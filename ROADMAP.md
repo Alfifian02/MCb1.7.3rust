@@ -20,7 +20,8 @@ Sumber: decomp MCP b1.7.3 (678 file Java, +-65 rb baris). Strategi: port per lap
 | 4b | World 1 | set_block*WithNotify, notifikasi tetangga, tick terjadwal, kecerahan | ditulis, belum dikompilasi |
 | 4c | World 2 | tabrakan blok, raycast, ChunkSource, dimensi | ditulis, belum dikompilasi |
 | **A** | **Cangkang Android + CI (APK-1)** | layar uji mandiri, GitHub Actions (tes + APK + Release) | **ditulis, belum dikompilasi** |
-| 5 | Generator dunia | ChunkProviderGenerate, WorldChunkManager, Biome, MapGenCaves, WorldGen*, populate | - |
+| 5a | Generator: terrain | biome (simplex), WorldChunkManager, terrain 5x17x5, permukaan, gua; uji golden vs Java per tahap | ditulis, belum dikompilasi |
+| 5b | Generator: populate | WorldGen* (pohon, bijih, danau, kaktus, dll.), urutan populate persis | - |
 | **B** | **Peta dari seed (APK-2)** | gambar peta atas terrain dari seed, ketuk untuk geser (renderer perangkat lunak) | - |
 | 6 | NBT & save | NBT*, RegionFile, McRegion, WorldInfo | - |
 | **C** | **Render voxel GLES + input sentuh (APK-3)** | meshing chunk, joystick virtual, jalan-jalan di dunia, taruh/hancurkan blok | - |

@@ -16,3 +16,4 @@ pub mod provider;
 pub mod selftest;
 pub mod vec3;
 pub mod world;
+pub mod worldgen;

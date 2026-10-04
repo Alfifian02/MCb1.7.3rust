@@ -49,7 +49,7 @@ fn build_report() -> (Vec<Line>, bool) {
     let passed = results.iter().filter(|r| r.ok).count();
     let mut lines = vec![
         Line { text: "MINECRAFT B1.7.3 - RUST".into(), color: WHITE },
-        Line { text: "APK-1: uji mandiri mc-core".into(), color: GRAY },
+        Line { text: "Uji mandiri mc-core (Fase 1-5a)".into(), color: GRAY },
         Line { text: String::new(), color: GRAY },
     ];
     for r in &results {
@@ -148,7 +148,13 @@ fn draw(app: &AndroidApp, lines: &[Line], all_ok: bool) {
 
 #[no_mangle]
 fn android_main(app: AndroidApp) {
-    let (lines, all_ok) = build_report();
+    // Uji berjalan di thread terpisah agar loop event tetap responsif (generator dunia butuh beberapa detik di build debug).
+    let mut handle = Some(std::thread::spawn(build_report));
+    let mut lines = vec![
+        Line { text: "MINECRAFT B1.7.3 - RUST".into(), color: WHITE },
+        Line { text: "Menjalankan uji mandiri...".into(), color: GRAY },
+    ];
+    let mut all_ok = true;
     let mut running = true;
     let mut redraw = true;
     while running {
@@ -163,6 +169,19 @@ fn android_main(app: AndroidApp) {
                 }
             }
         });
+        if handle.as_ref().map_or(false, |h| h.is_finished()) {
+            match handle.take().unwrap().join() {
+                Ok((l, ok)) => {
+                    lines = l;
+                    all_ok = ok;
+                }
+                Err(_) => {
+                    lines = vec![Line { text: "Uji berhenti karena panic di luar perlindungan".into(), color: RED }];
+                    all_ok = false;
+                }
+            }
+            redraw = true;
+        }
         if redraw {
             draw(&app, &lines, all_ok);
             redraw = false;

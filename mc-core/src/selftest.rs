@@ -165,6 +165,11 @@ fn t_tick() -> Result<(), String> {
     eq("sudah jatuh tempo", w.block_metadata(0, 70, 0), 9)
 }
 
+fn t_worldgen_golden() -> Result<(), String> {
+    // 5 chunk seed 12345 dibandingkan dengan keluaran ChunkProviderGenerate asli (hash FNV-1a)
+    crate::worldgen::check_golden_seed(12345)
+}
+
 fn t_langit() -> Result<(), String> {
     eq("Nether", Dimension::Hell.celestial_angle(777, 0.2), 0.5f32)?;
     eq("siang", World::calculate_skylight_subtracted(0.0, 0.0, 0.0), 0)?;
@@ -185,6 +190,7 @@ pub fn run_all() -> Vec<TestResult> {
         ("tabrakan pagar", t_collision as Check),
         ("tick terjadwal", t_tick as Check),
         ("sudut langit", t_langit as Check),
+        ("generator = Java (seed 12345)", t_worldgen_golden as Check),
     ];
     checks
         .into_iter()
