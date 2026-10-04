@@ -1,4 +1,5 @@
-// Desktop dev entry point (Android uses android_main in lib.rs).
+// Desktop dev entry point (Android uses android_main in android.rs).
 fn main() {
-    bgame::run(winit::event_loop::EventLoop::new().unwrap());
+    #[cfg(not(target_os = "android"))]
+    bgame::run();
 }

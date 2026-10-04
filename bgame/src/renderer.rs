@@ -1,7 +1,9 @@
 use crate::math::Mat4;
-use crate::world::World;
-use bcore::mesh;
+use crate::ui::UiBatch;
+use crate::world::{SecKey, World};
+use bcore::{chunk::H, mesh};
 use glow::HasContext;
+use std::collections::HashMap;
 
 // 512x512 raw RGBA atlas (16x16 tiles of 32px). Regenerate with tools/convert_atlas.py.
 const ATLAS: &[u8] = include_bytes!("../assets/terrain.rgba");
@@ -38,6 +40,40 @@ void main() {
     gl_FragColor = vec4(mix(c.rgb * v_shade, sky, v_fog), 1.0);
 }";
 
+const LINE_VS: &str = "
+attribute vec3 a_pos;
+uniform mat4 u_mvp;
+uniform vec3 u_off;
+void main() { gl_Position = u_mvp * vec4(a_pos + u_off, 1.0); }";
+
+const LINE_FS: &str = "
+precision mediump float;
+void main() { gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0); }";
+
+const UI_VS: &str = "
+attribute vec2 a_pos;
+attribute vec2 a_uv;
+attribute vec4 a_col;
+uniform vec2 u_screen;
+varying vec2 v_uv;
+varying vec4 v_col;
+void main() {
+    gl_Position = vec4(a_pos.x / u_screen.x * 2.0 - 1.0, 1.0 - a_pos.y / u_screen.y * 2.0, 0.0, 1.0);
+    v_uv = a_uv;
+    v_col = a_col;
+}";
+
+const UI_FS: &str = "
+precision mediump float;
+uniform sampler2D u_tex;
+varying vec2 v_uv;
+varying vec4 v_col;
+void main() {
+    float use_tex = step(0.0, v_uv.x);
+    vec4 t = texture2D(u_tex, max(v_uv, vec2(0.0)));
+    gl_FragColor = mix(v_col, t * v_col, use_tex);
+}";
+
 struct Section {
     vbo: glow::Buffer,
     ibo: glow::Buffer,
@@ -48,37 +84,72 @@ struct Section {
 
 pub struct Renderer {
     gl: glow::Context,
-    prog: glow::Program,
     tex: glow::Texture,
+    // world
+    prog: glow::Program,
     u_mvp: Option<glow::UniformLocation>,
     u_off: Option<glow::UniformLocation>,
     u_tex: Option<glow::UniformLocation>,
     a_pos: u32,
     a_uv: u32,
-    sections: Vec<Section>,
+    // block outline
+    line_prog: glow::Program,
+    l_mvp: Option<glow::UniformLocation>,
+    l_off: Option<glow::UniformLocation>,
+    l_pos: u32,
+    line_vbo: glow::Buffer,
+    // ui
+    ui_prog: glow::Program,
+    ui_screen: Option<glow::UniformLocation>,
+    ui_tex: Option<glow::UniformLocation>,
+    ui_pos: u32,
+    ui_uv: u32,
+    ui_col: u32,
+    ui_vbo: glow::Buffer,
+    sections: HashMap<SecKey, Section>,
 }
 
 fn bytes<T>(v: &[T]) -> &[u8] {
     unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, std::mem::size_of_val(v)) }
 }
 
+fn compile(gl: &glow::Context, vs: &str, fs: &str) -> glow::Program {
+    unsafe {
+        let prog = gl.create_program().expect("program");
+        for (kind, src) in [(glow::VERTEX_SHADER, vs), (glow::FRAGMENT_SHADER, fs)] {
+            let sh = gl.create_shader(kind).expect("shader");
+            gl.shader_source(sh, src);
+            gl.compile_shader(sh);
+            if !gl.get_shader_compile_status(sh) {
+                panic!("shader error: {}", gl.get_shader_info_log(sh));
+            }
+            gl.attach_shader(prog, sh);
+        }
+        gl.link_program(prog);
+        if !gl.get_program_link_status(prog) {
+            panic!("link error: {}", gl.get_program_info_log(prog));
+        }
+        prog
+    }
+}
+
+fn outline_vertices() -> Vec<f32> {
+    let (a, b) = (-0.003f32, 1.003f32);
+    let c = |i: usize| [if i & 1 == 0 { a } else { b }, if i & 2 == 0 { a } else { b }, if i & 4 == 0 { a } else { b }];
+    let mut v = Vec::new();
+    for (i, j) in [(0, 1), (2, 3), (4, 5), (6, 7), (0, 2), (1, 3), (4, 6), (5, 7), (0, 4), (1, 5), (2, 6), (3, 7)] {
+        v.extend_from_slice(&c(i));
+        v.extend_from_slice(&c(j));
+    }
+    v
+}
+
 impl Renderer {
-    pub fn new(gl: glow::Context, world: &World) -> Self {
+    pub fn new(gl: glow::Context) -> Self {
         unsafe {
-            let prog = gl.create_program().expect("program");
-            for (kind, src) in [(glow::VERTEX_SHADER, VS), (glow::FRAGMENT_SHADER, FS)] {
-                let sh = gl.create_shader(kind).expect("shader");
-                gl.shader_source(sh, src);
-                gl.compile_shader(sh);
-                if !gl.get_shader_compile_status(sh) {
-                    panic!("shader error: {}", gl.get_shader_info_log(sh));
-                }
-                gl.attach_shader(prog, sh);
-            }
-            gl.link_program(prog);
-            if !gl.get_program_link_status(prog) {
-                panic!("link error: {}", gl.get_program_info_log(prog));
-            }
+            let prog = compile(&gl, VS, FS);
+            let line_prog = compile(&gl, LINE_VS, LINE_FS);
+            let ui_prog = compile(&gl, UI_VS, UI_FS);
 
             let tex = gl.create_texture().expect("texture");
             gl.bind_texture(glow::TEXTURE_2D, Some(tex));
@@ -95,26 +166,55 @@ impl Renderer {
                 gl.tex_parameter_i32(glow::TEXTURE_2D, p, v as i32);
             }
 
-            let mut r = Renderer {
+            let line_vbo = gl.create_buffer().unwrap();
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(line_vbo));
+            gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, bytes(&outline_vertices()), glow::STATIC_DRAW);
+            let ui_vbo = gl.create_buffer().unwrap();
+
+            Renderer {
                 u_mvp: gl.get_uniform_location(prog, "u_mvp"),
                 u_off: gl.get_uniform_location(prog, "u_off"),
                 u_tex: gl.get_uniform_location(prog, "u_tex"),
                 a_pos: gl.get_attrib_location(prog, "a_pos").expect("a_pos"),
                 a_uv: gl.get_attrib_location(prog, "a_uv").expect("a_uv"),
-                gl, prog, tex, sections: Vec::new(),
-            };
-            r.upload_world(world);
-            r
+                l_mvp: gl.get_uniform_location(line_prog, "u_mvp"),
+                l_off: gl.get_uniform_location(line_prog, "u_off"),
+                l_pos: gl.get_attrib_location(line_prog, "a_pos").expect("l_pos"),
+                ui_screen: gl.get_uniform_location(ui_prog, "u_screen"),
+                ui_tex: gl.get_uniform_location(ui_prog, "u_tex"),
+                ui_pos: gl.get_attrib_location(ui_prog, "a_pos").expect("ui_pos"),
+                ui_uv: gl.get_attrib_location(ui_prog, "a_uv").expect("ui_uv"),
+                ui_col: gl.get_attrib_location(ui_prog, "a_col").expect("ui_col"),
+                gl, tex, prog, line_prog, line_vbo, ui_prog, ui_vbo,
+                sections: HashMap::new(),
+            }
         }
     }
 
-    unsafe fn upload_world(&mut self, world: &World) {
-        for (&(cx, cz), chunk) in &world.chunks {
-            for sy in 0..(bcore::chunk::H / mesh::SECTION) {
-                let m = mesh::build_section(chunk, sy, &|nx, ny, nz| world.block(cx * 16 + nx, ny, cz * 16 + nz));
-                if m.indices.is_empty() {
-                    continue;
+    pub fn remesh_all(&mut self, world: &World) {
+        let keys: Vec<SecKey> = world
+            .chunks
+            .keys()
+            .flat_map(|&(cx, cz)| (0..H / mesh::SECTION).map(move |sy| (cx, cz, sy)))
+            .collect();
+        self.remesh(world, &keys);
+    }
+
+    pub fn remesh(&mut self, world: &World, keys: &[SecKey]) {
+        for &key in keys {
+            if let Some(old) = self.sections.remove(&key) {
+                unsafe {
+                    self.gl.delete_buffer(old.vbo);
+                    self.gl.delete_buffer(old.ibo);
                 }
+            }
+            let (cx, cz, sy) = key;
+            let Some(chunk) = world.chunks.get(&(cx, cz)) else { continue };
+            let m = mesh::build_section(chunk, sy, &|nx, ny, nz| world.block(cx * 16 + nx, ny, cz * 16 + nz));
+            if m.indices.is_empty() {
+                continue;
+            }
+            unsafe {
                 let gl = &self.gl;
                 let vbo = gl.create_buffer().unwrap();
                 gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
@@ -123,12 +223,18 @@ impl Renderer {
                 gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(ibo));
                 gl.buffer_data_u8_slice(glow::ELEMENT_ARRAY_BUFFER, bytes(&m.indices), glow::STATIC_DRAW);
                 let (ox, oz) = ((cx * 16) as f32, (cz * 16) as f32);
-                self.sections.push(Section {
+                self.sections.insert(key, Section {
                     vbo, ibo, count: m.indices.len() as i32,
                     origin: [ox, 0.0, oz],
                     center: [ox + 8.0, (sy * 16 + 8) as f32, oz + 8.0],
                 });
             }
+        }
+    }
+
+    unsafe fn reset_attribs(&self) {
+        for i in 0..4 {
+            self.gl.disable_vertex_attrib_array(i);
         }
     }
 
@@ -138,8 +244,10 @@ impl Renderer {
             gl.viewport(0, 0, size.0 as i32, size.1 as i32);
             gl.clear_color(0.53, 0.71, 0.95, 1.0);
             gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
+            gl.disable(glow::BLEND);
             gl.enable(glow::DEPTH_TEST);
             gl.enable(glow::CULL_FACE);
+            self.reset_attribs();
             gl.use_program(Some(self.prog));
             gl.uniform_matrix_4_f32_slice(self.u_mvp.as_ref(), false, mvp);
             gl.active_texture(glow::TEXTURE0);
@@ -147,7 +255,7 @@ impl Renderer {
             gl.uniform_1_i32(self.u_tex.as_ref(), 0);
             gl.enable_vertex_attrib_array(self.a_pos);
             gl.enable_vertex_attrib_array(self.a_uv);
-            for s in &self.sections {
+            for s in self.sections.values() {
                 // cheap culling: skip sections entirely behind the camera
                 let d = [s.center[0] - cam[0], s.center[1] - cam[1], s.center[2] - cam[2]];
                 if d[0] * fwd[0] + d[1] * fwd[1] + d[2] * fwd[2] < -14.0 {
@@ -160,6 +268,50 @@ impl Renderer {
                 gl.uniform_3_f32(self.u_off.as_ref(), s.origin[0], s.origin[1], s.origin[2]);
                 gl.draw_elements(glow::TRIANGLES, s.count, glow::UNSIGNED_SHORT, 0);
             }
+        }
+    }
+
+    pub fn draw_outline(&self, mvp: &Mat4, block: [i32; 3]) {
+        let gl = &self.gl;
+        unsafe {
+            self.reset_attribs();
+            gl.use_program(Some(self.line_prog));
+            gl.uniform_matrix_4_f32_slice(self.l_mvp.as_ref(), false, mvp);
+            gl.uniform_3_f32(self.l_off.as_ref(), block[0] as f32, block[1] as f32, block[2] as f32);
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.line_vbo));
+            gl.enable_vertex_attrib_array(self.l_pos);
+            gl.vertex_attrib_pointer_f32(self.l_pos, 3, glow::FLOAT, false, 12, 0);
+            gl.line_width(2.0);
+            gl.draw_arrays(glow::LINES, 0, 24);
+        }
+    }
+
+    pub fn draw_ui(&self, batch: &UiBatch, size: (u32, u32)) {
+        if batch.verts.is_empty() {
+            return;
+        }
+        let gl = &self.gl;
+        unsafe {
+            gl.disable(glow::DEPTH_TEST);
+            gl.disable(glow::CULL_FACE);
+            gl.enable(glow::BLEND);
+            gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
+            self.reset_attribs();
+            gl.use_program(Some(self.ui_prog));
+            gl.uniform_2_f32(self.ui_screen.as_ref(), size.0 as f32, size.1 as f32);
+            gl.active_texture(glow::TEXTURE0);
+            gl.bind_texture(glow::TEXTURE_2D, Some(self.tex));
+            gl.uniform_1_i32(self.ui_tex.as_ref(), 0);
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.ui_vbo));
+            gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, bytes(&batch.verts), glow::STREAM_DRAW);
+            gl.enable_vertex_attrib_array(self.ui_pos);
+            gl.enable_vertex_attrib_array(self.ui_uv);
+            gl.enable_vertex_attrib_array(self.ui_col);
+            gl.vertex_attrib_pointer_f32(self.ui_pos, 2, glow::FLOAT, false, 20, 0);
+            gl.vertex_attrib_pointer_f32(self.ui_uv, 2, glow::FLOAT, false, 20, 8);
+            gl.vertex_attrib_pointer_f32(self.ui_col, 4, glow::UNSIGNED_BYTE, true, 20, 16);
+            gl.draw_arrays(glow::TRIANGLES, 0, batch.verts.len() as i32);
+            gl.disable(glow::BLEND);
         }
     }
 }

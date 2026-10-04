@@ -1,15 +1,18 @@
-mod app;
+mod engine;
+mod game;
+mod gamepad;
+#[allow(dead_code)]
+mod gl_raw;
+mod input;
 mod math;
 mod renderer;
+mod ui;
 mod world;
 
-pub use app::run;
+#[cfg(not(target_os = "android"))]
+mod desktop;
+#[cfg(not(target_os = "android"))]
+pub use desktop::run;
 
 #[cfg(target_os = "android")]
-#[no_mangle]
-fn android_main(app: android_activity::AndroidApp) {
-    use winit::event_loop::EventLoopBuilder;
-    use winit::platform::android::EventLoopBuilderExtAndroid;
-    let event_loop = EventLoopBuilder::new().with_android_app(app).build().unwrap();
-    run(event_loop);
-}
+mod android;

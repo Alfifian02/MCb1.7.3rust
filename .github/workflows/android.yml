@@ -22,7 +22,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Test core
-        run: cargo test -p bcore --release
+        run: cargo test -p bcore -p bgame --release
 
       - name: Install cargo-ndk
         run: cargo install cargo-ndk --locked

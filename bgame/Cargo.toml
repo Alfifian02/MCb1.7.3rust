@@ -1,6 +1,6 @@
 [package]
 name = "bgame"
-version = "0.1.0"
+version = "0.3.0"
 edition = "2021"
 
 [lib]
@@ -11,10 +11,13 @@ crate-type = ["cdylib", "rlib"]
 bcore = { path = "../bcore" }
 glow = "0.13"
 glutin = { version = "0.31", default-features = false, features = ["egl", "x11"] }
-glutin-winit = { version = "0.4", default-features = false, features = ["egl", "x11"] }
 raw-window-handle = "0.5"
+
+# Desktop dev build (keyboard/mouse/touch test harness)
+[target.'cfg(not(target_os = "android"))'.dependencies]
+glutin-winit = { version = "0.4", default-features = false, features = ["egl", "x11"] }
 winit = { version = "0.29", default-features = false, features = ["rwh_05", "x11"] }
 
+# Android talks to NativeActivity directly: winit cannot deliver gamepad sticks/triggers.
 [target.'cfg(target_os = "android")'.dependencies]
 android-activity = { version = "0.5", features = ["native-activity"] }
-winit = { version = "0.29", features = ["android-native-activity"] }
