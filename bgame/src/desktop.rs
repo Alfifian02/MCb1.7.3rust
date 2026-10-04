@@ -1,5 +1,5 @@
 //! Desktop dev harness (winit): keyboard/mouse/touch drive the same Engine as Android.
-//! Keys: WASD move, arrows look, Space jump, Shift sneak, R sprint, F fly, Z/LMB break, X/RMB place, 1-9 hotbar.
+//! Keys: WASD move, arrows look, Space jump, Shift sneak, R sprint, F fly, V view distance, Z/LMB break, X/RMB place, 1-9 hotbar.
 use crate::engine::Engine;
 use crate::input::{Key, Phase};
 use glutin::config::{ConfigTemplateBuilder, GlConfig};
@@ -83,6 +83,7 @@ fn map_key(code: KeyCode) -> Option<Key> {
         KeyZ => Key::Break,
         KeyX => Key::Place,
         KeyR => Key::Sprint,
+        KeyV => Key::View,
         Digit1 => Key::Num(1),
         Digit2 => Key::Num(2),
         Digit3 => Key::Num(3),

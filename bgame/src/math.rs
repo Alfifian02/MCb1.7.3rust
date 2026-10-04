@@ -49,6 +49,33 @@ pub fn view(eye: [f32; 3], yaw: f32, pitch: f32) -> Mat4 {
     ]
 }
 
+/// Six normalised frustum planes (left, right, bottom, top, near, far) from a column-major MVP.
+pub fn frustum(m: &Mat4) -> [[f32; 4]; 6] {
+    let row = |i: usize| [m[i], m[4 + i], m[8 + i], m[12 + i]];
+    let (r0, r1, r2, r3) = (row(0), row(1), row(2), row(3));
+    let comb = |a: [f32; 4], b: [f32; 4], s: f32| [a[0] + s * b[0], a[1] + s * b[1], a[2] + s * b[2], a[3] + s * b[3]];
+    let mut p = [comb(r3, r0, 1.0), comb(r3, r0, -1.0), comb(r3, r1, 1.0), comb(r3, r1, -1.0), comb(r3, r2, 1.0), comb(r3, r2, -1.0)];
+    for pl in p.iter_mut() {
+        let l = (pl[0] * pl[0] + pl[1] * pl[1] + pl[2] * pl[2]).sqrt();
+        for v in pl.iter_mut() {
+            *v /= l;
+        }
+    }
+    p
+}
+
+pub fn aabb_visible(p: &[[f32; 4]; 6], min: [f32; 3], max: [f32; 3]) -> bool {
+    for pl in p {
+        let x = if pl[0] >= 0.0 { max[0] } else { min[0] };
+        let y = if pl[1] >= 0.0 { max[1] } else { min[1] };
+        let z = if pl[2] >= 0.0 { max[2] } else { min[2] };
+        if pl[0] * x + pl[1] * y + pl[2] * z + pl[3] < 0.0 {
+            return false;
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -58,6 +85,18 @@ mod tests {
         let p = perspective(1.0, 1.5, 0.1, 100.0);
         assert_eq!(mul(&i, &p), p);
     }
+    #[test]
+    fn frustum_culls_correctly() {
+        let m = mul(&perspective(1.2, 1.0, 0.1, 100.0), &view([0.0, 0.0, 0.0], 0.0, 0.0));
+        let f = frustum(&m);
+        let b = |c: [f32; 3], h: f32| aabb_visible(&f, [c[0] - h, c[1] - h, c[2] - h], [c[0] + h, c[1] + h, c[2] + h]);
+        assert!(b([0.0, 0.0, -10.0], 1.0), "in front");
+        assert!(!b([0.0, 0.0, 10.0], 1.0), "behind");
+        assert!(!b([-100.0, 0.0, -5.0], 1.0), "far left");
+        assert!(!b([0.0, 0.0, -500.0], 1.0), "beyond far plane");
+        assert!(b([0.0, 0.0, 0.0], 1.0), "straddling camera");
+    }
+
     #[test]
     fn point_in_front_is_visible() {
         let m = mul(&perspective(1.2, 1.0, 0.1, 100.0), &view([0.0, 0.0, 0.0], 0.0, 0.0));

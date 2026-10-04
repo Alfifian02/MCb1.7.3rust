@@ -6,6 +6,7 @@
 //!   A = jump / fly up          B = sneak / fly down
 //!   Y or D-pad Up = toggle fly L3 = sprint (latches until you stop)
 //!   LB/RB or D-pad Left/Right = previous / next hotbar slot
+//!   D-pad Down = cycle view distance (pips shown top-left)
 //!   R3, Start, Select, Mode = unassigned (see `sample`, one line each to remap)
 
 const LOOK_SPEED: f32 = 3.2; // rad/s at full deflection
@@ -37,6 +38,7 @@ pub struct PadControls {
     pub place: bool,
     pub hotbar_delta: i32,
     pub fly_toggle: bool,
+    pub view_cycle: bool,
 }
 
 #[derive(Default)]
@@ -112,6 +114,7 @@ impl Gamepad {
         }
         let y = self.take(PadButton::Y);
         let up = self.take(PadButton::DUp);
+        let view = self.take(PadButton::DDown);
 
         PadControls {
             move_x: mx,
@@ -125,6 +128,7 @@ impl Gamepad {
             place: self.held(PadButton::L2) || self.held(PadButton::X) || a.lt > 0.5,
             hotbar_delta: hd,
             fly_toggle: y || up,
+            view_cycle: view,
         }
     }
 }
@@ -180,6 +184,14 @@ mod tests {
         assert!(g.sample(0.016).sprint);
         g.set_axes(Axes::default());
         assert!(!g.sample(0.016).sprint);
+    }
+
+    #[test]
+    fn dpad_down_cycles_view_once() {
+        let mut g = Gamepad::default();
+        g.button(PadButton::DDown, true);
+        assert!(g.sample(0.016).view_cycle);
+        assert!(!g.sample(0.016).view_cycle);
     }
 
     #[test]

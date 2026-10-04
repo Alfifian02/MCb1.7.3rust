@@ -77,23 +77,30 @@ impl UiBatch {
     }
 }
 
-pub fn build(
-    b: &mut UiBatch,
-    l: &Layout,
-    sel: usize,
-    hotbar: &[u8; 9],
-    touch_ui: bool,
-    stick: Option<((f32, f32), (f32, f32))>,
-) {
+pub struct HudState<'a> {
+    pub sel: usize,
+    pub hotbar: &'a [u8; 9],
+    pub touch_ui: bool,
+    pub stick: Option<((f32, f32), (f32, f32))>,
+    /// Current view distance in chunks, shown as small squares top-left.
+    pub view_radius: i32,
+}
+
+pub fn build(b: &mut UiBatch, l: &Layout, s: &HudState) {
     // crosshair
     let (cx, cy) = (l.w * 0.5, l.h * 0.5);
     b.rect(Rect::new(cx - 9.0, cy - 1.0, 18.0, 2.0), [255, 255, 255, 220]);
     b.rect(Rect::new(cx - 1.0, cy - 9.0, 2.0, 18.0), [255, 255, 255, 220]);
 
+    // view-distance pips
+    for i in 0..s.view_radius.max(0) {
+        b.rect(Rect::new(10.0 + i as f32 * 14.0, 10.0, 10.0, 10.0), [255, 255, 255, 150]);
+    }
+
     // hotbar
     for (i, r) in l.hotbar.iter().enumerate() {
         b.rect(*r, [0, 0, 0, 110]);
-        if i == sel {
+        if i == s.sel {
             let t = 3.0;
             let c = [255, 255, 255, 235];
             b.rect(Rect::new(r.x - t, r.y - t, r.w + 2.0 * t, t), c);
@@ -101,15 +108,15 @@ pub fn build(
             b.rect(Rect::new(r.x - t, r.y, t, r.h), c);
             b.rect(Rect::new(r.x + r.w, r.y, t, r.h), c);
         }
-        b.tile(r.inset(r.w * 0.15), tile(hotbar[i], Face::PosX), [255, 255, 255, 255]);
+        b.tile(r.inset(r.w * 0.15), tile(s.hotbar[i], Face::PosX), [255, 255, 255, 255]);
     }
 
-    if touch_ui {
+    if s.touch_ui {
         b.rect(l.jump, [255, 255, 255, 70]);
         b.rect(l.place, [80, 220, 80, 80]);
         b.rect(l.brk, [230, 70, 70, 80]);
         b.rect(l.fly, [80, 200, 255, 80]);
-        if let Some(((ax, ay), (bx, by))) = stick {
+        if let Some(((ax, ay), (bx, by))) = s.stick {
             b.rect(Rect::new(ax - 40.0, ay - 40.0, 80.0, 80.0), [255, 255, 255, 40]);
             b.rect(Rect::new(bx - 20.0, by - 20.0, 40.0, 40.0), [255, 255, 255, 110]);
         }

@@ -16,13 +16,14 @@ pub struct Controls {
     pub hotbar_delta: i32,
     pub hotbar_set: Option<usize>,
     pub fly_toggle: bool,
+    pub view_cycle: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Phase { Down, Move, Up }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Key { W, A, S, D, Space, Shift, Left, Right, Up, Down, Fly, Break, Place, Sprint, Num(u8) }
+pub enum Key { W, A, S, D, Space, Shift, Left, Right, Up, Down, Fly, Break, Place, Sprint, View, Num(u8) }
 
 #[derive(Default)]
 pub struct Input {
@@ -38,6 +39,7 @@ pub struct Input {
     tlook: (f32, f32),
     pending_set: Option<usize>,
     pending_fly: bool,
+    pending_view: bool,
 }
 
 impl Input {
@@ -69,6 +71,7 @@ impl Input {
             Key::Place => self.kplace = down,
             Key::Sprint => self.ksprint = down,
             Key::Fly => if down { self.pending_fly = true },
+            Key::View => if down { self.pending_view = true },
             Key::Num(n) => if down && (1..=9).contains(&n) { self.pending_set = Some(n as usize - 1) },
         }
     }
@@ -144,9 +147,11 @@ impl Input {
             hotbar_delta: pc.hotbar_delta,
             hotbar_set: self.pending_set.take(),
             fly_toggle: self.pending_fly || pc.fly_toggle,
+            view_cycle: self.pending_view || pc.view_cycle,
         };
         self.tlook = (0.0, 0.0);
         self.pending_fly = false;
+        self.pending_view = false;
         c
     }
 }

@@ -1,4 +1,4 @@
-use crate::math::Mat4;
+use crate::math::{self, Mat4};
 use crate::ui::UiBatch;
 use crate::world::{SecKey, World};
 use bcore::{chunk::H, mesh};
@@ -15,6 +15,7 @@ attribute vec4 a_pos;
 attribute vec4 a_uv;
 uniform mat4 u_mvp;
 uniform vec3 u_off;
+uniform vec2 u_fog;
 varying vec2 v_uv;
 varying float v_shade;
 varying float v_fog;
@@ -24,7 +25,7 @@ void main() {
     vec2 t = vec2(mod(tile, 16.0), floor(tile / 16.0));
     v_uv = (t + mix(vec2(0.02), vec2(0.98), a_uv.xy)) / 16.0;
     v_shade = a_uv.w / 255.0;
-    v_fog = clamp((gl_Position.w - 28.0) / 24.0, 0.0, 1.0);
+    v_fog = clamp((gl_Position.w - u_fog.x) / (u_fog.y - u_fog.x), 0.0, 1.0);
 }";
 
 const FS: &str = "
@@ -79,7 +80,7 @@ struct Section {
     ibo: glow::Buffer,
     count: i32,
     origin: [f32; 3],
-    center: [f32; 3],
+    min_y: f32,
 }
 
 pub struct Renderer {
@@ -90,6 +91,7 @@ pub struct Renderer {
     u_mvp: Option<glow::UniformLocation>,
     u_off: Option<glow::UniformLocation>,
     u_tex: Option<glow::UniformLocation>,
+    u_fog: Option<glow::UniformLocation>,
     a_pos: u32,
     a_uv: u32,
     // block outline
@@ -107,6 +109,7 @@ pub struct Renderer {
     ui_col: u32,
     ui_vbo: glow::Buffer,
     sections: HashMap<SecKey, Section>,
+    order: Vec<(f32, SecKey)>, // scratch: visible sections sorted front-to-back
 }
 
 fn bytes<T>(v: &[T]) -> &[u8] {
@@ -175,6 +178,7 @@ impl Renderer {
                 u_mvp: gl.get_uniform_location(prog, "u_mvp"),
                 u_off: gl.get_uniform_location(prog, "u_off"),
                 u_tex: gl.get_uniform_location(prog, "u_tex"),
+                u_fog: gl.get_uniform_location(prog, "u_fog"),
                 a_pos: gl.get_attrib_location(prog, "a_pos").expect("a_pos"),
                 a_uv: gl.get_attrib_location(prog, "a_uv").expect("a_uv"),
                 l_mvp: gl.get_uniform_location(line_prog, "u_mvp"),
@@ -187,48 +191,62 @@ impl Renderer {
                 ui_col: gl.get_attrib_location(ui_prog, "a_col").expect("ui_col"),
                 gl, tex, prog, line_prog, line_vbo, ui_prog, ui_vbo,
                 sections: HashMap::new(),
+                order: Vec::new(),
             }
         }
     }
 
-    pub fn remesh_all(&mut self, world: &World) {
-        let keys: Vec<SecKey> = world
-            .chunks
-            .keys()
-            .flat_map(|&(cx, cz)| (0..H / mesh::SECTION).map(move |sy| (cx, cz, sy)))
-            .collect();
-        self.remesh(world, &keys);
+    fn upload(&mut self, key: SecKey, m: &mesh::Mesh) {
+        if m.indices.is_empty() {
+            return;
+        }
+        unsafe {
+            let gl = &self.gl;
+            let vbo = gl.create_buffer().unwrap();
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
+            gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, bytes(&m.vertices), glow::STATIC_DRAW);
+            let ibo = gl.create_buffer().unwrap();
+            gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(ibo));
+            gl.buffer_data_u8_slice(glow::ELEMENT_ARRAY_BUFFER, bytes(&m.indices), glow::STATIC_DRAW);
+            self.sections.insert(key, Section {
+                vbo, ibo, count: m.indices.len() as i32,
+                origin: [(key.0 * 16) as f32, 0.0, (key.1 * 16) as f32],
+                min_y: (key.2 * 16) as f32,
+            });
+        }
     }
 
+    fn drop_section(&mut self, key: SecKey) {
+        if let Some(old) = self.sections.remove(&key) {
+            unsafe {
+                self.gl.delete_buffer(old.vbo);
+                self.gl.delete_buffer(old.ibo);
+            }
+        }
+    }
+
+    /// Replaces every section of a chunk with freshly built meshes (from the streaming workers).
+    pub fn set_chunk_meshes(&mut self, cx: i32, cz: i32, sections: Vec<(usize, mesh::Mesh)>) {
+        self.remove_chunk(cx, cz);
+        for (sy, m) in &sections {
+            self.upload((cx, cz, *sy), m);
+        }
+    }
+
+    pub fn remove_chunk(&mut self, cx: i32, cz: i32) {
+        for sy in 0..H / mesh::SECTION {
+            self.drop_section((cx, cz, sy));
+        }
+    }
+
+    /// Synchronous re-mesh of a few sections (block edits must show up instantly).
     pub fn remesh(&mut self, world: &World, keys: &[SecKey]) {
         for &key in keys {
-            if let Some(old) = self.sections.remove(&key) {
-                unsafe {
-                    self.gl.delete_buffer(old.vbo);
-                    self.gl.delete_buffer(old.ibo);
-                }
-            }
+            self.drop_section(key);
             let (cx, cz, sy) = key;
             let Some(chunk) = world.chunks.get(&(cx, cz)) else { continue };
             let m = mesh::build_section(chunk, sy, &|nx, ny, nz| world.block(cx * 16 + nx, ny, cz * 16 + nz));
-            if m.indices.is_empty() {
-                continue;
-            }
-            unsafe {
-                let gl = &self.gl;
-                let vbo = gl.create_buffer().unwrap();
-                gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
-                gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, bytes(&m.vertices), glow::STATIC_DRAW);
-                let ibo = gl.create_buffer().unwrap();
-                gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(ibo));
-                gl.buffer_data_u8_slice(glow::ELEMENT_ARRAY_BUFFER, bytes(&m.indices), glow::STATIC_DRAW);
-                let (ox, oz) = ((cx * 16) as f32, (cz * 16) as f32);
-                self.sections.insert(key, Section {
-                    vbo, ibo, count: m.indices.len() as i32,
-                    origin: [ox, 0.0, oz],
-                    center: [ox + 8.0, (sy * 16 + 8) as f32, oz + 8.0],
-                });
-            }
+            self.upload(key, &m);
         }
     }
 
@@ -238,7 +256,21 @@ impl Renderer {
         }
     }
 
-    pub fn draw(&self, size: (u32, u32), mvp: &Mat4, cam: [f32; 3], fwd: [f32; 3]) {
+    pub fn draw(&mut self, size: (u32, u32), mvp: &Mat4, cam: [f32; 3], fog: (f32, f32)) {
+        let planes = math::frustum(mvp);
+        let mut order = std::mem::take(&mut self.order);
+        order.clear();
+        for (k, s) in &self.sections {
+            let min = [s.origin[0], s.min_y, s.origin[2]];
+            let max = [min[0] + 16.0, min[1] + 16.0, min[2] + 16.0];
+            if !math::aabb_visible(&planes, min, max) {
+                continue;
+            }
+            let d = [min[0] + 8.0 - cam[0], min[1] + 8.0 - cam[1], min[2] + 8.0 - cam[2]];
+            order.push((d[0] * d[0] + d[1] * d[1] + d[2] * d[2], *k));
+        }
+        order.sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
         let gl = &self.gl;
         unsafe {
             gl.viewport(0, 0, size.0 as i32, size.1 as i32);
@@ -250,17 +282,14 @@ impl Renderer {
             self.reset_attribs();
             gl.use_program(Some(self.prog));
             gl.uniform_matrix_4_f32_slice(self.u_mvp.as_ref(), false, mvp);
+            gl.uniform_2_f32(self.u_fog.as_ref(), fog.0, fog.1);
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, Some(self.tex));
             gl.uniform_1_i32(self.u_tex.as_ref(), 0);
             gl.enable_vertex_attrib_array(self.a_pos);
             gl.enable_vertex_attrib_array(self.a_uv);
-            for s in self.sections.values() {
-                // cheap culling: skip sections entirely behind the camera
-                let d = [s.center[0] - cam[0], s.center[1] - cam[1], s.center[2] - cam[2]];
-                if d[0] * fwd[0] + d[1] * fwd[1] + d[2] * fwd[2] < -14.0 {
-                    continue;
-                }
+            for (_, k) in &order {
+                let s = &self.sections[k];
                 gl.bind_buffer(glow::ARRAY_BUFFER, Some(s.vbo));
                 gl.vertex_attrib_pointer_f32(self.a_pos, 4, glow::UNSIGNED_BYTE, false, 8, 0);
                 gl.vertex_attrib_pointer_f32(self.a_uv, 4, glow::UNSIGNED_BYTE, false, 8, 4);
@@ -269,6 +298,7 @@ impl Renderer {
                 gl.draw_elements(glow::TRIANGLES, s.count, glow::UNSIGNED_SHORT, 0);
             }
         }
+        self.order = order;
     }
 
     pub fn draw_outline(&self, mvp: &Mat4, block: [i32; 3]) {

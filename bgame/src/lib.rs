@@ -6,6 +6,7 @@ mod gl_raw;
 mod input;
 mod math;
 mod renderer;
+mod stream;
 mod ui;
 mod world;
 

@@ -2,13 +2,14 @@ use bcore::block::{AIR, WATER};
 use bcore::chunk::{Chunk, H, W};
 use bcore::worldgen;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// (chunk x, chunk z, section y)
 pub type SecKey = (i32, i32, usize);
 
 pub struct World {
     pub seed: u32,
-    pub chunks: HashMap<(i32, i32), Chunk>,
+    pub chunks: HashMap<(i32, i32), Arc<Chunk>>,
 }
 
 impl World {
@@ -16,10 +17,14 @@ impl World {
         let mut chunks = HashMap::new();
         for cx in -radius..=radius {
             for cz in -radius..=radius {
-                chunks.insert((cx, cz), worldgen::generate(seed, cx, cz));
+                chunks.insert((cx, cz), Arc::new(worldgen::generate(seed, cx, cz)));
             }
         }
         Self { seed, chunks }
+    }
+
+    pub fn empty(seed: u32) -> Self {
+        Self { seed, chunks: HashMap::new() }
     }
 
     fn split(x: i32, z: i32) -> ((i32, i32), (i32, i32)) {
@@ -65,7 +70,7 @@ impl World {
         }
         let (c, l) = Self::split(x, z);
         let Some(ch) = self.chunks.get_mut(&c) else { return dirty };
-        ch.set(l.0 as usize, y as usize, l.1 as usize, id);
+        Arc::make_mut(ch).set(l.0 as usize, y as usize, l.1 as usize, id); // copy-on-write: streaming jobs keep their snapshot
         let sy = (y / 16) as usize;
         dirty.push((c.0, c.1, sy));
         let mut edge = |cx: i32, cz: i32, sy: usize| dirty.push((cx, cz, sy));
