@@ -1,35 +1,31 @@
-# mcrs (Step 4)
-- `bcore/`  : dependency-free core: chunks, worldgen, mesher, player physics, voxel raycast. `cargo test -p bcore`
-- `bgame/`  : engine, chunk streaming (worker threads), renderer (OpenGL ES 2.0). `cargo test -p bgame`; desktop dev run: `cargo run --release -p bgame`
-- `android/`: Gradle shell (NativeActivity, no Java). APK is built by `.github/workflows/android.yml`
+# Minecraft b1.7.3 -> Rust (Android)
 
-Push to GitHub -> Actions -> "Build APK" -> download artifact `bgame-apk` -> install.
+Port bertahap dari decomp MCP b1.7.3. Lihat `ROADMAP.md` untuk urutan dan status.
 
-## Controls
-| Action | Gamepad | Touch | Desktop test keys |
-|---|---|---|---|
-| Move | Left stick | Drag left half | WASD |
-| Look | Right stick | Drag right half | Arrow keys |
-| Jump / fly up | A | White button | Space |
-| Sneak / fly down | B | - | Shift |
-| Sprint | L3 (latches) | Push stick fully | R |
-| Break (hold) | RT / R2 | Red button | LMB / Z |
-| Place (hold) | LT / L2 / X | Green button | RMB / X |
-| Hotbar prev/next | LB/RB, D-pad left/right | Tap a slot | 1-9 |
-| Toggle fly | Y / D-pad up | Cyan button | F |
-| View distance (3/4/5/6/8 chunks) | D-pad down | - | V |
+## Struktur
+- `mc-core/`    logika dunia (tanpa GL/Android): RNG, noise, blok, chunk, cahaya, tabrakan, raycast, tick.
+- `mc-android/` cangkang APK (menjalankan `mc_core::selftest` dan menampilkan hasilnya di layar).
+- `tools/`      generator data dari jar asli (butuh JDK + Python di PC; hasilnya sudah ikut di repo).
+- `.github/workflows/ci.yml` build + tes otomatis di GitHub.
 
-Gamepad: deadzones, quadratic look curve, analog triggers or trigger buttons, hat-axis or key D-pad.
-The touch overlay hides while a gamepad is in use and returns when you touch the screen.
-Remap in `bgame/src/gamepad.rs` (`sample`) and `bgame/src/android.rs` (`pad_button`).
+## Cara mencoba hanya dengan Android
 
-## Streaming (Step 4)
-- Chunks load and unload around the player; generation and meshing run on 1-2 worker threads, the render thread
-  only uploads at most ~2 finished chunk meshes per frame.
-- Frustum culling + front-to-back draw order; fog is tied to the view distance and hides the loading edge.
-- Default view distance is 4 chunks. Squares top-left show the current value.
-- Chunks you edited are kept in memory when you walk away (disk saving comes in Step 5).
+### Jalur A: APK lewat GitHub (disarankan)
+1. Buat repositori baru di github.com (browser ponsel, mode "Situs desktop" bila perlu).
+2. Unggah isi proyek. Cara paling mudah di ponsel adalah Termux (lihat jalur B) lalu `git push`.
+   Unggah file satu-satu lewat web tidak mempertahankan folder.
+3. Setelah push, buka tab **Actions**: job `test` menjalankan semua tes unit, job `apk` membangun APK.
+4. Buka tab **Releases**, unduh `MinecraftB173Rust.apk`, lalu pasang (izinkan "pasang dari sumber tidak dikenal").
+5. Buka aplikasi: baris hijau `[OK]` = lulus, merah `[GAGAL]` = ada bug (kirim foto layar ke saya).
 
-## Textures
-`bgame/assets/terrain.rgba` is converted from a Faithful 32x `terrain.png` by `tools/convert_atlas.py`.
-Faithful is derived from Mojang's art: keep the APK for personal use, do not publish it.
+### Jalur B: tes langsung di ponsel dengan Termux
+```
+pkg update && pkg install rust git unzip
+unzip mc-rs.zip && cd mc-rs
+cargo test            # hanya mc-core (default-members)
+```
+Kirim keluaran error/gagal ke saya bila ada. Termux tidak membangun APK; untuk itu pakai Jalur A.
+
+## Catatan jujur
+Kode ditulis tanpa kompilator di sisi saya (sandbox tanpa cargo/NDK). Kemungkinan ada error kompilasi
+pertama; perbaikannya cepat bila Anda mengirim log dari Actions atau Termux.

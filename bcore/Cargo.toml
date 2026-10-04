@@ -1,7 +1,0 @@
-[package]
-name = "bcore"
-version = "0.1.0"
-edition = "2021"
-description = "Platform-independent voxel core (chunks, worldgen, meshing). No dependencies."
-
-[dependencies]
