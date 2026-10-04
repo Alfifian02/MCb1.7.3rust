@@ -36,8 +36,9 @@ jobs:
         run: cargo apk build
       - name: Kumpulkan APK
         run: |
+          ls -la target/debug/apk/
           mkdir -p dist
-          cp target/debug/apk/*.apk dist/MinecraftB173Rust.apk
+          cp target/debug/apk/MinecraftB173Rust.apk dist/MinecraftB173Rust.apk
       - uses: actions/upload-artifact@v4
         with:
           name: MinecraftB173Rust-apk
