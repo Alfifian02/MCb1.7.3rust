@@ -1,14 +1,13 @@
 [package]
-name = "mc-android"
+name = "mc-rs"
 version = "0.1.0"
 edition = "2021"
 
 [lib]
-name = "mc_android"
+name = "mc_rs"
 crate-type = ["cdylib"]
 
 [dependencies]
-mc-core = { path = "../mc-core" }
 android-activity = { version = "0.6", features = ["native-activity"] }
 
 [package.metadata.android]
@@ -17,7 +16,7 @@ apk_name = "MinecraftB173Rust"
 build_targets = ["aarch64-linux-android", "armv7-linux-androideabi"]
 
 [package.metadata.android.sdk]
-min_sdk_version = 24
+min_sdk_version = 26
 target_sdk_version = 34
 
 [package.metadata.android.application]

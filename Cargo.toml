@@ -1,13 +1,10 @@
 [workspace]
-members = ["mc-core", "mc-android"]
-# `cargo test` / `cargo build` tanpa -p hanya memproses mc-core (mc-android hanya untuk target Android).
-default-members = ["mc-core"]
 resolver = "2"
+members = ["mc-rs"]
+default-members = ["mc-rs"]
 
 [profile.release]
 opt-level = 3
 lto = "fat"
 codegen-units = 1
 strip = true
-# CATATAN: panic = "abort" sengaja belum dipakai. `selftest` menangkap panic (catch_unwind) agar satu
-# kegagalan tidak mematikan aplikasi. Aktifkan lagi saat rilis akhir (Fase 12).
