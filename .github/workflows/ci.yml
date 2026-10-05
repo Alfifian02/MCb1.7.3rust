@@ -6,23 +6,42 @@ on:
 permissions:
   contents: write
 
+# Cancel in-progress runs on the same branch when a new commit is pushed.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
-    runs-on: linux
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: mc-rs-test
       - run: cargo test --message-format=short 2>&1 | tail -n 200
 
   apk:
-    runs-on: linux
+    # Pinned image reduces queue time vs the rolling `linux` label.
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android,armv7-linux-androideabi
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: mc-rs-apk
+      # cargo-apk install pays a hefty cost every run; cache the binary.
+      - name: Restore cargo-apk
+        id: cache-cargo-apk
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-apk
+          key: cargo-apk-bin-v1-${{ runner.os }}
       - name: Install cargo-apk
+        if: steps.cache-cargo-apk.outputs.cache-hit != 'true'
         run: cargo install cargo-apk --locked
       - name: Env for SDK/NDK
         run: |
@@ -31,7 +50,11 @@ jobs:
           echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
       - name: Build APK
         working-directory: mc-rs
-        run: cargo apk build 2>&1 | tail -n 80
+        run: cargo apk build 2>&1 | tail -n 120
+      - name: Verify APK exists
+        run: |
+          find . -name '*.apk' -path '*/target/*'
+          test -n "$(find . -name '*.apk' -path '*/target/*')"
       - name: Collect APK
         run: |
           mkdir -p dist
