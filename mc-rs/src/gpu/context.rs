@@ -7,7 +7,7 @@ use raw_window_handle::{
     AndroidDisplayHandle, AndroidNdkWindowHandle, HasDisplayHandle, HasWindowHandle,
     RawDisplayHandle, RawWindowHandle,
 };
-use wgpu::{Adapter, Device, Instance, Queue, Surface, SurfaceConfiguration};
+use wgpu::{Adapter, Device, Extent3d, Instance, Queue, Surface, SurfaceConfiguration, Texture, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages, TextureView};
 
 /// Wrapper for an Android ANativeWindow pointer so we can use it as a wgpu surface target.
 struct AndroidWindow(pub NonNull<c_void>);
@@ -39,6 +39,8 @@ pub struct Gpu {
     pub device: Device,
     pub queue: Queue,
     pub config: SurfaceConfiguration,
+    pub depth_view: TextureView,
+    depth_tex: Texture,
 }
 
 impl Gpu {
@@ -100,6 +102,11 @@ impl Gpu {
         };
         surface.configure(&device, &config);
 
+
+        // Depth texture. Sized to the current surface; recreated on resize.
+        let depth_tex = Self::create_depth(&device, 1, 1);
+        let depth_view = depth_tex.create_view(&wgpu::TextureViewDescriptor::default());
+
         // Leak the AndroidWindow wrapper so the surface has a stable owner.
         // The pointer came from android-activity and lives as long as the window does.
         std::mem::forget(window);
@@ -111,6 +118,8 @@ impl Gpu {
             device,
             queue,
             config,
+            depth_view,
+            depth_tex,
         })
     }
 
@@ -118,6 +127,21 @@ impl Gpu {
         self.config.width = width.max(1);
         self.config.height = height.max(1);
         self.surface.configure(&self.device, &self.config);
+        self.depth_tex = Self::create_depth(&self.device, self.config.width, self.config.height);
+        self.depth_view = self.depth_tex.create_view(&wgpu::TextureViewDescriptor::default());
+    }
+
+    fn create_depth(device: &Device, width: u32, height: u32) -> Texture {
+        device.create_texture(&TextureDescriptor {
+            label: Some("depth"),
+            size: Extent3d { width: width.max(1), height: height.max(1), depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: TextureFormat::Depth32Float,
+            usage: TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        })
     }
 
     pub fn surface_format(&self) -> wgpu::TextureFormat {

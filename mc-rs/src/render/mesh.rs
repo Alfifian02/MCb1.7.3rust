@@ -56,11 +56,28 @@ const FACES: [Face; 6] = [
     },
 ];
 
-/// Decide which of the 6 faces a single cell exposes. For M1, every cell is stone
-/// and we treat everything outside the chunk as air, so every cell emits all 6 faces.
-/// This is wasteful but correct; neighbor culling comes in M13.
-fn exposed_faces(_chunk: &Chunk, _x: usize, _y: usize, _z: usize) -> u8 {
-    0b0011_1111
+/// Decide which of the 6 faces a single cell exposes by checking each of the 6
+/// neighbors. Out-of-bounds counts as air (so a stone chunk emits its side faces).
+/// Air cells emit no faces. Interior cells emit no faces -> mesh is much smaller.
+fn exposed_faces(chunk: &Chunk, x: usize, y: usize, z: usize) -> u8 {
+    use crate::world::chunk::{idx, W, H, D};
+    let here = chunk.blocks[idx(x, y, z)];
+    if here == 0 { return 0; }
+    let mut mask = 0u8;
+    // Face order in FACES: 0=+X 1=-X 2=+Y 3=-Y 4=+Z 5=-Z
+    let nx_p = if x + 1 < W { chunk.blocks[idx(x+1, y, z)] } else { 0 };
+    let nx_m = if x     > 0 { chunk.blocks[idx(x-1, y, z)] } else { 0 };
+    let ny_p = if y + 1 < H { chunk.blocks[idx(x, y+1, z)] } else { 0 };
+    let ny_m = if y     > 0 { chunk.blocks[idx(x, y-1, z)] } else { 0 };
+    let nz_p = if z + 1 < D { chunk.blocks[idx(x, y, z+1)] } else { 0 };
+    let nz_m = if z     > 0 { chunk.blocks[idx(x, y, z-1)] } else { 0 };
+    if nx_p == 0 { mask |= 1 << 0; }
+    if nx_m == 0 { mask |= 1 << 1; }
+    if ny_p == 0 { mask |= 1 << 2; }
+    if ny_m == 0 { mask |= 1 << 3; }
+    if nz_p == 0 { mask |= 1 << 4; }
+    if nz_m == 0 { mask |= 1 << 5; }
+    mask
 }
 
 /// Build vertex + index buffers for the chunk.
