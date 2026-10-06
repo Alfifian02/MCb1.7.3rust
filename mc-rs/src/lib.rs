@@ -198,7 +198,7 @@ impl App {
             rp.set_pipeline(&self.pipe.pipeline);
             rp.set_bind_group(0, &self.pipe.bind_group, &[]);
             rp.set_vertex_buffer(0, self.vbuf.slice(..));
-            rp.set_index_buffer(self.ibuf.slice(..), wgpu::IndexFormat::Uint16);
+            rp.set_index_buffer(self.ibuf.slice(..), wgpu::IndexFormat::Uint32);
             rp.draw_indexed(0..self.index_count, 0, 0..1);
         }
         self.gpu.queue.submit(std::iter::once(enc.finish()));

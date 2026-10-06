@@ -93,10 +93,10 @@ fn exposed_faces(chunk: &Chunk, x: usize, y: usize, z: usize, w: usize, d: usize
 ///
 /// M3d: this is now generic over the X/Z extent. For the legacy 16x16 chunk
 /// pass `(W, D)` from `world::chunk`. For the 48x48 super-chunk pass `(48, 48)`.
-pub fn build_ext(chunk: &Chunk, w: usize, d: usize) -> (Vec<f32>, Vec<u16>) {
+pub fn build_ext(chunk: &Chunk, w: usize, d: usize) -> (Vec<f32>, Vec<u32>) {
     assert_eq!(chunk.blocks.len(), w * H * d);
     let mut verts: Vec<f32> = Vec::with_capacity(64 * 1024);
-    let mut idxs: Vec<u16> = Vec::with_capacity(96 * 1024);
+    let mut idxs: Vec<u32> = Vec::with_capacity(96 * 1024);
 
     for y in 0..H {
         for z in 0..d {
@@ -112,7 +112,7 @@ pub fn build_ext(chunk: &Chunk, w: usize, d: usize) -> (Vec<f32>, Vec<u16>) {
                     if mask & (1 << face_i) == 0 {
                         continue;
                     }
-                    let base = verts.len() as u16 / 6;
+                    let base = verts.len() as u32 / 6;
                     for corner in face.corners {
                         verts.push(corner[0] + x as f32);
                         verts.push(corner[1] + y as f32);
@@ -147,7 +147,7 @@ pub fn face_count(verts: &[f32]) -> usize {
 }
 
 /// Backwards-compat wrapper for the original 16x16 chunk shape.
-pub fn build(chunk: &Chunk) -> (Vec<f32>, Vec<u16>) {
+pub fn build(chunk: &Chunk) -> (Vec<f32>, Vec<u32>) {
     use crate::world::chunk::{W, D};
     build_ext(chunk, W, D)
 }

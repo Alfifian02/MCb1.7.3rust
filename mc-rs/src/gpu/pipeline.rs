@@ -239,7 +239,7 @@ pub fn create_vertex_buffer(device: &Device, verts: &[Vertex]) -> Buffer {
     })
 }
 
-pub fn create_index_buffer(device: &Device, idx: &[u16]) -> Buffer {
+pub fn create_index_buffer(device: &Device, idx: &[u32]) -> Buffer {
     device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("chunk_ibuf"),
         contents: bytemuck::cast_slice(idx),
