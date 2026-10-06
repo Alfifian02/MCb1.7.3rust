@@ -21,7 +21,7 @@ pollster = "0.4"
 android_logger = "0.14"
 
 [package.metadata.android]
-version_code = "2"
+version_code = 2
 package = "dev.mcrs.b173"
 apk_name = "MinecraftB173Rust"
 build_targets = ["aarch64-linux-android"]
