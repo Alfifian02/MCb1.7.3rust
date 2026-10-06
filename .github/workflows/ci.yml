@@ -83,7 +83,10 @@ jobs:
       - name: Build APK (release)
         env:
           # Tell cargo-apk to sign with the debug keystore even in release mode.
-          CARGO_APK_RELEASE_KEYSTORE: ${{ env.HOME }}/.android/debug.keystore
+          # Use an absolute path: cargo-apk 0.10 forwards $HOME to apksigner
+          # literally, and on GitHub-hosted runners it can land at "/.android/..."
+          # which fails with "java.io.FileNotFoundException: /.android/debug.keystore".
+          CARGO_APK_RELEASE_KEYSTORE: /home/runner/.android/debug.keystore
           CARGO_APK_RELEASE_KEYSTORE_PASSWORD: android
         run: |
           set -euo pipefail
@@ -103,6 +106,13 @@ jobs:
           echo "--- produced APKs ---"
           find . -name 'MinecraftB173Rust.apk' -exec ls -la {} \;
           find . -name '*.apk' -path '*/target/*' | head
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: /tmp/build.log
+          if-no-contains-found: ignore
       - name: Locate signed APK
         id: find_apk
         run: |
