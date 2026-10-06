@@ -92,7 +92,13 @@ jobs:
           # --release uses our [profile.release] in workspace Cargo.toml:
           #   opt-level=3, lto=fat, codegen-units=1, strip=true, debug=0.
           # pipefail is critical: | tail -n 80 would otherwise swallow cargo errors.
-          cargo apk build --release 2>&1 | tail -n 80
+          # Capture the full output to a log file so we can debug on failure.
+          cargo apk build --release > /tmp/build.log 2>&1 || {
+            echo "BUILD FAILED. Full output follows:"
+            cat /tmp/build.log
+            exit 1
+          }
+          cat /tmp/build.log | tail -n 80
           cd ..
           echo "--- produced APKs ---"
           find . -name 'MinecraftB173Rust.apk' -exec ls -la {} \;
