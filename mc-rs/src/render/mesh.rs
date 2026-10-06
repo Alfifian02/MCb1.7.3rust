@@ -5,7 +5,13 @@
 //!
 //! Vertex format: position(3) + uv(2) + normal_or_ao(1) = 6 floats = 24 bytes.
 
-use crate::world::chunk::{Chunk, W, H, D, VOLUME};
+use crate::world::chunk::{Chunk, H};
+
+#[inline]
+fn idx_ext(x: usize, y: usize, z: usize, _w: usize, _d: usize) -> usize {
+    (x << 11) | (z << 7) | y
+}
+
 
 /// One textured quad. Four corners in CCW order from the front.
 /// `normal_index` selects the face normal (0..5) for debug-coloring later.
@@ -83,15 +89,18 @@ fn exposed_faces(chunk: &Chunk, x: usize, y: usize, z: usize) -> u8 {
 /// Build vertex + index buffers for the chunk.
 /// Vertices: 6 floats each (px, py, pz, u, v, light).
 /// Indices: 6 per face (two triangles).
-pub fn build(chunk: &Chunk) -> (Vec<f32>, Vec<u16>) {
-    assert_eq!(chunk.blocks.len(), VOLUME);
+///
+/// M3d: this is now generic over the X/Z extent. For the legacy 16x16 chunk
+/// pass `(W, D)` from `world::chunk`. For the 48x48 super-chunk pass `(48, 48)`.
+pub fn build_ext(chunk: &Chunk, w: usize, d: usize) -> (Vec<f32>, Vec<u16>) {
+    assert_eq!(chunk.blocks.len(), w * H * d);
     let mut verts: Vec<f32> = Vec::with_capacity(64 * 1024);
     let mut idxs: Vec<u16> = Vec::with_capacity(96 * 1024);
 
     for y in 0..H {
-        for z in 0..D {
-            for x in 0..W {
-                if chunk.blocks[(x << 11) | (z << 7) | y] == 0 {
+        for z in 0..d {
+            for x in 0..w {
+                if chunk.blocks[idx_ext(x, y, z, w, d)] == 0 {
                     continue; // M2+: only render exposed surfaces; M1 emits all 6
                 }
                 let mask = exposed_faces(chunk, x, y, z);
@@ -127,4 +136,10 @@ pub fn build(chunk: &Chunk) -> (Vec<f32>, Vec<u16>) {
 /// Simple count of generated faces (verts.len()/24, since 4 verts * 6 floats).
 pub fn face_count(verts: &[f32]) -> usize {
     verts.len() / 24
+}
+
+/// Backwards-compat wrapper for the original 16x16 chunk shape.
+pub fn build(chunk: &Chunk) -> (Vec<f32>, Vec<u16>) {
+    use crate::world::chunk::{W, D};
+    build_ext(chunk, W, D)
 }

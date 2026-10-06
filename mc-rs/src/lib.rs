@@ -47,23 +47,48 @@ impl App {
         let pipe = ChunkPipeline::new(&gpu.device, surface_format);
         pipe.upload_atlas(&gpu.queue);
 
-        // M3b: build a real overworld chunk and spawn the player on top of it.
+        // M3d: build a 3x3 grid of chunks and stitch them into a 48x128x48
+        // "super-chunk" so the player can walk off the original 16x16 boundary
+        // and see neighboring terrain. The mesh + physics still use a single
+        // 48-wide X stride, so no neighbor culling changes are needed.
         let mut generator = OverworldGenerator::new(0xCAFEBABEu64);
         let biomes = [Biome::Plains; 256];
-        let blocks = generator.generate(0, 0, &biomes);
-        // Convert the 16x128x16 blocks into a Chunk (we keep the same storage
-        // layout; Chunk is essentially Vec<u8> of length 32768).
-        let chunk = Chunk { blocks: blocks.clone() };
+        const SUPER_W: usize = 16 * 3; // 48
+        const SUPER_H: usize = 128;
+        const SUPER_D: usize = 16 * 3; // 48
+        const SUPER_VOLUME: usize = SUPER_W * SUPER_H * SUPER_D;
+        let mut super_blocks: Vec<u8> = vec![0; SUPER_VOLUME];
+        // Order: chunks(cx, cz) for cx in -1..=1, cz in -1..=1
+        for cz_off in -1..=1 {
+            for cx_off in -1..=1 {
+                let blocks = generator.generate(cx_off, cz_off, &biomes);
+                let x0 = ((cx_off + 1) as usize) * 16;
+                let z0 = ((cz_off + 1) as usize) * 16;
+                for z in 0..16 {
+                    for x in 0..16 {
+                        for y in 0..128 {
+                            let src = (x << 11) | (z << 7) | y;
+                            // Super-chunk uses (x << 11) | (z << 7) | y too,
+                            // but x/z are now global to the 48-wide grid.
+                            let dst = ((x + x0) << 11) | ((z + z0) << 7) | y;
+                            super_blocks[dst] = blocks[src];
+                        }
+                    }
+                }
+            }
+        }
+        // Treat the super-chunk as a single Chunk (same layout).
+        let chunk = Chunk { blocks: super_blocks.clone() };
 
-        // Find a safe spawn: scan the top surface at chunk center and snap feet
-        // to the top solid block + 0.9 (player AABB half-height).
-        let spawn_x: usize = 8;
-        let spawn_z: usize = 8;
-        let top = OverworldGenerator::top_block(&blocks, spawn_x, spawn_z);
+        // Spawn at the center of the super-chunk (x=24, z=24, the center of
+        // chunk (0,0)).
+        let spawn_x: usize = 24;
+        let spawn_z: usize = 24;
+        let top = OverworldGenerator::top_block(&super_blocks, spawn_x, spawn_z);
         let spawn_feet_y = (top as f32) + 1.0 + 0.9;
-        log::info!("M3b: spawn at ({}, {}, {}), top block y={}", spawn_x, spawn_feet_y, spawn_z, top);
+        log::info!("M3d: super-chunk 48x128x48, spawn at ({}, {}, {}), top block y={}", spawn_x, spawn_feet_y, spawn_z, top);
 
-        let (raw_verts, raw_idxs) = mesh::build(&chunk);
+        let (raw_verts, raw_idxs) = mesh::build_ext(&chunk, 48, 48);
         let mut verts: Vec<Vertex> = Vec::with_capacity(raw_verts.len() / 6);
         for chunk_v in raw_verts.chunks(6) {
             verts.push(Vertex {
@@ -110,10 +135,12 @@ impl App {
         if dt < 0.0 { dt = 0.0; }
         self.last_frame = now;
         let blocks = &self.chunk.blocks;
+        // M3d: super-chunk is 48x128x48. Layout is still (x<<11)|(z<<7)|y,
+        // so the only change is the bound check.
         let get = |x: i32, y: i32, z: i32| -> Option<u8> {
             if x < 0 || y < 0 || z < 0 { return None; }
             let (x, y, z) = (x as usize, y as usize, z as usize);
-            if x >= W || y >= H || z >= D { return None; }
+            if x >= 48 || y >= 128 || z >= 48 { return None; }
             Some(blocks[(x << 11) | (z << 7) | y])
         };
         physics::step(&mut self.player, dt, &get);
