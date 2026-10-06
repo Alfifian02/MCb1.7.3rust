@@ -54,11 +54,15 @@ impl Gpu {
         let nn = unsafe { NonNull::new_unchecked(native_ptr) };
         let window = AndroidWindow(nn);
 
+        // Try Vulkan first, then fall back to default. Instance::default() on
+        // Android enumerates all backends; on the user's device the order is
+        // undefined, but the adapter request below picks the best match.
         let instance = Instance::default();
         let surface = unsafe {
             instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::from_window(&window).map_err(|e| format!("surface target: {e:?}"))?)
         }.map_err(|e| e.to_string())?;
 
+        log::info!("M3 init: surface created, requesting adapter");
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
@@ -67,6 +71,9 @@ impl Gpu {
             })
             .await
             .map_err(|e| format!("adapter request: {e:?}"))?;
+
+        let info = adapter.get_info();
+        log::info!("M3 init: adapter={:?} backend={:?} vendor=0x{:x} device=0x{:x}", info.name, info.backend, info.vendor, info.device);
 
         let (device, queue) = adapter
             .request_device(
@@ -77,12 +84,13 @@ impl Gpu {
                     memory_hints: wgpu::MemoryHints::default(),
                     trace: wgpu::Trace::Off,
                 },
-    // no trace_path
             )
             .await
             .map_err(|e| e.to_string())?;
 
+        log::info!("M3 init: device + queue acquired");
         let caps = surface.get_capabilities(&adapter);
+        log::info!("M3 init: surface caps: formats={:?} present_modes={:?} alpha_modes={:?}", caps.formats, caps.present_modes, caps.alpha_modes);
         let format = caps
             .formats
             .iter()
@@ -90,17 +98,29 @@ impl Gpu {
             .find(|f| f.is_srgb())
             .unwrap_or(caps.formats[0]);
 
+        // Pick Fifo explicitly. Some Android Vulkan drivers expose Mailbox as
+        // present_modes[0] but don't actually support it, which causes
+        // get_current_texture() to time out and present() to silently drop
+        // frames. Fifo is universal.
+        let present_mode = if caps.present_modes.contains(&wgpu::PresentMode::Fifo) {
+            wgpu::PresentMode::Fifo
+        } else {
+            caps.present_modes[0]
+        };
+        log::info!("M3 init: chose present_mode={:?} format={:?}", present_mode, format);
+
         let config = SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
             width: 1,
             height: 1,
-            present_mode: caps.present_modes[0],
+            present_mode,
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
             alpha_mode: caps.alpha_modes[0],
         };
         surface.configure(&device, &config);
+        log::info!("M3 init: surface configured 1x1 (will resize on first frame)");
 
 
         // Depth texture. Sized to the current surface; recreated on resize.
