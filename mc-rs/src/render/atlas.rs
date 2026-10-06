@@ -53,12 +53,14 @@ pub fn atlas_rgba() -> Vec<u8> {
 /// In the 1px-per-block atlas, the UVs of each face are all 0.0 or 1.0
 /// (corners of the 1x1 tile), and `atlas_uv` just remaps to the
 /// (block_id%16, block_id/16) tile origin.
-pub fn atlas_uv(block_id: u8, u: f32, v: f32) -> (f32, f32) {
+pub fn atlas_uv(block_id: u8, _u: f32, _v: f32) -> (f32, f32) {
+    // The atlas is 1 texel per block id, so any UV inside this block's tile
+    // samples the same color. We snap to the texel center for a Nearest
+    // sampler: (tile_x + 0.5) / 16. Both face corners (u, v in {0, 1}) end
+    // up at the same sample, which is what we want for a flat-shaded atlas.
     let tile_x = (block_id % 16) as f32;
     let tile_y = (block_id / 16) as f32;
-    // Add 0.5/16 center sample to avoid bleeding from neighboring tiles
-    // when the sampler is Nearest (it samples at the texel center).
-    let au = (tile_x + u * (15.0 / 16.0) + 0.5 / 16.0) / 16.0;
-    let av = (tile_y + v * (15.0 / 16.0) + 0.5 / 16.0) / 16.0;
+    let au = (tile_x + 0.5) / 16.0;
+    let av = (tile_y + 0.5) / 16.0;
     (au, av)
 }

@@ -164,10 +164,33 @@ impl App {
         let (view, proj) = self.camera.build_view_proj();
         self.pipe.upload_uniforms(&self.gpu.queue, view, proj);
 
+        // M3e-atlas-fix debug: cycle clear color so a black screen is obvious.
+        // phase 0 = sky, phase 1 = red, phase 2 = green.
+        let phase = (self.frames / 30) % 3;
+        let clear = match phase {
+            0 => wgpu::Color { r: 0.6, g: 0.8, b: 1.0, a: 1.0 },
+            1 => wgpu::Color { r: 1.0, g: 0.2, b: 0.2, a: 1.0 },
+            _ => wgpu::Color { r: 0.2, g: 1.0, b: 0.2, a: 1.0 },
+        };
+        if self.frames == 0 {
+            log::info!("M3 render: first frame, surface_format={:?}, index_count={}, drawing chunk", self.gpu.surface_format(), self.index_count);
+        }
+
         let frame = match self.gpu.surface.get_current_texture() {
             Ok(f) => f,
             Err(e) => { log::warn!("surface.get_current_texture: {e:?}"); return; }
         };
+        // Reconcile surface/config size. Native-activity doesn't always send
+        // MainEvent::WindowResized before the first frame, so the cached
+        // config.width/height can be wrong (1x1 from from_android_window).
+        // We drop the stale one (wgpu invalidates it after configure), resize, return.
+        let actual_w = frame.texture.width();
+        let actual_h = frame.texture.height();
+        if actual_w != self.gpu.config.width || actual_h != self.gpu.config.height {
+            log::info!("M3 render: frame is {actual_w}x{actual_h}, reconfiguring (was {}x{})", self.gpu.config.width, self.gpu.config.height);
+            self.resize(actual_w, actual_h);
+            return;
+        }
         let view_tex = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         let mut enc = self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
@@ -180,7 +203,7 @@ impl App {
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.6, g: 0.8, b: 1.0, a: 1.0 }),
+                        load: wgpu::LoadOp::Clear(clear),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -284,10 +307,10 @@ fn android_main(app: AndroidApp) {
     let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .try_init();
 
+    let mut self_main_frames: u64 = 0;
     let mut app_state: Option<App> = None;
     let mut init_handle: Option<std::thread::JoinHandle<Result<App, String>>> = None;
     let mut running = true;
-    let mut redraw = true;
 
     while running {
         app.poll_events(Some(Duration::from_millis(8)), |event| {
@@ -327,15 +350,12 @@ fn android_main(app: AndroidApp) {
                             .expect("spawn");
                         init_handle = Some(h);
                     }
-                    MainEvent::WindowResized { .. } => { redraw = true; }
-                    MainEvent::RedrawNeeded { .. } => { redraw = true; }
                     MainEvent::InputAvailable => {
                         if let Ok(mut iter) = app.input_events_iter() {
                             iter.next(|event| {
                                 if let IEv::MotionEvent(m) = event {
                                     if let Some(a) = app_state.as_mut() {
                                         a.on_motion(&m);
-                                        redraw = true;
                                     }
                                 }
                                 InputStatus::Unhandled
@@ -350,16 +370,17 @@ fn android_main(app: AndroidApp) {
 
         if let Some(h) = init_handle.take() {
             match h.join() {
-                Ok(Ok(a)) => { app_state = Some(a); redraw = true; }
+                Ok(Ok(a)) => { app_state = Some(a); self_main_frames = 0; }
                 Ok(Err(e)) => log::error!("init failed: {e}"),
                 Err(_) => log::error!("init panicked"),
             }
         }
 
         if let Some(a) = app_state.as_mut() {
-            if redraw {
-                a.render();
-                redraw = false;
+            a.render();
+            self_main_frames += 1;
+            if self_main_frames == 1 || self_main_frames == 30 || self_main_frames % 300 == 0 {
+                log::info!("M3 main frame {self_main_frames}");
             }
         }
     }
