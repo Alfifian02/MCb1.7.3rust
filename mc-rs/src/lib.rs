@@ -1,33 +1,40 @@
 //! mc-rs: Minecraft b1.7.3 in Rust for Android.
 //!
-//! M1 - First chunk visible. 16x16x128 stone half-block, fixed camera, no movement.
-//! Renderer: wgpu (Vulkan primary, GLES fallback).
+//! M2 - First-person camera + swept AABB physics. Touch-drag = look.
 
 mod render;
 mod world;
 mod gpu;
 
-use android_activity::{AndroidApp, MainEvent, PollEvent};
+use android_activity::{AndroidApp, InputStatus, MainEvent, PollEvent};
+use android_activity::input::{Axis, InputEvent as IEv, MotionAction};
 use core::ffi::c_void;
 use std::time::{Duration, Instant};
 
 use crate::gpu::context::Gpu;
 use crate::gpu::pipeline::{ChunkPipeline, Vertex, create_index_buffer, create_vertex_buffer};
-use crate::render::camera::Camera;
+use crate::render::camera::FirstPersonCamera;
 use crate::render::mesh;
-use crate::world::chunk::Chunk;
+use crate::world::chunk::{Chunk, W, H, D};
+use crate::world::physics::{self, Player};
 
-/// Top-level game state. Lives for the duration of the surface.
+const LOOK_SENS: f32 = 0.004;
+const EYE_HEIGHT: f32 = 1.62;
+
 struct App {
     gpu: Gpu,
     pipe: ChunkPipeline,
     vbuf: wgpu::Buffer,
     ibuf: wgpu::Buffer,
     index_count: u32,
-    camera: Camera,
+    chunk: Chunk,
+    camera: FirstPersonCamera,
+    player: Player,
     last_frame: Instant,
     frames: u64,
     fps_last: Instant,
+    look_pid: Option<i32>,
+    look_last: Option<(f32, f32)>,
 }
 
 impl App {
@@ -37,11 +44,8 @@ impl App {
         let pipe = ChunkPipeline::new(&gpu.device, surface_format);
         pipe.upload_atlas(&gpu.queue);
 
-        // Build a chunk: stone in the bottom half, air above.
         let chunk = Chunk::stone_pillar();
         let (raw_verts, raw_idxs) = mesh::build(&chunk);
-
-        // Re-pack into Vertex structs.
         let mut verts: Vec<Vertex> = Vec::with_capacity(raw_verts.len() / 6);
         for chunk_v in raw_verts.chunks(6) {
             verts.push(Vertex {
@@ -50,20 +54,29 @@ impl App {
                 light: chunk_v[5],
             });
         }
-        log::info!("M1: built {} verts, {} idx", verts.len(), raw_idxs.len());
+        log::info!("M2: built {} verts, {} idx", verts.len(), raw_idxs.len());
 
         let vbuf = create_vertex_buffer(&gpu.device, &verts);
         let ibuf = create_index_buffer(&gpu.device, &raw_idxs);
         let index_count = raw_idxs.len() as u32;
 
-        let camera = Camera::default_orbit(1.0);
+        let mut camera = FirstPersonCamera::spawn_on_top_of_chunk();
+        let player = Player {
+            pos: camera.pos - glam::Vec3::new(0.0, EYE_HEIGHT, 0.0),
+            vel: glam::Vec3::ZERO,
+            on_ground: false,
+        };
+        camera.pos = player.pos + glam::Vec3::new(0.0, EYE_HEIGHT, 0.0);
 
         Ok(Self {
             gpu, pipe, vbuf, ibuf, index_count,
-            camera,
+            chunk, camera,
+            player,
             last_frame: Instant::now(),
             frames: 0,
             fps_last: Instant::now(),
+            look_pid: None,
+            look_last: None,
         })
     }
 
@@ -72,23 +85,35 @@ impl App {
         self.camera.aspect = w as f32 / h as f32;
     }
 
+    fn step_frame(&mut self) {
+        let now = Instant::now();
+        let mut dt = now.duration_since(self.last_frame).as_secs_f32();
+        if dt > 1.0 / 30.0 { dt = 1.0 / 30.0; }
+        if dt < 0.0 { dt = 0.0; }
+        self.last_frame = now;
+        let blocks = &self.chunk.blocks;
+        let get = |x: i32, y: i32, z: i32| -> Option<u8> {
+            if x < 0 || y < 0 || z < 0 { return None; }
+            let (x, y, z) = (x as usize, y as usize, z as usize);
+            if x >= W || y >= H || z >= D { return None; }
+            Some(blocks[(x << 11) | (z << 7) | y])
+        };
+        physics::step(&mut self.player, dt, &get);
+        self.camera.pos = self.player.pos + glam::Vec3::new(0.0, EYE_HEIGHT, 0.0);
+    }
+
     fn render(&mut self) {
-        // Compute view/proj with current aspect.
+        self.step_frame();
         let (view, proj) = self.camera.build_view_proj();
         self.pipe.upload_uniforms(&self.gpu.queue, view, proj);
 
         let frame = match self.gpu.surface.get_current_texture() {
             Ok(f) => f,
-            Err(e) => {
-                log::warn!("surface.get_current_texture: {e:?}");
-                return;
-            }
+            Err(e) => { log::warn!("surface.get_current_texture: {e:?}"); return; }
         };
         let view_tex = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        let mut enc = self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("frame"),
-        });
+        let mut enc = self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
 
         {
             let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -115,7 +140,6 @@ impl App {
         self.gpu.queue.submit(std::iter::once(enc.finish()));
         frame.present();
 
-        // FPS counter
         self.frames += 1;
         let now = Instant::now();
         if now.duration_since(self.fps_last).as_secs_f32() >= 1.0 {
@@ -125,11 +149,64 @@ impl App {
             self.fps_last = now;
         }
     }
+
+    fn on_motion(&mut self, ev: &android_activity::input::MotionEvent) {
+        let find_pos = |pid: i32| -> Option<(f32, f32)> {
+            for p in ev.pointers() {
+                if p.pointer_id() == pid {
+                    return Some((p.axis_value(Axis::X), p.axis_value(Axis::Y)));
+                }
+            }
+            None
+        };
+        match ev.action() {
+            MotionAction::Down => {
+                let pid = ev.pointer_at_index(0).pointer_id();
+                if let Some(pos) = find_pos(pid) {
+                    self.look_pid = Some(pid);
+                    self.look_last = Some(pos);
+                    if self.player.on_ground {
+                        self.player.vel.y = 8.4;
+                    }
+                }
+            }
+            MotionAction::PointerDown => {
+                if self.look_pid.is_none() {
+                    let pid = ev.pointer_at_index(0).pointer_id();
+                    if let Some(pos) = find_pos(pid) {
+                        self.look_pid = Some(pid);
+                        self.look_last = Some(pos);
+                    }
+                }
+            }
+            MotionAction::Move => {
+                if let Some(cur_pid) = self.look_pid {
+                    if let (Some((nx, ny)), Some((lx0, ly0))) = (find_pos(cur_pid), self.look_last) {
+                        self.camera.add_yaw((nx - lx0) * LOOK_SENS);
+                        self.camera.add_pitch((ny - ly0) * LOOK_SENS);
+                        self.look_last = Some((nx, ny));
+                    }
+                }
+            }
+            MotionAction::Up | MotionAction::Cancel => {
+                self.look_pid = None;
+                self.look_last = None;
+            }
+            MotionAction::PointerUp => {
+                if let Some(cur_pid) = self.look_pid {
+                    if find_pos(cur_pid).is_none() {
+                        self.look_pid = None;
+                        self.look_last = None;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 #[no_mangle]
 fn android_main(app: AndroidApp) {
-    // Logger - pipe Rust log messages to Android logcat
     #[cfg(target_os = "android")]
     android_logger::init_once(
         android_logger::Config::default()
@@ -139,11 +216,6 @@ fn android_main(app: AndroidApp) {
     #[cfg(not(target_os = "android"))]
     let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .try_init();
-
-    // We need to bridge from the android-activity sync event model to async GPU init.
-    // Strategy: spawn the init on a separate thread, communicate via a small oneshot.
-    // For M1 simplicity: poll events synchronously, then init once we have a window,
-    // then enter the render loop on the same thread.
 
     let mut app_state: Option<App> = None;
     let mut init_handle: Option<std::thread::JoinHandle<Result<App, String>>> = None;
@@ -161,17 +233,24 @@ fn android_main(app: AndroidApp) {
                         let ptr = window.ptr().as_ptr() as usize;
                         let h = std::thread::Builder::new()
                             .stack_size(8 * 1024 * 1024)
-                            .spawn(move || {
-                                pollster::block_on(App::init(ptr as *mut c_void))
-                            })
+                            .spawn(move || pollster::block_on(App::init(ptr as *mut c_void)))
                             .expect("spawn");
                         init_handle = Some(h);
                     }
-                    MainEvent::WindowResized { .. } => {
-                        redraw = true;
-                    }
-                    MainEvent::RedrawNeeded { .. } => {
-                        redraw = true;
+                    MainEvent::WindowResized { .. } => { redraw = true; }
+                    MainEvent::RedrawNeeded { .. } => { redraw = true; }
+                    MainEvent::InputAvailable => {
+                        if let Ok(mut iter) = app.input_events_iter() {
+                            iter.next(|event| {
+                                if let IEv::MotionEvent(m) = event {
+                                    if let Some(a) = app_state.as_mut() {
+                                        a.on_motion(&m);
+                                        redraw = true;
+                                    }
+                                }
+                                InputStatus::Unhandled
+                            });
+                        }
                     }
                     MainEvent::Destroy { .. } => running = false,
                     _ => {}
@@ -181,10 +260,7 @@ fn android_main(app: AndroidApp) {
 
         if let Some(h) = init_handle.take() {
             match h.join() {
-                Ok(Ok(a)) => {
-                    app_state = Some(a);
-                    redraw = true;
-                }
+                Ok(Ok(a)) => { app_state = Some(a); redraw = true; }
                 Ok(Err(e)) => log::error!("init failed: {e}"),
                 Err(_) => log::error!("init panicked"),
             }
