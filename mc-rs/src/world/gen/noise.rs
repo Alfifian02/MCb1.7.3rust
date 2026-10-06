@@ -14,7 +14,7 @@ pub struct PerlinNoise {
 
 impl PerlinNoise {
     pub fn from_seed(seed: u64) -> Self {
-        let mut rng = JavaRandom::new(seed);
+        let rng = JavaRandom::new(seed);
         let mut p = [0u8; 256];
         for i in 0..256 { p[i] = i as u8; }
         for i in 0..256 {
@@ -74,7 +74,7 @@ pub struct OctaveNoise {
 
 impl OctaveNoise {
     pub fn new(seed: u64, octaves: usize) -> Self {
-        let mut rng = JavaRandom::new(seed);
+        let rng = JavaRandom::new(seed);
         let mut octs = Vec::with_capacity(octaves);
         for _ in 0..octaves {
             octs.push(PerlinNoise::from_seed(rng.next_u63()));
@@ -91,6 +91,49 @@ impl OctaveNoise {
             scale /= 2.0;
         }
         total
+    }
+
+    /// 2D batch: sample w*h points at (x0+ix*sx, y0+iy*sy) with octave halving.
+    /// Vanilla `generateNoiseOctaves` with ny=1, dy=1.0.
+    pub fn sample_array2d(&self, x0: i32, y0: i32, w: usize, h: usize, sx: f64, sy: f64) -> Vec<f64> {
+        let mut out = vec![0.0; w * h];
+        let mut scale = 1.0;
+        for o in &self.octaves {
+            for iy in 0..h {
+                let yy = (y0 as f64 + iy as f64) * sy * scale;
+                for ix in 0..w {
+                    let xx = (x0 as f64 + ix as f64) * sx * scale;
+                    out[iy * w + ix] += o.generate_noise(xx, yy, 0.0) / scale;
+                }
+            }
+            scale /= 2.0;
+        }
+        out
+    }
+
+    /// 2D batch at constant y, with the y-scale unused.
+    pub fn sample_array2d_y(&self, x0: i32, z0: i32, w: usize, h: usize, sx: f64, sz: f64) -> Vec<f64> {
+        self.sample_array2d(x0, z0, w, h, sx, sz)
+    }
+
+    /// 3D batch. Vanilla `generateNoiseOctaves` with full 3D.
+    pub fn sample_array3d(&self, x0: i32, y0: i32, z0: i32, w: usize, h: usize, d: usize, sx: f64, sy: f64, sz: f64) -> Vec<f64> {
+        let mut out = vec![0.0; w * h * d];
+        let mut scale = 1.0;
+        for o in &self.octaves {
+            for iz in 0..d {
+                let zz = (z0 as f64 + iz as f64) * sz * scale;
+                for iy in 0..h {
+                    let yy = (y0 as f64 + iy as f64) * sy * scale;
+                    for ix in 0..w {
+                        let xx = (x0 as f64 + ix as f64) * sx * scale;
+                        out[(iz * h + iy) * w + ix] += o.generate_noise(xx, yy, zz) / scale;
+                    }
+                }
+            }
+            scale /= 2.0;
+        }
+        out
     }
 }
 

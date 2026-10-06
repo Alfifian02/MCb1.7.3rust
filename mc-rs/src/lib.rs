@@ -16,6 +16,7 @@ use crate::gpu::pipeline::{ChunkPipeline, Vertex, create_index_buffer, create_ve
 use crate::render::camera::FirstPersonCamera;
 use crate::render::mesh;
 use crate::world::chunk::{Chunk, W, H, D};
+use crate::world::biome::Biome;
 use crate::world::gen::overworld::OverworldGenerator;
 use crate::world::physics::{self, Player};
 
@@ -47,8 +48,9 @@ impl App {
         pipe.upload_atlas(&gpu.queue);
 
         // M3b: build a real overworld chunk and spawn the player on top of it.
-        let generator = OverworldGenerator::new(0xCAFEBABEu64);
-        let blocks = generator.generate(0, 0);
+        let mut generator = OverworldGenerator::new(0xCAFEBABEu64);
+        let biomes = [Biome::Plains; 256];
+        let blocks = generator.generate(0, 0, &biomes);
         // Convert the 16x128x16 blocks into a Chunk (we keep the same storage
         // layout; Chunk is essentially Vec<u8> of length 32768).
         let chunk = Chunk { blocks: blocks.clone() };
@@ -57,7 +59,7 @@ impl App {
         // to the top solid block + 0.9 (player AABB half-height).
         let spawn_x: usize = 8;
         let spawn_z: usize = 8;
-        let top = generator.top_block(&blocks, spawn_x, spawn_z);
+        let top = OverworldGenerator::top_block(&blocks, spawn_x, spawn_z);
         let spawn_feet_y = (top as f32) + 1.0 + 0.9;
         log::info!("M3b: spawn at ({}, {}, {}), top block y={}", spawn_x, spawn_feet_y, spawn_z, top);
 
