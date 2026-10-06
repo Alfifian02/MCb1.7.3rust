@@ -84,7 +84,7 @@ impl ChunkPipeline {
         // M3e-atlas: 256x256 RGBA, one 16x16 tile per block id.
         let atlas_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("atlas"),
-            size: wgpu::Extent3d { width: 256, height: 256, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d { width: 16, height: 16, depth_or_array_layers: 1 },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -223,10 +223,10 @@ impl ChunkPipeline {
             &rgba,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(256 * 4),
-                rows_per_image: Some(256),
+                bytes_per_row: Some(16 * 4),
+                rows_per_image: Some(16),
             },
-            wgpu::Extent3d { width: 256, height: 256, depth_or_array_layers: 1 },
+            wgpu::Extent3d { width: 16, height: 16, depth_or_array_layers: 1 },
         );
     }
 }

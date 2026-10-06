@@ -89,6 +89,7 @@ impl App {
         }
 
         let chunk = Chunk { blocks: super_blocks.clone() };
+        
 
         // Spawn at the center of the super-chunk (x=24, z=24, the center of
         // chunk (0,0)).
@@ -112,6 +113,7 @@ impl App {
         let vbuf = create_vertex_buffer(&gpu.device, &verts);
         let ibuf = create_index_buffer(&gpu.device, &raw_idxs);
         let index_count = raw_idxs.len() as u32;
+        log::info!("M3 init: {} blocks, {} verts, {} idx", chunk.blocks.len(), verts.len(), index_count);
 
         let mut camera = FirstPersonCamera::spawn_at(spawn_x as f32 + 0.5, spawn_feet_y + EYE_HEIGHT, spawn_z as f32 + 0.5);
         let player = Player {
@@ -296,9 +298,32 @@ fn android_main(app: AndroidApp) {
                         unsafe impl Send for NativePtr {}
                         let Some(window) = app.native_window() else { return };
                         let ptr = window.ptr().as_ptr() as usize;
+                        log::info!("M3: InitWindow, starting GPU init thread");
                         let h = std::thread::Builder::new()
                             .stack_size(8 * 1024 * 1024)
-                            .spawn(move || pollster::block_on(App::init(ptr as *mut c_void)))
+                            .spawn(move || {
+                                let r = std::panic::catch_unwind(|| {
+                                    pollster::block_on(App::init(ptr as *mut c_void))
+                                });
+                                match r {
+                                    Ok(Ok(a)) => Ok(a),
+                                    Ok(Err(e)) => {
+                                        log::error!("M3 init error: {e}");
+                                        Err(e)
+                                    }
+                                    Err(p) => {
+                                        let msg = if let Some(s) = p.downcast_ref::<&str>() {
+                                            s.to_string()
+                                        } else if let Some(s) = p.downcast_ref::<String>() {
+                                            s.clone()
+                                        } else {
+                                            "<unknown panic>".to_string()
+                                        };
+                                        log::error!("M3 init panic: {msg}");
+                                        Err(format!("panic: {msg}"))
+                                    }
+                                }
+                            })
                             .expect("spawn");
                         init_handle = Some(h);
                     }
