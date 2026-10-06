@@ -69,17 +69,18 @@ jobs:
           echo "ANDROID_NDK_ROOT=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
           echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
           echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
-      - name: Pre-create debug keystore (used for release signing)
+      - name: Install committed signing keystore
         run: |
+          # Use a single long-lived keystore committed to the repo so every
+          # build produces APKs signed with the same identity. This is what
+          # lets `adb install -r` upgrade over the previously installed copy.
+          # The keystore is committed at keystore/debug.keystore; if you're
+          # worried about leaking the cert, move it to a GitHub Actions secret
+          # (ANDROID_KEYSTORE_B64) and decode it here.
           mkdir -p "$HOME/.android"
-          if [ ! -f "$HOME/.android/debug.keystore" ]; then
-            keytool -genkey -v \
-              -keystore "$HOME/.android/debug.keystore" \
-              -storepass android -alias androiddebugkey \
-              -keypass android -keyalg RSA -keysize 2048 \
-              -validity 10000 \
-              -dname "CN=Android Debug,O=Android,C=US"
-          fi
+          cp keystore/debug.keystore "$HOME/.android/debug.keystore"
+          echo "Keystore SHA-256:"
+          sha256sum "$HOME/.android/debug.keystore"
       - name: Build APK (release)
         env:
           # Tell cargo-apk to sign with the debug keystore even in release mode.
