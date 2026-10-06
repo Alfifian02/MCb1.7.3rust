@@ -16,13 +16,12 @@ pub struct FirstPersonCamera {
 }
 
 impl FirstPersonCamera {
-    /// Spawn standing on top of the stone pillar at y=64, facing -Z.
-    /// Eye height 1.62 m above feet.
+    /// Spawn standing on top of the stone pillar at y=64, facing -Z, looking slightly down.
     pub fn spawn_on_top_of_chunk() -> Self {
         Self {
             pos: Vec3::new(8.0, 64.0 + 0.9 + 1.62, 8.0),
             yaw: 0.0,
-            pitch: 0.0,
+            pitch: -0.3,
             fov_y: 70_f32.to_radians(),
             aspect: 1.0,
             znear: 0.05,

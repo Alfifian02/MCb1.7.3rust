@@ -182,8 +182,11 @@ impl App {
             MotionAction::Move => {
                 if let Some(cur_pid) = self.look_pid {
                     if let (Some((nx, ny)), Some((lx0, ly0))) = (find_pos(cur_pid), self.look_last) {
-                        self.camera.add_yaw((nx - lx0) * LOOK_SENS);
-                        self.camera.add_pitch((ny - ly0) * LOOK_SENS);
+                        let dx = nx - lx0;
+                        let dy = ny - ly0;
+                        log::info!("M2 touch: move dx={:.1} dy={:.1} yaw={:.2} pitch={:.2}", dx, dy, self.camera.yaw, self.camera.pitch);
+                        self.camera.add_yaw(dx * LOOK_SENS);
+                        self.camera.add_pitch(dy * LOOK_SENS);
                         self.look_last = Some((nx, ny));
                     }
                 }
