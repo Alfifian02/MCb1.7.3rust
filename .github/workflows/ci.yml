@@ -46,75 +46,48 @@ jobs:
           echo "ANDROID_NDK_ROOT=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
           echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
           echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
-      # Build unsigned; sign in a separate step so the result is deterministic
-      # regardless of cargo-apk's internal signing assumptions.
-      - name: Build APK (unsigned)
+      # cargo-apk writes the APK to target/<triple>/<profile>/apk/<apk_name>.apk
+      # and signs it with the debug keystore (creating one at ~/.android/debug.keystore if needed).
+      - name: Build APK
         working-directory: mc-rs
-        run: cargo apk build --no-sign 2>&1 | tail -n 120
-      - name: Locate unsigned APK
+        run: |
+          set -e
+          cargo apk build 2>&1 | tail -n 120
+          echo "--- looking for produced APK ---"
+          find target -name '*.apk' -path '*/apk/*' -exec ls -la {} \;
+      - name: Locate APK
         id: find_apk
         working-directory: mc-rs
         run: |
-          UNSIGNED=$(find . -name '*-unsigned.apk' | head -1)
-          if [ -z "$UNSIGNED" ]; then
-            UNSIGNED=$(find . -name '*.apk' -path '*/target/*' | head -1)
+          set -e
+          APK=$(find target -name 'MinecraftB173Rust.apk' | head -1)
+          if [ -z "$APK" ]; then
+            APK=$(find target -name '*.apk' -path '*/apk/*' | head -1)
           fi
-          echo "apk=$UNSIGNED" >> "$GITHUB_OUTPUT"
-          ls -la "$UNSIGNED"
-      - name: Ensure debug keystore
-        id: ks
-        run: |
-          mkdir -p "$HOME/.android"
-          if [ ! -f "$HOME/.android/debug.keystore" ]; then
-            keytool -genkey -v \
-              -keystore "$HOME/.android/debug.keystore" \
-              -storepass android -alias androiddebugkey \
-              -keypass android -keyalg RSA -keysize 2048 \
-              -validity 10000 \
-              -dname "CN=Android Debug,O=Android,C=US"
+          if [ -z "$APK" ]; then
+            echo "::error::no APK found under target/. Build step did not produce one."
+            exit 1
           fi
-          echo "keystore=$HOME/.android/debug.keystore" >> "$GITHUB_OUTPUT"
-      - name: Find apksigner and zipalign
-        id: tools
+          echo "apk=$APK" >> "$GITHUB_OUTPUT"
+          ls -la "$APK"
+      - name: Verify signature (debug keystore)
+        id: verify
+        working-directory: mc-rs
         run: |
+          set -e
+          APK=${{ steps.find_apk.outputs.apk }}
           APK_SIGNER=$(find "$ANDROID_HOME" -name 'apksigner' -type f | head -1)
           if [ -z "$APK_SIGNER" ]; then
             echo "::error::apksigner not found in ANDROID_HOME=$ANDROID_HOME"
             exit 1
           fi
-          ZIP_ALIGN=$(find "$ANDROID_HOME" -name 'zipalign' -type f | head -1)
-          if [ -z "$ZIP_ALIGN" ]; then
-            echo "::error::zipalign not found in ANDROID_HOME=$ANDROID_HOME"
-            exit 1
-          fi
-          echo "apk_signer=$APK_SIGNER" >> "$GITHUB_OUTPUT"
-          echo "zip_align=$ZIP_ALIGN" >> "$GITHUB_OUTPUT"
-          echo "apksigner=$APK_SIGNER"
-          echo "zipalign=$ZIP_ALIGN"
-      - name: Sign APK
-        env:
-          UNSIGNED: ${{ steps.find_apk.outputs.apk }}
-          KEYSTORE: ${{ steps.ks.outputs.keystore }}
-          APK_SIGNER: ${{ steps.tools.outputs.apk_signer }}
-          ZIP_ALIGN: ${{ steps.tools.outputs.zip_align }}
-        run: |
-          set -e
-          echo "Aligning $UNSIGNED"
-          "$ZIP_ALIGN" -f -p 4 "$UNSIGNED" "$UNSIGNED".aligned
-          mv "$UNSIGNED".aligned "$UNSIGNED"
-          echo "Signing"
-          "$APK_SIGNER" sign \
-            --ks "$KEYSTORE" \
-            --ks-pass pass:android \
-            --key-pass pass:android \
-            --ks-key-alias androiddebugkey \
-            "$UNSIGNED"
-          echo "Verifying signature"
-          "$APK_SIGNER" verify --print-certs "$UNSIGNED"
+          echo "Using apksigner: $APK_SIGNER"
+          "$APK_SIGNER" verify --print-certs "$APK"
       - name: Collect APK
         env:
           UNSIGNED: ${{ steps.find_apk.outputs.apk }}
         run: |
+          set -e
           mkdir -p dist
           cp "$UNSIGNED" dist/MinecraftB173Rust.apk
           ls -la dist/
