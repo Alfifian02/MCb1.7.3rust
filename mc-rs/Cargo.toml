@@ -23,7 +23,7 @@ android_logger = "0.14"
 [package.metadata.android]
 package = "dev.mcrs.b173"
 apk_name = "MinecraftB173Rust"
-build_targets = ["aarch64-linux-android", "armv7-linux-androideabi"]
+build_targets = ["aarch64-linux-android"]
 
 [package.metadata.android.sdk]
 min_sdk_version = 26

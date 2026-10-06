@@ -3,8 +3,16 @@ resolver = "2"
 members = ["mc-rs"]
 default-members = ["mc-rs"]
 
+# Release profile tuned for low-end Android:
+# - opt-level=3: full optimization
+# - lto="fat": cross-crate LTO, smaller & faster binaries
+# - codegen-units=1: better inlining
+# - strip=true: drop symbol tables
+# - debug=0: skip debug-line directives in dependencies (smaller, no real downside for release)
+# (panic=abort skipped: process aborts the whole app on any panic; better keep unwinding for diagnostics.)
 [profile.release]
 opt-level = 3
 lto = "fat"
 codegen-units = 1
 strip = true
+debug = 0

@@ -27,7 +27,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-linux-android,armv7-linux-androideabi
+          targets: aarch64-linux-android
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: mc-rs-apk-release
@@ -81,16 +81,21 @@ jobs:
           cd ..
           echo "--- produced APKs ---"
           find . -name 'MinecraftB173Rust.apk' -exec ls -la {} \;
+          find . -name '*.apk' -path '*/target/*' | head
       - name: Locate signed APK
         id: find_apk
         run: |
-          set -e
           APK=$(find . -name 'MinecraftB173Rust.apk' | head -1)
           if [ -z "$APK" ]; then
+            APK=$(find . -name '*.apk' -path '*/target/*' | head -1)
+          fi
+          if [ -z "$APK" ]; then
             echo "::error::no APK produced"
+            find . -name '*.apk' 2>&1 || true
             exit 1
           fi
           echo "apk=$APK" >> "$GITHUB_OUTPUT"
+          ls -la "$APK"
       - name: Verify signature
         env:
           APK: ${{ steps.find_apk.outputs.apk }}
