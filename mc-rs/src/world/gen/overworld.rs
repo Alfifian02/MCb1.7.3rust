@@ -27,6 +27,13 @@ pub mod block {
     pub const WATER: u8 = 8;
     pub const SAND: u8 = 12;
     pub const GRAVEL: u8 = 13;
+    // Ores (Beta-1.7 numbering, vanilla matches).
+    pub const ORE_COAL: u8 = 16;
+    pub const ORE_IRON: u8 = 15;
+    pub const ORE_GOLD: u8 = 14;
+    pub const ORE_DIAMOND: u8 = 56;
+    pub const ORE_REDSTONE: u8 = 73;
+    pub const ORE_LAPIS: u8 = 21;
 }
 
 pub struct OverworldGenerator {
@@ -266,5 +273,97 @@ impl OverworldGenerator {
 
         let _ = (xs1, zs1); // (used by future per-direction offset)
         out
+    }
+}
+
+impl OverworldGenerator {
+    /// M3e-ores: populate a 16x16 chunk with ore veins. Beta-1.7's
+    /// WorldGenMinable algorithm: an ellipsoid of stone->ore blocks.
+    /// `blocks` is in absolute world coords (the same layout the mesher
+    /// uses). For the super-chunk 48x48, pass `origin = (chunk_x*16, chunk_z*16)`.
+    pub fn populate_ores(&mut self, blocks: &mut [u8], origin: (i32, i32)) {
+        // Re-seed per the decomp's populate() formula.
+        // Java's long is i64; we mirror that here.
+        let world_seed: i64 = 0xCAFEBABEu64 as i64;
+        let mut rng = JavaRandom::new(world_seed as u64);
+        let _ = rng.next_long();
+        let _ = rng.next_long();
+        // Chunk-relative seed.
+        let chunk_seed: i64 = ((origin.0 as i64).wrapping_mul(341873128712i64))
+            .wrapping_add((origin.1 as i64).wrapping_mul(132897987541i64))
+            ^ world_seed;
+        let mut rng = JavaRandom::new(chunk_seed as u64);
+        // Vein counts from decomp populate().
+        let veins: &[((u8, i32), i32)] = &[
+            ((block::ORE_COAL, 16), 20),
+            ((block::ORE_IRON, 8),  20),
+            ((block::ORE_GOLD, 8),  2),
+            ((block::ORE_DIAMOND, 7), 1),
+            ((block::ORE_REDSTONE, 7), 8),
+            ((block::ORE_LAPIS, 6), 1),
+        ];
+        for &((ore, size), count) in veins {
+            for _ in 0..count {
+                let cx = origin.0 + (rng.next_u31() as i32 % 16) + 8;
+                let cy = rng.next_u31() as i32 % 128;
+                let cz = origin.1 + (rng.next_u31() as i32 % 16) + 8;
+                // Some ores have y-bounds tighter than 128.
+                let max_y = match ore {
+                    block::ORE_IRON => 64,
+                    block::ORE_GOLD => 32,
+                    block::ORE_DIAMOND => 16,
+                    block::ORE_REDSTONE => 16,
+                    _ => 128,
+                };
+                let cy = cy.min(max_y - 1);
+                self.place_vein(blocks, &mut rng, ore, size, cx, cy, cz, origin);
+            }
+        }
+    }
+
+    fn place_vein(&self, blocks: &mut [u8], rng: &mut JavaRandom, ore: u8, size: i32, x0: i32, y0: i32, z0: i32, _origin: (i32, i32)) {
+        // Direct port of WorldGenMinable.generate(). Only places ore inside
+        // the super-chunk's 48x48 footprint.
+        let angle = rng.next_u31() as f64 / 4294967295.0 * std::f64::consts::PI;
+        let sin_a = angle.sin();
+        let cos_a = angle.cos();
+        let dx0 = (x0 as f64 + 8.0) + sin_a * (size as f64) / 8.0;
+        let dx1 = (x0 as f64 + 8.0) - sin_a * (size as f64) / 8.0;
+        let dz0 = (z0 as f64 + 8.0) + cos_a * (size as f64) / 8.0;
+        let dz1 = (z0 as f64 + 8.0) - cos_a * (size as f64) / 8.0;
+        let dy0 = y0 as f64 + (rng.next_u31() as i32 % 3 + 2) as f64;
+        let dy1 = y0 as f64 + (rng.next_u31() as i32 % 3 + 2) as f64;
+        for i in 0..=size {
+            let t = i as f64 / size as f64;
+            let cx = dx0 + (dx1 - dx0) * t;
+            let cy = dy0 + (dy1 - dy0) * t;
+            let cz = dz0 + (dz1 - dz0) * t;
+            let r = (rng.next_u31() as f64 / 4294967295.0) * (size as f64) / 16.0;
+            let swell = ((i as f64 * std::f64::consts::PI / size as f64).sin() + 1.0) * r + 1.0;
+            let x_lo = (cx - swell / 2.0).floor() as i32;
+            let x_hi = (cx + swell / 2.0).floor() as i32;
+            let y_lo = (cy - swell / 2.0).floor() as i32;
+            let y_hi = (cy + swell / 2.0).floor() as i32;
+            let z_lo = (cz - swell / 2.0).floor() as i32;
+            let z_hi = (cz + swell / 2.0).floor() as i32;
+            for bx in x_lo..=x_hi {
+                let dxn = (bx as f64 + 0.5 - cx) / (swell / 2.0);
+                if dxn * dxn >= 1.0 { continue; }
+                for by in y_lo..=y_hi {
+                    let dyn_ = (by as f64 + 0.5 - cy) / (swell / 2.0);
+                    if dxn * dxn + dyn_ * dyn_ >= 1.0 { continue; }
+                    for bz in z_lo..=z_hi {
+                        let dzn = (bz as f64 + 0.5 - cz) / (swell / 2.0);
+                        if dxn * dxn + dyn_ * dyn_ + dzn * dzn >= 1.0 { continue; }
+                        // Only place if inside the 48x48 super-chunk.
+                        if bx < 0 || bx >= 48 || bz < 0 || bz >= 48 || by < 0 || by >= 128 { continue; }
+                        let idx = (bx as usize) << 11 | (bz as usize) << 7 | (by as usize);
+                        if blocks[idx] == block::STONE {
+                            blocks[idx] = ore;
+                        }
+                    }
+                }
+            }
+        }
     }
 }

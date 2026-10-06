@@ -167,6 +167,9 @@ impl JavaRandom {
         (next >> (48 - bits)) as u32
     }
     pub fn next_u31(&self) -> u32 { self.next(31) }
+    pub fn next_long(&self) -> i64 {
+        ((self.next(32) as i64) << 32) + (self.next(32) as i64)
+    }
     pub fn next_u63(&self) -> u64 {
         ((self.next(31) as u64) << 32) | (self.next(31) as u64) | 1
     }

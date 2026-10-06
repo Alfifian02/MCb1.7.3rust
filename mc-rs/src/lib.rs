@@ -78,6 +78,16 @@ impl App {
             }
         }
         // Treat the super-chunk as a single Chunk (same layout).
+        // M3e-ores: place ore veins in each of the 9 chunks.
+        for cz_off in -1..=1 {
+            for cx_off in -1..=1 {
+                generator.populate_ores(
+                    &mut super_blocks,
+                    (cx_off * 16, cz_off * 16),
+                );
+            }
+        }
+
         let chunk = Chunk { blocks: super_blocks.clone() };
 
         // Spawn at the center of the super-chunk (x=24, z=24, the center of
