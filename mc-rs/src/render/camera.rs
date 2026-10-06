@@ -18,8 +18,13 @@ pub struct FirstPersonCamera {
 impl FirstPersonCamera {
     /// Spawn standing on top of the stone pillar at y=64, facing -Z, looking slightly down.
     pub fn spawn_on_top_of_chunk() -> Self {
+        Self::spawn_at(8.0, 64.0 + 0.9 + 1.62, 8.0)
+    }
+
+    /// Spawn at a specific (x, y, z) with default yaw/pitch/fov.
+    pub fn spawn_at(x: f32, y: f32, z: f32) -> Self {
         Self {
-            pos: Vec3::new(8.0, 64.0 + 0.9 + 1.62, 8.0),
+            pos: Vec3::new(x, y, z),
             yaw: 0.0,
             pitch: -0.3,
             fov_y: 70_f32.to_radians(),

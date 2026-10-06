@@ -16,6 +16,7 @@ use crate::gpu::pipeline::{ChunkPipeline, Vertex, create_index_buffer, create_ve
 use crate::render::camera::FirstPersonCamera;
 use crate::render::mesh;
 use crate::world::chunk::{Chunk, W, H, D};
+use crate::world::gen::overworld::OverworldGenerator;
 use crate::world::physics::{self, Player};
 
 const LOOK_SENS: f32 = 0.004;
@@ -28,6 +29,7 @@ struct App {
     ibuf: wgpu::Buffer,
     index_count: u32,
     chunk: Chunk,
+    generator: OverworldGenerator,
     camera: FirstPersonCamera,
     player: Player,
     last_frame: Instant,
@@ -44,7 +46,21 @@ impl App {
         let pipe = ChunkPipeline::new(&gpu.device, surface_format);
         pipe.upload_atlas(&gpu.queue);
 
-        let chunk = Chunk::stone_pillar();
+        // M3b: build a real overworld chunk and spawn the player on top of it.
+        let generator = OverworldGenerator::new(0xCAFEBABEu64);
+        let blocks = generator.generate(0, 0);
+        // Convert the 16x128x16 blocks into a Chunk (we keep the same storage
+        // layout; Chunk is essentially Vec<u8> of length 32768).
+        let chunk = Chunk { blocks: blocks.clone() };
+
+        // Find a safe spawn: scan the top surface at chunk center and snap feet
+        // to the top solid block + 0.9 (player AABB half-height).
+        let spawn_x: usize = 8;
+        let spawn_z: usize = 8;
+        let top = generator.top_block(&blocks, spawn_x, spawn_z);
+        let spawn_feet_y = (top as f32) + 1.0 + 0.9;
+        log::info!("M3b: spawn at ({}, {}, {}), top block y={}", spawn_x, spawn_feet_y, spawn_z, top);
+
         let (raw_verts, raw_idxs) = mesh::build(&chunk);
         let mut verts: Vec<Vertex> = Vec::with_capacity(raw_verts.len() / 6);
         for chunk_v in raw_verts.chunks(6) {
@@ -54,15 +70,15 @@ impl App {
                 light: chunk_v[5],
             });
         }
-        log::info!("M2: built {} verts, {} idx", verts.len(), raw_idxs.len());
+        log::info!("M3b: built {} verts, {} idx", verts.len(), raw_idxs.len());
 
         let vbuf = create_vertex_buffer(&gpu.device, &verts);
         let ibuf = create_index_buffer(&gpu.device, &raw_idxs);
         let index_count = raw_idxs.len() as u32;
 
-        let mut camera = FirstPersonCamera::spawn_on_top_of_chunk();
+        let mut camera = FirstPersonCamera::spawn_at(spawn_x as f32 + 0.5, spawn_feet_y + EYE_HEIGHT, spawn_z as f32 + 0.5);
         let player = Player {
-            pos: camera.pos - glam::Vec3::new(0.0, EYE_HEIGHT, 0.0),
+            pos: glam::Vec3::new(spawn_x as f32 + 0.5, spawn_feet_y, spawn_z as f32 + 0.5),
             vel: glam::Vec3::ZERO,
             on_ground: false,
         };
@@ -70,7 +86,7 @@ impl App {
 
         Ok(Self {
             gpu, pipe, vbuf, ibuf, index_count,
-            chunk, camera,
+            chunk, generator, camera,
             player,
             last_frame: Instant::now(),
             frames: 0,
