@@ -70,21 +70,18 @@ jobs:
           echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
           echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
       - name: Build APK
-        working-directory: mc-rs
         run: |
           set -e
+          cd mc-rs
           cargo apk build 2>&1 | tail -n 80
+          cd ..
           echo "--- produced APKs ---"
-          find target -name '*.apk' -path '*/apk/*' -exec ls -la {} \;
+          find . -name 'MinecraftB173Rust.apk' -exec ls -la {} \;
       - name: Locate signed APK
         id: find_apk
-        working-directory: mc-rs
         run: |
           set -e
-          APK=$(find target -name 'MinecraftB173Rust.apk' | head -1)
-          if [ -z "$APK" ]; then
-            APK=$(find target -name '*.apk' -path '*/apk/*' | head -1)
-          fi
+          APK=$(find . -name 'MinecraftB173Rust.apk' | head -1)
           if [ -z "$APK" ]; then
             echo "::error::no APK produced"
             exit 1
