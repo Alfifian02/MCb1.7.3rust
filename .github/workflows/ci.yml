@@ -69,14 +69,29 @@ jobs:
           echo "ANDROID_NDK_ROOT=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
           echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
           echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
-      - name: Build APK (release)
+      - name: Pre-create debug keystore (used for release signing)
         run: |
-          set -e
+          mkdir -p "$HOME/.android"
+          if [ ! -f "$HOME/.android/debug.keystore" ]; then
+            keytool -genkey -v \
+              -keystore "$HOME/.android/debug.keystore" \
+              -storepass android -alias androiddebugkey \
+              -keypass android -keyalg RSA -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+      - name: Build APK (release)
+        env:
+          # Tell cargo-apk to sign with the debug keystore even in release mode.
+          CARGO_APK_RELEASE_KEYSTORE: ${{ env.HOME }}/.android/debug.keystore
+          CARGO_APK_RELEASE_KEYSTORE_PASSWORD: android
+        run: |
+          set -euo pipefail
           cd mc-rs
           # cargo-apk defaults to debug builds (huge APK, no opt-level).
           # --release uses our [profile.release] in workspace Cargo.toml:
-          #   opt-level=3, lto=fat, codegen-units=1, strip=true.
-          # Expected size: 245 MB debug -> ~30 MB release.
+          #   opt-level=3, lto=fat, codegen-units=1, strip=true, debug=0.
+          # pipefail is critical: | tail -n 80 would otherwise swallow cargo errors.
           cargo apk build --release 2>&1 | tail -n 80
           cd ..
           echo "--- produced APKs ---"
