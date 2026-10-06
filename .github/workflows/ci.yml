@@ -88,7 +88,6 @@ jobs:
           fi
           echo "apk=$APK" >> "$GITHUB_OUTPUT"
       - name: Verify signature
-        working-directory: mc-rs
         env:
           APK: ${{ steps.find_apk.outputs.apk }}
         run: |
@@ -98,11 +97,14 @@ jobs:
             echo "::error::apksigner still missing after build-tools install"
             exit 1
           fi
+          echo "Verifying: $APK"
+          ls -la "$APK"
           "$APKSIGNER" verify --print-certs "$APK"
       - name: Collect APK
         env:
           UNSIGNED: ${{ steps.find_apk.outputs.apk }}
         run: |
+          set -e
           mkdir -p dist
           cp "$UNSIGNED" dist/MinecraftB173Rust.apk
           ls -la dist/
