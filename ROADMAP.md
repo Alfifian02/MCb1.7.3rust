@@ -26,3 +26,10 @@ McRegion save format. Client-only networking.
 - Workspace at `mc-rs/`
 - `cargo test` runs mc-core unit tests
 - APK via GitHub Actions `cargo apk build` -> `MinecraftB173Rust.apk`
+
+## Changelog
+- `aef24f7` M3e-atlas-fix (1/2): 16x16 atlas + panic catcher in init.
+- `2a5497f` M3e-atlas-fix (2/2): Uint32 indices. **Black screen root cause**: the
+  48x128x48 super-chunk pushes the per-frame index count past `u16::MAX`, so
+  `IndexFormat::Uint16` silently clipped the draw and wgpu presented black.
+  Atlas size was a red herring.
