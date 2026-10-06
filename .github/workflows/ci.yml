@@ -11,6 +11,38 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  probe:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Dump Android SDK layout
+        run: |
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+          echo "ANDROID_NDK_ROOT=$ANDROID_NDK_ROOT"
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
+          echo "--- contents of \$ANDROID_HOME ---"
+          ls -la "$ANDROID_HOME" 2>&1 | head -20
+          echo "--- build-tools ---"
+          ls -la "$ANDROID_HOME/build-tools/" 2>&1 | head -10
+          if [ -d "$ANDROID_HOME/build-tools" ]; then
+            BTVER=$(ls "$ANDROID_HOME/build-tools/" | sort -V | tail -1)
+            echo "latest build-tools version: $BTVER"
+            ls -la "$ANDROID_HOME/build-tools/$BTVER/" | head -30
+          fi
+          echo "--- aapt? ---"
+          which aapt || true
+          "$ANDROID_HOME/build-tools"/*/aapt version 2>&1 | head -3 || true
+          echo "--- apksigner? ---"
+          which apksigner || true
+          "$ANDROID_HOME/build-tools"/*/apksigner --version 2>&1 | head -3 || true
+          echo "--- zipalign? ---"
+          which zipalign || true
+          echo "--- keytool? ---"
+          which keytool || true
+          keytool -help 2>&1 | head -2 || true
+
   test:
     runs-on: ubuntu-22.04
     steps:
@@ -22,6 +54,7 @@ jobs:
       - run: cargo test --message-format=short 2>&1 | tail -n 200
 
   apk:
+    needs: probe
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -40,22 +73,14 @@ jobs:
       - name: Install cargo-apk
         if: steps.cache-cargo-apk.outputs.cache-hit != 'true'
         run: cargo install cargo-apk --locked
-      - name: Env for SDK/NDK
-        run: |
-          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK_ROOT=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
-          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
-      # cargo-apk writes the APK to target/<triple>/<profile>/apk/<apk_name>.apk
-      # and signs it with the debug keystore (creating one at ~/.android/debug.keystore if needed).
       - name: Build APK
         working-directory: mc-rs
         run: |
           set -e
-          cargo apk build 2>&1 | tail -n 120
-          echo "--- looking for produced APK ---"
+          cargo apk build 2>&1 | tail -n 80
+          echo "--- produced APKs ---"
           find target -name '*.apk' -path '*/apk/*' -exec ls -la {} \;
-      - name: Locate APK
+      - name: Locate signed APK
         id: find_apk
         working-directory: mc-rs
         run: |
@@ -65,29 +90,27 @@ jobs:
             APK=$(find target -name '*.apk' -path '*/apk/*' | head -1)
           fi
           if [ -z "$APK" ]; then
-            echo "::error::no APK found under target/. Build step did not produce one."
+            echo "::error::no APK produced"
             exit 1
           fi
           echo "apk=$APK" >> "$GITHUB_OUTPUT"
-          ls -la "$APK"
-      - name: Verify signature (debug keystore)
-        id: verify
+      - name: Verify signature (apksigner)
         working-directory: mc-rs
+        env:
+          APK: ${{ steps.find_apk.outputs.apk }}
         run: |
           set -e
-          APK=${{ steps.find_apk.outputs.apk }}
-          APK_SIGNER=$(find "$ANDROID_HOME" -name 'apksigner' -type f | head -1)
-          if [ -z "$APK_SIGNER" ]; then
-            echo "::error::apksigner not found in ANDROID_HOME=$ANDROID_HOME"
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name 'apksigner' -type f | head -1)
+          if [ -z "$APKSIGNER" ]; then
+            echo "::error::apksigner not found; refusing to ship"
             exit 1
           fi
-          echo "Using apksigner: $APK_SIGNER"
-          "$APK_SIGNER" verify --print-certs "$APK"
+          echo "Using apksigner: $APKSIGNER"
+          "$APKSIGNER" verify --print-certs "$APK"
       - name: Collect APK
         env:
           UNSIGNED: ${{ steps.find_apk.outputs.apk }}
         run: |
-          set -e
           mkdir -p dist
           cp "$UNSIGNED" dist/MinecraftB173Rust.apk
           ls -la dist/
@@ -101,5 +124,5 @@ jobs:
         with:
           tag_name: build-${{ github.run_number }}
           name: APK build ${{ github.run_number }}
-          prerelease: true
-          files: dist/MinecraftB173Rust.apk
+        prerelease: true
+        files: dist/MinecraftB173Rust.apk
