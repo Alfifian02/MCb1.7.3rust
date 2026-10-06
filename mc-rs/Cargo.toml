@@ -9,6 +9,16 @@ crate-type = ["cdylib"]
 
 [dependencies]
 android-activity = { version = "0.6", features = ["native-activity"] }
+wgpu = { version = "26", default-features = false, features = ["vulkan", "gles", "wgsl"] }
+glam = "0.27"
+bytemuck = { version = "1", features = ["derive"] }
+raw-window-handle = "0.6"
+log = "0.4"
+env_logger = "0.11"
+pollster = "0.4"
+
+[target.'cfg(target_os = "android")'.dependencies]
+android_logger = "0.14"
 
 [package.metadata.android]
 package = "dev.mcrs.b173"
