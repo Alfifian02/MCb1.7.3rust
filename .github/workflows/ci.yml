@@ -11,38 +11,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  probe:
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Dump Android SDK layout
-        run: |
-          echo "ANDROID_HOME=$ANDROID_HOME"
-          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
-          echo "ANDROID_NDK_ROOT=$ANDROID_NDK_ROOT"
-          echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
-          echo "--- contents of \$ANDROID_HOME ---"
-          ls -la "$ANDROID_HOME" 2>&1 | head -20
-          echo "--- build-tools ---"
-          ls -la "$ANDROID_HOME/build-tools/" 2>&1 | head -10
-          if [ -d "$ANDROID_HOME/build-tools" ]; then
-            BTVER=$(ls "$ANDROID_HOME/build-tools/" | sort -V | tail -1)
-            echo "latest build-tools version: $BTVER"
-            ls -la "$ANDROID_HOME/build-tools/$BTVER/" | head -30
-          fi
-          echo "--- aapt? ---"
-          which aapt || true
-          "$ANDROID_HOME/build-tools"/*/aapt version 2>&1 | head -3 || true
-          echo "--- apksigner? ---"
-          which apksigner || true
-          "$ANDROID_HOME/build-tools"/*/apksigner --version 2>&1 | head -3 || true
-          echo "--- zipalign? ---"
-          which zipalign || true
-          echo "--- keytool? ---"
-          which keytool || true
-          keytool -help 2>&1 | head -2 || true
-
   test:
     runs-on: ubuntu-22.04
     steps:
@@ -54,7 +22,6 @@ jobs:
       - run: cargo test --message-format=short 2>&1 | tail -n 200
 
   apk:
-    needs: probe
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -73,6 +40,35 @@ jobs:
       - name: Install cargo-apk
         if: steps.cache-cargo-apk.outputs.cache-hit != 'true'
         run: cargo install cargo-apk --locked
+      # GitHub's ubuntu-22.04 image ships Android SDK WITHOUT build-tools,
+      # so aapt/apksigner/zipalign aren't on disk. Install cmdline-tools and use
+      # sdkmanager to install the build-tools package we need.
+      - name: Install Android cmdline-tools (if missing)
+        run: |
+          set -e
+          if [ ! -d "$ANDROID_HOME/cmdline-tools" ]; then
+            echo "Installing Android cmdline-tools"
+            mkdir -p "$ANDROID_HOME/cmdline-tools"
+            cd /tmp
+            curl -sLO https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+            unzip -q commandlinetools-linux-11076708_latest.zip
+            mv cmdline-tools "$ANDROID_HOME/cmdline-tools/latest"
+          fi
+          ls -la "$ANDROID_HOME/cmdline-tools/latest/bin/" | head -5
+      - name: Install Android build-tools 34.0.0
+        env:
+          ANDROID_SDK_ROOT: ${{ env.ANDROID_HOME }}
+        run: |
+          set -e
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "platform-tools" "build-tools;34.0.0"
+          ls -la "$ANDROID_HOME/build-tools/34.0.0/" | head -10
+      - name: Env for SDK/NDK
+        run: |
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
+          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
       - name: Build APK
         working-directory: mc-rs
         run: |
@@ -94,7 +90,7 @@ jobs:
             exit 1
           fi
           echo "apk=$APK" >> "$GITHUB_OUTPUT"
-      - name: Verify signature (apksigner)
+      - name: Verify signature
         working-directory: mc-rs
         env:
           APK: ${{ steps.find_apk.outputs.apk }}
@@ -102,10 +98,9 @@ jobs:
           set -e
           APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name 'apksigner' -type f | head -1)
           if [ -z "$APKSIGNER" ]; then
-            echo "::error::apksigner not found; refusing to ship"
+            echo "::error::apksigner still missing after build-tools install"
             exit 1
           fi
-          echo "Using apksigner: $APKSIGNER"
           "$APKSIGNER" verify --print-certs "$APK"
       - name: Collect APK
         env:
@@ -124,5 +119,5 @@ jobs:
         with:
           tag_name: build-${{ github.run_number }}
           name: APK build ${{ github.run_number }}
-        prerelease: true
-        files: dist/MinecraftB173Rust.apk
+          prerelease: true
+          files: dist/MinecraftB173Rust.apk
