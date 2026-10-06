@@ -8,7 +8,7 @@ use wgpu::{
 };
 use wgpu::util::DeviceExt;
 
-use crate::render::atlas::stone_image_rgba;
+// atlas functions are called inline now
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
@@ -81,11 +81,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 
 impl ChunkPipeline {
     pub fn new(device: &Device, surface_format: wgpu::TextureFormat) -> Self {
-        // Atlas texture (2x2 RGBA)
-        let rgba = stone_image_rgba();
+        // M3e-atlas: 256x256 RGBA, one 16x16 tile per block id.
         let atlas_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("atlas"),
-            size: wgpu::Extent3d { width: 2, height: 2, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d { width: 256, height: 256, depth_or_array_layers: 1 },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -213,7 +212,7 @@ impl ChunkPipeline {
     }
 
     pub fn upload_atlas(&self, queue: &Queue) {
-        let rgba = stone_image_rgba();
+        let rgba = crate::render::atlas::atlas_rgba();
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &self.atlas_tex,
@@ -224,10 +223,10 @@ impl ChunkPipeline {
             &rgba,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(2 * 4),
-                rows_per_image: Some(2),
+                bytes_per_row: Some(256 * 4),
+                rows_per_image: Some(256),
             },
-            wgpu::Extent3d { width: 2, height: 2, depth_or_array_layers: 1 },
+            wgpu::Extent3d { width: 256, height: 256, depth_or_array_layers: 1 },
         );
     }
 }

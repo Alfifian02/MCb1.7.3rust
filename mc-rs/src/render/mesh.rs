@@ -6,6 +6,7 @@
 //! Vertex format: position(3) + uv(2) + normal_or_ao(1) = 6 floats = 24 bytes.
 
 use crate::world::chunk::{Chunk, H};
+use crate::render::atlas;
 
 #[inline]
 fn idx_ext(x: usize, y: usize, z: usize, _w: usize, _d: usize) -> usize {
@@ -122,9 +123,11 @@ pub fn build_ext(chunk: &Chunk, w: usize, d: usize) -> (Vec<f32>, Vec<u16>) {
                         3 => 0.55,  // -Y bottom
                         _ => 0.80,  // +X, -X, +Z, -Z sides
                     };
+                    let blk = chunk.blocks[idx_ext(x, y, z, w, d)];
                     for uv in face.uv {
-                        verts.push(uv[0]);
-                        verts.push(uv[1]);
+                        let (au, av) = atlas::atlas_uv(blk, uv[0], uv[1]);
+                        verts.push(au);
+                        verts.push(av);
                         verts.push(light);
                     }
                     idxs.extend_from_slice(&[
