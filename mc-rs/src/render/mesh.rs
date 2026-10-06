@@ -65,18 +65,18 @@ const FACES: [Face; 6] = [
 /// Decide which of the 6 faces a single cell exposes by checking each of the 6
 /// neighbors. Out-of-bounds counts as air (so a stone chunk emits its side faces).
 /// Air cells emit no faces. Interior cells emit no faces -> mesh is much smaller.
-fn exposed_faces(chunk: &Chunk, x: usize, y: usize, z: usize) -> u8 {
-    use crate::world::chunk::{idx, W, H, D};
-    let here = chunk.blocks[idx(x, y, z)];
+fn exposed_faces(chunk: &Chunk, x: usize, y: usize, z: usize, w: usize, d: usize) -> u8 {
+    use crate::world::chunk::H;
+    let here = chunk.blocks[idx_ext(x, y, z, w, d)];
     if here == 0 { return 0; }
     let mut mask = 0u8;
     // Face order in FACES: 0=+X 1=-X 2=+Y 3=-Y 4=+Z 5=-Z
-    let nx_p = if x + 1 < W { chunk.blocks[idx(x+1, y, z)] } else { 0 };
-    let nx_m = if x     > 0 { chunk.blocks[idx(x-1, y, z)] } else { 0 };
-    let ny_p = if y + 1 < H { chunk.blocks[idx(x, y+1, z)] } else { 0 };
-    let ny_m = if y     > 0 { chunk.blocks[idx(x, y-1, z)] } else { 0 };
-    let nz_p = if z + 1 < D { chunk.blocks[idx(x, y, z+1)] } else { 0 };
-    let nz_m = if z     > 0 { chunk.blocks[idx(x, y, z-1)] } else { 0 };
+    let nx_p = if x + 1 < w { chunk.blocks[idx_ext(x+1, y, z, w, d)] } else { 0 };
+    let nx_m = if x     > 0 { chunk.blocks[idx_ext(x-1, y, z, w, d)] } else { 0 };
+    let ny_p = if y + 1 < H { chunk.blocks[idx_ext(x, y+1, z, w, d)] } else { 0 };
+    let ny_m = if y     > 0 { chunk.blocks[idx_ext(x, y-1, z, w, d)] } else { 0 };
+    let nz_p = if z + 1 < d { chunk.blocks[idx_ext(x, y, z+1, w, d)] } else { 0 };
+    let nz_m = if z     > 0 { chunk.blocks[idx_ext(x, y, z-1, w, d)] } else { 0 };
     if nx_p == 0 { mask |= 1 << 0; }
     if nx_m == 0 { mask |= 1 << 1; }
     if ny_p == 0 { mask |= 1 << 2; }
@@ -103,7 +103,7 @@ pub fn build_ext(chunk: &Chunk, w: usize, d: usize) -> (Vec<f32>, Vec<u16>) {
                 if chunk.blocks[idx_ext(x, y, z, w, d)] == 0 {
                     continue; // M2+: only render exposed surfaces; M1 emits all 6
                 }
-                let mask = exposed_faces(chunk, x, y, z);
+                let mask = exposed_faces(chunk, x, y, z, w, d);
                 if mask == 0 {
                     continue;
                 }
@@ -117,10 +117,15 @@ pub fn build_ext(chunk: &Chunk, w: usize, d: usize) -> (Vec<f32>, Vec<u16>) {
                         verts.push(corner[1] + y as f32);
                         verts.push(corner[2] + z as f32);
                     }
+                    let light = match face_i {
+                        2 => 1.00,  // +Y top
+                        3 => 0.55,  // -Y bottom
+                        _ => 0.80,  // +X, -X, +Z, -Z sides
+                    };
                     for uv in face.uv {
                         verts.push(uv[0]);
                         verts.push(uv[1]);
-                        verts.push(15.0 / 16.0); // full sky light for M1
+                        verts.push(light);
                     }
                     idxs.extend_from_slice(&[
                         base, base + 1, base + 2,
