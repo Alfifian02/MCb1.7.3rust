@@ -24,8 +24,35 @@ McRegion save format. Client-only networking.
 
 ## Build
 - Workspace at `mc-rs/`
-- `cargo test` runs mc-core unit tests
-- APK via GitHub Actions `cargo apk build` -> `MinecraftB173Rust.apk`
+- `cargo test --lib` runs the 15 unit tests (host, sub-second).
+- `cargo run` boots a desktop window (Metal / Vulkan / GL depending on host).
+- APK via GitHub Actions `cargo apk build --release` -> `MinecraftB173Rust.apk`.
+- A long-lived debug keystore at `keystore/debug.keystore` signs the release
+  APK in CI. The same keystore is what `cargo apk build --release` expects at
+  `~/.android/debug.keystore` with password `android` if you build locally.
+
+## Source-of-truth rule
+
+Anything that cannot be diffed against the b1.7.3 Java sources or the
+decompiled `minecraft/` tree is marked `// UNVERIFIED:` in the code. PRs
+that fix UNVERIFIED items should drop the marker and link the source line
+they matched.
+
+## Next step
+
+M4: biomes + trees + caves. The overworld currently uses a constant-Plains
+biome array in `App::init` (`OverworldGenerator::generate` is called with
+`[Biome::Plains; 256]`). M4 replaces that with a per-column biome sampler
+(temperature + humidity noise, vanilla lookup table) and runs the populate
+pass: trees (oak / birch / spruce), caves (carve through density < 0), ore
+veins (already done in M3 — keep them), and ravines. Acceptance: for fixed
+seeds (0, -1, i64::MAX), the block id array for chunks (0,0), (-1,-1), and
+(5,-3) matches the b1.7.3 reference byte-for-byte. See
+`world/gen/overworld.rs` line 67 for the constant-biome workaround that
+M4 deletes.
+
+After M4, M5 (raycast pick + break + place) is the next milestone that
+unlocks anything player-facing.
 
 ## Changelog
 - `aef24f7` M3e-atlas-fix (1/2): 16x16 atlas + panic catcher in init.
@@ -33,28 +60,31 @@ McRegion save format. Client-only networking.
   48x128x48 super-chunk pushes the per-frame index count past `u16::MAX`, so
   `IndexFormat::Uint16` silently clipped the draw and wgpu presented black.
   Atlas size was a red herring.
-- `pending` M12 (WIP): d-pad + look-stick + pause button + hotbar tap on top
-  of the M2/M3 baseline. Files: `src/input/{mod,touch_ui}.rs`,
-  `src/render/hud.rs`, `lib.rs`. Build status:
-  - `cargo test --lib`: 15/15 pass on the host.
-  - `cargo build --target aarch64-linux-android --lib`: INTERRUPTED before
-    completion. Not verified.
-  - APK build on the CI runner: not done.
+- `ad33e0d` M12: Touch UX overlay (HUD + d-pad + look-stick + pause menu).
+  Files: `src/input/{mod,touch_ui}.rs`, `src/render/hud.rs`,
+  `src/lib.rs`, `ROADMAP.md`. Region-based touch UI state machine plus a
+  separate 2D orthographic wgpu pass for the HUD overlay (alpha-blended,
+  depth-less, runs after the chunk pass). 9 unit tests, 15/15 pass.
+  Build status:
+    - `cargo test --lib`: 15/15 pass on the host.
+    - `cargo build --target aarch64-linux-android --lib --release`: clean,
+      4.5 MB `libmc_rs.so`, ELF confirmed AArch64.
+    - `cargo apk build --release`: not run locally (this host is aarch64
+      Android, the SDK build-tools are x86_64 glibc ELFs). The CI workflow
+      at `.github/workflows/ci.yml` runs the same command on a GitHub-hosted
+      ubuntu-22.04 runner — that APK build is the end-to-end check.
   Verified against b1.7.3 sources:
     - Hotbar cell count (9), 20 px cell width, 22 px tall, centred horizontally.
-      Match against `GuiIngame.java` lines 58-62 (drawTexturedModalRect calls).
-    - `moveStrafe` / `moveForward` semantics ({-1,0,1}). Match against
-      `MovementInputFromOptions.java` lines 67-83.
-    - Jump velocity 8.4 m/s when on_ground. M2 baseline value, preserved.
-  UNVERIFIED (no b1.7.3 source exists for these):
-    - D-pad layout (centre position, arm length, button radius).
+      `GuiIngame.java` lines 58-62.
+    - `moveStrafe` / `moveForward` semantics ({-1,0,1}). `MovementInputFromOptions.java`
+      lines 67-83.
+    - Jump velocity 8.4 m/s when on_ground. Preserved from the M2 baseline.
+  UNVERIFIED (no b1.7.3 source — b1.7.3 PC has no touch UX at all):
+    - D-pad layout (centre, arm length, button radius).
     - Look-stick radius and anchor.
     - Pause button rectangle.
-    - Tap-to-jump on empty screen space (M2 behaviour; the guide says
-      M12 should add a dedicated jump button, but the source-of-truth
-      b1.7.3 PC game has no touch UX at all — Pocket Edition is a
-      separate code base not provided here).
-  Follow-up before declaring M12 done: cross-check d-pad/look-stick/
-  pause-button rectangles against Pocket Edition 0.x or any later
-  touch-based Minecraft client. Run a real Android build (`cargo apk
-  build --release`) on the CI runner and verify on a phone.
+    - Tap-to-jump on empty screen space (M2 behaviour; left in place).
+  Follow-up: cross-check the touch rectangles against Pocket Edition 0.x
+  or any later touch-based Minecraft client. Run `cargo apk build --release`
+  on the CI runner and verify on a phone.
+- `pending` M4: biomes + trees + caves (next, see "Next step" above).
