@@ -1,13 +1,18 @@
 //! mc-rs: Minecraft b1.7.3 in Rust for Android.
 //!
-//! M2 - First-person camera + swept AABB physics. Touch-drag = look.
+//! M12 - Touch UX overlay (HUD, d-pad, look stick, hotbar, pause menu) on
+//! top of M2 (camera + physics) and M3 (overworld generation).
 
 mod render;
 mod world;
 mod gpu;
+mod input;
+
+use crate::input::touch_ui::{PointerRole, TouchUi};
+use crate::render::hud::{HudPipeline, HudVertex};
 
 use android_activity::{AndroidApp, InputStatus, MainEvent, PollEvent};
-use android_activity::input::{Axis, InputEvent as IEv, MotionAction};
+use android_activity::input::{Axis, InputEvent as IEv};
 use core::ffi::c_void;
 use std::time::{Duration, Instant};
 
@@ -15,13 +20,46 @@ use crate::gpu::context::Gpu;
 use crate::gpu::pipeline::{ChunkPipeline, Vertex, create_index_buffer, create_vertex_buffer};
 use crate::render::camera::FirstPersonCamera;
 use crate::render::mesh;
-use crate::world::chunk::{Chunk, W, H, D};
+use crate::world::chunk::Chunk;
 use crate::world::biome::Biome;
 use crate::world::gen::overworld::OverworldGenerator;
 use crate::world::physics::{self, Player};
 
 const LOOK_SENS: f32 = 0.004;
+/// World units per second when the d-pad is fully pressed.
+const MOVE_SPEED: f32 = 4.3;
 const EYE_HEIGHT: f32 = 1.62;
+
+/// Hotbar swatch colors (RGBA). Cycle through the same block ids the mesher
+/// knows about, so the player can tell at a glance which slot is selected.
+fn hotbar_color(slot: usize) -> [f32; 4] {
+    // Match the 1-byte ids from world::gen::overworld::block.
+    let id = match slot {
+        0 => 1,  // stone
+        1 => 2,  // grass
+        2 => 3,  // dirt
+        3 => 12, // sand
+        4 => 4,  // cobblestone
+        5 => 5,  // planks
+        6 => 14, // gold ore
+        7 => 56, // diamond
+        _ => 16, // coal
+    };
+    // Approximate Beta-1.7 colors (same numbers as render::atlas::block_color).
+    let px = match id {
+        1 => [125, 125, 125],
+        2 => [110, 170, 70],
+        3 => [134, 96, 67],
+        4 => [200, 200, 200],
+        5 => [220, 200, 100],
+        12 => [225, 215, 160],
+        14 => [240, 220, 60],
+        16 => [60, 60, 60],
+        56 => [180, 240, 240],
+        _ => [180, 30, 200],
+    };
+    [px[0] as f32 / 255.0, px[1] as f32 / 255.0, px[2] as f32 / 255.0, 1.0]
+}
 
 struct App {
     gpu: Gpu,
@@ -36,8 +74,15 @@ struct App {
     last_frame: Instant,
     frames: u64,
     fps_last: Instant,
-    look_pid: Option<i32>,
-    look_last: Option<(f32, f32)>,
+    // M12: touch UI state + HUD renderer.
+    touch: TouchUi,
+    hud: HudPipeline,
+    /// Last (x, y) seen per pointer id, used to derive look-stick deltas.
+    /// Held outside the HashMap so the App can decide on cancel behaviour
+    /// without copying through TouchUi every frame.
+    look_last: std::collections::HashMap<i32, (f32, f32)>,
+    /// Scratch vertex buffer for the HUD; cleared each frame, then emitted.
+    hud_verts: Vec<HudVertex>,
 }
 
 impl App {
@@ -139,6 +184,11 @@ impl App {
         };
         camera.pos = player.pos + glam::Vec3::new(0.0, EYE_HEIGHT, 0.0);
 
+        // M12: HUD pipeline + touch state machine. Surface dimensions match
+        // the window we just initialised against.
+        let touch = TouchUi::new(width, height);
+        let hud = HudPipeline::new(&gpu.device, &gpu.queue, surface_format, width, height);
+
         Ok(Self {
             gpu, pipe, vbuf, ibuf, index_count,
             chunk, generator, camera,
@@ -146,14 +196,18 @@ impl App {
             last_frame: Instant::now(),
             frames: 0,
             fps_last: Instant::now(),
-            look_pid: None,
-            look_last: None,
+            touch,
+            hud,
+            look_last: std::collections::HashMap::new(),
+            hud_verts: Vec::with_capacity(256),
         })
     }
 
     fn resize(&mut self, w: u32, h: u32) {
         self.gpu.resize(w, h);
         self.camera.aspect = w as f32 / h as f32;
+        self.touch.ensure_layout(w, h);
+        self.hud.resize(&self.gpu.queue, w, h);
     }
 
     fn step_frame(&mut self) {
@@ -163,6 +217,39 @@ impl App {
         if dt < 0.0 { dt = 0.0; }
         self.last_frame = now;
         let blocks = &self.chunk.blocks;
+        // Pause: freeze the world but keep the timer warm so un-pause doesn't
+        // produce a giant dt step (which would either teleport the player or
+        // kill their fall).
+        if self.touch.paused {
+            // Player physics is still ticked so they don't fall through the
+            // world if pause was opened mid-air, but gravity is zeroed.
+            self.player.vel = glam::Vec3::ZERO;
+            self.camera.pos = self.player.pos + glam::Vec3::new(0.0, EYE_HEIGHT, 0.0);
+            return;
+        }
+        // Apply d-pad movement intent. We rotate the camera-frame vector
+        // (fwd, side) by yaw to get world-space velocity.
+        let (fwd, side) = self.touch.move_input;
+        if fwd != 0.0 || side != 0.0 {
+            let yaw = self.camera.yaw;
+            // forward = -Z when yaw = 0; rotate by yaw around +Y.
+            let fx = yaw.sin();
+            let fz = -yaw.cos();
+            let sx = yaw.cos();
+            let sz = yaw.sin();
+            let wx = fwd * fx + side * sx;
+            let wz = fwd * fz + side * sz;
+            // Walk speed in m/s, plus a tiny boost along the Y to avoid
+            // getting stuck on partial-block collisions.
+            self.player.vel.x = wx * MOVE_SPEED;
+            self.player.vel.z = wz * MOVE_SPEED;
+        }
+        // M2 jump: a tap-to-jump latch on empty screen space. Mirrors the
+        // b1.7.3 jump velocity (8.4 m/s) used in physics::step for ground
+        // checks; without this, the M2 baseline regresses.
+        if self.touch.take_jump() && self.player.on_ground {
+            self.player.vel.y = 8.4;
+        }
         // M3d: super-chunk is 48x128x48. Layout is still (x<<11)|(z<<7)|y,
         // so the only change is the bound check.
         let get = |x: i32, y: i32, z: i32| -> Option<u8> {
@@ -234,6 +321,37 @@ impl App {
             rp.set_index_buffer(self.ibuf.slice(..), wgpu::IndexFormat::Uint32);
             rp.draw_indexed(0..self.index_count, 0, 0..1);
         }
+        // M12: HUD overlay pass. Built into the same encoder so the HUD
+        // never gets lost if the GPU drops a frame.
+        self.build_hud();
+        let hud_vertex_count = self.hud_verts.len();
+        if hud_vertex_count > 0 {
+            self.gpu.queue.write_buffer(
+                &self.hud.vbuf,
+                0,
+                bytemuck::cast_slice(&self.hud_verts),
+            );
+            let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("hud_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view_tex,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        // Preserve the chunk render; just draw on top.
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            rp.set_pipeline(&self.hud.pipeline);
+            rp.set_bind_group(0, &self.hud.bind_group, &[]);
+            rp.set_vertex_buffer(0, self.hud.vbuf.slice(..));
+            rp.draw(0..hud_vertex_count as u32, 0..1);
+        }
         self.gpu.queue.submit(std::iter::once(enc.finish()));
         frame.present();
 
@@ -248,59 +366,181 @@ impl App {
     }
 
     fn on_motion(&mut self, ev: &android_activity::input::MotionEvent) {
-        let find_pos = |pid: i32| -> Option<(f32, f32)> {
-            for p in ev.pointers() {
-                if p.pointer_id() == pid {
-                    return Some((p.axis_value(Axis::X), p.axis_value(Axis::Y)));
+        // The touch UI owns all hit-testing. We just feed it events, then
+        // walk its pointer table to derive look-stick deltas.
+        self.touch.handle_motion(ev);
+
+        // Capture the *current* (x, y) of every live pointer. Anything the
+        // touch UI is tracking but no longer in the MotionEvent has lifted.
+        let mut live: std::collections::HashMap<i32, (f32, f32)> = std::collections::HashMap::new();
+        for p in ev.pointers() {
+            live.insert(p.pointer_id(), (p.axis_value(Axis::X), p.axis_value(Axis::Y)));
+        }
+
+        // Look-stick: walk pointers whose role is LookStick and apply deltas.
+        // The last position we recorded for each pointer id is in
+        // `self.look_last`. The touch UI's pointer table tells us whether
+        // that pointer is still a LookStick (i.e. still pressed inside the
+        // stick area).
+        // Two cases to handle:
+        //   1. Pointer is currently in ev.pointers() (a Move event): take
+        //      the delta between the live position and the recorded last.
+        //   2. Pointer is not in ev.pointers() (the user lifted, or it was
+        //      re-classified on a different region): drop our last entry.
+        let mut to_apply: Vec<(f32, f32)> = Vec::new();
+        let mut to_drop: Vec<i32> = Vec::new();
+        for (pid, last) in self.look_last.iter() {
+            // Is this pointer still claiming the LookStick role?
+            let still_look = self.touch.pointers.get(pid).map_or(false, |ptr| {
+                matches!(ptr.role, PointerRole::LookStick { .. })
+            });
+            if !still_look {
+                to_drop.push(*pid);
+                continue;
+            }
+            if let Some(&(nx, ny)) = live.get(pid) {
+                let dx = nx - last.0;
+                let dy = ny - last.1;
+                if dx != 0.0 || dy != 0.0 {
+                    to_apply.push((dx, dy));
                 }
             }
-            None
-        };
-        match ev.action() {
-            MotionAction::Down => {
-                let pid = ev.pointer_at_index(0).pointer_id();
-                if let Some(pos) = find_pos(pid) {
-                    self.look_pid = Some(pid);
-                    self.look_last = Some(pos);
-                    if self.player.on_ground {
-                        self.player.vel.y = 8.4;
-                    }
+        }
+        // Update last positions for any pointer currently in ev.pointers()
+        // that is also a LookStick pointer in our state. Pointers we don't
+        // know about will be picked up next move.
+        for (pid, &(nx, ny)) in &live {
+            if let Some(ptr) = self.touch.pointers.get(pid) {
+                if matches!(ptr.role, PointerRole::LookStick { .. }) {
+                    self.look_last.insert(*pid, (nx, ny));
                 }
             }
-            MotionAction::PointerDown => {
-                if self.look_pid.is_none() {
-                    let pid = ev.pointer_at_index(0).pointer_id();
-                    if let Some(pos) = find_pos(pid) {
-                        self.look_pid = Some(pid);
-                        self.look_last = Some(pos);
-                    }
-                }
-            }
-            MotionAction::Move => {
-                if let Some(cur_pid) = self.look_pid {
-                    if let (Some((nx, ny)), Some((lx0, ly0))) = (find_pos(cur_pid), self.look_last) {
-                        let dx = nx - lx0;
-                        let dy = ny - ly0;
-                        log::debug!("M2 touch: move dx={:.1} dy={:.1} yaw={:.2} pitch={:.2}", dx, dy, self.camera.yaw, self.camera.pitch);
-                        self.camera.add_yaw(dx * LOOK_SENS);
-                        self.camera.add_pitch(dy * LOOK_SENS);
-                        self.look_last = Some((nx, ny));
-                    }
-                }
-            }
-            MotionAction::Up | MotionAction::Cancel => {
-                self.look_pid = None;
-                self.look_last = None;
-            }
-            MotionAction::PointerUp => {
-                if let Some(cur_pid) = self.look_pid {
-                    if find_pos(cur_pid).is_none() {
-                        self.look_pid = None;
-                        self.look_last = None;
-                    }
-                }
-            }
-            _ => {}
+        }
+        for pid in to_drop {
+            self.look_last.remove(&pid);
+        }
+        // Apply the look deltas.
+        for (dx, dy) in to_apply {
+            self.camera.add_yaw(dx * LOOK_SENS);
+            self.camera.add_pitch(dy * LOOK_SENS);
+        }
+    }
+
+    /// Build the HUD vertex buffer for this frame. Called between the chunk
+    /// and HUD render passes inside `render`.
+    fn build_hud(&mut self) {
+        let v = &mut self.hud_verts;
+        v.clear();
+        let layout = &self.touch.layout;
+        let paused = self.touch.paused;
+
+        // Pause button: top-right rectangle. We highlight it when pressed.
+        let pause_pressed = self.touch.pointers.values().any(|p| {
+            matches!(p.role, PointerRole::Pause)
+        });
+        let (px, py, pw, ph) = layout.pause;
+        let pause_fill = if pause_pressed { [0.30, 0.55, 0.85, 0.95] } else { [0.20, 0.40, 0.70, 0.75] };
+        let pause_border = [0.95, 0.95, 0.95, 0.9];
+        HudPipeline::push_outlined_quad(v, px, py, pw, ph, pause_fill, pause_border, 3.0);
+        // Two bars on the button to suggest "pause" visually.
+        let bar_w = pw * 0.18;
+        let bar_gap = pw * 0.18;
+        let bar_h = ph * 0.50;
+        let bar_y = py + (ph - bar_h) * 0.5;
+        let bx0 = px + (pw - (bar_w * 2.0 + bar_gap)) * 0.5;
+        let bx1 = bx0 + bar_w + bar_gap;
+        HudPipeline::push_quad(v, bx0, bar_y, bar_w, bar_h, [1.0; 4]);
+        HudPipeline::push_quad(v, bx1, bar_y, bar_w, bar_h, [1.0; 4]);
+
+        // Hotbar: 9 cells. Selected slot is highlighted.
+        for (i, &(hx, hy, hw, hh)) in layout.hotbar.iter().enumerate() {
+            let border = if i == self.touch.hotbar_slot {
+                [1.0, 1.0, 1.0, 1.0]
+            } else {
+                [0.85, 0.85, 0.85, 0.85]
+            };
+            let fill = [0.10, 0.10, 0.10, 0.55];
+            HudPipeline::push_outlined_quad(v, hx, hy, hw, hh, fill, border, 3.0);
+            // Block colour swatch: pick a different block per slot.
+            let block_color = hotbar_color(i);
+            let pad = (hw.min(hh) * 0.18).max(2.0);
+            HudPipeline::push_quad(
+                v,
+                hx + pad,
+                hy + pad,
+                hw - pad * 2.0,
+                hh - pad * 2.0,
+                block_color,
+            );
+            // Slot number, very small, top-left corner.
+            let dot = (pad * 0.45).max(1.0);
+            HudPipeline::push_quad(v, hx + 4.0, hy + 4.0, dot, dot, [1.0, 1.0, 1.0, 0.8]);
+        }
+
+        // D-pad: lower-right. Four discs at cardinal positions.
+        let (cx, cy) = layout.dpad_center;
+        let arm = layout.dpad_arm_len;
+        let br = layout.dpad_button_radius;
+        let dpad_dir = self.touch.move_input;
+        let base_color = [0.18, 0.20, 0.26, 0.55];
+        let active_color = [0.45, 0.65, 0.95, 0.85];
+        // Centre dot (small disc) for visual anchor.
+        HudPipeline::push_disc(v, cx, cy, br * 0.45, [0.0, 0.0, 0.0, 0.35]);
+        // North (forward, screen-up): fwd = +1.
+        let north_color = if dpad_dir.0 > 0.0 { active_color } else { base_color };
+        HudPipeline::push_disc(v, cx, cy - arm, br, north_color);
+        // South (backward, screen-down): fwd = -1.
+        let south_color = if dpad_dir.0 < 0.0 { active_color } else { base_color };
+        HudPipeline::push_disc(v, cx, cy + arm, br, south_color);
+        // West (left): side = -1.
+        let west_color = if dpad_dir.1 < 0.0 { active_color } else { base_color };
+        HudPipeline::push_disc(v, cx - arm, cy, br, west_color);
+        // East (right): side = +1.
+        let east_color = if dpad_dir.1 > 0.0 { active_color } else { base_color };
+        HudPipeline::push_disc(v, cx + arm, cy, br, east_color);
+
+        // Look stick: lower-left. Ring + centre crosshair.
+        let (lx, ly) = layout.look_center;
+        let lr = layout.look_radius;
+        HudPipeline::push_ring(v, lx, ly, lr, lr * 0.85, [0.95, 0.95, 0.95, 0.18]);
+        // Inner filled circle (translucent).
+        HudPipeline::push_disc(v, lx, ly, lr * 0.30, [0.95, 0.95, 0.95, 0.25]);
+        // Crosshair lines.
+        let cross = lr * 0.08;
+        HudPipeline::push_quad(v, lx - cross, ly - 1.0, cross * 2.0, 2.0, [1.0; 4]);
+        HudPipeline::push_quad(v, lx - 1.0, ly - cross, 2.0, cross * 2.0, [1.0; 4]);
+
+        // Pause menu: when paused, darken the whole frame and stack a
+        // centred button the player can tap to resume.
+        if paused {
+            let w = self.gpu.config.width as f32;
+            let h = self.gpu.config.height as f32;
+            HudPipeline::push_quad(v, 0.0, 0.0, w, h, [0.0, 0.0, 0.0, 0.55]);
+            let bw = w * 0.4;
+            let bh = h * 0.10;
+            let bx = (w - bw) * 0.5;
+            let by = (h - bh) * 0.5;
+            HudPipeline::push_outlined_quad(
+                v,
+                bx, by, bw, bh,
+                [0.20, 0.30, 0.50, 0.95],
+                [0.95, 0.95, 0.95, 0.95],
+                4.0,
+            );
+            // A small "play triangle" inside the button.
+            let tx = bx + bw * 0.42;
+            let ty = by + bh * 0.30;
+            let tw = bw * 0.16;
+            let th = bh * 0.40;
+            HudPipeline::push_quad(v, tx, ty, tw, th * 0.5, [1.0; 4]);
+            HudPipeline::push_quad(v, tx, ty + th * 0.5, tw, th * 0.5, [1.0; 4]);
+        }
+
+        // Cap vertex count to the buffer capacity; extra quads are silently
+        // dropped. 64 quads * 6 verts = 384 verts; we have room for that.
+        let max = self.hud.quad_capacity * 6;
+        if v.len() > max {
+            v.truncate(max);
         }
     }
 }
