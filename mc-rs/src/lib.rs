@@ -41,7 +41,7 @@ struct App {
 }
 
 impl App {
-    async fn init(native_ptr: *mut c_void) -> Result<Self, String> {
+    async fn init(native_ptr: *mut c_void, width: u32, height: u32) -> Result<Self, String> {
         let gpu = Gpu::from_android_window(native_ptr, width, height).await?;
         let surface_format = gpu.surface_format();
         let pipe = ChunkPipeline::new(&gpu.device, surface_format);
