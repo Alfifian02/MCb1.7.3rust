@@ -80,7 +80,7 @@ impl Gpu {
         // Build the instance with Vulkan-only enabled. Display handle comes
         // from the WindowHandle at create_surface time (see SurfaceTarget).
         let window = AndroidWindow(nn);
-        let instance = Instance::new(wgpu::InstanceDescriptor {
+        let instance = Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::VULKAN,
             ..Default::default()
         });
