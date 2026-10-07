@@ -307,6 +307,10 @@ fn android_main(app: AndroidApp) {
     let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .try_init();
 
+    std::panic::set_hook(Box::new(|info| {
+        log::error!("PANIC: {info}");
+    }));
+
     let mut self_main_frames: u64 = 0;
     let mut app_state: Option<App> = None;
     let mut init_handle: Option<std::thread::JoinHandle<Result<App, String>>> = None;
@@ -364,17 +368,31 @@ fn android_main(app: AndroidApp) {
                             });
                         }
                     }
+                    MainEvent::TerminateWindow { .. } => {
+                        // Window is going away (home button, rotate, etc).
+                        // Drop the surface before the ANativeWindow dies.
+                        app_state = None;
+                    }
                     MainEvent::Destroy { .. } => running = false,
                     _ => {}
                 }
             }
         });
 
-        if let Some(h) = init_handle.take() {
-            match h.join() {
-                Ok(Ok(a)) => { app_state = Some(a); self_main_frames = 0; }
-                Ok(Err(e)) => log::error!("init failed: {e}"),
-                Err(_) => log::error!("init panicked"),
+        if init_handle.as_ref().map_or(false, |h| h.is_finished()) {
+            if let Some(h) = init_handle.take() {
+                match h.join() {
+                    Ok(Ok(a)) => {
+                        if app.native_window().is_some() {
+                            app_state = Some(a);
+                            self_main_frames = 0;
+                        } else {
+                            log::warn!("init finished but window is gone; discarding");
+                        }
+                    }
+                    Ok(Err(e)) => log::error!("init failed: {e}"),
+                    Err(_) => log::error!("init panicked"),
+                }
             }
         }
 

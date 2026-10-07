@@ -74,14 +74,31 @@ impl Gpu {
         let height = height.max(1);
         log::info!("M3 init: native window {width}x{height}");
 
-        // Force Vulkan. User policy: "require Vulkan". Some Android Vulkan
-        // drivers had issues under wgpu 26, but the GLES fallback path is
-        // even less reliable on Android, so we go Vulkan-only here.
-        // Build the instance with Vulkan-only enabled. Display handle comes
-        // from the WindowHandle at create_surface time (see SurfaceTarget).
-        let window = AndroidWindow(nn);
+        // Try Vulkan first; if the device has no usable Vulkan driver, fall
+        // back to GLES instead of failing to start (black screen / instant close).
+        let mut last_err = String::new();
+        for backends in [wgpu::Backends::VULKAN, wgpu::Backends::GL] {
+            match Self::try_init(AndroidWindow(nn), backends, width, height).await {
+                Ok(g) => return Ok(g),
+                Err(e) => {
+                    log::warn!("GPU init with {backends:?} failed: {e}");
+                    last_err = e;
+                }
+            }
+        }
+        Err(last_err)
+    }
+
+    async fn try_init(
+        window: AndroidWindow,
+        backends: wgpu::Backends,
+        width: u32,
+        height: u32,
+    ) -> Result<Self, String> {
+
+        // Backend is chosen by the caller (Vulkan first, GLES fallback).
         let instance = Instance::new(&wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::VULKAN,
+            backends,
             ..Default::default()
         });
 
@@ -109,12 +126,13 @@ impl Gpu {
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("mc-rs"),
                 required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::downlevel_defaults(),
+                required_limits: wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits()),
                 memory_hints: wgpu::MemoryHints::default(),
                 trace: wgpu::Trace::Off,
             })
             .await
             .map_err(|e| format!("request_device: {e:?}"))?;
+        device.on_uncaptured_error(Box::new(|e| log::error!("wgpu error: {e}")));
         log::info!("M3 init: device + queue acquired");
 
         let caps = surface.get_capabilities(&adapter);
