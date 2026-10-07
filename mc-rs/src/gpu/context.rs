@@ -77,14 +77,12 @@ impl Gpu {
         // Force Vulkan. User policy: "require Vulkan". Some Android Vulkan
         // drivers had issues under wgpu 26, but the GLES fallback path is
         // even less reliable on Android, so we go Vulkan-only here.
-        // Build the instance with a display handle tied to the Android
-        // window. new_with_display_handle is what jinleili/wgpu-in-app uses
-        // and is required on Android -- a display-less instance can fail
-        // create_surface on some Vulkan drivers with no error message.
+        // Build the instance with Vulkan-only enabled. Display handle comes
+        // from the WindowHandle at create_surface time (see SurfaceTarget).
         let window = AndroidWindow(nn);
         let instance = Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::VULKAN,
-            ..wgpu::InstanceDescriptor::new_with_display_handle(Box::new(window.clone()))
+            ..Default::default()
         });
 
         let handle: Box<dyn wgpu::WindowHandle> = Box::new(window.clone());
