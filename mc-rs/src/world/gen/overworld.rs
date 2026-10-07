@@ -101,8 +101,8 @@ impl OverworldGenerator {
         let sx: usize = 5;
         let sy: usize = 17;
         let sz: usize = 5;
-        let xs0: i32 = chunk_x * sx as i32;
-        let zs0: i32 = chunk_z * sz as i32;
+        let xs0: i32 = chunk_x * 4;
+        let zs0: i32 = chunk_z * 4;
         let xs1: i32 = (chunk_x * sx as i32) + sx as i32;
         let zs1: i32 = (chunk_z * sz as i32) + sz as i32;
 
@@ -180,24 +180,43 @@ impl OverworldGenerator {
         d = Vec::new(); e = Vec::new(); f = Vec::new(); g = Vec::new(); h = Vec::new();
 
         // --- Step 2: place terrain blocks based on density. ---
-        // We emit 16 cells in y per density step, so each (ix, iy, iz) density sample
-        // becomes 4x8x4 cells in the chunk.
+        // Beta 1.7.3 samples density on a 5 x 17 x 5 grid (4 x 16 x 4 *cells*
+        // of samples) and trilinearly interpolates between neighbouring samples:
+        // each cell covers 4 (x) x 8 (y) x 4 (z) blocks. The old code expanded
+        // all 5 samples to 4 blocks each (20 wide in a 16-wide chunk), which
+        // indexed out of bounds and panicked during init.
+        // `density` layout (from step 1): ((ix * sz) + iz) * sy + iy.
+        let dens = |ix: usize, iy: usize, iz: usize| -> f64 { density[(ix * sz + iz) * sy + iy] };
         let mut out = vec![block::AIR; VOLUME];
-        let mut idx_den = 0;
-        for iy in 0..sy {
-            for iz in 0..sz {
-                for ix in 0..sx {
-                    let d_val = density[idx_den];
-                    idx_den += 1;
-                    // Each density sample covers 4 (x) x 8 (y) x 4 (z) cells.
-                    for dy in 0..8 {
+        for ix in 0..(sx - 1) {
+            for iz in 0..(sz - 1) {
+                for iy in 0..(sy - 1) {
+                    let c000 = dens(ix, iy, iz);
+                    let c001 = dens(ix, iy, iz + 1);
+                    let c100 = dens(ix + 1, iy, iz);
+                    let c101 = dens(ix + 1, iy, iz + 1);
+                    let c010 = dens(ix, iy + 1, iz);
+                    let c011 = dens(ix, iy + 1, iz + 1);
+                    let c110 = dens(ix + 1, iy + 1, iz);
+                    let c111 = dens(ix + 1, iy + 1, iz + 1);
+                    for dy in 0..8usize {
                         let y = iy * 8 + dy;
                         if y >= H { continue; }
-                        for dz in 0..4 {
-                            let z = iz * 4 + dz;
-                            for dx in 0..4 {
-                                let x = ix * 4 + dx;
-                                let cell_idx: usize = ((x << 11) | (z << 7) | y) as usize;
+                        let fy = dy as f64 / 8.0;
+                        let x0z0 = c000 + (c010 - c000) * fy;
+                        let x0z1 = c001 + (c011 - c001) * fy;
+                        let x1z0 = c100 + (c110 - c100) * fy;
+                        let x1z1 = c101 + (c111 - c101) * fy;
+                        for dx in 0..4usize {
+                            let fx = dx as f64 / 4.0;
+                            let z0 = x0z0 + (x1z0 - x0z0) * fx;
+                            let z1 = x0z1 + (x1z1 - x0z1) * fx;
+                            let x = ix * 4 + dx;
+                            for dz in 0..4usize {
+                                let fz = dz as f64 / 4.0;
+                                let d_val = z0 + (z1 - z0) * fz;
+                                let z = iz * 4 + dz;
+                                let cell_idx: usize = (x << 11) | (z << 7) | y;
                                 if d_val > 0.0 {
                                     out[cell_idx] = block::STONE;
                                 } else if (y as i32) < SEA_LEVEL {

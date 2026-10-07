@@ -26,7 +26,7 @@ impl FirstPersonCamera {
         Self {
             pos: Vec3::new(x, y, z),
             yaw: 0.0,
-            pitch: -0.3,
+            pitch: 0.3, // positive pitch = look down (forward.y = -sin(pitch))
             fov_y: 70_f32.to_radians(),
             aspect: 1.0,
             znear: 0.05,

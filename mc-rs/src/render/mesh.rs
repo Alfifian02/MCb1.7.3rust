@@ -113,19 +113,20 @@ pub fn build_ext(chunk: &Chunk, w: usize, d: usize) -> (Vec<f32>, Vec<u32>) {
                         continue;
                     }
                     let base = verts.len() as u32 / 6;
-                    for corner in face.corners {
-                        verts.push(corner[0] + x as f32);
-                        verts.push(corner[1] + y as f32);
-                        verts.push(corner[2] + z as f32);
-                    }
                     let light = match face_i {
                         2 => 1.00,  // +Y top
                         3 => 0.55,  // -Y bottom
                         _ => 0.80,  // +X, -X, +Z, -Z sides
                     };
                     let blk = chunk.blocks[idx_ext(x, y, z, w, d)];
-                    for uv in face.uv {
+                    // Interleave per vertex: px, py, pz, u, v, light.
+                    // (The renderer repacks this with chunks(6); pushing all four
+                    // positions first and then all UVs scrambled every vertex.)
+                    for (corner, uv) in face.corners.iter().zip(face.uv.iter()) {
                         let (au, av) = atlas::atlas_uv(blk, uv[0], uv[1]);
+                        verts.push(corner[0] + x as f32);
+                        verts.push(corner[1] + y as f32);
+                        verts.push(corner[2] + z as f32);
                         verts.push(au);
                         verts.push(av);
                         verts.push(light);

@@ -91,11 +91,27 @@ impl App {
         let chunk = Chunk { blocks: super_blocks.clone() };
         
 
-        // Spawn at the center of the super-chunk (x=24, z=24, the center of
-        // chunk (0,0)).
-        let spawn_x: usize = 24;
-        let spawn_z: usize = 24;
-        let top = OverworldGenerator::top_block(&super_blocks, spawn_x, spawn_z);
+        // Spawn on dry land closest to the centre of the super-chunk. The old
+        // fixed (24, 24) spawn was under the sea (top block y=60 < sea level 64),
+        // which put the camera inside water blocks.
+        let (spawn_x, spawn_z, top) = {
+            let mut best: Option<(usize, usize, i32, i32)> = None; // x, z, top, dist^2
+            let mut highest = (24usize, 24usize, i32::MIN);
+            for z in 2..46usize {
+                for x in 2..46usize {
+                    let t = OverworldGenerator::top_block(&super_blocks, x, z);
+                    if t > highest.2 { highest = (x, z, t); }
+                    if t >= 64 {
+                        let d2 = (x as i32 - 24).pow(2) + (z as i32 - 24).pow(2);
+                        if best.map_or(true, |b| d2 < b.3) { best = Some((x, z, t, d2)); }
+                    }
+                }
+            }
+            match best {
+                Some((x, z, t, _)) => (x, z, t),
+                None => highest,
+            }
+        };
         let spawn_feet_y = (top as f32) + 1.0 + 0.9;
         log::info!("M3d: super-chunk 48x128x48, spawn at ({}, {}, {}), top block y={}", spawn_x, spawn_feet_y, spawn_z, top);
 
@@ -164,14 +180,8 @@ impl App {
         let (view, proj) = self.camera.build_view_proj();
         self.pipe.upload_uniforms(&self.gpu.queue, view, proj);
 
-        // M3e-atlas-fix debug: cycle clear color so a black screen is obvious.
-        // phase 0 = sky, phase 1 = red, phase 2 = green.
-        let phase = (self.frames / 30) % 3;
-        let clear = match phase {
-            0 => wgpu::Color { r: 0.6, g: 0.8, b: 1.0, a: 1.0 },
-            1 => wgpu::Color { r: 1.0, g: 0.2, b: 0.2, a: 1.0 },
-            _ => wgpu::Color { r: 0.2, g: 1.0, b: 0.2, a: 1.0 },
-        };
+        // Sky-blue clear color (the red/green debug cycling is no longer needed).
+        let clear = wgpu::Color { r: 0.6, g: 0.8, b: 1.0, a: 1.0 };
         if self.frames == 0 {
             log::info!("M3 render: first frame, surface_format={:?}, index_count={}, drawing chunk", self.gpu.surface_format(), self.index_count);
         }
