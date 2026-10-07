@@ -113,7 +113,7 @@ jobs:
         with:
           name: build-log
           path: /tmp/build.log
-          if-no-contains-found: ignore
+          if-no-files-found: ignore
       - name: Locate signed APK
         id: find_apk
         run: |
