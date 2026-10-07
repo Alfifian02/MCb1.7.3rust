@@ -42,7 +42,7 @@ struct App {
 
 impl App {
     async fn init(native_ptr: *mut c_void) -> Result<Self, String> {
-        let gpu = Gpu::from_android_window(native_ptr).await?;
+        let gpu = Gpu::from_android_window(native_ptr, width, height).await?;
         let surface_format = gpu.surface_format();
         let pipe = ChunkPipeline::new(&gpu.device, surface_format);
         pipe.upload_atlas(&gpu.queue);
@@ -321,12 +321,14 @@ fn android_main(app: AndroidApp) {
                         unsafe impl Send for NativePtr {}
                         let Some(window) = app.native_window() else { return };
                         let ptr = window.ptr().as_ptr() as usize;
-                        log::info!("M3: InitWindow, starting GPU init thread");
+                        let init_w = window.width().max(1) as u32;
+                        let init_h = window.height().max(1) as u32;
+                        log::info!("M3: InitWindow, native {}x{}, starting GPU init thread", init_w, init_h);
                         let h = std::thread::Builder::new()
                             .stack_size(8 * 1024 * 1024)
                             .spawn(move || {
                                 let r = std::panic::catch_unwind(|| {
-                                    pollster::block_on(App::init(ptr as *mut c_void))
+                                    pollster::block_on(App::init(ptr as *mut c_void, init_w, init_h))
                                 });
                                 match r {
                                     Ok(Ok(a)) => Ok(a),

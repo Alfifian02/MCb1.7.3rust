@@ -1,5 +1,12 @@
-//! Minimal wgpu context wrapper. Holds the GLES/Metal/Vulkan state
-//! plus the surface. M1 keeps this simple - no resource pooling yet.
+//! Minimal wgpu context wrapper. Vulkan-only on Android.
+//! Reference: jinleili/wgpu-in-app (github.com/jinleili/wgpu-in-app).
+//! Key fixes vs the previous attempt:
+//!   - Force Backends::VULKAN (no GLES fallback) -- user policy requires Vulkan.
+//!   - Use SurfaceTarget::Window (safe API) instead of SurfaceTargetUnsafe.
+//!   - Use surface.get_default_config(w, h) for the initial config, sized to
+//!     the actual ANativeWindow width/height (not 1x1), so we never hit the
+//!     "frame is NxM, reconfiguring" race.
+//!   - Allocate depth at the same size from the start.
 
 use core::ffi::c_void;
 use core::ptr::NonNull;
@@ -10,11 +17,17 @@ use raw_window_handle::{
 use wgpu::{Adapter, Device, Extent3d, Instance, Queue, Surface, SurfaceConfiguration, Texture, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages, TextureView};
 
 /// Wrapper for an Android ANativeWindow pointer so we can use it as a wgpu surface target.
-struct AndroidWindow(pub NonNull<c_void>);
+struct AndroidWindow(NonNull<c_void>);
 // SAFETY: ANativeWindow pointers are not Send by default in the bindings, but
 // we only share them with the wgpu instance which knows how to keep them alive.
 unsafe impl Send for AndroidWindow {}
 unsafe impl Sync for AndroidWindow {}
+
+impl Clone for AndroidWindow {
+    fn clone(&self) -> Self {
+        AndroidWindow(self.0)
+    }
+}
 
 impl HasDisplayHandle for AndroidWindow {
     fn display_handle(&self) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
@@ -44,25 +57,37 @@ pub struct Gpu {
 }
 
 impl Gpu {
-    /// Build a surface from a raw ANativeWindow pointer.
+    /// Build a surface from a raw ANativeWindow pointer and the actual physical
+    /// size read from the window before init.
     /// # Safety
     /// - `native_ptr` must be a valid, non-null ANativeWindow from android-activity.
-    pub async fn from_android_window(native_ptr: *mut c_void) -> Result<Self, String> {
+    pub async fn from_android_window(
+        native_ptr: *mut c_void,
+        width: u32,
+        height: u32,
+    ) -> Result<Self, String> {
         if native_ptr.is_null() {
             return Err("null ANativeWindow".into());
         }
         let nn = unsafe { NonNull::new_unchecked(native_ptr) };
+        let width = width.max(1);
+        let height = height.max(1);
+        log::info!("M3 init: native window {width}x{height}");
+
+        // Force Vulkan. User policy: "require Vulkan". Some Android Vulkan
+        // drivers had issues under wgpu 26, but the GLES fallback path is
+        // even less reliable on Android, so we go Vulkan-only here.
+        let instance = Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::VULKAN,
+            ..Default::default()
+        });
+
         let window = AndroidWindow(nn);
+        let handle: Box<dyn wgpu::WindowHandle> = Box::new(window.clone());
+        let surface = instance
+            .create_surface(wgpu::SurfaceTarget::Window(handle))
+            .map_err(|e| format!("create_surface: {e:?}"))?;
 
-        // Try Vulkan first, then fall back to default. Instance::default() on
-        // Android enumerates all backends; on the user's device the order is
-        // undefined, but the adapter request below picks the best match.
-        let instance = Instance::default();
-        let surface = unsafe {
-            instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::from_window(&window).map_err(|e| format!("surface target: {e:?}"))?)
-        }.map_err(|e| e.to_string())?;
-
-        log::info!("M3 init: surface created, requesting adapter");
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
@@ -73,58 +98,52 @@ impl Gpu {
             .map_err(|e| format!("adapter request: {e:?}"))?;
 
         let info = adapter.get_info();
-        log::info!("M3 init: adapter={:?} backend={:?} vendor=0x{:x} device=0x{:x}", info.name, info.backend, info.vendor, info.device);
+        log::info!(
+            "M3 init: adapter={:?} backend={:?} vendor=0x{:x} device=0x{:x}",
+            info.name, info.backend, info.vendor, info.device
+        );
 
         let (device, queue) = adapter
-            .request_device(
-                &wgpu::DeviceDescriptor {
-                    label: Some("mc-rs"),
-                    required_features: wgpu::Features::empty(),
-                    required_limits: wgpu::Limits::downlevel_defaults(),
-                    memory_hints: wgpu::MemoryHints::default(),
-                    trace: wgpu::Trace::Off,
-                },
-            )
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("mc-rs"),
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::downlevel_defaults(),
+                memory_hints: wgpu::MemoryHints::default(),
+                trace: wgpu::Trace::Off,
+            })
             .await
-            .map_err(|e| e.to_string())?;
-
+            .map_err(|e| format!("request_device: {e:?}"))?;
         log::info!("M3 init: device + queue acquired");
+
         let caps = surface.get_capabilities(&adapter);
-        log::info!("M3 init: surface caps: formats={:?} present_modes={:?} alpha_modes={:?}", caps.formats, caps.present_modes, caps.alpha_modes);
-        let format = caps
-            .formats
-            .iter()
-            .copied()
-            .find(|f| f.is_srgb())
-            .unwrap_or(caps.formats[0]);
+        log::info!(
+            "M3 init: caps: formats={:?} present_modes={:?} alpha_modes={:?}",
+            caps.formats, caps.present_modes, caps.alpha_modes
+        );
 
-        // Pick Fifo explicitly. Some Android Vulkan drivers expose Mailbox as
-        // present_modes[0] but don't actually support it, which causes
-        // get_current_texture() to time out and present() to silently drop
-        // frames. Fifo is universal.
-        let present_mode = if caps.present_modes.contains(&wgpu::PresentMode::Fifo) {
-            wgpu::PresentMode::Fifo
-        } else {
-            caps.present_modes[0]
-        };
-        log::info!("M3 init: chose present_mode={:?} format={:?}", present_mode, format);
+        // Use get_default_config to get the format + present_mode the adapter
+        // actually wants. This is what jinleili/wgpu-in-app does and it works
+        // on every Android device tested.
+        let mut config = surface
+            .get_default_config(&adapter, width, height)
+            .ok_or_else(|| "get_default_config returned None".to_string())?;
+        // Override present mode to Fifo if available (safer than Mailbox on
+        // Android Vulkan drivers that lie about Mailbox support).
+        if caps.present_modes.contains(&wgpu::PresentMode::Fifo) {
+            config.present_mode = wgpu::PresentMode::Fifo;
+        }
+        // Android doesn't support view_formats; force empty to avoid validation
+        // error (SURFACE_VIEW_FORMATS not in downlevel properties).
+        config.view_formats = vec![];
+        log::info!(
+            "M3 init: config format={:?} view_formats={:?} present_mode={:?}",
+            config.format, config.view_formats, config.present_mode
+        );
 
-        let config = SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format,
-            width: 1,
-            height: 1,
-            present_mode,
-            view_formats: vec![],
-            desired_maximum_frame_latency: 2,
-            alpha_mode: caps.alpha_modes[0],
-        };
         surface.configure(&device, &config);
-        log::info!("M3 init: surface configured 1x1 (will resize on first frame)");
 
-
-        // Depth texture. Sized to the current surface; recreated on resize.
-        let depth_tex = Self::create_depth(&device, 1, 1);
+        // Depth texture at the real size from the start -- no resize race.
+        let depth_tex = Self::create_depth(&device, width, height);
         let depth_view = depth_tex.create_view(&wgpu::TextureViewDescriptor::default());
 
         // Leak the AndroidWindow wrapper so the surface has a stable owner.
