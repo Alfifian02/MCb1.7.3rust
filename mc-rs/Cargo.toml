@@ -31,3 +31,9 @@ target_sdk_version = 34
 
 [package.metadata.android.application]
 label = "MC b1.7.3 Rust"
+# No title/status bar, so the landscape surface is the full screen.
+theme = "@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen"
+
+[package.metadata.android.application.activity]
+# Landscape, either direction (follows the sensor, never portrait).
+orientation = "sensorLandscape"

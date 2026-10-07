@@ -1,41 +1,46 @@
-// M12 - Touch UX state machine. See mod.rs for an overview.
+// Touch UX state machine, landscape layout. See mod.rs for an overview.
 //
-// SOURCE-OF-TRUTH NOTE (per GPT-5.5 porting guide, rule #1, #2, #8):
-//   - b1.7.3 Java does NOT contain any touch UX. The d-pad, look stick
-//     and pause-button rectangles are Pocket Edition-style inventions.
-//     Layout constants (cell sizes, anchor offsets) are UNVERIFIED: I
-//     have no reference implementation to diff against. A reviewer
-//     should compare against a Pocket Edition 0.x build before signing M12.
-//   - The hotbar slot count (9) and the MovementInput.moveStrafe /
-//     MovementInput.moveForward semantics are derived from b1.7.3
-//     sources (GuiIngame.java: 9 cells; MovementInputFromOptions.java:
-//     moveStrafe in {-1,0,1}, moveForward in {-1,0,1}). Those bits are
-//     verified.
-//   - The Android target build was interrupted before completion and was
-//     not tested on a real device.
+// Scheme (Minecraft-PE-like, two thumbs):
+//   - Left half of the screen: floating move stick. It anchors where the
+//     finger lands; drag distance from the anchor is the analog (fwd, side).
+//   - Right half: drag anywhere to look.
+//   - Jump button: bottom-right circle (held = keep jumping).
+//   - Hotbar: bottom centre, tap to select. Pause: top-right.
+//   - Paused: only the pause button and the resume button respond.
 //
-// All angles are radians, all positions are in surface pixels with (0, 0) at
-// the top-left (the Android MotionEvent convention).
+// SOURCE-OF-TRUTH NOTE: b1.7.3 Java has no touch UX, so every rectangle and
+// radius here is UNVERIFIED (no reference to diff against). Sizes are
+// fractions of the short screen side `u`, so they hold on any landscape
+// aspect ratio. The hotbar slot count (9) and the {-1..1} forward/strafe
+// semantics come from GuiIngame / MovementInputFromOptions.
+//
+// All positions are surface pixels, (0, 0) top-left (MotionEvent convention).
 
 use android_activity::input::{Axis, MotionAction, MotionEvent};
 use std::collections::HashMap;
 
 /// Hotbar slot count.
 pub const HOTBAR_SLOTS: usize = 9;
+/// Fraction of the stick radius below which the stick reads as zero.
+const DEADZONE: f32 = 0.15;
+
+/// (x, y, w, h) in pixels.
+pub type Rect = (f32, f32, f32, f32);
 
 /// What a single pointer is currently doing.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum PointerRole {
-    /// Press landed on the pause button. Tap on release to toggle the menu.
+    /// Press landed on the pause button (or the resume button while paused).
+    /// Toggles pause on release.
     Pause,
-    /// Press landed on hotbar slot N (0..HOTBAR_SLOTS). Tap on release.
+    /// Press landed on hotbar slot N. Selects on release.
     Hotbar(usize),
-    /// Press landed in the look-stick hit area. We use the absolute press
-    /// position as the anchor; move deltas drive the camera.
-    LookStick { anchor: (f32, f32) },
-    /// Press landed on a d-pad arm. `fwd` and `side` are -1/0/+1 in the
-    /// camera-relative frame; App::step_input rotates them by yaw.
-    Dpad { fwd: f32, side: f32 },
+    /// Press landed on the jump button. Held = jumping.
+    Jump,
+    /// Floating move stick; `anchor` is where the finger first landed.
+    Move { anchor: (f32, f32) },
+    /// Look drag; deltas accumulate in `TouchUi::look_delta`.
+    Look,
 }
 
 /// Live state of one finger on the glass.
@@ -48,133 +53,110 @@ pub struct Pointer {
 /// Screen-space layout (pixels, top-left origin).
 #[derive(Clone, Debug)]
 pub struct LayoutRects {
-    pub pause: (f32, f32, f32, f32),
-    pub hotbar: [(f32, f32, f32, f32); HOTBAR_SLOTS],
-    pub look_center: (f32, f32),
-    pub look_radius: f32,
-    pub dpad_center: (f32, f32),
-    pub dpad_button_radius: f32,
-    pub dpad_arm_len: f32,
+    pub width: f32,
+    pub pause: Rect,
+    pub resume: Rect,
+    pub hotbar: [Rect; HOTBAR_SLOTS],
+    pub jump_center: (f32, f32),
+    pub jump_radius: f32,
+    /// Where the idle stick hint is drawn.
+    pub stick_home: (f32, f32),
+    /// Max drag distance (stick full deflection).
+    pub stick_radius: f32,
+}
+
+fn in_rect(r: Rect, x: f32, y: f32) -> bool {
+    x >= r.0 && x <= r.0 + r.2 && y >= r.1 && y <= r.1 + r.3
 }
 
 impl LayoutRects {
-    /// Layout tuned for phones in portrait. `w`, `h` are surface dimensions
-    /// in pixels.
+    /// Layout for a `w` x `h` surface, tuned for landscape (works in portrait
+    /// too, just cramped). Everything scales with the short side.
     pub fn for_surface(w: u32, h: u32) -> Self {
         let w = w as f32;
         let h = h as f32;
+        let u = w.min(h);
+        let pad = 0.04 * u;
 
-        // Pause: top-right corner.
-        let pause_size = 64.0_f32.min(w * 0.12).min(h * 0.08);
-        let pause_pad = 16.0_f32;
-        let pause = (w - pause_size - pause_pad, pause_pad, pause_size, pause_size);
+        let ps = 0.11 * u;
+        let pause = (w - ps - pad, pad, ps, ps);
 
-        // Hotbar: b1.7.3 lays out 9 cells of 20 px each (background 182x22),
-        // centred horizontally, 22 px above the bottom edge. The cell width
-        // here is the *touch hit-target*, scaled to the surface so a thumb
-        // can reliably hit each slot on a phone. We multiply the original
-        // 20 px by `touch_scale = w / 320` (b1.7.3 default scaled width).
-        // UNVERIFIED: Pocket Edition uses a larger hit-target than b1.7.3
-        // PC; the exact size is not derivable from the Java sources.
-        let touch_scale = (w / 320.0).max(1.0);
-        let cell = 20.0 * touch_scale;
-        let hb_h = 22.0 * touch_scale;
-        let hb_y = h - hb_h - 16.0 * touch_scale;
+        // Square cells; capped so nine of them always fit the width.
+        let cell = (0.105 * u).min(w / 9.5);
         let hb_x0 = (w - cell * HOTBAR_SLOTS as f32) * 0.5;
+        let hb_y = h - cell - pad;
         let mut hotbar = [(0.0, 0.0, 0.0, 0.0); HOTBAR_SLOTS];
-        for i in 0..HOTBAR_SLOTS {
-            hotbar[i] = (hb_x0 + cell * i as f32, hb_y, cell, hb_h);
+        for (i, slot) in hotbar.iter_mut().enumerate() {
+            *slot = (hb_x0 + cell * i as f32, hb_y, cell, cell);
         }
 
-        // Look stick and d-pad: anchored above the hotbar strip. Sizes and
-        // anchor offsets are UNVERIFIED — see header.
-        let touch_scale = (w / 320.0).max(1.0);
-        let look_radius = (w.min(h) * 0.18).max(96.0 * touch_scale).min(180.0 * touch_scale);
-        let look_center = (
-            look_radius * 0.7,
-            h - hb_h - 16.0 * touch_scale - look_radius * 0.9,
-        );
-
-        let dpad_button_radius = (w.min(h) * 0.08).max(44.0 * touch_scale).min(72.0 * touch_scale);
-        let dpad_arm_len = dpad_button_radius * 1.6;
-        let dpad_center = (
-            w - dpad_button_radius * 1.4,
-            h - hb_h - 16.0 * touch_scale - dpad_arm_len * 1.2,
-        );
+        let bw = (0.8 * u).min(w * 0.6);
+        let bh = 0.16 * u;
+        let resume = ((w - bw) * 0.5, (h - bh) * 0.5, bw, bh);
 
         Self {
+            width: w,
             pause,
+            resume,
             hotbar,
-            look_center,
-            look_radius,
-            dpad_center,
-            dpad_button_radius,
-            dpad_arm_len,
+            jump_center: (w - 0.17 * u, h - 0.30 * u),
+            jump_radius: 0.09 * u,
+            stick_home: (0.22 * u + pad, h - 0.30 * u),
+            stick_radius: 0.14 * u,
         }
     }
 
-    /// Hit-test a touch position. Returns `None` if it lands outside every
-    /// named region (the press is then ignored).
-    pub fn hit_test(&self, x: f32, y: f32) -> Option<PointerRole> {
-        let (px, py, pw, ph) = self.pause;
-        if x >= px && x <= px + pw && y >= py && y <= py + ph {
+    /// Hit-test a press. `None` means the press is ignored. While paused only
+    /// the pause and resume buttons respond.
+    pub fn hit_test(&self, x: f32, y: f32, paused: bool) -> Option<PointerRole> {
+        if in_rect(self.pause, x, y) || (paused && in_rect(self.resume, x, y)) {
             return Some(PointerRole::Pause);
         }
-        for i in 0..HOTBAR_SLOTS {
-            let (hx, hy, hw, hh) = self.hotbar[i];
-            if x >= hx && x <= hx + hw && y >= hy && y <= hy + hh {
-                return Some(PointerRole::Hotbar(i));
-            }
+        if paused {
+            return None;
         }
-        // Look stick: anything inside the lower-left circle.
-        let (cx, cy) = self.look_center;
-        let dx = x - cx;
-        let dy = y - cy;
-        if dx * dx + dy * dy <= self.look_radius * self.look_radius {
-            return Some(PointerRole::LookStick { anchor: (x, y) });
+        let (jx, jy) = self.jump_center;
+        if (x - jx).powi(2) + (y - jy).powi(2) <= self.jump_radius.powi(2) {
+            return Some(PointerRole::Jump);
         }
-        // D-pad: 4 buttons at N/S/E/W of the centre.
-        let (cx, cy) = self.dpad_center;
-        let arm = self.dpad_arm_len;
-        let br = self.dpad_button_radius;
-        if x >= cx - arm - br && x <= cx + arm + br && y >= cy - arm - br && y <= cy + arm + br {
-            let rx = x - cx;
-            let ry = y - cy;
-            if rx.abs() >= ry.abs() {
-                if rx >= 0.0 {
-                    return Some(PointerRole::Dpad { fwd: 0.0, side: 1.0 });
-                } else {
-                    return Some(PointerRole::Dpad { fwd: 0.0, side: -1.0 });
-                }
-            } else if ry >= 0.0 {
-                // y grows downward; positive ry is below the centre, which is
-                // "backward" from the player's frame.
-                return Some(PointerRole::Dpad { fwd: -1.0, side: 0.0 });
-            } else {
-                return Some(PointerRole::Dpad { fwd: 1.0, side: 0.0 });
-            }
+        if let Some(i) = self.hotbar.iter().position(|&r| in_rect(r, x, y)) {
+            return Some(PointerRole::Hotbar(i));
         }
-        None
+        if x < self.width * 0.5 {
+            Some(PointerRole::Move { anchor: (x, y) })
+        } else {
+            Some(PointerRole::Look)
+        }
     }
+}
+
+/// Finger offset from the stick anchor -> analog (fwd, side), length <= 1.
+/// Screen-up is forward.
+pub fn stick_vector(dx: f32, dy: f32, radius: f32) -> (f32, f32) {
+    let (mut side, mut fwd) = (dx / radius, -dy / radius);
+    let len = (side * side + fwd * fwd).sqrt();
+    if len < DEADZONE {
+        return (0.0, 0.0);
+    }
+    if len > 1.0 {
+        side /= len;
+        fwd /= len;
+    }
+    (fwd, side)
 }
 
 /// Whole touch UX state. Owned by `App`.
 pub struct TouchUi {
     pub paused: bool,
     pub hotbar_slot: usize,
-    /// Movement vector from the d-pad in the camera frame: (fwd, side),
-    /// each in {-1, 0, +1}.
+    /// Analog movement in the camera frame: (fwd, side), each in [-1, 1].
     pub move_input: (f32, f32),
-    pub jump_pending: bool,
-    /// Latched jump request. M2 behaviour: tapping anywhere on the screen
-    /// (i.e. a touch-down that lands outside any named region) sets this
-    /// flag. App::step_input reads and clears it each frame. The PE-style
-    /// replacement is a dedicated jump button, but this is a smaller diff
-    /// from the M2 baseline and stays compatible with desktop tests.
     pub pointers: HashMap<i32, Pointer>,
     pub surface_w: u32,
     pub surface_h: u32,
     pub layout: LayoutRects,
+    /// Look drag pixels since the last `take_look`.
+    look_delta: (f32, f32),
 }
 
 impl TouchUi {
@@ -183,23 +165,40 @@ impl TouchUi {
             paused: false,
             hotbar_slot: 0,
             move_input: (0.0, 0.0),
-            jump_pending: false,
             pointers: HashMap::new(),
             surface_w: w,
             surface_h: h,
             layout: LayoutRects::for_surface(w, h),
+            look_delta: (0.0, 0.0),
         }
     }
 
-    /// Atomically read and clear the jump latch.
-    pub fn take_jump(&mut self) -> bool {
-        let j = self.jump_pending;
-        self.jump_pending = false;
-        j
+    /// Read and clear the accumulated look drag (pixels).
+    pub fn take_look(&mut self) -> (f32, f32) {
+        std::mem::take(&mut self.look_delta)
     }
 
-    /// Rebuild the layout if the surface size has changed. Returns true if
-    /// the layout changed.
+    /// True while a finger holds the jump button.
+    pub fn jumping(&self) -> bool {
+        self.pointers.values().any(|p| p.role == PointerRole::Jump)
+    }
+
+    /// (anchor, finger) of the active move stick, for drawing.
+    pub fn stick_state(&self) -> Option<((f32, f32), (f32, f32))> {
+        self.pointers.values().find_map(|p| match p.role {
+            PointerRole::Move { anchor } => Some((anchor, p.last)),
+            _ => None,
+        })
+    }
+
+    /// Drop every finger and zero all input (pause, cancel, resize).
+    fn clear(&mut self) {
+        self.pointers.clear();
+        self.move_input = (0.0, 0.0);
+        self.look_delta = (0.0, 0.0);
+    }
+
+    /// Rebuild the layout if the surface size changed. True if it did.
     pub fn ensure_layout(&mut self, w: u32, h: u32) -> bool {
         if self.surface_w == w && self.surface_h == h {
             return false;
@@ -207,124 +206,73 @@ impl TouchUi {
         self.surface_w = w;
         self.surface_h = h;
         self.layout = LayoutRects::for_surface(w, h);
-        self.pointers.clear();
-        self.move_input = (0.0, 0.0);
+        self.clear();
         true
     }
 
     pub fn handle_motion(&mut self, ev: &MotionEvent) {
         match ev.action() {
             MotionAction::Down | MotionAction::PointerDown => {
-                let idx = ev.pointer_index();
-                let p = ev.pointer_at_index(idx);
-                let pid = p.pointer_id();
-                let x = p.axis_value(Axis::X);
-                let y = p.axis_value(Axis::Y);
-                if let Some(role) = self.layout.hit_test(x, y) {
-                    self.on_press(pid, x, y, role);
-                } else {
-                    // Touch-down on empty space: legacy M2 "tap-to-jump".
-                    // Only the first finger to land triggers the latch;
-                    // subsequent fingers on empty space are ignored so a
-                    // second thumb doesn't cause a double-jump.
-                    if self.pointers.is_empty() {
-                        self.jump_pending = true;
-                    }
+                let p = ev.pointer_at_index(ev.pointer_index());
+                let (x, y) = (p.axis_value(Axis::X), p.axis_value(Axis::Y));
+                if let Some(role) = self.layout.hit_test(x, y, self.paused) {
+                    self.on_press(p.pointer_id(), x, y, role);
                 }
             }
             MotionAction::Move => {
                 for p in ev.pointers() {
-                    let pid = p.pointer_id();
-                    let x = p.axis_value(Axis::X);
-                    let y = p.axis_value(Axis::Y);
-                    self.on_move(pid, x, y);
+                    self.on_move(p.pointer_id(), p.axis_value(Axis::X), p.axis_value(Axis::Y));
                 }
             }
-            MotionAction::Up | MotionAction::Cancel => {
-                let idx = ev.pointer_index();
-                let p = ev.pointer_at_index(idx);
-                self.on_release(p.pointer_id(), true);
+            MotionAction::Up | MotionAction::PointerUp => {
+                let p = ev.pointer_at_index(ev.pointer_index());
+                self.on_release(p.pointer_id());
             }
-            MotionAction::PointerUp => {
-                let idx = ev.pointer_index();
-                let p = ev.pointer_at_index(idx);
-                self.on_release(p.pointer_id(), false);
-            }
+            MotionAction::Cancel => self.clear(),
             _ => {}
         }
     }
 
     fn on_press(&mut self, pid: i32, x: f32, y: f32, role: PointerRole) {
-        match role {
-            PointerRole::Dpad { .. } => {
-                self.recompute_dpad(pid, role);
-                if let Some(p) = self.pointers.get_mut(&pid) {
-                    p.last = (x, y);
-                }
-            }
-            PointerRole::LookStick { anchor } => {
-                self.pointers.insert(
-                    pid,
-                    Pointer {
-                        role: PointerRole::LookStick { anchor },
-                        last: (x, y),
-                    },
-                );
-            }
-            PointerRole::Pause => {
-                self.pointers.insert(pid, Pointer { role, last: (x, y) });
-            }
-            PointerRole::Hotbar(_) => {
-                self.pointers.insert(pid, Pointer { role, last: (x, y) });
-            }
+        // One move finger and one look finger at a time; extras are ignored.
+        if matches!(role, PointerRole::Move { .. } | PointerRole::Look)
+            && self
+                .pointers
+                .values()
+                .any(|p| std::mem::discriminant(&p.role) == std::mem::discriminant(&role))
+        {
+            return;
         }
-    }
-
-    fn recompute_dpad(&mut self, pid: i32, role: PointerRole) {
-        self.pointers.insert(pid, Pointer { role, last: (0.0, 0.0) });
-        let mut f = 0.0_f32;
-        let mut s = 0.0_f32;
-        for p in self.pointers.values() {
-            if let PointerRole::Dpad { fwd, side } = p.role {
-                if fwd.abs() > f.abs() { f = fwd; }
-                if side.abs() > s.abs() { s = side; }
-            }
-        }
-        self.move_input = (f, s);
+        self.pointers.insert(pid, Pointer { role, last: (x, y) });
     }
 
     fn on_move(&mut self, pid: i32, x: f32, y: f32) {
-        if let Some(ptr) = self.pointers.get_mut(&pid) {
-            ptr.last = (x, y);
+        let Some(ptr) = self.pointers.get_mut(&pid) else { return };
+        let (lx, ly) = ptr.last;
+        ptr.last = (x, y);
+        match ptr.role {
+            PointerRole::Look => {
+                self.look_delta.0 += x - lx;
+                self.look_delta.1 += y - ly;
+            }
+            PointerRole::Move { anchor } => {
+                self.move_input = stick_vector(x - anchor.0, y - anchor.1, self.layout.stick_radius);
+            }
+            _ => {}
         }
     }
 
-    fn on_release(&mut self, pid: i32, is_cancel: bool) {
+    fn on_release(&mut self, pid: i32) {
         let Some(ptr) = self.pointers.remove(&pid) else { return };
-        if is_cancel {
-            return;
-        }
         match ptr.role {
             PointerRole::Pause => {
                 self.paused = !self.paused;
-                log::info!("M12 touch: pause toggled -> {}", self.paused);
+                self.clear();
+                log::info!("touch: pause -> {}", self.paused);
             }
-            PointerRole::Hotbar(slot) => {
-                self.hotbar_slot = slot;
-                log::info!("M12 touch: hotbar slot -> {slot}");
-            }
-            PointerRole::Dpad { fwd: _, side: _ } => {
-                let mut f = 0.0_f32;
-                let mut s = 0.0_f32;
-                for p in self.pointers.values() {
-                    if let PointerRole::Dpad { fwd, side } = p.role {
-                        if fwd.abs() > f.abs() { f = fwd; }
-                        if side.abs() > s.abs() { s = side; }
-                    }
-                }
-                self.move_input = (f, s);
-            }
-            PointerRole::LookStick { anchor: _ } => {}
+            PointerRole::Hotbar(slot) => self.hotbar_slot = slot,
+            PointerRole::Move { .. } => self.move_input = (0.0, 0.0),
+            PointerRole::Jump | PointerRole::Look => {}
         }
     }
 }
@@ -333,115 +281,126 @@ impl TouchUi {
 mod tests {
     use super::*;
 
+    const W: u32 = 2400;
+    const H: u32 = 1080;
+
     fn approx(a: f32, b: f32) {
         assert!((a - b).abs() < 0.001, "{a} != {b}");
     }
 
-    #[test]
-    fn pause_button_in_corner() {
-        let layout = LayoutRects::for_surface(1080, 1920);
-        let (px, py, pw, ph) = layout.pause;
-        let role = layout.hit_test(px + 1.0, py + 1.0).expect("pause hit");
-        assert_eq!(role, PointerRole::Pause);
-        let _ = (pw, ph);
+    fn tap(ui: &mut TouchUi, pid: i32, x: f32, y: f32) {
+        let role = ui.layout.hit_test(x, y, ui.paused).expect("hit");
+        ui.on_press(pid, x, y, role);
+        ui.on_release(pid);
     }
 
     #[test]
-    fn hotbar_slots_centered() {
-        let layout = LayoutRects::for_surface(1080, 1920);
+    fn regions_hit_where_expected() {
+        let l = LayoutRects::for_surface(W, H);
+        let (px, py, pw, ph) = l.pause;
+        assert_eq!(l.hit_test(px + pw * 0.5, py + ph * 0.5, false), Some(PointerRole::Pause));
+        assert_eq!(l.hit_test(l.jump_center.0, l.jump_center.1, false), Some(PointerRole::Jump));
         for i in 0..HOTBAR_SLOTS {
-            let (hx, hy, hw, hh) = layout.hotbar[i];
-            let cx = hx + hw * 0.5;
-            let cy = hy + hh * 0.5;
-            let role = layout.hit_test(cx, cy).expect("hotbar hit");
-            assert_eq!(role, PointerRole::Hotbar(i));
+            let (hx, hy, hw, hh) = l.hotbar[i];
+            assert_eq!(l.hit_test(hx + hw * 0.5, hy + hh * 0.5, false), Some(PointerRole::Hotbar(i)));
+        }
+        assert!(matches!(l.hit_test(600.0, 400.0, false), Some(PointerRole::Move { .. })));
+        assert_eq!(l.hit_test(1800.0, 400.0, false), Some(PointerRole::Look));
+    }
+
+    #[test]
+    fn buttons_do_not_overlap_in_common_landscape_ratios() {
+        // 16:9, 20:9 and 4:3: jump button must not touch the hotbar row.
+        for (w, h) in [(1920, 1080), (2400, 1080), (1440, 1080)] {
+            let l = LayoutRects::for_surface(w, h);
+            let jump_bottom = l.jump_center.1 + l.jump_radius;
+            assert!(jump_bottom < l.hotbar[0].1, "{w}x{h}");
         }
     }
 
     #[test]
-    fn dpad_cardinal_directions() {
-        let layout = LayoutRects::for_surface(1080, 1920);
-        let (cx, cy) = layout.dpad_center;
-        let fwd_role = layout.hit_test(cx, cy - layout.dpad_arm_len).expect("fwd");
-        assert_eq!(fwd_role, PointerRole::Dpad { fwd: 1.0, side: 0.0 });
-        let back_role = layout.hit_test(cx, cy + layout.dpad_arm_len).expect("back");
-        assert_eq!(back_role, PointerRole::Dpad { fwd: -1.0, side: 0.0 });
-        let left_role = layout.hit_test(cx - layout.dpad_arm_len, cy).expect("left");
-        assert_eq!(left_role, PointerRole::Dpad { fwd: 0.0, side: -1.0 });
-        let right_role = layout.hit_test(cx + layout.dpad_arm_len, cy).expect("right");
-        assert_eq!(right_role, PointerRole::Dpad { fwd: 0.0, side: 1.0 });
-        let _ = approx;
+    fn paused_only_pause_and_resume_respond() {
+        let l = LayoutRects::for_surface(W, H);
+        assert_eq!(l.hit_test(1800.0, 400.0, true), None);
+        assert_eq!(l.hit_test(l.jump_center.0, l.jump_center.1, true), None);
+        let (rx, ry, rw, rh) = l.resume;
+        assert_eq!(l.hit_test(rx + rw * 0.5, ry + rh * 0.5, true), Some(PointerRole::Pause));
     }
 
     #[test]
-    fn look_stick_centre_is_in() {
-        let layout = LayoutRects::for_surface(1080, 1920);
-        let (cx, cy) = layout.look_center;
-        let role = layout.hit_test(cx, cy).expect("look centre");
-        match role {
-            PointerRole::LookStick { .. } => {}
-            other => panic!("expected LookStick, got {other:?}"),
-        }
+    fn stick_vector_deadzone_direction_and_clamp() {
+        assert_eq!(stick_vector(1.0, 1.0, 100.0), (0.0, 0.0));
+        let (f, s) = stick_vector(0.0, -100.0, 100.0);
+        approx(f, 1.0);
+        approx(s, 0.0);
+        let (f, s) = stick_vector(100.0, 0.0, 100.0);
+        approx(f, 0.0);
+        approx(s, 1.0);
+        let (f, s) = stick_vector(500.0, -500.0, 100.0);
+        approx((f * f + s * s).sqrt(), 1.0);
     }
 
     #[test]
-    fn empty_outside_dpad_returns_none() {
-        let layout = LayoutRects::for_surface(1080, 1920);
-        // Hit the middle of the screen -- should land on no region (or the
-        // look stick if the centre happens to overlap; on a 1080x1920 the
-        // centre is well outside both stick regions).
-        let role = layout.hit_test(540.0, 960.0);
-        assert!(role.is_none(), "centre should not hit anything: {role:?}");
-    }
-
-    #[test]
-    fn dpad_compose_fwd_plus_right() {
-        let mut ui = TouchUi::new(1080, 1920);
-        let (cx, cy) = ui.layout.dpad_center;
-        // Press forward, then right while forward is still held.
-        let fwd_role = ui.layout.hit_test(cx, cy - ui.layout.dpad_arm_len).unwrap();
-        ui.on_press(1, cx, cy - ui.layout.dpad_arm_len, fwd_role);
-        let rt_role = ui.layout.hit_test(cx + ui.layout.dpad_arm_len, cy).unwrap();
-        ui.on_press(2, cx + ui.layout.dpad_arm_len, cy, rt_role);
-        // The max-absolute rule keeps both axes.
+    fn move_stick_drag_and_release() {
+        let mut ui = TouchUi::new(W, H);
+        ui.on_press(1, 400.0, 700.0, PointerRole::Move { anchor: (400.0, 700.0) });
+        ui.on_move(1, 400.0, 700.0 - ui.layout.stick_radius);
         approx(ui.move_input.0, 1.0);
-        approx(ui.move_input.1, 1.0);
+        approx(ui.move_input.1, 0.0);
+        ui.on_release(1);
+        assert_eq!(ui.move_input, (0.0, 0.0));
     }
 
     #[test]
-    fn dpad_release_collapses_axis() {
-        let mut ui = TouchUi::new(1080, 1920);
-        let (cx, cy) = ui.layout.dpad_center;
-        let fwd_role = ui.layout.hit_test(cx, cy - ui.layout.dpad_arm_len).unwrap();
-        ui.on_press(1, cx, cy - ui.layout.dpad_arm_len, fwd_role);
-        let rt_role = ui.layout.hit_test(cx + ui.layout.dpad_arm_len, cy).unwrap();
-        ui.on_press(2, cx + ui.layout.dpad_arm_len, cy, rt_role);
-        ui.on_release(1, false);
-        // Right is still held, so side stays +1; fwd collapses to 0.
-        approx(ui.move_input.0, 0.0);
-        approx(ui.move_input.1, 1.0);
+    fn second_move_finger_is_ignored() {
+        let mut ui = TouchUi::new(W, H);
+        ui.on_press(1, 300.0, 600.0, PointerRole::Move { anchor: (300.0, 600.0) });
+        ui.on_press(2, 500.0, 600.0, PointerRole::Move { anchor: (500.0, 600.0) });
+        assert_eq!(ui.pointers.len(), 1);
     }
 
     #[test]
-    fn pause_tap_toggles() {
-        let mut ui = TouchUi::new(1080, 1920);
+    fn look_drag_accumulates_and_clears() {
+        let mut ui = TouchUi::new(W, H);
+        ui.on_press(1, 1800.0, 400.0, PointerRole::Look);
+        ui.on_move(1, 1810.0, 395.0);
+        ui.on_move(1, 1830.0, 395.0);
+        assert_eq!(ui.take_look(), (30.0, -5.0));
+        assert_eq!(ui.take_look(), (0.0, 0.0));
+    }
+
+    #[test]
+    fn jump_is_held_not_latched() {
+        let mut ui = TouchUi::new(W, H);
+        assert!(!ui.jumping());
+        ui.on_press(1, 2200.0, 750.0, PointerRole::Jump);
+        assert!(ui.jumping());
+        ui.on_release(1);
+        assert!(!ui.jumping());
+    }
+
+    #[test]
+    fn single_finger_taps_work() {
+        let mut ui = TouchUi::new(W, H);
+        let (hx, hy, hw, hh) = ui.layout.hotbar[3];
+        tap(&mut ui, 1, hx + hw * 0.5, hy + hh * 0.5);
+        assert_eq!(ui.hotbar_slot, 3);
         let (px, py, pw, ph) = ui.layout.pause;
-        let role = ui.layout.hit_test(px + pw * 0.5, py + ph * 0.5).unwrap();
-        ui.on_press(1, px + pw * 0.5, py + ph * 0.5, role);
-        ui.on_release(1, false);
+        tap(&mut ui, 2, px + pw * 0.5, py + ph * 0.5);
         assert!(ui.paused);
-        ui.on_press(2, px + pw * 0.5, py + ph * 0.5, role);
-        ui.on_release(2, false);
+        tap(&mut ui, 3, px + pw * 0.5, py + ph * 0.5);
         assert!(!ui.paused);
     }
 
     #[test]
-    fn hotbar_tap_selects_slot() {
-        let mut ui = TouchUi::new(1080, 1920);
-        let (hx, hy, hw, hh) = ui.layout.hotbar[3];
-        let role = ui.layout.hit_test(hx + hw * 0.5, hy + hh * 0.5).unwrap();
-        ui.on_press(1, hx + hw * 0.5, hy + hh * 0.5, role);
-        ui.on_release(1, false);
-        assert_eq!(ui.hotbar_slot, 3);
+    fn pausing_zeroes_stuck_input() {
+        let mut ui = TouchUi::new(W, H);
+        ui.on_press(1, 400.0, 700.0, PointerRole::Move { anchor: (400.0, 700.0) });
+        ui.on_move(1, 400.0, 600.0);
+        assert_ne!(ui.move_input, (0.0, 0.0));
+        let (px, py, pw, ph) = ui.layout.pause;
+        tap(&mut ui, 2, px + pw * 0.5, py + ph * 0.5);
+        assert_eq!(ui.move_input, (0.0, 0.0));
+        assert!(ui.pointers.is_empty());
     }
 }

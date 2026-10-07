@@ -18,7 +18,7 @@ McRegion save format. Client-only networking.
 | M9  | Audio | Positional OGG, music stubs |
 | M10 | Multiplayer | Full b1.7.3 client protocol |
 | M11 | Nether | Hell biomes, portals, ghast, zombie pigman |
-| M12 | Touch UX | D-pad, look stick, hotbar tap, pause menu |
+| M12 | Touch UX | Landscape; move stick, look drag, jump button, hotbar tap, pause menu |
 | M13 | Optimization | Frustum culling, greedy meshing, profiler |
 | M14 | Polish | Splash, main menu, settings, lang |
 
@@ -80,10 +80,8 @@ unlocks anything player-facing.
       lines 67-83.
     - Jump velocity 8.4 m/s when on_ground. Preserved from the M2 baseline.
   UNVERIFIED (no b1.7.3 source — b1.7.3 PC has no touch UX at all):
-    - D-pad layout (centre, arm length, button radius).
-    - Look-stick radius and anchor.
-    - Pause button rectangle.
-    - Tap-to-jump on empty screen space (M2 behaviour; left in place).
+    - Move-stick radius, look-zone split (left/right half), jump button position.
+    - Pause and resume button rectangles.
   Follow-up: cross-check the touch rectangles against Pocket Edition 0.x
   or any later touch-based Minecraft client. Run `cargo apk build --release`
   on the CI runner and verify on a phone.

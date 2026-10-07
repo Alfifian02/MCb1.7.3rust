@@ -1,6 +1,6 @@
 //! mc-rs: Minecraft b1.7.3 in Rust for Android.
 //!
-//! M12 - Touch UX overlay (HUD, d-pad, look stick, hotbar, pause menu) on
+//! M12 - Landscape touch UX (move stick, look drag, jump button, hotbar, pause menu) on
 //! top of M2 (camera + physics) and M3 (overworld generation).
 
 mod render;
@@ -77,10 +77,6 @@ struct App {
     // M12: touch UI state + HUD renderer.
     touch: TouchUi,
     hud: HudPipeline,
-    /// Last (x, y) seen per pointer id, used to derive look-stick deltas.
-    /// Held outside the HashMap so the App can decide on cancel behaviour
-    /// without copying through TouchUi every frame.
-    look_last: std::collections::HashMap<i32, (f32, f32)>,
     /// Scratch vertex buffer for the HUD; cleared each frame, then emitted.
     hud_verts: Vec<HudVertex>,
 }
@@ -198,7 +194,6 @@ impl App {
             fps_last: Instant::now(),
             touch,
             hud,
-            look_last: std::collections::HashMap::new(),
             hud_verts: Vec::with_capacity(256),
         })
     }
@@ -217,6 +212,9 @@ impl App {
         if dt < 0.0 { dt = 0.0; }
         self.last_frame = now;
         let blocks = &self.chunk.blocks;
+        // Look drag accumulated by the touch UI since the last frame. Drained
+        // even when paused so a drag started before pausing doesn't replay.
+        let (look_dx, look_dy) = self.touch.take_look();
         // Pause: freeze the world but keep the timer warm so un-pause doesn't
         // produce a giant dt step (which would either teleport the player or
         // kill their fall).
@@ -227,27 +225,18 @@ impl App {
             self.camera.pos = self.player.pos + glam::Vec3::new(0.0, EYE_HEIGHT, 0.0);
             return;
         }
-        // Apply d-pad movement intent. We rotate the camera-frame vector
-        // (fwd, side) by yaw to get world-space velocity.
+        self.camera.add_yaw(look_dx * LOOK_SENS);
+        self.camera.add_pitch(look_dy * LOOK_SENS);
+        // Analog move stick: rotate the camera-frame (fwd, side) by yaw into
+        // world-space velocity. Set every frame (zero when the stick is idle),
+        // otherwise the player keeps sliding after the finger lifts.
         let (fwd, side) = self.touch.move_input;
-        if fwd != 0.0 || side != 0.0 {
-            let yaw = self.camera.yaw;
-            // forward = -Z when yaw = 0; rotate by yaw around +Y.
-            let fx = yaw.sin();
-            let fz = -yaw.cos();
-            let sx = yaw.cos();
-            let sz = yaw.sin();
-            let wx = fwd * fx + side * sx;
-            let wz = fwd * fz + side * sz;
-            // Walk speed in m/s, plus a tiny boost along the Y to avoid
-            // getting stuck on partial-block collisions.
-            self.player.vel.x = wx * MOVE_SPEED;
-            self.player.vel.z = wz * MOVE_SPEED;
-        }
-        // M2 jump: a tap-to-jump latch on empty screen space. Mirrors the
-        // b1.7.3 jump velocity (8.4 m/s) used in physics::step for ground
-        // checks; without this, the M2 baseline regresses.
-        if self.touch.take_jump() && self.player.on_ground {
+        let yaw = self.camera.yaw;
+        // forward = -Z when yaw = 0; rotate by yaw around +Y.
+        self.player.vel.x = (fwd * yaw.sin() + side * yaw.cos()) * MOVE_SPEED;
+        self.player.vel.z = (-fwd * yaw.cos() + side * yaw.sin()) * MOVE_SPEED;
+        // Held jump button; 8.4 m/s matches the b1.7.3 jump velocity.
+        if self.touch.jumping() && self.player.on_ground {
             self.player.vel.y = 8.4;
         }
         // M3d: super-chunk is 48x128x48. Layout is still (x<<11)|(z<<7)|y,
@@ -366,64 +355,7 @@ impl App {
     }
 
     fn on_motion(&mut self, ev: &android_activity::input::MotionEvent) {
-        // The touch UI owns all hit-testing. We just feed it events, then
-        // walk its pointer table to derive look-stick deltas.
         self.touch.handle_motion(ev);
-
-        // Capture the *current* (x, y) of every live pointer. Anything the
-        // touch UI is tracking but no longer in the MotionEvent has lifted.
-        let mut live: std::collections::HashMap<i32, (f32, f32)> = std::collections::HashMap::new();
-        for p in ev.pointers() {
-            live.insert(p.pointer_id(), (p.axis_value(Axis::X), p.axis_value(Axis::Y)));
-        }
-
-        // Look-stick: walk pointers whose role is LookStick and apply deltas.
-        // The last position we recorded for each pointer id is in
-        // `self.look_last`. The touch UI's pointer table tells us whether
-        // that pointer is still a LookStick (i.e. still pressed inside the
-        // stick area).
-        // Two cases to handle:
-        //   1. Pointer is currently in ev.pointers() (a Move event): take
-        //      the delta between the live position and the recorded last.
-        //   2. Pointer is not in ev.pointers() (the user lifted, or it was
-        //      re-classified on a different region): drop our last entry.
-        let mut to_apply: Vec<(f32, f32)> = Vec::new();
-        let mut to_drop: Vec<i32> = Vec::new();
-        for (pid, last) in self.look_last.iter() {
-            // Is this pointer still claiming the LookStick role?
-            let still_look = self.touch.pointers.get(pid).map_or(false, |ptr| {
-                matches!(ptr.role, PointerRole::LookStick { .. })
-            });
-            if !still_look {
-                to_drop.push(*pid);
-                continue;
-            }
-            if let Some(&(nx, ny)) = live.get(pid) {
-                let dx = nx - last.0;
-                let dy = ny - last.1;
-                if dx != 0.0 || dy != 0.0 {
-                    to_apply.push((dx, dy));
-                }
-            }
-        }
-        // Update last positions for any pointer currently in ev.pointers()
-        // that is also a LookStick pointer in our state. Pointers we don't
-        // know about will be picked up next move.
-        for (pid, &(nx, ny)) in &live {
-            if let Some(ptr) = self.touch.pointers.get(pid) {
-                if matches!(ptr.role, PointerRole::LookStick { .. }) {
-                    self.look_last.insert(*pid, (nx, ny));
-                }
-            }
-        }
-        for pid in to_drop {
-            self.look_last.remove(&pid);
-        }
-        // Apply the look deltas.
-        for (dx, dy) in to_apply {
-            self.camera.add_yaw(dx * LOOK_SENS);
-            self.camera.add_pitch(dy * LOOK_SENS);
-        }
     }
 
     /// Build the HUD vertex buffer for this frame. Called between the chunk
@@ -433,111 +365,70 @@ impl App {
         v.clear();
         let layout = &self.touch.layout;
         let paused = self.touch.paused;
+        let pressed = |role: PointerRole| self.touch.pointers.values().any(|p| p.role == role);
 
-        // Pause button: top-right rectangle. We highlight it when pressed.
-        let pause_pressed = self.touch.pointers.values().any(|p| {
-            matches!(p.role, PointerRole::Pause)
-        });
+        // Pause button: top-right, two bars.
         let (px, py, pw, ph) = layout.pause;
-        let pause_fill = if pause_pressed { [0.30, 0.55, 0.85, 0.95] } else { [0.20, 0.40, 0.70, 0.75] };
-        let pause_border = [0.95, 0.95, 0.95, 0.9];
-        HudPipeline::push_outlined_quad(v, px, py, pw, ph, pause_fill, pause_border, 3.0);
-        // Two bars on the button to suggest "pause" visually.
+        let pause_fill = if pressed(PointerRole::Pause) { [0.30, 0.55, 0.85, 0.95] } else { [0.20, 0.40, 0.70, 0.75] };
+        HudPipeline::push_outlined_quad(v, px, py, pw, ph, pause_fill, [0.95, 0.95, 0.95, 0.9], 3.0);
         let bar_w = pw * 0.18;
-        let bar_gap = pw * 0.18;
         let bar_h = ph * 0.50;
         let bar_y = py + (ph - bar_h) * 0.5;
-        let bx0 = px + (pw - (bar_w * 2.0 + bar_gap)) * 0.5;
-        let bx1 = bx0 + bar_w + bar_gap;
+        let bx0 = px + (pw - bar_w * 3.0) * 0.5;
         HudPipeline::push_quad(v, bx0, bar_y, bar_w, bar_h, [1.0; 4]);
-        HudPipeline::push_quad(v, bx1, bar_y, bar_w, bar_h, [1.0; 4]);
+        HudPipeline::push_quad(v, bx0 + bar_w * 2.0, bar_y, bar_w, bar_h, [1.0; 4]);
 
-        // Hotbar: 9 cells. Selected slot is highlighted.
+        // Hotbar: 9 cells, selected slot highlighted.
         for (i, &(hx, hy, hw, hh)) in layout.hotbar.iter().enumerate() {
-            let border = if i == self.touch.hotbar_slot {
-                [1.0, 1.0, 1.0, 1.0]
-            } else {
-                [0.85, 0.85, 0.85, 0.85]
-            };
-            let fill = [0.10, 0.10, 0.10, 0.55];
-            HudPipeline::push_outlined_quad(v, hx, hy, hw, hh, fill, border, 3.0);
-            // Block colour swatch: pick a different block per slot.
-            let block_color = hotbar_color(i);
+            let border = if i == self.touch.hotbar_slot { [1.0, 1.0, 1.0, 1.0] } else { [0.85, 0.85, 0.85, 0.85] };
+            HudPipeline::push_outlined_quad(v, hx, hy, hw, hh, [0.10, 0.10, 0.10, 0.55], border, 3.0);
             let pad = (hw.min(hh) * 0.18).max(2.0);
-            HudPipeline::push_quad(
-                v,
-                hx + pad,
-                hy + pad,
-                hw - pad * 2.0,
-                hh - pad * 2.0,
-                block_color,
-            );
-            // Slot number, very small, top-left corner.
-            let dot = (pad * 0.45).max(1.0);
-            HudPipeline::push_quad(v, hx + 4.0, hy + 4.0, dot, dot, [1.0, 1.0, 1.0, 0.8]);
+            HudPipeline::push_quad(v, hx + pad, hy + pad, hw - pad * 2.0, hh - pad * 2.0, hotbar_color(i));
         }
 
-        // D-pad: lower-right. Four discs at cardinal positions.
-        let (cx, cy) = layout.dpad_center;
-        let arm = layout.dpad_arm_len;
-        let br = layout.dpad_button_radius;
-        let dpad_dir = self.touch.move_input;
-        let base_color = [0.18, 0.20, 0.26, 0.55];
-        let active_color = [0.45, 0.65, 0.95, 0.85];
-        // Centre dot (small disc) for visual anchor.
-        HudPipeline::push_disc(v, cx, cy, br * 0.45, [0.0, 0.0, 0.0, 0.35]);
-        // North (forward, screen-up): fwd = +1.
-        let north_color = if dpad_dir.0 > 0.0 { active_color } else { base_color };
-        HudPipeline::push_disc(v, cx, cy - arm, br, north_color);
-        // South (backward, screen-down): fwd = -1.
-        let south_color = if dpad_dir.0 < 0.0 { active_color } else { base_color };
-        HudPipeline::push_disc(v, cx, cy + arm, br, south_color);
-        // West (left): side = -1.
-        let west_color = if dpad_dir.1 < 0.0 { active_color } else { base_color };
-        HudPipeline::push_disc(v, cx - arm, cy, br, west_color);
-        // East (right): side = +1.
-        let east_color = if dpad_dir.1 > 0.0 { active_color } else { base_color };
-        HudPipeline::push_disc(v, cx + arm, cy, br, east_color);
+        // Jump button: bottom-right disc with a ring.
+        let (jx, jy) = layout.jump_center;
+        let jr = layout.jump_radius;
+        let jump_fill = if self.touch.jumping() { [0.45, 0.65, 0.95, 0.80] } else { [0.18, 0.20, 0.26, 0.50] };
+        HudPipeline::push_disc(v, jx, jy, jr, jump_fill);
+        HudPipeline::push_ring(v, jx, jy, jr, jr * 0.92, [0.95, 0.95, 0.95, 0.7]);
 
-        // Look stick: lower-left. Ring + centre crosshair.
-        let (lx, ly) = layout.look_center;
-        let lr = layout.look_radius;
-        HudPipeline::push_ring(v, lx, ly, lr, lr * 0.85, [0.95, 0.95, 0.95, 0.18]);
-        // Inner filled circle (translucent).
-        HudPipeline::push_disc(v, lx, ly, lr * 0.30, [0.95, 0.95, 0.95, 0.25]);
-        // Crosshair lines.
-        let cross = lr * 0.08;
-        HudPipeline::push_quad(v, lx - cross, ly - 1.0, cross * 2.0, 2.0, [1.0; 4]);
-        HudPipeline::push_quad(v, lx - 1.0, ly - cross, 2.0, cross * 2.0, [1.0; 4]);
+        // Move stick: base at the finger's anchor while held, a faint hint at
+        // the home position otherwise.
+        let sr = layout.stick_radius;
+        match self.touch.stick_state() {
+            Some(((ax, ay), (fx, fy))) => {
+                let (dx, dy) = (fx - ax, fy - ay);
+                let len = (dx * dx + dy * dy).sqrt().max(1.0);
+                let k = (len.min(sr)) / len;
+                HudPipeline::push_ring(v, ax, ay, sr, sr * 0.94, [0.95, 0.95, 0.95, 0.5]);
+                HudPipeline::push_disc(v, ax, ay, sr, [0.18, 0.20, 0.26, 0.35]);
+                HudPipeline::push_disc(v, ax + dx * k, ay + dy * k, sr * 0.45, [0.45, 0.65, 0.95, 0.85]);
+            }
+            None => {
+                let (hx, hy) = layout.stick_home;
+                HudPipeline::push_ring(v, hx, hy, sr, sr * 0.94, [0.95, 0.95, 0.95, 0.22]);
+                HudPipeline::push_disc(v, hx, hy, sr * 0.45, [0.95, 0.95, 0.95, 0.15]);
+            }
+        }
 
-        // Pause menu: when paused, darken the whole frame and stack a
-        // centred button the player can tap to resume.
+        // Pause menu: dim the frame and show the resume button.
         if paused {
             let w = self.gpu.config.width as f32;
             let h = self.gpu.config.height as f32;
             HudPipeline::push_quad(v, 0.0, 0.0, w, h, [0.0, 0.0, 0.0, 0.55]);
-            let bw = w * 0.4;
-            let bh = h * 0.10;
-            let bx = (w - bw) * 0.5;
-            let by = (h - bh) * 0.5;
-            HudPipeline::push_outlined_quad(
-                v,
-                bx, by, bw, bh,
-                [0.20, 0.30, 0.50, 0.95],
-                [0.95, 0.95, 0.95, 0.95],
-                4.0,
-            );
-            // A small "play triangle" inside the button.
-            let tx = bx + bw * 0.42;
-            let ty = by + bh * 0.30;
-            let tw = bw * 0.16;
-            let th = bh * 0.40;
+            let (bx, by, bw, bh) = layout.resume;
+            HudPipeline::push_outlined_quad(v, bx, by, bw, bh, [0.20, 0.30, 0.50, 0.95], [0.95, 0.95, 0.95, 0.95], 4.0);
+            // Play triangle, approximated by two stacked quads.
+            let tx = bx + bw * 0.46;
+            let ty = by + bh * 0.25;
+            let tw = bw * 0.08;
+            let th = bh * 0.50;
             HudPipeline::push_quad(v, tx, ty, tw, th * 0.5, [1.0; 4]);
             HudPipeline::push_quad(v, tx, ty + th * 0.5, tw, th * 0.5, [1.0; 4]);
         }
 
-        // Cap vertex count to the buffer capacity; extra quads are silently
-        // dropped. 64 quads * 6 verts = 384 verts; we have room for that.
+        // Cap to the buffer capacity; extra quads are silently dropped.
         let max = self.hud.quad_capacity * 6;
         if v.len() > max {
             v.truncate(max);
@@ -608,14 +499,16 @@ fn android_main(app: AndroidApp) {
                     }
                     MainEvent::InputAvailable => {
                         if let Ok(mut iter) = app.input_events_iter() {
-                            iter.next(|event| {
+                            // `next` handles one queued event per call; loop so
+                            // multi-touch moves and Up events are never dropped.
+                            while iter.next(|event| {
                                 if let IEv::MotionEvent(m) = event {
                                     if let Some(a) = app_state.as_mut() {
                                         a.on_motion(&m);
                                     }
                                 }
                                 InputStatus::Unhandled
-                            });
+                            }) {}
                         }
                     }
                     MainEvent::TerminateWindow { .. } => {

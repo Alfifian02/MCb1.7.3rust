@@ -18,9 +18,9 @@ original. Anything that cannot be derived from the b1.7.3 sources is marked
 |---|---|---|
 | M0  Skeleton         | done | Workspace + wgpu surface + solid-colour clear + no panic on Android. |
 | M1  Blocks + chunks  | done | Hand-built 16x16x128 stone chunk, neighbour-culled mesher, 32-bit indices. |
-| M2  Camera + physics | done | First-person walk + jump + swept AABB collision. Tap-to-jump on empty screen space. |
+| M2  Camera + physics | done | First-person walk + jump + swept AABB collision. Jump is now a button (see M12). |
 | M3  Overworld gen    | done | Beta-1.7 Perlin + OctaveNoise + 48x128x48 super-chunk, sea level 64, grass/dirt/stone/sand, 5 ore veins (coal, iron, gold, diamond, redstone, lapis). |
-| M12 Touch UX         | done (this commit) | Region-based touch UI state, HUD overlay with hotbar tap, d-pad, look-stick, pause menu. |
+| M12 Touch UX         | done (this commit) | Landscape-only. Floating analog move stick (left half), look drag (right half), jump button, hotbar tap, pause menu. |
 | M4..M14              | pending | See ROADMAP.md for the order. |
 
 Latest commit on `main`: see `git log -1`. Latest released APK: see the
@@ -82,8 +82,8 @@ UNVERIFIED until you can show a reference.
   from `EntityPlayerSP` / `MovementInputFromOptions`).
 - `input::touch_ui::LayoutRects::for_surface` — hotbar matches
   `GuiIngame.java` lines 58-62 (9 cells, 20 px wide, 22 px tall, centred
-  horizontally, 22 px above the bottom edge). The d-pad / look-stick /
-  pause-button are UNVERIFIED — b1.7.3 PC has no touch UX.
+  horizontally, 22 px above the bottom edge). The move stick / look drag /
+  jump / pause buttons are UNVERIFIED — b1.7.3 PC has no touch UX.
 
 ## Build
 
@@ -142,9 +142,9 @@ was generated with). The CI workflow does this for you.
 
 - No text rendering. The hotbar slots are coloured squares (one per
   block id), not item sprites. M14 will add the font + GUI atlas.
-- No Minecraft PE touch UX anchor — d-pad / look-stick / pause-button
+- No Minecraft PE touch UX anchor — move-stick / look / jump / pause
   geometry was invented for this port and is flagged UNVERIFIED in
   the code. If you have a PE 0.x reference, please open an issue
   with the on-screen rectangles so we can diff against them.
-- No jump button. Tap-to-jump on empty screen space is the M2 baseline
-  carried forward; a dedicated jump button is a UI nit, not a milestone.
+- Display cutouts (notches) are not handled; HUD margins are a fixed
+  fraction of the screen height.
