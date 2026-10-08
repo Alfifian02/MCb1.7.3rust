@@ -14,7 +14,7 @@ use crate::input::touch_ui::{PointerRole, TouchUi};
 use crate::render::hud::{HudPipeline, HudVertex};
 
 use android_activity::{AndroidApp, InputStatus, MainEvent, PollEvent};
-use android_activity::input::{Axis, InputEvent as IEv};
+use android_activity::input::InputEvent as IEv;
 use core::ffi::c_void;
 use std::time::{Duration, Instant};
 
@@ -174,7 +174,6 @@ impl App {
         if dt > 1.0 / 30.0 { dt = 1.0 / 30.0; }
         if dt < 0.0 { dt = 0.0; }
         self.last_frame = now;
-        let chunks = &self.chunks;
         // Look drag accumulated by the touch UI since the last frame. Drained
         // even when paused so a drag started before pausing doesn't replay.
         let (look_dx, look_dy) = self.touch.take_look();
@@ -206,8 +205,8 @@ impl App {
         if self.touch.jumping() && self.player.on_ground {
             self.player.vel.y = 8.4;
         }
-        // Plants (flowers, tall grass, snow layer, reeds) are drawn as nothing yet, so they are not solid.
-        let get = |x: i32, y: i32, z: i32| chunks.block(x, y, z).map(|b| if is_plant(b) { 0 } else { b });
+        // Plants are drawn but not solid yet (collision shapes come with M14), so physics reads them as air.
+        let get = |x: i32, y: i32, z: i32| self.chunks.block(x, y, z).map(|b| if is_plant(b) { 0 } else { b });
         physics::step(&mut self.player, dt, &get);
         self.camera.pos = self.player.pos + glam::Vec3::new(0.0, EYE_HEIGHT, 0.0);
 
