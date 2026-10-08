@@ -28,8 +28,11 @@ impl WorldChunkManager {
     /// Java, the noise is sampled `w` x `w`, so only w == d is meaningful.
     pub fn load_block_generator_data(&mut self, x: i32, z: i32, w: usize, d: usize) -> Vec<Biome> {
         let (xf, zf) = (x as f64, z as f64);
-        let mut temp = self.temp_noise.generate(xf, zf, w, w, 0.025, 0.025, 0.25);
-        let mut humid = self.humid_noise.generate(xf, zf, w, w, 0.05, 0.05, 1.0 / 3.0);
+        // The Java passes `(double)0.025F` / `(double)0.05F`: float literals widened to
+        // double, which are NOT the same numbers as the double literals 0.025 / 0.05.
+        let (ts, hs) = (0.025_f32 as f64, 0.05_f32 as f64);
+        let mut temp = self.temp_noise.generate(xf, zf, w, w, ts, ts, 0.25);
+        let mut humid = self.humid_noise.generate(xf, zf, w, w, hs, hs, 1.0 / 3.0);
         let extra = self.extra_noise.generate(xf, zf, w, w, 0.25, 0.25, 0.5882352941176471);
         let mut biomes = Vec::with_capacity(w * d);
         let mut i = 0;

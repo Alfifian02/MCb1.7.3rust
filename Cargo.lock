@@ -696,6 +696,7 @@ dependencies = [
  "bytemuck",
  "env_logger",
  "glam",
+ "jni",
  "log",
  "pollster",
  "raw-window-handle",

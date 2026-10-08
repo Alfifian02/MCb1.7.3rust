@@ -7,6 +7,7 @@ mod render;
 mod world;
 mod gpu;
 mod input;
+mod immersive;
 
 use crate::input::touch_ui::{PointerRole, TouchUi};
 use crate::render::hud::{HudPipeline, HudVertex};
@@ -174,6 +175,9 @@ impl App {
         log::info!("M3 init: {} blocks, {} verts, {} idx", chunk.blocks.len(), verts.len(), index_count);
 
         let mut camera = FirstPersonCamera::spawn_at(spawn_x as f32 + 0.5, spawn_feet_y + EYE_HEIGHT, spawn_z as f32 + 0.5);
+        // spawn_at defaults to aspect 1.0 and resize() only runs when the size changes, so
+        // without this the 3D view is squashed horizontally onto the real screen shape.
+        camera.aspect = width as f32 / height as f32;
         let player = Player {
             pos: glam::Vec3::new(spawn_x as f32 + 0.5, spawn_feet_y, spawn_z as f32 + 0.5),
             vel: glam::Vec3::ZERO,
@@ -265,7 +269,13 @@ impl App {
 
         let frame = match self.gpu.surface.get_current_texture() {
             Ok(f) => f,
-            Err(e) => { log::warn!("surface.get_current_texture: {e:?}"); return; }
+            Err(e) => {
+                log::warn!("surface.get_current_texture: {e:?}");
+                if matches!(e, wgpu::SurfaceError::Outdated | wgpu::SurfaceError::Lost) {
+                    self.gpu.surface.configure(&self.gpu.device, &self.gpu.config);
+                }
+                return;
+            }
         };
         // Reconcile surface/config size. Native-activity doesn't always send
         // MainEvent::WindowResized before the first frame, so the cached
@@ -437,6 +447,16 @@ impl App {
     }
 }
 
+/// Match the swapchain to the real window size. Hiding the nav bar or rotating changes the
+/// window size; a swapchain left at the old size gets scaled by Android to fit = stretched.
+fn sync_size(app: &AndroidApp, state: &mut Option<App>) {
+    let (Some(a), Some(win)) = (state.as_mut(), app.native_window()) else { return };
+    let (w, h) = (win.width().max(1) as u32, win.height().max(1) as u32);
+    if (w, h) != (a.gpu.config.width, a.gpu.config.height) {
+        a.resize(w, h);
+    }
+}
+
 #[no_mangle]
 fn android_main(app: AndroidApp) {
     #[cfg(target_os = "android")]
@@ -463,6 +483,7 @@ fn android_main(app: AndroidApp) {
             if let PollEvent::Main(main_event) = event {
                 match main_event {
                     MainEvent::InitWindow { .. } => {
+                        immersive::hide_system_bars(&app);
                         struct NativePtr(usize);
                         unsafe impl Send for NativePtr {}
                         let Some(window) = app.native_window() else { return };
@@ -517,6 +538,14 @@ fn android_main(app: AndroidApp) {
                         // Drop the surface before the ANativeWindow dies.
                         app_state = None;
                     }
+                    MainEvent::GainedFocus => {
+                        immersive::hide_system_bars(&app);
+                        sync_size(&app, &mut app_state);
+                    }
+                    MainEvent::WindowResized { .. }
+                    | MainEvent::ContentRectChanged { .. }
+                    | MainEvent::InsetsChanged { .. }
+                    | MainEvent::RedrawNeeded { .. } => sync_size(&app, &mut app_state),
                     MainEvent::Destroy { .. } => running = false,
                     _ => {}
                 }
@@ -529,6 +558,7 @@ fn android_main(app: AndroidApp) {
                     Ok(Ok(a)) => {
                         if app.native_window().is_some() {
                             app_state = Some(a);
+                            sync_size(&app, &mut app_state);
                             self_main_frames = 0;
                         } else {
                             log::warn!("init finished but window is gone; discarding");
@@ -546,6 +576,9 @@ fn android_main(app: AndroidApp) {
             if self_main_frames == 1 || self_main_frames == 30 || self_main_frames % 300 == 0 {
                 log::info!("M3 main frame {self_main_frames}");
             }
+        }
+        if self_main_frames % 30 == 0 {
+            sync_size(&app, &mut app_state);
         }
     }
 }
