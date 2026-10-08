@@ -203,6 +203,32 @@ impl HudPipeline {
 
     /// Outlined rect (filled with `fill`, bordered by `border`, `border_px`
     /// pixels thick).
+    /// Seven-segment number (there is no text rendering yet, M14). `h` is the digit height in px;
+    /// each digit advances by `0.71 * h`.
+    pub fn push_number(out: &mut Vec<HudVertex>, x: f32, y: f32, h: f32, n: u32, color: [f32; 4]) {
+        // Bits a..g = top, top-right, bottom-right, bottom, bottom-left, top-left, middle.
+        const SEG: [u8; 10] = [63, 6, 91, 79, 102, 109, 125, 7, 127, 111];
+        let (w, t) = (h * 0.5, h * 0.14);
+        let half = h * 0.5 + t * 0.5;
+        for (i, c) in n.to_string().bytes().enumerate() {
+            let dx = x + i as f32 * (w + t * 1.5);
+            let segs = [
+                (dx, y, w, t),
+                (dx + w - t, y, t, half),
+                (dx + w - t, y + h * 0.5 - t * 0.5, t, half),
+                (dx, y + h - t, w, t),
+                (dx, y + h * 0.5 - t * 0.5, t, half),
+                (dx, y, t, half),
+                (dx, y + (h - t) * 0.5, w, t),
+            ];
+            for (bit, &(sx, sy, sw, sh)) in segs.iter().enumerate() {
+                if SEG[(c - b'0') as usize] >> bit & 1 == 1 {
+                    Self::push_quad(out, sx, sy, sw, sh, color);
+                }
+            }
+        }
+    }
+
     pub fn push_outlined_quad(
         out: &mut Vec<HudVertex>,
         x: f32, y: f32, w: f32, h: f32,

@@ -76,6 +76,11 @@ struct App {
     last_frame: Instant,
     frames: u64,
     fps_last: Instant,
+    /// FPS counter: average over the last second, and over the whole run (from `started`).
+    fps_recent: u32,
+    fps_overall: u32,
+    total_frames: u64,
+    started: Instant,
     // M12: touch UI state + HUD renderer.
     touch: TouchUi,
     hud: HudPipeline,
@@ -148,6 +153,10 @@ impl App {
             last_frame: Instant::now(),
             frames: 0,
             fps_last: Instant::now(),
+            fps_recent: 0,
+            fps_overall: 0,
+            total_frames: 0,
+            started: Instant::now(),
             touch,
             hud,
             hud_verts: Vec::with_capacity(256),
@@ -305,10 +314,13 @@ impl App {
         frame.present();
 
         self.frames += 1;
+        self.total_frames += 1;
         let now = Instant::now();
         if now.duration_since(self.fps_last).as_secs_f32() >= 1.0 {
             let fps = self.frames as f32 / now.duration_since(self.fps_last).as_secs_f32();
-            log::info!("FPS: {fps:.1}");
+            self.fps_recent = fps.round() as u32;
+            self.fps_overall = (self.total_frames as f32 / now.duration_since(self.started).as_secs_f32()).round() as u32;
+            log::info!("FPS: {fps:.1} (average since start {}), {} chunks loaded", self.fps_overall, self.chunks.loaded());
             self.frames = 0;
             self.fps_last = now;
         }
@@ -370,6 +382,16 @@ impl App {
                 HudPipeline::push_ring(v, hx, hy, sr, sr * 0.94, [0.95, 0.95, 0.95, 0.22]);
                 HudPipeline::push_disc(v, hx, hy, sr * 0.45, [0.95, 0.95, 0.95, 0.15]);
             }
+        }
+
+        // FPS counter, top-left. White = average over the last second, yellow = average since
+        // the app started (includes the chunk loading at the start).
+        {
+            let dh = (self.gpu.config.height as f32 * 0.05).max(14.0);
+            let (fx, fy) = (self.gpu.config.width as f32 * 0.07, dh * 0.6);
+            HudPipeline::push_quad(v, fx - dh * 0.3, fy - dh * 0.3, dh * 3.2, dh * 2.7, [0.0, 0.0, 0.0, 0.5]);
+            HudPipeline::push_number(v, fx, fy, dh, self.fps_recent, [1.0, 1.0, 1.0, 1.0]);
+            HudPipeline::push_number(v, fx, fy + dh * 1.3, dh, self.fps_overall, [1.0, 0.85, 0.2, 1.0]);
         }
 
         // Pause menu: dim the frame and show the resume button.
