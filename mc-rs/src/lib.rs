@@ -29,7 +29,9 @@ use crate::world::physics::{self, Player};
 const LOOK_SENS: f32 = 0.004;
 /// World units per second when the d-pad is fully pressed.
 const MOVE_SPEED: f32 = 4.3;
-const EYE_HEIGHT: f32 = 1.62;
+/// Eye offset from `player.pos`, which is the CENTRE of the 1.8-tall box. Steve's eyes are
+/// 1.62 above his feet (EntityPlayer.yOffset), i.e. 1.62 - 0.9 above the centre.
+const EYE_HEIGHT: f32 = 1.62 - physics::HALF.y;
 
 /// Hotbar swatch colors (RGBA). Cycle through the same block ids the mesher
 /// knows about, so the player can tell at a glance which slot is selected.
