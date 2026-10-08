@@ -11,7 +11,7 @@ McRegion save format. Client-only networking.
 | M2  | Camera + physics | First-person walk, jump, AABB collision |
 | M3  | Overworld gen | Beta-1.7 noise: grass/dirt/stone, sea level 64, ores |
 | M4  | Biomes + trees + caves | All b1.7.3 biomes + worldgen populate step |
-| M5  | Block interaction | Raycast pick, break, place, light update |
+| M5  | Block interaction | Raycast pick, break, place, light update (done, not compiled: see Changelog) |
 | M6  | Inventory + crafting | Survival inv, hotbar, crafting grid, recipes |
 | M7  | Save (McRegion) | Read/write .mcr, new-world / save / load |
 | M8  | Entities + AI | Mobs + item entities |
@@ -40,12 +40,21 @@ they matched.
 
 ## Next step
 
-M5: raycast pick + break + place (+ the light update). M4 is done: caves and populate match the real classes bit for
+M6: inventory + crafting (M5 is written but must first compile and be checked on a device). M4 is done: caves and populate match the real classes bit for
 bit (`tools/golden/`). Still approximate in populate (see README): light model, no metadata, no tile entities, no block
 ticks (liquids/sand). Sapling growth, fluid flow and falling sand belong with M5's block updates. Ice Desert exists in
 BiomeGenBase but climate never selects it; b1.7.3 has no ravines.
 
 ## Changelog
+- `done` M5 block interaction (written WITHOUT a Rust toolchain: not compiled, tests not run, expect a compile fix or two):
+    - `world/pick.rs`: port of `World.func_28105_a` + `Block.collisionRayTrace` (f64, 4.0 reach), place cell/replaceable/player-overlap rules. 3 tests.
+    - `world/chunks/light.rs`: port of the b1.7.3 light engine (sky + block light, region queue, `MetadataChunkBlock` relaxation,
+      `Chunk.func_1003_g` relight, `generateSkylightMap`). Chunks light once final; edits go through `ChunkManager::set_block`. 1 test.
+    - `chunk.rs`: `light_opacity`/`light_value` tables derived from Block.java, `brightness`, `height_map`. `mesh.rs`: faces use the
+      neighbour cell's brightness x vanilla face shade (1.0/0.5/0.8/0.6); `push_box`. `render/outline.rs`: selection outline.
+    - Touch: tap on the right half places, hold breaks (repeat 0.25 s), drag looks. Crosshair added. Hotbar slot = block placed.
+    - Simplifications: instant break, no drops/consumption (M6), no day/night (`skylightSubtracted` = 0), plants/liquids not pickable,
+      light seams across a not-yet-final neighbour are fixed by the seam strips when it is lit.
 - `done` M4d caves, trees, populate (compiled and tested on a Linux host with rustc 1.85; not run on a device):
     - `gen/caves.rs`, `gen/populate.rs` (new), `OverworldGenerator::generate` now ends with the caves; `populate_ores`
       and `next_u31` deleted. `mobSpawnerNoise` is the 8th noise stack (after the 7 terrain ones).

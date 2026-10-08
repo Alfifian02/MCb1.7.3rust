@@ -20,7 +20,10 @@ use std::time::{Duration, Instant};
 
 use crate::gpu::context::Gpu;
 use crate::gpu::pipeline::ChunkPipeline;
+use crate::render::atlas;
 use crate::render::camera::FirstPersonCamera;
+use crate::render::outline::Outline;
+use crate::world::pick::{self, Hit};
 use crate::world::chunk::is_plant;
 use crate::world::chunks::{chunk_coord, ChunkManager};
 use crate::world::physics::{self, Player};
@@ -35,11 +38,9 @@ const MOVE_SPEED: f32 = 4.3;
 /// 1.62 above his feet (EntityPlayer.yOffset), i.e. 1.62 - 0.9 above the centre.
 const EYE_HEIGHT: f32 = 1.62 - physics::HALF.y;
 
-/// Hotbar swatch colors (RGBA). Cycle through the same block ids the mesher
-/// knows about, so the player can tell at a glance which slot is selected.
-fn hotbar_color(slot: usize) -> [f32; 4] {
-    // Match the 1-byte ids from world::gen::overworld::block.
-    let id = match slot {
+/// Block id placed by hotbar slot `slot` (no inventory until M6).
+fn hotbar_block(slot: usize) -> u8 {
+    match slot {
         0 => 1,  // stone
         1 => 2,  // grass
         2 => 3,  // dirt
@@ -49,20 +50,12 @@ fn hotbar_color(slot: usize) -> [f32; 4] {
         6 => 14, // gold ore
         7 => 56, // diamond
         _ => 16, // coal
-    };
-    // Approximate Beta-1.7 colors (same numbers as render::atlas::block_color).
-    let px = match id {
-        1 => [125, 125, 125],
-        2 => [110, 170, 70],
-        3 => [134, 96, 67],
-        4 => [200, 200, 200],
-        5 => [220, 200, 100],
-        12 => [225, 215, 160],
-        14 => [240, 220, 60],
-        16 => [60, 60, 60],
-        56 => [180, 240, 240],
-        _ => [180, 30, 200],
-    };
+    }
+}
+
+/// Hotbar swatch colour (RGBA): the block's atlas colour.
+fn hotbar_color(slot: usize) -> [f32; 4] {
+    let px = atlas::block_color(hotbar_block(slot));
     [px[0] as f32 / 255.0, px[1] as f32 / 255.0, px[2] as f32 / 255.0, 1.0]
 }
 
@@ -85,6 +78,9 @@ struct App {
     hud: HudPipeline,
     /// Scratch vertex buffer for the HUD; cleared each frame, then emitted.
     hud_verts: Vec<HudVertex>,
+    // M5: block under the crosshair (within reach) and its outline buffers.
+    target: Option<Hit>,
+    outline: Outline,
 }
 
 impl App {
@@ -140,6 +136,7 @@ impl App {
         // the window we just initialised against.
         let touch = TouchUi::new(width, height);
         let hud = HudPipeline::new(&gpu.device, &gpu.queue, surface_format, width, height);
+        let outline = Outline::new(&gpu.device);
 
         Ok(Self {
             gpu, pipe,
@@ -155,6 +152,8 @@ impl App {
             touch,
             hud,
             hud_verts: Vec::with_capacity(256),
+            target: None,
+            outline,
         })
     }
 
@@ -203,6 +202,27 @@ impl App {
         let get = |x: i32, y: i32, z: i32| chunks.block(x, y, z).map(|b| if is_plant(b) { 0 } else { b });
         physics::step(&mut self.player, dt, &get);
         self.camera.pos = self.player.pos + glam::Vec3::new(0.0, EYE_HEIGHT, 0.0);
+
+        // M5: pick the block under the crosshair, then apply the tap (place) / hold (break).
+        self.touch.tick(dt);
+        let (place, brk) = self.touch.take_actions();
+        let eye = self.camera.pos.as_dvec3();
+        let end = eye + self.camera.forward().as_dvec3() * pick::REACH;
+        // Plants and liquids are not pickable (plants are not drawn yet; vanilla's rayTraceBlocks skips liquids).
+        let solid = |x: i32, y: i32, z: i32| matches!(self.chunks.block_loaded(x, y, z), Some(b) if b != 0 && !is_plant(b) && !(8..=11).contains(&b));
+        self.target = pick::ray_trace(&solid, eye, end);
+        let Some(hit) = self.target else { return };
+        // ponytail: breaking is instant and drops nothing (no dig time, tools or items until M6).
+        if brk && self.chunks.block_loaded(hit.pos.0, hit.pos.1, hit.pos.2).is_some_and(pick::breakable) {
+            self.chunks.set_block(hit.pos.0, hit.pos.1, hit.pos.2, 0);
+        }
+        if place {
+            let (x, y, z) = pick::place_pos(&hit);
+            // ItemBlock refuses a solid block at y = 127 (every hotbar block is solid).
+            if y < 127 && self.chunks.block_loaded(x, y, z).is_some_and(pick::replaceable) && !pick::overlaps_player((x, y, z), self.player.pos) {
+                self.chunks.set_block(x, y, z, hotbar_block(self.touch.hotbar_slot));
+            }
+        }
     }
 
     fn render(&mut self) {
@@ -211,6 +231,7 @@ impl App {
         self.chunks.update(&self.gpu.device, pcx, pcz);
         let (view, proj) = self.camera.build_view_proj();
         self.pipe.upload_uniforms(&self.gpu.queue, view, proj);
+        let outline_indices = self.target.map_or(0, |h| self.outline.update(&self.gpu.queue, h.pos));
 
         // Sky-blue clear color (the red/green debug cycling is no longer needed).
         let clear = wgpu::Color { r: 0.6, g: 0.8, b: 1.0, a: 1.0 };
@@ -274,6 +295,11 @@ impl App {
                 rp.set_index_buffer(m.ibuf.slice(..), wgpu::IndexFormat::Uint32);
                 rp.draw_indexed(0..m.index_count, 0, 0..1);
             }
+            if outline_indices > 0 {
+                rp.set_vertex_buffer(0, self.outline.vbuf.slice(..));
+                rp.set_index_buffer(self.outline.ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                rp.draw_indexed(0..outline_indices, 0, 0..1);
+            }
         }
         // M12: HUD overlay pass. Built into the same encoder so the HUD
         // never gets lost if the GPU drops a frame.
@@ -334,6 +360,14 @@ impl App {
         let layout = &self.touch.layout;
         let paused = self.touch.paused;
         let pressed = |role: PointerRole| self.touch.pointers.values().any(|p| p.role == role);
+
+        // Crosshair: the aim point of the pick ray (first, so the quad cap never drops it).
+        {
+            let (w, h) = (self.gpu.config.width as f32, self.gpu.config.height as f32);
+            let (arm, th) = (0.025 * w.min(h), (0.004 * w.min(h)).max(2.0));
+            HudPipeline::push_quad(v, w * 0.5 - arm, h * 0.5 - th * 0.5, arm * 2.0, th, [1.0, 1.0, 1.0, 0.85]);
+            HudPipeline::push_quad(v, w * 0.5 - th * 0.5, h * 0.5 - arm, th, arm * 2.0, [1.0, 1.0, 1.0, 0.85]);
+        }
 
         // Pause button: top-right, two bars.
         let (px, py, pw, ph) = layout.pause;

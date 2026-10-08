@@ -25,7 +25,8 @@ original. Anything that cannot be derived from the b1.7.3 sources is marked
 | M4e Fix pass | done (not yet run on a device) | 48x48 stitching index, jump ground probe, eye height, aspect/resize sync, immersive nav bar, climate float constants. See the changelog in ROADMAP.md. |
 | M4f Chunk manager | done (now compiles and its tests pass on a Linux host; not run on a device) | Chunks keyed by (cx, cz), one mesh per chunk, circular render-distance ring (4 chunks) that loads/unloads as you walk, terrain generated on 1-2 worker threads, cross-chunk face culling. Replaces the 48x48 super-chunk. |
 | M4d Caves, trees, populate | done (compiled + golden-tested on a Linux host; not run on a device) | MapGenCaves in `generate`, full `populate()` (lakes, dungeons, clay, dirt/gravel/ores, oak/birch/big/taiga trees, flowers, grass, reeds, pumpkins, cactus, springs, snow). Bit-exact vs the real Java on 11 cases (`tools/golden/`). Chunk manager gained the populated/final state. |
-| M5..M14              | pending | See ROADMAP.md for the order. |
+| M5 Block interaction | written, NOT compiled | Raycast pick, break (hold), place (tap), light engine port, outline + crosshair. See ROADMAP changelog. |
+| M6..M14              | pending | See ROADMAP.md for the order. |
 
 Latest commit on `main`: see `git log -1`. Latest released APK: see the
 `MinecraftB173Rust-apk` artifact on the GitHub Actions run.
@@ -53,6 +54,8 @@ mc-rs/
                           (not WorldChunkManager below, which is the vanilla climate/biome class)
       biome.rs            Beta-1.7 climate -> biome table (10 reachable biomes)
       physics.rs          swept AABB, gravity, on_ground
+      pick.rs             M5 ray trace + place rules
+      chunks/light.rs     M5 light engine (port of World/Chunk lighting)
       gen/
         mod.rs            module list
         caves.rs          MapGenBase + MapGenCaves

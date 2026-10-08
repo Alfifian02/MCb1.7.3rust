@@ -20,10 +20,12 @@ use std::sync::{mpsc, Arc, Mutex};
 
 use crate::gpu::pipeline::{create_index_buffer, create_vertex_buffer};
 use crate::render::mesh;
-use crate::world::chunk::{idx, H};
+use crate::world::chunk::{height_map, idx, H, VOLUME};
 use crate::world::gen::chunk_manager::WorldChunkManager;
 use crate::world::gen::overworld::OverworldGenerator;
 use crate::world::gen::populate::Region;
+
+mod light;
 
 type Key = (i32, i32);
 
@@ -45,6 +47,12 @@ pub struct Mesh {
 
 struct Entry {
     blocks: Vec<u8>,
+    /// Per cell, sky light in the low nibble and block light in the high nibble (same index as `blocks`).
+    light: Vec<u8>,
+    /// `Chunk.heightMap`, indexed `z << 4 | x`; kept in step with `blocks` (insert, populate, edits).
+    height: [u8; 256],
+    /// Initial light was computed (`light::init_chunk`); meshing waits for it.
+    lit: bool,
     /// populate() has run on this chunk (it also wrote into its +X/+Z/+X+Z neighbours).
     populated: bool,
     /// Meshing was done (the mesh may still be `None`: a chunk of pure air has nothing to draw).
@@ -69,6 +77,8 @@ pub struct ChunkManager {
     cm: WorldChunkManager,
     jobs: mpsc::Sender<Key>,
     done: mpsc::Receiver<(Key, Vec<u8>)>,
+    /// Pending light updates, newest last (`World.lightingToUpdate`).
+    light_queue: Vec<light::Region>,
 }
 
 impl ChunkManager {
@@ -110,11 +120,12 @@ impl ChunkManager {
         ring.sort_by_key(|&(dx, dz)| dx * dx + dz * dz);
 
         Self { chunks: HashMap::new(), pending: HashSet::new(), ring, radius, center: None, max_in_flight: workers * 2,
-               gen: OverworldGenerator::new(seed), cm: WorldChunkManager::new(seed), jobs, done }
+               gen: OverworldGenerator::new(seed), cm: WorldChunkManager::new(seed), jobs, done, light_queue: Vec::new() }
     }
 
     fn insert(&mut self, key: Key, blocks: Vec<u8>) {
-        self.chunks.insert(key, Entry { blocks, populated: false, meshed: false, mesh: None });
+        let height = height_map(&blocks);
+        self.chunks.insert(key, Entry { blocks, light: vec![0; VOLUME], height, lit: false, populated: false, meshed: false, mesh: None });
     }
 
     /// Generate and populate the chunks `lo..=hi` (both axes) synchronously, for the spawn area:
@@ -137,13 +148,51 @@ impl ChunkManager {
     /// a chunk that is not loaded reads as solid, so the player is walled in at the edge of the
     /// loaded area instead of walking or falling into void.
     pub fn block(&self, x: i32, y: i32, z: i32) -> Option<u8> {
+        (0..H as i32).contains(&y).then(|| self.block_loaded(x, y, z).unwrap_or(1))
+    }
+
+    /// Block at world coordinates, `None` when out of the world or the chunk is not loaded (picking
+    /// must not hit the invisible wall `block` builds at the edge).
+    pub fn block_loaded(&self, x: i32, y: i32, z: i32) -> Option<u8> {
         if !(0..H as i32).contains(&y) {
             return None;
         }
-        Some(match self.chunks.get(&(x >> 4, z >> 4)) {
-            Some(e) => e.blocks[idx((x & 15) as usize, y as usize, (z & 15) as usize)],
-            None => 1,
-        })
+        self.chunks.get(&(x >> 4, z >> 4)).map(|e| e.blocks[idx((x & 15) as usize, y as usize, (z & 15) as usize)])
+    }
+
+    /// Break or place a block (`Chunk.setBlockID`): writes the cell, keeps the height map and
+    /// light in step and marks the affected meshes for a rebuild. False if nothing changed.
+    pub fn set_block(&mut self, x: i32, y: i32, z: i32, id: u8) -> bool {
+        if !(0..H as i32).contains(&y) {
+            return false;
+        }
+        let Some(e) = self.chunks.get_mut(&(x >> 4, z >> 4)) else { return false };
+        let (lx, lz) = ((x & 15) as usize, (z & 15) as usize);
+        let i = idx(lx, y as usize, lz);
+        if e.blocks[i] == id {
+            return false;
+        }
+        e.blocks[i] = id;
+        let h = e.height[lz << 4 | lx] as i32;
+        self.mark_dirty(x, z);
+        self.light_after_set(x, y, z, id, h);
+        true
+    }
+
+    /// The chunk holding world column (x, z) needs a new mesh, and so does the neighbour whose border
+    /// faces look at it when the column is on the chunk edge.
+    fn mark_dirty(&mut self, x: i32, z: i32) {
+        let (cx, cz, lx, lz) = (x >> 4, z >> 4, x & 15, z & 15);
+        let mut keys = vec![(cx, cz)];
+        if lx == 0 { keys.push((cx - 1, cz)) }
+        if lx == 15 { keys.push((cx + 1, cz)) }
+        if lz == 0 { keys.push((cx, cz - 1)) }
+        if lz == 15 { keys.push((cx, cz + 1)) }
+        for k in keys {
+            if let Some(e) = self.chunks.get_mut(&k) {
+                e.meshed = false;
+            }
+        }
     }
 
     /// Chunk C is final when populate has run on C, C-x, C-z and C-x-z.
@@ -164,7 +213,11 @@ impl ChunkManager {
     pub fn update(&mut self, device: &wgpu::Device, cx: i32, cz: i32) {
         self.stream(cx, cz);
         self.populate_pending(cx, cz, 1);
-        self.mesh_pending(device, cx, cz);
+        self.light_pending(cx, cz);
+        // Meshes wait for the light queue to drain, so an edit or a new chunk is meshed once, lit.
+        if self.light_queue.is_empty() {
+            self.mesh_pending(device, cx, cz);
+        }
     }
 
     fn stream(&mut self, cx: i32, cz: i32) {
@@ -223,7 +276,10 @@ impl ChunkManager {
         let mut region = Region::new(x, z, blocks);
         self.gen.populate(&mut region, x, z, &mut self.cm);
         for (k, b) in keys.iter().zip(region.into_blocks()) {
-            self.chunks.get_mut(k).unwrap().blocks = b;
+            let e = self.chunks.get_mut(k).unwrap();
+            e.height = height_map(&b);
+            e.blocks = b;
+            e.lit = false; // blocks changed under the light: it is computed again once final
             // The chunk and its four neighbours (border faces) need a new mesh if they had one.
             for n in [(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)] {
                 if let Some(e) = self.chunks.get_mut(&(k.0 + n.0, k.1 + n.1)) {
@@ -245,9 +301,11 @@ impl ChunkManager {
             let (x, z) = (cx + dx, cz + dz);
             let c = &self.chunks;
             let built = match (c.get(&(x, z)), c.get(&(x + 1, z)), c.get(&(x - 1, z)), c.get(&(x, z + 1)), c.get(&(x, z - 1))) {
-                (Some(me), Some(px), Some(nx), Some(pz), Some(nz)) if !me.meshed && self.is_final(x, z) => Some(mesh::build(
+                (Some(me), Some(px), Some(nx), Some(pz), Some(nz)) if !me.meshed && me.lit && self.is_final(x, z) => Some(mesh::build(
                     &me.blocks,
+                    &me.light,
                     [px.blocks.as_slice(), nx.blocks.as_slice(), pz.blocks.as_slice(), nz.blocks.as_slice()],
+                    [px.light.as_slice(), nx.light.as_slice(), pz.light.as_slice(), nz.light.as_slice()],
                     x * 16,
                     z * 16,
                 )),
