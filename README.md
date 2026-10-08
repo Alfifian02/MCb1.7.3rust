@@ -19,9 +19,11 @@ original. Anything that cannot be derived from the b1.7.3 sources is marked
 | M0  Skeleton         | done | Workspace + wgpu surface + solid-colour clear + no panic on Android. |
 | M1  Blocks + chunks  | done | Hand-built 16x16x128 stone chunk, neighbour-culled mesher, 32-bit indices. |
 | M2  Camera + physics | done | First-person walk + jump + swept AABB collision. Jump is now a button (see M12). |
-| M3  Overworld gen    | done | Beta-1.7 Perlin + OctaveNoise + 48x128x48 super-chunk, sea level 64, grass/dirt/stone/sand, 5 ore veins (coal, iron, gold, diamond, redstone, lapis). |
+| M3  Overworld gen    | done | 48x128x48 super-chunk, sea level 64, 6 ore types (coal, iron, gold, diamond, redstone, lapis). Terrain was rebuilt in M4a-c, see below. |
 | M12 Touch UX         | done (this commit) | Landscape-only. Floating analog move stick (left half), look drag (right half), jump button, hotbar tap, pause menu. |
-| M4..M14              | pending | See ROADMAP.md for the order. |
+| M4a-c Faithful terrain + biomes | done (untested build) | java.util.Random, Perlin/simplex noise, WorldChunkManager (climate -> 10 biomes), generateTerrain and replaceBlocksForBiome, all checked against the real b1.7.3 classes (`tools/golden/`). |
+| M4d Caves, trees, populate | pending | MapGenCaves, WorldGenTrees/BigTree/Forest/Taiga, real populate() (replaces the old ore placer). |
+| M5..M14              | pending | See ROADMAP.md for the order. |
 
 Latest commit on `main`: see `git log -1`. Latest released APK: see the
 `MinecraftB173Rust-apk` artifact on the GitHub Actions run.
@@ -44,7 +46,7 @@ mc-rs/
       touch_ui.rs         region hit-test + per-pointer state machine (M12)
     world/
       chunk.rs            16x16x128 storage, (x<<11)|(z<<7)|y layout
-      biome.rs            Beta-1.7 8-biome registry (Plains/Desert/Forest/...)
+      biome.rs            Beta-1.7 climate -> biome table (10 reachable biomes)
       physics.rs          swept AABB, gravity, on_ground
       gen/
         mod.rs            generator trait

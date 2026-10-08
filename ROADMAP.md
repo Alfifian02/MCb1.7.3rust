@@ -40,16 +40,15 @@ they matched.
 
 ## Next step
 
-M4: biomes + trees + caves. The overworld currently uses a constant-Plains
-biome array in `App::init` (`OverworldGenerator::generate` is called with
-`[Biome::Plains; 256]`). M4 replaces that with a per-column biome sampler
-(temperature + humidity noise, vanilla lookup table) and runs the populate
-pass: trees (oak / birch / spruce), caves (carve through density < 0), ore
-veins (already done in M3 — keep them), and ravines. Acceptance: for fixed
-seeds (0, -1, i64::MAX), the block id array for chunks (0,0), (-1,-1), and
-(5,-3) matches the b1.7.3 reference byte-for-byte. See
-`world/gen/overworld.rs` line 67 for the constant-biome workaround that
-M4 deletes.
+M4d: caves, trees, populate. M4a-c are done: `JavaRandom`, the noise
+generators, `WorldChunkManager` (biomes from climate) and the first two
+`provideChunk` passes now match the real b1.7.3 classes bit for bit (golden
+tests in `overworld.rs`, vectors from `tools/golden/G.java`). Still to port,
+each with a golden test the same way: MapGenBase/MapGenCaves (the last
+`provideChunk` step), then populate(): WorldGenTrees / BigTree / Forest /
+Taiga1/2, WorldGenMinable ores (replacing the old M3 placer, which does not
+follow the Java), flowers, clay, liquids, and snow in cold biomes. b1.7.3 has
+no ravines. Ice Desert exists in BiomeGenBase but climate never selects it.
 
 After M4, M5 (raycast pick + break + place) is the next milestone that
 unlocks anything player-facing.
@@ -85,4 +84,5 @@ unlocks anything player-facing.
   Follow-up: cross-check the touch rectangles against Pocket Edition 0.x
   or any later touch-based Minecraft client. Run `cargo apk build --release`
   on the CI runner and verify on a phone.
-- `pending` M4: biomes + trees + caves (next, see "Next step" above).
+- `done` M4a-c: faithful Random/noise, climate biomes, terrain + surface (untested build).
+- `pending` M4d: caves, trees, populate (next, see "Next step" above).

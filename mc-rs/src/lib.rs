@@ -21,7 +21,7 @@ use crate::gpu::pipeline::{ChunkPipeline, Vertex, create_index_buffer, create_ve
 use crate::render::camera::FirstPersonCamera;
 use crate::render::mesh;
 use crate::world::chunk::Chunk;
-use crate::world::biome::Biome;
+use crate::world::gen::chunk_manager::WorldChunkManager;
 use crate::world::gen::overworld::OverworldGenerator;
 use crate::world::physics::{self, Player};
 
@@ -92,8 +92,9 @@ impl App {
         // "super-chunk" so the player can walk off the original 16x16 boundary
         // and see neighboring terrain. The mesh + physics still use a single
         // 48-wide X stride, so no neighbor culling changes are needed.
-        let mut generator = OverworldGenerator::new(0xCAFEBABEu64);
-        let biomes = [Biome::Plains; 256];
+        const SEED: i64 = 0xCAFEBABE;
+        let mut generator = OverworldGenerator::new(SEED);
+        let mut chunk_manager = WorldChunkManager::new(SEED);
         const SUPER_W: usize = 16 * 3; // 48
         const SUPER_H: usize = 128;
         const SUPER_D: usize = 16 * 3; // 48
@@ -102,7 +103,7 @@ impl App {
         // Order: chunks(cx, cz) for cx in -1..=1, cz in -1..=1
         for cz_off in -1..=1 {
             for cx_off in -1..=1 {
-                let blocks = generator.generate(cx_off, cz_off, &biomes);
+                let blocks = generator.generate(cx_off, cz_off, &mut chunk_manager);
                 let x0 = ((cx_off + 1) as usize) * 16;
                 let z0 = ((cz_off + 1) as usize) * 16;
                 for z in 0..16 {

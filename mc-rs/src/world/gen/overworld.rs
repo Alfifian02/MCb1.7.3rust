@@ -1,14 +1,12 @@
-//! Overworld chunk generator. Direct port of net.minecraft.src.ChunkProviderGenerate
-//! from the b1.7.3 decomp. Vanilla equivalent: net.minecraft.world.level.levelgen.
+//! Overworld chunk generator: port of ChunkProviderGenerate (b1.7.3) up to
+//! and including replaceBlocksForBiome. Caves (MapGenCaves) and populate()
+//! (trees, ores, ...) are separate M4 steps.
 //!
-//! M3c: full Beta-1.7 density function. Produces the canonical Beta-1.7 overworld
-//! shape: rolling hills, occasional steep mountains, sea level 64.
-//!
-//! M3b's heightmap shortcut has been replaced. The math is identical to the
-//! decomp, just with the biomes array and chunk manager hard-coded to Plains
-//! (single-biome chunk for now; multi-biome comes in M3e).
+//! Verified against the real Java classes: see `matches_java_reference`
+//! and tools/golden/.
 
 use crate::world::biome::Biome;
+use crate::world::gen::chunk_manager::WorldChunkManager;
 use crate::world::gen::noise::{JavaRandom, OctaveNoise};
 
 pub const W: usize = 16;
@@ -17,16 +15,19 @@ pub const D: usize = 16;
 pub const VOLUME: usize = W * H * D;
 pub const SEA_LEVEL: i32 = 64;
 
-/// Block ids (Beta-1.7 numbering, vanilla uses the same).
+/// Block ids (Beta-1.7 numbering).
 pub mod block {
     pub const AIR: u8 = 0;
     pub const STONE: u8 = 1;
     pub const GRASS: u8 = 2;
     pub const DIRT: u8 = 3;
     pub const BEDROCK: u8 = 7;
-    pub const WATER: u8 = 8;
+    /// Block.waterStill (waterMoving is 8; terrain generation only uses 9).
+    pub const WATER: u8 = 9;
     pub const SAND: u8 = 12;
     pub const GRAVEL: u8 = 13;
+    pub const SANDSTONE: u8 = 24;
+    pub const ICE: u8 = 79;
     // Ores (Beta-1.7 numbering, vanilla matches).
     pub const ORE_COAL: u8 = 16;
     pub const ORE_IRON: u8 = 15;
@@ -37,43 +38,30 @@ pub mod block {
 }
 
 pub struct OverworldGenerator {
-    // Five octaves in declaration order, matching the decomp's field order.
-    noise_lim: OctaveNoise,    // field_912_k, 16 octaves, scale 684.412
-    noise_low: OctaveNoise,    // field_911_l, 16 octaves, scale 684.412
-    noise_base: OctaveNoise,   // field_910_m, 8  octaves, scale 684.412/80 x 684.412/160 x 684.412/80
-    noise_main: OctaveNoise,   // field_922_a, 10 octaves, scale 1.121
-    noise_height: OctaveNoise, // field_921_b, 16 octaves, scale 200.0
-    // Surface materials, used in replaceBlocksForBiome.
-    noise_sand: OctaveNoise,   // field_909_n, 4  octaves
-    noise_gravel: OctaveNoise, // field_908_o, 4  octaves
-    // Scratch buffers.
-    scratch_d: Vec<f64>,
-    scratch_e: Vec<f64>,
-    scratch_f: Vec<f64>,
-    scratch_g: Vec<f64>,
-    scratch_h: Vec<f64>,
-    surface_rand: JavaRandom,
+    /// Shared Random: seeds the noise stacks in order, then is reseeded per
+    /// chunk and drives the surface pass.
+    rand: JavaRandom,
+    noise_lim: OctaveNoise,    // field_912_k, 16 octaves
+    noise_low: OctaveNoise,    // field_911_l, 16
+    noise_base: OctaveNoise,   // field_910_m, 8
+    noise_sand: OctaveNoise,   // field_909_n, 4 (sand and gravel)
+    noise_stone: OctaveNoise,  // field_908_o, 4
+    noise_main: OctaveNoise,   // field_922_a, 10
+    noise_height: OctaveNoise, // field_921_b, 16
 }
 
 impl OverworldGenerator {
-    pub fn new(world_seed: u64) -> Self {
-        let rng = JavaRandom::new(world_seed);
-        let s = Self {
-            noise_lim:    OctaveNoise::new(rng.next_u63(), 16),
-            noise_low:    OctaveNoise::new(rng.next_u63(), 16),
-            noise_base:   OctaveNoise::new(rng.next_u63(), 8),
-            noise_main:   OctaveNoise::new(rng.next_u63(), 10),
-            noise_height: OctaveNoise::new(rng.next_u63(), 16),
-            noise_sand:   OctaveNoise::new(rng.next_u63(), 4),
-            noise_gravel: OctaveNoise::new(rng.next_u63(), 4),
-            scratch_d: Vec::new(),
-            scratch_e: Vec::new(),
-            scratch_f: Vec::new(),
-            scratch_g: Vec::new(),
-            scratch_h: Vec::new(),
-            surface_rand: JavaRandom::new(world_seed),
-        };
-        s
+    pub fn new(seed: i64) -> Self {
+        // Order matters: every stack draws from the same Random.
+        let mut rand = JavaRandom::new(seed);
+        let noise_lim = OctaveNoise::new(&mut rand, 16);
+        let noise_low = OctaveNoise::new(&mut rand, 16);
+        let noise_base = OctaveNoise::new(&mut rand, 8);
+        let noise_sand = OctaveNoise::new(&mut rand, 4);
+        let noise_stone = OctaveNoise::new(&mut rand, 4);
+        let noise_main = OctaveNoise::new(&mut rand, 10);
+        let noise_height = OctaveNoise::new(&mut rand, 16);
+        Self { rand, noise_lim, noise_low, noise_base, noise_sand, noise_stone, noise_main, noise_height }
     }
 
     /// Highest solid block at column (x, z), or -1 if none.
@@ -87,212 +75,202 @@ impl OverworldGenerator {
         -1
     }
 
-    /// Generate a single 16x128x16 chunk, indices (x << 11) | (z << 7) | y.
-    /// `biomes` is a [256] array of biomes for this chunk.
-    pub fn generate(&mut self, chunk_x: i32, chunk_z: i32, biomes: &[Biome; 256]) -> Vec<u8> {
-        // Reset the surface random to the chunk's deterministic seed (matches
-        // provideChunk's rand.setSeed).
-        self.surface_rand = JavaRandom::new(
-            (chunk_x as u64).wrapping_mul(341873128712u64)
-                .wrapping_add((chunk_z as u64).wrapping_mul(132897987541u64))
-        );
+    /// One 16x128x16 chunk, indexed `(x << 11) | (z << 7) | y`.
+    pub fn generate(&mut self, chunk_x: i32, chunk_z: i32, cm: &mut WorldChunkManager) -> Vec<u8> {
+        self.rand.set_seed(chunk_seed(chunk_x, chunk_z));
+        let biomes = cm.load_block_generator_data(chunk_x * 16, chunk_z * 16, 16, 16);
+        let mut blocks = vec![block::AIR; VOLUME];
+        self.generate_terrain(chunk_x, chunk_z, &mut blocks, &cm.temperature, &cm.humidity);
+        self.replace_blocks_for_biome(chunk_x, chunk_z, &mut blocks, &biomes);
+        blocks
+    }
 
-        // --- Step 1: density sample (5 x 17 x 5) ---
-        let sx: usize = 5;
-        let sy: usize = 17;
-        let sz: usize = 5;
-        let xs0: i32 = chunk_x * 4;
-        let zs0: i32 = chunk_z * 4;
-        let xs1: i32 = (chunk_x * sx as i32) + sx as i32;
-        let zs1: i32 = (chunk_z * sz as i32) + sz as i32;
+    /// func_4061_a: the 5x17x5 density grid.
+    fn density(&self, x: i32, z: i32, temps: &[f64], hums: &[f64]) -> Vec<f64> {
+        const SX: usize = 5;
+        const SY: usize = 17;
+        const SZ: usize = 5;
+        let (xf, zf) = (x as f64, z as f64);
+        let d_main = self.noise_main.generate_2d(x, z, SX, SZ, 1.121, 1.121);
+        let d_height = self.noise_height.generate_2d(x, z, SX, SZ, 200.0, 200.0);
+        let d_base = self.noise_base.generate(xf, 0.0, zf, SX, SY, SZ, 684.412 / 80.0, 684.412 / 160.0, 684.412 / 80.0);
+        let d_lim = self.noise_lim.generate(xf, 0.0, zf, SX, SY, SZ, 684.412, 684.412, 684.412);
+        let d_low = self.noise_low.generate(xf, 0.0, zf, SX, SY, SZ, 684.412, 684.412, 684.412);
 
-        // Main + height noises (XZ-only).
-        let mut g = self.noise_main.sample_array2d(xs0, zs0, sx as usize, sz as usize, 1.121, 1.121);
-        let mut h = self.noise_height.sample_array2d(xs0, zs0, sx as usize, sz as usize, 200.0, 200.0);
-        // Three YXZ noises.
-        let mut d = self.noise_base.sample_array3d(xs0, 0, zs0, sx as usize, sy as usize, sz as usize, 684.412/80.0, 684.412/160.0, 684.412/80.0);
-        let mut e = self.noise_lim.sample_array3d(xs0, 0, zs0, sx as usize, sy as usize, sz as usize, 684.412, 684.412, 684.412);
-        let mut f = self.noise_low.sample_array3d(xs0, 0, zs0, sx as usize, sy as usize, sz as usize, 684.412, 684.412, 684.412);
-
-        // Apply per-column humidity/temperature bias and the "var29 mountain" formula.
-        // M3c uses constant temp=0.5/humidity=0.5 (Plains), so the var25/var27/var29
-        // math collapses to fixed values: var25 = 0.9375, var27 -> constant 0.5,
-        // var29 -> 0.0. We still compute them through the same path so the shape
-        // is correct.
-        let temperature = [0.5f64; 256];
-        let humidity = [0.5f64; 256];
-
-        let mut density: Vec<f64> = vec![0.0; sx * sy * sz];
-        let mut idx_d = 0;
-        let mut idx_g = 0;
-        for ix in 0..sx {
-            let column_x: usize = ix * (16 / sx) + (16 / sx) / 2;
-            for iz in 0..sz {
-                let column_z: usize = iz * (16 / sz) + (16 / sz) / 2;
-                let var21 = temperature[column_x * 16 + column_z];
-                let var23 = humidity[column_x * 16 + column_z] * var21;
-                let mut var25 = 1.0 - var23;
-                var25 *= var25;
-                var25 *= var25;
-                var25 = 1.0 - var25;
-                let mut var27 = (g[idx_g] + 256.0) / 512.0;
-                var27 *= var25;
-                if var27 > 1.0 { var27 = 1.0; }
-                let mut var29 = h[idx_g] / 8000.0;
-                if var29 < 0.0 { var29 = -var29 * 0.3; }
-                var29 = var29 * 3.0 - 2.0;
-                if var29 < 0.0 {
-                    var29 /= 2.0;
-                    if var29 < -1.0 { var29 = -1.0; }
-                    var29 /= 1.4;
-                    var29 /= 2.0;
-                    var27 = 0.0;
+        let mut out = vec![0.0; SX * SY * SZ];
+        let step = 16 / SX;
+        let mut i = 0;
+        let mut col = 0;
+        for ix in 0..SX {
+            let bx = ix * step + step / 2;
+            for iz in 0..SZ {
+                let bz = iz * step + step / 2;
+                let t = temps[bx * 16 + bz];
+                let h = hums[bx * 16 + bz] * t;
+                let mut v25 = 1.0 - h;
+                v25 *= v25;
+                v25 *= v25;
+                v25 = 1.0 - v25;
+                let mut v27 = (d_main[col] + 256.0) / 512.0;
+                v27 *= v25;
+                if v27 > 1.0 { v27 = 1.0; }
+                let mut v29 = d_height[col] / 8000.0;
+                if v29 < 0.0 { v29 = -v29 * 0.3; }
+                v29 = v29 * 3.0 - 2.0;
+                if v29 < 0.0 {
+                    v29 /= 2.0;
+                    if v29 < -1.0 { v29 = -1.0; }
+                    v29 /= 1.4;
+                    v29 /= 2.0;
+                    v27 = 0.0;
                 } else {
-                    if var29 > 1.0 { var29 = 1.0; }
-                    var29 /= 8.0;
+                    if v29 > 1.0 { v29 = 1.0; }
+                    v29 /= 8.0;
                 }
-                if var27 < 0.0 { var27 = 0.0; }
-                var27 += 0.5;
-                var29 = var29 * (sy as f64) / 16.0;
-                let var31 = (sy as f64) / 2.0 + var29 * 4.0;
-                idx_g += 1;
-                for iy in 0..sy {
-                    let mut var34;
-                    let var36 = ((iy as f64) - var31) * 12.0 / var27;
-                    let var36b = if var36 < 0.0 { var36 * 4.0 } else { var36 };
-                    let var38 = e[idx_d] / 512.0;
-                    let var40 = f[idx_d] / 512.0;
-                    let var42 = (d[idx_d] / 10.0 + 1.0) / 2.0;
-                    if var42 < 0.0 { var34 = var38; }
-                    else if var42 > 1.0 { var34 = var40; }
-                    else { var34 = var38 + (var40 - var38) * var42; }
-                    var34 -= var36b;
-                    if iy > sy - 4 {
-                        let t = ((iy - (sy - 4)) as f64) / 3.0;
-                        var34 = var34 * (1.0 - t) + -10.0 * t;
+                if v27 < 0.0 { v27 = 0.0; }
+                v27 += 0.5;
+                v29 = v29 * SY as f64 / 16.0;
+                let v31 = SY as f64 / 2.0 + v29 * 4.0;
+                col += 1;
+                for iy in 0..SY {
+                    let mut v36 = (iy as f64 - v31) * 12.0 / v27;
+                    if v36 < 0.0 { v36 *= 4.0; }
+                    let lim = d_lim[i] / 512.0;
+                    let low = d_low[i] / 512.0;
+                    let mix = (d_base[i] / 10.0 + 1.0) / 2.0;
+                    let mut v34 = if mix < 0.0 { lim } else if mix > 1.0 { low } else { lim + (low - lim) * mix };
+                    v34 -= v36;
+                    if iy > SY - 4 {
+                        // The Java divides in float here.
+                        let v44 = ((iy - (SY - 4)) as f32 / 3.0_f32) as f64;
+                        v34 = v34 * (1.0 - v44) + -10.0 * v44;
                     }
-                    density[idx_d] = var34;
-                    idx_d += 1;
+                    out[i] = v34;
+                    i += 1;
                 }
             }
         }
-        // Drop the now-unused scratch to release memory before the next chunk.
-        d = Vec::new(); e = Vec::new(); f = Vec::new(); g = Vec::new(); h = Vec::new();
-
-        // --- Step 2: place terrain blocks based on density. ---
-        // Beta 1.7.3 samples density on a 5 x 17 x 5 grid (4 x 16 x 4 *cells*
-        // of samples) and trilinearly interpolates between neighbouring samples:
-        // each cell covers 4 (x) x 8 (y) x 4 (z) blocks. The old code expanded
-        // all 5 samples to 4 blocks each (20 wide in a 16-wide chunk), which
-        // indexed out of bounds and panicked during init.
-        // `density` layout (from step 1): ((ix * sz) + iz) * sy + iy.
-        let dens = |ix: usize, iy: usize, iz: usize| -> f64 { density[(ix * sz + iz) * sy + iy] };
-        let mut out = vec![block::AIR; VOLUME];
-        for ix in 0..(sx - 1) {
-            for iz in 0..(sz - 1) {
-                for iy in 0..(sy - 1) {
-                    let c000 = dens(ix, iy, iz);
-                    let c001 = dens(ix, iy, iz + 1);
-                    let c100 = dens(ix + 1, iy, iz);
-                    let c101 = dens(ix + 1, iy, iz + 1);
-                    let c010 = dens(ix, iy + 1, iz);
-                    let c011 = dens(ix, iy + 1, iz + 1);
-                    let c110 = dens(ix + 1, iy + 1, iz);
-                    let c111 = dens(ix + 1, iy + 1, iz + 1);
-                    for dy in 0..8usize {
-                        let y = iy * 8 + dy;
-                        if y >= H { continue; }
-                        let fy = dy as f64 / 8.0;
-                        let x0z0 = c000 + (c010 - c000) * fy;
-                        let x0z1 = c001 + (c011 - c001) * fy;
-                        let x1z0 = c100 + (c110 - c100) * fy;
-                        let x1z1 = c101 + (c111 - c101) * fy;
-                        for dx in 0..4usize {
-                            let fx = dx as f64 / 4.0;
-                            let z0 = x0z0 + (x1z0 - x0z0) * fx;
-                            let z1 = x0z1 + (x1z1 - x0z1) * fx;
-                            let x = ix * 4 + dx;
-                            for dz in 0..4usize {
-                                let fz = dz as f64 / 4.0;
-                                let d_val = z0 + (z1 - z0) * fz;
-                                let z = iz * 4 + dz;
-                                let cell_idx: usize = (x << 11) | (z << 7) | y;
-                                if d_val > 0.0 {
-                                    out[cell_idx] = block::STONE;
-                                } else if (y as i32) < SEA_LEVEL {
-                                    out[cell_idx] = block::WATER;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // --- Step 3: replaceBlocksForBiome (top layer, sand/gravel, dirt under grass) ---
-        // Re-seed for surface materials (matches b1.7.3 ordering).
-        let sand_n = self.noise_sand.sample_array2d(
-            chunk_x * 16, chunk_z * 16, 16, 16, 1.0/32.0, 1.0/32.0,
-        );
-        let gravel_n = self.noise_gravel.sample_array2d_y(
-            chunk_x * 16, chunk_z * 16, 16, 16, 1.0/32.0, 1.0/32.0,
-        );
-        let stone_n = self.noise_gravel.sample_array2d(
-            chunk_x * 16, chunk_z * 16, 16, 16, 1.0/16.0, 1.0/16.0,
-        );
-        for z in 0..16 {
-            for x in 0..16 {
-                let biome = biomes[z * 16 + x];
-                let sand_here = sand_n[z * 16 + x] + self.surface_rand.next_double() * 0.2 > 0.0;
-                let gravel_here = gravel_n[z * 16 + x] + self.surface_rand.next_double() * 0.2 > 3.0;
-                let stone_depth = ((stone_n[z * 16 + x] / 3.0 + 3.0 + self.surface_rand.next_double() * 0.25) as i32).max(0);
-                let mut top_depth = -1i32;
-                let mut top_block = biome.top_block();
-                let mut filler = biome.filler_block();
-                for y in (0..H).rev() {
-                    let cell = (x << 11) | (z << 7) | y;
-                    if y as i32 <= self.surface_rand.next_u31() as i32 % 5 {
-                        out[cell] = block::BEDROCK;
-                        continue;
-                    }
-                    let here = out[cell];
-                    if here == block::AIR {
-                        top_depth = -1;
-                    } else if here == block::STONE {
-                        if top_depth == -1 {
-                            if stone_depth <= 0 {
-                                top_block = block::AIR;
-                                filler = block::STONE;
-                            } else if (y as i32) >= SEA_LEVEL - 4 && (y as i32) <= SEA_LEVEL + 1 {
-                                top_block = biome.top_block();
-                                filler = biome.filler_block();
-                                if gravel_here { top_block = block::AIR; }
-                                if gravel_here { filler = block::GRAVEL; }
-                                if sand_here { top_block = block::SAND; }
-                                if sand_here { filler = block::SAND; }
-                            }
-                            if (y as i32) < SEA_LEVEL && top_block == block::AIR {
-                                top_block = block::WATER;
-                            }
-                            top_depth = stone_depth as i32;
-                            out[cell] = if (y as i32) >= SEA_LEVEL - 1 { top_block } else { filler };
-                        } else if top_depth > 0 {
-                            top_depth -= 1;
-                            out[cell] = filler;
-                            if top_depth == 0 && filler == block::SAND {
-                                top_depth = self.surface_rand.next_u31() as i32 % 4;
-                                // Filler becomes sandstone in original; we don't have that
-                                // block id yet, leave as sand.
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        let _ = (xs1, zs1); // (used by future per-direction offset)
         out
     }
+
+    /// generateTerrain: interpolate the density grid into stone/water/ice.
+    /// The incremental `+=` interpolation is kept as in Java so the sign of
+    /// the density (stone vs not) matches bit for bit.
+    fn generate_terrain(&self, chunk_x: i32, chunk_z: i32, blocks: &mut [u8], temps: &[f64], hums: &[f64]) {
+        let d = self.density(chunk_x * 4, chunk_z * 4, temps, hums);
+        let at = |i: usize, j: usize, k: usize| d[(i * 5 + j) * 17 + k];
+        for i in 0..4usize {
+            for j in 0..4usize {
+                for k in 0..16usize {
+                    let mut v16 = at(i, j, k);
+                    let mut v18 = at(i, j + 1, k);
+                    let mut v20 = at(i + 1, j, k);
+                    let mut v22 = at(i + 1, j + 1, k);
+                    let v24 = (at(i, j, k + 1) - v16) * 0.125;
+                    let v26 = (at(i, j + 1, k + 1) - v18) * 0.125;
+                    let v28 = (at(i + 1, j, k + 1) - v20) * 0.125;
+                    let v30 = (at(i + 1, j + 1, k + 1) - v22) * 0.125;
+                    for l in 0..8usize {
+                        let y = k * 8 + l;
+                        let mut v35 = v16;
+                        let mut v37 = v18;
+                        let v39 = (v20 - v16) * 0.25;
+                        let v41 = (v22 - v18) * 0.25;
+                        for m in 0..4usize {
+                            let mut pos = ((m + i * 4) << 11) | ((j * 4) << 7) | y;
+                            let mut v48 = v35;
+                            let v50 = (v37 - v35) * 0.25;
+                            for n in 0..4usize {
+                                let t = temps[(i * 4 + m) * 16 + j * 4 + n];
+                                let mut b = block::AIR;
+                                if (y as i32) < SEA_LEVEL {
+                                    b = if t < 0.5 && y as i32 >= SEA_LEVEL - 1 { block::ICE } else { block::WATER };
+                                }
+                                if v48 > 0.0 {
+                                    b = block::STONE;
+                                }
+                                blocks[pos] = b;
+                                pos += 128;
+                                v48 += v50;
+                            }
+                            v35 += v39;
+                            v37 += v41;
+                        }
+                        v16 += v24;
+                        v18 += v26;
+                        v20 += v28;
+                        v22 += v30;
+                    }
+                }
+            }
+        }
+    }
+
+    /// replaceBlocksForBiome: grass/dirt/sand/gravel skin and bedrock floor.
+    /// `biomes` is x-major (`x * 16 + z`), as from the chunk manager.
+    fn replace_blocks_for_biome(&mut self, chunk_x: i32, chunk_z: i32, blocks: &mut [u8], biomes: &[Biome]) {
+        let s = 1.0 / 32.0;
+        let (bx, bz) = ((chunk_x * 16) as f64, (chunk_z * 16) as f64);
+        // Sand and gravel both use noise_sand; gravel samples an x/z plane,
+        // sand an x/y plane (z fixed at 0). Quirks kept from the Java.
+        let sand_n = self.noise_sand.generate(bx, bz, 0.0, 16, 16, 1, s, s, 1.0);
+        let gravel_n = self.noise_sand.generate(bx, 109.0134, bz, 16, 1, 16, s, 1.0, s);
+        let stone_n = self.noise_stone.generate(bx, bz, 0.0, 16, 16, 1, s * 2.0, s * 2.0, s * 2.0);
+        let sea = SEA_LEVEL;
+        for a in 0..16usize {
+            for b in 0..16usize {
+                let biome = biomes[a + b * 16];
+                let sand = sand_n[a + b * 16] + self.rand.next_double() * 0.2 > 0.0;
+                let gravel = gravel_n[a + b * 16] + self.rand.next_double() * 0.2 > 3.0;
+                let stone = (stone_n[a + b * 16] / 3.0 + 3.0 + self.rand.next_double() * 0.25) as i32;
+                let mut depth = -1;
+                let mut top = biome.top_block();
+                let mut filler = biome.filler_block();
+                for y in (0..H).rev() {
+                    let idx = (b * 16 + a) * 128 + y;
+                    if y as i32 <= self.rand.next_int_bound(5) {
+                        blocks[idx] = block::BEDROCK;
+                        continue;
+                    }
+                    let cur = blocks[idx];
+                    if cur == block::AIR {
+                        depth = -1;
+                    } else if cur == block::STONE {
+                        if depth == -1 {
+                            if stone <= 0 {
+                                top = block::AIR;
+                                filler = block::STONE;
+                            } else if y as i32 >= sea - 4 && y as i32 <= sea + 1 {
+                                top = biome.top_block();
+                                filler = biome.filler_block();
+                                if gravel { top = block::AIR; }
+                                if gravel { filler = block::GRAVEL; }
+                                if sand { top = block::SAND; }
+                                if sand { filler = block::SAND; }
+                            }
+                            if (y as i32) < sea && top == block::AIR {
+                                top = block::WATER;
+                            }
+                            depth = stone;
+                            blocks[idx] = if y as i32 >= sea - 1 { top } else { filler };
+                        } else if depth > 0 {
+                            depth -= 1;
+                            blocks[idx] = filler;
+                            if depth == 0 && filler == block::SAND {
+                                depth = self.rand.next_int_bound(4);
+                                filler = block::SANDSTONE;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// provideChunk's per-chunk Random seed.
+fn chunk_seed(chunk_x: i32, chunk_z: i32) -> i64 {
+    (chunk_x as i64).wrapping_mul(341873128712).wrapping_add((chunk_z as i64).wrapping_mul(132897987541))
 }
 
 impl OverworldGenerator {
@@ -303,15 +281,15 @@ impl OverworldGenerator {
     pub fn populate_ores(&mut self, blocks: &mut [u8], origin: (i32, i32)) {
         // Re-seed per the decomp's populate() formula.
         // Java's long is i64; we mirror that here.
-        let world_seed: i64 = 0xCAFEBABEu64 as i64;
-        let mut rng = JavaRandom::new(world_seed as u64);
+        let world_seed: i64 = 0xCAFEBABEi64;
+        let mut rng = JavaRandom::new(world_seed);
         let _ = rng.next_long();
         let _ = rng.next_long();
         // Chunk-relative seed.
         let chunk_seed: i64 = ((origin.0 as i64).wrapping_mul(341873128712i64))
             .wrapping_add((origin.1 as i64).wrapping_mul(132897987541i64))
             ^ world_seed;
-        let mut rng = JavaRandom::new(chunk_seed as u64);
+        let mut rng = JavaRandom::new(chunk_seed);
         // Vein counts from decomp populate().
         let veins: &[((u8, i32), i32)] = &[
             ((block::ORE_COAL, 16), 20),
@@ -384,5 +362,77 @@ impl OverworldGenerator {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fnv(bytes: &[u8]) -> u64 {
+        let mut h: u64 = 0xcbf29ce484222325;
+        for &b in bytes {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+        h
+    }
+
+    /// (seed, chunk x, chunk z, [biome hash, terrain hash, surface hash,
+    /// temp[0] bits, humidity[0] bits, temp[255] bits, humidity[255] bits]),
+    /// produced by the real b1.7.3 ChunkProviderGenerate / WorldChunkManager
+    /// (tools/golden/G.java). Terrain and surface are hashed after
+    /// generateTerrain and after replaceBlocksForBiome; caves are not run.
+    #[allow(clippy::type_complexity)]
+    const GOLDEN: &[(i64, i32, i32, [u64; 7])] = &[
+        (3405691582, 0, 0, [0x1327a4fb26c0378a, 0x3967fa67a187f317, 0x9a56ede6c16cd66b, 0x3feae9d10fe31574, 0x3fd096af2aa2654b, 0x3fea30ff0dc61801, 0x3fc4e7839aba6def]),
+        (3405691582, -1, 0, [0x8faa464d6523b860, 0xec8a1c3f37cf5e73, 0xfc6e42d5df332ea1, 0x3febf64daf796031, 0x3fc4b5a474e86e7e, 0x3fea1e99191a70cb, 0x3fc7093585cd1d7e]),
+        (3405691582, 3, -5, [0x683f678012279f2c, 0x0ba3057b77f361b6, 0x0e735f70424439c2, 0x3febc224a46d4046, 0x3fd4cf0088b65297, 0x3fe979e85d51756d, 0x3fcb537d10815712]),
+        (3405691582, 7, 7, [0xc8727fb8ed51d025, 0x6b09a800ea91114d, 0x1cbcf19473960aa7, 0x3fec14a3a633f4cf, 0x3fe3d9ee7893a3d0, 0x3fed87af244c3f78, 0x3fe0b4927eebc9c7]),
+        (3405691582, -9, 12, [0xc8727fb8ed51d025, 0xdab56ccd58b1fcc5, 0xbc75dc0940e2ea88, 0x3fee3a7f389b51b5, 0x3fd96702c6b4913d, 0x3fed4852a7cd85c8, 0x3fdbb3e37dabbb1a]),
+        (3405691582, 20, -20, [0xc8727fb8ed51d025, 0x55c7686520d178cd, 0x41f3e604c1007e4e, 0x3fe84fdb5be4711d, 0x3fec5650603fe3cb, 0x3fe7f209f60e52a8, 0x3fea8bcb2072fe81]),
+        (12345, 0, 0, [0x6d851e31644b63d9, 0x89fd438a9df0c135, 0xed5f3c87f3c8df60, 0x3fef189e7c134589, 0x0000000000000000, 0x3fee271e1a29ffcf, 0x0000000000000000]),
+        (12345, -1, 0, [0x295f1101e4692025, 0x7c44e7cfe08ba9ea, 0x7d715d7ac61d409c, 0x3fef76a014c9e1ee, 0x0000000000000000, 0x3fef01afbcd40ed7, 0x0000000000000000]),
+        (12345, 3, -5, [0x295f1101e4692025, 0x851e2fc766a4336d, 0xdface7a7d01407e6, 0x3fef0dbcb26e96f1, 0x0000000000000000, 0x3fef73be938f8508, 0x0000000000000000]),
+        (12345, 7, 7, [0x295f1101e4692025, 0xc7a406f41ec9ee9e, 0x9a7f11f6f047f8ed, 0x3fefe590ce0388c5, 0x3faf0876f6159bf4, 0x3feff4600d822d7f, 0x3f9c63f177c8c1c8]),
+        (12345, -9, 12, [0x9c0e1f6aa8bc6325, 0xd8b8171f0e537465, 0x90a0926da3bd22ab, 0x3fefed1bed638966, 0x3fe65abd6a73b9f3, 0x3feffb77a92ee4d9, 0x3fe49d2764fe3ab5]),
+        (12345, 20, -20, [0x9c0e1f6aa8bc6325, 0x7cdca60de33f86b6, 0xa310fd6d438f5808, 0x3fefff7baffafaa5, 0x3fe389a50c7ebfcf, 0x3fefb0e58b9c9a6a, 0x3fe19200cc8f9804]),
+        (-4172144997902289642, 0, 0, [0x8bfa194563a8f2e6, 0x5ded6519db30a109, 0x0133331e8c6e75b2, 0x3fefcf1dfcc1e0e5, 0x3fd43c4352020db4, 0x3fef9d98e01e00a6, 0x3fc82c38ae5597f3]),
+        (-4172144997902289642, -1, 0, [0xa6d462c883e1b85a, 0xea4ec455eb8764f4, 0x06037b55bb252193, 0x3fefffed9fb5435c, 0x3fdd168412869dac, 0x3fef9b89a3018163, 0x3fc75c44e82d3bd4]),
+        (-4172144997902289642, 3, -5, [0x9c0e1f6aa8bc6325, 0xb6745edd68f89a69, 0xea5bfd643f4df4b0, 0x3fefe077749c032c, 0x3fe8c2ee5a718d7c, 0x3feffe7c47ef27a0, 0x3fe36f7c15bd5455]),
+        (-4172144997902289642, 7, 7, [0x625fcbb3471847fa, 0x1d4d17f848620803, 0x7a6f2c451bdf45ad, 0x3fef14348077e4ff, 0x3fc590dc5fded887, 0x3fee272b89616484, 0x3f805451b6c600b3]),
+        (-4172144997902289642, -9, 12, [0xc8727fb8ed51d025, 0x962d5e969105894d, 0x4357efb289b05be6, 0x3fee9b2c199d1697, 0x3fe364981c5a5245, 0x3feecea5c3aaa326, 0x3fe3bf38c95cf33d]),
+        (-4172144997902289642, 20, -20, [0x9c0e1f6aa8bc6325, 0x6b173dd57b841225, 0x65810d927c5461d7, 0x3fefffc5557a61d0, 0x3fe0501aa1b22356, 0x3feff68079d6f263, 0x3fe6455f9e848ce0]),
+    ];
+
+    #[test]
+    fn matches_java_reference() {
+        for &(seed, cx, cz, want) in GOLDEN {
+            let at = format!("seed {seed} chunk ({cx}, {cz})");
+            let mut cm = WorldChunkManager::new(seed);
+            let mut g = OverworldGenerator::new(seed);
+            g.rand.set_seed(chunk_seed(cx, cz));
+            let biomes = cm.load_block_generator_data(cx * 16, cz * 16, 16, 16);
+            let codes: Vec<u8> = biomes.iter().map(|b| b.java_code()).collect();
+            assert_eq!(fnv(&codes), want[0], "biomes, {at}");
+            assert_eq!(cm.temperature[0].to_bits(), want[3], "temperature[0], {at}");
+            assert_eq!(cm.humidity[0].to_bits(), want[4], "humidity[0], {at}");
+            assert_eq!(cm.temperature[255].to_bits(), want[5], "temperature[255], {at}");
+            assert_eq!(cm.humidity[255].to_bits(), want[6], "humidity[255], {at}");
+            let mut blocks = vec![block::AIR; VOLUME];
+            g.generate_terrain(cx, cz, &mut blocks, &cm.temperature, &cm.humidity);
+            assert_eq!(fnv(&blocks), want[1], "terrain, {at}");
+            g.replace_blocks_for_biome(cx, cz, &mut blocks, &biomes);
+            assert_eq!(fnv(&blocks), want[2], "surface, {at}");
+        }
+    }
+
+    #[test]
+    fn generate_is_deterministic() {
+        let mut cm = WorldChunkManager::new(42);
+        let mut g = OverworldGenerator::new(42);
+        let a = g.generate(2, -3, &mut cm);
+        let b = g.generate(2, -3, &mut cm);
+        assert_eq!(a, b);
     }
 }
