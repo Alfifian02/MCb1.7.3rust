@@ -274,11 +274,13 @@ fn chunk_seed(chunk_x: i32, chunk_z: i32) -> i64 {
 }
 
 impl OverworldGenerator {
-    /// M3e-ores: populate a 16x16 chunk with ore veins. Beta-1.7's
+    /// M3e-ores: populate one chunk with ore veins. Beta-1.7's
     /// WorldGenMinable algorithm: an ellipsoid of stone->ore blocks.
-    /// `blocks` is in absolute world coords (the same layout the mesher
-    /// uses). For the super-chunk 48x48, pass `origin = (chunk_x*16, chunk_z*16)`.
-    pub fn populate_ores(&mut self, blocks: &mut [u8], origin: (i32, i32)) {
+    /// `blocks` is the chunk's own 16x128x16 array; `chunk` is its (cx, cz), used for the seed.
+    /// Veins are clipped at the chunk edge (UNVERIFIED; the real populate() in M4d reaches into
+    /// the +X/+Z neighbours).
+    pub fn populate_ores(&mut self, blocks: &mut [u8], chunk: (i32, i32)) {
+        let origin = (chunk.0 * 16, chunk.1 * 16);
         // Re-seed per the decomp's populate() formula.
         // Java's long is i64; we mirror that here.
         let world_seed: i64 = 0xCAFEBABEi64;
@@ -301,9 +303,11 @@ impl OverworldGenerator {
         ];
         for &((ore, size), count) in veins {
             for _ in 0..count {
-                let cx = origin.0 + (rng.next_u31() as i32 % 16) + 8;
+                // Chunk-local. The -8 cancels the +8 in place_vein, so the vein centre lands
+                // inside this chunk instead of half of them being clipped away.
+                let cx = (rng.next_u31() as i32 % 16) - 8;
                 let cy = rng.next_u31() as i32 % 128;
-                let cz = origin.1 + (rng.next_u31() as i32 % 16) + 8;
+                let cz = (rng.next_u31() as i32 % 16) - 8;
                 // Some ores have y-bounds tighter than 128.
                 let max_y = match ore {
                     block::ORE_IRON => 64,
@@ -313,14 +317,13 @@ impl OverworldGenerator {
                     _ => 128,
                 };
                 let cy = cy.min(max_y - 1);
-                self.place_vein(blocks, &mut rng, ore, size, cx, cy, cz, origin);
+                self.place_vein(blocks, &mut rng, ore, size, cx, cy, cz);
             }
         }
     }
 
-    fn place_vein(&self, blocks: &mut [u8], rng: &mut JavaRandom, ore: u8, size: i32, x0: i32, y0: i32, z0: i32, _origin: (i32, i32)) {
-        // Direct port of WorldGenMinable.generate(). Only places ore inside
-        // the super-chunk's 48x48 footprint.
+    fn place_vein(&self, blocks: &mut [u8], rng: &mut JavaRandom, ore: u8, size: i32, x0: i32, y0: i32, z0: i32) {
+        // Direct port of WorldGenMinable.generate(). Only places ore inside this chunk.
         let angle = rng.next_u31() as f64 / 4294967295.0 * std::f64::consts::PI;
         let sin_a = angle.sin();
         let cos_a = angle.cos();
@@ -352,9 +355,8 @@ impl OverworldGenerator {
                     for bz in z_lo..=z_hi {
                         let dzn = (bz as f64 + 0.5 - cz) / (swell / 2.0);
                         if dxn * dxn + dyn_ * dyn_ + dzn * dzn >= 1.0 { continue; }
-                        // Only place if inside the 48x48 super-chunk.
-                        if bx < 0 || bx >= 48 || bz < 0 || bz >= 48 || by < 0 || by >= 128 { continue; }
-                        let idx = ((bx as usize) * 48 + bz as usize) * H + by as usize;
+                        if bx < 0 || bx >= 16 || bz < 0 || bz >= 16 || by < 0 || by >= 128 { continue; }
+                        let idx = ((bx as usize) * 16 + bz as usize) * H + by as usize;
                         if blocks[idx] == block::STONE {
                             blocks[idx] = ore;
                         }

@@ -1,20 +1,13 @@
-//! M1 chunk mesher.
+//! Chunk mesher.
 //!
-//! Goal: emit only the *exterior* faces of a 16x16x128 chunk filled with stone.
-//! No neighbor culling across chunks yet (this chunk is air on all 6 sides).
+//! One mesh per 16x128x16 chunk. Faces are emitted only where the neighbouring cell is air;
+//! at the chunk edge the neighbour is read from the adjacent chunk, so no faces are wasted on
+//! the seams between loaded chunks. Vertex positions are world coordinates.
 //!
-//! Vertex format: position(3) + uv(2) + normal_or_ao(1) = 6 floats = 24 bytes.
+//! Vertex format: position(3) + uv(2) + light(1) = 6 floats = 24 bytes (`gpu::pipeline::Vertex`).
 
-use crate::world::chunk::{Chunk, H};
 use crate::render::atlas;
-
-#[inline]
-fn idx_ext(x: usize, y: usize, z: usize, _w: usize, d: usize) -> usize {
-    // (x * d + z) * H + y; for d == 16 this equals the old (x<<11)|(z<<7)|y. The shifts only
-    // work for a 16-deep chunk: with d == 48 their bits overlap and columns overwrite each other.
-    (x * d + z) * H + y
-}
-
+use crate::world::chunk::{idx, H, VOLUME};
 
 /// One textured quad. Four corners in CCW order from the front.
 /// `normal_index` selects the face normal (0..5) for debug-coloring later.
@@ -65,53 +58,34 @@ const FACES: [Face; 6] = [
     },
 ];
 
-/// Decide which of the 6 faces a single cell exposes by checking each of the 6
-/// neighbors. Out-of-bounds counts as air (so a stone chunk emits its side faces).
-/// Air cells emit no faces. Interior cells emit no faces -> mesh is much smaller.
-fn exposed_faces(chunk: &Chunk, x: usize, y: usize, z: usize, w: usize, d: usize) -> u8 {
-    use crate::world::chunk::H;
-    let here = chunk.blocks[idx_ext(x, y, z, w, d)];
-    if here == 0 { return 0; }
-    let mut mask = 0u8;
-    // Face order in FACES: 0=+X 1=-X 2=+Y 3=-Y 4=+Z 5=-Z
-    let nx_p = if x + 1 < w { chunk.blocks[idx_ext(x+1, y, z, w, d)] } else { 0 };
-    let nx_m = if x     > 0 { chunk.blocks[idx_ext(x-1, y, z, w, d)] } else { 0 };
-    let ny_p = if y + 1 < H { chunk.blocks[idx_ext(x, y+1, z, w, d)] } else { 0 };
-    let ny_m = if y     > 0 { chunk.blocks[idx_ext(x, y-1, z, w, d)] } else { 0 };
-    let nz_p = if z + 1 < d { chunk.blocks[idx_ext(x, y, z+1, w, d)] } else { 0 };
-    let nz_m = if z     > 0 { chunk.blocks[idx_ext(x, y, z-1, w, d)] } else { 0 };
-    if nx_p == 0 { mask |= 1 << 0; }
-    if nx_m == 0 { mask |= 1 << 1; }
-    if ny_p == 0 { mask |= 1 << 2; }
-    if ny_m == 0 { mask |= 1 << 3; }
-    if nz_p == 0 { mask |= 1 << 4; }
-    if nz_m == 0 { mask |= 1 << 5; }
-    mask
-}
+/// Face order matches `FACES`: +X, -X, +Y, -Y, +Z, -Z.
+const DIRS: [(i32, i32, i32); 6] = [(1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)];
 
-/// Build vertex + index buffers for the chunk.
-/// Vertices: 6 floats each (px, py, pz, u, v, light).
-/// Indices: 6 per face (two triangles).
-///
-/// M3d: this is now generic over the X/Z extent. For the legacy 16x16 chunk
-/// pass `(W, D)` from `world::chunk`. For the 48x48 super-chunk pass `(48, 48)`.
-pub fn build_ext(chunk: &Chunk, w: usize, d: usize) -> (Vec<f32>, Vec<u32>) {
-    assert_eq!(chunk.blocks.len(), w * H * d);
-    let mut verts: Vec<f32> = Vec::with_capacity(64 * 1024);
-    let mut idxs: Vec<u32> = Vec::with_capacity(96 * 1024);
+/// Build vertex + index buffers for one chunk.
+/// `nb` are the blocks of the neighbouring chunks, in the order +X, -X, +Z, -Z; they are only
+/// read for the one-cell border. `(ox, oz)` is the chunk's world origin (chunk * 16).
+/// Vertices: 6 floats each (px, py, pz, u, v, light). Indices: 6 per face (two triangles).
+pub fn build(blocks: &[u8], nb: [&[u8]; 4], ox: i32, oz: i32) -> (Vec<f32>, Vec<u32>) {
+    assert_eq!(blocks.len(), VOLUME);
+    // Cell lookup for x, z in -1..=16 (one cell outside the chunk); above/below the world is air.
+    let get = |x: i32, y: i32, z: i32| -> u8 {
+        if y < 0 || y >= H as i32 { return 0; }
+        let b = if x < 0 { nb[1] } else if x >= 16 { nb[0] } else if z < 0 { nb[3] } else if z >= 16 { nb[2] } else { blocks };
+        b[idx((x & 15) as usize, y as usize, (z & 15) as usize)]
+    };
+    let mut verts: Vec<f32> = Vec::new();
+    let mut idxs: Vec<u32> = Vec::new();
 
-    for y in 0..H {
-        for z in 0..d {
-            for x in 0..w {
-                if chunk.blocks[idx_ext(x, y, z, w, d)] == 0 {
-                    continue; // M2+: only render exposed surfaces; M1 emits all 6
-                }
-                let mask = exposed_faces(chunk, x, y, z, w, d);
-                if mask == 0 {
+    for y in 0..H as i32 {
+        for z in 0..16 {
+            for x in 0..16 {
+                let blk = get(x, y, z);
+                if blk == 0 {
                     continue;
                 }
                 for (face_i, face) in FACES.iter().enumerate() {
-                    if mask & (1 << face_i) == 0 {
+                    let (dx, dy, dz) = DIRS[face_i];
+                    if get(x + dx, y + dy, z + dz) != 0 {
                         continue;
                     }
                     let base = verts.len() as u32 / 6;
@@ -120,15 +94,13 @@ pub fn build_ext(chunk: &Chunk, w: usize, d: usize) -> (Vec<f32>, Vec<u32>) {
                         3 => 0.55,  // -Y bottom
                         _ => 0.80,  // +X, -X, +Z, -Z sides
                     };
-                    let blk = chunk.blocks[idx_ext(x, y, z, w, d)];
-                    // Interleave per vertex: px, py, pz, u, v, light.
-                    // (The renderer repacks this with chunks(6); pushing all four
-                    // positions first and then all UVs scrambled every vertex.)
                     for (corner, uv) in face.corners.iter().zip(face.uv.iter()) {
                         let (au, av) = atlas::atlas_uv(blk, uv[0], uv[1]);
-                        verts.push(corner[0] + x as f32);
+                        // ponytail: world-space f32 vertices lose precision far from the origin
+                        // (about 1 cm at 100k blocks); upgrade path is a per-chunk offset uniform.
+                        verts.push(corner[0] + (ox + x) as f32);
                         verts.push(corner[1] + y as f32);
-                        verts.push(corner[2] + z as f32);
+                        verts.push(corner[2] + (oz + z) as f32);
                         verts.push(au);
                         verts.push(av);
                         verts.push(light);
@@ -149,24 +121,36 @@ pub fn face_count(verts: &[f32]) -> usize {
     verts.len() / 24
 }
 
-/// Backwards-compat wrapper for the original 16x16 chunk shape.
-pub fn build(chunk: &Chunk) -> (Vec<f32>, Vec<u32>) {
-    use crate::world::chunk::{W, D};
-    build_ext(chunk, W, D)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// One block in a 48x48 grid must produce exactly one cube (6 faces). With the old
-    /// shift-based index, (40, 20, 40) aliased other columns and ghost copies appeared.
+    fn air() -> Vec<u8> { vec![0; VOLUME] }
+
+    /// One block in the middle of a chunk is exactly one cube.
     #[test]
-    fn wide_grid_single_block_is_one_cube() {
-        let (w, d) = (48, 48);
-        let mut c = Chunk { blocks: vec![0; w * H * d] };
-        c.blocks[idx_ext(40, 20, 40, w, d)] = 1;
-        let (verts, _) = build_ext(&c, w, d);
+    fn single_block_is_one_cube() {
+        let mut c = air();
+        c[idx(5, 20, 5)] = 1;
+        let a = air();
+        let (verts, _) = build(&c, [&a[..], &a[..], &a[..], &a[..]], 0, 0);
         assert_eq!(face_count(&verts), 6);
+    }
+
+    /// A block on the chunk edge hides the face it shares with the neighbour chunk's block,
+    /// for every one of the four sides.
+    #[test]
+    fn edge_face_is_culled_against_neighbour() {
+        let a = air();
+        let mk = |x: usize, z: usize| { let mut c = air(); c[idx(x, 20, z)] = 1; c };
+        let faces = |me: &[u8], nb: [&[u8]; 4]| face_count(&build(me, nb, 0, 0).0);
+        let (px, nx, pz, nz) = (mk(0, 5), mk(15, 5), mk(5, 0), mk(5, 15));
+        let (a_px, a_nx, a_pz, a_nz) = (mk(15, 5), mk(0, 5), mk(5, 15), mk(5, 0));
+        assert_eq!(faces(&a_px[..], [&px[..], &a[..], &a[..], &a[..]]), 5);
+        assert_eq!(faces(&a_nx[..], [&a[..], &nx[..], &a[..], &a[..]]), 5);
+        assert_eq!(faces(&a_pz[..], [&a[..], &a[..], &pz[..], &a[..]]), 5);
+        assert_eq!(faces(&a_nz[..], [&a[..], &a[..], &a[..], &nz[..]]), 5);
+        // Without the neighbour the same block shows all six.
+        assert_eq!(faces(&a_px[..], [&a[..], &a[..], &a[..], &a[..]]), 6);
     }
 }

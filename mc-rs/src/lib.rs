@@ -1,7 +1,8 @@
 //! mc-rs: Minecraft b1.7.3 in Rust for Android.
 //!
 //! M12 - Landscape touch UX (move stick, look drag, jump button, hotbar, pause menu) on
-//! top of M2 (camera + physics) and M3 (overworld generation).
+//! top of M2 (camera + physics) and M3 (overworld generation), with the world streamed by
+//! `world::chunks::ChunkManager` (render-distance ring, generation on worker threads).
 
 mod render;
 mod world;
@@ -18,13 +19,15 @@ use core::ffi::c_void;
 use std::time::{Duration, Instant};
 
 use crate::gpu::context::Gpu;
-use crate::gpu::pipeline::{ChunkPipeline, Vertex, create_index_buffer, create_vertex_buffer};
+use crate::gpu::pipeline::ChunkPipeline;
 use crate::render::camera::FirstPersonCamera;
-use crate::render::mesh;
-use crate::world::chunk::Chunk;
+use crate::world::chunks::{chunk_coord, generate, ChunkManager};
 use crate::world::gen::chunk_manager::WorldChunkManager;
 use crate::world::gen::overworld::OverworldGenerator;
 use crate::world::physics::{self, Player};
+
+/// Render distance in chunks (a circle of this radius is meshed and drawn, one more is generated).
+const RENDER_DIST: i32 = 4;
 
 const LOOK_SENS: f32 = 0.004;
 /// World units per second when the d-pad is fully pressed.
@@ -67,11 +70,7 @@ fn hotbar_color(slot: usize) -> [f32; 4] {
 struct App {
     gpu: Gpu,
     pipe: ChunkPipeline,
-    vbuf: wgpu::Buffer,
-    ibuf: wgpu::Buffer,
-    index_count: u32,
-    chunk: Chunk,
-    generator: OverworldGenerator,
+    chunks: ChunkManager,
     camera: FirstPersonCamera,
     player: Player,
     last_frame: Instant,
@@ -91,89 +90,40 @@ impl App {
         let pipe = ChunkPipeline::new(&gpu.device, surface_format);
         pipe.upload_atlas(&gpu.queue);
 
-        // M3d: build a 3x3 grid of chunks and stitch them into a 48x128x48
-        // "super-chunk" so the player can walk off the original 16x16 boundary
-        // and see neighboring terrain. The mesh + physics still use a single
-        // 48-wide X stride, so no neighbor culling changes are needed.
+        // The spawn search needs real terrain before the first frame, so the 3x3 chunks around
+        // the origin are generated here (init runs on its own thread, not the render loop) and
+        // handed to the manager; everything further out streams in on the worker threads.
         const SEED: i64 = 0xCAFEBABE;
+        let mut chunks = ChunkManager::new(SEED, RENDER_DIST);
         let mut generator = OverworldGenerator::new(SEED);
-        let mut chunk_manager = WorldChunkManager::new(SEED);
-        const SUPER_W: usize = 16 * 3; // 48
-        const SUPER_H: usize = 128;
-        const SUPER_D: usize = 16 * 3; // 48
-        const SUPER_VOLUME: usize = SUPER_W * SUPER_H * SUPER_D;
-        let mut super_blocks: Vec<u8> = vec![0; SUPER_VOLUME];
-        // Order: chunks(cx, cz) for cx in -1..=1, cz in -1..=1
-        for cz_off in -1..=1 {
-            for cx_off in -1..=1 {
-                let blocks = generator.generate(cx_off, cz_off, &mut chunk_manager);
-                let x0 = ((cx_off + 1) as usize) * 16;
-                let z0 = ((cz_off + 1) as usize) * 16;
-                for z in 0..16 {
-                    for x in 0..16 {
-                        for y in 0..128 {
-                            let src = (x << 11) | (z << 7) | y;
-                            // Super-chunk is 48 deep in Z, so its stride is 48 (not 16).
-                            let dst = ((x + x0) * SUPER_D + (z + z0)) * SUPER_H + y;
-                            super_blocks[dst] = blocks[src];
+        let mut climate = WorldChunkManager::new(SEED);
+        // Spawn on dry land closest to the centre of chunk (0, 0). A fixed spawn was under the
+        // sea (top block y=60 < sea level 64), which put the camera inside water blocks.
+        let mut best: Option<(i32, i32, i32, i32)> = None; // x, z, top, dist^2
+        let mut highest = (8, 8, i32::MIN);
+        for cz in -1..=1 {
+            for cx in -1..=1 {
+                let blocks = generate(&mut generator, &mut climate, cx, cz);
+                for lz in 0..16usize {
+                    for lx in 0..16usize {
+                        let t = OverworldGenerator::top_block(&blocks, lx, lz, 16);
+                        let (x, z) = (cx * 16 + lx as i32, cz * 16 + lz as i32);
+                        if t > highest.2 { highest = (x, z, t); }
+                        if t >= 64 {
+                            let d2 = (x - 8).pow(2) + (z - 8).pow(2);
+                            if best.map_or(true, |b| d2 < b.3) { best = Some((x, z, t, d2)); }
                         }
                     }
                 }
+                chunks.insert((cx, cz), blocks);
             }
         }
-        // Treat the super-chunk as a single Chunk (same layout).
-        // M3e-ores: place ore veins in each of the 9 chunks.
-        for cz_off in -1..=1 {
-            for cx_off in -1..=1 {
-                generator.populate_ores(
-                    &mut super_blocks,
-                    (cx_off * 16, cz_off * 16),
-                );
-            }
-        }
-
-        let chunk = Chunk { blocks: super_blocks.clone() };
-        
-
-        // Spawn on dry land closest to the centre of the super-chunk. The old
-        // fixed (24, 24) spawn was under the sea (top block y=60 < sea level 64),
-        // which put the camera inside water blocks.
-        let (spawn_x, spawn_z, top) = {
-            let mut best: Option<(usize, usize, i32, i32)> = None; // x, z, top, dist^2
-            let mut highest = (24usize, 24usize, i32::MIN);
-            for z in 2..46usize {
-                for x in 2..46usize {
-                    let t = OverworldGenerator::top_block(&super_blocks, x, z, SUPER_D);
-                    if t > highest.2 { highest = (x, z, t); }
-                    if t >= 64 {
-                        let d2 = (x as i32 - 24).pow(2) + (z as i32 - 24).pow(2);
-                        if best.map_or(true, |b| d2 < b.3) { best = Some((x, z, t, d2)); }
-                    }
-                }
-            }
-            match best {
-                Some((x, z, t, _)) => (x, z, t),
-                None => highest,
-            }
+        let (spawn_x, spawn_z, top) = match best {
+            Some((x, z, t, _)) => (x, z, t),
+            None => highest,
         };
         let spawn_feet_y = (top as f32) + 1.0 + 0.9;
-        log::info!("M3d: super-chunk 48x128x48, spawn at ({}, {}, {}), top block y={}", spawn_x, spawn_feet_y, spawn_z, top);
-
-        let (raw_verts, raw_idxs) = mesh::build_ext(&chunk, 48, 48);
-        let mut verts: Vec<Vertex> = Vec::with_capacity(raw_verts.len() / 6);
-        for chunk_v in raw_verts.chunks(6) {
-            verts.push(Vertex {
-                pos: [chunk_v[0], chunk_v[1], chunk_v[2]],
-                uv: [chunk_v[3], chunk_v[4]],
-                light: chunk_v[5],
-            });
-        }
-        log::info!("M3b: built {} verts, {} idx", verts.len(), raw_idxs.len());
-
-        let vbuf = create_vertex_buffer(&gpu.device, &verts);
-        let ibuf = create_index_buffer(&gpu.device, &raw_idxs);
-        let index_count = raw_idxs.len() as u32;
-        log::info!("M3 init: {} blocks, {} verts, {} idx", chunk.blocks.len(), verts.len(), index_count);
+        log::info!("chunks: render distance {}, spawn at ({}, {}, {}), top block y={}", RENDER_DIST, spawn_x, spawn_feet_y, spawn_z, top);
 
         let mut camera = FirstPersonCamera::spawn_at(spawn_x as f32 + 0.5, spawn_feet_y + EYE_HEIGHT, spawn_z as f32 + 0.5);
         // spawn_at defaults to aspect 1.0 and resize() only runs when the size changes, so
@@ -192,8 +142,8 @@ impl App {
         let hud = HudPipeline::new(&gpu.device, &gpu.queue, surface_format, width, height);
 
         Ok(Self {
-            gpu, pipe, vbuf, ibuf, index_count,
-            chunk, generator, camera,
+            gpu, pipe,
+            chunks, camera,
             player,
             last_frame: Instant::now(),
             frames: 0,
@@ -217,7 +167,7 @@ impl App {
         if dt > 1.0 / 30.0 { dt = 1.0 / 30.0; }
         if dt < 0.0 { dt = 0.0; }
         self.last_frame = now;
-        let blocks = &self.chunk.blocks;
+        let chunks = &self.chunks;
         // Look drag accumulated by the touch UI since the last frame. Drained
         // even when paused so a drag started before pausing doesn't replay.
         let (look_dx, look_dy) = self.touch.take_look();
@@ -245,27 +195,22 @@ impl App {
         if self.touch.jumping() && self.player.on_ground {
             self.player.vel.y = 8.4;
         }
-        // M3d: super-chunk is 48x128x48. Layout is still (x<<11)|(z<<7)|y,
-        // so the only change is the bound check.
-        let get = |x: i32, y: i32, z: i32| -> Option<u8> {
-            if x < 0 || y < 0 || z < 0 { return None; }
-            let (x, y, z) = (x as usize, y as usize, z as usize);
-            if x >= 48 || y >= 128 || z >= 48 { return None; }
-            Some(blocks[(x * 48 + z) * 128 + y])
-        };
+        let get = |x: i32, y: i32, z: i32| chunks.block(x, y, z);
         physics::step(&mut self.player, dt, &get);
         self.camera.pos = self.player.pos + glam::Vec3::new(0.0, EYE_HEIGHT, 0.0);
     }
 
     fn render(&mut self) {
         self.step_frame();
+        let (pcx, pcz) = (chunk_coord(self.player.pos.x), chunk_coord(self.player.pos.z));
+        self.chunks.update(&self.gpu.device, pcx, pcz);
         let (view, proj) = self.camera.build_view_proj();
         self.pipe.upload_uniforms(&self.gpu.queue, view, proj);
 
         // Sky-blue clear color (the red/green debug cycling is no longer needed).
         let clear = wgpu::Color { r: 0.6, g: 0.8, b: 1.0, a: 1.0 };
         if self.frames == 0 {
-            log::info!("M3 render: first frame, surface_format={:?}, index_count={}, drawing chunk", self.gpu.surface_format(), self.index_count);
+            log::info!("render: first frame, surface_format={:?}, {} chunks loaded", self.gpu.surface_format(), self.chunks.loaded());
         }
 
         let frame = match self.gpu.surface.get_current_texture() {
@@ -318,9 +263,12 @@ impl App {
             });
             rp.set_pipeline(&self.pipe.pipeline);
             rp.set_bind_group(0, &self.pipe.bind_group, &[]);
-            rp.set_vertex_buffer(0, self.vbuf.slice(..));
-            rp.set_index_buffer(self.ibuf.slice(..), wgpu::IndexFormat::Uint32);
-            rp.draw_indexed(0..self.index_count, 0, 0..1);
+            // One draw per chunk mesh. M13: frustum-test each chunk's bounds here (see chunks.rs).
+            for m in self.chunks.meshes() {
+                rp.set_vertex_buffer(0, m.vbuf.slice(..));
+                rp.set_index_buffer(m.ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                rp.draw_indexed(0..m.index_count, 0, 0..1);
+            }
         }
         // M12: HUD overlay pass. Built into the same encoder so the HUD
         // never gets lost if the GPU drops a frame.
