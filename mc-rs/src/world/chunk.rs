@@ -12,3 +12,9 @@ pub const VOLUME: usize = W * H * D;
 pub const fn idx(x: usize, y: usize, z: usize) -> usize {
     (x << 11) | (z << 7) | y
 }
+
+/// Blocks with no cube shape (tall grass, dead bush, flowers, mushrooms, snow layer, reeds). The
+/// mesher skips them and physics walks through them until M14 gives them real models.
+pub const fn is_plant(id: u8) -> bool {
+    matches!(id, 31 | 32 | 37..=40 | 78 | 83)
+}

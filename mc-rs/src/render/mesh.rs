@@ -7,7 +7,7 @@
 //! Vertex format: position(3) + uv(2) + light(1) = 6 floats = 24 bytes (`gpu::pipeline::Vertex`).
 
 use crate::render::atlas;
-use crate::world::chunk::{idx, H, VOLUME};
+use crate::world::chunk::{idx, is_plant, H, VOLUME};
 
 /// One textured quad. Four corners in CCW order from the front.
 /// `normal_index` selects the face normal (0..5) for debug-coloring later.
@@ -71,7 +71,8 @@ pub fn build(blocks: &[u8], nb: [&[u8]; 4], ox: i32, oz: i32) -> (Vec<f32>, Vec<
     let get = |x: i32, y: i32, z: i32| -> u8 {
         if y < 0 || y >= H as i32 { return 0; }
         let b = if x < 0 { nb[1] } else if x >= 16 { nb[0] } else if z < 0 { nb[3] } else if z >= 16 { nb[2] } else { blocks };
-        b[idx((x & 15) as usize, y as usize, (z & 15) as usize)]
+        let id = b[idx((x & 15) as usize, y as usize, (z & 15) as usize)];
+        if is_plant(id) { 0 } else { id } // see `is_plant`: neither drawn nor occluding
     };
     let mut verts: Vec<f32> = Vec::new();
     let mut idxs: Vec<u32> = Vec::new();

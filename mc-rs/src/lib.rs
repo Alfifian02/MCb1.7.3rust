@@ -21,12 +21,11 @@ use std::time::{Duration, Instant};
 use crate::gpu::context::Gpu;
 use crate::gpu::pipeline::ChunkPipeline;
 use crate::render::camera::FirstPersonCamera;
-use crate::world::chunks::{chunk_coord, generate, ChunkManager};
-use crate::world::gen::chunk_manager::WorldChunkManager;
-use crate::world::gen::overworld::OverworldGenerator;
+use crate::world::chunk::is_plant;
+use crate::world::chunks::{chunk_coord, ChunkManager};
 use crate::world::physics::{self, Player};
 
-/// Render distance in chunks (a circle of this radius is meshed and drawn, one more is generated).
+/// Render distance in chunks (a circle of this radius is meshed and drawn, two more are generated).
 const RENDER_DIST: i32 = 4;
 
 const LOOK_SENS: f32 = 0.004;
@@ -95,32 +94,28 @@ impl App {
         let pipe = ChunkPipeline::new(&gpu.device, surface_format);
         pipe.upload_atlas(&gpu.queue);
 
-        // The spawn search needs real terrain before the first frame, so the 3x3 chunks around
-        // the origin are generated here (init runs on its own thread, not the render loop) and
-        // handed to the manager; everything further out streams in on the worker threads.
+        // The spawn search needs real terrain before the first frame, so the chunks around the
+        // origin are generated and populated here (init runs on its own thread, not the render loop);
+        // everything further out streams in on the worker threads. Raw -1..=2 populates -1..=1,
+        // which finishes chunks 0..=1, the area searched.
         const SEED: i64 = 0xCAFEBABE;
         let mut chunks = ChunkManager::new(SEED, RENDER_DIST);
-        let mut generator = OverworldGenerator::new(SEED);
-        let mut climate = WorldChunkManager::new(SEED);
-        // Spawn on dry land closest to the centre of chunk (0, 0). A fixed spawn was under the
-        // sea (top block y=60 < sea level 64), which put the camera inside water blocks.
+        chunks.preload(-1, 2);
+        // Spawn on dry ground closest to the centre of chunk (0, 0): not under water (a fixed spawn
+        // at y=60 put the camera inside the sea), and not on top of a tree.
+        let top_of = |x: i32, z: i32| {
+            (0..128).rev().find(|&y| !matches!(chunks.block(x, y, z), Some(0 | 8 | 9 | 17 | 18)) && !chunks.block(x, y, z).is_some_and(is_plant)).unwrap_or(-1)
+        };
         let mut best: Option<(i32, i32, i32, i32)> = None; // x, z, top, dist^2
         let mut highest = (8, 8, i32::MIN);
-        for cz in -1..=1 {
-            for cx in -1..=1 {
-                let blocks = generate(&mut generator, &mut climate, cx, cz);
-                for lz in 0..16usize {
-                    for lx in 0..16usize {
-                        let t = OverworldGenerator::top_block(&blocks, lx, lz, 16);
-                        let (x, z) = (cx * 16 + lx as i32, cz * 16 + lz as i32);
-                        if t > highest.2 { highest = (x, z, t); }
-                        if t >= 64 {
-                            let d2 = (x - 8).pow(2) + (z - 8).pow(2);
-                            if best.map_or(true, |b| d2 < b.3) { best = Some((x, z, t, d2)); }
-                        }
-                    }
+        for z in 0..32 {
+            for x in 0..32 {
+                let t = top_of(x, z);
+                if t > highest.2 { highest = (x, z, t); }
+                if t >= 64 {
+                    let d2 = (x - 8).pow(2) + (z - 8).pow(2);
+                    if best.map_or(true, |b| d2 < b.3) { best = Some((x, z, t, d2)); }
                 }
-                chunks.insert((cx, cz), blocks);
             }
         }
         let (spawn_x, spawn_z, top) = match best {
@@ -204,7 +199,8 @@ impl App {
         if self.touch.jumping() && self.player.on_ground {
             self.player.vel.y = 8.4;
         }
-        let get = |x: i32, y: i32, z: i32| chunks.block(x, y, z);
+        // Plants (flowers, tall grass, snow layer, reeds) are drawn as nothing yet, so they are not solid.
+        let get = |x: i32, y: i32, z: i32| chunks.block(x, y, z).map(|b| if is_plant(b) { 0 } else { b });
         physics::step(&mut self.player, dt, &get);
         self.camera.pos = self.player.pos + glam::Vec3::new(0.0, EYE_HEIGHT, 0.0);
     }

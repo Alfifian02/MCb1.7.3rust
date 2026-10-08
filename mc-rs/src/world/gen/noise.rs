@@ -67,18 +67,27 @@ impl JavaRandom {
     pub fn next_boolean(&mut self) -> bool {
         self.next(1) != 0
     }
-
-    /// Kept for the old ore placer; M4d replaces it with the real populate().
-    pub fn next_u31(&mut self) -> u32 {
-        self.next(31) as u32
-    }
 }
 
-/// Java `(int)v` followed by the decomp's floor correction.
+/// MathHelper.floor_double: Java `(int)v` followed by the decomp's floor correction.
 #[inline]
-fn ifloor(v: f64) -> i32 {
+pub fn ifloor(v: f64) -> i32 {
     let i = v as i32;
     if v < i as f64 { i - 1 } else { i }
+}
+
+/// MathHelper.sin / cos: the 65536-entry float table, NOT `f32::sin` (the table is coarser).
+fn sin_table() -> &'static [f32] {
+    static T: std::sync::OnceLock<Vec<f32>> = std::sync::OnceLock::new();
+    T.get_or_init(|| (0..65536).map(|i| (i as f64 * std::f64::consts::PI * 2.0 / 65536.0).sin() as f32).collect())
+}
+
+pub fn mh_sin(x: f32) -> f32 {
+    sin_table()[((x * 10430.378_f32) as i32 & 0xffff) as usize]
+}
+
+pub fn mh_cos(x: f32) -> f32 {
+    sin_table()[((x * 10430.378_f32 + 16384.0_f32) as i32 & 0xffff) as usize]
 }
 
 #[inline]
@@ -134,6 +143,14 @@ impl PerlinNoise {
     #[inline]
     fn p(&self, i: i32) -> i32 {
         self.perm[i as usize]
+    }
+
+    /// NoiseGeneratorPerlin.generateNoise(x, y, z): one 3D sample, via the batch path (2 in y so
+    /// the 3D branch runs; `dx = 1` and `amp = 1` make it the plain sample).
+    pub fn sample(&self, x: f64, y: f64, z: f64) -> f64 {
+        let mut out = [0.0; 2];
+        self.add(&mut out, x, y, z, 1, 2, 1, 1.0, 1.0, 1.0, 1.0);
+        out[0]
     }
 
     /// Add this octave's noise into `out` (func_805_a). `amp` is the octave
@@ -237,6 +254,16 @@ impl OctaveNoise {
             amp /= 2.0;
         }
         out
+    }
+
+    /// NoiseGeneratorOctaves.func_806_a: one (x, z) sample summed over the octaves.
+    pub fn sample(&self, x: f64, z: f64) -> f64 {
+        let (mut v, mut s) = (0.0, 1.0);
+        for g in &self.gens {
+            v += g.sample(x * s, z * s, 0.0) / s;
+            s /= 2.0;
+        }
+        v
     }
 
     /// func_4109_a: the x/z-only variant (sy = 1, y fixed at 10).

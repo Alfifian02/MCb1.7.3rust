@@ -40,25 +40,22 @@ they matched.
 
 ## Next step
 
-M4d: caves, trees, populate. M4a-c are done: `JavaRandom`, the noise
-generators, `WorldChunkManager` (biomes from climate) and the first two
-`provideChunk` passes now match the real b1.7.3 classes bit for bit (golden
-tests in `overworld.rs`, vectors from `tools/golden/G.java`). Still to port,
-each with a golden test the same way: MapGenBase/MapGenCaves (the last
-`provideChunk` step), then populate(): WorldGenTrees / BigTree / Forest /
-Taiga1/2, WorldGenMinable ores (replacing the old M3 placer, which does not
-follow the Java), flowers, clay, liquids, and snow in cold biomes. b1.7.3 has
-no ravines. Ice Desert exists in BiomeGenBase but climate never selects it.
-
-M4d must also replace `populate_ores` (not faithful, see README). b1.7.3 populate() touches
-+8..+24 blocks into the +X/+Z neighbours, so populate needs one extra ring of generated chunks
-beyond the ones being populated; `ChunkManager` already generates one ring beyond the render ring
-(for mesh border culling), M4d needs a second state ("populated") on top of that.
-
-After M4, M5 (raycast pick + break + place) is the next milestone that
-unlocks anything player-facing.
+M5: raycast pick + break + place (+ the light update). M4 is done: caves and populate match the real classes bit for
+bit (`tools/golden/`). Still approximate in populate (see README): light model, no metadata, no tile entities, no block
+ticks (liquids/sand). Sapling growth, fluid flow and falling sand belong with M5's block updates. Ice Desert exists in
+BiomeGenBase but climate never selects it; b1.7.3 has no ravines.
 
 ## Changelog
+- `done` M4d caves, trees, populate (compiled and tested on a Linux host with rustc 1.85; not run on a device):
+    - `gen/caves.rs`, `gen/populate.rs` (new), `OverworldGenerator::generate` now ends with the caves; `populate_ores`
+      and `next_u31` deleted. `mobSpawnerNoise` is the 8th noise stack (after the 7 terrain ones).
+    - `world/chunks.rs`: raw ring is now `RENDER_DIST + 2`, populate (1 chunk/frame, nearest first) needs the 2x2 raw
+      chunks, a chunk is meshed once populate ran on it and its -X/-Z/-X-Z neighbours (`is_final`); a populate that
+      touches meshed chunks marks them for a rebuild. Spawn area is `preload(-1, 2)`.
+    - Golden: `G.java` has a fake `World` (2x2 chunks, column light model, no-op springs) and prints RAW/POP hashes plus a
+      block table; 3 seeds, 11 cases (taiga+snow, forest, lava lake, dungeon, pumpkin, mushrooms, cactus, clay, big trees).
+    - Plants are neither meshed nor solid (`is_plant`); atlas colours for the new blocks. Spawn search skips trees.
+    - The M4f chunk manager compiled first try on rustc 1.85; its 3 tests pass.
 - `done` M4f chunk manager (`world/chunks.rs`; written without a Rust toolchain, NOT compiled, tested or run on
   a device yet, so expect a compile fix or two on the first CI run):
     - Replaces the 48x48 super-chunk (gone from `lib.rs`, `mesh.rs`, `populate_ores`). Chunks live in a

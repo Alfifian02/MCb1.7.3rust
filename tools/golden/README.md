@@ -15,3 +15,6 @@ the harmless "achievements" stack trace on stderr is expected.)
 
 Add a new section to `G.java` for every new port (caves, trees, ...), then
 copy its numbers into the matching Rust test.
+
+Output lines: `CHUNK` (terrain/surface), `TAB` (block opacity/solid tables), `RAW`/`POP` (4 chunks before and after
+populate, caves included). `java -Dexplore=1 ...` instead prints `IDS` lines to find chunks that exercise a feature.

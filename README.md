@@ -23,8 +23,8 @@ original. Anything that cannot be derived from the b1.7.3 sources is marked
 | M12 Touch UX         | done (this commit) | Landscape-only. Floating analog move stick (left half), look drag (right half), jump button, hotbar tap, pause menu. |
 | M4a-c Faithful terrain + biomes | done | java.util.Random, Perlin/simplex noise, WorldChunkManager (climate -> 10 biomes), generateTerrain and replaceBlocksForBiome. Bit-exact against the real b1.7.3 classes on 18 chunks (3 seeds), golden test passes (`tools/golden/`). |
 | M4e Fix pass | done (not yet run on a device) | 48x48 stitching index, jump ground probe, eye height, aspect/resize sync, immersive nav bar, climate float constants. See the changelog in ROADMAP.md. |
-| M4f Chunk manager | done (written without a compiler; not built or run yet) | Chunks keyed by (cx, cz), one mesh per chunk, circular render-distance ring (4 chunks) that loads/unloads as you walk, terrain generated on 1-2 worker threads, cross-chunk face culling. Replaces the 48x48 super-chunk. |
-| M4d Caves, trees, populate | pending | MapGenCaves, WorldGenTrees/BigTree/Forest/Taiga, real populate() (replaces the old ore placer). |
+| M4f Chunk manager | done (now compiles and its tests pass on a Linux host; not run on a device) | Chunks keyed by (cx, cz), one mesh per chunk, circular render-distance ring (4 chunks) that loads/unloads as you walk, terrain generated on 1-2 worker threads, cross-chunk face culling. Replaces the 48x48 super-chunk. |
+| M4d Caves, trees, populate | done (compiled + golden-tested on a Linux host; not run on a device) | MapGenCaves in `generate`, full `populate()` (lakes, dungeons, clay, dirt/gravel/ores, oak/birch/big/taiga trees, flowers, grass, reeds, pumpkins, cactus, springs, snow). Bit-exact vs the real Java on 11 cases (`tools/golden/`). Chunk manager gained the populated/final state. |
 | M5..M14              | pending | See ROADMAP.md for the order. |
 
 Latest commit on `main`: see `git log -1`. Latest released APK: see the
@@ -54,7 +54,9 @@ mc-rs/
       biome.rs            Beta-1.7 climate -> biome table (10 reachable biomes)
       physics.rs          swept AABB, gravity, on_ground
       gen/
-        mod.rs            generator trait
+        mod.rs            module list
+        caves.rs          MapGenBase + MapGenCaves
+        populate.rs       Region (2x2 chunks) + populate() and every WorldGen* class
         noise.rs          PerlinNoise + OctaveNoise, java.util.Random clone
         overworld.rs      ChunkProviderGenerate port (density + biome surface)
 keystore/
@@ -77,10 +79,12 @@ UNVERIFIED until you can show a reference.
   `ChunkProviderGenerate.provideChunk`. 5x17x5 density grid, trilinear
   interpolation across cells, then `replaceBlocksForBiome` for the
   grass/dirt/sand/gravel surface pass.
-- `world::gen::overworld::populate_ores` — now chunk-local (veins clipped at the chunk edge). **NOT faithful** (UNVERIFIED). Right ore
-  kinds, counts and vein sizes, but wrong RNG seeding (not populate()'s odd-multiplier
-  seed), wrong calls (`% n` instead of `nextInt`, no float maths as in
-  `WorldGenMinable`), wrong height ranges, no dirt/gravel patches. Replaced in M4d.
+- `world::gen::caves` — port of `MapGenBase`/`MapGenCaves` (incl. the `y` off-by-one quirk), run at the end of `generate`. Golden-tested.
+- `world::gen::populate` — port of `populate()` and the `WorldGen*` classes, same Random draw order. Golden-tested
+  against the real classes on a fake `World` (`tools/golden/G.java`). Known simplifications, none of which touch a
+  Random draw: light is the column model (no lateral spread, no block light), no block metadata (leaf/log species,
+  tall-grass type), no tile entities (chest loot / spawner mob are drawn and dropped), no block ticks (springs do
+  not flow, sand does not fall). Order dependence: vanilla populates in load order; here it is nearest-first.
 - `world::gen::chunk_manager` — climate noise scales are `(double)0.025F` and
   `(double)0.05F` (float widened to double), not the double literals.
 - `world::biome::Biome` — the 8 overworld biomes from `BiomeGenBase`, with
@@ -104,7 +108,7 @@ UNVERIFIED until you can show a reference.
 ```
 cargo test --lib
 ```
-Currently 25 unit tests by count (incl. the 18-chunk golden comparison). Net +3 over the 22 that passed before: 2 mesher tests replace the old super-chunk one, and 2 chunk manager tests are new. None of the changed or new ones have been run yet. `ring_loads_then_unloads_when_walking` generates real chunks, so it takes a few seconds in a debug build.
+Currently 14 unit tests, all passing on a Linux host (rustc 1.85, built in a scratch crate that `#[path]`-includes the sources, because `android-activity` does not build there). That includes the 18-chunk terrain golden, `populate_matches_java` (11 raw+populated 2x2 cases) and `block_tables_match_java`. `ring_loads_then_unloads_when_walking` and the golden tests generate real chunks: use `--release`.
 The crate depends on `android-activity` -> `ndk-sys`, which only compiles for Android, so
 `cargo test` works on an Android host (e.g. Termux) but not on a plain Linux runner. The CI
 `test` job pipes through `tail` without `pipefail`, so a failure there is NOT reported.
@@ -147,7 +151,7 @@ was generated with). The CI workflow does this for you.
 ## Performance notes
 
 - World streaming: render distance is `RENDER_DIST` in `lib.rs` (4 chunks, circular, so ~49 chunks drawn,
-  ~81 generated and kept). One draw call per chunk, at most 2 chunk meshes built per frame. Memory is
+  ~113 generated (radius 6) and ~149 kept). populate() runs on the render thread, one chunk per frame. One draw call per chunk, at most 2 chunk meshes built per frame. Memory is
   32 KB of blocks per loaded chunk. No device numbers yet for this path; the old 48x48 figure
   (~16 ms/frame on a Pixel 4a) no longer applies.
 - M13 adds frustum culling (a filter over `ChunkManager::meshes()`, bounds come from the chunk key) and
@@ -169,5 +173,5 @@ was generated with). The CI workflow does this for you.
   (e.g. the pause button after flipping the phone 180 degrees), add display-cutout insets.
 - The nav bar is hidden with `setSystemUiVisibility` (deprecated since API 30 but still
   honoured on 11-14). Not yet verified on a real device.
-- Terrain is still missing caves (MapGenCaves) and the real populate() (trees, lakes,
-  dungeons, clay, dirt/gravel, flowers, snow). See M4d.
+- Plants (flowers, tall grass, mushrooms, reeds, snow layer) are not drawn and not solid yet (`is_plant`); leaves, water and
+  lava are drawn as opaque flat-colour cubes. Real models/textures are M14.

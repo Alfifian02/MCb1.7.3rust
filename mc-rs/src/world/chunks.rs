@@ -1,10 +1,16 @@
 //! Chunk manager: chunks stored by (cx, cz), one small mesh per chunk, a render-distance ring
 //! that loads and unloads as the player walks, terrain generated on worker threads.
 //!
-//! Per frame: `stream` (cheap, no GPU) collects finished chunks, unloads far ones and asks the
-//! workers for missing ones nearest-first; `mesh_pending` meshes a couple of chunks and uploads
-//! them. A chunk is meshed only once its four neighbours are loaded, so border faces are culled
-//! correctly. That is why the generate ring is one chunk wider than the render ring.
+//! Per frame: `stream` (cheap, no GPU) collects finished chunks, unloads far ones, asks the
+//! workers for missing ones nearest-first and populates one chunk; `mesh_pending` meshes a couple
+//! of chunks and uploads them.
+//!
+//! Three states per chunk: raw (terrain + caves, from a worker), populated (trees, ores, ...) and
+//! final. populate(P) needs raw P, P+x, P+z, P+x+z and writes into all four, so a chunk C is final
+//! once populate has run on C, C-x, C-z and C-x-z, and is meshed only then (and with its four
+//! neighbours loaded, so border faces cull correctly). That is why the raw ring is two chunks wider
+//! than the render ring. A populate that changes an already meshed chunk (or its neighbour's
+//! border) just marks it for a rebuild.
 //!
 //! M13 frustum culling: each chunk's bounds are known from its key
 //! ((cx*16, 0, cz*16) .. +(16, 128, 16)), so it is one `filter` on `meshes()` in the draw loop.
@@ -17,6 +23,7 @@ use crate::render::mesh;
 use crate::world::chunk::{idx, H};
 use crate::world::gen::chunk_manager::WorldChunkManager;
 use crate::world::gen::overworld::OverworldGenerator;
+use crate::world::gen::populate::Region;
 
 type Key = (i32, i32);
 
@@ -30,13 +37,6 @@ pub fn chunk_coord(v: f32) -> i32 {
     (v.floor() as i32) >> 4
 }
 
-/// Terrain for one chunk: provideChunk passes, then the (still unfaithful) M3 ore placer.
-pub fn generate(g: &mut OverworldGenerator, cm: &mut WorldChunkManager, cx: i32, cz: i32) -> Vec<u8> {
-    let mut blocks = g.generate(cx, cz, cm);
-    g.populate_ores(&mut blocks, (cx, cz)); // M4d replaces this with the real populate()
-    blocks
-}
-
 pub struct Mesh {
     pub vbuf: wgpu::Buffer,
     pub ibuf: wgpu::Buffer,
@@ -45,6 +45,8 @@ pub struct Mesh {
 
 struct Entry {
     blocks: Vec<u8>,
+    /// populate() has run on this chunk (it also wrote into its +X/+Z/+X+Z neighbours).
+    populated: bool,
     /// Meshing was done (the mesh may still be `None`: a chunk of pure air has nothing to draw).
     meshed: bool,
     mesh: Option<Mesh>,
@@ -54,13 +56,17 @@ pub struct ChunkManager {
     chunks: HashMap<Key, Entry>,
     /// Requested from a worker, not back yet.
     pending: HashSet<Key>,
-    /// Offsets of the generate ring (radius + 1), nearest first.
+    /// Offsets of the raw ring (radius + 2), nearest first.
     ring: Vec<Key>,
     /// Render radius in chunks.
     radius: i32,
     /// Player chunk at the last unload pass.
     center: Option<Key>,
     max_in_flight: usize,
+    /// populate() runs here, on the render thread, one chunk per frame.
+    /// ponytail: move it to the workers if it shows up in a frame profile (it would need the 4 chunks behind a lock).
+    gen: OverworldGenerator,
+    cm: WorldChunkManager,
     jobs: mpsc::Sender<Key>,
     done: mpsc::Receiver<(Key, Vec<u8>)>,
 }
@@ -88,7 +94,7 @@ impl ChunkManager {
                         // waiting for a job, not while generating.
                         let job = rx.lock().unwrap_or_else(|e| e.into_inner()).recv();
                         let Ok((cx, cz)) = job else { break };
-                        if tx.send(((cx, cz), generate(&mut g, &mut cm, cx, cz))).is_err() {
+                        if tx.send(((cx, cz), g.generate(cx, cz, &mut cm))).is_err() {
                             break;
                         }
                     }
@@ -96,19 +102,35 @@ impl ChunkManager {
                 .expect("spawn chunk worker");
         }
 
-        let r = radius + 1;
+        let r = radius + 2;
         let mut ring: Vec<Key> = (-r..=r)
             .flat_map(|dx| (-r..=r).map(move |dz| (dx, dz)))
             .filter(|&(dx, dz)| dx * dx + dz * dz <= r * r)
             .collect();
         ring.sort_by_key(|&(dx, dz)| dx * dx + dz * dz);
 
-        Self { chunks: HashMap::new(), pending: HashSet::new(), ring, radius, center: None, max_in_flight: workers * 2, jobs, done }
+        Self { chunks: HashMap::new(), pending: HashSet::new(), ring, radius, center: None, max_in_flight: workers * 2,
+               gen: OverworldGenerator::new(seed), cm: WorldChunkManager::new(seed), jobs, done }
     }
 
-    /// Add an already generated chunk (the spawn area, made synchronously during init).
-    pub fn insert(&mut self, key: Key, blocks: Vec<u8>) {
-        self.chunks.insert(key, Entry { blocks, meshed: false, mesh: None });
+    fn insert(&mut self, key: Key, blocks: Vec<u8>) {
+        self.chunks.insert(key, Entry { blocks, populated: false, meshed: false, mesh: None });
+    }
+
+    /// Generate and populate the chunks `lo..=hi` (both axes) synchronously, for the spawn area:
+    /// init needs real terrain before the first frame. Only chunks whose 2x2 is inside get populated.
+    pub fn preload(&mut self, lo: i32, hi: i32) {
+        for z in lo..=hi {
+            for x in lo..=hi {
+                let blocks = self.gen.generate(x, z, &mut self.cm);
+                self.insert((x, z), blocks);
+            }
+        }
+        for z in lo..hi {
+            for x in lo..hi {
+                self.populate_one(x, z);
+            }
+        }
     }
 
     /// Block at world coordinates. `None` above/below the world (like the old bounds check);
@@ -124,6 +146,11 @@ impl ChunkManager {
         })
     }
 
+    /// Chunk C is final when populate has run on C, C-x, C-z and C-x-z.
+    fn is_final(&self, x: i32, z: i32) -> bool {
+        [(x, z), (x - 1, z), (x, z - 1), (x - 1, z - 1)].iter().all(|k| self.chunks.get(k).is_some_and(|e| e.populated))
+    }
+
     /// Everything that has a mesh, for the draw loop.
     pub fn meshes(&self) -> impl Iterator<Item = &Mesh> {
         self.chunks.values().filter_map(|e| e.mesh.as_ref())
@@ -136,12 +163,15 @@ impl ChunkManager {
     /// Call once per frame with the player's chunk.
     pub fn update(&mut self, device: &wgpu::Device, cx: i32, cz: i32) {
         self.stream(cx, cz);
+        self.populate_pending(cx, cz, 1);
         self.mesh_pending(device, cx, cz);
     }
 
     fn stream(&mut self, cx: i32, cz: i32) {
-        // Keep radius: generate ring + 1, so walking along the edge does not thrash.
-        let keep = (self.radius + 2) * (self.radius + 2);
+        // Keep radius: raw ring + 1, so walking along the edge does not thrash.
+        // ponytail: no saves yet (M7), so a chunk that is unloaded and loaded again is populated again,
+        // on top of what its still-loaded neighbours kept; harmless-ish (trees do not grow into trees).
+        let keep = (self.radius + 3) * (self.radius + 3);
         let d2 = |(x, z): Key| (x - cx) * (x - cx) + (z - cz) * (z - cz);
 
         // 1. Collect finished chunks; ones the player already walked away from are dropped.
@@ -171,6 +201,40 @@ impl ChunkManager {
         }
     }
 
+    /// Run populate on up to `budget` chunks, nearest to (cx, cz) first, whose 2x2 block is loaded.
+    fn populate_pending(&mut self, cx: i32, cz: i32, mut budget: usize) {
+        for i in 0..self.ring.len() {
+            if budget == 0 {
+                break;
+            }
+            if self.populate_one(cx + self.ring[i].0, cz + self.ring[i].1) {
+                budget -= 1;
+            }
+        }
+    }
+
+    /// populate chunk (x, z) if it is not yet and its 2x2 block is loaded. True if it ran.
+    fn populate_one(&mut self, x: i32, z: i32) -> bool {
+        let keys = [(x, z), (x, z + 1), (x + 1, z), (x + 1, z + 1)];
+        if self.chunks.get(&keys[0]).map_or(true, |e| e.populated) || !keys.iter().all(|k| self.chunks.contains_key(k)) {
+            return false;
+        }
+        let blocks = keys.map(|k| std::mem::take(&mut self.chunks.get_mut(&k).unwrap().blocks));
+        let mut region = Region::new(x, z, blocks);
+        self.gen.populate(&mut region, x, z, &mut self.cm);
+        for (k, b) in keys.iter().zip(region.into_blocks()) {
+            self.chunks.get_mut(k).unwrap().blocks = b;
+            // The chunk and its four neighbours (border faces) need a new mesh if they had one.
+            for n in [(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)] {
+                if let Some(e) = self.chunks.get_mut(&(k.0 + n.0, k.1 + n.1)) {
+                    e.meshed = false;
+                }
+            }
+        }
+        self.chunks.get_mut(&keys[0]).unwrap().populated = true;
+        true
+    }
+
     fn mesh_pending(&mut self, device: &wgpu::Device, cx: i32, cz: i32) {
         let r2 = self.radius * self.radius;
         let mut budget = MESH_PER_FRAME;
@@ -181,7 +245,7 @@ impl ChunkManager {
             let (x, z) = (cx + dx, cz + dz);
             let c = &self.chunks;
             let built = match (c.get(&(x, z)), c.get(&(x + 1, z)), c.get(&(x - 1, z)), c.get(&(x, z + 1)), c.get(&(x, z - 1))) {
-                (Some(me), Some(px), Some(nx), Some(pz), Some(nz)) if !me.meshed => Some(mesh::build(
+                (Some(me), Some(px), Some(nx), Some(pz), Some(nz)) if !me.meshed && self.is_final(x, z) => Some(mesh::build(
                     &me.blocks,
                     [px.blocks.as_slice(), nx.blocks.as_slice(), pz.blocks.as_slice(), nz.blocks.as_slice()],
                     x * 16,
@@ -221,6 +285,20 @@ mod tests {
         assert_eq!(m.block(-2, 5, 0), Some(0));
         assert_eq!(m.block(0, 5, 0), Some(1)); // chunk (0, 0) is not loaded
         assert_eq!(m.block(-1, 200, 0), None);
+    }
+
+    /// preload populates every chunk whose 2x2 is loaded, which finishes the inner ones.
+    #[test]
+    fn preload_populates_and_finishes_inner_chunks() {
+        let mut m = ChunkManager::new(1, 1);
+        m.preload(-1, 2);
+        for z in -1..=1 {
+            for x in -1..=1 {
+                assert!(m.chunks[&(x, z)].populated, "({x}, {z})");
+            }
+        }
+        assert!(!m.chunks[&(2, 2)].populated);
+        assert!(m.is_final(0, 0) && m.is_final(1, 1) && !m.is_final(2, 2));
     }
 
     /// The ring around the player fills in from the workers; after a long walk the old area is gone.

@@ -1,11 +1,11 @@
-//! Overworld chunk generator: port of ChunkProviderGenerate (b1.7.3) up to
-//! and including replaceBlocksForBiome. Caves (MapGenCaves) and populate()
-//! (trees, ores, ...) are separate M4 steps.
+//! Overworld chunk generator: port of ChunkProviderGenerate (b1.7.3). `generate` is provideChunk
+//! (terrain, biome surface, caves); populate() (trees, ores, ...) lives in `populate.rs`.
 //!
-//! Verified against the real Java classes: see `matches_java_reference`
+//! Verified against the real Java classes: see `matches_java_reference`, `generate_matches_java`
 //! and tools/golden/.
 
 use crate::world::biome::Biome;
+use crate::world::gen::caves;
 use crate::world::gen::chunk_manager::WorldChunkManager;
 use crate::world::gen::noise::{JavaRandom, OctaveNoise};
 
@@ -21,13 +21,33 @@ pub mod block {
     pub const STONE: u8 = 1;
     pub const GRASS: u8 = 2;
     pub const DIRT: u8 = 3;
+    pub const COBBLE: u8 = 4;
     pub const BEDROCK: u8 = 7;
-    /// Block.waterStill (waterMoving is 8; terrain generation only uses 9).
+    /// Block.waterMoving / waterStill (terrain uses 9; caves and springs use the moving ones).
+    pub const WATER_MOVING: u8 = 8;
     pub const WATER: u8 = 9;
+    pub const LAVA_MOVING: u8 = 10;
+    pub const LAVA: u8 = 11;
     pub const SAND: u8 = 12;
     pub const GRAVEL: u8 = 13;
+    pub const LOG: u8 = 17;
+    pub const LEAVES: u8 = 18;
     pub const SANDSTONE: u8 = 24;
+    pub const TALL_GRASS: u8 = 31;
+    pub const DEAD_BUSH: u8 = 32;
+    pub const FLOWER_Y: u8 = 37;
+    pub const FLOWER_R: u8 = 38;
+    pub const MUSH_BROWN: u8 = 39;
+    pub const MUSH_RED: u8 = 40;
+    pub const MOSSY: u8 = 48;
+    pub const SPAWNER: u8 = 52;
+    pub const CHEST: u8 = 54;
+    pub const SNOW: u8 = 78;
     pub const ICE: u8 = 79;
+    pub const CACTUS: u8 = 81;
+    pub const CLAY: u8 = 82;
+    pub const REED: u8 = 83;
+    pub const PUMPKIN: u8 = 86;
     // Ores (Beta-1.7 numbering, vanilla matches).
     pub const ORE_COAL: u8 = 16;
     pub const ORE_IRON: u8 = 15;
@@ -38,6 +58,8 @@ pub mod block {
 }
 
 pub struct OverworldGenerator {
+    /// World seed (MapGenBase and populate re-seed from it).
+    pub(super) seed: i64,
     /// Shared Random: seeds the noise stacks in order, then is reseeded per
     /// chunk and drives the surface pass.
     rand: JavaRandom,
@@ -48,6 +70,8 @@ pub struct OverworldGenerator {
     noise_stone: OctaveNoise,  // field_908_o, 4
     noise_main: OctaveNoise,   // field_922_a, 10
     noise_height: OctaveNoise, // field_921_b, 16
+    /// mobSpawnerNoise, 8 octaves, last in the constructor's order: populate's tree count.
+    pub(super) noise_spawner: OctaveNoise,
 }
 
 impl OverworldGenerator {
@@ -61,7 +85,8 @@ impl OverworldGenerator {
         let noise_stone = OctaveNoise::new(&mut rand, 4);
         let noise_main = OctaveNoise::new(&mut rand, 10);
         let noise_height = OctaveNoise::new(&mut rand, 16);
-        Self { rand, noise_lim, noise_low, noise_base, noise_sand, noise_stone, noise_main, noise_height }
+        let noise_spawner = OctaveNoise::new(&mut rand, 8);
+        Self { seed, rand, noise_lim, noise_low, noise_base, noise_sand, noise_stone, noise_main, noise_height, noise_spawner }
     }
 
     /// Highest solid block at column (x, z) of a grid `depth` blocks deep in Z, or -1 if none.
@@ -75,13 +100,14 @@ impl OverworldGenerator {
         -1
     }
 
-    /// One 16x128x16 chunk, indexed `(x << 11) | (z << 7) | y`.
+    /// provideChunk: one 16x128x16 chunk (terrain, surface, caves), indexed `(x << 11) | (z << 7) | y`.
     pub fn generate(&mut self, chunk_x: i32, chunk_z: i32, cm: &mut WorldChunkManager) -> Vec<u8> {
         self.rand.set_seed(chunk_seed(chunk_x, chunk_z));
         let biomes = cm.load_block_generator_data(chunk_x * 16, chunk_z * 16, 16, 16);
         let mut blocks = vec![block::AIR; VOLUME];
         self.generate_terrain(chunk_x, chunk_z, &mut blocks, &cm.temperature, &cm.humidity);
         self.replace_blocks_for_biome(chunk_x, chunk_z, &mut blocks, &biomes);
+        caves::carve(self.seed, chunk_x, chunk_z, &mut blocks);
         blocks
     }
 
@@ -271,100 +297,6 @@ impl OverworldGenerator {
 /// provideChunk's per-chunk Random seed.
 fn chunk_seed(chunk_x: i32, chunk_z: i32) -> i64 {
     (chunk_x as i64).wrapping_mul(341873128712).wrapping_add((chunk_z as i64).wrapping_mul(132897987541))
-}
-
-impl OverworldGenerator {
-    /// M3e-ores: populate one chunk with ore veins. Beta-1.7's
-    /// WorldGenMinable algorithm: an ellipsoid of stone->ore blocks.
-    /// `blocks` is the chunk's own 16x128x16 array; `chunk` is its (cx, cz), used for the seed.
-    /// Veins are clipped at the chunk edge (UNVERIFIED; the real populate() in M4d reaches into
-    /// the +X/+Z neighbours).
-    pub fn populate_ores(&mut self, blocks: &mut [u8], chunk: (i32, i32)) {
-        let origin = (chunk.0 * 16, chunk.1 * 16);
-        // Re-seed per the decomp's populate() formula.
-        // Java's long is i64; we mirror that here.
-        let world_seed: i64 = 0xCAFEBABEi64;
-        let mut rng = JavaRandom::new(world_seed);
-        let _ = rng.next_long();
-        let _ = rng.next_long();
-        // Chunk-relative seed.
-        let chunk_seed: i64 = ((origin.0 as i64).wrapping_mul(341873128712i64))
-            .wrapping_add((origin.1 as i64).wrapping_mul(132897987541i64))
-            ^ world_seed;
-        let mut rng = JavaRandom::new(chunk_seed);
-        // Vein counts from decomp populate().
-        let veins: &[((u8, i32), i32)] = &[
-            ((block::ORE_COAL, 16), 20),
-            ((block::ORE_IRON, 8),  20),
-            ((block::ORE_GOLD, 8),  2),
-            ((block::ORE_DIAMOND, 7), 1),
-            ((block::ORE_REDSTONE, 7), 8),
-            ((block::ORE_LAPIS, 6), 1),
-        ];
-        for &((ore, size), count) in veins {
-            for _ in 0..count {
-                // Chunk-local. The -8 cancels the +8 in place_vein, so the vein centre lands
-                // inside this chunk instead of half of them being clipped away.
-                let cx = (rng.next_u31() as i32 % 16) - 8;
-                let cy = rng.next_u31() as i32 % 128;
-                let cz = (rng.next_u31() as i32 % 16) - 8;
-                // Some ores have y-bounds tighter than 128.
-                let max_y = match ore {
-                    block::ORE_IRON => 64,
-                    block::ORE_GOLD => 32,
-                    block::ORE_DIAMOND => 16,
-                    block::ORE_REDSTONE => 16,
-                    _ => 128,
-                };
-                let cy = cy.min(max_y - 1);
-                self.place_vein(blocks, &mut rng, ore, size, cx, cy, cz);
-            }
-        }
-    }
-
-    fn place_vein(&self, blocks: &mut [u8], rng: &mut JavaRandom, ore: u8, size: i32, x0: i32, y0: i32, z0: i32) {
-        // Direct port of WorldGenMinable.generate(). Only places ore inside this chunk.
-        let angle = rng.next_u31() as f64 / 4294967295.0 * std::f64::consts::PI;
-        let sin_a = angle.sin();
-        let cos_a = angle.cos();
-        let dx0 = (x0 as f64 + 8.0) + sin_a * (size as f64) / 8.0;
-        let dx1 = (x0 as f64 + 8.0) - sin_a * (size as f64) / 8.0;
-        let dz0 = (z0 as f64 + 8.0) + cos_a * (size as f64) / 8.0;
-        let dz1 = (z0 as f64 + 8.0) - cos_a * (size as f64) / 8.0;
-        let dy0 = y0 as f64 + (rng.next_u31() as i32 % 3 + 2) as f64;
-        let dy1 = y0 as f64 + (rng.next_u31() as i32 % 3 + 2) as f64;
-        for i in 0..=size {
-            let t = i as f64 / size as f64;
-            let cx = dx0 + (dx1 - dx0) * t;
-            let cy = dy0 + (dy1 - dy0) * t;
-            let cz = dz0 + (dz1 - dz0) * t;
-            let r = (rng.next_u31() as f64 / 4294967295.0) * (size as f64) / 16.0;
-            let swell = ((i as f64 * std::f64::consts::PI / size as f64).sin() + 1.0) * r + 1.0;
-            let x_lo = (cx - swell / 2.0).floor() as i32;
-            let x_hi = (cx + swell / 2.0).floor() as i32;
-            let y_lo = (cy - swell / 2.0).floor() as i32;
-            let y_hi = (cy + swell / 2.0).floor() as i32;
-            let z_lo = (cz - swell / 2.0).floor() as i32;
-            let z_hi = (cz + swell / 2.0).floor() as i32;
-            for bx in x_lo..=x_hi {
-                let dxn = (bx as f64 + 0.5 - cx) / (swell / 2.0);
-                if dxn * dxn >= 1.0 { continue; }
-                for by in y_lo..=y_hi {
-                    let dyn_ = (by as f64 + 0.5 - cy) / (swell / 2.0);
-                    if dxn * dxn + dyn_ * dyn_ >= 1.0 { continue; }
-                    for bz in z_lo..=z_hi {
-                        let dzn = (bz as f64 + 0.5 - cz) / (swell / 2.0);
-                        if dxn * dxn + dyn_ * dyn_ + dzn * dzn >= 1.0 { continue; }
-                        if bx < 0 || bx >= 16 || bz < 0 || bz >= 16 || by < 0 || by >= 128 { continue; }
-                        let idx = ((bx as usize) * 16 + bz as usize) * H + by as usize;
-                        if blocks[idx] == block::STONE {
-                            blocks[idx] = ore;
-                        }
-                    }
-                }
-            }
-        }
-    }
 }
 
 #[cfg(test)]
