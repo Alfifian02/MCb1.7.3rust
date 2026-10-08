@@ -27,6 +27,8 @@ original. Anything that cannot be derived from the b1.7.3 sources is marked
 | M4d Caves, trees, populate | done (compiled + golden-tested on a Linux host; not run on a device) | MapGenCaves in `generate`, full `populate()` (lakes, dungeons, clay, dirt/gravel/ores, oak/birch/big/taiga trees, flowers, grass, reeds, pumpkins, cactus, springs, snow). Bit-exact vs the real Java on 11 cases (`tools/golden/`). Chunk manager gained the populated/final state. |
 | M5 Block interaction | written, NOT compiled | Raycast pick, break (hold), place (tap), light engine port, outline + crosshair. See ROADMAP changelog. |
 | Day/night            | written, NOT compiled | 20-minute cycle: sky light 0..11 subtracted in the mesher, sky colour from sun angle + climate. No sun/moon/stars yet. |
+| Digging              | written, NOT compiled | Hardness-based survival digging, hold to dig, progress bar. No tools yet. |
+| Drops + inventory    | written, logic tested on a Linux host, NOT compiled as a whole | A broken block drops its `idDropped` items as entities (20 Hz motion, pickup after 10 ticks). The hotbar holds real stacks with counts and starts empty; placing uses one up. See ROADMAP changelog. |
 | M6..M14              | pending | See ROADMAP.md for the order. |
 
 Latest commit on `main`: see `git log -1`. Latest released APK: see the
@@ -46,6 +48,7 @@ mc-rs/
       atlas.rs            16x16 RGBA block-id atlas, vanilla-Beta-1.7 colours
       camera.rs           FirstPersonCamera: yaw/pitch/look_at/perspective
       hud.rs              2D orthographic overlay pipeline (M12)
+      items.rs            dropped items: one small flat-colour cube each, bobbing
       mesh.rs             per-chunk mesher, culls against the 4 neighbouring chunks
     input/
       touch_ui.rs         region hit-test + per-pointer state machine (M12)
@@ -56,6 +59,8 @@ mc-rs/
       biome.rs            Beta-1.7 climate -> biome table (10 reachable biomes)
       physics.rs          swept AABB, gravity, on_ground
       pick.rs             M5 ray trace + place rules
+      dig.rs              hardness table + dig-time maths (PlayerControllerSP)
+      items.rs            ItemStack, hotbar Inventory, idDropped/quantityDropped rules, EntityItem physics + pickup
       sky.rs              day/night: sun angle, skylight subtracted, sky colour
       chunks/light.rs     M5 light engine (port of World/Chunk lighting)
       gen/
@@ -166,8 +171,8 @@ was generated with). The CI workflow does this for you.
 
 ## What M12 is not (yet)
 
-- No text rendering. The hotbar slots are coloured squares (one per
-  block id), not item sprites. M14 will add the font + GUI atlas.
+- No text rendering. Hotbar slots show a flat colour square per item (counts are seven-segment digits),
+  not item sprites. M14 will add the font + GUI atlas.
 - No Minecraft PE touch UX anchor — move-stick / look / jump / pause
   geometry was invented for this port and is flagged UNVERIFIED in
   the code. If you have a PE 0.x reference, please open an issue

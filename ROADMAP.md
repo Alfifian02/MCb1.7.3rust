@@ -40,12 +40,30 @@ they matched.
 
 ## Next step
 
-M6: inventory + crafting (M5 is written but must first compile and be checked on a device). M4 is done: caves and populate match the real classes bit for
+M6: the rest of inventory + crafting (hotbar stacks and drops are in; the 27 hidden slots, screen, crafting grid, tools are not; M5 is written but must first compile and be checked on a device). M4 is done: caves and populate match the real classes bit for
 bit (`tools/golden/`). Still approximate in populate (see README): light model, no metadata, no tile entities, no block
 ticks (liquids/sand). Sapling growth, fluid flow and falling sand belong with M5's block updates. Ice Desert exists in
 BiomeGenBase but climate never selects it; b1.7.3 has no ravines.
 
 ## Changelog
+- `done` drops + hotbar inventory (`world/items.rs`, `render/items.rs`; the logic is unit-tested on a Linux host in a scratch crate,
+  `lib.rs`/wgpu NOT compiled here: expect a compile fix or two):
+    - Drops port `Block.dropBlockAsItem`: `quantityDropped`, then per item one `nextFloat` (chance 1.0) and `idDropped`, then the 3
+      position draws, in the Java order on one `JavaRandom`. Table covers every block worldgen makes plus the metadata-free extras
+      (stone -> cobblestone, grass/farmland -> dirt, gravel -> flint 1/10, coal/diamond/lapis(4-8 dye:4)/redstone(4-5) ores, leaves ->
+      sapling 1/20, tall grass -> seeds 1/8, web, clay x4, snow block x4, glowstone dust 2-4, reeds, furnace, signs, redstone torch;
+      none for fluids, ice, glass, bookshelf, TNT, spawner, snow layer, dead bush). Not yet: doors, bed, crops, slabs, stairs (need metadata).
+    - `EntityItem`: 0.25 box, 20 Hz, gravity 0.04, drag 0.98, ground friction 0.588 (ice 0.9604), 10 tick pickup delay, 6000 tick life, pickup when
+      the player's box grown 1.0 in x/z touches it. Collision tests the box centre line (ponytail, see items.rs). Max 256 entities.
+    - `Inventory`: 9 hotbar slots, `addItemStackToInventory` (top up a matching stack, else first empty, partial adds), max stack 64 (16 snowball, 1 sign/door/bed).
+      Starts empty; a tap places the selected item if it is a block (id < 256) and uses one up. Full hotbar leaves the item on the ground.
+    - Bare hands harvest everything for now (vanilla `canHarvestBlock` would drop nothing from stone without a pickaxe; no tools/crafting yet).
+    - Open: placing plants has no `canBlockStay` check; items are drawn as cubes, full brightness, no spin; no 27-slot inventory screen (M6).
+- `done` hardness-based digging (not compiled): `world/dig.rs` ports `Block.blockStrength` and the `PlayerControllerSP` damage
+  counter at 20 Hz (hardness table from Block.java; bare hand: rock/iron/snow/web dig 3.3x slower; 5x slower when airborne or
+  head under water; instant for hardness 0; 5-tick wait after a break; bedrock/portal unbreakable). Touch: hold still on the
+  right half for 0.4 s to start digging, keep holding to finish (aiming elsewhere restarts the damage); progress bar under the
+  crosshair (vanilla's crack textures need M14). Tap still places. No tools or drops yet (inventory).
 - `done` faster world loading (not compiled): chunk map uses a cheap integer hasher instead of SipHash; light work is bounded by
   10 ms per frame instead of a cell count and lights up to 2 chunks per frame; seam recomputation skips cells above the tallest
   column and block light when neither chunk has any; `App::init` (off the render thread) lights and meshes the spawn area

@@ -4,7 +4,7 @@
 //   - Left half of the screen: floating move stick. It anchors where the
 //     finger lands; drag distance from the anchor is the analog (fwd, side).
 //   - Right half: drag anywhere to look. A short tap there places a block, a press held still
-//     breaks one (and repeats), like Minecraft PE; a drag does neither.
+//     digs (hold to keep digging, the dig can follow the look), like Minecraft PE.
 //   - Jump button: bottom-right circle (held = keep jumping).
 //   - Hotbar: bottom centre, tap to select. Pause: top-right.
 //   - Paused: only the pause button and the resume button respond.
@@ -27,10 +27,8 @@ const DEADZONE: f32 = 0.15;
 // UNVERIFIED: tap/hold timings and slop (b1.7.3 has no touch input). Picked to feel like PE.
 /// A press shorter than this, that did not move, is a tap (place).
 const TAP_SECS: f32 = 0.25;
-/// A press held still this long starts breaking; it then repeats every `REPEAT_SECS` (the creative
-/// `PlayerControllerCreative` delay is 5 ticks).
+/// A press held still this long starts digging, which lasts until the finger lifts.
 const HOLD_SECS: f32 = 0.4;
-const REPEAT_SECS: f32 = 0.25;
 /// Finger travel (fraction of the short screen side) above which a press is a look drag.
 const SLOP: f32 = 0.02;
 
@@ -61,7 +59,7 @@ pub struct Pointer {
     /// Seconds held (frame time) and pixels travelled since the press.
     pub held: f32,
     pub travel: f32,
-    /// A hold already broke a block, so releasing is not a tap.
+    /// The hold turned into digging, so releasing is not a tap.
     pub broke: bool,
 }
 
@@ -172,9 +170,8 @@ pub struct TouchUi {
     pub layout: LayoutRects,
     /// Look drag pixels since the last `take_look`.
     look_delta: (f32, f32),
-    /// A tap / a hold fired since the last `take_actions`.
+    /// A tap fired since the last `take_place`.
     place: bool,
-    breaking: bool,
 }
 
 impl TouchUi {
@@ -189,26 +186,25 @@ impl TouchUi {
             layout: LayoutRects::for_surface(w, h),
             look_delta: (0.0, 0.0),
             place: false,
-            breaking: false,
         }
     }
 
-    /// (place, break) requested since the last call, then cleared.
-    pub fn take_actions(&mut self) -> (bool, bool) {
-        (std::mem::take(&mut self.place), std::mem::take(&mut self.breaking))
+    /// A tap (place) was requested since the last call.
+    pub fn take_place(&mut self) -> bool {
+        std::mem::take(&mut self.place)
     }
 
-    /// Advance the hold timers by one frame: a look finger held still starts breaking after
-    /// `HOLD_SECS` and repeats every `REPEAT_SECS`.
+    /// True while a look finger that was held still is down: the player is digging.
+    pub fn digging(&self) -> bool {
+        self.pointers.values().any(|p| p.role == PointerRole::Look && p.broke)
+    }
+
+    /// Advance the hold timers by one frame: a look finger held still turns into digging after `HOLD_SECS`.
     pub fn tick(&mut self, dt: f32) {
         let slop = self.surface_w.min(self.surface_h) as f32 * SLOP;
-        for p in self.pointers.values_mut().filter(|p| p.role == PointerRole::Look && p.travel < slop) {
+        for p in self.pointers.values_mut().filter(|p| p.role == PointerRole::Look && !p.broke && p.travel < slop) {
             p.held += dt;
-            if p.held >= HOLD_SECS {
-                p.held -= REPEAT_SECS;
-                p.broke = true;
-                self.breaking = true;
-            }
+            p.broke = p.held >= HOLD_SECS;
         }
     }
 
@@ -236,7 +232,6 @@ impl TouchUi {
         self.move_input = (0.0, 0.0);
         self.look_delta = (0.0, 0.0);
         self.place = false;
-        self.breaking = false;
     }
 
     /// Rebuild the layout if the surface size changed. True if it did.
@@ -453,35 +448,36 @@ mod tests {
     }
 
     #[test]
-    fn tap_places_hold_breaks_drag_does_neither() {
+    fn tap_places_hold_digs_drag_does_neither() {
         let mut ui = TouchUi::new(W, H);
         // Quick tap -> place.
         ui.on_press(1, 1800.0, 400.0, PointerRole::Look);
         ui.tick(0.1);
         ui.on_release(1);
-        assert_eq!(ui.take_actions(), (true, false));
-        // Hold still -> break at 0.4 s, again 0.25 s later, and the release is not a tap.
+        assert!(ui.take_place() && !ui.digging());
+        // Hold still: digging starts at 0.4 s, lasts while the finger is down (even if it then moves),
+        // and the release is not a tap.
         ui.on_press(1, 1800.0, 400.0, PointerRole::Look);
         ui.tick(0.3);
-        assert_eq!(ui.take_actions(), (false, false));
+        assert!(!ui.digging());
         ui.tick(0.15);
-        assert_eq!(ui.take_actions(), (false, true));
-        ui.tick(0.15);
-        assert_eq!(ui.take_actions(), (false, false));
+        assert!(ui.digging());
+        ui.on_move(1, 1900.0, 400.0);
         ui.tick(0.1);
-        assert_eq!(ui.take_actions(), (false, true));
+        assert!(ui.digging());
         ui.on_release(1);
-        assert_eq!(ui.take_actions(), (false, false));
-        // A drag is a look, not a tap or a hold.
+        assert!(!ui.digging() && !ui.take_place());
+        // A drag is a look: neither a tap nor digging.
         ui.on_press(1, 1800.0, 400.0, PointerRole::Look);
         ui.on_move(1, 1900.0, 400.0);
         ui.tick(0.5);
+        assert!(!ui.digging());
         ui.on_release(1);
-        assert_eq!(ui.take_actions(), (false, false));
-        // A press held still for 0.3 s is too long for a tap and too short to break: nothing.
+        assert!(!ui.take_place());
+        // Held still for 0.3 s: too long for a tap, too short to dig.
         ui.on_press(1, 1800.0, 400.0, PointerRole::Look);
         ui.tick(0.3);
         ui.on_release(1);
-        assert_eq!(ui.take_actions(), (false, false));
+        assert!(!ui.take_place() && !ui.digging());
     }
 }

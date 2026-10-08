@@ -3,3 +3,4 @@ pub mod camera;
 pub mod mesh;
 pub mod hud;
 pub mod outline;
+pub mod items;

@@ -123,11 +123,6 @@ pub fn overlaps_player(cell: (i32, i32, i32), pos: Vec3) -> bool {
     hi.x > c.x && lo.x < c.x + 1.0 && hi.y > c.y && lo.y < c.y + 1.0 && hi.z > c.z && lo.z < c.z + 1.0
 }
 
-/// Bedrock is the only unbreakable block worldgen makes (`setHardness(-1.0F)`).
-pub fn breakable(id: u8) -> bool {
-    id != 7
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,6 +173,5 @@ mod tests {
         let p = Vec3::new(5.5, 11.9, 5.5);
         assert!(overlaps_player((5, 11, 5), p) && overlaps_player((5, 12, 5), p));
         assert!(!overlaps_player((5, 10, 5), p) && !overlaps_player((5, 13, 5), p) && !overlaps_player((6, 11, 5), p));
-        assert!(breakable(1) && !breakable(7));
     }
 }

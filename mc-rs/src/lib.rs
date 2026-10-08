@@ -21,9 +21,12 @@ use std::time::{Duration, Instant};
 use crate::gpu::context::Gpu;
 use crate::gpu::pipeline::ChunkPipeline;
 use crate::render::atlas;
+use crate::render::items::ItemMesh;
 use crate::render::camera::FirstPersonCamera;
 use crate::render::outline::Outline;
 use crate::world::pick::{self, Hit};
+use crate::world::dig::{self, Dig};
+use crate::world::items::{self, Drops, Inventory};
 use crate::world::sky;
 use crate::world::chunk::{cross_shape, is_plant};
 use crate::world::chunks::{chunk_coord, ChunkManager};
@@ -38,27 +41,6 @@ const MOVE_SPEED: f32 = 4.3;
 /// Eye offset from `player.pos`, which is the CENTRE of the 1.8-tall box. Steve's eyes are
 /// 1.62 above his feet (EntityPlayer.yOffset), i.e. 1.62 - 0.9 above the centre.
 const EYE_HEIGHT: f32 = 1.62 - physics::HALF.y;
-
-/// Block id placed by hotbar slot `slot` (no inventory until M6).
-fn hotbar_block(slot: usize) -> u8 {
-    match slot {
-        0 => 1,  // stone
-        1 => 2,  // grass
-        2 => 3,  // dirt
-        3 => 12, // sand
-        4 => 4,  // cobblestone
-        5 => 5,  // planks
-        6 => 14, // gold ore
-        7 => 56, // diamond
-        _ => 16, // coal
-    }
-}
-
-/// Hotbar swatch colour (RGBA): the block's atlas colour.
-fn hotbar_color(slot: usize) -> [f32; 4] {
-    let px = atlas::block_color(hotbar_block(slot));
-    [px[0] as f32 / 255.0, px[1] as f32 / 255.0, px[2] as f32 / 255.0, 1.0]
-}
 
 struct App {
     gpu: Gpu,
@@ -84,6 +66,13 @@ struct App {
     outline: Outline,
     /// World time in ticks (20 per second); a new world starts at 0, sunrise.
     world_ticks: f64,
+    /// Survival digging state and the leftover time towards the next 20 Hz dig tick.
+    dig: Dig,
+    dig_acc: f32,
+    /// Hotbar stacks (starts empty), dropped items on the ground and their draw buffers.
+    inv: Inventory,
+    drops: Drops,
+    item_mesh: ItemMesh,
 }
 
 impl App {
@@ -149,6 +138,8 @@ impl App {
         let touch = TouchUi::new(width, height);
         let hud = HudPipeline::new(&gpu.device, &gpu.queue, surface_format, width, height);
         let outline = Outline::new(&gpu.device);
+        let item_mesh = ItemMesh::new(&gpu.device);
+        let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as i64);
 
         Ok(Self {
             gpu, pipe,
@@ -167,6 +158,11 @@ impl App {
             target: None,
             outline,
             world_ticks: 0.0,
+            dig: Dig::default(),
+            dig_acc: 0.0,
+            inv: Inventory::default(),
+            drops: Drops::new(seed),
+            item_mesh,
         })
     }
 
@@ -218,26 +214,51 @@ impl App {
         let get = |x: i32, y: i32, z: i32| self.chunks.block(x, y, z).map(|b| if is_plant(b) { 0 } else { b });
         physics::step(&mut self.player, dt, &get);
         self.camera.pos = self.player.pos + glam::Vec3::new(0.0, EYE_HEIGHT, 0.0);
+        // Dropped items fall, settle and get picked up (before the target check below, which can return early).
+        self.drops.tick(dt, &|x: i32, y: i32, z: i32| self.chunks.block(x, y, z), self.player.pos, &mut self.inv);
 
-        // M5: pick the block under the crosshair, then apply the tap (place) / hold (break).
+        // M5: pick the block under the crosshair, dig it while the dig input is held, place on a tap.
         self.touch.tick(dt);
-        let (place, brk) = self.touch.take_actions();
+        let place = self.touch.take_place();
         let eye = self.camera.pos.as_dvec3();
         let end = eye + self.camera.forward().as_dvec3() * pick::REACH;
         // Liquids are not pickable (vanilla's rayTraceBlocks skips them), nor is the snow layer, which is not drawn yet.
         // ponytail: a plant is picked as a whole cell, not by its (smaller) bounds.
         let solid = |x: i32, y: i32, z: i32| matches!(self.chunks.block_loaded(x, y, z), Some(b) if b != 0 && (!is_plant(b) || cross_shape(b).is_some()) && !(8..=11).contains(&b));
         self.target = pick::ray_trace(&solid, eye, end);
-        let Some(hit) = self.target else { return };
-        // ponytail: breaking is instant and drops nothing (no dig time, tools or items until M6).
-        if brk && self.chunks.block_loaded(hit.pos.0, hit.pos.1, hit.pos.2).is_some_and(pick::breakable) {
-            self.chunks.set_block(hit.pos.0, hit.pos.1, hit.pos.2, 0);
+
+        // Digging runs on the 20 Hz game tick of the Java (hardness-based time, see world::dig).
+        // A broken block drops its items (world::items); there are no tools yet.
+        match self.target {
+            Some(hit) if self.touch.digging() => {
+                self.dig_acc += dt;
+                while self.dig_acc >= dig::TICK {
+                    self.dig_acc -= dig::TICK;
+                    let (x, y, z) = hit.pos;
+                    let in_water = matches!(self.chunks.block_loaded(eye.x.floor() as i32, eye.y.floor() as i32, eye.z.floor() as i32), Some(8 | 9));
+                    if let Some(id) = self.chunks.block_loaded(x, y, z) {
+                        if self.dig.tick(hit.pos, id, self.player.on_ground, in_water) {
+                            self.chunks.set_block(x, y, z, 0);
+                            self.drops.spawn_block(id, hit.pos);
+                        }
+                    }
+                }
+            }
+            _ => {
+                self.dig.reset();
+                self.dig_acc = 0.0;
+            }
         }
+        let Some(hit) = self.target else { return };
         if place {
             let (x, y, z) = pick::place_pos(&hit);
-            // ItemBlock refuses a solid block at y = 127 (every hotbar block is solid).
-            if y < 127 && self.chunks.block_loaded(x, y, z).is_some_and(pick::replaceable) && !pick::overlaps_player((x, y, z), self.player.pos) {
-                self.chunks.set_block(x, y, z, hotbar_block(self.touch.hotbar_slot));
+            // Items below 256 are blocks; anything else cannot be placed. ItemBlock refuses a solid block at y = 127
+            // (ponytail: plants are refused there too).
+            let slot = self.touch.hotbar_slot;
+            if let Some(s) = self.inv.slots[slot].filter(|s| s.id < 256) {
+                if y < 127 && self.chunks.block_loaded(x, y, z).is_some_and(pick::replaceable) && !pick::overlaps_player((x, y, z), self.player.pos) && self.chunks.set_block(x, y, z, s.id as u8) {
+                    self.inv.consume(slot);
+                }
             }
         }
     }
@@ -249,6 +270,7 @@ impl App {
         let (view, proj) = self.camera.build_view_proj();
         self.pipe.upload_uniforms(&self.gpu.queue, view, proj);
         let outline_indices = self.target.map_or(0, |h| self.outline.update(&self.gpu.queue, h.pos));
+        let item_indices = self.item_mesh.update(&self.gpu.queue, &self.drops);
 
         // Sky colour from the sun angle and the climate under the player.
         let (px, pz) = (self.camera.pos.x.floor() as i32, self.camera.pos.z.floor() as i32);
@@ -315,6 +337,11 @@ impl App {
                 rp.set_vertex_buffer(0, m.vbuf.slice(..));
                 rp.set_index_buffer(m.ibuf.slice(..), wgpu::IndexFormat::Uint32);
                 rp.draw_indexed(0..m.index_count, 0, 0..1);
+            }
+            if item_indices > 0 {
+                rp.set_vertex_buffer(0, self.item_mesh.vbuf.slice(..));
+                rp.set_index_buffer(self.item_mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                rp.draw_indexed(0..item_indices, 0, 0..1);
             }
             if outline_indices > 0 {
                 rp.set_vertex_buffer(0, self.outline.vbuf.slice(..));
@@ -390,6 +417,15 @@ impl App {
             HudPipeline::push_quad(v, w * 0.5 - th * 0.5, h * 0.5 - arm, th, arm * 2.0, [1.0, 1.0, 1.0, 0.85]);
         }
 
+        // Dig progress under the crosshair.
+        if self.dig.damage > 0.0 {
+            let (w, h) = (self.gpu.config.width as f32, self.gpu.config.height as f32);
+            let (bw, bh) = (0.12 * w.min(h), (0.012 * w.min(h)).max(3.0));
+            let (bx, by) = (w * 0.5 - bw * 0.5, h * 0.5 + 0.05 * w.min(h));
+            HudPipeline::push_quad(v, bx, by, bw, bh, [0.0, 0.0, 0.0, 0.6]);
+            HudPipeline::push_quad(v, bx, by, bw * self.dig.damage.min(1.0), bh, [1.0, 1.0, 1.0, 0.9]);
+        }
+
         // Pause button: top-right, two bars.
         let (px, py, pw, ph) = layout.pause;
         let pause_fill = if pressed(PointerRole::Pause) { [0.30, 0.55, 0.85, 0.95] } else { [0.20, 0.40, 0.70, 0.75] };
@@ -405,8 +441,18 @@ impl App {
         for (i, &(hx, hy, hw, hh)) in layout.hotbar.iter().enumerate() {
             let border = if i == self.touch.hotbar_slot { [1.0, 1.0, 1.0, 1.0] } else { [0.85, 0.85, 0.85, 0.85] };
             HudPipeline::push_outlined_quad(v, hx, hy, hw, hh, [0.10, 0.10, 0.10, 0.55], border, 3.0);
+            let Some(s) = self.inv.slots[i] else { continue };
             let pad = (hw.min(hh) * 0.18).max(2.0);
-            HudPipeline::push_quad(v, hx + pad, hy + pad, hw - pad * 2.0, hh - pad * 2.0, hotbar_color(i));
+            let px = atlas::block_color(items::tile(s.id));
+            HudPipeline::push_quad(v, hx + pad, hy + pad, hw - pad * 2.0, hh - pad * 2.0, [px[0] as f32 / 255.0, px[1] as f32 / 255.0, px[2] as f32 / 255.0, 1.0]);
+            // Count, bottom right with a shadow like `RenderItem.renderItemOverlayIntoGUI`; shown above 1 only.
+            if s.count > 1 {
+                let dh = hh * 0.3;
+                let digits = if s.count > 9 { 2.0 } else { 1.0 };
+                let (nx, ny) = (hx + hw - pad * 0.5 - (digits * 0.71 - 0.21) * dh, hy + hh - pad * 0.5 - dh);
+                HudPipeline::push_number(v, nx + 1.5, ny + 1.5, dh, s.count as u32, [0.0, 0.0, 0.0, 0.9]);
+                HudPipeline::push_number(v, nx, ny, dh, s.count as u32, [1.0; 4]);
+            }
         }
 
         // Jump button: bottom-right disc with a ring.
