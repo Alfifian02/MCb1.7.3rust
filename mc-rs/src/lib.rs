@@ -111,9 +111,8 @@ impl App {
                     for x in 0..16 {
                         for y in 0..128 {
                             let src = (x << 11) | (z << 7) | y;
-                            // Super-chunk uses (x << 11) | (z << 7) | y too,
-                            // but x/z are now global to the 48-wide grid.
-                            let dst = ((x + x0) << 11) | ((z + z0) << 7) | y;
+                            // Super-chunk is 48 deep in Z, so its stride is 48 (not 16).
+                            let dst = ((x + x0) * SUPER_D + (z + z0)) * SUPER_H + y;
                             super_blocks[dst] = blocks[src];
                         }
                     }
@@ -142,7 +141,7 @@ impl App {
             let mut highest = (24usize, 24usize, i32::MIN);
             for z in 2..46usize {
                 for x in 2..46usize {
-                    let t = OverworldGenerator::top_block(&super_blocks, x, z);
+                    let t = OverworldGenerator::top_block(&super_blocks, x, z, SUPER_D);
                     if t > highest.2 { highest = (x, z, t); }
                     if t >= 64 {
                         let d2 = (x as i32 - 24).pow(2) + (z as i32 - 24).pow(2);
@@ -250,7 +249,7 @@ impl App {
             if x < 0 || y < 0 || z < 0 { return None; }
             let (x, y, z) = (x as usize, y as usize, z as usize);
             if x >= 48 || y >= 128 || z >= 48 { return None; }
-            Some(blocks[(x << 11) | (z << 7) | y])
+            Some(blocks[(x * 48 + z) * 128 + y])
         };
         physics::step(&mut self.player, dt, &get);
         self.camera.pos = self.player.pos + glam::Vec3::new(0.0, EYE_HEIGHT, 0.0);

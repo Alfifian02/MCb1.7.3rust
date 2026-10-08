@@ -64,10 +64,10 @@ impl OverworldGenerator {
         Self { rand, noise_lim, noise_low, noise_base, noise_sand, noise_stone, noise_main, noise_height }
     }
 
-    /// Highest solid block at column (x, z), or -1 if none.
-    pub fn top_block(blocks: &[u8], x: usize, z: usize) -> i32 {
+    /// Highest solid block at column (x, z) of a grid `depth` blocks deep in Z, or -1 if none.
+    pub fn top_block(blocks: &[u8], x: usize, z: usize, depth: usize) -> i32 {
         for y in (0..H).rev() {
-            let b = blocks[(x << 11) | (z << 7) | y];
+            let b = blocks[(x * depth + z) * H + y];
             if b != block::AIR && b != block::WATER {
                 return y as i32;
             }
@@ -354,7 +354,7 @@ impl OverworldGenerator {
                         if dxn * dxn + dyn_ * dyn_ + dzn * dzn >= 1.0 { continue; }
                         // Only place if inside the 48x48 super-chunk.
                         if bx < 0 || bx >= 48 || bz < 0 || bz >= 48 || by < 0 || by >= 128 { continue; }
-                        let idx = (bx as usize) << 11 | (bz as usize) << 7 | (by as usize);
+                        let idx = ((bx as usize) * 48 + bz as usize) * H + by as usize;
                         if blocks[idx] == block::STONE {
                             blocks[idx] = ore;
                         }

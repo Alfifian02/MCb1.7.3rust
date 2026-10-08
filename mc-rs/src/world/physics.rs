@@ -31,7 +31,7 @@ pub fn step(player: &mut Player, dt: f32, get: BlockQuery<'_>) {
 fn ground_test(pos: Vec3, get: BlockQuery<'_>) -> bool {
     // Test the four corners of the bottom face just below current pos.
     let h = HALF;
-    let below = pos + Vec3::new(0.0, -0.001, 0.0);
+    let below = pos - Vec3::new(0.0, h.y + 0.001, 0.0);
     let corners = [
         (below.x - h.x, below.y, below.z - h.z),
         (below.x + h.x, below.y, below.z - h.z),
@@ -113,4 +113,24 @@ fn snap<F: Fn(f32) -> bool>(start: f32, delta: f32, hits: F) -> f32 {
         if hits(m) { hi = m; } else { lo = m; }
     }
     lo
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Standing on a floor must read as on_ground, otherwise the jump button can never fire.
+    #[test]
+    fn standing_on_floor_is_on_ground_and_can_jump() {
+        let get = |x: i32, y: i32, z: i32| -> Option<u8> {
+            if !(0..16).contains(&x) || !(0..16).contains(&z) || y < 0 { return None; }
+            Some(if y < 10 { 1 } else { 0 })
+        };
+        let mut p = Player { pos: Vec3::new(8.5, 10.0 + HALF.y + 0.5, 8.5), vel: Vec3::ZERO, on_ground: false };
+        for _ in 0..120 { step(&mut p, 1.0 / 60.0, &get); }
+        assert!(p.on_ground, "pos.y = {}", p.pos.y);
+        p.vel.y = 8.4;
+        step(&mut p, 1.0 / 60.0, &get);
+        assert!(p.pos.y > 10.0 + HALF.y + 0.05 && !ground_test(p.pos, &get));
+    }
 }

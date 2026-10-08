@@ -9,8 +9,10 @@ use crate::world::chunk::{Chunk, H};
 use crate::render::atlas;
 
 #[inline]
-fn idx_ext(x: usize, y: usize, z: usize, _w: usize, _d: usize) -> usize {
-    (x << 11) | (z << 7) | y
+fn idx_ext(x: usize, y: usize, z: usize, _w: usize, d: usize) -> usize {
+    // (x * d + z) * H + y; for d == 16 this equals the old (x<<11)|(z<<7)|y. The shifts only
+    // work for a 16-deep chunk: with d == 48 their bits overlap and columns overwrite each other.
+    (x * d + z) * H + y
 }
 
 
@@ -151,4 +153,20 @@ pub fn face_count(verts: &[f32]) -> usize {
 pub fn build(chunk: &Chunk) -> (Vec<f32>, Vec<u32>) {
     use crate::world::chunk::{W, D};
     build_ext(chunk, W, D)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One block in a 48x48 grid must produce exactly one cube (6 faces). With the old
+    /// shift-based index, (40, 20, 40) aliased other columns and ghost copies appeared.
+    #[test]
+    fn wide_grid_single_block_is_one_cube() {
+        let (w, d) = (48, 48);
+        let mut c = Chunk { blocks: vec![0; w * H * d] };
+        c.blocks[idx_ext(40, 20, 40, w, d)] = 1;
+        let (verts, _) = build_ext(&c, w, d);
+        assert_eq!(face_count(&verts), 6);
+    }
 }
