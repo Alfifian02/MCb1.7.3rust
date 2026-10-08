@@ -26,6 +26,7 @@ original. Anything that cannot be derived from the b1.7.3 sources is marked
 | M4f Chunk manager | done (now compiles and its tests pass on a Linux host; not run on a device) | Chunks keyed by (cx, cz), one mesh per chunk, circular render-distance ring (4 chunks) that loads/unloads as you walk, terrain generated on 1-2 worker threads, cross-chunk face culling. Replaces the 48x48 super-chunk. |
 | M4d Caves, trees, populate | done (compiled + golden-tested on a Linux host; not run on a device) | MapGenCaves in `generate`, full `populate()` (lakes, dungeons, clay, dirt/gravel/ores, oak/birch/big/taiga trees, flowers, grass, reeds, pumpkins, cactus, springs, snow). Bit-exact vs the real Java on 11 cases (`tools/golden/`). Chunk manager gained the populated/final state. |
 | M5 Block interaction | written, NOT compiled | Raycast pick, break (hold), place (tap), light engine port, outline + crosshair. See ROADMAP changelog. |
+| Day/night            | written, NOT compiled | 20-minute cycle: sky light 0..11 subtracted in the mesher, sky colour from sun angle + climate. No sun/moon/stars yet. |
 | M6..M14              | pending | See ROADMAP.md for the order. |
 
 Latest commit on `main`: see `git log -1`. Latest released APK: see the
@@ -55,6 +56,7 @@ mc-rs/
       biome.rs            Beta-1.7 climate -> biome table (10 reachable biomes)
       physics.rs          swept AABB, gravity, on_ground
       pick.rs             M5 ray trace + place rules
+      sky.rs              day/night: sun angle, skylight subtracted, sky colour
       chunks/light.rs     M5 light engine (port of World/Chunk lighting)
       gen/
         mod.rs            module list
@@ -176,5 +178,5 @@ was generated with). The CI workflow does this for you.
   (e.g. the pause button after flipping the phone 180 degrees), add display-cutout insets.
 - The nav bar is hidden with `setSystemUiVisibility` (deprecated since API 30 but still
   honoured on 11-14). Not yet verified on a real device.
-- Plants (flowers, tall grass, mushrooms, reeds, snow layer) are not drawn and not solid yet (`is_plant`); leaves, water and
-  lava are drawn as opaque flat-colour cubes. Real models/textures are M14.
+- Flowers, tall grass, mushrooms, dead bush and reeds are drawn as flat-colour crossed quads (not solid); the snow layer is
+  neither drawn nor solid yet; leaves, water and lava are drawn as opaque flat-colour cubes. Real models/textures are M14.

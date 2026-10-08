@@ -9,7 +9,7 @@
 //! brightness of the cell the face looks into (`Block.getBlockBrightness` -> `lightBrightnessTable`).
 
 use crate::render::atlas;
-use crate::world::chunk::{brightness, idx, is_plant, H, VOLUME};
+use crate::world::chunk::{brightness, cross_shape, idx, is_plant, H, VOLUME};
 
 /// One textured quad. Four corners in CCW order from the front.
 /// `normal_index` selects the face normal (0..5) for debug-coloring later.
@@ -63,15 +63,13 @@ const FACES: [Face; 6] = [
 /// Face order matches `FACES`: +X, -X, +Y, -Y, +Z, -Z.
 const DIRS: [(i32, i32, i32); 6] = [(1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)];
 
-/// `World.skylightSubtracted`: 0 = full day. The day/night cycle is not ported yet.
-const SKYLIGHT_SUBTRACTED: u8 = 0;
-
 /// Build vertex + index buffers for one chunk.
 /// `nb` / `nb_light` are the blocks and light of the neighbouring chunks, in the order +X, -X, +Z, -Z;
 /// they are only read for the one-cell border. `light` holds sky light in the low nibble and block
-/// light in the high nibble. `(ox, oz)` is the chunk's world origin (chunk * 16).
+/// light in the high nibble. `sky_sub` is `World.skylightSubtracted` (0 day .. 11 night, `world::sky`).
+/// `(ox, oz)` is the chunk's world origin (chunk * 16).
 /// Vertices: 6 floats each (px, py, pz, u, v, light). Indices: 6 per face (two triangles).
-pub fn build(blocks: &[u8], light: &[u8], nb: [&[u8]; 4], nb_light: [&[u8]; 4], ox: i32, oz: i32) -> (Vec<f32>, Vec<u32>) {
+pub fn build(blocks: &[u8], light: &[u8], nb: [&[u8]; 4], nb_light: [&[u8]; 4], sky_sub: u8, ox: i32, oz: i32) -> (Vec<f32>, Vec<u32>) {
     assert_eq!(blocks.len(), VOLUME);
     assert_eq!(light.len(), VOLUME);
     // Which chunk's arrays a cell with x, z in -1..=16 lives in: 0 = this one, 1.. = +X, -X, +Z, -Z.
@@ -87,10 +85,10 @@ pub fn build(blocks: &[u8], light: &[u8], nb: [&[u8]; 4], nb_light: [&[u8]; 4], 
     let table: [f32; 16] = std::array::from_fn(|i| brightness(i as u8));
     let bright = |x: i32, y: i32, z: i32| -> f32 {
         if y < 0 { return table[0]; }
-        if y >= H as i32 { return table[15]; }
+        if y >= H as i32 { return table[15usize.saturating_sub(sky_sub as usize)]; }
         let l = match slot(x, z) { 0 => light, s => nb_light[s - 1] };
         let v = l[idx((x & 15) as usize, y as usize, (z & 15) as usize)];
-        table[((v & 15).saturating_sub(SKYLIGHT_SUBTRACTED)).max(v >> 4) as usize]
+        table[((v & 15).saturating_sub(sky_sub)).max(v >> 4) as usize]
     };
     let mut verts: Vec<f32> = Vec::new();
     let mut idxs: Vec<u32> = Vec::new();
@@ -98,6 +96,22 @@ pub fn build(blocks: &[u8], light: &[u8], nb: [&[u8]; 4], nb_light: [&[u8]; 4], 
     for y in 0..H as i32 {
         for z in 0..16 {
             for x in 0..16 {
+                // Plants: two crossed quads, visible from both sides, lit by their own cell.
+                let raw = blocks[idx(x as usize, y as usize, z as usize)];
+                if let Some((half, h)) = cross_shape(raw) {
+                    let lit = bright(x, y, z);
+                    let (cx, cz) = ((ox + x) as f32 + 0.5, (oz + z) as f32 + 0.5);
+                    let (au, av) = atlas::atlas_uv(raw, 0.0, 0.0);
+                    for (a, b) in [((-half, -half), (half, half)), ((-half, half), (half, -half))] {
+                        let base = verts.len() as u32 / 6;
+                        for (px, pz, py) in [(a.0, a.1, 0.0), (b.0, b.1, 0.0), (b.0, b.1, h), (a.0, a.1, h)] {
+                            verts.extend_from_slice(&[cx + px, y as f32 + py, cz + pz, au, av, lit]);
+                        }
+                        // Both windings: the pipeline culls back faces.
+                        idxs.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3, base, base + 2, base + 1, base, base + 3, base + 2]);
+                    }
+                    continue;
+                }
                 let blk = get(x, y, z);
                 if blk == 0 {
                     continue;
@@ -167,8 +181,19 @@ mod tests {
         let mut c = air();
         c[idx(5, 20, 5)] = 1;
         let a = air();
-        let (verts, _) = build(&c, &a, [&a[..], &a[..], &a[..], &a[..]], [&a[..], &a[..], &a[..], &a[..]], 0, 0);
+        let (verts, _) = build(&c, &a, [&a[..], &a[..], &a[..], &a[..]], [&a[..], &a[..], &a[..], &a[..]], 0, 0, 0);
         assert_eq!(face_count(&verts), 6);
+    }
+
+    /// A plant is two crossed quads, and does not hide the top of the block under it.
+    #[test]
+    fn plant_is_two_crossed_quads() {
+        let a = air();
+        let mut c = air();
+        c[idx(5, 20, 5)] = 37;
+        assert_eq!(face_count(&build(&c, &a, [&a[..], &a[..], &a[..], &a[..]], [&a[..], &a[..], &a[..], &a[..]], 0, 0, 0).0), 2);
+        c[idx(5, 19, 5)] = 3; // dirt under the flower: 6 faces + 2 quads
+        assert_eq!(face_count(&build(&c, &a, [&a[..], &a[..], &a[..], &a[..]], [&a[..], &a[..], &a[..], &a[..]], 0, 0, 0).0), 8);
     }
 
     /// A block on the chunk edge hides the face it shares with the neighbour chunk's block,
@@ -177,7 +202,7 @@ mod tests {
     fn edge_face_is_culled_against_neighbour() {
         let a = air();
         let mk = |x: usize, z: usize| { let mut c = air(); c[idx(x, 20, z)] = 1; c };
-        let faces = |me: &[u8], nb: [&[u8]; 4]| face_count(&build(me, &a, nb, [&a[..], &a[..], &a[..], &a[..]], 0, 0).0);
+        let faces = |me: &[u8], nb: [&[u8]; 4]| face_count(&build(me, &a, nb, [&a[..], &a[..], &a[..], &a[..]], 0, 0, 0).0);
         let (px, nx, pz, nz) = (mk(0, 5), mk(15, 5), mk(5, 0), mk(5, 15));
         let (a_px, a_nx, a_pz, a_nz) = (mk(15, 5), mk(0, 5), mk(5, 15), mk(5, 0));
         assert_eq!(faces(&a_px[..], [&px[..], &a[..], &a[..], &a[..]]), 5);

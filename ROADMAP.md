@@ -46,6 +46,15 @@ ticks (liquids/sand). Sapling growth, fluid flow and falling sand belong with M5
 BiomeGenBase but climate never selects it; b1.7.3 has no ravines.
 
 ## Changelog
+- `done` plants drawn (written WITHOUT a Rust toolchain: not compiled, tests not run): flowers, mushrooms, tall grass, dead bush
+  and reeds are two crossed double-sided quads (`chunk::cross_shape`, sized from each block's bounds; flat colours until M14
+  textures), lit by their own cell, and pickable/breakable as a whole cell. Still not solid. Snow layer (78) is still not drawn.
+- `done` day/night cycle (written WITHOUT a Rust toolchain: not compiled, tests not run):
+    - `world/sky.rs`: ports of `calculateCelestialAngle`, `calculateSkylightSubtracted`, the sky colour (`func_4079_a` +
+      `getSkyColorByTemp`, AWT HSB maths). 24000 ticks per day at 20 ticks/s, new world starts at tick 0 (sunrise). 2 tests.
+    - `ChunkManager::set_sky_sub` (0..=11) marks every mesh stale when it changes; `mesh::build` takes `sky_sub` and uses
+      `max(sky - sky_sub, block)` per cell, so night is dark but lava/torches stay lit. `temperature_at` feeds the sky colour.
+    - Not done: sun, moon and stars are not drawn, no fog, no rain/thunder terms, time is not saved (M7) and not adjustable.
 - `done` M5 block interaction (written WITHOUT a Rust toolchain: not compiled, tests not run, expect a compile fix or two):
     - `world/pick.rs`: port of `World.func_28105_a` + `Block.collisionRayTrace` (f64, 4.0 reach), place cell/replaceable/player-overlap rules. 3 tests.
     - `world/chunks/light.rs`: port of the b1.7.3 light engine (sky + block light, region queue, `MetadataChunkBlock` relaxation,

@@ -79,6 +79,8 @@ pub struct ChunkManager {
     done: mpsc::Receiver<(Key, Vec<u8>)>,
     /// Pending light updates, newest last (`World.lightingToUpdate`).
     light_queue: Vec<light::Region>,
+    /// `World.skylightSubtracted` (0 day .. 11 night), applied by the mesher.
+    sky_sub: u8,
 }
 
 impl ChunkManager {
@@ -120,7 +122,7 @@ impl ChunkManager {
         ring.sort_by_key(|&(dx, dz)| dx * dx + dz * dz);
 
         Self { chunks: HashMap::new(), pending: HashSet::new(), ring, radius, center: None, max_in_flight: workers * 2,
-               gen: OverworldGenerator::new(seed), cm: WorldChunkManager::new(seed), jobs, done, light_queue: Vec::new() }
+               gen: OverworldGenerator::new(seed), cm: WorldChunkManager::new(seed), jobs, done, light_queue: Vec::new(), sky_sub: 0 }
     }
 
     fn insert(&mut self, key: Key, blocks: Vec<u8>) {
@@ -198,6 +200,21 @@ impl ChunkManager {
     /// Chunk C is final when populate has run on C, C-x, C-z and C-x-z.
     fn is_final(&self, x: i32, z: i32) -> bool {
         [(x, z), (x - 1, z), (x, z - 1), (x - 1, z - 1)].iter().all(|k| self.chunks.get(k).is_some_and(|e| e.populated))
+    }
+
+    /// Time of day changed the light: every mesh is stale (`updateAllRenderers`) and is rebuilt a
+    /// couple per frame, nearest first; the old meshes keep drawing until their replacement is ready.
+    pub fn set_sky_sub(&mut self, v: u8) {
+        if v != self.sky_sub {
+            self.sky_sub = v;
+            self.chunks.values_mut().for_each(|e| e.meshed = false);
+        }
+    }
+
+    /// `WorldChunkManager.getTemperature` at a block column (for the sky colour).
+    pub fn temperature_at(&mut self, x: i32, z: i32) -> f64 {
+        self.cm.load_block_generator_data(x, z, 1, 1);
+        self.cm.temperature[0]
     }
 
     /// Everything that has a mesh, for the draw loop.
@@ -306,6 +323,7 @@ impl ChunkManager {
                     &me.light,
                     [px.blocks.as_slice(), nx.blocks.as_slice(), pz.blocks.as_slice(), nz.blocks.as_slice()],
                     [px.light.as_slice(), nx.light.as_slice(), pz.light.as_slice(), nz.light.as_slice()],
+                    self.sky_sub,
                     x * 16,
                     z * 16,
                 )),

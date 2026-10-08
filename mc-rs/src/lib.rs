@@ -24,7 +24,8 @@ use crate::render::atlas;
 use crate::render::camera::FirstPersonCamera;
 use crate::render::outline::Outline;
 use crate::world::pick::{self, Hit};
-use crate::world::chunk::is_plant;
+use crate::world::sky;
+use crate::world::chunk::{cross_shape, is_plant};
 use crate::world::chunks::{chunk_coord, ChunkManager};
 use crate::world::physics::{self, Player};
 
@@ -81,6 +82,8 @@ struct App {
     // M5: block under the crosshair (within reach) and its outline buffers.
     target: Option<Hit>,
     outline: Outline,
+    /// World time in ticks (20 per second); a new world starts at 0, sunrise.
+    world_ticks: f64,
 }
 
 impl App {
@@ -154,6 +157,7 @@ impl App {
             hud_verts: Vec::with_capacity(256),
             target: None,
             outline,
+            world_ticks: 0.0,
         })
     }
 
@@ -184,6 +188,10 @@ impl App {
             self.camera.pos = self.player.pos + glam::Vec3::new(0.0, EYE_HEIGHT, 0.0);
             return;
         }
+        // Day/night: time only runs while playing; a new sky-light level restarts the meshes.
+        self.world_ticks += dt as f64 * 20.0;
+        let sub = sky::skylight_subtracted(sky::celestial_angle(self.world_ticks as u64, 1.0));
+        self.chunks.set_sky_sub(sub);
         self.camera.add_yaw(look_dx * LOOK_SENS);
         self.camera.add_pitch(look_dy * LOOK_SENS);
         // Analog move stick: rotate the camera-frame (fwd, side) by yaw into
@@ -208,8 +216,9 @@ impl App {
         let (place, brk) = self.touch.take_actions();
         let eye = self.camera.pos.as_dvec3();
         let end = eye + self.camera.forward().as_dvec3() * pick::REACH;
-        // Plants and liquids are not pickable (plants are not drawn yet; vanilla's rayTraceBlocks skips liquids).
-        let solid = |x: i32, y: i32, z: i32| matches!(self.chunks.block_loaded(x, y, z), Some(b) if b != 0 && !is_plant(b) && !(8..=11).contains(&b));
+        // Liquids are not pickable (vanilla's rayTraceBlocks skips them), nor is the snow layer, which is not drawn yet.
+        // ponytail: a plant is picked as a whole cell, not by its (smaller) bounds.
+        let solid = |x: i32, y: i32, z: i32| matches!(self.chunks.block_loaded(x, y, z), Some(b) if b != 0 && (!is_plant(b) || cross_shape(b).is_some()) && !(8..=11).contains(&b));
         self.target = pick::ray_trace(&solid, eye, end);
         let Some(hit) = self.target else { return };
         // ponytail: breaking is instant and drops nothing (no dig time, tools or items until M6).
@@ -233,8 +242,12 @@ impl App {
         self.pipe.upload_uniforms(&self.gpu.queue, view, proj);
         let outline_indices = self.target.map_or(0, |h| self.outline.update(&self.gpu.queue, h.pos));
 
-        // Sky-blue clear color (the red/green debug cycling is no longer needed).
-        let clear = wgpu::Color { r: 0.6, g: 0.8, b: 1.0, a: 1.0 };
+        // Sky colour from the sun angle and the climate under the player.
+        let (px, pz) = (self.camera.pos.x.floor() as i32, self.camera.pos.z.floor() as i32);
+        let temp = self.chunks.temperature_at(px, pz) as f32;
+        let angle = sky::celestial_angle(self.world_ticks as u64, self.world_ticks.fract() as f32);
+        let [r, g, b] = sky::sky_color(angle, temp);
+        let clear = wgpu::Color { r: r as f64, g: g as f64, b: b as f64, a: 1.0 };
         if self.frames == 0 {
             log::info!("render: first frame, surface_format={:?}, {} chunks loaded", self.gpu.surface_format(), self.chunks.loaded());
         }
