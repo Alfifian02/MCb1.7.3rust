@@ -7,12 +7,13 @@
 //! each cell that changed, until nothing changes. Newest region first, like the Java.
 //!
 //! Differences from vanilla, none of which change the settled result:
-//! - the queue is drained by a per-frame budget (`run_light`) instead of `updatingLighting`'s 500 regions;
+//! - the queue is drained by a per-frame time budget (`run_light`) instead of `updatingLighting`'s 500 regions;
 //! - a freshly final chunk is lit in one go (`init_chunk`) because worldgen writes raw blocks instead of
 //!   calling `setBlockWithNotify`, so no per-block updates were ever queued for them;
 //! - no day/night: `skylightSubtracted` is 0 (see `render::mesh`).
 
 use super::{ChunkManager, Key};
+use std::time::{Duration, Instant};
 use crate::world::chunk::{idx, light_opacity, light_value, H};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -55,10 +56,9 @@ impl Region {
     }
 }
 
-/// Regions per frame (`World.updatingLighting`) and a cell cap on top: a region is one hash lookup
-/// per neighbour per cell. ponytail: per-chunk lookup cache if this shows in a profile.
-const REGIONS_PER_FRAME: usize = 500;
-const CELLS_PER_FRAME: i32 = 16_384;
+/// Time per frame spent on light (replaces `World.updatingLighting`'s 500 regions). ponytail: a cell is still
+/// ~10 map lookups; a per-chunk lookup cache is the next step if loading is still slow.
+const LIGHT_BUDGET: Duration = Duration::from_millis(10);
 
 impl ChunkManager {
     fn chunk_exists(&self, x: i32, z: i32) -> bool {
@@ -206,14 +206,13 @@ impl ChunkManager {
         }
     }
 
-    /// Process queued regions, newest first, until the frame budget is spent.
-    pub(super) fn run_light(&mut self, max_regions: usize, max_cells: i32) {
-        let (mut regions, mut cells) = (0, 0);
-        while regions < max_regions && cells < max_cells {
-            let Some(r) = self.light_queue.pop() else { break };
-            regions += 1;
-            cells += r.volume();
+    /// Process queued regions, newest first, until the queue is empty or `deadline` passes.
+    pub(super) fn run_light(&mut self, deadline: Option<Instant>) {
+        while let Some(r) = self.light_queue.pop() {
             self.update_region(r);
+            if deadline.is_some_and(|d| Instant::now() >= d) {
+                break;
+            }
         }
     }
 
@@ -321,13 +320,20 @@ impl ChunkManager {
         for p in emitters {
             self.schedule_light(Kind::Block, p, p);
         }
-        // Seams: the border column on each side of every border with a lit neighbour, full height.
+        // Seams: the border column on each side of every border with a lit neighbour. Sky light only needs
+        // recomputing up to the tallest column of the two chunks (above that both sides are open sky);
+        // block light only if either chunk holds any.
         for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
-            if !self.chunks.get(&(key.0 + dx, key.1 + dz)).is_some_and(|n| n.lit) {
-                continue;
-            }
-            // (x range, z range) of our border column and of the neighbour's facing one.
-            let strip = |cx: i32, cz: i32, d: (i32, i32)| {
+            let nk = (key.0 + dx, key.1 + dz);
+            let (top, glow) = match (self.chunks.get(&key), self.chunks.get(&nk)) {
+                (Some(me), Some(n)) if n.lit => (
+                    (*me.height.iter().chain(n.height.iter()).max().unwrap() as i32 + 1).min(H as i32 - 1),
+                    me.light.iter().chain(n.light.iter()).any(|&v| v >> 4 != 0),
+                ),
+                _ => continue,
+            };
+            // Our border column and the neighbour's facing one: (x range, z range) of the strip.
+            let strip = |cx: i32, cz: i32, d: (i32, i32), y1: i32| {
                 let (x0, z0) = (cx * 16, cz * 16);
                 let (xs, zs) = match d {
                     (-1, 0) => ((x0, x0), (z0, z0 + 15)),
@@ -335,31 +341,41 @@ impl ChunkManager {
                     (0, -1) => ((x0, x0 + 15), (z0, z0)),
                     _ => ((x0, x0 + 15), (z0 + 15, z0 + 15)),
                 };
-                ([xs.0, 0, zs.0], [xs.1, H as i32 - 1, zs.1])
+                ([xs.0, 0, zs.0], [xs.1, y1, zs.1])
             };
-            for (k, d) in [(key, (dx, dz)), ((key.0 + dx, key.1 + dz), (-dx, -dz))] {
-                let (lo, hi) = strip(k.0, k.1, d);
+            for (k, d) in [(key, (dx, dz)), (nk, (-dx, -dz))] {
+                let (lo, hi) = strip(k.0, k.1, d, top);
                 self.schedule_light(Kind::Sky, lo, hi);
-                self.schedule_light(Kind::Block, lo, hi);
+                if glow {
+                    let (lo, hi) = strip(k.0, k.1, d, H as i32 - 1);
+                    self.schedule_light(Kind::Block, lo, hi);
+                }
             }
         }
     }
 
-    /// Per frame: when the queue is empty, light the nearest final chunk of the render circle that has
-    /// all 8 neighbours loaded, then work the queue for this frame's budget.
+    /// Per frame, within `LIGHT_BUDGET`: light up to two final chunks of the render circle that have all
+    /// 8 neighbours loaded (nearest first), one after the other so the queue is empty when meshing runs.
     pub(super) fn light_pending(&mut self, cx: i32, cz: i32) {
-        if self.light_queue.is_empty() {
-            let r2 = self.radius * self.radius;
-            let next = self.ring.iter().take_while(|&&(dx, dz)| dx * dx + dz * dz <= r2).map(|&(dx, dz)| (cx + dx, cz + dz)).find(|&(x, z)| {
-                self.chunks.get(&(x, z)).is_some_and(|e| !e.lit)
-                    && self.is_final(x, z)
-                    && (-1..=1).all(|dx| (-1..=1).all(|dz| self.chunks.contains_key(&(x + dx, z + dz))))
-            });
-            if let Some(k) = next {
-                self.init_chunk(k);
+        let deadline = Instant::now() + LIGHT_BUDGET;
+        for _ in 0..2 {
+            if self.light_queue.is_empty() {
+                let r2 = self.radius * self.radius;
+                let next = self.ring.iter().take_while(|&&(dx, dz)| dx * dx + dz * dz <= r2).map(|&(dx, dz)| (cx + dx, cz + dz)).find(|&(x, z)| {
+                    self.chunks.get(&(x, z)).is_some_and(|e| !e.lit)
+                        && self.is_final(x, z)
+                        && (-1..=1).all(|dx| (-1..=1).all(|dz| self.chunks.contains_key(&(x + dx, z + dz))))
+                });
+                match next {
+                    Some(k) => self.init_chunk(k),
+                    None => break,
+                }
+            }
+            self.run_light(Some(deadline));
+            if !self.light_queue.is_empty() || Instant::now() >= deadline {
+                break;
             }
         }
-        self.run_light(REGIONS_PER_FRAME, CELLS_PER_FRAME);
     }
 }
 
@@ -395,9 +411,7 @@ mod tests {
     }
 
     fn settle(m: &mut ChunkManager) {
-        while !m.light_queue.is_empty() {
-            m.run_light(usize::MAX, i32::MAX);
-        }
+        m.run_light(None);
     }
 
     /// Sky light: 15 over open ground, 0 inside stone, a roof dims the cell under it by one step of

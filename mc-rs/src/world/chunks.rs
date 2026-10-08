@@ -29,6 +29,31 @@ mod light;
 
 type Key = (i32, i32);
 
+/// Multiply-rotate hasher for the chunk map. The default SipHash was the main cost of the light engine
+/// (about 10 map lookups per cell evaluated); keys here are small ints, not attacker input.
+#[derive(Default)]
+struct KeyHasher(u64);
+
+impl KeyHasher {
+    fn add(&mut self, v: u64) {
+        self.0 = (self.0.rotate_left(5) ^ v).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+}
+
+impl std::hash::Hasher for KeyHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        bytes.iter().for_each(|&b| self.add(b as u64));
+    }
+    fn write_i32(&mut self, i: i32) {
+        self.add(i as u32 as u64);
+    }
+}
+
+type Chunks = HashMap<Key, Entry, std::hash::BuildHasherDefault<KeyHasher>>;
+
 /// Chunks meshed + uploaded per frame, so walking into fresh terrain never stalls a frame.
 /// ponytail: meshing runs on the render thread; if one chunk mesh is slow on a weak phone,
 /// move it to the workers (they would need the neighbours' blocks behind an `Arc`).
@@ -61,7 +86,7 @@ struct Entry {
 }
 
 pub struct ChunkManager {
-    chunks: HashMap<Key, Entry>,
+    chunks: Chunks,
     /// Requested from a worker, not back yet.
     pending: HashSet<Key>,
     /// Offsets of the raw ring (radius + 2), nearest first.
@@ -121,7 +146,7 @@ impl ChunkManager {
             .collect();
         ring.sort_by_key(|&(dx, dz)| dx * dx + dz * dz);
 
-        Self { chunks: HashMap::new(), pending: HashSet::new(), ring, radius, center: None, max_in_flight: workers * 2,
+        Self { chunks: Chunks::default(), pending: HashSet::new(), ring, radius, center: None, max_in_flight: workers * 2,
                gen: OverworldGenerator::new(seed), cm: WorldChunkManager::new(seed), jobs, done, light_queue: Vec::new(), sky_sub: 0 }
     }
 
@@ -220,6 +245,11 @@ impl ChunkManager {
     /// Everything that has a mesh, for the draw loop.
     pub fn meshes(&self) -> impl Iterator<Item = &Mesh> {
         self.chunks.values().filter_map(|e| e.mesh.as_ref())
+    }
+
+    /// Chunks that currently have something to draw.
+    pub fn meshed(&self) -> usize {
+        self.meshes().count()
     }
 
     pub fn loaded(&self) -> usize {

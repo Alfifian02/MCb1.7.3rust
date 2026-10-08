@@ -124,6 +124,15 @@ impl App {
         let spawn_feet_y = (top as f32) + 1.0 + 0.9;
         log::info!("chunks: render distance {}, spawn at ({}, {}, {}), top block y={}", RENDER_DIST, spawn_x, spawn_feet_y, spawn_z, top);
 
+        // Light and mesh the area around the spawn now: init runs off the render thread, so the first
+        // frame already shows terrain instead of filling in over the next few seconds.
+        let warm = Instant::now();
+        while chunks.meshed() < 24 && warm.elapsed() < Duration::from_secs(8) {
+            chunks.update(&gpu.device, spawn_x >> 4, spawn_z >> 4);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        log::info!("chunks: {} meshed after {:?}", chunks.meshed(), warm.elapsed());
+
         let mut camera = FirstPersonCamera::spawn_at(spawn_x as f32 + 0.5, spawn_feet_y + EYE_HEIGHT, spawn_z as f32 + 0.5);
         // spawn_at defaults to aspect 1.0 and resize() only runs when the size changes, so
         // without this the 3D view is squashed horizontally onto the real screen shape.

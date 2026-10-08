@@ -46,6 +46,10 @@ ticks (liquids/sand). Sapling growth, fluid flow and falling sand belong with M5
 BiomeGenBase but climate never selects it; b1.7.3 has no ravines.
 
 ## Changelog
+- `done` faster world loading (not compiled): chunk map uses a cheap integer hasher instead of SipHash; light work is bounded by
+  10 ms per frame instead of a cell count and lights up to 2 chunks per frame; seam recomputation skips cells above the tallest
+  column and block light when neither chunk has any; `App::init` (off the render thread) lights and meshes the spawn area
+  (>= 24 chunk meshes or 8 s) before the first frame. Still open: populate and meshing run on the render thread.
 - `done` plants drawn (written WITHOUT a Rust toolchain: not compiled, tests not run): flowers, mushrooms, tall grass, dead bush
   and reeds are two crossed double-sided quads (`chunk::cross_shape`, sized from each block's bounds; flat colours until M14
   textures), lit by their own cell, and pickable/breakable as a whole cell. Still not solid. Snow layer (78) is still not drawn.
