@@ -97,6 +97,14 @@ pub fn build(blocks: &[u8], data: &Nibbles, light: &[u8], nb: [&[u8]; 4], nb_lig
         let v = l[idx((x & 15) as usize, y as usize, (z & 15) as usize)];
         table[((v & 15).saturating_sub(sky_sub)).max(v >> 4) as usize]
     };
+    // Is the air cell in the shade? A ray toward the sun, `sun_key` steps along Z per step up.
+    let (sx, sy) = { let h = if sun == NO_SUN { 0.0 } else { sun as f32 / 2.0 }; let m = h.abs().max(1.0); (h / m, 1.0 / m) };
+    let occ = |x: i32, y: i32, z: i32| -> bool {
+        if sun == NO_SUN || !(-1..=16).contains(&x) || !(-1..=16).contains(&z) { return false; }
+        let (cz, cy) = (z as f32 + 0.5, y as f32 + 0.5);
+        (1..=10).map(|n| ((cz + sx * n as f32).floor() as i32, (cy + sy * n as f32).floor() as i32))
+            .take_while(|&(rz, _)| (-1..=16).contains(&rz)).any(|(rz, ry)| get(x, ry, rz) != 0)
+    };
     let mut verts: Vec<f32> = Vec::new();
     let mut idxs: Vec<u32> = Vec::new();
 
@@ -136,17 +144,8 @@ pub fn build(blocks: &[u8], data: &Nibbles, light: &[u8], nb: [&[u8]; 4], nb_lig
                         4 | 5 => 0.8, // +Z, -Z
                         _ => 0.6, // +X, -X
                     };
-                    let mut light = shade * bright(x + dx, y + dy, z + dz);
-                    if sun != NO_SUN {
-                        let h = sun as f32 / 2.0;
-                        let m = h.abs().max(1.0);
-                        let (sx, sy) = (h / m, 1.0 / m);
-                        let (cz, cy) = ((z + dz) as f32 + 0.5, (y + dy) as f32 + 0.5);
-                        let ray = (1..=10).map(|n| ((cz + sx * n as f32).floor() as i32, (cy + sy * n as f32).floor() as i32));
-                        if ray.take_while(|&(rz, _)| (-1..=16).contains(&rz)).any(|(rz, ry)| get(x + dx, ry, rz) != 0) {
-                            light *= 0.6;
-                        }
-                    }
+                    let light = shade * bright(x + dx, y + dy, z + dz);
+                    let own = occ(x + dx, y + dy, z + dz);
                     for (corner, uv) in face.corners.iter().zip(face.uv.iter()) {
                         let (au, av) = atlas::atlas_uv(tile, uv[0], uv[1]);
                         // ponytail: world-space f32 vertices lose precision far from the origin
@@ -156,7 +155,16 @@ pub fn build(blocks: &[u8], data: &Nibbles, light: &[u8], nb: [&[u8]; 4], nb_lig
                         verts.push(corner[2] + (oz + z) as f32);
                         verts.push(au);
                         verts.push(av);
-                        verts.push(light);
+                        // Soft edge: the shadow of the 4 air cells touching this corner in the face plane, averaged, so the
+                        // GPU fades it across a block instead of cutting it at the block edge.
+                        let t = if dx != 0 { [1, 2] } else if dy != 0 { [0, 2] } else { [0, 1] };
+                        let hit = if sun == NO_SUN { 0 } else { (0..4usize).filter(|&i| {
+                            let mut c = [x + dx, y + dy, z + dz];
+                            c[t[0]] += corner[t[0]] as i32 - 1 + (i & 1) as i32;
+                            c[t[1]] += corner[t[1]] as i32 - 1 + (i >> 1) as i32;
+                            if get(c[0], c[1], c[2]) != 0 { own } else { occ(c[0], c[1], c[2]) }
+                        }).count() };
+                        verts.push(light * (1.0 - 0.4 * hit as f32 / 4.0));
                     }
                     idxs.extend_from_slice(&[
                         base, base + 1, base + 2,
