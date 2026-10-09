@@ -35,6 +35,7 @@ original. Anything that cannot be derived from the b1.7.3 sources is marked
 | M6b Block updates    | written WITHOUT a Rust toolchain: not compiled, not run | `world/ticks.rs`: scheduled ticks (`scheduleBlockUpdate`, 1000 per tick) + 80 random ticks per chunk within 9 chunks, `onBlockAdded`/`onBlockRemoval`/`onNeighborBlockChange` replayed from a change log of the notifying setters. Water and lava flow (`BlockFlowing`: levels, falling, source making, lava slow + hardening to obsidian/cobblestone), sand and gravel fall (`EntityFallingSand` as a flat box), leaf decay, sapling growth (reuses the populate tree generators), plants uproot without ground, grass spread, crops, farmland, reeds, cactus. No fire, mushroom spread, snow/ice, rain on farmland. See ROADMAP changelog. |
 | Health + damage      | compiled and ran on an Android device (56 host tests) | 20 health, fall damage, drowning, lava + fire, void, death drops the inventory and respawns. Fluids are not solid and the player swims. Mushroom stew (bowl + 2 mushrooms) is the only food, tap to eat. See ROADMAP changelog. |
 | M7 Save              | compiled and ran on an Android device | Own simple format, not McRegion: one run-length-coded file per edited chunk + a `level` file (player, inventory, furnaces, dropped items, time). Autosave every 5 s, full save on pause/exit, resume on start. Saves live in the app's private storage, one folder per seed. +2 tests. See ROADMAP changelog. |
+| Block textures       | written WITHOUT a Rust toolchain: not compiled, not run | Real `terrain.png` tiles on every block face (`assets/terrain.rgba`, grass/foliage tint baked for one climate), per-face tiles from `getBlockTextureFromSideAndMetadata`, cut-out plants and glass. Items, mobs and the HUD stay flat colour. See ROADMAP changelog. |
 | Real-time shadows    | written; shader + pass tested headless on lavapipe (Vulkan) on a Linux host, NOT run on a device, `lib.rs` not compiled | Port of shaderLABS/Shadow-Tutorial to wgpu, no Iris/OptiFine: sun depth pass (1024^2, distortion 0.10, foliage excluded) + per-pixel compare in the chunk shader, replaces the mesher's baked shadow ray. See ROADMAP changelog. |
 | M8 Mobs              | written WITHOUT a Rust toolchain: not compiled, 3 mob tests not run | 13 mobs on one AI (`EntityCreature`/`EntityLiving` wander at 20 Hz, 0.9..3.6 box physics via `physics::step_box`): pig, cow, sheep (fleece colours), chicken (eggs, slow fall), wolf (angry when hit), squid, zombie, zombie pigman, giant, skeleton (arrows), creeper (fuse + `Explosion`), spider (leap, climbs), slime (hops, splits). Boxy models with swinging limbs, tap to hit (swords 4+, tools 2+, hand 1, 10-tick hurt window, knockback), `dropFewItems` loot, zombies/skeletons burn in daylight, spawns by light/grass/water. No path-finder, ghast, taming, shearing, sound, save. See ROADMAP changelog. |
 | M9..M14              | pending | Everything else: see ROADMAP.md for the order. |
@@ -54,7 +55,7 @@ mc-rs/
       pipeline.rs         chunk pipeline + atlas upload + uniforms
     render/
       sky.rs              sky pass: dome, sunrise glow, sun, moon, stars, under-plane (assets/sky.rgba = real sun.png + moon.png)
-      atlas.rs            16x32 RGBA atlas: block-id tiles + metadata variants (log/leaf species, wool colours)
+      atlas.rs            256x288 RGBA atlas: real terrain.png tiles (`terrain_tile` per block face) + a flat-colour strip for items/mobs/unknown blocks
       camera.rs           FirstPersonCamera: yaw/pitch/look_at/perspective
       hud.rs              2D orthographic overlay pipeline (M12)
       mobs.rs             M8: Mob (13 kinds), Mobs (AI tick, spawn, hit, loot, arrows, explosions, ray pick)
@@ -219,5 +220,5 @@ was generated with). The CI workflow does this for you.
   (e.g. the pause button after flipping the phone 180 degrees), add display-cutout insets.
 - The nav bar is hidden with `setSystemUiVisibility` (deprecated since API 30 but still
   honoured on 11-14). Not yet verified on a real device.
-- Flowers, tall grass, mushrooms, dead bush and reeds are drawn as flat-colour crossed quads (not solid); the snow layer is
+- Flowers, tall grass, mushrooms, dead bush and reeds are drawn as textured crossed quads (not solid); the snow layer is
   neither drawn nor solid yet; leaves, water and lava are drawn as opaque flat-colour cubes. Real models/textures are M14.

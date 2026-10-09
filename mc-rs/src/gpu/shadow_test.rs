@@ -1,8 +1,9 @@
 //! Headless check of the shadow pass (needs a Vulkan/GL adapter, e.g. lavapipe; skipped without one).
 use super::{create_index_buffer, create_vertex_buffer, ChunkPipeline, Vertex};
-use crate::render::atlas::atlas_uv;
+use crate::render::atlas::{atlas_uv, terrain_uv};
 use glam::{Mat4, Vec3};
 
+/// `tile` 31 stands for tall grass: its terrain tile, which the shadow pass skips; any other tile is a flat colour.
 fn render(strength: f32, tile: u16) -> Option<Vec<f32>> {
     let inst = wgpu::Instance::default();
     let ad = pollster::block_on(inst.request_adapter(&Default::default())).ok()?;
@@ -10,7 +11,7 @@ fn render(strength: f32, tile: u16) -> Option<Vec<f32>> {
     let fmt = wgpu::TextureFormat::Rgba8Unorm;
     let pipe = ChunkPipeline::new(&dev, fmt);
     pipe.upload_atlas(&q);
-    let quad = |t: u16, a, b, c, d| { let (x, y) = atlas_uv(t, 0.0, 0.0); [a, b, c, d].map(|p| Vertex { pos: p, uv: [x, y], light: 1.0 }) };
+    let quad = |t: u16, a, b, c, d| { let (x, y) = if t == 31 { terrain_uv(39, 0.5, 0.5) } else { atlas_uv(t, 0.0, 0.0) }; [a, b, c, d].map(|p| Vertex { pos: p, uv: [x, y], light: 1.0 }) };
     // 1x1 faces like the real mesher (the distort is per vertex, so huge triangles would interpolate it wrongly).
     let mut verts = vec![];
     for x in -40..40 { for z in -40..40 { let (x, z) = (x as f32, z as f32); verts.extend(quad(2, [x, 0., z], [x + 1., 0., z], [x + 1., 0., z + 1.], [x, 0., z + 1.])); } }

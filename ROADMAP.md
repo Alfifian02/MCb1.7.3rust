@@ -46,6 +46,16 @@ ticks (liquids/sand). Sapling growth, fluid flow and falling sand are in M6b (bl
 BiomeGenBase but climate never selects it; b1.7.3 has no ravines.
 
 ## Changelog
+- `done` real block textures (written WITHOUT a Rust toolchain: not compiled, +1 test and 1 changed test not run; `tools/gen_terrain.py` ran, its tiles were looked at):
+    - `assets/terrain.rgba` = the real `terrain.png` (256x256, from the jar) with the biome tint baked in: grass top, tall grass, fern, reeds x the grass colour, leaves x the foliage colour,
+      spruce 0x619961, birch 0x80A755 (own tile 255, the png has no birch leaf tile); water, lava and ice made opaque. Climate is one fixed point (temperature 0.8, rainfall 0.4).
+    - `render/atlas.rs`: the atlas texture is 256 x 288, the png on top and under it the old flat-colour strip (items, mobs, falling blocks and blocks without a tile keep it).
+      `terrain_tile(id, meta, side)` = `getBlockTextureFromSideAndMetadata` of the blocks the world has (grass, log, leaves, sandstone, cactus, furnace, workbench, pumpkin, wool,
+      slabs, tnt, ...); `face_uv` picks it per face (the mesher's face order -> the Java side), `terrain_uv` insets a hair so Nearest never reads the next tile.
+    - `render/mesh.rs`: faces use `face_uv`; plants are full-height 0.9-wide crossed quads (`renderCrossedSquares`) with the cut-out texture (`cross_shape` still sizes pick and collision).
+    - `gpu/pipeline.rs`: the shader drops texels with alpha < 0.5 (plants, glass); the shadow pass finds foliage by terrain tile (`PLANT` is built from `terrain_tile`).
+    - Not done: biome tint per block (needs a colour vertex attribute), grass side overlay (tile 38), animated water/lava/fire, translucent water/ice/glass, mipmaps (distant tiles shimmer), furnace/pumpkin/chest
+      facing (front is always +Z until metadata carries it), item sprites and mob/GUI textures (M14).
 - `done` M6b block updates (`world/ticks.rs`, hooks in `world/chunks.rs`, `world/gen/populate.rs`, `render/items.rs`, `lib.rs`; written WITHOUT a Rust toolchain: not compiled, not run, expect a compile fix or two; no new tests yet):
   - `ChunkManager` logs every notifying write (`set_block` / `set_block_meta`: x, y, z, old id, new id); `set_quiet` is the `setBlockAndMetadata` / `setBlockMetadata` write that does not. `Ticks::step` (20 Hz, next to the furnaces) runs the scheduled
     ticks (`TickUpdates`: BTreeSet by due time, dedup set, <= 1000 per tick, skipped unless the cell's +-8 area is loaded), then 80 random ticks per lit final chunk within 9 chunks with the Java LCG (`World.tick`), then replays the log:

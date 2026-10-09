@@ -57,7 +57,15 @@ const SHADOW_BRIGHTNESS: f32 = 0.75;
 const PLANT: [[u32; 4]; 2] = {
     let (mut m, mut id) = ([[0u32; 4]; 2], 0usize);
     while id < 256 {
-        if is_plant(id as u8) { m[id >> 7][(id >> 5) & 3] |= 1 << (id & 31); }
+        // Every terrain tile a plant can show (tall grass has three by metadata). 78 (snow layer) is not drawn and shares
+        // its tile with snow blocks, which do cast shadows.
+        if is_plant(id as u8) && id != 78 {
+            let mut meta = 0;
+            while meta < 3 {
+                if let Some(t) = atlas::terrain_tile(id as u8, meta, 2) { m[(t >> 7) as usize][((t >> 5) & 3) as usize] |= 1 << (t & 31); }
+                meta += 1;
+            }
+        }
         id += 1;
     }
     m
@@ -116,7 +124,8 @@ fn vs_main(@location(0) vpos: vec3<f32>, @location(1) vuv: vec2<f32>, @location(
 // applied. The shadow map's depth is `z * 0.5 + 0.25`: distort.glsl's `z * 0.5` in GL clip space, then 0..1.
 @vertex
 fn vs_shadow(@location(0) p: vec3<f32>, @location(1) uv: vec2<f32>) -> @builtin(position) vec4<f32> {
-    let t = min(u32(uv.y * TH) * TW + u32(uv.x * f32(TW)), 255u); // atlas_uv is the texel centre of tile t
+    // Terrain tile under this UV (the strip below the png gives 256 and up: clamped to the unused tile 255).
+    let t = min(u32(uv.y * TH) * TW + u32(uv.x * f32(TW)), 255u);
     if ((u.plant[t >> 7u][(t >> 5u) & 3u] >> (t & 31u)) & 1u) == 1u { return vec4<f32>(10.0); }
     let c = u.shadow_vp * vec4<f32>(p, 1.0);
     return vec4<f32>(c.xy / (length(c.xy) + u.sh.x), c.z * 0.5 + 0.25, 1.0);
@@ -127,6 +136,7 @@ fn vs_shadow(@location(0) p: vec3<f32>, @location(1) uv: vec2<f32>) -> @builtin(
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let c = textureSample(tex, samp, in.uv);
+    if c.a < 0.5 { discard; } // cut-out textures: plants, glass
     var n = normalize(cross(dpdx(in.wp), dpdy(in.wp)));
     if dot(n, u.eye.xyz - in.wp) < 0.0 { n = -n; }
     var k = 1.0;
@@ -155,10 +165,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 
 impl ChunkPipeline {
     pub fn new(device: &Device, surface_format: wgpu::TextureFormat) -> Self {
-        // M3e-atlas: RGBA, one texel per tile (block ids, then metadata variants), `TILES_W` x `TILES_H`.
+        // Atlas: `terrain.png` plus the flat-colour strip, `ATLAS_W` x `ATLAS_H` (see `render::atlas`).
         let atlas_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("atlas"),
-            size: wgpu::Extent3d { width: atlas::TILES_W as u32, height: atlas::TILES_H as u32, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d { width: atlas::ATLAS_W as u32, height: atlas::ATLAS_H as u32, depth_or_array_layers: 1 },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -228,7 +238,7 @@ impl ChunkPipeline {
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("chunk_shader"),
-            source: wgpu::ShaderSource::Wgsl(SHADER_SRC.replace("@TW@", &atlas::TILES_W.to_string()).replace("@TH@", &atlas::TILES_H.to_string()).into()),
+            source: wgpu::ShaderSource::Wgsl(SHADER_SRC.replace("@TW@", &atlas::TILES_W.to_string()).replace("@TH@", &(atlas::ATLAS_H / 16).to_string()).into()),
         });
 
         // Group 1: the shadow map and its comparison sampler (nearest = `shadowtex0Nearest`; `Linear` is free PCF).
@@ -385,10 +395,10 @@ impl ChunkPipeline {
             &rgba,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(atlas::TILES_W as u32 * 4),
-                rows_per_image: Some(atlas::TILES_H as u32),
+                bytes_per_row: Some(atlas::ATLAS_W as u32 * 4),
+                rows_per_image: Some(atlas::ATLAS_H as u32),
             },
-            wgpu::Extent3d { width: atlas::TILES_W as u32, height: atlas::TILES_H as u32, depth_or_array_layers: 1 },
+            wgpu::Extent3d { width: atlas::ATLAS_W as u32, height: atlas::ATLAS_H as u32, depth_or_array_layers: 1 },
         );
     }
 }

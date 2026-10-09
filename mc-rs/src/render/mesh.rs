@@ -131,13 +131,16 @@ pub fn build(blocks: &[u8], data: &Nibbles, light: &[u8], nb: [&[u8]; 4], nb_lig
             for x in 0..16 {
                 // Plants: two crossed quads, visible from both sides, lit by their own cell.
                 let raw = blocks[idx(x as usize, y as usize, z as usize)];
-                if let Some((half, h)) = cross_shape(raw) {
+                if cross_shape(raw).is_some() {
                     let lit = bright(x, y, z);
+                    let meta = data.get(x as usize, y as usize, z as usize);
                     let (cx, cz) = ((ox + x) as f32 + 0.5, (oz + z) as f32 + 0.5);
-                    let (au, av) = atlas::atlas_uv(raw as u16, 0.0, 0.0);
+                    // `RenderBlocks.renderCrossedSquares`: full-height quads 0.9 wide, the texture's cut-out does the shaping.
+                    let half = 0.45;
                     for (a, b) in [((-half, -half), (half, half)), ((-half, half), (half, -half))] {
                         let base = verts.len() as u32 / 6;
-                        for (px, pz, py) in [(a.0, a.1, 0.0), (b.0, b.1, 0.0), (b.0, b.1, h), (a.0, a.1, h)] {
+                        for (k, (px, pz, py)) in [(a.0, a.1, 0.0), (b.0, b.1, 0.0), (b.0, b.1, 1.0), (a.0, a.1, 1.0)].into_iter().enumerate() {
+                            let (au, av) = atlas::face_uv(raw, meta, 2, (k == 1 || k == 2) as u8 as f32, (k >= 2) as u8 as f32);
                             verts.extend_from_slice(&[cx + px, y as f32 + py, cz + pz, au, av, lit]);
                         }
                         // Both windings: the pipeline culls back faces.
@@ -149,7 +152,7 @@ pub fn build(blocks: &[u8], data: &Nibbles, light: &[u8], nb: [&[u8]; 4], nb_lig
                 if blk == 0 {
                     continue;
                 }
-                let tile = atlas::tile_of(blk, data.get(x as usize, y as usize, z as usize));
+                let meta = data.get(x as usize, y as usize, z as usize);
                 for (face_i, face) in FACES.iter().enumerate() {
                     let (dx, dy, dz) = DIRS[face_i];
                     if get(x + dx, y + dy, z + dz) != 0 {
@@ -166,7 +169,7 @@ pub fn build(blocks: &[u8], data: &Nibbles, light: &[u8], nb: [&[u8]; 4], nb_lig
                     let own = occ(x + dx, y + dy, z + dz);
                     let mut ls = [light; 4];
                     for (ci, (corner, uv)) in face.corners.iter().zip(face.uv.iter()).enumerate() {
-                        let (au, av) = atlas::atlas_uv(tile, uv[0], uv[1]);
+                        let (au, av) = atlas::face_uv(blk, meta, face_i, uv[0], uv[1]);
                         // ponytail: world-space f32 vertices lose precision far from the origin
                         // (about 1 cm at 100k blocks); upgrade path is a per-chunk offset uniform.
                         verts.push(corner[0] + (ox + x) as f32);
@@ -256,10 +259,10 @@ mod tests {
             (v[3], v[4])
         };
         let mut d = Nibbles::new();
-        assert_eq!(uv(&d), atlas::atlas_uv(35, 0.0, 0.0));
+        let white = uv(&d);
         d.set(5, 20, 5, 14);
-        assert_eq!(uv(&d), atlas::atlas_uv(atlas::tile_of(35, 14), 0.0, 0.0));
-        assert_ne!(uv(&d), atlas::atlas_uv(35, 0.0, 0.0));
+        assert_ne!(uv(&d), white);
+        assert_eq!(uv(&d), atlas::terrain_uv(129, 0.0, 0.0)); // red wool: the first corner is the corner of tile 129
     }
 
     /// A plant is two crossed quads, and does not hide the top of the block under it.
