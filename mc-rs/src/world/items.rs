@@ -30,6 +30,8 @@ pub const STEW: u16 = 282;
 pub fn heal_amount(id: u16) -> Option<i32> {
     match id {
         STEW => Some(10),
+        319 => Some(3), // raw porkchop
+        320 => Some(8), // cooked porkchop
         _ => None,
     }
 }
