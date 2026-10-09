@@ -63,6 +63,14 @@ impl Vitals {
         true
     }
 
+    /// `EntityLiving.heal`: nothing for the dead; the damage window drops to half.
+    pub fn heal(&mut self, n: i32) {
+        if self.health > 0 {
+            self.health = (self.health + n).min(MAX_HEALTH);
+            self.hearts_life = 10;
+        }
+    }
+
     /// `updateFallState` (every frame) and `EntityLiving.fall`: landing after `d` blocks costs `ceil(d - 3)`;
     /// water cancels the fall.
     fn land(&mut self, e: &Env) {
@@ -146,6 +154,13 @@ mod tests {
         let mut v = Vitals::default();
         assert!(v.hurt(4) && !v.hurt(4) && v.hurt(5));
         assert_eq!(v.health, 15);
+        v.heal(3);
+        assert_eq!(v.health, 18);
+        v.heal(10);
+        assert_eq!(v.health, MAX_HEALTH);
+        v.health = 0;
+        v.heal(10);
+        assert!(v.dead());
 
         let mut v = Vitals::default();
         let under = Env { eye_in_water: true, ..Env::default() };

@@ -1,6 +1,7 @@
-//! M3e-atlas (minimal): 16x16 block-id atlas, 1 pixel per block id.
-//! Each block gets a single solid color. No fancy dither.
-//! Texture: 16x16 RGBA = 1 KB. Safe on any GPU.
+//! M3e-atlas (minimal): 16x32 atlas, 1 pixel per tile. Tiles 0..=255 are the block ids, tiles 256.. the
+//! metadata variants that look different (log species, leaf kinds, wool colours; see `tile_of`).
+//! Each tile is a single solid color. No fancy dither.
+//! Texture: 16x32 RGBA = 2 KB. Safe on any GPU.
 
 pub type Pixel = [u8; 4];
 
@@ -48,6 +49,7 @@ pub fn block_color(id: u8) -> Pixel {
         42 => [225, 225, 225, 255],  // iron block (also iron tools)
         57 => [100, 230, 215, 255],  // diamond block (also diamond tools)
         58 => [150, 105, 60, 255],   // workbench
+        60 => [95, 62, 38, 255],     // farmland (tilled by a hoe)
         61 => [105, 105, 105, 255],  // furnace
         62 => [230, 130, 40, 255],   // lit furnace
         80 => [250, 252, 255, 255],  // snow block
@@ -57,37 +59,73 @@ pub fn block_color(id: u8) -> Pixel {
     }
 }
 
-/// 16x16 atlas, 1 pixel per block id. Returns 16*16*4 = 1024 bytes RGBA.
-pub fn atlas_rgba() -> Vec<u8> {
-    const W: usize = 16;
-    const H: usize = 16;
-    let mut out = vec![0u8; W * H * 4];
-    for id in 0u16..256 {
-        let id = id as u8;
-        let x = (id % 16) as usize;
-        let y = (id / 16) as usize;
-        let c = block_color(id);
-        let off = (y * W + x) * 4;
-        out[off] = c[0];
-        out[off + 1] = c[1];
-        out[off + 2] = c[2];
-        out[off + 3] = c[3];
+/// Atlas size in tiles (one texel each): 256 block-id tiles, then the variants.
+pub const TILES_W: usize = 16;
+pub const TILES_H: usize = 32;
+
+/// `EntitySheep.fleeceColorTable`: the wool colours, indexed by the cloth metadata (0 white .. 15 black).
+const FLEECE: [[f32; 3]; 16] = [
+    [1.0, 1.0, 1.0], [0.95, 0.7, 0.2], [0.9, 0.5, 0.85], [0.6, 0.7, 0.95], [0.9, 0.9, 0.2], [0.5, 0.8, 0.1],
+    [0.95, 0.7, 0.8], [0.3, 0.3, 0.3], [0.6, 0.6, 0.6], [0.3, 0.6, 0.7], [0.7, 0.4, 0.9], [0.2, 0.4, 0.8],
+    [0.5, 0.4, 0.3], [0.4, 0.5, 0.2], [0.8, 0.3, 0.3], [0.1, 0.1, 0.1],
+];
+
+/// Tile of a block with its metadata: the block id's own tile, or one of the tiles from 256 up for a variant that
+/// looks different. Log 17: 1 spruce (256), 2 birch (257), else oak (BlockLog textures). Leaves 18, `meta & 3`
+/// (bit 8 is the placed-by-player mark): 1 spruce (258), 2 birch (259). Wool 35: 1..=15 are 260..=274, 0 is white.
+pub fn tile_of(id: u8, meta: u8) -> u16 {
+    match (id, meta) {
+        (17, 1..=2) => 255 + meta as u16,
+        (18, _) if matches!(meta & 3, 1 | 2) => 257 + (meta & 3) as u16,
+        (35, 1..=15) => 259 + meta as u16,
+        _ => id as u16,
     }
-    out
 }
 
-/// Convert block id + face UV (0..1 in tile space) to atlas UV.
-/// In the 1px-per-block atlas, the UVs of each face are all 0.0 or 1.0
-/// (corners of the 1x1 tile), and `atlas_uv` just remaps to the
-/// (block_id%16, block_id/16) tile origin.
-pub fn atlas_uv(block_id: u8, _u: f32, _v: f32) -> (f32, f32) {
-    // The atlas is 1 texel per block id, so any UV inside this block's tile
-    // samples the same color. We snap to the texel center for a Nearest
-    // sampler: (tile_x + 0.5) / 16. Both face corners (u, v in {0, 1}) end
-    // up at the same sample, which is what we want for a flat-shaded atlas.
-    let tile_x = (block_id % 16) as f32;
-    let tile_y = (block_id / 16) as f32;
-    let au = (tile_x + 0.5) / 16.0;
-    let av = (tile_y + 0.5) / 16.0;
-    (au, av)
+/// Tile -> RGBA. Tiles nothing hands out are magenta.
+// UNVERIFIED: the log and leaf variants (vanilla uses textures; its leaves are tinted by `ColorizerFoliage`:
+// the spruce and birch leaf colours are 0x619961 and 0x80A755 scaled by 0.7, the rest is a guess).
+pub fn tile_color(tile: u16) -> Pixel {
+    match tile {
+        0..=255 => block_color(tile as u8),
+        256 => [75, 55, 35, 255],    // spruce log
+        257 => [215, 215, 205, 255], // birch log
+        258 => [68, 107, 68, 255],   // spruce leaves
+        259 => [90, 117, 60, 255],   // birch leaves
+        260..=274 => {
+            let c = FLEECE[(tile - 259) as usize];
+            [(c[0] * 255.0 + 0.5) as u8, (c[1] * 255.0 + 0.5) as u8, (c[2] * 255.0 + 0.5) as u8, 255]
+        }
+        _ => [180, 30, 200, 255],
+    }
+}
+
+/// The whole atlas, row by row (tile `t` is texel `t`): `TILES_W * TILES_H * 4` bytes of RGBA.
+pub fn atlas_rgba() -> Vec<u8> {
+    (0..(TILES_W * TILES_H) as u16).flat_map(tile_color).collect()
+}
+
+/// Atlas UV of a tile. The atlas is 1 texel per tile, so every UV inside a tile samples the same color:
+/// snap to the texel center for a Nearest sampler, `(tile % 16 + 0.5) / 16`, `(tile / 16 + 0.5) / 32`.
+/// Both face corners (u, v in {0, 1}) end up at the same sample, which is what a flat-shaded atlas wants.
+pub fn atlas_uv(tile: u16, _u: f32, _v: f32) -> (f32, f32) {
+    (((tile % 16) as f32 + 0.5) / TILES_W as f32, ((tile / 16) as f32 + 0.5) / TILES_H as f32)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Metadata picks the tile: species and wool colours get their own, everything else keeps the block id's tile.
+    #[test]
+    fn metadata_picks_the_tile() {
+        assert_eq!((tile_of(17, 0), tile_of(17, 1), tile_of(17, 2), tile_of(17, 3)), (17, 256, 257, 17));
+        assert_eq!((tile_of(18, 0), tile_of(18, 1 | 8), tile_of(18, 2 | 8), tile_of(18, 3)), (18, 258, 259, 18));
+        assert_eq!((tile_of(35, 0), tile_of(35, 1), tile_of(35, 15), tile_of(1, 7)), (35, 260, 274, 1));
+        // Every tile `tile_of` hands out has its own colour, and the texture covers all of them.
+        assert_eq!(atlas_rgba().len(), TILES_W * TILES_H * 4);
+        assert_ne!(tile_color(260), tile_color(261));
+        assert_ne!(tile_color(256), tile_color(17));
+        assert!(tile_color(274)[3] == 255 && (25..=26).contains(&tile_color(274)[0])); // black wool
+    }
 }

@@ -4,7 +4,7 @@
 //! real item sprites.
 
 use crate::render::mesh::push_box;
-use crate::world::items::{tile, Drops, MAX_ITEMS};
+use crate::world::items::{stack_tile, Drops, MAX_ITEMS};
 
 /// 24 vertices x 6 floats per cube, 36 indices per cube.
 const VERTEX_BYTES: u64 = (MAX_ITEMS * 24 * 6 * 4) as u64;
@@ -40,7 +40,7 @@ fn geometry(drops: &Drops) -> (Vec<f32>, Vec<u32>) {
         let mut c = e.prev.lerp(e.pos, a);
         c.y += ((e.age as f32 + a) / 10.0).sin() * 0.1 + 0.1;
         let h = 0.125;
-        push_box(&mut verts, &mut idxs, [c.x - h, c.y - h, c.z - h], [c.x + h, c.y + h, c.z + h], tile(e.stack.id), 1.0);
+        push_box(&mut verts, &mut idxs, [c.x - h, c.y - h, c.z - h], [c.x + h, c.y + h, c.z + h], stack_tile(e.stack), 1.0);
     }
     (verts, idxs)
 }

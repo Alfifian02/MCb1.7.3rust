@@ -24,7 +24,7 @@ McRegion save format. Client-only networking.
 
 ## Build
 - Workspace at `mc-rs/`
-- `cargo test --lib` runs the 47 unit tests (Android host such as Termux; see README).
+- `cargo test --lib` runs the unit tests: 47 before block metadata, 52 with it, 56 with swimming, health, food and frustum culling (Android host such as Termux; see README).
 - `cargo run` boots a desktop window (Metal / Vulkan / GL depending on host).
 - APK via GitHub Actions `cargo apk build --release` -> `MinecraftB173Rust.apk`.
 - A long-lived debug keystore at `keystore/debug.keystore` signs the release
@@ -40,12 +40,34 @@ they matched.
 
 ## Next step
 
-M7 (save). Furnaces now smelt (see the furnace entry), so the whole tool chain up to diamond is reachable. M6 is written and the crate type-checks and tests on a host, but nothing has run on a device (M5 included). M4 is done: caves and populate match the real classes bit for
+M7 (save). Block metadata is in (changelog), so the chunk's `Data` tag is `Nibbles::bytes()` as is. Furnaces now smelt (see the furnace entry), so the whole tool chain up to diamond is reachable. M6 is written and the crate type-checks and tests on a host, but nothing has run on a device (M5 included). M4 is done: caves and populate match the real classes bit for
 bit (`tools/golden/`). Still approximate in populate (see README): light model, no metadata, no tile entities, no block
 ticks (liquids/sand). Sapling growth, fluid flow and falling sand belong with M5's block updates. Ice Desert exists in
 BiomeGenBase but climate never selects it; b1.7.3 has no ravines.
 
 ## Changelog
+- `done` M13 frustum culling (host-checked: type-checks, 48 tests pass; NOT run on a device, so the FPS gain is unmeasured):
+    - `render/camera.rs`: `Frustum::from_view_proj(proj * view)` takes the six planes (Gribb-Hartmann, depth 0..1 so the near plane is row 2),
+      `intersects_aabb` is the usual conservative test against the corner furthest along each plane normal. Test covers ahead, behind,
+      sides, above/below, past the far plane, the camera inside a box, the wide 2:1 shape and a 90 degree turn.
+    - `world/chunks.rs`: `meshes_where(visible)` yields the meshes whose box (16 x `H` x 16 at the chunk key) passes the test. `lib.rs` draws
+      only those. Only the terrain draw is culled: dropped items, the outline and the HUD are tiny.
+    - Not done on purpose: tightening the box to each chunk's real height (it is the full 128), occlusion culling, greedy meshing, a profiler.
+      Culling also trims only draw calls and GPU vertex work; chunk meshing and generation still run for the whole ring.
+- `done` sword, hoe, shears (host-checked like M6: crate type-checks, 47 tests pass, NOT run on a device):
+    - `craft.rs`: swords (ids 267/268/272/276/283, 1.5x on everything, 15x and harvest on web, 2 wear per block), hoes (290..294, no wear
+      from digging, 1 per tilling), shears (359, 238 uses: 15x and harvest on web, 15x on leaves, 5x on wool, wear only on leaves and web).
+      Recipes `RecipesWeapons` x 5, hoe x 5 from `RecipesTools`, shears from two iron ingots. Wear is `wear_on_break(held, block)`.
+    - `lib.rs`: a hoe tills dirt, or grass with air above and not from below, into farmland (60) and wears 1 (`ItemHoe.onItemUse`);
+      shears on leaves drop the leaves block itself (`BlockLeaves.harvestBlock`) via `Drops::spawn_stack`.
+    - Not done: farmland reverting to dirt, its 15/16 height, crops (so a hoe only makes farmland), sheep, bow and arrow.
+- `done` mushroom stew + eating (`world/items.rs`, `world/craft.rs`, `world/vitals.rs`, `lib.rs`; written WITHOUT a Rust toolchain: not compiled, tests not run, +1 test and extra asserts):
+    `ItemFood.onItemRightClick` / `ItemSoup`: a tap that neither places a block nor opens a workbench/furnace uses the held item (as
+    `Minecraft.clickMouse` -> `sendUseItem` does, aimed at a block or not). Food uses up one and `Vitals::heal`s (`EntityLiving.heal`: nothing when dead,
+    capped at 20, damage window back to 10); eating at full health still uses it up. Stew (282) heals 10, stacks to 1 and leaves an empty bowl (281).
+    Recipes: bowl (3 planks in a V, x4) and stew (red + brown mushroom + bowl, either order). Only the stew is in `heal_amount`; apple, bread, pork, golden
+    apple and fish are one line each (ids in the comment) once mobs, crops or chests exist. Not done: eating animation and sound, the hold-to-eat delay
+    (b1.7.3 has none: eating is instant).
 - `done` health, damage, death (`world/vitals.rs`, `lib.rs`; written WITHOUT a Rust toolchain: not compiled, test not run, +1 test):
     `Vitals` = `EntityLiving.attackEntityFrom` (20 health, the 10-tick damage window: an equal or smaller hit inside it is ignored, a bigger one
     pays the difference), `Entity.updateFallState` + `EntityLiving.fall` (`ceil(fall - 3)`, water cancels it), drowning (300 air, then 2 damage every
@@ -63,6 +85,27 @@ BiomeGenBase but climate never selects it; b1.7.3 has no ravines.
     wall hop 0.3/tick when 0.6 higher is free. Simplified: every fluid cell is a source block (flow levels need metadata), horizontal speed is
     scaled to the terminal swim speed (2.0 m/s water, 0.8 lava) instead of accumulating. Not done: no flow push, no splash/bubbles, no breath
     or lava damage (next: health), dropped items still treat fluids as solid.
+- `done` block metadata (written WITHOUT a Rust toolchain: not compiled, tests not run; the Java side was run). Foundation for wood
+  and leaf species, wool colours, slabs, stairs, doors and the bed, so the chunk format does not change again when they arrive:
+    - `world/chunk.rs`: `Nibbles` = `NibbleArray` (4 bits per cell, even cell index = low nibble, same index as the blocks), 16 KB
+      per chunk, bytes identical to the McRegion `Data` tag (M7 writes `bytes()` as is). `world/chunks.rs`: `Entry.data`,
+      `ChunkManager::meta`, `set_block_meta` (= `Chunk.setBlockIDWithMetadata`) and `set_block` (= `setBlockID`: nothing on the same
+      id, metadata cleared when the id changes). `render/mesh.rs` reads only its own chunk's metadata.
+    - `world/gen/populate.rs`: `Region` carries the 2x2 metadata; `set` clears it like `setBlock`, `set_meta` writes it like
+      `setBlockAndMetadata`. Written where the Java writes: birch leaves/logs 2 (`WorldGenForest`), spruce 1 (`WorldGenTaiga1/2`), tall
+      grass 1 or 2 (rainforest, `WorldGenTallGrass`), pumpkin facing 0..3. Oak and big trees stay 0. No Random draw changed.
+    - Golden: `tools/golden/G.java`'s fake `World` keeps a `NibbleArray` per chunk with the Java setter semantics and prints a `META` line
+      (FNV of each chunk's packed nibbles) after every `POP` line. Regenerated: every old line is byte for byte unchanged; 6 of the 11
+      cases have non-zero metadata. `populate_matches_java` compares the Rust bytes with those hashes.
+    - `world/items.rs`: `damage_dropped(block, meta)` (`Block.damageDropped`), `spawn_block(block, meta, pos)` (lib.rs reads the
+      metadata before it clears the cell), `placed_meta` (`Item.getPlacedBlockMetadata`; leaves get bit 8), `stack_tile`; double
+      slab drops 2 single slabs (`BlockStep`). `lib.rs` places with `set_block_meta`.
+    - `render/atlas.rs`: the atlas is 16x32 (`TILES_W`/`TILES_H`, `gpu/pipeline.rs` follows); tiles 256.. are variants picked by
+      `tile_of(id, meta)`: spruce/birch logs and leaves, the 15 coloured wools (`EntitySheep.fleeceColorTable`). Hotbar, inventory and
+      dropped items use `stack_tile`, so a red wool stack is red. Log and leaf colours are UNVERIFIED stand-ins until M14 textures.
+    - Not done: slab/stair/door/bed shapes, rotation on placement (no `onBlockPlacedBy`: furnace and pumpkin facing is stored by worldgen
+      only), leaf decay and sapling growth, saving the data (M7), blocks the player cannot make yet (no wool dye or slab recipes).
+      Note for M7: `ChunkManager::set_block` clears metadata, so the furnace lit/unlit flip loses the facing once furnaces have one.
 - `done` touch spread (fix from a device report: with only tap = left click, a stack could not be split across a grid):
   a picked-up stack floats above the finger (`TouchUi::cursor_pos`), and dragging it over other slots puts one item into each
   slot it enters, the start slot included (`Screen::drop_one`: empty or same item with room, never a swap, never an output

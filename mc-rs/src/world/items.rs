@@ -5,6 +5,7 @@
 
 use glam::Vec3;
 
+use crate::render::atlas;
 use crate::world::chunk::is_plant;
 use crate::world::craft;
 use crate::world::dig::TICK;
@@ -19,17 +20,32 @@ pub struct ItemStack {
     pub damage: u16,
 }
 
-/// `Item.maxStackSize`: tools, sign, doors and bed 1, snowball 16, everything else 64.
+/// Empty bowl and mushroom stew (`Item.bowlEmpty` 25, `Item.bowlSoup` 26, shifted by 256).
+pub const BOWL: u16 = 281;
+pub const STEW: u16 = 282;
+
+/// `ItemFood.healAmount`. ponytail: only the stew is here, the one food that can be made today; apple 4 (260), bread 5 (297),
+/// raw/cooked pork 3/8 (319, 320), golden apple 42 (322), raw/cooked fish 2/5 (349, 350) are one line each once their
+/// source exists (mobs, crops, chests).
+pub fn heal_amount(id: u16) -> Option<i32> {
+    match id {
+        STEW => Some(10),
+        _ => None,
+    }
+}
+
+/// `Item.maxStackSize`: tools, sign, doors, bed and stew 1, snowball 16, everything else 64.
 pub fn max_stack(id: u16) -> u8 {
     match id {
-        323 | 324 | 330 | 355 => 1,
+        282 | 323 | 324 | 330 | 355 => 1,
         332 => 16,
         _ if craft::tool(id).is_some() => 1,
         _ => 64,
     }
 }
 
-/// Atlas tile (block id) whose flat colour stands in for an item until M14 has item sprites.
+/// Atlas tile (block id) whose flat colour stands in for an item until M14 has item sprites. A block item's
+/// damage is its metadata (wool colour, wood species): see `stack_tile` for the tile that shows it.
 // UNVERIFIED: colours only, picked from the existing atlas.
 pub fn tile(id: u16) -> u8 {
     match id {
@@ -51,19 +67,40 @@ pub fn tile(id: u16) -> u8 {
         265 => 42,       // iron ingot
         266 => 41,       // gold ingot
         280 => 17,       // stick
+        359 => 42,       // shears
+        281 => 5,        // bowl
+        282 => 39,       // mushroom stew
         // Tools: the material's colour (wood, stone, iron, diamond, gold); the HUD draws the head shape on top.
         _ => craft::tool(id).map_or(255, |(_, m)| [5, 4, 42, 57, 41][m]),
     }
 }
 
+/// The atlas tile of a stack: a block item's damage is the metadata its block gets when placed (`placed_meta`), so
+/// red wool and birch logs show their own colour; any other item (a tool's damage is its wear) keeps `tile`.
+pub fn stack_tile(s: ItemStack) -> u16 {
+    if s.id < 256 { atlas::tile_of(s.id as u8, s.damage as u8) } else { tile(s.id) as u16 }
+}
+
+/// `Item.getPlacedBlockMetadata`: the metadata a block item sets when it is placed. Sapling, log, wool and slab
+/// (`ItemSapling`, `ItemLog`, `ItemCloth`, `ItemSlab`) pass their damage on, leaves add bit 8 (`ItemLeaves`: placed
+/// by the player, never decays), every other block item places metadata 0.
+pub fn placed_meta(s: ItemStack) -> u8 {
+    match s.id {
+        6 | 17 | 35 | 44 => s.damage as u8,
+        18 => s.damage as u8 | 8,
+        _ => 0,
+    }
+}
+
 // ---- Block.idDropped / quantityDropped / damageDropped ----
-// ponytail: blocks whose drop reads metadata (doors, bed, crops, slabs, stairs) are missing: worldgen does not
-// make them and nothing can place them yet. Add them together with block metadata.
+// ponytail: blocks whose drop reads metadata and that nothing can make or place yet (doors, bed, crops, stairs)
+// are missing; their drops go in with the blocks. Slabs are here because the drop is two lines.
 
 fn quantity(b: u8, r: &mut JavaRandom) -> i32 {
     match b {
         // fluids, glass, TNT, bookshelf, fire, spawner, snow layer, ice, portal
         8..=11 | 20 | 46 | 47 | 51 | 52 | 78 | 79 | 90 => 0,
+        43 => 2,                                  // double slab: two single slabs
         18 => (r.next_int_bound(20) == 0) as i32, // leaves: a sapling one time in 20
         21 => 4 + r.next_int_bound(5),            // lapis
         73 | 74 => 4 + r.next_int_bound(2),       // redstone ore
@@ -83,6 +120,7 @@ fn id_dropped(b: u8, r: &mut JavaRandom) -> i32 {
         21 => 351,                                                    // lapis ore -> dye
         56 => 264,                                                    // diamond ore -> diamond
         18 => 6,                                                      // leaves -> sapling
+        43 | 44 => 44,                                                // slabs -> single slab
         30 => 287,                                                    // web -> string
         31 => if r.next_int_bound(8) == 0 { 295 } else { -1 },        // tall grass -> seeds 1 in 8
         32 => -1,                                                     // dead bush
@@ -99,8 +137,14 @@ fn id_dropped(b: u8, r: &mut JavaRandom) -> i32 {
     }
 }
 
-fn damage_dropped(b: u8) -> u16 {
-    if b == 21 { 4 } else { 0 }
+/// `Block.damageDropped(metadata)`: the damage of the dropped stack (of the item that is dropped, whatever it is).
+fn damage_dropped(b: u8, meta: u8) -> u16 {
+    match b {
+        6 | 18 => (meta & 3) as u16,      // sapling, leaves: the species (leaves lose the placed bit)
+        17 | 35 | 43 | 44 => meta as u16, // log, wool, slabs: as placed
+        21 => 4,                          // lapis ore -> blue dye
+        _ => 0,
+    }
 }
 
 // ---- Inventory ----
@@ -145,6 +189,18 @@ impl Inventory {
         if s.damage > max {
             self.slots[slot] = None;
         }
+    }
+
+    /// `ItemFood.onItemRightClick` on the item in `slot`: uses up one and returns the health it heals; a stew leaves its
+    /// empty bowl (`ItemSoup`). Eating at full health still uses the item up, like the original. `None` if not food.
+    pub fn eat(&mut self, slot: usize) -> Option<i32> {
+        let id = self.slots[slot]?.id;
+        let heal = heal_amount(id)?;
+        self.consume(slot);
+        if id == STEW {
+            self.slots[slot] = Some(ItemStack { id: BOWL, count: 1, damage: 0 });
+        }
+        Some(heal)
     }
 
     /// Use up one item of `slot` (`--stackSize`); an emptied stack becomes `None`.
@@ -271,20 +327,26 @@ impl Drops {
     /// `Block.dropBlockAsItem` for block `block` just broken at `cell`: `quantityDropped` entities of one item
     /// each, placed at random in the middle 0.7 of the cell, hopping up and sideways, 10 ticks before pickup.
     /// The caller has already checked `dig::can_harvest` (vanilla `sendBlockRemoved`: no harvest, no drop).
-    pub fn spawn_block(&mut self, block: u8, (x, y, z): (i32, i32, i32)) {
+    /// `meta` is the block's metadata from before it was cleared (`ChunkManager::meta`): it decides the damage.
+    pub fn spawn_block(&mut self, block: u8, meta: u8, cell: (i32, i32, i32)) {
         for _ in 0..quantity(block, &mut self.rng) {
             self.rng.next_float(); // `nextFloat() <= chance` with chance 1.0: always true, but it draws
             let id = id_dropped(block, &mut self.rng);
             if id <= 0 {
                 continue;
             }
-            let mut offset = || ((self.rng.next_float() * 0.7) as f64 + (1.0f32 - 0.7) as f64 * 0.5) as f32;
-            let pos = Vec3::new(x as f32 + offset(), y as f32 + offset(), z as f32 + offset());
-            let mut jitter = || (self.fx.next_double() * 0.2f32 as f64 - 0.1f32 as f64) as f32;
-            let vel = Vec3::new(jitter(), 0.2, jitter());
-            let stack = ItemStack { id: id as u16, count: 1, damage: damage_dropped(block) };
-            self.push(ItemEntity { pos, prev: pos, vel, stack, age: 0, delay: 10, on_ground: false });
+            self.spawn_stack(ItemStack { id: id as u16, count: 1, damage: damage_dropped(block, meta) }, cell);
         }
+    }
+
+    /// `Block.dropBlockAsItem_do`: one stack placed at random in the middle 0.7 of `cell`, hopping up and sideways.
+    /// Shears on leaves use it directly to drop the leaves block itself (`BlockLeaves.harvestBlock`).
+    pub fn spawn_stack(&mut self, stack: ItemStack, (x, y, z): (i32, i32, i32)) {
+        let mut offset = || ((self.rng.next_float() * 0.7) as f64 + (1.0f32 - 0.7) as f64 * 0.5) as f32;
+        let pos = Vec3::new(x as f32 + offset(), y as f32 + offset(), z as f32 + offset());
+        let mut jitter = || (self.fx.next_double() * 0.2f32 as f64 - 0.1f32 as f64) as f32;
+        let vel = Vec3::new(jitter(), 0.2, jitter());
+        self.push(ItemEntity { pos, prev: pos, vel, stack, age: 0, delay: 10, on_ground: false });
     }
 
     /// `EntityPlayer.dropPlayerItem`: thrown from 0.3 below the eye along the look direction, 40 ticks before it can
@@ -326,17 +388,31 @@ impl Drops {
 mod tests {
     use super::*;
 
+    /// Stew heals 10 and leaves a bowl; other items are not food and stay.
+    #[test]
+    fn stew_heals_and_leaves_a_bowl() {
+        let mut inv = Inventory::default();
+        inv.slots[0] = Some(ItemStack { id: STEW, count: 1, damage: 0 });
+        inv.slots[1] = Some(ItemStack { id: 4, count: 5, damage: 0 });
+        assert_eq!(inv.eat(1), None);
+        assert_eq!(inv.slots[1].map(|s| s.count), Some(5));
+        assert_eq!(inv.eat(0), Some(10));
+        assert_eq!(inv.slots[0], Some(ItemStack { id: BOWL, count: 1, damage: 0 }));
+        assert_eq!(inv.eat(0), None);
+        assert_eq!(inv.eat(2), None);
+    }
+
     /// The Java drop rules, `addItemStackToInventory`, and an item falling, landing and being picked up.
     #[test]
     fn drops_inventory_and_item_physics() {
         let mut d = Drops::new(1);
         let ids = |d: &Drops| d.items.iter().map(|e| (e.stack.id, e.stack.damage)).collect::<Vec<_>>();
-        d.spawn_block(1, (0, 10, 0)); // stone
-        d.spawn_block(2, (0, 10, 0)); // grass
-        d.spawn_block(79, (0, 10, 0)); // ice: nothing
-        d.spawn_block(32, (0, 10, 0)); // dead bush: nothing
+        d.spawn_block(1, 0, (0, 10, 0)); // stone
+        d.spawn_block(2, 0, (0, 10, 0)); // grass
+        d.spawn_block(79, 0, (0, 10, 0)); // ice: nothing
+        d.spawn_block(32, 0, (0, 10, 0)); // dead bush: nothing
         assert_eq!(ids(&d), [(4, 0), (3, 0)]);
-        d.spawn_block(21, (0, 10, 0)); // lapis: 4..=8 dye with damage 4
+        d.spawn_block(21, 0, (0, 10, 0)); // lapis: 4..=8 dye with damage 4
         let n = d.items.len() - 2;
         assert!((4..=8).contains(&n) && ids(&d)[2..].iter().all(|&i| i == (351, 4)));
 
@@ -378,5 +454,23 @@ mod tests {
         assert_eq!(inv.slots[0], None);
         inv.damage(1, 1); // not a tool: untouched
         assert_eq!(inv.slots[1].map(|s| s.count), Some(64));
+    }
+
+    /// `damageDropped` / `getPlacedBlockMetadata`: metadata survives break -> drop -> place.
+    #[test]
+    fn metadata_survives_break_and_place() {
+        let mut d = Drops::new(1);
+        let stacks = |d: &Drops| d.items.iter().map(|e| (e.stack.id, e.stack.damage)).collect::<Vec<_>>();
+        d.spawn_block(35, 14, (0, 10, 0)); // red wool
+        d.spawn_block(17, 2, (0, 10, 0)); // birch log
+        d.spawn_block(43, 3, (0, 10, 0)); // double slab: two single slabs of the same type
+        assert_eq!(stacks(&d), [(35, 14), (17, 2), (44, 3), (44, 3)]);
+        // Leaves drop their species without the placed bit; a placed leaf gets the bit.
+        assert_eq!(damage_dropped(18, 8 | 2), 2);
+        let stack = |id: u16, damage: u16| ItemStack { id, count: 1, damage };
+        assert_eq!((placed_meta(stack(18, 2)), placed_meta(stack(35, 14)), placed_meta(stack(1, 0))), (10, 14, 0));
+        // A block item shows its metadata colour; a tool's wear is not metadata.
+        assert_eq!(stack_tile(stack(35, 14)), atlas::tile_of(35, 14));
+        assert_eq!(stack_tile(stack(270, 3)), tile(270) as u16);
     }
 }

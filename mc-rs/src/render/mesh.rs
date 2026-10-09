@@ -9,7 +9,7 @@
 //! brightness of the cell the face looks into (`Block.getBlockBrightness` -> `lightBrightnessTable`).
 
 use crate::render::atlas;
-use crate::world::chunk::{brightness, cross_shape, idx, is_plant, H, VOLUME};
+use crate::world::chunk::{brightness, cross_shape, idx, is_plant, Nibbles, H, VOLUME};
 
 /// One textured quad. Four corners in CCW order from the front.
 /// `normal_index` selects the face normal (0..5) for debug-coloring later.
@@ -64,12 +64,14 @@ const FACES: [Face; 6] = [
 const DIRS: [(i32, i32, i32); 6] = [(1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)];
 
 /// Build vertex + index buffers for one chunk.
+/// `data` is this chunk's block metadata: it picks the atlas tile of a cell (wool colour, wood species); the
+/// neighbours' metadata is never needed, a neighbour only has to be see-through or not.
 /// `nb` / `nb_light` are the blocks and light of the neighbouring chunks, in the order +X, -X, +Z, -Z;
 /// they are only read for the one-cell border. `light` holds sky light in the low nibble and block
 /// light in the high nibble. `sky_sub` is `World.skylightSubtracted` (0 day .. 11 night, `world::sky`).
 /// `(ox, oz)` is the chunk's world origin (chunk * 16).
 /// Vertices: 6 floats each (px, py, pz, u, v, light). Indices: 6 per face (two triangles).
-pub fn build(blocks: &[u8], light: &[u8], nb: [&[u8]; 4], nb_light: [&[u8]; 4], sky_sub: u8, ox: i32, oz: i32) -> (Vec<f32>, Vec<u32>) {
+pub fn build(blocks: &[u8], data: &Nibbles, light: &[u8], nb: [&[u8]; 4], nb_light: [&[u8]; 4], sky_sub: u8, ox: i32, oz: i32) -> (Vec<f32>, Vec<u32>) {
     assert_eq!(blocks.len(), VOLUME);
     assert_eq!(light.len(), VOLUME);
     // Which chunk's arrays a cell with x, z in -1..=16 lives in: 0 = this one, 1.. = +X, -X, +Z, -Z.
@@ -101,7 +103,7 @@ pub fn build(blocks: &[u8], light: &[u8], nb: [&[u8]; 4], nb_light: [&[u8]; 4], 
                 if let Some((half, h)) = cross_shape(raw) {
                     let lit = bright(x, y, z);
                     let (cx, cz) = ((ox + x) as f32 + 0.5, (oz + z) as f32 + 0.5);
-                    let (au, av) = atlas::atlas_uv(raw, 0.0, 0.0);
+                    let (au, av) = atlas::atlas_uv(raw as u16, 0.0, 0.0);
                     for (a, b) in [((-half, -half), (half, half)), ((-half, half), (half, -half))] {
                         let base = verts.len() as u32 / 6;
                         for (px, pz, py) in [(a.0, a.1, 0.0), (b.0, b.1, 0.0), (b.0, b.1, h), (a.0, a.1, h)] {
@@ -116,6 +118,7 @@ pub fn build(blocks: &[u8], light: &[u8], nb: [&[u8]; 4], nb_light: [&[u8]; 4], 
                 if blk == 0 {
                     continue;
                 }
+                let tile = atlas::tile_of(blk, data.get(x as usize, y as usize, z as usize));
                 for (face_i, face) in FACES.iter().enumerate() {
                     let (dx, dy, dz) = DIRS[face_i];
                     if get(x + dx, y + dy, z + dz) != 0 {
@@ -130,7 +133,7 @@ pub fn build(blocks: &[u8], light: &[u8], nb: [&[u8]; 4], nb_light: [&[u8]; 4], 
                     };
                     let light = shade * bright(x + dx, y + dy, z + dz);
                     for (corner, uv) in face.corners.iter().zip(face.uv.iter()) {
-                        let (au, av) = atlas::atlas_uv(blk, uv[0], uv[1]);
+                        let (au, av) = atlas::atlas_uv(tile, uv[0], uv[1]);
                         // ponytail: world-space f32 vertices lose precision far from the origin
                         // (about 1 cm at 100k blocks); upgrade path is a per-chunk offset uniform.
                         verts.push(corner[0] + (ox + x) as f32);
@@ -151,13 +154,13 @@ pub fn build(blocks: &[u8], light: &[u8], nb: [&[u8]; 4], nb_light: [&[u8]; 4], 
     (verts, idxs)
 }
 
-/// Append an axis-aligned box `min..max` (world coordinates) of block `id` with a flat `light`; the
+/// Append an axis-aligned box `min..max` (world coordinates) of atlas tile `tile` with a flat `light`; the
 /// outline of the picked block reuses the face templates above, so the winding is the mesher's.
-pub fn push_box(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, min: [f32; 3], max: [f32; 3], id: u8, light: f32) {
+pub fn push_box(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, min: [f32; 3], max: [f32; 3], tile: u16, light: f32) {
     for face in &FACES {
         let base = verts.len() as u32 / 6;
         for (c, uv) in face.corners.iter().zip(face.uv.iter()) {
-            let (au, av) = atlas::atlas_uv(id, uv[0], uv[1]);
+            let (au, av) = atlas::atlas_uv(tile, uv[0], uv[1]);
             verts.extend_from_slice(&[min[0] + c[0] * (max[0] - min[0]), min[1] + c[1] * (max[1] - min[1]), min[2] + c[2] * (max[2] - min[2]), au, av, light]);
         }
         idxs.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
@@ -181,8 +184,25 @@ mod tests {
         let mut c = air();
         c[idx(5, 20, 5)] = 1;
         let a = air();
-        let (verts, _) = build(&c, &a, [&a[..], &a[..], &a[..], &a[..]], [&a[..], &a[..], &a[..], &a[..]], 0, 0, 0);
+        let (verts, _) = build(&c, &Nibbles::new(), &a, [&a[..], &a[..], &a[..], &a[..]], [&a[..], &a[..], &a[..], &a[..]], 0, 0, 0);
         assert_eq!(face_count(&verts), 6);
+    }
+
+    /// The cell's metadata picks the atlas tile of its faces: red wool is not white wool.
+    #[test]
+    fn metadata_picks_the_face_tile() {
+        let a = air();
+        let mut c = air();
+        c[idx(5, 20, 5)] = 35;
+        let uv = |d: &Nibbles| {
+            let v = build(&c, d, &a, [&a[..], &a[..], &a[..], &a[..]], [&a[..], &a[..], &a[..], &a[..]], 0, 0, 0).0;
+            (v[3], v[4])
+        };
+        let mut d = Nibbles::new();
+        assert_eq!(uv(&d), atlas::atlas_uv(35, 0.0, 0.0));
+        d.set(5, 20, 5, 14);
+        assert_eq!(uv(&d), atlas::atlas_uv(atlas::tile_of(35, 14), 0.0, 0.0));
+        assert_ne!(uv(&d), atlas::atlas_uv(35, 0.0, 0.0));
     }
 
     /// A plant is two crossed quads, and does not hide the top of the block under it.
@@ -191,9 +211,9 @@ mod tests {
         let a = air();
         let mut c = air();
         c[idx(5, 20, 5)] = 37;
-        assert_eq!(face_count(&build(&c, &a, [&a[..], &a[..], &a[..], &a[..]], [&a[..], &a[..], &a[..], &a[..]], 0, 0, 0).0), 2);
+        assert_eq!(face_count(&build(&c, &Nibbles::new(), &a, [&a[..], &a[..], &a[..], &a[..]], [&a[..], &a[..], &a[..], &a[..]], 0, 0, 0).0), 2);
         c[idx(5, 19, 5)] = 3; // dirt under the flower: 6 faces + 2 quads
-        assert_eq!(face_count(&build(&c, &a, [&a[..], &a[..], &a[..], &a[..]], [&a[..], &a[..], &a[..], &a[..]], 0, 0, 0).0), 8);
+        assert_eq!(face_count(&build(&c, &Nibbles::new(), &a, [&a[..], &a[..], &a[..], &a[..]], [&a[..], &a[..], &a[..], &a[..]], 0, 0, 0).0), 8);
     }
 
     /// A block on the chunk edge hides the face it shares with the neighbour chunk's block,
@@ -202,7 +222,7 @@ mod tests {
     fn edge_face_is_culled_against_neighbour() {
         let a = air();
         let mk = |x: usize, z: usize| { let mut c = air(); c[idx(x, 20, z)] = 1; c };
-        let faces = |me: &[u8], nb: [&[u8]; 4]| face_count(&build(me, &a, nb, [&a[..], &a[..], &a[..], &a[..]], 0, 0, 0).0);
+        let faces = |me: &[u8], nb: [&[u8]; 4]| face_count(&build(me, &Nibbles::new(), &a, nb, [&a[..], &a[..], &a[..], &a[..]], 0, 0, 0).0);
         let (px, nx, pz, nz) = (mk(0, 5), mk(15, 5), mk(5, 0), mk(5, 15));
         let (a_px, a_nx, a_pz, a_nz) = (mk(15, 5), mk(0, 5), mk(5, 15), mk(5, 0));
         assert_eq!(faces(&a_px[..], [&px[..], &a[..], &a[..], &a[..]]), 5);

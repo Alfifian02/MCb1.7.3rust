@@ -1,6 +1,7 @@
 //! Chunk storage layout. Vanilla b1.7.3 dimensions: 16 wide, 128 tall, 16 deep.
 //! Volume = 32768 cells. A chunk is a `Vec<u8>` of block ids (0 = air) with index
-//! `(x<<11) | (z<<7) | y`; the chunks themselves live in `world::chunks::ChunkManager`.
+//! `(x<<11) | (z<<7) | y`, plus a `Nibbles` of block metadata with the same index; the chunks themselves
+//! live in `world::chunks::ChunkManager`.
 
 pub const W: usize = 16;
 pub const H: usize = 128;
@@ -11,6 +12,36 @@ pub const VOLUME: usize = W * H * D;
 #[inline]
 pub const fn idx(x: usize, y: usize, z: usize) -> usize {
     (x << 11) | (z << 7) | y
+}
+
+/// `NibbleArray`: 4 bits per cell, two cells to a byte (an even cell index is the low nibble), indexed like the
+/// blocks (`idx`). A chunk's block metadata (`Chunk.data`: log species, wool colour, slab type, stair and door
+/// facing, ...) lives in one, and its bytes are the McRegion `Data` tag as they are, so saving (M7) needs no
+/// conversion. `Default` is the empty placeholder `mem::take` leaves behind; make a real one with `new`.
+#[derive(Clone, Default, PartialEq, Eq, Debug)]
+pub struct Nibbles(Vec<u8>);
+
+impl Nibbles {
+    pub fn new() -> Self {
+        Self(vec![0; VOLUME / 2])
+    }
+
+    pub fn get(&self, x: usize, y: usize, z: usize) -> u8 {
+        let i = idx(x, y, z);
+        self.0[i >> 1] >> ((i & 1) * 4) & 15
+    }
+
+    /// Only the low 4 bits of `v` count (`NibbleArray.setNibble`).
+    pub fn set(&mut self, x: usize, y: usize, z: usize, v: u8) {
+        let i = idx(x, y, z);
+        let s = (i & 1) * 4;
+        let b = &mut self.0[i >> 1];
+        *b = *b & !(15u8 << s) | (v & 15) << s;
+    }
+
+    pub fn bytes(&self) -> &[u8] {
+        &self.0
+    }
 }
 
 /// Blocks with no cube shape (tall grass, dead bush, flowers, mushrooms, snow layer, reeds). The
@@ -84,4 +115,23 @@ pub fn height_map(blocks: &[u8]) -> [u8; 256] {
         }
     }
     h
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Same layout as the Java `NibbleArray`: low nibble first, cell index `x << 11 | z << 7 | y`, neighbours untouched.
+    #[test]
+    fn nibbles_pack_like_java() {
+        let mut n = Nibbles::new();
+        n.set(0, 0, 0, 5);
+        n.set(0, 1, 0, 9); // cell 1: the high nibble of byte 0
+        n.set(15, 127, 15, 0xAB); // the last cell; only the low 4 bits count
+        assert_eq!(n.bytes()[0], 0x95);
+        assert_eq!(n.bytes()[VOLUME / 2 - 1], 0xB0);
+        assert_eq!((n.get(0, 0, 0), n.get(0, 1, 0), n.get(15, 127, 15), n.get(1, 0, 0)), (5, 9, 11, 0));
+        n.set(0, 0, 0, 0);
+        assert_eq!(n.bytes()[0], 0x90);
+    }
 }

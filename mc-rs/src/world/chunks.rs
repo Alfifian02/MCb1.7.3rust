@@ -18,9 +18,11 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{mpsc, Arc, Mutex};
 
+use glam::Vec3;
+
 use crate::gpu::pipeline::{create_index_buffer, create_vertex_buffer};
 use crate::render::mesh;
-use crate::world::chunk::{height_map, idx, H, VOLUME};
+use crate::world::chunk::{height_map, idx, Nibbles, H, VOLUME};
 use crate::world::gen::chunk_manager::WorldChunkManager;
 use crate::world::gen::overworld::OverworldGenerator;
 use crate::world::gen::populate::Region;
@@ -72,6 +74,8 @@ pub struct Mesh {
 
 struct Entry {
     blocks: Vec<u8>,
+    /// Block metadata (`Chunk.data`), 4 bits per cell; worldgen only writes it in `populate`.
+    data: Nibbles,
     /// Per cell, sky light in the low nibble and block light in the high nibble (same index as `blocks`).
     light: Vec<u8>,
     /// `Chunk.heightMap`, indexed `z << 4 | x`; kept in step with `blocks` (insert, populate, edits).
@@ -152,7 +156,7 @@ impl ChunkManager {
 
     fn insert(&mut self, key: Key, blocks: Vec<u8>) {
         let height = height_map(&blocks);
-        self.chunks.insert(key, Entry { blocks, light: vec![0; VOLUME], height, lit: false, populated: false, meshed: false, mesh: None });
+        self.chunks.insert(key, Entry { blocks, data: Nibbles::new(), light: vec![0; VOLUME], height, lit: false, populated: false, meshed: false, mesh: None });
     }
 
     /// Generate and populate the chunks `lo..=hi` (both axes) synchronously, for the spawn area:
@@ -187,19 +191,36 @@ impl ChunkManager {
         self.chunks.get(&(x >> 4, z >> 4)).map(|e| e.blocks[idx((x & 15) as usize, y as usize, (z & 15) as usize)])
     }
 
-    /// Break or place a block (`Chunk.setBlockID`): writes the cell, keeps the height map and
-    /// light in step and marks the affected meshes for a rebuild. False if nothing changed.
+    /// Block metadata at world coordinates (`World.getBlockMetadata`); 0 above/below the world and in an
+    /// unloaded chunk. A caller that breaks a block reads this first: `set_block` clears it.
+    pub fn meta(&self, x: i32, y: i32, z: i32) -> u8 {
+        if !(0..H as i32).contains(&y) {
+            return 0;
+        }
+        self.chunks.get(&(x >> 4, z >> 4)).map_or(0, |e| e.data.get((x & 15) as usize, y as usize, (z & 15) as usize))
+    }
+
+    /// Break or place a block with metadata 0 (`Chunk.setBlockID`): nothing when the cell already holds `id`,
+    /// else the id is written and the metadata cleared. False if nothing changed.
     pub fn set_block(&mut self, x: i32, y: i32, z: i32, id: u8) -> bool {
+        self.block_loaded(x, y, z) != Some(id) && self.set_block_meta(x, y, z, id, 0)
+    }
+
+    /// Place a block with metadata (`Chunk.setBlockIDWithMetadata`, `meta` is 0..=15): writes the cell, keeps
+    /// the height map and light in step and marks the affected meshes for a rebuild. False if nothing changed.
+    pub fn set_block_meta(&mut self, x: i32, y: i32, z: i32, id: u8, meta: u8) -> bool {
         if !(0..H as i32).contains(&y) {
             return false;
         }
         let Some(e) = self.chunks.get_mut(&(x >> 4, z >> 4)) else { return false };
         let (lx, lz) = ((x & 15) as usize, (z & 15) as usize);
         let i = idx(lx, y as usize, lz);
-        if e.blocks[i] == id {
+        let meta = meta & 15;
+        if e.blocks[i] == id && e.data.get(lx, y as usize, lz) == meta {
             return false;
         }
         e.blocks[i] = id;
+        e.data.set(lx, y as usize, lz, meta);
         let h = e.height[lz << 4 | lx] as i32;
         self.mark_dirty(x, z);
         self.light_after_set(x, y, z, id, h);
@@ -245,6 +266,14 @@ impl ChunkManager {
     /// Everything that has a mesh, for the draw loop.
     pub fn meshes(&self) -> impl Iterator<Item = &Mesh> {
         self.chunks.values().filter_map(|e| e.mesh.as_ref())
+    }
+
+    /// The meshes whose chunk box (16 x `H` x 16 at its key) passes `visible(min, max)`: the draw loop's frustum test.
+    pub fn meshes_where<'a>(&'a self, visible: impl Fn(Vec3, Vec3) -> bool + 'a) -> impl Iterator<Item = &'a Mesh> {
+        self.chunks.iter().filter_map(move |(&(x, z), e)| {
+            let min = Vec3::new(x as f32 * 16.0, 0.0, z as f32 * 16.0);
+            e.mesh.as_ref().filter(|_| visible(min, min + Vec3::new(16.0, H as f32, 16.0)))
+        })
     }
 
     /// Chunks that currently have something to draw.
@@ -320,12 +349,15 @@ impl ChunkManager {
             return false;
         }
         let blocks = keys.map(|k| std::mem::take(&mut self.chunks.get_mut(&k).unwrap().blocks));
-        let mut region = Region::new(x, z, blocks);
+        let data = keys.map(|k| std::mem::take(&mut self.chunks.get_mut(&k).unwrap().data));
+        let mut region = Region::new(x, z, blocks, data);
         self.gen.populate(&mut region, x, z, &mut self.cm);
-        for (k, b) in keys.iter().zip(region.into_blocks()) {
+        let (blocks, data) = region.into_parts();
+        for ((k, b), d) in keys.iter().zip(blocks).zip(data) {
             let e = self.chunks.get_mut(k).unwrap();
             e.height = height_map(&b);
             e.blocks = b;
+            e.data = d;
             e.lit = false; // blocks changed under the light: it is computed again once final
             // The chunk and its four neighbours (border faces) need a new mesh if they had one.
             for n in [(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)] {
@@ -350,6 +382,7 @@ impl ChunkManager {
             let built = match (c.get(&(x, z)), c.get(&(x + 1, z)), c.get(&(x - 1, z)), c.get(&(x, z + 1)), c.get(&(x, z - 1))) {
                 (Some(me), Some(px), Some(nx), Some(pz), Some(nz)) if !me.meshed && me.lit && self.is_final(x, z) => Some(mesh::build(
                     &me.blocks,
+                    &me.data,
                     &me.light,
                     [px.blocks.as_slice(), nx.blocks.as_slice(), pz.blocks.as_slice(), nz.blocks.as_slice()],
                     [px.light.as_slice(), nx.light.as_slice(), pz.light.as_slice(), nz.light.as_slice()],
@@ -391,6 +424,25 @@ mod tests {
         assert_eq!(m.block(-2, 5, 0), Some(0));
         assert_eq!(m.block(0, 5, 0), Some(1)); // chunk (0, 0) is not loaded
         assert_eq!(m.block(-1, 200, 0), None);
+    }
+
+    /// Metadata follows the Java setters: `set_block_meta` writes id and metadata, `set_block` does nothing on the
+    /// same id and clears the metadata when the id changes, and an unloaded chunk reads 0.
+    #[test]
+    fn metadata_follows_chunk_setters() {
+        let mut m = ChunkManager::new(1, 1);
+        m.insert((0, 0), vec![0u8; VOLUME]);
+        assert!(m.set_block_meta(3, 40, 5, 35, 14)); // red wool
+        assert_eq!((m.block(3, 40, 5), m.meta(3, 40, 5)), (Some(35), 14));
+        assert!(!m.set_block_meta(3, 40, 5, 35, 14)); // nothing changed
+        assert!(m.set_block_meta(3, 40, 5, 35, 3 | 16)); // same id, new metadata (only 4 bits)
+        assert_eq!(m.meta(3, 40, 5), 3);
+        assert!(!m.set_block(3, 40, 5, 35)); // same id: untouched
+        assert_eq!(m.meta(3, 40, 5), 3);
+        assert!(m.set_block(3, 40, 5, 0)); // break: the metadata is cleared
+        assert_eq!((m.block(3, 40, 5), m.meta(3, 40, 5)), (Some(0), 0));
+        assert_eq!(m.meta(100, 40, 5), 0); // unloaded
+        assert!(!m.set_block_meta(3, 128, 5, 35, 1)); // above the world
     }
 
     /// preload populates every chunk whose 2x2 is loaded, which finishes the inner ones.

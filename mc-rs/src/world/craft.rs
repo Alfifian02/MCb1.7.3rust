@@ -1,4 +1,5 @@
-//! M6 crafting + tools. Ports of `EnumToolMaterial`, `ItemTool` / `ItemPickaxe` / `ItemSpade` (`getStrVsBlock`,
+//! M6 crafting + tools. Ports of `EnumToolMaterial`, `ItemTool` / `ItemPickaxe` / `ItemSpade` / `ItemSword` /
+//! `ItemHoe` / `ItemShears` (`getStrVsBlock`,
 //! `canHarvestBlock`), `CraftingManager` + `ShapedRecipes.matches`, and the left-click rules of
 //! `Container.func_27280_a` for `ContainerPlayer` (2x2 grid), `ContainerWorkbench` (3x3 grid) and `ContainerFurnace`,
 //! plus `TileEntityFurnace` and `FurnaceRecipes` (smelting).
@@ -15,13 +16,23 @@ pub enum Kind {
     Shovel,
     Pickaxe,
     Axe,
+    Sword,
+    Hoe,
 }
 
 /// `EnumToolMaterial` in the order wood, stone, iron, diamond ("EMERALD"), gold: (harvestLevel, maxUses, efficiency).
 const MATERIALS: [(u8, u16, f32); 5] = [(0, 59, 2.0), (1, 131, 4.0), (2, 250, 6.0), (3, 1561, 8.0), (0, 32, 12.0)];
-/// `Item.shiftedIndex` of (shovel, pickaxe, axe) per material, same order as `MATERIALS` and `Kind`.
-const TOOL_IDS: [[u16; 3]; 5] = [[269, 270, 271], [273, 274, 275], [256, 257, 258], [277, 278, 279], [284, 285, 286]];
-const KINDS: [Kind; 3] = [Kind::Shovel, Kind::Pickaxe, Kind::Axe];
+/// `Item.shiftedIndex` of (shovel, pickaxe, axe, sword, hoe) per material, same order as `MATERIALS` and `KINDS`.
+const TOOL_IDS: [[u16; 5]; 5] = [
+    [269, 270, 271, 268, 290],
+    [273, 274, 275, 272, 291],
+    [256, 257, 258, 267, 292],
+    [277, 278, 279, 276, 293],
+    [284, 285, 286, 283, 294],
+];
+const KINDS: [Kind; 5] = [Kind::Shovel, Kind::Pickaxe, Kind::Axe, Kind::Sword, Kind::Hoe];
+/// `Item.shears` (103): no material, 238 uses.
+pub const SHEARS: u16 = 359;
 
 /// (kind, material index) of a tool item, `None` for anything else.
 pub fn tool(id: u16) -> Option<(Kind, usize)> {
@@ -30,7 +41,32 @@ pub fn tool(id: u16) -> Option<(Kind, usize)> {
 
 /// `Item.getMaxDamage`: durability of a tool, `None` = not damageable.
 pub fn max_damage(id: u16) -> Option<u16> {
+    if id == SHEARS {
+        return Some(238);
+    }
     tool(id).map(|(_, m)| MATERIALS[m].1)
+}
+
+/// `Item.onBlockDestroyed` wear for breaking block `b` with `held`: `ItemTool` 1, `ItemSword` 2, shears 1 on leaves
+/// and web only, a hoe none (it wears when it tills instead).
+pub fn wear_on_break(held: u16, b: u8) -> u16 {
+    if held == SHEARS {
+        return matches!(b, 18 | 30) as u16;
+    }
+    match tool(held) {
+        Some((Kind::Sword, _)) => 2,
+        Some((Kind::Hoe, _)) | None => 0,
+        Some(_) => 1,
+    }
+}
+
+pub fn is_hoe(id: u16) -> bool {
+    matches!(tool(id), Some((Kind::Hoe, _)))
+}
+
+/// `ItemHoe.onItemUse`: dirt always tills; grass only from the side or top with air above it.
+pub fn can_till(block: u8, above: u8, face: u8) -> bool {
+    block == 3 || (block == 2 && above == 0 && face != 0)
 }
 
 /// `blocksEffectiveAgainst` of `ItemPickaxe` / `ItemAxe` / `ItemSpade`, as block ids.
@@ -39,25 +75,38 @@ fn effective(kind: Kind, b: u8) -> bool {
         Kind::Pickaxe => matches!(b, 1 | 4 | 14..=16 | 21 | 22 | 24 | 41..=44 | 48 | 56 | 57 | 79 | 87),
         Kind::Axe => matches!(b, 5 | 17 | 47 | 54),
         Kind::Shovel => matches!(b, 2 | 3 | 12 | 13 | 60 | 78 | 80 | 82),
+        Kind::Sword | Kind::Hoe => false,
     }
 }
 
 /// `ItemStack.getStrVsBlock` of the held item `held`: the material's efficiency on its blocks, else 1.
 pub fn str_vs_block(held: u16, b: u8) -> f32 {
+    if held == SHEARS {
+        return match b {
+            18 | 30 => 15.0,
+            35 => 5.0,
+            _ => 1.0,
+        };
+    }
     match tool(held) {
+        Some((Kind::Sword, _)) => if b == 30 { 15.0 } else { 1.5 },
         Some((k, m)) if effective(k, b) => MATERIALS[m].2,
         _ => 1.0,
     }
 }
 
 /// `Item.canHarvestBlock` of the held item (the item half of `InventoryPlayer.canHarvestBlock`; the material half is
-/// `dig::harvestable_by_hand`). `ItemPickaxe` gates by harvest level, `ItemSpade` takes snow, every other item says no.
+/// `dig::harvestable_by_hand`). `ItemPickaxe` gates by harvest level, `ItemSpade` takes snow, sword and shears take web, every other item says no.
 pub fn tool_can_harvest(held: u16, b: u8) -> bool {
+    if held == SHEARS {
+        return b == 30;
+    }
     let Some((kind, m)) = tool(held) else { return false };
     let level = MATERIALS[m].0;
     match kind {
         Kind::Shovel => matches!(b, 78 | 80),
-        Kind::Axe => false,
+        Kind::Sword => b == 30,
+        Kind::Axe | Kind::Hoe => false,
         Kind::Pickaxe => match b {
             49 => level == 3,                         // obsidian
             14 | 41 | 56 | 57 | 73 | 74 => level >= 2, // gold, diamond, redstone
@@ -109,9 +158,9 @@ fn shaped(rows: &[&str], key: &[(char, u16)], out: u16, n: u8) -> Recipe {
     Recipe { w, h, cells, out: ItemStack { id: out, count: n, damage: 0 } }
 }
 
-/// Every recipe of `RecipesTools` (pickaxe, shovel, axe x 5 materials) and the `CraftingManager` / `RecipesCrafting`
-/// ones whose result exists in this port (a block that can be placed, or a tool ingredient). Not ported: hoes, swords,
-/// armor, food, rails, doors, stairs, dyes and the rest, none of which has anything to do yet. One line each to add.
+/// Every recipe of `RecipesTools` (pickaxe, shovel, axe, hoe x 5 materials), `RecipesWeapons` (swords), the shears
+/// and the `CraftingManager` / `RecipesCrafting` ones whose result exists in this port (a block that can be placed, or
+/// a tool ingredient). Not ported: bow, arrow, armor, food, rails, doors, stairs, dyes and the rest, none of which has anything to do yet. One line each to add.
 // ponytail: vanilla sorts the list (`RecipeSorter`, bigger first); no two patterns here can match one grid, so the
 // first match is the only match and the sort is skipped.
 pub fn recipes() -> &'static [Recipe] {
@@ -119,7 +168,8 @@ pub fn recipes() -> &'static [Recipe] {
     R.get_or_init(|| {
         const PLANKS: u16 = 5;
         const STICK: u16 = 280;
-        const PATTERNS: [&[&str]; 3] = [&["X", "#", "#"], &["XXX", " # ", " # "], &["XX", "X#", " #"]];
+        // shovel, pickaxe, axe (RecipesTools), sword (RecipesWeapons), hoe (RecipesTools)
+        const PATTERNS: [&[&str]; 5] = [&["X", "#", "#"], &["XXX", " # ", " # "], &["XX", "X#", " #"], &["X", "X", "#"], &["XX", " #", " #"]];
         let mut r = vec![
             shaped(&["#"], &[('#', 17)], PLANKS, 4),
             shaped(&["#", "#"], &[('#', PLANKS)], STICK, 4),
@@ -132,6 +182,10 @@ pub fn recipes() -> &'static [Recipe] {
             shaped(&["##", "##"], &[('#', 337)], 82, 1),  // clay -> clay block
             shaped(&["##", "##"], &[('#', 348)], 89, 1),  // glowstone dust -> glowstone
             shaped(&["##", "##"], &[('#', 287)], 35, 1),  // string -> wool
+            shaped(&["# #", " # "], &[('#', PLANKS)], 281, 4), // bowl
+            shaped(&["Y", "X", "#"], &[('X', 39), ('Y', 40), ('#', 281)], 282, 1), // mushroom stew, either order
+            shaped(&["Y", "X", "#"], &[('X', 40), ('Y', 39), ('#', 281)], 282, 1),
+            shaped(&[" #", "# "], &[('#', 265)], SHEARS, 1), // shears
         ];
         // RecipesTools: head material per tier = planks, cobblestone, iron ingot, diamond, gold ingot.
         for (m, head) in [PLANKS, 4, 265, 264, 266].into_iter().enumerate() {
@@ -457,6 +511,16 @@ mod tests {
         assert_eq!(out(&[(0, 5), (1, 5), (2, 5), (4, 280), (7, 280), (8, 3)], 3), None, "a stray item breaks it");
         assert_eq!(out(&[(3, 264), (4, 264), (5, 264), (7, 280), (1, 280)], 3), None, "diamonds in the wrong place");
         assert_eq!(out(&[(0, 264), (3, 280), (6, 280)], 3), Some((277, 1)), "diamond shovel");
+        assert_eq!(out(&[(0, 5), (2, 5), (4, 5)], 3), Some((281, 4)), "bowls");
+        assert_eq!(out(&[(1, 40), (4, 39), (7, 281)], 3), Some((282, 1)), "stew");
+        assert_eq!(out(&[(1, 39), (4, 40), (7, 281)], 3), Some((282, 1)), "stew, other order");
+        assert_eq!(out(&[(1, 39), (4, 39), (7, 281)], 3), None, "two brown mushrooms");
+        assert_eq!(out(&[(0, 4), (3, 4), (6, 280)], 3), Some((272, 1)), "stone sword");
+        assert_eq!(out(&[(0, 5), (1, 5), (4, 280), (7, 280)], 3), Some((290, 1)), "wooden hoe");
+        assert_eq!(out(&[(0, 5), (1, 5), (3, 280), (6, 280)], 3), Some((290, 1)), "wooden hoe, mirrored");
+        assert_eq!(out(&[(1, 265), (2, 265)], 2), Some((359, 1)), "shears in a 2x2");
+        assert_eq!(out(&[(0, 265), (3, 265)], 2), Some((359, 1)), "shears, mirrored");
+        assert_eq!(out(&[(1, 265), (3, 265)], 3), Some((359, 1)), "shears in a 3x3");
     }
 
     /// The `Container.func_27280_a` rules: pick up, put one, take the result (uses up the grid), swap, top up, close.
@@ -553,5 +617,16 @@ mod tests {
         assert!(tool_can_harvest(270, 1) && tool_can_harvest(285, 4), "any pickaxe takes stone");
         assert!(!tool_can_harvest(271, 1) && !tool_can_harvest(5, 1), "an axe or a block does not");
         assert!(tool_can_harvest(269, 78) && !tool_can_harvest(270, 78), "snow takes a shovel");
+        // Sword, hoe, shears.
+        assert_eq!((tool(267), tool(294), tool(359)), (Some((Kind::Sword, 2)), Some((Kind::Hoe, 4)), None));
+        assert_eq!((max_damage(276), max_damage(SHEARS), max_damage(292)), (Some(1561), Some(238), Some(250)));
+        let speeds = [str_vs_block(268, 1), str_vs_block(268, 30), str_vs_block(SHEARS, 18), str_vs_block(SHEARS, 35), str_vs_block(SHEARS, 1)];
+        assert_eq!(speeds, [1.5, 15.0, 15.0, 5.0, 1.0]);
+        assert!(tool_can_harvest(268, 30) && tool_can_harvest(SHEARS, 30) && !tool_can_harvest(290, 30), "web: sword and shears");
+        assert!(!tool_can_harvest(SHEARS, 1) && !tool_can_harvest(268, 1), "a sword or shears is no pickaxe");
+        let wear = [wear_on_break(270, 1), wear_on_break(268, 3), wear_on_break(290, 3), wear_on_break(SHEARS, 18), wear_on_break(SHEARS, 3), wear_on_break(5, 1)];
+        assert_eq!(wear, [1, 2, 0, 1, 0, 0]);
+        assert!(can_till(3, 1, 0) && can_till(2, 0, 1) && !can_till(2, 0, 0) && !can_till(2, 1, 1) && !can_till(1, 0, 1), "hoe rules");
+        assert!(is_hoe(291) && !is_hoe(274));
     }
 }

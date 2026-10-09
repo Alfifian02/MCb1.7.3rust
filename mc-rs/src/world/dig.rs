@@ -155,7 +155,7 @@ mod tests {
         assert!(!can_harvest(1, None) && can_harvest(1, held(270)) && !can_harvest(1, held(271)));
         assert!(can_harvest(3, None) && can_harvest(17, None), "dirt and logs by hand");
         assert!(!can_harvest(56, held(274)) && can_harvest(56, held(257)), "diamond ore: stone no, iron yes");
-        assert!(!can_harvest(30, held(270)), "web needs a sword (not ported)");
+        assert!(!can_harvest(30, held(270)) && can_harvest(30, held(268)) && can_harvest(30, held(359)), "web: sword or shears");
         // stone, hardness 1.5: hand 1/1.5/100 = 150 ticks; wooden pickaxe 2/1.5/30 -> 23; iron 6/1.5/30 -> 8.
         assert!(matches!(ticks_with(1, held(270), 400), Some(23..=25)));
         assert!(matches!(ticks_with(1, held(257), 400), Some(8..=10)));

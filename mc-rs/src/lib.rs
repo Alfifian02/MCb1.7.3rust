@@ -23,7 +23,7 @@ use crate::gpu::context::Gpu;
 use crate::gpu::pipeline::ChunkPipeline;
 use crate::render::atlas;
 use crate::render::items::ItemMesh;
-use crate::render::camera::FirstPersonCamera;
+use crate::render::camera::{FirstPersonCamera, Frustum};
 use crate::render::outline::Outline;
 use crate::world::pick::{self, Hit};
 use crate::world::dig::{self, Dig};
@@ -296,7 +296,7 @@ impl App {
 
         // Digging runs on the 20 Hz game tick of the Java (hardness-based time, see world::dig).
         // A broken block drops its items (world::items) only if the held item may harvest it (stone needs a pickaxe),
-        // and wears the tool by one use.
+        // and wears the tool (`Item.onBlockDestroyed`: 1 use, a sword 2, a hoe none).
         match self.target {
             Some(hit) if self.touch.digging() => {
                 self.dig_acc += dt;
@@ -308,6 +308,7 @@ impl App {
                         let slot = self.touch.hotbar_slot;
                         let held = self.inv.slots[slot];
                         if self.dig.tick(hit.pos, id, held, self.player.on_ground, in_water) {
+                            let meta = self.chunks.meta(x, y, z); // before the cell is cleared: the drop depends on it
                             self.chunks.set_block(x, y, z, 0);
                             if let (61 | 62, Some(f)) = (id, self.furnaces.remove(&hit.pos)) {
                                 for st in f.slots.into_iter().flatten() {
@@ -317,9 +318,16 @@ impl App {
                             // PlayerControllerSP.sendBlockRemoved: `canHarvestBlock` is read before the tool wears, so
                             // a tool that breaks on this block still harvests it; no suitable tool, no drop.
                             let harvest = dig::can_harvest(id, held);
-                            self.inv.damage(slot, 1);
+                            if let Some(h) = held {
+                                self.inv.damage(slot, craft::wear_on_break(h.id, id));
+                            }
                             if harvest {
-                                self.drops.spawn_block(id, hit.pos);
+                                // BlockLeaves.harvestBlock: shears drop the leaves themselves, not a sapling.
+                                if id == 18 && held.is_some_and(|h| h.id == craft::SHEARS) {
+                                    self.drops.spawn_stack(ItemStack { id: 18, count: 1, damage: (meta & 3) as u16 }, hit.pos);
+                                } else {
+                                    self.drops.spawn_block(id, meta, hit.pos);
+                                }
                             }
                         }
                     }
@@ -330,7 +338,12 @@ impl App {
                 self.dig_acc = 0.0;
             }
         }
-        let Some(hit) = self.target else { return };
+        let Some(hit) = self.target else {
+            if place {
+                self.eat();
+            }
+            return;
+        };
         if place {
             // Using a workbench or a furnace opens its screen instead of placing a block against it.
             match self.chunks.block_loaded(hit.pos.0, hit.pos.1, hit.pos.2) {
@@ -345,15 +358,39 @@ impl App {
                 }
                 _ => {}
             }
+            // ItemHoe.onItemUse: till dirt (or grass with air above) into farmland, one use of wear. A hoe never
+            // places anything. ponytail: farmland stays farmland (no `BlockFarmland.updateTick` reverting it to dirt),
+            // it is drawn as a full cube (the original is 15/16 high) and nothing grows on it yet.
+            let slot = self.touch.hotbar_slot;
+            if self.inv.slots[slot].is_some_and(|s| craft::is_hoe(s.id)) {
+                let (x, y, z) = hit.pos;
+                let (b, above) = (self.chunks.block_loaded(x, y, z), self.chunks.block_loaded(x, y + 1, z));
+                if let (Some(b), Some(above)) = (b, above) {
+                    if craft::can_till(b, above, hit.face) {
+                        self.chunks.set_block(x, y, z, 60);
+                        self.inv.damage(slot, 1);
+                    }
+                }
+                return;
+            }
             let (x, y, z) = pick::place_pos(&hit);
             // Items below 256 are blocks; anything else cannot be placed. ItemBlock refuses a solid block at y = 127
             // (ponytail: plants are refused there too).
-            let slot = self.touch.hotbar_slot;
             if let Some(s) = self.inv.slots[slot].filter(|s| s.id < 256) {
-                if y < 127 && self.chunks.block_loaded(x, y, z).is_some_and(pick::replaceable) && !pick::overlaps_player((x, y, z), self.player.pos) && self.chunks.set_block(x, y, z, s.id as u8) {
+                if y < 127 && self.chunks.block_loaded(x, y, z).is_some_and(pick::replaceable) && !pick::overlaps_player((x, y, z), self.player.pos) && self.chunks.set_block_meta(x, y, z, s.id as u8, items::placed_meta(s)) {
                     self.inv.consume(slot);
                 }
+            } else {
+                self.eat();
             }
+        }
+    }
+
+    /// `Minecraft.clickMouse` -> `sendUseItem`: a tap that neither placed a block nor opened a screen uses the held item;
+    /// food is eaten, aimed at a block or not.
+    fn eat(&mut self) {
+        if let Some(n) = self.inv.eat(self.touch.hotbar_slot) {
+            self.vitals.heal(n);
         }
     }
 
@@ -451,6 +488,7 @@ impl App {
         self.chunks.update(&self.gpu.device, pcx, pcz);
         let (view, proj) = self.camera.build_view_proj();
         self.pipe.upload_uniforms(&self.gpu.queue, view, proj);
+        let frustum = Frustum::from_view_proj(proj * view);
         let outline_indices = self.target.map_or(0, |h| self.outline.update(&self.gpu.queue, h.pos));
         let item_indices = self.item_mesh.update(&self.gpu.queue, &self.drops);
 
@@ -514,8 +552,8 @@ impl App {
             });
             rp.set_pipeline(&self.pipe.pipeline);
             rp.set_bind_group(0, &self.pipe.bind_group, &[]);
-            // One draw per chunk mesh. M13: frustum-test each chunk's bounds here (see chunks.rs).
-            for m in self.chunks.meshes() {
+            // One draw per chunk mesh that is in the view frustum.
+            for m in self.chunks.meshes_where(|min, max| frustum.intersects_aabb(min, max)) {
                 rp.set_vertex_buffer(0, m.vbuf.slice(..));
                 rp.set_index_buffer(m.ibuf.slice(..), wgpu::IndexFormat::Uint32);
                 rp.draw_indexed(0..m.index_count, 0, 0..1);
@@ -776,23 +814,35 @@ impl App {
 }
 
 /// One item stack drawn into the cell `(x, y, w, h)`: the flat colour of its tile (a tool is a stick-coloured handle
-/// with a head in the material colour, shaped per kind, so pickaxe, axe and shovel can be told apart), a wear bar
+/// with a head in the material colour, shaped per kind, so pickaxe, axe, shovel, sword and hoe can be told apart), a wear bar
 /// under a damaged tool, and the count bottom right with a shadow like `RenderItem.renderItemOverlayIntoGUI`
 /// (shown above 1 only). Real item sprites are M14.
 // UNVERIFIED: the head shapes and the wear-bar colours are stand-ins for the item sprites and `renderItemOverlay`.
 fn push_stack(v: &mut Vec<HudVertex>, (hx, hy, hw, hh): (f32, f32, f32, f32), s: ItemStack) {
     let pad = (hw.min(hh) * 0.18).max(2.0);
-    let rgb = |tile: u8| {
-        let c = atlas::block_color(tile);
+    let rgb = |tile: u16| {
+        let c = atlas::tile_color(tile);
         [c[0] as f32 / 255.0, c[1] as f32 / 255.0, c[2] as f32 / 255.0, 1.0]
     };
     let (ix, iy, iw, ih) = (hx + pad, hy + pad, hw - pad * 2.0, hh - pad * 2.0);
     match craft::tool(s.id) {
-        None => HudPipeline::push_quad(v, ix, iy, iw, ih, rgb(items::tile(s.id))),
+        None if s.id == craft::SHEARS => {
+            // Two blades over a grip.
+            let c = rgb(items::tile(s.id).into());
+            HudPipeline::push_quad(v, ix + iw * 0.15, iy, iw * 0.2, ih * 0.6, c);
+            HudPipeline::push_quad(v, ix + iw * 0.65, iy, iw * 0.2, ih * 0.6, c);
+            HudPipeline::push_quad(v, ix + iw * 0.25, iy + ih * 0.6, iw * 0.5, ih * 0.4, rgb(17));
+        }
+        None => HudPipeline::push_quad(v, ix, iy, iw, ih, rgb(items::stack_tile(s))),
         Some((kind, _)) => {
             HudPipeline::push_quad(v, ix + iw * 0.42, iy, iw * 0.16, ih, rgb(17));
-            let head = rgb(items::tile(s.id));
+            let head = rgb(items::tile(s.id).into());
             match kind {
+                craft::Kind::Sword => {
+                    HudPipeline::push_quad(v, ix + iw * 0.4, iy, iw * 0.2, ih * 0.7, head);
+                    HudPipeline::push_quad(v, ix + iw * 0.2, iy + ih * 0.68, iw * 0.6, ih * 0.1, head);
+                }
+                craft::Kind::Hoe => HudPipeline::push_quad(v, ix + iw * 0.42, iy, iw * 0.5, ih * 0.18, head),
                 craft::Kind::Pickaxe => HudPipeline::push_quad(v, ix, iy, iw, ih * 0.22, head),
                 craft::Kind::Axe => HudPipeline::push_quad(v, ix, iy, iw * 0.58, ih * 0.38, head),
                 craft::Kind::Shovel => HudPipeline::push_quad(v, ix + iw * 0.28, iy, iw * 0.44, ih * 0.32, head),

@@ -34,7 +34,7 @@ public class G {
   /** World stand-in for populate: the 2x2 chunks at (cx0, cz0), air outside, writes outside dropped.
    *  Light/height use the same column model as mc-rs populate.rs (see its module docs). */
   static class FakeWorld extends World {
-    long seed; int cx0, cz0; byte[][] c = new byte[4][]; WorldChunkManager cm;
+    long seed; int cx0, cz0; byte[][] c = new byte[4][]; NibbleArray[] md = new NibbleArray[4]; WorldChunkManager cm;
     FakeWorld() { super((ISaveHandler) null, "x", (WorldProvider) null, 0L); }
     int slot(int x, int y, int z) {
       if (y < 0 || y >= 128) return -1;
@@ -44,10 +44,24 @@ public class G {
     }
     int ix(int x, int y, int z) { return ((x & 15) << 11) | ((z & 15) << 7) | y; }
     public int getBlockId(int x, int y, int z) { int s = slot(x, y, z); return s < 0 || c[s] == null ? 0 : c[s][ix(x, y, z)] & 255; }
-    public boolean setBlock(int x, int y, int z, int id) { int s = slot(x, y, z); if (s >= 0 && c[s] != null) c[s][ix(x, y, z)] = (byte) id; return true; }
+    // Chunk.setBlockID: a different id resets the metadata nibble to 0; same id changes nothing.
+    public boolean setBlock(int x, int y, int z, int id) {
+      int s = slot(x, y, z);
+      if (s >= 0 && c[s] != null) {
+        int i = ix(x, y, z);
+        if ((c[s][i] & 255) != id) { c[s][i] = (byte) id; md[s].setNibble(x & 15, y, z & 15, 0); }
+      }
+      return true;
+    }
     public boolean setBlockWithNotify(int x, int y, int z, int id) { return setBlock(x, y, z, id); }
-    public boolean setBlockAndMetadata(int x, int y, int z, int id, int m) { return setBlock(x, y, z, id); }
-    public boolean setBlockAndMetadataWithNotify(int x, int y, int z, int id, int m) { return setBlock(x, y, z, id); }
+    // Chunk.setBlockIDWithMetadata: id and nibble are both written.
+    public boolean setBlockAndMetadata(int x, int y, int z, int id, int m) {
+      int s = slot(x, y, z);
+      if (s >= 0 && c[s] != null) { c[s][ix(x, y, z)] = (byte) id; md[s].setNibble(x & 15, y, z & 15, m); }
+      return true;
+    }
+    public boolean setBlockAndMetadataWithNotify(int x, int y, int z, int id, int m) { return setBlockAndMetadata(x, y, z, id, m); }
+    public int getBlockMetadata(int x, int y, int z) { int s = slot(x, y, z); return s < 0 || md[s] == null ? 0 : md[s].getNibble(x & 15, y, z & 15); }
     public void scheduleLightingUpdate(EnumSkyBlock t, int a, int b, int c, int d, int e, int f) {}
     public void neighborLightPropagationChanged(EnumSkyBlock t, int a, int b, int c, int d) {}
     public long getRandomSeed() { return seed; }
@@ -115,7 +129,7 @@ public class G {
       wp.worldChunkMgr = cm;
       FakeWorld w = (FakeWorld) U.allocateInstance(FakeWorld.class);
       U.putObject(w, U.objectFieldOffset(World.class.getDeclaredField("worldProvider")), wp);
-      w.seed = seed; w.cm = cm; w.c = new byte[4][];
+      w.seed = seed; w.cm = cm; w.c = new byte[4][]; w.md = new NibbleArray[4];
       ChunkProviderGenerate p = new ChunkProviderGenerate(w, seed);
       for (int[] ch0 : cases) {
         if (!explore && ch0[0] != si) continue;
@@ -124,7 +138,9 @@ public class G {
         int[][] at = {{cx, cz}, {cx, cz + 1}, {cx + 1, cz}, {cx + 1, cz + 1}};
         StringBuilder raw = new StringBuilder("RAW " + seed + " " + cx + " " + cz);
         for (int i = 0; i < 4; i++) {
-          w.c[i] = p.provideChunk(at[i][0], at[i][1]).blocks.clone();
+          Chunk ck = p.provideChunk(at[i][0], at[i][1]);
+          w.c[i] = ck.blocks.clone();
+          w.md[i] = new NibbleArray(ck.data.data.clone());
           raw.append(" ").append(Long.toHexString(fnv(w.c[i])));
         }
         System.out.println(raw);
@@ -132,6 +148,10 @@ public class G {
         StringBuilder pop = new StringBuilder("POP " + seed + " " + cx + " " + cz);
         for (int i = 0; i < 4; i++) pop.append(" ").append(Long.toHexString(fnv(w.c[i])));
         System.out.println(pop);
+        // META: FNV of each chunk's packed metadata nibbles (NibbleArray.data = the McRegion Data tag layout).
+        StringBuilder meta = new StringBuilder("META " + seed + " " + cx + " " + cz);
+        for (int i = 0; i < 4; i++) meta.append(" ").append(Long.toHexString(fnv(w.md[i].data)));
+        System.out.println(meta);
         if (explore) {
           boolean[] seen = new boolean[256];
           for (byte[] b : w.c) for (byte x : b) seen[x & 255] = true;

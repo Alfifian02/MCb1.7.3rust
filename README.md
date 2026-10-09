@@ -29,8 +29,9 @@ original. Anything that cannot be derived from the b1.7.3 sources is marked
 | Day/night            | written, NOT compiled | 20-minute cycle: sky light 0..11 subtracted in the mesher, sky colour from sun angle + climate. No sun/moon/stars yet. |
 | Digging              | written, NOT compiled | Hardness-based survival digging, hold to dig, progress bar. No tools yet. |
 | Drops + inventory    | written, logic tested on a Linux host, NOT compiled as a whole | A broken block drops its `idDropped` items as entities (20 Hz motion, pickup after 10 ticks). The hotbar holds real stacks with counts and starts empty; placing uses one up. See ROADMAP changelog. |
-| M6 Crafting + tools  | written, logic tested on a Linux host, whole crate type-checked against a stubbed `android-activity`; NOT run on a device | 36-slot inventory, 2x2 inventory crafting and 3x3 workbench crafting, furnace smelting (`TileEntityFurnace`, 8 smelting recipes), 26 recipes (wood/stone/iron/diamond/gold pickaxe, axe, shovel + planks, sticks, workbench, chest, furnace, torch, ...), tool speed and durability, and `canHarvestBlock`: stone without a pickaxe breaks and drops nothing, like the original. See ROADMAP changelog. |
-| Health + damage      | written, NOT compiled | 20 health, fall damage, drowning, lava + fire, void, death drops the inventory and respawns. Fluids are not solid and the player swims. No food yet, so no healing. See ROADMAP changelog. |
+| M6 Crafting + tools  | written, logic tested on a Linux host, whole crate type-checked against a stubbed `android-activity`; NOT run on a device | 36-slot inventory, 2x2 inventory crafting and 3x3 workbench crafting, furnace smelting (`TileEntityFurnace`, 8 smelting recipes), 31 recipes (wood/stone/iron/diamond/gold pickaxe, axe, shovel, sword, hoe + shears + planks, sticks, workbench, chest, furnace, torch, ...), tool speed and durability, and `canHarvestBlock`: stone without a pickaxe breaks and drops nothing, like the original. See ROADMAP changelog. |
+| Block metadata       | written, NOT compiled (no Rust toolchain that session) | 4-bit `Nibbles` per chunk (= `NibbleArray`, the McRegion `Data` tag as is), `meta` / `set_block_meta`, worldgen writes it (birch + taiga species, grass type, pumpkin facing), drops carry `damageDropped`, items place `getPlacedBlockMetadata`, the atlas shows log/leaf species and the 15 wool colours. Block shapes (slab, stairs, door, bed) are not part of it. Java golden regenerated: old lines unchanged, new `META` hashes. See ROADMAP changelog. |
+| Health + damage      | written, host-tested (56 tests), NOT run on a device | 20 health, fall damage, drowning, lava + fire, void, death drops the inventory and respawns. Fluids are not solid and the player swims. Mushroom stew (bowl + 2 mushrooms) is the only food, tap to eat. See ROADMAP changelog. |
 | M7..M14              | pending | See ROADMAP.md for the order. |
 
 Latest commit on `main`: see `git log -1`. Latest released APK: see the
@@ -47,7 +48,7 @@ mc-rs/
       context.rs          wgpu instance + Vulkan/GL fallback for Android
       pipeline.rs         chunk pipeline + atlas upload + uniforms
     render/
-      atlas.rs            16x16 RGBA block-id atlas, vanilla-Beta-1.7 colours
+      atlas.rs            16x32 RGBA atlas: block-id tiles + metadata variants (log/leaf species, wool colours)
       camera.rs           FirstPersonCamera: yaw/pitch/look_at/perspective
       hud.rs              2D orthographic overlay pipeline (M12)
       items.rs            dropped items: one small flat-colour cube each, bobbing
@@ -55,7 +56,7 @@ mc-rs/
     input/
       touch_ui.rs         region hit-test + per-pointer state machine (M12)
     world/
-      chunk.rs            16x16x128 cell layout, idx = (x<<11)|(z<<7)|y
+      chunk.rs            16x16x128 cell layout, idx = (x<<11)|(z<<7)|y; `Nibbles` = block metadata (NibbleArray)
       chunks.rs           ChunkManager: HashMap<(cx,cz), chunk + mesh>, ring streaming, worker threads
                           (not WorldChunkManager below, which is the vanilla climate/biome class)
       biome.rs            Beta-1.7 climate -> biome table (10 reachable biomes)
@@ -96,9 +97,17 @@ UNVERIFIED until you can show a reference.
 - `world::gen::caves` — port of `MapGenBase`/`MapGenCaves` (incl. the `y` off-by-one quirk), run at the end of `generate`. Golden-tested.
 - `world::gen::populate` — port of `populate()` and the `WorldGen*` classes, same Random draw order. Golden-tested
   against the real classes on a fake `World` (`tools/golden/G.java`). Known simplifications, none of which touch a
-  Random draw: light is the column model (no lateral spread, no block light), no block metadata (leaf/log species,
-  tall-grass type), no tile entities (chest loot / spawner mob are drawn and dropped), no block ticks (springs do
+  Random draw: light is the column model (no lateral spread, no block light), no tile entities (chest loot / spawner mob are drawn and dropped), no block ticks (springs do
   not flow, sand does not fall). Order dependence: vanilla populates in load order; here it is nearest-first.
+- `world::chunk::Nibbles` — `NibbleArray` (same cell index, even cell = low nibble); `Chunk.setBlockID` clears a cell's
+  metadata when the id changes, `setBlockIDWithMetadata` writes both (`ChunkManager::set_block` / `set_block_meta`,
+  `populate::Region::set` / `set_meta`). `populate` writes metadata where the Java does (`WorldGenForest` birch 2,
+  `WorldGenTaiga1/2` spruce 1, `WorldGenTallGrass` 1 or 2, `WorldGenPumpkin` facing); golden-tested bit for bit on the
+  packed bytes (`META` lines). Nothing reads metadata for behaviour yet except drops and colours: leaf decay, sapling
+  growth, slab/stair/door/bed shapes and furnace facing are still to do.
+- `world::items::damage_dropped` / `placed_meta` — `Block.damageDropped` (sapling and leaves `& 3`, log, wool, slabs as
+  placed, lapis ore 4) and `Item.getPlacedBlockMetadata` (`ItemSapling`, `ItemLog`, `ItemCloth`, `ItemSlab` pass the damage,
+  `ItemLeaves` adds bit 8). `render::atlas::FLEECE` is `EntitySheep.fleeceColorTable`, indexed by the cloth metadata.
 - `world::gen::chunk_manager` — climate noise scales are `(double)0.025F` and
   `(double)0.05F` (float widened to double), not the double literals.
 - `world::biome::Biome` — the 8 overworld biomes from `BiomeGenBase`, with
@@ -115,7 +124,7 @@ UNVERIFIED until you can show a reference.
   `canHarvestBlock` of `ItemPickaxe`/`ItemSpade`, `RecipesTools` + `RecipesCrafting` + the `CraftingManager` entries it
   carries, `ShapedRecipes.matches` (anywhere in the grid, mirrored), `SlotCrafting.onPickupFromSlot`, the slot positions
   of `ContainerPlayer`/`ContainerWorkbench`, and the left/right click branches of `Container.func_27280_a`. Not ported:
-  hoes, swords, shears, armor slots, shift-click, raw pork/fish smelting, the lava bucket as fuel, ~100 other recipes (one line each in `recipes()`).
+  bow, arrow, armor slots, shift-click, raw pork/fish smelting, the lava bucket as fuel, ~100 other recipes (one line each in `recipes()`).
 - `world::dig::can_harvest` — `InventoryPlayer.canHarvestBlock` (material half + held-item half), used by `lib.rs` the way
   `PlayerControllerSP.sendBlockRemoved` does: read before the tool wears, so a tool that breaks on a block still harvests it.
 - `input::touch_ui::LayoutRects::for_surface` — hotbar matches
@@ -129,7 +138,9 @@ UNVERIFIED until you can show a reference.
 ```
 cargo test --lib
 ```
-Currently 47 unit tests, all passing on a Linux host (rustc 1.85, the whole crate built against a small stand-in for `android-activity`, which does not build there; `tools/` must sit next to the crate for the golden `include_str!`). That includes the 18-chunk terrain golden, `populate_matches_java` (11 raw+populated 2x2 cases), `block_tables_match_java` and the M6 tests (`recipes_match_like_java`, `clicks_follow_container_rules`, `tool_tables`, `furnace_smelts_like_java`, `drop_one_spreads_the_cursor_stack`, `tools_gate_harvest_and_speed_up_digging`, `open_screen_turns_presses_into_taps`). `ring_loads_then_unloads_when_walking` and the golden tests generate real chunks: use `--release`.
+Last full run: 56 unit tests (47 before block metadata, 52 with it; swimming, health, food and frustum culling add 4), all passing on a Linux host (rustc 1.85, the whole crate built against a small stand-in for `android-activity`, which does not build there; `tools/` must sit next to the crate for the golden `include_str!`). That includes the 18-chunk terrain golden, `populate_matches_java` (11 raw+populated 2x2 cases), `block_tables_match_java` and the M6 tests (`recipes_match_like_java`, `clicks_follow_container_rules`, `tool_tables`, `furnace_smelts_like_java`, `drop_one_spreads_the_cursor_stack`, `tools_gate_harvest_and_speed_up_digging`, `open_screen_turns_presses_into_taps`). Block metadata adds 5 tests (`nibbles_pack_like_java`, `metadata_follows_chunk_setters`, `metadata_survives_break_and_place`,
+`metadata_picks_the_tile`, `metadata_picks_the_face_tile`) and makes `populate_matches_java` compare the `META` hashes; the metadata code was first run in the 56-test pass, which also fixed a wrong expectation in `metadata_picks_the_tile` (wool metadata 1 is tile 260).
+`ring_loads_then_unloads_when_walking` and the golden tests generate real chunks: use `--release`.
 The crate depends on `android-activity` -> `ndk-sys`, which only compiles for Android, so
 `cargo test` works on an Android host (e.g. Termux) but not on a plain Linux runner. The CI
 `test` job pipes through `tail` without `pipefail`, so a failure there is NOT reported.
@@ -175,7 +186,7 @@ was generated with). The CI workflow does this for you.
   ~113 generated (radius 6) and ~149 kept). populate() runs on the render thread, one chunk per frame. One draw call per chunk, at most 2 chunk meshes built per frame. Memory is
   32 KB of blocks per loaded chunk. No device numbers yet for this path; the old 48x48 figure
   (~16 ms/frame on a Pixel 4a) no longer applies.
-- M13 adds frustum culling (a filter over `ChunkManager::meshes()`, bounds come from the chunk key) and
+- M13 frustum culling is in (`render::camera::Frustum`, filtered through `ChunkManager::meshes_where`); M13 still adds
   greedy meshing.
 - No JNI calls except the one `android_main` entry point; everything
   inside the game loop is pure Rust.

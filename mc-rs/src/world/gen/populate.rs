@@ -9,12 +9,15 @@
 //! UNVERIFIED / simplified on purpose (none of these change a Random draw, only a placed block):
 //! - Light is the column model of `Chunk.func_1024_c` (15 minus the opacities from the top
 //!   down), so no lateral spread and no block light. Used by flowers, mushrooms and lake grass.
-//! - No block metadata (leaf/log species, tall-grass type, pumpkin facing), no tile entities (chest
-//!   loot and the spawner mob are drawn from the Random and dropped), no block ticks: springs are
-//!   placed but do not flow, sand/gravel do not fall.
+//! - No tile entities (chest loot and the spawner mob are drawn from the Random and dropped), no block
+//!   ticks: springs are placed but do not flow, sand/gravel do not fall.
+//!
+//! Block metadata is written like the Java (`setBlockAndMetadata`): birch and taiga leaf/log species, the
+//! tall-grass type, the pumpkin facing; every other `setBlock` resets the cell's metadata to 0. Checked by
+//! the `META` lines of the golden file.
 
 use crate::world::biome::Biome;
-use crate::world::chunk::idx;
+use crate::world::chunk::{idx, Nibbles};
 use crate::world::gen::chunk_manager::WorldChunkManager;
 use crate::world::gen::noise::{ifloor, mh_cos, mh_sin, JavaRandom};
 use crate::world::gen::overworld::{block::*, OverworldGenerator};
@@ -28,15 +31,17 @@ pub struct Region {
     cz: i32,
     /// Chunk (cx + i, cz + j) at `i * 2 + j`.
     b: [Vec<u8>; 4],
+    /// Block metadata of the same chunks (`Chunk.data`).
+    d: [Nibbles; 4],
 }
 
 impl Region {
-    pub fn new(cx: i32, cz: i32, b: [Vec<u8>; 4]) -> Self {
-        Self { cx, cz, b }
+    pub fn new(cx: i32, cz: i32, b: [Vec<u8>; 4], d: [Nibbles; 4]) -> Self {
+        Self { cx, cz, b, d }
     }
 
-    pub fn into_blocks(self) -> [Vec<u8>; 4] {
-        self.b
+    pub fn into_parts(self) -> ([Vec<u8>; 4], [Nibbles; 4]) {
+        (self.b, self.d)
     }
 
     fn at(&self, x: i32, y: i32, z: i32) -> Option<(usize, usize)> {
@@ -51,9 +56,18 @@ impl Region {
         self.at(x, y, z).map_or(0, |(c, i)| self.b[c][i])
     }
 
+    /// `World.setBlock` (`Chunk.setBlockID`): a different id resets the cell's metadata to 0, the same id changes nothing.
     fn set(&mut self, x: i32, y: i32, z: i32, id: u8) {
+        if self.get(x, y, z) != id {
+            self.set_meta(x, y, z, id, 0);
+        }
+    }
+
+    /// `World.setBlockAndMetadata`: id and metadata (low 4 bits) are both written.
+    fn set_meta(&mut self, x: i32, y: i32, z: i32, id: u8, meta: u8) {
         if let Some((c, i)) = self.at(x, y, z) {
             self.b[c][i] = id;
+            self.d[c].set((x & 15) as usize, y as usize, (z & 15) as usize, meta);
         }
     }
 
@@ -218,15 +232,14 @@ impl OverworldGenerator {
             _ => 0,
         };
         for _ in 0..n {
-            if biome == Biome::Rainforest {
-                r.next_int_bound(3); // grass type, not stored (no metadata yet)
-            }
+            // The grass type is drawn first: a fern (2) in two tries of three in a rainforest, else tall grass (1).
+            let kind = if biome == Biome::Rainforest && r.next_int_bound(3) != 0 { 2 } else { 1 };
             let (x, y, z) = (bx + r.next_int_bound(16) + 8, r.next_int_bound(128), bz + r.next_int_bound(16) + 8);
-            ground_plants(w, &mut r, TALL_GRASS, 128, x, y, z);
+            ground_plants(w, &mut r, TALL_GRASS, 128, kind, x, y, z);
         }
         for _ in 0..(if biome == Biome::Desert { 2 } else { 0 }) {
             let (x, y, z) = (bx + r.next_int_bound(16) + 8, r.next_int_bound(128), bz + r.next_int_bound(16) + 8);
-            ground_plants(w, &mut r, DEAD_BUSH, 4, x, y, z);
+            ground_plants(w, &mut r, DEAD_BUSH, 4, 0, x, y, z);
         }
         for &(odds, id) in &[(2, FLOWER_R), (4, MUSH_BROWN), (8, MUSH_RED)] {
             if r.next_int_bound(odds) == 0 {
@@ -501,8 +514,8 @@ fn plants(w: &mut Region, r: &mut JavaRandom, id: u8, x: i32, y: i32, z: i32) {
     }
 }
 
-/// WorldGenTallGrass (`tries` 128) and WorldGenDeadBush (4): sink to the ground first.
-fn ground_plants(w: &mut Region, r: &mut JavaRandom, id: u8, tries: i32, x: i32, mut y: i32, z: i32) {
+/// WorldGenTallGrass (`tries` 128, `meta` its grass type) and WorldGenDeadBush (4, 0): sink to the ground first.
+fn ground_plants(w: &mut Region, r: &mut JavaRandom, id: u8, tries: i32, meta: u8, x: i32, mut y: i32, z: i32) {
     while y > 0 && matches!(w.get(x, y, z), AIR | LEAVES) {
         y -= 1;
     }
@@ -514,7 +527,7 @@ fn ground_plants(w: &mut Region, r: &mut JavaRandom, id: u8, tries: i32, x: i32,
         let (a, b) = (r.next_int_bound(8), r.next_int_bound(8));
         let z2 = z + a - b;
         if w.air(x2, y2, z2) && can_stay(w, id, x2, y2, z2) {
-            w.set(x2, y2, z2, id);
+            w.set_meta(x2, y2, z2, id, meta);
         }
     }
 }
@@ -556,8 +569,8 @@ fn pumpkins(w: &mut Region, r: &mut JavaRandom, x: i32, y: i32, z: i32) {
         let z2 = z + a - b;
         // canPlaceBlockAt: air above a normal cube; grass is one, so the grass test covers it.
         if w.air(x2, y2, z2) && w.get(x2, y2 - 1, z2) == GRASS {
-            w.set(x2, y2, z2, PUMPKIN);
-            r.next_int_bound(4); // facing, not stored
+            let facing = r.next_int_bound(4) as u8;
+            w.set_meta(x2, y2, z2, PUMPKIN, facing);
         }
     }
 }
@@ -628,8 +641,8 @@ impl Tree {
 
     fn generate(self, w: &mut Region, r: &mut JavaRandom, x: i32, y: i32, z: i32) -> bool {
         match self {
-            Tree::Oak => round_tree(w, r, x, y, z, 4),
-            Tree::Birch => round_tree(w, r, x, y, z, 5),
+            Tree::Oak => round_tree(w, r, x, y, z, 4, 0),
+            Tree::Birch => round_tree(w, r, x, y, z, 5, 2),
             Tree::Big => big_tree(w, r, x, y, z),
             Tree::Taiga1 => taiga1(w, r, x, y, z),
             Tree::Taiga2 => taiga2(w, r, x, y, z),
@@ -646,27 +659,29 @@ fn grows_on(w: &Region, x: i32, y: i32, z: i32) -> bool {
     matches!(w.get(x, y - 1, z), GRASS | DIRT)
 }
 
-/// A leaf layer of radius `rad` around (x, z), skipping `skip_corner` cells; opaque cells are kept.
-fn leaves(w: &mut Region, x: i32, y: i32, z: i32, rad: i32, mut skip_corner: impl FnMut(i32, i32) -> bool) {
+/// A leaf layer of radius `rad` around (x, z), skipping `skip_corner` cells; opaque cells are kept. `meta` is the
+/// leaf kind: 0 oak, 1 spruce, 2 birch.
+fn leaves(w: &mut Region, x: i32, y: i32, z: i32, rad: i32, meta: u8, mut skip_corner: impl FnMut(i32, i32) -> bool) {
     for xx in x - rad..=x + rad {
         for zz in z - rad..=z + rad {
             if !skip_corner(xx - x, zz - z) && !opaque(w.get(xx, y, zz)) {
-                w.set(xx, y, zz, LEAVES);
+                w.set_meta(xx, y, zz, LEAVES, meta);
             }
         }
     }
 }
 
-fn trunk(w: &mut Region, x: i32, y: i32, z: i32, len: i32) {
+/// A trunk of `len` logs of species `meta` (0 oak, 1 spruce, 2 birch), only into air and leaves.
+fn trunk(w: &mut Region, x: i32, y: i32, z: i32, len: i32, meta: u8) {
     for i in 0..len {
         if matches!(w.get(x, y + i, z), AIR | LEAVES) {
-            w.set(x, y + i, z, LOG);
+            w.set_meta(x, y + i, z, LOG, meta);
         }
     }
 }
 
-/// WorldGenTrees (min height 4) and WorldGenForest (5).
-fn round_tree(w: &mut Region, r: &mut JavaRandom, x: i32, y: i32, z: i32, min_h: i32) -> bool {
+/// WorldGenTrees (min height 4, species 0) and WorldGenForest (5, birch = 2).
+fn round_tree(w: &mut Region, r: &mut JavaRandom, x: i32, y: i32, z: i32, min_h: i32, meta: u8) -> bool {
     let h = r.next_int_bound(3) + min_h;
     if y < 1 || y + h + 1 > 128 {
         return false;
@@ -685,9 +700,9 @@ fn round_tree(w: &mut Region, r: &mut JavaRandom, x: i32, y: i32, z: i32, min_h:
         let dy = yy - (y + h);
         let rad = 1 - dy / 2;
         // A corner is dropped half the time (and always on the top layer): one draw per corner.
-        leaves(w, x, yy, z, rad, |dx, dz| dx.abs() == rad && dz.abs() == rad && !(r.next_int_bound(2) != 0 && dy != 0));
+        leaves(w, x, yy, z, rad, meta, |dx, dz| dx.abs() == rad && dz.abs() == rad && !(r.next_int_bound(2) != 0 && dy != 0));
     }
-    trunk(w, x, y, z, h);
+    trunk(w, x, y, z, h, meta);
     true
 }
 
@@ -711,14 +726,14 @@ fn taiga1(w: &mut Region, r: &mut JavaRandom, x: i32, y: i32, z: i32) -> bool {
     w.set(x, y - 1, z, DIRT);
     let mut rad = 0;
     for yy in (y + bare..=y + h).rev() {
-        leaves(w, x, yy, z, rad, |dx, dz| dx.abs() == rad && dz.abs() == rad && rad > 0);
+        leaves(w, x, yy, z, rad, 1, |dx, dz| dx.abs() == rad && dz.abs() == rad && rad > 0);
         if rad >= 1 && yy == y + bare + 1 {
             rad -= 1;
         } else if rad < max_rad {
             rad += 1;
         }
     }
-    trunk(w, x, y, z, h - 1);
+    trunk(w, x, y, z, h - 1, 1);
     true
 }
 
@@ -743,7 +758,7 @@ fn taiga2(w: &mut Region, r: &mut JavaRandom, x: i32, y: i32, z: i32) -> bool {
     let mut rad = r.next_int_bound(2);
     let (mut next, mut after) = (1, 0);
     for i in 0..=span {
-        leaves(w, x, y + h - i, z, rad, |dx, dz| dx.abs() == rad && dz.abs() == rad && rad > 0);
+        leaves(w, x, y + h - i, z, rad, 1, |dx, dz| dx.abs() == rad && dz.abs() == rad && rad > 0);
         if rad >= next {
             rad = after;
             after = 1;
@@ -753,7 +768,7 @@ fn taiga2(w: &mut Region, r: &mut JavaRandom, x: i32, y: i32, z: i32) -> bool {
         }
     }
     let cut = r.next_int_bound(3);
-    trunk(w, x, y, z, h - cut);
+    trunk(w, x, y, z, h - cut, 1);
     true
 }
 
@@ -978,7 +993,7 @@ mod tests {
     fn populate_matches_java() {
         let seeds = [0xCAFEBABE_i64, 12345, -4172144997902289642];
         let mut cases = 0;
-        for (raw, pop) in lines("RAW").zip(lines("POP")) {
+        for ((raw, pop), meta) in lines("RAW").zip(lines("POP")).zip(lines("META")) {
             let seed: i64 = raw[0].parse().unwrap();
             let (cx, cz): (i32, i32) = (raw[1].parse().unwrap(), raw[2].parse().unwrap());
             assert!(seeds.contains(&seed));
@@ -989,10 +1004,13 @@ mod tests {
             for i in 0..4 {
                 assert_eq!(format!("{:x}", fnv(&blocks[i])), raw[3 + i], "raw chunk {:?}, seed {seed}", at[i]);
             }
-            let mut w = Region::new(cx, cz, blocks);
+            assert_eq!(meta[..3], raw[..3], "META line out of step with RAW");
+            let mut w = Region::new(cx, cz, blocks, std::array::from_fn(|_| Nibbles::new()));
             g.populate(&mut w, cx, cz, &mut cm);
-            for (i, b) in w.into_blocks().iter().enumerate() {
-                assert_eq!(format!("{:x}", fnv(b)), pop[3 + i], "populated chunk {:?}, seed {seed}", at[i]);
+            let (blocks, data) = w.into_parts();
+            for i in 0..4 {
+                assert_eq!(format!("{:x}", fnv(&blocks[i])), pop[3 + i], "populated chunk {:?}, seed {seed}", at[i]);
+                assert_eq!(format!("{:x}", fnv(data[i].bytes())), meta[3 + i], "metadata of chunk {:?}, seed {seed}", at[i]);
             }
             cases += 1;
         }

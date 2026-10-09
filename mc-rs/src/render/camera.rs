@@ -3,7 +3,7 @@
 //! Right-handed, yaw=0 looks toward -Z, matching the chunk mesh's +Z-front convention.
 //! Touch-drag and mouse-look both feed into `yaw` / `pitch` directly.
 
-use glam::{Mat4, Vec3};
+use glam::{Mat4, Vec3, Vec4};
 
 pub struct FirstPersonCamera {
     pub pos: Vec3,
@@ -59,5 +59,61 @@ impl FirstPersonCamera {
         let view = Mat4::look_at_rh(self.pos, self.pos + fwd, Vec3::Y);
         let proj = Mat4::perspective_rh(self.fov_y, self.aspect, self.znear, self.zfar);
         (view, proj)
+    }
+}
+
+/// M13 view frustum: the six planes of `proj * view` (Gribb-Hartmann), for culling whole chunks before they are drawn.
+/// Depth is 0..1 (`Mat4::perspective_rh`, wgpu), so the near plane is row 2 alone.
+pub struct Frustum {
+    /// `(a, b, c, d)` with the normal `(a, b, c)` pointing into the frustum, normalised so `d` is a distance.
+    planes: [Vec4; 6],
+}
+
+impl Frustum {
+    pub fn from_view_proj(m: Mat4) -> Self {
+        let (r0, r1, r2, r3) = (m.row(0), m.row(1), m.row(2), m.row(3));
+        let planes = [r3 + r0, r3 - r0, r3 + r1, r3 - r1, r2, r3 - r2].map(|p| p / p.truncate().length());
+        Self { planes }
+    }
+
+    /// False only when the box `min..max` lies wholly outside one plane (conservative: a box near a corner
+    /// can pass without being visible, never the other way round).
+    pub fn intersects_aabb(&self, min: Vec3, max: Vec3) -> bool {
+        self.planes.iter().all(|p| {
+            // The corner furthest along the plane normal; if even that is behind the plane the box is out.
+            let v = Vec3::new(if p.x >= 0.0 { max.x } else { min.x }, if p.y >= 0.0 { max.y } else { min.y }, if p.z >= 0.0 { max.z } else { min.z });
+            p.truncate().dot(v) + p.w >= 0.0
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frustum_culls_boxes_outside_the_view() {
+        // At the origin looking down -Z (yaw 0, pitch 0), 70 degrees tall, 2:1, far plane 256.
+        let mut cam = FirstPersonCamera::spawn_at(0.0, 0.0, 0.0);
+        cam.pitch = 0.0;
+        cam.aspect = 2.0;
+        let (view, proj) = cam.build_view_proj();
+        let f = Frustum::from_view_proj(proj * view);
+        let cube = |c: Vec3| f.intersects_aabb(c - Vec3::splat(8.0), c + Vec3::splat(8.0));
+        assert!(cube(Vec3::new(0.0, 0.0, -50.0)), "straight ahead");
+        assert!(!cube(Vec3::new(0.0, 0.0, 50.0)), "behind");
+        assert!(!cube(Vec3::new(200.0, 0.0, -20.0)), "far to the right");
+        assert!(!cube(Vec3::new(-200.0, 0.0, -20.0)), "far to the left");
+        assert!(!cube(Vec3::new(0.0, 200.0, -20.0)) && !cube(Vec3::new(0.0, -200.0, -20.0)), "above and below");
+        assert!(!cube(Vec3::new(0.0, 0.0, -400.0)), "beyond the far plane");
+        assert!(cube(Vec3::ZERO), "the box the camera is inside of");
+        // A 2:1 view is wider than tall: 40 blocks out, 30 to the side is in view, 60 up is not (the half-height at
+        // 48 blocks is 33.6, so even the box's lowest far corner, y=52, is above it; a box at y=40 would still clip in).
+        assert!(cube(Vec3::new(30.0, 0.0, -40.0)) && !cube(Vec3::new(0.0, 60.0, -40.0)) && cube(Vec3::new(0.0, 40.0, -40.0)));
+        // Turning 90 degrees right (yaw +pi/2 looks toward +X) moves the view onto the box that was off to the right.
+        cam.yaw = std::f32::consts::FRAC_PI_2;
+        let (view, proj) = cam.build_view_proj();
+        let f = Frustum::from_view_proj(proj * view);
+        assert!(f.intersects_aabb(Vec3::new(40.0, -8.0, -8.0), Vec3::new(56.0, 8.0, 8.0)) && !f.intersects_aabb(Vec3::new(-56.0, -8.0, -8.0), Vec3::new(-40.0, 8.0, 8.0)));
     }
 }
