@@ -72,7 +72,7 @@ const DIRS: [(i32, i32, i32); 6] = [(1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0)
 /// `(ox, oz)` is the chunk's world origin (chunk * 16).
 /// Vertices: 6 floats each (px, py, pz, u, v, light). Indices: 6 per face (two triangles).
 /// `sun` = `sky::sun_key`: sun tan(angle) x 2, or `NO_SUN`. ponytail: a face is shadowed when a block lies on the ray
-/// toward the sun (10 steps, the sun moves along Z like `render::sky` draws it, the ray stops at this chunk's 1-cell border, so a shadow cast from
+/// toward the sun (8 steps, the sun moves along Z like `render::sky` draws it, the ray stops at this chunk's 1-cell border, so a shadow cast from
 /// another chunk is missed); upgrade = a per-column shadow map shared by chunks.
 pub const NO_SUN: i32 = i32::MAX;
 
@@ -97,12 +97,22 @@ pub fn build(blocks: &[u8], data: &Nibbles, light: &[u8], nb: [&[u8]; 4], nb_lig
         let v = l[idx((x & 15) as usize, y as usize, (z & 15) as usize)];
         table[((v & 15).saturating_sub(sky_sub)).max(v >> 4) as usize]
     };
+    // Sky light nibble of a cell (open sky above the world, none below it).
+    let skyl = |x: i32, y: i32, z: i32| -> u8 {
+        if y < 0 { return 0; }
+        if y >= H as i32 { return 15; }
+        let l = match slot(x, z) { 0 => light, s => nb_light[s - 1] };
+        l[idx((x & 15) as usize, y as usize, (z & 15) as usize)] & 15
+    };
     // Is the air cell in the shade? A ray toward the sun, `sun_key` steps along Z per step up.
     let (sx, sy) = { let h = if sun == NO_SUN { 0.0 } else { sun as f32 / 2.0 }; let m = h.abs().max(1.0); (h / m, 1.0 / m) };
     let occ = |x: i32, y: i32, z: i32| -> bool {
         if sun == NO_SUN || !(-1..=16).contains(&x) || !(-1..=16).contains(&z) { return false; }
+        // Vanilla sky light already shades under trees and overhangs: cast only onto fully sky-lit cells, so the two mix
+        // instead of stacking.
+        if skyl(x, y, z) < 15 { return false; }
         let (cz, cy) = (z as f32 + 0.5, y as f32 + 0.5);
-        (1..=10).map(|n| ((cz + sx * n as f32).floor() as i32, (cy + sy * n as f32).floor() as i32))
+        (1..=8).map(|n| ((cz + sx * n as f32).floor() as i32, (cy + sy * n as f32).floor() as i32))
             .take_while(|&(rz, _)| (-1..=16).contains(&rz)).any(|(rz, ry)| get(x, ry, rz) != 0)
     };
     let mut verts: Vec<f32> = Vec::new();
@@ -146,7 +156,8 @@ pub fn build(blocks: &[u8], data: &Nibbles, light: &[u8], nb: [&[u8]; 4], nb_lig
                     };
                     let light = shade * bright(x + dx, y + dy, z + dz);
                     let own = occ(x + dx, y + dy, z + dz);
-                    for (corner, uv) in face.corners.iter().zip(face.uv.iter()) {
+                    let mut ls = [light; 4];
+                    for (ci, (corner, uv)) in face.corners.iter().zip(face.uv.iter()).enumerate() {
                         let (au, av) = atlas::atlas_uv(tile, uv[0], uv[1]);
                         // ponytail: world-space f32 vertices lose precision far from the origin
                         // (about 1 cm at 100k blocks); upgrade path is a per-chunk offset uniform.
@@ -164,12 +175,15 @@ pub fn build(blocks: &[u8], data: &Nibbles, light: &[u8], nb: [&[u8]; 4], nb_lig
                             c[t[1]] += corner[t[1]] as i32 - 1 + (i >> 1) as i32;
                             if get(c[0], c[1], c[2]) != 0 { own } else { occ(c[0], c[1], c[2]) }
                         }).count() };
-                        verts.push(light * (1.0 - 0.4 * hit as f32 / 4.0));
+                        ls[ci] = light * (1.0 - 0.4 * hit as f32 / 4.0);
+                        verts.push(ls[ci]);
                     }
-                    idxs.extend_from_slice(&[
-                        base, base + 1, base + 2,
-                        base, base + 2, base + 3,
-                    ]);
+                    // Split along the diagonal whose ends match best, or the gradient shows as dark triangles.
+                    idxs.extend_from_slice(&if (ls[0] - ls[2]).abs() <= (ls[1] - ls[3]).abs() {
+                        [base, base + 1, base + 2, base, base + 2, base + 3]
+                    } else {
+                        [base + 1, base + 2, base + 3, base + 1, base + 3, base]
+                    });
                 }
             }
         }
@@ -217,7 +231,7 @@ mod tests {
         let mut c = air();
         for z in 0..16 { c[idx(5, 0, z)] = 1; }
         for y in 1..4 { c[idx(5, y, 9)] = 1; }
-        let a = air();
+        let a = vec![15u8; VOLUME]; // full sky light: shadows fall only on sky-lit cells
         let v = build(&c, &Nibbles::new(), &a, [&a[..], &a[..], &a[..], &a[..]], [&a[..], &a[..], &a[..], &a[..]], 0, 2, 0, 0).0;
         let top = |z0: f32| v.chunks(6).find(|q| q[1] == 1.0 && q[2] >= z0 && q[2] < z0 + 1.0 && q[0] == 5.0).unwrap()[5];
         assert!(top(7.0) < top(2.0));
