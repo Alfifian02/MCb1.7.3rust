@@ -205,7 +205,7 @@ pub fn find(grid: &[Option<ItemStack>; 9], gw: usize) -> Option<ItemStack> {
 
 // ---- Furnace ----
 
-/// `FurnaceRecipes`: what smelting `id` gives. Not ported: raw pork and fish (no mobs yet).
+/// `FurnaceRecipes`: what smelting `id` gives. Not ported: raw fish (no fish yet).
 fn smelting(id: u16) -> Option<ItemStack> {
     let (out, damage) = match id {
         15 => (265, 0),  // iron ore -> iron ingot
@@ -216,6 +216,7 @@ fn smelting(id: u16) -> Option<ItemStack> {
         337 => (336, 0), // clay -> brick
         81 => (351, 2),  // cactus -> green dye
         17 => (263, 1),  // log -> charcoal
+        319 => (320, 0), // raw -> cooked porkchop
         _ => return None,
     };
     Some(ItemStack { id: out, count: 1, damage })

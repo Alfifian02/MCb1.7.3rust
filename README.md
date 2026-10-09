@@ -34,7 +34,8 @@ original. Anything that cannot be derived from the b1.7.3 sources is marked
 | Block metadata       | written, NOT compiled (no Rust toolchain that session) | 4-bit `Nibbles` per chunk (= `NibbleArray`, the McRegion `Data` tag as is), `meta` / `set_block_meta`, worldgen writes it (birch + taiga species, grass type, pumpkin facing), drops carry `damageDropped`, items place `getPlacedBlockMetadata`, the atlas shows log/leaf species and the 15 wool colours. Block shapes (slab, stairs, door, bed) are not part of it. Java golden regenerated: old lines unchanged, new `META` hashes. See ROADMAP changelog. |
 | Health + damage      | written, host-tested (56 tests), NOT run on a device | 20 health, fall damage, drowning, lava + fire, void, death drops the inventory and respawns. Fluids are not solid and the player swims. Mushroom stew (bowl + 2 mushrooms) is the only food, tap to eat. See ROADMAP changelog. |
 | M7 Save              | written, NOT compiled (no Rust toolchain that session) | Own simple format, not McRegion: one run-length-coded file per edited chunk + a `level` file (player, inventory, furnaces, dropped items, time). Autosave every 5 s, full save on pause/exit, resume on start. Saves live in the app's private storage, one folder per seed. +2 tests. See ROADMAP changelog. |
-| M8..M14              | pending | See ROADMAP.md for the order. |
+| M8 Pig (first mob)   | written WITHOUT a Rust toolchain: not compiled, +1 test not run | `EntityPig` + the `EntityCreature`/`EntityLiving` wander AI at 20 Hz, 0.9 box physics, quadruped model as 6 flat pink boxes with swinging legs, tap to hit (swords 4+, tools 2+, hand 1, 10-tick hurt window, knockback), 10 health, drops 0..2 raw porkchop (heals 3, smelts to cooked 8). Spawns on grass 24..48 blocks away (cap 8). No path-finder, saddle, sound, save. See ROADMAP changelog. |
+| M8 rest, M9..M14     | pending | Other mobs and the rest: see ROADMAP.md for the order. |
 
 Latest commit on `main`: see `git log -1`. Latest released APK: see the
 `MinecraftB173Rust-apk` artifact on the GitHub Actions run.
@@ -54,6 +55,7 @@ mc-rs/
       atlas.rs            16x32 RGBA atlas: block-id tiles + metadata variants (log/leaf species, wool colours)
       camera.rs           FirstPersonCamera: yaw/pitch/look_at/perspective
       hud.rs              2D orthographic overlay pipeline (M12)
+      mobs.rs             M8: Pig + Mobs (AI tick, spawn, hit, drops, ray pick)
       items.rs            dropped items: one small flat-colour cube each, bobbing
       mesh.rs             per-chunk mesher, culls against the 4 neighbouring chunks
     input/

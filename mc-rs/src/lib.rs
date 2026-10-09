@@ -31,6 +31,7 @@ use crate::world::pick::{self, Hit};
 use crate::world::dig::{self, Dig};
 use crate::world::craft::{self, Furnace, Screen};
 use crate::world::items::{self, Drops, Inventory, ItemStack};
+use crate::world::mobs::{self, Mobs};
 use crate::world::save::{self, Level};
 use crate::world::sky;
 use crate::world::chunk::{cross_shape, is_plant};
@@ -88,6 +89,7 @@ struct App {
     /// Hotbar stacks (starts empty), dropped items on the ground and their draw buffers.
     inv: Inventory,
     drops: Drops,
+    mobs: Mobs,
     item_mesh: ItemMesh,
     /// Open container screen (the 2x2 inventory or a workbench's 3x3) and its "place one" click toggle.
     screen: Option<Screen>,
@@ -182,6 +184,7 @@ impl App {
             dig_acc: 0.0,
             inv: Inventory::default(),
             drops: Drops::new(seed),
+            mobs: Mobs::new(seed),
             item_mesh,
             screen: None,
             one_mode: false,
@@ -313,6 +316,7 @@ impl App {
         }
         // Dropped items fall, settle and get picked up (before the target check below, which can return early).
         self.drops.tick(dt, &|x: i32, y: i32, z: i32| self.chunks.block(x, y, z), self.player.pos, &mut self.inv);
+        self.mobs.update(dt, &get, self.player.pos, &mut self.drops);
         // Furnaces burn on the 20 Hz tick, open or not, but only in loaded chunks (vanilla ticks loaded tile entities).
         // The block swaps between unlit 61 and lit 62 when the fire goes on or off.
         self.furn_acc += dt;
@@ -392,6 +396,19 @@ impl App {
             _ => {
                 self.dig.reset();
                 self.dig_acc = 0.0;
+            }
+        }
+        // A tap that has a pig under the crosshair, nearer than the block behind it, hits it (`Minecraft.clickMouse`'s attack;
+        // touch has no left button, and placing a block against a pig is not worth a gesture).
+        if place {
+            let (eye, fwd, slot) = (self.camera.pos, self.camera.forward(), self.touch.hotbar_slot);
+            let wall = self.target.map_or(f32::MAX, |h| h.point.distance(eye.as_dvec3()) as f32);
+            if let Some((i, _)) = self.mobs.pick(eye, fwd, pick::REACH as f32).filter(|&(_, t)| t < wall) {
+                let held = self.inv.slots[slot].map(|s| s.id);
+                let (dmg, wear) = mobs::attack(held);
+                self.mobs.pigs[i].damage(dmg, self.player.pos);
+                self.inv.damage(slot, wear);
+                return;
             }
         }
         let Some(hit) = self.target else {
@@ -546,7 +563,7 @@ impl App {
         self.pipe.upload_uniforms(&self.gpu.queue, view, proj);
         let frustum = Frustum::from_view_proj(proj * view);
         let outline_indices = self.target.map_or(0, |h| self.outline.update(&self.gpu.queue, h.pos));
-        let item_indices = self.item_mesh.update(&self.gpu.queue, &self.drops);
+        let item_indices = self.item_mesh.update(&self.gpu.queue, &self.drops, &self.mobs);
 
         // Sky and fog colour from the sun angle, the weather and the climate under the player; the frame is cleared to
         // the fog colour and the sky pass is drawn over it (vanilla order).

@@ -29,12 +29,12 @@ fn is_solid(b: u8) -> bool { b > 0 && !is_fluid(b) }
 /// `Entity.handleWaterMovement` / `handleLavaMovement`: is any cell with an id in `ids` inside the box shrunk 0.4 top and
 /// bottom (and `xz` on the sides)? A fluid cell only reaches up to 8/9 of its height (`BlockFluid.getPercentAir(0)`).
 /// ponytail: every fluid cell counts as a source block; flowing levels need block metadata (a later milestone).
-fn touches(pos: Vec3, get: BlockQuery<'_>, xz: f32, ids: std::ops::RangeInclusive<u8>) -> bool {
-    let (lo, hi) = (pos.y - HALF.y + 0.401, pos.y + HALF.y - 0.401);
+fn touches(pos: Vec3, half: Vec3, get: BlockQuery<'_>, xz: f32, ids: std::ops::RangeInclusive<u8>) -> bool {
+    let (lo, hi) = (pos.y - half.y + 0.401, pos.y + half.y - 0.401);
     for cy in lo.floor() as i32..=hi.floor() as i32 {
         if cy as f32 + 8.0 / 9.0 < lo { continue; }
-        for cz in (pos.z - HALF.z + xz).floor() as i32..=(pos.z + HALF.z - xz).floor() as i32 {
-            for cx in (pos.x - HALF.x + xz).floor() as i32..=(pos.x + HALF.x - xz).floor() as i32 {
+        for cz in (pos.z - half.z + xz).floor() as i32..=(pos.z + half.z - xz).floor() as i32 {
+            for cx in (pos.x - half.x + xz).floor() as i32..=(pos.x + half.x - xz).floor() as i32 {
                 if matches!(get(cx, cy, cz), Some(b) if ids.contains(&b)) { return true; }
             }
         }
@@ -47,8 +47,13 @@ fn touches(pos: Vec3, get: BlockQuery<'_>, xz: f32, ids: std::ops::RangeInclusiv
 /// x0.5 lava per tick) and sinks 0.02 blocks/tick, a held jump swims up (+0.04 blocks/tick), and pushing against a wall
 /// hops out of the fluid (0.3 blocks/tick) when the spot 0.6 higher is free. Returns (touching water, touching lava).
 pub fn step(player: &mut Player, dt: f32, jumping: bool, get: BlockQuery<'_>) -> (bool, bool) {
-    let water = touches(player.pos, get, 0.001, 8..=9);
-    let lava = !water && touches(player.pos, get, 0.1, 10..=11);
+    step_box(player, HALF, dt, jumping, get)
+}
+
+/// `step` for a box of half-extents `half` (a pig's is 0.45 on every axis); `pos` is the centre.
+pub fn step_box(player: &mut Player, half: Vec3, dt: f32, jumping: bool, get: BlockQuery<'_>) -> (bool, bool) {
+    let water = touches(player.pos, half, get, 0.001, 8..=9);
+    let lava = !water && touches(player.pos, half, get, 0.1, 10..=11);
     let ticks = dt * 20.0;
     if water || lava {
         let speed = (if water { WATER_SPEED } else { LAVA_SPEED }) / WALK_SPEED;
@@ -65,20 +70,19 @@ pub fn step(player: &mut Player, dt: f32, jumping: bool, get: BlockQuery<'_>) ->
 
     // Sweep each axis independently.
     let (vx, vz) = (player.vel.x, player.vel.z);
-    player.pos = sweep_axis(player.pos, player.vel * dt, get, &mut player.vel);
+    player.pos = sweep_axis(player.pos, half, player.vel * dt, get, &mut player.vel);
     if water || lava {
         player.vel.y = player.vel.y * (if water { 0.8f32 } else { 0.5 }).powf(ticks) - 0.4 * ticks;
         let blocked = (vx != 0.0 && player.vel.x == 0.0) || (vz != 0.0 && player.vel.z == 0.0);
         let up = player.pos + Vec3::new(vx * dt, 0.6, vz * dt);
-        if blocked && !aabb_any(up, get, |b| b > 0) { player.vel.y = 6.0; }
+        if blocked && !aabb_any(up, half, get, |b| b > 0) { player.vel.y = 6.0; }
     }
-    player.on_ground = ground_test(player.pos, get);
+    player.on_ground = ground_test(player.pos, half, get);
     (water, lava)
 }
 
-fn ground_test(pos: Vec3, get: BlockQuery<'_>) -> bool {
+fn ground_test(pos: Vec3, h: Vec3, get: BlockQuery<'_>) -> bool {
     // Test the four corners of the bottom face just below current pos.
-    let h = HALF;
     let below = pos - Vec3::new(0.0, h.y + 0.001, 0.0);
     let corners = [
         (below.x - h.x, below.y, below.z - h.z),
@@ -94,36 +98,35 @@ fn ground_test(pos: Vec3, get: BlockQuery<'_>) -> bool {
     })
 }
 
-fn sweep_axis(pos: Vec3, delta: Vec3, get: BlockQuery<'_>, vel: &mut Vec3) -> Vec3 {
+fn sweep_axis(pos: Vec3, h: Vec3, delta: Vec3, get: BlockQuery<'_>, vel: &mut Vec3) -> Vec3 {
     let mut p = pos;
     // X axis
     let mut try_p = p + Vec3::new(delta.x, 0.0, 0.0);
-    if aabb_hits_solid(try_p, get) {
-        try_p.x = snap(p.x, delta.x, |x| aabb_hits_solid_x(p.y, p.z, x, get));
+    if aabb_hits_solid(try_p, h, get) {
+        try_p.x = snap(p.x, delta.x, |x| aabb_hits_solid(Vec3::new(x, p.y, p.z), h, get));
         vel.x = 0.0;
     }
     p = try_p;
     // Z axis
     let mut try_p = p + Vec3::new(0.0, 0.0, delta.z);
-    if aabb_hits_solid(try_p, get) {
-        try_p.z = snap(p.z, delta.z, |z| aabb_hits_solid_z(p.y, p.x, z, get));
+    if aabb_hits_solid(try_p, h, get) {
+        try_p.z = snap(p.z, delta.z, |z| aabb_hits_solid(Vec3::new(p.x, p.y, z), h, get));
         vel.z = 0.0;
     }
     p = try_p;
     // Y axis
     let mut try_p = p + Vec3::new(0.0, delta.y, 0.0);
-    if aabb_hits_solid(try_p, get) {
-        try_p.y = snap(p.y, delta.y, |y| aabb_hits_solid_y(p.x, p.z, y, get));
+    if aabb_hits_solid(try_p, h, get) {
+        try_p.y = snap(p.y, delta.y, |y| aabb_hits_solid(Vec3::new(p.x, y, p.z), h, get));
         vel.y = 0.0;
     }
     try_p
 }
 
-fn aabb_hits_solid(p: Vec3, get: BlockQuery<'_>) -> bool { aabb_any(p, get, is_solid) }
+fn aabb_hits_solid(p: Vec3, h: Vec3, get: BlockQuery<'_>) -> bool { aabb_any(p, h, get, is_solid) }
 
 /// Does the player box at `p` overlap a cell whose id satisfies `pred`?
-fn aabb_any(p: Vec3, get: BlockQuery<'_>, pred: fn(u8) -> bool) -> bool {
-    let h = HALF;
+fn aabb_any(p: Vec3, h: Vec3, get: BlockQuery<'_>, pred: fn(u8) -> bool) -> bool {
     let (x0, x1) = (p.x - h.x, p.x + h.x);
     let (y0, y1) = (p.y - h.y, p.y + h.y);
     let (z0, z1) = (p.z - h.z, p.z + h.z);
@@ -140,16 +143,6 @@ fn aabb_any(p: Vec3, get: BlockQuery<'_>, pred: fn(u8) -> bool) -> bool {
         }
     }
     false
-}
-
-fn aabb_hits_solid_x(y: f32, z: f32, x: f32, get: BlockQuery<'_>) -> bool {
-    aabb_hits_solid(Vec3::new(x, y, z), get)
-}
-fn aabb_hits_solid_z(y: f32, x: f32, z: f32, get: BlockQuery<'_>) -> bool {
-    aabb_hits_solid(Vec3::new(x, y, z), get)
-}
-fn aabb_hits_solid_y(x: f32, z: f32, y: f32, get: BlockQuery<'_>) -> bool {
-    aabb_hits_solid(Vec3::new(x, y, z), get)
 }
 
 /// Binary search for the first `t in [0,|delta|]` that *would* collide, then snap to just before.
@@ -181,7 +174,7 @@ mod tests {
         for _ in 0..120 { step(&mut p, 1.0 / 60.0, false, &get); }
         assert!(p.on_ground, "pos.y = {}", p.pos.y);
         step(&mut p, 1.0 / 60.0, true, &get);
-        assert!(p.pos.y > 10.0 + HALF.y + 0.05 && !ground_test(p.pos, &get));
+        assert!(p.pos.y > 10.0 + HALF.y + 0.05 && !ground_test(p.pos, HALF, &get));
     }
 
     /// Stone below y = 10, still water (9) for y 10..20, air above: the fluid is not solid.

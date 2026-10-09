@@ -1,0 +1,1243 @@
+diff --git a/README.md b/README.md
+index 9e85c0d..0454976 100644
+--- a/README.md
++++ b/README.md
+@@ -34,7 +34,8 @@ original. Anything that cannot be derived from the b1.7.3 sources is marked
+ | Block metadata       | written, NOT compiled (no Rust toolchain that session) | 4-bit `Nibbles` per chunk (= `NibbleArray`, the McRegion `Data` tag as is), `meta` / `set_block_meta`, worldgen writes it (birch + taiga species, grass type, pumpkin facing), drops carry `damageDropped`, items place `getPlacedBlockMetadata`, the atlas shows log/leaf species and the 15 wool colours. Block shapes (slab, stairs, door, bed) are not part of it. Java golden regenerated: old lines unchanged, new `META` hashes. See ROADMAP changelog. |
+ | Health + damage      | written, host-tested (56 tests), NOT run on a device | 20 health, fall damage, drowning, lava + fire, void, death drops the inventory and respawns. Fluids are not solid and the player swims. Mushroom stew (bowl + 2 mushrooms) is the only food, tap to eat. See ROADMAP changelog. |
+ | M7 Save              | written, NOT compiled (no Rust toolchain that session) | Own simple format, not McRegion: one run-length-coded file per edited chunk + a `level` file (player, inventory, furnaces, dropped items, time). Autosave every 5 s, full save on pause/exit, resume on start. Saves live in the app's private storage, one folder per seed. +2 tests. See ROADMAP changelog. |
+-| M8..M14              | pending | See ROADMAP.md for the order. |
++| M8 Pig (first mob)   | written WITHOUT a Rust toolchain: not compiled, +1 test not run | `EntityPig` + the `EntityCreature`/`EntityLiving` wander AI at 20 Hz, 0.9 box physics, quadruped model as 6 flat pink boxes with swinging legs, tap to hit (swords 4+, tools 2+, hand 1, 10-tick hurt window, knockback), 10 health, drops 0..2 raw porkchop (heals 3, smelts to cooked 8). Spawns on grass 24..48 blocks away (cap 8). No path-finder, saddle, sound, save. See ROADMAP changelog. |
++| M8 rest, M9..M14     | pending | Other mobs and the rest: see ROADMAP.md for the order. |
+ 
+ Latest commit on `main`: see `git log -1`. Latest released APK: see the
+ `MinecraftB173Rust-apk` artifact on the GitHub Actions run.
+@@ -54,6 +55,7 @@ mc-rs/
+       atlas.rs            16x32 RGBA atlas: block-id tiles + metadata variants (log/leaf species, wool colours)
+       camera.rs           FirstPersonCamera: yaw/pitch/look_at/perspective
+       hud.rs              2D orthographic overlay pipeline (M12)
++      mobs.rs             M8: Pig + Mobs (AI tick, spawn, hit, drops, ray pick)
+       items.rs            dropped items: one small flat-colour cube each, bobbing
+       mesh.rs             per-chunk mesher, culls against the 4 neighbouring chunks
+     input/
+@@ -200,7 +202,7 @@ was generated with). The CI workflow does this for you.
+ 
+ ## What M12 is not (yet)
+ 
+-- No text rendering. Hotbar slots show a flat colour square per item (counts are seven-segment digits),
++- Text exists only as the item-name tooltip (real `font/default.png` glyphs, `render/font.rs`): hold a finger on an inventory/workbench/furnace slot, or on a picked-up stack, to see its name (`GuiContainer`'s hover tooltip; no menus or chat use it yet). Hotbar slots show a flat colour square per item (counts are seven-segment digits),
+   not item sprites. M14 will add the font + GUI atlas.
+ - No Minecraft PE touch UX anchor — move-stick / look / jump / pause
+   geometry was invented for this port and is flagged UNVERIFIED in
+diff --git a/ROADMAP.md b/ROADMAP.md
+index ad685ef..2811a88 100644
+--- a/ROADMAP.md
++++ b/ROADMAP.md
+@@ -46,6 +46,26 @@ ticks (liquids/sand). Sapling growth, fluid flow and falling sand belong with M5
+ BiomeGenBase but climate never selects it; b1.7.3 has no ravines.
+ 
+ ## Changelog
++- `done` pig, first mob of M8 (written WITHOUT a Rust toolchain: not compiled, +1 test `pig_wanders_is_hit_and_dies` not run):
++    - `world/mobs.rs` (new): `Pig` = `EntityPig` (0.9 box, 10 health, drops `rand(3)` raw porkchop 319), AI = `EntityCreature.updatePlayerActionState`
++      with `func_31026_E` (10 random cells, grass weight 10) and `EntityLiving.updatePlayerActionState` (random turning, looks at a player within 8,
++      `func_27021_X` despawn: > 128 blocks, or 1/800 after 600 ticks when > 32 away), all on the 20 Hz tick; `attackEntityFrom` (10-tick window pays the
++      difference) + `knockBack`; `attack(held)` = `getDamageVsEntity`. `Mobs::spawn`: packs of 1..=4 on grass 24..48 blocks away, cap 8, 200-tick burst at
++      start then every 400 ticks. `physics::step_box` is `step` for any box size (the player's `step` is unchanged).
++    - `render/items.rs`: `push_pig` = `ModelQuadruped(6)` through `RenderLiving`'s transform, shares the item buffers; flat pink, red while hurt.
++    - `lib.rs`: a tap with a pig on the crosshair nearer than the block behind it hits it, wearing the held tool (sword 1, tool 2, hoe 0).
++      Raw porkchop (319) heals 3, cooked (320) 8, furnace 319 -> 320.
++    - ponytail / not done: no A* (straight walk, a blocked pig hops, so no routing around walls), light not read, no saddle/riding, no sounds, no
++      death animation, no fire/fall/drowning damage, no `onStruckByLightning` (pig zombie), pigs and their spawn state are not saved, item tiles for 319/320
++      have no colour of their own yet. UNVERIFIED: spawn rules and rates (vanilla spawns at chunk generation), pig colours.
++- `done` item-name tooltip (written WITHOUT a Rust toolchain: not compiled, +2 tests not run; `tools/gen_names.py` ran and its output was
++  spot-checked against `lang/en_US.lang`): `GuiContainer.drawScreen` shows `translateNamedKey(getItemName())` in a 75% black box (3 units of
++  padding) for the hovered slot when the cursor is empty. Touch has no hover, so it shows while a finger is down: the stack under it, or the
++  picked-up stack (a tap picks the slot's stack up, which would otherwise hide it). `render/font.rs` (generated: `default.png` glyphs +
++  `FontRenderer` widths, ASCII 32..126 only), `world/names.rs` (generated: `setBlockName`/`setItemName` + lang), `items::name` (wool, dye,
++  slab, charcoal by damage), `HudPipeline::push_text` / `text_width` / `push_tooltip`, hud quad cap 2048 -> 4096.
++    - Not done: tooltips in the hotbar/in play (b1.7.3 has none), non-ASCII, text anywhere else (that is M14), item sprites.
++    - UNVERIFIED: the tooltip spot (34 units above the finger, below it near the top edge) is invented; vanilla uses mouse + (12, -12).
+ - `done` sun, moon, stars, sunrise glow and weather (written WITHOUT a Rust toolchain: not compiled, the 5 new tests not run; the Java reference
+   numbers behind 3 of them were generated from the real classes, `tools/golden/G.java` `sky()`; +5 tests):
+     - `world/sky.rs`: `Weather` = `World.updateWeather` (rain/thunder timers on a `java.util.Random`, strengths +-0.01 per tick; started clear, not
+diff --git a/mc-rs/src/lib.rs b/mc-rs/src/lib.rs
+index 83bcfec..d6473dd 100644
+--- a/mc-rs/src/lib.rs
++++ b/mc-rs/src/lib.rs
+@@ -31,6 +31,7 @@ use crate::world::pick::{self, Hit};
+ use crate::world::dig::{self, Dig};
+ use crate::world::craft::{self, Furnace, Screen};
+ use crate::world::items::{self, Drops, Inventory, ItemStack};
++use crate::world::mobs::{self, Mobs};
+ use crate::world::save::{self, Level};
+ use crate::world::sky;
+ use crate::world::chunk::{cross_shape, is_plant};
+@@ -88,6 +89,7 @@ struct App {
+     /// Hotbar stacks (starts empty), dropped items on the ground and their draw buffers.
+     inv: Inventory,
+     drops: Drops,
++    mobs: Mobs,
+     item_mesh: ItemMesh,
+     /// Open container screen (the 2x2 inventory or a workbench's 3x3) and its "place one" click toggle.
+     screen: Option<Screen>,
+@@ -182,6 +184,7 @@ impl App {
+             dig_acc: 0.0,
+             inv: Inventory::default(),
+             drops: Drops::new(seed),
++            mobs: Mobs::new(seed),
+             item_mesh,
+             screen: None,
+             one_mode: false,
+@@ -313,6 +316,7 @@ impl App {
+         }
+         // Dropped items fall, settle and get picked up (before the target check below, which can return early).
+         self.drops.tick(dt, &|x: i32, y: i32, z: i32| self.chunks.block(x, y, z), self.player.pos, &mut self.inv);
++        self.mobs.update(dt, &get, self.player.pos, &mut self.drops);
+         // Furnaces burn on the 20 Hz tick, open or not, but only in loaded chunks (vanilla ticks loaded tile entities).
+         // The block swaps between unlit 61 and lit 62 when the fire goes on or off.
+         self.furn_acc += dt;
+@@ -394,6 +398,19 @@ impl App {
+                 self.dig_acc = 0.0;
+             }
+         }
++        // A tap that has a pig under the crosshair, nearer than the block behind it, hits it (`Minecraft.clickMouse`'s attack;
++        // touch has no left button, and placing a block against a pig is not worth a gesture).
++        if place {
++            let (eye, fwd, slot) = (self.camera.pos, self.camera.forward(), self.touch.hotbar_slot);
++            let wall = self.target.map_or(f32::MAX, |h| h.point.distance(eye.as_dvec3()) as f32);
++            if let Some((i, _)) = self.mobs.pick(eye, fwd, pick::REACH as f32).filter(|&(_, t)| t < wall) {
++                let held = self.inv.slots[slot].map(|s| s.id);
++                let (dmg, wear) = mobs::attack(held);
++                self.mobs.pigs[i].damage(dmg, self.player.pos);
++                self.inv.damage(slot, wear);
++                return;
++            }
++        }
+         let Some(hit) = self.target else {
+             if place {
+                 self.eat();
+@@ -546,7 +563,7 @@ impl App {
+         self.pipe.upload_uniforms(&self.gpu.queue, view, proj);
+         let frustum = Frustum::from_view_proj(proj * view);
+         let outline_indices = self.target.map_or(0, |h| self.outline.update(&self.gpu.queue, h.pos));
+-        let item_indices = self.item_mesh.update(&self.gpu.queue, &self.drops);
++        let item_indices = self.item_mesh.update(&self.gpu.queue, &self.drops, &self.mobs);
+ 
+         // Sky and fog colour from the sun angle, the weather and the climate under the player; the frame is cleared to
+         // the fog colour and the sky pass is drawn over it (vanilla order).
+@@ -753,6 +770,18 @@ impl App {
+                 let sz = 16.0 * k;
+                 push_stack(v, (cx - sz * 0.5, cy - sz * 1.4, sz, sz), c);
+             }
++            // Item name while a finger is down (hover has no touch twin): the picked-up stack, else the stack under the
++            // finger. `GuiContainer.drawScreen` names only the hovered slot and only with an empty cursor; the held
++            // stack is named too because a tap picks the slot's stack up and the finger then covers it.
++            if self.gesture.is_some() {
++                let (cx, cy) = self.touch.cursor_pos;
++                let under = || craft::slot_at(s.gw, w, h, cx, cy).and_then(|id| s.get(&self.inv, furn, id));
++                if let Some(name) = s.cursor.or_else(under).and_then(items::name) {
++                    let bw = (HudPipeline::text_width(name) as f32 + 6.0) * k;
++                    let ty = if cy > 36.0 * k { cy - 34.0 * k } else { cy + 14.0 * k };
++                    HudPipeline::push_tooltip(v, (cx - bw * 0.5).clamp(0.0, (w - bw).max(0.0)), ty, k, name);
++                }
++            }
+         }
+ 
+         // Pause button: top-right, two bars.
+diff --git a/mc-rs/src/render/font.rs b/mc-rs/src/render/font.rs
+new file mode 100644
+index 0000000..c09d795
+--- /dev/null
++++ b/mc-rs/src/render/font.rs
+@@ -0,0 +1,100 @@
++//! GENERATED by tools/gen_names.py from the b1.7.3 `font/default.png`; do not edit.
++//! `GLYPHS[c - 32][row]` bit x = pixel x (bit 0 left); `WIDTH` = `FontRenderer.charWidth`.
++pub const GLYPHS: [[u8; 8]; 95] = [
++    [0, 0, 0, 0, 0, 0, 0, 0],
++    [1, 1, 1, 1, 1, 0, 1, 0],
++    [10, 10, 5, 0, 0, 0, 0, 0],
++    [10, 10, 31, 10, 31, 10, 10, 0],
++    [4, 30, 1, 14, 16, 15, 4, 0],
++    [17, 9, 8, 4, 2, 18, 17, 0],
++    [4, 10, 4, 22, 13, 9, 22, 0],
++    [2, 2, 1, 0, 0, 0, 0, 0],
++    [12, 2, 1, 1, 1, 2, 12, 0],
++    [3, 4, 8, 8, 8, 4, 3, 0],
++    [0, 0, 9, 6, 9, 0, 0, 0],
++    [0, 4, 4, 31, 4, 4, 0, 0],
++    [0, 0, 0, 0, 0, 1, 1, 1],
++    [0, 0, 0, 31, 0, 0, 0, 0],
++    [0, 0, 0, 0, 0, 1, 1, 0],
++    [16, 8, 8, 4, 2, 2, 1, 0],
++    [14, 17, 25, 21, 19, 17, 14, 0],
++    [4, 6, 4, 4, 4, 4, 31, 0],
++    [14, 17, 16, 12, 2, 17, 31, 0],
++    [14, 17, 16, 12, 16, 17, 14, 0],
++    [24, 20, 18, 17, 31, 16, 16, 0],
++    [31, 1, 15, 16, 16, 17, 14, 0],
++    [12, 2, 1, 15, 17, 17, 14, 0],
++    [31, 17, 16, 8, 4, 4, 4, 0],
++    [14, 17, 17, 14, 17, 17, 14, 0],
++    [14, 17, 17, 30, 16, 8, 6, 0],
++    [0, 1, 1, 0, 0, 1, 1, 0],
++    [0, 1, 1, 0, 0, 1, 1, 1],
++    [8, 4, 2, 1, 2, 4, 8, 0],
++    [0, 0, 31, 0, 0, 31, 0, 0],
++    [1, 2, 4, 8, 4, 2, 1, 0],
++    [14, 17, 16, 8, 4, 0, 4, 0],
++    [30, 33, 45, 45, 61, 1, 30, 0],
++    [14, 17, 31, 17, 17, 17, 17, 0],
++    [15, 17, 15, 17, 17, 17, 15, 0],
++    [14, 17, 1, 1, 1, 17, 14, 0],
++    [15, 17, 17, 17, 17, 17, 15, 0],
++    [31, 1, 7, 1, 1, 1, 31, 0],
++    [31, 1, 7, 1, 1, 1, 1, 0],
++    [30, 1, 25, 17, 17, 17, 14, 0],
++    [17, 17, 31, 17, 17, 17, 17, 0],
++    [7, 2, 2, 2, 2, 2, 7, 0],
++    [16, 16, 16, 16, 16, 17, 14, 0],
++    [17, 9, 7, 9, 17, 17, 17, 0],
++    [1, 1, 1, 1, 1, 1, 31, 0],
++    [17, 27, 21, 17, 17, 17, 17, 0],
++    [17, 19, 21, 25, 17, 17, 17, 0],
++    [14, 17, 17, 17, 17, 17, 14, 0],
++    [15, 17, 15, 1, 1, 1, 1, 0],
++    [14, 17, 17, 17, 17, 9, 22, 0],
++    [15, 17, 15, 17, 17, 17, 17, 0],
++    [30, 1, 14, 16, 16, 17, 14, 0],
++    [31, 4, 4, 4, 4, 4, 4, 0],
++    [17, 17, 17, 17, 17, 17, 14, 0],
++    [17, 17, 17, 17, 10, 10, 4, 0],
++    [17, 17, 17, 17, 21, 27, 17, 0],
++    [17, 10, 4, 10, 17, 17, 17, 0],
++    [17, 10, 4, 4, 4, 4, 4, 0],
++    [31, 16, 8, 4, 2, 1, 31, 0],
++    [7, 1, 1, 1, 1, 1, 7, 0],
++    [1, 2, 2, 4, 8, 8, 16, 0],
++    [7, 4, 4, 4, 4, 4, 7, 0],
++    [4, 10, 17, 0, 0, 0, 0, 0],
++    [0, 0, 0, 0, 0, 0, 0, 31],
++    [1, 1, 2, 0, 0, 0, 0, 0],
++    [0, 0, 14, 16, 30, 17, 30, 0],
++    [1, 1, 13, 19, 17, 17, 15, 0],
++    [0, 0, 14, 17, 1, 17, 14, 0],
++    [16, 16, 22, 25, 17, 17, 30, 0],
++    [0, 0, 14, 17, 31, 1, 30, 0],
++    [12, 2, 15, 2, 2, 2, 2, 0],
++    [0, 0, 30, 17, 17, 30, 16, 15],
++    [1, 1, 13, 19, 17, 17, 17, 0],
++    [1, 0, 1, 1, 1, 1, 1, 0],
++    [16, 0, 16, 16, 16, 17, 17, 14],
++    [1, 1, 9, 5, 3, 5, 9, 0],
++    [1, 1, 1, 1, 1, 1, 2, 0],
++    [0, 0, 11, 21, 21, 17, 17, 0],
++    [0, 0, 15, 17, 17, 17, 17, 0],
++    [0, 0, 14, 17, 17, 17, 14, 0],
++    [0, 0, 13, 19, 17, 15, 1, 1],
++    [0, 0, 22, 25, 17, 30, 16, 16],
++    [0, 0, 13, 19, 1, 1, 1, 0],
++    [0, 0, 30, 1, 14, 16, 15, 0],
++    [2, 2, 7, 2, 2, 2, 4, 0],
++    [0, 0, 17, 17, 17, 17, 30, 0],
++    [0, 0, 17, 17, 17, 10, 4, 0],
++    [0, 0, 17, 17, 21, 21, 30, 0],
++    [0, 0, 17, 10, 4, 10, 17, 0],
++    [0, 0, 17, 17, 17, 30, 16, 15],
++    [0, 0, 31, 8, 4, 2, 31, 0],
++    [12, 2, 2, 1, 2, 2, 12, 0],
++    [1, 1, 1, 0, 1, 1, 1, 0],
++    [3, 4, 4, 8, 4, 4, 3, 0],
++    [38, 25, 0, 0, 0, 0, 0, 0],
++];
++pub const WIDTH: [u8; 95] = [4, 2, 5, 6, 6, 6, 6, 3, 5, 5, 5, 6, 2, 6, 2, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 2, 2, 5, 6, 5, 6, 7, 6, 6, 6, 6, 6, 6, 6, 6, 4, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 4, 6, 4, 6, 6, 3, 6, 6, 6, 6, 6, 5, 6, 6, 2, 6, 5, 3, 6, 6, 6, 6, 6, 6, 6, 4, 6, 6, 6, 6, 6, 6, 5, 2, 5, 7];
+diff --git a/mc-rs/src/render/hud.rs b/mc-rs/src/render/hud.rs
+index 1131533..3a56c1b 100644
+--- a/mc-rs/src/render/hud.rs
++++ b/mc-rs/src/render/hud.rs
+@@ -24,6 +24,8 @@
+ 
+ use bytemuck::{Pod, Zeroable};
+ 
++use crate::render::font;
++
+ use wgpu::{BlendState, Buffer, BufferUsages, ColorTargetState, ColorWrites, Device, FragmentState, FrontFace, MultisampleState, PipelineCompilationOptions, PipelineLayoutDescriptor, PolygonMode, PrimitiveState, PrimitiveTopology, Queue, RenderPipeline, ShaderModuleDescriptor, ShaderStages, TextureFormat, VertexAttribute, VertexBufferLayout, VertexFormat, VertexState, VertexStepMode};
+ 
+ #[repr(C)]
+@@ -161,8 +163,8 @@ impl HudPipeline {
+         // 512 quads = 3072 verts * 24 bytes = 72 KB. The old 64-quad cap
+         // (384 verts) was smaller than the hotbar alone, so the controls were
+         // truncated and never drawn. Peak HUD is ~1000 verts.
+-        // 2048 quads: an open inventory screen is 46 slots plus up to 46 stacks with two-digit counts.
+-        let quad_capacity = 2048;
++        // 4096 quads: an open inventory screen is 46 slots plus up to 46 stacks with two-digit counts, plus a tooltip (~500).
++        let quad_capacity = 4096;
+         let vbuf = device.create_buffer(&wgpu::BufferDescriptor {
+             label: Some("hud_vbuf"),
+             size: (quad_capacity * 6 * std::mem::size_of::<HudVertex>()) as u64,
+@@ -202,6 +204,43 @@ impl HudPipeline {
+         out.push(tl); out.push(br); out.push(bl);
+     }
+ 
++    /// Width of `s` in GUI units (`FontRenderer.getStringWidth`); ASCII 32..=126 only, anything else counts as `?`.
++    pub fn text_width(s: &str) -> u32 {
++        s.bytes().map(|b| font::WIDTH[glyph(b)] as u32).sum()
++    }
++
++    /// `FontRenderer.drawStringWithShadow`: `s` with its top-left at `(x, y)`, one font pixel = `k` px, the shadow one
++    /// pixel down-right in a quarter of the colour. Runs of lit pixels in a row are one quad.
++    pub fn push_text(out: &mut Vec<HudVertex>, x: f32, y: f32, k: f32, s: &str, color: [f32; 4]) {
++        let shadow = [color[0] * 0.25, color[1] * 0.25, color[2] * 0.25, color[3]];
++        for (dx, c) in [(k, shadow), (0.0, color)] {
++            let mut cx = x + dx;
++            for b in s.bytes() {
++                let g = glyph(b);
++                for (row, bits) in font::GLYPHS[g].iter().enumerate() {
++                    let mut px = 0;
++                    while px < 8 {
++                        if bits >> px & 1 == 0 {
++                            px += 1;
++                            continue;
++                        }
++                        let run = (px..8).take_while(|p| bits >> p & 1 == 1).count();
++                        Self::push_quad(out, cx + px as f32 * k, y + dx + row as f32 * k, run as f32 * k, k, c);
++                        px += run;
++                    }
++                }
++                cx += font::WIDTH[g] as f32 * k;
++            }
++        }
++    }
++
++    /// The `GuiContainer` item-name tooltip: `s` on a 75% black box (3 units of padding), the box's top-left at
++    /// `(x, y)`; returns nothing, the caller picks the spot.
++    pub fn push_tooltip(out: &mut Vec<HudVertex>, x: f32, y: f32, k: f32, s: &str) {
++        Self::push_quad(out, x, y, (Self::text_width(s) as f32 + 6.0) * k, 14.0 * k, [0.0, 0.0, 0.0, 0.75]);
++        Self::push_text(out, x + 3.0 * k, y + 3.0 * k, k, s, [1.0; 4]);
++    }
++
+     /// Outlined rect (filled with `fill`, bordered by `border`, `border_px`
+     /// pixels thick).
+     /// Seven-segment number (there is no text rendering yet, M14). `h` is the digit height in px;
+@@ -321,3 +360,25 @@ mod tests {
+         approx(v.len() as f32, 192.0);
+     }
+ }
++
++/// Index into `font::GLYPHS` / `WIDTH` (chars 32..=126; the rest draw as `?`).
++fn glyph(b: u8) -> usize {
++    (if (32..=126).contains(&b) { b } else { b'?' } - 32) as usize
++}
++
++#[cfg(test)]
++mod text_tests {
++    use super::*;
++
++    #[test]
++    fn text_is_measured_and_drawn() {
++        assert_eq!(HudPipeline::text_width(""), 0);
++        assert_eq!(HudPipeline::text_width(" "), 4); // FontRenderer: space is 4 wide
++        assert_eq!(HudPipeline::text_width("\u{e9}"), HudPipeline::text_width("?"));
++        let mut v = Vec::new();
++        HudPipeline::push_tooltip(&mut v, 0.0, 0.0, 2.0, "Iron Pickaxe");
++        assert!(v.len() > 6 * 20 && v.len() % 6 == 0);
++        let right = (HudPipeline::text_width("Iron Pickaxe") as f32 + 6.0) * 2.0;
++        assert!(v.iter().all(|p| p.pos[0] >= 0.0 && p.pos[0] <= right + 2.0)); // + the 1 px shadow
++    }
++}
+diff --git a/mc-rs/src/render/items.rs b/mc-rs/src/render/items.rs
+index e2cb186..8128e60 100644
+--- a/mc-rs/src/render/items.rs
++++ b/mc-rs/src/render/items.rs
+@@ -4,11 +4,16 @@
+ //! real item sprites.
+ 
+ use crate::render::mesh::push_box;
+-use crate::world::items::{stack_tile, Drops, MAX_ITEMS};
++use glam::{Mat4, Vec3};
++
++use crate::world::items::{stack_tile, Drops, ItemStack, MAX_ITEMS};
++use crate::world::mobs::{Mobs, Pig, MAX_PIGS};
+ 
+ /// 24 vertices x 6 floats per cube, 36 indices per cube.
+-const VERTEX_BYTES: u64 = (MAX_ITEMS * 24 * 6 * 4) as u64;
+-const INDEX_BYTES: u64 = (MAX_ITEMS * 36 * 4) as u64;
++/// A pig is 6 boxes.
++const BOXES: usize = MAX_ITEMS + MAX_PIGS * 6;
++const VERTEX_BYTES: u64 = (BOXES * 24 * 6 * 4) as u64;
++const INDEX_BYTES: u64 = (BOXES * 36 * 4) as u64;
+ 
+ pub struct ItemMesh {
+     pub vbuf: wgpu::Buffer,
+@@ -22,8 +27,8 @@ impl ItemMesh {
+     }
+ 
+     /// Upload this frame's items; returns the index count to draw.
+-    pub fn update(&self, queue: &wgpu::Queue, drops: &Drops) -> u32 {
+-        let (verts, idxs) = geometry(drops);
++    pub fn update(&self, queue: &wgpu::Queue, drops: &Drops, mobs: &Mobs) -> u32 {
++        let (verts, idxs) = geometry(drops, mobs);
+         if idxs.is_empty() {
+             return 0;
+         }
+@@ -33,7 +38,7 @@ impl ItemMesh {
+     }
+ }
+ 
+-fn geometry(drops: &Drops) -> (Vec<f32>, Vec<u32>) {
++fn geometry(drops: &Drops, mobs: &Mobs) -> (Vec<f32>, Vec<u32>) {
+     let (mut verts, mut idxs) = (Vec::new(), Vec::new());
+     let a = drops.alpha();
+     for e in &drops.items {
+@@ -42,5 +47,39 @@ fn geometry(drops: &Drops) -> (Vec<f32>, Vec<u32>) {
+         let h = 0.125;
+         push_box(&mut verts, &mut idxs, [c.x - h, c.y - h, c.z - h], [c.x + h, c.y + h, c.z + h], stack_tile(e.stack), 1.0);
+     }
++    for p in &mobs.pigs {
++        push_pig(&mut verts, &mut idxs, p);
++    }
+     (verts, idxs)
+ }
++
++/// `ModelPig` = `ModelQuadruped(6)` drawn like `RenderLiving`: turned to face its yaw, scaled 1/16 and flipped upside down
++/// (model y points down), 24 px above the ground. Parts are (box min, size, rotation point, rotation x) in model pixels;
++/// the body lies down (x turned 90 degrees) and legs swing with `limb` (`cos(limb x 0.6662) x 1.4 x amount`).
++/// UNVERIFIED stand-in: flat pink (wool 6), flashing red (wool 14) while hurt; the real `pig.png` comes with M14.
++fn push_pig(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, p: &Pig) {
++    let feet = p.body.pos - Vec3::new(0.0, 0.45, 0.0);
++    let root = Mat4::from_translation(feet)
++        * Mat4::from_rotation_y(std::f32::consts::PI - p.yaw.to_radians())
++        * Mat4::from_scale(Vec3::new(-1.0, -1.0, 1.0) / 16.0)
++        * Mat4::from_translation(Vec3::new(0.0, -23.875, 0.0));
++    let tile = stack_tile(ItemStack { id: 35, count: 1, damage: if p.hurt > 0 { 14 } else { 6 } });
++    let swing = |phase: f32| (p.limb * 0.6662 + phase).cos() * 1.4 * p.limb_amt;
++    let parts: [([f32; 3], [f32; 3], [f32; 3], f32); 6] = [
++        ([-4.0, -4.0, -8.0], [8.0, 8.0, 8.0], [0.0, 12.0, -6.0], 0.0),                              // head
++        ([-5.0, -10.0, -7.0], [10.0, 16.0, 8.0], [0.0, 11.0, 2.0], std::f32::consts::FRAC_PI_2),     // body
++        ([-2.0, 0.0, -2.0], [4.0, 6.0, 4.0], [-3.0, 18.0, 7.0], swing(0.0)),                         // leg1
++        ([-2.0, 0.0, -2.0], [4.0, 6.0, 4.0], [3.0, 18.0, 7.0], swing(std::f32::consts::PI)),         // leg2
++        ([-2.0, 0.0, -2.0], [4.0, 6.0, 4.0], [-3.0, 18.0, -5.0], swing(std::f32::consts::PI)),       // leg3
++        ([-2.0, 0.0, -2.0], [4.0, 6.0, 4.0], [3.0, 18.0, -5.0], swing(0.0)),                         // leg4
++    ];
++    for (min, size, rp, rx) in parts {
++        let m = root * Mat4::from_translation(Vec3::from(rp)) * Mat4::from_rotation_x(rx);
++        let n0 = verts.len();
++        push_box(verts, idxs, min, [min[0] + size[0], min[1] + size[1], min[2] + size[2]], tile, 1.0);
++        for v in verts[n0..].chunks_exact_mut(6) {
++            let w = m.transform_point3(Vec3::new(v[0], v[1], v[2]));
++            v[..3].copy_from_slice(&w.to_array());
++        }
++    }
++}
+diff --git a/mc-rs/src/render/mod.rs b/mc-rs/src/render/mod.rs
+index e55a8b9..ec398a3 100644
+--- a/mc-rs/src/render/mod.rs
++++ b/mc-rs/src/render/mod.rs
+@@ -2,6 +2,7 @@ pub mod atlas;
+ pub mod camera;
+ pub mod mesh;
+ pub mod hud;
++pub mod font;
+ pub mod outline;
+ pub mod items;
+ pub mod sky;
+diff --git a/mc-rs/src/world/craft.rs b/mc-rs/src/world/craft.rs
+index fa96f9d..ae6144d 100644
+--- a/mc-rs/src/world/craft.rs
++++ b/mc-rs/src/world/craft.rs
+@@ -205,7 +205,7 @@ pub fn find(grid: &[Option<ItemStack>; 9], gw: usize) -> Option<ItemStack> {
+ 
+ // ---- Furnace ----
+ 
+-/// `FurnaceRecipes`: what smelting `id` gives. Not ported: raw pork and fish (no mobs yet).
++/// `FurnaceRecipes`: what smelting `id` gives. Not ported: raw fish (no fish yet).
+ fn smelting(id: u16) -> Option<ItemStack> {
+     let (out, damage) = match id {
+         15 => (265, 0),  // iron ore -> iron ingot
+@@ -216,6 +216,7 @@ fn smelting(id: u16) -> Option<ItemStack> {
+         337 => (336, 0), // clay -> brick
+         81 => (351, 2),  // cactus -> green dye
+         17 => (263, 1),  // log -> charcoal
++        319 => (320, 0), // raw -> cooked porkchop
+         _ => return None,
+     };
+     Some(ItemStack { id: out, count: 1, damage })
+diff --git a/mc-rs/src/world/items.rs b/mc-rs/src/world/items.rs
+index d46bfda..23cf932 100644
+--- a/mc-rs/src/world/items.rs
++++ b/mc-rs/src/world/items.rs
+@@ -30,11 +30,26 @@ pub const STEW: u16 = 282;
+ pub fn heal_amount(id: u16) -> Option<i32> {
+     match id {
+         STEW => Some(10),
++        319 => Some(3),  // raw porkchop
++        320 => Some(8),  // cooked porkchop
+         _ => None,
+     }
+ }
+ 
+ /// `Item.maxStackSize`: tools, sign, doors, bed and stew 1, snowball 16, everything else 64.
++/// `ItemStack.getItemName` translated (`StringTranslate`): the `en_US.lang` name; wool, dye, slabs and charcoal by
++/// damage (`ItemCloth`, `ItemDye`, `ItemSlab`, `ItemCoal`). `None` for an id the original gives no name.
++pub fn name(s: ItemStack) -> Option<&'static str> {
++    use crate::world::names::*;
++    match s.id {
++        35 => Some(WOOL[(s.damage & 15) as usize]),
++        43 | 44 => Some(SLAB[(s.damage & 3) as usize]),
++        263 if s.damage == 1 => Some(CHARCOAL),
++        351 => Some(DYE[(s.damage & 15) as usize]),
++        id => NAMES.binary_search_by_key(&id, |e| e.0).ok().map(|i| NAMES[i].1),
++    }
++}
++
+ pub fn max_stack(id: u16) -> u8 {
+     match id {
+         282 | 323 | 324 | 330 | 355 => 1,
+@@ -391,6 +406,18 @@ impl Drops {
+ 
+ #[cfg(test)]
+ mod tests {
++    #[test]
++    fn names_match_lang() {
++        let n = |id, damage| super::name(super::ItemStack { id, count: 1, damage });
++        assert_eq!(n(1, 0), Some("Stone"));
++        assert_eq!(n(257, 0), Some("Iron Pickaxe"));
++        assert_eq!(n(35, 14), Some("Red Wool")); // meta 14 = red (~14 & 15 = 1)
++        assert_eq!(n(263, 1), Some("Charcoal"));
++        assert_eq!(n(44, 2), Some("Wooden Slab"));
++        assert_eq!(n(351, 4), Some("Lapis Lazuli"));
++        assert_eq!(n(9999, 0), None);
++    }
++
+     use super::*;
+ 
+     /// Stew heals 10 and leaves a bowl; other items are not food and stay.
+diff --git a/mc-rs/src/world/mobs.rs b/mc-rs/src/world/mobs.rs
+new file mode 100644
+index 0000000..7268ef5
+--- /dev/null
++++ b/mc-rs/src/world/mobs.rs
+@@ -0,0 +1,318 @@
++//! M8, first mob: the pig. Ports of `EntityPig`, `EntityAnimal`, `EntityCreature.updatePlayerActionState`,
++//! `EntityLiving.updatePlayerActionState` / `attackEntityFrom` / `dropFewItems` / `func_27021_X` (despawn), driven at 20 Hz,
++//! with the body moved every frame by `physics::step_box`.
++//! ponytail: no A* (`Pathfinder`): a "path" is a straight walk to the chosen cell, and a pig that is blocked hops, so it
++//! climbs one-block steps but walks into walls and cannot go around them. Light is not read (`getBlockPathWeight` counts
++//! it as 0). No saddle/riding, no sounds, no death animation, no fire or fall damage, pigs are not saved. Walk speed is
++//! the terminal speed of `moveFlying` (0.7 x 0.98 x 0.1 against 0.546 drag = 3 m/s), not accumulated momentum.
++//! UNVERIFIED: spawning. Vanilla spawns animals while generating chunks (`SpawnerAnimals.performWorldGenSpawning`) and
++//! every 400 ticks (`performSpawning`); here a short burst at start and then one group per 400 ticks, 24..48 blocks away.
++
++use glam::Vec3;
++
++use crate::world::craft::{self, Kind};
++use crate::world::gen::noise::JavaRandom;
++use crate::world::items::{Drops, ItemStack};
++use crate::world::physics::{self, BlockQuery, Player};
++
++/// `EntityPig.setSize(0.9, 0.9)`, as half-extents.
++pub const HALF: Vec3 = Vec3::new(0.45, 0.45, 0.45);
++/// Most pigs in the world (and the render buffer size).
++pub const MAX_PIGS: usize = 16;
++const CAP: usize = 8;
++const PORK: u16 = 319;
++const MOVE_SPEED: f32 = 0.7;
++const WALK: f32 = 3.0;
++const TICK: f32 = 0.05;
++
++pub struct Pig {
++    /// `pos` is the centre of the 0.9 box.
++    pub body: Player,
++    /// `rotationYaw`, degrees; the pig moves along (-sin, cos).
++    pub yaw: f32,
++    pub health: i32,
++    /// `field_704_R` / `field_705_Q`: leg swing phase and amount.
++    pub limb: f32,
++    pub limb_amt: f32,
++    /// `hurtTime`: ticks of red flash left.
++    pub hurt: u8,
++    age: u32,
++    yaw_vel: f32,
++    look: Option<i32>,
++    goal: Option<(f32, f32)>,
++    forward: f32,
++    jumping: bool,
++    wet: bool,
++    blocked: bool,
++    life: u8,
++    last: i32,
++}
++
++fn norm(mut a: f32) -> f32 {
++    while a < -180.0 { a += 360.0; }
++    while a >= 180.0 { a -= 360.0; }
++    a
++}
++
++impl Pig {
++    fn new(x: f32, y: i32, z: f32, yaw: f32) -> Self {
++        let pos = Vec3::new(x, y as f32 + HALF.y + 0.01, z);
++        Self { body: Player { pos, vel: Vec3::ZERO, on_ground: false }, yaw, health: 10, limb: 0.0, limb_amt: 0.0, hurt: 0, age: 0,
++            yaw_vel: 0.0, look: None, goal: None, forward: 0.0, jumping: false, wet: false, blocked: false, life: 0, last: 0 }
++    }
++
++    pub fn aabb(&self) -> (Vec3, Vec3) {
++        (self.body.pos - HALF, self.body.pos + HALF)
++    }
++
++    /// One 20 Hz tick of AI. Returns false when the pig despawns.
++    fn tick(&mut self, rng: &mut JavaRandom, player: Vec3, get: BlockQuery<'_>) -> bool {
++        self.life = self.life.saturating_sub(1);
++        self.hurt = self.hurt.saturating_sub(1);
++        let pos = self.body.pos;
++        // EntityCreature: pick somewhere to go (`func_31026_E`): of 10 random cells within 6 x 3 x 6 the best weight, grass 10.
++        if (self.goal.is_none() && rng.next_int_bound(80) == 0) || rng.next_int_bound(80) == 0 {
++            let mut best: Option<(f32, (i32, i32, i32))> = None;
++            for _ in 0..10 {
++                let x = (pos.x + rng.next_int_bound(13) as f32 - 6.0).floor() as i32;
++                let y = (pos.y - HALF.y + rng.next_int_bound(7) as f32 - 3.0).floor() as i32;
++                let z = (pos.z + rng.next_int_bound(13) as f32 - 6.0).floor() as i32;
++                let w = if get(x, y - 1, z) == Some(2) { 10.0 } else { -0.5 };
++                if best.map_or(true, |b| w > b.0) {
++                    best = Some((w, (x, y, z)));
++                }
++            }
++            // The cell's height is ignored (no path-finder to climb to it); only a blocked pig hops.
++            self.goal = best.map(|(_, (x, _, z))| (x as f32 + 0.5, z as f32 + 0.5));
++        }
++        if let (Some((gx, gz)), true) = (self.goal, self.goal.is_some() && rng.next_int_bound(100) != 0) {
++            self.jumping = false;
++            let (dx, dz) = (gx - pos.x, gz - pos.z);
++            if dx * dx + dz * dz < 1.8 * 1.8 {
++                self.goal = None; // the path is finished
++            } else {
++                self.yaw += norm(dz.atan2(dx).to_degrees() - 90.0 - self.yaw).clamp(-30.0, 30.0);
++                self.forward = MOVE_SPEED;
++            }
++            // ponytail: vanilla hops when `isCollidedHorizontally && !hasPath()`; with no path-finder a blocked pig hops.
++            self.jumping |= self.blocked;
++            self.jumping |= rng.next_float() < 0.8 && self.wet;
++        } else {
++            // EntityLiving.updatePlayerActionState: stand, look at a player within 8, or turn at random.
++            self.goal = None;
++            self.age += 1;
++            let d2 = (player - pos).length_squared();
++            if d2 > 16384.0 {
++                return false;
++            }
++            if self.age > 600 && rng.next_int_bound(800) == 0 {
++                if d2 < 1024.0 { self.age = 0 } else { return false }
++            }
++            self.forward = 0.0;
++            if rng.next_float() < 0.02 {
++                if d2 < 64.0 { self.look = Some(10 + rng.next_int_bound(20)) } else { self.yaw_vel = (rng.next_float() - 0.5) * 20.0 }
++            }
++            if let Some(t) = self.look {
++                let d = player - pos;
++                self.yaw += norm((d.z.atan2(d.x)).to_degrees() - 90.0 - self.yaw).clamp(-10.0, 10.0);
++                self.look = (t > 0 && d2 <= 64.0).then_some(t - 1);
++            } else {
++                if rng.next_float() < 0.05 { self.yaw_vel = (rng.next_float() - 0.5) * 20.0 }
++                self.yaw += self.yaw_vel;
++            }
++            // Vanilla leaves `isJumping` as it was; a pig that last hopped would hop for ever, so it is cleared here.
++            self.jumping = self.wet && rng.next_float() < 0.8;
++        }
++        self.yaw_vel *= 0.9;
++        true
++    }
++
++    /// Per-frame movement along the heading the last tick chose.
++    fn step(&mut self, dt: f32, get: BlockQuery<'_>) {
++        let ticks = dt * 20.0;
++        let f = self.forward * (WALK / MOVE_SPEED);
++        let (s, c) = self.yaw.to_radians().sin_cos();
++        let (vx, vz) = if self.hurt > 0 {
++            let drag = 0.546f32.powf(ticks); // knocked back: no steering until the flash ends
++            (self.body.vel.x * drag, self.body.vel.z * drag)
++        } else {
++            (-s * f, c * f)
++        };
++        (self.body.vel.x, self.body.vel.z) = (vx, vz);
++        let before = self.body.pos;
++        let (w, l) = physics::step_box(&mut self.body, HALF, dt, self.jumping, get);
++        self.wet = w || l;
++        self.blocked = f > 0.0 && ((vx != 0.0 && self.body.vel.x == 0.0) || (vz != 0.0 && self.body.vel.z == 0.0));
++        let moved = ((self.body.pos.x - before.x).powi(2) + (self.body.pos.z - before.z).powi(2)).sqrt() / ticks;
++        self.limb_amt += ((moved * 4.0).min(1.0) - self.limb_amt) * (1.0 - 0.6f32.powf(ticks));
++        self.limb += self.limb_amt * ticks;
++    }
++
++    /// `EntityLiving.attackEntityFrom`: a hit inside the 10-tick window only pays the difference; the first one knocks back.
++    pub fn damage(&mut self, dmg: i32, from: Vec3) {
++        if self.health <= 0 {
++            return;
++        }
++        self.age = 0;
++        if self.life > 10 {
++            if dmg <= self.last { return }
++            self.health -= dmg - self.last;
++            self.last = dmg;
++        } else {
++            self.last = dmg;
++            self.life = 20;
++            self.health -= dmg;
++            self.hurt = 10;
++            let (dx, dz) = (from.x - self.body.pos.x, from.z - self.body.pos.z);
++            let d = (dx * dx + dz * dz).sqrt();
++            if d > 1e-4 {
++                // `knockBack`: motion / 2 - direction x 0.4 (blocks per tick), up 0.4 at most.
++                self.body.vel.x = self.body.vel.x / 2.0 - dx / d * 8.0;
++                self.body.vel.z = self.body.vel.z / 2.0 - dz / d * 8.0;
++                self.body.vel.y = (self.body.vel.y / 2.0 + 8.0).min(8.0);
++            }
++        }
++    }
++}
++
++/// (damage, wear) of hitting with `held`: `ItemSword` 4 + material, `ItemTool` 2 + material, anything else 1
++/// (`Item.getDamageVsEntity`); material bonus wood 0, stone 1, iron 2, diamond 3, gold 0. Swords wear 1, tools 2, a hoe none.
++pub fn attack(held: Option<u16>) -> (i32, u16) {
++    match held.and_then(craft::tool) {
++        Some((Kind::Sword, m)) => (4 + [0, 1, 2, 3, 0][m], 1),
++        Some((Kind::Hoe, _)) => (1, 0),
++        Some((_, m)) => (2 + [0, 1, 2, 3, 0][m], 2),
++        None => (1, 0),
++    }
++}
++
++/// Distance along the ray `o + t d` to the box `lo..hi`, if it hits within `t >= 0`.
++fn ray_box(o: Vec3, d: Vec3, lo: Vec3, hi: Vec3) -> Option<f32> {
++    let (mut t0, mut t1) = (0.0f32, f32::MAX);
++    for i in 0..3 {
++        if d[i].abs() < 1e-8 {
++            if o[i] < lo[i] || o[i] > hi[i] { return None }
++        } else {
++            let (a, b) = ((lo[i] - o[i]) / d[i], (hi[i] - o[i]) / d[i]);
++            t0 = t0.max(a.min(b));
++            t1 = t1.min(a.max(b));
++        }
++    }
++    (t0 <= t1).then_some(t0)
++}
++
++/// Grass with two air cells above, in column (x, z): the y of the grass.
++fn grass_top(get: BlockQuery<'_>, x: i32, z: i32) -> Option<i32> {
++    let y = (1..127).rev().find(|&y| get(x, y, z) != Some(0))?;
++    (get(x, y, z) == Some(2) && get(x, y + 1, z) == Some(0) && get(x, y + 2, z) == Some(0)).then_some(y)
++}
++
++pub struct Mobs {
++    pub pigs: Vec<Pig>,
++    rng: JavaRandom,
++    acc: f32,
++    clock: u32,
++    burst: u32,
++}
++
++impl Mobs {
++    pub fn new(seed: i64) -> Self {
++        Self { pigs: Vec::new(), rng: JavaRandom::new(seed ^ 0x5049_47), acc: 0.0, clock: 0, burst: 200 }
++    }
++
++    /// A pack of 1..=4 on grass 24..48 blocks from `player`, if the column there has any.
++    fn spawn(&mut self, get: BlockQuery<'_>, player: Vec3) {
++        let (a, r) = (self.rng.next_float() * std::f32::consts::TAU, 24.0 + self.rng.next_float() * 24.0);
++        let (x, z) = ((player.x + a.cos() * r).floor() as i32, (player.z + a.sin() * r).floor() as i32);
++        if grass_top(get, x, z).is_none() {
++            return;
++        }
++        for _ in 0..1 + self.rng.next_int_bound(4) {
++            let (px, pz) = (x + self.rng.next_int_bound(6) - self.rng.next_int_bound(6), z + self.rng.next_int_bound(6) - self.rng.next_int_bound(6));
++            if let (Some(y), true) = (grass_top(get, px, pz), self.pigs.len() < CAP) {
++                let yaw = self.rng.next_float() * 360.0;
++                self.pigs.push(Pig::new(px as f32 + 0.5, y + 1, pz as f32 + 0.5, yaw));
++            }
++        }
++    }
++
++    /// Advance `dt` seconds: AI at 20 Hz, movement per frame, spawns, and the drops of the dead (`dropFewItems`: 0..=2 raw pork).
++    pub fn update(&mut self, dt: f32, get: BlockQuery<'_>, player: Vec3, drops: &mut Drops) {
++        self.acc += dt;
++        while self.acc >= TICK {
++            self.acc -= TICK;
++            self.clock += 1;
++            let rng = &mut self.rng;
++            self.pigs.retain_mut(|p| p.tick(rng, player, get));
++            if self.pigs.len() < CAP && (self.burst > 0 || self.clock % 400 == 0) {
++                self.burst = self.burst.saturating_sub(1);
++                self.spawn(get, player);
++            }
++        }
++        for p in &mut self.pigs {
++            p.step(dt, get);
++        }
++        let mut i = 0;
++        while i < self.pigs.len() {
++            if self.pigs[i].health > 0 {
++                i += 1;
++                continue;
++            }
++            let p = self.pigs.swap_remove(i).body.pos;
++            for _ in 0..self.rng.next_int_bound(3) {
++                drops.spawn_stack(ItemStack { id: PORK, count: 1, damage: 0 }, (p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32));
++            }
++        }
++    }
++
++    /// The nearest pig on the ray within `reach`: (index, distance).
++    pub fn pick(&self, eye: Vec3, dir: Vec3, reach: f32) -> Option<(usize, f32)> {
++        self.pigs.iter().enumerate().filter_map(|(i, p)| {
++            let (lo, hi) = p.aabb();
++            ray_box(eye, dir, lo, hi).filter(|&t| t <= reach).map(|t| (i, t))
++        }).min_by(|a, b| a.1.total_cmp(&b.1))
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    /// Grass floor at y = 9 over stone, air above, 64 x 64 wide.
++    fn flat(x: i32, y: i32, z: i32) -> Option<u8> {
++        if !(0..64).contains(&x) || !(0..64).contains(&z) || y < 0 { return None }
++        Some(match y { 0..=8 => 1, 9 => 2, _ => 0 })
++    }
++
++    /// A pig on grass settles, wanders off its start and stays on the ground; a hit hurts, knocks back and kills after
++    /// 10 damage (swords: 4 + material); the ray finds it; a distant player despawns it.
++    #[test]
++    fn pig_wanders_is_hit_and_dies() {
++        let mut rng = JavaRandom::new(7);
++        let mut p = Pig::new(32.5, 10, 32.5, 0.0);
++        let start = p.body.pos;
++        let mut far = 0.0f32;
++        for _ in 0..2000 {
++            assert!(p.tick(&mut rng, Vec3::new(32.0, 10.0, 32.0 + 20.0), &flat));
++            for _ in 0..3 { p.step(TICK / 3.0, &flat) }
++            far = far.max((p.body.pos - start).length());
++            assert!(p.body.pos.y > 9.9 && p.body.pos.y < 11.0, "y = {}", p.body.pos.y);
++        }
++        assert!(far > 1.0, "never moved");
++        assert!(ray_box(Vec3::new(0.0, 0.0, -2.0), Vec3::Z, Vec3::splat(-0.45), Vec3::splat(0.45)) == Some(1.55));
++        assert!(ray_box(Vec3::new(2.0, 0.0, -2.0), Vec3::Z, Vec3::splat(-0.45), Vec3::splat(0.45)).is_none());
++        assert_eq!(attack(None), (1, 0));
++        assert_eq!(attack(Some(268)), (4, 1)); // wooden sword
++        assert_eq!(attack(Some(257)), (4, 2)); // iron pickaxe: 2 + 2
++        p.damage(4, p.body.pos + Vec3::X);
++        assert_eq!(p.health, 6);
++        assert!(p.body.vel.x < 0.0 && p.hurt == 10);
++        p.damage(4, p.body.pos); // inside the window, not bigger: ignored
++        assert_eq!(p.health, 6);
++        p.damage(6, p.body.pos); // bigger: pays the difference
++        assert_eq!(p.health, 4);
++        // Despawn: a player 200 blocks away.
++        let mut q = Pig::new(32.5, 10, 32.5, 0.0);
++        assert!((0..50).any(|_| !q.tick(&mut rng, Vec3::new(232.0, 10.0, 32.0), &flat)));
++    }
++}
+diff --git a/mc-rs/src/world/mod.rs b/mc-rs/src/world/mod.rs
+index fe765bf..8daf5d2 100644
+--- a/mc-rs/src/world/mod.rs
++++ b/mc-rs/src/world/mod.rs
+@@ -7,6 +7,8 @@ pub mod pick;
+ pub mod sky;
+ pub mod dig;
+ pub mod items;
++pub mod mobs;
++pub mod names;
+ pub mod craft;
+ pub mod vitals;
+ pub mod save;
+diff --git a/mc-rs/src/world/names.rs b/mc-rs/src/world/names.rs
+new file mode 100644
+index 0000000..ca8d0b4
+--- /dev/null
++++ b/mc-rs/src/world/names.rs
+@@ -0,0 +1,199 @@
++//! GENERATED by tools/gen_names.py from `Block`/`Item` `setBlockName`/`setItemName` and `lang/en_US.lang`.
++pub const NAMES: &[(u16, &str)] = &[
++    (1, "Stone"),
++    (2, "Grass"),
++    (3, "Dirt"),
++    (4, "Cobblestone"),
++    (5, "Wooden Planks"),
++    (6, "Sapling"),
++    (7, "Bedrock"),
++    (8, "Water"),
++    (9, "Water"),
++    (10, "Lava"),
++    (11, "Lava"),
++    (12, "Sand"),
++    (13, "Gravel"),
++    (14, "Gold Ore"),
++    (15, "Iron Ore"),
++    (16, "Coal Ore"),
++    (17, "Wood"),
++    (18, "Leaves"),
++    (19, "Sponge"),
++    (20, "Glass"),
++    (21, "Lapis Lazuli Ore"),
++    (22, "Lapis Lazuli Block"),
++    (23, "Dispenser"),
++    (24, "Sandstone"),
++    (25, "Note Block"),
++    (26, "Bed"),
++    (27, "Powered Rail"),
++    (28, "Detector Rail"),
++    (29, "Sticky Piston"),
++    (30, "Cobweb"),
++    (33, "Piston"),
++    (37, "Flower"),
++    (38, "Rose"),
++    (39, "Mushroom"),
++    (40, "Mushroom"),
++    (41, "Block of Gold"),
++    (42, "Block of Iron"),
++    (45, "Bricks"),
++    (46, "TNT"),
++    (47, "Bookshelf"),
++    (48, "Moss Stone"),
++    (49, "Obsidian"),
++    (50, "Torch"),
++    (51, "Fire"),
++    (52, "Monster Spawner"),
++    (53, "Wooden Stairs"),
++    (54, "Chest"),
++    (55, "Redstone Dust"),
++    (56, "Diamond Ore"),
++    (57, "Block of Diamond"),
++    (58, "Crafting Table"),
++    (59, "Crops"),
++    (60, "Farmland"),
++    (61, "Furnace"),
++    (62, "Furnace"),
++    (63, "Sign"),
++    (64, "Wooden Door"),
++    (65, "Ladder"),
++    (66, "Rail"),
++    (67, "Stone Stairs"),
++    (68, "Sign"),
++    (69, "Lever"),
++    (70, "Pressure Plate"),
++    (71, "Iron Door"),
++    (72, "Pressure Plate"),
++    (73, "Redstone Ore"),
++    (74, "Redstone Ore"),
++    (75, "Redstone Torch"),
++    (76, "Redstone Torch"),
++    (77, "Button"),
++    (78, "Snow"),
++    (79, "Ice"),
++    (80, "Snow"),
++    (81, "Cactus"),
++    (82, "Clay"),
++    (83, "Sugar cane"),
++    (84, "Jukebox"),
++    (85, "Fence"),
++    (86, "Pumpkin"),
++    (87, "Netherrack"),
++    (88, "Soul Sand"),
++    (89, "Glowstone"),
++    (90, "Portal"),
++    (91, "Jack 'o' Lantern"),
++    (92, "Cake"),
++    (95, "Locked chest"),
++    (96, "Trapdoor"),
++    (256, "Iron Shovel"),
++    (257, "Iron Pickaxe"),
++    (258, "Iron Axe"),
++    (259, "Flint and Steel"),
++    (260, "Apple"),
++    (261, "Bow"),
++    (262, "Arrow"),
++    (263, "Coal"),
++    (264, "Diamond"),
++    (265, "Iron Ingot"),
++    (266, "Gold Ingot"),
++    (267, "Iron Sword"),
++    (268, "Wooden Sword"),
++    (269, "Wooden Shovel"),
++    (270, "Wooden Pickaxe"),
++    (271, "Wooden Axe"),
++    (272, "Stone Sword"),
++    (273, "Stone Shovel"),
++    (274, "Stone Pickaxe"),
++    (275, "Stone Axe"),
++    (276, "Diamond Sword"),
++    (277, "Diamond Shovel"),
++    (278, "Diamond Pickaxe"),
++    (279, "Diamond Axe"),
++    (280, "Stick"),
++    (281, "Bowl"),
++    (282, "Mushroom Stew"),
++    (283, "Golden Sword"),
++    (284, "Golden Shovel"),
++    (285, "Golden Pickaxe"),
++    (286, "Golden Axe"),
++    (287, "String"),
++    (288, "Feather"),
++    (289, "Gunpowder"),
++    (290, "Wooden Hoe"),
++    (291, "Stone Hoe"),
++    (292, "Iron Hoe"),
++    (293, "Diamond Hoe"),
++    (294, "Golden Hoe"),
++    (295, "Seeds"),
++    (296, "Wheat"),
++    (297, "Bread"),
++    (298, "Leather Cap"),
++    (299, "Leather Tunic"),
++    (300, "Leather Pants"),
++    (301, "Leather Boots"),
++    (302, "Chain Helmet"),
++    (303, "Chain Chestplate"),
++    (304, "Chain Leggings"),
++    (305, "Chain Boots"),
++    (306, "Iron Helmet"),
++    (307, "Iron Chestplate"),
++    (308, "Iron Leggings"),
++    (309, "Iron Boots"),
++    (310, "Diamond Helmet"),
++    (311, "Diamond Chestplate"),
++    (312, "Diamond Leggings"),
++    (313, "Diamond Boots"),
++    (314, "Golden Helmet"),
++    (315, "Golden Chestplate"),
++    (316, "Golden Leggings"),
++    (317, "Golden boots"),
++    (318, "Flint"),
++    (319, "Raw Porkchop"),
++    (320, "Cooked Porkchop"),
++    (321, "Painting"),
++    (322, "Golden Apple"),
++    (323, "Sign"),
++    (324, "Wooden Door"),
++    (325, "Bucket"),
++    (326, "Water Bucket"),
++    (327, "Lava bucket"),
++    (328, "Minecart"),
++    (329, "Saddle"),
++    (330, "Iron Door"),
++    (331, "Redstone"),
++    (332, "Snowball"),
++    (333, "Boat"),
++    (334, "Leather"),
++    (335, "Milk"),
++    (336, "Brick"),
++    (337, "Clay"),
++    (338, "Sugar Canes"),
++    (339, "Paper"),
++    (340, "Book"),
++    (341, "Slimeball"),
++    (342, "Minecart with Chest"),
++    (343, "Minecart with Furnace"),
++    (344, "Egg"),
++    (345, "Compass"),
++    (346, "Fishing Rod"),
++    (347, "Clock"),
++    (348, "Glowstone Dust"),
++    (349, "Raw Fish"),
++    (350, "Cooked Fish"),
++    (352, "Bone"),
++    (353, "Sugar"),
++    (354, "Cake"),
++    (355, "Bed"),
++    (356, "Redstone Repeater"),
++    (357, "Cookie"),
++    (358, "Map"),
++    (359, "Shears"),
++    (2256, "Music Disc"),
++    (2257, "Music Disc"),
++];
++pub const WOOL: [&str; 16] = ["Wool", "Orange Wool", "Magenta Wool", "Light Blue Wool", "Yellow Wool", "Lime Wool", "Pink Wool", "Gray Wool", "Light Gray Wool", "Cyan Wool", "Purple Wool", "Blue Wool", "Brown Wool", "Green Wool", "Red Wool", "Black Wool"];
++pub const DYE: [&str; 16] = ["Ink Sac", "Rose Red", "Cactus Green", "Cocoa Beans", "Lapis Lazuli", "Purple Dye", "Cyan Dye", "Light Gray Dye", "Gray Dye", "Pink Dye", "Lime Dye", "Dandelion Yellow", "Light Blue Dye", "Magenta Dye", "Orange Dye", "Bone Meal"];
++pub const SLAB: [&str; 4] = ["Stone Slab", "Sandstone Slab", "Wooden Slab", "Stone Slab"];
++pub const CHARCOAL: &str = "Charcoal";
+diff --git a/mc-rs/src/world/physics.rs b/mc-rs/src/world/physics.rs
+index ba5842e..40c1a45 100644
+--- a/mc-rs/src/world/physics.rs
++++ b/mc-rs/src/world/physics.rs
+@@ -29,12 +29,12 @@ fn is_solid(b: u8) -> bool { b > 0 && !is_fluid(b) }
+ /// `Entity.handleWaterMovement` / `handleLavaMovement`: is any cell with an id in `ids` inside the box shrunk 0.4 top and
+ /// bottom (and `xz` on the sides)? A fluid cell only reaches up to 8/9 of its height (`BlockFluid.getPercentAir(0)`).
+ /// ponytail: every fluid cell counts as a source block; flowing levels need block metadata (a later milestone).
+-fn touches(pos: Vec3, get: BlockQuery<'_>, xz: f32, ids: std::ops::RangeInclusive<u8>) -> bool {
+-    let (lo, hi) = (pos.y - HALF.y + 0.401, pos.y + HALF.y - 0.401);
++fn touches(pos: Vec3, half: Vec3, get: BlockQuery<'_>, xz: f32, ids: std::ops::RangeInclusive<u8>) -> bool {
++    let (lo, hi) = (pos.y - half.y + 0.401, pos.y + half.y - 0.401);
+     for cy in lo.floor() as i32..=hi.floor() as i32 {
+         if cy as f32 + 8.0 / 9.0 < lo { continue; }
+-        for cz in (pos.z - HALF.z + xz).floor() as i32..=(pos.z + HALF.z - xz).floor() as i32 {
+-            for cx in (pos.x - HALF.x + xz).floor() as i32..=(pos.x + HALF.x - xz).floor() as i32 {
++        for cz in (pos.z - half.z + xz).floor() as i32..=(pos.z + half.z - xz).floor() as i32 {
++            for cx in (pos.x - half.x + xz).floor() as i32..=(pos.x + half.x - xz).floor() as i32 {
+                 if matches!(get(cx, cy, cz), Some(b) if ids.contains(&b)) { return true; }
+             }
+         }
+@@ -47,8 +47,13 @@ fn touches(pos: Vec3, get: BlockQuery<'_>, xz: f32, ids: std::ops::RangeInclusiv
+ /// x0.5 lava per tick) and sinks 0.02 blocks/tick, a held jump swims up (+0.04 blocks/tick), and pushing against a wall
+ /// hops out of the fluid (0.3 blocks/tick) when the spot 0.6 higher is free. Returns (touching water, touching lava).
+ pub fn step(player: &mut Player, dt: f32, jumping: bool, get: BlockQuery<'_>) -> (bool, bool) {
+-    let water = touches(player.pos, get, 0.001, 8..=9);
+-    let lava = !water && touches(player.pos, get, 0.1, 10..=11);
++    step_box(player, HALF, dt, jumping, get)
++}
++
++/// `step` for a box of half-extents `half` (a pig's is 0.45 on every axis); `pos` is the centre.
++pub fn step_box(player: &mut Player, half: Vec3, dt: f32, jumping: bool, get: BlockQuery<'_>) -> (bool, bool) {
++    let water = touches(player.pos, half, get, 0.001, 8..=9);
++    let lava = !water && touches(player.pos, half, get, 0.1, 10..=11);
+     let ticks = dt * 20.0;
+     if water || lava {
+         let speed = (if water { WATER_SPEED } else { LAVA_SPEED }) / WALK_SPEED;
+@@ -65,20 +70,19 @@ pub fn step(player: &mut Player, dt: f32, jumping: bool, get: BlockQuery<'_>) ->
+ 
+     // Sweep each axis independently.
+     let (vx, vz) = (player.vel.x, player.vel.z);
+-    player.pos = sweep_axis(player.pos, player.vel * dt, get, &mut player.vel);
++    player.pos = sweep_axis(player.pos, half, player.vel * dt, get, &mut player.vel);
+     if water || lava {
+         player.vel.y = player.vel.y * (if water { 0.8f32 } else { 0.5 }).powf(ticks) - 0.4 * ticks;
+         let blocked = (vx != 0.0 && player.vel.x == 0.0) || (vz != 0.0 && player.vel.z == 0.0);
+         let up = player.pos + Vec3::new(vx * dt, 0.6, vz * dt);
+-        if blocked && !aabb_any(up, get, |b| b > 0) { player.vel.y = 6.0; }
++        if blocked && !aabb_any(up, half, get, |b| b > 0) { player.vel.y = 6.0; }
+     }
+-    player.on_ground = ground_test(player.pos, get);
++    player.on_ground = ground_test(player.pos, half, get);
+     (water, lava)
+ }
+ 
+-fn ground_test(pos: Vec3, get: BlockQuery<'_>) -> bool {
++fn ground_test(pos: Vec3, h: Vec3, get: BlockQuery<'_>) -> bool {
+     // Test the four corners of the bottom face just below current pos.
+-    let h = HALF;
+     let below = pos - Vec3::new(0.0, h.y + 0.001, 0.0);
+     let corners = [
+         (below.x - h.x, below.y, below.z - h.z),
+@@ -94,36 +98,35 @@ fn ground_test(pos: Vec3, get: BlockQuery<'_>) -> bool {
+     })
+ }
+ 
+-fn sweep_axis(pos: Vec3, delta: Vec3, get: BlockQuery<'_>, vel: &mut Vec3) -> Vec3 {
++fn sweep_axis(pos: Vec3, h: Vec3, delta: Vec3, get: BlockQuery<'_>, vel: &mut Vec3) -> Vec3 {
+     let mut p = pos;
+     // X axis
+     let mut try_p = p + Vec3::new(delta.x, 0.0, 0.0);
+-    if aabb_hits_solid(try_p, get) {
+-        try_p.x = snap(p.x, delta.x, |x| aabb_hits_solid_x(p.y, p.z, x, get));
++    if aabb_hits_solid(try_p, h, get) {
++        try_p.x = snap(p.x, delta.x, |x| aabb_hits_solid(Vec3::new(x, p.y, p.z), h, get));
+         vel.x = 0.0;
+     }
+     p = try_p;
+     // Z axis
+     let mut try_p = p + Vec3::new(0.0, 0.0, delta.z);
+-    if aabb_hits_solid(try_p, get) {
+-        try_p.z = snap(p.z, delta.z, |z| aabb_hits_solid_z(p.y, p.x, z, get));
++    if aabb_hits_solid(try_p, h, get) {
++        try_p.z = snap(p.z, delta.z, |z| aabb_hits_solid(Vec3::new(p.x, p.y, z), h, get));
+         vel.z = 0.0;
+     }
+     p = try_p;
+     // Y axis
+     let mut try_p = p + Vec3::new(0.0, delta.y, 0.0);
+-    if aabb_hits_solid(try_p, get) {
+-        try_p.y = snap(p.y, delta.y, |y| aabb_hits_solid_y(p.x, p.z, y, get));
++    if aabb_hits_solid(try_p, h, get) {
++        try_p.y = snap(p.y, delta.y, |y| aabb_hits_solid(Vec3::new(p.x, y, p.z), h, get));
+         vel.y = 0.0;
+     }
+     try_p
+ }
+ 
+-fn aabb_hits_solid(p: Vec3, get: BlockQuery<'_>) -> bool { aabb_any(p, get, is_solid) }
++fn aabb_hits_solid(p: Vec3, h: Vec3, get: BlockQuery<'_>) -> bool { aabb_any(p, h, get, is_solid) }
+ 
+ /// Does the player box at `p` overlap a cell whose id satisfies `pred`?
+-fn aabb_any(p: Vec3, get: BlockQuery<'_>, pred: fn(u8) -> bool) -> bool {
+-    let h = HALF;
++fn aabb_any(p: Vec3, h: Vec3, get: BlockQuery<'_>, pred: fn(u8) -> bool) -> bool {
+     let (x0, x1) = (p.x - h.x, p.x + h.x);
+     let (y0, y1) = (p.y - h.y, p.y + h.y);
+     let (z0, z1) = (p.z - h.z, p.z + h.z);
+@@ -142,16 +145,6 @@ fn aabb_any(p: Vec3, get: BlockQuery<'_>, pred: fn(u8) -> bool) -> bool {
+     false
+ }
+ 
+-fn aabb_hits_solid_x(y: f32, z: f32, x: f32, get: BlockQuery<'_>) -> bool {
+-    aabb_hits_solid(Vec3::new(x, y, z), get)
+-}
+-fn aabb_hits_solid_z(y: f32, x: f32, z: f32, get: BlockQuery<'_>) -> bool {
+-    aabb_hits_solid(Vec3::new(x, y, z), get)
+-}
+-fn aabb_hits_solid_y(x: f32, z: f32, y: f32, get: BlockQuery<'_>) -> bool {
+-    aabb_hits_solid(Vec3::new(x, y, z), get)
+-}
+-
+ /// Binary search for the first `t in [0,|delta|]` that *would* collide, then snap to just before.
+ fn snap<F: Fn(f32) -> bool>(start: f32, delta: f32, hits: F) -> f32 {
+     if delta == 0.0 { return start; }
+@@ -181,7 +174,7 @@ mod tests {
+         for _ in 0..120 { step(&mut p, 1.0 / 60.0, false, &get); }
+         assert!(p.on_ground, "pos.y = {}", p.pos.y);
+         step(&mut p, 1.0 / 60.0, true, &get);
+-        assert!(p.pos.y > 10.0 + HALF.y + 0.05 && !ground_test(p.pos, &get));
++        assert!(p.pos.y > 10.0 + HALF.y + 0.05 && !ground_test(p.pos, HALF, &get));
+     }
+ 
+     /// Stone below y = 10, still water (9) for y 10..20, air above: the fluid is not solid.
+diff --git a/tools/gen_names.py b/tools/gen_names.py
+new file mode 100644
+index 0000000..7654fff
+--- /dev/null
++++ b/tools/gen_names.py
+@@ -0,0 +1,48 @@
++#!/usr/bin/env python3
++"""Regenerates mc-rs/src/render/font.rs (font/default.png glyphs + FontRenderer widths) and
++mc-rs/src/world/names.rs (Block/Item setBlockName/setItemName + lang/en_US.lang). Run from the repo root;
++needs `unzip` and Pillow. Inputs: minecraft/jars/deobfuscated.jar, minecraft/src/net/minecraft/src/{Block,Item}.java."""
++import re, subprocess, io
++from PIL import Image
++jar = "minecraft/jars/deobfuscated.jar"
++rd = lambda p: subprocess.check_output(["unzip", "-p", jar, p])
++src = "minecraft/src/net/minecraft/src/"
++
++# Font: FontRenderer.<init>: width = last non-empty column of the 8x8 cell + 2, space = 4.
++im = Image.open(io.BytesIO(rd("font/default.png"))).convert("RGBA")
++rows, wid = [], []
++for c in range(32, 127):
++    ox, oy = c % 16 * 8, c // 16 * 8
++    on = lambda x, y: im.getpixel((ox + x, oy + y))[0] > 0 and im.getpixel((ox + x, oy + y))[3] > 0
++    rows.append([sum(1 << x for x in range(8) if on(x, y)) for y in range(8)])
++    last = next((x for x in range(7, -1, -1) if any(on(x, y) for y in range(8))), 7 if c != 32 else 2)
++    wid.append(4 if c == 32 else last + 2)
++with open("mc-rs/src/render/font.rs", "w") as f:
++    f.write("//! GENERATED by tools/gen_names.py from the b1.7.3 `font/default.png`; do not edit.\n"
++            "//! `GLYPHS[c - 32][row]` bit x = pixel x (bit 0 left); `WIDTH` = `FontRenderer.charWidth`.\n")
++    f.write("pub const GLYPHS: [[u8; 8]; 95] = [\n" + "".join(f"    {r},\n" for r in rows) + "];\n")
++    f.write("pub const WIDTH: [u8; 95] = " + str(wid) + ";\n")
++
++# Names.
++lang = {}
++for l in rd("lang/en_US.lang").decode("utf-8").splitlines():
++    if "=" in l and not l.startswith("#"):
++        k, v = l.split("=", 1); lang[k.strip()] = v.strip()
++out = {}
++for stmt in open(src + "Block.java", encoding="utf-8").read().split(";"):
++    m = re.search(r"new \w+\((\d+)[^;]*?\.setBlockName\(\"(\w+)\"\)", stmt, re.S)
++    if m and f"tile.{m[2]}.name" in lang: out[int(m[1])] = lang[f"tile.{m[2]}.name"]
++for stmt in open(src + "Item.java", encoding="utf-8").read().split(";"):
++    m = re.search(r"new \w+\((\d+)[^;]*?\.setItemName\(\"(\w+)\"\)", stmt, re.S)
++    if m and f"item.{m[2]}.name" in lang: out[256 + int(m[1])] = lang[f"item.{m[2]}.name"]
++dye = "black red green brown blue purple cyan silver gray pink lime yellow lightBlue magenta orange white".split()
++wool = [lang[f"tile.cloth.{dye[~m & 15]}.name"] for m in range(16)]  # ItemCloth: ~damage & 15
++inks = [lang[f"item.dyePowder.{d}.name"] for d in dye]
++slab = [lang[f"tile.stoneSlab.{s}.name"] for s in "stone sand wood cobble".split()]
++q = lambda l: "[" + ", ".join(f'"{s}"' for s in l) + "]"
++with open("mc-rs/src/world/names.rs", "w") as f:
++    f.write("//! GENERATED by tools/gen_names.py from `Block`/`Item` `setBlockName`/`setItemName` and `lang/en_US.lang`.\n")
++    f.write("pub const NAMES: &[(u16, &str)] = &[\n" + "".join(f'    ({i}, "{n}"),\n' for i, n in sorted(out.items())) + "];\n")
++    f.write(f"pub const WOOL: [&str; 16] = {q(wool)};\npub const DYE: [&str; 16] = {q(inks)};\npub const SLAB: [&str; 4] = {q(slab)};\n")
++    f.write(f'pub const CHARCOAL: &str = "{lang["item.charcoal.name"]}";\n')
++print(len(out), "names")
