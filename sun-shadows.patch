@@ -1,0 +1,168 @@
+diff --git a/mc-rs/src/lib.rs b/mc-rs/src/lib.rs
+index d6473dd..c30df40 100644
+--- a/mc-rs/src/lib.rs
++++ b/mc-rs/src/lib.rs
+@@ -289,8 +289,10 @@ impl App {
+             self.weather.tick();
+             self.weather_ticks += 1;
+         }
+-        let sub = sky::skylight_subtracted(sky::celestial_angle(self.world_ticks as u64, 1.0), self.weather.rain(1.0), self.weather.thunder(1.0));
++        let angle = sky::celestial_angle(self.world_ticks as u64, 1.0);
++        let sub = sky::skylight_subtracted(angle, self.weather.rain(1.0), self.weather.thunder(1.0));
+         self.chunks.set_sky_sub(sub);
++        self.chunks.set_sun(if self.weather.rain(1.0) > 0.5 { i32::MAX } else { sky::sun_key(angle) });
+         self.camera.add_yaw(look_dx * LOOK_SENS);
+         self.camera.add_pitch(look_dy * LOOK_SENS);
+         // Analog move stick: rotate the camera-frame (fwd, side) by yaw into
+diff --git a/mc-rs/src/render/mesh.rs b/mc-rs/src/render/mesh.rs
+index 65b6907..cef2930 100644
+--- a/mc-rs/src/render/mesh.rs
++++ b/mc-rs/src/render/mesh.rs
+@@ -71,7 +71,12 @@ const DIRS: [(i32, i32, i32); 6] = [(1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0)
+ /// light in the high nibble. `sky_sub` is `World.skylightSubtracted` (0 day .. 11 night, `world::sky`).
+ /// `(ox, oz)` is the chunk's world origin (chunk * 16).
+ /// Vertices: 6 floats each (px, py, pz, u, v, light). Indices: 6 per face (two triangles).
+-pub fn build(blocks: &[u8], data: &Nibbles, light: &[u8], nb: [&[u8]; 4], nb_light: [&[u8]; 4], sky_sub: u8, ox: i32, oz: i32) -> (Vec<f32>, Vec<u32>) {
++/// `sun` = `sky::sun_key`: sun tan(angle) x 2, or `NO_SUN`. ponytail: a face is shadowed when a block lies on the ray
++/// toward the sun (10 steps, sun moves along X only, the ray stops at this chunk's 1-cell border, so a shadow cast from
++/// another chunk is missed); upgrade = a per-column shadow map shared by chunks.
++pub const NO_SUN: i32 = i32::MAX;
++
++pub fn build(blocks: &[u8], data: &Nibbles, light: &[u8], nb: [&[u8]; 4], nb_light: [&[u8]; 4], sky_sub: u8, sun: i32, ox: i32, oz: i32) -> (Vec<f32>, Vec<u32>) {
+     assert_eq!(blocks.len(), VOLUME);
+     assert_eq!(light.len(), VOLUME);
+     // Which chunk's arrays a cell with x, z in -1..=16 lives in: 0 = this one, 1.. = +X, -X, +Z, -Z.
+@@ -131,7 +136,16 @@ pub fn build(blocks: &[u8], data: &Nibbles, light: &[u8], nb: [&[u8]; 4], nb_lig
+                         4 | 5 => 0.8, // +Z, -Z
+                         _ => 0.6, // +X, -X
+                     };
+-                    let light = shade * bright(x + dx, y + dy, z + dz);
++                    let mut light = shade * bright(x + dx, y + dy, z + dz);
++                    if sun != NO_SUN {
++                        let h = sun as f32 / 2.0;
++                        let m = h.abs().max(1.0);
++                        let (sx, sy) = (h / m, 1.0 / m);
++                        let (cx, cy) = ((x + dx) as f32 + 0.5, (y + dy) as f32 + 0.5);
++                        if (1..=10).any(|n| get((cx + sx * n as f32).floor() as i32, (cy + sy * n as f32).floor() as i32, z + dz) != 0) {
++                            light *= 0.6;
++                        }
++                    }
+                     for (corner, uv) in face.corners.iter().zip(face.uv.iter()) {
+                         let (au, av) = atlas::atlas_uv(tile, uv[0], uv[1]);
+                         // ponytail: world-space f32 vertices lose precision far from the origin
+@@ -184,10 +198,22 @@ mod tests {
+         let mut c = air();
+         c[idx(5, 20, 5)] = 1;
+         let a = air();
+-        let (verts, _) = build(&c, &Nibbles::new(), &a, [&a[..], &a[..], &a[..], &a[..]], [&a[..], &a[..], &a[..], &a[..]], 0, 0, 0);
++        let (verts, _) = build(&c, &Nibbles::new(), &a, [&a[..], &a[..], &a[..], &a[..]], [&a[..], &a[..], &a[..], &a[..]], 0, NO_SUN, 0, 0);
+         assert_eq!(face_count(&verts), 6);
+     }
+ 
++    /// A pillar at x=9 shades the ground at x=7 (sun at +X, 45 degrees) but not the ground at x=2.
++    #[test]
++    fn pillar_casts_a_shadow_away_from_the_sun() {
++        let mut c = air();
++        for x in 0..16 { c[idx(x, 0, 5)] = 1; }
++        for y in 1..4 { c[idx(9, y, 5)] = 1; }
++        let a = air();
++        let v = build(&c, &Nibbles::new(), &a, [&a[..], &a[..], &a[..], &a[..]], [&a[..], &a[..], &a[..], &a[..]], 0, 2, 0, 0).0;
++        let top = |x0: f32| v.chunks(6).find(|q| q[1] == 1.0 && q[0] >= x0 && q[0] < x0 + 1.0 && q[2] == 5.0).unwrap()[5];
++        assert!(top(7.0) < top(2.0));
++    }
++
+     /// The cell's metadata picks the atlas tile of its faces: red wool is not white wool.
+     #[test]
+     fn metadata_picks_the_face_tile() {
+@@ -195,7 +221,7 @@ mod tests {
+         let mut c = air();
+         c[idx(5, 20, 5)] = 35;
+         let uv = |d: &Nibbles| {
+-            let v = build(&c, d, &a, [&a[..], &a[..], &a[..], &a[..]], [&a[..], &a[..], &a[..], &a[..]], 0, 0, 0).0;
++            let v = build(&c, d, &a, [&a[..], &a[..], &a[..], &a[..]], [&a[..], &a[..], &a[..], &a[..]], 0, NO_SUN, 0, 0).0;
+             (v[3], v[4])
+         };
+         let mut d = Nibbles::new();
+@@ -211,9 +237,9 @@ mod tests {
+         let a = air();
+         let mut c = air();
+         c[idx(5, 20, 5)] = 37;
+-        assert_eq!(face_count(&build(&c, &Nibbles::new(), &a, [&a[..], &a[..], &a[..], &a[..]], [&a[..], &a[..], &a[..], &a[..]], 0, 0, 0).0), 2);
++        assert_eq!(face_count(&build(&c, &Nibbles::new(), &a, [&a[..], &a[..], &a[..], &a[..]], [&a[..], &a[..], &a[..], &a[..]], 0, NO_SUN, 0, 0).0), 2);
+         c[idx(5, 19, 5)] = 3; // dirt under the flower: 6 faces + 2 quads
+-        assert_eq!(face_count(&build(&c, &Nibbles::new(), &a, [&a[..], &a[..], &a[..], &a[..]], [&a[..], &a[..], &a[..], &a[..]], 0, 0, 0).0), 8);
++        assert_eq!(face_count(&build(&c, &Nibbles::new(), &a, [&a[..], &a[..], &a[..], &a[..]], [&a[..], &a[..], &a[..], &a[..]], 0, NO_SUN, 0, 0).0), 8);
+     }
+ 
+     /// A block on the chunk edge hides the face it shares with the neighbour chunk's block,
+@@ -222,7 +248,7 @@ mod tests {
+     fn edge_face_is_culled_against_neighbour() {
+         let a = air();
+         let mk = |x: usize, z: usize| { let mut c = air(); c[idx(x, 20, z)] = 1; c };
+-        let faces = |me: &[u8], nb: [&[u8]; 4]| face_count(&build(me, &Nibbles::new(), &a, nb, [&a[..], &a[..], &a[..], &a[..]], 0, 0, 0).0);
++        let faces = |me: &[u8], nb: [&[u8]; 4]| face_count(&build(me, &Nibbles::new(), &a, nb, [&a[..], &a[..], &a[..], &a[..]], 0, NO_SUN, 0, 0).0);
+         let (px, nx, pz, nz) = (mk(0, 5), mk(15, 5), mk(5, 0), mk(5, 15));
+         let (a_px, a_nx, a_pz, a_nz) = (mk(15, 5), mk(0, 5), mk(5, 15), mk(5, 0));
+         assert_eq!(faces(&a_px[..], [&px[..], &a[..], &a[..], &a[..]]), 5);
+diff --git a/mc-rs/src/world/chunks.rs b/mc-rs/src/world/chunks.rs
+index 739f8cf..3fe4a14 100644
+--- a/mc-rs/src/world/chunks.rs
++++ b/mc-rs/src/world/chunks.rs
+@@ -118,6 +118,7 @@ pub struct ChunkManager {
+     light_queue: Vec<light::Region>,
+     /// `World.skylightSubtracted` (0 day .. 11 night), applied by the mesher.
+     sky_sub: u8,
++    sun: i32,
+     /// Save folder (M7); `None` = nothing is read or written (the tests). `saved` = chunks that have a file there.
+     dir: Option<PathBuf>,
+     saved: HashSet<Key>,
+@@ -162,7 +163,7 @@ impl ChunkManager {
+         ring.sort_by_key(|&(dx, dz)| dx * dx + dz * dz);
+ 
+         Self { chunks: Chunks::default(), pending: HashSet::new(), ring, radius, center: None, max_in_flight: workers * 2,
+-               gen: OverworldGenerator::new(seed), cm: WorldChunkManager::new(seed), jobs, done, light_queue: Vec::new(), sky_sub: 0, dir: None, saved: HashSet::new() }
++               gen: OverworldGenerator::new(seed), cm: WorldChunkManager::new(seed), jobs, done, light_queue: Vec::new(), sky_sub: 0, sun: crate::render::mesh::NO_SUN, dir: None, saved: HashSet::new() }
+     }
+ 
+     /// Keep this world in `dir`: chunks found there are loaded instead of generated, and edited ones are written back
+@@ -340,6 +341,14 @@ impl ChunkManager {
+         }
+     }
+ 
++    /// Sun shadow direction changed (`sky::sun_key`): every mesh is stale, like `set_sky_sub`.
++    pub fn set_sun(&mut self, v: i32) {
++        if v != self.sun {
++            self.sun = v;
++            self.chunks.values_mut().for_each(|e| e.meshed = false);
++        }
++    }
++
+     /// `WorldChunkManager.getTemperature` at a block column (for the sky colour).
+     pub fn temperature_at(&mut self, x: i32, z: i32) -> f64 {
+         self.cm.load_block_generator_data(x, z, 1, 1);
+@@ -489,6 +498,7 @@ impl ChunkManager {
+                     [px.blocks.as_slice(), nx.blocks.as_slice(), pz.blocks.as_slice(), nz.blocks.as_slice()],
+                     [px.light.as_slice(), nx.light.as_slice(), pz.light.as_slice(), nz.light.as_slice()],
+                     self.sky_sub,
++                    self.sun,
+                     x * 16,
+                     z * 16,
+                 )),
+diff --git a/mc-rs/src/world/sky.rs b/mc-rs/src/world/sky.rs
+index 6144ec0..e7327b3 100644
+--- a/mc-rs/src/world/sky.rs
++++ b/mc-rs/src/world/sky.rs
+@@ -27,6 +27,13 @@ pub fn celestial_angle(time: u64, partial: f32) -> f32 {
+     linear + (curved - linear) / 3.0
+ }
+ 
++/// Shadow direction of the sun, quantised so meshes rebuild ~17 times per half day: tan(angle from noon) x 2, clamped
++/// to +-8; `i32::MAX` (no shadows) when it is under ~12 degrees above the horizon.
++pub fn sun_key(angle: f32) -> i32 {
++    let t = angle * std::f32::consts::TAU;
++    if t.cos() < 0.2 { i32::MAX } else { (t.tan() * 2.0).round().clamp(-8.0, 8.0) as i32 }
++}
++
+ /// Sky light taken away by the time of day and the weather: 0 (day) ..= 11 (night). `rain` and `thunder` are
+ /// the strengths `Weather::rain` / `Weather::thunder` return (`func_27162_g` / `func_27166_f`).
+ pub fn skylight_subtracted(angle: f32, rain: f32, thunder: f32) -> u8 {

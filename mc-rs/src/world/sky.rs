@@ -27,6 +27,13 @@ pub fn celestial_angle(time: u64, partial: f32) -> f32 {
     linear + (curved - linear) / 3.0
 }
 
+/// Shadow direction of the sun, quantised so meshes rebuild ~17 times per half day: tan(angle from noon) x 2, clamped
+/// to +-8; `i32::MAX` (no shadows) when it is under ~12 degrees above the horizon.
+pub fn sun_key(angle: f32) -> i32 {
+    let t = angle * std::f32::consts::TAU;
+    if t.cos() < 0.2 { i32::MAX } else { (t.tan() * 2.0).round().clamp(-8.0, 8.0) as i32 }
+}
+
 /// Sky light taken away by the time of day and the weather: 0 (day) ..= 11 (night). `rain` and `thunder` are
 /// the strengths `Weather::rain` / `Weather::thunder` return (`func_27162_g` / `func_27166_f`).
 pub fn skylight_subtracted(angle: f32, rain: f32, thunder: f32) -> u8 {

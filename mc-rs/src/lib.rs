@@ -289,8 +289,10 @@ impl App {
             self.weather.tick();
             self.weather_ticks += 1;
         }
-        let sub = sky::skylight_subtracted(sky::celestial_angle(self.world_ticks as u64, 1.0), self.weather.rain(1.0), self.weather.thunder(1.0));
+        let angle = sky::celestial_angle(self.world_ticks as u64, 1.0);
+        let sub = sky::skylight_subtracted(angle, self.weather.rain(1.0), self.weather.thunder(1.0));
         self.chunks.set_sky_sub(sub);
+        self.chunks.set_sun(if self.weather.rain(1.0) > 0.5 { i32::MAX } else { sky::sun_key(angle) });
         self.camera.add_yaw(look_dx * LOOK_SENS);
         self.camera.add_pitch(look_dy * LOOK_SENS);
         // Analog move stick: rotate the camera-frame (fwd, side) by yaw into
