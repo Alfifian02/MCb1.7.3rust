@@ -316,7 +316,11 @@ impl App {
         self.camera.pos = self.player.pos + glam::Vec3::new(0.0, EYE_HEIGHT, 0.0);
         let e = self.camera.pos;
         let eye_in_water = matches!(self.chunks.block_loaded(e.x.floor() as i32, e.y.floor() as i32, e.z.floor() as i32), Some(8 | 9));
+        self.vitals.armor = craft::armor_value(&self.inv.slots[items::MAIN..]);
         self.vitals.update(dt, Env { dy: self.player.pos.y - y0, on_ground: self.player.on_ground, water, lava, eye_in_water, eye_y: e.y });
+        // `InventoryPlayer.damageArmor`: every worn piece takes the damage that was dealt (before armor).
+        let wear = std::mem::take(&mut self.vitals.wear) as u16;
+        (items::MAIN..items::SLOTS).filter(|_| wear > 0).for_each(|i| self.inv.damage(i, wear));
         if self.vitals.dead() {
             self.die();
             return;

@@ -32,17 +32,28 @@ pub struct Vitals {
     last_damage: i32,
     fall: f32,
     acc: f32,
+    /// `getTotalArmorValue`, set by the caller each frame; `rem` = `damageRemainder`; `wear` = damage the armor has to take.
+    pub armor: i32,
+    pub wear: i32,
+    rem: i32,
 }
 
 impl Default for Vitals {
     fn default() -> Self {
-        Self { health: MAX_HEALTH, air: MAX_AIR, fire: 0, hearts_life: 0, last_damage: 0, fall: 0.0, acc: 0.0 }
+        Self { health: MAX_HEALTH, air: MAX_AIR, fire: 0, hearts_life: 0, last_damage: 0, fall: 0.0, acc: 0.0, armor: 0, wear: 0, rem: 0 }
     }
 }
 
 impl Vitals {
     pub fn dead(&self) -> bool {
         self.health <= 0
+    }
+
+    /// `EntityPlayer.damageEntity`: armor takes `dmg` off 25ths (`25 - armor`), the remainder carries over to the next hit.
+    fn absorb(&mut self, dmg: i32) -> i32 {
+        let t = dmg * (25 - self.armor) + self.rem;
+        (self.wear, self.rem) = (self.wear + dmg, t % 25);
+        t / 25
     }
 
     /// `EntityLiving.attackEntityFrom` for a damage source with no attacker. False if nothing was taken.
@@ -54,10 +65,10 @@ impl Vitals {
             if dmg <= self.last_damage {
                 return false;
             }
-            self.health -= dmg - self.last_damage;
+            self.health -= self.absorb(dmg - self.last_damage);
         } else {
             self.hearts_life = 20;
-            self.health -= dmg;
+            self.health -= self.absorb(dmg);
         }
         self.last_damage = dmg;
         true

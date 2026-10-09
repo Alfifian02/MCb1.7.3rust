@@ -24,19 +24,22 @@ pub struct ItemStack {
 pub const BOWL: u16 = 281;
 pub const STEW: u16 = 282;
 
-/// `ItemFood.healAmount`. ponytail: only the stew is here, the one food that can be made today; apple 4 (260), bread 5 (297),
-/// raw/cooked pork 3/8 (319, 320), golden apple 42 (322), raw/cooked fish 2/5 (349, 350) are one line each once their
-/// source exists (mobs, crops, chests).
+/// `ItemFood.healAmount` of every `ItemFood` in `Item` (ids shifted by 256).
 pub fn heal_amount(id: u16) -> Option<i32> {
     match id {
         STEW => Some(10),
-        319 => Some(3), // raw porkchop
-        320 => Some(8), // cooked porkchop
+        260 => Some(4),  // apple
+        297 => Some(5),  // bread
+        319 => Some(3),  // raw porkchop
+        320 => Some(8),  // cooked porkchop
+        322 => Some(42), // golden apple
+        349 => Some(2),  // raw fish
+        350 => Some(5),  // cooked fish
+        357 => Some(1),  // cookie
         _ => None,
     }
 }
 
-/// `Item.maxStackSize`: tools, sign, doors, bed and stew 1, snowball 16, everything else 64.
 /// `ItemStack.getItemName` translated (`StringTranslate`): the `en_US.lang` name; wool, dye, slabs and charcoal by
 /// damage (`ItemCloth`, `ItemDye`, `ItemSlab`, `ItemCoal`). `None` for an id the original gives no name.
 pub fn name(s: ItemStack) -> Option<&'static str> {
@@ -50,11 +53,13 @@ pub fn name(s: ItemStack) -> Option<&'static str> {
     }
 }
 
+/// `Item.maxStackSize`: tools, armor, buckets, sign, doors, bed and stew 1, snowball 16, cookie 8, everything else 64.
 pub fn max_stack(id: u16) -> u8 {
     match id {
-        282 | 323 | 324 | 330 | 355 => 1,
+        282 | 323 | 324 | 330 | 355 | 325..=327 | 335 => 1,
         332 => 16,
-        _ if craft::tool(id).is_some() => 1,
+        357 => 8,
+        _ if craft::tool(id).is_some() || craft::armor(id).is_some() => 1,
         _ => 64,
     }
 }
@@ -83,10 +88,12 @@ pub fn tile(id: u16) -> u8 {
         266 => 41,       // gold ingot
         280 => 17,       // stick
         359 => 42,       // shears
+        325 | 326 | 327 => [42, 9, 11][id as usize - 325], // buckets: iron, water, lava
+        335 => 35,       // milk
         281 => 5,        // bowl
         282 => 39,       // mushroom stew
         // Tools: the material's colour (wood, stone, iron, diamond, gold); the HUD draws the head shape on top.
-        _ => craft::tool(id).map_or(255, |(_, m)| [5, 4, 42, 57, 41][m]),
+        _ => craft::tool(id).map(|(_, m)| m).or(craft::armor(id).map(|a| a.1)).map_or(255, |m| [5, 4, 42, 57, 41][m]),
     }
 }
 
@@ -164,8 +171,10 @@ fn damage_dropped(b: u8, meta: u8) -> u16 {
 
 // ---- Inventory ----
 
-/// `InventoryPlayer.mainInventory`: 0..9 is the hotbar, 9..36 the rest (shown on the inventory screen).
-pub const SLOTS: usize = 36;
+/// `InventoryPlayer.mainInventory`: 0..9 is the hotbar, 9..36 the rest (shown on the inventory screen); 36..40 is
+/// `armorInventory` (index 3 = helmet .. 0 = boots), so a `Slot` index past `MAIN` is an armor slot as in `ContainerPlayer`.
+pub const MAIN: usize = 36;
+pub const SLOTS: usize = MAIN + 4;
 
 /// Starts empty, like a new survival player.
 pub struct Inventory {
@@ -186,7 +195,8 @@ impl Inventory {
         let start = s.count;
         while s.count > 0 {
             let fits = |o: &Option<ItemStack>| o.is_some_and(|t| t.id == s.id && t.damage == s.damage && t.count < max_stack(t.id));
-            let Some(i) = self.slots.iter().position(fits).or_else(|| self.slots.iter().position(Option::is_none)) else { break };
+            let main = &self.slots[..MAIN];
+            let Some(i) = main.iter().position(fits).or_else(|| main.iter().position(Option::is_none)) else { break };
             let t = self.slots[i].get_or_insert(ItemStack { count: 0, ..*s });
             let n = s.count.min(max_stack(s.id) - t.count);
             t.count += n;

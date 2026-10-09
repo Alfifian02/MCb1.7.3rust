@@ -46,6 +46,14 @@ ticks (liquids/sand). Sapling growth, fluid flow and falling sand belong with M5
 BiomeGenBase but climate never selects it; b1.7.3 has no ravines.
 
 ## Changelog
+- `done` cheap table fills (written WITHOUT a Rust toolchain: not compiled, `table_fills` test not run; `craft.rs`, `items.rs`, `vitals.rs`, `lib.rs`):
+    `RecipesDyes` (shapeless, `ShapelessRecipes.matches`: `Recipe.w == 0`), `RecipesIngots`, `RecipesArmor` (all 20 pieces; chain wants fire), cookie, bucket;
+    food `heal_amount` for apple, bread, golden apple, fish, cookie; raw fish smelts; lava bucket burns 20000 and leaves an empty bucket;
+    buckets stack 1. Armor: `Inventory.slots` is 40 long (36..40 = `armorInventory`, helmet at 39), `SlotArmor` rules in `Screen::armor_ok`,
+    `Vitals.armor` / `absorb` = `EntityPlayer.damageEntity` (25ths with a carried remainder), worn pieces wear by the damage dealt (`lib.rs`).
+    - Save format changed (inventory 36 -> 40 slots): an old `level` file fails to decode and starts a new game.
+    - Not done: filling/emptying buckets (no fluid flow), armor model and HUD armor bar, shift-click, a pumpkin stack onto the head (needs a single pumpkin in hand).
+    - UNVERIFIED: the mode toggle moved to the top right (152, 8) to clear the armor column; armor tile colours are invented.
 - `done` item-name tooltip (written WITHOUT a Rust toolchain: not compiled, +2 tests not run; `tools/gen_names.py` ran and its output was
   spot-checked against `lang/en_US.lang`): `GuiContainer.drawScreen` shows `translateNamedKey(getItemName())` in a 75% black box (3 units of
   padding) for the hovered slot when the cursor is empty. Touch has no hover, so it shows while a finger is down: the stack under it, or the

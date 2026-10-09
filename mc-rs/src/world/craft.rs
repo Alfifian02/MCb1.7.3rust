@@ -7,7 +7,7 @@
 
 use std::sync::OnceLock;
 
-use crate::world::items::{max_stack, Inventory, ItemStack};
+use crate::world::items::{max_stack, Inventory, ItemStack, MAIN, SLOTS};
 
 // ---- Tools ----
 
@@ -44,7 +44,30 @@ pub fn max_damage(id: u16) -> Option<u16> {
     if id == SHEARS {
         return Some(238);
     }
+    if let Some((t, m)) = armor(id) {
+        return Some([11, 16, 15, 13][t] * 3 << [0, 1, 2, 3, 1][m]); // ItemArmor: maxDamageArray[type] * 3 << armorLevel
+    }
     tool(id).map(|(_, m)| MATERIALS[m].1)
+}
+
+/// (armor type 0 helmet..3 boots, material 0 leather, chain, iron, diamond, gold) of an `ItemArmor` (298..=317).
+pub fn armor(id: u16) -> Option<(usize, usize)> {
+    (298..318).contains(&id).then(|| ((id - 298) as usize % 4, (id - 298) as usize / 4))
+}
+
+/// `SlotArmor.isItemValid` for inventory slot `MAIN + k` (`armorInventory[k]`, type `3 - k`): matching armor, or a pumpkin on the head.
+fn armor_fits(k: usize, id: u16) -> bool {
+    armor(id).map_or(id == 86 && k == 3, |a| a.0 == 3 - k)
+}
+
+/// `InventoryPlayer.getTotalArmorValue`: `slots` is the armor part of the inventory.
+pub fn armor_value(slots: &[Option<ItemStack>]) -> i32 {
+    let (mut red, mut left, mut max) = (0, 0, 0);
+    for s in slots.iter().flatten().filter(|s| armor(s.id).is_some()) {
+        let m = max_damage(s.id).unwrap() as i32;
+        (red, left, max) = (red + [3, 8, 6, 3][armor(s.id).unwrap().0], left + m - s.damage as i32, max + m);
+    }
+    if max == 0 { 0 } else { (red - 1) * left / max + 1 }
 }
 
 /// `Item.onBlockDestroyed` wear for breaking block `b` with `held`: `ItemTool` 1, `ItemSword` 2, shears 1 on leaves
@@ -118,8 +141,9 @@ pub fn tool_can_harvest(held: u16, b: u8) -> bool {
 
 // ---- Recipes ----
 
-/// A `ShapedRecipes`: `w` x `h` pattern, row-major, 0 = empty cell. Ingredients ignore damage (every Java ingredient
-/// used here is an `Item`/`Block` with damage -1 or 0, and nothing in this port has a second subtype yet).
+/// A `ShapedRecipes`: `w` x `h` pattern, row-major, 0 = empty cell (`w` 0 = `ShapelessRecipes`, `cells` the ingredients).
+/// Ingredients are item codes (`code`): the id, plus the damage for wool and dye, the only ones that need it (the Java
+/// ingredients are damage -1 = any, or an exact wool / dye colour).
 pub struct Recipe {
     w: usize,
     h: usize,
@@ -131,6 +155,11 @@ impl Recipe {
     /// `ShapedRecipes.matches` on a `gw` x `gw` grid of item ids: the pattern may sit anywhere in the 3x3 area
     /// (cells outside a 2x2 grid are empty), mirrored or not, and every other cell must be empty.
     fn matches(&self, grid: &[u16; 9], gw: usize) -> bool {
+        if self.w == 0 {
+            // `ShapelessRecipes.matches`: the same ingredients, in any cells (`cells` is the list).
+            let sorted = |c: &[u16]| { let mut v: Vec<u16> = c.iter().copied().filter(|&c| c != 0).collect(); v.sort_unstable(); v };
+            return sorted(grid) == sorted(&self.cells);
+        }
         let at = |x: usize, y: usize| if x < gw && y < gw { grid[y * gw + x] } else { 0 };
         let want = |x: usize, y: usize, ox: usize, oy: usize, mirror: bool| {
             let (rx, ry) = (x.wrapping_sub(ox), y.wrapping_sub(oy));
@@ -146,6 +175,17 @@ impl Recipe {
     }
 }
 
+/// Ingredient / result code: wool and dye keep their colour in the bits above the id (ids stay below 512).
+fn code(id: u16, damage: u16) -> u16 {
+    if matches!(id, 35 | 351) { id | (damage & 15) << 9 } else { id }
+}
+
+fn shapeless(ings: &[u16], out: u16, n: u8) -> Recipe {
+    let mut cells = [0; 9];
+    cells[..ings.len()].copy_from_slice(ings);
+    Recipe { w: 0, h: 0, cells, out: ItemStack { id: out & 511, count: n, damage: out >> 9 } }
+}
+
 /// `CraftingManager.addRecipe` with a pattern: `key` maps pattern characters to item ids, anything else is empty.
 fn shaped(rows: &[&str], key: &[(char, u16)], out: u16, n: u8) -> Recipe {
     let (h, w) = (rows.len(), rows[0].len());
@@ -155,12 +195,13 @@ fn shaped(rows: &[&str], key: &[(char, u16)], out: u16, n: u8) -> Recipe {
             cells[y * w + x] = key.iter().find(|k| k.0 == c).map_or(0, |k| k.1);
         }
     }
-    Recipe { w, h, cells, out: ItemStack { id: out, count: n, damage: 0 } }
+    Recipe { w, h, cells, out: ItemStack { id: out & 511, count: n, damage: out >> 9 } }
 }
 
 /// Every recipe of `RecipesTools` (pickaxe, shovel, axe, hoe x 5 materials), `RecipesWeapons` (swords), the shears
 /// and the `CraftingManager` / `RecipesCrafting` ones whose result exists in this port (a block that can be placed, or
-/// a tool ingredient). Not ported: bow, arrow, armor, food, rails, doors, stairs, dyes and the rest, none of which has anything to do yet. One line each to add.
+/// a tool ingredient), `RecipesFood` (cookie), `RecipesDyes`, `RecipesIngots` and `RecipesArmor`. Not ported: bow, arrow, rails, doors, stairs and the rest of
+/// `CraftingManager`. One line each to add.
 // ponytail: vanilla sorts the list (`RecipeSorter`, bigger first); no two patterns here can match one grid, so the
 // first match is the only match and the sort is skipped.
 pub fn recipes() -> &'static [Recipe] {
@@ -168,6 +209,7 @@ pub fn recipes() -> &'static [Recipe] {
     R.get_or_init(|| {
         const PLANKS: u16 = 5;
         const STICK: u16 = 280;
+        let dy = |d: u16| code(351, d);
         // shovel, pickaxe, axe (RecipesTools), sword (RecipesWeapons), hoe (RecipesTools)
         const PATTERNS: [&[&str]; 5] = [&["X", "#", "#"], &["XXX", " # ", " # "], &["XX", "X#", " #"], &["X", "X", "#"], &["XX", " #", " #"]];
         let mut r = vec![
@@ -186,7 +228,26 @@ pub fn recipes() -> &'static [Recipe] {
             shaped(&["Y", "X", "#"], &[('X', 39), ('Y', 40), ('#', 281)], 282, 1), // mushroom stew, either order
             shaped(&["Y", "X", "#"], &[('X', 40), ('Y', 39), ('#', 281)], 282, 1),
             shaped(&[" #", "# "], &[('#', 265)], SHEARS, 1), // shears
+            shaped(&["# #", " # "], &[('#', 265)], 325, 1), // bucket
+            shaped(&["#X#"], &[('X', dy(3)), ('#', 296)], 357, 8), // cookie: wheat, cocoa, wheat
+            shapeless(&[37], dy(11), 2), // dandelion -> yellow dye
+            shapeless(&[38], dy(1), 2),  // rose -> red dye
+            shapeless(&[352], dy(15), 3), // bone -> bone meal
         ];
+        // RecipesDyes: dye + white wool -> the dye's wool (`BlockCloth.func_21035_d` = `~d & 15`), then the dye mixes.
+        r.extend((0..16).map(|d| shapeless(&[dy(d), 35], 35 | (!d & 15) << 9, 1)));
+        let mixes: [(&[u16], u16, u8); 12] = [(&[1, 15][..], 9, 2), (&[1, 11][..], 14, 2), (&[2, 15][..], 10, 2), (&[0, 15][..], 8, 2), (&[8, 15][..], 7, 2), (&[0, 15, 15][..], 7, 3), (&[4, 15][..], 12, 2), (&[4, 2][..], 6, 2), (&[4, 1][..], 5, 2), (&[5, 9][..], 13, 2), (&[4, 1, 9][..], 13, 3), (&[4, 1, 1, 15][..], 13, 4)];
+        r.extend(mixes.iter().map(|&(src, out, n)| shapeless(&src.iter().map(|&d| dy(d)).collect::<Vec<_>>(), dy(out), n)));
+        // RecipesIngots: 9 of the item <-> the block (gold, iron, diamond, lapis).
+        for (block, item) in [(41, 266), (42, 265), (57, 264), (22, dy(4))] {
+            r.push(shaped(&["###", "###", "###"], &[('#', item)], block, 1));
+            r.push(shaped(&["#"], &[('#', block)], item, 9));
+        }
+        // RecipesArmor: leather, fire (chain: no item makes it), iron, diamond, gold; helmet, chestplate, leggings, boots.
+        const ARMOR: [&[&str]; 4] = [&["XXX", "X X"], &["X X", "XXX", "XXX"], &["XXX", "X X", "X X"], &["X X", "X X"]];
+        for (m, x) in [334, 51, 265, 264, 266].into_iter().enumerate() {
+            r.extend(ARMOR.iter().enumerate().map(|(t, rows)| shaped(rows, &[('X', x)], 298 + (m * 4 + t) as u16, 1)));
+        }
         // RecipesTools: head material per tier = planks, cobblestone, iron ingot, diamond, gold ingot.
         for (m, head) in [PLANKS, 4, 265, 264, 266].into_iter().enumerate() {
             for (k, rows) in PATTERNS.iter().enumerate() {
@@ -199,13 +260,13 @@ pub fn recipes() -> &'static [Recipe] {
 
 /// `CraftingManager.findMatchingRecipe` for a `gw` x `gw` grid.
 pub fn find(grid: &[Option<ItemStack>; 9], gw: usize) -> Option<ItemStack> {
-    let ids = grid.map(|s| s.map_or(0, |s| s.id));
+    let ids = grid.map(|s| s.map_or(0, |s| code(s.id, s.damage)));
     recipes().iter().find(|r| r.matches(&ids, gw)).map(|r| r.out)
 }
 
 // ---- Furnace ----
 
-/// `FurnaceRecipes`: what smelting `id` gives. Not ported: raw fish (no fish yet).
+/// `FurnaceRecipes`: what smelting `id` gives.
 fn smelting(id: u16) -> Option<ItemStack> {
     let (out, damage) = match id {
         15 => (265, 0),  // iron ore -> iron ingot
@@ -217,18 +278,20 @@ fn smelting(id: u16) -> Option<ItemStack> {
         81 => (351, 2),  // cactus -> green dye
         17 => (263, 1),  // log -> charcoal
         319 => (320, 0), // raw -> cooked porkchop
+        349 => (350, 0), // raw -> cooked fish
         _ => return None,
     };
     Some(ItemStack { id: out, count: 1, damage })
 }
 
 /// `TileEntityFurnace.getItemBurnTime` in ticks: wooden blocks 300, stick and sapling 100, coal 1600.
-/// Not ported: the lava bucket (20000), there are no buckets.
+/// and the lava bucket 20000 (it leaves an empty bucket).
 fn burn_time(id: u16) -> u16 {
     match id {
         5 | 17 | 25 | 47 | 53 | 54 | 58 | 63 | 64 | 68 | 72 | 84 | 85 | 95 | 96 => 300,
         280 | 6 => 100,
         263 => 1600,
+        327 => 20000,
         _ => 0,
     }
 }
@@ -260,7 +323,8 @@ impl Furnace {
                 if let Some(f) = &mut self.slots[1] {
                     f.count -= 1;
                     if f.count == 0 {
-                        self.slots[1] = None;
+                        // `getContainerItem`: a lava bucket leaves an empty one.
+                        self.slots[1] = (f.id == 327).then_some(ItemStack { id: 325, count: 1, damage: 0 });
                     }
                 }
             }
@@ -297,7 +361,7 @@ pub enum SlotId {
 
 /// `ContainerPlayer` (`gw` 2) or `ContainerWorkbench` (`gw` 3): the crafting grid and the stack on the cursor.
 /// The result slot is not stored, it is whatever `find` says about the grid.
-// ponytail: no armor slots (no armor items), no shift-click (`getStackInSlot` quick-move), no right-button except as
+// ponytail: no shift-click (`getStackInSlot` quick-move), no right-button except as
 // the `one` flag of `click`. Upgrade: add them when the touch UI has a gesture for them.
 pub struct Screen {
     /// Grid width: 2 inventory, 3 workbench, 0 furnace (then `furnace` is the block it belongs to).
@@ -367,6 +431,9 @@ impl Screen {
     /// The furnace output (`SlotFurnace`) is an output slot like the craft result (accepts nothing), except that
     /// taking from it uses nothing up and a right click takes half. Pass the furnace for a furnace screen.
     pub fn click(&mut self, id: SlotId, one: bool, inv: &mut Inventory, mut furn: Option<&mut Furnace>) {
+        if !self.armor_ok(id) {
+            return;
+        }
         let is_result = id == SlotId::Result;
         let is_out = is_result || id == SlotId::Furn(2);
         if matches!(id, SlotId::Furn(_)) && furn.is_none() {
@@ -411,6 +478,14 @@ impl Screen {
         }
     }
 
+    /// `SlotArmor`: only the right armor goes in, one at a time. Any other slot takes anything.
+    fn armor_ok(&self, id: SlotId) -> bool {
+        match (id, self.cursor) {
+            (SlotId::Inv(i @ MAIN..), Some(c)) => armor_fits(i - MAIN, c.id) && c.count == 1,
+            _ => true,
+        }
+    }
+
     /// Spread (touch drag): put one item of the cursor stack into `id` when that slot is empty or holds the same
     /// item with room. Unlike a right click it never swaps, and never fills an output slot. True if it was valid.
     pub fn drop_one(&mut self, id: SlotId, inv: &mut Inventory, mut furn: Option<&mut Furnace>) -> bool {
@@ -418,7 +493,7 @@ impl Screen {
         if matches!(id, SlotId::Result | SlotId::Furn(2)) {
             return false;
         }
-        let fits = self.get(inv, furn.as_deref(), id).map_or(true, |h| h.id == c.id && h.damage == c.damage && h.count < max_stack(c.id));
+        let fits = self.armor_ok(id) && self.get(inv, furn.as_deref(), id).map_or(true, |h| h.id == c.id && h.damage == c.damage && h.count < max_stack(c.id));
         if fits {
             self.click(id, true, inv, furn);
         }
@@ -434,9 +509,9 @@ impl Screen {
 // ---- Geometry: the vanilla 176 x 166 GUI, scaled to the surface ----
 
 pub const PANEL: (f32, f32) = (176.0, 166.0);
-/// The "place one" toggle (this port has no right mouse button), in the column the vanilla armor slots would use.
+/// The "place one" toggle (this port has no right mouse button), top right, clear of every slot.
 // UNVERIFIED: position and the toggle itself are invented for touch (the original uses the mouse cursor and buttons).
-pub const MODE: (f32, f32) = (8.0, 53.0);
+pub const MODE: (f32, f32) = (152.0, 8.0);
 
 /// Vanilla `(slot, x, y)` of every slot's top-left pixel (`ContainerPlayer` / `ContainerWorkbench` constructors).
 pub fn layout(gw: usize) -> Vec<(SlotId, f32, f32)> {
@@ -447,6 +522,9 @@ pub fn layout(gw: usize) -> Vec<(SlotId, f32, f32)> {
         vec![(SlotId::Result, rx as f32, ry as f32)]
     };
     v.extend((0..gw * gw).map(|i| (SlotId::Grid(i), (gx + 18 * (i % gw)) as f32, (gy + 18 * (i / gw)) as f32)));
+    if gw == 2 {
+        v.extend((0..4).map(|k| (SlotId::Inv(MAIN + k), 8.0, 8.0 + 18.0 * (3 - k) as f32))); // ContainerPlayer: SlotArmor at (8, 8 + 18 * type)
+    }
     v.extend((9..36).map(|i| (SlotId::Inv(i), (8 + 18 * (i % 9)) as f32, (84 + 18 * (i / 9 - 1)) as f32)));
     v.extend((0..9).map(|i| (SlotId::Inv(i), (8 + 18 * i) as f32, 142.0)));
     v
@@ -602,6 +680,44 @@ mod tests {
         assert_eq!((inv.slots[0], s.cursor), (Some(stack(3, 1)), Some(stack(5, 1))));
         assert!(s.drop_one(SlotId::Grid(0), &mut inv, None), "same item stacks up");
         assert_eq!((s.grid[0], s.grid[2], s.cursor), (Some(stack(5, 2)), Some(stack(5, 1)), None));
+    }
+
+    /// RecipesDyes / Ingots / Armor / Food, armor slots and the armor value.
+    #[test]
+    fn table_fills() {
+        let st = |id, damage| ItemStack { id, count: 1, damage };
+        let find_in = |cells: &[(usize, ItemStack)], gw| {
+            let mut g = [None; 9];
+            cells.iter().for_each(|&(i, s)| g[i] = Some(s));
+            find(&g, gw).map(|s| (s.id, s.count, s.damage))
+        };
+        assert_eq!(find_in(&[(0, st(351, 1)), (3, st(35, 0))], 2), Some((35, 1, 14)), "red dye + white wool = red wool");
+        assert_eq!(find_in(&[(0, st(351, 1)), (1, st(35, 5))], 2), None, "coloured wool is not white wool");
+        assert_eq!(find_in(&[(2, st(351, 4)), (1, st(351, 1))], 2), Some((351, 2, 5)), "lapis + red = purple, any cells");
+        assert_eq!(find_in(&[(0, st(352, 0))], 2), Some((351, 3, 15)), "bone meal");
+        assert_eq!(find_in(&[(0, st(22, 0))], 2), Some((351, 9, 4)), "lapis block -> 9 lapis");
+        assert_eq!(find_in(&(0..9).map(|i| (i, st(351, 4))).collect::<Vec<_>>(), 3), Some((22, 1, 0)));
+        assert_eq!(find_in(&[(0, st(296, 0)), (1, st(351, 3)), (2, st(296, 0))], 3), Some((357, 8, 0)), "cookie");
+        assert_eq!(find_in(&[(0, st(296, 0)), (1, st(351, 4)), (2, st(296, 0))], 3), None, "cookie needs cocoa");
+        assert_eq!(find_in(&[(0, st(265, 0)), (2, st(265, 0)), (3, st(265, 0)), (5, st(265, 0))], 3), Some((309, 1, 0)), "iron boots");
+        assert_eq!(find_in(&(0..9).filter(|i| *i != 4).map(|i| (i, st(266, 0))).collect::<Vec<_>>(), 3), None, "no gold ring recipe");
+        // ItemArmor: durability, SlotArmor, getTotalArmorValue.
+        assert_eq!((max_damage(298), max_damage(311), max_damage(315)), (Some(33), Some(384), Some(66)));
+        let mut inv = Inventory::default();
+        let mut s = Screen::new(2);
+        s.cursor = Some(st(298, 0)); // leather cap: only on the head slot (armorInventory[3])
+        s.click(SlotId::Inv(MAIN), false, &mut inv, None);
+        assert!(inv.slots[MAIN].is_none() && s.cursor.is_some());
+        s.click(SlotId::Inv(MAIN + 3), false, &mut inv, None);
+        assert!(inv.slots[MAIN + 3].is_some() && s.cursor.is_none());
+        assert_eq!(armor_value(&inv.slots[MAIN..]), 3); // one new cap: (3 - 1) * 33 / 33 + 1
+        inv.slots[MAIN + 2] = Some(st(311, 0)); // diamond chestplate
+        assert_eq!(armor_value(&inv.slots[MAIN..]), 11); // (3 + 8 - 1) * 417 / 417 + 1
+        inv.damage(MAIN + 3, 40); // past 33 uses: the cap breaks
+        assert!(inv.slots[MAIN + 3].is_none() && inv.slots[MAIN + 2].is_some());
+        let mut v = crate::world::vitals::Vitals::default();
+        v.armor = 5;
+        assert!(v.hurt(10) && v.health == 12 && v.wear == 10, "10 * 20 / 25 = 8, remainder 0");
     }
 
     /// Tools: ids, durability, speed on their blocks and the harvest gate.

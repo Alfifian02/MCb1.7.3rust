@@ -130,7 +130,9 @@ UNVERIFIED until you can show a reference.
   `canHarvestBlock` of `ItemPickaxe`/`ItemSpade`, `RecipesTools` + `RecipesCrafting` + the `CraftingManager` entries it
   carries, `ShapedRecipes.matches` (anywhere in the grid, mirrored), `SlotCrafting.onPickupFromSlot`, the slot positions
   of `ContainerPlayer`/`ContainerWorkbench`, and the left/right click branches of `Container.func_27280_a`. Not ported:
-  bow, arrow, armor slots, shift-click, raw pork/fish smelting, the lava bucket as fuel, ~100 other recipes (one line each in `recipes()`).
+  bow, arrow, shift-click, the rest of `CraftingManager` (one line each in `recipes()`). Armor: `armor` / `armor_fits` /
+  `armor_value` (`ItemArmor`, `SlotArmor`, `InventoryPlayer.getTotalArmorValue`), slots `Inv(36..40)` = `armorInventory`.
+  Recipes of `RecipesFood`/`Dyes`/`Ingots`/`Armor` are in (shapeless ones: `w` 0, wool and dye match by colour); fish smelts, the lava bucket fuels.
 - `world::save` — NOT b1.7.3: it replaces `McRegionChunkLoader`/`NBTTagCompound`/`level.dat` on purpose. Nothing in it is
   derived from the Java, so nothing in it is a fidelity claim. What it keeps is what the port keeps: a chunk's block ids and
   `Nibbles` bytes (the `Data` tag), whether populate ran on it, and the player/world state this port has.
