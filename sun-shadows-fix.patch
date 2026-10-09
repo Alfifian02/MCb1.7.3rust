@@ -1,0 +1,43 @@
+--- a/mc-rs/src/render/mesh.rs
++++ b/mc-rs/src/render/mesh.rs
+@@ -72,7 +72,7 @@
+ /// `(ox, oz)` is the chunk's world origin (chunk * 16).
+ /// Vertices: 6 floats each (px, py, pz, u, v, light). Indices: 6 per face (two triangles).
+ /// `sun` = `sky::sun_key`: sun tan(angle) x 2, or `NO_SUN`. ponytail: a face is shadowed when a block lies on the ray
+-/// toward the sun (10 steps, sun moves along X only, the ray stops at this chunk's 1-cell border, so a shadow cast from
++/// toward the sun (10 steps, the sun moves along Z like `render::sky` draws it, the ray stops at this chunk's 1-cell border, so a shadow cast from
+ /// another chunk is missed); upgrade = a per-column shadow map shared by chunks.
+ pub const NO_SUN: i32 = i32::MAX;
+ 
+@@ -141,8 +141,9 @@
+                         let h = sun as f32 / 2.0;
+                         let m = h.abs().max(1.0);
+                         let (sx, sy) = (h / m, 1.0 / m);
+-                        let (cx, cy) = ((x + dx) as f32 + 0.5, (y + dy) as f32 + 0.5);
+-                        if (1..=10).any(|n| get((cx + sx * n as f32).floor() as i32, (cy + sy * n as f32).floor() as i32, z + dz) != 0) {
++                        let (cz, cy) = ((z + dz) as f32 + 0.5, (y + dy) as f32 + 0.5);
++                        let ray = (1..=10).map(|n| ((cz + sx * n as f32).floor() as i32, (cy + sy * n as f32).floor() as i32));
++                        if ray.take_while(|&(rz, _)| (-1..=16).contains(&rz)).any(|(rz, ry)| get(x + dx, ry, rz) != 0) {
+                             light *= 0.6;
+                         }
+                     }
+@@ -202,15 +203,15 @@
+         assert_eq!(face_count(&verts), 6);
+     }
+ 
+-    /// A pillar at x=9 shades the ground at x=7 (sun at +X, 45 degrees) but not the ground at x=2.
++    /// A pillar at z=9 shades the ground at z=7 (sun at +Z, 45 degrees) but not the ground at z=2.
+     #[test]
+     fn pillar_casts_a_shadow_away_from_the_sun() {
+         let mut c = air();
+-        for x in 0..16 { c[idx(x, 0, 5)] = 1; }
+-        for y in 1..4 { c[idx(9, y, 5)] = 1; }
++        for z in 0..16 { c[idx(5, 0, z)] = 1; }
++        for y in 1..4 { c[idx(5, y, 9)] = 1; }
+         let a = air();
+         let v = build(&c, &Nibbles::new(), &a, [&a[..], &a[..], &a[..], &a[..]], [&a[..], &a[..], &a[..], &a[..]], 0, 2, 0, 0).0;
+-        let top = |x0: f32| v.chunks(6).find(|q| q[1] == 1.0 && q[0] >= x0 && q[0] < x0 + 1.0 && q[2] == 5.0).unwrap()[5];
++        let top = |z0: f32| v.chunks(6).find(|q| q[1] == 1.0 && q[2] >= z0 && q[2] < z0 + 1.0 && q[0] == 5.0).unwrap()[5];
+         assert!(top(7.0) < top(2.0));
+     }
+ 
