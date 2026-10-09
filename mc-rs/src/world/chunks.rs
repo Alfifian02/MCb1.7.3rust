@@ -359,11 +359,6 @@ impl ChunkManager {
         self.light_at(x, y, z, self.sky_sub)
     }
 
-    /// `World.canBlockSeeTheSky`: nothing opaque above the cell (`Chunk.canBlockSeeTheSky`: y >= heightMap).
-    pub fn sees_sky(&self, x: i32, y: i32, z: i32) -> bool {
-        self.chunks.get(&(x >> 4, z >> 4)).is_some_and(|e| y >= e.height[((z & 15) << 4 | (x & 15)) as usize] as i32)
-    }
-
     /// `World.tick`'s random block ticks: 80 random cells in every lit, final chunk within `r` chunks of `center`, with the Java's
     /// own LCG. Returns the cells whose block ticks at random (`Block.tickOnLoad`).
     pub fn random_ticks(&self, center: Key, r: i32, lcg: &mut i32) -> Vec<(i32, i32, i32, u8)> {

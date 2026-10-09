@@ -95,7 +95,7 @@ impl ChunkManager {
     }
 
     /// `World.canExistingBlockSeeTheSky`.
-    fn sees_sky(&self, x: i32, y: i32, z: i32) -> bool {
+    pub fn sees_sky(&self, x: i32, y: i32, z: i32) -> bool {
         if y < 0 {
             return false;
         }
