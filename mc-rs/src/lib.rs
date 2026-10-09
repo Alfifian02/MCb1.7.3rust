@@ -83,6 +83,8 @@ struct App {
     sky: SkyRenderer,
     weather: sky::Weather,
     weather_ticks: u64,
+    /// Hotbar slot last seen and seconds its item name still shows (`GuiIngame` shows it ~2 s after a switch).
+    tip: (usize, f32),
     /// Survival digging state and the leftover time towards the next 20 Hz dig tick.
     dig: Dig,
     dig_acc: f32,
@@ -180,6 +182,7 @@ impl App {
             sky: sky_renderer,
             weather: sky::Weather::new(seed),
             weather_ticks: 0,
+            tip: (0, 0.0),
             dig: Dig::default(),
             dig_acc: 0.0,
             inv: Inventory::default(),
@@ -283,6 +286,8 @@ impl App {
             self.save_acc = 0.0;
             self.save(AUTOSAVE_CHUNKS);
         }
+        let slot = self.touch.hotbar_slot;
+        self.tip = if slot != self.tip.0 { (slot, 2.0) } else { (slot, (self.tip.1 - dt).max(0.0)) };
         // Day/night: time only runs while playing; a new sky-light level restarts the meshes.
         self.world_ticks += dt as f64 * 20.0;
         while self.weather_ticks < self.world_ticks as u64 {
@@ -814,6 +819,15 @@ impl App {
             if let Some(s) = self.inv.slots[i] {
                 push_stack(v, (hx, hy, hw, hh), s);
             }
+        }
+
+        // Name of the item just switched to, above the hearts.
+        if let (true, Some(name)) = (play && self.tip.1 > 0.0, self.inv.slots[self.touch.hotbar_slot].and_then(items::name)) {
+            let (w, h) = (self.gpu.config.width as f32, self.gpu.config.height as f32);
+            let k = craft::panel(w, h).2;
+            let (hx, hy, hw, _) = layout.hotbar[self.touch.hotbar_slot];
+            let bw = (HudPipeline::text_width(name) as f32 + 6.0) * k;
+            HudPipeline::push_tooltip(v, (hx + hw * 0.5 - bw * 0.5).clamp(0.0, (w - bw).max(0.0)), hy - 34.0 * k, k, name);
         }
 
         if play {
