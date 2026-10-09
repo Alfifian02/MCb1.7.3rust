@@ -680,6 +680,22 @@ fn trunk(w: &mut Region, x: i32, y: i32, z: i32, len: i32, meta: u8) {
     }
 }
 
+/// `BlockSapling.growTree`: clears the sapling cell, grows the species' tree (oak, one in ten big; spruce; birch) and puts
+/// the sapling back when it does not fit.
+pub fn grow_sapling(w: &mut Region, r: &mut JavaRandom, x: i32, y: i32, z: i32, species: u8) -> bool {
+    w.set(x, y, z, 0);
+    let ok = match species & 3 {
+        1 => taiga2(w, r, x, y, z),
+        2 => round_tree(w, r, x, y, z, 5, 2),
+        _ if r.next_int_bound(10) == 0 => big_tree(w, r, x, y, z),
+        _ => round_tree(w, r, x, y, z, 4, 0),
+    };
+    if !ok {
+        w.set_meta(x, y, z, 6, species);
+    }
+    ok
+}
+
 /// WorldGenTrees (min height 4, species 0) and WorldGenForest (5, birch = 2).
 fn round_tree(w: &mut Region, r: &mut JavaRandom, x: i32, y: i32, z: i32, min_h: i32, meta: u8) -> bool {
     let h = r.next_int_bound(3) + min_h;

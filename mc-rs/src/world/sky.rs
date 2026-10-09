@@ -9,7 +9,8 @@
 //! and lava fog, clouds, and drawing rain/snow (`renderRainSnow`); thunder strikes need `EntityLightningBolt`.
 
 use crate::world::gen::noise::{mh_cos, mh_sin, JavaRandom};
-use std::f32::consts::PI;
+use glam::Vec3;
+use std::f32::consts::{PI, TAU};
 
 pub const TICKS_PER_DAY: u64 = 24000;
 
@@ -32,6 +33,17 @@ pub fn celestial_angle(time: u64, partial: f32) -> f32 {
 pub fn sun_key(angle: f32) -> i32 {
     let t = angle * std::f32::consts::TAU;
     if t.cos() < 0.2 { i32::MAX } else { (t.tan() * 2.0).round().clamp(-8.0, 8.0) as i32 }
+}
+
+/// Direction toward the sun, turned about X by the sun angle like `render::sky` draws it: noon (0, 1, 0), dusk (0, 0, 1).
+pub fn sun_dir(angle: f32) -> Vec3 {
+    let t = angle * TAU;
+    Vec3::new(0.0, t.cos(), t.sin())
+}
+
+/// Shadow strength 0..1: in from 6 to 17 degrees of sun height (the baked shadows cut off at ~12), out in rain.
+pub fn shadow_strength(angle: f32, rain: f32) -> f32 {
+    (((angle * TAU).cos() - 0.1) / 0.2).clamp(0.0, 1.0) * (1.0 - 2.0 * rain).clamp(0.0, 1.0)
 }
 
 /// Sky light taken away by the time of day and the weather: 0 (day) ..= 11 (night). `rain` and `thunder` are

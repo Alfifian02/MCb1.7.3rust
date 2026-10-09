@@ -197,3 +197,5 @@ pub const WOOL: [&str; 16] = ["Wool", "Orange Wool", "Magenta Wool", "Light Blue
 pub const DYE: [&str; 16] = ["Ink Sac", "Rose Red", "Cactus Green", "Cocoa Beans", "Lapis Lazuli", "Purple Dye", "Cyan Dye", "Light Gray Dye", "Gray Dye", "Pink Dye", "Lime Dye", "Dandelion Yellow", "Light Blue Dye", "Magenta Dye", "Orange Dye", "Bone Meal"];
 pub const SLAB: [&str; 4] = ["Stone Slab", "Sandstone Slab", "Wooden Slab", "Stone Slab"];
 pub const CHARCOAL: &str = "Charcoal";
+/// `Block.blockResistance` where `setResistance` was called (ids < 256, sorted); elsewhere it is hardness x 5.
+pub const RESIST: &[(u8, f32)] = &[(1, 30.0), (4, 30.0), (5, 15.0), (7, 18000000.0), (14, 15.0), (15, 15.0), (16, 15.0), (21, 15.0), (22, 15.0), (41, 30.0), (42, 30.0), (43, 30.0), (44, 30.0), (45, 30.0), (48, 30.0), (49, 6000.0), (56, 15.0), (57, 30.0), (73, 15.0), (74, 15.0), (84, 30.0), (85, 15.0)];

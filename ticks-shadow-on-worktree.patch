@@ -1,0 +1,1553 @@
+diff -ruN a/README.md b/README.md
+--- a/README.md	2026-10-10 05:16:34.000000000 +0000
++++ b/README.md	2026-10-09 22:28:07.341036806 +0000
+@@ -22,18 +22,20 @@
+ | M3  Overworld gen    | done | 48x128x48 super-chunk, sea level 64, 6 ore types (coal, iron, gold, diamond, redstone, lapis). Terrain was rebuilt in M4a-c, see below. |
+ | M12 Touch UX         | done (this commit) | Landscape-only. Floating analog move stick (left half), look drag (right half), jump button, hotbar tap, pause menu. |
+ | M4a-c Faithful terrain + biomes | done | java.util.Random, Perlin/simplex noise, WorldChunkManager (climate -> 10 biomes), generateTerrain and replaceBlocksForBiome. Bit-exact against the real b1.7.3 classes on 18 chunks (3 seeds), golden test passes (`tools/golden/`). |
+-| M4e Fix pass | done (not yet run on a device) | 48x48 stitching index, jump ground probe, eye height, aspect/resize sync, immersive nav bar, climate float constants. See the changelog in ROADMAP.md. |
+-| M4f Chunk manager | done (now compiles and its tests pass on a Linux host; not run on a device) | Chunks keyed by (cx, cz), one mesh per chunk, circular render-distance ring (4 chunks) that loads/unloads as you walk, terrain generated on 1-2 worker threads, cross-chunk face culling. Replaces the 48x48 super-chunk. |
+-| M4d Caves, trees, populate | done (compiled + golden-tested on a Linux host; not run on a device) | MapGenCaves in `generate`, full `populate()` (lakes, dungeons, clay, dirt/gravel/ores, oak/birch/big/taiga trees, flowers, grass, reeds, pumpkins, cactus, springs, snow). Bit-exact vs the real Java on 11 cases (`tools/golden/`). Chunk manager gained the populated/final state. |
+-| M5 Block interaction | written, NOT compiled | Raycast pick, break (hold), place (tap), light engine port, outline + crosshair. See ROADMAP changelog. |
+-| Day/night            | written, NOT compiled | 20-minute cycle: sky light 0..11 subtracted in the mesher, sky colour from sun angle + climate. Sun, moon, stars and weather: next row. |
+-| Sun, moon, stars, weather | written WITHOUT a Rust toolchain: not compiled, 5 new tests not run (their Java reference numbers were) | Sky pass drawn behind the terrain with the real sun/moon textures, sunrise/sunset glow, stars, fog-coloured clear; rain/thunder timers (`World.updateWeather`) that grey the sky and fog, darken the sky light and fade sun and stars. Rain/snow streaks, lightning, clouds and terrain fog are not drawn yet. See ROADMAP changelog. |
+-| Digging              | written, NOT compiled | Hardness-based survival digging, hold to dig, progress bar. No tools yet. |
+-| Drops + inventory    | written, logic tested on a Linux host, NOT compiled as a whole | A broken block drops its `idDropped` items as entities (20 Hz motion, pickup after 10 ticks). The hotbar holds real stacks with counts and starts empty; placing uses one up. See ROADMAP changelog. |
+-| M6 Crafting + tools  | written, logic tested on a Linux host, whole crate type-checked against a stubbed `android-activity`; NOT run on a device | 36-slot inventory, 2x2 inventory crafting and 3x3 workbench crafting, furnace smelting (`TileEntityFurnace`, 8 smelting recipes), 31 recipes (wood/stone/iron/diamond/gold pickaxe, axe, shovel, sword, hoe + shears + planks, sticks, workbench, chest, furnace, torch, ...), tool speed and durability, and `canHarvestBlock`: stone without a pickaxe breaks and drops nothing, like the original. See ROADMAP changelog. |
+-| Block metadata       | written, NOT compiled (no Rust toolchain that session) | 4-bit `Nibbles` per chunk (= `NibbleArray`, the McRegion `Data` tag as is), `meta` / `set_block_meta`, worldgen writes it (birch + taiga species, grass type, pumpkin facing), drops carry `damageDropped`, items place `getPlacedBlockMetadata`, the atlas shows log/leaf species and the 15 wool colours. Block shapes (slab, stairs, door, bed) are not part of it. Java golden regenerated: old lines unchanged, new `META` hashes. See ROADMAP changelog. |
+-| Health + damage      | written, host-tested (56 tests), NOT run on a device | 20 health, fall damage, drowning, lava + fire, void, death drops the inventory and respawns. Fluids are not solid and the player swims. Mushroom stew (bowl + 2 mushrooms) is the only food, tap to eat. See ROADMAP changelog. |
+-| M7 Save              | written, NOT compiled (no Rust toolchain that session) | Own simple format, not McRegion: one run-length-coded file per edited chunk + a `level` file (player, inventory, furnaces, dropped items, time). Autosave every 5 s, full save on pause/exit, resume on start. Saves live in the app's private storage, one folder per seed. +2 tests. See ROADMAP changelog. |
++| M4e Fix pass | done (compiled and ran on an Android device) | 48x48 stitching index, jump ground probe, eye height, aspect/resize sync, immersive nav bar, climate float constants. See the changelog in ROADMAP.md. |
++| M4f Chunk manager | done (now compiles and its tests pass on a Linux host; compiled and ran on an Android device) | Chunks keyed by (cx, cz), one mesh per chunk, circular render-distance ring (4 chunks) that loads/unloads as you walk, terrain generated on 1-2 worker threads, cross-chunk face culling. Replaces the 48x48 super-chunk. |
++| M4d Caves, trees, populate | done (compiled + golden-tested on a Linux host; compiled and ran on an Android device) | MapGenCaves in `generate`, full `populate()` (lakes, dungeons, clay, dirt/gravel/ores, oak/birch/big/taiga trees, flowers, grass, reeds, pumpkins, cactus, springs, snow). Bit-exact vs the real Java on 11 cases (`tools/golden/`). Chunk manager gained the populated/final state. |
++| M5 Block interaction | compiled and ran on an Android device | Raycast pick, break (hold), place (tap), light engine port, outline + crosshair. See ROADMAP changelog. |
++| Day/night            | compiled and ran on an Android device | 20-minute cycle: sky light 0..11 subtracted in the mesher, sky colour from sun angle + climate. Sun, moon, stars and weather: next row. |
++| Sun, moon, stars, weather | compiled and ran on an Android device (written without a Rust toolchain; the 5 new tests are not confirmed run, their Java reference numbers were) | Sky pass drawn behind the terrain with the real sun/moon textures, sunrise/sunset glow, stars, fog-coloured clear; rain/thunder timers (`World.updateWeather`) that grey the sky and fog, darken the sky light and fade sun and stars. Rain/snow streaks, lightning, clouds and terrain fog are not drawn yet. See ROADMAP changelog. |
++| Digging              | compiled and ran on an Android device | Hardness-based survival digging, hold to dig, progress bar. No tools yet. |
++| Drops + inventory    | compiled and ran on an Android device (logic also tested on a Linux host) | A broken block drops its `idDropped` items as entities (20 Hz motion, pickup after 10 ticks). The hotbar holds real stacks with counts and starts empty; placing uses one up. See ROADMAP changelog. |
++| M6 Crafting + tools  | compiled and ran on an Android device (logic also tested on a Linux host) | 36-slot inventory, 2x2 inventory crafting and 3x3 workbench crafting, furnace smelting (`TileEntityFurnace`, 8 smelting recipes), 31 recipes (wood/stone/iron/diamond/gold pickaxe, axe, shovel, sword, hoe + shears + planks, sticks, workbench, chest, furnace, torch, ...), tool speed and durability, and `canHarvestBlock`: stone without a pickaxe breaks and drops nothing, like the original. See ROADMAP changelog. |
++| Block metadata       | compiled and ran on an Android device | 4-bit `Nibbles` per chunk (= `NibbleArray`, the McRegion `Data` tag as is), `meta` / `set_block_meta`, worldgen writes it (birch + taiga species, grass type, pumpkin facing), drops carry `damageDropped`, items place `getPlacedBlockMetadata`, the atlas shows log/leaf species and the 15 wool colours. Block shapes (slab, stairs, door, bed) are not part of it. Java golden regenerated: old lines unchanged, new `META` hashes. See ROADMAP changelog. |
++| M6b Block updates    | written WITHOUT a Rust toolchain: not compiled, not run | `world/ticks.rs`: scheduled ticks (`scheduleBlockUpdate`, 1000 per tick) + 80 random ticks per chunk within 9 chunks, `onBlockAdded`/`onBlockRemoval`/`onNeighborBlockChange` replayed from a change log of the notifying setters. Water and lava flow (`BlockFlowing`: levels, falling, source making, lava slow + hardening to obsidian/cobblestone), sand and gravel fall (`EntityFallingSand` as a flat box), leaf decay, sapling growth (reuses the populate tree generators), plants uproot without ground, grass spread, crops, farmland, reeds, cactus. No fire, mushroom spread, snow/ice, rain on farmland. See ROADMAP changelog. |
++| Health + damage      | compiled and ran on an Android device (56 host tests) | 20 health, fall damage, drowning, lava + fire, void, death drops the inventory and respawns. Fluids are not solid and the player swims. Mushroom stew (bowl + 2 mushrooms) is the only food, tap to eat. See ROADMAP changelog. |
++| M7 Save              | compiled and ran on an Android device | Own simple format, not McRegion: one run-length-coded file per edited chunk + a `level` file (player, inventory, furnaces, dropped items, time). Autosave every 5 s, full save on pause/exit, resume on start. Saves live in the app's private storage, one folder per seed. +2 tests. See ROADMAP changelog. |
++| Real-time shadows    | written; shader + pass tested headless on lavapipe (Vulkan) on a Linux host, NOT run on a device, `lib.rs` not compiled | Port of shaderLABS/Shadow-Tutorial to wgpu, no Iris/OptiFine: sun depth pass (1024^2, distortion 0.10, foliage excluded) + per-pixel compare in the chunk shader, replaces the mesher's baked shadow ray. See ROADMAP changelog. |
+ | M8 Mobs              | written WITHOUT a Rust toolchain: not compiled, 3 mob tests not run | 13 mobs on one AI (`EntityCreature`/`EntityLiving` wander at 20 Hz, 0.9..3.6 box physics via `physics::step_box`): pig, cow, sheep (fleece colours), chicken (eggs, slow fall), wolf (angry when hit), squid, zombie, zombie pigman, giant, skeleton (arrows), creeper (fuse + `Explosion`), spider (leap, climbs), slime (hops, splits). Boxy models with swinging limbs, tap to hit (swords 4+, tools 2+, hand 1, 10-tick hurt window, knockback), `dropFewItems` loot, zombies/skeletons burn in daylight, spawns by light/grass/water. No path-finder, ghast, taming, shearing, sound, save. See ROADMAP changelog. |
+ | M9..M14              | pending | Everything else: see ROADMAP.md for the order. |
+ 
+@@ -74,6 +76,7 @@
+       save.rs             M7: chunk file codec (RLE), `Level` codec (player, inventory, furnaces, drops), atomic write
+       vitals.rs           health, air, fire, fall damage (EntityLiving.attackEntityFrom and friends)
+       chunks/light.rs     M5 light engine (port of World/Chunk lighting)
++      ticks.rs            M6b block updates: scheduled + random ticks, notifications, water/lava, sand, leaves, saplings, crops
+       gen/
+         mod.rs            module list
+         caves.rs          MapGenBase + MapGenCaves
+diff -ruN a/ROADMAP.md b/ROADMAP.md
+--- a/ROADMAP.md	2026-10-10 05:16:34.000000000 +0000
++++ b/ROADMAP.md	2026-10-09 22:28:07.342908927 +0000
+@@ -11,9 +11,9 @@
+ | M2  | Camera + physics | First-person walk, jump, AABB collision |
+ | M3  | Overworld gen | Beta-1.7 noise: grass/dirt/stone, sea level 64, ores |
+ | M4  | Biomes + trees + caves | All b1.7.3 biomes + worldgen populate step |
+-| M5  | Block interaction | Raycast pick, break, place, light update (done, not compiled: see Changelog) |
+-| M6  | Inventory + crafting | Survival inv, hotbar, crafting grid, recipes (done, not run on a device: see Changelog) |
+-| M7  | Save | Own format (not McRegion, by decision): per-chunk RLE files + `level`; autosave, save on pause/exit, resume (written, not compiled: see Changelog) |
++| M5  | Block interaction | Raycast pick, break, place, light update (done, compiled and ran on an Android device: see Changelog) |
++| M6  | Inventory + crafting | Survival inv, hotbar, crafting grid, recipes (done, compiled and ran on an Android device: see Changelog) |
++| M7  | Save | Own format (not McRegion, by decision): per-chunk RLE files + `level`; autosave, save on pause/exit, resume (done, compiled and ran on an Android device: see Changelog) |
+ | M8  | Entities + AI | Mobs + item entities |
+ | M9  | Audio | Positional OGG, music stubs |
+ | M10 | Multiplayer | Full b1.7.3 client protocol |
+@@ -42,10 +42,27 @@
+ 
+ M8 (entities + AI). M7 (save) is written but not compiled: run `cargo test --lib` first. Furnaces smelt (see the furnace entry), so the whole tool chain up to diamond is reachable. M6 is written and the crate type-checks and tests on a host, but nothing has run on a device (M5 included). M4 is done: caves and populate match the real classes bit for
+ bit (`tools/golden/`). Still approximate in populate (see README): light model, no metadata, no tile entities, no block
+-ticks (liquids/sand). Sapling growth, fluid flow and falling sand belong with M5's block updates. Ice Desert exists in
++ticks (liquids/sand). Sapling growth, fluid flow and falling sand are in M6b (block updates). Ice Desert exists in
+ BiomeGenBase but climate never selects it; b1.7.3 has no ravines.
+ 
+ ## Changelog
++- `done` M6b block updates (`world/ticks.rs`, hooks in `world/chunks.rs`, `world/gen/populate.rs`, `render/items.rs`, `lib.rs`; written WITHOUT a Rust toolchain: not compiled, not run, expect a compile fix or two; no new tests yet):
++  - `ChunkManager` logs every notifying write (`set_block` / `set_block_meta`: x, y, z, old id, new id); `set_quiet` is the `setBlockAndMetadata` / `setBlockMetadata` write that does not. `Ticks::step` (20 Hz, next to the furnaces) runs the scheduled
++    ticks (`TickUpdates`: BTreeSet by due time, dedup set, <= 1000 per tick, skipped unless the cell's +-8 area is loaded), then 80 random ticks per lit final chunk within 9 chunks with the Java LCG (`World.tick`), then replays the log:
++    `onBlockAdded`, `onBlockRemoval`, `onNeighborBlockChange` of the six neighbours, until it is empty.
++  - Water/lava: `BlockFlowing.updateTick` (levels, downward flow with +8, sources from 2 neighbours for water, lava creeps 2 levels and 3 of 4 ticks held back, `calculateFlowCost` / `getOptimalFlowDirections`), `BlockStationary` waking up,
++    `checkForHarden` (obsidian / cobblestone), tick rates 5 / 30. Items in the way drop (water only).
++  - Sand, gravel: schedule 3 ticks, `EntityFallingSand` as `ticks::Falling` (gravity 0.04, drag 0.98, <= 64, drawn as a 0.98 flat box), lands or drops as an item.
++  - `BlockLeaves` decay (bit 8, 4 steps from a log, `onBlockRemoval` of logs +-4 and leaves +-1 sets the bit), `BlockSapling` (bit 8 then `growTree` through `populate::grow_sapling` on a 2x2 chunk `Region`; the 4 chunks are re-lit),
++    `BlockFlower.canBlockStay` for flowers, tall grass, dead bush, mushrooms, crops (they drop and vanish), `BlockGrass` spread/death, `BlockCrops` growth + `getGrowthRate`, `BlockFarmland`, `BlockReed`, `BlockCactus`.
++  - Not ported: fire (lava does not ignite), mushroom spread, snow/ice, rain wetting farmland, falling sand when chunks are far (vanilla drops it instantly), trampling farmland, saving pending ticks (vanilla does not).
++  - UNVERIFIED: mushroom `canBlockStay` light limit (only the opaque ground is checked), the `Block.tickOnLoad` list was read from the `setTickOnLoad(true)` calls.
++- `done` real-time shadows (port of shaderLABS/Shadow-Tutorial, written on a Linux host: `render::camera`, `world::sky` and `gpu::pipeline` compiled and tested there (14 tests, incl. a headless lavapipe render, `gpu/shadow_test.rs`); `lib.rs` edits NOT compiled; not run on a device):
++    - `gpu/pipeline.rs`: shadow map `Depth32Float` 1024^2 + comparison sampler (group 1), `vs_shadow` (= `shadow.vsh`: `distort()`, foliage parked off-screen via a tile bitmask built from `chunk::is_plant`), `fs_main` (= `gbuffers_terrain.fsh`: face normal from position derivatives, `SHADOW_BRIGHTNESS`, `sqrt(N.L)` lit mix, strength fade). `camera::shadow_view_proj` (ortho 64 blocks around the eye), `sky::sun_dir` / `shadow_strength`; `lib.rs` runs the extra depth pass only while the strength is > 0 (never at night or in rain).
++    - Replaces the baked shadow ray: `lib.rs` no longer calls `set_sun`, so `mesh::build`'s `occ` code, `ChunkManager::set_sun` and `sky::sun_key` are dead and can go.
++    - Not ported: colored shadows (no translucent pass yet: glass and water are opaque cubes) and `SHADOW_DISTORT_ENABLED`/`COLORED_SHADOWS` toggles. Block light is not exempt from shadow (the vertex `light` merges sky and block light, the pack only darkens the sky part).
++    - Deviation: `NORMAL_BIAS` offsets in blocks (one texel of the distorted map x `SHADOW_BIAS`); the pack's offset is 1/R of that and left flat ground full of acne in the test.
++    - UNVERIFIED: 64-block radius, 1024 map and the 37-degree test scene on real hardware; cost of the second pass on low-end GPUs (Back-face culling in the shadow pipeline is the first thing to try).
+ - `done` all overworld mobs (written WITHOUT a Rust toolchain: not compiled, 3 tests in `mobs.rs` not run; `tools/gen_names.py` now also writes `RESIST`):
+     - `world/mobs.rs`: the pig's `Pig` became `Mob` + `Kind` with `spec` = (`setSize`, health, `moveSpeed`, `attackStrength`): Pig, Cow, Sheep (`getRandomFleeceColor`),
+       Chicken (egg every 6000..12000 ticks, `motionY x 0.6` fall), Wolf (neutral until hit), Squid (`EntitySquid` swim vector), Zombie, PigZombie (400..800
+@@ -79,7 +96,7 @@
+   slab, charcoal by damage), `HudPipeline::push_text` / `text_width` / `push_tooltip`, hud quad cap 2048 -> 4096.
+     - Not done: tooltips in the hotbar/in play (b1.7.3 has none), non-ASCII, text anywhere else (that is M14), item sprites.
+     - UNVERIFIED: the tooltip spot (34 units above the finger, below it near the top edge) is invented; vanilla uses mouse + (12, -12).
+-- `done` sun, moon, stars, sunrise glow and weather (written WITHOUT a Rust toolchain: not compiled, the 5 new tests not run; the Java reference
++- `done` sun, moon, stars, sunrise glow and weather (written WITHOUT a Rust toolchain, then compiled and ran on an Android device; the 5 new tests not run; the Java reference
+   numbers behind 3 of them were generated from the real classes, `tools/golden/G.java` `sky()`; +5 tests):
+     - `world/sky.rs`: `Weather` = `World.updateWeather` (rain/thunder timers on a `java.util.Random`, strengths +-0.01 per tick; started clear, not
+       saved, a loaded world starts clear), `skylight_subtracted` / `sky_color` now take the rain and thunder strengths, `fog_color` (horizon colour
+@@ -96,7 +113,7 @@
+     - Not done: rain/snow streaks (`renderRainSnow`; `rain.png`/`snow.png` are in the jar), rain particles and sound, lightning (`EntityLightningBolt`)
+       and the sky flash, snow layers and ice from weather, clouds, fog on terrain, water/lava fog, the weather is not saved. A new world waits
+       12000..180000 ticks (10..150 minutes) for the first rain; to see it sooner, call `weather.tick()` in a loop at start-up until `weather.rain(1.0) > 0`.
+-- `done` M7 fix: autosave no longer interrupts play every 5 s (not compiled, not run on a device). `App::save` called `close_screen()`
++- `done` M7 fix: autosave no longer interrupts play every 5 s (compiled and ran on an Android device). `App::save` called `close_screen()`
+   unconditionally, and `close_screen` also runs `touch.set_screen(false)`, so each autosave (screen closed) reset the touch state and cut
+   the held move stick / look drag / dig. Now `save` closes a screen only when one is open (`lib.rs`, one `if`). Pause and exit saves are
+   unchanged (they still turn an open screen into dropped items first).
+@@ -104,7 +121,7 @@
+       site, not read. If actions still drop, look there first.
+     - Still open: autosave writes the level + up to 24 chunks on the render thread; on a slow phone that can hitch a frame. If so, lower
+       `AUTOSAVE_CHUNKS` or move the writes to a thread.
+-- `done` M7 save (written WITHOUT a Rust toolchain: not compiled, tests not run, expect a compile fix or two; +2 tests). Decision: it does
++- `done` M7 save (written WITHOUT a Rust toolchain, then compiled and ran on an Android device; tests not run; +2 tests). Decision: it does
+   not follow b1.7.3 (no McRegion, NBT, zlib): the aim is fewer lines and a smaller, faster save, not a loadable vanilla world.
+     - `world/save.rs` (new): `encode_chunk`/`decode_chunk` = populated flag + run-length-coded block ids + metadata nibbles (runs of
+       1..=255), `Level` encode/decode (time, position, spawn, look, hotbar slot, health/air/fire, 36 slots, furnaces, dropped items),
+@@ -126,7 +143,7 @@
+       if a populated chunk was written before its neighbour. Chunk writes and reads run on the render thread (a few small files per frame).
+     - Tests: `chunk_and_level_round_trip` (codec, run splitting, every corrupt case), `edits_survive_a_restart` (flush, new manager loads
+       it, corrupt file forgotten).
+-- `done` M13 frustum culling (host-checked: type-checks, 48 tests pass; NOT run on a device, so the FPS gain is unmeasured):
++- `done` M13 frustum culling (host-checked: type-checks, 48 tests pass; compiled and ran on an Android device; the FPS gain is still unmeasured):
+     - `render/camera.rs`: `Frustum::from_view_proj(proj * view)` takes the six planes (Gribb-Hartmann, depth 0..1 so the near plane is row 2),
+       `intersects_aabb` is the usual conservative test against the corner furthest along each plane normal. Test covers ahead, behind,
+       sides, above/below, past the far plane, the camera inside a box, the wide 2:1 shape and a 90 degree turn.
+@@ -134,21 +151,21 @@
+       only those. Only the terrain draw is culled: dropped items, the outline and the HUD are tiny.
+     - Not done on purpose: tightening the box to each chunk's real height (it is the full 128), occlusion culling, greedy meshing, a profiler.
+       Culling also trims only draw calls and GPU vertex work; chunk meshing and generation still run for the whole ring.
+-- `done` sword, hoe, shears (host-checked like M6: crate type-checks, 47 tests pass, NOT run on a device):
++- `done` sword, hoe, shears (host-checked like M6: crate type-checks, 47 tests pass, compiled and ran on an Android device):
+     - `craft.rs`: swords (ids 267/268/272/276/283, 1.5x on everything, 15x and harvest on web, 2 wear per block), hoes (290..294, no wear
+       from digging, 1 per tilling), shears (359, 238 uses: 15x and harvest on web, 15x on leaves, 5x on wool, wear only on leaves and web).
+       Recipes `RecipesWeapons` x 5, hoe x 5 from `RecipesTools`, shears from two iron ingots. Wear is `wear_on_break(held, block)`.
+     - `lib.rs`: a hoe tills dirt, or grass with air above and not from below, into farmland (60) and wears 1 (`ItemHoe.onItemUse`);
+       shears on leaves drop the leaves block itself (`BlockLeaves.harvestBlock`) via `Drops::spawn_stack`.
+     - Not done: farmland reverting to dirt, its 15/16 height, crops (so a hoe only makes farmland), sheep, bow and arrow.
+-- `done` mushroom stew + eating (`world/items.rs`, `world/craft.rs`, `world/vitals.rs`, `lib.rs`; written WITHOUT a Rust toolchain: not compiled, tests not run, +1 test and extra asserts):
++- `done` mushroom stew + eating (`world/items.rs`, `world/craft.rs`, `world/vitals.rs`, `lib.rs`; written WITHOUT a Rust toolchain, then compiled and ran on an Android device; tests not run, +1 test and extra asserts):
+     `ItemFood.onItemRightClick` / `ItemSoup`: a tap that neither places a block nor opens a workbench/furnace uses the held item (as
+     `Minecraft.clickMouse` -> `sendUseItem` does, aimed at a block or not). Food uses up one and `Vitals::heal`s (`EntityLiving.heal`: nothing when dead,
+     capped at 20, damage window back to 10); eating at full health still uses it up. Stew (282) heals 10, stacks to 1 and leaves an empty bowl (281).
+     Recipes: bowl (3 planks in a V, x4) and stew (red + brown mushroom + bowl, either order). Only the stew is in `heal_amount`; apple, bread, pork, golden
+     apple and fish are one line each (ids in the comment) once mobs, crops or chests exist. Not done: eating animation and sound, the hold-to-eat delay
+     (b1.7.3 has none: eating is instant).
+-- `done` health, damage, death (`world/vitals.rs`, `lib.rs`; written WITHOUT a Rust toolchain: not compiled, test not run, +1 test):
++- `done` health, damage, death (`world/vitals.rs`, `lib.rs`; written WITHOUT a Rust toolchain, then compiled and ran on an Android device; test not run, +1 test):
+     `Vitals` = `EntityLiving.attackEntityFrom` (20 health, the 10-tick damage window: an equal or smaller hit inside it is ignored, a bigger one
+     pays the difference), `Entity.updateFallState` + `EntityLiving.fall` (`ceil(fall - 3)`, water cancels it), drowning (300 air, then 2 damage every
+     20 ticks once it runs out, `isInsideOfMaterial`), lava (4 damage per window + 600 ticks of fire, 1 damage per second while burning, water puts
+@@ -158,14 +175,14 @@
+     b1.7.3 has no hunger and no natural regeneration (only Peaceful heals), so health stays down until food is ported. Not done: suffocation in
+     blocks, hurt flash/blink, knockback, burning and hurt sounds, fire overlay, death camera roll, items burning in lava, per-difficulty damage,
+     bed spawn, health in the save (M7).
+-- `done` fluids are not solid + swimming (`world/physics.rs`; written WITHOUT a Rust toolchain: not compiled, test not run, +1 test):
++- `done` fluids are not solid + swimming (`world/physics.rs`; written WITHOUT a Rust toolchain, then compiled and ran on an Android device; test not run, +1 test):
+     the player used to stand on water and lava because physics treated every id > 0 as solid. Ids 8..=11 are now passable; `step` takes the
+     held jump flag and ports `Entity.handleWaterMovement`/`handleLavaMovement` (box shrunk 0.4 top and bottom) and
+     `EntityLiving.moveEntityWithHeading`: no gravity in a fluid, vertical drag 0.8 (lava 0.5) and 0.02 blocks/tick sink, held jump +0.04/tick,
+     wall hop 0.3/tick when 0.6 higher is free. Simplified: every fluid cell is a source block (flow levels need metadata), horizontal speed is
+     scaled to the terminal swim speed (2.0 m/s water, 0.8 lava) instead of accumulating. Not done: no flow push, no splash/bubbles, no breath
+     or lava damage (next: health), dropped items still treat fluids as solid.
+-- `done` block metadata (written WITHOUT a Rust toolchain: not compiled, tests not run; the Java side was run). Foundation for wood
++- `done` block metadata (written WITHOUT a Rust toolchain, then compiled and ran on an Android device; tests not run; the Java side was run). Foundation for wood
+   and leaf species, wool colours, slabs, stairs, doors and the bed, so the chunk format does not change again when they arrive:
+     - `world/chunk.rs`: `Nibbles` = `NibbleArray` (4 bits per cell, even cell index = low nibble, same index as the blocks), 16 KB
+       per chunk, bytes identical to the McRegion `Data` tag (M7 writes `bytes()` as is). `world/chunks.rs`: `Entry.data`,
+@@ -190,8 +207,8 @@
+   a picked-up stack floats above the finger (`TouchUi::cursor_pos`), and dragging it over other slots puts one item into each
+   slot it enters, the start slot included (`Screen::drop_one`: empty or same item with room, never a swap, never an output
+   slot). A press that lifts where it began is still a tap, and the "1" toggle stays. The yellow cursor box is gone. The
+-  gesture state machine is in `lib.rs` (`on_screen_event`) and only `drop_one` is unit-tested; 47 tests pass, not run on a device.
+-- `done` furnace + smelting (same host checks as M6: crate type-checks, 46 tests pass, NOT run on a device):
++  gesture state machine is in `lib.rs` (`on_screen_event`) and only `drop_one` is unit-tested; 47 tests pass, compiled and ran on an Android device.
++- `done` furnace + smelting (same host checks as M6: crate type-checks, 46 tests pass, compiled and ran on an Android device):
+     - `world/craft.rs`: `Furnace` = `TileEntityFurnace.updateEntity` (fuel used up when the fire starts, 200 ticks per item, output stacks
+       to 64, relights from the next fuel without a flip), `FurnaceRecipes` (iron/gold/diamond ore, sand -> glass, cobble -> stone, clay -> brick,
+       cactus -> green dye, log -> charcoal) and `getItemBurnTime` (wood blocks 300, stick/sapling 100, coal 1600). `ContainerFurnace` slots and the
+@@ -201,7 +218,7 @@
+     - Atlas colours for the new blocks (glass, wool, metal blocks, workbench, furnaces, snow block, glowstone); iron/gold/diamond tools had none.
+     - Not done: the furnace contents are not saved (M7), furnace facing (no metadata), fuel/lava bucket, raw pork and fish.
+ - `done` M6 crafting + tools (written on a Linux host: the whole crate type-checks and its 45 tests pass against a stubbed
+-  `android-activity`; NOT run on a device, so the touch layout of the new screen is untested by hand):
++  `android-activity`; compiled and ran on an Android device):
+     - `world/craft.rs` (new): `EnumToolMaterial` (wood/stone/iron/diamond/gold), pickaxe/axe/shovel ids 256..=286, `getStrVsBlock`,
+       `ItemPickaxe.canHarvestBlock` (obsidian level 3, diamond/gold/redstone level 2, iron/lapis level 1, else rock/iron),
+       `ItemSpade.canHarvestBlock` (snow). 26 shaped recipes (`RecipesTools` loop for 5 materials x 3 tools, planks, sticks,
+@@ -221,7 +238,7 @@
+       item sprites (tools are a handle plus a head shape in the material colour), the other ~100 `CraftingManager` recipes.
+     - The `ponytail` note in the drops entry below ("bare hands harvest everything") is superseded by this entry.
+ - `done` drops + hotbar inventory (`world/items.rs`, `render/items.rs`; the logic is unit-tested on a Linux host in a scratch crate,
+-  `lib.rs`/wgpu NOT compiled here: expect a compile fix or two):
++  `lib.rs`/wgpu NOT compiled here: ):
+     - Drops port `Block.dropBlockAsItem`: `quantityDropped`, then per item one `nextFloat` (chance 1.0) and `idDropped`, then the 3
+       position draws, in the Java order on one `JavaRandom`. Table covers every block worldgen makes plus the metadata-free extras
+       (stone -> cobblestone, grass/farmland -> dirt, gravel -> flint 1/10, coal/diamond/lapis(4-8 dye:4)/redstone(4-5) ores, leaves ->
+@@ -233,25 +250,25 @@
+       Starts empty; a tap places the selected item if it is a block (id < 256) and uses one up. Full hotbar leaves the item on the ground.
+     - Bare hands harvest everything for now (vanilla `canHarvestBlock` would drop nothing from stone without a pickaxe; no tools/crafting yet).
+     - Open: placing plants has no `canBlockStay` check; items are drawn as cubes, full brightness, no spin; no 27-slot inventory screen (M6).
+-- `done` hardness-based digging (not compiled): `world/dig.rs` ports `Block.blockStrength` and the `PlayerControllerSP` damage
++- `done` hardness-based digging (compiled and ran on an Android device): `world/dig.rs` ports `Block.blockStrength` and the `PlayerControllerSP` damage
+   counter at 20 Hz (hardness table from Block.java; bare hand: rock/iron/snow/web dig 3.3x slower; 5x slower when airborne or
+   head under water; instant for hardness 0; 5-tick wait after a break; bedrock/portal unbreakable). Touch: hold still on the
+   right half for 0.4 s to start digging, keep holding to finish (aiming elsewhere restarts the damage); progress bar under the
+   crosshair (vanilla's crack textures need M14). Tap still places. No tools or drops yet (inventory).
+-- `done` faster world loading (not compiled): chunk map uses a cheap integer hasher instead of SipHash; light work is bounded by
++- `done` faster world loading (compiled and ran on an Android device): chunk map uses a cheap integer hasher instead of SipHash; light work is bounded by
+   10 ms per frame instead of a cell count and lights up to 2 chunks per frame; seam recomputation skips cells above the tallest
+   column and block light when neither chunk has any; `App::init` (off the render thread) lights and meshes the spawn area
+   (>= 24 chunk meshes or 8 s) before the first frame. Still open: populate and meshing run on the render thread.
+-- `done` plants drawn (written WITHOUT a Rust toolchain: not compiled, tests not run): flowers, mushrooms, tall grass, dead bush
++- `done` plants drawn (written WITHOUT a Rust toolchain, then compiled and ran on an Android device; tests not run): flowers, mushrooms, tall grass, dead bush
+   and reeds are two crossed double-sided quads (`chunk::cross_shape`, sized from each block's bounds; flat colours until M14
+   textures), lit by their own cell, and pickable/breakable as a whole cell. Still not solid. Snow layer (78) is still not drawn.
+-- `done` day/night cycle (written WITHOUT a Rust toolchain: not compiled, tests not run):
++- `done` day/night cycle (written WITHOUT a Rust toolchain, then compiled and ran on an Android device; tests not run):
+     - `world/sky.rs`: ports of `calculateCelestialAngle`, `calculateSkylightSubtracted`, the sky colour (`func_4079_a` +
+       `getSkyColorByTemp`, AWT HSB maths). 24000 ticks per day at 20 ticks/s, new world starts at tick 0 (sunrise). 2 tests.
+     - `ChunkManager::set_sky_sub` (0..=11) marks every mesh stale when it changes; `mesh::build` takes `sky_sub` and uses
+       `max(sky - sky_sub, block)` per cell, so night is dark but lava/torches stay lit. `temperature_at` feeds the sky colour.
+     - Not done: sun, moon and stars are not drawn (done later: see the sun/moon/weather entry), no fog, no rain/thunder terms, time is not saved (M7) and not adjustable.
+-- `done` M5 block interaction (written WITHOUT a Rust toolchain: not compiled, tests not run, expect a compile fix or two):
++- `done` M5 block interaction (written WITHOUT a Rust toolchain, then compiled and ran on an Android device; tests not run, ):
+     - `world/pick.rs`: port of `World.func_28105_a` + `Block.collisionRayTrace` (f64, 4.0 reach), place cell/replaceable/player-overlap rules. 3 tests.
+     - `world/chunks/light.rs`: port of the b1.7.3 light engine (sky + block light, region queue, `MetadataChunkBlock` relaxation,
+       `Chunk.func_1003_g` relight, `generateSkylightMap`). Chunks light once final; edits go through `ChunkManager::set_block`. 1 test.
+@@ -260,7 +277,7 @@
+     - Touch: tap on the right half places, hold breaks (repeat 0.25 s), drag looks. Crosshair added. Hotbar slot = block placed.
+     - Simplifications: instant break, no drops/consumption (M6), no day/night (`skylightSubtracted` = 0), plants/liquids not pickable,
+       light seams across a not-yet-final neighbour are fixed by the seam strips when it is lit.
+-- `done` M4d caves, trees, populate (compiled and tested on a Linux host with rustc 1.85; not run on a device):
++- `done` M4d caves, trees, populate (compiled and tested on a Linux host with rustc 1.85; compiled and ran on an Android device):
+     - `gen/caves.rs`, `gen/populate.rs` (new), `OverworldGenerator::generate` now ends with the caves; `populate_ores`
+       and `next_u31` deleted. `mobSpawnerNoise` is the 8th noise stack (after the 7 terrain ones).
+     - `world/chunks.rs`: raw ring is now `RENDER_DIST + 2`, populate (1 chunk/frame, nearest first) needs the 2x2 raw
+@@ -271,7 +288,7 @@
+     - Plants are neither meshed nor solid (`is_plant`); atlas colours for the new blocks. Spawn search skips trees.
+     - The M4f chunk manager compiled first try on rustc 1.85; its 3 tests pass.
+ - `done` M4f chunk manager (`world/chunks.rs`; written without a Rust toolchain, NOT compiled, tested or run on
+-  a device yet, so expect a compile fix or two on the first CI run):
++  a device yet, so  on the first CI run):
+     - Replaces the 48x48 super-chunk (gone from `lib.rs`, `mesh.rs`, `populate_ores`). Chunks live in a
+       `HashMap<(cx, cz), Entry>`; each has its own vertex/index buffer (empty chunks have none).
+     - Ring: circle of `RENDER_DIST` (4) chunks is meshed and drawn, `RENDER_DIST + 1` is generated (a chunk is
+diff -ruN a/mc-rs/src/gpu/pipeline.rs b/mc-rs/src/gpu/pipeline.rs
+--- a/mc-rs/src/gpu/pipeline.rs	2026-10-09 15:02:46.000000000 +0000
++++ b/mc-rs/src/gpu/pipeline.rs	2026-10-09 22:27:07.090272803 +0000
+@@ -1,14 +1,15 @@
+ //! Render pipeline for chunk meshes + atlas texture.
+ 
+ use bytemuck::{Pod, Zeroable};
+-use glam::Mat4;
++use glam::{Mat4, Vec3};
+ use wgpu::{
+     BindGroup, BindGroupLayout, Buffer, BufferUsages, Device, Queue, RenderPipeline,
+     Texture, TextureView,
+ };
+ use wgpu::util::DeviceExt;
+ 
+-use crate::render::atlas;
++use crate::render::{atlas, camera::{shadow_view_proj, SHADOW_RADIUS}};
++use crate::world::chunk::is_plant;
+ 
+ #[repr(C)]
+ #[derive(Copy, Clone, Pod, Zeroable)]
+@@ -37,8 +38,31 @@
+ pub struct Uniforms {
+     pub view: [[f32; 4]; 4],
+     pub proj: [[f32; 4]; 4],
++    pub shadow_vp: [[f32; 4]; 4],
++    /// xyz: direction toward the sun, w: shadow strength 0..1 (0 = no shadow pass this frame).
++    pub sun: [f32; 4],
++    pub eye: [f32; 4],
++    /// x: distort factor, y: bias in blocks per undistorted texel, z: shadow brightness.
++    pub sh: [f32; 4],
++    /// Bit `t` set: atlas tile `t` is foliage and casts no shadow (`EXCLUDE_FOLIAGE`, `block.properties`).
++    pub plant: [[u32; 4]; 2],
+ }
+ 
++// Shadow-Tutorial `distort.glsl` constants.
++pub const SHADOW_RES: u32 = 1024; // shadowMapResolution
++const SHADOW_DISTORT: f32 = 0.10; // SHADOW_DISTORT_FACTOR
++const SHADOW_BIAS: f32 = 1.0;
++const SHADOW_BRIGHTNESS: f32 = 0.75;
++
++const PLANT: [[u32; 4]; 2] = {
++    let (mut m, mut id) = ([[0u32; 4]; 2], 0usize);
++    while id < 256 {
++        if is_plant(id as u8) { m[id >> 7][(id >> 5) & 3] |= 1 << (id & 31); }
++        id += 1;
++    }
++    m
++};
++
+ pub struct ChunkPipeline {
+     pub pipeline: RenderPipeline,
+     pub uniform_buf: Buffer,
+@@ -46,21 +70,36 @@
+     pub atlas_view: TextureView,
+     pub bind_group: BindGroup,
+     pub bind_layout: BindGroupLayout,
++    /// Sun depth pass (`shadow.vsh`), its target, and the group 1 the main pass reads it through.
++    pub shadow_pipeline: RenderPipeline,
++    pub shadow_view: TextureView,
++    pub shadow_bind: BindGroup,
+ }
+ 
+ const SHADER_SRC: &str = r#"
+ struct Uniforms {
+     view: mat4x4<f32>,
+     proj: mat4x4<f32>,
++    shadow_vp: mat4x4<f32>,
++    sun: vec4<f32>,
++    eye: vec4<f32>,
++    sh: vec4<f32>,
++    plant: array<vec4<u32>, 2>,
+ };
+ @group(0) @binding(0) var<uniform> u: Uniforms;
+ @group(0) @binding(1) var samp: sampler;
+ @group(0) @binding(2) var tex: texture_2d<f32>;
++@group(1) @binding(0) var sh_tex: texture_depth_2d;
++@group(1) @binding(1) var sh_samp: sampler_comparison;
++
++const TW: u32 = @TW@u;
++const TH: f32 = @TH@.0;
+ 
+ struct VsOut {
+     @builtin(position) pos: vec4<f32>,
+     @location(0) uv: vec2<f32>,
+     @location(1) light: f32,
++    @location(2) wp: vec3<f32>,
+ };
+ 
+ @vertex
+@@ -69,13 +108,45 @@
+     o.pos = u.proj * u.view * vec4<f32>(vpos, 1.0);
+     o.uv = vuv;
+     o.light = vlight;
++    o.wp = vpos;
+     return o;
+ }
+ 
++// shadow.vsh: foliage is parked outside the clip volume; everything else is drawn from the sun with `distort()`
++// applied. The shadow map's depth is `z * 0.5 + 0.25`: distort.glsl's `z * 0.5` in GL clip space, then 0..1.
++@vertex
++fn vs_shadow(@location(0) p: vec3<f32>, @location(1) uv: vec2<f32>) -> @builtin(position) vec4<f32> {
++    let t = min(u32(uv.y * TH) * TW + u32(uv.x * f32(TW)), 255u); // atlas_uv is the texel centre of tile t
++    if ((u.plant[t >> 7u][(t >> 5u) & 3u] >> (t & 31u)) & 1u) == 1u { return vec4<f32>(10.0); }
++    let c = u.shadow_vp * vec4<f32>(p, 1.0);
++    return vec4<f32>(c.xy / (length(c.xy) + u.sh.x), c.z * 0.5 + 0.25, 1.0);
++}
++
++// gbuffers_terrain.fsh, per pixel instead of per vertex (there is no normal attribute: a flat face's normal is the
++// cross of the position derivatives, turned toward the eye).
+ @fragment
+ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+     let c = textureSample(tex, samp, in.uv);
+-    return vec4<f32>(c.rgb * in.light, c.a);
++    var n = normalize(cross(dpdx(in.wp), dpdy(in.wp)));
++    if dot(n, u.eye.xyz - in.wp) < 0.0 { n = -n; }
++    var k = 1.0;
++    if u.sun.w > 0.0 {
++        k = u.sh.z; // facing away from the sun, or in shadow
++        let ndl = dot(n, u.sun.xyz);
++        if ndl > 0.0 {
++            let c0 = u.shadow_vp * vec4<f32>(in.wp, 1.0);
++            let f = length(c0.xy) + u.sh.x;
++            // computeBias + NORMAL_BIAS, in blocks: the world size of a shadow texel here (distortion stretches it by
++            // f^2 / K), pushed along the surface normal. (distort.glsl's own offset is 1/R of this, too small to stop acne.)
++            let bias = u.sh.y * f * f / u.sh.x;
++            let c1 = u.shadow_vp * vec4<f32>(in.wp + n * bias, 1.0);
++            let p = vec3<f32>(c1.xy / (length(c1.xy) + u.sh.x) * 0.5 + 0.5, c1.z * 0.5 + 0.25);
++            let lit = textureSampleCompareLevel(sh_tex, sh_samp, vec2<f32>(p.x, 1.0 - p.y), p.z);
++            k = mix(k, mix(u.sh.z, 1.0, sqrt(ndl)), lit);
++        }
++        k = mix(1.0, k, u.sun.w);
++    }
++    return vec4<f32>(c.rgb * in.light * k, c.a);
+ }
+ "#;
+ 
+@@ -115,7 +186,7 @@
+             entries: &[
+                 wgpu::BindGroupLayoutEntry {
+                     binding: 0,
+-                    visibility: wgpu::ShaderStages::VERTEX,
++                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                     ty: wgpu::BindingType::Buffer {
+                         ty: wgpu::BufferBindingType::Uniform,
+                         has_dynamic_offset: false,
+@@ -154,14 +225,90 @@
+ 
+         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+             label: Some("chunk_shader"),
+-            source: wgpu::ShaderSource::Wgsl(SHADER_SRC.into()),
++            source: wgpu::ShaderSource::Wgsl(SHADER_SRC.replace("@TW@", &atlas::TILES_W.to_string()).replace("@TH@", &atlas::TILES_H.to_string()).into()),
++        });
++
++        // Group 1: the shadow map and its comparison sampler (nearest = `shadowtex0Nearest`; `Linear` is free PCF).
++        let shadow_tex = device.create_texture(&wgpu::TextureDescriptor {
++            label: Some("shadow_map"),
++            size: wgpu::Extent3d { width: SHADOW_RES, height: SHADOW_RES, depth_or_array_layers: 1 },
++            mip_level_count: 1,
++            sample_count: 1,
++            dimension: wgpu::TextureDimension::D2,
++            format: wgpu::TextureFormat::Depth32Float,
++            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
++            view_formats: &[],
++        });
++        let shadow_view = shadow_tex.create_view(&wgpu::TextureViewDescriptor::default());
++        let shadow_samp = device.create_sampler(&wgpu::SamplerDescriptor {
++            mag_filter: wgpu::FilterMode::Nearest,
++            min_filter: wgpu::FilterMode::Nearest,
++            compare: Some(wgpu::CompareFunction::LessEqual), // lit when ref <= stored, i.e. not `stored < ref`
++            ..Default::default()
++        });
++        let shadow_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
++            label: Some("shadow_bind_layout"),
++            entries: &[
++                wgpu::BindGroupLayoutEntry {
++                    binding: 0,
++                    visibility: wgpu::ShaderStages::FRAGMENT,
++                    ty: wgpu::BindingType::Texture {
++                        sample_type: wgpu::TextureSampleType::Depth,
++                        view_dimension: wgpu::TextureViewDimension::D2,
++                        multisampled: false,
++                    },
++                    count: None,
++                },
++                wgpu::BindGroupLayoutEntry {
++                    binding: 1,
++                    visibility: wgpu::ShaderStages::FRAGMENT,
++                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
++                    count: None,
++                },
++            ],
++        });
++        let shadow_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
++            label: Some("shadow_bind"),
++            layout: &shadow_layout,
++            entries: &[
++                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&shadow_view) },
++                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&shadow_samp) },
++            ],
+         });
+ 
+         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+             label: Some("chunk_pipeline_layout"),
+-            bind_group_layouts: &[&bind_layout],
++            bind_group_layouts: &[&bind_layout, &shadow_layout],
+             push_constant_ranges: &[],
+         });
++        // The shadow pass only needs group 0 (it cannot bind the map it is writing).
++        let shadow_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
++            label: Some("shadow_pipeline"),
++            layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
++                label: Some("shadow_pipeline_layout"),
++                bind_group_layouts: &[&bind_layout],
++                push_constant_ranges: &[],
++            })),
++            vertex: wgpu::VertexState {
++                module: &shader,
++                entry_point: Some("vs_shadow"),
++                buffers: &[Vertex::layout()],
++                compilation_options: wgpu::PipelineCompilationOptions::default(),
++            },
++            fragment: None,
++            // ponytail: no culling (Back would skip the faces turned from the sun, a cheap speed-up once measured).
++            primitive: wgpu::PrimitiveState::default(),
++            depth_stencil: Some(wgpu::DepthStencilState {
++                format: wgpu::TextureFormat::Depth32Float,
++                depth_write_enabled: true,
++                depth_compare: wgpu::CompareFunction::Less,
++                stencil: wgpu::StencilState::default(),
++                bias: wgpu::DepthBiasState::default(),
++            }),
++            multisample: wgpu::MultisampleState::default(),
++            multiview: None,
++            cache: None,
++        });
+ 
+         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+             label: Some("chunk_pipeline"),
+@@ -203,12 +350,24 @@
+             cache: None,
+         });
+ 
+-        Self { pipeline, uniform_buf, atlas_tex, atlas_view, bind_group, bind_layout }
++        Self { pipeline, uniform_buf, atlas_tex, atlas_view, bind_group, bind_layout, shadow_pipeline, shadow_view, shadow_bind }
+     }
+ 
+-    pub fn upload_uniforms(&self, queue: &Queue, view: Mat4, proj: Mat4) {
+-        let u = Uniforms { view: view.to_cols_array_2d(), proj: proj.to_cols_array_2d() };
++    /// Returns the sun's view-projection (for culling the shadow pass). `strength` 0 turns shadows off.
++    pub fn upload_uniforms(&self, queue: &Queue, view: Mat4, proj: Mat4, sun: Vec3, strength: f32) -> Mat4 {
++        let eye = view.inverse().w_axis.truncate();
++        let vp = shadow_view_proj(eye, sun);
++        let u = Uniforms {
++            view: view.to_cols_array_2d(),
++            proj: proj.to_cols_array_2d(),
++            shadow_vp: vp.to_cols_array_2d(),
++            sun: sun.extend(strength).to_array(),
++            eye: eye.extend(0.0).to_array(),
++            sh: [SHADOW_DISTORT, SHADOW_BIAS * 2.0 * SHADOW_RADIUS / SHADOW_RES as f32, SHADOW_BRIGHTNESS, 0.0],
++            plant: PLANT,
++        };
+         queue.write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&u));
++        vp
+     }
+ 
+     pub fn upload_atlas(&self, queue: &Queue) {
+@@ -231,6 +390,9 @@
+     }
+ }
+ 
++#[cfg(test)]
++mod shadow_test;
++
+ pub fn create_vertex_buffer(device: &Device, verts: &[Vertex]) -> Buffer {
+     device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+         label: Some("chunk_vbuf"),
+diff -ruN a/mc-rs/src/gpu/shadow_test.rs b/mc-rs/src/gpu/shadow_test.rs
+--- a/mc-rs/src/gpu/shadow_test.rs	1970-01-01 00:00:00.000000000 +0000
++++ b/mc-rs/src/gpu/shadow_test.rs	2026-10-09 22:27:07.090304530 +0000
+@@ -0,0 +1,63 @@
++//! Headless check of the shadow pass (needs a Vulkan/GL adapter, e.g. lavapipe; skipped without one).
++use super::{create_index_buffer, create_vertex_buffer, ChunkPipeline, Vertex};
++use crate::render::atlas::atlas_uv;
++use glam::{Mat4, Vec3};
++
++fn render(strength: f32, tile: u16) -> Option<Vec<f32>> {
++    let inst = wgpu::Instance::default();
++    let ad = pollster::block_on(inst.request_adapter(&Default::default())).ok()?;
++    let (dev, q) = pollster::block_on(ad.request_device(&Default::default())).ok()?;
++    let fmt = wgpu::TextureFormat::Rgba8Unorm;
++    let pipe = ChunkPipeline::new(&dev, fmt);
++    pipe.upload_atlas(&q);
++    let quad = |t: u16, a, b, c, d| { let (x, y) = atlas_uv(t, 0.0, 0.0); [a, b, c, d].map(|p| Vertex { pos: p, uv: [x, y], light: 1.0 }) };
++    // 1x1 faces like the real mesher (the distort is per vertex, so huge triangles would interpolate it wrongly).
++    let mut verts = vec![];
++    for x in -40..40 { for z in -40..40 { let (x, z) = (x as f32, z as f32); verts.extend(quad(2, [x, 0., z], [x + 1., 0., z], [x + 1., 0., z + 1.], [x, 0., z + 1.])); } }
++    let ground = verts.len() as u32 / 4 * 12;
++    for x in -30..30 { for y in 0..6 { let (x, y) = (x as f32, y as f32); verts.extend(quad(tile, [x, y, 5.], [x + 1., y, 5.], [x + 1., y + 1., 5.], [x, y + 1., 5.])); } }
++    let idx: Vec<u32> = (0..verts.len() as u32 / 4).flat_map(|f| { let b = f * 4; [b, b + 1, b + 2, b, b + 2, b + 3, b, b + 2, b + 1, b, b + 3, b + 2] }).collect();
++    let (vb, ib) = (create_vertex_buffer(&dev, &verts), create_index_buffer(&dev, &idx));
++    let eye = Vec3::new(0.0, 40.0, -4.0);
++    let view = Mat4::look_at_rh(eye, Vec3::new(0.0, 0.0, -4.0), Vec3::Z);
++    let proj = Mat4::perspective_rh(50f32.to_radians(), 1.0, 0.1, 200.0);
++    let sun = Vec3::new(0.0, 0.6, 0.8); // toward +Z, 37 degrees up
++    pipe.upload_uniforms(&q, view, proj, sun, strength);
++    let target = dev.create_texture(&wgpu::TextureDescriptor { label: None, size: wgpu::Extent3d { width: 64, height: 64, depth_or_array_layers: 1 }, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: fmt, usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC, view_formats: &[] });
++    let depth = dev.create_texture(&wgpu::TextureDescriptor { label: None, size: wgpu::Extent3d { width: 64, height: 64, depth_or_array_layers: 1 }, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::Depth32Float, usage: wgpu::TextureUsages::RENDER_ATTACHMENT, view_formats: &[] });
++    let buf = dev.create_buffer(&wgpu::BufferDescriptor { label: None, size: 64 * 64 * 4, usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false });
++    let mut enc = dev.create_command_encoder(&Default::default());
++    let draw = |rp: &mut wgpu::RenderPass, n: u32| { rp.set_bind_group(0, &pipe.bind_group, &[]); rp.set_vertex_buffer(0, vb.slice(..)); rp.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32); rp.draw_indexed(0..n, 0, 0..1); };
++    if strength > 0.0 {
++        let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor { label: None, color_attachments: &[], depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment { view: &pipe.shadow_view, depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }), stencil_ops: None }), timestamp_writes: None, occlusion_query_set: None });
++        rp.set_pipeline(&pipe.shadow_pipeline);
++        draw(&mut rp, idx.len() as u32);
++    }
++    {
++        let tv = target.create_view(&Default::default());
++        let dv = depth.create_view(&Default::default());
++        let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor { label: None, color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &tv, resolve_target: None, depth_slice: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store } })], depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment { view: &dv, depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }), stencil_ops: None }), timestamp_writes: None, occlusion_query_set: None });
++        rp.set_pipeline(&pipe.pipeline);
++        rp.set_bind_group(1, &pipe.shadow_bind, &[]);
++        draw(&mut rp, ground); // ground only: the wall is seen by the sun alone
++    }
++    enc.copy_texture_to_buffer(target.as_image_copy(), wgpu::TexelCopyBufferInfo { buffer: &buf, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(256), rows_per_image: Some(64) } }, wgpu::Extent3d { width: 64, height: 64, depth_or_array_layers: 1 });
++    q.submit([enc.finish()]);
++    buf.slice(..).map_async(wgpu::MapMode::Read, |_| ());
++    dev.poll(wgpu::PollType::Wait).unwrap();
++    let d = buf.slice(..).get_mapped_range();
++    Some(d.chunks(4).map(|p| p[1] as f32).collect()) // green channel
++}
++
++#[test]
++fn wall_shades_the_ground_away_from_the_sun() {
++    let (Some(on), Some(off)) = (render(1.0, 2), render(0.0, 2)) else { return };
++    let (mx, mn) = (on.iter().cloned().fold(0., f32::max), on.iter().cloned().fold(255., f32::min));
++    let (ox, on_) = (off.iter().cloned().fold(0., f32::max), off.iter().cloned().fold(255., f32::min));
++    assert!(ox / on_ < 1.02, "no shadow pass: flat");
++    assert!(mx / mn > 1.15, "shadow darkens part of the ground");
++    // Foliage (tile 31, tall grass) casts no shadow: no ground pixel keeps the shadowed value (77) when the wall is foliage.
++    let dark = |v: &[f32]| v.iter().filter(|&&x| (74.0..=80.0).contains(&x)).count();
++    let plant = render(1.0, 31).unwrap();
++    assert!(dark(&on) > 100 && dark(&plant) == 0, "foliage casts nothing");
++}
+diff -ruN a/mc-rs/src/lib.rs b/mc-rs/src/lib.rs
+--- a/mc-rs/src/lib.rs	2026-10-10 05:16:34.000000000 +0000
++++ b/mc-rs/src/lib.rs	2026-10-09 22:27:19.014575287 +0000
+@@ -32,6 +32,7 @@
+ use crate::world::craft::{self, Furnace, Screen};
+ use crate::world::items::{self, Drops, Inventory, ItemStack};
+ use crate::world::mobs::{self, Ctx, Ev, Mobs};
++use crate::world::ticks::Ticks;
+ use crate::world::save::{self, Level};
+ use crate::world::sky;
+ use crate::world::chunk::{cross_shape, is_plant};
+@@ -92,6 +93,8 @@
+     inv: Inventory,
+     drops: Drops,
+     mobs: Mobs,
++    /// Block updates (scheduled + random ticks, notifications, falling blocks), stepped on the 20 Hz game tick.
++    ticks: Ticks,
+     item_mesh: ItemMesh,
+     /// Open container screen (the 2x2 inventory or a workbench's 3x3) and its "place one" click toggle.
+     screen: Option<Screen>,
+@@ -188,6 +191,7 @@
+             inv: Inventory::default(),
+             drops: Drops::new(seed),
+             mobs: Mobs::new(seed),
++            ticks: Ticks::new(seed),
+             item_mesh,
+             screen: None,
+             one_mode: false,
+@@ -297,7 +301,6 @@
+         let angle = sky::celestial_angle(self.world_ticks as u64, 1.0);
+         let sub = sky::skylight_subtracted(angle, self.weather.rain(1.0), self.weather.thunder(1.0));
+         self.chunks.set_sky_sub(sub);
+-        self.chunks.set_sun(if self.weather.rain(1.0) > 0.5 { i32::MAX } else { sky::sun_key(angle) });
+         self.camera.add_yaw(look_dx * LOOK_SENS);
+         self.camera.add_pitch(look_dy * LOOK_SENS);
+         // Analog move stick: rotate the camera-frame (fwd, side) by yaw into
+@@ -341,6 +344,8 @@
+         self.furn_acc += dt;
+         while self.furn_acc >= dig::TICK {
+             self.furn_acc -= dig::TICK;
++            let centre = (chunk_coord(self.player.pos.x), chunk_coord(self.player.pos.z));
++            self.ticks.step(&mut self.chunks, &mut self.drops, centre);
+             let mut flips = Vec::new();
+             for (&pos, f) in self.furnaces.iter_mut() {
+                 if matches!(self.chunks.block_loaded(pos.0, pos.1, pos.2), Some(61 | 62)) && f.tick() {
+@@ -597,10 +602,8 @@
+         let (pcx, pcz) = (chunk_coord(self.player.pos.x), chunk_coord(self.player.pos.z));
+         self.chunks.update(&self.gpu.device, pcx, pcz);
+         let (view, proj) = self.camera.build_view_proj();
+-        self.pipe.upload_uniforms(&self.gpu.queue, view, proj);
+-        let frustum = Frustum::from_view_proj(proj * view);
+         let outline_indices = self.target.map_or(0, |h| self.outline.update(&self.gpu.queue, h.pos));
+-        let item_indices = self.item_mesh.update(&self.gpu.queue, &self.drops, &self.mobs);
++        let item_indices = self.item_mesh.update(&self.gpu.queue, &self.drops, &self.mobs, &self.ticks.falling);
+ 
+         // Sky and fog colour from the sun angle, the weather and the climate under the player; the frame is cleared to
+         // the fog colour and the sky pass is drawn over it (vanilla order).
+@@ -609,6 +612,9 @@
+         let partial = self.world_ticks.fract() as f32;
+         let angle = sky::celestial_angle(self.world_ticks as u64, partial);
+         let (rain, thunder) = (self.weather.rain(partial), self.weather.thunder(partial));
++        let sun_strength = sky::shadow_strength(angle, rain);
++        let shadow_vp = self.pipe.upload_uniforms(&self.gpu.queue, view, proj, sky::sun_dir(angle), sun_strength);
++        let (frustum, shadow_frustum) = (Frustum::from_view_proj(proj * view), Frustum::from_view_proj(shadow_vp));
+         let sky_rgb = sky::sky_color(angle, temp, rain, thunder);
+         let fog = sky::fog_color(angle, sky_rgb, rain, thunder);
+         let clear = wgpu::Color { r: fog[0] as f64, g: fog[1] as f64, b: fog[2] as f64, a: 1.0 };
+@@ -642,6 +648,26 @@
+ 
+         let mut enc = self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
+ 
++        if sun_strength > 0.0 {
++            let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
++                label: Some("shadow_pass"),
++                color_attachments: &[],
++                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
++                    view: &self.pipe.shadow_view,
++                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
++                    stencil_ops: None,
++                }),
++                timestamp_writes: None,
++                occlusion_query_set: None,
++            });
++            rp.set_pipeline(&self.pipe.shadow_pipeline);
++            rp.set_bind_group(0, &self.pipe.bind_group, &[]);
++            for m in self.chunks.meshes_where(|min, max| shadow_frustum.intersects_aabb(min, max)) {
++                rp.set_vertex_buffer(0, m.vbuf.slice(..));
++                rp.set_index_buffer(m.ibuf.slice(..), wgpu::IndexFormat::Uint32);
++                rp.draw_indexed(0..m.index_count, 0, 0..1);
++            }
++        }
+         {
+             let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                 label: Some("chunk_pass"),
+@@ -668,6 +694,7 @@
+             self.sky.draw(&mut rp);
+             rp.set_pipeline(&self.pipe.pipeline);
+             rp.set_bind_group(0, &self.pipe.bind_group, &[]);
++            rp.set_bind_group(1, &self.pipe.shadow_bind, &[]);
+             // One draw per chunk mesh that is in the view frustum.
+             for m in self.chunks.meshes_where(|min, max| frustum.intersects_aabb(min, max)) {
+                 rp.set_vertex_buffer(0, m.vbuf.slice(..));
+diff -ruN a/mc-rs/src/render/camera.rs b/mc-rs/src/render/camera.rs
+--- a/mc-rs/src/render/camera.rs	2026-10-09 15:02:46.000000000 +0000
++++ b/mc-rs/src/render/camera.rs	2026-10-09 22:27:07.090304530 +0000
+@@ -62,6 +62,17 @@
+     }
+ }
+ 
++/// ponytail: no shadows past 64 blocks (= the render ring); upgrade = cascades.
++pub const SHADOW_RADIUS: f32 = 64.0;
++
++/// The sun's view-projection (`shadowProjection * shadowModelView`): an orthographic box `SHADOW_RADIUS` blocks to each side of
++/// `center`, looking along the sun's rays from `Z` blocks toward the sun. Depth 0..1 like `Mat4::perspective_rh`, so
++/// `Frustum` culls with it too. The sun moves in the YZ plane, so `X` is always a valid up vector.
++pub fn shadow_view_proj(center: Vec3, sun: Vec3) -> Mat4 {
++    const Z: f32 = 128.0; // the world is 128 tall
++    Mat4::orthographic_rh(-SHADOW_RADIUS, SHADOW_RADIUS, -SHADOW_RADIUS, SHADOW_RADIUS, 0.0, 2.0 * Z) * Mat4::look_at_rh(center + sun * Z, center, Vec3::X)
++}
++
+ /// M13 view frustum: the six planes of `proj * view` (Gribb-Hartmann), for culling whole chunks before they are drawn.
+ /// Depth is 0..1 (`Mat4::perspective_rh`, wgpu), so the near plane is row 2 alone.
+ pub struct Frustum {
+@@ -91,6 +102,17 @@
+ mod tests {
+     use super::*;
+ 
++    /// Rays toward the sun share one shadow-map texel, the box edge is NDC 1, and the box centre sits mid-depth.
++    #[test]
++    fn shadow_matrix_follows_the_sun() {
++        let (c, sun) = (Vec3::new(10.0, 70.0, -5.0), Vec3::new(0.0, 0.8, 0.6));
++        let vp = shadow_view_proj(c, sun);
++        let (a, b) = (vp.project_point3(c + Vec3::new(3.0, 1.0, 2.0)), vp.project_point3(c + Vec3::new(3.0, 1.0, 2.0) + sun * 20.0));
++        assert!((a.truncate() - b.truncate()).length() < 1e-4 && b.z < a.z, "same texel, nearer the sun is shallower");
++        assert!((vp.project_point3(c) - Vec3::new(0.0, 0.0, 0.5)).length() < 1e-4);
++        assert!((vp.project_point3(c + Vec3::X * 64.0).y.abs() - 1.0).abs() < 1e-4);
++    }
++
+     #[test]
+     fn frustum_culls_boxes_outside_the_view() {
+         // At the origin looking down -Z (yaw 0, pitch 0), 70 degrees tall, 2:1, far plane 256.
+diff -ruN a/mc-rs/src/render/items.rs b/mc-rs/src/render/items.rs
+--- a/mc-rs/src/render/items.rs	2026-10-10 05:16:34.000000000 +0000
++++ b/mc-rs/src/render/items.rs	2026-10-09 22:27:19.013878123 +0000
+@@ -8,10 +8,11 @@
+ 
+ use crate::world::items::{stack_tile, Drops, ItemStack, MAX_ITEMS};
+ use crate::world::mobs::{Kind::*, Mob, Mobs, MAX_ARROWS, MAX_MOBS};
++use crate::world::ticks::{Falling, MAX_FALLING};
+ 
+ /// 24 vertices x 6 floats per cube, 36 indices per cube.
+-/// A mob is at most 12 boxes (spider 11), an arrow one.
+-const BOXES: usize = MAX_ITEMS + MAX_MOBS * 12 + MAX_ARROWS;
++/// A mob is at most 12 boxes (spider 11), an arrow one, a falling block one.
++const BOXES: usize = MAX_ITEMS + MAX_MOBS * 12 + MAX_ARROWS + MAX_FALLING;
+ const VERTEX_BYTES: u64 = (BOXES * 24 * 6 * 4) as u64;
+ const INDEX_BYTES: u64 = (BOXES * 36 * 4) as u64;
+ 
+@@ -27,8 +28,8 @@
+     }
+ 
+     /// Upload this frame's items; returns the index count to draw.
+-    pub fn update(&self, queue: &wgpu::Queue, drops: &Drops, mobs: &Mobs) -> u32 {
+-        let (verts, idxs) = geometry(drops, mobs);
++    pub fn update(&self, queue: &wgpu::Queue, drops: &Drops, mobs: &Mobs, falling: &[Falling]) -> u32 {
++        let (verts, idxs) = geometry(drops, mobs, falling);
+         if idxs.is_empty() {
+             return 0;
+         }
+@@ -38,7 +39,7 @@
+     }
+ }
+ 
+-fn geometry(drops: &Drops, mobs: &Mobs) -> (Vec<f32>, Vec<u32>) {
++fn geometry(drops: &Drops, mobs: &Mobs, falling: &[Falling]) -> (Vec<f32>, Vec<u32>) {
+     let (mut verts, mut idxs) = (Vec::new(), Vec::new());
+     let a = drops.alpha();
+     for e in &drops.items {
+@@ -54,6 +55,12 @@
+         let (p, h) = (a.pos, 0.06);
+         push_box(&mut verts, &mut idxs, [p.x - h, p.y - h, p.z - h], [p.x + h, p.y + h, p.z + h], stack_tile(ItemStack { id: 35, count: 1, damage: 12 }), 1.0);
+     }
++    // A falling block is a 0.98 box in its block's flat colour (`EntityFallingSand`).
++    for f in falling {
++        let c = f.prev.lerp(f.pos, a);
++        let h = 0.49;
++        push_box(&mut verts, &mut idxs, [c.x - h, c.y - h, c.z - h], [c.x + h, c.y + h, c.z + h], stack_tile(ItemStack { id: f.id as u16, count: 1, damage: 0 }), 1.0);
++    }
+     (verts, idxs)
+ }
+ 
+diff -ruN a/mc-rs/src/world/chunks.rs b/mc-rs/src/world/chunks.rs
+--- a/mc-rs/src/world/chunks.rs	2026-10-10 05:16:34.000000000 +0000
++++ b/mc-rs/src/world/chunks.rs	2026-10-09 22:27:07.094809775 +0000
+@@ -26,6 +26,7 @@
+ use crate::world::chunk::{height_map, idx, Nibbles, H, VOLUME};
+ use crate::world::gen::chunk_manager::WorldChunkManager;
+ use crate::world::gen::overworld::OverworldGenerator;
++use crate::world::gen::noise::JavaRandom;
+ use crate::world::gen::populate::Region;
+ use crate::world::save;
+ 
+@@ -122,6 +123,9 @@
+     /// Save folder (M7); `None` = nothing is read or written (the tests). `saved` = chunks that have a file there.
+     dir: Option<PathBuf>,
+     saved: HashSet<Key>,
++    /// Cells written through `set_block_meta` since the last `take_changes`: (x, y, z, old id, new id). `world::ticks`
++    /// turns them into `onBlockAdded` / `onBlockRemoval` / `onNeighborBlockChange` (the `...WithNotify` setters).
++    changes: Vec<(i32, i32, i32, u8, u8)>,
+ }
+ 
+ impl ChunkManager {
+@@ -163,7 +167,7 @@
+         ring.sort_by_key(|&(dx, dz)| dx * dx + dz * dz);
+ 
+         Self { chunks: Chunks::default(), pending: HashSet::new(), ring, radius, center: None, max_in_flight: workers * 2,
+-               gen: OverworldGenerator::new(seed), cm: WorldChunkManager::new(seed), jobs, done, light_queue: Vec::new(), sky_sub: 0, sun: crate::render::mesh::NO_SUN, dir: None, saved: HashSet::new() }
++               gen: OverworldGenerator::new(seed), cm: WorldChunkManager::new(seed), jobs, done, light_queue: Vec::new(), sky_sub: 0, sun: crate::render::mesh::NO_SUN, dir: None, saved: HashSet::new(), changes: Vec::new() }
+     }
+ 
+     /// Keep this world in `dir`: chunks found there are loaded instead of generated, and edited ones are written back
+@@ -305,6 +309,16 @@
+     /// Place a block with metadata (`Chunk.setBlockIDWithMetadata`, `meta` is 0..=15): writes the cell, keeps
+     /// the height map and light in step and marks the affected meshes for a rebuild. False if nothing changed.
+     pub fn set_block_meta(&mut self, x: i32, y: i32, z: i32, id: u8, meta: u8) -> bool {
++        let old = self.block_loaded(x, y, z);
++        let done = self.set_quiet(x, y, z, id, meta);
++        if done {
++            self.changes.push((x, y, z, old.unwrap_or(0), id));
++        }
++        done
++    }
++
++    /// `World.setBlockAndMetadata` / `setBlockMetadata`: the same write without telling the neighbours.
++    pub fn set_quiet(&mut self, x: i32, y: i32, z: i32, id: u8, meta: u8) -> bool {
+         if !(0..H as i32).contains(&y) {
+             return false;
+         }
+@@ -324,6 +338,94 @@
+         true
+     }
+ 
++    pub fn take_changes(&mut self) -> Vec<(i32, i32, i32, u8, u8)> {
++        std::mem::take(&mut self.changes)
++    }
++
++    /// `World.getBlockLightValue` (`sub` = `skylightSubtracted`, 0 for `getFullBlockLightValue`): the brighter of sky and block light.
++    pub fn light_at(&self, x: i32, y: i32, z: i32, sub: u8) -> u8 {
++        if y < 0 {
++            return 0;
++        }
++        let y = y.min(H as i32 - 1) as usize;
++        self.chunks.get(&(x >> 4, z >> 4)).map_or(0, |e| {
++            let l = e.light[idx((x & 15) as usize, y, (z & 15) as usize)];
++            (l & 15).saturating_sub(sub).max(l >> 4)
++        })
++    }
++
++    /// Light with the current day/night subtraction (`getBlockLightValue`).
++    pub fn light_level(&self, x: i32, y: i32, z: i32) -> u8 {
++        self.light_at(x, y, z, self.sky_sub)
++    }
++
++    /// `World.canBlockSeeTheSky`: nothing opaque above the cell (`Chunk.canBlockSeeTheSky`: y >= heightMap).
++    pub fn sees_sky(&self, x: i32, y: i32, z: i32) -> bool {
++        self.chunks.get(&(x >> 4, z >> 4)).is_some_and(|e| y >= e.height[((z & 15) << 4 | (x & 15)) as usize] as i32)
++    }
++
++    /// `World.tick`'s random block ticks: 80 random cells in every lit, final chunk within `r` chunks of `center`, with the Java's
++    /// own LCG. Returns the cells whose block ticks at random (`Block.tickOnLoad`).
++    pub fn random_ticks(&self, center: Key, r: i32, lcg: &mut i32) -> Vec<(i32, i32, i32, u8)> {
++        let mut out = Vec::new();
++        for (&(cx, cz), e) in &self.chunks {
++            if (cx - center.0).abs() > r || (cz - center.1).abs() > r || !e.lit || !self.is_final(cx, cz) {
++                continue;
++            }
++            for _ in 0..80 {
++                *lcg = lcg.wrapping_mul(3).wrapping_add(1013904223);
++                let v = *lcg >> 2;
++                let (x, z, y) = ((v & 15) as usize, (v >> 8 & 15) as usize, (v >> 16 & 127) as usize);
++                let id = e.blocks[idx(x, y, z)];
++                if crate::world::ticks::ticks_at_random(id) {
++                    out.push((cx * 16 + x as i32, y as i32, cz * 16 + z as i32, id));
++                }
++            }
++        }
++        out
++    }
++
++    /// `BlockSapling.growTree` in a 2x2 chunk region around (x, z) (a tree reaches at most 8 cells out); false when one of the
++    /// four chunks is missing or the tree does not fit. ponytail: the four chunks are lit again as after a populate, one
++    /// light pass per grown tree; a per-cell light update would be cheaper.
++    pub fn grow_tree(&mut self, x: i32, y: i32, z: i32, species: u8, rng: &mut JavaRandom) -> bool {
++        let (cx, cz) = ((x - 8) >> 4, (z - 8) >> 4);
++        let Some(mut region) = self.take_region(cx, cz) else { return false };
++        let ok = crate::world::gen::populate::grow_sapling(&mut region, rng, x, y, z, species);
++        self.put_region(cx, cz, region);
++        ok
++    }
++
++    /// The four chunks populate / tree growth write into, moved out into a `Region`.
++    fn take_region(&mut self, x: i32, z: i32) -> Option<Region> {
++        let keys = [(x, z), (x, z + 1), (x + 1, z), (x + 1, z + 1)];
++        if !keys.iter().all(|k| self.chunks.contains_key(k)) {
++            return None;
++        }
++        let blocks = keys.map(|k| std::mem::take(&mut self.chunks.get_mut(&k).unwrap().blocks));
++        let data = keys.map(|k| std::mem::take(&mut self.chunks.get_mut(&k).unwrap().data));
++        Some(Region::new(x, z, blocks, data))
++    }
++
++    fn put_region(&mut self, x: i32, z: i32, region: Region) {
++        let keys = [(x, z), (x, z + 1), (x + 1, z), (x + 1, z + 1)];
++        let (blocks, data) = region.into_parts();
++        for ((k, b), d) in keys.iter().zip(blocks).zip(data) {
++            let e = self.chunks.get_mut(k).unwrap();
++            e.height = height_map(&b);
++            e.blocks = b;
++            e.data = d;
++            e.dirty = true; // a populate writes into all four (trees, ores, ... spill over the borders)
++            e.lit = false; // blocks changed under the light: it is computed again once final
++            // The chunk and its four neighbours (border faces) need a new mesh if they had one.
++            for n in [(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)] {
++                if let Some(e) = self.chunks.get_mut(&(k.0 + n.0, k.1 + n.1)) {
++                    e.meshed = false;
++                }
++            }
++        }
++    }
++
+     /// The chunk holding world column (x, z) needs a new mesh, and so does the neighbour whose border
+     /// faces look at it when the column is on the chunk edge.
+     fn mark_dirty(&mut self, x: i32, z: i32) {
+@@ -471,25 +573,9 @@
+         if self.chunks.get(&keys[0]).map_or(true, |e| e.populated) || !keys.iter().all(|k| self.chunks.contains_key(k)) {
+             return false;
+         }
+-        let blocks = keys.map(|k| std::mem::take(&mut self.chunks.get_mut(&k).unwrap().blocks));
+-        let data = keys.map(|k| std::mem::take(&mut self.chunks.get_mut(&k).unwrap().data));
+-        let mut region = Region::new(x, z, blocks, data);
++        let mut region = self.take_region(x, z).unwrap();
+         self.gen.populate(&mut region, x, z, &mut self.cm);
+-        let (blocks, data) = region.into_parts();
+-        for ((k, b), d) in keys.iter().zip(blocks).zip(data) {
+-            let e = self.chunks.get_mut(k).unwrap();
+-            e.height = height_map(&b);
+-            e.blocks = b;
+-            e.data = d;
+-            e.dirty = true; // a populate writes into all four (trees, ores, ... spill over the borders)
+-            e.lit = false; // blocks changed under the light: it is computed again once final
+-            // The chunk and its four neighbours (border faces) need a new mesh if they had one.
+-            for n in [(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)] {
+-                if let Some(e) = self.chunks.get_mut(&(k.0 + n.0, k.1 + n.1)) {
+-                    e.meshed = false;
+-                }
+-            }
+-        }
++        self.put_region(x, z, region);
+         self.chunks.get_mut(&keys[0]).unwrap().populated = true;
+         true
+     }
+diff -ruN a/mc-rs/src/world/gen/populate.rs b/mc-rs/src/world/gen/populate.rs
+--- a/mc-rs/src/world/gen/populate.rs	2026-10-09 15:02:46.000000000 +0000
++++ b/mc-rs/src/world/gen/populate.rs	2026-10-09 22:28:18.608264359 +0000
+@@ -680,6 +680,22 @@
+     }
+ }
+ 
++/// `BlockSapling.growTree`: clears the sapling cell, grows the species' tree (oak, one in ten big; spruce; birch) and puts
++/// the sapling back when it does not fit.
++pub fn grow_sapling(w: &mut Region, r: &mut JavaRandom, x: i32, y: i32, z: i32, species: u8) -> bool {
++    w.set(x, y, z, 0);
++    let ok = match species & 3 {
++        1 => taiga2(w, r, x, y, z),
++        2 => round_tree(w, r, x, y, z, 5, 2),
++        _ if r.next_int_bound(10) == 0 => big_tree(w, r, x, y, z),
++        _ => round_tree(w, r, x, y, z, 4, 0),
++    };
++    if !ok {
++        w.set_meta(x, y, z, 6, species);
++    }
++    ok
++}
++
+ /// WorldGenTrees (min height 4, species 0) and WorldGenForest (5, birch = 2).
+ fn round_tree(w: &mut Region, r: &mut JavaRandom, x: i32, y: i32, z: i32, min_h: i32, meta: u8) -> bool {
+     let h = r.next_int_bound(3) + min_h;
+diff -ruN a/mc-rs/src/world/mod.rs b/mc-rs/src/world/mod.rs
+--- a/mc-rs/src/world/mod.rs	2026-10-09 18:04:18.000000000 +0000
++++ b/mc-rs/src/world/mod.rs	2026-10-09 22:27:07.094906431 +0000
+@@ -12,3 +12,4 @@
+ pub mod craft;
+ pub mod vitals;
+ pub mod save;
++pub mod ticks;
+diff -ruN a/mc-rs/src/world/sky.rs b/mc-rs/src/world/sky.rs
+--- a/mc-rs/src/world/sky.rs	2026-10-09 18:09:38.000000000 +0000
++++ b/mc-rs/src/world/sky.rs	2026-10-09 22:27:07.090304530 +0000
+@@ -9,7 +9,8 @@
+ //! and lava fog, clouds, and drawing rain/snow (`renderRainSnow`); thunder strikes need `EntityLightningBolt`.
+ 
+ use crate::world::gen::noise::{mh_cos, mh_sin, JavaRandom};
+-use std::f32::consts::PI;
++use glam::Vec3;
++use std::f32::consts::{PI, TAU};
+ 
+ pub const TICKS_PER_DAY: u64 = 24000;
+ 
+@@ -34,6 +35,17 @@
+     if t.cos() < 0.2 { i32::MAX } else { (t.tan() * 2.0).round().clamp(-8.0, 8.0) as i32 }
+ }
+ 
++/// Direction toward the sun, turned about X by the sun angle like `render::sky` draws it: noon (0, 1, 0), dusk (0, 0, 1).
++pub fn sun_dir(angle: f32) -> Vec3 {
++    let t = angle * TAU;
++    Vec3::new(0.0, t.cos(), t.sin())
++}
++
++/// Shadow strength 0..1: in from 6 to 17 degrees of sun height (the baked shadows cut off at ~12), out in rain.
++pub fn shadow_strength(angle: f32, rain: f32) -> f32 {
++    (((angle * TAU).cos() - 0.1) / 0.2).clamp(0.0, 1.0) * (1.0 - 2.0 * rain).clamp(0.0, 1.0)
++}
++
+ /// Sky light taken away by the time of day and the weather: 0 (day) ..= 11 (night). `rain` and `thunder` are
+ /// the strengths `Weather::rain` / `Weather::thunder` return (`func_27162_g` / `func_27166_f`).
+ pub fn skylight_subtracted(angle: f32, rain: f32, thunder: f32) -> u8 {
+diff -ruN a/mc-rs/src/world/ticks.rs b/mc-rs/src/world/ticks.rs
+--- a/mc-rs/src/world/ticks.rs	1970-01-01 00:00:00.000000000 +0000
++++ b/mc-rs/src/world/ticks.rs	2026-10-09 22:27:07.094951827 +0000
+@@ -0,0 +1,534 @@
++//! M6 block updates: `World.scheduleBlockUpdate` / `TickUpdates` (scheduled ticks), the 80 random ticks per chunk of
++//! `World.tick`, and the `onBlockAdded` / `onBlockRemoval` / `onNeighborBlockChange` notifications of the `...WithNotify`
++//! setters (the `ChunkManager` logs every notifying write, `step` replays the log). The blocks they drive:
++//! water and lava (`BlockFlowing`, `BlockStationary`, hardening), sand and gravel (`BlockSand`, `EntityFallingSand`),
++//! leaf decay, saplings, plants that lose their ground, grass spread, crops, farmland, reeds and cactus.
++//! Not ported yet: fire (lava does not ignite), mushroom spread, snow and ice, lava mix sound and smoke, falling sand
++//! far from loaded chunks (vanilla drops it instantly), pending ticks are not saved (vanilla does not either).
++
++use std::collections::{BTreeSet, HashSet};
++
++use glam::Vec3;
++
++use crate::world::chunk::light_opacity;
++use crate::world::chunks::ChunkManager;
++use crate::world::gen::noise::JavaRandom;
++use crate::world::items::{Drops, ItemStack};
++use crate::world::pick::replaceable;
++
++/// Chunks around the player whose blocks tick at random (`World.tick`'s active set).
++const ACTIVE: i32 = 9;
++/// `TickUpdates` runs at most this many scheduled entries per game tick.
++const MAX_SCHEDULED: usize = 1000;
++/// Falling blocks alive at once (the draw buffer holds this many boxes).
++pub const MAX_FALLING: usize = 64;
++
++/// `Block.tickOnLoad`: blocks that get random ticks.
++pub fn ticks_at_random(id: u8) -> bool {
++    matches!(id, 2 | 6 | 8 | 10 | 18 | 31 | 32 | 37 | 38 | 59 | 60 | 81 | 83)
++}
++
++/// `Material.isSolid` false: air, fluids, plants, fire, web, snow layer, portal and the "circuit" blocks.
++fn non_solid(id: u8) -> bool {
++    matches!(id, 0 | 6 | 8..=11 | 27 | 28 | 30..=32 | 37..=40 | 50 | 51 | 55 | 59 | 66 | 69 | 70 | 72 | 75..=78 | 90)
++}
++
++/// `BlockFlowing.blockBlocksFlow`: doors, sign post, ladder, reeds and every solid block.
++fn blocks_flow(id: u8) -> bool {
++    matches!(id, 63..=65 | 71 | 83) || !non_solid(id)
++}
++
++/// `BlockSand.canFallBelow`: air, fire and fluids.
++fn can_fall_below(id: u8) -> bool {
++    matches!(id, 0 | 8..=11 | 51)
++}
++
++fn bid(w: &ChunkManager, x: i32, y: i32, z: i32) -> u8 {
++    w.block_loaded(x, y, z).unwrap_or(0)
++}
++
++/// A block of sand or gravel that left its cell (`EntityFallingSand`, 0.98 box, centre `pos`).
++pub struct Falling {
++    pub pos: Vec3,
++    pub prev: Vec3,
++    vy: f32,
++    pub id: u8,
++    age: u32,
++}
++
++pub struct Ticks {
++    now: u64,
++    seq: u64,
++    /// (due tick, insertion number, x, y, z, block id): `scheduledTickTreeSet`; `pending` is `scheduledTickSet`.
++    due: BTreeSet<(u64, u64, i32, i32, i32, u8)>,
++    pending: HashSet<(i32, i32, i32, u8)>,
++    rng: JavaRandom,
++    lcg: i32,
++    pub falling: Vec<Falling>,
++}
++
++impl Ticks {
++    pub fn new(seed: i64) -> Self {
++        Self { now: 0, seq: 0, due: BTreeSet::new(), pending: HashSet::new(), rng: JavaRandom::new(seed ^ 0xB10C), lcg: 0x2545_F491, falling: Vec::new() }
++    }
++
++    /// `World.scheduleBlockUpdate`: the same block at the same cell is queued once.
++    fn schedule(&mut self, x: i32, y: i32, z: i32, id: u8, delay: u64) {
++        if id > 0 && self.pending.insert((x, y, z, id)) {
++            self.seq += 1;
++            self.due.insert((self.now + delay, self.seq, x, y, z, id));
++        }
++    }
++
++    /// One 20 Hz game tick: scheduled ticks, random ticks, block notifications, falling blocks.
++    pub fn step(&mut self, w: &mut ChunkManager, drops: &mut Drops, center: (i32, i32)) {
++        self.now += 1;
++        for _ in 0..MAX_SCHEDULED {
++            let Some(&e) = self.due.first().filter(|e| e.0 <= self.now) else { break };
++            self.due.remove(&e);
++            let (_, _, x, y, z, id) = e;
++            self.pending.remove(&(x, y, z, id));
++            // checkChunksExist(+-8): the cell's chunks (and so the area around it) must be loaded.
++            if [(-8, -8), (8, -8), (-8, 8), (8, 8)].iter().all(|&(dx, dz)| w.block_loaded(x + dx, y, z + dz).is_some()) && bid(w, x, y, z) == id {
++                self.update(w, drops, x, y, z, id);
++            }
++            self.notify(w, drops);
++        }
++        for (x, y, z, id) in w.random_ticks(center, ACTIVE, &mut self.lcg) {
++            if bid(w, x, y, z) == id {
++                self.update(w, drops, x, y, z, id);
++                self.notify(w, drops);
++            }
++        }
++        self.notify(w, drops);
++        self.fall(w, drops);
++    }
++
++    /// Replays the notifying writes: the new block's `onBlockAdded`, the old one's `onBlockRemoval`, and
++    /// `onNeighborBlockChange` for the six neighbours; their own writes are replayed in turn.
++    fn notify(&mut self, w: &mut ChunkManager, drops: &mut Drops) {
++        loop {
++            let changes = w.take_changes();
++            if changes.is_empty() {
++                return;
++            }
++            for (x, y, z, old, new) in changes {
++                if old != new {
++                    self.removed(w, x, y, z, old);
++                    self.added(w, x, y, z, new);
++                }
++                for (dx, dy, dz) in [(-1, 0, 0), (1, 0, 0), (0, -1, 0), (0, 1, 0), (0, 0, -1), (0, 0, 1)] {
++                    let (nx, ny, nz) = (x + dx, y + dy, z + dz);
++                    let id = bid(w, nx, ny, nz);
++                    self.neighbour(w, drops, nx, ny, nz, id);
++                }
++            }
++        }
++    }
++
++    fn removed(&mut self, w: &mut ChunkManager, x: i32, y: i32, z: i32, id: u8) {
++        // BlockLog / BlockLeaves.onBlockRemoval: leaves around it get the "check decay" bit 8.
++        let r = match id {
++            17 => 4,
++            18 => 1,
++            _ => return,
++        };
++        for (dx, dy, dz) in (-r..=r).flat_map(|a| (-r..=r).flat_map(move |b| (-r..=r).map(move |c| (a, b, c)))) {
++            let (lx, ly, lz) = (x + dx, y + dy, z + dz);
++            if bid(w, lx, ly, lz) == 18 {
++                w.set_quiet(lx, ly, lz, 18, w.meta(lx, ly, lz) | 8);
++            }
++        }
++    }
++
++    fn added(&mut self, w: &mut ChunkManager, x: i32, y: i32, z: i32, id: u8) {
++        match id {
++            8..=11 => {
++                harden(w, x, y, z, id);
++                if id == 8 || id == 10 {
++                    self.schedule(x, y, z, id, tick_rate(id));
++                }
++            }
++            12 | 13 => self.schedule(x, y, z, id, 3),
++            _ => {}
++        }
++    }
++
++    fn neighbour(&mut self, w: &mut ChunkManager, drops: &mut Drops, x: i32, y: i32, z: i32, id: u8) {
++        match id {
++            8..=11 => {
++                harden(w, x, y, z, id);
++                // BlockStationary: a still fluid wakes up as a flowing one.
++                if matches!(bid(w, x, y, z), 9 | 11) {
++                    w.set_quiet(x, y, z, id - 1, w.meta(x, y, z));
++                    self.schedule(x, y, z, id - 1, tick_rate(id - 1));
++                }
++            }
++            12 | 13 => self.schedule(x, y, z, id, 3),
++            6 | 31 | 32 | 37..=40 | 59 | 81 | 83 => {
++                check_stay(w, drops, x, y, z, id);
++            }
++            // BlockFarmland: something solid on top turns it back to dirt.
++            60 if !non_solid(bid(w, x, y + 1, z)) => {
++                w.set_block(x, y, z, 3);
++            }
++            _ => {}
++        }
++    }
++
++    /// `Block.updateTick` of a scheduled or random tick.
++    fn update(&mut self, w: &mut ChunkManager, drops: &mut Drops, x: i32, y: i32, z: i32, id: u8) {
++        match id {
++            8 | 10 => self.flow(w, drops, x, y, z, id),
++            12 | 13 => {
++                if can_fall_below(bid(w, x, y - 1, z)) && y >= 0 && self.falling.len() < MAX_FALLING {
++                    // EntityFallingSand removes the block on its first update, which is this same tick.
++                    w.set_block(x, y, z, 0);
++                    let pos = Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
++                    self.falling.push(Falling { pos, prev: pos, vy: 0.0, id, age: 0 });
++                }
++            }
++            2 => grass(w, &mut self.rng, x, y, z),
++            18 => leaves(w, drops, x, y, z),
++            6 | 31 | 32 | 37 | 38 | 59 => {
++                // BlockFlower.updateTick drops a plant that cannot stay; saplings and crops then grow.
++                if !check_stay(w, drops, x, y, z, id) {
++                    return;
++                }
++                match id {
++                    6 => self.sapling(w, x, y, z),
++                    59 => crops(w, &mut self.rng, x, y, z),
++                    _ => {}
++                }
++            }
++            60 => farmland(w, &mut self.rng, x, y, z),
++            81 | 83 => grow_column(w, x, y, z, id),
++            _ => {}
++        }
++    }
++
++    /// `BlockSapling.updateTick` (the light check of the caller is `getBlockLightValue(y + 1)`, with day/night).
++    fn sapling(&mut self, w: &mut ChunkManager, x: i32, y: i32, z: i32) {
++        if w.light_level(x, y + 1, z) >= 9 && self.rng.next_int_bound(30) == 0 {
++            let m = w.meta(x, y, z);
++            if m & 8 == 0 {
++                w.set_block_meta(x, y, z, 6, m | 8);
++            } else {
++                w.grow_tree(x, y, z, m & 3, &mut self.rng);
++            }
++        }
++    }
++
++    /// `BlockFlowing.updateTick`.
++    fn flow(&mut self, w: &mut ChunkManager, drops: &mut Drops, x: i32, y: i32, z: i32, id: u8) {
++        let (lava, step) = (id == 10, if id == 10 { 2 } else { 1 }); // overworld: lava creeps 2 levels per cell
++        let mut d = decay(w, x, y, z, id);
++        let mut settle = true;
++        if d > 0 {
++            let (mut min, mut adjacent) = (-100, 0);
++            for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
++                let v = decay(w, x + dx, y, z + dz, id);
++                if v < 0 {
++                    continue;
++                }
++                adjacent += (v == 0) as i32;
++                let v = if v >= 8 { 0 } else { v };
++                if !(min >= 0 && v >= min) {
++                    min = v;
++                }
++            }
++            let mut nd = min + step;
++            if nd >= 8 || min < 0 {
++                nd = -1;
++            }
++            let above = decay(w, x, y + 1, z, id);
++            if above >= 0 {
++                nd = if above >= 8 { above } else { above + 8 };
++            }
++            // Two source neighbours make a new source (water only); vanilla's second condition reads this cell's own
++            // metadata, which is > 0 here, so it never holds.
++            if adjacent >= 2 && !lava && !non_solid(bid(w, x, y - 1, z)) {
++                nd = 0;
++            }
++            if lava && d < 8 && nd < 8 && nd > d && self.rng.next_int_bound(4) != 0 {
++                nd = d;
++                settle = false;
++            }
++            if nd != d {
++                d = nd;
++                if nd < 0 {
++                    w.set_block(x, y, z, 0);
++                } else {
++                    w.set_block_meta(x, y, z, id, nd as u8);
++                    self.schedule(x, y, z, id, tick_rate(id));
++                }
++            } else if settle {
++                w.set_quiet(x, y, z, id + 1, d as u8);
++            }
++        } else {
++            w.set_quiet(x, y, z, id + 1, 0);
++        }
++        let below = bid(w, x, y - 1, z);
++        if can_displace(w, x, y - 1, z, id) {
++            let meta = if d >= 8 { d } else { d + 8 };
++            w.set_block_meta(x, y - 1, z, id, meta as u8);
++        } else if d >= 0 && (d == 0 || blocks_flow(below)) {
++            let dirs = optimal_directions(w, x, y, z, id);
++            let nd = if d >= 8 { 1 } else { d + step };
++            if nd >= 8 {
++                return;
++            }
++            for (i, (dx, dz)) in [(-1, 0), (1, 0), (0, -1), (0, 1)].into_iter().enumerate() {
++                if dirs[i] && can_displace(w, x + dx, y, z + dz, id) {
++                    let old = bid(w, x + dx, y, z + dz);
++                    if old > 0 && !lava {
++                        drops.spawn_block(old, w.meta(x + dx, y, z + dz), (x + dx, y, z + dz));
++                    }
++                    w.set_block_meta(x + dx, y, z + dz, id, nd as u8);
++                }
++            }
++        }
++    }
++
++    /// Falling blocks, one game tick: gravity 0.04, drag 0.98; a block lands on the first cell below that is not
++    /// air/fluid/plant, and drops as an item when its cell is taken.
++    fn fall(&mut self, w: &mut ChunkManager, drops: &mut Drops) {
++        let mut i = 0;
++        while i < self.falling.len() {
++            let f = &mut self.falling[i];
++            f.age += 1;
++            f.prev = f.pos;
++            f.vy -= 0.04;
++            let ny = f.pos.y + f.vy;
++            let (x, z) = (f.pos.x.floor() as i32, f.pos.z.floor() as i32);
++            let ground = (ny - 0.49).floor() as i32;
++            if ground >= 0 && f.age <= 100 && replaceable(bid(w, x, ground, z)) {
++                f.pos.y = ny;
++                f.vy *= 0.98;
++                i += 1;
++                continue;
++            }
++            let f = self.falling.swap_remove(i);
++            let y = (ground + 1).max(0);
++            if ground >= -1 && f.age <= 100 && replaceable(bid(w, x, y, z)) && !can_fall_below(bid(w, x, y - 1, z)) {
++                w.set_block(x, y, z, f.id);
++            } else {
++                drops.spawn_stack(ItemStack { id: f.id as u16, count: 1, damage: 0 }, (x, y, z));
++            }
++        }
++    }
++}
++
++/// `BlockFluid.tickRate` (water 5, lava 30 in the overworld).
++fn tick_rate(id: u8) -> u64 {
++    if id < 10 { 5 } else { 30 }
++}
++
++/// `BlockFlowing.getFlowDecay`: the fluid level at the cell, -1 when it is not the same fluid (water 8/9, lava 10/11).
++fn decay(w: &ChunkManager, x: i32, y: i32, z: i32, id: u8) -> i32 {
++    let b = bid(w, x, y, z);
++    if (8..=11).contains(&b) && b / 2 == id / 2 { w.meta(x, y, z) as i32 } else { -1 }
++}
++
++fn is_source(w: &ChunkManager, x: i32, y: i32, z: i32, id: u8) -> bool {
++    decay(w, x, y, z, id) == 0
++}
++
++/// `BlockFlowing.liquidCanDisplaceBlock`: not the same fluid, not lava, and not something solid.
++fn can_displace(w: &ChunkManager, x: i32, y: i32, z: i32, id: u8) -> bool {
++    let b = bid(w, x, y, z);
++    if (8..=11).contains(&b) { b / 2 != id / 2 && b < 10 } else { !blocks_flow(b) }
++}
++
++/// `BlockFlowing.calculateFlowCost`: steps to the nearest drop within 4 cells (depth-first, not going back).
++fn flow_cost(w: &ChunkManager, x: i32, y: i32, z: i32, depth: i32, from: usize, id: u8) -> i32 {
++    let mut best = 1000;
++    for (dir, (dx, dz)) in [(-1, 0), (1, 0), (0, -1), (0, 1)].into_iter().enumerate() {
++        if dir == from ^ 1 {
++            continue;
++        }
++        let (nx, nz) = (x + dx, z + dz);
++        if !blocks_flow(bid(w, nx, y, nz)) && !is_source(w, nx, y, nz, id) {
++            if !blocks_flow(bid(w, nx, y - 1, nz)) {
++                return depth;
++            }
++            if depth < 4 {
++                best = best.min(flow_cost(w, nx, y, nz, depth + 1, dir, id));
++            }
++        }
++    }
++    best
++}
++
++/// `BlockFlowing.getOptimalFlowDirections`: -x, +x, -z, +z flagged when they lead to the nearest drop.
++fn optimal_directions(w: &ChunkManager, x: i32, y: i32, z: i32, id: u8) -> [bool; 4] {
++    let mut cost = [1000; 4];
++    for (dir, (dx, dz)) in [(-1, 0), (1, 0), (0, -1), (0, 1)].into_iter().enumerate() {
++        let (nx, nz) = (x + dx, z + dz);
++        if !blocks_flow(bid(w, nx, y, nz)) && !is_source(w, nx, y, nz, id) {
++            cost[dir] = if !blocks_flow(bid(w, nx, y - 1, nz)) { 0 } else { flow_cost(w, nx, y, nz, 1, dir, id) };
++        }
++    }
++    let min = *cost.iter().min().unwrap();
++    cost.map(|c| c == min)
++}
++
++/// `BlockFluid.checkForHarden`: lava next to water (sides or above) becomes obsidian (source) or cobblestone (flow <= 4).
++fn harden(w: &mut ChunkManager, x: i32, y: i32, z: i32, id: u8) {
++    if id < 10 || bid(w, x, y, z) != id {
++        return;
++    }
++    let wet = [(0, 0, -1), (0, 0, 1), (-1, 0, 0), (1, 0, 0), (0, 1, 0)].iter().any(|&(dx, dy, dz)| matches!(bid(w, x + dx, y + dy, z + dz), 8 | 9));
++    if wet {
++        match w.meta(x, y, z) {
++            0 => w.set_block(x, y, z, 49),
++            1..=4 => w.set_block(x, y, z, 4),
++            _ => false,
++        };
++    }
++}
++
++/// `BlockFlower` / mushroom / reed / cactus `canBlockStay`.
++fn can_stay(w: &ChunkManager, x: i32, y: i32, z: i32, id: u8) -> bool {
++    let below = bid(w, x, y - 1, z);
++    let lit = || w.light_at(x, y, z, 0) >= 8 || w.sees_sky(x, y, z);
++    match id {
++        6 | 31 | 37 | 38 => lit() && matches!(below, 2 | 3 | 60),
++        32 => lit() && below == 12,
++        59 => lit() && below == 60,
++        // UNVERIFIED: BlockMushroom.canBlockStay also reads a light limit; only the opaque ground is checked here.
++        39 | 40 => light_opacity(below) == 255 && !matches!(below, 10 | 11),
++        83 => below == 83 || (matches!(below, 2 | 3) && [(-1, 0), (1, 0), (0, -1), (0, 1)].iter().any(|&(dx, dz)| matches!(bid(w, x + dx, y - 1, z + dz), 8 | 9))),
++        81 => [(-1, 0), (1, 0), (0, -1), (0, 1)].iter().all(|&(dx, dz)| non_solid(bid(w, x + dx, y, z + dz))) && matches!(below, 12 | 81),
++        _ => true,
++    }
++}
++
++/// `checkFlowerChange` and friends: a plant that cannot stay drops its items and goes. True when it stayed.
++fn check_stay(w: &mut ChunkManager, drops: &mut Drops, x: i32, y: i32, z: i32, id: u8) -> bool {
++    if can_stay(w, x, y, z, id) {
++        return true;
++    }
++    drops.spawn_block(id, w.meta(x, y, z), (x, y, z));
++    w.set_block(x, y, z, 0);
++    false
++}
++
++/// `BlockGrass.updateTick`: smothered grass dies (one in four), lit grass spreads to dirt nearby.
++fn grass(w: &mut ChunkManager, rng: &mut JavaRandom, x: i32, y: i32, z: i32) {
++    if w.light_level(x, y + 1, z) < 4 && light_opacity(bid(w, x, y + 1, z)) > 2 {
++        if rng.next_int_bound(4) == 0 {
++            w.set_block(x, y, z, 3);
++        }
++    } else if w.light_level(x, y + 1, z) >= 9 {
++        let (tx, ty, tz) = (x + rng.next_int_bound(3) - 1, y + rng.next_int_bound(5) - 3, z + rng.next_int_bound(3) - 1);
++        if bid(w, tx, ty, tz) == 3 && w.light_level(tx, ty + 1, tz) >= 4 && light_opacity(bid(w, tx, ty + 1, tz)) <= 2 {
++            w.set_block(tx, ty, tz, 2);
++        }
++    }
++}
++
++/// `BlockLeaves.updateTick`: leaves marked with bit 8 stay only within 4 steps (through leaves) of a log.
++fn leaves(w: &mut ChunkManager, drops: &mut Drops, x: i32, y: i32, z: i32) {
++    let m = w.meta(x, y, z);
++    if m & 8 == 0 {
++        return;
++    }
++    // dist: 0 log, -2 leaves not reached yet, -1 anything else; 9x9x9 around the cell.
++    let mut dist = [[[-1i8; 9]; 9]; 9];
++    for (a, plane) in dist.iter_mut().enumerate() {
++        for (b, row) in plane.iter_mut().enumerate() {
++            for (c, d) in row.iter_mut().enumerate() {
++                match w.block_loaded(x + a as i32 - 4, y + b as i32 - 4, z + c as i32 - 4) {
++                    Some(17) => *d = 0,
++                    Some(18) => *d = -2,
++                    Some(_) => {}
++                    None => return, // checkChunksExist failed
++                }
++            }
++        }
++    }
++    for step in 1..=4 {
++        for a in 0..9usize {
++            for b in 0..9usize {
++                for c in 0..9usize {
++                    if dist[a][b][c] != step - 1 {
++                        continue;
++                    }
++                    for (da, db, dc) in [(-1, 0, 0), (1, 0, 0), (0, -1, 0), (0, 1, 0), (0, 0, -1), (0, 0, 1)] {
++                        let (na, nb, nc) = (a as i32 + da, b as i32 + db, c as i32 + dc);
++                        if [na, nb, nc].iter().all(|v| (0..9).contains(v)) && dist[na as usize][nb as usize][nc as usize] == -2 {
++                            dist[na as usize][nb as usize][nc as usize] = step;
++                        }
++                    }
++                }
++            }
++        }
++    }
++    if dist[4][4][4] >= 0 {
++        w.set_quiet(x, y, z, 18, m & !8);
++    } else {
++        drops.spawn_block(18, m, (x, y, z));
++        w.set_block(x, y, z, 0);
++    }
++}
++
++/// `BlockCrops.updateTick` growth with `getGrowthRate`.
++fn crops(w: &mut ChunkManager, rng: &mut JavaRandom, x: i32, y: i32, z: i32) {
++    let m = w.meta(x, y, z);
++    if m >= 7 || w.light_level(x, y + 1, z) < 9 {
++        return;
++    }
++    let is = |dx: i32, dz: i32| bid(w, x + dx, y, z + dz) == 59;
++    let (row, col) = (is(-1, 0) || is(1, 0), is(0, -1) || is(0, 1));
++    let diagonal = is(-1, -1) || is(1, -1) || is(1, 1) || is(-1, 1);
++    let mut rate = 1.0f32;
++    for (dx, dz) in (-1..=1).flat_map(|a| (-1..=1).map(move |b| (a, b))) {
++        let mut v = 0.0;
++        if bid(w, x + dx, y - 1, z + dz) == 60 {
++            v = if w.meta(x + dx, y - 1, z + dz) > 0 { 3.0 } else { 1.0 };
++        }
++        rate += if (dx, dz) != (0, 0) { v / 4.0 } else { v };
++    }
++    if diagonal || (row && col) {
++        rate /= 2.0;
++    }
++    if rng.next_int_bound((100.0 / rate) as i32) == 0 {
++        w.set_block_meta(x, y, z, 59, m + 1);
++    }
++}
++
++/// `BlockFarmland.updateTick`: wet when water is within 4 cells (or it rains), else it dries out, then reverts to dirt
++/// unless a crop grows on it.
++fn farmland(w: &mut ChunkManager, rng: &mut JavaRandom, x: i32, y: i32, z: i32) {
++    if rng.next_int_bound(5) != 0 {
++        return;
++    }
++    let water = (-4..=4).any(|dx| (-4..=4).any(|dz| (y..=y + 1).any(|dy| matches!(bid(w, x + dx, dy, z + dz), 8 | 9))));
++    // UNVERIFIED: rain wetting (`canBlockBeRainedOn`) needs the weather state, which the tick does not have; not ported.
++    let m = w.meta(x, y, z);
++    if water {
++        w.set_block_meta(x, y, z, 60, 7);
++    } else if m > 0 {
++        w.set_block_meta(x, y, z, 60, m - 1);
++    } else if bid(w, x, y + 1, z) != 59 {
++        w.set_block(x, y, z, 3);
++    }
++}
++
++/// `BlockReed` / `BlockCactus.updateTick`: stacks grow up to 3 high, one cell per 16 ticks of the top block.
++fn grow_column(w: &mut ChunkManager, x: i32, y: i32, z: i32, id: u8) {
++    if bid(w, x, y + 1, z) != 0 || w.block_loaded(x, y + 1, z).is_none() {
++        return;
++    }
++    let height = (1..).take_while(|&h| bid(w, x, y - h, z) == id).count() + 1;
++    if height < 3 {
++        let m = w.meta(x, y, z);
++        if m == 15 {
++            w.set_block(x, y + 1, z, id);
++            w.set_block_meta(x, y, z, id, 0);
++        } else {
++            w.set_block_meta(x, y, z, id, m + 1);
++        }
++    }
++}

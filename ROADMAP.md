@@ -11,9 +11,9 @@ Own simple save format (M7 dropped McRegion). Client-only networking.
 | M2  | Camera + physics | First-person walk, jump, AABB collision |
 | M3  | Overworld gen | Beta-1.7 noise: grass/dirt/stone, sea level 64, ores |
 | M4  | Biomes + trees + caves | All b1.7.3 biomes + worldgen populate step |
-| M5  | Block interaction | Raycast pick, break, place, light update (done, not compiled: see Changelog) |
-| M6  | Inventory + crafting | Survival inv, hotbar, crafting grid, recipes (done, not run on a device: see Changelog) |
-| M7  | Save | Own format (not McRegion, by decision): per-chunk RLE files + `level`; autosave, save on pause/exit, resume (written, not compiled: see Changelog) |
+| M5  | Block interaction | Raycast pick, break, place, light update (done, compiled and ran on an Android device: see Changelog) |
+| M6  | Inventory + crafting | Survival inv, hotbar, crafting grid, recipes (done, compiled and ran on an Android device: see Changelog) |
+| M7  | Save | Own format (not McRegion, by decision): per-chunk RLE files + `level`; autosave, save on pause/exit, resume (done, compiled and ran on an Android device: see Changelog) |
 | M8  | Entities + AI | Mobs + item entities |
 | M9  | Audio | Positional OGG, music stubs |
 | M10 | Multiplayer | Full b1.7.3 client protocol |
@@ -42,10 +42,44 @@ they matched.
 
 M8 (entities + AI). M7 (save) is written but not compiled: run `cargo test --lib` first. Furnaces smelt (see the furnace entry), so the whole tool chain up to diamond is reachable. M6 is written and the crate type-checks and tests on a host, but nothing has run on a device (M5 included). M4 is done: caves and populate match the real classes bit for
 bit (`tools/golden/`). Still approximate in populate (see README): light model, no metadata, no tile entities, no block
-ticks (liquids/sand). Sapling growth, fluid flow and falling sand belong with M5's block updates. Ice Desert exists in
+ticks (liquids/sand). Sapling growth, fluid flow and falling sand are in M6b (block updates). Ice Desert exists in
 BiomeGenBase but climate never selects it; b1.7.3 has no ravines.
 
 ## Changelog
+- `done` M6b block updates (`world/ticks.rs`, hooks in `world/chunks.rs`, `world/gen/populate.rs`, `render/items.rs`, `lib.rs`; written WITHOUT a Rust toolchain: not compiled, not run, expect a compile fix or two; no new tests yet):
+  - `ChunkManager` logs every notifying write (`set_block` / `set_block_meta`: x, y, z, old id, new id); `set_quiet` is the `setBlockAndMetadata` / `setBlockMetadata` write that does not. `Ticks::step` (20 Hz, next to the furnaces) runs the scheduled
+    ticks (`TickUpdates`: BTreeSet by due time, dedup set, <= 1000 per tick, skipped unless the cell's +-8 area is loaded), then 80 random ticks per lit final chunk within 9 chunks with the Java LCG (`World.tick`), then replays the log:
+    `onBlockAdded`, `onBlockRemoval`, `onNeighborBlockChange` of the six neighbours, until it is empty.
+  - Water/lava: `BlockFlowing.updateTick` (levels, downward flow with +8, sources from 2 neighbours for water, lava creeps 2 levels and 3 of 4 ticks held back, `calculateFlowCost` / `getOptimalFlowDirections`), `BlockStationary` waking up,
+    `checkForHarden` (obsidian / cobblestone), tick rates 5 / 30. Items in the way drop (water only).
+  - Sand, gravel: schedule 3 ticks, `EntityFallingSand` as `ticks::Falling` (gravity 0.04, drag 0.98, <= 64, drawn as a 0.98 flat box), lands or drops as an item.
+  - `BlockLeaves` decay (bit 8, 4 steps from a log, `onBlockRemoval` of logs +-4 and leaves +-1 sets the bit), `BlockSapling` (bit 8 then `growTree` through `populate::grow_sapling` on a 2x2 chunk `Region`; the 4 chunks are re-lit),
+    `BlockFlower.canBlockStay` for flowers, tall grass, dead bush, mushrooms, crops (they drop and vanish), `BlockGrass` spread/death, `BlockCrops` growth + `getGrowthRate`, `BlockFarmland`, `BlockReed`, `BlockCactus`.
+  - Not ported: fire (lava does not ignite), mushroom spread, snow/ice, rain wetting farmland, falling sand when chunks are far (vanilla drops it instantly), trampling farmland, saving pending ticks (vanilla does not).
+  - UNVERIFIED: mushroom `canBlockStay` light limit (only the opaque ground is checked), the `Block.tickOnLoad` list was read from the `setTickOnLoad(true)` calls.
+- `done` real-time shadows (port of shaderLABS/Shadow-Tutorial, written on a Linux host: `render::camera`, `world::sky` and `gpu::pipeline` compiled and tested there (14 tests, incl. a headless lavapipe render, `gpu/shadow_test.rs`); `lib.rs` edits NOT compiled; not run on a device):
+    - `gpu/pipeline.rs`: shadow map `Depth32Float` 1024^2 + comparison sampler (group 1), `vs_shadow` (= `shadow.vsh`: `distort()`, foliage parked off-screen via a tile bitmask built from `chunk::is_plant`), `fs_main` (= `gbuffers_terrain.fsh`: face normal from position derivatives, `SHADOW_BRIGHTNESS`, `sqrt(N.L)` lit mix, strength fade). `camera::shadow_view_proj` (ortho 64 blocks around the eye), `sky::sun_dir` / `shadow_strength`; `lib.rs` runs the extra depth pass only while the strength is > 0 (never at night or in rain).
+    - Replaces the baked shadow ray: `lib.rs` no longer calls `set_sun`, so `mesh::build`'s `occ` code, `ChunkManager::set_sun` and `sky::sun_key` are dead and can go.
+    - Not ported: colored shadows (no translucent pass yet: glass and water are opaque cubes) and `SHADOW_DISTORT_ENABLED`/`COLORED_SHADOWS` toggles. Block light is not exempt from shadow (the vertex `light` merges sky and block light, the pack only darkens the sky part).
+    - Deviation: `NORMAL_BIAS` offsets in blocks (one texel of the distorted map x `SHADOW_BIAS`); the pack's offset is 1/R of that and left flat ground full of acne in the test.
+    - UNVERIFIED: 64-block radius, 1024 map and the 37-degree test scene on real hardware; cost of the second pass on low-end GPUs (Back-face culling in the shadow pipeline is the first thing to try).
+- `done` all overworld mobs (written WITHOUT a Rust toolchain: not compiled, 3 tests in `mobs.rs` not run; `tools/gen_names.py` now also writes `RESIST`):
+    - `world/mobs.rs`: the pig's `Pig` became `Mob` + `Kind` with `spec` = (`setSize`, health, `moveSpeed`, `attackStrength`): Pig, Cow, Sheep (`getRandomFleeceColor`),
+      Chicken (egg every 6000..12000 ticks, `motionY x 0.6` fall), Wolf (neutral until hit), Squid (`EntitySquid` swim vector), Zombie, PigZombie (400..800
+      ticks of anger, 0.95 speed), Giant (6x zombie), Skeleton (`attackEntity` arrows every 30 ticks, `EntityArrow` 4 damage), Creeper (30-tick fuse at 3 blocks,
+      `Explosion.doExplosionA` rays, power 3, resistance = `RESIST`/hardness x 5, /5), Spider (leaps at 2..6, gives up in light, climbs walls), Slime (size
+      1/2/4, health size^2, hops, four halves on death, damages only above size 1). Melee is `EntityMob.attackEntity` (dist < 2, 20 ticks apart). Zombies and
+      skeletons catch fire in sun (`onLivingUpdate`, 1 damage a second). Loot = `getDropItemId` x `rand(3)` (skeleton arrows + bones, sheep 1 wool of its colour,
+      squid 1..3 ink, slime balls at size 1). Despawn = `func_27021_X`.
+    - Spawning (UNVERIFIED, not `SpawnerAnimals`): animals on lit grass every 400 ticks + a burst at start (cap 12; sheep 12, pig 10, chicken 10, cow 8), monsters
+      every 40 ticks in the dark (`light <= rand(8)`, cap 10; slimes only in `func_997_a(987234911)` chunks below y 16), squid in water y 46..62 (cap 3), 24..48
+      blocks from the player.
+    - `Chunks::light` (= `World.getBlockLightValue`), `lib.rs`: `Ctx`/`Ev` hooks (`Hurt` -> `Vitals.hurt`, so armor works; `Boom` -> `App::explode`: blocks
+      cleared, 30% drop, player damage), tap-to-hit now for every mob (`Mobs::hit`).
+    - `render/items.rs`: `parts` = the b1.7.3 models (`ModelQuadruped`, `ModelBiped`/`ModelZombie`/`ModelSkeleton`, `ModelCreeper`, `ModelChicken`, spider, squid,
+      wolf, slime from memory) as flat wool-coloured boxes (red when hurt, white fuse flash); arrows are small boxes.
+    - Not done: Ghast and the zombie-pigman spawn (M11), wolf spawning (needs biomes), taming, shearing, milking, saddles, A*, sounds, saving mobs, explosion
+      exposure/knockback, arrows sticking in blocks, a skeleton/spider jockey, the textures (M14).
 - `done` cheap table fills (written WITHOUT a Rust toolchain: not compiled, `table_fills` test not run; `craft.rs`, `items.rs`, `vitals.rs`, `lib.rs`):
     `RecipesDyes` (shapeless, `ShapelessRecipes.matches`: `Recipe.w == 0`), `RecipesIngots`, `RecipesArmor` (all 20 pieces; chain wants fire), cookie, bucket;
     food `heal_amount` for apple, bread, golden apple, fish, cookie; raw fish smelts; lava bucket burns 20000 and leaves an empty bucket;
@@ -62,7 +96,7 @@ BiomeGenBase but climate never selects it; b1.7.3 has no ravines.
   slab, charcoal by damage), `HudPipeline::push_text` / `text_width` / `push_tooltip`, hud quad cap 2048 -> 4096.
     - Not done: tooltips in the hotbar/in play (b1.7.3 has none), non-ASCII, text anywhere else (that is M14), item sprites.
     - UNVERIFIED: the tooltip spot (34 units above the finger, below it near the top edge) is invented; vanilla uses mouse + (12, -12).
-- `done` sun, moon, stars, sunrise glow and weather (written WITHOUT a Rust toolchain: not compiled, the 5 new tests not run; the Java reference
+- `done` sun, moon, stars, sunrise glow and weather (written WITHOUT a Rust toolchain, then compiled and ran on an Android device; the 5 new tests not run; the Java reference
   numbers behind 3 of them were generated from the real classes, `tools/golden/G.java` `sky()`; +5 tests):
     - `world/sky.rs`: `Weather` = `World.updateWeather` (rain/thunder timers on a `java.util.Random`, strengths +-0.01 per tick; started clear, not
       saved, a loaded world starts clear), `skylight_subtracted` / `sky_color` now take the rain and thunder strengths, `fog_color` (horizon colour
@@ -79,7 +113,7 @@ BiomeGenBase but climate never selects it; b1.7.3 has no ravines.
     - Not done: rain/snow streaks (`renderRainSnow`; `rain.png`/`snow.png` are in the jar), rain particles and sound, lightning (`EntityLightningBolt`)
       and the sky flash, snow layers and ice from weather, clouds, fog on terrain, water/lava fog, the weather is not saved. A new world waits
       12000..180000 ticks (10..150 minutes) for the first rain; to see it sooner, call `weather.tick()` in a loop at start-up until `weather.rain(1.0) > 0`.
-- `done` M7 fix: autosave no longer interrupts play every 5 s (not compiled, not run on a device). `App::save` called `close_screen()`
+- `done` M7 fix: autosave no longer interrupts play every 5 s (compiled and ran on an Android device). `App::save` called `close_screen()`
   unconditionally, and `close_screen` also runs `touch.set_screen(false)`, so each autosave (screen closed) reset the touch state and cut
   the held move stick / look drag / dig. Now `save` closes a screen only when one is open (`lib.rs`, one `if`). Pause and exit saves are
   unchanged (they still turn an open screen into dropped items first).
@@ -87,7 +121,7 @@ BiomeGenBase but climate never selects it; b1.7.3 has no ravines.
       site, not read. If actions still drop, look there first.
     - Still open: autosave writes the level + up to 24 chunks on the render thread; on a slow phone that can hitch a frame. If so, lower
       `AUTOSAVE_CHUNKS` or move the writes to a thread.
-- `done` M7 save (written WITHOUT a Rust toolchain: not compiled, tests not run, expect a compile fix or two; +2 tests). Decision: it does
+- `done` M7 save (written WITHOUT a Rust toolchain, then compiled and ran on an Android device; tests not run; +2 tests). Decision: it does
   not follow b1.7.3 (no McRegion, NBT, zlib): the aim is fewer lines and a smaller, faster save, not a loadable vanilla world.
     - `world/save.rs` (new): `encode_chunk`/`decode_chunk` = populated flag + run-length-coded block ids + metadata nibbles (runs of
       1..=255), `Level` encode/decode (time, position, spawn, look, hotbar slot, health/air/fire, 36 slots, furnaces, dropped items),
@@ -109,7 +143,7 @@ BiomeGenBase but climate never selects it; b1.7.3 has no ravines.
       if a populated chunk was written before its neighbour. Chunk writes and reads run on the render thread (a few small files per frame).
     - Tests: `chunk_and_level_round_trip` (codec, run splitting, every corrupt case), `edits_survive_a_restart` (flush, new manager loads
       it, corrupt file forgotten).
-- `done` M13 frustum culling (host-checked: type-checks, 48 tests pass; NOT run on a device, so the FPS gain is unmeasured):
+- `done` M13 frustum culling (host-checked: type-checks, 48 tests pass; compiled and ran on an Android device; the FPS gain is still unmeasured):
     - `render/camera.rs`: `Frustum::from_view_proj(proj * view)` takes the six planes (Gribb-Hartmann, depth 0..1 so the near plane is row 2),
       `intersects_aabb` is the usual conservative test against the corner furthest along each plane normal. Test covers ahead, behind,
       sides, above/below, past the far plane, the camera inside a box, the wide 2:1 shape and a 90 degree turn.
@@ -117,21 +151,21 @@ BiomeGenBase but climate never selects it; b1.7.3 has no ravines.
       only those. Only the terrain draw is culled: dropped items, the outline and the HUD are tiny.
     - Not done on purpose: tightening the box to each chunk's real height (it is the full 128), occlusion culling, greedy meshing, a profiler.
       Culling also trims only draw calls and GPU vertex work; chunk meshing and generation still run for the whole ring.
-- `done` sword, hoe, shears (host-checked like M6: crate type-checks, 47 tests pass, NOT run on a device):
+- `done` sword, hoe, shears (host-checked like M6: crate type-checks, 47 tests pass, compiled and ran on an Android device):
     - `craft.rs`: swords (ids 267/268/272/276/283, 1.5x on everything, 15x and harvest on web, 2 wear per block), hoes (290..294, no wear
       from digging, 1 per tilling), shears (359, 238 uses: 15x and harvest on web, 15x on leaves, 5x on wool, wear only on leaves and web).
       Recipes `RecipesWeapons` x 5, hoe x 5 from `RecipesTools`, shears from two iron ingots. Wear is `wear_on_break(held, block)`.
     - `lib.rs`: a hoe tills dirt, or grass with air above and not from below, into farmland (60) and wears 1 (`ItemHoe.onItemUse`);
       shears on leaves drop the leaves block itself (`BlockLeaves.harvestBlock`) via `Drops::spawn_stack`.
     - Not done: farmland reverting to dirt, its 15/16 height, crops (so a hoe only makes farmland), sheep, bow and arrow.
-- `done` mushroom stew + eating (`world/items.rs`, `world/craft.rs`, `world/vitals.rs`, `lib.rs`; written WITHOUT a Rust toolchain: not compiled, tests not run, +1 test and extra asserts):
+- `done` mushroom stew + eating (`world/items.rs`, `world/craft.rs`, `world/vitals.rs`, `lib.rs`; written WITHOUT a Rust toolchain, then compiled and ran on an Android device; tests not run, +1 test and extra asserts):
     `ItemFood.onItemRightClick` / `ItemSoup`: a tap that neither places a block nor opens a workbench/furnace uses the held item (as
     `Minecraft.clickMouse` -> `sendUseItem` does, aimed at a block or not). Food uses up one and `Vitals::heal`s (`EntityLiving.heal`: nothing when dead,
     capped at 20, damage window back to 10); eating at full health still uses it up. Stew (282) heals 10, stacks to 1 and leaves an empty bowl (281).
     Recipes: bowl (3 planks in a V, x4) and stew (red + brown mushroom + bowl, either order). Only the stew is in `heal_amount`; apple, bread, pork, golden
     apple and fish are one line each (ids in the comment) once mobs, crops or chests exist. Not done: eating animation and sound, the hold-to-eat delay
     (b1.7.3 has none: eating is instant).
-- `done` health, damage, death (`world/vitals.rs`, `lib.rs`; written WITHOUT a Rust toolchain: not compiled, test not run, +1 test):
+- `done` health, damage, death (`world/vitals.rs`, `lib.rs`; written WITHOUT a Rust toolchain, then compiled and ran on an Android device; test not run, +1 test):
     `Vitals` = `EntityLiving.attackEntityFrom` (20 health, the 10-tick damage window: an equal or smaller hit inside it is ignored, a bigger one
     pays the difference), `Entity.updateFallState` + `EntityLiving.fall` (`ceil(fall - 3)`, water cancels it), drowning (300 air, then 2 damage every
     20 ticks once it runs out, `isInsideOfMaterial`), lava (4 damage per window + 600 ticks of fire, 1 damage per second while burning, water puts
@@ -141,14 +175,14 @@ BiomeGenBase but climate never selects it; b1.7.3 has no ravines.
     b1.7.3 has no hunger and no natural regeneration (only Peaceful heals), so health stays down until food is ported. Not done: suffocation in
     blocks, hurt flash/blink, knockback, burning and hurt sounds, fire overlay, death camera roll, items burning in lava, per-difficulty damage,
     bed spawn, health in the save (M7).
-- `done` fluids are not solid + swimming (`world/physics.rs`; written WITHOUT a Rust toolchain: not compiled, test not run, +1 test):
+- `done` fluids are not solid + swimming (`world/physics.rs`; written WITHOUT a Rust toolchain, then compiled and ran on an Android device; test not run, +1 test):
     the player used to stand on water and lava because physics treated every id > 0 as solid. Ids 8..=11 are now passable; `step` takes the
     held jump flag and ports `Entity.handleWaterMovement`/`handleLavaMovement` (box shrunk 0.4 top and bottom) and
     `EntityLiving.moveEntityWithHeading`: no gravity in a fluid, vertical drag 0.8 (lava 0.5) and 0.02 blocks/tick sink, held jump +0.04/tick,
     wall hop 0.3/tick when 0.6 higher is free. Simplified: every fluid cell is a source block (flow levels need metadata), horizontal speed is
     scaled to the terminal swim speed (2.0 m/s water, 0.8 lava) instead of accumulating. Not done: no flow push, no splash/bubbles, no breath
     or lava damage (next: health), dropped items still treat fluids as solid.
-- `done` block metadata (written WITHOUT a Rust toolchain: not compiled, tests not run; the Java side was run). Foundation for wood
+- `done` block metadata (written WITHOUT a Rust toolchain, then compiled and ran on an Android device; tests not run; the Java side was run). Foundation for wood
   and leaf species, wool colours, slabs, stairs, doors and the bed, so the chunk format does not change again when they arrive:
     - `world/chunk.rs`: `Nibbles` = `NibbleArray` (4 bits per cell, even cell index = low nibble, same index as the blocks), 16 KB
       per chunk, bytes identical to the McRegion `Data` tag (M7 writes `bytes()` as is). `world/chunks.rs`: `Entry.data`,
@@ -173,8 +207,8 @@ BiomeGenBase but climate never selects it; b1.7.3 has no ravines.
   a picked-up stack floats above the finger (`TouchUi::cursor_pos`), and dragging it over other slots puts one item into each
   slot it enters, the start slot included (`Screen::drop_one`: empty or same item with room, never a swap, never an output
   slot). A press that lifts where it began is still a tap, and the "1" toggle stays. The yellow cursor box is gone. The
-  gesture state machine is in `lib.rs` (`on_screen_event`) and only `drop_one` is unit-tested; 47 tests pass, not run on a device.
-- `done` furnace + smelting (same host checks as M6: crate type-checks, 46 tests pass, NOT run on a device):
+  gesture state machine is in `lib.rs` (`on_screen_event`) and only `drop_one` is unit-tested; 47 tests pass, compiled and ran on an Android device.
+- `done` furnace + smelting (same host checks as M6: crate type-checks, 46 tests pass, compiled and ran on an Android device):
     - `world/craft.rs`: `Furnace` = `TileEntityFurnace.updateEntity` (fuel used up when the fire starts, 200 ticks per item, output stacks
       to 64, relights from the next fuel without a flip), `FurnaceRecipes` (iron/gold/diamond ore, sand -> glass, cobble -> stone, clay -> brick,
       cactus -> green dye, log -> charcoal) and `getItemBurnTime` (wood blocks 300, stick/sapling 100, coal 1600). `ContainerFurnace` slots and the
@@ -184,7 +218,7 @@ BiomeGenBase but climate never selects it; b1.7.3 has no ravines.
     - Atlas colours for the new blocks (glass, wool, metal blocks, workbench, furnaces, snow block, glowstone); iron/gold/diamond tools had none.
     - Not done: the furnace contents are not saved (M7), furnace facing (no metadata), fuel/lava bucket, raw pork and fish.
 - `done` M6 crafting + tools (written on a Linux host: the whole crate type-checks and its 45 tests pass against a stubbed
-  `android-activity`; NOT run on a device, so the touch layout of the new screen is untested by hand):
+  `android-activity`; compiled and ran on an Android device):
     - `world/craft.rs` (new): `EnumToolMaterial` (wood/stone/iron/diamond/gold), pickaxe/axe/shovel ids 256..=286, `getStrVsBlock`,
       `ItemPickaxe.canHarvestBlock` (obsidian level 3, diamond/gold/redstone level 2, iron/lapis level 1, else rock/iron),
       `ItemSpade.canHarvestBlock` (snow). 26 shaped recipes (`RecipesTools` loop for 5 materials x 3 tools, planks, sticks,
@@ -204,7 +238,7 @@ BiomeGenBase but climate never selects it; b1.7.3 has no ravines.
       item sprites (tools are a handle plus a head shape in the material colour), the other ~100 `CraftingManager` recipes.
     - The `ponytail` note in the drops entry below ("bare hands harvest everything") is superseded by this entry.
 - `done` drops + hotbar inventory (`world/items.rs`, `render/items.rs`; the logic is unit-tested on a Linux host in a scratch crate,
-  `lib.rs`/wgpu NOT compiled here: expect a compile fix or two):
+  `lib.rs`/wgpu NOT compiled here: ):
     - Drops port `Block.dropBlockAsItem`: `quantityDropped`, then per item one `nextFloat` (chance 1.0) and `idDropped`, then the 3
       position draws, in the Java order on one `JavaRandom`. Table covers every block worldgen makes plus the metadata-free extras
       (stone -> cobblestone, grass/farmland -> dirt, gravel -> flint 1/10, coal/diamond/lapis(4-8 dye:4)/redstone(4-5) ores, leaves ->
@@ -216,25 +250,25 @@ BiomeGenBase but climate never selects it; b1.7.3 has no ravines.
       Starts empty; a tap places the selected item if it is a block (id < 256) and uses one up. Full hotbar leaves the item on the ground.
     - Bare hands harvest everything for now (vanilla `canHarvestBlock` would drop nothing from stone without a pickaxe; no tools/crafting yet).
     - Open: placing plants has no `canBlockStay` check; items are drawn as cubes, full brightness, no spin; no 27-slot inventory screen (M6).
-- `done` hardness-based digging (not compiled): `world/dig.rs` ports `Block.blockStrength` and the `PlayerControllerSP` damage
+- `done` hardness-based digging (compiled and ran on an Android device): `world/dig.rs` ports `Block.blockStrength` and the `PlayerControllerSP` damage
   counter at 20 Hz (hardness table from Block.java; bare hand: rock/iron/snow/web dig 3.3x slower; 5x slower when airborne or
   head under water; instant for hardness 0; 5-tick wait after a break; bedrock/portal unbreakable). Touch: hold still on the
   right half for 0.4 s to start digging, keep holding to finish (aiming elsewhere restarts the damage); progress bar under the
   crosshair (vanilla's crack textures need M14). Tap still places. No tools or drops yet (inventory).
-- `done` faster world loading (not compiled): chunk map uses a cheap integer hasher instead of SipHash; light work is bounded by
+- `done` faster world loading (compiled and ran on an Android device): chunk map uses a cheap integer hasher instead of SipHash; light work is bounded by
   10 ms per frame instead of a cell count and lights up to 2 chunks per frame; seam recomputation skips cells above the tallest
   column and block light when neither chunk has any; `App::init` (off the render thread) lights and meshes the spawn area
   (>= 24 chunk meshes or 8 s) before the first frame. Still open: populate and meshing run on the render thread.
-- `done` plants drawn (written WITHOUT a Rust toolchain: not compiled, tests not run): flowers, mushrooms, tall grass, dead bush
+- `done` plants drawn (written WITHOUT a Rust toolchain, then compiled and ran on an Android device; tests not run): flowers, mushrooms, tall grass, dead bush
   and reeds are two crossed double-sided quads (`chunk::cross_shape`, sized from each block's bounds; flat colours until M14
   textures), lit by their own cell, and pickable/breakable as a whole cell. Still not solid. Snow layer (78) is still not drawn.
-- `done` day/night cycle (written WITHOUT a Rust toolchain: not compiled, tests not run):
+- `done` day/night cycle (written WITHOUT a Rust toolchain, then compiled and ran on an Android device; tests not run):
     - `world/sky.rs`: ports of `calculateCelestialAngle`, `calculateSkylightSubtracted`, the sky colour (`func_4079_a` +
       `getSkyColorByTemp`, AWT HSB maths). 24000 ticks per day at 20 ticks/s, new world starts at tick 0 (sunrise). 2 tests.
     - `ChunkManager::set_sky_sub` (0..=11) marks every mesh stale when it changes; `mesh::build` takes `sky_sub` and uses
       `max(sky - sky_sub, block)` per cell, so night is dark but lava/torches stay lit. `temperature_at` feeds the sky colour.
     - Not done: sun, moon and stars are not drawn (done later: see the sun/moon/weather entry), no fog, no rain/thunder terms, time is not saved (M7) and not adjustable.
-- `done` M5 block interaction (written WITHOUT a Rust toolchain: not compiled, tests not run, expect a compile fix or two):
+- `done` M5 block interaction (written WITHOUT a Rust toolchain, then compiled and ran on an Android device; tests not run, ):
     - `world/pick.rs`: port of `World.func_28105_a` + `Block.collisionRayTrace` (f64, 4.0 reach), place cell/replaceable/player-overlap rules. 3 tests.
     - `world/chunks/light.rs`: port of the b1.7.3 light engine (sky + block light, region queue, `MetadataChunkBlock` relaxation,
       `Chunk.func_1003_g` relight, `generateSkylightMap`). Chunks light once final; edits go through `ChunkManager::set_block`. 1 test.
@@ -243,7 +277,7 @@ BiomeGenBase but climate never selects it; b1.7.3 has no ravines.
     - Touch: tap on the right half places, hold breaks (repeat 0.25 s), drag looks. Crosshair added. Hotbar slot = block placed.
     - Simplifications: instant break, no drops/consumption (M6), no day/night (`skylightSubtracted` = 0), plants/liquids not pickable,
       light seams across a not-yet-final neighbour are fixed by the seam strips when it is lit.
-- `done` M4d caves, trees, populate (compiled and tested on a Linux host with rustc 1.85; not run on a device):
+- `done` M4d caves, trees, populate (compiled and tested on a Linux host with rustc 1.85; compiled and ran on an Android device):
     - `gen/caves.rs`, `gen/populate.rs` (new), `OverworldGenerator::generate` now ends with the caves; `populate_ores`
       and `next_u31` deleted. `mobSpawnerNoise` is the 8th noise stack (after the 7 terrain ones).
     - `world/chunks.rs`: raw ring is now `RENDER_DIST + 2`, populate (1 chunk/frame, nearest first) needs the 2x2 raw
@@ -254,7 +288,7 @@ BiomeGenBase but climate never selects it; b1.7.3 has no ravines.
     - Plants are neither meshed nor solid (`is_plant`); atlas colours for the new blocks. Spawn search skips trees.
     - The M4f chunk manager compiled first try on rustc 1.85; its 3 tests pass.
 - `done` M4f chunk manager (`world/chunks.rs`; written without a Rust toolchain, NOT compiled, tested or run on
-  a device yet, so expect a compile fix or two on the first CI run):
+  a device yet, so  on the first CI run):
     - Replaces the 48x48 super-chunk (gone from `lib.rs`, `mesh.rs`, `populate_ores`). Chunks live in a
       `HashMap<(cx, cz), Entry>`; each has its own vertex/index buffer (empty chunks have none).
     - Ring: circle of `RENDER_DIST` (4) chunks is meshed and drawn, `RENDER_DIST + 1` is generated (a chunk is

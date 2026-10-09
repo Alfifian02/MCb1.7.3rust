@@ -31,7 +31,8 @@ use crate::world::pick::{self, Hit};
 use crate::world::dig::{self, Dig};
 use crate::world::craft::{self, Furnace, Screen};
 use crate::world::items::{self, Drops, Inventory, ItemStack};
-use crate::world::mobs::{self, Mobs};
+use crate::world::mobs::{self, Ctx, Ev, Mobs};
+use crate::world::ticks::Ticks;
 use crate::world::save::{self, Level};
 use crate::world::sky;
 use crate::world::chunk::{cross_shape, is_plant};
@@ -92,6 +93,8 @@ struct App {
     inv: Inventory,
     drops: Drops,
     mobs: Mobs,
+    /// Block updates (scheduled + random ticks, notifications, falling blocks), stepped on the 20 Hz game tick.
+    ticks: Ticks,
     item_mesh: ItemMesh,
     /// Open container screen (the 2x2 inventory or a workbench's 3x3) and its "place one" click toggle.
     screen: Option<Screen>,
@@ -188,6 +191,7 @@ impl App {
             inv: Inventory::default(),
             drops: Drops::new(seed),
             mobs: Mobs::new(seed),
+            ticks: Ticks::new(seed),
             item_mesh,
             screen: None,
             one_mode: false,
@@ -297,7 +301,6 @@ impl App {
         let angle = sky::celestial_angle(self.world_ticks as u64, 1.0);
         let sub = sky::skylight_subtracted(angle, self.weather.rain(1.0), self.weather.thunder(1.0));
         self.chunks.set_sky_sub(sub);
-        self.chunks.set_sun(if self.weather.rain(1.0) > 0.5 { i32::MAX } else { sky::sun_key(angle) });
         self.camera.add_yaw(look_dx * LOOK_SENS);
         self.camera.add_pitch(look_dy * LOOK_SENS);
         // Analog move stick: rotate the camera-frame (fwd, side) by yaw into
@@ -327,12 +330,22 @@ impl App {
         }
         // Dropped items fall, settle and get picked up (before the target check below, which can return early).
         self.drops.tick(dt, &|x: i32, y: i32, z: i32| self.chunks.block(x, y, z), self.player.pos, &mut self.inv);
-        self.mobs.update(dt, &get, self.player.pos, &mut self.drops);
+        let light = |x: i32, y: i32, z: i32| self.chunks.light(x, y, z);
+        let ctx = Ctx { get: &get, light: &light, day: sub < 4, player: self.player.pos, eye: self.camera.pos };
+        for e in self.mobs.update(dt, &ctx, &mut self.drops) {
+            match e {
+                Ev::Hurt(d) => { self.vitals.hurt(d); }
+                Ev::Boom(p) => self.explode(p, 3.0),
+                _ => {}
+            }
+        }
         // Furnaces burn on the 20 Hz tick, open or not, but only in loaded chunks (vanilla ticks loaded tile entities).
         // The block swaps between unlit 61 and lit 62 when the fire goes on or off.
         self.furn_acc += dt;
         while self.furn_acc >= dig::TICK {
             self.furn_acc -= dig::TICK;
+            let centre = (chunk_coord(self.player.pos.x), chunk_coord(self.player.pos.z));
+            self.ticks.step(&mut self.chunks, &mut self.drops, centre);
             let mut flips = Vec::new();
             for (&pos, f) in self.furnaces.iter_mut() {
                 if matches!(self.chunks.block_loaded(pos.0, pos.1, pos.2), Some(61 | 62)) && f.tick() {
@@ -409,7 +422,7 @@ impl App {
                 self.dig_acc = 0.0;
             }
         }
-        // A tap that has a pig under the crosshair, nearer than the block behind it, hits it (`Minecraft.clickMouse`'s attack;
+        // A tap that has a mob under the crosshair, nearer than the block behind it, hits it (`Minecraft.clickMouse`'s attack;
         // touch has no left button, and placing a block against a pig is not worth a gesture).
         if place {
             let (eye, fwd, slot) = (self.camera.pos, self.camera.forward(), self.touch.hotbar_slot);
@@ -417,7 +430,7 @@ impl App {
             if let Some((i, _)) = self.mobs.pick(eye, fwd, pick::REACH as f32).filter(|&(_, t)| t < wall) {
                 let held = self.inv.slots[slot].map(|s| s.id);
                 let (dmg, wear) = mobs::attack(held);
-                self.mobs.pigs[i].damage(dmg, self.player.pos);
+                self.mobs.hit(i, dmg, self.player.pos);
                 self.inv.damage(slot, wear);
                 return;
             }
@@ -472,6 +485,24 @@ impl App {
 
     /// `Minecraft.clickMouse` -> `sendUseItem`: a tap that neither placed a block nor opened a screen uses the held item;
     /// food is eaten, aimed at a block or not.
+    /// `Explosion` at `at`: the rays pick the cells (`Mobs::explode`), a broken block drops with chance 0.3 (vanilla: per item),
+    /// the player takes `(impact^2 + impact) / 2 x 8 x power + 1` (no exposure test, no knockback).
+    fn explode(&mut self, at: glam::Vec3, power: f32) {
+        let cells = self.mobs.explode(&|x: i32, y: i32, z: i32| self.chunks.block(x, y, z), at, power);
+        for (x, y, z) in cells {
+            let Some(id) = self.chunks.block_loaded(x, y, z).filter(|&b| b > 0) else { continue };
+            let meta = self.chunks.meta(x, y, z);
+            if self.mobs.rng.next_float() < 0.3 {
+                self.drops.spawn_block(id, meta, (x, y, z));
+            }
+            self.chunks.set_block(x, y, z, 0);
+        }
+        let impact = 1.0 - (self.player.pos - at).length() / (power * 2.0);
+        if impact > 0.0 {
+            self.vitals.hurt(((impact * impact + impact) / 2.0 * 8.0 * power + 1.0) as i32);
+        }
+    }
+
     fn eat(&mut self) {
         if let Some(n) = self.inv.eat(self.touch.hotbar_slot) {
             self.vitals.heal(n);
@@ -571,10 +602,8 @@ impl App {
         let (pcx, pcz) = (chunk_coord(self.player.pos.x), chunk_coord(self.player.pos.z));
         self.chunks.update(&self.gpu.device, pcx, pcz);
         let (view, proj) = self.camera.build_view_proj();
-        self.pipe.upload_uniforms(&self.gpu.queue, view, proj);
-        let frustum = Frustum::from_view_proj(proj * view);
         let outline_indices = self.target.map_or(0, |h| self.outline.update(&self.gpu.queue, h.pos));
-        let item_indices = self.item_mesh.update(&self.gpu.queue, &self.drops, &self.mobs);
+        let item_indices = self.item_mesh.update(&self.gpu.queue, &self.drops, &self.mobs, &self.ticks.falling);
 
         // Sky and fog colour from the sun angle, the weather and the climate under the player; the frame is cleared to
         // the fog colour and the sky pass is drawn over it (vanilla order).
@@ -583,6 +612,9 @@ impl App {
         let partial = self.world_ticks.fract() as f32;
         let angle = sky::celestial_angle(self.world_ticks as u64, partial);
         let (rain, thunder) = (self.weather.rain(partial), self.weather.thunder(partial));
+        let sun_strength = sky::shadow_strength(angle, rain);
+        let shadow_vp = self.pipe.upload_uniforms(&self.gpu.queue, view, proj, sky::sun_dir(angle), sun_strength);
+        let (frustum, shadow_frustum) = (Frustum::from_view_proj(proj * view), Frustum::from_view_proj(shadow_vp));
         let sky_rgb = sky::sky_color(angle, temp, rain, thunder);
         let fog = sky::fog_color(angle, sky_rgb, rain, thunder);
         let clear = wgpu::Color { r: fog[0] as f64, g: fog[1] as f64, b: fog[2] as f64, a: 1.0 };
@@ -616,6 +648,26 @@ impl App {
 
         let mut enc = self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
 
+        if sun_strength > 0.0 {
+            let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("shadow_pass"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.pipe.shadow_view,
+                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            rp.set_pipeline(&self.pipe.shadow_pipeline);
+            rp.set_bind_group(0, &self.pipe.bind_group, &[]);
+            for m in self.chunks.meshes_where(|min, max| shadow_frustum.intersects_aabb(min, max)) {
+                rp.set_vertex_buffer(0, m.vbuf.slice(..));
+                rp.set_index_buffer(m.ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                rp.draw_indexed(0..m.index_count, 0, 0..1);
+            }
+        }
         {
             let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("chunk_pass"),
@@ -642,6 +694,7 @@ impl App {
             self.sky.draw(&mut rp);
             rp.set_pipeline(&self.pipe.pipeline);
             rp.set_bind_group(0, &self.pipe.bind_group, &[]);
+            rp.set_bind_group(1, &self.pipe.shadow_bind, &[]);
             // One draw per chunk mesh that is in the view frustum.
             for m in self.chunks.meshes_where(|min, max| frustum.intersects_aabb(min, max)) {
                 rp.set_vertex_buffer(0, m.vbuf.slice(..));

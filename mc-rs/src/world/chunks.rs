@@ -26,6 +26,7 @@ use crate::render::mesh;
 use crate::world::chunk::{height_map, idx, Nibbles, H, VOLUME};
 use crate::world::gen::chunk_manager::WorldChunkManager;
 use crate::world::gen::overworld::OverworldGenerator;
+use crate::world::gen::noise::JavaRandom;
 use crate::world::gen::populate::Region;
 use crate::world::save;
 
@@ -122,6 +123,9 @@ pub struct ChunkManager {
     /// Save folder (M7); `None` = nothing is read or written (the tests). `saved` = chunks that have a file there.
     dir: Option<PathBuf>,
     saved: HashSet<Key>,
+    /// Cells written through `set_block_meta` since the last `take_changes`: (x, y, z, old id, new id). `world::ticks`
+    /// turns them into `onBlockAdded` / `onBlockRemoval` / `onNeighborBlockChange` (the `...WithNotify` setters).
+    changes: Vec<(i32, i32, i32, u8, u8)>,
 }
 
 impl ChunkManager {
@@ -163,7 +167,7 @@ impl ChunkManager {
         ring.sort_by_key(|&(dx, dz)| dx * dx + dz * dz);
 
         Self { chunks: Chunks::default(), pending: HashSet::new(), ring, radius, center: None, max_in_flight: workers * 2,
-               gen: OverworldGenerator::new(seed), cm: WorldChunkManager::new(seed), jobs, done, light_queue: Vec::new(), sky_sub: 0, sun: crate::render::mesh::NO_SUN, dir: None, saved: HashSet::new() }
+               gen: OverworldGenerator::new(seed), cm: WorldChunkManager::new(seed), jobs, done, light_queue: Vec::new(), sky_sub: 0, sun: crate::render::mesh::NO_SUN, dir: None, saved: HashSet::new(), changes: Vec::new() }
     }
 
     /// Keep this world in `dir`: chunks found there are loaded instead of generated, and edited ones are written back
@@ -274,6 +278,19 @@ impl ChunkManager {
         self.chunks.get(&(x >> 4, z >> 4)).map(|e| e.blocks[idx((x & 15) as usize, y as usize, (z & 15) as usize)])
     }
 
+    /// `World.getBlockLightValue`: the brighter of block light and sky light less `skylightSubtracted`, 0..=15; the open sky
+    /// above the world and unloaded chunks read as full daylight.
+    pub fn light(&self, x: i32, y: i32, z: i32) -> u8 {
+        let day = 15u8.saturating_sub(self.sky_sub);
+        if !(0..H as i32).contains(&y) {
+            return if y >= H as i32 { day } else { 0 };
+        }
+        self.chunks.get(&(x >> 4, z >> 4)).map_or(day, |e| {
+            let l = e.light[idx((x & 15) as usize, y as usize, (z & 15) as usize)];
+            (l & 15).saturating_sub(self.sky_sub).max(l >> 4)
+        })
+    }
+
     /// Block metadata at world coordinates (`World.getBlockMetadata`); 0 above/below the world and in an
     /// unloaded chunk. A caller that breaks a block reads this first: `set_block` clears it.
     pub fn meta(&self, x: i32, y: i32, z: i32) -> u8 {
@@ -292,6 +309,16 @@ impl ChunkManager {
     /// Place a block with metadata (`Chunk.setBlockIDWithMetadata`, `meta` is 0..=15): writes the cell, keeps
     /// the height map and light in step and marks the affected meshes for a rebuild. False if nothing changed.
     pub fn set_block_meta(&mut self, x: i32, y: i32, z: i32, id: u8, meta: u8) -> bool {
+        let old = self.block_loaded(x, y, z);
+        let done = self.set_quiet(x, y, z, id, meta);
+        if done {
+            self.changes.push((x, y, z, old.unwrap_or(0), id));
+        }
+        done
+    }
+
+    /// `World.setBlockAndMetadata` / `setBlockMetadata`: the same write without telling the neighbours.
+    pub fn set_quiet(&mut self, x: i32, y: i32, z: i32, id: u8, meta: u8) -> bool {
         if !(0..H as i32).contains(&y) {
             return false;
         }
@@ -309,6 +336,94 @@ impl ChunkManager {
         self.mark_dirty(x, z);
         self.light_after_set(x, y, z, id, h);
         true
+    }
+
+    pub fn take_changes(&mut self) -> Vec<(i32, i32, i32, u8, u8)> {
+        std::mem::take(&mut self.changes)
+    }
+
+    /// `World.getBlockLightValue` (`sub` = `skylightSubtracted`, 0 for `getFullBlockLightValue`): the brighter of sky and block light.
+    pub fn light_at(&self, x: i32, y: i32, z: i32, sub: u8) -> u8 {
+        if y < 0 {
+            return 0;
+        }
+        let y = y.min(H as i32 - 1) as usize;
+        self.chunks.get(&(x >> 4, z >> 4)).map_or(0, |e| {
+            let l = e.light[idx((x & 15) as usize, y, (z & 15) as usize)];
+            (l & 15).saturating_sub(sub).max(l >> 4)
+        })
+    }
+
+    /// Light with the current day/night subtraction (`getBlockLightValue`).
+    pub fn light_level(&self, x: i32, y: i32, z: i32) -> u8 {
+        self.light_at(x, y, z, self.sky_sub)
+    }
+
+    /// `World.canBlockSeeTheSky`: nothing opaque above the cell (`Chunk.canBlockSeeTheSky`: y >= heightMap).
+    pub fn sees_sky(&self, x: i32, y: i32, z: i32) -> bool {
+        self.chunks.get(&(x >> 4, z >> 4)).is_some_and(|e| y >= e.height[((z & 15) << 4 | (x & 15)) as usize] as i32)
+    }
+
+    /// `World.tick`'s random block ticks: 80 random cells in every lit, final chunk within `r` chunks of `center`, with the Java's
+    /// own LCG. Returns the cells whose block ticks at random (`Block.tickOnLoad`).
+    pub fn random_ticks(&self, center: Key, r: i32, lcg: &mut i32) -> Vec<(i32, i32, i32, u8)> {
+        let mut out = Vec::new();
+        for (&(cx, cz), e) in &self.chunks {
+            if (cx - center.0).abs() > r || (cz - center.1).abs() > r || !e.lit || !self.is_final(cx, cz) {
+                continue;
+            }
+            for _ in 0..80 {
+                *lcg = lcg.wrapping_mul(3).wrapping_add(1013904223);
+                let v = *lcg >> 2;
+                let (x, z, y) = ((v & 15) as usize, (v >> 8 & 15) as usize, (v >> 16 & 127) as usize);
+                let id = e.blocks[idx(x, y, z)];
+                if crate::world::ticks::ticks_at_random(id) {
+                    out.push((cx * 16 + x as i32, y as i32, cz * 16 + z as i32, id));
+                }
+            }
+        }
+        out
+    }
+
+    /// `BlockSapling.growTree` in a 2x2 chunk region around (x, z) (a tree reaches at most 8 cells out); false when one of the
+    /// four chunks is missing or the tree does not fit. ponytail: the four chunks are lit again as after a populate, one
+    /// light pass per grown tree; a per-cell light update would be cheaper.
+    pub fn grow_tree(&mut self, x: i32, y: i32, z: i32, species: u8, rng: &mut JavaRandom) -> bool {
+        let (cx, cz) = ((x - 8) >> 4, (z - 8) >> 4);
+        let Some(mut region) = self.take_region(cx, cz) else { return false };
+        let ok = crate::world::gen::populate::grow_sapling(&mut region, rng, x, y, z, species);
+        self.put_region(cx, cz, region);
+        ok
+    }
+
+    /// The four chunks populate / tree growth write into, moved out into a `Region`.
+    fn take_region(&mut self, x: i32, z: i32) -> Option<Region> {
+        let keys = [(x, z), (x, z + 1), (x + 1, z), (x + 1, z + 1)];
+        if !keys.iter().all(|k| self.chunks.contains_key(k)) {
+            return None;
+        }
+        let blocks = keys.map(|k| std::mem::take(&mut self.chunks.get_mut(&k).unwrap().blocks));
+        let data = keys.map(|k| std::mem::take(&mut self.chunks.get_mut(&k).unwrap().data));
+        Some(Region::new(x, z, blocks, data))
+    }
+
+    fn put_region(&mut self, x: i32, z: i32, region: Region) {
+        let keys = [(x, z), (x, z + 1), (x + 1, z), (x + 1, z + 1)];
+        let (blocks, data) = region.into_parts();
+        for ((k, b), d) in keys.iter().zip(blocks).zip(data) {
+            let e = self.chunks.get_mut(k).unwrap();
+            e.height = height_map(&b);
+            e.blocks = b;
+            e.data = d;
+            e.dirty = true; // a populate writes into all four (trees, ores, ... spill over the borders)
+            e.lit = false; // blocks changed under the light: it is computed again once final
+            // The chunk and its four neighbours (border faces) need a new mesh if they had one.
+            for n in [(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)] {
+                if let Some(e) = self.chunks.get_mut(&(k.0 + n.0, k.1 + n.1)) {
+                    e.meshed = false;
+                }
+            }
+        }
     }
 
     /// The chunk holding world column (x, z) needs a new mesh, and so does the neighbour whose border
@@ -458,25 +573,9 @@ impl ChunkManager {
         if self.chunks.get(&keys[0]).map_or(true, |e| e.populated) || !keys.iter().all(|k| self.chunks.contains_key(k)) {
             return false;
         }
-        let blocks = keys.map(|k| std::mem::take(&mut self.chunks.get_mut(&k).unwrap().blocks));
-        let data = keys.map(|k| std::mem::take(&mut self.chunks.get_mut(&k).unwrap().data));
-        let mut region = Region::new(x, z, blocks, data);
+        let mut region = self.take_region(x, z).unwrap();
         self.gen.populate(&mut region, x, z, &mut self.cm);
-        let (blocks, data) = region.into_parts();
-        for ((k, b), d) in keys.iter().zip(blocks).zip(data) {
-            let e = self.chunks.get_mut(k).unwrap();
-            e.height = height_map(&b);
-            e.blocks = b;
-            e.data = d;
-            e.dirty = true; // a populate writes into all four (trees, ores, ... spill over the borders)
-            e.lit = false; // blocks changed under the light: it is computed again once final
-            // The chunk and its four neighbours (border faces) need a new mesh if they had one.
-            for n in [(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)] {
-                if let Some(e) = self.chunks.get_mut(&(k.0 + n.0, k.1 + n.1)) {
-                    e.meshed = false;
-                }
-            }
-        }
+        self.put_region(x, z, region);
         self.chunks.get_mut(&keys[0]).unwrap().populated = true;
         true
     }

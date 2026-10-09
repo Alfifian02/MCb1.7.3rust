@@ -12,3 +12,4 @@ pub mod names;
 pub mod craft;
 pub mod vitals;
 pub mod save;
+pub mod ticks;

@@ -62,6 +62,17 @@ impl FirstPersonCamera {
     }
 }
 
+/// ponytail: no shadows past 64 blocks (= the render ring); upgrade = cascades.
+pub const SHADOW_RADIUS: f32 = 64.0;
+
+/// The sun's view-projection (`shadowProjection * shadowModelView`): an orthographic box `SHADOW_RADIUS` blocks to each side of
+/// `center`, looking along the sun's rays from `Z` blocks toward the sun. Depth 0..1 like `Mat4::perspective_rh`, so
+/// `Frustum` culls with it too. The sun moves in the YZ plane, so `X` is always a valid up vector.
+pub fn shadow_view_proj(center: Vec3, sun: Vec3) -> Mat4 {
+    const Z: f32 = 128.0; // the world is 128 tall
+    Mat4::orthographic_rh(-SHADOW_RADIUS, SHADOW_RADIUS, -SHADOW_RADIUS, SHADOW_RADIUS, 0.0, 2.0 * Z) * Mat4::look_at_rh(center + sun * Z, center, Vec3::X)
+}
+
 /// M13 view frustum: the six planes of `proj * view` (Gribb-Hartmann), for culling whole chunks before they are drawn.
 /// Depth is 0..1 (`Mat4::perspective_rh`, wgpu), so the near plane is row 2 alone.
 pub struct Frustum {
@@ -90,6 +101,17 @@ impl Frustum {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Rays toward the sun share one shadow-map texel, the box edge is NDC 1, and the box centre sits mid-depth.
+    #[test]
+    fn shadow_matrix_follows_the_sun() {
+        let (c, sun) = (Vec3::new(10.0, 70.0, -5.0), Vec3::new(0.0, 0.8, 0.6));
+        let vp = shadow_view_proj(c, sun);
+        let (a, b) = (vp.project_point3(c + Vec3::new(3.0, 1.0, 2.0)), vp.project_point3(c + Vec3::new(3.0, 1.0, 2.0) + sun * 20.0));
+        assert!((a.truncate() - b.truncate()).length() < 1e-4 && b.z < a.z, "same texel, nearer the sun is shallower");
+        assert!((vp.project_point3(c) - Vec3::new(0.0, 0.0, 0.5)).length() < 1e-4);
+        assert!((vp.project_point3(c + Vec3::X * 64.0).y.abs() - 1.0).abs() < 1e-4);
+    }
 
     #[test]
     fn frustum_culls_boxes_outside_the_view() {
