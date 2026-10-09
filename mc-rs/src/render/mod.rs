@@ -2,6 +2,7 @@ pub mod atlas;
 pub mod camera;
 pub mod mesh;
 pub mod hud;
+pub mod font;
 pub mod outline;
 pub mod items;
 pub mod sky;

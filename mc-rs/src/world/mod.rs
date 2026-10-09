@@ -7,6 +7,7 @@ pub mod pick;
 pub mod sky;
 pub mod dig;
 pub mod items;
+pub mod names;
 pub mod craft;
 pub mod vitals;
 pub mod save;

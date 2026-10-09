@@ -46,6 +46,14 @@ ticks (liquids/sand). Sapling growth, fluid flow and falling sand belong with M5
 BiomeGenBase but climate never selects it; b1.7.3 has no ravines.
 
 ## Changelog
+- `done` item-name tooltip (written WITHOUT a Rust toolchain: not compiled, +2 tests not run; `tools/gen_names.py` ran and its output was
+  spot-checked against `lang/en_US.lang`): `GuiContainer.drawScreen` shows `translateNamedKey(getItemName())` in a 75% black box (3 units of
+  padding) for the hovered slot when the cursor is empty. Touch has no hover, so it shows while a finger is down: the stack under it, or the
+  picked-up stack (a tap picks the slot's stack up, which would otherwise hide it). `render/font.rs` (generated: `default.png` glyphs +
+  `FontRenderer` widths, ASCII 32..126 only), `world/names.rs` (generated: `setBlockName`/`setItemName` + lang), `items::name` (wool, dye,
+  slab, charcoal by damage), `HudPipeline::push_text` / `text_width` / `push_tooltip`, hud quad cap 2048 -> 4096.
+    - Not done: tooltips in the hotbar/in play (b1.7.3 has none), non-ASCII, text anywhere else (that is M14), item sprites.
+    - UNVERIFIED: the tooltip spot (34 units above the finger, below it near the top edge) is invented; vanilla uses mouse + (12, -12).
 - `done` sun, moon, stars, sunrise glow and weather (written WITHOUT a Rust toolchain: not compiled, the 5 new tests not run; the Java reference
   numbers behind 3 of them were generated from the real classes, `tools/golden/G.java` `sky()`; +5 tests):
     - `world/sky.rs`: `Weather` = `World.updateWeather` (rain/thunder timers on a `java.util.Random`, strengths +-0.01 per tick; started clear, not

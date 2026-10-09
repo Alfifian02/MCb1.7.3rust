@@ -35,6 +35,19 @@ pub fn heal_amount(id: u16) -> Option<i32> {
 }
 
 /// `Item.maxStackSize`: tools, sign, doors, bed and stew 1, snowball 16, everything else 64.
+/// `ItemStack.getItemName` translated (`StringTranslate`): the `en_US.lang` name; wool, dye, slabs and charcoal by
+/// damage (`ItemCloth`, `ItemDye`, `ItemSlab`, `ItemCoal`). `None` for an id the original gives no name.
+pub fn name(s: ItemStack) -> Option<&'static str> {
+    use crate::world::names::*;
+    match s.id {
+        35 => Some(WOOL[(s.damage & 15) as usize]),
+        43 | 44 => Some(SLAB[(s.damage & 3) as usize]),
+        263 if s.damage == 1 => Some(CHARCOAL),
+        351 => Some(DYE[(s.damage & 15) as usize]),
+        id => NAMES.binary_search_by_key(&id, |e| e.0).ok().map(|i| NAMES[i].1),
+    }
+}
+
 pub fn max_stack(id: u16) -> u8 {
     match id {
         282 | 323 | 324 | 330 | 355 => 1,
@@ -391,6 +404,18 @@ impl Drops {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn names_match_lang() {
+        let n = |id, damage| super::name(super::ItemStack { id, count: 1, damage });
+        assert_eq!(n(1, 0), Some("Stone"));
+        assert_eq!(n(257, 0), Some("Iron Pickaxe"));
+        assert_eq!(n(35, 14), Some("Red Wool")); // meta 14 = red (~14 & 15 = 1)
+        assert_eq!(n(263, 1), Some("Charcoal"));
+        assert_eq!(n(44, 2), Some("Wooden Slab"));
+        assert_eq!(n(351, 4), Some("Lapis Lazuli"));
+        assert_eq!(n(9999, 0), None);
+    }
+
     use super::*;
 
     /// Stew heals 10 and leaves a bowl; other items are not food and stay.

@@ -200,7 +200,7 @@ was generated with). The CI workflow does this for you.
 
 ## What M12 is not (yet)
 
-- No text rendering. Hotbar slots show a flat colour square per item (counts are seven-segment digits),
+- Text exists only as the item-name tooltip (real `font/default.png` glyphs, `render/font.rs`): hold a finger on an inventory/workbench/furnace slot, or on a picked-up stack, to see its name (`GuiContainer`'s hover tooltip; no menus or chat use it yet). Hotbar slots show a flat colour square per item (counts are seven-segment digits),
   not item sprites. M14 will add the font + GUI atlas.
 - No Minecraft PE touch UX anchor — move-stick / look / jump / pause
   geometry was invented for this port and is flagged UNVERIFIED in

@@ -753,6 +753,18 @@ impl App {
                 let sz = 16.0 * k;
                 push_stack(v, (cx - sz * 0.5, cy - sz * 1.4, sz, sz), c);
             }
+            // Item name while a finger is down (hover has no touch twin): the picked-up stack, else the stack under the
+            // finger. `GuiContainer.drawScreen` names only the hovered slot and only with an empty cursor; the held
+            // stack is named too because a tap picks the slot's stack up and the finger then covers it.
+            if self.gesture.is_some() {
+                let (cx, cy) = self.touch.cursor_pos;
+                let under = || craft::slot_at(s.gw, w, h, cx, cy).and_then(|id| s.get(&self.inv, furn, id));
+                if let Some(name) = s.cursor.or_else(under).and_then(items::name) {
+                    let bw = (HudPipeline::text_width(name) as f32 + 6.0) * k;
+                    let ty = if cy > 36.0 * k { cy - 34.0 * k } else { cy + 14.0 * k };
+                    HudPipeline::push_tooltip(v, (cx - bw * 0.5).clamp(0.0, (w - bw).max(0.0)), ty, k, name);
+                }
+            }
         }
 
         // Pause button: top-right, two bars.
