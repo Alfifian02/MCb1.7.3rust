@@ -72,8 +72,8 @@ const DIRS: [(i32, i32, i32); 6] = [(1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0)
 /// `(ox, oz)` is the chunk's world origin (chunk * 16).
 /// Vertices: 6 floats each (px, py, pz, u, v, light). Indices: 6 per face (two triangles).
 /// `sun` = `sky::sun_key`: sun tan(angle) x 2, or `NO_SUN`. ponytail: a face is shadowed when a block lies on the ray
-/// toward the sun (8 steps, the sun moves along Z like `render::sky` draws it, the ray stops at this chunk's 1-cell border, so a shadow cast from
-/// another chunk is missed); upgrade = a per-column shadow map shared by chunks.
+/// toward the sun (8 steps, the sun moves along Z like `render::sky` draws it, rays cross into the +Z/-Z chunks; a shadow
+/// cast across an X border is approximated); upgrade = a per-column shadow map shared by chunks.
 pub const NO_SUN: i32 = i32::MAX;
 
 pub fn build(blocks: &[u8], data: &Nibbles, light: &[u8], nb: [&[u8]; 4], nb_light: [&[u8]; 4], sky_sub: u8, sun: i32, ox: i32, oz: i32) -> (Vec<f32>, Vec<u32>) {
@@ -104,16 +104,22 @@ pub fn build(blocks: &[u8], data: &Nibbles, light: &[u8], nb: [&[u8]; 4], nb_lig
         let l = match slot(x, z) { 0 => light, s => nb_light[s - 1] };
         l[idx((x & 15) as usize, y as usize, (z & 15) as usize)] & 15
     };
-    // Is the air cell in the shade? A ray toward the sun, `sun_key` steps along Z per step up.
-    let (sx, sy) = { let h = if sun == NO_SUN { 0.0 } else { sun as f32 / 2.0 }; let m = h.abs().max(1.0); (h / m, 1.0 / m) };
-    let occ = |x: i32, y: i32, z: i32| -> bool {
-        if sun == NO_SUN || !(-1..=16).contains(&x) || !(-1..=16).contains(&z) { return false; }
-        // Vanilla sky light already shades under trees and overhangs: cast only onto fully sky-lit cells, so the two mix
-        // instead of stacking.
-        if skyl(x, y, z) < 15 { return false; }
+    // Solid cell for the shadow ray: the sun moves along Z, so only the +Z / -Z neighbours (whole chunks) are read, x is
+    // clamped into the chunk (ponytail: a shadow cast across an X border is approximated by the cell at the edge).
+    let solid = |x: i32, y: i32, z: i32| -> bool {
+        if y < 0 || y >= H as i32 { return false; }
+        let b = if z < 0 { nb[3] } else if z >= 16 { nb[2] } else { blocks };
+        let id = b[idx(x.clamp(0, 15) as usize, y as usize, (z & 15) as usize)];
+        id != 0 && !is_plant(id)
+    };
+    // Shade of an air cell, 0..1: 1 when a ray toward the sun hits a block, scaled by the cell's sky light so it fades
+    // out where vanilla sky light already darkens (no step at the edge of a tree's own shade).
+    let occ = |x: i32, y: i32, z: i32| -> f32 {
+        if sun == NO_SUN || !(-1..=16).contains(&x) || !(-1..=16).contains(&z) { return 0.0; }
         let (cz, cy) = (z as f32 + 0.5, y as f32 + 0.5);
-        (1..=8).map(|n| ((cz + sx * n as f32).floor() as i32, (cy + sy * n as f32).floor() as i32))
-            .take_while(|&(rz, _)| (-1..=16).contains(&rz)).any(|(rz, ry)| get(x, ry, rz) != 0)
+        let hit = (1..=8).map(|n| ((cz + sx * n as f32).floor() as i32, (cy + sy * n as f32).floor() as i32))
+            .take_while(|&(rz, _)| (-16..32).contains(&rz)).any(|(rz, ry)| solid(x, ry, rz));
+        if hit { skyl(x, y, z) as f32 / 15.0 } else { 0.0 }
     };
     let mut verts: Vec<f32> = Vec::new();
     let mut idxs: Vec<u32> = Vec::new();
@@ -169,13 +175,13 @@ pub fn build(blocks: &[u8], data: &Nibbles, light: &[u8], nb: [&[u8]; 4], nb_lig
                         // Soft edge: the shadow of the 4 air cells touching this corner in the face plane, averaged, so the
                         // GPU fades it across a block instead of cutting it at the block edge.
                         let t = if dx != 0 { [1, 2] } else if dy != 0 { [0, 2] } else { [0, 1] };
-                        let hit = if sun == NO_SUN { 0 } else { (0..4usize).filter(|&i| {
+                        let hit: f32 = if sun == NO_SUN { 0.0 } else { (0..4usize).map(|i| {
                             let mut c = [x + dx, y + dy, z + dz];
                             c[t[0]] += corner[t[0]] as i32 - 1 + (i & 1) as i32;
                             c[t[1]] += corner[t[1]] as i32 - 1 + (i >> 1) as i32;
                             if get(c[0], c[1], c[2]) != 0 { own } else { occ(c[0], c[1], c[2]) }
-                        }).count() };
-                        ls[ci] = light * (1.0 - 0.4 * hit as f32 / 4.0);
+                        }).sum() };
+                        ls[ci] = light * (1.0 - 0.4 * hit / 4.0);
                         verts.push(ls[ci]);
                     }
                     // Split along the diagonal whose ends match best, or the gradient shows as dark triangles.
@@ -231,8 +237,8 @@ mod tests {
         let mut c = air();
         for z in 0..16 { c[idx(5, 0, z)] = 1; }
         for y in 1..4 { c[idx(5, y, 9)] = 1; }
-        let a = vec![15u8; VOLUME]; // full sky light: shadows fall only on sky-lit cells
-        let v = build(&c, &Nibbles::new(), &a, [&a[..], &a[..], &a[..], &a[..]], [&a[..], &a[..], &a[..], &a[..]], 0, 2, 0, 0).0;
+        let (a, e) = (vec![15u8; VOLUME], air()); // full sky light, empty neighbours
+        let v = build(&c, &Nibbles::new(), &a, [&e[..], &e[..], &e[..], &e[..]], [&a[..], &a[..], &a[..], &a[..]], 0, 2, 0, 0).0;
         let top = |z0: f32| v.chunks(6).find(|q| q[1] == 1.0 && q[2] >= z0 && q[2] < z0 + 1.0 && q[0] == 5.0).unwrap()[5];
         assert!(top(7.0) < top(2.0));
     }
