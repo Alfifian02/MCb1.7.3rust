@@ -27,6 +27,7 @@ use crate::render::items::ItemMesh;
 use crate::render::camera::{FirstPersonCamera, Frustum};
 use crate::render::outline::Outline;
 use crate::render::sky::{SkyFrame, SkyRenderer};
+use crate::render::vl::{self, LightShafts};
 use crate::world::pick::{self, Hit};
 use crate::world::dig::{self, Dig};
 use crate::world::craft::{self, Furnace, Screen};
@@ -82,6 +83,8 @@ struct App {
     /// Sun, moon and stars drawn behind the terrain, and the rain/thunder timers (not saved: a loaded world starts clear).
     /// `weather_ticks` counts the whole ticks the weather has run, so it catches up to `world_ticks` one tick at a time.
     sky: SkyRenderer,
+    /// Volumetric light (`render::vl`), drawn after the terrain.
+    shafts: LightShafts,
     weather: sky::Weather,
     weather_ticks: u64,
     /// Hotbar slot last seen and seconds its item name still shows (`GuiIngame` shows it ~2 s after a switch).
@@ -163,6 +166,7 @@ impl App {
         let outline = Outline::new(&gpu.device);
         let item_mesh = ItemMesh::new(&gpu.device);
         let sky_renderer = SkyRenderer::new(&gpu.device, &gpu.queue, surface_format);
+        let shafts = LightShafts::new(&gpu.device, surface_format, &pipe.shadow_layout);
         let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as i64);
 
         let mut app = Self {
@@ -183,6 +187,7 @@ impl App {
             outline,
             world_ticks: 0.0,
             sky: sky_renderer,
+            shafts,
             weather: sky::Weather::new(seed),
             weather_ticks: 0,
             tip: (0, 0.0),
@@ -612,10 +617,16 @@ impl App {
         let partial = self.world_ticks.fract() as f32;
         let angle = sky::celestial_angle(self.world_ticks as u64, partial);
         let (rain, thunder) = (self.weather.rain(partial), self.weather.thunder(partial));
-        let sun_strength = sky::shadow_strength(angle, rain);
-        let shadow_vp = self.pipe.upload_uniforms(&self.gpu.queue, view, proj, sky::sun_dir(angle), sun_strength);
-        let (frustum, shadow_frustum) = (Frustum::from_view_proj(proj * view), Frustum::from_view_proj(shadow_vp));
         let sky_rgb = sky::sky_color(angle, temp, rain, thunder);
+        // Light shafts march through the shadow map, so the shadow pass also runs for them (sunrise, sunset, rain, the moon);
+        // the terrain still takes its shadow only from `sun_strength`. Not under water (the pack has its own shafts there).
+        let e = self.camera.pos;
+        let eye_in_water = matches!(self.chunks.block_loaded(e.x.floor() as i32, e.y.floor() as i32, e.z.floor() as i32), Some(8 | 9));
+        let mut vlp = vl::params(self.world_ticks, angle, rain, sky_rgb, e.y);
+        vlp.active &= !eye_in_water;
+        let sun_strength = sky::shadow_strength(angle, rain);
+        let shadow_vp = self.pipe.upload_uniforms(&self.gpu.queue, view, proj, vlp.light, sun_strength);
+        let (frustum, shadow_frustum) = (Frustum::from_view_proj(proj * view), Frustum::from_view_proj(shadow_vp));
         let fog = sky::fog_color(angle, sky_rgb, rain, thunder);
         let clear = wgpu::Color { r: fog[0] as f64, g: fog[1] as f64, b: fog[2] as f64, a: 1.0 };
         self.sky.update(&self.gpu.queue, &self.camera, &SkyFrame { angle, rain, sky: sky_rgb, fog });
@@ -648,7 +659,7 @@ impl App {
 
         let mut enc = self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
 
-        if sun_strength > 0.0 {
+        if sun_strength > 0.0 || vlp.active {
             let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("shadow_pass"),
                 color_attachments: &[],
@@ -711,6 +722,9 @@ impl App {
                 rp.set_index_buffer(self.outline.ibuf.slice(..), wgpu::IndexFormat::Uint32);
                 rp.draw_indexed(0..outline_indices, 0, 0..1);
             }
+        }
+        if vlp.active {
+            self.shafts.draw(&self.gpu, &mut enc, &view_tex, &self.pipe.shadow_bind, &self.camera, shadow_vp, &vlp);
         }
         // M12: HUD overlay pass. Built into the same encoder so the HUD
         // never gets lost if the GPU drops a frame.

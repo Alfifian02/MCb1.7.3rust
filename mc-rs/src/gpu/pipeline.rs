@@ -50,7 +50,7 @@ pub struct Uniforms {
 
 // Shadow-Tutorial `distort.glsl` constants.
 pub const SHADOW_RES: u32 = 1024; // shadowMapResolution
-const SHADOW_DISTORT: f32 = 0.10; // SHADOW_DISTORT_FACTOR
+pub const SHADOW_DISTORT: f32 = 0.10; // SHADOW_DISTORT_FACTOR
 const SHADOW_BIAS: f32 = 1.0;
 const SHADOW_BRIGHTNESS: f32 = 0.75;
 
@@ -82,6 +82,8 @@ pub struct ChunkPipeline {
     pub shadow_pipeline: RenderPipeline,
     pub shadow_view: TextureView,
     pub shadow_bind: BindGroup,
+    /// Layout of `shadow_bind`, for the light-shaft pass (`render::vl`).
+    pub shadow_layout: BindGroupLayout,
 }
 
 const SHADER_SRC: &str = r#"
@@ -363,7 +365,7 @@ impl ChunkPipeline {
             cache: None,
         });
 
-        Self { pipeline, uniform_buf, atlas_tex, atlas_view, bind_group, bind_layout, shadow_pipeline, shadow_view, shadow_bind }
+        Self { pipeline, uniform_buf, atlas_tex, atlas_view, bind_group, bind_layout, shadow_pipeline, shadow_view, shadow_bind, shadow_layout }
     }
 
     /// Returns the sun's view-projection (for culling the shadow pass). `strength` 0 turns shadows off.

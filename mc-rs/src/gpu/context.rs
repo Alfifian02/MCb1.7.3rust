@@ -198,7 +198,7 @@ impl Gpu {
             sample_count: 1,
             dimension: TextureDimension::D2,
             format: TextureFormat::Depth32Float,
-            usage: TextureUsages::RENDER_ATTACHMENT,
+            usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING, // the light-shaft pass reads it
             view_formats: &[],
         })
     }
