@@ -26,6 +26,7 @@ use crate::render::atlas;
 use crate::render::items::ItemMesh;
 use crate::render::camera::{FirstPersonCamera, Frustum};
 use crate::render::outline::Outline;
+use crate::render::sky::{SkyFrame, SkyRenderer};
 use crate::world::pick::{self, Hit};
 use crate::world::dig::{self, Dig};
 use crate::world::craft::{self, Furnace, Screen};
@@ -76,6 +77,11 @@ struct App {
     outline: Outline,
     /// World time in ticks (20 per second); a new world starts at 0, sunrise.
     world_ticks: f64,
+    /// Sun, moon and stars drawn behind the terrain, and the rain/thunder timers (not saved: a loaded world starts clear).
+    /// `weather_ticks` counts the whole ticks the weather has run, so it catches up to `world_ticks` one tick at a time.
+    sky: SkyRenderer,
+    weather: sky::Weather,
+    weather_ticks: u64,
     /// Survival digging state and the leftover time towards the next 20 Hz dig tick.
     dig: Dig,
     dig_acc: f32,
@@ -149,6 +155,7 @@ impl App {
         let hud = HudPipeline::new(&gpu.device, &gpu.queue, surface_format, width, height);
         let outline = Outline::new(&gpu.device);
         let item_mesh = ItemMesh::new(&gpu.device);
+        let sky_renderer = SkyRenderer::new(&gpu.device, &gpu.queue, surface_format);
         let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as i64);
 
         let mut app = Self {
@@ -168,6 +175,9 @@ impl App {
             target: None,
             outline,
             world_ticks: 0.0,
+            sky: sky_renderer,
+            weather: sky::Weather::new(seed),
+            weather_ticks: 0,
             dig: Dig::default(),
             dig_acc: 0.0,
             inv: Inventory::default(),
@@ -193,6 +203,7 @@ impl App {
     /// (the position and spawn were used when the app was built).
     fn restore(&mut self, l: Level) {
         self.world_ticks = l.ticks;
+        self.weather_ticks = l.ticks as u64;
         self.camera.yaw = l.yaw;
         self.camera.pitch = l.pitch;
         self.touch.hotbar_slot = l.slot as usize;
@@ -271,7 +282,11 @@ impl App {
         }
         // Day/night: time only runs while playing; a new sky-light level restarts the meshes.
         self.world_ticks += dt as f64 * 20.0;
-        let sub = sky::skylight_subtracted(sky::celestial_angle(self.world_ticks as u64, 1.0));
+        while self.weather_ticks < self.world_ticks as u64 {
+            self.weather.tick();
+            self.weather_ticks += 1;
+        }
+        let sub = sky::skylight_subtracted(sky::celestial_angle(self.world_ticks as u64, 1.0), self.weather.rain(1.0), self.weather.thunder(1.0));
         self.chunks.set_sky_sub(sub);
         self.camera.add_yaw(look_dx * LOOK_SENS);
         self.camera.add_pitch(look_dy * LOOK_SENS);
@@ -533,12 +548,17 @@ impl App {
         let outline_indices = self.target.map_or(0, |h| self.outline.update(&self.gpu.queue, h.pos));
         let item_indices = self.item_mesh.update(&self.gpu.queue, &self.drops);
 
-        // Sky colour from the sun angle and the climate under the player.
+        // Sky and fog colour from the sun angle, the weather and the climate under the player; the frame is cleared to
+        // the fog colour and the sky pass is drawn over it (vanilla order).
         let (px, pz) = (self.camera.pos.x.floor() as i32, self.camera.pos.z.floor() as i32);
         let temp = self.chunks.temperature_at(px, pz) as f32;
-        let angle = sky::celestial_angle(self.world_ticks as u64, self.world_ticks.fract() as f32);
-        let [r, g, b] = sky::sky_color(angle, temp);
-        let clear = wgpu::Color { r: r as f64, g: g as f64, b: b as f64, a: 1.0 };
+        let partial = self.world_ticks.fract() as f32;
+        let angle = sky::celestial_angle(self.world_ticks as u64, partial);
+        let (rain, thunder) = (self.weather.rain(partial), self.weather.thunder(partial));
+        let sky_rgb = sky::sky_color(angle, temp, rain, thunder);
+        let fog = sky::fog_color(angle, sky_rgb, rain, thunder);
+        let clear = wgpu::Color { r: fog[0] as f64, g: fog[1] as f64, b: fog[2] as f64, a: 1.0 };
+        self.sky.update(&self.gpu.queue, &self.camera, &SkyFrame { angle, rain, sky: sky_rgb, fog });
         if self.frames == 0 {
             log::info!("render: first frame, surface_format={:?}, {} chunks loaded", self.gpu.surface_format(), self.chunks.loaded());
         }
@@ -591,6 +611,7 @@ impl App {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
+            self.sky.draw(&mut rp);
             rp.set_pipeline(&self.pipe.pipeline);
             rp.set_bind_group(0, &self.pipe.bind_group, &[]);
             // One draw per chunk mesh that is in the view frustum.

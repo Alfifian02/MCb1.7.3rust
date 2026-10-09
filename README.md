@@ -26,7 +26,8 @@ original. Anything that cannot be derived from the b1.7.3 sources is marked
 | M4f Chunk manager | done (now compiles and its tests pass on a Linux host; not run on a device) | Chunks keyed by (cx, cz), one mesh per chunk, circular render-distance ring (4 chunks) that loads/unloads as you walk, terrain generated on 1-2 worker threads, cross-chunk face culling. Replaces the 48x48 super-chunk. |
 | M4d Caves, trees, populate | done (compiled + golden-tested on a Linux host; not run on a device) | MapGenCaves in `generate`, full `populate()` (lakes, dungeons, clay, dirt/gravel/ores, oak/birch/big/taiga trees, flowers, grass, reeds, pumpkins, cactus, springs, snow). Bit-exact vs the real Java on 11 cases (`tools/golden/`). Chunk manager gained the populated/final state. |
 | M5 Block interaction | written, NOT compiled | Raycast pick, break (hold), place (tap), light engine port, outline + crosshair. See ROADMAP changelog. |
-| Day/night            | written, NOT compiled | 20-minute cycle: sky light 0..11 subtracted in the mesher, sky colour from sun angle + climate. No sun/moon/stars yet. |
+| Day/night            | written, NOT compiled | 20-minute cycle: sky light 0..11 subtracted in the mesher, sky colour from sun angle + climate. Sun, moon, stars and weather: next row. |
+| Sun, moon, stars, weather | written WITHOUT a Rust toolchain: not compiled, 5 new tests not run (their Java reference numbers were) | Sky pass drawn behind the terrain with the real sun/moon textures, sunrise/sunset glow, stars, fog-coloured clear; rain/thunder timers (`World.updateWeather`) that grey the sky and fog, darken the sky light and fade sun and stars. Rain/snow streaks, lightning, clouds and terrain fog are not drawn yet. See ROADMAP changelog. |
 | Digging              | written, NOT compiled | Hardness-based survival digging, hold to dig, progress bar. No tools yet. |
 | Drops + inventory    | written, logic tested on a Linux host, NOT compiled as a whole | A broken block drops its `idDropped` items as entities (20 Hz motion, pickup after 10 ticks). The hotbar holds real stacks with counts and starts empty; placing uses one up. See ROADMAP changelog. |
 | M6 Crafting + tools  | written, logic tested on a Linux host, whole crate type-checked against a stubbed `android-activity`; NOT run on a device | 36-slot inventory, 2x2 inventory crafting and 3x3 workbench crafting, furnace smelting (`TileEntityFurnace`, 8 smelting recipes), 31 recipes (wood/stone/iron/diamond/gold pickaxe, axe, shovel, sword, hoe + shears + planks, sticks, workbench, chest, furnace, torch, ...), tool speed and durability, and `canHarvestBlock`: stone without a pickaxe breaks and drops nothing, like the original. See ROADMAP changelog. |
@@ -49,6 +50,7 @@ mc-rs/
       context.rs          wgpu instance + Vulkan/GL fallback for Android
       pipeline.rs         chunk pipeline + atlas upload + uniforms
     render/
+      sky.rs              sky pass: dome, sunrise glow, sun, moon, stars, under-plane (assets/sky.rgba = real sun.png + moon.png)
       atlas.rs            16x32 RGBA atlas: block-id tiles + metadata variants (log/leaf species, wool colours)
       camera.rs           FirstPersonCamera: yaw/pitch/look_at/perspective
       hud.rs              2D orthographic overlay pipeline (M12)
@@ -66,7 +68,7 @@ mc-rs/
       dig.rs              hardness table + dig-time maths (PlayerControllerSP) + canHarvestBlock gate
       items.rs            ItemStack, 36-slot Inventory (hotbar = 0..9), idDropped/quantityDropped rules, EntityItem physics + pickup + throw
       craft.rs            M6: tools (EnumToolMaterial, getStrVsBlock, canHarvestBlock), recipes (CraftingManager), inventory/workbench screen (Container clicks) + its GUI geometry
-      sky.rs              day/night: sun angle, skylight subtracted, sky colour
+      sky.rs              day/night + weather: sun angle, skylight subtracted, sky/fog/sunrise colours, star brightness + positions, `Weather` (rain/thunder timers)
       save.rs             M7: chunk file codec (RLE), `Level` codec (player, inventory, furnaces, drops), atomic write
       vitals.rs           health, air, fire, fall damage (EntityLiving.attackEntityFrom and friends)
       chunks/light.rs     M5 light engine (port of World/Chunk lighting)
@@ -143,7 +145,7 @@ UNVERIFIED until you can show a reference.
 ```
 cargo test --lib
 ```
-Last full run: 56 unit tests (47 before block metadata, 52 with it; swimming, health, food and frustum culling add 4), all passing on a Linux host (rustc 1.85, the whole crate built against a small stand-in for `android-activity`, which does not build there; `tools/` must sit next to the crate for the golden `include_str!`). That includes the 18-chunk terrain golden, `populate_matches_java` (11 raw+populated 2x2 cases), `block_tables_match_java` and the M6 tests (`recipes_match_like_java`, `clicks_follow_container_rules`, `tool_tables`, `furnace_smelts_like_java`, `drop_one_spreads_the_cursor_stack`, `tools_gate_harvest_and_speed_up_digging`, `open_screen_turns_presses_into_taps`). Block metadata adds 5 tests (`nibbles_pack_like_java`, `metadata_follows_chunk_setters`, `metadata_survives_break_and_place`,
+Last full run: 56 unit tests (47 before block metadata, 52 with it; swimming, health, food and frustum culling add 4), all passing on a Linux host (rustc 1.85, the whole crate built against a small stand-in for `android-activity`, which does not build there; `tools/` must sit next to the crate for the golden `include_str!`). That includes the 18-chunk terrain golden, `populate_matches_java` (11 raw+populated 2x2 cases), `block_tables_match_java` and the M6 tests (`recipes_match_like_java`, `clicks_follow_container_rules`, `tool_tables`, `furnace_smelts_like_java`, `drop_one_spreads_the_cursor_stack`, `tools_gate_harvest_and_speed_up_digging`, `open_screen_turns_presses_into_taps`). Block metadata adds 5 tests (`nibbles_pack_like_java`, `metadata_follows_chunk_setters`, `metadata_survives_break_and_place`, The sun/moon/weather work then added 5 tests (`sky_matches_java`, `weather_matches_java`, `stars_match_java`, `rain_and_thunder_dim_the_sky`, `sun_and_moon_trade_places`), written without a Rust toolchain and NOT run; the first three compare against new `CEL`/`SUBL`/`WEAT`/`WEAH`/`STARS` lines in `golden.txt`, which come from the real classes.
 `metadata_picks_the_tile`, `metadata_picks_the_face_tile`) and makes `populate_matches_java` compare the `META` hashes; the metadata code was first run in the 56-test pass, which also fixed a wrong expectation in `metadata_picks_the_tile` (wool metadata 1 is tile 260).
 `ring_loads_then_unloads_when_walking` and the golden tests generate real chunks: use `--release`.
 The crate depends on `android-activity` -> `ndk-sys`, which only compiles for Android, so

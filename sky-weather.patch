@@ -1,0 +1,1156 @@
+diff --git a/README.md b/README.md
+index 2197d32..9e85c0d 100644
+--- a/README.md
++++ b/README.md
+@@ -26,7 +26,8 @@ original. Anything that cannot be derived from the b1.7.3 sources is marked
+ | M4f Chunk manager | done (now compiles and its tests pass on a Linux host; not run on a device) | Chunks keyed by (cx, cz), one mesh per chunk, circular render-distance ring (4 chunks) that loads/unloads as you walk, terrain generated on 1-2 worker threads, cross-chunk face culling. Replaces the 48x48 super-chunk. |
+ | M4d Caves, trees, populate | done (compiled + golden-tested on a Linux host; not run on a device) | MapGenCaves in `generate`, full `populate()` (lakes, dungeons, clay, dirt/gravel/ores, oak/birch/big/taiga trees, flowers, grass, reeds, pumpkins, cactus, springs, snow). Bit-exact vs the real Java on 11 cases (`tools/golden/`). Chunk manager gained the populated/final state. |
+ | M5 Block interaction | written, NOT compiled | Raycast pick, break (hold), place (tap), light engine port, outline + crosshair. See ROADMAP changelog. |
+-| Day/night            | written, NOT compiled | 20-minute cycle: sky light 0..11 subtracted in the mesher, sky colour from sun angle + climate. No sun/moon/stars yet. |
++| Day/night            | written, NOT compiled | 20-minute cycle: sky light 0..11 subtracted in the mesher, sky colour from sun angle + climate. Sun, moon, stars and weather: next row. |
++| Sun, moon, stars, weather | written WITHOUT a Rust toolchain: not compiled, 5 new tests not run (their Java reference numbers were) | Sky pass drawn behind the terrain with the real sun/moon textures, sunrise/sunset glow, stars, fog-coloured clear; rain/thunder timers (`World.updateWeather`) that grey the sky and fog, darken the sky light and fade sun and stars. Rain/snow streaks, lightning, clouds and terrain fog are not drawn yet. See ROADMAP changelog. |
+ | Digging              | written, NOT compiled | Hardness-based survival digging, hold to dig, progress bar. No tools yet. |
+ | Drops + inventory    | written, logic tested on a Linux host, NOT compiled as a whole | A broken block drops its `idDropped` items as entities (20 Hz motion, pickup after 10 ticks). The hotbar holds real stacks with counts and starts empty; placing uses one up. See ROADMAP changelog. |
+ | M6 Crafting + tools  | written, logic tested on a Linux host, whole crate type-checked against a stubbed `android-activity`; NOT run on a device | 36-slot inventory, 2x2 inventory crafting and 3x3 workbench crafting, furnace smelting (`TileEntityFurnace`, 8 smelting recipes), 31 recipes (wood/stone/iron/diamond/gold pickaxe, axe, shovel, sword, hoe + shears + planks, sticks, workbench, chest, furnace, torch, ...), tool speed and durability, and `canHarvestBlock`: stone without a pickaxe breaks and drops nothing, like the original. See ROADMAP changelog. |
+@@ -49,6 +50,7 @@ mc-rs/
+       context.rs          wgpu instance + Vulkan/GL fallback for Android
+       pipeline.rs         chunk pipeline + atlas upload + uniforms
+     render/
++      sky.rs              sky pass: dome, sunrise glow, sun, moon, stars, under-plane (assets/sky.rgba = real sun.png + moon.png)
+       atlas.rs            16x32 RGBA atlas: block-id tiles + metadata variants (log/leaf species, wool colours)
+       camera.rs           FirstPersonCamera: yaw/pitch/look_at/perspective
+       hud.rs              2D orthographic overlay pipeline (M12)
+@@ -66,7 +68,7 @@ mc-rs/
+       dig.rs              hardness table + dig-time maths (PlayerControllerSP) + canHarvestBlock gate
+       items.rs            ItemStack, 36-slot Inventory (hotbar = 0..9), idDropped/quantityDropped rules, EntityItem physics + pickup + throw
+       craft.rs            M6: tools (EnumToolMaterial, getStrVsBlock, canHarvestBlock), recipes (CraftingManager), inventory/workbench screen (Container clicks) + its GUI geometry
+-      sky.rs              day/night: sun angle, skylight subtracted, sky colour
++      sky.rs              day/night + weather: sun angle, skylight subtracted, sky/fog/sunrise colours, star brightness + positions, `Weather` (rain/thunder timers)
+       save.rs             M7: chunk file codec (RLE), `Level` codec (player, inventory, furnaces, drops), atomic write
+       vitals.rs           health, air, fire, fall damage (EntityLiving.attackEntityFrom and friends)
+       chunks/light.rs     M5 light engine (port of World/Chunk lighting)
+@@ -143,7 +145,7 @@ UNVERIFIED until you can show a reference.
+ ```
+ cargo test --lib
+ ```
+-Last full run: 56 unit tests (47 before block metadata, 52 with it; swimming, health, food and frustum culling add 4), all passing on a Linux host (rustc 1.85, the whole crate built against a small stand-in for `android-activity`, which does not build there; `tools/` must sit next to the crate for the golden `include_str!`). That includes the 18-chunk terrain golden, `populate_matches_java` (11 raw+populated 2x2 cases), `block_tables_match_java` and the M6 tests (`recipes_match_like_java`, `clicks_follow_container_rules`, `tool_tables`, `furnace_smelts_like_java`, `drop_one_spreads_the_cursor_stack`, `tools_gate_harvest_and_speed_up_digging`, `open_screen_turns_presses_into_taps`). Block metadata adds 5 tests (`nibbles_pack_like_java`, `metadata_follows_chunk_setters`, `metadata_survives_break_and_place`,
++Last full run: 56 unit tests (47 before block metadata, 52 with it; swimming, health, food and frustum culling add 4), all passing on a Linux host (rustc 1.85, the whole crate built against a small stand-in for `android-activity`, which does not build there; `tools/` must sit next to the crate for the golden `include_str!`). That includes the 18-chunk terrain golden, `populate_matches_java` (11 raw+populated 2x2 cases), `block_tables_match_java` and the M6 tests (`recipes_match_like_java`, `clicks_follow_container_rules`, `tool_tables`, `furnace_smelts_like_java`, `drop_one_spreads_the_cursor_stack`, `tools_gate_harvest_and_speed_up_digging`, `open_screen_turns_presses_into_taps`). Block metadata adds 5 tests (`nibbles_pack_like_java`, `metadata_follows_chunk_setters`, `metadata_survives_break_and_place`, The sun/moon/weather work then added 5 tests (`sky_matches_java`, `weather_matches_java`, `stars_match_java`, `rain_and_thunder_dim_the_sky`, `sun_and_moon_trade_places`), written without a Rust toolchain and NOT run; the first three compare against new `CEL`/`SUBL`/`WEAT`/`WEAH`/`STARS` lines in `golden.txt`, which come from the real classes.
+ `metadata_picks_the_tile`, `metadata_picks_the_face_tile`) and makes `populate_matches_java` compare the `META` hashes; the metadata code was first run in the 56-test pass, which also fixed a wrong expectation in `metadata_picks_the_tile` (wool metadata 1 is tile 260).
+ `ring_loads_then_unloads_when_walking` and the golden tests generate real chunks: use `--release`.
+ The crate depends on `android-activity` -> `ndk-sys`, which only compiles for Android, so
+diff --git a/ROADMAP.md b/ROADMAP.md
+index ecebc68..ad685ef 100644
+--- a/ROADMAP.md
++++ b/ROADMAP.md
+@@ -46,6 +46,23 @@ ticks (liquids/sand). Sapling growth, fluid flow and falling sand belong with M5
+ BiomeGenBase but climate never selects it; b1.7.3 has no ravines.
+ 
+ ## Changelog
++- `done` sun, moon, stars, sunrise glow and weather (written WITHOUT a Rust toolchain: not compiled, the 5 new tests not run; the Java reference
++  numbers behind 3 of them were generated from the real classes, `tools/golden/G.java` `sky()`; +5 tests):
++    - `world/sky.rs`: `Weather` = `World.updateWeather` (rain/thunder timers on a `java.util.Random`, strengths +-0.01 per tick; started clear, not
++      saved, a loaded world starts clear), `skylight_subtracted` / `sky_color` now take the rain and thunder strengths, `fog_color` (horizon colour
++      `func_4096_a` mixed with the sky, rain/thunder darkening), `sunrise_color`, `star_brightness`, `star_vertices` (`renderStars`, `Random(10842)`).
++      Golden: celestial angle, horizon colour, sunrise glow, star brightness, skylight with weather, 1M ticks of weather for 2 seeds, the star quads.
++    - `render/sky.rs` (new) + `assets/sky.rgba`: one pass drawn first in the frame, depth never tested or written, around the viewer (view matrix keeps
++      only the rotation, far plane 2 x 128): dome (16 above, fog 0..0.8 x far by distance), sunrise fan (alpha blend), sun 60 / moon 40 wide
++      (the real `terrain/sun.png` / `moon.png`, additive, alpha `1 - rain`), stars (additive, brightness `star_brightness x (1 - rain)`), dark plane 16 below.
++      The frame now clears to the fog colour, not the sky colour. `lib.rs`: `App.sky`, `App.weather`, `weather_ticks` (whole ticks run, set to the loaded time).
++    - ponytail: vanilla draws no sky below NORMAL view distance and mixes the fog by `1 - (1/(4 - renderDistance))^0.25`; mc-rs always draws it with
++      NORMAL's numbers (mix 0.24, far 128), though terrain reaches 64. The brightness term of the fog colour (darker in caves) is left out.
++    - UNVERIFIED: surface gamma. Colours are written as in vanilla (framebuffer values); on an sRGB surface (wgpu's usual pick) they come out lighter,
++      like the old clear colour did. Sun/moon use an sRGB texture like the block atlas.
++    - Not done: rain/snow streaks (`renderRainSnow`; `rain.png`/`snow.png` are in the jar), rain particles and sound, lightning (`EntityLightningBolt`)
++      and the sky flash, snow layers and ice from weather, clouds, fog on terrain, water/lava fog, the weather is not saved. A new world waits
++      12000..180000 ticks (10..150 minutes) for the first rain; to see it sooner, call `weather.tick()` in a loop at start-up until `weather.rain(1.0) > 0`.
+ - `done` M7 fix: autosave no longer interrupts play every 5 s (not compiled, not run on a device). `App::save` called `close_screen()`
+   unconditionally, and `close_screen` also runs `touch.set_screen(false)`, so each autosave (screen closed) reset the touch state and cut
+   the held move stick / look drag / dig. Now `save` closes a screen only when one is open (`lib.rs`, one `if`). Pause and exit saves are
+@@ -200,7 +217,7 @@ BiomeGenBase but climate never selects it; b1.7.3 has no ravines.
+       `getSkyColorByTemp`, AWT HSB maths). 24000 ticks per day at 20 ticks/s, new world starts at tick 0 (sunrise). 2 tests.
+     - `ChunkManager::set_sky_sub` (0..=11) marks every mesh stale when it changes; `mesh::build` takes `sky_sub` and uses
+       `max(sky - sky_sub, block)` per cell, so night is dark but lava/torches stay lit. `temperature_at` feeds the sky colour.
+-    - Not done: sun, moon and stars are not drawn, no fog, no rain/thunder terms, time is not saved (M7) and not adjustable.
++    - Not done: sun, moon and stars are not drawn (done later: see the sun/moon/weather entry), no fog, no rain/thunder terms, time is not saved (M7) and not adjustable.
+ - `done` M5 block interaction (written WITHOUT a Rust toolchain: not compiled, tests not run, expect a compile fix or two):
+     - `world/pick.rs`: port of `World.func_28105_a` + `Block.collisionRayTrace` (f64, 4.0 reach), place cell/replaceable/player-overlap rules. 3 tests.
+     - `world/chunks/light.rs`: port of the b1.7.3 light engine (sky + block light, region queue, `MetadataChunkBlock` relaxation,
+diff --git a/mc-rs/assets/sky.rgba b/mc-rs/assets/sky.rgba
+new file mode 100644
+index 0000000000000000000000000000000000000000..2506cbdd64878bd8a0fbfe06d5823af862793065
+GIT binary patch
+literal 16384
+zcmeI1y>jeC5QSH({onQa|KDZ1Y-9Ubh=@qZ;01`N;vJ|W;0Z`bNO=fSf}8Um&3w~3
+ztC1`(Yq+<{*B)1ONjvHp%{hI#XEg5hde+;(ilS#Pu}#K&nNJbs`4Za<SJxb#!`bim
+zY!iE~f7iRZ+n&K$^sTpvJ<HR2PTKPp*0L<jt!INlvDV76SNRqzuG-^vV`gqG+!fZM
+zUmDgcxDM8u`^dlIt37Uq-qSfYaXaSWu&~jnAB<~Z<8i-XYR3m(coG*HFMY>T4ifAM
+z?i%yZ`sFBKck7qq@VmCUo#(^Ik+@iCrolr~3z{2qO=Io29q(jP+H_jlY&HnSHMK!}
+zh7a7pM;8xz&$IXg_GYZXGKyHs!Nkhp)CQwjxHiq(riKr^I3FE6tT?FgYfdS4#TzWb
+zJf9D2YinrBWw-GRANZk<^Wb_&wV?Oa98|GyVE1@~MVJSpxedo#Hk>TGEj+_VT(~}5
+z4-GA}IM93?e=o+3_z_F6q_}r>Mz*&%j<&x)HcY>H1~(}Wj3F(+0q@ZJy72ovJ?6v`
+zEGh2MbjQZCJ-7M3jj`%C&muP|4`B>xfw5yQbl_L)$y;(**cXdI#3bAY2NOFyoY?X4
+zv|+UI3@*e2ec{hJ=vOtt>mnR9@K>>?zLDoO_C>@b+>^zDO%{hX-8ya<Z9Ibu@h})I
+zTnjNL&;hkG<-q5_T+-O1Tjnk7ySpA|;XXT?+4=cA7+1fi4NmYu6ZAm~;(#&9sZ;}P
+z{E9ug^|(9s@oYE7S-5B0XExtCx7oIv-=9T3@NrG-M&87M*MwnQLuw7w_^Ejw`y%Ep
+znrHsPesnaklap!0dwIFAtE+`wUvEX@o;J9^2j7$f#-bjO2fi*8F$YrozQz%s5c^o;
+zLav8AudyEmd?yj}V)xP(dsnu#e;ti`+Ta79$>ONR!90%Xc~EH}=0Kf`;3qzcJvoey
+z!2zDr)0tgd%p>lbo2A{}F758ljeFYQ0UvzD0b?*0da5<x_&o=__BnoPp2wa#7d0R9
+z8$7e+X^8nn#JxPYvE{+7Ef4S9xDRdcfDgXnAm&1>2eWEjptgh@sA@o}edWDkPcEZp
+zVk+!ly}#eKhlg!@eB6n~J#9P_2lSyYW1u6(R2^vMK)@f@`!dOU#eOf~AlFY4?6<ak
+zbRX=&c8(vTaZekZhy&L_$c0c3&=ED%*TzvJ2ZTS>zG6>3Bd5_dxWH$BeYw`e0e$Gp
+z7}7wR16l`S9AfROwXfJy&!}_g8eHJ}@V7PWr(b@JzrXtWTl?m_A66WAE*uB`4!j-)
+z4UkvL0o8yuesoH_6np9#xsASwal~)GnRQv<1|NLsL*G;bjIA2*9DeGa=e@_CT1Rf9
+zZ(<C7F#rC?pA8<sj=2s(F2s6p7WGqWV73;&=YF}u@3HrsC$8wc#{VI3kXqm*;K!%d
+zz&vU|Ilz9Acc8T{{Nz6SI^iew)ON)lowxCehwp#<xx)Xj(g1xKL--ln*MY%mACSgB
+z#ZTRn_NnvKI`aMB@Z*CoeUt-?g{EGFKh!;GpE^&iBj3RfW-QeK`p59Wmp;k?)<Zab
+z3;31qsSe;m`u|w?(d=v0zv8beTzm}uQ=49U{R5|Jy<(oW{h#^=e%7ehy#5I@*ESEd
+zX%C>>-*o+BPx5*1f5IN<@QeSn|6vVyulrxVL4-fu18NWa*1vy*|Gj_zI(~fvzrXVj
+z?E|TUe)jji&cAB>en#`2&OcQH+8j_1r3JnX_<m=9z#gf2_U&yv!v|mX67*#ZG{yR&
+zZyw%LpZ(~*>kOE0;!l76o#Gb<st3%y=Hc!B|D(;pQyx5yaIwx5YsEW_Ib(LmzNG=3
+zPsej1|9^;|+kU$Lf2DfVJlj{WY+~(x`klUG{e6`S;z8Gn4?izk^S@B}Ke>wMmtTcp
+z)9ZSCFMq$zD>uJx_Kt9flm9XUnSsneW*{?=8ORJ|1~LPgfy_W=ATy8|$P8o#G6R``
+e%s^%!Gmsg`3}gl}1DS!$KxQB_kQw;Q8TbczvzXxk
+
+literal 0
+HcmV?d00001
+
+diff --git a/mc-rs/src/lib.rs b/mc-rs/src/lib.rs
+index bb153a6..83bcfec 100644
+--- a/mc-rs/src/lib.rs
++++ b/mc-rs/src/lib.rs
+@@ -26,6 +26,7 @@ use crate::render::atlas;
+ use crate::render::items::ItemMesh;
+ use crate::render::camera::{FirstPersonCamera, Frustum};
+ use crate::render::outline::Outline;
++use crate::render::sky::{SkyFrame, SkyRenderer};
+ use crate::world::pick::{self, Hit};
+ use crate::world::dig::{self, Dig};
+ use crate::world::craft::{self, Furnace, Screen};
+@@ -76,6 +77,11 @@ struct App {
+     outline: Outline,
+     /// World time in ticks (20 per second); a new world starts at 0, sunrise.
+     world_ticks: f64,
++    /// Sun, moon and stars drawn behind the terrain, and the rain/thunder timers (not saved: a loaded world starts clear).
++    /// `weather_ticks` counts the whole ticks the weather has run, so it catches up to `world_ticks` one tick at a time.
++    sky: SkyRenderer,
++    weather: sky::Weather,
++    weather_ticks: u64,
+     /// Survival digging state and the leftover time towards the next 20 Hz dig tick.
+     dig: Dig,
+     dig_acc: f32,
+@@ -149,6 +155,7 @@ impl App {
+         let hud = HudPipeline::new(&gpu.device, &gpu.queue, surface_format, width, height);
+         let outline = Outline::new(&gpu.device);
+         let item_mesh = ItemMesh::new(&gpu.device);
++        let sky_renderer = SkyRenderer::new(&gpu.device, &gpu.queue, surface_format);
+         let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as i64);
+ 
+         let mut app = Self {
+@@ -168,6 +175,9 @@ impl App {
+             target: None,
+             outline,
+             world_ticks: 0.0,
++            sky: sky_renderer,
++            weather: sky::Weather::new(seed),
++            weather_ticks: 0,
+             dig: Dig::default(),
+             dig_acc: 0.0,
+             inv: Inventory::default(),
+@@ -193,6 +203,7 @@ impl App {
+     /// (the position and spawn were used when the app was built).
+     fn restore(&mut self, l: Level) {
+         self.world_ticks = l.ticks;
++        self.weather_ticks = l.ticks as u64;
+         self.camera.yaw = l.yaw;
+         self.camera.pitch = l.pitch;
+         self.touch.hotbar_slot = l.slot as usize;
+@@ -271,7 +282,11 @@ impl App {
+         }
+         // Day/night: time only runs while playing; a new sky-light level restarts the meshes.
+         self.world_ticks += dt as f64 * 20.0;
+-        let sub = sky::skylight_subtracted(sky::celestial_angle(self.world_ticks as u64, 1.0));
++        while self.weather_ticks < self.world_ticks as u64 {
++            self.weather.tick();
++            self.weather_ticks += 1;
++        }
++        let sub = sky::skylight_subtracted(sky::celestial_angle(self.world_ticks as u64, 1.0), self.weather.rain(1.0), self.weather.thunder(1.0));
+         self.chunks.set_sky_sub(sub);
+         self.camera.add_yaw(look_dx * LOOK_SENS);
+         self.camera.add_pitch(look_dy * LOOK_SENS);
+@@ -533,12 +548,17 @@ impl App {
+         let outline_indices = self.target.map_or(0, |h| self.outline.update(&self.gpu.queue, h.pos));
+         let item_indices = self.item_mesh.update(&self.gpu.queue, &self.drops);
+ 
+-        // Sky colour from the sun angle and the climate under the player.
++        // Sky and fog colour from the sun angle, the weather and the climate under the player; the frame is cleared to
++        // the fog colour and the sky pass is drawn over it (vanilla order).
+         let (px, pz) = (self.camera.pos.x.floor() as i32, self.camera.pos.z.floor() as i32);
+         let temp = self.chunks.temperature_at(px, pz) as f32;
+-        let angle = sky::celestial_angle(self.world_ticks as u64, self.world_ticks.fract() as f32);
+-        let [r, g, b] = sky::sky_color(angle, temp);
+-        let clear = wgpu::Color { r: r as f64, g: g as f64, b: b as f64, a: 1.0 };
++        let partial = self.world_ticks.fract() as f32;
++        let angle = sky::celestial_angle(self.world_ticks as u64, partial);
++        let (rain, thunder) = (self.weather.rain(partial), self.weather.thunder(partial));
++        let sky_rgb = sky::sky_color(angle, temp, rain, thunder);
++        let fog = sky::fog_color(angle, sky_rgb, rain, thunder);
++        let clear = wgpu::Color { r: fog[0] as f64, g: fog[1] as f64, b: fog[2] as f64, a: 1.0 };
++        self.sky.update(&self.gpu.queue, &self.camera, &SkyFrame { angle, rain, sky: sky_rgb, fog });
+         if self.frames == 0 {
+             log::info!("render: first frame, surface_format={:?}, {} chunks loaded", self.gpu.surface_format(), self.chunks.loaded());
+         }
+@@ -591,6 +611,7 @@ impl App {
+                 timestamp_writes: None,
+                 occlusion_query_set: None,
+             });
++            self.sky.draw(&mut rp);
+             rp.set_pipeline(&self.pipe.pipeline);
+             rp.set_bind_group(0, &self.pipe.bind_group, &[]);
+             // One draw per chunk mesh that is in the view frustum.
+diff --git a/mc-rs/src/render/mod.rs b/mc-rs/src/render/mod.rs
+index 0dd3aca..e55a8b9 100644
+--- a/mc-rs/src/render/mod.rs
++++ b/mc-rs/src/render/mod.rs
+@@ -4,3 +4,4 @@ pub mod mesh;
+ pub mod hud;
+ pub mod outline;
+ pub mod items;
++pub mod sky;
+diff --git a/mc-rs/src/render/sky.rs b/mc-rs/src/render/sky.rs
+new file mode 100644
+index 0000000..b1e790d
+--- /dev/null
++++ b/mc-rs/src/render/sky.rs
+@@ -0,0 +1,384 @@
++//! Sky pass, a port of `RenderGlobal.renderSky`: the sky dome, the sunrise glow, the sun and moon, the stars and the
++//! dark plane under the horizon, in the vanilla order. It is drawn first into the frame, without writing depth, around
++//! the viewer (the view matrix keeps only the camera rotation), so the terrain simply paints over it.
++//! The sun and moon are the real `terrain/sun.png` and `terrain/moon.png` packed into `assets/sky.rgba`
++//! (64x64 RGBA: sun at the top left, moon at the top right, a white tile at the bottom left for flat colours).
++//! Dome and under-plane use the fog of `EntityRenderer.setupFog(-1)`: linear from 0 to 0.8 x the far plane,
++//! by distance from the eye, towards the fog colour. Vanilla's cloud layer and rain/snow are not drawn (see ROADMAP).
++
++use bytemuck::{Pod, Zeroable};
++use glam::{Mat4, Vec3, Vec4};
++use std::f32::consts::{FRAC_PI_2, PI, TAU};
++use std::ops::Range;
++use wgpu::util::DeviceExt;
++
++use crate::render::camera::FirstPersonCamera;
++use crate::world::gen::noise::{mh_cos, mh_sin};
++use crate::world::sky;
++
++const ATLAS: &[u8] = include_bytes!("../../assets/sky.rgba");
++const ATLAS_SIZE: u32 = 64;
++/// Far plane of vanilla's NORMAL view distance (`256 >> 1`); the sky projection reaches twice that, like `gluPerspective`.
++const FAR: f32 = 128.0;
++/// Centre of the all-white tile in the atlas.
++const WHITE: [f32; 2] = [0.25, 0.75];
++/// Room for the dome (6), glow (48), sun + moon (12) and under plane (6) vertices.
++const MAX_VERTS: usize = 128;
++
++#[repr(C)]
++#[derive(Copy, Clone, Pod, Zeroable)]
++struct Vertex {
++    pos: [f32; 3],
++    uv: [f32; 2],
++    color: [f32; 4],
++    /// 1 = fogged (dome, under plane), 0 = not.
++    fog: f32,
++}
++
++impl Vertex {
++    fn layout() -> wgpu::VertexBufferLayout<'static> {
++        wgpu::VertexBufferLayout {
++            array_stride: std::mem::size_of::<Vertex>() as u64,
++            step_mode: wgpu::VertexStepMode::Vertex,
++            attributes: &[
++                wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 0, shader_location: 0 },
++                wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 12, shader_location: 1 },
++                wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 20, shader_location: 2 },
++                wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32, offset: 36, shader_location: 3 },
++            ],
++        }
++    }
++}
++
++#[repr(C)]
++#[derive(Copy, Clone, Pod, Zeroable)]
++struct Uniforms {
++    view: [[f32; 4]; 4],
++    proj: [[f32; 4]; 4],
++    /// Fog colour (rgb).
++    fog: [f32; 4],
++    /// Fog start and end (x, y).
++    range: [f32; 4],
++    /// Multiplies every colour: white, or the star brightness.
++    tint: [f32; 4],
++}
++
++const SHADER_SRC: &str = r#"
++struct U { view: mat4x4<f32>, proj: mat4x4<f32>, fog: vec4<f32>, range: vec4<f32>, tint: vec4<f32> };
++@group(0) @binding(0) var<uniform> u: U;
++@group(0) @binding(1) var samp: sampler;
++@group(0) @binding(2) var tex: texture_2d<f32>;
++
++struct VsOut {
++    @builtin(position) pos: vec4<f32>,
++    @location(0) uv: vec2<f32>,
++    @location(1) color: vec4<f32>,
++    @location(2) vpos: vec3<f32>,
++    @location(3) fog: f32,
++};
++
++@vertex
++fn vs_main(@location(0) p: vec3<f32>, @location(1) uv: vec2<f32>, @location(2) color: vec4<f32>, @location(3) fog: f32) -> VsOut {
++    var o: VsOut;
++    let v = u.view * vec4<f32>(p, 1.0);
++    o.pos = u.proj * v;
++    o.uv = uv;
++    o.color = color;
++    o.vpos = v.xyz;
++    o.fog = fog;
++    return o;
++}
++
++@fragment
++fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
++    var c = textureSample(tex, samp, in.uv) * in.color * u.tint;
++    if (in.fog > 0.5) {
++        let f = clamp((u.range.y - length(in.vpos)) / (u.range.y - u.range.x), 0.0, 1.0);
++        c = vec4<f32>(mix(u.fog.rgb, c.rgb, f), c.a);
++    }
++    return c;
++}
++"#;
++
++/// What the sky needs to know about this frame (all from `world::sky`).
++pub struct SkyFrame {
++    pub angle: f32,
++    pub rain: f32,
++    pub sky: [f32; 3],
++    pub fog: [f32; 3],
++}
++
++/// One frame of dynamic geometry in draw order, as ranges into one vertex list (triangle lists).
++struct Geometry {
++    verts: Vec<Vertex>,
++    dome: Range<u32>,
++    glow: Range<u32>,
++    bodies: Range<u32>,
++    under: Range<u32>,
++}
++
++fn quad(v: &mut Vec<Vertex>, p: [[f32; 3]; 4], uv: [[f32; 2]; 4], color: [f32; 4], fog: f32) {
++    for i in [0, 1, 2, 0, 2, 3] {
++        v.push(Vertex { pos: p[i], uv: uv[i], color, fog });
++    }
++}
++
++/// The sun or moon quad: corners `[x sign, z sign, u, v]` at height `y`, side `2 * s`, turned with the sky by `rot`.
++fn body(v: &mut Vec<Vertex>, rot: Mat4, s: f32, y: f32, pts: [[f32; 4]; 4], color: [f32; 4], u0: f32) {
++    let p = pts.map(|q| rot.transform_point3(Vec3::new(q[0] * s, y, q[1] * s)).to_array());
++    let uv = pts.map(|q| [u0 + q[2] * 0.5, q[3] * 0.5]);
++    quad(v, p, uv, color, 0.0);
++}
++
++fn geometry(f: &SkyFrame) -> Geometry {
++    let mut v: Vec<Vertex> = Vec::with_capacity(MAX_VERTS);
++    // glSkyList / glSkyList2: a flat plane 16 above / below the eye, 64 x 64 quads from -384 to 448 in vanilla.
++    let (lo, hi) = (-384.0_f32, 448.0_f32);
++    let plane = |y: f32| [[lo, y, lo], [hi, y, lo], [hi, y, hi], [lo, y, hi]];
++    quad(&mut v, plane(16.0), [WHITE; 4], [f.sky[0], f.sky[1], f.sky[2], 1.0], 1.0);
++    let dome = 0..v.len() as u32;
++
++    // Sunrise / sunset glow: a fan standing on the horizon, opaque in the middle and clear at the rim.
++    let start = v.len() as u32;
++    if let Some(c) = sky::sunrise_color(f.angle) {
++        let m = Mat4::from_rotation_x(FRAC_PI_2) * Mat4::from_rotation_z(if f.angle > 0.5 { PI } else { 0.0 });
++        let at = |p: [f32; 3]| m.transform_point3(Vec3::from(p)).to_array();
++        let centre = Vertex { pos: at([0.0, 100.0, 0.0]), uv: WHITE, color: c, fog: 0.0 };
++        let rim = |i: u32| {
++            let a = i as f32 * PI * 2.0 / 16.0;
++            let (s, co) = (mh_sin(a), mh_cos(a));
++            Vertex { pos: at([s * 120.0, co * 120.0, -co * 40.0 * c[3]]), uv: WHITE, color: [c[0], c[1], c[2], 0.0], fog: 0.0 }
++        };
++        for i in 0..16 {
++            v.extend([centre, rim(i), rim(i + 1)]);
++        }
++    }
++    let glow = start..v.len() as u32;
++
++    // Sun (30 wide half-size) and moon (20), opposite each other, turned about the X axis by the sun angle.
++    let start = v.len() as u32;
++    let rot = Mat4::from_rotation_x(f.angle * TAU);
++    let white = [1.0, 1.0, 1.0, 1.0 - f.rain];
++    body(&mut v, rot, 30.0, 100.0, [[-1.0, -1.0, 0.0, 0.0], [1.0, -1.0, 1.0, 0.0], [1.0, 1.0, 1.0, 1.0], [-1.0, 1.0, 0.0, 1.0]], white, 0.0);
++    body(&mut v, rot, 20.0, -100.0, [[-1.0, 1.0, 1.0, 1.0], [1.0, 1.0, 0.0, 1.0], [1.0, -1.0, 0.0, 0.0], [-1.0, -1.0, 1.0, 0.0]], white, 0.5);
++    let bodies = start..v.len() as u32;
++
++    // The stars are drawn here (own buffer), then the dark plane under the horizon.
++    let start = v.len() as u32;
++    quad(&mut v, plane(-16.0), [WHITE; 4], [f.sky[0] * 0.2 + 0.04, f.sky[1] * 0.2 + 0.04, f.sky[2] * 0.6 + 0.1, 1.0], 1.0);
++    let under = start..v.len() as u32;
++    Geometry { verts: v, dome, glow, bodies, under }
++}
++
++pub struct SkyRenderer {
++    opaque: wgpu::RenderPipeline,
++    alpha: wgpu::RenderPipeline,
++    additive: wgpu::RenderPipeline,
++    main_uniforms: wgpu::Buffer,
++    star_uniforms: wgpu::Buffer,
++    main_bind: wgpu::BindGroup,
++    star_bind: wgpu::BindGroup,
++    dynamic: wgpu::Buffer,
++    stars: wgpu::Buffer,
++    star_count: u32,
++    stars_on: bool,
++    /// Dome, glow, sun + moon, under plane: set by `update`, read by `draw`.
++    ranges: [Range<u32>; 4],
++}
++
++impl SkyRenderer {
++    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, surface_format: wgpu::TextureFormat) -> Self {
++        let size = wgpu::Extent3d { width: ATLAS_SIZE, height: ATLAS_SIZE, depth_or_array_layers: 1 };
++        let tex = device.create_texture(&wgpu::TextureDescriptor {
++            label: Some("sky_atlas"),
++            size,
++            mip_level_count: 1,
++            sample_count: 1,
++            dimension: wgpu::TextureDimension::D2,
++            format: wgpu::TextureFormat::Rgba8UnormSrgb,
++            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
++            view_formats: &[],
++        });
++        queue.write_texture(
++            wgpu::TexelCopyTextureInfo { texture: &tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
++            ATLAS,
++            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(ATLAS_SIZE * 4), rows_per_image: Some(ATLAS_SIZE) },
++            size,
++        );
++        let tex_view = tex.create_view(&wgpu::TextureViewDescriptor::default());
++        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
++            address_mode_u: wgpu::AddressMode::ClampToEdge,
++            address_mode_v: wgpu::AddressMode::ClampToEdge,
++            mag_filter: wgpu::FilterMode::Nearest,
++            min_filter: wgpu::FilterMode::Nearest,
++            ..Default::default()
++        });
++
++        let uniforms = || device.create_buffer(&wgpu::BufferDescriptor {
++            label: Some("sky_uniform"),
++            size: std::mem::size_of::<Uniforms>() as u64,
++            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
++            mapped_at_creation: false,
++        });
++        let (main_uniforms, star_uniforms) = (uniforms(), uniforms());
++
++        let bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
++            label: Some("sky_bind_layout"),
++            entries: &[
++                wgpu::BindGroupLayoutEntry {
++                    binding: 0,
++                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
++                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
++                    count: None,
++                },
++                wgpu::BindGroupLayoutEntry {
++                    binding: 1,
++                    visibility: wgpu::ShaderStages::FRAGMENT,
++                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
++                    count: None,
++                },
++                wgpu::BindGroupLayoutEntry {
++                    binding: 2,
++                    visibility: wgpu::ShaderStages::FRAGMENT,
++                    ty: wgpu::BindingType::Texture {
++                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
++                        view_dimension: wgpu::TextureViewDimension::D2,
++                        multisampled: false,
++                    },
++                    count: None,
++                },
++            ],
++        });
++        let bind = |buf: &wgpu::Buffer| device.create_bind_group(&wgpu::BindGroupDescriptor {
++            label: Some("sky_bind"),
++            layout: &bind_layout,
++            entries: &[
++                wgpu::BindGroupEntry { binding: 0, resource: buf.as_entire_binding() },
++                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) },
++                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&tex_view) },
++            ],
++        });
++        let (main_bind, star_bind) = (bind(&main_uniforms), bind(&star_uniforms));
++
++        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("sky_shader"), source: wgpu::ShaderSource::Wgsl(SHADER_SRC.into()) });
++        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("sky_pipeline_layout"), bind_group_layouts: &[&bind_layout], push_constant_ranges: &[] });
++        // The frame pass has a depth buffer, so the pipelines declare one too: never tested, never written.
++        let make = |label: &str, blend: wgpu::BlendState| device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
++            label: Some(label),
++            layout: Some(&layout),
++            vertex: wgpu::VertexState { module: &shader, entry_point: Some("vs_main"), buffers: &[Vertex::layout()], compilation_options: wgpu::PipelineCompilationOptions::default() },
++            fragment: Some(wgpu::FragmentState {
++                module: &shader,
++                entry_point: Some("fs_main"),
++                targets: &[Some(wgpu::ColorTargetState { format: surface_format, blend: Some(blend), write_mask: wgpu::ColorWrites::ALL })],
++                compilation_options: wgpu::PipelineCompilationOptions::default(),
++            }),
++            primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
++            depth_stencil: Some(wgpu::DepthStencilState {
++                format: wgpu::TextureFormat::Depth32Float,
++                depth_write_enabled: false,
++                depth_compare: wgpu::CompareFunction::Always,
++                stencil: wgpu::StencilState::default(),
++                bias: wgpu::DepthBiasState::default(),
++            }),
++            multisample: wgpu::MultisampleState::default(),
++            multiview: None,
++            cache: None,
++        });
++        // GL_SRC_ALPHA, GL_ONE: what the sun, moon and stars are drawn with.
++        let add = wgpu::BlendComponent { src_factor: wgpu::BlendFactor::SrcAlpha, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add };
++        let opaque = make("sky_opaque", wgpu::BlendState::REPLACE);
++        let alpha = make("sky_alpha", wgpu::BlendState::ALPHA_BLENDING);
++        let additive = make("sky_additive", wgpu::BlendState { color: add, alpha: add });
++
++        let dynamic = device.create_buffer(&wgpu::BufferDescriptor {
++            label: Some("sky_dynamic"),
++            size: (MAX_VERTS * std::mem::size_of::<Vertex>()) as u64,
++            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
++            mapped_at_creation: false,
++        });
++        let mut sv: Vec<Vertex> = Vec::new();
++        for q in sky::star_vertices().chunks(4) {
++            quad(&mut sv, [q[0], q[1], q[2], q[3]].map(|p| p.map(|c| c as f32)), [WHITE; 4], [1.0; 4], 0.0);
++        }
++        let stars = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("sky_stars"), contents: bytemuck::cast_slice(&sv), usage: wgpu::BufferUsages::VERTEX });
++
++        Self { opaque, alpha, additive, main_uniforms, star_uniforms, main_bind, star_bind, dynamic, stars, star_count: sv.len() as u32, stars_on: false, ranges: [0..0, 0..0, 0..0, 0..0] }
++    }
++
++    /// Upload this frame's matrices, colours and geometry.
++    pub fn update(&mut self, queue: &wgpu::Queue, camera: &FirstPersonCamera, f: &SkyFrame) {
++        let (mut view, _) = camera.build_view_proj();
++        view.w_axis = Vec4::W; // the sky travels with the viewer: keep the rotation, drop the position
++        let proj = Mat4::perspective_rh(camera.fov_y, camera.aspect, camera.znear, FAR * 2.0);
++        let mut u = Uniforms {
++            view: view.to_cols_array_2d(),
++            proj: proj.to_cols_array_2d(),
++            fog: [f.fog[0], f.fog[1], f.fog[2], 1.0],
++            range: [0.0, FAR * 0.8, 0.0, 0.0],
++            tint: [1.0; 4],
++        };
++        queue.write_buffer(&self.main_uniforms, 0, bytemuck::bytes_of(&u));
++        // glColor4f(b, b, b, b) with the additive blend: the stars fade in at dusk and out in rain.
++        let b = sky::star_brightness(f.angle) * (1.0 - f.rain);
++        u.tint = [b; 4];
++        queue.write_buffer(&self.star_uniforms, 0, bytemuck::bytes_of(&u));
++        self.stars_on = b > 0.0;
++        let g = geometry(f);
++        queue.write_buffer(&self.dynamic, 0, bytemuck::cast_slice(&g.verts));
++        self.ranges = [g.dome, g.glow, g.bodies, g.under];
++    }
++
++    /// Draw the sky into the frame pass, before any terrain.
++    pub fn draw(&self, rp: &mut wgpu::RenderPass<'_>) {
++        let [dome, glow, bodies, under] = &self.ranges;
++        rp.set_vertex_buffer(0, self.dynamic.slice(..));
++        rp.set_bind_group(0, &self.main_bind, &[]);
++        rp.set_pipeline(&self.opaque);
++        rp.draw(dome.clone(), 0..1);
++        if !glow.is_empty() {
++            rp.set_pipeline(&self.alpha);
++            rp.draw(glow.clone(), 0..1);
++        }
++        rp.set_pipeline(&self.additive);
++        rp.draw(bodies.clone(), 0..1);
++        if self.stars_on {
++            rp.set_bind_group(0, &self.star_bind, &[]);
++            rp.set_vertex_buffer(0, self.stars.slice(..));
++            rp.draw(0..self.star_count, 0..1);
++            rp.set_bind_group(0, &self.main_bind, &[]);
++            rp.set_vertex_buffer(0, self.dynamic.slice(..));
++        }
++        rp.set_pipeline(&self.opaque);
++        rp.draw(under.clone(), 0..1);
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn mean(v: &[Vertex]) -> Vec3 {
++        v.iter().map(|p| Vec3::from(p.pos)).sum::<Vec3>() / v.len() as f32
++    }
++
++    /// Noon: sun straight up, moon straight down; midnight: swapped. The glow only exists near the horizon,
++    /// and everything fits the dynamic buffer.
++    #[test]
++    fn sun_and_moon_trade_places() {
++        let frame = |angle| SkyFrame { angle, rain: 0.0, sky: [0.5; 3], fog: [0.5; 3] };
++        let centres = |g: &Geometry| {
++            let s = g.bodies.start as usize;
++            (mean(&g.verts[s..s + 6]), mean(&g.verts[s + 6..g.bodies.end as usize]))
++        };
++        let noon = geometry(&frame(0.0));
++        let (sun, moon) = centres(&noon);
++        assert!((sun - Vec3::new(0.0, 100.0, 0.0)).length() < 1e-3 && (moon - Vec3::new(0.0, -100.0, 0.0)).length() < 1e-3);
++        let (sun, moon) = centres(&geometry(&frame(0.5)));
++        assert!(sun.y < -99.0 && moon.y > 99.0);
++        let dusk = geometry(&frame(0.25));
++        assert!(noon.glow.is_empty() && dusk.glow.len() == 48);
++        assert_eq!((noon.dome.len(), noon.under.len(), noon.bodies.len()), (6, 6, 12));
++        assert!(dusk.verts.len() <= MAX_VERTS && ATLAS.len() == (ATLAS_SIZE * ATLAS_SIZE * 4) as usize);
++    }
++}
+diff --git a/mc-rs/src/world/sky.rs b/mc-rs/src/world/sky.rs
+index b35097f..6144ec0 100644
+--- a/mc-rs/src/world/sky.rs
++++ b/mc-rs/src/world/sky.rs
+@@ -1,10 +1,14 @@
+-//! Day/night cycle: world time -> sun angle -> light subtracted from sky light, and the sky colour.
+-//! Ports `WorldProvider.calculateCelestialAngle`, `World.calculateSkylightSubtracted`,
+-//! `World.func_4079_a` (sky colour) and `BiomeGenBase.getSkyColorByTemp`. One day is 24000 ticks
+-//! (20 per second, 20 minutes). Rain, thunder and lightning do not exist yet, so their terms (all
+-//! multiplications by 1 or no-ops with a strength of 0) are left out.
++//! Sky and weather: world time -> sun angle -> light subtracted from sky light, the sky and fog colours, the
++//! sunrise glow, star brightness and star positions, and the rain/thunder timers that dim all of it.
++//! Ports `WorldProvider.calculateCelestialAngle` / `calcSunriseSunsetColors` / `func_4096_a` (horizon colour),
++//! `World.calculateSkylightSubtracted`, `World.func_4079_a` (sky colour), `World.getStarBrightness`,
++//! `World.updateWeather`, `BiomeGenBase.getSkyColorByTemp`, the fog colour of `EntityRenderer.updateFogColor`
++//! and `RenderGlobal.renderStars`. One day is 24000 ticks (20 per second, 20 minutes).
++//! Checked against the real classes by `tools/golden/G.java` (`CEL`, `SUBL`, `WEAT`/`WEAH`, `STARS` lines).
++//! Not ported: the lightning flash (`field_27172_i`), the cave-darkening of the fog colour (`fogColor1`), water
++//! and lava fog, clouds, and drawing rain/snow (`renderRainSnow`); thunder strikes need `EntityLightningBolt`.
+ 
+-use crate::world::gen::noise::mh_cos;
++use crate::world::gen::noise::{mh_cos, mh_sin, JavaRandom};
+ use std::f32::consts::PI;
+ 
+ pub const TICKS_PER_DAY: u64 = 24000;
+@@ -23,15 +27,76 @@ pub fn celestial_angle(time: u64, partial: f32) -> f32 {
+     linear + (curved - linear) / 3.0
+ }
+ 
+-/// Sky light taken away by the time of day: 0 (day) ..= 11 (night).
+-pub fn skylight_subtracted(angle: f32) -> u8 {
++/// Sky light taken away by the time of day and the weather: 0 (day) ..= 11 (night). `rain` and `thunder` are
++/// the strengths `Weather::rain` / `Weather::thunder` return (`func_27162_g` / `func_27166_f`).
++pub fn skylight_subtracted(angle: f32, rain: f32, thunder: f32) -> u8 {
+     let mut v = (1.0 - (mh_cos(angle * PI * 2.0) * 2.0 + 0.5)).clamp(0.0, 1.0);
+     v = 1.0 - v;
+-    // (the rain and thunder strengths would scale `v` here; both are 0)
++    v = (v as f64 * (1.0 - (rain * 5.0) as f64 / 16.0)) as f32;
++    v = (v as f64 * (1.0 - (thunder * 5.0) as f64 / 16.0)) as f32;
+     v = 1.0 - v;
+     (v * 11.0) as u8
+ }
+ 
++/// `World.updateWeather`: the rain and thunder timers (`WorldInfo.rainTime` / `thunderTime`, in ticks) flip the
++/// two flags, and the smoothed strengths chase them by 0.01 per tick (5 seconds from clear to full). A new world
++/// starts clear with both timers at 0, so the first draws pick the time to the first rain / thunder. Call `tick`
++/// once per game tick; `rain` / `thunder` interpolate with the fraction of the current tick.
++pub struct Weather {
++    rng: JavaRandom,
++    raining: bool,
++    rain_time: i32,
++    thundering: bool,
++    thunder_time: i32,
++    prev_rain: f32,
++    rain: f32,
++    prev_thunder: f32,
++    thunder: f32,
++}
++
++impl Weather {
++    /// `seed` feeds the `java.util.Random` that picks the timers (the Java `World.rand` is unseeded).
++    pub fn new(seed: i64) -> Self {
++        Self { rng: JavaRandom::new(seed), raining: false, rain_time: 0, thundering: false, thunder_time: 0, prev_rain: 0.0, rain: 0.0, prev_thunder: 0.0, thunder: 0.0 }
++    }
++
++    pub fn tick(&mut self) {
++        // Thunder first, then rain: the draw order is part of the reference.
++        if self.thunder_time <= 0 {
++            self.thunder_time = if self.thundering { self.rng.next_int_bound(12000) + 3600 } else { self.rng.next_int_bound(168000) + 12000 };
++        } else {
++            self.thunder_time -= 1;
++            if self.thunder_time <= 0 {
++                self.thundering = !self.thundering;
++            }
++        }
++        if self.rain_time <= 0 {
++            self.rain_time = if self.raining { self.rng.next_int_bound(12000) + 12000 } else { self.rng.next_int_bound(168000) + 12000 };
++        } else {
++            self.rain_time -= 1;
++            if self.rain_time <= 0 {
++                self.raining = !self.raining;
++            }
++        }
++        self.prev_rain = self.rain;
++        self.rain = ((self.rain as f64) + if self.raining { 0.01 } else { -0.01 }) as f32;
++        self.rain = self.rain.clamp(0.0, 1.0);
++        self.prev_thunder = self.thunder;
++        self.thunder = ((self.thunder as f64) + if self.thundering { 0.01 } else { -0.01 }) as f32;
++        self.thunder = self.thunder.clamp(0.0, 1.0);
++    }
++
++    /// `World.func_27162_g`: rain strength 0..=1.
++    pub fn rain(&self, partial: f32) -> f32 {
++        self.prev_rain + (self.rain - self.prev_rain) * partial
++    }
++
++    /// `World.func_27166_f`: thunder strength, which only counts while it rains.
++    pub fn thunder(&self, partial: f32) -> f32 {
++        (self.prev_thunder + (self.thunder - self.prev_thunder) * partial) * self.rain(partial)
++    }
++}
++
+ /// `java.awt.Color.HSBtoRGB` as 0..=1 floats, quantised to 8 bits like the AWT int result.
+ fn hsb_to_rgb(h: f32, s: f32, b: f32) -> [f32; 3] {
+     let q8 = |v: f32| (v * 255.0 + 0.5) as i32 as f32 / 255.0;
+@@ -52,22 +117,126 @@ fn hsb_to_rgb(h: f32, s: f32, b: f32) -> [f32; 3] {
+     [q8(r), q8(g), q8(bl)]
+ }
+ 
+-/// Sky colour (RGB, 0..=1) for a sun `angle` over ground of climate `temperature` (0..=1).
+-pub fn sky_color(angle: f32, temperature: f32) -> [f32; 3] {
++/// Greys `c` towards its luminance (weights 0.3/0.59/0.11) scaled by `grey`; `strength` 1 gives `1 - 12/16` of the colour.
++fn grey_towards(c: [f32; 3], strength: f32, grey: f32) -> [f32; 3] {
++    let l = (c[0] * 0.3 + c[1] * 0.59 + c[2] * 0.11) * grey;
++    let keep = 1.0 - strength * (12.0 / 16.0);
++    c.map(|v| v * keep + l * (1.0 - keep))
++}
++
++/// Sky colour (RGB, 0..=1) for a sun `angle` over ground of climate `temperature` (0..=1) with the given rain and
++/// thunder strengths (`World.func_4079_a`).
++pub fn sky_color(angle: f32, temperature: f32, rain: f32, thunder: f32) -> [f32; 3] {
+     let k = (mh_cos(angle * PI * 2.0) * 2.0 + 0.5).clamp(0.0, 1.0);
+     let t = (temperature / 3.0).clamp(-1.0, 1.0);
+-    hsb_to_rgb(224.0 / 360.0 - t * 0.05, 0.5 + t * 0.1, 1.0).map(|c| c * k)
++    let mut c = hsb_to_rgb(224.0 / 360.0 - t * 0.05, 0.5 + t * 0.1, 1.0).map(|v| v * k);
++    if rain > 0.0 {
++        c = grey_towards(c, rain, 0.6);
++    }
++    if thunder > 0.0 {
++        c = grey_towards(c, thunder, 0.2);
++    }
++    c
++}
++
++/// Colour of the sky at the horizon (`WorldProvider.func_4096_a`): pale blue by day, nearly black at night.
++fn horizon_color(angle: f32) -> [f32; 3] {
++    let k = (mh_cos(angle * PI * 2.0) * 2.0 + 0.5).clamp(0.0, 1.0);
++    [192.0 / 255.0 * (k * 0.94 + 0.06), 216.0 / 255.0 * (k * 0.94 + 0.06), 1.0 * (k * 0.91 + 0.09)]
++}
++
++/// Fog colour, which is also what the frame is cleared to (`EntityRenderer.updateFogColor`): the horizon colour
++/// pulled a little towards the sky colour, darkened by rain and thunder.
++/// ponytail: vanilla draws no sky at all below the NORMAL view distance and mixes by `1 - (1/(4 - renderDistance))^0.25`;
++/// mc-rs always draws it and uses NORMAL's (renderDistance 1) numbers. The `fogColor1` brightness term (darker fog
++/// in caves) is left out.
++pub fn fog_color(angle: f32, sky: [f32; 3], rain: f32, thunder: f32) -> [f32; 3] {
++    let mix = (1.0 - ((1.0_f32 / 3.0) as f64).powf(0.25)) as f32;
++    let h = horizon_color(angle);
++    let mut c = [h[0] + (sky[0] - h[0]) * mix, h[1] + (sky[1] - h[1]) * mix, h[2] + (sky[2] - h[2]) * mix];
++    if rain > 0.0 {
++        let (rg, b) = (1.0 - rain * 0.5, 1.0 - rain * 0.4);
++        c = [c[0] * rg, c[1] * rg, c[2] * b];
++    }
++    if thunder > 0.0 {
++        c = c.map(|v| v * (1.0 - thunder * 0.5));
++    }
++    c
++}
++
++/// Orange glow along the horizon at sunrise and sunset (`WorldProvider.calcSunriseSunsetColors`): RGBA, or `None`
++/// while the sun is far from the horizon.
++pub fn sunrise_color(angle: f32) -> Option<[f32; 4]> {
++    let (band, centre) = (0.4_f32, -0.0_f32);
++    let c = mh_cos(angle * PI * 2.0) - 0.0;
++    if c < centre - band || c > centre + band {
++        return None;
++    }
++    let a = (c - centre) / band * 0.5 + 0.5;
++    let mut alpha = 1.0 - (1.0 - mh_sin(a * PI)) * 0.99;
++    alpha *= alpha;
++    Some([a * 0.3 + 0.7, a * a * 0.7 + 0.2, a * a * 0.0 + 0.2, alpha])
++}
++
++/// How bright the stars are, 0 by day up to 0.5 at midnight (`World.getStarBrightness`); the renderer also
++/// multiplies by `1 - rain`.
++pub fn star_brightness(angle: f32) -> f32 {
++    let v = (1.0 - (mh_cos(angle * PI * 2.0) * 2.0 + 12.0 / 16.0)).clamp(0.0, 1.0);
++    v * v * 0.5
++}
++
++/// The star quads of `RenderGlobal.renderStars`: 4 corners per star, on a sphere of radius 100 around the viewer.
++/// 1500 random directions are drawn from `Random(10842)`; those outside the unit ball are skipped.
++pub fn star_vertices() -> Vec<[f64; 3]> {
++    let mut rng = JavaRandom::new(10842);
++    let mut out = Vec::new();
++    for _ in 0..1500 {
++        let mut x = (rng.next_float() * 2.0 - 1.0) as f64;
++        let mut y = (rng.next_float() * 2.0 - 1.0) as f64;
++        let mut z = (rng.next_float() * 2.0 - 1.0) as f64;
++        let size = (0.25 + rng.next_float() * 0.25) as f64;
++        let d = x * x + y * y + z * z;
++        if d < 1.0 && d > 0.01 {
++            let inv = 1.0 / d.sqrt();
++            (x, y, z) = (x * inv, y * inv, z * inv);
++            let (cx, cy, cz) = (x * 100.0, y * 100.0, z * 100.0);
++            let (s1, c1) = x.atan2(z).sin_cos();
++            let (s2, c2) = (x * x + z * z).sqrt().atan2(y).sin_cos();
++            let (s3, c3) = (rng.next_double() * std::f64::consts::PI * 2.0).sin_cos();
++            for i in 0..4 {
++                let u = (((i & 2) as i32) - 1) as f64 * size;
++                let v = ((((i + 1) & 2) as i32) - 1) as f64 * size;
++                let (a, b) = (u * c3 - v * s3, v * c3 + u * s3);
++                let (up, back) = (a * s2, -(a * c2));
++                out.push([cx + (back * s1 - b * c1), cy + up, cz + (b * s1 + back * c1)]);
++            }
++        }
++    }
++    out
+ }
+ 
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+ 
++    /// Reference numbers from the real classes (tools/golden/G.java -> golden.txt).
++    const GOLDEN: &str = include_str!("../../../tools/golden/golden.txt");
++
++    fn lines(tag: &'static str) -> impl Iterator<Item = Vec<&'static str>> {
++        GOLDEN.lines().filter(move |l| l.starts_with(tag)).map(|l| l.split_whitespace().collect())
++    }
++    fn hex(s: &str) -> f32 {
++        f32::from_bits(u32::from_str_radix(s, 16).unwrap())
++    }
++    fn close(a: f32, b: f32) {
++        assert!((a - b).abs() < 1e-5, "{a} vs {b}");
++    }
++
+     /// Time 0 is sunrise in daylight, noon and midday are full light, midnight is the darkest (11);
+     /// every tick of the day stays inside 0..=11 and the in-between values occur.
+     #[test]
+     fn day_night_cycle() {
+-        let sub = |t| skylight_subtracted(celestial_angle(t, 1.0));
++        let sub = |t| skylight_subtracted(celestial_angle(t, 1.0), 0.0, 0.0);
+         assert_eq!((sub(0), sub(6000), sub(18000)), (0, 0, 11));
+         assert!((celestial_angle(18000, 0.0) - 0.5).abs() < 1e-6 && celestial_angle(6000, 0.0).abs() < 1e-6);
+         let all: Vec<u8> = (0..TICKS_PER_DAY).step_by(10).map(sub).collect();
+@@ -78,10 +247,103 @@ mod tests {
+     /// Black at midnight, a blue-ish day sky at noon (blue channel full, red lowest).
+     #[test]
+     fn sky_colour_follows_the_sun() {
+-        assert_eq!(sky_color(0.5, 0.5), [0.0; 3]);
+-        let [r, g, b] = sky_color(0.0, 0.5);
++        assert_eq!(sky_color(0.5, 0.5, 0.0, 0.0), [0.0; 3]);
++        let [r, g, b] = sky_color(0.0, 0.5, 0.0, 0.0);
+         assert!(b == 1.0 && r < g && g < b, "{r} {g} {b}");
+         // Colder ground (lower temperature) shifts the hue, so the colour differs.
+-        assert_ne!(sky_color(0.0, 0.0), sky_color(0.0, 1.0));
++        assert_ne!(sky_color(0.0, 0.0, 0.0, 0.0), sky_color(0.0, 1.0, 0.0, 0.0));
++    }
++
++    /// Rain and thunder each darken the sky, the fog and the sky light, step by step.
++    #[test]
++    fn rain_and_thunder_dim_the_sky() {
++        let sum = |c: [f32; 3]| c[0] + c[1] + c[2];
++        let clear = sky_color(0.0, 0.5, 0.0, 0.0);
++        let (rainy, storm) = (sky_color(0.0, 0.5, 1.0, 0.0), sky_color(0.0, 0.5, 1.0, 1.0));
++        assert!(sum(clear) > sum(rainy) && sum(rainy) > sum(storm));
++        let fog = |r, t| sum(fog_color(0.0, clear, r, t));
++        assert!(fog(0.0, 0.0) > fog(1.0, 0.0) && fog(1.0, 0.0) > fog(1.0, 1.0));
++        let sub = |r, t| skylight_subtracted(0.0, r, t);
++        assert!(sub(0.0, 0.0) == 0 && sub(1.0, 0.0) > 0 && sub(1.0, 1.0) > sub(1.0, 0.0));
++    }
++
++    /// Celestial angle, horizon colour, sunrise glow and star brightness against the real `WorldProvider` / `World`,
++    /// and the sky light with rain and thunder against `World.calculateSkylightSubtracted`.
++    #[test]
++    fn sky_matches_java() {
++        let mut n = 0;
++        for t in lines("CEL") {
++            let time: u64 = t[1].parse().unwrap();
++            let angle = celestial_angle(time, 0.25);
++            close(angle, hex(t[2]));
++            let h = horizon_color(angle);
++            (0..3).for_each(|i| close(h[i], hex(t[3 + i])));
++            let (want, star) = if t[6] == "none" { (None, t[7]) } else { (Some([hex(t[6]), hex(t[7]), hex(t[8]), hex(t[9])]), t[10]) };
++            match (sunrise_color(angle), want) {
++                (None, None) => {}
++                (Some(a), Some(b)) => (0..4).for_each(|i| close(a[i], b[i])),
++                (a, b) => panic!("sunrise glow {a:?} vs {b:?} at tick {time}"),
++            }
++            close(star_brightness(angle), hex(star));
++            n += 1;
++        }
++        assert!(n >= 10);
++        for t in lines("SUBL") {
++            let time: u64 = t[1].parse().unwrap();
++            let want: u8 = t[4].parse().unwrap();
++            assert_eq!(skylight_subtracted(celestial_angle(time, 1.0), hex(t[2]), hex(t[3])), want, "{t:?}");
++            n += 1;
++        }
++        assert!(n >= 60);
++    }
++
++    /// A million ticks of `World.updateWeather` from a fresh world, two seeds: every tick's flags, timers and
++    /// strengths hash the same as in Java, and so do the spot checks and the number of rain / thunder starts.
++    #[test]
++    fn weather_matches_java() {
++        for seed in [0xCAFEBABE_i64, 12345] {
++            let spot: Vec<Vec<&str>> = lines("WEAT").filter(|t| t[1] == seed.to_string()).collect();
++            assert_eq!(spot.len(), 4);
++            let mut w = Weather::new(seed);
++            let (mut h, mut rains, mut thunders, mut was_rain, mut was_thunder) = (0xcbf29ce484222325_u64, 0u32, 0u32, false, false);
++            for tick in 1..=1_000_000u32 {
++                w.tick();
++                let v = [w.raining as u64, w.thundering as u64, w.rain_time as u32 as u64, w.thunder_time as u32 as u64, w.rain(1.0).to_bits() as u64, w.thunder(1.0).to_bits() as u64];
++                for x in v {
++                    h ^= x;
++                    h = h.wrapping_mul(0x100000001b3);
++                }
++                rains += (w.raining && !was_rain) as u32;
++                thunders += (w.thundering && !was_thunder) as u32;
++                (was_rain, was_thunder) = (w.raining, w.thundering);
++                if let Some(t) = spot.iter().find(|t| t[2] == tick.to_string()) {
++                    assert_eq!(t[3..7].join(" "), format!("{} {} {} {}", w.raining as u8, w.thundering as u8, w.rain_time, w.thunder_time), "tick {tick}");
++                    close(w.rain(1.0), hex(t[7]));
++                    close(w.rain(0.5), hex(t[8]));
++                }
++            }
++            let end = lines("WEAH").find(|t| t[1] == seed.to_string()).unwrap();
++            assert_eq!(format!("{h:x}"), end[2], "seed {seed}");
++            assert_eq!((rains, thunders), (end[3].parse().unwrap(), end[4].parse().unwrap()), "seed {seed}");
++        }
++    }
++
++    /// The star quads against `RenderGlobal.renderStars` (count, coordinate sums, the first two stars).
++    #[test]
++    fn stars_match_java() {
++        let t = lines("STARS").next().unwrap();
++        let v = star_vertices();
++        assert_eq!(v.len().to_string(), t[1]);
++        for k in 0..3 {
++            let want: f64 = t[2 + k].parse().unwrap();
++            let sum: f64 = v.iter().map(|p| p[k]).sum();
++            assert!((sum - want).abs() < 1e-6, "axis {k}: {sum} vs {want}");
++        }
++        for i in 0..8 {
++            for k in 0..3 {
++                let want: f64 = t[5 + i * 3 + k].parse().unwrap();
++                assert!((v[i][k] - want).abs() < 1e-9, "vertex {i} axis {k}");
++            }
++        }
+     }
+ }
+diff --git a/tools/golden/G.java b/tools/golden/G.java
+index c1e8435..ffd571e 100644
+--- a/tools/golden/G.java
++++ b/tools/golden/G.java
+@@ -162,6 +162,101 @@ public class G {
+       }
+     }
+   }
++  static String fb(float f) { return Integer.toHexString(Float.floatToIntBits(f)); }
++
++  /** Sky + weather reference values: celestial angle, fog colour, sunrise glow, star brightness, skylight with
++   *  rain/thunder, the updateWeather timer/strength state machine, and the star quads of RenderGlobal.renderStars. */
++  static void sky() throws Exception {
++    WorldProvider wp = new WorldProviderSurface(); // a real constructor: allocateInstance would skip the sunrise colour array
++    World w = (World) U.allocateInstance(World.class);
++    Field pf = World.class.getDeclaredField("worldProvider");
++    U.putObject(w, U.objectFieldOffset(pf), wp);
++    WorldInfo wi = new WorldInfo(0L, "x");
++    setField(w, "worldInfo", wi);
++    long[] times = {0, 1000, 5000, 6000, 11999, 12000, 13000, 17999, 18000, 22500, 23999, 24000, 30000};
++    for (long t : times) {
++      float partial = 0.25f;
++      float ang = wp.calculateCelestialAngle(t, partial);
++      Vec3D fog = wp.func_4096_a(ang, partial);
++      float[] sr = wp.calcSunriseSunsetColors(ang, partial);
++      wi.setWorldTime(t);
++      System.out.println("CEL " + t + " " + fb(ang) + " " + fb((float) fog.xCoord) + " " + fb((float) fog.yCoord) + " " + fb((float) fog.zCoord) + " "
++        + (sr == null ? "none" : fb(sr[0]) + " " + fb(sr[1]) + " " + fb(sr[2]) + " " + fb(sr[3])) + " " + fb(w.getStarBrightness(partial)));
++    }
++    float[][] rt = {{0, 0}, {1, 0}, {1, 1}, {0.5f, 0.5f}, {0.3f, 1}, {0, 1}};
++    for (long t : new long[]{0, 3000, 6000, 9000, 12000, 14000, 17000, 18000, 21000, 23000}) {
++      wi.setWorldTime(t);
++      for (float[] x : rt) {
++        setField(w, "prevRainingStrength", x[0]); setField(w, "rainingStrength", x[0]);
++        setField(w, "prevThunderingStrength", x[1]); setField(w, "thunderingStrength", x[1]);
++        System.out.println("SUBL " + t + " " + fb(w.func_27162_g(1.0f)) + " " + fb(w.func_27166_f(1.0f)) + " " + w.calculateSkylightSubtracted(1.0f));
++      }
++    }
++    // updateWeather: a fresh world (rainTime = thunderTime = 0), java.util.Random seeded like the Rust side.
++    Method uw = World.class.getDeclaredMethod("updateWeather");
++    uw.setAccessible(true);
++    for (long seed : new long[]{0xCAFEBABEL, 12345L}) {
++      World ww = (World) U.allocateInstance(World.class);
++      U.putObject(ww, U.objectFieldOffset(pf), wp);
++      WorldInfo wwi = new WorldInfo(0L, "x");
++      setField(ww, "worldInfo", wwi);
++      ww.rand = new Random(seed);
++      long h = 0xcbf29ce484222325L;
++      int rainStarts = 0, thunderStarts = 0;
++      boolean pr = false, pt = false;
++      for (int tick = 1; tick <= 1000000; tick++) {
++        uw.invoke(ww);
++        float rs = ww.func_27162_g(1.0f), ts = ww.func_27166_f(1.0f);
++        long[] v = {wwi.getRaining() ? 1 : 0, wwi.getThundering() ? 1 : 0, wwi.getRainTime(), wwi.getThunderTime(), Float.floatToIntBits(rs), Float.floatToIntBits(ts)};
++        for (long x : v) { h ^= x & 0xffffffffL; h *= 0x100000001b3L; }
++        if (wwi.getRaining() && !pr) rainStarts++;
++        if (wwi.getThundering() && !pt) thunderStarts++;
++        pr = wwi.getRaining(); pt = wwi.getThundering();
++        if (tick == 1 || tick == 50000 || tick == 400000 || tick == 1000000)
++          System.out.println("WEAT " + seed + " " + tick + " " + v[0] + " " + v[1] + " " + v[2] + " " + v[3] + " " + fb(rs) + " " + fb(ww.func_27162_g(0.5f)));
++      }
++      System.out.println("WEAH " + seed + " " + Long.toHexString(h) + " " + rainStarts + " " + thunderStarts);
++    }
++    // RenderGlobal.renderStars, verbatim, collecting the quad corners instead of calling the Tessellator.
++    Random var1 = new Random(10842L);
++    List<double[]> out = new ArrayList<>();
++    for (int var3 = 0; var3 < 1500; ++var3) {
++      double var4 = (double)(var1.nextFloat() * 2.0F - 1.0F);
++      double var6 = (double)(var1.nextFloat() * 2.0F - 1.0F);
++      double var8 = (double)(var1.nextFloat() * 2.0F - 1.0F);
++      double var10 = (double)(0.25F + var1.nextFloat() * 0.25F);
++      double var12 = var4 * var4 + var6 * var6 + var8 * var8;
++      if(var12 < 1.0D && var12 > 0.01D) {
++        var12 = 1.0D / Math.sqrt(var12);
++        var4 *= var12; var6 *= var12; var8 *= var12;
++        double var14 = var4 * 100.0D, var16 = var6 * 100.0D, var18 = var8 * 100.0D;
++        double var20 = Math.atan2(var4, var8);
++        double var22 = Math.sin(var20), var24 = Math.cos(var20);
++        double var26 = Math.atan2(Math.sqrt(var4 * var4 + var8 * var8), var6);
++        double var28 = Math.sin(var26), var30 = Math.cos(var26);
++        double var32 = var1.nextDouble() * Math.PI * 2.0D;
++        double var34 = Math.sin(var32), var36 = Math.cos(var32);
++        for(int var38 = 0; var38 < 4; ++var38) {
++          double var39 = 0.0D;
++          double var41 = (double)((var38 & 2) - 1) * var10;
++          double var43 = (double)((var38 + 1 & 2) - 1) * var10;
++          double var47 = var41 * var36 - var43 * var34;
++          double var49 = var43 * var36 + var41 * var34;
++          double var53 = var47 * var28 + var39 * var30;
++          double var55 = var39 * var28 - var47 * var30;
++          double var57 = var55 * var22 - var49 * var24;
++          double var61 = var49 * var22 + var55 * var24;
++          out.add(new double[]{var14 + var57, var16 + var53, var18 + var61});
++        }
++      }
++    }
++    double s0 = 0, s1 = 0, s2 = 0;
++    for (double[] q : out) { s0 += q[0]; s1 += q[1]; s2 += q[2]; }
++    StringBuilder sb = new StringBuilder("STARS " + out.size() + " " + s0 + " " + s1 + " " + s2);
++    for (int i = 0; i < 8; i++) sb.append(" ").append(out.get(i)[0]).append(" ").append(out.get(i)[1]).append(" ").append(out.get(i)[2]);
++    System.out.println(sb);
++  }
++
+   public static void main(String[] a) throws Exception {
+     Field uf = sun.misc.Unsafe.class.getDeclaredField("theUnsafe");
+     uf.setAccessible(true);
+@@ -227,5 +322,6 @@ public class G {
+     } else {
+       populateSection(seeds, POP_CASES, false);
+     }
++    sky();
+   }
+ }
+diff --git a/tools/golden/golden.txt b/tools/golden/golden.txt
+index 95cce6e..e42addd 100644
+--- a/tools/golden/golden.txt
++++ b/tools/golden/golden.txt
+@@ -94,3 +94,87 @@ META -4172144997902289642 -3 -6 870d88d12c51925 8e17c878d3dcb2c2 9c1bda7f8c87232
+ RAW -4172144997902289642 3 -6 1430cd7c67aa135 da13712a10a8e375 fcc04600b4781c62 f520485fb0c6ff41
+ POP -4172144997902289642 3 -6 5dc84a5d43090030 a2d69f941c109bc4 a4a528192d4445c1 29eb60f2e5eec8a7
+ META -4172144997902289642 3 -6 9c1bda7f8c872325 9c1bda7f8c872325 9c1bda7f8c872325 9c1bda7f8c872325
++CEL 0 3f48d6de 3f3421b3 3f4aa5e9 3f6fc5b6 3f6e41a2 3f1d296a 3e4ccccd 3ee3e13f 0
++CEL 1000 3f53a152 3f40c0c1 3f58d8d9 3f800000 none 0
++CEL 5000 3f78869d 3f40c0c1 3f58d8d9 3f800000 none 0
++CEL 6000 36e95556 3f40c0c1 3f58d8d9 3f800000 none 0
++CEL 11999 3e5c9edf 3f343bc0 3f4ac338 3f6fe736 3f6e4889 3f1d4230 3e4ccccd 3ee358b0 0
++CEL 12000 3e5caa34 3f3421b3 3f4aa5e9 3f6fc5b6 3f6e41a2 3f1d296a 3e4ccccd 3ee3e13f 0
++CEL 13000 3e84f26f 3ea05c81 3eb46811 3ede85ea 3f53c70b 3ea6e36e 3e4ccccd 3f71e1ec 3d8d2c7c
++CEL 17999 3efffb21 3d390af6 3d502c55 3db851ec none 3f000000
++CEL 18000 3f0000d0 3d390af6 3d502c55 3db851ec none 3f000000
++CEL 22500 3f37b510 3de74656 3e021790 3e355c38 3f4631de 3e78a5c1 3e4ccccd 3efdd4b8 3e5b2cc7
++CEL 23999 3f48d409 3f341053 3f4a925d 3f6faf60 3f6e3d08 3f1d18e7 3e4ccccd 3ee44491 0
++CEL 24000 3f48d6de 3f3421b3 3f4aa5e9 3f6fc5b6 3f6e41a2 3f1d296a 3e4ccccd 3ee3e13f 0
++CEL 30000 36e95556 3f40c0c1 3f58d8d9 3f800000 none 0
++SUBL 0 0 0 0
++SUBL 0 3f800000 0 3
++SUBL 0 3f800000 3f800000 6
++SUBL 0 3f000000 3e800000 3
++SUBL 0 3e99999a 3e99999a 2
++SUBL 0 0 0 0
++SUBL 3000 0 0 0
++SUBL 3000 3f800000 0 3
++SUBL 3000 3f800000 3f800000 5
++SUBL 3000 3f000000 3e800000 2
++SUBL 3000 3e99999a 3e99999a 1
++SUBL 3000 0 0 0
++SUBL 6000 0 0 0
++SUBL 6000 3f800000 0 3
++SUBL 6000 3f800000 3f800000 5
++SUBL 6000 3f000000 3e800000 2
++SUBL 6000 3e99999a 3e99999a 1
++SUBL 6000 0 0 0
++SUBL 9000 0 0 0
++SUBL 9000 3f800000 0 3
++SUBL 9000 3f800000 3f800000 5
++SUBL 9000 3f000000 3e800000 2
++SUBL 9000 3e99999a 3e99999a 1
++SUBL 9000 0 0 0
++SUBL 12000 0 0 0
++SUBL 12000 3f800000 0 3
++SUBL 12000 3f800000 3f800000 6
++SUBL 12000 3f000000 3e800000 3
++SUBL 12000 3e99999a 3e99999a 2
++SUBL 12000 0 0 0
++SUBL 14000 0 0 11
++SUBL 14000 3f800000 0 11
++SUBL 14000 3f800000 3f800000 11
++SUBL 14000 3f000000 3e800000 11
++SUBL 14000 3e99999a 3e99999a 11
++SUBL 14000 0 0 11
++SUBL 17000 0 0 11
++SUBL 17000 3f800000 0 11
++SUBL 17000 3f800000 3f800000 11
++SUBL 17000 3f000000 3e800000 11
++SUBL 17000 3e99999a 3e99999a 11
++SUBL 17000 0 0 11
++SUBL 18000 0 0 11
++SUBL 18000 3f800000 0 11
++SUBL 18000 3f800000 3f800000 11
++SUBL 18000 3f000000 3e800000 11
++SUBL 18000 3e99999a 3e99999a 11
++SUBL 18000 0 0 11
++SUBL 21000 0 0 11
++SUBL 21000 3f800000 0 11
++SUBL 21000 3f800000 3f800000 11
++SUBL 21000 3f000000 3e800000 11
++SUBL 21000 3e99999a 3e99999a 11
++SUBL 21000 0 0 11
++SUBL 23000 0 0 6
++SUBL 23000 3f800000 0 8
++SUBL 23000 3f800000 3f800000 9
++SUBL 23000 3f000000 3e800000 7
++SUBL 23000 3e99999a 3e99999a 7
++SUBL 23000 0 0 6
++WEAT 3405691582 1 0 0 147931 170429 0 0
++WEAT 3405691582 50000 0 0 97932 120430 0 0
++WEAT 3405691582 400000 0 0 100811 40510 0 0
++WEAT 3405691582 1000000 0 1 8254 10119 0 0
++WEAH 3405691582 aec316f6f34691d9 5 11
++WEAT 12345 1 0 0 41080 146251 0 0
++WEAT 12345 50000 1 0 11323 96252 3f800000 3f800000
++WEAT 12345 400000 0 0 63383 36092 0 0
++WEAT 12345 1000000 0 0 174083 7264 0 0
++WEAH 12345 793bef1ba662e528 9 8
++STARS 3120 6383.723035837265 -5206.500978262187 624.7256147220824 -53.544398699078286 69.795714043366 47.557135428659606 -53.209925774125004 70.14301575326797 47.42137283122404 -52.94933451454261 70.05576598216113 47.84018277733463 -53.283807439495895 69.70846427225916 47.9759453747702 -97.02699410207538 -18.360653829219196 15.784285795741413 -96.99936852982033 -17.78348014074241 16.594131809231744 -96.75477790740669 -18.5726960204642 17.14825898515868 -96.78240347966174 -19.149869708940987 16.33841297166835

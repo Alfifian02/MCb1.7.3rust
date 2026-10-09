@@ -162,6 +162,101 @@ public class G {
       }
     }
   }
+  static String fb(float f) { return Integer.toHexString(Float.floatToIntBits(f)); }
+
+  /** Sky + weather reference values: celestial angle, fog colour, sunrise glow, star brightness, skylight with
+   *  rain/thunder, the updateWeather timer/strength state machine, and the star quads of RenderGlobal.renderStars. */
+  static void sky() throws Exception {
+    WorldProvider wp = new WorldProviderSurface(); // a real constructor: allocateInstance would skip the sunrise colour array
+    World w = (World) U.allocateInstance(World.class);
+    Field pf = World.class.getDeclaredField("worldProvider");
+    U.putObject(w, U.objectFieldOffset(pf), wp);
+    WorldInfo wi = new WorldInfo(0L, "x");
+    setField(w, "worldInfo", wi);
+    long[] times = {0, 1000, 5000, 6000, 11999, 12000, 13000, 17999, 18000, 22500, 23999, 24000, 30000};
+    for (long t : times) {
+      float partial = 0.25f;
+      float ang = wp.calculateCelestialAngle(t, partial);
+      Vec3D fog = wp.func_4096_a(ang, partial);
+      float[] sr = wp.calcSunriseSunsetColors(ang, partial);
+      wi.setWorldTime(t);
+      System.out.println("CEL " + t + " " + fb(ang) + " " + fb((float) fog.xCoord) + " " + fb((float) fog.yCoord) + " " + fb((float) fog.zCoord) + " "
+        + (sr == null ? "none" : fb(sr[0]) + " " + fb(sr[1]) + " " + fb(sr[2]) + " " + fb(sr[3])) + " " + fb(w.getStarBrightness(partial)));
+    }
+    float[][] rt = {{0, 0}, {1, 0}, {1, 1}, {0.5f, 0.5f}, {0.3f, 1}, {0, 1}};
+    for (long t : new long[]{0, 3000, 6000, 9000, 12000, 14000, 17000, 18000, 21000, 23000}) {
+      wi.setWorldTime(t);
+      for (float[] x : rt) {
+        setField(w, "prevRainingStrength", x[0]); setField(w, "rainingStrength", x[0]);
+        setField(w, "prevThunderingStrength", x[1]); setField(w, "thunderingStrength", x[1]);
+        System.out.println("SUBL " + t + " " + fb(w.func_27162_g(1.0f)) + " " + fb(w.func_27166_f(1.0f)) + " " + w.calculateSkylightSubtracted(1.0f));
+      }
+    }
+    // updateWeather: a fresh world (rainTime = thunderTime = 0), java.util.Random seeded like the Rust side.
+    Method uw = World.class.getDeclaredMethod("updateWeather");
+    uw.setAccessible(true);
+    for (long seed : new long[]{0xCAFEBABEL, 12345L}) {
+      World ww = (World) U.allocateInstance(World.class);
+      U.putObject(ww, U.objectFieldOffset(pf), wp);
+      WorldInfo wwi = new WorldInfo(0L, "x");
+      setField(ww, "worldInfo", wwi);
+      ww.rand = new Random(seed);
+      long h = 0xcbf29ce484222325L;
+      int rainStarts = 0, thunderStarts = 0;
+      boolean pr = false, pt = false;
+      for (int tick = 1; tick <= 1000000; tick++) {
+        uw.invoke(ww);
+        float rs = ww.func_27162_g(1.0f), ts = ww.func_27166_f(1.0f);
+        long[] v = {wwi.getRaining() ? 1 : 0, wwi.getThundering() ? 1 : 0, wwi.getRainTime(), wwi.getThunderTime(), Float.floatToIntBits(rs), Float.floatToIntBits(ts)};
+        for (long x : v) { h ^= x & 0xffffffffL; h *= 0x100000001b3L; }
+        if (wwi.getRaining() && !pr) rainStarts++;
+        if (wwi.getThundering() && !pt) thunderStarts++;
+        pr = wwi.getRaining(); pt = wwi.getThundering();
+        if (tick == 1 || tick == 50000 || tick == 400000 || tick == 1000000)
+          System.out.println("WEAT " + seed + " " + tick + " " + v[0] + " " + v[1] + " " + v[2] + " " + v[3] + " " + fb(rs) + " " + fb(ww.func_27162_g(0.5f)));
+      }
+      System.out.println("WEAH " + seed + " " + Long.toHexString(h) + " " + rainStarts + " " + thunderStarts);
+    }
+    // RenderGlobal.renderStars, verbatim, collecting the quad corners instead of calling the Tessellator.
+    Random var1 = new Random(10842L);
+    List<double[]> out = new ArrayList<>();
+    for (int var3 = 0; var3 < 1500; ++var3) {
+      double var4 = (double)(var1.nextFloat() * 2.0F - 1.0F);
+      double var6 = (double)(var1.nextFloat() * 2.0F - 1.0F);
+      double var8 = (double)(var1.nextFloat() * 2.0F - 1.0F);
+      double var10 = (double)(0.25F + var1.nextFloat() * 0.25F);
+      double var12 = var4 * var4 + var6 * var6 + var8 * var8;
+      if(var12 < 1.0D && var12 > 0.01D) {
+        var12 = 1.0D / Math.sqrt(var12);
+        var4 *= var12; var6 *= var12; var8 *= var12;
+        double var14 = var4 * 100.0D, var16 = var6 * 100.0D, var18 = var8 * 100.0D;
+        double var20 = Math.atan2(var4, var8);
+        double var22 = Math.sin(var20), var24 = Math.cos(var20);
+        double var26 = Math.atan2(Math.sqrt(var4 * var4 + var8 * var8), var6);
+        double var28 = Math.sin(var26), var30 = Math.cos(var26);
+        double var32 = var1.nextDouble() * Math.PI * 2.0D;
+        double var34 = Math.sin(var32), var36 = Math.cos(var32);
+        for(int var38 = 0; var38 < 4; ++var38) {
+          double var39 = 0.0D;
+          double var41 = (double)((var38 & 2) - 1) * var10;
+          double var43 = (double)((var38 + 1 & 2) - 1) * var10;
+          double var47 = var41 * var36 - var43 * var34;
+          double var49 = var43 * var36 + var41 * var34;
+          double var53 = var47 * var28 + var39 * var30;
+          double var55 = var39 * var28 - var47 * var30;
+          double var57 = var55 * var22 - var49 * var24;
+          double var61 = var49 * var22 + var55 * var24;
+          out.add(new double[]{var14 + var57, var16 + var53, var18 + var61});
+        }
+      }
+    }
+    double s0 = 0, s1 = 0, s2 = 0;
+    for (double[] q : out) { s0 += q[0]; s1 += q[1]; s2 += q[2]; }
+    StringBuilder sb = new StringBuilder("STARS " + out.size() + " " + s0 + " " + s1 + " " + s2);
+    for (int i = 0; i < 8; i++) sb.append(" ").append(out.get(i)[0]).append(" ").append(out.get(i)[1]).append(" ").append(out.get(i)[2]);
+    System.out.println(sb);
+  }
+
   public static void main(String[] a) throws Exception {
     Field uf = sun.misc.Unsafe.class.getDeclaredField("theUnsafe");
     uf.setAccessible(true);
@@ -227,5 +322,6 @@ public class G {
     } else {
       populateSection(seeds, POP_CASES, false);
     }
+    sky();
   }
 }

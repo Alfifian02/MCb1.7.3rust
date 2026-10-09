@@ -46,6 +46,23 @@ ticks (liquids/sand). Sapling growth, fluid flow and falling sand belong with M5
 BiomeGenBase but climate never selects it; b1.7.3 has no ravines.
 
 ## Changelog
+- `done` sun, moon, stars, sunrise glow and weather (written WITHOUT a Rust toolchain: not compiled, the 5 new tests not run; the Java reference
+  numbers behind 3 of them were generated from the real classes, `tools/golden/G.java` `sky()`; +5 tests):
+    - `world/sky.rs`: `Weather` = `World.updateWeather` (rain/thunder timers on a `java.util.Random`, strengths +-0.01 per tick; started clear, not
+      saved, a loaded world starts clear), `skylight_subtracted` / `sky_color` now take the rain and thunder strengths, `fog_color` (horizon colour
+      `func_4096_a` mixed with the sky, rain/thunder darkening), `sunrise_color`, `star_brightness`, `star_vertices` (`renderStars`, `Random(10842)`).
+      Golden: celestial angle, horizon colour, sunrise glow, star brightness, skylight with weather, 1M ticks of weather for 2 seeds, the star quads.
+    - `render/sky.rs` (new) + `assets/sky.rgba`: one pass drawn first in the frame, depth never tested or written, around the viewer (view matrix keeps
+      only the rotation, far plane 2 x 128): dome (16 above, fog 0..0.8 x far by distance), sunrise fan (alpha blend), sun 60 / moon 40 wide
+      (the real `terrain/sun.png` / `moon.png`, additive, alpha `1 - rain`), stars (additive, brightness `star_brightness x (1 - rain)`), dark plane 16 below.
+      The frame now clears to the fog colour, not the sky colour. `lib.rs`: `App.sky`, `App.weather`, `weather_ticks` (whole ticks run, set to the loaded time).
+    - ponytail: vanilla draws no sky below NORMAL view distance and mixes the fog by `1 - (1/(4 - renderDistance))^0.25`; mc-rs always draws it with
+      NORMAL's numbers (mix 0.24, far 128), though terrain reaches 64. The brightness term of the fog colour (darker in caves) is left out.
+    - UNVERIFIED: surface gamma. Colours are written as in vanilla (framebuffer values); on an sRGB surface (wgpu's usual pick) they come out lighter,
+      like the old clear colour did. Sun/moon use an sRGB texture like the block atlas.
+    - Not done: rain/snow streaks (`renderRainSnow`; `rain.png`/`snow.png` are in the jar), rain particles and sound, lightning (`EntityLightningBolt`)
+      and the sky flash, snow layers and ice from weather, clouds, fog on terrain, water/lava fog, the weather is not saved. A new world waits
+      12000..180000 ticks (10..150 minutes) for the first rain; to see it sooner, call `weather.tick()` in a loop at start-up until `weather.rain(1.0) > 0`.
 - `done` M7 fix: autosave no longer interrupts play every 5 s (not compiled, not run on a device). `App::save` called `close_screen()`
   unconditionally, and `close_screen` also runs `touch.set_screen(false)`, so each autosave (screen closed) reset the touch state and cut
   the held move stick / look drag / dig. Now `save` closes a screen only when one is open (`lib.rs`, one `if`). Pause and exit saves are
@@ -200,7 +217,7 @@ BiomeGenBase but climate never selects it; b1.7.3 has no ravines.
       `getSkyColorByTemp`, AWT HSB maths). 24000 ticks per day at 20 ticks/s, new world starts at tick 0 (sunrise). 2 tests.
     - `ChunkManager::set_sky_sub` (0..=11) marks every mesh stale when it changes; `mesh::build` takes `sky_sub` and uses
       `max(sky - sky_sub, block)` per cell, so night is dark but lava/torches stay lit. `temperature_at` feeds the sky colour.
-    - Not done: sun, moon and stars are not drawn, no fog, no rain/thunder terms, time is not saved (M7) and not adjustable.
+    - Not done: sun, moon and stars are not drawn (done later: see the sun/moon/weather entry), no fog, no rain/thunder terms, time is not saved (M7) and not adjustable.
 - `done` M5 block interaction (written WITHOUT a Rust toolchain: not compiled, tests not run, expect a compile fix or two):
     - `world/pick.rs`: port of `World.func_28105_a` + `Block.collisionRayTrace` (f64, 4.0 reach), place cell/replaceable/player-overlap rules. 3 tests.
     - `world/chunks/light.rs`: port of the b1.7.3 light engine (sky + block light, region queue, `MetadataChunkBlock` relaxation,

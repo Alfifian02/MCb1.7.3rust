@@ -4,3 +4,4 @@ pub mod mesh;
 pub mod hud;
 pub mod outline;
 pub mod items;
+pub mod sky;
