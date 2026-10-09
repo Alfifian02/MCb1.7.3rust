@@ -42,6 +42,12 @@ impl Nibbles {
     pub fn bytes(&self) -> &[u8] {
         &self.0
     }
+
+    /// The packed bytes back (a loaded save); the caller has checked the length.
+    pub fn from_bytes(b: Vec<u8>) -> Self {
+        debug_assert_eq!(b.len(), VOLUME / 2);
+        Self(b)
+    }
 }
 
 /// Blocks with no cube shape (tall grass, dead bush, flowers, mushrooms, snow layer, reeds). The

@@ -17,6 +17,7 @@ use android_activity::{AndroidApp, InputStatus, MainEvent, PollEvent};
 use android_activity::input::InputEvent as IEv;
 use core::ffi::c_void;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::gpu::context::Gpu;
@@ -29,6 +30,7 @@ use crate::world::pick::{self, Hit};
 use crate::world::dig::{self, Dig};
 use crate::world::craft::{self, Furnace, Screen};
 use crate::world::items::{self, Drops, Inventory, ItemStack};
+use crate::world::save::{self, Level};
 use crate::world::sky;
 use crate::world::chunk::{cross_shape, is_plant};
 use crate::world::chunks::{chunk_coord, ChunkManager};
@@ -37,6 +39,11 @@ use crate::world::vitals::{self, Env, Vitals};
 
 /// Render distance in chunks (a circle of this radius is meshed and drawn, two more are generated).
 const RENDER_DIST: i32 = 4;
+
+/// Seconds of play between autosaves (the level file and a few chunks; pause and exit save everything).
+const AUTOSAVE_SECS: f32 = 5.0;
+/// Chunks written per autosave, so the first ones after generating a lot of terrain do not hitch a frame.
+const AUTOSAVE_CHUNKS: usize = 24;
 
 const LOOK_SENS: f32 = 0.004;
 /// World units per second when the d-pad is fully pressed.
@@ -87,6 +94,9 @@ struct App {
     /// Health, air and fire; and where a dead player comes back (the first spawn: no beds yet).
     vitals: Vitals,
     spawn: glam::Vec3,
+    /// Where this world is saved (M7) and the play time since the last autosave.
+    dir: PathBuf,
+    save_acc: f32,
 }
 
 /// A press on an open screen: where it began, whether it became a spread (a drag over slots with a stack on the
@@ -98,63 +108,40 @@ struct Gesture {
 }
 
 impl App {
-    async fn init(native_ptr: *mut c_void, width: u32, height: u32) -> Result<Self, String> {
+    async fn init(native_ptr: *mut c_void, width: u32, height: u32, dir: PathBuf) -> Result<Self, String> {
         let gpu = Gpu::from_android_window(native_ptr, width, height).await?;
         let surface_format = gpu.surface_format();
         let pipe = ChunkPipeline::new(&gpu.device, surface_format);
         pipe.upload_atlas(&gpu.queue);
 
-        // The spawn search needs real terrain before the first frame, so the chunks around the
-        // origin are generated and populated here (init runs on its own thread, not the render loop);
-        // everything further out streams in on the worker threads. Raw -1..=2 populates -1..=1,
-        // which finishes chunks 0..=1, the area searched.
+        // The terrain around the player must be real before the first frame, so those chunks are loaded (or
+        // generated and populated) here (init runs on its own thread, not the render loop); everything further out
+        // streams in on the worker threads. A saved world resumes where the player stood, a new one at the origin.
+        // One folder per seed: chunks saved for another seed would not fit this terrain.
         const SEED: i64 = 0xCAFEBABE;
-        let mut chunks = ChunkManager::new(SEED, RENDER_DIST);
-        chunks.preload(-1, 2);
-        // Spawn on dry ground closest to the centre of chunk (0, 0): not under water (a fixed spawn
-        // at y=60 put the camera inside the sea), and not on top of a tree.
-        let top_of = |x: i32, z: i32| {
-            (0..128).rev().find(|&y| !matches!(chunks.block(x, y, z), Some(0 | 8 | 9 | 17 | 18)) && !chunks.block(x, y, z).is_some_and(is_plant)).unwrap_or(-1)
-        };
-        let mut best: Option<(i32, i32, i32, i32)> = None; // x, z, top, dist^2
-        let mut highest = (8, 8, i32::MIN);
-        for z in 0..32 {
-            for x in 0..32 {
-                let t = top_of(x, z);
-                if t > highest.2 { highest = (x, z, t); }
-                if t >= 64 {
-                    let d2 = (x - 8).pow(2) + (z - 8).pow(2);
-                    if best.map_or(true, |b| d2 < b.3) { best = Some((x, z, t, d2)); }
-                }
-            }
-        }
-        let (spawn_x, spawn_z, top) = match best {
-            Some((x, z, t, _)) => (x, z, t),
-            None => highest,
-        };
-        let spawn_feet_y = (top as f32) + 1.0 + 0.9;
-        log::info!("chunks: render distance {}, spawn at ({}, {}, {}), top block y={}", RENDER_DIST, spawn_x, spawn_feet_y, spawn_z, top);
+        let dir = dir.join(format!("world-{SEED:x}"));
+        let level = std::fs::read(dir.join("level")).ok().and_then(|b| Level::decode(&b));
+        let mut chunks = ChunkManager::new(SEED, RENDER_DIST).with_dir(dir.clone());
+        let (pcx, pcz) = level.as_ref().map_or((0, 0), |l| (chunk_coord(l.pos.x), chunk_coord(l.pos.z)));
+        chunks.preload(pcx, pcz);
+        let spawn = level.as_ref().map_or_else(|| find_spawn(&chunks), |l| l.spawn);
+        let start = level.as_ref().map_or(spawn, |l| l.pos);
+        log::info!("save: {} in {}", if level.is_some() { "resuming" } else { "new world" }, dir.display());
 
-        // Light and mesh the area around the spawn now: init runs off the render thread, so the first
+        // Light and mesh the area around the player now: init runs off the render thread, so the first
         // frame already shows terrain instead of filling in over the next few seconds.
         let warm = Instant::now();
         while chunks.meshed() < 24 && warm.elapsed() < Duration::from_secs(8) {
-            chunks.update(&gpu.device, spawn_x >> 4, spawn_z >> 4);
+            chunks.update(&gpu.device, chunk_coord(start.x), chunk_coord(start.z));
             std::thread::sleep(Duration::from_millis(1));
         }
         log::info!("chunks: {} meshed after {:?}", chunks.meshed(), warm.elapsed());
 
-        let mut camera = FirstPersonCamera::spawn_at(spawn_x as f32 + 0.5, spawn_feet_y + EYE_HEIGHT, spawn_z as f32 + 0.5);
+        let mut camera = FirstPersonCamera::spawn_at(start.x, start.y + EYE_HEIGHT, start.z);
         // spawn_at defaults to aspect 1.0 and resize() only runs when the size changes, so
         // without this the 3D view is squashed horizontally onto the real screen shape.
         camera.aspect = width as f32 / height as f32;
-        let player = Player {
-            pos: glam::Vec3::new(spawn_x as f32 + 0.5, spawn_feet_y, spawn_z as f32 + 0.5),
-            vel: glam::Vec3::ZERO,
-            on_ground: false,
-        };
-        camera.pos = player.pos + glam::Vec3::new(0.0, EYE_HEIGHT, 0.0);
-        let spawn = player.pos;
+        let player = Player { pos: start, vel: glam::Vec3::ZERO, on_ground: false };
 
         // M12: HUD pipeline + touch state machine. Surface dimensions match
         // the window we just initialised against.
@@ -164,7 +151,7 @@ impl App {
         let item_mesh = ItemMesh::new(&gpu.device);
         let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as i64);
 
-        Ok(Self {
+        let mut app = Self {
             gpu, pipe,
             chunks, camera,
             player,
@@ -193,7 +180,51 @@ impl App {
             gesture: None,
             vitals: Vitals::default(),
             spawn,
-        })
+            dir,
+            save_acc: 0.0,
+        };
+        if let Some(l) = level {
+            app.restore(l);
+        }
+        Ok(app)
+    }
+
+    /// Put a loaded `Level` back: time, look direction, hotbar slot, health, inventory, furnaces and dropped items
+    /// (the position and spawn were used when the app was built).
+    fn restore(&mut self, l: Level) {
+        self.world_ticks = l.ticks;
+        self.camera.yaw = l.yaw;
+        self.camera.pitch = l.pitch;
+        self.touch.hotbar_slot = l.slot as usize;
+        self.vitals.health = l.vitals[0];
+        self.vitals.air = l.vitals[1];
+        self.vitals.fire = l.vitals[2];
+        self.inv.slots = l.inv;
+        self.furnaces = l.furnaces.into_iter().collect();
+        self.drops.items = l.drops.into_iter().map(|(p, s, age)| items::ItemEntity::resting(p, s, age)).collect();
+    }
+
+    /// Write the world to disk: the level file, then up to `chunks` unsaved chunks (`usize::MAX` = all). An open
+    /// screen is closed first, so the cursor stack and the grid become dropped items, which are saved.
+    // ponytail: runs on the render thread; the level file is ~1 KB and the chunk writes are capped per autosave.
+    fn save(&mut self, chunks: usize) {
+        self.close_screen();
+        let level = Level {
+            ticks: self.world_ticks,
+            pos: self.player.pos,
+            spawn: self.spawn,
+            yaw: self.camera.yaw,
+            pitch: self.camera.pitch,
+            slot: self.touch.hotbar_slot as u8,
+            vitals: [self.vitals.health, self.vitals.air, self.vitals.fire],
+            inv: self.inv.slots,
+            furnaces: self.furnaces.iter().map(|(&p, f)| (p, f.clone())).collect(),
+            drops: self.drops.items.iter().map(|e| (e.pos, e.stack, e.age)).collect(),
+        };
+        if let Err(e) = save::write(&self.dir.join("level"), &level.encode()) {
+            log::warn!("save: level file: {e}");
+        }
+        self.chunks.flush(chunks);
     }
 
     fn resize(&mut self, w: u32, h: u32) {
@@ -227,6 +258,12 @@ impl App {
             self.vitals = Vitals::default();
             self.player.pos = self.spawn;
             self.player.vel = glam::Vec3::ZERO;
+        }
+        // Autosave while playing (not with a screen open: its cursor stack is not in the inventory yet).
+        self.save_acc += dt;
+        if self.save_acc >= AUTOSAVE_SECS && self.screen.is_none() {
+            self.save_acc = 0.0;
+            self.save(AUTOSAVE_CHUNKS);
         }
         // Day/night: time only runs while playing; a new sky-light level restarts the meshes.
         self.world_ticks += dt as f64 * 20.0;
@@ -813,6 +850,33 @@ impl App {
     }
 }
 
+/// A new world's spawn point (feet position): dry ground closest to the centre of chunk (0, 0), not under water (a
+/// fixed spawn at y=60 put the camera inside the sea), and not on top of a tree. Needs chunks 0..=1 final.
+fn find_spawn(chunks: &ChunkManager) -> glam::Vec3 {
+    let top_of = |x: i32, z: i32| {
+        (0..128).rev().find(|&y| !matches!(chunks.block(x, y, z), Some(0 | 8 | 9 | 17 | 18)) && !chunks.block(x, y, z).is_some_and(is_plant)).unwrap_or(-1)
+    };
+    let mut best: Option<(i32, i32, i32, i32)> = None; // x, z, top, dist^2
+    let mut highest = (8, 8, i32::MIN);
+    for z in 0..32 {
+        for x in 0..32 {
+            let t = top_of(x, z);
+            if t > highest.2 { highest = (x, z, t); }
+            if t >= 64 {
+                let d2 = (x - 8).pow(2) + (z - 8).pow(2);
+                if best.map_or(true, |b| d2 < b.3) { best = Some((x, z, t, d2)); }
+            }
+        }
+    }
+    let (spawn_x, spawn_z, top) = match best {
+        Some((x, z, t, _)) => (x, z, t),
+        None => highest,
+    };
+    let spawn_feet_y = (top as f32) + 1.0 + 0.9;
+    log::info!("chunks: render distance {}, spawn at ({}, {}, {}), top block y={}", RENDER_DIST, spawn_x, spawn_feet_y, spawn_z, top);
+    glam::Vec3::new(spawn_x as f32 + 0.5, spawn_feet_y, spawn_z as f32 + 0.5)
+}
+
 /// One item stack drawn into the cell `(x, y, w, h)`: the flat colour of its tile (a tool is a stick-coloured handle
 /// with a head in the material colour, shaped per kind, so pickaxe, axe, shovel, sword and hoe can be told apart), a wear bar
 /// under a damaged tool, and the count bottom right with a shadow like `RenderItem.renderItemOverlayIntoGUI`
@@ -907,12 +971,14 @@ fn android_main(app: AndroidApp) {
                         let ptr = window.ptr().as_ptr() as usize;
                         let init_w = window.width().max(1) as u32;
                         let init_h = window.height().max(1) as u32;
+                        // App-private storage, where the world is saved.
+                        let dir = app.internal_data_path().unwrap_or_else(std::env::temp_dir);
                         log::info!("M3: InitWindow, native {}x{}, starting GPU init thread", init_w, init_h);
                         let h = std::thread::Builder::new()
                             .stack_size(8 * 1024 * 1024)
                             .spawn(move || {
                                 let r = std::panic::catch_unwind(|| {
-                                    pollster::block_on(App::init(ptr as *mut c_void, init_w, init_h))
+                                    pollster::block_on(App::init(ptr as *mut c_void, init_w, init_h, dir))
                                 });
                                 match r {
                                     Ok(Ok(a)) => Ok(a),
@@ -951,9 +1017,18 @@ fn android_main(app: AndroidApp) {
                         }
                     }
                     MainEvent::TerminateWindow { .. } => {
-                        // Window is going away (home button, rotate, etc).
-                        // Drop the surface before the ANativeWindow dies.
+                        // Window is going away (home button, rotate, etc): the world is rebuilt from the save on
+                        // return, so save everything first. Then drop the surface before the ANativeWindow dies.
+                        if let Some(a) = app_state.as_mut() {
+                            a.save(usize::MAX);
+                        }
                         app_state = None;
+                    }
+                    // The process may be killed after this without another event.
+                    MainEvent::Pause => {
+                        if let Some(a) = app_state.as_mut() {
+                            a.save(usize::MAX);
+                        }
                     }
                     MainEvent::GainedFocus => {
                         immersive::hide_system_bars(&app);

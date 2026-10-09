@@ -16,6 +16,7 @@
 //! ((cx*16, 0, cz*16) .. +(16, 128, 16)), so it is one `filter` on `meshes()` in the draw loop.
 
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Mutex};
 
 use glam::Vec3;
@@ -26,6 +27,7 @@ use crate::world::chunk::{height_map, idx, Nibbles, H, VOLUME};
 use crate::world::gen::chunk_manager::WorldChunkManager;
 use crate::world::gen::overworld::OverworldGenerator;
 use crate::world::gen::populate::Region;
+use crate::world::save;
 
 mod light;
 
@@ -61,6 +63,10 @@ type Chunks = HashMap<Key, Entry, std::hash::BuildHasherDefault<KeyHasher>>;
 /// move it to the workers (they would need the neighbours' blocks behind an `Arc`).
 const MESH_PER_FRAME: usize = 2;
 
+/// Saved chunks read per frame (the rest wait for the next frame, like generation does).
+/// ponytail: the read + decode runs on the render thread (about 32 KB of work per chunk); move it to the workers if it shows.
+const LOADS_PER_FRAME: usize = 8;
+
 /// Chunk coordinate of a world-space coordinate (floor division by 16).
 pub fn chunk_coord(v: f32) -> i32 {
     (v.floor() as i32) >> 4
@@ -84,6 +90,8 @@ struct Entry {
     lit: bool,
     /// populate() has run on this chunk (it also wrote into its +X/+Z/+X+Z neighbours).
     populated: bool,
+    /// Differs from what the seed generates (edited, or written into by a populate) and is not on disk yet.
+    dirty: bool,
     /// Meshing was done (the mesh may still be `None`: a chunk of pure air has nothing to draw).
     meshed: bool,
     mesh: Option<Mesh>,
@@ -110,6 +118,9 @@ pub struct ChunkManager {
     light_queue: Vec<light::Region>,
     /// `World.skylightSubtracted` (0 day .. 11 night), applied by the mesher.
     sky_sub: u8,
+    /// Save folder (M7); `None` = nothing is read or written (the tests). `saved` = chunks that have a file there.
+    dir: Option<PathBuf>,
+    saved: HashSet<Key>,
 }
 
 impl ChunkManager {
@@ -151,25 +162,96 @@ impl ChunkManager {
         ring.sort_by_key(|&(dx, dz)| dx * dx + dz * dz);
 
         Self { chunks: Chunks::default(), pending: HashSet::new(), ring, radius, center: None, max_in_flight: workers * 2,
-               gen: OverworldGenerator::new(seed), cm: WorldChunkManager::new(seed), jobs, done, light_queue: Vec::new(), sky_sub: 0 }
+               gen: OverworldGenerator::new(seed), cm: WorldChunkManager::new(seed), jobs, done, light_queue: Vec::new(), sky_sub: 0, dir: None, saved: HashSet::new() }
+    }
+
+    /// Keep this world in `dir`: chunks found there are loaded instead of generated, and edited ones are written back
+    /// (`flush`, and when they unload).
+    pub fn with_dir(mut self, dir: PathBuf) -> Self {
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            log::warn!("save: cannot create {}: {e}", dir.display());
+        }
+        self.saved = std::fs::read_dir(&dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|f| {
+                let name = f.file_name().into_string().ok()?;
+                let (x, z) = name.strip_prefix("c.")?.split_once('.')?;
+                Some((x.parse().ok()?, z.parse().ok()?)) // "c.1.2.tmp" and other strays do not parse
+            })
+            .collect();
+        self.dir = Some(dir);
+        self
     }
 
     fn insert(&mut self, key: Key, blocks: Vec<u8>) {
         let height = height_map(&blocks);
-        self.chunks.insert(key, Entry { blocks, data: Nibbles::new(), light: vec![0; VOLUME], height, lit: false, populated: false, meshed: false, mesh: None });
+        self.chunks.insert(key, Entry { blocks, data: Nibbles::new(), light: vec![0; VOLUME], height, lit: false, populated: false, dirty: false, meshed: false, mesh: None });
     }
 
-    /// Generate and populate the chunks `lo..=hi` (both axes) synchronously, for the spawn area:
-    /// init needs real terrain before the first frame. Only chunks whose 2x2 is inside get populated.
-    pub fn preload(&mut self, lo: i32, hi: i32) {
-        for z in lo..=hi {
-            for x in lo..=hi {
-                let blocks = self.gen.generate(x, z, &mut self.cm);
-                self.insert((x, z), blocks);
+    /// Load a saved chunk. A file that does not decode is forgotten, so the chunk is generated instead.
+    fn load(&mut self, key: Key) {
+        let bytes = self.dir.as_ref().and_then(|d| std::fs::read(chunk_path(d, key)).ok());
+        match bytes.as_deref().and_then(save::decode_chunk) {
+            Some((blocks, data, populated)) => {
+                self.insert(key, blocks);
+                if let Some(e) = self.chunks.get_mut(&key) {
+                    e.data = data;
+                    e.populated = populated;
+                }
+            }
+            None => {
+                log::warn!("save: chunk {key:?} unreadable, generating it again");
+                self.saved.remove(&key);
             }
         }
-        for z in lo..hi {
-            for x in lo..hi {
+    }
+
+    /// The chunk from disk when there is a save of it, else freshly generated (synchronously).
+    fn fresh(&mut self, key: Key) {
+        if self.saved.contains(&key) {
+            self.load(key);
+        }
+        if !self.chunks.contains_key(&key) {
+            let blocks = self.gen.generate(key.0, key.1, &mut self.cm);
+            self.insert(key, blocks);
+        }
+    }
+
+    /// Write up to `budget` unsaved chunks (`usize::MAX` = all, for pause and exit). A failed write leaves the chunk
+    /// dirty for the next call and stops this one, so a full disk costs one log line per call, not one per chunk.
+    pub fn flush(&mut self, mut budget: usize) {
+        let Some(dir) = &self.dir else { return };
+        for (&k, e) in self.chunks.iter_mut().filter(|(_, e)| e.dirty) {
+            if budget == 0 {
+                break;
+            }
+            budget -= 1;
+            match write_entry(dir, k, e) {
+                Ok(()) => {
+                    e.dirty = false;
+                    self.saved.insert(k);
+                }
+                Err(err) => {
+                    log::warn!("save: chunk {k:?}: {err}");
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Generate (or load) and populate the 4x4 chunks `cx-1..=cx+2`, `cz-1..=cz+2` synchronously, for the spawn area:
+    /// init needs real terrain before the first frame. Only chunks whose 2x2 is inside get populated, which finishes
+    /// the 2x2 chunks `cx..=cx+1`, `cz..=cz+1`.
+    pub fn preload(&mut self, cx: i32, cz: i32) {
+        for z in cz - 1..=cz + 2 {
+            for x in cx - 1..=cx + 2 {
+                self.fresh((x, z));
+            }
+        }
+        for z in cz - 1..cz + 2 {
+            for x in cx - 1..cx + 2 {
                 self.populate_one(x, z);
             }
         }
@@ -221,6 +303,7 @@ impl ChunkManager {
         }
         e.blocks[i] = id;
         e.data.set(lx, y as usize, lz, meta);
+        e.dirty = true;
         let h = e.height[lz << 4 | lx] as i32;
         self.mark_dirty(x, z);
         self.light_after_set(x, y, z, id, h);
@@ -298,8 +381,6 @@ impl ChunkManager {
 
     fn stream(&mut self, cx: i32, cz: i32) {
         // Keep radius: raw ring + 1, so walking along the edge does not thrash.
-        // ponytail: no saves yet (M7), so a chunk that is unloaded and loaded again is populated again,
-        // on top of what its still-loaded neighbours kept; harmless-ish (trees do not grow into trees).
         let keep = (self.radius + 3) * (self.radius + 3);
         let d2 = |(x, z): Key| (x - cx) * (x - cx) + (z - cz) * (z - cz);
 
@@ -311,20 +392,40 @@ impl ChunkManager {
             }
         }
 
-        // 2. Unload, only when the player crossed a chunk border. Dropping an entry frees its buffers.
+        // 2. Unload, only when the player crossed a chunk border. Dropping an entry frees its buffers; one that is
+        // not on disk yet is written first.
+        // ponytail: the writes run on the render thread, a handful of ~5 KB files per border crossing.
         if self.center != Some((cx, cz)) {
             self.center = Some((cx, cz));
-            self.chunks.retain(|&k, _| d2(k) <= keep);
+            let gone: Vec<Key> = self.chunks.keys().copied().filter(|&k| d2(k) > keep).collect();
+            for k in gone {
+                let Some(e) = self.chunks.remove(&k) else { continue };
+                if let (true, Some(dir)) = (e.dirty, &self.dir) {
+                    match write_entry(dir, k, &e) {
+                        Ok(()) => {
+                            self.saved.insert(k);
+                        }
+                        Err(err) => log::warn!("save: chunk {k:?} lost on unload: {err}"),
+                    }
+                }
+            }
         }
 
-        // 3. Request missing chunks nearest-first. Only a few jobs are in flight, and the list is
-        // rebuilt from the current position every frame, so a worker never queues stale requests.
-        for &(dx, dz) in &self.ring {
-            if self.pending.len() >= self.max_in_flight {
-                break;
+        // 3. Missing chunks nearest-first: a saved one is read from disk (a few per frame), any other is requested
+        // from a worker. Only a few jobs are in flight, and the list is rebuilt from the current position every
+        // frame, so a worker never queues stale requests.
+        let mut loads = LOADS_PER_FRAME;
+        for i in 0..self.ring.len() {
+            let key = (cx + self.ring[i].0, cz + self.ring[i].1);
+            if self.chunks.contains_key(&key) {
+                continue;
             }
-            let key = (cx + dx, cz + dz);
-            if !self.chunks.contains_key(&key) && self.pending.insert(key) {
+            if self.saved.contains(&key) {
+                if loads > 0 {
+                    loads -= 1;
+                    self.load(key);
+                }
+            } else if self.pending.len() < self.max_in_flight && self.pending.insert(key) {
                 let _ = self.jobs.send(key);
             }
         }
@@ -358,6 +459,7 @@ impl ChunkManager {
             e.height = height_map(&b);
             e.blocks = b;
             e.data = d;
+            e.dirty = true; // a populate writes into all four (trees, ores, ... spill over the borders)
             e.lit = false; // blocks changed under the light: it is computed again once final
             // The chunk and its four neighbours (border faces) need a new mesh if they had one.
             for n in [(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)] {
@@ -407,6 +509,14 @@ impl ChunkManager {
     }
 }
 
+fn chunk_path(dir: &Path, (x, z): Key) -> PathBuf {
+    dir.join(format!("c.{x}.{z}"))
+}
+
+fn write_entry(dir: &Path, key: Key, e: &Entry) -> std::io::Result<()> {
+    save::write(&chunk_path(dir, key), &save::encode_chunk(&e.blocks, &e.data, e.populated))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -449,7 +559,7 @@ mod tests {
     #[test]
     fn preload_populates_and_finishes_inner_chunks() {
         let mut m = ChunkManager::new(1, 1);
-        m.preload(-1, 2);
+        m.preload(0, 0);
         for z in -1..=1 {
             for x in -1..=1 {
                 assert!(m.chunks[&(x, z)].populated, "({x}, {z})");
@@ -457,6 +567,33 @@ mod tests {
         }
         assert!(!m.chunks[&(2, 2)].populated);
         assert!(m.is_final(0, 0) && m.is_final(1, 1) && !m.is_final(2, 2));
+    }
+
+    /// An edit survives a restart: flushed, then read back by a fresh manager that loads (does not generate) the chunk.
+    /// A chunk nobody touched is not written, and a corrupt file is forgotten instead of loaded.
+    #[test]
+    fn edits_survive_a_restart() {
+        let dir = std::env::temp_dir().join(format!("mc-rs-save-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut a = ChunkManager::new(1, 1).with_dir(dir.clone());
+        a.insert((0, 0), vec![0u8; VOLUME]);
+        a.insert((1, 0), vec![0u8; VOLUME]);
+        assert!(a.set_block_meta(3, 40, 5, 35, 14)); // red wool in chunk (0, 0)
+        a.chunks.get_mut(&(0, 0)).unwrap().populated = true;
+        a.flush(usize::MAX);
+        assert!(!a.chunks[&(0, 0)].dirty && a.saved.contains(&(0, 0)) && !a.saved.contains(&(1, 0)));
+
+        let mut b = ChunkManager::new(1, 1).with_dir(dir.clone());
+        assert!(b.saved.contains(&(0, 0)) && b.saved.len() == 1);
+        b.load((0, 0));
+        assert_eq!((b.block(3, 40, 5), b.meta(3, 40, 5)), (Some(35), 14));
+        assert!(b.chunks[&(0, 0)].populated && !b.chunks[&(0, 0)].dirty);
+
+        std::fs::write(dir.join("c.0.0"), [1u8, 2, 3]).unwrap();
+        let mut c = ChunkManager::new(1, 1).with_dir(dir.clone());
+        c.load((0, 0));
+        assert!(!c.saved.contains(&(0, 0)) && !c.chunks.contains_key(&(0, 0)));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The ring around the player fills in from the workers; after a long walk the old area is gone.

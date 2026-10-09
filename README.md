@@ -20,19 +20,20 @@ original. Anything that cannot be derived from the b1.7.3 sources is marked
 | M1  Blocks + chunks  | done | Hand-built 16x16x128 stone chunk, neighbour-culled mesher, 32-bit indices. |
 | M2  Camera + physics | done | First-person walk + jump + swept AABB collision. Jump is now a button (see M12). |
 | M3  Overworld gen    | done | 48x128x48 super-chunk, sea level 64, 6 ore types (coal, iron, gold, diamond, redstone, lapis). Terrain was rebuilt in M4a-c, see below. |
-| M12 Touch UX         | done | Landscape-only. Floating analog move stick (left half), look drag (right half), jump button, hotbar tap, pause menu. |
+| M12 Touch UX         | done (this commit) | Landscape-only. Floating analog move stick (left half), look drag (right half), jump button, hotbar tap, pause menu. |
 | M4a-c Faithful terrain + biomes | done | java.util.Random, Perlin/simplex noise, WorldChunkManager (climate -> 10 biomes), generateTerrain and replaceBlocksForBiome. Bit-exact against the real b1.7.3 classes on 18 chunks (3 seeds), golden test passes (`tools/golden/`). |
-| M4e Fix pass | done | 48x48 stitching index, jump ground probe, eye height, aspect/resize sync, immersive nav bar, climate float constants. See the changelog in ROADMAP.md. |
-| M4f Chunk manager | done | Chunks keyed by (cx, cz), one mesh per chunk, circular render-distance ring (4 chunks) that loads/unloads as you walk, terrain generated on 1-2 worker threads, cross-chunk face culling. Replaces the 48x48 super-chunk. |
-| M4d Caves, trees, populate | done (compiled + golden-tested on a Linux host) | MapGenCaves in `generate`, full `populate()` (lakes, dungeons, clay, dirt/gravel/ores, oak/birch/big/taiga trees, flowers, grass, reeds, pumpkins, cactus, springs, snow). Bit-exact vs the real Java on 11 cases (`tools/golden/`). Chunk manager gained the populated/final state. |
-| M5 Block interaction | written, compiled | Raycast pick, break (hold), place (tap), light engine port, outline + crosshair. See ROADMAP changelog. |
+| M4e Fix pass | done (not yet run on a device) | 48x48 stitching index, jump ground probe, eye height, aspect/resize sync, immersive nav bar, climate float constants. See the changelog in ROADMAP.md. |
+| M4f Chunk manager | done (now compiles and its tests pass on a Linux host; not run on a device) | Chunks keyed by (cx, cz), one mesh per chunk, circular render-distance ring (4 chunks) that loads/unloads as you walk, terrain generated on 1-2 worker threads, cross-chunk face culling. Replaces the 48x48 super-chunk. |
+| M4d Caves, trees, populate | done (compiled + golden-tested on a Linux host; not run on a device) | MapGenCaves in `generate`, full `populate()` (lakes, dungeons, clay, dirt/gravel/ores, oak/birch/big/taiga trees, flowers, grass, reeds, pumpkins, cactus, springs, snow). Bit-exact vs the real Java on 11 cases (`tools/golden/`). Chunk manager gained the populated/final state. |
+| M5 Block interaction | written, NOT compiled | Raycast pick, break (hold), place (tap), light engine port, outline + crosshair. See ROADMAP changelog. |
 | Day/night            | written, NOT compiled | 20-minute cycle: sky light 0..11 subtracted in the mesher, sky colour from sun angle + climate. No sun/moon/stars yet. |
 | Digging              | written, NOT compiled | Hardness-based survival digging, hold to dig, progress bar. No tools yet. |
 | Drops + inventory    | written, logic tested on a Linux host, NOT compiled as a whole | A broken block drops its `idDropped` items as entities (20 Hz motion, pickup after 10 ticks). The hotbar holds real stacks with counts and starts empty; placing uses one up. See ROADMAP changelog. |
 | M6 Crafting + tools  | written, logic tested on a Linux host, whole crate type-checked against a stubbed `android-activity`; NOT run on a device | 36-slot inventory, 2x2 inventory crafting and 3x3 workbench crafting, furnace smelting (`TileEntityFurnace`, 8 smelting recipes), 31 recipes (wood/stone/iron/diamond/gold pickaxe, axe, shovel, sword, hoe + shears + planks, sticks, workbench, chest, furnace, torch, ...), tool speed and durability, and `canHarvestBlock`: stone without a pickaxe breaks and drops nothing, like the original. See ROADMAP changelog. |
 | Block metadata       | written, NOT compiled (no Rust toolchain that session) | 4-bit `Nibbles` per chunk (= `NibbleArray`, the McRegion `Data` tag as is), `meta` / `set_block_meta`, worldgen writes it (birch + taiga species, grass type, pumpkin facing), drops carry `damageDropped`, items place `getPlacedBlockMetadata`, the atlas shows log/leaf species and the 15 wool colours. Block shapes (slab, stairs, door, bed) are not part of it. Java golden regenerated: old lines unchanged, new `META` hashes. See ROADMAP changelog. |
 | Health + damage      | written, host-tested (56 tests), NOT run on a device | 20 health, fall damage, drowning, lava + fire, void, death drops the inventory and respawns. Fluids are not solid and the player swims. Mushroom stew (bowl + 2 mushrooms) is the only food, tap to eat. See ROADMAP changelog. |
-| M7..M14              | pending | See ROADMAP.md for the order. |
+| M7 Save              | written, NOT compiled (no Rust toolchain that session) | Own simple format, not McRegion: one run-length-coded file per edited chunk + a `level` file (player, inventory, furnaces, dropped items, time). Autosave every 5 s, full save on pause/exit, resume on start. Saves live in the app's private storage, one folder per seed. +2 tests. See ROADMAP changelog. |
+| M8..M14              | pending | See ROADMAP.md for the order. |
 
 Latest commit on `main`: see `git log -1`. Latest released APK: see the
 `MinecraftB173Rust-apk` artifact on the GitHub Actions run.
@@ -66,6 +67,7 @@ mc-rs/
       items.rs            ItemStack, 36-slot Inventory (hotbar = 0..9), idDropped/quantityDropped rules, EntityItem physics + pickup + throw
       craft.rs            M6: tools (EnumToolMaterial, getStrVsBlock, canHarvestBlock), recipes (CraftingManager), inventory/workbench screen (Container clicks) + its GUI geometry
       sky.rs              day/night: sun angle, skylight subtracted, sky colour
+      save.rs             M7: chunk file codec (RLE), `Level` codec (player, inventory, furnaces, drops), atomic write
       vitals.rs           health, air, fire, fall damage (EntityLiving.attackEntityFrom and friends)
       chunks/light.rs     M5 light engine (port of World/Chunk lighting)
       gen/
@@ -125,6 +127,9 @@ UNVERIFIED until you can show a reference.
   carries, `ShapedRecipes.matches` (anywhere in the grid, mirrored), `SlotCrafting.onPickupFromSlot`, the slot positions
   of `ContainerPlayer`/`ContainerWorkbench`, and the left/right click branches of `Container.func_27280_a`. Not ported:
   bow, arrow, armor slots, shift-click, raw pork/fish smelting, the lava bucket as fuel, ~100 other recipes (one line each in `recipes()`).
+- `world::save` — NOT b1.7.3: it replaces `McRegionChunkLoader`/`NBTTagCompound`/`level.dat` on purpose. Nothing in it is
+  derived from the Java, so nothing in it is a fidelity claim. What it keeps is what the port keeps: a chunk's block ids and
+  `Nibbles` bytes (the `Data` tag), whether populate ran on it, and the player/world state this port has.
 - `world::dig::can_harvest` — `InventoryPlayer.canHarvestBlock` (material half + held-item half), used by `lib.rs` the way
   `PlayerControllerSP.sendBlockRemoved` does: read before the tool wears, so a tool that breaks on a block still harvests it.
 - `input::touch_ui::LayoutRects::for_surface` — hotbar matches

@@ -1,7 +1,7 @@
 # Roadmap: Minecraft b1.7.3 -> Android in Rust
 
 Fresh start. One milestone per session. Vanilla names. Vulkan-only.
-McRegion save format. Client-only networking.
+Own simple save format (M7 dropped McRegion). Client-only networking.
 
 ## Milestones
 | #   | Name | Deliverable |
@@ -13,7 +13,7 @@ McRegion save format. Client-only networking.
 | M4  | Biomes + trees + caves | All b1.7.3 biomes + worldgen populate step |
 | M5  | Block interaction | Raycast pick, break, place, light update (done, not compiled: see Changelog) |
 | M6  | Inventory + crafting | Survival inv, hotbar, crafting grid, recipes (done, not run on a device: see Changelog) |
-| M7  | Save (McRegion) | Read/write .mcr, new-world / save / load |
+| M7  | Save | Own format (not McRegion, by decision): per-chunk RLE files + `level`; autosave, save on pause/exit, resume (written, not compiled: see Changelog) |
 | M8  | Entities + AI | Mobs + item entities |
 | M9  | Audio | Positional OGG, music stubs |
 | M10 | Multiplayer | Full b1.7.3 client protocol |
@@ -40,12 +40,34 @@ they matched.
 
 ## Next step
 
-M7 (save). Block metadata is in (changelog), so the chunk's `Data` tag is `Nibbles::bytes()` as is. Furnaces now smelt (see the furnace entry), so the whole tool chain up to diamond is reachable. M6 is written and the crate type-checks and tests on a host, but nothing has run on a device (M5 included). M4 is done: caves and populate match the real classes bit for
+M8 (entities + AI). M7 (save) is written but not compiled: run `cargo test --lib` first. Furnaces smelt (see the furnace entry), so the whole tool chain up to diamond is reachable. M6 is written and the crate type-checks and tests on a host, but nothing has run on a device (M5 included). M4 is done: caves and populate match the real classes bit for
 bit (`tools/golden/`). Still approximate in populate (see README): light model, no metadata, no tile entities, no block
 ticks (liquids/sand). Sapling growth, fluid flow and falling sand belong with M5's block updates. Ice Desert exists in
 BiomeGenBase but climate never selects it; b1.7.3 has no ravines.
 
 ## Changelog
+- `done` M7 save (written WITHOUT a Rust toolchain: not compiled, tests not run, expect a compile fix or two; +2 tests). Decision: it does
+  not follow b1.7.3 (no McRegion, NBT, zlib): the aim is fewer lines and a smaller, faster save, not a loadable vanilla world.
+    - `world/save.rs` (new): `encode_chunk`/`decode_chunk` = populated flag + run-length-coded block ids + metadata nibbles (runs of
+      1..=255), `Level` encode/decode (time, position, spawn, look, hotbar slot, health/air/fire, 36 slots, furnaces, dropped items),
+      `write` = temp file + rename, so a kill mid-write keeps the old file. Decoding checks every length, stack size and float and
+      answers `None` for anything off (chunk: generated again; level: new game); it never panics.
+    - Only chunks that differ from the seed are written: `Entry.dirty` is set by an edit and by `populate` (on all 4 chunks it writes
+      into), cleared by a write. Untouched chunks are regenerated, light and height map are recomputed on load. `ChunkManager::with_dir`
+      scans the folder once into `saved`; `stream` reads saved chunks (8 per frame) instead of asking a worker; `flush(budget)` writes
+      dirty ones; unloading writes a dirty chunk first. `preload(cx, cz)` now takes the centre chunk (it was `lo, hi`).
+    - `lib.rs`: the world resumes where the player stood (`Level` -> `App::restore`); a new world still searches a spawn (`find_spawn`).
+      Autosave every 5 s of play (level + 24 chunks, skipped with a screen open), and a full save on `Pause` and `TerminateWindow`,
+      which matters: `TerminateWindow` drops the whole `App`, so before this a trip to the home screen lost the world. An open screen is
+      closed first, so its cursor and grid become dropped items. Folder: `internal_data_path()/world-<seed hex>/` (`c.<cx>.<cz>`, `level`).
+      To start a new world, clear the app's data (no menu until M14).
+    - This also ends the old ponytail note in `stream` (an unloaded chunk was populated again on return).
+    - Not saved: pause state, mining progress, velocity of dropped items (they come back at rest), the sky/light, anything a menu would
+      choose. Furnace facing is still lost when a furnace lights (`set_block` clears metadata).
+    - Known ceiling: a hard kill (not a normal pause/exit) can lose up to 5 s of play, and can leave a chunk border with a tree cut off
+      if a populated chunk was written before its neighbour. Chunk writes and reads run on the render thread (a few small files per frame).
+    - Tests: `chunk_and_level_round_trip` (codec, run splitting, every corrupt case), `edits_survive_a_restart` (flush, new manager loads
+      it, corrupt file forgotten).
 - `done` M13 frustum culling (host-checked: type-checks, 48 tests pass; NOT run on a device, so the FPS gain is unmeasured):
     - `render/camera.rs`: `Frustum::from_view_proj(proj * view)` takes the six planes (Gribb-Hartmann, depth 0..1 so the near plane is row 2),
       `intersects_aabb` is the usual conservative test against the corner furthest along each plane normal. Test covers ahead, behind,

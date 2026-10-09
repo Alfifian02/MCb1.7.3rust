@@ -9,3 +9,4 @@ pub mod dig;
 pub mod items;
 pub mod craft;
 pub mod vitals;
+pub mod save;

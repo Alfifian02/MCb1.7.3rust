@@ -243,6 +243,11 @@ fn cell(p: Vec3) -> [i32; 3] {
 }
 
 impl ItemEntity {
+    /// A saved item coming back: at rest, ready to be picked up (it settles on the next tick).
+    pub fn resting(pos: Vec3, stack: ItemStack, age: u32) -> Self {
+        Self { pos, prev: pos, vel: Vec3::ZERO, stack, age, delay: 0, on_ground: false }
+    }
+
     /// One 20 Hz `EntityItem.onUpdate`; false once it is gone (lava, 5 min old, fell out of the world).
     // ponytail: collision tests the box centre line, not all 8 corners, so an item can overhang an edge by
     // up to 0.125; movement per tick is capped under one block so it cannot tunnel. Upgrade: sweep the AABB.

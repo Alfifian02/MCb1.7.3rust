@@ -233,7 +233,7 @@ fn burn_time(id: u16) -> u16 {
 }
 
 /// A `TileEntityFurnace`: 0 input, 1 fuel, 2 output. 20 Hz `tick`s, 200 ticks per item.
-#[derive(Default)]
+#[derive(Default, Clone, PartialEq, Debug)]
 pub struct Furnace {
     pub slots: [Option<ItemStack>; 3],
     /// `furnaceBurnTime`, `currentItemBurnTime`, `furnaceCookTime`.
