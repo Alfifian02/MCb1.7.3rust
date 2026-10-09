@@ -112,6 +112,8 @@ pub fn build(blocks: &[u8], data: &Nibbles, light: &[u8], nb: [&[u8]; 4], nb_lig
         let id = b[idx(x.clamp(0, 15) as usize, y as usize, (z & 15) as usize)];
         id != 0 && !is_plant(id)
     };
+    // Ray step toward the sun: `sx` blocks along Z and `sy` up per step, the longer one is 1.
+    let (sx, sy) = { let h = if sun == NO_SUN { 0.0 } else { sun as f32 / 2.0 }; let m = h.abs().max(1.0); (h / m, 1.0 / m) };
     // Shade of an air cell, 0..1: 1 when a ray toward the sun hits a block, scaled by the cell's sky light so it fades
     // out where vanilla sky light already darkens (no step at the edge of a tree's own shade).
     let occ = |x: i32, y: i32, z: i32| -> f32 {
