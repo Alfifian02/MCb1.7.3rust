@@ -45,8 +45,8 @@ fn touches(pos: Vec3, get: BlockQuery<'_>, xz: f32, ids: std::ops::RangeInclusiv
 /// Integrate one frame. `dt` is seconds, capped by the caller; `jumping` is the held jump button.
 /// In water or lava (`EntityLiving.moveEntityWithHeading`) there is no gravity: the vertical speed is dragged (x0.8 water,
 /// x0.5 lava per tick) and sinks 0.02 blocks/tick, a held jump swims up (+0.04 blocks/tick), and pushing against a wall
-/// hops out of the fluid (0.3 blocks/tick) when the spot 0.6 higher is free.
-pub fn step(player: &mut Player, dt: f32, jumping: bool, get: BlockQuery<'_>) {
+/// hops out of the fluid (0.3 blocks/tick) when the spot 0.6 higher is free. Returns (touching water, touching lava).
+pub fn step(player: &mut Player, dt: f32, jumping: bool, get: BlockQuery<'_>) -> (bool, bool) {
     let water = touches(player.pos, get, 0.001, 8..=9);
     let lava = !water && touches(player.pos, get, 0.1, 10..=11);
     let ticks = dt * 20.0;
@@ -73,6 +73,7 @@ pub fn step(player: &mut Player, dt: f32, jumping: bool, get: BlockQuery<'_>) {
         if blocked && !aabb_any(up, get, |b| b > 0) { player.vel.y = 6.0; }
     }
     player.on_ground = ground_test(player.pos, get);
+    (water, lava)
 }
 
 fn ground_test(pos: Vec3, get: BlockQuery<'_>) -> bool {

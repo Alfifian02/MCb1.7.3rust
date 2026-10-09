@@ -1,0 +1,384 @@
+diff -ruN a/README.md b/README.md
+--- a/README.md	2026-10-09 03:47:30.078017835 +0000
++++ b/README.md	2026-10-09 03:47:30.079161124 +0000
+@@ -30,6 +30,7 @@
+ | Digging              | written, NOT compiled | Hardness-based survival digging, hold to dig, progress bar. No tools yet. |
+ | Drops + inventory    | written, logic tested on a Linux host, NOT compiled as a whole | A broken block drops its `idDropped` items as entities (20 Hz motion, pickup after 10 ticks). The hotbar holds real stacks with counts and starts empty; placing uses one up. See ROADMAP changelog. |
+ | M6 Crafting + tools  | written, logic tested on a Linux host, whole crate type-checked against a stubbed `android-activity`; NOT run on a device | 36-slot inventory, 2x2 inventory crafting and 3x3 workbench crafting, furnace smelting (`TileEntityFurnace`, 8 smelting recipes), 26 recipes (wood/stone/iron/diamond/gold pickaxe, axe, shovel + planks, sticks, workbench, chest, furnace, torch, ...), tool speed and durability, and `canHarvestBlock`: stone without a pickaxe breaks and drops nothing, like the original. See ROADMAP changelog. |
++| Health + damage      | written, NOT compiled | 20 health, fall damage, drowning, lava + fire, void, death drops the inventory and respawns. Fluids are not solid and the player swims. No food yet, so no healing. See ROADMAP changelog. |
+ | M7..M14              | pending | See ROADMAP.md for the order. |
+ 
+ Latest commit on `main`: see `git log -1`. Latest released APK: see the
+@@ -64,6 +65,7 @@
+       items.rs            ItemStack, 36-slot Inventory (hotbar = 0..9), idDropped/quantityDropped rules, EntityItem physics + pickup + throw
+       craft.rs            M6: tools (EnumToolMaterial, getStrVsBlock, canHarvestBlock), recipes (CraftingManager), inventory/workbench screen (Container clicks) + its GUI geometry
+       sky.rs              day/night: sun angle, skylight subtracted, sky colour
++      vitals.rs           health, air, fire, fall damage (EntityLiving.attackEntityFrom and friends)
+       chunks/light.rs     M5 light engine (port of World/Chunk lighting)
+       gen/
+         mod.rs            module list
+diff -ruN a/ROADMAP.md b/ROADMAP.md
+--- a/ROADMAP.md	2026-10-09 03:47:30.072869339 +0000
++++ b/ROADMAP.md	2026-10-09 03:47:30.074298704 +0000
+@@ -46,6 +46,16 @@
+ BiomeGenBase but climate never selects it; b1.7.3 has no ravines.
+ 
+ ## Changelog
++- `done` health, damage, death (`world/vitals.rs`, `lib.rs`; written WITHOUT a Rust toolchain: not compiled, test not run, +1 test):
++    `Vitals` = `EntityLiving.attackEntityFrom` (20 health, the 10-tick damage window: an equal or smaller hit inside it is ignored, a bigger one
++    pays the difference), `Entity.updateFallState` + `EntityLiving.fall` (`ceil(fall - 3)`, water cancels it), drowning (300 air, then 2 damage every
++    20 ticks once it runs out, `isInsideOfMaterial`), lava (4 damage per window + 600 ticks of fire, 1 damage per second while burning, water puts
++    it out) and the void (eye below -64). Frame-based fall check, everything else on the 20 Hz tick. `physics::step` now returns (water, lava).
++    HUD: 10 hearts above the hotbar, air bubbles while the eye is under water. Death (`App::die`): the open screen and the whole inventory drop where
++    he died, the pause menu turns red and its resume button respawns at the first spawn point with full health and a clean `Vitals`.
++    b1.7.3 has no hunger and no natural regeneration (only Peaceful heals), so health stays down until food is ported. Not done: suffocation in
++    blocks, hurt flash/blink, knockback, burning and hurt sounds, fire overlay, death camera roll, items burning in lava, per-difficulty damage,
++    bed spawn, health in the save (M7).
+ - `done` fluids are not solid + swimming (`world/physics.rs`; written WITHOUT a Rust toolchain: not compiled, test not run, +1 test):
+     the player used to stand on water and lava because physics treated every id > 0 as solid. Ids 8..=11 are now passable; `step` takes the
+     held jump flag and ports `Entity.handleWaterMovement`/`handleLavaMovement` (box shrunk 0.4 top and bottom) and
+diff -ruN a/mc-rs/src/input/touch_ui.rs b/mc-rs/src/input/touch_ui.rs
+--- a/mc-rs/src/input/touch_ui.rs	2026-10-09 03:47:30.068139099 +0000
++++ b/mc-rs/src/input/touch_ui.rs	2026-10-09 03:47:30.069199464 +0000
+@@ -279,6 +279,12 @@
+         })
+     }
+ 
++    /// Open the pause menu (the death screen reuses it: its resume button is the respawn button).
++    pub fn pause(&mut self) {
++        self.paused = true;
++        self.clear();
++    }
++
+     /// Drop every finger and zero all input (pause, cancel, resize).
+     fn clear(&mut self) {
+         self.pointers.clear();
+diff -ruN a/mc-rs/src/lib.rs b/mc-rs/src/lib.rs
+--- a/mc-rs/src/lib.rs	2026-10-09 03:47:30.053301430 +0000
++++ b/mc-rs/src/lib.rs	2026-10-09 03:47:30.054387835 +0000
+@@ -33,6 +33,7 @@
+ use crate::world::chunk::{cross_shape, is_plant};
+ use crate::world::chunks::{chunk_coord, ChunkManager};
+ use crate::world::physics::{self, Player};
++use crate::world::vitals::{self, Env, Vitals};
+ 
+ /// Render distance in chunks (a circle of this radius is meshed and drawn, two more are generated).
+ const RENDER_DIST: i32 = 4;
+@@ -83,6 +84,9 @@
+     furn_acc: f32,
+     /// The finger gesture on the open screen, to tell a tap from a spread.
+     gesture: Option<Gesture>,
++    /// Health, air and fire; and where a dead player comes back (the first spawn: no beds yet).
++    vitals: Vitals,
++    spawn: glam::Vec3,
+ }
+ 
+ /// A press on an open screen: where it began, whether it became a spread (a drag over slots with a stack on the
+@@ -150,6 +154,7 @@
+             on_ground: false,
+         };
+         camera.pos = player.pos + glam::Vec3::new(0.0, EYE_HEIGHT, 0.0);
++        let spawn = player.pos;
+ 
+         // M12: HUD pipeline + touch state machine. Surface dimensions match
+         // the window we just initialised against.
+@@ -186,6 +191,8 @@
+             furnaces: HashMap::new(),
+             furn_acc: 0.0,
+             gesture: None,
++            vitals: Vitals::default(),
++            spawn,
+         })
+     }
+ 
+@@ -215,6 +222,12 @@
+             self.camera.pos = self.player.pos + glam::Vec3::new(0.0, EYE_HEIGHT, 0.0);
+             return;
+         }
++        // The death screen's resume button was pressed: come back at the spawn point with full health.
++        if self.vitals.dead() {
++            self.vitals = Vitals::default();
++            self.player.pos = self.spawn;
++            self.player.vel = glam::Vec3::ZERO;
++        }
+         // Day/night: time only runs while playing; a new sky-light level restarts the meshes.
+         self.world_ticks += dt as f64 * 20.0;
+         let sub = sky::skylight_subtracted(sky::celestial_angle(self.world_ticks as u64, 1.0));
+@@ -232,8 +245,16 @@
+         // Plants are drawn but not solid yet (collision shapes come with M14), so physics reads them as air.
+         let get = |x: i32, y: i32, z: i32| self.chunks.block(x, y, z).map(|b| if is_plant(b) { 0 } else { b });
+         // The held jump button jumps (8.4 m/s, the b1.7.3 velocity) or swims up; fluids (ids 8..=11) are not solid.
+-        physics::step(&mut self.player, dt, self.touch.jumping(), &get);
++        let y0 = self.player.pos.y;
++        let (water, lava) = physics::step(&mut self.player, dt, self.touch.jumping(), &get);
+         self.camera.pos = self.player.pos + glam::Vec3::new(0.0, EYE_HEIGHT, 0.0);
++        let e = self.camera.pos;
++        let eye_in_water = matches!(self.chunks.block_loaded(e.x.floor() as i32, e.y.floor() as i32, e.z.floor() as i32), Some(8 | 9));
++        self.vitals.update(dt, Env { dy: self.player.pos.y - y0, on_ground: self.player.on_ground, water, lava, eye_in_water, eye_y: e.y });
++        if self.vitals.dead() {
++            self.die();
++            return;
++        }
+         // Dropped items fall, settle and get picked up (before the target check below, which can return early).
+         self.drops.tick(dt, &|x: i32, y: i32, z: i32| self.chunks.block(x, y, z), self.player.pos, &mut self.inv);
+         // Furnaces burn on the 20 Hz tick, open or not, but only in loaded chunks (vanilla ticks loaded tile entities).
+@@ -336,6 +357,20 @@
+         }
+     }
+ 
++    /// `EntityPlayer.onDeath`: the open screen's cursor and grid, then the whole inventory, fall to the ground where he
++    /// died (ponytail: `scatter` drops one entity per stack, vanilla throws each with a random spread). The pause
++    /// menu is the death screen: its resume button respawns (top of `step_frame`).
++    fn die(&mut self) {
++        self.close_screen();
++        let at = (self.player.pos.x.floor() as i32, self.player.pos.y.floor() as i32, self.player.pos.z.floor() as i32);
++        for slot in self.inv.slots.iter_mut() {
++            if let Some(st) = slot.take() {
++                self.drops.scatter(st, at);
++            }
++        }
++        self.touch.pause();
++    }
++
+     /// Open a container screen: the 2x2 inventory, a workbench's 3x3 or a furnace.
+     fn open_screen(&mut self, screen: Screen) {
+         self.screen = Some(screen);
+@@ -651,6 +686,32 @@
+         }
+ 
+         if play {
++            // Hearts (GuiIngame: 10, 8 units apart on the 20 unit hotbar cells, left half, above the hotbar): a full
++            // heart is 2 health. Air bubbles sit over the right half while the eye is under water: whole ones
++            // `ceil((air - 2) * 10 / 300)`, then the one that is about to pop, faded. Flat shapes until M14 sprites.
++            let (hx, hy, hw, _) = layout.hotbar[0];
++            let (sz, y) = (hw * 0.45, hy - hw * 0.6);
++            for i in 0..10 {
++                let x = hx + i as f32 * hw * 0.4;
++                let at = 2 * i + 1;
++                HudPipeline::push_quad(v, x, y, sz, sz, [0.25, 0.0, 0.0, 0.8]);
++                if at < self.vitals.health {
++                    HudPipeline::push_quad(v, x, y, sz, sz, [0.9, 0.1, 0.1, 1.0]);
++                } else if at == self.vitals.health {
++                    HudPipeline::push_quad(v, x, y, sz * 0.5, sz, [0.9, 0.1, 0.1, 1.0]);
++                }
++            }
++            if self.vitals.air < vitals::MAX_AIR {
++                let air = self.vitals.air as f32;
++                let whole = ((air - 2.0) * 10.0 / 300.0).ceil().max(0.0) as i32;
++                let popping = (air * 10.0 / 300.0).ceil().max(0.0) as i32 - whole;
++                let (rx, _, rw, _) = layout.hotbar[8];
++                for i in 0..whole + popping {
++                    let alpha = if i < whole { 0.9 } else { 0.4 };
++                    HudPipeline::push_disc(v, rx + rw - sz * 0.5 - i as f32 * hw * 0.4, y - hw * 0.5, sz * 0.4, [0.55, 0.8, 1.0, alpha]);
++                }
++            }
++
+             // Jump button: bottom-right disc with a ring.
+             let (jx, jy) = layout.jump_center;
+             let jr = layout.jump_radius;
+@@ -692,7 +753,9 @@
+         if paused {
+             let w = self.gpu.config.width as f32;
+             let h = self.gpu.config.height as f32;
+-            HudPipeline::push_quad(v, 0.0, 0.0, w, h, [0.0, 0.0, 0.0, 0.55]);
++            // Dead: the same menu, tinted red; the resume button respawns.
++            let tint = if self.vitals.dead() { [0.55, 0.0, 0.0, 0.6] } else { [0.0, 0.0, 0.0, 0.55] };
++            HudPipeline::push_quad(v, 0.0, 0.0, w, h, tint);
+             let (bx, by, bw, bh) = layout.resume;
+             HudPipeline::push_outlined_quad(v, bx, by, bw, bh, [0.20, 0.30, 0.50, 0.95], [0.95, 0.95, 0.95, 0.95], 4.0);
+             // Play triangle, approximated by two stacked quads.
+diff -ruN a/mc-rs/src/world/mod.rs b/mc-rs/src/world/mod.rs
+--- a/mc-rs/src/world/mod.rs	2026-10-09 03:47:30.063137335 +0000
++++ b/mc-rs/src/world/mod.rs	2026-10-09 03:47:30.064229472 +0000
+@@ -8,3 +8,4 @@
+ pub mod dig;
+ pub mod items;
+ pub mod craft;
++pub mod vitals;
+diff -ruN a/mc-rs/src/world/physics.rs b/mc-rs/src/world/physics.rs
+--- a/mc-rs/src/world/physics.rs	2026-10-09 03:47:30.058255264 +0000
++++ b/mc-rs/src/world/physics.rs	2026-10-09 03:47:30.059360538 +0000
+@@ -45,8 +45,8 @@
+ /// Integrate one frame. `dt` is seconds, capped by the caller; `jumping` is the held jump button.
+ /// In water or lava (`EntityLiving.moveEntityWithHeading`) there is no gravity: the vertical speed is dragged (x0.8 water,
+ /// x0.5 lava per tick) and sinks 0.02 blocks/tick, a held jump swims up (+0.04 blocks/tick), and pushing against a wall
+-/// hops out of the fluid (0.3 blocks/tick) when the spot 0.6 higher is free.
+-pub fn step(player: &mut Player, dt: f32, jumping: bool, get: BlockQuery<'_>) {
++/// hops out of the fluid (0.3 blocks/tick) when the spot 0.6 higher is free. Returns (touching water, touching lava).
++pub fn step(player: &mut Player, dt: f32, jumping: bool, get: BlockQuery<'_>) -> (bool, bool) {
+     let water = touches(player.pos, get, 0.001, 8..=9);
+     let lava = !water && touches(player.pos, get, 0.1, 10..=11);
+     let ticks = dt * 20.0;
+@@ -73,6 +73,7 @@
+         if blocked && !aabb_any(up, get, |b| b > 0) { player.vel.y = 6.0; }
+     }
+     player.on_ground = ground_test(player.pos, get);
++    (water, lava)
+ }
+ 
+ fn ground_test(pos: Vec3, get: BlockQuery<'_>) -> bool {
+diff -ruN a/mc-rs/src/world/vitals.rs b/mc-rs/src/world/vitals.rs
+--- a/mc-rs/src/world/vitals.rs	1970-01-01 00:00:00.000000000 +0000
++++ b/mc-rs/src/world/vitals.rs	2026-10-09 03:47:30.081335721 +0000
+@@ -0,0 +1,161 @@
++//! Player health and damage: `EntityLiving.attackEntityFrom` (the 10-tick damage window), `Entity.updateFallState` /
++//! `EntityLiving.fall`, drowning (`air`), lava and burning, and falling out of the world (`Entity.onEntityUpdate`).
++//! b1.7.3 has no hunger and no natural regeneration (only Peaceful heals), so health only goes back up on respawn
++//! until food exists.
++//! ponytail: no suffocation in blocks, no damage flash or knockback, no burning/hurt sounds (all later).
++
++use crate::world::dig::TICK;
++
++pub const MAX_HEALTH: i32 = 20;
++pub const MAX_AIR: i32 = 300;
++
++/// What the world says about the player this frame.
++#[derive(Clone, Copy, Default)]
++pub struct Env {
++    /// Vertical movement this frame (negative = fell).
++    pub dy: f32,
++    pub on_ground: bool,
++    /// The box touches water / lava (`handleWaterMovement`, `handleLavaMovement`).
++    pub water: bool,
++    pub lava: bool,
++    /// The eye is inside a water cell (`isInsideOfMaterial(water)`), and its height (`Entity.posY` of a player).
++    pub eye_in_water: bool,
++    pub eye_y: f32,
++}
++
++pub struct Vitals {
++    pub health: i32,
++    pub air: i32,
++    pub fire: i32,
++    /// `heartsLife`: 20 right after a hit, counts down; while above 10 only a bigger hit than `last_damage` counts.
++    hearts_life: i32,
++    last_damage: i32,
++    fall: f32,
++    acc: f32,
++}
++
++impl Default for Vitals {
++    fn default() -> Self {
++        Self { health: MAX_HEALTH, air: MAX_AIR, fire: 0, hearts_life: 0, last_damage: 0, fall: 0.0, acc: 0.0 }
++    }
++}
++
++impl Vitals {
++    pub fn dead(&self) -> bool {
++        self.health <= 0
++    }
++
++    /// `EntityLiving.attackEntityFrom` for a damage source with no attacker. False if nothing was taken.
++    pub fn hurt(&mut self, dmg: i32) -> bool {
++        if self.health <= 0 {
++            return false;
++        }
++        if self.hearts_life > 10 {
++            if dmg <= self.last_damage {
++                return false;
++            }
++            self.health -= dmg - self.last_damage;
++        } else {
++            self.hearts_life = 20;
++            self.health -= dmg;
++        }
++        self.last_damage = dmg;
++        true
++    }
++
++    /// `updateFallState` (every frame) and `EntityLiving.fall`: landing after `d` blocks costs `ceil(d - 3)`;
++    /// water cancels the fall.
++    fn land(&mut self, e: &Env) {
++        if e.water {
++            self.fall = 0.0;
++        }
++        if e.on_ground {
++            let dmg = (self.fall - 3.0).ceil() as i32;
++            self.fall = 0.0;
++            if dmg > 0 {
++                self.hurt(dmg);
++            }
++        } else if e.dy < 0.0 {
++            self.fall -= e.dy;
++        }
++    }
++
++    /// One 20 Hz tick of `Entity.onEntityUpdate` + `EntityLiving.onEntityUpdate`.
++    fn tick(&mut self, e: &Env) {
++        if self.hearts_life > 0 {
++            self.hearts_life -= 1;
++        }
++        if e.water {
++            self.fire = 0;
++        }
++        if self.fire > 0 {
++            if self.fire % 20 == 0 {
++                self.hurt(1);
++            }
++            self.fire -= 1;
++        }
++        if e.lava {
++            // setOnFireFromLava: 4 damage (the damage window lets one through every 10 ticks) and 30 s of fire.
++            self.hurt(4);
++            self.fire = 600;
++        }
++        if e.eye_y < -64.0 {
++            self.hurt(1000);
++        }
++        if e.eye_in_water {
++            self.air -= 1;
++            if self.air == -20 {
++                self.air = 0;
++                self.hurt(2);
++            }
++            self.fire = 0;
++        } else {
++            self.air = MAX_AIR;
++        }
++    }
++
++    /// Advance by `dt` seconds: the fall is judged now, everything else on 20 Hz ticks.
++    pub fn update(&mut self, dt: f32, e: Env) {
++        self.land(&e);
++        self.acc += dt;
++        while self.acc >= TICK {
++            self.acc -= TICK;
++            self.tick(&e);
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    /// A 10 block fall costs 7 (ceil(10 - 3)); water cancels it; the damage window ignores equal hits and tops up
++    /// bigger ones; drowning starts after 300 + 20 ticks and then costs 2 every 20.
++    #[test]
++    fn damage_like_java() {
++        let mut v = Vitals::default();
++        for _ in 0..10 { v.update(0.0, Env { dy: -1.0, ..Env::default() }); }
++        v.update(0.0, Env { on_ground: true, ..Env::default() });
++        assert_eq!(v.health, 13);
++
++        let mut v = Vitals::default();
++        for _ in 0..10 { v.update(0.0, Env { dy: -1.0, ..Env::default() }); }
++        v.update(0.0, Env { on_ground: true, water: true, ..Env::default() });
++        assert_eq!(v.health, 20);
++
++        let mut v = Vitals::default();
++        assert!(v.hurt(4) && !v.hurt(4) && v.hurt(5));
++        assert_eq!(v.health, 15);
++
++        let mut v = Vitals::default();
++        let under = Env { eye_in_water: true, ..Env::default() };
++        for _ in 0..319 { v.tick(&under); }
++        assert_eq!(v.health, 20);
++        v.tick(&under);
++        assert_eq!(v.health, 18);
++        for _ in 0..20 { v.tick(&under); }
++        assert_eq!(v.health, 16);
++        v.tick(&Env::default());
++        assert_eq!(v.air, MAX_AIR);
++    }
++}

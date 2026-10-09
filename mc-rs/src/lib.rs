@@ -33,6 +33,7 @@ use crate::world::sky;
 use crate::world::chunk::{cross_shape, is_plant};
 use crate::world::chunks::{chunk_coord, ChunkManager};
 use crate::world::physics::{self, Player};
+use crate::world::vitals::{self, Env, Vitals};
 
 /// Render distance in chunks (a circle of this radius is meshed and drawn, two more are generated).
 const RENDER_DIST: i32 = 4;
@@ -83,6 +84,9 @@ struct App {
     furn_acc: f32,
     /// The finger gesture on the open screen, to tell a tap from a spread.
     gesture: Option<Gesture>,
+    /// Health, air and fire; and where a dead player comes back (the first spawn: no beds yet).
+    vitals: Vitals,
+    spawn: glam::Vec3,
 }
 
 /// A press on an open screen: where it began, whether it became a spread (a drag over slots with a stack on the
@@ -150,6 +154,7 @@ impl App {
             on_ground: false,
         };
         camera.pos = player.pos + glam::Vec3::new(0.0, EYE_HEIGHT, 0.0);
+        let spawn = player.pos;
 
         // M12: HUD pipeline + touch state machine. Surface dimensions match
         // the window we just initialised against.
@@ -186,6 +191,8 @@ impl App {
             furnaces: HashMap::new(),
             furn_acc: 0.0,
             gesture: None,
+            vitals: Vitals::default(),
+            spawn,
         })
     }
 
@@ -215,6 +222,12 @@ impl App {
             self.camera.pos = self.player.pos + glam::Vec3::new(0.0, EYE_HEIGHT, 0.0);
             return;
         }
+        // The death screen's resume button was pressed: come back at the spawn point with full health.
+        if self.vitals.dead() {
+            self.vitals = Vitals::default();
+            self.player.pos = self.spawn;
+            self.player.vel = glam::Vec3::ZERO;
+        }
         // Day/night: time only runs while playing; a new sky-light level restarts the meshes.
         self.world_ticks += dt as f64 * 20.0;
         let sub = sky::skylight_subtracted(sky::celestial_angle(self.world_ticks as u64, 1.0));
@@ -232,8 +245,16 @@ impl App {
         // Plants are drawn but not solid yet (collision shapes come with M14), so physics reads them as air.
         let get = |x: i32, y: i32, z: i32| self.chunks.block(x, y, z).map(|b| if is_plant(b) { 0 } else { b });
         // The held jump button jumps (8.4 m/s, the b1.7.3 velocity) or swims up; fluids (ids 8..=11) are not solid.
-        physics::step(&mut self.player, dt, self.touch.jumping(), &get);
+        let y0 = self.player.pos.y;
+        let (water, lava) = physics::step(&mut self.player, dt, self.touch.jumping(), &get);
         self.camera.pos = self.player.pos + glam::Vec3::new(0.0, EYE_HEIGHT, 0.0);
+        let e = self.camera.pos;
+        let eye_in_water = matches!(self.chunks.block_loaded(e.x.floor() as i32, e.y.floor() as i32, e.z.floor() as i32), Some(8 | 9));
+        self.vitals.update(dt, Env { dy: self.player.pos.y - y0, on_ground: self.player.on_ground, water, lava, eye_in_water, eye_y: e.y });
+        if self.vitals.dead() {
+            self.die();
+            return;
+        }
         // Dropped items fall, settle and get picked up (before the target check below, which can return early).
         self.drops.tick(dt, &|x: i32, y: i32, z: i32| self.chunks.block(x, y, z), self.player.pos, &mut self.inv);
         // Furnaces burn on the 20 Hz tick, open or not, but only in loaded chunks (vanilla ticks loaded tile entities).
@@ -334,6 +355,20 @@ impl App {
                 }
             }
         }
+    }
+
+    /// `EntityPlayer.onDeath`: the open screen's cursor and grid, then the whole inventory, fall to the ground where he
+    /// died (ponytail: `scatter` drops one entity per stack, vanilla throws each with a random spread). The pause
+    /// menu is the death screen: its resume button respawns (top of `step_frame`).
+    fn die(&mut self) {
+        self.close_screen();
+        let at = (self.player.pos.x.floor() as i32, self.player.pos.y.floor() as i32, self.player.pos.z.floor() as i32);
+        for slot in self.inv.slots.iter_mut() {
+            if let Some(st) = slot.take() {
+                self.drops.scatter(st, at);
+            }
+        }
+        self.touch.pause();
     }
 
     /// Open a container screen: the 2x2 inventory, a workbench's 3x3 or a furnace.
@@ -651,6 +686,32 @@ impl App {
         }
 
         if play {
+            // Hearts (GuiIngame: 10, 8 units apart on the 20 unit hotbar cells, left half, above the hotbar): a full
+            // heart is 2 health. Air bubbles sit over the right half while the eye is under water: whole ones
+            // `ceil((air - 2) * 10 / 300)`, then the one that is about to pop, faded. Flat shapes until M14 sprites.
+            let (hx, hy, hw, _) = layout.hotbar[0];
+            let (sz, y) = (hw * 0.45, hy - hw * 0.6);
+            for i in 0..10 {
+                let x = hx + i as f32 * hw * 0.4;
+                let at = 2 * i + 1;
+                HudPipeline::push_quad(v, x, y, sz, sz, [0.25, 0.0, 0.0, 0.8]);
+                if at < self.vitals.health {
+                    HudPipeline::push_quad(v, x, y, sz, sz, [0.9, 0.1, 0.1, 1.0]);
+                } else if at == self.vitals.health {
+                    HudPipeline::push_quad(v, x, y, sz * 0.5, sz, [0.9, 0.1, 0.1, 1.0]);
+                }
+            }
+            if self.vitals.air < vitals::MAX_AIR {
+                let air = self.vitals.air as f32;
+                let whole = ((air - 2.0) * 10.0 / 300.0).ceil().max(0.0) as i32;
+                let popping = (air * 10.0 / 300.0).ceil().max(0.0) as i32 - whole;
+                let (rx, _, rw, _) = layout.hotbar[8];
+                for i in 0..whole + popping {
+                    let alpha = if i < whole { 0.9 } else { 0.4 };
+                    HudPipeline::push_disc(v, rx + rw - sz * 0.5 - i as f32 * hw * 0.4, y - hw * 0.5, sz * 0.4, [0.55, 0.8, 1.0, alpha]);
+                }
+            }
+
             // Jump button: bottom-right disc with a ring.
             let (jx, jy) = layout.jump_center;
             let jr = layout.jump_radius;
@@ -692,7 +753,9 @@ impl App {
         if paused {
             let w = self.gpu.config.width as f32;
             let h = self.gpu.config.height as f32;
-            HudPipeline::push_quad(v, 0.0, 0.0, w, h, [0.0, 0.0, 0.0, 0.55]);
+            // Dead: the same menu, tinted red; the resume button respawns.
+            let tint = if self.vitals.dead() { [0.55, 0.0, 0.0, 0.6] } else { [0.0, 0.0, 0.0, 0.55] };
+            HudPipeline::push_quad(v, 0.0, 0.0, w, h, tint);
             let (bx, by, bw, bh) = layout.resume;
             HudPipeline::push_outlined_quad(v, bx, by, bw, bh, [0.20, 0.30, 0.50, 0.95], [0.95, 0.95, 0.95, 0.95], 4.0);
             // Play triangle, approximated by two stacked quads.

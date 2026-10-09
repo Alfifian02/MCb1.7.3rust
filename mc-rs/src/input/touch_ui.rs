@@ -279,6 +279,12 @@ impl TouchUi {
         })
     }
 
+    /// Open the pause menu (the death screen reuses it: its resume button is the respawn button).
+    pub fn pause(&mut self) {
+        self.paused = true;
+        self.clear();
+    }
+
     /// Drop every finger and zero all input (pause, cancel, resize).
     fn clear(&mut self) {
         self.pointers.clear();

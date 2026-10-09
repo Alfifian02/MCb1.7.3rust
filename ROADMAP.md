@@ -46,6 +46,16 @@ ticks (liquids/sand). Sapling growth, fluid flow and falling sand belong with M5
 BiomeGenBase but climate never selects it; b1.7.3 has no ravines.
 
 ## Changelog
+- `done` health, damage, death (`world/vitals.rs`, `lib.rs`; written WITHOUT a Rust toolchain: not compiled, test not run, +1 test):
+    `Vitals` = `EntityLiving.attackEntityFrom` (20 health, the 10-tick damage window: an equal or smaller hit inside it is ignored, a bigger one
+    pays the difference), `Entity.updateFallState` + `EntityLiving.fall` (`ceil(fall - 3)`, water cancels it), drowning (300 air, then 2 damage every
+    20 ticks once it runs out, `isInsideOfMaterial`), lava (4 damage per window + 600 ticks of fire, 1 damage per second while burning, water puts
+    it out) and the void (eye below -64). Frame-based fall check, everything else on the 20 Hz tick. `physics::step` now returns (water, lava).
+    HUD: 10 hearts above the hotbar, air bubbles while the eye is under water. Death (`App::die`): the open screen and the whole inventory drop where
+    he died, the pause menu turns red and its resume button respawns at the first spawn point with full health and a clean `Vitals`.
+    b1.7.3 has no hunger and no natural regeneration (only Peaceful heals), so health stays down until food is ported. Not done: suffocation in
+    blocks, hurt flash/blink, knockback, burning and hurt sounds, fire overlay, death camera roll, items burning in lava, per-difficulty damage,
+    bed spawn, health in the save (M7).
 - `done` fluids are not solid + swimming (`world/physics.rs`; written WITHOUT a Rust toolchain: not compiled, test not run, +1 test):
     the player used to stand on water and lava because physics treated every id > 0 as solid. Ids 8..=11 are now passable; `step` takes the
     held jump flag and ports `Entity.handleWaterMovement`/`handleLavaMovement` (box shrunk 0.4 top and bottom) and

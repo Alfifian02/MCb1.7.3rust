@@ -30,6 +30,7 @@ original. Anything that cannot be derived from the b1.7.3 sources is marked
 | Digging              | written, NOT compiled | Hardness-based survival digging, hold to dig, progress bar. No tools yet. |
 | Drops + inventory    | written, logic tested on a Linux host, NOT compiled as a whole | A broken block drops its `idDropped` items as entities (20 Hz motion, pickup after 10 ticks). The hotbar holds real stacks with counts and starts empty; placing uses one up. See ROADMAP changelog. |
 | M6 Crafting + tools  | written, logic tested on a Linux host, whole crate type-checked against a stubbed `android-activity`; NOT run on a device | 36-slot inventory, 2x2 inventory crafting and 3x3 workbench crafting, furnace smelting (`TileEntityFurnace`, 8 smelting recipes), 26 recipes (wood/stone/iron/diamond/gold pickaxe, axe, shovel + planks, sticks, workbench, chest, furnace, torch, ...), tool speed and durability, and `canHarvestBlock`: stone without a pickaxe breaks and drops nothing, like the original. See ROADMAP changelog. |
+| Health + damage      | written, NOT compiled | 20 health, fall damage, drowning, lava + fire, void, death drops the inventory and respawns. Fluids are not solid and the player swims. No food yet, so no healing. See ROADMAP changelog. |
 | M7..M14              | pending | See ROADMAP.md for the order. |
 
 Latest commit on `main`: see `git log -1`. Latest released APK: see the
@@ -64,6 +65,7 @@ mc-rs/
       items.rs            ItemStack, 36-slot Inventory (hotbar = 0..9), idDropped/quantityDropped rules, EntityItem physics + pickup + throw
       craft.rs            M6: tools (EnumToolMaterial, getStrVsBlock, canHarvestBlock), recipes (CraftingManager), inventory/workbench screen (Container clicks) + its GUI geometry
       sky.rs              day/night: sun angle, skylight subtracted, sky colour
+      vitals.rs           health, air, fire, fall damage (EntityLiving.attackEntityFrom and friends)
       chunks/light.rs     M5 light engine (port of World/Chunk lighting)
       gen/
         mod.rs            module list
