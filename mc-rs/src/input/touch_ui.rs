@@ -6,8 +6,10 @@
 //   - Right half: drag anywhere to look. A short tap there places a block, a press held still
 //     digs (hold to keep digging, the dig can follow the look), like Minecraft PE.
 //   - Jump button: bottom-right circle (held = keep jumping).
-//   - Hotbar: bottom centre, tap to select. Pause: top-right.
+//   - Hotbar: bottom centre, tap to select. Pause: top-right, inventory button just left of it.
 //   - Paused: only the pause button and the resume button respond.
+//   - A container screen is open (inventory / workbench): every press except the two buttons is a tap, reported with
+//     `take_taps` for the screen to hit-test; move, look, jump and hotbar are off.
 //
 // SOURCE-OF-TRUTH NOTE: b1.7.3 Java has no touch UX, so every rectangle and
 // radius here is UNVERIFIED (no reference to diff against). Sizes are
@@ -41,6 +43,10 @@ pub enum PointerRole {
     /// Press landed on the pause button (or the resume button while paused).
     /// Toggles pause on release.
     Pause,
+    /// Press landed on the inventory button. Opens / closes the screen on release.
+    Inventory,
+    /// Any other press while a screen is open. Reported as a tap on release.
+    Tap,
     /// Press landed on hotbar slot N. Selects on release.
     Hotbar(usize),
     /// Press landed on the jump button. Held = jumping.
@@ -68,6 +74,7 @@ pub struct Pointer {
 pub struct LayoutRects {
     pub width: f32,
     pub pause: Rect,
+    pub inventory: Rect,
     pub resume: Rect,
     pub hotbar: [Rect; HOTBAR_SLOTS],
     pub jump_center: (f32, f32),
@@ -93,6 +100,8 @@ impl LayoutRects {
 
         let ps = 0.11 * u;
         let pause = (w - ps - pad, pad, ps, ps);
+        // UNVERIFIED: b1.7.3 opens the inventory with a key; this button's place is invented for touch.
+        let inventory = (w - ps * 2.0 - pad * 1.5, pad, ps, ps);
 
         // Square cells; capped so nine of them always fit the width.
         let cell = (0.105 * u).min(w / 9.5);
@@ -110,6 +119,7 @@ impl LayoutRects {
         Self {
             width: w,
             pause,
+            inventory,
             resume,
             hotbar,
             jump_center: (w - 0.17 * u, h - 0.30 * u),
@@ -120,13 +130,19 @@ impl LayoutRects {
     }
 
     /// Hit-test a press. `None` means the press is ignored. While paused only
-    /// the pause and resume buttons respond.
-    pub fn hit_test(&self, x: f32, y: f32, paused: bool) -> Option<PointerRole> {
+    /// the pause and resume buttons respond; with a `screen` open everything but the two buttons is a tap.
+    pub fn hit_test(&self, x: f32, y: f32, paused: bool, screen: bool) -> Option<PointerRole> {
         if in_rect(self.pause, x, y) || (paused && in_rect(self.resume, x, y)) {
             return Some(PointerRole::Pause);
         }
         if paused {
             return None;
+        }
+        if in_rect(self.inventory, x, y) {
+            return Some(PointerRole::Inventory);
+        }
+        if screen {
+            return Some(PointerRole::Tap);
         }
         let (jx, jy) = self.jump_center;
         if (x - jx).powi(2) + (y - jy).powi(2) <= self.jump_radius.powi(2) {
@@ -172,6 +188,12 @@ pub struct TouchUi {
     look_delta: (f32, f32),
     /// A tap fired since the last `take_place`.
     place: bool,
+    /// A container screen is open (set by `set_screen`); presses become taps.
+    pub screen: bool,
+    /// The inventory button was released since the last `take_inventory`.
+    inventory: bool,
+    /// Taps (finger-up positions) on an open screen since the last `take_taps`.
+    taps: Vec<(f32, f32)>,
 }
 
 impl TouchUi {
@@ -186,7 +208,26 @@ impl TouchUi {
             layout: LayoutRects::for_surface(w, h),
             look_delta: (0.0, 0.0),
             place: false,
+            screen: false,
+            inventory: false,
+            taps: Vec::new(),
         }
+    }
+
+    /// The inventory button was pressed and released since the last call.
+    pub fn take_inventory(&mut self) -> bool {
+        std::mem::take(&mut self.inventory)
+    }
+
+    /// Taps on an open screen since the last call, in surface pixels.
+    pub fn take_taps(&mut self) -> Vec<(f32, f32)> {
+        std::mem::take(&mut self.taps)
+    }
+
+    /// A screen opened or closed: drop every finger so none stays stuck as move, look or dig.
+    pub fn set_screen(&mut self, open: bool) {
+        self.screen = open;
+        self.clear();
     }
 
     /// A tap (place) was requested since the last call.
@@ -232,6 +273,7 @@ impl TouchUi {
         self.move_input = (0.0, 0.0);
         self.look_delta = (0.0, 0.0);
         self.place = false;
+        self.taps.clear();
     }
 
     /// Rebuild the layout if the surface size changed. True if it did.
@@ -251,7 +293,7 @@ impl TouchUi {
             MotionAction::Down | MotionAction::PointerDown => {
                 let p = ev.pointer_at_index(ev.pointer_index());
                 let (x, y) = (p.axis_value(Axis::X), p.axis_value(Axis::Y));
-                if let Some(role) = self.layout.hit_test(x, y, self.paused) {
+                if let Some(role) = self.layout.hit_test(x, y, self.paused, self.screen) {
                     self.on_press(p.pointer_id(), x, y, role);
                 }
             }
@@ -307,6 +349,8 @@ impl TouchUi {
                 self.clear();
                 log::info!("touch: pause -> {}", self.paused);
             }
+            PointerRole::Inventory => self.inventory = true,
+            PointerRole::Tap => self.taps.push(ptr.last),
             PointerRole::Hotbar(slot) => self.hotbar_slot = slot,
             PointerRole::Move { .. } => self.move_input = (0.0, 0.0),
             PointerRole::Look => {
@@ -332,7 +376,7 @@ mod tests {
     }
 
     fn tap(ui: &mut TouchUi, pid: i32, x: f32, y: f32) {
-        let role = ui.layout.hit_test(x, y, ui.paused).expect("hit");
+        let role = ui.layout.hit_test(x, y, ui.paused, ui.screen).expect("hit");
         ui.on_press(pid, x, y, role);
         ui.on_release(pid);
     }
@@ -341,14 +385,14 @@ mod tests {
     fn regions_hit_where_expected() {
         let l = LayoutRects::for_surface(W, H);
         let (px, py, pw, ph) = l.pause;
-        assert_eq!(l.hit_test(px + pw * 0.5, py + ph * 0.5, false), Some(PointerRole::Pause));
-        assert_eq!(l.hit_test(l.jump_center.0, l.jump_center.1, false), Some(PointerRole::Jump));
+        assert_eq!(l.hit_test(px + pw * 0.5, py + ph * 0.5, false, false), Some(PointerRole::Pause));
+        assert_eq!(l.hit_test(l.jump_center.0, l.jump_center.1, false, false), Some(PointerRole::Jump));
         for i in 0..HOTBAR_SLOTS {
             let (hx, hy, hw, hh) = l.hotbar[i];
-            assert_eq!(l.hit_test(hx + hw * 0.5, hy + hh * 0.5, false), Some(PointerRole::Hotbar(i)));
+            assert_eq!(l.hit_test(hx + hw * 0.5, hy + hh * 0.5, false, false), Some(PointerRole::Hotbar(i)));
         }
-        assert!(matches!(l.hit_test(600.0, 400.0, false), Some(PointerRole::Move { .. })));
-        assert_eq!(l.hit_test(1800.0, 400.0, false), Some(PointerRole::Look));
+        assert!(matches!(l.hit_test(600.0, 400.0, false, false), Some(PointerRole::Move { .. })));
+        assert_eq!(l.hit_test(1800.0, 400.0, false, false), Some(PointerRole::Look));
     }
 
     #[test]
@@ -364,10 +408,10 @@ mod tests {
     #[test]
     fn paused_only_pause_and_resume_respond() {
         let l = LayoutRects::for_surface(W, H);
-        assert_eq!(l.hit_test(1800.0, 400.0, true), None);
-        assert_eq!(l.hit_test(l.jump_center.0, l.jump_center.1, true), None);
+        assert_eq!(l.hit_test(1800.0, 400.0, true, false), None);
+        assert_eq!(l.hit_test(l.jump_center.0, l.jump_center.1, true, false), None);
         let (rx, ry, rw, rh) = l.resume;
-        assert_eq!(l.hit_test(rx + rw * 0.5, ry + rh * 0.5, true), Some(PointerRole::Pause));
+        assert_eq!(l.hit_test(rx + rw * 0.5, ry + rh * 0.5, true, false), Some(PointerRole::Pause));
     }
 
     #[test]
@@ -479,5 +523,28 @@ mod tests {
         ui.tick(0.3);
         ui.on_release(1);
         assert!(!ui.take_place() && !ui.digging());
+    }
+
+    #[test]
+    fn open_screen_turns_presses_into_taps() {
+        let mut ui = TouchUi::new(W, H);
+        let (ix, iy, iw, ih) = ui.layout.inventory;
+        let (px, py, pw, _) = ui.layout.pause;
+        assert!(ix + iw < px, "inventory button sits left of pause");
+        assert_eq!(ui.layout.hit_test(ix + iw * 0.5, iy + ih * 0.5, false, false), Some(PointerRole::Inventory));
+        tap(&mut ui, 1, ix + iw * 0.5, iy + ih * 0.5);
+        assert!(ui.take_inventory() && !ui.take_inventory());
+        // A held move finger is dropped when the screen opens; afterwards the jump button and the world are taps.
+        ui.on_press(2, 400.0, 700.0, PointerRole::Move { anchor: (400.0, 700.0) });
+        ui.set_screen(true);
+        assert!(ui.pointers.is_empty());
+        let (jx, jy) = ui.layout.jump_center;
+        tap(&mut ui, 3, jx, jy);
+        tap(&mut ui, 4, 1800.0, 400.0);
+        assert_eq!(ui.take_taps(), vec![(jx, jy), (1800.0, 400.0)]);
+        assert!(!ui.jumping() && !ui.take_place() && ui.take_taps().is_empty());
+        // The pause button still works with a screen open.
+        tap(&mut ui, 5, px + pw * 0.5, py + 1.0);
+        assert!(ui.paused);
     }
 }

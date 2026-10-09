@@ -161,7 +161,8 @@ impl HudPipeline {
         // 512 quads = 3072 verts * 24 bytes = 72 KB. The old 64-quad cap
         // (384 verts) was smaller than the hotbar alone, so the controls were
         // truncated and never drawn. Peak HUD is ~1000 verts.
-        let quad_capacity = 512;
+        // 2048 quads: an open inventory screen is 46 slots plus up to 46 stacks with two-digit counts.
+        let quad_capacity = 2048;
         let vbuf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("hud_vbuf"),
             size: (quad_capacity * 6 * std::mem::size_of::<HudVertex>()) as u64,

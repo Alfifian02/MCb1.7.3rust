@@ -6,6 +6,7 @@
 use glam::Vec3;
 
 use crate::world::chunk::is_plant;
+use crate::world::craft;
 use crate::world::dig::TICK;
 use crate::world::gen::noise::JavaRandom;
 use crate::world::physics::{self, BlockQuery};
@@ -14,15 +15,16 @@ use crate::world::physics::{self, BlockQuery};
 pub struct ItemStack {
     pub id: u16,
     pub count: u8,
-    /// `ItemStack.itemDamage`: only lapis (dye 4) is needed until blocks have metadata.
-    pub damage: u8,
+    /// `ItemStack.itemDamage`: the dye colour (lapis = 4) or, on a tool, the uses spent so far.
+    pub damage: u16,
 }
 
-/// `Item.maxStackSize`: sign, doors and bed 1, snowball 16, everything else 64.
+/// `Item.maxStackSize`: tools, sign, doors and bed 1, snowball 16, everything else 64.
 pub fn max_stack(id: u16) -> u8 {
     match id {
         323 | 324 | 330 | 355 => 1,
         332 => 16,
+        _ if craft::tool(id).is_some() => 1,
         _ => 64,
     }
 }
@@ -45,7 +47,11 @@ pub fn tile(id: u16) -> u8 {
         348 => 14,       // glowstone dust
         351 => 21,       // lapis dye
         355 => 38,       // bed
-        _ => 255,
+        265 => 42,       // iron ingot
+        266 => 41,       // gold ingot
+        280 => 17,       // stick
+        // Tools: the material's colour (wood, stone, iron, diamond, gold); the HUD draws the head shape on top.
+        _ => craft::tool(id).map_or(255, |(_, m)| [5, 4, 42, 57, 41][m]),
     }
 }
 
@@ -92,20 +98,25 @@ fn id_dropped(b: u8, r: &mut JavaRandom) -> i32 {
     }
 }
 
-fn damage_dropped(b: u8) -> u8 {
+fn damage_dropped(b: u8) -> u16 {
     if b == 21 { 4 } else { 0 }
 }
 
 // ---- Inventory ----
 
-/// Hotbar only: there is no inventory screen yet, so 27 hidden slots would swallow pickups.
-/// ponytail: M6 makes this 36 (`InventoryPlayer.mainInventory`); `add` and the HUD already index by slot.
-pub const SLOTS: usize = 9;
+/// `InventoryPlayer.mainInventory`: 0..9 is the hotbar, 9..36 the rest (shown on the inventory screen).
+pub const SLOTS: usize = 36;
 
 /// Starts empty, like a new survival player.
-#[derive(Default)]
 pub struct Inventory {
     pub slots: [Option<ItemStack>; SLOTS],
+}
+
+// Not derived: `Default` stops at 32-element arrays.
+impl Default for Inventory {
+    fn default() -> Self {
+        Self { slots: [None; SLOTS] }
+    }
 }
 
 impl Inventory {
@@ -122,6 +133,17 @@ impl Inventory {
             s.count -= n;
         }
         s.count < start
+    }
+
+    /// `ItemStack.damageItem`: wear a tool in `slot` by `n` uses; past its durability it breaks (a tool stack is 1).
+    /// Anything that is not a tool is left alone.
+    pub fn damage(&mut self, slot: usize, n: u16) {
+        let Some(s) = &mut self.slots[slot] else { return };
+        let Some(max) = craft::max_damage(s.id) else { return };
+        s.damage += n;
+        if s.damage > max {
+            self.slots[slot] = None;
+        }
     }
 
     /// Use up one item of `slot` (`--stackSize`); an emptied stack becomes `None`.
@@ -247,9 +269,7 @@ impl Drops {
 
     /// `Block.dropBlockAsItem` for block `block` just broken at `cell`: `quantityDropped` entities of one item
     /// each, placed at random in the middle 0.7 of the cell, hopping up and sideways, 10 ticks before pickup.
-    // ponytail: bare hands harvest every block. Vanilla `canHarvestBlock` makes stone, ores etc. drop nothing
-    // without the right tool; there are no tools (and no crafting) yet, so that rule would leave the player with
-    // no way to ever get cobblestone. Add the check when tools exist (dig.rs already has the by-hand table).
+    /// The caller has already checked `dig::can_harvest` (vanilla `sendBlockRemoved`: no harvest, no drop).
     pub fn spawn_block(&mut self, block: u8, (x, y, z): (i32, i32, i32)) {
         for _ in 0..quantity(block, &mut self.rng) {
             self.rng.next_float(); // `nextFloat() <= chance` with chance 1.0: always true, but it draws
@@ -261,12 +281,25 @@ impl Drops {
             let pos = Vec3::new(x as f32 + offset(), y as f32 + offset(), z as f32 + offset());
             let mut jitter = || (self.fx.next_double() * 0.2f32 as f64 - 0.1f32 as f64) as f32;
             let vel = Vec3::new(jitter(), 0.2, jitter());
-            if self.items.len() >= MAX_ITEMS {
-                self.items.remove(0);
-            }
             let stack = ItemStack { id: id as u16, count: 1, damage: damage_dropped(block) };
-            self.items.push(ItemEntity { pos, prev: pos, vel, stack, age: 0, delay: 10, on_ground: false });
+            self.push(ItemEntity { pos, prev: pos, vel, stack, age: 0, delay: 10, on_ground: false });
         }
+    }
+
+    /// `EntityPlayer.dropPlayerItem`: thrown from 0.3 below the eye along the look direction, 40 ticks before it can
+    /// be picked up again. ponytail: vanilla adds a little random sideways scatter; this one flies straight.
+    pub fn throw(&mut self, stack: ItemStack, eye: Vec3, forward: Vec3) {
+        let pos = eye - Vec3::new(0.0, 0.3, 0.0);
+        let vel = forward * 0.3 + Vec3::new(0.0, 0.1, 0.0);
+        self.push(ItemEntity { pos, prev: pos, vel, stack, age: 0, delay: 40, on_ground: false });
+    }
+
+    /// Add an entity, dropping the oldest one when `MAX_ITEMS` is reached.
+    fn push(&mut self, e: ItemEntity) {
+        if self.items.len() >= MAX_ITEMS {
+            self.items.remove(0);
+        }
+        self.items.push(e);
     }
 
     /// Advance by `dt` seconds in 20 Hz ticks; items near `player` (centre of its box) go into `inv`.
@@ -321,5 +354,19 @@ mod tests {
         inv.slots[3] = Some(ItemStack { id: 5, count: 1, damage: 0 });
         inv.consume(3);
         assert_eq!(inv.slots[3], None);
+
+        // 36 slots: the 28th stack goes to slot 27. Tools stack 1 and the use past the durability breaks them.
+        let mut inv = Inventory::default();
+        let mut s = ItemStack { id: 4, count: 64, damage: 0 };
+        assert!(max_stack(285) == 1 && max_stack(280) == 64 && SLOTS == 36);
+        inv.slots[..27].fill(Some(ItemStack { id: 5, count: 64, damage: 0 }));
+        assert!(inv.add(&mut s) && inv.slots[27] == Some(ItemStack { id: 4, count: 64, damage: 0 }));
+        inv.slots[0] = Some(ItemStack { id: 285, count: 1, damage: 31 }); // golden pickaxe: 32 uses
+        inv.damage(0, 1);
+        assert_eq!(inv.slots[0].map(|s| s.damage), Some(32));
+        inv.damage(0, 1);
+        assert_eq!(inv.slots[0], None);
+        inv.damage(1, 1); // not a tool: untouched
+        assert_eq!(inv.slots[1].map(|s| s.count), Some(64));
     }
 }

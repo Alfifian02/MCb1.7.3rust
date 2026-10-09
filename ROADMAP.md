@@ -12,7 +12,7 @@ McRegion save format. Client-only networking.
 | M3  | Overworld gen | Beta-1.7 noise: grass/dirt/stone, sea level 64, ores |
 | M4  | Biomes + trees + caves | All b1.7.3 biomes + worldgen populate step |
 | M5  | Block interaction | Raycast pick, break, place, light update (done, not compiled: see Changelog) |
-| M6  | Inventory + crafting | Survival inv, hotbar, crafting grid, recipes |
+| M6  | Inventory + crafting | Survival inv, hotbar, crafting grid, recipes (done, not run on a device: see Changelog) |
 | M7  | Save (McRegion) | Read/write .mcr, new-world / save / load |
 | M8  | Entities + AI | Mobs + item entities |
 | M9  | Audio | Positional OGG, music stubs |
@@ -24,7 +24,7 @@ McRegion save format. Client-only networking.
 
 ## Build
 - Workspace at `mc-rs/`
-- `cargo test --lib` runs the 22 unit tests (Android host such as Termux; see README).
+- `cargo test --lib` runs the 45 unit tests (Android host such as Termux; see README).
 - `cargo run` boots a desktop window (Metal / Vulkan / GL depending on host).
 - APK via GitHub Actions `cargo apk build --release` -> `MinecraftB173Rust.apk`.
 - A long-lived debug keystore at `keystore/debug.keystore` signs the release
@@ -40,12 +40,32 @@ they matched.
 
 ## Next step
 
-M6: the rest of inventory + crafting (hotbar stacks and drops are in; the 27 hidden slots, screen, crafting grid, tools are not; M5 is written but must first compile and be checked on a device). M4 is done: caves and populate match the real classes bit for
+M7 (save) or, before it, the furnace: iron and gold tools are craftable but their ingots are not obtainable until smelting exists (`TileEntityFurnace`), and diamond ore needs an iron pickaxe, so diamonds are out of reach until then. M6 is written and the crate type-checks and tests on a host, but nothing has run on a device (M5 included). M4 is done: caves and populate match the real classes bit for
 bit (`tools/golden/`). Still approximate in populate (see README): light model, no metadata, no tile entities, no block
 ticks (liquids/sand). Sapling growth, fluid flow and falling sand belong with M5's block updates. Ice Desert exists in
 BiomeGenBase but climate never selects it; b1.7.3 has no ravines.
 
 ## Changelog
+- `done` M6 crafting + tools (written on a Linux host: the whole crate type-checks and its 45 tests pass against a stubbed
+  `android-activity`; NOT run on a device, so the touch layout of the new screen is untested by hand):
+    - `world/craft.rs` (new): `EnumToolMaterial` (wood/stone/iron/diamond/gold), pickaxe/axe/shovel ids 256..=286, `getStrVsBlock`,
+      `ItemPickaxe.canHarvestBlock` (obsidian level 3, diamond/gold/redstone level 2, iron/lapis level 1, else rock/iron),
+      `ItemSpade.canHarvestBlock` (snow). 26 shaped recipes (`RecipesTools` loop for 5 materials x 3 tools, planks, sticks,
+      workbench, chest, furnace, torch, sandstone, snow/clay blocks, glowstone, wool); the matcher is `ShapedRecipes.matches`.
+    - `Screen`: `ContainerPlayer` (2x2) and `ContainerWorkbench` (3x3). Touch has no mouse, so a tap is a left click and a toggle
+      button ("1") turns taps into right clicks (put one, take half). Result slot as in `SlotCrafting`: refuses input, a take uses up
+      one of each ingredient. Closing (or tapping outside the panel with the cursor full) throws the cursor stack and the grid out
+      along the look direction (`dropPlayerItem`, 40 tick pickup delay).
+    - `items.rs`: `Inventory` is 36 slots (`mainInventory`; pickups already fill the hotbar first), `ItemStack.damage` is `u16` (tool
+      wear), tools stack to 1, `Inventory::damage` = `ItemStack.damageItem` (breaks past maxUses), `Drops::throw`.
+    - `dig.rs`: `strength` and `Dig::tick` take the held item: `canHarvestBlock` false = the 1/100 rate, else tool efficiency / hardness / 30,
+      with the /5 for water and air. `can_harvest` = material half (`harvestable_by_hand`) or the held tool. `lib.rs` breaks the block,
+      wears the tool, and spawns the drops only if `can_harvest`: **stone by hand now drops nothing**, like the original.
+    - Touch: inventory button left of pause; using a workbench (tap) opens the 3x3 screen instead of placing. While a screen is open the move
+      stick, look, jump, hotbar and crosshair are hidden and every press is a tap. `hud.rs` quad capacity 512 -> 2048 for the screen.
+    - Not done: smelting (so no iron/gold ingots), hoes, swords, shears (web and leaves still need them), armor slots, shift-click,
+      item sprites (tools are a handle plus a head shape in the material colour), the other ~100 `CraftingManager` recipes.
+    - The `ponytail` note in the drops entry below ("bare hands harvest everything") is superseded by this entry.
 - `done` drops + hotbar inventory (`world/items.rs`, `render/items.rs`; the logic is unit-tested on a Linux host in a scratch crate,
   `lib.rs`/wgpu NOT compiled here: expect a compile fix or two):
     - Drops port `Block.dropBlockAsItem`: `quantityDropped`, then per item one `nextFloat` (chance 1.0) and `idDropped`, then the 3

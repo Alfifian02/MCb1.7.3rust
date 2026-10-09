@@ -26,7 +26,8 @@ use crate::render::camera::FirstPersonCamera;
 use crate::render::outline::Outline;
 use crate::world::pick::{self, Hit};
 use crate::world::dig::{self, Dig};
-use crate::world::items::{self, Drops, Inventory};
+use crate::world::craft::{self, Screen};
+use crate::world::items::{self, Drops, Inventory, ItemStack};
 use crate::world::sky;
 use crate::world::chunk::{cross_shape, is_plant};
 use crate::world::chunks::{chunk_coord, ChunkManager};
@@ -73,6 +74,9 @@ struct App {
     inv: Inventory,
     drops: Drops,
     item_mesh: ItemMesh,
+    /// Open container screen (the 2x2 inventory or a workbench's 3x3) and its "place one" click toggle.
+    screen: Option<Screen>,
+    one_mode: bool,
 }
 
 impl App {
@@ -163,6 +167,8 @@ impl App {
             inv: Inventory::default(),
             drops: Drops::new(seed),
             item_mesh,
+            screen: None,
+            one_mode: false,
         })
     }
 
@@ -220,6 +226,17 @@ impl App {
         // M5: pick the block under the crosshair, dig it while the dig input is held, place on a tap.
         self.touch.tick(dt);
         let place = self.touch.take_place();
+        // The inventory button, and taps on an open screen (its presses are not look / move / place).
+        if self.touch.take_inventory() {
+            if self.screen.is_some() {
+                self.close_screen();
+            } else {
+                self.open_screen(2);
+            }
+        }
+        for (x, y) in self.touch.take_taps() {
+            self.on_screen_tap(x, y);
+        }
         let eye = self.camera.pos.as_dvec3();
         let end = eye + self.camera.forward().as_dvec3() * pick::REACH;
         // Liquids are not pickable (vanilla's rayTraceBlocks skips them), nor is the snow layer, which is not drawn yet.
@@ -228,7 +245,8 @@ impl App {
         self.target = pick::ray_trace(&solid, eye, end);
 
         // Digging runs on the 20 Hz game tick of the Java (hardness-based time, see world::dig).
-        // A broken block drops its items (world::items); there are no tools yet.
+        // A broken block drops its items (world::items) only if the held item may harvest it (stone needs a pickaxe),
+        // and wears the tool by one use.
         match self.target {
             Some(hit) if self.touch.digging() => {
                 self.dig_acc += dt;
@@ -237,9 +255,17 @@ impl App {
                     let (x, y, z) = hit.pos;
                     let in_water = matches!(self.chunks.block_loaded(eye.x.floor() as i32, eye.y.floor() as i32, eye.z.floor() as i32), Some(8 | 9));
                     if let Some(id) = self.chunks.block_loaded(x, y, z) {
-                        if self.dig.tick(hit.pos, id, self.player.on_ground, in_water) {
+                        let slot = self.touch.hotbar_slot;
+                        let held = self.inv.slots[slot];
+                        if self.dig.tick(hit.pos, id, held, self.player.on_ground, in_water) {
                             self.chunks.set_block(x, y, z, 0);
-                            self.drops.spawn_block(id, hit.pos);
+                            // PlayerControllerSP.sendBlockRemoved: `canHarvestBlock` is read before the tool wears, so
+                            // a tool that breaks on this block still harvests it; no suitable tool, no drop.
+                            let harvest = dig::can_harvest(id, held);
+                            self.inv.damage(slot, 1);
+                            if harvest {
+                                self.drops.spawn_block(id, hit.pos);
+                            }
                         }
                     }
                 }
@@ -251,6 +277,11 @@ impl App {
         }
         let Some(hit) = self.target else { return };
         if place {
+            // Using a workbench opens its 3x3 grid instead of placing a block against it.
+            if self.chunks.block_loaded(hit.pos.0, hit.pos.1, hit.pos.2) == Some(58) {
+                self.open_screen(3);
+                return;
+            }
             let (x, y, z) = pick::place_pos(&hit);
             // Items below 256 are blocks; anything else cannot be placed. ItemBlock refuses a solid block at y = 127
             // (ponytail: plants are refused there too).
@@ -259,6 +290,41 @@ impl App {
                 if y < 127 && self.chunks.block_loaded(x, y, z).is_some_and(pick::replaceable) && !pick::overlaps_player((x, y, z), self.player.pos) && self.chunks.set_block(x, y, z, s.id as u8) {
                     self.inv.consume(slot);
                 }
+            }
+        }
+    }
+
+    /// Open the 2x2 inventory (`gw` 2) or a workbench's 3x3 screen (`gw` 3).
+    fn open_screen(&mut self, gw: usize) {
+        self.screen = Some(Screen::new(gw));
+        self.one_mode = false;
+        self.touch.set_screen(true);
+    }
+
+    /// `onCraftGuiClosed`: the cursor stack and whatever is left in the grid are thrown out in front of the player.
+    fn close_screen(&mut self) {
+        if let Some(mut s) = self.screen.take() {
+            for st in s.close() {
+                self.drops.throw(st, self.camera.pos, self.camera.forward());
+            }
+        }
+        self.touch.set_screen(false);
+    }
+
+    /// A tap on the open screen: the "place one" toggle, a slot, or outside the panel (throws the cursor stack).
+    fn on_screen_tap(&mut self, x: f32, y: f32) {
+        let (w, h) = (self.gpu.config.width as f32, self.gpu.config.height as f32);
+        let Some(s) = self.screen.as_mut() else { return };
+        if craft::on_mode_button(w, h, x, y) {
+            self.one_mode = !self.one_mode;
+        } else if let Some(id) = craft::slot_at(s.gw, w, h, x, y) {
+            s.click(id, self.one_mode, &mut self.inv);
+        } else if !craft::in_panel(w, h, x, y) {
+            // Click outside the window (slot -999): throw the cursor stack, or one item of it.
+            if let Some(c) = s.cursor {
+                let n = if self.one_mode { 1 } else { c.count };
+                s.cursor = (c.count > n).then(|| ItemStack { count: c.count - n, ..c });
+                self.drops.throw(ItemStack { count: n, ..c }, self.camera.pos, self.camera.forward());
             }
         }
     }
@@ -408,9 +474,11 @@ impl App {
         let layout = &self.touch.layout;
         let paused = self.touch.paused;
         let pressed = |role: PointerRole| self.touch.pointers.values().any(|p| p.role == role);
+        // The in-world controls are hidden while a container screen is open.
+        let play = self.screen.is_none();
 
         // Crosshair: the aim point of the pick ray (first, so the quad cap never drops it).
-        {
+        if play {
             let (w, h) = (self.gpu.config.width as f32, self.gpu.config.height as f32);
             let (arm, th) = (0.025 * w.min(h), (0.004 * w.min(h)).max(2.0));
             HudPipeline::push_quad(v, w * 0.5 - arm, h * 0.5 - th * 0.5, arm * 2.0, th, [1.0, 1.0, 1.0, 0.85]);
@@ -418,12 +486,40 @@ impl App {
         }
 
         // Dig progress under the crosshair.
-        if self.dig.damage > 0.0 {
+        if play && self.dig.damage > 0.0 {
             let (w, h) = (self.gpu.config.width as f32, self.gpu.config.height as f32);
             let (bw, bh) = (0.12 * w.min(h), (0.012 * w.min(h)).max(3.0));
             let (bx, by) = (w * 0.5 - bw * 0.5, h * 0.5 + 0.05 * w.min(h));
             HudPipeline::push_quad(v, bx, by, bw, bh, [0.0, 0.0, 0.0, 0.6]);
             HudPipeline::push_quad(v, bx, by, bw * self.dig.damage.min(1.0), bh, [1.0, 1.0, 1.0, 0.9]);
+        }
+
+        // Container screen: the vanilla GUI (176 x 166 units) over a dimmed frame, slots with their stacks.
+        if let Some(s) = &self.screen {
+            let (w, h) = (self.gpu.config.width as f32, self.gpu.config.height as f32);
+            let (ox, oy, k) = craft::panel(w, h);
+            HudPipeline::push_quad(v, 0.0, 0.0, w, h, [0.0, 0.0, 0.0, 0.55]);
+            HudPipeline::push_outlined_quad(v, ox, oy, craft::PANEL.0 * k, craft::PANEL.1 * k, [0.78, 0.78, 0.78, 0.97], [0.15, 0.15, 0.15, 1.0], (2.0 * k).max(2.0));
+            let slot = |v: &mut Vec<HudVertex>, c: (f32, f32, f32), st: Option<ItemStack>, edge: [f32; 4]| {
+                let inner = (c.0 + k, c.1 + k, c.2 - 2.0 * k, c.2 - 2.0 * k);
+                HudPipeline::push_quad(v, c.0, c.1, c.2, c.2, edge);
+                HudPipeline::push_quad(v, inner.0, inner.1, inner.2, inner.3, [0.55, 0.55, 0.55, 1.0]);
+                if let Some(st) = st {
+                    push_stack(v, inner, st);
+                }
+            };
+            for (id, ux, uy) in craft::layout(s.gw) {
+                slot(v, craft::cell(w, h, (ux, uy)), s.get(&self.inv, id), [0.3, 0.3, 0.3, 1.0]);
+            }
+            // The stack on the cursor (yellow edge), and the "place one" toggle under it: blue = whole stacks,
+            // orange with a 1 = one at a time (what the right mouse button does on a desktop).
+            slot(v, craft::cell(w, h, craft::HELD), s.cursor, [0.95, 0.8, 0.2, 1.0]);
+            let (mx, my, ms) = craft::cell(w, h, craft::MODE);
+            let fill = if self.one_mode { [0.85, 0.5, 0.1, 1.0] } else { [0.2, 0.4, 0.7, 1.0] };
+            HudPipeline::push_outlined_quad(v, mx, my, ms, ms, fill, [0.15, 0.15, 0.15, 1.0], k.max(2.0));
+            if self.one_mode {
+                HudPipeline::push_number(v, mx + ms * 0.32, my + ms * 0.2, ms * 0.6, 1, [1.0; 4]);
+            }
         }
 
         // Pause button: top-right, two bars.
@@ -437,47 +533,50 @@ impl App {
         HudPipeline::push_quad(v, bx0, bar_y, bar_w, bar_h, [1.0; 4]);
         HudPipeline::push_quad(v, bx0 + bar_w * 2.0, bar_y, bar_w, bar_h, [1.0; 4]);
 
+        // Inventory button, left of pause: a 2x2 grid icon (the crafting grid of the screen it opens).
+        let (ix, iy, iw, ih) = layout.inventory;
+        let inv_fill = if pressed(PointerRole::Inventory) || !play { [0.30, 0.55, 0.85, 0.95] } else { [0.20, 0.40, 0.70, 0.75] };
+        HudPipeline::push_outlined_quad(v, ix, iy, iw, ih, inv_fill, [0.95, 0.95, 0.95, 0.9], 3.0);
+        let (q, g) = (iw * 0.22, iw * 0.08);
+        let (qx, qy) = (ix + (iw - q * 2.0 - g) * 0.5, iy + (ih - q * 2.0 - g) * 0.5);
+        for (dx, dy) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)] {
+            HudPipeline::push_quad(v, qx + dx * (q + g), qy + dy * (q + g), q, q, [1.0; 4]);
+        }
+
         // Hotbar: 9 cells, selected slot highlighted.
-        for (i, &(hx, hy, hw, hh)) in layout.hotbar.iter().enumerate() {
+        for (i, &(hx, hy, hw, hh)) in layout.hotbar.iter().enumerate().filter(|_| play) {
             let border = if i == self.touch.hotbar_slot { [1.0, 1.0, 1.0, 1.0] } else { [0.85, 0.85, 0.85, 0.85] };
             HudPipeline::push_outlined_quad(v, hx, hy, hw, hh, [0.10, 0.10, 0.10, 0.55], border, 3.0);
-            let Some(s) = self.inv.slots[i] else { continue };
-            let pad = (hw.min(hh) * 0.18).max(2.0);
-            let px = atlas::block_color(items::tile(s.id));
-            HudPipeline::push_quad(v, hx + pad, hy + pad, hw - pad * 2.0, hh - pad * 2.0, [px[0] as f32 / 255.0, px[1] as f32 / 255.0, px[2] as f32 / 255.0, 1.0]);
-            // Count, bottom right with a shadow like `RenderItem.renderItemOverlayIntoGUI`; shown above 1 only.
-            if s.count > 1 {
-                let dh = hh * 0.3;
-                let digits = if s.count > 9 { 2.0 } else { 1.0 };
-                let (nx, ny) = (hx + hw - pad * 0.5 - (digits * 0.71 - 0.21) * dh, hy + hh - pad * 0.5 - dh);
-                HudPipeline::push_number(v, nx + 1.5, ny + 1.5, dh, s.count as u32, [0.0, 0.0, 0.0, 0.9]);
-                HudPipeline::push_number(v, nx, ny, dh, s.count as u32, [1.0; 4]);
+            if let Some(s) = self.inv.slots[i] {
+                push_stack(v, (hx, hy, hw, hh), s);
             }
         }
 
-        // Jump button: bottom-right disc with a ring.
-        let (jx, jy) = layout.jump_center;
-        let jr = layout.jump_radius;
-        let jump_fill = if self.touch.jumping() { [0.45, 0.65, 0.95, 0.80] } else { [0.18, 0.20, 0.26, 0.50] };
-        HudPipeline::push_disc(v, jx, jy, jr, jump_fill);
-        HudPipeline::push_ring(v, jx, jy, jr, jr * 0.92, [0.95, 0.95, 0.95, 0.7]);
+        if play {
+            // Jump button: bottom-right disc with a ring.
+            let (jx, jy) = layout.jump_center;
+            let jr = layout.jump_radius;
+            let jump_fill = if self.touch.jumping() { [0.45, 0.65, 0.95, 0.80] } else { [0.18, 0.20, 0.26, 0.50] };
+            HudPipeline::push_disc(v, jx, jy, jr, jump_fill);
+            HudPipeline::push_ring(v, jx, jy, jr, jr * 0.92, [0.95, 0.95, 0.95, 0.7]);
 
-        // Move stick: base at the finger's anchor while held, a faint hint at
-        // the home position otherwise.
-        let sr = layout.stick_radius;
-        match self.touch.stick_state() {
-            Some(((ax, ay), (fx, fy))) => {
-                let (dx, dy) = (fx - ax, fy - ay);
-                let len = (dx * dx + dy * dy).sqrt().max(1.0);
-                let k = (len.min(sr)) / len;
-                HudPipeline::push_ring(v, ax, ay, sr, sr * 0.94, [0.95, 0.95, 0.95, 0.5]);
-                HudPipeline::push_disc(v, ax, ay, sr, [0.18, 0.20, 0.26, 0.35]);
-                HudPipeline::push_disc(v, ax + dx * k, ay + dy * k, sr * 0.45, [0.45, 0.65, 0.95, 0.85]);
-            }
-            None => {
-                let (hx, hy) = layout.stick_home;
-                HudPipeline::push_ring(v, hx, hy, sr, sr * 0.94, [0.95, 0.95, 0.95, 0.22]);
-                HudPipeline::push_disc(v, hx, hy, sr * 0.45, [0.95, 0.95, 0.95, 0.15]);
+            // Move stick: base at the finger's anchor while held, a faint hint at
+            // the home position otherwise.
+            let sr = layout.stick_radius;
+            match self.touch.stick_state() {
+                Some(((ax, ay), (fx, fy))) => {
+                    let (dx, dy) = (fx - ax, fy - ay);
+                    let len = (dx * dx + dy * dy).sqrt().max(1.0);
+                    let k = (len.min(sr)) / len;
+                    HudPipeline::push_ring(v, ax, ay, sr, sr * 0.94, [0.95, 0.95, 0.95, 0.5]);
+                    HudPipeline::push_disc(v, ax, ay, sr, [0.18, 0.20, 0.26, 0.35]);
+                    HudPipeline::push_disc(v, ax + dx * k, ay + dy * k, sr * 0.45, [0.45, 0.65, 0.95, 0.85]);
+                }
+                None => {
+                    let (hx, hy) = layout.stick_home;
+                    HudPipeline::push_ring(v, hx, hy, sr, sr * 0.94, [0.95, 0.95, 0.95, 0.22]);
+                    HudPipeline::push_disc(v, hx, hy, sr * 0.45, [0.95, 0.95, 0.95, 0.15]);
+                }
             }
         }
 
@@ -512,6 +611,45 @@ impl App {
         if v.len() > max {
             v.truncate(max);
         }
+    }
+}
+
+/// One item stack drawn into the cell `(x, y, w, h)`: the flat colour of its tile (a tool is a stick-coloured handle
+/// with a head in the material colour, shaped per kind, so pickaxe, axe and shovel can be told apart), a wear bar
+/// under a damaged tool, and the count bottom right with a shadow like `RenderItem.renderItemOverlayIntoGUI`
+/// (shown above 1 only). Real item sprites are M14.
+// UNVERIFIED: the head shapes and the wear-bar colours are stand-ins for the item sprites and `renderItemOverlay`.
+fn push_stack(v: &mut Vec<HudVertex>, (hx, hy, hw, hh): (f32, f32, f32, f32), s: ItemStack) {
+    let pad = (hw.min(hh) * 0.18).max(2.0);
+    let rgb = |tile: u8| {
+        let c = atlas::block_color(tile);
+        [c[0] as f32 / 255.0, c[1] as f32 / 255.0, c[2] as f32 / 255.0, 1.0]
+    };
+    let (ix, iy, iw, ih) = (hx + pad, hy + pad, hw - pad * 2.0, hh - pad * 2.0);
+    match craft::tool(s.id) {
+        None => HudPipeline::push_quad(v, ix, iy, iw, ih, rgb(items::tile(s.id))),
+        Some((kind, _)) => {
+            HudPipeline::push_quad(v, ix + iw * 0.42, iy, iw * 0.16, ih, rgb(17));
+            let head = rgb(items::tile(s.id));
+            match kind {
+                craft::Kind::Pickaxe => HudPipeline::push_quad(v, ix, iy, iw, ih * 0.22, head),
+                craft::Kind::Axe => HudPipeline::push_quad(v, ix, iy, iw * 0.58, ih * 0.38, head),
+                craft::Kind::Shovel => HudPipeline::push_quad(v, ix + iw * 0.28, iy, iw * 0.44, ih * 0.32, head),
+            }
+        }
+    }
+    if let Some(max) = craft::max_damage(s.id).filter(|_| s.damage > 0) {
+        let left = (1.0 - s.damage as f32 / max as f32).clamp(0.0, 1.0);
+        let (by, bh) = (hy + hh - pad * 0.5 - (hh * 0.06).max(2.0), (hh * 0.06).max(2.0));
+        HudPipeline::push_quad(v, ix, by, iw, bh, [0.0, 0.0, 0.0, 0.8]);
+        HudPipeline::push_quad(v, ix, by, iw * left, bh, [1.0 - left, left, 0.0, 1.0]);
+    }
+    if s.count > 1 {
+        let dh = hh * 0.3;
+        let digits = if s.count > 9 { 2.0 } else { 1.0 };
+        let (nx, ny) = (hx + hw - pad * 0.5 - (digits * 0.71 - 0.21) * dh, hy + hh - pad * 0.5 - dh);
+        HudPipeline::push_number(v, nx + 1.5, ny + 1.5, dh, s.count as u32, [0.0, 0.0, 0.0, 0.9]);
+        HudPipeline::push_number(v, nx, ny, dh, s.count as u32, [1.0; 4]);
     }
 }
 
