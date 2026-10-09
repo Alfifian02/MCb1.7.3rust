@@ -1,6 +1,7 @@
 //! M6 crafting + tools. Ports of `EnumToolMaterial`, `ItemTool` / `ItemPickaxe` / `ItemSpade` (`getStrVsBlock`,
 //! `canHarvestBlock`), `CraftingManager` + `ShapedRecipes.matches`, and the left-click rules of
-//! `Container.func_27280_a` for `ContainerPlayer` (2x2 grid) and `ContainerWorkbench` (3x3 grid).
+//! `Container.func_27280_a` for `ContainerPlayer` (2x2 grid), `ContainerWorkbench` (3x3 grid) and `ContainerFurnace`,
+//! plus `TileEntityFurnace` and `FurnaceRecipes` (smelting).
 //! Item ids follow `world::items`: below 256 = the block, from 256 up = `Item.shiftedIndex` (256 + n).
 
 use std::sync::OnceLock;
@@ -148,13 +149,94 @@ pub fn find(grid: &[Option<ItemStack>; 9], gw: usize) -> Option<ItemStack> {
     recipes().iter().find(|r| r.matches(&ids, gw)).map(|r| r.out)
 }
 
+// ---- Furnace ----
+
+/// `FurnaceRecipes`: what smelting `id` gives. Not ported: raw pork and fish (no mobs yet).
+fn smelting(id: u16) -> Option<ItemStack> {
+    let (out, damage) = match id {
+        15 => (265, 0),  // iron ore -> iron ingot
+        14 => (266, 0),  // gold ore -> gold ingot
+        56 => (264, 0),  // diamond ore -> diamond
+        12 => (20, 0),   // sand -> glass
+        4 => (1, 0),     // cobblestone -> stone
+        337 => (336, 0), // clay -> brick
+        81 => (351, 2),  // cactus -> green dye
+        17 => (263, 1),  // log -> charcoal
+        _ => return None,
+    };
+    Some(ItemStack { id: out, count: 1, damage })
+}
+
+/// `TileEntityFurnace.getItemBurnTime` in ticks: wooden blocks 300, stick and sapling 100, coal 1600.
+/// Not ported: the lava bucket (20000), there are no buckets.
+fn burn_time(id: u16) -> u16 {
+    match id {
+        5 | 17 | 25 | 47 | 53 | 54 | 58 | 63 | 64 | 68 | 72 | 84 | 85 | 95 | 96 => 300,
+        280 | 6 => 100,
+        263 => 1600,
+        _ => 0,
+    }
+}
+
+/// A `TileEntityFurnace`: 0 input, 1 fuel, 2 output. 20 Hz `tick`s, 200 ticks per item.
+#[derive(Default)]
+pub struct Furnace {
+    pub slots: [Option<ItemStack>; 3],
+    /// `furnaceBurnTime`, `currentItemBurnTime`, `furnaceCookTime`.
+    pub burn: u16,
+    pub item_burn: u16,
+    pub cook: u16,
+}
+
+impl Furnace {
+    fn can_smelt(&self) -> bool {
+        let Some(r) = self.slots[0].and_then(|s| smelting(s.id)) else { return false };
+        self.slots[2].map_or(true, |o| o.id == r.id && o.damage == r.damage && o.count < max_stack(r.id))
+    }
+
+    /// One `updateEntity`; true when the fire went on or off (the block must swap between unlit 61 and lit 62).
+    pub fn tick(&mut self) -> bool {
+        let was = self.burn > 0;
+        self.burn = self.burn.saturating_sub(1);
+        if self.burn == 0 && self.can_smelt() {
+            self.item_burn = self.slots[1].map_or(0, |s| burn_time(s.id));
+            self.burn = self.item_burn;
+            if self.burn > 0 {
+                if let Some(f) = &mut self.slots[1] {
+                    f.count -= 1;
+                    if f.count == 0 {
+                        self.slots[1] = None;
+                    }
+                }
+            }
+        }
+        if self.burn > 0 && self.can_smelt() {
+            self.cook += 1;
+            if self.cook == 200 {
+                self.cook = 0;
+                let r = smelting(self.slots[0].map_or(0, |s| s.id)).unwrap();
+                match &mut self.slots[2] {
+                    Some(o) => o.count += 1,
+                    none => *none = Some(r),
+                }
+                self.slots[0] = rest(self.slots[0].unwrap(), 1);
+            }
+        } else {
+            self.cook = 0;
+        }
+        was != (self.burn > 0)
+    }
+}
+
 // ---- Container screen ----
 
 /// A slot of the open screen. `Inv(i)` is `InventoryPlayer.mainInventory[i]`: 0..9 hotbar, 9..36 the rest.
+/// `Furn(i)` is a furnace slot (0 input, 1 fuel, 2 output).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SlotId {
     Result,
     Grid(usize),
+    Furn(usize),
     Inv(usize),
 }
 
@@ -163,7 +245,9 @@ pub enum SlotId {
 // ponytail: no armor slots (no armor items), no shift-click (`getStackInSlot` quick-move), no right-button except as
 // the `one` flag of `click`. Upgrade: add them when the touch UI has a gesture for them.
 pub struct Screen {
+    /// Grid width: 2 inventory, 3 workbench, 0 furnace (then `furnace` is the block it belongs to).
     pub gw: usize,
+    pub furnace: Option<(i32, i32, i32)>,
     pub grid: [Option<ItemStack>; 9],
     pub cursor: Option<ItemStack>,
 }
@@ -174,24 +258,35 @@ fn rest(s: ItemStack, n: u8) -> Option<ItemStack> {
 
 impl Screen {
     pub fn new(gw: usize) -> Self {
-        Self { gw, grid: [None; 9], cursor: None }
+        Self { gw, furnace: None, grid: [None; 9], cursor: None }
+    }
+
+    /// `ContainerFurnace` for the furnace at `pos`; the caller passes that furnace to `get` and `click`.
+    pub fn at_furnace(pos: (i32, i32, i32)) -> Self {
+        Self { furnace: Some(pos), ..Self::new(0) }
     }
 
     pub fn result(&self) -> Option<ItemStack> {
         find(&self.grid, self.gw)
     }
 
-    pub fn get(&self, inv: &Inventory, id: SlotId) -> Option<ItemStack> {
+    pub fn get(&self, inv: &Inventory, furn: Option<&Furnace>, id: SlotId) -> Option<ItemStack> {
         match id {
             SlotId::Result => self.result(),
+            SlotId::Furn(i) => furn.and_then(|f| f.slots[i]),
             SlotId::Grid(i) => self.grid[i],
             SlotId::Inv(i) => inv.slots[i],
         }
     }
 
-    fn set(&mut self, inv: &mut Inventory, id: SlotId, s: Option<ItemStack>) {
+    fn set(&mut self, inv: &mut Inventory, furn: Option<&mut Furnace>, id: SlotId, s: Option<ItemStack>) {
         match id {
             SlotId::Result => {}
+            SlotId::Furn(i) => {
+                if let Some(f) = furn {
+                    f.slots[i] = s;
+                }
+            }
             SlotId::Grid(i) => self.grid[i] = s,
             SlotId::Inv(i) => inv.slots[i] = s,
         }
@@ -213,12 +308,19 @@ impl Screen {
     /// empty slot takes the cursor (all, or one); empty cursor takes the slot (all, or the larger half); two
     /// different items swap; the same item tops the slot up. The result slot accepts nothing, and only gives
     /// its stack to an empty cursor or to a cursor already holding the same item (when it fits).
-    pub fn click(&mut self, id: SlotId, one: bool, inv: &mut Inventory) {
+    ///
+    /// The furnace output (`SlotFurnace`) is an output slot like the craft result (accepts nothing), except that
+    /// taking from it uses nothing up and a right click takes half. Pass the furnace for a furnace screen.
+    pub fn click(&mut self, id: SlotId, one: bool, inv: &mut Inventory, mut furn: Option<&mut Furnace>) {
         let is_result = id == SlotId::Result;
-        match (self.get(inv, id), self.cursor) {
-            (None, Some(c)) if !is_result => {
+        let is_out = is_result || id == SlotId::Furn(2);
+        if matches!(id, SlotId::Furn(_)) && furn.is_none() {
+            return;
+        }
+        match (self.get(inv, furn.as_deref(), id), self.cursor) {
+            (None, Some(c)) if !is_out => {
                 let n = if one { 1 } else { c.count };
-                self.set(inv, id, Some(ItemStack { count: n, ..c }));
+                self.set(inv, furn, id, Some(ItemStack { count: n, ..c }));
                 self.cursor = rest(c, n);
             }
             (Some(h), None) => {
@@ -227,22 +329,26 @@ impl Screen {
                 if is_result {
                     self.take_result();
                 } else {
-                    self.set(inv, id, rest(h, n));
+                    self.set(inv, furn, id, rest(h, n));
                 }
             }
             (Some(h), Some(c)) => {
                 let same = h.id == c.id && h.damage == c.damage;
-                if is_result {
+                if is_out {
                     if same && max_stack(c.id) > 1 && h.count + c.count <= max_stack(c.id) {
                         self.cursor = Some(ItemStack { count: h.count + c.count, ..c });
-                        self.take_result();
+                        if is_result {
+                            self.take_result();
+                        } else {
+                            self.set(inv, furn, id, None);
+                        }
                     }
                 } else if !same {
-                    self.set(inv, id, Some(c));
+                    self.set(inv, furn, id, Some(c));
                     self.cursor = Some(h);
                 } else {
                     let n = (if one { 1 } else { c.count }).min(max_stack(c.id).saturating_sub(h.count));
-                    self.set(inv, id, Some(ItemStack { count: h.count + n, ..h }));
+                    self.set(inv, furn, id, Some(ItemStack { count: h.count + n, ..h }));
                     self.cursor = rest(c, n);
                 }
             }
@@ -268,7 +374,11 @@ pub const MODE: (f32, f32) = (8.0, 53.0);
 /// Vanilla `(slot, x, y)` of every slot's top-left pixel (`ContainerPlayer` / `ContainerWorkbench` constructors).
 pub fn layout(gw: usize) -> Vec<(SlotId, f32, f32)> {
     let ((rx, ry), (gx, gy)) = if gw == 2 { ((144, 36), (88, 26)) } else { ((124, 35), (30, 17)) };
-    let mut v = vec![(SlotId::Result, rx as f32, ry as f32)];
+    let mut v = if gw == 0 {
+        vec![(SlotId::Furn(0), 56.0, 17.0), (SlotId::Furn(1), 56.0, 53.0), (SlotId::Furn(2), 116.0, 35.0)]
+    } else {
+        vec![(SlotId::Result, rx as f32, ry as f32)]
+    };
     v.extend((0..gw * gw).map(|i| (SlotId::Grid(i), (gx + 18 * (i % gw)) as f32, (gy + 18 * (i / gw)) as f32)));
     v.extend((9..36).map(|i| (SlotId::Inv(i), (8 + 18 * (i % 9)) as f32, (84 + 18 * (i / 9 - 1)) as f32)));
     v.extend((0..9).map(|i| (SlotId::Inv(i), (8 + 18 * i) as f32, 142.0)));
@@ -343,31 +453,63 @@ mod tests {
         let mut inv = Inventory::default();
         inv.slots[0] = Some(stack(17, 3));
         let mut s = Screen::new(2);
-        s.click(SlotId::Inv(0), false, &mut inv); // all 3 logs to the cursor
+        s.click(SlotId::Inv(0), false, &mut inv, None); // all 3 logs to the cursor
         assert_eq!((inv.slots[0], s.cursor), (None, Some(stack(17, 3))));
-        s.click(SlotId::Grid(0), true, &mut inv); // one log in the grid
+        s.click(SlotId::Grid(0), true, &mut inv, None); // one log in the grid
         assert_eq!((s.grid[0], s.cursor), (Some(stack(17, 1)), Some(stack(17, 2))));
         assert_eq!(s.result(), Some(stack(5, 4)));
-        s.click(SlotId::Result, false, &mut inv); // the cursor holds logs, the result is planks: refused
+        s.click(SlotId::Result, false, &mut inv, None); // the cursor holds logs, the result is planks: refused
         assert_eq!((s.grid[0], s.cursor), (Some(stack(17, 1)), Some(stack(17, 2))));
-        s.click(SlotId::Inv(0), false, &mut inv); // logs back into the empty slot
+        s.click(SlotId::Inv(0), false, &mut inv, None); // logs back into the empty slot
         assert_eq!((inv.slots[0], s.cursor), (Some(stack(17, 2)), None));
-        s.click(SlotId::Result, false, &mut inv); // empty cursor takes 4 planks, the log is used up
+        s.click(SlotId::Result, false, &mut inv, None); // empty cursor takes 4 planks, the log is used up
         assert_eq!((s.cursor, s.grid[0], s.result()), (Some(stack(5, 4)), None, None));
-        s.click(SlotId::Inv(1), false, &mut inv);
-        s.click(SlotId::Inv(0), false, &mut inv); // swap: planks out of slot 1, 2 logs on the cursor
-        s.click(SlotId::Inv(1), false, &mut inv);
+        s.click(SlotId::Inv(1), false, &mut inv, None);
+        s.click(SlotId::Inv(0), false, &mut inv, None); // swap: planks out of slot 1, 2 logs on the cursor
+        s.click(SlotId::Inv(1), false, &mut inv, None);
         assert_eq!((inv.slots[1], s.cursor), (Some(stack(17, 2)), Some(stack(5, 4))));
-        s.click(SlotId::Inv(0), false, &mut inv); // the empty slot takes the planks
+        s.click(SlotId::Inv(0), false, &mut inv, None); // the empty slot takes the planks
         assert_eq!(inv.slots[0], Some(stack(5, 4)));
         assert_eq!(s.cursor, None);
         // Half a stack, then close: the cursor and the grid come back as drops.
-        s.click(SlotId::Inv(1), true, &mut inv);
+        s.click(SlotId::Inv(1), true, &mut inv, None);
         assert_eq!((s.cursor, inv.slots[1]), (Some(stack(17, 1)), Some(stack(17, 1))));
-        s.click(SlotId::Grid(3), false, &mut inv);
-        s.click(SlotId::Inv(1), false, &mut inv);
+        s.click(SlotId::Grid(3), false, &mut inv, None);
+        s.click(SlotId::Inv(1), false, &mut inv, None);
         assert_eq!(s.close(), vec![stack(17, 1), stack(17, 1)]);
         assert!(s.cursor.is_none() && s.grid.iter().all(Option::is_none));
+    }
+
+    /// `TileEntityFurnace`: fuel is used up when the fire starts, 200 ticks per item, output stacks, and the
+    /// lit state flips on and off. Plus the output slot rules of `SlotFurnace`.
+    #[test]
+    fn furnace_smelts_like_java() {
+        let mut f = Furnace::default();
+        f.slots[0] = Some(stack(15, 1)); // iron ore
+        f.slots[1] = Some(stack(280, 2)); // 2 sticks: 100 ticks of fire each, so exactly one item
+        assert!(f.tick(), "fire starts");
+        assert_eq!((f.burn, f.slots[1]), (100, Some(stack(280, 1))));
+        for _ in 0..199 {
+            assert!(!f.tick(), "the second stick takes over without the fire going out");
+        }
+        assert_eq!((f.slots[0], f.slots[1], f.slots[2]), (None, None, Some(stack(265, 1))), "ingot after 200 ticks");
+        assert_eq!(f.burn, 1);
+        assert!(f.tick() && f.burn == 0, "fire out");
+        f.slots[0] = Some(stack(3, 1)); // dirt does not smelt
+        f.slots[1] = Some(stack(263, 1));
+        assert!(!f.tick() && f.burn == 0 && f.slots[1].is_some());
+        // Output slot: takes nothing, gives half on a right click.
+        let mut s = Screen::at_furnace((0, 0, 0));
+        let mut inv = Inventory::default();
+        f.slots[2] = Some(stack(265, 5));
+        s.cursor = Some(stack(3, 1));
+        s.click(SlotId::Furn(2), false, &mut inv, Some(&mut f));
+        assert_eq!((s.cursor, f.slots[2]), (Some(stack(3, 1)), Some(stack(265, 5))));
+        s.cursor = None;
+        s.click(SlotId::Furn(2), true, &mut inv, Some(&mut f));
+        assert_eq!((s.cursor, f.slots[2]), (Some(stack(265, 3)), Some(stack(265, 2))));
+        s.click(SlotId::Furn(0), false, &mut inv, Some(&mut f)); // the input slot takes anything
+        assert_eq!(f.slots[0], Some(stack(265, 3)));
     }
 
     /// Tools: ids, durability, speed on their blocks and the harvest gate.

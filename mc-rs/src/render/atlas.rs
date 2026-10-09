@@ -41,6 +41,17 @@ pub fn block_color(id: u8) -> Pixel {
         39 => [140, 105, 80, 255],   // brown mushroom
         40 => [200, 40, 40, 255],    // red mushroom
         78 => [245, 250, 255, 255],  // snow layer
+        // Blocks and item stand-ins M6 can make; UNVERIFIED colours, like the rest until M14 textures.
+        20 => [200, 230, 240, 255],  // glass
+        35 => [235, 235, 235, 255],  // wool
+        41 => [250, 236, 80, 255],   // gold block (also gold tools)
+        42 => [225, 225, 225, 255],  // iron block (also iron tools)
+        57 => [100, 230, 215, 255],  // diamond block (also diamond tools)
+        58 => [150, 105, 60, 255],   // workbench
+        61 => [105, 105, 105, 255],  // furnace
+        62 => [230, 130, 40, 255],   // lit furnace
+        80 => [250, 252, 255, 255],  // snow block
+        89 => [245, 220, 120, 255],  // glowstone
         83 => [140, 190, 100, 255],  // reeds
         _ => [180, 30, 200, 255],    // unknown = magenta
     }

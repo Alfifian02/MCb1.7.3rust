@@ -44,6 +44,7 @@ pub fn tile(id: u16) -> u8 {
         331 => 73,       // redstone
         332 => 78,       // snowball
         337 => 82,       // clay
+        336 => 38,       // brick
         348 => 14,       // glowstone dust
         351 => 21,       // lapis dye
         355 => 38,       // bed
@@ -292,6 +293,15 @@ impl Drops {
         let pos = eye - Vec3::new(0.0, 0.3, 0.0);
         let vel = forward * 0.3 + Vec3::new(0.0, 0.1, 0.0);
         self.push(ItemEntity { pos, prev: pos, vel, stack, age: 0, delay: 40, on_ground: false });
+    }
+
+    /// A broken furnace's contents pop out of the middle of its cell (`BlockFurnace.onBlockRemoved`).
+    /// ponytail: vanilla splits a stack into random-sized piles; this is one entity per stack.
+    pub fn scatter(&mut self, stack: ItemStack, (x, y, z): (i32, i32, i32)) {
+        let pos = Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
+        let mut jitter = || (self.fx.next_double() * 0.2 - 0.1) as f32;
+        let vel = Vec3::new(jitter(), 0.2, jitter());
+        self.push(ItemEntity { pos, prev: pos, vel, stack, age: 0, delay: 10, on_ground: false });
     }
 
     /// Add an entity, dropping the oldest one when `MAX_ITEMS` is reached.

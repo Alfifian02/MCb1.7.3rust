@@ -24,7 +24,7 @@ McRegion save format. Client-only networking.
 
 ## Build
 - Workspace at `mc-rs/`
-- `cargo test --lib` runs the 45 unit tests (Android host such as Termux; see README).
+- `cargo test --lib` runs the 46 unit tests (Android host such as Termux; see README).
 - `cargo run` boots a desktop window (Metal / Vulkan / GL depending on host).
 - APK via GitHub Actions `cargo apk build --release` -> `MinecraftB173Rust.apk`.
 - A long-lived debug keystore at `keystore/debug.keystore` signs the release
@@ -40,12 +40,21 @@ they matched.
 
 ## Next step
 
-M7 (save) or, before it, the furnace: iron and gold tools are craftable but their ingots are not obtainable until smelting exists (`TileEntityFurnace`), and diamond ore needs an iron pickaxe, so diamonds are out of reach until then. M6 is written and the crate type-checks and tests on a host, but nothing has run on a device (M5 included). M4 is done: caves and populate match the real classes bit for
+M7 (save). Furnaces now smelt (see the furnace entry), so the whole tool chain up to diamond is reachable. M6 is written and the crate type-checks and tests on a host, but nothing has run on a device (M5 included). M4 is done: caves and populate match the real classes bit for
 bit (`tools/golden/`). Still approximate in populate (see README): light model, no metadata, no tile entities, no block
 ticks (liquids/sand). Sapling growth, fluid flow and falling sand belong with M5's block updates. Ice Desert exists in
 BiomeGenBase but climate never selects it; b1.7.3 has no ravines.
 
 ## Changelog
+- `done` furnace + smelting (same host checks as M6: crate type-checks, 46 tests pass, NOT run on a device):
+    - `world/craft.rs`: `Furnace` = `TileEntityFurnace.updateEntity` (fuel used up when the fire starts, 200 ticks per item, output stacks
+      to 64, relights from the next fuel without a flip), `FurnaceRecipes` (iron/gold/diamond ore, sand -> glass, cobble -> stone, clay -> brick,
+      cactus -> green dye, log -> charcoal) and `getItemBurnTime` (wood blocks 300, stick/sapling 100, coal 1600). `ContainerFurnace` slots and the
+      `SlotFurnace` rule: the output takes nothing, right click takes half.
+    - `lib.rs`: furnaces live in a map by block position, created on first use, ticked at 20 Hz only while their chunk is loaded; the block swaps
+      61 <-> 62 (lit, light 13) when the fire flips. Using a furnace opens its screen (flame and arrow bars). Breaking one spills its three slots.
+    - Atlas colours for the new blocks (glass, wool, metal blocks, workbench, furnaces, snow block, glowstone); iron/gold/diamond tools had none.
+    - Not done: the furnace contents are not saved (M7), furnace facing (no metadata), fuel/lava bucket, raw pork and fish.
 - `done` M6 crafting + tools (written on a Linux host: the whole crate type-checks and its 45 tests pass against a stubbed
   `android-activity`; NOT run on a device, so the touch layout of the new screen is untested by hand):
     - `world/craft.rs` (new): `EnumToolMaterial` (wood/stone/iron/diamond/gold), pickaxe/axe/shovel ids 256..=286, `getStrVsBlock`,

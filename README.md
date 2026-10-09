@@ -29,7 +29,7 @@ original. Anything that cannot be derived from the b1.7.3 sources is marked
 | Day/night            | written, NOT compiled | 20-minute cycle: sky light 0..11 subtracted in the mesher, sky colour from sun angle + climate. No sun/moon/stars yet. |
 | Digging              | written, NOT compiled | Hardness-based survival digging, hold to dig, progress bar. No tools yet. |
 | Drops + inventory    | written, logic tested on a Linux host, NOT compiled as a whole | A broken block drops its `idDropped` items as entities (20 Hz motion, pickup after 10 ticks). The hotbar holds real stacks with counts and starts empty; placing uses one up. See ROADMAP changelog. |
-| M6 Crafting + tools  | written, logic tested on a Linux host, whole crate type-checked against a stubbed `android-activity`; NOT run on a device | 36-slot inventory, 2x2 inventory crafting and 3x3 workbench crafting, 26 recipes (wood/stone/iron/diamond/gold pickaxe, axe, shovel + planks, sticks, workbench, chest, furnace, torch, ...), tool speed and durability, and `canHarvestBlock`: stone without a pickaxe breaks and drops nothing, like the original. See ROADMAP changelog. |
+| M6 Crafting + tools  | written, logic tested on a Linux host, whole crate type-checked against a stubbed `android-activity`; NOT run on a device | 36-slot inventory, 2x2 inventory crafting and 3x3 workbench crafting, furnace smelting (`TileEntityFurnace`, 8 smelting recipes), 26 recipes (wood/stone/iron/diamond/gold pickaxe, axe, shovel + planks, sticks, workbench, chest, furnace, torch, ...), tool speed and durability, and `canHarvestBlock`: stone without a pickaxe breaks and drops nothing, like the original. See ROADMAP changelog. |
 | M7..M14              | pending | See ROADMAP.md for the order. |
 
 Latest commit on `main`: see `git log -1`. Latest released APK: see the
@@ -113,7 +113,7 @@ UNVERIFIED until you can show a reference.
   `canHarvestBlock` of `ItemPickaxe`/`ItemSpade`, `RecipesTools` + `RecipesCrafting` + the `CraftingManager` entries it
   carries, `ShapedRecipes.matches` (anywhere in the grid, mirrored), `SlotCrafting.onPickupFromSlot`, the slot positions
   of `ContainerPlayer`/`ContainerWorkbench`, and the left/right click branches of `Container.func_27280_a`. Not ported:
-  hoes, swords, shears, armor slots, shift-click, ~100 other recipes (one line each in `recipes()`).
+  hoes, swords, shears, armor slots, shift-click, raw pork/fish smelting, the lava bucket as fuel, ~100 other recipes (one line each in `recipes()`).
 - `world::dig::can_harvest` — `InventoryPlayer.canHarvestBlock` (material half + held-item half), used by `lib.rs` the way
   `PlayerControllerSP.sendBlockRemoved` does: read before the tool wears, so a tool that breaks on a block still harvests it.
 - `input::touch_ui::LayoutRects::for_surface` — hotbar matches
@@ -127,7 +127,7 @@ UNVERIFIED until you can show a reference.
 ```
 cargo test --lib
 ```
-Currently 45 unit tests, all passing on a Linux host (rustc 1.85, the whole crate built against a small stand-in for `android-activity`, which does not build there; `tools/` must sit next to the crate for the golden `include_str!`). That includes the 18-chunk terrain golden, `populate_matches_java` (11 raw+populated 2x2 cases), `block_tables_match_java` and the M6 tests (`recipes_match_like_java`, `clicks_follow_container_rules`, `tool_tables`, `tools_gate_harvest_and_speed_up_digging`, `open_screen_turns_presses_into_taps`). `ring_loads_then_unloads_when_walking` and the golden tests generate real chunks: use `--release`.
+Currently 46 unit tests, all passing on a Linux host (rustc 1.85, the whole crate built against a small stand-in for `android-activity`, which does not build there; `tools/` must sit next to the crate for the golden `include_str!`). That includes the 18-chunk terrain golden, `populate_matches_java` (11 raw+populated 2x2 cases), `block_tables_match_java` and the M6 tests (`recipes_match_like_java`, `clicks_follow_container_rules`, `tool_tables`, `furnace_smelts_like_java`, `tools_gate_harvest_and_speed_up_digging`, `open_screen_turns_presses_into_taps`). `ring_loads_then_unloads_when_walking` and the golden tests generate real chunks: use `--release`.
 The crate depends on `android-activity` -> `ndk-sys`, which only compiles for Android, so
 `cargo test` works on an Android host (e.g. Termux) but not on a plain Linux runner. The CI
 `test` job pipes through `tail` without `pipefail`, so a failure there is NOT reported.

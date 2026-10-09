@@ -16,6 +16,7 @@ use crate::render::hud::{HudPipeline, HudVertex};
 use android_activity::{AndroidApp, InputStatus, MainEvent, PollEvent};
 use android_activity::input::InputEvent as IEv;
 use core::ffi::c_void;
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use crate::gpu::context::Gpu;
@@ -26,7 +27,7 @@ use crate::render::camera::FirstPersonCamera;
 use crate::render::outline::Outline;
 use crate::world::pick::{self, Hit};
 use crate::world::dig::{self, Dig};
-use crate::world::craft::{self, Screen};
+use crate::world::craft::{self, Furnace, Screen};
 use crate::world::items::{self, Drops, Inventory, ItemStack};
 use crate::world::sky;
 use crate::world::chunk::{cross_shape, is_plant};
@@ -77,6 +78,9 @@ struct App {
     /// Open container screen (the 2x2 inventory or a workbench's 3x3) and its "place one" click toggle.
     screen: Option<Screen>,
     one_mode: bool,
+    /// Furnace tile entities by block position (created on first use), and the time left over from the last 20 Hz tick.
+    furnaces: HashMap<(i32, i32, i32), Furnace>,
+    furn_acc: f32,
 }
 
 impl App {
@@ -169,6 +173,8 @@ impl App {
             item_mesh,
             screen: None,
             one_mode: false,
+            furnaces: HashMap::new(),
+            furn_acc: 0.0,
         })
     }
 
@@ -222,6 +228,21 @@ impl App {
         self.camera.pos = self.player.pos + glam::Vec3::new(0.0, EYE_HEIGHT, 0.0);
         // Dropped items fall, settle and get picked up (before the target check below, which can return early).
         self.drops.tick(dt, &|x: i32, y: i32, z: i32| self.chunks.block(x, y, z), self.player.pos, &mut self.inv);
+        // Furnaces burn on the 20 Hz tick, open or not, but only in loaded chunks (vanilla ticks loaded tile entities).
+        // The block swaps between unlit 61 and lit 62 when the fire goes on or off.
+        self.furn_acc += dt;
+        while self.furn_acc >= dig::TICK {
+            self.furn_acc -= dig::TICK;
+            let mut flips = Vec::new();
+            for (&pos, f) in self.furnaces.iter_mut() {
+                if matches!(self.chunks.block_loaded(pos.0, pos.1, pos.2), Some(61 | 62)) && f.tick() {
+                    flips.push((pos, f.burn > 0));
+                }
+            }
+            for ((x, y, z), lit) in flips {
+                self.chunks.set_block(x, y, z, if lit { 62 } else { 61 });
+            }
+        }
 
         // M5: pick the block under the crosshair, dig it while the dig input is held, place on a tap.
         self.touch.tick(dt);
@@ -231,7 +252,7 @@ impl App {
             if self.screen.is_some() {
                 self.close_screen();
             } else {
-                self.open_screen(2);
+                self.open_screen(Screen::new(2));
             }
         }
         for (x, y) in self.touch.take_taps() {
@@ -259,6 +280,11 @@ impl App {
                         let held = self.inv.slots[slot];
                         if self.dig.tick(hit.pos, id, held, self.player.on_ground, in_water) {
                             self.chunks.set_block(x, y, z, 0);
+                            if let (61 | 62, Some(f)) = (id, self.furnaces.remove(&hit.pos)) {
+                                for st in f.slots.into_iter().flatten() {
+                                    self.drops.scatter(st, hit.pos);
+                                }
+                            }
                             // PlayerControllerSP.sendBlockRemoved: `canHarvestBlock` is read before the tool wears, so
                             // a tool that breaks on this block still harvests it; no suitable tool, no drop.
                             let harvest = dig::can_harvest(id, held);
@@ -277,10 +303,18 @@ impl App {
         }
         let Some(hit) = self.target else { return };
         if place {
-            // Using a workbench opens its 3x3 grid instead of placing a block against it.
-            if self.chunks.block_loaded(hit.pos.0, hit.pos.1, hit.pos.2) == Some(58) {
-                self.open_screen(3);
-                return;
+            // Using a workbench or a furnace opens its screen instead of placing a block against it.
+            match self.chunks.block_loaded(hit.pos.0, hit.pos.1, hit.pos.2) {
+                Some(58) => {
+                    self.open_screen(Screen::new(3));
+                    return;
+                }
+                Some(61 | 62) => {
+                    self.furnaces.entry(hit.pos).or_default();
+                    self.open_screen(Screen::at_furnace(hit.pos));
+                    return;
+                }
+                _ => {}
             }
             let (x, y, z) = pick::place_pos(&hit);
             // Items below 256 are blocks; anything else cannot be placed. ItemBlock refuses a solid block at y = 127
@@ -294,9 +328,9 @@ impl App {
         }
     }
 
-    /// Open the 2x2 inventory (`gw` 2) or a workbench's 3x3 screen (`gw` 3).
-    fn open_screen(&mut self, gw: usize) {
-        self.screen = Some(Screen::new(gw));
+    /// Open a container screen: the 2x2 inventory, a workbench's 3x3 or a furnace.
+    fn open_screen(&mut self, screen: Screen) {
+        self.screen = Some(screen);
         self.one_mode = false;
         self.touch.set_screen(true);
     }
@@ -318,7 +352,8 @@ impl App {
         if craft::on_mode_button(w, h, x, y) {
             self.one_mode = !self.one_mode;
         } else if let Some(id) = craft::slot_at(s.gw, w, h, x, y) {
-            s.click(id, self.one_mode, &mut self.inv);
+            let furn = s.furnace.and_then(|p| self.furnaces.get_mut(&p));
+            s.click(id, self.one_mode, &mut self.inv, furn);
         } else if !craft::in_panel(w, h, x, y) {
             // Click outside the window (slot -999): throw the cursor stack, or one item of it.
             if let Some(c) = s.cursor {
@@ -508,8 +543,20 @@ impl App {
                     push_stack(v, inner, st);
                 }
             };
+            let furn = s.furnace.and_then(|p| self.furnaces.get(&p));
             for (id, ux, uy) in craft::layout(s.gw) {
-                slot(v, craft::cell(w, h, (ux, uy)), s.get(&self.inv, id), [0.3, 0.3, 0.3, 1.0]);
+                slot(v, craft::cell(w, h, (ux, uy)), s.get(&self.inv, furn, id), [0.3, 0.3, 0.3, 1.0]);
+            }
+            if let Some(f) = furn {
+                // Cook arrow (fills left to right over 200 ticks) and flame (drains from the top), vanilla positions.
+                let u = |ux: f32, uy: f32, uw: f32, uh: f32| (ox + ux * k, oy + uy * k, uw * k, uh * k);
+                let (ax, ay, aw, ah) = u(79.0, 34.0, 24.0, 17.0);
+                HudPipeline::push_quad(v, ax, ay, aw, ah, [0.45, 0.45, 0.45, 1.0]);
+                HudPipeline::push_quad(v, ax, ay, aw * f.cook as f32 / 200.0, ah, [1.0; 4]);
+                let (fx, fy, fw, fh) = u(56.0, 36.0, 14.0, 14.0);
+                let left = f.burn as f32 / f.item_burn.max(1) as f32;
+                HudPipeline::push_quad(v, fx, fy, fw, fh, [0.45, 0.45, 0.45, 1.0]);
+                HudPipeline::push_quad(v, fx, fy + fh * (1.0 - left), fw, fh * left, [1.0, 0.6, 0.1, 1.0]);
             }
             // The stack on the cursor (yellow edge), and the "place one" toggle under it: blue = whole stacks,
             // orange with a 1 = one at a time (what the right mouse button does on a desktop).
