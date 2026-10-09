@@ -39,7 +39,7 @@ const RENDER_DIST: i32 = 4;
 
 const LOOK_SENS: f32 = 0.004;
 /// World units per second when the d-pad is fully pressed.
-const MOVE_SPEED: f32 = 4.3;
+const MOVE_SPEED: f32 = physics::WALK_SPEED;
 /// Eye offset from `player.pos`, which is the CENTRE of the 1.8-tall box. Steve's eyes are
 /// 1.62 above his feet (EntityPlayer.yOffset), i.e. 1.62 - 0.9 above the centre.
 const EYE_HEIGHT: f32 = 1.62 - physics::HALF.y;
@@ -229,13 +229,10 @@ impl App {
         // forward = -Z when yaw = 0; rotate by yaw around +Y.
         self.player.vel.x = (fwd * yaw.sin() + side * yaw.cos()) * MOVE_SPEED;
         self.player.vel.z = (-fwd * yaw.cos() + side * yaw.sin()) * MOVE_SPEED;
-        // Held jump button; 8.4 m/s matches the b1.7.3 jump velocity.
-        if self.touch.jumping() && self.player.on_ground {
-            self.player.vel.y = 8.4;
-        }
         // Plants are drawn but not solid yet (collision shapes come with M14), so physics reads them as air.
         let get = |x: i32, y: i32, z: i32| self.chunks.block(x, y, z).map(|b| if is_plant(b) { 0 } else { b });
-        physics::step(&mut self.player, dt, &get);
+        // The held jump button jumps (8.4 m/s, the b1.7.3 velocity) or swims up; fluids (ids 8..=11) are not solid.
+        physics::step(&mut self.player, dt, self.touch.jumping(), &get);
         self.camera.pos = self.player.pos + glam::Vec3::new(0.0, EYE_HEIGHT, 0.0);
         // Dropped items fall, settle and get picked up (before the target check below, which can return early).
         self.drops.tick(dt, &|x: i32, y: i32, z: i32| self.chunks.block(x, y, z), self.player.pos, &mut self.inv);

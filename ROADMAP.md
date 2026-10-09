@@ -46,6 +46,13 @@ ticks (liquids/sand). Sapling growth, fluid flow and falling sand belong with M5
 BiomeGenBase but climate never selects it; b1.7.3 has no ravines.
 
 ## Changelog
+- `done` fluids are not solid + swimming (`world/physics.rs`; written WITHOUT a Rust toolchain: not compiled, test not run, +1 test):
+    the player used to stand on water and lava because physics treated every id > 0 as solid. Ids 8..=11 are now passable; `step` takes the
+    held jump flag and ports `Entity.handleWaterMovement`/`handleLavaMovement` (box shrunk 0.4 top and bottom) and
+    `EntityLiving.moveEntityWithHeading`: no gravity in a fluid, vertical drag 0.8 (lava 0.5) and 0.02 blocks/tick sink, held jump +0.04/tick,
+    wall hop 0.3/tick when 0.6 higher is free. Simplified: every fluid cell is a source block (flow levels need metadata), horizontal speed is
+    scaled to the terminal swim speed (2.0 m/s water, 0.8 lava) instead of accumulating. Not done: no flow push, no splash/bubbles, no breath
+    or lava damage (next: health), dropped items still treat fluids as solid.
 - `done` touch spread (fix from a device report: with only tap = left click, a stack could not be split across a grid):
   a picked-up stack floats above the finger (`TouchUi::cursor_pos`), and dragging it over other slots puts one item into each
   slot it enters, the start slot included (`Screen::drop_one`: empty or same item with room, never a swap, never an output
