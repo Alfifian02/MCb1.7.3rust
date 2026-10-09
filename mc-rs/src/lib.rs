@@ -208,7 +208,11 @@ impl App {
     /// screen is closed first, so the cursor stack and the grid become dropped items, which are saved.
     // ponytail: runs on the render thread; the level file is ~1 KB and the chunk writes are capped per autosave.
     fn save(&mut self, chunks: usize) {
-        self.close_screen();
+        // `close_screen` also calls `touch.set_screen(false)`, which resets the touch state. Autosave runs while
+        // playing (no screen open), so calling it unconditionally cut every held action (move, dig, look) every 5 s.
+        if self.screen.is_some() {
+            self.close_screen();
+        }
         let level = Level {
             ticks: self.world_ticks,
             pos: self.player.pos,

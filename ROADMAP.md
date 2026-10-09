@@ -46,6 +46,14 @@ ticks (liquids/sand). Sapling growth, fluid flow and falling sand belong with M5
 BiomeGenBase but climate never selects it; b1.7.3 has no ravines.
 
 ## Changelog
+- `done` M7 fix: autosave no longer interrupts play every 5 s (not compiled, not run on a device). `App::save` called `close_screen()`
+  unconditionally, and `close_screen` also runs `touch.set_screen(false)`, so each autosave (screen closed) reset the touch state and cut
+  the held move stick / look drag / dig. Now `save` closes a screen only when one is open (`lib.rs`, one `if`). Pause and exit saves are
+  unchanged (they still turn an open screen into dropped items first).
+    - UNVERIFIED: `input/touch_ui.rs` was not in the zip, so that `set_screen(false)` resets the pointer state is inferred from the call
+      site, not read. If actions still drop, look there first.
+    - Still open: autosave writes the level + up to 24 chunks on the render thread; on a slow phone that can hitch a frame. If so, lower
+      `AUTOSAVE_CHUNKS` or move the writes to a thread.
 - `done` M7 save (written WITHOUT a Rust toolchain: not compiled, tests not run, expect a compile fix or two; +2 tests). Decision: it does
   not follow b1.7.3 (no McRegion, NBT, zlib): the aim is fewer lines and a smaller, faster save, not a loadable vanilla world.
     - `world/save.rs` (new): `encode_chunk`/`decode_chunk` = populated flag + run-length-coded block ids + metadata nibbles (runs of
