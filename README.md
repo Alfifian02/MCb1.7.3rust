@@ -127,7 +127,7 @@ UNVERIFIED until you can show a reference.
 ```
 cargo test --lib
 ```
-Currently 46 unit tests, all passing on a Linux host (rustc 1.85, the whole crate built against a small stand-in for `android-activity`, which does not build there; `tools/` must sit next to the crate for the golden `include_str!`). That includes the 18-chunk terrain golden, `populate_matches_java` (11 raw+populated 2x2 cases), `block_tables_match_java` and the M6 tests (`recipes_match_like_java`, `clicks_follow_container_rules`, `tool_tables`, `furnace_smelts_like_java`, `tools_gate_harvest_and_speed_up_digging`, `open_screen_turns_presses_into_taps`). `ring_loads_then_unloads_when_walking` and the golden tests generate real chunks: use `--release`.
+Currently 47 unit tests, all passing on a Linux host (rustc 1.85, the whole crate built against a small stand-in for `android-activity`, which does not build there; `tools/` must sit next to the crate for the golden `include_str!`). That includes the 18-chunk terrain golden, `populate_matches_java` (11 raw+populated 2x2 cases), `block_tables_match_java` and the M6 tests (`recipes_match_like_java`, `clicks_follow_container_rules`, `tool_tables`, `furnace_smelts_like_java`, `drop_one_spreads_the_cursor_stack`, `tools_gate_harvest_and_speed_up_digging`, `open_screen_turns_presses_into_taps`). `ring_loads_then_unloads_when_walking` and the golden tests generate real chunks: use `--release`.
 The crate depends on `android-activity` -> `ndk-sys`, which only compiles for Android, so
 `cargo test` works on an Android host (e.g. Termux) but not on a plain Linux runner. The CI
 `test` job pipes through `tail` without `pipefail`, so a failure there is NOT reported.

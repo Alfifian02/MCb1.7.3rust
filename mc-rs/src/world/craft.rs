@@ -356,6 +356,20 @@ impl Screen {
         }
     }
 
+    /// Spread (touch drag): put one item of the cursor stack into `id` when that slot is empty or holds the same
+    /// item with room. Unlike a right click it never swaps, and never fills an output slot. True if it was valid.
+    pub fn drop_one(&mut self, id: SlotId, inv: &mut Inventory, mut furn: Option<&mut Furnace>) -> bool {
+        let Some(c) = self.cursor else { return false };
+        if matches!(id, SlotId::Result | SlotId::Furn(2)) {
+            return false;
+        }
+        let fits = self.get(inv, furn.as_deref(), id).map_or(true, |h| h.id == c.id && h.damage == c.damage && h.count < max_stack(c.id));
+        if fits {
+            self.click(id, true, inv, furn);
+        }
+        fits
+    }
+
     /// `onCraftGuiClosed`: the cursor stack and everything left in the grid goes back into the world.
     pub fn close(&mut self) -> Vec<ItemStack> {
         self.cursor.take().into_iter().chain(self.grid.iter_mut().filter_map(Option::take)).collect()
@@ -365,10 +379,8 @@ impl Screen {
 // ---- Geometry: the vanilla 176 x 166 GUI, scaled to the surface ----
 
 pub const PANEL: (f32, f32) = (176.0, 166.0);
-/// Where the stack on the cursor is shown, and the "place one" toggle (this port has no right mouse button).
-/// Both sit in the column the vanilla armor slots would use.
-// UNVERIFIED: positions and the toggle itself are invented for touch (the original uses the mouse cursor and buttons).
-pub const HELD: (f32, f32) = (8.0, 17.0);
+/// The "place one" toggle (this port has no right mouse button), in the column the vanilla armor slots would use.
+// UNVERIFIED: position and the toggle itself are invented for touch (the original uses the mouse cursor and buttons).
 pub const MODE: (f32, f32) = (8.0, 53.0);
 
 /// Vanilla `(slot, x, y)` of every slot's top-left pixel (`ContainerPlayer` / `ContainerWorkbench` constructors).
@@ -510,6 +522,21 @@ mod tests {
         assert_eq!((s.cursor, f.slots[2]), (Some(stack(265, 3)), Some(stack(265, 2))));
         s.click(SlotId::Furn(0), false, &mut inv, Some(&mut f)); // the input slot takes anything
         assert_eq!(f.slots[0], Some(stack(265, 3)));
+    }
+
+    /// Touch spread: one item per slot, never a swap, never into an output slot.
+    #[test]
+    fn drop_one_spreads_the_cursor_stack() {
+        let mut inv = Inventory::default();
+        let mut s = Screen::new(2);
+        s.cursor = Some(stack(5, 3));
+        inv.slots[0] = Some(stack(3, 1));
+        assert!(!s.drop_one(SlotId::Result, &mut inv, None), "output slots refuse");
+        assert!(s.drop_one(SlotId::Grid(0), &mut inv, None) && s.drop_one(SlotId::Grid(2), &mut inv, None));
+        assert!(!s.drop_one(SlotId::Inv(0), &mut inv, None), "a different item is not swapped");
+        assert_eq!((inv.slots[0], s.cursor), (Some(stack(3, 1)), Some(stack(5, 1))));
+        assert!(s.drop_one(SlotId::Grid(0), &mut inv, None), "same item stacks up");
+        assert_eq!((s.grid[0], s.grid[2], s.cursor), (Some(stack(5, 2)), Some(stack(5, 1)), None));
     }
 
     /// Tools: ids, durability, speed on their blocks and the harvest gate.

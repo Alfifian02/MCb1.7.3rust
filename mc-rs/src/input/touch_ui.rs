@@ -37,6 +37,14 @@ const SLOP: f32 = 0.02;
 /// (x, y, w, h) in pixels.
 pub type Rect = (f32, f32, f32, f32);
 
+/// What the finger on an open screen did, in order; the screen decides what a tap or a drag means.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ScreenEv {
+    Down(f32, f32),
+    Move(f32, f32),
+    Up(f32, f32),
+}
+
 /// What a single pointer is currently doing.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum PointerRole {
@@ -192,8 +200,10 @@ pub struct TouchUi {
     pub screen: bool,
     /// The inventory button was released since the last `take_inventory`.
     inventory: bool,
-    /// Taps (finger-up positions) on an open screen since the last `take_taps`.
-    taps: Vec<(f32, f32)>,
+    /// Finger events on an open screen since the last `take_screen_events`.
+    events: Vec<ScreenEv>,
+    /// Where the finger last was on the open screen: the picked-up stack floats here.
+    pub cursor_pos: (f32, f32),
 }
 
 impl TouchUi {
@@ -210,7 +220,8 @@ impl TouchUi {
             place: false,
             screen: false,
             inventory: false,
-            taps: Vec::new(),
+            events: Vec::new(),
+            cursor_pos: (w as f32 * 0.5, h as f32 * 0.5),
         }
     }
 
@@ -219,14 +230,15 @@ impl TouchUi {
         std::mem::take(&mut self.inventory)
     }
 
-    /// Taps on an open screen since the last call, in surface pixels.
-    pub fn take_taps(&mut self) -> Vec<(f32, f32)> {
-        std::mem::take(&mut self.taps)
+    /// Finger events on an open screen since the last call, in surface pixels.
+    pub fn take_screen_events(&mut self) -> Vec<ScreenEv> {
+        std::mem::take(&mut self.events)
     }
 
     /// A screen opened or closed: drop every finger so none stays stuck as move, look or dig.
     pub fn set_screen(&mut self, open: bool) {
         self.screen = open;
+        self.cursor_pos = (self.surface_w as f32 * 0.5, self.surface_h as f32 * 0.5);
         self.clear();
     }
 
@@ -273,7 +285,7 @@ impl TouchUi {
         self.move_input = (0.0, 0.0);
         self.look_delta = (0.0, 0.0);
         self.place = false;
-        self.taps.clear();
+        self.events.clear();
     }
 
     /// Rebuild the layout if the surface size changed. True if it did.
@@ -313,13 +325,17 @@ impl TouchUi {
 
     fn on_press(&mut self, pid: i32, x: f32, y: f32, role: PointerRole) {
         // One move finger and one look finger at a time; extras are ignored.
-        if matches!(role, PointerRole::Move { .. } | PointerRole::Look)
+        if matches!(role, PointerRole::Move { .. } | PointerRole::Look | PointerRole::Tap)
             && self
                 .pointers
                 .values()
                 .any(|p| std::mem::discriminant(&p.role) == std::mem::discriminant(&role))
         {
             return;
+        }
+        if role == PointerRole::Tap {
+            self.events.push(ScreenEv::Down(x, y));
+            self.cursor_pos = (x, y);
         }
         self.pointers.insert(pid, Pointer { role, last: (x, y), held: 0.0, travel: 0.0, broke: false });
     }
@@ -337,6 +353,10 @@ impl TouchUi {
             PointerRole::Move { anchor } => {
                 self.move_input = stick_vector(x - anchor.0, y - anchor.1, self.layout.stick_radius);
             }
+            PointerRole::Tap => {
+                self.events.push(ScreenEv::Move(x, y));
+                self.cursor_pos = (x, y);
+            }
             _ => {}
         }
     }
@@ -350,7 +370,10 @@ impl TouchUi {
                 log::info!("touch: pause -> {}", self.paused);
             }
             PointerRole::Inventory => self.inventory = true,
-            PointerRole::Tap => self.taps.push(ptr.last),
+            PointerRole::Tap => {
+                self.events.push(ScreenEv::Up(ptr.last.0, ptr.last.1));
+                self.cursor_pos = ptr.last;
+            }
             PointerRole::Hotbar(slot) => self.hotbar_slot = slot,
             PointerRole::Move { .. } => self.move_input = (0.0, 0.0),
             PointerRole::Look => {
@@ -541,8 +564,17 @@ mod tests {
         let (jx, jy) = ui.layout.jump_center;
         tap(&mut ui, 3, jx, jy);
         tap(&mut ui, 4, 1800.0, 400.0);
-        assert_eq!(ui.take_taps(), vec![(jx, jy), (1800.0, 400.0)]);
-        assert!(!ui.jumping() && !ui.take_place() && ui.take_taps().is_empty());
+        assert_eq!(
+            ui.take_screen_events(),
+            vec![ScreenEv::Down(jx, jy), ScreenEv::Up(jx, jy), ScreenEv::Down(1800.0, 400.0), ScreenEv::Up(1800.0, 400.0)]
+        );
+        assert!(!ui.jumping() && !ui.take_place() && ui.take_screen_events().is_empty());
+        // A drag reports every move and floats the cursor with the finger.
+        ui.on_press(6, 1000.0, 500.0, PointerRole::Tap);
+        ui.on_move(6, 1100.0, 520.0);
+        assert_eq!(ui.cursor_pos, (1100.0, 520.0));
+        ui.on_release(6);
+        assert_eq!(ui.take_screen_events(), vec![ScreenEv::Down(1000.0, 500.0), ScreenEv::Move(1100.0, 520.0), ScreenEv::Up(1100.0, 520.0)]);
         // The pause button still works with a screen open.
         tap(&mut ui, 5, px + pw * 0.5, py + 1.0);
         assert!(ui.paused);

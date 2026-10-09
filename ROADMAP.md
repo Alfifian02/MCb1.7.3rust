@@ -24,7 +24,7 @@ McRegion save format. Client-only networking.
 
 ## Build
 - Workspace at `mc-rs/`
-- `cargo test --lib` runs the 46 unit tests (Android host such as Termux; see README).
+- `cargo test --lib` runs the 47 unit tests (Android host such as Termux; see README).
 - `cargo run` boots a desktop window (Metal / Vulkan / GL depending on host).
 - APK via GitHub Actions `cargo apk build --release` -> `MinecraftB173Rust.apk`.
 - A long-lived debug keystore at `keystore/debug.keystore` signs the release
@@ -46,6 +46,11 @@ ticks (liquids/sand). Sapling growth, fluid flow and falling sand belong with M5
 BiomeGenBase but climate never selects it; b1.7.3 has no ravines.
 
 ## Changelog
+- `done` touch spread (fix from a device report: with only tap = left click, a stack could not be split across a grid):
+  a picked-up stack floats above the finger (`TouchUi::cursor_pos`), and dragging it over other slots puts one item into each
+  slot it enters, the start slot included (`Screen::drop_one`: empty or same item with room, never a swap, never an output
+  slot). A press that lifts where it began is still a tap, and the "1" toggle stays. The yellow cursor box is gone. The
+  gesture state machine is in `lib.rs` (`on_screen_event`) and only `drop_one` is unit-tested; 47 tests pass, not run on a device.
 - `done` furnace + smelting (same host checks as M6: crate type-checks, 46 tests pass, NOT run on a device):
     - `world/craft.rs`: `Furnace` = `TileEntityFurnace.updateEntity` (fuel used up when the fire starts, 200 ticks per item, output stacks
       to 64, relights from the next fuel without a flip), `FurnaceRecipes` (iron/gold/diamond ore, sand -> glass, cobble -> stone, clay -> brick,

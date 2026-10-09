@@ -10,7 +10,7 @@ mod gpu;
 mod input;
 mod immersive;
 
-use crate::input::touch_ui::{PointerRole, TouchUi};
+use crate::input::touch_ui::{PointerRole, ScreenEv, TouchUi};
 use crate::render::hud::{HudPipeline, HudVertex};
 
 use android_activity::{AndroidApp, InputStatus, MainEvent, PollEvent};
@@ -81,6 +81,16 @@ struct App {
     /// Furnace tile entities by block position (created on first use), and the time left over from the last 20 Hz tick.
     furnaces: HashMap<(i32, i32, i32), Furnace>,
     furn_acc: f32,
+    /// The finger gesture on the open screen, to tell a tap from a spread.
+    gesture: Option<Gesture>,
+}
+
+/// A press on an open screen: where it began, whether it became a spread (a drag over slots with a stack on the
+/// cursor, one item into each slot it enters) and which slots it already filled.
+struct Gesture {
+    start: Option<craft::SlotId>,
+    spread: bool,
+    visited: Vec<craft::SlotId>,
 }
 
 impl App {
@@ -175,6 +185,7 @@ impl App {
             one_mode: false,
             furnaces: HashMap::new(),
             furn_acc: 0.0,
+            gesture: None,
         })
     }
 
@@ -255,8 +266,8 @@ impl App {
                 self.open_screen(Screen::new(2));
             }
         }
-        for (x, y) in self.touch.take_taps() {
-            self.on_screen_tap(x, y);
+        for ev in self.touch.take_screen_events() {
+            self.on_screen_event(ev);
         }
         let eye = self.camera.pos.as_dvec3();
         let end = eye + self.camera.forward().as_dvec3() * pick::REACH;
@@ -343,6 +354,44 @@ impl App {
             }
         }
         self.touch.set_screen(false);
+    }
+
+    /// A finger event on the open screen: a press that lifts where it began is a tap; one that drags over other
+    /// slots with a stack on the cursor spreads it, one item per slot (the start slot included).
+    fn on_screen_event(&mut self, ev: ScreenEv) {
+        let (w, h) = (self.gpu.config.width as f32, self.gpu.config.height as f32);
+        let Some(gw) = self.screen.as_ref().map(|s| s.gw) else { return };
+        let mut fill = Vec::new();
+        match ev {
+            ScreenEv::Down(x, y) => {
+                self.gesture = Some(Gesture { start: craft::slot_at(gw, w, h, x, y), spread: false, visited: Vec::new() });
+            }
+            ScreenEv::Move(x, y) => {
+                let (Some(g), Some(cur)) = (self.gesture.as_mut(), craft::slot_at(gw, w, h, x, y)) else { return };
+                if self.screen.as_ref().map_or(true, |s| s.cursor.is_none()) || (!g.spread && g.start == Some(cur)) {
+                    return;
+                }
+                if !g.spread {
+                    g.spread = true;
+                    fill.extend(g.start);
+                }
+                fill.push(cur);
+                fill.retain(|id| !g.visited.contains(id));
+                fill.dedup();
+                g.visited.extend(fill.iter().copied());
+            }
+            ScreenEv::Up(x, y) => {
+                if !self.gesture.take().is_some_and(|g| g.spread) {
+                    self.on_screen_tap(x, y);
+                }
+            }
+        }
+        for id in fill {
+            if let Some(s) = self.screen.as_mut() {
+                let furn = s.furnace.and_then(|p| self.furnaces.get_mut(&p));
+                s.drop_one(id, &mut self.inv, furn);
+            }
+        }
     }
 
     /// A tap on the open screen: the "place one" toggle, a slot, or outside the panel (throws the cursor stack).
@@ -558,14 +607,19 @@ impl App {
                 HudPipeline::push_quad(v, fx, fy, fw, fh, [0.45, 0.45, 0.45, 1.0]);
                 HudPipeline::push_quad(v, fx, fy + fh * (1.0 - left), fw, fh * left, [1.0, 0.6, 0.1, 1.0]);
             }
-            // The stack on the cursor (yellow edge), and the "place one" toggle under it: blue = whole stacks,
-            // orange with a 1 = one at a time (what the right mouse button does on a desktop).
-            slot(v, craft::cell(w, h, craft::HELD), s.cursor, [0.95, 0.8, 0.2, 1.0]);
+            // The "place one" toggle: blue = whole stacks, orange with a 1 = one at a time (what the right mouse
+            // button does on a desktop). Dragging the stack over slots spreads it without the toggle.
             let (mx, my, ms) = craft::cell(w, h, craft::MODE);
             let fill = if self.one_mode { [0.85, 0.5, 0.1, 1.0] } else { [0.2, 0.4, 0.7, 1.0] };
             HudPipeline::push_outlined_quad(v, mx, my, ms, ms, fill, [0.15, 0.15, 0.15, 1.0], k.max(2.0));
             if self.one_mode {
                 HudPipeline::push_number(v, mx + ms * 0.32, my + ms * 0.2, ms * 0.6, 1, [1.0; 4]);
+            }
+            // The picked-up stack floats just above the finger.
+            if let Some(c) = s.cursor {
+                let (cx, cy) = self.touch.cursor_pos;
+                let sz = 16.0 * k;
+                push_stack(v, (cx - sz * 0.5, cy - sz * 1.4, sz, sz), c);
             }
         }
 
