@@ -821,13 +821,14 @@ impl App {
             }
         }
 
-        // Name of the item just switched to, above the hearts.
+        // Name of the item just switched to, centred above the hotbar and the hearts.
+        // UNVERIFIED: not in b1.7.3 (Beta 1.8 added it); the 2 s, the 0.75 scale and the spot are invented.
         if let (true, Some(name)) = (play && self.tip.1 > 0.0, self.inv.slots[self.touch.hotbar_slot].and_then(items::name)) {
             let (w, h) = (self.gpu.config.width as f32, self.gpu.config.height as f32);
             let k = craft::panel(w, h).2;
-            let (hx, hy, hw, _) = layout.hotbar[self.touch.hotbar_slot];
-            let bw = (HudPipeline::text_width(name) as f32 + 6.0) * k;
-            HudPipeline::push_tooltip(v, (hx + hw * 0.5 - bw * 0.5).clamp(0.0, (w - bw).max(0.0)), hy - 34.0 * k, k, name);
+            let (hx, hy, hw, _) = layout.hotbar[4];
+            let bw = (HudPipeline::text_width(name) as f32 + 6.0) * k * 0.75;
+            HudPipeline::push_tooltip(v, hx + hw * 0.5 - bw * 0.5, hy - 34.0 * k, k * 0.75, name);
         }
 
         if play {
