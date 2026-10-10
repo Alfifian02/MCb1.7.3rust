@@ -633,6 +633,7 @@ impl App {
         let mut vlp = vl::params(self.world_ticks, angle, rain, sky_rgb, e.y);
         vlp.active &= !eye_in_water;
         let sun_strength = sky::shadow_strength(angle, rain);
+        vlp.shadow = sun_strength; // surface shadows come from the volumetric pass (`render::vl`), not the chunk shader
         // The shadow map is only redrawn when the eye, the light or the geometry moved enough (`ShadowCache`); the terrain and
         // the shafts read it with the matrix and light it was drawn with.
         let draw_shadow = self.shadow.refresh(sun_strength > 0.0 || vlp.active, e, vlp.light, self.chunks.mesh_gen);

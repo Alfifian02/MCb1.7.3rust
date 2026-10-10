@@ -142,35 +142,12 @@ fn vs_shadow(@location(0) p: vec3<f32>, @location(1) uv: vec2<f32>) -> @builtin(
     return vec4<f32>(c.xy / (length(c.xy) + u.sh.x), c.z * 0.5 + 0.25, 1.0);
 }
 
-// gbuffers_terrain.fsh, per pixel instead of per vertex (there is no normal attribute: a flat face's normal is the
-// cross of the position derivatives, turned toward the eye).
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let c = textureSample(tex, samp, in.uv);
     if c.a < 0.5 { discard; } // cut-out textures: plants, glass
-    var n = normalize(cross(dpdx(in.wp), dpdy(in.wp)));
-    if dot(n, u.eye.xyz - in.wp) < 0.0 { n = -n; }
-    var k = 1.0;
-    if u.sun.w > 0.0 {
-        k = u.sh.z; // facing away from the sun, or in shadow
-        let ndl = dot(n, u.sun.xyz);
-        if ndl > 0.0 {
-            let c0 = u.shadow_vp * vec4<f32>(in.wp, 1.0);
-            let f = length(c0.xy) + u.sh.x;
-            // computeBias + NORMAL_BIAS, in blocks: the world size of a shadow texel here (distortion stretches it by
-            // f^2 / K), pushed along the surface normal. (distort.glsl's own offset is 1/R of this, too small to stop acne.)
-            // Acne guard: near the eye the texel is ~1 cm, far less than the depth slope across it (and than the error of the
-            // per-vertex distortion), so the offset has a floor that grows as the sun grazes the surface (tan of the angle, <= 4).
-            let tn = min(sqrt(1.0 - ndl * ndl) / ndl, 4.0);
-            let bias = max(u.sh.y * f * f / u.sh.x, 0.06 * (1.0 + tn));
-            let c1 = u.shadow_vp * vec4<f32>(in.wp + n * bias, 1.0);
-            let p = vec3<f32>(c1.xy / (length(c1.xy) + u.sh.x) * 0.5 + 0.5, c1.z * 0.5 + 0.25);
-            let lit = textureSampleCompareLevel(sh_tex, sh_samp, vec2<f32>(p.x, 1.0 - p.y), p.z);
-            k = mix(k, mix(u.sh.z, 1.0, sqrt(ndl)), lit);
-        }
-        k = mix(1.0, k, u.sun.w);
-    }
-    var rgb = c.rgb * in.light * k;
+    // Shadows are not here any more: `render::vl` darkens the shadowed pixels in its full-screen blend.
+    var rgb = c.rgb * in.light;
     if u.fog.w > 0.0 {
         // fog.glsl `NormalFog`, `DISTANT_FADE` vanilla part with `fogOffset = 0`: 1 - (far - d) * 5 / (density * far).
         // Rain thickens it (`RAIN_FOG_DENSITY * rainFactor + 1`). Fog colour = the sky's horizon colour, so the edge melts into it.
@@ -431,9 +408,6 @@ impl ChunkPipeline {
         );
     }
 }
-
-#[cfg(test)]
-mod shadow_test;
 
 pub fn create_vertex_buffer(device: &Device, verts: &[Vertex]) -> Buffer {
     device.create_buffer_init(&wgpu::util::BufferInitDescriptor {

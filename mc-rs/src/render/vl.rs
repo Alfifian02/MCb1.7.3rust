@@ -28,6 +28,11 @@ const STRENGTH: f32 = 1.0;
 /// Added to the sample's shadow-map depth, like `shadowPosition.z += 0.0001`: the pack's depth range is not ours,
 /// this is ~0.25 block (one block = 0.5 / 256 of depth here). UNVERIFIED on a device.
 const DEPTH_BIAS: f32 = 0.0005;
+/// Extra depth bias for the shadow test of the surface itself (the march's samples hang in air): ~1 block along the light, so a
+/// flat floor does not shadow itself (the pass has no normal to offset along). UNVERIFIED on a device.
+const SURFACE_BIAS: f32 = 0.002;
+/// How dark a fully shadowed, fully sunlit surface gets (the old per-pixel shadow was 0.25). UNVERIFIED: tune on a device.
+const SHADOW_DARK: f32 = 0.55;
 
 /// What the shader needs besides the camera: the light, and the per-frame scalars of `composite1.glsl`.
 pub struct Params {
@@ -45,6 +50,8 @@ pub struct Params {
     endurance: f32,
     power: f32,
     rain: f32,
+    /// Darkness of a shadowed surface, 0..1 (0 = no shadows: night, rain). The caller sets it (`world::sky::shadow_strength`).
+    pub shadow: f32,
 }
 
 fn mix(a: f32, b: f32, t: f32) -> f32 {
@@ -127,6 +134,7 @@ pub fn params(time: f64, angle: f32, rain: f32, sky_rgb: [f32; 3], eye_y: f32) -
         endurance: 1.2 * (2.0 + rain * rain - sv * sv).min(2.0),
         power: (1.75 - rain + sv * 0.25).max(1.0),
         rain,
+        shadow: 0.0,
     }
 }
 
@@ -153,11 +161,12 @@ struct U {
     c: [f32; 4],
     /// rgb: colour scale, w: lightShaftTime.
     s: [f32; 4],
-    /// xy: frame size in pixels.
+    /// xy: frame size in pixels, z: surface shadow darkness (`SHADOW_DARK` x sun strength).
     res: [f32; 4],
 }
 
 const SHADER: &str = r#"
+const SURFACE_BIAS: f32 = @SB@; // `SURFACE_BIAS` of vl.rs
 struct U {
     cam: mat4x4<f32>,
     shadow_cam: mat4x4<f32>,
@@ -232,18 +241,28 @@ fn fs_march(in: FsIn) -> @location(0) vec4<f32> {
     }
     var v = pow(sqrt(sum * visibility), u.a.w) * 0.9;
     if v > 0.0 { v = v + (dither - 0.19) / 128.0; }
-    return vec4<f32>(v, 0.0, 0.0, 1.0);
+    // The surface's own shadow (g): the same lookup at the pixel's depth (not the sky), 1 = in shadow, 0 = lit or off the map.
+    var sh = 0.0;
+    if u.res.z > 0.0 && z < 1.0 {
+        let c = u.shadow_cam * vec4<f32>(r * depth, 1.0);
+        if abs(c.x) < 1.0 && abs(c.y) < 1.0 {
+            let p = vec3<f32>(c.xy / (length(c.xy) + u.a.x) * 0.5 + 0.5, c.z * 0.5 + 0.25 + u.light.w + SURFACE_BIAS);
+            sh = 1.0 - textureSampleCompareLevel(sh_tex, sh_samp, vec2<f32>(p.x, 1.0 - p.y), p.z);
+        }
+    }
+    return vec4<f32>(v, sh, 0.0, 1.0);
 }
 
 // composite1.glsl: 4-tap blur, square, colour, and the blend, written as `rgb + dst * (1 - a)`.
 @fragment
 fn fs_comp(in: FsIn) -> @location(0) vec4<f32> {
     let px = 1.0 / u.res.xy;
-    let m = textureSampleLevel(vl_tex, vl_samp, in.uv + vec2<f32>(0.0, px.y), 0.0).r
-          + textureSampleLevel(vl_tex, vl_samp, in.uv - vec2<f32>(0.0, px.y), 0.0).r
-          + textureSampleLevel(vl_tex, vl_samp, in.uv + vec2<f32>(px.x, 0.0), 0.0).r
-          + textureSampleLevel(vl_tex, vl_samp, in.uv - vec2<f32>(px.x, 0.0), 0.0).r;
-    let vlp = (m * 0.25) * (m * 0.25);
+    let m = textureSampleLevel(vl_tex, vl_samp, in.uv + vec2<f32>(0.0, px.y), 0.0).rg
+          + textureSampleLevel(vl_tex, vl_samp, in.uv - vec2<f32>(0.0, px.y), 0.0).rg
+          + textureSampleLevel(vl_tex, vl_samp, in.uv + vec2<f32>(px.x, 0.0), 0.0).rg
+          + textureSampleLevel(vl_tex, vl_samp, in.uv - vec2<f32>(px.x, 0.0), 0.0).rg;
+    let vlp = (m.x * 0.25) * (m.x * 0.25);
+    let dark = m.y * 0.25 * u.res.z; // blurred surface shadow x strength
     let dirw = normalize((u.cam * vec4<f32>(view_ray(in.uv), 0.0)).xyz);
     var nu = 1.0 - max(dirw.y, 0.0); // NdotU
     if nu > 0.5 { nu = smoothstep(0.0, 1.0, nu); }
@@ -251,7 +270,8 @@ fn fs_comp(in: FsIn) -> @location(0) vec4<f32> {
     nu = mix(nu, 1.0, u.b.z * u.b.z * 0.75);
     let vl = vlp * (nu * nu) * u.s.rgb;
     let k = (1.0 - u.b.x) * vlp * (1.0 - 0.5 * u.b.z) * u.b.y; // (1 - w) * vlMixBlend * mixedTime
-    return vec4<f32>(k * (vl / max(vlp, 0.01)) + u.b.x * u.s.w * vl, k);
+    // Blend is `rgb + dst * (1 - a)`: the shafts' glow is unchanged, the frame under it is scaled by (1 - k) and by (1 - dark).
+    return vec4<f32>(k * (vl / max(vlp, 0.01)) + u.b.x * u.s.w * vl, 1.0 - (1.0 - k) * (1.0 - dark));
 }
 "#;
 
@@ -301,7 +321,7 @@ impl LightShafts {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("vl_shader"), source: wgpu::ShaderSource::Wgsl(SHADER.into()) });
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("vl_shader"), source: wgpu::ShaderSource::Wgsl(SHADER.replace("@SB@", &format!("{SURFACE_BIAS:?}")).into()) });
         let pipeline = |label, layouts: &[&BindGroupLayout], fs: &str, format, blend| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
@@ -378,7 +398,7 @@ impl LightShafts {
             // minDistFactor = 8 * clamp(far, 0, 512) / 192, then * 0.5 / 1.7; addition = 0.5 * 1.42857.
             c: [8.0 * cam.zfar.clamp(0.0, 512.0) / 192.0 * 0.5 / 1.7, 0.5 * 1.42857, 0.0, 0.0],
             s: [p.scale[0], p.scale[1], p.scale[2], p.lst],
-            res: [w as f32, h as f32, 0.0, 0.0],
+            res: [w as f32, h as f32, p.shadow * SHADOW_DARK, 0.0],
         };
         gpu.queue.write_buffer(&self.ubuf, 0, bytemuck::bytes_of(&u));
         let t = self.target.as_ref().unwrap();
