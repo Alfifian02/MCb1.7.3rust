@@ -292,6 +292,9 @@ fn fs_march(in: FsIn) -> @location(0) vec4<f32> {
                 let p = vec3<f32>(c.xy / (length(c.xy) + u.a.x) * 0.5 + 0.5, c.z * 0.5 + 0.25 + bias);
                 sh = 1.0 - textureSampleCompareLevel(sh_tex, sh_samp, vec2<f32>(p.x, 1.0 - p.y), p.z);
             }
+            // A face lit at a grazing angle gets almost no light anyway, and no bias fixes its acne (the rings on flat ground at a
+            // low sun): fade from the map's answer to plain shadow, like N.L going to 0.
+            sh = mix(1.0, sh, smoothstep(0.05, 0.3, nl));
         }
     }
     return vec4<f32>(v, sh, 0.0, 1.0);
