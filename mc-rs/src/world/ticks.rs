@@ -14,7 +14,7 @@ use crate::world::chunk::light_opacity;
 use crate::world::chunks::ChunkManager;
 use crate::world::gen::noise::JavaRandom;
 use crate::world::items::{Drops, ItemStack};
-use crate::world::pick::replaceable;
+use crate::world::pick::{replaceable, torch_stays};
 
 /// Chunks around the player whose blocks tick at random (`World.tick`'s active set).
 const ACTIVE: i32 = 9;
@@ -29,7 +29,7 @@ pub fn ticks_at_random(id: u8) -> bool {
 }
 
 /// `Material.isSolid` false: air, fluids, plants, fire, web, snow layer, portal and the "circuit" blocks.
-fn non_solid(id: u8) -> bool {
+pub fn non_solid(id: u8) -> bool {
     matches!(id, 0 | 6 | 8..=11 | 27 | 28 | 30..=32 | 37..=40 | 50 | 51 | 55 | 59 | 66 | 69 | 70 | 72 | 75..=78 | 90)
 }
 
@@ -167,6 +167,11 @@ impl Ticks {
             12 | 13 => self.schedule(x, y, z, id, 3),
             6 | 31 | 32 | 37..=40 | 59 | 81 | 83 => {
                 check_stay(w, drops, x, y, z, id);
+            }
+            // BlockTorch.onNeighborBlockChange: the wall or floor it hangs on is gone, so it drops itself.
+            50 if !torch_stays(&|a, b, c| bid(w, a, b, c), (x, y, z), w.meta(x, y, z)) => {
+                drops.spawn_block(50, 0, (x, y, z));
+                w.set_block(x, y, z, 0);
             }
             // BlockFarmland: something solid on top turns it back to dirt.
             60 if !non_solid(bid(w, x, y + 1, z)) => {

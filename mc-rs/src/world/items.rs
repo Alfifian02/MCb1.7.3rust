@@ -6,7 +6,7 @@
 use glam::Vec3;
 
 use crate::render::atlas;
-use crate::world::chunk::is_plant;
+use crate::world::chunk::collision;
 use crate::world::craft;
 use crate::world::dig::TICK;
 use crate::world::gen::noise::JavaRandom;
@@ -258,9 +258,10 @@ pub struct ItemEntity {
     on_ground: bool,
 }
 
-/// Anything an item cannot pass: not air, plants, water or lava. An unloaded chunk reads as solid (`ChunkManager::block`).
+/// Anything an item cannot pass: a block with a collision box (not air, plants, torches, water or lava). An unloaded chunk reads as
+/// solid (`ChunkManager::block`). ponytail: the whole cell, not the box (an item rests on a slab at the cell's top).
 fn solid(get: BlockQuery<'_>, c: [i32; 3]) -> bool {
-    get(c[0], c[1], c[2]).is_some_and(|b| b != 0 && !is_plant(b) && !(8..=11).contains(&b))
+    get(c[0], c[1], c[2]).is_some_and(|b| collision(b).is_some())
 }
 
 fn cell(p: Vec3) -> [i32; 3] {

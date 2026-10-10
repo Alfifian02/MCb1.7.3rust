@@ -30,13 +30,14 @@ use crate::render::sky::{SkyFrame, SkyRenderer};
 use crate::render::vl::{self, LightShafts};
 use crate::world::pick::{self, Hit};
 use crate::world::dig::{self, Dig};
+use crate::world::chest::{self, Chest};
 use crate::world::craft::{self, Furnace, Screen};
 use crate::world::items::{self, Drops, Inventory, ItemStack};
 use crate::world::mobs::{self, Ctx, Ev, Mobs};
 use crate::world::ticks::Ticks;
 use crate::world::save::{self, Level};
 use crate::world::sky;
-use crate::world::chunk::{cross_shape, is_plant};
+use crate::world::chunk::{is_plant, outline_bounds, physics_id, pick_bounds};
 use crate::world::chunks::{chunk_coord, ChunkManager, Shape};
 use crate::world::physics::{self, Player};
 use crate::world::vitals::{self, Env, Vitals};
@@ -116,6 +117,8 @@ struct App {
     /// Furnace tile entities by block position (created on first use), and the time left over from the last 20 Hz tick.
     furnaces: HashMap<(i32, i32, i32), Furnace>,
     furn_acc: f32,
+    /// Chest tile entities by block position (created on first open, or by a dungeon's populate).
+    chests: HashMap<chest::Pos, Chest>,
     /// The finger gesture on the open screen, to tell a tap from a spread.
     gesture: Option<Gesture>,
     /// Health, air and fire; and where a dead player comes back (the first spawn: no beds yet).
@@ -213,6 +216,7 @@ impl App {
             screen: None,
             one_mode: false,
             furnaces: HashMap::new(),
+            chests: HashMap::new(),
             furn_acc: 0.0,
             gesture: None,
             vitals: Vitals::default(),
@@ -264,6 +268,7 @@ impl App {
         self.vitals.fire = l.vitals[2];
         self.inv.slots = l.inv;
         self.furnaces = l.furnaces.into_iter().collect();
+        self.chests = l.chests.into_iter().collect();
         self.drops.items = l.drops.into_iter().map(|(p, s, age)| items::ItemEntity::resting(p, s, age)).collect();
     }
 
@@ -286,6 +291,7 @@ impl App {
             vitals: [self.vitals.health, self.vitals.air, self.vitals.fire],
             inv: self.inv.slots,
             furnaces: self.furnaces.iter().map(|(&p, f)| (p, f.clone())).collect(),
+            chests: self.chests.iter().map(|(&p, &c)| (p, c)).collect(),
             drops: self.drops.items.iter().map(|e| (e.pos, e.stack, e.age)).collect(),
         };
         if let Err(e) = save::write(&self.dir.join("level"), &level.encode()) {
@@ -359,7 +365,7 @@ impl App {
         self.player.vel.x = (fwd * yaw.sin() + side * yaw.cos()) * MOVE_SPEED;
         self.player.vel.z = (-fwd * yaw.cos() + side * yaw.sin()) * MOVE_SPEED;
         // Plants are drawn but not solid yet (collision shapes come with M14), so physics reads them as air.
-        let get = |x: i32, y: i32, z: i32| self.chunks.block(x, y, z).map(|b| if is_plant(b) { 0 } else { b });
+        let get = |x: i32, y: i32, z: i32| self.chunks.block(x, y, z).map(|b| if is_plant(b) { 0 } else { physics_id(b, self.chunks.meta(x, y, z)) });
         // The held jump button jumps (8.4 m/s, the b1.7.3 velocity) or swims up; fluids (ids 8..=11) are not solid.
         let y0 = self.player.pos.y;
         let (water, lava) = physics::step(&mut self.player, dt, self.touch.jumping(), &get);
@@ -376,7 +382,7 @@ impl App {
             return;
         }
         // Dropped items fall, settle and get picked up (before the target check below, which can return early).
-        self.drops.tick(dt, &|x: i32, y: i32, z: i32| self.chunks.block(x, y, z), self.player.pos, &mut self.inv);
+        self.drops.tick(dt, &|x: i32, y: i32, z: i32| self.chunks.block(x, y, z).map(|b| physics_id(b, self.chunks.meta(x, y, z))), self.player.pos, &mut self.inv);
         let light = |x: i32, y: i32, z: i32| self.chunks.light(x, y, z);
         let ctx = Ctx { get: &get, light: &light, day: sub < 4, player: self.player.pos, eye: self.camera.pos };
         for e in self.mobs.update(dt, &ctx, &mut self.drops) {
@@ -402,6 +408,22 @@ impl App {
             for ((x, y, z), lit) in flips {
                 self.chunks.set_block(x, y, z, if lit { 62 } else { 61 });
             }
+            // Chests: take over what a dungeon's populate put in them; one whose block is gone (dug, blown up, washed away)
+            // spills its contents (`BlockChest.onBlockRemoval`; ponytail: seen on the next 20 Hz tick, not at the removal).
+            for (p, c) in self.chunks.take_loot() {
+                self.chests.entry(p).or_insert(c);
+            }
+            let gone: Vec<_> = self.chests.keys().copied().filter(|&(x, y, z)| self.chunks.block_loaded(x, y, z).is_some_and(|b| b != chest::ID)).collect();
+            for p in gone {
+                for st in self.chests.remove(&p).into_iter().flatten().flatten() {
+                    self.drops.scatter(st, p);
+                }
+            }
+        }
+
+        // `EntityPlayer.onUpdate`: a container that is no longer usable (the chest is gone, or the eye is 8+ blocks away) closes.
+        if self.screen.as_ref().is_some_and(|s| !s.chests.is_empty() && !chest::usable(&|x, y, z| self.chunks.block(x, y, z).unwrap_or(0), self.camera.pos, &s.chests)) {
+            self.close_screen();
         }
 
         // M5: pick the block under the crosshair, dig it while the dig input is held, place on a tap.
@@ -420,10 +442,10 @@ impl App {
         }
         let eye = self.camera.pos.as_dvec3();
         let end = eye + self.camera.forward().as_dvec3() * pick::REACH;
-        // Liquids are not pickable (vanilla's rayTraceBlocks skips them), nor is the snow layer, which is not drawn yet.
-        // ponytail: a plant is picked as a whole cell, not by its (smaller) bounds.
-        let solid = |x: i32, y: i32, z: i32| matches!(self.chunks.block_loaded(x, y, z), Some(b) if b != 0 && (!is_plant(b) || cross_shape(b).is_some()) && !(8..=11).contains(&b));
-        self.target = pick::ray_trace(&solid, eye, end);
+        // The crosshair hits a block's bounds (`Block.collisionRayTrace`: a sapling's small box, half a slab); liquids are not pickable
+        // (vanilla's rayTraceBlocks skips them).
+        let bounds = |x: i32, y: i32, z: i32| self.chunks.block_loaded(x, y, z).and_then(|b| pick_bounds(b, self.chunks.meta(x, y, z)));
+        self.target = pick::ray_trace(&bounds, eye, end);
 
         // Digging runs on the 20 Hz game tick of the Java (hardness-based time, see world::dig).
         // A broken block drops its items (world::items) only if the held item may harvest it (stone needs a pickaxe),
@@ -500,6 +522,16 @@ impl App {
                     self.open_screen(Screen::at_furnace(hit.pos));
                     return;
                 }
+                Some(chest::ID) => {
+                    // `BlockChest.blockActivated`: a large chest opens as one; under a normal cube nothing opens. Never places.
+                    if let Some(group) = chest::open(&|x, y, z| self.chunks.block(x, y, z).unwrap_or(0), hit.pos) {
+                        for p in &group {
+                            self.chests.entry(*p).or_default();
+                        }
+                        self.open_screen(Screen::at_chest(group));
+                    }
+                    return;
+                }
                 _ => {}
             }
             // ItemHoe.onItemUse: till dirt (or grass with air above) into farmland, one use of wear. A hoe never
@@ -521,8 +553,12 @@ impl App {
             // Items below 256 are blocks; anything else cannot be placed. ItemBlock refuses a solid block at y = 127
             // (ponytail: plants are refused there too).
             if let Some(s) = self.inv.slots[slot].filter(|s| s.id < 256) {
-                if y < 127 && self.chunks.block_loaded(x, y, z).is_some_and(pick::replaceable) && !pick::overlaps_player((x, y, z), self.player.pos) && self.chunks.set_block_meta(x, y, z, s.id as u8, items::placed_meta(s)) {
-                    self.inv.consume(slot);
+                // A torch's facing comes from the face aimed at and what can hold it (None = nothing to hang on: no placement).
+                let meta = if s.id == 50 { pick::torch_meta(&|a, b, c| self.chunks.block_loaded(a, b, c).unwrap_or(0), (x, y, z), hit.face) } else { Some(items::placed_meta(s)) };
+                if let Some(meta) = meta.filter(|_| y < 127 && self.chunks.block_loaded(x, y, z).is_some_and(pick::replaceable) && !pick::overlaps_player((x, y, z), s.id as u8, self.player.pos) && (s.id != chest::ID as u16 || chest::can_place(&|a, b, c| self.chunks.block(a, b, c).unwrap_or(0), (x, y, z)))) {
+                    if self.chunks.set_block_meta(x, y, z, s.id as u8, meta) {
+                        self.inv.consume(slot);
+                    }
                 }
             } else {
                 self.eat();
@@ -570,7 +606,7 @@ impl App {
         self.touch.pause();
     }
 
-    /// Open a container screen: the 2x2 inventory, a workbench's 3x3 or a furnace.
+    /// Open a container screen: the 2x2 inventory, a workbench's 3x3, a furnace or chests.
     fn open_screen(&mut self, screen: Screen) {
         self.screen = Some(screen);
         self.one_mode = false;
@@ -585,6 +621,34 @@ impl App {
             }
         }
         self.touch.set_screen(false);
+    }
+
+    /// The slots behind the open screen: a furnace's 3, or the chests' 27 each (upper half first); `None` for the 2x2 and the workbench.
+    fn ext(&self, s: &Screen) -> Option<Vec<Option<ItemStack>>> {
+        if let Some(f) = s.furnace.and_then(|p| self.furnaces.get(&p)) {
+            return Some(f.slots.to_vec());
+        }
+        (!s.chests.is_empty()).then(|| s.chests.iter().flat_map(|p| self.chests.get(p).copied().unwrap_or_default()).collect())
+    }
+
+    /// Run `f` on the open screen with the slots behind it (`ext`): they are copied out and written back, so a large chest's
+    /// two halves are one slice, as `InventoryLargeChest` makes them. `None` when no screen is open.
+    fn with_ext<R>(&mut self, f: impl FnOnce(&mut Screen, &mut Inventory, Option<&mut [Option<ItemStack>]>) -> R) -> Option<R> {
+        let mut s = self.screen.take()?;
+        let mut ext = self.ext(&s);
+        let r = f(&mut s, &mut self.inv, ext.as_deref_mut());
+        if let Some(e) = ext {
+            if let Some(furn) = s.furnace.and_then(|p| self.furnaces.get_mut(&p)) {
+                furn.slots.copy_from_slice(&e);
+            }
+            for (p, part) in s.chests.iter().zip(e.chunks(chest::SIZE)) {
+                if let Some(c) = self.chests.get_mut(p) {
+                    c.copy_from_slice(part);
+                }
+            }
+        }
+        self.screen = Some(s);
+        Some(r)
     }
 
     /// A finger event on the open screen: a press that lifts where it began is a tap; one that drags over other
@@ -618,23 +682,21 @@ impl App {
             }
         }
         for id in fill {
-            if let Some(s) = self.screen.as_mut() {
-                let furn = s.furnace.and_then(|p| self.furnaces.get_mut(&p));
-                s.drop_one(id, &mut self.inv, furn);
-            }
+            self.with_ext(|s, inv, ext| s.drop_one(id, inv, ext));
         }
     }
 
     /// A tap on the open screen: the "place one" toggle, a slot, or outside the panel (throws the cursor stack).
     fn on_screen_tap(&mut self, x: f32, y: f32) {
         let (w, h) = (self.gpu.config.width as f32, self.gpu.config.height as f32);
-        let Some(s) = self.screen.as_mut() else { return };
-        if craft::on_mode_button(w, h, x, y) {
-            self.one_mode = !self.one_mode;
-        } else if let Some(id) = craft::slot_at(s.gw, w, h, x, y) {
-            let furn = s.furnace.and_then(|p| self.furnaces.get_mut(&p));
-            s.click(id, self.one_mode, &mut self.inv, furn);
-        } else if !craft::in_panel(w, h, x, y) {
+        let Some(gw) = self.screen.as_ref().map(|s| s.gw) else { return };
+        let one = self.one_mode;
+        if craft::on_mode_button(gw, w, h, x, y) {
+            self.one_mode = !one;
+        } else if let Some(id) = craft::slot_at(gw, w, h, x, y) {
+            self.with_ext(|s, inv, ext| s.click(id, one, inv, ext));
+        } else if !craft::in_panel(gw, w, h, x, y) {
+            let Some(s) = self.screen.as_mut() else { return };
             // Click outside the window (slot -999): throw the cursor stack, or one item of it.
             if let Some(c) = s.cursor {
                 let n = if self.one_mode { 1 } else { c.count };
@@ -649,7 +711,11 @@ impl App {
         let (pcx, pcz) = (chunk_coord(self.player.pos.x), chunk_coord(self.player.pos.z));
         self.chunks.update(&self.gpu.device, pcx, pcz);
         let (view, proj) = self.camera.build_view_proj();
-        let outline_indices = self.target.map_or(0, |h| self.outline.update(&self.gpu.queue, h.pos));
+        let outline_indices = self.target.map_or(0, |h| {
+            let (x, y, z) = h.pos;
+            let b = self.chunks.block_loaded(x, y, z).and_then(|b| outline_bounds(b, self.chunks.meta(x, y, z)));
+            b.map_or(0, |b| self.outline.update(&self.gpu.queue, h.pos, b))
+        });
         let item_indices = self.item_mesh.update(&self.gpu.queue, &self.drops, &self.mobs, &self.ticks.falling);
 
         // Sky and fog colour from the sun angle, the weather and the climate under the player; the frame is cleared to
@@ -782,9 +848,9 @@ impl App {
             rp.set_bind_group(1, &self.pipe.shadow_bind, &[]);
             // One draw per run of chunk sections that is in the render shape and the view frustum.
             let (rh, rv) = ((RENDER_DIST * 16) as f32, (RENDER_VERT * 16) as f32);
-            self.chunks.draw_ranges(self.camera.pos, RENDER_SHAPE, rh, rv, |min, max| frustum.intersects_aabb(min, max), |m, r| {
+            self.chunks.draw_ranges(self.camera.pos, RENDER_SHAPE, rh, rv, false, |min, max| frustum.intersects_aabb(min, max), |m, ib, r| {
                 rp.set_vertex_buffer(0, m.vbuf.slice(..));
-                rp.set_index_buffer(m.ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                rp.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
                 rp.draw_indexed(r, 0, 0..1);
             });
             if item_indices > 0 {
@@ -792,6 +858,14 @@ impl App {
                 rp.set_index_buffer(self.item_mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
                 rp.draw_indexed(0..item_indices, 0, 0..1);
             }
+            // Water last: blended over the terrain and the entities, no depth write (`water_pipeline`; same groups as the terrain).
+            rp.set_pipeline(&self.pipe.water_pipeline);
+            self.chunks.draw_ranges(self.camera.pos, RENDER_SHAPE, rh, rv, true, |min, max| frustum.intersects_aabb(min, max), |m, ib, r| {
+                rp.set_vertex_buffer(0, m.vbuf.slice(..));
+                rp.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
+                rp.draw_indexed(r, 0, 0..1);
+            });
+            rp.set_pipeline(&self.pipe.pipeline);
             if outline_indices > 0 {
                 rp.set_vertex_buffer(0, self.outline.vbuf.slice(..));
                 rp.set_index_buffer(self.outline.ibuf.slice(..), wgpu::IndexFormat::Uint32);
@@ -889,9 +963,10 @@ impl App {
         // Container screen: the vanilla GUI (176 x 166 units) over a dimmed frame, slots with their stacks.
         if let Some(s) = &self.screen {
             let (w, h) = (self.gpu.config.width as f32, self.gpu.config.height as f32);
-            let (ox, oy, k) = craft::panel(w, h);
+            let (ox, oy, k) = craft::panel(s.gw, w, h);
+            let (pw, ph) = craft::panel_size(s.gw);
             HudPipeline::push_quad(v, 0.0, 0.0, w, h, [0.0, 0.0, 0.0, 0.55]);
-            HudPipeline::push_outlined_quad(v, ox, oy, craft::PANEL.0 * k, craft::PANEL.1 * k, [0.78, 0.78, 0.78, 0.97], [0.15, 0.15, 0.15, 1.0], (2.0 * k).max(2.0));
+            HudPipeline::push_outlined_quad(v, ox, oy, pw * k, ph * k, [0.78, 0.78, 0.78, 0.97], [0.15, 0.15, 0.15, 1.0], (2.0 * k).max(2.0));
             let slot = |v: &mut Vec<HudVertex>, c: (f32, f32, f32), st: Option<ItemStack>, edge: [f32; 4]| {
                 let inner = (c.0 + k, c.1 + k, c.2 - 2.0 * k, c.2 - 2.0 * k);
                 HudPipeline::push_quad(v, c.0, c.1, c.2, c.2, edge);
@@ -901,8 +976,15 @@ impl App {
                 }
             };
             let furn = s.furnace.and_then(|p| self.furnaces.get(&p));
+            let ext = self.ext(s);
             for (id, ux, uy) in craft::layout(s.gw) {
-                slot(v, craft::cell(w, h, (ux, uy)), s.get(&self.inv, furn, id), [0.3, 0.3, 0.3, 1.0]);
+                slot(v, craft::cell(s.gw, w, h, (ux, uy)), s.get(&self.inv, ext.as_deref(), id), [0.3, 0.3, 0.3, 1.0]);
+            }
+            if !s.chests.is_empty() {
+                // `GuiChest.drawGuiContainerForegroundLayer`: the chest's name at (8, 6), "Inventory" at (8, ySize - 96 + 2), colour 0x404040.
+                let (title, ink) = (if s.chests.len() > 1 { "Large chest" } else { "Chest" }, [0.25, 0.25, 0.25, 1.0]);
+                HudPipeline::push_text(v, ox + 8.0 * k, oy + 6.0 * k, k, title, ink);
+                HudPipeline::push_text(v, ox + 8.0 * k, oy + (ph - 94.0) * k, k, "Inventory", ink);
             }
             if let Some(f) = furn {
                 // Cook arrow (fills left to right over 200 ticks) and flame (drains from the top), vanilla positions.
@@ -917,7 +999,7 @@ impl App {
             }
             // The "place one" toggle: blue = whole stacks, orange with a 1 = one at a time (what the right mouse
             // button does on a desktop). Dragging the stack over slots spreads it without the toggle.
-            let (mx, my, ms) = craft::cell(w, h, craft::MODE);
+            let (mx, my, ms) = craft::cell(s.gw, w, h, craft::MODE);
             let fill = if self.one_mode { [0.85, 0.5, 0.1, 1.0] } else { [0.2, 0.4, 0.7, 1.0] };
             HudPipeline::push_outlined_quad(v, mx, my, ms, ms, fill, [0.15, 0.15, 0.15, 1.0], k.max(2.0));
             if self.one_mode {
@@ -934,7 +1016,7 @@ impl App {
             // stack is named too because a tap picks the slot's stack up and the finger then covers it.
             if self.gesture.is_some() {
                 let (cx, cy) = self.touch.cursor_pos;
-                let under = || craft::slot_at(s.gw, w, h, cx, cy).and_then(|id| s.get(&self.inv, furn, id));
+                let under = || craft::slot_at(s.gw, w, h, cx, cy).and_then(|id| s.get(&self.inv, ext.as_deref(), id));
                 if let Some(name) = s.cursor.or_else(under).and_then(items::name) {
                     let bw = (HudPipeline::text_width(name) as f32 + 6.0) * k;
                     let ty = if cy > 36.0 * k { cy - 34.0 * k } else { cy + 14.0 * k };
@@ -977,7 +1059,7 @@ impl App {
         // UNVERIFIED: not in b1.7.3 (Beta 1.8 added it); the 2 s, the 0.75 scale and the spot are invented.
         if let (true, Some(name)) = (play && self.tip.1 > 0.0, self.inv.slots[self.touch.hotbar_slot].and_then(items::name)) {
             let (w, h) = (self.gpu.config.width as f32, self.gpu.config.height as f32);
-            let k = craft::panel(w, h).2;
+            let k = craft::panel(0, w, h).2;
             let (hx, hy, hw, _) = layout.hotbar[4];
             let bw = (HudPipeline::text_width(name) as f32 + 6.0) * k * 0.75;
             HudPipeline::push_tooltip(v, hx + hw * 0.5 - bw * 0.5, hy - 34.0 * k, k * 0.75, name);

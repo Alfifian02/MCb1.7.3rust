@@ -9,7 +9,7 @@
 //! UNVERIFIED / simplified on purpose (none of these change a Random draw, only a placed block):
 //! - Light is the column model of `Chunk.func_1024_c` (15 minus the opacities from the top
 //!   down), so no lateral spread and no block light. Used by flowers, mushrooms and lake grass.
-//! - No tile entities (chest loot and the spawner mob are drawn from the Random and dropped), no block
+//! - Only the dungeon chests are tile entities (`Region::take_loot`); the spawner mob is drawn from the Random and dropped. No block
 //!   ticks: springs are placed but do not flow, sand/gravel do not fall.
 //!
 //! Block metadata is written like the Java (`setBlockAndMetadata`): birch and taiga leaf/log species, the
@@ -17,9 +17,11 @@
 //! the `META` lines of the golden file.
 
 use crate::world::biome::Biome;
+use crate::world::chest::{Chest, Pos};
 use crate::world::chunk::{idx, Nibbles};
 use crate::world::gen::chunk_manager::WorldChunkManager;
 use crate::world::gen::noise::{ifloor, mh_cos, mh_sin, JavaRandom};
+use crate::world::items::ItemStack;
 use crate::world::gen::overworld::{block::*, OverworldGenerator};
 use std::f32::consts::PI;
 
@@ -33,11 +35,18 @@ pub struct Region {
     b: [Vec<u8>; 4],
     /// Block metadata of the same chunks (`Chunk.data`).
     d: [Nibbles; 4],
+    /// The tile entities populate filled: dungeon chests and their loot (`WorldGenDungeons`).
+    loot: Vec<(Pos, Chest)>,
 }
 
 impl Region {
     pub fn new(cx: i32, cz: i32, b: [Vec<u8>; 4], d: [Nibbles; 4]) -> Self {
-        Self { cx, cz, b, d }
+        Self { cx, cz, b, d, loot: Vec::new() }
+    }
+
+    /// The chests populate filled since the last call.
+    pub fn take_loot(&mut self) -> Vec<(Pos, Chest)> {
+        std::mem::take(&mut self.loot)
     }
 
     pub fn into_parts(self) -> ([Vec<u8>; 4], [Nibbles; 4]) {
@@ -414,7 +423,8 @@ fn lake(w: &mut Region, r: &mut JavaRandom, liquid: u8, x: i32, y: i32, z: i32) 
     }
 }
 
-/// WorldGenDungeons. The chest loot and the spawner mob are drawn (to keep the Random in step) and dropped.
+/// WorldGenDungeons. The chest loot goes into the chest (`Region::take_loot`); the spawner mob is drawn (to keep the Random
+/// in step) and dropped.
 fn dungeon(w: &mut Region, r: &mut JavaRandom, x: i32, y: i32, z: i32) {
     let h = 3;
     let sx = r.next_int_bound(2) + 2;
@@ -460,11 +470,13 @@ fn dungeon(w: &mut Region, r: &mut JavaRandom, x: i32, y: i32, z: i32) {
             let walls = [(cx - 1, cz), (cx + 1, cz), (cx, cz - 1), (cx, cz + 1)].iter().filter(|&&(a, b)| is_solid(w.get(a, y, b))).count();
             if walls == 1 {
                 w.set(cx, y, cz, CHEST);
+                let mut chest = Chest::default();
                 for _ in 0..8 {
-                    if loot(r) {
-                        r.next_int_bound(27); // slot
+                    if let Some(st) = loot(r) {
+                        chest[r.next_int_bound(27) as usize] = Some(st); // setInventorySlotContents: a later pick overwrites
                     }
                 }
+                w.loot.push(((cx, y, cz), chest));
                 break;
             }
         }
@@ -473,30 +485,24 @@ fn dungeon(w: &mut Region, r: &mut JavaRandom, x: i32, y: i32, z: i32) {
     r.next_int_bound(4); // mob
 }
 
-/// WorldGenDungeons.pickCheckLootItem: only the draws, true if it picked an item.
-fn loot(r: &mut JavaRandom) -> bool {
-    match r.next_int_bound(11) {
-        0 | 2 | 6 | 10 => true,
-        1 | 3 | 4 | 5 => {
-            r.next_int_bound(4);
-            true
-        }
-        7 => r.next_int_bound(100) == 0,
-        8 => {
-            let hit = r.next_int_bound(2) == 0;
-            if hit {
-                r.next_int_bound(4);
-            }
-            hit
-        }
-        _ => {
-            let hit = r.next_int_bound(10) == 0;
-            if hit {
-                r.next_int_bound(2);
-            }
-            hit
-        }
-    }
+/// WorldGenDungeons.pickCheckLootItem: the stack picked, if any (same draws, in the same order, as the Java).
+fn loot(r: &mut JavaRandom) -> Option<ItemStack> {
+    let n = |r: &mut JavaRandom| r.next_int_bound(4) as u8 + 1;
+    let (id, count, damage) = match r.next_int_bound(11) {
+        0 => (329, 1, 0),              // saddle
+        1 => (265, n(r), 0),           // iron ingot
+        2 => (297, 1, 0),              // bread
+        3 => (296, n(r), 0),           // wheat
+        4 => (289, n(r), 0),           // gunpowder
+        5 => (287, n(r), 0),           // string
+        6 => (325, 1, 0),              // bucket
+        7 if r.next_int_bound(100) == 0 => (322, 1, 0), // golden apple
+        8 if r.next_int_bound(2) == 0 => (331, n(r), 0), // redstone
+        9 if r.next_int_bound(10) == 0 => (2256 + r.next_int_bound(2) as u16, 1, 0), // record 13 / cat
+        10 => (351, 1, 3),             // cocoa beans
+        _ => return None,
+    };
+    Some(ItemStack { id, count, damage })
 }
 
 /// WorldGenFlowers: yellow/red flowers and both mushrooms.

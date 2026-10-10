@@ -62,9 +62,8 @@ const SHADOW_BRIGHTNESS: f32 = 0.75;
 const PLANT: [[u32; 4]; 2] = {
     let (mut m, mut id) = ([[0u32; 4]; 2], 0usize);
     while id < 256 {
-        // Every terrain tile a plant can show (tall grass has three by metadata). 78 (snow layer) is not drawn and shares
-        // its tile with snow blocks, which do cast shadows.
-        if is_plant(id as u8) && id != 78 {
+        // Every terrain tile a plant can show (tall grass has three by metadata, the sapling a species per metadata).
+        if is_plant(id as u8) {
             let mut meta = 0;
             while meta < 3 {
                 if let Some(t) = atlas::terrain_tile(id as u8, meta, 2) { m[(t >> 7) as usize][((t >> 5) & 3) as usize] |= 1 << (t & 31); }
@@ -78,6 +77,8 @@ const PLANT: [[u32; 4]; 2] = {
 
 pub struct ChunkPipeline {
     pub pipeline: RenderPipeline,
+    /// Translucent water (`fs_water`), drawn after the opaque terrain and the entities.
+    pub water_pipeline: RenderPipeline,
     pub uniform_buf: Buffer,
     pub atlas_tex: Texture,
     pub atlas_view: TextureView,
@@ -148,6 +149,16 @@ fn vs_shadow(@location(0) p: vec3<f32>, @location(1) uv: vec2<f32>) -> @builtin(
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let c = textureSample(tex, samp, in.uv);
     if c.a < 0.5 { discard; } // cut-out textures: plants, glass
+    return shade(in, c);
+}
+
+// Translucent water: the texture's own alpha (0.54), blended over what is behind it.
+@fragment
+fn fs_water(in: VsOut) -> @location(0) vec4<f32> {
+    return shade(in, textureSample(tex, samp, in.uv));
+}
+
+fn shade(in: VsOut, c: vec4<f32>) -> vec4<f32> {
     // Shadows are not here any more: `render::vl` darkens the shadowed pixels in its full-screen blend.
     var rgb = c.rgb * in.light;
     if u.fog.w > 0.0 {
@@ -371,7 +382,41 @@ impl ChunkPipeline {
             cache: None,
         });
 
-        Self { pipeline, uniform_buf, atlas_tex, atlas_view, bind_group, bind_layout, shadow_pipeline, shadow_view, ent_view, shadow_bind, shadow_layout }
+        // Water: the same vertices and shader, blended, no depth write (so what is behind it is still drawn and seen), both faces
+        // (the surface is seen from below). ponytail: chunks are not sorted back to front; two water chunks in a line blend in map order.
+        let water_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("water_pipeline"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[Vertex::layout()],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_water"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        Self { pipeline, water_pipeline, uniform_buf, atlas_tex, atlas_view, bind_group, bind_layout, shadow_pipeline, shadow_view, ent_view, shadow_bind, shadow_layout }
     }
 
     /// Terrain fog for this frame: `colour` rgb, `far` blocks (0 = off, e.g. under water), `rain` 0..1. Call after `upload_uniforms`.

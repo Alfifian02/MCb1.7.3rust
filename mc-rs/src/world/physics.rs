@@ -3,6 +3,8 @@
 
 use glam::Vec3;
 
+use crate::world::chunk::collision;
+
 /// Vanilla-ish player AABB: 0.6 wide, 1.8 tall, 0.6 deep.
 pub const HALF: Vec3 = Vec3::new(0.3, 0.9, 0.3);
 
@@ -13,7 +15,7 @@ pub struct Player {
 }
 
 /// Block lookup signature. Returns `Some(block_id)` (raw id, fluids included) or `None` if the query is
-/// out of bounds. Water (8, 9) and lava (10, 11) are not solid; every other non-zero id is.
+/// out of bounds. What an id collides with is `chunk::collision` (fluids, plants, torches: nothing; slab, cactus: a smaller box).
 pub type BlockQuery<'a> = &'a dyn Fn(i32, i32, i32) -> Option<u8>;
 
 /// Walk speed in m/s with the stick fully pressed (the callers set the horizontal velocity from it).
@@ -23,8 +25,6 @@ pub const WALK_SPEED: f32 = 4.3;
 const WATER_SPEED: f32 = 2.0;
 const LAVA_SPEED: f32 = 0.8;
 
-fn is_fluid(b: u8) -> bool { (8..=11).contains(&b) }
-fn is_solid(b: u8) -> bool { b > 0 && !is_fluid(b) }
 
 /// `Entity.handleWaterMovement` / `handleLavaMovement`: is any cell with an id in `ids` inside the box shrunk 0.4 top and
 /// bottom (and `xz` on the sides)? A fluid cell only reaches up to 8/9 of its height (`BlockFluid.getPercentAir(0)`).
@@ -70,7 +70,7 @@ pub fn step_box(player: &mut Player, half: Vec3, dt: f32, jumping: bool, get: Bl
 
     // Sweep each axis independently.
     let (vx, vz) = (player.vel.x, player.vel.z);
-    player.pos = sweep_axis(player.pos, half, player.vel * dt, get, &mut player.vel);
+    player.pos = sweep_axis(player.pos, half, player.vel * dt, get, &mut player.vel, player.on_ground && !(water || lava));
     if water || lava {
         player.vel.y = player.vel.y * (if water { 0.8f32 } else { 0.5 }).powf(ticks) - 0.4 * ticks;
         let blocked = (vx != 0.0 && player.vel.x == 0.0) || (vz != 0.0 && player.vel.z == 0.0);
@@ -81,39 +81,34 @@ pub fn step_box(player: &mut Player, half: Vec3, dt: f32, jumping: bool, get: Bl
     (water, lava)
 }
 
+/// Standing on something: the box, a hair lower, overlaps a collision box (a slab or a cactus top is not at a cell edge).
 fn ground_test(pos: Vec3, h: Vec3, get: BlockQuery<'_>) -> bool {
-    // Test the four corners of the bottom face just below current pos.
-    let below = pos - Vec3::new(0.0, h.y + 0.001, 0.0);
-    let corners = [
-        (below.x - h.x, below.y, below.z - h.z),
-        (below.x + h.x, below.y, below.z - h.z),
-        (below.x - h.x, below.y, below.z + h.z),
-        (below.x + h.x, below.y, below.z + h.z),
-    ];
-    corners.iter().any(|&(x, y, z)| {
-        let cx = x.floor() as i32;
-        let cy = y.floor() as i32;
-        let cz = z.floor() as i32;
-        matches!(get(cx, cy, cz), Some(b) if is_solid(b))
-    })
+    aabb_hits_solid(pos - Vec3::new(0.0, 0.002, 0.0), h, get)
 }
 
-fn sweep_axis(pos: Vec3, h: Vec3, delta: Vec3, get: BlockQuery<'_>, vel: &mut Vec3) -> Vec3 {
+/// `Entity.stepHeight`: a grounded box that is blocked sideways climbs an obstacle up to this high (a slab) without a jump.
+const STEP: f32 = 0.5;
+
+fn sweep_axis(pos: Vec3, h: Vec3, delta: Vec3, get: BlockQuery<'_>, vel: &mut Vec3, grounded: bool) -> Vec3 {
     let mut p = pos;
-    // X axis
-    let mut try_p = p + Vec3::new(delta.x, 0.0, 0.0);
-    if aabb_hits_solid(try_p, h, get) {
-        try_p.x = snap(p.x, delta.x, |x| aabb_hits_solid(Vec3::new(x, p.y, p.z), h, get));
-        vel.x = 0.0;
+    let hits = |q: Vec3| aabb_hits_solid(q, h, get);
+    // One horizontal axis (`axis` 0 = x, 2 = z). Blocked: step up when grounded and the raised box is free, else stop at the wall.
+    for axis in [0, 2] {
+        let mut d = Vec3::ZERO;
+        d[axis] = delta[axis];
+        let mut t = p + d;
+        if hits(t) {
+            if grounded && !hits(t + Vec3::Y * STEP) {
+                // Raise by STEP, then settle on whatever is under the new spot (never below where we were).
+                let top = t.y + STEP;
+                t.y = snap(top, -STEP, |y| hits(Vec3::new(t.x, y, t.z)));
+            } else {
+                t[axis] = snap(p[axis], delta[axis], |v| { let mut q = p; q[axis] = v; hits(q) });
+                vel[axis] = 0.0;
+            }
+        }
+        p = t;
     }
-    p = try_p;
-    // Z axis
-    let mut try_p = p + Vec3::new(0.0, 0.0, delta.z);
-    if aabb_hits_solid(try_p, h, get) {
-        try_p.z = snap(p.z, delta.z, |z| aabb_hits_solid(Vec3::new(p.x, p.y, z), h, get));
-        vel.z = 0.0;
-    }
-    p = try_p;
     // Y axis
     let mut try_p = p + Vec3::new(0.0, delta.y, 0.0);
     if aabb_hits_solid(try_p, h, get) {
@@ -123,7 +118,23 @@ fn sweep_axis(pos: Vec3, h: Vec3, delta: Vec3, get: BlockQuery<'_>, vel: &mut Ve
     try_p
 }
 
-fn aabb_hits_solid(p: Vec3, h: Vec3, get: BlockQuery<'_>) -> bool { aabb_any(p, h, get, is_solid) }
+/// Does the box at `p` strictly overlap the collision box (`getCollisionBoundingBoxFromPool`) of a block it touches?
+fn aabb_hits_solid(p: Vec3, h: Vec3, get: BlockQuery<'_>) -> bool {
+    let (lo, hi) = (p - h, p + h);
+    for cy in lo.y.floor() as i32..=hi.y.floor() as i32 {
+        for cz in lo.z.floor() as i32..=hi.z.floor() as i32 {
+            for cx in lo.x.floor() as i32..=hi.x.floor() as i32 {
+                let Some(c) = get(cx, cy, cz).and_then(collision) else { continue };
+                let (o, b) = (Vec3::new(cx as f32, cy as f32, cz as f32), Vec3::from_slice(&c[..3]));
+                let (bl, bh) = (o + b, o + Vec3::from_slice(&c[3..]));
+                if hi.x > bl.x && lo.x < bh.x && hi.y > bl.y && lo.y < bh.y && hi.z > bl.z && lo.z < bh.z {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
 
 /// Does the player box at `p` overlap a cell whose id satisfies `pred`?
 fn aabb_any(p: Vec3, h: Vec3, get: BlockQuery<'_>, pred: fn(u8) -> bool) -> bool {
@@ -193,5 +204,49 @@ mod tests {
         for _ in 0..600 { step(&mut p, 1.0 / 60.0, true, &pool); }
         let feet = p.pos.y - HALF.y;
         assert!((19.0..20.0).contains(&feet), "feet y = {feet}");
+    }
+
+    /// A half-high slab is stood on at half a block, a cactus is 1/16 lower and narrower, a torch or a sapling is walked through.
+    #[test]
+    fn collision_boxes_are_not_the_whole_cell() {
+        let floor = |top: u8| move |x: i32, y: i32, z: i32| -> Option<u8> {
+            if !(0..16).contains(&x) || !(0..16).contains(&z) || y < 0 { return None; }
+            Some(match y { 0..=9 => 1, 10 => top, _ => 0 })
+        };
+        let rest = |top: u8| {
+            let get = floor(top);
+            let mut p = Player { pos: Vec3::new(8.5, 14.0, 8.5), vel: Vec3::ZERO, on_ground: false };
+            for _ in 0..180 { step(&mut p, 1.0 / 60.0, false, &get); }
+            (p.pos.y - HALF.y, p.on_ground)
+        };
+        let (slab, on) = rest(44);
+        assert!(on && (slab - 10.5).abs() < 0.01, "slab: feet y = {slab}");
+        let (cactus, on) = rest(81);
+        assert!(on && (cactus - (11.0 - 1.0 / 16.0)).abs() < 0.01, "cactus: feet y = {cactus}");
+        for plant in [6, 50, 37, 78] {
+            assert!(rest(plant).0 < 10.01, "block {plant} must not hold the player up");
+        }
+        // Beside a cactus (inset 1/16) the player's box fits in the gap a full cell would not leave.
+        let get = |x: i32, y: i32, z: i32| -> Option<u8> { Some(if (x, y, z) == (5, 10, 5) { 81 } else { 0 }) };
+        assert!(!aabb_hits_solid(Vec3::new(5.0 + 1.0 - 1.0 / 16.0 + 0.31, 10.9 + 0.1, 5.5), HALF, &get));
+        assert!(aabb_hits_solid(Vec3::new(5.0 + 1.0 - 1.0 / 16.0 + 0.29, 10.9 + 0.1, 5.5), HALF, &get));
+    }
+
+    /// Walking into a slab climbs it without a jump; a full block is still a wall.
+    #[test]
+    fn a_slab_is_stepped_up_a_full_block_is_not() {
+        let at = |top: u8| {
+            let get = move |x: i32, y: i32, z: i32| -> Option<u8> {
+                if y < 0 { return None; }
+                Some(match (x, y) { (_, 0..=9) => 1, (x, 10) if x >= 10 => top, _ => 0 })
+            };
+            let mut p = Player { pos: Vec3::new(8.5, 10.0 + HALF.y, 8.5), vel: Vec3::ZERO, on_ground: true };
+            for _ in 0..120 { p.vel.x = WALK_SPEED; step(&mut p, 1.0 / 60.0, false, &get); }
+            (p.pos.x, p.pos.y - HALF.y)
+        };
+        let (x, y) = at(44);
+        assert!(x > 10.5 && (y - 10.5).abs() < 0.01, "slab: x = {x}, feet y = {y}");
+        let (x, y) = at(1);
+        assert!(x < 9.71 && (y - 10.0).abs() < 0.01, "block: x = {x}, feet y = {y}");
     }
 }

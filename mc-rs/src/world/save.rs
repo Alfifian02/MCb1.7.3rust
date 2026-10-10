@@ -4,7 +4,7 @@
 //!   coded as (byte, run 1..=255) pairs. Terrain is long vertical runs, so a chunk is a few KB instead of 48 KB.
 //!   Only chunks that differ from what the seed generates are written (edited, or touched by a `populate`); the
 //!   rest are regenerated. Light and the height map are not stored, they are recomputed on load.
-//! - `level`: world time, player, inventory, furnaces and dropped items, little-endian, versioned by its magic.
+//! - `level`: world time, player, inventory, furnaces, chests and dropped items, little-endian, versioned by its magic.
 //! - Every write goes to `<name>.tmp` and is renamed over the old file, so a kill mid-write keeps the old save.
 //!
 //! Decoding is a trust boundary (a truncated or foreign file): every read is checked and any problem is `None`,
@@ -15,6 +15,7 @@ use std::{fs, io, path::Path};
 use glam::Vec3;
 
 use crate::world::chunk::{Nibbles, VOLUME};
+use crate::world::chest::{Chest, Pos};
 use crate::world::craft::Furnace;
 use crate::world::items::{ItemStack, MAX_ITEMS, SLOTS};
 
@@ -71,7 +72,7 @@ pub fn decode_chunk(b: &[u8]) -> Option<(Vec<u8>, Nibbles, bool)> {
 }
 
 /// Everything about the player and the loose ends of the world that is not a chunk.
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Level {
     pub ticks: f64,
     pub pos: Vec3,
@@ -85,6 +86,8 @@ pub struct Level {
     pub furnaces: Vec<((i32, i32, i32), Furnace)>,
     /// Dropped items: position, stack, age. Motion is not kept: they come back at rest and settle.
     pub drops: Vec<(Vec3, ItemStack, u32)>,
+    /// `TileEntityChest`s by block position (the Java's `Items` list, 27 slots each).
+    pub chests: Vec<(Pos, Chest)>,
 }
 
 const MAGIC: &[u8; 4] = b"MCL1";
@@ -169,6 +172,12 @@ impl Level {
             put_stack(&mut w, Some(s));
             put(&mut w, age.to_le_bytes());
         }
+        // Chests come last so a level file from before them still decodes (it just has none).
+        put(&mut w, (self.chests.len() as u16).to_le_bytes());
+        for ((x, y, z), c) in &self.chests {
+            [x, y, z].iter().for_each(|v| put(&mut w, v.to_le_bytes()));
+            c.iter().for_each(|&s| put_stack(&mut w, s));
+        }
         w
     }
 
@@ -197,7 +206,21 @@ impl Level {
         let drops = (0..r.u16()?.min(MAX_ITEMS as u16))
             .map(|_| Some((r.vec()?, r.stack()??, r.u32()?)))
             .collect::<Option<Vec<_>>>()?;
-        Some(Level { ticks, pos, spawn, yaw, pitch, slot, vitals, inv, furnaces, drops })
+        let chests = if r.0.is_empty() {
+            Vec::new()
+        } else {
+            (0..r.u16()?)
+                .map(|_| {
+                    let p = (r.i32()?, r.i32()?, r.i32()?);
+                    let mut c: Chest = Default::default();
+                    for s in c.iter_mut() {
+                        *s = r.stack()?;
+                    }
+                    Some((p, c))
+                })
+                .collect::<Option<Vec<_>>>()?
+        };
+        Some(Level { ticks, pos, spawn, yaw, pitch, slot, vitals, inv, furnaces, drops, chests })
     }
 }
 
@@ -240,9 +263,18 @@ mod tests {
             inv,
             furnaces: vec![((1, 64, -2), Furnace { slots: [Some(ItemStack { id: 15, count: 3, damage: 0 }), None, None], burn: 10, item_burn: 100, cook: 7 })],
             drops: vec![(Vec3::new(1.0, 2.0, 3.0), ItemStack { id: 17, count: 2, damage: 0 }, 99)],
+            chests: vec![((4, 70, -9), {
+                let mut c: Chest = Default::default();
+                c[0] = Some(ItemStack { id: 265, count: 3, damage: 0 });
+                c[26] = Some(ItemStack { id: 351, count: 1, damage: 3 });
+                c
+            })],
         };
         let enc = l.encode();
-        assert_eq!(Level::decode(&enc), Some(l));
+        assert_eq!(Level::decode(&enc), Some(l.clone()));
+        // A level file written before chests existed ends after the drops: it decodes with no chests.
+        let old = Level { chests: Vec::new(), ..l.clone() }.encode();
+        assert_eq!(Level::decode(&old[..old.len() - 2]), Some(Level { chests: Vec::new(), ..l }));
         assert!(Level::decode(&enc[..enc.len() - 1]).is_none());
         assert!(Level::decode(b"nope").is_none());
         let mut nan = enc.clone();

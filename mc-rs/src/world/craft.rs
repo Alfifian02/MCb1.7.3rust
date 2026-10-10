@@ -350,12 +350,13 @@ impl Furnace {
 // ---- Container screen ----
 
 /// A slot of the open screen. `Inv(i)` is `InventoryPlayer.mainInventory[i]`: 0..9 hotbar, 9..36 the rest.
-/// `Furn(i)` is a furnace slot (0 input, 1 fuel, 2 output).
+/// `Furn(i)` is a furnace slot (0 input, 1 fuel, 2 output), `Chest(i)` a slot of the open chest (a large chest counts on: 27..54).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SlotId {
     Result,
     Grid(usize),
     Furn(usize),
+    Chest(usize),
     Inv(usize),
 }
 
@@ -364,9 +365,11 @@ pub enum SlotId {
 // ponytail: no shift-click (`getStackInSlot` quick-move), no right-button except as
 // the `one` flag of `click`. Upgrade: add them when the touch UI has a gesture for them.
 pub struct Screen {
-    /// Grid width: 2 inventory, 3 workbench, 0 furnace (then `furnace` is the block it belongs to).
+    /// Grid width: 2 inventory, 3 workbench, 0 furnace (then `furnace` is the block it belongs to), or the number of chest
+    /// slots (27 per chest, then `chests` are the blocks, upper half first): there is no grid in that case.
     pub gw: usize,
     pub furnace: Option<(i32, i32, i32)>,
+    pub chests: Vec<(i32, i32, i32)>,
     pub grid: [Option<ItemStack>; 9],
     pub cursor: Option<ItemStack>,
 }
@@ -377,7 +380,7 @@ fn rest(s: ItemStack, n: u8) -> Option<ItemStack> {
 
 impl Screen {
     pub fn new(gw: usize) -> Self {
-        Self { gw, furnace: None, grid: [None; 9], cursor: None }
+        Self { gw, furnace: None, chests: Vec::new(), grid: [None; 9], cursor: None }
     }
 
     /// `ContainerFurnace` for the furnace at `pos`; the caller passes that furnace to `get` and `click`.
@@ -385,25 +388,30 @@ impl Screen {
         Self { furnace: Some(pos), ..Self::new(0) }
     }
 
+    /// `ContainerChest` for the chests in `group` (`chest::open`); the caller passes their slots, in that order, to `get` and `click`.
+    pub fn at_chest(group: Vec<(i32, i32, i32)>) -> Self {
+        Self { gw: group.len() * 27, chests: group, ..Self::new(0) }
+    }
+
     pub fn result(&self) -> Option<ItemStack> {
         find(&self.grid, self.gw)
     }
 
-    pub fn get(&self, inv: &Inventory, furn: Option<&Furnace>, id: SlotId) -> Option<ItemStack> {
+    pub fn get(&self, inv: &Inventory, ext: Option<&[Option<ItemStack>]>, id: SlotId) -> Option<ItemStack> {
         match id {
             SlotId::Result => self.result(),
-            SlotId::Furn(i) => furn.and_then(|f| f.slots[i]),
+            SlotId::Furn(i) | SlotId::Chest(i) => ext.and_then(|f| f[i]),
             SlotId::Grid(i) => self.grid[i],
             SlotId::Inv(i) => inv.slots[i],
         }
     }
 
-    fn set(&mut self, inv: &mut Inventory, furn: Option<&mut Furnace>, id: SlotId, s: Option<ItemStack>) {
+    fn set(&mut self, inv: &mut Inventory, ext: Option<&mut [Option<ItemStack>]>, id: SlotId, s: Option<ItemStack>) {
         match id {
             SlotId::Result => {}
-            SlotId::Furn(i) => {
-                if let Some(f) = furn {
-                    f.slots[i] = s;
+            SlotId::Furn(i) | SlotId::Chest(i) => {
+                if let Some(f) = ext {
+                    f[i] = s;
                 }
             }
             SlotId::Grid(i) => self.grid[i] = s,
@@ -429,20 +437,20 @@ impl Screen {
     /// its stack to an empty cursor or to a cursor already holding the same item (when it fits).
     ///
     /// The furnace output (`SlotFurnace`) is an output slot like the craft result (accepts nothing), except that
-    /// taking from it uses nothing up and a right click takes half. Pass the furnace for a furnace screen.
-    pub fn click(&mut self, id: SlotId, one: bool, inv: &mut Inventory, mut furn: Option<&mut Furnace>) {
+    /// taking from it uses nothing up and a right click takes half. Pass the open container's slots (`ext`: a furnace's 3, the chests' 27 each) for a furnace or chest screen.
+    pub fn click(&mut self, id: SlotId, one: bool, inv: &mut Inventory, mut ext: Option<&mut [Option<ItemStack>]>) {
         if !self.armor_ok(id) {
             return;
         }
         let is_result = id == SlotId::Result;
         let is_out = is_result || id == SlotId::Furn(2);
-        if matches!(id, SlotId::Furn(_)) && furn.is_none() {
+        if matches!(id, SlotId::Furn(_) | SlotId::Chest(_)) && ext.is_none() {
             return;
         }
-        match (self.get(inv, furn.as_deref(), id), self.cursor) {
+        match (self.get(inv, ext.as_deref(), id), self.cursor) {
             (None, Some(c)) if !is_out => {
                 let n = if one { 1 } else { c.count };
-                self.set(inv, furn, id, Some(ItemStack { count: n, ..c }));
+                self.set(inv, ext, id, Some(ItemStack { count: n, ..c }));
                 self.cursor = rest(c, n);
             }
             (Some(h), None) => {
@@ -451,7 +459,7 @@ impl Screen {
                 if is_result {
                     self.take_result();
                 } else {
-                    self.set(inv, furn, id, rest(h, n));
+                    self.set(inv, ext, id, rest(h, n));
                 }
             }
             (Some(h), Some(c)) => {
@@ -462,15 +470,15 @@ impl Screen {
                         if is_result {
                             self.take_result();
                         } else {
-                            self.set(inv, furn, id, None);
+                            self.set(inv, ext, id, None);
                         }
                     }
                 } else if !same {
-                    self.set(inv, furn, id, Some(c));
+                    self.set(inv, ext, id, Some(c));
                     self.cursor = Some(h);
                 } else {
                     let n = (if one { 1 } else { c.count }).min(max_stack(c.id).saturating_sub(h.count));
-                    self.set(inv, furn, id, Some(ItemStack { count: h.count + n, ..h }));
+                    self.set(inv, ext, id, Some(ItemStack { count: h.count + n, ..h }));
                     self.cursor = rest(c, n);
                 }
             }
@@ -488,14 +496,14 @@ impl Screen {
 
     /// Spread (touch drag): put one item of the cursor stack into `id` when that slot is empty or holds the same
     /// item with room. Unlike a right click it never swaps, and never fills an output slot. True if it was valid.
-    pub fn drop_one(&mut self, id: SlotId, inv: &mut Inventory, mut furn: Option<&mut Furnace>) -> bool {
+    pub fn drop_one(&mut self, id: SlotId, inv: &mut Inventory, mut ext: Option<&mut [Option<ItemStack>]>) -> bool {
         let Some(c) = self.cursor else { return false };
         if matches!(id, SlotId::Result | SlotId::Furn(2)) {
             return false;
         }
-        let fits = self.armor_ok(id) && self.get(inv, furn.as_deref(), id).map_or(true, |h| h.id == c.id && h.damage == c.damage && h.count < max_stack(c.id));
+        let fits = self.armor_ok(id) && self.get(inv, ext.as_deref(), id).map_or(true, |h| h.id == c.id && h.damage == c.damage && h.count < max_stack(c.id));
         if fits {
-            self.click(id, true, inv, furn);
+            self.click(id, true, inv, ext);
         }
         fits
     }
@@ -506,39 +514,52 @@ impl Screen {
     }
 }
 
-// ---- Geometry: the vanilla 176 x 166 GUI, scaled to the surface ----
+// ---- Geometry: the vanilla GUI (176 x 166 units, a chest's taller), scaled to the surface ----
 
-pub const PANEL: (f32, f32) = (176.0, 166.0);
+/// `GuiContainer.xSize` x `ySize`: the vanilla 176 x 166 GUI, or a chest's `114 + 18 * rows` (`GuiChest`).
+pub fn panel_size(gw: usize) -> (f32, f32) {
+    (176.0, if gw > 3 { 114.0 + 18.0 * (gw / 9) as f32 } else { 166.0 })
+}
+
 /// The "place one" toggle (this port has no right mouse button), top right, clear of every slot.
 // UNVERIFIED: position and the toggle itself are invented for touch (the original uses the mouse cursor and buttons).
 pub const MODE: (f32, f32) = (152.0, 8.0);
 
-/// Vanilla `(slot, x, y)` of every slot's top-left pixel (`ContainerPlayer` / `ContainerWorkbench` constructors).
+/// Vanilla `(slot, x, y)` of every slot's top-left pixel (`ContainerPlayer` / `ContainerWorkbench` / `ContainerFurnace` /
+/// `ContainerChest` constructors). A chest screen has `gw` chest slots (rows of 9) and the player's 27 + 9 below them.
 pub fn layout(gw: usize) -> Vec<(SlotId, f32, f32)> {
+    let chest = gw > 3;
+    let d = if chest { (gw / 9) as i32 * 18 - 72 } else { 0 }; // `ContainerChest`: `(rows - 4) * 18`
     let ((rx, ry), (gx, gy)) = if gw == 2 { ((144, 36), (88, 26)) } else { ((124, 35), (30, 17)) };
-    let mut v = if gw == 0 {
+    let mut v: Vec<_> = if chest {
+        (0..gw).map(|i| (SlotId::Chest(i), (8 + 18 * (i % 9)) as f32, (18 + 18 * (i / 9)) as f32)).collect()
+    } else if gw == 0 {
         vec![(SlotId::Furn(0), 56.0, 17.0), (SlotId::Furn(1), 56.0, 53.0), (SlotId::Furn(2), 116.0, 35.0)]
     } else {
         vec![(SlotId::Result, rx as f32, ry as f32)]
     };
-    v.extend((0..gw * gw).map(|i| (SlotId::Grid(i), (gx + 18 * (i % gw)) as f32, (gy + 18 * (i / gw)) as f32)));
+    if !chest {
+        v.extend((0..gw * gw).map(|i| (SlotId::Grid(i), (gx + 18 * (i % gw)) as f32, (gy + 18 * (i / gw)) as f32)));
+    }
     if gw == 2 {
         v.extend((0..4).map(|k| (SlotId::Inv(MAIN + k), 8.0, 8.0 + 18.0 * (3 - k) as f32))); // ContainerPlayer: SlotArmor at (8, 8 + 18 * type)
     }
-    v.extend((9..36).map(|i| (SlotId::Inv(i), (8 + 18 * (i % 9)) as f32, (84 + 18 * (i / 9 - 1)) as f32)));
-    v.extend((0..9).map(|i| (SlotId::Inv(i), (8 + 18 * i) as f32, 142.0)));
+    let (rows_y, hot_y) = if chest { (103 + d, 161 + d) } else { (84, 142) };
+    v.extend((9..36).map(|i| (SlotId::Inv(i), (8 + 18 * (i % 9)) as f32, (rows_y + 18 * (i as i32 / 9 - 1)) as f32)));
+    v.extend((0..9).map(|i| (SlotId::Inv(i), (8 + 18 * i) as f32, hot_y as f32)));
     v
 }
 
-/// Panel origin (px) and scale (px per GUI unit) for a `w` x `h` surface.
-pub fn panel(w: f32, h: f32) -> (f32, f32, f32) {
-    let k = (h * 0.92 / PANEL.1).min(w * 0.92 / PANEL.0);
-    ((w - PANEL.0 * k) * 0.5, (h - PANEL.1 * k) * 0.5, k)
+/// Panel origin (px) and scale (px per GUI unit) for a `w` x `h` surface and a screen with `gw` (see `Screen::gw`).
+pub fn panel(gw: usize, w: f32, h: f32) -> (f32, f32, f32) {
+    let (pw, ph) = panel_size(gw);
+    let k = (h * 0.92 / ph).min(w * 0.92 / pw);
+    ((w - pw * k) * 0.5, (h - ph * k) * 0.5, k)
 }
 
 /// The 18 x 18 unit cell around the 16 x 16 slot at GUI position `(ux, uy)`, in px: (x, y, size).
-pub fn cell(w: f32, h: f32, (ux, uy): (f32, f32)) -> (f32, f32, f32) {
-    let (ox, oy, k) = panel(w, h);
+pub fn cell(gw: usize, w: f32, h: f32, (ux, uy): (f32, f32)) -> (f32, f32, f32) {
+    let (ox, oy, k) = panel(gw, w, h);
     (ox + (ux - 1.0) * k, oy + (uy - 1.0) * k, 18.0 * k)
 }
 
@@ -548,16 +569,17 @@ fn inside((x, y, s): (f32, f32, f32), px: f32, py: f32) -> bool {
 
 /// Which slot a touch at `(px, py)` is on.
 pub fn slot_at(gw: usize, w: f32, h: f32, px: f32, py: f32) -> Option<SlotId> {
-    layout(gw).into_iter().find(|&(_, ux, uy)| inside(cell(w, h, (ux, uy)), px, py)).map(|s| s.0)
+    layout(gw).into_iter().find(|&(_, ux, uy)| inside(cell(gw, w, h, (ux, uy)), px, py)).map(|s| s.0)
 }
 
-pub fn on_mode_button(w: f32, h: f32, px: f32, py: f32) -> bool {
-    inside(cell(w, h, MODE), px, py)
+pub fn on_mode_button(gw: usize, w: f32, h: f32, px: f32, py: f32) -> bool {
+    inside(cell(gw, w, h, MODE), px, py)
 }
 
-pub fn in_panel(w: f32, h: f32, px: f32, py: f32) -> bool {
-    let (ox, oy, k) = panel(w, h);
-    px >= ox && px < ox + PANEL.0 * k && py >= oy && py < oy + PANEL.1 * k
+pub fn in_panel(gw: usize, w: f32, h: f32, px: f32, py: f32) -> bool {
+    let (ox, oy, k) = panel(gw, w, h);
+    let (pw, ph) = panel_size(gw);
+    px >= ox && px < ox + pw * k && py >= oy && py < oy + ph * k
 }
 
 #[cfg(test)]
@@ -658,13 +680,45 @@ mod tests {
         let mut inv = Inventory::default();
         f.slots[2] = Some(stack(265, 5));
         s.cursor = Some(stack(3, 1));
-        s.click(SlotId::Furn(2), false, &mut inv, Some(&mut f));
+        s.click(SlotId::Furn(2), false, &mut inv, Some(&mut f.slots));
         assert_eq!((s.cursor, f.slots[2]), (Some(stack(3, 1)), Some(stack(265, 5))));
         s.cursor = None;
-        s.click(SlotId::Furn(2), true, &mut inv, Some(&mut f));
+        s.click(SlotId::Furn(2), true, &mut inv, Some(&mut f.slots));
         assert_eq!((s.cursor, f.slots[2]), (Some(stack(265, 3)), Some(stack(265, 2))));
-        s.click(SlotId::Furn(0), false, &mut inv, Some(&mut f)); // the input slot takes anything
+        s.click(SlotId::Furn(0), false, &mut inv, Some(&mut f.slots)); // the input slot takes anything
         assert_eq!(f.slots[0], Some(stack(265, 3)));
+    }
+
+    /// `ContainerChest`: clicks reach the chest's slots (the lower half of a large chest too), the player's slots sit below
+    /// them as in the Java constructor, and the panel is `114 + 18 * rows` tall with every slot findable at its own centre.
+    #[test]
+    fn chest_screen_clicks_and_layout() {
+        let mut inv = Inventory::default();
+        let mut s = Screen::at_chest(vec![(0, 64, 0), (1, 64, 0)]);
+        let mut ext = vec![None; 54];
+        ext[30] = Some(stack(5, 7));
+        inv.slots[0] = Some(stack(5, 60));
+        s.click(SlotId::Chest(30), false, &mut inv, Some(&mut ext));
+        assert_eq!((s.gw, s.cursor, ext[30]), (54, Some(stack(5, 7)), None));
+        s.click(SlotId::Inv(0), false, &mut inv, Some(&mut ext)); // tops up to 64, 3 stay on the cursor
+        assert_eq!((inv.slots[0], s.cursor), (Some(stack(5, 64)), Some(stack(5, 3))));
+        s.click(SlotId::Chest(2), true, &mut inv, Some(&mut ext)); // right click puts one
+        assert_eq!((ext[2], s.cursor), (Some(stack(5, 1)), Some(stack(5, 2))));
+        s.click(SlotId::Chest(0), false, &mut inv, None); // no chest behind the screen: nothing moves
+        assert_eq!(s.cursor, Some(stack(5, 2)));
+
+        let l = layout(54);
+        assert_eq!(l.len(), 54 + 27 + 9);
+        assert_eq!((panel_size(27).1, panel_size(54).1, panel_size(0).1), (168.0, 222.0, 166.0));
+        let y = |gw, id| layout(gw).into_iter().find(|e| e.0 == id).map(|e| e.2);
+        assert_eq!((y(27, SlotId::Inv(0)), y(54, SlotId::Inv(0)), y(54, SlotId::Inv(9)), y(54, SlotId::Chest(53))), (Some(143.0), Some(197.0), Some(139.0), Some(108.0)));
+        for gw in [27, 54, 81] {
+            for (id, ux, uy) in layout(gw) {
+                let (x, y, sz) = cell(gw, 800.0, 400.0, (ux, uy));
+                assert_eq!(slot_at(gw, 800.0, 400.0, x + sz / 2.0, y + sz / 2.0), Some(id));
+                assert!(in_panel(gw, 800.0, 400.0, x + sz / 2.0, y + sz / 2.0));
+            }
+        }
     }
 
     /// Touch spread: one item per slot, never a swap, never into an output slot.

@@ -50,18 +50,23 @@ impl Nibbles {
     }
 }
 
-/// Blocks with no cube shape (tall grass, dead bush, flowers, mushrooms, snow layer, reeds). The
-/// mesher skips them and physics walks through them until M14 gives them real models.
+/// Plants (render type 1, `getCollisionBoundingBoxFromPool` null): sapling, tall grass, dead bush, flowers, mushrooms,
+/// reeds. Drawn as crossed quads (`cross_shape`), walked through, never hide a neighbour's face.
 pub const fn is_plant(id: u8) -> bool {
-    matches!(id, 31 | 32 | 37..=40 | 78 | 83)
+    matches!(id, 6 | 31 | 32 | 37..=40 | 83)
 }
 
-/// Plants drawn as two crossed quads (render type 1): (half width, height) of the quads. Taken from each
-/// block's `setBlockBounds`; vanilla draws a full-cell quad with a texture that is mostly transparent, and
-/// until M14 has textures the bounds are the closest flat-colour stand-in.
-// UNVERIFIED: shape only (bounds instead of the cut-out texture).
+/// `BlockFluid`: water 8 (flowing) / 9 (still), lava 10 / 11. No collision, drawn with `mesh`'s own fluid shape.
+pub const fn is_fluid(id: u8) -> bool {
+    matches!(id, 8..=11)
+}
+
+/// Plants drawn as two crossed quads (render type 1): (half width, height) of the block's bounds (`setBlockBounds`).
+/// The quads themselves are full cell (`renderCrossedSquares`, the texture's cut-out shapes them); these bounds size
+/// the pick ray and the selection outline.
 pub const fn cross_shape(id: u8) -> Option<(f32, f32)> {
     match id {
+        6 => Some((0.4, 0.8)),         // sapling
         37 | 38 => Some((0.2, 0.6)),   // flowers
         39 | 40 => Some((0.2, 0.4)),   // mushrooms
         31 | 32 => Some((0.4, 0.8)),   // tall grass, dead bush
@@ -70,18 +75,97 @@ pub const fn cross_shape(id: u8) -> Option<(f32, f32)> {
     }
 }
 
+/// The 1/16 `BlockCactus` pulls its four side faces in (`renderBlockCactus`) and its collision box and outline shrink by.
+pub const CACTUS_INSET: f32 = 1.0 / 16.0;
+
+/// Blocks drawn as a (non-full) box: `setBlockBounds` as [min x, y, z, max x, y, z] inside the cell. The faces are the
+/// box's, with the matching window of the tile (`renderEastFace` and friends). The snow layer reads its metadata
+/// (`BlockSnow.setBlockBoundsBasedOnState`: 2 x (1 + layers) sixteenths). The cactus is a full cell here: the Java never sets
+/// its bounds, only its collision / outline / faces are inset (`CACTUS_INSET`).
+pub fn box_bounds(id: u8, meta: u8) -> Option<[f32; 6]> {
+    Some(match id {
+        44 => [0.0, 0.0, 0.0, 1.0, 0.5, 1.0],                              // single slab
+        // `BlockTorch.collisionRayTrace`: 1..=4 hangs on the -X, +X, -Z, +Z wall (0.3 wide, 0.2..0.8 high), else it stands.
+        50 => match meta & 7 {
+            1 => [0.0, 0.2, 0.35, 0.3, 0.8, 0.65],
+            2 => [0.7, 0.2, 0.35, 1.0, 0.8, 0.65],
+            3 => [0.35, 0.2, 0.0, 0.65, 0.8, 0.3],
+            4 => [0.35, 0.2, 0.7, 0.65, 0.8, 1.0],
+            _ => [0.4, 0.0, 0.4, 0.6, 0.6, 0.6],
+        },
+        59 => [0.0, 0.0, 0.0, 1.0, 0.25, 1.0],                             // crops (pick / outline only: drawn as 4 quads)
+        60 => [0.0, 0.0, 0.0, 1.0, 15.0 / 16.0, 1.0],                      // farmland
+        78 => [0.0, 0.0, 0.0, 1.0, 2.0 * (1 + (meta & 7)) as f32 / 16.0, 1.0], // snow layer
+        81 => [0.0, 0.0, 0.0, 1.0, 1.0, 1.0],                              // cactus
+        _ => return None,
+    })
+}
+
+/// What the crosshair can hit (`Block.collisionRayTrace`): the block's bounds; fluids and air are skipped
+/// (`canCollideCheck`).
+pub fn pick_bounds(id: u8, meta: u8) -> Option<[f32; 6]> {
+    if id == 0 || is_fluid(id) {
+        return None;
+    }
+    Some(match cross_shape(id) {
+        Some((w, h)) => [0.5 - w, 0.0, 0.5 - w, 0.5 + w, h, 0.5 + w],
+        None => box_bounds(id, meta).unwrap_or([0.0, 0.0, 0.0, 1.0, 1.0, 1.0]),
+    })
+}
+
+/// The selection outline (`getSelectedBoundingBoxFromPool`): the pick box, except the cactus, which is inset on x and z.
+pub fn outline_bounds(id: u8, meta: u8) -> Option<[f32; 6]> {
+    let i = CACTUS_INSET;
+    if id == 81 { Some([i, 0.0, i, 1.0 - i, 1.0, 1.0 - i]) } else { pick_bounds(id, meta) }
+}
+
+/// The snow layer collides only from 3 layers up (`BlockSnow.getCollisionBoundingBoxFromPool`, `meta & 7 >= 3`, 0.5 high), but the
+/// physics queries carry ids, not metadata: `physics_id` turns such a layer into the pseudo id `SNOW_DEEP`, which `collision` knows.
+pub const SNOW_DEEP: u8 = 255;
+
+/// The id a physics query (`BlockQuery`) reads for a cell: its own, except a snow layer of 3+ layers (`SNOW_DEEP`).
+pub fn physics_id(id: u8, meta: u8) -> u8 {
+    if id == 78 && meta & 7 >= 3 { SNOW_DEEP } else { id }
+}
+
+/// `getCollisionBoundingBoxFromPool`: what the player and mobs stand on or bump into; `None` = walk through. The
+/// farmland is a full cell here although it is drawn 15/16 high (`BlockFarmland`), a fence is 1.5 high, the cactus is
+/// inset by `CACTUS_INSET` and one sixteenth lower; a snow layer of 3+ layers is `SNOW_DEEP` (0.5 high).
+/// `World.isBlockNormalCube`: an opaque full cube (stone, planks, furnace, ...), what holds a wall torch. Not lava, a slab or a
+/// chest, which are opaque in the light table but not `renderAsNormalBlock`; stairs (53, 67) and the fence are not either.
+pub const fn normal_cube(id: u8) -> bool {
+    light_opacity(id) == 255 && !matches!(id, 10 | 11 | 44 | 53 | 54 | 67 | 85)
+}
+
+pub fn collision(id: u8) -> Option<[f32; 6]> {
+    const I: f32 = CACTUS_INSET;
+    match id {
+        0 | 8..=11 | 30 | 50 | 51 | 55 | 59 | 63 | 68 | 78 | 90 => None,
+        _ if is_plant(id) => None,
+        44 | SNOW_DEEP => Some([0.0, 0.0, 0.0, 1.0, 0.5, 1.0]),
+        81 => Some([I, 0.0, I, 1.0 - I, 1.0 - I, 1.0 - I]),
+        85 => Some([0.0, 0.0, 0.0, 1.0, 1.5, 1.0]),
+        _ => Some([0.0, 0.0, 0.0, 1.0, 1.0, 1.0]),
+    }
+}
+
+/// `isOpaqueCube`: hides the faces behind it. Not the plants, fluids and boxes above; leaves, glass and ice stay in, as the
+/// mesher draws them as opaque cubes.
+pub fn opaque(id: u8) -> bool {
+    id != 0 && !is_plant(id) && !is_fluid(id) && !matches!(id, 44 | 50 | 53 | 59 | 60 | 67 | 78 | 81 | 85)
+}
+
 /// `Block.lightOpacity`: how much light a block eats (255 = fully opaque). Default is 255 for
 /// opaque cubes and 0 for everything else; the overrides are `setLightOpacity` calls in Block.java
 /// (water 3, lava 255, leaves 1, web 1, ice 3). Slabs (44) and wool (35) are not generated by
-/// worldgen and read as opaque, which matches the 255 default for wool.
-// UNVERIFIED: 44 (single slab) - Block.lightOpacity is set in the Block constructor before
-// BlockStep.blockType exists, so vanilla may read 0 here.
+/// worldgen and read as opaque, which matches the 255 default for wool. 44 (single slab) and 60 (farmland) call
+/// `setLightOpacity(255)` themselves, though they are not opaque cubes (golden `TAB 60 0 255`).
 pub const fn light_opacity(id: u8) -> u8 {
     match id {
         8 | 9 | 79 => 3,
         18 | 30 => 1,
         10 | 11 => 255,
-        0 | 6 | 20 | 26..=29 | 31..=34 | 36..=40 | 50..=53 | 55 | 59 | 60 | 63..=72 | 75..=78 | 81 | 83 | 85 | 90 | 92..=94 | 96 => 0,
+        0 | 6 | 20 | 26..=29 | 31..=34 | 36..=40 | 50..=53 | 55 | 59 | 63..=72 | 75..=78 | 81 | 83 | 85 | 90 | 92..=94 | 96 => 0,
         _ => 255,
     }
 }
@@ -139,5 +223,15 @@ mod tests {
         assert_eq!((n.get(0, 0, 0), n.get(0, 1, 0), n.get(15, 127, 15), n.get(1, 0, 0)), (5, 9, 11, 0));
         n.set(0, 0, 0, 0);
         assert_eq!(n.bytes()[0], 0x90);
+    }
+
+    /// A snow layer collides from 3 layers up (`meta & 7 >= 3`), half a block high, like the Java; 1-2 layers are walked through.
+    #[test]
+    fn snow_collides_from_three_layers() {
+        assert_eq!(collision(physics_id(78, 1)), None);
+        assert_eq!(collision(physics_id(78, 2)), None);
+        assert_eq!(collision(physics_id(78, 3)), Some([0.0, 0.0, 0.0, 1.0, 0.5, 1.0]));
+        assert_eq!(collision(physics_id(78, 8 | 2)), None, "bit 8 is not a layer");
+        assert_eq!(physics_id(1, 5), 1);
     }
 }

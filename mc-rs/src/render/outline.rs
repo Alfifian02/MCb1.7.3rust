@@ -22,18 +22,18 @@ impl Outline {
         Self { vbuf: buf("outline_vbuf", VERTEX_BYTES, wgpu::BufferUsages::VERTEX), ibuf: buf("outline_ibuf", INDEX_BYTES, wgpu::BufferUsages::INDEX) }
     }
 
-    /// Upload the outline of block `pos`; returns the index count to draw.
-    pub fn update(&self, queue: &wgpu::Queue, pos: (i32, i32, i32)) -> u32 {
-        let (verts, idxs) = geometry(pos);
+    /// Upload the outline of the box `bounds` (min xyz, max xyz) inside block `pos`; returns the index count to draw.
+    pub fn update(&self, queue: &wgpu::Queue, pos: (i32, i32, i32), bounds: [f32; 6]) -> u32 {
+        let (verts, idxs) = geometry(pos, bounds);
         queue.write_buffer(&self.vbuf, 0, bytemuck::cast_slice(&verts));
         queue.write_buffer(&self.ibuf, 0, bytemuck::cast_slice(&idxs));
         idxs.len() as u32
     }
 }
 
-fn geometry(pos: (i32, i32, i32)) -> (Vec<f32>, Vec<u32>) {
+fn geometry(pos: (i32, i32, i32), bounds: [f32; 6]) -> (Vec<f32>, Vec<u32>) {
     let p = [pos.0 as f32, pos.1 as f32, pos.2 as f32];
-    let (a, b) = (p.map(|v| v - GROW), p.map(|v| v + 1.0 + GROW));
+    let (a, b): ([f32; 3], [f32; 3]) = (std::array::from_fn(|i| p[i] + bounds[i] - GROW), std::array::from_fn(|i| p[i] + bounds[i + 3] + GROW));
     let (mut verts, mut idxs) = (Vec::new(), Vec::new());
     for axis in 0..3 {
         // The 4 edges along `axis`: each of the other two axes pinned to its low or high side.
@@ -55,7 +55,7 @@ mod tests {
     /// The CPU geometry fills exactly the buffers `new` allocates, and stays around the block.
     #[test]
     fn geometry_fits_the_buffers_and_hugs_the_block() {
-        let (v, i) = geometry((-3, 70, 8));
+        let (v, i) = geometry((-3, 70, 8), [0.0, 0.0, 0.0, 1.0, 1.0, 1.0]);
         assert_eq!((v.len() * 4) as u64, VERTEX_BYTES);
         assert_eq!((i.len() * 4) as u64, INDEX_BYTES);
         for p in v.chunks(6) {
@@ -63,5 +63,13 @@ mod tests {
             assert!(p[1] >= 70.0 - GROW - 1e-4 && p[1] <= 71.0 + GROW + 1e-4);
             assert!(p[2] >= 8.0 - GROW - 1e-4 && p[2] <= 9.0 + GROW + 1e-4);
         }
+    }
+
+    /// A slab's outline stops at half a block.
+    #[test]
+    fn outline_follows_the_bounds() {
+        let (v, _) = geometry((0, 10, 0), [0.0, 0.0, 0.0, 1.0, 0.5, 1.0]);
+        assert!(v.chunks(6).all(|q| q[1] <= 10.5 + GROW + 1e-4));
+        assert!(v.chunks(6).any(|q| q[1] > 10.5));
     }
 }

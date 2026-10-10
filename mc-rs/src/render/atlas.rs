@@ -129,6 +129,11 @@ pub fn terrain_uv(t: u8, u: f32, v: f32) -> (f32, f32) {
     (x / ATLAS_W as f32, y / ATLAS_H as f32)
 }
 
+/// Atlas UV of the pixel (`px`, `py`) (0..16, y down like the png) of terrain tile `t`.
+pub fn terrain_px(t: u8, px: f32, py: f32) -> (f32, f32) {
+    (((t % 16) as f32 * 16.0 + px) / ATLAS_W as f32, ((t / 16) as f32 * 16.0 + py) / ATLAS_H as f32)
+}
+
 /// `Block.getBlockTextureFromSideAndMetadata`: the `terrain.png` tile of a block's face, `side` as in the Java (0 bottom, 1 top,
 /// 2 north -Z, 3 south +Z, 4 west -X, 5 east +X); `None` = no tile known (flat colour). Blocks with a facing in the Java
 /// (furnace, pumpkin, chest) get their front on +Z, because this port does not keep the facing yet. 31 tall grass is 55 dead
@@ -139,12 +144,13 @@ pub const fn terrain_tile(id: u8, meta: u8, side: u8) -> Option<u8> {
         1 => 1,
         2 => if top { 0 } else if bottom { 2 } else { 3 },
         3 => 2,
-        4 => 16,
-        5 | 85 => 4,
+        4 | 67 => 16,
+        5 | 53 | 85 => 4,
+        59 => 88 + (meta & 7),
         6 => match meta & 3 { 1 => 63, 2 => 79, _ => 15 },
         7 => 17,
-        8 | 9 => 205,
-        10 | 11 => 237,
+        8 | 9 => if side <= 1 { 205 } else { 206 },   // `BlockFluid.getBlockTextureFromSide`: top/bottom still, sides flowing
+        10 | 11 => if side <= 1 { 237 } else { 238 },
         12 => 18,
         13 => 19,
         14 => 32,
@@ -174,6 +180,7 @@ pub const fn terrain_tile(id: u8, meta: u8, side: u8) -> Option<u8> {
         49 => 37,
         52 => 65,
         54 => if side <= 1 { 25 } else if side == 3 { 27 } else { 26 },
+        50 => 80,
         56 => 50,
         57 => 24,
         58 => if top { 43 } else if bottom { 4 } else if side == 2 || side == 4 { 60 } else { 59 },
@@ -183,6 +190,7 @@ pub const fn terrain_tile(id: u8, meta: u8, side: u8) -> Option<u8> {
         73 | 74 => 51,
         79 => 67,
         80 => 66,
+        78 => 66,
         81 => if top { 69 } else if bottom { 71 } else { 70 },
         82 => 72,
         83 => 73,

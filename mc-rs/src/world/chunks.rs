@@ -27,6 +27,7 @@ use crate::world::chunk::{height_map, idx, Nibbles, H, VOLUME};
 use crate::world::gen::chunk_manager::WorldChunkManager;
 use crate::world::gen::overworld::OverworldGenerator;
 use crate::world::gen::noise::JavaRandom;
+use crate::world::chest::{Chest, Pos};
 use crate::world::gen::populate::Region;
 use crate::world::save;
 
@@ -79,6 +80,8 @@ pub struct Mesh {
     pub index_count: u32,
     /// The indices are sorted by 16-block section: section `s` is `starts[s]..starts[s + 1]` (`by_section`).
     starts: [u32; SECTIONS + 1],
+    /// The water faces (blended, drawn after everything else) share `vbuf`; their indices sorted by section the same way.
+    water: Option<(wgpu::Buffer, [u32; SECTIONS + 1])>,
 }
 
 /// Sections (16 blocks tall) of a chunk column: the unit the draw loop culls.
@@ -171,6 +174,8 @@ pub struct ChunkManager {
     /// Cells written through `set_block_meta` since the last `take_changes`: (x, y, z, old id, new id). `world::ticks`
     /// turns them into `onBlockAdded` / `onBlockRemoval` / `onNeighborBlockChange` (the `...WithNotify` setters).
     changes: Vec<(i32, i32, i32, u8, u8)>,
+    /// Dungeon chests filled by populate that the game has not taken over yet (`take_loot`).
+    loot: Vec<(Pos, Chest)>,
 }
 
 impl ChunkManager {
@@ -212,7 +217,7 @@ impl ChunkManager {
         ring.sort_by_key(|&(dx, dz)| dx * dx + dz * dz);
 
         Self { chunks: Chunks::default(), pending: HashSet::new(), ring, radius, center: None, max_in_flight: workers * 2,
-               gen: OverworldGenerator::new(seed), cm: WorldChunkManager::new(seed), jobs, done, light_queue: Vec::new(), sky_sub: 0, mesh_gen: 0, dir: None, saved: HashSet::new(), changes: Vec::new() }
+               gen: OverworldGenerator::new(seed), cm: WorldChunkManager::new(seed), jobs, done, light_queue: Vec::new(), sky_sub: 0, mesh_gen: 0, dir: None, saved: HashSet::new(), changes: Vec::new(), loot: Vec::new() }
     }
 
     /// Keep this world in `dir`: chunks found there are loaded instead of generated, and edited ones are written back
@@ -447,7 +452,13 @@ impl ChunkManager {
         Some(Region::new(x, z, blocks, data))
     }
 
-    fn put_region(&mut self, x: i32, z: i32, region: Region) {
+    /// The chests populate filled since the last call; the game puts them into its tile entities.
+    pub fn take_loot(&mut self) -> Vec<(Pos, Chest)> {
+        std::mem::take(&mut self.loot)
+    }
+
+    fn put_region(&mut self, x: i32, z: i32, mut region: Region) {
+        self.loot.extend(region.take_loot());
         let keys = [(x, z), (x, z + 1), (x + 1, z), (x + 1, z + 1)];
         let (blocks, data) = region.into_parts();
         for ((k, b), d) in keys.iter().zip(blocks).zip(data) {
@@ -518,21 +529,27 @@ impl ChunkManager {
     /// The main pass's draw loop: calls `draw(mesh, index range)` for every run of neighbouring sections that is inside the
     /// `shape` around `eye` (radii `rh`, `rv` in blocks) and passes `visible(min, max)` (the frustum). Each section's box is
     /// one block taller at both ends. Empty sections are skipped, touching ones are one range, so a chunk is mostly one draw.
-    pub fn draw_ranges(&self, eye: Vec3, shape: Shape, rh: f32, rv: f32, visible: impl Fn(Vec3, Vec3) -> bool, mut draw: impl FnMut(&Mesh, std::ops::Range<u32>)) {
+    /// `water` picks the water faces (index buffer passed to `draw`) instead of the opaque ones.
+    pub fn draw_ranges(&self, eye: Vec3, shape: Shape, rh: f32, rv: f32, water: bool, visible: impl Fn(Vec3, Vec3) -> bool, mut draw: impl FnMut(&Mesh, &wgpu::Buffer, std::ops::Range<u32>)) {
         for (&(x, z), e) in &self.chunks {
             let Some(m) = e.mesh.as_ref() else { continue };
+            let (ibuf, starts) = match (&m.water, water) {
+                (Some((b, s)), true) => (b, s),
+                (None, true) => continue,
+                _ => (&m.ibuf, &m.starts),
+            };
             let mut run: Option<(u32, u32)> = None;
             for s in 0..=SECTIONS {
-                let on = s < SECTIONS && m.starts[s + 1] > m.starts[s] && {
+                let on = s < SECTIONS && starts[s + 1] > starts[s] && {
                     let min = Vec3::new(x as f32 * 16.0, s as f32 * 16.0 - 1.0, z as f32 * 16.0);
                     let max = min + Vec3::new(16.0, 18.0, 16.0);
                     in_range(shape, eye, min, max, rh, rv) && visible(min, max)
                 };
                 match (on, run) {
-                    (true, None) => run = Some((m.starts[s], m.starts[s + 1])),
-                    (true, Some((a, _))) => run = Some((a, m.starts[s + 1])),
+                    (true, None) => run = Some((starts[s], starts[s + 1])),
+                    (true, Some((a, _))) => run = Some((a, starts[s + 1])),
                     (false, Some((a, b))) => {
-                        draw(m, a..b);
+                        draw(m, ibuf, a..b);
                         run = None;
                     }
                     _ => {}
@@ -649,9 +666,10 @@ impl ChunkManager {
             let (x, z) = (cx + dx, cz + dz);
             let c = &self.chunks;
             let built = match (c.get(&(x, z)), c.get(&(x + 1, z)), c.get(&(x - 1, z)), c.get(&(x, z + 1)), c.get(&(x, z - 1))) {
-                (Some(me), Some(px), Some(nx), Some(pz), Some(nz)) if !me.meshed && me.lit && self.is_final(x, z) => Some(mesh::build(
+                (Some(me), Some(px), Some(nx), Some(pz), Some(nz)) if !me.meshed && me.lit && self.is_final(x, z) => Some(mesh::build_split(
                     &me.blocks,
                     &me.data,
+                    [&px.data, &nx.data, &pz.data, &nz.data],
                     &me.light,
                     [px.blocks.as_slice(), nx.blocks.as_slice(), pz.blocks.as_slice(), nz.blocks.as_slice()],
                     [px.light.as_slice(), nx.light.as_slice(), pz.light.as_slice(), nz.light.as_slice()],
@@ -661,14 +679,17 @@ impl ChunkManager {
                 )),
                 _ => None,
             };
-            let Some((verts, idxs)) = built else { continue };
+            let Some((verts, idxs, widxs)) = built else { continue };
             budget -= 1;
             let (idxs, starts) = by_section(&verts, &idxs);
-            let mesh = (!idxs.is_empty()).then(|| Mesh {
+            let (widxs, wstarts) = by_section(&verts, &widxs);
+            let mesh = (!idxs.is_empty() || !widxs.is_empty()).then(|| Mesh {
                 vbuf: create_vertex_buffer(device, bytemuck::cast_slice(&verts)),
-                ibuf: create_index_buffer(device, &idxs),
+                // (a chunk of only water has no opaque faces: a dummy index keeps the buffer non-empty, `index_count` is 0)
+                ibuf: create_index_buffer(device, if idxs.is_empty() { &[0u32][..] } else { &idxs[..] }),
                 index_count: idxs.len() as u32,
                 starts,
+                water: (!widxs.is_empty()).then(|| (create_index_buffer(device, &widxs), wstarts)),
             });
             if let Some(e) = self.chunks.get_mut(&(x, z)) {
                 // ponytail: a rebuild with the same index count (the time-of-day relight) is taken as the same geometry, so the

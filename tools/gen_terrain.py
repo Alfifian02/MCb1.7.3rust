@@ -26,6 +26,6 @@ def opaque(im): im.putalpha(255); return im
 put(255, tint(tile(53), BIRCH))                           # birch leaves (fast leaves, 53, are opaque)
 for n in (0, 39, 56, 73): put(n, tint(tile(n), GRASS))    # grass top, tall grass, fern, reeds
 put(53, tint(tile(53), FOLIAGE)); put(133, tint(tile(133), SPRUCE))
-for n in (205, 237, 67): put(n, opaque(tile(n)))          # water, lava, ice are drawn as opaque cubes
+for n in (237, 67): put(n, opaque(tile(n)))               # lava, ice are drawn as opaque cubes; water keeps its alpha (0.54, drawn translucent)
 open("mc-rs/assets/terrain.rgba", "wb").write(terrain.tobytes())
 print("grass", GRASS, "foliage", FOLIAGE)
