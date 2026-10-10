@@ -48,6 +48,8 @@ const RENDER_DIST: i32 = 4;
 const SEED: i64 = 0xCAFEBABE;
 /// Vertical render distance in chunks (16 blocks): sections further above or below the eye are not drawn.
 const RENDER_VERT: i32 = 3;
+/// Copies of the entity mesh that draw its shadow cone; with `CONE_STEP` 0.2 in `gpu/pipeline.rs` the cone reaches 8 blocks from the sun side.
+const CONE_COPIES: u32 = 40;
 /// `Sphere`: what is drawn is within `RENDER_DIST` blocks-of-16 in 3D (matches the fog, which is by 3D distance);
 /// `Cylinder`: a circle of that radius at any height within `RENDER_VERT`.
 const RENDER_SHAPE: Shape = Shape::Sphere;
@@ -857,6 +859,13 @@ impl App {
                 rp.set_vertex_buffer(0, self.item_mesh.vbuf.slice(..));
                 rp.set_index_buffer(self.item_mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
                 rp.draw_indexed(0..item_indices, 0, 0..1);
+                // The umbra in the air under every item and mob: copies 1..=CONE_COPIES, copy 0 is the entity itself (drawn above).
+                // ponytail: 8 blocks of reach (a low sun on a tall mob is cut short) and every copy is the whole buffer.
+                if sun_strength > 0.0 {
+                    rp.set_pipeline(&self.pipe.cone_pipeline);
+                    rp.draw_indexed(0..item_indices, 0, 1..CONE_COPIES + 1);
+                    rp.set_pipeline(&self.pipe.pipeline);
+                }
             }
             // Water last: blended over the terrain and the entities, no depth write (`water_pipeline`; same groups as the terrain).
             rp.set_pipeline(&self.pipe.water_pipeline);

@@ -89,6 +89,8 @@ pub struct ChunkPipeline {
     pub shadow_view: TextureView,
     /// Same box and matrix as `shadow_view`, but holds only the moving things (items, mobs, falling blocks) and is redrawn every frame.
     pub ent_view: TextureView,
+    /// Draws the entity mesh's shadow cone (see `vs_cone`); the instance count is `CONE_COPIES`.
+    pub cone_pipeline: RenderPipeline,
     pub shadow_bind: BindGroup,
     /// Layout of `shadow_bind`, for the light-shaft pass (`render::vl`).
     pub shadow_layout: BindGroupLayout,
@@ -124,6 +126,20 @@ struct VsOut {
     @location(1) light: f32,
     @location(2) wp: vec3<f32>,
 };
+
+// Shadow cone: the entity mesh drawn again CONE_COPIES times, each copy slid CONE_STEP further from the sun, as faint black layers.
+// Along a view ray the layers stack in proportion to the path through the swept volume, so the umbra an item throws shows in the air
+// and ends where the depth test meets the ground (no depth write, so the light-shaft march still reads the terrain depth).
+const CONE_STEP: f32 = 0.2;
+const CONE_ALPHA: f32 = 0.04;
+@vertex
+fn vs_cone(@location(0) vpos: vec3<f32>, @builtin(instance_index) i: u32) -> @builtin(position) vec4<f32> {
+    return u.proj * u.view * vec4<f32>(vpos - u.sun.xyz * (f32(i) * CONE_STEP), 1.0);
+}
+@fragment
+fn fs_cone() -> @location(0) vec4<f32> {
+    return vec4<f32>(0.0, 0.0, 0.0, CONE_ALPHA * u.sun.w);
+}
 
 @vertex
 fn vs_main(@location(0) vpos: vec3<f32>, @location(1) vuv: vec2<f32>, @location(2) vlight: f32) -> VsOut {
@@ -394,6 +410,47 @@ impl ChunkPipeline {
             cache: None,
         });
 
+        let cone_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("cone_pipeline"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_cone"),
+                buffers: &[Vertex::layout()],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_cone"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    // dst * (1 - alpha): a black layer of that alpha.
+                    blend: Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::Zero,
+                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        alpha: wgpu::BlendComponent::OVER,
+                    }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            // Both faces: the layers count what a ray crosses, front and back.
+            primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
         // Water: the same vertices and shader, blended, no depth write (so what is behind it is still drawn and seen), both faces
         // (the surface is seen from below). ponytail: chunks are not sorted back to front; two water chunks in a line blend in map order.
         let water_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -428,7 +485,7 @@ impl ChunkPipeline {
             cache: None,
         });
 
-        Self { pipeline, water_pipeline, uniform_buf, atlas_tex, atlas_view, bind_group, bind_layout, shadow_pipeline, shadow_view, ent_view, shadow_bind, shadow_layout }
+        Self { pipeline, water_pipeline, uniform_buf, atlas_tex, atlas_view, bind_group, bind_layout, shadow_pipeline, shadow_view, ent_view, cone_pipeline, shadow_bind, shadow_layout }
     }
 
     /// Terrain fog for this frame: `colour` rgb, `far` blocks (0 = off, e.g. under water), `rain` 0..1. Call after `upload_uniforms`.
