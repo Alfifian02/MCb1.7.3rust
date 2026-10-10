@@ -57,6 +57,13 @@ pub mod block {
     pub const ORE_LAPIS: u8 = 21;
 }
 
+/// One column of LOD terrain: the height of its top face and the block that is drawn there.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct LodCol {
+    pub top: u8,
+    pub block: u8,
+}
+
 pub struct OverworldGenerator {
     /// World seed (MapGenBase and populate re-seed from it).
     pub(super) seed: i64,
@@ -111,28 +118,35 @@ impl OverworldGenerator {
         blocks
     }
 
-    /// func_4061_a: the 5x17x5 density grid.
+    /// func_4061_a: the 5x17x5 density grid of a chunk (`x`, `z` = chunk * 4). The climate is read at the block
+    /// `ix * 3 + 1` of the chunk, as the Java does (`16 / 5` is 3).
     fn density(&self, x: i32, z: i32, temps: &[f64], hums: &[f64]) -> Vec<f64> {
-        const SX: usize = 5;
-        const SY: usize = 17;
-        const SZ: usize = 5;
-        let (xf, zf) = (x as f64, z as f64);
-        let d_main = self.noise_main.generate_2d(x, z, SX, SZ, 1.121, 1.121);
-        let d_height = self.noise_height.generate_2d(x, z, SX, SZ, 200.0, 200.0);
-        let d_base = self.noise_base.generate(xf, 0.0, zf, SX, SY, SZ, 684.412 / 80.0, 684.412 / 160.0, 684.412 / 80.0);
-        let d_lim = self.noise_lim.generate(xf, 0.0, zf, SX, SY, SZ, 684.412, 684.412, 684.412);
-        let d_low = self.noise_low.generate(xf, 0.0, zf, SX, SY, SZ, 684.412, 684.412, 684.412);
+        self.density_grid(x as f64, z as f64, 5, 1.0, |ix, iz| {
+            let b = (ix * 3 + 1) * 16 + iz * 3 + 1;
+            (temps[b], hums[b])
+        })
+    }
 
-        let mut out = vec![0.0; SX * SY * SZ];
-        let step = 16 / SX;
+    /// The density grid, `n` x 17 x `n` nodes: node (ix, iz) sits at (`x` + ix * `s`, `z` + iz * `s`) in node units (4 blocks);
+    /// `s` = 1.0 and `n` = 5 is the vanilla chunk grid, bit for bit (every `* 1.0` and `/ 1.0` is exact). A larger `s`
+    /// strides the same noise, which is what the LOD terrain uses. `clim(ix, iz)` = (temperature, humidity) of a column.
+    fn density_grid(&self, x: f64, z: f64, n: usize, s: f64, clim: impl Fn(usize, usize) -> (f64, f64)) -> Vec<f64> {
+        const SY: usize = 17;
+        let (sx, sz) = (n, n);
+        let (xf, zf) = (x / s, z / s);
+        let d_main = self.noise_main.generate(xf, 10.0, zf, sx, 1, sz, 1.121 * s, 1.0, 1.121 * s);
+        let d_height = self.noise_height.generate(xf, 10.0, zf, sx, 1, sz, 200.0 * s, 1.0, 200.0 * s);
+        let d_base = self.noise_base.generate(xf, 0.0, zf, sx, SY, sz, 684.412 / 80.0 * s, 684.412 / 160.0, 684.412 / 80.0 * s);
+        let d_lim = self.noise_lim.generate(xf, 0.0, zf, sx, SY, sz, 684.412 * s, 684.412, 684.412 * s);
+        let d_low = self.noise_low.generate(xf, 0.0, zf, sx, SY, sz, 684.412 * s, 684.412, 684.412 * s);
+
+        let mut out = vec![0.0; sx * SY * sz];
         let mut i = 0;
         let mut col = 0;
-        for ix in 0..SX {
-            let bx = ix * step + step / 2;
-            for iz in 0..SZ {
-                let bz = iz * step + step / 2;
-                let t = temps[bx * 16 + bz];
-                let h = hums[bx * 16 + bz] * t;
+        for ix in 0..sx {
+            for iz in 0..sz {
+                let (t, hum) = clim(ix, iz);
+                let h = hum * t;
                 let mut v25 = 1.0 - h;
                 v25 *= v25;
                 v25 *= v25;
@@ -177,6 +191,39 @@ impl OverworldGenerator {
             }
         }
         out
+    }
+
+    /// LOD terrain (`render::lod`): the top of the ground for an `n` x `n` grid of `cell`-block cells, the first one with its
+    /// corner at block (`x0`, `z0`); index `ix * n + iz`. Only the density grid is evaluated, at the middle of each cell (the
+    /// vanilla grid is every 4 blocks, so `cell` = 4 is as fine as the terrain gets): no chunk, no caves, no populate.
+    /// The surface is the highest node with density > 0, put where the density crosses 0 on the line to the node above, which
+    /// is where `generate_terrain`'s trilinear blend crosses it too (that one is linear in y).
+    // UNVERIFIED: not diffed against `generate_terrain` bit for bit (cells are sampled at their middle, not on the node
+    // grid); `lod_follows_the_terrain` bounds the error. Left out: trees, gravel, the jitter on the sand test, caves.
+    pub fn lod_columns(&self, cm: &mut WorldChunkManager, x0: i32, z0: i32, n: usize, cell: i32) -> Vec<LodCol> {
+        let c = cell as f64;
+        let (px, pz) = (x0 as f64 + c / 2.0, z0 as f64 + c / 2.0);
+        let biomes = cm.climate(px, pz, n, n, c);
+        let (temps, hums) = (&cm.temperature, &cm.humidity);
+        let d = self.density_grid(px / 4.0, pz / 4.0, n, c / 4.0, |ix, iz| (temps[ix * n + iz], hums[ix * n + iz]));
+        // noise_sand as `replace_blocks_for_biome` reads it (x and z in the first two slots, scale 1/32), strided like the rest.
+        let sand = self.noise_sand.generate(px / c, pz / c, 0.0, n, n, 1, c / 32.0, c / 32.0, 1.0);
+        (0..n * n).map(|i| {
+            let col = &d[i * 17..i * 17 + 17];
+            // Node 16 is always <= 0 (the fade at the top of the grid), so k + 1 <= 16 is not above ground.
+            let top = (0..16).rev().find(|&k| col[k] > 0.0).map_or(1, |k| {
+                let y = k as f64 * 8.0 + 8.0 * col[k] / (col[k] - col[k + 1]);
+                (y.floor() as i32 + 1).clamp(1, H as i32)
+            });
+            let cold = temps[i] < 0.5;
+            if top < SEA_LEVEL {
+                return LodCol { top: SEA_LEVEL as u8, block: if cold { block::ICE } else { block::WATER } };
+            }
+            let mut b = biomes[i].top_block();
+            // The beach band of `replace_blocks_for_biome`: top block within sea - 4 ..= sea + 1.
+            if (SEA_LEVEL - 4..=SEA_LEVEL + 1).contains(&(top - 1)) && sand[i] > 0.0 { b = block::SAND; }
+            LodCol { top: top as u8, block: if cold { 80 } else { b } } // 80 = snow block: populate's snow layer, flat
+        }).collect()
     }
 
     /// generateTerrain: interpolate the density grid into stone/water/ice.

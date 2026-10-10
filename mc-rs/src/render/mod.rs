@@ -5,5 +5,6 @@ pub mod hud;
 pub mod font;
 pub mod outline;
 pub mod items;
+pub mod lod;
 pub mod sky;
 pub mod vl;

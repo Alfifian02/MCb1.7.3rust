@@ -24,6 +24,7 @@ use crate::gpu::context::Gpu;
 use crate::gpu::pipeline::ChunkPipeline;
 use crate::render::atlas;
 use crate::render::items::ItemMesh;
+use crate::render::lod::{self, LodRenderer};
 use crate::render::camera::{FirstPersonCamera, Frustum, ShadowCache};
 use crate::render::outline::Outline;
 use crate::render::sky::{SkyFrame, SkyRenderer};
@@ -85,6 +86,8 @@ struct App {
     sky: SkyRenderer,
     /// Volumetric light (`render::vl`), drawn after the terrain.
     shafts: LightShafts,
+    /// Distant terrain beyond the chunk ring (`render::lod`).
+    lod: LodRenderer,
     /// Where and along what the shadow map was last drawn (it is reused between redraws).
     shadow: ShadowCache,
     weather: sky::Weather,
@@ -159,6 +162,7 @@ impl App {
         // spawn_at defaults to aspect 1.0 and resize() only runs when the size changes, so
         // without this the 3D view is squashed horizontally onto the real screen shape.
         camera.aspect = width as f32 / height as f32;
+        camera.zfar = lod::FAR; // the distant terrain reaches `lod::RADIUS`
         let player = Player { pos: start, vel: glam::Vec3::ZERO, on_ground: false };
 
         // M12: HUD pipeline + touch state machine. Surface dimensions match
@@ -169,6 +173,7 @@ impl App {
         let item_mesh = ItemMesh::new(&gpu.device);
         let sky_renderer = SkyRenderer::new(&gpu.device, &gpu.queue, surface_format);
         let shafts = LightShafts::new(&gpu.device, surface_format, &pipe.shadow_layout);
+        let lod = LodRenderer::new(&gpu.device, surface_format, SEED);
         let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as i64);
 
         let mut app = Self {
@@ -190,6 +195,7 @@ impl App {
             world_ticks: 0.0,
             sky: sky_renderer,
             shafts,
+            lod,
             shadow: ShadowCache::new(),
             weather: sky::Weather::new(seed),
             weather_ticks: 0,
@@ -609,6 +615,7 @@ impl App {
         self.step_frame();
         let (pcx, pcz) = (chunk_coord(self.player.pos.x), chunk_coord(self.player.pos.z));
         self.chunks.update(&self.gpu.device, pcx, pcz);
+        self.lod.update(&self.gpu.device, self.camera.pos);
         let (view, proj) = self.camera.build_view_proj();
         let outline_indices = self.target.map_or(0, |h| self.outline.update(&self.gpu.queue, h.pos));
         let item_indices = self.item_mesh.update(&self.gpu.queue, &self.drops, &self.mobs, &self.ticks.falling);
@@ -636,7 +643,9 @@ impl App {
         let (frustum, shadow_frustum) = (Frustum::from_view_proj(proj * view), Frustum::from_view_proj(shadow_vp));
         let fog = sky::fog_color(angle, sky_rgb, rain, thunder);
         // Terrain fog (AstraLex `NormalFog`): fades to the horizon colour at the render distance; off under water.
-        self.pipe.set_fog(&self.gpu.queue, fog, if eye_in_water { 0.0 } else { (RENDER_DIST * 16) as f32 }, rain);
+        self.pipe.set_fog(&self.gpu.queue, fog, if eye_in_water { 0.0 } else { lod::RADIUS }, rain);
+        let day = crate::world::chunk::brightness(15u8.saturating_sub(sky::skylight_subtracted(angle, rain, thunder)));
+        self.lod.prepare(&self.gpu.queue, proj * view, self.camera.pos, fog, day, (pcx, pcz, RENDER_DIST));
         let clear = wgpu::Color { r: fog[0] as f64, g: fog[1] as f64, b: fog[2] as f64, a: 1.0 };
         self.sky.update(&self.gpu.queue, &self.camera, &SkyFrame { angle, rain, sky: sky_rgb, fog });
         if self.frames == 0 {
@@ -721,6 +730,9 @@ impl App {
                 rp.set_vertex_buffer(0, m.vbuf.slice(..));
                 rp.set_index_buffer(m.ibuf.slice(..), wgpu::IndexFormat::Uint32);
                 rp.draw_indexed(0..m.index_count, 0, 0..1);
+            }
+            if !eye_in_water {
+                self.lod.draw(&mut rp, &frustum);
             }
             if item_indices > 0 {
                 rp.set_vertex_buffer(0, self.item_mesh.vbuf.slice(..));
