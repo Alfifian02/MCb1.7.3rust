@@ -68,8 +68,9 @@ struct Uniforms {
 /// `SUN_GLARE_DAY * 0.1 * SUNGLARE_OUTWATER_STRENGTH * 0.01` of the pack is an HDR add; here the halo is an alpha blend
 /// (an add would clip on the pale sky), so this is its own number. UNVERIFIED: on a device.
 const GLARE: f32 = 1.2;
-/// Half-size of the glare quad at the sun's distance (100): reaches ~63 degrees from the sun, where the glare is ~0.
-const GLARE_R: f32 = 200.0;
+/// Half-size of the glare quad at the sun's distance (100): reaches ~42 degrees from the sun, where the glare alpha is < 2%
+/// (it is drawn over the whole sky and then covered by terrain, so every pixel it spans costs a shaded fragment).
+const GLARE_R: f32 = 90.0;
 /// `lightColor.glsl` morning light (236, 184, 132) / 255.
 const GLARE_RGB: [f32; 3] = [0.93, 0.72, 0.52];
 

@@ -203,6 +203,8 @@ was generated with). The CI workflow does this for you.
   ~113 generated (radius 6) and ~149 kept). populate() runs on the render thread, one chunk per frame. One draw call per chunk, at most 2 chunk meshes built per frame. Memory is
   32 KB of blocks per loaded chunk. No device numbers yet for this path; the old 48x48 figure
   (~16 ms/frame on a Pixel 4a) no longer applies.
+- Shadows + light shafts: the shadow map is reused between redraws (`render::camera::ShadowCache`), the shadow pass culls back faces, the shafts' blend shares the HUD pass. See the ROADMAP changelog for the levers still open. Unmeasured.
+- Shadows + light shafts + glare: the shadow map is reused between redraws (`render::camera::ShadowCache`), the shadow pass culls back faces, the shafts' blend shares the HUD pass, the glare quad is smaller. See the ROADMAP changelog for the levers still open. Unmeasured.
 - M13 frustum culling is in (`render::camera::Frustum`, filtered through `ChunkManager::meshes_where`); M13 still adds
   greedy meshing.
 - No JNI calls except the one `android_main` entry point; everything

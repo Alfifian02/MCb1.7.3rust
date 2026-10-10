@@ -328,8 +328,9 @@ impl ChunkPipeline {
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             fragment: None,
-            // ponytail: no culling (Back would skip the faces turned from the sun, a cheap speed-up once measured).
-            primitive: wgpu::PrimitiveState::default(),
+            // Back-face culling: the mesher drops hidden faces, so the nearest face to the sun is always a sun-facing one and the
+            // depth map is the same, for half the rasterised triangles. (distort() keeps the winding.)
+            primitive: wgpu::PrimitiveState { cull_mode: Some(wgpu::Face::Back), ..Default::default() },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
                 depth_write_enabled: true,
@@ -391,10 +392,11 @@ impl ChunkPipeline {
         queue.write_buffer(&self.uniform_buf, std::mem::offset_of!(Uniforms, fog) as u64, bytemuck::bytes_of(&f));
     }
 
-    /// Returns the sun's view-projection (for culling the shadow pass). `strength` 0 turns shadows off.
-    pub fn upload_uniforms(&self, queue: &Queue, view: Mat4, proj: Mat4, sun: Vec3, strength: f32) -> Mat4 {
+    /// Returns the sun's view-projection (for culling the shadow pass). `strength` 0 turns shadows off. `shadow_center` and
+    /// `sun` are those of the last shadow-map render (`App.shadow`), so the lookup matches the map even when it is reused.
+    pub fn upload_uniforms(&self, queue: &Queue, view: Mat4, proj: Mat4, sun: Vec3, strength: f32, shadow_center: Vec3) -> Mat4 {
         let eye = view.inverse().w_axis.truncate();
-        let vp = shadow_view_proj(eye, sun);
+        let vp = shadow_view_proj(shadow_center, sun);
         let u = Uniforms {
             view: view.to_cols_array_2d(),
             proj: proj.to_cols_array_2d(),

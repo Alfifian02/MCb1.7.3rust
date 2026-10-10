@@ -1,7 +1,7 @@
 //! Volumetric light ("light shafts"), a port of AstraLex's `lib/atmospherics/volumetricLight.glsl` (the ray march,
 //! `program/composite.glsl`) and the `LIGHT_SHAFT` part of `program/composite1.glsl` (blur, colour, blend), overworld,
 //! eye not under water. Two passes after the terrain: a half-resolution march through the sun's shadow map into an
-//! RGBA8 target (what `colortex1` is in the pack), then a full-screen blend onto the frame.
+//! RGBA8 target (what `colortex1` is in the pack: `march`), then a full-screen blend onto the frame (`composite`, drawn inside the HUD pass).
 //! Everything that depends only on the time of day and the weather (`lightCol`, `shadowFade`, the multipliers) is worked
 //! out once per frame on the CPU in `params` and is the part the tests check.
 //! Deviations from the pack, all because mc-rs has no such input:
@@ -139,7 +139,8 @@ fn mix_v(a: Vec3, b: Vec3, t: f32) -> Vec3 {
 struct U {
     /// Inverse view: camera space to world.
     cam: [[f32; 4]; 4],
-    shadow_vp: [[f32; 4]; 4],
+    /// `shadow_vp * cam`: view space straight to shadow clip space (the march needs no world position).
+    shadow_cam: [[f32; 4]; 4],
     /// xyz: toward the light, w: depth bias.
     light: [f32; 4],
     /// x, y: tan(fov / 2) x aspect and tan(fov / 2); z, w: near and far.
@@ -159,7 +160,7 @@ struct U {
 const SHADER: &str = r#"
 struct U {
     cam: mat4x4<f32>,
-    shadow_vp: mat4x4<f32>,
+    shadow_cam: mat4x4<f32>,
     light: vec4<f32>,
     ray: vec4<f32>,
     a: vec4<f32>,
@@ -217,10 +218,10 @@ fn fs_march(in: FsIn) -> @location(0) vec4<f32> {
     let dither = ign(in.pos.xy);
     var sum = 0.0;
     for (var i = 0; i < 10; i = i + 1) {
-        let d = pow(f32(i) + dither + u.c.y, 1.5) * min_dist_factor;
+        let t = f32(i) + dither + u.c.y;
+        let d = t * sqrt(t) * min_dist_factor; // pow(t, 1.5)
         if d >= max_dist || depth < d { break; }
-        let wp = u.cam * vec4<f32>(r * d, 1.0);
-        let c = u.shadow_vp * vec4<f32>(wp.xyz, 1.0);
+        let c = u.shadow_cam * vec4<f32>(r * d, 1.0);
         if abs(c.x) < 1.0 && abs(c.y) < 1.0 {
             let p = vec3<f32>(c.xy / (length(c.xy) + u.a.x) * 0.5 + 0.5, c.z * 0.5 + 0.25 + u.light.w);
             let lit = textureSampleCompareLevel(sh_tex, sh_samp, vec2<f32>(p.x, 1.0 - p.y), p.z);
@@ -329,9 +330,9 @@ impl LightShafts {
         Self { march, comp, ubuf, march_layout, comp_layout, samp, target: None }
     }
 
-    /// Run after the terrain pass, before the HUD. `shadow_vp` is what `ChunkPipeline::upload_uniforms` returned this
-    /// frame (the shadow pass has to have run: `Params::active`), `shadow_bind` its map.
-    pub fn draw(&mut self, gpu: &Gpu, enc: &mut CommandEncoder, frame: &TextureView, shadow_bind: &BindGroup, cam: &FirstPersonCamera, shadow_vp: Mat4, p: &Params) {
+    /// Run after the terrain pass: the half-resolution march. `shadow_vp` is what `ChunkPipeline::upload_uniforms` returned this
+    /// frame (the shadow map has to exist: `Params::active`), `shadow_bind` its map. Then `composite` blends it onto the frame.
+    pub fn march(&mut self, gpu: &Gpu, enc: &mut CommandEncoder, shadow_bind: &BindGroup, cam: &FirstPersonCamera, shadow_vp: Mat4, p: &Params) {
         let (w, h) = (gpu.config.width, gpu.config.height);
         if self.target.as_ref().map_or(true, |t| t.size != (w, h)) {
             // ponytail: half resolution, nearest depth tap (the pack marches at full resolution, 4-tap blurred); a
@@ -369,7 +370,7 @@ impl LightShafts {
         let (view, proj) = cam.build_view_proj();
         let u = U {
             cam: view.inverse().to_cols_array_2d(),
-            shadow_vp: shadow_vp.to_cols_array_2d(),
+            shadow_cam: (shadow_vp * view.inverse()).to_cols_array_2d(),
             light: p.light.extend(DEPTH_BIAS).to_array(),
             ray: [1.0 / proj.x_axis.x, 1.0 / proj.y_axis.y, cam.znear, cam.zfar],
             a: [SHADOW_DISTORT, SHADOW_RADIUS, p.endurance, p.power],
@@ -399,18 +400,12 @@ impl LightShafts {
             rp.set_bind_group(1, shadow_bind, &[]);
             rp.draw(0..3, 0..1);
         }
-        let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("vl_comp"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: frame,
-                resolve_target: None,
-                depth_slice: None,
-                ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
-            })],
-            depth_stencil_attachment: None,
-            timestamp_writes: None,
-            occlusion_query_set: None,
-        });
+    }
+
+    /// The blend onto the frame, drawn inside a pass that already loads it (the HUD's), so the frame is not loaded and stored
+    /// a second time just for this. Only after `march` in the same frame.
+    pub fn composite(&self, rp: &mut wgpu::RenderPass<'_>) {
+        let Some(t) = &self.target else { return };
         rp.set_pipeline(&self.comp);
         rp.set_bind_group(0, &t.comp_bind, &[]);
         rp.draw(0..3, 0..1);

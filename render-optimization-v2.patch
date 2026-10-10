@@ -1,0 +1,386 @@
+diff -ruN a/README.md b/README.md
+--- a/README.md	2026-10-10 06:53:16.000000000 +0000
++++ b/README.md	2026-10-10 00:35:56.737445094 +0000
+@@ -203,6 +203,8 @@
+   ~113 generated (radius 6) and ~149 kept). populate() runs on the render thread, one chunk per frame. One draw call per chunk, at most 2 chunk meshes built per frame. Memory is
+   32 KB of blocks per loaded chunk. No device numbers yet for this path; the old 48x48 figure
+   (~16 ms/frame on a Pixel 4a) no longer applies.
++- Shadows + light shafts: the shadow map is reused between redraws (`render::camera::ShadowCache`), the shadow pass culls back faces, the shafts' blend shares the HUD pass. See the ROADMAP changelog for the levers still open. Unmeasured.
++- Shadows + light shafts + glare: the shadow map is reused between redraws (`render::camera::ShadowCache`), the shadow pass culls back faces, the shafts' blend shares the HUD pass, the glare quad is smaller. See the ROADMAP changelog for the levers still open. Unmeasured.
+ - M13 frustum culling is in (`render::camera::Frustum`, filtered through `ChunkManager::meshes_where`); M13 still adds
+   greedy meshing.
+ - No JNI calls except the one `android_main` entry point; everything
+diff -ruN a/ROADMAP.md b/ROADMAP.md
+--- a/ROADMAP.md	2026-10-10 07:13:28.000000000 +0000
++++ b/ROADMAP.md	2026-10-10 00:35:56.737100711 +0000
+@@ -46,6 +46,12 @@
+ BiomeGenBase but climate never selects it; b1.7.3 has no ravines.
+ 
+ ## Changelog
++- `done` render cost pass for shadows + light shafts + sun glare (written WITHOUT a Rust toolchain: not compiled, not run, +1 test `shadow_cache_redraws_only_when_stale` not run; no FPS numbers):
++    - Shadow map is cached (`render::camera::ShadowCache`): it was redrawn every frame, all chunks in a 128-tall box. Now it is redrawn only when the eye moved > 4 blocks, the light turned > 0.5 degrees, a mesh changed size / an unload happened (`ChunkManager::mesh_gen`), or it was unused the frame before. Between redraws the terrain and the shafts read it with the matrix + light it was drawn with (`upload_uniforms` takes the cached centre), so nothing swims.
++    - Shadow pass culls back faces (the mesher drops hidden faces, so the depth map is the same).
++    - Light shafts: `shadow_vp * inverse_view` is one CPU-side matrix (one mat4 per sample, was two), `pow(t, 1.5)` is `t * sqrt(t)`; the blend (`LightShafts::composite`) now runs inside the HUD pass, saving one full-screen load/store of the frame. The chunk pass discards its depth when the shafts are off.
++    - Sun glare: the quad's half-size 200 -> 90 (`GLARE_R`): the alpha is < 2% past ~40 degrees, and the quad is drawn over the whole sky before the terrain covers it, so it shaded ~5x more pixels than it showed. Terrain fog is left as is (a `length` + smoothstep per pixel, only past 0.6 x far).
++    - ponytail: a mesh rebuilt with the same index count (the time-of-day relight) does not refresh the map; an edit that keeps the count shows at the next sun / movement refresh (<= ~2 s). Levers left, in order: `SHADOW_RES` 1024 -> 512, 10 -> 6 march samples in `fs_march`, march at quarter resolution, no moon shafts (`Params.active` only for the sun), a render scale below native.
+ - `done` terrain fog + sun glare (port of AstraLex `NormalFog` / `sunGlare.glsl`; written WITHOUT a Rust toolchain: not compiled, not run; +1 assert in `sky.rs` tests):
+     - `gpu/pipeline.rs`: `fs_main` fades to the horizon fog colour (`sky::fog_color`, also the clear colour and the dome's fog) by `1 - (far - d) * 5 / (density * far)`, smoothstepped; `far` = `RENDER_DIST * 16`, density 2.0 (+50% per unit of rain), off under water. `ChunkPipeline::set_fog` writes the new `fog`/`fogp` uniforms (called from `lib.rs` after `upload_uniforms`).
+     - `render/sky.rs`: a glare quad (alpha blend, before the sun) shaded per pixel by `VoL^8` as in `sunGlare.glsl`, warm `lightCol`, faded by `sunVisibility` and rain.
+diff -ruN a/mc-rs/src/gpu/pipeline.rs b/mc-rs/src/gpu/pipeline.rs
+--- a/mc-rs/src/gpu/pipeline.rs	2026-10-10 07:13:28.000000000 +0000
++++ b/mc-rs/src/gpu/pipeline.rs	2026-10-10 00:35:47.980436865 +0000
+@@ -328,8 +328,9 @@
+                 compilation_options: wgpu::PipelineCompilationOptions::default(),
+             },
+             fragment: None,
+-            // ponytail: no culling (Back would skip the faces turned from the sun, a cheap speed-up once measured).
+-            primitive: wgpu::PrimitiveState::default(),
++            // Back-face culling: the mesher drops hidden faces, so the nearest face to the sun is always a sun-facing one and the
++            // depth map is the same, for half the rasterised triangles. (distort() keeps the winding.)
++            primitive: wgpu::PrimitiveState { cull_mode: Some(wgpu::Face::Back), ..Default::default() },
+             depth_stencil: Some(wgpu::DepthStencilState {
+                 format: wgpu::TextureFormat::Depth32Float,
+                 depth_write_enabled: true,
+@@ -391,10 +392,11 @@
+         queue.write_buffer(&self.uniform_buf, std::mem::offset_of!(Uniforms, fog) as u64, bytemuck::bytes_of(&f));
+     }
+ 
+-    /// Returns the sun's view-projection (for culling the shadow pass). `strength` 0 turns shadows off.
+-    pub fn upload_uniforms(&self, queue: &Queue, view: Mat4, proj: Mat4, sun: Vec3, strength: f32) -> Mat4 {
++    /// Returns the sun's view-projection (for culling the shadow pass). `strength` 0 turns shadows off. `shadow_center` and
++    /// `sun` are those of the last shadow-map render (`App.shadow`), so the lookup matches the map even when it is reused.
++    pub fn upload_uniforms(&self, queue: &Queue, view: Mat4, proj: Mat4, sun: Vec3, strength: f32, shadow_center: Vec3) -> Mat4 {
+         let eye = view.inverse().w_axis.truncate();
+-        let vp = shadow_view_proj(eye, sun);
++        let vp = shadow_view_proj(shadow_center, sun);
+         let u = Uniforms {
+             view: view.to_cols_array_2d(),
+             proj: proj.to_cols_array_2d(),
+diff -ruN a/mc-rs/src/gpu/shadow_test.rs b/mc-rs/src/gpu/shadow_test.rs
+--- a/mc-rs/src/gpu/shadow_test.rs	2026-10-10 05:57:18.000000000 +0000
++++ b/mc-rs/src/gpu/shadow_test.rs	2026-10-10 00:35:39.957317444 +0000
+@@ -23,7 +23,7 @@
+     let view = Mat4::look_at_rh(eye, Vec3::new(0.0, 0.0, -4.0), Vec3::Z);
+     let proj = Mat4::perspective_rh(50f32.to_radians(), 1.0, 0.1, 200.0);
+     let sun = Vec3::new(0.0, 0.6, 0.8); // toward +Z, 37 degrees up
+-    pipe.upload_uniforms(&q, view, proj, sun, strength);
++    pipe.upload_uniforms(&q, view, proj, sun, strength, eye);
+     let target = dev.create_texture(&wgpu::TextureDescriptor { label: None, size: wgpu::Extent3d { width: 64, height: 64, depth_or_array_layers: 1 }, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: fmt, usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC, view_formats: &[] });
+     let depth = dev.create_texture(&wgpu::TextureDescriptor { label: None, size: wgpu::Extent3d { width: 64, height: 64, depth_or_array_layers: 1 }, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::Depth32Float, usage: wgpu::TextureUsages::RENDER_ATTACHMENT, view_formats: &[] });
+     let buf = dev.create_buffer(&wgpu::BufferDescriptor { label: None, size: 64 * 64 * 4, usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false });
+diff -ruN a/mc-rs/src/lib.rs b/mc-rs/src/lib.rs
+--- a/mc-rs/src/lib.rs	2026-10-10 07:13:28.000000000 +0000
++++ b/mc-rs/src/lib.rs	2026-10-10 00:35:47.981224683 +0000
+@@ -24,7 +24,7 @@
+ use crate::gpu::pipeline::ChunkPipeline;
+ use crate::render::atlas;
+ use crate::render::items::ItemMesh;
+-use crate::render::camera::{FirstPersonCamera, Frustum};
++use crate::render::camera::{FirstPersonCamera, Frustum, ShadowCache};
+ use crate::render::outline::Outline;
+ use crate::render::sky::{SkyFrame, SkyRenderer};
+ use crate::render::vl::{self, LightShafts};
+@@ -85,6 +85,8 @@
+     sky: SkyRenderer,
+     /// Volumetric light (`render::vl`), drawn after the terrain.
+     shafts: LightShafts,
++    /// Where and along what the shadow map was last drawn (it is reused between redraws).
++    shadow: ShadowCache,
+     weather: sky::Weather,
+     weather_ticks: u64,
+     /// Hotbar slot last seen and seconds its item name still shows (`GuiIngame` shows it ~2 s after a switch).
+@@ -188,6 +190,7 @@
+             world_ticks: 0.0,
+             sky: sky_renderer,
+             shafts,
++            shadow: ShadowCache::new(),
+             weather: sky::Weather::new(seed),
+             weather_ticks: 0,
+             tip: (0, 0.0),
+@@ -625,7 +628,11 @@
+         let mut vlp = vl::params(self.world_ticks, angle, rain, sky_rgb, e.y);
+         vlp.active &= !eye_in_water;
+         let sun_strength = sky::shadow_strength(angle, rain);
+-        let shadow_vp = self.pipe.upload_uniforms(&self.gpu.queue, view, proj, vlp.light, sun_strength);
++        // The shadow map is only redrawn when the eye, the light or the geometry moved enough (`ShadowCache`); the terrain and
++        // the shafts read it with the matrix and light it was drawn with.
++        let draw_shadow = self.shadow.refresh(sun_strength > 0.0 || vlp.active, e, vlp.light, self.chunks.mesh_gen);
++        vlp.light = self.shadow.light;
++        let shadow_vp = self.pipe.upload_uniforms(&self.gpu.queue, view, proj, self.shadow.light, sun_strength, self.shadow.center);
+         let (frustum, shadow_frustum) = (Frustum::from_view_proj(proj * view), Frustum::from_view_proj(shadow_vp));
+         let fog = sky::fog_color(angle, sky_rgb, rain, thunder);
+         // Terrain fog (AstraLex `NormalFog`): fades to the horizon colour at the render distance; off under water.
+@@ -661,7 +668,7 @@
+ 
+         let mut enc = self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
+ 
+-        if sun_strength > 0.0 || vlp.active {
++        if draw_shadow {
+             let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                 label: Some("shadow_pass"),
+                 color_attachments: &[],
+@@ -695,9 +702,10 @@
+                 })],
+                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                     view: &self.gpu.depth_view,
++                    // Only the light-shaft march reads the depth back; otherwise a tile GPU never writes it to memory.
+                     depth_ops: Some(wgpu::Operations {
+                         load: wgpu::LoadOp::Clear(1.0),
+-                        store: wgpu::StoreOp::Store,
++                        store: if vlp.active { wgpu::StoreOp::Store } else { wgpu::StoreOp::Discard },
+                     }),
+                     stencil_ops: None,
+                 }),
+@@ -726,13 +734,13 @@
+             }
+         }
+         if vlp.active {
+-            self.shafts.draw(&self.gpu, &mut enc, &view_tex, &self.pipe.shadow_bind, &self.camera, shadow_vp, &vlp);
++            self.shafts.march(&self.gpu, &mut enc, &self.pipe.shadow_bind, &self.camera, shadow_vp, &vlp);
+         }
+         // M12: HUD overlay pass. Built into the same encoder so the HUD
+         // never gets lost if the GPU drops a frame.
+         self.build_hud();
+         let hud_vertex_count = self.hud_verts.len();
+-        if hud_vertex_count > 0 {
++        if hud_vertex_count > 0 || vlp.active {
+             self.gpu.queue.write_buffer(
+                 &self.hud.vbuf,
+                 0,
+@@ -754,10 +762,16 @@
+                 timestamp_writes: None,
+                 occlusion_query_set: None,
+             });
+-            rp.set_pipeline(&self.hud.pipeline);
+-            rp.set_bind_group(0, &self.hud.bind_group, &[]);
+-            rp.set_vertex_buffer(0, self.hud.vbuf.slice(..));
+-            rp.draw(0..hud_vertex_count as u32, 0..1);
++            // The light shafts are blended here, under the HUD, so the frame is loaded once for both.
++            if vlp.active {
++                self.shafts.composite(&mut rp);
++            }
++            if hud_vertex_count > 0 {
++                rp.set_pipeline(&self.hud.pipeline);
++                rp.set_bind_group(0, &self.hud.bind_group, &[]);
++                rp.set_vertex_buffer(0, self.hud.vbuf.slice(..));
++                rp.draw(0..hud_vertex_count as u32, 0..1);
++            }
+         }
+         self.gpu.queue.submit(std::iter::once(enc.finish()));
+         frame.present();
+diff -ruN a/mc-rs/src/render/camera.rs b/mc-rs/src/render/camera.rs
+--- a/mc-rs/src/render/camera.rs	2026-10-10 05:30:56.000000000 +0000
++++ b/mc-rs/src/render/camera.rs	2026-10-10 00:35:39.957396683 +0000
+@@ -73,6 +73,41 @@
+     Mat4::orthographic_rh(-SHADOW_RADIUS, SHADOW_RADIUS, -SHADOW_RADIUS, SHADOW_RADIUS, 0.0, 2.0 * Z) * Mat4::look_at_rh(center + sun * Z, center, Vec3::X)
+ }
+ 
++/// The shadow map is drawn from `center` along `light` and read back with the same matrix, so it stays right for the geometry it
++/// saw when the eye walks off or the sun creeps on. It is redrawn only when that error shows (`refresh`), not every frame.
++pub struct ShadowCache {
++    pub center: Vec3,
++    pub light: Vec3,
++    mesh_gen: u32,
++    valid: bool,
++}
++
++impl ShadowCache {
++    /// Eye travel (blocks) and light turn (cos 0.5 degrees) after which the map is redrawn. At 4 blocks the distorted map's
++    /// texels near the eye are still fine; 0.5 degrees moves a 10-block tree's shadow by ~9 cm.
++    const MOVE: f32 = 4.0;
++    const COS: f32 = 0.99996;
++
++    pub fn new() -> Self {
++        Self { center: Vec3::ZERO, light: Vec3::Y, mesh_gen: 0, valid: false }
++    }
++
++    /// True when the shadow pass has to run this frame; then `center` / `light` are the new ones. `want` false (no shadow
++    /// consumer this frame) drops the cache, because the map is not drawn and goes stale.
++    pub fn refresh(&mut self, want: bool, eye: Vec3, light: Vec3, mesh_gen: u32) -> bool {
++        let fresh = want
++            && self.valid
++            && self.mesh_gen == mesh_gen
++            && (eye - self.center).length_squared() <= Self::MOVE * Self::MOVE
++            && light.dot(self.light) >= Self::COS;
++        self.valid = want;
++        if want && !fresh {
++            *self = Self { center: eye, light, mesh_gen, valid: true };
++        }
++        want && !fresh
++    }
++}
++
+ /// M13 view frustum: the six planes of `proj * view` (Gribb-Hartmann), for culling whole chunks before they are drawn.
+ /// Depth is 0..1 (`Mat4::perspective_rh`, wgpu), so the near plane is row 2 alone.
+ pub struct Frustum {
+@@ -113,6 +148,22 @@
+         assert!((vp.project_point3(c + Vec3::X * 64.0).y.abs() - 1.0).abs() < 1e-4);
+     }
+ 
++    /// The cached map is reused until the eye, the light or the geometry moves enough, and is dropped when nobody reads it.
++    #[test]
++    fn shadow_cache_redraws_only_when_stale() {
++        let (eye, l) = (Vec3::new(5.0, 70.0, 5.0), Vec3::new(0.0, 0.8, 0.6).normalize());
++        let mut c = ShadowCache::new();
++        assert!(c.refresh(true, eye, l, 0), "first frame draws");
++        assert!(!c.refresh(true, eye + Vec3::new(3.0, 0.0, 0.0), l, 0), "small step reuses");
++        assert_eq!(c.center, eye, "and keeps the old centre");
++        assert!(c.refresh(true, eye + Vec3::new(5.0, 0.0, 0.0), l, 0), "walked 5 blocks");
++        let turned = Vec3::new(0.0, 0.6f32.atan2(0.8) + 0.02, 0.0); // ~1.1 degrees
++        let l2 = Vec3::new(0.0, turned.y.cos(), turned.y.sin());
++        assert!(c.refresh(true, c.center, l2, 0), "light turned");
++        assert!(c.refresh(true, c.center, l2, 1), "geometry changed");
++        assert!(!c.refresh(false, c.center, l2, 1) && c.refresh(true, c.center, l2, 1), "dropped while unused");
++    }
++
+     #[test]
+     fn frustum_culls_boxes_outside_the_view() {
+         // At the origin looking down -Z (yaw 0, pitch 0), 70 degrees tall, 2:1, far plane 256.
+diff -ruN a/mc-rs/src/render/sky.rs b/mc-rs/src/render/sky.rs
+--- a/mc-rs/src/render/sky.rs	2026-10-10 07:13:28.000000000 +0000
++++ b/mc-rs/src/render/sky.rs	2026-10-10 00:35:47.981860348 +0000
+@@ -68,8 +68,9 @@
+ /// `SUN_GLARE_DAY * 0.1 * SUNGLARE_OUTWATER_STRENGTH * 0.01` of the pack is an HDR add; here the halo is an alpha blend
+ /// (an add would clip on the pale sky), so this is its own number. UNVERIFIED: on a device.
+ const GLARE: f32 = 1.2;
+-/// Half-size of the glare quad at the sun's distance (100): reaches ~63 degrees from the sun, where the glare is ~0.
+-const GLARE_R: f32 = 200.0;
++/// Half-size of the glare quad at the sun's distance (100): reaches ~42 degrees from the sun, where the glare alpha is < 2%
++/// (it is drawn over the whole sky and then covered by terrain, so every pixel it spans costs a shaded fragment).
++const GLARE_R: f32 = 90.0;
+ /// `lightColor.glsl` morning light (236, 184, 132) / 255.
+ const GLARE_RGB: [f32; 3] = [0.93, 0.72, 0.52];
+ 
+diff -ruN a/mc-rs/src/render/vl.rs b/mc-rs/src/render/vl.rs
+--- a/mc-rs/src/render/vl.rs	2026-10-10 06:53:16.000000000 +0000
++++ b/mc-rs/src/render/vl.rs	2026-10-10 00:35:39.957446802 +0000
+@@ -1,7 +1,7 @@
+ //! Volumetric light ("light shafts"), a port of AstraLex's `lib/atmospherics/volumetricLight.glsl` (the ray march,
+ //! `program/composite.glsl`) and the `LIGHT_SHAFT` part of `program/composite1.glsl` (blur, colour, blend), overworld,
+ //! eye not under water. Two passes after the terrain: a half-resolution march through the sun's shadow map into an
+-//! RGBA8 target (what `colortex1` is in the pack), then a full-screen blend onto the frame.
++//! RGBA8 target (what `colortex1` is in the pack: `march`), then a full-screen blend onto the frame (`composite`, drawn inside the HUD pass).
+ //! Everything that depends only on the time of day and the weather (`lightCol`, `shadowFade`, the multipliers) is worked
+ //! out once per frame on the CPU in `params` and is the part the tests check.
+ //! Deviations from the pack, all because mc-rs has no such input:
+@@ -139,7 +139,8 @@
+ struct U {
+     /// Inverse view: camera space to world.
+     cam: [[f32; 4]; 4],
+-    shadow_vp: [[f32; 4]; 4],
++    /// `shadow_vp * cam`: view space straight to shadow clip space (the march needs no world position).
++    shadow_cam: [[f32; 4]; 4],
+     /// xyz: toward the light, w: depth bias.
+     light: [f32; 4],
+     /// x, y: tan(fov / 2) x aspect and tan(fov / 2); z, w: near and far.
+@@ -159,7 +160,7 @@
+ const SHADER: &str = r#"
+ struct U {
+     cam: mat4x4<f32>,
+-    shadow_vp: mat4x4<f32>,
++    shadow_cam: mat4x4<f32>,
+     light: vec4<f32>,
+     ray: vec4<f32>,
+     a: vec4<f32>,
+@@ -217,10 +218,10 @@
+     let dither = ign(in.pos.xy);
+     var sum = 0.0;
+     for (var i = 0; i < 10; i = i + 1) {
+-        let d = pow(f32(i) + dither + u.c.y, 1.5) * min_dist_factor;
++        let t = f32(i) + dither + u.c.y;
++        let d = t * sqrt(t) * min_dist_factor; // pow(t, 1.5)
+         if d >= max_dist || depth < d { break; }
+-        let wp = u.cam * vec4<f32>(r * d, 1.0);
+-        let c = u.shadow_vp * vec4<f32>(wp.xyz, 1.0);
++        let c = u.shadow_cam * vec4<f32>(r * d, 1.0);
+         if abs(c.x) < 1.0 && abs(c.y) < 1.0 {
+             let p = vec3<f32>(c.xy / (length(c.xy) + u.a.x) * 0.5 + 0.5, c.z * 0.5 + 0.25 + u.light.w);
+             let lit = textureSampleCompareLevel(sh_tex, sh_samp, vec2<f32>(p.x, 1.0 - p.y), p.z);
+@@ -329,9 +330,9 @@
+         Self { march, comp, ubuf, march_layout, comp_layout, samp, target: None }
+     }
+ 
+-    /// Run after the terrain pass, before the HUD. `shadow_vp` is what `ChunkPipeline::upload_uniforms` returned this
+-    /// frame (the shadow pass has to have run: `Params::active`), `shadow_bind` its map.
+-    pub fn draw(&mut self, gpu: &Gpu, enc: &mut CommandEncoder, frame: &TextureView, shadow_bind: &BindGroup, cam: &FirstPersonCamera, shadow_vp: Mat4, p: &Params) {
++    /// Run after the terrain pass: the half-resolution march. `shadow_vp` is what `ChunkPipeline::upload_uniforms` returned this
++    /// frame (the shadow map has to exist: `Params::active`), `shadow_bind` its map. Then `composite` blends it onto the frame.
++    pub fn march(&mut self, gpu: &Gpu, enc: &mut CommandEncoder, shadow_bind: &BindGroup, cam: &FirstPersonCamera, shadow_vp: Mat4, p: &Params) {
+         let (w, h) = (gpu.config.width, gpu.config.height);
+         if self.target.as_ref().map_or(true, |t| t.size != (w, h)) {
+             // ponytail: half resolution, nearest depth tap (the pack marches at full resolution, 4-tap blurred); a
+@@ -369,7 +370,7 @@
+         let (view, proj) = cam.build_view_proj();
+         let u = U {
+             cam: view.inverse().to_cols_array_2d(),
+-            shadow_vp: shadow_vp.to_cols_array_2d(),
++            shadow_cam: (shadow_vp * view.inverse()).to_cols_array_2d(),
+             light: p.light.extend(DEPTH_BIAS).to_array(),
+             ray: [1.0 / proj.x_axis.x, 1.0 / proj.y_axis.y, cam.znear, cam.zfar],
+             a: [SHADOW_DISTORT, SHADOW_RADIUS, p.endurance, p.power],
+@@ -399,18 +400,12 @@
+             rp.set_bind_group(1, shadow_bind, &[]);
+             rp.draw(0..3, 0..1);
+         }
+-        let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+-            label: Some("vl_comp"),
+-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+-                view: frame,
+-                resolve_target: None,
+-                depth_slice: None,
+-                ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+-            })],
+-            depth_stencil_attachment: None,
+-            timestamp_writes: None,
+-            occlusion_query_set: None,
+-        });
++    }
++
++    /// The blend onto the frame, drawn inside a pass that already loads it (the HUD's), so the frame is not loaded and stored
++    /// a second time just for this. Only after `march` in the same frame.
++    pub fn composite(&self, rp: &mut wgpu::RenderPass<'_>) {
++        let Some(t) = &self.target else { return };
+         rp.set_pipeline(&self.comp);
+         rp.set_bind_group(0, &t.comp_bind, &[]);
+         rp.draw(0..3, 0..1);
+diff -ruN a/mc-rs/src/world/chunks.rs b/mc-rs/src/world/chunks.rs
+--- a/mc-rs/src/world/chunks.rs	2026-10-10 05:39:32.000000000 +0000
++++ b/mc-rs/src/world/chunks.rs	2026-10-10 00:35:39.957446802 +0000
+@@ -119,6 +119,8 @@
+     light_queue: Vec<light::Region>,
+     /// `World.skylightSubtracted` (0 day .. 11 night), applied by the mesher.
+     sky_sub: u8,
++    /// Bumped whenever the drawn geometry changes (a mesh with another size, an unload): the cached shadow map is stale then.
++    pub mesh_gen: u32,
+     sun: i32,
+     /// Save folder (M7); `None` = nothing is read or written (the tests). `saved` = chunks that have a file there.
+     dir: Option<PathBuf>,
+@@ -167,7 +169,7 @@
+         ring.sort_by_key(|&(dx, dz)| dx * dx + dz * dz);
+ 
+         Self { chunks: Chunks::default(), pending: HashSet::new(), ring, radius, center: None, max_in_flight: workers * 2,
+-               gen: OverworldGenerator::new(seed), cm: WorldChunkManager::new(seed), jobs, done, light_queue: Vec::new(), sky_sub: 0, sun: crate::render::mesh::NO_SUN, dir: None, saved: HashSet::new(), changes: Vec::new() }
++               gen: OverworldGenerator::new(seed), cm: WorldChunkManager::new(seed), jobs, done, light_queue: Vec::new(), sky_sub: 0, mesh_gen: 0, sun: crate::render::mesh::NO_SUN, dir: None, saved: HashSet::new(), changes: Vec::new() }
+     }
+ 
+     /// Keep this world in `dir`: chunks found there are loaded instead of generated, and edited ones are written back
+@@ -517,6 +519,7 @@
+         if self.center != Some((cx, cz)) {
+             self.center = Some((cx, cz));
+             let gone: Vec<Key> = self.chunks.keys().copied().filter(|&k| d2(k) > keep).collect();
++            self.mesh_gen = self.mesh_gen.wrapping_add(1);
+             for k in gone {
+                 let Some(e) = self.chunks.remove(&k) else { continue };
+                 if let (true, Some(dir)) = (e.dirty, &self.dir) {
+@@ -606,6 +609,11 @@
+                 index_count: idxs.len() as u32,
+             });
+             if let Some(e) = self.chunks.get_mut(&(x, z)) {
++                // ponytail: a rebuild with the same index count (the time-of-day relight) is taken as the same geometry, so the
++                // shadow map is not redrawn for it; an edit that keeps the count is picked up by the next sun / movement refresh.
++                if e.mesh.as_ref().map_or(0, |m| m.index_count) != mesh.as_ref().map_or(0, |m| m.index_count) {
++                    self.mesh_gen = self.mesh_gen.wrapping_add(1);
++                }
+                 e.mesh = mesh;
+                 e.meshed = true;
+             }

@@ -23,7 +23,7 @@ fn render(strength: f32, tile: u16) -> Option<Vec<f32>> {
     let view = Mat4::look_at_rh(eye, Vec3::new(0.0, 0.0, -4.0), Vec3::Z);
     let proj = Mat4::perspective_rh(50f32.to_radians(), 1.0, 0.1, 200.0);
     let sun = Vec3::new(0.0, 0.6, 0.8); // toward +Z, 37 degrees up
-    pipe.upload_uniforms(&q, view, proj, sun, strength);
+    pipe.upload_uniforms(&q, view, proj, sun, strength, eye);
     let target = dev.create_texture(&wgpu::TextureDescriptor { label: None, size: wgpu::Extent3d { width: 64, height: 64, depth_or_array_layers: 1 }, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: fmt, usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC, view_formats: &[] });
     let depth = dev.create_texture(&wgpu::TextureDescriptor { label: None, size: wgpu::Extent3d { width: 64, height: 64, depth_or_array_layers: 1 }, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::Depth32Float, usage: wgpu::TextureUsages::RENDER_ATTACHMENT, view_formats: &[] });
     let buf = dev.create_buffer(&wgpu::BufferDescriptor { label: None, size: 64 * 64 * 4, usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false });

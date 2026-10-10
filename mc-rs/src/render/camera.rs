@@ -73,6 +73,41 @@ pub fn shadow_view_proj(center: Vec3, sun: Vec3) -> Mat4 {
     Mat4::orthographic_rh(-SHADOW_RADIUS, SHADOW_RADIUS, -SHADOW_RADIUS, SHADOW_RADIUS, 0.0, 2.0 * Z) * Mat4::look_at_rh(center + sun * Z, center, Vec3::X)
 }
 
+/// The shadow map is drawn from `center` along `light` and read back with the same matrix, so it stays right for the geometry it
+/// saw when the eye walks off or the sun creeps on. It is redrawn only when that error shows (`refresh`), not every frame.
+pub struct ShadowCache {
+    pub center: Vec3,
+    pub light: Vec3,
+    mesh_gen: u32,
+    valid: bool,
+}
+
+impl ShadowCache {
+    /// Eye travel (blocks) and light turn (cos 0.5 degrees) after which the map is redrawn. At 4 blocks the distorted map's
+    /// texels near the eye are still fine; 0.5 degrees moves a 10-block tree's shadow by ~9 cm.
+    const MOVE: f32 = 4.0;
+    const COS: f32 = 0.99996;
+
+    pub fn new() -> Self {
+        Self { center: Vec3::ZERO, light: Vec3::Y, mesh_gen: 0, valid: false }
+    }
+
+    /// True when the shadow pass has to run this frame; then `center` / `light` are the new ones. `want` false (no shadow
+    /// consumer this frame) drops the cache, because the map is not drawn and goes stale.
+    pub fn refresh(&mut self, want: bool, eye: Vec3, light: Vec3, mesh_gen: u32) -> bool {
+        let fresh = want
+            && self.valid
+            && self.mesh_gen == mesh_gen
+            && (eye - self.center).length_squared() <= Self::MOVE * Self::MOVE
+            && light.dot(self.light) >= Self::COS;
+        self.valid = want;
+        if want && !fresh {
+            *self = Self { center: eye, light, mesh_gen, valid: true };
+        }
+        want && !fresh
+    }
+}
+
 /// M13 view frustum: the six planes of `proj * view` (Gribb-Hartmann), for culling whole chunks before they are drawn.
 /// Depth is 0..1 (`Mat4::perspective_rh`, wgpu), so the near plane is row 2 alone.
 pub struct Frustum {
@@ -111,6 +146,22 @@ mod tests {
         assert!((a.truncate() - b.truncate()).length() < 1e-4 && b.z < a.z, "same texel, nearer the sun is shallower");
         assert!((vp.project_point3(c) - Vec3::new(0.0, 0.0, 0.5)).length() < 1e-4);
         assert!((vp.project_point3(c + Vec3::X * 64.0).y.abs() - 1.0).abs() < 1e-4);
+    }
+
+    /// The cached map is reused until the eye, the light or the geometry moves enough, and is dropped when nobody reads it.
+    #[test]
+    fn shadow_cache_redraws_only_when_stale() {
+        let (eye, l) = (Vec3::new(5.0, 70.0, 5.0), Vec3::new(0.0, 0.8, 0.6).normalize());
+        let mut c = ShadowCache::new();
+        assert!(c.refresh(true, eye, l, 0), "first frame draws");
+        assert!(!c.refresh(true, eye + Vec3::new(3.0, 0.0, 0.0), l, 0), "small step reuses");
+        assert_eq!(c.center, eye, "and keeps the old centre");
+        assert!(c.refresh(true, eye + Vec3::new(5.0, 0.0, 0.0), l, 0), "walked 5 blocks");
+        let turned = Vec3::new(0.0, 0.6f32.atan2(0.8) + 0.02, 0.0); // ~1.1 degrees
+        let l2 = Vec3::new(0.0, turned.y.cos(), turned.y.sin());
+        assert!(c.refresh(true, c.center, l2, 0), "light turned");
+        assert!(c.refresh(true, c.center, l2, 1), "geometry changed");
+        assert!(!c.refresh(false, c.center, l2, 1) && c.refresh(true, c.center, l2, 1), "dropped while unused");
     }
 
     #[test]

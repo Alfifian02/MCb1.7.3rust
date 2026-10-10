@@ -24,7 +24,7 @@ use crate::gpu::context::Gpu;
 use crate::gpu::pipeline::ChunkPipeline;
 use crate::render::atlas;
 use crate::render::items::ItemMesh;
-use crate::render::camera::{FirstPersonCamera, Frustum};
+use crate::render::camera::{FirstPersonCamera, Frustum, ShadowCache};
 use crate::render::outline::Outline;
 use crate::render::sky::{SkyFrame, SkyRenderer};
 use crate::render::vl::{self, LightShafts};
@@ -85,6 +85,8 @@ struct App {
     sky: SkyRenderer,
     /// Volumetric light (`render::vl`), drawn after the terrain.
     shafts: LightShafts,
+    /// Where and along what the shadow map was last drawn (it is reused between redraws).
+    shadow: ShadowCache,
     weather: sky::Weather,
     weather_ticks: u64,
     /// Hotbar slot last seen and seconds its item name still shows (`GuiIngame` shows it ~2 s after a switch).
@@ -188,6 +190,7 @@ impl App {
             world_ticks: 0.0,
             sky: sky_renderer,
             shafts,
+            shadow: ShadowCache::new(),
             weather: sky::Weather::new(seed),
             weather_ticks: 0,
             tip: (0, 0.0),
@@ -625,7 +628,11 @@ impl App {
         let mut vlp = vl::params(self.world_ticks, angle, rain, sky_rgb, e.y);
         vlp.active &= !eye_in_water;
         let sun_strength = sky::shadow_strength(angle, rain);
-        let shadow_vp = self.pipe.upload_uniforms(&self.gpu.queue, view, proj, vlp.light, sun_strength);
+        // The shadow map is only redrawn when the eye, the light or the geometry moved enough (`ShadowCache`); the terrain and
+        // the shafts read it with the matrix and light it was drawn with.
+        let draw_shadow = self.shadow.refresh(sun_strength > 0.0 || vlp.active, e, vlp.light, self.chunks.mesh_gen);
+        vlp.light = self.shadow.light;
+        let shadow_vp = self.pipe.upload_uniforms(&self.gpu.queue, view, proj, self.shadow.light, sun_strength, self.shadow.center);
         let (frustum, shadow_frustum) = (Frustum::from_view_proj(proj * view), Frustum::from_view_proj(shadow_vp));
         let fog = sky::fog_color(angle, sky_rgb, rain, thunder);
         // Terrain fog (AstraLex `NormalFog`): fades to the horizon colour at the render distance; off under water.
@@ -661,7 +668,7 @@ impl App {
 
         let mut enc = self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
 
-        if sun_strength > 0.0 || vlp.active {
+        if draw_shadow {
             let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("shadow_pass"),
                 color_attachments: &[],
@@ -695,9 +702,10 @@ impl App {
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &self.gpu.depth_view,
+                    // Only the light-shaft march reads the depth back; otherwise a tile GPU never writes it to memory.
                     depth_ops: Some(wgpu::Operations {
                         load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
+                        store: if vlp.active { wgpu::StoreOp::Store } else { wgpu::StoreOp::Discard },
                     }),
                     stencil_ops: None,
                 }),
@@ -726,13 +734,13 @@ impl App {
             }
         }
         if vlp.active {
-            self.shafts.draw(&self.gpu, &mut enc, &view_tex, &self.pipe.shadow_bind, &self.camera, shadow_vp, &vlp);
+            self.shafts.march(&self.gpu, &mut enc, &self.pipe.shadow_bind, &self.camera, shadow_vp, &vlp);
         }
         // M12: HUD overlay pass. Built into the same encoder so the HUD
         // never gets lost if the GPU drops a frame.
         self.build_hud();
         let hud_vertex_count = self.hud_verts.len();
-        if hud_vertex_count > 0 {
+        if hud_vertex_count > 0 || vlp.active {
             self.gpu.queue.write_buffer(
                 &self.hud.vbuf,
                 0,
@@ -754,10 +762,16 @@ impl App {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            rp.set_pipeline(&self.hud.pipeline);
-            rp.set_bind_group(0, &self.hud.bind_group, &[]);
-            rp.set_vertex_buffer(0, self.hud.vbuf.slice(..));
-            rp.draw(0..hud_vertex_count as u32, 0..1);
+            // The light shafts are blended here, under the HUD, so the frame is loaded once for both.
+            if vlp.active {
+                self.shafts.composite(&mut rp);
+            }
+            if hud_vertex_count > 0 {
+                rp.set_pipeline(&self.hud.pipeline);
+                rp.set_bind_group(0, &self.hud.bind_group, &[]);
+                rp.set_vertex_buffer(0, self.hud.vbuf.slice(..));
+                rp.draw(0..hud_vertex_count as u32, 0..1);
+            }
         }
         self.gpu.queue.submit(std::iter::once(enc.finish()));
         frame.present();

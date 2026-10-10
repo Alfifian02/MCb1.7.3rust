@@ -119,6 +119,8 @@ pub struct ChunkManager {
     light_queue: Vec<light::Region>,
     /// `World.skylightSubtracted` (0 day .. 11 night), applied by the mesher.
     sky_sub: u8,
+    /// Bumped whenever the drawn geometry changes (a mesh with another size, an unload): the cached shadow map is stale then.
+    pub mesh_gen: u32,
     sun: i32,
     /// Save folder (M7); `None` = nothing is read or written (the tests). `saved` = chunks that have a file there.
     dir: Option<PathBuf>,
@@ -167,7 +169,7 @@ impl ChunkManager {
         ring.sort_by_key(|&(dx, dz)| dx * dx + dz * dz);
 
         Self { chunks: Chunks::default(), pending: HashSet::new(), ring, radius, center: None, max_in_flight: workers * 2,
-               gen: OverworldGenerator::new(seed), cm: WorldChunkManager::new(seed), jobs, done, light_queue: Vec::new(), sky_sub: 0, sun: crate::render::mesh::NO_SUN, dir: None, saved: HashSet::new(), changes: Vec::new() }
+               gen: OverworldGenerator::new(seed), cm: WorldChunkManager::new(seed), jobs, done, light_queue: Vec::new(), sky_sub: 0, mesh_gen: 0, sun: crate::render::mesh::NO_SUN, dir: None, saved: HashSet::new(), changes: Vec::new() }
     }
 
     /// Keep this world in `dir`: chunks found there are loaded instead of generated, and edited ones are written back
@@ -517,6 +519,7 @@ impl ChunkManager {
         if self.center != Some((cx, cz)) {
             self.center = Some((cx, cz));
             let gone: Vec<Key> = self.chunks.keys().copied().filter(|&k| d2(k) > keep).collect();
+            self.mesh_gen = self.mesh_gen.wrapping_add(1);
             for k in gone {
                 let Some(e) = self.chunks.remove(&k) else { continue };
                 if let (true, Some(dir)) = (e.dirty, &self.dir) {
@@ -606,6 +609,11 @@ impl ChunkManager {
                 index_count: idxs.len() as u32,
             });
             if let Some(e) = self.chunks.get_mut(&(x, z)) {
+                // ponytail: a rebuild with the same index count (the time-of-day relight) is taken as the same geometry, so the
+                // shadow map is not redrawn for it; an edit that keeps the count is picked up by the next sun / movement refresh.
+                if e.mesh.as_ref().map_or(0, |m| m.index_count) != mesh.as_ref().map_or(0, |m| m.index_count) {
+                    self.mesh_gen = self.mesh_gen.wrapping_add(1);
+                }
                 e.mesh = mesh;
                 e.meshed = true;
             }
