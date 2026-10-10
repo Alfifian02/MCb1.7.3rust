@@ -77,6 +77,50 @@ pub struct Mesh {
     pub vbuf: wgpu::Buffer,
     pub ibuf: wgpu::Buffer,
     pub index_count: u32,
+    /// The indices are sorted by 16-block section: section `s` is `starts[s]..starts[s + 1]` (`by_section`).
+    starts: [u32; SECTIONS + 1],
+}
+
+/// Sections (16 blocks tall) of a chunk column: the unit the draw loop culls.
+pub const SECTIONS: usize = H / 16;
+
+/// Which blocks around the eye are drawn. `Cylinder`: a circle of the horizontal radius (circular horizontal distance).
+/// `Sphere`: 3D distance <= the horizontal radius. Both are also capped by the vertical radius. All distances run from the eye
+/// to the nearest point of the section's box, so a section is drawn as soon as any part of it is in range.
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub enum Shape {
+    Cylinder,
+    Sphere,
+}
+
+pub fn in_range(shape: Shape, eye: Vec3, min: Vec3, max: Vec3, rh: f32, rv: f32) -> bool {
+    let d = (min - eye).max(eye - max).max(Vec3::ZERO);
+    let dh2 = d.x * d.x + d.z * d.z;
+    d.y <= rv && dh2 + if shape == Shape::Sphere { d.y * d.y } else { 0.0 } <= rh * rh
+}
+
+/// Reorders a mesh's triangles by the 16-block section they sit in (the highest vertex minus half a block picks the block, so
+/// top, side and plant faces land in their own block's section; a face on a section border may land in either, which the
+/// draw loop's one-block margin covers). Returns the new indices and the section offsets. Vertices are 6 floats, y second.
+fn by_section(verts: &[f32], idxs: &[u32]) -> (Vec<u32>, [u32; SECTIONS + 1]) {
+    let sec = |t: &[u32]| {
+        let top = t.iter().map(|&i| verts[i as usize * 6 + 1]).fold(f32::MIN, f32::max);
+        (((top - 0.5).floor().max(0.0) as usize) >> 4).min(SECTIONS - 1)
+    };
+    let mut starts = [0u32; SECTIONS + 1];
+    for t in idxs.chunks_exact(3) {
+        starts[sec(t) + 1] += 3;
+    }
+    for s in 0..SECTIONS {
+        starts[s + 1] += starts[s];
+    }
+    let (mut at, mut out) = (starts, vec![0u32; idxs.len()]);
+    for t in idxs.chunks_exact(3) {
+        let s = sec(t);
+        out[at[s] as usize..at[s] as usize + 3].copy_from_slice(t);
+        at[s] += 3;
+    }
+    (out, starts)
 }
 
 struct Entry {
@@ -480,6 +524,32 @@ impl ChunkManager {
         })
     }
 
+    /// The main pass's draw loop: calls `draw(mesh, index range)` for every run of neighbouring sections that is inside the
+    /// `shape` around `eye` (radii `rh`, `rv` in blocks) and passes `visible(min, max)` (the frustum). Each section's box is
+    /// one block taller at both ends. Empty sections are skipped, touching ones are one range, so a chunk is mostly one draw.
+    pub fn draw_ranges(&self, eye: Vec3, shape: Shape, rh: f32, rv: f32, visible: impl Fn(Vec3, Vec3) -> bool, mut draw: impl FnMut(&Mesh, std::ops::Range<u32>)) {
+        for (&(x, z), e) in &self.chunks {
+            let Some(m) = e.mesh.as_ref() else { continue };
+            let mut run: Option<(u32, u32)> = None;
+            for s in 0..=SECTIONS {
+                let on = s < SECTIONS && m.starts[s + 1] > m.starts[s] && {
+                    let min = Vec3::new(x as f32 * 16.0, s as f32 * 16.0 - 1.0, z as f32 * 16.0);
+                    let max = min + Vec3::new(16.0, 18.0, 16.0);
+                    in_range(shape, eye, min, max, rh, rv) && visible(min, max)
+                };
+                match (on, run) {
+                    (true, None) => run = Some((m.starts[s], m.starts[s + 1])),
+                    (true, Some((a, _))) => run = Some((a, m.starts[s + 1])),
+                    (false, Some((a, b))) => {
+                        draw(m, a..b);
+                        run = None;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
     /// Chunks that currently have something to draw.
     pub fn meshed(&self) -> usize {
         self.meshes().count()
@@ -603,10 +673,12 @@ impl ChunkManager {
             };
             let Some((verts, idxs)) = built else { continue };
             budget -= 1;
+            let (idxs, starts) = by_section(&verts, &idxs);
             let mesh = (!idxs.is_empty()).then(|| Mesh {
                 vbuf: create_vertex_buffer(device, bytemuck::cast_slice(&verts)),
                 ibuf: create_index_buffer(device, &idxs),
                 index_count: idxs.len() as u32,
+                starts,
             });
             if let Some(e) = self.chunks.get_mut(&(x, z)) {
                 // ponytail: a rebuild with the same index count (the time-of-day relight) is taken as the same geometry, so the
@@ -723,5 +795,21 @@ mod tests {
         settle(&mut m, (0, 0));
         settle(&mut m, (10, 0));
         assert!(!m.chunks.contains_key(&(0, 0)));
+    }
+
+    /// Sphere is stricter than cylinder, both stop at the vertical radius; sections come out in order with the right offsets.
+    #[test]
+    fn render_shape_and_sections() {
+        let (eye, lo, hi) = (Vec3::new(8.0, 64.0, 8.0), Vec3::new(64.0, 48.0, 0.0), Vec3::new(80.0, 66.0, 16.0));
+        assert!(in_range(Shape::Cylinder, eye, lo, hi, 64.0, 48.0) && in_range(Shape::Sphere, eye, lo, hi, 64.0, 48.0));
+        let (lo, hi) = (Vec3::new(64.0, 0.0, 0.0), Vec3::new(80.0, 16.0, 16.0)); // 48 below, 56 across: 74 away in 3D
+        assert!(in_range(Shape::Cylinder, eye, lo, hi, 64.0, 48.0) && !in_range(Shape::Sphere, eye, lo, hi, 64.0, 48.0));
+        assert!(!in_range(Shape::Cylinder, eye, lo, hi, 64.0, 40.0), "vertical radius");
+        // Two triangles at y = 5 and y = 40 (given out of order) are sorted into sections 0 and 2.
+        let mut v = vec![0.0f32; 6 * 6];
+        (0..3).for_each(|i| v[i * 6 + 1] = 5.0);
+        (3..6).for_each(|i| v[i * 6 + 1] = 40.0);
+        let (idx, st) = by_section(&v, &[3, 4, 5, 0, 1, 2]);
+        assert_eq!((idx, st[1], st[2], st[3], st[SECTIONS]), (vec![0, 1, 2, 3, 4, 5], 3, 3, 6, 6));
     }
 }

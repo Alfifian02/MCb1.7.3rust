@@ -37,12 +37,17 @@ use crate::world::ticks::Ticks;
 use crate::world::save::{self, Level};
 use crate::world::sky;
 use crate::world::chunk::{cross_shape, is_plant};
-use crate::world::chunks::{chunk_coord, ChunkManager};
+use crate::world::chunks::{chunk_coord, ChunkManager, Shape};
 use crate::world::physics::{self, Player};
 use crate::world::vitals::{self, Env, Vitals};
 
 /// Render distance in chunks (a circle of this radius is meshed and drawn, two more are generated).
 const RENDER_DIST: i32 = 4;
+/// Vertical render distance in chunks (16 blocks): sections further above or below the eye are not drawn.
+const RENDER_VERT: i32 = 3;
+/// `Sphere`: what is drawn is within `RENDER_DIST` blocks-of-16 in 3D (matches the fog, which is by 3D distance);
+/// `Cylinder`: a circle of that radius at any height within `RENDER_VERT`.
+const RENDER_SHAPE: Shape = Shape::Sphere;
 
 /// Seconds of play between autosaves (the level file and a few chunks; pause and exit save everything).
 const AUTOSAVE_SECS: f32 = 5.0;
@@ -716,12 +721,13 @@ impl App {
             rp.set_pipeline(&self.pipe.pipeline);
             rp.set_bind_group(0, &self.pipe.bind_group, &[]);
             rp.set_bind_group(1, &self.pipe.shadow_bind, &[]);
-            // One draw per chunk mesh that is in the view frustum.
-            for m in self.chunks.meshes_where(|min, max| frustum.intersects_aabb(min, max)) {
+            // One draw per run of chunk sections that is in the render shape and the view frustum.
+            let (rh, rv) = ((RENDER_DIST * 16) as f32, (RENDER_VERT * 16) as f32);
+            self.chunks.draw_ranges(self.camera.pos, RENDER_SHAPE, rh, rv, |min, max| frustum.intersects_aabb(min, max), |m, r| {
                 rp.set_vertex_buffer(0, m.vbuf.slice(..));
                 rp.set_index_buffer(m.ibuf.slice(..), wgpu::IndexFormat::Uint32);
-                rp.draw_indexed(0..m.index_count, 0, 0..1);
-            }
+                rp.draw_indexed(r, 0, 0..1);
+            });
             if item_indices > 0 {
                 rp.set_vertex_buffer(0, self.item_mesh.vbuf.slice(..));
                 rp.set_index_buffer(self.item_mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);

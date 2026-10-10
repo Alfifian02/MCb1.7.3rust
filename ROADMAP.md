@@ -46,6 +46,11 @@ ticks (liquids/sand). Sapling growth, fluid flow and falling sand are in M6b (bl
 BiomeGenBase but climate never selects it; b1.7.3 has no ravines.
 
 ## Changelog
+- `done` render shape + vertical distance + per-section draws (written WITHOUT a Rust toolchain: not compiled, not run, +1 test `render_shape_and_sections` not run; no FPS numbers):
+    - `world/chunks.rs`: a chunk's indices are sorted by 16-block section (`by_section`, one counting pass at mesh time, same vertex buffer). `ChunkManager::draw_ranges` tests each section's box (one block taller each end) against the render shape and the frustum, merges touching sections into one `draw_indexed` range, skips empty ones. Before, one 128-tall box per chunk decided everything.
+    - `Shape::Cylinder` = circular horizontal distance (exact in blocks from the eye to the section box, not just the chunk ring); `Shape::Sphere` = 3D distance <= the same radius (the terrain fog is by 3D distance, so the cut-off hides in it). Both are capped by `RENDER_VERT` (3 chunks) above and below the eye. `lib.rs`: `RENDER_SHAPE` (Sphere), `RENDER_VERT`; no settings screen yet (M14).
+    - Loading, light and the shadow pass are unchanged (the shadow pass still draws whole meshes in its 64-block box). ponytail: sections out of range still cost memory; far above or below the eye the fog does not hide a vertical cut-off (the fog colour is the horizon's).
+    - UNVERIFIED: that it compiles; FPS gain on a device; a face on a section border may sit in the neighbouring section, covered by the one-block margin.
 - `done` render cost pass for shadows + light shafts + sun glare (written WITHOUT a Rust toolchain: not compiled, not run, +1 test `shadow_cache_redraws_only_when_stale` not run; no FPS numbers):
     - Shadow map is cached (`render::camera::ShadowCache`): it was redrawn every frame, all chunks in a 128-tall box. Now it is redrawn only when the eye moved > 4 blocks, the light turned > 0.5 degrees, a mesh changed size / an unload happened (`ChunkManager::mesh_gen`), or it was unused the frame before. Between redraws the terrain and the shafts read it with the matrix + light it was drawn with (`upload_uniforms` takes the cached centre), so nothing swims.
     - Shadow pass culls back faces (the mesher drops hidden faces, so the depth map is the same).
