@@ -262,7 +262,9 @@ fn fs_march(in: FsIn) -> @location(0) vec4<f32> {
         let c = u.shadow_cam * vec4<f32>(r * d, 1.0);
         if abs(c.x) < 1.0 && abs(c.y) < 1.0 {
             let p = vec3<f32>(c.xy / (length(c.xy) + u.a.x) * 0.5 + 0.5, c.z * 0.5 + 0.25 + u.light.w);
-            let lit = textureSampleCompareLevel(sh_tex, sh_samp, vec2<f32>(p.x, 1.0 - p.y), p.z);
+            let q = vec2<f32>(p.x, 1.0 - p.y);
+            // An item or mob in the way darkens the sample too, so it throws a shaft-shaped shadow volume along the light.
+            let lit = min(textureSampleCompareLevel(sh_tex, sh_samp, q, p.z), textureSampleCompareLevel(ent_tex, sh_samp, q, p.z));
             sum = sum + lit * lit * sqrt(d / max_dist) * 1.5;
         } else {
             sum = sum + 1.0; // outside the shadow map: lit
@@ -520,7 +522,7 @@ mod tests {
     #[test]
     fn surface_bias_pulls_the_reference_toward_the_sun() {
         assert!(SHADER.contains("c.z * 0.5 + 0.25 - bias") && !SHADER.contains("+ bias"));
-        assert!(SHADER.contains("ent_tex, sh_samp, q, p.z"), "entities shade the surface through their own map");
+        assert_eq!(SHADER.matches("ent_tex, sh_samp, q, p.z").count(), 2, "entities shade both the surface and the shaft march");
     }
 
     #[test]

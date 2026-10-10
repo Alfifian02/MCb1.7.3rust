@@ -1,0 +1,33 @@
+--- a/mc-rs/src/render/vl.rs	2026-10-10 06:53:00.141079855 +0000
++++ b/mc-rs/src/render/vl.rs	2026-10-10 06:53:00.188159121 +0000
+@@ -262,7 +262,9 @@
+         let c = u.shadow_cam * vec4<f32>(r * d, 1.0);
+         if abs(c.x) < 1.0 && abs(c.y) < 1.0 {
+             let p = vec3<f32>(c.xy / (length(c.xy) + u.a.x) * 0.5 + 0.5, c.z * 0.5 + 0.25 + u.light.w);
+-            let lit = textureSampleCompareLevel(sh_tex, sh_samp, vec2<f32>(p.x, 1.0 - p.y), p.z);
++            let q = vec2<f32>(p.x, 1.0 - p.y);
++            // An item or mob in the way darkens the sample too, so it throws a shaft-shaped shadow volume along the light.
++            let lit = min(textureSampleCompareLevel(sh_tex, sh_samp, q, p.z), textureSampleCompareLevel(ent_tex, sh_samp, q, p.z));
+             sum = sum + lit * lit * sqrt(d / max_dist) * 1.5;
+         } else {
+             sum = sum + 1.0; // outside the shadow map: lit
+@@ -520,7 +522,7 @@
+     #[test]
+     fn surface_bias_pulls_the_reference_toward_the_sun() {
+         assert!(SHADER.contains("c.z * 0.5 + 0.25 - bias") && !SHADER.contains("+ bias"));
+-        assert!(SHADER.contains("ent_tex, sh_samp, q, p.z"), "entities shade the surface through their own map");
++        assert_eq!(SHADER.matches("ent_tex, sh_samp, q, p.z").count(), 2, "entities shade both the surface and the shaft march");
+     }
+ 
+     #[test]
+--- a/ROADMAP.md	2026-10-10 06:53:00.139544587 +0000
++++ b/ROADMAP.md	2026-10-10 06:53:00.187080002 +0000
+@@ -48,7 +48,7 @@
+ ## Changelog
+ - `done` entities cast shadows: dropped items, mobs and falling blocks (written WITHOUT a Rust toolchain: not compiled, not run; the vl.rs test gains one assert, not run; no FPS numbers):
+     - Before, only chunk meshes were drawn into the shadow map, so nothing that moves threw a shadow. `gpu/pipeline.rs`: a second `Depth32Float` map `ent_view` (same size, same `shadow_vp`, bound as binding 2 of the shadow group). `lib.rs`: an `entity_shadow_pass` draws the whole item buffer (`item_mesh`, all entities) into it with `shadow_pipeline`, EVERY frame, because the terrain map is cached (`ShadowCache`) and a walking mob would leave a trail in it; it is cleared once more after the last entity is gone (`ent_shadow_dirty`; starts true because a fresh depth texture reads 0 = all shadow).
+-    - `render/vl.rs` `fs_march`: the surface test samples both maps with the same lookup point and bias and is lit only if both say lit (`min`). The light-shaft march does not read the entity map, so entities cast no shafts.
++    - `render/vl.rs` `fs_march`: the surface test samples both maps with the same lookup point and bias and is lit only if both say lit (`min`). The light-shaft march reads it too (`min` of the two taps per sample), so an item or mob leaves a dark shaft-shaped volume along the light; cost: one more depth tap per march sample (10 per half-resolution pixel), the first lever if it shows in the frame time is to skip the tap while `ent_shadow_dirty` is false.
+     - Consequences (UNVERIFIED on a device): the entity map is drawn at the terrain map's resolution and distortion, so a 0.25 item shadow is a few texels near the eye and blocky far away; the entity pass costs a 1024^2 clear every frame while any entity exists; foliage tiles are skipped by `vs_shadow`, so a dropped sapling or flower casts nothing. ponytail: no culling of the entity draw; items are flat full-brightness cubes, so their own sun-lit faces are shaded only by the map.
+ - `done` FIX acne everywhere + sun-facing faces going dark when the player walks up (written WITHOUT a Rust toolchain: not compiled, not run; +1 test `surface_bias_pulls_the_reference_toward_the_sun` not run; the margins below come from a 2-D Python model of `fs_march`'s lookup, not from a device):
+     - Root cause, one character in `render/vl.rs` `fs_march`: the surface lookup ADDED its depth bias (`c.z * 0.5 + 0.25 + bias`). The sampler is `LessEqual` (lit when ref <= stored) and a point nearer the sun has the smaller depth, so a positive bias pushes the reference away from the sun and every face into its own shadow. Now `- bias`. The line that was meant to help, the normal offset, only pulls the reference toward the sun by `texel x n.L`; the bias's 0.05 block floor outweighed it wherever the map's texel is < ~0.12 block (`distort()` makes texels small near the map centre, which is the eye within 4 blocks, see `ShadowCache`). That is one cause for both reports: a sun-facing dirt wall self-shadowed inside ~11 blocks of the centre and was lit beyond it (dark as you approach), and flat faces had a negative margin at every distance (acne). With the minus sign the modelled margin is positive for every n.L in 0.02..1 and every distance 0..63 (texel quantisation only).
