@@ -289,11 +289,18 @@ fn fs_march(in: FsIn) -> @location(0) vec4<f32> {
             if abs(c.x) < 1.0 && abs(c.y) < 1.0 {
                 let slope = min(sqrt(max(1.0 - nl * nl, 0.0)) / nl, 4.0);
                 let bias = (0.05 + texel * slope) * (0.5 / 256.0); // blocks -> depth: the box is 256 blocks deep, mapped to 0.5
-                let p = vec3<f32>(c.xy / (length(c.xy) + u.a.x) * 0.5 + 0.5, c.z * 0.5 + 0.25 + bias);
+                // MINUS: the sampler is LessEqual (lit when ref <= stored) and a point nearer the sun has the smaller depth, so the
+                // bias has to pull the reference toward the sun. Added, it pushed every face into its own shadow while the 0.05 block
+                // floor outweighed the normal offset (texel < ~0.12 block, i.e. within ~11 blocks of the map centre): sun-facing
+                // walls went dark as you walked up to them, and flat ground was all acne.
+                let p = vec3<f32>(c.xy / (length(c.xy) + u.a.x) * 0.5 + 0.5, c.z * 0.5 + 0.25 - bias);
                 sh = 1.0 - textureSampleCompareLevel(sh_tex, sh_samp, vec2<f32>(p.x, 1.0 - p.y), p.z);
             }
-            // A face lit at a grazing angle gets almost no light anyway, and no bias fixes its acne (the rings on flat ground at a
-            // low sun): fade from the map's answer to plain shadow, like N.L going to 0.
+            // ponytail: a face lit at a grazing angle gets almost no light anyway, so fade from the map's answer to plain shadow like
+            // N.L going to 0. Ceiling: the bias above covers texel quantisation, but `distort()` is applied per vertex, so across a
+            // 1-block face the depth is interpolated in distorted screen space and errs by ~0.02 block x tan(angle) within ~2 blocks of
+            // the map centre; below nl ~0.3 (sun < ~18 degrees over flat ground) that beats the bias. Upgrade = tessellate the shadow
+            // pass finer near the centre; then this line can go.
             sh = mix(1.0, sh, smoothstep(0.05, 0.3, nl));
         }
     }
@@ -503,6 +510,13 @@ mod tests {
         let p = at(18000.0, 1.0); // rainy midnight: the grey-blue weather colour, no additive branch
         assert!(near(p.scale[0], 1.1661) && near(p.scale[1], 2.2303) && near(p.scale[2], 5.2787), "{:?}", p.scale);
         assert!(p.w == 0.0 && near(p.endurance, 2.4) && near(p.power, 1.0));
+    }
+
+    /// The shadow sampler is LessEqual and a point nearer the sun has the smaller depth (`camera::shadow_matrix_follows_the_sun`),
+    /// so the surface bias must be subtracted from the reference depth. Added, every face shadowed itself near the eye.
+    #[test]
+    fn surface_bias_pulls_the_reference_toward_the_sun() {
+        assert!(SHADER.contains("c.z * 0.5 + 0.25 - bias") && !SHADER.contains("+ bias"));
     }
 
     #[test]
