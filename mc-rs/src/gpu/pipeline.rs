@@ -97,6 +97,7 @@ pub struct ChunkPipeline {
 const SHADER_SRC: &str = r#"
 // AstraLex `OVERWORLD_FOG_DENSITY`: the pack's default 0.5 only fogs the last 6 blocks of a 64 block view, too late here.
 const FOG_DENSITY: f32 = 2.0;
+const WATER_LIGHT: f32 = @WL@;
 struct Uniforms {
     view: mat4x4<f32>,
     proj: mat4x4<f32>,
@@ -152,10 +153,21 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     return shade(in, c);
 }
 
-// Translucent water: the texture's own alpha (0.54), blended over what is behind it.
+// Translucent water. `mesh::build_split` packs the water column under the face (whole cells) into the integer part of `light`
+// and `light * WATER_LIGHT` into the fraction. The texture's alpha (0.54) is the floor: deeper water absorbs, so it turns
+// opaque (1 - e^(-0.35 d): 0.3 at 1 block, 0.65 at 3, 0.88 at 6) and darker and bluer, and a grazing view reflects more.
+// Shallow water still shows its bed. UNVERIFIED: the constants are tuned by eye against a shader-pack screenshot, not a source.
 @fragment
 fn fs_water(in: VsOut) -> @location(0) vec4<f32> {
-    return shade(in, textureSample(tex, samp, in.uv));
+    let depth = floor(in.light + 0.05); // +0.05: interpolation may land a hair under the integer
+    var v = in;
+    v.light = (in.light - depth) / WATER_LIGHT;
+    let c = textureSample(tex, samp, in.uv);
+    let absorb = 1.0 - exp(-0.35 * depth);
+    let graze = pow(1.0 - abs(normalize(u.eye.xyz - in.wp).y), 3.0);
+    var o = shade(v, vec4<f32>(c.rgb * mix(vec3<f32>(1.0), vec3<f32>(0.45, 0.62, 0.8), absorb), c.a));
+    o.a = max(o.a, mix(absorb, 1.0, 0.5 * graze));
+    return o;
 }
 
 fn shade(in: VsOut, c: vec4<f32>) -> vec4<f32> {
@@ -247,7 +259,7 @@ impl ChunkPipeline {
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("chunk_shader"),
-            source: wgpu::ShaderSource::Wgsl(SHADER_SRC.replace("@TW@", &atlas::TILES_W.to_string()).replace("@TH@", &(atlas::ATLAS_H / 16).to_string()).into()),
+            source: wgpu::ShaderSource::Wgsl(SHADER_SRC.replace("@TW@", &atlas::TILES_W.to_string()).replace("@TH@", &(atlas::ATLAS_H / 16).to_string()).replace("@WL@", &format!("{:?}", crate::render::mesh::WATER_LIGHT)).into()),
         });
 
         // Group 1: the shadow map and its comparison sampler (nearest = `shadowtex0Nearest`; `Linear` is free PCF).

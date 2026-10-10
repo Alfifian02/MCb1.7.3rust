@@ -13,6 +13,9 @@ use crate::world::chest;
 use crate::world::chunk::{box_bounds, brightness, cross_shape, idx, is_fluid, is_plant, opaque, Nibbles, CACTUS_INSET, H, VOLUME};
 use crate::world::ticks::non_solid;
 
+/// Water vertices pack `light * WATER_LIGHT + column depth` (see `build_split`); `fs_water` in `gpu/pipeline.rs` unpacks it.
+pub const WATER_LIGHT: f32 = 0.9;
+
 /// One textured quad. Four corners in CCW order from the front.
 /// `normal_index` selects the face normal (0..5) for debug-coloring later.
 #[derive(Clone, Copy)]
@@ -285,7 +288,14 @@ pub fn build_split(blocks: &[u8], data: &Nibbles, nb_data: [&Nibbles; 4], light:
                     };
                     // A face the box does not reach the edge with, and a fluid's top, take the light of their own cell.
                     let own_cell = !reach || (heights.is_some() && face_i == 2);
-                    let light = shade * if own_cell { bright(x, y, z) } else { bright(x + dx, y + dy, z + dz) };
+                    let mut light = shade * if own_cell { bright(x, y, z) } else { bright(x + dx, y + dy, z + dz) };
+                    // Water carries the depth of its column (water cells from here down, <= 15) in the integer part of `light`:
+                    // `fs_water` unpacks `floor` / `fract` and makes deep water opaque and dark. ponytail: whole cells only, and
+                    // the column is counted straight down, not along the view ray.
+                    if matches!(blk, 8 | 9) {
+                        let depth = (0..=y).take_while(|&d| d < 15 && matches!(rid(x, y - d, z), 8 | 9)).count();
+                        light = light * WATER_LIGHT + depth as f32;
+                    }
                     for corner in face.corners.iter() {
                         // Corner inside the cell: the box's, a fluid's top corners at their height.
                         let mut p: [f32; 3] = std::array::from_fn(|a| bounds[a] + corner[a] * (bounds[a + 3] - bounds[a]));
@@ -614,6 +624,12 @@ mod tests {
         let (v, o, w) = build_split(&c, &Nibbles::new(), [&Nibbles::new(); 4], &a, [&a[..], &a[..], &a[..], &a[..]], [&a[..], &a[..], &a[..], &a[..]], 0, 0, 0);
         assert_eq!((w.len(), o.len()), (6 * 6, 12 * 6)); // 6 faces of 6 indices for the water; lava and stone 12 faces
         assert!(w.iter().all(|&i| (5.0..=6.0).contains(&v[i as usize * 6])));
+        // One water cell = depth 1: the integer part of its light; a 3-deep column reads 3 on its top face.
+        assert!(w.iter().all(|&i| v[i as usize * 6 + 5].floor() == 1.0));
+        c[idx(5, 19, 5)] = 9;
+        c[idx(5, 18, 5)] = 9;
+        let (v, _, w) = build_split(&c, &Nibbles::new(), [&Nibbles::new(); 4], &a, [&a[..], &a[..], &a[..], &a[..]], [&a[..], &a[..], &a[..], &a[..]], 0, 0, 0);
+        assert!(w.iter().any(|&i| v[i as usize * 6 + 5].floor() == 3.0));
     }
 
     /// A level-1 cell in the +X neighbour is read as level 1, not as a source: the source beside it flows toward +X across the seam.
