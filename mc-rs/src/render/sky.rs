@@ -22,7 +22,7 @@ const ATLAS_SIZE: u32 = 64;
 const FAR: f32 = 128.0;
 /// Centre of the all-white tile in the atlas.
 const WHITE: [f32; 2] = [0.25, 0.75];
-/// Room for the dome (6), glow (48), sun + moon (12) and under plane (6) vertices.
+/// Room for the dome (6), glow (48), glare (6), sun + moon (12) and under plane (6) vertices.
 const MAX_VERTS: usize = 128;
 
 #[repr(C)]
@@ -61,10 +61,20 @@ struct Uniforms {
     range: [f32; 4],
     /// Multiplies every colour: white, or the star brightness.
     tint: [f32; 4],
+    /// View-space direction toward the sun (xyz), for the glare.
+    sunv: [f32; 4],
 }
 
+/// `SUN_GLARE_DAY * 0.1 * SUNGLARE_OUTWATER_STRENGTH * 0.01` of the pack is an HDR add; here the halo is an alpha blend
+/// (an add would clip on the pale sky), so this is its own number. UNVERIFIED: on a device.
+const GLARE: f32 = 1.2;
+/// Half-size of the glare quad at the sun's distance (100): reaches ~63 degrees from the sun, where the glare is ~0.
+const GLARE_R: f32 = 200.0;
+/// `lightColor.glsl` morning light (236, 184, 132) / 255.
+const GLARE_RGB: [f32; 3] = [0.93, 0.72, 0.52];
+
 const SHADER_SRC: &str = r#"
-struct U { view: mat4x4<f32>, proj: mat4x4<f32>, fog: vec4<f32>, range: vec4<f32>, tint: vec4<f32> };
+struct U { view: mat4x4<f32>, proj: mat4x4<f32>, fog: vec4<f32>, range: vec4<f32>, tint: vec4<f32>, sunv: vec4<f32> };
 @group(0) @binding(0) var<uniform> u: U;
 @group(0) @binding(1) var samp: sampler;
 @group(0) @binding(2) var tex: texture_2d<f32>;
@@ -91,6 +101,14 @@ fn vs_main(@location(0) p: vec3<f32>, @location(1) uv: vec2<f32>, @location(2) c
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    if (in.fog > 1.5) {
+        // gbuffers glare, `sunGlare.glsl`: VoL^8, then visfactor / (1 - (1 - visfactor) * VoL) - visfactor, times VoL.
+        let s = dot(normalize(in.vpos), u.sunv.xyz);
+        if (s <= 0.0) { return vec4<f32>(0.0); }
+        var v = s * s; v = v * v; v = v * v;
+        let g = (0.2 / (1.0 - 0.8 * v) - 0.2) * s;
+        return vec4<f32>(in.color.rgb, clamp(g * GLARE, 0.0, 1.0) * in.color.a);
+    }
     var c = textureSample(tex, samp, in.uv) * in.color * u.tint;
     if (in.fog > 0.5) {
         let f = clamp((u.range.y - length(in.vpos)) / (u.range.y - u.range.x), 0.0, 1.0);
@@ -113,6 +131,7 @@ struct Geometry {
     verts: Vec<Vertex>,
     dome: Range<u32>,
     glow: Range<u32>,
+    glare: Range<u32>,
     bodies: Range<u32>,
     under: Range<u32>,
 }
@@ -155,9 +174,19 @@ fn geometry(f: &SkyFrame) -> Geometry {
     }
     let glow = start..v.len() as u32;
 
-    // Sun (30 wide half-size) and moon (20), opposite each other, turned about the X axis by the sun angle.
+    // Sun glare: one big quad around the sun, shaded per pixel by the angle to it. `sunVisibility` fades it at the horizon
+    // and the night, rain removes it (`1.1 - rainFactor`).
     let start = v.len() as u32;
     let rot = Mat4::from_rotation_x(f.angle * TAU);
+    let vis = (rot.transform_vector3(Vec3::Y).y + 0.0625).clamp(0.0, 0.125) * 8.0 * (1.0 - f.rain);
+    if vis > 0.0 {
+        let p = [[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]].map(|c| rot.transform_point3(Vec3::new(c[0] * GLARE_R, 100.0, c[1] * GLARE_R)).to_array());
+        quad(&mut v, p, [WHITE; 4], [GLARE_RGB[0], GLARE_RGB[1], GLARE_RGB[2], vis], 2.0);
+    }
+    let glare = start..v.len() as u32;
+
+    // Sun (30 wide half-size) and moon (20), opposite each other, turned about the X axis by the sun angle.
+    let start = v.len() as u32;
     let white = [1.0, 1.0, 1.0, 1.0 - f.rain];
     body(&mut v, rot, 30.0, 100.0, [[-1.0, -1.0, 0.0, 0.0], [1.0, -1.0, 1.0, 0.0], [1.0, 1.0, 1.0, 1.0], [-1.0, 1.0, 0.0, 1.0]], white, 0.0);
     body(&mut v, rot, 20.0, -100.0, [[-1.0, 1.0, 1.0, 1.0], [1.0, 1.0, 0.0, 1.0], [1.0, -1.0, 0.0, 0.0], [-1.0, -1.0, 1.0, 0.0]], white, 0.5);
@@ -167,7 +196,7 @@ fn geometry(f: &SkyFrame) -> Geometry {
     let start = v.len() as u32;
     quad(&mut v, plane(-16.0), [WHITE; 4], [f.sky[0] * 0.2 + 0.04, f.sky[1] * 0.2 + 0.04, f.sky[2] * 0.6 + 0.1, 1.0], 1.0);
     let under = start..v.len() as u32;
-    Geometry { verts: v, dome, glow, bodies, under }
+    Geometry { verts: v, dome, glow, glare, bodies, under }
 }
 
 pub struct SkyRenderer {
@@ -183,7 +212,7 @@ pub struct SkyRenderer {
     star_count: u32,
     stars_on: bool,
     /// Dome, glow, sun + moon, under plane: set by `update`, read by `draw`.
-    ranges: [Range<u32>; 4],
+    ranges: [Range<u32>; 5],
 }
 
 impl SkyRenderer {
@@ -303,7 +332,7 @@ impl SkyRenderer {
         }
         let stars = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("sky_stars"), contents: bytemuck::cast_slice(&sv), usage: wgpu::BufferUsages::VERTEX });
 
-        Self { opaque, alpha, additive, main_uniforms, star_uniforms, main_bind, star_bind, dynamic, stars, star_count: sv.len() as u32, stars_on: false, ranges: [0..0, 0..0, 0..0, 0..0] }
+        Self { opaque, alpha, additive, main_uniforms, star_uniforms, main_bind, star_bind, dynamic, stars, star_count: sv.len() as u32, stars_on: false, ranges: [0..0, 0..0, 0..0, 0..0, 0..0] }
     }
 
     /// Upload this frame's matrices, colours and geometry.
@@ -317,6 +346,7 @@ impl SkyRenderer {
             fog: [f.fog[0], f.fog[1], f.fog[2], 1.0],
             range: [0.0, FAR * 0.8, 0.0, 0.0],
             tint: [1.0; 4],
+            sunv: view.transform_vector3(Mat4::from_rotation_x(f.angle * TAU).transform_vector3(Vec3::Y)).normalize().extend(0.0).to_array(),
         };
         queue.write_buffer(&self.main_uniforms, 0, bytemuck::bytes_of(&u));
         // glColor4f(b, b, b, b) with the additive blend: the stars fade in at dusk and out in rain.
@@ -326,12 +356,12 @@ impl SkyRenderer {
         self.stars_on = b > 0.0;
         let g = geometry(f);
         queue.write_buffer(&self.dynamic, 0, bytemuck::cast_slice(&g.verts));
-        self.ranges = [g.dome, g.glow, g.bodies, g.under];
+        self.ranges = [g.dome, g.glow, g.glare, g.bodies, g.under];
     }
 
     /// Draw the sky into the frame pass, before any terrain.
     pub fn draw(&self, rp: &mut wgpu::RenderPass<'_>) {
-        let [dome, glow, bodies, under] = &self.ranges;
+        let [dome, glow, glare, bodies, under] = &self.ranges;
         rp.set_vertex_buffer(0, self.dynamic.slice(..));
         rp.set_bind_group(0, &self.main_bind, &[]);
         rp.set_pipeline(&self.opaque);
@@ -339,6 +369,10 @@ impl SkyRenderer {
         if !glow.is_empty() {
             rp.set_pipeline(&self.alpha);
             rp.draw(glow.clone(), 0..1);
+        }
+        if !glare.is_empty() {
+            rp.set_pipeline(&self.alpha);
+            rp.draw(glare.clone(), 0..1);
         }
         rp.set_pipeline(&self.additive);
         rp.draw(bodies.clone(), 0..1);
@@ -379,6 +413,7 @@ mod tests {
         let dusk = geometry(&frame(0.25));
         assert!(noon.glow.is_empty() && dusk.glow.len() == 48);
         assert_eq!((noon.dome.len(), noon.under.len(), noon.bodies.len()), (6, 6, 12));
+        assert!(noon.glare.len() == 6 && geometry(&frame(0.5)).glare.is_empty()); // sun glare: day only
         assert!(dusk.verts.len() <= MAX_VERTS && ATLAS.len() == (ATLAS_SIZE * ATLAS_SIZE * 4) as usize);
     }
 }

@@ -46,7 +46,12 @@ pub struct Uniforms {
     pub sh: [f32; 4],
     /// Bit `t` set: atlas tile `t` is foliage and casts no shadow (`EXCLUDE_FOLIAGE`, `block.properties`).
     pub plant: [[u32; 4]; 2],
+    /// rgb: fog colour, w: fog distance (the render distance in blocks; 0 = no fog). Written by `set_fog`.
+    pub fog: [f32; 4],
+    /// x: rain strength.
+    pub fogp: [f32; 4],
 }
+
 
 // Shadow-Tutorial `distort.glsl` constants.
 pub const SHADOW_RES: u32 = 1024; // shadowMapResolution
@@ -87,6 +92,8 @@ pub struct ChunkPipeline {
 }
 
 const SHADER_SRC: &str = r#"
+// AstraLex `OVERWORLD_FOG_DENSITY`: the pack's default 0.5 only fogs the last 6 blocks of a 64 block view, too late here.
+const FOG_DENSITY: f32 = 2.0;
 struct Uniforms {
     view: mat4x4<f32>,
     proj: mat4x4<f32>,
@@ -95,6 +102,8 @@ struct Uniforms {
     eye: vec4<f32>,
     sh: vec4<f32>,
     plant: array<vec4<u32>, 2>,
+    fog: vec4<f32>,
+    fogp: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var samp: sampler;
@@ -161,7 +170,15 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         }
         k = mix(1.0, k, u.sun.w);
     }
-    return vec4<f32>(c.rgb * in.light * k, c.a);
+    var rgb = c.rgb * in.light * k;
+    if u.fog.w > 0.0 {
+        // fog.glsl `NormalFog`, `DISTANT_FADE` vanilla part with `fogOffset = 0`: 1 - (far - d) * 5 / (density * far).
+        // Rain thickens it (`RAIN_FOG_DENSITY * rainFactor + 1`). Fog colour = the sky's horizon colour, so the edge melts into it.
+        let d = length(in.wp - u.eye.xyz);
+        let f = clamp(1.0 - (u.fog.w - d) * 5.0 / (FOG_DENSITY * (1.0 + 0.5 * u.fogp.x) * u.fog.w), 0.0, 1.0);
+        rgb = mix(rgb, u.fog.rgb, f * f * (3.0 - 2.0 * f));
+    }
+    return vec4<f32>(rgb, c.a);
 }
 "#;
 
@@ -368,6 +385,12 @@ impl ChunkPipeline {
         Self { pipeline, uniform_buf, atlas_tex, atlas_view, bind_group, bind_layout, shadow_pipeline, shadow_view, shadow_bind, shadow_layout }
     }
 
+    /// Terrain fog for this frame: `colour` rgb, `far` blocks (0 = off, e.g. under water), `rain` 0..1. Call after `upload_uniforms`.
+    pub fn set_fog(&self, queue: &Queue, colour: [f32; 3], far: f32, rain: f32) {
+        let f = [[colour[0], colour[1], colour[2], far], [rain, 0.0, 0.0, 0.0]];
+        queue.write_buffer(&self.uniform_buf, std::mem::offset_of!(Uniforms, fog) as u64, bytemuck::bytes_of(&f));
+    }
+
     /// Returns the sun's view-projection (for culling the shadow pass). `strength` 0 turns shadows off.
     pub fn upload_uniforms(&self, queue: &Queue, view: Mat4, proj: Mat4, sun: Vec3, strength: f32) -> Mat4 {
         let eye = view.inverse().w_axis.truncate();
@@ -380,6 +403,8 @@ impl ChunkPipeline {
             eye: eye.extend(0.0).to_array(),
             sh: [SHADOW_DISTORT, SHADOW_BIAS * 2.0 * SHADOW_RADIUS / SHADOW_RES as f32, SHADOW_BRIGHTNESS, 0.0],
             plant: PLANT,
+            fog: [0.0; 4], // off until `set_fog`
+            fogp: [0.0; 4],
         };
         queue.write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&u));
         vp
