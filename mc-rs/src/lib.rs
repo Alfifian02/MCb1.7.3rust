@@ -94,6 +94,8 @@ struct App {
     shafts: LightShafts,
     /// Where and along what the shadow map was last drawn (it is reused between redraws).
     shadow: ShadowCache,
+    /// The entity shadow map holds something (or was never written: a fresh texture reads as depth 0 = all shadow) and needs a clear.
+    ent_shadow_dirty: bool,
     weather: sky::Weather,
     weather_ticks: u64,
     /// Hotbar slot last seen and seconds its item name still shows (`GuiIngame` shows it ~2 s after a switch).
@@ -197,6 +199,7 @@ impl App {
             sky: sky_renderer,
             shafts,
             shadow: ShadowCache::new(),
+            ent_shadow_dirty: true,
             weather: sky::Weather::new(seed),
             weather_ticks: 0,
             tip: (0, 0.0),
@@ -724,6 +727,30 @@ impl App {
                 rp.set_index_buffer(m.ibuf.slice(..), wgpu::IndexFormat::Uint32);
                 rp.draw_indexed(0..m.index_count, 0, 0..1);
             }
+        }
+        // Moving things cast shadows through a second map, redrawn every frame (the terrain map is cached, a walking mob would leave a
+        // trail in it). It is cleared once more after the last entity is gone. ponytail: one draw of the whole item buffer, no culling.
+        let draw_ent = (sun_strength > 0.0 || vlp.active) && (item_indices > 0 || self.ent_shadow_dirty);
+        if draw_ent {
+            let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("entity_shadow_pass"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.pipe.ent_view,
+                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            if item_indices > 0 {
+                rp.set_pipeline(&self.pipe.shadow_pipeline);
+                rp.set_bind_group(0, &self.pipe.bind_group, &[]);
+                rp.set_vertex_buffer(0, self.item_mesh.vbuf.slice(..));
+                rp.set_index_buffer(self.item_mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                rp.draw_indexed(0..item_indices, 0, 0..1);
+            }
+            self.ent_shadow_dirty = item_indices > 0;
         }
         {
             let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {

@@ -1,0 +1,155 @@
+--- a/mc-rs/src/gpu/pipeline.rs	2026-10-10 12:25:54.000000000 +0000
++++ b/mc-rs/src/gpu/pipeline.rs	2026-10-10 06:39:11.991288985 +0000
+@@ -86,6 +86,8 @@
+     /// Sun depth pass (`shadow.vsh`), its target, and the group 1 the main pass reads it through.
+     pub shadow_pipeline: RenderPipeline,
+     pub shadow_view: TextureView,
++    /// Same box and matrix as `shadow_view`, but holds only the moving things (items, mobs, falling blocks) and is redrawn every frame.
++    pub ent_view: TextureView,
+     pub shadow_bind: BindGroup,
+     /// Layout of `shadow_bind`, for the light-shaft pass (`render::vl`).
+     pub shadow_layout: BindGroupLayout,
+@@ -238,7 +240,7 @@
+         });
+ 
+         // Group 1: the shadow map and its comparison sampler (nearest = `shadowtex0Nearest`; `Linear` is free PCF).
+-        let shadow_tex = device.create_texture(&wgpu::TextureDescriptor {
++        let mut shadow_desc = wgpu::TextureDescriptor {
+             label: Some("shadow_map"),
+             size: wgpu::Extent3d { width: SHADOW_RES, height: SHADOW_RES, depth_or_array_layers: 1 },
+             mip_level_count: 1,
+@@ -247,8 +249,10 @@
+             format: wgpu::TextureFormat::Depth32Float,
+             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+             view_formats: &[],
+-        });
+-        let shadow_view = shadow_tex.create_view(&wgpu::TextureViewDescriptor::default());
++        };
++        let shadow_view = device.create_texture(&shadow_desc).create_view(&wgpu::TextureViewDescriptor::default());
++        shadow_desc.label = Some("entity_shadow_map");
++        let ent_view = device.create_texture(&shadow_desc).create_view(&wgpu::TextureViewDescriptor::default());
+         let shadow_samp = device.create_sampler(&wgpu::SamplerDescriptor {
+             mag_filter: wgpu::FilterMode::Nearest,
+             min_filter: wgpu::FilterMode::Nearest,
+@@ -274,6 +278,12 @@
+                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                     count: None,
+                 },
++                wgpu::BindGroupLayoutEntry {
++                    binding: 2,
++                    visibility: wgpu::ShaderStages::FRAGMENT,
++                    ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Depth, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
++                    count: None,
++                },
+             ],
+         });
+         let shadow_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+@@ -282,6 +292,7 @@
+             entries: &[
+                 wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&shadow_view) },
+                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&shadow_samp) },
++                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&ent_view) },
+             ],
+         });
+ 
+@@ -360,7 +371,7 @@
+             cache: None,
+         });
+ 
+-        Self { pipeline, uniform_buf, atlas_tex, atlas_view, bind_group, bind_layout, shadow_pipeline, shadow_view, shadow_bind, shadow_layout }
++        Self { pipeline, uniform_buf, atlas_tex, atlas_view, bind_group, bind_layout, shadow_pipeline, shadow_view, ent_view, shadow_bind, shadow_layout }
+     }
+ 
+     /// Terrain fog for this frame: `colour` rgb, `far` blocks (0 = off, e.g. under water), `rain` 0..1. Call after `upload_uniforms`.
+--- a/mc-rs/src/lib.rs	2026-10-10 12:29:20.000000000 +0000
++++ b/mc-rs/src/lib.rs	2026-10-10 06:39:11.990174875 +0000
+@@ -94,6 +94,8 @@
+     shafts: LightShafts,
+     /// Where and along what the shadow map was last drawn (it is reused between redraws).
+     shadow: ShadowCache,
++    /// The entity shadow map holds something (or was never written: a fresh texture reads as depth 0 = all shadow) and needs a clear.
++    ent_shadow_dirty: bool,
+     weather: sky::Weather,
+     weather_ticks: u64,
+     /// Hotbar slot last seen and seconds its item name still shows (`GuiIngame` shows it ~2 s after a switch).
+@@ -197,6 +199,7 @@
+             sky: sky_renderer,
+             shafts,
+             shadow: ShadowCache::new(),
++            ent_shadow_dirty: true,
+             weather: sky::Weather::new(seed),
+             weather_ticks: 0,
+             tip: (0, 0.0),
+@@ -725,6 +728,30 @@
+                 rp.draw_indexed(0..m.index_count, 0, 0..1);
+             }
+         }
++        // Moving things cast shadows through a second map, redrawn every frame (the terrain map is cached, a walking mob would leave a
++        // trail in it). It is cleared once more after the last entity is gone. ponytail: one draw of the whole item buffer, no culling.
++        let draw_ent = (sun_strength > 0.0 || vlp.active) && (item_indices > 0 || self.ent_shadow_dirty);
++        if draw_ent {
++            let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
++                label: Some("entity_shadow_pass"),
++                color_attachments: &[],
++                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
++                    view: &self.pipe.ent_view,
++                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
++                    stencil_ops: None,
++                }),
++                timestamp_writes: None,
++                occlusion_query_set: None,
++            });
++            if item_indices > 0 {
++                rp.set_pipeline(&self.pipe.shadow_pipeline);
++                rp.set_bind_group(0, &self.pipe.bind_group, &[]);
++                rp.set_vertex_buffer(0, self.item_mesh.vbuf.slice(..));
++                rp.set_index_buffer(self.item_mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
++                rp.draw_indexed(0..item_indices, 0, 0..1);
++            }
++            self.ent_shadow_dirty = item_indices > 0;
++        }
+         {
+             let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                 label: Some("chunk_pass"),
+--- a/mc-rs/src/render/vl.rs	2026-10-10 06:39:11.591750368 +0000
++++ b/mc-rs/src/render/vl.rs	2026-10-10 06:39:11.992750169 +0000
+@@ -185,6 +185,7 @@
+ @group(0) @binding(3) var vl_samp: sampler;
+ @group(1) @binding(0) var sh_tex: texture_depth_2d;
+ @group(1) @binding(1) var sh_samp: sampler_comparison;
++@group(1) @binding(2) var ent_tex: texture_depth_2d; // items, mobs, falling blocks: same matrix as sh_tex, redrawn every frame
+ 
+ struct FsIn {
+     @builtin(position) pos: vec4<f32>,
+@@ -294,7 +295,9 @@
+                 // floor outweighed the normal offset (texel < ~0.12 block, i.e. within ~11 blocks of the map centre): sun-facing
+                 // walls went dark as you walked up to them, and flat ground was all acne.
+                 let p = vec3<f32>(c.xy / (length(c.xy) + u.a.x) * 0.5 + 0.5, c.z * 0.5 + 0.25 - bias);
+-                sh = 1.0 - textureSampleCompareLevel(sh_tex, sh_samp, vec2<f32>(p.x, 1.0 - p.y), p.z);
++                let q = vec2<f32>(p.x, 1.0 - p.y);
++                // Lit only if neither the terrain map nor the entity map has something nearer the sun.
++                sh = 1.0 - min(textureSampleCompareLevel(sh_tex, sh_samp, q, p.z), textureSampleCompareLevel(ent_tex, sh_samp, q, p.z));
+             }
+             // ponytail: a face lit at a grazing angle gets almost no light anyway, so fade from the map's answer to plain shadow like
+             // N.L going to 0. Ceiling: the bias above covers texel quantisation, but `distort()` is applied per vertex, so across a
+@@ -517,6 +520,7 @@
+     #[test]
+     fn surface_bias_pulls_the_reference_toward_the_sun() {
+         assert!(SHADER.contains("c.z * 0.5 + 0.25 - bias") && !SHADER.contains("+ bias"));
++        assert!(SHADER.contains("ent_tex, sh_samp, q, p.z"), "entities shade the surface through their own map");
+     }
+ 
+     #[test]
+--- a/ROADMAP.md	2026-10-10 06:39:11.590263518 +0000
++++ b/ROADMAP.md	2026-10-10 06:39:11.989075557 +0000
+@@ -46,6 +46,10 @@
+ BiomeGenBase but climate never selects it; b1.7.3 has no ravines.
+ 
+ ## Changelog
++- `done` entities cast shadows: dropped items, mobs and falling blocks (written WITHOUT a Rust toolchain: not compiled, not run; the vl.rs test gains one assert, not run; no FPS numbers):
++    - Before, only chunk meshes were drawn into the shadow map, so nothing that moves threw a shadow. `gpu/pipeline.rs`: a second `Depth32Float` map `ent_view` (same size, same `shadow_vp`, bound as binding 2 of the shadow group). `lib.rs`: an `entity_shadow_pass` draws the whole item buffer (`item_mesh`, all entities) into it with `shadow_pipeline`, EVERY frame, because the terrain map is cached (`ShadowCache`) and a walking mob would leave a trail in it; it is cleared once more after the last entity is gone (`ent_shadow_dirty`; starts true because a fresh depth texture reads 0 = all shadow).
++    - `render/vl.rs` `fs_march`: the surface test samples both maps with the same lookup point and bias and is lit only if both say lit (`min`). The light-shaft march does not read the entity map, so entities cast no shafts.
++    - Consequences (UNVERIFIED on a device): the entity map is drawn at the terrain map's resolution and distortion, so a 0.25 item shadow is a few texels near the eye and blocky far away; the entity pass costs a 1024^2 clear every frame while any entity exists; foliage tiles are skipped by `vs_shadow`, so a dropped sapling or flower casts nothing. ponytail: no culling of the entity draw; items are flat full-brightness cubes, so their own sun-lit faces are shaded only by the map.
+ - `done` FIX acne everywhere + sun-facing faces going dark when the player walks up (written WITHOUT a Rust toolchain: not compiled, not run; +1 test `surface_bias_pulls_the_reference_toward_the_sun` not run; the margins below come from a 2-D Python model of `fs_march`'s lookup, not from a device):
+     - Root cause, one character in `render/vl.rs` `fs_march`: the surface lookup ADDED its depth bias (`c.z * 0.5 + 0.25 + bias`). The sampler is `LessEqual` (lit when ref <= stored) and a point nearer the sun has the smaller depth, so a positive bias pushes the reference away from the sun and every face into its own shadow. Now `- bias`. The line that was meant to help, the normal offset, only pulls the reference toward the sun by `texel x n.L`; the bias's 0.05 block floor outweighed it wherever the map's texel is < ~0.12 block (`distort()` makes texels small near the map centre, which is the eye within 4 blocks, see `ShadowCache`). That is one cause for both reports: a sun-facing dirt wall self-shadowed inside ~11 blocks of the centre and was lit beyond it (dark as you approach), and flat faces had a negative margin at every distance (acne). With the minus sign the modelled margin is positive for every n.L in 0.02..1 and every distance 0..63 (texel quantisation only).
+     - The grazing fade of `vl-grazing-acne-followup.patch` stays, but its premise ("no bias fixes its acne") was the sign bug. Its real job is the ceiling now marked `ponytail:` in the shader: `distort()` is per vertex, so over a 1-block face the shadow depth is interpolated in distorted screen space and errs by ~0.02 block x tan(angle) within ~2 blocks of the map centre; below n.L ~0.3 that beats the bias. If acne is gone on a device, narrow or delete the `smoothstep(0.05, 0.3, nl)` line (the ground then stays bright to a lower sun).

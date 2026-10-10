@@ -185,6 +185,7 @@ struct U {
 @group(0) @binding(3) var vl_samp: sampler;
 @group(1) @binding(0) var sh_tex: texture_depth_2d;
 @group(1) @binding(1) var sh_samp: sampler_comparison;
+@group(1) @binding(2) var ent_tex: texture_depth_2d; // items, mobs, falling blocks: same matrix as sh_tex, redrawn every frame
 
 struct FsIn {
     @builtin(position) pos: vec4<f32>,
@@ -294,7 +295,9 @@ fn fs_march(in: FsIn) -> @location(0) vec4<f32> {
                 // floor outweighed the normal offset (texel < ~0.12 block, i.e. within ~11 blocks of the map centre): sun-facing
                 // walls went dark as you walked up to them, and flat ground was all acne.
                 let p = vec3<f32>(c.xy / (length(c.xy) + u.a.x) * 0.5 + 0.5, c.z * 0.5 + 0.25 - bias);
-                sh = 1.0 - textureSampleCompareLevel(sh_tex, sh_samp, vec2<f32>(p.x, 1.0 - p.y), p.z);
+                let q = vec2<f32>(p.x, 1.0 - p.y);
+                // Lit only if neither the terrain map nor the entity map has something nearer the sun.
+                sh = 1.0 - min(textureSampleCompareLevel(sh_tex, sh_samp, q, p.z), textureSampleCompareLevel(ent_tex, sh_samp, q, p.z));
             }
             // ponytail: a face lit at a grazing angle gets almost no light anyway, so fade from the map's answer to plain shadow like
             // N.L going to 0. Ceiling: the bias above covers texel quantisation, but `distort()` is applied per vertex, so across a
@@ -517,6 +520,7 @@ mod tests {
     #[test]
     fn surface_bias_pulls_the_reference_toward_the_sun() {
         assert!(SHADER.contains("c.z * 0.5 + 0.25 - bias") && !SHADER.contains("+ bias"));
+        assert!(SHADER.contains("ent_tex, sh_samp, q, p.z"), "entities shade the surface through their own map");
     }
 
     #[test]

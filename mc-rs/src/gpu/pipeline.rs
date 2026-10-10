@@ -86,6 +86,8 @@ pub struct ChunkPipeline {
     /// Sun depth pass (`shadow.vsh`), its target, and the group 1 the main pass reads it through.
     pub shadow_pipeline: RenderPipeline,
     pub shadow_view: TextureView,
+    /// Same box and matrix as `shadow_view`, but holds only the moving things (items, mobs, falling blocks) and is redrawn every frame.
+    pub ent_view: TextureView,
     pub shadow_bind: BindGroup,
     /// Layout of `shadow_bind`, for the light-shaft pass (`render::vl`).
     pub shadow_layout: BindGroupLayout,
@@ -238,7 +240,7 @@ impl ChunkPipeline {
         });
 
         // Group 1: the shadow map and its comparison sampler (nearest = `shadowtex0Nearest`; `Linear` is free PCF).
-        let shadow_tex = device.create_texture(&wgpu::TextureDescriptor {
+        let mut shadow_desc = wgpu::TextureDescriptor {
             label: Some("shadow_map"),
             size: wgpu::Extent3d { width: SHADOW_RES, height: SHADOW_RES, depth_or_array_layers: 1 },
             mip_level_count: 1,
@@ -247,8 +249,10 @@ impl ChunkPipeline {
             format: wgpu::TextureFormat::Depth32Float,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
-        });
-        let shadow_view = shadow_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        };
+        let shadow_view = device.create_texture(&shadow_desc).create_view(&wgpu::TextureViewDescriptor::default());
+        shadow_desc.label = Some("entity_shadow_map");
+        let ent_view = device.create_texture(&shadow_desc).create_view(&wgpu::TextureViewDescriptor::default());
         let shadow_samp = device.create_sampler(&wgpu::SamplerDescriptor {
             mag_filter: wgpu::FilterMode::Nearest,
             min_filter: wgpu::FilterMode::Nearest,
@@ -274,6 +278,12 @@ impl ChunkPipeline {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Depth, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
+                    count: None,
+                },
             ],
         });
         let shadow_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -282,6 +292,7 @@ impl ChunkPipeline {
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&shadow_view) },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&shadow_samp) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&ent_view) },
             ],
         });
 
@@ -360,7 +371,7 @@ impl ChunkPipeline {
             cache: None,
         });
 
-        Self { pipeline, uniform_buf, atlas_tex, atlas_view, bind_group, bind_layout, shadow_pipeline, shadow_view, shadow_bind, shadow_layout }
+        Self { pipeline, uniform_buf, atlas_tex, atlas_view, bind_group, bind_layout, shadow_pipeline, shadow_view, ent_view, shadow_bind, shadow_layout }
     }
 
     /// Terrain fog for this frame: `colour` rgb, `far` blocks (0 = off, e.g. under water), `rain` 0..1. Call after `upload_uniforms`.
