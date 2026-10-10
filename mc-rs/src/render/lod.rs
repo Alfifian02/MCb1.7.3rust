@@ -6,8 +6,10 @@
 //!   grid (`OverworldGenerator::lod_columns`): no chunk, no caves, no populate, no light, nothing on disk. Evicted tiles are
 //!   simply computed again (about 13 ms of noise on one background thread).
 //! - **One height per column** (2.5D), not DH's stack of vertical slices: Beta has no floating islands worth the memory.
-//! - **16-byte vertices** (position + packed colour, face shade baked in), `u16` indices, a run of equal columns is one quad
-//!   (1D greedy merge), one draw call per tile, its own 40-line shader (fog identical to the chunk shader's).
+//! - **A smooth heightfield, not boxes**: one vertex per cell corner (shared by its four cells), normal from the neighbouring
+//!   heights, colour = the block's mean tile colour, lit per pixel by the sun like the chunks. No vertical walls, except a
+//!   skirt hanging from each tile's edge (covers the crack against a tile of another level). 20-byte vertices, `u16`
+//!   indices, one draw call per tile, its own small shader (fog identical to the chunk shader's).
 //! - **Quadtree** of 16 x 16 cell tiles: level `l` has cells of `4 << l` blocks (level 0 = the terrain's own 4-block grid).
 //!   A node splits while the eye is closer than `SPLIT` x its width; a node whose children are not all ready is drawn itself,
 //!   so loading never leaves a hole (coarse tiles are requested first).
@@ -113,86 +115,56 @@ fn select(ex: f32, ez: f32, ready: &dyn Fn(Key) -> bool) -> (Vec<Key>, Vec<Key>)
 #[derive(Copy, Clone, Pod, Zeroable)]
 pub struct LodVertex {
     pos: [f32; 3],
-    /// rgb already times the face shade (sRGB values like the atlas); a is unused.
+    /// sRGB values like the atlas; a is unused.
     col: [u8; 4],
+    /// Unit normal, snorm8 (w unused).
+    nrm: [i8; 4],
 }
 
-/// Mesh of one tile from its `n` x `n` columns (`n` = `CELLS + 2`: the ring of cells around the tile is only read, for the
-/// side faces). The tile's first cell has its corner at block (`x0`, `z0`), so column (i, j) is at `x0 + (i - 1) * cell`.
-/// A top face and every side face that looks at a lower neighbour is emitted, runs of equal neighbours as one quad; on the
-/// tile's outer edge the side face goes down to y = 0 (the skirt that covers a crack against a coarser tile).
+/// Edge of a skirt: how far it hangs below the tile's edge, in blocks.
+const SKIRT: f32 = 24.0;
+
+/// Mesh of one tile from its `n` x `n` columns (`n` = `CELLS + 3`; column (i, j) is the corner at block
+/// `x0 + (i - 1) * cell`, `z0 + (j - 1) * cell`). Vertices are the `CELLS + 1` squared corners 1..=CELLS + 1 (the ring around
+/// them is only read, for normals and so that neighbouring tiles agree on their shared edge), two triangles per cell, and a
+/// skirt hanging `SKIRT` blocks from each of the four edges.
 fn build(cols: &[LodCol], n: usize, x0: i32, z0: i32, cell: i32) -> (Vec<LodVertex>, Vec<u16>) {
     assert_eq!(cols.len(), n * n);
-    let at = |i: usize, j: usize| cols[i * n + j];
-    let (xo, zo) = (|i: usize| (x0 + (i as i32 - 1) * cell) as f32, |j: usize| (z0 + (j as i32 - 1) * cell) as f32);
-    let (mut v, mut idx) = (Vec::new(), Vec::new());
-    let mut quad = |p: [[f32; 3]; 4], block: u8, shade: f32| {
-        let c = atlas::lod_color(block);
-        let col = [(c[0] as f32 * shade) as u8, (c[1] as f32 * shade) as u8, (c[2] as f32 * shade) as u8, 255];
-        let b = v.len() as u16;
-        v.extend(p.map(|pos| LodVertex { pos, col }));
-        idx.extend_from_slice(&[b, b + 1, b + 2, b, b + 2, b + 3]);
-    };
-    // Tops: runs along x.
-    for j in 1..=CELLS {
-        let mut i = 1;
-        while i <= CELLS {
-            let c = at(i, j);
-            let mut e = i + 1;
-            while e <= CELLS && at(e, j) == c {
-                e += 1;
-            }
-            let (xa, xb, za, zb, y) = (xo(i), xo(e), zo(j), zo(j) + cell as f32, c.top as f32);
-            quad([[xa, y, zb], [xb, y, zb], [xb, y, za], [xa, y, za]], c.block, 1.0);
-            i = e;
+    let (m, c) = (CELLS + 1, cell as f32);
+    let h = |i: usize, j: usize| cols[i * n + j].top as f32;
+    let mut v = Vec::with_capacity(m * m + 4 * m);
+    for i in 1..=m {
+        for j in 1..=m {
+            let (nx, nz) = (h(i - 1, j) - h(i + 1, j), h(i, j - 1) - h(i, j + 1));
+            let len = (nx * nx + 4.0 * c * c + nz * nz).sqrt();
+            let q = |f: f32| (f / len * 127.0).round() as i8;
+            let k = atlas::lod_color(cols[i * n + j].block);
+            v.push(LodVertex {
+                pos: [(x0 + (i as i32 - 1) * cell) as f32, h(i, j), (z0 + (j as i32 - 1) * cell) as f32],
+                col: [k[0], k[1], k[2], 255],
+                nrm: [q(nx), q(2.0 * c), q(nz), 0],
+            });
         }
     }
-    // Sides: for +X / -X the line is a fixed i and the run goes along j; for +Z / -Z the other way round.
-    for (di, dj) in [(1i32, 0i32), (-1, 0), (0, 1), (0, -1)] {
-        let shade = if di != 0 { 0.6 } else { 0.8 };
-        for a in 1..=CELLS {
-            // The cell of the run's position `b` on line `a`, its neighbour, whether that neighbour is outside the tile, the
-            // y the face goes down to.
-            let cell_at = |b: usize| if di != 0 { (a, b) } else { (b, a) };
-            let info = |b: usize| {
-                let (i, j) = cell_at(b);
-                let (ni, nj) = ((i as i32 + di) as usize, (j as i32 + dj) as usize);
-                let edge = ni == 0 || nj == 0 || ni == CELLS + 1 || nj == CELLS + 1;
-                (at(i, j), if edge { 0 } else { at(ni, nj).top }, edge)
-            };
-            let mut b = 1;
-            while b <= CELLS {
-                let (c, bottom, edge) = info(b);
-                if !edge && c.top <= bottom {
-                    b += 1;
-                    continue;
-                }
-                let mut e = b + 1;
-                while e <= CELLS && info(e) == (c, bottom, edge) {
-                    e += 1;
-                }
-                let (yb, yt) = (bottom as f32, c.top as f32);
-                let (i, j) = cell_at(b);
-                match (di, dj) {
-                    (1, 0) => {
-                        let (x, z0, z1) = (xo(i) + cell as f32, zo(b), zo(e));
-                        quad([[x, yb, z1], [x, yb, z0], [x, yt, z0], [x, yt, z1]], c.block, shade);
-                    }
-                    (-1, 0) => {
-                        let (x, z0, z1) = (xo(i), zo(b), zo(e));
-                        quad([[x, yb, z0], [x, yb, z1], [x, yt, z1], [x, yt, z0]], c.block, shade);
-                    }
-                    (0, 1) => {
-                        let (z, x0, x1) = (zo(j) + cell as f32, xo(b), xo(e));
-                        quad([[x0, yb, z], [x1, yb, z], [x1, yt, z], [x0, yt, z]], c.block, shade);
-                    }
-                    _ => {
-                        let (z, x0, x1) = (zo(j), xo(b), xo(e));
-                        quad([[x1, yb, z], [x0, yb, z], [x0, yt, z], [x1, yt, z]], c.block, shade);
-                    }
-                }
-                b = e;
-            }
+    let mut idx = Vec::with_capacity(6 * CELLS * CELLS + 24 * CELLS);
+    for a in 0..CELLS {
+        for b in 0..CELLS {
+            let (p00, p10, p01, p11) = ((a * m + b) as u16, ((a + 1) * m + b) as u16, (a * m + b + 1) as u16, ((a + 1) * m + b + 1) as u16);
+            idx.extend_from_slice(&[p01, p11, p10, p01, p10, p00]); // counter-clockwise from above
+        }
+    }
+    // Skirts: copies of the edge vertices, lowered. (The pipeline does not cull, so their winding does not matter.)
+    for edge in 0..4 {
+        let at = |k: usize| match edge { 0 => k, 1 => CELLS * m + k, 2 => k * m, _ => k * m + CELLS };
+        let base = v.len() as u16;
+        for k in 0..m {
+            let mut d = v[at(k)];
+            d.pos[1] = (d.pos[1] - SKIRT).max(0.0);
+            v.push(d);
+        }
+        for k in 0..CELLS {
+            let (s0, s1, d0, d1) = (at(k) as u16, at(k + 1) as u16, base + k as u16, base + k as u16 + 1);
+            idx.extend_from_slice(&[s0, s1, d1, s0, d1, d0]);
         }
     }
     (v, idx)
@@ -204,8 +176,9 @@ fn work(seed: i64, jobs: mpsc::Receiver<Key>, done: mpsc::Sender<(Key, Vec<LodVe
     while let Ok(key) = jobs.recv() {
         let cell = BASE << key.0;
         let (x0, z0) = (key.1 * width(key.0), key.2 * width(key.0));
-        let n = CELLS + 2;
-        let cols = gen.lod_columns(&mut cm, x0 - cell, z0 - cell, n, cell);
+        let n = CELLS + 3;
+        // Columns are sampled at their middle, so start half a cell before the corner of index 0 (corner -1).
+        let cols = gen.lod_columns(&mut cm, x0 - cell - cell / 2, z0 - cell - cell / 2, n, cell);
         let (v, i) = build(&cols, n, x0, z0, cell);
         if done.send((key, v, i)).is_err() {
             break;
@@ -231,13 +204,14 @@ struct Uniforms {
 const SHADER: &str = r#"
 struct U { vp: mat4x4<f32>, eye: vec4<f32>, fog: vec4<f32>, p: vec4<f32>, q: vec4<f32>, sun: vec4<f32> };
 @group(0) @binding(0) var<uniform> u: U;
-struct VsOut { @builtin(position) pos: vec4<f32>, @location(0) col: vec3<f32>, @location(1) wp: vec3<f32> };
+struct VsOut { @builtin(position) pos: vec4<f32>, @location(0) col: vec3<f32>, @location(1) wp: vec3<f32>, @location(2) nrm: vec3<f32> };
 @vertex
-fn vs(@location(0) p: vec3<f32>, @location(1) c: vec4<f32>) -> VsOut {
+fn vs(@location(0) p: vec3<f32>, @location(1) c: vec4<f32>, @location(2) nr: vec4<f32>) -> VsOut {
     var o: VsOut;
     o.pos = u.vp * vec4<f32>(p, 1.0);
     o.col = c.rgb;
     o.wp = p;
+    o.nrm = nr.xyz;
     return o;
 }
 @fragment
@@ -245,20 +219,19 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     // The real chunks are drawn inside their ring (the same test as the mesher's ring), the LOD only outside it.
     let c = floor(in.wp.xz / 16.0) - u.p.zw;
     if dot(c, c) <= u.q.x * u.q.x { discard; }
-    var n = normalize(cross(dpdx(in.wp), dpdy(in.wp)));
-    if dot(n, u.eye.xyz - in.wp) < 0.0 { n = -n; }
+    let n = normalize(in.nrm);
     let d = length(in.wp.xz - u.eye.xz);
     var rgb = in.col;
     if u.p.y > 0.5 { rgb = pow(rgb, vec3<f32>(2.2)); } // the atlas is sRGB and decoded on sampling; match it
     // Per-block jitter (integer hash of the block), fading out with distance where it would only shimmer.
-    let b = bitcast<vec3<u32>>(vec3<i32>(floor(in.wp + 0.001)));
-    var h = (b.x * 73856093u) ^ (b.y * 19349663u) ^ (b.z * 83492791u);
+    let b = bitcast<vec2<u32>>(vec2<i32>(floor(in.wp.xz + 0.001)));
+    var h = (b.x * 73856093u) ^ (b.y * 83492791u);
     h = (h ^ (h >> 13u)) * 1274126177u;
     rgb = rgb * (1.0 + (f32((h >> 8u) & 255u) / 255.0 - 0.5) * 0.2 * (1.0 - smoothstep(48.0, 200.0, d)));
     // The chunk shader's sun term without the map (unshadowed): `mix(SHADOW_BRIGHTNESS, 1, sqrt(N.L))`, faded by strength.
     var k = 1.0;
     if u.sun.w > 0.0 { k = mix(1.0, mix(0.75, 1.0, sqrt(max(dot(n, u.sun.xyz), 0.0))), u.sun.w); }
-    rgb = rgb * u.p.x * k;
+    rgb = rgb * u.p.x * k * (0.6 + 0.4 * max(n.y, 0.0)); // slopes darken like the chunks' side faces (1.0 flat, 0.6 vertical)
     // The chunk shader's fog (`NormalFog`, density 2): 1 - (far - d) * 5 / (2 far), smoothstepped.
     let far = u.fog.w;
     let f = clamp(1.0 - (far - length(in.wp - u.eye.xyz)) * 5.0 / (2.0 * far), 0.0, 1.0);
@@ -333,6 +306,7 @@ impl LodRenderer {
                     attributes: &[
                         wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 0, shader_location: 0 },
                         wgpu::VertexAttribute { format: wgpu::VertexFormat::Unorm8x4, offset: 12, shader_location: 1 },
+                        wgpu::VertexAttribute { format: wgpu::VertexFormat::Snorm8x4, offset: 16, shader_location: 2 },
                     ],
                 }],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
@@ -343,7 +317,7 @@ impl LodRenderer {
                 targets: &[Some(wgpu::ColorTargetState { format: surface_format, blend: Some(wgpu::BlendState::REPLACE), write_mask: wgpu::ColorWrites::ALL })],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             }),
-            primitive: wgpu::PrimitiveState { cull_mode: Some(wgpu::Face::Back), ..Default::default() },
+            primitive: wgpu::PrimitiveState::default(), // no culling: the skirts are seen from either side
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
                 depth_write_enabled: true,
@@ -481,22 +455,23 @@ mod tests {
         vec![LodCol { top, block: 2 }; n * n]
     }
 
-    /// Flat ground is one quad per row of tops plus the skirt of the tile; a raised column adds its four sides and splits one row.
+    /// Flat ground: the corner grid plus four skirts, normals straight up; a raised column tilts its neighbours' normals away from it.
     #[test]
-    fn runs_merge_into_quads() {
-        let n = CELLS + 2;
+    fn heightfield_mesh() {
+        let n = CELLS + 3;
         let mut cols = flat(n, 70);
         let (v, i) = build(&cols, n, 0, 0, 4);
-        let quads = CELLS + 4; // 16 top rows + one skirt quad (the whole run) on each of the 4 edges
-        assert_eq!((v.len(), i.len()), (quads * 4, quads * 6));
-        cols[8 * n + 8].top = 75;
-        let (v, _) = build(&cols, n, 0, 0, 4);
-        assert_eq!(v.len() / 4, quads + 2 + 4, "the raised row splits in 3 (+2 quads), the column gets 4 sides");
-        assert!(v.iter().all(|p| p.pos[1] >= 0.0 && p.pos[1] <= 75.0));
+        let m = CELLS + 1;
+        assert_eq!((v.len(), i.len()), (m * m + 4 * m, 6 * CELLS * CELLS + 24 * CELLS));
+        assert!(v.iter().all(|p| p.pos[1] >= 46.0 && p.pos[1] <= 70.0) && v[0].nrm[1] == 127 && v[0].nrm[0] == 0);
+        // Corner (i, j) = (1, 1) is the tile's own corner, block (0, 0); (CELLS + 1, CELLS + 1) is (64, 64).
+        assert_eq!((v[0].pos[0], v[0].pos[2], v[m * m - 1].pos[0]), (0.0, 0.0, 64.0));
         // The top faces up: counter-clockwise seen from above, like the chunk mesher's.
-        let top = &v[0..3];
-        let (a, b) = (Vec3::from(top[1].pos) - Vec3::from(top[0].pos), Vec3::from(top[2].pos) - Vec3::from(top[1].pos));
-        assert!(a.cross(b).y > 0.0);
+        let t: Vec<Vec3> = i[0..3].iter().map(|&k| Vec3::from(v[k as usize].pos)).collect();
+        assert!((t[1] - t[0]).cross(t[2] - t[1]).y > 0.0);
+        cols[8 * n + 8].top = 75; // corner (7, 7) in vertex space
+        let (v, _) = build(&cols, n, 0, 0, 4);
+        assert!(v[6 * m + 7].nrm[0] < 0 && v[7 * m + 6].nrm[2] < 0 && v[7 * m + 7].pos[1] == 75.0, "{:?}", v[6 * m + 7].nrm);
     }
 
     /// The density-grid height is the real terrain's within a few blocks (cells are sampled at their middle, the chunk is
