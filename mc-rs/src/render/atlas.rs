@@ -104,6 +104,27 @@ pub fn tile_color(tile: u16) -> Pixel {
     }
 }
 
+/// Mean colour of a block's top tile in `terrain.png` (opaque texels, tint baked in): what the distant terrain (`render::lod`)
+/// draws, so it matches the textured chunks next to it. Blocks without a tile keep `block_color`.
+pub fn lod_color(id: u8) -> [u8; 3] {
+    static MEAN: std::sync::OnceLock<[[u8; 3]; 256]> = std::sync::OnceLock::new();
+    MEAN.get_or_init(|| std::array::from_fn(|i| {
+        let Some(t) = terrain_tile(i as u8, 0, 1) else {
+            let c = block_color(i as u8);
+            return [c[0], c[1], c[2]];
+        };
+        let (mut sum, mut n) = ([0u32; 3], 0u32);
+        for p in 0..256 {
+            let o = (((t as usize / 16) * 16 + p / 16) * ATLAS_W + (t as usize % 16) * 16 + p % 16) * 4;
+            if TERRAIN[o + 3] >= 128 {
+                (0..3).for_each(|c| sum[c] += TERRAIN[o + c] as u32);
+                n += 1;
+            }
+        }
+        sum.map(|v| (v / n.max(1)) as u8)
+    }))[id as usize]
+}
+
 /// The whole atlas, row by row: `terrain.png`, then the flat strip (tile `t` is strip texel `t`; the rest of a strip row is clear).
 pub fn atlas_rgba() -> Vec<u8> {
     let mut v = TERRAIN.to_vec();

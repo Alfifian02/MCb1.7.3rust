@@ -643,9 +643,10 @@ impl App {
         let (frustum, shadow_frustum) = (Frustum::from_view_proj(proj * view), Frustum::from_view_proj(shadow_vp));
         let fog = sky::fog_color(angle, sky_rgb, rain, thunder);
         // Terrain fog (AstraLex `NormalFog`): fades to the horizon colour at the render distance; off under water.
-        self.pipe.set_fog(&self.gpu.queue, fog, if eye_in_water { 0.0 } else { lod::RADIUS }, rain);
+        let fade = if eye_in_water { (0.0, 0.0) } else { lod::fade_band(RENDER_DIST) }; // no LOD under water: the chunks stay whole
+        self.pipe.set_fog(&self.gpu.queue, fog, if eye_in_water { 0.0 } else { lod::RADIUS }, rain, fade);
         let day = crate::world::chunk::brightness(15u8.saturating_sub(sky::skylight_subtracted(angle, rain, thunder)));
-        self.lod.prepare(&self.gpu.queue, proj * view, self.camera.pos, fog, day, (pcx, pcz, RENDER_DIST));
+        self.lod.prepare(&self.gpu.queue, proj * view, self.camera.pos, fog, day, fade, self.shadow.light, sun_strength);
         let clear = wgpu::Color { r: fog[0] as f64, g: fog[1] as f64, b: fog[2] as f64, a: 1.0 };
         self.sky.update(&self.gpu.queue, &self.camera, &SkyFrame { angle, rain, sky: sky_rgb, fog });
         if self.frames == 0 {
