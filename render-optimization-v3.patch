@@ -12,8 +12,8 @@ diff -ruN a/README.md b/README.md
  - No JNI calls except the one `android_main` entry point; everything
 diff -ruN a/ROADMAP.md b/ROADMAP.md
 --- a/ROADMAP.md	2026-10-10 07:13:28.000000000 +0000
-+++ b/ROADMAP.md	2026-10-10 00:35:56.737100711 +0000
-@@ -46,6 +46,12 @@
++++ b/ROADMAP.md	2026-10-10 02:11:53.989919203 +0000
+@@ -46,6 +46,13 @@
  BiomeGenBase but climate never selects it; b1.7.3 has no ravines.
  
  ## Changelog
@@ -23,6 +23,7 @@ diff -ruN a/ROADMAP.md b/ROADMAP.md
 +    - Light shafts: `shadow_vp * inverse_view` is one CPU-side matrix (one mat4 per sample, was two), `pow(t, 1.5)` is `t * sqrt(t)`; the blend (`LightShafts::composite`) now runs inside the HUD pass, saving one full-screen load/store of the frame. The chunk pass discards its depth when the shafts are off.
 +    - Sun glare: the quad's half-size 200 -> 90 (`GLARE_R`): the alpha is < 2% past ~40 degrees, and the quad is drawn over the whole sky before the terrain covers it, so it shaded ~5x more pixels than it showed. Terrain fog is left as is (a `length` + smoothstep per pixel, only past 0.6 x far).
 +    - ponytail: a mesh rebuilt with the same index count (the time-of-day relight) does not refresh the map; an edit that keeps the count shows at the next sun / movement refresh (<= ~2 s). Levers left, in order: `SHADOW_RES` 1024 -> 512, 10 -> 6 march samples in `fs_march`, march at quarter resolution, no moon shafts (`Params.active` only for the sun), a render scale below native.
++- `done` FIX black screen from the entry below: the glare branch of the sky shader used the Rust constant `GLARE` inside the WGSL text (no such name: shader compile failed, init panicked, the frame stayed black) and sampled the texture after a branch on a varying. The glare is now its own entry point `fs_glare` and pipeline (`glare_pl`) in `render/sky.rs`, `GLARE` is substituted into the source (`@GLARE@`). Terrain fog (`gpu/pipeline.rs`) was read and is valid WGSL. Still not compiled or run here.
  - `done` terrain fog + sun glare (port of AstraLex `NormalFog` / `sunGlare.glsl`; written WITHOUT a Rust toolchain: not compiled, not run; +1 assert in `sky.rs` tests):
      - `gpu/pipeline.rs`: `fs_main` fades to the horizon fog colour (`sky::fog_color`, also the clear colour and the dome's fog) by `1 - (far - d) * 5 / (density * far)`, smoothstepped; `far` = `RENDER_DIST * 16`, density 2.0 (+50% per unit of rain), off under water. `ChunkPipeline::set_fog` writes the new `fog`/`fogp` uniforms (called from `lib.rs` after `upload_uniforms`).
      - `render/sky.rs`: a glare quad (alpha blend, before the sun) shaded per pixel by `VoL^8` as in `sunGlare.glsl`, warm `lightCol`, faded by `sunVisibility` and rain.
@@ -238,8 +239,8 @@ diff -ruN a/mc-rs/src/render/camera.rs b/mc-rs/src/render/camera.rs
          // At the origin looking down -Z (yaw 0, pitch 0), 70 degrees tall, 2:1, far plane 256.
 diff -ruN a/mc-rs/src/render/sky.rs b/mc-rs/src/render/sky.rs
 --- a/mc-rs/src/render/sky.rs	2026-10-10 07:13:28.000000000 +0000
-+++ b/mc-rs/src/render/sky.rs	2026-10-10 00:35:47.981860348 +0000
-@@ -68,8 +68,9 @@
++++ b/mc-rs/src/render/sky.rs	2026-10-10 02:11:39.202454433 +0000
+@@ -68,12 +68,14 @@
  /// `SUN_GLARE_DAY * 0.1 * SUNGLARE_OUTWATER_STRENGTH * 0.01` of the pack is an HDR add; here the halo is an alpha blend
  /// (an add would clip on the pale sky), so this is its own number. UNVERIFIED: on a device.
  const GLARE: f32 = 1.2;
@@ -251,6 +252,109 @@ diff -ruN a/mc-rs/src/render/sky.rs b/mc-rs/src/render/sky.rs
  /// `lightColor.glsl` morning light (236, 184, 132) / 255.
  const GLARE_RGB: [f32; 3] = [0.93, 0.72, 0.52];
  
+ const SHADER_SRC: &str = r#"
++const GLARE: f32 = @GLARE@; // substituted from the Rust `GLARE`
+ struct U { view: mat4x4<f32>, proj: mat4x4<f32>, fog: vec4<f32>, range: vec4<f32>, tint: vec4<f32>, sunv: vec4<f32> };
+ @group(0) @binding(0) var<uniform> u: U;
+ @group(0) @binding(1) var samp: sampler;
+@@ -99,16 +101,20 @@
+     return o;
+ }
+ 
++// gbuffers glare, `sunGlare.glsl`: VoL^8, then visfactor / (1 - (1 - visfactor) * VoL) - visfactor, times VoL.
++// A pipeline of its own (no texture), so no branch on a varying precedes a texture sample in `fs_main`.
++@fragment
++fn fs_glare(in: VsOut) -> @location(0) vec4<f32> {
++    let s = max(dot(normalize(in.vpos), u.sunv.xyz), 0.0);
++    var v = s * s;
++    v = v * v;
++    v = v * v;
++    let g = (0.2 / (1.0 - 0.8 * v) - 0.2) * s;
++    return vec4<f32>(in.color.rgb, clamp(g * GLARE, 0.0, 1.0) * in.color.a);
++}
++
+ @fragment
+ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+-    if (in.fog > 1.5) {
+-        // gbuffers glare, `sunGlare.glsl`: VoL^8, then visfactor / (1 - (1 - visfactor) * VoL) - visfactor, times VoL.
+-        let s = dot(normalize(in.vpos), u.sunv.xyz);
+-        if (s <= 0.0) { return vec4<f32>(0.0); }
+-        var v = s * s; v = v * v; v = v * v;
+-        let g = (0.2 / (1.0 - 0.8 * v) - 0.2) * s;
+-        return vec4<f32>(in.color.rgb, clamp(g * GLARE, 0.0, 1.0) * in.color.a);
+-    }
+     var c = textureSample(tex, samp, in.uv) * in.color * u.tint;
+     if (in.fog > 0.5) {
+         let f = clamp((u.range.y - length(in.vpos)) / (u.range.y - u.range.x), 0.0, 1.0);
+@@ -181,7 +187,7 @@
+     let vis = (rot.transform_vector3(Vec3::Y).y + 0.0625).clamp(0.0, 0.125) * 8.0 * (1.0 - f.rain);
+     if vis > 0.0 {
+         let p = [[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]].map(|c| rot.transform_point3(Vec3::new(c[0] * GLARE_R, 100.0, c[1] * GLARE_R)).to_array());
+-        quad(&mut v, p, [WHITE; 4], [GLARE_RGB[0], GLARE_RGB[1], GLARE_RGB[2], vis], 2.0);
++        quad(&mut v, p, [WHITE; 4], [GLARE_RGB[0], GLARE_RGB[1], GLARE_RGB[2], vis], 0.0);
+     }
+     let glare = start..v.len() as u32;
+ 
+@@ -201,6 +207,7 @@
+ 
+ pub struct SkyRenderer {
+     opaque: wgpu::RenderPipeline,
++    glare_pl: wgpu::RenderPipeline,
+     alpha: wgpu::RenderPipeline,
+     additive: wgpu::RenderPipeline,
+     main_uniforms: wgpu::Buffer,
+@@ -289,16 +296,16 @@
+         });
+         let (main_bind, star_bind) = (bind(&main_uniforms), bind(&star_uniforms));
+ 
+-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("sky_shader"), source: wgpu::ShaderSource::Wgsl(SHADER_SRC.into()) });
++        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("sky_shader"), source: wgpu::ShaderSource::Wgsl(SHADER_SRC.replace("@GLARE@", &format!("{GLARE:?}")).into()) });
+         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("sky_pipeline_layout"), bind_group_layouts: &[&bind_layout], push_constant_ranges: &[] });
+         // The frame pass has a depth buffer, so the pipelines declare one too: never tested, never written.
+-        let make = |label: &str, blend: wgpu::BlendState| device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
++        let make = |label: &str, fs: &str, blend: wgpu::BlendState| device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+             label: Some(label),
+             layout: Some(&layout),
+             vertex: wgpu::VertexState { module: &shader, entry_point: Some("vs_main"), buffers: &[Vertex::layout()], compilation_options: wgpu::PipelineCompilationOptions::default() },
+             fragment: Some(wgpu::FragmentState {
+                 module: &shader,
+-                entry_point: Some("fs_main"),
++                entry_point: Some(fs),
+                 targets: &[Some(wgpu::ColorTargetState { format: surface_format, blend: Some(blend), write_mask: wgpu::ColorWrites::ALL })],
+                 compilation_options: wgpu::PipelineCompilationOptions::default(),
+             }),
+@@ -316,9 +323,10 @@
+         });
+         // GL_SRC_ALPHA, GL_ONE: what the sun, moon and stars are drawn with.
+         let add = wgpu::BlendComponent { src_factor: wgpu::BlendFactor::SrcAlpha, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add };
+-        let opaque = make("sky_opaque", wgpu::BlendState::REPLACE);
+-        let alpha = make("sky_alpha", wgpu::BlendState::ALPHA_BLENDING);
+-        let additive = make("sky_additive", wgpu::BlendState { color: add, alpha: add });
++        let opaque = make("sky_opaque", "fs_main", wgpu::BlendState::REPLACE);
++        let alpha = make("sky_alpha", "fs_main", wgpu::BlendState::ALPHA_BLENDING);
++        let glare_pl = make("sky_glare", "fs_glare", wgpu::BlendState::ALPHA_BLENDING);
++        let additive = make("sky_additive", "fs_main", wgpu::BlendState { color: add, alpha: add });
+ 
+         let dynamic = device.create_buffer(&wgpu::BufferDescriptor {
+             label: Some("sky_dynamic"),
+@@ -332,7 +340,7 @@
+         }
+         let stars = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("sky_stars"), contents: bytemuck::cast_slice(&sv), usage: wgpu::BufferUsages::VERTEX });
+ 
+-        Self { opaque, alpha, additive, main_uniforms, star_uniforms, main_bind, star_bind, dynamic, stars, star_count: sv.len() as u32, stars_on: false, ranges: [0..0, 0..0, 0..0, 0..0, 0..0] }
++        Self { opaque, glare_pl, alpha, additive, main_uniforms, star_uniforms, main_bind, star_bind, dynamic, stars, star_count: sv.len() as u32, stars_on: false, ranges: [0..0, 0..0, 0..0, 0..0, 0..0] }
+     }
+ 
+     /// Upload this frame's matrices, colours and geometry.
+@@ -371,7 +379,7 @@
+             rp.draw(glow.clone(), 0..1);
+         }
+         if !glare.is_empty() {
+-            rp.set_pipeline(&self.alpha);
++            rp.set_pipeline(&self.glare_pl);
+             rp.draw(glare.clone(), 0..1);
+         }
+         rp.set_pipeline(&self.additive);
 diff -ruN a/mc-rs/src/render/vl.rs b/mc-rs/src/render/vl.rs
 --- a/mc-rs/src/render/vl.rs	2026-10-10 06:53:16.000000000 +0000
 +++ b/mc-rs/src/render/vl.rs	2026-10-10 00:35:39.957446802 +0000

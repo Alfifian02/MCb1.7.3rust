@@ -75,6 +75,7 @@ const GLARE_R: f32 = 90.0;
 const GLARE_RGB: [f32; 3] = [0.93, 0.72, 0.52];
 
 const SHADER_SRC: &str = r#"
+const GLARE: f32 = @GLARE@; // substituted from the Rust `GLARE`
 struct U { view: mat4x4<f32>, proj: mat4x4<f32>, fog: vec4<f32>, range: vec4<f32>, tint: vec4<f32>, sunv: vec4<f32> };
 @group(0) @binding(0) var<uniform> u: U;
 @group(0) @binding(1) var samp: sampler;
@@ -100,16 +101,20 @@ fn vs_main(@location(0) p: vec3<f32>, @location(1) uv: vec2<f32>, @location(2) c
     return o;
 }
 
+// gbuffers glare, `sunGlare.glsl`: VoL^8, then visfactor / (1 - (1 - visfactor) * VoL) - visfactor, times VoL.
+// A pipeline of its own (no texture), so no branch on a varying precedes a texture sample in `fs_main`.
+@fragment
+fn fs_glare(in: VsOut) -> @location(0) vec4<f32> {
+    let s = max(dot(normalize(in.vpos), u.sunv.xyz), 0.0);
+    var v = s * s;
+    v = v * v;
+    v = v * v;
+    let g = (0.2 / (1.0 - 0.8 * v) - 0.2) * s;
+    return vec4<f32>(in.color.rgb, clamp(g * GLARE, 0.0, 1.0) * in.color.a);
+}
+
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    if (in.fog > 1.5) {
-        // gbuffers glare, `sunGlare.glsl`: VoL^8, then visfactor / (1 - (1 - visfactor) * VoL) - visfactor, times VoL.
-        let s = dot(normalize(in.vpos), u.sunv.xyz);
-        if (s <= 0.0) { return vec4<f32>(0.0); }
-        var v = s * s; v = v * v; v = v * v;
-        let g = (0.2 / (1.0 - 0.8 * v) - 0.2) * s;
-        return vec4<f32>(in.color.rgb, clamp(g * GLARE, 0.0, 1.0) * in.color.a);
-    }
     var c = textureSample(tex, samp, in.uv) * in.color * u.tint;
     if (in.fog > 0.5) {
         let f = clamp((u.range.y - length(in.vpos)) / (u.range.y - u.range.x), 0.0, 1.0);
@@ -182,7 +187,7 @@ fn geometry(f: &SkyFrame) -> Geometry {
     let vis = (rot.transform_vector3(Vec3::Y).y + 0.0625).clamp(0.0, 0.125) * 8.0 * (1.0 - f.rain);
     if vis > 0.0 {
         let p = [[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]].map(|c| rot.transform_point3(Vec3::new(c[0] * GLARE_R, 100.0, c[1] * GLARE_R)).to_array());
-        quad(&mut v, p, [WHITE; 4], [GLARE_RGB[0], GLARE_RGB[1], GLARE_RGB[2], vis], 2.0);
+        quad(&mut v, p, [WHITE; 4], [GLARE_RGB[0], GLARE_RGB[1], GLARE_RGB[2], vis], 0.0);
     }
     let glare = start..v.len() as u32;
 
@@ -202,6 +207,7 @@ fn geometry(f: &SkyFrame) -> Geometry {
 
 pub struct SkyRenderer {
     opaque: wgpu::RenderPipeline,
+    glare_pl: wgpu::RenderPipeline,
     alpha: wgpu::RenderPipeline,
     additive: wgpu::RenderPipeline,
     main_uniforms: wgpu::Buffer,
@@ -290,16 +296,16 @@ impl SkyRenderer {
         });
         let (main_bind, star_bind) = (bind(&main_uniforms), bind(&star_uniforms));
 
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("sky_shader"), source: wgpu::ShaderSource::Wgsl(SHADER_SRC.into()) });
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("sky_shader"), source: wgpu::ShaderSource::Wgsl(SHADER_SRC.replace("@GLARE@", &format!("{GLARE:?}")).into()) });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("sky_pipeline_layout"), bind_group_layouts: &[&bind_layout], push_constant_ranges: &[] });
         // The frame pass has a depth buffer, so the pipelines declare one too: never tested, never written.
-        let make = |label: &str, blend: wgpu::BlendState| device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let make = |label: &str, fs: &str, blend: wgpu::BlendState| device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some(label),
             layout: Some(&layout),
             vertex: wgpu::VertexState { module: &shader, entry_point: Some("vs_main"), buffers: &[Vertex::layout()], compilation_options: wgpu::PipelineCompilationOptions::default() },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
-                entry_point: Some("fs_main"),
+                entry_point: Some(fs),
                 targets: &[Some(wgpu::ColorTargetState { format: surface_format, blend: Some(blend), write_mask: wgpu::ColorWrites::ALL })],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             }),
@@ -317,9 +323,10 @@ impl SkyRenderer {
         });
         // GL_SRC_ALPHA, GL_ONE: what the sun, moon and stars are drawn with.
         let add = wgpu::BlendComponent { src_factor: wgpu::BlendFactor::SrcAlpha, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add };
-        let opaque = make("sky_opaque", wgpu::BlendState::REPLACE);
-        let alpha = make("sky_alpha", wgpu::BlendState::ALPHA_BLENDING);
-        let additive = make("sky_additive", wgpu::BlendState { color: add, alpha: add });
+        let opaque = make("sky_opaque", "fs_main", wgpu::BlendState::REPLACE);
+        let alpha = make("sky_alpha", "fs_main", wgpu::BlendState::ALPHA_BLENDING);
+        let glare_pl = make("sky_glare", "fs_glare", wgpu::BlendState::ALPHA_BLENDING);
+        let additive = make("sky_additive", "fs_main", wgpu::BlendState { color: add, alpha: add });
 
         let dynamic = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("sky_dynamic"),
@@ -333,7 +340,7 @@ impl SkyRenderer {
         }
         let stars = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("sky_stars"), contents: bytemuck::cast_slice(&sv), usage: wgpu::BufferUsages::VERTEX });
 
-        Self { opaque, alpha, additive, main_uniforms, star_uniforms, main_bind, star_bind, dynamic, stars, star_count: sv.len() as u32, stars_on: false, ranges: [0..0, 0..0, 0..0, 0..0, 0..0] }
+        Self { opaque, glare_pl, alpha, additive, main_uniforms, star_uniforms, main_bind, star_bind, dynamic, stars, star_count: sv.len() as u32, stars_on: false, ranges: [0..0, 0..0, 0..0, 0..0, 0..0] }
     }
 
     /// Upload this frame's matrices, colours and geometry.
@@ -372,7 +379,7 @@ impl SkyRenderer {
             rp.draw(glow.clone(), 0..1);
         }
         if !glare.is_empty() {
-            rp.set_pipeline(&self.alpha);
+            rp.set_pipeline(&self.glare_pl);
             rp.draw(glare.clone(), 0..1);
         }
         rp.set_pipeline(&self.additive);
