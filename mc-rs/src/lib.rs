@@ -43,6 +43,8 @@ use crate::world::vitals::{self, Env, Vitals};
 
 /// Render distance in chunks (a circle of this radius is meshed and drawn, two more are generated).
 const RENDER_DIST: i32 = 4;
+/// The world seed (its save folder is `world-<seed>`).
+const SEED: i64 = 0xCAFEBABE;
 /// Vertical render distance in chunks (16 blocks): sections further above or below the eye are not drawn.
 const RENDER_VERT: i32 = 3;
 /// `Sphere`: what is drawn is within `RENDER_DIST` blocks-of-16 in 3D (matches the fog, which is by 3D distance);
@@ -141,7 +143,6 @@ impl App {
         // generated and populated) here (init runs on its own thread, not the render loop); everything further out
         // streams in on the worker threads. A saved world resumes where the player stood, a new one at the origin.
         // One folder per seed: chunks saved for another seed would not fit this terrain.
-        const SEED: i64 = 0xCAFEBABE;
         let dir = dir.join(format!("world-{SEED:x}"));
         let level = std::fs::read(dir.join("level")).ok().and_then(|b| Level::decode(&b));
         let mut chunks = ChunkManager::new(SEED, RENDER_DIST).with_dir(dir.clone());
@@ -222,6 +223,31 @@ impl App {
         Ok(app)
     }
 
+    /// TEMPORARY (pause-menu reset button): delete the save folder and put everything back to a new world of `SEED`: terrain
+    /// without edits, spawn point, hotbar and inventory, health, time, weather, mobs, drops, furnaces, block updates. An open
+    /// screen's stacks are discarded, not dropped. ponytail: `preload` runs on the render thread (a second or two of freeze).
+    fn reset_world(&mut self) {
+        if self.screen.take().is_some() {
+            self.touch.set_screen(false);
+        }
+        let _ = std::fs::remove_dir_all(&self.dir);
+        let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as i64);
+        self.chunks = ChunkManager::new(SEED, RENDER_DIST).with_dir(self.dir.clone()); // the old one's workers stop on drop
+        self.chunks.preload(0, 0);
+        self.spawn = find_spawn(&self.chunks);
+        let s = self.spawn;
+        self.player = Player { pos: s, vel: glam::Vec3::ZERO, on_ground: false };
+        let aspect = self.camera.aspect;
+        self.camera = FirstPersonCamera::spawn_at(s.x, s.y + EYE_HEIGHT, s.z);
+        self.camera.aspect = aspect;
+        (self.world_ticks, self.weather_ticks, self.weather) = (0.0, 0, sky::Weather::new(seed));
+        (self.tip, self.dig, self.dig_acc, self.target, self.shadow) = ((0, 0.0), Dig::default(), 0.0, None, ShadowCache::new());
+        (self.inv, self.drops, self.mobs, self.ticks) = (Inventory::default(), Drops::new(seed), Mobs::new(seed), Ticks::new(seed));
+        (self.furnaces, self.furn_acc, self.vitals, self.save_acc) = (HashMap::new(), 0.0, Vitals::default(), 0.0);
+        self.touch.hotbar_slot = 0;
+        log::info!("reset: new world of seed {SEED:x}, spawn {s:?}");
+    }
+
     /// Put a loaded `Level` back: time, look direction, hotbar slot, health, inventory, furnaces and dropped items
     /// (the position and spawn were used when the app was built).
     fn restore(&mut self, l: Level) {
@@ -278,6 +304,11 @@ impl App {
         if dt > 1.0 / 30.0 { dt = 1.0 / 30.0; }
         if dt < 0.0 { dt = 0.0; }
         self.last_frame = now;
+        // TEMPORARY pause-menu button: wipe the save and start the seed's world again.
+        if self.touch.take_reset() {
+            self.reset_world();
+            return;
+        }
         // Look drag accumulated by the touch UI since the last frame. Drained
         // even when paused so a drag started before pausing doesn't replay.
         let (look_dx, look_dy) = self.touch.take_look();
@@ -1005,6 +1036,16 @@ impl App {
             let th = bh * 0.50;
             HudPipeline::push_quad(v, tx, ty, tw, th * 0.5, [1.0; 4]);
             HudPipeline::push_quad(v, tx, ty + th * 0.5, tw, th * 0.5, [1.0; 4]);
+            // TEMPORARY reset-world button: dark red; after the first tap bright red (tap again to confirm). Its symbol is a
+            // hollow square (there is no text in the HUD yet).
+            let (rx, ry, rw, rh) = layout.reset;
+            let fill = if self.touch.reset_armed { [0.90, 0.10, 0.10, 0.95] } else { [0.45, 0.10, 0.10, 0.90] };
+            HudPipeline::push_outlined_quad(v, rx, ry, rw, rh, fill, [0.95, 0.95, 0.95, 0.95], 4.0);
+            let (s, t) = (rh * 0.4, rh * 0.07);
+            let (qx, qy) = (rx + (rw - s) * 0.5, ry + (rh - s) * 0.5);
+            for (x, y, w, h) in [(qx, qy, s, t), (qx, qy + s - t, s, t), (qx, qy, t, s), (qx + s - t, qy, t, s)] {
+                HudPipeline::push_quad(v, x, y, w, h, [1.0; 4]);
+            }
         }
 
         // Cap to the buffer capacity; extra quads are silently dropped.

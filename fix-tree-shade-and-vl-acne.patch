@@ -1,0 +1,377 @@
+diff -ruN a/README.md b/README.md
+--- a/README.md	2026-10-10 05:48:00.360344909 +0000
++++ b/README.md	2026-10-10 05:48:00.361829584 +0000
+@@ -37,7 +37,7 @@
+ | M7 Save              | compiled and ran on an Android device | Own simple format, not McRegion: one run-length-coded file per edited chunk + a `level` file (player, inventory, furnaces, dropped items, time). Autosave every 5 s, full save on pause/exit, resume on start. Saves live in the app's private storage, one folder per seed. +2 tests. See ROADMAP changelog. |
+ | Block textures       | written WITHOUT a Rust toolchain: not compiled, not run | Real `terrain.png` tiles on every block face (`assets/terrain.rgba`, grass/foliage tint baked for one climate), per-face tiles from `getBlockTextureFromSideAndMetadata`, cut-out plants and glass. Items, mobs and the HUD stay flat colour. See ROADMAP changelog. |
+ | Real-time shadows    | written; shader + pass tested headless on lavapipe (Vulkan) on a Linux host, NOT run on a device, `lib.rs` not compiled | Port of shaderLABS/Shadow-Tutorial to wgpu, no Iris/OptiFine: sun depth pass (1024^2, distortion 0.10, foliage excluded) + per-pixel compare in the chunk shader, replaces the mesher's baked shadow ray. See ROADMAP changelog. |
+-| Volumetric light     | written WITHOUT a Rust toolchain: not compiled, not run | Port of AstraLex's light shafts (`render/vl.rs`): half-resolution ray march through the sun/moon shadow map + blurred blend over the frame; the shadow pass now also runs at sunrise, sunset, in rain and at night for it. See ROADMAP changelog. |
++| Volumetric light     | written WITHOUT a Rust toolchain: not compiled, not run | Port of AstraLex's light shafts (`render/vl.rs`): half-resolution ray march through the sun/moon shadow map + blurred blend over the frame; the shadow pass now also runs at sunrise, sunset, in rain and at night for it. Surface shadows come from this pass too (face normal rebuilt from depth, normal + slope bias) and the mesher no longer lets leaves dim the sky light, so a tree is shaded once, by the shadow map. See ROADMAP changelog. |
+ | M8 Mobs              | written WITHOUT a Rust toolchain: not compiled, 3 mob tests not run | 13 mobs on one AI (`EntityCreature`/`EntityLiving` wander at 20 Hz, 0.9..3.6 box physics via `physics::step_box`): pig, cow, sheep (fleece colours), chicken (eggs, slow fall), wolf (angry when hit), squid, zombie, zombie pigman, giant, skeleton (arrows), creeper (fuse + `Explosion`), spider (leap, climbs), slime (hops, splits). Boxy models with swinging limbs, tap to hit (swords 4+, tools 2+, hand 1, 10-tick hurt window, knockback), `dropFewItems` loot, zombies/skeletons burn in daylight, spawns by light/grass/water. No path-finder, ghast, taming, shearing, sound, save. See ROADMAP changelog. |
+ | M9..M14              | pending | Everything else: see ROADMAP.md for the order. |
+ 
+diff -ruN a/ROADMAP.md b/ROADMAP.md
+--- a/ROADMAP.md	2026-10-10 05:48:00.366773864 +0000
++++ b/ROADMAP.md	2026-10-10 05:48:00.368268890 +0000
+@@ -46,6 +46,11 @@
+ BiomeGenBase but climate never selects it; b1.7.3 has no ravines.
+ 
+ ## Changelog
++- `done` FIX tree shade + stripes on dirt in the light-shaft pass (written WITHOUT a Rust toolchain: not compiled, not run; +1 test `leaves_do_not_shade_like_a_roof` not run, -1 test `pillar_casts_a_shadow_away_from_the_sun` with the code it tested):
++    - Dark blocky square under a tree = vanilla sky light: leaves have `Block.lightOpacity` 1, so every cell under a canopy lost one sky level per leaf, flat per face, and the shadow map then darkened the same spot again. `render/mesh.rs`: `bright` now takes a cell as open sky (15) when only air, plants and leaves lie above it (`open`), so the canopy's shade comes from the shadow map alone. A stone roof still dims it. The light engine itself is untouched (mob spawning, grass and the golden tests still see vanilla light); only the drawn brightness changes.
++    - Deleted the baked shadow ray that this replaced and that nothing could reach any more: `mesh::build`'s `sun` argument, `occ`, `solid`, `skyl`, `NO_SUN`, `ChunkManager::set_sun` + its field, `sky::sun_key`.
++    - Diagonal stripes on dirt (and the lit/dark bands on grass edges) = shadow acne in the surface shadow of `render/vl.rs`: the pass had no normal, only a flat 1-block bias, and the shadow pass culls back faces, so a face turned away from the sun, or parallel to it (every X face: the sun moves in the YZ plane), was compared against a depth that is not its own. Now `fs_march` rebuilds the face normal from the depth buffer (`face_normal`, nearer neighbour per axis, snapped to an axis because every face is axis aligned); `n.L <= 0` is shadowed outright (like the old `N.L`), a lit face looks the map up `NORMAL_BIAS` (1) texel along its normal with a depth bias of 0.05 block + texel x slope (slope capped at 4). A texel's size in blocks follows `distort()` (0.0125 at the eye, ~1.5 at the map edge), so the bias scales with the distance. `SURFACE_BIAS` is gone.
++    - Consequences (UNVERIFIED on a device): X faces and every face turned from the sun now take the full `SHADOW_DARK` (0.55): lower it if the shaded sides look too heavy; a pixel on the edge between two faces can pick the neighbour's normal (a 1-pixel line, blurred by the composite); the normal costs 4 extra depth taps per shadowed pixel at half resolution.
+ - `done` TEMPORARY reset-world button (written WITHOUT a Rust toolchain: not compiled, not run, +1 test `reset_needs_two_taps` not run): a dark-red button under resume in the pause menu (a hollow square: the HUD has no text). The first tap arms it (bright red), the second confirms; resuming or pausing again disarms it. `App::reset_world` deletes the save folder, builds a new `ChunkManager` for `SEED` (the seed's terrain, no edits), preloads, finds the spawn, and resets player, camera, time, weather, inventory, health, mobs, drops, furnaces, block updates and the shadow cache. ponytail: preload runs on the render thread (a short freeze). Remove it with the M14 menu: `PointerRole::Reset`, `LayoutRects.reset`, `TouchUi.reset*`, the HUD block under the resume button, `App::reset_world`.
+ - `done` shadows moved from the chunk shader into the volumetric pass, and darker (written WITHOUT a Rust toolchain: not compiled, not run; no new test: the shader math needs a GPU, and `gpu/shadow_test.rs`, which tested the chunk shader's lookup, is deleted):
+     - `gpu/pipeline.rs`: `fs_main` no longer reads the shadow map (no normal from derivatives, no `N.L` term, no lookup): texture x vertex light, then fog. The map is still drawn (`vs_shadow`) for the volumetric pass.
+diff -ruN a/mc-rs/src/render/mesh.rs b/mc-rs/src/render/mesh.rs
+--- a/mc-rs/src/render/mesh.rs	2026-10-10 05:48:00.333941717 +0000
++++ b/mc-rs/src/render/mesh.rs	2026-10-10 05:48:11.518361526 +0000
+@@ -71,12 +71,9 @@
+ /// light in the high nibble. `sky_sub` is `World.skylightSubtracted` (0 day .. 11 night, `world::sky`).
+ /// `(ox, oz)` is the chunk's world origin (chunk * 16).
+ /// Vertices: 6 floats each (px, py, pz, u, v, light). Indices: 6 per face (two triangles).
+-/// `sun` = `sky::sun_key`: sun tan(angle) x 2, or `NO_SUN`. ponytail: a face is shadowed when a block lies on the ray
+-/// toward the sun (8 steps, the sun moves along Z like `render::sky` draws it, rays cross into the +Z/-Z chunks; a shadow
+-/// cast across an X border is approximated); upgrade = a per-column shadow map shared by chunks.
+-pub const NO_SUN: i32 = i32::MAX;
+-
+-pub fn build(blocks: &[u8], data: &Nibbles, light: &[u8], nb: [&[u8]; 4], nb_light: [&[u8]; 4], sky_sub: u8, sun: i32, ox: i32, oz: i32) -> (Vec<f32>, Vec<u32>) {
++/// Shadows are not baked here: the sun's shadow map darkens the frame in `render::vl`. Leaves do not dim the sky light either
++/// (see `open` below), or a tree would be shaded twice.
++pub fn build(blocks: &[u8], data: &Nibbles, light: &[u8], nb: [&[u8]; 4], nb_light: [&[u8]; 4], sky_sub: u8, ox: i32, oz: i32) -> (Vec<f32>, Vec<u32>) {
+     assert_eq!(blocks.len(), VOLUME);
+     assert_eq!(light.len(), VOLUME);
+     // Which chunk's arrays a cell with x, z in -1..=16 lives in: 0 = this one, 1.. = +X, -X, +Z, -Z.
+@@ -88,6 +85,9 @@
+         let id = b[idx((x & 15) as usize, y as usize, (z & 15) as usize)];
+         if is_plant(id) { 0 } else { id } // see `is_plant`: neither drawn nor occluding
+     };
++    // Only air, plants and leaves above a cell: the sky is open. Leaves cast their shadow through the shadow map, so they must
++    // not also dim the sky light (vanilla takes 1 level per leaf: a hard-edged dark square under every tree).
++    let open = |x: i32, y: i32, z: i32| (y + 1..H as i32).all(|yy| matches!(get(x, yy, z), 0 | 18));
+     // Brightness of a cell (`World.getBlockLightValue`): open sky above the world, dark below it.
+     let table: [f32; 16] = std::array::from_fn(|i| brightness(i as u8));
+     let bright = |x: i32, y: i32, z: i32| -> f32 {
+@@ -95,33 +95,8 @@
+         if y >= H as i32 { return table[15usize.saturating_sub(sky_sub as usize)]; }
+         let l = match slot(x, z) { 0 => light, s => nb_light[s - 1] };
+         let v = l[idx((x & 15) as usize, y as usize, (z & 15) as usize)];
+-        table[((v & 15).saturating_sub(sky_sub)).max(v >> 4) as usize]
+-    };
+-    // Sky light nibble of a cell (open sky above the world, none below it).
+-    let skyl = |x: i32, y: i32, z: i32| -> u8 {
+-        if y < 0 { return 0; }
+-        if y >= H as i32 { return 15; }
+-        let l = match slot(x, z) { 0 => light, s => nb_light[s - 1] };
+-        l[idx((x & 15) as usize, y as usize, (z & 15) as usize)] & 15
+-    };
+-    // Solid cell for the shadow ray: the sun moves along Z, so only the +Z / -Z neighbours (whole chunks) are read, x is
+-    // clamped into the chunk (ponytail: a shadow cast across an X border is approximated by the cell at the edge).
+-    let solid = |x: i32, y: i32, z: i32| -> bool {
+-        if y < 0 || y >= H as i32 { return false; }
+-        let b = if z < 0 { nb[3] } else if z >= 16 { nb[2] } else { blocks };
+-        let id = b[idx(x.clamp(0, 15) as usize, y as usize, (z & 15) as usize)];
+-        id != 0 && !is_plant(id)
+-    };
+-    // Ray step toward the sun: `sx` blocks along Z and `sy` up per step, the longer one is 1.
+-    let (sx, sy) = { let h = if sun == NO_SUN { 0.0 } else { sun as f32 / 2.0 }; let m = h.abs().max(1.0); (h / m, 1.0 / m) };
+-    // Shade of an air cell, 0..1: 1 when a ray toward the sun hits a block, scaled by the cell's sky light so it fades
+-    // out where vanilla sky light already darkens (no step at the edge of a tree's own shade).
+-    let occ = |x: i32, y: i32, z: i32| -> f32 {
+-        if sun == NO_SUN || !(-1..=16).contains(&x) || !(-1..=16).contains(&z) { return 0.0; }
+-        let (cz, cy) = (z as f32 + 0.5, y as f32 + 0.5);
+-        let hit = (1..=8).map(|n| ((cz + sx * n as f32).floor() as i32, (cy + sy * n as f32).floor() as i32))
+-            .take_while(|&(rz, _)| (-16..32).contains(&rz)).any(|(rz, ry)| solid(x, ry, rz));
+-        if hit { skyl(x, y, z) as f32 / 15.0 } else { 0.0 }
++        let sky: u8 = if (v & 15) < 15 && open(x, y, z) { 15 } else { v & 15 };
++        table[sky.saturating_sub(sky_sub).max(v >> 4) as usize]
+     };
+     let mut verts: Vec<f32> = Vec::new();
+     let mut idxs: Vec<u32> = Vec::new();
+@@ -166,35 +141,13 @@
+                         _ => 0.6, // +X, -X
+                     };
+                     let light = shade * bright(x + dx, y + dy, z + dz);
+-                    let own = occ(x + dx, y + dy, z + dz);
+-                    let mut ls = [light; 4];
+-                    for (ci, (corner, uv)) in face.corners.iter().zip(face.uv.iter()).enumerate() {
++                    for (corner, uv) in face.corners.iter().zip(face.uv.iter()) {
+                         let (au, av) = atlas::face_uv(blk, meta, face_i, uv[0], uv[1]);
+                         // ponytail: world-space f32 vertices lose precision far from the origin
+                         // (about 1 cm at 100k blocks); upgrade path is a per-chunk offset uniform.
+-                        verts.push(corner[0] + (ox + x) as f32);
+-                        verts.push(corner[1] + y as f32);
+-                        verts.push(corner[2] + (oz + z) as f32);
+-                        verts.push(au);
+-                        verts.push(av);
+-                        // Soft edge: the shadow of the 4 air cells touching this corner in the face plane, averaged, so the
+-                        // GPU fades it across a block instead of cutting it at the block edge.
+-                        let t = if dx != 0 { [1, 2] } else if dy != 0 { [0, 2] } else { [0, 1] };
+-                        let hit: f32 = if sun == NO_SUN { 0.0 } else { (0..4usize).map(|i| {
+-                            let mut c = [x + dx, y + dy, z + dz];
+-                            c[t[0]] += corner[t[0]] as i32 - 1 + (i & 1) as i32;
+-                            c[t[1]] += corner[t[1]] as i32 - 1 + (i >> 1) as i32;
+-                            if get(c[0], c[1], c[2]) != 0 { own } else { occ(c[0], c[1], c[2]) }
+-                        }).sum() };
+-                        ls[ci] = light * (1.0 - 0.4 * hit / 4.0);
+-                        verts.push(ls[ci]);
++                        verts.extend_from_slice(&[corner[0] + (ox + x) as f32, corner[1] + y as f32, corner[2] + (oz + z) as f32, au, av, light]);
+                     }
+-                    // Split along the diagonal whose ends match best, or the gradient shows as dark triangles.
+-                    idxs.extend_from_slice(&if (ls[0] - ls[2]).abs() <= (ls[1] - ls[3]).abs() {
+-                        [base, base + 1, base + 2, base, base + 2, base + 3]
+-                    } else {
+-                        [base + 1, base + 2, base + 3, base + 1, base + 3, base]
+-                    });
++                    idxs.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+                 }
+             }
+         }
+@@ -232,20 +185,24 @@
+         let mut c = air();
+         c[idx(5, 20, 5)] = 1;
+         let a = air();
+-        let (verts, _) = build(&c, &Nibbles::new(), &a, [&a[..], &a[..], &a[..], &a[..]], [&a[..], &a[..], &a[..], &a[..]], 0, NO_SUN, 0, 0);
++        let (verts, _) = build(&c, &Nibbles::new(), &a, [&a[..], &a[..], &a[..], &a[..]], [&a[..], &a[..], &a[..], &a[..]], 0, 0, 0);
+         assert_eq!(face_count(&verts), 6);
+     }
+ 
+-    /// A pillar at z=9 shades the ground at z=7 (sun at +Z, 45 degrees) but not the ground at z=2.
++    /// Leaves above a cell do not dim its sky light (the shadow map darkens it, `render::vl`); a stone roof still does.
+     #[test]
+-    fn pillar_casts_a_shadow_away_from_the_sun() {
+-        let mut c = air();
+-        for z in 0..16 { c[idx(5, 0, z)] = 1; }
+-        for y in 1..4 { c[idx(5, y, 9)] = 1; }
+-        let (a, e) = (vec![15u8; VOLUME], air()); // full sky light, empty neighbours
+-        let v = build(&c, &Nibbles::new(), &a, [&e[..], &e[..], &e[..], &e[..]], [&a[..], &a[..], &a[..], &a[..]], 0, 2, 0, 0).0;
+-        let top = |z0: f32| v.chunks(6).find(|q| q[1] == 1.0 && q[2] >= z0 && q[2] < z0 + 1.0 && q[0] == 5.0).unwrap()[5];
+-        assert!(top(7.0) < top(2.0));
++    fn leaves_do_not_shade_like_a_roof() {
++        let (l, e) = (vec![12u8; VOLUME], air()); // sky light 12 everywhere, empty neighbours
++        let top = |roof: u8| {
++            let mut c = air();
++            c[idx(5, 0, 5)] = 1;
++            c[idx(5, 5, 5)] = roof;
++            let v = build(&c, &Nibbles::new(), &l, [&e[..], &e[..], &e[..], &e[..]], [&l[..], &l[..], &l[..], &l[..]], 0, 0, 0).0;
++            // The top face has the largest face shade (1.0), so it is the brightest vertex at y = 1.
++            v.chunks(6).filter(|q| q[1] == 1.0).map(|q| q[5]).fold(0.0, f32::max)
++        };
++        assert_eq!(top(18), brightness(15));
++        assert_eq!(top(1), brightness(12));
+     }
+ 
+     /// The cell's metadata picks the atlas tile of its faces: red wool is not white wool.
+@@ -255,7 +212,7 @@
+         let mut c = air();
+         c[idx(5, 20, 5)] = 35;
+         let uv = |d: &Nibbles| {
+-            let v = build(&c, d, &a, [&a[..], &a[..], &a[..], &a[..]], [&a[..], &a[..], &a[..], &a[..]], 0, NO_SUN, 0, 0).0;
++            let v = build(&c, d, &a, [&a[..], &a[..], &a[..], &a[..]], [&a[..], &a[..], &a[..], &a[..]], 0, 0, 0).0;
+             (v[3], v[4])
+         };
+         let mut d = Nibbles::new();
+@@ -271,9 +228,9 @@
+         let a = air();
+         let mut c = air();
+         c[idx(5, 20, 5)] = 37;
+-        assert_eq!(face_count(&build(&c, &Nibbles::new(), &a, [&a[..], &a[..], &a[..], &a[..]], [&a[..], &a[..], &a[..], &a[..]], 0, NO_SUN, 0, 0).0), 2);
++        assert_eq!(face_count(&build(&c, &Nibbles::new(), &a, [&a[..], &a[..], &a[..], &a[..]], [&a[..], &a[..], &a[..], &a[..]], 0, 0, 0).0), 2);
+         c[idx(5, 19, 5)] = 3; // dirt under the flower: 6 faces + 2 quads
+-        assert_eq!(face_count(&build(&c, &Nibbles::new(), &a, [&a[..], &a[..], &a[..], &a[..]], [&a[..], &a[..], &a[..], &a[..]], 0, NO_SUN, 0, 0).0), 8);
++        assert_eq!(face_count(&build(&c, &Nibbles::new(), &a, [&a[..], &a[..], &a[..], &a[..]], [&a[..], &a[..], &a[..], &a[..]], 0, 0, 0).0), 8);
+     }
+ 
+     /// A block on the chunk edge hides the face it shares with the neighbour chunk's block,
+@@ -282,7 +239,7 @@
+     fn edge_face_is_culled_against_neighbour() {
+         let a = air();
+         let mk = |x: usize, z: usize| { let mut c = air(); c[idx(x, 20, z)] = 1; c };
+-        let faces = |me: &[u8], nb: [&[u8]; 4]| face_count(&build(me, &Nibbles::new(), &a, nb, [&a[..], &a[..], &a[..], &a[..]], 0, NO_SUN, 0, 0).0);
++        let faces = |me: &[u8], nb: [&[u8]; 4]| face_count(&build(me, &Nibbles::new(), &a, nb, [&a[..], &a[..], &a[..], &a[..]], 0, 0, 0).0);
+         let (px, nx, pz, nz) = (mk(0, 5), mk(15, 5), mk(5, 0), mk(5, 15));
+         let (a_px, a_nx, a_pz, a_nz) = (mk(15, 5), mk(0, 5), mk(5, 15), mk(5, 0));
+         assert_eq!(faces(&a_px[..], [&px[..], &a[..], &a[..], &a[..]]), 5);
+diff -ruN a/mc-rs/src/render/vl.rs b/mc-rs/src/render/vl.rs
+--- a/mc-rs/src/render/vl.rs	2026-10-10 05:48:00.340449240 +0000
++++ b/mc-rs/src/render/vl.rs	2026-10-10 05:48:00.341932131 +0000
+@@ -17,7 +17,7 @@
+ use wgpu::{BindGroup, BindGroupLayout, Buffer, CommandEncoder, Device, RenderPipeline, Sampler, TextureView};
+ 
+ use crate::gpu::context::Gpu;
+-use crate::gpu::pipeline::SHADOW_DISTORT;
++use crate::gpu::pipeline::{SHADOW_DISTORT, SHADOW_RES};
+ use crate::render::camera::{FirstPersonCamera, SHADOW_RADIUS};
+ use crate::world::sky;
+ 
+@@ -28,9 +28,9 @@
+ /// Added to the sample's shadow-map depth, like `shadowPosition.z += 0.0001`: the pack's depth range is not ours,
+ /// this is ~0.25 block (one block = 0.5 / 256 of depth here). UNVERIFIED on a device.
+ const DEPTH_BIAS: f32 = 0.0005;
+-/// Extra depth bias for the shadow test of the surface itself (the march's samples hang in air): ~1 block along the light, so a
+-/// flat floor does not shadow itself (the pass has no normal to offset along). UNVERIFIED on a device.
+-const SURFACE_BIAS: f32 = 0.002;
++/// The surface's own shadow test moves its lookup point this many shadow-map texels along the face normal (Shadow-Tutorial's
++/// normal bias) and adds a slope-scaled depth bias; the normal comes from the depth buffer, snapped to an axis. UNVERIFIED on a device.
++const NORMAL_BIAS: f32 = 1.0;
+ /// How dark a fully shadowed, fully sunlit surface gets (the old per-pixel shadow was 0.25). UNVERIFIED: tune on a device.
+ const SHADOW_DARK: f32 = 0.55;
+ 
+@@ -166,7 +166,8 @@
+ }
+ 
+ const SHADER: &str = r#"
+-const SURFACE_BIAS: f32 = @SB@; // `SURFACE_BIAS` of vl.rs
++const NORMAL_BIAS: f32 = @NB@; // `NORMAL_BIAS` of vl.rs
++const SH_RES: f32 = @RES@; // `SHADOW_RES`
+ struct U {
+     cam: mat4x4<f32>,
+     shadow_cam: mat4x4<f32>,
+@@ -205,6 +206,33 @@
+     return vec3<f32>((uv.x * 2.0 - 1.0) * u.ray.x, (1.0 - uv.y * 2.0) * u.ray.y, -1.0);
+ }
+ 
++// View-space position of a full-resolution pixel.
++fn view_pos(ip: vec2<i32>) -> vec3<f32> {
++    let dims = vec2<i32>(textureDimensions(depth_tex));
++    let q = clamp(ip, vec2<i32>(0), dims - 1);
++    let z = textureLoad(depth_tex, q, 0);
++    return view_ray((vec2<f32>(q) + 0.5) / vec2<f32>(dims)) * (u.ray.z * u.ray.w / (u.ray.w - z * (u.ray.w - u.ray.z)));
++}
++
++// World-space normal of the face at `ip` (view position `p0`), snapped to an axis: every face in this world is axis aligned. Each
++// screen axis steps toward the neighbour with the smaller depth jump, so a silhouette does not tilt it. ponytail: a pixel on an
++// edge between two faces can pick the other face's normal (a one-pixel line, blurred by `fs_comp`); a normal buffer is the upgrade.
++fn face_normal(ip: vec2<i32>, p0: vec3<f32>) -> vec3<f32> {
++    let a = view_pos(ip + vec2<i32>(2, 0)) - p0;
++    let b = p0 - view_pos(ip - vec2<i32>(2, 0));
++    let c = view_pos(ip + vec2<i32>(0, 2)) - p0;
++    let d = p0 - view_pos(ip - vec2<i32>(0, 2));
++    let cr = cross(select(b, a, abs(a.z) < abs(b.z)), select(d, c, abs(c.z) < abs(d.z)));
++    if dot(cr, cr) < 1e-12 { return vec3<f32>(0.0); }
++    var n = normalize(cr);
++    if dot(n, p0) > 0.0 { n = -n; } // toward the eye
++    let w = (u.cam * vec4<f32>(n, 0.0)).xyz;
++    let m = abs(w);
++    if m.x >= m.y && m.x >= m.z { return vec3<f32>(sign(w.x), 0.0, 0.0); }
++    if m.y >= m.z { return vec3<f32>(0.0, sign(w.y), 0.0); }
++    return vec3<f32>(0.0, 0.0, sign(w.z));
++}
++
+ // InterleavedGradientNoise() without the frame term (there is no TAA to average it away).
+ fn ign(p: vec2<f32>) -> f32 {
+     return fract(52.9829189 * fract(0.06711056 * p.x + 0.00583715 * p.y));
+@@ -241,13 +269,29 @@
+     }
+     var v = pow(sqrt(sum * visibility), u.a.w) * 0.9;
+     if v > 0.0 { v = v + (dither - 0.19) / 128.0; }
+-    // The surface's own shadow (g): the same lookup at the pixel's depth (not the sky), 1 = in shadow, 0 = lit or off the map.
++    // The surface's own shadow (g), 1 = in shadow, 0 = lit or off the map. A face turned away from the light (or parallel to it,
++    // like every X face while the sun moves in the YZ plane) has no front face in the culled shadow map to compare with, so it is
++    // shadowed outright, like N.L <= 0; a lit face looks the map up one texel out along its normal, with a slope-scaled depth bias.
+     var sh = 0.0;
+     if u.res.z > 0.0 && z < 1.0 {
+-        let c = u.shadow_cam * vec4<f32>(r * depth, 1.0);
+-        if abs(c.x) < 1.0 && abs(c.y) < 1.0 {
+-            let p = vec3<f32>(c.xy / (length(c.xy) + u.a.x) * 0.5 + 0.5, c.z * 0.5 + 0.25 + u.light.w + SURFACE_BIAS);
+-            sh = 1.0 - textureSampleCompareLevel(sh_tex, sh_samp, vec2<f32>(p.x, 1.0 - p.y), p.z);
++        let ip = vec2<i32>(in.pos.xy) * 2;
++        let p0 = view_pos(ip);
++        let n = face_normal(ip, p0);
++        let nl = dot(n, u.light.xyz);
++        if nl <= 0.0 {
++            sh = 1.0;
++        } else {
++            let c0 = u.shadow_cam * vec4<f32>(p0, 1.0);
++            let k = length(c0.xy) + u.a.x;
++            let texel = u.a.y * 2.0 / SH_RES * k * k / u.a.x; // one map texel here, in blocks (distort() stretches the map)
++            let nv = vec3<f32>(dot(u.cam[0].xyz, n), dot(u.cam[1].xyz, n), dot(u.cam[2].xyz, n)); // n in view space
++            let c = c0 + u.shadow_cam * vec4<f32>(nv * (texel * NORMAL_BIAS), 0.0);
++            if abs(c.x) < 1.0 && abs(c.y) < 1.0 {
++                let slope = min(sqrt(max(1.0 - nl * nl, 0.0)) / nl, 4.0);
++                let bias = (0.05 + texel * slope) * (0.5 / 256.0); // blocks -> depth: the box is 256 blocks deep, mapped to 0.5
++                let p = vec3<f32>(c.xy / (length(c.xy) + u.a.x) * 0.5 + 0.5, c.z * 0.5 + 0.25 + bias);
++                sh = 1.0 - textureSampleCompareLevel(sh_tex, sh_samp, vec2<f32>(p.x, 1.0 - p.y), p.z);
++            }
+         }
+     }
+     return vec4<f32>(v, sh, 0.0, 1.0);
+@@ -321,7 +365,7 @@
+             min_filter: wgpu::FilterMode::Linear,
+             ..Default::default()
+         });
+-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("vl_shader"), source: wgpu::ShaderSource::Wgsl(SHADER.replace("@SB@", &format!("{SURFACE_BIAS:?}")).into()) });
++        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("vl_shader"), source: wgpu::ShaderSource::Wgsl(SHADER.replace("@NB@", &format!("{NORMAL_BIAS:?}")).replace("@RES@", &format!("{:?}", SHADOW_RES as f32)).into()) });
+         let pipeline = |label, layouts: &[&BindGroupLayout], fs: &str, format, blend| {
+             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                 label: Some(label),
+diff -ruN a/mc-rs/src/world/chunks.rs b/mc-rs/src/world/chunks.rs
+--- a/mc-rs/src/world/chunks.rs	2026-10-10 05:48:00.346958491 +0000
++++ b/mc-rs/src/world/chunks.rs	2026-10-10 05:48:00.348441423 +0000
+@@ -165,7 +165,6 @@
+     sky_sub: u8,
+     /// Bumped whenever the drawn geometry changes (a mesh with another size, an unload): the cached shadow map is stale then.
+     pub mesh_gen: u32,
+-    sun: i32,
+     /// Save folder (M7); `None` = nothing is read or written (the tests). `saved` = chunks that have a file there.
+     dir: Option<PathBuf>,
+     saved: HashSet<Key>,
+@@ -213,7 +212,7 @@
+         ring.sort_by_key(|&(dx, dz)| dx * dx + dz * dz);
+ 
+         Self { chunks: Chunks::default(), pending: HashSet::new(), ring, radius, center: None, max_in_flight: workers * 2,
+-               gen: OverworldGenerator::new(seed), cm: WorldChunkManager::new(seed), jobs, done, light_queue: Vec::new(), sky_sub: 0, mesh_gen: 0, sun: crate::render::mesh::NO_SUN, dir: None, saved: HashSet::new(), changes: Vec::new() }
++               gen: OverworldGenerator::new(seed), cm: WorldChunkManager::new(seed), jobs, done, light_queue: Vec::new(), sky_sub: 0, mesh_gen: 0, dir: None, saved: HashSet::new(), changes: Vec::new() }
+     }
+ 
+     /// Keep this world in `dir`: chunks found there are loaded instead of generated, and edited ones are written back
+@@ -497,14 +496,6 @@
+         }
+     }
+ 
+-    /// Sun shadow direction changed (`sky::sun_key`): every mesh is stale, like `set_sky_sub`.
+-    pub fn set_sun(&mut self, v: i32) {
+-        if v != self.sun {
+-            self.sun = v;
+-            self.chunks.values_mut().for_each(|e| e.meshed = false);
+-        }
+-    }
+-
+     /// `WorldChunkManager.getTemperature` at a block column (for the sky colour).
+     pub fn temperature_at(&mut self, x: i32, z: i32) -> f64 {
+         self.cm.load_block_generator_data(x, z, 1, 1);
+@@ -665,7 +656,6 @@
+                     [px.blocks.as_slice(), nx.blocks.as_slice(), pz.blocks.as_slice(), nz.blocks.as_slice()],
+                     [px.light.as_slice(), nx.light.as_slice(), pz.light.as_slice(), nz.light.as_slice()],
+                     self.sky_sub,
+-                    self.sun,
+                     x * 16,
+                     z * 16,
+                 )),
+diff -ruN a/mc-rs/src/world/sky.rs b/mc-rs/src/world/sky.rs
+--- a/mc-rs/src/world/sky.rs	2026-10-10 05:48:00.353503572 +0000
++++ b/mc-rs/src/world/sky.rs	2026-10-10 05:48:00.354928782 +0000
+@@ -28,20 +28,13 @@
+     linear + (curved - linear) / 3.0
+ }
+ 
+-/// Shadow direction of the sun, quantised so meshes rebuild ~17 times per half day: tan(angle from noon) x 2, clamped
+-/// to +-8; `i32::MAX` (no shadows) when it is under ~12 degrees above the horizon.
+-pub fn sun_key(angle: f32) -> i32 {
+-    let t = angle * std::f32::consts::TAU;
+-    if t.cos() < 0.2 { i32::MAX } else { (t.tan() * 2.0).round().clamp(-8.0, 8.0) as i32 }
+-}
+-
+ /// Direction toward the sun, turned about X by the sun angle like `render::sky` draws it: noon (0, 1, 0), dusk (0, 0, 1).
+ pub fn sun_dir(angle: f32) -> Vec3 {
+     let t = angle * TAU;
+     Vec3::new(0.0, t.cos(), t.sin())
+ }
+ 
+-/// Shadow strength 0..1: in from 6 to 17 degrees of sun height (the baked shadows cut off at ~12), out in rain.
++/// Shadow strength 0..1: in from 6 to 17 degrees of sun height, out in rain.
+ pub fn shadow_strength(angle: f32, rain: f32) -> f32 {
+     (((angle * TAU).cos() - 0.1) / 0.2).clamp(0.0, 1.0) * (1.0 - 2.0 * rain).clamp(0.0, 1.0)
+ }

@@ -165,7 +165,6 @@ pub struct ChunkManager {
     sky_sub: u8,
     /// Bumped whenever the drawn geometry changes (a mesh with another size, an unload): the cached shadow map is stale then.
     pub mesh_gen: u32,
-    sun: i32,
     /// Save folder (M7); `None` = nothing is read or written (the tests). `saved` = chunks that have a file there.
     dir: Option<PathBuf>,
     saved: HashSet<Key>,
@@ -213,7 +212,7 @@ impl ChunkManager {
         ring.sort_by_key(|&(dx, dz)| dx * dx + dz * dz);
 
         Self { chunks: Chunks::default(), pending: HashSet::new(), ring, radius, center: None, max_in_flight: workers * 2,
-               gen: OverworldGenerator::new(seed), cm: WorldChunkManager::new(seed), jobs, done, light_queue: Vec::new(), sky_sub: 0, mesh_gen: 0, sun: crate::render::mesh::NO_SUN, dir: None, saved: HashSet::new(), changes: Vec::new() }
+               gen: OverworldGenerator::new(seed), cm: WorldChunkManager::new(seed), jobs, done, light_queue: Vec::new(), sky_sub: 0, mesh_gen: 0, dir: None, saved: HashSet::new(), changes: Vec::new() }
     }
 
     /// Keep this world in `dir`: chunks found there are loaded instead of generated, and edited ones are written back
@@ -497,14 +496,6 @@ impl ChunkManager {
         }
     }
 
-    /// Sun shadow direction changed (`sky::sun_key`): every mesh is stale, like `set_sky_sub`.
-    pub fn set_sun(&mut self, v: i32) {
-        if v != self.sun {
-            self.sun = v;
-            self.chunks.values_mut().for_each(|e| e.meshed = false);
-        }
-    }
-
     /// `WorldChunkManager.getTemperature` at a block column (for the sky colour).
     pub fn temperature_at(&mut self, x: i32, z: i32) -> f64 {
         self.cm.load_block_generator_data(x, z, 1, 1);
@@ -665,7 +656,6 @@ impl ChunkManager {
                     [px.blocks.as_slice(), nx.blocks.as_slice(), pz.blocks.as_slice(), nz.blocks.as_slice()],
                     [px.light.as_slice(), nx.light.as_slice(), pz.light.as_slice(), nz.light.as_slice()],
                     self.sky_sub,
-                    self.sun,
                     x * 16,
                     z * 16,
                 )),

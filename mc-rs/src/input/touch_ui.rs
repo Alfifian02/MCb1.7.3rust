@@ -51,6 +51,8 @@ pub enum PointerRole {
     /// Press landed on the pause button (or the resume button while paused).
     /// Toggles pause on release.
     Pause,
+    /// Press landed on the temporary reset-world button (pause menu only). Arms on the first release, fires on the second.
+    Reset,
     /// Press landed on the inventory button. Opens / closes the screen on release.
     Inventory,
     /// Any other press while a screen is open. Reported as a tap on release.
@@ -84,6 +86,8 @@ pub struct LayoutRects {
     pub pause: Rect,
     pub inventory: Rect,
     pub resume: Rect,
+    /// TEMPORARY: reset-world button, under `resume`.
+    pub reset: Rect,
     pub hotbar: [Rect; HOTBAR_SLOTS],
     pub jump_center: (f32, f32),
     pub jump_radius: f32,
@@ -123,12 +127,14 @@ impl LayoutRects {
         let bw = (0.8 * u).min(w * 0.6);
         let bh = 0.16 * u;
         let resume = ((w - bw) * 0.5, (h - bh) * 0.5, bw, bh);
+        let reset = (resume.0, resume.1 + bh * 1.25, bw, bh * 0.8);
 
         Self {
             width: w,
             pause,
             inventory,
             resume,
+            reset,
             hotbar,
             jump_center: (w - 0.17 * u, h - 0.30 * u),
             jump_radius: 0.09 * u,
@@ -144,7 +150,7 @@ impl LayoutRects {
             return Some(PointerRole::Pause);
         }
         if paused {
-            return None;
+            return in_rect(self.reset, x, y).then_some(PointerRole::Reset);
         }
         if in_rect(self.inventory, x, y) {
             return Some(PointerRole::Inventory);
@@ -200,6 +206,9 @@ pub struct TouchUi {
     pub screen: bool,
     /// The inventory button was released since the last `take_inventory`.
     inventory: bool,
+    /// TEMPORARY reset-world button: armed by one tap (drawn bright), confirmed by the next; leaving the pause menu disarms it.
+    pub reset_armed: bool,
+    reset: bool,
     /// Finger events on an open screen since the last `take_screen_events`.
     events: Vec<ScreenEv>,
     /// Where the finger last was on the open screen: the picked-up stack floats here.
@@ -220,9 +229,16 @@ impl TouchUi {
             place: false,
             screen: false,
             inventory: false,
+            reset_armed: false,
+            reset: false,
             events: Vec::new(),
             cursor_pos: (w as f32 * 0.5, h as f32 * 0.5),
         }
+    }
+
+    /// The reset-world button was confirmed (tapped twice) since the last call.
+    pub fn take_reset(&mut self) -> bool {
+        std::mem::take(&mut self.reset)
     }
 
     /// The inventory button was pressed and released since the last call.
@@ -370,8 +386,17 @@ impl TouchUi {
     fn on_release(&mut self, pid: i32) {
         let Some(ptr) = self.pointers.remove(&pid) else { return };
         match ptr.role {
+            PointerRole::Reset => {
+                if self.reset_armed {
+                    (self.reset, self.reset_armed, self.paused) = (true, false, false);
+                    self.clear();
+                } else {
+                    self.reset_armed = true;
+                }
+            }
             PointerRole::Pause => {
                 self.paused = !self.paused;
+                self.reset_armed = false;
                 self.clear();
                 log::info!("touch: pause -> {}", self.paused);
             }
@@ -441,6 +466,24 @@ mod tests {
         assert_eq!(l.hit_test(l.jump_center.0, l.jump_center.1, true, false), None);
         let (rx, ry, rw, rh) = l.resume;
         assert_eq!(l.hit_test(rx + rw * 0.5, ry + rh * 0.5, true, false), Some(PointerRole::Pause));
+    }
+
+    /// The reset button answers only while paused, and needs two taps (the first arms it, leaving the menu disarms it).
+    #[test]
+    fn reset_needs_two_taps() {
+        let mut ui = TouchUi::new(W, H);
+        let (x, y) = (ui.layout.reset.0 + 5.0, ui.layout.reset.1 + 5.0);
+        assert_eq!(ui.layout.hit_test(x, y, false, false), None);
+        ui.paused = true;
+        tap(&mut ui, 1, x, y);
+        assert!(ui.reset_armed && !ui.take_reset() && ui.paused);
+        let (rx, ry, rw, rh) = ui.layout.resume;
+        tap(&mut ui, 2, rx + rw * 0.5, ry + rh * 0.5); // resume: disarms
+        assert!(!ui.reset_armed && !ui.paused);
+        ui.paused = true;
+        tap(&mut ui, 3, x, y);
+        tap(&mut ui, 4, x, y);
+        assert!(ui.take_reset() && !ui.take_reset() && !ui.paused && !ui.reset_armed);
     }
 
     #[test]

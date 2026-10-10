@@ -28,20 +28,13 @@ pub fn celestial_angle(time: u64, partial: f32) -> f32 {
     linear + (curved - linear) / 3.0
 }
 
-/// Shadow direction of the sun, quantised so meshes rebuild ~17 times per half day: tan(angle from noon) x 2, clamped
-/// to +-8; `i32::MAX` (no shadows) when it is under ~12 degrees above the horizon.
-pub fn sun_key(angle: f32) -> i32 {
-    let t = angle * std::f32::consts::TAU;
-    if t.cos() < 0.2 { i32::MAX } else { (t.tan() * 2.0).round().clamp(-8.0, 8.0) as i32 }
-}
-
 /// Direction toward the sun, turned about X by the sun angle like `render::sky` draws it: noon (0, 1, 0), dusk (0, 0, 1).
 pub fn sun_dir(angle: f32) -> Vec3 {
     let t = angle * TAU;
     Vec3::new(0.0, t.cos(), t.sin())
 }
 
-/// Shadow strength 0..1: in from 6 to 17 degrees of sun height (the baked shadows cut off at ~12), out in rain.
+/// Shadow strength 0..1: in from 6 to 17 degrees of sun height, out in rain.
 pub fn shadow_strength(angle: f32, rain: f32) -> f32 {
     (((angle * TAU).cos() - 0.1) / 0.2).clamp(0.0, 1.0) * (1.0 - 2.0 * rain).clamp(0.0, 1.0)
 }

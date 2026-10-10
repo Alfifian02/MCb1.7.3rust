@@ -17,7 +17,7 @@ use glam::{Mat4, Vec3};
 use wgpu::{BindGroup, BindGroupLayout, Buffer, CommandEncoder, Device, RenderPipeline, Sampler, TextureView};
 
 use crate::gpu::context::Gpu;
-use crate::gpu::pipeline::SHADOW_DISTORT;
+use crate::gpu::pipeline::{SHADOW_DISTORT, SHADOW_RES};
 use crate::render::camera::{FirstPersonCamera, SHADOW_RADIUS};
 use crate::world::sky;
 
@@ -28,9 +28,9 @@ const STRENGTH: f32 = 1.0;
 /// Added to the sample's shadow-map depth, like `shadowPosition.z += 0.0001`: the pack's depth range is not ours,
 /// this is ~0.25 block (one block = 0.5 / 256 of depth here). UNVERIFIED on a device.
 const DEPTH_BIAS: f32 = 0.0005;
-/// Extra depth bias for the shadow test of the surface itself (the march's samples hang in air): ~1 block along the light, so a
-/// flat floor does not shadow itself (the pass has no normal to offset along). UNVERIFIED on a device.
-const SURFACE_BIAS: f32 = 0.002;
+/// The surface's own shadow test moves its lookup point this many shadow-map texels along the face normal (Shadow-Tutorial's
+/// normal bias) and adds a slope-scaled depth bias; the normal comes from the depth buffer, snapped to an axis. UNVERIFIED on a device.
+const NORMAL_BIAS: f32 = 1.0;
 /// How dark a fully shadowed, fully sunlit surface gets (the old per-pixel shadow was 0.25). UNVERIFIED: tune on a device.
 const SHADOW_DARK: f32 = 0.55;
 
@@ -166,7 +166,8 @@ struct U {
 }
 
 const SHADER: &str = r#"
-const SURFACE_BIAS: f32 = @SB@; // `SURFACE_BIAS` of vl.rs
+const NORMAL_BIAS: f32 = @NB@; // `NORMAL_BIAS` of vl.rs
+const SH_RES: f32 = @RES@; // `SHADOW_RES`
 struct U {
     cam: mat4x4<f32>,
     shadow_cam: mat4x4<f32>,
@@ -205,6 +206,33 @@ fn view_ray(uv: vec2<f32>) -> vec3<f32> {
     return vec3<f32>((uv.x * 2.0 - 1.0) * u.ray.x, (1.0 - uv.y * 2.0) * u.ray.y, -1.0);
 }
 
+// View-space position of a full-resolution pixel.
+fn view_pos(ip: vec2<i32>) -> vec3<f32> {
+    let dims = vec2<i32>(textureDimensions(depth_tex));
+    let q = clamp(ip, vec2<i32>(0), dims - 1);
+    let z = textureLoad(depth_tex, q, 0);
+    return view_ray((vec2<f32>(q) + 0.5) / vec2<f32>(dims)) * (u.ray.z * u.ray.w / (u.ray.w - z * (u.ray.w - u.ray.z)));
+}
+
+// World-space normal of the face at `ip` (view position `p0`), snapped to an axis: every face in this world is axis aligned. Each
+// screen axis steps toward the neighbour with the smaller depth jump, so a silhouette does not tilt it. ponytail: a pixel on an
+// edge between two faces can pick the other face's normal (a one-pixel line, blurred by `fs_comp`); a normal buffer is the upgrade.
+fn face_normal(ip: vec2<i32>, p0: vec3<f32>) -> vec3<f32> {
+    let a = view_pos(ip + vec2<i32>(2, 0)) - p0;
+    let b = p0 - view_pos(ip - vec2<i32>(2, 0));
+    let c = view_pos(ip + vec2<i32>(0, 2)) - p0;
+    let d = p0 - view_pos(ip - vec2<i32>(0, 2));
+    let cr = cross(select(b, a, abs(a.z) < abs(b.z)), select(d, c, abs(c.z) < abs(d.z)));
+    if dot(cr, cr) < 1e-12 { return vec3<f32>(0.0); }
+    var n = normalize(cr);
+    if dot(n, p0) > 0.0 { n = -n; } // toward the eye
+    let w = (u.cam * vec4<f32>(n, 0.0)).xyz;
+    let m = abs(w);
+    if m.x >= m.y && m.x >= m.z { return vec3<f32>(sign(w.x), 0.0, 0.0); }
+    if m.y >= m.z { return vec3<f32>(0.0, sign(w.y), 0.0); }
+    return vec3<f32>(0.0, 0.0, sign(w.z));
+}
+
 // InterleavedGradientNoise() without the frame term (there is no TAA to average it away).
 fn ign(p: vec2<f32>) -> f32 {
     return fract(52.9829189 * fract(0.06711056 * p.x + 0.00583715 * p.y));
@@ -241,13 +269,29 @@ fn fs_march(in: FsIn) -> @location(0) vec4<f32> {
     }
     var v = pow(sqrt(sum * visibility), u.a.w) * 0.9;
     if v > 0.0 { v = v + (dither - 0.19) / 128.0; }
-    // The surface's own shadow (g): the same lookup at the pixel's depth (not the sky), 1 = in shadow, 0 = lit or off the map.
+    // The surface's own shadow (g), 1 = in shadow, 0 = lit or off the map. A face turned away from the light (or parallel to it,
+    // like every X face while the sun moves in the YZ plane) has no front face in the culled shadow map to compare with, so it is
+    // shadowed outright, like N.L <= 0; a lit face looks the map up one texel out along its normal, with a slope-scaled depth bias.
     var sh = 0.0;
     if u.res.z > 0.0 && z < 1.0 {
-        let c = u.shadow_cam * vec4<f32>(r * depth, 1.0);
-        if abs(c.x) < 1.0 && abs(c.y) < 1.0 {
-            let p = vec3<f32>(c.xy / (length(c.xy) + u.a.x) * 0.5 + 0.5, c.z * 0.5 + 0.25 + u.light.w + SURFACE_BIAS);
-            sh = 1.0 - textureSampleCompareLevel(sh_tex, sh_samp, vec2<f32>(p.x, 1.0 - p.y), p.z);
+        let ip = vec2<i32>(in.pos.xy) * 2;
+        let p0 = view_pos(ip);
+        let n = face_normal(ip, p0);
+        let nl = dot(n, u.light.xyz);
+        if nl <= 0.0 {
+            sh = 1.0;
+        } else {
+            let c0 = u.shadow_cam * vec4<f32>(p0, 1.0);
+            let k = length(c0.xy) + u.a.x;
+            let texel = u.a.y * 2.0 / SH_RES * k * k / u.a.x; // one map texel here, in blocks (distort() stretches the map)
+            let nv = vec3<f32>(dot(u.cam[0].xyz, n), dot(u.cam[1].xyz, n), dot(u.cam[2].xyz, n)); // n in view space
+            let c = c0 + u.shadow_cam * vec4<f32>(nv * (texel * NORMAL_BIAS), 0.0);
+            if abs(c.x) < 1.0 && abs(c.y) < 1.0 {
+                let slope = min(sqrt(max(1.0 - nl * nl, 0.0)) / nl, 4.0);
+                let bias = (0.05 + texel * slope) * (0.5 / 256.0); // blocks -> depth: the box is 256 blocks deep, mapped to 0.5
+                let p = vec3<f32>(c.xy / (length(c.xy) + u.a.x) * 0.5 + 0.5, c.z * 0.5 + 0.25 + bias);
+                sh = 1.0 - textureSampleCompareLevel(sh_tex, sh_samp, vec2<f32>(p.x, 1.0 - p.y), p.z);
+            }
         }
     }
     return vec4<f32>(v, sh, 0.0, 1.0);
@@ -321,7 +365,7 @@ impl LightShafts {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("vl_shader"), source: wgpu::ShaderSource::Wgsl(SHADER.replace("@SB@", &format!("{SURFACE_BIAS:?}")).into()) });
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("vl_shader"), source: wgpu::ShaderSource::Wgsl(SHADER.replace("@NB@", &format!("{NORMAL_BIAS:?}")).replace("@RES@", &format!("{:?}", SHADOW_RES as f32)).into()) });
         let pipeline = |label, layouts: &[&BindGroupLayout], fs: &str, format, blend| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
