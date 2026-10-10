@@ -48,7 +48,7 @@ pub struct Uniforms {
     pub plant: [[u32; 4]; 2],
     /// rgb: fog colour, w: fog distance (the render distance in blocks; 0 = no fog). Written by `set_fog`.
     pub fog: [f32; 4],
-    /// x: rain strength, y..z: the dither band where the chunks hand over to the distant terrain (`lod::fade_band`; z = 0: off).
+    /// x: rain strength.
     pub fogp: [f32; 4],
 }
 
@@ -121,11 +121,6 @@ struct VsOut {
     @location(2) wp: vec3<f32>,
 };
 
-// InterleavedGradientNoise, the same function as the LOD shader's, so the two dithers are exact complements.
-fn ign(p: vec2<f32>) -> f32 {
-    return fract(52.9829189 * fract(0.06711056 * p.x + 0.00583715 * p.y));
-}
-
 @vertex
 fn vs_main(@location(0) vpos: vec3<f32>, @location(1) vuv: vec2<f32>, @location(2) vlight: f32) -> VsOut {
     var o: VsOut;
@@ -153,9 +148,6 @@ fn vs_shadow(@location(0) p: vec3<f32>, @location(1) uv: vec2<f32>) -> @builtin(
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let c = textureSample(tex, samp, in.uv);
     if c.a < 0.5 { discard; } // cut-out textures: plants, glass
-    // Hand-over to the distant terrain (DH `uDitherDhRendering`): in the band, chunk pixels drop out where the LOD's appear.
-    // Only `terrain.png` texels: items and mobs (the flat strip below it) never fade.
-    if u.fogp.z > 0.0 && in.uv.y * TH < 16.0 && ign(in.pos.xy) < (length(in.wp.xz - u.eye.xz) - u.fogp.y) / (u.fogp.z - u.fogp.y) { discard; }
     var n = normalize(cross(dpdx(in.wp), dpdy(in.wp)));
     if dot(n, u.eye.xyz - in.wp) < 0.0 { n = -n; }
     var k = 1.0;
@@ -395,8 +387,8 @@ impl ChunkPipeline {
     }
 
     /// Terrain fog for this frame: `colour` rgb, `far` blocks (0 = off, e.g. under water), `rain` 0..1. Call after `upload_uniforms`.
-    pub fn set_fog(&self, queue: &Queue, colour: [f32; 3], far: f32, rain: f32, fade: (f32, f32)) {
-        let f = [[colour[0], colour[1], colour[2], far], [rain, fade.0, fade.1, 0.0]];
+    pub fn set_fog(&self, queue: &Queue, colour: [f32; 3], far: f32, rain: f32) {
+        let f = [[colour[0], colour[1], colour[2], far], [rain, 0.0, 0.0, 0.0]];
         queue.write_buffer(&self.uniform_buf, std::mem::offset_of!(Uniforms, fog) as u64, bytemuck::bytes_of(&f));
     }
 

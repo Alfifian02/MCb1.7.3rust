@@ -11,10 +11,10 @@
 //! - **Quadtree** of 16 x 16 cell tiles: level `l` has cells of `4 << l` blocks (level 0 = the terrain's own 4-block grid).
 //!   A node splits while the eye is closer than `SPLIT` x its width; a node whose children are not all ready is drawn itself,
 //!   so loading never leaves a hole (coarse tiles are requested first).
-//! - **Hand-over by dither** (DH `uDitherDhRendering`): in the band `fade_band` the chunk shader drops pixels where
-//!   `ign(pixel) < t` and this shader keeps only those (`t` = 0 at the band's start, 1 at its end), so the two surfaces
-//!   interleave with no seam and no blending pass; inside the band's start the LOD is gone, so the tiles under the player
-//!   need no special case and no rebuild when he walks.
+//! - The real chunks win inside their ring: the fragment shader drops LOD pixels over a chunk the ring covers (DH's
+//!   `uClipDistance`), so the tiles under the player need no special case and no rebuild when he walks. (A dither band
+//!   as in DH's `uDitherDhRendering` was tried and dropped: it made the chunks' trees see-through, since the LOD has none,
+//!   and discarding in the chunk shader costs early-z.)
 //! - **Matches the chunks**: colours are the mean of the real `terrain.png` tile (`atlas::lod_color`, tint included), the sun
 //!   term is the chunk shader's (`mix(SHADOW_BRIGHTNESS, 1, sqrt(N.L))`), plus a per-block brightness jitter that fades with
 //!   distance (DH's noise texture, `noiseDropoff`), so flat ground is not one flat colour.
@@ -50,11 +50,6 @@ pub const FAR: f32 = RADIUS + 256.0;
 /// Tiles asked of the worker at once (the list is rebuilt every frame, so stale requests stay few), and uploaded per frame.
 const MAX_PENDING: usize = 4;
 const UPLOADS_PER_FRAME: usize = 4;
-/// Distances from the eye (blocks) where the chunks start and finish handing over to the LOD: the chunk ring always covers
-/// radius `(ring - 1.42) * 16` (the eye may sit anywhere in its chunk), so the band ends inside it.
-pub fn fade_band(ring: i32) -> (f32, f32) {
-    (((ring as f32 - 2.5) * 16.0).max(0.0), ((ring as f32 - 1.5) * 16.0).max(0.0))
-}
 /// A tile that was neither drawn nor wanted for this many frames is dropped.
 const KEEP_FRAMES: u64 = 600;
 
@@ -225,9 +220,9 @@ struct Uniforms {
     eye: [f32; 4],
     /// rgb: fog colour, w: fog distance.
     fog: [f32; 4],
-    /// x: daylight brightness (`chunk::brightness`), y: 1 when the surface is sRGB.
+    /// x: daylight brightness (`chunk::brightness`), y: 1 when the surface is sRGB, zw: the chunk the player is in.
     p: [f32; 4],
-    /// yz: the dither band (`fade_band`).
+    /// x: radius of the real chunk ring.
     q: [f32; 4],
     /// xyz: direction toward the light, w: shadow strength (0 = flat).
     sun: [f32; 4],
@@ -245,15 +240,14 @@ fn vs(@location(0) p: vec3<f32>, @location(1) c: vec4<f32>) -> VsOut {
     o.wp = p;
     return o;
 }
-// The chunk shader's `ign`: the two dithers are exact complements.
-fn ign(p: vec2<f32>) -> f32 { return fract(52.9829189 * fract(0.06711056 * p.x + 0.00583715 * p.y)); }
 @fragment
 fn fs(in: VsOut) -> @location(0) vec4<f32> {
+    // The real chunks are drawn inside their ring (the same test as the mesher's ring), the LOD only outside it.
+    let c = floor(in.wp.xz / 16.0) - u.p.zw;
+    if dot(c, c) <= u.q.x * u.q.x { discard; }
     var n = normalize(cross(dpdx(in.wp), dpdy(in.wp)));
     if dot(n, u.eye.xyz - in.wp) < 0.0 { n = -n; }
     let d = length(in.wp.xz - u.eye.xz);
-    // Inside the band the chunks keep the pixels with ign < t's complement: here only ign < t survives (t = 0 at its start).
-    if ign(in.pos.xy) >= clamp((d - u.q.y) / max(u.q.z - u.q.y, 1.0), 0.0, 1.0) { discard; }
     var rgb = in.col;
     if u.p.y > 0.5 { rgb = pow(rgb, vec3<f32>(2.2)); } // the atlas is sRGB and decoded on sampling; match it
     // Per-block jitter (integer hash of the block), fading out with distance where it would only shimmer.
@@ -405,15 +399,15 @@ impl LodRenderer {
         }
     }
 
-    /// `day` = brightness of full sky light now (`chunk::brightness(15 - skylight_subtracted)`); `fade` = `fade_band` (or
-    /// (0, 0) when the LOD is not drawn); `sun`, `strength` = the chunk shader's light direction and shadow strength.
-    pub fn prepare(&self, queue: &wgpu::Queue, view_proj: Mat4, eye: Vec3, fog: [f32; 3], day: f32, fade: (f32, f32), sun: Vec3, strength: f32) {
+    /// `day` = brightness of full sky light now (`chunk::brightness(15 - skylight_subtracted)`); `ring` = (chunk x, chunk z,
+    /// radius in chunks) of the real terrain, which the LOD leaves alone; `sun`, `strength` = the chunk shader's light.
+    pub fn prepare(&self, queue: &wgpu::Queue, view_proj: Mat4, eye: Vec3, fog: [f32; 3], day: f32, ring: (i32, i32, i32), sun: Vec3, strength: f32) {
         let u = Uniforms {
             vp: view_proj.to_cols_array_2d(),
             eye: eye.extend(0.0).to_array(),
             fog: [fog[0], fog[1], fog[2], RADIUS],
-            p: [day, self.srgb, 0.0, 0.0],
-            q: [0.0, fade.0, fade.1, 0.0],
+            p: [day, self.srgb, ring.0 as f32, ring.1 as f32],
+            q: [ring.2 as f32, 0.0, 0.0, 0.0],
             sun: sun.extend(strength).to_array(),
         };
         queue.write_buffer(&self.ubuf, 0, bytemuck::bytes_of(&u));
@@ -476,13 +470,9 @@ mod tests {
         assert!(draw.iter().any(|k| k.0 == 0 && inside(*k, 1.0, 1.0)) && draw.iter().any(|k| k.0 == LEVELS - 1));
     }
 
-    /// The band ends inside the radius the ring always covers; the grass colour is the tinted tile's (green over red and blue).
+    /// The grass colour is the tinted tile's mean (green over red and blue), not the old flat one.
     #[test]
-    fn hand_over_and_colours() {
-        for ring in 2..12 {
-            let (a, b) = fade_band(ring);
-            assert!(a < b && b <= (ring as f32 - 1.42) * 16.0, "ring {ring}: {a}..{b}");
-        }
+    fn colours_come_from_the_tiles() {
         let g = atlas::lod_color(2);
         assert!(g[1] > g[0] && g[1] > g[2], "grass {g:?}");
     }
