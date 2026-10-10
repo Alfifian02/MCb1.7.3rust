@@ -39,7 +39,6 @@ original. Anything that cannot be derived from the b1.7.3 sources is marked
 | Real-time shadows    | written; shader + pass tested headless on lavapipe (Vulkan) on a Linux host, NOT run on a device, `lib.rs` not compiled | Port of shaderLABS/Shadow-Tutorial to wgpu, no Iris/OptiFine: sun depth pass (1024^2, distortion 0.10, foliage excluded) + per-pixel compare in the chunk shader, replaces the mesher's baked shadow ray. See ROADMAP changelog. |
 | Volumetric light     | written WITHOUT a Rust toolchain: not compiled, not run | Port of AstraLex's light shafts (`render/vl.rs`): half-resolution ray march through the sun/moon shadow map + blurred blend over the frame; the shadow pass now also runs at sunrise, sunset, in rain and at night for it. See ROADMAP changelog. |
 | M8 Mobs              | written WITHOUT a Rust toolchain: not compiled, 3 mob tests not run | 13 mobs on one AI (`EntityCreature`/`EntityLiving` wander at 20 Hz, 0.9..3.6 box physics via `physics::step_box`): pig, cow, sheep (fleece colours), chicken (eggs, slow fall), wolf (angry when hit), squid, zombie, zombie pigman, giant, skeleton (arrows), creeper (fuse + `Explosion`), spider (leap, climbs), slime (hops, splits). Boxy models with swinging limbs, tap to hit (swords 4+, tools 2+, hand 1, 10-tick hurt window, knockback), `dropFewItems` loot, zombies/skeletons burn in daylight, spawns by light/grass/water. No path-finder, ghast, taming, shearing, sound, save. See ROADMAP changelog. |
-| Distant terrain (LOD) | written WITHOUT a Rust toolchain: not compiled, not run, 3 new tests not run | `render/lod.rs`: Distant-Horizons-style quadtree of 16x16-cell tiles (cells 4/8/16 blocks) out to 1024 blocks, beyond the chunk ring. Computed straight from the terrain's density grid (`OverworldGenerator::lod_columns`): no chunks, no storage, one worker thread. 16-byte vertices, 1D greedy quads, own small shader with the chunk shader's fog. See ROADMAP changelog. |
 | M9..M14              | pending | Everything else: see ROADMAP.md for the order. |
 
 Latest commit on `main`: see `git log -1`. Latest released APK: see the
@@ -64,7 +63,6 @@ mc-rs/
       mobs.rs             M8: Mob (13 kinds), Mobs (AI tick, spawn, hit, loot, arrows, explosions, ray pick)
       items.rs            dropped items: one small flat-colour cube each, bobbing
       mesh.rs             per-chunk mesher, culls against the 4 neighbouring chunks
-      lod.rs              distant terrain: quadtree select, tile mesher, pipeline, worker thread
     input/
       touch_ui.rs         region hit-test + per-pointer state machine (M12)
     world/
