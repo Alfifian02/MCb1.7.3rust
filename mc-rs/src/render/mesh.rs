@@ -198,7 +198,7 @@ pub fn build_split(blocks: &[u8], data: &Nibbles, nb_data: [&Nibbles; 4], light:
         b[idx((x & 15) as usize, y as usize, (z & 15) as usize)]
     };
     // Metadata of a cell for x, z in -1..=16, from this chunk or a side neighbour (fluid levels across a seam).
-    let meta = |x: i32, y: i32, z: i32| -> u8 {
+    let meta_at = |x: i32, y: i32, z: i32| -> u8 {
         if y < 0 || y >= H as i32 { return 0; }
         let d = match slot(x, z) { 0 => data, s => nb_data[s - 1] };
         d.get((x & 15) as usize, y as usize, (z & 15) as usize)
@@ -258,8 +258,8 @@ pub fn build_split(blocks: &[u8], data: &Nibbles, nb_data: [&Nibbles; 4], light:
                 // Non-full blocks: a box (`box_bounds`) or a fluid whose top corners have their own height.
                 let (boxes, n_boxes) = shapes(blk, meta, &|dx, dz| rid(x + dx, y, z + dz) == blk);
                 for &bounds in &boxes[..n_boxes] {
-                let heights = is_fluid(blk).then(|| fluid_heights(&rid, &meta, x, y, z));
-                let flow = if heights.is_some() { flow_angle(&rid, &meta, x, y, z) } else { None };
+                let heights = is_fluid(blk).then(|| fluid_heights(&rid, &meta_at, x, y, z));
+                let flow = if heights.is_some() { flow_angle(&rid, &meta_at, x, y, z) } else { None };
                 for (face_i, face) in FACES.iter().enumerate() {
                     let (dx, dy, dz) = DIRS[face_i];
                     let n = rid(x + dx, y + dy, z + dz);

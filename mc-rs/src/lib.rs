@@ -935,6 +935,8 @@ impl App {
     /// Build the HUD vertex buffer for this frame. Called between the chunk
     /// and HUD render passes inside `render`.
     fn build_hud(&mut self) {
+        // `ext` reads all of `self`, so it is taken before `hud_verts` is borrowed mutably.
+        let ext = self.screen.as_ref().and_then(|s| self.ext(s));
         let v = &mut self.hud_verts;
         v.clear();
         let layout = &self.touch.layout;
@@ -976,7 +978,6 @@ impl App {
                 }
             };
             let furn = s.furnace.and_then(|p| self.furnaces.get(&p));
-            let ext = self.ext(s);
             for (id, ux, uy) in craft::layout(s.gw) {
                 slot(v, craft::cell(s.gw, w, h, (ux, uy)), s.get(&self.inv, ext.as_deref(), id), [0.3, 0.3, 0.3, 1.0]);
             }

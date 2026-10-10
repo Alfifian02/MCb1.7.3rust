@@ -7,7 +7,7 @@
 
 use std::sync::OnceLock;
 
-use crate::world::items::{max_stack, Inventory, ItemStack, MAIN, SLOTS};
+use crate::world::items::{max_stack, Inventory, ItemStack, MAIN};
 
 // ---- Tools ----
 
@@ -438,7 +438,7 @@ impl Screen {
     ///
     /// The furnace output (`SlotFurnace`) is an output slot like the craft result (accepts nothing), except that
     /// taking from it uses nothing up and a right click takes half. Pass the open container's slots (`ext`: a furnace's 3, the chests' 27 each) for a furnace or chest screen.
-    pub fn click(&mut self, id: SlotId, one: bool, inv: &mut Inventory, mut ext: Option<&mut [Option<ItemStack>]>) {
+    pub fn click(&mut self, id: SlotId, one: bool, inv: &mut Inventory, ext: Option<&mut [Option<ItemStack>]>) {
         if !self.armor_ok(id) {
             return;
         }
@@ -496,7 +496,7 @@ impl Screen {
 
     /// Spread (touch drag): put one item of the cursor stack into `id` when that slot is empty or holds the same
     /// item with room. Unlike a right click it never swaps, and never fills an output slot. True if it was valid.
-    pub fn drop_one(&mut self, id: SlotId, inv: &mut Inventory, mut ext: Option<&mut [Option<ItemStack>]>) -> bool {
+    pub fn drop_one(&mut self, id: SlotId, inv: &mut Inventory, ext: Option<&mut [Option<ItemStack>]>) -> bool {
         let Some(c) = self.cursor else { return false };
         if matches!(id, SlotId::Result | SlotId::Furn(2)) {
             return false;
