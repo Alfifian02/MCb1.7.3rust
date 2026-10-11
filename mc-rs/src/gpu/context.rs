@@ -169,6 +169,8 @@ impl Gpu {
         // Depth texture at the real size from the start -- no resize race.
         let depth_tex = Self::create_depth(&device, width, height);
         let depth_view = depth_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let depth_copy = Self::create_depth(&device, width, height);
+        let depth_copy_view = depth_copy.create_view(&wgpu::TextureViewDescriptor::default());
 
         // Leak the AndroidWindow wrapper so the surface has a stable owner.
         // The pointer came from android-activity and lives as long as the window does.
