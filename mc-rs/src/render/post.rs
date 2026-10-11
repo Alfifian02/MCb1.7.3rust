@@ -106,12 +106,12 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             taa: true,
-            fxaa: true,
+            fxaa: false,
             cas: true,
             cas_intensity: 0.5,
             vignette: true,
             vignette_intensity: 1.0,
-            bloom: true,
+            bloom: false,
             bloom_intensity: 1.0,
             bloom_spread: 1.0,
             bloom_bicubic: false,

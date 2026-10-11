@@ -53,8 +53,6 @@ const RENDER_DIST: i32 = 4;
 const SEED: i64 = 0xCAFEBABE;
 /// Vertical render distance in chunks (16 blocks): sections further above or below the eye are not drawn.
 const RENDER_VERT: i32 = 3;
-/// Copies of the entity mesh that draw its shadow cone; with `CONE_STEP` 0.2 in `gpu/pipeline.rs` the cone reaches 8 blocks from the sun side.
-const CONE_COPIES: u32 = 40;
 /// `Sphere`: what is drawn is within `RENDER_DIST` blocks-of-16 in 3D (matches the fog, which is by 3D distance);
 /// `Cylinder`: a circle of that radius at any height within `RENDER_VERT`.
 const RENDER_SHAPE: Shape = Shape::Sphere;
@@ -910,9 +908,18 @@ impl App {
         }
         // The march always runs now: its green channel is the surface shadow the deferred pass lights with (it is 0 when `vlp.shadow`
         // is 0). ponytail: the shaft loop is wasted while `vlp.active` is false (night under water); a flag in `Params` would skip it.
-        self.shafts.march(&self.gpu, &mut enc, &self.pipe.shadow_bind, &self.shadows.bind, &self.camera, shadow_vp, &vlp);
+        self.gpu.copy_depth(&mut enc);
+        // Boxes of the things that throw an umbra in the air (mobs, drops, falling blocks), for the shaft composite.
+        let mut cone_boxes: Vec<(glam::Vec3, glam::Vec3)> = Vec::new();
+        if sun_strength > 0.0 {
+            let mut add = |c: glam::Vec3, h: glam::Vec3| cone_boxes.push((c - h, c + h));
+            self.mobs.list.iter().for_each(|m| add(m.body.pos, m.half));
+            self.drops.items.iter().for_each(|d| add(d.pos, glam::Vec3::splat(0.125)));
+            self.ticks.falling.iter().for_each(|f| add(f.pos, glam::Vec3::splat(0.49)));
+        }
+        self.shafts.march(&self.gpu, &mut enc, &self.pipe.shadow_bind, &self.shadows.bind, &self.camera, shadow_vp, &vlp, self.total_frames);
         if let Some(vl_view) = self.shafts.view() {
-            self.photon.bind(&self.gpu.device, &self.gpu.depth_view, vl_view);
+            self.photon.bind(&self.gpu.device, &self.gpu.depth_copy_view, vl_view);
         }
         // HDR scene: the sky over the fog colour (vanilla order), the deferred lighting of the terrain, the shadow cone, water, then the
         // shafts. The terrain depth is attached read-only (the deferred shader and the water test read it).
@@ -931,17 +938,6 @@ impl App {
             });
             self.sky.draw(&mut rp);
             self.photon.draw_deferred(&mut rp, &self.pipe.bind_group);
-            // The umbra in the air under every item and mob (merged from the shadow-cone change, which predates the G-buffer): it is a
-            // black alpha layer, so it cannot go in the G-buffer pass; here it darkens the lit scene. Copy 0 (the entity) is in the
-            // G-buffer. ponytail: 8 blocks of reach (a low sun on a tall mob is cut short) and every copy is the whole buffer.
-            if item_indices > 0 && sun_strength > 0.0 {
-                rp.set_pipeline(&self.pipe.cone_pipeline);
-                rp.set_bind_group(0, &self.pipe.bind_group, &[]);
-                rp.set_bind_group(1, &self.pipe.shadow_bind, &[]);
-                rp.set_vertex_buffer(0, self.item_mesh.vbuf.slice(..));
-                rp.set_index_buffer(self.item_mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
-                rp.draw_indexed(0..item_indices, 0, 1..CONE_COPIES + 1);
-            }
             // Water last: blended over the terrain, no depth write (`water_pipeline`; same groups as the terrain).
             rp.set_pipeline(&self.pipe.water_pipeline);
             rp.set_bind_group(0, &self.pipe.bind_group, &[]);
@@ -952,6 +948,7 @@ impl App {
                 rp.draw_indexed(r, 0, 0..1);
             });
             if vlp.active {
+                self.shafts.set_cone(&self.gpu.queue, self.camera.pos, &mut cone_boxes);
                 self.shafts.composite(&mut rp);
             }
         }

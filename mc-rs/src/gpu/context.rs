@@ -54,6 +54,10 @@ pub struct Gpu {
     pub config: SurfaceConfiguration,
     pub depth_view: TextureView,
     depth_tex: Texture,
+    /// A per-frame copy of the depth (`copy_depth`): the passes that read depth as a texture while the real one is still attached to
+    /// the HDR scene pass read this, so nothing is ever sampled and attached in the same pass (some mobile GPUs draw garbage tiles then).
+    pub depth_copy_view: TextureView,
+    depth_copy: Texture,
 }
 
 impl Gpu {
@@ -179,6 +183,8 @@ impl Gpu {
             config,
             depth_view,
             depth_tex,
+            depth_copy_view,
+            depth_copy,
         })
     }
 
@@ -188,6 +194,13 @@ impl Gpu {
         self.surface.configure(&self.device, &self.config);
         self.depth_tex = Self::create_depth(&self.device, self.config.width, self.config.height);
         self.depth_view = self.depth_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        self.depth_copy = Self::create_depth(&self.device, self.config.width, self.config.height);
+        self.depth_copy_view = self.depth_copy.create_view(&wgpu::TextureViewDescriptor::default());
+    }
+
+    /// Copy the finished opaque depth into `depth_copy_view`; run after the G-buffer pass.
+    pub fn copy_depth(&self, enc: &mut wgpu::CommandEncoder) {
+        enc.copy_texture_to_texture(self.depth_tex.as_image_copy(), self.depth_copy.as_image_copy(), Extent3d { width: self.config.width.max(1), height: self.config.height.max(1), depth_or_array_layers: 1 });
     }
 
     fn create_depth(device: &Device, width: u32, height: u32) -> Texture {
@@ -198,7 +211,7 @@ impl Gpu {
             sample_count: 1,
             dimension: TextureDimension::D2,
             format: TextureFormat::Depth32Float,
-            usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING, // the light-shaft pass reads it
+            usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_SRC | TextureUsages::COPY_DST, // the light-shaft pass reads it
             view_formats: &[],
         })
     }

@@ -26,12 +26,17 @@ use crate::world::sky;
 /// `#define LIGHT_SHAFT` (off = no march, and the shadow pass is back to running only in sunlight).
 pub const LIGHT_SHAFT: bool = true;
 /// `LIGHT_SHAFT_STRENGTH`, the pack's default.
-const STRENGTH: f32 = 1.0;
+const STRENGTH: f32 = 1.8;
 /// Added to the sample's shadow-map depth, like `shadowPosition.z += 0.0001`: the pack's depth range is not ours,
 /// this is 0.25 block (`BLOCK_DEPTH` per block). UNVERIFIED on a device.
 const DEPTH_BIAS: f32 = 0.25 * BLOCK_DEPTH;
 /// How dark a fully shadowed, fully sunlit surface gets (the old per-pixel shadow was 0.25). UNVERIFIED: tune on a device.
 const SHADOW_DARK: f32 = 0.55;
+
+/// Boxes the umbra pass handles (the nearest ones), how far toward the sun a box still shades (blocks), and the air's opacity per block.
+pub const CONE_MAX: usize = 8;
+const CONE_LEN: f32 = 10.0;
+const CONE_DENSITY: f32 = 0.30;
 
 /// What the shader needs besides the camera: the light, and the per-frame scalars of `composite1.glsl`.
 pub struct Params {
@@ -156,7 +161,7 @@ struct U {
     a: [f32; 4],
     /// x: additive weight, y: mixedTime, z: rain, w: exponent of the fov falloff.
     b: [f32; 4],
-    /// x: `minDistFactor` before the fov falloff, y: `addition`.
+    /// x: `minDistFactor` before the fov falloff, y: `addition`, z: frame % 64 (dither jitter).
     c: [f32; 4],
     /// rgb: colour scale, w: lightShaftTime.
     s: [f32; 4],
@@ -182,6 +187,12 @@ struct U {
 @group(0) @binding(1) var depth_tex: texture_depth_2d;
 @group(0) @binding(2) var vl_tex: texture_2d<f32>;
 @group(0) @binding(3) var vl_samp: sampler;
+// Entity umbra: up to CONE_MAX boxes (min, max pairs; n.x = count). The air the sun's rays cross after passing through a box is its shadow.
+struct Cone {
+    n: vec4<f32>,
+    b: array<vec4<f32>, 16>,
+};
+@group(0) @binding(4) var<uniform> cone: Cone;
 @group(1) @binding(0) var sh_tex: texture_depth_2d;
 @group(1) @binding(1) var sh_samp: sampler_comparison;
 @group(1) @binding(2) var ent_tex: texture_depth_2d; // items, mobs, falling blocks: same matrix as sh_tex, redrawn every frame
@@ -252,7 +263,7 @@ fn fs_march(in: FsIn) -> @location(0) vec4<f32> {
     let x = pow(1.0 - (in.uv.x - 0.5) * (in.uv.x - 0.5), u.b.w);
     let max_dist = u.a.y * x;
     let min_dist_factor = u.c.x * x;
-    let dither = ign(in.pos.xy);
+    let dither = ign(in.pos.xy + u.c.z * 5.588238); // c.z: frame % 64, so TAA averages the noise away
     var sum = 0.0;
     for (var i = 0; i < 10; i = i + 1) {
         let t = f32(i) + dither + u.c.y;
@@ -289,6 +300,53 @@ fn fs_march(in: FsIn) -> @location(0) vec4<f32> {
     return vec4<f32>(v, sh, 0.0, 1.0);
 }
 
+// Interval of the ray parameter t where `c0 + c1 * t >= 0`, intersected into `r` (x = enter, y = exit).
+fn clip_half(c0: f32, c1: f32, r: vec2<f32>) -> vec2<f32> {
+    if abs(c1) < 1e-7 {
+        return select(vec2<f32>(1.0, 0.0), r, c0 >= 0.0);
+    }
+    let t = -c0 / c1;
+    return select(vec2<f32>(r.x, min(r.y, t)), vec2<f32>(max(r.x, t), r.y), c1 > 0.0);
+}
+
+// Sun-ray parameter interval [lo, hi] (affine in t: xy = lo, zw = hi) for which `o + s * l` is inside [mn, mx] on one axis.
+fn s_interval(mn: f32, mx: f32, o: f32, v: f32, l: f32) -> vec4<f32> {
+    let a = (mn - o) / l;
+    let b = (mx - o) / l;
+    let d = -v / l;
+    return select(vec4<f32>(b, d, a, d), vec4<f32>(a, d, b, d), l > 0.0);
+}
+
+// Path length of the view ray (origin o, unit direction v, up to tmax) through the volume swept by box [mn, mx] toward the sun:
+// the points whose sun ray (s in 0..len) meets the box. The sun moves in the YZ plane, so x is a plain slab; an axis the sun is
+// nearly parallel to is a slab too (a vertical column at noon). Exact for one box, no layers, no banding.
+fn cone_thickness(mn: vec3<f32>, mx: vec3<f32>, o: vec3<f32>, v: vec3<f32>, tmax: f32) -> f32 {
+    let l = u.light.xyz;
+    let len = cone.n.z;
+    var r = vec2<f32>(0.0, tmax);
+    r = clip_half(o.x - mn.x, v.x, r);
+    r = clip_half(mx.x - o.x, -v.x, r);
+    let ty = abs(l.y) > 0.02;
+    let tz = abs(l.z) > 0.02;
+    var iy = vec4<f32>(0.0);
+    var iz = vec4<f32>(0.0);
+    if ty { iy = s_interval(mn.y, mx.y, o.y, v.y, l.y); } else { r = clip_half(o.y - mn.y, v.y, r); r = clip_half(mx.y - o.y, -v.y, r); }
+    if tz { iz = s_interval(mn.z, mx.z, o.z, v.z, l.z); } else { r = clip_half(o.z - mn.z, v.z, r); r = clip_half(mx.z - o.z, -v.z, r); }
+    if ty {
+        r = clip_half(iy.z, iy.w, r);          // hi_y >= 0: the box is toward the sun
+        r = clip_half(len - iy.x, -iy.y, r);   // lo_y <= len: within reach
+    }
+    if tz {
+        r = clip_half(iz.z, iz.w, r);
+        r = clip_half(len - iz.x, -iz.y, r);
+    }
+    if ty && tz {
+        r = clip_half(iy.z - iz.x, iy.w - iz.y, r); // lo_z <= hi_y
+        r = clip_half(iz.z - iy.x, iz.w - iy.y, r); // lo_y <= hi_z
+    }
+    return max(r.y - r.x, 0.0);
+}
+
 // composite1.glsl: 4-tap blur, square, colour, and the blend, written as `rgb + dst * (1 - a)`.
 @fragment
 fn fs_comp(in: FsIn) -> @location(0) vec4<f32> {
@@ -298,8 +356,19 @@ fn fs_comp(in: FsIn) -> @location(0) vec4<f32> {
           + textureSampleLevel(vl_tex, vl_samp, in.uv + vec2<f32>(px.x, 0.0), 0.0).rg
           + textureSampleLevel(vl_tex, vl_samp, in.uv - vec2<f32>(px.x, 0.0), 0.0).rg;
     let vlp = (m.x * 0.25) * (m.x * 0.25);
-    let dark = m.y * 0.25 * u.res.z * u.res.w; // blurred surface shadow x strength; res.w = 0: `render::photon` lights the surface now
-    let dirw = normalize((u.cam * vec4<f32>(view_ray(in.uv), 0.0)).xyz);
+    let ray = view_ray(in.uv);
+    let dirw = normalize((u.cam * vec4<f32>(ray, 0.0)).xyz);
+    // Entity umbra, from the exact swept volumes, up to the surface behind the pixel; strength follows the sun's.
+    let z = textureLoad(depth_tex, vec2<i32>(in.pos.xy), 0);
+    let near = u.ray.z;
+    let far = u.ray.w;
+    let tmax = min(near * far / (far - z * (far - near)) * length(ray), 96.0);
+    let eye = u.cam[3].xyz;
+    var thick = 0.0;
+    for (var i = 0; i < i32(cone.n.x); i = i + 1) {
+        thick = thick + cone_thickness(cone.b[2 * i].xyz, cone.b[2 * i + 1].xyz, eye, dirw, tmax);
+    }
+    let dark = (1.0 - exp(-cone.n.y * thick)) * u.res.z;
     var nu = 1.0 - max(dirw.y, 0.0); // NdotU
     if nu > 0.5 { nu = smoothstep(0.0, 1.0, nu); }
     nu = nu * nu; // DIRECTION_LIGHTSHAFT 2
@@ -323,6 +392,8 @@ pub struct LightShafts {
     march: RenderPipeline,
     comp: RenderPipeline,
     ubuf: Buffer,
+    /// Entity umbra boxes (`Cone` in the shader).
+    cbuf: Buffer,
     march_layout: BindGroupLayout,
     comp_layout: BindGroupLayout,
     samp: Sampler,
@@ -337,6 +408,12 @@ impl LightShafts {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let cbuf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("vl_cone"),
+            size: 16 + 16 * CONE_MAX as u64 * 2,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let entry = |binding, ty| wgpu::BindGroupLayoutEntry { binding, visibility: wgpu::ShaderStages::FRAGMENT, ty, count: None };
         let uniform = || wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None };
         let tex = |sample_type| wgpu::BindingType::Texture { sample_type, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false };
@@ -348,8 +425,10 @@ impl LightShafts {
             label: Some("vl_comp_layout"),
             entries: &[
                 entry(0, uniform()),
+                entry(1, tex(wgpu::TextureSampleType::Depth)),
                 entry(2, tex(wgpu::TextureSampleType::Float { filterable: true })),
                 entry(3, wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering)),
+                entry(4, uniform()),
             ],
         });
         let samp = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -390,12 +469,12 @@ impl LightShafts {
         };
         let march = pipeline("vl_march", &[&march_layout, shadow_layout, params_layout], "fs_march", wgpu::TextureFormat::Rgba8Unorm, None, false);
         let comp = pipeline("vl_comp", &[&comp_layout], "fs_comp", surface_format, Some(over), true);
-        Self { march, comp, ubuf, march_layout, comp_layout, samp, target: None }
+        Self { march, comp, ubuf, cbuf, march_layout, comp_layout, samp, target: None }
     }
 
     /// Run after the terrain pass: the half-resolution march. `shadow_vp` is what `ChunkPipeline::upload_uniforms` returned this
     /// frame (the shadow map has to exist: `Params::active`), `shadow_bind` its map. Then `composite` blends it onto the frame.
-    pub fn march(&mut self, gpu: &Gpu, enc: &mut CommandEncoder, shadow_bind: &BindGroup, params_bind: &BindGroup, cam: &FirstPersonCamera, shadow_vp: Mat4, p: &Params) {
+    pub fn march(&mut self, gpu: &Gpu, enc: &mut CommandEncoder, shadow_bind: &BindGroup, params_bind: &BindGroup, cam: &FirstPersonCamera, shadow_vp: Mat4, p: &Params, frame: u64) {
         let (w, h) = (gpu.config.width, gpu.config.height);
         if self.target.as_ref().map_or(true, |t| t.size != (w, h)) {
             // ponytail: half resolution, nearest depth tap (the pack marches at full resolution, 4-tap blurred); a
@@ -424,8 +503,10 @@ impl LightShafts {
                 layout: &self.comp_layout,
                 entries: &[
                     wgpu::BindGroupEntry { binding: 0, resource: self.ubuf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&gpu.depth_copy_view) },
                     wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&view) },
                     wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&self.samp) },
+                    wgpu::BindGroupEntry { binding: 4, resource: self.cbuf.as_entire_binding() },
                 ],
             });
             self.target = Some(Target { size: (w, h), view, march_bind, comp_bind });
@@ -439,7 +520,7 @@ impl LightShafts {
             a: [0.0, SHADOW_RADIUS, p.endurance, p.power],
             b: [p.w, p.mt, p.rain, (3.0 - proj.y_axis.y / 1.37).max(0.0)],
             // minDistFactor = 8 * clamp(far, 0, 512) / 192, then * 0.5 / 1.7; addition = 0.5 * 1.42857.
-            c: [8.0 * cam.zfar.clamp(0.0, 512.0) / 192.0 * 0.5 / 1.7, 0.5 * 1.42857, 0.0, 0.0],
+            c: [8.0 * cam.zfar.clamp(0.0, 512.0) / 192.0 * 0.5 / 1.7, 0.5 * 1.42857, (frame % 64) as f32, 0.0],
             s: [p.scale[0], p.scale[1], p.scale[2], p.lst],
             res: [w as f32, h as f32, p.shadow * SHADOW_DARK, 0.0],
         };
@@ -464,6 +545,19 @@ impl LightShafts {
             rp.set_bind_group(2, params_bind, &[]);
             rp.draw(0..3, 0..1);
         }
+    }
+
+    /// The entity boxes (min, max) whose umbra `composite` darkens: the `CONE_MAX` nearest to `eye`. Call every frame before `composite`.
+    pub fn set_cone(&self, queue: &wgpu::Queue, eye: Vec3, boxes: &mut Vec<(Vec3, Vec3)>) {
+        boxes.sort_by(|a, b| (0.5 * (a.0 + a.1)).distance_squared(eye).total_cmp(&(0.5 * (b.0 + b.1)).distance_squared(eye)));
+        boxes.truncate(CONE_MAX);
+        let mut d = [[0.0f32; 4]; 1 + 2 * CONE_MAX];
+        d[0] = [boxes.len() as f32, CONE_DENSITY, CONE_LEN, 0.0];
+        for (i, (mn, mx)) in boxes.iter().enumerate() {
+            d[1 + 2 * i] = mn.extend(0.0).to_array();
+            d[2 + 2 * i] = mx.extend(0.0).to_array();
+        }
+        queue.write_buffer(&self.cbuf, 0, bytemuck::cast_slice(&d));
     }
 
     /// The half-resolution march target (r: shafts, g: surface shadow), once `march` has run; `photon::Photon::bind` reads it.
@@ -492,18 +586,18 @@ mod tests {
         (a - b).abs() <= 0.01 * b.abs().max(0.01)
     }
 
-    /// Reference numbers: `composite1.glsl` / `lightColor.glsl` transcribed line by line (default settings, f64) for the same inputs.
+    /// Reference numbers (at `LIGHT_SHAFT_STRENGTH` 1, hence `* STRENGTH`): `composite1.glsl` / `lightColor.glsl` transcribed line by line (default settings, f64) for the same inputs.
     #[test]
     fn scalars_match_the_glsl() {
         let p = at(6000.0, 0.0); // noon
-        assert!(near(p.scale[0], 10.0859) && near(p.scale[1], 7.6781) && near(p.scale[2], 5.7696), "{:?}", p.scale);
+        assert!(near(p.scale[0], 10.0859 * STRENGTH) && near(p.scale[1], 7.6781 * STRENGTH) && near(p.scale[2], 5.7696 * STRENGTH), "{:?}", p.scale);
         assert!(near(p.lst, 1.0) && near(p.w, 1.0) && near(p.mt, 1.0) && near(p.endurance, 1.2) && near(p.power, 2.0));
         let p = at(0.0, 0.0); // sunrise: orange
-        assert!(near(p.scale[0], 36.4737) && near(p.scale[1], 8.1925) && near(p.scale[2], 1.1167), "{:?}", p.scale);
+        assert!(near(p.scale[0], 36.4737 * STRENGTH) && near(p.scale[1], 8.1925 * STRENGTH) && near(p.scale[2], 1.1167 * STRENGTH), "{:?}", p.scale);
         let p = at(12600.0, 0.0); // the shadow fade between sun and moon
-        assert!(near(p.scale[0], 3.3336) && near(p.scale[1], 1.1155) && near(p.lst, 0.15172) && near(p.mt, 0.0294) && near(p.w, 0.9141), "{:?} {}", p.scale, p.lst);
+        assert!(near(p.scale[0], 3.3336 * STRENGTH) && near(p.scale[1], 1.1155 * STRENGTH) && near(p.lst, 0.15172) && near(p.mt, 0.0294) && near(p.w, 0.9141), "{:?} {}", p.scale, p.lst);
         let p = at(18000.0, 1.0); // rainy midnight: the grey-blue weather colour, no additive branch
-        assert!(near(p.scale[0], 1.1661) && near(p.scale[1], 2.2303) && near(p.scale[2], 5.2787), "{:?}", p.scale);
+        assert!(near(p.scale[0], 1.1661 * STRENGTH) && near(p.scale[1], 2.2303 * STRENGTH) && near(p.scale[2], 5.2787 * STRENGTH), "{:?}", p.scale);
         assert!(p.w == 0.0 && near(p.endurance, 2.4) && near(p.power, 1.0));
     }
 
@@ -526,6 +620,16 @@ mod tests {
         assert_eq!(at(12700.0, 0.0).light, sun(12700.0));
         assert_eq!(at(12800.0, 0.0).light, -sun(12800.0));
         assert_eq!(at(23300.0, 0.0).light, sun(23300.0));
+    }
+
+    /// The shader (march, composite with the entity umbra) parses and validates once the shadow code is spliced in, and the cone
+    /// buffer is what `Cone` declares: 16 + 16 vec4.
+    #[test]
+    fn shader_validates() {
+        let src = SHADER.replace("@DISTORT@", &shadows::distortion_wgsl()).replace("@PCSS@", &shadows::pcss_wgsl());
+        let m = naga::front::wgsl::parse_str(&src).unwrap_or_else(|e| panic!("{}", e.emit_to_string(&src)));
+        naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all()).validate(&m).unwrap();
+        assert_eq!(16 + 16 * CONE_MAX * 2, 16 + 16 * 16);
     }
 
     #[test]
