@@ -62,6 +62,10 @@ const AUTOSAVE_SECS: f32 = 5.0;
 /// Chunks written per autosave, so the first ones after generating a lot of terrain do not hitch a frame.
 const AUTOSAVE_CHUNKS: usize = 24;
 
+/// Moving things (items, mobs, falling blocks) cast shadows through a second 1024^2 map redrawn every frame. Off: that is a clear + a draw per frame
+/// and a second fetch per shadow tap, for a nicety. ponytail: flip it to bring them back (the deferred shader and the pass both follow it).
+pub(crate) const ENTITY_SHADOWS: bool = false;
+
 const LOOK_SENS: f32 = 0.004;
 /// World units per second when the d-pad is fully pressed.
 const MOVE_SPEED: f32 = physics::WALK_SPEED;
@@ -133,6 +137,8 @@ struct App {
     /// Furnace tile entities by block position (created on first use), and the time left over from the last 20 Hz tick.
     furnaces: HashMap<(i32, i32, i32), Furnace>,
     furn_acc: f32,
+    /// CPU seconds spent in `render` (without the swap-chain wait) since the last FPS log line.
+    cpu_acc: f32,
     /// Chest tile entities by block position (created on first open, or by a dungeon's populate).
     chests: HashMap<chest::Pos, Chest>,
     /// The finger gesture on the open screen, to tell a tap from a spread.
@@ -197,9 +203,10 @@ impl App {
         let sky_renderer = SkyRenderer::new(&gpu.device, &gpu.queue, photon::HDR_FORMAT);
         let shadows = Shadows::new(&gpu.device, &gpu.queue);
         let shafts = LightShafts::new(&gpu.device, photon::HDR_FORMAT, &pipe.shadow_layout, &shadows.layout);
-        let photon = Photon::new(&gpu.device, &pipe.bind_layout, width, height);
+        let (sw, sh) = gpu.scene();
+        let photon = Photon::new(&gpu.device, &pipe.bind_layout, &pipe.shadow_layout, sw, sh);
         let clouds = clouds::RUN_CLOUDS.then(|| Clouds::new(&gpu.device, &gpu.queue, clouds::atmosphere_lut(&gpu.device, &gpu.queue)));
-        let post = Post::new(&gpu.device, &gpu.queue, width, height, photon::HDR_FORMAT, surface_format, &gpu.depth_view, post::Settings::default());
+        let post = Post::new(&gpu.device, &gpu.queue, sw, sh, photon::HDR_FORMAT, surface_format, &gpu.depth_view, (width, height), post::Settings::default());
         let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as i64);
 
         let mut app = Self {
@@ -244,6 +251,7 @@ impl App {
             furnaces: HashMap::new(),
             chests: HashMap::new(),
             furn_acc: 0.0,
+            cpu_acc: 0.0,
             gesture: None,
             vitals: Vitals::default(),
             spawn,
@@ -329,7 +337,8 @@ impl App {
     fn resize(&mut self, w: u32, h: u32) {
         self.gpu.resize(w, h);
         self.photon.invalidate();
-        self.post.resize(&self.gpu.device, &self.gpu.queue, w, h, &self.gpu.depth_view);
+        let (sw, sh) = self.gpu.scene();
+        self.post.resize(&self.gpu.device, &self.gpu.queue, sw, sh, &self.gpu.depth_view, (w, h));
         self.camera.aspect = w as f32 / h as f32;
         self.touch.ensure_layout(w, h);
         self.hud.resize(&self.gpu.queue, w, h);
@@ -735,6 +744,7 @@ impl App {
     }
 
     fn render(&mut self) {
+        let t0 = Instant::now();
         let dt = self.last_frame.elapsed().as_secs_f32().min(0.1); // frameTime for the post chain
         self.step_frame();
         let (pcx, pcz) = (chunk_coord(self.player.pos.x), chunk_coord(self.player.pos.z));
@@ -775,13 +785,16 @@ impl App {
         let fog = sky::fog_color(angle, sky_rgb, rain, thunder);
         // Terrain fog (AstraLex `NormalFog`): fades to the horizon colour at the render distance; off under water.
         self.pipe.set_fog(&self.gpu.queue, fog, if eye_in_water { 0.0 } else { (RENDER_DIST * 16) as f32 }, rain);
-        self.pipe.set_lighting(&self.gpu.queue, &photon::lighting(angle, rain, self.shadow.light));
+        let lit = photon::lighting(angle, rain, self.shadow.light);
+        self.pipe.set_lighting(&self.gpu.queue, &lit);
+        vlp.hdr(lit.light_color); // the shafts glow in the scene's HDR units: the light's own colour
         let clear = wgpu::Color { r: fog[0] as f64, g: fog[1] as f64, b: fog[2] as f64, a: 1.0 };
         self.sky.update(&self.gpu.queue, &self.camera, &SkyFrame { angle, rain, seconds: self.world_ticks as f32 / 20.0 });
         if self.frames == 0 {
             log::info!("render: first frame, surface_format={:?}, {} chunks loaded", self.gpu.surface_format(), self.chunks.loaded());
         }
 
+        let t_acq = Instant::now();
         let frame = match self.gpu.surface.get_current_texture() {
             Ok(f) => f,
             Err(e) => {
@@ -792,6 +805,7 @@ impl App {
                 return;
             }
         };
+        let acq = t_acq.elapsed(); // the swap-chain wait (vsync / GPU back-pressure) is not CPU work
         // Reconcile surface/config size. Native-activity doesn't always send
         // MainEvent::WindowResized before the first frame, so the cached
         // config.width/height can be wrong (1x1 from from_android_window).
@@ -804,7 +818,8 @@ impl App {
             return;
         }
         let view_tex = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
-        self.photon.resize(&self.gpu.device, actual_w, actual_h);
+        let (sw, sh) = self.gpu.scene();
+        self.photon.resize(&self.gpu.device, sw, sh);
 
         let mut enc = self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
         self.sky.encode(&mut enc); // sky map + SH (Photon d0, d4a)
@@ -831,7 +846,7 @@ impl App {
         }
         // Moving things cast shadows through a second map, redrawn every frame (the terrain map is cached, a walking mob would leave a
         // trail in it). It is cleared once more after the last entity is gone. ponytail: one draw of the whole item buffer, no culling.
-        let draw_ent = (sun_strength > 0.0 || vlp.active) && (item_indices > 0 || self.ent_shadow_dirty);
+        let draw_ent = ENTITY_SHADOWS && (sun_strength > 0.0 || vlp.active) && (item_indices > 0 || self.ent_shadow_dirty);
         if draw_ent {
             let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("entity_shadow_pass"),
@@ -937,7 +952,7 @@ impl App {
                 occlusion_query_set: None,
             });
             self.sky.draw(&mut rp);
-            self.photon.draw_deferred(&mut rp, &self.pipe.bind_group);
+            self.photon.draw_deferred(&mut rp, &self.pipe.bind_group, &self.pipe.shadow_bind);
             // Water last: blended over the terrain, no depth write (`water_pipeline`; same groups as the terrain).
             rp.set_pipeline(&self.pipe.water_pipeline);
             rp.set_bind_group(0, &self.pipe.bind_group, &[]);
@@ -972,6 +987,7 @@ impl App {
             rp.draw(0..hud_vertex_count as u32, 0..1);
         }
         self.gpu.queue.submit(std::iter::once(enc.finish()));
+        self.cpu_acc += t0.elapsed().saturating_sub(acq).as_secs_f32();
         frame.present();
 
         self.frames += 1;
@@ -981,7 +997,8 @@ impl App {
             let fps = self.frames as f32 / now.duration_since(self.fps_last).as_secs_f32();
             self.fps_recent = fps.round() as u32;
             self.fps_overall = (self.total_frames as f32 / now.duration_since(self.started).as_secs_f32()).round() as u32;
-            log::info!("FPS: {fps:.1} (average since start {}), {} chunks loaded", self.fps_overall, self.chunks.loaded());
+            log::info!("FPS: {fps:.1} (average since start {}), {} chunks loaded, CPU {:.1} ms/frame (CPU ~ frame time: CPU-bound; far below: GPU-bound)", self.fps_overall, self.chunks.loaded(), self.cpu_acc / self.frames as f32 * 1000.0);
+            self.cpu_acc = 0.0;
             self.frames = 0;
             self.fps_last = now;
         }

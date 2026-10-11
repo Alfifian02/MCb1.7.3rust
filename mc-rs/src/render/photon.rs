@@ -400,6 +400,15 @@ const SHADER: &str = r#"
 @group(1) @binding(1) var depth_tex: texture_depth_2d;
 @group(1) @binding(2) var vl_tex: texture_2d<f32>;
 @group(1) @binding(3) var samp: sampler;
+// The sun's depth map(s), the same group the terrain shadow pass fills (`ChunkPipeline::shadow_bind`).
+@group(2) @binding(0) var sh_tex: texture_depth_2d;
+@group(2) @binding(1) var sh_samp: sampler_comparison;
+@ENT_DECL@
+
+@DISTORT@
+
+const SHADOW_DEPTH_BIAS: f32 = @DBIAS@; // 0.15 block in shadow-map depth units
+const PCF_RADIUS: f32 = 1.3 / @RES@;   // taps sit 1.3 texels out; each tap is a hardware bilinear compare
 
 struct FsIn {
     @builtin(position) pos: vec4<f32>,
@@ -414,6 +423,40 @@ fn vs_full(@builtin(vertex_index) i: u32) -> FsIn {
     return o;
 }
 
+// NaN / Inf guard that survives fast-math (both have an all-ones exponent).
+fn finite1(x: f32) -> bool { return (bitcast<u32>(x) & 0x7f800000u) != 0x7f800000u; }
+fn sane3(v: vec3<f32>) -> vec3<f32> {
+    let ok = vec3<bool>(finite1(v.x), finite1(v.y), finite1(v.z));
+    return clamp(select(vec3<f32>(0.0), v, ok), vec3<f32>(0.0), vec3<f32>(60000.0));
+}
+
+fn ign(p: vec2<f32>) -> f32 {
+    return fract(52.9829189 * fract(0.06711056 * p.x + 0.00583715 * p.y));
+}
+
+fn sun_visible(wp: vec3<f32>, n: vec3<f32>, nol: f32, sky: f32, frag: vec2<f32>) -> f32 {
+    let lightmap = smoothstep(13.5 / 15.0, 14.5 / 15.0, sky); // outside the map, and the leak-free fallback
+    let leak = smoothstep(0.0, 2.0 / 15.0, sky);               // no sun in caves
+    // Normal offset of ~1.2 texels (a texel is `0.125 * factor` blocks), more at grazing angles; then the map's own lookup.
+    let c0 = u.shadow_vp * vec4<f32>(wp, 1.0);
+    let f = get_distortion_factor(c0.xy);
+    let c = u.shadow_vp * vec4<f32>(wp + n * (0.15 * f) * (2.0 - clamp(nol, 0.0, 1.0)), 1.0);
+    let p = distort_shadow_space(vec3<f32>(c.xy, c.z * 2.0 - 1.0)) * 0.5 + 0.5;
+    let edge = smoothstep(0.80, 1.0, max(abs(c.x), abs(c.y)));
+    if edge >= 1.0 || c.z < 0.0 || c.z > 1.0 { return lightmap; }
+    let z = p.z - SHADOW_DEPTH_BIAS;
+    let rot = ign(frag) * 6.2831853;
+    var sum = 0.0;
+    for (var i = 0; i < 4; i = i + 1) {
+        let a = rot + f32(i) * 1.5707963;
+        let q = vec2<f32>(p.x + cos(a) * PCF_RADIUS, 1.0 - (p.y + sin(a) * PCF_RADIUS)); // GL (y up) -> texture (y down)
+        var lit = textureSampleCompareLevel(sh_tex, sh_samp, q, z);
+        @ENT_LIT@
+        sum = sum + lit;
+    }
+    return mix(sum * 0.25 * leak, lightmap, edge);
+}
+
 // d4_deferred_shading.fsh, terrain branch. Sky pixels (depth 1) keep what the sky pass drew.
 @fragment
 fn fs_deferred(in: FsIn) -> @location(0) vec4<f32> {
@@ -421,25 +464,44 @@ fn fs_deferred(in: FsIn) -> @location(0) vec4<f32> {
     let z = textureLoad(depth_tex, ip, 0);
     if z >= 1.0 { discard; }
     let g = textureLoad(gbuf, ip, 0);
-    // alpha = face * 256 + sky * 16 + block (`Vertex.lm`, exact in f16)
-    let face = u32(floor(g.a / 256.0 + 0.001));
-    let lm = g.a - f32(face) * 256.0;
-    let sky_i = floor(lm / 16.0 + 0.001);
+    // alpha = face * 256 + sky * 16 + block (`Vertex.lm`, exact in f16); clamped so a bad texel cannot make a negative `pow`
+    let a = select(0.0, clamp(g.a, 0.0, 1535.0), finite1(g.a));
+    let face = min(u32(floor(a / 256.0 + 0.001)), 5u);
+    let lm = a - f32(face) * 256.0;
+    let sky_i = clamp(floor(lm / 16.0 + 0.001), 0.0, 15.0);
     let sky = sky_i / 15.0;
-    let bl = (lm - sky_i * 16.0) / 15.0;
+    let bl = clamp((lm - sky_i * 16.0) / 15.0, 0.0, 1.0);
     let dims = vec2<f32>(textureDimensions(depth_tex));
     let uv = in.pos.xy / dims;
-    // The surface shadow `render::vl`'s march wrote (g, 1 = in shadow), bilinear from half resolution.
-    let shadow = 1.0 - textureSampleLevel(vl_tex, samp, uv, 0.0).g;
-    let rgb = photon_light(to_working(g.rgb), face, sky, bl, shadow);
-    // view-space distance for the fog: z_view = -B / (z + A) for glam's depth 0..1 projection
+    // view-space position: z_view = -B / (z + A) for glam's depth 0..1 projection
     let zv = -u.proj[3][2] / (z + u.proj[2][2]);
     let nd = vec2<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
-    let d = length(vec3<f32>(nd.x * -zv / u.proj[0][0], nd.y * -zv / u.proj[1][1], zv));
-    return vec4<f32>(apply_fog(rgb, d), 1.0);
+    let vpos = vec3<f32>(nd.x * -zv / u.proj[0][0], nd.y * -zv / u.proj[1][1], zv);
+    let d = length(vpos);
+    let n = face_normal(face);
+    let nol = dot(n, u.sun.xyz);
+    var shadow = 0.0;
+    if nol > 1e-3 {
+        // world position: eye + R^T * view position (`v * M` is M^T v)
+        let wp = u.eye.xyz + vpos * mat3x3<f32>(u.view[0].xyz, u.view[1].xyz, u.view[2].xyz);
+        shadow = sun_visible(wp, n, nol, sky, in.pos.xy);
+    }
+    let rgb = photon_light(to_working(g.rgb), face, sky, bl, shadow);
+    return vec4<f32>(sane3(apply_fog(rgb, d)), 1.0);
 }
 
 "#;
+
+/// `SHADER` with the shadow-map constants spliced in (a test validates the result).
+pub fn deferred_source() -> String {
+    let ent = crate::ENTITY_SHADOWS;
+    SHADER
+        .replace("@DISTORT@", &crate::render::shadows::distortion_wgsl())
+        .replace("@ENT_DECL@", if ent { "@group(2) @binding(2) var ent_tex: texture_depth_2d;" } else { "" })
+        .replace("@ENT_LIT@", if ent { "lit = min(lit, textureSampleCompareLevel(ent_tex, sh_samp, q, z));" } else { "" })
+        .replace("@DBIAS@", &format!("{:?}", 0.15 * crate::render::shadows::BLOCK_DEPTH))
+        .replace("@RES@", &format!("{:?}", crate::gpu::pipeline::SHADOW_RES as f32))
+}
 
 /// Size-dependent targets + the two full-screen pipelines.
 pub struct Photon {
@@ -469,7 +531,7 @@ fn gbuffer(device: &Device, w: u32, h: u32) -> TextureView {
 
 impl Photon {
     /// `uniform_layout` is `ChunkPipeline::bind_layout` (group 0: the shared uniform block).
-    pub fn new(device: &Device, uniform_layout: &BindGroupLayout, w: u32, h: u32) -> Self {
+    pub fn new(device: &Device, uniform_layout: &BindGroupLayout, shadow_layout: &BindGroupLayout, w: u32, h: u32) -> Self {
         let gbuf = gbuffer(device, w, h);
         let entry = |binding, ty| wgpu::BindGroupLayoutEntry { binding, visibility: wgpu::ShaderStages::FRAGMENT, ty, count: None };
         let tex = |sample_type| wgpu::BindingType::Texture { sample_type, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false };
@@ -483,12 +545,12 @@ impl Photon {
             ],
         });
         let samp = device.create_sampler(&wgpu::SamplerDescriptor { mag_filter: wgpu::FilterMode::Linear, min_filter: wgpu::FilterMode::Linear, ..Default::default() });
-        let src = format!("{WGSL_COMMON}{SHADER}");
+        let src = format!("{WGSL_COMMON}{}", deferred_source());
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("photon_shader"), source: wgpu::ShaderSource::Wgsl(src.into()) });
         let pipeline = |label, group1: &BindGroupLayout, fs: &str, format, depth: bool| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
-                layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some(label), bind_group_layouts: &[uniform_layout, group1], push_constant_ranges: &[] })),
+                layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some(label), bind_group_layouts: &[uniform_layout, group1, shadow_layout], push_constant_ranges: &[] })),
                 vertex: wgpu::VertexState { module: &module, entry_point: Some("vs_full"), buffers: &[], compilation_options: wgpu::PipelineCompilationOptions::default() },
                 fragment: Some(wgpu::FragmentState {
                     module: &module,
@@ -546,11 +608,12 @@ impl Photon {
     }
 
     /// Inside the scene pass, after the sky: `uniforms` is `ChunkPipeline::bind_group`.
-    pub fn draw_deferred(&self, rp: &mut wgpu::RenderPass<'_>, uniforms: &BindGroup) {
+    pub fn draw_deferred(&self, rp: &mut wgpu::RenderPass<'_>, uniforms: &BindGroup, shadow: &BindGroup) {
         let Some(b) = &self.deferred_bind else { return };
         rp.set_pipeline(&self.deferred);
         rp.set_bind_group(0, uniforms, &[]);
         rp.set_bind_group(1, b, &[]);
+        rp.set_bind_group(2, shadow, &[]);
         rp.draw(0..3, 0..1);
     }
 }
@@ -566,6 +629,15 @@ mod tests {
         assert!(f16_to_f64(0x3c00) == 1.0 && f16_to_f64(0xc000) == -2.0);
         let up = lut_sample(lut_uv(1.0, 1.0, 0.0));
         assert!(up.iter().all(|c| c.is_finite() && *c >= 0.0), "{up:?}");
+    }
+
+    /// The deferred shader (with the shadow lookup spliced in) parses and validates, with and without the entity map.
+    #[test]
+    fn deferred_shader_validates() {
+        let src = format!("{WGSL_COMMON}{}", deferred_source());
+        let m = naga::front::wgsl::parse_str(&src).unwrap_or_else(|e| panic!("{}", e.emit_to_string(&src)));
+        naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all()).validate(&m).unwrap();
+        assert!(deferred_source().contains("sun_visible(wp, n, nol, sky"), "the surface shadow is looked up here, with the G-buffer face");
     }
 
     /// Light colour: bright and slightly warm at noon, gone with the sun below the horizon, the moon dim and blue at night.

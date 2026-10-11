@@ -462,6 +462,8 @@ pub struct Post {
     prev_proj: Mat4,
     prev_cam: Vec3,
     first: bool,
+    /// Surface size the final pass writes (the scene may be smaller: `gpu::context::RENDER_SCALE`).
+    out: (u32, u32),
 }
 
 fn make_tex(device: &wgpu::Device, label: &str, w: u32, h: u32, format: wgpu::TextureFormat, mips: u32) -> wgpu::Texture {
@@ -494,7 +496,7 @@ impl Post {
     /// until the G-buffer milestone makes it HDR), `surface_format` the swapchain, `depth` the game's depth view (rebuilt, with
     /// this, on every resize).
     #[allow(clippy::too_many_arguments)]
-    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, w: u32, h: u32, scene_format: wgpu::TextureFormat, surface_format: wgpu::TextureFormat, depth: &wgpu::TextureView, settings: Settings) -> Self {
+    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, w: u32, h: u32, scene_format: wgpu::TextureFormat, surface_format: wgpu::TextureFormat, depth: &wgpu::TextureView, out: (u32, u32), settings: Settings) -> Self {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("post"), source: wgpu::ShaderSource::Wgsl(shader_source(&settings, surface_format.is_srgb()).into()) });
         let entry = |binding, ty| wgpu::BindGroupLayoutEntry { binding, visibility: wgpu::ShaderStages::FRAGMENT, ty, count: None };
         let tex = |filterable| wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false };
@@ -574,7 +576,7 @@ impl Post {
             layout: &layout1,
             entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer: &pbuf, offset: 0, size: wgpu::BufferSize::new(std::mem::size_of::<P>() as u64) }) }],
         });
-        let post = Self { settings, pipes, layout0, ubuf, pbuf, pgroup, samp, noise, dummy, scene_format, t, scene_view, frame: 0, prev_view: Mat4::IDENTITY, prev_proj: Mat4::IDENTITY, prev_cam: Vec3::ZERO, first: true };
+        let post = Self { settings, pipes, layout0, ubuf, pbuf, pgroup, samp, noise, dummy, scene_format, t, scene_view, frame: 0, prev_view: Mat4::IDENTITY, prev_proj: Mat4::IDENTITY, prev_cam: Vec3::ZERO, first: true, out };
         post.write_passes(queue);
         post
     }
@@ -596,7 +598,8 @@ impl Post {
         Mat4::from_translation(Vec3::new(j.x, j.y, 0.0)) * proj
     }
 
-    pub fn resize(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, w: u32, h: u32, depth: &wgpu::TextureView) {
+    pub fn resize(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, w: u32, h: u32, depth: &wgpu::TextureView, out: (u32, u32)) {
+        self.out = out;
         let (t, sv) = Self::targets(device, &self.layout0, &self.ubuf, &self.samp, &self.noise, &self.dummy, depth, self.scene_format, w, h, &self.settings);
         self.t = t;
         self.scene_view = sv;
@@ -709,7 +712,7 @@ impl Post {
             prev_cam: [prev_cam.x, prev_cam.y, prev_cam.z, f.time],
             res: [w, h, 1.0 / w, 1.0 / h],
             misc: [w / h, (self.frame % 720720) as f32, 0.0, 0.0], // aspectRatio, frameCounter, blindness, darknessFactor
-            misc2: [0.0; 4],                                       // biome_cave
+            misc2: [0.0, 0.0, 1.0 / self.out.0.max(1) as f32, 1.0 / self.out.1.max(1) as f32], // biome_cave, 1 / surface size
             wb: [col(wb.x_axis), col(wb.y_axis), col(wb.z_axis)],
         };
         queue.write_buffer(&self.ubuf, 0, bytemuck::bytes_of(&u));

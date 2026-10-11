@@ -216,6 +216,7 @@ was generated with). The CI workflow does this for you.
   (~16 ms/frame on a Pixel 4a) no longer applies.
 - Shadows + light shafts: the shadow map is reused between redraws (`render::camera::ShadowCache`), the shadow pass culls back faces, the shafts' blend shares the HUD pass. See the ROADMAP changelog for the levers still open. Unmeasured.
 - Shadows + light shafts + glare: the shadow map is reused between redraws (`render::camera::ShadowCache`), the shadow pass culls back faces, the shafts' blend shares the HUD pass, the glare quad is smaller. See the ROADMAP changelog for the levers still open. Unmeasured.
+- Internal resolution is `gpu::context::RENDER_SCALE` (0.67) of the screen, upscaled by the final pass; the surface shadow is looked up in the deferred pass (`render/photon.rs`), the light shafts are `render/vl.rs` only. The FPS log line shows CPU ms per frame. Unmeasured on a device.
 - M13 frustum culling is in (`render::camera::Frustum`, filtered through `ChunkManager::meshes_where`); M13 still adds
   greedy meshing.
 - No JNI calls except the one `android_main` entry point; everything

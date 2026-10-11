@@ -45,6 +45,15 @@ impl HasWindowHandle for AndroidWindow {
     }
 }
 
+/// Internal render resolution as a fraction of the surface: depth, G-buffer, HDR scene and the whole post chain run at this size and the
+/// final pass upscales (bilinear + CAS). 1.0 = native. Low-end phones (Mali-G52 class) are fill-rate bound: 0.67 is 2.2x fewer pixels.
+pub const RENDER_SCALE: f32 = 0.67;
+
+/// The scene size for a surface of `w` x `h`.
+pub fn scene_size(w: u32, h: u32) -> (u32, u32) {
+    (((w as f32 * RENDER_SCALE).round() as u32).max(1), ((h as f32 * RENDER_SCALE).round() as u32).max(1))
+}
+
 pub struct Gpu {
     pub instance: Instance,
     pub surface: Surface<'static>,
@@ -167,9 +176,10 @@ impl Gpu {
         surface.configure(&device, &config);
 
         // Depth texture at the real size from the start -- no resize race.
-        let depth_tex = Self::create_depth(&device, width, height);
+        let (sw, sh) = scene_size(width, height);
+        let depth_tex = Self::create_depth(&device, sw, sh);
         let depth_view = depth_tex.create_view(&wgpu::TextureViewDescriptor::default());
-        let depth_copy = Self::create_depth(&device, width, height);
+        let depth_copy = Self::create_depth(&device, sw, sh);
         let depth_copy_view = depth_copy.create_view(&wgpu::TextureViewDescriptor::default());
 
         // Leak the AndroidWindow wrapper so the surface has a stable owner.
@@ -194,15 +204,21 @@ impl Gpu {
         self.config.width = width.max(1);
         self.config.height = height.max(1);
         self.surface.configure(&self.device, &self.config);
-        self.depth_tex = Self::create_depth(&self.device, self.config.width, self.config.height);
+        let (sw, sh) = scene_size(self.config.width, self.config.height);
+        self.depth_tex = Self::create_depth(&self.device, sw, sh);
         self.depth_view = self.depth_tex.create_view(&wgpu::TextureViewDescriptor::default());
-        self.depth_copy = Self::create_depth(&self.device, self.config.width, self.config.height);
+        self.depth_copy = Self::create_depth(&self.device, sw, sh);
         self.depth_copy_view = self.depth_copy.create_view(&wgpu::TextureViewDescriptor::default());
     }
 
     /// Copy the finished opaque depth into `depth_copy_view`; run after the G-buffer pass.
     pub fn copy_depth(&self, enc: &mut wgpu::CommandEncoder) {
-        enc.copy_texture_to_texture(self.depth_tex.as_image_copy(), self.depth_copy.as_image_copy(), Extent3d { width: self.config.width.max(1), height: self.config.height.max(1), depth_or_array_layers: 1 });
+        enc.copy_texture_to_texture(self.depth_tex.as_image_copy(), self.depth_copy.as_image_copy(), Extent3d { width: self.depth_tex.width(), height: self.depth_tex.height(), depth_or_array_layers: 1 });
+    }
+
+    /// Size of the depth / G-buffer / HDR scene (`scene_size` of the surface).
+    pub fn scene(&self) -> (u32, u32) {
+        (self.depth_tex.width(), self.depth_tex.height())
     }
 
     fn create_depth(device: &Device, width: u32, height: u32) -> Texture {

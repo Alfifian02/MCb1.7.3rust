@@ -25,6 +25,11 @@ use crate::world::sky;
 
 /// `#define LIGHT_SHAFT` (off = no march, and the shadow pass is back to running only in sunlight).
 pub const LIGHT_SHAFT: bool = true;
+/// Samples per ray (the pack's 10; low-end GPUs: fewer, the dither + TAA hide it) and the spacing that keeps the same reach, `pow(t, 1.5)`.
+const MARCH_STEPS: i32 = 8;
+const STEP_COMPENSATION: f32 = 1.4; // (10 / 8)^1.5
+/// Shaft glow as a fraction of the light colour (the scene is HDR: `light_color` is ~7 at noon, ground radiance ~0.7). UNVERIFIED on a device: tune.
+const SHAFT_GAIN: f32 = 0.30;
 /// `LIGHT_SHAFT_STRENGTH`, the pack's default.
 const STRENGTH: f32 = 1.8;
 /// Added to the sample's shadow-map depth, like `shadowPosition.z += 0.0001`: the pack's depth range is not ours,
@@ -56,6 +61,20 @@ pub struct Params {
     rain: f32,
     /// Darkness of a shadowed surface, 0..1 (0 = no shadows: night, rain). The caller sets it (`world::sky::shadow_strength`).
     pub shadow: f32,
+}
+
+impl Params {
+    /// Shaft colour in the HDR scene's units: the frame's own `light_color` (sun, sunset red, moon: `photon::lighting`) times a gain. The old
+    /// `scale` was AstraLex's LDR number and was far too faint next to a 7x sun. Time-of-day weights (`w`, `mt`, `lst`) are unchanged.
+    pub fn hdr(&mut self, light_color: [f32; 3]) {
+        let k = SHAFT_GAIN * (1.0 - 0.8 * self.rain);
+        self.scale = light_color.map(|c| c * k);
+    }
+}
+
+/// The march / composite shader with the shadow-space code and the step count spliced in.
+fn source() -> String {
+    SHADER.replace("@DISTORT@", &shadows::distortion_wgsl()).replace("@STEPS@", &MARCH_STEPS.to_string())
 }
 
 fn mix(a: f32, b: f32, t: f32) -> f32 {
@@ -171,7 +190,6 @@ struct U {
 
 const SHADER: &str = r#"
 @DISTORT@
-@PCSS@
 struct U {
     cam: mat4x4<f32>,
     shadow_cam: mat4x4<f32>,
@@ -197,6 +215,8 @@ struct Cone {
 @group(1) @binding(1) var sh_samp: sampler_comparison;
 @group(1) @binding(2) var ent_tex: texture_depth_2d; // items, mobs, falling blocks: same matrix as sh_tex, redrawn every frame
 
+const MARCH_STEPS: i32 = @STEPS@;
+
 struct FsIn {
     @builtin(position) pos: vec4<f32>,
     @location(0) uv: vec2<f32>,
@@ -215,33 +235,6 @@ fn vs_full(@builtin(vertex_index) i: u32) -> FsIn {
 // View-space ray through `uv` (z = -1): view-space depth d is `ray * d`.
 fn view_ray(uv: vec2<f32>) -> vec3<f32> {
     return vec3<f32>((uv.x * 2.0 - 1.0) * u.ray.x, (1.0 - uv.y * 2.0) * u.ray.y, -1.0);
-}
-
-// View-space position of a full-resolution pixel.
-fn view_pos(ip: vec2<i32>) -> vec3<f32> {
-    let dims = vec2<i32>(textureDimensions(depth_tex));
-    let q = clamp(ip, vec2<i32>(0), dims - 1);
-    let z = textureLoad(depth_tex, q, 0);
-    return view_ray((vec2<f32>(q) + 0.5) / vec2<f32>(dims)) * (u.ray.z * u.ray.w / (u.ray.w - z * (u.ray.w - u.ray.z)));
-}
-
-// World-space normal of the face at `ip` (view position `p0`), snapped to an axis: every face in this world is axis aligned. Each
-// screen axis steps toward the neighbour with the smaller depth jump, so a silhouette does not tilt it. ponytail: a pixel on an
-// edge between two faces can pick the other face's normal (a one-pixel line, blurred by `fs_comp`); a normal buffer is the upgrade.
-fn face_normal(ip: vec2<i32>, p0: vec3<f32>) -> vec3<f32> {
-    let a = view_pos(ip + vec2<i32>(2, 0)) - p0;
-    let b = p0 - view_pos(ip - vec2<i32>(2, 0));
-    let c = view_pos(ip + vec2<i32>(0, 2)) - p0;
-    let d = p0 - view_pos(ip - vec2<i32>(0, 2));
-    let cr = cross(select(b, a, abs(a.z) < abs(b.z)), select(d, c, abs(c.z) < abs(d.z)));
-    if dot(cr, cr) < 1e-12 { return vec3<f32>(0.0); }
-    var n = normalize(cr);
-    if dot(n, p0) > 0.0 { n = -n; } // toward the eye
-    let w = (u.cam * vec4<f32>(n, 0.0)).xyz;
-    let m = abs(w);
-    if m.x >= m.y && m.x >= m.z { return vec3<f32>(sign(w.x), 0.0, 0.0); }
-    if m.y >= m.z { return vec3<f32>(0.0, sign(w.y), 0.0); }
-    return vec3<f32>(0.0, 0.0, sign(w.z));
 }
 
 // InterleavedGradientNoise() without the frame term (there is no TAA to average it away).
@@ -265,7 +258,7 @@ fn fs_march(in: FsIn) -> @location(0) vec4<f32> {
     let min_dist_factor = u.c.x * x;
     let dither = ign(in.pos.xy + u.c.z * 5.588238); // c.z: frame % 64, so TAA averages the noise away
     var sum = 0.0;
-    for (var i = 0; i < 10; i = i + 1) {
+    for (var i = 0; i < MARCH_STEPS; i = i + 1) {
         let t = f32(i) + dither + u.c.y;
         let d = t * sqrt(t) * min_dist_factor; // pow(t, 1.5)
         if d >= max_dist || depth < d { break; }
@@ -281,23 +274,8 @@ fn fs_march(in: FsIn) -> @location(0) vec4<f32> {
     }
     var v = pow(sqrt(sum * visibility), u.a.w) * 0.9;
     if v > 0.0 { v = v + (dither - 0.19) / 128.0; }
-    // The surface's own shadow (g), 1 = in shadow, 0 = lit. d4_deferred_shading.fsh: nothing is lit unless NoL > 1e-3; then photon's
-    // PCSS (`get_filtered_shadows`) near the eye, faded into `get_lightmap_shadows` past the map. The face normal is rebuilt from
-    // the depth buffer (no G-buffer yet, M1) and snapped to an axis; skylight 1 and no clouds / SSS until M1 and M4 supply them.
-    var sh = 0.0;
-    if u.res.z > 0.0 && z < 1.0 {
-        let ip = vec2<i32>(in.pos.xy) * 2;
-        let p0 = view_pos(ip);
-        let n = face_normal(ip, p0);
-        if dot(n, shu.light.xyz) > 1e-3 {
-            let scene_pos = (u.cam * vec4<f32>(p0, 0.0)).xyz; // world minus the eye
-            let near_shadow = get_filtered_shadows(scene_pos, n, 1.0, 1.0, 0.0, vec2<i32>(in.pos.xy));
-            sh = 1.0 - mix(near_shadow.shadow.x, get_lightmap_shadows(1.0), clamp01(near_shadow.distance_fade));
-        } else {
-            sh = 1.0;
-        }
-    }
-    return vec4<f32>(v, sh, 0.0, 1.0);
+    // The surface shadow moved into `photon`'s deferred pass (full resolution, the G-buffer's exact face): g is unused now.
+    return vec4<f32>(v, 0.0, 0.0, 1.0);
 }
 
 // Interval of the ray parameter t where `c0 + c1 * t >= 0`, intersected into `r` (x = enter, y = exit).
@@ -436,7 +414,7 @@ impl LightShafts {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("vl_shader"), source: wgpu::ShaderSource::Wgsl(SHADER.replace("@DISTORT@", &shadows::distortion_wgsl()).replace("@PCSS@", &shadows::pcss_wgsl()).into()) });
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("vl_shader"), source: wgpu::ShaderSource::Wgsl(source().into()) });
         let pipeline = |label, layouts: &[&BindGroupLayout], fs: &str, format, blend, depth: bool| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
@@ -475,7 +453,7 @@ impl LightShafts {
     /// Run after the terrain pass: the half-resolution march. `shadow_vp` is what `ChunkPipeline::upload_uniforms` returned this
     /// frame (the shadow map has to exist: `Params::active`), `shadow_bind` its map. Then `composite` blends it onto the frame.
     pub fn march(&mut self, gpu: &Gpu, enc: &mut CommandEncoder, shadow_bind: &BindGroup, params_bind: &BindGroup, cam: &FirstPersonCamera, shadow_vp: Mat4, p: &Params, frame: u64) {
-        let (w, h) = (gpu.config.width, gpu.config.height);
+        let (w, h) = gpu.scene();
         if self.target.as_ref().map_or(true, |t| t.size != (w, h)) {
             // ponytail: half resolution, nearest depth tap (the pack marches at full resolution, 4-tap blurred); a
             // min-of-4 depth tap is the upgrade if shafts leak over thin silhouettes.
@@ -521,7 +499,7 @@ impl LightShafts {
             a: [0.0, if p.active { SHADOW_RADIUS } else { 0.0 }, p.endurance, p.power],
             b: [p.w, p.mt, p.rain, (3.0 - proj.y_axis.y / 1.37).max(0.0)],
             // minDistFactor = 8 * clamp(far, 0, 512) / 192, then * 0.5 / 1.7; addition = 0.5 * 1.42857.
-            c: [8.0 * cam.zfar.clamp(0.0, 512.0) / 192.0 * 0.5 / 1.7, 0.5 * 1.42857, (frame % 64) as f32, 0.0],
+            c: [8.0 * cam.zfar.clamp(0.0, 512.0) / 192.0 * 0.5 / 1.7 * STEP_COMPENSATION, 0.5 * 1.42857, (frame % 64) as f32, 0.0],
             s: [p.scale[0], p.scale[1], p.scale[2], p.lst],
             res: [w as f32, h as f32, p.shadow * SHADOW_DARK, 0.0],
         };
@@ -602,13 +580,13 @@ mod tests {
         assert!(p.w == 0.0 && near(p.endurance, 2.4) && near(p.power, 1.0));
     }
 
-    /// The lookups go through photon's code: the march distorts like `shadow.vsh`, the surface asks `get_filtered_shadows` and
-    /// mixes it with `get_lightmap_shadows`, and the entity map is compared through the same adaptor (`shadow_compare1`).
+    /// The march distorts like `shadow.vsh`; the surface shadow is no longer here (it is the deferred pass's), and the HDR colour is the light's.
     #[test]
-    fn lookups_use_photons_shadow_code() {
-        assert!(SHADER.contains("distort_shadow_space(vec3<f32>(c.xy, c.z * 2.0 - 1.0))") && SHADER.contains("get_filtered_shadows(scene_pos"));
-        assert!(SHADER.contains("get_lightmap_shadows(1.0)") && !SHADER.contains("NORMAL_BIAS"));
-        assert!(shadows::pcss_wgsl().contains("textureSampleCompareLevel(ent_tex, sh_samp, q, z)"), "entities shade the surface through their own map");
+    fn march_is_shafts_only_and_hdr() {
+        assert!(SHADER.contains("distort_shadow_space(vec3<f32>(c.xy, c.z * 2.0 - 1.0))") && !SHADER.contains("get_filtered_shadows"));
+        let mut p = at(6000.0, 0.0);
+        p.hdr([7.0, 6.0, 5.0]);
+        assert!(near(p.scale[0], 7.0 * SHAFT_GAIN) && near(p.scale[2], 5.0 * SHAFT_GAIN), "{:?}", p.scale);
     }
 
     #[test]
@@ -627,7 +605,7 @@ mod tests {
     /// buffer is what `Cone` declares: 16 + 16 vec4.
     #[test]
     fn shader_validates() {
-        let src = SHADER.replace("@DISTORT@", &shadows::distortion_wgsl()).replace("@PCSS@", &shadows::pcss_wgsl());
+        let src = source();
         let m = naga::front::wgsl::parse_str(&src).unwrap_or_else(|e| panic!("{}", e.emit_to_string(&src)));
         naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all()).validate(&m).unwrap();
         assert_eq!(16 + 16 * CONE_MAX * 2, 16 + 16 * 16);

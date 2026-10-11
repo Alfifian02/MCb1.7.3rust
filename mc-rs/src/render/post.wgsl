@@ -12,7 +12,7 @@ struct U {
     prev_cam: vec4<f32>,     // previousCameraPosition, frameTimeCounter
     res: vec4<f32>,          // view_res, view_pixel_size
     misc: vec4<f32>,         // aspectRatio, frameCounter, blindness, darknessFactor
-    misc2: vec4<f32>,        // biome_cave
+    misc2: vec4<f32>,        // x: biome_cave, zw: 1 / output size (final pass; 0 = same as the scene)
     wb0: vec4<f32>,          // white_balance_matrix columns
     wb1: vec4<f32>,
     wb2: vec4<f32>,
@@ -88,6 +88,15 @@ fn fetch_depth(texel: vec2<i32>) -> f32 {
     let d = vec2<i32>(textureDimensions(tex_depth));
     return textureLoad(tex_depth, clamp(texel, vec2<i32>(0), d - vec2<i32>(1)), 0);
 }
+
+// NaN / Inf guard that survives fast-math: both have an all-ones exponent, so an integer test finds them (`max(x, 0.0)` does not
+// clear a NaN on every driver, which is how one bad texel used to turn a whole frame of terrain black).
+fn finite1(x: f32) -> bool { return (bitcast<u32>(x) & 0x7f800000u) != 0x7f800000u; }
+fn sane(v: vec3<f32>) -> vec3<f32> {
+    let ok = vec3<bool>(finite1(v.x), finite1(v.y), finite1(v.z));
+    return clamp(select(vec3<f32>(0.0), v, ok), vec3<f32>(0.0), vec3<f32>(60000.0)); // 60000: inside f16
+}
+fn fetch_s(texel: vec2<i32>) -> vec3<f32> { return sane(fetch(tex_a, texel).rgb); }
 
 fn pass_uv(pos: vec4<f32>) -> vec2<f32> {
     return (pos.xy - p.rect.xy) / p.rect.zw;
@@ -393,7 +402,7 @@ fn max_of5(a: vec3<f32>, b: vec3<f32>, c: vec3<f32>, d: vec3<f32>, f: vec3<f32>)
 
 // Invertible tonemapping operator (Reinhard) applied before blending the current and previous frames
 fn reinhard(rgb: vec3<f32>) -> vec3<f32> { return rgb / (rgb + 1.0); }
-fn reinhard_inverse(rgb: vec3<f32>) -> vec3<f32> { return rgb / (1.0 - rgb); }
+fn reinhard_inverse(rgb: vec3<f32>) -> vec3<f32> { let c = clamp(rgb, vec3<f32>(0.0), vec3<f32>(0.9999)); return c / (1.0 - c); }
 
 // Estimates the closest fragment in a 5x5 radius with 5 samples in a cross pattern; returns (uv, depth)
 fn get_closest_fragment(texel0: vec2<i32>) -> vec3<f32> {
@@ -433,15 +442,15 @@ fn neighborhood_clipping(texel: vec2<i32>, current_color: vec3<f32>, history_in:
     // a b c
     // d e f
     // g h i
-    var a = fetch(tex_a, texel + vec2<i32>(-1, 1)).rgb;
-    var b = fetch(tex_a, texel + vec2<i32>(0, 1)).rgb;
-    var c = fetch(tex_a, texel + vec2<i32>(1, 1)).rgb;
-    var d = fetch(tex_a, texel + vec2<i32>(-1, 0)).rgb;
+    var a = fetch_s(texel + vec2<i32>(-1, 1));
+    var b = fetch_s(texel + vec2<i32>(0, 1));
+    var c = fetch_s(texel + vec2<i32>(1, 1));
+    var d = fetch_s(texel + vec2<i32>(-1, 0));
     var e = current_color;
-    var f = fetch(tex_a, texel + vec2<i32>(1, 0)).rgb;
-    var g = fetch(tex_a, texel + vec2<i32>(-1, -1)).rgb;
-    var h = fetch(tex_a, texel + vec2<i32>(0, -1)).rgb;
-    var i = fetch(tex_a, texel + vec2<i32>(1, -1)).rgb;
+    var f = fetch_s(texel + vec2<i32>(1, 0));
+    var g = fetch_s(texel + vec2<i32>(-1, -1));
+    var h = fetch_s(texel + vec2<i32>(0, -1));
+    var i = fetch_s(texel + vec2<i32>(1, -1));
 
     // Convert to YCoCg (clipping in a luminance-chrominance space is superior)
     a = rgb_to_ycocg(reinhard(a));
@@ -472,7 +481,7 @@ fn neighborhood_clipping(texel: vec2<i32>, current_color: vec3<f32>, history_in:
         let gamma = mix(0.75, 1.25, linear_step(0.25, 1.0, distance_factor));
 
         let mu = m0;
-        let sigma = sqrt(m1 - m0 * m0);
+        let sigma = sqrt(max(m1 - m0 * m0, vec3<f32>(0.0))); // flat areas round to a hair below 0: sqrt(-eps) was NaN
 
         min_color = max(min_color, mu - gamma * sigma);
         max_color = min(max_color, mu + gamma * sigma);
@@ -500,7 +509,7 @@ fn fs_taa(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
         let previous_uv = uv - velocity;
 
         var history_color = catmull_rom_fast_rgb(tex_b, previous_uv, 0.6);
-        history_color = max0v(history_color); // Eliminate NaNs in the history
+        history_color = sane(history_color); // Eliminate NaNs / Infs / negatives in the history
 
         var pixel_age = fetch(tex_b, vec2<i32>(previous_uv * u.res.xy)).a;
         let inside = all(c01v2(previous_uv) == previous_uv);
@@ -514,7 +523,7 @@ fn fs_taa(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
         var alpha = max(1.0 / pixel_age, blend_weight);
 
         // Native resolution TAA
-        var current_color = fetch(tex_a, texel).rgb;
+        var current_color = fetch_s(texel);
 
         // "Tonemapping" before applying TAA in order to perform the AA in SDR
         current_color = reinhard(current_color);
@@ -531,11 +540,11 @@ fn fs_taa(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
         alpha = 1.0 - alpha;
 
         current_color = mix(history_color, current_color, alpha);
-        current_color = reinhard_inverse(current_color);
+        current_color = sane(reinhard_inverse(current_color));
 
         result = vec4<f32>(current_color, pixel_age * offcenter_rejection);
     } else {
-        result = fetch(tex_a, texel);
+        result = vec4<f32>(fetch_s(texel), 1.0);
     }
 
     // Store exposure in the alpha component of the corner texel of the history buffer
@@ -1097,7 +1106,7 @@ fn fs_grade(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let texel = vec2<i32>(pos.xy);
     let uv = pos.xy * u.res.zw;
 
-    var scene_color = fetch(tex_b, texel).rgb; // colortex5: TAA output
+    var scene_color = sane(fetch(tex_b, texel).rgb); // colortex5: TAA output
     let exposure = textureLoad(tex_c, vec2<i32>(0), 0).x;
 
     if (BLOOM_ON) {
@@ -1326,20 +1335,29 @@ fn fs_fxaa(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
 //  final: CAS + dithering (MC_RENDER_QUALITY is 1: the catmull-rom upscale branch is not needed)
 // ===========================================================================================================================
 
-// FidelityFX contrast-adaptive sharpening filter, https://github.com/GPUOpen-Effects/FidelityFX-CAS
-fn cas_filter(texel: vec2<i32>, sharpness: f32) -> vec3<f32> {
-    if (!CAS_ON) { return srgb_eotf(fetch(tex_a, texel).rgb); }
+// The final pass runs at the surface's resolution, the scene at `RENDER_SCALE` of it. Every tap is a bilinear fetch on the OUTPUT pixel
+// grid (`misc2.zw` = 1 / surface size, 0 = same size as the scene); at scale 1 it lands on texel centres, i.e. the old `texelFetch`.
+fn fin_tap(pos: vec2<f32>, off: vec2<f32>) -> vec3<f32> {
+    let inv = select(u.res.zw, u.misc2.zw, u.misc2.z > 0.0);
+    return sane(smp(tex_a, (pos + off) * inv).rgb);
+}
+
+// FidelityFX contrast-adaptive sharpening filter, https://github.com/GPUOpen-Effects/FidelityFX-CAS. `pos` is the output pixel centre; the
+// taps are one SOURCE pixel apart (k output pixels), so it sharpens what the upscale softened.
+fn cas_filter(pos: vec2<f32>, sharpness: f32) -> vec3<f32> {
+    if (!CAS_ON) { return srgb_eotf(fin_tap(pos, vec2<f32>(0.0))); }
+    let k = select(1.0, max(u.res.z / u.misc2.z, 1.0), u.misc2.z > 0.0);
 
     // Fetch 3x3 neighborhood
-    var a = fetch(tex_a, texel + vec2<i32>(-1, -1)).rgb;
-    var b = fetch(tex_a, texel + vec2<i32>(0, -1)).rgb;
-    var c = fetch(tex_a, texel + vec2<i32>(1, -1)).rgb;
-    var d = fetch(tex_a, texel + vec2<i32>(-1, 0)).rgb;
-    var e = fetch(tex_a, texel).rgb;
-    var f = fetch(tex_a, texel + vec2<i32>(1, 0)).rgb;
-    var g = fetch(tex_a, texel + vec2<i32>(-1, 1)).rgb;
-    var h = fetch(tex_a, texel + vec2<i32>(0, 1)).rgb;
-    var i = fetch(tex_a, texel + vec2<i32>(1, 1)).rgb;
+    var a = fin_tap(pos, k * vec2<f32>(-1.0, -1.0));
+    var b = fin_tap(pos, k * vec2<f32>(0.0, -1.0));
+    var c = fin_tap(pos, k * vec2<f32>(1.0, -1.0));
+    var d = fin_tap(pos, k * vec2<f32>(-1.0, 0.0));
+    var e = fin_tap(pos, vec2<f32>(0.0));
+    var f = fin_tap(pos, k * vec2<f32>(1.0, 0.0));
+    var g = fin_tap(pos, k * vec2<f32>(-1.0, 1.0));
+    var h = fin_tap(pos, k * vec2<f32>(0.0, 1.0));
+    var i = fin_tap(pos, k * vec2<f32>(1.0, 1.0));
 
     // Convert to sRGB before performing CAS
     a = srgb_eotf(a);
@@ -1359,8 +1377,8 @@ fn cas_filter(texel: vec2<i32>, sharpness: f32) -> vec3<f32> {
     var max_color = max_of5(d, e, f, b, h);
     max_color = max_color + max_of5(max_color, a, c, g, i);
 
-    // Smooth minimum distance to the signal limit divided by smooth max
-    var w = c01v(min(min_color, vec3<f32>(2.0) - max_color) / max_color);
+    // Smooth minimum distance to the signal limit divided by smooth max (a black 3x3 divided 0 / 0: NaN)
+    var w = c01v(min(min_color, vec3<f32>(2.0) - max_color) / max(max_color, vec3<f32>(1e-4)));
     w = 1.0 - sqr3(1.0 - w); // Shaping amount of sharpening
     w = w * (-1.0 / mix(8.0, 5.0, sharpness));
 
@@ -1375,7 +1393,7 @@ fn cas_filter(texel: vec2<i32>, sharpness: f32) -> vec3<f32> {
 @fragment
 fn fs_final(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let texel = vec2<i32>(pos.xy);
-    var fragment_color = cas_filter(texel, CAS_SHARPNESS);
+    var fragment_color = cas_filter(pos.xy, CAS_SHARPNESS);
     fragment_color = dither_8bit(fragment_color, bayer16(vec2<f32>(texel)));
     // The swapchain is sRGB on most phones: the pack writes display-encoded values, so undo the hardware's encode.
     if (SRGB_SURFACE) { fragment_color = srgb_eotf_inv(fragment_color); }

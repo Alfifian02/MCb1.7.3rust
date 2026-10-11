@@ -1,0 +1,789 @@
+diff -ruN orig/README.md repo/README.md
+--- orig/README.md	2026-10-11 13:32:13.818492983 +0000
++++ repo/README.md	2026-10-11 22:06:27.091691322 +0000
+@@ -216,6 +216,7 @@
+   (~16 ms/frame on a Pixel 4a) no longer applies.
+ - Shadows + light shafts: the shadow map is reused between redraws (`render::camera::ShadowCache`), the shadow pass culls back faces, the shafts' blend shares the HUD pass. See the ROADMAP changelog for the levers still open. Unmeasured.
+ - Shadows + light shafts + glare: the shadow map is reused between redraws (`render::camera::ShadowCache`), the shadow pass culls back faces, the shafts' blend shares the HUD pass, the glare quad is smaller. See the ROADMAP changelog for the levers still open. Unmeasured.
++- Internal resolution is `gpu::context::RENDER_SCALE` (0.67) of the screen, upscaled by the final pass; the surface shadow is looked up in the deferred pass (`render/photon.rs`), the light shafts are `render/vl.rs` only. The FPS log line shows CPU ms per frame. Unmeasured on a device.
+ - M13 frustum culling is in (`render::camera::Frustum`, filtered through `ChunkManager::meshes_where`); M13 still adds
+   greedy meshing.
+ - No JNI calls except the one `android_main` entry point; everything
+diff -ruN orig/ROADMAP.md repo/ROADMAP.md
+--- orig/ROADMAP.md	2026-10-11 13:32:13.818641532 +0000
++++ repo/ROADMAP.md	2026-10-11 22:06:27.090952816 +0000
+@@ -46,6 +46,12 @@
+ BiomeGenBase but climate never selects it; b1.7.3 has no ravines.
+ 
+ ## Changelog
++- `done` shader pass for the OPPO A5i video (black terrain flicker, dark leaves, no light shafts, ~6 fps). Written WITHOUT a Rust toolchain or a GPU: not compiled, not run; +1 test (`photon::deferred_shader_validates`), `vl` tests changed (`march_is_shafts_only_and_hdr` replaces `lookups_use_photons_shadow_code`). Numbers below are from the video (143 frames in 22.9 s: 160 ms average, 470 ms worst), not from a profiler:
++    - Black flicker, root cause in `render/post.wgsl` TAA: `sqrt(m1 - m0 * m0)` (variance clip) rounds to a hair below 0 on flat areas -> NaN, which the old `max0v(history)` did not clear on every driver (it came back one frame later: the strobe). Also `reinhard_inverse` divided by `1 - x` with x >= 1 after the YCoCg clip, and CAS divided 0 / 0 on a black 3x3. Now `sane()` (integer test for the all-ones exponent, survives fast-math) guards the TAA inputs, history and output and the grade input, the variance is `max(.., 0)`, the inverse is clamped to < 1, CAS divides by `max(max_color, 1e-4)`. The deferred pass guards its own decode and output the same way.
++    - Dark, flickering leaves: the surface shadow was computed in `vl.rs` at half resolution from a face normal rebuilt from the depth buffer; alpha-cut leaves have noisy depth, so the axis snap picked a wrong face and `n.L <= 0` shadowed them (the TAA jitter made it flicker). Now `photon.rs` `fs_deferred` looks the shadow up at full resolution with the G-buffer's exact face: normal offset of ~1.2 texels (x the distortion factor, more at grazing angles), a 0.15 block depth bias, 4 hardware-bilinear compares rotated by IGN, faded to `get_lightmap_shadows` at the map edge. Deleted from the march: `face_normal`, `view_pos`, the PCSS include and its blocker search (the `shadows::pcss_wgsl` code stays, unused). `Photon::new` / `draw_deferred` take the shadow group.
++    - Light shafts: their colour was AstraLex's LDR scale next to a 7x HDR sun. `Params::hdr(light_color)` replaces it with `photon::lighting().light_color * SHAFT_GAIN (0.30) * (1 - 0.8 rain)`; the time-of-day weights are unchanged. The march takes 8 samples (was 10, spacing x1.4 keeps the reach). The shadow cone can no longer black out the frame (its darkening was already capped at `SHADOW_DARK`).
++    - Cost: `RENDER_SCALE` 0.67 (`gpu/context.rs`): depth, G-buffer, HDR scene, shafts and the post chain run at the scaled size and `fs_final` upscales (bilinear taps on the output grid + CAS one source pixel apart; `Post::new` / `resize` take the surface size). `ENTITY_SHADOWS` (`lib.rs`) false: no per-frame 1024^2 entity map, no second fetch per tap. The FPS log line now prints CPU ms per frame (without the swap-chain wait): near the frame time = CPU-bound (chunk generation / meshing on the render thread), far below = GPU-bound.
++    - UNVERIFIED on a device: all of it. Levers: `RENDER_SCALE`, `SHAFT_GAIN`, `MARCH_STEPS`, the PCF radius / bias in `photon.rs`, `Settings.taa` / `cas`. ponytail: the entity cone umbra still loops up to 8 boxes per full-resolution pixel when mobs are near (`CONE_MAX`); the shadow map is still redrawn on every `mesh_gen` change while chunks stream in.
+ - `done` milestone 6 of the Photon port: GTAO, water + translucent layer, weather (written WITHOUT a Rust toolchain: not compiled, not run; +3 tests not run: `gtao::shader_text_is_complete`, `water::water_text_and_pack`, `weather::rain_columns_and_gaussian`; the last compares `JavaRandom::next_gaussian` with the JDK value for seed 42 from memory):
+     - `render/gtao.rs`: `d3_ao.fsh` + `gtao.glsl` + slerp/catmull-rom/r2, half resolution, temporal accumulation, ping-pong history. Outputs `ambient` (ao, SSS, bent normal xy) and `history_data` (1 - depth, age); `AO_UPSAMPLE_WGSL` is `d4_deferred_shading`'s depth-aware upsample for milestone 1 to paste. Normal rebuilt from depth until the G-buffer exists (marked `ponytail:`). Not wired into `lib.rs`: nothing reads it yet.
+     - `render/water.rs`: `gbuffers_all_translucent` water path (Gerstner waves, height variation, parallax, `get_water_displacement` in the vertex stage, texture + edge highlight, `water_fog_simple` absorption, GGX sun/moon highlight, diffuse) into a translucent layer with its own depth + a refraction target, then `c1_blend_layers` (refraction + `scene * (1 - a) + rgb`). Needs a scene colour texture that is not the target (milestone 1's HDR buffer) and a stored opaque depth. Missing, all because the input is milestone 2/3/4/5's: sky and environment reflections, PCSS shadows (uses the pack's no-shadow `pow8(skylight)`), cloud shadows, `common_fog`/analytic fog (uses the chunk shader's terrain fog), Purkinje shift. Sky/ambient colours are uniforms (`Frame`).
+diff -ruN orig/mc-rs/src/gpu/context.rs repo/mc-rs/src/gpu/context.rs
+--- orig/mc-rs/src/gpu/context.rs	2026-10-11 13:32:13.822485637 +0000
++++ repo/mc-rs/src/gpu/context.rs	2026-10-11 22:03:42.414732128 +0000
+@@ -45,6 +45,15 @@
+     }
+ }
+ 
++/// Internal render resolution as a fraction of the surface: depth, G-buffer, HDR scene and the whole post chain run at this size and the
++/// final pass upscales (bilinear + CAS). 1.0 = native. Low-end phones (Mali-G52 class) are fill-rate bound: 0.67 is 2.2x fewer pixels.
++pub const RENDER_SCALE: f32 = 0.67;
++
++/// The scene size for a surface of `w` x `h`.
++pub fn scene_size(w: u32, h: u32) -> (u32, u32) {
++    (((w as f32 * RENDER_SCALE).round() as u32).max(1), ((h as f32 * RENDER_SCALE).round() as u32).max(1))
++}
++
+ pub struct Gpu {
+     pub instance: Instance,
+     pub surface: Surface<'static>,
+@@ -167,9 +176,10 @@
+         surface.configure(&device, &config);
+ 
+         // Depth texture at the real size from the start -- no resize race.
+-        let depth_tex = Self::create_depth(&device, width, height);
++        let (sw, sh) = scene_size(width, height);
++        let depth_tex = Self::create_depth(&device, sw, sh);
+         let depth_view = depth_tex.create_view(&wgpu::TextureViewDescriptor::default());
+-        let depth_copy = Self::create_depth(&device, width, height);
++        let depth_copy = Self::create_depth(&device, sw, sh);
+         let depth_copy_view = depth_copy.create_view(&wgpu::TextureViewDescriptor::default());
+ 
+         // Leak the AndroidWindow wrapper so the surface has a stable owner.
+@@ -194,15 +204,21 @@
+         self.config.width = width.max(1);
+         self.config.height = height.max(1);
+         self.surface.configure(&self.device, &self.config);
+-        self.depth_tex = Self::create_depth(&self.device, self.config.width, self.config.height);
++        let (sw, sh) = scene_size(self.config.width, self.config.height);
++        self.depth_tex = Self::create_depth(&self.device, sw, sh);
+         self.depth_view = self.depth_tex.create_view(&wgpu::TextureViewDescriptor::default());
+-        self.depth_copy = Self::create_depth(&self.device, self.config.width, self.config.height);
++        self.depth_copy = Self::create_depth(&self.device, sw, sh);
+         self.depth_copy_view = self.depth_copy.create_view(&wgpu::TextureViewDescriptor::default());
+     }
+ 
+     /// Copy the finished opaque depth into `depth_copy_view`; run after the G-buffer pass.
+     pub fn copy_depth(&self, enc: &mut wgpu::CommandEncoder) {
+-        enc.copy_texture_to_texture(self.depth_tex.as_image_copy(), self.depth_copy.as_image_copy(), Extent3d { width: self.config.width.max(1), height: self.config.height.max(1), depth_or_array_layers: 1 });
++        enc.copy_texture_to_texture(self.depth_tex.as_image_copy(), self.depth_copy.as_image_copy(), Extent3d { width: self.depth_tex.width(), height: self.depth_tex.height(), depth_or_array_layers: 1 });
++    }
++
++    /// Size of the depth / G-buffer / HDR scene (`scene_size` of the surface).
++    pub fn scene(&self) -> (u32, u32) {
++        (self.depth_tex.width(), self.depth_tex.height())
+     }
+ 
+     fn create_depth(device: &Device, width: u32, height: u32) -> Texture {
+diff -ruN orig/mc-rs/src/lib.rs repo/mc-rs/src/lib.rs
+--- orig/mc-rs/src/lib.rs	2026-10-11 13:32:13.822900240 +0000
++++ repo/mc-rs/src/lib.rs	2026-10-11 22:05:53.308385943 +0000
+@@ -62,6 +62,10 @@
+ /// Chunks written per autosave, so the first ones after generating a lot of terrain do not hitch a frame.
+ const AUTOSAVE_CHUNKS: usize = 24;
+ 
++/// Moving things (items, mobs, falling blocks) cast shadows through a second 1024^2 map redrawn every frame. Off: that is a clear + a draw per frame
++/// and a second fetch per shadow tap, for a nicety. ponytail: flip it to bring them back (the deferred shader and the pass both follow it).
++pub(crate) const ENTITY_SHADOWS: bool = false;
++
+ const LOOK_SENS: f32 = 0.004;
+ /// World units per second when the d-pad is fully pressed.
+ const MOVE_SPEED: f32 = physics::WALK_SPEED;
+@@ -133,6 +137,8 @@
+     /// Furnace tile entities by block position (created on first use), and the time left over from the last 20 Hz tick.
+     furnaces: HashMap<(i32, i32, i32), Furnace>,
+     furn_acc: f32,
++    /// CPU seconds spent in `render` (without the swap-chain wait) since the last FPS log line.
++    cpu_acc: f32,
+     /// Chest tile entities by block position (created on first open, or by a dungeon's populate).
+     chests: HashMap<chest::Pos, Chest>,
+     /// The finger gesture on the open screen, to tell a tap from a spread.
+@@ -197,9 +203,10 @@
+         let sky_renderer = SkyRenderer::new(&gpu.device, &gpu.queue, photon::HDR_FORMAT);
+         let shadows = Shadows::new(&gpu.device, &gpu.queue);
+         let shafts = LightShafts::new(&gpu.device, photon::HDR_FORMAT, &pipe.shadow_layout, &shadows.layout);
+-        let photon = Photon::new(&gpu.device, &pipe.bind_layout, width, height);
++        let (sw, sh) = gpu.scene();
++        let photon = Photon::new(&gpu.device, &pipe.bind_layout, &pipe.shadow_layout, sw, sh);
+         let clouds = clouds::RUN_CLOUDS.then(|| Clouds::new(&gpu.device, &gpu.queue, clouds::atmosphere_lut(&gpu.device, &gpu.queue)));
+-        let post = Post::new(&gpu.device, &gpu.queue, width, height, photon::HDR_FORMAT, surface_format, &gpu.depth_view, post::Settings::default());
++        let post = Post::new(&gpu.device, &gpu.queue, sw, sh, photon::HDR_FORMAT, surface_format, &gpu.depth_view, (width, height), post::Settings::default());
+         let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as i64);
+ 
+         let mut app = Self {
+@@ -244,6 +251,7 @@
+             furnaces: HashMap::new(),
+             chests: HashMap::new(),
+             furn_acc: 0.0,
++            cpu_acc: 0.0,
+             gesture: None,
+             vitals: Vitals::default(),
+             spawn,
+@@ -329,7 +337,8 @@
+     fn resize(&mut self, w: u32, h: u32) {
+         self.gpu.resize(w, h);
+         self.photon.invalidate();
+-        self.post.resize(&self.gpu.device, &self.gpu.queue, w, h, &self.gpu.depth_view);
++        let (sw, sh) = self.gpu.scene();
++        self.post.resize(&self.gpu.device, &self.gpu.queue, sw, sh, &self.gpu.depth_view, (w, h));
+         self.camera.aspect = w as f32 / h as f32;
+         self.touch.ensure_layout(w, h);
+         self.hud.resize(&self.gpu.queue, w, h);
+@@ -735,6 +744,7 @@
+     }
+ 
+     fn render(&mut self) {
++        let t0 = Instant::now();
+         let dt = self.last_frame.elapsed().as_secs_f32().min(0.1); // frameTime for the post chain
+         self.step_frame();
+         let (pcx, pcz) = (chunk_coord(self.player.pos.x), chunk_coord(self.player.pos.z));
+@@ -775,13 +785,16 @@
+         let fog = sky::fog_color(angle, sky_rgb, rain, thunder);
+         // Terrain fog (AstraLex `NormalFog`): fades to the horizon colour at the render distance; off under water.
+         self.pipe.set_fog(&self.gpu.queue, fog, if eye_in_water { 0.0 } else { (RENDER_DIST * 16) as f32 }, rain);
+-        self.pipe.set_lighting(&self.gpu.queue, &photon::lighting(angle, rain, self.shadow.light));
++        let lit = photon::lighting(angle, rain, self.shadow.light);
++        self.pipe.set_lighting(&self.gpu.queue, &lit);
++        vlp.hdr(lit.light_color); // the shafts glow in the scene's HDR units: the light's own colour
+         let clear = wgpu::Color { r: fog[0] as f64, g: fog[1] as f64, b: fog[2] as f64, a: 1.0 };
+         self.sky.update(&self.gpu.queue, &self.camera, &SkyFrame { angle, rain, seconds: self.world_ticks as f32 / 20.0 });
+         if self.frames == 0 {
+             log::info!("render: first frame, surface_format={:?}, {} chunks loaded", self.gpu.surface_format(), self.chunks.loaded());
+         }
+ 
++        let t_acq = Instant::now();
+         let frame = match self.gpu.surface.get_current_texture() {
+             Ok(f) => f,
+             Err(e) => {
+@@ -792,6 +805,7 @@
+                 return;
+             }
+         };
++        let acq = t_acq.elapsed(); // the swap-chain wait (vsync / GPU back-pressure) is not CPU work
+         // Reconcile surface/config size. Native-activity doesn't always send
+         // MainEvent::WindowResized before the first frame, so the cached
+         // config.width/height can be wrong (1x1 from from_android_window).
+@@ -804,7 +818,8 @@
+             return;
+         }
+         let view_tex = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+-        self.photon.resize(&self.gpu.device, actual_w, actual_h);
++        let (sw, sh) = self.gpu.scene();
++        self.photon.resize(&self.gpu.device, sw, sh);
+ 
+         let mut enc = self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
+         self.sky.encode(&mut enc); // sky map + SH (Photon d0, d4a)
+@@ -831,7 +846,7 @@
+         }
+         // Moving things cast shadows through a second map, redrawn every frame (the terrain map is cached, a walking mob would leave a
+         // trail in it). It is cleared once more after the last entity is gone. ponytail: one draw of the whole item buffer, no culling.
+-        let draw_ent = (sun_strength > 0.0 || vlp.active) && (item_indices > 0 || self.ent_shadow_dirty);
++        let draw_ent = ENTITY_SHADOWS && (sun_strength > 0.0 || vlp.active) && (item_indices > 0 || self.ent_shadow_dirty);
+         if draw_ent {
+             let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                 label: Some("entity_shadow_pass"),
+@@ -937,7 +952,7 @@
+                 occlusion_query_set: None,
+             });
+             self.sky.draw(&mut rp);
+-            self.photon.draw_deferred(&mut rp, &self.pipe.bind_group);
++            self.photon.draw_deferred(&mut rp, &self.pipe.bind_group, &self.pipe.shadow_bind);
+             // Water last: blended over the terrain, no depth write (`water_pipeline`; same groups as the terrain).
+             rp.set_pipeline(&self.pipe.water_pipeline);
+             rp.set_bind_group(0, &self.pipe.bind_group, &[]);
+@@ -972,6 +987,7 @@
+             rp.draw(0..hud_vertex_count as u32, 0..1);
+         }
+         self.gpu.queue.submit(std::iter::once(enc.finish()));
++        self.cpu_acc += t0.elapsed().saturating_sub(acq).as_secs_f32();
+         frame.present();
+ 
+         self.frames += 1;
+@@ -981,7 +997,8 @@
+             let fps = self.frames as f32 / now.duration_since(self.fps_last).as_secs_f32();
+             self.fps_recent = fps.round() as u32;
+             self.fps_overall = (self.total_frames as f32 / now.duration_since(self.started).as_secs_f32()).round() as u32;
+-            log::info!("FPS: {fps:.1} (average since start {}), {} chunks loaded", self.fps_overall, self.chunks.loaded());
++            log::info!("FPS: {fps:.1} (average since start {}), {} chunks loaded, CPU {:.1} ms/frame (CPU ~ frame time: CPU-bound; far below: GPU-bound)", self.fps_overall, self.chunks.loaded(), self.cpu_acc / self.frames as f32 * 1000.0);
++            self.cpu_acc = 0.0;
+             self.frames = 0;
+             self.fps_last = now;
+         }
+diff -ruN orig/mc-rs/src/render/photon.rs repo/mc-rs/src/render/photon.rs
+--- orig/mc-rs/src/render/photon.rs	2026-10-11 13:32:13.823753293 +0000
++++ repo/mc-rs/src/render/photon.rs	2026-10-11 22:04:45.747586497 +0000
+@@ -400,6 +400,15 @@
+ @group(1) @binding(1) var depth_tex: texture_depth_2d;
+ @group(1) @binding(2) var vl_tex: texture_2d<f32>;
+ @group(1) @binding(3) var samp: sampler;
++// The sun's depth map(s), the same group the terrain shadow pass fills (`ChunkPipeline::shadow_bind`).
++@group(2) @binding(0) var sh_tex: texture_depth_2d;
++@group(2) @binding(1) var sh_samp: sampler_comparison;
++@ENT_DECL@
++
++@DISTORT@
++
++const SHADOW_DEPTH_BIAS: f32 = @DBIAS@; // 0.15 block in shadow-map depth units
++const PCF_RADIUS: f32 = 1.3 / @RES@;   // taps sit 1.3 texels out; each tap is a hardware bilinear compare
+ 
+ struct FsIn {
+     @builtin(position) pos: vec4<f32>,
+@@ -414,6 +423,40 @@
+     return o;
+ }
+ 
++// NaN / Inf guard that survives fast-math (both have an all-ones exponent).
++fn finite1(x: f32) -> bool { return (bitcast<u32>(x) & 0x7f800000u) != 0x7f800000u; }
++fn sane3(v: vec3<f32>) -> vec3<f32> {
++    let ok = vec3<bool>(finite1(v.x), finite1(v.y), finite1(v.z));
++    return clamp(select(vec3<f32>(0.0), v, ok), vec3<f32>(0.0), vec3<f32>(60000.0));
++}
++
++fn ign(p: vec2<f32>) -> f32 {
++    return fract(52.9829189 * fract(0.06711056 * p.x + 0.00583715 * p.y));
++}
++
++fn sun_visible(wp: vec3<f32>, n: vec3<f32>, nol: f32, sky: f32, frag: vec2<f32>) -> f32 {
++    let lightmap = smoothstep(13.5 / 15.0, 14.5 / 15.0, sky); // outside the map, and the leak-free fallback
++    let leak = smoothstep(0.0, 2.0 / 15.0, sky);               // no sun in caves
++    // Normal offset of ~1.2 texels (a texel is `0.125 * factor` blocks), more at grazing angles; then the map's own lookup.
++    let c0 = u.shadow_vp * vec4<f32>(wp, 1.0);
++    let f = get_distortion_factor(c0.xy);
++    let c = u.shadow_vp * vec4<f32>(wp + n * (0.15 * f) * (2.0 - clamp(nol, 0.0, 1.0)), 1.0);
++    let p = distort_shadow_space(vec3<f32>(c.xy, c.z * 2.0 - 1.0)) * 0.5 + 0.5;
++    let edge = smoothstep(0.80, 1.0, max(abs(c.x), abs(c.y)));
++    if edge >= 1.0 || c.z < 0.0 || c.z > 1.0 { return lightmap; }
++    let z = p.z - SHADOW_DEPTH_BIAS;
++    let rot = ign(frag) * 6.2831853;
++    var sum = 0.0;
++    for (var i = 0; i < 4; i = i + 1) {
++        let a = rot + f32(i) * 1.5707963;
++        let q = vec2<f32>(p.x + cos(a) * PCF_RADIUS, 1.0 - (p.y + sin(a) * PCF_RADIUS)); // GL (y up) -> texture (y down)
++        var lit = textureSampleCompareLevel(sh_tex, sh_samp, q, z);
++        @ENT_LIT@
++        sum = sum + lit;
++    }
++    return mix(sum * 0.25 * leak, lightmap, edge);
++}
++
+ // d4_deferred_shading.fsh, terrain branch. Sky pixels (depth 1) keep what the sky pass drew.
+ @fragment
+ fn fs_deferred(in: FsIn) -> @location(0) vec4<f32> {
+@@ -421,26 +464,45 @@
+     let z = textureLoad(depth_tex, ip, 0);
+     if z >= 1.0 { discard; }
+     let g = textureLoad(gbuf, ip, 0);
+-    // alpha = face * 256 + sky * 16 + block (`Vertex.lm`, exact in f16)
+-    let face = u32(floor(g.a / 256.0 + 0.001));
+-    let lm = g.a - f32(face) * 256.0;
+-    let sky_i = floor(lm / 16.0 + 0.001);
++    // alpha = face * 256 + sky * 16 + block (`Vertex.lm`, exact in f16); clamped so a bad texel cannot make a negative `pow`
++    let a = select(0.0, clamp(g.a, 0.0, 1535.0), finite1(g.a));
++    let face = min(u32(floor(a / 256.0 + 0.001)), 5u);
++    let lm = a - f32(face) * 256.0;
++    let sky_i = clamp(floor(lm / 16.0 + 0.001), 0.0, 15.0);
+     let sky = sky_i / 15.0;
+-    let bl = (lm - sky_i * 16.0) / 15.0;
++    let bl = clamp((lm - sky_i * 16.0) / 15.0, 0.0, 1.0);
+     let dims = vec2<f32>(textureDimensions(depth_tex));
+     let uv = in.pos.xy / dims;
+-    // The surface shadow `render::vl`'s march wrote (g, 1 = in shadow), bilinear from half resolution.
+-    let shadow = 1.0 - textureSampleLevel(vl_tex, samp, uv, 0.0).g;
+-    let rgb = photon_light(to_working(g.rgb), face, sky, bl, shadow);
+-    // view-space distance for the fog: z_view = -B / (z + A) for glam's depth 0..1 projection
++    // view-space position: z_view = -B / (z + A) for glam's depth 0..1 projection
+     let zv = -u.proj[3][2] / (z + u.proj[2][2]);
+     let nd = vec2<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
+-    let d = length(vec3<f32>(nd.x * -zv / u.proj[0][0], nd.y * -zv / u.proj[1][1], zv));
+-    return vec4<f32>(apply_fog(rgb, d), 1.0);
++    let vpos = vec3<f32>(nd.x * -zv / u.proj[0][0], nd.y * -zv / u.proj[1][1], zv);
++    let d = length(vpos);
++    let n = face_normal(face);
++    let nol = dot(n, u.sun.xyz);
++    var shadow = 0.0;
++    if nol > 1e-3 {
++        // world position: eye + R^T * view position (`v * M` is M^T v)
++        let wp = u.eye.xyz + vpos * mat3x3<f32>(u.view[0].xyz, u.view[1].xyz, u.view[2].xyz);
++        shadow = sun_visible(wp, n, nol, sky, in.pos.xy);
++    }
++    let rgb = photon_light(to_working(g.rgb), face, sky, bl, shadow);
++    return vec4<f32>(sane3(apply_fog(rgb, d)), 1.0);
+ }
+ 
+ "#;
+ 
++/// `SHADER` with the shadow-map constants spliced in (a test validates the result).
++pub fn deferred_source() -> String {
++    let ent = crate::ENTITY_SHADOWS;
++    SHADER
++        .replace("@DISTORT@", &crate::render::shadows::distortion_wgsl())
++        .replace("@ENT_DECL@", if ent { "@group(2) @binding(2) var ent_tex: texture_depth_2d;" } else { "" })
++        .replace("@ENT_LIT@", if ent { "lit = min(lit, textureSampleCompareLevel(ent_tex, sh_samp, q, z));" } else { "" })
++        .replace("@DBIAS@", &format!("{:?}", 0.15 * crate::render::shadows::BLOCK_DEPTH))
++        .replace("@RES@", &format!("{:?}", crate::gpu::pipeline::SHADOW_RES as f32))
++}
++
+ /// Size-dependent targets + the two full-screen pipelines.
+ pub struct Photon {
+     size: (u32, u32),
+@@ -469,7 +531,7 @@
+ 
+ impl Photon {
+     /// `uniform_layout` is `ChunkPipeline::bind_layout` (group 0: the shared uniform block).
+-    pub fn new(device: &Device, uniform_layout: &BindGroupLayout, w: u32, h: u32) -> Self {
++    pub fn new(device: &Device, uniform_layout: &BindGroupLayout, shadow_layout: &BindGroupLayout, w: u32, h: u32) -> Self {
+         let gbuf = gbuffer(device, w, h);
+         let entry = |binding, ty| wgpu::BindGroupLayoutEntry { binding, visibility: wgpu::ShaderStages::FRAGMENT, ty, count: None };
+         let tex = |sample_type| wgpu::BindingType::Texture { sample_type, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false };
+@@ -483,12 +545,12 @@
+             ],
+         });
+         let samp = device.create_sampler(&wgpu::SamplerDescriptor { mag_filter: wgpu::FilterMode::Linear, min_filter: wgpu::FilterMode::Linear, ..Default::default() });
+-        let src = format!("{WGSL_COMMON}{SHADER}");
++        let src = format!("{WGSL_COMMON}{}", deferred_source());
+         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("photon_shader"), source: wgpu::ShaderSource::Wgsl(src.into()) });
+         let pipeline = |label, group1: &BindGroupLayout, fs: &str, format, depth: bool| {
+             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                 label: Some(label),
+-                layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some(label), bind_group_layouts: &[uniform_layout, group1], push_constant_ranges: &[] })),
++                layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some(label), bind_group_layouts: &[uniform_layout, group1, shadow_layout], push_constant_ranges: &[] })),
+                 vertex: wgpu::VertexState { module: &module, entry_point: Some("vs_full"), buffers: &[], compilation_options: wgpu::PipelineCompilationOptions::default() },
+                 fragment: Some(wgpu::FragmentState {
+                     module: &module,
+@@ -546,11 +608,12 @@
+     }
+ 
+     /// Inside the scene pass, after the sky: `uniforms` is `ChunkPipeline::bind_group`.
+-    pub fn draw_deferred(&self, rp: &mut wgpu::RenderPass<'_>, uniforms: &BindGroup) {
++    pub fn draw_deferred(&self, rp: &mut wgpu::RenderPass<'_>, uniforms: &BindGroup, shadow: &BindGroup) {
+         let Some(b) = &self.deferred_bind else { return };
+         rp.set_pipeline(&self.deferred);
+         rp.set_bind_group(0, uniforms, &[]);
+         rp.set_bind_group(1, b, &[]);
++        rp.set_bind_group(2, shadow, &[]);
+         rp.draw(0..3, 0..1);
+     }
+ }
+@@ -568,6 +631,15 @@
+         assert!(up.iter().all(|c| c.is_finite() && *c >= 0.0), "{up:?}");
+     }
+ 
++    /// The deferred shader (with the shadow lookup spliced in) parses and validates, with and without the entity map.
++    #[test]
++    fn deferred_shader_validates() {
++        let src = format!("{WGSL_COMMON}{}", deferred_source());
++        let m = naga::front::wgsl::parse_str(&src).unwrap_or_else(|e| panic!("{}", e.emit_to_string(&src)));
++        naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all()).validate(&m).unwrap();
++        assert!(deferred_source().contains("sun_visible(wp, n, nol, sky"), "the surface shadow is looked up here, with the G-buffer face");
++    }
++
+     /// Light colour: bright and slightly warm at noon, gone with the sun below the horizon, the moon dim and blue at night.
+     #[test]
+     fn light_colours_follow_the_time_of_day() {
+diff -ruN orig/mc-rs/src/render/post.rs repo/mc-rs/src/render/post.rs
+--- orig/mc-rs/src/render/post.rs	2026-10-11 13:32:13.823805681 +0000
++++ repo/mc-rs/src/render/post.rs	2026-10-11 22:03:42.415442677 +0000
+@@ -462,6 +462,8 @@
+     prev_proj: Mat4,
+     prev_cam: Vec3,
+     first: bool,
++    /// Surface size the final pass writes (the scene may be smaller: `gpu::context::RENDER_SCALE`).
++    out: (u32, u32),
+ }
+ 
+ fn make_tex(device: &wgpu::Device, label: &str, w: u32, h: u32, format: wgpu::TextureFormat, mips: u32) -> wgpu::Texture {
+@@ -494,7 +496,7 @@
+     /// until the G-buffer milestone makes it HDR), `surface_format` the swapchain, `depth` the game's depth view (rebuilt, with
+     /// this, on every resize).
+     #[allow(clippy::too_many_arguments)]
+-    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, w: u32, h: u32, scene_format: wgpu::TextureFormat, surface_format: wgpu::TextureFormat, depth: &wgpu::TextureView, settings: Settings) -> Self {
++    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, w: u32, h: u32, scene_format: wgpu::TextureFormat, surface_format: wgpu::TextureFormat, depth: &wgpu::TextureView, out: (u32, u32), settings: Settings) -> Self {
+         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("post"), source: wgpu::ShaderSource::Wgsl(shader_source(&settings, surface_format.is_srgb()).into()) });
+         let entry = |binding, ty| wgpu::BindGroupLayoutEntry { binding, visibility: wgpu::ShaderStages::FRAGMENT, ty, count: None };
+         let tex = |filterable| wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false };
+@@ -574,7 +576,7 @@
+             layout: &layout1,
+             entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer: &pbuf, offset: 0, size: wgpu::BufferSize::new(std::mem::size_of::<P>() as u64) }) }],
+         });
+-        let post = Self { settings, pipes, layout0, ubuf, pbuf, pgroup, samp, noise, dummy, scene_format, t, scene_view, frame: 0, prev_view: Mat4::IDENTITY, prev_proj: Mat4::IDENTITY, prev_cam: Vec3::ZERO, first: true };
++        let post = Self { settings, pipes, layout0, ubuf, pbuf, pgroup, samp, noise, dummy, scene_format, t, scene_view, frame: 0, prev_view: Mat4::IDENTITY, prev_proj: Mat4::IDENTITY, prev_cam: Vec3::ZERO, first: true, out };
+         post.write_passes(queue);
+         post
+     }
+@@ -596,7 +598,8 @@
+         Mat4::from_translation(Vec3::new(j.x, j.y, 0.0)) * proj
+     }
+ 
+-    pub fn resize(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, w: u32, h: u32, depth: &wgpu::TextureView) {
++    pub fn resize(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, w: u32, h: u32, depth: &wgpu::TextureView, out: (u32, u32)) {
++        self.out = out;
+         let (t, sv) = Self::targets(device, &self.layout0, &self.ubuf, &self.samp, &self.noise, &self.dummy, depth, self.scene_format, w, h, &self.settings);
+         self.t = t;
+         self.scene_view = sv;
+@@ -709,7 +712,7 @@
+             prev_cam: [prev_cam.x, prev_cam.y, prev_cam.z, f.time],
+             res: [w, h, 1.0 / w, 1.0 / h],
+             misc: [w / h, (self.frame % 720720) as f32, 0.0, 0.0], // aspectRatio, frameCounter, blindness, darknessFactor
+-            misc2: [0.0; 4],                                       // biome_cave
++            misc2: [0.0, 0.0, 1.0 / self.out.0.max(1) as f32, 1.0 / self.out.1.max(1) as f32], // biome_cave, 1 / surface size
+             wb: [col(wb.x_axis), col(wb.y_axis), col(wb.z_axis)],
+         };
+         queue.write_buffer(&self.ubuf, 0, bytemuck::bytes_of(&u));
+diff -ruN orig/mc-rs/src/render/post.wgsl repo/mc-rs/src/render/post.wgsl
+--- orig/mc-rs/src/render/post.wgsl	2026-10-11 13:32:13.823869163 +0000
++++ repo/mc-rs/src/render/post.wgsl	2026-10-11 13:32:48.991267445 +0000
+@@ -12,7 +12,7 @@
+     prev_cam: vec4<f32>,     // previousCameraPosition, frameTimeCounter
+     res: vec4<f32>,          // view_res, view_pixel_size
+     misc: vec4<f32>,         // aspectRatio, frameCounter, blindness, darknessFactor
+-    misc2: vec4<f32>,        // biome_cave
++    misc2: vec4<f32>,        // x: biome_cave, zw: 1 / output size (final pass; 0 = same as the scene)
+     wb0: vec4<f32>,          // white_balance_matrix columns
+     wb1: vec4<f32>,
+     wb2: vec4<f32>,
+@@ -89,6 +89,15 @@
+     return textureLoad(tex_depth, clamp(texel, vec2<i32>(0), d - vec2<i32>(1)), 0);
+ }
+ 
++// NaN / Inf guard that survives fast-math: both have an all-ones exponent, so an integer test finds them (`max(x, 0.0)` does not
++// clear a NaN on every driver, which is how one bad texel used to turn a whole frame of terrain black).
++fn finite1(x: f32) -> bool { return (bitcast<u32>(x) & 0x7f800000u) != 0x7f800000u; }
++fn sane(v: vec3<f32>) -> vec3<f32> {
++    let ok = vec3<bool>(finite1(v.x), finite1(v.y), finite1(v.z));
++    return clamp(select(vec3<f32>(0.0), v, ok), vec3<f32>(0.0), vec3<f32>(60000.0)); // 60000: inside f16
++}
++fn fetch_s(texel: vec2<i32>) -> vec3<f32> { return sane(fetch(tex_a, texel).rgb); }
++
+ fn pass_uv(pos: vec4<f32>) -> vec2<f32> {
+     return (pos.xy - p.rect.xy) / p.rect.zw;
+ }
+@@ -393,7 +402,7 @@
+ 
+ // Invertible tonemapping operator (Reinhard) applied before blending the current and previous frames
+ fn reinhard(rgb: vec3<f32>) -> vec3<f32> { return rgb / (rgb + 1.0); }
+-fn reinhard_inverse(rgb: vec3<f32>) -> vec3<f32> { return rgb / (1.0 - rgb); }
++fn reinhard_inverse(rgb: vec3<f32>) -> vec3<f32> { let c = clamp(rgb, vec3<f32>(0.0), vec3<f32>(0.9999)); return c / (1.0 - c); }
+ 
+ // Estimates the closest fragment in a 5x5 radius with 5 samples in a cross pattern; returns (uv, depth)
+ fn get_closest_fragment(texel0: vec2<i32>) -> vec3<f32> {
+@@ -433,15 +442,15 @@
+     // a b c
+     // d e f
+     // g h i
+-    var a = fetch(tex_a, texel + vec2<i32>(-1, 1)).rgb;
+-    var b = fetch(tex_a, texel + vec2<i32>(0, 1)).rgb;
+-    var c = fetch(tex_a, texel + vec2<i32>(1, 1)).rgb;
+-    var d = fetch(tex_a, texel + vec2<i32>(-1, 0)).rgb;
++    var a = fetch_s(texel + vec2<i32>(-1, 1));
++    var b = fetch_s(texel + vec2<i32>(0, 1));
++    var c = fetch_s(texel + vec2<i32>(1, 1));
++    var d = fetch_s(texel + vec2<i32>(-1, 0));
+     var e = current_color;
+-    var f = fetch(tex_a, texel + vec2<i32>(1, 0)).rgb;
+-    var g = fetch(tex_a, texel + vec2<i32>(-1, -1)).rgb;
+-    var h = fetch(tex_a, texel + vec2<i32>(0, -1)).rgb;
+-    var i = fetch(tex_a, texel + vec2<i32>(1, -1)).rgb;
++    var f = fetch_s(texel + vec2<i32>(1, 0));
++    var g = fetch_s(texel + vec2<i32>(-1, -1));
++    var h = fetch_s(texel + vec2<i32>(0, -1));
++    var i = fetch_s(texel + vec2<i32>(1, -1));
+ 
+     // Convert to YCoCg (clipping in a luminance-chrominance space is superior)
+     a = rgb_to_ycocg(reinhard(a));
+@@ -472,7 +481,7 @@
+         let gamma = mix(0.75, 1.25, linear_step(0.25, 1.0, distance_factor));
+ 
+         let mu = m0;
+-        let sigma = sqrt(m1 - m0 * m0);
++        let sigma = sqrt(max(m1 - m0 * m0, vec3<f32>(0.0))); // flat areas round to a hair below 0: sqrt(-eps) was NaN
+ 
+         min_color = max(min_color, mu - gamma * sigma);
+         max_color = min(max_color, mu + gamma * sigma);
+@@ -500,7 +509,7 @@
+         let previous_uv = uv - velocity;
+ 
+         var history_color = catmull_rom_fast_rgb(tex_b, previous_uv, 0.6);
+-        history_color = max0v(history_color); // Eliminate NaNs in the history
++        history_color = sane(history_color); // Eliminate NaNs / Infs / negatives in the history
+ 
+         var pixel_age = fetch(tex_b, vec2<i32>(previous_uv * u.res.xy)).a;
+         let inside = all(c01v2(previous_uv) == previous_uv);
+@@ -514,7 +523,7 @@
+         var alpha = max(1.0 / pixel_age, blend_weight);
+ 
+         // Native resolution TAA
+-        var current_color = fetch(tex_a, texel).rgb;
++        var current_color = fetch_s(texel);
+ 
+         // "Tonemapping" before applying TAA in order to perform the AA in SDR
+         current_color = reinhard(current_color);
+@@ -531,11 +540,11 @@
+         alpha = 1.0 - alpha;
+ 
+         current_color = mix(history_color, current_color, alpha);
+-        current_color = reinhard_inverse(current_color);
++        current_color = sane(reinhard_inverse(current_color));
+ 
+         result = vec4<f32>(current_color, pixel_age * offcenter_rejection);
+     } else {
+-        result = fetch(tex_a, texel);
++        result = vec4<f32>(fetch_s(texel), 1.0);
+     }
+ 
+     // Store exposure in the alpha component of the corner texel of the history buffer
+@@ -1097,7 +1106,7 @@
+     let texel = vec2<i32>(pos.xy);
+     let uv = pos.xy * u.res.zw;
+ 
+-    var scene_color = fetch(tex_b, texel).rgb; // colortex5: TAA output
++    var scene_color = sane(fetch(tex_b, texel).rgb); // colortex5: TAA output
+     let exposure = textureLoad(tex_c, vec2<i32>(0), 0).x;
+ 
+     if (BLOOM_ON) {
+@@ -1326,20 +1335,29 @@
+ //  final: CAS + dithering (MC_RENDER_QUALITY is 1: the catmull-rom upscale branch is not needed)
+ // ===========================================================================================================================
+ 
+-// FidelityFX contrast-adaptive sharpening filter, https://github.com/GPUOpen-Effects/FidelityFX-CAS
+-fn cas_filter(texel: vec2<i32>, sharpness: f32) -> vec3<f32> {
+-    if (!CAS_ON) { return srgb_eotf(fetch(tex_a, texel).rgb); }
++// The final pass runs at the surface's resolution, the scene at `RENDER_SCALE` of it. Every tap is a bilinear fetch on the OUTPUT pixel
++// grid (`misc2.zw` = 1 / surface size, 0 = same size as the scene); at scale 1 it lands on texel centres, i.e. the old `texelFetch`.
++fn fin_tap(pos: vec2<f32>, off: vec2<f32>) -> vec3<f32> {
++    let inv = select(u.res.zw, u.misc2.zw, u.misc2.z > 0.0);
++    return sane(smp(tex_a, (pos + off) * inv).rgb);
++}
++
++// FidelityFX contrast-adaptive sharpening filter, https://github.com/GPUOpen-Effects/FidelityFX-CAS. `pos` is the output pixel centre; the
++// taps are one SOURCE pixel apart (k output pixels), so it sharpens what the upscale softened.
++fn cas_filter(pos: vec2<f32>, sharpness: f32) -> vec3<f32> {
++    if (!CAS_ON) { return srgb_eotf(fin_tap(pos, vec2<f32>(0.0))); }
++    let k = select(1.0, max(u.res.z / u.misc2.z, 1.0), u.misc2.z > 0.0);
+ 
+     // Fetch 3x3 neighborhood
+-    var a = fetch(tex_a, texel + vec2<i32>(-1, -1)).rgb;
+-    var b = fetch(tex_a, texel + vec2<i32>(0, -1)).rgb;
+-    var c = fetch(tex_a, texel + vec2<i32>(1, -1)).rgb;
+-    var d = fetch(tex_a, texel + vec2<i32>(-1, 0)).rgb;
+-    var e = fetch(tex_a, texel).rgb;
+-    var f = fetch(tex_a, texel + vec2<i32>(1, 0)).rgb;
+-    var g = fetch(tex_a, texel + vec2<i32>(-1, 1)).rgb;
+-    var h = fetch(tex_a, texel + vec2<i32>(0, 1)).rgb;
+-    var i = fetch(tex_a, texel + vec2<i32>(1, 1)).rgb;
++    var a = fin_tap(pos, k * vec2<f32>(-1.0, -1.0));
++    var b = fin_tap(pos, k * vec2<f32>(0.0, -1.0));
++    var c = fin_tap(pos, k * vec2<f32>(1.0, -1.0));
++    var d = fin_tap(pos, k * vec2<f32>(-1.0, 0.0));
++    var e = fin_tap(pos, vec2<f32>(0.0));
++    var f = fin_tap(pos, k * vec2<f32>(1.0, 0.0));
++    var g = fin_tap(pos, k * vec2<f32>(-1.0, 1.0));
++    var h = fin_tap(pos, k * vec2<f32>(0.0, 1.0));
++    var i = fin_tap(pos, k * vec2<f32>(1.0, 1.0));
+ 
+     // Convert to sRGB before performing CAS
+     a = srgb_eotf(a);
+@@ -1359,8 +1377,8 @@
+     var max_color = max_of5(d, e, f, b, h);
+     max_color = max_color + max_of5(max_color, a, c, g, i);
+ 
+-    // Smooth minimum distance to the signal limit divided by smooth max
+-    var w = c01v(min(min_color, vec3<f32>(2.0) - max_color) / max_color);
++    // Smooth minimum distance to the signal limit divided by smooth max (a black 3x3 divided 0 / 0: NaN)
++    var w = c01v(min(min_color, vec3<f32>(2.0) - max_color) / max(max_color, vec3<f32>(1e-4)));
+     w = 1.0 - sqr3(1.0 - w); // Shaping amount of sharpening
+     w = w * (-1.0 / mix(8.0, 5.0, sharpness));
+ 
+@@ -1375,7 +1393,7 @@
+ @fragment
+ fn fs_final(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+     let texel = vec2<i32>(pos.xy);
+-    var fragment_color = cas_filter(texel, CAS_SHARPNESS);
++    var fragment_color = cas_filter(pos.xy, CAS_SHARPNESS);
+     fragment_color = dither_8bit(fragment_color, bayer16(vec2<f32>(texel)));
+     // The swapchain is sRGB on most phones: the pack writes display-encoded values, so undo the hardware's encode.
+     if (SRGB_SURFACE) { fragment_color = srgb_eotf_inv(fragment_color); }
+diff -ruN orig/mc-rs/src/render/vl.rs repo/mc-rs/src/render/vl.rs
+--- orig/mc-rs/src/render/vl.rs	2026-10-11 13:32:13.824156767 +0000
++++ repo/mc-rs/src/render/vl.rs	2026-10-11 22:05:30.004024445 +0000
+@@ -25,6 +25,11 @@
+ 
+ /// `#define LIGHT_SHAFT` (off = no march, and the shadow pass is back to running only in sunlight).
+ pub const LIGHT_SHAFT: bool = true;
++/// Samples per ray (the pack's 10; low-end GPUs: fewer, the dither + TAA hide it) and the spacing that keeps the same reach, `pow(t, 1.5)`.
++const MARCH_STEPS: i32 = 8;
++const STEP_COMPENSATION: f32 = 1.4; // (10 / 8)^1.5
++/// Shaft glow as a fraction of the light colour (the scene is HDR: `light_color` is ~7 at noon, ground radiance ~0.7). UNVERIFIED on a device: tune.
++const SHAFT_GAIN: f32 = 0.30;
+ /// `LIGHT_SHAFT_STRENGTH`, the pack's default.
+ const STRENGTH: f32 = 1.8;
+ /// Added to the sample's shadow-map depth, like `shadowPosition.z += 0.0001`: the pack's depth range is not ours,
+@@ -58,6 +63,20 @@
+     pub shadow: f32,
+ }
+ 
++impl Params {
++    /// Shaft colour in the HDR scene's units: the frame's own `light_color` (sun, sunset red, moon: `photon::lighting`) times a gain. The old
++    /// `scale` was AstraLex's LDR number and was far too faint next to a 7x sun. Time-of-day weights (`w`, `mt`, `lst`) are unchanged.
++    pub fn hdr(&mut self, light_color: [f32; 3]) {
++        let k = SHAFT_GAIN * (1.0 - 0.8 * self.rain);
++        self.scale = light_color.map(|c| c * k);
++    }
++}
++
++/// The march / composite shader with the shadow-space code and the step count spliced in.
++fn source() -> String {
++    SHADER.replace("@DISTORT@", &shadows::distortion_wgsl()).replace("@STEPS@", &MARCH_STEPS.to_string())
++}
++
+ fn mix(a: f32, b: f32, t: f32) -> f32 {
+     a + (b - a) * t
+ }
+@@ -171,7 +190,6 @@
+ 
+ const SHADER: &str = r#"
+ @DISTORT@
+-@PCSS@
+ struct U {
+     cam: mat4x4<f32>,
+     shadow_cam: mat4x4<f32>,
+@@ -197,6 +215,8 @@
+ @group(1) @binding(1) var sh_samp: sampler_comparison;
+ @group(1) @binding(2) var ent_tex: texture_depth_2d; // items, mobs, falling blocks: same matrix as sh_tex, redrawn every frame
+ 
++const MARCH_STEPS: i32 = @STEPS@;
++
+ struct FsIn {
+     @builtin(position) pos: vec4<f32>,
+     @location(0) uv: vec2<f32>,
+@@ -217,33 +237,6 @@
+     return vec3<f32>((uv.x * 2.0 - 1.0) * u.ray.x, (1.0 - uv.y * 2.0) * u.ray.y, -1.0);
+ }
+ 
+-// View-space position of a full-resolution pixel.
+-fn view_pos(ip: vec2<i32>) -> vec3<f32> {
+-    let dims = vec2<i32>(textureDimensions(depth_tex));
+-    let q = clamp(ip, vec2<i32>(0), dims - 1);
+-    let z = textureLoad(depth_tex, q, 0);
+-    return view_ray((vec2<f32>(q) + 0.5) / vec2<f32>(dims)) * (u.ray.z * u.ray.w / (u.ray.w - z * (u.ray.w - u.ray.z)));
+-}
+-
+-// World-space normal of the face at `ip` (view position `p0`), snapped to an axis: every face in this world is axis aligned. Each
+-// screen axis steps toward the neighbour with the smaller depth jump, so a silhouette does not tilt it. ponytail: a pixel on an
+-// edge between two faces can pick the other face's normal (a one-pixel line, blurred by `fs_comp`); a normal buffer is the upgrade.
+-fn face_normal(ip: vec2<i32>, p0: vec3<f32>) -> vec3<f32> {
+-    let a = view_pos(ip + vec2<i32>(2, 0)) - p0;
+-    let b = p0 - view_pos(ip - vec2<i32>(2, 0));
+-    let c = view_pos(ip + vec2<i32>(0, 2)) - p0;
+-    let d = p0 - view_pos(ip - vec2<i32>(0, 2));
+-    let cr = cross(select(b, a, abs(a.z) < abs(b.z)), select(d, c, abs(c.z) < abs(d.z)));
+-    if dot(cr, cr) < 1e-12 { return vec3<f32>(0.0); }
+-    var n = normalize(cr);
+-    if dot(n, p0) > 0.0 { n = -n; } // toward the eye
+-    let w = (u.cam * vec4<f32>(n, 0.0)).xyz;
+-    let m = abs(w);
+-    if m.x >= m.y && m.x >= m.z { return vec3<f32>(sign(w.x), 0.0, 0.0); }
+-    if m.y >= m.z { return vec3<f32>(0.0, sign(w.y), 0.0); }
+-    return vec3<f32>(0.0, 0.0, sign(w.z));
+-}
+-
+ // InterleavedGradientNoise() without the frame term (there is no TAA to average it away).
+ fn ign(p: vec2<f32>) -> f32 {
+     return fract(52.9829189 * fract(0.06711056 * p.x + 0.00583715 * p.y));
+@@ -265,7 +258,7 @@
+     let min_dist_factor = u.c.x * x;
+     let dither = ign(in.pos.xy + u.c.z * 5.588238); // c.z: frame % 64, so TAA averages the noise away
+     var sum = 0.0;
+-    for (var i = 0; i < 10; i = i + 1) {
++    for (var i = 0; i < MARCH_STEPS; i = i + 1) {
+         let t = f32(i) + dither + u.c.y;
+         let d = t * sqrt(t) * min_dist_factor; // pow(t, 1.5)
+         if d >= max_dist || depth < d { break; }
+@@ -281,23 +274,8 @@
+     }
+     var v = pow(sqrt(sum * visibility), u.a.w) * 0.9;
+     if v > 0.0 { v = v + (dither - 0.19) / 128.0; }
+-    // The surface's own shadow (g), 1 = in shadow, 0 = lit. d4_deferred_shading.fsh: nothing is lit unless NoL > 1e-3; then photon's
+-    // PCSS (`get_filtered_shadows`) near the eye, faded into `get_lightmap_shadows` past the map. The face normal is rebuilt from
+-    // the depth buffer (no G-buffer yet, M1) and snapped to an axis; skylight 1 and no clouds / SSS until M1 and M4 supply them.
+-    var sh = 0.0;
+-    if u.res.z > 0.0 && z < 1.0 {
+-        let ip = vec2<i32>(in.pos.xy) * 2;
+-        let p0 = view_pos(ip);
+-        let n = face_normal(ip, p0);
+-        if dot(n, shu.light.xyz) > 1e-3 {
+-            let scene_pos = (u.cam * vec4<f32>(p0, 0.0)).xyz; // world minus the eye
+-            let near_shadow = get_filtered_shadows(scene_pos, n, 1.0, 1.0, 0.0, vec2<i32>(in.pos.xy));
+-            sh = 1.0 - mix(near_shadow.shadow.x, get_lightmap_shadows(1.0), clamp01(near_shadow.distance_fade));
+-        } else {
+-            sh = 1.0;
+-        }
+-    }
+-    return vec4<f32>(v, sh, 0.0, 1.0);
++    // The surface shadow moved into `photon`'s deferred pass (full resolution, the G-buffer's exact face): g is unused now.
++    return vec4<f32>(v, 0.0, 0.0, 1.0);
+ }
+ 
+ // Interval of the ray parameter t where `c0 + c1 * t >= 0`, intersected into `r` (x = enter, y = exit).
+@@ -436,7 +414,7 @@
+             min_filter: wgpu::FilterMode::Linear,
+             ..Default::default()
+         });
+-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("vl_shader"), source: wgpu::ShaderSource::Wgsl(SHADER.replace("@DISTORT@", &shadows::distortion_wgsl()).replace("@PCSS@", &shadows::pcss_wgsl()).into()) });
++        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("vl_shader"), source: wgpu::ShaderSource::Wgsl(source().into()) });
+         let pipeline = |label, layouts: &[&BindGroupLayout], fs: &str, format, blend, depth: bool| {
+             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                 label: Some(label),
+@@ -475,7 +453,7 @@
+     /// Run after the terrain pass: the half-resolution march. `shadow_vp` is what `ChunkPipeline::upload_uniforms` returned this
+     /// frame (the shadow map has to exist: `Params::active`), `shadow_bind` its map. Then `composite` blends it onto the frame.
+     pub fn march(&mut self, gpu: &Gpu, enc: &mut CommandEncoder, shadow_bind: &BindGroup, params_bind: &BindGroup, cam: &FirstPersonCamera, shadow_vp: Mat4, p: &Params, frame: u64) {
+-        let (w, h) = (gpu.config.width, gpu.config.height);
++        let (w, h) = gpu.scene();
+         if self.target.as_ref().map_or(true, |t| t.size != (w, h)) {
+             // ponytail: half resolution, nearest depth tap (the pack marches at full resolution, 4-tap blurred); a
+             // min-of-4 depth tap is the upgrade if shafts leak over thin silhouettes.
+@@ -521,7 +499,7 @@
+             a: [0.0, if p.active { SHADOW_RADIUS } else { 0.0 }, p.endurance, p.power],
+             b: [p.w, p.mt, p.rain, (3.0 - proj.y_axis.y / 1.37).max(0.0)],
+             // minDistFactor = 8 * clamp(far, 0, 512) / 192, then * 0.5 / 1.7; addition = 0.5 * 1.42857.
+-            c: [8.0 * cam.zfar.clamp(0.0, 512.0) / 192.0 * 0.5 / 1.7, 0.5 * 1.42857, (frame % 64) as f32, 0.0],
++            c: [8.0 * cam.zfar.clamp(0.0, 512.0) / 192.0 * 0.5 / 1.7 * STEP_COMPENSATION, 0.5 * 1.42857, (frame % 64) as f32, 0.0],
+             s: [p.scale[0], p.scale[1], p.scale[2], p.lst],
+             res: [w as f32, h as f32, p.shadow * SHADOW_DARK, 0.0],
+         };
+@@ -602,13 +580,13 @@
+         assert!(p.w == 0.0 && near(p.endurance, 2.4) && near(p.power, 1.0));
+     }
+ 
+-    /// The lookups go through photon's code: the march distorts like `shadow.vsh`, the surface asks `get_filtered_shadows` and
+-    /// mixes it with `get_lightmap_shadows`, and the entity map is compared through the same adaptor (`shadow_compare1`).
++    /// The march distorts like `shadow.vsh`; the surface shadow is no longer here (it is the deferred pass's), and the HDR colour is the light's.
+     #[test]
+-    fn lookups_use_photons_shadow_code() {
+-        assert!(SHADER.contains("distort_shadow_space(vec3<f32>(c.xy, c.z * 2.0 - 1.0))") && SHADER.contains("get_filtered_shadows(scene_pos"));
+-        assert!(SHADER.contains("get_lightmap_shadows(1.0)") && !SHADER.contains("NORMAL_BIAS"));
+-        assert!(shadows::pcss_wgsl().contains("textureSampleCompareLevel(ent_tex, sh_samp, q, z)"), "entities shade the surface through their own map");
++    fn march_is_shafts_only_and_hdr() {
++        assert!(SHADER.contains("distort_shadow_space(vec3<f32>(c.xy, c.z * 2.0 - 1.0))") && !SHADER.contains("get_filtered_shadows"));
++        let mut p = at(6000.0, 0.0);
++        p.hdr([7.0, 6.0, 5.0]);
++        assert!(near(p.scale[0], 7.0 * SHAFT_GAIN) && near(p.scale[2], 5.0 * SHAFT_GAIN), "{:?}", p.scale);
+     }
+ 
+     #[test]
+@@ -627,7 +605,7 @@
+     /// buffer is what `Cone` declares: 16 + 16 vec4.
+     #[test]
+     fn shader_validates() {
+-        let src = SHADER.replace("@DISTORT@", &shadows::distortion_wgsl()).replace("@PCSS@", &shadows::pcss_wgsl());
++        let src = source();
+         let m = naga::front::wgsl::parse_str(&src).unwrap_or_else(|e| panic!("{}", e.emit_to_string(&src)));
+         naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all()).validate(&m).unwrap();
+         assert_eq!(16 + 16 * CONE_MAX * 2, 16 + 16 * 16);
