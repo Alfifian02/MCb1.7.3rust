@@ -8,7 +8,7 @@ use wgpu::{
 };
 use wgpu::util::DeviceExt;
 
-use crate::render::{atlas, camera::{shadow_view_proj, SHADOW_RADIUS}};
+use crate::render::{atlas, camera::shadow_view_proj, shadows};
 use crate::world::chunk::is_plant;
 
 #[repr(C)]
@@ -17,6 +17,8 @@ pub struct Vertex {
     pub pos: [f32; 3],
     pub uv: [f32; 2],
     pub light: f32,
+    /// `sky * 16 + block` light levels, see `render::mesh::lm`.
+    pub lm: f32,
 }
 
 impl Vertex {
@@ -28,6 +30,7 @@ impl Vertex {
             wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 0, shader_location: 0 },
             wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 12, shader_location: 1 },
             wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32, offset: 20, shader_location: 2 },
+            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32, offset: 24, shader_location: 3 },
         ],
         }
     }
@@ -42,22 +45,23 @@ pub struct Uniforms {
     /// xyz: direction toward the sun, w: shadow strength 0..1 (0 = no shadow pass this frame).
     pub sun: [f32; 4],
     pub eye: [f32; 4],
-    /// x: distort factor, y: bias in blocks per undistorted texel, z: shadow brightness.
-    pub sh: [f32; 4],
     /// Bit `t` set: atlas tile `t` is foliage and casts no shadow (`EXCLUDE_FOLIAGE`, `block.properties`).
     pub plant: [[u32; 4]; 2],
     /// rgb: fog colour, w: fog distance (the render distance in blocks; 0 = no fog). Written by `set_fog`.
     pub fog: [f32; 4],
     /// x: rain strength.
     pub fogp: [f32; 4],
+    /// rgb: photon `light_color`, w: exposure. Written by `set_lighting`.
+    pub lcol: [f32; 4],
+    /// rgb: `ambient_color`, w: `time_noon`.
+    pub amb: [f32; 4],
+    /// rgb: `blocklight_color`.
+    pub blk: [f32; 4],
 }
 
 
-// Shadow-Tutorial `distort.glsl` constants.
-pub const SHADOW_RES: u32 = 1024; // shadowMapResolution
-pub const SHADOW_DISTORT: f32 = 0.10; // SHADOW_DISTORT_FACTOR
-const SHADOW_BIAS: f32 = 1.0;
-const SHADOW_BRIGHTNESS: f32 = 0.75;
+/// `shadowMapResolution` (photon's is 2048 over twice the distance: the same texels per block, see `render::shadows`).
+pub const SHADOW_RES: u32 = 1024;
 
 const PLANT: [[u32; 4]; 2] = {
     let (mut m, mut id) = ([[0u32; 4]; 2], 0usize);
@@ -97,25 +101,14 @@ pub struct ChunkPipeline {
 }
 
 const SHADER_SRC: &str = r#"
-// AstraLex `OVERWORLD_FOG_DENSITY`: the pack's default 0.5 only fogs the last 6 blocks of a 64 block view, too late here.
-const FOG_DENSITY: f32 = 2.0;
-const WATER_LIGHT: f32 = @WL@;
-struct Uniforms {
-    view: mat4x4<f32>,
-    proj: mat4x4<f32>,
-    shadow_vp: mat4x4<f32>,
-    sun: vec4<f32>,
-    eye: vec4<f32>,
-    sh: vec4<f32>,
-    plant: array<vec4<u32>, 2>,
-    fog: vec4<f32>,
-    fogp: vec4<f32>,
-};
-@group(0) @binding(0) var<uniform> u: Uniforms;
+const WATER_LIGHT: f32 = @WL@; // `mesh::WATER_LIGHT`: the water depth rides in the integer part of `light`
+// (`photon::WGSL_COMMON` comes first: the uniform block `u`, colour spaces, fog and `photon_light`)
 @group(0) @binding(1) var samp: sampler;
 @group(0) @binding(2) var tex: texture_2d<f32>;
 @group(1) @binding(0) var sh_tex: texture_depth_2d;
 @group(1) @binding(1) var sh_samp: sampler_comparison;
+
+@DISTORT@
 
 const TW: u32 = @TW@u;
 const TH: f32 = @TH@.0;
@@ -125,6 +118,7 @@ struct VsOut {
     @location(0) uv: vec2<f32>,
     @location(1) light: f32,
     @location(2) wp: vec3<f32>,
+    @location(3) lm: f32,
 };
 
 // Shadow cone: the entity mesh drawn again CONE_COPIES times, each copy slid CONE_STEP further from the sun, as faint black layers.
@@ -142,66 +136,60 @@ fn fs_cone() -> @location(0) vec4<f32> {
 }
 
 @vertex
-fn vs_main(@location(0) vpos: vec3<f32>, @location(1) vuv: vec2<f32>, @location(2) vlight: f32) -> VsOut {
+fn vs_main(@location(0) vpos: vec3<f32>, @location(1) vuv: vec2<f32>, @location(2) vlight: f32, @location(3) vlm: f32) -> VsOut {
     var o: VsOut;
     o.pos = u.proj * u.view * vec4<f32>(vpos, 1.0);
     o.uv = vuv;
     o.light = vlight;
     o.wp = vpos;
+    o.lm = vlm;
     return o;
 }
 
-// shadow.vsh: foliage is parked outside the clip volume; everything else is drawn from the sun with `distort()`
-// applied. The shadow map's depth is `z * 0.5 + 0.25`: distort.glsl's `z * 0.5` in GL clip space, then 0..1.
+// shadow.vsh: foliage is parked outside the clip volume; everything else is drawn from the sun with photon's
+// `distort_shadow_space`. `shadow_vp` has depth 0..1 and the distortion works on GL clip space (-1..1), so z goes
+// there and back: the stored depth is `z_gl * SHADOW_DEPTH_SCALE * 0.5 + 0.5`.
 @vertex
 fn vs_shadow(@location(0) p: vec3<f32>, @location(1) uv: vec2<f32>) -> @builtin(position) vec4<f32> {
     // Terrain tile under this UV (the strip below the png gives 256 and up: clamped to the unused tile 255).
     let t = min(u32(uv.y * TH) * TW + u32(uv.x * f32(TW)), 255u);
     if ((u.plant[t >> 7u][(t >> 5u) & 3u] >> (t & 31u)) & 1u) == 1u { return vec4<f32>(10.0); }
     let c = u.shadow_vp * vec4<f32>(p, 1.0);
-    return vec4<f32>(c.xy / (length(c.xy) + u.sh.x), c.z * 0.5 + 0.25, 1.0);
+    let d = distort_shadow_space(vec3<f32>(c.xy, c.z * 2.0 - 1.0));
+    return vec4<f32>(d.xy, d.z * 0.5 + 0.5, 1.0);
 }
 
+// G-buffer: albedo (linear, Rec. 709) and `face * 256 + sky * 16 + block`; `photon::SHADER` `fs_deferred` lights it.
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    let face = face_index(in.wp, dpdx(in.wp), dpdy(in.wp));
     let c = textureSample(tex, samp, in.uv);
     if c.a < 0.5 { discard; } // cut-out textures: plants, glass
-    return shade(in, c);
+    return vec4<f32>(c.rgb, f32(face) * 256.0 + in.lm);
 }
 
-// Translucent water. `mesh::build_split` packs the water column under the face (whole cells) into the integer part of `light`
-// and `light * WATER_LIGHT` into the fraction. The texture's alpha (0.54) is the floor: deeper water absorbs, so it turns
-// opaque (1 - e^(-0.35 d): 0.3 at 1 block, 0.65 at 3, 0.88 at 6) and darker and bluer, and a grazing view reflects more.
-// Shallow water still shows its bed. UNVERIFIED: the constants are tuned by eye against a shader-pack screenshot, not a source.
+// Translucent water, forward lit with the same `photon_light` (no shadow). `mesh::build_split` packs the water column under
+// the face (whole cells) into the integer part of `light`. The texture's alpha (0.54) is the floor: deeper water absorbs, so
+// it turns opaque (1 - e^(-0.35 d): 0.3 at 1 block, 0.65 at 3, 0.88 at 6) and darker and bluer, and a grazing view reflects
+// more. Shallow water still shows its bed. UNVERIFIED: the constants are tuned by eye, not taken from a source.
 @fragment
 fn fs_water(in: VsOut) -> @location(0) vec4<f32> {
     let depth = floor(in.light + 0.05); // +0.05: interpolation may land a hair under the integer
-    var v = in;
-    v.light = (in.light - depth) / WATER_LIGHT;
+    let face = face_index(in.wp, dpdx(in.wp), dpdy(in.wp));
     let c = textureSample(tex, samp, in.uv);
     let absorb = 1.0 - exp(-0.35 * depth);
     let graze = pow(1.0 - abs(normalize(u.eye.xyz - in.wp).y), 3.0);
-    var o = shade(v, vec4<f32>(c.rgb * mix(vec3<f32>(1.0), vec3<f32>(0.45, 0.62, 0.8), absorb), c.a));
-    o.a = max(o.a, mix(absorb, 1.0, 0.5 * graze));
-    return o;
-}
-
-fn shade(in: VsOut, c: vec4<f32>) -> vec4<f32> {
-    // Shadows are not here any more: `render::vl` darkens the shadowed pixels in its full-screen blend.
-    var rgb = c.rgb * in.light;
-    if u.fog.w > 0.0 {
-        // fog.glsl `NormalFog`, `DISTANT_FADE` vanilla part with `fogOffset = 0`: 1 - (far - d) * 5 / (density * far).
-        // Rain thickens it (`RAIN_FOG_DENSITY * rainFactor + 1`). Fog colour = the sky's horizon colour, so the edge melts into it.
-        let d = length(in.wp - u.eye.xyz);
-        let f = clamp(1.0 - (u.fog.w - d) * 5.0 / (FOG_DENSITY * (1.0 + 0.5 * u.fogp.x) * u.fog.w), 0.0, 1.0);
-        rgb = mix(rgb, u.fog.rgb, f * f * (3.0 - 2.0 * f));
-    }
-    return vec4<f32>(rgb, c.a);
+    let lm = in.lm + 0.01;
+    let sky_i = floor(lm / 16.0);
+    let albedo = to_working(c.rgb * mix(vec3<f32>(1.0), vec3<f32>(0.45, 0.62, 0.8), absorb));
+    var rgb = photon_light(albedo, face, sky_i / 15.0, floor(lm - sky_i * 16.0) / 15.0, 1.0);
+    rgb = apply_fog(rgb, length(in.wp - u.eye.xyz));
+    return vec4<f32>(rgb, max(c.a, mix(absorb, 1.0, 0.5 * graze)));
 }
 "#;
 
 impl ChunkPipeline {
-    pub fn new(device: &Device, surface_format: wgpu::TextureFormat) -> Self {
+    pub fn new(device: &Device, _surface_format: wgpu::TextureFormat) -> Self {
         // Atlas: `terrain.png` plus the flat-colour strip, `ATLAS_W` x `ATLAS_H` (see `render::atlas`).
         let atlas_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("atlas"),
@@ -275,10 +263,10 @@ impl ChunkPipeline {
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("chunk_shader"),
-            source: wgpu::ShaderSource::Wgsl(SHADER_SRC.replace("@TW@", &atlas::TILES_W.to_string()).replace("@TH@", &(atlas::ATLAS_H / 16).to_string()).replace("@WL@", &format!("{:?}", crate::render::mesh::WATER_LIGHT)).into()),
+            source: wgpu::ShaderSource::Wgsl(format!("{}{}", crate::render::photon::WGSL_COMMON, SHADER_SRC).replace("@DISTORT@", &crate::render::shadows::distortion_wgsl()).replace("@TW@", &atlas::TILES_W.to_string()).replace("@TH@", &(atlas::ATLAS_H / 16).to_string()).replace("@WL@", &format!("{:?}", crate::render::mesh::WATER_LIGHT)).into()),
         });
 
-        // Group 1: the shadow map and its comparison sampler (nearest = `shadowtex0Nearest`; `Linear` is free PCF).
+        // Group 1: the shadow map and its comparison sampler: linear = `shadowHardwareFiltering1` (a bilinear compare).
         let mut shadow_desc = wgpu::TextureDescriptor {
             label: Some("shadow_map"),
             size: wgpu::Extent3d { width: SHADOW_RES, height: SHADOW_RES, depth_or_array_layers: 1 },
@@ -293,8 +281,8 @@ impl ChunkPipeline {
         shadow_desc.label = Some("entity_shadow_map");
         let ent_view = device.create_texture(&shadow_desc).create_view(&wgpu::TextureViewDescriptor::default());
         let shadow_samp = device.create_sampler(&wgpu::SamplerDescriptor {
-            mag_filter: wgpu::FilterMode::Nearest,
-            min_filter: wgpu::FilterMode::Nearest,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
             compare: Some(wgpu::CompareFunction::LessEqual), // lit when ref <= stored, i.e. not `stored < ref`
             ..Default::default()
         });
@@ -383,7 +371,7 @@ impl ChunkPipeline {
                 module: &shader,
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_format,
+                    format: crate::render::photon::HDR_FORMAT,
                     blend: Some(wgpu::BlendState::REPLACE),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -423,7 +411,7 @@ impl ChunkPipeline {
                 module: &shader,
                 entry_point: Some("fs_cone"),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_format,
+                    format: crate::render::photon::HDR_FORMAT,
                     // dst * (1 - alpha): a black layer of that alpha.
                     blend: Some(wgpu::BlendState {
                         color: wgpu::BlendComponent {
@@ -466,7 +454,7 @@ impl ChunkPipeline {
                 module: &shader,
                 entry_point: Some("fs_water"),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_format,
+                    format: crate::render::photon::HDR_FORMAT,
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -494,6 +482,16 @@ impl ChunkPipeline {
         queue.write_buffer(&self.uniform_buf, std::mem::offset_of!(Uniforms, fog) as u64, bytemuck::bytes_of(&f));
     }
 
+    /// Photon colours for this frame (`render::photon::lighting`). Call after `upload_uniforms`.
+    pub fn set_lighting(&self, queue: &Queue, l: &crate::render::photon::Lighting) {
+        let v = [
+            [l.light_color[0], l.light_color[1], l.light_color[2], l.exposure],
+            [l.ambient[0], l.ambient[1], l.ambient[2], l.noon],
+            [l.blocklight[0], l.blocklight[1], l.blocklight[2], 0.0],
+        ];
+        queue.write_buffer(&self.uniform_buf, std::mem::offset_of!(Uniforms, lcol) as u64, bytemuck::bytes_of(&v));
+    }
+
     /// Returns the sun's view-projection (for culling the shadow pass). `strength` 0 turns shadows off. `shadow_center` and
     /// `sun` are those of the last shadow-map render (`App.shadow`), so the lookup matches the map even when it is reused.
     pub fn upload_uniforms(&self, queue: &Queue, view: Mat4, proj: Mat4, sun: Vec3, strength: f32, shadow_center: Vec3) -> Mat4 {
@@ -505,10 +503,12 @@ impl ChunkPipeline {
             shadow_vp: vp.to_cols_array_2d(),
             sun: sun.extend(strength).to_array(),
             eye: eye.extend(0.0).to_array(),
-            sh: [SHADOW_DISTORT, SHADOW_BIAS * 2.0 * SHADOW_RADIUS / SHADOW_RES as f32, SHADOW_BRIGHTNESS, 0.0],
             plant: PLANT,
             fog: [0.0; 4], // off until `set_fog`
             fogp: [0.0; 4],
+            lcol: [0.0, 0.0, 0.0, 1.0], // dark until `set_lighting`
+            amb: [0.0; 4],
+            blk: [0.0; 4],
         };
         queue.write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&u));
         vp

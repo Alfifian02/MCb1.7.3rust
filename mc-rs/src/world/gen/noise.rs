@@ -13,15 +13,18 @@ const MASK: u64 = (1u64 << 48) - 1;
 /// java.util.Random (48-bit LCG), same algorithm as the JDK.
 pub struct JavaRandom {
     seed: u64,
+    /// `nextNextGaussian` while `haveNextNextGaussian` is set.
+    spare: Option<f64>,
 }
 
 impl JavaRandom {
     pub fn new(seed: i64) -> Self {
-        Self { seed: ((seed as u64) ^ MULT) & MASK }
+        Self { seed: ((seed as u64) ^ MULT) & MASK, spare: None }
     }
 
     pub fn set_seed(&mut self, seed: i64) {
         self.seed = ((seed as u64) ^ MULT) & MASK;
+        self.spare = None; // setSeed clears haveNextNextGaussian
     }
 
     fn next(&mut self, bits: u32) -> i32 {
@@ -66,6 +69,23 @@ impl JavaRandom {
 
     pub fn next_boolean(&mut self) -> bool {
         self.next(1) != 0
+    }
+
+    /// `nextGaussian`: the polar method, the second value of each pair kept for the next call.
+    pub fn next_gaussian(&mut self) -> f64 {
+        if let Some(g) = self.spare.take() {
+            return g;
+        }
+        loop {
+            let v1 = 2.0 * self.next_double() - 1.0;
+            let v2 = 2.0 * self.next_double() - 1.0;
+            let s = v1 * v1 + v2 * v2;
+            if s < 1.0 && s != 0.0 {
+                let m = (-2.0 * s.ln() / s).sqrt();
+                self.spare = Some(v2 * m);
+                return v1 * m;
+            }
+        }
     }
 }
 

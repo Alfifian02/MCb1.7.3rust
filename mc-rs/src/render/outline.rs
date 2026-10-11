@@ -8,7 +8,7 @@ const GROW: f32 = 0.002;
 /// Edge thickness in blocks. // UNVERIFIED: vanilla draws 2 px GL lines, which have no block size.
 const THICK: f32 = 0.02;
 /// 12 edges x 6 faces x 4 vertices x 6 floats, and x 6 indices per face.
-const VERTEX_BYTES: u64 = 12 * 6 * 4 * 6 * 4;
+const VERTEX_BYTES: u64 = 12 * 6 * 4 * 7 * 4;
 const INDEX_BYTES: u64 = 12 * 6 * 6 * 4;
 
 pub struct Outline {

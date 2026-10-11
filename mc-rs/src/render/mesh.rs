@@ -4,7 +4,7 @@
 //! at the chunk edge the neighbour is read from the adjacent chunk, so no faces are wasted on
 //! the seams between loaded chunks. Vertex positions are world coordinates.
 //!
-//! Vertex format: position(3) + uv(2) + light(1) = 6 floats = 24 bytes (`gpu::pipeline::Vertex`).
+//! Vertex format: position(3) + uv(2) + light(1) + lm(1) = `VF` (7) floats = 28 bytes (`gpu::pipeline::Vertex`).
 //! `light` = face shade (RenderBlocks: top 1.0, bottom 0.5, Z sides 0.8, X sides 0.6) times the
 //! brightness of the cell the face looks into (`Block.getBlockBrightness` -> `lightBrightnessTable`).
 
@@ -15,6 +15,16 @@ use crate::world::ticks::non_solid;
 
 /// Water vertices pack `light * WATER_LIGHT + column depth` (see `build_split`); `fs_water` in `gpu/pipeline.rs` unpacks it.
 pub const WATER_LIGHT: f32 = 0.9;
+
+/// Floats per vertex: position(3) + uv(2) + light(1) + lm(1).
+pub const VF: usize = 7;
+/// Packed light levels of a vertex, `sky * 16 + block` (each 0..=15, exact in f32 and f16): the two numbers photon's lighting
+/// reads separately as `light_levels` (`lmcoord`). `sky` is the RAW sky light, not minus `skylight_subtracted`: day and night
+/// come from the light colours, so a mesh no longer has to be relit when the sun moves. `light` (shade x brightness) stays for the
+/// water depth packing and the old flat consumers.
+pub fn lm(sky: u8, block: u8) -> f32 {
+    (sky.min(15) * 16 + block.min(15)) as f32
+}
 
 /// One textured quad. Four corners in CCW order from the front.
 /// `normal_index` selects the face normal (0..5) for debug-coloring later.
@@ -178,7 +188,7 @@ fn flow_uv(blk: u8, angle: f32, corner: &[f32; 3]) -> (f32, f32) {
 /// they are only read for the one-cell border. `light` holds sky light in the low nibble and block
 /// light in the high nibble. `sky_sub` is `World.skylightSubtracted` (0 day .. 11 night, `world::sky`).
 /// `(ox, oz)` is the chunk's world origin (chunk * 16).
-/// Vertices: 6 floats each (px, py, pz, u, v, light). Indices: 6 per face (two triangles).
+/// Vertices: `VF` floats each (px, py, pz, u, v, light, lm). Indices: 6 per face (two triangles).
 /// Shadows are not baked here: the sun's shadow map darkens the frame in `render::vl`. Leaves do not dim the sky light either
 /// (see `open` below), or a tree would be shaded twice.
 pub fn build(blocks: &[u8], data: &Nibbles, light: &[u8], nb: [&[u8]; 4], nb_light: [&[u8]; 4], sky_sub: u8, ox: i32, oz: i32) -> (Vec<f32>, Vec<u32>) {
@@ -211,14 +221,15 @@ pub fn build_split(blocks: &[u8], data: &Nibbles, nb_data: [&Nibbles; 4], light:
     let open = |x: i32, y: i32, z: i32| (y + 1..H as i32).all(|yy| matches!(rid(x, yy, z), 0 | 18) || is_plant(rid(x, yy, z)));
     // Brightness of a cell (`World.getBlockLightValue`): open sky above the world, dark below it.
     let table: [f32; 16] = std::array::from_fn(|i| brightness(i as u8));
-    let bright = |x: i32, y: i32, z: i32| -> f32 {
-        if y < 0 { return table[0]; }
-        if y >= H as i32 { return table[15usize.saturating_sub(sky_sub as usize)]; }
+    // (raw sky, block) light of a cell; the open-sky rule above lifts a covered-by-leaves cell to 15.
+    let lv = |x: i32, y: i32, z: i32| -> (u8, u8) {
+        if y < 0 { return (0, 0); }
+        if y >= H as i32 { return (15, 0); }
         let l = match slot(x, z) { 0 => light, s => nb_light[s - 1] };
         let v = l[idx((x & 15) as usize, y as usize, (z & 15) as usize)];
-        let sky: u8 = if (v & 15) < 15 && open(x, y, z) { 15 } else { v & 15 };
-        table[sky.saturating_sub(sky_sub).max(v >> 4) as usize]
+        (if (v & 15) < 15 && open(x, y, z) { 15 } else { v & 15 }, v >> 4)
     };
+    let br = |(s, b): (u8, u8)| table[s.saturating_sub(sky_sub).max(b) as usize];
     let mut verts: Vec<f32> = Vec::new();
     let mut idxs: Vec<u32> = Vec::new();
     let mut widxs: Vec<u32> = Vec::new();
@@ -233,20 +244,21 @@ pub fn build_split(blocks: &[u8], data: &Nibbles, nb_data: [&Nibbles; 4], light:
                     continue;
                 }
                 if raw == 59 {
-                    push_crops(&mut verts, &mut idxs, [(ox + x) as f32, y as f32, (oz + z) as f32], data.get(x as usize, y as usize, z as usize), bright(x, y, z));
+                    { let l = lv(x, y, z); push_crops(&mut verts, &mut idxs, [(ox + x) as f32, y as f32, (oz + z) as f32], data.get(x as usize, y as usize, z as usize), br(l), lm(l.0, l.1)); }
                     continue;
                 }
                 if cross_shape(raw).is_some() {
-                    let lit = bright(x, y, z);
+                    let l = lv(x, y, z);
+                    let (lit, lmv) = (br(l), lm(l.0, l.1));
                     let meta = data.get(x as usize, y as usize, z as usize);
                     let (cx, cz) = ((ox + x) as f32 + 0.5, (oz + z) as f32 + 0.5);
                     // `RenderBlocks.renderCrossedSquares`: full-height quads 0.9 wide, the texture's cut-out does the shaping.
                     let half = 0.45;
                     for (a, b) in [((-half, -half), (half, half)), ((-half, half), (half, -half))] {
-                        let base = verts.len() as u32 / 6;
+                        let base = verts.len() as u32 / VF as u32;
                         for (k, (px, pz, py)) in [(a.0, a.1, 0.0), (b.0, b.1, 0.0), (b.0, b.1, 1.0), (a.0, a.1, 1.0)].into_iter().enumerate() {
                             let (au, av) = atlas::face_uv(raw, meta, 2, (k == 1 || k == 2) as u8 as f32, (k >= 2) as u8 as f32);
-                            verts.extend_from_slice(&[cx + px, y as f32 + py, cz + pz, au, av, lit]);
+                            verts.extend_from_slice(&[cx + px, y as f32 + py, cz + pz, au, av, lit, lmv]);
                         }
                         // Both windings: the pipeline culls back faces.
                         idxs.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3, base, base + 2, base + 1, base, base + 3, base + 2]);
@@ -277,7 +289,7 @@ pub fn build_split(blocks: &[u8], data: &Nibbles, nb_data: [&Nibbles; 4], light:
                     if hidden {
                         continue;
                     }
-                    let base = verts.len() as u32 / 6;
+                    let base = verts.len() as u32 / VF as u32;
                     // A chest's tile depends on its neighbours (`BlockChest.getBlockTexture`), `face_i` as the Java's side.
                     let chest_tile = (blk == chest::ID).then(|| chest::tile(&rid, (x, y, z), [5, 4, 1, 0, 3, 2][face_i]));
                     let shade = match face_i {
@@ -288,7 +300,9 @@ pub fn build_split(blocks: &[u8], data: &Nibbles, nb_data: [&Nibbles; 4], light:
                     };
                     // A face the box does not reach the edge with, and a fluid's top, take the light of their own cell.
                     let own_cell = !reach || (heights.is_some() && face_i == 2);
-                    let mut light = shade * if own_cell { bright(x, y, z) } else { bright(x + dx, y + dy, z + dz) };
+                    let lvl = if own_cell { lv(x, y, z) } else { lv(x + dx, y + dy, z + dz) };
+                    let lmv = lm(lvl.0, lvl.1);
+                    let mut light = shade * br(lvl);
                     // Water carries the depth of its column (water cells from here down, <= 15) in the integer part of `light`:
                     // `fs_water` unpacks `floor` / `fract` and makes deep water opaque and dark. ponytail: whole cells only, and
                     // the column is counted straight down, not along the view ray.
@@ -318,7 +332,7 @@ pub fn build_split(blocks: &[u8], data: &Nibbles, nb_data: [&Nibbles; 4], light:
                         }
                         // ponytail: world-space f32 vertices lose precision far from the origin
                         // (about 1 cm at 100k blocks); upgrade path is a per-chunk offset uniform.
-                        verts.extend_from_slice(&[p[0] + (ox + x) as f32, p[1] + y as f32, p[2] + (oz + z) as f32, au, av, light]);
+                        verts.extend_from_slice(&[p[0] + (ox + x) as f32, p[1] + y as f32, p[2] + (oz + z) as f32, au, av, light, lmv]);
                     }
                     let list = if matches!(blk, 8 | 9) { &mut widxs } else { &mut idxs };
                     list.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
@@ -333,11 +347,13 @@ pub fn build_split(blocks: &[u8], data: &Nibbles, nb_data: [&Nibbles; 4], light:
 /// Append an axis-aligned box `min..max` (world coordinates) of atlas tile `tile` with a flat `light`; the
 /// outline of the picked block reuses the face templates above, so the winding is the mesher's.
 pub fn push_box(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, min: [f32; 3], max: [f32; 3], tile: u16, light: f32) {
+    // Photon lights by levels, not by `light`: items and mobs (light 1) read as open sky, the outline (0.15, near black) as a dark cell.
+    let lmv = if light < 0.2 { lm(0, 0) } else { lm(15, 0) };
     for face in &FACES {
-        let base = verts.len() as u32 / 6;
+        let base = verts.len() as u32 / VF as u32;
         for (c, uv) in face.corners.iter().zip(face.uv.iter()) {
             let (au, av) = atlas::atlas_uv(tile, uv[0], uv[1]);
-            verts.extend_from_slice(&[min[0] + c[0] * (max[0] - min[0]), min[1] + c[1] * (max[1] - min[1]), min[2] + c[2] * (max[2] - min[2]), au, av, light]);
+            verts.extend_from_slice(&[min[0] + c[0] * (max[0] - min[0]), min[1] + c[1] * (max[1] - min[1]), min[2] + c[2] * (max[2] - min[2]), au, av, light, lmv]);
         }
         idxs.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
     }
@@ -380,15 +396,15 @@ fn shapes(id: u8, meta: u8, same: &dyn Fn(i32, i32) -> bool) -> ([[f32; 6]; 5], 
 
 /// `RenderBlocks.func_1245_b` (crops): two pairs of crossing quads at 1/4 and 3/4 of the cell, one sixteenth sunk into the farmland,
 /// the growth stage (metadata) picks the tile. Visible from both sides.
-pub fn push_crops(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, cell: [f32; 3], meta: u8, light: f32) {
+pub fn push_crops(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, cell: [f32; 3], meta: u8, light: f32, lmv: f32) {
     let [x, y, z] = cell;
     let y = y - 1.0 / 16.0;
     // (x0, z0, x1, z1) of each quad's base line
     for (x0, z0, x1, z1) in [(0.25, 0.0, 0.25, 1.0), (0.75, 0.0, 0.75, 1.0), (0.0, 0.25, 1.0, 0.25), (0.0, 0.75, 1.0, 0.75)] {
-        let base = verts.len() as u32 / 6;
+        let base = verts.len() as u32 / VF as u32;
         for (px, pz, py, u, v) in [(x0, z0, 1.0, 0.0, 0.0), (x0, z0, 0.0, 0.0, 1.0), (x1, z1, 0.0, 1.0, 1.0), (x1, z1, 1.0, 1.0, 0.0)] {
             let (au, av) = atlas::face_uv(59, meta, 2, u, v);
-            verts.extend_from_slice(&[x + px, y + py, z + pz, au, av, light]);
+            verts.extend_from_slice(&[x + px, y + py, z + pz, au, av, light, lmv]);
         }
         idxs.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3, base, base + 2, base + 1, base, base + 3, base + 2]);
     }
@@ -418,18 +434,18 @@ pub fn push_torch(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, cell: [f32; 3], met
         [[x + 0.5, y + 1.0, z - w, 0.0, 1.0], [x + 0.5 + tx, y, z - w + tz, 0.0, 0.0], [x - 0.5 + tx, y, z - w + tz, 1.0, 0.0], [x - 0.5, y + 1.0, z - w, 1.0, 1.0]],
     ];
     for q in quads {
-        let base = verts.len() as u32 / 6;
+        let base = verts.len() as u32 / VF as u32;
         for p in q {
             let (u, v) = atlas::terrain_uv(80, p[3], p[4]);
-            verts.extend_from_slice(&[p[0], p[1], p[2], u, v, 1.0]);
+            verts.extend_from_slice(&[p[0], p[1], p[2], u, v, 1.0, lm(15, 15)]);
         }
         idxs.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3, base, base + 2, base + 1, base, base + 3, base + 2]);
     }
 }
 
-/// Simple count of generated faces (verts.len()/24, since 4 verts * 6 floats).
+/// Simple count of generated faces (verts.len() / (4 * VF), since 4 verts per face).
 pub fn face_count(verts: &[f32]) -> usize {
-    verts.len() / 24
+    verts.len() / (4 * VF)
 }
 
 #[cfg(test)]
@@ -447,7 +463,7 @@ mod tests {
         let u_of = |cells: &[usize], face: usize| {
             let mut c = air();
             cells.iter().for_each(|&i| c[i] = chest::ID);
-            build(&c, &Nibbles::new(), &a, [&a[..], &a[..], &a[..], &a[..]], [&a[..], &a[..], &a[..], &a[..]], 0, 0, 0).0[face * 4 * 6 + 3]
+            build(&c, &Nibbles::new(), &a, [&a[..], &a[..], &a[..], &a[..]], [&a[..], &a[..], &a[..], &a[..]], 0, 0, 0).0[face * 4 * VF + 3]
         };
         assert_eq!(u_of(&[idx(5, 20, 5)], 4), atlas::terrain_uv(27, 0.0, 0.0).0);
         // Block 5 emits -X, +Y, -Y, +Z, -Z (+X touches the other chest): its +Z is face 3; block 6's is face 5 + 3.
@@ -623,13 +639,13 @@ mod tests {
         c[idx(11, 20, 5)] = 1;
         let (v, o, w) = build_split(&c, &Nibbles::new(), [&Nibbles::new(); 4], &a, [&a[..], &a[..], &a[..], &a[..]], [&a[..], &a[..], &a[..], &a[..]], 0, 0, 0);
         assert_eq!((w.len(), o.len()), (6 * 6, 12 * 6)); // 6 faces of 6 indices for the water; lava and stone 12 faces
-        assert!(w.iter().all(|&i| (5.0..=6.0).contains(&v[i as usize * 6])));
+        assert!(w.iter().all(|&i| (5.0..=6.0).contains(&v[i as usize * VF])));
         // One water cell = depth 1: the integer part of its light; a 3-deep column reads 3 on its top face.
-        assert!(w.iter().all(|&i| v[i as usize * 6 + 5].floor() == 1.0));
+        assert!(w.iter().all(|&i| v[i as usize * VF + 5].floor() == 1.0));
         c[idx(5, 19, 5)] = 9;
         c[idx(5, 18, 5)] = 9;
         let (v, _, w) = build_split(&c, &Nibbles::new(), [&Nibbles::new(); 4], &a, [&a[..], &a[..], &a[..], &a[..]], [&a[..], &a[..], &a[..], &a[..]], 0, 0, 0);
-        assert!(w.iter().any(|&i| v[i as usize * 6 + 5].floor() == 3.0));
+        assert!(w.iter().any(|&i| v[i as usize * VF + 5].floor() == 3.0));
     }
 
     /// A level-1 cell in the +X neighbour is read as level 1, not as a source: the source beside it flows toward +X across the seam.

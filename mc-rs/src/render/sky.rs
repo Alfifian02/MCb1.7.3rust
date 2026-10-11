@@ -1,398 +1,230 @@
-//! Sky pass, a port of `RenderGlobal.renderSky`: the sky dome, the sunrise glow, the sun and moon, the stars and the
-//! dark plane under the horizon, in the vanilla order. It is drawn first into the frame, without writing depth, around
-//! the viewer (the view matrix keeps only the camera rotation), so the terrain simply paints over it.
-//! The sun and moon are the real `terrain/sun.png` and `terrain/moon.png` packed into `assets/sky.rgba`
-//! (64x64 RGBA: sun at the top left, moon at the top right, a white tile at the bottom left for flat colours).
-//! Dome and under-plane use the fog of `EntityRenderer.setupFog(-1)`: linear from 0 to 0.8 x the far plane,
-//! by distance from the eye, towards the fog colour. Vanilla's cloud layer and rain/snow are not drawn (see ROADMAP).
+//! Sky, a port of Photon's `d0_sky_map` + `d4a_generate_sky_sh` and the sky branch of `d4_deferred_shading` (WGSL in
+//! `sky.wgsl` / `sky_sh.wgsl`, Photon Shaders by SixthSurge, see `LICENSE-PHOTON`). Replaces the vanilla dome, sunrise
+//! fan, sun/moon quads, glare and star quads of `RenderGlobal.renderSky`.
+//!
+//! Per frame, before the scene: `encode` renders the 192 x 108 sky map (the whole sky around the viewer from the
+//! precomputed atmosphere LUT, `assets/scattering.dat`, with the light colours in column 191) and sums it into 9 SH
+//! coefficients (`sh`). `draw` then paints the full-resolution sky (atmosphere, stars, sun, moon) over every pixel the
+//! scene left at depth 1; it is the stand-in for d4's sky branch until the deferred pass exists (milestone 1), so it
+//! tone-maps itself (see `stand_in_tonemap`; milestone 5 removes that).
+//!
+//! For d4 (milestone 1): `WGSL` is the library (paste it into the deferred module and call `draw_sky`,
+//! `atmosphere_scattering`, `project_sky`, `sh_evaluate_irradiance`), `sky_map` the texture (rgba16f, light colour at
+//! (191, 0), ambient colour at (191, 1)), `sh` the buffer (9 coefficients + irradiance up, `vec4` each), and
+//! `uniform_buffer` the `Sky` block of group 0, `bind_group()` with its layout `layout`.
 
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3, Vec4};
-use std::f32::consts::{FRAC_PI_2, PI, TAU};
-use std::ops::Range;
+use std::f32::consts::TAU;
 use wgpu::util::DeviceExt;
 
 use crate::render::camera::FirstPersonCamera;
-use crate::world::gen::noise::{mh_cos, mh_sin};
 use crate::world::sky;
 
-const ATLAS: &[u8] = include_bytes!("../../assets/sky.rgba");
-const ATLAS_SIZE: u32 = 64;
-/// Far plane of vanilla's NORMAL view distance (`256 >> 1`); the sky projection reaches twice that, like `gluPerspective`.
-const FAR: f32 = 128.0;
-/// Centre of the all-white tile in the atlas.
-const WHITE: [f32; 2] = [0.25, 0.75];
-/// Room for the dome (6), glow (48), glare (6), sun + moon (12) and under plane (6) vertices.
-const MAX_VERTS: usize = 128;
+/// The library part of the shader (group 0 only).
+pub const WGSL: &str = include_str!("sky.wgsl");
+const SH_WGSL: &str = include_str!("sky_sh.wgsl");
+const LUT_DAT: &[u8] = include_bytes!("../../assets/scattering.dat");
+const NOISE: &[u8] = include_bytes!("../../assets/noise.rgba");
+/// The LUT of `image/atmosphere/scattering.dat`: RGB16F, x = 2 x 16 (nu; Rayleigh half, Mie half), y = 64 (mu), z = 32 (mu_s).
+const LUT_SIZE: (u32, u32, u32) = (32, 64, 32);
+const NOISE_SIZE: u32 = 512;
+pub const SKY_MAP: (u32, u32) = (192, 108);
 
-#[repr(C)]
-#[derive(Copy, Clone, Pod, Zeroable)]
-struct Vertex {
-    pos: [f32; 3],
-    uv: [f32; 2],
-    color: [f32; 4],
-    /// 1 = fogged (dome, under plane), 0 = not.
-    fog: f32,
-}
-
-impl Vertex {
-    fn layout() -> wgpu::VertexBufferLayout<'static> {
-        wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<Vertex>() as u64,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &[
-                wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 0, shader_location: 0 },
-                wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 12, shader_location: 1 },
-                wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 20, shader_location: 2 },
-                wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32, offset: 36, shader_location: 3 },
-            ],
-        }
-    }
-}
-
-#[repr(C)]
-#[derive(Copy, Clone, Pod, Zeroable)]
-struct Uniforms {
-    view: [[f32; 4]; 4],
-    proj: [[f32; 4]; 4],
-    /// Fog colour (rgb).
-    fog: [f32; 4],
-    /// Fog start and end (x, y).
-    range: [f32; 4],
-    /// Multiplies every colour: white, or the star brightness.
-    tint: [f32; 4],
-    /// View-space direction toward the sun (xyz), for the glare.
-    sunv: [f32; 4],
-}
-
-/// `SUN_GLARE_DAY * 0.1 * SUNGLARE_OUTWATER_STRENGTH * 0.01` of the pack is an HDR add; here the halo is an alpha blend
-/// (an add would clip on the pale sky), so this is its own number. UNVERIFIED: on a device.
-const GLARE: f32 = 1.2;
-/// Half-size of the glare quad at the sun's distance (100): reaches ~42 degrees from the sun, where the glare alpha is < 2%
-/// (it is drawn over the whole sky and then covered by terrain, so every pixel it spans costs a shaded fragment).
-const GLARE_R: f32 = 90.0;
-/// `lightColor.glsl` morning light (236, 184, 132) / 255.
-const GLARE_RGB: [f32; 3] = [0.93, 0.72, 0.52];
-
-const SHADER_SRC: &str = r#"
-const GLARE: f32 = @GLARE@; // substituted from the Rust `GLARE`
-struct U { view: mat4x4<f32>, proj: mat4x4<f32>, fog: vec4<f32>, range: vec4<f32>, tint: vec4<f32>, sunv: vec4<f32> };
-@group(0) @binding(0) var<uniform> u: U;
-@group(0) @binding(1) var samp: sampler;
-@group(0) @binding(2) var tex: texture_2d<f32>;
-
-struct VsOut {
-    @builtin(position) pos: vec4<f32>,
-    @location(0) uv: vec2<f32>,
-    @location(1) color: vec4<f32>,
-    @location(2) vpos: vec3<f32>,
-    @location(3) fog: f32,
-};
-
-@vertex
-fn vs_main(@location(0) p: vec3<f32>, @location(1) uv: vec2<f32>, @location(2) color: vec4<f32>, @location(3) fog: f32) -> VsOut {
-    var o: VsOut;
-    let v = u.view * vec4<f32>(p, 1.0);
-    o.pos = u.proj * v;
-    o.uv = uv;
-    o.color = color;
-    o.vpos = v.xyz;
-    o.fog = fog;
-    return o;
-}
-
-// gbuffers glare, `sunGlare.glsl`: VoL^8, then visfactor / (1 - (1 - visfactor) * VoL) - visfactor, times VoL.
-// A pipeline of its own (no texture), so no branch on a varying precedes a texture sample in `fs_main`.
-@fragment
-fn fs_glare(in: VsOut) -> @location(0) vec4<f32> {
-    let s = max(dot(normalize(in.vpos), u.sunv.xyz), 0.0);
-    var v = s * s;
-    v = v * v;
-    v = v * v;
-    let g = (0.2 / (1.0 - 0.8 * v) - 0.2) * s;
-    return vec4<f32>(in.color.rgb, clamp(g * GLARE, 0.0, 1.0) * in.color.a);
-}
-
-@fragment
-fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    var c = textureSample(tex, samp, in.uv) * in.color * u.tint;
-    if (in.fog > 0.5) {
-        let f = clamp((u.range.y - length(in.vpos)) / (u.range.y - u.range.x), 0.0, 1.0);
-        c = vec4<f32>(mix(u.fog.rgb, c.rgb, f), c.a);
-    }
-    return c;
-}
-"#;
-
-/// What the sky needs to know about this frame (all from `world::sky`).
+/// What the sky needs to know about this frame.
 pub struct SkyFrame {
+    /// `world::sky::celestial_angle`: 0 = noon, 0.5 = midnight.
     pub angle: f32,
     pub rain: f32,
-    pub sky: [f32; 3],
-    pub fog: [f32; 3],
+    /// Seconds of play, for the stars' twinkle (`frameTimeCounter`).
+    pub seconds: f32,
 }
 
-/// One frame of dynamic geometry in draw order, as ranges into one vertex list (triangle lists).
-struct Geometry {
-    verts: Vec<Vertex>,
-    dome: Range<u32>,
-    glow: Range<u32>,
-    glare: Range<u32>,
-    bodies: Range<u32>,
-    under: Range<u32>,
+/// The `Sky` block of `sky.wgsl`.
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
+pub struct Params {
+    inv_vp: [[f32; 4]; 4],
+    sun_dir: [f32; 4],
+    moon_dir: [f32; 4],
+    light_dir: [f32; 4],
+    celestial: [[f32; 4]; 4],
+    /// time_sunrise, time_noon, time_sunset, time_midnight
+    times: [f32; 4],
+    /// rainStrength, sunAngle, seconds, atmosphere_saturation_boost_amount
+    misc: [f32; 4],
 }
 
-fn quad(v: &mut Vec<Vertex>, p: [[f32; 3]; 4], uv: [[f32; 2]; 4], color: [f32; 4], fog: f32) {
-    for i in [0, 1, 2, 0, 2, 3] {
-        v.push(Vertex { pos: p[i], uv: uv[i], color, fog });
+/// The pack's Iris uniforms (`shaders.properties`) from mc-rs's sun angle. The pack's `sunAngle` is 0 at sunrise, ours 0 at noon;
+/// our sun path lies in the YZ plane, so "east" (`sun_dir.x > 0`, the rising half) is `angle > 0.5` here.
+pub fn params(f: &SkyFrame, camera: &FirstPersonCamera) -> Params {
+    let sun = sky::sun_dir(f.angle);
+    let sun_angle = (f.angle + 0.25).fract();
+    let light = if sun_angle < 0.5 { sun } else { -sun };
+    let (mut view, proj) = camera.build_view_proj();
+    view.w_axis = Vec4::W; // the sky travels with the viewer: keep the rotation, drop the position
+    let y = sun.y;
+    let me_fade = if y < 0.18 { 0.37 + 1.2 * (-y).max(0.0) } else { 1.7 };
+    let me = (1.0 - me_fade * (y - 0.18).abs()).clamp(0.0, 1.0).powi(2);
+    let rising = f.angle > 0.5;
+    let blue_hour = (-150.0 * (y + 0.07283) * (y + 0.07283)).exp();
+    let v4 = |v: Vec3| v.extend(0.0).to_array();
+    Params {
+        inv_vp: (proj * view).inverse().to_cols_array_2d(),
+        sun_dir: v4(sun),
+        moon_dir: v4(-sun),
+        light_dir: v4(light),
+        celestial: Mat4::from_rotation_x(-f.angle * TAU).to_cols_array_2d(),
+        times: [if rising { me } else { 0.0 }, if y > 0.0 { 1.0 - me } else { 0.0 }, if rising { 0.0 } else { me }, if y < 0.0 { 1.0 - me } else { 0.0 }],
+        misc: [f.rain, sun_angle, f.seconds, 0.10 + 0.20 * blue_hour],
     }
 }
 
-/// The sun or moon quad: corners `[x sign, z sign, u, v]` at height `y`, side `2 * s`, turned with the sky by `rot`.
-fn body(v: &mut Vec<Vertex>, rot: Mat4, s: f32, y: f32, pts: [[f32; 4]; 4], color: [f32; 4], u0: f32) {
-    let p = pts.map(|q| rot.transform_point3(Vec3::new(q[0] * s, y, q[1] * s)).to_array());
-    let uv = pts.map(|q| [u0 + q[2] * 0.5, q[3] * 0.5]);
-    quad(v, p, uv, color, 0.0);
-}
-
-fn geometry(f: &SkyFrame) -> Geometry {
-    let mut v: Vec<Vertex> = Vec::with_capacity(MAX_VERTS);
-    // glSkyList / glSkyList2: a flat plane 16 above / below the eye, 64 x 64 quads from -384 to 448 in vanilla.
-    let (lo, hi) = (-384.0_f32, 448.0_f32);
-    let plane = |y: f32| [[lo, y, lo], [hi, y, lo], [hi, y, hi], [lo, y, hi]];
-    quad(&mut v, plane(16.0), [WHITE; 4], [f.sky[0], f.sky[1], f.sky[2], 1.0], 1.0);
-    let dome = 0..v.len() as u32;
-
-    // Sunrise / sunset glow: a fan standing on the horizon, opaque in the middle and clear at the rim.
-    let start = v.len() as u32;
-    if let Some(c) = sky::sunrise_color(f.angle) {
-        let m = Mat4::from_rotation_x(FRAC_PI_2) * Mat4::from_rotation_z(if f.angle > 0.5 { PI } else { 0.0 });
-        let at = |p: [f32; 3]| m.transform_point3(Vec3::from(p)).to_array();
-        let centre = Vertex { pos: at([0.0, 100.0, 0.0]), uv: WHITE, color: c, fog: 0.0 };
-        let rim = |i: u32| {
-            let a = i as f32 * PI * 2.0 / 16.0;
-            let (s, co) = (mh_sin(a), mh_cos(a));
-            Vertex { pos: at([s * 120.0, co * 120.0, -co * 40.0 * c[3]]), uv: WHITE, color: [c[0], c[1], c[2], 0.0], fog: 0.0 }
-        };
-        for i in 0..16 {
-            v.extend([centre, rim(i), rim(i + 1)]);
-        }
-    }
-    let glow = start..v.len() as u32;
-
-    // Sun glare: one big quad around the sun, shaded per pixel by the angle to it. `sunVisibility` fades it at the horizon
-    // and the night, rain removes it (`1.1 - rainFactor`).
-    let start = v.len() as u32;
-    let rot = Mat4::from_rotation_x(f.angle * TAU);
-    let vis = (rot.transform_vector3(Vec3::Y).y + 0.0625).clamp(0.0, 0.125) * 8.0 * (1.0 - f.rain);
-    if vis > 0.0 {
-        let p = [[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]].map(|c| rot.transform_point3(Vec3::new(c[0] * GLARE_R, 100.0, c[1] * GLARE_R)).to_array());
-        quad(&mut v, p, [WHITE; 4], [GLARE_RGB[0], GLARE_RGB[1], GLARE_RGB[2], vis], 0.0);
-    }
-    let glare = start..v.len() as u32;
-
-    // Sun (30 wide half-size) and moon (20), opposite each other, turned about the X axis by the sun angle.
-    let start = v.len() as u32;
-    let white = [1.0, 1.0, 1.0, 1.0 - f.rain];
-    body(&mut v, rot, 30.0, 100.0, [[-1.0, -1.0, 0.0, 0.0], [1.0, -1.0, 1.0, 0.0], [1.0, 1.0, 1.0, 1.0], [-1.0, 1.0, 0.0, 1.0]], white, 0.0);
-    body(&mut v, rot, 20.0, -100.0, [[-1.0, 1.0, 1.0, 1.0], [1.0, 1.0, 0.0, 1.0], [1.0, -1.0, 0.0, 0.0], [-1.0, -1.0, 1.0, 0.0]], white, 0.5);
-    let bodies = start..v.len() as u32;
-
-    // The stars are drawn here (own buffer), then the dark plane under the horizon.
-    let start = v.len() as u32;
-    quad(&mut v, plane(-16.0), [WHITE; 4], [f.sky[0] * 0.2 + 0.04, f.sky[1] * 0.2 + 0.04, f.sky[2] * 0.6 + 0.1, 1.0], 1.0);
-    let under = start..v.len() as u32;
-    Geometry { verts: v, dome, glow, glare, bodies, under }
-}
-
+/// Everything the sky owns on the GPU.
 pub struct SkyRenderer {
-    opaque: wgpu::RenderPipeline,
-    glare_pl: wgpu::RenderPipeline,
-    alpha: wgpu::RenderPipeline,
-    additive: wgpu::RenderPipeline,
-    main_uniforms: wgpu::Buffer,
-    star_uniforms: wgpu::Buffer,
-    main_bind: wgpu::BindGroup,
-    star_bind: wgpu::BindGroup,
-    dynamic: wgpu::Buffer,
-    stars: wgpu::Buffer,
-    star_count: u32,
-    stars_on: bool,
-    /// Dome, glow, sun + moon, under plane: set by `update`, read by `draw`.
-    ranges: [Range<u32>; 5],
+    pub uniform_buffer: wgpu::Buffer,
+    pub layout: wgpu::BindGroupLayout,
+    bind: wgpu::BindGroup,
+    pub sky_map: wgpu::TextureView,
+    pub sh: wgpu::Buffer,
+    d0: wgpu::RenderPipeline,
+    d4a: wgpu::ComputePipeline,
+    d4a_bind: wgpu::BindGroup,
+    pipeline: wgpu::RenderPipeline,
 }
 
 impl SkyRenderer {
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, surface_format: wgpu::TextureFormat) -> Self {
-        let size = wgpu::Extent3d { width: ATLAS_SIZE, height: ATLAS_SIZE, depth_or_array_layers: 1 };
-        let tex = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("sky_atlas"),
-            size,
+        let tex = |label: &str, size: wgpu::Extent3d, dimension: wgpu::TextureDimension, format: wgpu::TextureFormat, data: &[u8]| {
+            device.create_texture_with_data(
+                queue,
+                &wgpu::TextureDescriptor { label: Some(label), size, mip_level_count: 1, sample_count: 1, dimension, format, usage: wgpu::TextureUsages::TEXTURE_BINDING, view_formats: &[] },
+                wgpu::util::TextureDataOrder::LayerMajor,
+                data,
+            )
+        };
+        // The file is RGB16F; there is no 3-channel half format, so pad every texel with an alpha of 1.0 (half 0x3C00).
+        let lut_data: Vec<u8> = LUT_DAT.chunks(6).flat_map(|t| t.iter().copied().chain([0x00, 0x3C])).collect();
+        let lut = tex("sky_lut", wgpu::Extent3d { width: LUT_SIZE.0, height: LUT_SIZE.1, depth_or_array_layers: LUT_SIZE.2 }, wgpu::TextureDimension::D3, wgpu::TextureFormat::Rgba16Float, &lut_data);
+        let noise = tex("sky_noise", wgpu::Extent3d { width: NOISE_SIZE, height: NOISE_SIZE, depth_or_array_layers: 1 }, wgpu::TextureDimension::D2, wgpu::TextureFormat::Rgba8Unorm, NOISE);
+        let sampler = |mode| device.create_sampler(&wgpu::SamplerDescriptor { address_mode_u: mode, address_mode_v: mode, address_mode_w: mode, mag_filter: wgpu::FilterMode::Linear, min_filter: wgpu::FilterMode::Linear, ..Default::default() });
+        let (lut_samp, noise_samp) = (sampler(wgpu::AddressMode::ClampToEdge), sampler(wgpu::AddressMode::Repeat));
+
+        let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor { label: Some("sky_uniform"), size: std::mem::size_of::<Params>() as u64, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        let all = wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE;
+        let texture = |binding, dim| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: all,
+            ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: dim, multisampled: false },
+            count: None,
+        };
+        let samp = |binding| wgpu::BindGroupLayoutEntry { binding, visibility: all, ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering), count: None };
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("sky_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry { binding: 0, visibility: all, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                texture(1, wgpu::TextureViewDimension::D3),
+                samp(2),
+                texture(3, wgpu::TextureViewDimension::D2),
+                samp(4),
+            ],
+        });
+        let view = |t: &wgpu::Texture| t.create_view(&Default::default());
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("sky_bind"),
+            layout: &layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: uniform_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view(&lut)) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&lut_samp) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&view(&noise)) },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&noise_samp) },
+            ],
+        });
+
+        let map_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("sky_map"),
+            size: wgpu::Extent3d { width: SKY_MAP.0, height: SKY_MAP.1, depth_or_array_layers: 1 },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8UnormSrgb,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo { texture: &tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-            ATLAS,
-            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(ATLAS_SIZE * 4), rows_per_image: Some(ATLAS_SIZE) },
-            size,
-        );
-        let tex_view = tex.create_view(&wgpu::TextureViewDescriptor::default());
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Nearest,
-            min_filter: wgpu::FilterMode::Nearest,
-            ..Default::default()
-        });
+        let sky_map = view(&map_tex);
+        let sh = device.create_buffer(&wgpu::BufferDescriptor { label: Some("sky_sh"), size: 160, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false });
 
-        let uniforms = || device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("sky_uniform"),
-            size: std::mem::size_of::<Uniforms>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let (main_uniforms, star_uniforms) = (uniforms(), uniforms());
-
-        let bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("sky_bind_layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-            ],
-        });
-        let bind = |buf: &wgpu::Buffer| device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("sky_bind"),
-            layout: &bind_layout,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&tex_view) },
-            ],
-        });
-        let (main_bind, star_bind) = (bind(&main_uniforms), bind(&star_uniforms));
-
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("sky_shader"), source: wgpu::ShaderSource::Wgsl(SHADER_SRC.replace("@GLARE@", &format!("{GLARE:?}")).into()) });
-        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("sky_pipeline_layout"), bind_group_layouts: &[&bind_layout], push_constant_ranges: &[] });
-        // The frame pass has a depth buffer, so the pipelines declare one too: never tested, never written.
-        let make = |label: &str, fs: &str, blend: wgpu::BlendState| device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("sky_shader"), source: wgpu::ShaderSource::Wgsl(format!("{WGSL}\n{SH_WGSL}").into()) });
+        let pl = |label: &str, layouts: &[&wgpu::BindGroupLayout]| device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some(label), bind_group_layouts: layouts, push_constant_ranges: &[] });
+        let render = |label: &str, fs: &str, format: wgpu::TextureFormat, depth: Option<wgpu::DepthStencilState>| device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some(label),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState { module: &shader, entry_point: Some("vs_main"), buffers: &[Vertex::layout()], compilation_options: wgpu::PipelineCompilationOptions::default() },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some(fs),
-                targets: &[Some(wgpu::ColorTargetState { format: surface_format, blend: Some(blend), write_mask: wgpu::ColorWrites::ALL })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            }),
-            primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: false,
-                depth_compare: wgpu::CompareFunction::Always,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
+            layout: Some(&pl(label, &[&layout])),
+            vertex: wgpu::VertexState { module: &shader, entry_point: Some("vs_main"), buffers: &[], compilation_options: Default::default() },
+            fragment: Some(wgpu::FragmentState { module: &shader, entry_point: Some(fs), targets: &[Some(format.into())], compilation_options: Default::default() }),
+            primitive: Default::default(),
+            depth_stencil: depth,
+            multisample: Default::default(),
             multiview: None,
             cache: None,
         });
-        // GL_SRC_ALPHA, GL_ONE: what the sun, moon and stars are drawn with.
-        let add = wgpu::BlendComponent { src_factor: wgpu::BlendFactor::SrcAlpha, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add };
-        let opaque = make("sky_opaque", "fs_main", wgpu::BlendState::REPLACE);
-        let alpha = make("sky_alpha", "fs_main", wgpu::BlendState::ALPHA_BLENDING);
-        let glare_pl = make("sky_glare", "fs_glare", wgpu::BlendState::ALPHA_BLENDING);
-        let additive = make("sky_additive", "fs_main", wgpu::BlendState { color: add, alpha: add });
+        let d0 = render("sky_d0", "fs_d0", wgpu::TextureFormat::Rgba16Float, None);
+        // Only where nothing was drawn: the triangle sits at depth 1.0, the frame clears to 1.0 and the terrain writes less.
+        let pipeline = render("sky_pass", "fs_sky", surface_format, Some(wgpu::DepthStencilState { format: wgpu::TextureFormat::Depth32Float, depth_write_enabled: false, depth_compare: wgpu::CompareFunction::LessEqual, stencil: Default::default(), bias: Default::default() }));
 
-        let dynamic = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("sky_dynamic"),
-            size: (MAX_VERTS * std::mem::size_of::<Vertex>()) as u64,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
+        let sh_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("sky_sh_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 1, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+            ],
         });
-        let mut sv: Vec<Vertex> = Vec::new();
-        for q in sky::star_vertices().chunks(4) {
-            quad(&mut sv, [q[0], q[1], q[2], q[3]].map(|p| p.map(|c| c as f32)), [WHITE; 4], [1.0; 4], 0.0);
+        let d4a_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("sky_sh_bind"),
+            layout: &sh_layout,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&sky_map) }, wgpu::BindGroupEntry { binding: 1, resource: sh.as_entire_binding() }],
+        });
+        let d4a = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some("sky_d4a"), layout: Some(&pl("sky_d4a", &[&layout, &sh_layout])), module: &shader, entry_point: Some("cs_sh"), compilation_options: Default::default(), cache: None });
+
+        Self { uniform_buffer, layout, bind, sky_map, sh, d0, d4a, d4a_bind, pipeline }
+    }
+
+    /// The group 0 bind group (uniform, LUT, noise and their samplers) for passes that include `WGSL`.
+    pub fn bind_group(&self) -> &wgpu::BindGroup {
+        &self.bind
+    }
+
+    /// Upload this frame's sun, moon and camera.
+    pub fn update(&self, queue: &wgpu::Queue, camera: &FirstPersonCamera, f: &SkyFrame) {
+        queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&params(f, camera)));
+    }
+
+    /// d0 and d4a: the sky map, then its SH. Outside any render pass, before the scene.
+    pub fn encode(&self, enc: &mut wgpu::CommandEncoder) {
+        {
+            let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("sky_d0"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &self.sky_map, resolve_target: None, depth_slice: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store } })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            rp.set_pipeline(&self.d0);
+            rp.set_bind_group(0, &self.bind, &[]);
+            rp.draw(0..3, 0..1);
         }
-        let stars = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("sky_stars"), contents: bytemuck::cast_slice(&sv), usage: wgpu::BufferUsages::VERTEX });
-
-        Self { opaque, glare_pl, alpha, additive, main_uniforms, star_uniforms, main_bind, star_bind, dynamic, stars, star_count: sv.len() as u32, stars_on: false, ranges: [0..0, 0..0, 0..0, 0..0, 0..0] }
+        let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("sky_d4a"), timestamp_writes: None });
+        cp.set_pipeline(&self.d4a);
+        cp.set_bind_group(0, &self.bind, &[]);
+        cp.set_bind_group(1, &self.d4a_bind, &[]);
+        cp.dispatch_workgroups(1, 1, 1);
     }
 
-    /// Upload this frame's matrices, colours and geometry.
-    pub fn update(&mut self, queue: &wgpu::Queue, camera: &FirstPersonCamera, f: &SkyFrame) {
-        let (mut view, _) = camera.build_view_proj();
-        view.w_axis = Vec4::W; // the sky travels with the viewer: keep the rotation, drop the position
-        let proj = Mat4::perspective_rh(camera.fov_y, camera.aspect, camera.znear, FAR * 2.0);
-        let mut u = Uniforms {
-            view: view.to_cols_array_2d(),
-            proj: proj.to_cols_array_2d(),
-            fog: [f.fog[0], f.fog[1], f.fog[2], 1.0],
-            range: [0.0, FAR * 0.8, 0.0, 0.0],
-            tint: [1.0; 4],
-            sunv: view.transform_vector3(Mat4::from_rotation_x(f.angle * TAU).transform_vector3(Vec3::Y)).normalize().extend(0.0).to_array(),
-        };
-        queue.write_buffer(&self.main_uniforms, 0, bytemuck::bytes_of(&u));
-        // glColor4f(b, b, b, b) with the additive blend: the stars fade in at dusk and out in rain.
-        let b = sky::star_brightness(f.angle) * (1.0 - f.rain);
-        u.tint = [b; 4];
-        queue.write_buffer(&self.star_uniforms, 0, bytemuck::bytes_of(&u));
-        self.stars_on = b > 0.0;
-        let g = geometry(f);
-        queue.write_buffer(&self.dynamic, 0, bytemuck::cast_slice(&g.verts));
-        self.ranges = [g.dome, g.glow, g.glare, g.bodies, g.under];
-    }
-
-    /// Draw the sky into the frame pass, before any terrain.
+    /// The sky over every pixel still at depth 1, inside the scene pass after the opaque geometry.
     pub fn draw(&self, rp: &mut wgpu::RenderPass<'_>) {
-        let [dome, glow, glare, bodies, under] = &self.ranges;
-        rp.set_vertex_buffer(0, self.dynamic.slice(..));
-        rp.set_bind_group(0, &self.main_bind, &[]);
-        rp.set_pipeline(&self.opaque);
-        rp.draw(dome.clone(), 0..1);
-        if !glow.is_empty() {
-            rp.set_pipeline(&self.alpha);
-            rp.draw(glow.clone(), 0..1);
-        }
-        if !glare.is_empty() {
-            rp.set_pipeline(&self.glare_pl);
-            rp.draw(glare.clone(), 0..1);
-        }
-        rp.set_pipeline(&self.additive);
-        rp.draw(bodies.clone(), 0..1);
-        if self.stars_on {
-            rp.set_bind_group(0, &self.star_bind, &[]);
-            rp.set_vertex_buffer(0, self.stars.slice(..));
-            rp.draw(0..self.star_count, 0..1);
-            rp.set_bind_group(0, &self.main_bind, &[]);
-            rp.set_vertex_buffer(0, self.dynamic.slice(..));
-        }
-        rp.set_pipeline(&self.opaque);
-        rp.draw(under.clone(), 0..1);
+        rp.set_pipeline(&self.pipeline);
+        rp.set_bind_group(0, &self.bind, &[]);
+        rp.draw(0..3, 0..1);
     }
 }
 
@@ -400,28 +232,83 @@ impl SkyRenderer {
 mod tests {
     use super::*;
 
-    fn mean(v: &[Vertex]) -> Vec3 {
-        v.iter().map(|p| Vec3::from(p.pos)).sum::<Vec3>() / v.len() as f32
+    /// Reads `n` bytes of a GPU buffer back.
+    fn read(dev: &wgpu::Device, q: &wgpu::Queue, enc: wgpu::CommandEncoder, src: &wgpu::Buffer, n: u64) -> Vec<f32> {
+        let out = dev.create_buffer(&wgpu::BufferDescriptor { label: None, size: n, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        let mut enc = enc;
+        enc.copy_buffer_to_buffer(src, 0, &out, 0, n);
+        q.submit([enc.finish()]);
+        out.slice(..).map_async(wgpu::MapMode::Read, |_| ());
+        dev.poll(wgpu::PollType::Wait).unwrap();
+        let v = bytemuck::cast_slice(&out.slice(..).get_mapped_range()).to_vec();
+        v
     }
 
-    /// Noon: sun straight up, moon straight down; midnight: swapped. The glow only exists near the horizon,
-    /// and everything fits the dynamic buffer.
+    /// The sky at `angle` as an 8-bit image of `w x h` (RGBA) plus the SH buffer (10 x 4 floats); `None` without an adapter.
+    fn render(angle: f32, rain: f32, pitch: f32) -> Option<(Vec<u8>, Vec<f32>)> {
+        let inst = wgpu::Instance::default();
+        let ad = pollster::block_on(inst.request_adapter(&Default::default())).ok()?;
+        let (dev, q) = pollster::block_on(ad.request_device(&Default::default())).ok()?;
+        let (w, h) = (256u32, 128u32);
+        let fmt = wgpu::TextureFormat::Rgba8Unorm;
+        let sky = SkyRenderer::new(&dev, &q, fmt);
+        let mut cam = FirstPersonCamera::spawn_at(0.0, 70.0, 0.0);
+        (cam.aspect, cam.pitch) = (w as f32 / h as f32, pitch);
+        sky.update(&q, &cam, &SkyFrame { angle, rain, seconds: 3.0 });
+        let target = dev.create_texture(&wgpu::TextureDescriptor { label: None, size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 }, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: fmt, usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC, view_formats: &[] });
+        let depth = dev.create_texture(&wgpu::TextureDescriptor { label: None, size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 }, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::Depth32Float, usage: wgpu::TextureUsages::RENDER_ATTACHMENT, view_formats: &[] });
+        let mut enc = dev.create_command_encoder(&Default::default());
+        sky.encode(&mut enc);
+        {
+            let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: None,
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &target.create_view(&Default::default()), resolve_target: None, depth_slice: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::RED), store: wgpu::StoreOp::Store } })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment { view: &depth.create_view(&Default::default()), depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Discard }), stencil_ops: None }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            sky.draw(&mut rp);
+        }
+        let img = dev.create_buffer(&wgpu::BufferDescriptor { label: None, size: (w * h * 4) as u64, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        enc.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo { texture: &target, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            wgpu::TexelCopyBufferInfo { buffer: &img, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * 4), rows_per_image: Some(h) } },
+            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        );
+        let sh = read(&dev, &q, enc, &sky.sh, 160);
+        img.slice(..).map_async(wgpu::MapMode::Read, |_| ());
+        dev.poll(wgpu::PollType::Wait).unwrap();
+        let pixels = img.slice(..).get_mapped_range().to_vec();
+        Some((pixels, sh))
+    }
+
+    /// The times of day the pack distinguishes, and the sun/moon vectors (pure CPU).
     #[test]
-    fn sun_and_moon_trade_places() {
-        let frame = |angle| SkyFrame { angle, rain: 0.0, sky: [0.5; 3], fog: [0.5; 3] };
-        let centres = |g: &Geometry| {
-            let s = g.bodies.start as usize;
-            (mean(&g.verts[s..s + 6]), mean(&g.verts[s + 6..g.bodies.end as usize]))
-        };
-        let noon = geometry(&frame(0.0));
-        let (sun, moon) = centres(&noon);
-        assert!((sun - Vec3::new(0.0, 100.0, 0.0)).length() < 1e-3 && (moon - Vec3::new(0.0, -100.0, 0.0)).length() < 1e-3);
-        let (sun, moon) = centres(&geometry(&frame(0.5)));
-        assert!(sun.y < -99.0 && moon.y > 99.0);
-        let dusk = geometry(&frame(0.25));
-        assert!(noon.glow.is_empty() && dusk.glow.len() == 48);
-        assert_eq!((noon.dome.len(), noon.under.len(), noon.bodies.len()), (6, 6, 12));
-        assert!(noon.glare.len() == 6 && geometry(&frame(0.5)).glare.is_empty()); // sun glare: day only
-        assert!(dusk.verts.len() <= MAX_VERTS && ATLAS.len() == (ATLAS_SIZE * ATLAS_SIZE * 4) as usize);
+    fn params_follow_the_sun() {
+        let cam = FirstPersonCamera::spawn_at(0.0, 70.0, 0.0);
+        let p = |angle| params(&SkyFrame { angle, rain: 0.0, seconds: 0.0 }, &cam);
+        let noon = p(0.0);
+        assert!(noon.sun_dir[1] > 0.999 && noon.moon_dir[1] < -0.999 && noon.light_dir == noon.sun_dir);
+        assert_eq!((noon.times[1], noon.times[3]), (1.0, 0.0)); // noon only
+        let sunset = p(0.25); // sun on the horizon, going down: the light is already the moon's (sunAngle 0.5)
+        assert!(sunset.times[2] > 0.5 && sunset.times[0] == 0.0 && sunset.light_dir == sunset.moon_dir);
+        let sunrise = p(0.75);
+        assert!(sunrise.times[0] > 0.5 && sunrise.times[2] == 0.0 && sunrise.light_dir == sunrise.sun_dir);
+        assert!(p(0.5).times[3] == 1.0 && p(0.5).misc[1] == 0.75);
+    }
+
+    /// Runs the real shaders on whatever adapter exists (lavapipe is enough; skipped without one): the sky is finite, blue at
+    /// noon and dark at midnight, the SH of the noon sky points up (irradiance up > 0, DC term > 0), and every pixel was covered.
+    #[test]
+    fn sky_renders_and_sh_is_sane() {
+        let Some((day, sh_day)) = render(0.0, 0.0, -0.4) else { return };
+        let (night, sh_night) = render(0.5, 0.0, -0.4).unwrap();
+        assert!(sh_day.iter().chain(&sh_night).all(|v| v.is_finite()), "NaN or inf in the SH: {sh_day:?}");
+        let mean = |img: &[u8], c: usize| img.chunks(4).map(|p| p[c] as f32).sum::<f32>() / (img.len() / 4) as f32;
+        assert!(day.chunks(4).all(|p| !(p[0] == 255 && p[1] == 0 && p[2] == 0)), "some pixels kept the clear colour");
+        assert!(mean(&day, 2) > mean(&day, 0) + 20.0, "noon sky is not blue: r {} b {}", mean(&day, 0), mean(&day, 2));
+        assert!(mean(&night, 2) < mean(&day, 2) * 0.5, "midnight is not darker than noon");
+        assert!(sh_day[0] > 0.0 && sh_day[9 * 4 + 2] > 0.0, "no skylight at noon: {sh_day:?}");
+        assert!(sh_day[9 * 4 + 2] > sh_night[9 * 4 + 2] * 5.0, "the night sky lights as much as the day sky");
     }
 }

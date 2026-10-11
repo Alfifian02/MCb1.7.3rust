@@ -17,6 +17,16 @@ pub enum Biome {
 }
 
 impl Biome {
+    /// `BiomeGenBase.getEnableSnow` (taiga, tundra; ice desert is never selected).
+    pub fn snows(self) -> bool {
+        matches!(self, Biome::Taiga | Biome::Tundra)
+    }
+
+    /// `BiomeGenBase.canSpawnLightningBolt`: rain falls where it does not snow and rain is not disabled (desert).
+    pub fn rains(self) -> bool {
+        !self.snows() && self != Biome::Desert
+    }
+
     /// getBiomeFromLookup(temperature, humidity); both in [0, 1].
     pub fn from_climate(temperature: f64, humidity: f64) -> Biome {
         // The Java table is indexed on a 64x64 grid, filled with f32 maths.

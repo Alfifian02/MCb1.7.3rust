@@ -1,12 +1,14 @@
 //! Volumetric light ("light shafts"), a port of AstraLex's `lib/atmospherics/volumetricLight.glsl` (the ray march,
 //! `program/composite.glsl`) and the `LIGHT_SHAFT` part of `program/composite1.glsl` (blur, colour, blend), overworld,
 //! eye not under water. Two passes after the terrain: a half-resolution march through the sun's shadow map into an
-//! RGBA8 target (what `colortex1` is in the pack: `march`), then a full-screen blend onto the frame (`composite`, drawn inside the HUD pass).
+//! RGBA8 target (what `colortex1` is in the pack: `march`), then a full-screen blend onto the frame (`composite`, drawn inside the
+//! HDR scene pass of `render::photon`; `LightShafts::new` takes that pass's format). The march's green channel is the surface
+//! shadow `photon`'s deferred pass reads; the composite no longer darkens the frame with it (`res.w` = 0).
 //! Everything that depends only on the time of day and the weather (`lightCol`, `shadowFade`, the multipliers) is worked
 //! out once per frame on the CPU in `params` and is the part the tests check.
 //! Deviations from the pack, all because mc-rs has no such input:
 //! - dither is `InterleavedGradientNoise` (the pack's `TEXTURED_DITHERING 1` branch), there is no blue-noise texture;
-//! - the shadow lookup is mc-rs's (`distort()` of Shadow-Tutorial, depth `z * 0.5 + 0.25`), not `DistortShadow`, and
+//! - the shadow lookup is photon's (`render::shadows`: its distortion and depth scale, not AstraLex's `DistortShadow`), and
 //!   the march stops at `SHADOW_RADIUS` (the pack's `shadowDistance` is 512): past the map a sample counts as lit;
 //! - no coloured shadows / translucent albedo (water and glass are opaque cubes): `shadowCol` is 0, `vlAlbedo` is 0.
 //! Not ported: underwater shafts, `SMOKER_LIGHT_SHAFT` (the animated noise; needs `noise.png`), the cave fade
@@ -17,8 +19,8 @@ use glam::{Mat4, Vec3};
 use wgpu::{BindGroup, BindGroupLayout, Buffer, CommandEncoder, Device, RenderPipeline, Sampler, TextureView};
 
 use crate::gpu::context::Gpu;
-use crate::gpu::pipeline::{SHADOW_DISTORT, SHADOW_RES};
 use crate::render::camera::{FirstPersonCamera, SHADOW_RADIUS};
+use crate::render::shadows::{self, BLOCK_DEPTH};
 use crate::world::sky;
 
 /// `#define LIGHT_SHAFT` (off = no march, and the shadow pass is back to running only in sunlight).
@@ -26,11 +28,8 @@ pub const LIGHT_SHAFT: bool = true;
 /// `LIGHT_SHAFT_STRENGTH`, the pack's default.
 const STRENGTH: f32 = 1.0;
 /// Added to the sample's shadow-map depth, like `shadowPosition.z += 0.0001`: the pack's depth range is not ours,
-/// this is ~0.25 block (one block = 0.5 / 256 of depth here). UNVERIFIED on a device.
-const DEPTH_BIAS: f32 = 0.0005;
-/// The surface's own shadow test moves its lookup point this many shadow-map texels along the face normal (Shadow-Tutorial's
-/// normal bias) and adds a slope-scaled depth bias; the normal comes from the depth buffer, snapped to an axis. UNVERIFIED on a device.
-const NORMAL_BIAS: f32 = 1.0;
+/// this is 0.25 block (`BLOCK_DEPTH` per block). UNVERIFIED on a device.
+const DEPTH_BIAS: f32 = 0.25 * BLOCK_DEPTH;
 /// How dark a fully shadowed, fully sunlit surface gets (the old per-pixel shadow was 0.25). UNVERIFIED: tune on a device.
 const SHADOW_DARK: f32 = 0.55;
 
@@ -153,7 +152,7 @@ struct U {
     light: [f32; 4],
     /// x, y: tan(fov / 2) x aspect and tan(fov / 2); z, w: near and far.
     ray: [f32; 4],
-    /// x: distort K, y: max march distance, z: endurance, w: vlPower.
+    /// x: unused (was the distort K, now `SHADOW_DISTORTION` in the shader), y: max march distance, z: endurance, w: vlPower.
     a: [f32; 4],
     /// x: additive weight, y: mixedTime, z: rain, w: exponent of the fov falloff.
     b: [f32; 4],
@@ -166,8 +165,8 @@ struct U {
 }
 
 const SHADER: &str = r#"
-const NORMAL_BIAS: f32 = @NB@; // `NORMAL_BIAS` of vl.rs
-const SH_RES: f32 = @RES@; // `SHADOW_RES`
+@DISTORT@
+@PCSS@
 struct U {
     cam: mat4x4<f32>,
     shadow_cam: mat4x4<f32>,
@@ -261,8 +260,9 @@ fn fs_march(in: FsIn) -> @location(0) vec4<f32> {
         if d >= max_dist || depth < d { break; }
         let c = u.shadow_cam * vec4<f32>(r * d, 1.0);
         if abs(c.x) < 1.0 && abs(c.y) < 1.0 {
-            let p = vec3<f32>(c.xy / (length(c.xy) + u.a.x) * 0.5 + 0.5, c.z * 0.5 + 0.25 + u.light.w);
-            let lit = textureSampleCompareLevel(sh_tex, sh_samp, vec2<f32>(p.x, 1.0 - p.y), p.z);
+            // `shadow_cam` has depth 0..1, the pack's distortion works on GL clip space: z goes there (`c.z * 2 - 1`).
+            let p = distort_shadow_space(vec3<f32>(c.xy, c.z * 2.0 - 1.0)) * 0.5 + 0.5;
+            let lit = textureSampleCompareLevel(sh_tex, sh_samp, sm_uv(p.xy), p.z + u.light.w);
             sum = sum + lit * lit * sqrt(d / max_dist) * 1.5;
         } else {
             sum = sum + 1.0; // outside the shadow map: lit
@@ -270,41 +270,20 @@ fn fs_march(in: FsIn) -> @location(0) vec4<f32> {
     }
     var v = pow(sqrt(sum * visibility), u.a.w) * 0.9;
     if v > 0.0 { v = v + (dither - 0.19) / 128.0; }
-    // The surface's own shadow (g), 1 = in shadow, 0 = lit or off the map. A face turned away from the light (or parallel to it,
-    // like every X face while the sun moves in the YZ plane) has no front face in the culled shadow map to compare with, so it is
-    // shadowed outright, like N.L <= 0; a lit face looks the map up one texel out along its normal, with a slope-scaled depth bias.
+    // The surface's own shadow (g), 1 = in shadow, 0 = lit. d4_deferred_shading.fsh: nothing is lit unless NoL > 1e-3; then photon's
+    // PCSS (`get_filtered_shadows`) near the eye, faded into `get_lightmap_shadows` past the map. The face normal is rebuilt from
+    // the depth buffer (no G-buffer yet, M1) and snapped to an axis; skylight 1 and no clouds / SSS until M1 and M4 supply them.
     var sh = 0.0;
     if u.res.z > 0.0 && z < 1.0 {
         let ip = vec2<i32>(in.pos.xy) * 2;
         let p0 = view_pos(ip);
         let n = face_normal(ip, p0);
-        let nl = dot(n, u.light.xyz);
-        if nl <= 0.0 {
-            sh = 1.0;
+        if dot(n, shu.light.xyz) > 1e-3 {
+            let scene_pos = (u.cam * vec4<f32>(p0, 0.0)).xyz; // world minus the eye
+            let near_shadow = get_filtered_shadows(scene_pos, n, 1.0, 1.0, 0.0, vec2<i32>(in.pos.xy));
+            sh = 1.0 - mix(near_shadow.shadow.x, get_lightmap_shadows(1.0), clamp01(near_shadow.distance_fade));
         } else {
-            let c0 = u.shadow_cam * vec4<f32>(p0, 1.0);
-            let k = length(c0.xy) + u.a.x;
-            let texel = u.a.y * 2.0 / SH_RES * k * k / u.a.x; // one map texel here, in blocks (distort() stretches the map)
-            let nv = vec3<f32>(dot(u.cam[0].xyz, n), dot(u.cam[1].xyz, n), dot(u.cam[2].xyz, n)); // n in view space
-            let c = c0 + u.shadow_cam * vec4<f32>(nv * (texel * NORMAL_BIAS), 0.0);
-            if abs(c.x) < 1.0 && abs(c.y) < 1.0 {
-                let slope = min(sqrt(max(1.0 - nl * nl, 0.0)) / nl, 4.0);
-                let bias = (0.05 + texel * slope) * (0.5 / 256.0); // blocks -> depth: the box is 256 blocks deep, mapped to 0.5
-                // MINUS: the sampler is LessEqual (lit when ref <= stored) and a point nearer the sun has the smaller depth, so the
-                // bias has to pull the reference toward the sun. Added, it pushed every face into its own shadow while the 0.05 block
-                // floor outweighed the normal offset (texel < ~0.12 block, i.e. within ~11 blocks of the map centre): sun-facing
-                // walls went dark as you walked up to them, and flat ground was all acne.
-                let p = vec3<f32>(c.xy / (length(c.xy) + u.a.x) * 0.5 + 0.5, c.z * 0.5 + 0.25 - bias);
-                let q = vec2<f32>(p.x, 1.0 - p.y);
-                // Lit only if neither the terrain map nor the entity map has something nearer the sun.
-                sh = 1.0 - min(textureSampleCompareLevel(sh_tex, sh_samp, q, p.z), textureSampleCompareLevel(ent_tex, sh_samp, q, p.z));
-            }
-            // ponytail: a face lit at a grazing angle gets almost no light anyway, so fade from the map's answer to plain shadow like
-            // N.L going to 0. Ceiling: the bias above covers texel quantisation, but `distort()` is applied per vertex, so across a
-            // 1-block face the depth is interpolated in distorted screen space and errs by ~0.02 block x tan(angle) within ~2 blocks of
-            // the map centre; below nl ~0.3 (sun < ~18 degrees over flat ground) that beats the bias. Upgrade = tessellate the shadow
-            // pass finer near the centre; then this line can go.
-            sh = mix(1.0, sh, smoothstep(0.05, 0.3, nl));
+            sh = 1.0;
         }
     }
     return vec4<f32>(v, sh, 0.0, 1.0);
@@ -319,7 +298,7 @@ fn fs_comp(in: FsIn) -> @location(0) vec4<f32> {
           + textureSampleLevel(vl_tex, vl_samp, in.uv + vec2<f32>(px.x, 0.0), 0.0).rg
           + textureSampleLevel(vl_tex, vl_samp, in.uv - vec2<f32>(px.x, 0.0), 0.0).rg;
     let vlp = (m.x * 0.25) * (m.x * 0.25);
-    let dark = m.y * 0.25 * u.res.z; // blurred surface shadow x strength
+    let dark = m.y * 0.25 * u.res.z * u.res.w; // blurred surface shadow x strength; res.w = 0: `render::photon` lights the surface now
     let dirw = normalize((u.cam * vec4<f32>(view_ray(in.uv), 0.0)).xyz);
     var nu = 1.0 - max(dirw.y, 0.0); // NdotU
     if nu > 0.5 { nu = smoothstep(0.0, 1.0, nu); }
@@ -351,7 +330,7 @@ pub struct LightShafts {
 }
 
 impl LightShafts {
-    pub fn new(device: &Device, surface_format: wgpu::TextureFormat, shadow_layout: &BindGroupLayout) -> Self {
+    pub fn new(device: &Device, surface_format: wgpu::TextureFormat, shadow_layout: &BindGroupLayout, params_layout: &BindGroupLayout) -> Self {
         let ubuf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("vl_uniform"),
             size: std::mem::size_of::<U>() as u64,
@@ -378,8 +357,8 @@ impl LightShafts {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("vl_shader"), source: wgpu::ShaderSource::Wgsl(SHADER.replace("@NB@", &format!("{NORMAL_BIAS:?}")).replace("@RES@", &format!("{:?}", SHADOW_RES as f32)).into()) });
-        let pipeline = |label, layouts: &[&BindGroupLayout], fs: &str, format, blend| {
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("vl_shader"), source: wgpu::ShaderSource::Wgsl(SHADER.replace("@DISTORT@", &shadows::distortion_wgsl()).replace("@PCSS@", &shadows::pcss_wgsl()).into()) });
+        let pipeline = |label, layouts: &[&BindGroupLayout], fs: &str, format, blend, depth: bool| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
                 layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some(label), bind_group_layouts: layouts, push_constant_ranges: &[] })),
@@ -391,7 +370,14 @@ impl LightShafts {
                     compilation_options: wgpu::PipelineCompilationOptions::default(),
                 }),
                 primitive: wgpu::PrimitiveState::default(),
-                depth_stencil: None,
+                // The composite is drawn inside the HDR scene pass, which has the terrain depth attached read-only.
+                depth_stencil: depth.then(|| wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: false,
+                    depth_compare: wgpu::CompareFunction::Always,
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
                 multisample: wgpu::MultisampleState::default(),
                 multiview: None,
                 cache: None,
@@ -402,14 +388,14 @@ impl LightShafts {
             color: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha, operation: wgpu::BlendOperation::Add },
             alpha: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::Zero, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add },
         };
-        let march = pipeline("vl_march", &[&march_layout, shadow_layout], "fs_march", wgpu::TextureFormat::Rgba8Unorm, None);
-        let comp = pipeline("vl_comp", &[&comp_layout], "fs_comp", surface_format, Some(over));
+        let march = pipeline("vl_march", &[&march_layout, shadow_layout, params_layout], "fs_march", wgpu::TextureFormat::Rgba8Unorm, None, false);
+        let comp = pipeline("vl_comp", &[&comp_layout], "fs_comp", surface_format, Some(over), true);
         Self { march, comp, ubuf, march_layout, comp_layout, samp, target: None }
     }
 
     /// Run after the terrain pass: the half-resolution march. `shadow_vp` is what `ChunkPipeline::upload_uniforms` returned this
     /// frame (the shadow map has to exist: `Params::active`), `shadow_bind` its map. Then `composite` blends it onto the frame.
-    pub fn march(&mut self, gpu: &Gpu, enc: &mut CommandEncoder, shadow_bind: &BindGroup, cam: &FirstPersonCamera, shadow_vp: Mat4, p: &Params) {
+    pub fn march(&mut self, gpu: &Gpu, enc: &mut CommandEncoder, shadow_bind: &BindGroup, params_bind: &BindGroup, cam: &FirstPersonCamera, shadow_vp: Mat4, p: &Params) {
         let (w, h) = (gpu.config.width, gpu.config.height);
         if self.target.as_ref().map_or(true, |t| t.size != (w, h)) {
             // ponytail: half resolution, nearest depth tap (the pack marches at full resolution, 4-tap blurred); a
@@ -450,7 +436,7 @@ impl LightShafts {
             shadow_cam: (shadow_vp * view.inverse()).to_cols_array_2d(),
             light: p.light.extend(DEPTH_BIAS).to_array(),
             ray: [1.0 / proj.x_axis.x, 1.0 / proj.y_axis.y, cam.znear, cam.zfar],
-            a: [SHADOW_DISTORT, SHADOW_RADIUS, p.endurance, p.power],
+            a: [0.0, SHADOW_RADIUS, p.endurance, p.power],
             b: [p.w, p.mt, p.rain, (3.0 - proj.y_axis.y / 1.37).max(0.0)],
             // minDistFactor = 8 * clamp(far, 0, 512) / 192, then * 0.5 / 1.7; addition = 0.5 * 1.42857.
             c: [8.0 * cam.zfar.clamp(0.0, 512.0) / 192.0 * 0.5 / 1.7, 0.5 * 1.42857, 0.0, 0.0],
@@ -475,11 +461,17 @@ impl LightShafts {
             rp.set_pipeline(&self.march);
             rp.set_bind_group(0, &t.march_bind, &[]);
             rp.set_bind_group(1, shadow_bind, &[]);
+            rp.set_bind_group(2, params_bind, &[]);
             rp.draw(0..3, 0..1);
         }
     }
 
-    /// The blend onto the frame, drawn inside a pass that already loads it (the HUD's), so the frame is not loaded and stored
+    /// The half-resolution march target (r: shafts, g: surface shadow), once `march` has run; `photon::Photon::bind` reads it.
+    pub fn view(&self) -> Option<&TextureView> {
+        self.target.as_ref().map(|t| &t.view)
+    }
+
+    /// The blend onto the frame, drawn inside a pass that already loads it (now the HDR scene pass's), so the frame is not loaded and stored
     /// a second time just for this. Only after `march` in the same frame.
     pub fn composite(&self, rp: &mut wgpu::RenderPass<'_>) {
         let Some(t) = &self.target else { return };
@@ -515,12 +507,13 @@ mod tests {
         assert!(p.w == 0.0 && near(p.endurance, 2.4) && near(p.power, 1.0));
     }
 
-    /// The shadow sampler is LessEqual and a point nearer the sun has the smaller depth (`camera::shadow_matrix_follows_the_sun`),
-    /// so the surface bias must be subtracted from the reference depth. Added, every face shadowed itself near the eye.
+    /// The lookups go through photon's code: the march distorts like `shadow.vsh`, the surface asks `get_filtered_shadows` and
+    /// mixes it with `get_lightmap_shadows`, and the entity map is compared through the same adaptor (`shadow_compare1`).
     #[test]
-    fn surface_bias_pulls_the_reference_toward_the_sun() {
-        assert!(SHADER.contains("c.z * 0.5 + 0.25 - bias") && !SHADER.contains("+ bias"));
-        assert!(SHADER.contains("ent_tex, sh_samp, q, p.z"), "entities shade the surface through their own map");
+    fn lookups_use_photons_shadow_code() {
+        assert!(SHADER.contains("distort_shadow_space(vec3<f32>(c.xy, c.z * 2.0 - 1.0))") && SHADER.contains("get_filtered_shadows(scene_pos"));
+        assert!(SHADER.contains("get_lightmap_shadows(1.0)") && !SHADER.contains("NORMAL_BIAS"));
+        assert!(shadows::pcss_wgsl().contains("textureSampleCompareLevel(ent_tex, sh_samp, q, z)"), "entities shade the surface through their own map");
     }
 
     #[test]

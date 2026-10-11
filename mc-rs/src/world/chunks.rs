@@ -104,10 +104,10 @@ pub fn in_range(shape: Shape, eye: Vec3, min: Vec3, max: Vec3, rh: f32, rv: f32)
 
 /// Reorders a mesh's triangles by the 16-block section they sit in (the highest vertex minus half a block picks the block, so
 /// top, side and plant faces land in their own block's section; a face on a section border may land in either, which the
-/// draw loop's one-block margin covers). Returns the new indices and the section offsets. Vertices are 6 floats, y second.
+/// draw loop's one-block margin covers). Returns the new indices and the section offsets. Vertices are `mesh::VF` floats, y second.
 fn by_section(verts: &[f32], idxs: &[u32]) -> (Vec<u32>, [u32; SECTIONS + 1]) {
     let sec = |t: &[u32]| {
-        let top = t.iter().map(|&i| verts[i as usize * 6 + 1]).fold(f32::MIN, f32::max);
+        let top = t.iter().map(|&i| verts[i as usize * crate::render::mesh::VF + 1]).fold(f32::MIN, f32::max);
         (((top - 0.5).floor().max(0.0) as usize) >> 4).min(SECTIONS - 1)
     };
     let mut starts = [0u32; SECTIONS + 1];
@@ -513,6 +513,23 @@ impl ChunkManager {
         self.cm.temperature[0]
     }
 
+    /// The biome and climate (`temperature`, `humidity`, both 0..1) of a block column, for the pack's weather and fog.
+    pub fn climate_at(&mut self, x: i32, z: i32) -> (crate::world::biome::Biome, f64, f64) {
+        let biome = self.cm.load_block_generator_data(x, z, 1, 1)[0];
+        (biome, self.cm.temperature[0], self.cm.humidity[0])
+    }
+
+    /// `WorldChunkManager.func_4069_a`: the biomes of a `w` x `d` area from (x, z), x outer, z inner (what `renderRainSnow` walks).
+    pub fn biomes(&mut self, x: i32, z: i32, w: usize, d: usize) -> Vec<crate::world::biome::Biome> {
+        self.cm.load_block_generator_data(x, z, w, d)
+    }
+
+    /// `World.findTopSolidBlock`: one above the highest solid or liquid cell of the loaded column, -1 if none.
+    pub fn top_solid(&self, x: i32, z: i32) -> i32 {
+        use crate::world::gen::populate::{is_liquid, is_solid};
+        (1..H as i32).rev().find(|&y| self.block_loaded(x, y, z).is_some_and(|b| is_solid(b) || is_liquid(b))).map_or(-1, |y| y + 1)
+    }
+
     /// Everything that has a mesh, for the draw loop.
     pub fn meshes(&self) -> impl Iterator<Item = &Mesh> {
         self.chunks.values().filter_map(|e| e.mesh.as_ref())
@@ -817,9 +834,9 @@ mod tests {
         assert!(in_range(Shape::Cylinder, eye, lo, hi, 64.0, 48.0) && !in_range(Shape::Sphere, eye, lo, hi, 64.0, 48.0));
         assert!(!in_range(Shape::Cylinder, eye, lo, hi, 64.0, 40.0), "vertical radius");
         // Two triangles at y = 5 and y = 40 (given out of order) are sorted into sections 0 and 2.
-        let mut v = vec![0.0f32; 6 * 6];
-        (0..3).for_each(|i| v[i * 6 + 1] = 5.0);
-        (3..6).for_each(|i| v[i * 6 + 1] = 40.0);
+        let mut v = vec![0.0f32; 6 * crate::render::mesh::VF];
+        (0..3).for_each(|i| v[i * crate::render::mesh::VF + 1] = 5.0);
+        (3..6).for_each(|i| v[i * crate::render::mesh::VF + 1] = 40.0);
         let (idx, st) = by_section(&v, &[3, 4, 5, 0, 1, 2]);
         assert_eq!((idx, st[1], st[2], st[3], st[SECTIONS]), (vec![0, 1, 2, 3, 4, 5], 3, 3, 6, 6));
     }

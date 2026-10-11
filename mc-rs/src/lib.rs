@@ -26,8 +26,13 @@ use crate::render::atlas;
 use crate::render::items::ItemMesh;
 use crate::render::camera::{FirstPersonCamera, Frustum, ShadowCache};
 use crate::render::outline::Outline;
+use crate::render::shadows::Shadows;
 use crate::render::sky::{SkyFrame, SkyRenderer};
+use crate::render::photon::{self, Photon};
+use crate::render::post::{self, Post};
 use crate::render::vl::{self, LightShafts};
+use crate::render::clouds::{self, Clouds, CloudsFrame};
+use crate::render::pack::BiomeEnv;
 use crate::world::pick::{self, Hit};
 use crate::world::dig::{self, Dig};
 use crate::world::chest::{self, Chest};
@@ -95,6 +100,17 @@ struct App {
     sky: SkyRenderer,
     /// Volumetric light (`render::vl`), drawn after the terrain.
     shafts: LightShafts,
+    /// HDR frame, deferred lighting and tone mapping (`render::photon`).
+    photon: Photon,
+    /// photon's shadow lookups (`render::shadows`): the sun camera, the light, the eye and the blue noise, as group 2 of the march.
+    shadows: Shadows,
+    /// Photon's clouds (`render::clouds`, milestone 4): None unless `clouds::RUN_CLOUDS`. The biome weights they ease over
+    /// 30 s, and last frame's view, projection, eye and time (their temporal upscale reprojects with them).
+    clouds: Option<Clouds>,
+    biome_env: BiomeEnv,
+    cloud_prev: Option<(glam::Mat4, glam::Mat4, glam::Vec3, f32)>,
+    /// Photon post chain (`render::post`): the world is drawn into its HDR scene texture, it ends on the surface.
+    post: Post,
     /// Where and along what the shadow map was last drawn (it is reused between redraws).
     shadow: ShadowCache,
     /// The entity shadow map holds something (or was never written: a fresh texture reads as depth 0 = all shadow) and needs a clear.
@@ -180,8 +196,12 @@ impl App {
         let hud = HudPipeline::new(&gpu.device, &gpu.queue, surface_format, width, height);
         let outline = Outline::new(&gpu.device);
         let item_mesh = ItemMesh::new(&gpu.device);
-        let sky_renderer = SkyRenderer::new(&gpu.device, &gpu.queue, surface_format);
-        let shafts = LightShafts::new(&gpu.device, surface_format, &pipe.shadow_layout);
+        let sky_renderer = SkyRenderer::new(&gpu.device, &gpu.queue, photon::HDR_FORMAT);
+        let shadows = Shadows::new(&gpu.device, &gpu.queue);
+        let shafts = LightShafts::new(&gpu.device, photon::HDR_FORMAT, &pipe.shadow_layout, &shadows.layout);
+        let photon = Photon::new(&gpu.device, &pipe.bind_layout, width, height);
+        let clouds = clouds::RUN_CLOUDS.then(|| Clouds::new(&gpu.device, &gpu.queue, clouds::atmosphere_lut(&gpu.device, &gpu.queue)));
+        let post = Post::new(&gpu.device, &gpu.queue, width, height, photon::HDR_FORMAT, surface_format, &gpu.depth_view, post::Settings::default());
         let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as i64);
 
         let mut app = Self {
@@ -203,6 +223,12 @@ impl App {
             world_ticks: 0.0,
             sky: sky_renderer,
             shafts,
+            photon,
+            shadows,
+            clouds,
+            biome_env: BiomeEnv::default(),
+            cloud_prev: None,
+            post,
             shadow: ShadowCache::new(),
             ent_shadow_dirty: true,
             weather: sky::Weather::new(seed),
@@ -304,6 +330,8 @@ impl App {
 
     fn resize(&mut self, w: u32, h: u32) {
         self.gpu.resize(w, h);
+        self.photon.invalidate();
+        self.post.resize(&self.gpu.device, &self.gpu.queue, w, h, &self.gpu.depth_view);
         self.camera.aspect = w as f32 / h as f32;
         self.touch.ensure_layout(w, h);
         self.hud.resize(&self.gpu.queue, w, h);
@@ -709,10 +737,13 @@ impl App {
     }
 
     fn render(&mut self) {
+        let dt = self.last_frame.elapsed().as_secs_f32().min(0.1); // frameTime for the post chain
         self.step_frame();
         let (pcx, pcz) = (chunk_coord(self.player.pos.x), chunk_coord(self.player.pos.z));
         self.chunks.update(&self.gpu.device, pcx, pcz);
         let (view, proj) = self.camera.build_view_proj();
+        // TAA: the world is drawn with the sub-pixel jitter of this frame, the post chain gets the plain projection.
+        let proj_jittered = self.post.jittered(proj);
         let outline_indices = self.target.map_or(0, |h| {
             let (x, y, z) = h.pos;
             let b = self.chunks.block_loaded(x, y, z).and_then(|b| outline_bounds(b, self.chunks.meta(x, y, z)));
@@ -740,13 +771,15 @@ impl App {
         // the shafts read it with the matrix and light it was drawn with.
         let draw_shadow = self.shadow.refresh(sun_strength > 0.0 || vlp.active, e, vlp.light, self.chunks.mesh_gen);
         vlp.light = self.shadow.light;
-        let shadow_vp = self.pipe.upload_uniforms(&self.gpu.queue, view, proj, self.shadow.light, sun_strength, self.shadow.center);
+        let shadow_vp = self.pipe.upload_uniforms(&self.gpu.queue, view, proj_jittered, self.shadow.light, sun_strength, self.shadow.center);
+        self.shadows.update(&self.gpu.queue, self.shadow.center, self.shadow.light, e, self.camera.zfar, self.total_frames);
         let (frustum, shadow_frustum) = (Frustum::from_view_proj(proj * view), Frustum::from_view_proj(shadow_vp));
         let fog = sky::fog_color(angle, sky_rgb, rain, thunder);
         // Terrain fog (AstraLex `NormalFog`): fades to the horizon colour at the render distance; off under water.
         self.pipe.set_fog(&self.gpu.queue, fog, if eye_in_water { 0.0 } else { (RENDER_DIST * 16) as f32 }, rain);
+        self.pipe.set_lighting(&self.gpu.queue, &photon::lighting(angle, rain, self.shadow.light));
         let clear = wgpu::Color { r: fog[0] as f64, g: fog[1] as f64, b: fog[2] as f64, a: 1.0 };
-        self.sky.update(&self.gpu.queue, &self.camera, &SkyFrame { angle, rain, sky: sky_rgb, fog });
+        self.sky.update(&self.gpu.queue, &self.camera, &SkyFrame { angle, rain, seconds: self.world_ticks as f32 / 20.0 });
         if self.frames == 0 {
             log::info!("render: first frame, surface_format={:?}, {} chunks loaded", self.gpu.surface_format(), self.chunks.loaded());
         }
@@ -773,8 +806,10 @@ impl App {
             return;
         }
         let view_tex = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        self.photon.resize(&self.gpu.device, actual_w, actual_h);
 
         let mut enc = self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
+        self.sky.encode(&mut enc); // sky map + SH (Photon d0, d4a)
 
         if draw_shadow {
             let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -820,36 +855,29 @@ impl App {
             }
             self.ent_shadow_dirty = item_indices > 0;
         }
+        // G-buffer: terrain, items and the outline write albedo + light + face; the depth is kept (the march and the deferred pass read it).
+        let (rh, rv) = ((RENDER_DIST * 16) as f32, (RENDER_VERT * 16) as f32);
         {
             let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("chunk_pass"),
+                label: Some("gbuffer_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view_tex,
+                    view: &self.photon.gbuf,
                     resolve_target: None,
                     depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(clear),
-                        store: wgpu::StoreOp::Store,
-                    },
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &self.gpu.depth_view,
-                    // Only the light-shaft march reads the depth back; otherwise a tile GPU never writes it to memory.
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: if vlp.active { wgpu::StoreOp::Store } else { wgpu::StoreOp::Discard },
-                    }),
+                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
                     stencil_ops: None,
                 }),
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            self.sky.draw(&mut rp);
             rp.set_pipeline(&self.pipe.pipeline);
             rp.set_bind_group(0, &self.pipe.bind_group, &[]);
             rp.set_bind_group(1, &self.pipe.shadow_bind, &[]);
             // One draw per run of chunk sections that is in the render shape and the view frustum.
-            let (rh, rv) = ((RENDER_DIST * 16) as f32, (RENDER_VERT * 16) as f32);
             self.chunks.draw_ranges(self.camera.pos, RENDER_SHAPE, rh, rv, false, |min, max| frustum.intersects_aabb(min, max), |m, ib, r| {
                 rp.set_vertex_buffer(0, m.vbuf.slice(..));
                 rp.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
@@ -859,67 +887,92 @@ impl App {
                 rp.set_vertex_buffer(0, self.item_mesh.vbuf.slice(..));
                 rp.set_index_buffer(self.item_mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
                 rp.draw_indexed(0..item_indices, 0, 0..1);
-                // The umbra in the air under every item and mob: copies 1..=CONE_COPIES, copy 0 is the entity itself (drawn above).
-                // ponytail: 8 blocks of reach (a low sun on a tall mob is cut short) and every copy is the whole buffer.
-                if sun_strength > 0.0 {
-                    rp.set_pipeline(&self.pipe.cone_pipeline);
-                    rp.draw_indexed(0..item_indices, 0, 1..CONE_COPIES + 1);
-                    rp.set_pipeline(&self.pipe.pipeline);
-                }
             }
-            // Water last: blended over the terrain and the entities, no depth write (`water_pipeline`; same groups as the terrain).
-            rp.set_pipeline(&self.pipe.water_pipeline);
-            self.chunks.draw_ranges(self.camera.pos, RENDER_SHAPE, rh, rv, true, |min, max| frustum.intersects_aabb(min, max), |m, ib, r| {
-                rp.set_vertex_buffer(0, m.vbuf.slice(..));
-                rp.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
-                rp.draw_indexed(r, 0, 0..1);
-            });
-            rp.set_pipeline(&self.pipe.pipeline);
             if outline_indices > 0 {
                 rp.set_vertex_buffer(0, self.outline.vbuf.slice(..));
                 rp.set_index_buffer(self.outline.ibuf.slice(..), wgpu::IndexFormat::Uint32);
                 rp.draw_indexed(0..outline_indices, 0, 0..1);
             }
         }
-        if vlp.active {
-            self.shafts.march(&self.gpu, &mut enc, &self.pipe.shadow_bind, &self.camera, shadow_vp, &vlp);
+        // Photon's clouds (p0, d1, d2): they read the frame's opaque depth, so they run after the chunk pass.
+        if let Some(clouds) = self.clouds.as_mut() {
+            let (biome, t, h) = self.chunks.climate_at(px, pz);
+            self.biome_env.update(biome, t, h, 1.0 / 60.0);
+            let time_s = self.started.elapsed().as_secs_f32();
+            let (prev_view, prev_proj, prev_eye, prev_t) = self.cloud_prev.unwrap_or((view, proj, e, time_s));
+            let frame = CloudsFrame {
+                view, proj, prev_view, prev_proj, eye: e, prev_eye, near: self.camera.znear, far: self.camera.zfar,
+                angle, rain, world_ticks: self.world_ticks, frame: self.total_frames as u32, time_s,
+                dt: (time_s - prev_t).clamp(1e-4, 0.1), biome: self.biome_env, taa_offset: [0.0; 2], world_age_changed: self.cloud_prev.is_none(),
+            };
+            clouds.render(&self.gpu, &mut enc, &self.gpu.depth_view, &frame);
+            self.cloud_prev = Some((view, proj, e, time_s));
         }
-        // M12: HUD overlay pass. Built into the same encoder so the HUD
-        // never gets lost if the GPU drops a frame.
-        self.build_hud();
-        let hud_vertex_count = self.hud_verts.len();
-        if hud_vertex_count > 0 || vlp.active {
-            self.gpu.queue.write_buffer(
-                &self.hud.vbuf,
-                0,
-                bytemuck::cast_slice(&self.hud_verts),
-            );
+        // The march always runs now: its green channel is the surface shadow the deferred pass lights with (it is 0 when `vlp.shadow`
+        // is 0). ponytail: the shaft loop is wasted while `vlp.active` is false (night under water); a flag in `Params` would skip it.
+        self.shafts.march(&self.gpu, &mut enc, &self.pipe.shadow_bind, &self.shadows.bind, &self.camera, shadow_vp, &vlp);
+        if let Some(vl_view) = self.shafts.view() {
+            self.photon.bind(&self.gpu.device, &self.gpu.depth_view, vl_view);
+        }
+        // HDR scene: the sky over the fog colour (vanilla order), the deferred lighting of the terrain, the shadow cone, water, then the
+        // shafts. The terrain depth is attached read-only (the deferred shader and the water test read it).
+        {
             let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("hud_pass"),
+                label: Some("hdr_scene_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view_tex,
+                    view: self.post.scene_view(),
                     resolve_target: None,
                     depth_slice: None,
-                    ops: wgpu::Operations {
-                        // Preserve the chunk render; just draw on top.
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(clear), store: wgpu::StoreOp::Store },
                 })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment { view: &self.gpu.depth_view, depth_ops: None, stencil_ops: None }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            self.sky.draw(&mut rp);
+            self.photon.draw_deferred(&mut rp, &self.pipe.bind_group);
+            // The umbra in the air under every item and mob (merged from the shadow-cone change, which predates the G-buffer): it is a
+            // black alpha layer, so it cannot go in the G-buffer pass; here it darkens the lit scene. Copy 0 (the entity) is in the
+            // G-buffer. ponytail: 8 blocks of reach (a low sun on a tall mob is cut short) and every copy is the whole buffer.
+            if item_indices > 0 && sun_strength > 0.0 {
+                rp.set_pipeline(&self.pipe.cone_pipeline);
+                rp.set_bind_group(0, &self.pipe.bind_group, &[]);
+                rp.set_bind_group(1, &self.pipe.shadow_bind, &[]);
+                rp.set_vertex_buffer(0, self.item_mesh.vbuf.slice(..));
+                rp.set_index_buffer(self.item_mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                rp.draw_indexed(0..item_indices, 0, 1..CONE_COPIES + 1);
+            }
+            // Water last: blended over the terrain, no depth write (`water_pipeline`; same groups as the terrain).
+            rp.set_pipeline(&self.pipe.water_pipeline);
+            rp.set_bind_group(0, &self.pipe.bind_group, &[]);
+            rp.set_bind_group(1, &self.pipe.shadow_bind, &[]);
+            self.chunks.draw_ranges(self.camera.pos, RENDER_SHAPE, rh, rv, true, |min, max| frustum.intersects_aabb(min, max), |m, ib, r| {
+                rp.set_vertex_buffer(0, m.vbuf.slice(..));
+                rp.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
+                rp.draw_indexed(r, 0, 0..1);
+            });
+            if vlp.active {
+                self.shafts.composite(&mut rp);
+            }
+        }
+        self.post.draw(&self.gpu.queue, &mut enc, &view_tex, &post::Frame { view, proj, cam_pos: self.camera.pos, dt, time: self.started.elapsed().as_secs_f32() });
+        // M12: HUD overlay pass. Built into the same encoder so the HUD never gets lost if the GPU drops a frame; it is drawn over the
+        // finished frame (the post chain ends on the surface), so it is not tonemapped.
+        self.build_hud();
+        let hud_vertex_count = self.hud_verts.len();
+        if hud_vertex_count > 0 {
+            self.gpu.queue.write_buffer(&self.hud.vbuf, 0, bytemuck::cast_slice(&self.hud_verts));
+            let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("hud_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &view_tex, resolve_target: None, depth_slice: None, ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store } })],
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            // The light shafts are blended here, under the HUD, so the frame is loaded once for both.
-            if vlp.active {
-                self.shafts.composite(&mut rp);
-            }
-            if hud_vertex_count > 0 {
-                rp.set_pipeline(&self.hud.pipeline);
-                rp.set_bind_group(0, &self.hud.bind_group, &[]);
-                rp.set_vertex_buffer(0, self.hud.vbuf.slice(..));
-                rp.draw(0..hud_vertex_count as u32, 0..1);
-            }
+            rp.set_pipeline(&self.hud.pipeline);
+            rp.set_bind_group(0, &self.hud.bind_group, &[]);
+            rp.set_vertex_buffer(0, self.hud.vbuf.slice(..));
+            rp.draw(0..hud_vertex_count as u32, 0..1);
         }
         self.gpu.queue.submit(std::iter::once(enc.finish()));
         frame.present();

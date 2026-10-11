@@ -698,6 +698,7 @@ dependencies = [
  "glam",
  "jni",
  "log",
+ "naga",
  "pollster",
  "raw-window-handle",
  "wgpu",

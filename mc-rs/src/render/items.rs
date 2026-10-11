@@ -10,10 +10,10 @@ use crate::world::items::{stack_tile, Drops, ItemStack, MAX_ITEMS};
 use crate::world::mobs::{Kind::*, Mob, Mobs, MAX_ARROWS, MAX_MOBS};
 use crate::world::ticks::{Falling, MAX_FALLING};
 
-/// 24 vertices x 6 floats per cube, 36 indices per cube.
+/// 24 vertices x 7 floats (`mesh::VF`) per cube, 36 indices per cube.
 /// A mob is at most 12 boxes (spider 11), an arrow one, a falling block one.
 const BOXES: usize = MAX_ITEMS + MAX_MOBS * 12 + MAX_ARROWS + MAX_FALLING;
-const VERTEX_BYTES: u64 = (BOXES * 24 * 6 * 4) as u64;
+const VERTEX_BYTES: u64 = (BOXES * 24 * 7 * 4) as u64;
 const INDEX_BYTES: u64 = (BOXES * 36 * 4) as u64;
 
 pub struct ItemMesh {

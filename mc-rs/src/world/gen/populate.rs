@@ -119,12 +119,12 @@ impl Region {
 
 // Block tables for the ids the generator can place (checked against the real `Block` statics by
 // `block_tables_match_java`).
-fn is_liquid(b: u8) -> bool {
+pub(crate) fn is_liquid(b: u8) -> bool {
     matches!(b, WATER_MOVING..=LAVA)
 }
 
 /// Material.isSolid(): false for air, liquids, plants, snow layer.
-fn is_solid(b: u8) -> bool {
+pub(crate) fn is_solid(b: u8) -> bool {
     !matches!(b, AIR | WATER_MOVING..=LAVA | TALL_GRASS | DEAD_BUSH | FLOWER_Y..=MUSH_RED | SNOW | REED)
 }
 

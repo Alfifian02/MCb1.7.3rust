@@ -65,12 +65,31 @@ impl FirstPersonCamera {
 /// ponytail: no shadows past 64 blocks (= the render ring); upgrade = cascades.
 pub const SHADOW_RADIUS: f32 = 64.0;
 
+/// Half the depth of the shadow box: the sun camera sits `SHADOW_Z` blocks toward the sun and the box reaches `2 * SHADOW_Z`
+/// along the rays (the world is 128 tall).
+pub const SHADOW_Z: f32 = 128.0;
+
+/// World space to the sun camera's view space (`center` looks along the rays). The sun moves in the YZ plane, so `X` is always
+/// a valid up vector.
+pub fn shadow_view(center: Vec3, sun: Vec3) -> Mat4 {
+    Mat4::look_at_rh(center + sun * SHADOW_Z, center, Vec3::X)
+}
+
 /// The sun's view-projection (`shadowProjection * shadowModelView`): an orthographic box `SHADOW_RADIUS` blocks to each side of
-/// `center`, looking along the sun's rays from `Z` blocks toward the sun. Depth 0..1 like `Mat4::perspective_rh`, so
-/// `Frustum` culls with it too. The sun moves in the YZ plane, so `X` is always a valid up vector.
+/// `center`. Depth 0..1 like `Mat4::perspective_rh`, so `Frustum` culls with it too and `vs_shadow` draws with it.
 pub fn shadow_view_proj(center: Vec3, sun: Vec3) -> Mat4 {
-    const Z: f32 = 128.0; // the world is 128 tall
-    Mat4::orthographic_rh(-SHADOW_RADIUS, SHADOW_RADIUS, -SHADOW_RADIUS, SHADOW_RADIUS, 0.0, 2.0 * Z) * Mat4::look_at_rh(center + sun * Z, center, Vec3::X)
+    Mat4::orthographic_rh(-SHADOW_RADIUS, SHADOW_RADIUS, -SHADOW_RADIUS, SHADOW_RADIUS, 0.0, 2.0 * SHADOW_Z) * shadow_view(center, sun)
+}
+
+/// photon's `shadowModelView`: scene space (world minus the eye, what the deferred shaders work in) to the sun's view space.
+pub fn shadow_model_view(center: Vec3, sun: Vec3, eye: Vec3) -> Mat4 {
+    shadow_view(center, sun) * Mat4::from_translation(eye)
+}
+
+/// photon's `shadowProjection`: the same box with OpenGL's -1..1 depth, which is what `distort_shadow_space` and
+/// `project_ortho` of the pack expect (the shadow pass converts back to 0..1 on output).
+pub fn shadow_projection() -> Mat4 {
+    Mat4::orthographic_rh_gl(-SHADOW_RADIUS, SHADOW_RADIUS, -SHADOW_RADIUS, SHADOW_RADIUS, 0.0, 2.0 * SHADOW_Z)
 }
 
 /// The shadow map is drawn from `center` along `light` and read back with the same matrix, so it stays right for the geometry it
@@ -146,6 +165,16 @@ mod tests {
         assert!((a.truncate() - b.truncate()).length() < 1e-4 && b.z < a.z, "same texel, nearer the sun is shallower");
         assert!((vp.project_point3(c) - Vec3::new(0.0, 0.0, 0.5)).length() < 1e-4);
         assert!((vp.project_point3(c + Vec3::X * 64.0).y.abs() - 1.0).abs() < 1e-4);
+    }
+
+    /// The pack's split (`shadowProjection * shadowModelView` on scene space, GL depth) is the same box as the combined matrix.
+    #[test]
+    fn shadow_model_view_takes_scene_space() {
+        let (c, sun, eye) = (Vec3::new(10.0, 70.0, -5.0), Vec3::new(0.0, 0.8, 0.6), Vec3::new(12.0, 72.0, -1.0));
+        let (scene, vp) = (Vec3::new(3.0, -2.0, 7.0), shadow_view_proj(c, sun));
+        let a = vp.project_point3(eye + scene);
+        let b = shadow_projection().project_point3(shadow_model_view(c, sun, eye).transform_point3(scene));
+        assert!((a.truncate() - b.truncate()).length() < 1e-5 && (2.0 * a.z - 1.0 - b.z).abs() < 1e-5, "{a:?} {b:?}");
     }
 
     /// The cached map is reused until the eye, the light or the geometry moves enough, and is dropped when nobody reads it.
