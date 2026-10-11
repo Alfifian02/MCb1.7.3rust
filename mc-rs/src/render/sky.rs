@@ -91,6 +91,7 @@ pub struct SkyRenderer {
     d4a: wgpu::ComputePipeline,
     d4a_bind: wgpu::BindGroup,
     pipeline: wgpu::RenderPipeline,
+    frame: std::sync::atomic::AtomicU32,
 }
 
 impl SkyRenderer {
@@ -186,7 +187,7 @@ impl SkyRenderer {
         });
         let d4a = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some("sky_d4a"), layout: Some(&pl("sky_d4a", &[&layout, &sh_layout])), module: &shader, entry_point: Some("cs_sh"), compilation_options: Default::default(), cache: None });
 
-        Self { uniform_buffer, layout, bind, sky_map, sh, d0, d4a, d4a_bind, pipeline }
+        Self { uniform_buffer, layout, bind, sky_map, sh, d0, d4a, d4a_bind, pipeline, frame: Default::default() }
     }
 
     /// The group 0 bind group (uniform, LUT, noise and their samplers) for passes that include `WGSL`.
@@ -201,6 +202,8 @@ impl SkyRenderer {
 
     /// d0 and d4a: the sky map, then its SH. Outside any render pass, before the scene.
     pub fn encode(&self, enc: &mut wgpu::CommandEncoder) {
+        // The map and SH do not depend on the camera and the sun moves slowly: refresh every 4th frame (the first call always runs).
+        if self.frame.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 4 != 0 { return; }
         {
             let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("sky_d0"),

@@ -1544,7 +1544,7 @@ fn draw_crepuscular_rays(ray_direction_world: vec3<f32>, is_terrain: bool, dithe
     let r = planet_radius + eye_altitude() * CLOUDS_SCALE;
     let dists = intersect_spherical_shell_mu(ray_direction_world.y, r, volume_inner_radius, volume_outer_radius) * rcp(CLOUDS_SCALE);
 
-    if (dists.y < 0.0 || is_terrain) { return vec4<f32>(0.0, 0.0, 0.0, 1.0); }
+    if (dists.y < 0.0 || is_terrain || cp_crepuscular() <= 0.0) { return vec4<f32>(0.0, 0.0, 0.0, 1.0); } // 0 amount: the result below is exactly this
 
     let ray_length = clamp(dists.y - dists.x, 0.0, max_ray_length);
     let step_length = ray_length * rcp(f32(step_count));

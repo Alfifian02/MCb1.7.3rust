@@ -517,7 +517,8 @@ impl LightShafts {
             shadow_cam: (shadow_vp * view.inverse()).to_cols_array_2d(),
             light: p.light.extend(DEPTH_BIAS).to_array(),
             ray: [1.0 / proj.x_axis.x, 1.0 / proj.y_axis.y, cam.znear, cam.zfar],
-            a: [0.0, SHADOW_RADIUS, p.endurance, p.power],
+            // max_dist 0 when inactive: the march loop breaks on its first step (surface shadow in `g` is still written).
+            a: [0.0, if p.active { SHADOW_RADIUS } else { 0.0 }, p.endurance, p.power],
             b: [p.w, p.mt, p.rain, (3.0 - proj.y_axis.y / 1.37).max(0.0)],
             // minDistFactor = 8 * clamp(far, 0, 512) / 192, then * 0.5 / 1.7; addition = 0.5 * 1.42857.
             c: [8.0 * cam.zfar.clamp(0.0, 512.0) / 192.0 * 0.5 / 1.7, 0.5 * 1.42857, (frame % 64) as f32, 0.0],
