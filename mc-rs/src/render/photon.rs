@@ -277,7 +277,7 @@ pub fn lighting(angle: f32, rain: f32, light: Vec3) -> Lighting {
     let moon_exposure = 0.66 * 1.0 * (1.0 + 0.33 / clamp01(1.25 * (-y).max(0.1))); // moon_phase_brightness = 1
     let moon_color: [f64; 3] = from_srgb([0.75, 0.83, 1.0]).map(|t| t * moon_exposure);
 
-    let night = dot3(l, sun) < 0.0; // `step(0.5, sunAngle)` for the light the shadow map uses
+    let night = dot3(l.to_array(), sun) < 0.0; // `step(0.5, sunAngle)` for the light the shadow map uses
     let trans = atmosphere_transmittance(l[1], PLANET_R);
     let base: [f64; 3] = std::array::from_fn(|c| SUNLIGHT_COLOR[c] * trans[c]);
     let mut lc = atmosphere_post(base, sat_boost);

@@ -8,7 +8,7 @@ use wgpu::{
 };
 use wgpu::util::DeviceExt;
 
-use crate::render::{atlas, camera::shadow_view_proj, shadows};
+use crate::render::{atlas, camera::shadow_view_proj};
 use crate::world::chunk::is_plant;
 
 #[repr(C)]
