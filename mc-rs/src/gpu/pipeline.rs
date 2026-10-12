@@ -99,6 +99,7 @@ pub struct ChunkPipeline {
 }
 
 const SHADER_SRC: &str = r#"
+const LEGACY: bool = @LEGACY@; // `lib.rs` LEGACY: Console-Edition lighting (smooth light + ambient occlusion in the G-buffer)
 const WATER_LIGHT: f32 = @WL@; // `mesh::WATER_LIGHT`: the water depth rides in the integer part of `light`
 // (`photon::WGSL_COMMON` comes first: the uniform block `u`, colour spaces, fog and `photon_light`)
 @group(0) @binding(1) var samp: sampler;
@@ -117,6 +118,9 @@ struct VsOut {
     @location(1) light: f32,
     @location(2) wp: vec3<f32>,
     @location(3) lm: f32,
+    @location(4) sk: f32, // sky light in quarter levels, block light in half levels, shade * ambient occlusion (-1: flat face, shade from its normal)
+    @location(5) bk: f32,
+    @location(6) ao: f32,
 };
 
 @vertex
@@ -127,6 +131,17 @@ fn vs_main(@location(0) vpos: vec3<f32>, @location(1) vuv: vec2<f32>, @location(
     o.light = vlight;
     o.wp = vpos;
     o.lm = vlm;
+    if vlm >= 256.0 { // smooth vertex (`mesh::SMOOTH_LM`)
+        let v = vlm - 256.0;
+        o.sk = floor(v / 32.0 + 0.001);
+        o.bk = v - o.sk * 32.0;
+        o.ao = vlight;
+    } else { // flat: `sky * 16 + block`
+        let s = floor(vlm / 16.0 + 0.001);
+        o.sk = s * 4.0;
+        o.bk = (vlm - s * 16.0) * 2.0;
+        o.ao = -1.0;
+    }
     return o;
 }
 
@@ -149,6 +164,14 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let face = face_index(in.wp, dpdx(in.wp), dpdy(in.wp));
     let c = textureSample(tex, samp, in.uv);
     if c.a < 0.5 { discard; } // cut-out textures: plants, glass
+    if LEGACY {
+        // The face shade and the ambient occlusion go into the albedo (they do not change with the time of day; the deferred
+        // pass applies the sky/block light, `photon_light`'s legacy branch): alpha = sky quarters * 32 + block halves.
+        var shade = 0.8;
+        if face == 2u { shade = 1.0; } else if face == 3u { shade = 0.5; } else if face < 2u { shade = 0.6; }
+        if in.ao >= 0.0 { shade = in.ao; }
+        return vec4<f32>(c.rgb * pow(shade, 2.2), floor(in.sk + 0.5) * 32.0 + floor(in.bk + 0.5));
+    }
     return vec4<f32>(c.rgb, f32(face) * 256.0 + in.lm);
 }
 
@@ -247,7 +270,7 @@ impl ChunkPipeline {
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("chunk_shader"),
-            source: wgpu::ShaderSource::Wgsl(format!("{}{}", crate::render::photon::WGSL_COMMON, SHADER_SRC).replace("@DISTORT@", &crate::render::shadows::distortion_wgsl()).replace("@TW@", &atlas::TILES_W.to_string()).replace("@TH@", &(atlas::ATLAS_H / 16).to_string()).replace("@WL@", &format!("{:?}", crate::render::mesh::WATER_LIGHT)).into()),
+            source: wgpu::ShaderSource::Wgsl(format!("{}{}", crate::render::photon::WGSL_COMMON, SHADER_SRC).replace("@DISTORT@", &crate::render::shadows::distortion_wgsl()).replace("@TW@", &atlas::TILES_W.to_string()).replace("@TH@", &(atlas::ATLAS_H / 16).to_string()).replace("@LEGACY@", if crate::LEGACY { "true" } else { "false" }).replace("@WL@", &format!("{:?}", crate::render::mesh::WATER_LIGHT)).into()),
         });
 
         // Group 1: the shadow map and its comparison sampler: linear = `shadowHardwareFiltering1` (a bilinear compare).
@@ -430,7 +453,7 @@ impl ChunkPipeline {
         let v = [
             [l.light_color[0], l.light_color[1], l.light_color[2], l.exposure],
             [l.ambient[0], l.ambient[1], l.ambient[2], l.noon],
-            [l.blocklight[0], l.blocklight[1], l.blocklight[2], 0.0],
+            [l.blocklight[0], l.blocklight[1], l.blocklight[2], l.legacy], // w: 1 = Console-Edition lighting (`photon_light`)
         ];
         queue.write_buffer(&self.uniform_buf, std::mem::offset_of!(Uniforms, lcol) as u64, bytemuck::bytes_of(&v));
     }

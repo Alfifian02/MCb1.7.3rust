@@ -1,0 +1,149 @@
+diff -ruN a/mc-rs/src/gpu/pipeline.rs b/mc-rs/src/gpu/pipeline.rs
+--- a/mc-rs/src/gpu/pipeline.rs	2026-10-11 19:59:08.000000000 +0000
++++ b/mc-rs/src/gpu/pipeline.rs	2026-10-12 06:14:01.622158922 +0000
+@@ -430,7 +430,7 @@
+         let v = [
+             [l.light_color[0], l.light_color[1], l.light_color[2], l.exposure],
+             [l.ambient[0], l.ambient[1], l.ambient[2], l.noon],
+-            [l.blocklight[0], l.blocklight[1], l.blocklight[2], 0.0],
++            [l.blocklight[0], l.blocklight[1], l.blocklight[2], l.legacy], // w: 1 = Console-Edition lighting (`photon_light`)
+         ];
+         queue.write_buffer(&self.uniform_buf, std::mem::offset_of!(Uniforms, lcol) as u64, bytemuck::bytes_of(&v));
+     }
+diff -ruN a/mc-rs/src/lib.rs b/mc-rs/src/lib.rs
+--- a/mc-rs/src/lib.rs	2026-10-12 05:39:04.000000000 +0000
++++ b/mc-rs/src/lib.rs	2026-10-12 06:14:09.838022256 +0000
+@@ -65,6 +65,10 @@
+ /// Moving things (items, mobs, falling blocks) cast shadows through a second 1024^2 map redrawn every frame. Off: that is a clear + a draw per frame
+ /// and a second fetch per shadow tap, for a nicety. ponytail: flip it to bring them back (the deferred shader and the pass both follow it).
+ pub(crate) const ENTITY_SHADOWS: bool = false;
++/// Console-Edition ("legacy") look: vanilla light table + face shades, no shadow map, no light shafts, a neutral post chain
++/// (`post::Settings::legacy`). `false` = the Photon look. ponytail: one switch, not a runtime option; the Photon passes that are
++/// still encoded (sky LUT, G-buffer, march) keep running, cutting them is step 2.
++pub(crate) const LEGACY: bool = true;
+ 
+ const LOOK_SENS: f32 = 0.004;
+ /// World units per second when the d-pad is fully pressed.
+@@ -206,7 +210,7 @@
+         let (sw, sh) = gpu.scene();
+         let photon = Photon::new(&gpu.device, &pipe.bind_layout, &pipe.shadow_layout, sw, sh);
+         let clouds = clouds::RUN_CLOUDS.then(|| Clouds::new(&gpu.device, &gpu.queue, clouds::atmosphere_lut(&gpu.device, &gpu.queue)));
+-        let post = Post::new(&gpu.device, &gpu.queue, sw, sh, photon::HDR_FORMAT, surface_format, &gpu.depth_view, (width, height), post::Settings::default());
++        let post = Post::new(&gpu.device, &gpu.queue, sw, sh, photon::HDR_FORMAT, surface_format, &gpu.depth_view, (width, height), if LEGACY { post::Settings::legacy() } else { post::Settings::default() });
+         let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as i64);
+ 
+         let mut app = Self {
+@@ -772,8 +776,8 @@
+         let e = self.camera.pos;
+         let eye_in_water = matches!(self.chunks.block_loaded(e.x.floor() as i32, e.y.floor() as i32, e.z.floor() as i32), Some(8 | 9));
+         let mut vlp = vl::params(self.world_ticks, angle, rain, sky_rgb, e.y);
+-        vlp.active &= !eye_in_water;
+-        let sun_strength = sky::shadow_strength(angle, rain);
++        vlp.active &= !eye_in_water && !LEGACY;
++        let sun_strength = if LEGACY { 0.0 } else { sky::shadow_strength(angle, rain) };
+         vlp.shadow = sun_strength; // surface shadows come from the volumetric pass (`render::vl`), not the chunk shader
+         // The shadow map is only redrawn when the eye, the light or the geometry moved enough (`ShadowCache`); the terrain and
+         // the shafts read it with the matrix and light it was drawn with.
+@@ -785,7 +789,11 @@
+         let fog = sky::fog_color(angle, sky_rgb, rain, thunder);
+         // Terrain fog (AstraLex `NormalFog`): fades to the horizon colour at the render distance; off under water.
+         self.pipe.set_fog(&self.gpu.queue, fog, if eye_in_water { 0.0 } else { (RENDER_DIST * 16) as f32 }, rain);
+-        let lit = photon::lighting(angle, rain, self.shadow.light);
++        let mut lit = photon::lighting(angle, rain, self.shadow.light);
++        if LEGACY {
++            lit.legacy = 1.0;
++            lit.ambient[0] = sky::skylight_subtracted(angle, rain, thunder) as f32 / 15.0;
++        }
+         self.pipe.set_lighting(&self.gpu.queue, &lit);
+         vlp.hdr(lit.light_color); // the shafts glow in the scene's HDR units: the light's own colour
+         let clear = wgpu::Color { r: fog[0] as f64, g: fog[1] as f64, b: fog[2] as f64, a: 1.0 };
+diff -ruN a/mc-rs/src/render/photon.rs b/mc-rs/src/render/photon.rs
+--- a/mc-rs/src/render/photon.rs	2026-10-12 05:39:04.000000000 +0000
++++ b/mc-rs/src/render/photon.rs	2026-10-12 06:14:21.748366791 +0000
+@@ -244,6 +244,8 @@
+     pub blocklight: [f32; 3],
+     pub noon: f32,
+     pub exposure: f32,
++    /// 1 = `photon_light` takes its legacy branch (`ambient[0]` is then the sky light subtracted / 15); `lib.rs` sets it.
++    pub legacy: f32,
+ }
+ 
+ /// `angle` = `sky::celestial_angle` (0 noon, 0.25 sunset, 0.5 midnight), `rain` 0..1, `light` = the light the shadow map was
+@@ -301,6 +303,7 @@
+         blocklight: blk.map(|x| x as f32),
+         noon: time_noon as f32,
+         exposure: 1.0, // get_exposure_from_ev_100(MANUAL_EXPOSURE_VALUE = 0)
++        legacy: 0.0,
+     }
+ }
+ 
+@@ -374,6 +377,16 @@
+ // get_diffuse_lighting, overworld, SHADOW_VPS, no SSS / AO / cloud shadows. `albedo` is in the working space, `sky` and `bl`
+ // are the light levels / 15, `shadow` is 1 where the light arrives.
+ fn photon_light(albedo: vec3<f32>, face: u32, sky: f32, bl: f32, shadow_in: f32) -> vec3<f32> {
++    if u.blk.w > 0.5 {
++        // Console-Edition look (`lib.rs` LEGACY): b1.7.3 `World.lightBrightnessTable` and `RenderBlocks` face shades (top 1,
++        // bottom 0.5, x 0.6, z 0.8). `u.amb.x` = sky light taken away by the time of day / 15. Vanilla multiplies in gamma space,
++        // the frame is linear: `pow(.., 2.2)` makes the two agree.
++        let l = max(max(sky - u.amb.x, 0.0), bl);
++        let b = (l / (4.0 - 3.0 * l)) * 0.95 + 0.05; // (1 - f) / (3 f + 1) with f = 1 - l
++        var shade = 0.8;
++        if face == 2u { shade = 1.0; } else if face == 3u { shade = 0.5; } else if face < 2u { shade = 0.6; }
++        return albedo * pow(b * shade, 2.2);
++    }
+     let n = face_normal(face);
+     let nol = dot(n, u.sun.xyz);
+     let directional = (0.9 + 0.1 * n.x) * (0.8 + 0.2 * abs(n.y));
+@@ -622,6 +635,17 @@
+ mod tests {
+     use super::*;
+ 
++    /// The legacy branch of `photon_light` uses the closed form of b1.7.3 `World.lightBrightnessTable` (`(1 - f) / (3 f + 1) * 0.95 + 0.05`).
++    #[test]
++    fn legacy_light_table_is_vanilla() {
++        assert!(WGSL_COMMON.contains("l / (4.0 - 3.0 * l)"));
++        for k in 0..=15 {
++            let (l, f) = (k as f32 / 15.0, 1.0 - k as f32 / 15.0);
++            let vanilla = (1.0 - f) / (f * 3.0 + 1.0) * (1.0 - 0.05) + 0.05;
++            assert!((l / (4.0 - 3.0 * l) * 0.95 + 0.05 - vanilla).abs() < 1e-6, "level {k}");
++        }
++    }
++
+     /// The embedded table is the pack's `scattering.dat` (32 x 64 x 32 x RGB16F), and decoding it gives light.
+     #[test]
+     fn lut_is_the_pack_table() {
+diff -ruN a/mc-rs/src/render/post.rs b/mc-rs/src/render/post.rs
+--- a/mc-rs/src/render/post.rs	2026-10-12 05:39:04.000000000 +0000
++++ b/mc-rs/src/render/post.rs	2026-10-12 06:14:01.621073719 +0000
+@@ -43,6 +43,8 @@
+     Ozius,
+     Reinhard,
+     ReinhardJodie,
++    /// Identity (the grade still clamps to 0..1): legacy look, `Settings::legacy`.
++    Off,
+ }
+ 
+ impl Tonemap {
+@@ -58,6 +60,7 @@
+             Tonemap::Ozius => "tonemap_ozius",
+             Tonemap::Reinhard => "tonemap_reinhard",
+             Tonemap::ReinhardJodie => "tonemap_reinhard_jodie",
++            Tonemap::Off => "tonemap_off", // never emitted: `tonemap_switch` skips it
+         }
+     }
+ }
+@@ -141,6 +144,14 @@
+     }
+ }
+ 
++impl Settings {
++    /// Console-Edition look: nothing but a straight copy to the screen. No TAA/FXAA/CAS/vignette/bloom/DOF/exposure, identity
++    /// tone map, and the grade's built-in 0.83 brightness and 0.98 saturation undone (`grade_input`), teal boost off.
++    pub fn legacy() -> Self {
++        Self { taa: false, cas: false, vignette: false, tonemap: Tonemap::Off, brightness: 1.0 / 0.83, saturation: 1.0 / 0.98, teal_sat_boost: 0.0, ..Self::default() }
++    }
++}
++
+ /// `shaders.properties`: `taa_offset = vec2(jitter_x / viewWidth, jitter_y / viewWidth)` (y is divided by the WIDTH in the pack,
+ /// kept), `jitter = frac(R2 * frameCounter + 0.5) * 2 - 1`. The vertex shaders add `taa_offset * 0.66 * clip.w` (no TAAU), which
+ /// `jitter()` already includes. `frameCounter` wraps at 720720 like Iris'. Computed in f64 (the pack's f32 loses its fraction late).

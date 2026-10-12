@@ -65,6 +65,10 @@ const AUTOSAVE_CHUNKS: usize = 24;
 /// Moving things (items, mobs, falling blocks) cast shadows through a second 1024^2 map redrawn every frame. Off: that is a clear + a draw per frame
 /// and a second fetch per shadow tap, for a nicety. ponytail: flip it to bring them back (the deferred shader and the pass both follow it).
 pub(crate) const ENTITY_SHADOWS: bool = false;
+/// Console-Edition ("legacy") look: vanilla light table + face shades, no shadow map, no light shafts, a neutral post chain
+/// (`post::Settings::legacy`). `false` = the Photon look. ponytail: one switch, not a runtime option; the Photon passes that are
+/// still encoded (sky LUT, G-buffer, march) keep running, cutting them is step 2.
+pub(crate) const LEGACY: bool = true;
 
 const LOOK_SENS: f32 = 0.004;
 /// World units per second when the d-pad is fully pressed.
@@ -206,7 +210,7 @@ impl App {
         let (sw, sh) = gpu.scene();
         let photon = Photon::new(&gpu.device, &pipe.bind_layout, &pipe.shadow_layout, sw, sh);
         let clouds = clouds::RUN_CLOUDS.then(|| Clouds::new(&gpu.device, &gpu.queue, clouds::atmosphere_lut(&gpu.device, &gpu.queue)));
-        let post = Post::new(&gpu.device, &gpu.queue, sw, sh, photon::HDR_FORMAT, surface_format, &gpu.depth_view, (width, height), post::Settings::default());
+        let post = Post::new(&gpu.device, &gpu.queue, sw, sh, photon::HDR_FORMAT, surface_format, &gpu.depth_view, (width, height), if LEGACY { post::Settings::legacy() } else { post::Settings::default() });
         let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as i64);
 
         let mut app = Self {
@@ -772,8 +776,8 @@ impl App {
         let e = self.camera.pos;
         let eye_in_water = matches!(self.chunks.block_loaded(e.x.floor() as i32, e.y.floor() as i32, e.z.floor() as i32), Some(8 | 9));
         let mut vlp = vl::params(self.world_ticks, angle, rain, sky_rgb, e.y);
-        vlp.active &= !eye_in_water;
-        let sun_strength = sky::shadow_strength(angle, rain);
+        vlp.active &= !eye_in_water && !LEGACY;
+        let sun_strength = if LEGACY { 0.0 } else { sky::shadow_strength(angle, rain) };
         vlp.shadow = sun_strength; // surface shadows come from the volumetric pass (`render::vl`), not the chunk shader
         // The shadow map is only redrawn when the eye, the light or the geometry moved enough (`ShadowCache`); the terrain and
         // the shafts read it with the matrix and light it was drawn with.
@@ -783,13 +787,21 @@ impl App {
         self.shadows.update(&self.gpu.queue, self.shadow.center, self.shadow.light, e, self.camera.zfar, self.total_frames);
         let (frustum, shadow_frustum) = (Frustum::from_view_proj(proj * view), Frustum::from_view_proj(shadow_vp));
         let fog = sky::fog_color(angle, sky_rgb, rain, thunder);
+        let fog = if LEGACY { photon::legacy_lin(fog) } else { fog }; // vanilla values -> the frame's linear space
         // Terrain fog (AstraLex `NormalFog`): fades to the horizon colour at the render distance; off under water.
         self.pipe.set_fog(&self.gpu.queue, fog, if eye_in_water { 0.0 } else { (RENDER_DIST * 16) as f32 }, rain);
-        let lit = photon::lighting(angle, rain, self.shadow.light);
+        let mut lit = photon::lighting(angle, rain, self.shadow.light);
+        if LEGACY {
+            lit.legacy = 1.0;
+            lit.ambient[0] = sky::skylight_subtracted(angle, rain, thunder) as f32 / 15.0;
+        }
         self.pipe.set_lighting(&self.gpu.queue, &lit);
         vlp.hdr(lit.light_color); // the shafts glow in the scene's HDR units: the light's own colour
         let clear = wgpu::Color { r: fog[0] as f64, g: fog[1] as f64, b: fog[2] as f64, a: 1.0 };
         self.sky.update(&self.gpu.queue, &self.camera, &SkyFrame { angle, rain, seconds: self.world_ticks as f32 / 20.0 });
+        if LEGACY {
+            self.sky.set_legacy(&self.gpu.queue, photon::legacy_lin(sky_rgb), fog);
+        }
         if self.frames == 0 {
             log::info!("render: first frame, surface_format={:?}, {} chunks loaded", self.gpu.surface_format(), self.chunks.loaded());
         }
@@ -822,7 +834,9 @@ impl App {
         self.photon.resize(&self.gpu.device, sw, sh);
 
         let mut enc = self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
-        self.sky.encode(&mut enc); // sky map + SH (Photon d0, d4a)
+        if !LEGACY {
+            self.sky.encode(&mut enc); // sky map + SH (Photon d0, d4a); nothing reads them in legacy mode
+        }
 
         if draw_shadow {
             let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -932,7 +946,11 @@ impl App {
             self.drops.items.iter().for_each(|d| add(d.pos, glam::Vec3::splat(0.125)));
             self.ticks.falling.iter().for_each(|f| add(f.pos, glam::Vec3::splat(0.49)));
         }
-        self.shafts.march(&self.gpu, &mut enc, &self.pipe.shadow_bind, &self.shadows.bind, &self.camera, shadow_vp, &vlp, self.total_frames);
+        // Legacy: only the first call, which creates the target the deferred bind group wants; nothing reads it afterwards (ponytail:
+        // a resize keeps the old-size target, harmless while nothing samples it).
+        if !LEGACY || self.shafts.view().is_none() {
+            self.shafts.march(&self.gpu, &mut enc, &self.pipe.shadow_bind, &self.shadows.bind, &self.camera, shadow_vp, &vlp, self.total_frames);
+        }
         if let Some(vl_view) = self.shafts.view() {
             self.photon.bind(&self.gpu.device, &self.gpu.depth_copy_view, vl_view);
         }

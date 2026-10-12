@@ -683,7 +683,8 @@ impl ChunkManager {
             let (x, z) = (cx + dx, cz + dz);
             let c = &self.chunks;
             let built = match (c.get(&(x, z)), c.get(&(x + 1, z)), c.get(&(x - 1, z)), c.get(&(x, z + 1)), c.get(&(x, z - 1))) {
-                (Some(me), Some(px), Some(nx), Some(pz), Some(nz)) if !me.meshed && me.lit && self.is_final(x, z) => Some(mesh::build_split(
+                (Some(me), Some(px), Some(nx), Some(pz), Some(nz)) if !me.meshed && me.lit && self.is_final(x, z) => Some(mesh::build_split_with(
+                    crate::LEGACY,
                     &me.blocks,
                     &me.data,
                     [&px.data, &nx.data, &pz.data, &nz.data],

@@ -52,6 +52,10 @@ fn vm(v: [f64; 3], m: &M3) -> [f64; 3] {
 fn from_srgb(c: [f64; 3]) -> [f64; 3] {
     vm(vm(c.map(|x| x.powf(2.2)), &REC709_TO_XYZ), &XYZ_TO_REC2020)
 }
+/// A vanilla (gamma) colour as the frame's linear Rec. 2020 (Console-Edition mode: the sky and fog colours are vanilla values).
+pub fn legacy_lin(c: [f32; 3]) -> [f32; 3] {
+    from_srgb(c.map(f64::from)).map(|x| x as f32)
+}
 fn to_working(c: [f64; 3]) -> [f64; 3] {
     vm(vm(c, &REC709_TO_XYZ), &XYZ_TO_REC2020)
 }
@@ -244,6 +248,8 @@ pub struct Lighting {
     pub blocklight: [f32; 3],
     pub noon: f32,
     pub exposure: f32,
+    /// 1 = `photon_light` takes its legacy branch (`ambient[0]` is then the sky light subtracted / 15); `lib.rs` sets it.
+    pub legacy: f32,
 }
 
 /// `angle` = `sky::celestial_angle` (0 noon, 0.25 sunset, 0.5 midnight), `rain` 0..1, `light` = the light the shadow map was
@@ -301,6 +307,7 @@ pub fn lighting(angle: f32, rain: f32, light: Vec3) -> Lighting {
         blocklight: blk.map(|x| x as f32),
         noon: time_noon as f32,
         exposure: 1.0, // get_exposure_from_ev_100(MANUAL_EXPOSURE_VALUE = 0)
+        legacy: 0.0,
     }
 }
 
@@ -374,6 +381,17 @@ fn blocklight_falloff(bl: f32, sky: f32) -> f32 {
 // get_diffuse_lighting, overworld, SHADOW_VPS, no SSS / AO / cloud shadows. `albedo` is in the working space, `sky` and `bl`
 // are the light levels / 15, `shadow` is 1 where the light arrives.
 fn photon_light(albedo: vec3<f32>, face: u32, sky: f32, bl: f32, shadow_in: f32) -> vec3<f32> {
+    if u.blk.w > 0.5 {
+        // Console-Edition look (`lib.rs` LEGACY): b1.7.3 `World.lightBrightnessTable` and `RenderBlocks` face shades (top 1,
+        // bottom 0.5, x 0.6, z 0.8). `u.amb.x` = sky light taken away by the time of day / 15. Vanilla multiplies in gamma space,
+        // the frame is linear: `pow(.., 2.2)` makes the two agree.
+        let l = max(max(sky - u.amb.x, 0.0), bl);
+        let b = (l / (4.0 - 3.0 * l)) * 0.95 + 0.05; // (1 - f) / (3 f + 1) with f = 1 - l
+        var shade = 0.8;
+        if face == 2u { shade = 1.0; } else if face == 3u { shade = 0.5; } else if face < 2u { shade = 0.6; }
+        if face > 5u { shade = 1.0; } // the deferred pass: already in the albedo (`fs_main`)
+        return albedo * pow(b * shade, 2.2);
+    }
     let n = face_normal(face);
     let nol = dot(n, u.sun.xyz);
     let directional = (0.9 + 0.1 * n.x) * (0.8 + 0.2 * abs(n.y));
@@ -390,6 +408,9 @@ fn photon_light(albedo: vec3<f32>, face: u32, sky: f32, bl: f32, shadow_in: f32)
 // fog.glsl `NormalFog`, `DISTANT_FADE` vanilla part with `fogOffset = 0`: 1 - (far - d) * 5 / (density * far). Rain thickens it.
 fn apply_fog(rgb: vec3<f32>, d: f32) -> vec3<f32> {
     if u.fog.w <= 0.0 { return rgb; }
+    if u.blk.w > 0.5 { // legacy: b1.7.3 `setupFog`, GL_LINEAR from a quarter of the far plane to the far plane, no weather thickening
+        return mix(rgb, u.fog.rgb, clamp((d - 0.25 * u.fog.w) / (0.75 * u.fog.w), 0.0, 1.0));
+    }
     let f = clamp(1.0 - (u.fog.w - d) * 5.0 / (FOG_DENSITY * (1.0 + 0.5 * u.fogp.x) * u.fog.w), 0.0, 1.0);
     return mix(rgb, u.fog.rgb, f * f * (3.0 - 2.0 * f));
 }
@@ -465,12 +486,19 @@ fn fs_deferred(in: FsIn) -> @location(0) vec4<f32> {
     if z >= 1.0 { discard; }
     let g = textureLoad(gbuf, ip, 0);
     // alpha = face * 256 + sky * 16 + block (`Vertex.lm`, exact in f16); clamped so a bad texel cannot make a negative `pow`
-    let a = select(0.0, clamp(g.a, 0.0, 1535.0), finite1(g.a));
+    let a = select(0.0, clamp(g.a, 0.0, 2047.0), finite1(g.a));
     let face = min(u32(floor(a / 256.0 + 0.001)), 5u);
     let lm = a - f32(face) * 256.0;
     let sky_i = clamp(floor(lm / 16.0 + 0.001), 0.0, 15.0);
-    let sky = sky_i / 15.0;
-    let bl = clamp((lm - sky_i * 16.0) / 15.0, 0.0, 1.0);
+    var sky = sky_i / 15.0;
+    var bl = clamp((lm - sky_i * 16.0) / 15.0, 0.0, 1.0);
+    var lface = face;
+    if u.blk.w > 0.5 { // legacy G-buffer (`fs_main`): sky quarter levels * 32 + block half levels
+        let sq = clamp(floor(a / 32.0 + 0.001), 0.0, 60.0);
+        sky = sq / 60.0;
+        bl = clamp((a - sq * 32.0) / 30.0, 0.0, 1.0);
+        lface = 6u;
+    }
     let dims = vec2<f32>(textureDimensions(depth_tex));
     let uv = in.pos.xy / dims;
     // view-space position: z_view = -B / (z + A) for glam's depth 0..1 projection
@@ -481,12 +509,12 @@ fn fs_deferred(in: FsIn) -> @location(0) vec4<f32> {
     let n = face_normal(face);
     let nol = dot(n, u.sun.xyz);
     var shadow = 0.0;
-    if nol > 1e-3 {
+    if nol > 1e-3 && u.blk.w < 0.5 { // legacy: no shadow map, skip the lookup
         // world position: eye + R^T * view position (`v * M` is M^T v)
         let wp = u.eye.xyz + vpos * mat3x3<f32>(u.view[0].xyz, u.view[1].xyz, u.view[2].xyz);
         shadow = sun_visible(wp, n, nol, sky, in.pos.xy);
     }
-    let rgb = photon_light(to_working(g.rgb), face, sky, bl, shadow);
+    let rgb = photon_light(to_working(g.rgb), lface, sky, bl, shadow);
     return vec4<f32>(sane3(apply_fog(rgb, d)), 1.0);
 }
 
@@ -621,6 +649,25 @@ impl Photon {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The legacy fog is b1.7.3's GL_LINEAR: clear up to a quarter of the far plane, full at the far plane.
+    #[test]
+    fn legacy_fog_is_linear() {
+        assert!(WGSL_COMMON.contains("(d - 0.25 * u.fog.w) / (0.75 * u.fog.w)"));
+        let f = |d: f32, far: f32| ((d - 0.25 * far) / (0.75 * far)).clamp(0.0, 1.0);
+        assert_eq!((f(16.0, 64.0), f(64.0, 64.0), f(40.0, 64.0)), (0.0, 1.0, 0.5));
+    }
+
+    /// The legacy branch of `photon_light` uses the closed form of b1.7.3 `World.lightBrightnessTable` (`(1 - f) / (3 f + 1) * 0.95 + 0.05`).
+    #[test]
+    fn legacy_light_table_is_vanilla() {
+        assert!(WGSL_COMMON.contains("l / (4.0 - 3.0 * l)"));
+        for k in 0..=15 {
+            let (l, f) = (k as f32 / 15.0, 1.0 - k as f32 / 15.0);
+            let vanilla = (1.0 - f) / (f * 3.0 + 1.0) * (1.0 - 0.05) + 0.05;
+            assert!((l / (4.0 - 3.0 * l) * 0.95 + 0.05 - vanilla).abs() < 1e-6, "level {k}");
+        }
+    }
 
     /// The embedded table is the pack's `scattering.dat` (32 x 64 x 32 x RGB16F), and decoding it gives light.
     #[test]

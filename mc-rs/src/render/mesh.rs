@@ -26,6 +26,12 @@ pub fn lm(sky: u8, block: u8) -> f32 {
     (sky.min(15) * 16 + block.min(15)) as f32
 }
 
+/// Smooth vertices carry `SMOOTH_LM + sky_q * 32 + block_h` in `lm` (flat ones keep `sky * 16 + block`, always below this):
+/// `sky_q` = four cells' sky levels summed (quarter levels, 0..=60), `block_h` = their block levels averaged in half levels
+/// (0..=30), so `sky_q * 32 + block_h <= 1950` stays exact in the G-buffer's f16. `light` then holds `face shade * ambient occlusion`.
+/// `vs_main` in `gpu/pipeline.rs` unpacks both kinds.
+pub const SMOOTH_LM: f32 = 256.0;
+
 /// One textured quad. Four corners in CCW order from the front.
 /// `normal_index` selects the face normal (0..5) for debug-coloring later.
 #[derive(Clone, Copy)]
@@ -200,6 +206,11 @@ pub fn build(blocks: &[u8], data: &Nibbles, light: &[u8], nb: [&[u8]; 4], nb_lig
 /// `build`, with the water faces (blocks 8, 9: `getRenderBlockPass` 1, drawn blended after everything else) as a second index list
 /// into the same vertices: `(vertices, opaque indices, water indices)`. `build` leaves them out of its indices.
 pub fn build_split(blocks: &[u8], data: &Nibbles, nb_data: [&Nibbles; 4], light: &[u8], nb: [&[u8]; 4], nb_light: [&[u8]; 4], sky_sub: u8, ox: i32, oz: i32) -> (Vec<f32>, Vec<u32>, Vec<u32>) {
+    build_split_with(false, blocks, data, nb_data, light, nb, nb_light, sky_sub, ox, oz)
+}
+
+/// `build_split`; `smooth` (Console-Edition mode) gives every full face per-corner light and ambient occlusion, see `SMOOTH_LM`.
+pub fn build_split_with(smooth: bool, blocks: &[u8], data: &Nibbles, nb_data: [&Nibbles; 4], light: &[u8], nb: [&[u8]; 4], nb_light: [&[u8]; 4], sky_sub: u8, ox: i32, oz: i32) -> (Vec<f32>, Vec<u32>, Vec<u32>) {
     assert_eq!(blocks.len(), VOLUME);
     assert_eq!(light.len(), VOLUME);
     // Which chunk's arrays a cell with x, z in -1..=16 lives in: 0 = this one, 1.. = +X, -X, +Z, -Z.
@@ -230,6 +241,33 @@ pub fn build_split(blocks: &[u8], data: &Nibbles, nb_data: [&Nibbles; 4], light:
         (if (v & 15) < 15 && open(x, y, z) { 15 } else { v & 15 }, v >> 4)
     };
     let br = |(s, b): (u8, u8)| table[s.saturating_sub(sky_sub).max(b) as usize];
+    // `RenderBlocks.renderStandardBlockWithAmbientOcclusion`: the light of a face corner is the mean of the four cells around it (the
+    // face's own cell, the two beside it along the face, and the diagonal); an opaque cell counts as 0.2 for the occlusion and, as in
+    // later versions, takes the face cell's light instead of its own 0. A diagonal behind two opaque sides is that side. A cell
+    // beyond the chunk's corner (x and z both outside) is not loaded here: it counts as open. -> (sky quarters, block halves, ao)
+    let corner_light = |cell: [i32; 3], d: [i32; 3], corner: &[f32; 3]| -> (f32, f32, f32) {
+        let axes: Vec<usize> = (0..3).filter(|&a| d[a] == 0).collect();
+        let base = [cell[0] + d[0], cell[1] + d[1], cell[2] + d[2]];
+        let at = |o1: i32, o2: i32| {
+            let mut c = base;
+            c[axes[0]] += o1 * if corner[axes[0]] > 0.5 { 1 } else { -1 };
+            c[axes[1]] += o2 * if corner[axes[1]] > 0.5 { 1 } else { -1 };
+            c
+        };
+        let centre = lv(base[0], base[1], base[2]);
+        let get = |c: [i32; 3]| -> Option<((u8, u8), f32)> {
+            if (c[0] < 0 || c[0] >= 16) && (c[2] < 0 || c[2] >= 16) { return None; }
+            let solid = opaque(rid(c[0], c[1], c[2]));
+            Some((if solid { centre } else { lv(c[0], c[1], c[2]) }, if solid { 0.2 } else { 1.0 }))
+        };
+        let open_cell = (centre, 1.0);
+        let (s1, s2) = (get(at(1, 0)).unwrap_or(open_cell), get(at(0, 1)).unwrap_or(open_cell));
+        let diag = if s1.1 < 1.0 && s2.1 < 1.0 { s1 } else { get(at(1, 1)).unwrap_or(open_cell) };
+        let cells = [(centre, 1.0), s1, s2, diag];
+        let sky: u32 = cells.iter().map(|c| c.0 .0 as u32).sum();
+        let blk: u32 = cells.iter().map(|c| c.0 .1 as u32).sum();
+        (sky as f32, (blk as f32 / 2.0).round(), cells.iter().map(|c| c.1).sum::<f32>() / 4.0)
+    };
     let mut verts: Vec<f32> = Vec::new();
     let mut idxs: Vec<u32> = Vec::new();
     let mut widxs: Vec<u32> = Vec::new();
@@ -310,6 +348,9 @@ pub fn build_split(blocks: &[u8], data: &Nibbles, nb_data: [&Nibbles; 4], light:
                         let depth = (0..=y).take_while(|&d| d < 15 && matches!(rid(x, y - d, z), 8 | 9)).count();
                         light = light * WATER_LIGHT + depth as f32;
                     }
+                    let smooth_face = smooth && !own_cell && heights.is_none();
+                    let mut vls = [0.0f32; 4]; // shade * ao per corner, to pick the quad's diagonal
+                    let mut k = 0;
                     for corner in face.corners.iter() {
                         // Corner inside the cell: the box's, a fluid's top corners at their height.
                         let mut p: [f32; 3] = std::array::from_fn(|a| bounds[a] + corner[a] * (bounds[a + 3] - bounds[a]));
@@ -332,10 +373,23 @@ pub fn build_split(blocks: &[u8], data: &Nibbles, nb_data: [&Nibbles; 4], light:
                         }
                         // ponytail: world-space f32 vertices lose precision far from the origin
                         // (about 1 cm at 100k blocks); upgrade path is a per-chunk offset uniform.
-                        verts.extend_from_slice(&[p[0] + (ox + x) as f32, p[1] + y as f32, p[2] + (oz + z) as f32, au, av, light, lmv]);
+                        let (vl, vlm) = if smooth_face {
+                            let (sq, bh, ao) = corner_light([x, y, z], [dx, dy, dz], corner);
+                            (shade * ao, SMOOTH_LM + sq * 32.0 + bh)
+                        } else {
+                            (light, lmv)
+                        };
+                        vls[k] = vl;
+                        k += 1;
+                        verts.extend_from_slice(&[p[0] + (ox + x) as f32, p[1] + y as f32, p[2] + (oz + z) as f32, au, av, vl, vlm]);
                     }
                     let list = if matches!(blk, 8 | 9) { &mut widxs } else { &mut idxs };
-                    list.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+                    // Smooth faces split along the diagonal that joins the brighter pair, so a dark corner does not smear across the quad.
+                    if smooth_face && vls[0] + vls[2] < vls[1] + vls[3] {
+                        list.extend_from_slice(&[base + 1, base + 2, base + 3, base + 1, base + 3, base]);
+                    } else {
+                        list.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+                    }
                 }
                 }
             }
@@ -479,6 +533,22 @@ mod tests {
         let a = air();
         let (verts, _) = build(&c, &Nibbles::new(), &a, [&a[..], &a[..], &a[..], &a[..]], [&a[..], &a[..], &a[..], &a[..]], 0, 0, 0);
         assert_eq!(face_count(&verts), 6);
+    }
+
+    /// Console-Edition smooth light: the corner of a floor face that touches a wall is darker (ambient occlusion), the far one is not,
+    /// and smooth vertices carry the packed light (`SMOOTH_LM`).
+    #[test]
+    fn smooth_corner_next_to_a_wall_is_darker() {
+        let (a, e, mut c) = (air(), Nibbles::new(), air());
+        for x in 3..8 { for z in 3..8 { c[idx(x, 19, z)] = 1; } }
+        c[idx(5, 20, 5)] = 1;
+        let v = build_split_with(true, &c, &e, [&e; 4], &a, [&a[..]; 4], [&a[..]; 4], 0, 0, 0).0;
+        let min = |q: &[f32], o: usize| (0..4).map(|k| q[k * VF + o]).fold(f32::MAX, f32::min);
+        // the top face of the floor cell (4, 19, 5): y = 20, x in 4..5, z in 5..6
+        let q = v.chunks(4 * VF).find(|q| min(q, 1) == 20.0 && (0..4).all(|k| q[k * VF + 1] == 20.0) && min(q, 0) == 4.0 && min(q, 2) == 5.0).unwrap();
+        let at_x = |x: f32| (0..4).filter(|&k| q[k * VF] == x).map(|k| q[k * VF + 5]).fold(f32::MAX, f32::min);
+        assert!(at_x(5.0) < at_x(4.0), "wall corner {} not darker than open corner {}", at_x(5.0), at_x(4.0));
+        assert!((0..4).all(|k| q[k * VF + 6] >= SMOOTH_LM));
     }
 
     /// Leaves above a cell do not dim its sky light (the shadow map darkens it, `render::vl`); a stone roof still does.

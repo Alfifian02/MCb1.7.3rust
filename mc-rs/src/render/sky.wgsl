@@ -18,6 +18,8 @@ struct Sky {
     celestial: mat4x4<f32>, // world direction -> the frame the stars are fixed in (turns with the sun and moon)
     times: vec4<f32>,       // time_sunrise, time_noon, time_sunset, time_midnight
     misc: vec4<f32>,        // rainStrength, sunAngle (OptiFine: 0 sunrise, 0.5 sunset), seconds, atmosphere_saturation_boost_amount
+    zenith: vec4<f32>,      // legacy sky only: dome colour (linear working space)
+    horizon: vec4<f32>,     // legacy sky only: fog colour
 };
 
 @group(0) @binding(0) var<uniform> sky: Sky;
@@ -487,4 +489,25 @@ fn fs_sky(in: VsOut) -> @location(0) vec4<f32> {
     let ray_dir = normalize(p.xyz / p.w);
     let atmosphere = atmosphere_scattering(ray_dir, in.sun_color, in.moon_color);
     return vec4<f32>(stand_in_tonemap(draw_sky(ray_dir, atmosphere, vec4<f32>(0.0, 0.0, 0.0, 1.0), in.sun_color)), 1.0);
+}
+
+// Console-Edition sky (`lib.rs` LEGACY): b1.7.3 `RenderGlobal.renderSky` in two lines. The dome is the sky colour, the fog colour
+// shows at the horizon; the sun (30 units wide at 100) and moon (20 at 100) are flat squares, their texture comes with the
+// resource pack. The sun's path lies in the YZ plane, so +X is a tangent of both. No stars, no sunrise fan yet.
+fn legacy_quad(r: vec3<f32>, dir: vec3<f32>, half: f32) -> f32 {
+    let d = dot(r, dir);
+    if d <= 0.0 { return 0.0; }
+    let t = r / d - dir;
+    let b = cross(dir, vec3<f32>(1.0, 0.0, 0.0));
+    return select(0.0, 1.0, max(abs(t.x), abs(dot(t, b))) < half);
+}
+
+@fragment
+fn fs_legacy(in: VsOut) -> @location(0) vec4<f32> {
+    let p = sky.inv_vp * vec4<f32>(in.ndc, 1.0, 1.0);
+    let r = normalize(p.xyz / p.w);
+    var c = mix(sky.horizon.rgb, sky.zenith.rgb, clamp01(r.y * 2.5));
+    c = mix(c, to_working(vec3<f32>(1.0, 1.0, 0.85)), legacy_quad(r, sky.sun_dir.xyz, 0.15) * (1.0 - sky.misc.x));
+    c = mix(c, to_working(vec3<f32>(0.80, 0.85, 1.0)), legacy_quad(r, sky.moon_dir.xyz, 0.10) * (1.0 - sky.misc.x));
+    return vec4<f32>(c, 1.0);
 }

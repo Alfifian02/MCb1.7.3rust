@@ -43,6 +43,8 @@ pub enum Tonemap {
     Ozius,
     Reinhard,
     ReinhardJodie,
+    /// Identity (the grade still clamps to 0..1): legacy look, `Settings::legacy`.
+    Off,
 }
 
 impl Tonemap {
@@ -58,6 +60,7 @@ impl Tonemap {
             Tonemap::Ozius => "tonemap_ozius",
             Tonemap::Reinhard => "tonemap_reinhard",
             Tonemap::ReinhardJodie => "tonemap_reinhard_jodie",
+            Tonemap::Off => "tonemap_off", // never emitted: `tonemap_switch` skips it
         }
     }
 }
@@ -138,6 +141,14 @@ impl Default for Settings {
             green_sat_boost: 0.0,
             green_hue_shift: 0.0,
         }
+    }
+}
+
+impl Settings {
+    /// Console-Edition look: nothing but a straight copy to the screen. No TAA/FXAA/CAS/vignette/bloom/DOF/exposure, identity
+    /// tone map, and the grade's built-in 0.83 brightness and 0.98 saturation undone (`grade_input`), teal boost off.
+    pub fn legacy() -> Self {
+        Self { taa: false, cas: false, vignette: false, tonemap: Tonemap::Off, brightness: 1.0 / 0.83, saturation: 1.0 / 0.98, teal_sat_boost: 0.0, ..Self::default() }
     }
 }
 

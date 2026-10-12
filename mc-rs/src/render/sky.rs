@@ -53,6 +53,9 @@ pub struct Params {
     times: [f32; 4],
     /// rainStrength, sunAngle, seconds, atmosphere_saturation_boost_amount
     misc: [f32; 4],
+    /// legacy sky (`fs_legacy`): dome colour, fog colour; zero unless `set_legacy` wrote them after `update`.
+    zenith: [f32; 4],
+    horizon: [f32; 4],
 }
 
 /// The pack's Iris uniforms (`shaders.properties`) from mc-rs's sun angle. The pack's `sunAngle` is 0 at sunrise, ours 0 at noon;
@@ -77,6 +80,8 @@ pub fn params(f: &SkyFrame, camera: &FirstPersonCamera) -> Params {
         celestial: Mat4::from_rotation_x(-f.angle * TAU).to_cols_array_2d(),
         times: [if rising { me } else { 0.0 }, if y > 0.0 { 1.0 - me } else { 0.0 }, if rising { 0.0 } else { me }, if y < 0.0 { 1.0 - me } else { 0.0 }],
         misc: [f.rain, sun_angle, f.seconds, 0.10 + 0.20 * blue_hour],
+        zenith: [0.0; 4],
+        horizon: [0.0; 4],
     }
 }
 
@@ -96,6 +101,11 @@ pub struct SkyRenderer {
 
 impl SkyRenderer {
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, surface_format: wgpu::TextureFormat) -> Self {
+        Self::with_look(device, queue, surface_format, crate::LEGACY)
+    }
+
+    /// `legacy`: the sky pass draws the Console-Edition sky (`fs_legacy`) instead of Photon's atmosphere.
+    pub fn with_look(device: &wgpu::Device, queue: &wgpu::Queue, surface_format: wgpu::TextureFormat, legacy: bool) -> Self {
         let tex = |label: &str, size: wgpu::Extent3d, dimension: wgpu::TextureDimension, format: wgpu::TextureFormat, data: &[u8]| {
             device.create_texture_with_data(
                 queue,
@@ -171,7 +181,7 @@ impl SkyRenderer {
         });
         let d0 = render("sky_d0", "fs_d0", wgpu::TextureFormat::Rgba16Float, None);
         // Only where nothing was drawn: the triangle sits at depth 1.0, the frame clears to 1.0 and the terrain writes less.
-        let pipeline = render("sky_pass", "fs_sky", surface_format, Some(wgpu::DepthStencilState { format: wgpu::TextureFormat::Depth32Float, depth_write_enabled: false, depth_compare: wgpu::CompareFunction::LessEqual, stencil: Default::default(), bias: Default::default() }));
+        let pipeline = render("sky_pass", if legacy { "fs_legacy" } else { "fs_sky" }, surface_format, Some(wgpu::DepthStencilState { format: wgpu::TextureFormat::Depth32Float, depth_write_enabled: false, depth_compare: wgpu::CompareFunction::LessEqual, stencil: Default::default(), bias: Default::default() }));
 
         let sh_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("sky_sh_layout"),
@@ -198,6 +208,12 @@ impl SkyRenderer {
     /// Upload this frame's sun, moon and camera.
     pub fn update(&self, queue: &wgpu::Queue, camera: &FirstPersonCamera, f: &SkyFrame) {
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&params(f, camera)));
+    }
+
+    /// Legacy sky colours (linear working space). Call after `update`, which rewrites the whole block.
+    pub fn set_legacy(&self, queue: &wgpu::Queue, zenith: [f32; 3], horizon: [f32; 3]) {
+        let v = [[zenith[0], zenith[1], zenith[2], 0.0], [horizon[0], horizon[1], horizon[2], 0.0]];
+        queue.write_buffer(&self.uniform_buffer, std::mem::offset_of!(Params, zenith) as u64, bytemuck::bytes_of(&v));
     }
 
     /// d0 and d4a: the sky map, then its SH. Outside any render pass, before the scene.
@@ -235,6 +251,17 @@ impl SkyRenderer {
 mod tests {
     use super::*;
 
+    /// Both sky fragment entries (Photon's and the Console-Edition one) parse and validate; no GPU needed.
+    #[test]
+    fn sky_shader_validates_with_legacy_entry() {
+        let src = format!("{WGSL}\n{SH_WGSL}");
+        let m = naga::front::wgsl::parse_str(&src).unwrap_or_else(|e| panic!("{}", e.emit_to_string(&src)));
+        naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all()).validate(&m).unwrap();
+        for entry in ["fs_sky", "fs_legacy"] {
+            assert!(m.entry_points.iter().any(|e| e.name == entry), "{entry} missing");
+        }
+    }
+
     /// Reads `n` bytes of a GPU buffer back.
     fn read(dev: &wgpu::Device, q: &wgpu::Queue, enc: wgpu::CommandEncoder, src: &wgpu::Buffer, n: u64) -> Vec<f32> {
         let out = dev.create_buffer(&wgpu::BufferDescriptor { label: None, size: n, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
@@ -254,7 +281,7 @@ mod tests {
         let (dev, q) = pollster::block_on(ad.request_device(&Default::default())).ok()?;
         let (w, h) = (256u32, 128u32);
         let fmt = wgpu::TextureFormat::Rgba8Unorm;
-        let sky = SkyRenderer::new(&dev, &q, fmt);
+        let sky = SkyRenderer::with_look(&dev, &q, fmt, false); // the Photon sky, whatever `LEGACY` says
         let mut cam = FirstPersonCamera::spawn_at(0.0, 70.0, 0.0);
         (cam.aspect, cam.pitch) = (w as f32 / h as f32, pitch);
         sky.update(&q, &cam, &SkyFrame { angle, rain, seconds: 3.0 });
