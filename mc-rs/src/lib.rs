@@ -386,7 +386,7 @@ impl App {
         }
         let slot = self.touch.hotbar_slot;
         self.tip = if slot != self.tip.0 { (slot, 2.0) } else { (slot, (self.tip.1 - dt).max(0.0)) };
-        // Day/night: time only runs while playing; a new sky-light level restarts the meshes.
+        // Day/night: time only runs while playing; the shader reads the sky-light level from a uniform, so the meshes are not rebuilt.
         self.world_ticks += dt as f64 * 20.0;
         while self.weather_ticks < self.world_ticks as u64 {
             self.weather.tick();

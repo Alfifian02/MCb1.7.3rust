@@ -498,13 +498,11 @@ impl ChunkManager {
         [(x, z), (x - 1, z), (x, z - 1), (x - 1, z - 1)].iter().all(|k| self.chunks.get(k).is_some_and(|e| e.populated))
     }
 
-    /// Time of day changed the light: every mesh is stale (`updateAllRenderers`) and is rebuilt a
-    /// couple per frame, nearest first; the old meshes keep drawing until their replacement is ready.
+    /// Time of day changed the light. The meshes stay: no vertex the shaders read depends on it (`lm` carries the raw
+    /// levels, the sky-light the day takes away is the `amb.x` uniform), so a rebuild would only repeat the same vertices.
+    /// It used to restart every mesh (`updateAllRenderers`): the whole ring, a couple per frame, at every sky-light step.
     pub fn set_sky_sub(&mut self, v: u8) {
-        if v != self.sky_sub {
-            self.sky_sub = v;
-            self.chunks.values_mut().for_each(|e| e.meshed = false);
-        }
+        self.sky_sub = v;
     }
 
     /// `WorldChunkManager.getTemperature` at a block column (for the sky colour).
@@ -840,5 +838,16 @@ mod tests {
         (3..6).for_each(|i| v[i * crate::render::mesh::VF + 1] = 40.0);
         let (idx, st) = by_section(&v, &[3, 4, 5, 0, 1, 2]);
         assert_eq!((idx, st[1], st[2], st[3], st[SECTIONS]), (vec![0, 1, 2, 3, 4, 5], 3, 3, 6, 6));
+    }
+
+    /// A new sky-light level changes nothing the shaders read from a vertex, so no mesh goes stale.
+    #[test]
+    fn sky_light_step_keeps_the_meshes() {
+        let mut m = ChunkManager::new(1, 1);
+        m.insert((0, 0), vec![0u8; VOLUME]);
+        m.chunks.get_mut(&(0, 0)).unwrap().meshed = true;
+        m.set_sky_sub(7);
+        assert!(m.chunks[&(0, 0)].meshed);
+        assert_eq!(m.sky_sub, 7);
     }
 }

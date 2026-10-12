@@ -161,14 +161,19 @@ fn vs_shadow(@location(0) p: vec3<f32>, @location(1) uv: vec2<f32>) -> @builtin(
 // G-buffer: albedo (linear, Rec. 709) and `face * 256 + sky * 16 + block`; `photon::SHADER` `fs_deferred` lights it.
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    let face = face_index(in.wp, dpdx(in.wp), dpdy(in.wp));
+    let dx = dpdx(in.wp); // derivatives stay in uniform control flow; `face_index` below can then sit behind a per-pixel branch
+    let dy = dpdy(in.wp);
     let c = textureSample(tex, samp, in.uv);
     if c.a < 0.5 { discard; } // cut-out textures: plants, glass
     if LEGACY {
         // Face shade and ambient occlusion x the sky/block light (`photon_light`'s legacy branch) x the fog.
-        var shade = 0.8;
-        if face == 2u { shade = 1.0; } else if face == 3u { shade = 0.5; } else if face < 2u { shade = 0.6; }
-        if in.ao >= 0.0 { shade = in.ao; }
+        // Smooth faces carry shade * ao already (`in.ao >= 0`); only the flat ones need their face from the derivatives.
+        var shade = in.ao;
+        if in.ao < 0.0 {
+            let face = face_index(in.wp, dx, dy);
+            shade = 0.8;
+            if face == 2u { shade = 1.0; } else if face == 3u { shade = 0.5; } else if face < 2u { shade = 0.6; }
+        }
         // Lit right here (forward), straight into the scene: no G-buffer, no depth copy, no full-screen pass that reads them back.
         // Same maths the deferred pass did (`photon_light` legacy branch, face 6 = shade already in the albedo, then the fog).
         let albedo = to_working(c.rgb * pow(max(shade, 0.0), 2.2));
@@ -176,7 +181,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let bl = clamp(floor(in.bk + 0.5), 0.0, 30.0) / 30.0;
         return vec4<f32>(apply_fog(photon_light(albedo, 6u, sky, bl, 0.0), length(in.wp - u.eye.xyz)), 1.0);
     }
-    return vec4<f32>(c.rgb, f32(face) * 256.0 + in.lm);
+    return vec4<f32>(c.rgb, f32(face_index(in.wp, dx, dy)) * 256.0 + in.lm);
 }
 
 // Translucent water, forward lit with the same `photon_light` (no shadow). `mesh::build_split` packs the water column under
@@ -393,7 +398,9 @@ impl ChunkPipeline {
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: crate::render::photon::HDR_FORMAT,
-                    blend: Some(wgpu::BlendState::REPLACE),
+                    // None, not REPLACE: REPLACE still enables the blend unit (src * 1 + dst * 0), which reads the old framebuffer for every
+                    // opaque pixel; a non-finite green left in a tile turned the terrain magenta (Inf * 0 = NaN, zeroed by `sane`).
+                    blend: None,
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
