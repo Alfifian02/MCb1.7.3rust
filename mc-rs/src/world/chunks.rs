@@ -65,6 +65,13 @@ type Chunks = HashMap<Key, Entry, std::hash::BuildHasherDefault<KeyHasher>>;
 /// move it to the workers (they would need the neighbours' blocks behind an `Arc`).
 const MESH_PER_FRAME: usize = 2;
 
+/// A second mesh in a frame starts only while the frame's chunk work is still under this: a weak phone, where one chunk mesh
+/// takes tens of ms, builds one per frame instead of two (the first one always runs, so meshing never starves); a fast one builds both.
+const CHUNK_WORK_BUDGET: std::time::Duration = std::time::Duration::from_millis(6);
+
+/// A frame whose chunk work (stream, populate, light, meshes) took this long or more is logged with its stages.
+const SLOW_CHUNK_WORK: std::time::Duration = std::time::Duration::from_millis(16);
+
 /// Saved chunks read per frame (the rest wait for the next frame, like generation does).
 /// ponytail: the read + decode runs on the render thread (about 32 KB of work per chunk); move it to the workers if it shows.
 const LOADS_PER_FRAME: usize = 8;
@@ -609,12 +616,20 @@ impl ChunkManager {
 
     /// Call once per frame with the player's chunk.
     pub fn update(&mut self, device: &wgpu::Device, cx: i32, cz: i32) {
+        let t0 = std::time::Instant::now();
         self.stream(cx, cz);
         self.populate_pending(cx, cz, 1);
+        let populated = t0.elapsed();
         self.light_pending(cx, cz);
+        let lit = t0.elapsed();
         // Meshes wait for the light queue to drain, so an edit or a new chunk is meshed once, lit.
+        let mut built = 0;
         if self.light_queue.is_empty() {
-            self.mesh_pending(device, cx, cz);
+            built = self.mesh_pending(device, cx, cz, t0);
+        }
+        let total = t0.elapsed();
+        if total >= SLOW_CHUNK_WORK {
+            log::warn!("slow chunk work {total:?}: stream + populate {populated:?}, light done at {lit:?}, {built} mesh(es)");
         }
     }
 
@@ -696,12 +711,16 @@ impl ChunkManager {
         true
     }
 
-    fn mesh_pending(&mut self, device: &wgpu::Device, cx: i32, cz: i32) {
+    /// Meshes up to `MESH_PER_FRAME` chunks (`t0` = when this frame's chunk work began); returns how many it built.
+    fn mesh_pending(&mut self, device: &wgpu::Device, cx: i32, cz: i32, t0: std::time::Instant) -> usize {
         let r2 = self.radius * self.radius;
         let mut budget = MESH_PER_FRAME;
         for &(dx, dz) in &self.ring {
             if budget == 0 || dx * dx + dz * dz > r2 {
                 break; // the ring is sorted by distance, so everything after is outside too
+            }
+            if budget < MESH_PER_FRAME && t0.elapsed() > CHUNK_WORK_BUDGET {
+                break; // one is built already and the frame is spent: the next waits for the next frame
             }
             let (x, z) = (cx + dx, cz + dz);
             let c = &self.chunks;
@@ -743,6 +762,7 @@ impl ChunkManager {
                 e.meshed = true;
             }
         }
+        MESH_PER_FRAME - budget
     }
 }
 

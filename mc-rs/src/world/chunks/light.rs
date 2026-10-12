@@ -58,7 +58,7 @@ impl Region {
 
 /// Time per frame spent on light (replaces `World.updatingLighting`'s 500 regions). ponytail: a cell is still
 /// ~10 map lookups; a per-chunk lookup cache is the next step if loading is still slow.
-const LIGHT_BUDGET: Duration = Duration::from_millis(10);
+const LIGHT_BUDGET: Duration = Duration::from_millis(4);
 
 impl ChunkManager {
     fn chunk_exists(&self, x: i32, z: i32) -> bool {
