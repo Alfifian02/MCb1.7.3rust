@@ -4,20 +4,45 @@
 //! at the chunk edge the neighbour is read from the adjacent chunk, so no faces are wasted on
 //! the seams between loaded chunks. Vertex positions are world coordinates.
 //!
-//! Vertex format: position(3) + uv(2) + light(1) + lm(1) = `VF` (7) floats = 28 bytes (`gpu::pipeline::Vertex`).
+//! Vertex format: position(3) + uv(2) + light(1) + lm(1) + tint(1) = `VF` (8) floats = 32 bytes (`gpu::pipeline::Vertex`).
 //! `light` = face shade (RenderBlocks: top 1.0, bottom 0.5, Z sides 0.8, X sides 0.6) times the
 //! brightness of the cell the face looks into (`Block.getBlockBrightness` -> `lightBrightnessTable`).
 
 use crate::render::atlas;
 use crate::world::chest;
 use crate::world::chunk::{box_bounds, brightness, cross_shape, idx, is_fluid, is_plant, opaque, Nibbles, CACTUS_INSET, H, VOLUME};
+use crate::world::climate;
 use crate::world::ticks::non_solid;
 
 /// Water vertices pack `light * WATER_LIGHT + column depth` (see `build_split`); `fs_water` in `gpu/pipeline.rs` unpacks it.
 pub const WATER_LIGHT: f32 = 0.9;
 
-/// Floats per vertex: position(3) + uv(2) + light(1) + lm(1).
-pub const VF: usize = 7;
+/// Floats per vertex: position(3) + uv(2) + light(1) + lm(1) + tint(1).
+pub const VF: usize = 8;
+/// `tint` packs an sRGB colour as `r << 16 | g << 8 | b` (exact in an f32): the texel is multiplied by it in the vertex shader\n/// (`ColorizerGrass` / `ColorizerFoliage`, per block column). No tint is white.
+pub const WHITE: f32 = 16_777_215.0;
+
+/// Grass and foliage colour (packed like `WHITE`) of the 16 x 16 columns of a chunk, index `x * 16 + z`.
+pub struct Tints {
+    pub grass: [f32; 256],
+    pub foliage: [f32; 256],
+}
+
+impl Tints {
+    pub fn white() -> Self {
+        Self { grass: [WHITE; 256], foliage: [WHITE; 256] }
+    }
+}
+
+/// `Block.colorMultiplier` of the blocks that have one: grass top (the side overlay uses it too), tall grass (not the dead\n/// shrub, metadata 0), reeds, leaves (spruce / birch by metadata, else the foliage colour).
+fn tint_of(t: &Tints, id: u8, meta: u8, col: usize) -> f32 {
+    match id {
+        2 | 83 => t.grass[col],
+        31 if meta != 0 => t.grass[col],
+        18 => match meta & 3 { 1 => climate::PINE as f32, 2 => climate::BIRCH as f32, _ => t.foliage[col] },
+        _ => WHITE,
+    }
+}
 /// Packed light levels of a vertex, `sky * 16 + block` (each 0..=15, exact in f32 and f16): the two numbers photon's lighting
 /// reads separately as `light_levels` (`lmcoord`). `sky` is the RAW sky light, not minus `skylight_subtracted`: day and night
 /// come from the light colours, so a mesh no longer has to be relit when the sun moves. `light` (shade x brightness) stays for the
@@ -211,6 +236,11 @@ pub fn build_split(blocks: &[u8], data: &Nibbles, nb_data: [&Nibbles; 4], light:
 
 /// `build_split`; `smooth` (Console-Edition mode) gives every full face per-corner light and ambient occlusion, see `SMOOTH_LM`.
 pub fn build_split_with(smooth: bool, blocks: &[u8], data: &Nibbles, nb_data: [&Nibbles; 4], light: &[u8], nb: [&[u8]; 4], nb_light: [&[u8]; 4], sky_sub: u8, ox: i32, oz: i32) -> (Vec<f32>, Vec<u32>, Vec<u32>) {
+    build_split_tinted(smooth, blocks, data, nb_data, light, nb, nb_light, sky_sub, ox, oz, &Tints::white())
+}
+
+/// `build_split_with` with the biome colours of the chunk's columns (`Tints`).
+pub fn build_split_tinted(smooth: bool, blocks: &[u8], data: &Nibbles, nb_data: [&Nibbles; 4], light: &[u8], nb: [&[u8]; 4], nb_light: [&[u8]; 4], sky_sub: u8, ox: i32, oz: i32, tints: &Tints) -> (Vec<f32>, Vec<u32>, Vec<u32>) {
     assert_eq!(blocks.len(), VOLUME);
     assert_eq!(light.len(), VOLUME);
     // Which chunk's arrays a cell with x, z in -1..=16 lives in: 0 = this one, 1.. = +X, -X, +Z, -Z.
@@ -285,6 +315,16 @@ pub fn build_split_with(smooth: bool, blocks: &[u8], data: &Nibbles, nb_data: [&
                     { let l = lv(x, y, z); push_crops(&mut verts, &mut idxs, [(ox + x) as f32, y as f32, (oz + z) as f32], data.get(x as usize, y as usize, z as usize), br(l), lm(l.0, l.1)); }
                     continue;
                 }
+                if raw == 51 {
+                    push_fire(&mut verts, &mut idxs, [(ox + x) as f32, y as f32, (oz + z) as f32]);
+                    continue;
+                }
+                if matches!(raw, 27 | 28 | 65 | 66) {
+                    let l = lv(x, y, z);
+                    let meta = data.get(x as usize, y as usize, z as usize);
+                    push_flat(&mut verts, &mut idxs, raw, meta, [(ox + x) as f32, y as f32, (oz + z) as f32], br(l), lm(l.0, l.1));
+                    continue;
+                }
                 if cross_shape(raw).is_some() {
                     let l = lv(x, y, z);
                     let (lit, lmv) = (br(l), lm(l.0, l.1));
@@ -296,7 +336,7 @@ pub fn build_split_with(smooth: bool, blocks: &[u8], data: &Nibbles, nb_data: [&
                         let base = verts.len() as u32 / VF as u32;
                         for (k, (px, pz, py)) in [(a.0, a.1, 0.0), (b.0, b.1, 0.0), (b.0, b.1, 1.0), (a.0, a.1, 1.0)].into_iter().enumerate() {
                             let (au, av) = atlas::face_uv(raw, meta, 2, (k == 1 || k == 2) as u8 as f32, (k >= 2) as u8 as f32);
-                            verts.extend_from_slice(&[cx + px, y as f32 + py, cz + pz, au, av, lit, lmv]);
+                            verts.extend_from_slice(&[cx + px, y as f32 + py, cz + pz, au, av, lit, lmv, tint_of(tints, raw, meta, (x * 16 + z) as usize)]);
                         }
                         // Both windings: the pipeline culls back faces.
                         idxs.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3, base, base + 2, base + 1, base, base + 3, base + 2]);
@@ -329,7 +369,14 @@ pub fn build_split_with(smooth: bool, blocks: &[u8], data: &Nibbles, nb_data: [&
                     }
                     let base = verts.len() as u32 / VF as u32;
                     // A chest's tile depends on its neighbours (`BlockChest.getBlockTexture`), `face_i` as the Java's side.
-                    let chest_tile = (blk == chest::ID).then(|| chest::tile(&rid, (x, y, z), [5, 4, 1, 0, 3, 2][face_i]));
+                    let side_of_cell = face_i != 2 && face_i != 3;
+                    // `BlockGrass.getBlockTexture`: snow on top turns the side into tile 68 (and drops the overlay).
+                    let snowy = blk == 2 && side_of_cell && matches!(rid(x, y + 1, z), 78 | 80);
+                    let chest_tile = if blk == chest::ID { Some(chest::tile(&rid, (x, y, z), [5, 4, 1, 0, 3, 2][face_i])) } else if snowy { Some(68) } else { None };
+                    // Grass tints its top only (the side's tint is on the overlay quad); every other tinted block all its faces.
+                    let tint = if blk == 2 && face_i != 2 { WHITE } else { tint_of(tints, blk, meta, (x * 16 + z) as usize) };
+                    // Doors draw some faces mirrored (negative tile in the Java).
+                    let flip = matches!(blk, 64 | 71) && atlas::door_face(blk, meta, [5, 4, 1, 0, 3, 2][face_i]).1;
                     let shade = match face_i {
                         2 => 1.0, // +Y top
                         3 => 0.5, // -Y bottom
@@ -359,6 +406,7 @@ pub fn build_split_with(smooth: bool, blocks: &[u8], data: &Nibbles, nb_data: [&
                         }
                         // The tile window of the box's face (`renderEastFace`...), the fluid's v is its height.
                         let (u, v) = window(face, p);
+                        let u = if flip { 1.0 - u } else { u };
                         let (au, av) = match flow {
                             Some(a) if face_i == 2 => flow_uv(blk, a, corner),
                             _ => match chest_tile {
@@ -381,7 +429,7 @@ pub fn build_split_with(smooth: bool, blocks: &[u8], data: &Nibbles, nb_data: [&
                         };
                         vls[k] = vl;
                         k += 1;
-                        verts.extend_from_slice(&[p[0] + (ox + x) as f32, p[1] + y as f32, p[2] + (oz + z) as f32, au, av, vl, vlm]);
+                        verts.extend_from_slice(&[p[0] + (ox + x) as f32, p[1] + y as f32, p[2] + (oz + z) as f32, au, av, vl, vlm, tint]);
                     }
                     let list = if matches!(blk, 8 | 9) { &mut widxs } else { &mut idxs };
                     // Smooth faces split along the diagonal that joins the brighter pair, so a dark corner does not smear across the quad.
@@ -389,6 +437,22 @@ pub fn build_split_with(smooth: bool, blocks: &[u8], data: &Nibbles, nb_data: [&
                         list.extend_from_slice(&[base + 1, base + 2, base + 3, base + 1, base + 3, base]);
                     } else {
                         list.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+                    }
+                    // `renderBlockFluids`-style second pass of the grass side (`RenderBlocks`, tile 38 x grass colour): a cut-out quad\n                    // 2 mm off the face. ponytail: not a depth-biased pass, so it can shimmer at extreme distance.
+                    if blk == 2 && side_of_cell && !snowy {
+                        let b2 = verts.len() as u32 / VF as u32;
+                        for (k, corner) in face.corners.iter().enumerate() {
+                            let mut v: [f32; VF] = verts[(base as usize + k) * VF..(base as usize + k + 1) * VF].try_into().unwrap();
+                            let (cu, cv) = window(face, *corner);
+                            let (au, av) = atlas::terrain_uv(38, cu, cv);
+                            v[0] += dx as f32 * 0.002;
+                            v[2] += dz as f32 * 0.002;
+                            v[3] = au;
+                            v[4] = av;
+                            v[7] = tints.grass[(x * 16 + z) as usize];
+                            verts.extend_from_slice(&v);
+                        }
+                        idxs.extend_from_slice(&[b2, b2 + 1, b2 + 2, b2, b2 + 2, b2 + 3]);
                     }
                 }
                 }
@@ -406,8 +470,8 @@ pub fn push_box(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, min: [f32; 3], max: [
     for face in &FACES {
         let base = verts.len() as u32 / VF as u32;
         for (c, uv) in face.corners.iter().zip(face.uv.iter()) {
-            let (au, av) = atlas::atlas_uv(tile, uv[0], uv[1]);
-            verts.extend_from_slice(&[min[0] + c[0] * (max[0] - min[0]), min[1] + c[1] * (max[1] - min[1]), min[2] + c[2] * (max[2] - min[2]), au, av, light, lmv]);
+            let (au, av) = if tile >= atlas::ITEM_TILE0 { atlas::item_uv((tile - atlas::ITEM_TILE0) as u8, uv[0], uv[1]) } else { atlas::atlas_uv(tile, uv[0], uv[1]) };
+            verts.extend_from_slice(&[min[0] + c[0] * (max[0] - min[0]), min[1] + c[1] * (max[1] - min[1]), min[2] + c[2] * (max[2] - min[2]), au, av, light, lmv, WHITE]);
         }
         idxs.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
     }
@@ -458,7 +522,7 @@ pub fn push_crops(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, cell: [f32; 3], met
         let base = verts.len() as u32 / VF as u32;
         for (px, pz, py, u, v) in [(x0, z0, 1.0, 0.0, 0.0), (x0, z0, 0.0, 0.0, 1.0), (x1, z1, 0.0, 1.0, 1.0), (x1, z1, 1.0, 1.0, 0.0)] {
             let (au, av) = atlas::face_uv(59, meta, 2, u, v);
-            verts.extend_from_slice(&[x + px, y + py, z + pz, au, av, light, lmv]);
+            verts.extend_from_slice(&[x + px, y + py, z + pz, au, av, light, lmv, WHITE]);
         }
         idxs.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3, base, base + 2, base + 1, base, base + 3, base + 2]);
     }
@@ -491,9 +555,70 @@ pub fn push_torch(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, cell: [f32; 3], met
         let base = verts.len() as u32 / VF as u32;
         for p in q {
             let (u, v) = atlas::terrain_uv(80, p[3], p[4]);
-            verts.extend_from_slice(&[p[0], p[1], p[2], u, v, 1.0, lm(15, 15)]);
+            verts.extend_from_slice(&[p[0], p[1], p[2], u, v, 1.0, lm(15, 15), WHITE]);
         }
         idxs.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3, base, base + 2, base + 1, base, base + 3, base + 2]);
+    }
+}
+
+/// `RenderBlocks.renderBlockMinecartTrack` (rails 66, powered 27, detector 28) and `renderBlockLadder` (65): one cut-out quad, seen from\n/// both sides. A rail lies 1/16 up, ascending shapes (metadata 2..=5) lift one edge a block; curves (6..=9) use the tile above.\n/// A ladder sits 0.05 inside the wall it is on (metadata 2..=5 = wall on +Z, -Z, +X, -X).
+pub fn push_flat(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, id: u8, meta: u8, [x, y, z]: [f32; 3], light: f32, lmv: f32) {
+    // (x, y, z, u, v) with u, v in the tile, v up.
+    let q: [[f32; 5]; 4] = if id == 65 {
+        match meta {
+            5 => [[0.05, 1.0, 1.0, 0.0, 1.0], [0.05, 0.0, 1.0, 0.0, 0.0], [0.05, 0.0, 0.0, 1.0, 0.0], [0.05, 1.0, 0.0, 1.0, 1.0]],
+            4 => [[0.95, 0.0, 1.0, 1.0, 0.0], [0.95, 1.0, 1.0, 1.0, 1.0], [0.95, 1.0, 0.0, 0.0, 1.0], [0.95, 0.0, 0.0, 0.0, 0.0]],
+            3 => [[1.0, 0.0, 0.05, 1.0, 0.0], [1.0, 1.0, 0.05, 1.0, 1.0], [0.0, 1.0, 0.05, 0.0, 1.0], [0.0, 0.0, 0.05, 0.0, 0.0]],
+            2 => [[1.0, 1.0, 0.95, 0.0, 1.0], [1.0, 0.0, 0.95, 0.0, 0.0], [0.0, 0.0, 0.95, 1.0, 0.0], [0.0, 1.0, 0.95, 1.0, 1.0]],
+            _ => return, // a ladder with no wall is not drawn (the Java draws nothing either)
+        }
+    } else {
+        let m = if id == 66 { meta } else { meta & 7 }; // a powered / detector rail keeps its shape in the low 3 bits
+        // corners 20..23 of the Java as (x, z), then the height lifts
+        let (xs, zs) = match m {
+            1 | 2 | 3 | 7 => ([1.0, 0.0, 0.0, 1.0], [1.0, 1.0, 0.0, 0.0]),
+            8 => ([0.0, 0.0, 1.0, 1.0], [1.0, 0.0, 0.0, 1.0]),
+            9 => ([0.0, 1.0, 1.0, 0.0], [0.0, 0.0, 1.0, 1.0]),
+            _ => ([1.0, 1.0, 0.0, 0.0], [0.0, 1.0, 1.0, 0.0]),
+        };
+        let mut h = [1.0 / 16.0; 4];
+        match m {
+            2 | 4 => { h[0] += 1.0; h[3] += 1.0; }
+            3 | 5 => { h[1] += 1.0; h[2] += 1.0; }
+            _ => {}
+        }
+        let uv = [[1.0, 1.0], [1.0, 0.0], [0.0, 0.0], [0.0, 1.0]];
+        std::array::from_fn(|i| [xs[i], h[i], zs[i], uv[i][0], uv[i][1]])
+    };
+    let tile = match (id, meta) {
+        (65, _) => 83,
+        (66, 6..) => 112,
+        (66, _) => 128,
+        (27, m) => if m & 8 == 0 { 163 } else { 179 },
+        _ => 195,
+    };
+    let base = verts.len() as u32 / VF as u32;
+    for p in q {
+        let (u, v) = atlas::terrain_uv(tile, p[3], p[4]);
+        verts.extend_from_slice(&[x + p[0], y + p[1], z + p[2], u, v, light, lmv, WHITE]);
+    }
+    idxs.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3, base, base + 2, base + 1, base, base + 3, base + 2]);
+}
+
+/// Fire (`BlockFire`, render type 3), simplified: the two flame tiles (31, 47: animated, `render::anim`) as crossed quads, one
+/// pair a little narrower than the other. Full bright (fire emits light), cut out by the tile's alpha. ponytail: vanilla also
+/// draws the side flames on a wall a flammable block stands against and the top flames on a flammable roof; this is the
+/// standing-fire look on every cell.
+pub fn push_fire(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, [x, y, z]: [f32; 3]) {
+    for (tile, half) in [(31u8, 0.45f32), (47, 0.35)] {
+        for ((x0, z0), (x1, z1)) in [((-half, -half), (half, half)), ((-half, half), (half, -half))] {
+            let base = verts.len() as u32 / VF as u32;
+            for (px, pz, py, u, v) in [(x0, z0, 0.0, 0.0, 0.0), (x1, z1, 0.0, 1.0, 0.0), (x1, z1, 1.0, 1.0, 1.0), (x0, z0, 1.0, 0.0, 1.0)] {
+                let (au, av) = atlas::terrain_uv(tile, u, v);
+                verts.extend_from_slice(&[x + 0.5 + px, y + py, z + 0.5 + pz, au, av, 1.0, lm(15, 15), WHITE]);
+            }
+            idxs.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3, base, base + 2, base + 1, base, base + 3, base + 2]);
+        }
     }
 }
 
@@ -765,5 +890,21 @@ mod tests {
         assert!(v.chunks(6).any(|p| (p[0] - 6.0).abs() < 1e-5), "the bar of the first fence reaches the second");
         let (s, b) = ([0.0, 0.0, 0.0, 1.0, 1.0, 1.0f32], shapes(53, 1, &|_, _| false));
         assert!(b.1 == 2 && b.0[0] != s && !opaque(53) && !opaque(85) && !opaque(59));
+    }
+
+    /// Grass keeps its side tile and gets a tinted cut-out overlay quad on each side (4 more quads), its top carries the column's
+    /// grass colour; a rail is one flat quad drawn from both sides.
+    #[test]
+    fn grass_overlay_tint_and_rail_quad() {
+        let (mut c, z, a) = (vec![0u8; VOLUME], vec![0u8; VOLUME], vec![0xFFu8; VOLUME]);
+        c[idx(5, 64, 5)] = 2;
+        c[idx(9, 64, 9)] = 66;
+        let mut t = Tints::white();
+        t.grass[5 * 16 + 5] = 0x112233 as f32;
+        let e = Nibbles::new();
+        let (v, i, _) = build_split_tinted(false, &c, &e, [&e; 4], &a, [&z[..]; 4], [&a[..]; 4], 0, 0, 0, &t);
+        assert_eq!(v.len() / (4 * VF), 6 + 4 + 1);
+        assert_eq!(i.len(), (6 + 4) * 6 + 12);
+        assert_eq!(v.chunks(VF).filter(|q| q[7] == 0x112233 as f32).count(), 4 + 16); // top face + 4 overlay quads
     }
 }

@@ -64,7 +64,15 @@ pub const TILES_W: usize = 16;
 pub const TILES_H: usize = 32;
 /// The whole texture: `terrain.png` (256 px) with the strip under it.
 pub const ATLAS_W: usize = 256;
-pub const ATLAS_H: usize = 256 + TILES_H;
+/// Rows: `terrain.png`, the flat strip, then `gui/items.png` (`ITEMS_Y`).
+pub const ITEMS_Y: usize = 256 + TILES_H;
+pub const ATLAS_H: usize = ITEMS_Y + 256;
+/// Mip levels of the atlas (a 16 px tile has 16, 8, 4 px: three levels never mix two tiles at the middle of a tile).
+pub const MIPS: u32 = 3;
+/// `gui/items.png` as RGBA (256 x 256, 16 x 16 px sprites): `Item.iconIndex` picks the sprite (`item_icon`).
+pub const ITEMS: &[u8] = include_bytes!("../../assets/items.rgba");
+/// A mesh tile number from here up is an items.png sprite (`ITEM_TILE0 + icon`), see `item_uv`.
+pub const ITEM_TILE0: u16 = 1000;
 const TERRAIN: &[u8] = include_bytes!("../../assets/terrain.rgba");
 
 /// `EntitySheep.fleeceColorTable`: the wool colours, indexed by the cloth metadata (0 white .. 15 black).
@@ -114,7 +122,27 @@ pub fn atlas_rgba() -> Vec<u8> {
             v.resize(v.len() + (ATLAS_W - TILES_W) * 4, 0);
         }
     }
+    v.extend_from_slice(ITEMS);
     v
+}
+
+/// Level `l` (1, 2) of the atlas from level 0: 2x2 box filter per level, colour weighted by alpha so a cut-out's clear texels
+/// do not darken its edge (the alpha itself is averaged: distant plants thin out a little).
+pub fn mip(src: &[u8], w: usize, h: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(w / 2 * (h / 2) * 4);
+    for y in 0..h / 2 {
+        for x in 0..w / 2 {
+            let px = |dx: usize, dy: usize| &src[((2 * y + dy) * w + 2 * x + dx) * 4..][..4];
+            let (mut c, mut a) = ([0u32; 3], 0u32);
+            for p in [px(0, 0), px(1, 0), px(0, 1), px(1, 1)] {
+                (0..3).for_each(|i| c[i] += p[i] as u32 * p[3] as u32);
+                a += p[3] as u32;
+            }
+            let d = a.max(1);
+            out.extend([(c[0] / d) as u8, (c[1] / d) as u8, (c[2] / d) as u8, (a / 4) as u8]);
+        }
+    }
+    out
 }
 
 /// Atlas UV of a flat-colour tile: the centre of its strip texel (Nearest sampler), so every UV in the tile samples one colour.
@@ -127,6 +155,50 @@ pub fn atlas_uv(tile: u16, _u: f32, _v: f32) -> (f32, f32) {
 pub fn terrain_uv(t: u8, u: f32, v: f32) -> (f32, f32) {
     let (x, y) = ((t % 16) as f32 * 16.0 + 0.02 + u * 15.96, (t / 16) as f32 * 16.0 + 0.02 + (1.0 - v) * 15.96);
     (x / ATLAS_W as f32, y / ATLAS_H as f32)
+}
+
+/// Atlas UV of items.png sprite `icon` at (u, v) in 0..1, v up (same inset as `terrain_uv`).
+pub fn item_uv(icon: u8, u: f32, v: f32) -> (f32, f32) {
+    let (x, y) = ((icon % 16) as f32 * 16.0 + 0.02 + u * 15.96, ITEMS_Y as f32 + (icon / 16) as f32 * 16.0 + 0.02 + (1.0 - v) * 15.96);
+    (x / ATLAS_W as f32, y / ATLAS_H as f32)
+}
+
+/// `Item.iconIndex` of an item id (256 and up), `None` for blocks and items the Java table does not have.
+pub fn item_icon(id: u16) -> Option<u8> {
+    super::icons::ICONS.binary_search_by_key(&id, |&(i, _)| i).ok().map(|k| super::icons::ICONS[k].1)
+}
+
+/// `BlockDoor.getBlockTextureFromSideAndMetadata`: (tile, mirrored). The Java returns the tile negated for a mirrored face; the top
+/// half (metadata bit 8) is the tile 16 lower (97 wood / 98 iron: 81 / 82 on top).
+pub const fn door_face(id: u8, meta: u8, side: u8) -> (u8, bool) {
+    let base = if id == 71 { 98 } else { 97 };
+    if side <= 1 {
+        return (base, false);
+    }
+    let state = if meta & 4 == 0 { meta.wrapping_sub(1) & 3 } else { meta & 3 };
+    if ((state == 0 || state == 2) as u8 ^ (side <= 3) as u8) != 0 {
+        return (base, false);
+    }
+    let n = state / 2 + ((side & 1) ^ state) + (meta & 4) / 4;
+    (base - (meta & 8) * 2, n & 1 != 0)
+}
+
+/// `BlockBed.getBlockTextureFromSideAndMetadata` with `ModelBed.bedDirection`: the head (metadata bit 8 clear) and the foot.
+pub const fn bed_tile(meta: u8, side: u8) -> u8 {
+    const DIR: [[u8; 6]; 4] = [[1, 0, 3, 2, 5, 4], [1, 0, 5, 4, 2, 3], [1, 0, 2, 3, 4, 5], [1, 0, 4, 5, 3, 2]];
+    if side == 0 {
+        return 4;
+    }
+    let d = DIR[(meta & 3) as usize][side as usize];
+    if meta & 8 != 0 {
+        if d == 2 { 152 } else if d == 4 || d == 5 { 151 } else { 135 }
+    } else if d == 3 {
+        149
+    } else if d == 4 || d == 5 {
+        150
+    } else {
+        134
+    }
 }
 
 /// Atlas UV of the pixel (`px`, `py`) (0..16, y down like the png) of terrain tile `t`.
@@ -199,6 +271,8 @@ pub const fn terrain_tile(id: u8, meta: u8, side: u8) -> Option<u8> {
         87 => 103,
         88 => 104,
         89 => 105,
+        26 => bed_tile(meta, side),
+        64 | 71 => door_face(id, meta, side).0,
         _ => return None,
     })
 }
@@ -238,6 +312,10 @@ mod tests {
         assert_eq!((terrain_tile(17, 0, 1), terrain_tile(17, 0, 3), terrain_tile(17, 2, 3)), (Some(21), Some(20), Some(117)));
         assert_eq!((terrain_tile(35, 0, 2), terrain_tile(35, 14, 2), terrain_tile(35, 15, 2)), (Some(64), Some(129), Some(113)));
         assert_eq!((terrain_tile(61, 0, 3), terrain_tile(62, 0, 3), terrain_tile(86, 0, 3), terrain_tile(91, 0, 3)), (Some(44), Some(61), Some(119), Some(120)));
+        // doors: the top half is the tile 16 lower; a bed is planks underneath; the generated icon table is sorted
+        assert_eq!((door_face(64, 1, 2).0, door_face(64, 9, 2).0, door_face(71, 1, 2).0), (97, 81, 98));
+        assert_eq!((bed_tile(0, 0), bed_tile(0, 1), bed_tile(8, 1)), (4, 134, 135));
+        assert!(super::super::icons::ICONS.windows(2).all(|w| w[0].0 < w[1].0) && item_icon(256) == Some(82) && item_icon(1) == None);
         assert_eq!(terrain_tile(255, 0, 0), None);
         // Terrain UVs stay inside their own tile and the flat strip stays under the png.
         let (u, v) = terrain_uv(255, 1.0, 0.0);

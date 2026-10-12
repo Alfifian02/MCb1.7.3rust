@@ -141,6 +141,9 @@ struct App {
     /// Furnace tile entities by block position (created on first use), and the time left over from the last 20 Hz tick.
     furnaces: HashMap<(i32, i32, i32), Furnace>,
     furn_acc: f32,
+    /// Animated water / lava / fire tiles (`render::anim`) and the time left over from their last 20 Hz tick.
+    anim: crate::render::anim::Anim,
+    anim_acc: f32,
     /// CPU seconds spent in `render` (without the swap-chain wait) since the last FPS log line.
     cpu_acc: f32,
     /// Chest tile entities by block position (created on first open, or by a dungeon's populate).
@@ -255,6 +258,8 @@ impl App {
             furnaces: HashMap::new(),
             chests: HashMap::new(),
             furn_acc: 0.0,
+            anim: crate::render::anim::Anim::new(),
+            anim_acc: 0.0,
             cpu_acc: 0.0,
             gesture: None,
             vitals: Vitals::default(),
@@ -435,6 +440,12 @@ impl App {
         }
         // Furnaces burn on the 20 Hz tick, open or not, but only in loaded chunks (vanilla ticks loaded tile entities).
         // The block swaps between unlit 61 and lit 62 when the fire goes on or off.
+        // `TextureFX.onTick` every 20 Hz tick (at most 2 per frame: a stall does not queue a burst of texture uploads).
+        self.anim_acc = (self.anim_acc + dt).min(2.0 * dig::TICK);
+        while self.anim_acc >= dig::TICK {
+            self.anim_acc -= dig::TICK;
+            self.pipe.animate(&self.gpu.queue, &self.anim.tick());
+        }
         self.furn_acc += dt;
         while self.furn_acc >= dig::TICK {
             self.furn_acc -= dig::TICK;
@@ -1317,7 +1328,10 @@ fn push_stack(v: &mut Vec<HudVertex>, (hx, hy, hw, hh): (f32, f32, f32, f32), s:
         [c[0] as f32 / 255.0, c[1] as f32 / 255.0, c[2] as f32 / 255.0, 1.0]
     };
     let (ix, iy, iw, ih) = (hx + pad, hy + pad, hw - pad * 2.0, hh - pad * 2.0);
-    match craft::tool(s.id) {
+    // Items are their `gui/items.png` sprite (tools and shears included); blocks and anything without an icon keep the flat shapes.
+    match (s.id >= 256).then(|| atlas::item_icon(s.id)).flatten() {
+    Some(icon) => HudPipeline::push_sprite(v, hx + pad * 0.5, hy + pad * 0.5, hw - pad, hh - pad, icon),
+    None => match craft::tool(s.id) {
         None if s.id == craft::SHEARS => {
             // Two blades over a grip.
             let c = rgb(items::tile(s.id).into());
@@ -1340,7 +1354,7 @@ fn push_stack(v: &mut Vec<HudVertex>, (hx, hy, hw, hh): (f32, f32, f32, f32), s:
                 craft::Kind::Shovel => HudPipeline::push_quad(v, ix + iw * 0.28, iy, iw * 0.44, ih * 0.32, head),
             }
         }
-    }
+    }}
     if let Some(max) = craft::max_damage(s.id).filter(|_| s.damage > 0) {
         let left = (1.0 - s.damage as f32 / max as f32).clamp(0.0, 1.0);
         let (by, bh) = (hy + hh - pad * 0.5 - (hh * 0.06).max(2.0), (hh * 0.06).max(2.0));

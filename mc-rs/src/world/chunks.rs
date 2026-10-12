@@ -70,6 +70,19 @@ const MESH_PER_FRAME: usize = 2;
 const LOADS_PER_FRAME: usize = 8;
 
 /// Chunk coordinate of a world-space coordinate (floor division by 16).
+/// The grass and foliage colour of every column of chunk (cx, cz) (`BlockGrass.colorMultiplier` and friends read the climate of the
+/// column itself, no blending). ponytail: the climate noise is sampled again for every (re)mesh; cache it per chunk if remeshing shows up in a profile.
+fn biome_tints(cm: &mut WorldChunkManager, cx: i32, cz: i32) -> mesh::Tints {
+    cm.load_block_generator_data(cx * 16, cz * 16, 16, 16);
+    let mut t = mesh::Tints::white();
+    for i in 0..256 {
+        let (temp, humid) = (cm.temperature[i], cm.humidity[i]);
+        t.grass[i] = crate::world::climate::grass(temp, humid) as f32;
+        t.foliage[i] = crate::world::climate::foliage(temp, humid) as f32;
+    }
+    t
+}
+
 pub fn chunk_coord(v: f32) -> i32 {
     (v.floor() as i32) >> 4
 }
@@ -546,7 +559,14 @@ impl ChunkManager {
     /// one block taller at both ends. Empty sections are skipped, touching ones are one range, so a chunk is mostly one draw.
     /// `water` picks the water faces (index buffer passed to `draw`) instead of the opaque ones.
     pub fn draw_ranges(&self, eye: Vec3, shape: Shape, rh: f32, rv: f32, water: bool, visible: impl Fn(Vec3, Vec3) -> bool, mut draw: impl FnMut(&Mesh, &wgpu::Buffer, std::ops::Range<u32>)) {
-        for (&(x, z), e) in &self.chunks {
+        // Translucent water blends over what is behind it, so its chunks go far to near (`WorldRenderer` sorts chunks too).
+        // ponytail: whole chunks only, the faces inside one chunk keep map order; upgrade = sort the sections / faces too.
+        let mut order: Vec<_> = self.chunks.iter().collect();
+        if water {
+            let d2 = |e: &(&Key, &_)| ((e.0 .0 * 16 + 8) as f32 - eye.x).powi(2) + ((e.0 .1 * 16 + 8) as f32 - eye.z).powi(2);
+            order.sort_by(|a, b| d2(b).total_cmp(&d2(a)));
+        }
+        for (&(x, z), e) in order {
             let Some(m) = e.mesh.as_ref() else { continue };
             let (ibuf, starts) = match (&m.water, water) {
                 (Some((b, s)), true) => (b, s),
@@ -681,7 +701,7 @@ impl ChunkManager {
             let (x, z) = (cx + dx, cz + dz);
             let c = &self.chunks;
             let built = match (c.get(&(x, z)), c.get(&(x + 1, z)), c.get(&(x - 1, z)), c.get(&(x, z + 1)), c.get(&(x, z - 1))) {
-                (Some(me), Some(px), Some(nx), Some(pz), Some(nz)) if !me.meshed && me.lit && self.is_final(x, z) => Some(mesh::build_split_with(
+                (Some(me), Some(px), Some(nx), Some(pz), Some(nz)) if !me.meshed && me.lit && self.is_final(x, z) => Some(mesh::build_split_tinted(
                     crate::LEGACY,
                     &me.blocks,
                     &me.data,
@@ -692,6 +712,7 @@ impl ChunkManager {
                     self.sky_sub,
                     x * 16,
                     z * 16,
+                    &biome_tints(&mut self.cm, x, z),
                 )),
                 _ => None,
             };

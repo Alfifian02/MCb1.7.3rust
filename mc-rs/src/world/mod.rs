@@ -1,4 +1,5 @@
 pub mod chunk;
+pub mod climate;
 pub mod chunks;
 pub mod physics;
 pub mod biome;

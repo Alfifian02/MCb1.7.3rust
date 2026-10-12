@@ -3,6 +3,7 @@
 //! ponytail: no spin (needs rotated boxes), flat full brightness, no 2nd/3rd copy for big stacks; M14 draws
 //! real item sprites.
 
+use crate::render::atlas;
 use crate::render::mesh::{push_box, VF};
 use glam::{Mat4, Vec3};
 
@@ -12,8 +13,8 @@ use crate::world::ticks::{Falling, MAX_FALLING};
 
 /// 24 vertices x 7 floats (`mesh::VF`) per cube, 36 indices per cube.
 /// A mob is at most 12 boxes (spider 11), an arrow one, a falling block one.
-const BOXES: usize = MAX_ITEMS + MAX_MOBS * 12 + MAX_ARROWS + MAX_FALLING;
-const VERTEX_BYTES: u64 = (BOXES * 24 * 7 * 4) as u64;
+const BOXES: usize = MAX_ITEMS * 2 + MAX_MOBS * 12 + MAX_ARROWS + MAX_FALLING;
+const VERTEX_BYTES: u64 = (BOXES * 24 * crate::render::mesh::VF * 4) as u64;
 const INDEX_BYTES: u64 = (BOXES * 36 * 4) as u64;
 
 pub struct ItemMesh {
@@ -46,7 +47,15 @@ fn geometry(drops: &Drops, mobs: &Mobs, falling: &[Falling]) -> (Vec<f32>, Vec<u
         let mut c = e.prev.lerp(e.pos, a);
         c.y += ((e.age as f32 + a) / 10.0).sin() * 0.1 + 0.1;
         let h = 0.125;
-        push_box(&mut verts, &mut idxs, [c.x - h, c.y - h, c.z - h], [c.x + h, c.y + h, c.z + h], stack_tile(e.stack), 1.0);
+        // An item (not a block) is its `gui/items.png` sprite, two thin crossed slabs so it shows from every side; the alpha cuts it out.
+        match Some(e.stack.id).filter(|&i| i >= 256).and_then(atlas::item_icon) {
+            Some(icon) => {
+                let (t, w, d) = (atlas::ITEM_TILE0 + icon as u16, 0.18, 0.015);
+                push_box(&mut verts, &mut idxs, [c.x - w, c.y - w, c.z - d], [c.x + w, c.y + w, c.z + d], t, 1.0);
+                push_box(&mut verts, &mut idxs, [c.x - d, c.y - w, c.z - w], [c.x + d, c.y + w, c.z + w], t, 1.0);
+            }
+            None => push_box(&mut verts, &mut idxs, [c.x - h, c.y - h, c.z - h], [c.x + h, c.y + h, c.z + h], stack_tile(e.stack), 1.0),
+        }
     }
     for m in &mobs.list {
         push_mob(&mut verts, &mut idxs, m);

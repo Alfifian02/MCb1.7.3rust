@@ -19,6 +19,8 @@ pub struct Vertex {
     pub light: f32,
     /// `sky * 16 + block` light levels, see `render::mesh::lm`.
     pub lm: f32,
+    /// Packed sRGB colour the texel is multiplied by (`render::mesh::WHITE` = none).
+    pub tint: f32,
 }
 
 impl Vertex {
@@ -31,6 +33,7 @@ impl Vertex {
             wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 12, shader_location: 1 },
             wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32, offset: 20, shader_location: 2 },
             wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32, offset: 24, shader_location: 3 },
+            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32, offset: 28, shader_location: 4 },
         ],
         }
     }
@@ -121,11 +124,15 @@ struct VsOut {
     @location(4) sk: f32, // sky light in quarter levels, block light in half levels, shade * ambient occlusion (-1: flat face, shade from its normal)
     @location(5) bk: f32,
     @location(6) ao: f32,
+    @location(7) tint: vec3<f32>, // linear colour of the biome / leaf tint
 };
 
 @vertex
-fn vs_main(@location(0) vpos: vec3<f32>, @location(1) vuv: vec2<f32>, @location(2) vlight: f32, @location(3) vlm: f32) -> VsOut {
+fn vs_main(@location(0) vpos: vec3<f32>, @location(1) vuv: vec2<f32>, @location(2) vlight: f32, @location(3) vlm: f32, @location(4) vtint: f32) -> VsOut {
     var o: VsOut;
+    let tp = u32(vtint + 0.5);
+    // sRGB bytes -> linear: texel x tint is the same product in either space (the Java multiplies bytes)
+    o.tint = pow(vec3<f32>(f32((tp >> 16u) & 255u), f32((tp >> 8u) & 255u), f32(tp & 255u)) / 255.0, vec3<f32>(2.2));
     o.pos = u.proj * u.view * vec4<f32>(vpos, 1.0);
     o.uv = vuv;
     o.light = vlight;
@@ -165,6 +172,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let dy = dpdy(in.wp);
     let c = textureSample(tex, samp, in.uv);
     if c.a < 0.5 { discard; } // cut-out textures: plants, glass
+    let rgb = c.rgb * in.tint;
     if LEGACY {
         // Face shade and ambient occlusion x the sky/block light (`photon_light`'s legacy branch) x the fog.
         // Smooth faces carry shade * ao already (`in.ao >= 0`); only the flat ones need their face from the derivatives.
@@ -176,12 +184,12 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         }
         // Lit right here (forward), straight into the scene: no G-buffer, no depth copy, no full-screen pass that reads them back.
         // Same maths the deferred pass did (`photon_light` legacy branch, face 6 = shade already in the albedo, then the fog).
-        let albedo = to_working(c.rgb * pow(max(shade, 0.0), 2.2));
+        let albedo = to_working(rgb * pow(max(shade, 0.0), 2.2));
         let sky = clamp(floor(in.sk + 0.5), 0.0, 60.0) / 60.0;
         let bl = clamp(floor(in.bk + 0.5), 0.0, 30.0) / 30.0;
         return vec4<f32>(apply_fog(photon_light(albedo, 6u, sky, bl, 0.0), length(in.wp - u.eye.xyz)), 1.0);
     }
-    return vec4<f32>(c.rgb, f32(face_index(in.wp, dx, dy)) * 256.0 + in.lm);
+    return vec4<f32>(rgb, f32(face_index(in.wp, dx, dy)) * 256.0 + in.lm);
 }
 
 // Translucent water, forward lit with the same `photon_light` (no shadow). `mesh::build_split` packs the water column under
@@ -220,7 +228,7 @@ impl ChunkPipeline {
         let atlas_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("atlas"),
             size: wgpu::Extent3d { width: atlas::ATLAS_W as u32, height: atlas::ATLAS_H as u32, depth_or_array_layers: 1 },
-            mip_level_count: 1,
+            mip_level_count: atlas::MIPS,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8UnormSrgb,
@@ -234,7 +242,9 @@ impl ChunkPipeline {
             address_mode_u: wgpu::AddressMode::Repeat,
             address_mode_v: wgpu::AddressMode::Repeat,
             mag_filter: wgpu::FilterMode::Nearest,
-            min_filter: wgpu::FilterMode::Nearest,
+            // Near texels stay crisp (Nearest), distant ones blend between mip levels instead of shimmering.
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
 
@@ -502,22 +512,40 @@ impl ChunkPipeline {
     }
 
     pub fn upload_atlas(&self, queue: &Queue) {
-        let rgba = atlas::atlas_rgba();
+        let mut level = atlas::atlas_rgba();
+        let (mut w, mut h) = (atlas::ATLAS_W, atlas::ATLAS_H);
+        for l in 0..atlas::MIPS {
+            self.write_rgba(queue, l, [0, 0], [w as u32, h as u32], &level);
+            if l + 1 < atlas::MIPS {
+                level = atlas::mip(&level, w, h);
+                (w, h) = (w / 2, h / 2);
+            }
+        }
+    }
+
+    fn write_rgba(&self, queue: &Queue, level: u32, origin: [u32; 2], size: [u32; 2], rgba: &[u8]) {
         queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &self.atlas_tex,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &rgba,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(atlas::ATLAS_W as u32 * 4),
-                rows_per_image: Some(atlas::ATLAS_H as u32),
-            },
-            wgpu::Extent3d { width: atlas::ATLAS_W as u32, height: atlas::ATLAS_H as u32, depth_or_array_layers: 1 },
+            wgpu::TexelCopyTextureInfo { texture: &self.atlas_tex, mip_level: level, origin: wgpu::Origin3d { x: origin[0], y: origin[1], z: 0 }, aspect: wgpu::TextureAspect::All },
+            rgba,
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(size[0] * 4), rows_per_image: Some(size[1]) },
+            wgpu::Extent3d { width: size[0], height: size[1], depth_or_array_layers: 1 },
         );
+    }
+
+    /// One tick of the animated tiles (`render::anim`): each 16 x 16 picture over its atlas tile, and its 8 x 8 / 4 x 4 mips (a
+    /// tile is aligned to every level, so the mips never touch a neighbour).
+    pub fn animate(&self, queue: &Queue, tiles: &[(u8, crate::render::anim::Tile)]) {
+        for (t, px) in tiles {
+            let (x, y) = ((*t as u32 % 16) * 16, (*t as u32 / 16) * 16);
+            let (mut level, mut n) = (px.to_vec(), 16usize);
+            for l in 0..atlas::MIPS {
+                self.write_rgba(queue, l, [x >> l, y >> l], [n as u32, n as u32], &level);
+                if l + 1 < atlas::MIPS {
+                    level = atlas::mip(&level, n, n);
+                    n /= 2;
+                }
+            }
+        }
     }
 }
 

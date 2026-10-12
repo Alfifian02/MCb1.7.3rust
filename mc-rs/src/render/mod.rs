@@ -1,4 +1,6 @@
 pub mod atlas;
+pub mod anim;
+pub mod icons;
 pub mod camera;
 pub mod mesh;
 pub mod hud;

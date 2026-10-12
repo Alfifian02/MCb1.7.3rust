@@ -97,6 +97,24 @@ pub fn box_bounds(id: u8, meta: u8) -> Option<[f32; 6]> {
         60 => [0.0, 0.0, 0.0, 1.0, 15.0 / 16.0, 1.0],                      // farmland
         78 => [0.0, 0.0, 0.0, 1.0, 2.0 * (1 + (meta & 7)) as f32 / 16.0, 1.0], // snow layer
         81 => [0.0, 0.0, 0.0, 1.0, 1.0, 1.0],                              // cactus
+        26 => [0.0, 0.0, 0.0, 1.0, 9.0 / 16.0, 1.0],                       // bed (`BlockBed`)
+        // `BlockDoor.setDoorRotation` (3/16 thick, one block high per half) from `getState`
+        64 | 71 => match if meta & 4 == 0 { meta.wrapping_sub(1) & 3 } else { meta & 3 } {
+            0 => [0.0, 0.0, 0.0, 1.0, 1.0, 3.0 / 16.0],
+            1 => [13.0 / 16.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+            2 => [0.0, 0.0, 13.0 / 16.0, 1.0, 1.0, 1.0],
+            _ => [0.0, 0.0, 0.0, 3.0 / 16.0, 1.0, 1.0],
+        },
+        // `BlockLadder.setBlockBoundsBasedOnState`: 2/16 thick against the wall (metadata 2..=5 = +Z, -Z, +X, -X)
+        65 => match meta {
+            2 => [0.0, 0.0, 14.0 / 16.0, 1.0, 1.0, 1.0],
+            3 => [0.0, 0.0, 0.0, 1.0, 1.0, 2.0 / 16.0],
+            4 => [14.0 / 16.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+            5 => [0.0, 0.0, 0.0, 2.0 / 16.0, 1.0, 1.0],
+            _ => [0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+        },
+        // `BlockRail.setBlockBoundsBasedOnState`: 2/16 high, 10/16 on an ascending shape (drawn as a flat quad, `mesh::push_flat`)
+        66 | 27 | 28 => [0.0, 0.0, 0.0, 1.0, if (2..=5).contains(&(meta & 7)) { 10.0 / 16.0 } else { 2.0 / 16.0 }, 1.0],
         _ => return None,
     })
 }
@@ -140,7 +158,8 @@ pub const fn normal_cube(id: u8) -> bool {
 pub fn collision(id: u8) -> Option<[f32; 6]> {
     const I: f32 = CACTUS_INSET;
     match id {
-        0 | 8..=11 | 30 | 50 | 51 | 55 | 59 | 63 | 68 | 78 | 90 => None,
+        0 | 8..=11 | 27 | 28 | 30 | 50 | 51 | 55 | 59 | 63 | 65 | 66 | 68 | 78 | 90 => None, // rails have none (`getCollisionBoundingBoxFromPool` = null); ponytail: a ladder's thin box needs metadata (physics reads ids), none for now
+        26 => Some([0.0, 0.0, 0.0, 1.0, 9.0 / 16.0, 1.0]), // ponytail: a door stays a full cell until the query carries metadata
         _ if is_plant(id) => None,
         44 | SNOW_DEEP => Some([0.0, 0.0, 0.0, 1.0, 0.5, 1.0]),
         81 => Some([I, 0.0, I, 1.0 - I, 1.0 - I, 1.0 - I]),
@@ -152,7 +171,7 @@ pub fn collision(id: u8) -> Option<[f32; 6]> {
 /// `isOpaqueCube`: hides the faces behind it. Not the plants, fluids and boxes above; leaves, glass and ice stay in, as the
 /// mesher draws them as opaque cubes.
 pub fn opaque(id: u8) -> bool {
-    id != 0 && !is_plant(id) && !is_fluid(id) && !matches!(id, 44 | 50 | 53 | 59 | 60 | 67 | 78 | 81 | 85)
+    id != 0 && !is_plant(id) && !is_fluid(id) && !matches!(id, 26 | 27 | 28 | 44 | 50 | 51 | 53 | 59 | 60 | 64..=67 | 71 | 78 | 81 | 85)
 }
 
 /// `Block.lightOpacity`: how much light a block eats (255 = fully opaque). Default is 255 for

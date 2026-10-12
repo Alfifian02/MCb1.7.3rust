@@ -33,7 +33,11 @@ use wgpu::{BlendState, Buffer, BufferUsages, ColorTargetState, ColorWrites, Devi
 pub struct HudVertex {
     pub pos: [f32; 2],
     pub color: [f32; 4],
+    /// Texel position in 0..1 of the items sheet, or `NO_UV` for a flat colour.
+    pub uv: [f32; 2],
 }
+
+pub const NO_UV: [f32; 2] = [-1.0, -1.0];
 
 impl HudVertex {
     pub fn layout() -> VertexBufferLayout<'static> {
@@ -43,6 +47,7 @@ impl HudVertex {
             attributes: &[
                 VertexAttribute { format: VertexFormat::Float32x2, offset: 0, shader_location: 0 },
                 VertexAttribute { format: VertexFormat::Float32x4, offset: 8, shader_location: 1 },
+                VertexAttribute { format: VertexFormat::Float32x2, offset: 24, shader_location: 2 },
             ],
         }
     }
@@ -57,19 +62,26 @@ struct HudU { size: vec2<f32> };
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
     @location(0) color: vec4<f32>,
+    @location(1) uv: vec2<f32>,
 };
+@group(0) @binding(1) var items: texture_2d<f32>;
+@group(0) @binding(2) var items_samp: sampler;
 
 @vertex
-fn vs_main(@location(0) vpos: vec2<f32>, @location(1) vcolor: vec4<f32>) -> VsOut {
+fn vs_main(@location(0) vpos: vec2<f32>, @location(1) vcolor: vec4<f32>, @location(2) vuv: vec2<f32>) -> VsOut {
     var o: VsOut;
     o.pos = vec4<f32>(vpos.x * 2.0 / u.size.x - 1.0, 1.0 - vpos.y * 2.0 / u.size.y, 0.0, 1.0);
     o.color = vcolor;
+    o.uv = vuv;
     return o;
 }
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    return in.color;
+    if in.uv.x < 0.0 { return in.color; }
+    let t = textureSampleLevel(items, items_samp, in.uv, 0.0); // `gui/items.png`, bytes straight to the surface like the flat colours
+    if t.a < 0.5 { discard; }
+    return vec4<f32>(t.rgb * in.color.rgb, t.a * in.color.a);
 }
 "#;
 /// Owns the HUD pipeline + dynamic vertex buffer. One instance per surface.
@@ -108,16 +120,46 @@ impl HudPipeline {
                     min_binding_size: None,
                 },
                 count: None,
+            }, wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: false }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
+                count: None,
+            }, wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                count: None,
             }],
         });
+        // The item sprites: `gui/items.png`, 256 x 256, not sRGB (the HUD writes plain bytes).
+        let items_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("hud_items"),
+            size: wgpu::Extent3d { width: 256, height: 256, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo { texture: &items_tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            crate::render::atlas::ITEMS,
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(256 * 4), rows_per_image: Some(256) },
+            wgpu::Extent3d { width: 256, height: 256, depth_or_array_layers: 1 },
+        );
+        let items_view = items_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let items_samp = device.create_sampler(&wgpu::SamplerDescriptor { mag_filter: wgpu::FilterMode::Nearest, min_filter: wgpu::FilterMode::Nearest, ..Default::default() });
 
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("hud_bind"),
             layout: &bind_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: uniform_buf.as_entire_binding(),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: uniform_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&items_view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&items_samp) },
+            ],
         });
 
         let layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
@@ -194,12 +236,22 @@ impl HudPipeline {
         queue.write_buffer(&self.uniform_buf, 0, bytemuck::cast_slice(&bytes));
     }
 
+    /// An items.png sprite (`Item.iconIndex` = `icon`) in the box (x, y, w, h), top-left origin; the alpha cuts it out.
+    pub fn push_sprite(out: &mut Vec<HudVertex>, x: f32, y: f32, w: f32, h: f32, icon: u8) {
+        let (u0, v0) = ((icon % 16) as f32 / 16.0, (icon / 16) as f32 / 16.0);
+        let (u1, v1) = (u0 + 1.0 / 16.0 - 0.0005, v0 + 1.0 / 16.0 - 0.0005);
+        let c = [1.0; 4];
+        let v = |px: f32, py: f32, u: f32, vv: f32| HudVertex { pos: [px, py], color: c, uv: [u, vv] };
+        let (tl, tr, br, bl) = (v(x, y, u0, v0), v(x + w, y, u1, v0), v(x + w, y + h, u1, v1), v(x, y + h, u0, v1));
+        out.extend([tl, tr, br, tl, br, bl]);
+    }
+
     /// Append a single quad (top-left origin) to `out`. Two CCW triangles.
     pub fn push_quad(out: &mut Vec<HudVertex>, x: f32, y: f32, w: f32, h: f32, color: [f32; 4]) {
-        let tl = HudVertex { pos: [x, y], color };
-        let tr = HudVertex { pos: [x + w, y], color };
-        let br = HudVertex { pos: [x + w, y + h], color };
-        let bl = HudVertex { pos: [x, y + h], color };
+        let tl = HudVertex { pos: [x, y], color, uv: NO_UV };
+        let tr = HudVertex { pos: [x + w, y], color, uv: NO_UV };
+        let br = HudVertex { pos: [x + w, y + h], color, uv: NO_UV };
+        let bl = HudVertex { pos: [x, y + h], color, uv: NO_UV };
         out.push(tl); out.push(tr); out.push(br);
         out.push(tl); out.push(br); out.push(bl);
     }
@@ -288,12 +340,12 @@ impl HudPipeline {
         cx: f32, cy: f32, r: f32, fill: [f32; 4],
     ) {
         let segments = 24;
-        let center = HudVertex { pos: [cx, cy], color: fill };
+        let center = HudVertex { pos: [cx, cy], color: fill, uv: NO_UV };
         for i in 0..segments {
             let a0 = (i as f32 / segments as f32) * std::f32::consts::TAU;
             let a1 = ((i + 1) as f32 / segments as f32) * std::f32::consts::TAU;
-            let p0 = HudVertex { pos: [cx + a0.cos() * r, cy + a0.sin() * r], color: fill };
-            let p1 = HudVertex { pos: [cx + a1.cos() * r, cy + a1.sin() * r], color: fill };
+            let p0 = HudVertex { pos: [cx + a0.cos() * r, cy + a0.sin() * r], color: fill, uv: NO_UV };
+            let p1 = HudVertex { pos: [cx + a1.cos() * r, cy + a1.sin() * r], color: fill, uv: NO_UV };
             out.push(center); out.push(p0); out.push(p1);
         }
     }
@@ -311,10 +363,10 @@ impl HudPipeline {
             let s0 = a0.sin();
             let c1 = a1.cos();
             let s1 = a1.sin();
-            let p0_in = HudVertex { pos: [cx + c0 * r_inner, cy + s0 * r_inner], color };
-            let p0_out = HudVertex { pos: [cx + c0 * r_outer, cy + s0 * r_outer], color };
-            let p1_in = HudVertex { pos: [cx + c1 * r_inner, cy + s1 * r_inner], color };
-            let p1_out = HudVertex { pos: [cx + c1 * r_outer, cy + s1 * r_outer], color };
+            let p0_in = HudVertex { pos: [cx + c0 * r_inner, cy + s0 * r_inner], color, uv: NO_UV };
+            let p0_out = HudVertex { pos: [cx + c0 * r_outer, cy + s0 * r_outer], color, uv: NO_UV };
+            let p1_in = HudVertex { pos: [cx + c1 * r_inner, cy + s1 * r_inner], color, uv: NO_UV };
+            let p1_out = HudVertex { pos: [cx + c1 * r_outer, cy + s1 * r_outer], color, uv: NO_UV };
             out.push(p0_in); out.push(p0_out); out.push(p1_out);
             out.push(p0_in); out.push(p1_out); out.push(p1_in);
         }
