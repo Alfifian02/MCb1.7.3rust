@@ -165,12 +165,16 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let c = textureSample(tex, samp, in.uv);
     if c.a < 0.5 { discard; } // cut-out textures: plants, glass
     if LEGACY {
-        // The face shade and the ambient occlusion go into the albedo (they do not change with the time of day; the deferred
-        // pass applies the sky/block light, `photon_light`'s legacy branch): alpha = sky quarters * 32 + block halves.
+        // Face shade and ambient occlusion x the sky/block light (`photon_light`'s legacy branch) x the fog.
         var shade = 0.8;
         if face == 2u { shade = 1.0; } else if face == 3u { shade = 0.5; } else if face < 2u { shade = 0.6; }
         if in.ao >= 0.0 { shade = in.ao; }
-        return vec4<f32>(c.rgb * pow(shade, 2.2), floor(in.sk + 0.5) * 32.0 + floor(in.bk + 0.5));
+        // Lit right here (forward), straight into the scene: no G-buffer, no depth copy, no full-screen pass that reads them back.
+        // Same maths the deferred pass did (`photon_light` legacy branch, face 6 = shade already in the albedo, then the fog).
+        let albedo = to_working(c.rgb * pow(max(shade, 0.0), 2.2));
+        let sky = clamp(floor(in.sk + 0.5), 0.0, 60.0) / 60.0;
+        let bl = clamp(floor(in.bk + 0.5), 0.0, 30.0) / 30.0;
+        return vec4<f32>(apply_fog(photon_light(albedo, 6u, sky, bl, 0.0), length(in.wp - u.eye.xyz)), 1.0);
     }
     return vec4<f32>(c.rgb, f32(face) * 256.0 + in.lm);
 }
@@ -194,6 +198,16 @@ fn fs_water(in: VsOut) -> @location(0) vec4<f32> {
     return vec4<f32>(rgb, max(c.a, mix(absorb, 1.0, 0.5 * graze)));
 }
 "#;
+
+/// The chunk shader with its constants spliced in (`legacy` = `lib.rs` LEGACY); a test validates both looks.
+fn shader_source(legacy: bool) -> String {
+    format!("{}{}", crate::render::photon::WGSL_COMMON, SHADER_SRC)
+        .replace("@DISTORT@", &crate::render::shadows::distortion_wgsl())
+        .replace("@TW@", &atlas::TILES_W.to_string())
+        .replace("@TH@", &(atlas::ATLAS_H / 16).to_string())
+        .replace("@LEGACY@", if legacy { "true" } else { "false" })
+        .replace("@WL@", &format!("{:?}", crate::render::mesh::WATER_LIGHT))
+}
 
 impl ChunkPipeline {
     pub fn new(device: &Device, _surface_format: wgpu::TextureFormat) -> Self {
@@ -270,7 +284,7 @@ impl ChunkPipeline {
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("chunk_shader"),
-            source: wgpu::ShaderSource::Wgsl(format!("{}{}", crate::render::photon::WGSL_COMMON, SHADER_SRC).replace("@DISTORT@", &crate::render::shadows::distortion_wgsl()).replace("@TW@", &atlas::TILES_W.to_string()).replace("@TH@", &(atlas::ATLAS_H / 16).to_string()).replace("@LEGACY@", if crate::LEGACY { "true" } else { "false" }).replace("@WL@", &format!("{:?}", crate::render::mesh::WATER_LIGHT)).into()),
+            source: wgpu::ShaderSource::Wgsl(shader_source(crate::LEGACY).into()),
         });
 
         // Group 1: the shadow map and its comparison sampler: linear = `shadowHardwareFiltering1` (a bilinear compare).
@@ -514,4 +528,20 @@ pub fn create_index_buffer(device: &Device, idx: &[u32]) -> Buffer {
         contents: bytemuck::cast_slice(idx),
         usage: BufferUsages::INDEX,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Both looks parse and validate, and the legacy `fs_main` lights and fogs in place (it no longer writes a G-buffer texel).
+    #[test]
+    fn chunk_shader_validates_and_legacy_is_forward() {
+        for legacy in [false, true] {
+            let src = shader_source(legacy);
+            let m = naga::front::wgsl::parse_str(&src).unwrap_or_else(|e| panic!("{}", e.emit_to_string(&src)));
+            naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all()).validate(&m).unwrap();
+        }
+        assert!(SHADER_SRC.contains("apply_fog(photon_light(albedo, 6u, sky, bl, 0.0)"), "legacy terrain is lit in `fs_main`");
+    }
 }

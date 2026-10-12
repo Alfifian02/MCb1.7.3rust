@@ -747,6 +747,30 @@ impl App {
         }
     }
 
+    /// Terrain (one draw per run of chunk sections in the render shape and the frustum), dropped items / mobs, and the block outline.
+    /// Photon: into the G-buffer; legacy: into the scene, already lit.
+    fn draw_opaque(&self, rp: &mut wgpu::RenderPass<'_>, frustum: &Frustum, item_indices: u32, outline_indices: u32) {
+        let (rh, rv) = ((RENDER_DIST * 16) as f32, (RENDER_VERT * 16) as f32);
+        rp.set_pipeline(&self.pipe.pipeline);
+        rp.set_bind_group(0, &self.pipe.bind_group, &[]);
+        rp.set_bind_group(1, &self.pipe.shadow_bind, &[]);
+        self.chunks.draw_ranges(self.camera.pos, RENDER_SHAPE, rh, rv, false, |min, max| frustum.intersects_aabb(min, max), |m, ib, r| {
+            rp.set_vertex_buffer(0, m.vbuf.slice(..));
+            rp.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
+            rp.draw_indexed(r, 0, 0..1);
+        });
+        if item_indices > 0 {
+            rp.set_vertex_buffer(0, self.item_mesh.vbuf.slice(..));
+            rp.set_index_buffer(self.item_mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
+            rp.draw_indexed(0..item_indices, 0, 0..1);
+        }
+        if outline_indices > 0 {
+            rp.set_vertex_buffer(0, self.outline.vbuf.slice(..));
+            rp.set_index_buffer(self.outline.ibuf.slice(..), wgpu::IndexFormat::Uint32);
+            rp.draw_indexed(0..outline_indices, 0, 0..1);
+        }
+    }
+
     fn render(&mut self) {
         let t0 = Instant::now();
         let dt = self.last_frame.elapsed().as_secs_f32().min(0.1); // frameTime for the post chain
@@ -882,9 +906,10 @@ impl App {
             }
             self.ent_shadow_dirty = item_indices > 0;
         }
-        // G-buffer: terrain, items and the outline write albedo + light + face; the depth is kept (the march and the deferred pass read it).
+        // Photon look: a G-buffer (terrain, items and the outline write albedo + light + face; the depth is kept) that the deferred pass
+        // reads back. Legacy look: nothing here, the terrain is lit as it is drawn, in the scene pass below.
         let (rh, rv) = ((RENDER_DIST * 16) as f32, (RENDER_VERT * 16) as f32);
-        {
+        if !LEGACY {
             let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("gbuffer_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -901,25 +926,7 @@ impl App {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            rp.set_pipeline(&self.pipe.pipeline);
-            rp.set_bind_group(0, &self.pipe.bind_group, &[]);
-            rp.set_bind_group(1, &self.pipe.shadow_bind, &[]);
-            // One draw per run of chunk sections that is in the render shape and the view frustum.
-            self.chunks.draw_ranges(self.camera.pos, RENDER_SHAPE, rh, rv, false, |min, max| frustum.intersects_aabb(min, max), |m, ib, r| {
-                rp.set_vertex_buffer(0, m.vbuf.slice(..));
-                rp.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
-                rp.draw_indexed(r, 0, 0..1);
-            });
-            if item_indices > 0 {
-                rp.set_vertex_buffer(0, self.item_mesh.vbuf.slice(..));
-                rp.set_index_buffer(self.item_mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
-                rp.draw_indexed(0..item_indices, 0, 0..1);
-            }
-            if outline_indices > 0 {
-                rp.set_vertex_buffer(0, self.outline.vbuf.slice(..));
-                rp.set_index_buffer(self.outline.ibuf.slice(..), wgpu::IndexFormat::Uint32);
-                rp.draw_indexed(0..outline_indices, 0, 0..1);
-            }
+            self.draw_opaque(&mut rp, &frustum, item_indices, outline_indices);
         }
         // Photon's clouds (p0, d1, d2): they read the frame's opaque depth, so they run after the chunk pass.
         if let Some(clouds) = self.clouds.as_mut() {
@@ -937,7 +944,9 @@ impl App {
         }
         // The march always runs now: its green channel is the surface shadow the deferred pass lights with (it is 0 when `vlp.shadow`
         // is 0). ponytail: the shaft loop is wasted while `vlp.active` is false (night under water); a flag in `Params` would skip it.
-        self.gpu.copy_depth(&mut enc);
+        if !LEGACY {
+            self.gpu.copy_depth(&mut enc); // the deferred pass reads the depth as a texture
+        }
         // Boxes of the things that throw an umbra in the air (mobs, drops, falling blocks), for the shaft composite.
         let mut cone_boxes: Vec<(glam::Vec3, glam::Vec3)> = Vec::new();
         if sun_strength > 0.0 {
@@ -946,13 +955,12 @@ impl App {
             self.drops.items.iter().for_each(|d| add(d.pos, glam::Vec3::splat(0.125)));
             self.ticks.falling.iter().for_each(|f| add(f.pos, glam::Vec3::splat(0.49)));
         }
-        // Legacy: only the first call, which creates the target the deferred bind group wants; nothing reads it afterwards (ponytail:
-        // a resize keeps the old-size target, harmless while nothing samples it).
-        if !LEGACY || self.shafts.view().is_none() {
+        // Legacy has no shafts and no deferred pass, so neither the march nor its bind group exist.
+        if !LEGACY {
             self.shafts.march(&self.gpu, &mut enc, &self.pipe.shadow_bind, &self.shadows.bind, &self.camera, shadow_vp, &vlp, self.total_frames);
-        }
-        if let Some(vl_view) = self.shafts.view() {
-            self.photon.bind(&self.gpu.device, &self.gpu.depth_copy_view, vl_view);
+            if let Some(vl_view) = self.shafts.view() {
+                self.photon.bind(&self.gpu.device, &self.gpu.depth_copy_view, vl_view);
+            }
         }
         // HDR scene: the sky over the fog colour (vanilla order), the deferred lighting of the terrain, the shadow cone, water, then the
         // shafts. The terrain depth is attached read-only (the deferred shader and the water test read it).
@@ -965,12 +973,22 @@ impl App {
                     depth_slice: None,
                     ops: wgpu::Operations { load: wgpu::LoadOp::Clear(clear), store: wgpu::StoreOp::Store },
                 })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment { view: &self.gpu.depth_view, depth_ops: None, stencil_ops: None }),
+                // Photon: the terrain's depth is attached read-only (the deferred shader reads it). Legacy: this pass draws the terrain itself.
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.gpu.depth_view,
+                    depth_ops: LEGACY.then_some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
+                    stencil_ops: None,
+                }),
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            self.sky.draw(&mut rp);
-            self.photon.draw_deferred(&mut rp, &self.pipe.bind_group, &self.pipe.shadow_bind);
+            if LEGACY {
+                self.draw_opaque(&mut rp, &frustum, item_indices, outline_indices); // lit in `fs_main`
+            }
+            self.sky.draw(&mut rp); // depth-tested LessEqual: only the pixels the opaque draws left at 1
+            if !LEGACY {
+                self.photon.draw_deferred(&mut rp, &self.pipe.bind_group, &self.pipe.shadow_bind);
+            }
             // Water last: blended over the terrain, no depth write (`water_pipeline`; same groups as the terrain).
             rp.set_pipeline(&self.pipe.water_pipeline);
             rp.set_bind_group(0, &self.pipe.bind_group, &[]);

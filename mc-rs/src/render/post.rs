@@ -653,6 +653,9 @@ impl Post {
         let input = if s.dof { &dof } else { &scene_all };
         let groups = [0usize, 1].map(|f| {
             let (cur, prev) = (&hist[f], &hist[1 - f]);
+            // What the bloom and the grade read as "the frame": the TAA output, or, with TAA off, the scene itself (the TAA pass is
+            // then skipped in `draw`: with it off it only copied the scene, a full-screen RGBA16F read + write for nothing).
+            let frame = if s.taa { cur } else { input };
             let mut g: Vec<wgpu::BindGroup> = Vec::new();
             g.push(bg(&scene_all, dummy, &expo[1 - f])); // DOF: centerDepthSmooth of the last frame
             // ponytail: the exposure pass reads the scene (the only texture with mips), also when DOF is on
@@ -660,7 +663,7 @@ impl Post {
             g.push(bg(input, prev, &expo[f])); // TAA
             for i in 0..TILES {
                 // Iris' main/alt flip: tile i writes bloom[(i & 1) ^ 1] and reads what tile i - 1 wrote (tile 0 reads the history)
-                g.push(if i == 0 { bg(cur, dummy, &expo[f]) } else { bg(&bloom[i & 1], dummy, &expo[f]) });
+                g.push(if i == 0 { bg(frame, dummy, &expo[f]) } else { bg(&bloom[i & 1], dummy, &expo[f]) });
             }
             g.push(bg(&bloom[0], dummy, &expo[f])); // merge: odd tiles live in bloom[0]
             g.push(bg(&bloom[1], dummy, &expo[f])); // gaussian h
@@ -668,7 +671,7 @@ impl Post {
             for j in 0..5 {
                 g.push(bg(&bloom[1 - (j & 1)], dummy, &expo[f])); // upsample
             }
-            g.push(bg(&bloom[0], cur, &expo[f])); // grade: bloom + TAA output
+            g.push(bg(&bloom[0], frame, &expo[f])); // grade: bloom + TAA output
             g.push(bg(&graded, dummy, &expo[f])); // fxaa
             g.push(bg(if s.fxaa { &fxaa } else { &graded }, dummy, &expo[f])); // final
             for l in 1..scene_mips.len() {
@@ -765,7 +768,9 @@ impl Post {
             run(enc, &pipes.dof, id::DOF, &t.dof, None, false);
         }
         run(enc, &pipes.expo, id::EXPOSURE, &t.expo[fi], None, false);
-        run(enc, &pipes.taa, id::TAA, &t.hist[fi], None, false);
+        if s.taa {
+            run(enc, &pipes.taa, id::TAA, &t.hist[fi], None, false);
+        }
         if s.bloom {
             // Iris' colortex0 main/alt flip, spelled out: tile i is written to bloom[(i & 1) ^ 1] and read back from bloom[i & 1]
             // by the next one; merge copies the odd tiles over to the even ones' buffer.
