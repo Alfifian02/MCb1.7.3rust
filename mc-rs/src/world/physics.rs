@@ -3,7 +3,7 @@
 
 use glam::Vec3;
 
-use crate::world::chunk::collision;
+use crate::world::chunk::collisions;
 
 /// Vanilla-ish player AABB: 0.6 wide, 1.8 tall, 0.6 deep.
 pub const HALF: Vec3 = Vec3::new(0.3, 0.9, 0.3);
@@ -124,11 +124,14 @@ fn aabb_hits_solid(p: Vec3, h: Vec3, get: BlockQuery<'_>) -> bool {
     for cy in lo.y.floor() as i32..=hi.y.floor() as i32 {
         for cz in lo.z.floor() as i32..=hi.z.floor() as i32 {
             for cx in lo.x.floor() as i32..=hi.x.floor() as i32 {
-                let Some(c) = get(cx, cy, cz).and_then(collision) else { continue };
-                let (o, b) = (Vec3::new(cx as f32, cy as f32, cz as f32), Vec3::from_slice(&c[..3]));
-                let (bl, bh) = (o + b, o + Vec3::from_slice(&c[3..]));
-                if hi.x > bl.x && lo.x < bh.x && hi.y > bl.y && lo.y < bh.y && hi.z > bl.z && lo.z < bh.z {
-                    return true;
+                let Some(id) = get(cx, cy, cz) else { continue };
+                let (boxes, n) = collisions(id);
+                for c in &boxes[..n] {
+                    let (o, b) = (Vec3::new(cx as f32, cy as f32, cz as f32), Vec3::from_slice(&c[..3]));
+                    let (bl, bh) = (o + b, o + Vec3::from_slice(&c[3..]));
+                    if hi.x > bl.x && lo.x < bh.x && hi.y > bl.y && lo.y < bh.y && hi.z > bl.z && lo.z < bh.z {
+                        return true;
+                    }
                 }
             }
         }

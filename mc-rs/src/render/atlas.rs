@@ -236,6 +236,23 @@ pub const fn terrain_tile(id: u8, meta: u8, side: u8) -> Option<u8> {
         22 => 144,
         24 => if top { 176 } else if bottom { 208 } else { 192 },
         31 => match meta { 1 => 39, 2 => 56, _ => 55 },
+        51 => 31, // fire_0
+        // BlockBed.getBlockTextureFromSideAndMetadata: base tile 134, `ModelBed.bedDirection` says which face is the end, a side or the top.
+        26 => {
+            const DIR: [[u8; 6]; 4] = [[1, 0, 3, 2, 5, 4], [1, 0, 5, 4, 2, 3], [1, 0, 2, 3, 4, 5], [1, 0, 4, 5, 3, 2]];
+            let d = DIR[(meta & 3) as usize][side as usize];
+            let side_face = d == 4 || d == 5;
+            if bottom { 4 } else if meta & 8 != 0 {
+                if d == 2 { 134 + 2 + 16 } else if !side_face { 134 + 1 } else { 134 + 1 + 16 }
+            } else if d == 3 { 134 - 1 + 16 } else if !side_face { 134 } else { 134 + 16 }
+        }
+        // BlockDoor.getBlockTextureFromSideAndMetadata (97 wood, 98 iron; the upper half is 16 tiles up). ponytail: the
+        // Java mirrors some faces (negative index); the leaf is drawn unmirrored.
+        64 | 71 => {
+            let base = if id == 64 { 97 } else { 98 };
+            let s = crate::world::chunk::door_state(meta);
+            if top || bottom || (s == 0 || s == 2) != (side <= 3) { base } else { base - (meta & 8) * 2 }
+        }
         32 => 55,
         35 => if meta == 0 { 64 } else { let m = !(meta & 15); 113 + ((m & 8) >> 3) + (m & 7) * 16 },
         37 => 13,

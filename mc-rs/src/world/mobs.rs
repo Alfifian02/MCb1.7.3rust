@@ -77,6 +77,8 @@ pub struct Mob {
     pub size: f32,
     /// Sheep fleece colour (cloth metadata).
     pub color: u8,
+    /// Sheep: shorn (`EntitySheep.getSheared`); no wool on death, bare for good.
+    pub sheared: bool,
     /// Creeper: ticks of fuse burnt.
     pub fuse: u8,
     pub half: Vec3,
@@ -108,6 +110,8 @@ pub enum Ev {
     /// A creeper went off here.
     Boom(Vec3),
     Shoot(Vec3, Vec3),
+    /// A player's arrow stopped against a block here.
+    Landed(Vec3),
     Egg(Vec3),
 }
 
@@ -165,7 +169,7 @@ impl Mob {
             0
         };
         let pos = Vec3::new(x, feet + half.y + 0.01, z);
-        Self { kind, body: Player { pos, vel: Vec3::ZERO, on_ground: false }, yaw, health: hp, limb: 0.0, limb_amt: 0.0, hurt: 0, size, color,
+        Self { kind, body: Player { pos, vel: Vec3::ZERO, on_ground: false }, yaw, health: hp, limb: 0.0, limb_amt: 0.0, hurt: 0, size, color, sheared: false,
             fuse: 0, half, age: 0, yaw_vel: 0.0, look: None, goal: None, fspeed: 0.0, jumping: false, wet: false, blocked: false, life: 0,
             last: 0, target: false, shot: false, lit: false, anger: 0, attack_time: 0, hop: 0, egg: rng.next_int_bound(6000) + 6000, fire: 0,
             free: 0, swim: Vec3::ZERO }
@@ -468,7 +472,7 @@ impl Mob {
             Spider => s(287, 0, n).collect(),
             Slime if self.size == 1.0 => s(341, 0, n).collect(),
             Skeleton => s(262, 0, n).chain(s(352, 0, rng.next_int_bound(3))).collect(),
-            Sheep => s(35, self.color as u16, 1).collect(),
+            Sheep => s(35, self.color as u16, !self.sheared as i32).collect(),
             Squid => s(351, 0, n + 1).collect(),
             _ => Vec::new(),
         }
@@ -480,6 +484,8 @@ pub struct Arrow {
     pub pos: Vec3,
     vel: Vec3,
     age: u16,
+    /// Shot by the player (`ItemBow`): hurts mobs, not the player, and lands as a pick-up-able item.
+    pub player: bool,
 }
 
 impl Arrow {
@@ -488,10 +494,14 @@ impl Arrow {
         self.pos += self.vel;
         let (x, y, z) = cell(self.pos);
         if self.age > 600 || solid((c.get)(x, y, z)) {
-            return false; // ponytail: vanilla sticks in the block (and a player's arrows can be picked up again)
+            // ponytail: vanilla sticks in the block until picked up; the player's arrow drops as an item where it stopped.
+            if self.player {
+                ev.push(Ev::Landed(self.pos - self.vel));
+            }
+            return false;
         }
         let d = self.pos - c.player;
-        if d.x.abs() < 0.4 && d.z.abs() < 0.4 && d.y.abs() < 1.0 {
+        if !self.player && d.x.abs() < 0.4 && d.z.abs() < 0.4 && d.y.abs() < 1.0 {
             ev.push(Ev::Hurt(4));
             return false;
         }
@@ -567,7 +577,7 @@ impl Mobs {
     }
 
     /// `getCanSpawnHere` per kind at the cell (x, y, z) (the cell the mob would stand in).
-    fn can_spawn(&mut self, c: &Ctx, kind: Kind, x: i32, y: i32, z: i32) -> bool {
+    pub(crate) fn can_spawn(&mut self, c: &Ctx, kind: Kind, x: i32, y: i32, z: i32) -> bool {
         let (below, feet, head) = ((c.get)(x, y - 1, z), (c.get)(x, y, z), (c.get)(x, y + 1, z));
         let light = (c.light)(x, y, z);
         match kind {
@@ -653,6 +663,15 @@ impl Mobs {
             let rng = &mut self.rng;
             self.list.retain_mut(|m| m.tick(rng, c, &mut ev));
             self.arrows.retain_mut(|a| a.tick(c, &mut ev));
+            // A player's arrow inside a mob's box (grown 0.3, like `EntityArrow`) hurts it and is gone.
+            let (list, rng) = (&mut self.list, &mut self.rng);
+            self.arrows.retain(|a| {
+                let hit = a.player.then(|| list.iter().position(|m| {
+                    let (lo, hi) = m.aabb();
+                    a.pos.cmpge(lo - Vec3::splat(0.3)).all() && a.pos.cmple(hi + Vec3::splat(0.3)).all()
+                })).flatten();
+                hit.map_or(true, |i| { list[i].damage(crate::world::gear::ARROW_DAMAGE, a.pos - a.vel, rng); false })
+            });
             self.spawn(c);
         }
         for m in &mut self.list {
@@ -661,7 +680,8 @@ impl Mobs {
         let mut out = Vec::new();
         for e in ev {
             match e {
-                Ev::Shoot(pos, vel) if self.arrows.len() < MAX_ARROWS => self.arrows.push(Arrow { pos, vel, age: 0 }),
+                Ev::Shoot(pos, vel) if self.arrows.len() < MAX_ARROWS => self.arrows.push(Arrow { pos, vel, age: 0, player: false }),
+                Ev::Landed(p) => drops.spawn_stack(ItemStack { id: crate::world::gear::ARROW, count: 1, damage: 0 }, cell(p)),
                 Ev::Egg(p) => drops.spawn_stack(ItemStack { id: 344, count: 1, damage: 0 }, cell(p)),
                 Ev::Hurt(_) | Ev::Boom(_) => out.push(e),
                 Ev::Shoot(..) => {}
@@ -700,6 +720,13 @@ impl Mobs {
             let (lo, hi) = m.aabb();
             ray_box(eye, dir, lo, hi).filter(|&t| t <= reach).map(|t| (i, t))
         }).min_by(|a, b| a.1.total_cmp(&b.1))
+    }
+
+    /// `ItemBow`: a player's arrow leaves `pos` with `vel` (blocks per tick).
+    pub fn shoot(&mut self, pos: Vec3, vel: Vec3) {
+        if self.arrows.len() < MAX_ARROWS {
+            self.arrows.push(Arrow { pos, vel, age: 0, player: true });
+        }
     }
 
     pub fn hit(&mut self, i: usize, dmg: i32, from: Vec3) {

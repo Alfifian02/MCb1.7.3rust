@@ -196,6 +196,8 @@ pub struct ChunkManager {
     changes: Vec<(i32, i32, i32, u8, u8)>,
     /// Dungeon chests filled by populate that the game has not taken over yet (`take_loot`).
     loot: Vec<(Pos, Chest)>,
+    /// Dungeon spawners populate placed that the game has not taken over yet (`take_spawners`).
+    spawners: Vec<(Pos, u8)>,
 }
 
 impl ChunkManager {
@@ -237,7 +239,7 @@ impl ChunkManager {
         ring.sort_by_key(|&(dx, dz)| dx * dx + dz * dz);
 
         Self { chunks: Chunks::default(), pending: HashSet::new(), ring, radius, center: None, max_in_flight: workers * 2,
-               gen: OverworldGenerator::new(seed), cm: WorldChunkManager::new(seed), jobs, done, light_queue: Vec::new(), sky_sub: 0, mesh_gen: 0, dir: None, saved: HashSet::new(), changes: Vec::new(), loot: Vec::new() }
+               gen: OverworldGenerator::new(seed), cm: WorldChunkManager::new(seed), jobs, done, light_queue: Vec::new(), sky_sub: 0, mesh_gen: 0, dir: None, saved: HashSet::new(), changes: Vec::new(), loot: Vec::new(), spawners: Vec::new() }
     }
 
     /// Keep this world in `dir`: chunks found there are loaded instead of generated, and edited ones are written back
@@ -348,6 +350,18 @@ impl ChunkManager {
         self.chunks.get(&(x >> 4, z >> 4)).map(|e| e.blocks[idx((x & 15) as usize, y as usize, (z & 15) as usize)])
     }
 
+    /// Raw (sky, block) light of a cell, what the mesher's `lm` takes: entities are lit by the cell they are in
+    /// (`Entity.getBrightnessForRender`). Open sky above the world and unloaded chunks read as full sky light.
+    pub fn light_levels(&self, x: i32, y: i32, z: i32) -> (u8, u8) {
+        if !(0..H as i32).contains(&y) {
+            return (if y >= H as i32 { 15 } else { 0 }, 0);
+        }
+        self.chunks.get(&(x >> 4, z >> 4)).map_or((15, 0), |e| {
+            let l = e.light[idx((x & 15) as usize, y as usize, (z & 15) as usize)];
+            (l & 15, l >> 4)
+        })
+    }
+
     /// `World.getBlockLightValue`: the brighter of block light and sky light less `skylightSubtracted`, 0..=15; the open sky
     /// above the world and unloaded chunks read as full daylight.
     pub fn light(&self, x: i32, y: i32, z: i32) -> u8 {
@@ -431,11 +445,17 @@ impl ChunkManager {
 
     /// `World.tick`'s random block ticks: 80 random cells in every lit, final chunk within `r` chunks of `center`, with the Java's
     /// own LCG. Returns the cells whose block ticks at random (`Block.tickOnLoad`).
-    pub fn random_ticks(&self, center: Key, r: i32, lcg: &mut i32) -> Vec<(i32, i32, i32, u8)> {
-        let mut out = Vec::new();
+    pub fn random_ticks(&self, center: Key, r: i32, lcg: &mut i32, rng: &mut JavaRandom) -> (Vec<(i32, i32, i32, u8)>, Vec<(i32, i32)>) {
+        let (mut out, mut columns) = (Vec::new(), Vec::new());
         for (&(cx, cz), e) in &self.chunks {
             if (cx - center.0).abs() > r || (cz - center.1).abs() > r || !e.lit || !self.is_final(cx, cz) {
                 continue;
+            }
+            // The snow / ice column of `World.tick`: one chunk in sixteen per tick, a column drawn from the same LCG.
+            if rng.next_int_bound(16) == 0 {
+                *lcg = lcg.wrapping_mul(3).wrapping_add(1013904223);
+                let v = *lcg >> 2;
+                columns.push((cx * 16 + (v & 15), cz * 16 + (v >> 8 & 15)));
             }
             for _ in 0..80 {
                 *lcg = lcg.wrapping_mul(3).wrapping_add(1013904223);
@@ -447,7 +467,15 @@ impl ChunkManager {
                 }
             }
         }
-        out
+        (out, columns)
+    }
+
+    /// `World.getSavedLightValue(EnumSkyBlock.Block, ..)`.
+    pub fn block_light(&self, x: i32, y: i32, z: i32) -> u8 {
+        if y < 0 || y >= H as i32 {
+            return 0;
+        }
+        self.chunks.get(&(x >> 4, z >> 4)).map_or(0, |e| e.light[idx((x & 15) as usize, y as usize, (z & 15) as usize)] >> 4)
     }
 
     /// `BlockSapling.growTree` in a 2x2 chunk region around (x, z) (a tree reaches at most 8 cells out); false when one of the
@@ -477,8 +505,14 @@ impl ChunkManager {
         std::mem::take(&mut self.loot)
     }
 
+    /// The spawners populate placed since the last call; the game puts them into its tile entities.
+    pub fn take_spawners(&mut self) -> Vec<(Pos, u8)> {
+        std::mem::take(&mut self.spawners)
+    }
+
     fn put_region(&mut self, x: i32, z: i32, mut region: Region) {
         self.loot.extend(region.take_loot());
+        self.spawners.extend(region.take_spawners());
         let keys = [(x, z), (x, z + 1), (x + 1, z), (x + 1, z + 1)];
         let (blocks, data) = region.into_parts();
         for ((k, b), d) in keys.iter().zip(blocks).zip(data) {

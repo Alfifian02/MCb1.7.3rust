@@ -151,6 +151,15 @@ pub fn sky_color(angle: f32, temperature: f32, rain: f32, thunder: f32) -> [f32;
     c
 }
 
+/// The last block of `World.func_4079_a`: while a bolt flashes (`flash` 2, then 1) the sky is pulled towards (0.8, 0.8, 1.0) by up to 45%.
+pub fn lightning_flash(c: [f32; 3], flash: i32, partial: f32) -> [f32; 3] {
+    if flash <= 0 {
+        return c;
+    }
+    let k = (flash as f32 - partial).min(1.0) * 0.45;
+    [c[0] * (1.0 - k) + 0.8 * k, c[1] * (1.0 - k) + 0.8 * k, c[2] * (1.0 - k) + k]
+}
+
 /// Colour of the sky at the horizon (`WorldProvider.func_4096_a`): pale blue by day, nearly black at night.
 fn horizon_color(angle: f32) -> [f32; 3] {
     let k = (mh_cos(angle * PI * 2.0) * 2.0 + 0.5).clamp(0.0, 1.0);

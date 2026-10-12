@@ -88,6 +88,10 @@ pub struct Level {
     pub drops: Vec<(Vec3, ItemStack, u32)>,
     /// `TileEntityChest`s by block position (the Java's `Items` list, 27 slots each).
     pub chests: Vec<(Pos, Chest)>,
+    /// `EntityPlayer.playerSpawnCoordinate`: the bed that last put the player to sleep (the tail is absent without one).
+    pub bed: Option<Pos>,
+    /// `TileEntityMobSpawner`s: position, the mob index of `pickMobSpawner`, `delay`.
+    pub spawners: Vec<(Pos, u8, i32)>,
 }
 
 const MAGIC: &[u8; 4] = b"MCL1";
@@ -178,6 +182,18 @@ impl Level {
             [x, y, z].iter().for_each(|v| put(&mut w, v.to_le_bytes()));
             c.iter().for_each(|&s| put_stack(&mut w, s));
         }
+        // Spawners come after the chests, so a level file without them still decodes (it just has none).
+        put(&mut w, (self.spawners.len() as u16).to_le_bytes());
+        for ((x, y, z), kind, delay) in &self.spawners {
+            [x, y, z].iter().for_each(|v| put(&mut w, v.to_le_bytes()));
+            put(&mut w, [*kind]);
+            put(&mut w, delay.to_le_bytes());
+        }
+        // The bed comes last (the tail is absent without one). A level written before spawners existed has the bed
+        // right after the chests: exactly 12 bytes, which no spawner tail (2 + 17 n) can be, so `decode` tells them apart.
+        if let Some((x, y, z)) = self.bed {
+            [x, y, z].iter().for_each(|v| put(&mut w, v.to_le_bytes()));
+        }
         w
     }
 
@@ -220,7 +236,13 @@ impl Level {
                 })
                 .collect::<Option<Vec<_>>>()?
         };
-        Some(Level { ticks, pos, spawn, yaw, pitch, slot, vitals, inv, furnaces, drops, chests })
+        let spawners = if r.0.is_empty() || r.0.len() == 12 {
+            Vec::new()
+        } else {
+            (0..r.u16()?).map(|_| Some(((r.i32()?, r.i32()?, r.i32()?), r.u8()?, r.i32()?))).collect::<Option<Vec<_>>>()?
+        };
+        let bed = if r.0.is_empty() { None } else { Some((r.i32()?, r.i32()?, r.i32()?)) };
+        Some(Level { ticks, pos, spawn, yaw, pitch, slot, vitals, inv, furnaces, drops, chests, bed, spawners })
     }
 }
 
@@ -269,12 +291,21 @@ mod tests {
                 c[26] = Some(ItemStack { id: 351, count: 1, damage: 3 });
                 c
             })],
+            bed: Some((7, 65, -3)),
+            spawners: vec![((4, 71, -9), 3, 123)],
         };
         let enc = l.encode();
         assert_eq!(Level::decode(&enc), Some(l.clone()));
         // A level file written before chests existed ends after the drops: it decodes with no chests.
-        let old = Level { chests: Vec::new(), ..l.clone() }.encode();
-        assert_eq!(Level::decode(&old[..old.len() - 2]), Some(Level { chests: Vec::new(), ..l }));
+        let old = Level { chests: Vec::new(), bed: None, spawners: Vec::new(), ..l.clone() }.encode();
+        assert_eq!(Level::decode(&old[..old.len() - 4]), Some(Level { chests: Vec::new(), bed: None, spawners: Vec::new(), ..l.clone() }));
+        // One from before spawners has the bed straight after the chests (no spawner count).
+        let mut mid = Level { spawners: Vec::new(), ..l.clone() }.encode();
+        mid.drain(mid.len() - 14..mid.len() - 12);
+        assert_eq!(Level::decode(&mid), Some(Level { spawners: Vec::new(), ..l.clone() }));
+        // ... and one without a bed or spawners ends after the chests.
+        let end = Level { spawners: Vec::new(), bed: None, ..l.clone() }.encode();
+        assert_eq!(Level::decode(&end[..end.len() - 2]), Some(Level { spawners: Vec::new(), bed: None, ..l }));
         assert!(Level::decode(&enc[..enc.len() - 1]).is_none());
         assert!(Level::decode(b"nope").is_none());
         let mut nan = enc.clone();

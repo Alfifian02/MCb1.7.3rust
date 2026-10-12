@@ -3,14 +3,17 @@
 //! fragment stage `RAIN_OPACITY 0.25` / `SNOW_OPACITY 0.75` with `get_rain_color` / `get_snow_color` (PROGRAM_WEATHER branch),
 //! output premultiplied (`rgb *= a`) into the translucent layer (`colortex13`), which the water composite blends over the scene.
 //!
+//! Drawn in its own pass over the finished scene (`lib.rs`): colour is blended (premultiplied) into the HDR scene, the depth attachment is
+//! the terrain's, read-only, so the hardware hides the streaks behind it (`water.rs`' translucent layer is not wired yet).
+//!
 //! Deviations: `FANCY` is false (radius 5, the Java default `gameSettings.fancyGraphics` off: cheaper on a phone); the sun colour
 //! is `sunlight_color` of the pack, not yet attenuated by the atmosphere (milestone 2); no TAA jitter (milestone 5); the particle is
-//! hidden behind terrain by comparing with the opaque depth in the fragment shader (the pack does it with `depthtex1`).
+//! hidden behind terrain by the depth test of its pass (the pack compares `depthtex1` in the fragment shader).
 //! UNVERIFIED: written WITHOUT a Rust toolchain, never compiled or run.
 
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
-use wgpu::{BindGroup, BindGroupLayout, Buffer, Device, Queue, RenderPass, RenderPipeline, Sampler, TextureView};
+use wgpu::{BindGroup, Buffer, Device, Queue, RenderPass, RenderPipeline, TextureView};
 
 use crate::world::biome::Biome;
 use crate::world::gen::noise::JavaRandom;
@@ -175,11 +178,9 @@ struct U {
 const SHADER: &str = r#"
 struct U { vp: mat4x4<f32>, eye: vec4<f32>, rain_c: vec4<f32>, snow_c: vec4<f32> };
 @group(0) @binding(0) var<uniform> u: U;
-@group(0) @binding(1) var depth1: texture_depth_2d; // opaque depth
-@group(0) @binding(2) var samp: sampler;
-@group(0) @binding(3) var tex: texture_2d<f32>;
+@group(0) @binding(1) var samp: sampler;
+@group(0) @binding(2) var tex: texture_2d<f32>;
 
-struct FsOut { @location(0) refraction: vec4<f32>, @location(1) color: vec4<f32> };
 struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32>, @location(1) tint: vec4<f32> };
 
 @vertex
@@ -197,33 +198,25 @@ fn vs_weather(@location(0) p: vec3<f32>, @location(1) uv: vec2<f32>, @location(2
 }
 
 @fragment
-fn fs_weather(in: VOut) -> FsOut {
+fn fs_weather(in: VOut) -> @location(0) vec4<f32> {
     let base = textureSample(tex, samp, in.uv);
     if base.a < 0.1 { discard; }
-    if in.pos.z > textureLoad(depth1, vec2<i32>(in.pos.xy), 0) { discard; } // behind terrain
     let is_rain = abs(base.r - base.b) > 1e-6;
     var c = select(
         vec4<f32>(u.snow_c.rgb, $SNOW$ * base.a) * in.tint,
         vec4<f32>(u.rain_c.rgb, $RAIN$ * base.a) * in.tint,
         is_rain);
     c = vec4<f32>(c.rgb * c.a, c.a);
-    var o: FsOut;
-    o.refraction = vec4<f32>(0.0); // colortex3 is not written (its write mask is empty)
-    o.color = c;
-    return o;
+    return c;
 }
 "#;
 
 pub struct Weather {
     pipeline: RenderPipeline,
-    layout: BindGroupLayout,
     ubuf: Buffer,
     vbuf: Buffer,
-    samp: Sampler,
-    snow_tex: TextureView,
-    rain_tex: TextureView,
-    binds: Option<[BindGroup; 2]>,
-    counts: [u32; 2], // snow, rain
+    binds: [BindGroup; 2], // snow, rain
+    counts: [u32; 2],      // snow, rain
 }
 
 fn upload(device: &Device, queue: &Queue, bytes: &[u8], w: u32, h: u32) -> TextureView {
@@ -247,20 +240,17 @@ fn upload(device: &Device, queue: &Queue, bytes: &[u8], w: u32, h: u32) -> Textu
 }
 
 impl Weather {
-    /// Draws inside `WaterLayer::begin`'s pass, so its targets are that pass's: refraction (not written) and the translucent layer.
-    pub fn new(device: &Device, queue: &Queue) -> Self {
-        use crate::render::water::{DEPTH_FORMAT as depth_format, REFRACTION_FORMAT, TRANSLUCENT_FORMAT as color_format};
+    /// `format` = the scene colour target the pass blends into; the pass's depth attachment is the game's `Depth32Float`, read-only.
+    pub fn new(device: &Device, queue: &Queue, format: wgpu::TextureFormat) -> Self {
         let ubuf = device.create_buffer(&wgpu::BufferDescriptor { label: Some("weather_u"), size: std::mem::size_of::<U>() as u64, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
         let vbuf = device.create_buffer(&wgpu::BufferDescriptor { label: Some("weather_v"), size: (2 * MAX_VERTS * std::mem::size_of::<Vertex>()) as u64, usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
         let entry = |binding, visibility, ty| wgpu::BindGroupLayoutEntry { binding, visibility, ty, count: None };
-        let tex = |sample_type| wgpu::BindingType::Texture { sample_type, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false };
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("weather_layout"),
             entries: &[
                 entry(0, wgpu::ShaderStages::VERTEX_FRAGMENT, wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }),
-                entry(1, wgpu::ShaderStages::FRAGMENT, tex(wgpu::TextureSampleType::Depth)),
-                entry(2, wgpu::ShaderStages::FRAGMENT, wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering)),
-                entry(3, wgpu::ShaderStages::FRAGMENT, tex(wgpu::TextureSampleType::Float { filterable: true })),
+                entry(1, wgpu::ShaderStages::FRAGMENT, wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering)),
+                entry(2, wgpu::ShaderStages::FRAGMENT, wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false }),
             ],
         });
         // GL_NEAREST + GL_REPEAT, like `RenderEngine` for these pngs.
@@ -289,21 +279,32 @@ impl Weather {
                 }],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
-            fragment: Some(wgpu::FragmentState { module: &module, entry_point: Some("fs_weather"), targets: &[Some(wgpu::ColorTargetState { format: REFRACTION_FORMAT, blend: None, write_mask: wgpu::ColorWrites::empty() }), Some(wgpu::ColorTargetState { format: color_format, blend: Some(blend), write_mask: wgpu::ColorWrites::ALL })], compilation_options: wgpu::PipelineCompilationOptions::default() }),
+            fragment: Some(wgpu::FragmentState { module: &module, entry_point: Some("fs_weather"), targets: &[Some(wgpu::ColorTargetState { format, blend: Some(blend), write_mask: wgpu::ColorWrites::ALL })], compilation_options: wgpu::PipelineCompilationOptions::default() }),
             primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() }, // glDisable(GL_CULL_FACE)
-            depth_stencil: Some(wgpu::DepthStencilState { format: depth_format, depth_write_enabled: false, depth_compare: wgpu::CompareFunction::Less, stencil: wgpu::StencilState::default(), bias: wgpu::DepthBiasState::default() }),
+            depth_stencil: Some(wgpu::DepthStencilState { format: wgpu::TextureFormat::Depth32Float, depth_write_enabled: false, depth_compare: wgpu::CompareFunction::Less, stencil: wgpu::StencilState::default(), bias: wgpu::DepthBiasState::default() }),
             multisample: wgpu::MultisampleState::default(),
             multiview: None,
             cache: None,
         });
+        let make = |t: &TextureView| {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("weather_bind"),
+                layout: &layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: ubuf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&samp) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(t) },
+                ],
+            })
+        };
         let snow_tex = upload(device, queue, include_bytes!("../../assets/snow.rgba"), 64, 256);
         let rain_tex = upload(device, queue, include_bytes!("../../assets/rain.rgba"), 64, 256);
-        Self { pipeline, layout, ubuf, vbuf, samp, snow_tex, rain_tex, binds: None, counts: [0; 2] }
+        let binds = [make(&snow_tex), make(&rain_tex)];
+        Self { pipeline, ubuf, vbuf, binds, counts: [0; 2] }
     }
 
-    /// Per frame, before the pass: geometry and uniforms. `opaque_depth` is the main depth view (stored); the bind groups are rebuilt
-    /// because that view changes when the window is resized. ponytail: two small bind groups per frame.
-    pub fn update(&mut self, device: &Device, queue: &Queue, opaque_depth: &TextureView, vp: Mat4, eye: Vec3, sun_y: f32, snow: &[Vertex], rain: &[Vertex]) {
+    /// Per frame, before the pass: geometry and uniforms. `vp` is the camera's view-projection in world space.
+    pub fn update(&mut self, queue: &Queue, vp: Mat4, eye: Vec3, sun_y: f32, snow: &[Vertex], rain: &[Vertex]) {
         let (rc, sc) = colors(sun_y);
         let u = U { vp: vp.to_cols_array_2d(), eye: eye.extend(0.0).to_array(), rain_c: [rc[0], rc[1], rc[2], 0.0], snow_c: [sc[0], sc[1], sc[2], 0.0] };
         queue.write_buffer(&self.ubuf, 0, bytemuck::bytes_of(&u));
@@ -311,24 +312,10 @@ impl Weather {
         queue.write_buffer(&self.vbuf, 0, bytemuck::cast_slice(snow));
         queue.write_buffer(&self.vbuf, (MAX_VERTS * std::mem::size_of::<Vertex>()) as u64, bytemuck::cast_slice(rain));
         self.counts = [snow.len() as u32, rain.len() as u32];
-        let make = |t: &TextureView| {
-            device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("weather_bind"),
-                layout: &self.layout,
-                entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: self.ubuf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(opaque_depth) },
-                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.samp) },
-                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(t) },
-                ],
-            })
-        };
-        self.binds = Some([make(&self.snow_tex), make(&self.rain_tex)]);
     }
 
-    /// Inside the translucent-layer pass, after the water (it tests against the layer's depth).
+    /// Inside a pass over the scene, with the terrain's depth attached read-only.
     pub fn draw<'a>(&'a self, rp: &mut RenderPass<'a>) {
-        let Some(binds) = &self.binds else { return };
         if self.counts == [0, 0] {
             return;
         }
@@ -336,11 +323,11 @@ impl Weather {
         rp.set_vertex_buffer(0, self.vbuf.slice(..));
         let base = MAX_VERTS as u32;
         if self.counts[0] > 0 {
-            rp.set_bind_group(0, &binds[0], &[]);
+            rp.set_bind_group(0, &self.binds[0], &[]);
             rp.draw(0..self.counts[0], 0..1); // snow first, like the Java
         }
         if self.counts[1] > 0 {
-            rp.set_bind_group(0, &binds[1], &[]);
+            rp.set_bind_group(0, &self.binds[1], &[]);
             rp.draw(base..base + self.counts[1], 0..1);
         }
     }

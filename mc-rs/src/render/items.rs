@@ -4,7 +4,9 @@
 //! real item sprites.
 
 use crate::render::atlas;
-use crate::render::mesh::{push_box, VF};
+use crate::render::mesh::{lm, push_box, VF};
+use crate::world::chunk::brightness;
+use crate::world::effects::{Effects, Fx, MAX_BOLTS, MAX_PARTICLES};
 use glam::{Mat4, Vec3};
 
 use crate::world::items::{stack_tile, Drops, ItemStack, MAX_ITEMS};
@@ -13,7 +15,7 @@ use crate::world::ticks::{Falling, MAX_FALLING};
 
 /// 24 vertices x 7 floats (`mesh::VF`) per cube, 36 indices per cube.
 /// A mob is at most 12 boxes (spider 11), an arrow one, a falling block one.
-const BOXES: usize = MAX_ITEMS * 2 + MAX_MOBS * 12 + MAX_ARROWS + MAX_FALLING;
+const BOXES: usize = MAX_ITEMS * 2 + MAX_MOBS * 12 + MAX_ARROWS + MAX_FALLING + MAX_PARTICLES + MAX_BOLTS + 1;
 const VERTEX_BYTES: u64 = (BOXES * 24 * crate::render::mesh::VF * 4) as u64;
 const INDEX_BYTES: u64 = (BOXES * 36 * 4) as u64;
 
@@ -29,8 +31,9 @@ impl ItemMesh {
     }
 
     /// Upload this frame's items; returns the index count to draw.
-    pub fn update(&self, queue: &wgpu::Queue, drops: &Drops, mobs: &Mobs, falling: &[Falling]) -> u32 {
-        let (verts, idxs) = geometry(drops, mobs, falling);
+    /// `lv` = raw (sky, block) light of a cell: every entity is lit by its own cell.
+    pub fn update(&self, queue: &wgpu::Queue, drops: &Drops, mobs: &Mobs, falling: &[Falling], fx: &Effects, lv: &dyn Fn(i32, i32, i32) -> (u8, u8), hook: Option<Vec3>) -> u32 {
+        let (verts, idxs) = geometry(drops, mobs, falling, fx, lv, hook);
         if idxs.is_empty() {
             return 0;
         }
@@ -40,10 +43,22 @@ impl ItemMesh {
     }
 }
 
-fn geometry(drops: &Drops, mobs: &Mobs, falling: &[Falling]) -> (Vec<f32>, Vec<u32>) {
+/// Light the boxes pushed since vertex float `from` like `Entity.getBrightnessForRender`: the levels of the cell `at`, in the
+/// mesher's `lm` (the day's share is the `amb.x` uniform, as for terrain). ponytail: `light` is the brighter of the two levels.
+fn lit(verts: &mut [f32], from: usize, lv: &dyn Fn(i32, i32, i32) -> (u8, u8), at: Vec3) {
+    let (sky, block) = lv(at.x.floor() as i32, at.y.floor() as i32, at.z.floor() as i32);
+    let b = brightness(sky.max(block));
+    for v in verts[from..].chunks_exact_mut(VF) {
+        v[5] = b;
+        v[6] = lm(sky, block);
+    }
+}
+
+fn geometry(drops: &Drops, mobs: &Mobs, falling: &[Falling], fx: &Effects, lv: &dyn Fn(i32, i32, i32) -> (u8, u8), hook: Option<Vec3>) -> (Vec<f32>, Vec<u32>) {
     let (mut verts, mut idxs) = (Vec::new(), Vec::new());
     let a = drops.alpha();
     for e in &drops.items {
+        let n0 = verts.len();
         let mut c = e.prev.lerp(e.pos, a);
         c.y += ((e.age as f32 + a) / 10.0).sin() * 0.1 + 0.1;
         let h = 0.125;
@@ -56,19 +71,49 @@ fn geometry(drops: &Drops, mobs: &Mobs, falling: &[Falling]) -> (Vec<f32>, Vec<u
             }
             None => push_box(&mut verts, &mut idxs, [c.x - h, c.y - h, c.z - h], [c.x + h, c.y + h, c.z + h], stack_tile(e.stack), 1.0),
         }
+        lit(&mut verts, n0, lv, c);
     }
     for m in &mobs.list {
+        let n0 = verts.len();
         push_mob(&mut verts, &mut idxs, m);
+        lit(&mut verts, n0, lv, m.body.pos);
     }
     for a in &mobs.arrows {
         let (p, h) = (a.pos, 0.06);
+        let n0 = verts.len();
         push_box(&mut verts, &mut idxs, [p.x - h, p.y - h, p.z - h], [p.x + h, p.y + h, p.z + h], stack_tile(ItemStack { id: 35, count: 1, damage: 12 }), 1.0);
+        lit(&mut verts, n0, lv, p);
+    }
+    // The fishing bobber: a small red box.
+    if let Some(p) = hook {
+        let (h, n0) = (0.125, verts.len());
+        push_box(&mut verts, &mut idxs, [p.x - h, p.y, p.z - h], [p.x + h, p.y + 2.0 * h, p.z + h], stack_tile(ItemStack { id: 35, count: 1, damage: 14 }), 1.0);
+        lit(&mut verts, n0, lv, p);
+    }
+    // The fishing bobber: a small red box.
+    if let Some(p) = hook {
+        let h = 0.125;
+        push_box(&mut verts, &mut idxs, [p.x - h, p.y, p.z - h], [p.x + h, p.y + 2.0 * h, p.z + h], stack_tile(ItemStack { id: 35, count: 1, damage: 14 }), 1.0);
     }
     // A falling block is a 0.98 box in its block's flat colour (`EntityFallingSand`).
     for f in falling {
         let c = f.prev.lerp(f.pos, a);
         let h = 0.49;
+        let n0 = verts.len();
         push_box(&mut verts, &mut idxs, [c.x - h, c.y - h, c.z - h], [c.x + h, c.y + h, c.z + h], stack_tile(ItemStack { id: f.id as u16, count: 1, damage: 0 }), 1.0);
+        lit(&mut verts, n0, lv, c);
+    }
+    // Water and spawner particles: small full-bright boxes in a flat colour (wool: white, light blue, orange, grey). ponytail: no
+    // textured quads facing the camera (`EntityFX.renderParticle`), no sprite from `particles.png`.
+    for p in &fx.particles {
+        let (c, h) = (p.prev.lerp(p.pos, a), p.half * 0.5);
+        let damage = match p.kind { Fx::Bubble => 0, Fx::Splash => 3, Fx::Flame => 1, Fx::Smoke => 7 };
+        push_box(&mut verts, &mut idxs, [c.x - h, c.y - h, c.z - h], [c.x + h, c.y + h, c.z + h], stack_tile(ItemStack { id: 35, count: 1, damage }), 1.0);
+    }
+    // A lightning bolt: one straight white column from the ground up (vanilla's is jagged, seeded by `field_27029_a`).
+    for b in fx.bolts.iter().filter(|b| b.visible()) {
+        let (p, w) = (b.pos, 0.15);
+        push_box(&mut verts, &mut idxs, [p.x - w, p.y, p.z - w], [p.x + w, p.y + 96.0, p.z + w], stack_tile(ItemStack { id: 35, count: 1, damage: 0 }), 1.0);
     }
     (verts, idxs)
 }
@@ -168,6 +213,7 @@ fn push_mob(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, m: &Mob) {
         * Mat4::from_scale(Vec3::new(-1.0, -1.0, 1.0) * m.size / 16.0)
         * Mat4::from_translation(Vec3::new(0.0, -23.875, 0.0));
     let own = match m.kind {
+        Sheep if m.sheared => 8, // bare skin
         Sheep => m.color,
         k => crate::world::mobs::colour(k),
     };

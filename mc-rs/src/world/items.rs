@@ -56,7 +56,7 @@ pub fn name(s: ItemStack) -> Option<&'static str> {
 /// `Item.maxStackSize`: tools, armor, buckets, sign, doors, bed and stew 1, snowball 16, cookie 8, everything else 64.
 pub fn max_stack(id: u16) -> u8 {
     match id {
-        282 | 323 | 324 | 330 | 355 | 325..=327 | 335 => 1,
+        261 | 282 | 323 | 324 | 330 | 346 | 355 | 325..=327 | 335 => 1,
         332 => 16,
         357 => 8,
         _ if craft::tool(id).is_some() || craft::armor(id).is_some() => 1,
@@ -90,7 +90,10 @@ pub fn tile(id: u16) -> u8 {
         359 => 42,       // shears
         325 | 326 | 327 => [42, 9, 11][id as usize - 325], // buckets: iron, water, lava
         335 => 35,       // milk
-        281 => 5,        // bowl
+        281 | 261 | 346 => 5, // bowl, bow, rod
+        262 => 13,       // arrow (flint)
+        297 => 12,       // bread (sand)
+        349 | 350 => 9,  // fish
         282 => 39,       // mushroom stew
         // Tools: the material's colour (wood, stone, iron, diamond, gold); the HUD draws the head shape on top.
         _ => craft::tool(id).map(|(_, m)| m).or(craft::armor(id).map(|a| a.1)).map_or(255, |m| [5, 4, 42, 57, 41][m]),
@@ -150,6 +153,9 @@ fn id_dropped(b: u8, r: &mut JavaRandom) -> i32 {
         55 | 73 | 74 => 331,                                          // redstone
         61 | 62 => 61,                                                // lit furnace -> furnace
         63 | 68 => 323,                                               // signs
+        26 => 355,                                                    // bed
+        64 => 324,                                                    // wooden door
+        71 => 330,                                                    // iron door
         75 | 76 => 76,                                                // redstone torches
         80 => 332,                                                    // snow block -> snowball
         82 => 337,                                                    // clay
@@ -226,6 +232,13 @@ impl Inventory {
             self.slots[slot] = Some(ItemStack { id: BOWL, count: 1, damage: 0 });
         }
         Some(heal)
+    }
+
+    /// `InventoryPlayer.consumeInventoryItem`: use up one `id` from the first stack that has it (main slots only).
+    pub fn take_one(&mut self, id: u16) -> bool {
+        let Some(i) = self.slots[..MAIN].iter().position(|s| s.is_some_and(|s| s.id == id)) else { return false };
+        self.consume(i);
+        true
     }
 
     /// Use up one item of `slot` (`--stackSize`); an emptied stack becomes `None`.
@@ -360,6 +373,9 @@ impl Drops {
     /// The caller has already checked `dig::can_harvest` (vanilla `sendBlockRemoved`: no harvest, no drop).
     /// `meta` is the block's metadata from before it was cleared (`ChunkManager::meta`): it decides the damage.
     pub fn spawn_block(&mut self, block: u8, meta: u8, cell: (i32, i32, i32)) {
+        if matches!(block, 26 | 64 | 71) && meta & 8 != 0 {
+            return; // BlockBed / BlockDoor.idDropped: the second half drops nothing
+        }
         for _ in 0..quantity(block, &mut self.rng) {
             self.rng.next_float(); // `nextFloat() <= chance` with chance 1.0: always true, but it draws
             let id = id_dropped(block, &mut self.rng);
@@ -386,6 +402,11 @@ impl Drops {
         let pos = eye - Vec3::new(0.0, 0.3, 0.0);
         let vel = forward * 0.3 + Vec3::new(0.0, 0.1, 0.0);
         self.push(ItemEntity { pos, prev: pos, vel, stack, age: 0, delay: 40, on_ground: false });
+    }
+
+    /// A stack leaving `pos` with `vel` blocks per tick (a caught fish flying to the player), pick-up delay 10.
+    pub fn throw_from(&mut self, stack: ItemStack, pos: Vec3, vel: Vec3) {
+        self.push(ItemEntity { pos, prev: pos, vel, stack, age: 0, delay: 10, on_ground: false });
     }
 
     /// A broken furnace's contents pop out of the middle of its cell (`BlockFurnace.onBlockRemoved`).
@@ -487,7 +508,7 @@ mod tests {
         // 36 slots: the 28th stack goes to slot 27. Tools stack 1 and the use past the durability breaks them.
         let mut inv = Inventory::default();
         let mut s = ItemStack { id: 4, count: 64, damage: 0 };
-        assert!(max_stack(285) == 1 && max_stack(280) == 64 && SLOTS == 36);
+        assert!(max_stack(285) == 1 && max_stack(280) == 64 && MAIN == 36);
         inv.slots[..27].fill(Some(ItemStack { id: 5, count: 64, damage: 0 }));
         assert!(inv.add(&mut s) && inv.slots[27] == Some(ItemStack { id: 4, count: 64, damage: 0 }));
         inv.slots[0] = Some(ItemStack { id: 285, count: 1, damage: 31 }); // golden pickaxe: 32 uses

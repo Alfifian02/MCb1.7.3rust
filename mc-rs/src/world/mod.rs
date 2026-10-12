@@ -12,6 +12,8 @@ pub mod mobs;
 pub mod names;
 pub mod craft;
 pub mod chest;
+pub mod gear;
 pub mod vitals;
+pub mod effects;
 pub mod save;
 pub mod ticks;

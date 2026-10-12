@@ -45,6 +45,8 @@ original. Anything that cannot be derived from the b1.7.3 sources is marked
 | Photon M5 post chain | written; shader module validated by a host test and the whole chain run headless on lavapipe (Vulkan, 4 configs, no NaN); `lib.rs` wiring NOT compiled, not run on a device | `render/post.rs` + `post.wgsl`: line-by-line port of Photon's `c2_dof`, `c4_taa_exposure`, `c5`..`c18` bloom, `c19_color_grading` (ACES RRT+ODT, rec. 2020 working space), `c21_fxaa`, `final` (CAS + dither). The world now draws into `Post`'s scene texture, the light shafts blend into it, the chain ends on the surface and the HUD is drawn over it. See ROADMAP changelog. |
 | Photon port M6 (GTAO, water, weather) | written WITHOUT a Rust toolchain: not compiled, not run, not wired into `lib.rs` | `render/gtao.rs`, `render/water.rs`, `render/weather.rs`, `render/noise.rs`: ports of Photon's `d3_ao`, translucent water + `c1_blend_layers`, `gbuffers_weather`, and b1.7.3 `renderRainSnow`. Waits for the HDR target of milestone 1. See ROADMAP changelog. |
 | Rendering gaps       | written WITHOUT a Rust toolchain: not compiled, not run | Biome tint per block, grass side overlay, animated water/lava/fire (`render/anim.rs`), mipmaps, item sprites (HUD + drops), back-to-front water chunks, door / bed / ladder / rail models. See ROADMAP changelog. |
+| Player + world effects | written WITHOUT a Rust toolchain: not compiled, not run | `world/effects.rs`: splash + drowning bubbles, suffocation, lightning (thunderstorm rolls, bolt, damage, sky flash), dungeon mob spawners as tile entities (saved), rain/snow streaks wired into the frame (`render/weather.rs`), entities lit by their own cell. See ROADMAP changelog. |
+| Gear + shift-click | written; logic tested on a Linux host (51 tests, `world/` only); `lib.rs` wiring NOT compiled, not run on a device | `world/gear.rs`: empty/full buckets (water + lava sources, milk from a cow), bow + arrows (player arrows hurt mobs, land as pick-up items), fishing rod + bobber (`EntityFish`, raw fish), shears and dye on sheep (bare for good, no regrowth in b1.7.3), bread / golden apple / bow / arrow / rod recipes, armor bar in the HUD, shift-click (UNVERIFIED: not in b1.7.3) behind a toggle button. See ROADMAP changelog. |
 | M9..M14              | pending | Everything else: see ROADMAP.md for the order. |
 
 Latest commit on `main`: see `git log -1`. Latest released APK: see the
@@ -89,6 +91,7 @@ mc-rs/
       craft.rs            M6: tools (EnumToolMaterial, getStrVsBlock, canHarvestBlock), recipes (CraftingManager), inventory/workbench screen (Container clicks) + its GUI geometry
       sky.rs              day/night + weather: sun angle, skylight subtracted, sky/fog/sunrise colours, star brightness + positions, `Weather` (rain/thunder timers)
       save.rs             M7: chunk file codec (RLE), `Level` codec (player, inventory, furnaces, drops), atomic write
+      effects.rs          particles (splash, bubbles), lightning, suffocation, dungeon spawners
       vitals.rs           health, air, fire, fall damage (EntityLiving.attackEntityFrom and friends)
       chunks/light.rs     M5 light engine (port of World/Chunk lighting)
       ticks.rs            M6b block updates: scheduled + random ticks, notifications, water/lava, sand, leaves, saplings, crops

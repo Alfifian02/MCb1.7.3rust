@@ -37,16 +37,23 @@ pub struct Region {
     d: [Nibbles; 4],
     /// The tile entities populate filled: dungeon chests and their loot (`WorldGenDungeons`).
     loot: Vec<(Pos, Chest)>,
+    /// Dungeon spawners and the mob index `pickMobSpawner` drew (0..4).
+    spawners: Vec<(Pos, u8)>,
 }
 
 impl Region {
     pub fn new(cx: i32, cz: i32, b: [Vec<u8>; 4], d: [Nibbles; 4]) -> Self {
-        Self { cx, cz, b, d, loot: Vec::new() }
+        Self { cx, cz, b, d, loot: Vec::new(), spawners: Vec::new() }
     }
 
     /// The chests populate filled since the last call.
     pub fn take_loot(&mut self) -> Vec<(Pos, Chest)> {
         std::mem::take(&mut self.loot)
+    }
+
+    /// The spawners populate placed since the last call.
+    pub fn take_spawners(&mut self) -> Vec<(Pos, u8)> {
+        std::mem::take(&mut self.spawners)
     }
 
     pub fn into_parts(self) -> ([Vec<u8>; 4], [Nibbles; 4]) {
@@ -482,7 +489,8 @@ fn dungeon(w: &mut Region, r: &mut JavaRandom, x: i32, y: i32, z: i32) {
         }
     }
     w.set(x, y, z, SPAWNER);
-    r.next_int_bound(4); // mob
+    let mob = r.next_int_bound(4) as u8; // pickMobSpawner
+    w.spawners.push(((x, y, z), mob));
 }
 
 /// WorldGenDungeons.pickCheckLootItem: the stack picked, if any (same draws, in the same order, as the Java).

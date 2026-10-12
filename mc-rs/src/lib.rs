@@ -38,6 +38,7 @@ use crate::world::dig::{self, Dig};
 use crate::world::chest::{self, Chest};
 use crate::world::craft::{self, Furnace, Screen};
 use crate::world::items::{self, Drops, Inventory, ItemStack};
+use crate::world::gear::{self, Hook, Used};
 use crate::world::mobs::{self, Ctx, Ev, Mobs};
 use crate::world::ticks::Ticks;
 use crate::world::save::{self, Level};
@@ -46,6 +47,8 @@ use crate::world::chunk::{is_plant, outline_bounds, physics_id, pick_bounds};
 use crate::world::chunks::{chunk_coord, ChunkManager, Shape};
 use crate::world::physics::{self, Player};
 use crate::world::vitals::{self, Env, Vitals};
+use crate::world::effects::{self, Effects, Spawner};
+use crate::render::weather;
 
 /// Render distance in chunks (a circle of this radius is meshed and drawn, two more are generated).
 const RENDER_DIST: i32 = 4;
@@ -123,6 +126,12 @@ struct App {
     ent_shadow_dirty: bool,
     weather: sky::Weather,
     weather_ticks: u64,
+    /// Water particles, lightning and the dungeon spawners (`world::effects`).
+    fx: Effects,
+    /// Rain and snow streaks (`render::weather`), drawn over the finished scene.
+    rain_fx: weather::Weather,
+    /// The player's box touched water last frame (`Entity.inWater`): a splash on entry.
+    was_in_water: bool,
     /// Hotbar slot last seen and seconds its item name still shows (`GuiIngame` shows it ~2 s after a switch).
     tip: (usize, f32),
     /// Survival digging state and the leftover time towards the next 20 Hz dig tick.
@@ -138,6 +147,10 @@ struct App {
     /// Open container screen (the 2x2 inventory or a workbench's 3x3) and its "place one" click toggle.
     screen: Option<Screen>,
     one_mode: bool,
+    /// Shift-click toggle (second button beside `one_mode`): a tap on a slot quick-moves its stack.
+    shift_mode: bool,
+    /// The fishing bobber in the water (`EntityPlayer.fishEntity`).
+    hook: Option<Hook>,
     /// Furnace tile entities by block position (created on first use), and the time left over from the last 20 Hz tick.
     furnaces: HashMap<(i32, i32, i32), Furnace>,
     furn_acc: f32,
@@ -153,6 +166,10 @@ struct App {
     /// Health, air and fire; and where a dead player comes back (the first spawn: no beds yet).
     vitals: Vitals,
     spawn: glam::Vec3,
+    /// Asleep: the bed's cell (the half with bit 8) and the ticks slept (`EntityPlayer.sleepTimer`, 100 = fully asleep).
+    sleep: Option<(i32, i32, i32, u32)>,
+    /// The bed a respawn goes to while it still stands (`playerSpawnCoordinate`).
+    bed_spawn: Option<(i32, i32, i32)>,
     /// Where this world is saved (M7) and the play time since the last autosave.
     dir: PathBuf,
     save_acc: f32,
@@ -207,6 +224,7 @@ impl App {
         let hud = HudPipeline::new(&gpu.device, &gpu.queue, surface_format, width, height);
         let outline = Outline::new(&gpu.device);
         let item_mesh = ItemMesh::new(&gpu.device);
+        let rain_fx = weather::Weather::new(&gpu.device, &gpu.queue, photon::HDR_FORMAT);
         let sky_renderer = SkyRenderer::new(&gpu.device, &gpu.queue, photon::HDR_FORMAT);
         let shadows = Shadows::new(&gpu.device, &gpu.queue);
         let shafts = LightShafts::new(&gpu.device, photon::HDR_FORMAT, &pipe.shadow_layout, &shadows.layout);
@@ -245,6 +263,9 @@ impl App {
             ent_shadow_dirty: true,
             weather: sky::Weather::new(seed),
             weather_ticks: 0,
+            fx: Effects::new(seed),
+            rain_fx,
+            was_in_water: false,
             tip: (0, 0.0),
             dig: Dig::default(),
             dig_acc: 0.0,
@@ -255,6 +276,8 @@ impl App {
             item_mesh,
             screen: None,
             one_mode: false,
+            shift_mode: false,
+            hook: None,
             furnaces: HashMap::new(),
             chests: HashMap::new(),
             furn_acc: 0.0,
@@ -264,6 +287,8 @@ impl App {
             gesture: None,
             vitals: Vitals::default(),
             spawn,
+            sleep: None,
+            bed_spawn: None,
             dir,
             save_acc: 0.0,
         };
@@ -285,12 +310,14 @@ impl App {
         self.chunks = ChunkManager::new(SEED, RENDER_DIST).with_dir(self.dir.clone()); // the old one's workers stop on drop
         self.chunks.preload(0, 0);
         self.spawn = find_spawn(&self.chunks);
+        (self.sleep, self.bed_spawn) = (None, None);
         let s = self.spawn;
         self.player = Player { pos: s, vel: glam::Vec3::ZERO, on_ground: false };
         let aspect = self.camera.aspect;
         self.camera = FirstPersonCamera::spawn_at(s.x, s.y + EYE_HEIGHT, s.z);
         self.camera.aspect = aspect;
         (self.world_ticks, self.weather_ticks, self.weather) = (0.0, 0, sky::Weather::new(seed));
+        self.fx = Effects::new(seed);
         (self.tip, self.dig, self.dig_acc, self.target, self.shadow) = ((0, 0.0), Dig::default(), 0.0, None, ShadowCache::new());
         (self.inv, self.drops, self.mobs, self.ticks) = (Inventory::default(), Drops::new(seed), Mobs::new(seed), Ticks::new(seed));
         (self.furnaces, self.furn_acc, self.vitals, self.save_acc) = (HashMap::new(), 0.0, Vitals::default(), 0.0);
@@ -312,6 +339,8 @@ impl App {
         self.inv.slots = l.inv;
         self.furnaces = l.furnaces.into_iter().collect();
         self.chests = l.chests.into_iter().collect();
+        self.fx.spawners = l.spawners.into_iter().map(|(p, kind, delay)| (p, Spawner { kind, delay })).collect();
+        self.bed_spawn = l.bed;
         self.drops.items = l.drops.into_iter().map(|(p, s, age)| items::ItemEntity::resting(p, s, age)).collect();
     }
 
@@ -335,6 +364,8 @@ impl App {
             inv: self.inv.slots,
             furnaces: self.furnaces.iter().map(|(&p, f)| (p, f.clone())).collect(),
             chests: self.chests.iter().map(|(&p, &c)| (p, c)).collect(),
+            spawners: self.fx.spawners.iter().map(|(&p, s)| (p, s.kind, s.delay)).collect(),
+            bed: self.bed_spawn,
             drops: self.drops.items.iter().map(|e| (e.pos, e.stack, e.age)).collect(),
         };
         if let Err(e) = save::write(&self.dir.join("level"), &level.encode()) {
@@ -380,7 +411,7 @@ impl App {
         // The death screen's resume button was pressed: come back at the spawn point with full health.
         if self.vitals.dead() {
             self.vitals = Vitals::default();
-            self.player.pos = self.spawn;
+            self.player.pos = self.respawn_pos();
             self.player.vel = glam::Vec3::ZERO;
         }
         // Autosave while playing (not with a screen open: its cursor stack is not in the inventory yet).
@@ -400,12 +431,19 @@ impl App {
         let angle = sky::celestial_angle(self.world_ticks as u64, 1.0);
         let sub = sky::skylight_subtracted(angle, self.weather.rain(1.0), self.weather.thunder(1.0));
         self.chunks.set_sky_sub(sub);
-        self.camera.add_yaw(look_dx * LOOK_SENS);
-        self.camera.add_pitch(look_dy * LOOK_SENS);
+        // Asleep, the jump button is "leave bed" (`GuiSleepMP`); the view and the body stay put.
+        if self.sleep.is_some() && self.touch.jumping() {
+            self.wake(true);
+        }
+        let asleep = self.sleep.is_some();
+        if !asleep {
+            self.camera.add_yaw(look_dx * LOOK_SENS);
+            self.camera.add_pitch(look_dy * LOOK_SENS);
+        }
         // Analog move stick: rotate the camera-frame (fwd, side) by yaw into
         // world-space velocity. Set every frame (zero when the stick is idle),
         // otherwise the player keeps sliding after the finger lifts.
-        let (fwd, side) = self.touch.move_input;
+        let (fwd, side) = if asleep { (0.0, 0.0) } else { self.touch.move_input };
         let yaw = self.camera.yaw;
         // forward = -Z when yaw = 0; rotate by yaw around +Y.
         self.player.vel.x = (fwd * yaw.sin() + side * yaw.cos()) * MOVE_SPEED;
@@ -414,12 +452,23 @@ impl App {
         let get = |x: i32, y: i32, z: i32| self.chunks.block(x, y, z).map(|b| if is_plant(b) { 0 } else { physics_id(b, self.chunks.meta(x, y, z)) });
         // The held jump button jumps (8.4 m/s, the b1.7.3 velocity) or swims up; fluids (ids 8..=11) are not solid.
         let y0 = self.player.pos.y;
-        let (water, lava) = physics::step(&mut self.player, dt, self.touch.jumping(), &get);
+        let (water, lava) = if asleep { (false, false) } else { physics::step(&mut self.player, dt, self.touch.jumping(), &get) };
         self.camera.pos = self.player.pos + glam::Vec3::new(0.0, EYE_HEIGHT, 0.0);
         let e = self.camera.pos;
         let eye_in_water = matches!(self.chunks.block_loaded(e.x.floor() as i32, e.y.floor() as i32, e.z.floor() as i32), Some(8 | 9));
         self.vitals.armor = craft::armor_value(&self.inv.slots[items::MAIN..]);
-        self.vitals.update(dt, Env { dy: self.player.pos.y - y0, on_ground: self.player.on_ground, water, lava, eye_in_water, eye_y: e.y });
+        // `Entity.isEntityInsideOpaqueBlock` at the head (`EntityPlayer.getEyeHeight` is 0.12 over the eye): 1 damage a tick in a wall.
+        let in_wall = effects::inside_opaque(&|x, y, z| self.chunks.block(x, y, z), self.player.pos.x, self.player.pos.y + 0.84, self.player.pos.z, 0.6);
+        self.vitals.update(dt, Env { dy: self.player.pos.y - y0, on_ground: self.player.on_ground, water, lava, eye_in_water, eye_y: e.y, in_wall });
+        // Entering water splashes (`Entity.onEntityUpdate`); running out of air pops 8 bubbles round the eye (`EntityLiving.onEntityUpdate`).
+        let motion = self.player.vel / 20.0; // blocks per tick
+        if water && !self.was_in_water {
+            self.fx.splash(glam::Vec3::new(self.player.pos.x, (self.player.pos.y - 0.9).floor() + 1.0, self.player.pos.z), 0.6, motion);
+        }
+        self.was_in_water = water;
+        if std::mem::take(&mut self.vitals.drowned) {
+            self.fx.breath(e, motion);
+        }
         // `InventoryPlayer.damageArmor`: every worn piece takes the damage that was dealt (before armor).
         let wear = std::mem::take(&mut self.vitals.wear) as u16;
         (items::MAIN..items::SLOTS).filter(|_| wear > 0).for_each(|i| self.inv.damage(i, wear));
@@ -449,8 +498,19 @@ impl App {
         self.furn_acc += dt;
         while self.furn_acc >= dig::TICK {
             self.furn_acc -= dig::TICK;
+            // The bobber: gone when the rod is not in hand, 32 blocks away, or after 1200 ticks on the ground.
+            if let Some(h) = &mut self.hook {
+                let rod = self.inv.slots[self.touch.hotbar_slot].is_some_and(|s| s.id == gear::ROD);
+                let get = |x: i32, y: i32, z: i32| self.chunks.block(x, y, z);
+                let rain = self.weather.rain(1.0) > 0.5;
+                if !rod || h.pos.distance_squared(self.player.pos) > 1024.0 || !h.tick(&get, &mut self.mobs.rng, rain) {
+                    self.hook = None;
+                }
+            }
             let centre = (chunk_coord(self.player.pos.x), chunk_coord(self.player.pos.z));
-            self.ticks.step(&mut self.chunks, &mut self.drops, centre);
+            self.sleep_tick(sub);
+            self.ticks.step(&mut self.chunks, &mut self.drops, centre, self.weather.rain(1.0));
+            self.tick_effects(centre);
             let mut flips = Vec::new();
             for (&pos, f) in self.furnaces.iter_mut() {
                 if matches!(self.chunks.block_loaded(pos.0, pos.1, pos.2), Some(61 | 62)) && f.tick() {
@@ -465,6 +525,11 @@ impl App {
             for (p, c) in self.chunks.take_loot() {
                 self.chests.entry(p).or_insert(c);
             }
+            // Dungeon spawners (`TileEntityMobSpawner`): taken over from populate; one whose block is gone is dropped.
+            for (p, kind) in self.chunks.take_spawners() {
+                self.fx.spawners.entry(p).or_insert(Spawner { kind, delay: 20 });
+            }
+            self.fx.spawners.retain(|&(x, y, z), _| self.chunks.block_loaded(x, y, z).map_or(true, |b| b == effects::SPAWNER_ID));
             let gone: Vec<_> = self.chests.keys().copied().filter(|&(x, y, z)| self.chunks.block_loaded(x, y, z).is_some_and(|b| b != chest::ID)).collect();
             for p in gone {
                 for st in self.chests.remove(&p).into_iter().flatten().flatten() {
@@ -549,6 +614,28 @@ impl App {
             let (eye, fwd, slot) = (self.camera.pos, self.camera.forward(), self.touch.hotbar_slot);
             let wall = self.target.map_or(f32::MAX, |h| h.point.distance(eye.as_dvec3()) as f32);
             if let Some((i, _)) = self.mobs.pick(eye, fwd, pick::REACH as f32).filter(|&(_, t)| t < wall) {
+                if let Some(h) = self.inv.slots[slot] {
+                    // Shears / dye on a sheep, a bucket on a cow: `Entity.interact` before the attack.
+                    let used = gear::use_on_mob(&mut self.mobs.list[i], h, &mut self.mobs.rng);
+                    let at = self.mobs.list[i].body.pos;
+                    let cell = (at.x.floor() as i32, at.y.floor() as i32, at.z.floor() as i32);
+                    match used {
+                        Some(Used::Sheared(wool)) => {
+                            wool.into_iter().for_each(|w| self.drops.spawn_stack(w, cell));
+                            self.inv.damage(slot, 1);
+                            return;
+                        }
+                        Some(Used::Dyed) => {
+                            self.inv.consume(slot);
+                            return;
+                        }
+                        Some(Used::Milked) => {
+                            self.inv.slots[slot] = Some(ItemStack { id: gear::MILK_BUCKET, count: 1, damage: 0 });
+                            return;
+                        }
+                        None => {}
+                    }
+                }
                 let held = self.inv.slots[slot].map(|s| s.id);
                 let (dmg, wear) = mobs::attack(held);
                 self.mobs.hit(i, dmg, self.player.pos);
@@ -558,7 +645,7 @@ impl App {
         }
         let Some(hit) = self.target else {
             if place {
-                self.eat();
+                self.use_held();
             }
             return;
         };
@@ -572,6 +659,16 @@ impl App {
                 Some(61 | 62) => {
                     self.furnaces.entry(hit.pos).or_default();
                     self.open_screen(Screen::at_furnace(hit.pos));
+                    return;
+                }
+                // BlockDoor.blockActivated: a wooden door swings, an iron one ignores the hand.
+                Some(64) => {
+                    self.toggle_door(hit.pos);
+                    return;
+                }
+                Some(71) => return,
+                Some(26) => {
+                    self.use_bed(hit.pos);
                     return;
                 }
                 Some(chest::ID) => {
@@ -590,6 +687,41 @@ impl App {
             // places anything. ponytail: farmland stays farmland (no `BlockFarmland.updateTick` reverting it to dirt),
             // it is drawn as a full cube (the original is 15/16 high) and nothing grows on it yet.
             let slot = self.touch.hotbar_slot;
+            // ItemBed.onItemUse: only against a top face, both halves on air over solid cubes.
+            if self.inv.slots[slot].is_some_and(|s| s.id == 355) {
+                let (x, y, z) = pick::place_pos(&hit);
+                let yaw = self.camera.yaw.to_degrees() + 180.0;
+                let n = pick::bed_meta(&|a, b, c| self.chunks.block_loaded(a, b, c).unwrap_or(0), (x, y, z), yaw);
+                if let Some(n) = n.filter(|_| hit.face == 1) {
+                    let (dx, dz) = pick::BED_DIR[n as usize];
+                    self.chunks.set_block_meta(x, y, z, 26, n);
+                    self.chunks.set_block_meta(x + dx, y, z + dz, 26, n + 8);
+                    self.inv.consume(slot);
+                }
+                return;
+            }
+            // ItemDoor.onItemUse: only against a top face; both halves are written before the neighbours are told.
+            if let Some(s) = self.inv.slots[slot].filter(|s| matches!(s.id, 324 | 330)) {
+                let (x, y, z) = pick::place_pos(&hit);
+                let bid = if s.id == 324 { 64 } else { 71 };
+                let yaw = self.camera.yaw.to_degrees() + 180.0;
+                let meta = pick::door_meta(&|a, b, c| self.chunks.block_loaded(a, b, c).unwrap_or(0), (x, y, z), yaw, bid);
+                if let Some(m) = meta.filter(|_| hit.face == 1) {
+                    self.chunks.set_block_meta(x, y, z, bid, m);
+                    self.chunks.set_block_meta(x, y + 1, z, bid, m + 8);
+                    self.inv.consume(slot);
+                }
+                return;
+            }
+            // ItemFlintAndSteel.onItemUse: fire in the empty cell next to the face aimed at; one use of wear either way.
+            if self.inv.slots[slot].is_some_and(|s| s.id == craft::FLINT_AND_STEEL) {
+                let (x, y, z) = pick::place_pos(&hit);
+                if self.chunks.block_loaded(x, y, z) == Some(0) {
+                    self.chunks.set_block(x, y, z, 51);
+                }
+                self.inv.damage(slot, 1);
+                return;
+            }
             if self.inv.slots[slot].is_some_and(|s| craft::is_hoe(s.id)) {
                 let (x, y, z) = hit.pos;
                 let (b, above) = (self.chunks.block_loaded(x, y, z), self.chunks.block_loaded(x, y + 1, z));
@@ -606,14 +738,14 @@ impl App {
             // (ponytail: plants are refused there too).
             if let Some(s) = self.inv.slots[slot].filter(|s| s.id < 256) {
                 // A torch's facing comes from the face aimed at and what can hold it (None = nothing to hang on: no placement).
-                let meta = if s.id == 50 { pick::torch_meta(&|a, b, c| self.chunks.block_loaded(a, b, c).unwrap_or(0), (x, y, z), hit.face) } else { Some(items::placed_meta(s)) };
+                let meta = if s.id == 50 { pick::torch_meta(&|a, b, c| self.chunks.block_loaded(a, b, c).unwrap_or(0), (x, y, z), hit.face) } else if matches!(s.id, 53 | 67) { Some(pick::stairs_meta(self.camera.yaw.to_degrees() + 180.0)) } else { Some(items::placed_meta(s)) };
                 if let Some(meta) = meta.filter(|_| y < 127 && self.chunks.block_loaded(x, y, z).is_some_and(pick::replaceable) && !pick::overlaps_player((x, y, z), s.id as u8, self.player.pos) && (s.id != chest::ID as u16 || chest::can_place(&|a, b, c| self.chunks.block(a, b, c).unwrap_or(0), (x, y, z)))) {
                     if self.chunks.set_block_meta(x, y, z, s.id as u8, meta) {
                         self.inv.consume(slot);
                     }
                 }
             } else {
-                self.eat();
+                self.use_held();
             }
         }
     }
@@ -622,6 +754,36 @@ impl App {
     /// food is eaten, aimed at a block or not.
     /// `Explosion` at `at`: the rays pick the cells (`Mobs::explode`), a broken block drops with chance 0.3 (vanilla: per item),
     /// the player takes `(impact^2 + impact) / 2 x 8 x power + 1` (no exposure test, no knockback).
+    /// One 20 Hz tick of `world::effects`: thunderstorm rolls and what a bolt hits, particles, spawners.
+    fn tick_effects(&mut self, centre: (i32, i32)) {
+        // `World.tick`: in a thunderstorm (`func_27161_C` rain > 0.2 and `func_27160_B` thunder > 0.9) each chunk near the player
+        // rolls 1 in 100000 for a bolt on a column that is rained on (`canBlockBeRainedOn`: open to the sky, in a biome with rain).
+        if self.weather.rain(1.0) > 0.2 && self.weather.thunder(1.0) > 0.9 {
+            for (x, z) in self.fx.storm(centre) {
+                let y = self.chunks.top_solid(x, z);
+                if y >= 0 && self.chunks.biomes(x, z, 1, 1)[0].rains() {
+                    self.fx.strike(glam::Vec3::new(x as f32, y as f32, z as f32));
+                }
+            }
+        }
+        let get = |x: i32, y: i32, z: i32| self.chunks.block(x, y, z);
+        for b in self.fx.tick(&get) {
+            // `Entity.onStruckByLightning` for everything in the bolt's box.
+            if effects::struck(b, self.player.pos, glam::Vec3::new(0.3, 0.9, 0.3)) {
+                self.vitals.lightning();
+            }
+            for m in self.mobs.list.iter_mut().filter(|m| effects::struck(b, m.body.pos, m.half)) {
+                m.damage(5, b, &mut self.mobs.rng); // ponytail: through `damage`, so it also knocks back; no burning
+            }
+        }
+        // Spawners see the same world as the mobs do (plants read as air).
+        let get = |x: i32, y: i32, z: i32| self.chunks.block(x, y, z).map(|b| if is_plant(b) { 0 } else { physics_id(b, self.chunks.meta(x, y, z)) });
+        let light = |x: i32, y: i32, z: i32| self.chunks.light(x, y, z);
+        let ctx = Ctx { get: &get, light: &light, day: false, player: self.player.pos, eye: self.camera.pos };
+        let chunks = &self.chunks;
+        self.fx.tick_spawners(&mut self.mobs, &ctx, &|(x, _, z)| chunks.block_loaded(x, 0, z).is_some());
+    }
+
     fn explode(&mut self, at: glam::Vec3, power: f32) {
         let cells = self.mobs.explode(&|x: i32, y: i32, z: i32| self.chunks.block(x, y, z), at, power);
         for (x, y, z) in cells {
@@ -635,6 +797,147 @@ impl App {
         let impact = 1.0 - (self.player.pos - at).length() / (power * 2.0);
         if impact > 0.0 {
             self.vitals.hurt(((impact * impact + impact) / 2.0 * 8.0 * power + 1.0) as i32);
+        }
+    }
+
+    /// `World.isDaytime`: the sky-light subtraction is under 4.
+    fn daytime(&self) -> bool {
+        let angle = sky::celestial_angle(self.world_ticks as u64, 1.0);
+        sky::skylight_subtracted(angle, self.weather.rain(1.0), self.weather.thunder(1.0)) < 4
+    }
+
+    /// `EntityPlayer.func_25060_a`: the bed's free cell, else the world spawn (feet 0.1 above the cell; `pos` is the box centre).
+    fn respawn_pos(&self) -> glam::Vec3 {
+        let get = |a, b, c| self.chunks.block_loaded(a, b, c).unwrap_or(0);
+        let cell = self.bed_spawn.filter(|&(x, y, z)| get(x, y, z) == 26).and_then(|b| pick::wake_cell(&get, b, self.chunks.meta(b.0, b.1, b.2)));
+        cell.map_or(self.spawn, |(x, y, z)| glam::Vec3::new(x as f32 + 0.5, y as f32 + 1.0, z as f32 + 0.5))
+    }
+
+    /// `BlockBed.blockActivated` + `EntityPlayer.sleepInBedAt` (only the OK status: at night, within 3 / 2 / 3 blocks).
+    /// ponytail: no "you can only sleep at night" message (the HUD has no text); the hostile spawn on waking is not ported.
+    fn use_bed(&mut self, (mut x, y, mut z): (i32, i32, i32)) {
+        let mut m = self.chunks.meta(x, y, z);
+        if m & 8 == 0 {
+            let (dx, dz) = pick::BED_DIR[(m & 3) as usize];
+            (x, z) = (x + dx, z + dz);
+            if self.chunks.block_loaded(x, y, z) != Some(26) {
+                return;
+            }
+            m = self.chunks.meta(x, y, z);
+        }
+        let eye = self.player.pos + glam::Vec3::new(0.0, EYE_HEIGHT, 0.0);
+        let near = (eye.x - x as f32).abs() <= 3.0 && (eye.y - y as f32).abs() <= 2.0 && (eye.z - z as f32).abs() <= 3.0;
+        if self.sleep.is_some() || self.vitals.dead() || self.daytime() || !near {
+            return;
+        }
+        let d = m & 3;
+        let (px, pz) = (if d == 1 { 0.1 } else if d == 3 { 0.9 } else { 0.5 }, if d == 0 { 0.9 } else if d == 2 { 0.1 } else { 0.5 });
+        self.player.pos = glam::Vec3::new(x as f32 + px, y as f32 + 15.0 / 16.0 - EYE_HEIGHT, z as f32 + pz);
+        self.player.vel = glam::Vec3::ZERO;
+        // getBedOrientationInDegrees, as `rotationYaw`; our yaw is that minus 180 degrees. UNVERIFIED on a device.
+        self.camera.yaw = ([90.0f32, 0.0, 270.0, 180.0][d as usize] - 180.0).to_radians();
+        self.camera.pitch = 0.0;
+        self.chunks.set_block_meta(x, y, z, 26, m | 4);
+        self.sleep = Some((x, y, z, 0));
+    }
+
+    /// `EntityPlayer.wakeUpPlayer`: the bed is free again and the player stands beside it (`set_spawn` = the bed becomes the
+    /// respawn point).
+    fn wake(&mut self, set_spawn: bool) {
+        let Some((x, y, z, _)) = self.sleep.take() else { return };
+        let get = |a, b, c| self.chunks.block_loaded(a, b, c).unwrap_or(0);
+        let m = self.chunks.meta(x, y, z);
+        let cell = pick::wake_cell(&get, (x, y, z), m).unwrap_or((x, y + 1, z));
+        if get(x, y, z) == 26 {
+            self.chunks.set_block_meta(x, y, z, 26, m & !4);
+        }
+        self.player.pos = glam::Vec3::new(cell.0 as f32 + 0.5, cell.1 as f32 + 1.0, cell.2 as f32 + 0.5);
+        if set_spawn {
+            self.bed_spawn = Some((x, y, z));
+        }
+    }
+
+    /// One 20 Hz tick of sleeping: fully asleep (100 ticks) everyone wakes at the next morning (`World.tick`, no weather runs
+    /// during the skip); a bed that is gone or day wakes the player earlier (`EntityPlayer.onUpdate`).
+    fn sleep_tick(&mut self, sky_sub: u8) {
+        let Some((x, y, z, t)) = self.sleep else { return };
+        if t >= 100 {
+            let next = self.world_ticks as u64 + 24000;
+            self.world_ticks = (next - next % 24000) as f64;
+            self.weather_ticks = self.world_ticks as u64;
+            self.wake(true);
+        } else if self.chunks.block_loaded(x, y, z) != Some(26) {
+            self.wake(false);
+        } else if sky_sub < 4 {
+            self.wake(true);
+        } else {
+            self.sleep = Some((x, y, z, t + 1));
+        }
+    }
+
+    /// `BlockDoor.blockActivated` for a wooden door: the lower half's open bit flips, and the upper half follows.
+    fn toggle_door(&mut self, (x, y, z): (i32, i32, i32)) {
+        let y = if self.chunks.meta(x, y, z) & 8 != 0 { y - 1 } else { y };
+        if self.chunks.block_loaded(x, y, z) == Some(64) {
+            let m = self.chunks.meta(x, y, z);
+            if self.chunks.block_loaded(x, y + 1, z) == Some(64) {
+                self.chunks.set_block_meta(x, y + 1, z, 64, (m ^ 4) + 8);
+            }
+            self.chunks.set_block_meta(x, y, z, 64, m ^ 4);
+        }
+    }
+
+    /// `ItemStack.useItemRightClick` for what is held and not placed: bow, rod, bucket, else food.
+    fn use_held(&mut self) {
+        let slot = self.touch.hotbar_slot;
+        let Some(held) = self.inv.slots[slot] else { return };
+        let (eye, fwd) = (self.camera.pos, self.camera.forward());
+        match held.id {
+            // `ItemBow`: uses one arrow from the inventory and shoots it at once (no draw time in b1.7.3).
+            gear::BOW => {
+                if self.inv.take_one(gear::ARROW) {
+                    let v = gear::arrow_velocity(fwd, &mut self.mobs.rng);
+                    self.mobs.shoot(eye + fwd * 0.5, v);
+                }
+            }
+            // `ItemFishingRod`: reel in what is out (a bite gives a raw fish), else cast.
+            gear::ROD => match self.hook.take() {
+                Some(h) => {
+                    let (fish, wear) = h.catch(self.player.pos);
+                    if let Some((s, v)) = fish {
+                        self.drops.throw_from(s, h.pos, v);
+                    }
+                    self.inv.damage(slot, wear);
+                }
+                None => self.hook = Some(Hook::cast(eye, fwd, &mut self.mobs.rng)),
+            },
+            gear::BUCKET | gear::WATER_BUCKET | gear::LAVA_BUCKET => self.use_bucket(slot, held.id),
+            _ => self.eat(),
+        }
+    }
+
+    /// `ItemBucket.onItemRightClick`: a 5 block ray; an empty bucket also hits liquids and takes a source, a full one
+    /// pours into the cell beside the face it hit (air or a non-solid block).
+    fn use_bucket(&mut self, slot: usize, held: u16) {
+        let eye = self.camera.pos.as_dvec3();
+        let end = eye + self.camera.forward().as_dvec3() * 5.0;
+        let empty = held == gear::BUCKET;
+        let bounds = |x: i32, y: i32, z: i32| {
+            let b = self.chunks.block_loaded(x, y, z)?;
+            if empty && (8..=11).contains(&b) { Some([0.0, 0.0, 0.0, 1.0, 1.0, 1.0]) } else { pick_bounds(b, self.chunks.meta(x, y, z)) }
+        };
+        let Some(hit) = pick::ray_trace(&bounds, eye, end) else { return };
+        let (x, y, z) = hit.pos;
+        let filled = self.chunks.block_loaded(x, y, z).and_then(|b| gear::bucket_fill(b, self.chunks.meta(x, y, z)));
+        if let (true, Some(full)) = (empty, filled) {
+            self.chunks.set_block(x, y, z, 0);
+            self.inv.slots[slot] = Some(ItemStack { id: full, count: 1, damage: 0 });
+        } else if let Some(fluid) = gear::bucket_pour(held) {
+            let (x, y, z) = pick::place_pos(&hit);
+            if self.chunks.block_loaded(x, y, z).is_some_and(pick::replaceable) && y < 128 {
+                self.chunks.set_block_meta(x, y, z, fluid, 0);
+                self.inv.slots[slot] = Some(ItemStack { id: gear::BUCKET, count: 1, damage: 0 });
+            }
         }
     }
 
@@ -661,7 +964,7 @@ impl App {
     /// Open a container screen: the 2x2 inventory, a workbench's 3x3, a furnace or chests.
     fn open_screen(&mut self, screen: Screen) {
         self.screen = Some(screen);
-        self.one_mode = false;
+        (self.one_mode, self.shift_mode) = (false, false);
         self.touch.set_screen(true);
     }
 
@@ -745,8 +1048,11 @@ impl App {
         let one = self.one_mode;
         if craft::on_mode_button(gw, w, h, x, y) {
             self.one_mode = !one;
+        } else if craft::on_shift_button(gw, w, h, x, y) {
+            self.shift_mode = !self.shift_mode;
         } else if let Some(id) = craft::slot_at(gw, w, h, x, y) {
-            self.with_ext(|s, inv, ext| s.click(id, one, inv, ext));
+            let shift = self.shift_mode;
+            self.with_ext(|s, inv, ext| if shift { s.shift_click(id, inv, ext) } else { s.click(id, one, inv, ext) });
         } else if !craft::in_panel(gw, w, h, x, y) {
             let Some(s) = self.screen.as_mut() else { return };
             // Click outside the window (slot -999): throw the cursor stack, or one item of it.
@@ -796,7 +1102,10 @@ impl App {
             let b = self.chunks.block_loaded(x, y, z).and_then(|b| outline_bounds(b, self.chunks.meta(x, y, z)));
             b.map_or(0, |b| self.outline.update(&self.gpu.queue, h.pos, b))
         });
-        let item_indices = self.item_mesh.update(&self.gpu.queue, &self.drops, &self.mobs, &self.ticks.falling);
+        let item_indices = {
+            let chunks = &self.chunks;
+            self.item_mesh.update(&self.gpu.queue, &self.drops, &self.mobs, &self.ticks.falling, &self.fx, &|x, y, z| chunks.light_levels(x, y, z), self.hook.as_ref().map(|h| h.pos))
+        };
 
         // Sky and fog colour from the sun angle, the weather and the climate under the player; the frame is cleared to
         // the fog colour and the sky pass is drawn over it (vanilla order).
@@ -835,7 +1144,7 @@ impl App {
         let clear = wgpu::Color { r: fog[0] as f64, g: fog[1] as f64, b: fog[2] as f64, a: 1.0 };
         self.sky.update(&self.gpu.queue, &self.camera, &SkyFrame { angle, rain, seconds: self.world_ticks as f32 / 20.0 });
         if LEGACY {
-            self.sky.set_legacy(&self.gpu.queue, photon::legacy_lin(sky_rgb), fog);
+            self.sky.set_legacy(&self.gpu.queue, photon::legacy_lin(sky::lightning_flash(sky_rgb, self.fx.flash, partial)), fog);
         }
         if self.frames == 0 {
             log::info!("render: first frame, surface_format={:?}, {} chunks loaded", self.gpu.surface_format(), self.chunks.loaded());
@@ -1014,6 +1323,26 @@ impl App {
                 self.shafts.composite(&mut rp);
             }
         }
+        // Rain and snow (`EntityRenderer.renderRainSnow`) over the finished scene; the terrain's depth is attached read-only so the
+        // depth test hides the streaks behind it. ponytail: not behind water (its translucent layer is not wired), no splashes on the ground.
+        if rain > 0.0 {
+            let r = weather::radius();
+            let n = (2 * r + 1) as usize;
+            let biomes = self.chunks.biomes(px - r, pz - r, n, n);
+            let chunks = &self.chunks;
+            let top = |x: i32, z: i32| chunks.top_solid(x, z);
+            let bright = |x: i32, y: i32, z: i32| crate::world::chunk::brightness(chunks.light(x, y, z));
+            let (snow, rain_quads) = weather::build(&weather::Input { eye: e, ticks: self.world_ticks as u32, partial, rain, biomes: &biomes, top_solid: &top, brightness: &bright });
+            self.rain_fx.update(&self.gpu.queue, proj_jittered * view, e, sky::sun_dir(angle).y, &snow, &rain_quads);
+            let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("weather_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: self.post.scene_view(), resolve_target: None, depth_slice: None, ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store } })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment { view: &self.gpu.depth_view, depth_ops: None, stencil_ops: None }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            self.rain_fx.draw(&mut rp);
+        }
         self.post.draw(&self.gpu.queue, &mut enc, &view_tex, &post::Frame { view, proj, cam_pos: self.camera.pos, dt, time: self.started.elapsed().as_secs_f32() });
         // M12: HUD overlay pass. Built into the same encoder so the HUD never gets lost if the GPU drops a frame; it is drawn over the
         // finished frame (the post chain ends on the surface), so it is not tonemapped.
@@ -1129,6 +1458,13 @@ impl App {
             if self.one_mode {
                 HudPipeline::push_number(v, mx + ms * 0.32, my + ms * 0.2, ms * 0.6, 1, [1.0; 4]);
             }
+            // The shift-click toggle: left of the other one, green when on.
+            let (sx, sy, ss) = craft::cell(s.gw, w, h, craft::SHIFT);
+            let fill = if self.shift_mode { [0.2, 0.7, 0.3, 1.0] } else { [0.2, 0.4, 0.7, 1.0] };
+            HudPipeline::push_outlined_quad(v, sx, sy, ss, ss, fill, [0.15, 0.15, 0.15, 1.0], k.max(2.0));
+            if self.shift_mode {
+                HudPipeline::push_number(v, sx + ss * 0.32, sy + ss * 0.2, ss * 0.6, 2, [1.0; 4]);
+            }
             // The picked-up stack floats just above the finger.
             if let Some(c) = s.cursor {
                 let (cx, cy) = self.touch.cursor_pos;
@@ -1203,6 +1539,19 @@ impl App {
                     HudPipeline::push_quad(v, x, y, sz, sz, [0.9, 0.1, 0.1, 1.0]);
                 } else if at == self.vitals.health {
                     HudPipeline::push_quad(v, x, y, sz * 0.5, sz, [0.9, 0.1, 0.1, 1.0]);
+                }
+            }
+            // Armor bar (GuiIngame): 10 shields over the hearts, a full one is 2 armor points, a half one 1.
+            if self.vitals.armor > 0 {
+                for i in 0..10 {
+                    let x = hx + i as f32 * hw * 0.4;
+                    let at = 2 * i + 1;
+                    HudPipeline::push_quad(v, x, y - sz * 1.2, sz, sz, [0.1, 0.1, 0.12, 0.8]);
+                    if at < self.vitals.armor {
+                        HudPipeline::push_quad(v, x, y - sz * 1.2, sz, sz, [0.75, 0.78, 0.85, 1.0]);
+                    } else if at == self.vitals.armor {
+                        HudPipeline::push_quad(v, x, y - sz * 1.2, sz * 0.5, sz, [0.75, 0.78, 0.85, 1.0]);
+                    }
                 }
             }
             if self.vitals.air < vitals::MAX_AIR {

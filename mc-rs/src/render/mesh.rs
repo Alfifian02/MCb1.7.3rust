@@ -10,7 +10,7 @@
 
 use crate::render::atlas;
 use crate::world::chest;
-use crate::world::chunk::{box_bounds, brightness, cross_shape, idx, is_fluid, is_plant, opaque, Nibbles, CACTUS_INSET, H, VOLUME};
+use crate::world::chunk::{box_bounds, brightness, cross_shape, stair_boxes, idx, is_fluid, is_plant, opaque, Nibbles, CACTUS_INSET, H, VOLUME};
 use crate::world::climate;
 use crate::world::ticks::non_solid;
 
@@ -484,12 +484,7 @@ fn shapes(id: u8, meta: u8, same: &dyn Fn(i32, i32) -> bool) -> ([[f32; 6]; 5], 
     let mut o = [[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]; 5];
     match id {
         53 | 67 => {
-            o[..2].copy_from_slice(&match meta & 3 {
-                0 => [[0.0, 0.0, 0.0, 0.5, 0.5, 1.0], [0.5, 0.0, 0.0, 1.0, 1.0, 1.0]],
-                1 => [[0.0, 0.0, 0.0, 0.5, 1.0, 1.0], [0.5, 0.0, 0.0, 1.0, 0.5, 1.0]],
-                2 => [[0.0, 0.0, 0.0, 1.0, 0.5, 0.5], [0.0, 0.0, 0.5, 1.0, 1.0, 1.0]],
-                _ => [[0.0, 0.0, 0.0, 1.0, 1.0, 0.5], [0.0, 0.0, 0.5, 1.0, 0.5, 1.0]],
-            });
+            o[..2].copy_from_slice(&stair_boxes(meta));
             (o, 2)
         }
         85 => {

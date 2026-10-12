@@ -3,18 +3,19 @@
 //! setters (the `ChunkManager` logs every notifying write, `step` replays the log). The blocks they drive:
 //! water and lava (`BlockFlowing`, `BlockStationary`, hardening), sand and gravel (`BlockSand`, `EntityFallingSand`),
 //! leaf decay, saplings, plants that lose their ground, grass spread, crops, farmland, reeds and cactus.
-//! Not ported yet: fire (lava does not ignite), mushroom spread, snow and ice, lava mix sound and smoke, falling sand
+//! Fire (`BlockFire`), mushroom spread, snow and ice forming and melting (`World.tick`, `BlockSnow`, `BlockIce`) and rain on
+//! farmland are in. Not ported yet: portal from fire (M11), TNT priming from fire, lava mix sound and smoke, falling sand
 //! far from loaded chunks (vanilla drops it instantly), pending ticks are not saved (vanilla does not either).
 
 use std::collections::{BTreeSet, HashSet};
 
 use glam::Vec3;
 
-use crate::world::chunk::light_opacity;
+use crate::world::chunk::{light_opacity, normal_cube, opaque};
 use crate::world::chunks::ChunkManager;
 use crate::world::gen::noise::JavaRandom;
 use crate::world::items::{Drops, ItemStack};
-use crate::world::pick::{replaceable, torch_stays};
+use crate::world::pick::{replaceable, torch_stays, BED_DIR};
 
 /// Chunks around the player whose blocks tick at random (`World.tick`'s active set).
 const ACTIVE: i32 = 9;
@@ -25,7 +26,7 @@ pub const MAX_FALLING: usize = 64;
 
 /// `Block.tickOnLoad`: blocks that get random ticks.
 pub fn ticks_at_random(id: u8) -> bool {
-    matches!(id, 2 | 6 | 8 | 10 | 18 | 31 | 32 | 37 | 38 | 59 | 60 | 81 | 83)
+    matches!(id, 2 | 6 | 8 | 10 | 18 | 31 | 32 | 37..=40 | 51 | 59 | 60 | 78 | 79 | 81 | 83)
 }
 
 /// `Material.isSolid` false: air, fluids, plants, fire, web, snow layer, portal and the "circuit" blocks.
@@ -64,12 +65,14 @@ pub struct Ticks {
     pending: HashSet<(i32, i32, i32, u8)>,
     rng: JavaRandom,
     lcg: i32,
+    /// `World.func_27161_C`: rain strength above 0.2.
+    wet: bool,
     pub falling: Vec<Falling>,
 }
 
 impl Ticks {
     pub fn new(seed: i64) -> Self {
-        Self { now: 0, seq: 0, due: BTreeSet::new(), pending: HashSet::new(), rng: JavaRandom::new(seed ^ 0xB10C), lcg: 0x2545_F491, falling: Vec::new() }
+        Self { now: 0, seq: 0, due: BTreeSet::new(), pending: HashSet::new(), rng: JavaRandom::new(seed ^ 0xB10C), lcg: 0x2545_F491, wet: false, falling: Vec::new() }
     }
 
     /// `World.scheduleBlockUpdate`: the same block at the same cell is queued once.
@@ -81,8 +84,9 @@ impl Ticks {
     }
 
     /// One 20 Hz game tick: scheduled ticks, random ticks, block notifications, falling blocks.
-    pub fn step(&mut self, w: &mut ChunkManager, drops: &mut Drops, center: (i32, i32)) {
+    pub fn step(&mut self, w: &mut ChunkManager, drops: &mut Drops, center: (i32, i32), rain: f32) {
         self.now += 1;
+        self.wet = rain > 0.2;
         for _ in 0..MAX_SCHEDULED {
             let Some(&e) = self.due.first().filter(|e| e.0 <= self.now) else { break };
             self.due.remove(&e);
@@ -94,7 +98,12 @@ impl Ticks {
             }
             self.notify(w, drops);
         }
-        for (x, y, z, id) in w.random_ticks(center, ACTIVE, &mut self.lcg) {
+        let (blocks, columns) = w.random_ticks(center, ACTIVE, &mut self.lcg, &mut self.rng);
+        for (x, z) in columns {
+            self.snow_ice(w, x, z);
+            self.notify(w, drops);
+        }
+        for (x, y, z, id) in blocks {
             if bid(w, x, y, z) == id {
                 self.update(w, drops, x, y, z, id);
                 self.notify(w, drops);
@@ -150,6 +159,11 @@ impl Ticks {
                 }
             }
             12 | 13 => self.schedule(x, y, z, id, 3),
+            // BlockFire.onBlockAdded (ponytail: no portal from obsidian before M11).
+            51 if fire_stays(w, x, y, z) => self.schedule(x, y, z, 51, 40),
+            51 => {
+                w.set_block(x, y, z, 0);
+            }
             _ => {}
         }
     }
@@ -173,6 +187,15 @@ impl Ticks {
                 drops.spawn_block(50, 0, (x, y, z));
                 w.set_block(x, y, z, 0);
             }
+            // BlockFire / BlockSnow.onNeighborBlockChange: no ground (or fuel) left.
+            51 if !fire_stays(w, x, y, z) => {
+                w.set_block(x, y, z, 0);
+            }
+            78 if !snow_ok(bid(w, x, y - 1, z)) => {
+                w.set_block(x, y, z, 0); // quantityDropped is 0: nothing drops
+            }
+            64 | 71 => door_neighbour(w, drops, x, y, z, id),
+            26 => bed_neighbour(w, drops, x, y, z),
             // BlockFarmland: something solid on top turns it back to dirt.
             60 if !non_solid(bid(w, x, y + 1, z)) => {
                 w.set_block(x, y, z, 3);
@@ -206,7 +229,16 @@ impl Ticks {
                     _ => {}
                 }
             }
-            60 => farmland(w, &mut self.rng, x, y, z),
+            60 => farmland(w, &mut self.rng, self.wet, x, y, z),
+            39 | 40 => mushroom(w, &mut self.rng, x, y, z, id),
+            51 => self.fire(w, x, y, z),
+            // BlockSnow / BlockIce.updateTick: block light melts them (ice 11 - lightOpacity 3).
+            78 if w.block_light(x, y, z) > 11 => {
+                w.set_block(x, y, z, 0);
+            }
+            79 if w.block_light(x, y, z) > 8 => {
+                w.set_block(x, y, z, 9);
+            }
             81 | 83 => grow_column(w, x, y, z, id),
             _ => {}
         }
@@ -401,8 +433,8 @@ fn can_stay(w: &ChunkManager, x: i32, y: i32, z: i32, id: u8) -> bool {
         6 | 31 | 37 | 38 => lit() && matches!(below, 2 | 3 | 60),
         32 => lit() && below == 12,
         59 => lit() && below == 60,
-        // UNVERIFIED: BlockMushroom.canBlockStay also reads a light limit; only the opaque ground is checked here.
-        39 | 40 => light_opacity(below) == 255 && !matches!(below, 10 | 11),
+        // BlockMushroom.canBlockStay: dark enough, on an opaque cube (UNVERIFIED: `opaqueCubeLookup` is `light_opacity == 255` here).
+        39 | 40 => (0..128).contains(&y) && w.light_at(x, y, z, 0) < 13 && light_opacity(below) == 255 && !matches!(below, 10 | 11),
         83 => below == 83 || (matches!(below, 2 | 3) && [(-1, 0), (1, 0), (0, -1), (0, 1)].iter().any(|&(dx, dz)| matches!(bid(w, x + dx, y - 1, z + dz), 8 | 9))),
         81 => [(-1, 0), (1, 0), (0, -1), (0, 1)].iter().all(|&(dx, dz)| non_solid(bid(w, x + dx, y, z + dz))) && matches!(below, 12 | 81),
         _ => true,
@@ -505,12 +537,11 @@ fn crops(w: &mut ChunkManager, rng: &mut JavaRandom, x: i32, y: i32, z: i32) {
 
 /// `BlockFarmland.updateTick`: wet when water is within 4 cells (or it rains), else it dries out, then reverts to dirt
 /// unless a crop grows on it.
-fn farmland(w: &mut ChunkManager, rng: &mut JavaRandom, x: i32, y: i32, z: i32) {
+fn farmland(w: &mut ChunkManager, rng: &mut JavaRandom, wet: bool, x: i32, y: i32, z: i32) {
     if rng.next_int_bound(5) != 0 {
         return;
     }
-    let water = (-4..=4).any(|dx| (-4..=4).any(|dz| (y..=y + 1).any(|dy| matches!(bid(w, x + dx, dy, z + dz), 8 | 9))));
-    // UNVERIFIED: rain wetting (`canBlockBeRainedOn`) needs the weather state, which the tick does not have; not ported.
+    let water = rained_on(w, wet, x, y + 1, z) || (-4..=4).any(|dx| (-4..=4).any(|dz| (y..=y + 1).any(|dy| matches!(bid(w, x + dx, dy, z + dz), 8 | 9))));
     let m = w.meta(x, y, z);
     if water {
         w.set_block_meta(x, y, z, 60, 7);
@@ -535,5 +566,187 @@ fn grow_column(w: &mut ChunkManager, x: i32, y: i32, z: i32, id: u8) {
         } else {
             w.set_block_meta(x, y, z, id, m + 1);
         }
+    }
+}
+
+/// `BlockBed.onNeighborBlockChange`: a half whose partner is gone breaks; only the half without bit 8 drops the bed.
+fn bed_neighbour(w: &mut ChunkManager, drops: &mut Drops, x: i32, y: i32, z: i32) {
+    let m = w.meta(x, y, z);
+    let (dx, dz) = BED_DIR[(m & 3) as usize];
+    if m & 8 != 0 {
+        if bid(w, x - dx, y, z - dz) != 26 {
+            w.set_block(x, y, z, 0);
+        }
+    } else if bid(w, x + dx, y, z + dz) != 26 {
+        w.set_block(x, y, z, 0);
+        drops.spawn_block(26, m, (x, y, z));
+    }
+}
+
+/// `BlockDoor.onNeighborBlockChange` (without redstone, step 5): a half whose partner or floor is gone breaks; the lower half drops the door.
+fn door_neighbour(w: &mut ChunkManager, drops: &mut Drops, x: i32, y: i32, z: i32, id: u8) {
+    let m = w.meta(x, y, z);
+    if m & 8 != 0 {
+        if bid(w, x, y - 1, z) != id {
+            w.set_block(x, y, z, 0);
+        }
+        return;
+    }
+    let mut gone = false;
+    if bid(w, x, y + 1, z) != id {
+        w.set_block(x, y, z, 0);
+        gone = true;
+    }
+    if !normal_cube(bid(w, x, y - 1, z)) {
+        w.set_block(x, y, z, 0);
+        gone = true;
+        if bid(w, x, y + 1, z) == id {
+            w.set_block(x, y + 1, z, 0);
+        }
+    }
+    if gone {
+        drops.spawn_block(id, m, (x, y, z));
+    }
+}
+
+/// `BlockFire.setBurnRate`: (chance to encourage fire, ability to catch fire) of a block id.
+fn burn_rate(id: u8) -> (i32, i32) {
+    match id {
+        5 | 53 | 85 => (5, 20), // planks, wooden stairs, fence
+        17 => (5, 5),
+        18 | 35 => (30, 60), // leaves, wool
+        47 => (30, 20),
+        46 => (15, 100),
+        31 => (60, 100),
+        _ => (0, 0),
+    }
+}
+
+const SIDES: [(i32, i32, i32); 6] = [(1, 0, 0), (-1, 0, 0), (0, -1, 0), (0, 1, 0), (0, 0, -1), (0, 0, 1)];
+
+/// `BlockFire.func_263_h`: some neighbour burns.
+fn next_to_fuel(w: &ChunkManager, x: i32, y: i32, z: i32) -> bool {
+    SIDES.iter().any(|&(a, b, c)| burn_rate(bid(w, x + a, y + b, z + c)).0 > 0)
+}
+
+/// `BlockFire.canPlaceBlockAt`: a solid floor or a burning neighbour.
+fn fire_stays(w: &ChunkManager, x: i32, y: i32, z: i32) -> bool {
+    normal_cube(bid(w, x, y - 1, z)) || next_to_fuel(w, x, y, z)
+}
+
+/// `BlockSnow.canPlaceBlockAt`: an opaque, solid floor (UNVERIFIED: glass, leaves and ice are told apart by hand).
+fn snow_ok(below: u8) -> bool {
+    below != 0 && opaque(below) && !matches!(below, 18 | 20 | 79) && !non_solid(below)
+}
+
+/// `World.canBlockBeRainedOn` (`wet` = rain above 0.2): open sky, nothing solid above, a biome that rains.
+fn rained_on(w: &mut ChunkManager, wet: bool, x: i32, y: i32, z: i32) -> bool {
+    wet && w.sees_sky(x, y, z) && w.top_solid(x, z) <= y && w.biomes(x, z, 1, 1).first().is_some_and(|b| b.rains())
+}
+
+/// `BlockMushroom.updateTick`: one tick in a hundred it seeds a random nearby cell (the Java also draws two unused offsets).
+fn mushroom(w: &mut ChunkManager, rng: &mut JavaRandom, x: i32, y: i32, z: i32, id: u8) {
+    if rng.next_int_bound(100) != 0 {
+        return;
+    }
+    let (tx, ty, tz) = (x + rng.next_int_bound(3) - 1, y + rng.next_int_bound(2) - rng.next_int_bound(2), z + rng.next_int_bound(3) - 1);
+    if bid(w, tx, ty, tz) == 0 && can_stay(w, tx, ty, tz, id) {
+        rng.next_int_bound(3);
+        rng.next_int_bound(3);
+        w.set_block(tx, ty, tz, id);
+    }
+}
+
+impl Ticks {
+    /// `BlockFire.tryToCatchBlockOnFire`. ponytail: burning TNT is only removed; priming it comes with the TNT block.
+    fn catch_fire(&mut self, w: &mut ChunkManager, x: i32, y: i32, z: i32, chance: i32, age: i32) {
+        if self.rng.next_int_bound(chance) < burn_rate(bid(w, x, y, z)).1 {
+            if self.rng.next_int_bound(age + 10) < 5 && !rained_on(w, self.wet, x, y, z) {
+                let m = (age + self.rng.next_int_bound(5) / 4).min(15);
+                w.set_block_meta(x, y, z, 51, m as u8);
+            } else {
+                w.set_block(x, y, z, 0);
+            }
+        }
+    }
+
+    /// `BlockFire.updateTick` (tick rate 40). The Java keeps going after it removes the fire; every later branch would
+    /// remove it again or does nothing, so this returns.
+    fn fire(&mut self, w: &mut ChunkManager, x: i32, y: i32, z: i32) {
+        let (below, nether) = (bid(w, x, y - 1, z), bid(w, x, y - 1, z) == 87);
+        let drenched = !nether && [(0, 0), (-1, 0), (1, 0), (0, -1), (0, 1)].iter().any(|&(a, b)| rained_on(w, self.wet, x + a, y, z + b));
+        if !fire_stays(w, x, y, z) || drenched {
+            w.set_block(x, y, z, 0);
+            return;
+        }
+        let age = w.meta(x, y, z) as i32;
+        if age < 15 {
+            w.set_quiet(x, y, z, 51, (age + self.rng.next_int_bound(3) / 2) as u8);
+        }
+        self.schedule(x, y, z, 51, 40);
+        if !nether && !next_to_fuel(w, x, y, z) {
+            if !normal_cube(below) || age > 3 {
+                w.set_block(x, y, z, 0);
+            }
+        } else if !nether && burn_rate(below).0 == 0 && age == 15 && self.rng.next_int_bound(4) == 0 {
+            w.set_block(x, y, z, 0);
+        } else {
+            for (i, (a, b, c)) in [(1, 0, 0), (-1, 0, 0), (0, -1, 0), (0, 1, 0), (0, 0, -1), (0, 0, 1)].into_iter().enumerate() {
+                self.catch_fire(w, x + a, y + b, z + c, if matches!(i, 2 | 3) { 250 } else { 300 }, age);
+            }
+            for (a, b, c) in (x - 1..=x + 1).flat_map(|a| (z - 1..=z + 1).flat_map(move |b| (y - 1..=y + 4).map(move |c| (a, b, c)))) {
+                // here (a, c, b) is the cell and `b` its z, as in the Java's (var8, var10, var9)
+                if (a, c, b) == (x, y, z) {
+                    continue;
+                }
+                let chance = 100 + if c > y + 1 { (c - (y + 1)) * 100 } else { 0 };
+                let encourage = if bid(w, a, c, b) == 0 { SIDES.iter().map(|&(i, j, k)| burn_rate(bid(w, a + i, c + j, b + k)).0).max().unwrap_or(0) } else { 0 };
+                if encourage > 0 {
+                    let n = (encourage + 40) / (age + 30);
+                    // The Java's second rain test reads (var8 - 1, var10, var4): the fire's own z, kept as is.
+                    if n > 0
+                        && self.rng.next_int_bound(chance) <= n
+                        && !rained_on(w, self.wet, a, c, b)
+                        && !rained_on(w, self.wet, a - 1, c, z)
+                        && !rained_on(w, self.wet, a + 1, c, b)
+                        && !rained_on(w, self.wet, a, c, b - 1)
+                        && !rained_on(w, self.wet, a, c, b + 1)
+                    {
+                        let m = (age + self.rng.next_int_bound(5) / 4).min(15);
+                        w.set_block_meta(a, c, b, 51, m as u8);
+                    }
+                }
+            }
+        }
+    }
+
+    /// The snow and ice part of `World.tick` for one column: snow on the top of a snowy biome while it rains, still water
+    /// that is open to the air freezes (both only where block light is under 10).
+    fn snow_ice(&mut self, w: &mut ChunkManager, x: i32, z: i32) {
+        let y = w.top_solid(x, z);
+        if !(0..128).contains(&y) || w.block_light(x, y, z) >= 10 || !w.biomes(x, z, 1, 1).first().is_some_and(|b| b.snows()) {
+            return;
+        }
+        let below = bid(w, x, y - 1, z);
+        if self.wet && bid(w, x, y, z) == 0 && snow_ok(below) {
+            w.set_block(x, y, z, 78);
+        }
+        if below == 9 && w.meta(x, y - 1, z) == 0 {
+            w.set_block(x, y - 1, z, 79);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn burn_table_and_snow_floor() {
+        assert_eq!(burn_rate(5), (5, 20));
+        assert_eq!(burn_rate(18), (30, 60));
+        assert_eq!(burn_rate(1), (0, 0));
+        assert!(snow_ok(1) && snow_ok(2) && !snow_ok(0) && !snow_ok(79) && !snow_ok(18) && !snow_ok(8));
+        assert!(non_solid(51) && ticks_at_random(51) && ticks_at_random(39) && ticks_at_random(79));
     }
 }

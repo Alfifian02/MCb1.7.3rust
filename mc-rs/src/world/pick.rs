@@ -114,6 +114,52 @@ pub fn place_pos(hit: &Hit) -> (i32, i32, i32) {
     (hit.pos.0 + dx, hit.pos.1 + dy, hit.pos.2 + dz)
 }
 
+/// `BlockStairs.onBlockPlacedBy`: the facing from the player's yaw in degrees (Minecraft's `rotationYaw`).
+pub fn stairs_meta(yaw: f32) -> u8 {
+    [2, 1, 3, 0][((yaw * 4.0 / 360.0 + 0.5).floor() as i32 & 3) as usize]
+}
+
+/// `ItemDoor.onItemUse` + `BlockDoor.canPlaceBlockAt`: the metadata of the lower half of door `id` (the upper is that + 8)
+/// placed at `cell`, or `None` when it cannot stand there. The hinge goes to the side with more solid neighbours or next
+/// to another door (the `+ 4` open-state bit is how the Java stores a mirrored hinge).
+pub fn door_meta(get: &dyn Fn(i32, i32, i32) -> u8, (x, y, z): (i32, i32, i32), yaw: f32, id: u8) -> Option<u8> {
+    if y >= 127 || !normal_cube(get(x, y - 1, z)) || !replaceable(get(x, y, z)) || !replaceable(get(x, y + 1, z)) {
+        return None;
+    }
+    let n = ((yaw + 180.0) * 4.0 / 360.0 - 0.5).floor() as i32 & 3;
+    let (dx, dz) = [(0, 1), (-1, 0), (0, -1), (1, 0)][n as usize];
+    let cubes = |a: i32, b: i32| normal_cube(get(a, y, b)) as i32 + normal_cube(get(a, y + 1, b)) as i32;
+    let door = |a: i32, b: i32| get(a, y, b) == id || get(a, y + 1, b) == id;
+    let (behind, ahead) = ((x - dx, z - dz), (x + dx, z + dz));
+    let flip = (door(behind.0, behind.1) && !door(ahead.0, ahead.1)) || cubes(ahead.0, ahead.1) > cubes(behind.0, behind.1);
+    Some(if flip { ((n - 1) & 3) as u8 + 4 } else { n as u8 })
+}
+
+/// `BlockBed.headBlockToFootBlockMap`: from the half placed first to its partner (metadata bit 8), by facing.
+pub const BED_DIR: [(i32, i32); 4] = [(0, 1), (-1, 0), (0, -1), (1, 0)];
+
+/// `ItemBed.onItemUse`: the facing (metadata of the first half at `cell`; the partner is `BED_DIR` away with `+ 8`) from the yaw
+/// in degrees, or `None` unless both cells are air over solid cubes.
+pub fn bed_meta(get: &dyn Fn(i32, i32, i32) -> u8, (x, y, z): (i32, i32, i32), yaw: f32) -> Option<u8> {
+    let n = (yaw * 4.0 / 360.0 + 0.5).floor() as i32 & 3;
+    let (dx, dz) = BED_DIR[n as usize];
+    let ok = get(x, y, z) == 0 && get(x + dx, y, z + dz) == 0 && normal_cube(get(x, y - 1, z)) && normal_cube(get(x + dx, y - 1, z + dz));
+    ok.then_some(n as u8)
+}
+
+/// `BlockBed.getNearestEmptyChunkCoordinates(.., 0)`: the first standable cell in the 3x3 around the bed half, then around the one
+/// next to it (x outer, z inner), where the player wakes or respawns.
+pub fn wake_cell(get: &dyn Fn(i32, i32, i32) -> u8, (x, y, z): (i32, i32, i32), meta: u8) -> Option<(i32, i32, i32)> {
+    let (dx, dz) = BED_DIR[(meta & 3) as usize];
+    (0..=1)
+        .flat_map(|k| {
+            let (x0, z0) = (x - dx * k - 1, z - dz * k - 1);
+            (x0..=x0 + 2).flat_map(move |a| (z0..=z0 + 2).map(move |b| (a, b)))
+        })
+        .find(|&(a, b)| normal_cube(get(a, y - 1, b)) && get(a, y, b) == 0 && get(a, y + 1, b) == 0)
+        .map(|(a, b)| (a, y, b))
+}
+
 /// Cells a block can be placed into (`World.canBlockBePlacedAt`: air, water, lava, fire, snow).
 /// Plants count too: they are drawn as nothing yet, so refusing to place into one would look like a bug.
 pub fn replaceable(id: u8) -> bool {
@@ -240,5 +286,31 @@ mod tests {
         let g = |x: i32, y: i32, z: i32| if (x, y, z) == (5, 10, 5) { 20u8 } else { 0 };
         assert_eq!(torch_meta(&g, (5, 11, 5), 1), None, "glass does not");
         assert!(torch_stays(&w, (6, 10, 5), 1) && !torch_stays(&w, (6, 10, 5), 4) && !torch_stays(&w, (6, 12, 5), 5));
+    }
+}
+
+#[cfg(test)]
+mod door_tests {
+    use super::*;
+
+    #[test]
+    fn stairs_face_the_player_and_doors_need_a_floor() {
+        assert_eq!((stairs_meta(0.0), stairs_meta(90.0), stairs_meta(180.0), stairs_meta(270.0)), (2, 1, 3, 0));
+        let floor = |_: i32, y: i32, _: i32| if y == 63 { 1 } else { 0 };
+        assert_eq!(door_meta(&floor, (0, 64, 0), 0.0, 64), Some(1));
+        let wall = |x: i32, y: i32, _: i32| if y == 63 || (x == -1 && y < 66) { 1 } else { 0 };
+        assert_eq!(door_meta(&wall, (0, 64, 0), 0.0, 64), Some(4), "a wall ahead swings the hinge");
+        assert_eq!(door_meta(&|_, _, _| 0, (0, 64, 0), 0.0, 64), None, "no floor");
+    }
+
+    #[test]
+    fn beds_place_on_two_floor_cells_and_wake_beside() {
+        let floor = |_: i32, y: i32, _: i32| if y == 63 { 1 } else { 0 };
+        assert_eq!(bed_meta(&floor, (0, 64, 0), 0.0), Some(0));
+        assert_eq!(bed_meta(&floor, (0, 64, 0), 90.0), Some(1));
+        let half = |x: i32, y: i32, _: i32| if y == 63 && x <= 0 { 1 } else { 0 };
+        assert_eq!(bed_meta(&half, (0, 64, 0), 270.0), None, "the partner cell (1, 64, 0) has no floor");
+        assert_eq!(wake_cell(&floor, (0, 64, 0), 0), Some((-1, 64, -1)));
+        assert_eq!(wake_cell(&|_, _, _| 0, (0, 64, 0), 0), None);
     }
 }

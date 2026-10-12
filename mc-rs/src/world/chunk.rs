@@ -51,9 +51,9 @@ impl Nibbles {
 }
 
 /// Plants (render type 1, `getCollisionBoundingBoxFromPool` null): sapling, tall grass, dead bush, flowers, mushrooms,
-/// reeds. Drawn as crossed quads (`cross_shape`), walked through, never hide a neighbour's face.
+/// reeds, fire. Drawn as crossed quads (`cross_shape`), walked through, never hide a neighbour's face.
 pub const fn is_plant(id: u8) -> bool {
-    matches!(id, 6 | 31 | 32 | 37..=40 | 83)
+    matches!(id, 6 | 31 | 32 | 37..=40 | 51 | 83)
 }
 
 /// `BlockFluid`: water 8 (flowing) / 9 (still), lava 10 / 11. No collision, drawn with `mesh`'s own fluid shape.
@@ -71,6 +71,7 @@ pub const fn cross_shape(id: u8) -> Option<(f32, f32)> {
         39 | 40 => Some((0.2, 0.4)),   // mushrooms
         31 | 32 => Some((0.4, 0.8)),   // tall grass, dead bush
         83 => Some((0.375, 1.0)),      // reeds
+        51 => Some((0.5, 1.0)),        // fire (ponytail: crossed quads on tile 31, not `renderBlockFire`'s flames)
         _ => None,
     }
 }
@@ -141,9 +142,53 @@ pub fn outline_bounds(id: u8, meta: u8) -> Option<[f32; 6]> {
 /// physics queries carry ids, not metadata: `physics_id` turns such a layer into the pseudo id `SNOW_DEEP`, which `collision` knows.
 pub const SNOW_DEEP: u8 = 255;
 
-/// The id a physics query (`BlockQuery`) reads for a cell: its own, except a snow layer of 3+ layers (`SNOW_DEEP`).
+/// Pseudo ids (unused block ids) for what depends on metadata: `STAIRS_PHYS + (meta & 3)` and `DOOR_PHYS + door_state`.
+pub const STAIRS_PHYS: u8 = 100;
+pub const DOOR_PHYS: u8 = 104;
+
+/// The id a physics query (`BlockQuery`) reads for a cell: its own, except a snow layer of 3+ layers (`SNOW_DEEP`), a stair
+/// (`STAIRS_PHYS`, its facing) and a door (`DOOR_PHYS`, its leaf's position).
 pub fn physics_id(id: u8, meta: u8) -> u8 {
-    if id == 78 && meta & 7 >= 3 { SNOW_DEEP } else { id }
+    match id {
+        78 if meta & 7 >= 3 => SNOW_DEEP,
+        53 | 67 => STAIRS_PHYS + (meta & 3),
+        64 | 71 => DOOR_PHYS + door_state(meta),
+        _ => id,
+    }
+}
+
+/// `BlockDoor.getState`: which edge of the cell the leaf stands on (0 -Z, 1 +X, 2 +Z, 3 -X); an open door turns a quarter.
+pub const fn door_state(meta: u8) -> u8 {
+    if meta & 4 == 0 { meta.wrapping_sub(1) & 3 } else { meta & 3 }
+}
+
+/// `BlockDoor.setDoorRotation`: the 3/16 thick leaf, one cell high per half.
+pub fn door_box(state: u8) -> [f32; 6] {
+    const T: f32 = 3.0 / 16.0;
+    match state {
+        0 => [0.0, 0.0, 0.0, 1.0, 1.0, T],
+        1 => [1.0 - T, 0.0, 0.0, 1.0, 1.0, 1.0],
+        2 => [0.0, 0.0, 1.0 - T, 1.0, 1.0, 1.0],
+        _ => [0.0, 0.0, 0.0, T, 1.0, 1.0],
+    }
+}
+
+/// `BlockStairs.getCollidingBoundingBoxes` (also what the mesher draws): the lower half and the raised half, by facing.
+pub fn stair_boxes(meta: u8) -> [[f32; 6]; 2] {
+    match meta & 3 {
+        0 => [[0.0, 0.0, 0.0, 0.5, 0.5, 1.0], [0.5, 0.0, 0.0, 1.0, 1.0, 1.0]],
+        1 => [[0.0, 0.0, 0.0, 0.5, 1.0, 1.0], [0.5, 0.0, 0.0, 1.0, 0.5, 1.0]],
+        2 => [[0.0, 0.0, 0.0, 1.0, 0.5, 0.5], [0.0, 0.0, 0.5, 1.0, 1.0, 1.0]],
+        _ => [[0.0, 0.0, 0.0, 1.0, 1.0, 0.5], [0.0, 0.0, 0.5, 1.0, 0.5, 1.0]],
+    }
+}
+
+/// Every collision box of a (physics) id, and how many: two for a stair, else `collision`'s one or none.
+pub fn collisions(id: u8) -> ([[f32; 6]; 2], usize) {
+    match id {
+        STAIRS_PHYS..=103 => (stair_boxes(id - STAIRS_PHYS), 2),
+        _ => collision(id).map_or(([[0.0; 6]; 2], 0), |b| ([b, [0.0; 6]], 1)),
+    }
 }
 
 /// `getCollisionBoundingBoxFromPool`: what the player and mobs stand on or bump into; `None` = walk through. The
@@ -162,6 +207,8 @@ pub fn collision(id: u8) -> Option<[f32; 6]> {
         26 => Some([0.0, 0.0, 0.0, 1.0, 9.0 / 16.0, 1.0]), // ponytail: a door stays a full cell until the query carries metadata
         _ if is_plant(id) => None,
         44 | SNOW_DEEP => Some([0.0, 0.0, 0.0, 1.0, 0.5, 1.0]),
+        DOOR_PHYS..=107 => Some(door_box(id - DOOR_PHYS)),
+        26 => Some([0.0, 0.0, 0.0, 1.0, 9.0 / 16.0, 1.0]),
         81 => Some([I, 0.0, I, 1.0 - I, 1.0 - I, 1.0 - I]),
         85 => Some([0.0, 0.0, 0.0, 1.0, 1.5, 1.0]),
         _ => Some([0.0, 0.0, 0.0, 1.0, 1.0, 1.0]),
@@ -252,5 +299,23 @@ mod tests {
         assert_eq!(collision(physics_id(78, 3)), Some([0.0, 0.0, 0.0, 1.0, 0.5, 1.0]));
         assert_eq!(collision(physics_id(78, 8 | 2)), None, "bit 8 is not a layer");
         assert_eq!(physics_id(1, 5), 1);
+    }
+}
+
+#[cfg(test)]
+mod phys_tests {
+    use super::*;
+
+    #[test]
+    fn stairs_and_doors_have_their_java_boxes() {
+        assert_eq!(physics_id(53, 2), STAIRS_PHYS + 2);
+        assert_eq!(collisions(physics_id(67, 0)), (stair_boxes(0), 2));
+        assert_eq!(stair_boxes(3)[1], [0.0, 0.0, 0.5, 1.0, 0.5, 1.0]);
+        // closed: meta - 1 & 3, open: meta & 3
+        assert_eq!((door_state(0), door_state(1), door_state(4), door_state(5)), (3, 0, 0, 1));
+        assert_eq!(collision(physics_id(64, 1)), Some([0.0, 0.0, 0.0, 1.0, 1.0, 3.0 / 16.0]));
+        assert_eq!(collisions(physics_id(71, 8)).1, 1, "the upper half has the same leaf");
+        assert_eq!(collisions(1), ([[0.0, 0.0, 0.0, 1.0, 1.0, 1.0], [0.0; 6]], 1));
+        assert_eq!(collisions(0).1, 0);
     }
 }

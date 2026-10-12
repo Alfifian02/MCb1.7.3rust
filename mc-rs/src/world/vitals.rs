@@ -2,7 +2,8 @@
 //! `EntityLiving.fall`, drowning (`air`), lava and burning, and falling out of the world (`Entity.onEntityUpdate`).
 //! b1.7.3 has no hunger and no natural regeneration (only Peaceful heals), so health only goes back up on respawn
 //! until food exists.
-//! ponytail: no suffocation in blocks, no damage flash or knockback, no burning/hurt sounds (all later).
+//! Suffocation (1 damage a tick with the head in a wall) is `Env.in_wall`.
+//! ponytail: no damage flash or knockback, no burning/hurt sounds (all later).
 
 use crate::world::dig::TICK;
 
@@ -21,6 +22,8 @@ pub struct Env {
     /// The eye is inside a water cell (`isInsideOfMaterial(water)`), and its height (`Entity.posY` of a player).
     pub eye_in_water: bool,
     pub eye_y: f32,
+    /// The head is inside a normal cube (`Entity.isEntityInsideOpaqueBlock`): suffocation.
+    pub in_wall: bool,
 }
 
 pub struct Vitals {
@@ -36,11 +39,13 @@ pub struct Vitals {
     pub armor: i32,
     pub wear: i32,
     rem: i32,
+    /// Set when the air ran out and the drowning bubbles pop (`EntityLiving.onEntityUpdate`); the caller takes it.
+    pub drowned: bool,
 }
 
 impl Default for Vitals {
     fn default() -> Self {
-        Self { health: MAX_HEALTH, air: MAX_AIR, fire: 0, hearts_life: 0, last_damage: 0, fall: 0.0, acc: 0.0, armor: 0, wear: 0, rem: 0 }
+        Self { health: MAX_HEALTH, air: MAX_AIR, fire: 0, hearts_life: 0, last_damage: 0, fall: 0.0, acc: 0.0, armor: 0, wear: 0, rem: 0, drowned: false }
     }
 }
 
@@ -74,6 +79,12 @@ impl Vitals {
         true
     }
 
+    /// `Entity.onStruckByLightning`: 5 fire damage and burning (`++fire`, 300 ticks if it was out; here 0 = not burning, vanilla -1).
+    pub fn lightning(&mut self) {
+        self.hurt(5);
+        self.fire = if self.fire <= 0 { 300 } else { self.fire + 1 };
+    }
+
     /// `EntityLiving.heal`: nothing for the dead; the damage window drops to half.
     pub fn heal(&mut self, n: i32) {
         if self.health > 0 {
@@ -104,6 +115,9 @@ impl Vitals {
         if self.hearts_life > 0 {
             self.hearts_life -= 1;
         }
+        if e.in_wall {
+            self.hurt(1); // `attackEntityFrom(null, 1)` every tick inside a wall
+        }
         if e.water {
             self.fire = 0;
         }
@@ -125,6 +139,7 @@ impl Vitals {
             self.air -= 1;
             if self.air == -20 {
                 self.air = 0;
+                self.drowned = true;
                 self.hurt(2);
             }
             self.fire = 0;
