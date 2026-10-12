@@ -130,7 +130,7 @@ struct VsOut {
 @vertex
 fn vs_main(@location(0) vpos: vec3<f32>, @location(1) vuv: vec2<f32>, @location(2) vlight: f32, @location(3) vlm: f32, @location(4) vtint: f32) -> VsOut {
     var o: VsOut;
-    let tp = u32(vtint + 0.5);
+    let tp = u32(vtint); // exact: the packed colour is an integer below 2^24 (`+ 0.5` would round `WHITE` up to 2^24 = black)
     // sRGB bytes -> linear: texel x tint is the same product in either space (the Java multiplies bytes)
     o.tint = pow(vec3<f32>(f32((tp >> 16u) & 255u), f32((tp >> 8u) & 255u), f32(tp & 255u)) / 255.0, vec3<f32>(2.2));
     o.pos = u.proj * u.view * vec4<f32>(vpos, 1.0);
@@ -171,7 +171,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let dx = dpdx(in.wp); // derivatives stay in uniform control flow; `face_index` below can then sit behind a per-pixel branch
     let dy = dpdy(in.wp);
     let c = textureSample(tex, samp, in.uv);
-    if c.a < 0.5 { discard; } // cut-out textures: plants, glass
+    // Cut-out textures: plants, glass. ponytail: alpha from mip 0, so the linear filter at a tile corner cannot blend in a transparent
+    // neighbour tile and punch bright holes at block corners; the cost is a second tap, the upgrade path is a per-tile clamp.
+    if textureSampleLevel(tex, samp, in.uv, 0.0).a < 0.5 { discard; }
     let rgb = c.rgb * in.tint;
     if LEGACY {
         // Face shade and ambient occlusion x the sky/block light (`photon_light`'s legacy branch) x the fog.
@@ -578,5 +580,14 @@ mod tests {
             naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all()).validate(&m).unwrap();
         }
         assert!(SHADER_SRC.contains("apply_fog(photon_light(albedo, 6u, sky, bl, 0.0)"), "legacy terrain is lit in `fs_main`");
+    }
+
+    /// `WHITE` is 2^24 - 1, the last f32 below 2^24: `+ 0.5` rounds it up to 2^24 and all three colour bytes read 0 (black sides, mobs).
+    #[test]
+    fn tint_unpack_keeps_white() {
+        let w = crate::render::mesh::WHITE;
+        assert_eq!(w as u32, 0xFF_FF_FF);
+        assert_eq!((w + 0.5) as u32, 1 << 24, "the rounding `vs_main` must not do");
+        assert!(!SHADER_SRC.contains("vtint + 0.5"));
     }
 }
