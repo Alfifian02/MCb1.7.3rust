@@ -4,7 +4,8 @@
 
 use crate::render::mesh::push_box;
 
-const GROW: f32 = 0.002;
+// 0.005, not vanilla's 0.002: the grass-side overlay (`mesh.rs`) already sits 0.002 off the face, and at an equal offset it hid the lines.
+const GROW: f32 = 0.005;
 /// Edge thickness in blocks. // UNVERIFIED: vanilla draws 2 px GL lines, which have no block size.
 const THICK: f32 = 0.02;
 /// 12 edges x 6 faces x 4 vertices x 6 floats, and x 6 indices per face.
