@@ -1263,9 +1263,10 @@ impl App {
         let (view, proj) = self.camera.build_view_proj();
         // TAA: the world is drawn with the sub-pixel jitter of this frame, the post chain gets the plain projection.
         let proj_jittered = self.post.jittered(proj);
+        // No selection cage on crossed-quad plants (grass, flowers, reeds, saplings): a box 0.75 to 1 block high around a few thin stalks read as a glitch.
         let outline_indices = self.target.map_or(0, |h| {
             let (x, y, z) = h.pos;
-            let b = self.chunks.block_loaded(x, y, z).and_then(|b| outline_bounds(b, self.chunks.meta(x, y, z)));
+            let b = self.chunks.block_loaded(x, y, z).filter(|&b| !is_plant(b)).and_then(|b| outline_bounds(b, self.chunks.meta(x, y, z)));
             b.map_or(0, |b| self.outline.update(&self.gpu.queue, h.pos, b))
         });
         let eye = self.camera.pos;

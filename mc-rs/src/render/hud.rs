@@ -108,14 +108,34 @@ fn vs_main(@location(0) vpos: vec2<f32>, @location(1) vcolor: vec4<f32>, @locati
     return o;
 }
 
+// The post chain ends on the surface and handles an sRGB one (`SRGB_SURFACE`); this pass writes after it, so it has to do the same: the
+// sheets and the flat colours are sRGB bytes, and an sRGB surface encodes what it is given, which washed the whole HUD out (too bright).
+fn lin(c: vec3<f32>) -> vec3<f32> {
+    if !SRGB { return c; }
+    return select(c / 12.92, pow((c + 0.055) / 1.055, vec3<f32>(2.4)), c > vec3<f32>(0.04045));
+}
+
+// Sharp bilinear: nearest inside a texel, a one-pixel blend only across a texel edge. The sprites are drawn at a fractional scale of the
+// screen, where plain nearest makes some texels one pixel wider than their neighbours (the grain on icons and the hotbar).
+const SHEET: vec2<f32> = vec2<f32>(256.0, 2048.0); // `SHEET_H`
+
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    if in.uv.x < 0.0 { return in.color; }
-    let t = textureSampleLevel(items, items_samp, in.uv, 0.0); // `gui/items.png`, bytes straight to the surface like the flat colours
+    let p = in.uv * SHEET;
+    let w = max(fwidth(p), vec2<f32>(1e-4)); // derivatives before the early return: uniform control flow
+    let e = floor(p + 0.5);
+    let q = (e + clamp((p - e) / w, vec2<f32>(-0.5), vec2<f32>(0.5))) / SHEET;
+    if in.uv.x < 0.0 { return vec4<f32>(lin(in.color.rgb), in.color.a); }
+    let t = textureSampleLevel(items, items_samp, q, 0.0); // `gui/items.png`, the GUI sheet, terrain.png, the panels
     if t.a < 0.5 { discard; }
-    return vec4<f32>(t.rgb * in.color.rgb, t.a * in.color.a);
+    return vec4<f32>(lin(t.rgb * in.color.rgb), t.a * in.color.a);
 }
 "#;
+/// The shader with its one constant spliced in: whether the surface encodes sRGB itself.
+fn shader_source(srgb: bool) -> String {
+    format!("const SRGB: bool = {srgb};\n{SHADER_SRC}")
+}
+
 /// Owns the HUD pipeline + dynamic vertex buffer. One instance per surface.
 pub struct HudPipeline {
     pub pipeline: RenderPipeline,
@@ -131,7 +151,7 @@ impl HudPipeline {
     pub fn new(device: &Device, queue: &Queue, surface_format: TextureFormat, surface_w: u32, surface_h: u32) -> Self {
         let shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("hud_shader"),
-            source: wgpu::ShaderSource::Wgsl(SHADER_SRC.into()),
+            source: wgpu::ShaderSource::Wgsl(shader_source(surface_format.is_srgb()).into()),
         });
 
         let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -155,16 +175,16 @@ impl HudPipeline {
             }, wgpu::BindGroupLayoutEntry {
                 binding: 1,
                 visibility: ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: false }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
+                ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
                 count: None,
             }, wgpu::BindGroupLayoutEntry {
                 binding: 2,
                 visibility: ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                 count: None,
             }],
         });
-        // The item sprites (`gui/items.png`, 256 x 256), the GUI sheet and `terrain.png` under them, not sRGB (the HUD writes plain bytes).
+        // The item sprites (`gui/items.png`, 256 x 256), the GUI sheet and `terrain.png` under them, Rgba8Unorm: the shader decodes sRGB itself when the surface is one.
         let items_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("hud_items"),
             size: wgpu::Extent3d { width: 256, height: SHEET_H as u32, depth_or_array_layers: 1 },
@@ -182,7 +202,7 @@ impl HudPipeline {
             wgpu::Extent3d { width: 256, height: SHEET_H as u32, depth_or_array_layers: 1 },
         );
         let items_view = items_tex.create_view(&wgpu::TextureViewDescriptor::default());
-        let items_samp = device.create_sampler(&wgpu::SamplerDescriptor { mag_filter: wgpu::FilterMode::Nearest, min_filter: wgpu::FilterMode::Nearest, ..Default::default() });
+        let items_samp = device.create_sampler(&wgpu::SamplerDescriptor { mag_filter: wgpu::FilterMode::Linear, min_filter: wgpu::FilterMode::Linear, ..Default::default() }); // Linear only feeds `fs_main`'s sharp-bilinear UV
 
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("hud_bind"),
@@ -471,6 +491,16 @@ impl HudPipeline {
 
 #[cfg(test)]
 mod tests {
+    /// The HUD shader validates for an sRGB and a plain surface.
+    #[test]
+    fn hud_shader_validates() {
+        for srgb in [false, true] {
+            let src = shader_source(srgb);
+            let m = naga::front::wgsl::parse_str(&src).unwrap_or_else(|e| panic!("{}", e.emit_to_string(&src)));
+            naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all()).validate(&m).unwrap();
+        }
+    }
+
     /// A button is three sprites (two ends and a middle), two when it is too narrow for a middle, all inside the box and on the widgets rows.
     #[test]
     fn button_is_ends_and_middle() {
