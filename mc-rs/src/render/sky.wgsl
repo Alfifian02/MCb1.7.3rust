@@ -20,6 +20,8 @@ struct Sky {
     misc: vec4<f32>,        // rainStrength, sunAngle (OptiFine: 0 sunrise, 0.5 sunset), seconds, atmosphere_saturation_boost_amount
     zenith: vec4<f32>,      // legacy sky only: dome colour (linear working space)
     horizon: vec4<f32>,     // legacy sky only: fog colour
+    stars: vec4<f32>,       // legacy sky only: star colour (rgb) and alpha = star brightness
+    vp: mat4x4<f32>,        // legacy sky only: world direction -> clip (view rotation + projection)
 };
 
 @group(0) @binding(0) var<uniform> sky: Sky;
@@ -492,22 +494,73 @@ fn fs_sky(in: VsOut) -> @location(0) vec4<f32> {
 }
 
 // Console-Edition sky (`lib.rs` LEGACY): b1.7.3 `RenderGlobal.renderSky` in two lines. The dome is the sky colour, the fog colour
-// shows at the horizon; the sun (30 units wide at 100) and moon (20 at 100) are flat squares, their texture comes with the
-// resource pack. The sun's path lies in the YZ plane, so +X is a tangent of both. No stars, no sunrise fan yet.
-fn legacy_quad(r: vec3<f32>, dir: vec3<f32>, half: f32) -> f32 {
-    let d = dot(r, dir);
-    if d <= 0.0 { return 0.0; }
-    let t = r / d - dir;
-    let b = cross(dir, vec3<f32>(1.0, 0.0, 0.0));
-    return select(0.0, 1.0, max(abs(t.x), abs(dot(t, b))) < half);
-}
-
+// shows at the horizon. The sun and moon are textured quads (`vs_body`), the stars and the sunrise fan geometry (`vs_stars`, `vs_fan`).
 @fragment
 fn fs_legacy(in: VsOut) -> @location(0) vec4<f32> {
     let p = sky.inv_vp * vec4<f32>(in.ndc, 1.0, 1.0);
     let r = normalize(p.xyz / p.w);
-    var c = mix(sky.horizon.rgb, sky.zenith.rgb, clamp01(r.y * 2.5));
-    c = mix(c, to_working(vec3<f32>(1.0, 1.0, 0.85)), legacy_quad(r, sky.sun_dir.xyz, 0.15) * (1.0 - sky.misc.x));
-    c = mix(c, to_working(vec3<f32>(0.80, 0.85, 1.0)), legacy_quad(r, sky.moon_dir.xyz, 0.10) * (1.0 - sky.misc.x));
-    return vec4<f32>(c, 1.0);
+    return vec4<f32>(mix(sky.horizon.rgb, sky.zenith.rgb, clamp01(r.y * 2.5)), 1.0);
+}
+
+// Console-Edition stars and sunrise fan: real geometry (`world::sky::star_vertices`, `sunrise_color`), drawn after `fs_legacy` over
+// the sky pass's own depth: the clip z is just under w, so they show only where nothing nearer was drawn.
+struct GeoOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) col: vec4<f32>,
+};
+
+fn geo_clip(w: vec3<f32>) -> vec4<f32> {
+    let c = sky.vp * vec4<f32>(w, 1.0);
+    return vec4<f32>(c.xy, c.w * 0.99999, c.w);
+}
+
+// `p` is a star corner on the sphere of radius 100 in the stars' own frame; `celestial` turns the world into that frame.
+@vertex
+fn vs_stars(@location(0) p: vec3<f32>) -> GeoOut {
+    let m = mat3x3<f32>(sky.celestial[0].xyz, sky.celestial[1].xyz, sky.celestial[2].xyz);
+    var o: GeoOut;
+    o.pos = geo_clip(transpose(m) * p);
+    o.col = sky.stars;
+    return o;
+}
+
+@vertex
+fn vs_fan(@location(0) p: vec3<f32>, @location(1) col: vec4<f32>) -> GeoOut {
+    var o: GeoOut;
+    o.pos = geo_clip(p);
+    o.col = col;
+    return o;
+}
+
+@fragment
+fn fs_geo(in: GeoOut) -> @location(0) vec4<f32> {
+    return in.col;
+}
+
+// The sun (a square of 60 at distance 100) and the moon (40), `assets/celestial.rgba`: the sun in the left half, the moon in the right.
+// Drawn additively like the Java (`glBlendFunc(SRC_ALPHA, ONE)`, alpha 1 - rain), so the textures' black is nothing. The path lies in
+// the YZ plane, so +X is a tangent of both quads. `c`: the corner (-1 or 1 each) and, in z, 0 for the sun and 1 for the moon.
+@group(2) @binding(0) var body_tex: texture_2d<f32>;
+@group(2) @binding(1) var body_samp: sampler;
+
+struct BodyOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_body(@location(0) c: vec3<f32>) -> BodyOut {
+    let moon = c.z > 0.5;
+    let dir = select(sky.sun_dir.xyz, sky.moon_dir.xyz, moon);
+    let extent = select(30.0, 20.0, moon);
+    let side = vec3<f32>(1.0, 0.0, 0.0);
+    var o: BodyOut;
+    o.pos = geo_clip(dir * 100.0 + side * (c.x * extent) + cross(dir, side) * (c.y * extent));
+    o.uv = vec2<f32>((c.x * 0.5 + 0.5) * 0.5 + select(0.0, 0.5, moon), 0.5 - c.y * 0.5);
+    return o;
+}
+
+@fragment
+fn fs_body(in: BodyOut) -> @location(0) vec4<f32> {
+    return vec4<f32>(to_working(textureSample(body_tex, body_samp, in.uv).rgb), 1.0 - sky.misc.x);
 }

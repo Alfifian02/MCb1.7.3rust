@@ -407,6 +407,7 @@ fn photon_light(albedo: vec3<f32>, face: u32, sky: f32, bl: f32, shadow_in: f32)
 
 // fog.glsl `NormalFog`, `DISTANT_FADE` vanilla part with `fogOffset = 0`: 1 - (far - d) * 5 / (density * far). Rain thickens it.
 fn apply_fog(rgb: vec3<f32>, d: f32) -> vec3<f32> {
+    if u.fog.w < 0.0 { return mix(rgb, u.fog.rgb, 1.0 - exp(u.fog.w * d)); } // legacy, eye in water: GL_EXP, density = -w
     if u.fog.w <= 0.0 { return rgb; }
     if u.blk.w > 0.5 { // legacy: b1.7.3 `setupFog`, GL_LINEAR from a quarter of the far plane to the far plane, no weather thickening
         return mix(rgb, u.fog.rgb, clamp((d - 0.25 * u.fog.w) / (0.75 * u.fog.w), 0.0, 1.0));
@@ -649,6 +650,13 @@ impl Photon {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Under water the legacy fog is b1.7.3's GL_EXP at density 0.1 (`far` < 0 carries the density).
+    #[test]
+    fn legacy_underwater_fog_is_exp() {
+        assert!(WGSL_COMMON.contains("1.0 - exp(u.fog.w * d)"));
+        assert!(((1.0 - (-0.1f32 * 10.0).exp()) - 0.632_120_6).abs() < 1e-6);
+    }
 
     /// The legacy fog is b1.7.3's GL_LINEAR: clear up to a quarter of the far plane, full at the far plane.
     #[test]

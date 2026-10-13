@@ -39,6 +39,38 @@ pub struct HudVertex {
 
 pub const NO_UV: [f32; 2] = [-1.0, -1.0];
 
+/// The pack's `gui/widgets.png` over `gui/icons.png` (256 x 512, `tools/gen_gui.py`). In the HUD texture it sits under the items sheet
+/// (rows 256..768), then `terrain.png`, then the container panels. `GuiIngame`'s sprites keep their b1.7.3 places.
+pub const GUI: &[u8] = include_bytes!("../../assets/gui.rgba");
+/// `gui/container/{inventory,crafting_table,furnace,generic_54}.png` stacked, 256 x 1024 (`tools/gen_gui.py`).
+pub const CONTAINERS: &[u8] = include_bytes!("../../assets/containers.rgba");
+const SHEET_H: f32 = 2048.0;
+/// Where `terrain.png` (untinted, 256 x 256) starts in the HUD texture: block icons are drawn from it (`push_cube`, `push_tile`).
+const TERRAIN_Y: f32 = 768.0;
+
+/// Sprites as `(x, y, w, h)` in pixels of the whole HUD texture: items 0..256, widgets.png 256..512, icons.png 512..768, terrain.png
+/// 768..1024, then the container panels (inventory 1024, crafting table 1280, furnace 1536, chest 1792).
+pub mod sprites {
+    pub type Sprite = (f32, f32, f32, f32);
+    pub const HOTBAR: Sprite = (0.0, 256.0, 182.0, 22.0);
+    pub const SELECTOR: Sprite = (0.0, 278.0, 24.0, 24.0);
+    pub const CROSSHAIR: Sprite = (0.0, 512.0, 16.0, 16.0);
+    pub const HEART_BG: Sprite = (16.0, 512.0, 9.0, 9.0);
+    pub const HEART_FULL: Sprite = (52.0, 512.0, 9.0, 9.0);
+    pub const HEART_HALF: Sprite = (61.0, 512.0, 9.0, 9.0);
+    pub const ARMOR_EMPTY: Sprite = (16.0, 521.0, 9.0, 9.0);
+    pub const ARMOR_HALF: Sprite = (25.0, 521.0, 9.0, 9.0);
+    pub const ARMOR_FULL: Sprite = (34.0, 521.0, 9.0, 9.0);
+    pub const BUBBLE: Sprite = (16.0, 530.0, 9.0, 9.0);
+    pub const BUBBLE_POP: Sprite = (25.0, 530.0, 9.0, 9.0);
+    /// The 176 x 166 panels (a chest's rows are cut from `CHEST_Y`, see `lib.rs`); the furnace's flame is at (176, 0) of its panel
+    /// (14 x 14) and its arrow at (176, 14) (24 x 16).
+    pub const INVENTORY: Sprite = (0.0, 1024.0, 176.0, 166.0);
+    pub const CRAFTING: Sprite = (0.0, 1280.0, 176.0, 166.0);
+    pub const FURNACE: Sprite = (0.0, 1536.0, 176.0, 166.0);
+    pub const CHEST_Y: f32 = 1792.0;
+}
+
 impl HudVertex {
     pub fn layout() -> VertexBufferLayout<'static> {
         VertexBufferLayout {
@@ -132,10 +164,10 @@ impl HudPipeline {
                 count: None,
             }],
         });
-        // The item sprites: `gui/items.png`, 256 x 256, not sRGB (the HUD writes plain bytes).
+        // The item sprites (`gui/items.png`, 256 x 256), the GUI sheet and `terrain.png` under them, not sRGB (the HUD writes plain bytes).
         let items_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("hud_items"),
-            size: wgpu::Extent3d { width: 256, height: 256, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d { width: 256, height: SHEET_H as u32, depth_or_array_layers: 1 },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -145,9 +177,9 @@ impl HudPipeline {
         });
         queue.write_texture(
             wgpu::TexelCopyTextureInfo { texture: &items_tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-            crate::render::atlas::ITEMS,
-            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(256 * 4), rows_per_image: Some(256) },
-            wgpu::Extent3d { width: 256, height: 256, depth_or_array_layers: 1 },
+            &[crate::render::atlas::ITEMS, GUI, crate::render::atlas::TERRAIN, CONTAINERS].concat(), // items, the GUI sheet, terrain.png, the panels
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(256 * 4), rows_per_image: Some(SHEET_H as u32) },
+            wgpu::Extent3d { width: 256, height: SHEET_H as u32, depth_or_array_layers: 1 },
         );
         let items_view = items_tex.create_view(&wgpu::TextureViewDescriptor::default());
         let items_samp = device.create_sampler(&wgpu::SamplerDescriptor { mag_filter: wgpu::FilterMode::Nearest, min_filter: wgpu::FilterMode::Nearest, ..Default::default() });
@@ -238,12 +270,76 @@ impl HudPipeline {
 
     /// An items.png sprite (`Item.iconIndex` = `icon`) in the box (x, y, w, h), top-left origin; the alpha cuts it out.
     pub fn push_sprite(out: &mut Vec<HudVertex>, x: f32, y: f32, w: f32, h: f32, icon: u8) {
-        let (u0, v0) = ((icon % 16) as f32 / 16.0, (icon / 16) as f32 / 16.0);
-        let (u1, v1) = (u0 + 1.0 / 16.0 - 0.0005, v0 + 1.0 / 16.0 - 0.0005);
+        let (u0, v0) = ((icon % 16) as f32 / 16.0, (icon / 16) as f32 * 16.0 / SHEET_H);
+        let (u1, v1) = (u0 + 1.0 / 16.0 - 0.0005, v0 + 16.0 / SHEET_H - 0.0005);
         let c = [1.0; 4];
         let v = |px: f32, py: f32, u: f32, vv: f32| HudVertex { pos: [px, py], color: c, uv: [u, vv] };
         let (tl, tr, br, bl) = (v(x, y, u0, v0), v(x + w, y, u1, v0), v(x + w, y + h, u1, v1), v(x, y + h, u0, v1));
         out.extend([tl, tr, br, tl, br, bl]);
+    }
+
+    /// A sprite of the HUD texture (`sprites`) stretched over the box (x, y, w, h), top-left origin; the alpha cuts it out.
+    pub fn push_gui(out: &mut Vec<HudVertex>, x: f32, y: f32, w: f32, h: f32, (sx, sy, sw, sh): sprites::Sprite) {
+        // A hair inside the sprite, so nearest sampling never picks up its neighbour.
+        let (u0, u1) = ((sx + 0.01) / 256.0, (sx + sw - 0.01) / 256.0);
+        let (v0, v1) = ((sy + 0.01) / SHEET_H, (sy + sh - 0.01) / SHEET_H);
+        let c = [1.0; 4];
+        let v = |px: f32, py: f32, u: f32, vv: f32| HudVertex { pos: [px, py], color: c, uv: [u, vv] };
+        let (tl, tr, br, bl) = (v(x, y, u0, v0), v(x + w, y, u1, v0), v(x + w, y + h, u1, v1), v(x, y + h, u0, v1));
+        out.extend([tl, tr, br, tl, br, bl]);
+    }
+
+    /// A `terrain.png` tile (`vspan` of its height from the top: a slab's side is half) on the quad `p` (corners in order tl, tr, br, bl),
+    /// multiplied by `rgb`.
+    fn push_tile_quad(out: &mut Vec<HudVertex>, p: [[f32; 2]; 4], tile: u16, vspan: f32, rgb: [f32; 3]) {
+        let (tx, ty) = ((tile % 16) as f32 * 16.0, (tile / 16) as f32 * 16.0);
+        let (u0, u1) = ((tx + 0.01) / 256.0, (tx + 16.0 - 0.01) / 256.0);
+        let (v0, v1) = ((TERRAIN_Y + ty + 0.01) / SHEET_H, (TERRAIN_Y + ty + 16.0 * vspan - 0.01) / SHEET_H);
+        let c = [rgb[0], rgb[1], rgb[2], 1.0];
+        let v = |q: [f32; 2], u: f32, vv: f32| HudVertex { pos: q, color: c, uv: [u, vv] };
+        let (tl, tr, br, bl) = (v(p[0], u0, v0), v(p[1], u1, v0), v(p[2], u1, v1), v(p[3], u0, v1));
+        out.extend([tl, tr, br, tl, br, bl]);
+    }
+
+    /// A `gui/widgets.png` button (`GuiButton`): `state` 0 disabled, 1 normal, 2 highlighted (rows 46 / 66 / 86 of the sheet, 200 x 20),
+    /// scaled so its height is `h`. The two ends (4 sprite pixels) keep their shape, the middle is the flat strip at 96..104 stretched,
+    /// so a square (the touch buttons) and a wide bar both work.
+    pub fn push_button(out: &mut Vec<HudVertex>, x: f32, y: f32, w: f32, h: f32, state: u8) {
+        let sy = 256.0 + 46.0 + 20.0 * state.min(2) as f32; // widgets.png starts at row 256 of the texture
+        let cap = (4.0 * h / 20.0).min(w * 0.5);
+        Self::push_gui(out, x, y, cap, h, (0.0, sy, 4.0, 20.0));
+        Self::push_gui(out, x + w - cap, y, cap, h, (196.0, sy, 4.0, 20.0));
+        if w > 2.0 * cap {
+            Self::push_gui(out, x + cap, y, w - 2.0 * cap, h, (96.0, sy, 8.0, 20.0));
+        }
+    }
+
+    /// `s` centred on `cx` with its top at `y` (`GuiScreen.drawCenteredString`).
+    pub fn push_text_centered(out: &mut Vec<HudVertex>, cx: f32, y: f32, k: f32, s: &str, color: [f32; 4]) {
+        Self::push_text(out, cx - Self::text_width(s) as f32 * k * 0.5, y, k, s, color);
+    }
+
+    /// A terrain tile flat in the box (x, y, w, h): what the inventory shows of a sapling, a torch, a ladder, a rail.
+    pub fn push_tile(out: &mut Vec<HudVertex>, x: f32, y: f32, w: f32, h: f32, tile: u16, rgb: [f32; 3]) {
+        Self::push_tile_quad(out, [[x, y], [x + w, y], [x + w, y + h], [x, y + h]], tile, 1.0, rgb);
+    }
+
+    /// A block as the console and `RenderBlocks.renderBlockOnInventory` draw it: a cube seen from above at the usual isometric angle, the
+    /// top and the two sides in the box (x, y, w, h), lit 1.0 / 0.8 / 0.6 (top, left, right). `faces` are (tile, tint) of top, left, right;
+    /// `overlay` is a second, tinted tile over the left and right side (the grass strip); `height` is 1.0 for a cube, 0.5 for a slab.
+    // UNVERIFIED: which two sides face the viewer (here south on the left, east on the right) and the light factors.
+    pub fn push_cube(out: &mut Vec<HudVertex>, (x, y, w, h): (f32, f32, f32, f32), faces: [(u16, [f32; 3]); 3], overlay: Option<(u16, [f32; 3])>, height: f32) {
+        let (cx, d) = (x + w * 0.5, 0.5 * h * (1.0 - height)); // d: how far a slab's top sits below a cube's
+        let (t, tl, tr, c) = ([cx, y + d], [x, y + d + 0.25 * h], [x + w, y + d + 0.25 * h], [cx, y + d + 0.5 * h]);
+        let (bl, br, b) = ([x, y + 0.75 * h], [x + w, y + 0.75 * h], [cx, y + h]);
+        let lit = |rgb: [f32; 3], k: f32| [rgb[0] * k, rgb[1] * k, rgb[2] * k];
+        Self::push_tile_quad(out, [t, tr, c, tl], faces[0].0, 1.0, lit(faces[0].1, 1.0));
+        Self::push_tile_quad(out, [tl, c, b, bl], faces[1].0, height, lit(faces[1].1, 0.8));
+        Self::push_tile_quad(out, [c, tr, br, b], faces[2].0, height, lit(faces[2].1, 0.6));
+        if let Some((tile, rgb)) = overlay {
+            Self::push_tile_quad(out, [tl, c, b, bl], tile, height, lit(rgb, 0.8));
+            Self::push_tile_quad(out, [c, tr, br, b], tile, height, lit(rgb, 0.6));
+        }
     }
 
     /// Append a single quad (top-left origin) to `out`. Two CCW triangles.
@@ -375,6 +471,56 @@ impl HudPipeline {
 
 #[cfg(test)]
 mod tests {
+    /// A button is three sprites (two ends and a middle), two when it is too narrow for a middle, all inside the box and on the widgets rows.
+    #[test]
+    fn button_is_ends_and_middle() {
+        let mut v = Vec::new();
+        HudPipeline::push_button(&mut v, 10.0, 20.0, 200.0, 20.0, 1);
+        assert_eq!(v.len(), 18);
+        assert!(v.iter().all(|p| (10.0..=210.0).contains(&p.pos[0]) && (20.0..=40.0).contains(&p.pos[1])));
+        assert!(v.iter().all(|p| p.uv[1] >= 256.0 / SHEET_H && p.uv[1] <= 352.0 / SHEET_H), "widgets rows");
+        let mut s = Vec::new();
+        HudPipeline::push_button(&mut s, 0.0, 0.0, 8.0, 20.0, 2);
+        assert_eq!(s.len(), 12, "two caps of 4 fill 8 wide");
+    }
+
+    /// A cube icon is three quads (the overlay adds two) and stays inside its box; a slab's sides are half as tall.
+    #[test]
+    fn cube_icon_fits_its_box() {
+        let faces = [(0u16, [1.0; 3]), (3, [1.0; 3]), (3, [1.0; 3])];
+        let mut v = Vec::new();
+        HudPipeline::push_cube(&mut v, (10.0, 20.0, 16.0, 16.0), faces, None, 1.0);
+        assert_eq!(v.len(), 18);
+        assert!(v.iter().all(|p| (10.0..=26.0).contains(&p.pos[0]) && (20.0..=36.0).contains(&p.pos[1])));
+        assert!(v.iter().all(|p| p.uv[0] >= 0.0 && p.uv[1] >= TERRAIN_Y / SHEET_H && p.uv[1] <= 1.0), "uv inside the terrain rows");
+        let side_h = |v: &[HudVertex]| v[6..12].iter().map(|p| p.pos[1]).fold(f32::MIN, f32::max) - v[6..12].iter().map(|p| p.pos[1]).fold(f32::MAX, f32::min);
+        let mut s = Vec::new();
+        HudPipeline::push_cube(&mut s, (10.0, 20.0, 16.0, 16.0), faces, Some((38, [0.5; 3])), 0.5);
+        assert_eq!(s.len(), 30);
+        assert!(side_h(&s) < side_h(&v), "a slab is lower");
+    }
+    /// The container sheet is four 256-row panels; each has its frame at the top left and the furnace its flame and arrow at (176, 0).
+    #[test]
+    fn containers_sheet_has_the_panels() {
+        assert_eq!(CONTAINERS.len(), 256 * 1024 * 4);
+        let a = |x: usize, y: usize| CONTAINERS[((y - 1024) * 256 + x) * 4 + 3];
+        for (_, y, _, _) in [sprites::INVENTORY, sprites::CRAFTING, sprites::FURNACE, (0.0, sprites::CHEST_Y, 0.0, 0.0)] {
+            assert!(a(10, y as usize + 10) > 0, "panel at row {y} is empty");
+        }
+        let f = sprites::FURNACE.1 as usize;
+        assert!(a(182, f + 7) > 0 && a(186, f + 20) > 0, "flame and arrow");
+    }
+
+    /// The GUI sheet is widgets.png over icons.png, and the sprites' places hold a picture (the hotbar's frame, a full heart, the bubble).
+    #[test]
+    fn gui_sheet_has_the_sprites() {
+        assert_eq!(GUI.len(), 256 * 512 * 4);
+        let a = |x: f32, y: f32| GUI[((y as usize - 256) * 256 + x as usize) * 4 + 3]; // GUI starts at row 256 of the texture
+        for (x, y, w, h) in [sprites::HOTBAR, sprites::SELECTOR, sprites::HEART_FULL, sprites::HEART_BG, sprites::BUBBLE, sprites::ARMOR_FULL, sprites::CROSSHAIR] {
+            let seen = (0..(w * h) as usize).any(|i| a(x + (i % w as usize) as f32, y + (i / w as usize) as f32) > 0);
+            assert!(seen, "sprite at {x},{y} is empty");
+        }
+    }
     use super::*;
 
     fn approx(a: f32, b: f32) {

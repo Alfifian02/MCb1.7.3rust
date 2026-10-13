@@ -11,7 +11,7 @@ mod input;
 mod immersive;
 
 use crate::input::touch_ui::{PointerRole, ScreenEv, TouchUi};
-use crate::render::hud::{HudPipeline, HudVertex};
+use crate::render::hud::{sprites as sp, HudPipeline, HudVertex};
 
 use android_activity::{AndroidApp, InputStatus, MainEvent, PollEvent};
 use android_activity::input::InputEvent as IEv;
@@ -1309,8 +1309,14 @@ impl App {
         let (frustum, shadow_frustum) = (Frustum::from_view_proj(proj * view), Frustum::from_view_proj(shadow_vp));
         let fog = sky::fog_color(angle, sky_rgb, rain, thunder);
         let fog = if LEGACY { photon::legacy_lin(fog) } else { fog }; // vanilla values -> the frame's linear space
-        // Terrain fog (AstraLex `NormalFog`): fades to the horizon colour at the render distance; off under water.
-        self.pipe.set_fog(&self.gpu.queue, fog, if eye_in_water { 0.0 } else { (RENDER_DIST * 16) as f32 }, rain);
+        // Terrain fog (AstraLex `NormalFog`): fades to the horizon colour at the render distance; off under water. Legacy under water:
+        // b1.7.3's GL_EXP, density 0.1, colour (0.02, 0.02, 0.2); a negative far plane is how the shaders learn the density.
+        let (fog, far) = match (LEGACY, eye_in_water) {
+            (true, true) => (photon::legacy_lin([0.02, 0.02, 0.2]), -0.1),
+            (_, true) => (fog, 0.0),
+            _ => (fog, (RENDER_DIST * 16) as f32),
+        };
+        self.pipe.set_fog(&self.gpu.queue, fog, far, rain);
         let mut lit = photon::lighting(angle, rain, self.shadow.light);
         if LEGACY {
             lit.legacy = 1.0;
@@ -1321,7 +1327,7 @@ impl App {
         let clear = wgpu::Color { r: fog[0] as f64, g: fog[1] as f64, b: fog[2] as f64, a: 1.0 };
         self.sky.update(&self.gpu.queue, &self.camera, &SkyFrame { angle, rain, seconds: self.world_ticks as f32 / 20.0 });
         if LEGACY {
-            self.sky.set_legacy(&self.gpu.queue, photon::legacy_lin(sky::lightning_flash(sky_rgb, self.fx.flash, partial)), fog);
+            self.sky.set_legacy(&self.gpu.queue, photon::legacy_lin(sky::lightning_flash(sky_rgb, self.fx.flash, partial)), fog, angle, rain);
         }
         if self.frames == 0 {
             log::info!("render: first frame, surface_format={:?}, {} chunks loaded", self.gpu.surface_format(), self.chunks.loaded());
@@ -1483,6 +1489,7 @@ impl App {
                 self.draw_opaque(&mut rp, &frustum, item_indices, outline_indices); // lit in `fs_main`
             }
             self.sky.draw(&mut rp); // depth-tested LessEqual: only the pixels the opaque draws left at 1
+            self.sky.draw_extras(&mut rp); // legacy: sunrise fan + stars
             if !LEGACY {
                 self.photon.draw_deferred(&mut rp, &self.pipe.bind_group, &self.pipe.shadow_bind);
             }
@@ -1577,9 +1584,9 @@ impl App {
         // Crosshair: the aim point of the pick ray (first, so the quad cap never drops it).
         if play {
             let (w, h) = (self.gpu.config.width as f32, self.gpu.config.height as f32);
-            let (arm, th) = (0.025 * w.min(h), (0.004 * w.min(h)).max(2.0));
-            HudPipeline::push_quad(v, w * 0.5 - arm, h * 0.5 - th * 0.5, arm * 2.0, th, [1.0, 1.0, 1.0, 0.85]);
-            HudPipeline::push_quad(v, w * 0.5 - th * 0.5, h * 0.5 - arm, th, arm * 2.0, [1.0, 1.0, 1.0, 0.85]);
+            // `icons.png`'s cross (the Java draws it inverting the pixels behind it; here plain white), the size the two bars had.
+            let s = 0.05 * w.min(h);
+            HudPipeline::push_gui(v, w * 0.5 - s * 0.5, h * 0.5 - s * 0.5, s, s, sp::CROSSHAIR);
         }
 
         // Dig progress under the crosshair.
@@ -1627,35 +1634,50 @@ impl App {
             let (ox, oy, k) = craft::panel(s.gw, w, h);
             let (pw, ph) = craft::panel_size(s.gw);
             HudPipeline::push_quad(v, 0.0, 0.0, w, h, [0.0, 0.0, 0.0, 0.55]);
-            HudPipeline::push_outlined_quad(v, ox, oy, pw * k, ph * k, [0.78, 0.78, 0.78, 0.97], [0.15, 0.15, 0.15, 1.0], (2.0 * k).max(2.0));
-            let slot = |v: &mut Vec<HudVertex>, c: (f32, f32, f32), st: Option<ItemStack>, edge: [f32; 4]| {
-                let inner = (c.0 + k, c.1 + k, c.2 - 2.0 * k, c.2 - 2.0 * k);
-                HudPipeline::push_quad(v, c.0, c.1, c.2, c.2, edge);
-                HudPipeline::push_quad(v, inner.0, inner.1, inner.2, inner.3, [0.55, 0.55, 0.55, 1.0]);
+            // The panel is the pack's picture (`GuiInventory` / `GuiCrafting` / `GuiFurnace` / `GuiChest`: a chest is its rows' top, then the
+            // 96 units of the player's inventory from y = 126 of the sheet); the slots are in it, so a slot is only its stack.
+            if s.gw > 3 {
+                let top = 17.0 + 18.0 * (s.gw / 9) as f32;
+                HudPipeline::push_gui(v, ox, oy, pw * k, top * k, (0.0, sp::CHEST_Y, 176.0, top));
+                HudPipeline::push_gui(v, ox, oy + top * k, pw * k, 96.0 * k, (0.0, sp::CHEST_Y + 126.0, 176.0, 96.0));
+            } else {
+                HudPipeline::push_gui(v, ox, oy, pw * k, ph * k, match s.gw { 2 => sp::INVENTORY, 3 => sp::CRAFTING, _ => sp::FURNACE });
+            }
+            let slot = |v: &mut Vec<HudVertex>, c: (f32, f32, f32), st: Option<ItemStack>| {
                 if let Some(st) = st {
-                    push_stack(v, inner, st);
+                    push_stack(v, (c.0 + k, c.1 + k, c.2 - 2.0 * k, c.2 - 2.0 * k), st);
                 }
             };
             let furn = s.furnace.and_then(|p| self.furnaces.get(&p));
             for (id, ux, uy) in craft::layout(s.gw) {
-                slot(v, craft::cell(s.gw, w, h, (ux, uy)), s.get(&self.inv, ext.as_deref(), id), [0.3, 0.3, 0.3, 1.0]);
+                slot(v, craft::cell(s.gw, w, h, (ux, uy)), s.get(&self.inv, ext.as_deref(), id));
             }
-            if !s.chests.is_empty() {
-                // `GuiChest.drawGuiContainerForegroundLayer`: the chest's name at (8, 6), "Inventory" at (8, ySize - 96 + 2), colour 0x404040.
-                let (title, ink) = (if s.chests.len() > 1 { "Large chest" } else { "Chest" }, [0.25, 0.25, 0.25, 1.0]);
-                HudPipeline::push_text(v, ox + 8.0 * k, oy + 6.0 * k, k, title, ink);
-                HudPipeline::push_text(v, ox + 8.0 * k, oy + (ph - 94.0) * k, k, "Inventory", ink);
+            // The labels of `drawGuiContainerForegroundLayer`, colour 0x404040: the chest's name at (8, 6), "Inventory" at (8, ySize - 96 + 2);
+            // "Crafting" at (28, 6) on the workbench, (86, 16) in the inventory; "Furnace" at (60, 6).
+            // UNVERIFIED: the non-chest positions are recalled, not read from the Java.
+            let ink = [0.25, 0.25, 0.25, 1.0];
+            let labels: &[(&str, f32, f32)] = match s.gw {
+                2 => &[("Crafting", 86.0, 16.0)],
+                3 => &[("Crafting", 28.0, 6.0), ("Inventory", 8.0, ph - 94.0)],
+                0 => &[("Furnace", 60.0, 6.0), ("Inventory", 8.0, ph - 94.0)],
+                _ => &[(if s.chests.len() > 1 { "Large chest" } else { "Chest" }, 8.0, 6.0), ("Inventory", 8.0, ph - 94.0)],
+            };
+            for &(text, ux, uy) in labels {
+                HudPipeline::push_text(v, ox + ux * k, oy + uy * k, k, text, ink);
             }
             if let Some(f) = furn {
                 // Cook arrow (fills left to right over 200 ticks) and flame (drains from the top), vanilla positions.
                 let u = |ux: f32, uy: f32, uw: f32, uh: f32| (ox + ux * k, oy + uy * k, uw * k, uh * k);
-                let (ax, ay, aw, ah) = u(79.0, 34.0, 24.0, 17.0);
-                HudPipeline::push_quad(v, ax, ay, aw, ah, [0.45, 0.45, 0.45, 1.0]);
-                HudPipeline::push_quad(v, ax, ay, aw * f.cook as f32 / 200.0, ah, [1.0; 4]);
-                let (fx, fy, fw, fh) = u(56.0, 36.0, 14.0, 14.0);
-                let left = f.burn as f32 / f.item_burn.max(1) as f32;
-                HudPipeline::push_quad(v, fx, fy, fw, fh, [0.45, 0.45, 0.45, 1.0]);
-                HudPipeline::push_quad(v, fx, fy + fh * (1.0 - left), fw, fh * left, [1.0, 0.6, 0.1, 1.0]);
+                // `GuiFurnace`: the arrow is `cook * 24 / 200 + 1` wide, the flame `burn * 12 / item_burn` + 2 tall from its bottom.
+                let fy = sp::FURNACE.1;
+                let cook = (f.cook as f32 * 24.0 / 200.0).floor() + 1.0;
+                let (ax, ay, ..) = u(79.0, 34.0, 0.0, 0.0);
+                HudPipeline::push_gui(v, ax, ay, cook * k, 16.0 * k, (176.0, fy + 14.0, cook, 16.0));
+                if f.burn > 0 {
+                    let b = (f.burn as f32 * 12.0 / f.item_burn.max(1) as f32).floor();
+                    let (fx, fyy, ..) = u(56.0, 36.0 + 12.0 - b, 0.0, 0.0);
+                    HudPipeline::push_gui(v, fx, fyy, 14.0 * k, (b + 2.0) * k, (176.0, fy + 12.0 - b, 14.0, b + 2.0));
+                }
             }
             // The "place one" toggle: blue = whole stacks, orange with a 1 = one at a time (what the right mouse
             // button does on a desktop). Dragging the stack over slots spreads it without the toggle.
@@ -1694,8 +1716,7 @@ impl App {
 
         // Pause button: top-right, two bars.
         let (px, py, pw, ph) = layout.pause;
-        let pause_fill = if pressed(PointerRole::Pause) { [0.30, 0.55, 0.85, 0.95] } else { [0.20, 0.40, 0.70, 0.75] };
-        HudPipeline::push_outlined_quad(v, px, py, pw, ph, pause_fill, [0.95, 0.95, 0.95, 0.9], 3.0);
+        HudPipeline::push_button(v, px, py, pw, ph, if pressed(PointerRole::Pause) { 2 } else { 1 });
         let bar_w = pw * 0.18;
         let bar_h = ph * 0.50;
         let bar_y = py + (ph - bar_h) * 0.5;
@@ -1705,18 +1726,23 @@ impl App {
 
         // Inventory button, left of pause: a 2x2 grid icon (the crafting grid of the screen it opens).
         let (ix, iy, iw, ih) = layout.inventory;
-        let inv_fill = if pressed(PointerRole::Inventory) || !play { [0.30, 0.55, 0.85, 0.95] } else { [0.20, 0.40, 0.70, 0.75] };
-        HudPipeline::push_outlined_quad(v, ix, iy, iw, ih, inv_fill, [0.95, 0.95, 0.95, 0.9], 3.0);
+        HudPipeline::push_button(v, ix, iy, iw, ih, if pressed(PointerRole::Inventory) || !play { 2 } else { 1 });
         let (q, g) = (iw * 0.22, iw * 0.08);
         let (qx, qy) = (ix + (iw - q * 2.0 - g) * 0.5, iy + (ih - q * 2.0 - g) * 0.5);
         for (dx, dy) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)] {
             HudPipeline::push_quad(v, qx + dx * (q + g), qy + dy * (q + g), q, q, [1.0; 4]);
         }
 
-        // Hotbar: 9 cells, selected slot highlighted.
+        // Hotbar (`GuiIngame`): the 182 x 22 strip (20 units a slot, a unit = a ninth-cell / 20), then the 24 x 24 selector over the slot
+        // in use, then the stacks. The touch cells are the slots, so the strip is drawn around them.
+        if play {
+            let (hx, hy, hw, _) = layout.hotbar[0];
+            let u = hw / 20.0;
+            HudPipeline::push_gui(v, hx - u, hy - u, 182.0 * u, 22.0 * u, sp::HOTBAR);
+            let (sx, _, _, _) = layout.hotbar[self.touch.hotbar_slot];
+            HudPipeline::push_gui(v, sx - 2.0 * u, hy - 2.0 * u, 24.0 * u, 24.0 * u, sp::SELECTOR);
+        }
         for (i, &(hx, hy, hw, hh)) in layout.hotbar.iter().enumerate().filter(|_| play) {
-            let border = if i == self.touch.hotbar_slot { [1.0, 1.0, 1.0, 1.0] } else { [0.85, 0.85, 0.85, 0.85] };
-            HudPipeline::push_outlined_quad(v, hx, hy, hw, hh, [0.10, 0.10, 0.10, 0.55], border, 3.0);
             if let Some(s) = self.inv.slots[i] {
                 push_stack(v, (hx, hy, hw, hh), s);
             }
@@ -1735,17 +1761,17 @@ impl App {
         if play {
             // Hearts (GuiIngame: 10, 8 units apart on the 20 unit hotbar cells, left half, above the hotbar): a full
             // heart is 2 health. Air bubbles sit over the right half while the eye is under water: whole ones
-            // `ceil((air - 2) * 10 / 300)`, then the one that is about to pop, faded. Flat shapes until M14 sprites.
+            // `ceil((air - 2) * 10 / 300)`, then the one that is about to pop. Armor sits on the row above, left (`GuiIngame`).
             let (hx, hy, hw, _) = layout.hotbar[0];
             let (sz, y) = (hw * 0.45, hy - hw * 0.6);
             for i in 0..10 {
                 let x = hx + i as f32 * hw * 0.4;
                 let at = 2 * i + 1;
-                HudPipeline::push_quad(v, x, y, sz, sz, [0.25, 0.0, 0.0, 0.8]);
+                HudPipeline::push_gui(v, x, y, sz, sz, sp::HEART_BG);
                 if at < self.vitals.health {
-                    HudPipeline::push_quad(v, x, y, sz, sz, [0.9, 0.1, 0.1, 1.0]);
+                    HudPipeline::push_gui(v, x, y, sz, sz, sp::HEART_FULL);
                 } else if at == self.vitals.health {
-                    HudPipeline::push_quad(v, x, y, sz * 0.5, sz, [0.9, 0.1, 0.1, 1.0]);
+                    HudPipeline::push_gui(v, x, y, sz, sz, sp::HEART_HALF);
                 }
             }
             // Armor bar (GuiIngame): 10 shields over the hearts, a full one is 2 armor points, a half one 1.
@@ -1753,12 +1779,8 @@ impl App {
                 for i in 0..10 {
                     let x = hx + i as f32 * hw * 0.4;
                     let at = 2 * i + 1;
-                    HudPipeline::push_quad(v, x, y - sz * 1.2, sz, sz, [0.1, 0.1, 0.12, 0.8]);
-                    if at < self.vitals.armor {
-                        HudPipeline::push_quad(v, x, y - sz * 1.2, sz, sz, [0.75, 0.78, 0.85, 1.0]);
-                    } else if at == self.vitals.armor {
-                        HudPipeline::push_quad(v, x, y - sz * 1.2, sz * 0.5, sz, [0.75, 0.78, 0.85, 1.0]);
-                    }
+                    let s = if at < self.vitals.armor { sp::ARMOR_FULL } else if at == self.vitals.armor { sp::ARMOR_HALF } else { sp::ARMOR_EMPTY };
+                    HudPipeline::push_gui(v, x, y - sz * 1.2, sz, sz, s);
                 }
             }
             if self.vitals.air < vitals::MAX_AIR {
@@ -1767,8 +1789,8 @@ impl App {
                 let popping = (air * 10.0 / 300.0).ceil().max(0.0) as i32 - whole;
                 let (rx, _, rw, _) = layout.hotbar[8];
                 for i in 0..whole + popping {
-                    let alpha = if i < whole { 0.9 } else { 0.4 };
-                    HudPipeline::push_disc(v, rx + rw - sz * 0.5 - i as f32 * hw * 0.4, y - hw * 0.5, sz * 0.4, [0.55, 0.8, 1.0, alpha]);
+                    let s = if i < whole { sp::BUBBLE } else { sp::BUBBLE_POP };
+                    HudPipeline::push_gui(v, rx + rw - sz - i as f32 * hw * 0.4, y - hw * 0.5, sz, sz, s);
                 }
             }
 
@@ -1816,25 +1838,20 @@ impl App {
             // Dead: the same menu, tinted red; the resume button respawns.
             let tint = if self.vitals.dead() { [0.55, 0.0, 0.0, 0.6] } else { [0.0, 0.0, 0.0, 0.55] };
             HudPipeline::push_quad(v, 0.0, 0.0, w, h, tint);
+            // `GuiIngameMenu` / `GuiGameOver`: the title centred above, the buttons are `widgets.png`'s with their label centred (white,
+            // 0xFFFFA0 while pressed or armed, as `GuiButton` does for the one under the mouse); the resume button respawns when dead.
+            let label = |v: &mut Vec<HudVertex>, (bx, by, bw, bh): (f32, f32, f32, f32), text: &str, hot: bool| {
+                let k = bh / 20.0;
+                HudPipeline::push_button(v, bx, by, bw, bh, if hot { 2 } else { 1 });
+                let ink = if hot { [1.0, 1.0, 0.63, 1.0] } else { [0.88, 0.88, 0.88, 1.0] };
+                HudPipeline::push_text_centered(v, bx + bw * 0.5, by + (bh - 8.0 * k) * 0.5, k, text, ink);
+            };
             let (bx, by, bw, bh) = layout.resume;
-            HudPipeline::push_outlined_quad(v, bx, by, bw, bh, [0.20, 0.30, 0.50, 0.95], [0.95, 0.95, 0.95, 0.95], 4.0);
-            // Play triangle, approximated by two stacked quads.
-            let tx = bx + bw * 0.46;
-            let ty = by + bh * 0.25;
-            let tw = bw * 0.08;
-            let th = bh * 0.50;
-            HudPipeline::push_quad(v, tx, ty, tw, th * 0.5, [1.0; 4]);
-            HudPipeline::push_quad(v, tx, ty + th * 0.5, tw, th * 0.5, [1.0; 4]);
-            // TEMPORARY reset-world button: dark red; after the first tap bright red (tap again to confirm). Its symbol is a
-            // hollow square (there is no text in the HUD yet).
-            let (rx, ry, rw, rh) = layout.reset;
-            let fill = if self.touch.reset_armed { [0.90, 0.10, 0.10, 0.95] } else { [0.45, 0.10, 0.10, 0.90] };
-            HudPipeline::push_outlined_quad(v, rx, ry, rw, rh, fill, [0.95, 0.95, 0.95, 0.95], 4.0);
-            let (s, t) = (rh * 0.4, rh * 0.07);
-            let (qx, qy) = (rx + (rw - s) * 0.5, ry + (rh - s) * 0.5);
-            for (x, y, w, h) in [(qx, qy, s, t), (qx, qy + s - t, s, t), (qx, qy, t, s), (qx + s - t, qy, t, s)] {
-                HudPipeline::push_quad(v, x, y, w, h, [1.0; 4]);
-            }
+            let dead = self.vitals.dead();
+            HudPipeline::push_text_centered(v, bx + bw * 0.5, by - bh * 1.3, bh / 20.0 * if dead { 2.0 } else { 1.5 }, if dead { "You died!" } else { "Game menu" }, [1.0; 4]);
+            label(v, layout.resume, if dead { "Respawn" } else { "Back to game" }, pressed(PointerRole::Pause));
+            // TEMPORARY reset-world button: after the first tap it is lit and asks again.
+            label(v, layout.reset, if self.touch.reset_armed { "Tap again to confirm" } else { "Reset world" }, self.touch.reset_armed);
         }
 
         // Cap to the buffer capacity; extra quads are silently dropped.
@@ -1872,6 +1889,40 @@ fn find_spawn(chunks: &ChunkManager) -> glam::Vec3 {
     glam::Vec3::new(spawn_x as f32 + 0.5, spawn_feet_y, spawn_z as f32 + 0.5)
 }
 
+/// The biome colour of a block icon: the plains climate (temperature 0.8, humidity 0.4), as `rgb` floats.
+fn icon_tint(c: u32) -> [f32; 3] {
+    [(c >> 16 & 255) as f32 / 255.0, (c >> 8 & 255) as f32 / 255.0, (c & 255) as f32 / 255.0]
+}
+
+/// A block stack as the inventory draws it (`RenderItem.drawItemIntoGui`): cubes (a slab half high) as an isometric cube with the
+/// grass and leaf tints, everything with another shape (plants, torches, rails, the ladder, wire, doors, signs, the lever, the
+/// button, the bed...) as its flat tile. `false`: the block has no tile (the caller draws the flat colour).
+fn push_block_icon(v: &mut Vec<HudVertex>, (x, y, w, h): (f32, f32, f32, f32), s: ItemStack) -> bool {
+    let (id, meta) = (s.id as u8, items::placed_meta(s));
+    let tile = |side: u8| atlas::terrain_tile(id, meta, side).map(u16::from);
+    let flat = crate::world::chunk::cross_shape(id).is_some() || matches!(id, 26 | 27 | 28 | 50 | 51 | 55 | 63 | 64 | 65 | 66 | 68 | 69 | 71 | 75 | 76 | 77 | 90 | 92 | 93 | 94 | 96);
+    let grass = icon_tint(crate::world::climate::grass(0.8, 0.4));
+    let white = [1.0; 3];
+    if flat {
+        let Some(t) = tile(2) else { return false };
+        let rgb = if id == 31 && meta != 0 { grass } else { white };
+        HudPipeline::push_tile(v, x, y, w, h, t, rgb);
+        return true;
+    }
+    let (Some(top), Some(left), Some(right)) = (tile(1), tile(3), tile(5)) else { return false };
+    let tint = match id {
+        2 => [grass, white, white],
+        18 => {
+            let c = match meta & 3 { 1 => crate::world::climate::PINE, 2 => crate::world::climate::BIRCH, _ => crate::world::climate::foliage(0.8, 0.4) };
+            [icon_tint(c); 3]
+        }
+        _ => [white; 3],
+    };
+    let overlay = (id == 2).then_some((38, grass));
+    HudPipeline::push_cube(v, (x, y, w, h), [(top, tint[0]), (left, tint[1]), (right, tint[2])], overlay, if id == 44 { 0.5 } else { 1.0 });
+    true
+}
+
 /// One item stack drawn into the cell `(x, y, w, h)`: the flat colour of its tile (a tool is a stick-coloured handle
 /// with a head in the material colour, shaped per kind, so pickaxe, axe, shovel, sword and hoe can be told apart), a wear bar
 /// under a damaged tool, and the count bottom right with a shadow like `RenderItem.renderItemOverlayIntoGUI`
@@ -1884,7 +1935,9 @@ fn push_stack(v: &mut Vec<HudVertex>, (hx, hy, hw, hh): (f32, f32, f32, f32), s:
         [c[0] as f32 / 255.0, c[1] as f32 / 255.0, c[2] as f32 / 255.0, 1.0]
     };
     let (ix, iy, iw, ih) = (hx + pad, hy + pad, hw - pad * 2.0, hh - pad * 2.0);
-    // Items are their `gui/items.png` sprite (tools and shears included); blocks and anything without an icon keep the flat shapes.
+    // Blocks are their isometric cube (plants, torches, rails... their flat tile), items their `gui/items.png` sprite (tools and shears
+    // included); anything without either keeps the flat shapes.
+    if !(s.id < 256 && push_block_icon(v, (hx + pad * 0.5, hy + pad * 0.5, hw - pad, hh - pad), s)) {
     match (s.id >= 256).then(|| atlas::item_icon(s.id)).flatten() {
     Some(icon) => HudPipeline::push_sprite(v, hx + pad * 0.5, hy + pad * 0.5, hw - pad, hh - pad, icon),
     None => match craft::tool(s.id) {
@@ -1910,7 +1963,7 @@ fn push_stack(v: &mut Vec<HudVertex>, (hx, hy, hw, hh): (f32, f32, f32, f32), s:
                 craft::Kind::Shovel => HudPipeline::push_quad(v, ix + iw * 0.28, iy, iw * 0.44, ih * 0.32, head),
             }
         }
-    }}
+    }}}
     if let Some(max) = craft::max_damage(s.id).filter(|_| s.damage > 0) {
         let left = (1.0 - s.damage as f32 / max as f32).clamp(0.0, 1.0);
         let (by, bh) = (hy + hh - pad * 0.5 - (hh * 0.06).max(2.0), (hh * 0.06).max(2.0));

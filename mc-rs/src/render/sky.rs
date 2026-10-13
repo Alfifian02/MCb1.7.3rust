@@ -26,6 +26,8 @@ pub const WGSL: &str = include_str!("sky.wgsl");
 const SH_WGSL: &str = include_str!("sky_sh.wgsl");
 const LUT_DAT: &[u8] = include_bytes!("../../assets/scattering.dat");
 const NOISE: &[u8] = include_bytes!("../../assets/noise.rgba");
+/// The sun and the full moon, 32 x 32 each side by side (`tools/gen_celestial.py`).
+const CELESTIAL: &[u8] = include_bytes!("../../assets/celestial.rgba");
 /// The LUT of `image/atmosphere/scattering.dat`: RGB16F, x = 2 x 16 (nu; Rayleigh half, Mie half), y = 64 (mu), z = 32 (mu_s).
 const LUT_SIZE: (u32, u32, u32) = (32, 64, 32);
 const NOISE_SIZE: u32 = 512;
@@ -56,6 +58,9 @@ pub struct Params {
     /// legacy sky (`fs_legacy`): dome colour, fog colour; zero unless `set_legacy` wrote them after `update`.
     zenith: [f32; 4],
     horizon: [f32; 4],
+    /// legacy sky: star colour, alpha = star brightness (`set_legacy`); then the view-projection without translation.
+    stars: [f32; 4],
+    vp: [[f32; 4]; 4],
 }
 
 /// The pack's Iris uniforms (`shaders.properties`) from mc-rs's sun angle. The pack's `sunAngle` is 0 at sunrise, ours 0 at noon;
@@ -82,7 +87,46 @@ pub fn params(f: &SkyFrame, camera: &FirstPersonCamera) -> Params {
         misc: [f.rain, sun_angle, f.seconds, 0.10 + 0.20 * blue_hour],
         zenith: [0.0; 4],
         horizon: [0.0; 4],
+        stars: [1.0, 1.0, 1.0, 0.0],
+        vp: (proj * view).to_cols_array_2d(),
     }
+}
+
+/// `RenderGlobal.renderSky`'s sunrise/sunset fan as 16 triangles of `[x, y, z, r, g, b, a]` (empty while the sun is high or low): centre
+/// 100 out towards the sun's horizon point with the glow colour, the ring of radius 120 (rising 40 * alpha on the sun's side) fully
+/// transparent. The Java builds it with three `glRotatef`; written out, the ring is `h * 120 cos f + up * 40 a cos f + side * 120 sin f`
+/// with `h` the horizontal direction of the sun. Colours are linearised (`photon::legacy_lin`) like the rest of the legacy sky.
+pub fn fan_vertices(angle: f32, rain: f32, sun: Vec3) -> Vec<[f32; 7]> {
+    let (Some(c), h) = (sky::sunrise_color(angle), Vec3::new(sun.x, 0.0, sun.z).normalize_or_zero()) else { return Vec::new() };
+    if h == Vec3::ZERO { return Vec::new(); }
+    let rgb = crate::render::photon::legacy_lin([c[0], c[1], c[2]]);
+    let a = c[3] * (1.0 - rain);
+    let side = Vec3::Y.cross(h);
+    let ring = |f: f32| h * (120.0 * f.cos()) + Vec3::Y * (40.0 * a * f.cos()) + side * (120.0 * f.sin());
+    let v = |p: Vec3, alpha: f32| [p.x, p.y, p.z, rgb[0], rgb[1], rgb[2], alpha];
+    let centre = v(h * 100.0, a);
+    (0..16).flat_map(|j| {
+        let (f0, f1) = (j as f32 * TAU / 16.0, (j + 1) as f32 * TAU / 16.0);
+        [centre, v(ring(f0), 0.0), v(ring(f1), 0.0)]
+    }).collect()
+}
+
+/// Stars and sunrise fan of the Console-Edition sky (see `fs_geo` in `sky.wgsl`).
+struct Geo {
+    stars: wgpu::RenderPipeline,
+    fan: wgpu::RenderPipeline,
+    star_v: wgpu::Buffer,
+    star_i: wgpu::Buffer,
+    star_n: u32,
+    fan_v: wgpu::Buffer,
+    fan_n: std::sync::atomic::AtomicU32,
+    /// The sun and moon quads (`vs_body`): 12 corners, a texture bind group (group 2; group 1 is the SH's, so an empty one fills it).
+    body: wgpu::RenderPipeline,
+    body_v: wgpu::Buffer,
+    body_bind: wgpu::BindGroup,
+    empty_bind: wgpu::BindGroup,
+    /// `f32` bits of the star brightness; 0 = skip the draw.
+    star_alpha: std::sync::atomic::AtomicU32,
 }
 
 /// Everything the sky owns on the GPU.
@@ -97,6 +141,7 @@ pub struct SkyRenderer {
     d4a_bind: wgpu::BindGroup,
     pipeline: wgpu::RenderPipeline,
     frame: std::sync::atomic::AtomicU32,
+    geo: Option<Geo>,
 }
 
 impl SkyRenderer {
@@ -197,7 +242,62 @@ impl SkyRenderer {
         });
         let d4a = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some("sky_d4a"), layout: Some(&pl("sky_d4a", &[&layout, &sh_layout])), module: &shader, entry_point: Some("cs_sh"), compilation_options: Default::default(), cache: None });
 
-        Self { uniform_buffer, layout, bind, sky_map, sh, d0, d4a, d4a_bind, pipeline, frame: Default::default() }
+        let geo = legacy.then(|| {
+            let verts: Vec<[f32; 3]> = sky::star_vertices().iter().map(|p| p.map(|c| c as f32)).collect();
+            let idx: Vec<u32> = (0..verts.len() as u32 / 4).flat_map(|s| [4 * s, 4 * s + 1, 4 * s + 2, 4 * s, 4 * s + 2, 4 * s + 3]).collect();
+            let buf = |label, data: &[u8], usage| device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some(label), contents: data, usage });
+            let depth = || Some(wgpu::DepthStencilState { format: wgpu::TextureFormat::Depth32Float, depth_write_enabled: false, depth_compare: wgpu::CompareFunction::LessEqual, stencil: Default::default(), bias: Default::default() });
+            let geo_pipe = |label: &str, vs: &str, fs: &str, blend: wgpu::BlendState, groups: &[&wgpu::BindGroupLayout], stride: u64, attrs: &[wgpu::VertexAttribute]| device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&pl(label, groups)),
+                vertex: wgpu::VertexState { module: &shader, entry_point: Some(vs), buffers: &[wgpu::VertexBufferLayout { array_stride: stride, step_mode: wgpu::VertexStepMode::Vertex, attributes: attrs }], compilation_options: Default::default() },
+                fragment: Some(wgpu::FragmentState { module: &shader, entry_point: Some(fs), targets: &[Some(wgpu::ColorTargetState { format: surface_format, blend: Some(blend), write_mask: wgpu::ColorWrites::ALL })], compilation_options: Default::default() }),
+                primitive: Default::default(),
+                depth_stencil: depth(),
+                multisample: Default::default(),
+                multiview: None,
+                cache: None,
+            });
+            // The sun and moon: two squares of two triangles, corner (+-1, +-1) and which body (0 sun, 1 moon).
+            let quad = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)];
+            let body_verts: Vec<[f32; 3]> = [0.0, 1.0].iter().flat_map(|&k| quad.map(|(x, y)| [x, y, k])).collect();
+            let additive = wgpu::BlendState { color: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::SrcAlpha, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add }, alpha: wgpu::BlendComponent::OVER };
+            let empty = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("sky_empty"), entries: &[] });
+            let body_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("sky_body_layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false }, count: None },
+                    wgpu::BindGroupLayoutEntry { binding: 1, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering), count: None },
+                ],
+            });
+            let body_tex = tex("sky_body", wgpu::Extent3d { width: 64, height: 32, depth_or_array_layers: 1 }, wgpu::TextureDimension::D2, wgpu::TextureFormat::Rgba8UnormSrgb, CELESTIAL);
+            let empty_bind = device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("sky_empty_bind"), layout: &empty, entries: &[] });
+            let body_samp = sampler(wgpu::AddressMode::ClampToEdge);
+            let body_view = body_tex.create_view(&Default::default());
+            let body_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("sky_body_bind"),
+                layout: &body_layout,
+                entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&body_view) }, wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&body_samp) }],
+            });
+            let pos = wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 0, shader_location: 0 };
+            let col = wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 12, shader_location: 1 };
+            Geo {
+                stars: geo_pipe("sky_stars", "vs_stars", "fs_geo", wgpu::BlendState::ALPHA_BLENDING, &[&layout], 12, &[pos]),
+                fan: geo_pipe("sky_fan", "vs_fan", "fs_geo", wgpu::BlendState::ALPHA_BLENDING, &[&layout], 28, &[pos, col]),
+                body: geo_pipe("sky_body", "vs_body", "fs_body", additive, &[&layout, &empty, &body_layout], 12, &[pos]),
+                body_v: buf("sky_body_v", bytemuck::cast_slice(&body_verts), wgpu::BufferUsages::VERTEX),
+                body_bind,
+                empty_bind,
+                star_v: buf("sky_star_v", bytemuck::cast_slice(&verts), wgpu::BufferUsages::VERTEX),
+                star_i: buf("sky_star_i", bytemuck::cast_slice(&idx), wgpu::BufferUsages::INDEX),
+                star_n: idx.len() as u32,
+                fan_v: device.create_buffer(&wgpu::BufferDescriptor { label: Some("sky_fan_v"), size: 48 * 28, usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }),
+                fan_n: Default::default(),
+                star_alpha: Default::default(),
+            }
+        });
+
+        Self { uniform_buffer, layout, bind, sky_map, sh, d0, d4a, d4a_bind, pipeline, frame: Default::default(), geo }
     }
 
     /// The group 0 bind group (uniform, LUT, noise and their samplers) for passes that include `WGSL`.
@@ -211,9 +311,20 @@ impl SkyRenderer {
     }
 
     /// Legacy sky colours (linear working space). Call after `update`, which rewrites the whole block.
-    pub fn set_legacy(&self, queue: &wgpu::Queue, zenith: [f32; 3], horizon: [f32; 3]) {
-        let v = [[zenith[0], zenith[1], zenith[2], 0.0], [horizon[0], horizon[1], horizon[2], 0.0]];
+    /// Also the star brightness (`World.getStarBrightness` x (1 - rain)) and the sunrise fan of this `angle`.
+    pub fn set_legacy(&self, queue: &wgpu::Queue, zenith: [f32; 3], horizon: [f32; 3], angle: f32, rain: f32) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let stars = sky::star_brightness(angle) * (1.0 - rain);
+        let v = [[zenith[0], zenith[1], zenith[2], 0.0], [horizon[0], horizon[1], horizon[2], 0.0], [1.0, 1.0, 1.0, stars]];
         queue.write_buffer(&self.uniform_buffer, std::mem::offset_of!(Params, zenith) as u64, bytemuck::bytes_of(&v));
+        if let Some(g) = &self.geo {
+            let fan = fan_vertices(angle, rain, sky::sun_dir(angle));
+            if !fan.is_empty() {
+                queue.write_buffer(&g.fan_v, 0, bytemuck::cast_slice(&fan));
+            }
+            g.fan_n.store(fan.len() as u32, Relaxed);
+            g.star_alpha.store(stars.to_bits(), Relaxed);
+        }
     }
 
     /// d0 and d4a: the sky map, then its SH. Outside any render pass, before the scene.
@@ -240,6 +351,30 @@ impl SkyRenderer {
     }
 
     /// The sky over every pixel still at depth 1, inside the scene pass after the opaque geometry.
+    /// Legacy only, right after `draw`: the sunrise fan, the sun and moon, then the stars (vanilla order). Same pass, same read-only depth.
+    pub fn draw_extras(&self, rp: &mut wgpu::RenderPass<'_>) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let Some(g) = &self.geo else { return };
+        rp.set_bind_group(0, &self.bind, &[]);
+        let n = g.fan_n.load(Relaxed);
+        if n > 0 {
+            rp.set_pipeline(&g.fan);
+            rp.set_vertex_buffer(0, g.fan_v.slice(..));
+            rp.draw(0..n, 0..1);
+        }
+        rp.set_pipeline(&g.body);
+        rp.set_bind_group(1, &g.empty_bind, &[]);
+        rp.set_bind_group(2, &g.body_bind, &[]);
+        rp.set_vertex_buffer(0, g.body_v.slice(..));
+        rp.draw(0..12, 0..1);
+        if f32::from_bits(g.star_alpha.load(Relaxed)) > 0.0 {
+            rp.set_pipeline(&g.stars);
+            rp.set_vertex_buffer(0, g.star_v.slice(..));
+            rp.set_index_buffer(g.star_i.slice(..), wgpu::IndexFormat::Uint32);
+            rp.draw_indexed(0..g.star_n, 0, 0..1);
+        }
+    }
+
     pub fn draw(&self, rp: &mut wgpu::RenderPass<'_>) {
         rp.set_pipeline(&self.pipeline);
         rp.set_bind_group(0, &self.bind, &[]);
@@ -251,13 +386,36 @@ impl SkyRenderer {
 mod tests {
     use super::*;
 
+    /// The sunrise fan exists only near the horizon, is centred 100 out towards the sun's horizon point, fades to nothing at its rim.
+    #[test]
+    fn fan_hugs_the_sun_at_the_horizon() {
+        assert!(fan_vertices(0.0, 0.0, sky::sun_dir(0.0)).is_empty(), "no fan at noon");
+        let sun = sky::sun_dir(0.25); // sunset: the sun sits on the horizon
+        let fan = fan_vertices(0.25, 0.0, sun);
+        assert_eq!(fan.len(), 16 * 3);
+        let h = Vec3::new(sun.x, 0.0, sun.z).normalize();
+        let c = Vec3::new(fan[0][0], fan[0][1], fan[0][2]);
+        assert!((c - h * 100.0).length() < 1e-3 && fan[0][6] > 0.0);
+        assert!(fan.chunks(3).all(|t| t[1][6] == 0.0 && t[2][6] == 0.0 && t[0][6] == fan[0][6]));
+        assert!(fan_vertices(0.25, 1.0, sun).iter().all(|v| v[6] == 0.0), "rain hides the glow");
+    }
+
+    /// The celestial texture is the sun and the moon, 32 x 32 each: bright at their middle, black at the corners (additive blending).
+    #[test]
+    fn celestial_texture_is_sun_and_moon() {
+        assert_eq!(CELESTIAL.len(), 64 * 32 * 4);
+        let px = |x: usize, y: usize| &CELESTIAL[(y * 64 + x) * 4..][..3];
+        assert!(px(16, 16).iter().all(|&c| c > 150) && px(48, 16).iter().all(|&c| c > 100));
+        assert!(px(0, 0).iter().all(|&c| c < 8) && px(32, 0).iter().all(|&c| c < 8));
+    }
+
     /// Both sky fragment entries (Photon's and the Console-Edition one) parse and validate; no GPU needed.
     #[test]
     fn sky_shader_validates_with_legacy_entry() {
         let src = format!("{WGSL}\n{SH_WGSL}");
         let m = naga::front::wgsl::parse_str(&src).unwrap_or_else(|e| panic!("{}", e.emit_to_string(&src)));
         naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all()).validate(&m).unwrap();
-        for entry in ["fs_sky", "fs_legacy"] {
+        for entry in ["fs_sky", "fs_legacy", "fs_geo", "vs_stars", "vs_fan", "vs_body", "fs_body"] {
             assert!(m.entry_points.iter().any(|e| e.name == entry), "{entry} missing");
         }
     }

@@ -80,7 +80,7 @@ pub const ITEM_TILE0: u16 = 1000;
 pub const ART_TILE0: u16 = 2000;
 /// `art/kz.png` + `item/sign.png` as RGBA, 256 x 288 (`tools/gen_terrain.py`).
 pub const ART: &[u8] = include_bytes!("../../assets/art.rgba");
-const TERRAIN: &[u8] = include_bytes!("../../assets/terrain.rgba");
+pub const TERRAIN: &[u8] = include_bytes!("../../assets/terrain.rgba");
 
 /// `EntitySheep.fleeceColorTable`: the wool colours, indexed by the cloth metadata (0 white .. 15 black).
 const FLEECE: [[f32; 3]; 16] = [
@@ -309,6 +309,13 @@ pub const fn terrain_tile(id: u8, meta: u8, side: u8) -> Option<u8> {
         96 => 84, // trapdoor
         // BlockCake.getBlockTextureFromSideAndMetadata (base tile 121): top, sides, the bitten face (-X), bottom
         92 => if top { 121 } else if bottom { 124 } else if meta > 0 && side == 4 { 123 } else { 122 },
+        // Blocks nothing above gave a tile: the dispenser (no facing here yet: the front is +Z), the note block (the jukebox's side),
+        // cobweb, the portal, the locked chest (the chest's). Rails, wire, torches, the lever, the ladder... are drawn by the mesher.
+        23 => if side <= 1 { 62 } else if side == 3 { 46 } else { 45 },
+        25 => 74,
+        30 => 11,
+        90 => 14,
+        95 => if side <= 1 { 25 } else if side == 3 { 27 } else { 26 },
         _ => return None,
     })
 }
@@ -340,6 +347,22 @@ mod tests {
         assert_ne!(tile_color(260), tile_color(261));
         assert_ne!(tile_color(256), tile_color(17));
         assert!(tile_color(274)[3] == 255 && (25..=26).contains(&tile_color(274)[0])); // black wool
+    }
+
+    /// Every tile `terrain_tile` hands out, for any block, damage and face, holds a picture in `assets/terrain.rgba` (the Legacy Restoration
+    /// pack, `tools/gen_terrain_pack.py`; the grass overlay, tile 38, is the only one meant to be mostly transparent, and it is not handed out).
+    #[test]
+    fn every_handed_out_tile_has_a_picture() {
+        for id in 1..=96u8 {
+            for meta in 0..16 {
+                for side in 0..6 {
+                    let Some(t) = terrain_tile(id, meta, side) else { continue };
+                    let (x, y) = ((t % 16) as usize * 16, (t / 16) as usize * 16);
+                    let seen = (0..16 * 16).any(|i| TERRAIN[((y + i / 16) * 256 + x + i % 16) * 4 + 3] > 0);
+                    assert!(seen, "block {id} meta {meta} side {side}: tile {t} is empty");
+                }
+            }
+        }
     }
 
     /// Faces follow the Java: grass is top 0 / side 3 / bottom 2, a log has end grain on top, wool colours come from the

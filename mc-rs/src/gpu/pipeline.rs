@@ -238,8 +238,10 @@ fn fs_water(in: VsOut) -> @location(0) vec4<f32> {
     let depth = floor(in.light + 0.05); // +0.05: interpolation may land a hair under the integer
     let face = face_index(in.wp, dpdx(in.wp), dpdy(in.wp));
     let c = atlas_sample(in.uv);
-    let absorb = 1.0 - exp(-0.35 * depth);
-    let graze = pow(1.0 - abs(normalize(u.eye.xyz - in.wp).y), 3.0);
+    // Console-Edition water (`LEGACY`): flat and translucent with the texture's own alpha, as b1.7.3 and the console drew it: no
+    // depth absorption, no grazing reflection (the face shade and light come from `photon_light`'s legacy branch).
+    let absorb = select(1.0 - exp(-0.35 * depth), 0.0, LEGACY);
+    let graze = select(pow(1.0 - abs(normalize(u.eye.xyz - in.wp).y), 3.0), 0.0, LEGACY);
     let lm = in.lm + 0.01;
     let sky_i = floor(lm / 16.0);
     let albedo = to_working(c.rgb * mix(vec3<f32>(1.0), vec3<f32>(0.45, 0.62, 0.8), absorb));
