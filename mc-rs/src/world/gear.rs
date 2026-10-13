@@ -15,6 +15,8 @@ pub const LAVA_BUCKET: u16 = 327;
 pub const MILK_BUCKET: u16 = 335;
 pub const BOW: u16 = 261;
 pub const ARROW: u16 = 262;
+pub const SNOWBALL: u16 = 332;
+pub const EGG: u16 = 344;
 pub const ROD: u16 = 346;
 const RAW_FISH: u16 = 349;
 /// `EntityArrow`: launch speed in blocks per tick (`setArrowHeading(.., 1.5F, 1.0F)`), damage on a mob.

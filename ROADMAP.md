@@ -1,9 +1,17 @@
 # Roadmap: Minecraft b1.7.3 -> Android in Rust
 
 Fresh start. One milestone per session. Vanilla names. Vulkan-only.
-Own simple save format (M7 dropped McRegion). Client-only networking.
+Own simple save format (M7 dropped McRegion). Client-only, single player.
 
-## Milestones
+## Scope
+
+Out of scope on purpose (not planned, not tracked): **M9 audio**, **M10 multiplayer** (`Packet*`, `NetClientHandler`),
+**M13 further optimization** (frustum culling is in; greedy meshing, profiler and the rest are dropped), McRegion saves.
+Everything below is gameplay or content that exists in the b1.7.3 sources and is missing or wrong in mc-rs.
+The list comes from an audit of `Block.java`, `Item.java`, `EntityList`, `TileEntity`, `CraftingManager` and every `Block*`
+class with an interaction hook, checked against the Rust code (read, not run: no Rust toolchain in that session).
+
+## Milestones: done
 | #   | Name | Deliverable |
 |-----|------|-------------|
 | M0  | Skeleton | Buildable APK, solid color on screen, lifecycle correct |
@@ -11,20 +19,29 @@ Own simple save format (M7 dropped McRegion). Client-only networking.
 | M2  | Camera + physics | First-person walk, jump, AABB collision |
 | M3  | Overworld gen | Beta-1.7 noise: grass/dirt/stone, sea level 64, ores |
 | M4  | Biomes + trees + caves | All b1.7.3 biomes + worldgen populate step |
-| M5  | Block interaction | Raycast pick, break, place, light update (done, compiled and ran on an Android device: see Changelog) |
-| M6  | Inventory + crafting | Survival inv, hotbar, crafting grid, recipes (done, compiled and ran on an Android device: see Changelog) |
-| M7  | Save | Own format (not McRegion, by decision): per-chunk RLE files + `level`; autosave, save on pause/exit, resume (done, compiled and ran on an Android device: see Changelog) |
-| M8  | Entities + AI | Mobs + item entities |
-| M9  | Audio | Positional OGG, music stubs |
-| M10 | Multiplayer | Full b1.7.3 client protocol |
-| M11 | Nether | Hell biomes, portals, ghast, zombie pigman |
+| M5  | Block interaction | Raycast pick, break, place, light update |
+| M6  | Inventory + crafting | Survival inv, hotbar, crafting grid, furnace, tools, armor (recipes still partial: see M16) |
+| M7  | Save | Own format: per-chunk RLE files + `level`; autosave, save on pause/exit, resume |
+| M8  | Entities + AI | 13 overworld mobs + item entities (no A*, taming, saddle: see M20) |
 | M12 | Touch UX | Landscape; move stick, look drag, jump button, hotbar tap, pause menu |
-| M13 | Optimization | Frustum culling, greedy meshing, profiler |
-| M14 | Polish | Splash, main menu, settings, lang |
+| M15 | Farming fix | Crop drops (seeds / wheat), `ItemSeeds` and `ItemReed` placement: written without a toolchain, not compiled or run (2026-10-13) |
+
+## Milestones: to do (in this order)
+| #   | Name | Deliverable | Missing today (from the audit) |
+|-----|------|-------------|--------------------------------|
+| M16 | Recipe fill (second half) | Every `CraftingManager` recipe whose result can exist | Done 2026-10-13 (tests `plain_recipes_match_java`, not run): paper, book, sugar, fence, ladder, brick block, bookshelf, jack-o'-lantern, 4 slab types, trapdoor, cake, TNT, sign, painting. Still open, each waits for its block or item: rails (3), minecarts (3), boat, lever, redstone torch, repeater, button, 2 pressure plates, dispenser, 2 pistons, jukebox, note block, compass, clock, map |
+| M17 | Block-entity effects + placement | Blocks act on the player and on placement | Done 2026-10-13 (tests not run): ladder climbing and slow fall, web, cactus damage to the player and to mobs (`mobs::tests::cactus_hurts_a_mob_without_knockback_or_anger`), furnace and pumpkin facing on placement, slab on slab -> double slab, farmland trampling (`Ticks::walk`), `canPlaceBlockAt` for plants and cactus. Still open: soul sand slow-down (needs the block: Nether) |
+| M18 | TNT + throwables | `EntityTNTPrimed`, snowball, egg | Done 2026-10-13 (tests `primed_tnt_rests_then_booms_on_its_fuse`, `thrown_items_land_quietly_and_an_egg_hatches`, not run): primed TNT lit by flint and steel or fire and chained by explosions, snowball, egg, the TNT recipe, the white flash of the fuse. Still open: lighting by redstone (M21) |
+| M19 | Small blocks + sign + painting | One session of the remaining simple blocks | Done 2026-10-14 (tests `paintings_hang_on_walls_like_java`, `paintings_fall_off_and_are_picked`, `signs_place_edit_and_save`, not run): trapdoor, cake, sign, painting; sponge needed nothing (see changelog). Nothing open |
+| M20 | Mobs, particles, items | Finish the overworld entity set | wolf taming and sitting, saddle + riding a pig (`ItemSaddle`), A* `Pathfinder`, `EntityDiggingFX` (block break pieces), heart, redstone and portal particles, animated compass and clock (`TextureCompassFX`, `TextureWatchFX`), `ItemMap` + `MapData` |
+| M21 | Redstone | Full circuits | `BlockRedstoneWire`, redstone torch, lever, button, pressure plates, repeater, glowing redstone ore, `isPoweringTo` / indirect power, redstone-driven doors and TNT, `BlockDispenser` + `TileEntityDispenser` + `GuiDispenser`, note block (`TileEntityNote`), jukebox + records as blocks and items (logic only, no sound), pistons (`BlockPistonBase`, `BlockPistonExtension`, `BlockPistonMoving`, `TileEntityPiston`) |
+| M22 | Vehicles + rails | Minecarts and boats | rail shape on placement (`RailLogic`), powered and detector rails, `EntityMinecart` (empty, chest, furnace), `EntityBoat`, their items and models |
+| M11 | Nether | Hell biome, portals, ghast, pigman | `ChunkProviderHell`, `WorldProviderHell`, `Teleporter`, portal block 90 (it is only recognized today: lighting, `BlockPortal`, `TextureFX` portal), `MapGenCavesHell`, `WorldGenFire` / `GlowStone1/2` / `HellLava`, netherrack, soul sand, `EntityGhast` + `EntityFireball`, pig-zombie spawn. Optional: `WorldProviderSky` |
+| M14 | Polish | Menus, UI, look | `GuiMainMenu`, `GuiOptions`, `GuiSelectWorld`, `GuiCreateWorld`, `GuiChat`, achievements and stats screens, real mob models and textures (mobs are flat-colour boxes), first-person hand and swing, hurt flash, fire and water overlays, death camera, text beyond the item tooltip |
 
 ## Build
 - Workspace at `mc-rs/`
-- `cargo test --lib` runs the unit tests: 47 before block metadata, 52 with it, 56 with swimming, health, food and frustum culling (Android host such as Termux; see README).
+- `cargo test --lib` runs the unit tests (Android host such as Termux; see README). Several newer tests were written without a toolchain and have never run: run them first.
 - `cargo run` boots a desktop window (Metal / Vulkan / GL depending on host).
 - APK via GitHub Actions `cargo apk build --release` -> `MinecraftB173Rust.apk`.
 - A long-lived debug keystore at `keystore/debug.keystore` signs the release
@@ -38,14 +55,28 @@ decompiled `minecraft/` tree is marked `// UNVERIFIED:` in the code. PRs
 that fix UNVERIFIED items should drop the marker and link the source line
 they matched.
 
+## Working rule (AGENTS.md)
+
+Lazy senior dev: read the Java, trace the flow, reuse what exists (the arrow path, `Explosion`, `shaped(..)`, the tick
+table), one runnable check per non-trivial piece, `ponytail:` comment on every deliberate shortcut. Fewest files possible.
+Order of work: always the easiest item first.
+
 ## Next step
 
-M8 (entities + AI). M7 (save) is written but not compiled: run `cargo test --lib` first. Furnaces smelt (see the furnace entry), so the whole tool chain up to diamond is reachable. M6 is written and the crate type-checks and tests on a host, but nothing has run on a device (M5 included). M4 is done: caves and populate match the real classes bit for
-bit (`tools/golden/`). Still approximate in populate (see README): light model, no metadata, no tile entities, no block
-ticks (liquids/sand). Sapling growth, fluid flow and falling sand are in M6b (block updates). Ice Desert exists in
-BiomeGenBase but climate never selects it; b1.7.3 has no ravines.
+M17..M19 are done in this base (soul sand waits for M11). Next in the easy-first order: M20 (taming, saddle, `EntityDiggingFX`, compass and clock), then M22, M11, M14; M21 (redstone) is the biggest and gets a session of its own. First run `cargo test --lib`: the M15..M19 work has never been compiled.
 
 ## Changelog
+- 2026-10-14: M19 sign + painting, M17 cactus on mobs, M18 TNT recipe + flash (written WITHOUT a Rust toolchain: not compiled, not run; +5 tests `decor::tests::{paintings_hang_on_walls_like_java, paintings_fall_off_and_are_picked, signs_place_edit_and_save}`, `mobs::tests::cactus_hurts_a_mob_without_knockback_or_anger`, asserts in `plain_recipes_match_java` and `atlas`). Ported from `EntityPainting`, `EnumArt`, `ItemPainting`, `RenderPainting`, `BlockSign`, `ItemSign`, `TileEntitySign`, `TileEntitySignRenderer`, `SignModel`, `GuiEditSign`, `BlockCactus`, `RenderTNTPrimed`:
+    - `world/decor.rs` (new): `ART` (`EnumArt`), `Painting` (`func_412_b` frame, `func_410_i` = `fits`: no collision box in the plate, solid wall behind each 16 px piece, no other painting; `hang` draws one of the motives that fit with `nextInt`; `step` re-checks every 101 ticks and the caller drops the item; `pick` = ray against the box grown 0.1), `sign_place` (`ItemSign.onItemUse`: post `floor((rotationYaw + 180) * 16 / 360 + 0.5) & 15` on a top face, wall sign with the face as metadata), the editor (`Edit`, `Key`, `layout`: an on-screen keyboard, `GuiEditSign.keyTyped` = 15 characters, backspace, next line) and the `decor` save file (own file: `Level`'s optional tails stay as they are; a line or motive out of range makes the file be ignored).
+    - `render/atlas.rs`: the atlas gains `assets/art.rgba` (`art/kz.png` 256 x 256 over `item/sign.png` 64 x 32, `tools/gen_terrain.py`): paintings use tiles `ART_TILE0 + row * 16 + col` (every motive offset is a multiple of 16), signs read pixels of `sign.png` (`sign_px`). `mesh::push_face` is `push_box` for one face. `ATLAS_H` 544 -> 832.
+    - `render/items.rs`: paintings (one face per 16 px piece, lit by the cell in front), signs (`push_model_box` = `ModelRenderer.addBox` + `TexturedQuad` unwrap, 2/3 scale, post turned 22.5 degrees a step, wall sign 5/16 down and 7/16 back; text as flat black quads from the HUD font's glyph runs, 1/60 of the scale per pixel, within 16 blocks) and the TNT flash (`(fuse / 5) % 2 == 0`: a white box). Blocks 63 / 68 are skipped by the mesher (`getRenderType` -1) and are no longer `opaque`; `box_bounds` has the post and the wall sign (`setBlockBoundsBasedOnState`).
+    - `ticks.rs`: `BlockSign.onNeighborBlockChange` (`sign_stays`). `lib.rs`: tap on a side face with a painting hangs it, a tap on a painting breaks it (drops the item); a sign is placed with the editor opening on it (the text lives in `App.signs`, edited in place); `mobs.rs`: `Mob::hit` = the damage window without anger, a mob touching a cactus takes 1 a tick (no knockback, no anger).
+    - ponytail: a painting is only its front (sides and back are not drawn); the sign is drawn two-sided and its text is not textured; the editor has no hardware keys; a sign block without a `decor` entry (a save from a crash between chunk and `decor` write) is not drawn; the painting's collision with entities uses blocks only (as `getBoundingBox` is null for everything else in b1.7.3). UNVERIFIED: that it compiles, the keyboard layout on a device, sign text size, the sign's one-pixel UV inset at coarse mips.
+- 2026-10-13: M17 first half: ladder, web, cactus (written WITHOUT a Rust toolchain: not compiled, not run; +2 tests `physics::tests::ladder_climbs_into_the_wall_and_slows_the_fall`, `web_cuts_the_move_and_the_cactus_touches`). One shared change in `physics::step_box`, so the player and every mob get it: `on_ladder` (`EntityLiving.isOnLadder`: the cell at the feet), sideways speed and fall capped at 0.15 blocks/tick, a push into the wall climbs at 0.2; `touching` (`Entity.moveEntity` contact sweep, box shrunk 0.001) drives the web (`isInWeb`: move x0.25 / y0.05 / x0.25, motion zeroed) and the cactus (`lib.rs`: `Vitals::hurt(1)` per frame, the damage window paces it). `Env.ladder` makes `Vitals::land` reset the fall like `fallDistance = 0`. ponytail: the web applies in the same frame (vanilla reads last tick's flag); the climb adds the frame's gravity back to match the Java's ~0.1176 blocks/tick; mobs do not take cactus damage; no sneak-to-hold on a ladder (no sneak on touch).
+- 2026-10-13: ROADMAP restructured after a source audit (docs only, no code): out-of-scope list (audio, multiplayer, further optimization), done milestones split from to-do ones, new M15..M22 for every gap found, M11 and M14 expanded. M9, M10, M13 removed from the plan. Entries below are untouched except the three new M15 / M16 ones at the top.
+- 2026-10-13: M15 done: seeds and sugar cane can be placed (written WITHOUT a Rust toolchain: not compiled, not run; +1 test `pick::tests::reeds_need_water_beside_the_ground_or_more_reeds`). `lib.rs` tap path: `ItemSeeds.onItemUse` (top face of farmland, air above -> crops meta 0), `ItemReed.onItemUse` (cell beside the face, or the snow layer itself; `pick::reed_ok` = `BlockReed.canPlaceBlockAt`). Crop loop is now closed: till, plant, grow, harvest, replant. ponytail: no step sound; the reed's own entity-collision check is skipped (it has no collision box).
+- 2026-10-13: M16 first half: 12 plain recipes in `craft::recipes()` (paper, book, sugar, fence, ladder, brick block, bookshelf, jack-o'-lantern, 4 slab types), all with results that already place or stack (written WITHOUT a Rust toolchain: not compiled, not run; +1 test `plain_recipes_match_java`). No pattern collides with an existing one (the first-match-wins note in `recipes()` still holds). Left for when their blocks work: trapdoor, sign, TNT, rails, minecarts, boat, painting, redstone parts, cake, jukebox, note block, dispenser, pistons, compass, clock, map.
+- 2026-10-13: FIX crops dropped a block-59 item (written WITHOUT a Rust toolchain: not compiled, not run; +1 test `crops_drop_seeds_and_wheat`): `Drops::spawn_block` now ports `BlockCrops.dropBlockAsItemWithChance` (the `super` float draw, wheat at meta 7, 3 tries of seeds with `nextInt(15) <= meta`). `ItemSeeds` / `ItemReed` placement is still open (M15).
 - 2026-10-13: FIX grass-side fringe flickering between bright and dim (written WITHOUT a Rust toolchain: not compiled, not run; `mesh::grass_overlay_tint_and_rail_quad` changed, the WGSL is covered by `chunk_shader_validates_and_legacy_is_forward`; video `Record_2026-10-13-16-08-56.mp4`):
     - Symptom, measured on the video: the camera is still for frames ~28-60 and the frames are identical, so nothing flickers there; while it moves, the green fringe along the top of a grass block's side face is bright in frames 72, 73, 85, 87 and dark in 74-83, 84, 86, i.e. it flips from one frame to the next at the same view.
     - Cause: the overlay (tile 38, grey fringe x grass tint = the dark one) was a second quad on the SAME plane and the SAME vertices as the face (tile 3, which has a bright untinted green fringe baked in), told apart only by a depth pull of 5e-7 (8 ulps) in `vs_main`. Two differently triangulated coplanar quads rasterise a few ulps apart, and a phone GPU interpolates depth with less precision than that at a grazing angle (the camera looking down a side face), so per pixel and per frame either quad won: the base's bright fringe showed through the overlay. UNVERIFIED on a device, but it is the only thing in the frame that decides this by depth, and it matches the toggling.
@@ -513,3 +544,11 @@ BiomeGenBase but climate never selects it; b1.7.3 has no ravines.
     - `world/pick.rs`: `stairs_meta` (`onBlockPlacedBy`), `door_meta` (`ItemDoor.onItemUse`: facing, hinge side, `canPlaceBlockAt`). `lib.rs`: stairs take their facing from the camera yaw (`yaw + 180` degrees = `rotationYaw`), a door item places both halves against a top face, a tap on a wooden door swings both halves (`toggle_door`), iron doors ignore the hand.
     - `world/ticks.rs`: `door_neighbour` = `BlockDoor.onNeighborBlockChange` (no redstone yet). `items.rs`: wooden / iron door drops (the upper half drops nothing). `craft.rs`: wooden door, iron door, wooden and cobblestone stairs. `atlas.rs`: door tiles 97 / 98, upper half 81 / 82.
     - Not done: the bed (needs sleeping, time skip and the bed spawn: next patch), door sounds, redstone-driven doors (step 5), mirrored hinge texture, stairs `getBlockTexture` metadata, items and mobs still treat stairs as a full cell (`collision` is the bounding box).
+- `done` M19, trapdoor (written WITHOUT a Rust toolchain: not compiled, not run; +1 test `chunk::phys_tests::trapdoor_lies_flat_or_stands_on_its_wall` not run). Ported from `BlockTrapDoor`; reuses the door pattern (pseudo physics ids, `box_bounds`, `neighbour` arm, tap toggle):
+    - `world/chunk.rs`: `trap_box` (`setBlockBoundsForBlockRender`), `TRAP_PHYS` (108..=115, `physics_id` 96 + `meta & 7`), `box_bounds` / `collision` arms, 96 is no longer `opaque`. `world/pick.rs`: `trap_meta` (`canPlaceBlockOnSide` + `onBlockPlaced`: side faces on a normal cube, facing = face - 2). `world/ticks.rs`: `trap_neighbour` (wall gone = drops itself). `render/atlas.rs`: tile 84. `world/craft.rs`: 6 planks -> 2 trapdoors (drop M16's "trapdoor" from its open list). `lib.rs`: a tap flips bit 4, placement uses `trap_meta`.
+    - Not done: the click sound, redstone (`onPoweredBlockChange`, M21), item sprite for the HUD (the atlas tile is used).
+- `no change` M19, sponge: in b1.7.3 `BlockSponge.onBlockAdded` is an empty loop (the `Material.water` test has no body) and `onBlockRemoval` only re-notifies neighbours, so the sponge does NOT absorb water. mc-rs already matches (id 19, tile 48, hardness 0.6). The "absorbs water when placed" wording above was wrong.
+- `done` M19, cake (written WITHOUT a Rust toolchain: not compiled, not run; +1 test `craft::tests::cake_takes_milk_sugar_wheat_egg_and_gives_the_buckets_back` and 2 asserts in `trapdoor_lies_flat_or_stands_on_its_wall`, not run). Needs the M15 `ItemReed` branch (`seeds-reeds.patch`); ported from `BlockCake`, `ItemReed`, `SlotCrafting.onPickupFromSlot`:
+    - `lib.rs`: the `ItemReed` branch now also places item 354 as block 92 (solid ground below, the player's box must be clear: `canBlockBePlacedAt`); a tap on a cake heals 3 below full health and adds a bite (meta + 1), the sixth bite removes it.
+    - `world/chunk.rs`: `box_bounds` (drawn / outline: loses 2/16 from -X per bite), `CAKE_PHYS` (116..=121, collision 1/16 lower), not `opaque`. `render/atlas.rs`: tiles 121 top, 122 sides, 123 bitten face, 124 bottom. `world/ticks.rs`: ground not solid = gone. `world/items.rs`: drops nothing, stack of 1. `world/craft.rs`: recipe (3 milk, 2 sugar, 3 wheat, egg), and `take_result` now leaves an empty bucket for a water / lava / milk bucket (`getContainerItem`).
+    - Not done: sugar has no source until M16 (sugar cane -> sugar recipe), a punch (`onBlockClicked`) does not eat, eat sound.

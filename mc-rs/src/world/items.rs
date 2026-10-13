@@ -53,11 +53,11 @@ pub fn name(s: ItemStack) -> Option<&'static str> {
     }
 }
 
-/// `Item.maxStackSize`: tools, armor, buckets, sign, doors, bed and stew 1, snowball 16, cookie 8, everything else 64.
+/// `Item.maxStackSize`: tools, armor, buckets, sign, doors, bed and stew 1, snowball and egg 16, cookie 8, everything else 64.
 pub fn max_stack(id: u16) -> u8 {
     match id {
-        261 | 282 | 323 | 324 | 330 | 346 | 355 | 325..=327 | 335 => 1,
-        332 => 16,
+        261 | 282 | 323 | 324 | 330 | 346 | 354 | 355 | 325..=327 | 335 => 1,
+        332 | 344 => 16,
         357 => 8,
         _ if craft::tool(id).is_some() || craft::armor(id).is_some() => 1,
         _ => 64,
@@ -118,13 +118,13 @@ pub fn placed_meta(s: ItemStack) -> u8 {
 }
 
 // ---- Block.idDropped / quantityDropped / damageDropped ----
-// ponytail: blocks whose drop reads metadata and that nothing can make or place yet (doors, bed, crops, stairs)
+// ponytail: blocks whose drop reads metadata and that nothing can make or place yet (stairs)
 // are missing; their drops go in with the blocks. Slabs are here because the drop is two lines.
 
 fn quantity(b: u8, r: &mut JavaRandom) -> i32 {
     match b {
-        // fluids, glass, TNT, bookshelf, fire, spawner, snow layer, ice, portal
-        8..=11 | 20 | 46 | 47 | 51 | 52 | 78 | 79 | 90 => 0,
+        // fluids, glass, TNT, bookshelf, fire, spawner, snow layer, ice, portal, cake
+        8..=11 | 20 | 46 | 47 | 51 | 52 | 78 | 79 | 90 | 92 => 0,
         43 => 2,                                  // double slab: two single slabs
         18 => (r.next_int_bound(20) == 0) as i32, // leaves: a sapling one time in 20
         21 => 4 + r.next_int_bound(5),            // lapis
@@ -376,6 +376,19 @@ impl Drops {
         if matches!(block, 26 | 64 | 71) && meta & 8 != 0 {
             return; // BlockBed / BlockDoor.idDropped: the second half drops nothing
         }
+        if block == 59 {
+            // `BlockCrops`: `idDropped` is wheat only at meta 7 (the `super` call still draws its float), then 3 tries at seeds, each `nextInt(15) <= meta`.
+            self.rng.next_float();
+            if meta == 7 {
+                self.spawn_stack(ItemStack { id: 296, count: 1, damage: 0 }, cell);
+            }
+            for _ in 0..3 {
+                if self.rng.next_int_bound(15) <= meta as i32 {
+                    self.spawn_stack(ItemStack { id: 295, count: 1, damage: 0 }, cell);
+                }
+            }
+            return;
+        }
         for _ in 0..quantity(block, &mut self.rng) {
             self.rng.next_float(); // `nextFloat() <= chance` with chance 1.0: always true, but it draws
             let id = id_dropped(block, &mut self.rng);
@@ -451,6 +464,20 @@ mod tests {
     }
 
     use super::*;
+
+    /// Crops drop seeds when young, wheat plus seeds when ripe (`BlockCrops`), never a crops item.
+    #[test]
+    fn crops_drop_seeds_and_wheat() {
+        let mut d = Drops::new(1);
+        for _ in 0..50 {
+            d.spawn_block(59, 3, (0, 64, 0));
+        }
+        assert!(d.items.iter().all(|e| e.stack.id == 295), "young crops: seeds only");
+        let mut d = Drops::new(1);
+        d.spawn_block(59, 7, (0, 64, 0));
+        assert_eq!(d.items.iter().filter(|e| e.stack.id == 296).count(), 1);
+        assert!(d.items.iter().all(|e| e.stack.id != 59));
+    }
 
     /// Stew heals 10 and leaves a bowl; other items are not food and stay.
     #[test]

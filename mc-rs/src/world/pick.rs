@@ -119,6 +119,25 @@ pub fn stairs_meta(yaw: f32) -> u8 {
     [2, 1, 3, 0][((yaw * 4.0 / 360.0 + 0.5).floor() as i32 & 3) as usize]
 }
 
+/// `onBlockPlacedBy` of the blocks that face the player (stairs 53 / 67, furnace 61, pumpkin 86 / jack-o'-lantern 91): the
+/// metadata from `rotationYaw` in degrees, `None` for any other block (it takes `items::placed_meta`).
+pub fn facing_meta(id: u16, yaw: f32) -> Option<u8> {
+    let q = yaw * 4.0 / 360.0;
+    let at = |k: f32, t: [u8; 4]| t[(((q + k).floor() as i32) & 3) as usize];
+    match id {
+        53 | 67 => Some(at(0.5, [2, 1, 3, 0])),
+        61 => Some(at(0.5, [2, 5, 3, 4])),
+        86 | 91 => Some(at(2.5, [0, 1, 2, 3])),
+        _ => None,
+    }
+}
+
+/// `BlockTrapDoor.canPlaceBlockOnSide` + `onBlockPlaced`: only on a side face (2..=5) of a normal cube (`support`); the facing
+/// is `face - 2`.
+pub fn trap_meta(face: u8, support: bool) -> Option<u8> {
+    (face >= 2 && support).then(|| face - 2)
+}
+
 /// `ItemDoor.onItemUse` + `BlockDoor.canPlaceBlockAt`: the metadata of the lower half of door `id` (the upper is that + 8)
 /// placed at `cell`, or `None` when it cannot stand there. The hinge goes to the side with more solid neighbours or next
 /// to another door (the `+ 4` open-state bit is how the Java stores a mirrored hinge).
@@ -164,6 +183,15 @@ pub fn wake_cell(get: &dyn Fn(i32, i32, i32) -> u8, (x, y, z): (i32, i32, i32), 
 /// Plants count too: they are drawn as nothing yet, so refusing to place into one would look like a bug.
 pub fn replaceable(id: u8) -> bool {
     matches!(id, 0 | 8..=11 | 51 | 78) || is_plant(id)
+}
+
+/// `BlockReed.canPlaceBlockAt`: on more reeds, or on grass / dirt with water (still or flowing) beside the ground cell.
+pub fn reed_ok(get: &dyn Fn(i32, i32, i32) -> u8, (x, y, z): (i32, i32, i32)) -> bool {
+    match get(x, y - 1, z) {
+        83 => true,
+        2 | 3 => [(-1, 0), (1, 0), (0, -1), (0, 1)].iter().any(|&(a, b)| matches!(get(x + a, y - 1, z + b), 8 | 9)),
+        _ => false,
+    }
 }
 
 /// `BlockTorch.func_31032_h`: a torch can stand on a normal cube or a fence.
@@ -296,6 +324,9 @@ mod door_tests {
     #[test]
     fn stairs_face_the_player_and_doors_need_a_floor() {
         assert_eq!((stairs_meta(0.0), stairs_meta(90.0), stairs_meta(180.0), stairs_meta(270.0)), (2, 1, 3, 0));
+        assert_eq!([0.0, 90.0, 180.0, 270.0].map(|y| facing_meta(61, y).unwrap()), [2, 5, 3, 4]);
+        assert_eq!([0.0, 90.0, 180.0, 270.0].map(|y| facing_meta(86, y).unwrap()), [2, 3, 0, 1]);
+        assert_eq!((facing_meta(53, 90.0), facing_meta(1, 0.0)), (Some(1), None));
         let floor = |_: i32, y: i32, _: i32| if y == 63 { 1 } else { 0 };
         assert_eq!(door_meta(&floor, (0, 64, 0), 0.0, 64), Some(1));
         let wall = |x: i32, y: i32, _: i32| if y == 63 || (x == -1 && y < 66) { 1 } else { 0 };
@@ -312,5 +343,14 @@ mod door_tests {
         assert_eq!(bed_meta(&half, (0, 64, 0), 270.0), None, "the partner cell (1, 64, 0) has no floor");
         assert_eq!(wake_cell(&floor, (0, 64, 0), 0), Some((-1, 64, -1)));
         assert_eq!(wake_cell(&|_, _, _| 0, (0, 64, 0), 0), None);
+    }
+
+    #[test]
+    fn reeds_need_water_beside_the_ground_or_more_reeds() {
+        let shore = |x: i32, y: i32, _: i32| if y == 63 && x == 1 { 9 } else if y == 63 { 2 } else { 0 };
+        assert!(reed_ok(&shore, (0, 64, 0)), "grass with water beside it");
+        assert!(!reed_ok(&shore, (-3, 64, 0)), "grass with no water beside it");
+        assert!(reed_ok(&|_, y, _| if y == 63 { 83 } else { 0 }, (0, 64, 0)), "on a reed");
+        assert!(!reed_ok(&|_, y, _| if y == 63 { 1 } else { 0 }, (0, 64, 0)), "on stone");
     }
 }

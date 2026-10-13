@@ -238,6 +238,8 @@ pub fn recipes() -> &'static [Recipe] {
             shaped(&[" #", "# "], &[('#', 265)], SHEARS, 1), // shears
             shaped(&["A ", " B"], &[('A', 265), ('B', 318)], FLINT_AND_STEEL, 1), // CraftingManager: iron ingot + flint
             shaped(&["###", "XXX"], &[('#', 35), ('X', 5)], 355, 1), // bed: wool + planks
+            shaped(&["###", "###"], &[('#', PLANKS)], 96, 2), // trapdoor (CraftingManager)
+            shaped(&["AAA", "BEB", "CCC"], &[('A', 335), ('B', 353), ('C', 296), ('E', 344)], 354, 1), // cake: milk, sugar, wheat, egg
             shaped(&["##", "##", "##"], &[('#', 5)], 324, 1),   // wooden door
             shaped(&["##", "##", "##"], &[('#', 265)], 330, 1), // iron door
             shaped(&["#  ", "## ", "###"], &[('#', 5)], 53, 4), // wooden stairs
@@ -252,6 +254,22 @@ pub fn recipes() -> &'static [Recipe] {
             shaped(&["  #", " #X", "# X"], &[('#', STICK), ('X', 287)], 346, 1), // fishing rod
             shaped(&["###"], &[('#', 296)], 297, 1), // bread
             shaped(&["###", "#X#", "###"], &[('#', 41), ('X', 260)], 322, 1), // golden apple: gold block + apple
+            // CraftingManager: the plain ones whose result already works (blocks that place, items that stack).
+            shaped(&["###"], &[('#', 338)], 339, 3),                         // paper: 3 sugar cane
+            shaped(&["#", "#", "#"], &[('#', 339)], 340, 1),                 // book: 3 paper
+            shaped(&["#"], &[('#', 338)], 353, 1),                           // sugar: 1 sugar cane
+            shaped(&["###", "###"], &[('#', STICK)], 85, 2),                 // fence
+            shaped(&["# #", "###", "# #"], &[('#', STICK)], 65, 2),          // ladder
+            shaped(&["##", "##"], &[('#', 336)], 45, 1),                     // brick block: 4 bricks
+            shaped(&["###", "XXX", "###"], &[('#', PLANKS), ('X', 340)], 47, 1), // bookshelf
+            shaped(&["A", "B"], &[('A', 86), ('B', 50)], 91, 1),             // jack-o'-lantern: pumpkin + torch
+            shaped(&["###", "###", " X "], &[('#', PLANKS), ('X', STICK)], 323, 1),   // sign
+            shaped(&["###", "#X#", "###"], &[('#', STICK), ('X', 35)], 321, 1),        // painting: 8 sticks round a wool
+            shaped(&["X#X", "#X#", "X#X"], &[('X', 289), ('#', 12)], 46, 1),  // TNT: gunpowder + sand
+            shaped(&["###"], &[('#', 4)], 44 | 3 << 9, 3),                   // slabs x3: cobblestone, stone, sandstone, planks
+            shaped(&["###"], &[('#', 1)], 44, 3),
+            shaped(&["###"], &[('#', 24)], 44 | 1 << 9, 3),
+            shaped(&["###"], &[('#', PLANKS)], 44 | 2 << 9, 3),
         ];
         // RecipesDyes: dye + white wool -> the dye's wool (`BlockCloth.func_21035_d` = `~d & 15`), then the dye mixes.
         r.extend((0..16).map(|d| shapeless(&[dy(d), 35], 35 | (!d & 15) << 9, 1)));
@@ -460,13 +478,14 @@ impl Screen {
         }
     }
 
-    /// `SlotCrafting.onPickupFromSlot`: one of every ingredient is used up (no container items in this port).
+    /// `SlotCrafting.onPickupFromSlot`: one of every ingredient is used up; a bucket with something in it (water, lava, milk)
+    /// leaves an empty one (`getContainerItem`).
     fn take_result(&mut self) {
         for s in self.grid.iter_mut() {
             if let Some(t) = s {
                 t.count -= 1;
                 if t.count == 0 {
-                    *s = None;
+                    *s = matches!(t.id, 326 | 327 | 335).then_some(ItemStack { id: 325, count: 1, damage: 0 });
                 }
             }
         }
@@ -867,6 +886,34 @@ mod tests {
         assert!(v.hurt(10) && v.health == 12 && v.wear == 10, "10 * 20 / 25 = 8, remainder 0");
     }
 
+    /// The plain `CraftingManager` recipes added for blocks and items that already work.
+    #[test]
+    fn plain_recipes_match_java() {
+        let st = |id, damage| ItemStack { id, count: 1, damage };
+        let row = |id| (0..3).map(|i| (i, st(id, 0))).collect::<Vec<_>>();
+        let find_in = |cells: &[(usize, ItemStack)], gw| {
+            let mut g = [None; 9];
+            cells.iter().for_each(|&(i, s)| g[i] = Some(s));
+            find(&g, gw).map(|s| (s.id, s.count, s.damage))
+        };
+        assert_eq!(find_in(&row(338), 3), Some((339, 3, 0)), "paper");
+        assert_eq!(find_in(&[(1, st(338, 0))], 3), Some((353, 1, 0)), "sugar");
+        assert_eq!(find_in(&[(0, st(339, 0)), (3, st(339, 0)), (6, st(339, 0))], 3), Some((340, 1, 0)), "book");
+        assert_eq!(find_in(&row(4), 3), Some((44, 3, 3)), "cobblestone slab");
+        assert_eq!(find_in(&row(1), 3), Some((44, 3, 0)), "stone slab");
+        assert_eq!(find_in(&row(24), 3), Some((44, 3, 1)), "sandstone slab");
+        assert_eq!(find_in(&row(5), 3), Some((44, 3, 2)), "wooden slab");
+        let shelf: Vec<_> = (0..9).map(|i| (i, st(if (3..6).contains(&i) { 340 } else { 5 }, 0))).collect();
+        assert_eq!(find_in(&shelf, 3), Some((47, 1, 0)), "bookshelf");
+        assert_eq!(find_in(&[(0, st(86, 0)), (3, st(50, 0))], 3), Some((91, 1, 0)), "jack-o'-lantern");
+        let tnt: Vec<_> = (0..9).map(|i| (i, st(if i % 2 == 0 { 289 } else { 12 }, 0))).collect();
+        assert_eq!(find_in(&tnt, 3), Some((46, 1, 0)), "TNT: gunpowder on the corners and the centre, sand between");
+        let sign: Vec<_> = (0..9).map(|i| (i, st(if i < 6 { 5 } else if i == 7 { 280 } else { 0 }, 0))).filter(|c| c.1.id != 0).collect();
+        assert_eq!(find_in(&sign, 3), Some((323, 1, 0)), "sign: 6 planks over a stick");
+        let frame: Vec<_> = (0..9).map(|i| (i, st(if i == 4 { 35 } else { 280 }, 0))).collect();
+        assert_eq!(find_in(&frame, 3), Some((321, 1, 0)), "painting: 8 sticks round a wool");
+    }
+
     /// Tools: ids, durability, speed on their blocks and the harvest gate.
     #[test]
     fn tool_tables() {
@@ -921,5 +968,19 @@ mod tests {
         assert_eq!(find(&[(0, 318), (3, 280), (6, 288)], 3), Some((262, 4)), "arrow");
         assert_eq!(find(&[(1, 280), (2, 287), (3, 280), (5, 287), (7, 280), (8, 287)], 3), Some((261, 1)), "bow");
         assert_eq!(find(&[(2, 280), (4, 280), (5, 287), (6, 280), (8, 287)], 3), Some((346, 1)), "rod");
+    }
+
+    #[test]
+    fn cake_takes_milk_sugar_wheat_egg_and_gives_the_buckets_back() {
+        let st = |id: u16| ItemStack { id, count: 1, damage: 0 };
+        let (mut inv, mut s) = (Inventory::default(), Screen::new(3));
+        for (i, id) in [335, 335, 335, 353, 344, 353, 296, 296, 296].into_iter().enumerate() {
+            s.grid[i] = Some(st(id));
+        }
+        s.click(SlotId::Result, false, &mut inv, None);
+        assert_eq!(s.cursor.map(|c| (c.id, c.count)), Some((354, 1)));
+        assert!(s.grid[..3].iter().all(|g| g.is_some_and(|b| b.id == 325)), "three empty buckets");
+        assert!(s.grid[3..].iter().all(Option::is_none));
+        assert_eq!(crate::world::items::max_stack(354), 1);
     }
 }

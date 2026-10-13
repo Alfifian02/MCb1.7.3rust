@@ -21,6 +21,11 @@ open("mc-rs/assets/terrain.rgba", "wb").write(terrain.tobytes())
 open("mc-rs/assets/grasscolor.rgb", "wb").write(grass.convert("RGB").tobytes())
 open("mc-rs/assets/foliagecolor.rgb", "wb").write(foliage.convert("RGB").tobytes())
 open("mc-rs/assets/items.rgba", "wb").write(png("gui/items.png").tobytes())
+# art/kz.png (painting motives, 256x256) with item/sign.png (64x32, the sign model) under it, 256x288: `render::atlas::ART`
+art = Image.new("RGBA", (256, 288), (0, 0, 0, 0))
+art.paste(png("art/kz.png"), (0, 0))
+art.paste(png("item/sign.png"), (0, 256))
+open("mc-rs/assets/art.rgba", "wb").write(art.tobytes())
 
 # item id -> items.png tile, from Item.java: `new ItemX(<id - 256>, ...).setIconCoord(col, row)` or `.setIconIndex(n)`
 import re

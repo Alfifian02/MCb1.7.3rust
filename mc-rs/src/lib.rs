@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 use crate::gpu::context::Gpu;
 use crate::gpu::pipeline::ChunkPipeline;
 use crate::render::atlas;
-use crate::render::items::ItemMesh;
+use crate::render::items::{ItemMesh, SignView};
 use crate::render::camera::{FirstPersonCamera, Frustum, ShadowCache};
 use crate::render::outline::Outline;
 use crate::render::shadows::Shadows;
@@ -36,14 +36,15 @@ use crate::render::pack::BiomeEnv;
 use crate::world::pick::{self, Hit};
 use crate::world::dig::{self, Dig};
 use crate::world::chest::{self, Chest};
+use crate::world::decor::{self, Edit, Key, Painting, Text};
 use crate::world::craft::{self, Furnace, Screen};
 use crate::world::items::{self, Drops, Inventory, ItemStack};
 use crate::world::gear::{self, Hook, Used};
 use crate::world::mobs::{self, Ctx, Ev, Mobs};
-use crate::world::ticks::Ticks;
+use crate::world::ticks::{self, Ticks};
 use crate::world::save::{self, Level};
 use crate::world::sky;
-use crate::world::chunk::{is_plant, outline_bounds, physics_id, pick_bounds};
+use crate::world::chunk::{is_plant, normal_cube, outline_bounds, physics_id, pick_bounds};
 use crate::world::chunks::{chunk_coord, ChunkManager, Shape};
 use crate::world::physics::{self, Player};
 use crate::world::vitals::{self, Env, Vitals};
@@ -161,6 +162,10 @@ struct App {
     cpu_acc: f32,
     /// Chest tile entities by block position (created on first open, or by a dungeon's populate).
     chests: HashMap<chest::Pos, Chest>,
+    /// Paintings on walls, sign texts by block position (`TileEntitySign`) and the sign being edited (`GuiEditSign`); saved in `decor`.
+    paintings: Vec<Painting>,
+    signs: HashMap<decor::Pos, Text>,
+    sign_edit: Option<Edit>,
     /// The finger gesture on the open screen, to tell a tap from a spread.
     gesture: Option<Gesture>,
     /// Health, air and fire; and where a dead player comes back (the first spawn: no beds yet).
@@ -280,6 +285,9 @@ impl App {
             hook: None,
             furnaces: HashMap::new(),
             chests: HashMap::new(),
+            paintings: Vec::new(),
+            signs: HashMap::new(),
+            sign_edit: None,
             furn_acc: 0.0,
             anim: crate::render::anim::Anim::new(),
             anim_acc: 0.0,
@@ -295,6 +303,9 @@ impl App {
         if let Some(l) = level {
             app.restore(l);
         }
+        if let Some((p, s)) = std::fs::read(app.dir.join("decor")).ok().and_then(|b| decor::decode(&b)) {
+            (app.paintings, app.signs) = (p, s.into_iter().collect());
+        }
         Ok(app)
     }
 
@@ -305,6 +316,8 @@ impl App {
         if self.screen.take().is_some() {
             self.touch.set_screen(false);
         }
+        self.close_sign();
+        (self.paintings, self.signs) = (Vec::new(), HashMap::new());
         let _ = std::fs::remove_dir_all(&self.dir);
         let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as i64);
         self.chunks = ChunkManager::new(SEED, RENDER_DIST).with_dir(self.dir.clone()); // the old one's workers stop on drop
@@ -370,6 +383,10 @@ impl App {
         };
         if let Err(e) = save::write(&self.dir.join("level"), &level.encode()) {
             log::warn!("save: level file: {e}");
+        }
+        let signs: Vec<_> = self.signs.iter().map(|(&p, t)| (p, t.clone())).collect();
+        if let Err(e) = save::write(&self.dir.join("decor"), &decor::encode(&self.paintings, &signs)) {
+            log::warn!("save: decor file: {e}");
         }
         self.chunks.flush(chunks);
     }
@@ -459,7 +476,12 @@ impl App {
         self.vitals.armor = craft::armor_value(&self.inv.slots[items::MAIN..]);
         // `Entity.isEntityInsideOpaqueBlock` at the head (`EntityPlayer.getEyeHeight` is 0.12 over the eye): 1 damage a tick in a wall.
         let in_wall = effects::inside_opaque(&|x, y, z| self.chunks.block(x, y, z), self.player.pos.x, self.player.pos.y + 0.84, self.player.pos.z, 0.6);
-        self.vitals.update(dt, Env { dy: self.player.pos.y - y0, on_ground: self.player.on_ground, water, lava, eye_in_water, eye_y: e.y, in_wall });
+        let ladder = !asleep && physics::on_ladder(self.player.pos, physics::HALF, &get);
+        // `BlockCactus.onEntityCollidedWithBlock`: 1 damage every frame the box touches a cactus cell (the 10 tick damage window paces it).
+        if !asleep && physics::touching(self.player.pos, physics::HALF, &get, 81) {
+            self.vitals.hurt(1);
+        }
+        self.vitals.update(dt, Env { dy: self.player.pos.y - y0, on_ground: self.player.on_ground, water, lava, ladder, eye_in_water, eye_y: e.y, in_wall });
         // Entering water splashes (`Entity.onEntityUpdate`); running out of air pops 8 bubbles round the eye (`EntityLiving.onEntityUpdate`).
         let motion = self.player.vel / 20.0; // blocks per tick
         if water && !self.was_in_water {
@@ -510,6 +532,13 @@ impl App {
             let centre = (chunk_coord(self.player.pos.x), chunk_coord(self.player.pos.z));
             self.sleep_tick(sub);
             self.ticks.step(&mut self.chunks, &mut self.drops, centre, self.weather.rain(1.0));
+            for at in std::mem::take(&mut self.ticks.booms) {
+                self.explode(at, 4.0); // `EntityTNTPrimed.explode`
+            }
+            if self.sleep.is_none() {
+                let p = self.player.pos; // the box centre is 0.9 over the feet
+                self.ticks.walk(&mut self.chunks, p.x, p.y - 0.9, p.z);
+            }
             self.tick_effects(centre);
             let mut flips = Vec::new();
             for (&pos, f) in self.furnaces.iter_mut() {
@@ -518,7 +547,9 @@ impl App {
                 }
             }
             for ((x, y, z), lit) in flips {
-                self.chunks.set_block(x, y, z, if lit { 62 } else { 61 });
+                // `updateFurnaceBlockState`: the facing survives the swap.
+                let m = self.chunks.meta(x, y, z);
+                self.chunks.set_block_meta(x, y, z, if lit { 62 } else { 61 }, m);
             }
             // Chests: take over what a dungeon's populate put in them; one whose block is gone (dug, blown up, washed away)
             // spills its contents (`BlockChest.onBlockRemoval`; ponytail: seen on the next 20 Hz tick, not at the removal).
@@ -528,6 +559,18 @@ impl App {
             // Dungeon spawners (`TileEntityMobSpawner`): taken over from populate; one whose block is gone is dropped.
             for (p, kind) in self.chunks.take_spawners() {
                 self.fx.spawners.entry(p).or_insert(Spawner { kind, delay: 20 });
+            }
+            // Paintings check their wall every 101 ticks and drop as an item when it is gone (`EntityPainting.onUpdate`); a sign's
+            // text goes with its block, and closes the editor.
+            let chunks = &self.chunks;
+            let cell = |x: i32, y: i32, z: i32| chunks.block_loaded(x, y, z).map(|b| (b, chunks.meta(x, y, z)));
+            for p in decor::step(&mut self.paintings, &cell) {
+                let c = p.frame().0;
+                self.drops.scatter(ItemStack { id: decor::PAINTING, count: 1, damage: 0 }, (c.x.floor() as i32, c.y.floor() as i32, c.z.floor() as i32));
+            }
+            self.signs.retain(|&(x, y, z), _| self.chunks.block_loaded(x, y, z).map_or(true, |b| matches!(b, decor::POST | decor::WALL)));
+            if self.sign_edit.is_some_and(|e| !self.signs.contains_key(&e.pos)) {
+                self.close_sign();
             }
             self.fx.spawners.retain(|&(x, y, z), _| self.chunks.block_loaded(x, y, z).map_or(true, |b| b == effects::SPAWNER_ID));
             let gone: Vec<_> = self.chests.keys().copied().filter(|&(x, y, z)| self.chunks.block_loaded(x, y, z).is_some_and(|b| b != chest::ID)).collect();
@@ -548,7 +591,9 @@ impl App {
         let place = self.touch.take_place();
         // The inventory button, and taps on an open screen (its presses are not look / move / place).
         if self.touch.take_inventory() {
-            if self.screen.is_some() {
+            if self.sign_edit.is_some() {
+                self.close_sign();
+            } else if self.screen.is_some() {
                 self.close_screen();
             } else {
                 self.open_screen(Screen::new(2));
@@ -580,6 +625,7 @@ impl App {
                         if self.dig.tick(hit.pos, id, held, self.player.on_ground, in_water) {
                             let meta = self.chunks.meta(x, y, z); // before the cell is cleared: the drop depends on it
                             self.chunks.set_block(x, y, z, 0);
+                            self.fx.dig(hit.pos, crate::render::atlas::tile_of(id, meta)); // `addBlockDestroyEffects`
                             if let (61 | 62, Some(f)) = (id, self.furnaces.remove(&hit.pos)) {
                                 for st in f.slots.into_iter().flatten() {
                                     self.drops.scatter(st, hit.pos);
@@ -591,7 +637,14 @@ impl App {
                             if let Some(h) = held {
                                 self.inv.damage(slot, craft::wear_on_break(h.id, id));
                             }
-                            if harvest {
+                            if id == 46 {
+                                // `BlockTNT.onBlockDestroyedByPlayer` (unconditional): metadata 1, or flint and steel in hand (`onBlockClicked`), lights it.
+                                if meta & 1 == 1 || held.is_some_and(|h| h.id == craft::FLINT_AND_STEEL) {
+                                    self.ticks.prime(hit.pos, false);
+                                } else {
+                                    self.drops.spawn_stack(ItemStack { id: 46, count: 1, damage: 0 }, hit.pos);
+                                }
+                            } else if harvest {
                                 // BlockLeaves.harvestBlock: shears drop the leaves themselves, not a sapling.
                                 if id == 18 && held.is_some_and(|h| h.id == craft::SHEARS) {
                                     self.drops.spawn_stack(ItemStack { id: 18, count: 1, damage: (meta & 3) as u16 }, hit.pos);
@@ -643,6 +696,16 @@ impl App {
                 return;
             }
         }
+        // A tap on a painting nearer than the block behind it breaks it (`EntityPainting.attackEntityFrom`: it drops as an item).
+        if place {
+            let (eye, fwd) = (self.camera.pos, self.camera.forward());
+            let wall = self.target.map_or(f32::MAX, |h| h.point.distance(eye.as_dvec3()) as f32);
+            if let Some((i, _)) = decor::pick(&self.paintings, eye, fwd, pick::REACH as f32).filter(|&(_, t)| t < wall) {
+                let c = self.paintings.remove(i).frame().0;
+                self.drops.scatter(ItemStack { id: decor::PAINTING, count: 1, damage: 0 }, (c.x.floor() as i32, c.y.floor() as i32, c.z.floor() as i32));
+                return;
+            }
+        }
         let Some(hit) = self.target else {
             if place {
                 self.use_held();
@@ -667,6 +730,27 @@ impl App {
                     return;
                 }
                 Some(71) => return,
+                // BlockCake.blockActivated: a slice heals 3 while below full health; the sixth slice removes the cake.
+                // ponytail: a punch (`onBlockClicked`) does not eat; holding it digs the cake away like any block.
+                Some(92) => {
+                    let (x, y, z) = hit.pos;
+                    if self.vitals.health < crate::world::vitals::MAX_HEALTH {
+                        self.vitals.heal(3);
+                        let m = self.chunks.meta(x, y, z) + 1;
+                        if m >= 6 {
+                            self.chunks.set_block(x, y, z, 0);
+                        } else {
+                            self.chunks.set_block_meta(x, y, z, 92, m);
+                        }
+                    }
+                    return;
+                }
+                // BlockTrapDoor.blockActivated: the open bit flips.
+                Some(96) => {
+                    let (x, y, z) = hit.pos;
+                    self.chunks.set_block_meta(x, y, z, 96, self.chunks.meta(x, y, z) ^ 4);
+                    return;
+                }
                 Some(26) => {
                     self.use_bed(hit.pos);
                     return;
@@ -687,6 +771,32 @@ impl App {
             // places anything. ponytail: farmland stays farmland (no `BlockFarmland.updateTick` reverting it to dirt),
             // it is drawn as a full cube (the original is 15/16 high) and nothing grows on it yet.
             let slot = self.touch.hotbar_slot;
+            // ItemPainting.onItemUse: a side face; the motive is drawn among those that fit (`decor::hang`). Never places a block.
+            if self.inv.slots[slot].is_some_and(|s| s.id == decor::PAINTING) {
+                if let (Some(dir), true) = (decor::dir_of_face(hit.face), self.paintings.len() < decor::MAX_PAINTINGS) {
+                    let chunks = &self.chunks;
+                    let cell = |x: i32, y: i32, z: i32| chunks.block_loaded(x, y, z).map(|b| (b, chunks.meta(x, y, z)));
+                    if let Some(p) = decor::hang(hit.pos, dir, &self.paintings, &cell, &mut self.mobs.rng) {
+                        self.paintings.push(p);
+                        self.inv.consume(slot);
+                    }
+                }
+                return;
+            }
+            // ItemSign.onItemUse: a post on a top face, a wall sign on a side face; the editor opens on the new sign.
+            if self.inv.slots[slot].is_some_and(|s| s.id == decor::SIGN) {
+                let yaw = self.camera.yaw.to_degrees() + 180.0;
+                let placed = decor::sign_place(&|a, b, c| self.chunks.block_loaded(a, b, c).unwrap_or(0), hit.pos, hit.face, yaw);
+                if let Some(((x, y, z), id, meta)) = placed {
+                    if self.chunks.set_block_meta(x, y, z, id, meta) {
+                        self.inv.consume(slot);
+                        self.signs.insert((x, y, z), Default::default());
+                        self.sign_edit = Some(Edit::new((x, y, z)));
+                        self.touch.set_screen(true);
+                    }
+                }
+                return;
+            }
             // ItemBed.onItemUse: only against a top face, both halves on air over solid cubes.
             if self.inv.slots[slot].is_some_and(|s| s.id == 355) {
                 let (x, y, z) = pick::place_pos(&hit);
@@ -733,13 +843,35 @@ impl App {
                 }
                 return;
             }
+            // ItemSeeds.onItemUse: only the top face of farmland with air above; one seed becomes a crops block (meta 0).
+            if self.inv.slots[slot].is_some_and(|s| s.id == 295) {
+                let (x, y, z) = hit.pos;
+                if hit.face == 1 && self.chunks.block_loaded(x, y, z) == Some(60) && self.chunks.block_loaded(x, y + 1, z) == Some(0) {
+                    self.chunks.set_block(x, y + 1, z, 59);
+                    self.inv.consume(slot);
+                }
+                return;
+            }
+            // ItemReed.onItemUse (sugar cane, cake): the cell beside the face aimed at, or the snow layer itself; the block's
+            // `canPlaceBlockAt` decides (reeds: `reed_ok`; cake: solid ground, and the player's box must not be in the way).
+            if self.inv.slots[slot].is_some_and(|s| matches!(s.id, 338 | 354)) {
+                let cake = self.inv.slots[slot].is_some_and(|s| s.id == 354);
+                let at = if self.chunks.block_loaded(hit.pos.0, hit.pos.1, hit.pos.2) == Some(78) { hit.pos } else { pick::place_pos(&hit) };
+                let get = |a, b, c| self.chunks.block_loaded(a, b, c).unwrap_or(0);
+                let ok = at.1 < 127 && self.chunks.block_loaded(at.0, at.1, at.2).is_some_and(pick::replaceable)
+                    && if cake { !crate::world::ticks::non_solid(get(at.0, at.1 - 1, at.2)) && !pick::overlaps_player(at, physics_id(92, 0), self.player.pos) } else { pick::reed_ok(&get, at) };
+                if ok && self.chunks.set_block_meta(at.0, at.1, at.2, if cake { 92 } else { 83 }, 0) {
+                    self.inv.consume(slot);
+                }
+                return;
+            }
             let (x, y, z) = pick::place_pos(&hit);
             // Items below 256 are blocks; anything else cannot be placed. ItemBlock refuses a solid block at y = 127
             // (ponytail: plants are refused there too).
             if let Some(s) = self.inv.slots[slot].filter(|s| s.id < 256) {
                 // A torch's facing comes from the face aimed at and what can hold it (None = nothing to hang on: no placement).
-                let meta = if s.id == 50 { pick::torch_meta(&|a, b, c| self.chunks.block_loaded(a, b, c).unwrap_or(0), (x, y, z), hit.face) } else if matches!(s.id, 53 | 67) { Some(pick::stairs_meta(self.camera.yaw.to_degrees() + 180.0)) } else { Some(items::placed_meta(s)) };
-                if let Some(meta) = meta.filter(|_| y < 127 && self.chunks.block_loaded(x, y, z).is_some_and(pick::replaceable) && !pick::overlaps_player((x, y, z), s.id as u8, self.player.pos) && (s.id != chest::ID as u16 || chest::can_place(&|a, b, c| self.chunks.block(a, b, c).unwrap_or(0), (x, y, z)))) {
+                let meta = if s.id == 50 { pick::torch_meta(&|a, b, c| self.chunks.block_loaded(a, b, c).unwrap_or(0), (x, y, z), hit.face) } else if s.id == 96 { pick::trap_meta(hit.face, self.chunks.block_loaded(hit.pos.0, hit.pos.1, hit.pos.2).is_some_and(normal_cube)) } else { pick::facing_meta(s.id, self.camera.yaw.to_degrees() + 180.0).or(Some(items::placed_meta(s))) };
+                if let Some(meta) = meta.filter(|_| y < 127 && self.chunks.block_loaded(x, y, z).is_some_and(pick::replaceable) && !pick::overlaps_player((x, y, z), s.id as u8, self.player.pos) && ticks::can_place(&self.chunks, x, y, z, s.id as u8) && (s.id != chest::ID as u16 || chest::can_place(&|a, b, c| self.chunks.block(a, b, c).unwrap_or(0), (x, y, z)))) {
                     if self.chunks.set_block_meta(x, y, z, s.id as u8, meta) {
                         self.inv.consume(slot);
                     }
@@ -789,7 +921,9 @@ impl App {
         for (x, y, z) in cells {
             let Some(id) = self.chunks.block_loaded(x, y, z).filter(|&b| b > 0) else { continue };
             let meta = self.chunks.meta(x, y, z);
-            if self.mobs.rng.next_float() < 0.3 {
+            if id == 46 {
+                self.ticks.prime((x, y, z), true); // `BlockTNT.onBlockDestroyedByExplosion`: a chain, no drop
+            } else if self.mobs.rng.next_float() < 0.3 {
                 self.drops.spawn_block(id, meta, (x, y, z));
             }
             self.chunks.set_block(x, y, z, 0);
@@ -897,8 +1031,14 @@ impl App {
             gear::BOW => {
                 if self.inv.take_one(gear::ARROW) {
                     let v = gear::arrow_velocity(fwd, &mut self.mobs.rng);
-                    self.mobs.shoot(eye + fwd * 0.5, v);
+                    self.mobs.shoot(eye + fwd * 0.5, v, 0);
                 }
+            }
+            // `ItemSnowball` / `ItemEgg`: one is used up and thrown along the look direction (same heading as an arrow).
+            gear::SNOWBALL | gear::EGG => {
+                self.inv.consume(slot);
+                let v = gear::arrow_velocity(fwd, &mut self.mobs.rng);
+                self.mobs.shoot(eye - glam::Vec3::Y * 0.1, v, held.id);
             }
             // `ItemFishingRod`: reel in what is out (a bite gives a raw fish), else cast.
             gear::ROD => match self.hook.take() {
@@ -952,6 +1092,7 @@ impl App {
     /// menu is the death screen: its resume button respawns (top of `step_frame`).
     fn die(&mut self) {
         self.close_screen();
+        self.close_sign();
         let at = (self.player.pos.x.floor() as i32, self.player.pos.y.floor() as i32, self.player.pos.z.floor() as i32);
         for slot in self.inv.slots.iter_mut() {
             if let Some(st) = slot.take() {
@@ -959,6 +1100,25 @@ impl App {
             }
         }
         self.touch.pause();
+    }
+
+    /// The sign editor is done: the text stays on the sign (it is edited in place).
+    fn close_sign(&mut self) {
+        if self.sign_edit.take().is_some() {
+            self.touch.set_screen(false);
+        }
+    }
+
+    /// A tap on the sign editor: a key of the on-screen keyboard or a line of the board (`GuiEditSign.keyTyped`).
+    fn on_sign_tap(&mut self, x: f32, y: f32) {
+        let (w, h) = (self.gpu.config.width as f32, self.gpu.config.height as f32);
+        let Some(mut e) = self.sign_edit else { return };
+        let Some(k) = decor::key_at(w, h, e.shift, x, y) else { return };
+        let done = self.signs.get_mut(&e.pos).map_or(k == Key::Done, |t| e.press(k, t));
+        self.sign_edit = Some(e);
+        if done {
+            self.close_sign();
+        }
     }
 
     /// Open a container screen: the 2x2 inventory, a workbench's 3x3, a furnace or chests.
@@ -1009,6 +1169,12 @@ impl App {
     /// A finger event on the open screen: a press that lifts where it began is a tap; one that drags over other
     /// slots with a stack on the cursor spreads it, one item per slot (the start slot included).
     fn on_screen_event(&mut self, ev: ScreenEv) {
+        if self.sign_edit.is_some() {
+            if let ScreenEv::Up(x, y) = ev {
+                self.on_sign_tap(x, y);
+            }
+            return;
+        }
         let (w, h) = (self.gpu.config.width as f32, self.gpu.config.height as f32);
         let Some(gw) = self.screen.as_ref().map(|s| s.gw) else { return };
         let mut fill = Vec::new();
@@ -1102,9 +1268,20 @@ impl App {
             let b = self.chunks.block_loaded(x, y, z).and_then(|b| outline_bounds(b, self.chunks.meta(x, y, z)));
             b.map_or(0, |b| self.outline.update(&self.gpu.queue, h.pos, b))
         });
+        let eye = self.camera.pos;
+        let mut sign_views: Vec<SignView> = self
+            .signs
+            .iter()
+            .filter_map(|(&pos, text)| {
+                let id = self.chunks.block_loaded(pos.0, pos.1, pos.2).filter(|b| matches!(b, decor::POST | decor::WALL))?;
+                Some(SignView { pos, id, meta: self.chunks.meta(pos.0, pos.1, pos.2), text })
+            })
+            .collect();
+        let near = |s: &SignView| (glam::Vec3::new(s.pos.0 as f32 + 0.5, s.pos.1 as f32 + 0.5, s.pos.2 as f32 + 0.5) - eye).length_squared();
+        sign_views.sort_by(|a, b| near(a).total_cmp(&near(b)));
         let item_indices = {
             let chunks = &self.chunks;
-            self.item_mesh.update(&self.gpu.queue, &self.drops, &self.mobs, &self.ticks.falling, &self.fx, &|x, y, z| chunks.light_levels(x, y, z), self.hook.as_ref().map(|h| h.pos))
+            self.item_mesh.update(&self.gpu.queue, &self.drops, &self.mobs, &self.ticks.falling, &self.fx, &|x, y, z| chunks.light_levels(x, y, z), self.hook.as_ref().map(|h| h.pos), &self.paintings, &sign_views, eye)
         };
 
         // Sky and fog colour from the sun angle, the weather and the climate under the player; the frame is cleared to
@@ -1395,7 +1572,7 @@ impl App {
         let paused = self.touch.paused;
         let pressed = |role: PointerRole| self.touch.pointers.values().any(|p| p.role == role);
         // The in-world controls are hidden while a container screen is open.
-        let play = self.screen.is_none();
+        let play = self.screen.is_none() && self.sign_edit.is_none();
 
         // Crosshair: the aim point of the pick ray (first, so the quad cap never drops it).
         if play {
@@ -1412,6 +1589,36 @@ impl App {
             let (bx, by) = (w * 0.5 - bw * 0.5, h * 0.5 + 0.05 * w.min(h));
             HudPipeline::push_quad(v, bx, by, bw, bh, [0.0, 0.0, 0.0, 0.6]);
             HudPipeline::push_quad(v, bx, by, bw * self.dig.damage.min(1.0), bh, [1.0, 1.0, 1.0, 0.9]);
+        }
+
+        // `GuiEditSign`: the title, the board with its four lines (the one being edited is wrapped in `> <` and blinks), and the keys.
+        if let Some(e) = self.sign_edit {
+            let (w, h) = (self.gpu.config.width as f32, self.gpu.config.height as f32);
+            let (u, keys) = decor::layout(w, h, e.shift);
+            HudPipeline::push_quad(v, 0.0, 0.0, w, h, [0.0, 0.0, 0.0, 0.55]);
+            let title = "Edit sign message:";
+            HudPipeline::push_text(v, (w - HudPipeline::text_width(title) as f32 * u) / 2.0, 14.0 * u, u, title, [1.0; 4]);
+            HudPipeline::push_outlined_quad(v, (w - 130.0 * u) / 2.0, 30.0 * u, 130.0 * u, 64.0 * u, [0.62, 0.49, 0.28, 1.0], [0.25, 0.18, 0.08, 1.0], (2.0 * u).max(2.0));
+            let text = self.signs.get(&e.pos).cloned().unwrap_or_default();
+            let blink = (self.world_ticks as u64 / 6) % 2 == 0;
+            for (k, r) in &keys {
+                let label = match *k {
+                    Key::Line(i) if i == e.line && blink => format!("> {} <", text[i as usize]),
+                    Key::Line(i) => text[i as usize].clone(),
+                    k => decor::label(k),
+                };
+                let (fill, ink) = match *k {
+                    Key::Line(_) => ([0.0; 4], [0.0, 0.0, 0.0, 1.0]),
+                    Key::Shift if e.shift => ([0.2, 0.5, 0.8, 0.97], [1.0; 4]),
+                    Key::Done => ([0.2, 0.55, 0.25, 0.97], [1.0; 4]),
+                    _ => ([0.33, 0.33, 0.33, 0.97], [1.0; 4]),
+                };
+                if fill[3] > 0.0 {
+                    HudPipeline::push_outlined_quad(v, r[0], r[1], r[2], r[3], fill, [0.1, 0.1, 0.1, 1.0], (u).max(1.0));
+                }
+                let tw = HudPipeline::text_width(&label) as f32 * u;
+                HudPipeline::push_text(v, r[0] + (r[2] - tw) / 2.0, r[1] + (r[3] - 8.0 * u) / 2.0, u, &label, ink);
+            }
         }
 
         // Container screen: the vanilla GUI (176 x 166 units) over a dimmed frame, slots with their stacks.

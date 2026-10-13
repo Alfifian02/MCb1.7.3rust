@@ -42,6 +42,17 @@ fn touches(pos: Vec3, half: Vec3, get: BlockQuery<'_>, xz: f32, ids: std::ops::R
     false
 }
 
+/// `Entity.moveEntity`'s block-contact sweep: does the box, shrunk 0.001 on every side, overlap a cell with this id?
+/// The block's own shape does not matter (a cactus is inset 1/16 and still hurts from inside that gap).
+pub fn touching(pos: Vec3, half: Vec3, get: BlockQuery<'_>, id: u8) -> bool {
+    aabb_any(pos, half - Vec3::splat(0.001), get, |b| b == id)
+}
+
+/// `EntityLiving.isOnLadder`: the cell at the feet (not the box) is a ladder.
+pub fn on_ladder(pos: Vec3, half: Vec3, get: BlockQuery<'_>) -> bool {
+    get(pos.x.floor() as i32, (pos.y - half.y).floor() as i32, pos.z.floor() as i32) == Some(65)
+}
+
 /// Integrate one frame. `dt` is seconds, capped by the caller; `jumping` is the held jump button.
 /// In water or lava (`EntityLiving.moveEntityWithHeading`) there is no gravity: the vertical speed is dragged (x0.8 water,
 /// x0.5 lava per tick) and sinks 0.02 blocks/tick, a held jump swims up (+0.04 blocks/tick), and pushing against a wall
@@ -55,6 +66,7 @@ pub fn step_box(player: &mut Player, half: Vec3, dt: f32, jumping: bool, get: Bl
     let water = touches(player.pos, half, get, 0.001, 8..=9);
     let lava = !water && touches(player.pos, half, get, 0.1, 10..=11);
     let ticks = dt * 20.0;
+    let ladder = on_ladder(player.pos, half, get);
     if water || lava {
         let speed = (if water { WATER_SPEED } else { LAVA_SPEED }) / WALK_SPEED;
         player.vel.x *= speed;
@@ -66,11 +78,27 @@ pub fn step_box(player: &mut Player, half: Vec3, dt: f32, jumping: bool, get: Bl
         // Cap fall speed so a long stall doesn't kill the player.
         if player.vel.y < -55.0 { player.vel.y = -55.0; }
         if jumping && player.on_ground { player.vel.y = 8.4; }
+        if ladder {
+            // `moveEntityWithHeading`: sideways speed capped at 0.15 blocks/tick, falling at 0.15.
+            player.vel.x = player.vel.x.clamp(-3.0, 3.0);
+            player.vel.z = player.vel.z.clamp(-3.0, 3.0);
+            player.vel.y = player.vel.y.max(-3.0);
+        }
     }
 
-    // Sweep each axis independently.
+    // Sweep each axis independently. `Entity.moveEntity` in a web: the move is x0.25 / y0.05 / x0.25 and the motion is lost.
     let (vx, vz) = (player.vel.x, player.vel.z);
-    player.pos = sweep_axis(player.pos, half, player.vel * dt, get, &mut player.vel, player.on_ground && !(water || lava));
+    let web = touching(player.pos, half, get, 30);
+    let scale = if web { Vec3::new(0.25, 0.05, 0.25) } else { Vec3::ONE };
+    player.pos = sweep_axis(player.pos, half, player.vel * scale * dt, get, &mut player.vel, player.on_ground && !(water || lava));
+    if web {
+        player.vel = Vec3::ZERO;
+    }
+    // `isCollidedHorizontally && isOnLadder`: push into the wall and climb at 0.2 blocks/tick. ponytail: the frame's own
+    // gravity (23 * dt) is added back so the next sweep moves ~0.1176 blocks/tick like the Java (0.2 - 0.08) * 0.98.
+    if ladder && !(water || lava) && ((vx != 0.0 && player.vel.x == 0.0) || (vz != 0.0 && player.vel.z == 0.0)) {
+        player.vel.y = 2.35 + 23.0 * dt;
+    }
     if water || lava {
         player.vel.y = player.vel.y * (if water { 0.8f32 } else { 0.5 }).powf(ticks) - 0.4 * ticks;
         let blocked = (vx != 0.0 && player.vel.x == 0.0) || (vz != 0.0 && player.vel.z == 0.0);
@@ -140,7 +168,7 @@ fn aabb_hits_solid(p: Vec3, h: Vec3, get: BlockQuery<'_>) -> bool {
 }
 
 /// Does the player box at `p` overlap a cell whose id satisfies `pred`?
-fn aabb_any(p: Vec3, h: Vec3, get: BlockQuery<'_>, pred: fn(u8) -> bool) -> bool {
+fn aabb_any(p: Vec3, h: Vec3, get: BlockQuery<'_>, pred: impl Fn(u8) -> bool) -> bool {
     let (x0, x1) = (p.x - h.x, p.x + h.x);
     let (y0, y1) = (p.y - h.y, p.y + h.y);
     let (z0, z1) = (p.z - h.z, p.z + h.z);
@@ -189,6 +217,40 @@ mod tests {
         assert!(p.on_ground, "pos.y = {}", p.pos.y);
         step(&mut p, 1.0 / 60.0, true, &get);
         assert!(p.pos.y > 10.0 + HALF.y + 0.05 && !ground_test(p.pos, HALF, &get));
+    }
+
+    /// Ladder: a wall of ladder (cell x = 0) against stone (x = 1): pushing into the stone climbs, no push slides at 3 m/s.
+    fn shaft(x: i32, y: i32, z: i32) -> Option<u8> {
+        if !(-4..16).contains(&x) || !(-4..16).contains(&z) || y < 0 { return None; }
+        Some(if y < 10 || x >= 1 { 1 } else if x == 0 { 65 } else { 0 })
+    }
+
+    #[test]
+    fn ladder_climbs_into_the_wall_and_slows_the_fall() {
+        let mut p = Player { pos: Vec3::new(0.69, 10.0 + HALF.y + 0.01, 0.5), vel: Vec3::ZERO, on_ground: true };
+        for _ in 0..60 {
+            p.vel.x = 4.3; // pushing into the wall behind the ladder
+            step(&mut p, 1.0 / 60.0, false, &shaft);
+        }
+        assert!(p.pos.y > 10.0 + HALF.y + 1.5, "climbed: y = {}", p.pos.y);
+        let top = p.pos.y;
+        p.vel = Vec3::new(0.0, -50.0, 0.0);
+        step(&mut p, 1.0 / 60.0, false, &shaft);
+        assert!(p.vel.y >= -3.0 - 1e-3 && p.pos.y < top && p.pos.y > top - 0.06, "falls at most 3 m/s: dy = {}", p.pos.y - top);
+    }
+
+    /// Cobweb (30) everywhere above y = 10: the move is cut to 5% vertically and 25% sideways, and the speed is lost.
+    #[test]
+    fn web_cuts_the_move_and_the_cactus_touches() {
+        let web = |x: i32, y: i32, z: i32| -> Option<u8> { if !(0..16).contains(&x) || !(0..16).contains(&z) || y < 0 { None } else { Some(if y < 10 { 1 } else if y < 30 { 30 } else { 0 }) } };
+        let mut p = Player { pos: Vec3::new(8.5, 20.0, 8.5), vel: Vec3::new(4.0, 0.0, 0.0), on_ground: false };
+        step(&mut p, 0.1, false, &web);
+        assert!((p.pos.x - 8.6).abs() < 1e-3 && p.vel == Vec3::ZERO, "x moved a quarter of 0.4: {}", p.pos.x - 8.5);
+        assert!(20.0 - p.pos.y > 0.0 && 20.0 - p.pos.y < 0.02, "fell 5% of the normal 0.23 drop: {}", 20.0 - p.pos.y);
+        let cactus = |x: i32, _: i32, _: i32| -> Option<u8> { Some(if x == 5 { 81 } else { 0 }) };
+        assert!(touching(Vec3::new(5.5, 64.9, 0.5), HALF, &cactus, 81), "inside the cell");
+        assert!(touching(Vec3::new(4.75, 64.9, 0.5), HALF, &cactus, 81), "box reaches into the cell by 0.05");
+        assert!(!touching(Vec3::new(4.7, 64.9, 0.5), HALF, &cactus, 81), "box ends exactly at the cell edge");
     }
 
     /// Stone below y = 10, still water (9) for y 10..20, air above: the fluid is not solid.

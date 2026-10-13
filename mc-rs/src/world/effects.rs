@@ -64,6 +64,8 @@ pub enum Fx {
     Splash,
     Flame,
     Smoke,
+    /// `EntityDiggingFX`: a piece of a broken block, drawn with this tile of the block atlas.
+    Dig(u16),
 }
 
 #[derive(Clone)]
@@ -97,6 +99,15 @@ impl Particle {
         Self { kind: Fx::Splash, pos, prev: pos, vel, max: life(r), half: 0.1 * scale(r) }
     }
 
+    /// `EntityDiggingFX` (`EntityFX`'s constructor): thrown out from the cell centre by `v`, plus 0.1 up; half-size `0.1 * scale / 2`,
+    /// life `4 / (nextFloat * 0.9 + 0.1)` ticks.
+    fn dig(r: &mut JavaRandom, pos: Vec3, v: Vec3, tile: u16) -> Self {
+        let vel = base_motion(r, v) + Vec3::Y * 0.1;
+        let half = 0.1 * scale(r) * 0.5;
+        let max = (4.0 / (r.next_float() * 0.9 + 0.1)) as u16;
+        Self { kind: Fx::Dig(tile), pos, prev: pos, vel, max, half }
+    }
+
     /// UNVERIFIED (from memory): `EntityFlameFX` hardly moves (motion * 0.01) and lives a few ticks longer.
     fn flame(r: &mut JavaRandom, pos: Vec3) -> Self {
         let vel = (base_motion(r, Vec3::ZERO) + Vec3::Y * 0.1) * 0.01;
@@ -121,7 +132,7 @@ impl Particle {
                     return false;
                 }
             }
-            Fx::Splash => {
+            Fx::Splash | Fx::Dig(_) => {
                 self.vel.y -= 0.04;
                 let mut ground = false;
                 let ny = self.pos.y + self.vel.y;
@@ -137,7 +148,7 @@ impl Particle {
                 }
                 self.vel *= 0.98;
                 if ground {
-                    if r.next_double() < 0.5 {
+                    if self.kind == Fx::Splash && r.next_double() < 0.5 {
                         return false;
                     }
                     self.vel.x *= 0.7;
@@ -145,7 +156,7 @@ impl Particle {
                 }
                 // Inside a liquid or solid cell below its surface (`BlockFluid.getPercentAir`; UNVERIFIED: flowing levels read as a source).
                 let c = cell(self.pos);
-                if get(c.0, c.1, c.2).is_some_and(|b| b > 0 && !is_plant(b)) && self.pos.y < (c.1 + 1) as f32 - 1.0 / 9.0 {
+                if self.kind == Fx::Splash && get(c.0, c.1, c.2).is_some_and(|b| b > 0 && !is_plant(b)) && self.pos.y < (c.1 + 1) as f32 - 1.0 / 9.0 {
                     return false;
                 }
             }
@@ -273,6 +284,23 @@ impl Effects {
     }
 
     /// `EntityLiving.onEntityUpdate` when the air runs out: 8 bubbles around `pos` (the eye of the player).
+    /// `EffectRenderer.addBlockDestroyEffects`: 4 x 4 x 4 pieces, each flung away from the cell centre. ponytail: capped at 3000
+    /// live particles; the whole block tile is drawn (vanilla crops a random 4 x 4 pixel patch), untinted, not lit by the cell.
+    pub fn dig(&mut self, (x, y, z): (i32, i32, i32), tile: u16) {
+        if self.particles.len() > 3000 {
+            return;
+        }
+        for i in 0..4 {
+            for j in 0..4 {
+                for k in 0..4 {
+                    let v = Vec3::new((i as f32 + 0.5) / 4.0 - 0.5, (j as f32 + 0.5) / 4.0 - 0.5, (k as f32 + 0.5) / 4.0 - 0.5);
+                    let pos = Vec3::new(x as f32, y as f32, z as f32) + v + Vec3::splat(0.5);
+                    self.particles.push(Particle::dig(&mut self.rng, pos, v, tile));
+                }
+            }
+        }
+    }
+
     pub fn breath(&mut self, pos: Vec3, v: Vec3) {
         for _ in 0..8 {
             let o = Vec3::new(diff(&mut self.rng), diff(&mut self.rng), diff(&mut self.rng));
@@ -392,6 +420,27 @@ mod tests {
 
     /// A splash makes as many splashes as bubbles; bubbles die out of water; a wall at the head is found; a bolt strikes on its
     /// first two ticks and always ends.
+    /// A broken block throws 64 pieces that start inside its cell, fly outwards, fall under gravity 0.04, and are all gone within
+    /// `4 / 0.1 = 40` ticks.
+    #[test]
+    fn digging_pieces_fly_out_fall_and_die() {
+        let mut fx = Effects::new(3);
+        fx.dig((10, 64, 10), 4);
+        assert_eq!(fx.particles.len(), 64);
+        assert!(fx.particles.iter().all(|p| p.kind == Fx::Dig(4) && (10.0..11.0).contains(&p.pos.x) && (64.0..65.0).contains(&p.pos.y)));
+        let top = fx.particles.iter().map(|p| p.pos.y).fold(0.0, f32::max);
+        let floor = |_: i32, y: i32, _: i32| Some(if y < 64 { 1u8 } else { 0 });
+        for _ in 0..3 {
+            fx.tick(&floor);
+        }
+        assert!(fx.particles.iter().any(|p| p.pos.y > top - 0.5), "they are thrown up and out first");
+        assert!(fx.particles.iter().all(|p| p.pos.y >= 64.0 - 1e-3), "none sinks into the floor");
+        for _ in 0..60 {
+            fx.tick(&floor);
+        }
+        assert!(fx.particles.is_empty());
+    }
+
     #[test]
     fn effects_follow_java() {
         let mut fx = Effects::new(1);

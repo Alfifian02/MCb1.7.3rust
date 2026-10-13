@@ -55,6 +55,10 @@ pub struct Falling {
     vy: f32,
     pub id: u8,
     age: u32,
+    /// Primed TNT (`EntityTNTPrimed`, id 46) also drifts in x / z and counts a fuse down; sand and gravel leave both at 0 / -1.
+    vx: f32,
+    vz: f32,
+    pub fuse: i32,
 }
 
 pub struct Ticks {
@@ -68,11 +72,42 @@ pub struct Ticks {
     /// `World.func_27161_C`: rain strength above 0.2.
     wet: bool,
     pub falling: Vec<Falling>,
+    /// Where a primed TNT's fuse ran out this tick: the caller makes the power 4 explosion (`EntityTNTPrimed.explode`).
+    pub booms: Vec<Vec3>,
+    /// `Entity.distanceWalkedModified` / `nextStepDistance` of the player and where the last tick left him (x, z).
+    walked: f32,
+    next_step: i32,
+    last_xz: Option<(f32, f32)>,
 }
 
 impl Ticks {
     pub fn new(seed: i64) -> Self {
-        Self { now: 0, seq: 0, due: BTreeSet::new(), pending: HashSet::new(), rng: JavaRandom::new(seed ^ 0xB10C), lcg: 0x2545_F491, wet: false, falling: Vec::new() }
+        Self { now: 0, seq: 0, due: BTreeSet::new(), pending: HashSet::new(), rng: JavaRandom::new(seed ^ 0xB10C), lcg: 0x2545_F491, wet: false, falling: Vec::new(), booms: Vec::new(), walked: 0.0, next_step: 1, last_xz: None }
+    }
+
+    /// The step trigger of `Entity.moveEntity` for the player (walked distance x 0.6 past `nextStepDistance`, block under the
+    /// feet) and `BlockFarmland.onEntityWalking`: a step on farmland turns it to dirt 1 time in 4. Call once per 20 Hz tick with
+    /// the feet position. ponytail: mobs and the fence-under-block rule are skipped; a jump over farmland counts like a step.
+    pub fn walk(&mut self, w: &mut ChunkManager, x: f32, feet_y: f32, z: f32) {
+        let (px, pz) = self.last_xz.replace((x, z)).unwrap_or((x, z));
+        self.walked += (x - px).hypot(z - pz).min(1.0) * 0.6; // min: a respawn or bed teleport is not a walk
+        let (cx, cy, cz) = (x.floor() as i32, (feet_y - 0.2).floor() as i32, z.floor() as i32);
+        let id = bid(w, cx, cy, cz);
+        if self.walked > self.next_step as f32 && id > 0 {
+            self.next_step += 1;
+            if id == 60 && self.rng.next_int_bound(4) == 0 {
+                w.set_block(cx, cy, cz, 3);
+            }
+        }
+    }
+
+    /// `new EntityTNTPrimed` at the cell centre: a hop of 0.2 and a drift of 0.02 in a random direction, fuse 80 ticks, or
+    /// `rand(20) + 10` when an explosion set it off (`BlockTNT.onBlockDestroyedByExplosion`). Not capped by `MAX_FALLING`.
+    pub fn prime(&mut self, (x, y, z): (i32, i32, i32), short: bool) {
+        let (s, c) = (self.rng.next_float() * std::f32::consts::TAU * std::f32::consts::PI / 180.0).sin_cos(); // the Java feeds radians to a degree conversion
+        let fuse = if short { self.rng.next_int_bound(20) + 10 } else { 80 };
+        let pos = Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
+        self.falling.push(Falling { pos, prev: pos, vy: 0.2, id: 46, age: 0, vx: -s * 0.02, vz: -c * 0.02, fuse });
     }
 
     /// `World.scheduleBlockUpdate`: the same block at the same cell is queued once.
@@ -159,6 +194,12 @@ impl Ticks {
                 }
             }
             12 | 13 => self.schedule(x, y, z, id, 3),
+            // BlockStep.onBlockAdded: a slab on a slab of the same kind becomes one double slab (43) in the lower cell.
+            44 if y > 0 && bid(w, x, y - 1, z) == 44 && w.meta(x, y, z) == w.meta(x, y - 1, z) => {
+                let m = w.meta(x, y, z);
+                w.set_block(x, y, z, 0);
+                w.set_block_meta(x, y - 1, z, 43, m);
+            }
             // BlockFire.onBlockAdded (ponytail: no portal from obsidian before M11).
             51 if fire_stays(w, x, y, z) => self.schedule(x, y, z, 51, 40),
             51 => {
@@ -195,6 +236,16 @@ impl Ticks {
                 w.set_block(x, y, z, 0); // quantityDropped is 0: nothing drops
             }
             64 | 71 => door_neighbour(w, drops, x, y, z, id),
+            96 => trap_neighbour(w, drops, x, y, z),
+            // BlockSign.onNeighborBlockChange: a post needs solid ground, a wall sign the wall it hangs on; else it drops the sign.
+            63 | 68 if !sign_stays(w, x, y, z, id) => {
+                drops.spawn_block(id, 0, (x, y, z));
+                w.set_block(x, y, z, 0);
+            }
+            // BlockCake.onNeighborBlockChange: the ground is not solid any more (quantityDropped 0: nothing drops).
+            92 if non_solid(bid(w, x, y - 1, z)) => {
+                w.set_block(x, y, z, 0);
+            }
             26 => bed_neighbour(w, drops, x, y, z),
             // BlockFarmland: something solid on top turns it back to dirt.
             60 if !non_solid(bid(w, x, y + 1, z)) => {
@@ -213,7 +264,7 @@ impl Ticks {
                     // EntityFallingSand removes the block on its first update, which is this same tick.
                     w.set_block(x, y, z, 0);
                     let pos = Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
-                    self.falling.push(Falling { pos, prev: pos, vy: 0.0, id, age: 0 });
+                    self.falling.push(Falling { pos, prev: pos, vy: 0.0, id, age: 0, vx: 0.0, vz: 0.0, fuse: -1 });
                 }
             }
             2 => grass(w, &mut self.rng, x, y, z),
@@ -333,6 +384,40 @@ impl Ticks {
         let mut i = 0;
         while i < self.falling.len() {
             let f = &mut self.falling[i];
+            if f.id == 46 {
+                // `EntityTNTPrimed.onUpdate`: gravity 0.04, drag 0.98, x / z x 0.7 on the ground, then the fuse.
+                // ponytail: the 0.98 box is probed as a point at its leading face (centre height for x / z), so a TNT can hang a hair over an edge.
+                f.prev = f.pos;
+                f.vy -= 0.04;
+                let solid = |p: Vec3| !non_solid(bid(w, p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32));
+                let ny = f.pos.y + f.vy;
+                let ground = f.vy < 0.0 && solid(Vec3::new(f.pos.x, ny - 0.49, f.pos.z));
+                if ground {
+                    f.pos.y = (ny - 0.49).floor() + 1.49;
+                    f.vy = 0.0;
+                } else if f.vy > 0.0 && solid(Vec3::new(f.pos.x, ny + 0.49, f.pos.z)) {
+                    f.vy = 0.0;
+                } else {
+                    f.pos.y = ny;
+                }
+                let nx = f.pos.x + f.vx;
+                if solid(Vec3::new(nx + 0.49 * f.vx.signum(), f.pos.y, f.pos.z)) { f.vx = 0.0 } else { f.pos.x = nx }
+                let nz = f.pos.z + f.vz;
+                if solid(Vec3::new(f.pos.x, f.pos.y, nz + 0.49 * f.vz.signum())) { f.vz = 0.0 } else { f.pos.z = nz }
+                (f.vx, f.vy, f.vz) = (f.vx * 0.98, f.vy * 0.98, f.vz * 0.98);
+                if ground {
+                    (f.vx, f.vz) = (f.vx * 0.7, f.vz * 0.7);
+                }
+                let boom = f.fuse <= 0;
+                f.fuse -= 1;
+                if boom {
+                    self.booms.push(f.pos);
+                    self.falling.swap_remove(i);
+                } else {
+                    i += 1;
+                }
+                continue;
+            }
             f.age += 1;
             f.prev = f.pos;
             f.vy -= 0.04;
@@ -427,14 +512,23 @@ fn harden(w: &mut ChunkManager, x: i32, y: i32, z: i32, id: u8) {
 
 /// `BlockFlower` / mushroom / reed / cactus `canBlockStay`.
 fn can_stay(w: &ChunkManager, x: i32, y: i32, z: i32, id: u8) -> bool {
+    stay(w, x, y, z, id, false)
+}
+
+/// `canPlaceBlockAt` of the same plants: the ground rule without the light rule (the cactus keeps its neighbour test).
+pub fn can_place(w: &ChunkManager, x: i32, y: i32, z: i32, id: u8) -> bool {
+    stay(w, x, y, z, id, true)
+}
+
+fn stay(w: &ChunkManager, x: i32, y: i32, z: i32, id: u8, placing: bool) -> bool {
     let below = bid(w, x, y - 1, z);
-    let lit = || w.light_at(x, y, z, 0) >= 8 || w.sees_sky(x, y, z);
+    let lit = || placing || w.light_at(x, y, z, 0) >= 8 || w.sees_sky(x, y, z);
     match id {
         6 | 31 | 37 | 38 => lit() && matches!(below, 2 | 3 | 60),
         32 => lit() && below == 12,
         59 => lit() && below == 60,
         // BlockMushroom.canBlockStay: dark enough, on an opaque cube (UNVERIFIED: `opaqueCubeLookup` is `light_opacity == 255` here).
-        39 | 40 => (0..128).contains(&y) && w.light_at(x, y, z, 0) < 13 && light_opacity(below) == 255 && !matches!(below, 10 | 11),
+        39 | 40 => (0..128).contains(&y) && (placing || w.light_at(x, y, z, 0) < 13) && light_opacity(below) == 255 && !matches!(below, 10 | 11),
         83 => below == 83 || (matches!(below, 2 | 3) && [(-1, 0), (1, 0), (0, -1), (0, 1)].iter().any(|&(dx, dz)| matches!(bid(w, x + dx, y - 1, z + dz), 8 | 9))),
         81 => [(-1, 0), (1, 0), (0, -1), (0, 1)].iter().all(|&(dx, dz)| non_solid(bid(w, x + dx, y, z + dz))) && matches!(below, 12 | 81),
         _ => true,
@@ -609,6 +703,31 @@ fn door_neighbour(w: &mut ChunkManager, drops: &mut Drops, x: i32, y: i32, z: i3
     }
 }
 
+/// `BlockSign.onNeighborBlockChange`: the cell below a post, or the wall a wall sign's metadata names (2 -> +Z, 3 -> -Z, 4 -> +X,
+/// 5 -> -X), must be solid.
+fn sign_stays(w: &ChunkManager, x: i32, y: i32, z: i32, id: u8) -> bool {
+    if id == 63 {
+        return !non_solid(bid(w, x, y - 1, z));
+    }
+    match w.meta(x, y, z) {
+        m @ 2..=5 => {
+            let (dx, dz) = [(0, 1), (0, -1), (1, 0), (-1, 0)][m as usize - 2];
+            !non_solid(bid(w, x + dx, y, z + dz))
+        }
+        _ => false,
+    }
+}
+
+/// `BlockTrapDoor.onNeighborBlockChange` (no redstone yet): the wall it hangs on is not a normal cube any more, so it drops itself.
+fn trap_neighbour(w: &mut ChunkManager, drops: &mut Drops, x: i32, y: i32, z: i32) {
+    let m = w.meta(x, y, z);
+    let (dx, dz) = [(0, 1), (0, -1), (1, 0), (-1, 0)][(m & 3) as usize];
+    if !normal_cube(bid(w, x + dx, y, z + dz)) {
+        w.set_block(x, y, z, 0);
+        drops.spawn_block(96, m, (x, y, z));
+    }
+}
+
 /// `BlockFire.setBurnRate`: (chance to encourage fire, ability to catch fire) of a block id.
 fn burn_rate(id: u8) -> (i32, i32) {
     match id {
@@ -658,14 +777,18 @@ fn mushroom(w: &mut ChunkManager, rng: &mut JavaRandom, x: i32, y: i32, z: i32, 
 }
 
 impl Ticks {
-    /// `BlockFire.tryToCatchBlockOnFire`. ponytail: burning TNT is only removed; priming it comes with the TNT block.
+    /// `BlockFire.tryToCatchBlockOnFire`. burning TNT is primed (fuse 80).
     fn catch_fire(&mut self, w: &mut ChunkManager, x: i32, y: i32, z: i32, chance: i32, age: i32) {
         if self.rng.next_int_bound(chance) < burn_rate(bid(w, x, y, z)).1 {
+            let tnt = bid(w, x, y, z) == 46;
             if self.rng.next_int_bound(age + 10) < 5 && !rained_on(w, self.wet, x, y, z) {
                 let m = (age + self.rng.next_int_bound(5) / 4).min(15);
                 w.set_block_meta(x, y, z, 51, m as u8);
             } else {
                 w.set_block(x, y, z, 0);
+            }
+            if tnt {
+                self.prime((x, y, z), false);
             }
         }
     }
@@ -748,5 +871,63 @@ mod tests {
         assert_eq!(burn_rate(1), (0, 0));
         assert!(snow_ok(1) && snow_ok(2) && !snow_ok(0) && !snow_ok(79) && !snow_ok(18) && !snow_ok(8));
         assert!(non_solid(51) && ticks_at_random(51) && ticks_at_random(39) && ticks_at_random(79));
+    }
+
+    #[test]
+    fn farmland_is_trampled_by_steps_not_by_standing_and_plants_need_their_ground() {
+        let mut m = ChunkManager::new(1, 1);
+        m.insert((0, 0), vec![0u8; crate::world::chunk::VOLUME]);
+        for x in 0..16 {
+            m.set_block(x, 40, 5, 60);
+        }
+        m.set_block(2, 39, 8, 12); // sand
+        m.set_block(2, 39, 9, 3); // dirt
+        let mut t = Ticks::new(1);
+        for _ in 0..100 {
+            t.walk(&mut m, 3.5, 41.0, 5.5); // standing still: no step
+        }
+        assert_eq!(m.block(3, 40, 5), Some(60));
+        for i in 0..400 {
+            t.walk(&mut m, 0.5 + (i % 30) as f32 * 0.5, 41.0, 5.5); // pacing along the row
+        }
+        let dirt = (0..16).filter(|&x| m.block(x, 40, 5) == Some(3)).count();
+        assert!(dirt > 0 && (0..16).all(|x| matches!(m.block(x, 40, 5), Some(60 | 3))));
+        assert!(can_place(&m, 2, 40, 9, 37) && !can_place(&m, 2, 40, 8, 37) && can_place(&m, 2, 40, 8, 32));
+        assert!(can_place(&m, 2, 40, 8, 81) && !can_place(&m, 2, 40, 9, 81), "cactus: sand and open sides");
+        assert!(can_place(&m, 2, 40, 9, 39) && !can_place(&m, 2, 41, 9, 39), "a mushroom wants an opaque block under it, in any light");
+    }
+
+    #[test]
+    fn primed_tnt_rests_then_booms_on_its_fuse() {
+        let mut m = ChunkManager::new(1, 1);
+        m.insert((0, 0), vec![0u8; crate::world::chunk::VOLUME]);
+        (0..16).for_each(|x| (0..16).for_each(|z| { m.set_block(x, 39, z, 1); }));
+        let (mut t, mut d) = (Ticks::new(1), Drops::new(1));
+        t.prime((3, 40, 5), false);
+        for _ in 0..80 {
+            t.fall(&mut m, &mut d);
+        }
+        assert!(t.booms.is_empty() && t.falling.len() == 1, "the fuse is 80: it goes off on the 81st tick");
+        let p = t.falling[0].pos;
+        assert!((p.y - 40.49).abs() < 0.01 && (p.x - 3.5).abs() < 1.5, "rests on the floor, drifts a little");
+        t.fall(&mut m, &mut d);
+        assert!(t.booms.len() == 1 && t.falling.is_empty());
+        t.prime((8, 40, 8), true);
+        let n = (1..40).find(|_| { t.fall(&mut m, &mut d); t.falling.is_empty() }).unwrap();
+        assert!((10..=30).contains(&n), "short fuse is rand(20) + 10, got {n}");
+    }
+
+    #[test]
+    fn slab_on_slab_merges_only_when_the_kinds_match() {
+        let mut m = ChunkManager::new(1, 1);
+        m.insert((0, 0), vec![0u8; crate::world::chunk::VOLUME]);
+        let mut t = Ticks::new(1);
+        m.set_block_meta(3, 40, 5, 44, 2);
+        m.set_block_meta(3, 41, 5, 44, 3); // stone-kind below, wood above: stays two slabs
+        t.added(&mut m, 3, 41, 5, 44);
+        assert_eq!((m.block(3, 41, 5), m.block(3, 40, 5)), (Some(44), Some(44)));
+        m.set_block_meta(3, 41, 5, 44, 2);
+        t.added(&mut m, 3, 41, 5, 44);
+        assert_eq!((m.block(3, 41, 5), m.block(3, 40, 5), m.meta(3, 40, 5)), (Some(0), Some(43), 2));
     }
 }

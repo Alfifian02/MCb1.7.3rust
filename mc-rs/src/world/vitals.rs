@@ -19,6 +19,8 @@ pub struct Env {
     /// The box touches water / lava (`handleWaterMovement`, `handleLavaMovement`).
     pub water: bool,
     pub lava: bool,
+    /// The feet are in a ladder cell (`isOnLadder`): `fallDistance` is reset every frame.
+    pub ladder: bool,
     /// The eye is inside a water cell (`isInsideOfMaterial(water)`), and its height (`Entity.posY` of a player).
     pub eye_in_water: bool,
     pub eye_y: f32,
@@ -96,7 +98,7 @@ impl Vitals {
     /// `updateFallState` (every frame) and `EntityLiving.fall`: landing after `d` blocks costs `ceil(d - 3)`;
     /// water cancels the fall.
     fn land(&mut self, e: &Env) {
-        if e.water {
+        if e.water || e.ladder {
             self.fall = 0.0;
         }
         if e.on_ground {

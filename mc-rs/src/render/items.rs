@@ -4,7 +4,8 @@
 //! real item sprites.
 
 use crate::render::atlas;
-use crate::render::mesh::{lm, push_box, VF};
+use crate::render::mesh::{lm, push_box, push_face, VF, WHITE};
+use crate::world::decor::{self, Painting, Text};
 use crate::world::chunk::brightness;
 use crate::world::effects::{Effects, Fx, MAX_BOLTS, MAX_PARTICLES};
 use glam::{Mat4, Vec3};
@@ -16,8 +17,23 @@ use crate::world::ticks::{Falling, MAX_FALLING};
 /// 24 vertices x 7 floats (`mesh::VF`) per cube, 36 indices per cube.
 /// A mob is at most 12 boxes (spider 11), an arrow one, a falling block one.
 const BOXES: usize = MAX_ITEMS * 2 + MAX_MOBS * 12 + MAX_ARROWS + MAX_FALLING + MAX_PARTICLES + MAX_BOLTS + 1;
-const VERTEX_BYTES: u64 = (BOXES * 24 * crate::render::mesh::VF * 4) as u64;
-const INDEX_BYTES: u64 = (BOXES * 36 * 4) as u64;
+/// Paintings (16 px pieces, one face each), signs (a board and a post of 6 two-sided faces) and the sign text (one quad per run
+/// of lit font pixels), on top of the boxes.
+const MAX_SIGNS: usize = 32;
+const PIECES: usize = 512;
+const TEXT_QUADS: usize = 4096;
+const EXTRA_V: usize = PIECES * 4 + MAX_SIGNS * 2 * 24 + TEXT_QUADS * 4;
+const EXTRA_I: usize = PIECES * 6 + MAX_SIGNS * 2 * 72 + TEXT_QUADS * 6;
+const VERTEX_BYTES: u64 = ((BOXES * 24 + EXTRA_V) * crate::render::mesh::VF * 4) as u64;
+const INDEX_BYTES: u64 = ((BOXES * 36 + EXTRA_I) * 4) as u64;
+
+/// A sign to draw: its cell, block id (63 post, 68 wall), metadata and text.
+pub struct SignView<'a> {
+    pub pos: (i32, i32, i32),
+    pub id: u8,
+    pub meta: u8,
+    pub text: &'a Text,
+}
 
 pub struct ItemMesh {
     pub vbuf: wgpu::Buffer,
@@ -32,8 +48,8 @@ impl ItemMesh {
 
     /// Upload this frame's items; returns the index count to draw.
     /// `lv` = raw (sky, block) light of a cell: every entity is lit by its own cell.
-    pub fn update(&self, queue: &wgpu::Queue, drops: &Drops, mobs: &Mobs, falling: &[Falling], fx: &Effects, lv: &dyn Fn(i32, i32, i32) -> (u8, u8), hook: Option<Vec3>) -> u32 {
-        let (verts, idxs) = geometry(drops, mobs, falling, fx, lv, hook);
+    pub fn update(&self, queue: &wgpu::Queue, drops: &Drops, mobs: &Mobs, falling: &[Falling], fx: &Effects, lv: &dyn Fn(i32, i32, i32) -> (u8, u8), hook: Option<Vec3>, paintings: &[Painting], signs: &[SignView], eye: Vec3) -> u32 {
+        let (verts, idxs) = geometry(drops, mobs, falling, fx, lv, hook, paintings, signs, eye);
         if idxs.is_empty() {
             return 0;
         }
@@ -54,7 +70,7 @@ fn lit(verts: &mut [f32], from: usize, lv: &dyn Fn(i32, i32, i32) -> (u8, u8), a
     }
 }
 
-fn geometry(drops: &Drops, mobs: &Mobs, falling: &[Falling], fx: &Effects, lv: &dyn Fn(i32, i32, i32) -> (u8, u8), hook: Option<Vec3>) -> (Vec<f32>, Vec<u32>) {
+fn geometry(drops: &Drops, mobs: &Mobs, falling: &[Falling], fx: &Effects, lv: &dyn Fn(i32, i32, i32) -> (u8, u8), hook: Option<Vec3>, paintings: &[Painting], signs: &[SignView], eye: Vec3) -> (Vec<f32>, Vec<u32>) {
     let (mut verts, mut idxs) = (Vec::new(), Vec::new());
     let a = drops.alpha();
     for e in &drops.items {
@@ -79,9 +95,10 @@ fn geometry(drops: &Drops, mobs: &Mobs, falling: &[Falling], fx: &Effects, lv: &
         lit(&mut verts, n0, lv, m.body.pos);
     }
     for a in &mobs.arrows {
-        let (p, h) = (a.pos, 0.06);
+        let (p, h) = (a.pos, if a.kind == 0 { 0.06 } else { 0.125 });
         let n0 = verts.len();
-        push_box(&mut verts, &mut idxs, [p.x - h, p.y - h, p.z - h], [p.x + h, p.y + h, p.z + h], stack_tile(ItemStack { id: 35, count: 1, damage: 12 }), 1.0);
+        let tile = if a.kind == 0 { ItemStack { id: 35, count: 1, damage: 12 } } else { ItemStack { id: a.kind, count: 1, damage: 0 } };
+        push_box(&mut verts, &mut idxs, [p.x - h, p.y - h, p.z - h], [p.x + h, p.y + h, p.z + h], stack_tile(tile), 1.0);
         lit(&mut verts, n0, lv, p);
     }
     // The fishing bobber: a small red box.
@@ -90,32 +107,142 @@ fn geometry(drops: &Drops, mobs: &Mobs, falling: &[Falling], fx: &Effects, lv: &
         push_box(&mut verts, &mut idxs, [p.x - h, p.y, p.z - h], [p.x + h, p.y + 2.0 * h, p.z + h], stack_tile(ItemStack { id: 35, count: 1, damage: 14 }), 1.0);
         lit(&mut verts, n0, lv, p);
     }
-    // The fishing bobber: a small red box.
-    if let Some(p) = hook {
-        let h = 0.125;
-        push_box(&mut verts, &mut idxs, [p.x - h, p.y, p.z - h], [p.x + h, p.y + 2.0 * h, p.z + h], stack_tile(ItemStack { id: 35, count: 1, damage: 14 }), 1.0);
-    }
     // A falling block is a 0.98 box in its block's flat colour (`EntityFallingSand`).
     for f in falling {
         let c = f.prev.lerp(f.pos, a);
         let h = 0.49;
         let n0 = verts.len();
-        push_box(&mut verts, &mut idxs, [c.x - h, c.y - h, c.z - h], [c.x + h, c.y + h, c.z + h], stack_tile(ItemStack { id: f.id as u16, count: 1, damage: 0 }), 1.0);
+        // `RenderTNTPrimed`: every other 5 ticks of the fuse the block flashes white (ponytail: a flat white box, not the additive overlay).
+        let flash = f.id == 46 && f.fuse >= 0 && (f.fuse / 5) % 2 == 0;
+        let tile = if flash { stack_tile(ItemStack { id: 35, count: 1, damage: 0 }) } else { stack_tile(ItemStack { id: f.id as u16, count: 1, damage: 0 }) };
+        push_box(&mut verts, &mut idxs, [c.x - h, c.y - h, c.z - h], [c.x + h, c.y + h, c.z + h], tile, 1.0);
         lit(&mut verts, n0, lv, c);
     }
     // Water and spawner particles: small full-bright boxes in a flat colour (wool: white, light blue, orange, grey). ponytail: no
     // textured quads facing the camera (`EntityFX.renderParticle`), no sprite from `particles.png`.
     for p in &fx.particles {
         let (c, h) = (p.prev.lerp(p.pos, a), p.half * 0.5);
-        let damage = match p.kind { Fx::Bubble => 0, Fx::Splash => 3, Fx::Flame => 1, Fx::Smoke => 7 };
-        push_box(&mut verts, &mut idxs, [c.x - h, c.y - h, c.z - h], [c.x + h, c.y + h, c.z + h], stack_tile(ItemStack { id: 35, count: 1, damage }), 1.0);
+        let (tile, light) = match p.kind {
+            Fx::Dig(t) => (t, 0.6), // `EntityDiggingFX`: colour x 0.6
+            k => (stack_tile(ItemStack { id: 35, count: 1, damage: match k { Fx::Bubble => 0, Fx::Splash => 3, Fx::Flame => 1, _ => 7 } }), 1.0),
+        };
+        push_box(&mut verts, &mut idxs, [c.x - h, c.y - h, c.z - h], [c.x + h, c.y + h, c.z + h], tile, light);
     }
     // A lightning bolt: one straight white column from the ground up (vanilla's is jagged, seeded by `field_27029_a`).
     for b in fx.bolts.iter().filter(|b| b.visible()) {
         let (p, w) = (b.pos, 0.15);
         push_box(&mut verts, &mut idxs, [p.x - w, p.y, p.z - w], [p.x + w, p.y + 96.0, p.z + w], stack_tile(ItemStack { id: 35, count: 1, damage: 0 }), 1.0);
     }
+    // Paintings: each 16 px piece shows its tile of `art/kz.png` on the face away from the wall, lit by the cell in front.
+    let mut pieces = 0;
+    for p in paintings.iter().filter(|p| p.frame().0.distance_squared(eye) < 48.0 * 48.0) {
+        let ps = p.pieces();
+        if pieces + ps.len() > PIECES {
+            break;
+        }
+        pieces += ps.len();
+        let n0 = verts.len();
+        for (tile, min, max) in ps {
+            push_face(&mut verts, &mut idxs, p.face(), min, max, atlas::ART_TILE0 + tile, 1.0);
+        }
+        let (x, y, z) = p.light_cell();
+        lit(&mut verts, n0, lv, Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5));
+    }
+    // Signs (`TileEntitySignRenderer`): the model within 64 blocks, the text within 16.
+    let mut quads = 0;
+    for s in signs.iter().take(MAX_SIGNS) {
+        let c = Vec3::new(s.pos.0 as f32 + 0.5, s.pos.1 as f32 + 0.5, s.pos.2 as f32 + 0.5);
+        let d = c.distance_squared(eye);
+        if d < 64.0 * 64.0 {
+            let n0 = verts.len();
+            push_sign(&mut verts, &mut idxs, &mut quads, s, d < 16.0 * 16.0);
+            lit(&mut verts, n0, lv, c);
+        }
+    }
     (verts, idxs)
+}
+
+/// `TileEntitySignRenderer.renderTileEntitySignAt`: the board (and the post of a standing sign) from `item/sign.png`, 2/3 scale,
+/// turned by the metadata (post: 22.5 degrees a step; wall: the side), then the four lines in black from the HUD font's glyph
+/// runs, 1/60 of that scale per font pixel, centred on the board. ponytail: the model is drawn two-sided (no culling choice),
+/// text is flat black quads (no `FontRenderer` texture) and only within 16 blocks.
+fn push_sign(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, quads: &mut usize, s: &SignView, text: bool) {
+    let sc = 2.0 / 3.0;
+    let wall = s.id != decor::POST;
+    let turn = if wall { -match s.meta { 2 => 180.0f32, 4 => 90.0, 5 => -90.0, _ => 0.0 } } else { -(s.meta as f32) * 22.5 };
+    let mut root = Mat4::from_translation(Vec3::new(s.pos.0 as f32 + 0.5, s.pos.1 as f32 + 12.0 / 16.0 * sc, s.pos.2 as f32 + 0.5)) * Mat4::from_rotation_y(turn.to_radians());
+    if wall {
+        root *= Mat4::from_translation(Vec3::new(0.0, -5.0 / 16.0, -7.0 / 16.0));
+    }
+    let model = root * Mat4::from_scale(Vec3::new(sc, -sc, -sc) / 16.0);
+    push_model_box(verts, idxs, &model, [-12.0, -14.0, -1.0], [24.0, 12.0, 2.0], (0.0, 0.0));
+    if !wall {
+        push_model_box(verts, idxs, &model, [-1.0, -2.0, -1.0], [2.0, 14.0, 2.0], (0.0, 14.0));
+    }
+    if !text {
+        return;
+    }
+    let tm = root * Mat4::from_translation(Vec3::new(0.0, 0.5 * sc, 0.07 * sc)) * Mat4::from_scale(Vec3::new(sc / 60.0, -sc / 60.0, sc / 60.0));
+    let (au, av) = atlas::atlas_uv(stack_tile(ItemStack { id: 35, count: 1, damage: 15 }), 0.0, 0.0);
+    for (i, line) in s.text.iter().enumerate() {
+        let g = |b: u8| if (32..127).contains(&b) { (b - 32) as usize } else { 31 };
+        let width: i32 = line.bytes().map(|b| crate::render::font::WIDTH[g(b)] as i32).sum();
+        let (mut cx, y0) = (-(width / 2) as f32, (i as i32 * 10 - 20) as f32);
+        for b in line.bytes() {
+            let gi = g(b);
+            for (row, bits) in crate::render::font::GLYPHS[gi].iter().enumerate() {
+                let mut px = 0;
+                while px < 8 {
+                    if bits >> px & 1 == 0 {
+                        px += 1;
+                        continue;
+                    }
+                    let run = (px..8).take_while(|p| bits >> p & 1 == 1).count();
+                    if *quads >= TEXT_QUADS {
+                        return;
+                    }
+                    *quads += 1;
+                    let (x0, x1, ya, yb) = (cx + px as f32, cx + (px + run) as f32, y0 + row as f32, y0 + row as f32 + 1.0);
+                    let base = verts.len() as u32 / VF as u32;
+                    for (x, y) in [(x0, yb), (x1, yb), (x1, ya), (x0, ya)] {
+                        let p = tm.transform_point3(Vec3::new(x, y, 0.0));
+                        verts.extend_from_slice(&[p.x, p.y, p.z, au, av, 1.0, lm(15, 0), WHITE]);
+                    }
+                    idxs.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+                    px += run;
+                }
+            }
+            cx += crate::render::font::WIDTH[gi] as f32;
+        }
+    }
+}
+
+/// `ModelRenderer.addBox` + `TexturedQuad` for `item/sign.png` (64 x 32): the box at `min` with `size` in model pixels through `m`,
+/// its six faces unwrapped from texture offset `o` (right, left, top, bottom, front, back), both windings.
+fn push_model_box(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, m: &Mat4, min: [f32; 3], size: [f32; 3], o: (f32, f32)) {
+    let (x1, y1, z1) = (min[0], min[1], min[2]);
+    let (x2, y2, z2) = (x1 + size[0], y1 + size[1], z1 + size[2]);
+    let (dx, dy, dz, ox, oy) = (size[0], size[1], size[2], o.0, o.1);
+    let c = [[x1, y1, z1], [x2, y1, z1], [x2, y2, z1], [x1, y2, z1], [x1, y1, z2], [x2, y1, z2], [x2, y2, z2], [x1, y2, z2]];
+    let faces: [([usize; 4], [f32; 4]); 6] = [
+        ([5, 1, 2, 6], [ox + dz + dx, oy + dz, ox + dz + dx + dz, oy + dz + dy]),
+        ([0, 4, 7, 3], [ox, oy + dz, ox + dz, oy + dz + dy]),
+        ([5, 4, 0, 1], [ox + dz, oy, ox + dz + dx, oy + dz]),
+        ([2, 3, 7, 6], [ox + dz + dx, oy, ox + dz + dx + dx, oy + dz]),
+        ([1, 0, 3, 2], [ox + dz, oy + dz, ox + dz + dx, oy + dz + dy]),
+        ([4, 5, 6, 7], [ox + dz + dx + dz, oy + dz, ox + dz + dx + dz + dx, oy + dz + dy]),
+    ];
+    for (vi, [u0, v0, u1, v1]) in faces {
+        let base = verts.len() as u32 / VF as u32;
+        // `TexturedQuad`'s corner order and its 0.1 px inset.
+        let uv = [(u1 - 0.1, v0 + 0.1), (u0 + 0.1, v0 + 0.1), (u0 + 0.1, v1 - 0.1), (u1 - 0.1, v1 - 0.1)];
+        for (k, &i) in vi.iter().enumerate() {
+            let p = m.transform_point3(Vec3::from(c[i]));
+            let (au, av) = atlas::sign_px(uv[k].0, uv[k].1);
+            verts.extend_from_slice(&[p.x, p.y, p.z, au, av, 1.0, lm(15, 0), WHITE]);
+        }
+        idxs.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3, base, base + 2, base + 1, base, base + 3, base + 2]);
+    }
 }
 
 /// One model box: (min, size, rotation point, rotation x/y/z, swing phase + amplitude, wool colour or `ME`), in model pixels.

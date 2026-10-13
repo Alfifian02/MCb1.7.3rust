@@ -113,6 +113,8 @@ pub enum Ev {
     /// A player's arrow stopped against a block here.
     Landed(Vec3),
     Egg(Vec3),
+    /// A thrown egg hit something here: 1 in 8 hatches a chicken (`EntityEgg.onUpdate`).
+    Hatch(Vec3),
 }
 
 pub struct Ctx<'a> {
@@ -210,6 +212,10 @@ impl Mob {
         if self.fire > 0 {
             self.fire -= 1;
             if self.wet { self.fire = 0 } else if self.fire % 20 == 0 { self.health -= 1; self.hurt = 10 }
+        }
+        // `BlockCactus.onEntityCollidedWithBlock`: 1 damage per tick of contact (the 10-tick window paces it), no anger, no knockback.
+        if physics::touching(pos, self.half, c.get, 81) {
+            self.hit(1, pos);
         }
         // EntityCreature.findPlayerToAttack per kind; anger (zombie pigman, wolf) sets `target` itself.
         self.anger = (self.anger - 1).max(0);
@@ -430,14 +436,20 @@ impl Mob {
     /// `EntityLiving.attackEntityFrom`: a hit inside the 10-tick window only pays the difference; the first one knocks back.
     /// A zombie pigman or wolf hit turns on its attacker.
     pub fn damage(&mut self, dmg: i32, from: Vec3, rng: &mut JavaRandom) {
+        if self.health > 0 && matches!(self.kind, PigZombie | Wolf) {
+            self.anger = if self.kind == Wolf { 1 << 20 } else { 400 + rng.next_int_bound(400) };
+            self.target = true;
+        }
+        self.hit(dmg, from);
+    }
+
+    /// The damage window of `attackEntityFrom` without the attacker's anger. `from` at the mob's own place = no
+    /// knockback, which is the `attackEntityFrom(null, n)` of a cactus.
+    fn hit(&mut self, dmg: i32, from: Vec3) {
         if self.health <= 0 {
             return;
         }
         self.age = 0;
-        if matches!(self.kind, PigZombie | Wolf) {
-            self.anger = if self.kind == Wolf { 1 << 20 } else { 400 + rng.next_int_bound(400) };
-            self.target = true;
-        }
         if self.life > 10 {
             if dmg <= self.last { return }
             self.health -= dmg - self.last;
@@ -486,6 +498,8 @@ pub struct Arrow {
     age: u16,
     /// Shot by the player (`ItemBow`): hurts mobs, not the player, and lands as a pick-up-able item.
     pub player: bool,
+    /// 0 = an arrow; `gear::SNOWBALL` / `gear::EGG` = a thrown item (`EntitySnowball` / `EntityEgg`: the same flight, no damage, gone on a hit).
+    pub kind: u16,
 }
 
 impl Arrow {
@@ -495,8 +509,10 @@ impl Arrow {
         let (x, y, z) = cell(self.pos);
         if self.age > 600 || solid((c.get)(x, y, z)) {
             // ponytail: vanilla sticks in the block until picked up; the player's arrow drops as an item where it stopped.
-            if self.player {
-                ev.push(Ev::Landed(self.pos - self.vel));
+            match self.kind {
+                0 if self.player => ev.push(Ev::Landed(self.pos - self.vel)),
+                crate::world::gear::EGG => ev.push(Ev::Hatch(self.pos - self.vel)),
+                _ => {}
             }
             return false;
         }
@@ -522,7 +538,7 @@ pub fn attack(held: Option<u16>) -> (i32, u16) {
 }
 
 /// Distance along the ray `o + t d` to the box `lo..hi`, if it hits within `t >= 0`.
-fn ray_box(o: Vec3, d: Vec3, lo: Vec3, hi: Vec3) -> Option<f32> {
+pub(crate) fn ray_box(o: Vec3, d: Vec3, lo: Vec3, hi: Vec3) -> Option<f32> {
     let (mut t0, mut t1) = (0.0f32, f32::MAX);
     for i in 0..3 {
         if d[i].abs() < 1e-8 {
@@ -670,7 +686,14 @@ impl Mobs {
                     let (lo, hi) = m.aabb();
                     a.pos.cmpge(lo - Vec3::splat(0.3)).all() && a.pos.cmple(hi + Vec3::splat(0.3)).all()
                 })).flatten();
-                hit.map_or(true, |i| { list[i].damage(crate::world::gear::ARROW_DAMAGE, a.pos - a.vel, rng); false })
+                hit.map_or(true, |i| {
+                    // A snowball or egg does 0 damage but still knocks back (`attackEntityFrom(thrower, 0)`).
+                    list[i].damage(if a.kind == 0 { crate::world::gear::ARROW_DAMAGE } else { 0 }, a.pos - a.vel, rng);
+                    if a.kind == crate::world::gear::EGG {
+                        ev.push(Ev::Hatch(a.pos));
+                    }
+                    false
+                })
             });
             self.spawn(c);
         }
@@ -680,9 +703,18 @@ impl Mobs {
         let mut out = Vec::new();
         for e in ev {
             match e {
-                Ev::Shoot(pos, vel) if self.arrows.len() < MAX_ARROWS => self.arrows.push(Arrow { pos, vel, age: 0, player: false }),
+                Ev::Shoot(pos, vel) if self.arrows.len() < MAX_ARROWS => self.arrows.push(Arrow { pos, vel, age: 0, player: false, kind: 0 }),
                 Ev::Landed(p) => drops.spawn_stack(ItemStack { id: crate::world::gear::ARROW, count: 1, damage: 0 }, cell(p)),
                 Ev::Egg(p) => drops.spawn_stack(ItemStack { id: 344, count: 1, damage: 0 }, cell(p)),
+                Ev::Hatch(p) => {
+                    if self.rng.next_int_bound(8) == 0 {
+                        let n = if self.rng.next_int_bound(32) == 0 { 4 } else { 1 };
+                        for _ in 0..n {
+                            let m = Mob::new(Chicken, p.x, p.y, p.z, 0.0, &mut self.rng);
+                            self.list.push(m);
+                        }
+                    }
+                }
                 Ev::Hurt(_) | Ev::Boom(_) => out.push(e),
                 Ev::Shoot(..) => {}
             }
@@ -723,9 +755,10 @@ impl Mobs {
     }
 
     /// `ItemBow`: a player's arrow leaves `pos` with `vel` (blocks per tick).
-    pub fn shoot(&mut self, pos: Vec3, vel: Vec3) {
+    /// A player's arrow (`kind` 0) or thrown snowball / egg.
+    pub fn shoot(&mut self, pos: Vec3, vel: Vec3, kind: u16) {
         if self.arrows.len() < MAX_ARROWS {
-            self.arrows.push(Arrow { pos, vel, age: 0, player: true });
+            self.arrows.push(Arrow { pos, vel, age: 0, player: true, kind });
         }
     }
 
@@ -820,6 +853,39 @@ mod tests {
         let far_player = ctx(Vec3::new(232.0, 10.0, 32.0), &l);
         let mut q = Mob::new(Pig, 32.5, 10.0, 32.5, 0.0, &mut rng);
         assert!((0..50).any(|_| !q.tick(&mut rng, &far_player, &mut ev)));
+    }
+
+    /// A mob in a cactus cell loses 1 health, once per 10-tick window, and is neither knocked back nor angered.
+    #[test]
+    fn cactus_hurts_a_mob_without_knockback_or_anger() {
+        let cact = |x: i32, y: i32, z: i32| if (x, z) == (32, 32) && y == 10 { Some(81) } else { flat(x, y, z) };
+        let l = |_, _, _| 15u8;
+        let c = Ctx { get: &cact, light: &l, day: false, player: Vec3::new(5.0, 20.0, 5.0), eye: Vec3::new(5.0, 20.6, 5.0) };
+        let mut rng = JavaRandom::new(5);
+        let mut w = Mob::new(Wolf, 32.5, 10.0, 32.5, 0.0, &mut rng);
+        let mut ev = Vec::new();
+        w.tick(&mut rng, &c, &mut ev);
+        assert_eq!((w.health, w.anger, w.body.vel.x), (7, 0, 0.0), "8 - 1, calm, not pushed");
+        w.tick(&mut rng, &c, &mut ev);
+        assert_eq!(w.health, 7, "inside the damage window, an equal hit is ignored");
+        for _ in 0..12 { w.tick(&mut rng, &c, &mut ev); }
+        assert!(w.health < 7, "the window ran out and the cactus hurts again");
+    }
+
+    /// Snowballs and eggs fly like arrows, hurt for 0 and are gone on a block; only the egg asks to hatch.
+    #[test]
+    fn thrown_items_land_quietly_and_an_egg_hatches() {
+        let l = |_, _, _| 0u8;
+        let c = ctx(Vec3::new(5.0, 20.0, 5.0), &l);
+        let ball = |kind| Arrow { pos: Vec3::new(32.5, 9.5, 32.5), vel: Vec3::new(0.0, -0.5, 0.0), age: 0, player: true, kind };
+        let mut ev = Vec::new();
+        assert!(!ball(crate::world::gear::SNOWBALL).tick(&c, &mut ev) && ev.is_empty());
+        assert!(!ball(crate::world::gear::EGG).tick(&c, &mut ev) && matches!(ev[..], [Ev::Hatch(_)]));
+        let mut rng = JavaRandom::new(3);
+        let mut pig = Mob::new(Pig, 32.5, 10.0, 32.5, 0.0, &mut rng);
+        let h = pig.health;
+        pig.damage(0, Vec3::new(30.0, 10.0, 32.5), &mut rng);
+        assert_eq!(pig.health, h);
     }
 
     /// Hostiles: a skeleton in range shoots, a creeper next to the player lights its fuse and goes off after 30 ticks,

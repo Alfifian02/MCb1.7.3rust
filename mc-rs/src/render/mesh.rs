@@ -343,7 +343,8 @@ pub fn build_split_tinted(smooth: bool, blocks: &[u8], data: &Nibbles, nb_data: 
                     }
                     continue;
                 }
-                if raw == 0 {
+                // Sign posts and wall signs (`getRenderType` -1): no block shape, `render::items` draws the model.
+                if raw == 0 || matches!(raw, 63 | 68) {
                     continue;
                 }
                 let blk = raw;
@@ -452,16 +453,27 @@ pub fn build_split_tinted(smooth: bool, blocks: &[u8], data: &Nibbles, nb_data: 
 /// Append an axis-aligned box `min..max` (world coordinates) of atlas tile `tile` with a flat `light`; the
 /// outline of the picked block reuses the face templates above, so the winding is the mesher's.
 pub fn push_box(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, min: [f32; 3], max: [f32; 3], tile: u16, light: f32) {
+    (0..6).for_each(|face| push_face(verts, idxs, face, min, max, tile, light));
+}
+
+/// One face of `push_box` (index as in `FACES`: +X, -X, +Y, -Y, +Z, -Z): a painting piece shows only its front.
+/// A tile from `ART_TILE0` up is a piece of `art/kz.png`, from `ITEM_TILE0` an items.png sprite.
+pub fn push_face(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, face: usize, min: [f32; 3], max: [f32; 3], tile: u16, light: f32) {
     // Photon lights by levels, not by `light`: items and mobs (light 1) read as open sky, the outline (0.15, near black) as a dark cell.
     let lmv = if light < 0.2 { lm(0, 0) } else { lm(15, 0) };
-    for face in &FACES {
-        let base = verts.len() as u32 / VF as u32;
-        for (c, uv) in face.corners.iter().zip(face.uv.iter()) {
-            let (au, av) = if tile >= atlas::ITEM_TILE0 { atlas::item_uv((tile - atlas::ITEM_TILE0) as u8, uv[0], uv[1]) } else { atlas::atlas_uv(tile, uv[0], uv[1]) };
-            verts.extend_from_slice(&[min[0] + c[0] * (max[0] - min[0]), min[1] + c[1] * (max[1] - min[1]), min[2] + c[2] * (max[2] - min[2]), au, av, light, lmv, WHITE]);
-        }
-        idxs.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    let face = &FACES[face];
+    let base = verts.len() as u32 / VF as u32;
+    for (c, uv) in face.corners.iter().zip(face.uv.iter()) {
+        let (au, av) = if tile >= atlas::ART_TILE0 {
+            atlas::art_uv((tile - atlas::ART_TILE0) as u8, uv[0], uv[1])
+        } else if tile >= atlas::ITEM_TILE0 {
+            atlas::item_uv((tile - atlas::ITEM_TILE0) as u8, uv[0], uv[1])
+        } else {
+            atlas::atlas_uv(tile, uv[0], uv[1])
+        };
+        verts.extend_from_slice(&[min[0] + c[0] * (max[0] - min[0]), min[1] + c[1] * (max[1] - min[1]), min[2] + c[2] * (max[2] - min[2]), au, av, light, lmv, WHITE]);
     }
+    idxs.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
 }
 
 /// The boxes a block is drawn as (`setBlockBounds` + `renderStandardBlock` per box in `RenderBlocks`): the stairs' two steps

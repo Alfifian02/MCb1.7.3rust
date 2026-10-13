@@ -1,0 +1,2320 @@
+diff -ruN '--exclude=art.rgba' a/Repo/README.md b/Repo/README.md
+--- a/README.md	2026-10-13 22:02:45.153740177 +0000
++++ b/README.md	2026-10-13 22:02:45.454906662 +0000
+@@ -47,6 +47,9 @@
+ | Rendering gaps       | written WITHOUT a Rust toolchain: not compiled, not run | Biome tint per block, grass side overlay, animated water/lava/fire (`render/anim.rs`), mipmaps, item sprites (HUD + drops), back-to-front water chunks, door / bed / ladder / rail models. See ROADMAP changelog. |
+ | Player + world effects | written WITHOUT a Rust toolchain: not compiled, not run | `world/effects.rs`: splash + drowning bubbles, suffocation, lightning (thunderstorm rolls, bolt, damage, sky flash), dungeon mob spawners as tile entities (saved), rain/snow streaks wired into the frame (`render/weather.rs`), entities lit by their own cell. See ROADMAP changelog. |
+ | Gear + shift-click | written; logic tested on a Linux host (51 tests, `world/` only); `lib.rs` wiring NOT compiled, not run on a device | `world/gear.rs`: empty/full buckets (water + lava sources, milk from a cow), bow + arrows (player arrows hurt mobs, land as pick-up items), fishing rod + bobber (`EntityFish`, raw fish), shears and dye on sheep (bare for good, no regrowth in b1.7.3), bread / golden apple / bow / arrow / rod recipes, armor bar in the HUD, shift-click (UNVERIFIED: not in b1.7.3) behind a toggle button. See ROADMAP changelog. |
++| Trapdoor (M19)       | written WITHOUT a Rust toolchain: not compiled, not run (+1 test not run) | `BlockTrapDoor`: flat 3/16 flap or standing against its wall, tap flips it, placed on a side face of a normal cube, drops itself when the wall goes, 6 planks -> 2. No sound, no redstone. See ROADMAP changelog. |
++| Cake (M19)           | written WITHOUT a Rust toolchain: not compiled, not run (+1 test, +2 asserts not run) | `BlockCake` + `ItemReed` use: place on solid ground, tap eats a slice (heals 3 below full health, 6 slices), bitten box + tiles, gone with its ground, recipe gives the milk buckets back as empty ones. Needs `seeds-reeds.patch` (M15). Sugar has no recipe until M16. See ROADMAP changelog. |
++| Sign + painting (M19), cactus on mobs (M17), TNT recipe + flash (M18) | written WITHOUT a Rust toolchain: not compiled, not run | `world/decor.rs`: `EntityPainting` / `EnumArt` / `ItemPainting` (motive drawn among those that fit, tap to break, re-check every 101 ticks), `BlockSign` / `ItemSign` / `TileEntitySign` with an on-screen-keyboard `GuiEditSign`, post and wall models from `sign.png`, text in world, saved in the `decor` file; `art/kz.png` + `sign.png` joined the atlas. See ROADMAP changelog. |
+ | M9..M14              | pending | Everything else: see ROADMAP.md for the order. |
+ 
+ Latest commit on `main`: see `git log -1`. Latest released APK: see the
+@@ -87,6 +90,7 @@
+       pick.rs             M5 ray trace + place rules
+       dig.rs              hardness table + dig-time maths (PlayerControllerSP) + canHarvestBlock gate
+       items.rs            ItemStack, 36-slot Inventory (hotbar = 0..9), idDropped/quantityDropped rules, EntityItem physics + pickup + throw
++      decor.rs            M19: paintings (`EntityPainting`, `EnumArt`) and signs (`TileEntitySign`, the editor's keyboard), `decor` save codec
+       chest.rs            chest storage: tile entity, placement/open rules, large-chest grouping, face tiles, reach
+       craft.rs            M6: tools (EnumToolMaterial, getStrVsBlock, canHarvestBlock), recipes (CraftingManager), inventory/workbench screen (Container clicks) + its GUI geometry
+       sky.rs              day/night + weather: sun angle, skylight subtracted, sky/fog/sunrise colours, star brightness + positions, `Weather` (rain/thunder timers)
+diff -ruN '--exclude=art.rgba' a/Repo/ROADMAP.md b/Repo/ROADMAP.md
+--- a/ROADMAP.md	2026-10-13 22:02:45.154273217 +0000
++++ b/ROADMAP.md	2026-10-13 22:02:45.269139133 +0000
+@@ -29,10 +29,10 @@
+ ## Milestones: to do (in this order)
+ | #   | Name | Deliverable | Missing today (from the audit) |
+ |-----|------|-------------|--------------------------------|
+-| M16 | Recipe fill (second half) | Every `CraftingManager` recipe whose result can exist | Done 2026-10-13 (test `plain_recipes_match_java`, not run): paper, book, sugar, fence, ladder, brick block, bookshelf, jack-o'-lantern, 4 slab types. Still open, each waits for its block or item: trapdoor, sign, TNT, rails (3), minecarts (3), boat, painting, lever, redstone torch, repeater, button, 2 pressure plates, dispenser, 2 pistons, jukebox, note block, compass, clock, map, cake |
+-| M17 | Block-entity effects + placement | Blocks act on the player and on placement | Done 2026-10-13 (tests `ladder_climbs_into_the_wall_and_slows_the_fall`, `web_cuts_the_move_and_the_cactus_touches`, not run): ladder climbing and slow fall (player and every mob, via `physics::step_box`), web slow-down, cactus damage to the player. Still open: soul sand slow-down (needs the block to exist: Nether), cactus damage to mobs, farmland trampling (`BlockFarmland.onEntityWalking`), slab on slab -> double slab (`ItemSlab`, `BlockStep`), furnace and pumpkin facing on placement (`onBlockPlacedBy`), `canPlaceBlockAt` / `canBlockStay` checks when placing plants |
+-| M18 | TNT + throwables | `EntityTNTPrimed`, snowball, egg | TNT cannot be lit (flint and steel, fire, explosion chain; redstone comes in M21), no `EntityTNTPrimed`, no `EntitySnowball`, no `EntityEgg` (reuse the arrow path and `Explosion`) |
+-| M19 | Small blocks + sign + painting | One session of the remaining simple blocks | Done 2026-10-13 (test `trapdoor_lies_flat_or_stands_on_its_wall`, not run): trapdoor; sponge needed nothing (see changelog). Cake done too (see changelog). Still open: sign (item, `TileEntitySign`, `GuiEditSign`, post and wall models, save), painting (`EntityPainting`, `EnumArt`, `ItemPainting`) |
++| M16 | Recipe fill (second half) | Every `CraftingManager` recipe whose result can exist | Done 2026-10-13 (tests `plain_recipes_match_java`, not run): paper, book, sugar, fence, ladder, brick block, bookshelf, jack-o'-lantern, 4 slab types, trapdoor, cake, TNT, sign, painting. Still open, each waits for its block or item: rails (3), minecarts (3), boat, lever, redstone torch, repeater, button, 2 pressure plates, dispenser, 2 pistons, jukebox, note block, compass, clock, map |
++| M17 | Block-entity effects + placement | Blocks act on the player and on placement | Done 2026-10-13 (tests not run): ladder climbing and slow fall, web, cactus damage to the player and to mobs (`mobs::tests::cactus_hurts_a_mob_without_knockback_or_anger`), furnace and pumpkin facing on placement, slab on slab -> double slab, farmland trampling (`Ticks::walk`), `canPlaceBlockAt` for plants and cactus. Still open: soul sand slow-down (needs the block: Nether) |
++| M18 | TNT + throwables | `EntityTNTPrimed`, snowball, egg | Done 2026-10-13 (tests `primed_tnt_rests_then_booms_on_its_fuse`, `thrown_items_land_quietly_and_an_egg_hatches`, not run): primed TNT lit by flint and steel or fire and chained by explosions, snowball, egg, the TNT recipe, the white flash of the fuse. Still open: lighting by redstone (M21) |
++| M19 | Small blocks + sign + painting | One session of the remaining simple blocks | Done 2026-10-14 (tests `paintings_hang_on_walls_like_java`, `paintings_fall_off_and_are_picked`, `signs_place_edit_and_save`, not run): trapdoor, cake, sign, painting; sponge needed nothing (see changelog). Nothing open |
+ | M20 | Mobs, particles, items | Finish the overworld entity set | wolf taming and sitting, saddle + riding a pig (`ItemSaddle`), A* `Pathfinder`, `EntityDiggingFX` (block break pieces), heart, redstone and portal particles, animated compass and clock (`TextureCompassFX`, `TextureWatchFX`), `ItemMap` + `MapData` |
+ | M21 | Redstone | Full circuits | `BlockRedstoneWire`, redstone torch, lever, button, pressure plates, repeater, glowing redstone ore, `isPoweringTo` / indirect power, redstone-driven doors and TNT, `BlockDispenser` + `TileEntityDispenser` + `GuiDispenser`, note block (`TileEntityNote`), jukebox + records as blocks and items (logic only, no sound), pistons (`BlockPistonBase`, `BlockPistonExtension`, `BlockPistonMoving`, `TileEntityPiston`) |
+ | M22 | Vehicles + rails | Minecarts and boats | rail shape on placement (`RailLogic`), powered and detector rails, `EntityMinecart` (empty, chest, furnace), `EntityBoat`, their items and models |
+@@ -63,11 +63,15 @@
+ 
+ ## Next step
+ 
+-Rest of M17 (slab merge, placement facing, trampling), then M18, then the rest of M19 (sign, painting). Trapdoor and cake
+-(M19) are in; cake needs the M15 `ItemReed` branch, and nothing yields sugar until M16's sugar recipe is applied. M21 (redstone)
+-is the biggest and gets a session of its own. First run `cargo test --lib`: the M15, M16 and M19 work above has not been compiled.
++M17..M19 are done in this base (soul sand waits for M11). Next in the easy-first order: M20 (taming, saddle, `EntityDiggingFX`, compass and clock), then M22, M11, M14; M21 (redstone) is the biggest and gets a session of its own. First run `cargo test --lib`: the M15..M19 work has never been compiled.
+ 
+ ## Changelog
++- 2026-10-14: M19 sign + painting, M17 cactus on mobs, M18 TNT recipe + flash (written WITHOUT a Rust toolchain: not compiled, not run; +5 tests `decor::tests::{paintings_hang_on_walls_like_java, paintings_fall_off_and_are_picked, signs_place_edit_and_save}`, `mobs::tests::cactus_hurts_a_mob_without_knockback_or_anger`, asserts in `plain_recipes_match_java` and `atlas`). Ported from `EntityPainting`, `EnumArt`, `ItemPainting`, `RenderPainting`, `BlockSign`, `ItemSign`, `TileEntitySign`, `TileEntitySignRenderer`, `SignModel`, `GuiEditSign`, `BlockCactus`, `RenderTNTPrimed`:
++    - `world/decor.rs` (new): `ART` (`EnumArt`), `Painting` (`func_412_b` frame, `func_410_i` = `fits`: no collision box in the plate, solid wall behind each 16 px piece, no other painting; `hang` draws one of the motives that fit with `nextInt`; `step` re-checks every 101 ticks and the caller drops the item; `pick` = ray against the box grown 0.1), `sign_place` (`ItemSign.onItemUse`: post `floor((rotationYaw + 180) * 16 / 360 + 0.5) & 15` on a top face, wall sign with the face as metadata), the editor (`Edit`, `Key`, `layout`: an on-screen keyboard, `GuiEditSign.keyTyped` = 15 characters, backspace, next line) and the `decor` save file (own file: `Level`'s optional tails stay as they are; a line or motive out of range makes the file be ignored).
++    - `render/atlas.rs`: the atlas gains `assets/art.rgba` (`art/kz.png` 256 x 256 over `item/sign.png` 64 x 32, `tools/gen_terrain.py`): paintings use tiles `ART_TILE0 + row * 16 + col` (every motive offset is a multiple of 16), signs read pixels of `sign.png` (`sign_px`). `mesh::push_face` is `push_box` for one face. `ATLAS_H` 544 -> 832.
++    - `render/items.rs`: paintings (one face per 16 px piece, lit by the cell in front), signs (`push_model_box` = `ModelRenderer.addBox` + `TexturedQuad` unwrap, 2/3 scale, post turned 22.5 degrees a step, wall sign 5/16 down and 7/16 back; text as flat black quads from the HUD font's glyph runs, 1/60 of the scale per pixel, within 16 blocks) and the TNT flash (`(fuse / 5) % 2 == 0`: a white box). Blocks 63 / 68 are skipped by the mesher (`getRenderType` -1) and are no longer `opaque`; `box_bounds` has the post and the wall sign (`setBlockBoundsBasedOnState`).
++    - `ticks.rs`: `BlockSign.onNeighborBlockChange` (`sign_stays`). `lib.rs`: tap on a side face with a painting hangs it, a tap on a painting breaks it (drops the item); a sign is placed with the editor opening on it (the text lives in `App.signs`, edited in place); `mobs.rs`: `Mob::hit` = the damage window without anger, a mob touching a cactus takes 1 a tick (no knockback, no anger).
++    - ponytail: a painting is only its front (sides and back are not drawn); the sign is drawn two-sided and its text is not textured; the editor has no hardware keys; a sign block without a `decor` entry (a save from a crash between chunk and `decor` write) is not drawn; the painting's collision with entities uses blocks only (as `getBoundingBox` is null for everything else in b1.7.3). UNVERIFIED: that it compiles, the keyboard layout on a device, sign text size, the sign's one-pixel UV inset at coarse mips.
+ - 2026-10-13: M17 first half: ladder, web, cactus (written WITHOUT a Rust toolchain: not compiled, not run; +2 tests `physics::tests::ladder_climbs_into_the_wall_and_slows_the_fall`, `web_cuts_the_move_and_the_cactus_touches`). One shared change in `physics::step_box`, so the player and every mob get it: `on_ladder` (`EntityLiving.isOnLadder`: the cell at the feet), sideways speed and fall capped at 0.15 blocks/tick, a push into the wall climbs at 0.2; `touching` (`Entity.moveEntity` contact sweep, box shrunk 0.001) drives the web (`isInWeb`: move x0.25 / y0.05 / x0.25, motion zeroed) and the cactus (`lib.rs`: `Vitals::hurt(1)` per frame, the damage window paces it). `Env.ladder` makes `Vitals::land` reset the fall like `fallDistance = 0`. ponytail: the web applies in the same frame (vanilla reads last tick's flag); the climb adds the frame's gravity back to match the Java's ~0.1176 blocks/tick; mobs do not take cactus damage; no sneak-to-hold on a ladder (no sneak on touch).
+ - 2026-10-13: ROADMAP restructured after a source audit (docs only, no code): out-of-scope list (audio, multiplayer, further optimization), done milestones split from to-do ones, new M15..M22 for every gap found, M11 and M14 expanded. M9, M10, M13 removed from the plan. Entries below are untouched except the three new M15 / M16 ones at the top.
+ - 2026-10-13: M15 done: seeds and sugar cane can be placed (written WITHOUT a Rust toolchain: not compiled, not run; +1 test `pick::tests::reeds_need_water_beside_the_ground_or_more_reeds`). `lib.rs` tap path: `ItemSeeds.onItemUse` (top face of farmland, air above -> crops meta 0), `ItemReed.onItemUse` (cell beside the face, or the snow layer itself; `pick::reed_ok` = `BlockReed.canPlaceBlockAt`). Crop loop is now closed: till, plant, grow, harvest, replant. ponytail: no step sound; the reed's own entity-collision check is skipped (it has no collision box).
+diff -ruN '--exclude=art.rgba' a/Repo/mc-rs/src/lib.rs b/Repo/mc-rs/src/lib.rs
+--- a/mc-rs/src/lib.rs	2026-10-13 22:02:45.256257273 +0000
++++ b/mc-rs/src/lib.rs	2026-10-13 22:02:45.454234402 +0000
+@@ -23,7 +23,7 @@
+ use crate::gpu::context::Gpu;
+ use crate::gpu::pipeline::ChunkPipeline;
+ use crate::render::atlas;
+-use crate::render::items::ItemMesh;
++use crate::render::items::{ItemMesh, SignView};
+ use crate::render::camera::{FirstPersonCamera, Frustum, ShadowCache};
+ use crate::render::outline::Outline;
+ use crate::render::shadows::Shadows;
+@@ -36,14 +36,15 @@
+ use crate::world::pick::{self, Hit};
+ use crate::world::dig::{self, Dig};
+ use crate::world::chest::{self, Chest};
++use crate::world::decor::{self, Edit, Key, Painting, Text};
+ use crate::world::craft::{self, Furnace, Screen};
+ use crate::world::items::{self, Drops, Inventory, ItemStack};
+ use crate::world::gear::{self, Hook, Used};
+ use crate::world::mobs::{self, Ctx, Ev, Mobs};
+-use crate::world::ticks::Ticks;
++use crate::world::ticks::{self, Ticks};
+ use crate::world::save::{self, Level};
+ use crate::world::sky;
+-use crate::world::chunk::{is_plant, outline_bounds, physics_id, pick_bounds};
++use crate::world::chunk::{is_plant, normal_cube, outline_bounds, physics_id, pick_bounds};
+ use crate::world::chunks::{chunk_coord, ChunkManager, Shape};
+ use crate::world::physics::{self, Player};
+ use crate::world::vitals::{self, Env, Vitals};
+@@ -161,6 +162,10 @@
+     cpu_acc: f32,
+     /// Chest tile entities by block position (created on first open, or by a dungeon's populate).
+     chests: HashMap<chest::Pos, Chest>,
++    /// Paintings on walls, sign texts by block position (`TileEntitySign`) and the sign being edited (`GuiEditSign`); saved in `decor`.
++    paintings: Vec<Painting>,
++    signs: HashMap<decor::Pos, Text>,
++    sign_edit: Option<Edit>,
+     /// The finger gesture on the open screen, to tell a tap from a spread.
+     gesture: Option<Gesture>,
+     /// Health, air and fire; and where a dead player comes back (the first spawn: no beds yet).
+@@ -280,6 +285,9 @@
+             hook: None,
+             furnaces: HashMap::new(),
+             chests: HashMap::new(),
++            paintings: Vec::new(),
++            signs: HashMap::new(),
++            sign_edit: None,
+             furn_acc: 0.0,
+             anim: crate::render::anim::Anim::new(),
+             anim_acc: 0.0,
+@@ -295,6 +303,9 @@
+         if let Some(l) = level {
+             app.restore(l);
+         }
++        if let Some((p, s)) = std::fs::read(app.dir.join("decor")).ok().and_then(|b| decor::decode(&b)) {
++            (app.paintings, app.signs) = (p, s.into_iter().collect());
++        }
+         Ok(app)
+     }
+ 
+@@ -305,6 +316,8 @@
+         if self.screen.take().is_some() {
+             self.touch.set_screen(false);
+         }
++        self.close_sign();
++        (self.paintings, self.signs) = (Vec::new(), HashMap::new());
+         let _ = std::fs::remove_dir_all(&self.dir);
+         let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as i64);
+         self.chunks = ChunkManager::new(SEED, RENDER_DIST).with_dir(self.dir.clone()); // the old one's workers stop on drop
+@@ -371,6 +384,10 @@
+         if let Err(e) = save::write(&self.dir.join("level"), &level.encode()) {
+             log::warn!("save: level file: {e}");
+         }
++        let signs: Vec<_> = self.signs.iter().map(|(&p, t)| (p, t.clone())).collect();
++        if let Err(e) = save::write(&self.dir.join("decor"), &decor::encode(&self.paintings, &signs)) {
++            log::warn!("save: decor file: {e}");
++        }
+         self.chunks.flush(chunks);
+     }
+ 
+@@ -459,7 +476,12 @@
+         self.vitals.armor = craft::armor_value(&self.inv.slots[items::MAIN..]);
+         // `Entity.isEntityInsideOpaqueBlock` at the head (`EntityPlayer.getEyeHeight` is 0.12 over the eye): 1 damage a tick in a wall.
+         let in_wall = effects::inside_opaque(&|x, y, z| self.chunks.block(x, y, z), self.player.pos.x, self.player.pos.y + 0.84, self.player.pos.z, 0.6);
+-        self.vitals.update(dt, Env { dy: self.player.pos.y - y0, on_ground: self.player.on_ground, water, lava, eye_in_water, eye_y: e.y, in_wall });
++        let ladder = !asleep && physics::on_ladder(self.player.pos, physics::HALF, &get);
++        // `BlockCactus.onEntityCollidedWithBlock`: 1 damage every frame the box touches a cactus cell (the 10 tick damage window paces it).
++        if !asleep && physics::touching(self.player.pos, physics::HALF, &get, 81) {
++            self.vitals.hurt(1);
++        }
++        self.vitals.update(dt, Env { dy: self.player.pos.y - y0, on_ground: self.player.on_ground, water, lava, ladder, eye_in_water, eye_y: e.y, in_wall });
+         // Entering water splashes (`Entity.onEntityUpdate`); running out of air pops 8 bubbles round the eye (`EntityLiving.onEntityUpdate`).
+         let motion = self.player.vel / 20.0; // blocks per tick
+         if water && !self.was_in_water {
+@@ -510,6 +532,13 @@
+             let centre = (chunk_coord(self.player.pos.x), chunk_coord(self.player.pos.z));
+             self.sleep_tick(sub);
+             self.ticks.step(&mut self.chunks, &mut self.drops, centre, self.weather.rain(1.0));
++            for at in std::mem::take(&mut self.ticks.booms) {
++                self.explode(at, 4.0); // `EntityTNTPrimed.explode`
++            }
++            if self.sleep.is_none() {
++                let p = self.player.pos; // the box centre is 0.9 over the feet
++                self.ticks.walk(&mut self.chunks, p.x, p.y - 0.9, p.z);
++            }
+             self.tick_effects(centre);
+             let mut flips = Vec::new();
+             for (&pos, f) in self.furnaces.iter_mut() {
+@@ -518,7 +547,9 @@
+                 }
+             }
+             for ((x, y, z), lit) in flips {
+-                self.chunks.set_block(x, y, z, if lit { 62 } else { 61 });
++                // `updateFurnaceBlockState`: the facing survives the swap.
++                let m = self.chunks.meta(x, y, z);
++                self.chunks.set_block_meta(x, y, z, if lit { 62 } else { 61 }, m);
+             }
+             // Chests: take over what a dungeon's populate put in them; one whose block is gone (dug, blown up, washed away)
+             // spills its contents (`BlockChest.onBlockRemoval`; ponytail: seen on the next 20 Hz tick, not at the removal).
+@@ -529,6 +560,18 @@
+             for (p, kind) in self.chunks.take_spawners() {
+                 self.fx.spawners.entry(p).or_insert(Spawner { kind, delay: 20 });
+             }
++            // Paintings check their wall every 101 ticks and drop as an item when it is gone (`EntityPainting.onUpdate`); a sign's
++            // text goes with its block, and closes the editor.
++            let chunks = &self.chunks;
++            let cell = |x: i32, y: i32, z: i32| chunks.block_loaded(x, y, z).map(|b| (b, chunks.meta(x, y, z)));
++            for p in decor::step(&mut self.paintings, &cell) {
++                let c = p.frame().0;
++                self.drops.scatter(ItemStack { id: decor::PAINTING, count: 1, damage: 0 }, (c.x.floor() as i32, c.y.floor() as i32, c.z.floor() as i32));
++            }
++            self.signs.retain(|&(x, y, z), _| self.chunks.block_loaded(x, y, z).map_or(true, |b| matches!(b, decor::POST | decor::WALL)));
++            if self.sign_edit.is_some_and(|e| !self.signs.contains_key(&e.pos)) {
++                self.close_sign();
++            }
+             self.fx.spawners.retain(|&(x, y, z), _| self.chunks.block_loaded(x, y, z).map_or(true, |b| b == effects::SPAWNER_ID));
+             let gone: Vec<_> = self.chests.keys().copied().filter(|&(x, y, z)| self.chunks.block_loaded(x, y, z).is_some_and(|b| b != chest::ID)).collect();
+             for p in gone {
+@@ -548,7 +591,9 @@
+         let place = self.touch.take_place();
+         // The inventory button, and taps on an open screen (its presses are not look / move / place).
+         if self.touch.take_inventory() {
+-            if self.screen.is_some() {
++            if self.sign_edit.is_some() {
++                self.close_sign();
++            } else if self.screen.is_some() {
+                 self.close_screen();
+             } else {
+                 self.open_screen(Screen::new(2));
+@@ -591,7 +636,14 @@
+                             if let Some(h) = held {
+                                 self.inv.damage(slot, craft::wear_on_break(h.id, id));
+                             }
+-                            if harvest {
++                            if id == 46 {
++                                // `BlockTNT.onBlockDestroyedByPlayer` (unconditional): metadata 1, or flint and steel in hand (`onBlockClicked`), lights it.
++                                if meta & 1 == 1 || held.is_some_and(|h| h.id == craft::FLINT_AND_STEEL) {
++                                    self.ticks.prime(hit.pos, false);
++                                } else {
++                                    self.drops.spawn_stack(ItemStack { id: 46, count: 1, damage: 0 }, hit.pos);
++                                }
++                            } else if harvest {
+                                 // BlockLeaves.harvestBlock: shears drop the leaves themselves, not a sapling.
+                                 if id == 18 && held.is_some_and(|h| h.id == craft::SHEARS) {
+                                     self.drops.spawn_stack(ItemStack { id: 18, count: 1, damage: (meta & 3) as u16 }, hit.pos);
+@@ -643,6 +695,16 @@
+                 return;
+             }
+         }
++        // A tap on a painting nearer than the block behind it breaks it (`EntityPainting.attackEntityFrom`: it drops as an item).
++        if place {
++            let (eye, fwd) = (self.camera.pos, self.camera.forward());
++            let wall = self.target.map_or(f32::MAX, |h| h.point.distance(eye.as_dvec3()) as f32);
++            if let Some((i, _)) = decor::pick(&self.paintings, eye, fwd, pick::REACH as f32).filter(|&(_, t)| t < wall) {
++                let c = self.paintings.remove(i).frame().0;
++                self.drops.scatter(ItemStack { id: decor::PAINTING, count: 1, damage: 0 }, (c.x.floor() as i32, c.y.floor() as i32, c.z.floor() as i32));
++                return;
++            }
++        }
+         let Some(hit) = self.target else {
+             if place {
+                 self.use_held();
+@@ -667,6 +729,27 @@
+                     return;
+                 }
+                 Some(71) => return,
++                // BlockCake.blockActivated: a slice heals 3 while below full health; the sixth slice removes the cake.
++                // ponytail: a punch (`onBlockClicked`) does not eat; holding it digs the cake away like any block.
++                Some(92) => {
++                    let (x, y, z) = hit.pos;
++                    if self.vitals.health < crate::world::vitals::MAX_HEALTH {
++                        self.vitals.heal(3);
++                        let m = self.chunks.meta(x, y, z) + 1;
++                        if m >= 6 {
++                            self.chunks.set_block(x, y, z, 0);
++                        } else {
++                            self.chunks.set_block_meta(x, y, z, 92, m);
++                        }
++                    }
++                    return;
++                }
++                // BlockTrapDoor.blockActivated: the open bit flips.
++                Some(96) => {
++                    let (x, y, z) = hit.pos;
++                    self.chunks.set_block_meta(x, y, z, 96, self.chunks.meta(x, y, z) ^ 4);
++                    return;
++                }
+                 Some(26) => {
+                     self.use_bed(hit.pos);
+                     return;
+@@ -687,6 +770,32 @@
+             // places anything. ponytail: farmland stays farmland (no `BlockFarmland.updateTick` reverting it to dirt),
+             // it is drawn as a full cube (the original is 15/16 high) and nothing grows on it yet.
+             let slot = self.touch.hotbar_slot;
++            // ItemPainting.onItemUse: a side face; the motive is drawn among those that fit (`decor::hang`). Never places a block.
++            if self.inv.slots[slot].is_some_and(|s| s.id == decor::PAINTING) {
++                if let (Some(dir), true) = (decor::dir_of_face(hit.face), self.paintings.len() < decor::MAX_PAINTINGS) {
++                    let chunks = &self.chunks;
++                    let cell = |x: i32, y: i32, z: i32| chunks.block_loaded(x, y, z).map(|b| (b, chunks.meta(x, y, z)));
++                    if let Some(p) = decor::hang(hit.pos, dir, &self.paintings, &cell, &mut self.mobs.rng) {
++                        self.paintings.push(p);
++                        self.inv.consume(slot);
++                    }
++                }
++                return;
++            }
++            // ItemSign.onItemUse: a post on a top face, a wall sign on a side face; the editor opens on the new sign.
++            if self.inv.slots[slot].is_some_and(|s| s.id == decor::SIGN) {
++                let yaw = self.camera.yaw.to_degrees() + 180.0;
++                let placed = decor::sign_place(&|a, b, c| self.chunks.block_loaded(a, b, c).unwrap_or(0), hit.pos, hit.face, yaw);
++                if let Some(((x, y, z), id, meta)) = placed {
++                    if self.chunks.set_block_meta(x, y, z, id, meta) {
++                        self.inv.consume(slot);
++                        self.signs.insert((x, y, z), Default::default());
++                        self.sign_edit = Some(Edit::new((x, y, z)));
++                        self.touch.set_screen(true);
++                    }
++                }
++                return;
++            }
+             // ItemBed.onItemUse: only against a top face, both halves on air over solid cubes.
+             if self.inv.slots[slot].is_some_and(|s| s.id == 355) {
+                 let (x, y, z) = pick::place_pos(&hit);
+@@ -733,13 +842,35 @@
+                 }
+                 return;
+             }
++            // ItemSeeds.onItemUse: only the top face of farmland with air above; one seed becomes a crops block (meta 0).
++            if self.inv.slots[slot].is_some_and(|s| s.id == 295) {
++                let (x, y, z) = hit.pos;
++                if hit.face == 1 && self.chunks.block_loaded(x, y, z) == Some(60) && self.chunks.block_loaded(x, y + 1, z) == Some(0) {
++                    self.chunks.set_block(x, y + 1, z, 59);
++                    self.inv.consume(slot);
++                }
++                return;
++            }
++            // ItemReed.onItemUse (sugar cane, cake): the cell beside the face aimed at, or the snow layer itself; the block's
++            // `canPlaceBlockAt` decides (reeds: `reed_ok`; cake: solid ground, and the player's box must not be in the way).
++            if self.inv.slots[slot].is_some_and(|s| matches!(s.id, 338 | 354)) {
++                let cake = self.inv.slots[slot].is_some_and(|s| s.id == 354);
++                let at = if self.chunks.block_loaded(hit.pos.0, hit.pos.1, hit.pos.2) == Some(78) { hit.pos } else { pick::place_pos(&hit) };
++                let get = |a, b, c| self.chunks.block_loaded(a, b, c).unwrap_or(0);
++                let ok = at.1 < 127 && self.chunks.block_loaded(at.0, at.1, at.2).is_some_and(pick::replaceable)
++                    && if cake { !crate::world::ticks::non_solid(get(at.0, at.1 - 1, at.2)) && !pick::overlaps_player(at, physics_id(92, 0), self.player.pos) } else { pick::reed_ok(&get, at) };
++                if ok && self.chunks.set_block_meta(at.0, at.1, at.2, if cake { 92 } else { 83 }, 0) {
++                    self.inv.consume(slot);
++                }
++                return;
++            }
+             let (x, y, z) = pick::place_pos(&hit);
+             // Items below 256 are blocks; anything else cannot be placed. ItemBlock refuses a solid block at y = 127
+             // (ponytail: plants are refused there too).
+             if let Some(s) = self.inv.slots[slot].filter(|s| s.id < 256) {
+                 // A torch's facing comes from the face aimed at and what can hold it (None = nothing to hang on: no placement).
+-                let meta = if s.id == 50 { pick::torch_meta(&|a, b, c| self.chunks.block_loaded(a, b, c).unwrap_or(0), (x, y, z), hit.face) } else if matches!(s.id, 53 | 67) { Some(pick::stairs_meta(self.camera.yaw.to_degrees() + 180.0)) } else { Some(items::placed_meta(s)) };
+-                if let Some(meta) = meta.filter(|_| y < 127 && self.chunks.block_loaded(x, y, z).is_some_and(pick::replaceable) && !pick::overlaps_player((x, y, z), s.id as u8, self.player.pos) && (s.id != chest::ID as u16 || chest::can_place(&|a, b, c| self.chunks.block(a, b, c).unwrap_or(0), (x, y, z)))) {
++                let meta = if s.id == 50 { pick::torch_meta(&|a, b, c| self.chunks.block_loaded(a, b, c).unwrap_or(0), (x, y, z), hit.face) } else if s.id == 96 { pick::trap_meta(hit.face, self.chunks.block_loaded(hit.pos.0, hit.pos.1, hit.pos.2).is_some_and(normal_cube)) } else { pick::facing_meta(s.id, self.camera.yaw.to_degrees() + 180.0).or(Some(items::placed_meta(s))) };
++                if let Some(meta) = meta.filter(|_| y < 127 && self.chunks.block_loaded(x, y, z).is_some_and(pick::replaceable) && !pick::overlaps_player((x, y, z), s.id as u8, self.player.pos) && ticks::can_place(&self.chunks, x, y, z, s.id as u8) && (s.id != chest::ID as u16 || chest::can_place(&|a, b, c| self.chunks.block(a, b, c).unwrap_or(0), (x, y, z)))) {
+                     if self.chunks.set_block_meta(x, y, z, s.id as u8, meta) {
+                         self.inv.consume(slot);
+                     }
+@@ -789,7 +920,9 @@
+         for (x, y, z) in cells {
+             let Some(id) = self.chunks.block_loaded(x, y, z).filter(|&b| b > 0) else { continue };
+             let meta = self.chunks.meta(x, y, z);
+-            if self.mobs.rng.next_float() < 0.3 {
++            if id == 46 {
++                self.ticks.prime((x, y, z), true); // `BlockTNT.onBlockDestroyedByExplosion`: a chain, no drop
++            } else if self.mobs.rng.next_float() < 0.3 {
+                 self.drops.spawn_block(id, meta, (x, y, z));
+             }
+             self.chunks.set_block(x, y, z, 0);
+@@ -897,9 +1030,15 @@
+             gear::BOW => {
+                 if self.inv.take_one(gear::ARROW) {
+                     let v = gear::arrow_velocity(fwd, &mut self.mobs.rng);
+-                    self.mobs.shoot(eye + fwd * 0.5, v);
++                    self.mobs.shoot(eye + fwd * 0.5, v, 0);
+                 }
+             }
++            // `ItemSnowball` / `ItemEgg`: one is used up and thrown along the look direction (same heading as an arrow).
++            gear::SNOWBALL | gear::EGG => {
++                self.inv.consume(slot);
++                let v = gear::arrow_velocity(fwd, &mut self.mobs.rng);
++                self.mobs.shoot(eye - glam::Vec3::Y * 0.1, v, held.id);
++            }
+             // `ItemFishingRod`: reel in what is out (a bite gives a raw fish), else cast.
+             gear::ROD => match self.hook.take() {
+                 Some(h) => {
+@@ -952,6 +1091,7 @@
+     /// menu is the death screen: its resume button respawns (top of `step_frame`).
+     fn die(&mut self) {
+         self.close_screen();
++        self.close_sign();
+         let at = (self.player.pos.x.floor() as i32, self.player.pos.y.floor() as i32, self.player.pos.z.floor() as i32);
+         for slot in self.inv.slots.iter_mut() {
+             if let Some(st) = slot.take() {
+@@ -961,6 +1101,25 @@
+         self.touch.pause();
+     }
+ 
++    /// The sign editor is done: the text stays on the sign (it is edited in place).
++    fn close_sign(&mut self) {
++        if self.sign_edit.take().is_some() {
++            self.touch.set_screen(false);
++        }
++    }
++
++    /// A tap on the sign editor: a key of the on-screen keyboard or a line of the board (`GuiEditSign.keyTyped`).
++    fn on_sign_tap(&mut self, x: f32, y: f32) {
++        let (w, h) = (self.gpu.config.width as f32, self.gpu.config.height as f32);
++        let Some(mut e) = self.sign_edit else { return };
++        let Some(k) = decor::key_at(w, h, e.shift, x, y) else { return };
++        let done = self.signs.get_mut(&e.pos).map_or(k == Key::Done, |t| e.press(k, t));
++        self.sign_edit = Some(e);
++        if done {
++            self.close_sign();
++        }
++    }
++
+     /// Open a container screen: the 2x2 inventory, a workbench's 3x3, a furnace or chests.
+     fn open_screen(&mut self, screen: Screen) {
+         self.screen = Some(screen);
+@@ -1009,6 +1168,12 @@
+     /// A finger event on the open screen: a press that lifts where it began is a tap; one that drags over other
+     /// slots with a stack on the cursor spreads it, one item per slot (the start slot included).
+     fn on_screen_event(&mut self, ev: ScreenEv) {
++        if self.sign_edit.is_some() {
++            if let ScreenEv::Up(x, y) = ev {
++                self.on_sign_tap(x, y);
++            }
++            return;
++        }
+         let (w, h) = (self.gpu.config.width as f32, self.gpu.config.height as f32);
+         let Some(gw) = self.screen.as_ref().map(|s| s.gw) else { return };
+         let mut fill = Vec::new();
+@@ -1102,9 +1267,20 @@
+             let b = self.chunks.block_loaded(x, y, z).and_then(|b| outline_bounds(b, self.chunks.meta(x, y, z)));
+             b.map_or(0, |b| self.outline.update(&self.gpu.queue, h.pos, b))
+         });
++        let eye = self.camera.pos;
++        let mut sign_views: Vec<SignView> = self
++            .signs
++            .iter()
++            .filter_map(|(&pos, text)| {
++                let id = self.chunks.block_loaded(pos.0, pos.1, pos.2).filter(|b| matches!(b, decor::POST | decor::WALL))?;
++                Some(SignView { pos, id, meta: self.chunks.meta(pos.0, pos.1, pos.2), text })
++            })
++            .collect();
++        let near = |s: &SignView| (glam::Vec3::new(s.pos.0 as f32 + 0.5, s.pos.1 as f32 + 0.5, s.pos.2 as f32 + 0.5) - eye).length_squared();
++        sign_views.sort_by(|a, b| near(a).total_cmp(&near(b)));
+         let item_indices = {
+             let chunks = &self.chunks;
+-            self.item_mesh.update(&self.gpu.queue, &self.drops, &self.mobs, &self.ticks.falling, &self.fx, &|x, y, z| chunks.light_levels(x, y, z), self.hook.as_ref().map(|h| h.pos))
++            self.item_mesh.update(&self.gpu.queue, &self.drops, &self.mobs, &self.ticks.falling, &self.fx, &|x, y, z| chunks.light_levels(x, y, z), self.hook.as_ref().map(|h| h.pos), &self.paintings, &sign_views, eye)
+         };
+ 
+         // Sky and fog colour from the sun angle, the weather and the climate under the player; the frame is cleared to
+@@ -1395,7 +1571,7 @@
+         let paused = self.touch.paused;
+         let pressed = |role: PointerRole| self.touch.pointers.values().any(|p| p.role == role);
+         // The in-world controls are hidden while a container screen is open.
+-        let play = self.screen.is_none();
++        let play = self.screen.is_none() && self.sign_edit.is_none();
+ 
+         // Crosshair: the aim point of the pick ray (first, so the quad cap never drops it).
+         if play {
+@@ -1414,6 +1590,36 @@
+             HudPipeline::push_quad(v, bx, by, bw * self.dig.damage.min(1.0), bh, [1.0, 1.0, 1.0, 0.9]);
+         }
+ 
++        // `GuiEditSign`: the title, the board with its four lines (the one being edited is wrapped in `> <` and blinks), and the keys.
++        if let Some(e) = self.sign_edit {
++            let (w, h) = (self.gpu.config.width as f32, self.gpu.config.height as f32);
++            let (u, keys) = decor::layout(w, h, e.shift);
++            HudPipeline::push_quad(v, 0.0, 0.0, w, h, [0.0, 0.0, 0.0, 0.55]);
++            let title = "Edit sign message:";
++            HudPipeline::push_text(v, (w - HudPipeline::text_width(title) as f32 * u) / 2.0, 14.0 * u, u, title, [1.0; 4]);
++            HudPipeline::push_outlined_quad(v, (w - 130.0 * u) / 2.0, 30.0 * u, 130.0 * u, 64.0 * u, [0.62, 0.49, 0.28, 1.0], [0.25, 0.18, 0.08, 1.0], (2.0 * u).max(2.0));
++            let text = self.signs.get(&e.pos).cloned().unwrap_or_default();
++            let blink = (self.world_ticks as u64 / 6) % 2 == 0;
++            for (k, r) in &keys {
++                let label = match *k {
++                    Key::Line(i) if i == e.line && blink => format!("> {} <", text[i as usize]),
++                    Key::Line(i) => text[i as usize].clone(),
++                    k => decor::label(k),
++                };
++                let (fill, ink) = match *k {
++                    Key::Line(_) => ([0.0; 4], [0.0, 0.0, 0.0, 1.0]),
++                    Key::Shift if e.shift => ([0.2, 0.5, 0.8, 0.97], [1.0; 4]),
++                    Key::Done => ([0.2, 0.55, 0.25, 0.97], [1.0; 4]),
++                    _ => ([0.33, 0.33, 0.33, 0.97], [1.0; 4]),
++                };
++                if fill[3] > 0.0 {
++                    HudPipeline::push_outlined_quad(v, r[0], r[1], r[2], r[3], fill, [0.1, 0.1, 0.1, 1.0], (u).max(1.0));
++                }
++                let tw = HudPipeline::text_width(&label) as f32 * u;
++                HudPipeline::push_text(v, r[0] + (r[2] - tw) / 2.0, r[1] + (r[3] - 8.0 * u) / 2.0, u, &label, ink);
++            }
++        }
++
+         // Container screen: the vanilla GUI (176 x 166 units) over a dimmed frame, slots with their stacks.
+         if let Some(s) = &self.screen {
+             let (w, h) = (self.gpu.config.width as f32, self.gpu.config.height as f32);
+diff -ruN '--exclude=art.rgba' a/Repo/mc-rs/src/render/atlas.rs b/Repo/mc-rs/src/render/atlas.rs
+--- a/mc-rs/src/render/atlas.rs	2026-10-13 22:02:45.256589789 +0000
++++ b/mc-rs/src/render/atlas.rs	2026-10-13 22:02:45.451835350 +0000
+@@ -66,13 +66,20 @@
+ pub const ATLAS_W: usize = 256;
+ /// Rows: `terrain.png`, the flat strip, then `gui/items.png` (`ITEMS_Y`).
+ pub const ITEMS_Y: usize = 256 + TILES_H;
+-pub const ATLAS_H: usize = ITEMS_Y + 256;
++/// Under them `art/kz.png` (the paintings, 16 px pieces = tiles `ART_TILE0 + row * 16 + col`) and `item/sign.png` (64 x 32 at `SIGN_Y`).
++pub const ART_Y: usize = ITEMS_Y + 256;
++pub const SIGN_Y: usize = ART_Y + 256;
++pub const ATLAS_H: usize = ART_Y + 288;
+ /// Mip levels of the atlas (a 16 px tile has 16, 8, 4 px: three levels never mix two tiles at the middle of a tile).
+ pub const MIPS: u32 = 3;
+ /// `gui/items.png` as RGBA (256 x 256, 16 x 16 px sprites): `Item.iconIndex` picks the sprite (`item_icon`).
+ pub const ITEMS: &[u8] = include_bytes!("../../assets/items.rgba");
+ /// A mesh tile number from here up is an items.png sprite (`ITEM_TILE0 + icon`), see `item_uv`.
+ pub const ITEM_TILE0: u16 = 1000;
++/// A mesh tile number from here up is a 16 px piece of `art/kz.png` (`ART_TILE0 + row * 16 + col`), see `art_uv`.
++pub const ART_TILE0: u16 = 2000;
++/// `art/kz.png` + `item/sign.png` as RGBA, 256 x 288 (`tools/gen_terrain.py`).
++pub const ART: &[u8] = include_bytes!("../../assets/art.rgba");
+ const TERRAIN: &[u8] = include_bytes!("../../assets/terrain.rgba");
+ 
+ /// `EntitySheep.fleeceColorTable`: the wool colours, indexed by the cloth metadata (0 white .. 15 black).
+@@ -123,6 +130,7 @@
+         }
+     }
+     v.extend_from_slice(ITEMS);
++    v.extend_from_slice(ART);
+     v
+ }
+ 
+@@ -163,6 +171,17 @@
+     (x / ATLAS_W as f32, y / ATLAS_H as f32)
+ }
+ 
++/// Atlas UV of piece `n` (`row * 16 + col`) of `art/kz.png` at (u, v) in 0..1, v up (same inset as `terrain_uv`).
++pub fn art_uv(n: u8, u: f32, v: f32) -> (f32, f32) {
++    let (x, y) = ((n % 16) as f32 * 16.0 + 0.02 + u * 15.96, ART_Y as f32 + (n / 16) as f32 * 16.0 + 0.02 + (1.0 - v) * 15.96);
++    (x / ATLAS_W as f32, y / ATLAS_H as f32)
++}
++
++/// Atlas UV of pixel (`x`, `y`) of `item/sign.png` (y down like the png).
++pub fn sign_px(x: f32, y: f32) -> (f32, f32) {
++    (x / ATLAS_W as f32, (SIGN_Y as f32 + y) / ATLAS_H as f32)
++}
++
+ /// `Item.iconIndex` of an item id (256 and up), `None` for blocks and items the Java table does not have.
+ pub fn item_icon(id: u16) -> Option<u8> {
+     super::icons::ICONS.binary_search_by_key(&id, |&(i, _)| i).ok().map(|k| super::icons::ICONS[k].1)
+@@ -208,7 +227,7 @@
+ 
+ /// `Block.getBlockTextureFromSideAndMetadata`: the `terrain.png` tile of a block's face, `side` as in the Java (0 bottom, 1 top,
+ /// 2 north -Z, 3 south +Z, 4 west -X, 5 east +X); `None` = no tile known (flat colour). Blocks with a facing in the Java
+-/// (furnace, pumpkin, chest) get their front on +Z, because this port does not keep the facing yet. 31 tall grass is 55 dead
++/// (furnace, pumpkin) get their front from the metadata (`onBlockPlacedBy`), a chest from its neighbours. 31 tall grass is 55 dead
+ /// shrub / 39 grass / 56 fern by metadata; wool, log, leaves and sapling pick by metadata like `tile_of` does.
+ pub const fn terrain_tile(id: u8, meta: u8, side: u8) -> Option<u8> {
+     let (top, bottom) = (side == 1, side == 0);
+@@ -274,8 +293,7 @@
+         57 => 24,
+         58 => if top { 43 } else if bottom { 4 } else if side == 2 || side == 4 { 60 } else { 59 },
+         60 => if top { if meta > 0 { 86 } else { 87 } } else { 2 },
+-        61 => if side <= 1 { 62 } else if side == 3 { 44 } else { 45 },
+-        62 => if side <= 1 { 62 } else if side == 3 { 61 } else { 45 },
++        61 | 62 => if side <= 1 { 62 } else if side != meta { 45 } else if id == 62 { 61 } else { 44 },
+         73 | 74 => 51,
+         79 => 67,
+         80 => 66,
+@@ -284,10 +302,13 @@
+         82 => 72,
+         83 => 73,
+         84 => if top { 75 } else { 74 },
+-        86 | 91 => if side <= 1 { 102 } else if side == 3 { if id == 91 { 120 } else { 119 } } else { 118 },
++        86 | 91 => if side <= 1 { 102 } else if side == [3, 4, 2, 5][(meta & 3) as usize] { 119 + (id == 91) as u8 } else { 118 },
+         87 => 103,
+         88 => 104,
+         89 => 105,
++        96 => 84, // trapdoor
++        // BlockCake.getBlockTextureFromSideAndMetadata (base tile 121): top, sides, the bitten face (-X), bottom
++        92 => if top { 121 } else if bottom { 124 } else if meta > 0 && side == 4 { 123 } else { 122 },
+         26 => bed_tile(meta, side),
+         64 | 71 => door_face(id, meta, side).0,
+         _ => return None,
+@@ -316,6 +337,8 @@
+         // Every tile `tile_of` hands out has its own colour, and the texture covers all of them.
+         assert_eq!(atlas_rgba().len(), ATLAS_W * ATLAS_H * 4);
+         assert_eq!(TERRAIN.len(), 256 * 256 * 4);
++        assert_eq!(ART.len(), 256 * 288 * 4, "kz.png over sign.png");
++        assert!(art_uv(255, 1.0, 0.0).1 * (ATLAS_H as f32) < (ART_Y + 256) as f32, "the last piece stays above the sign rows");
+         assert_ne!(tile_color(260), tile_color(261));
+         assert_ne!(tile_color(256), tile_color(17));
+         assert!(tile_color(274)[3] == 255 && (25..=26).contains(&tile_color(274)[0])); // black wool
+@@ -328,7 +351,9 @@
+         assert_eq!([1, 3, 0].map(|s| terrain_tile(2, 0, s)), [Some(0), Some(3), Some(2)]);
+         assert_eq!((terrain_tile(17, 0, 1), terrain_tile(17, 0, 3), terrain_tile(17, 2, 3)), (Some(21), Some(20), Some(117)));
+         assert_eq!((terrain_tile(35, 0, 2), terrain_tile(35, 14, 2), terrain_tile(35, 15, 2)), (Some(64), Some(129), Some(113)));
+-        assert_eq!((terrain_tile(61, 0, 3), terrain_tile(62, 0, 3), terrain_tile(86, 0, 3), terrain_tile(91, 0, 3)), (Some(44), Some(61), Some(119), Some(120)));
++        assert_eq!((terrain_tile(61, 3, 3), terrain_tile(62, 3, 3), terrain_tile(86, 0, 3), terrain_tile(91, 0, 3)), (Some(44), Some(61), Some(119), Some(120)));
++        // facing: a furnace shows its front only on the side its metadata names, a pumpkin on [S, W, N, E] for 0..3
++        assert_eq!((terrain_tile(61, 3, 2), terrain_tile(61, 0, 3), terrain_tile(86, 2, 2), terrain_tile(86, 2, 3)), (Some(45), Some(45), Some(119), Some(118)));
+         // doors: the top half is the tile 16 lower; a bed is planks underneath; the generated icon table is sorted
+         assert_eq!((door_face(64, 1, 2).0, door_face(64, 9, 2).0, door_face(71, 1, 2).0), (97, 81, 98));
+         assert_eq!((bed_tile(0, 0), bed_tile(0, 1), bed_tile(8, 1)), (4, 134, 135));
+diff -ruN '--exclude=art.rgba' a/Repo/mc-rs/src/render/hud.rs b/Repo/mc-rs/src/render/hud.rs
+--- a/mc-rs/src/render/hud.rs	2026-10-13 22:02:45.257576406 +0000
++++ b/mc-rs/src/render/hud.rs	2026-10-13 22:02:45.448956028 +0000
+@@ -206,7 +206,7 @@
+         // (384 verts) was smaller than the hotbar alone, so the controls were
+         // truncated and never drawn. Peak HUD is ~1000 verts.
+         // 4096 quads: an open inventory screen is 46 slots plus up to 46 stacks with two-digit counts, plus a tooltip (~500).
+-        let quad_capacity = 4096;
++        let quad_capacity = 6144; // the sign editor's keyboard is ~56 key glyphs, two quads a run (text + shadow), plus the board's lines
+         let vbuf = device.create_buffer(&wgpu::BufferDescriptor {
+             label: Some("hud_vbuf"),
+             size: (quad_capacity * 6 * std::mem::size_of::<HudVertex>()) as u64,
+diff -ruN '--exclude=art.rgba' a/Repo/mc-rs/src/render/items.rs b/Repo/mc-rs/src/render/items.rs
+--- a/mc-rs/src/render/items.rs	2026-10-13 22:02:45.257784691 +0000
++++ b/mc-rs/src/render/items.rs	2026-10-13 22:02:45.451810281 +0000
+@@ -4,7 +4,8 @@
+ //! real item sprites.
+ 
+ use crate::render::atlas;
+-use crate::render::mesh::{lm, push_box, VF};
++use crate::render::mesh::{lm, push_box, push_face, VF, WHITE};
++use crate::world::decor::{self, Painting, Text};
+ use crate::world::chunk::brightness;
+ use crate::world::effects::{Effects, Fx, MAX_BOLTS, MAX_PARTICLES};
+ use glam::{Mat4, Vec3};
+@@ -16,8 +17,23 @@
+ /// 24 vertices x 7 floats (`mesh::VF`) per cube, 36 indices per cube.
+ /// A mob is at most 12 boxes (spider 11), an arrow one, a falling block one.
+ const BOXES: usize = MAX_ITEMS * 2 + MAX_MOBS * 12 + MAX_ARROWS + MAX_FALLING + MAX_PARTICLES + MAX_BOLTS + 1;
+-const VERTEX_BYTES: u64 = (BOXES * 24 * crate::render::mesh::VF * 4) as u64;
+-const INDEX_BYTES: u64 = (BOXES * 36 * 4) as u64;
++/// Paintings (16 px pieces, one face each), signs (a board and a post of 6 two-sided faces) and the sign text (one quad per run
++/// of lit font pixels), on top of the boxes.
++const MAX_SIGNS: usize = 32;
++const PIECES: usize = 512;
++const TEXT_QUADS: usize = 4096;
++const EXTRA_V: usize = PIECES * 4 + MAX_SIGNS * 2 * 24 + TEXT_QUADS * 4;
++const EXTRA_I: usize = PIECES * 6 + MAX_SIGNS * 2 * 72 + TEXT_QUADS * 6;
++const VERTEX_BYTES: u64 = ((BOXES * 24 + EXTRA_V) * crate::render::mesh::VF * 4) as u64;
++const INDEX_BYTES: u64 = ((BOXES * 36 + EXTRA_I) * 4) as u64;
++
++/// A sign to draw: its cell, block id (63 post, 68 wall), metadata and text.
++pub struct SignView<'a> {
++    pub pos: (i32, i32, i32),
++    pub id: u8,
++    pub meta: u8,
++    pub text: &'a Text,
++}
+ 
+ pub struct ItemMesh {
+     pub vbuf: wgpu::Buffer,
+@@ -32,8 +48,8 @@
+ 
+     /// Upload this frame's items; returns the index count to draw.
+     /// `lv` = raw (sky, block) light of a cell: every entity is lit by its own cell.
+-    pub fn update(&self, queue: &wgpu::Queue, drops: &Drops, mobs: &Mobs, falling: &[Falling], fx: &Effects, lv: &dyn Fn(i32, i32, i32) -> (u8, u8), hook: Option<Vec3>) -> u32 {
+-        let (verts, idxs) = geometry(drops, mobs, falling, fx, lv, hook);
++    pub fn update(&self, queue: &wgpu::Queue, drops: &Drops, mobs: &Mobs, falling: &[Falling], fx: &Effects, lv: &dyn Fn(i32, i32, i32) -> (u8, u8), hook: Option<Vec3>, paintings: &[Painting], signs: &[SignView], eye: Vec3) -> u32 {
++        let (verts, idxs) = geometry(drops, mobs, falling, fx, lv, hook, paintings, signs, eye);
+         if idxs.is_empty() {
+             return 0;
+         }
+@@ -54,7 +70,7 @@
+     }
+ }
+ 
+-fn geometry(drops: &Drops, mobs: &Mobs, falling: &[Falling], fx: &Effects, lv: &dyn Fn(i32, i32, i32) -> (u8, u8), hook: Option<Vec3>) -> (Vec<f32>, Vec<u32>) {
++fn geometry(drops: &Drops, mobs: &Mobs, falling: &[Falling], fx: &Effects, lv: &dyn Fn(i32, i32, i32) -> (u8, u8), hook: Option<Vec3>, paintings: &[Painting], signs: &[SignView], eye: Vec3) -> (Vec<f32>, Vec<u32>) {
+     let (mut verts, mut idxs) = (Vec::new(), Vec::new());
+     let a = drops.alpha();
+     for e in &drops.items {
+@@ -79,9 +95,10 @@
+         lit(&mut verts, n0, lv, m.body.pos);
+     }
+     for a in &mobs.arrows {
+-        let (p, h) = (a.pos, 0.06);
++        let (p, h) = (a.pos, if a.kind == 0 { 0.06 } else { 0.125 });
+         let n0 = verts.len();
+-        push_box(&mut verts, &mut idxs, [p.x - h, p.y - h, p.z - h], [p.x + h, p.y + h, p.z + h], stack_tile(ItemStack { id: 35, count: 1, damage: 12 }), 1.0);
++        let tile = if a.kind == 0 { ItemStack { id: 35, count: 1, damage: 12 } } else { ItemStack { id: a.kind, count: 1, damage: 0 } };
++        push_box(&mut verts, &mut idxs, [p.x - h, p.y - h, p.z - h], [p.x + h, p.y + h, p.z + h], stack_tile(tile), 1.0);
+         lit(&mut verts, n0, lv, p);
+     }
+     // The fishing bobber: a small red box.
+@@ -90,17 +107,15 @@
+         push_box(&mut verts, &mut idxs, [p.x - h, p.y, p.z - h], [p.x + h, p.y + 2.0 * h, p.z + h], stack_tile(ItemStack { id: 35, count: 1, damage: 14 }), 1.0);
+         lit(&mut verts, n0, lv, p);
+     }
+-    // The fishing bobber: a small red box.
+-    if let Some(p) = hook {
+-        let h = 0.125;
+-        push_box(&mut verts, &mut idxs, [p.x - h, p.y, p.z - h], [p.x + h, p.y + 2.0 * h, p.z + h], stack_tile(ItemStack { id: 35, count: 1, damage: 14 }), 1.0);
+-    }
+     // A falling block is a 0.98 box in its block's flat colour (`EntityFallingSand`).
+     for f in falling {
+         let c = f.prev.lerp(f.pos, a);
+         let h = 0.49;
+         let n0 = verts.len();
+-        push_box(&mut verts, &mut idxs, [c.x - h, c.y - h, c.z - h], [c.x + h, c.y + h, c.z + h], stack_tile(ItemStack { id: f.id as u16, count: 1, damage: 0 }), 1.0);
++        // `RenderTNTPrimed`: every other 5 ticks of the fuse the block flashes white (ponytail: a flat white box, not the additive overlay).
++        let flash = f.id == 46 && f.fuse >= 0 && (f.fuse / 5) % 2 == 0;
++        let tile = if flash { stack_tile(ItemStack { id: 35, count: 1, damage: 0 }) } else { stack_tile(ItemStack { id: f.id as u16, count: 1, damage: 0 }) };
++        push_box(&mut verts, &mut idxs, [c.x - h, c.y - h, c.z - h], [c.x + h, c.y + h, c.z + h], tile, 1.0);
+         lit(&mut verts, n0, lv, c);
+     }
+     // Water and spawner particles: small full-bright boxes in a flat colour (wool: white, light blue, orange, grey). ponytail: no
+@@ -115,9 +130,118 @@
+         let (p, w) = (b.pos, 0.15);
+         push_box(&mut verts, &mut idxs, [p.x - w, p.y, p.z - w], [p.x + w, p.y + 96.0, p.z + w], stack_tile(ItemStack { id: 35, count: 1, damage: 0 }), 1.0);
+     }
++    // Paintings: each 16 px piece shows its tile of `art/kz.png` on the face away from the wall, lit by the cell in front.
++    let mut pieces = 0;
++    for p in paintings.iter().filter(|p| p.frame().0.distance_squared(eye) < 48.0 * 48.0) {
++        let ps = p.pieces();
++        if pieces + ps.len() > PIECES {
++            break;
++        }
++        pieces += ps.len();
++        let n0 = verts.len();
++        for (tile, min, max) in ps {
++            push_face(&mut verts, &mut idxs, p.face(), min, max, atlas::ART_TILE0 + tile, 1.0);
++        }
++        let (x, y, z) = p.light_cell();
++        lit(&mut verts, n0, lv, Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5));
++    }
++    // Signs (`TileEntitySignRenderer`): the model within 64 blocks, the text within 16.
++    let mut quads = 0;
++    for s in signs.iter().take(MAX_SIGNS) {
++        let c = Vec3::new(s.pos.0 as f32 + 0.5, s.pos.1 as f32 + 0.5, s.pos.2 as f32 + 0.5);
++        let d = c.distance_squared(eye);
++        if d < 64.0 * 64.0 {
++            let n0 = verts.len();
++            push_sign(&mut verts, &mut idxs, &mut quads, s, d < 16.0 * 16.0);
++            lit(&mut verts, n0, lv, c);
++        }
++    }
+     (verts, idxs)
+ }
+ 
++/// `TileEntitySignRenderer.renderTileEntitySignAt`: the board (and the post of a standing sign) from `item/sign.png`, 2/3 scale,
++/// turned by the metadata (post: 22.5 degrees a step; wall: the side), then the four lines in black from the HUD font's glyph
++/// runs, 1/60 of that scale per font pixel, centred on the board. ponytail: the model is drawn two-sided (no culling choice),
++/// text is flat black quads (no `FontRenderer` texture) and only within 16 blocks.
++fn push_sign(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, quads: &mut usize, s: &SignView, text: bool) {
++    let sc = 2.0 / 3.0;
++    let wall = s.id != decor::POST;
++    let turn = if wall { -match s.meta { 2 => 180.0f32, 4 => 90.0, 5 => -90.0, _ => 0.0 } } else { -(s.meta as f32) * 22.5 };
++    let mut root = Mat4::from_translation(Vec3::new(s.pos.0 as f32 + 0.5, s.pos.1 as f32 + 12.0 / 16.0 * sc, s.pos.2 as f32 + 0.5)) * Mat4::from_rotation_y(turn.to_radians());
++    if wall {
++        root *= Mat4::from_translation(Vec3::new(0.0, -5.0 / 16.0, -7.0 / 16.0));
++    }
++    let model = root * Mat4::from_scale(Vec3::new(sc, -sc, -sc) / 16.0);
++    push_model_box(verts, idxs, &model, [-12.0, -14.0, -1.0], [24.0, 12.0, 2.0], (0.0, 0.0));
++    if !wall {
++        push_model_box(verts, idxs, &model, [-1.0, -2.0, -1.0], [2.0, 14.0, 2.0], (0.0, 14.0));
++    }
++    if !text {
++        return;
++    }
++    let tm = root * Mat4::from_translation(Vec3::new(0.0, 0.5 * sc, 0.07 * sc)) * Mat4::from_scale(Vec3::new(sc / 60.0, -sc / 60.0, sc / 60.0));
++    let (au, av) = atlas::atlas_uv(stack_tile(ItemStack { id: 35, count: 1, damage: 15 }), 0.0, 0.0);
++    for (i, line) in s.text.iter().enumerate() {
++        let g = |b: u8| if (32..127).contains(&b) { (b - 32) as usize } else { 31 };
++        let width: i32 = line.bytes().map(|b| crate::render::font::WIDTH[g(b)] as i32).sum();
++        let (mut cx, y0) = (-(width / 2) as f32, (i as i32 * 10 - 20) as f32);
++        for b in line.bytes() {
++            let gi = g(b);
++            for (row, bits) in crate::render::font::GLYPHS[gi].iter().enumerate() {
++                let mut px = 0;
++                while px < 8 {
++                    if bits >> px & 1 == 0 {
++                        px += 1;
++                        continue;
++                    }
++                    let run = (px..8).take_while(|p| bits >> p & 1 == 1).count();
++                    if *quads >= TEXT_QUADS {
++                        return;
++                    }
++                    *quads += 1;
++                    let (x0, x1, ya, yb) = (cx + px as f32, cx + (px + run) as f32, y0 + row as f32, y0 + row as f32 + 1.0);
++                    let base = verts.len() as u32 / VF as u32;
++                    for (x, y) in [(x0, yb), (x1, yb), (x1, ya), (x0, ya)] {
++                        let p = tm.transform_point3(Vec3::new(x, y, 0.0));
++                        verts.extend_from_slice(&[p.x, p.y, p.z, au, av, 1.0, lm(15, 0), WHITE]);
++                    }
++                    idxs.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
++                    px += run;
++                }
++            }
++            cx += crate::render::font::WIDTH[gi] as f32;
++        }
++    }
++}
++
++/// `ModelRenderer.addBox` + `TexturedQuad` for `item/sign.png` (64 x 32): the box at `min` with `size` in model pixels through `m`,
++/// its six faces unwrapped from texture offset `o` (right, left, top, bottom, front, back), both windings.
++fn push_model_box(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, m: &Mat4, min: [f32; 3], size: [f32; 3], o: (f32, f32)) {
++    let (x1, y1, z1) = (min[0], min[1], min[2]);
++    let (x2, y2, z2) = (x1 + size[0], y1 + size[1], z1 + size[2]);
++    let (dx, dy, dz, ox, oy) = (size[0], size[1], size[2], o.0, o.1);
++    let c = [[x1, y1, z1], [x2, y1, z1], [x2, y2, z1], [x1, y2, z1], [x1, y1, z2], [x2, y1, z2], [x2, y2, z2], [x1, y2, z2]];
++    let faces: [([usize; 4], [f32; 4]); 6] = [
++        ([5, 1, 2, 6], [ox + dz + dx, oy + dz, ox + dz + dx + dz, oy + dz + dy]),
++        ([0, 4, 7, 3], [ox, oy + dz, ox + dz, oy + dz + dy]),
++        ([5, 4, 0, 1], [ox + dz, oy, ox + dz + dx, oy + dz]),
++        ([2, 3, 7, 6], [ox + dz + dx, oy, ox + dz + dx + dx, oy + dz]),
++        ([1, 0, 3, 2], [ox + dz, oy + dz, ox + dz + dx, oy + dz + dy]),
++        ([4, 5, 6, 7], [ox + dz + dx + dz, oy + dz, ox + dz + dx + dz + dx, oy + dz + dy]),
++    ];
++    for (vi, [u0, v0, u1, v1]) in faces {
++        let base = verts.len() as u32 / VF as u32;
++        // `TexturedQuad`'s corner order and its 0.1 px inset.
++        let uv = [(u1 - 0.1, v0 + 0.1), (u0 + 0.1, v0 + 0.1), (u0 + 0.1, v1 - 0.1), (u1 - 0.1, v1 - 0.1)];
++        for (k, &i) in vi.iter().enumerate() {
++            let p = m.transform_point3(Vec3::from(c[i]));
++            let (au, av) = atlas::sign_px(uv[k].0, uv[k].1);
++            verts.extend_from_slice(&[p.x, p.y, p.z, au, av, 1.0, lm(15, 0), WHITE]);
++        }
++        idxs.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3, base, base + 2, base + 1, base, base + 3, base + 2]);
++    }
++}
++
+ /// One model box: (min, size, rotation point, rotation x/y/z, swing phase + amplitude, wool colour or `ME`), in model pixels.
+ type Part = ([f32; 3], [f32; 3], [f32; 3], [f32; 3], [f32; 2], u8);
+ const ME: u8 = 255;
+diff -ruN '--exclude=art.rgba' a/Repo/mc-rs/src/render/mesh.rs b/Repo/mc-rs/src/render/mesh.rs
+--- a/mc-rs/src/render/mesh.rs	2026-10-13 22:02:45.257939780 +0000
++++ b/mc-rs/src/render/mesh.rs	2026-10-13 22:02:45.449145815 +0000
+@@ -343,7 +343,8 @@
+                     }
+                     continue;
+                 }
+-                if raw == 0 {
++                // Sign posts and wall signs (`getRenderType` -1): no block shape, `render::items` draws the model.
++                if raw == 0 || matches!(raw, 63 | 68) {
+                     continue;
+                 }
+                 let blk = raw;
+@@ -452,16 +453,27 @@
+ /// Append an axis-aligned box `min..max` (world coordinates) of atlas tile `tile` with a flat `light`; the
+ /// outline of the picked block reuses the face templates above, so the winding is the mesher's.
+ pub fn push_box(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, min: [f32; 3], max: [f32; 3], tile: u16, light: f32) {
++    (0..6).for_each(|face| push_face(verts, idxs, face, min, max, tile, light));
++}
++
++/// One face of `push_box` (index as in `FACES`: +X, -X, +Y, -Y, +Z, -Z): a painting piece shows only its front.
++/// A tile from `ART_TILE0` up is a piece of `art/kz.png`, from `ITEM_TILE0` an items.png sprite.
++pub fn push_face(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, face: usize, min: [f32; 3], max: [f32; 3], tile: u16, light: f32) {
+     // Photon lights by levels, not by `light`: items and mobs (light 1) read as open sky, the outline (0.15, near black) as a dark cell.
+     let lmv = if light < 0.2 { lm(0, 0) } else { lm(15, 0) };
+-    for face in &FACES {
+-        let base = verts.len() as u32 / VF as u32;
+-        for (c, uv) in face.corners.iter().zip(face.uv.iter()) {
+-            let (au, av) = if tile >= atlas::ITEM_TILE0 { atlas::item_uv((tile - atlas::ITEM_TILE0) as u8, uv[0], uv[1]) } else { atlas::atlas_uv(tile, uv[0], uv[1]) };
+-            verts.extend_from_slice(&[min[0] + c[0] * (max[0] - min[0]), min[1] + c[1] * (max[1] - min[1]), min[2] + c[2] * (max[2] - min[2]), au, av, light, lmv, WHITE]);
+-        }
+-        idxs.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
++    let face = &FACES[face];
++    let base = verts.len() as u32 / VF as u32;
++    for (c, uv) in face.corners.iter().zip(face.uv.iter()) {
++        let (au, av) = if tile >= atlas::ART_TILE0 {
++            atlas::art_uv((tile - atlas::ART_TILE0) as u8, uv[0], uv[1])
++        } else if tile >= atlas::ITEM_TILE0 {
++            atlas::item_uv((tile - atlas::ITEM_TILE0) as u8, uv[0], uv[1])
++        } else {
++            atlas::atlas_uv(tile, uv[0], uv[1])
++        };
++        verts.extend_from_slice(&[min[0] + c[0] * (max[0] - min[0]), min[1] + c[1] * (max[1] - min[1]), min[2] + c[2] * (max[2] - min[2]), au, av, light, lmv, WHITE]);
+     }
++    idxs.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+ }
+ 
+ /// The boxes a block is drawn as (`setBlockBounds` + `renderStandardBlock` per box in `RenderBlocks`): the stairs' two steps
+diff -ruN '--exclude=art.rgba' a/Repo/mc-rs/src/world/chunk.rs b/Repo/mc-rs/src/world/chunk.rs
+--- a/mc-rs/src/world/chunk.rs	2026-10-13 22:02:45.260710808 +0000
++++ b/mc-rs/src/world/chunk.rs	2026-10-13 22:02:45.454147752 +0000
+@@ -94,10 +94,27 @@
+             4 => [0.35, 0.2, 0.7, 0.65, 0.8, 1.0],
+             _ => [0.4, 0.0, 0.4, 0.6, 0.6, 0.6],
+         },
++        // `BlockSign`: the post is 0.5 wide and one block high; a wall sign (metadata 2..=5 = +Z, -Z, +X, -X wall) is 2/16 thick,
++        // y 9/32..25/32 (`setBlockBoundsBasedOnState`); any other metadata keeps the full cell, as the Java does.
++        63 => [0.25, 0.0, 0.25, 0.75, 1.0, 0.75],
++        68 => {
++            const LO: f32 = 9.0 / 32.0;
++            const HI: f32 = 25.0 / 32.0;
++            const T: f32 = 2.0 / 16.0;
++            match meta {
++                2 => [0.0, LO, 1.0 - T, 1.0, HI, 1.0],
++                3 => [0.0, LO, 0.0, 1.0, HI, T],
++                4 => [1.0 - T, LO, 0.0, 1.0, HI, 1.0],
++                5 => [0.0, LO, 0.0, T, HI, 1.0],
++                _ => [0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
++            }
++        }
+         59 => [0.0, 0.0, 0.0, 1.0, 0.25, 1.0],                             // crops (pick / outline only: drawn as 4 quads)
+         60 => [0.0, 0.0, 0.0, 1.0, 15.0 / 16.0, 1.0],                      // farmland
+         78 => [0.0, 0.0, 0.0, 1.0, 2.0 * (1 + (meta & 7)) as f32 / 16.0, 1.0], // snow layer
+         81 => [0.0, 0.0, 0.0, 1.0, 1.0, 1.0],                              // cactus
++        96 => trap_box(meta),                                              // trapdoor (`BlockTrapDoor`)
++        92 => [(1 + 2 * meta.min(5)) as f32 / 16.0, 0.0, 1.0 / 16.0, 15.0 / 16.0, 0.5, 15.0 / 16.0], // cake: a bitten slice is gone from -X
+         26 => [0.0, 0.0, 0.0, 1.0, 9.0 / 16.0, 1.0],                       // bed (`BlockBed`)
+         // `BlockDoor.setDoorRotation` (3/16 thick, one block high per half) from `getState`
+         64 | 71 => match if meta & 4 == 0 { meta.wrapping_sub(1) & 3 } else { meta & 3 } {
+@@ -145,6 +162,10 @@
+ /// Pseudo ids (unused block ids) for what depends on metadata: `STAIRS_PHYS + (meta & 3)` and `DOOR_PHYS + door_state`.
+ pub const STAIRS_PHYS: u8 = 100;
+ pub const DOOR_PHYS: u8 = 104;
++/// `TRAP_PHYS + (meta & 7)`: a trapdoor's flap (facing + open bit).
++pub const TRAP_PHYS: u8 = 108;
++/// `CAKE_PHYS + meta` (0..=5, slices eaten): the cake's collision box moves with its bites.
++pub const CAKE_PHYS: u8 = 116;
+ 
+ /// The id a physics query (`BlockQuery`) reads for a cell: its own, except a snow layer of 3+ layers (`SNOW_DEEP`), a stair
+ /// (`STAIRS_PHYS`, its facing) and a door (`DOOR_PHYS`, its leaf's position).
+@@ -153,6 +174,8 @@
+         78 if meta & 7 >= 3 => SNOW_DEEP,
+         53 | 67 => STAIRS_PHYS + (meta & 3),
+         64 | 71 => DOOR_PHYS + door_state(meta),
++        96 => TRAP_PHYS + (meta & 7),
++        92 => CAKE_PHYS + meta.min(5),
+         _ => id,
+     }
+ }
+@@ -173,6 +196,21 @@
+     }
+ }
+ 
++/// `BlockTrapDoor.setBlockBoundsForBlockRender`: 3/16 flat on the floor; open (bit 4) it stands against the wall it hangs on
++/// (`meta & 3` = support on +Z, -Z, +X, -X).
++pub fn trap_box(meta: u8) -> [f32; 6] {
++    const T: f32 = 3.0 / 16.0;
++    if meta & 4 == 0 {
++        return [0.0, 0.0, 0.0, 1.0, T, 1.0];
++    }
++    match meta & 3 {
++        0 => [0.0, 0.0, 1.0 - T, 1.0, 1.0, 1.0],
++        1 => [0.0, 0.0, 0.0, 1.0, 1.0, T],
++        2 => [1.0 - T, 0.0, 0.0, 1.0, 1.0, 1.0],
++        _ => [0.0, 0.0, 0.0, T, 1.0, 1.0],
++    }
++}
++
+ /// `BlockStairs.getCollidingBoundingBoxes` (also what the mesher draws): the lower half and the raised half, by facing.
+ pub fn stair_boxes(meta: u8) -> [[f32; 6]; 2] {
+     match meta & 3 {
+@@ -208,6 +246,9 @@
+         _ if is_plant(id) => None,
+         44 | SNOW_DEEP => Some([0.0, 0.0, 0.0, 1.0, 0.5, 1.0]),
+         DOOR_PHYS..=107 => Some(door_box(id - DOOR_PHYS)),
++        TRAP_PHYS..=115 => Some(trap_box(id - TRAP_PHYS)),
++        // `BlockCake.getCollisionBoundingBoxFromPool`: 1/16 lower than the drawn box (0.5 - 1/16 high)
++        CAKE_PHYS..=121 => Some([(1 + 2 * (id - CAKE_PHYS)) as f32 / 16.0, 0.0, 1.0 / 16.0, 15.0 / 16.0, 0.5 - 1.0 / 16.0, 15.0 / 16.0]),
+         26 => Some([0.0, 0.0, 0.0, 1.0, 9.0 / 16.0, 1.0]),
+         81 => Some([I, 0.0, I, 1.0 - I, 1.0 - I, 1.0 - I]),
+         85 => Some([0.0, 0.0, 0.0, 1.0, 1.5, 1.0]),
+@@ -218,7 +259,7 @@
+ /// `isOpaqueCube`: hides the faces behind it. Not the plants, fluids and boxes above; leaves, glass and ice stay in, as the
+ /// mesher draws them as opaque cubes.
+ pub fn opaque(id: u8) -> bool {
+-    id != 0 && !is_plant(id) && !is_fluid(id) && !matches!(id, 26 | 27 | 28 | 44 | 50 | 51 | 53 | 59 | 60 | 64..=67 | 71 | 78 | 81 | 85)
++    id != 0 && !is_plant(id) && !is_fluid(id) && !matches!(id, 26 | 27 | 28 | 44 | 50 | 51 | 53 | 59 | 60 | 63..=68 | 71 | 78 | 81 | 85 | 92 | 96)
+ }
+ 
+ /// `Block.lightOpacity`: how much light a block eats (255 = fully opaque). Default is 255 for
+@@ -318,4 +359,17 @@
+         assert_eq!(collisions(1), ([[0.0, 0.0, 0.0, 1.0, 1.0, 1.0], [0.0; 6]], 1));
+         assert_eq!(collisions(0).1, 0);
+     }
++
++    #[test]
++    fn trapdoor_lies_flat_or_stands_on_its_wall() {
++        use crate::world::pick::trap_meta;
++        assert_eq!(collision(physics_id(96, 2)), Some([0.0, 0.0, 0.0, 1.0, 3.0 / 16.0, 1.0]), "closed: flat whatever the facing");
++        assert_eq!(collision(physics_id(96, 4)), Some([0.0, 0.0, 13.0 / 16.0, 1.0, 1.0, 1.0]), "open on a +Z wall");
++        assert_eq!(box_bounds(96, 7), Some([0.0, 0.0, 0.0, 3.0 / 16.0, 1.0, 1.0]), "open on a -X wall");
++        assert_eq!((trap_meta(2, true), trap_meta(5, true), trap_meta(1, true), trap_meta(0, true), trap_meta(3, false)), (Some(0), Some(3), None, None, None));
++        assert!(!opaque(96));
++        // cake: the box loses 2/16 from -X per slice; the collision is 1/16 lower than the drawn box
++        assert_eq!(box_bounds(92, 2), Some([5.0 / 16.0, 0.0, 1.0 / 16.0, 15.0 / 16.0, 0.5, 15.0 / 16.0]));
++        assert_eq!(collision(physics_id(92, 0)), Some([1.0 / 16.0, 0.0, 1.0 / 16.0, 15.0 / 16.0, 7.0 / 16.0, 15.0 / 16.0]));
++    }
+ }
+diff -ruN '--exclude=art.rgba' a/Repo/mc-rs/src/world/craft.rs b/Repo/mc-rs/src/world/craft.rs
+--- a/mc-rs/src/world/craft.rs	2026-10-13 22:02:45.261456098 +0000
++++ b/mc-rs/src/world/craft.rs	2026-10-13 22:02:45.452349250 +0000
+@@ -238,6 +238,8 @@
+             shaped(&[" #", "# "], &[('#', 265)], SHEARS, 1), // shears
+             shaped(&["A ", " B"], &[('A', 265), ('B', 318)], FLINT_AND_STEEL, 1), // CraftingManager: iron ingot + flint
+             shaped(&["###", "XXX"], &[('#', 35), ('X', 5)], 355, 1), // bed: wool + planks
++            shaped(&["###", "###"], &[('#', PLANKS)], 96, 2), // trapdoor (CraftingManager)
++            shaped(&["AAA", "BEB", "CCC"], &[('A', 335), ('B', 353), ('C', 296), ('E', 344)], 354, 1), // cake: milk, sugar, wheat, egg
+             shaped(&["##", "##", "##"], &[('#', 5)], 324, 1),   // wooden door
+             shaped(&["##", "##", "##"], &[('#', 265)], 330, 1), // iron door
+             shaped(&["#  ", "## ", "###"], &[('#', 5)], 53, 4), // wooden stairs
+@@ -252,6 +254,22 @@
+             shaped(&["  #", " #X", "# X"], &[('#', STICK), ('X', 287)], 346, 1), // fishing rod
+             shaped(&["###"], &[('#', 296)], 297, 1), // bread
+             shaped(&["###", "#X#", "###"], &[('#', 41), ('X', 260)], 322, 1), // golden apple: gold block + apple
++            // CraftingManager: the plain ones whose result already works (blocks that place, items that stack).
++            shaped(&["###"], &[('#', 338)], 339, 3),                         // paper: 3 sugar cane
++            shaped(&["#", "#", "#"], &[('#', 339)], 340, 1),                 // book: 3 paper
++            shaped(&["#"], &[('#', 338)], 353, 1),                           // sugar: 1 sugar cane
++            shaped(&["###", "###"], &[('#', STICK)], 85, 2),                 // fence
++            shaped(&["# #", "###", "# #"], &[('#', STICK)], 65, 2),          // ladder
++            shaped(&["##", "##"], &[('#', 336)], 45, 1),                     // brick block: 4 bricks
++            shaped(&["###", "XXX", "###"], &[('#', PLANKS), ('X', 340)], 47, 1), // bookshelf
++            shaped(&["A", "B"], &[('A', 86), ('B', 50)], 91, 1),             // jack-o'-lantern: pumpkin + torch
++            shaped(&["###", "###", " X "], &[('#', PLANKS), ('X', STICK)], 323, 1),   // sign
++            shaped(&["###", "#X#", "###"], &[('#', STICK), ('X', 35)], 321, 1),        // painting: 8 sticks round a wool
++            shaped(&["X#X", "#X#", "X#X"], &[('X', 289), ('#', 12)], 46, 1),  // TNT: gunpowder + sand
++            shaped(&["###"], &[('#', 4)], 44 | 3 << 9, 3),                   // slabs x3: cobblestone, stone, sandstone, planks
++            shaped(&["###"], &[('#', 1)], 44, 3),
++            shaped(&["###"], &[('#', 24)], 44 | 1 << 9, 3),
++            shaped(&["###"], &[('#', PLANKS)], 44 | 2 << 9, 3),
+         ];
+         // RecipesDyes: dye + white wool -> the dye's wool (`BlockCloth.func_21035_d` = `~d & 15`), then the dye mixes.
+         r.extend((0..16).map(|d| shapeless(&[dy(d), 35], 35 | (!d & 15) << 9, 1)));
+@@ -460,13 +478,14 @@
+         }
+     }
+ 
+-    /// `SlotCrafting.onPickupFromSlot`: one of every ingredient is used up (no container items in this port).
++    /// `SlotCrafting.onPickupFromSlot`: one of every ingredient is used up; a bucket with something in it (water, lava, milk)
++    /// leaves an empty one (`getContainerItem`).
+     fn take_result(&mut self) {
+         for s in self.grid.iter_mut() {
+             if let Some(t) = s {
+                 t.count -= 1;
+                 if t.count == 0 {
+-                    *s = None;
++                    *s = matches!(t.id, 326 | 327 | 335).then_some(ItemStack { id: 325, count: 1, damage: 0 });
+                 }
+             }
+         }
+@@ -867,6 +886,34 @@
+         assert!(v.hurt(10) && v.health == 12 && v.wear == 10, "10 * 20 / 25 = 8, remainder 0");
+     }
+ 
++    /// The plain `CraftingManager` recipes added for blocks and items that already work.
++    #[test]
++    fn plain_recipes_match_java() {
++        let st = |id, damage| ItemStack { id, count: 1, damage };
++        let row = |id| (0..3).map(|i| (i, st(id, 0))).collect::<Vec<_>>();
++        let find_in = |cells: &[(usize, ItemStack)], gw| {
++            let mut g = [None; 9];
++            cells.iter().for_each(|&(i, s)| g[i] = Some(s));
++            find(&g, gw).map(|s| (s.id, s.count, s.damage))
++        };
++        assert_eq!(find_in(&row(338), 3), Some((339, 3, 0)), "paper");
++        assert_eq!(find_in(&[(1, st(338, 0))], 3), Some((353, 1, 0)), "sugar");
++        assert_eq!(find_in(&[(0, st(339, 0)), (3, st(339, 0)), (6, st(339, 0))], 3), Some((340, 1, 0)), "book");
++        assert_eq!(find_in(&row(4), 3), Some((44, 3, 3)), "cobblestone slab");
++        assert_eq!(find_in(&row(1), 3), Some((44, 3, 0)), "stone slab");
++        assert_eq!(find_in(&row(24), 3), Some((44, 3, 1)), "sandstone slab");
++        assert_eq!(find_in(&row(5), 3), Some((44, 3, 2)), "wooden slab");
++        let shelf: Vec<_> = (0..9).map(|i| (i, st(if (3..6).contains(&i) { 340 } else { 5 }, 0))).collect();
++        assert_eq!(find_in(&shelf, 3), Some((47, 1, 0)), "bookshelf");
++        assert_eq!(find_in(&[(0, st(86, 0)), (3, st(50, 0))], 3), Some((91, 1, 0)), "jack-o'-lantern");
++        let tnt: Vec<_> = (0..9).map(|i| (i, st(if i % 2 == 0 { 289 } else { 12 }, 0))).collect();
++        assert_eq!(find_in(&tnt, 3), Some((46, 1, 0)), "TNT: gunpowder on the corners and the centre, sand between");
++        let sign: Vec<_> = (0..9).map(|i| (i, st(if i < 6 { 5 } else if i == 7 { 280 } else { 0 }, 0))).filter(|c| c.1.id != 0).collect();
++        assert_eq!(find_in(&sign, 3), Some((323, 1, 0)), "sign: 6 planks over a stick");
++        let frame: Vec<_> = (0..9).map(|i| (i, st(if i == 4 { 35 } else { 280 }, 0))).collect();
++        assert_eq!(find_in(&frame, 3), Some((321, 1, 0)), "painting: 8 sticks round a wool");
++    }
++
+     /// Tools: ids, durability, speed on their blocks and the harvest gate.
+     #[test]
+     fn tool_tables() {
+@@ -922,4 +969,18 @@
+         assert_eq!(find(&[(1, 280), (2, 287), (3, 280), (5, 287), (7, 280), (8, 287)], 3), Some((261, 1)), "bow");
+         assert_eq!(find(&[(2, 280), (4, 280), (5, 287), (6, 280), (8, 287)], 3), Some((346, 1)), "rod");
+     }
++
++    #[test]
++    fn cake_takes_milk_sugar_wheat_egg_and_gives_the_buckets_back() {
++        let st = |id: u16| ItemStack { id, count: 1, damage: 0 };
++        let (mut inv, mut s) = (Inventory::default(), Screen::new(3));
++        for (i, id) in [335, 335, 335, 353, 344, 353, 296, 296, 296].into_iter().enumerate() {
++            s.grid[i] = Some(st(id));
++        }
++        s.click(SlotId::Result, false, &mut inv, None);
++        assert_eq!(s.cursor.map(|c| (c.id, c.count)), Some((354, 1)));
++        assert!(s.grid[..3].iter().all(|g| g.is_some_and(|b| b.id == 325)), "three empty buckets");
++        assert!(s.grid[3..].iter().all(Option::is_none));
++        assert_eq!(crate::world::items::max_stack(354), 1);
++    }
+ }
+diff -ruN '--exclude=art.rgba' a/Repo/mc-rs/src/world/decor.rs b/Repo/mc-rs/src/world/decor.rs
+--- a/mc-rs/src/world/decor.rs	1970-01-01 00:00:00.000000000 +0000
++++ b/mc-rs/src/world/decor.rs	2026-10-13 22:02:45.454010153 +0000
+@@ -0,0 +1,481 @@
++//! Wall decorations: paintings (`EntityPainting`, `EnumArt`, `ItemPainting`) and signs (`BlockSign`, `ItemSign`,
++//! `TileEntitySign`, `GuiEditSign`). Pure rules and data; `lib.rs` wires them, `render/items.rs` draws them.
++//! ponytail: the sign editor is an on-screen keyboard (no hardware keys on a phone), not `Keyboard.getEventCharacter`;
++//! a painting is only its front (the 1/16 thick sides and the back are against the wall and not drawn).
++
++use glam::Vec3;
++
++use crate::world::chunk::{collisions, physics_id};
++use crate::world::gen::noise::JavaRandom;
++use crate::world::ticks::non_solid;
++
++pub type Pos = (i32, i32, i32);
++/// `Item.painting` / `Item.sign`.
++pub const PAINTING: u16 = 321;
++pub const SIGN: u16 = 323;
++/// Block ids of the free-standing sign and the one on a wall.
++pub const POST: u8 = 63;
++pub const WALL: u8 = 68;
++pub const MAX_PAINTINGS: usize = 64;
++
++/// `EnumArt` in the enum's order: (title, sizeX, sizeY, offsetX, offsetY) in pixels of `art/kz.png`.
++pub const ART: [(&str, u16, u16, u16, u16); 25] = [
++    ("Kebab", 16, 16, 0, 0), ("Aztec", 16, 16, 16, 0), ("Alban", 16, 16, 32, 0), ("Aztec2", 16, 16, 48, 0),
++    ("Bomb", 16, 16, 64, 0), ("Plant", 16, 16, 80, 0), ("Wasteland", 16, 16, 96, 0),
++    ("Pool", 32, 16, 0, 32), ("Courbet", 32, 16, 32, 32), ("Sea", 32, 16, 64, 32), ("Sunset", 32, 16, 96, 32),
++    ("Creebet", 32, 16, 128, 32), ("Wanderer", 16, 32, 0, 64), ("Graham", 16, 32, 16, 64),
++    ("Match", 32, 32, 0, 128), ("Bust", 32, 32, 32, 128), ("Stage", 32, 32, 64, 128), ("Void", 32, 32, 96, 128),
++    ("SkullAndRoses", 32, 32, 128, 128), ("Fighters", 64, 32, 0, 96), ("Pointer", 64, 64, 0, 192),
++    ("Pigscene", 64, 64, 64, 192), ("BurningSkull", 64, 64, 128, 192), ("Skeleton", 64, 48, 192, 64),
++    ("DonkeyKong", 64, 48, 192, 112),
++];
++
++/// `EntityPainting`: the block it hangs on, `direction` (0 faces -Z, 1 -X, 2 +Z, 3 +X) and the `ART` index.
++#[derive(Clone, Copy, PartialEq, Eq, Debug)]
++pub struct Painting {
++    pub pos: Pos,
++    pub dir: u8,
++    pub art: u8,
++    /// `field_695_c`: counts up to 100, then it checks it still fits.
++    pub age: u8,
++}
++
++/// The face of `ItemPainting.onItemUse` (Java side 2..=5) as a direction, `None` for the top and bottom.
++pub fn dir_of_face(face: u8) -> Option<u8> {
++    match face {
++        2 => Some(0),
++        4 => Some(1),
++        3 => Some(2),
++        5 => Some(3),
++        _ => None,
++    }
++}
++
++/// Outward normal and the viewer's right-hand direction of each `direction`.
++const NORMAL: [(f32, f32); 4] = [(0.0, -1.0), (-1.0, 0.0), (0.0, 1.0), (1.0, 0.0)];
++const RIGHT: [(f32, f32); 4] = [(-1.0, 0.0), (0.0, 1.0), (1.0, 0.0), (0.0, -1.0)];
++
++impl Painting {
++    fn size(&self) -> (f32, f32) {
++        let a = ART[self.art as usize];
++        (a.1 as f32, a.2 as f32)
++    }
++
++    /// `func_412_b`: the centre of the plate and its half extents (a 1/32 thick slab, `sizeX / 32` wide along the wall).
++    pub fn frame(&self) -> (Vec3, Vec3) {
++        let (sx, sy) = self.size();
++        let (mut hx, hy, mut hz) = (sx, sy, sx);
++        if self.dir != 0 && self.dir != 2 { hx = 0.5 } else { hz = 0.5 }
++        let off = |n: f32| if n == 32.0 || n == 64.0 { 0.5 } else { 0.0 };
++        let (x, y, z) = self.pos;
++        let (mut cx, mut cz) = (x as f32 + 0.5, z as f32 + 0.5);
++        let d = 9.0 / 16.0;
++        match self.dir {
++            0 => { cz -= d; cx -= off(sx) }
++            1 => { cx -= d; cz += off(sx) }
++            2 => { cz += d; cx += off(sx) }
++            _ => { cx += d; cz -= off(sx) }
++        }
++        (Vec3::new(cx, y as f32 + 0.5 + off(sy), cz), Vec3::new(hx / 32.0, hy / 32.0, hz / 32.0))
++    }
++
++    /// The bounding box (`setBounds`, pulled in by 0.1/16 on every side).
++    pub fn bounds(&self) -> (Vec3, Vec3) {
++        let (c, h) = self.frame();
++        (c - h + Vec3::splat(0.1 / 16.0), c + h - Vec3::splat(0.1 / 16.0))
++    }
++
++    /// `EntityPainting.func_410_i`: no block collision box in the plate's box, a solid wall behind every 16 px piece, and no
++    /// other painting in the way. `get` is a cell's (block id, metadata); `None` = not loaded, which answers `None`.
++    pub fn fits(&self, get: &dyn Fn(i32, i32, i32) -> Option<(u8, u8)>, others: &[Painting]) -> Option<bool> {
++        let (lo, hi) = self.bounds();
++        for x in lo.x.floor() as i32..=hi.x.floor() as i32 {
++            for y in lo.y.floor() as i32..=hi.y.floor() as i32 {
++                for z in lo.z.floor() as i32..=hi.z.floor() as i32 {
++                    let (id, meta) = get(x, y, z)?;
++                    let (boxes, n) = collisions(physics_id(id, meta));
++                    let hit = |b: &[f32; 6]| lo.x < x as f32 + b[3] && hi.x > x as f32 + b[0] && lo.y < y as f32 + b[4] && hi.y > y as f32 + b[1] && lo.z < z as f32 + b[5] && hi.z > z as f32 + b[2];
++                    if boxes[..n].iter().any(hit) {
++                        return Some(false);
++                    }
++                }
++            }
++        }
++        let (c, _) = self.frame();
++        let (sx, sy) = self.size();
++        let along_x = self.dir == 0 || self.dir == 2;
++        let (x0, z0) = if along_x { ((c.x - sx / 32.0).floor() as i32, self.pos.2) } else { (self.pos.0, (c.z - sx / 32.0).floor() as i32) };
++        let y0 = (c.y - sy / 32.0).floor() as i32;
++        for i in 0..(sx as i32 / 16) {
++            for j in 0..(sy as i32 / 16) {
++                let (x, z) = if along_x { (x0 + i, z0) } else { (x0, z0 + i) };
++                if non_solid(get(x, y0 + j, z)?.0) {
++                    return Some(false);
++                }
++            }
++        }
++        Some(!others.iter().any(|o| {
++            let (a, b) = o.bounds();
++            hi.x > a.x && lo.x < b.x && hi.y > a.y && lo.y < b.y && hi.z > a.z && lo.z < b.z
++        }))
++    }
++
++    /// The 16 px pieces the plate is drawn as: (`ART_TILE0` offset = png row * 16 + col, box min, box max). The outward
++    /// face of each box (`face`) is the picture; `RenderPainting.func_159_a` draws the same grid.
++    pub fn pieces(&self) -> Vec<(u16, [f32; 3], [f32; 3])> {
++        let (c, _) = self.frame();
++        let a = ART[self.art as usize];
++        let (w, h) = ((a.1 / 16) as i32, (a.2 / 16) as i32);
++        let (r, hv) = (RIGHT[self.dir as usize], 1.0 / 32.0);
++        let half = Vec3::new(if r.0 != 0.0 { 0.5 } else { hv }, 0.5, if r.1 != 0.0 { 0.5 } else { hv });
++        let mut out = Vec::new();
++        for ky in 0..h {
++            for kx in 0..w {
++                let (or, up) = (kx as f32 + 0.5 - w as f32 / 2.0, h as f32 / 2.0 - ky as f32 - 0.5);
++                let p = c + Vec3::new(r.0 * or, up, r.1 * or);
++                let tile = (a.4 / 16 + ky as u16) * 16 + a.3 / 16 + kx as u16;
++                out.push((tile, (p - half).to_array(), (p + half).to_array()));
++            }
++        }
++        out
++    }
++
++    /// The face of `mesh::push_face` that points away from the wall (+X, -X, +Y, -Y, +Z, -Z).
++    pub fn face(&self) -> usize {
++        [5, 1, 4, 0][self.dir as usize]
++    }
++
++    /// The cell in front of the plate, whose light the painting is lit by.
++    pub fn light_cell(&self) -> Pos {
++        let (c, _) = self.frame();
++        let n = NORMAL[self.dir as usize];
++        ((c.x + n.0 * 0.5).floor() as i32, c.y.floor() as i32, (c.z + n.1 * 0.5).floor() as i32)
++    }
++}
++
++/// `new EntityPainting(world, x, y, z, direction)`: every motive that fits goes in a list, one is drawn with `nextInt`.
++/// `None` when none fits (`ItemPainting` then places nothing).
++pub fn hang(pos: Pos, dir: u8, others: &[Painting], get: &dyn Fn(i32, i32, i32) -> Option<(u8, u8)>, rng: &mut JavaRandom) -> Option<Painting> {
++    let at = |art| Painting { pos, dir, art, age: 0 };
++    let fit: Vec<u8> = (0..ART.len() as u8).filter(|&a| at(a).fits(get, others) == Some(true)).collect();
++    (!fit.is_empty()).then(|| at(fit[rng.next_int_bound(fit.len() as i32) as usize]))
++}
++
++/// `EntityPainting.onUpdate` for one 20 Hz tick: every 101st tick a painting that no longer fits is removed (the caller drops
++/// the item). A painting whose wall is not loaded stays.
++pub fn step(list: &mut Vec<Painting>, get: &dyn Fn(i32, i32, i32) -> Option<(u8, u8)>) -> Vec<Painting> {
++    let mut gone = Vec::new();
++    let mut i = 0;
++    while i < list.len() {
++        if list[i].age < 100 {
++            list[i].age += 1;
++        } else {
++            list[i].age = 0;
++            let others: Vec<Painting> = list.iter().enumerate().filter(|&(j, _)| j != i).map(|(_, o)| *o).collect();
++            if list[i].fits(get, &others) == Some(false) {
++                gone.push(list.remove(i));
++                continue;
++            }
++        }
++        i += 1;
++    }
++    gone
++}
++
++/// The painting under the crosshair within `reach`: the ray against the box grown by `getCollisionBorderSize` (0.1).
++pub fn pick(list: &[Painting], eye: Vec3, dir: Vec3, reach: f32) -> Option<(usize, f32)> {
++    list.iter()
++        .enumerate()
++        .filter_map(|(i, p)| {
++            let (lo, hi) = p.bounds();
++            crate::world::mobs::ray_box(eye, dir, lo - Vec3::splat(0.1), hi + Vec3::splat(0.1)).filter(|&t| t <= reach).map(|t| (i, t))
++        })
++        .min_by(|a, b| a.1.total_cmp(&b.1))
++}
++
++// ---- signs ----
++
++/// `TileEntitySign.signText`: four lines of at most 15 characters.
++pub type Text = [String; 4];
++pub const MAX_LEN: usize = 15;
++
++/// `ItemSign.onItemUse`: where the sign goes, its block id and metadata, or `None` when refused: not on a bottom face, the
++/// block aimed at must be solid, the cell beside the face must be replaceable (`Block.canPlaceBlockAt`). A top face makes a
++/// post turned to `floor((rotationYaw + 180) * 16 / 360 + 0.5) & 15`, a side face a wall sign with the face as metadata.
++/// `get` is a block id (unloaded = air), `yaw` the Java `rotationYaw` in degrees.
++pub fn sign_place(get: &dyn Fn(i32, i32, i32) -> u8, (x, y, z): Pos, face: u8, yaw: f32) -> Option<(Pos, u8, u8)> {
++    if face == 0 || face > 5 || non_solid(get(x, y, z)) {
++        return None;
++    }
++    let (dx, dy, dz) = [(0, 0, 0), (0, 1, 0), (0, 0, -1), (0, 0, 1), (-1, 0, 0), (1, 0, 0)][face as usize];
++    let at = (x + dx, y + dy, z + dz);
++    if at.1 > 127 || !crate::world::pick::replaceable(get(at.0, at.1, at.2)) {
++        return None;
++    }
++    Some(if face == 1 { (at, POST, (((yaw + 180.0) * 16.0 / 360.0 + 0.5).floor() as i32 & 15) as u8) } else { (at, WALL, face) })
++}
++
++/// A key of the sign editor's on-screen keyboard (`GuiEditSign.keyTyped`: characters, backspace, enter / down = next line).
++#[derive(Clone, Copy, PartialEq, Eq, Debug)]
++pub enum Key {
++    Ch(u8),
++    Shift,
++    Space,
++    Back,
++    Enter,
++    Done,
++    /// Tap on a line of the board: edit that line.
++    Line(u8),
++}
++
++/// The character rows, plain and shifted (all in `ChatAllowedCharacters`).
++const KEYS: [[&str; 2]; 4] = [["1234567890", "!@#$%^&+()"], ["qwertyuiop", "QWERTYUIOP"], ["asdfghjkl-", "ASDFGHJKL_"], ["zxcvbnm,.'", "ZXCVBNM;!="]];
++
++/// The line being edited and the shift state; the text itself lives with the sign.
++#[derive(Clone, Copy, PartialEq, Eq, Debug)]
++pub struct Edit {
++    pub pos: Pos,
++    pub line: u8,
++    pub shift: bool,
++}
++
++impl Edit {
++    pub fn new(pos: Pos) -> Self {
++        Self { pos, line: 0, shift: false }
++    }
++
++    /// A tapped key: returns true when the editor is done.
++    pub fn press(&mut self, k: Key, text: &mut Text) -> bool {
++        let line = &mut text[self.line as usize];
++        match k {
++            Key::Ch(c) if line.len() < MAX_LEN => line.push(c as char),
++            Key::Space if line.len() < MAX_LEN => line.push(' '),
++            Key::Back => {
++                line.pop();
++            }
++            Key::Enter => self.line = (self.line + 1) & 3,
++            Key::Line(l) => self.line = l,
++            Key::Shift => self.shift = !self.shift,
++            Key::Done => return true,
++            _ => {}
++        }
++        false
++    }
++}
++
++/// The editor screen for a `w` x `h` px surface in GUI units `u = h / 270`: (u, every key's rectangle x, y, w, h in px).
++/// Lines 0..4 are the board's, then 4 rows of characters and the control row.
++pub fn layout(w: f32, h: f32, shift: bool) -> (f32, Vec<(Key, [f32; 4])>) {
++    let u = h / 270.0;
++    let gw = w / u;
++    let mut v = Vec::new();
++    let (bw, lh) = (130.0, 14.0);
++    for i in 0..4u8 {
++        v.push((Key::Line(i), [(gw - bw) / 2.0 + 4.0, 34.0 + i as f32 * lh, bw - 8.0, lh]));
++    }
++    let pitch = ((gw - 24.0) / 10.0).min(48.0);
++    let x0 = (gw - 10.0 * pitch) / 2.0;
++    for (r, rows) in KEYS.iter().enumerate() {
++        for (c, ch) in rows[shift as usize].bytes().enumerate() {
++            v.push((Key::Ch(ch), [x0 + c as f32 * pitch, 104.0 + r as f32 * 33.0, pitch - 4.0, 30.0]));
++        }
++    }
++    let mut x = x0;
++    for (k, n) in [(Key::Shift, 1.5), (Key::Space, 5.0), (Key::Back, 1.5), (Key::Enter, 1.0), (Key::Done, 1.0)] {
++        v.push((k, [x, 104.0 + 4.0 * 33.0, n * pitch - 4.0, 30.0]));
++        x += n * pitch;
++    }
++    for (_, r) in v.iter_mut() {
++        r.iter_mut().for_each(|c| *c *= u);
++    }
++    (u, v)
++}
++
++/// The key under (`x`, `y`) px.
++pub fn key_at(w: f32, h: f32, shift: bool, x: f32, y: f32) -> Option<Key> {
++    layout(w, h, shift).1.into_iter().find(|(_, r)| x >= r[0] && x < r[0] + r[2] && y >= r[1] && y < r[1] + r[3]).map(|(k, _)| k)
++}
++
++pub fn label(k: Key) -> String {
++    match k {
++        Key::Ch(c) => (c as char).to_string(),
++        Key::Shift => "Shift".into(),
++        Key::Back => "Del".into(),
++        Key::Enter => "Next".into(),
++        Key::Done => "Done".into(),
++        Key::Space | Key::Line(_) => String::new(),
++    }
++}
++
++// ---- save ----
++
++const MAGIC: &[u8; 4] = b"MCD1";
++
++/// The `decor` file next to `level`: paintings (x y z dir art) then signs (x y z, 4 lines of length + bytes). Its own file so
++/// `Level`'s optional tails stay as they are.
++pub fn encode(paintings: &[Painting], signs: &[(Pos, Text)]) -> Vec<u8> {
++    let mut w = MAGIC.to_vec();
++    w.extend((paintings.len() as u16).to_le_bytes());
++    for p in paintings {
++        [p.pos.0, p.pos.1, p.pos.2].iter().for_each(|c| w.extend(c.to_le_bytes()));
++        w.extend([p.dir, p.art]);
++    }
++    w.extend((signs.len() as u16).to_le_bytes());
++    for (p, t) in signs {
++        [p.0, p.1, p.2].iter().for_each(|c| w.extend(c.to_le_bytes()));
++        for l in t {
++            w.push(l.len() as u8);
++            w.extend(l.bytes());
++        }
++    }
++    w
++}
++
++/// `None` for anything off (a cut file, a bad direction or motive, a character the font does not have, a line over 15).
++pub fn decode(b: &[u8]) -> Option<(Vec<Painting>, Vec<(Pos, Text)>)> {
++    let mut r = b.strip_prefix(MAGIC)?;
++    fn take<'a>(r: &mut &'a [u8], n: usize) -> Option<&'a [u8]> {
++        if r.len() < n {
++            return None;
++        }
++        let (a, rest) = r.split_at(n);
++        *r = rest;
++        Some(a)
++    }
++    let i32_ = |r: &mut &[u8]| Some(i32::from_le_bytes(take(r, 4)?.try_into().ok()?));
++    let u16_ = |r: &mut &[u8]| Some(u16::from_le_bytes(take(r, 2)?.try_into().ok()?));
++    let mut paintings = Vec::new();
++    for _ in 0..u16_(&mut r)? {
++        let pos = (i32_(&mut r)?, i32_(&mut r)?, i32_(&mut r)?);
++        let da = take(&mut r, 2)?;
++        if da[0] > 3 || da[1] as usize >= ART.len() {
++            return None;
++        }
++        paintings.push(Painting { pos, dir: da[0], art: da[1], age: 0 });
++    }
++    let mut signs = Vec::new();
++    for _ in 0..u16_(&mut r)? {
++        let pos = (i32_(&mut r)?, i32_(&mut r)?, i32_(&mut r)?);
++        let mut t: Text = Default::default();
++        for l in t.iter_mut() {
++            let n = take(&mut r, 1)?[0] as usize;
++            let s = take(&mut r, n)?;
++            if n > MAX_LEN || !s.iter().all(|c| (32..127).contains(c)) {
++                return None;
++            }
++            *l = String::from_utf8(s.to_vec()).ok()?;
++        }
++        signs.push((pos, t));
++    }
++    r.is_empty().then_some((paintings, signs))
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    /// A stone wall at z = 10 (cells z >= 10 solid), air in front.
++    fn wall(x: i32, y: i32, z: i32) -> Option<(u8, u8)> {
++        Some((if z >= 10 && y >= 60 { 1 } else { 0 }, 0))
++    }
++
++    /// Painting geometry follows `func_412_b`, the placement rules `func_410_i`, and the pieces tile the plate.
++    #[test]
++    fn paintings_hang_on_walls_like_java() {
++        // Kebab on the north face (dir 0) of the block (5, 64, 10): centre 9/16 out, plate 1/32 thick.
++        let p = Painting { pos: (5, 64, 10), dir: 0, art: 0, age: 0 };
++        let (c, h) = p.frame();
++        assert_eq!((c.x, c.y, c.z), (5.5, 64.5, 10.5 - 9.0 / 16.0));
++        assert_eq!((h.x, h.y, h.z), (0.5, 0.5, 1.0 / 64.0));
++        assert_eq!(p.fits(&wall, &[]), Some(true));
++        // A 32 wide motive is shifted half a block to -X and needs the wall behind both cells.
++        let wide = Painting { art: 7, ..p };
++        assert_eq!(wide.frame().0.x, 5.0);
++        assert_eq!(wide.fits(&wall, &[]), Some(true));
++        let hole = |x: i32, y: i32, z: i32| if (x, y, z) == (4, 64, 10) { Some((0, 0)) } else { wall(x, y, z) };
++        assert_eq!(wide.fits(&hole, &[]), Some(false), "air behind one piece");
++        assert_eq!(p.fits(&hole, &[]), Some(true), "the 16 px motive only needs its own cell");
++        // A solid block in front, another painting, and an unloaded cell.
++        let blocked = |x: i32, y: i32, z: i32| if (x, y, z) == (5, 64, 9) { Some((1, 0)) } else { wall(x, y, z) };
++        assert_eq!(p.fits(&blocked, &[]), Some(false));
++        assert_eq!(p.fits(&wall, &[p]), Some(false));
++        assert_eq!(p.fits(&|_, _, _| None, &[]), None);
++        // Every 16 px piece is one tile of the motive: Pool is 2 x 1 pieces at png (0, 32) = tiles 32 and 33 (row 2).
++        let pool = Painting { art: 7, ..p };
++        assert_eq!(pool.pieces().iter().map(|q| q.0).collect::<Vec<_>>(), vec![2 * 16, 2 * 16 + 1]);
++        // Seen from the north the first piece is on the viewer's left = +X side.
++        assert!(pool.pieces()[0].1[0] > pool.pieces()[1].1[0]);
++        // The motive is drawn on the face away from the wall.
++        assert_eq!((p.face(), Painting { dir: 3, ..p }.face()), (5, 0));
++        // hang: only motives that fit; a 1 x 1 hole leaves the 16 px ones.
++        let mut rng = JavaRandom::new(1);
++        let one = |x: i32, y: i32, z: i32| if (4..=5).contains(&x) && y == 64 && z == 10 { wall(x, y, z) } else if z == 10 { Some((0, 0)) } else { wall(x, y, z) };
++        let got = hang((5, 64, 10), 0, &[], &one, &mut rng).unwrap();
++        assert!(ART[got.art as usize].2 == 16, "only motives one block high fit a one block high wall: {got:?}");
++        assert!(hang((5, 64, 10), 0, &[], &|_, _, _| Some((0, 0)), &mut rng).is_none(), "no wall: no painting");
++    }
++
++    /// A painting that loses its wall drops on the 101st tick; the ray finds the plate.
++    #[test]
++    fn paintings_fall_off_and_are_picked() {
++        let mut list = vec![Painting { pos: (5, 64, 10), dir: 0, art: 0, age: 0 }];
++        for _ in 0..100 {
++            assert!(step(&mut list, &|_, _, _| Some((0, 0))).is_empty());
++        }
++        assert_eq!(step(&mut list, &|_, _, _| Some((0, 0))).len(), 1, "no wall behind it");
++        assert!(list.is_empty());
++        let on = [Painting { pos: (5, 64, 10), dir: 0, art: 0, age: 0 }];
++        let hit = pick(&on, Vec3::new(5.5, 64.5, 6.0), Vec3::Z, 4.0);
++        assert!(hit.is_some_and(|(i, t)| i == 0 && (t - 3.4).abs() < 0.2), "{hit:?}");
++        assert!(pick(&on, Vec3::new(8.5, 64.5, 6.0), Vec3::Z, 4.0).is_none());
++        assert!(pick(&on, Vec3::new(5.5, 64.5, 6.0), Vec3::Z, 3.0).is_none(), "out of reach");
++    }
++
++    /// Sign placement (`ItemSign`), the editor keys (`GuiEditSign`) and the save codec.
++    #[test]
++    fn signs_place_edit_and_save() {
++        let floor = |_: i32, y: i32, _: i32| if y < 64 { 1 } else { 0 };
++        // On top of a block: a post turned toward the player (rotationYaw 0 = facing +Z, so the front looks back: 8).
++        assert_eq!(sign_place(&floor, (3, 63, 3), 1, 0.0), Some(((3, 64, 3), POST, 8)));
++        assert_eq!(sign_place(&floor, (3, 63, 3), 1, 90.0), Some(((3, 64, 3), POST, 12)));
++        assert_eq!(sign_place(&floor, (3, 63, 3), 0, 0.0), None, "never on a bottom face");
++        assert_eq!(sign_place(&floor, (3, 64, 3), 1, 0.0), None, "air is not solid");
++        let side = |x: i32, y: i32, _: i32| if x <= 3 && y < 70 { 1 } else { 0 };
++        assert_eq!(sign_place(&side, (3, 65, 3), 5, 0.0), Some(((4, 65, 3), WALL, 5)));
++        assert_eq!(sign_place(&|_, _, _| 1, (3, 65, 3), 5, 0.0), None, "the cell must be free");
++        let mut t: Text = Default::default();
++        let mut e = Edit::new((3, 64, 3));
++        for c in b"hello world 12345" {
++            e.press(Key::Ch(*c), &mut t);
++        }
++        assert_eq!(t[0], "hello world 123", "15 characters at most");
++        e.press(Key::Back, &mut t);
++        assert_eq!(t[0], "hello world 12");
++        e.press(Key::Enter, &mut t);
++        e.press(Key::Space, &mut t);
++        e.press(Key::Line(3), &mut t);
++        assert_eq!((t[1].as_str(), e.line), (" ", 3));
++        e.press(Key::Enter, &mut t);
++        assert_eq!(e.line, 0, "the line wraps like `& 3`");
++        assert!(e.press(Key::Done, &mut t) && !e.press(Key::Shift, &mut t) && e.shift);
++        // Keyboard: every key is on the screen, none overlap, and a letter sits where its rectangle is.
++        let (w, h) = (2400.0, 1080.0);
++        let (_, keys) = layout(w, h, false);
++        assert_eq!(keys.len(), 4 + 40 + 5);
++        assert!(keys.iter().all(|(_, r)| r[0] >= 0.0 && r[0] + r[2] <= w && r[1] + r[3] <= h));
++        let q = keys.iter().find(|(k, _)| *k == Key::Ch(b'q')).unwrap().1;
++        assert_eq!(key_at(w, h, false, q[0] + 1.0, q[1] + 1.0), Some(Key::Ch(b'q')));
++        assert_eq!(key_at(w, h, true, q[0] + 1.0, q[1] + 1.0), Some(Key::Ch(b'Q')));
++        // Save round trip; every corrupt form is refused.
++        let ps = vec![Painting { pos: (1, 2, -3), dir: 3, art: 24, age: 0 }];
++        let ss = vec![((4, 70, 5), ["hi".to_string(), String::new(), "a b c".into(), "x".into()])];
++        let enc = encode(&ps, &ss);
++        assert_eq!(decode(&enc), Some((ps, ss)));
++        assert!(decode(&enc[..enc.len() - 1]).is_none() && decode(b"nope").is_none());
++        assert!(decode(&[&enc[..], &[0]].concat()).is_none());
++        let mut bad = encode(&[Painting { pos: (0, 0, 0), dir: 4, art: 0, age: 0 }], &[]);
++        assert!(decode(&bad).is_none());
++        bad = encode(&[], &[((0, 0, 0), ["\u{7f}".into(), String::new(), String::new(), String::new()])]);
++        assert!(decode(&bad).is_none());
++    }
++}
+diff -ruN '--exclude=art.rgba' a/Repo/mc-rs/src/world/gear.rs b/Repo/mc-rs/src/world/gear.rs
+--- a/mc-rs/src/world/gear.rs	2026-10-13 22:02:45.261754078 +0000
++++ b/mc-rs/src/world/gear.rs	2026-10-13 22:02:45.452138124 +0000
+@@ -15,6 +15,8 @@
+ pub const MILK_BUCKET: u16 = 335;
+ pub const BOW: u16 = 261;
+ pub const ARROW: u16 = 262;
++pub const SNOWBALL: u16 = 332;
++pub const EGG: u16 = 344;
+ pub const ROD: u16 = 346;
+ const RAW_FISH: u16 = 349;
+ /// `EntityArrow`: launch speed in blocks per tick (`setArrowHeading(.., 1.5F, 1.0F)`), damage on a mob.
+diff -ruN '--exclude=art.rgba' a/Repo/mc-rs/src/world/items.rs b/Repo/mc-rs/src/world/items.rs
+--- a/mc-rs/src/world/items.rs	2026-10-13 22:02:45.262633633 +0000
++++ b/mc-rs/src/world/items.rs	2026-10-13 22:02:45.454168575 +0000
+@@ -53,11 +53,11 @@
+     }
+ }
+ 
+-/// `Item.maxStackSize`: tools, armor, buckets, sign, doors, bed and stew 1, snowball 16, cookie 8, everything else 64.
++/// `Item.maxStackSize`: tools, armor, buckets, sign, doors, bed and stew 1, snowball and egg 16, cookie 8, everything else 64.
+ pub fn max_stack(id: u16) -> u8 {
+     match id {
+-        261 | 282 | 323 | 324 | 330 | 346 | 355 | 325..=327 | 335 => 1,
+-        332 => 16,
++        261 | 282 | 323 | 324 | 330 | 346 | 354 | 355 | 325..=327 | 335 => 1,
++        332 | 344 => 16,
+         357 => 8,
+         _ if craft::tool(id).is_some() || craft::armor(id).is_some() => 1,
+         _ => 64,
+@@ -118,13 +118,13 @@
+ }
+ 
+ // ---- Block.idDropped / quantityDropped / damageDropped ----
+-// ponytail: blocks whose drop reads metadata and that nothing can make or place yet (doors, bed, crops, stairs)
++// ponytail: blocks whose drop reads metadata and that nothing can make or place yet (stairs)
+ // are missing; their drops go in with the blocks. Slabs are here because the drop is two lines.
+ 
+ fn quantity(b: u8, r: &mut JavaRandom) -> i32 {
+     match b {
+-        // fluids, glass, TNT, bookshelf, fire, spawner, snow layer, ice, portal
+-        8..=11 | 20 | 46 | 47 | 51 | 52 | 78 | 79 | 90 => 0,
++        // fluids, glass, TNT, bookshelf, fire, spawner, snow layer, ice, portal, cake
++        8..=11 | 20 | 46 | 47 | 51 | 52 | 78 | 79 | 90 | 92 => 0,
+         43 => 2,                                  // double slab: two single slabs
+         18 => (r.next_int_bound(20) == 0) as i32, // leaves: a sapling one time in 20
+         21 => 4 + r.next_int_bound(5),            // lapis
+@@ -376,6 +376,19 @@
+         if matches!(block, 26 | 64 | 71) && meta & 8 != 0 {
+             return; // BlockBed / BlockDoor.idDropped: the second half drops nothing
+         }
++        if block == 59 {
++            // `BlockCrops`: `idDropped` is wheat only at meta 7 (the `super` call still draws its float), then 3 tries at seeds, each `nextInt(15) <= meta`.
++            self.rng.next_float();
++            if meta == 7 {
++                self.spawn_stack(ItemStack { id: 296, count: 1, damage: 0 }, cell);
++            }
++            for _ in 0..3 {
++                if self.rng.next_int_bound(15) <= meta as i32 {
++                    self.spawn_stack(ItemStack { id: 295, count: 1, damage: 0 }, cell);
++                }
++            }
++            return;
++        }
+         for _ in 0..quantity(block, &mut self.rng) {
+             self.rng.next_float(); // `nextFloat() <= chance` with chance 1.0: always true, but it draws
+             let id = id_dropped(block, &mut self.rng);
+@@ -452,6 +465,20 @@
+ 
+     use super::*;
+ 
++    /// Crops drop seeds when young, wheat plus seeds when ripe (`BlockCrops`), never a crops item.
++    #[test]
++    fn crops_drop_seeds_and_wheat() {
++        let mut d = Drops::new(1);
++        for _ in 0..50 {
++            d.spawn_block(59, 3, (0, 64, 0));
++        }
++        assert!(d.items.iter().all(|e| e.stack.id == 295), "young crops: seeds only");
++        let mut d = Drops::new(1);
++        d.spawn_block(59, 7, (0, 64, 0));
++        assert_eq!(d.items.iter().filter(|e| e.stack.id == 296).count(), 1);
++        assert!(d.items.iter().all(|e| e.stack.id != 59));
++    }
++
+     /// Stew heals 10 and leaves a bowl; other items are not food and stay.
+     #[test]
+     fn stew_heals_and_leaves_a_bowl() {
+diff -ruN '--exclude=art.rgba' a/Repo/mc-rs/src/world/mobs.rs b/Repo/mc-rs/src/world/mobs.rs
+--- a/mc-rs/src/world/mobs.rs	2026-10-13 22:02:45.262836254 +0000
++++ b/mc-rs/src/world/mobs.rs	2026-10-13 22:02:45.453945634 +0000
+@@ -113,6 +113,8 @@
+     /// A player's arrow stopped against a block here.
+     Landed(Vec3),
+     Egg(Vec3),
++    /// A thrown egg hit something here: 1 in 8 hatches a chicken (`EntityEgg.onUpdate`).
++    Hatch(Vec3),
+ }
+ 
+ pub struct Ctx<'a> {
+@@ -211,6 +213,10 @@
+             self.fire -= 1;
+             if self.wet { self.fire = 0 } else if self.fire % 20 == 0 { self.health -= 1; self.hurt = 10 }
+         }
++        // `BlockCactus.onEntityCollidedWithBlock`: 1 damage per tick of contact (the 10-tick window paces it), no anger, no knockback.
++        if physics::touching(pos, self.half, c.get, 81) {
++            self.hit(1, pos);
++        }
+         // EntityCreature.findPlayerToAttack per kind; anger (zombie pigman, wolf) sets `target` itself.
+         self.anger = (self.anger - 1).max(0);
+         let see = sees(c.get, pos, c.eye);
+@@ -430,14 +436,20 @@
+     /// `EntityLiving.attackEntityFrom`: a hit inside the 10-tick window only pays the difference; the first one knocks back.
+     /// A zombie pigman or wolf hit turns on its attacker.
+     pub fn damage(&mut self, dmg: i32, from: Vec3, rng: &mut JavaRandom) {
++        if self.health > 0 && matches!(self.kind, PigZombie | Wolf) {
++            self.anger = if self.kind == Wolf { 1 << 20 } else { 400 + rng.next_int_bound(400) };
++            self.target = true;
++        }
++        self.hit(dmg, from);
++    }
++
++    /// The damage window of `attackEntityFrom` without the attacker's anger. `from` at the mob's own place = no
++    /// knockback, which is the `attackEntityFrom(null, n)` of a cactus.
++    fn hit(&mut self, dmg: i32, from: Vec3) {
+         if self.health <= 0 {
+             return;
+         }
+         self.age = 0;
+-        if matches!(self.kind, PigZombie | Wolf) {
+-            self.anger = if self.kind == Wolf { 1 << 20 } else { 400 + rng.next_int_bound(400) };
+-            self.target = true;
+-        }
+         if self.life > 10 {
+             if dmg <= self.last { return }
+             self.health -= dmg - self.last;
+@@ -486,6 +498,8 @@
+     age: u16,
+     /// Shot by the player (`ItemBow`): hurts mobs, not the player, and lands as a pick-up-able item.
+     pub player: bool,
++    /// 0 = an arrow; `gear::SNOWBALL` / `gear::EGG` = a thrown item (`EntitySnowball` / `EntityEgg`: the same flight, no damage, gone on a hit).
++    pub kind: u16,
+ }
+ 
+ impl Arrow {
+@@ -495,8 +509,10 @@
+         let (x, y, z) = cell(self.pos);
+         if self.age > 600 || solid((c.get)(x, y, z)) {
+             // ponytail: vanilla sticks in the block until picked up; the player's arrow drops as an item where it stopped.
+-            if self.player {
+-                ev.push(Ev::Landed(self.pos - self.vel));
++            match self.kind {
++                0 if self.player => ev.push(Ev::Landed(self.pos - self.vel)),
++                crate::world::gear::EGG => ev.push(Ev::Hatch(self.pos - self.vel)),
++                _ => {}
+             }
+             return false;
+         }
+@@ -522,7 +538,7 @@
+ }
+ 
+ /// Distance along the ray `o + t d` to the box `lo..hi`, if it hits within `t >= 0`.
+-fn ray_box(o: Vec3, d: Vec3, lo: Vec3, hi: Vec3) -> Option<f32> {
++pub(crate) fn ray_box(o: Vec3, d: Vec3, lo: Vec3, hi: Vec3) -> Option<f32> {
+     let (mut t0, mut t1) = (0.0f32, f32::MAX);
+     for i in 0..3 {
+         if d[i].abs() < 1e-8 {
+@@ -670,7 +686,14 @@
+                     let (lo, hi) = m.aabb();
+                     a.pos.cmpge(lo - Vec3::splat(0.3)).all() && a.pos.cmple(hi + Vec3::splat(0.3)).all()
+                 })).flatten();
+-                hit.map_or(true, |i| { list[i].damage(crate::world::gear::ARROW_DAMAGE, a.pos - a.vel, rng); false })
++                hit.map_or(true, |i| {
++                    // A snowball or egg does 0 damage but still knocks back (`attackEntityFrom(thrower, 0)`).
++                    list[i].damage(if a.kind == 0 { crate::world::gear::ARROW_DAMAGE } else { 0 }, a.pos - a.vel, rng);
++                    if a.kind == crate::world::gear::EGG {
++                        ev.push(Ev::Hatch(a.pos));
++                    }
++                    false
++                })
+             });
+             self.spawn(c);
+         }
+@@ -680,9 +703,18 @@
+         let mut out = Vec::new();
+         for e in ev {
+             match e {
+-                Ev::Shoot(pos, vel) if self.arrows.len() < MAX_ARROWS => self.arrows.push(Arrow { pos, vel, age: 0, player: false }),
++                Ev::Shoot(pos, vel) if self.arrows.len() < MAX_ARROWS => self.arrows.push(Arrow { pos, vel, age: 0, player: false, kind: 0 }),
+                 Ev::Landed(p) => drops.spawn_stack(ItemStack { id: crate::world::gear::ARROW, count: 1, damage: 0 }, cell(p)),
+                 Ev::Egg(p) => drops.spawn_stack(ItemStack { id: 344, count: 1, damage: 0 }, cell(p)),
++                Ev::Hatch(p) => {
++                    if self.rng.next_int_bound(8) == 0 {
++                        let n = if self.rng.next_int_bound(32) == 0 { 4 } else { 1 };
++                        for _ in 0..n {
++                            let m = Mob::new(Chicken, p.x, p.y, p.z, 0.0, &mut self.rng);
++                            self.list.push(m);
++                        }
++                    }
++                }
+                 Ev::Hurt(_) | Ev::Boom(_) => out.push(e),
+                 Ev::Shoot(..) => {}
+             }
+@@ -723,9 +755,10 @@
+     }
+ 
+     /// `ItemBow`: a player's arrow leaves `pos` with `vel` (blocks per tick).
+-    pub fn shoot(&mut self, pos: Vec3, vel: Vec3) {
++    /// A player's arrow (`kind` 0) or thrown snowball / egg.
++    pub fn shoot(&mut self, pos: Vec3, vel: Vec3, kind: u16) {
+         if self.arrows.len() < MAX_ARROWS {
+-            self.arrows.push(Arrow { pos, vel, age: 0, player: true });
++            self.arrows.push(Arrow { pos, vel, age: 0, player: true, kind });
+         }
+     }
+ 
+@@ -822,6 +855,39 @@
+         assert!((0..50).any(|_| !q.tick(&mut rng, &far_player, &mut ev)));
+     }
+ 
++    /// A mob in a cactus cell loses 1 health, once per 10-tick window, and is neither knocked back nor angered.
++    #[test]
++    fn cactus_hurts_a_mob_without_knockback_or_anger() {
++        let cact = |x: i32, y: i32, z: i32| if (x, z) == (32, 32) && y == 10 { Some(81) } else { flat(x, y, z) };
++        let l = |_, _, _| 15u8;
++        let c = Ctx { get: &cact, light: &l, day: false, player: Vec3::new(5.0, 20.0, 5.0), eye: Vec3::new(5.0, 20.6, 5.0) };
++        let mut rng = JavaRandom::new(5);
++        let mut w = Mob::new(Wolf, 32.5, 10.0, 32.5, 0.0, &mut rng);
++        let mut ev = Vec::new();
++        w.tick(&mut rng, &c, &mut ev);
++        assert_eq!((w.health, w.anger, w.body.vel.x), (7, 0, 0.0), "8 - 1, calm, not pushed");
++        w.tick(&mut rng, &c, &mut ev);
++        assert_eq!(w.health, 7, "inside the damage window, an equal hit is ignored");
++        for _ in 0..12 { w.tick(&mut rng, &c, &mut ev); }
++        assert!(w.health < 7, "the window ran out and the cactus hurts again");
++    }
++
++    /// Snowballs and eggs fly like arrows, hurt for 0 and are gone on a block; only the egg asks to hatch.
++    #[test]
++    fn thrown_items_land_quietly_and_an_egg_hatches() {
++        let l = |_, _, _| 0u8;
++        let c = ctx(Vec3::new(5.0, 20.0, 5.0), &l);
++        let ball = |kind| Arrow { pos: Vec3::new(32.5, 9.5, 32.5), vel: Vec3::new(0.0, -0.5, 0.0), age: 0, player: true, kind };
++        let mut ev = Vec::new();
++        assert!(!ball(crate::world::gear::SNOWBALL).tick(&c, &mut ev) && ev.is_empty());
++        assert!(!ball(crate::world::gear::EGG).tick(&c, &mut ev) && matches!(ev[..], [Ev::Hatch(_)]));
++        let mut rng = JavaRandom::new(3);
++        let mut pig = Mob::new(Pig, 32.5, 10.0, 32.5, 0.0, &mut rng);
++        let h = pig.health;
++        pig.damage(0, Vec3::new(30.0, 10.0, 32.5), &mut rng);
++        assert_eq!(pig.health, h);
++    }
++
+     /// Hostiles: a skeleton in range shoots, a creeper next to the player lights its fuse and goes off after 30 ticks,
+     /// a zombie bites for 5; an explosion clears dirt-like blocks but not bedrock.
+     #[test]
+diff -ruN '--exclude=art.rgba' a/Repo/mc-rs/src/world/mod.rs b/Repo/mc-rs/src/world/mod.rs
+--- a/mc-rs/src/world/mod.rs	2026-10-13 22:02:45.262906254 +0000
++++ b/mc-rs/src/world/mod.rs	2026-10-13 22:02:45.453582335 +0000
+@@ -17,3 +17,4 @@
+ pub mod effects;
+ pub mod save;
+ pub mod ticks;
++pub mod decor;
+diff -ruN '--exclude=art.rgba' a/Repo/mc-rs/src/world/physics.rs b/Repo/mc-rs/src/world/physics.rs
+--- a/mc-rs/src/world/physics.rs	2026-10-13 22:02:45.263283120 +0000
++++ b/mc-rs/src/world/physics.rs	2026-10-13 22:02:45.453754813 +0000
+@@ -42,6 +42,17 @@
+     false
+ }
+ 
++/// `Entity.moveEntity`'s block-contact sweep: does the box, shrunk 0.001 on every side, overlap a cell with this id?
++/// The block's own shape does not matter (a cactus is inset 1/16 and still hurts from inside that gap).
++pub fn touching(pos: Vec3, half: Vec3, get: BlockQuery<'_>, id: u8) -> bool {
++    aabb_any(pos, half - Vec3::splat(0.001), get, |b| b == id)
++}
++
++/// `EntityLiving.isOnLadder`: the cell at the feet (not the box) is a ladder.
++pub fn on_ladder(pos: Vec3, half: Vec3, get: BlockQuery<'_>) -> bool {
++    get(pos.x.floor() as i32, (pos.y - half.y).floor() as i32, pos.z.floor() as i32) == Some(65)
++}
++
+ /// Integrate one frame. `dt` is seconds, capped by the caller; `jumping` is the held jump button.
+ /// In water or lava (`EntityLiving.moveEntityWithHeading`) there is no gravity: the vertical speed is dragged (x0.8 water,
+ /// x0.5 lava per tick) and sinks 0.02 blocks/tick, a held jump swims up (+0.04 blocks/tick), and pushing against a wall
+@@ -55,6 +66,7 @@
+     let water = touches(player.pos, half, get, 0.001, 8..=9);
+     let lava = !water && touches(player.pos, half, get, 0.1, 10..=11);
+     let ticks = dt * 20.0;
++    let ladder = on_ladder(player.pos, half, get);
+     if water || lava {
+         let speed = (if water { WATER_SPEED } else { LAVA_SPEED }) / WALK_SPEED;
+         player.vel.x *= speed;
+@@ -66,11 +78,27 @@
+         // Cap fall speed so a long stall doesn't kill the player.
+         if player.vel.y < -55.0 { player.vel.y = -55.0; }
+         if jumping && player.on_ground { player.vel.y = 8.4; }
++        if ladder {
++            // `moveEntityWithHeading`: sideways speed capped at 0.15 blocks/tick, falling at 0.15.
++            player.vel.x = player.vel.x.clamp(-3.0, 3.0);
++            player.vel.z = player.vel.z.clamp(-3.0, 3.0);
++            player.vel.y = player.vel.y.max(-3.0);
++        }
+     }
+ 
+-    // Sweep each axis independently.
++    // Sweep each axis independently. `Entity.moveEntity` in a web: the move is x0.25 / y0.05 / x0.25 and the motion is lost.
+     let (vx, vz) = (player.vel.x, player.vel.z);
+-    player.pos = sweep_axis(player.pos, half, player.vel * dt, get, &mut player.vel, player.on_ground && !(water || lava));
++    let web = touching(player.pos, half, get, 30);
++    let scale = if web { Vec3::new(0.25, 0.05, 0.25) } else { Vec3::ONE };
++    player.pos = sweep_axis(player.pos, half, player.vel * scale * dt, get, &mut player.vel, player.on_ground && !(water || lava));
++    if web {
++        player.vel = Vec3::ZERO;
++    }
++    // `isCollidedHorizontally && isOnLadder`: push into the wall and climb at 0.2 blocks/tick. ponytail: the frame's own
++    // gravity (23 * dt) is added back so the next sweep moves ~0.1176 blocks/tick like the Java (0.2 - 0.08) * 0.98.
++    if ladder && !(water || lava) && ((vx != 0.0 && player.vel.x == 0.0) || (vz != 0.0 && player.vel.z == 0.0)) {
++        player.vel.y = 2.35 + 23.0 * dt;
++    }
+     if water || lava {
+         player.vel.y = player.vel.y * (if water { 0.8f32 } else { 0.5 }).powf(ticks) - 0.4 * ticks;
+         let blocked = (vx != 0.0 && player.vel.x == 0.0) || (vz != 0.0 && player.vel.z == 0.0);
+@@ -140,7 +168,7 @@
+ }
+ 
+ /// Does the player box at `p` overlap a cell whose id satisfies `pred`?
+-fn aabb_any(p: Vec3, h: Vec3, get: BlockQuery<'_>, pred: fn(u8) -> bool) -> bool {
++fn aabb_any(p: Vec3, h: Vec3, get: BlockQuery<'_>, pred: impl Fn(u8) -> bool) -> bool {
+     let (x0, x1) = (p.x - h.x, p.x + h.x);
+     let (y0, y1) = (p.y - h.y, p.y + h.y);
+     let (z0, z1) = (p.z - h.z, p.z + h.z);
+@@ -191,6 +219,40 @@
+         assert!(p.pos.y > 10.0 + HALF.y + 0.05 && !ground_test(p.pos, HALF, &get));
+     }
+ 
++    /// Ladder: a wall of ladder (cell x = 0) against stone (x = 1): pushing into the stone climbs, no push slides at 3 m/s.
++    fn shaft(x: i32, y: i32, z: i32) -> Option<u8> {
++        if !(-4..16).contains(&x) || !(-4..16).contains(&z) || y < 0 { return None; }
++        Some(if y < 10 || x >= 1 { 1 } else if x == 0 { 65 } else { 0 })
++    }
++
++    #[test]
++    fn ladder_climbs_into_the_wall_and_slows_the_fall() {
++        let mut p = Player { pos: Vec3::new(0.69, 10.0 + HALF.y + 0.01, 0.5), vel: Vec3::ZERO, on_ground: true };
++        for _ in 0..60 {
++            p.vel.x = 4.3; // pushing into the wall behind the ladder
++            step(&mut p, 1.0 / 60.0, false, &shaft);
++        }
++        assert!(p.pos.y > 10.0 + HALF.y + 1.5, "climbed: y = {}", p.pos.y);
++        let top = p.pos.y;
++        p.vel = Vec3::new(0.0, -50.0, 0.0);
++        step(&mut p, 1.0 / 60.0, false, &shaft);
++        assert!(p.vel.y >= -3.0 - 1e-3 && p.pos.y < top && p.pos.y > top - 0.06, "falls at most 3 m/s: dy = {}", p.pos.y - top);
++    }
++
++    /// Cobweb (30) everywhere above y = 10: the move is cut to 5% vertically and 25% sideways, and the speed is lost.
++    #[test]
++    fn web_cuts_the_move_and_the_cactus_touches() {
++        let web = |x: i32, y: i32, z: i32| -> Option<u8> { if !(0..16).contains(&x) || !(0..16).contains(&z) || y < 0 { None } else { Some(if y < 10 { 1 } else if y < 30 { 30 } else { 0 }) } };
++        let mut p = Player { pos: Vec3::new(8.5, 20.0, 8.5), vel: Vec3::new(4.0, 0.0, 0.0), on_ground: false };
++        step(&mut p, 0.1, false, &web);
++        assert!((p.pos.x - 8.6).abs() < 1e-3 && p.vel == Vec3::ZERO, "x moved a quarter of 0.4: {}", p.pos.x - 8.5);
++        assert!(20.0 - p.pos.y > 0.0 && 20.0 - p.pos.y < 0.02, "fell 5% of the normal 0.23 drop: {}", 20.0 - p.pos.y);
++        let cactus = |x: i32, _: i32, _: i32| -> Option<u8> { Some(if x == 5 { 81 } else { 0 }) };
++        assert!(touching(Vec3::new(5.5, 64.9, 0.5), HALF, &cactus, 81), "inside the cell");
++        assert!(touching(Vec3::new(4.75, 64.9, 0.5), HALF, &cactus, 81), "box reaches into the cell by 0.05");
++        assert!(!touching(Vec3::new(4.7, 64.9, 0.5), HALF, &cactus, 81), "box ends exactly at the cell edge");
++    }
++
+     /// Stone below y = 10, still water (9) for y 10..20, air above: the fluid is not solid.
+     fn pool(x: i32, y: i32, z: i32) -> Option<u8> {
+         if !(0..16).contains(&x) || !(0..16).contains(&z) || y < 0 { return None; }
+diff -ruN '--exclude=art.rgba' a/Repo/mc-rs/src/world/pick.rs b/Repo/mc-rs/src/world/pick.rs
+--- a/mc-rs/src/world/pick.rs	2026-10-13 22:02:45.263358706 +0000
++++ b/mc-rs/src/world/pick.rs	2026-10-13 22:02:45.454192268 +0000
+@@ -119,6 +119,25 @@
+     [2, 1, 3, 0][((yaw * 4.0 / 360.0 + 0.5).floor() as i32 & 3) as usize]
+ }
+ 
++/// `onBlockPlacedBy` of the blocks that face the player (stairs 53 / 67, furnace 61, pumpkin 86 / jack-o'-lantern 91): the
++/// metadata from `rotationYaw` in degrees, `None` for any other block (it takes `items::placed_meta`).
++pub fn facing_meta(id: u16, yaw: f32) -> Option<u8> {
++    let q = yaw * 4.0 / 360.0;
++    let at = |k: f32, t: [u8; 4]| t[(((q + k).floor() as i32) & 3) as usize];
++    match id {
++        53 | 67 => Some(at(0.5, [2, 1, 3, 0])),
++        61 => Some(at(0.5, [2, 5, 3, 4])),
++        86 | 91 => Some(at(2.5, [0, 1, 2, 3])),
++        _ => None,
++    }
++}
++
++/// `BlockTrapDoor.canPlaceBlockOnSide` + `onBlockPlaced`: only on a side face (2..=5) of a normal cube (`support`); the facing
++/// is `face - 2`.
++pub fn trap_meta(face: u8, support: bool) -> Option<u8> {
++    (face >= 2 && support).then(|| face - 2)
++}
++
+ /// `ItemDoor.onItemUse` + `BlockDoor.canPlaceBlockAt`: the metadata of the lower half of door `id` (the upper is that + 8)
+ /// placed at `cell`, or `None` when it cannot stand there. The hinge goes to the side with more solid neighbours or next
+ /// to another door (the `+ 4` open-state bit is how the Java stores a mirrored hinge).
+@@ -166,6 +185,15 @@
+     matches!(id, 0 | 8..=11 | 51 | 78) || is_plant(id)
+ }
+ 
++/// `BlockReed.canPlaceBlockAt`: on more reeds, or on grass / dirt with water (still or flowing) beside the ground cell.
++pub fn reed_ok(get: &dyn Fn(i32, i32, i32) -> u8, (x, y, z): (i32, i32, i32)) -> bool {
++    match get(x, y - 1, z) {
++        83 => true,
++        2 | 3 => [(-1, 0), (1, 0), (0, -1), (0, 1)].iter().any(|&(a, b)| matches!(get(x + a, y - 1, z + b), 8 | 9)),
++        _ => false,
++    }
++}
++
+ /// `BlockTorch.func_31032_h`: a torch can stand on a normal cube or a fence.
+ fn torch_floor(get: &dyn Fn(i32, i32, i32) -> u8, x: i32, y: i32, z: i32) -> bool {
+     let b = get(x, y - 1, z);
+@@ -296,6 +324,9 @@
+     #[test]
+     fn stairs_face_the_player_and_doors_need_a_floor() {
+         assert_eq!((stairs_meta(0.0), stairs_meta(90.0), stairs_meta(180.0), stairs_meta(270.0)), (2, 1, 3, 0));
++        assert_eq!([0.0, 90.0, 180.0, 270.0].map(|y| facing_meta(61, y).unwrap()), [2, 5, 3, 4]);
++        assert_eq!([0.0, 90.0, 180.0, 270.0].map(|y| facing_meta(86, y).unwrap()), [2, 3, 0, 1]);
++        assert_eq!((facing_meta(53, 90.0), facing_meta(1, 0.0)), (Some(1), None));
+         let floor = |_: i32, y: i32, _: i32| if y == 63 { 1 } else { 0 };
+         assert_eq!(door_meta(&floor, (0, 64, 0), 0.0, 64), Some(1));
+         let wall = |x: i32, y: i32, _: i32| if y == 63 || (x == -1 && y < 66) { 1 } else { 0 };
+@@ -313,4 +344,13 @@
+         assert_eq!(wake_cell(&floor, (0, 64, 0), 0), Some((-1, 64, -1)));
+         assert_eq!(wake_cell(&|_, _, _| 0, (0, 64, 0), 0), None);
+     }
++
++    #[test]
++    fn reeds_need_water_beside_the_ground_or_more_reeds() {
++        let shore = |x: i32, y: i32, _: i32| if y == 63 && x == 1 { 9 } else if y == 63 { 2 } else { 0 };
++        assert!(reed_ok(&shore, (0, 64, 0)), "grass with water beside it");
++        assert!(!reed_ok(&shore, (-3, 64, 0)), "grass with no water beside it");
++        assert!(reed_ok(&|_, y, _| if y == 63 { 83 } else { 0 }, (0, 64, 0)), "on a reed");
++        assert!(!reed_ok(&|_, y, _| if y == 63 { 1 } else { 0 }, (0, 64, 0)), "on stone");
++    }
+ }
+diff -ruN '--exclude=art.rgba' a/Repo/mc-rs/src/world/ticks.rs b/Repo/mc-rs/src/world/ticks.rs
+--- a/mc-rs/src/world/ticks.rs	2026-10-13 22:02:45.263704519 +0000
++++ b/mc-rs/src/world/ticks.rs	2026-10-13 22:02:45.451907182 +0000
+@@ -55,6 +55,10 @@
+     vy: f32,
+     pub id: u8,
+     age: u32,
++    /// Primed TNT (`EntityTNTPrimed`, id 46) also drifts in x / z and counts a fuse down; sand and gravel leave both at 0 / -1.
++    vx: f32,
++    vz: f32,
++    pub fuse: i32,
+ }
+ 
+ pub struct Ticks {
+@@ -68,11 +72,42 @@
+     /// `World.func_27161_C`: rain strength above 0.2.
+     wet: bool,
+     pub falling: Vec<Falling>,
++    /// Where a primed TNT's fuse ran out this tick: the caller makes the power 4 explosion (`EntityTNTPrimed.explode`).
++    pub booms: Vec<Vec3>,
++    /// `Entity.distanceWalkedModified` / `nextStepDistance` of the player and where the last tick left him (x, z).
++    walked: f32,
++    next_step: i32,
++    last_xz: Option<(f32, f32)>,
+ }
+ 
+ impl Ticks {
+     pub fn new(seed: i64) -> Self {
+-        Self { now: 0, seq: 0, due: BTreeSet::new(), pending: HashSet::new(), rng: JavaRandom::new(seed ^ 0xB10C), lcg: 0x2545_F491, wet: false, falling: Vec::new() }
++        Self { now: 0, seq: 0, due: BTreeSet::new(), pending: HashSet::new(), rng: JavaRandom::new(seed ^ 0xB10C), lcg: 0x2545_F491, wet: false, falling: Vec::new(), booms: Vec::new(), walked: 0.0, next_step: 1, last_xz: None }
++    }
++
++    /// The step trigger of `Entity.moveEntity` for the player (walked distance x 0.6 past `nextStepDistance`, block under the
++    /// feet) and `BlockFarmland.onEntityWalking`: a step on farmland turns it to dirt 1 time in 4. Call once per 20 Hz tick with
++    /// the feet position. ponytail: mobs and the fence-under-block rule are skipped; a jump over farmland counts like a step.
++    pub fn walk(&mut self, w: &mut ChunkManager, x: f32, feet_y: f32, z: f32) {
++        let (px, pz) = self.last_xz.replace((x, z)).unwrap_or((x, z));
++        self.walked += (x - px).hypot(z - pz).min(1.0) * 0.6; // min: a respawn or bed teleport is not a walk
++        let (cx, cy, cz) = (x.floor() as i32, (feet_y - 0.2).floor() as i32, z.floor() as i32);
++        let id = bid(w, cx, cy, cz);
++        if self.walked > self.next_step as f32 && id > 0 {
++            self.next_step += 1;
++            if id == 60 && self.rng.next_int_bound(4) == 0 {
++                w.set_block(cx, cy, cz, 3);
++            }
++        }
++    }
++
++    /// `new EntityTNTPrimed` at the cell centre: a hop of 0.2 and a drift of 0.02 in a random direction, fuse 80 ticks, or
++    /// `rand(20) + 10` when an explosion set it off (`BlockTNT.onBlockDestroyedByExplosion`). Not capped by `MAX_FALLING`.
++    pub fn prime(&mut self, (x, y, z): (i32, i32, i32), short: bool) {
++        let (s, c) = (self.rng.next_float() * std::f32::consts::TAU * std::f32::consts::PI / 180.0).sin_cos(); // the Java feeds radians to a degree conversion
++        let fuse = if short { self.rng.next_int_bound(20) + 10 } else { 80 };
++        let pos = Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
++        self.falling.push(Falling { pos, prev: pos, vy: 0.2, id: 46, age: 0, vx: -s * 0.02, vz: -c * 0.02, fuse });
+     }
+ 
+     /// `World.scheduleBlockUpdate`: the same block at the same cell is queued once.
+@@ -159,6 +194,12 @@
+                 }
+             }
+             12 | 13 => self.schedule(x, y, z, id, 3),
++            // BlockStep.onBlockAdded: a slab on a slab of the same kind becomes one double slab (43) in the lower cell.
++            44 if y > 0 && bid(w, x, y - 1, z) == 44 && w.meta(x, y, z) == w.meta(x, y - 1, z) => {
++                let m = w.meta(x, y, z);
++                w.set_block(x, y, z, 0);
++                w.set_block_meta(x, y - 1, z, 43, m);
++            }
+             // BlockFire.onBlockAdded (ponytail: no portal from obsidian before M11).
+             51 if fire_stays(w, x, y, z) => self.schedule(x, y, z, 51, 40),
+             51 => {
+@@ -195,6 +236,16 @@
+                 w.set_block(x, y, z, 0); // quantityDropped is 0: nothing drops
+             }
+             64 | 71 => door_neighbour(w, drops, x, y, z, id),
++            96 => trap_neighbour(w, drops, x, y, z),
++            // BlockSign.onNeighborBlockChange: a post needs solid ground, a wall sign the wall it hangs on; else it drops the sign.
++            63 | 68 if !sign_stays(w, x, y, z, id) => {
++                drops.spawn_block(id, 0, (x, y, z));
++                w.set_block(x, y, z, 0);
++            }
++            // BlockCake.onNeighborBlockChange: the ground is not solid any more (quantityDropped 0: nothing drops).
++            92 if non_solid(bid(w, x, y - 1, z)) => {
++                w.set_block(x, y, z, 0);
++            }
+             26 => bed_neighbour(w, drops, x, y, z),
+             // BlockFarmland: something solid on top turns it back to dirt.
+             60 if !non_solid(bid(w, x, y + 1, z)) => {
+@@ -213,7 +264,7 @@
+                     // EntityFallingSand removes the block on its first update, which is this same tick.
+                     w.set_block(x, y, z, 0);
+                     let pos = Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
+-                    self.falling.push(Falling { pos, prev: pos, vy: 0.0, id, age: 0 });
++                    self.falling.push(Falling { pos, prev: pos, vy: 0.0, id, age: 0, vx: 0.0, vz: 0.0, fuse: -1 });
+                 }
+             }
+             2 => grass(w, &mut self.rng, x, y, z),
+@@ -333,6 +384,40 @@
+         let mut i = 0;
+         while i < self.falling.len() {
+             let f = &mut self.falling[i];
++            if f.id == 46 {
++                // `EntityTNTPrimed.onUpdate`: gravity 0.04, drag 0.98, x / z x 0.7 on the ground, then the fuse.
++                // ponytail: the 0.98 box is probed as a point at its leading face (centre height for x / z), so a TNT can hang a hair over an edge.
++                f.prev = f.pos;
++                f.vy -= 0.04;
++                let solid = |p: Vec3| !non_solid(bid(w, p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32));
++                let ny = f.pos.y + f.vy;
++                let ground = f.vy < 0.0 && solid(Vec3::new(f.pos.x, ny - 0.49, f.pos.z));
++                if ground {
++                    f.pos.y = (ny - 0.49).floor() + 1.49;
++                    f.vy = 0.0;
++                } else if f.vy > 0.0 && solid(Vec3::new(f.pos.x, ny + 0.49, f.pos.z)) {
++                    f.vy = 0.0;
++                } else {
++                    f.pos.y = ny;
++                }
++                let nx = f.pos.x + f.vx;
++                if solid(Vec3::new(nx + 0.49 * f.vx.signum(), f.pos.y, f.pos.z)) { f.vx = 0.0 } else { f.pos.x = nx }
++                let nz = f.pos.z + f.vz;
++                if solid(Vec3::new(f.pos.x, f.pos.y, nz + 0.49 * f.vz.signum())) { f.vz = 0.0 } else { f.pos.z = nz }
++                (f.vx, f.vy, f.vz) = (f.vx * 0.98, f.vy * 0.98, f.vz * 0.98);
++                if ground {
++                    (f.vx, f.vz) = (f.vx * 0.7, f.vz * 0.7);
++                }
++                let boom = f.fuse <= 0;
++                f.fuse -= 1;
++                if boom {
++                    self.booms.push(f.pos);
++                    self.falling.swap_remove(i);
++                } else {
++                    i += 1;
++                }
++                continue;
++            }
+             f.age += 1;
+             f.prev = f.pos;
+             f.vy -= 0.04;
+@@ -427,14 +512,23 @@
+ 
+ /// `BlockFlower` / mushroom / reed / cactus `canBlockStay`.
+ fn can_stay(w: &ChunkManager, x: i32, y: i32, z: i32, id: u8) -> bool {
++    stay(w, x, y, z, id, false)
++}
++
++/// `canPlaceBlockAt` of the same plants: the ground rule without the light rule (the cactus keeps its neighbour test).
++pub fn can_place(w: &ChunkManager, x: i32, y: i32, z: i32, id: u8) -> bool {
++    stay(w, x, y, z, id, true)
++}
++
++fn stay(w: &ChunkManager, x: i32, y: i32, z: i32, id: u8, placing: bool) -> bool {
+     let below = bid(w, x, y - 1, z);
+-    let lit = || w.light_at(x, y, z, 0) >= 8 || w.sees_sky(x, y, z);
++    let lit = || placing || w.light_at(x, y, z, 0) >= 8 || w.sees_sky(x, y, z);
+     match id {
+         6 | 31 | 37 | 38 => lit() && matches!(below, 2 | 3 | 60),
+         32 => lit() && below == 12,
+         59 => lit() && below == 60,
+         // BlockMushroom.canBlockStay: dark enough, on an opaque cube (UNVERIFIED: `opaqueCubeLookup` is `light_opacity == 255` here).
+-        39 | 40 => (0..128).contains(&y) && w.light_at(x, y, z, 0) < 13 && light_opacity(below) == 255 && !matches!(below, 10 | 11),
++        39 | 40 => (0..128).contains(&y) && (placing || w.light_at(x, y, z, 0) < 13) && light_opacity(below) == 255 && !matches!(below, 10 | 11),
+         83 => below == 83 || (matches!(below, 2 | 3) && [(-1, 0), (1, 0), (0, -1), (0, 1)].iter().any(|&(dx, dz)| matches!(bid(w, x + dx, y - 1, z + dz), 8 | 9))),
+         81 => [(-1, 0), (1, 0), (0, -1), (0, 1)].iter().all(|&(dx, dz)| non_solid(bid(w, x + dx, y, z + dz))) && matches!(below, 12 | 81),
+         _ => true,
+@@ -609,6 +703,31 @@
+     }
+ }
+ 
++/// `BlockSign.onNeighborBlockChange`: the cell below a post, or the wall a wall sign's metadata names (2 -> +Z, 3 -> -Z, 4 -> +X,
++/// 5 -> -X), must be solid.
++fn sign_stays(w: &ChunkManager, x: i32, y: i32, z: i32, id: u8) -> bool {
++    if id == 63 {
++        return !non_solid(bid(w, x, y - 1, z));
++    }
++    match w.meta(x, y, z) {
++        m @ 2..=5 => {
++            let (dx, dz) = [(0, 1), (0, -1), (1, 0), (-1, 0)][m as usize - 2];
++            !non_solid(bid(w, x + dx, y, z + dz))
++        }
++        _ => false,
++    }
++}
++
++/// `BlockTrapDoor.onNeighborBlockChange` (no redstone yet): the wall it hangs on is not a normal cube any more, so it drops itself.
++fn trap_neighbour(w: &mut ChunkManager, drops: &mut Drops, x: i32, y: i32, z: i32) {
++    let m = w.meta(x, y, z);
++    let (dx, dz) = [(0, 1), (0, -1), (1, 0), (-1, 0)][(m & 3) as usize];
++    if !normal_cube(bid(w, x + dx, y, z + dz)) {
++        w.set_block(x, y, z, 0);
++        drops.spawn_block(96, m, (x, y, z));
++    }
++}
++
+ /// `BlockFire.setBurnRate`: (chance to encourage fire, ability to catch fire) of a block id.
+ fn burn_rate(id: u8) -> (i32, i32) {
+     match id {
+@@ -658,15 +777,19 @@
+ }
+ 
+ impl Ticks {
+-    /// `BlockFire.tryToCatchBlockOnFire`. ponytail: burning TNT is only removed; priming it comes with the TNT block.
++    /// `BlockFire.tryToCatchBlockOnFire`. burning TNT is primed (fuse 80).
+     fn catch_fire(&mut self, w: &mut ChunkManager, x: i32, y: i32, z: i32, chance: i32, age: i32) {
+         if self.rng.next_int_bound(chance) < burn_rate(bid(w, x, y, z)).1 {
++            let tnt = bid(w, x, y, z) == 46;
+             if self.rng.next_int_bound(age + 10) < 5 && !rained_on(w, self.wet, x, y, z) {
+                 let m = (age + self.rng.next_int_bound(5) / 4).min(15);
+                 w.set_block_meta(x, y, z, 51, m as u8);
+             } else {
+                 w.set_block(x, y, z, 0);
+             }
++            if tnt {
++                self.prime((x, y, z), false);
++            }
+         }
+     }
+ 
+@@ -749,4 +872,62 @@
+         assert!(snow_ok(1) && snow_ok(2) && !snow_ok(0) && !snow_ok(79) && !snow_ok(18) && !snow_ok(8));
+         assert!(non_solid(51) && ticks_at_random(51) && ticks_at_random(39) && ticks_at_random(79));
+     }
++
++    #[test]
++    fn farmland_is_trampled_by_steps_not_by_standing_and_plants_need_their_ground() {
++        let mut m = ChunkManager::new(1, 1);
++        m.insert((0, 0), vec![0u8; crate::world::chunk::VOLUME]);
++        for x in 0..16 {
++            m.set_block(x, 40, 5, 60);
++        }
++        m.set_block(2, 39, 8, 12); // sand
++        m.set_block(2, 39, 9, 3); // dirt
++        let mut t = Ticks::new(1);
++        for _ in 0..100 {
++            t.walk(&mut m, 3.5, 41.0, 5.5); // standing still: no step
++        }
++        assert_eq!(m.block(3, 40, 5), Some(60));
++        for i in 0..400 {
++            t.walk(&mut m, 0.5 + (i % 30) as f32 * 0.5, 41.0, 5.5); // pacing along the row
++        }
++        let dirt = (0..16).filter(|&x| m.block(x, 40, 5) == Some(3)).count();
++        assert!(dirt > 0 && (0..16).all(|x| matches!(m.block(x, 40, 5), Some(60 | 3))));
++        assert!(can_place(&m, 2, 40, 9, 37) && !can_place(&m, 2, 40, 8, 37) && can_place(&m, 2, 40, 8, 32));
++        assert!(can_place(&m, 2, 40, 8, 81) && !can_place(&m, 2, 40, 9, 81), "cactus: sand and open sides");
++        assert!(can_place(&m, 2, 40, 9, 39) && !can_place(&m, 2, 41, 9, 39), "a mushroom wants an opaque block under it, in any light");
++    }
++
++    #[test]
++    fn primed_tnt_rests_then_booms_on_its_fuse() {
++        let mut m = ChunkManager::new(1, 1);
++        m.insert((0, 0), vec![0u8; crate::world::chunk::VOLUME]);
++        (0..16).for_each(|x| (0..16).for_each(|z| { m.set_block(x, 39, z, 1); }));
++        let (mut t, mut d) = (Ticks::new(1), Drops::new(1));
++        t.prime((3, 40, 5), false);
++        for _ in 0..80 {
++            t.fall(&mut m, &mut d);
++        }
++        assert!(t.booms.is_empty() && t.falling.len() == 1, "the fuse is 80: it goes off on the 81st tick");
++        let p = t.falling[0].pos;
++        assert!((p.y - 40.49).abs() < 0.01 && (p.x - 3.5).abs() < 1.5, "rests on the floor, drifts a little");
++        t.fall(&mut m, &mut d);
++        assert!(t.booms.len() == 1 && t.falling.is_empty());
++        t.prime((8, 40, 8), true);
++        let n = (1..40).find(|_| { t.fall(&mut m, &mut d); t.falling.is_empty() }).unwrap();
++        assert!((10..=30).contains(&n), "short fuse is rand(20) + 10, got {n}");
++    }
++
++    #[test]
++    fn slab_on_slab_merges_only_when_the_kinds_match() {
++        let mut m = ChunkManager::new(1, 1);
++        m.insert((0, 0), vec![0u8; crate::world::chunk::VOLUME]);
++        let mut t = Ticks::new(1);
++        m.set_block_meta(3, 40, 5, 44, 2);
++        m.set_block_meta(3, 41, 5, 44, 3); // stone-kind below, wood above: stays two slabs
++        t.added(&mut m, 3, 41, 5, 44);
++        assert_eq!((m.block(3, 41, 5), m.block(3, 40, 5)), (Some(44), Some(44)));
++        m.set_block_meta(3, 41, 5, 44, 2);
++        t.added(&mut m, 3, 41, 5, 44);
++        assert_eq!((m.block(3, 41, 5), m.block(3, 40, 5), m.meta(3, 40, 5)), (Some(0), Some(43), 2));
++    }
+ }
+diff -ruN '--exclude=art.rgba' a/Repo/mc-rs/src/world/vitals.rs b/Repo/mc-rs/src/world/vitals.rs
+--- a/mc-rs/src/world/vitals.rs	2026-10-13 22:02:45.263787182 +0000
++++ b/mc-rs/src/world/vitals.rs	2026-10-13 22:02:45.453692302 +0000
+@@ -19,6 +19,8 @@
+     /// The box touches water / lava (`handleWaterMovement`, `handleLavaMovement`).
+     pub water: bool,
+     pub lava: bool,
++    /// The feet are in a ladder cell (`isOnLadder`): `fallDistance` is reset every frame.
++    pub ladder: bool,
+     /// The eye is inside a water cell (`isInsideOfMaterial(water)`), and its height (`Entity.posY` of a player).
+     pub eye_in_water: bool,
+     pub eye_y: f32,
+@@ -96,7 +98,7 @@
+     /// `updateFallState` (every frame) and `EntityLiving.fall`: landing after `d` blocks costs `ceil(d - 3)`;
+     /// water cancels the fall.
+     fn land(&mut self, e: &Env) {
+-        if e.water {
++        if e.water || e.ladder {
+             self.fall = 0.0;
+         }
+         if e.on_ground {
+diff -ruN '--exclude=art.rgba' a/Repo/tools/gen_terrain.py b/Repo/tools/gen_terrain.py
+--- a/tools/gen_terrain.py	2026-10-13 22:02:45.264112359 +0000
++++ b/tools/gen_terrain.py	2026-10-13 22:02:45.454538906 +0000
+@@ -21,6 +21,11 @@
+ open("mc-rs/assets/grasscolor.rgb", "wb").write(grass.convert("RGB").tobytes())
+ open("mc-rs/assets/foliagecolor.rgb", "wb").write(foliage.convert("RGB").tobytes())
+ open("mc-rs/assets/items.rgba", "wb").write(png("gui/items.png").tobytes())
++# art/kz.png (painting motives, 256x256) with item/sign.png (64x32, the sign model) under it, 256x288: `render::atlas::ART`
++art = Image.new("RGBA", (256, 288), (0, 0, 0, 0))
++art.paste(png("art/kz.png"), (0, 0))
++art.paste(png("item/sign.png"), (0, 256))
++open("mc-rs/assets/art.rgba", "wb").write(art.tobytes())
+ 
+ # item id -> items.png tile, from Item.java: `new ItemX(<id - 256>, ...).setIconCoord(col, row)` or `.setIconIndex(n)`
+ import re

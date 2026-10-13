@@ -66,13 +66,20 @@ pub const TILES_H: usize = 32;
 pub const ATLAS_W: usize = 256;
 /// Rows: `terrain.png`, the flat strip, then `gui/items.png` (`ITEMS_Y`).
 pub const ITEMS_Y: usize = 256 + TILES_H;
-pub const ATLAS_H: usize = ITEMS_Y + 256;
+/// Under them `art/kz.png` (the paintings, 16 px pieces = tiles `ART_TILE0 + row * 16 + col`) and `item/sign.png` (64 x 32 at `SIGN_Y`).
+pub const ART_Y: usize = ITEMS_Y + 256;
+pub const SIGN_Y: usize = ART_Y + 256;
+pub const ATLAS_H: usize = ART_Y + 288;
 /// Mip levels of the atlas (a 16 px tile has 16, 8, 4 px: three levels never mix two tiles at the middle of a tile).
 pub const MIPS: u32 = 3;
 /// `gui/items.png` as RGBA (256 x 256, 16 x 16 px sprites): `Item.iconIndex` picks the sprite (`item_icon`).
 pub const ITEMS: &[u8] = include_bytes!("../../assets/items.rgba");
 /// A mesh tile number from here up is an items.png sprite (`ITEM_TILE0 + icon`), see `item_uv`.
 pub const ITEM_TILE0: u16 = 1000;
+/// A mesh tile number from here up is a 16 px piece of `art/kz.png` (`ART_TILE0 + row * 16 + col`), see `art_uv`.
+pub const ART_TILE0: u16 = 2000;
+/// `art/kz.png` + `item/sign.png` as RGBA, 256 x 288 (`tools/gen_terrain.py`).
+pub const ART: &[u8] = include_bytes!("../../assets/art.rgba");
 const TERRAIN: &[u8] = include_bytes!("../../assets/terrain.rgba");
 
 /// `EntitySheep.fleeceColorTable`: the wool colours, indexed by the cloth metadata (0 white .. 15 black).
@@ -123,6 +130,7 @@ pub fn atlas_rgba() -> Vec<u8> {
         }
     }
     v.extend_from_slice(ITEMS);
+    v.extend_from_slice(ART);
     v
 }
 
@@ -161,6 +169,17 @@ pub fn terrain_uv(t: u8, u: f32, v: f32) -> (f32, f32) {
 pub fn item_uv(icon: u8, u: f32, v: f32) -> (f32, f32) {
     let (x, y) = ((icon % 16) as f32 * 16.0 + 0.02 + u * 15.96, ITEMS_Y as f32 + (icon / 16) as f32 * 16.0 + 0.02 + (1.0 - v) * 15.96);
     (x / ATLAS_W as f32, y / ATLAS_H as f32)
+}
+
+/// Atlas UV of piece `n` (`row * 16 + col`) of `art/kz.png` at (u, v) in 0..1, v up (same inset as `terrain_uv`).
+pub fn art_uv(n: u8, u: f32, v: f32) -> (f32, f32) {
+    let (x, y) = ((n % 16) as f32 * 16.0 + 0.02 + u * 15.96, ART_Y as f32 + (n / 16) as f32 * 16.0 + 0.02 + (1.0 - v) * 15.96);
+    (x / ATLAS_W as f32, y / ATLAS_H as f32)
+}
+
+/// Atlas UV of pixel (`x`, `y`) of `item/sign.png` (y down like the png).
+pub fn sign_px(x: f32, y: f32) -> (f32, f32) {
+    (x / ATLAS_W as f32, (SIGN_Y as f32 + y) / ATLAS_H as f32)
 }
 
 /// `Item.iconIndex` of an item id (256 and up), `None` for blocks and items the Java table does not have.
@@ -208,7 +227,7 @@ pub fn terrain_px(t: u8, px: f32, py: f32) -> (f32, f32) {
 
 /// `Block.getBlockTextureFromSideAndMetadata`: the `terrain.png` tile of a block's face, `side` as in the Java (0 bottom, 1 top,
 /// 2 north -Z, 3 south +Z, 4 west -X, 5 east +X); `None` = no tile known (flat colour). Blocks with a facing in the Java
-/// (furnace, pumpkin, chest) get their front on +Z, because this port does not keep the facing yet. 31 tall grass is 55 dead
+/// (furnace, pumpkin) get their front from the metadata (`onBlockPlacedBy`), a chest from its neighbours. 31 tall grass is 55 dead
 /// shrub / 39 grass / 56 fern by metadata; wool, log, leaves and sapling pick by metadata like `tile_of` does.
 pub const fn terrain_tile(id: u8, meta: u8, side: u8) -> Option<u8> {
     let (top, bottom) = (side == 1, side == 0);
@@ -274,8 +293,7 @@ pub const fn terrain_tile(id: u8, meta: u8, side: u8) -> Option<u8> {
         57 => 24,
         58 => if top { 43 } else if bottom { 4 } else if side == 2 || side == 4 { 60 } else { 59 },
         60 => if top { if meta > 0 { 86 } else { 87 } } else { 2 },
-        61 => if side <= 1 { 62 } else if side == 3 { 44 } else { 45 },
-        62 => if side <= 1 { 62 } else if side == 3 { 61 } else { 45 },
+        61 | 62 => if side <= 1 { 62 } else if side != meta { 45 } else if id == 62 { 61 } else { 44 },
         73 | 74 => 51,
         79 => 67,
         80 => 66,
@@ -284,10 +302,13 @@ pub const fn terrain_tile(id: u8, meta: u8, side: u8) -> Option<u8> {
         82 => 72,
         83 => 73,
         84 => if top { 75 } else { 74 },
-        86 | 91 => if side <= 1 { 102 } else if side == 3 { if id == 91 { 120 } else { 119 } } else { 118 },
+        86 | 91 => if side <= 1 { 102 } else if side == [3, 4, 2, 5][(meta & 3) as usize] { 119 + (id == 91) as u8 } else { 118 },
         87 => 103,
         88 => 104,
         89 => 105,
+        96 => 84, // trapdoor
+        // BlockCake.getBlockTextureFromSideAndMetadata (base tile 121): top, sides, the bitten face (-X), bottom
+        92 => if top { 121 } else if bottom { 124 } else if meta > 0 && side == 4 { 123 } else { 122 },
         26 => bed_tile(meta, side),
         64 | 71 => door_face(id, meta, side).0,
         _ => return None,
@@ -316,6 +337,8 @@ mod tests {
         // Every tile `tile_of` hands out has its own colour, and the texture covers all of them.
         assert_eq!(atlas_rgba().len(), ATLAS_W * ATLAS_H * 4);
         assert_eq!(TERRAIN.len(), 256 * 256 * 4);
+        assert_eq!(ART.len(), 256 * 288 * 4, "kz.png over sign.png");
+        assert!(art_uv(255, 1.0, 0.0).1 * (ATLAS_H as f32) < (ART_Y + 256) as f32, "the last piece stays above the sign rows");
         assert_ne!(tile_color(260), tile_color(261));
         assert_ne!(tile_color(256), tile_color(17));
         assert!(tile_color(274)[3] == 255 && (25..=26).contains(&tile_color(274)[0])); // black wool
@@ -328,7 +351,9 @@ mod tests {
         assert_eq!([1, 3, 0].map(|s| terrain_tile(2, 0, s)), [Some(0), Some(3), Some(2)]);
         assert_eq!((terrain_tile(17, 0, 1), terrain_tile(17, 0, 3), terrain_tile(17, 2, 3)), (Some(21), Some(20), Some(117)));
         assert_eq!((terrain_tile(35, 0, 2), terrain_tile(35, 14, 2), terrain_tile(35, 15, 2)), (Some(64), Some(129), Some(113)));
-        assert_eq!((terrain_tile(61, 0, 3), terrain_tile(62, 0, 3), terrain_tile(86, 0, 3), terrain_tile(91, 0, 3)), (Some(44), Some(61), Some(119), Some(120)));
+        assert_eq!((terrain_tile(61, 3, 3), terrain_tile(62, 3, 3), terrain_tile(86, 0, 3), terrain_tile(91, 0, 3)), (Some(44), Some(61), Some(119), Some(120)));
+        // facing: a furnace shows its front only on the side its metadata names, a pumpkin on [S, W, N, E] for 0..3
+        assert_eq!((terrain_tile(61, 3, 2), terrain_tile(61, 0, 3), terrain_tile(86, 2, 2), terrain_tile(86, 2, 3)), (Some(45), Some(45), Some(119), Some(118)));
         // doors: the top half is the tile 16 lower; a bed is planks underneath; the generated icon table is sorted
         assert_eq!((door_face(64, 1, 2).0, door_face(64, 9, 2).0, door_face(71, 1, 2).0), (97, 81, 98));
         assert_eq!((bed_tile(0, 0), bed_tile(0, 1), bed_tile(8, 1)), (4, 134, 135));

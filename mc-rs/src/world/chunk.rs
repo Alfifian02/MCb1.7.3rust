@@ -94,10 +94,27 @@ pub fn box_bounds(id: u8, meta: u8) -> Option<[f32; 6]> {
             4 => [0.35, 0.2, 0.7, 0.65, 0.8, 1.0],
             _ => [0.4, 0.0, 0.4, 0.6, 0.6, 0.6],
         },
+        // `BlockSign`: the post is 0.5 wide and one block high; a wall sign (metadata 2..=5 = +Z, -Z, +X, -X wall) is 2/16 thick,
+        // y 9/32..25/32 (`setBlockBoundsBasedOnState`); any other metadata keeps the full cell, as the Java does.
+        63 => [0.25, 0.0, 0.25, 0.75, 1.0, 0.75],
+        68 => {
+            const LO: f32 = 9.0 / 32.0;
+            const HI: f32 = 25.0 / 32.0;
+            const T: f32 = 2.0 / 16.0;
+            match meta {
+                2 => [0.0, LO, 1.0 - T, 1.0, HI, 1.0],
+                3 => [0.0, LO, 0.0, 1.0, HI, T],
+                4 => [1.0 - T, LO, 0.0, 1.0, HI, 1.0],
+                5 => [0.0, LO, 0.0, T, HI, 1.0],
+                _ => [0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+            }
+        }
         59 => [0.0, 0.0, 0.0, 1.0, 0.25, 1.0],                             // crops (pick / outline only: drawn as 4 quads)
         60 => [0.0, 0.0, 0.0, 1.0, 15.0 / 16.0, 1.0],                      // farmland
         78 => [0.0, 0.0, 0.0, 1.0, 2.0 * (1 + (meta & 7)) as f32 / 16.0, 1.0], // snow layer
         81 => [0.0, 0.0, 0.0, 1.0, 1.0, 1.0],                              // cactus
+        96 => trap_box(meta),                                              // trapdoor (`BlockTrapDoor`)
+        92 => [(1 + 2 * meta.min(5)) as f32 / 16.0, 0.0, 1.0 / 16.0, 15.0 / 16.0, 0.5, 15.0 / 16.0], // cake: a bitten slice is gone from -X
         26 => [0.0, 0.0, 0.0, 1.0, 9.0 / 16.0, 1.0],                       // bed (`BlockBed`)
         // `BlockDoor.setDoorRotation` (3/16 thick, one block high per half) from `getState`
         64 | 71 => match if meta & 4 == 0 { meta.wrapping_sub(1) & 3 } else { meta & 3 } {
@@ -145,6 +162,10 @@ pub const SNOW_DEEP: u8 = 255;
 /// Pseudo ids (unused block ids) for what depends on metadata: `STAIRS_PHYS + (meta & 3)` and `DOOR_PHYS + door_state`.
 pub const STAIRS_PHYS: u8 = 100;
 pub const DOOR_PHYS: u8 = 104;
+/// `TRAP_PHYS + (meta & 7)`: a trapdoor's flap (facing + open bit).
+pub const TRAP_PHYS: u8 = 108;
+/// `CAKE_PHYS + meta` (0..=5, slices eaten): the cake's collision box moves with its bites.
+pub const CAKE_PHYS: u8 = 116;
 
 /// The id a physics query (`BlockQuery`) reads for a cell: its own, except a snow layer of 3+ layers (`SNOW_DEEP`), a stair
 /// (`STAIRS_PHYS`, its facing) and a door (`DOOR_PHYS`, its leaf's position).
@@ -153,6 +174,8 @@ pub fn physics_id(id: u8, meta: u8) -> u8 {
         78 if meta & 7 >= 3 => SNOW_DEEP,
         53 | 67 => STAIRS_PHYS + (meta & 3),
         64 | 71 => DOOR_PHYS + door_state(meta),
+        96 => TRAP_PHYS + (meta & 7),
+        92 => CAKE_PHYS + meta.min(5),
         _ => id,
     }
 }
@@ -169,6 +192,21 @@ pub fn door_box(state: u8) -> [f32; 6] {
         0 => [0.0, 0.0, 0.0, 1.0, 1.0, T],
         1 => [1.0 - T, 0.0, 0.0, 1.0, 1.0, 1.0],
         2 => [0.0, 0.0, 1.0 - T, 1.0, 1.0, 1.0],
+        _ => [0.0, 0.0, 0.0, T, 1.0, 1.0],
+    }
+}
+
+/// `BlockTrapDoor.setBlockBoundsForBlockRender`: 3/16 flat on the floor; open (bit 4) it stands against the wall it hangs on
+/// (`meta & 3` = support on +Z, -Z, +X, -X).
+pub fn trap_box(meta: u8) -> [f32; 6] {
+    const T: f32 = 3.0 / 16.0;
+    if meta & 4 == 0 {
+        return [0.0, 0.0, 0.0, 1.0, T, 1.0];
+    }
+    match meta & 3 {
+        0 => [0.0, 0.0, 1.0 - T, 1.0, 1.0, 1.0],
+        1 => [0.0, 0.0, 0.0, 1.0, 1.0, T],
+        2 => [1.0 - T, 0.0, 0.0, 1.0, 1.0, 1.0],
         _ => [0.0, 0.0, 0.0, T, 1.0, 1.0],
     }
 }
@@ -208,6 +246,9 @@ pub fn collision(id: u8) -> Option<[f32; 6]> {
         _ if is_plant(id) => None,
         44 | SNOW_DEEP => Some([0.0, 0.0, 0.0, 1.0, 0.5, 1.0]),
         DOOR_PHYS..=107 => Some(door_box(id - DOOR_PHYS)),
+        TRAP_PHYS..=115 => Some(trap_box(id - TRAP_PHYS)),
+        // `BlockCake.getCollisionBoundingBoxFromPool`: 1/16 lower than the drawn box (0.5 - 1/16 high)
+        CAKE_PHYS..=121 => Some([(1 + 2 * (id - CAKE_PHYS)) as f32 / 16.0, 0.0, 1.0 / 16.0, 15.0 / 16.0, 0.5 - 1.0 / 16.0, 15.0 / 16.0]),
         26 => Some([0.0, 0.0, 0.0, 1.0, 9.0 / 16.0, 1.0]),
         81 => Some([I, 0.0, I, 1.0 - I, 1.0 - I, 1.0 - I]),
         85 => Some([0.0, 0.0, 0.0, 1.0, 1.5, 1.0]),
@@ -218,7 +259,7 @@ pub fn collision(id: u8) -> Option<[f32; 6]> {
 /// `isOpaqueCube`: hides the faces behind it. Not the plants, fluids and boxes above; leaves, glass and ice stay in, as the
 /// mesher draws them as opaque cubes.
 pub fn opaque(id: u8) -> bool {
-    id != 0 && !is_plant(id) && !is_fluid(id) && !matches!(id, 26 | 27 | 28 | 44 | 50 | 51 | 53 | 59 | 60 | 64..=67 | 71 | 78 | 81 | 85)
+    id != 0 && !is_plant(id) && !is_fluid(id) && !matches!(id, 26 | 27 | 28 | 44 | 50 | 51 | 53 | 59 | 60 | 63..=68 | 71 | 78 | 81 | 85 | 92 | 96)
 }
 
 /// `Block.lightOpacity`: how much light a block eats (255 = fully opaque). Default is 255 for
@@ -317,5 +358,18 @@ mod phys_tests {
         assert_eq!(collisions(physics_id(71, 8)).1, 1, "the upper half has the same leaf");
         assert_eq!(collisions(1), ([[0.0, 0.0, 0.0, 1.0, 1.0, 1.0], [0.0; 6]], 1));
         assert_eq!(collisions(0).1, 0);
+    }
+
+    #[test]
+    fn trapdoor_lies_flat_or_stands_on_its_wall() {
+        use crate::world::pick::trap_meta;
+        assert_eq!(collision(physics_id(96, 2)), Some([0.0, 0.0, 0.0, 1.0, 3.0 / 16.0, 1.0]), "closed: flat whatever the facing");
+        assert_eq!(collision(physics_id(96, 4)), Some([0.0, 0.0, 13.0 / 16.0, 1.0, 1.0, 1.0]), "open on a +Z wall");
+        assert_eq!(box_bounds(96, 7), Some([0.0, 0.0, 0.0, 3.0 / 16.0, 1.0, 1.0]), "open on a -X wall");
+        assert_eq!((trap_meta(2, true), trap_meta(5, true), trap_meta(1, true), trap_meta(0, true), trap_meta(3, false)), (Some(0), Some(3), None, None, None));
+        assert!(!opaque(96));
+        // cake: the box loses 2/16 from -X per slice; the collision is 1/16 lower than the drawn box
+        assert_eq!(box_bounds(92, 2), Some([5.0 / 16.0, 0.0, 1.0 / 16.0, 15.0 / 16.0, 0.5, 15.0 / 16.0]));
+        assert_eq!(collision(physics_id(92, 0)), Some([1.0 / 16.0, 0.0, 1.0 / 16.0, 15.0 / 16.0, 7.0 / 16.0, 15.0 / 16.0]));
     }
 }
