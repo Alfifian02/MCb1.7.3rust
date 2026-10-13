@@ -114,6 +114,26 @@ const WATER_LIGHT: f32 = @WL@; // `mesh::WATER_LIGHT`: the water depth rides in 
 
 const TW: u32 = @TW@u;
 const TH: f32 = @TH@.0;
+const MIPS: f32 = @MIPS@.0; // `atlas::MIPS`
+const ITEMS_Y: f32 = @IY@.0; // `atlas::ITEMS_Y`: the flat strip is the rows 256..ITEMS_Y
+
+// The one atlas read. A minified tile (distance, a slanted face, `RENDER_SCALE`) is filtered bilinear + trilinear, and a tap of that
+// footprint within half a texel of the tile edge reads the NEIGHBOURING tile (the old 0.02 texel UV inset only covered mip 0): lines along
+// every block edge, and a flicker that moves with the lod. So the UV is clamped into its own 16-texel tile by half a texel of the
+// coarsest mip the sampler will touch (`ceil(lod)`). Magnified (Nearest) it changes nothing. The flat-colour strip (one texel per tile)
+// is read at mip 0, where a texel centre is exact. Derivatives come first, so every caller stays in uniform control flow.
+// `tools/atlas_bleed_check.py` is the numeric check of this clamp.
+fn atlas_sample(uv: vec2<f32>) -> vec4<f32> {
+    let size = vec2<f32>(textureDimensions(tex));
+    let gx = dpdx(uv);
+    let gy = dpdy(uv);
+    let p = uv * size;
+    if p.y >= 256.0 && p.y < ITEMS_Y { return textureSampleLevel(tex, samp, uv, 0.0); }
+    let g = max(length(gx * size), length(gy * size)); // texels of mip 0 per pixel = 2^lod
+    let pad = 0.5 * exp2(min(ceil(log2(max(g, 1.0))), MIPS - 1.0));
+    let o = floor(p / 16.0) * 16.0;
+    return textureSampleGrad(tex, samp, clamp(p, o + vec2<f32>(pad), o + vec2<f32>(16.0 - pad)) / size, gx, gy);
+}
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
@@ -134,6 +154,9 @@ fn vs_main(@location(0) vpos: vec3<f32>, @location(1) vuv: vec2<f32>, @location(
     // sRGB bytes -> linear: texel x tint is the same product in either space (the Java multiplies bytes)
     o.tint = pow(vec3<f32>(f32((tp >> 16u) & 255u), f32((tp >> 8u) & 255u), f32(tp & 255u)) / 255.0, vec3<f32>(2.2));
     o.pos = u.proj * u.view * vec4<f32>(vpos, 1.0);
+    // Grass-side overlay (tile 38, `mesh.rs`: a quad 2 mm off the face). Depth32 resolves ~1.2e-6 * z^2 blocks, so past ~40 blocks it
+    // z-fought with the face under it and flickered: pull it 8 depth ulps forward (1 cm at 30 blocks, 4 cm at 64).
+    if u32(vuv.y * TH) * TW + u32(vuv.x * f32(TW)) == 38u { o.pos.z -= 5e-7 * o.pos.w; }
     o.uv = vuv;
     o.light = vlight;
     o.wp = vpos;
@@ -170,9 +193,9 @@ fn vs_shadow(@location(0) p: vec3<f32>, @location(1) uv: vec2<f32>) -> @builtin(
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let dx = dpdx(in.wp); // derivatives stay in uniform control flow; `face_index` below can then sit behind a per-pixel branch
     let dy = dpdy(in.wp);
-    let c = textureSample(tex, samp, in.uv);
-    // Cut-out textures: plants, glass. ponytail: alpha from mip 0, so the linear filter at a tile corner cannot blend in a transparent
-    // neighbour tile and punch bright holes at block corners; the cost is a second tap, the upgrade path is a per-tile clamp.
+    let c = atlas_sample(in.uv);
+    // Cut-out textures: plants, glass. Alpha from mip 0 so a distant plant keeps its shape (the mips average alpha); the neighbouring
+    // tile no longer leaks in, `atlas_sample` clamps the UV to its own tile.
     if textureSampleLevel(tex, samp, in.uv, 0.0).a < 0.5 { discard; }
     let rgb = c.rgb * in.tint;
     if LEGACY {
@@ -202,7 +225,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 fn fs_water(in: VsOut) -> @location(0) vec4<f32> {
     let depth = floor(in.light + 0.05); // +0.05: interpolation may land a hair under the integer
     let face = face_index(in.wp, dpdx(in.wp), dpdy(in.wp));
-    let c = textureSample(tex, samp, in.uv);
+    let c = atlas_sample(in.uv);
     let absorb = 1.0 - exp(-0.35 * depth);
     let graze = pow(1.0 - abs(normalize(u.eye.xyz - in.wp).y), 3.0);
     let lm = in.lm + 0.01;
@@ -220,6 +243,8 @@ fn shader_source(legacy: bool) -> String {
         .replace("@DISTORT@", &crate::render::shadows::distortion_wgsl())
         .replace("@TW@", &atlas::TILES_W.to_string())
         .replace("@TH@", &(atlas::ATLAS_H / 16).to_string())
+        .replace("@MIPS@", &atlas::MIPS.to_string())
+        .replace("@IY@", &atlas::ITEMS_Y.to_string())
         .replace("@LEGACY@", if legacy { "true" } else { "false" })
         .replace("@WL@", &format!("{:?}", crate::render::mesh::WATER_LIGHT))
 }
@@ -580,6 +605,7 @@ mod tests {
             naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all()).validate(&m).unwrap();
         }
         assert!(SHADER_SRC.contains("apply_fog(photon_light(albedo, 6u, sky, bl, 0.0)"), "legacy terrain is lit in `fs_main`");
+        assert!(!SHADER_SRC.contains("textureSample(tex"), "the atlas is read through `atlas_sample` only (tile-clamped, no bleed)");
     }
 
     /// `WHITE` is 2^24 - 1, the last f32 below 2^24: `+ 0.5` rounds it up to 2^24 and all three colour bytes read 0 (black sides, mobs).
