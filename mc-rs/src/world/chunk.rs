@@ -249,7 +249,6 @@ pub fn collision(id: u8) -> Option<[f32; 6]> {
         TRAP_PHYS..=115 => Some(trap_box(id - TRAP_PHYS)),
         // `BlockCake.getCollisionBoundingBoxFromPool`: 1/16 lower than the drawn box (0.5 - 1/16 high)
         CAKE_PHYS..=121 => Some([(1 + 2 * (id - CAKE_PHYS)) as f32 / 16.0, 0.0, 1.0 / 16.0, 15.0 / 16.0, 0.5 - 1.0 / 16.0, 15.0 / 16.0]),
-        26 => Some([0.0, 0.0, 0.0, 1.0, 9.0 / 16.0, 1.0]),
         81 => Some([I, 0.0, I, 1.0 - I, 1.0 - I, 1.0 - I]),
         85 => Some([0.0, 0.0, 0.0, 1.0, 1.5, 1.0]),
         _ => Some([0.0, 0.0, 0.0, 1.0, 1.0, 1.0]),

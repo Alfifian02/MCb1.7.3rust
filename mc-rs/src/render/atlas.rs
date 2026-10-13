@@ -309,8 +309,6 @@ pub const fn terrain_tile(id: u8, meta: u8, side: u8) -> Option<u8> {
         96 => 84, // trapdoor
         // BlockCake.getBlockTextureFromSideAndMetadata (base tile 121): top, sides, the bitten face (-X), bottom
         92 => if top { 121 } else if bottom { 124 } else if meta > 0 && side == 4 { 123 } else { 122 },
-        26 => bed_tile(meta, side),
-        64 | 71 => door_face(id, meta, side).0,
         _ => return None,
     })
 }

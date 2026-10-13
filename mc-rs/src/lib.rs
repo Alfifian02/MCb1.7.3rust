@@ -1273,7 +1273,7 @@ impl App {
             .signs
             .iter()
             .filter_map(|(&pos, text)| {
-                let id = self.chunks.block_loaded(pos.0, pos.1, pos.2).filter(|b| matches!(b, decor::POST | decor::WALL))?;
+                let id = self.chunks.block_loaded(pos.0, pos.1, pos.2).filter(|b| matches!(*b, decor::POST | decor::WALL))?;
                 Some(SignView { pos, id, meta: self.chunks.meta(pos.0, pos.1, pos.2), text })
             })
             .collect();
