@@ -1,4 +1,4 @@
-,//! Render pipeline for chunk meshes + atlas texture.
+//! Render pipeline for chunk meshes + atlas texture.
 
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
