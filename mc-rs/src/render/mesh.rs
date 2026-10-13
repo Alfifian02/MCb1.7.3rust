@@ -438,15 +438,15 @@ pub fn build_split_tinted(smooth: bool, blocks: &[u8], data: &Nibbles, nb_data: 
                     } else {
                         list.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
                     }
-                    // `renderBlockFluids`-style second pass of the grass side (`RenderBlocks`, tile 38 x grass colour): a cut-out quad\n                    // 2 mm off the face. ponytail: not a depth-biased pass, so it can shimmer at extreme distance.
+                    // `renderBlockFluids`-style second pass of the grass side (`RenderBlocks`, tile 38 x grass colour): a cut-out quad on the SAME
+                    // plane as the face (same vertices, same uv), so its texels cover the base tile's untinted fringe exactly; it wins the depth test
+                    // by the bias in `vs_main` (a 2 mm offset showed the base's bright fringe as a 1 px line at every texel edge: parallax).
                     if blk == 2 && side_of_cell && !snowy {
                         let b2 = verts.len() as u32 / VF as u32;
                         for (k, corner) in face.corners.iter().enumerate() {
                             let mut v: [f32; VF] = verts[(base as usize + k) * VF..(base as usize + k + 1) * VF].try_into().unwrap();
                             let (cu, cv) = window(face, *corner);
                             let (au, av) = atlas::terrain_uv(38, cu, cv);
-                            v[0] += dx as f32 * 0.002;
-                            v[2] += dz as f32 * 0.002;
                             v[3] = au;
                             v[4] = av;
                             v[7] = tints.grass[(x * 16 + z) as usize];

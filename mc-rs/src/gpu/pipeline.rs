@@ -154,8 +154,9 @@ fn vs_main(@location(0) vpos: vec3<f32>, @location(1) vuv: vec2<f32>, @location(
     // sRGB bytes -> linear: texel x tint is the same product in either space (the Java multiplies bytes)
     o.tint = pow(vec3<f32>(f32((tp >> 16u) & 255u), f32((tp >> 8u) & 255u), f32(tp & 255u)) / 255.0, vec3<f32>(2.2));
     o.pos = u.proj * u.view * vec4<f32>(vpos, 1.0);
-    // Grass-side overlay (tile 38, `mesh.rs`: a quad 2 mm off the face). Depth32 resolves ~1.2e-6 * z^2 blocks, so past ~40 blocks it
-    // z-fought with the face under it and flickered: pull it 8 depth ulps forward (1 cm at 30 blocks, 4 cm at 64).
+    // Grass-side overlay (tile 38, `mesh.rs`): the same plane as the face under it, so it must win the depth test by a bias, 8 depth ulps
+    // forward (Depth32 resolves ~1.2e-6 * z^2 blocks: 1 cm at 30 blocks, 4 cm at 64). Without it the two z-fight and the fringe flickers.
+    if u32(vuv.y * TH) * TW + u32(vuv.x * f32(TW)) == 38u { o.pos.z -= 5e-7 * o.pos.w; }
     o.uv = vuv;
     o.light = vlight;
     o.wp = vpos;
