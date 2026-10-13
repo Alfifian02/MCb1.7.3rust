@@ -1,4 +1,4 @@
-//! Render pipeline for chunk meshes + atlas texture.
+,//! Render pipeline for chunk meshes + atlas texture.
 
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
@@ -156,7 +156,6 @@ fn vs_main(@location(0) vpos: vec3<f32>, @location(1) vuv: vec2<f32>, @location(
     o.pos = u.proj * u.view * vec4<f32>(vpos, 1.0);
     // Grass-side overlay (tile 38, `mesh.rs`: a quad 2 mm off the face). Depth32 resolves ~1.2e-6 * z^2 blocks, so past ~40 blocks it
     // z-fought with the face under it and flickered: pull it 8 depth ulps forward (1 cm at 30 blocks, 4 cm at 64).
-    if u32(vuv.y * TH) * TW + u32(vuv.x * f32(TW)) == 38u { o.pos.z -= 5e-7 * o.pos.w; }
     o.uv = vuv;
     o.light = vlight;
     o.wp = vpos;
