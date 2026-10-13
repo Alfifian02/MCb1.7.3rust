@@ -373,8 +373,9 @@ pub fn build_split_tinted(smooth: bool, blocks: &[u8], data: &Nibbles, nb_data: 
                     // `BlockGrass.getBlockTexture`: snow on top turns the side into tile 68 (and drops the overlay).
                     let snowy = blk == 2 && side_of_cell && matches!(rid(x, y + 1, z), 78 | 80);
                     let chest_tile = if blk == chest::ID { Some(chest::tile(&rid, (x, y, z), [5, 4, 1, 0, 3, 2][face_i])) } else if snowy { Some(68) } else { None };
-                    // Grass tints its top only (the side's tint is on the overlay quad); every other tinted block all its faces.
-                    let tint = if blk == 2 && face_i != 2 { WHITE } else { tint_of(tints, blk, meta, (x * 16 + z) as usize) };
+                    // Grass: its top is tinted; a side carries the grass colour for the overlay `fs_main` draws over tile 3 (the shader tints
+                    // only that, not the base fringe), the bottom and a snowy side (tile 68) stay white; every other tinted block all its faces.
+                    let tint = if blk == 2 && (face_i == 3 || snowy) { WHITE } else { tint_of(tints, blk, meta, (x * 16 + z) as usize) };
                     // Doors draw some faces mirrored (negative tile in the Java).
                     let flip = matches!(blk, 64 | 71) && atlas::door_face(blk, meta, [5, 4, 1, 0, 3, 2][face_i]).1;
                     let shade = match face_i {
@@ -438,22 +439,8 @@ pub fn build_split_tinted(smooth: bool, blocks: &[u8], data: &Nibbles, nb_data: 
                     } else {
                         list.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
                     }
-                    // `renderBlockFluids`-style second pass of the grass side (`RenderBlocks`, tile 38 x grass colour): a cut-out quad on the SAME
-                    // plane as the face (same vertices, same uv), so its texels cover the base tile's untinted fringe exactly; it wins the depth test
-                    // by the bias in `vs_main` (a 2 mm offset showed the base's bright fringe as a 1 px line at every texel edge: parallax).
-                    if blk == 2 && side_of_cell && !snowy {
-                        let b2 = verts.len() as u32 / VF as u32;
-                        for (k, corner) in face.corners.iter().enumerate() {
-                            let mut v: [f32; VF] = verts[(base as usize + k) * VF..(base as usize + k + 1) * VF].try_into().unwrap();
-                            let (cu, cv) = window(face, *corner);
-                            let (au, av) = atlas::terrain_uv(38, cu, cv);
-                            v[3] = au;
-                            v[4] = av;
-                            v[7] = tints.grass[(x * 16 + z) as usize];
-                            verts.extend_from_slice(&v);
-                        }
-                        idxs.extend_from_slice(&[b2, b2 + 1, b2 + 2, b2, b2 + 2, b2 + 3]);
-                    }
+                    // The grass side's tile 38 overlay (`RenderBlocks`, x grass colour) is not a second quad any more: two quads on one plane could
+                    // only be told apart by the depth test, which flickered on a phone at a grazing angle. `fs_main` composites it on tile 3.
                 }
                 }
             }
@@ -887,8 +874,8 @@ mod tests {
         assert!(b.1 == 2 && b.0[0] != s && !opaque(53) && !opaque(85) && !opaque(59));
     }
 
-    /// Grass keeps its side tile and gets a tinted cut-out overlay quad on each side (4 more quads), its top carries the column's
-    /// grass colour; a rail is one flat quad drawn from both sides.
+    /// Grass is one quad per face (the side's overlay is composited in the shader): its top and its 4 sides carry the column's grass
+    /// colour (the shader tints only the overlay), its bottom does not; a rail is one flat quad drawn from both sides.
     #[test]
     fn grass_overlay_tint_and_rail_quad() {
         let (mut c, z, a) = (vec![0u8; VOLUME], vec![0u8; VOLUME], vec![0xFFu8; VOLUME]);
@@ -898,8 +885,8 @@ mod tests {
         t.grass[5 * 16 + 5] = 0x112233 as f32;
         let e = Nibbles::new();
         let (v, i, _) = build_split_tinted(false, &c, &e, [&e; 4], &a, [&z[..]; 4], [&a[..]; 4], 0, 0, 0, &t);
-        assert_eq!(v.len() / (4 * VF), 6 + 4 + 1);
-        assert_eq!(i.len(), (6 + 4) * 6 + 12);
-        assert_eq!(v.chunks(VF).filter(|q| q[7] == 0x112233 as f32).count(), 4 + 16); // top face + 4 overlay quads
+        assert_eq!(v.len() / (4 * VF), 6 + 1);
+        assert_eq!(i.len(), 6 * 6 + 12);
+        assert_eq!(v.chunks(VF).filter(|q| q[7] == 0x112233 as f32).count(), 4 + 16); // top face + 4 sides, not the bottom
     }
 }

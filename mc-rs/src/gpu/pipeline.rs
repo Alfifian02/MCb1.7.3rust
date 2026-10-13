@@ -124,9 +124,13 @@ const ITEMS_Y: f32 = @IY@.0; // `atlas::ITEMS_Y`: the flat strip is the rows 256
 // is read at mip 0, where a texel centre is exact. Derivatives come first, so every caller stays in uniform control flow.
 // `tools/atlas_bleed_check.py` is the numeric check of this clamp.
 fn atlas_sample(uv: vec2<f32>) -> vec4<f32> {
+    return atlas_sample_g(uv, dpdx(uv), dpdy(uv));
+}
+
+// `atlas_sample` with the uv derivatives given: `textureSampleGrad` needs no uniform control flow, so this one may sit behind a branch
+// (the grass side in `fs_main`) as long as the derivatives were taken outside it.
+fn atlas_sample_g(uv: vec2<f32>, gx: vec2<f32>, gy: vec2<f32>) -> vec4<f32> {
     let size = vec2<f32>(textureDimensions(tex));
-    let gx = dpdx(uv);
-    let gy = dpdy(uv);
     let p = uv * size;
     if p.y >= 256.0 && p.y < ITEMS_Y { return textureSampleLevel(tex, samp, uv, 0.0); }
     let g = max(length(gx * size), length(gy * size)); // texels of mip 0 per pixel = 2^lod
@@ -154,9 +158,6 @@ fn vs_main(@location(0) vpos: vec3<f32>, @location(1) vuv: vec2<f32>, @location(
     // sRGB bytes -> linear: texel x tint is the same product in either space (the Java multiplies bytes)
     o.tint = pow(vec3<f32>(f32((tp >> 16u) & 255u), f32((tp >> 8u) & 255u), f32(tp & 255u)) / 255.0, vec3<f32>(2.2));
     o.pos = u.proj * u.view * vec4<f32>(vpos, 1.0);
-    // Grass-side overlay (tile 38, `mesh.rs`): the same plane as the face under it, so it must win the depth test by a bias, 8 depth ulps
-    // forward (Depth32 resolves ~1.2e-6 * z^2 blocks: 1 cm at 30 blocks, 4 cm at 64). Without it the two z-fight and the fringe flickers.
-    if u32(vuv.y * TH) * TW + u32(vuv.x * f32(TW)) == 38u { o.pos.z -= 5e-7 * o.pos.w; }
     o.uv = vuv;
     o.light = vlight;
     o.wp = vpos;
@@ -193,11 +194,22 @@ fn vs_shadow(@location(0) p: vec3<f32>, @location(1) uv: vec2<f32>) -> @builtin(
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let dx = dpdx(in.wp); // derivatives stay in uniform control flow; `face_index` below can then sit behind a per-pixel branch
     let dy = dpdy(in.wp);
-    let c = atlas_sample(in.uv);
+    let gx = dpdx(in.uv); // the uv derivatives too, in uniform control flow: the grass side below samples behind a branch
+    let gy = dpdy(in.uv);
+    let c = atlas_sample_g(in.uv, gx, gy);
     // Cut-out textures: plants, glass. Alpha from mip 0 so a distant plant keeps its shape (the mips average alpha); the neighbouring
     // tile no longer leaks in, `atlas_sample` clamps the UV to its own tile.
     if textureSampleLevel(tex, samp, in.uv, 0.0).a < 0.5 { discard; }
-    let rgb = c.rgb * in.tint;
+    var rgb = c.rgb * in.tint;
+    // Grass side (tile 3, untinted): `RenderBlocks` draws tile 38 over it, cut out and tinted with the grass colour (`in.tint`, which
+    // `mesh.rs` puts on this face). Done here, on the one quad, instead of a second quad on the same plane: two coplanar quads can only be
+    // told apart by the depth test, which on a phone GPU is not exact at a grazing angle, so the fringe flickered between the two.
+    // Tile 38 is 3 tiles right and 2 down from tile 3.
+    if u32(in.uv.y * TH) * TW + u32(in.uv.x * f32(TW)) == 3u {
+        let ouv = in.uv + vec2<f32>(3.0 / f32(TW), 2.0 / TH);
+        rgb = c.rgb;
+        if textureSampleLevel(tex, samp, ouv, 0.0).a >= 0.5 { rgb = atlas_sample_g(ouv, gx, gy).rgb * in.tint; }
+    }
     if LEGACY {
         // Face shade and ambient occlusion x the sky/block light (`photon_light`'s legacy branch) x the fog.
         // Smooth faces carry shade * ao already (`in.ao >= 0`); only the flat ones need their face from the derivatives.

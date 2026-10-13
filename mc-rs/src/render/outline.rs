@@ -4,7 +4,7 @@
 
 use crate::render::mesh::push_box;
 
-// 0.005, not vanilla's 0.002: the grass-side overlay (`mesh.rs`) already sits 0.002 off the face, and at an equal offset it hid the lines.
+// 0.005, not vanilla's 0.002: a phone's depth buffer cannot tell a line 0.002 off the face from the face at a distance, it z-fights.
 const GROW: f32 = 0.005;
 /// Edge thickness in blocks. // UNVERIFIED: vanilla draws 2 px GL lines, which have no block size.
 const THICK: f32 = 0.02;

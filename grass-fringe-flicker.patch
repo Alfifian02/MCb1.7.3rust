@@ -1,0 +1,140 @@
+--- a/mc-rs/src/gpu/pipeline.rs
++++ b/mc-rs/src/gpu/pipeline.rs
+@@ -124,9 +124,13 @@
+ // is read at mip 0, where a texel centre is exact. Derivatives come first, so every caller stays in uniform control flow.
+ // `tools/atlas_bleed_check.py` is the numeric check of this clamp.
+ fn atlas_sample(uv: vec2<f32>) -> vec4<f32> {
++    return atlas_sample_g(uv, dpdx(uv), dpdy(uv));
++}
++
++// `atlas_sample` with the uv derivatives given: `textureSampleGrad` needs no uniform control flow, so this one may sit behind a branch
++// (the grass side in `fs_main`) as long as the derivatives were taken outside it.
++fn atlas_sample_g(uv: vec2<f32>, gx: vec2<f32>, gy: vec2<f32>) -> vec4<f32> {
+     let size = vec2<f32>(textureDimensions(tex));
+-    let gx = dpdx(uv);
+-    let gy = dpdy(uv);
+     let p = uv * size;
+     if p.y >= 256.0 && p.y < ITEMS_Y { return textureSampleLevel(tex, samp, uv, 0.0); }
+     let g = max(length(gx * size), length(gy * size)); // texels of mip 0 per pixel = 2^lod
+@@ -154,9 +158,6 @@
+     // sRGB bytes -> linear: texel x tint is the same product in either space (the Java multiplies bytes)
+     o.tint = pow(vec3<f32>(f32((tp >> 16u) & 255u), f32((tp >> 8u) & 255u), f32(tp & 255u)) / 255.0, vec3<f32>(2.2));
+     o.pos = u.proj * u.view * vec4<f32>(vpos, 1.0);
+-    // Grass-side overlay (tile 38, `mesh.rs`): the same plane as the face under it, so it must win the depth test by a bias, 8 depth ulps
+-    // forward (Depth32 resolves ~1.2e-6 * z^2 blocks: 1 cm at 30 blocks, 4 cm at 64). Without it the two z-fight and the fringe flickers.
+-    if u32(vuv.y * TH) * TW + u32(vuv.x * f32(TW)) == 38u { o.pos.z -= 5e-7 * o.pos.w; }
+     o.uv = vuv;
+     o.light = vlight;
+     o.wp = vpos;
+@@ -193,11 +194,22 @@
+ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+     let dx = dpdx(in.wp); // derivatives stay in uniform control flow; `face_index` below can then sit behind a per-pixel branch
+     let dy = dpdy(in.wp);
+-    let c = atlas_sample(in.uv);
++    let gx = dpdx(in.uv); // the uv derivatives too, in uniform control flow: the grass side below samples behind a branch
++    let gy = dpdy(in.uv);
++    let c = atlas_sample_g(in.uv, gx, gy);
+     // Cut-out textures: plants, glass. Alpha from mip 0 so a distant plant keeps its shape (the mips average alpha); the neighbouring
+     // tile no longer leaks in, `atlas_sample` clamps the UV to its own tile.
+     if textureSampleLevel(tex, samp, in.uv, 0.0).a < 0.5 { discard; }
+-    let rgb = c.rgb * in.tint;
++    var rgb = c.rgb * in.tint;
++    // Grass side (tile 3, untinted): `RenderBlocks` draws tile 38 over it, cut out and tinted with the grass colour (`in.tint`, which
++    // `mesh.rs` puts on this face). Done here, on the one quad, instead of a second quad on the same plane: two coplanar quads can only be
++    // told apart by the depth test, which on a phone GPU is not exact at a grazing angle, so the fringe flickered between the two.
++    // Tile 38 is 3 tiles right and 2 down from tile 3.
++    if u32(in.uv.y * TH) * TW + u32(in.uv.x * f32(TW)) == 3u {
++        let ouv = in.uv + vec2<f32>(3.0 / f32(TW), 2.0 / TH);
++        rgb = c.rgb;
++        if textureSampleLevel(tex, samp, ouv, 0.0).a >= 0.5 { rgb = atlas_sample_g(ouv, gx, gy).rgb * in.tint; }
++    }
+     if LEGACY {
+         // Face shade and ambient occlusion x the sky/block light (`photon_light`'s legacy branch) x the fog.
+         // Smooth faces carry shade * ao already (`in.ao >= 0`); only the flat ones need their face from the derivatives.
+--- a/mc-rs/src/render/mesh.rs
++++ b/mc-rs/src/render/mesh.rs
+@@ -373,8 +373,9 @@
+                     // `BlockGrass.getBlockTexture`: snow on top turns the side into tile 68 (and drops the overlay).
+                     let snowy = blk == 2 && side_of_cell && matches!(rid(x, y + 1, z), 78 | 80);
+                     let chest_tile = if blk == chest::ID { Some(chest::tile(&rid, (x, y, z), [5, 4, 1, 0, 3, 2][face_i])) } else if snowy { Some(68) } else { None };
+-                    // Grass tints its top only (the side's tint is on the overlay quad); every other tinted block all its faces.
+-                    let tint = if blk == 2 && face_i != 2 { WHITE } else { tint_of(tints, blk, meta, (x * 16 + z) as usize) };
++                    // Grass: its top is tinted; a side carries the grass colour for the overlay `fs_main` draws over tile 3 (the shader tints
++                    // only that, not the base fringe), the bottom and a snowy side (tile 68) stay white; every other tinted block all its faces.
++                    let tint = if blk == 2 && (face_i == 3 || snowy) { WHITE } else { tint_of(tints, blk, meta, (x * 16 + z) as usize) };
+                     // Doors draw some faces mirrored (negative tile in the Java).
+                     let flip = matches!(blk, 64 | 71) && atlas::door_face(blk, meta, [5, 4, 1, 0, 3, 2][face_i]).1;
+                     let shade = match face_i {
+@@ -438,22 +439,8 @@
+                     } else {
+                         list.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+                     }
+-                    // `renderBlockFluids`-style second pass of the grass side (`RenderBlocks`, tile 38 x grass colour): a cut-out quad on the SAME
+-                    // plane as the face (same vertices, same uv), so its texels cover the base tile's untinted fringe exactly; it wins the depth test
+-                    // by the bias in `vs_main` (a 2 mm offset showed the base's bright fringe as a 1 px line at every texel edge: parallax).
+-                    if blk == 2 && side_of_cell && !snowy {
+-                        let b2 = verts.len() as u32 / VF as u32;
+-                        for (k, corner) in face.corners.iter().enumerate() {
+-                            let mut v: [f32; VF] = verts[(base as usize + k) * VF..(base as usize + k + 1) * VF].try_into().unwrap();
+-                            let (cu, cv) = window(face, *corner);
+-                            let (au, av) = atlas::terrain_uv(38, cu, cv);
+-                            v[3] = au;
+-                            v[4] = av;
+-                            v[7] = tints.grass[(x * 16 + z) as usize];
+-                            verts.extend_from_slice(&v);
+-                        }
+-                        idxs.extend_from_slice(&[b2, b2 + 1, b2 + 2, b2, b2 + 2, b2 + 3]);
+-                    }
++                    // The grass side's tile 38 overlay (`RenderBlocks`, x grass colour) is not a second quad any more: two quads on one plane could
++                    // only be told apart by the depth test, which flickered on a phone at a grazing angle. `fs_main` composites it on tile 3.
+                 }
+                 }
+             }
+@@ -887,8 +874,8 @@
+         assert!(b.1 == 2 && b.0[0] != s && !opaque(53) && !opaque(85) && !opaque(59));
+     }
+ 
+-    /// Grass keeps its side tile and gets a tinted cut-out overlay quad on each side (4 more quads), its top carries the column's
+-    /// grass colour; a rail is one flat quad drawn from both sides.
++    /// Grass is one quad per face (the side's overlay is composited in the shader): its top and its 4 sides carry the column's grass
++    /// colour (the shader tints only the overlay), its bottom does not; a rail is one flat quad drawn from both sides.
+     #[test]
+     fn grass_overlay_tint_and_rail_quad() {
+         let (mut c, z, a) = (vec![0u8; VOLUME], vec![0u8; VOLUME], vec![0xFFu8; VOLUME]);
+@@ -898,8 +885,8 @@
+         t.grass[5 * 16 + 5] = 0x112233 as f32;
+         let e = Nibbles::new();
+         let (v, i, _) = build_split_tinted(false, &c, &e, [&e; 4], &a, [&z[..]; 4], [&a[..]; 4], 0, 0, 0, &t);
+-        assert_eq!(v.len() / (4 * VF), 6 + 4 + 1);
+-        assert_eq!(i.len(), (6 + 4) * 6 + 12);
+-        assert_eq!(v.chunks(VF).filter(|q| q[7] == 0x112233 as f32).count(), 4 + 16); // top face + 4 overlay quads
++        assert_eq!(v.len() / (4 * VF), 6 + 1);
++        assert_eq!(i.len(), 6 * 6 + 12);
++        assert_eq!(v.chunks(VF).filter(|q| q[7] == 0x112233 as f32).count(), 4 + 16); // top face + 4 sides, not the bottom
+     }
+ }
+--- a/mc-rs/src/render/outline.rs
++++ b/mc-rs/src/render/outline.rs
+@@ -4,7 +4,7 @@
+ 
+ use crate::render::mesh::push_box;
+ 
+-// 0.005, not vanilla's 0.002: the grass-side overlay (`mesh.rs`) already sits 0.002 off the face, and at an equal offset it hid the lines.
++// 0.005, not vanilla's 0.002: a phone's depth buffer cannot tell a line 0.002 off the face from the face at a distance, it z-fights.
+ const GROW: f32 = 0.005;
+ /// Edge thickness in blocks. // UNVERIFIED: vanilla draws 2 px GL lines, which have no block size.
+ const THICK: f32 = 0.02;
+--- a/ROADMAP.md
++++ b/ROADMAP.md
+@@ -46,6 +46,11 @@
+ BiomeGenBase but climate never selects it; b1.7.3 has no ravines.
+ 
+ ## Changelog
++- 2026-10-13: FIX grass-side fringe flickering between bright and dim (written WITHOUT a Rust toolchain: not compiled, not run; `mesh::grass_overlay_tint_and_rail_quad` changed, the WGSL is covered by `chunk_shader_validates_and_legacy_is_forward`; video `Record_2026-10-13-16-08-56.mp4`):
++    - Symptom, measured on the video: the camera is still for frames ~28-60 and the frames are identical, so nothing flickers there; while it moves, the green fringe along the top of a grass block's side face is bright in frames 72, 73, 85, 87 and dark in 74-83, 84, 86, i.e. it flips from one frame to the next at the same view.
++    - Cause: the overlay (tile 38, grey fringe x grass tint = the dark one) was a second quad on the SAME plane and the SAME vertices as the face (tile 3, which has a bright untinted green fringe baked in), told apart only by a depth pull of 5e-7 (8 ulps) in `vs_main`. Two differently triangulated coplanar quads rasterise a few ulps apart, and a phone GPU interpolates depth with less precision than that at a grazing angle (the camera looking down a side face), so per pixel and per frame either quad won: the base's bright fringe showed through the overlay. UNVERIFIED on a device, but it is the only thing in the frame that decides this by depth, and it matches the toggling.
++    - Fix, no depth test left to lose: `mesh.rs` emits one quad per grass side (it carries the grass tint, the bottom and a snowy side stay white) and `fs_main` composites the overlay on tile 3 (`ouv` = tile 38, mip-0 alpha cut-out, colour from `atlas_sample_g` x tint, else the untinted base). `atlas_sample_g` is `atlas_sample` with the uv derivatives passed in, so the branch needs no uniform control flow. The depth pull in `vs_main` is gone. Cost: 4 quads fewer per grass block, 1 more texture read only on grass sides.
++    - ponytail: the outline's 0.005 offset is kept (its comment named the old 2 mm overlay); other coplanar pairs would flicker the same way (none known).
+ - 2026-10-13: FIX lines along block edges + white flicker on textures (written WITHOUT a Rust toolchain: not compiled, not run; the clamp maths ran in `tools/atlas_bleed_check.py` on the real `terrain.rgba`, the WGSL is validated by the existing `chunk_shader_validates_and_legacy_is_forward`, which gained one assert; video `Record_2026-10-13-14-24-31.mp4`):
+     - Root cause, one shared read in `gpu/pipeline.rs`: every block texture is a 16 px tile of one atlas, and the sampler is `Linear` (minified, i.e. distant or slanted faces, and everything at `RENDER_SCALE` 0.67) with `Linear` mips. A bilinear tap within half a texel of a tile edge reads the NEIGHBOURING tile, and the UV inset of 0.02 texel (`atlas::terrain_uv`) only covers mip 0, so at mip 1/2 a tap at the edge takes ~half of the next tile (`Repeat` also wraps tile 0 into tile 15 and the items rows). Measured in the script: up to 97/255 of colour from outside the tile (planks next to a transparent-black neighbour, dirt next to sand, ...), changing with the lod as the camera moves = lines at the block ends and a flicker. Transparent texels are black (`terrain.rgba`), the bright ones are light neighbours.
+     - Fix: `atlas_sample` (WGSL) replaces both `textureSample(tex, ..)` calls (`fs_main`, `fs_water`): the UV is clamped into its own tile by half a texel of the coarsest mip the sampler will touch (`ceil(lod)`, `lod` from the same derivatives), then `textureSampleGrad`. Magnified (Nearest) it changes nothing; the flat-colour strip is read at mip 0 (before, its mips blended neighbouring flat colours on items and mobs). The script's worst edge error goes from 97 to 0.
