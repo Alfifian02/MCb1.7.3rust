@@ -327,7 +327,10 @@ pub fn build_split_tinted(smooth: bool, blocks: &[u8], data: &Nibbles, nb_data: 
                 }
                 if cross_shape(raw).is_some() {
                     let l = lv(x, y, z);
-                    let (lit, lmv) = (br(l), lm(l.0, l.1));
+                    // Full shade (`renderCrossedSquares` sets the plain brightness, no face factor), sent as a smooth vertex so `fs_main` takes
+                    // the shade from the vertex. As a flat one it derived the face from the screen derivatives, and a quad on the diagonal
+                    // has no axis face: x and z tie, the pick flipped per pixel (0.6 against 0.8) and the plant wore light and dark patches.
+                    let (lit, lmv) = (1.0, SMOOTH_LM + l.0.min(15) as f32 * 4.0 * 32.0 + l.1.min(15) as f32 * 2.0);
                     let meta = data.get(x as usize, y as usize, z as usize);
                     let (cx, cz) = ((ox + x) as f32 + 0.5, (oz + z) as f32 + 0.5);
                     // `RenderBlocks.renderCrossedSquares`: full-height quads 0.9 wide, the texture's cut-out does the shaping.
@@ -709,7 +712,9 @@ mod tests {
         let a = air();
         let mut c = air();
         c[idx(5, 20, 5)] = 37;
-        assert_eq!(face_count(&build(&c, &Nibbles::new(), &a, [&a[..], &a[..], &a[..], &a[..]], [&a[..], &a[..], &a[..], &a[..]], 0, 0, 0).0), 2);
+        let v = build(&c, &Nibbles::new(), &a, [&a[..], &a[..], &a[..], &a[..]], [&a[..], &a[..], &a[..], &a[..]], 0, 0, 0).0;
+        assert_eq!(face_count(&v), 2);
+        assert!(v.chunks(VF).all(|q| q[5] == 1.0 && q[6] >= SMOOTH_LM), "a diagonal quad has no axis face: shade 1 from the vertex");
         c[idx(5, 19, 5)] = 3; // dirt under the flower: 6 faces + 2 quads
         assert_eq!(face_count(&build(&c, &Nibbles::new(), &a, [&a[..], &a[..], &a[..], &a[..]], [&a[..], &a[..], &a[..], &a[..]], 0, 0, 0).0), 8);
     }
