@@ -1796,9 +1796,11 @@ impl App {
             } else {
                 HudPipeline::push_gui(v, ox, oy, pw * k, ph * k, match s.gw { 2 => sp::INVENTORY, 3 => sp::CRAFTING, _ => sp::FURNACE });
             }
+            // Icons here are drawn as big in px as the hotbar's (`16 * hw / 20` box, 0.875 of it: 14 hotbar units), not as 16 panel units.
+            let icon_fill = 14.0 * layout.hotbar[0].2 / 20.0 / (16.0 * k);
             let slot = |v: &mut Vec<HudVertex>, c: (f32, f32, f32), st: Option<ItemStack>| {
                 if let Some(st) = st {
-                    push_stack(v, (c.0 + k, c.1 + k, c.2 - 2.0 * k, c.2 - 2.0 * k), 1.0, st);
+                    push_stack(v, (c.0 + k, c.1 + k, c.2 - 2.0 * k, c.2 - 2.0 * k), icon_fill, st);
                 }
             };
             let furn = s.furnace.and_then(|p| self.furnaces.get(&p));
@@ -1810,7 +1812,7 @@ impl App {
             // UNVERIFIED: the non-chest positions are recalled, not read from the Java.
             let ink = [0.25, 0.25, 0.25, 1.0];
             let labels: &[(&str, f32, f32)] = match s.gw {
-                2 => &[("Crafting", 97.0, 8.0)], // the pack's panel is the modern one: its grid is at (98, 18)
+                2 => &[("Crafting", 97.0 - craft::CRAFT_SHIFT as f32, 8.0)], // the pack's panel is the modern one: its grid is at (98, 18), moved left by CRAFT_SHIFT
                 3 => &[("Crafting", 28.0, 6.0), ("Inventory", 8.0, ph - 94.0)],
                 0 => &[("Furnace", 60.0, 6.0), ("Inventory", 8.0, ph - 94.0)],
                 9 => &[("Dispenser", 60.0, 6.0), ("Inventory", 8.0, ph - 94.0)],
@@ -1818,7 +1820,11 @@ impl App {
             };
             for &(text, ux, uy) in labels {
                 // 0.75 x: the 8 px glyphs are wider than vanilla's proportional font and ran into the grid and the buttons.
-                HudPipeline::push_text(v, ox + ux * k, oy + uy * k, k * 0.75, text, ink);
+                if text == "Crafting" {
+                    HudPipeline::push_text_outlined(v, ox + ux * k, oy + uy * k, k * 0.75, (k * 0.3).max(1.0), text, [1.0; 4]); // white, thin black outline
+                } else {
+                    HudPipeline::push_text(v, ox + ux * k, oy + uy * k, k * 0.75, text, ink);
+                }
             }
             if let Some(f) = furn {
                 // Cook arrow (fills left to right over 200 ticks) and flame (drains from the top), vanilla positions.
@@ -1853,7 +1859,7 @@ impl App {
             if let Some(c) = s.cursor {
                 let (cx, cy) = self.touch.cursor_pos;
                 let sz = 16.0 * k;
-                push_stack(v, (cx - sz * 0.5, cy - sz * 1.4, sz, sz), 1.0, c);
+                push_stack(v, (cx - sz * 0.5, cy - sz * 1.4, sz, sz), icon_fill, c);
             }
             // Item name while a finger is down (hover has no touch twin): the picked-up stack, else the stack under the
             // finger. `GuiContainer.drawScreen` names only the hovered slot and only with an empty cursor; the held

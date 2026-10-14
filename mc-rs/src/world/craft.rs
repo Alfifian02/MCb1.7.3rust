@@ -645,12 +645,16 @@ pub fn panel_size(gw: usize) -> (f32, f32) {
     (176.0, if gw > 3 && gw != 9 { 114.0 + 18.0 * (gw / 9) as f32 } else { 166.0 })
 }
 
+/// Units the inventory screen's crafting block (2x2 grid, arrow, result) sits left of where the pack's panel has it. The panel picture
+/// is shifted by the same amount in `assets/containers.rgba` (`tools/gen_gui.py`); `slots_sit_on_the_panels_frames` fails if they part.
+pub const CRAFT_SHIFT: i32 = 6;
+
 /// Vanilla `(slot, x, y)` of every slot's top-left pixel (`ContainerPlayer` / `ContainerWorkbench` / `ContainerFurnace` /
 /// `ContainerChest` constructors). A chest screen has `gw` chest slots (rows of 9) and the player's 27 + 9 below them.
 pub fn layout(gw: usize) -> Vec<(SlotId, f32, f32)> {
     let (disp, chest) = (gw == 9, gw > 3 && gw != 9);
     let d = if chest { (gw / 9) as i32 * 18 - 72 } else { 0 }; // `ContainerChest`: `(rows - 4) * 18`
-    let ((rx, ry), (gx, gy)) = if gw == 2 { ((154, 28), (98, 18)) } else { ((124, 35), (30, 17)) };
+    let ((rx, ry), (gx, gy)) = if gw == 2 { ((154 - CRAFT_SHIFT, 28), (98 - CRAFT_SHIFT, 18)) } else { ((124, 35), (30, 17)) };
     let mut v: Vec<_> = if disp {
         (0..9).map(|i| (SlotId::Chest(i), (62 + 18 * (i % 3)) as f32, (17 + 18 * (i / 3)) as f32)).collect() // `ContainerDispenser`
     } else if chest {

@@ -405,24 +405,36 @@ impl HudPipeline {
     /// pixel down-right in a quarter of the colour. Runs of lit pixels in a row are one quad.
     pub fn push_text(out: &mut Vec<HudVertex>, x: f32, y: f32, k: f32, s: &str, color: [f32; 4]) {
         let shadow = [color[0] * 0.25, color[1] * 0.25, color[2] * 0.25, color[3]];
-        for (dx, c) in [(k, shadow), (0.0, color)] {
-            let mut cx = x + dx;
-            for b in s.bytes() {
-                let g = glyph(b);
-                for (row, bits) in font::GLYPHS[g].iter().enumerate() {
-                    let mut px = 0;
-                    while px < 8 {
-                        if bits >> px & 1 == 0 {
-                            px += 1;
-                            continue;
-                        }
-                        let run = (px..8).take_while(|p| bits >> p & 1 == 1).count();
-                        Self::push_quad(out, cx + px as f32 * k, y + dx + row as f32 * k, run as f32 * k, k, c);
-                        px += run;
+        Self::push_glyphs(out, x + k, y + k, k, s, shadow);
+        Self::push_glyphs(out, x, y, k, s, color);
+    }
+
+    /// `s` in `color` with a thin black outline `o` px wide: the text in black at the 8 offsets round it, then the text itself. Replaces
+    /// the shadow (the outline already separates the glyphs from the panel).
+    pub fn push_text_outlined(out: &mut Vec<HudVertex>, x: f32, y: f32, k: f32, o: f32, s: &str, color: [f32; 4]) {
+        for (dx, dy) in [(-o, -o), (0.0, -o), (o, -o), (-o, 0.0), (o, 0.0), (-o, o), (0.0, o), (o, o)] {
+            Self::push_glyphs(out, x + dx, y + dy, k, s, [0.0, 0.0, 0.0, color[3]]);
+        }
+        Self::push_glyphs(out, x, y, k, s, color);
+    }
+
+    fn push_glyphs(out: &mut Vec<HudVertex>, x: f32, y: f32, k: f32, s: &str, c: [f32; 4]) {
+        let mut cx = x;
+        for b in s.bytes() {
+            let g = glyph(b);
+            for (row, bits) in font::GLYPHS[g].iter().enumerate() {
+                let mut px = 0;
+                while px < 8 {
+                    if bits >> px & 1 == 0 {
+                        px += 1;
+                        continue;
                     }
+                    let run = (px..8).take_while(|p| bits >> p & 1 == 1).count();
+                    Self::push_quad(out, cx + px as f32 * k, y + row as f32 * k, run as f32 * k, k, c);
+                    px += run;
                 }
-                cx += font::WIDTH[g] as f32 * k;
             }
+            cx += font::WIDTH[g] as f32 * k;
         }
     }
 
@@ -591,6 +603,19 @@ mod tests {
 
     fn approx(a: f32, b: f32) {
         assert!((a - b).abs() < 0.001, "{a} != {b}");
+    }
+
+    /// The outlined text is the plain glyphs (white) over 8 black copies at most `o` px away: nothing leaves that margin.
+    #[test]
+    fn outlined_text_is_white_over_a_thin_black_rim() {
+        let (mut plain, mut out) = (Vec::new(), Vec::new());
+        HudPipeline::push_glyphs(&mut plain, 100.0, 50.0, 3.0, "Crafting", [1.0; 4]);
+        HudPipeline::push_text_outlined(&mut out, 100.0, 50.0, 3.0, 1.0, "Crafting", [1.0; 4]);
+        assert_eq!(out.len(), plain.len() * 9);
+        assert!(out[out.len() - plain.len()..].iter().all(|p| p.color[..3] == [1.0; 3]), "white on top");
+        assert!(out[..plain.len() * 8].iter().all(|p| p.color[..3] == [0.0; 3]), "black below");
+        let (lo, hi) = (|v: &[HudVertex]| v.iter().map(|p| p.pos[0]).fold(f32::MAX, f32::min), |v: &[HudVertex]| v.iter().map(|p| p.pos[0]).fold(f32::MIN, f32::max));
+        assert!((lo(&plain) - lo(&out)).abs() <= 1.001 && (hi(&out) - hi(&plain)).abs() <= 1.001);
     }
 
     #[test]

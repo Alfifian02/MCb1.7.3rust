@@ -21,5 +21,11 @@ for i, name in enumerate(["inventory", "crafting_table", "furnace", "generic_54"
     box.paste(png("container/" + name + ".png"), (0, 256 * i))
 grey = box.getpixel((170, 8))  # the panel's own colour, inside its right margin
 box.paste(Image.new("RGBA", (18, 18), grey), (76, 61))
+# The inventory's crafting block (2x2 grid, arrow, result frame: x 96..172, y 16..55) sits CRAFT_SHIFT units further left than the
+# pack has it (keep in step with `craft::CRAFT_SHIFT`); the strip it leaves on the right is painted over with the panel grey.
+CRAFT_SHIFT = 6
+blk = box.crop((96, 16, 173, 56))
+box.paste(Image.new("RGBA", (77, 40), grey), (96, 16))
+box.paste(blk, (96 - CRAFT_SHIFT, 16))
 open("mc-rs/assets/containers.rgba", "wb").write(box.tobytes())
 print("wrote mc-rs/assets/containers.rgba")
