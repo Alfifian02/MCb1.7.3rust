@@ -1657,13 +1657,14 @@ impl App {
             // UNVERIFIED: the non-chest positions are recalled, not read from the Java.
             let ink = [0.25, 0.25, 0.25, 1.0];
             let labels: &[(&str, f32, f32)] = match s.gw {
-                2 => &[("Crafting", 86.0, 16.0)],
+                2 => &[("Crafting", 97.0, 8.0)], // the pack's panel is the modern one: its grid is at (98, 18)
                 3 => &[("Crafting", 28.0, 6.0), ("Inventory", 8.0, ph - 94.0)],
                 0 => &[("Furnace", 60.0, 6.0), ("Inventory", 8.0, ph - 94.0)],
                 _ => &[(if s.chests.len() > 1 { "Large chest" } else { "Chest" }, 8.0, 6.0), ("Inventory", 8.0, ph - 94.0)],
             };
             for &(text, ux, uy) in labels {
-                HudPipeline::push_text(v, ox + ux * k, oy + uy * k, k, text, ink);
+                // 0.75 x: the 8 px glyphs are wider than vanilla's proportional font and ran into the grid and the buttons.
+                HudPipeline::push_text(v, ox + ux * k, oy + uy * k, k * 0.75, text, ink);
             }
             if let Some(f) = furn {
                 // Cook arrow (fills left to right over 200 ticks) and flame (drains from the top), vanilla positions.
@@ -1681,14 +1682,14 @@ impl App {
             }
             // The "place one" toggle: blue = whole stacks, orange with a 1 = one at a time (what the right mouse
             // button does on a desktop). Dragging the stack over slots spreads it without the toggle.
-            let (mx, my, ms) = craft::cell(s.gw, w, h, craft::MODE);
+            let (mx, my, ms) = craft::toggle(s.gw, w, h, 1);
             let fill = if self.one_mode { [0.85, 0.5, 0.1, 1.0] } else { [0.2, 0.4, 0.7, 1.0] };
             HudPipeline::push_outlined_quad(v, mx, my, ms, ms, fill, [0.15, 0.15, 0.15, 1.0], k.max(2.0));
             if self.one_mode {
                 HudPipeline::push_number(v, mx + ms * 0.32, my + ms * 0.2, ms * 0.6, 1, [1.0; 4]);
             }
-            // The shift-click toggle: left of the other one, green when on.
-            let (sx, sy, ss) = craft::cell(s.gw, w, h, craft::SHIFT);
+            // The shift-click toggle: left of the other one, green when on (both sit bottom-left of the screen, `craft::toggle`).
+            let (sx, sy, ss) = craft::toggle(s.gw, w, h, 0);
             let fill = if self.shift_mode { [0.2, 0.7, 0.3, 1.0] } else { [0.2, 0.4, 0.7, 1.0] };
             HudPipeline::push_outlined_quad(v, sx, sy, ss, ss, fill, [0.15, 0.15, 0.15, 1.0], k.max(2.0));
             if self.shift_mode {

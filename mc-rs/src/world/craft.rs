@@ -627,18 +627,12 @@ pub fn panel_size(gw: usize) -> (f32, f32) {
     (176.0, if gw > 3 { 114.0 + 18.0 * (gw / 9) as f32 } else { 166.0 })
 }
 
-/// The "place one" toggle (this port has no right mouse button), top right, clear of every slot.
-// UNVERIFIED: position and the toggle itself are invented for touch (the original uses the mouse cursor and buttons).
-pub const MODE: (f32, f32) = (152.0, 8.0);
-/// The shift-click toggle, left of `MODE`. UNVERIFIED: invented for touch like `MODE`.
-pub const SHIFT: (f32, f32) = (132.0, 8.0);
-
 /// Vanilla `(slot, x, y)` of every slot's top-left pixel (`ContainerPlayer` / `ContainerWorkbench` / `ContainerFurnace` /
 /// `ContainerChest` constructors). A chest screen has `gw` chest slots (rows of 9) and the player's 27 + 9 below them.
 pub fn layout(gw: usize) -> Vec<(SlotId, f32, f32)> {
     let chest = gw > 3;
     let d = if chest { (gw / 9) as i32 * 18 - 72 } else { 0 }; // `ContainerChest`: `(rows - 4) * 18`
-    let ((rx, ry), (gx, gy)) = if gw == 2 { ((144, 36), (88, 26)) } else { ((124, 35), (30, 17)) };
+    let ((rx, ry), (gx, gy)) = if gw == 2 { ((154, 28), (98, 18)) } else { ((124, 35), (30, 17)) };
     let mut v: Vec<_> = if chest {
         (0..gw).map(|i| (SlotId::Chest(i), (8 + 18 * (i % 9)) as f32, (18 + 18 * (i / 9)) as f32)).collect()
     } else if gw == 0 {
@@ -671,6 +665,14 @@ pub fn cell(gw: usize, w: f32, h: f32, (ux, uy): (f32, f32)) -> (f32, f32, f32) 
     (ox + (ux - 1.0) * k, oy + (uy - 1.0) * k, 18.0 * k)
 }
 
+/// The two touch toggles, in the screen's bottom-left corner (outside every panel): `which` 0 = shift-click, 1 = "place one" (this
+/// port has no right mouse button or shift key). Same 18-unit size as a slot cell. UNVERIFIED: position and toggles are invented for touch.
+pub fn toggle(gw: usize, w: f32, h: f32, which: usize) -> (f32, f32, f32) {
+    let (_, _, k) = panel(gw, w, h);
+    let s = 18.0 * k;
+    (s * 0.4 + which as f32 * s * 1.2, h - s * 1.4, s)
+}
+
 fn inside((x, y, s): (f32, f32, f32), px: f32, py: f32) -> bool {
     px >= x && px < x + s && py >= y && py < y + s
 }
@@ -681,11 +683,11 @@ pub fn slot_at(gw: usize, w: f32, h: f32, px: f32, py: f32) -> Option<SlotId> {
 }
 
 pub fn on_mode_button(gw: usize, w: f32, h: f32, px: f32, py: f32) -> bool {
-    inside(cell(gw, w, h, MODE), px, py)
+    inside(toggle(gw, w, h, 1), px, py)
 }
 
 pub fn on_shift_button(gw: usize, w: f32, h: f32, px: f32, py: f32) -> bool {
-    inside(cell(gw, w, h, SHIFT), px, py)
+    inside(toggle(gw, w, h, 0), px, py)
 }
 
 pub fn in_panel(gw: usize, w: f32, h: f32, px: f32, py: f32) -> bool {
@@ -697,6 +699,20 @@ pub fn in_panel(gw: usize, w: f32, h: f32, px: f32, py: f32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every slot of `layout` sits on a frame of the pack's panel (`assets/containers.rgba`, 256 rows per panel): its left edge, one texel
+    /// out, is the frame's dark line. The 2x2 screen once used b1.7.3's positions on the modern panel, and taps missed the drawn slots.
+    #[test]
+    fn slots_sit_on_the_panels_frames() {
+        let px = |x: f32, y: f32, row: usize| crate::render::hud::CONTAINERS[((row + y as usize) * 256 + x as usize) * 4];
+        for (gw, row) in [(2, 0), (3, 256), (0, 512)] {
+            for (id, x, y) in layout(gw) {
+                let big = matches!(id, SlotId::Furn(2)) || (gw == 3 && id == SlotId::Result); // the 26 x 26 output frames sit 4 units out
+                let edge = if big { px(x - 5.0, y + 8.0, row) } else { px(x - 1.0, y + 8.0, row) };
+                assert_eq!(edge, 55, "gw {gw} slot {id:?} at ({x}, {y})");
+            }
+        }
+    }
 
     fn stack(id: u16, count: u8) -> ItemStack {
         ItemStack { id, count, damage: 0 }
