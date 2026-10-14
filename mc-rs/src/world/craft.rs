@@ -460,6 +460,11 @@ impl Screen {
         Self { furnace: Some(pos), ..Self::new(0) }
     }
 
+    /// `ContainerDispenser` for the dispenser at `pos` (`gw` 9: a chest-like screen of 9 slots in a 3 x 3 block).
+    pub fn at_dispenser(pos: (i32, i32, i32)) -> Self {
+        Self { gw: 9, chests: vec![pos], ..Self::new(0) }
+    }
+
     /// `ContainerChest` for the chests in `group` (`chest::open`); the caller passes their slots, in that order, to `get` and `click`.
     pub fn at_chest(group: Vec<(i32, i32, i32)>) -> Self {
         Self { gw: group.len() * 27, chests: group, ..Self::new(0) }
@@ -637,23 +642,25 @@ impl Screen {
 
 /// `GuiContainer.xSize` x `ySize`: the vanilla 176 x 166 GUI, or a chest's `114 + 18 * rows` (`GuiChest`).
 pub fn panel_size(gw: usize) -> (f32, f32) {
-    (176.0, if gw > 3 { 114.0 + 18.0 * (gw / 9) as f32 } else { 166.0 })
+    (176.0, if gw > 3 && gw != 9 { 114.0 + 18.0 * (gw / 9) as f32 } else { 166.0 })
 }
 
 /// Vanilla `(slot, x, y)` of every slot's top-left pixel (`ContainerPlayer` / `ContainerWorkbench` / `ContainerFurnace` /
 /// `ContainerChest` constructors). A chest screen has `gw` chest slots (rows of 9) and the player's 27 + 9 below them.
 pub fn layout(gw: usize) -> Vec<(SlotId, f32, f32)> {
-    let chest = gw > 3;
+    let (disp, chest) = (gw == 9, gw > 3 && gw != 9);
     let d = if chest { (gw / 9) as i32 * 18 - 72 } else { 0 }; // `ContainerChest`: `(rows - 4) * 18`
     let ((rx, ry), (gx, gy)) = if gw == 2 { ((154, 28), (98, 18)) } else { ((124, 35), (30, 17)) };
-    let mut v: Vec<_> = if chest {
+    let mut v: Vec<_> = if disp {
+        (0..9).map(|i| (SlotId::Chest(i), (62 + 18 * (i % 3)) as f32, (17 + 18 * (i / 3)) as f32)).collect() // `ContainerDispenser`
+    } else if chest {
         (0..gw).map(|i| (SlotId::Chest(i), (8 + 18 * (i % 9)) as f32, (18 + 18 * (i / 9)) as f32)).collect()
     } else if gw == 0 {
         vec![(SlotId::Furn(0), 56.0, 17.0), (SlotId::Furn(1), 56.0, 53.0), (SlotId::Furn(2), 116.0, 35.0)]
     } else {
         vec![(SlotId::Result, rx as f32, ry as f32)]
     };
-    if !chest {
+    if !chest && !disp {
         v.extend((0..gw * gw).map(|i| (SlotId::Grid(i), (gx + 18 * (i % gw)) as f32, (gy + 18 * (i / gw)) as f32)));
     }
     if gw == 2 {
@@ -853,6 +860,8 @@ mod tests {
         assert_eq!((panel_size(27).1, panel_size(54).1, panel_size(0).1), (168.0, 222.0, 166.0));
         let y = |gw, id| layout(gw).into_iter().find(|e| e.0 == id).map(|e| e.2);
         assert_eq!((y(27, SlotId::Inv(0)), y(54, SlotId::Inv(0)), y(54, SlotId::Inv(9)), y(54, SlotId::Chest(53))), (Some(143.0), Some(197.0), Some(139.0), Some(108.0)));
+        let d = layout(9);
+        assert_eq!((d.len(), d[0], d[8]), (45, (SlotId::Chest(0), 62.0, 17.0), (SlotId::Chest(8), 98.0, 53.0)), "dispenser: 3 x 3 at (62, 17), the inventory as in the workbench");
         for gw in [27, 54, 81] {
             for (id, ux, uy) in layout(gw) {
                 let (x, y, sz) = cell(gw, 800.0, 400.0, (ux, uy));

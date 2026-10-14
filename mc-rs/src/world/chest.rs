@@ -13,6 +13,8 @@ pub type Pos = (i32, i32, i32);
 pub const ID: u8 = 54;
 /// `TileEntityChest.getSizeInventory` (the Java array is 36 long, the last 9 are never read, written or saved).
 pub const SIZE: usize = 27;
+/// The dispenser (block 23) keeps its 9 slots in the first 9 of a `Chest`, so the chest map, the saves and the screen code are shared.
+pub const DISPENSER: u8 = 23;
 pub type Chest = [Option<ItemStack>; SIZE];
 type Get<'a> = &'a dyn Fn(i32, i32, i32) -> u8;
 
@@ -61,7 +63,7 @@ pub fn open(get: Get, p: Pos) -> Option<Vec<Pos>> {
 /// `canInteractWith` of every half (`InventoryLargeChest` needs both): still chests, and the eye within 8 blocks of each centre.
 /// `EntityPlayer.onUpdate` closes the screen the tick this turns false.
 pub fn usable(get: Get, eye: Vec3, group: &[Pos]) -> bool {
-    group.iter().all(|&(x, y, z)| get(x, y, z) == ID && (eye - Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5)).length_squared() <= 64.0)
+    group.iter().all(|&(x, y, z)| matches!(get(x, y, z), ID | DISPENSER) && (eye - Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5)).length_squared() <= 64.0)
 }
 
 /// `BlockChest.getBlockTexture(world, x, y, z, side)`: the `terrain.png` tile of face `side` (0 bottom, 1 top, 2 -Z, 3 +Z,

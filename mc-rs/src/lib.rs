@@ -563,6 +563,9 @@ impl App {
             self.ticks.plate_ents.extend(self.mobs.list.iter().map(|m| { let (lo, hi) = m.aabb(); (lo, hi, true) }));
             self.ticks.step(&mut self.chunks, &mut self.drops, centre, self.weather.rain(1.0));
             self.ticks.note_events.clear(); // no audio layer yet: it would play them here
+            for p in std::mem::take(&mut self.ticks.dispenses) {
+                self.dispense(p);
+            }
             for at in std::mem::take(&mut self.ticks.booms) {
                 self.explode(at, 4.0); // `EntityTNTPrimed.explode`
             }
@@ -604,7 +607,7 @@ impl App {
                 self.close_sign();
             }
             self.fx.spawners.retain(|&(x, y, z), _| self.chunks.block_loaded(x, y, z).map_or(true, |b| b == effects::SPAWNER_ID));
-            let gone: Vec<_> = self.chests.keys().copied().filter(|&(x, y, z)| self.chunks.block_loaded(x, y, z).is_some_and(|b| b != chest::ID)).collect();
+            let gone: Vec<_> = self.chests.keys().copied().filter(|&(x, y, z)| self.chunks.block_loaded(x, y, z).is_some_and(|b| b != chest::ID && b != chest::DISPENSER)).collect();
             for p in gone {
                 for st in self.chests.remove(&p).into_iter().flatten().flatten() {
                     self.drops.scatter(st, p);
@@ -849,6 +852,12 @@ impl App {
                 }
                 Some(26) => {
                     self.use_bed(hit.pos);
+                    return;
+                }
+                // BlockDispenser.blockActivated: its 9 slots open as a screen.
+                Some(chest::DISPENSER) => {
+                    self.chests.entry(hit.pos).or_default();
+                    self.open_screen(Screen::at_dispenser(hit.pos));
                     return;
                 }
                 Some(chest::ID) => {
@@ -1248,12 +1257,46 @@ impl App {
         self.touch.set_screen(false);
     }
 
+    /// `BlockDispenser.dispenseItem`: one item of a random filled slot (`getRandomStackFromInventory`: each filled slot replaces the
+    /// pick with chance 1 / n) leaves through the front: an arrow, egg or snowball flies (speed 1.1, spread 6), anything else drops.
+    fn dispense(&mut self, (x, y, z): (i32, i32, i32)) {
+        let (dx, dz) = match self.chunks.meta(x, y, z) { 3 => (0.0, 1.0), 2 => (0.0, -1.0), 5 => (1.0, 0.0), _ => (-1.0, 0.0) };
+        let Some(c) = self.chests.get_mut(&(x, y, z)) else { return };
+        let (mut pick, mut n) = (None, 1);
+        for (i, s) in c[..9].iter().enumerate() {
+            if s.is_some() {
+                if self.mobs.rng.next_int_bound(n) == 0 {
+                    pick = Some(i);
+                }
+                n += 1;
+            }
+        }
+        let Some(i) = pick else { return }; // an empty dispenser only clicks
+        let Some(s) = c[i].as_mut() else { return };
+        let (id, damage) = (s.id, s.damage);
+        s.count -= 1;
+        if s.count == 0 {
+            c[i] = None;
+        }
+        let pos = glam::Vec3::new(x as f32 + dx * 0.6 + 0.5, y as f32 + 0.5, z as f32 + dz * 0.6 + 0.5);
+        let mut g = |sd: f32| self.mobs.rng.next_gaussian() as f32 * 0.0075 * sd;
+        if matches!(id, gear::ARROW | gear::SNOWBALL | gear::EGG) {
+            let v = glam::Vec3::new(dx, 0.1, dz).normalize() * 1.1 + glam::Vec3::new(g(6.0), g(6.0), g(6.0));
+            self.mobs.shoot(pos, v, if id == gear::ARROW { 0 } else { id });
+        } else {
+            let s = self.mobs.rng.next_double() as f32 * 0.1 + 0.2;
+            let mut g = |sd: f32| self.mobs.rng.next_gaussian() as f32 * 0.0075 * sd;
+            let v = glam::Vec3::new(dx * s + g(6.0), 0.2 + g(6.0), dz * s + g(6.0));
+            self.drops.throw_from(ItemStack { id, count: 1, damage }, pos - glam::Vec3::Y * 0.3, v);
+        }
+    }
+
     /// The slots behind the open screen: a furnace's 3, or the chests' 27 each (upper half first); `None` for the 2x2 and the workbench.
     fn ext(&self, s: &Screen) -> Option<Vec<Option<ItemStack>>> {
         if let Some(f) = s.furnace.and_then(|p| self.furnaces.get(&p)) {
             return Some(f.slots.to_vec());
         }
-        (!s.chests.is_empty()).then(|| s.chests.iter().flat_map(|p| self.chests.get(p).copied().unwrap_or_default()).collect())
+        (!s.chests.is_empty()).then(|| s.chests.iter().flat_map(|p| self.chests.get(p).copied().unwrap_or_default().into_iter().take(if s.gw == 9 { 9 } else { chest::SIZE })).collect())
     }
 
     /// Run `f` on the open screen with the slots behind it (`ext`): they are copied out and written back, so a large chest's
@@ -1266,9 +1309,9 @@ impl App {
             if let Some(furn) = s.furnace.and_then(|p| self.furnaces.get_mut(&p)) {
                 furn.slots.copy_from_slice(&e);
             }
-            for (p, part) in s.chests.iter().zip(e.chunks(chest::SIZE)) {
+            for (p, part) in s.chests.iter().zip(e.chunks(if s.gw == 9 { 9 } else { chest::SIZE })) {
                 if let Some(c) = self.chests.get_mut(p) {
-                    c.copy_from_slice(part);
+                    c[..part.len()].copy_from_slice(part);
                 }
             }
         }
@@ -1770,6 +1813,7 @@ impl App {
                 2 => &[("Crafting", 97.0, 8.0)], // the pack's panel is the modern one: its grid is at (98, 18)
                 3 => &[("Crafting", 28.0, 6.0), ("Inventory", 8.0, ph - 94.0)],
                 0 => &[("Furnace", 60.0, 6.0), ("Inventory", 8.0, ph - 94.0)],
+                9 => &[("Dispenser", 60.0, 6.0), ("Inventory", 8.0, ph - 94.0)],
                 _ => &[(if s.chests.len() > 1 { "Large chest" } else { "Chest" }, 8.0, 6.0), ("Inventory", 8.0, ph - 94.0)],
             };
             for &(text, ux, uy) in labels {

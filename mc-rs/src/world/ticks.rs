@@ -77,6 +77,8 @@ pub struct Ticks {
     pub booms: Vec<Vec3>,
     /// Boxes (lo, hi, is living) of the player and the mobs this tick, for `BlockPressurePlate` (the caller fills it before `step`).
     pub plate_ents: Vec<(Vec3, Vec3, bool)>,
+    /// Dispensers that fired this tick (`BlockDispenser.updateTick`); the caller owns their contents.
+    pub dispenses: Vec<(i32, i32, i32)>,
     /// `BlockRedstoneTorch.torchUpdates`: (cell, tick) of each recent turn-off, for the burnout rule (8 in 100 ticks).
     torch_flips: Vec<((i32, i32, i32), u64)>,
     /// `TileEntityNote`: the note (0..=24) and whether the block was powered last time, per note block. ponytail: not saved.
@@ -91,7 +93,7 @@ pub struct Ticks {
 
 impl Ticks {
     pub fn new(seed: i64) -> Self {
-        Self { now: 0, seq: 0, due: BTreeSet::new(), pending: HashSet::new(), rng: JavaRandom::new(seed ^ 0xB10C), lcg: 0x2545_F491, wet: false, falling: Vec::new(), booms: Vec::new(), plate_ents: Vec::new(), torch_flips: Vec::new(), notes: HashMap::new(), note_events: Vec::new(), walked: 0.0, next_step: 1, last_xz: None }
+        Self { now: 0, seq: 0, due: BTreeSet::new(), pending: HashSet::new(), rng: JavaRandom::new(seed ^ 0xB10C), lcg: 0x2545_F491, wet: false, falling: Vec::new(), booms: Vec::new(), plate_ents: Vec::new(), dispenses: Vec::new(), torch_flips: Vec::new(), notes: HashMap::new(), note_events: Vec::new(), walked: 0.0, next_step: 1, last_xz: None }
     }
 
     /// The step trigger of `Entity.moveEntity` for the player (walked distance x 0.6 past `nextStepDistance`, block under the
@@ -287,6 +289,8 @@ impl Ticks {
                 w.set_block(x, y, z, 0);
             }
             75 | 76 => self.schedule(x, y, z, id, 2),
+            // BlockDispenser.onNeighborBlockChange: a power source changed and it (or the cell above) is powered: fire in 4 ticks.
+            23 if power && (redstone::indirectly_powered(w, x, y, z, true) || redstone::indirectly_powered(w, x, y + 1, z, true)) => self.schedule(x, y, z, 23, 4),
             // BlockNote.onNeighborBlockChange: it plays when the power turns on.
             25 => {
                 let p = redstone::indirectly_powered(w, x, y, z, true);
@@ -366,6 +370,7 @@ impl Ticks {
             39 | 40 => mushroom(w, &mut self.rng, x, y, z, id),
             51 => self.fire(w, x, y, z),
             75 | 76 => self.torch(w, x, y, z, id),
+            23 if redstone::indirectly_powered(w, x, y, z, true) || redstone::indirectly_powered(w, x, y + 1, z, true) => self.dispenses.push((x, y, z)),
             // BlockRedstoneRepeater.updateTick: follow the input, and an input that went away while it was turning on lets it go again.
             93 | 94 => {
                 let (m, input) = (w.meta(x, y, z), redstone::repeater_input(w, x, y, z));
@@ -1192,6 +1197,20 @@ mod tests {
         t.update(&mut m, &mut d, 6, 40, 5, 94);
         t.notify(&mut m, &mut d);
         assert_eq!((m.block(6, 40, 5), m.meta(7, 40, 5)), (Some(93), 0));
+    }
+
+    #[test]
+    fn a_powered_dispenser_fires_once_after_its_delay() {
+        let mut m = ChunkManager::new(1, 1);
+        m.insert((0, 0), vec![0u8; crate::world::chunk::VOLUME]);
+        (0..16).for_each(|x| (0..16).for_each(|z| { m.set_block(x, 39, z, 1); }));
+        let (mut t, mut d) = (Ticks::new(1), Drops::new(1));
+        m.set_block_meta(3, 40, 3, 23, 3);
+        m.set_block_meta(4, 40, 3, 69, 1 | 8); // a lever on its +x side, on
+        t.notify(&mut m, &mut d);
+        assert!(t.dispenses.is_empty(), "the dispenser waits 4 ticks");
+        t.update(&mut m, &mut d, 3, 40, 3, 23);
+        assert_eq!(t.dispenses, vec![(3, 40, 3)]);
     }
 
     #[test]

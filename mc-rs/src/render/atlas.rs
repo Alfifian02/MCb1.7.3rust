@@ -315,7 +315,7 @@ pub const fn terrain_tile(id: u8, meta: u8, side: u8) -> Option<u8> {
         92 => if top { 121 } else if bottom { 124 } else if meta > 0 && side == 4 { 123 } else { 122 },
         // Blocks nothing above gave a tile: the dispenser (no facing here yet: the front is +Z), the note block (the jukebox's side),
         // cobweb, the portal, the locked chest (the chest's). Rails, wire, torches, the lever, the ladder... are drawn by the mesher.
-        23 => if side <= 1 { 62 } else if side == 3 { 46 } else { 45 },
+        23 => if side <= 1 { 62 } else if side != meta { 45 } else { 46 }, // `BlockDispenser`: the face the metadata names
         25 => 74,
         30 => 11,
         90 => 14,

@@ -126,7 +126,7 @@ pub fn facing_meta(id: u16, yaw: f32) -> Option<u8> {
     let at = |k: f32, t: [u8; 4]| t[(((q + k).floor() as i32) & 3) as usize];
     match id {
         53 | 67 => Some(at(0.5, [2, 1, 3, 0])),
-        61 => Some(at(0.5, [2, 5, 3, 4])),
+        61 | 23 => Some(at(0.5, [2, 5, 3, 4])), // furnace and `BlockDispenser.onBlockPlacedBy`
         93 => Some(at(0.5, [2, 3, 0, 1])), // BlockRedstoneRepeater.onBlockPlacedBy: ((floor(yaw * 4 / 360 + 0.5) & 3) + 2) % 4
         86 | 91 => Some(at(2.5, [0, 1, 2, 3])),
         _ => None,
