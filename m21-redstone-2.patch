@@ -1,0 +1,463 @@
+diff -ruN a/ROADMAP.md b/ROADMAP.md
+--- a/ROADMAP.md	2026-10-14 03:31:13.257042939 +0000
++++ b/ROADMAP.md	2026-10-14 03:35:01.431482569 +0000
+@@ -34,7 +34,7 @@
+ | M18 | TNT + throwables | `EntityTNTPrimed`, snowball, egg | Done 2026-10-13 (tests `primed_tnt_rests_then_booms_on_its_fuse`, `thrown_items_land_quietly_and_an_egg_hatches`, not run): primed TNT lit by flint and steel or fire and chained by explosions, snowball, egg, the TNT recipe, the white flash of the fuse. Still open: lighting by redstone (M21) |
+ | M19 | Small blocks + sign + painting | One session of the remaining simple blocks | Done 2026-10-14 (tests `paintings_hang_on_walls_like_java`, `paintings_fall_off_and_are_picked`, `signs_place_edit_and_save`, not run): trapdoor, cake, sign, painting; sponge needed nothing (see changelog). Nothing open |
+ | M20 | Mobs, particles, items | Finish the overworld entity set | Done 2026-10-14 (not compiled or run; tests `digging_pieces_fly_out_fall_and_die`, `hearts_rise_and_fade`, `compass_and_clock_follow_their_targets`, `bone_tames_a_wolf_and_a_saddled_pig_is_a_mount`, `tame_wolf_walks_round_a_wall_to_its_owner`, `path::tests::*`): `EntityDiggingFX` block-break pieces, `EntityHeartFX`, animated compass and clock (`TextureCompassFX`, `TextureWatchFX`, in the atlas and the HUD copy of items.png), wolf taming (bone), sitting, following, teleport to the owner, pork healing, saddle + riding a pig (jump = get off), the A* `Pathfinder` (`world/path.rs`) for chasing and following. Moved or dropped: block-hit particles (`addBlockHitEffects` is never called in b1.7.3), redstone particles (M21), portal particles (M11). Still open: `ItemMap` + `MapData` (the map item, its colours and its screen), wolves attacking sheep and tame wolves fighting for their owner, wolf shaking dry, tame-wolf collar colour |
+-| M21 | Redstone | Full circuits | Part 1 done 2026-10-14 (tests `redstone::tests::lever_wire_and_torch_follow_java`, `ticks::tests::redstone_circuit_end_to_end`, extended `pick` test; not run): the power model (`world/redstone.rs`: `isPoweringTo` / `isIndirectlyPoweringTo`, `isBlockGettingPowered`, indirect power through solid blocks), redstone wire (level, diagonal steps), redstone torch (inversion, burnout), lever, button, stone and wooden pressure plates, glowing redstone ore, doors, trapdoors and TNT driven by power, placement of all of them. Still open: repeater (`BlockRedstoneRepeater`, ids 93 / 94, and its item), `BlockDispenser` + `TileEntityDispenser` + `GuiDispenser`, note block (`TileEntityNote`), jukebox + records as blocks and items (logic only, no sound), pistons (`BlockPistonBase`, `BlockPistonExtension`, `BlockPistonMoving`, `TileEntityPiston`) |
++| M21 | Redstone | Full circuits | Part 1 done 2026-10-14 (tests `redstone::tests::lever_wire_and_torch_follow_java`, `ticks::tests::redstone_circuit_end_to_end`, extended `pick` test; not run): the power model (`world/redstone.rs`: `isPoweringTo` / `isIndirectlyPoweringTo`, `isBlockGettingPowered`, indirect power through solid blocks), redstone wire (level, diagonal steps), redstone torch (inversion, burnout), lever, button, stone and wooden pressure plates, glowing redstone ore, doors, trapdoors and TNT driven by power, placement of all of them. Part 2 done 2026-10-14 (tests `repeater_delays_and_passes_the_signal_on`, recipe lines in `plain_recipes_match_java`; not run): repeater (ids 93 / 94, item 356), note block, jukebox with the two records, every redstone recipe (lever, torch, repeater, button, plates, jukebox, note block, dispenser, both pistons). Still open: `BlockDispenser` + `TileEntityDispenser` + `GuiDispenser`, pistons (`BlockPistonBase`, `BlockPistonExtension`, `BlockPistonMoving`, `TileEntityPiston`); sound for notes and records waits for an audio layer; records have no source yet (a creeper killed by a skeleton's arrow) |
+ | M22 | Vehicles + rails | Minecarts and boats | rail shape on placement (`RailLogic`), powered and detector rails, `EntityMinecart` (empty, chest, furnace), `EntityBoat`, their items and models |
+ | M11 | Nether | Hell biome, portals, ghast, pigman | `ChunkProviderHell`, `WorldProviderHell`, `Teleporter`, portal block 90 (it is only recognized today: lighting, `BlockPortal`, `TextureFX` portal), `MapGenCavesHell`, `WorldGenFire` / `GlowStone1/2` / `HellLava`, netherrack, soul sand, `EntityGhast` + `EntityFireball`, pig-zombie spawn. Optional: `WorldProviderSky` |
+ | M14 | Polish | Menus, UI, look | `GuiMainMenu`, `GuiOptions`, `GuiSelectWorld`, `GuiCreateWorld`, `GuiChat`, achievements and stats screens, real mob models and textures (mobs are flat-colour boxes), first-person hand and swing, hurt flash, fire and water overlays, death camera, text beyond the item tooltip |
+@@ -66,6 +66,7 @@
+ M20 is done except `ItemMap` (maps are big: a colour table for every block, the scan of the world, a texture, the screen: a session of their own). Next in the easy-first order: M22 (rails, minecarts, boats), M11 (Nether), M14 (menus and models); M21 (redstone) goes on from part 1. First run `cargo test --lib`: everything since M15 has never been compiled.
+ 
+ ## Changelog
++- 2026-10-14: M21 part 2: repeater, note block, jukebox, redstone recipes (written WITHOUT a Rust toolchain: not compiled, not run; +1 test `ticks::tests::repeater_delays_and_passes_the_signal_on`, 3 lines in `craft::tests::plain_recipes_match_java`). Repeater: `redstone::repeater_input` = `func_22022_g`, `weak` / `strong` of an active one point out of its front only, `ticks` schedules a change after `(delay + 1) * 2` game ticks (`updateTick`, `onNeighborBlockChange`), right click cycles the delay, placement takes the yaw (`pick::facing_meta` 93) and schedules at once when powered; it drops item 356. The wire now looks at its neighbours along Java directions (`isPowerProviderOrWire` with `dir`: a repeater only along its axis, a neighbour one step up or down only if it is another wire; FIX part 1 let any power source connect diagonally). Drawn as a 2/16 box + two torches (`renderBlockRedstoneRepeater` offsets). Note block: `Ticks::notes` (note, last power) + `note_events` (cell, note, instrument), right click raises the pitch, power turns it on (`BlockNote`); nothing plays (no audio layer) and the notes are not saved. Jukebox: the record lives in the block metadata (1 = 13, 2 = cat; the Java uses a tile entity), right click inserts / ejects, breaking ejects. Recipes: `CraftingManager` lines 27 / 28 / 68-79. ponytail: the repeater has no collision box, no particles.
+ - 2026-10-14: M20 finished except maps (written WITHOUT a Rust toolchain: not compiled, not run). (1) Compass and clock: `Anim::gauges` ports `TextureCompassFX` (needle chasing the world spawn, red tip, grey tail) and `TextureWatchFX` (the dial turned into the magenta face by the sky angle); the spring is shared (`chase`); written every 20 Hz tick into the atlas (`ChunkPipeline::animate_items`, mips too) and into the HUD's copy of items.png (`HudPipeline::animate_items`); `assets/dial.rgba` (`misc/dial.png`, 1024 bytes, written by `tools/gen_terrain.py`) is new and must exist. (2) Wolves: `gear::befriend` = `EntityWolf.interact` (bone: 1 in 3 tames, health 20, sits, 7 hearts, else 7 smoke; pork heals 3; a tap on a tame wolf toggles sitting) and `ItemSaddle` / `EntityPig.interact` (saddle on a pig, then a tap mounts); a sitting wolf stays, a tame one follows beyond 5 blocks and is put beside the owner beyond 16, never despawns, is not angered by its owner; `Fx::Heart` = `EntityHeartFX`. (3) Riding: `Mob::ridden`, the player's body sits 0.175 over the pig's feet (`updateRiderPosition`), no fall damage, jump = get off (touch has no sneak); the pig keeps its own AI (b1.7.3 has no steering). (4) `world/path.rs`: `Pathfinder` (A*, 4-connected, one step up, drops of up to 3, no water or lava, mob size boxes) used by `Mob::chase` for a target and for a following wolf (repath 1 in 20, jump when the next point is higher); wandering stays a straight walk. ponytail: heap with lazy deletion (ties may differ), 3000 expansions, the wolf teleports beyond 16 instead of when no path is found, no collar colour, no shaking, tame wolves do not fight, the camera does not turn with the pig.
+ - 2026-10-14: FIX jagged edges on every line (outline, block edges, plants) (written WITHOUT a Rust toolchain: not compiled, not run; `post::tests::shader_validates_in_every_configuration` now also validates `Settings::legacy()`, not run): the legacy frame had no anti-aliasing at all (TAA, FXAA, CAS off) and renders at `RENDER_SCALE` 0.67, so every edge was a stair-step. `Settings::legacy()` turns on the pack's FXAA (`c21_fxaa`, already ported; one full-screen pass at scene resolution, before the upscale).
+     - ponytail: FXAA is edge-contrast based, so it also softens the hard pixel edges inside a block texture a little. Levers if that is too much or the lines are still rough: `RENDER_SCALE` toward 1.0 in `gpu/context.rs` (costs fill rate), or MSAA on the scene pass (needs multisampled colour + depth and alpha-to-coverage for the cut-out plants: a bigger change).
+diff -ruN a/mc-rs/src/lib.rs b/mc-rs/src/lib.rs
+--- a/mc-rs/src/lib.rs	2026-10-14 03:31:13.263932202 +0000
++++ b/mc-rs/src/lib.rs	2026-10-14 03:34:49.450409542 +0000
+@@ -47,6 +47,7 @@
+ use crate::world::chunk::{is_plant, normal_cube, outline_bounds, physics_id, pick_bounds};
+ use crate::world::chunks::{chunk_coord, ChunkManager, Shape};
+ use crate::world::physics::{self, Player};
++use crate::world::redstone;
+ use crate::world::vitals::{self, Env, Vitals};
+ use crate::world::effects::{self, Effects, Spawner};
+ use crate::render::weather;
+@@ -561,6 +562,7 @@
+             self.ticks.plate_ents.push((p - physics::HALF, p + physics::HALF, true));
+             self.ticks.plate_ents.extend(self.mobs.list.iter().map(|m| { let (lo, hi) = m.aabb(); (lo, hi, true) }));
+             self.ticks.step(&mut self.chunks, &mut self.drops, centre, self.weather.rain(1.0));
++            self.ticks.note_events.clear(); // no audio layer yet: it would play them here
+             for at in std::mem::take(&mut self.ticks.booms) {
+                 self.explode(at, 4.0); // `EntityTNTPrimed.explode`
+             }
+@@ -666,6 +668,9 @@
+                             if let Some(h) = held {
+                                 self.inv.damage(slot, craft::wear_on_break(h.id, id));
+                             }
++                            if id == 84 && meta & 15 != 0 {
++                                self.drops.spawn_stack(ItemStack { id: 2255 + (meta & 15) as u16, count: 1, damage: 0 }, hit.pos); // the record comes out
++                            }
+                             if id == 46 {
+                                 // `BlockTNT.onBlockDestroyedByPlayer` (unconditional): metadata 1, or flint and steel in hand (`onBlockClicked`), lights it.
+                                 if meta & 1 == 1 || held.is_some_and(|h| h.id == craft::FLINT_AND_STEEL) {
+@@ -810,6 +815,34 @@
+                     }
+                     return;
+                 }
++                // BlockNote.blockActivated.
++                Some(25) => {
++                    let (x, y, z) = hit.pos;
++                    self.ticks.note_use(&self.chunks, x, y, z);
++                    return;
++                }
++                // BlockJukeBox.blockActivated + ItemRecord.onItemUse: a record goes in (the metadata says which: 1 = 13, 2 = cat;
++                // ponytail: the Java keeps it in a tile entity), clicking again takes it out.
++                Some(84) => {
++                    let (x, y, z) = hit.pos;
++                    let m = self.chunks.meta(x, y, z);
++                    if m != 0 {
++                        self.chunks.set_block_meta(x, y, z, 84, 0);
++                        self.drops.spawn_stack(ItemStack { id: 2255 + m as u16, count: 1, damage: 0 }, (x, y + 1, z));
++                        return;
++                    } else if let Some(s) = self.inv.slots[self.touch.hotbar_slot].filter(|s| matches!(s.id, 2256 | 2257)) {
++                        self.chunks.set_block_meta(x, y, z, 84, (s.id - 2255) as u8);
++                        self.inv.consume(self.touch.hotbar_slot);
++                        return;
++                    }
++                }
++                // BlockRedstoneRepeater.blockActivated: the delay goes 1 -> 2 -> 3 -> 4 -> 1.
++                Some(93 | 94) => {
++                    let (x, y, z) = hit.pos;
++                    let (m, id) = (self.chunks.meta(x, y, z), self.chunks.block_loaded(x, y, z).unwrap_or(93));
++                    self.chunks.set_block_meta(x, y, z, id, ((m & 12) + 4 & 12) | m & 3);
++                    return;
++                }
+                 // BlockRedstoneOre.blockActivated: it lights up, then the block in hand is still placed against it.
+                 Some(73) => {
+                     self.chunks.set_block(hit.pos.0, hit.pos.1, hit.pos.2, 74);
+@@ -929,10 +962,15 @@
+                 return;
+             }
+             // ItemRedstone.onItemUse: dust on the cell beside the face aimed at (`BlockRedstoneWire.canPlaceBlockAt`: solid below).
+-            if self.inv.slots[slot].is_some_and(|s| s.id == 331) {
++            // ItemReed for the repeater (356 -> block 93, facing from the yaw, `onBlockPlacedBy`: scheduled at once when powered).
++            if let Some(b) = self.inv.slots[slot].and_then(|s| match s.id { 331 => Some(55u8), 356 => Some(93), _ => None }) {
+                 let at = pick::place_pos(&hit);
+-                if at.1 < 127 && self.chunks.block_loaded(at.0, at.1, at.2).is_some_and(pick::replaceable) && ticks::can_place(&self.chunks, at.0, at.1, at.2, 55) && self.chunks.set_block_meta(at.0, at.1, at.2, 55, 0) {
++                let meta = pick::facing_meta(b as u16, self.camera.yaw.to_degrees() + 180.0).unwrap_or(0);
++                if at.1 < 127 && self.chunks.block_loaded(at.0, at.1, at.2).is_some_and(pick::replaceable) && ticks::can_place(&self.chunks, at.0, at.1, at.2, b) && self.chunks.set_block_meta(at.0, at.1, at.2, b, meta) {
+                     self.inv.consume(slot);
++                    if b == 93 && redstone::repeater_input(&self.chunks, at.0, at.1, at.2) {
++                        self.ticks.schedule(at.0, at.1, at.2, 93, 1);
++                    }
+                 }
+                 return;
+             }
+diff -ruN a/mc-rs/src/render/atlas.rs b/mc-rs/src/render/atlas.rs
+--- a/mc-rs/src/render/atlas.rs	2026-10-14 03:31:13.263091424 +0000
++++ b/mc-rs/src/render/atlas.rs	2026-10-14 03:32:59.995816501 +0000
+@@ -295,6 +295,7 @@
+         60 => if top { if meta > 0 { 86 } else { 87 } } else { 2 },
+         61 | 62 => if side <= 1 { 62 } else if side != meta { 45 } else if id == 62 { 61 } else { 44 },
+         73 | 74 => 51,
++        93 | 94 => match side { 1 => if id == 94 { 147 } else { 131 }, 0 => if id == 94 { 99 } else { 115 }, _ => 5 }, // `BlockRedstoneRepeater.getBlockTextureFromSide`
+         69 => 96,      // lever (ponytail: the lever sprite on its box, not `renderBlockLever`'s base + handle)
+         70 | 77 => 1,  // stone pressure plate, button
+         72 => 4,       // wooden pressure plate
+diff -ruN a/mc-rs/src/render/mesh.rs b/mc-rs/src/render/mesh.rs
+--- a/mc-rs/src/render/mesh.rs	2026-10-14 03:31:13.262328890 +0000
++++ b/mc-rs/src/render/mesh.rs	2026-10-14 03:32:59.996380294 +0000
+@@ -307,6 +307,15 @@
+             for x in 0..16 {
+                 // Plants: two crossed quads, visible from both sides, lit by their own cell.
+                 let raw = blocks[idx(x as usize, y as usize, z as usize)];
++                if matches!(raw, 93 | 94) {
++                    // `RenderBlocks.renderBlockRedstoneRepeater`: the fixed torch in front, the one that shows the delay behind it.
++                    let meta = data.get(x as usize, y as usize, z as usize);
++                    let a = [-0.0625, 0.0625, 0.1875, 0.3125][((meta & 12) >> 2) as usize];
++                    let (front, delay) = match meta & 3 { 0 => ((0.0, -0.3125), (0.0, a)), 1 => ((0.3125, 0.0), (-a, 0.0)), 2 => ((0.0, 0.3125), (0.0, -a)), _ => ((-0.3125, 0.0), (a, 0.0)) };
++                    for (dx, dz) in [front, delay] {
++                        push_torch(&mut verts, &mut idxs, [(ox + x) as f32 + dx, y as f32 - 0.2, (oz + z) as f32 + dz], 5, if raw == 94 { 99 } else { 115 });
++                    }
++                }
+                 if matches!(raw, 50 | 75 | 76) {
+                     push_torch(&mut verts, &mut idxs, [(ox + x) as f32, y as f32, (oz + z) as f32], data.get(x as usize, y as usize, z as usize), match raw { 50 => 80, 76 => 99, _ => 115 });
+                     continue;
+diff -ruN a/mc-rs/src/world/chunk.rs b/mc-rs/src/world/chunk.rs
+--- a/mc-rs/src/world/chunk.rs	2026-10-14 03:31:13.263846872 +0000
++++ b/mc-rs/src/world/chunk.rs	2026-10-14 03:32:59.995307843 +0000
+@@ -113,6 +113,7 @@
+         // (3/16 either side of the middle, 0.2..0.8 high on a wall, a 0.25 post on the floor); `BlockButton` (6/16..10/16 high, 2/16
+         // deep, 1/16 pressed). Metadata 1 / 2 / 3 / 4 = attached on the -x / +x / -z / +z side.
+         55 => [0.0, 0.0, 0.0, 1.0, 1.0 / 16.0, 1.0],
++        93 | 94 => [0.0, 0.0, 0.0, 1.0, 2.0 / 16.0, 1.0], // BlockRedstoneRepeater
+         70 | 72 => [1.0 / 16.0, 0.0, 1.0 / 16.0, 15.0 / 16.0, if meta == 1 { 1.0 / 32.0 } else { 1.0 / 16.0 }, 15.0 / 16.0],
+         69 => match meta & 7 {
+             1 => [0.0, 0.2, 0.5 - 3.0 / 16.0, 6.0 / 16.0, 0.8, 0.5 + 3.0 / 16.0],
+@@ -262,7 +263,7 @@
+ pub fn collision(id: u8) -> Option<[f32; 6]> {
+     const I: f32 = CACTUS_INSET;
+     match id {
+-        0 | 8..=11 | 27 | 28 | 30 | 50 | 51 | 55 | 59 | 63 | 65 | 66 | 68 | 69 | 70 | 72 | 75 | 76 | 77 | 78 | 90 => None, // rails have none (`getCollisionBoundingBoxFromPool` = null); ponytail: a ladder's thin box needs metadata (physics reads ids), none for now
++        0 | 8..=11 | 27 | 28 | 30 | 50 | 51 | 55 | 59 | 63 | 65 | 66 | 68 | 69 | 70 | 72 | 75 | 76 | 77 | 78 | 90 | 93 | 94 => None, // rails have none (`getCollisionBoundingBoxFromPool` = null); ponytail: a ladder's thin box needs metadata (physics reads ids), none for now
+         26 => Some([0.0, 0.0, 0.0, 1.0, 9.0 / 16.0, 1.0]), // ponytail: a door stays a full cell until the query carries metadata
+         _ if is_plant(id) => None,
+         44 | SNOW_DEEP => Some([0.0, 0.0, 0.0, 1.0, 0.5, 1.0]),
+diff -ruN a/mc-rs/src/world/craft.rs b/mc-rs/src/world/craft.rs
+--- a/mc-rs/src/world/craft.rs	2026-10-14 03:31:13.263326050 +0000
++++ b/mc-rs/src/world/craft.rs	2026-10-14 03:33:34.924058514 +0000
+@@ -266,6 +266,19 @@
+             shaped(&["###", "###", " X "], &[('#', PLANKS), ('X', STICK)], 323, 1),   // sign
+             shaped(&["###", "#X#", "###"], &[('#', STICK), ('X', 35)], 321, 1),        // painting: 8 sticks round a wool
+             shaped(&["X#X", "#X#", "X#X"], &[('X', 289), ('#', 12)], 46, 1),  // TNT: gunpowder + sand
++            // The redstone recipes of `CraftingManager` (M21): lever, torch, repeater, button, the two plates, jukebox, note block,
++            // dispenser, the two pistons.
++            shaped(&["X", "#"], &[('X', STICK), ('#', 4)], 69, 1),
++            shaped(&["X", "#"], &[('X', 331), ('#', STICK)], 76, 1),
++            shaped(&["#X#", "III"], &[('#', 76), ('X', 331), ('I', 1)], 356, 1),
++            shaped(&["#", "#"], &[('#', 1)], 77, 1),
++            shaped(&["##"], &[('#', 1)], 70, 1),
++            shaped(&["##"], &[('#', PLANKS)], 72, 1),
++            shaped(&["###", "#X#", "###"], &[('#', PLANKS), ('X', 264)], 84, 1),
++            shaped(&["###", "#X#", "###"], &[('#', PLANKS), ('X', 331)], 25, 1),
++            shaped(&["###", "#X#", "#R#"], &[('#', 4), ('X', 261), ('R', 331)], 23, 1),
++            shaped(&["TTT", "#X#", "#R#"], &[('T', PLANKS), ('#', 4), ('X', 265), ('R', 331)], 33, 1),
++            shaped(&["S", "P"], &[('S', 341), ('P', 33)], 29, 1),
+             shaped(&["###"], &[('#', 4)], 44 | 3 << 9, 3),                   // slabs x3: cobblestone, stone, sandstone, planks
+             shaped(&["###"], &[('#', 1)], 44, 3),
+             shaped(&["###"], &[('#', 24)], 44 | 1 << 9, 3),
+@@ -928,6 +941,11 @@
+         assert_eq!(find_in(&sign, 3), Some((323, 1, 0)), "sign: 6 planks over a stick");
+         let frame: Vec<_> = (0..9).map(|i| (i, st(if i == 4 { 35 } else { 280 }, 0))).collect();
+         assert_eq!(find_in(&frame, 3), Some((321, 1, 0)), "painting: 8 sticks round a wool");
++        assert_eq!(find_in(&[(0, st(280, 0)), (3, st(4, 0))], 3), Some((69, 1, 0)), "lever: stick over cobblestone");
++        let repeater: Vec<_> = [(0, 76), (1, 331), (2, 76), (3, 1), (4, 1), (5, 1)].iter().map(|&(i, id)| (i, st(id, 0))).collect();
++        assert_eq!(find_in(&repeater, 3), Some((356, 1, 0)), "repeater: two torches and dust over three stone");
++        let piston: Vec<_> = [(0, 5), (1, 5), (2, 5), (3, 4), (4, 265), (5, 4), (6, 4), (7, 331), (8, 4)].iter().map(|&(i, id)| (i, st(id, 0))).collect();
++        assert_eq!(find_in(&piston, 3), Some((33, 1, 0)), "piston: planks, cobblestone round an iron ingot and redstone");
+     }
+ 
+     /// Tools: ids, durability, speed on their blocks and the harvest gate.
+diff -ruN a/mc-rs/src/world/items.rs b/mc-rs/src/world/items.rs
+--- a/mc-rs/src/world/items.rs	2026-10-14 03:31:13.263613565 +0000
++++ b/mc-rs/src/world/items.rs	2026-10-14 03:34:34.498295472 +0000
+@@ -58,6 +58,7 @@
+     match id {
+         261 | 282 | 323 | 324 | 330 | 346 | 354 | 355 | 325..=327 | 335 => 1,
+         332 | 344 => 16,
++        2256 | 2257 => 1, // records
+         357 => 8,
+         _ if craft::tool(id).is_some() || craft::armor(id).is_some() => 1,
+         _ => 64,
+@@ -77,7 +78,7 @@
+         296 | 338 => 83, // wheat, sugar cane
+         318 => 13,       // flint
+         323 | 324 => 5,  // sign, wooden door
+-        331 => 73,       // redstone
++        331 | 356 => 73, // redstone, repeater
+         332 => 78,       // snowball
+         337 => 82,       // clay
+         336 => 38,       // brick
+@@ -157,6 +158,7 @@
+         64 => 324,                                                    // wooden door
+         71 => 330,                                                    // iron door
+         75 | 76 => 76,                                                // redstone torches
++        93 | 94 => 356,                                               // repeaters
+         80 => 332,                                                    // snow block -> snowball
+         82 => 337,                                                    // clay
+         83 => 338,                                                    // reeds
+diff -ruN a/mc-rs/src/world/pick.rs b/mc-rs/src/world/pick.rs
+--- a/mc-rs/src/world/pick.rs	2026-10-14 03:31:13.263870667 +0000
++++ b/mc-rs/src/world/pick.rs	2026-10-14 03:32:59.993073545 +0000
+@@ -127,6 +127,7 @@
+     match id {
+         53 | 67 => Some(at(0.5, [2, 1, 3, 0])),
+         61 => Some(at(0.5, [2, 5, 3, 4])),
++        93 => Some(at(0.5, [2, 3, 0, 1])), // BlockRedstoneRepeater.onBlockPlacedBy: ((floor(yaw * 4 / 360 + 0.5) & 3) + 2) % 4
+         86 | 91 => Some(at(2.5, [0, 1, 2, 3])),
+         _ => None,
+     }
+diff -ruN a/mc-rs/src/world/redstone.rs b/mc-rs/src/world/redstone.rs
+--- a/mc-rs/src/world/redstone.rs	2026-10-14 03:31:13.263762688 +0000
++++ b/mc-rs/src/world/redstone.rs	2026-10-14 03:32:41.979551417 +0000
+@@ -35,10 +35,16 @@
+         69 | 77 => m & 8 != 0,
+         70 | 72 => m > 0,
+         76 => torch_powers(m, side),
++        94 => repeater_powers(m, side),
+         _ => false,
+     }
+ }
+ 
++/// `BlockRedstoneRepeater.isPoweringTo` of a repeater that is on: out of its front only.
++fn repeater_powers(m: u8, side: u8) -> bool {
++    matches!((m & 3, side), (0, 3) | (1, 4) | (2, 2) | (3, 5))
++}
++
+ /// `Block.isIndirectlyPoweringTo`: the power a block gives the (solid) block it points at.
+ pub fn strong(w: &ChunkManager, x: i32, y: i32, z: i32, side: u8, wires: bool) -> bool {
+     let m = w.meta(x, y, z);
+@@ -48,13 +54,23 @@
+         77 => m & 8 != 0 && matches!((m & 7, side), (5, 1) | (4, 2) | (3, 3) | (2, 4) | (1, 5)),
+         70 | 72 => m > 0 && side == 1,
+         76 => side == 0 && torch_powers(m, 0),
++        94 => repeater_powers(m, side),
+         _ => false,
+     }
+ }
+ 
+-/// `BlockRedstoneWire.isPowerProviderOrWire`.
+-fn provider_or_wire(w: &ChunkManager, x: i32, y: i32, z: i32) -> bool {
+-    can_provide_power(get(w, x, y, z))
++/// `BlockRedstoneWire.isPowerProviderOrWire`: `dir` is the Java direction the wire looks along (0 +z, 1 -x, 2 -z, 3 +x) or -1 for a
++/// neighbour one step up or down, where only another wire counts; a repeater counts along its own axis.
++fn provider_or_wire(w: &ChunkManager, x: i32, y: i32, z: i32, dir: i8) -> bool {
++    match get(w, x, y, z) {
++        0 => false,
++        55 => true,
++        93 | 94 => {
++            let f = (w.meta(x, y, z) & 3) as usize;
++            dir == f as i8 || dir == [2, 3, 0, 1][f]
++        }
++        id => can_provide_power(id) && dir != -1,
++    }
+ }
+ 
+ /// `BlockRedstoneWire.isPoweringTo` for a wire with a level: it points along the lines it connects to (all four sides when it connects
+@@ -63,12 +79,13 @@
+     if side == 1 {
+         return true;
+     }
+-    let p = |a, b, c| provider_or_wire(w, a, b, c);
+-    // (west, east, north, south) = the neighbours at -x, +x, -z, +z
+-    let mut c = [(-1, 0), (1, 0), (0, -1), (0, 1)].map(|(dx, dz)| p(x + dx, y, z + dz) || (!nc(w, x + dx, y, z + dz) && p(x + dx, y - 1, z + dz)));
++    let p = |a, b, c, d| provider_or_wire(w, a, b, c, d);
++    // (west, east, north, south) = the neighbours at -x, +x, -z, +z, looked at along Java directions 1, 3, 2, 0
++    let around = [(-1, 0, 1), (1, 0, 3), (0, -1, 2), (0, 1, 0)];
++    let mut c = around.map(|(dx, dz, d)| p(x + dx, y, z + dz, d) || (!nc(w, x + dx, y, z + dz) && p(x + dx, y - 1, z + dz, -1)));
+     if !nc(w, x, y + 1, z) {
+-        for (i, (dx, dz)) in [(-1, 0), (1, 0), (0, -1), (0, 1)].into_iter().enumerate() {
+-            c[i] |= nc(w, x + dx, y, z + dz) && p(x + dx, y + 1, z + dz);
++        for (i, (dx, dz, _)) in around.into_iter().enumerate() {
++            c[i] |= nc(w, x + dx, y, z + dz) && p(x + dx, y + 1, z + dz, -1);
+         }
+     }
+     let [west, east, north, south] = c;
+@@ -113,6 +130,13 @@
+     best.saturating_sub(1)
+ }
+ 
++/// What a repeater reads (`BlockRedstoneRepeater.func_22022_g`): the cell behind it is a power source, or a live wire.
++pub fn repeater_input(w: &ChunkManager, x: i32, y: i32, z: i32) -> bool {
++    let (dx, dz, side) = [(0, 1, 3), (-1, 0, 4), (0, -1, 2), (1, 0, 5)][(w.meta(x, y, z) & 3) as usize];
++    let (a, c) = (x + dx, z + dz);
++    indirect(w, a, y, c, side, true) || (get(w, a, y, c) == 55 && w.meta(a, y, c) > 0)
++}
++
+ /// What a redstone torch reads (`BlockRedstoneTorch.func_30002_h`): the block it hangs on is powered from another side.
+ pub fn torch_input(w: &ChunkManager, x: i32, y: i32, z: i32) -> bool {
+     match w.meta(x, y, z) {
+diff -ruN a/mc-rs/src/world/ticks.rs b/mc-rs/src/world/ticks.rs
+--- a/mc-rs/src/world/ticks.rs	2026-10-14 03:31:13.263897593 +0000
++++ b/mc-rs/src/world/ticks.rs	2026-10-14 03:34:34.497869853 +0000
+@@ -7,7 +7,7 @@
+ //! farmland are in. Not ported yet: portal from fire (M11), TNT priming from fire, lava mix sound and smoke, falling sand
+ //! far from loaded chunks (vanilla drops it instantly), pending ticks are not saved (vanilla does not either).
+ 
+-use std::collections::{BTreeSet, HashSet};
++use std::collections::{BTreeSet, HashMap, HashSet};
+ 
+ use glam::Vec3;
+ 
+@@ -79,6 +79,10 @@
+     pub plate_ents: Vec<(Vec3, Vec3, bool)>,
+     /// `BlockRedstoneTorch.torchUpdates`: (cell, tick) of each recent turn-off, for the burnout rule (8 in 100 ticks).
+     torch_flips: Vec<((i32, i32, i32), u64)>,
++    /// `TileEntityNote`: the note (0..=24) and whether the block was powered last time, per note block. ponytail: not saved.
++    notes: HashMap<(i32, i32, i32), (u8, bool)>,
++    /// Notes played this tick (cell, note, instrument 0 harp / 1 bass drum / 2 snare / 3 click / 4 bass); no audio yet, the caller drains it.
++    pub note_events: Vec<((i32, i32, i32), u8, u8)>,
+     /// `Entity.distanceWalkedModified` / `nextStepDistance` of the player and where the last tick left him (x, z).
+     walked: f32,
+     next_step: i32,
+@@ -87,7 +91,7 @@
+ 
+ impl Ticks {
+     pub fn new(seed: i64) -> Self {
+-        Self { now: 0, seq: 0, due: BTreeSet::new(), pending: HashSet::new(), rng: JavaRandom::new(seed ^ 0xB10C), lcg: 0x2545_F491, wet: false, falling: Vec::new(), booms: Vec::new(), plate_ents: Vec::new(), torch_flips: Vec::new(), walked: 0.0, next_step: 1, last_xz: None }
++        Self { now: 0, seq: 0, due: BTreeSet::new(), pending: HashSet::new(), rng: JavaRandom::new(seed ^ 0xB10C), lcg: 0x2545_F491, wet: false, falling: Vec::new(), booms: Vec::new(), plate_ents: Vec::new(), torch_flips: Vec::new(), notes: HashMap::new(), note_events: Vec::new(), walked: 0.0, next_step: 1, last_xz: None }
+     }
+ 
+     /// The step trigger of `Entity.moveEntity` for the player (walked distance x 0.6 past `nextStepDistance`, block under the
+@@ -177,7 +181,7 @@
+                 }
+                 // A source of power changing (a lever flipping, a torch going out) is also heard by the neighbours of the block it
+                 // points at: `notifyBlocksOfNeighborChange(attached cell)`. Pinging all six neighbours covers it.
+-                if matches!(old, 69 | 70 | 72 | 75 | 76 | 77) || matches!(new, 69 | 70 | 72 | 75 | 76 | 77) {
++                if matches!(old, 69 | 70 | 72 | 75 | 76 | 77 | 93 | 94) || matches!(new, 69 | 70 | 72 | 75 | 76 | 77 | 93 | 94) {
+                     for (dx, dy, dz) in SIDE {
+                         w.ping(x + dx, y + dy, z + dz);
+                     }
+@@ -283,6 +287,28 @@
+                 w.set_block(x, y, z, 0);
+             }
+             75 | 76 => self.schedule(x, y, z, id, 2),
++            // BlockNote.onNeighborBlockChange: it plays when the power turns on.
++            25 => {
++                let p = redstone::indirectly_powered(w, x, y, z, true);
++                let e = self.notes.entry((x, y, z)).or_insert((0, false));
++                if e.1 != p {
++                    e.1 = p;
++                    if p {
++                        self.note_play(w, x, y, z);
++                    }
++                }
++            }
++            // BlockRedstoneRepeater.onNeighborBlockChange: no solid ground drops it, else a change of its input is scheduled
++            // after its delay (1 to 4 redstone ticks of 2 game ticks).
++            93 | 94 if !normal_cube(bid(w, x, y - 1, z)) => {
++                drops.spawn_block(93, 0, (x, y, z));
++                w.set_block(x, y, z, 0);
++            }
++            93 | 94 => {
++                if redstone::repeater_input(w, x, y, z) == (id == 93) {
++                    self.schedule(x, y, z, id, (((w.meta(x, y, z) as u64 & 12) >> 2) + 1) * 2);
++                }
++            }
+             // BlockLever / BlockButton.onNeighborBlockChange: the block it is attached to is gone (levers 1..4 wall, 5 / 6 floor).
+             69 | 77 if !switch_stays(w, x, y, z) => {
+                 drops.spawn_block(id, 0, (x, y, z));
+@@ -340,6 +366,18 @@
+             39 | 40 => mushroom(w, &mut self.rng, x, y, z, id),
+             51 => self.fire(w, x, y, z),
+             75 | 76 => self.torch(w, x, y, z, id),
++            // BlockRedstoneRepeater.updateTick: follow the input, and an input that went away while it was turning on lets it go again.
++            93 | 94 => {
++                let (m, input) = (w.meta(x, y, z), redstone::repeater_input(w, x, y, z));
++                if id == 94 && !input {
++                    w.set_block_meta(x, y, z, 93, m);
++                } else if id == 93 {
++                    w.set_block_meta(x, y, z, 94, m);
++                    if !input {
++                        self.schedule(x, y, z, 94, (((m as u64 & 12) >> 2) + 1) * 2);
++                    }
++                }
++            }
+             // BlockButton.updateTick: the 20 ticks are over.
+             77 if w.meta(x, y, z) & 8 != 0 => {
+                 w.set_block_meta(x, y, z, 77, w.meta(x, y, z) & 7);
+@@ -370,6 +408,28 @@
+         }
+     }
+ 
++    /// `TileEntityNote.triggerNote`: only with air above; the instrument comes from the block below (rock 1, sand 2, glass 3, wood 4).
++    fn note_play(&mut self, w: &ChunkManager, x: i32, y: i32, z: i32) {
++        if bid(w, x, y + 1, z) != 0 {
++            return;
++        }
++        let inst = match bid(w, x, y - 1, z) {
++            1 | 4 | 7 | 14..=16 | 21 | 22 | 24 | 43..=45 | 48 | 49 | 56 | 61 | 62 | 67 | 73 | 74 => 1,
++            12 | 13 => 2,
++            20 => 3,
++            5 | 17 | 25 | 47 | 53 | 54 | 58 | 64 | 84 | 85 | 96 => 4,
++            _ => 0,
++        };
++        self.note_events.push(((x, y, z), self.notes.get(&(x, y, z)).map_or(0, |e| e.0), inst));
++    }
++
++    /// `BlockNote.blockActivated`: the pitch goes up one (25 notes) and the note plays.
++    pub fn note_use(&mut self, w: &ChunkManager, x: i32, y: i32, z: i32) {
++        let e = self.notes.entry((x, y, z)).or_insert((0, false));
++        e.0 = (e.0 + 1) % 25;
++        self.note_play(w, x, y, z);
++    }
++
+     /// `BlockRedstoneTorch.updateTick`: it goes out when its input is powered and relights when it is not; a torch that flipped 8
+     /// times in 100 ticks stays out (burnout).
+     fn torch(&mut self, w: &mut ChunkManager, x: i32, y: i32, z: i32, id: u8) {
+@@ -672,7 +732,7 @@
+         83 => below == 83 || (matches!(below, 2 | 3) && [(-1, 0), (1, 0), (0, -1), (0, 1)].iter().any(|&(dx, dz)| matches!(bid(w, x + dx, y - 1, z + dz), 8 | 9))),
+         81 => [(-1, 0), (1, 0), (0, -1), (0, 1)].iter().all(|&(dx, dz)| non_solid(bid(w, x + dx, y, z + dz))) && matches!(below, 12 | 81),
+         // wire and pressure plates need a solid cell below; a lever or a button any solid neighbour (`canPlaceBlockAt`)
+-        55 | 70 | 72 => normal_cube(below),
++        55 | 70 | 72 | 93 | 94 => normal_cube(below),
+         // a lever may also sit on the floor; the button only on a side (`BlockLever` / `BlockButton.canPlaceBlockAt`)
+         69 | 77 => SIDE.iter().any(|&(dx, dy, dz)| (dy == 0 || (id == 69 && dy < 0)) && normal_cube(bid(w, x + dx, y + dy, z + dz))),
+         _ => true,
+@@ -1111,6 +1171,29 @@
+         assert_eq!(m.meta(2, 40, 2), 0);
+     }
+ 
++    /// A repeater (facing +x, delay 1) answers a lever two game ticks later and then powers the dust in front of it; it lets go again
++    /// two ticks after the lever goes off.
++    #[test]
++    fn repeater_delays_and_passes_the_signal_on() {
++        let mut m = ChunkManager::new(1, 1);
++        m.insert((0, 0), vec![0u8; crate::world::chunk::VOLUME]);
++        (0..16).for_each(|x| (0..16).for_each(|z| { m.set_block(x, 39, z, 1); }));
++        let (mut t, mut d) = (Ticks::new(1), Drops::new(1));
++        m.set_block_meta(6, 40, 5, 93, 1);
++        m.set_block(7, 40, 5, 55);
++        m.set_block_meta(5, 40, 5, 69, 5 | 8);
++        t.notify(&mut m, &mut d);
++        assert_eq!((m.block(6, 40, 5), m.meta(7, 40, 5)), (Some(93), 0), "still off: the delay has not passed");
++        t.update(&mut m, &mut d, 6, 40, 5, 93);
++        t.notify(&mut m, &mut d);
++        assert_eq!((m.block(6, 40, 5), m.meta(6, 40, 5), m.meta(7, 40, 5)), (Some(94), 1, 15), "on, facing kept, the dust in front is live");
++        m.set_block_meta(5, 40, 5, 69, 5);
++        t.notify(&mut m, &mut d);
++        t.update(&mut m, &mut d, 6, 40, 5, 94);
++        t.notify(&mut m, &mut d);
++        assert_eq!((m.block(6, 40, 5), m.meta(7, 40, 5)), (Some(93), 0));
++    }
++
+     #[test]
+     fn slab_on_slab_merges_only_when_the_kinds_match() {
+         let mut m = ChunkManager::new(1, 1);

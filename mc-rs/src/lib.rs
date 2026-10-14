@@ -47,6 +47,7 @@ use crate::world::sky;
 use crate::world::chunk::{is_plant, normal_cube, outline_bounds, physics_id, pick_bounds};
 use crate::world::chunks::{chunk_coord, ChunkManager, Shape};
 use crate::world::physics::{self, Player};
+use crate::world::redstone;
 use crate::world::vitals::{self, Env, Vitals};
 use crate::world::effects::{self, Effects, Spawner};
 use crate::render::weather;
@@ -555,7 +556,13 @@ impl App {
             }
             let centre = (chunk_coord(self.player.pos.x), chunk_coord(self.player.pos.z));
             self.sleep_tick(sub);
+            // `BlockPressurePlate`: the boxes of what may stand on a plate (the player, the mobs).
+            let p = self.player.pos;
+            self.ticks.plate_ents.clear();
+            self.ticks.plate_ents.push((p - physics::HALF, p + physics::HALF, true));
+            self.ticks.plate_ents.extend(self.mobs.list.iter().map(|m| { let (lo, hi) = m.aabb(); (lo, hi, true) }));
             self.ticks.step(&mut self.chunks, &mut self.drops, centre, self.weather.rain(1.0));
+            self.ticks.note_events.clear(); // no audio layer yet: it would play them here
             for at in std::mem::take(&mut self.ticks.booms) {
                 self.explode(at, 4.0); // `EntityTNTPrimed.explode`
             }
@@ -660,6 +667,9 @@ impl App {
                             let harvest = dig::can_harvest(id, held);
                             if let Some(h) = held {
                                 self.inv.damage(slot, craft::wear_on_break(h.id, id));
+                            }
+                            if id == 84 && meta & 15 != 0 {
+                                self.drops.spawn_stack(ItemStack { id: 2255 + (meta & 15) as u16, count: 1, damage: 0 }, hit.pos); // the record comes out
                             }
                             if id == 46 {
                                 // `BlockTNT.onBlockDestroyedByPlayer` (unconditional): metadata 1, or flint and steel in hand (`onBlockClicked`), lights it.
@@ -790,6 +800,53 @@ impl App {
                     self.chunks.set_block_meta(x, y, z, 96, self.chunks.meta(x, y, z) ^ 4);
                     return;
                 }
+                // BlockLever.blockActivated: the on bit flips. ponytail: a punch (`onBlockClicked`) does not flip it.
+                Some(69) => {
+                    let (x, y, z) = hit.pos;
+                    self.chunks.set_block_meta(x, y, z, 69, self.chunks.meta(x, y, z) ^ 8);
+                    return;
+                }
+                // BlockButton.blockActivated: pressed for 20 ticks.
+                Some(77) => {
+                    let (x, y, z) = hit.pos;
+                    let m = self.chunks.meta(x, y, z);
+                    if m & 8 == 0 && self.chunks.set_block_meta(x, y, z, 77, m | 8) {
+                        self.ticks.schedule(x, y, z, 77, 20);
+                    }
+                    return;
+                }
+                // BlockNote.blockActivated.
+                Some(25) => {
+                    let (x, y, z) = hit.pos;
+                    self.ticks.note_use(&self.chunks, x, y, z);
+                    return;
+                }
+                // BlockJukeBox.blockActivated + ItemRecord.onItemUse: a record goes in (the metadata says which: 1 = 13, 2 = cat;
+                // ponytail: the Java keeps it in a tile entity), clicking again takes it out.
+                Some(84) => {
+                    let (x, y, z) = hit.pos;
+                    let m = self.chunks.meta(x, y, z);
+                    if m != 0 {
+                        self.chunks.set_block_meta(x, y, z, 84, 0);
+                        self.drops.spawn_stack(ItemStack { id: 2255 + m as u16, count: 1, damage: 0 }, (x, y + 1, z));
+                        return;
+                    } else if let Some(s) = self.inv.slots[self.touch.hotbar_slot].filter(|s| matches!(s.id, 2256 | 2257)) {
+                        self.chunks.set_block_meta(x, y, z, 84, (s.id - 2255) as u8);
+                        self.inv.consume(self.touch.hotbar_slot);
+                        return;
+                    }
+                }
+                // BlockRedstoneRepeater.blockActivated: the delay goes 1 -> 2 -> 3 -> 4 -> 1.
+                Some(93 | 94) => {
+                    let (x, y, z) = hit.pos;
+                    let (m, id) = (self.chunks.meta(x, y, z), self.chunks.block_loaded(x, y, z).unwrap_or(93));
+                    self.chunks.set_block_meta(x, y, z, id, ((m & 12) + 4 & 12) | m & 3);
+                    return;
+                }
+                // BlockRedstoneOre.blockActivated: it lights up, then the block in hand is still placed against it.
+                Some(73) => {
+                    self.chunks.set_block(hit.pos.0, hit.pos.1, hit.pos.2, 74);
+                }
                 Some(26) => {
                     self.use_bed(hit.pos);
                     return;
@@ -904,12 +961,26 @@ impl App {
                 }
                 return;
             }
+            // ItemRedstone.onItemUse: dust on the cell beside the face aimed at (`BlockRedstoneWire.canPlaceBlockAt`: solid below).
+            // ItemReed for the repeater (356 -> block 93, facing from the yaw, `onBlockPlacedBy`: scheduled at once when powered).
+            if let Some(b) = self.inv.slots[slot].and_then(|s| match s.id { 331 => Some(55u8), 356 => Some(93), _ => None }) {
+                let at = pick::place_pos(&hit);
+                let meta = pick::facing_meta(b as u16, self.camera.yaw.to_degrees() + 180.0).unwrap_or(0);
+                if at.1 < 127 && self.chunks.block_loaded(at.0, at.1, at.2).is_some_and(pick::replaceable) && ticks::can_place(&self.chunks, at.0, at.1, at.2, b) && self.chunks.set_block_meta(at.0, at.1, at.2, b, meta) {
+                    self.inv.consume(slot);
+                    if b == 93 && redstone::repeater_input(&self.chunks, at.0, at.1, at.2) {
+                        self.ticks.schedule(at.0, at.1, at.2, 93, 1);
+                    }
+                }
+                return;
+            }
             let (x, y, z) = pick::place_pos(&hit);
             // Items below 256 are blocks; anything else cannot be placed. ItemBlock refuses a solid block at y = 127
             // (ponytail: plants are refused there too).
             if let Some(s) = self.inv.slots[slot].filter(|s| s.id < 256) {
                 // A torch's facing comes from the face aimed at and what can hold it (None = nothing to hang on: no placement).
-                let meta = if s.id == 50 { pick::torch_meta(&|a, b, c| self.chunks.block_loaded(a, b, c).unwrap_or(0), (x, y, z), hit.face) } else if s.id == 96 { pick::trap_meta(hit.face, self.chunks.block_loaded(hit.pos.0, hit.pos.1, hit.pos.2).is_some_and(normal_cube)) } else { pick::facing_meta(s.id, self.camera.yaw.to_degrees() + 180.0).or(Some(items::placed_meta(s))) };
+                let floor = 5 + self.mobs.rng.next_int_bound(2) as u8; // a lever on the floor: 5 or 6
+                let meta = if matches!(s.id, 50 | 75 | 76) { pick::torch_meta(&|a, b, c| self.chunks.block_loaded(a, b, c).unwrap_or(0), (x, y, z), hit.face) } else if matches!(s.id, 69 | 77) { pick::switch_meta(&|a, b, c| self.chunks.block_loaded(a, b, c).unwrap_or(0), (x, y, z), hit.face, s.id == 69, floor) } else if s.id == 96 { pick::trap_meta(hit.face, self.chunks.block_loaded(hit.pos.0, hit.pos.1, hit.pos.2).is_some_and(normal_cube)) } else { pick::facing_meta(s.id, self.camera.yaw.to_degrees() + 180.0).or(Some(items::placed_meta(s))) };
                 if let Some(meta) = meta.filter(|_| y < 127 && self.chunks.block_loaded(x, y, z).is_some_and(pick::replaceable) && !pick::overlaps_player((x, y, z), s.id as u8, self.player.pos) && ticks::can_place(&self.chunks, x, y, z, s.id as u8) && (s.id != chest::ID as u16 || chest::can_place(&|a, b, c| self.chunks.block(a, b, c).unwrap_or(0), (x, y, z)))) {
                     if self.chunks.set_block_meta(x, y, z, s.id as u8, meta) {
                         self.inv.consume(slot);

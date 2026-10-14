@@ -127,6 +127,7 @@ pub fn facing_meta(id: u16, yaw: f32) -> Option<u8> {
     match id {
         53 | 67 => Some(at(0.5, [2, 1, 3, 0])),
         61 => Some(at(0.5, [2, 5, 3, 4])),
+        93 => Some(at(0.5, [2, 3, 0, 1])), // BlockRedstoneRepeater.onBlockPlacedBy: ((floor(yaw * 4 / 360 + 0.5) & 3) + 2) % 4
         86 | 91 => Some(at(2.5, [0, 1, 2, 3])),
         _ => None,
     }
@@ -216,6 +217,22 @@ pub fn torch_meta(get: &dyn Fn(i32, i32, i32) -> u8, (x, y, z): (i32, i32, i32),
         return Some(aimed);
     }
     s.iter().position(|&h| h).map(|i| i as u8 + 1)
+}
+
+/// `BlockLever.onBlockPlaced` / `BlockButton.onBlockPlaced`: the metadata (1 -x, 2 +x, 3 -z, 4 +z wall; a lever on the floor 5 or
+/// `floor`, 6) from the face aimed at and the solid block behind it. A lever with nothing to hold it gets `None`; a button falls back
+/// to any solid side (`getOrientation`).
+pub fn switch_meta(get: &dyn Fn(i32, i32, i32) -> u8, (x, y, z): (i32, i32, i32), face: u8, lever: bool, floor: u8) -> Option<u8> {
+    let n = |dx, dy, dz| normal_cube(get(x + dx, y + dy, z + dz));
+    match face {
+        1 if lever && n(0, -1, 0) => Some(floor),
+        2 if n(0, 0, 1) => Some(4),
+        3 if n(0, 0, -1) => Some(3),
+        4 if n(1, 0, 0) => Some(2),
+        5 if n(-1, 0, 0) => Some(1),
+        _ if lever => None,
+        _ => Some(if n(-1, 0, 0) { 1 } else if n(1, 0, 0) { 2 } else if n(0, 0, -1) { 3 } else if n(0, 0, 1) { 4 } else { 1 }),
+    }
 }
 
 /// `BlockTorch.onNeighborBlockChange`: false when the torch with metadata `meta` has lost what it hangs on.
@@ -327,6 +344,8 @@ mod door_tests {
         assert_eq!([0.0, 90.0, 180.0, 270.0].map(|y| facing_meta(61, y).unwrap()), [2, 5, 3, 4]);
         assert_eq!([0.0, 90.0, 180.0, 270.0].map(|y| facing_meta(86, y).unwrap()), [2, 3, 0, 1]);
         assert_eq!((facing_meta(53, 90.0), facing_meta(1, 0.0)), (Some(1), None));
+        let stone_at_x1 = |x: i32, _: i32, _: i32| if x == 6 { 1u8 } else { 0 };
+        assert_eq!((switch_meta(&stone_at_x1, (5, 10, 5), 4, true, 5), switch_meta(&stone_at_x1, (5, 10, 5), 3, true, 5), switch_meta(&stone_at_x1, (5, 10, 5), 3, false, 5)), (Some(2), None, Some(2)));
         let floor = |_: i32, y: i32, _: i32| if y == 63 { 1 } else { 0 };
         assert_eq!(door_meta(&floor, (0, 64, 0), 0.0, 64), Some(1));
         let wall = |x: i32, y: i32, _: i32| if y == 63 || (x == -1 && y < 66) { 1 } else { 0 };

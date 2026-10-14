@@ -17,5 +17,6 @@ pub mod vitals;
 pub mod effects;
 pub mod save;
 pub mod ticks;
+pub mod redstone;
 pub mod decor;
 pub mod path;

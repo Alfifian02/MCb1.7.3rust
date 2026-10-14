@@ -87,7 +87,7 @@ pub fn box_bounds(id: u8, meta: u8) -> Option<[f32; 6]> {
     Some(match id {
         44 => [0.0, 0.0, 0.0, 1.0, 0.5, 1.0],                              // single slab
         // `BlockTorch.collisionRayTrace`: 1..=4 hangs on the -X, +X, -Z, +Z wall (0.3 wide, 0.2..0.8 high), else it stands.
-        50 => match meta & 7 {
+        50 | 75 | 76 => match meta & 7 {
             1 => [0.0, 0.2, 0.35, 0.3, 0.8, 0.65],
             2 => [0.7, 0.2, 0.35, 1.0, 0.8, 0.65],
             3 => [0.35, 0.2, 0.0, 0.65, 0.8, 0.3],
@@ -107,6 +107,28 @@ pub fn box_bounds(id: u8, meta: u8) -> Option<[f32; 6]> {
                 4 => [1.0 - T, LO, 0.0, 1.0, HI, 1.0],
                 5 => [0.0, LO, 0.0, T, HI, 1.0],
                 _ => [0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+            }
+        }
+        // M21: `BlockRedstoneWire` 1/16 high; pressure plates 1/16 in from the sides, 1/16 high (1/32 pressed); `BlockLever`
+        // (3/16 either side of the middle, 0.2..0.8 high on a wall, a 0.25 post on the floor); `BlockButton` (6/16..10/16 high, 2/16
+        // deep, 1/16 pressed). Metadata 1 / 2 / 3 / 4 = attached on the -x / +x / -z / +z side.
+        55 => [0.0, 0.0, 0.0, 1.0, 1.0 / 16.0, 1.0],
+        93 | 94 => [0.0, 0.0, 0.0, 1.0, 2.0 / 16.0, 1.0], // BlockRedstoneRepeater
+        70 | 72 => [1.0 / 16.0, 0.0, 1.0 / 16.0, 15.0 / 16.0, if meta == 1 { 1.0 / 32.0 } else { 1.0 / 16.0 }, 15.0 / 16.0],
+        69 => match meta & 7 {
+            1 => [0.0, 0.2, 0.5 - 3.0 / 16.0, 6.0 / 16.0, 0.8, 0.5 + 3.0 / 16.0],
+            2 => [1.0 - 6.0 / 16.0, 0.2, 0.5 - 3.0 / 16.0, 1.0, 0.8, 0.5 + 3.0 / 16.0],
+            3 => [0.5 - 3.0 / 16.0, 0.2, 0.0, 0.5 + 3.0 / 16.0, 0.8, 6.0 / 16.0],
+            4 => [0.5 - 3.0 / 16.0, 0.2, 1.0 - 6.0 / 16.0, 0.5 + 3.0 / 16.0, 0.8, 1.0],
+            _ => [0.25, 0.0, 0.25, 0.75, 0.6, 0.75],
+        },
+        77 => {
+            let d = if meta & 8 != 0 { 1.0 / 16.0 } else { 2.0 / 16.0 };
+            match meta & 7 {
+                1 => [0.0, 6.0 / 16.0, 0.5 - 3.0 / 16.0, d, 10.0 / 16.0, 0.5 + 3.0 / 16.0],
+                2 => [1.0 - d, 6.0 / 16.0, 0.5 - 3.0 / 16.0, 1.0, 10.0 / 16.0, 0.5 + 3.0 / 16.0],
+                3 => [0.5 - 3.0 / 16.0, 6.0 / 16.0, 0.0, 0.5 + 3.0 / 16.0, 10.0 / 16.0, d],
+                _ => [0.5 - 3.0 / 16.0, 6.0 / 16.0, 1.0 - d, 0.5 + 3.0 / 16.0, 10.0 / 16.0, 1.0],
             }
         }
         59 => [0.0, 0.0, 0.0, 1.0, 0.25, 1.0],                             // crops (pick / outline only: drawn as 4 quads)
@@ -241,7 +263,7 @@ pub const fn normal_cube(id: u8) -> bool {
 pub fn collision(id: u8) -> Option<[f32; 6]> {
     const I: f32 = CACTUS_INSET;
     match id {
-        0 | 8..=11 | 27 | 28 | 30 | 50 | 51 | 55 | 59 | 63 | 65 | 66 | 68 | 78 | 90 => None, // rails have none (`getCollisionBoundingBoxFromPool` = null); ponytail: a ladder's thin box needs metadata (physics reads ids), none for now
+        0 | 8..=11 | 27 | 28 | 30 | 50 | 51 | 55 | 59 | 63 | 65 | 66 | 68 | 69 | 70 | 72 | 75 | 76 | 77 | 78 | 90 | 93 | 94 => None, // rails have none (`getCollisionBoundingBoxFromPool` = null); ponytail: a ladder's thin box needs metadata (physics reads ids), none for now
         26 => Some([0.0, 0.0, 0.0, 1.0, 9.0 / 16.0, 1.0]), // ponytail: a door stays a full cell until the query carries metadata
         _ if is_plant(id) => None,
         44 | SNOW_DEEP => Some([0.0, 0.0, 0.0, 1.0, 0.5, 1.0]),

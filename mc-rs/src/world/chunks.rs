@@ -401,6 +401,12 @@ impl ChunkManager {
         done
     }
 
+    /// `World.notifyBlocksOfNeighborChange(x, y, z)`: the six neighbours of the cell hear of a change, nothing is written. The log entry
+    /// carries the sentinel id 255 (no block), so `ticks` reads it as "something that may provide power changed here".
+    pub fn ping(&mut self, x: i32, y: i32, z: i32) {
+        self.changes.push((x, y, z, 255, 255));
+    }
+
     /// `World.setBlockAndMetadata` / `setBlockMetadata`: the same write without telling the neighbours.
     pub fn set_quiet(&mut self, x: i32, y: i32, z: i32, id: u8, meta: u8) -> bool {
         if !(0..H as i32).contains(&y) {

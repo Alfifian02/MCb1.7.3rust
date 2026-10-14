@@ -266,6 +266,19 @@ pub fn recipes() -> &'static [Recipe] {
             shaped(&["###", "###", " X "], &[('#', PLANKS), ('X', STICK)], 323, 1),   // sign
             shaped(&["###", "#X#", "###"], &[('#', STICK), ('X', 35)], 321, 1),        // painting: 8 sticks round a wool
             shaped(&["X#X", "#X#", "X#X"], &[('X', 289), ('#', 12)], 46, 1),  // TNT: gunpowder + sand
+            // The redstone recipes of `CraftingManager` (M21): lever, torch, repeater, button, the two plates, jukebox, note block,
+            // dispenser, the two pistons.
+            shaped(&["X", "#"], &[('X', STICK), ('#', 4)], 69, 1),
+            shaped(&["X", "#"], &[('X', 331), ('#', STICK)], 76, 1),
+            shaped(&["#X#", "III"], &[('#', 76), ('X', 331), ('I', 1)], 356, 1),
+            shaped(&["#", "#"], &[('#', 1)], 77, 1),
+            shaped(&["##"], &[('#', 1)], 70, 1),
+            shaped(&["##"], &[('#', PLANKS)], 72, 1),
+            shaped(&["###", "#X#", "###"], &[('#', PLANKS), ('X', 264)], 84, 1),
+            shaped(&["###", "#X#", "###"], &[('#', PLANKS), ('X', 331)], 25, 1),
+            shaped(&["###", "#X#", "#R#"], &[('#', 4), ('X', 261), ('R', 331)], 23, 1),
+            shaped(&["TTT", "#X#", "#R#"], &[('T', PLANKS), ('#', 4), ('X', 265), ('R', 331)], 33, 1),
+            shaped(&["S", "P"], &[('S', 341), ('P', 33)], 29, 1),
             shaped(&["###"], &[('#', 4)], 44 | 3 << 9, 3),                   // slabs x3: cobblestone, stone, sandstone, planks
             shaped(&["###"], &[('#', 1)], 44, 3),
             shaped(&["###"], &[('#', 24)], 44 | 1 << 9, 3),
@@ -928,6 +941,11 @@ mod tests {
         assert_eq!(find_in(&sign, 3), Some((323, 1, 0)), "sign: 6 planks over a stick");
         let frame: Vec<_> = (0..9).map(|i| (i, st(if i == 4 { 35 } else { 280 }, 0))).collect();
         assert_eq!(find_in(&frame, 3), Some((321, 1, 0)), "painting: 8 sticks round a wool");
+        assert_eq!(find_in(&[(0, st(280, 0)), (3, st(4, 0))], 3), Some((69, 1, 0)), "lever: stick over cobblestone");
+        let repeater: Vec<_> = [(0, 76), (1, 331), (2, 76), (3, 1), (4, 1), (5, 1)].iter().map(|&(i, id)| (i, st(id, 0))).collect();
+        assert_eq!(find_in(&repeater, 3), Some((356, 1, 0)), "repeater: two torches and dust over three stone");
+        let piston: Vec<_> = [(0, 5), (1, 5), (2, 5), (3, 4), (4, 265), (5, 4), (6, 4), (7, 331), (8, 4)].iter().map(|&(i, id)| (i, st(id, 0))).collect();
+        assert_eq!(find_in(&piston, 3), Some((33, 1, 0)), "piston: planks, cobblestone round an iron ingot and redstone");
     }
 
     /// Tools: ids, durability, speed on their blocks and the harvest gate.

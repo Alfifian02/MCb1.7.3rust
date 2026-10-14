@@ -58,6 +58,7 @@ pub fn max_stack(id: u16) -> u8 {
     match id {
         261 | 282 | 323 | 324 | 330 | 346 | 354 | 355 | 325..=327 | 335 => 1,
         332 | 344 => 16,
+        2256 | 2257 => 1, // records
         357 => 8,
         _ if craft::tool(id).is_some() || craft::armor(id).is_some() => 1,
         _ => 64,
@@ -77,7 +78,7 @@ pub fn tile(id: u16) -> u8 {
         296 | 338 => 83, // wheat, sugar cane
         318 => 13,       // flint
         323 | 324 => 5,  // sign, wooden door
-        331 => 73,       // redstone
+        331 | 356 => 73, // redstone, repeater
         332 => 78,       // snowball
         337 => 82,       // clay
         336 => 38,       // brick
@@ -157,6 +158,7 @@ fn id_dropped(b: u8, r: &mut JavaRandom) -> i32 {
         64 => 324,                                                    // wooden door
         71 => 330,                                                    // iron door
         75 | 76 => 76,                                                // redstone torches
+        93 | 94 => 356,                                               // repeaters
         80 => 332,                                                    // snow block -> snowball
         82 => 337,                                                    // clay
         83 => 338,                                                    // reeds

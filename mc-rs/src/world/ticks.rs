@@ -7,7 +7,7 @@
 //! farmland are in. Not ported yet: portal from fire (M11), TNT priming from fire, lava mix sound and smoke, falling sand
 //! far from loaded chunks (vanilla drops it instantly), pending ticks are not saved (vanilla does not either).
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use glam::Vec3;
 
@@ -16,6 +16,7 @@ use crate::world::chunks::ChunkManager;
 use crate::world::gen::noise::JavaRandom;
 use crate::world::items::{Drops, ItemStack};
 use crate::world::pick::{replaceable, torch_stays, BED_DIR};
+use crate::world::redstone::{self, can_provide_power, SIDE};
 
 /// Chunks around the player whose blocks tick at random (`World.tick`'s active set).
 const ACTIVE: i32 = 9;
@@ -26,7 +27,7 @@ pub const MAX_FALLING: usize = 64;
 
 /// `Block.tickOnLoad`: blocks that get random ticks.
 pub fn ticks_at_random(id: u8) -> bool {
-    matches!(id, 2 | 6 | 8 | 10 | 18 | 31 | 32 | 37..=40 | 51 | 59 | 60 | 78 | 79 | 81 | 83)
+    matches!(id, 2 | 6 | 8 | 10 | 18 | 31 | 32 | 37..=40 | 51 | 59 | 60 | 74 | 75 | 76 | 78 | 79 | 81 | 83)
 }
 
 /// `Material.isSolid` false: air, fluids, plants, fire, web, snow layer, portal and the "circuit" blocks.
@@ -74,6 +75,14 @@ pub struct Ticks {
     pub falling: Vec<Falling>,
     /// Where a primed TNT's fuse ran out this tick: the caller makes the power 4 explosion (`EntityTNTPrimed.explode`).
     pub booms: Vec<Vec3>,
+    /// Boxes (lo, hi, is living) of the player and the mobs this tick, for `BlockPressurePlate` (the caller fills it before `step`).
+    pub plate_ents: Vec<(Vec3, Vec3, bool)>,
+    /// `BlockRedstoneTorch.torchUpdates`: (cell, tick) of each recent turn-off, for the burnout rule (8 in 100 ticks).
+    torch_flips: Vec<((i32, i32, i32), u64)>,
+    /// `TileEntityNote`: the note (0..=24) and whether the block was powered last time, per note block. ponytail: not saved.
+    notes: HashMap<(i32, i32, i32), (u8, bool)>,
+    /// Notes played this tick (cell, note, instrument 0 harp / 1 bass drum / 2 snare / 3 click / 4 bass); no audio yet, the caller drains it.
+    pub note_events: Vec<((i32, i32, i32), u8, u8)>,
     /// `Entity.distanceWalkedModified` / `nextStepDistance` of the player and where the last tick left him (x, z).
     walked: f32,
     next_step: i32,
@@ -82,7 +91,7 @@ pub struct Ticks {
 
 impl Ticks {
     pub fn new(seed: i64) -> Self {
-        Self { now: 0, seq: 0, due: BTreeSet::new(), pending: HashSet::new(), rng: JavaRandom::new(seed ^ 0xB10C), lcg: 0x2545_F491, wet: false, falling: Vec::new(), booms: Vec::new(), walked: 0.0, next_step: 1, last_xz: None }
+        Self { now: 0, seq: 0, due: BTreeSet::new(), pending: HashSet::new(), rng: JavaRandom::new(seed ^ 0xB10C), lcg: 0x2545_F491, wet: false, falling: Vec::new(), booms: Vec::new(), plate_ents: Vec::new(), torch_flips: Vec::new(), notes: HashMap::new(), note_events: Vec::new(), walked: 0.0, next_step: 1, last_xz: None }
     }
 
     /// The step trigger of `Entity.moveEntity` for the player (walked distance x 0.6 past `nextStepDistance`, block under the
@@ -97,6 +106,8 @@ impl Ticks {
             self.next_step += 1;
             if id == 60 && self.rng.next_int_bound(4) == 0 {
                 w.set_block(cx, cy, cz, 3);
+            } else if id == 73 {
+                w.set_block(cx, cy, cz, 74); // `BlockRedstoneOre.onEntityWalking`
             }
         }
     }
@@ -111,7 +122,7 @@ impl Ticks {
     }
 
     /// `World.scheduleBlockUpdate`: the same block at the same cell is queued once.
-    fn schedule(&mut self, x: i32, y: i32, z: i32, id: u8, delay: u64) {
+    pub fn schedule(&mut self, x: i32, y: i32, z: i32, id: u8, delay: u64) {
         if id > 0 && self.pending.insert((x, y, z, id)) {
             self.seq += 1;
             self.due.insert((self.now + delay, self.seq, x, y, z, id));
@@ -133,6 +144,8 @@ impl Ticks {
             }
             self.notify(w, drops);
         }
+        self.plates(w);
+        self.notify(w, drops);
         let (blocks, columns) = w.random_ticks(center, ACTIVE, &mut self.lcg, &mut self.rng);
         for (x, z) in columns {
             self.snow_ice(w, x, z);
@@ -164,7 +177,14 @@ impl Ticks {
                 for (dx, dy, dz) in [(-1, 0, 0), (1, 0, 0), (0, -1, 0), (0, 1, 0), (0, 0, -1), (0, 0, 1)] {
                     let (nx, ny, nz) = (x + dx, y + dy, z + dz);
                     let id = bid(w, nx, ny, nz);
-                    self.neighbour(w, drops, nx, ny, nz, id);
+                    self.neighbour(w, drops, nx, ny, nz, id, new);
+                }
+                // A source of power changing (a lever flipping, a torch going out) is also heard by the neighbours of the block it
+                // points at: `notifyBlocksOfNeighborChange(attached cell)`. Pinging all six neighbours covers it.
+                if matches!(old, 69 | 70 | 72 | 75 | 76 | 77 | 93 | 94) || matches!(new, 69 | 70 | 72 | 75 | 76 | 77 | 93 | 94) {
+                    for (dx, dy, dz) in SIDE {
+                        w.ping(x + dx, y + dy, z + dz);
+                    }
                 }
             }
         }
@@ -175,6 +195,7 @@ impl Ticks {
         let r = match id {
             17 => 4,
             18 => 1,
+            55 => return wire_ends(w, x, y, z), // BlockRedstoneWire.onBlockRemoval
             _ => return,
         };
         for (dx, dy, dz) in (-r..=r).flat_map(|a| (-r..=r).flat_map(move |b| (-r..=r).map(move |c| (a, b, c)))) {
@@ -200,6 +221,16 @@ impl Ticks {
                 w.set_block(x, y, z, 0);
                 w.set_block_meta(x, y - 1, z, 43, m);
             }
+            // BlockRedstoneWire.onBlockAdded; a redstone torch is checked at once; BlockTNT.onBlockAdded.
+            55 => {
+                self.wire(w, x, y, z);
+                wire_ends(w, x, y, z);
+            }
+            75 | 76 => self.schedule(x, y, z, id, 2),
+            46 if redstone::indirectly_powered(w, x, y, z, true) => {
+                w.set_block(x, y, z, 0);
+                self.prime((x, y, z), false);
+            }
             // BlockFire.onBlockAdded (ponytail: no portal from obsidian before M11).
             51 if fire_stays(w, x, y, z) => self.schedule(x, y, z, 51, 40),
             51 => {
@@ -209,7 +240,9 @@ impl Ticks {
         }
     }
 
-    fn neighbour(&mut self, w: &mut ChunkManager, drops: &mut Drops, x: i32, y: i32, z: i32, id: u8) {
+    /// `changed` is the id now at the cell that changed (255: a ping): `onNeighborBlockChange`'s last argument.
+    fn neighbour(&mut self, w: &mut ChunkManager, drops: &mut Drops, x: i32, y: i32, z: i32, id: u8, changed: u8) {
+        let power = changed == 255 || can_provide_power(changed);
         match id {
             8..=11 => {
                 harden(w, x, y, z, id);
@@ -235,8 +268,57 @@ impl Ticks {
             78 if !snow_ok(bid(w, x, y - 1, z)) => {
                 w.set_block(x, y, z, 0); // quantityDropped is 0: nothing drops
             }
-            64 | 71 => door_neighbour(w, drops, x, y, z, id),
-            96 => trap_neighbour(w, drops, x, y, z),
+            64 | 71 => door_neighbour(w, drops, x, y, z, id, power),
+            96 => trap_neighbour(w, drops, x, y, z, power),
+            // BlockTNT.onNeighborBlockChange: a power source changed and the TNT is powered.
+            46 if power && redstone::indirectly_powered(w, x, y, z, true) => {
+                w.set_block(x, y, z, 0);
+                self.prime((x, y, z), false);
+            }
+            // BlockRedstoneWire.onNeighborBlockChange: no solid ground drops the dust, else the level is recomputed.
+            55 if !normal_cube(bid(w, x, y - 1, z)) => {
+                drops.spawn_block(55, 0, (x, y, z));
+                w.set_block(x, y, z, 0);
+            }
+            55 => self.wire(w, x, y, z),
+            // BlockTorch.onNeighborBlockChange (redstone torches), then a tick in 2 to look at the input.
+            75 | 76 if !torch_stays(&|a, b, c| bid(w, a, b, c), (x, y, z), w.meta(x, y, z)) => {
+                drops.spawn_block(76, 0, (x, y, z));
+                w.set_block(x, y, z, 0);
+            }
+            75 | 76 => self.schedule(x, y, z, id, 2),
+            // BlockNote.onNeighborBlockChange: it plays when the power turns on.
+            25 => {
+                let p = redstone::indirectly_powered(w, x, y, z, true);
+                let e = self.notes.entry((x, y, z)).or_insert((0, false));
+                if e.1 != p {
+                    e.1 = p;
+                    if p {
+                        self.note_play(w, x, y, z);
+                    }
+                }
+            }
+            // BlockRedstoneRepeater.onNeighborBlockChange: no solid ground drops it, else a change of its input is scheduled
+            // after its delay (1 to 4 redstone ticks of 2 game ticks).
+            93 | 94 if !normal_cube(bid(w, x, y - 1, z)) => {
+                drops.spawn_block(93, 0, (x, y, z));
+                w.set_block(x, y, z, 0);
+            }
+            93 | 94 => {
+                if redstone::repeater_input(w, x, y, z) == (id == 93) {
+                    self.schedule(x, y, z, id, (((w.meta(x, y, z) as u64 & 12) >> 2) + 1) * 2);
+                }
+            }
+            // BlockLever / BlockButton.onNeighborBlockChange: the block it is attached to is gone (levers 1..4 wall, 5 / 6 floor).
+            69 | 77 if !switch_stays(w, x, y, z) => {
+                drops.spawn_block(id, 0, (x, y, z));
+                w.set_block(x, y, z, 0);
+            }
+            // BlockPressurePlate.onNeighborBlockChange.
+            70 | 72 if !normal_cube(bid(w, x, y - 1, z)) => {
+                drops.spawn_block(id, 0, (x, y, z));
+                w.set_block(x, y, z, 0);
+            }
             // BlockSign.onNeighborBlockChange: a post needs solid ground, a wall sign the wall it hangs on; else it drops the sign.
             63 | 68 if !sign_stays(w, x, y, z, id) => {
                 drops.spawn_block(id, 0, (x, y, z));
@@ -283,6 +365,28 @@ impl Ticks {
             60 => farmland(w, &mut self.rng, self.wet, x, y, z),
             39 | 40 => mushroom(w, &mut self.rng, x, y, z, id),
             51 => self.fire(w, x, y, z),
+            75 | 76 => self.torch(w, x, y, z, id),
+            // BlockRedstoneRepeater.updateTick: follow the input, and an input that went away while it was turning on lets it go again.
+            93 | 94 => {
+                let (m, input) = (w.meta(x, y, z), redstone::repeater_input(w, x, y, z));
+                if id == 94 && !input {
+                    w.set_block_meta(x, y, z, 93, m);
+                } else if id == 93 {
+                    w.set_block_meta(x, y, z, 94, m);
+                    if !input {
+                        self.schedule(x, y, z, 94, (((m as u64 & 12) >> 2) + 1) * 2);
+                    }
+                }
+            }
+            // BlockButton.updateTick: the 20 ticks are over.
+            77 if w.meta(x, y, z) & 8 != 0 => {
+                w.set_block_meta(x, y, z, 77, w.meta(x, y, z) & 7);
+            }
+            70 | 72 if w.meta(x, y, z) != 0 => self.plate(w, x, y, z),
+            // BlockRedstoneOre.updateTick: the glow ends.
+            74 => {
+                w.set_block(x, y, z, 73);
+            }
             // BlockSnow / BlockIce.updateTick: block light melts them (ice 11 - lightOpacity 3).
             78 if w.block_light(x, y, z) > 11 => {
                 w.set_block(x, y, z, 0);
@@ -292,6 +396,82 @@ impl Ticks {
             }
             81 | 83 => grow_column(w, x, y, z, id),
             _ => {}
+        }
+    }
+
+    /// `BlockRedstoneWire.func_21030_a`, as one local recomputation: the level the neighbours imply; a change is written (with the
+    /// notification that makes the neighbouring wires recompute in turn) and the wires one step up or down hear of it too.
+    fn wire(&mut self, w: &mut ChunkManager, x: i32, y: i32, z: i32) {
+        let l = redstone::wire_level(w, x, y, z);
+        if l != w.meta(x, y, z) && w.set_block_meta(x, y, z, 55, l) {
+            wire_ends(w, x, y, z);
+        }
+    }
+
+    /// `TileEntityNote.triggerNote`: only with air above; the instrument comes from the block below (rock 1, sand 2, glass 3, wood 4).
+    fn note_play(&mut self, w: &ChunkManager, x: i32, y: i32, z: i32) {
+        if bid(w, x, y + 1, z) != 0 {
+            return;
+        }
+        let inst = match bid(w, x, y - 1, z) {
+            1 | 4 | 7 | 14..=16 | 21 | 22 | 24 | 43..=45 | 48 | 49 | 56 | 61 | 62 | 67 | 73 | 74 => 1,
+            12 | 13 => 2,
+            20 => 3,
+            5 | 17 | 25 | 47 | 53 | 54 | 58 | 64 | 84 | 85 | 96 => 4,
+            _ => 0,
+        };
+        self.note_events.push(((x, y, z), self.notes.get(&(x, y, z)).map_or(0, |e| e.0), inst));
+    }
+
+    /// `BlockNote.blockActivated`: the pitch goes up one (25 notes) and the note plays.
+    pub fn note_use(&mut self, w: &ChunkManager, x: i32, y: i32, z: i32) {
+        let e = self.notes.entry((x, y, z)).or_insert((0, false));
+        e.0 = (e.0 + 1) % 25;
+        self.note_play(w, x, y, z);
+    }
+
+    /// `BlockRedstoneTorch.updateTick`: it goes out when its input is powered and relights when it is not; a torch that flipped 8
+    /// times in 100 ticks stays out (burnout).
+    fn torch(&mut self, w: &mut ChunkManager, x: i32, y: i32, z: i32, id: u8) {
+        let (input, m, now) = (redstone::torch_input(w, x, y, z), w.meta(x, y, z), self.now);
+        self.torch_flips.retain(|&(_, t)| now - t <= 100);
+        let burnt = |s: &Self| s.torch_flips.iter().filter(|f| f.0 == (x, y, z)).count() >= 8;
+        if id == 76 && input {
+            w.set_block_meta(x, y, z, 75, m);
+            self.torch_flips.push(((x, y, z), now)); // ponytail: no fizz sound and smoke when it burns out
+        } else if id == 75 && !input && !burnt(self) {
+            w.set_block_meta(x, y, z, 76, m);
+        }
+    }
+
+    /// `BlockPressurePlate.setStateIfMobInteractsWithPlate`: pressed while something is inside the plate's box (1/16 in from the
+    /// sides, a quarter high), re-checked every 20 ticks. The stone plate wants a living thing, the wooden one anything
+    /// (ponytail: dropped items and arrows are not in `plate_ents`, so they do not press it).
+    fn plate(&mut self, w: &mut ChunkManager, x: i32, y: i32, z: i32) {
+        let id = bid(w, x, y, z);
+        let (lo, hi) = (Vec3::new(x as f32 + 0.125, y as f32, z as f32 + 0.125), Vec3::new(x as f32 + 0.875, y as f32 + 0.25, z as f32 + 0.875));
+        let hit = self.plate_ents.iter().any(|&(a, b, living)| (living || id == 72) && b.cmpgt(lo).all() && a.cmplt(hi).all());
+        let on = w.meta(x, y, z) == 1;
+        if hit != on {
+            w.set_block_meta(x, y, z, id, hit as u8);
+        }
+        if hit {
+            self.schedule(x, y, z, id, 20);
+        }
+    }
+
+    /// `onEntityCollidedWithBlock` of every plate under an entity this tick.
+    fn plates(&mut self, w: &mut ChunkManager) {
+        for i in 0..self.plate_ents.len() {
+            let (lo, hi, _) = self.plate_ents[i];
+            let y = (lo.y + 0.001).floor() as i32;
+            for x in lo.x.floor() as i32..=hi.x.floor() as i32 {
+                for z in lo.z.floor() as i32..=hi.z.floor() as i32 {
+                    if matches!(bid(w, x, y, z), 70 | 72) && w.meta(x, y, z) != 1 {
+                        self.plate(w, x, y, z);
+                    }
+                }
+            }
         }
     }
 
@@ -441,6 +621,26 @@ impl Ticks {
     }
 }
 
+/// A wire appearing, going or changing level: the wires that lie one step above or below its four neighbours must look again
+/// (`notifyWireNeighborsOfNeighborChange`); pinging the neighbour cells reaches them (their up / down neighbours).
+fn wire_ends(w: &mut ChunkManager, x: i32, y: i32, z: i32) {
+    for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+        w.ping(x + dx, y, z + dz);
+    }
+}
+
+/// `BlockLever` / `BlockButton`: the cell the metadata names (1 -x, 2 +x, 3 -z, 4 +z, 5 / 6 below) is still a normal cube.
+fn switch_stays(w: &ChunkManager, x: i32, y: i32, z: i32) -> bool {
+    let (dx, dy, dz) = match w.meta(x, y, z) & 7 {
+        1 => (-1, 0, 0),
+        2 => (1, 0, 0),
+        3 => (0, 0, -1),
+        4 => (0, 0, 1),
+        _ => (0, -1, 0),
+    };
+    normal_cube(bid(w, x + dx, y + dy, z + dz))
+}
+
 /// `BlockFluid.tickRate` (water 5, lava 30 in the overworld).
 fn tick_rate(id: u8) -> u64 {
     if id < 10 { 5 } else { 30 }
@@ -531,6 +731,10 @@ fn stay(w: &ChunkManager, x: i32, y: i32, z: i32, id: u8, placing: bool) -> bool
         39 | 40 => (0..128).contains(&y) && (placing || w.light_at(x, y, z, 0) < 13) && light_opacity(below) == 255 && !matches!(below, 10 | 11),
         83 => below == 83 || (matches!(below, 2 | 3) && [(-1, 0), (1, 0), (0, -1), (0, 1)].iter().any(|&(dx, dz)| matches!(bid(w, x + dx, y - 1, z + dz), 8 | 9))),
         81 => [(-1, 0), (1, 0), (0, -1), (0, 1)].iter().all(|&(dx, dz)| non_solid(bid(w, x + dx, y, z + dz))) && matches!(below, 12 | 81),
+        // wire and pressure plates need a solid cell below; a lever or a button any solid neighbour (`canPlaceBlockAt`)
+        55 | 70 | 72 | 93 | 94 => normal_cube(below),
+        // a lever may also sit on the floor; the button only on a side (`BlockLever` / `BlockButton.canPlaceBlockAt`)
+        69 | 77 => SIDE.iter().any(|&(dx, dy, dz)| (dy == 0 || (id == 69 && dy < 0)) && normal_cube(bid(w, x + dx, y + dy, z + dz))),
         _ => true,
     }
 }
@@ -678,11 +882,13 @@ fn bed_neighbour(w: &mut ChunkManager, drops: &mut Drops, x: i32, y: i32, z: i32
 }
 
 /// `BlockDoor.onNeighborBlockChange` (without redstone, step 5): a half whose partner or floor is gone breaks; the lower half drops the door.
-fn door_neighbour(w: &mut ChunkManager, drops: &mut Drops, x: i32, y: i32, z: i32, id: u8) {
+fn door_neighbour(w: &mut ChunkManager, drops: &mut Drops, x: i32, y: i32, z: i32, id: u8, power: bool) {
     let m = w.meta(x, y, z);
     if m & 8 != 0 {
         if bid(w, x, y - 1, z) != id {
             w.set_block(x, y, z, 0);
+        } else if power {
+            door_neighbour(w, drops, x, y - 1, z, id, power); // the upper half asks the lower one
         }
         return;
     }
@@ -700,6 +906,13 @@ fn door_neighbour(w: &mut ChunkManager, drops: &mut Drops, x: i32, y: i32, z: i3
     }
     if gone {
         drops.spawn_block(id, m, (x, y, z));
+    } else if power {
+        // BlockDoor.onPoweredBlockChange: open while the cell or the one above is powered (both halves follow).
+        let open = redstone::indirectly_powered(w, x, y, z, true) || redstone::indirectly_powered(w, x, y + 1, z, true);
+        if (m & 4 != 0) != open {
+            w.set_block_meta(x, y + 1, z, id, (m ^ 4) + 8);
+            w.set_block_meta(x, y, z, id, m ^ 4);
+        }
     }
 }
 
@@ -718,13 +931,15 @@ fn sign_stays(w: &ChunkManager, x: i32, y: i32, z: i32, id: u8) -> bool {
     }
 }
 
-/// `BlockTrapDoor.onNeighborBlockChange` (no redstone yet): the wall it hangs on is not a normal cube any more, so it drops itself.
-fn trap_neighbour(w: &mut ChunkManager, drops: &mut Drops, x: i32, y: i32, z: i32) {
+/// `BlockTrapDoor.onNeighborBlockChange`: the wall it hangs on is not a normal cube any more, so it drops itself.
+fn trap_neighbour(w: &mut ChunkManager, drops: &mut Drops, x: i32, y: i32, z: i32, power: bool) {
     let m = w.meta(x, y, z);
     let (dx, dz) = [(0, 1), (0, -1), (1, 0), (-1, 0)][(m & 3) as usize];
     if !normal_cube(bid(w, x + dx, y, z + dz)) {
         w.set_block(x, y, z, 0);
         drops.spawn_block(96, m, (x, y, z));
+    } else if power && (m & 4 != 0) != redstone::indirectly_powered(w, x, y, z, true) {
+        w.set_block_meta(x, y, z, 96, m ^ 4); // BlockTrapDoor.onPoweredBlockChange
     }
 }
 
@@ -915,6 +1130,68 @@ mod tests {
         t.prime((8, 40, 8), true);
         let n = (1..40).find(|_| { t.fall(&mut m, &mut d); t.falling.is_empty() }).unwrap();
         assert!((10..=30).contains(&n), "short fuse is rand(20) + 10, got {n}");
+    }
+
+    /// A lever lights a line of dust (15, 14, 13) and darkens it again; a lever beside TNT sets it off; a torch goes out when its block is
+    /// powered and relights; a plate is pressed while something stands on it and lets go after.
+    #[test]
+    fn redstone_circuit_end_to_end() {
+        let mut m = ChunkManager::new(1, 1);
+        m.insert((0, 0), vec![0u8; crate::world::chunk::VOLUME]);
+        (0..16).for_each(|x| (0..16).for_each(|z| { m.set_block(x, 39, z, 1); }));
+        let (mut t, mut d) = (Ticks::new(1), Drops::new(1));
+        (4..7).for_each(|x| { m.set_block(x, 40, 5, 55); });
+        m.set_block_meta(3, 40, 5, 69, 5 | 8); // a lever on the floor, on
+        t.notify(&mut m, &mut d);
+        assert_eq!([4, 5, 6].map(|x| m.meta(x, 40, 5)), [15, 14, 13]);
+        m.set_block_meta(3, 40, 5, 69, 5);
+        t.notify(&mut m, &mut d);
+        assert_eq!([4, 5, 6].map(|x| m.meta(x, 40, 5)), [0, 0, 0]);
+        // TNT beside a lever that is switched on
+        m.set_block(12, 40, 8, 46);
+        m.set_block_meta(13, 40, 8, 69, 1 | 8);
+        t.notify(&mut m, &mut d);
+        assert!(m.block(12, 40, 8) == Some(0) && t.falling.iter().any(|f| f.id == 46));
+        // a torch on top of a block that a side lever powers
+        m.set_block(10, 40, 10, 1);
+        m.set_block_meta(10, 41, 10, 76, 5);
+        m.set_block_meta(11, 40, 10, 69, 1 | 8);
+        t.torch(&mut m, 10, 41, 10, 76);
+        assert_eq!(m.block(10, 41, 10), Some(75));
+        m.set_block_meta(11, 40, 10, 69, 1);
+        t.torch(&mut m, 10, 41, 10, 75);
+        assert_eq!(m.block(10, 41, 10), Some(76));
+        // a plate under the player
+        m.set_block(2, 40, 2, 70);
+        t.plate_ents.push((Vec3::new(1.7, 40.0, 1.7), Vec3::new(2.3, 41.8, 2.3), true));
+        t.plates(&mut m);
+        assert_eq!(m.meta(2, 40, 2), 1);
+        t.plate_ents.clear();
+        t.plate(&mut m, 2, 40, 2);
+        assert_eq!(m.meta(2, 40, 2), 0);
+    }
+
+    /// A repeater (facing +x, delay 1) answers a lever two game ticks later and then powers the dust in front of it; it lets go again
+    /// two ticks after the lever goes off.
+    #[test]
+    fn repeater_delays_and_passes_the_signal_on() {
+        let mut m = ChunkManager::new(1, 1);
+        m.insert((0, 0), vec![0u8; crate::world::chunk::VOLUME]);
+        (0..16).for_each(|x| (0..16).for_each(|z| { m.set_block(x, 39, z, 1); }));
+        let (mut t, mut d) = (Ticks::new(1), Drops::new(1));
+        m.set_block_meta(6, 40, 5, 93, 1);
+        m.set_block(7, 40, 5, 55);
+        m.set_block_meta(5, 40, 5, 69, 5 | 8);
+        t.notify(&mut m, &mut d);
+        assert_eq!((m.block(6, 40, 5), m.meta(7, 40, 5)), (Some(93), 0), "still off: the delay has not passed");
+        t.update(&mut m, &mut d, 6, 40, 5, 93);
+        t.notify(&mut m, &mut d);
+        assert_eq!((m.block(6, 40, 5), m.meta(6, 40, 5), m.meta(7, 40, 5)), (Some(94), 1, 15), "on, facing kept, the dust in front is live");
+        m.set_block_meta(5, 40, 5, 69, 5);
+        t.notify(&mut m, &mut d);
+        t.update(&mut m, &mut d, 6, 40, 5, 94);
+        t.notify(&mut m, &mut d);
+        assert_eq!((m.block(6, 40, 5), m.meta(7, 40, 5)), (Some(93), 0));
     }
 
     #[test]

@@ -307,8 +307,17 @@ pub fn build_split_tinted(smooth: bool, blocks: &[u8], data: &Nibbles, nb_data: 
             for x in 0..16 {
                 // Plants: two crossed quads, visible from both sides, lit by their own cell.
                 let raw = blocks[idx(x as usize, y as usize, z as usize)];
-                if raw == 50 {
-                    push_torch(&mut verts, &mut idxs, [(ox + x) as f32, y as f32, (oz + z) as f32], data.get(x as usize, y as usize, z as usize));
+                if matches!(raw, 93 | 94) {
+                    // `RenderBlocks.renderBlockRedstoneRepeater`: the fixed torch in front, the one that shows the delay behind it.
+                    let meta = data.get(x as usize, y as usize, z as usize);
+                    let a = [-0.0625, 0.0625, 0.1875, 0.3125][((meta & 12) >> 2) as usize];
+                    let (front, delay) = match meta & 3 { 0 => ((0.0, -0.3125), (0.0, a)), 1 => ((0.3125, 0.0), (-a, 0.0)), 2 => ((0.0, 0.3125), (0.0, -a)), _ => ((-0.3125, 0.0), (a, 0.0)) };
+                    for (dx, dz) in [front, delay] {
+                        push_torch(&mut verts, &mut idxs, [(ox + x) as f32 + dx, y as f32 - 0.2, (oz + z) as f32 + dz], 5, if raw == 94 { 99 } else { 115 });
+                    }
+                }
+                if matches!(raw, 50 | 75 | 76) {
+                    push_torch(&mut verts, &mut idxs, [(ox + x) as f32, y as f32, (oz + z) as f32], data.get(x as usize, y as usize, z as usize), match raw { 50 => 80, 76 => 99, _ => 115 });
                     continue;
                 }
                 if raw == 59 {
@@ -319,10 +328,18 @@ pub fn build_split_tinted(smooth: bool, blocks: &[u8], data: &Nibbles, nb_data: 
                     push_fire(&mut verts, &mut idxs, [(ox + x) as f32, y as f32, (oz + z) as f32]);
                     continue;
                 }
-                if matches!(raw, 27 | 28 | 65 | 66) {
+                if matches!(raw, 27 | 28 | 55 | 65 | 66) {
                     let l = lv(x, y, z);
                     let meta = data.get(x as usize, y as usize, z as usize);
+                    let n0 = verts.len();
                     push_flat(&mut verts, &mut idxs, raw, meta, [(ox + x) as f32, y as f32, (oz + z) as f32], br(l), lm(l.0, l.1));
+                    if raw == 55 {
+                        // `BlockRedstoneWire.colorMultiplier` for the level: dull red off, bright red on.
+                        let f = meta as f32 / 15.0;
+                        let (r, g, b) = (if meta == 0 { 0.3 } else { f * 0.6 + 0.4 }, (f * f * 0.7 - 0.5).max(0.0), (f * f * 0.6 - 0.7).max(0.0));
+                        let tint = ((r * 255.0) as u32) << 16 | ((g * 255.0) as u32) << 8 | (b * 255.0) as u32;
+                        verts[n0..].chunks_mut(VF).for_each(|v| v[7] = tint as f32);
+                    }
                     continue;
                 }
                 if cross_shape(raw).is_some() {
@@ -529,7 +546,8 @@ pub fn push_crops(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, cell: [f32; 3], met
 /// wide stick of four side quads (the tile's cut-out shapes them) and a 2 x 2 texel head at 0.625; a wall torch (metadata
 /// 1..=4: wall at -X, +X, -Z, +Z) sits 0.1 off its cell centre, 0.2 up, and leans 0.4 away from the wall. Full bright like
 /// any block that emits light, visible from both sides (the pipeline culls back faces).
-pub fn push_torch(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, cell: [f32; 3], meta: u8) {
+/// `tile`: 80 torch, 99 lit redstone torch, 115 one that is out.
+pub fn push_torch(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, cell: [f32; 3], meta: u8, tile: u8) {
     let ([ox, oy, oz], [tx, tz]) = match meta {
         1 => ([-0.1, 0.2, 0.0], [-0.4, 0.0]),
         2 => ([0.1, 0.2, 0.0], [0.4, 0.0]),
@@ -551,7 +569,7 @@ pub fn push_torch(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, cell: [f32; 3], met
     for q in quads {
         let base = verts.len() as u32 / VF as u32;
         for p in q {
-            let (u, v) = atlas::terrain_uv(80, p[3], p[4]);
+            let (u, v) = atlas::terrain_uv(tile, p[3], p[4]);
             verts.extend_from_slice(&[p[0], p[1], p[2], u, v, 1.0, lm(15, 15), WHITE]);
         }
         idxs.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3, base, base + 2, base + 1, base, base + 3, base + 2]);
@@ -570,7 +588,7 @@ pub fn push_flat(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, id: u8, meta: u8, [x
             _ => return, // a ladder with no wall is not drawn (the Java draws nothing either)
         }
     } else {
-        let m = if id == 66 { meta } else { meta & 7 }; // a powered / detector rail keeps its shape in the low 3 bits
+        let m = if id == 66 { meta } else if id == 55 { 0 } else { meta & 7 }; // a powered / detector rail keeps its shape in the low 3 bits; dust is flat
         // corners 20..23 of the Java as (x, z), then the height lifts
         let (xs, zs) = match m {
             1 | 2 | 3 | 7 => ([1.0, 0.0, 0.0, 1.0], [1.0, 1.0, 0.0, 0.0]),
@@ -592,6 +610,7 @@ pub fn push_flat(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, id: u8, meta: u8, [x
         (66, 6..) => 112,
         (66, _) => 128,
         (27, m) => if m & 8 == 0 { 163 } else { 179 },
+        (55, _) => 164, // redstone dust (ponytail: always the dot / cross tile, not the line tile 165 along a straight run)
         _ => 195,
     };
     let base = verts.len() as u32 / VF as u32;

@@ -295,6 +295,10 @@ pub const fn terrain_tile(id: u8, meta: u8, side: u8) -> Option<u8> {
         60 => if top { if meta > 0 { 86 } else { 87 } } else { 2 },
         61 | 62 => if side <= 1 { 62 } else if side != meta { 45 } else if id == 62 { 61 } else { 44 },
         73 | 74 => 51,
+        93 | 94 => match side { 1 => if id == 94 { 147 } else { 131 }, 0 => if id == 94 { 99 } else { 115 }, _ => 5 }, // `BlockRedstoneRepeater.getBlockTextureFromSide`
+        69 => 96,      // lever (ponytail: the lever sprite on its box, not `renderBlockLever`'s base + handle)
+        70 | 77 => 1,  // stone pressure plate, button
+        72 => 4,       // wooden pressure plate
         79 => 67,
         80 => 66,
         78 => 66,
