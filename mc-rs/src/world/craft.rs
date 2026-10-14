@@ -266,6 +266,9 @@ pub fn recipes() -> &'static [Recipe] {
             shaped(&["###", "###", " X "], &[('#', PLANKS), ('X', STICK)], 323, 1),   // sign
             shaped(&["###", "#X#", "###"], &[('#', STICK), ('X', 35)], 321, 1),        // painting: 8 sticks round a wool
             shaped(&["X#X", "#X#", "X#X"], &[('X', 289), ('#', 12)], 46, 1),  // TNT: gunpowder + sand
+            shaped(&["X X", "X#X", "X X"], &[('X', 265), ('#', STICK)], 66, 16), // rails: 6 iron + a stick
+            shaped(&["X X", "X#X", "XRX"], &[('X', 266), ('#', STICK), ('R', 331)], 27, 6), // powered rails: 6 gold + stick + redstone
+            shaped(&["X X", "X#X", "XRX"], &[('X', 265), ('#', 70), ('R', 331)], 28, 6), // detector rails: 6 iron + stone plate + redstone
             // The redstone recipes of `CraftingManager` (M21): lever, torch, repeater, button, the two plates, jukebox, note block,
             // dispenser, the two pistons.
             shaped(&["X", "#"], &[('X', STICK), ('#', 4)], 69, 1),
@@ -926,6 +929,27 @@ mod tests {
         let mut v = crate::world::vitals::Vitals::default();
         v.armor = 5;
         assert!(v.hurt(10) && v.health == 12 && v.wear == 10, "10 * 20 / 25 = 8, remainder 0");
+    }
+
+    /// The three rail recipes: 16 rails from 6 iron and a stick, 6 powered from 6 gold, a stick and redstone, 6 detector rails.
+    #[test]
+    fn rail_recipes_match_java() {
+        let st = |id| Some(ItemStack { id, count: 1, damage: 0 });
+        let grid = |ring: u16, mid: u16, bottom: u16| {
+            let mut g = [None; 9];
+            for i in [0, 2, 3, 5, 6, 8] {
+                g[i] = st(ring);
+            }
+            g[4] = st(mid);
+            if bottom != 0 {
+                g[7] = st(bottom);
+                g[6] = st(ring);
+            }
+            find(&g, 3).map(|s| (s.id, s.count))
+        };
+        assert_eq!(grid(265, 280, 0), Some((66, 16)), "rails");
+        assert_eq!(grid(266, 280, 331), Some((27, 6)), "powered rails");
+        assert_eq!(grid(265, 70, 331), Some((28, 6)), "detector rails");
     }
 
     /// The plain `CraftingManager` recipes added for blocks and items that already work.

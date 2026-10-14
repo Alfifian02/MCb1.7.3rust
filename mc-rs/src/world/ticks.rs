@@ -16,6 +16,7 @@ use crate::world::chunks::ChunkManager;
 use crate::world::gen::noise::JavaRandom;
 use crate::world::items::{Drops, ItemStack};
 use crate::world::pick::{replaceable, torch_stays, BED_DIR};
+use crate::world::rail;
 use crate::world::redstone::{self, can_provide_power, SIDE};
 
 /// Chunks around the player whose blocks tick at random (`World.tick`'s active set).
@@ -233,6 +234,8 @@ impl Ticks {
                 w.set_block(x, y, z, 0);
                 self.prime((x, y, z), false);
             }
+            // BlockRail.onBlockAdded: the shape of the new rail, and of the rails it joins.
+            27 | 28 | 66 => rail::added(w, (x, y, z)),
             // BlockFire.onBlockAdded (ponytail: no portal from obsidian before M11).
             51 if fire_stays(w, x, y, z) => self.schedule(x, y, z, 51, 40),
             51 => {
@@ -269,6 +272,13 @@ impl Ticks {
             }
             78 if !snow_ok(bid(w, x, y - 1, z)) => {
                 w.set_block(x, y, z, 0); // quantityDropped is 0: nothing drops
+            }
+            // BlockRail.onNeighborBlockChange: no ground drops it; a powered rail follows its line; see `rail::on_neighbour`.
+            27 | 28 | 66 => {
+                if rail::on_neighbour(w, (x, y, z), power) {
+                    drops.spawn_block(id, w.meta(x, y, z), (x, y, z));
+                    w.set_block(x, y, z, 0);
+                }
             }
             64 | 71 => door_neighbour(w, drops, x, y, z, id, power),
             96 => trap_neighbour(w, drops, x, y, z, power),
@@ -737,7 +747,7 @@ fn stay(w: &ChunkManager, x: i32, y: i32, z: i32, id: u8, placing: bool) -> bool
         83 => below == 83 || (matches!(below, 2 | 3) && [(-1, 0), (1, 0), (0, -1), (0, 1)].iter().any(|&(dx, dz)| matches!(bid(w, x + dx, y - 1, z + dz), 8 | 9))),
         81 => [(-1, 0), (1, 0), (0, -1), (0, 1)].iter().all(|&(dx, dz)| non_solid(bid(w, x + dx, y, z + dz))) && matches!(below, 12 | 81),
         // wire and pressure plates need a solid cell below; a lever or a button any solid neighbour (`canPlaceBlockAt`)
-        55 | 70 | 72 | 93 | 94 => normal_cube(below),
+        55 | 66 | 27 | 28 | 70 | 72 | 93 | 94 => normal_cube(below),
         // a lever may also sit on the floor; the button only on a side (`BlockLever` / `BlockButton.canPlaceBlockAt`)
         69 | 77 => SIDE.iter().any(|&(dx, dy, dz)| (dy == 0 || (id == 69 && dy < 0)) && normal_cube(bid(w, x + dx, y + dy, z + dz))),
         _ => true,
