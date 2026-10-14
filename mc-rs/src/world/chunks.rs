@@ -2,8 +2,9 @@
 //! that loads and unloads as the player walks, terrain generated on worker threads.
 //!
 //! Per frame: `stream` (cheap, no GPU) collects finished chunks, unloads far ones, asks the
-//! workers for missing ones nearest-first and populates one chunk; `mesh_pending` meshes a couple
-//! of chunks and uploads them.
+//! workers for missing ones nearest-first and populates one chunk; `mesh_pending` uploads the meshes
+//! the workers finished (a couple a frame) and queues jobs for the chunks that need one (the
+//! workers copy the chunk and its four neighbours, build the vertices and send them back).
 //!
 //! Three states per chunk: raw (terrain + caves, from a worker), populated (trees, ores, ...) and
 //! final. populate(P) needs raw P, P+x, P+z, P+x+z and writes into all four, so a chunk C is final
@@ -60,13 +61,12 @@ impl std::hash::Hasher for KeyHasher {
 
 type Chunks = HashMap<Key, Entry, std::hash::BuildHasherDefault<KeyHasher>>;
 
-/// Chunks meshed + uploaded per frame, so walking into fresh terrain never stalls a frame.
-/// ponytail: meshing runs on the render thread; if one chunk mesh is slow on a weak phone,
-/// move it to the workers (they would need the neighbours' blocks behind an `Arc`).
+/// Finished meshes uploaded (buffers created) per frame, so walking into fresh terrain never stalls a frame. The meshing itself runs
+/// on the workers (`Job::Mesh`), the upload is the only part that needs the device.
 const MESH_PER_FRAME: usize = 2;
 
-/// A second mesh in a frame starts only while the frame's chunk work is still under this: a weak phone, where one chunk mesh
-/// takes tens of ms, builds one per frame instead of two (the first one always runs, so meshing never starves); a fast one builds both.
+/// A second upload in a frame starts only while the frame's chunk work is still under this (the first one always runs, so a finished
+/// mesh never starves).
 const CHUNK_WORK_BUDGET: std::time::Duration = std::time::Duration::from_millis(6);
 
 /// A frame whose chunk work (stream, populate, light, meshes) took this long or more is logged with its stages.
@@ -146,6 +146,64 @@ fn by_section(verts: &[f32], idxs: &[u32]) -> (Vec<u32>, [u32; SECTIONS + 1]) {
     (out, starts)
 }
 
+/// Blocks, metadata and light of one chunk, copied for a mesh job.
+struct Snap {
+    blocks: Vec<u8>,
+    data: Nibbles,
+    light: Vec<u8>,
+}
+
+fn snap(e: &Entry) -> Snap {
+    Snap { blocks: e.blocks.clone(), data: e.data.clone(), light: e.light.clone() }
+}
+
+/// Everything the mesher reads, owned, so a worker can build a chunk's mesh while the manager goes on editing the live chunks: the
+/// chunk, then its +X, -X, +Z, -Z neighbours (`mesh::build_split_tinted`'s argument order).
+/// ponytail: the copy is ~0.4 MB per job (5 x 80 KB), memcpy speed, on the render thread; the upgrade is `Arc`-held chunk arrays with
+/// `Arc::make_mut` on every write, which would copy nothing but touches every writer of `blocks` / `data` / `light`.
+struct MeshJob {
+    key: Key,
+    sky_sub: u8,
+    cells: [Snap; 5],
+}
+
+/// What a worker is asked: generate a chunk (`OverworldGenerator::generate`) or build a mesh.
+enum Job {
+    Gen(Key),
+    Mesh(Box<MeshJob>),
+}
+
+/// A finished mesh, short of its GPU buffers: the vertices, and the opaque and water indices sorted by section (`by_section`).
+struct Built {
+    verts: Vec<f32>,
+    idxs: Vec<u32>,
+    starts: [u32; SECTIONS + 1],
+    widxs: Vec<u32>,
+    wstarts: [u32; SECTIONS + 1],
+}
+
+/// The CPU half of meshing a chunk, run by a worker with its own climate noise (`cm`) for the biome tints.
+fn build_job(job: MeshJob, cm: &mut WorldChunkManager) -> Built {
+    let (x, z) = job.key;
+    let [me, px, nx, pz, nz] = &job.cells;
+    let (verts, idxs, widxs) = mesh::build_split_tinted(
+        crate::LEGACY,
+        &me.blocks,
+        &me.data,
+        [&px.data, &nx.data, &pz.data, &nz.data],
+        &me.light,
+        [px.blocks.as_slice(), nx.blocks.as_slice(), pz.blocks.as_slice(), nz.blocks.as_slice()],
+        [px.light.as_slice(), nx.light.as_slice(), pz.light.as_slice(), nz.light.as_slice()],
+        job.sky_sub,
+        x * 16,
+        z * 16,
+        &biome_tints(cm, x, z),
+    );
+    let (idxs, starts) = by_section(&verts, &idxs);
+    let (widxs, wstarts) = by_section(&verts, &widxs);
+    Built { verts, idxs, starts, widxs, wstarts }
+}
+
 struct Entry {
     blocks: Vec<u8>,
     /// Block metadata (`Chunk.data`), 4 bits per cell; worldgen only writes it in `populate`.
@@ -160,7 +218,8 @@ struct Entry {
     populated: bool,
     /// Differs from what the seed generates (edited, or written into by a populate) and is not on disk yet.
     dirty: bool,
-    /// Meshing was done (the mesh may still be `None`: a chunk of pure air has nothing to draw).
+    /// The mesh matches the chunk as it is: built, or on its way from a worker (the mesh may still be `None`: a chunk of pure air has
+    /// nothing to draw). Every edit clears it, which queues a new job once the running one (if any) has landed.
     meshed: bool,
     mesh: Option<Mesh>,
 }
@@ -180,8 +239,13 @@ pub struct ChunkManager {
     /// ponytail: move it to the workers if it shows up in a frame profile (it would need the 4 chunks behind a lock).
     gen: OverworldGenerator,
     cm: WorldChunkManager,
-    jobs: mpsc::Sender<Key>,
+    jobs: mpsc::Sender<Job>,
     done: mpsc::Receiver<(Key, Vec<u8>)>,
+    /// Meshes the workers finished, waiting for their upload (`mesh_pending`).
+    built: mpsc::Receiver<(Key, Built)>,
+    /// Chunks with a mesh job queued or running (one at a time per chunk, so results never arrive out of order), and the most at once.
+    meshing: HashSet<Key>,
+    max_meshing: usize,
     /// Pending light updates, newest last (`World.lightingToUpdate`).
     light_queue: Vec<light::Region>,
     /// `World.skylightSubtracted` (0 day .. 11 night), applied by the mesher.
@@ -204,13 +268,14 @@ impl ChunkManager {
     /// `radius` is the render distance in chunks. Dropping the manager closes the job channel,
     /// which ends the workers.
     pub fn new(seed: i64, radius: i32) -> Self {
-        let (jobs, job_rx) = mpsc::channel::<Key>();
+        let (jobs, job_rx) = mpsc::channel::<Job>();
         let (done_tx, done) = mpsc::channel();
+        let (built_tx, built) = mpsc::channel();
         let job_rx = Arc::new(Mutex::new(job_rx));
         // Leave a core for the render thread; two workers are plenty for walking speed.
         let workers = std::thread::available_parallelism().map_or(2, |n| n.get()).saturating_sub(1).clamp(1, 2);
         for i in 0..workers {
-            let (rx, tx) = (job_rx.clone(), done_tx.clone());
+            let (rx, tx, bt) = (job_rx.clone(), done_tx.clone(), built_tx.clone());
             std::thread::Builder::new()
                 .name(format!("chunk-gen-{i}"))
                 .spawn(move || {
@@ -222,8 +287,15 @@ impl ChunkManager {
                         // The guard is a temporary of this statement: the lock is held while
                         // waiting for a job, not while generating.
                         let job = rx.lock().unwrap_or_else(|e| e.into_inner()).recv();
-                        let Ok((cx, cz)) = job else { break };
-                        if tx.send(((cx, cz), g.generate(cx, cz, &mut cm))).is_err() {
+                        let Ok(job) = job else { break };
+                        let sent = match job {
+                            Job::Gen((cx, cz)) => tx.send(((cx, cz), g.generate(cx, cz, &mut cm))).is_ok(),
+                            Job::Mesh(j) => {
+                                let key = j.key;
+                                bt.send((key, build_job(*j, &mut cm))).is_ok()
+                            }
+                        };
+                        if !sent {
                             break;
                         }
                     }
@@ -238,7 +310,7 @@ impl ChunkManager {
             .collect();
         ring.sort_by_key(|&(dx, dz)| dx * dx + dz * dz);
 
-        Self { chunks: Chunks::default(), pending: HashSet::new(), ring, radius, center: None, max_in_flight: workers * 2,
+        Self { chunks: Chunks::default(), pending: HashSet::new(), ring, radius, center: None, max_in_flight: workers * 2, built, meshing: HashSet::new(), max_meshing: workers * 2,
                gen: OverworldGenerator::new(seed), cm: WorldChunkManager::new(seed), jobs, done, light_queue: Vec::new(), sky_sub: 0, mesh_gen: 0, dir: None, saved: HashSet::new(), changes: Vec::new(), loot: Vec::new(), spawners: Vec::new() }
     }
 
@@ -721,7 +793,7 @@ impl ChunkManager {
                     self.load(key);
                 }
             } else if self.pending.len() < self.max_in_flight && self.pending.insert(key) {
-                let _ = self.jobs.send(key);
+                let _ = self.jobs.send(Job::Gen(key));
             }
         }
     }
@@ -751,39 +823,25 @@ impl ChunkManager {
         true
     }
 
-    /// Meshes up to `MESH_PER_FRAME` chunks (`t0` = when this frame's chunk work began); returns how many it built.
+    /// A finished mesh for `key` arrived: false when the chunk was unloaded meanwhile. One edited since its job was queued is kept all
+    /// the same: its `meshed` is clear, so a new job follows, and until that lands the older picture still beats the one before it
+    /// (a chunk that keeps changing, flowing water, would otherwise never be redrawn while its jobs outlast the gaps between edits).
+    fn accept(&mut self, key: Key) -> bool {
+        self.meshing.remove(&key);
+        self.chunks.contains_key(&key)
+    }
+
+    /// Uploads up to `MESH_PER_FRAME` finished meshes (`t0` = when this frame's chunk work began), then queues jobs for the chunks
+    /// that need one, nearest first, while fewer than `max_meshing` are out; returns how many it uploaded.
     fn mesh_pending(&mut self, device: &wgpu::Device, cx: i32, cz: i32, t0: std::time::Instant) -> usize {
-        let r2 = self.radius * self.radius;
-        let mut budget = MESH_PER_FRAME;
-        for &(dx, dz) in &self.ring {
-            if budget == 0 || dx * dx + dz * dz > r2 {
-                break; // the ring is sorted by distance, so everything after is outside too
+        let mut uploaded = 0;
+        while uploaded == 0 || (uploaded < MESH_PER_FRAME && t0.elapsed() <= CHUNK_WORK_BUDGET) {
+            let Ok((key, b)) = self.built.try_recv() else { break };
+            if !self.accept(key) {
+                continue;
             }
-            if budget < MESH_PER_FRAME && t0.elapsed() > CHUNK_WORK_BUDGET {
-                break; // one is built already and the frame is spent: the next waits for the next frame
-            }
-            let (x, z) = (cx + dx, cz + dz);
-            let c = &self.chunks;
-            let built = match (c.get(&(x, z)), c.get(&(x + 1, z)), c.get(&(x - 1, z)), c.get(&(x, z + 1)), c.get(&(x, z - 1))) {
-                (Some(me), Some(px), Some(nx), Some(pz), Some(nz)) if !me.meshed && me.lit && self.is_final(x, z) => Some(mesh::build_split_tinted(
-                    crate::LEGACY,
-                    &me.blocks,
-                    &me.data,
-                    [&px.data, &nx.data, &pz.data, &nz.data],
-                    &me.light,
-                    [px.blocks.as_slice(), nx.blocks.as_slice(), pz.blocks.as_slice(), nz.blocks.as_slice()],
-                    [px.light.as_slice(), nx.light.as_slice(), pz.light.as_slice(), nz.light.as_slice()],
-                    self.sky_sub,
-                    x * 16,
-                    z * 16,
-                    &biome_tints(&mut self.cm, x, z),
-                )),
-                _ => None,
-            };
-            let Some((verts, idxs, widxs)) = built else { continue };
-            budget -= 1;
-            let (idxs, starts) = by_section(&verts, &idxs);
-            let (widxs, wstarts) = by_section(&verts, &widxs);
+            uploaded += 1;
+            let Built { verts, idxs, starts, widxs, wstarts } = b;
             let mesh = (!idxs.is_empty() || !widxs.is_empty()).then(|| Mesh {
                 vbuf: create_vertex_buffer(device, bytemuck::cast_slice(&verts)),
                 // (a chunk of only water has no opaque faces: a dummy index keeps the buffer non-empty, `index_count` is 0)
@@ -792,17 +850,40 @@ impl ChunkManager {
                 starts,
                 water: (!widxs.is_empty()).then(|| (create_index_buffer(device, &widxs), wstarts)),
             });
-            if let Some(e) = self.chunks.get_mut(&(x, z)) {
+            if let Some(e) = self.chunks.get_mut(&key) {
                 // ponytail: a rebuild with the same index count (the time-of-day relight) is taken as the same geometry, so the
                 // shadow map is not redrawn for it; an edit that keeps the count is picked up by the next sun / movement refresh.
                 if e.mesh.as_ref().map_or(0, |m| m.index_count) != mesh.as_ref().map_or(0, |m| m.index_count) {
                     self.mesh_gen = self.mesh_gen.wrapping_add(1);
                 }
                 e.mesh = mesh;
-                e.meshed = true;
             }
         }
-        MESH_PER_FRAME - budget
+
+        let r2 = self.radius * self.radius;
+        for &(dx, dz) in &self.ring {
+            if self.meshing.len() >= self.max_meshing || dx * dx + dz * dz > r2 {
+                break; // the ring is sorted by distance, so everything after is outside too
+            }
+            let (x, z) = (cx + dx, cz + dz);
+            if self.meshing.contains(&(x, z)) {
+                continue;
+            }
+            let c = &self.chunks;
+            let job = match (c.get(&(x, z)), c.get(&(x + 1, z)), c.get(&(x - 1, z)), c.get(&(x, z + 1)), c.get(&(x, z - 1))) {
+                (Some(me), Some(px), Some(nx), Some(pz), Some(nz)) if !me.meshed && me.lit && self.is_final(x, z) => {
+                    Some(MeshJob { key: (x, z), sky_sub: self.sky_sub, cells: [snap(me), snap(px), snap(nx), snap(pz), snap(nz)] })
+                }
+                _ => None,
+            };
+            let Some(job) = job else { continue };
+            if let Some(e) = self.chunks.get_mut(&(x, z)) {
+                e.meshed = true; // "on its way": an edit before the result lands clears it again, and a new job follows
+            }
+            self.meshing.insert((x, z));
+            let _ = self.jobs.send(Job::Mesh(Box::new(job)));
+        }
+        uploaded
     }
 }
 
@@ -924,6 +1005,49 @@ mod tests {
         (3..6).for_each(|i| v[i * crate::render::mesh::VF + 1] = 40.0);
         let (idx, st) = by_section(&v, &[3, 4, 5, 0, 1, 2]);
         assert_eq!((idx, st[1], st[2], st[3], st[SECTIONS]), (vec![0, 1, 2, 3, 4, 5], 3, 3, 6, 6));
+    }
+
+    /// The CPU half of meshing run from a snapshot (what a worker does) gives exactly what the mesher gives on the live arrays.
+    #[test]
+    fn worker_mesh_is_the_in_place_mesh() {
+        let snap_of = |id: u8| {
+            let mut blocks = vec![0u8; VOLUME];
+            (0..16).for_each(|x| (0..16).for_each(|z| blocks[idx(x, 60, z)] = id));
+            Snap { blocks, data: Nibbles::new(), light: vec![15; VOLUME] }
+        };
+        let job = MeshJob { key: (2, -3), sky_sub: 0, cells: [snap_of(1), snap_of(1), snap_of(1), snap_of(1), snap_of(1)] };
+        let want = {
+            let [me, px, nx, pz, nz] = &job.cells;
+            let tints = biome_tints(&mut WorldChunkManager::new(1), 2, -3);
+            let (v, i, w) = mesh::build_split_tinted(
+                crate::LEGACY, &me.blocks, &me.data, [&px.data, &nx.data, &pz.data, &nz.data], &me.light,
+                [px.blocks.as_slice(), nx.blocks.as_slice(), pz.blocks.as_slice(), nz.blocks.as_slice()],
+                [px.light.as_slice(), nx.light.as_slice(), pz.light.as_slice(), nz.light.as_slice()], 0, 32, -48, &tints,
+            );
+            let (i, si) = by_section(&v, &i);
+            let (w, sw) = by_section(&v, &w);
+            (v, i, si, w, sw)
+        };
+        let b = build_job(job, &mut WorldChunkManager::new(1));
+        assert!(!b.idxs.is_empty(), "a stone floor has a top face");
+        assert_eq!((b.verts, b.idxs, b.starts, b.widxs, b.wstarts), want);
+    }
+
+    /// A result lands whether or not its chunk changed while the job ran (an edit clears `meshed`, so the next job is queued), is
+    /// dropped when the chunk was unloaded, and always frees the chunk for its next job.
+    #[test]
+    fn mesh_results_land_and_an_edit_queues_the_next_job() {
+        let mut m = ChunkManager::new(1, 1);
+        m.insert((0, 0), vec![0u8; VOLUME]);
+        m.chunks.get_mut(&(0, 0)).unwrap().meshed = true; // a job is out
+        m.meshing.insert((0, 0));
+        assert!(m.accept((0, 0)) && m.meshing.is_empty() && m.chunks[&(0, 0)].meshed, "untouched: kept, still current");
+        m.meshing.insert((0, 0));
+        m.mark_dirty(3, 3); // an edit while the job ran
+        assert!(m.accept((0, 0)) && m.meshing.is_empty() && !m.chunks[&(0, 0)].meshed, "edited: kept, and due a new job");
+        m.meshing.insert((0, 0));
+        m.chunks.remove(&(0, 0));
+        assert!(!m.accept((0, 0)) && m.meshing.is_empty(), "unloaded: dropped");
     }
 
     /// A new sky-light level changes nothing the legacy shaders read from a vertex, so no mesh goes stale (the Photon look restarts them).
