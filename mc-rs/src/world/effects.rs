@@ -66,6 +66,8 @@ pub enum Fx {
     Smoke,
     /// `EntityDiggingFX`: a piece of a broken block, drawn with this tile of the block atlas.
     Dig(u16),
+    /// `EntityHeartFX`: shown when a wolf is tamed.
+    Heart,
 }
 
 #[derive(Clone)]
@@ -120,6 +122,12 @@ impl Particle {
         Self { kind: Fx::Smoke, pos, prev: pos, vel, max: life(r) * 2, half: 0.05 * scale(r) }
     }
 
+    /// `EntityHeartFX`: no gravity, up 0.1 a tick, slowing by 0.86; scale `(nextFloat * 0.5 + 0.5) * 2 * 0.75 * 2`, 16 ticks.
+    fn heart(r: &mut JavaRandom, pos: Vec3) -> Self {
+        let vel = base_motion(r, Vec3::ZERO) * 0.01 + Vec3::Y * 0.1;
+        Self { kind: Fx::Heart, pos, prev: pos, vel, max: 16, half: 0.05 * scale(r) * 0.75 * 2.0 }
+    }
+
     /// One 20 Hz `onUpdate`; false when the particle is gone.
     fn tick(&mut self, get: BlockQuery<'_>, r: &mut JavaRandom) -> bool {
         self.prev = self.pos;
@@ -163,6 +171,10 @@ impl Particle {
             Fx::Flame => {
                 self.pos += self.vel;
                 self.vel *= 0.96;
+            }
+            Fx::Heart => {
+                self.pos += self.vel;
+                self.vel *= 0.86;
             }
             Fx::Smoke => {
                 self.vel.y += 0.004;
@@ -298,6 +310,16 @@ impl Effects {
                     self.particles.push(Particle::dig(&mut self.rng, pos, v, tile));
                 }
             }
+        }
+    }
+
+    /// `EntityWolf.showHeartsOrSmokeFX`: 7 hearts (tamed) or 7 smoke puffs over the wolf's box. `feet` is its `posY`.
+    pub fn hearts(&mut self, feet: Vec3, width: f32, height: f32, tamed: bool) {
+        for _ in 0..7 {
+            let (a, b, c) = (self.rng.next_float(), self.rng.next_float(), self.rng.next_float());
+            let pos = Vec3::new(feet.x + a * width * 2.0 - width, feet.y + 0.5 + b * height, feet.z + c * width * 2.0 - width);
+            let p = if tamed { Particle::heart(&mut self.rng, pos) } else { Particle::smoke(&mut self.rng, pos) };
+            self.particles.push(p);
         }
     }
 
@@ -461,5 +483,23 @@ mod tests {
         }
         assert!(b.dead);
         assert!(struck(Vec3::ZERO, Vec3::new(1.0, 4.0, 0.0), Vec3::new(0.3, 0.9, 0.3)) && !struck(Vec3::ZERO, Vec3::new(5.0, 0.0, 0.0), Vec3::splat(0.3)));
+    }
+
+    /// Taming throws 7 hearts (or 7 smoke puffs) over the wolf; a heart drifts up and is gone after 16 ticks.
+    #[test]
+    fn hearts_rise_and_fade() {
+        let mut fx = Effects::new(9);
+        fx.hearts(Vec3::new(5.0, 10.0, 5.0), 0.8, 0.8, true);
+        fx.hearts(Vec3::new(5.0, 10.0, 5.0), 0.8, 0.8, false);
+        assert_eq!(fx.particles.iter().filter(|p| p.kind == Fx::Heart).count(), 7);
+        assert_eq!(fx.particles.len(), 14);
+        let y0: f32 = fx.particles.iter().filter(|p| p.kind == Fx::Heart).map(|p| p.pos.y).sum();
+        let air = |_: i32, _: i32, _: i32| Some(0u8);
+        fx.tick(&air);
+        assert!(fx.particles.iter().filter(|p| p.kind == Fx::Heart).map(|p| p.pos.y).sum::<f32>() > y0);
+        for _ in 0..20 {
+            fx.tick(&air);
+        }
+        assert!(fx.particles.iter().all(|p| p.kind != Fx::Heart));
     }
 }

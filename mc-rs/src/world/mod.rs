@@ -18,3 +18,4 @@ pub mod effects;
 pub mod save;
 pub mod ticks;
 pub mod decor;
+pub mod path;

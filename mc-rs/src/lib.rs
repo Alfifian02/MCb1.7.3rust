@@ -452,6 +452,12 @@ impl App {
         if self.sleep.is_some() && self.touch.jumping() {
             self.wake(true);
         }
+        // On a saddled pig the jump button is "get off" (`EntityPlayerSP`: sneak dismounts; touch has no sneak) and the body goes
+        // wherever the pig goes (`updateRidden`: no motion of its own).
+        if self.touch.jumping() {
+            self.mobs.list.iter_mut().for_each(|m| m.ridden = false);
+        }
+        let riding = self.mobs.list.iter().any(|m| m.ridden);
         let asleep = self.sleep.is_some();
         if !asleep {
             self.camera.add_yaw(look_dx * LOOK_SENS);
@@ -460,7 +466,7 @@ impl App {
         // Analog move stick: rotate the camera-frame (fwd, side) by yaw into
         // world-space velocity. Set every frame (zero when the stick is idle),
         // otherwise the player keeps sliding after the finger lifts.
-        let (fwd, side) = if asleep { (0.0, 0.0) } else { self.touch.move_input };
+        let (fwd, side) = if asleep || riding { (0.0, 0.0) } else { self.touch.move_input };
         let yaw = self.camera.yaw;
         // forward = -Z when yaw = 0; rotate by yaw around +Y.
         self.player.vel.x = (fwd * yaw.sin() + side * yaw.cos()) * MOVE_SPEED;
@@ -469,7 +475,7 @@ impl App {
         let get = |x: i32, y: i32, z: i32| self.chunks.block(x, y, z).map(|b| if is_plant(b) { 0 } else { physics_id(b, self.chunks.meta(x, y, z)) });
         // The held jump button jumps (8.4 m/s, the b1.7.3 velocity) or swims up; fluids (ids 8..=11) are not solid.
         let y0 = self.player.pos.y;
-        let (water, lava) = if asleep { (false, false) } else { physics::step(&mut self.player, dt, self.touch.jumping(), &get) };
+        let (water, lava) = if asleep || riding { (false, false) } else { physics::step(&mut self.player, dt, self.touch.jumping(), &get) };
         self.camera.pos = self.player.pos + glam::Vec3::new(0.0, EYE_HEIGHT, 0.0);
         let e = self.camera.pos;
         let eye_in_water = matches!(self.chunks.block_loaded(e.x.floor() as i32, e.y.floor() as i32, e.z.floor() as i32), Some(8 | 9));
@@ -509,6 +515,14 @@ impl App {
                 _ => {}
             }
         }
+        // `Entity.updateRiderPosition`: the rider's feet are 0.175 over the pig's (`getMountedYOffset` 0.675, `getYOffset` -0.5).
+        if let Some(m) = self.mobs.list.iter().find(|m| m.ridden) {
+            let feet = m.body.pos.y - m.half.y;
+            self.player.pos = glam::Vec3::new(m.body.pos.x, feet + 0.175 + physics::HALF.y, m.body.pos.z);
+            self.player.vel = glam::Vec3::ZERO;
+            self.player.on_ground = true; // no fall damage from a pig's hop
+            self.camera.pos = self.player.pos + glam::Vec3::new(0.0, EYE_HEIGHT, 0.0);
+        }
         // Furnaces burn on the 20 Hz tick, open or not, but only in loaded chunks (vanilla ticks loaded tile entities).
         // The block swaps between unlit 61 and lit 62 when the fire goes on or off.
         // `TextureFX.onTick` every 20 Hz tick (at most 2 per frame: a stall does not queue a burst of texture uploads).
@@ -516,6 +530,16 @@ impl App {
         while self.anim_acc >= dig::TICK {
             self.anim_acc -= dig::TICK;
             self.pipe.animate(&self.gpu.queue, &self.anim.tick());
+            // The compass points at the world spawn and the clock shows the sky (`TextureCompassFX`, `TextureWatchFX`); the sprite
+            // is rewritten in the atlas (held items, drops) and in the HUD's copy of items.png (hotbar, inventory).
+            let g = self.anim.gauges(
+                self.camera.yaw.to_degrees() + 180.0,
+                (self.player.pos.x as f64, self.player.pos.z as f64),
+                (self.spawn.x as f64, self.spawn.z as f64),
+                sky::celestial_angle(self.world_ticks as u64, 1.0),
+            );
+            self.pipe.animate_items(&self.gpu.queue, &g);
+            self.hud.animate_items(&self.gpu.queue, &g);
         }
         self.furn_acc += dt;
         while self.furn_acc >= dig::TICK {
@@ -667,6 +691,21 @@ impl App {
             let (eye, fwd, slot) = (self.camera.pos, self.camera.forward(), self.touch.hotbar_slot);
             let wall = self.target.map_or(f32::MAX, |h| h.point.distance(eye.as_dvec3()) as f32);
             if let Some((i, _)) = self.mobs.pick(eye, fwd, pick::REACH as f32).filter(|&(_, t)| t < wall) {
+                // A bone or pork on a wolf, a tap on a tame one, a saddle on a pig, a tap on a saddled one (`Entity.interact`).
+                let held = self.inv.slots[slot];
+                if let Some(b) = gear::befriend(&mut self.mobs.list[i], held, &mut self.mobs.rng) {
+                    let m = &self.mobs.list[i];
+                    let (feet, w, h) = (m.body.pos - glam::Vec3::new(0.0, m.half.y, 0.0), m.half.x * 2.0, m.half.y * 2.0);
+                    match b {
+                        gear::Befriend::Tamed | gear::Befriend::Failed => {
+                            self.inv.consume(slot);
+                            self.fx.hearts(feet, w, h, b == gear::Befriend::Tamed);
+                        }
+                        gear::Befriend::Healed | gear::Befriend::Saddled => self.inv.consume(slot),
+                        gear::Befriend::Sat | gear::Befriend::Stood | gear::Befriend::Mounted => {}
+                    }
+                    return;
+                }
                 if let Some(h) = self.inv.slots[slot] {
                     // Shears / dye on a sheep, a bucket on a cow: `Entity.interact` before the attack.
                     let used = gear::use_on_mob(&mut self.mobs.list[i], h, &mut self.mobs.rng);

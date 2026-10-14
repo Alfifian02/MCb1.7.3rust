@@ -5,9 +5,10 @@
 //! `loot` (`dropFewItems`) and the few special cases below: `EntityMob.attackEntity` melee, skeleton arrows (`EntityArrow`),
 //! creeper fuse and `Explosion`, spider leap and wall climbing, slime hopping and splitting, squid swimming, chicken egg and
 //! slow fall, zombie/skeleton burning in daylight, zombie pigman and wolf anger.
-//! ponytail: no A* (`Pathfinder`): a "path" is a straight walk to the chosen cell (or to the player), and a blocked mob hops,
-//! so it climbs one-block steps but cannot go around walls. Light is not read by the wander weights. No sounds, no death
-//! animation, no fall/lava damage, no riding/taming/shearing/milking, mobs are not saved. Walk speed is the terminal speed
+//! ponytail: `Pathfinder` (A*, `world::path`) is used only to chase a target and for a tame wolf following its owner; wandering
+//! is a straight walk to the chosen cell, and a blocked mob hops, so it climbs one-block steps but does not go round walls there. Light is not read by the wander weights. No sounds, no death
+//! animation, no fall/lava damage, no breeding, mobs are not saved. A wolf can be tamed with a bone, sits, follows its owner and is put beside them; a pig takes a saddle and
+//! the player rides it (it keeps its own AI, as in b1.7.3: no steering). Walk speed is the terminal speed
 //! of `moveFlying` (`moveSpeed` x 0.1 x 0.98 against 0.546 drag), not accumulated momentum. Explosions have no exposure
 //! test, and knock the player back not at all. Normal difficulty. Ghast (needs the Nether) and the pig-zombie spawn are not here.
 //! UNVERIFIED: spawn rules and rates (vanilla spawns animals while generating chunks and every tick per chunk for monsters),
@@ -19,6 +20,7 @@ use crate::world::chunk::brightness;
 use crate::world::craft::{self, Kind as Tool};
 use crate::world::dig;
 use crate::world::gen::noise::JavaRandom;
+use crate::world::path;
 use crate::world::items::{Drops, ItemStack};
 use crate::world::names::RESIST;
 use crate::world::physics::{self, BlockQuery, Player};
@@ -81,6 +83,12 @@ pub struct Mob {
     pub sheared: bool,
     /// Creeper: ticks of fuse burnt.
     pub fuse: u8,
+    /// Wolf: tamed by a bone (`isWolfTamed`; the owner is the one player) and sitting (`isWolfSitting`).
+    pub tame: bool,
+    pub sitting: bool,
+    /// Pig: wearing a saddle, and carrying the player (`riddenByEntity`).
+    pub saddled: bool,
+    pub ridden: bool,
     pub half: Vec3,
     age: u32,
     yaw_vel: f32,
@@ -102,6 +110,9 @@ pub struct Mob {
     fire: u16,
     free: u8,
     swim: Vec3,
+    /// `pathToEntity` and the index of the point being walked to (`PathEntity.currentPathIndex`).
+    path: Vec<(i32, i32, i32)>,
+    path_i: usize,
 }
 
 pub enum Ev {
@@ -172,9 +183,61 @@ impl Mob {
         };
         let pos = Vec3::new(x, feet + half.y + 0.01, z);
         Self { kind, body: Player { pos, vel: Vec3::ZERO, on_ground: false }, yaw, health: hp, limb: 0.0, limb_amt: 0.0, hurt: 0, size, color, sheared: false,
-            fuse: 0, half, age: 0, yaw_vel: 0.0, look: None, goal: None, fspeed: 0.0, jumping: false, wet: false, blocked: false, life: 0,
+            fuse: 0, tame: false, sitting: false, saddled: false, ridden: false, half, age: 0, yaw_vel: 0.0, look: None, goal: None, fspeed: 0.0, jumping: false, wet: false, blocked: false, life: 0,
             last: 0, target: false, shot: false, lit: false, anger: 0, attack_time: 0, hop: 0, egg: rng.next_int_bound(6000) + 6000, fire: 0,
-            free: 0, swim: Vec3::ZERO }
+            free: 0, swim: Vec3::ZERO, path: Vec::new(), path_i: 0 }
+    }
+
+    /// `EntityWolf.interact`, a bone that took: tamed, sitting, full health, calm.
+    pub fn tame_now(&mut self) {
+        (self.tame, self.sitting, self.health, self.anger, self.target, self.goal) = (true, true, 20, 0, false, None);
+    }
+
+    /// `setPathToEntity(null)` and `isJumping = false`: stop where it stands.
+    pub fn stop(&mut self) {
+        (self.goal, self.fspeed, self.jumping) = (None, 0.0, false);
+        self.path.clear();
+    }
+
+    /// `EntityCreature.updatePlayerActionState` with a target: a path to the player, made when there is none and again 1 time in 20
+    /// (`getPathToEntity(.., 16)`), and the goal is the point being walked to; points are passed within `width * 2` of them. With
+    /// no path (walled in, or beyond 16) or at its end, the goal is the player themselves (the old straight walk).
+    fn chase(&mut self, rng: &mut JavaRandom, c: &Ctx) {
+        let (lo, w, h) = (self.aabb().0, self.half.x * 2.0, self.half.y * 2.0);
+        let size = ((w + 1.0).floor() as i32, (h + 1.0).floor() as i32, (w + 1.0).floor() as i32);
+        if self.path.is_empty() || rng.next_int_bound(20) == 0 {
+            let target = ((c.player.x - w / 2.0).floor() as i32, (c.player.y - physics::HALF.y).floor() as i32, (c.player.z - w / 2.0).floor() as i32);
+            self.path = path::find(c.get, (lo.x.floor() as i32, lo.y.floor() as i32, lo.z.floor() as i32), target, size, 16.0).unwrap_or_default();
+            self.path_i = 0;
+        }
+        let at = |&(x, _, z): &(i32, i32, i32)| (x as f32 + size.0 as f32 * 0.5, z as f32 + size.2 as f32 * 0.5);
+        while let Some(p) = self.path.get(self.path_i).map(at) {
+            let (dx, dz) = (p.0 - self.body.pos.x, p.1 - self.body.pos.z);
+            if dx * dx + dz * dz >= (w * 2.0) * (w * 2.0) {
+                break;
+            }
+            self.path_i += 1;
+        }
+        self.goal = Some(self.path.get(self.path_i).map_or((c.player.x, c.player.z), at));
+    }
+
+    /// `EntityWolf.getPathOrWalkableBlock`, the far branch: beside the owner, on the ring of the 5 x 5 around them, in a cell with
+    /// a solid floor and two free cells above. ponytail: vanilla does this only when no path is found within 16; with no
+    /// path-finder it is done whenever the owner is more than 16 away.
+    fn teleport_to(&mut self, c: &Ctx) {
+        let (x0, z0) = (c.player.x.floor() as i32 - 2, c.player.z.floor() as i32 - 2);
+        let y = (c.player.y - physics::HALF.y).floor() as i32;
+        for dx in 0..=4 {
+            for dz in 0..=4 {
+                let (x, z) = (x0 + dx, z0 + dz);
+                if (dx < 1 || dz < 1 || dx > 3 || dz > 3) && solid((c.get)(x, y - 1, z)) && !solid((c.get)(x, y, z)) && !solid((c.get)(x, y + 1, z)) {
+                    self.body.pos = Vec3::new(x as f32 + 0.5, y as f32 + self.half.y + 0.01, z as f32 + 0.5);
+                    self.body.vel = Vec3::ZERO;
+                    self.goal = None;
+                    return;
+                }
+            }
+        }
     }
 
     pub fn aabb(&self) -> (Vec3, Vec3) {
@@ -184,6 +247,9 @@ impl Mob {
     /// `EntityLiving.func_27021_X`: false when it despawns (more than 128 blocks away, or 1/800 after 600 ticks beyond 32).
     fn old(&mut self, rng: &mut JavaRandom, d2: f32) -> bool {
         self.age += 1;
+        if self.tame || self.ridden {
+            return false; // `EntityWolf.canDespawn`; a mount stays
+        }
         if d2 > 16384.0 {
             return true;
         }
@@ -217,6 +283,9 @@ impl Mob {
         if physics::touching(pos, self.half, c.get, 81) {
             self.hit(1, pos);
         }
+        if k == Wolf && self.wet {
+            self.sitting = false; // `EntityWolf.updatePlayerActionState`: in water it stands up
+        }
         // EntityCreature.findPlayerToAttack per kind; anger (zombie pigman, wolf) sets `target` itself.
         self.anger = (self.anger - 1).max(0);
         let see = sees(c.get, pos, c.eye);
@@ -236,6 +305,9 @@ impl Mob {
         };
         if !alive {
             return false;
+        }
+        if k == Wolf && self.tame && !self.sitting && d2 > 256.0 {
+            self.teleport_to(c);
         }
         if k == Chicken {
             self.egg -= 1;
@@ -305,12 +377,20 @@ impl Mob {
     /// The pig AI (see the module doc), plus walking after the player when `target` is set.
     fn ai_walk(&mut self, rng: &mut JavaRandom, c: &Ctx, d2: f32) -> bool {
         let (k, pos, get) = (self.kind, self.body.pos, c.get);
+        if k == Wolf && self.sitting {
+            self.stop(); // `isMovementCeased`
+            return true;
+        }
         if self.target && self.shot {
             (self.goal, self.fspeed, self.jumping) = (None, 0.0, false); // ranged attackers and a lit creeper stand and face
             return true;
         }
-        if self.target {
-            self.goal = Some((c.player.x, c.player.z));
+        let chasing = self.target || (k == Wolf && self.tame && d2 > 25.0);
+        if !chasing {
+            self.path.clear();
+        }
+        if chasing {
+            self.chase(rng, c); // a tame wolf more than 5 blocks off follows its owner the same way
         } else if (self.goal.is_none() && rng.next_int_bound(80) == 0) || rng.next_int_bound(80) == 0 {
             // `func_31026_E`: of 10 random cells within 6 x 3 x 6 the best weight, grass 10.
             let mut best: Option<(f32, (i32, i32))> = None;
@@ -333,7 +413,8 @@ impl Mob {
         if let (Some((gx, gz)), true) = (self.goal, self.goal.is_some() && (self.target || rng.next_int_bound(100) != 0)) {
             self.jumping = false;
             let (dx, dz) = (gx - pos.x, gz - pos.z);
-            if dx * dx + dz * dz < (self.half.x * 4.0).powi(2) {
+            // A point of a path is passed by `chase` (within width x 2); only a bare goal (a wander cell, the player) ends here.
+            if self.path_i >= self.path.len() && dx * dx + dz * dz < (self.half.x * 4.0).powi(2) {
                 self.goal = None; // the path is finished
                 self.fspeed = 0.0;
             } else {
@@ -342,6 +423,8 @@ impl Mob {
             }
             // ponytail: vanilla hops when `isCollidedHorizontally && !hasPath()`; with no path-finder a blocked mob hops.
             self.jumping |= self.blocked;
+            // `EntityCreature`: jump when the next point is higher than the feet.
+            self.jumping |= self.path.get(self.path_i).is_some_and(|p| p.1 > (self.body.pos.y - self.half.y + 0.5).floor() as i32);
             self.jumping |= rng.next_float() < 0.8 && self.wet;
         } else {
             // EntityLiving.updatePlayerActionState: stand, look at a player within 8, or turn at random.
@@ -436,7 +519,11 @@ impl Mob {
     /// `EntityLiving.attackEntityFrom`: a hit inside the 10-tick window only pays the difference; the first one knocks back.
     /// A zombie pigman or wolf hit turns on its attacker.
     pub fn damage(&mut self, dmg: i32, from: Vec3, rng: &mut JavaRandom) {
-        if self.health > 0 && matches!(self.kind, PigZombie | Wolf) {
+        if self.kind == Wolf {
+            self.sitting = false; // `EntityWolf.attackEntityFrom`
+        }
+        // A tamed wolf hit by its owner (the only player there is) does not turn on them.
+        if self.health > 0 && matches!(self.kind, PigZombie | Wolf) && !(self.kind == Wolf && self.tame) {
             self.anger = if self.kind == Wolf { 1 << 20 } else { 400 + rng.next_int_bound(400) };
             self.target = true;
         }
@@ -931,5 +1018,64 @@ mod tests {
         let mut sheep = Mob::new(Sheep, 1.5, 10.0, 1.5, 0.0, &mut rng);
         sheep.color = 6;
         assert_eq!(sheep.loot(&mut rng).iter().map(|s| (s.id, s.damage)).collect::<Vec<_>>(), vec![(35, 6)]);
+    }
+
+    /// A bone tames a wolf (1 in 3, health 20, calm, sitting); sitting it stays put, standing it follows its owner beyond 5
+    /// blocks and is put beside them beyond 16; a saddle goes on a pig once and a tap then mounts it; neither despawns.
+    #[test]
+    fn bone_tames_a_wolf_and_a_saddled_pig_is_a_mount() {
+        use crate::world::gear::{befriend, Befriend, BONE, SADDLE};
+        let l = |_, _, _| 15u8;
+        let mut rng = JavaRandom::new(11);
+        let item = |id| Some(ItemStack { id, count: 1, damage: 0 });
+        let mut w = Mob::new(Wolf, 10.5, 10.0, 10.5, 0.0, &mut rng);
+        assert!((0..60).any(|_| befriend(&mut w, item(BONE), &mut rng) == Some(Befriend::Tamed)));
+        assert!(w.tame && w.sitting && w.health == 20 && w.anger == 0);
+        let (mut ev, near) = (Vec::new(), ctx(Vec3::new(20.5, 10.9, 10.5), &l));
+        let start = w.body.pos;
+        for _ in 0..200 {
+            assert!(w.tick(&mut rng, &near, &mut ev));
+            for _ in 0..3 { w.step(TICK / 3.0, &flat) }
+        }
+        assert!((w.body.pos - start).length() < 0.05, "sitting: it did not move");
+        assert_eq!(befriend(&mut w, None, &mut rng), Some(Befriend::Stood));
+        for _ in 0..300 {
+            w.tick(&mut rng, &near, &mut ev);
+            for _ in 0..3 { w.step(TICK / 3.0, &flat) }
+        }
+        assert!((w.body.pos.x - 20.5).abs() < 6.5, "it followed: x = {}", w.body.pos.x);
+        w.damage(2, near.player, &mut rng);
+        assert!(w.anger == 0 && !w.target, "a tame wolf hit by its owner stays calm");
+        let gone = ctx(Vec3::new(60.5, 10.9, 10.5), &l);
+        w.tick(&mut rng, &gone, &mut ev);
+        assert!((w.body.pos.x - 60.5).abs() < 3.5 && (w.body.pos.z - 10.5).abs() < 3.5, "put beside the owner: {:?}", w.body.pos);
+        let mut p = Mob::new(Pig, 30.5, 10.0, 30.5, 0.0, &mut rng);
+        assert_eq!(befriend(&mut p, None, &mut rng), None, "no saddle, no ride");
+        assert_eq!(befriend(&mut p, item(SADDLE), &mut rng), Some(Befriend::Saddled));
+        assert_eq!(befriend(&mut p, item(SADDLE), &mut rng), Some(Befriend::Mounted), "a saddled pig is mounted by the next tap");
+        assert!(p.ridden);
+        let far = ctx(Vec3::new(232.0, 10.0, 32.0), &l);
+        assert!((0..50).all(|_| p.tick(&mut rng, &far, &mut ev)), "a mount does not despawn");
+    }
+
+    /// A tame wolf 10 blocks off with a wall between (open at z = 15) walks round it to its owner: the path-finder, not a straight
+    /// walk into the wall.
+    #[test]
+    fn tame_wolf_walks_round_a_wall_to_its_owner() {
+        let walled = |x: i32, y: i32, z: i32| if x == 10 && z <= 14 && (10..=12).contains(&y) { Some(1) } else { flat(x, y, z) };
+        let l = |_, _, _| 15u8;
+        let c = Ctx { get: &walled, light: &l, day: false, player: Vec3::new(15.5, 10.9, 5.5), eye: Vec3::new(15.5, 11.5, 5.5) };
+        let mut rng = JavaRandom::new(21);
+        let mut w = Mob::new(Wolf, 5.5, 10.0, 5.5, 0.0, &mut rng);
+        w.tame = true;
+        let (mut ev, mut near, mut round) = (Vec::new(), f32::MAX, false);
+        for _ in 0..2400 {
+            w.tick(&mut rng, &c, &mut ev);
+            for _ in 0..3 { w.step(TICK / 3.0, &walled) }
+            near = near.min((w.body.pos - c.player).length());
+            round |= w.body.pos.z > 14.5;
+        }
+        assert!(round, "it went round the end of the wall");
+        assert!(near < 5.5, "and came to its owner: closest {near}");
     }
 }

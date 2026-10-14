@@ -577,14 +577,24 @@ impl ChunkPipeline {
     /// tile is aligned to every level, so the mips never touch a neighbour).
     pub fn animate(&self, queue: &Queue, tiles: &[(u8, crate::render::anim::Tile)]) {
         for (t, px) in tiles {
-            let (x, y) = ((*t as u32 % 16) * 16, (*t as u32 / 16) * 16);
-            let (mut level, mut n) = (px.to_vec(), 16usize);
-            for l in 0..atlas::MIPS {
-                self.write_rgba(queue, l, [x >> l, y >> l], [n as u32, n as u32], &level);
-                if l + 1 < atlas::MIPS {
-                    level = atlas::mip(&level, n, n);
-                    n /= 2;
-                }
+            self.put_tile(queue, (*t as u32 % 16) * 16, (*t as u32 / 16) * 16, px);
+        }
+    }
+
+    /// The same for tiles of `gui/items.png` (the compass and the clock), which sit `ITEMS_Y` lower in the atlas.
+    pub fn animate_items(&self, queue: &Queue, tiles: &[(u8, crate::render::anim::Tile)]) {
+        for (t, px) in tiles {
+            self.put_tile(queue, (*t as u32 % 16) * 16, atlas::ITEMS_Y as u32 + (*t as u32 / 16) * 16, px);
+        }
+    }
+
+    fn put_tile(&self, queue: &Queue, x: u32, y: u32, px: &crate::render::anim::Tile) {
+        let (mut level, mut n) = (px.to_vec(), 16usize);
+        for l in 0..atlas::MIPS {
+            self.write_rgba(queue, l, [x >> l, y >> l], [n as u32, n as u32], &level);
+            if l + 1 < atlas::MIPS {
+                level = atlas::mip(&level, n, n);
+                n /= 2;
             }
         }
     }

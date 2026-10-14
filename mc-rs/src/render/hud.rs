@@ -145,9 +145,23 @@ pub struct HudPipeline {
     pub surface_w: u32,
     pub surface_h: u32,
     pub quad_capacity: usize,
+    /// `gui/items.png` as the HUD samples it; the compass and clock tiles are rewritten every tick.
+    items_tex: wgpu::Texture,
 }
 
 impl HudPipeline {
+    /// `TextureFX` for the item sprites in the hotbar and the inventory (the atlas copy is `ChunkPipeline::animate_items`).
+    pub fn animate_items(&self, queue: &Queue, tiles: &[(u8, crate::render::anim::Tile)]) {
+        for (t, px) in tiles {
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo { texture: &self.items_tex, mip_level: 0, origin: wgpu::Origin3d { x: (*t as u32 % 16) * 16, y: (*t as u32 / 16) * 16, z: 0 }, aspect: wgpu::TextureAspect::All },
+                px,
+                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(64), rows_per_image: Some(16) },
+                wgpu::Extent3d { width: 16, height: 16, depth_or_array_layers: 1 },
+            );
+        }
+    }
+
     pub fn new(device: &Device, queue: &Queue, surface_format: TextureFormat, surface_w: u32, surface_h: u32) -> Self {
         let shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("hud_shader"),
@@ -274,6 +288,7 @@ impl HudPipeline {
             surface_w,
             surface_h,
             quad_capacity,
+            items_tex,
         };
         // Initial uniform write so the first frame is sized correctly.
         let bytes = [surface_w as f32, surface_h as f32];

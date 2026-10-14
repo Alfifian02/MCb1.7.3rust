@@ -78,6 +78,60 @@ pub fn use_on_mob(m: &mut Mob, held: ItemStack, rng: &mut JavaRandom) -> Option<
     }
 }
 
+/// What a tap did to a wolf or a pig (`EntityWolf.interact`, `ItemSaddle.saddleEntity`, `EntityPig.interact`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Befriend {
+    /// A bone was used up and the wolf is tame (hearts) / the bone was used up and nothing happened (smoke).
+    Tamed,
+    Failed,
+    /// Raw or cooked pork was used up: +3 health.
+    Healed,
+    /// The owner's tap on a tame wolf: it sits down / stands up. No item is used.
+    Sat,
+    Stood,
+    /// A saddle was used up on a pig.
+    Saddled,
+    /// The player climbs onto a saddled pig.
+    Mounted,
+}
+
+pub const BONE: u16 = 352;
+pub const SADDLE: u16 = 329;
+
+/// A tap with `held` on a mob that may be befriended or mounted; `None` = nothing here (the tap attacks, or `use_on_mob` runs).
+/// A wild wolf that is angry takes no bone (the tap attacks it); a tame one takes pork while hurt, otherwise the tap toggles sitting.
+pub fn befriend(m: &mut Mob, held: Option<ItemStack>, rng: &mut JavaRandom) -> Option<Befriend> {
+    let id = held.map(|h| h.id);
+    match m.kind {
+        Kind::Wolf if !m.tame => (id == Some(BONE) && m.anger == 0).then(|| {
+            if rng.next_int_bound(3) == 0 {
+                m.tame_now();
+                Befriend::Tamed
+            } else {
+                Befriend::Failed
+            }
+        }),
+        Kind::Wolf if matches!(id, Some(319 | 320)) && m.health < 20 => {
+            m.health = (m.health + 3).min(20);
+            Some(Befriend::Healed)
+        }
+        Kind::Wolf => {
+            m.sitting = !m.sitting;
+            m.stop();
+            Some(if m.sitting { Befriend::Sat } else { Befriend::Stood })
+        }
+        Kind::Pig if id == Some(SADDLE) && !m.saddled => {
+            m.saddled = true;
+            Some(Befriend::Saddled)
+        }
+        Kind::Pig if m.saddled && !m.ridden => {
+            m.ridden = true;
+            Some(Befriend::Mounted)
+        }
+        _ => None,
+    }
+}
+
 /// `EntityFish`: the bobber. 20 Hz `tick`s; `pos` is the corner of its 0.25 box.
 // ponytail: it never hooks a mob (vanilla pulls the mob toward you, wear 3) and has no box collision, only the
 // cell it is in; the cast starts at the eye instead of 0.16 to the side.

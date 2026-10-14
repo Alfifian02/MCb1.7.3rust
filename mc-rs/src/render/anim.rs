@@ -10,6 +10,12 @@ pub const FIRE: [u8; 2] = [31, 47];
 
 pub type Tile = [u8; 1024];
 
+/// Item tiles of `gui/items.png` that animate (`Item.compass` icon (6, 3), `Item.pocketSundial` (6, 4)).
+pub const COMPASS: u8 = 54;
+pub const CLOCK: u8 = 70;
+/// `misc/dial.png` (16 x 16 RGBA): the sky painted into the clock's magenta face (`TextureWatchFX`); `tools/gen_terrain.py` writes it.
+const DIAL: &[u8] = include_bytes!("../../assets/dial.rgba");
+
 struct Rng(u64);
 impl Rng {
     fn f(&mut self) -> f32 {
@@ -115,7 +121,69 @@ fn flames(g: &mut [f32; 320], rng: &mut Rng) -> Tile {
     t
 }
 
+/// The 16 x 16 picture of an item tile, straight from `items.png`.
+fn items_tile(t: u8) -> Tile {
+    let mut o = [0u8; 1024];
+    for r in 0..16 {
+        let src = ((t as usize / 16 * 16 + r) * 256 + t as usize % 16 * 16) * 4;
+        o[r * 64..][..64].copy_from_slice(&crate::render::atlas::ITEMS[src..src + 64]);
+    }
+    o
+}
+
+/// The spring both gauges use: the shown angle `s.0` chases `target` (the difference wrapped to +-pi, then to +-1), `s.1` is its
+/// speed (`+= diff * 0.1`, `*= 0.8`).
+fn chase(s: &mut (f64, f64), target: f64) {
+    use std::f64::consts::{PI, TAU};
+    let mut d = target - s.0;
+    while d < -PI { d += TAU }
+    while d >= PI { d -= TAU }
+    d = d.clamp(-1.0, 1.0);
+    s.1 = (s.1 + d * 0.1) * 0.8;
+    s.0 += s.1;
+}
+
+/// `TextureCompassFX.onTick`: the needle is drawn over the plain icon: a grey tail (9 dots), then 25 dots along the needle, grey
+/// behind the pivot and red in front of it.
+fn compass(base: &Tile, a: f64) -> Tile {
+    let mut t = *base;
+    let (s, c) = a.sin_cos();
+    let mut put = |x: f64, y: f64, rgba: [u8; 4]| {
+        let (x, y) = (x as i32, y as i32);
+        if (0..16).contains(&x) && (0..16).contains(&y) { t[(y * 16 + x) as usize * 4..][..4].copy_from_slice(&rgba) }
+    };
+    for i in -4..=4 {
+        put(8.5 + c * i as f64 * 0.3, 7.5 - s * i as f64 * 0.3 * 0.5, [100, 100, 100, 255]);
+    }
+    for i in -8..=16 {
+        put(8.5 + s * i as f64 * 0.3, 7.5 + c * i as f64 * 0.3 * 0.5, if i >= 0 { [255, 20, 20, 255] } else { [100, 100, 100, 255] });
+    }
+    t
+}
+
+/// `TextureWatchFX.onTick`: every magenta pixel of the clock icon (red = blue, no green) shows the dial turned by `a`, as bright
+/// as that pixel was.
+fn watch(base: &Tile, a: f64) -> Tile {
+    let mut t = *base;
+    let (s, c) = a.sin_cos();
+    for i in 0..256 {
+        let [r, g, b, _] = [base[i * 4], base[i * 4 + 1], base[i * 4 + 2], base[i * 4 + 3]];
+        if r == b && g == 0 && b > 0 {
+            let x = -((i % 16) as f64 / 15.0 - 0.5);
+            let y = (i / 16) as f64 / 15.0 - 0.5;
+            let (u, v) = (((x * c + y * s + 0.5) * 16.0) as i32, ((y * c - x * s + 0.5) * 16.0) as i32);
+            let d = ((u & 15) + (v & 15) * 16) as usize * 4;
+            let k = r as u32;
+            t[i * 4..][..4].copy_from_slice(&[(DIAL[d] as u32 * k / 255) as u8, (DIAL[d + 1] as u32 * k / 255) as u8, (DIAL[d + 2] as u32 * k / 255) as u8, DIAL[d + 3]]);
+        }
+    }
+    t
+}
+
 pub struct Anim {
+    /// Shown angle and speed of the compass and clock hands (`field_4229_i` / `field_4228_j`, `field_4222_j` / `field_4221_k`).
+    compass: (f64, f64),
+    clock: (f64, f64),
     rng: Rng,
     tick: i32,
     water: Field,
@@ -127,7 +195,16 @@ pub struct Anim {
 
 impl Anim {
     pub fn new() -> Self {
-        Self { rng: Rng(0x9E37_79B9_7F4A_7C15), tick: 0, water: Field::new(), water_flow: Field::new(), lava: Field::new(), lava_flow: Field::new(), fire: [[0.0; 320]; 2] }
+        Self { compass: (0.0, 0.0), clock: (0.0, 0.0), rng: Rng(0x9E37_79B9_7F4A_7C15), tick: 0, water: Field::new(), water_flow: Field::new(), lava: Field::new(), lava_flow: Field::new(), fire: [[0.0; 320]; 2] }
+    }
+
+    /// One 20 Hz tick of `TextureCompassFX` and `TextureWatchFX`: the new pictures of the compass and clock items,
+    /// `(items.png tile, RGBA)`. `yaw` is `rotationYaw` in degrees, `pos` the player's x / z, `spawn` the world spawn x / z and
+    /// `celestial` `World.getCelestialAngle(1.0)`. ponytail: no Nether branch (the needle spinning at random), no anaglyph.
+    pub fn gauges(&mut self, yaw: f32, pos: (f64, f64), spawn: (f64, f64), celestial: f32) -> [(u8, Tile); 2] {
+        chase(&mut self.compass, (yaw as f64 - 90.0).to_radians() - (spawn.1 - pos.1).atan2(spawn.0 - pos.0));
+        chase(&mut self.clock, -(celestial as f64) * std::f64::consts::TAU);
+        [(COMPASS, compass(&items_tile(COMPASS), self.compass.0)), (CLOCK, watch(&items_tile(CLOCK), self.clock.0))]
     }
 
     /// One 20 Hz tick: the new picture of every animated tile, `(terrain tile, RGBA)`.
@@ -166,5 +243,26 @@ mod tests {
             }
         }
         assert_ne!(a.tick()[0].1[..], last[0].1[..]); // it moves
+    }
+
+    /// The compass hand settles on the spawn direction and stays; the red tip is drawn; the clock face differs between noon and
+    /// midnight and the parts of the icon that are not magenta never change.
+    #[test]
+    fn compass_and_clock_follow_their_targets() {
+        let mut a = Anim::new();
+        let mut last = a.gauges(0.0, (0.0, 0.0), (10.0, 0.0), 0.0);
+        for _ in 0..200 {
+            last = a.gauges(0.0, (0.0, 0.0), (10.0, 0.0), 0.0);
+        }
+        let again = a.gauges(0.0, (0.0, 0.0), (10.0, 0.0), 0.0);
+        assert!(last[0].1 == again[0].1 && last[1].1 == again[1].1, "both hands have settled");
+        assert!(again[0].1.chunks(4).any(|p| p == [255, 20, 20, 255]), "red needle tip");
+        let (base, noon) = (items_tile(CLOCK), again[1].1);
+        let midnight = {
+            let mut b = Anim::new();
+            (0..200).map(|_| b.gauges(0.0, (0.0, 0.0), (10.0, 0.0), 0.5)).last().unwrap()[1].1
+        };
+        assert!(noon != midnight, "the dial turns with the sky");
+        assert!((0..256).filter(|&i| !(base[i * 4] == base[i * 4 + 2] && base[i * 4 + 1] == 0 && base[i * 4 + 2] > 0)).all(|i| noon[i * 4..][..4] == base[i * 4..][..4]));
     }
 }
