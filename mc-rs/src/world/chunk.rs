@@ -155,6 +155,24 @@ pub fn box_bounds(id: u8, meta: u8) -> Option<[f32; 6]> {
         },
         // `BlockRail.setBlockBoundsBasedOnState`: 2/16 high, 10/16 on an ascending shape (drawn as a flat quad, `mesh::push_flat`)
         66 | 27 | 28 => [0.0, 0.0, 0.0, 1.0, if (2..=5).contains(&(meta & 7)) { 10.0 / 16.0 } else { 2.0 / 16.0 }, 1.0],
+        // M21 pistons: the head is its 4/16 plate (the shaft is not drawn), an extended base is 12/16 long (`BlockPistonBase`,
+        // `BlockPistonExtension.setBlockBoundsBasedOnState`); facing 0 -y, 1 +y, 2 -z, 3 +z, 4 -x, 5 +x.
+        34 => match meta & 7 {
+            0 => [0.0, 0.0, 0.0, 1.0, 0.25, 1.0],
+            1 => [0.0, 0.75, 0.0, 1.0, 1.0, 1.0],
+            2 => [0.0, 0.0, 0.0, 1.0, 1.0, 0.25],
+            3 => [0.0, 0.0, 0.75, 1.0, 1.0, 1.0],
+            4 => [0.0, 0.0, 0.0, 0.25, 1.0, 1.0],
+            _ => [0.75, 0.0, 0.0, 1.0, 1.0, 1.0],
+        },
+        29 | 33 if meta & 8 != 0 => match meta & 7 {
+            0 => [0.0, 0.25, 0.0, 1.0, 1.0, 1.0],
+            1 => [0.0, 0.0, 0.0, 1.0, 0.75, 1.0],
+            2 => [0.0, 0.0, 0.25, 1.0, 1.0, 1.0],
+            3 => [0.0, 0.0, 0.0, 1.0, 1.0, 0.75],
+            4 => [0.25, 0.0, 0.0, 1.0, 1.0, 1.0],
+            _ => [0.0, 0.0, 0.0, 0.75, 1.0, 1.0],
+        },
         _ => return None,
     })
 }

@@ -149,7 +149,7 @@ fn id_dropped(b: u8, r: &mut JavaRandom) -> i32 {
         43 | 44 => 44,                                                // slabs -> single slab
         30 => 287,                                                    // web -> string
         31 => if r.next_int_bound(8) == 0 { 295 } else { -1 },        // tall grass -> seeds 1 in 8
-        32 => -1,                                                     // dead bush
+        32 | 34 | 36 => -1,                                                     // dead bush
         52 => 0,                                                      // spawner
         55 | 73 | 74 => 331,                                          // redstone
         61 | 62 => 61,                                                // lit furnace -> furnace

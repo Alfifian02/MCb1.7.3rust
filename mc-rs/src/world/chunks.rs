@@ -334,7 +334,7 @@ impl ChunkManager {
         self
     }
 
-    fn insert(&mut self, key: Key, blocks: Vec<u8>) {
+    pub(crate) fn insert(&mut self, key: Key, blocks: Vec<u8>) {
         let height = height_map(&blocks);
         self.chunks.insert(key, Entry { blocks, data: Nibbles::new(), light: vec![0; VOLUME], height, lit: false, populated: false, dirty: false, meshed: false, mesh: None });
     }

@@ -20,7 +20,7 @@ original. Anything that cannot be derived from the b1.7.3 sources is marked
 | M1  Blocks + chunks  | done | Hand-built 16x16x128 stone chunk, neighbour-culled mesher, 32-bit indices. |
 | M2  Camera + physics | done | First-person walk + jump + swept AABB collision. Jump is now a button (see M12). |
 | M3  Overworld gen    | done | 48x128x48 super-chunk, sea level 64, 6 ore types (coal, iron, gold, diamond, redstone, lapis). Terrain was rebuilt in M4a-c, see below. |
-| M12 Touch UX         | done (this commit) | Landscape-only. Floating analog move stick (left half), look drag (right half), jump button, hotbar tap, pause menu. |
+| M12 Touch UX         | done (d-pad: written WITHOUT a Rust toolchain, not compiled) | Landscape-only. PE-style d-pad (Stone D-pad sprites) with 8 directions: an arrow shows its two corners, the centre is sneak (toggle); look drag anywhere else, jump button, hotbar tap, pause menu. Sneak (b1.7.3): x0.3 speed, no walking off edges, holds on ladders, eye 0.08 lower. See ROADMAP changelog. |
 | M4a-c Faithful terrain + biomes | done | java.util.Random, Perlin/simplex noise, WorldChunkManager (climate -> 10 biomes), generateTerrain and replaceBlocksForBiome. Bit-exact against the real b1.7.3 classes on 18 chunks (3 seeds), golden test passes (`tools/golden/`). |
 | M4e Fix pass | done (compiled and ran on an Android device) | 48x48 stitching index, jump ground probe, eye height, aspect/resize sync, immersive nav bar, climate float constants. See the changelog in ROADMAP.md. |
 | M4f Chunk manager | done (now compiles and its tests pass on a Linux host; compiled and ran on an Android device) | Chunks keyed by (cx, cz), one mesh per chunk, circular render-distance ring (4 chunks) that loads/unloads as you walk, terrain generated on 1-2 worker threads, cross-chunk face culling. Replaces the 48x48 super-chunk. |
@@ -80,7 +80,7 @@ mc-rs/
       items.rs            dropped items: one small flat-colour cube each, bobbing
       mesh.rs             per-chunk mesher, culls against the 4 neighbouring chunks
     input/
-      touch_ui.rs         region hit-test + per-pointer state machine (M12)
+      touch_ui.rs         region hit-test + per-pointer state machine, 8-way d-pad + sneak button (M12)
     world/
       chunk.rs            16x16x128 cell layout, idx = (x<<11)|(z<<7)|y; `Nibbles` = block metadata (NibbleArray)
       chunks.rs           ChunkManager: HashMap<(cx,cz), chunk + mesh>, ring streaming, worker threads
@@ -165,7 +165,7 @@ UNVERIFIED until you can show a reference.
   `PlayerControllerSP.sendBlockRemoved` does: read before the tool wears, so a tool that breaks on a block still harvests it.
 - `input::touch_ui::LayoutRects::for_surface` — hotbar matches
   `GuiIngame.java` lines 58-62 (9 cells, 20 px wide, 22 px tall, centred
-  horizontally, 22 px above the bottom edge). The move stick / look drag /
+  horizontally, 22 px above the bottom edge). The d-pad / look drag /
   jump / pause buttons are UNVERIFIED — b1.7.3 PC has no touch UX.
 
 ## Build
@@ -235,8 +235,8 @@ was generated with). The CI workflow does this for you.
 
 - Text exists only as the item-name tooltip (real `font/default.png` glyphs, `render/font.rs`): hold a finger on an inventory/workbench/furnace slot, or on a picked-up stack, to see its name (`GuiContainer`'s hover tooltip; no menus or chat use it yet). Hotbar slots show a flat colour square per item (counts are seven-segment digits),
   not item sprites. M14 will add the font + GUI atlas.
-- No Minecraft PE touch UX anchor — move-stick / look / jump / pause
-  geometry was invented for this port and is flagged UNVERIFIED in
+- The d-pad's look is PE's (Stone D-pad sprites, `tools/gen_dpad.py`); its sizes and places, like the look / jump /
+  pause geometry, were invented for this port and are flagged UNVERIFIED in
   the code. If you have a PE 0.x reference, please open an issue
   with the on-screen rectangles so we can diff against them.
 - Display cutouts: the window now draws into the notch (`layoutInDisplayCutoutMode =

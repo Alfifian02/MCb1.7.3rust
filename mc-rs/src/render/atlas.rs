@@ -296,6 +296,18 @@ pub const fn terrain_tile(id: u8, meta: u8, side: u8) -> Option<u8> {
         61 | 62 => if side <= 1 { 62 } else if side != meta { 45 } else if id == 62 { 61 } else { 44 },
         73 | 74 => 51,
         93 | 94 => match side { 1 => if id == 94 { 147 } else { 131 }, 0 => if id == 94 { 99 } else { 115 }, _ => 5 }, // `BlockRedstoneRepeater.getBlockTextureFromSide`
+        // `BlockPistonBase` / `BlockPistonExtension.getBlockTextureFromSideAndMetadata`: the face the metadata names, the opposite one
+        // and the four sides (106 sticky face, 107 face, 108 side, 109 back, 110 the face of an extended base).
+        33 | 29 => {
+            let f = meta & 7;
+            if f > 5 { if id == 29 { 106 } else { 107 } }
+            else if side == f { if meta & 8 != 0 { 110 } else if id == 29 { 106 } else { 107 } }
+            else if side == [1, 0, 3, 2, 5, 4][f as usize] { 109 } else { 108 }
+        }
+        34 => {
+            let f = meta & 7;
+            if f > 5 { 108 } else if side == f { if meta & 8 != 0 { 106 } else { 107 } } else if side == [1, 0, 3, 2, 5, 4][f as usize] { 107 } else { 108 }
+        }
         69 => 96,      // lever (ponytail: the lever sprite on its box, not `renderBlockLever`'s base + handle)
         70 | 77 => 1,  // stone pressure plate, button
         72 => 4,       // wooden pressure plate

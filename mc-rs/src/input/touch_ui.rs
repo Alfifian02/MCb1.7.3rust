@@ -1,18 +1,19 @@
 // Touch UX state machine, landscape layout. See mod.rs for an overview.
 //
-// Scheme (Minecraft-PE-like, two thumbs):
-//   - Left half of the screen: floating move stick. It anchors where the
-//     finger lands; drag distance from the anchor is the analog (fwd, side).
-//   - Right half: drag anywhere to look. A short tap there places a block, a press held still
+// Scheme (Minecraft PE's classic d-pad, two thumbs):
+//   - Bottom left: the d-pad. Four arrows round a centre button; pressing an arrow shows the two corner buttons beside it
+//     (up shows up-left and up-right, left shows up-left and down-left, ...), and sliding the finger onto one walks that
+//     diagonal. The centre button is sneak (a toggle, like PE's). Sprites: the Stone D-pad pack.
+//   - Anywhere else that is not a button: drag to look. A short tap places a block, a press held still
 //     digs (hold to keep digging, the dig can follow the look), like Minecraft PE.
-//   - Jump button: bottom-right circle (held = keep jumping).
+//   - Jump button: bottom right (held = keep jumping).
 //   - Hotbar: bottom centre, tap to select. Pause: top-right, inventory button just left of it.
 //   - Paused: only the pause button and the resume button respond.
 //   - A container screen is open (inventory / workbench): every press except the two buttons is a tap, reported with
 //     `take_taps` for the screen to hit-test; move, look, jump and hotbar are off.
 //
 // SOURCE-OF-TRUTH NOTE: b1.7.3 Java has no touch UX, so every rectangle and
-// radius here is UNVERIFIED (no reference to diff against). Sizes are
+// radius here is UNVERIFIED (no reference to diff against; the d-pad is drawn after PE's, from the pack's screenshot). Sizes are
 // fractions of the short screen side `u`, so they hold on any landscape
 // aspect ratio. The hotbar slot count (9) and the {-1..1} forward/strafe
 // semantics come from GuiIngame / MovementInputFromOptions.
@@ -24,8 +25,6 @@ use std::collections::HashMap;
 
 /// Hotbar slot count.
 pub const HOTBAR_SLOTS: usize = 9;
-/// Fraction of the stick radius below which the stick reads as zero.
-const DEADZONE: f32 = 0.15;
 // UNVERIFIED: tap/hold timings and slop (b1.7.3 has no touch input). Picked to feel like PE.
 /// A press shorter than this, that did not move, is a tap (place).
 const TAP_SECS: f32 = 0.25;
@@ -61,8 +60,10 @@ pub enum PointerRole {
     Hotbar(usize),
     /// Press landed on the jump button. Held = jumping.
     Jump,
-    /// Floating move stick; `anchor` is where the finger first landed.
-    Move { anchor: (f32, f32) },
+    /// Press landed on the sneak button (the d-pad's centre). Toggles sneaking on release.
+    Sneak,
+    /// Finger on the d-pad; `TouchUi::dir` is the button under it.
+    Dir,
     /// Look drag; deltas accumulate in `TouchUi::look_delta`.
     Look,
 }
@@ -89,12 +90,13 @@ pub struct LayoutRects {
     /// TEMPORARY: reset-world button, under `resume`.
     pub reset: Rect,
     pub hotbar: [Rect; HOTBAR_SLOTS],
-    pub jump_center: (f32, f32),
-    pub jump_radius: f32,
-    /// Where the idle stick hint is drawn.
-    pub stick_home: (f32, f32),
-    /// Max drag distance (stick full deflection).
-    pub stick_radius: f32,
+    pub jump: Rect,
+    /// The sneak button, the d-pad's centre cell.
+    pub sneak: Rect,
+    /// The d-pad's 8 cells (`DIRS` order: up, down, left, right, up_left, up_right, down_left, down_right). They tile without a gap, so
+    /// a finger sliding between two buttons never falls through; a button is drawn `dpad_gap` smaller than its cell.
+    pub dpad: [Rect; 8],
+    pub dpad_gap: f32,
 }
 
 fn in_rect(r: Rect, x: f32, y: f32) -> bool {
@@ -129,18 +131,17 @@ impl LayoutRects {
         let resume = ((w - bw) * 0.5, (h - bh) * 0.5, bw, bh);
         let reset = (resume.0, resume.1 + bh * 1.25, bw, bh * 0.8);
 
-        Self {
-            width: w,
-            pause,
-            inventory,
-            resume,
-            reset,
-            hotbar,
-            jump_center: (w - 0.17 * u, h - 0.30 * u),
-            jump_radius: 0.09 * u,
-            stick_home: (0.22 * u + pad, h - 0.30 * u),
-            stick_radius: 0.14 * u,
-        }
+        // The d-pad: a 3 x 3 block of square cells, its bottom edge half a pad above the hotbar row, so it clears the hotbar at any ratio.
+        let dpad_gap = 0.012 * u;
+        let step = 0.12 * u + dpad_gap;
+        let (cx, cy) = (pad * 1.5 + step * 1.5, hb_y - pad * 0.5 - step * 1.5);
+        let cell = |col: f32, row: f32| (cx + (col - 0.5) * step, cy + (row - 0.5) * step, step, step);
+        // (column, row) offsets from the centre, in `DIRS` order.
+        let dpad = [(0.0, -1.0), (0.0, 1.0), (-1.0, 0.0), (1.0, 0.0), (-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)].map(|(c, r)| cell(c, r));
+        let jw = 0.16 * u;
+        let jump = (w - pad * 1.5 - jw, cy - jw * 0.5, jw, jw);
+
+        Self { width: w, pause, inventory, resume, reset, hotbar, jump, sneak: cell(0.0, 0.0), dpad, dpad_gap }
     }
 
     /// Hit-test a press. `None` means the press is ignored. While paused only
@@ -158,42 +159,42 @@ impl LayoutRects {
         if screen {
             return Some(PointerRole::Tap);
         }
-        let (jx, jy) = self.jump_center;
-        if (x - jx).powi(2) + (y - jy).powi(2) <= self.jump_radius.powi(2) {
+        if in_rect(self.jump, x, y) {
             return Some(PointerRole::Jump);
+        }
+        if in_rect(self.sneak, x, y) {
+            return Some(PointerRole::Sneak);
+        }
+        // Only the arrows start a press; a corner is reached by sliding from an arrow (it is not even drawn before).
+        if self.dpad[..4].iter().any(|&r| in_rect(r, x, y)) {
+            return Some(PointerRole::Dir);
         }
         if let Some(i) = self.hotbar.iter().position(|&r| in_rect(r, x, y)) {
             return Some(PointerRole::Hotbar(i));
         }
-        if x < self.width * 0.5 {
-            Some(PointerRole::Move { anchor: (x, y) })
-        } else {
-            Some(PointerRole::Look)
-        }
+        Some(PointerRole::Look)
     }
 }
 
-/// Finger offset from the stick anchor -> analog (fwd, side), length <= 1.
-/// Screen-up is forward.
-pub fn stick_vector(dx: f32, dy: f32, radius: f32) -> (f32, f32) {
-    let (mut side, mut fwd) = (dx / radius, -dy / radius);
-    let len = (side * side + fwd * fwd).sqrt();
-    if len < DEADZONE {
-        return (0.0, 0.0);
-    }
-    if len > 1.0 {
-        side /= len;
-        fwd /= len;
-    }
-    (fwd, side)
-}
+const H: f32 = std::f32::consts::FRAC_1_SQRT_2;
+/// What each d-pad button walks, as (forward, side): up, down, left, right, then the corners up_left, up_right, down_left, down_right.
+/// A corner is normalised like `Entity.moveFlying` does (it divides by the length when that is above 1): a diagonal is no faster.
+pub const DIRS: [(f32, f32); 8] = [(1.0, 0.0), (-1.0, 0.0), (0.0, -1.0), (0.0, 1.0), (H, -H), (H, H), (-H, -H), (-H, H)];
+/// The two corners (`DIRS` indices) beside each arrow: the ones that appear while it is held.
+const NEXT: [[usize; 2]; 4] = [[4, 5], [6, 7], [4, 6], [5, 7]];
 
 /// Whole touch UX state. Owned by `App`.
 pub struct TouchUi {
     pub paused: bool,
     pub hotbar_slot: usize,
-    /// Analog movement in the camera frame: (fwd, side), each in [-1, 1].
+    /// Movement in the camera frame: (fwd, side), a `DIRS` entry or zero.
     pub move_input: (f32, f32),
+    /// The d-pad button under the finger (`DIRS` index), `None` when no finger is on the pad or it left every button.
+    pub dir: Option<usize>,
+    /// Which corner buttons (indices 4..8, as `[i - 4]`) are showing: the two beside the arrow the finger last rested on.
+    shown: [bool; 4],
+    /// Sneaking: the centre button toggles it. Kept across pause and screens (only the fingers are dropped).
+    pub sneak: bool,
     pub pointers: HashMap<i32, Pointer>,
     pub surface_w: u32,
     pub surface_h: u32,
@@ -221,6 +222,9 @@ impl TouchUi {
             paused: false,
             hotbar_slot: 0,
             move_input: (0.0, 0.0),
+            dir: None,
+            shown: [false; 4],
+            sneak: false,
             pointers: HashMap::new(),
             surface_w: w,
             surface_h: h,
@@ -287,12 +291,27 @@ impl TouchUi {
         self.pointers.values().any(|p| p.role == PointerRole::Jump)
     }
 
-    /// (anchor, finger) of the active move stick, for drawing.
-    pub fn stick_state(&self) -> Option<((f32, f32), (f32, f32))> {
-        self.pointers.values().find_map(|p| match p.role {
-            PointerRole::Move { anchor } => Some((anchor, p.last)),
-            _ => None,
-        })
+    /// Is d-pad button `i` drawn and pressable? The arrows always are; a corner only while an arrow beside it is held.
+    pub fn dpad_shown(&self, i: usize) -> bool {
+        i < 4 || self.shown[i - 4]
+    }
+
+    /// The visible d-pad button under (x, y).
+    fn dir_at(&self, x: f32, y: f32) -> Option<usize> {
+        (0..8).find(|&i| self.dpad_shown(i) && in_rect(self.layout.dpad[i], x, y))
+    }
+
+    /// The finger is on button `d` (`None`: it left the pad). Landing on an arrow shows its two corners; a corner leaves them as they are,
+    /// so the finger can slide arrow -> corner -> next arrow.
+    fn set_dir(&mut self, d: Option<usize>) {
+        self.dir = d;
+        self.move_input = d.map_or((0.0, 0.0), |d| DIRS[d]);
+        if let Some(d) = d.filter(|&d| d < 4) {
+            self.shown = [false; 4];
+            for c in NEXT[d] {
+                self.shown[c - 4] = true;
+            }
+        }
     }
 
     /// Open the pause menu (the death screen reuses it: its resume button is the respawn button).
@@ -304,6 +323,8 @@ impl TouchUi {
     /// Drop every finger and zero all input (pause, cancel, resize).
     fn clear(&mut self) {
         self.pointers.clear();
+        self.dir = None;
+        self.shown = [false; 4];
         self.move_input = (0.0, 0.0);
         self.look_delta = (0.0, 0.0);
         self.place = false;
@@ -346,8 +367,8 @@ impl TouchUi {
     }
 
     fn on_press(&mut self, pid: i32, x: f32, y: f32, role: PointerRole) {
-        // One move finger and one look finger at a time; extras are ignored.
-        if matches!(role, PointerRole::Move { .. } | PointerRole::Look | PointerRole::Tap)
+        // One d-pad finger and one look finger at a time; extras are ignored.
+        if matches!(role, PointerRole::Dir | PointerRole::Look | PointerRole::Tap)
             && self
                 .pointers
                 .values()
@@ -358,6 +379,9 @@ impl TouchUi {
         if role == PointerRole::Tap {
             self.events.push(ScreenEv::Down(x, y));
             self.cursor_pos = (x, y);
+        }
+        if role == PointerRole::Dir {
+            self.set_dir(self.dir_at(x, y));
         }
         self.pointers.insert(pid, Pointer { role, last: (x, y), held: 0.0, travel: 0.0, broke: false });
     }
@@ -372,8 +396,11 @@ impl TouchUi {
                 self.look_delta.1 += y - ly;
                 ptr.travel += (x - lx).hypot(y - ly);
             }
-            PointerRole::Move { anchor } => {
-                self.move_input = stick_vector(x - anchor.0, y - anchor.1, self.layout.stick_radius);
+            PointerRole::Dir => {
+                let d = self.dir_at(x, y);
+                if d != self.dir {
+                    self.set_dir(d);
+                }
             }
             PointerRole::Tap => {
                 self.events.push(ScreenEv::Move(x, y));
@@ -406,7 +433,11 @@ impl TouchUi {
                 self.cursor_pos = ptr.last;
             }
             PointerRole::Hotbar(slot) => self.hotbar_slot = slot,
-            PointerRole::Move { .. } => self.move_input = (0.0, 0.0),
+            PointerRole::Dir => {
+                self.set_dir(None);
+                self.shown = [false; 4];
+            }
+            PointerRole::Sneak => self.sneak = !self.sneak,
             PointerRole::Look => {
                 let slop = self.surface_w.min(self.surface_h) as f32 * SLOP;
                 if !ptr.broke && ptr.held < TAP_SECS && ptr.travel < slop {
@@ -429,6 +460,10 @@ mod tests {
         assert!((a - b).abs() < 0.001, "{a} != {b}");
     }
 
+    fn mid(r: Rect) -> (f32, f32) {
+        (r.0 + r.2 * 0.5, r.1 + r.3 * 0.5)
+    }
+
     fn tap(ui: &mut TouchUi, pid: i32, x: f32, y: f32) {
         let role = ui.layout.hit_test(x, y, ui.paused, ui.screen).expect("hit");
         ui.on_press(pid, x, y, role);
@@ -440,22 +475,33 @@ mod tests {
         let l = LayoutRects::for_surface(W, H);
         let (px, py, pw, ph) = l.pause;
         assert_eq!(l.hit_test(px + pw * 0.5, py + ph * 0.5, false, false), Some(PointerRole::Pause));
-        assert_eq!(l.hit_test(l.jump_center.0, l.jump_center.1, false, false), Some(PointerRole::Jump));
+        let (jx, jy) = mid(l.jump);
+        assert_eq!(l.hit_test(jx, jy, false, false), Some(PointerRole::Jump));
+        let (sx, sy) = mid(l.sneak);
+        assert_eq!(l.hit_test(sx, sy, false, false), Some(PointerRole::Sneak));
+        for i in 0..4 {
+            let (dx, dy) = mid(l.dpad[i]);
+            assert_eq!(l.hit_test(dx, dy, false, false), Some(PointerRole::Dir), "arrow {i}");
+        }
+        // A corner cell is no button until an arrow is held: a press there is a look.
+        let (cx, cy) = mid(l.dpad[4]);
+        assert_eq!(l.hit_test(cx, cy, false, false), Some(PointerRole::Look));
         for i in 0..HOTBAR_SLOTS {
             let (hx, hy, hw, hh) = l.hotbar[i];
             assert_eq!(l.hit_test(hx + hw * 0.5, hy + hh * 0.5, false, false), Some(PointerRole::Hotbar(i)));
         }
-        assert!(matches!(l.hit_test(600.0, 400.0, false, false), Some(PointerRole::Move { .. })));
+        assert_eq!(l.hit_test(1000.0, 300.0, false, false), Some(PointerRole::Look));
         assert_eq!(l.hit_test(1800.0, 400.0, false, false), Some(PointerRole::Look));
     }
 
     #[test]
     fn buttons_do_not_overlap_in_common_landscape_ratios() {
-        // 16:9, 20:9 and 4:3: jump button must not touch the hotbar row.
+        // 16:9, 20:9 and 4:3: the jump button and the whole d-pad must stay above the hotbar row and inside the screen.
         for (w, h) in [(1920, 1080), (2400, 1080), (1440, 1080)] {
             let l = LayoutRects::for_surface(w, h);
-            let jump_bottom = l.jump_center.1 + l.jump_radius;
-            assert!(jump_bottom < l.hotbar[0].1, "{w}x{h}");
+            assert!(l.jump.1 + l.jump.3 < l.hotbar[0].1, "{w}x{h}");
+            assert!(l.dpad.iter().chain([&l.sneak]).all(|r| r.0 >= 0.0 && r.1 >= 0.0 && r.1 + r.3 < l.hotbar[0].1), "{w}x{h}");
+            assert!(l.jump.0 + l.jump.2 <= w as f32);
         }
     }
 
@@ -463,7 +509,8 @@ mod tests {
     fn paused_only_pause_and_resume_respond() {
         let l = LayoutRects::for_surface(W, H);
         assert_eq!(l.hit_test(1800.0, 400.0, true, false), None);
-        assert_eq!(l.hit_test(l.jump_center.0, l.jump_center.1, true, false), None);
+        let (jx, jy) = mid(l.jump);
+        assert_eq!(l.hit_test(jx, jy, true, false), None);
         let (rx, ry, rw, rh) = l.resume;
         assert_eq!(l.hit_test(rx + rw * 0.5, ry + rh * 0.5, true, false), Some(PointerRole::Pause));
     }
@@ -486,36 +533,68 @@ mod tests {
         assert!(ui.take_reset() && !ui.take_reset() && !ui.paused && !ui.reset_armed);
     }
 
+    /// An arrow shows the two corners beside it, a corner walks the diagonal (normalised), sliding to the next arrow swaps the corners,
+    /// and lifting the finger stops and hides them all. Every arrow / corner pairing of the eight-way pad is checked.
     #[test]
-    fn stick_vector_deadzone_direction_and_clamp() {
-        assert_eq!(stick_vector(1.0, 1.0, 100.0), (0.0, 0.0));
-        let (f, s) = stick_vector(0.0, -100.0, 100.0);
-        approx(f, 1.0);
-        approx(s, 0.0);
-        let (f, s) = stick_vector(100.0, 0.0, 100.0);
-        approx(f, 0.0);
-        approx(s, 1.0);
-        let (f, s) = stick_vector(500.0, -500.0, 100.0);
-        approx((f * f + s * s).sqrt(), 1.0);
-    }
-
-    #[test]
-    fn move_stick_drag_and_release() {
+    fn dpad_arrow_shows_its_two_corners_and_walks_diagonally() {
         let mut ui = TouchUi::new(W, H);
-        ui.on_press(1, 400.0, 700.0, PointerRole::Move { anchor: (400.0, 700.0) });
-        ui.on_move(1, 400.0, 700.0 - ui.layout.stick_radius);
-        approx(ui.move_input.0, 1.0);
-        approx(ui.move_input.1, 0.0);
+        let at = |ui: &TouchUi, i: usize| mid(ui.layout.dpad[i]);
+        assert!((4..8).all(|i| !ui.dpad_shown(i)) && (0..4).all(|i| ui.dpad_shown(i)));
+        // Each arrow brings up exactly its two neighbours (up: up_left + up_right, left: up_left + down_left, ...).
+        for (arrow, corners) in [(0, [4, 5]), (1, [6, 7]), (2, [4, 6]), (3, [5, 7])] {
+            let (x, y) = at(&ui, arrow);
+            ui.on_press(1, x, y, PointerRole::Dir);
+            assert_eq!(ui.dir, Some(arrow));
+            assert_eq!(ui.move_input, DIRS[arrow]);
+            assert!((4..8).all(|i| ui.dpad_shown(i) == corners.contains(&i)), "arrow {arrow}");
+            ui.on_release(1);
+            assert!(ui.dir.is_none() && ui.move_input == (0.0, 0.0) && (4..8).all(|i| !ui.dpad_shown(i)));
+        }
+        // Up, slide to up_right: forward + right at 1 / sqrt 2 each; both corners stay; then on to the right arrow.
+        let (x, y) = at(&ui, 0);
+        ui.on_press(1, x, y, PointerRole::Dir);
+        let (x, y) = at(&ui, 5);
+        ui.on_move(1, x, y);
+        assert_eq!(ui.dir, Some(5));
+        approx(ui.move_input.0, H);
+        approx(ui.move_input.1, H);
+        approx((ui.move_input.0.powi(2) + ui.move_input.1.powi(2)).sqrt(), 1.0);
+        assert!(ui.dpad_shown(4) && ui.dpad_shown(5));
+        let (x, y) = at(&ui, 3);
+        ui.on_move(1, x, y);
+        assert_eq!(ui.move_input, (0.0, 1.0));
+        assert!(ui.dpad_shown(5) && ui.dpad_shown(7) && !ui.dpad_shown(4));
+        // Off the pad: stop, but the corners stay so the finger can come back.
+        ui.on_move(1, 1500.0, 100.0);
+        assert!(ui.dir.is_none() && ui.move_input == (0.0, 0.0) && ui.dpad_shown(7));
         ui.on_release(1);
-        assert_eq!(ui.move_input, (0.0, 0.0));
+        assert!((4..8).all(|i| !ui.dpad_shown(i)));
+    }
+
+    /// The centre button toggles sneaking on release; it survives pause and the fingers being dropped.
+    #[test]
+    fn sneak_button_toggles_and_survives_pause() {
+        let mut ui = TouchUi::new(W, H);
+        let (x, y) = mid(ui.layout.sneak);
+        tap(&mut ui, 1, x, y);
+        assert!(ui.sneak);
+        let (px, py, pw, ph) = ui.layout.pause;
+        tap(&mut ui, 2, px + pw * 0.5, py + ph * 0.5);
+        assert!(ui.paused && ui.sneak);
+        tap(&mut ui, 3, px + pw * 0.5, py + ph * 0.5);
+        tap(&mut ui, 4, x, y);
+        assert!(!ui.sneak);
     }
 
     #[test]
-    fn second_move_finger_is_ignored() {
+    fn second_dpad_finger_is_ignored() {
         let mut ui = TouchUi::new(W, H);
-        ui.on_press(1, 300.0, 600.0, PointerRole::Move { anchor: (300.0, 600.0) });
-        ui.on_press(2, 500.0, 600.0, PointerRole::Move { anchor: (500.0, 600.0) });
+        let (x, y) = mid(ui.layout.dpad[0]);
+        ui.on_press(1, x, y, PointerRole::Dir);
+        let (x, y) = mid(ui.layout.dpad[3]);
+        ui.on_press(2, x, y, PointerRole::Dir);
         assert_eq!(ui.pointers.len(), 1);
+        assert_eq!(ui.dir, Some(0));
     }
 
     #[test]
@@ -554,13 +633,13 @@ mod tests {
     #[test]
     fn pausing_zeroes_stuck_input() {
         let mut ui = TouchUi::new(W, H);
-        ui.on_press(1, 400.0, 700.0, PointerRole::Move { anchor: (400.0, 700.0) });
-        ui.on_move(1, 400.0, 600.0);
+        let (x, y) = mid(ui.layout.dpad[0]);
+        ui.on_press(1, x, y, PointerRole::Dir);
         assert_ne!(ui.move_input, (0.0, 0.0));
         let (px, py, pw, ph) = ui.layout.pause;
         tap(&mut ui, 2, px + pw * 0.5, py + ph * 0.5);
         assert_eq!(ui.move_input, (0.0, 0.0));
-        assert!(ui.pointers.is_empty());
+        assert!(ui.pointers.is_empty() && ui.dir.is_none() && !ui.dpad_shown(4));
     }
 
     #[test]
@@ -607,10 +686,11 @@ mod tests {
         tap(&mut ui, 1, ix + iw * 0.5, iy + ih * 0.5);
         assert!(ui.take_inventory() && !ui.take_inventory());
         // A held move finger is dropped when the screen opens; afterwards the jump button and the world are taps.
-        ui.on_press(2, 400.0, 700.0, PointerRole::Move { anchor: (400.0, 700.0) });
+        let (x, y) = mid(ui.layout.dpad[0]);
+        ui.on_press(2, x, y, PointerRole::Dir);
         ui.set_screen(true);
         assert!(ui.pointers.is_empty());
-        let (jx, jy) = ui.layout.jump_center;
+        let (jx, jy) = mid(ui.layout.jump);
         tap(&mut ui, 3, jx, jy);
         tap(&mut ui, 4, 1800.0, 400.0);
         assert_eq!(

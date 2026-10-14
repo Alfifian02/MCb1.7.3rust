@@ -230,6 +230,7 @@ impl Ticks {
                 wire_ends(w, x, y, z);
             }
             75 | 76 => self.schedule(x, y, z, id, 2),
+            33 | 29 => self.schedule(x, y, z, id, 1), // BlockPistonBase.onBlockAdded: look at the power once
             46 if redstone::indirectly_powered(w, x, y, z, true) => {
                 w.set_block(x, y, z, 0);
                 self.prime((x, y, z), false);
@@ -299,6 +300,14 @@ impl Ticks {
                 w.set_block(x, y, z, 0);
             }
             75 | 76 => self.schedule(x, y, z, id, 2),
+            // BlockPistonBase.onNeighborBlockChange; BlockPistonExtension.onNeighborBlockChange: a head without its base goes.
+            33 | 29 => self.piston(w, drops, x, y, z, id),
+            34 => {
+                let (dx, dy, dz) = SIDE[(w.meta(x, y, z) & 7).min(5) as usize];
+                if !matches!(bid(w, x - dx, y - dy, z - dz), 29 | 33) {
+                    w.set_block(x, y, z, 0);
+                }
+            }
             // BlockDispenser.onNeighborBlockChange: a power source changed and it (or the cell above) is powered: fire in 4 ticks.
             23 if power && (redstone::indirectly_powered(w, x, y, z, true) || redstone::indirectly_powered(w, x, y + 1, z, true)) => self.schedule(x, y, z, 23, 4),
             // BlockNote.onNeighborBlockChange: it plays when the power turns on.
@@ -380,6 +389,7 @@ impl Ticks {
             39 | 40 => mushroom(w, &mut self.rng, x, y, z, id),
             51 => self.fire(w, x, y, z),
             75 | 76 => self.torch(w, x, y, z, id),
+            33 | 29 => self.piston(w, drops, x, y, z, id),
             23 if redstone::indirectly_powered(w, x, y, z, true) || redstone::indirectly_powered(w, x, y + 1, z, true) => self.dispenses.push((x, y, z)),
             // BlockRedstoneRepeater.updateTick: follow the input, and an input that went away while it was turning on lets it go again.
             93 | 94 => {
@@ -420,6 +430,63 @@ impl Ticks {
         let l = redstone::wire_level(w, x, y, z);
         if l != w.meta(x, y, z) && w.set_block_meta(x, y, z, 55, l) {
             wire_ends(w, x, y, z);
+        }
+    }
+
+    /// `BlockPistonBase.func_31043_h` with the movement done at once (the Java slides the blocks over 2 ticks through `BlockPistonMoving`
+    /// and `TileEntityPiston`; ponytail: they jump, and entities are not pushed). Powered and retracted: push up to 12 blocks one cell
+    /// and put the head (34) in front; unpowered and extended: remove the head and, for the sticky one, pull the block behind it.
+    fn piston(&mut self, w: &mut ChunkManager, drops: &mut Drops, x: i32, y: i32, z: i32, id: u8) {
+        let (m, sticky) = (w.meta(x, y, z), id == 29);
+        let f = (m & 7) as usize;
+        if f > 5 {
+            return;
+        }
+        let (dx, dy, dz) = SIDE[f];
+        let powered = piston_powered(w, x, y, z, f);
+        let at = |i: i32| (x + dx * i, y + dy * i, z + dz * i);
+        if powered && m & 8 == 0 {
+            let (mut cells, mut crush) = (Vec::new(), None);
+            for i in 1..=13 {
+                let (cx, cy, cz) = at(i);
+                if cy <= 0 || cy >= 127 {
+                    return;
+                }
+                let b = bid(w, cx, cy, cz);
+                if b == 0 {
+                    break;
+                }
+                if !can_push(b, w.meta(cx, cy, cz)) || (push_kind(b) != 1 && cells.len() == 12) {
+                    return;
+                }
+                if push_kind(b) == 1 {
+                    crush = Some((cx, cy, cz)); // a plant, torch, wire...: it breaks and drops
+                    break;
+                }
+                cells.push((cx, cy, cz));
+            }
+            if let Some((cx, cy, cz)) = crush {
+                drops.spawn_block(bid(w, cx, cy, cz), w.meta(cx, cy, cz), (cx, cy, cz));
+                w.set_block(cx, cy, cz, 0);
+            }
+            for &(cx, cy, cz) in cells.iter().rev() {
+                w.set_block_meta(cx + dx, cy + dy, cz + dz, bid(w, cx, cy, cz), w.meta(cx, cy, cz));
+            }
+            let h = at(1);
+            w.set_block_meta(h.0, h.1, h.2, 34, f as u8 | if sticky { 8 } else { 0 });
+            w.set_block_meta(x, y, z, id, m | 8);
+        } else if !powered && m & 8 != 0 {
+            let h = at(1);
+            if bid(w, h.0, h.1, h.2) == 34 {
+                w.set_block(h.0, h.1, h.2, 0);
+            }
+            let b = at(2);
+            let pulled = bid(w, b.0, b.1, b.2);
+            if sticky && pulled != 0 && can_push(pulled, w.meta(b.0, b.1, b.2)) && push_kind(pulled) == 0 {
+                w.set_block_meta(h.0, h.1, h.2, pulled, w.meta(b.0, b.1, b.2));
+                w.set_block(b.0, b.1, b.2, 0);
+            }
+            w.set_block_meta(x, y, z, id, m & 7);
         }
     }
 
@@ -634,6 +701,31 @@ impl Ticks {
             }
         }
     }
+}
+
+/// `BlockPistonBase.func_31041_f`: powered from any side but the front, or by the "quasi-connected" cells one above (the famous
+/// piston behaviour of this version).
+fn piston_powered(w: &ChunkManager, x: i32, y: i32, z: i32, f: usize) -> bool {
+    let p = |dx, dy, dz, s| redstone::indirect(w, x + dx, y + dy, z + dz, s, true);
+    (f != 0 && p(0, -1, 0, 0)) || (f != 1 && p(0, 1, 0, 1)) || (f != 2 && p(0, 0, -1, 2)) || (f != 3 && p(0, 0, 1, 3)) || (f != 5 && p(1, 0, 0, 5)) || (f != 4 && p(-1, 0, 0, 4))
+        || p(0, 0, 0, 0) || p(0, 2, 0, 1) || p(0, 1, -1, 2) || p(0, 1, 1, 3) || p(-1, 1, 0, 4) || p(1, 1, 0, 5)
+}
+
+/// `BlockPistonBase.canPushBlock` for a block that is there: not bedrock, obsidian, a piston part or a portal, not a block with a tile
+/// entity, not an extended piston.
+fn can_push(id: u8, meta: u8) -> bool {
+    match id {
+        7 | 49 | 34 | 36 | 90 => false,
+        23 | 25 | 52 | 54 | 61 | 62 | 63 | 68 | 84 => false,
+        29 | 33 => meta & 8 == 0,
+        _ => true,
+    }
+}
+
+/// `Material.getMaterialMobility` 1: blocks a piston breaks (and drops) instead of pushing: plants, fluids, leaves, web, torches and
+/// the other circuit blocks, rails, snow, fire, cactus, cake.
+fn push_kind(id: u8) -> u8 {
+    matches!(id, 6 | 8..=11 | 18 | 27 | 28 | 30..=32 | 37..=40 | 50 | 51 | 55 | 59 | 66 | 69 | 70 | 72 | 75..=78 | 81 | 83 | 92..=94) as u8
 }
 
 /// A wire appearing, going or changing level: the wires that lie one step above or below its four neighbours must look again
@@ -1221,6 +1313,38 @@ mod tests {
         assert!(t.dispenses.is_empty(), "the dispenser waits 4 ticks");
         t.update(&mut m, &mut d, 3, 40, 3, 23);
         assert_eq!(t.dispenses, vec![(3, 40, 3)]);
+    }
+
+    /// A piston pushes two blocks and puts its head in front; a sticky one pulls the block back when it lets go.
+    #[test]
+    fn pistons_push_and_the_sticky_one_pulls() {
+        let mut m = ChunkManager::new(1, 1);
+        m.insert((0, 0), vec![0u8; crate::world::chunk::VOLUME]);
+        (0..16).for_each(|x| (0..16).for_each(|z| { m.set_block(x, 39, z, 1); }));
+        let (mut t, mut d) = (Ticks::new(1), Drops::new(1));
+        for (z, id) in [(5, 33), (9, 29)] {
+            m.set_block_meta(5, 40, z, id, 5); // facing +x
+            m.set_block(6, 40, z, 1);
+            m.set_block(7, 40, z, 4);
+            m.set_block_meta(4, 40, z, 69, 5 | 8); // a lever on the floor beside it, on
+        }
+        t.notify(&mut m, &mut d);
+        for z in [5, 9] {
+            assert_eq!((m.block(6, 40, z), m.meta(6, 40, z), m.block(7, 40, z), m.block(8, 40, z)), (Some(34), if z == 9 { 13 } else { 5 }, Some(1), Some(4)), "head in front, both blocks one cell on");
+            assert_eq!(m.meta(5, 40, z) & 8, 8);
+        }
+        for z in [5, 9] {
+            m.set_block_meta(4, 40, z, 69, 5);
+        }
+        t.notify(&mut m, &mut d);
+        assert_eq!((m.block(6, 40, 5), m.block(7, 40, 5), m.meta(5, 40, 5)), (Some(0), Some(1), 5), "the plain one leaves the blocks where they are");
+        assert_eq!((m.block(6, 40, 9), m.block(7, 40, 9)), (Some(1), Some(0)), "the sticky one pulls the nearest block back");
+        // obsidian stops it
+        m.set_block(6, 40, 12, 49);
+        m.set_block_meta(5, 40, 12, 33, 5);
+        m.set_block_meta(4, 40, 12, 69, 5 | 8);
+        t.notify(&mut m, &mut d);
+        assert_eq!((m.block(6, 40, 12), m.meta(5, 40, 12)), (Some(49), 5));
     }
 
     #[test]

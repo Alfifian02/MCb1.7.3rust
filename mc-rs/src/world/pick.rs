@@ -139,6 +139,21 @@ pub fn trap_meta(face: u8, support: bool) -> Option<u8> {
     (face >= 2 && support).then(|| face - 2)
 }
 
+/// `BlockPistonBase.func_31039_c`: up or down when the player stands within 2 blocks of the cell and looks well above or below it,
+/// else the furnace table from the yaw. `p` is the box centre of the player (0.9 over the feet).
+pub fn piston_facing(p: glam::Vec3, (x, y, z): (i32, i32, i32), yaw: f32) -> u8 {
+    if (p.x - x as f32).abs() < 2.0 && (p.z - z as f32).abs() < 2.0 {
+        let eye = p.y - 0.9 + 1.82;
+        if eye - y as f32 > 2.0 {
+            return 1;
+        }
+        if y as f32 - eye > 0.0 {
+            return 0;
+        }
+    }
+    facing_meta(61, yaw).unwrap_or(2)
+}
+
 /// `ItemDoor.onItemUse` + `BlockDoor.canPlaceBlockAt`: the metadata of the lower half of door `id` (the upper is that + 8)
 /// placed at `cell`, or `None` when it cannot stand there. The hinge goes to the side with more solid neighbours or next
 /// to another door (the `+ 4` open-state bit is how the Java stores a mirrored hinge).

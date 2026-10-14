@@ -44,12 +44,14 @@ pub const NO_UV: [f32; 2] = [-1.0, -1.0];
 pub const GUI: &[u8] = include_bytes!("../../assets/gui.rgba");
 /// `gui/container/{inventory,crafting_table,furnace,generic_54}.png` stacked, 256 x 1024 (`tools/gen_gui.py`).
 pub const CONTAINERS: &[u8] = include_bytes!("../../assets/containers.rgba");
-const SHEET_H: f32 = 2048.0;
+/// The touch d-pad's sprites (Stone D-pad pack, 256 x 256, `tools/gen_dpad.py`): the last 256 rows of the HUD texture.
+pub const DPAD_SHEET: &[u8] = include_bytes!("../../assets/dpad.rgba");
+const SHEET_H: f32 = 2304.0;
 /// Where `terrain.png` (untinted, 256 x 256) starts in the HUD texture: block icons are drawn from it (`push_cube`, `push_tile`).
 const TERRAIN_Y: f32 = 768.0;
 
 /// Sprites as `(x, y, w, h)` in pixels of the whole HUD texture: items 0..256, widgets.png 256..512, icons.png 512..768, terrain.png
-/// 768..1024, then the container panels (inventory 1024, crafting table 1280, furnace 1536, chest 1792).
+/// 768..1024, then the container panels (inventory 1024, crafting table 1280, furnace 1536, chest 1792), then the d-pad sheet (2048).
 pub mod sprites {
     pub type Sprite = (f32, f32, f32, f32);
     pub const HOTBAR: Sprite = (0.0, 256.0, 182.0, 22.0);
@@ -69,6 +71,18 @@ pub mod sprites {
     pub const CRAFTING: Sprite = (0.0, 1280.0, 176.0, 166.0);
     pub const FURNACE: Sprite = (0.0, 1536.0, 176.0, 166.0);
     pub const CHEST_Y: f32 = 1792.0;
+    /// Touch d-pad (`tools/gen_dpad.py`). Directions in the order up, down, left, right, up_left, up_right, down_left, down_right:
+    /// the arrows are 22 x 22, the four corners 18 x 18. Pressed ones are 22 rows lower; sneak / jump are 64 x 64.
+    pub const DPAD: [Sprite; 8] = dpad_row(2048.0);
+    pub const DPAD_PRESSED: [Sprite; 8] = dpad_row(2070.0);
+    pub const SNEAK: Sprite = (0.0, 2112.0, 64.0, 64.0);
+    pub const SNEAK_ON: Sprite = (64.0, 2112.0, 64.0, 64.0);
+    pub const JUMP: Sprite = (128.0, 2112.0, 64.0, 64.0);
+    pub const JUMP_ON: Sprite = (192.0, 2112.0, 64.0, 64.0);
+    const fn dpad_row(y: f32) -> [Sprite; 8] {
+        // literals, not `i * 22.0`: float arithmetic in a `const fn` needs Rust 1.82
+        [(0.0, y, 22.0, 22.0), (22.0, y, 22.0, 22.0), (44.0, y, 22.0, 22.0), (66.0, y, 22.0, 22.0), (88.0, y, 18.0, 18.0), (110.0, y, 18.0, 18.0), (132.0, y, 18.0, 18.0), (154.0, y, 18.0, 18.0)]
+    }
 }
 
 impl HudVertex {
@@ -117,7 +131,7 @@ fn lin(c: vec3<f32>) -> vec3<f32> {
 
 // Sharp bilinear: nearest inside a texel, a one-pixel blend only across a texel edge. The sprites are drawn at a fractional scale of the
 // screen, where plain nearest makes some texels one pixel wider than their neighbours (the grain on icons and the hotbar).
-const SHEET: vec2<f32> = vec2<f32>(256.0, 2048.0); // `SHEET_H`
+const SHEET: vec2<f32> = vec2<f32>(256.0, 2304.0); // `SHEET_H`
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
@@ -211,7 +225,7 @@ impl HudPipeline {
         });
         queue.write_texture(
             wgpu::TexelCopyTextureInfo { texture: &items_tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-            &[crate::render::atlas::ITEMS, GUI, crate::render::atlas::TERRAIN, CONTAINERS].concat(), // items, the GUI sheet, terrain.png, the panels
+            &[crate::render::atlas::ITEMS, GUI, crate::render::atlas::TERRAIN, CONTAINERS, DPAD_SHEET].concat(), // items, the GUI sheet, terrain.png, the panels, the d-pad
             wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(256 * 4), rows_per_image: Some(SHEET_H as u32) },
             wgpu::Extent3d { width: 256, height: SHEET_H as u32, depth_or_array_layers: 1 },
         );
@@ -593,6 +607,12 @@ mod tests {
     #[test]
     fn gui_sheet_has_the_sprites() {
         assert_eq!(GUI.len(), 256 * 512 * 4);
+        assert_eq!(DPAD_SHEET.len(), 256 * 256 * 4);
+        // Every d-pad sprite holds a picture (its place in the sheet is the last 256 rows of the texture).
+        let d = |x: f32, y: f32| DPAD_SHEET[((y as usize - 2048) * 256 + x as usize) * 4 + 3];
+        for (x, y, w, h) in sprites::DPAD.into_iter().chain(sprites::DPAD_PRESSED).chain([sprites::SNEAK, sprites::SNEAK_ON, sprites::JUMP, sprites::JUMP_ON]) {
+            assert!((0..(w * h) as usize).any(|i| d(x + (i % w as usize) as f32, y + (i / w as usize) as f32) > 0), "d-pad sprite at {x},{y} is empty");
+        }
         let a = |x: f32, y: f32| GUI[((y as usize - 256) * 256 + x as usize) * 4 + 3]; // GUI starts at row 256 of the texture
         for (x, y, w, h) in [sprites::HOTBAR, sprites::SELECTOR, sprites::HEART_FULL, sprites::HEART_BG, sprites::BUBBLE, sprites::ARMOR_FULL, sprites::CROSSHAIR] {
             let seen = (0..(w * h) as usize).any(|i| a(x + (i % w as usize) as f32, y + (i / w as usize) as f32) > 0);

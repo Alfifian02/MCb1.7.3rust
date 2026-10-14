@@ -109,6 +109,32 @@ pub fn step_box(player: &mut Player, half: Vec3, dt: f32, jumping: bool, get: Bl
     (water, lava)
 }
 
+/// Sneaking (`MovementInputFromOptions.sneak`, b1.7.3), the two parts that live in the physics. Call it before `step` with the same `dt`,
+/// after the caller set the horizontal velocity (and scaled the input by 0.3, which is `MovementInputFromOptions`'s own part).
+/// - `Entity.moveEntity`, `onGround && isSneaking()`: a step along x (then along z) is cut in 0.05-block slices until the box moved there
+///   still has a collision box within a block below it (`getOffsetBoundingBox(dx, -1, 0)`), so a sneaking player cannot walk off an edge.
+///   The velocity keeps only what survives, so `step` moves exactly that far.
+/// - `EntityLiving.moveEntityWithHeading`, `isSneaking() && motionY < 0` on a ladder: the fall stops (the player holds on). `step_box`
+///   adds this frame's gravity first, so the speed is set to cancel it.
+pub fn sneak(player: &mut Player, half: Vec3, dt: f32, get: BlockQuery<'_>) {
+    if dt <= 0.0 {
+        return;
+    }
+    if player.on_ground {
+        for axis in [0usize, 2] {
+            let mut d = player.vel[axis] * dt;
+            let to = |d: f32| { let mut q = player.pos - Vec3::Y; q[axis] += d; q };
+            while d != 0.0 && !aabb_hits_solid(to(d), half, get) {
+                d = if d.abs() < 0.05 { 0.0 } else { d - 0.05 * d.signum() };
+            }
+            player.vel[axis] = d / dt;
+        }
+    }
+    if on_ladder(player.pos, half, get) && player.vel.y - 23.0 * dt < 0.0 {
+        player.vel.y = 23.0 * dt;
+    }
+}
+
 /// Standing on something: the box, a hair lower, overlaps a collision box (a slab or a cactus top is not at a cell edge).
 fn ground_test(pos: Vec3, h: Vec3, get: BlockQuery<'_>) -> bool {
     aabb_hits_solid(pos - Vec3::new(0.0, 0.002, 0.0), h, get)
@@ -237,6 +263,37 @@ mod tests {
         p.vel = Vec3::new(0.0, -50.0, 0.0);
         step(&mut p, 1.0 / 60.0, false, &shaft);
         assert!(p.vel.y >= -3.0 - 1e-3 && p.pos.y < top && p.pos.y > top - 0.06, "falls at most 3 m/s: dy = {}", p.pos.y - top);
+    }
+
+    /// Sneaking: a grounded box stops at the edge of a platform (its box still rests on it, like `Entity.moveEntity` leaves it) while a
+    /// walking one drops off; on a ladder, sneaking holds the height and not sneaking slides down.
+    #[test]
+    fn sneaking_stops_at_the_edge_and_holds_on_a_ladder() {
+        let ledge = |x: i32, y: i32, z: i32| -> Option<u8> {
+            if !(-8..16).contains(&x) || !(0..16).contains(&z) || y < 0 { return None; }
+            Some(if y < 10 && x < 4 { 1 } else { 0 })
+        };
+        for sneaking in [true, false] {
+            let mut p = Player { pos: Vec3::new(3.5, 10.0 + HALF.y, 8.5), vel: Vec3::ZERO, on_ground: true };
+            for _ in 0..120 {
+                p.vel.x = 4.3;
+                if sneaking { sneak(&mut p, HALF, 1.0 / 60.0, &ledge); }
+                step(&mut p, 1.0 / 60.0, false, &ledge);
+            }
+            if sneaking {
+                assert!(p.on_ground && p.pos.x <= 4.31 && p.pos.x > 4.2 && (p.pos.y - HALF.y - 10.0).abs() < 0.01, "stopped at the edge: {:?}", p.pos);
+            } else {
+                assert!(p.pos.y < 10.0 + HALF.y - 1.0, "walked off: {:?}", p.pos);
+            }
+        }
+        for sneaking in [true, false] {
+            let mut p = Player { pos: Vec3::new(0.5, 20.0, 0.5), vel: Vec3::ZERO, on_ground: false };
+            for _ in 0..60 {
+                if sneaking { sneak(&mut p, HALF, 1.0 / 60.0, &shaft); }
+                step(&mut p, 1.0 / 60.0, false, &shaft);
+            }
+            assert_eq!(sneaking, (p.pos.y - 20.0).abs() < 0.01, "sneaking = {sneaking}: y = {}", p.pos.y);
+        }
     }
 
     /// Cobweb (30) everywhere above y = 10: the move is cut to 5% vertically and 25% sideways, and the speed is lost.

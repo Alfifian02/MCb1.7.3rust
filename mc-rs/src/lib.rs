@@ -76,7 +76,7 @@ pub(crate) const ENTITY_SHADOWS: bool = false;
 pub(crate) const LEGACY: bool = true;
 
 const LOOK_SENS: f32 = 0.004;
-/// World units per second when the d-pad is fully pressed.
+/// World units per second when a d-pad direction is held.
 const MOVE_SPEED: f32 = physics::WALK_SPEED;
 /// Eye offset from `player.pos`, which is the CENTRE of the 1.8-tall box. Steve's eyes are
 /// 1.62 above his feet (EntityPlayer.yOffset), i.e. 1.62 - 0.9 above the centre.
@@ -134,6 +134,8 @@ struct App {
     rain_fx: weather::Weather,
     /// The player's box touched water last frame (`Entity.inWater`): a splash on entry.
     was_in_water: bool,
+    /// `Entity.ySize` of the player, as far as the camera goes: how far the eye hangs below standing height (0.08 sneaking, then it decays).
+    sneak_y: f32,
     /// Hotbar slot last seen and seconds its item name still shows (`GuiIngame` shows it ~2 s after a switch).
     tip: (usize, f32),
     /// Survival digging state and the leftover time towards the next 20 Hz dig tick.
@@ -272,6 +274,7 @@ impl App {
             fx: Effects::new(seed),
             rain_fx,
             was_in_water: false,
+            sneak_y: 0.0,
             tip: (0, 0.0),
             dig: Dig::default(),
             dig_acc: 0.0,
@@ -423,7 +426,7 @@ impl App {
             // Player physics is still ticked so they don't fall through the
             // world if pause was opened mid-air, but gravity is zeroed.
             self.player.vel = glam::Vec3::ZERO;
-            self.camera.pos = self.player.pos + glam::Vec3::new(0.0, EYE_HEIGHT, 0.0);
+            self.camera.pos = self.player.pos + glam::Vec3::new(0.0, EYE_HEIGHT - self.sneak_y, 0.0);
             return;
         }
         // The death screen's resume button was pressed: come back at the spawn point with full health.
@@ -453,7 +456,7 @@ impl App {
         if self.sleep.is_some() && self.touch.jumping() {
             self.wake(true);
         }
-        // On a saddled pig the jump button is "get off" (`EntityPlayerSP`: sneak dismounts; touch has no sneak) and the body goes
+        // On a saddled pig the jump button is "get off" (PE dismounts with sneak; b1.7.3 has no sneak-dismount, so the jump button keeps it) and the body goes
         // wherever the pig goes (`updateRidden`: no motion of its own).
         if self.touch.jumping() {
             self.mobs.list.iter_mut().for_each(|m| m.ridden = false);
@@ -467,7 +470,13 @@ impl App {
         // Analog move stick: rotate the camera-frame (fwd, side) by yaw into
         // world-space velocity. Set every frame (zero when the stick is idle),
         // otherwise the player keeps sliding after the finger lifts.
-        let (fwd, side) = if asleep || riding { (0.0, 0.0) } else { self.touch.move_input };
+        let (mut fwd, mut side) = if asleep || riding { (0.0, 0.0) } else { self.touch.move_input };
+        // `MovementInputFromOptions`: sneaking scales both axes by 0.3. `EntityPlayerSP.isSneaking` is false in bed.
+        let sneaking = self.touch.sneak && !asleep;
+        if sneaking {
+            fwd *= 0.3;
+            side *= 0.3;
+        }
         let yaw = self.camera.yaw;
         // forward = -Z when yaw = 0; rotate by yaw around +Y.
         self.player.vel.x = (fwd * yaw.sin() + side * yaw.cos()) * MOVE_SPEED;
@@ -476,8 +485,14 @@ impl App {
         let get = |x: i32, y: i32, z: i32| self.chunks.block(x, y, z).map(|b| if is_plant(b) { 0 } else { physics_id(b, self.chunks.meta(x, y, z)) });
         // The held jump button jumps (8.4 m/s, the b1.7.3 velocity) or swims up; fluids (ids 8..=11) are not solid.
         let y0 = self.player.pos.y;
+        if sneaking && !riding {
+            physics::sneak(&mut self.player, physics::HALF, dt, &get); // no walking off an edge, a hold on ladders
+        }
         let (water, lava) = if asleep || riding { (false, false) } else { physics::step(&mut self.player, dt, self.touch.jumping(), &get) };
-        self.camera.pos = self.player.pos + glam::Vec3::new(0.0, EYE_HEIGHT, 0.0);
+        // `EntityPlayerSP.onLivingUpdate` sets `ySize` 0.2 while sneaking and `moveEntity` multiplies it by 0.4 every tick: the eye hangs 0.08
+        // low (1.54 up), and it comes back by the same x0.4 a tick once the button is released.
+        self.sneak_y = if sneaking { 0.08 } else { self.sneak_y * 0.4f32.powf(dt * 20.0) };
+        self.camera.pos = self.player.pos + glam::Vec3::new(0.0, EYE_HEIGHT - self.sneak_y, 0.0);
         let e = self.camera.pos;
         let eye_in_water = matches!(self.chunks.block_loaded(e.x.floor() as i32, e.y.floor() as i32, e.z.floor() as i32), Some(8 | 9));
         self.vitals.armor = craft::armor_value(&self.inv.slots[items::MAIN..]);
@@ -989,7 +1004,7 @@ impl App {
             if let Some(s) = self.inv.slots[slot].filter(|s| s.id < 256) {
                 // A torch's facing comes from the face aimed at and what can hold it (None = nothing to hang on: no placement).
                 let floor = 5 + self.mobs.rng.next_int_bound(2) as u8; // a lever on the floor: 5 or 6
-                let meta = if matches!(s.id, 50 | 75 | 76) { pick::torch_meta(&|a, b, c| self.chunks.block_loaded(a, b, c).unwrap_or(0), (x, y, z), hit.face) } else if matches!(s.id, 69 | 77) { pick::switch_meta(&|a, b, c| self.chunks.block_loaded(a, b, c).unwrap_or(0), (x, y, z), hit.face, s.id == 69, floor) } else if s.id == 96 { pick::trap_meta(hit.face, self.chunks.block_loaded(hit.pos.0, hit.pos.1, hit.pos.2).is_some_and(normal_cube)) } else { pick::facing_meta(s.id, self.camera.yaw.to_degrees() + 180.0).or(Some(items::placed_meta(s))) };
+                let meta = if matches!(s.id, 50 | 75 | 76) { pick::torch_meta(&|a, b, c| self.chunks.block_loaded(a, b, c).unwrap_or(0), (x, y, z), hit.face) } else if matches!(s.id, 33 | 29) { Some(pick::piston_facing(self.player.pos, (x, y, z), self.camera.yaw.to_degrees() + 180.0)) } else if matches!(s.id, 69 | 77) { pick::switch_meta(&|a, b, c| self.chunks.block_loaded(a, b, c).unwrap_or(0), (x, y, z), hit.face, s.id == 69, floor) } else if s.id == 96 { pick::trap_meta(hit.face, self.chunks.block_loaded(hit.pos.0, hit.pos.1, hit.pos.2).is_some_and(normal_cube)) } else { pick::facing_meta(s.id, self.camera.yaw.to_degrees() + 180.0).or(Some(items::placed_meta(s))) };
                 if let Some(meta) = meta.filter(|_| y < 127 && self.chunks.block_loaded(x, y, z).is_some_and(pick::replaceable) && !pick::overlaps_player((x, y, z), s.id as u8, self.player.pos) && ticks::can_place(&self.chunks, x, y, z, s.id as u8) && (s.id != chest::ID as u16 || chest::can_place(&|a, b, c| self.chunks.block(a, b, c).unwrap_or(0), (x, y, z)))) {
                     if self.chunks.set_block_meta(x, y, z, s.id as u8, meta) {
                         self.inv.consume(slot);
@@ -1956,31 +1971,21 @@ impl App {
                 }
             }
 
-            // Jump button: bottom-right disc with a ring.
-            let (jx, jy) = layout.jump_center;
-            let jr = layout.jump_radius;
-            let jump_fill = if self.touch.jumping() { [0.45, 0.65, 0.95, 0.80] } else { [0.18, 0.20, 0.26, 0.50] };
-            HudPipeline::push_disc(v, jx, jy, jr, jump_fill);
-            HudPipeline::push_ring(v, jx, jy, jr, jr * 0.92, [0.95, 0.95, 0.95, 0.7]);
-
-            // Move stick: base at the finger's anchor while held, a faint hint at
-            // the home position otherwise.
-            let sr = layout.stick_radius;
-            match self.touch.stick_state() {
-                Some(((ax, ay), (fx, fy))) => {
-                    let (dx, dy) = (fx - ax, fy - ay);
-                    let len = (dx * dx + dy * dy).sqrt().max(1.0);
-                    let k = (len.min(sr)) / len;
-                    HudPipeline::push_ring(v, ax, ay, sr, sr * 0.94, [0.95, 0.95, 0.95, 0.5]);
-                    HudPipeline::push_disc(v, ax, ay, sr, [0.18, 0.20, 0.26, 0.35]);
-                    HudPipeline::push_disc(v, ax + dx * k, ay + dy * k, sr * 0.45, [0.45, 0.65, 0.95, 0.85]);
-                }
-                None => {
-                    let (hx, hy) = layout.stick_home;
-                    HudPipeline::push_ring(v, hx, hy, sr, sr * 0.94, [0.95, 0.95, 0.95, 0.22]);
-                    HudPipeline::push_disc(v, hx, hy, sr * 0.45, [0.95, 0.95, 0.95, 0.15]);
-                }
+            // Touch d-pad (Stone D-pad sprites): the four arrows always, a corner only while an arrow beside it is held; the held button
+            // is drawn pressed. The cell is the hit area, the button is drawn `dpad_gap` smaller inside it, a corner (18 of 22 px)
+            // smaller still and centred.
+            let t = &self.touch;
+            for i in (0..8).filter(|&i| t.dpad_shown(i)) {
+                let spr = if t.dir == Some(i) { sp::DPAD_PRESSED[i] } else { sp::DPAD[i] };
+                let (cx, cy, cw, ch) = layout.dpad[i];
+                let k = (cw - layout.dpad_gap) / 22.0 * spr.2; // the arrows are 22 px, a corner 18: same pixel size
+                HudPipeline::push_gui(v, cx + (cw - k) * 0.5, cy + (ch - k) * 0.5, k, k, spr);
             }
+            let (sx, sy, sw, sh) = layout.sneak;
+            let g = layout.dpad_gap * 0.5;
+            HudPipeline::push_gui(v, sx + g, sy + g, sw - 2.0 * g, sh - 2.0 * g, if t.sneak { sp::SNEAK_ON } else { sp::SNEAK });
+            let (jx, jy, jw, jh) = layout.jump;
+            HudPipeline::push_gui(v, jx, jy, jw, jh, if t.jumping() { sp::JUMP_ON } else { sp::JUMP });
         }
 
         // FPS counter, top-left. White = average over the last second, yellow = average since
