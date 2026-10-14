@@ -103,7 +103,7 @@ pub struct Mob {
     target: bool,
     shot: bool,
     lit: bool,
-    anger: i32,
+    pub anger: i32,
     attack_time: u8,
     hop: i32,
     egg: i32,

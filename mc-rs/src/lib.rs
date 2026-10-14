@@ -1897,7 +1897,7 @@ impl App {
             let (sx, _, _, _) = layout.hotbar[self.touch.hotbar_slot];
             HudPipeline::push_gui(v, sx - 2.0 * u, hy - 2.0 * u, 24.0 * u, 24.0 * u, sp::SELECTOR);
         }
-        for (i, &(hx, hy, hw, hh)) in layout.hotbar.iter().enumerate().filter(|_| play) {
+        for (i, &(hx, hy, hw, _)) in layout.hotbar.iter().enumerate().filter(|_| play) {
             if let Some(s) = self.inv.slots[i] {
                 let u = hw / 20.0; // the slot is 20 units, its item 16 at (2, 2)
                 push_stack(v, (hx + 2.0 * u, hy + 2.0 * u, 16.0 * u, 16.0 * u), 0.875, s); // icon 14 of the 16 units

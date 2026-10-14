@@ -71,7 +71,7 @@ pub fn max_stack(id: u16) -> u8 {
 pub fn tile(id: u16) -> u8 {
     match id {
         0..=255 => id as u8,
-        263 | 356 => 7,  // coal, repeater
+        263 => 7,        // coal
         264 => 56,       // diamond
         287 | 330 => 4,  // string, iron door
         295 => 31,       // seeds
