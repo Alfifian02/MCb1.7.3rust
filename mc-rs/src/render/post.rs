@@ -145,10 +145,10 @@ impl Default for Settings {
 }
 
 impl Settings {
-    /// Console-Edition look: nothing but a straight copy to the screen. No TAA/FXAA/CAS/vignette/bloom/DOF/exposure, identity
+    /// Console-Edition look: a straight copy to the screen, plus FXAA (the frame has no other anti-aliasing: every edge was a stair-step, worst at `RENDER_SCALE` < 1). No TAA/CAS/vignette/bloom/DOF/exposure, identity
     /// tone map, and the grade's built-in 0.83 brightness and 0.98 saturation undone (`grade_input`), teal boost off.
     pub fn legacy() -> Self {
-        Self { taa: false, cas: false, vignette: false, tonemap: Tonemap::Off, brightness: 1.0 / 0.83, saturation: 1.0 / 0.98, teal_sat_boost: 0.0, ..Self::default() }
+        Self { taa: false, fxaa: true, cas: false, vignette: false, tonemap: Tonemap::Off, brightness: 1.0 / 0.83, saturation: 1.0 / 0.98, teal_sat_boost: 0.0, ..Self::default() }
     }
 }
 
@@ -813,6 +813,8 @@ mod tests {
     #[test]
     fn shader_validates_in_every_configuration() {
         validate(&Settings::default(), true);
+        validate(&Settings::legacy(), true);
+        validate(&Settings::legacy(), false);
         validate(&Settings { exposure: Exposure::Simple, dof: true, white_balance: 5000.0, bloom_bicubic: true, ..Settings::default() }, false);
         validate(&Settings { exposure: Exposure::Histogram, histogram_bins: 128, taa: false, cas: false, ..Settings::default() }, true);
         for t in [Tonemap::AcesFit, Tonemap::AcesFull, Tonemap::Lottes, Tonemap::Hejl2015, Tonemap::HejlBurgess, Tonemap::Tech, Tonemap::Uncharted2, Tonemap::Ozius, Tonemap::Reinhard, Tonemap::ReinhardJodie] {
