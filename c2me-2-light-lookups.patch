@@ -1,0 +1,240 @@
+diff --git a/ROADMAP.md b/ROADMAP.md
+index b86f509..b0c1630 100644
+--- a/ROADMAP.md
++++ b/ROADMAP.md
+@@ -66,6 +66,10 @@ Order of work: always the easiest item first.
+ M20 is done except `ItemMap` (maps are big: a colour table for every block, the scan of the world, a texture, the screen: a session of their own). Next in the easy-first order: M22 (rails, minecarts, boats), M11 (Nether), M14 (menus and models); M21 (redstone) goes on from part 1. First run `cargo test --lib`: everything since M15 has never been compiled.
+ 
+ ## Changelog
++- 2026-10-14: C2ME idea 2: the light engine does a block update's work with far fewer lookups (written WITHOUT a Rust toolchain: not compiled, not run; +1 test `light::tests::relit_matches_the_plain_formula`, not run; `light_settles_after_edits` is the settled-result check and must still pass). Chosen as the best lever for block-update speed: every edit (`set_quiet` -> `light_after_set`, flowing water, TNT, tree growth) queues light regions, and `mesh_pending` only queues a mesh job while `light_queue` is empty, so the light engine's throughput is how fast a block update becomes visible. Source: the allocation / lookup trimming side of C2ME (`c2me-opts-allocs`); the threaded light engine (`c2me-threading-lighting`) is NOT done: it needs mutable access to the chunk light arrays across borders, a rewrite of `update_region` / `init_chunk` that is too risky to write blind.
++    - Cost found by reading `world/chunks/light.rs`: a cell of `update_region` read its own light, block, open-sky test and six neighbours with ~9 `HashMap` lookups; each CHANGED cell added `set_saved_light` (`chunk_exists` + `put_light` + `mark_dirty`, which built a `Vec` per call: a heap allocation) and 3-6 `neighbor_changed` (`chunk_exists` + `sees_sky` / `raw_block` + `saved_light` + `schedule_light`'s own `chunk_exists`): ~30-40 lookups and one allocation per changed cell. `run_light` also read `Instant::now()` after EVERY region, most of which are one cell.
++    - Now: `relit` reads a cell from its chunk entry once (the neighbours inside the same chunk straight from its arrays, the ones across a border through `saved_light` as before); `neighbor_changed` is one lookup; `set_saved_light` has no extra `chunk_exists`; `mark_dirty` fills a 3-key array instead of a `Vec`; `run_light` reads the clock after a region of more than 256 cells or every 32nd region. Nothing else changed: the light values, their order of evaluation and the queue are the same, so the settled light is the same (`relit_matches_the_plain_formula` compares it with the old formula on borders, corners and the world's top and bottom).
++    - ponytail: the 4 ms `LIGHT_BUDGET` can now overshoot by up to 31 one-cell regions (microseconds). Not touched: the random-tick scan (`random_ticks`, ~150 chunks x 80 draws, tens of microseconds a tick), `ticks::step` and `notify`. Still open from the C2ME audit: save writes on an I/O thread, populate + light on the workers, bit-exact noise speedups, the threaded light engine. UNVERIFIED on a device: the actual gain (the per-cell cost should drop several-fold, but nothing was measured).
+ - 2026-10-14: sneak (b1.7.3) + PE d-pad with 8 directions (written WITHOUT a Rust toolchain: not compiled, not run; +3 tests `physics::tests::sneaking_stops_at_the_edge_and_holds_on_a_ladder`, `touch_ui::tests::{dpad_arrow_shows_its_two_corners_and_walks_diagonally, sneak_button_toggles_and_survives_pause, second_dpad_finger_is_ignored}`, `hud::tests::gui_sheet_has_the_sprites` extended; none run; the generator and the sprite sheet were run and looked at).
+     - Sneak, ported from `MovementInputFromOptions`, `Entity.moveEntity`, `EntityPlayerSP.onLivingUpdate`, `EntityLiving.moveEntityWithHeading`: both input axes x0.3 (`lib.rs`, next to the move vector); `physics::sneak` (one shared function, called before `step`): a grounded sneaking box cannot walk off an edge (the step is cut in 0.05 slices until a collision box is within a block below, x then z, as the Java loop does), and a sneaking player on a ladder stops falling; the eye hangs 0.08 low (`ySize` 0.2 set each tick, x0.4 by `moveEntity`: `App.sneak_y`, decays x0.4 a tick when released). The hitbox does not change (b1.7.3 has no crouch box). Not done: the sneaking player model / name tag (no player model), sneak-dismount (b1.7.3 has none in the source read, jump still gets off a pig).
+     - Touch: the floating analog stick is gone (`stick_vector`, `PointerRole::Move`). `LayoutRects.dpad` = 8 cells in `DIRS` order (up, down, left, right, up_left, up_right, down_left, down_right) tiled without gaps (a button is drawn `dpad_gap` smaller), the centre cell is sneak (a toggle, `TouchUi.sneak`, kept over pause), `jump` is a rect now. Holding an arrow shows its two corner buttons (up: up-left + up-right, left: up-left + down-left, ...); sliding onto a corner walks that diagonal (`DIRS` normalised, like `moveFlying`), sliding to another arrow swaps the corners, lifting hides them. Look is every press that is no button (it was the right half).
+diff --git a/mc-rs/src/world/chunks.rs b/mc-rs/src/world/chunks.rs
+index d3a897b..943785d 100644
+--- a/mc-rs/src/world/chunks.rs
++++ b/mc-rs/src/world/chunks.rs
+@@ -613,13 +613,17 @@ impl ChunkManager {
+     /// faces look at it when the column is on the chunk edge.
+     fn mark_dirty(&mut self, x: i32, z: i32) {
+         let (cx, cz, lx, lz) = (x >> 4, z >> 4, x & 15, z & 15);
+-        let mut keys = vec![(cx, cz)];
+-        if lx == 0 { keys.push((cx - 1, cz)) }
+-        if lx == 15 { keys.push((cx + 1, cz)) }
+-        if lz == 0 { keys.push((cx, cz - 1)) }
+-        if lz == 15 { keys.push((cx, cz + 1)) }
+-        for k in keys {
+-            if let Some(e) = self.chunks.get_mut(&k) {
++        // At most one neighbour per axis, so three keys at most; an array, because this runs for every cell whose light changes.
++        let mut keys = [(cx, cz); 3];
++        let mut n = 1;
++        for (hit, k) in [(lx == 0, (cx - 1, cz)), (lx == 15, (cx + 1, cz)), (lz == 0, (cx, cz - 1)), (lz == 15, (cx, cz + 1))] {
++            if hit {
++                keys[n] = k;
++                n += 1;
++            }
++        }
++        for k in &keys[..n] {
++            if let Some(e) = self.chunks.get_mut(k) {
+                 e.meshed = false;
+             }
+         }
+diff --git a/mc-rs/src/world/chunks/light.rs b/mc-rs/src/world/chunks/light.rs
+index c3b6b92..37763d6 100644
+--- a/mc-rs/src/world/chunks/light.rs
++++ b/mc-rs/src/world/chunks/light.rs
+@@ -22,6 +22,11 @@ pub(super) enum Kind {
+     Block,
+ }
+ 
++/// The `kind` half of a raw light byte (sky in the low nibble, block light in the high one).
++fn nib(kind: Kind, v: u8) -> u8 {
++    if kind == Kind::Sky { v & 15 } else { v >> 4 }
++}
++
+ /// `MetadataChunkBlock`: a box of cells (inclusive) whose light must be recomputed.
+ #[derive(Clone, Copy, Debug)]
+ pub(super) struct Region {
+@@ -73,10 +78,7 @@ impl ChunkManager {
+     /// `World.getSavedLightValue`: y is clamped into the world, an unloaded chunk is dark.
+     pub(super) fn saved_light(&self, kind: Kind, x: i32, y: i32, z: i32) -> u8 {
+         let y = y.clamp(0, H as i32 - 1) as usize;
+-        self.chunks.get(&(x >> 4, z >> 4)).map_or(0, |e| {
+-            let v = e.light[idx((x & 15) as usize, y, (z & 15) as usize)];
+-            if kind == Kind::Sky { v & 15 } else { v >> 4 }
+-        })
++        self.chunks.get(&(x >> 4, z >> 4)).map_or(0, |e| nib(kind, e.light[idx((x & 15) as usize, y, (z & 15) as usize)]))
+     }
+ 
+     /// Write a nibble without telling the mesher.
+@@ -88,7 +90,8 @@ impl ChunkManager {
+ 
+     /// `World.setLightValue`: write, and the mesh that shows this cell is stale.
+     fn set_saved_light(&mut self, kind: Kind, x: i32, y: i32, z: i32, v: u8) {
+-        if (0..H as i32).contains(&y) && self.chunk_exists(x, z) {
++        // (`update_region`, the only caller, has checked that the cell's chunk is loaded)
++        if (0..H as i32).contains(&y) {
+             self.put_light(kind, x, y, z, v);
+             self.mark_dirty(x, z);
+         }
+@@ -128,23 +131,53 @@ impl ChunkManager {
+ 
+     /// `World.neighborLightPropagationChanged`: cell (x, y, z) should now be at least `v` (the changed
+     /// neighbour's level minus 1); queue it if its stored level differs from what it should be.
+-    fn neighbor_changed(&mut self, kind: Kind, x: i32, y: i32, z: i32, mut v: i32) {
+-        if !(0..H as i32).contains(&y) || !self.chunk_exists(x, z) {
++    fn neighbor_changed(&mut self, kind: Kind, x: i32, y: i32, z: i32, v: i32) {
++        if !(0..H as i32).contains(&y) {
+             return;
+         }
+-        match kind {
+-            Kind::Sky => {
+-                if self.sees_sky(x, y, z) {
+-                    v = 15;
+-                }
+-            }
+-            Kind::Block => v = v.max(light_value(self.raw_block(x, y, z)) as i32),
+-        }
+-        if self.saved_light(kind, x, y, z) as i32 != v {
++        // One lookup of the cell's chunk gives the open-sky test (`sees_sky`), the block (`raw_block`) and the stored level.
++        let Some(e) = self.chunks.get(&(x >> 4, z >> 4)) else { return };
++        let (lx, lz) = ((x & 15) as usize, (z & 15) as usize);
++        let v = match kind {
++            Kind::Sky if y >= e.height[lz << 4 | lx] as i32 => 15,
++            Kind::Sky => v,
++            Kind::Block => v.max(light_value(e.blocks[idx(lx, y as usize, lz)]) as i32),
++        };
++        if nib(kind, e.light[idx(lx, y as usize, lz)]) as i32 != v {
+             self.schedule_light(kind, [x, y, z], [x, y, z]);
+         }
+     }
+ 
++    /// A cell's stored level and the level it should have: `max(neighbours) - max(opacity, 1)`, or its own source level
++    /// (`MetadataChunkBlock.func_4127_a`). The cell's chunk is looked up once, and its neighbours' only where they lie across a
++    /// chunk border (it used to be ~9 lookups). `y` is inside the world. `None`: the chunk is not loaded.
++    fn relit(&self, kind: Kind, x: i32, y: i32, z: i32) -> Option<(i32, i32)> {
++        let e = self.chunks.get(&(x >> 4, z >> 4))?;
++        let (lx, lz) = ((x & 15) as usize, (z & 15) as usize);
++        // Stored level of a cell beside this one (`saved_light`: y is clamped into the world).
++        let at = |nx: i32, ny: i32, nz: i32| -> i32 {
++            if nx >> 4 == x >> 4 && nz >> 4 == z >> 4 {
++                nib(kind, e.light[idx((nx & 15) as usize, ny.clamp(0, H as i32 - 1) as usize, (nz & 15) as usize)]) as i32
++            } else {
++                self.saved_light(kind, nx, ny, nz) as i32
++            }
++        };
++        let id = e.blocks[idx(lx, y as usize, lz)];
++        let opacity = (light_opacity(id) as i32).max(1);
++        let source = match kind {
++            Kind::Sky => if y >= e.height[lz << 4 | lx] as i32 { 15 } else { 0 },
++            Kind::Block => light_value(id) as i32,
++        };
++        let old = at(x, y, z);
++        let new = if opacity >= 15 && source == 0 {
++            0
++        } else {
++            let n = at(x - 1, y, z).max(at(x + 1, y, z)).max(at(x, y - 1, z)).max(at(x, y + 1, z)).max(at(x, y, z - 1)).max(at(x, y, z + 1));
++            (n - opacity).max(0).max(source)
++        };
++        Some((old, new))
++    }
++
+     /// `MetadataChunkBlock.func_4127_a`: recompute every cell of the region, queueing the neighbours of
+     /// each cell whose level changed.
+     fn update_region(&mut self, mut r: Region) {
+@@ -172,23 +205,7 @@ impl ChunkManager {
+                 r.lo[1] = r.lo[1].max(0);
+                 r.hi[1] = r.hi[1].min(H as i32 - 1);
+                 for y in r.lo[1]..=r.hi[1] {
+-                    let old = self.saved_light(kind, x, y, z) as i32;
+-                    let id = self.raw_block(x, y, z);
+-                    let opacity = (light_opacity(id) as i32).max(1);
+-                    let source = match kind {
+-                        Kind::Sky => if self.sees_sky(x, y, z) { 15 } else { 0 },
+-                        Kind::Block => light_value(id) as i32,
+-                    };
+-                    let new = if opacity >= 15 && source == 0 {
+-                        0
+-                    } else {
+-                        let n = [(-1, 0, 0), (1, 0, 0), (0, -1, 0), (0, 1, 0), (0, 0, -1), (0, 0, 1)]
+-                            .iter()
+-                            .map(|&(dx, dy, dz)| self.saved_light(kind, x + dx, y + dy, z + dz) as i32)
+-                            .max()
+-                            .unwrap_or(0);
+-                        (n - opacity).max(0).max(source)
+-                    };
++                    let Some((old, new)) = self.relit(kind, x, y, z) else { continue };
+                     if old != new {
+                         self.set_saved_light(kind, x, y, z, new as u8);
+                         let p = (new - 1).max(0);
+@@ -208,9 +225,14 @@ impl ChunkManager {
+ 
+     /// Process queued regions, newest first, until the queue is empty or `deadline` passes.
+     pub(super) fn run_light(&mut self, deadline: Option<Instant>) {
++        let mut n = 0u32;
+         while let Some(r) = self.light_queue.pop() {
++            let big = r.volume() > 256;
+             self.update_region(r);
+-            if deadline.is_some_and(|d| Instant::now() >= d) {
++            n += 1;
++            // The clock is read after a big region or every 32nd one: most regions are a single cell, which costs less than
++            // `Instant::now` does (so the budget can overshoot by a few dozen cells, microseconds).
++            if (big || n % 32 == 0) && deadline.is_some_and(|d| Instant::now() >= d) {
+                 break;
+             }
+         }
+@@ -414,6 +436,51 @@ mod tests {
+         m.run_light(None);
+     }
+ 
++    /// `relit` (one chunk lookup per cell) gives what the plain formula of `update_region` gives (`saved_light` / `raw_block` /
++    /// `sees_sky` for the cell and its six neighbours): mid-chunk, on borders and corners, at the outer edge of the loaded area and at
++    /// the bottom and top of the world, with sky and block light in a settled state and in a stale one.
++    #[test]
++    fn relit_matches_the_plain_formula() {
++        let slow = |m: &ChunkManager, kind: Kind, x: i32, y: i32, z: i32| {
++            let old = m.saved_light(kind, x, y, z) as i32;
++            let id = m.raw_block(x, y, z);
++            let opacity = (light_opacity(id) as i32).max(1);
++            let source = match kind {
++                Kind::Sky => if m.sees_sky(x, y, z) { 15 } else { 0 },
++                Kind::Block => light_value(id) as i32,
++            };
++            let new = if opacity >= 15 && source == 0 {
++                0
++            } else {
++                let n = [(-1, 0, 0), (1, 0, 0), (0, -1, 0), (0, 1, 0), (0, 0, -1), (0, 0, 1)]
++                    .iter()
++                    .map(|&(dx, dy, dz)| m.saved_light(kind, x + dx, y + dy, z + dz) as i32)
++                    .max()
++                    .unwrap_or(0);
++                (n - opacity).max(0).max(source)
++            };
++            (old, new)
++        };
++        let mut m = flat();
++        m.set_block(14, 11, 8, 89); // glowstone near the +X border
++        m.set_block(5, 12, 5, 1); // a roof
++        settle(&mut m);
++        m.set_block(0, 11, 0, 89); // not settled: the stored light is stale around it, so old != new somewhere
++        m.set_block(16, 10, 15, 1);
++        let mut differs = false;
++        for kind in [Kind::Sky, Kind::Block] {
++            for (x, z) in [(5, 5), (0, 0), (15, 15), (16, 0), (-1, -1), (15, 8), (8, 0), (14, 8), (16, 15), (31, 31), (-16, -16), (0, 15)] {
++                for y in [0, 1, 9, 10, 11, 12, 60, 126, 127] {
++                    let want = slow(&m, kind, x, y, z);
++                    differs |= want.0 != want.1;
++                    assert_eq!(m.relit(kind, x, y, z), Some(want), "{kind:?} ({x}, {y}, {z})");
++                }
++            }
++        }
++        assert!(differs, "the stale state must exercise old != new");
++        assert_eq!(m.relit(Kind::Sky, 100, 5, 0), None, "chunk not loaded");
++    }
++
+     /// Sky light: 15 over open ground, 0 inside stone, a roof dims the cell under it by one step of
+     /// lateral spread (14), and removing the roof restores 15. Block light: a glowstone lights 15
+     /// at the source, falls 1 per cell, crosses a chunk border, and is gone again when the source is removed.

@@ -613,13 +613,17 @@ impl ChunkManager {
     /// faces look at it when the column is on the chunk edge.
     fn mark_dirty(&mut self, x: i32, z: i32) {
         let (cx, cz, lx, lz) = (x >> 4, z >> 4, x & 15, z & 15);
-        let mut keys = vec![(cx, cz)];
-        if lx == 0 { keys.push((cx - 1, cz)) }
-        if lx == 15 { keys.push((cx + 1, cz)) }
-        if lz == 0 { keys.push((cx, cz - 1)) }
-        if lz == 15 { keys.push((cx, cz + 1)) }
-        for k in keys {
-            if let Some(e) = self.chunks.get_mut(&k) {
+        // At most one neighbour per axis, so three keys at most; an array, because this runs for every cell whose light changes.
+        let mut keys = [(cx, cz); 3];
+        let mut n = 1;
+        for (hit, k) in [(lx == 0, (cx - 1, cz)), (lx == 15, (cx + 1, cz)), (lz == 0, (cx, cz - 1)), (lz == 15, (cx, cz + 1))] {
+            if hit {
+                keys[n] = k;
+                n += 1;
+            }
+        }
+        for k in &keys[..n] {
+            if let Some(e) = self.chunks.get_mut(k) {
                 e.meshed = false;
             }
         }

@@ -22,6 +22,11 @@ pub(super) enum Kind {
     Block,
 }
 
+/// The `kind` half of a raw light byte (sky in the low nibble, block light in the high one).
+fn nib(kind: Kind, v: u8) -> u8 {
+    if kind == Kind::Sky { v & 15 } else { v >> 4 }
+}
+
 /// `MetadataChunkBlock`: a box of cells (inclusive) whose light must be recomputed.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Region {
@@ -73,10 +78,7 @@ impl ChunkManager {
     /// `World.getSavedLightValue`: y is clamped into the world, an unloaded chunk is dark.
     pub(super) fn saved_light(&self, kind: Kind, x: i32, y: i32, z: i32) -> u8 {
         let y = y.clamp(0, H as i32 - 1) as usize;
-        self.chunks.get(&(x >> 4, z >> 4)).map_or(0, |e| {
-            let v = e.light[idx((x & 15) as usize, y, (z & 15) as usize)];
-            if kind == Kind::Sky { v & 15 } else { v >> 4 }
-        })
+        self.chunks.get(&(x >> 4, z >> 4)).map_or(0, |e| nib(kind, e.light[idx((x & 15) as usize, y, (z & 15) as usize)]))
     }
 
     /// Write a nibble without telling the mesher.
@@ -88,7 +90,8 @@ impl ChunkManager {
 
     /// `World.setLightValue`: write, and the mesh that shows this cell is stale.
     fn set_saved_light(&mut self, kind: Kind, x: i32, y: i32, z: i32, v: u8) {
-        if (0..H as i32).contains(&y) && self.chunk_exists(x, z) {
+        // (`update_region`, the only caller, has checked that the cell's chunk is loaded)
+        if (0..H as i32).contains(&y) {
             self.put_light(kind, x, y, z, v);
             self.mark_dirty(x, z);
         }
@@ -128,21 +131,51 @@ impl ChunkManager {
 
     /// `World.neighborLightPropagationChanged`: cell (x, y, z) should now be at least `v` (the changed
     /// neighbour's level minus 1); queue it if its stored level differs from what it should be.
-    fn neighbor_changed(&mut self, kind: Kind, x: i32, y: i32, z: i32, mut v: i32) {
-        if !(0..H as i32).contains(&y) || !self.chunk_exists(x, z) {
+    fn neighbor_changed(&mut self, kind: Kind, x: i32, y: i32, z: i32, v: i32) {
+        if !(0..H as i32).contains(&y) {
             return;
         }
-        match kind {
-            Kind::Sky => {
-                if self.sees_sky(x, y, z) {
-                    v = 15;
-                }
-            }
-            Kind::Block => v = v.max(light_value(self.raw_block(x, y, z)) as i32),
-        }
-        if self.saved_light(kind, x, y, z) as i32 != v {
+        // One lookup of the cell's chunk gives the open-sky test (`sees_sky`), the block (`raw_block`) and the stored level.
+        let Some(e) = self.chunks.get(&(x >> 4, z >> 4)) else { return };
+        let (lx, lz) = ((x & 15) as usize, (z & 15) as usize);
+        let v = match kind {
+            Kind::Sky if y >= e.height[lz << 4 | lx] as i32 => 15,
+            Kind::Sky => v,
+            Kind::Block => v.max(light_value(e.blocks[idx(lx, y as usize, lz)]) as i32),
+        };
+        if nib(kind, e.light[idx(lx, y as usize, lz)]) as i32 != v {
             self.schedule_light(kind, [x, y, z], [x, y, z]);
         }
+    }
+
+    /// A cell's stored level and the level it should have: `max(neighbours) - max(opacity, 1)`, or its own source level
+    /// (`MetadataChunkBlock.func_4127_a`). The cell's chunk is looked up once, and its neighbours' only where they lie across a
+    /// chunk border (it used to be ~9 lookups). `y` is inside the world. `None`: the chunk is not loaded.
+    fn relit(&self, kind: Kind, x: i32, y: i32, z: i32) -> Option<(i32, i32)> {
+        let e = self.chunks.get(&(x >> 4, z >> 4))?;
+        let (lx, lz) = ((x & 15) as usize, (z & 15) as usize);
+        // Stored level of a cell beside this one (`saved_light`: y is clamped into the world).
+        let at = |nx: i32, ny: i32, nz: i32| -> i32 {
+            if nx >> 4 == x >> 4 && nz >> 4 == z >> 4 {
+                nib(kind, e.light[idx((nx & 15) as usize, ny.clamp(0, H as i32 - 1) as usize, (nz & 15) as usize)]) as i32
+            } else {
+                self.saved_light(kind, nx, ny, nz) as i32
+            }
+        };
+        let id = e.blocks[idx(lx, y as usize, lz)];
+        let opacity = (light_opacity(id) as i32).max(1);
+        let source = match kind {
+            Kind::Sky => if y >= e.height[lz << 4 | lx] as i32 { 15 } else { 0 },
+            Kind::Block => light_value(id) as i32,
+        };
+        let old = at(x, y, z);
+        let new = if opacity >= 15 && source == 0 {
+            0
+        } else {
+            let n = at(x - 1, y, z).max(at(x + 1, y, z)).max(at(x, y - 1, z)).max(at(x, y + 1, z)).max(at(x, y, z - 1)).max(at(x, y, z + 1));
+            (n - opacity).max(0).max(source)
+        };
+        Some((old, new))
     }
 
     /// `MetadataChunkBlock.func_4127_a`: recompute every cell of the region, queueing the neighbours of
@@ -172,23 +205,7 @@ impl ChunkManager {
                 r.lo[1] = r.lo[1].max(0);
                 r.hi[1] = r.hi[1].min(H as i32 - 1);
                 for y in r.lo[1]..=r.hi[1] {
-                    let old = self.saved_light(kind, x, y, z) as i32;
-                    let id = self.raw_block(x, y, z);
-                    let opacity = (light_opacity(id) as i32).max(1);
-                    let source = match kind {
-                        Kind::Sky => if self.sees_sky(x, y, z) { 15 } else { 0 },
-                        Kind::Block => light_value(id) as i32,
-                    };
-                    let new = if opacity >= 15 && source == 0 {
-                        0
-                    } else {
-                        let n = [(-1, 0, 0), (1, 0, 0), (0, -1, 0), (0, 1, 0), (0, 0, -1), (0, 0, 1)]
-                            .iter()
-                            .map(|&(dx, dy, dz)| self.saved_light(kind, x + dx, y + dy, z + dz) as i32)
-                            .max()
-                            .unwrap_or(0);
-                        (n - opacity).max(0).max(source)
-                    };
+                    let Some((old, new)) = self.relit(kind, x, y, z) else { continue };
                     if old != new {
                         self.set_saved_light(kind, x, y, z, new as u8);
                         let p = (new - 1).max(0);
@@ -208,9 +225,14 @@ impl ChunkManager {
 
     /// Process queued regions, newest first, until the queue is empty or `deadline` passes.
     pub(super) fn run_light(&mut self, deadline: Option<Instant>) {
+        let mut n = 0u32;
         while let Some(r) = self.light_queue.pop() {
+            let big = r.volume() > 256;
             self.update_region(r);
-            if deadline.is_some_and(|d| Instant::now() >= d) {
+            n += 1;
+            // The clock is read after a big region or every 32nd one: most regions are a single cell, which costs less than
+            // `Instant::now` does (so the budget can overshoot by a few dozen cells, microseconds).
+            if (big || n % 32 == 0) && deadline.is_some_and(|d| Instant::now() >= d) {
                 break;
             }
         }
@@ -412,6 +434,51 @@ mod tests {
 
     fn settle(m: &mut ChunkManager) {
         m.run_light(None);
+    }
+
+    /// `relit` (one chunk lookup per cell) gives what the plain formula of `update_region` gives (`saved_light` / `raw_block` /
+    /// `sees_sky` for the cell and its six neighbours): mid-chunk, on borders and corners, at the outer edge of the loaded area and at
+    /// the bottom and top of the world, with sky and block light in a settled state and in a stale one.
+    #[test]
+    fn relit_matches_the_plain_formula() {
+        let slow = |m: &ChunkManager, kind: Kind, x: i32, y: i32, z: i32| {
+            let old = m.saved_light(kind, x, y, z) as i32;
+            let id = m.raw_block(x, y, z);
+            let opacity = (light_opacity(id) as i32).max(1);
+            let source = match kind {
+                Kind::Sky => if m.sees_sky(x, y, z) { 15 } else { 0 },
+                Kind::Block => light_value(id) as i32,
+            };
+            let new = if opacity >= 15 && source == 0 {
+                0
+            } else {
+                let n = [(-1, 0, 0), (1, 0, 0), (0, -1, 0), (0, 1, 0), (0, 0, -1), (0, 0, 1)]
+                    .iter()
+                    .map(|&(dx, dy, dz)| m.saved_light(kind, x + dx, y + dy, z + dz) as i32)
+                    .max()
+                    .unwrap_or(0);
+                (n - opacity).max(0).max(source)
+            };
+            (old, new)
+        };
+        let mut m = flat();
+        m.set_block(14, 11, 8, 89); // glowstone near the +X border
+        m.set_block(5, 12, 5, 1); // a roof
+        settle(&mut m);
+        m.set_block(0, 11, 0, 89); // not settled: the stored light is stale around it, so old != new somewhere
+        m.set_block(16, 10, 15, 1);
+        let mut differs = false;
+        for kind in [Kind::Sky, Kind::Block] {
+            for (x, z) in [(5, 5), (0, 0), (15, 15), (16, 0), (-1, -1), (15, 8), (8, 0), (14, 8), (16, 15), (31, 31), (-16, -16), (0, 15)] {
+                for y in [0, 1, 9, 10, 11, 12, 60, 126, 127] {
+                    let want = slow(&m, kind, x, y, z);
+                    differs |= want.0 != want.1;
+                    assert_eq!(m.relit(kind, x, y, z), Some(want), "{kind:?} ({x}, {y}, {z})");
+                }
+            }
+        }
+        assert!(differs, "the stale state must exercise old != new");
+        assert_eq!(m.relit(Kind::Sky, 100, 5, 0), None, "chunk not loaded");
     }
 
     /// Sky light: 15 over open ground, 0 inside stone, a roof dims the cell under it by one step of
