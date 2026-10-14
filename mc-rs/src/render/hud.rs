@@ -291,7 +291,8 @@ impl HudPipeline {
     /// An items.png sprite (`Item.iconIndex` = `icon`) in the box (x, y, w, h), top-left origin; the alpha cuts it out.
     pub fn push_sprite(out: &mut Vec<HudVertex>, x: f32, y: f32, w: f32, h: f32, icon: u8) {
         let (u0, v0) = ((icon % 16) as f32 / 16.0, (icon / 16) as f32 * 16.0 / SHEET_H);
-        let (u1, v1) = (u0 + 1.0 / 16.0 - 0.0005, v0 + 16.0 / SHEET_H - 0.0005);
+        let (u0, v0) = (u0 + 0.5 / 256.0, v0 + 0.5 / SHEET_H); // half a texel in: `fs_main`'s sharp bilinear blends across the sprite's edge into its neighbour
+        let (u1, v1) = (u0 + 15.0 / 256.0, v0 + 15.0 / SHEET_H);
         let c = [1.0; 4];
         let v = |px: f32, py: f32, u: f32, vv: f32| HudVertex { pos: [px, py], color: c, uv: [u, vv] };
         let (tl, tr, br, bl) = (v(x, y, u0, v0), v(x + w, y, u1, v0), v(x + w, y + h, u1, v1), v(x, y + h, u0, v1));
@@ -311,10 +312,13 @@ impl HudPipeline {
 
     /// A `terrain.png` tile (`vspan` of its height from the top: a slab's side is half) on the quad `p` (corners in order tl, tr, br, bl),
     /// multiplied by `rgb`.
-    fn push_tile_quad(out: &mut Vec<HudVertex>, p: [[f32; 2]; 4], tile: u16, vspan: f32, rgb: [f32; 3]) {
+    /// `(ix, iy)` are the texels cut off the left / right and top / bottom: 0.5 keeps `fs_main`'s sharp bilinear (nearest inside a texel,
+    /// a blend across its edge) from reading the NEIGHBOURING tile of `terrain.png`, which drew a line round every block icon; more
+    /// trims a tile's own transparent border (the cactus).
+    fn push_tile_quad(out: &mut Vec<HudVertex>, p: [[f32; 2]; 4], tile: u16, vspan: f32, rgb: [f32; 3], (ix, iy): (f32, f32)) {
         let (tx, ty) = ((tile % 16) as f32 * 16.0, (tile / 16) as f32 * 16.0);
-        let (u0, u1) = ((tx + 0.01) / 256.0, (tx + 16.0 - 0.01) / 256.0);
-        let (v0, v1) = ((TERRAIN_Y + ty + 0.01) / SHEET_H, (TERRAIN_Y + ty + 16.0 * vspan - 0.01) / SHEET_H);
+        let (u0, u1) = ((tx + ix) / 256.0, (tx + 16.0 - ix) / 256.0);
+        let (v0, v1) = ((TERRAIN_Y + ty + iy) / SHEET_H, (TERRAIN_Y + ty + 16.0 * vspan - iy) / SHEET_H);
         let c = [rgb[0], rgb[1], rgb[2], 1.0];
         let v = |q: [f32; 2], u: f32, vv: f32| HudVertex { pos: q, color: c, uv: [u, vv] };
         let (tl, tr, br, bl) = (v(p[0], u0, v0), v(p[1], u1, v0), v(p[2], u1, v1), v(p[3], u0, v1));
@@ -341,24 +345,29 @@ impl HudPipeline {
 
     /// A terrain tile flat in the box (x, y, w, h): what the inventory shows of a sapling, a torch, a ladder, a rail.
     pub fn push_tile(out: &mut Vec<HudVertex>, x: f32, y: f32, w: f32, h: f32, tile: u16, rgb: [f32; 3]) {
-        Self::push_tile_quad(out, [[x, y], [x + w, y], [x + w, y + h], [x, y + h]], tile, 1.0, rgb);
+        Self::push_tile_quad(out, [[x, y], [x + w, y], [x + w, y + h], [x, y + h]], tile, 1.0, rgb, (0.5, 0.5));
     }
 
     /// A block as the console and `RenderBlocks.renderBlockOnInventory` draw it: a cube seen from above at the usual isometric angle, the
     /// top and the two sides in the box (x, y, w, h), lit 1.0 / 0.8 / 0.6 (top, left, right). `faces` are (tile, tint) of top, left, right;
-    /// `overlay` is a second, tinted tile over the left and right side (the grass strip); `height` is 1.0 for a cube, 0.5 for a slab.
+    /// `overlay` is a second, tinted tile over the left and right side (the grass strip); `height` is 1.0 for a cube, 0.5 for a slab;
+    /// `cut` is how many texels of each tile's transparent border to leave out (1 for the cactus, whose faces are 14 wide).
+    /// The cube is 30 degrees down and 45 around: 1.414 wide, 1.573 tall, so its box is 0.9 as wide as it is tall (a square box stretched it).
     // UNVERIFIED: which two sides face the viewer (here south on the left, east on the right) and the light factors.
-    pub fn push_cube(out: &mut Vec<HudVertex>, (x, y, w, h): (f32, f32, f32, f32), faces: [(u16, [f32; 3]); 3], overlay: Option<(u16, [f32; 3])>, height: f32) {
-        let (cx, d) = (x + w * 0.5, 0.5 * h * (1.0 - height)); // d: how far a slab's top sits below a cube's
-        let (t, tl, tr, c) = ([cx, y + d], [x, y + d + 0.25 * h], [x + w, y + d + 0.25 * h], [cx, y + d + 0.5 * h]);
-        let (bl, br, b) = ([x, y + 0.75 * h], [x + w, y + 0.75 * h], [cx, y + h]);
+    pub fn push_cube(out: &mut Vec<HudVertex>, (x, y, w, h): (f32, f32, f32, f32), faces: [(u16, [f32; 3]); 3], overlay: Option<(u16, [f32; 3])>, height: f32, cut: f32) {
+        const A: f32 = 0.2247; // half the top rhombus's height, of the cube's; the side edge is 1 - 2 A
+        let (x, w) = (x + w * 0.05, w * 0.9);
+        let (cx, d) = (x + w * 0.5, (1.0 - 2.0 * A) * h * (1.0 - height)); // d: how far a slab's top sits below a cube's
+        let (t, tl, tr, c) = ([cx, y + d], [x, y + d + A * h], [x + w, y + d + A * h], [cx, y + d + 2.0 * A * h]);
+        let (bl, br, b) = ([x, y + h - A * h], [x + w, y + h - A * h], [cx, y + h]);
         let lit = |rgb: [f32; 3], k: f32| [rgb[0] * k, rgb[1] * k, rgb[2] * k];
-        Self::push_tile_quad(out, [t, tr, c, tl], faces[0].0, 1.0, lit(faces[0].1, 1.0));
-        Self::push_tile_quad(out, [tl, c, b, bl], faces[1].0, height, lit(faces[1].1, 0.8));
-        Self::push_tile_quad(out, [c, tr, br, b], faces[2].0, height, lit(faces[2].1, 0.6));
+        let (top, side) = ((0.5 + cut, 0.5 + cut), (0.5 + cut, 0.5));
+        Self::push_tile_quad(out, [t, tr, c, tl], faces[0].0, 1.0, lit(faces[0].1, 1.0), top);
+        Self::push_tile_quad(out, [tl, c, b, bl], faces[1].0, height, lit(faces[1].1, 0.8), side);
+        Self::push_tile_quad(out, [c, tr, br, b], faces[2].0, height, lit(faces[2].1, 0.6), side);
         if let Some((tile, rgb)) = overlay {
-            Self::push_tile_quad(out, [tl, c, b, bl], tile, height, lit(rgb, 0.8));
-            Self::push_tile_quad(out, [c, tr, br, b], tile, height, lit(rgb, 0.6));
+            Self::push_tile_quad(out, [tl, c, b, bl], tile, height, lit(rgb, 0.8), side);
+            Self::push_tile_quad(out, [c, tr, br, b], tile, height, lit(rgb, 0.6), side);
         }
     }
 
@@ -409,8 +418,6 @@ impl HudPipeline {
         Self::push_text(out, x + 3.0 * k, y + 3.0 * k, k, s, [1.0; 4]);
     }
 
-    /// Outlined rect (filled with `fill`, bordered by `border`, `border_px`
-    /// pixels thick).
     /// Seven-segment number (there is no text rendering yet, M14). `h` is the digit height in px;
     /// each digit advances by `0.71 * h`.
     pub fn push_number(out: &mut Vec<HudVertex>, x: f32, y: f32, h: f32, n: u32, color: [f32; 4]) {
@@ -437,6 +444,14 @@ impl HudPipeline {
         }
     }
 
+    /// A stack count as `RenderItem.renderItemOverlayIntoGUI` draws it: the font's own digits with the shadow, right-aligned so the
+    /// text ends at (x + 17, ..) of the 16 unit item box at (x, y), and 9 units down; `k` px per unit.
+    pub fn push_count(out: &mut Vec<HudVertex>, x: f32, y: f32, k: f32, n: u32) {
+        let s = n.to_string();
+        Self::push_text(out, x + (17.0 - Self::text_width(&s) as f32) * k, y + 9.0 * k, k, &s, [1.0; 4]);
+    }
+
+    /// Outlined rect (filled with `fill`, bordered by `border`, `border_px` pixels thick).
     pub fn push_outlined_quad(
         out: &mut Vec<HudVertex>,
         x: f32, y: f32, w: f32, h: f32,
@@ -519,15 +534,21 @@ mod tests {
     fn cube_icon_fits_its_box() {
         let faces = [(0u16, [1.0; 3]), (3, [1.0; 3]), (3, [1.0; 3])];
         let mut v = Vec::new();
-        HudPipeline::push_cube(&mut v, (10.0, 20.0, 16.0, 16.0), faces, None, 1.0);
+        HudPipeline::push_cube(&mut v, (10.0, 20.0, 16.0, 16.0), faces, None, 1.0, 0.0);
         assert_eq!(v.len(), 18);
         assert!(v.iter().all(|p| (10.0..=26.0).contains(&p.pos[0]) && (20.0..=36.0).contains(&p.pos[1])));
         assert!(v.iter().all(|p| p.uv[0] >= 0.0 && p.uv[1] >= TERRAIN_Y / SHEET_H && p.uv[1] <= 1.0), "uv inside the terrain rows");
         let side_h = |v: &[HudVertex]| v[6..12].iter().map(|p| p.pos[1]).fold(f32::MIN, f32::max) - v[6..12].iter().map(|p| p.pos[1]).fold(f32::MAX, f32::min);
         let mut s = Vec::new();
-        HudPipeline::push_cube(&mut s, (10.0, 20.0, 16.0, 16.0), faces, Some((38, [0.5; 3])), 0.5);
+        HudPipeline::push_cube(&mut s, (10.0, 20.0, 16.0, 16.0), faces, Some((38, [0.5; 3])), 0.5, 0.0);
         assert_eq!(s.len(), 30);
         assert!(side_h(&s) < side_h(&v), "a slab is lower");
+        // The cube is 0.9 as wide as tall (not square), and no texel of a face reaches its tile's edge (no line from the neighbour).
+        let xs = v.iter().map(|p| p.pos[0]);
+        assert!(((xs.clone().fold(f32::MIN, f32::max) - xs.fold(f32::MAX, f32::min)) / 16.0 - 0.9).abs() < 1e-4);
+        let mut c = Vec::new();
+        HudPipeline::push_cube(&mut c, (10.0, 20.0, 16.0, 16.0), faces, None, 1.0, 1.0);
+        assert!(c[0].uv[0] > v[0].uv[0], "the cactus leaves its transparent border out");
     }
     /// The container sheet is four 256-row panels; each has its frame at the top left and the furnace its flame and arrow at (176, 0).
     #[test]

@@ -1645,7 +1645,7 @@ impl App {
             }
             let slot = |v: &mut Vec<HudVertex>, c: (f32, f32, f32), st: Option<ItemStack>| {
                 if let Some(st) = st {
-                    push_stack(v, (c.0 + k, c.1 + k, c.2 - 2.0 * k, c.2 - 2.0 * k), st);
+                    push_stack(v, (c.0 + k, c.1 + k, c.2 - 2.0 * k, c.2 - 2.0 * k), 1.0, st);
                 }
             };
             let furn = s.furnace.and_then(|p| self.furnaces.get(&p));
@@ -1699,7 +1699,7 @@ impl App {
             if let Some(c) = s.cursor {
                 let (cx, cy) = self.touch.cursor_pos;
                 let sz = 16.0 * k;
-                push_stack(v, (cx - sz * 0.5, cy - sz * 1.4, sz, sz), c);
+                push_stack(v, (cx - sz * 0.5, cy - sz * 1.4, sz, sz), 1.0, c);
             }
             // Item name while a finger is down (hover has no touch twin): the picked-up stack, else the stack under the
             // finger. `GuiContainer.drawScreen` names only the hovered slot and only with an empty cursor; the held
@@ -1745,7 +1745,8 @@ impl App {
         }
         for (i, &(hx, hy, hw, hh)) in layout.hotbar.iter().enumerate().filter(|_| play) {
             if let Some(s) = self.inv.slots[i] {
-                push_stack(v, (hx, hy, hw, hh), s);
+                let u = hw / 20.0; // the slot is 20 units, its item 16 at (2, 2)
+                push_stack(v, (hx + 2.0 * u, hy + 2.0 * u, 16.0 * u, 16.0 * u), 0.875, s); // icon 14 of the 16 units
             }
         }
 
@@ -1920,27 +1921,30 @@ fn push_block_icon(v: &mut Vec<HudVertex>, (x, y, w, h): (f32, f32, f32, f32), s
         _ => [white; 3],
     };
     let overlay = (id == 2).then_some((38, grass));
-    HudPipeline::push_cube(v, (x, y, w, h), [(top, tint[0]), (left, tint[1]), (right, tint[2])], overlay, if id == 44 { 0.5 } else { 1.0 });
+    // The cactus tiles are 14 wide inside a transparent border (the world mesh pulls its faces in by 1/16): trim it so the cube stays solid.
+    HudPipeline::push_cube(v, (x, y, w, h), [(top, tint[0]), (left, tint[1]), (right, tint[2])], overlay, if id == 44 { 0.5 } else { 1.0 }, if id == 81 { 1.0 } else { 0.0 });
     true
 }
 
-/// One item stack drawn into the cell `(x, y, w, h)`: the flat colour of its tile (a tool is a stick-coloured handle
+/// One item stack drawn into the 16 x 16 unit item box `(x, y, w, h)` (`hw / 16` px a unit): the flat colour of its tile (a tool is a stick-coloured handle
 /// with a head in the material colour, shaped per kind, so pickaxe, axe, shovel, sword and hoe can be told apart), a wear bar
-/// under a damaged tool, and the count bottom right with a shadow like `RenderItem.renderItemOverlayIntoGUI`
-/// (shown above 1 only). Real item sprites are M14.
+/// under a damaged tool, and the count bottom right in the font with a shadow like `RenderItem.renderItemOverlayIntoGUI`
+/// (shown above 1 only).
 // UNVERIFIED: the head shapes and the wear-bar colours are stand-ins for the item sprites and `renderItemOverlay`.
-fn push_stack(v: &mut Vec<HudVertex>, (hx, hy, hw, hh): (f32, f32, f32, f32), s: ItemStack) {
-    let pad = (hw.min(hh) * 0.18).max(2.0);
+fn push_stack(v: &mut Vec<HudVertex>, (cx, cy, cw, ch): (f32, f32, f32, f32), fill: f32, s: ItemStack) {
+    let u = cw / 16.0;
+    // The count and the wear bar keep the 16 unit box; the icon alone is drawn `fill` of it, centred (the hotbar draws it a little smaller).
+    let (hx, hy, hw, hh) = (cx + cw * (1.0 - fill) * 0.5, cy + ch * (1.0 - fill) * 0.5, cw * fill, ch * fill);
     let rgb = |tile: u16| {
         let c = atlas::tile_color(tile);
         [c[0] as f32 / 255.0, c[1] as f32 / 255.0, c[2] as f32 / 255.0, 1.0]
     };
-    let (ix, iy, iw, ih) = (hx + pad, hy + pad, hw - pad * 2.0, hh - pad * 2.0);
+    let (ix, iy, iw, ih) = (hx + u, hy + u, hw - u * 2.0, hh - u * 2.0);
     // Blocks are their isometric cube (plants, torches, rails... their flat tile), items their `gui/items.png` sprite (tools and shears
     // included); anything without either keeps the flat shapes.
-    if !(s.id < 256 && push_block_icon(v, (hx + pad * 0.5, hy + pad * 0.5, hw - pad, hh - pad), s)) {
+    if !(s.id < 256 && push_block_icon(v, (hx, hy, hw, hh), s)) {
     match (s.id >= 256).then(|| atlas::item_icon(s.id)).flatten() {
-    Some(icon) => HudPipeline::push_sprite(v, hx + pad * 0.5, hy + pad * 0.5, hw - pad, hh - pad, icon),
+    Some(icon) => HudPipeline::push_sprite(v, hx, hy, hw, hh, icon),
     None => match craft::tool(s.id) {
         None if s.id == craft::SHEARS => {
             // Two blades over a grip.
@@ -1966,17 +1970,13 @@ fn push_stack(v: &mut Vec<HudVertex>, (hx, hy, hw, hh): (f32, f32, f32, f32), s:
         }
     }}}
     if let Some(max) = craft::max_damage(s.id).filter(|_| s.damage > 0) {
+        // `renderItemOverlayIntoGUI`: a 13 x 2 unit bar at (2, 13), black behind the green-to-red fill.
         let left = (1.0 - s.damage as f32 / max as f32).clamp(0.0, 1.0);
-        let (by, bh) = (hy + hh - pad * 0.5 - (hh * 0.06).max(2.0), (hh * 0.06).max(2.0));
-        HudPipeline::push_quad(v, ix, by, iw, bh, [0.0, 0.0, 0.0, 0.8]);
-        HudPipeline::push_quad(v, ix, by, iw * left, bh, [1.0 - left, left, 0.0, 1.0]);
+        HudPipeline::push_quad(v, cx + 2.0 * u, cy + 13.0 * u, 13.0 * u, 2.0 * u, [0.0, 0.0, 0.0, 1.0]);
+        HudPipeline::push_quad(v, cx + 2.0 * u, cy + 13.0 * u, 13.0 * u * left, u, [1.0 - left, left, 0.0, 1.0]);
     }
     if s.count > 1 {
-        let dh = hh * 0.3;
-        let digits = if s.count > 9 { 2.0 } else { 1.0 };
-        let (nx, ny) = (hx + hw - pad * 0.5 - (digits * 0.71 - 0.21) * dh, hy + hh - pad * 0.5 - dh);
-        HudPipeline::push_number(v, nx + 1.5, ny + 1.5, dh, s.count as u32, [0.0, 0.0, 0.0, 0.9]);
-        HudPipeline::push_number(v, nx, ny, dh, s.count as u32, [1.0; 4]);
+        HudPipeline::push_count(v, cx, cy, u, s.count as u32);
     }
 }
 
