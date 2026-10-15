@@ -269,12 +269,20 @@ impl OctaveNoise {
     pub fn generate(&self, x: f64, y: f64, z: f64, sx: usize, sy: usize, sz: usize,
                     dx: f64, dy: f64, dz: f64) -> Vec<f64> {
         let mut out = vec![0.0; sx * sy * sz];
+        self.generate_into(&mut out, x, y, z, sx, sy, sz, dx, dy, dz);
+        out
+    }
+
+    /// `generate` into a caller's buffer (`sx * sy * sz` long; cleared first), so a hot caller allocates nothing.
+    #[allow(clippy::too_many_arguments)]
+    pub fn generate_into(&self, out: &mut [f64], x: f64, y: f64, z: f64, sx: usize, sy: usize, sz: usize,
+                         dx: f64, dy: f64, dz: f64) {
+        out.fill(0.0);
         let mut amp = 1.0;
         for g in &self.gens {
-            g.add(&mut out, x, y, z, sx, sy, sz, dx * amp, dy * amp, dz * amp, amp);
+            g.add(out, x, y, z, sx, sy, sz, dx * amp, dy * amp, dz * amp, amp);
             amp /= 2.0;
         }
-        out
     }
 
     /// NoiseGeneratorOctaves.func_806_a: one (x, z) sample summed over the octaves.
@@ -290,6 +298,11 @@ impl OctaveNoise {
     /// func_4109_a: the x/z-only variant (sy = 1, y fixed at 10).
     pub fn generate_2d(&self, x: i32, z: i32, sx: usize, sz: usize, dx: f64, dz: f64) -> Vec<f64> {
         self.generate(x as f64, 10.0, z as f64, sx, 1, sz, dx, 1.0, dz)
+    }
+
+    /// `generate_2d` into a caller's buffer.
+    pub fn generate_2d_into(&self, out: &mut [f64], x: i32, z: i32, sx: usize, sz: usize, dx: f64, dz: f64) {
+        self.generate_into(out, x as f64, 10.0, z as f64, sx, 1, sz, dx, 1.0, dz);
     }
 }
 

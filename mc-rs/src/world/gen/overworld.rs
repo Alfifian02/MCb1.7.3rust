@@ -76,6 +76,7 @@ pub struct OverworldGenerator {
     /// Noise columns by absolute grid (x, z): a chunk's 5x5 grid shares its border columns with its
     /// neighbours, so a column sampled once serves up to 4 chunks (Noisium: cached generation shape).
     cols: HashMap<(i32, i32), Col>,
+    max_cols: usize,
 }
 
 /// The five noise samples of one density grid column (17 high), in the order `density` reads them.
@@ -102,7 +103,7 @@ impl OverworldGenerator {
         let noise_main = OctaveNoise::new(&mut rand, 10);
         let noise_height = OctaveNoise::new(&mut rand, 16);
         let noise_spawner = OctaveNoise::new(&mut rand, 8);
-        Self { seed, rand, noise_lim, noise_low, noise_base, noise_sand, noise_stone, noise_main, noise_height, noise_spawner, cols: HashMap::new() }
+        Self { seed, rand, noise_lim, noise_low, noise_base, noise_sand, noise_stone, noise_main, noise_height, noise_spawner, cols: HashMap::new(), max_cols: MAX_COLS }
     }
 
     /// Highest solid block at column (x, z) of a grid `depth` blocks deep in Z, or -1 if none.
@@ -133,16 +134,13 @@ impl OverworldGenerator {
         if self.cols.contains_key(&(gx, gz)) {
             return;
         }
-        if self.cols.len() >= MAX_COLS {
-            self.cols.clear();
-        }
         let (xf, zf) = (gx as f64, gz as f64);
         let mut c = Col { main: 0.0, height: 0.0, base: [0.0; 17], lim: [0.0; 17], low: [0.0; 17] };
-        c.main = self.noise_main.generate_2d(gx, gz, 1, 1, 1.121, 1.121)[0];
-        c.height = self.noise_height.generate_2d(gx, gz, 1, 1, 200.0, 200.0)[0];
-        c.base.copy_from_slice(&self.noise_base.generate(xf, 0.0, zf, 1, 17, 1, 684.412 / 80.0, 684.412 / 160.0, 684.412 / 80.0));
-        c.lim.copy_from_slice(&self.noise_lim.generate(xf, 0.0, zf, 1, 17, 1, 684.412, 684.412, 684.412));
-        c.low.copy_from_slice(&self.noise_low.generate(xf, 0.0, zf, 1, 17, 1, 684.412, 684.412, 684.412));
+        self.noise_main.generate_2d_into(std::slice::from_mut(&mut c.main), gx, gz, 1, 1, 1.121, 1.121);
+        self.noise_height.generate_2d_into(std::slice::from_mut(&mut c.height), gx, gz, 1, 1, 200.0, 200.0);
+        self.noise_base.generate_into(&mut c.base, xf, 0.0, zf, 1, 17, 1, 684.412 / 80.0, 684.412 / 160.0, 684.412 / 80.0);
+        self.noise_lim.generate_into(&mut c.lim, xf, 0.0, zf, 1, 17, 1, 684.412, 684.412, 684.412);
+        self.noise_low.generate_into(&mut c.low, xf, 0.0, zf, 1, 17, 1, 684.412, 684.412, 684.412);
         self.cols.insert((gx, gz), c);
     }
 
@@ -151,6 +149,10 @@ impl OverworldGenerator {
         const SX: usize = 5;
         const SY: usize = 17;
         const SZ: usize = 5;
+        // Dropped before the fill, never inside it: a chunk's 25 columns must all survive until it is done.
+        if self.cols.len() + SX * SZ > self.max_cols {
+            self.cols.clear();
+        }
         for ix in 0..SX as i32 {
             for iz in 0..SZ as i32 {
                 self.column(x + ix, z + iz);
@@ -271,9 +273,10 @@ impl OverworldGenerator {
         let (bx, bz) = ((chunk_x * 16) as f64, (chunk_z * 16) as f64);
         // Sand and gravel both use noise_sand; gravel samples an x/z plane,
         // sand an x/y plane (z fixed at 0). Quirks kept from the Java.
-        let sand_n = self.noise_sand.generate(bx, bz, 0.0, 16, 16, 1, s, s, 1.0);
-        let gravel_n = self.noise_sand.generate(bx, 109.0134, bz, 16, 1, 16, s, 1.0, s);
-        let stone_n = self.noise_stone.generate(bx, bz, 0.0, 16, 16, 1, s * 2.0, s * 2.0, s * 2.0);
+        let (mut sand_n, mut gravel_n, mut stone_n) = ([0.0; 256], [0.0; 256], [0.0; 256]);
+        self.noise_sand.generate_into(&mut sand_n, bx, bz, 0.0, 16, 16, 1, s, s, 1.0);
+        self.noise_sand.generate_into(&mut gravel_n, bx, 109.0134, bz, 16, 1, 16, s, 1.0, s);
+        self.noise_stone.generate_into(&mut stone_n, bx, bz, 0.0, 16, 16, 1, s * 2.0, s * 2.0, s * 2.0);
         let sea = SEA_LEVEL;
         for a in 0..16usize {
             for b in 0..16usize {
@@ -284,13 +287,15 @@ impl OverworldGenerator {
                 let mut depth = -1;
                 let mut top = biome.top_block();
                 let mut filler = biome.filler_block();
+                // One column as a slice: no per-block index arithmetic or bounds checks (FastSurface's packed column walk).
+                let col = &mut blocks[(b * 16 + a) * 128..][..H];
                 for y in (0..H).rev() {
-                    let idx = (b * 16 + a) * 128 + y;
+                    // The draw is made for every y, as in the Java: it advances the Random.
                     if y as i32 <= self.rand.next_int_bound(5) {
-                        blocks[idx] = block::BEDROCK;
+                        col[y] = block::BEDROCK;
                         continue;
                     }
-                    let cur = blocks[idx];
+                    let cur = col[y];
                     if cur == block::AIR {
                         depth = -1;
                     } else if cur == block::STONE {
@@ -310,10 +315,10 @@ impl OverworldGenerator {
                                 top = block::WATER;
                             }
                             depth = stone;
-                            blocks[idx] = if y as i32 >= sea - 1 { top } else { filler };
+                            col[y] = if y as i32 >= sea - 1 { top } else { filler };
                         } else if depth > 0 {
                             depth -= 1;
-                            blocks[idx] = filler;
+                            col[y] = filler;
                             if depth == 0 && filler == block::SAND {
                                 depth = self.rand.next_int_bound(4);
                                 filler = block::SANDSTONE;
@@ -408,7 +413,8 @@ mod tests {
     fn cached_columns_match_a_fresh_generator() {
         let mut cm = WorldChunkManager::new(7);
         let mut shared = OverworldGenerator::new(7);
-        for (cx, cz) in [(0, 0), (1, 0), (0, 1), (1, 1), (-1, 0), (0, -1), (1, 0)] {
+        shared.max_cols = 60; // two chunks' worth: the cache is dropped again and again
+        for (cx, cz) in [(0, 0), (1, 0), (0, 1), (1, 1), (-1, 0), (0, -1), (1, 0), (2, 0), (3, 0), (3, 1), (2, 1), (0, 0)] {
             let fresh = OverworldGenerator::new(7).generate(cx, cz, &mut cm);
             assert_eq!(shared.generate(cx, cz, &mut cm), fresh, "chunk ({cx}, {cz})");
         }
