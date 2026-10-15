@@ -77,6 +77,8 @@ pub struct OverworldGenerator {
     /// neighbours, so a column sampled once serves up to 4 chunks (Noisium: cached generation shape).
     cols: HashMap<(i32, i32), Col>,
     max_cols: usize,
+    /// The second world type (`realistic.rs`): its terrain replaces the density pass; surface, caves and populate are unchanged.
+    realistic: Option<crate::world::gen::realistic::Realistic>,
 }
 
 /// The five noise samples of one density grid column (17 high), in the order `density` reads them.
@@ -103,7 +105,13 @@ impl OverworldGenerator {
         let noise_main = OctaveNoise::new(&mut rand, 10);
         let noise_height = OctaveNoise::new(&mut rand, 16);
         let noise_spawner = OctaveNoise::new(&mut rand, 8);
-        Self { seed, rand, noise_lim, noise_low, noise_base, noise_sand, noise_stone, noise_main, noise_height, noise_spawner, cols: HashMap::new(), max_cols: MAX_COLS }
+        Self { seed, rand, noise_lim, noise_low, noise_base, noise_sand, noise_stone, noise_main, noise_height, noise_spawner, cols: HashMap::new(), max_cols: MAX_COLS, realistic: None }
+    }
+
+    /// This generator on the Realistic world type.
+    pub fn realistic(mut self) -> Self {
+        self.realistic = Some(crate::world::gen::realistic::Realistic::new(self.seed));
+        self
     }
 
     /// Highest solid block at column (x, z) of a grid `depth` blocks deep in Z, or -1 if none.
@@ -122,7 +130,14 @@ impl OverworldGenerator {
         self.rand.set_seed(chunk_seed(chunk_x, chunk_z));
         let biomes = cm.load_block_generator_data(chunk_x * 16, chunk_z * 16, 16, 16);
         let mut blocks = vec![block::AIR; VOLUME];
-        self.generate_terrain(chunk_x, chunk_z, &mut blocks, &cm.temperature, &cm.humidity);
+        if let Some(r) = self.realistic.as_ref() {
+            use crate::world::gen::realistic::GRID;
+            let grid = cm.load_block_generator_data(chunk_x * 16 - 16, chunk_z * 16 - 16, GRID, GRID);
+            cm.load_block_generator_data(chunk_x * 16, chunk_z * 16, 16, 16); // leaves the chunk's own climate in `cm`, as the vanilla path does
+            r.fill(chunk_x, chunk_z, &mut blocks, &grid, &cm.temperature);
+        } else {
+            self.generate_terrain(chunk_x, chunk_z, &mut blocks, &cm.temperature, &cm.humidity);
+        }
         self.replace_blocks_for_biome(chunk_x, chunk_z, &mut blocks, &biomes);
         caves::carve(self.seed, chunk_x, chunk_z, &mut blocks);
         blocks

@@ -52,6 +52,8 @@ pub enum PointerRole {
     Pause,
     /// Press landed on the temporary reset-world button (pause menu only). Arms on the first release, fires on the second.
     Reset,
+    /// Press landed on the world-type button (pause menu only). Arms on the first release, switches the type and resets on the second.
+    WorldType,
     /// Press landed on the renderer button (pause menu only). Fires on release.
     Backend,
     /// Press landed on the zoom button. Zoomed while held (`TouchUi::zooming`).
@@ -97,6 +99,8 @@ pub struct LayoutRects {
     pub reset: Rect,
     /// Vulkan / OpenGL toggle, under `reset`.
     pub backend: Rect,
+    /// World-type toggle, under `backend`.
+    pub world: Rect,
     pub hotbar: [Rect; HOTBAR_SLOTS],
     pub jump: Rect,
     /// The sneak button, the d-pad's centre cell.
@@ -137,9 +141,10 @@ impl LayoutRects {
 
         let bw = (0.8 * u).min(w * 0.6);
         let bh = 0.16 * u;
-        let resume = ((w - bw) * 0.5, (h - bh) * 0.5, bw, bh);
+        let resume = ((w - bw) * 0.5, (h - bh) * 0.5 - bh * 0.45, bw, bh);
         let reset = (resume.0, resume.1 + bh * 1.25, bw, bh * 0.8);
         let backend = (resume.0, resume.1 + bh * 2.15, bw, bh * 0.8);
+        let world = (resume.0, resume.1 + bh * 3.05, bw, bh * 0.8);
 
         // The d-pad: a 3 x 3 block of square cells, its bottom edge half a pad above the hotbar row, so it clears the hotbar at any ratio.
         let dpad_gap = 0.012 * u;
@@ -151,7 +156,7 @@ impl LayoutRects {
         let jw = 0.16 * u;
         let jump = (w - pad * 1.5 - jw, cy - jw * 0.5, jw, jw);
 
-        Self { width: w, pause, inventory, zoom, resume, reset, backend, hotbar, jump, sneak: cell(0.0, 0.0), dpad, dpad_gap }
+        Self { width: w, pause, inventory, zoom, resume, reset, backend, world, hotbar, jump, sneak: cell(0.0, 0.0), dpad, dpad_gap }
     }
 
     /// Hit-test a press. `None` means the press is ignored. While paused only
@@ -161,7 +166,7 @@ impl LayoutRects {
             return Some(PointerRole::Pause);
         }
         if paused {
-            return if in_rect(self.reset, x, y) { Some(PointerRole::Reset) } else { in_rect(self.backend, x, y).then_some(PointerRole::Backend) };
+            return if in_rect(self.reset, x, y) { Some(PointerRole::Reset) } else if in_rect(self.backend, x, y) { Some(PointerRole::Backend) } else { in_rect(self.world, x, y).then_some(PointerRole::WorldType) };
         }
         if in_rect(self.inventory, x, y) {
             return Some(PointerRole::Inventory);
@@ -223,6 +228,9 @@ pub struct TouchUi {
     /// TEMPORARY reset-world button: armed by one tap (drawn bright), confirmed by the next; leaving the pause menu disarms it.
     pub reset_armed: bool,
     reset: bool,
+    /// World-type button: armed by one tap, confirmed by the next (like the reset button).
+    pub wt_armed: bool,
+    wt: bool,
     backend: bool,
     /// Finger events on an open screen since the last `take_screen_events`.
     events: Vec<ScreenEv>,
@@ -249,10 +257,17 @@ impl TouchUi {
             inventory: false,
             reset_armed: false,
             reset: false,
+            wt_armed: false,
+            wt: false,
             backend: false,
             events: Vec::new(),
             cursor_pos: (w as f32 * 0.5, h as f32 * 0.5),
         }
+    }
+
+    /// The world-type button was confirmed (tapped twice) since the last call.
+    pub fn take_worldtype(&mut self) -> bool {
+        std::mem::take(&mut self.wt)
     }
 
     /// The reset-world button was confirmed (tapped twice) since the last call.
@@ -438,18 +453,29 @@ impl TouchUi {
     fn on_release(&mut self, pid: i32) {
         let Some(ptr) = self.pointers.remove(&pid) else { return };
         match ptr.role {
+            PointerRole::WorldType => {
+                self.reset_armed = false;
+                if self.wt_armed {
+                    (self.wt, self.wt_armed, self.paused) = (true, false, false);
+                    self.clear();
+                } else {
+                    self.wt_armed = true;
+                }
+            }
             PointerRole::Reset => {
                 if self.reset_armed {
                     (self.reset, self.reset_armed, self.paused) = (true, false, false);
                     self.clear();
                 } else {
                     self.reset_armed = true;
+                    self.wt_armed = false;
                 }
             }
             PointerRole::Backend => self.backend = true,
             PointerRole::Pause => {
                 self.paused = !self.paused;
                 self.reset_armed = false;
+                self.wt_armed = false;
                 self.clear();
                 log::info!("touch: pause -> {}", self.paused);
             }
@@ -726,6 +752,25 @@ mod tests {
         assert!(ui.zooming());
         ui.on_release(1);
         assert!(!ui.zooming());
+    }
+
+    /// The world-type button answers only while paused and needs two taps; arming it disarms the reset button and the other way round.
+    #[test]
+    fn world_type_needs_two_taps() {
+        let mut ui = TouchUi::new(W, H);
+        let (x, y) = (ui.layout.world.0 + 5.0, ui.layout.world.1 + 5.0);
+        assert!(ui.layout.world.1 + ui.layout.world.3 <= H as f32);
+        assert_eq!(ui.layout.hit_test(x, y, false, false), Some(PointerRole::Look));
+        ui.paused = true;
+        tap(&mut ui, 1, x, y);
+        assert!(ui.wt_armed && !ui.take_worldtype() && ui.paused);
+        let (rx, ry) = (ui.layout.reset.0 + 5.0, ui.layout.reset.1 + 5.0);
+        tap(&mut ui, 2, rx, ry);
+        assert!(ui.reset_armed && !ui.wt_armed);
+        tap(&mut ui, 3, x, y);
+        assert!(ui.wt_armed && !ui.reset_armed);
+        tap(&mut ui, 4, x, y);
+        assert!(ui.take_worldtype() && !ui.take_worldtype() && !ui.take_reset() && !ui.paused && !ui.wt_armed);
     }
 
     #[test]

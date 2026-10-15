@@ -318,6 +318,11 @@ impl ChunkManager {
     /// `radius` is the render distance in chunks. Dropping the manager closes the job channel,
     /// which ends the workers.
     pub fn new(seed: i64, radius: i32) -> Self {
+        Self::new_typed(seed, radius, false)
+    }
+
+    /// `new` with the world type: `realistic` = the second generator (`gen::realistic`) in every worker and for `preload`.
+    pub fn new_typed(seed: i64, radius: i32, realistic: bool) -> Self {
         let (jobs, job_rx) = mpsc::channel::<Job>();
         let (done_tx, done) = mpsc::channel();
         let (built_tx, built) = mpsc::channel();
@@ -333,6 +338,9 @@ impl ChunkManager {
                     // Each worker owns its generator: generate() reseeds per chunk, so the
                     // result does not depend on which worker gets which chunk.
                     let mut g = OverworldGenerator::new(seed);
+                    if realistic {
+                        g = g.realistic();
+                    }
                     let mut cm = WorldChunkManager::new(seed);
                     loop {
                         // The guard is a temporary of this statement: the lock is held while
@@ -369,7 +377,7 @@ impl ChunkManager {
 
         Self { chunks: Chunks::default(), pending: HashSet::new(), ring, radius, center: None, max_in_flight: workers * 2, built, meshing: HashSet::new(), max_meshing: workers * 2,
                populated_rx, populating: HashMap::new(), busy: HashSet::new(), max_populating: workers, stamp: 0,
-               gen: OverworldGenerator::new(seed), cm: WorldChunkManager::new(seed), jobs, done, light_queue: Vec::new(), sky_sub: 0, mesh_gen: 0, dir: None, saved: HashSet::new(), writer: None, changes: Vec::new(), loot: Vec::new(), spawners: Vec::new(), culler: Culler::default(), visible: HashMap::new() }
+               gen: if realistic { OverworldGenerator::new(seed).realistic() } else { OverworldGenerator::new(seed) }, cm: WorldChunkManager::new(seed), jobs, done, light_queue: Vec::new(), sky_sub: 0, mesh_gen: 0, dir: None, saved: HashSet::new(), writer: None, changes: Vec::new(), loot: Vec::new(), spawners: Vec::new(), culler: Culler::default(), visible: HashMap::new() }
     }
 
     /// Keep this world in `dir`: chunks found there are loaded instead of generated, and edited ones are written back

@@ -87,6 +87,8 @@ const EYE_HEIGHT: f32 = 1.62 - physics::HALF.y;
 
 struct App {
     gpu: Gpu,
+    /// World type: false = vanilla b1.7.3 terrain, true = Realistic (`world::gen::realistic`). Saved in `<private storage>/worldtype`.
+    realistic: bool,
     /// The renderer button was tapped: the main loop saves, drops this App and starts again on the other backend.
     switch: bool,
     pipe: ChunkPipeline,
@@ -208,9 +210,10 @@ impl App {
         // generated and populated) here (init runs on its own thread, not the render loop); everything further out
         // streams in on the worker threads. A saved world resumes where the player stood, a new one at the origin.
         // One folder per seed: chunks saved for another seed would not fit this terrain.
-        let dir = dir.join(format!("world-{SEED:x}"));
+        let realistic = std::fs::read_to_string(dir.join("worldtype")).is_ok_and(|s| s.trim() == "realistic");
+        let dir = dir.join(world_dir(realistic));
         let level = std::fs::read(dir.join("level")).ok().and_then(|b| Level::decode(&b));
-        let mut chunks = ChunkManager::new(SEED, RENDER_DIST).with_dir(dir.clone());
+        let mut chunks = ChunkManager::new_typed(SEED, RENDER_DIST, realistic).with_dir(dir.clone());
         let (pcx, pcz) = level.as_ref().map_or((0, 0), |l| (chunk_coord(l.pos.x), chunk_coord(l.pos.z)));
         chunks.preload(pcx, pcz);
         let spawn = level.as_ref().map_or_else(|| find_spawn(&chunks), |l| l.spawn);
@@ -249,7 +252,7 @@ impl App {
         let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as i64);
 
         let mut app = Self {
-            gpu, switch: false, pipe,
+            gpu, realistic, switch: false, pipe,
             chunks, camera,
             player,
             last_frame: Instant::now(),
@@ -320,6 +323,17 @@ impl App {
         Ok(app)
     }
 
+    /// The pause menu's world-type button: save this world (it stays in its own folder), flip the type, remember it, and start a
+    /// fresh world of the other type (its folder is wiped, as a reset does).
+    fn switch_world_type(&mut self) {
+        self.save(usize::MAX);
+        self.realistic = !self.realistic;
+        let root = self.dir.parent().map_or_else(std::env::temp_dir, |p| p.to_path_buf());
+        let _ = std::fs::write(root.join("worldtype"), if self.realistic { "realistic" } else { "vanilla" });
+        self.dir = root.join(world_dir(self.realistic));
+        self.reset_world();
+    }
+
     /// TEMPORARY (pause-menu reset button): delete the save folder and put everything back to a new world of `SEED`: terrain
     /// without edits, spawn point, hotbar and inventory, health, time, weather, mobs, drops, furnaces, block updates. An open
     /// screen's stacks are discarded, not dropped. ponytail: `preload` runs on the render thread (a second or two of freeze).
@@ -332,7 +346,7 @@ impl App {
         self.boats = boat::Boats::default();
         let _ = std::fs::remove_dir_all(&self.dir);
         let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as i64);
-        self.chunks = ChunkManager::new(SEED, RENDER_DIST).with_dir(self.dir.clone()); // the old one's workers stop on drop
+        self.chunks = ChunkManager::new_typed(SEED, RENDER_DIST, self.realistic).with_dir(self.dir.clone()); // the old one's workers stop on drop
         self.chunks.preload(0, 0);
         self.spawn = find_spawn(&self.chunks);
         (self.sleep, self.bed_spawn) = (None, None);
@@ -426,6 +440,10 @@ impl App {
         // TEMPORARY pause-menu button: wipe the save and start the seed's world again.
         if self.touch.take_reset() {
             self.reset_world();
+            return;
+        }
+        if self.touch.take_worldtype() {
+            self.switch_world_type();
             return;
         }
         if self.touch.take_backend() {
@@ -2129,6 +2147,7 @@ impl App {
             // TEMPORARY reset-world button: after the first tap it is lit and asks again.
             label(v, layout.backend, if self.gpu.is_gl() { "Renderer: OpenGL" } else { "Renderer: Vulkan" }, pressed(PointerRole::Backend));
             label(v, layout.reset, if self.touch.reset_armed { "Tap again to confirm" } else { "Reset world" }, self.touch.reset_armed);
+            label(v, layout.world, if self.touch.wt_armed { "Tap again to confirm" } else if self.realistic { "World: Realistic" } else { "World: Vanilla" }, self.touch.wt_armed);
         }
 
         // Cap to the buffer capacity; extra quads are silently dropped.
@@ -2137,6 +2156,11 @@ impl App {
             v.truncate(max);
         }
     }
+}
+
+/// Save folder of a world type: the vanilla one keeps the name older saves have.
+fn world_dir(realistic: bool) -> String {
+    if realistic { format!("world-{SEED:x}-rtg") } else { format!("world-{SEED:x}") }
 }
 
 /// A new world's spawn point (feet position): dry ground closest to the centre of chunk (0, 0), not under water (a
