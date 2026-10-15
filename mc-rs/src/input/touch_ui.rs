@@ -54,6 +54,8 @@ pub enum PointerRole {
     Reset,
     /// Press landed on the renderer button (pause menu only). Fires on release.
     Backend,
+    /// Press landed on the zoom button. Zoomed while held (`TouchUi::zooming`).
+    Zoom,
     /// Press landed on the inventory button. Opens / closes the screen on release.
     Inventory,
     /// Any other press while a screen is open. Reported as a tap on release.
@@ -88,6 +90,8 @@ pub struct LayoutRects {
     pub width: f32,
     pub pause: Rect,
     pub inventory: Rect,
+    /// Hold to zoom (Zoomify), left of `inventory`.
+    pub zoom: Rect,
     pub resume: Rect,
     /// TEMPORARY: reset-world button, under `resume`.
     pub reset: Rect,
@@ -120,6 +124,7 @@ impl LayoutRects {
         let pause = (w - ps - pad, pad, ps, ps);
         // UNVERIFIED: b1.7.3 opens the inventory with a key; this button's place is invented for touch.
         let inventory = (w - ps * 2.0 - pad * 1.5, pad, ps, ps);
+        let zoom = (w - ps * 3.0 - pad * 2.0, pad, ps, ps);
 
         // Square cells; capped so nine of them always fit the width.
         let cell = (0.105 * u).min(w / 9.5);
@@ -146,7 +151,7 @@ impl LayoutRects {
         let jw = 0.16 * u;
         let jump = (w - pad * 1.5 - jw, cy - jw * 0.5, jw, jw);
 
-        Self { width: w, pause, inventory, resume, reset, backend, hotbar, jump, sneak: cell(0.0, 0.0), dpad, dpad_gap }
+        Self { width: w, pause, inventory, zoom, resume, reset, backend, hotbar, jump, sneak: cell(0.0, 0.0), dpad, dpad_gap }
     }
 
     /// Hit-test a press. `None` means the press is ignored. While paused only
@@ -163,6 +168,9 @@ impl LayoutRects {
         }
         if screen {
             return Some(PointerRole::Tap);
+        }
+        if in_rect(self.zoom, x, y) {
+            return Some(PointerRole::Zoom);
         }
         if in_rect(self.jump, x, y) {
             return Some(PointerRole::Jump);
@@ -255,6 +263,11 @@ impl TouchUi {
     /// The renderer button was tapped since the last call.
     pub fn take_backend(&mut self) -> bool {
         std::mem::take(&mut self.backend)
+    }
+
+    /// A finger is on the zoom button.
+    pub fn zooming(&self) -> bool {
+        self.pointers.values().any(|p| p.role == PointerRole::Zoom)
     }
 
     /// The inventory button was pressed and released since the last call.
@@ -457,7 +470,7 @@ impl TouchUi {
                     self.place = true;
                 }
             }
-            PointerRole::Jump => {}
+            PointerRole::Jump | PointerRole::Zoom => {}
         }
     }
 }
@@ -698,6 +711,21 @@ mod tests {
         ui.tick(0.3);
         ui.on_release(1);
         assert!(!ui.take_place() && !ui.digging());
+    }
+
+    /// The zoom button is held, not tapped: `zooming` is true while the finger is down, only in play, and it clears on release.
+    #[test]
+    fn zoom_button_is_a_hold() {
+        let mut ui = TouchUi::new(W, H);
+        let (x, y) = mid(ui.layout.zoom);
+        assert!(ui.layout.zoom.0 + ui.layout.zoom.2 < ui.layout.inventory.0, "zoom sits left of inventory");
+        assert_eq!(ui.layout.hit_test(x, y, true, false), None);
+        assert_eq!(ui.layout.hit_test(x, y, false, true), Some(PointerRole::Tap));
+        assert_eq!(ui.layout.hit_test(x, y, false, false), Some(PointerRole::Zoom));
+        ui.on_press(1, x, y, PointerRole::Zoom);
+        assert!(ui.zooming());
+        ui.on_release(1);
+        assert!(!ui.zooming());
     }
 
     #[test]

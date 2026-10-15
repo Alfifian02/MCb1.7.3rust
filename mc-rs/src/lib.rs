@@ -77,6 +77,8 @@ pub(crate) const ENTITY_SHADOWS: bool = false;
 pub(crate) const LEGACY: bool = true;
 
 const LOOK_SENS: f32 = 0.004;
+/// Zoom button magnification (Zoomify's default).
+const ZOOM: f32 = 4.0;
 /// World units per second when a d-pad direction is held.
 const MOVE_SPEED: f32 = physics::WALK_SPEED;
 /// Eye offset from `player.pos`, which is the CENTRE of the 1.8-tall box. Steve's eyes are
@@ -417,6 +419,10 @@ impl App {
         if dt > 1.0 / 30.0 { dt = 1.0 / 30.0; }
         if dt < 0.0 { dt = 0.0; }
         self.last_frame = now;
+        // Zoomify: hold the zoom button for 4x (the vertical tangent / 4), eased; the look drag slows with the field of view.
+        let base = 70_f32.to_radians();
+        let target = if self.touch.zooming() { 2.0 * ((base * 0.5).tan() / ZOOM).atan() } else { base };
+        self.camera.fov_y += (target - self.camera.fov_y) * (1.0 - (-14.0 * dt).exp());
         // TEMPORARY pause-menu button: wipe the save and start the seed's world again.
         if self.touch.take_reset() {
             self.reset_world();
@@ -475,8 +481,9 @@ impl App {
         let riding = self.mobs.list.iter().any(|m| m.ridden) || self.boats.ridden().is_some();
         let asleep = self.sleep.is_some();
         if !asleep {
-            self.camera.add_yaw(look_dx * LOOK_SENS);
-            self.camera.add_pitch(look_dy * LOOK_SENS);
+            let k = LOOK_SENS * (self.camera.fov_y * 0.5).tan() / (70_f32.to_radians() * 0.5).tan();
+            self.camera.add_yaw(look_dx * k);
+            self.camera.add_pitch(look_dy * k);
         }
         // Analog move stick: rotate the camera-frame (fwd, side) by yaw into
         // world-space velocity. Set every frame (zero when the stick is idle),
@@ -2006,6 +2013,11 @@ impl App {
             HudPipeline::push_quad(v, qx + dx * (q + g), qy + dy * (q + g), q, q, [1.0; 4]);
         }
 
+        // Zoom button, left of the inventory button: a Z (Zoomify), lit while held.
+        let (zx, zy, zw, zh) = layout.zoom;
+        HudPipeline::push_button(v, zx, zy, zw, zh, if pressed(PointerRole::Zoom) || !play { 2 } else { 1 });
+        HudPipeline::push_text_centered(v, zx + zw * 0.5, zy + (zh - 8.0 * zh / 20.0) * 0.5, zh / 20.0, "Z", [1.0; 4]);
+
         // Hotbar (`GuiIngame`): the 182 x 22 strip (20 units a slot, a unit = a ninth-cell / 20), then the 24 x 24 selector over the slot
         // in use, then the stacks. The touch cells are the slots, so the strip is drawn around them.
         if play {
@@ -2402,6 +2414,10 @@ fn android_main(app: AndroidApp) {
 
         if let Some(a) = app_state.as_mut() {
             a.render();
+            // Dynamic FPS: the paused world is frozen, so the menu runs at ~10 frames a second; a touch still wakes the poll.
+            if a.touch.paused {
+                std::thread::sleep(Duration::from_millis(90));
+            }
             self_main_frames += 1;
             if self_main_frames == 1 || self_main_frames == 30 || self_main_frames % 300 == 0 {
                 log::info!("M3 main frame {self_main_frames}");

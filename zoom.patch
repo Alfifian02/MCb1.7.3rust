@@ -1,0 +1,171 @@
+diff -ruN '--exclude=target' base/README.md b/README.md
+--- a/README.md	2026-10-15 06:18:55.625910432 +0000
++++ b/README.md	2026-10-15 06:16:07.780709425 +0000
+@@ -51,6 +51,7 @@
+ | Cake (M19)           | compiled and ran, not yet to be tested (+1 test, +2 asserts not yet to be tested) | `BlockCake` + `ItemReed` use: place on solid ground, tap eats a slice (heals 3 below full health, 6 slices), bitten box + tiles, gone with its ground, recipe gives the milk buckets back as empty ones. Needs `seeds-reeds.patch` (M15). Sugar has no recipe until M16. See ROADMAP changelog. |
+ | Sign + painting (M19), cactus on mobs (M17), TNT recipe + flash (M18) | compiled and ran, not yet to be tested | `world/decor.rs`: `EntityPainting` / `EnumArt` / `ItemPainting` (motive drawn among those that fit, tap to break, re-check every 101 ticks), `BlockSign` / `ItemSign` / `TileEntitySign` with an on-screen-keyboard `GuiEditSign`, post and wall models from `sign.png`, text in world, saved in the `decor` file; `art/kz.png` + `sign.png` joined the atlas. See ROADMAP changelog. |
+ | Piston animation (M21), boats (M22), speed ports | compiled and ran, not yet to be tested (the piston patch was `cargo check`ed and tested in a Linux scratch crate) | Pistons slide half a block a tick through a moving block 36 and carry entities (`ticks.rs`); `world/boat.rs`: `EntityBoat` + boat item + recipe, paddled by walking, planks model. Speed: chunk files are written by an I/O thread (C2ME), collision boxes and explosion rays are cached (Radium), terrain sections hidden behind terrain are not drawn (`embeddium/` crate, LGPL-3.0-or-later, `COPYING*`). See ROADMAP changelog. |
++| Additive ports (zoom, paused FPS cap) | written without a toolchain: not compiled, not run (+1 test `zoom_button_is_a_hold`) | Zoomify: hold the Z button (left of the inventory button) for 4x, eased, look drag slows with the field of view. Dynamic FPS: the pause menu draws at ~10 frames a second. See ROADMAP changelog. |
+ | M9..M14              | pending | Everything else: see ROADMAP.md for the order. |
+ 
+ Latest commit on `main`: see `git log -1`. Latest released APK: see the
+diff -ruN '--exclude=target' base/ROADMAP.md b/ROADMAP.md
+--- a/ROADMAP.md	2026-10-15 06:18:55.627438402 +0000
++++ b/ROADMAP.md	2026-10-15 06:16:07.780709425 +0000
+@@ -621,3 +621,7 @@
+     - `lib.rs`: the `ItemReed` branch now also places item 354 as block 92 (solid ground below, the player's box must be clear: `canBlockBePlacedAt`); a tap on a cake heals 3 below full health and adds a bite (meta + 1), the sixth bite removes it.
+     - `world/chunk.rs`: `box_bounds` (drawn / outline: loses 2/16 from -X per bite), `CAKE_PHYS` (116..=121, collision 1/16 lower), not `opaque`. `render/atlas.rs`: tiles 121 top, 122 sides, 123 bitten face, 124 bottom. `world/ticks.rs`: ground not solid = gone. `world/items.rs`: drops nothing, stack of 1. `world/craft.rs`: recipe (3 milk, 2 sugar, 3 wheat, egg), and `take_result` now leaves an empty bucket for a water / lava / milk bucket (`getContainerItem`).
+     - Not done: sugar has no source until M16 (sugar cane -> sugar recipe), a punch (`onBlockClicked`) does not eat, eat sound.
++- `done` Additive modpack audit (`additive-main.zip` is a packwiz manifest of ~60 Fabric mods, no code; compiled: no, ran: no, written without a toolchain; +1 test `touch_ui::tests::zoom_button_is_a_hold`, not yet to be tested). Ported: Zoomify (`PointerRole::Zoom`, `LayoutRects::zoom`, `TouchUi::zooming`, `lib.rs` `ZOOM` = 4x on the vertical tangent, eased 14/s, look sensitivity scaled by the field of view) and Dynamic FPS (the paused menu sleeps 90 ms a frame in `android_main`; the unfocused case never draws on Android).
++    - Already here: Sodium / Embeddium (`embeddium/`), C2ME (chunk I/O thread, workers), Lithium / Radium (cached collision boxes), Iris + shader packs (the Photon passes), Sodium Extra (fog, clouds, weather in the frame).
++    - Not applicable (no b1.7.3 or Android counterpart): everything about Fabric, Mod Menu, config libraries, networking and servers (Krypton, VMP, ServerCore, e4mc, World Host, fast pings), skins and capes (Ears, Cape Provider), resource-pack features (CIT, OptiGUI, EMF / ETF / ESF, Continuity, Polytone, Puzzle, Skyboxify, Animatica, Language Reload: the assets are baked in), keyboard / macOS fixes, chat reporting, Main Menu Credits (no main menu yet).
++    - Left out on purpose, each with its reason: Lambda Better Grass and Cull Fewer Leaves (the pack ships them off), FastQuit (saving is already a thread), Fast Noise / Fast Surface / Material Rule Compiler (would risk the bit-exact golden tests), ScalableLux (the light engine is not the measured bottleneck), Particle Core / ImmediatelyFast / Better Block Entities (no measurement to aim at), Controlify (gamepad needs a device to check), LambDynamicLights and Entity Culling (real work in the mesher / mob draw, not a one-line port; open if wanted).
+diff -ruN '--exclude=target' base/mc-rs/src/input/touch_ui.rs b/mc-rs/src/input/touch_ui.rs
+--- a/mc-rs/src/input/touch_ui.rs	2026-10-15 06:18:55.574600133 +0000
++++ b/mc-rs/src/input/touch_ui.rs	2026-10-15 06:15:55.561479732 +0000
+@@ -52,6 +52,8 @@
+     Pause,
+     /// Press landed on the temporary reset-world button (pause menu only). Arms on the first release, fires on the second.
+     Reset,
++    /// Press landed on the zoom button. Zoomed while held (`TouchUi::zooming`).
++    Zoom,
+     /// Press landed on the inventory button. Opens / closes the screen on release.
+     Inventory,
+     /// Any other press while a screen is open. Reported as a tap on release.
+@@ -86,6 +88,8 @@
+     pub width: f32,
+     pub pause: Rect,
+     pub inventory: Rect,
++    /// Hold to zoom (Zoomify), left of `inventory`.
++    pub zoom: Rect,
+     pub resume: Rect,
+     /// TEMPORARY: reset-world button, under `resume`.
+     pub reset: Rect,
+@@ -116,6 +120,7 @@
+         let pause = (w - ps - pad, pad, ps, ps);
+         // UNVERIFIED: b1.7.3 opens the inventory with a key; this button's place is invented for touch.
+         let inventory = (w - ps * 2.0 - pad * 1.5, pad, ps, ps);
++        let zoom = (w - ps * 3.0 - pad * 2.0, pad, ps, ps);
+ 
+         // Square cells; capped so nine of them always fit the width.
+         let cell = (0.105 * u).min(w / 9.5);
+@@ -141,7 +146,7 @@
+         let jw = 0.16 * u;
+         let jump = (w - pad * 1.5 - jw, cy - jw * 0.5, jw, jw);
+ 
+-        Self { width: w, pause, inventory, resume, reset, hotbar, jump, sneak: cell(0.0, 0.0), dpad, dpad_gap }
++        Self { width: w, pause, inventory, zoom, resume, reset, hotbar, jump, sneak: cell(0.0, 0.0), dpad, dpad_gap }
+     }
+ 
+     /// Hit-test a press. `None` means the press is ignored. While paused only
+@@ -159,6 +164,9 @@
+         if screen {
+             return Some(PointerRole::Tap);
+         }
++        if in_rect(self.zoom, x, y) {
++            return Some(PointerRole::Zoom);
++        }
+         if in_rect(self.jump, x, y) {
+             return Some(PointerRole::Jump);
+         }
+@@ -245,6 +253,11 @@
+         std::mem::take(&mut self.reset)
+     }
+ 
++    /// A finger is on the zoom button.
++    pub fn zooming(&self) -> bool {
++        self.pointers.values().any(|p| p.role == PointerRole::Zoom)
++    }
++
+     /// The inventory button was pressed and released since the last call.
+     pub fn take_inventory(&mut self) -> bool {
+         std::mem::take(&mut self.inventory)
+@@ -444,7 +457,7 @@
+                     self.place = true;
+                 }
+             }
+-            PointerRole::Jump => {}
++            PointerRole::Jump | PointerRole::Zoom => {}
+         }
+     }
+ }
+@@ -676,6 +689,21 @@
+         assert!(!ui.take_place() && !ui.digging());
+     }
+ 
++    /// The zoom button is held, not tapped: `zooming` is true while the finger is down, only in play, and it clears on release.
++    #[test]
++    fn zoom_button_is_a_hold() {
++        let mut ui = TouchUi::new(W, H);
++        let (x, y) = mid(ui.layout.zoom);
++        assert!(ui.layout.zoom.0 + ui.layout.zoom.2 < ui.layout.inventory.0, "zoom sits left of inventory");
++        assert_eq!(ui.layout.hit_test(x, y, true, false), None);
++        assert_eq!(ui.layout.hit_test(x, y, false, true), Some(PointerRole::Tap));
++        assert_eq!(ui.layout.hit_test(x, y, false, false), Some(PointerRole::Zoom));
++        ui.on_press(1, x, y, PointerRole::Zoom);
++        assert!(ui.zooming());
++        ui.on_release(1);
++        assert!(!ui.zooming());
++    }
++
+     #[test]
+     fn open_screen_turns_presses_into_taps() {
+         let mut ui = TouchUi::new(W, H);
+diff -ruN '--exclude=target' base/mc-rs/src/lib.rs b/mc-rs/src/lib.rs
+--- a/mc-rs/src/lib.rs	2026-10-15 06:18:55.575051649 +0000
++++ b/mc-rs/src/lib.rs	2026-10-15 06:15:52.447817022 +0000
+@@ -77,6 +77,8 @@
+ pub(crate) const LEGACY: bool = true;
+ 
+ const LOOK_SENS: f32 = 0.004;
++/// Zoom button magnification (Zoomify's default).
++const ZOOM: f32 = 4.0;
+ /// World units per second when a d-pad direction is held.
+ const MOVE_SPEED: f32 = physics::WALK_SPEED;
+ /// Eye offset from `player.pos`, which is the CENTRE of the 1.8-tall box. Steve's eyes are
+@@ -415,6 +417,10 @@
+         if dt > 1.0 / 30.0 { dt = 1.0 / 30.0; }
+         if dt < 0.0 { dt = 0.0; }
+         self.last_frame = now;
++        // Zoomify: hold the zoom button for 4x (the vertical tangent / 4), eased; the look drag slows with the field of view.
++        let base = 70_f32.to_radians();
++        let target = if self.touch.zooming() { 2.0 * ((base * 0.5).tan() / ZOOM).atan() } else { base };
++        self.camera.fov_y += (target - self.camera.fov_y) * (1.0 - (-14.0 * dt).exp());
+         // TEMPORARY pause-menu button: wipe the save and start the seed's world again.
+         if self.touch.take_reset() {
+             self.reset_world();
+@@ -469,8 +475,9 @@
+         let riding = self.mobs.list.iter().any(|m| m.ridden) || self.boats.ridden().is_some();
+         let asleep = self.sleep.is_some();
+         if !asleep {
+-            self.camera.add_yaw(look_dx * LOOK_SENS);
+-            self.camera.add_pitch(look_dy * LOOK_SENS);
++            let k = LOOK_SENS * (self.camera.fov_y * 0.5).tan() / (70_f32.to_radians() * 0.5).tan();
++            self.camera.add_yaw(look_dx * k);
++            self.camera.add_pitch(look_dy * k);
+         }
+         // Analog move stick: rotate the camera-frame (fwd, side) by yaw into
+         // world-space velocity. Set every frame (zero when the stick is idle),
+@@ -2000,6 +2007,11 @@
+             HudPipeline::push_quad(v, qx + dx * (q + g), qy + dy * (q + g), q, q, [1.0; 4]);
+         }
+ 
++        // Zoom button, left of the inventory button: a Z (Zoomify), lit while held.
++        let (zx, zy, zw, zh) = layout.zoom;
++        HudPipeline::push_button(v, zx, zy, zw, zh, if pressed(PointerRole::Zoom) || !play { 2 } else { 1 });
++        HudPipeline::push_text_centered(v, zx + zw * 0.5, zy + (zh - 8.0 * zh / 20.0) * 0.5, zh / 20.0, "Z", [1.0; 4]);
++
+         // Hotbar (`GuiIngame`): the 182 x 22 strip (20 units a slot, a unit = a ninth-cell / 20), then the 24 x 24 selector over the slot
+         // in use, then the stacks. The touch cells are the slots, so the strip is drawn around them.
+         if play {
+@@ -2372,6 +2384,10 @@
+ 
+         if let Some(a) = app_state.as_mut() {
+             a.render();
++            // Dynamic FPS: the paused world is frozen, so the menu runs at ~10 frames a second; a touch still wakes the poll.
++            if a.touch.paused {
++                std::thread::sleep(Duration::from_millis(90));
++            }
+             self_main_frames += 1;
+             if self_main_frames == 1 || self_main_frames == 30 || self_main_frames % 300 == 0 {
+                 log::info!("M3 main frame {self_main_frames}");
