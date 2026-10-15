@@ -8,6 +8,7 @@ use crate::world::biome::Biome;
 use crate::world::gen::caves;
 use crate::world::gen::chunk_manager::WorldChunkManager;
 use crate::world::gen::noise::{JavaRandom, OctaveNoise};
+use std::collections::HashMap;
 
 pub const W: usize = 16;
 pub const H: usize = 128;
@@ -72,7 +73,22 @@ pub struct OverworldGenerator {
     noise_height: OctaveNoise, // field_921_b, 16
     /// mobSpawnerNoise, 8 octaves, last in the constructor's order: populate's tree count.
     pub(super) noise_spawner: OctaveNoise,
+    /// Noise columns by absolute grid (x, z): a chunk's 5x5 grid shares its border columns with its
+    /// neighbours, so a column sampled once serves up to 4 chunks (Noisium: cached generation shape).
+    cols: HashMap<(i32, i32), Col>,
 }
+
+/// The five noise samples of one density grid column (17 high), in the order `density` reads them.
+struct Col {
+    main: f64,
+    height: f64,
+    base: [f64; 17],
+    lim: [f64; 17],
+    low: [f64; 17],
+}
+
+/// ponytail: past this many columns (~0.4 KB each) the cache is dropped whole; upgrade is an LRU.
+const MAX_COLS: usize = 4096;
 
 impl OverworldGenerator {
     pub fn new(seed: i64) -> Self {
@@ -86,7 +102,7 @@ impl OverworldGenerator {
         let noise_main = OctaveNoise::new(&mut rand, 10);
         let noise_height = OctaveNoise::new(&mut rand, 16);
         let noise_spawner = OctaveNoise::new(&mut rand, 8);
-        Self { seed, rand, noise_lim, noise_low, noise_base, noise_sand, noise_stone, noise_main, noise_height, noise_spawner }
+        Self { seed, rand, noise_lim, noise_low, noise_base, noise_sand, noise_stone, noise_main, noise_height, noise_spawner, cols: HashMap::new() }
     }
 
     /// Highest solid block at column (x, z) of a grid `depth` blocks deep in Z, or -1 if none.
@@ -111,22 +127,38 @@ impl OverworldGenerator {
         blocks
     }
 
+    /// The noise columns of absolute grid cell (gx, gz). One column is the same arithmetic as the
+    /// Java's batch (`add` restarts its y cache at iy = 0), so every value is bit for bit the same.
+    fn column(&mut self, gx: i32, gz: i32) {
+        if self.cols.contains_key(&(gx, gz)) {
+            return;
+        }
+        if self.cols.len() >= MAX_COLS {
+            self.cols.clear();
+        }
+        let (xf, zf) = (gx as f64, gz as f64);
+        let mut c = Col { main: 0.0, height: 0.0, base: [0.0; 17], lim: [0.0; 17], low: [0.0; 17] };
+        c.main = self.noise_main.generate_2d(gx, gz, 1, 1, 1.121, 1.121)[0];
+        c.height = self.noise_height.generate_2d(gx, gz, 1, 1, 200.0, 200.0)[0];
+        c.base.copy_from_slice(&self.noise_base.generate(xf, 0.0, zf, 1, 17, 1, 684.412 / 80.0, 684.412 / 160.0, 684.412 / 80.0));
+        c.lim.copy_from_slice(&self.noise_lim.generate(xf, 0.0, zf, 1, 17, 1, 684.412, 684.412, 684.412));
+        c.low.copy_from_slice(&self.noise_low.generate(xf, 0.0, zf, 1, 17, 1, 684.412, 684.412, 684.412));
+        self.cols.insert((gx, gz), c);
+    }
+
     /// func_4061_a: the 5x17x5 density grid.
-    fn density(&self, x: i32, z: i32, temps: &[f64], hums: &[f64]) -> Vec<f64> {
+    fn density(&mut self, x: i32, z: i32, temps: &[f64], hums: &[f64]) -> Vec<f64> {
         const SX: usize = 5;
         const SY: usize = 17;
         const SZ: usize = 5;
-        let (xf, zf) = (x as f64, z as f64);
-        let d_main = self.noise_main.generate_2d(x, z, SX, SZ, 1.121, 1.121);
-        let d_height = self.noise_height.generate_2d(x, z, SX, SZ, 200.0, 200.0);
-        let d_base = self.noise_base.generate(xf, 0.0, zf, SX, SY, SZ, 684.412 / 80.0, 684.412 / 160.0, 684.412 / 80.0);
-        let d_lim = self.noise_lim.generate(xf, 0.0, zf, SX, SY, SZ, 684.412, 684.412, 684.412);
-        let d_low = self.noise_low.generate(xf, 0.0, zf, SX, SY, SZ, 684.412, 684.412, 684.412);
-
+        for ix in 0..SX as i32 {
+            for iz in 0..SZ as i32 {
+                self.column(x + ix, z + iz);
+            }
+        }
         let mut out = vec![0.0; SX * SY * SZ];
         let step = 16 / SX;
         let mut i = 0;
-        let mut col = 0;
         for ix in 0..SX {
             let bx = ix * step + step / 2;
             for iz in 0..SZ {
@@ -137,10 +169,11 @@ impl OverworldGenerator {
                 v25 *= v25;
                 v25 *= v25;
                 v25 = 1.0 - v25;
-                let mut v27 = (d_main[col] + 256.0) / 512.0;
+                let c = &self.cols[&(x + ix as i32, z + iz as i32)];
+                let mut v27 = (c.main + 256.0) / 512.0;
                 v27 *= v25;
                 if v27 > 1.0 { v27 = 1.0; }
-                let mut v29 = d_height[col] / 8000.0;
+                let mut v29 = c.height / 8000.0;
                 if v29 < 0.0 { v29 = -v29 * 0.3; }
                 v29 = v29 * 3.0 - 2.0;
                 if v29 < 0.0 {
@@ -157,13 +190,12 @@ impl OverworldGenerator {
                 v27 += 0.5;
                 v29 = v29 * SY as f64 / 16.0;
                 let v31 = SY as f64 / 2.0 + v29 * 4.0;
-                col += 1;
                 for iy in 0..SY {
                     let mut v36 = (iy as f64 - v31) * 12.0 / v27;
                     if v36 < 0.0 { v36 *= 4.0; }
-                    let lim = d_lim[i] / 512.0;
-                    let low = d_low[i] / 512.0;
-                    let mix = (d_base[i] / 10.0 + 1.0) / 2.0;
+                    let lim = c.lim[iy] / 512.0;
+                    let low = c.low[iy] / 512.0;
+                    let mix = (c.base[iy] / 10.0 + 1.0) / 2.0;
                     let mut v34 = if mix < 0.0 { lim } else if mix > 1.0 { low } else { lim + (low - lim) * mix };
                     v34 -= v36;
                     if iy > SY - 4 {
@@ -182,7 +214,7 @@ impl OverworldGenerator {
     /// generateTerrain: interpolate the density grid into stone/water/ice.
     /// The incremental `+=` interpolation is kept as in Java so the sign of
     /// the density (stone vs not) matches bit for bit.
-    fn generate_terrain(&self, chunk_x: i32, chunk_z: i32, blocks: &mut [u8], temps: &[f64], hums: &[f64]) {
+    fn generate_terrain(&mut self, chunk_x: i32, chunk_z: i32, blocks: &mut [u8], temps: &[f64], hums: &[f64]) {
         let d = self.density(chunk_x * 4, chunk_z * 4, temps, hums);
         let at = |i: usize, j: usize, k: usize| d[(i * 5 + j) * 17 + k];
         for i in 0..4usize {
@@ -368,5 +400,17 @@ mod tests {
         let a = g.generate(2, -3, &mut cm);
         let b = g.generate(2, -3, &mut cm);
         assert_eq!(a, b);
+    }
+
+    /// A generator that keeps its noise columns (neighbours share border columns) must give the
+    /// same chunks as a fresh one for every chunk.
+    #[test]
+    fn cached_columns_match_a_fresh_generator() {
+        let mut cm = WorldChunkManager::new(7);
+        let mut shared = OverworldGenerator::new(7);
+        for (cx, cz) in [(0, 0), (1, 0), (0, 1), (1, 1), (-1, 0), (0, -1), (1, 0)] {
+            let fresh = OverworldGenerator::new(7).generate(cx, cz, &mut cm);
+            assert_eq!(shared.generate(cx, cz, &mut cm), fresh, "chunk ({cx}, {cz})");
+        }
     }
 }

@@ -132,7 +132,7 @@ UNVERIFIED until you can show a reference.
 - `world::gen::populate` — port of `populate()` and the `WorldGen*` classes, same Random draw order. Golden-tested
   against the real classes on a fake `World` (`tools/golden/G.java`). Known simplifications, none of which touch a
   Random draw: light is the column model (no lateral spread, no block light), no tile entities (chest loot / spawner mob are drawn and dropped), no block ticks (springs do
-  not flow, sand does not fall). Order dependence: vanilla populates in load order; here it is nearest-first.
+  not flow, sand does not fall). Order dependence: vanilla populates in load order; here it is nearest-first, with up to one populate per worker out at once (jobs in flight never share a chunk, so each sees its neighbours' finished populates).
 - `world::chunk::Nibbles` — `NibbleArray` (same cell index, even cell = low nibble); `Chunk.setBlockID` clears a cell's
   metadata when the id changes, `setBlockIDWithMetadata` writes both (`ChunkManager::set_block` / `set_block_meta`,
   `populate::Region::set` / `set_meta`). `populate` writes metadata where the Java does (`WorldGenForest` birch 2,
@@ -222,7 +222,7 @@ was generated with). The CI workflow does this for you.
 ## Performance notes
 
 - World streaming: render distance is `RENDER_DIST` in `lib.rs` (4 chunks, circular, so ~49 chunks drawn,
-  ~113 generated (radius 6) and ~149 kept). populate() and the light engine run on the render thread (populate one chunk per frame); chunk meshes are built on the workers (`Job::Mesh`, an idea of C2ME's scheduler) and at most 2 are uploaded per frame. One draw call per chunk. Memory is
+  ~113 generated (radius 6) and ~149 kept). the light engine runs on the render thread; populate and chunk meshes are built on the workers (`Job::Populate` on a copy of its 2x2 block, `Job::Mesh`; ideas of C2ME's scheduler): at most one populate per worker is out, and at most 2 meshes are uploaded per frame. One draw call per chunk. Memory is
   32 KB of blocks per loaded chunk. No device numbers yet for this path; the old 48x48 figure
   (~16 ms/frame on a Pixel 4a) no longer applies.
 - Shadows + light shafts: the shadow map is reused between redraws (`render::camera::ShadowCache`), the shadow pass culls back faces, the shafts' blend shares the HUD pass. See the ROADMAP changelog for the levers still open. Unmeasured.

@@ -2,7 +2,8 @@
 //! that loads and unloads as the player walks, terrain generated on worker threads.
 //!
 //! Per frame: `stream` (cheap, no GPU) collects finished chunks, unloads far ones, asks the
-//! workers for missing ones nearest-first and populates one chunk; `mesh_pending` uploads the meshes
+//! workers for missing ones nearest-first, sends `populate` jobs to the workers and puts the finished
+//! ones back (`populate_dispatch`, `populate_land`); `mesh_pending` uploads the meshes
 //! the workers finished (a couple a frame) and queues jobs for the chunks that need one (the
 //! workers copy the chunk and its four neighbours, build the vertices and send them back).
 //!
@@ -175,6 +176,15 @@ struct MeshJob {
 enum Job {
     Gen(Key),
     Mesh(Box<MeshJob>),
+    Populate(Box<PopJob>),
+}
+
+/// `populate` for the chunk (x, z) on a copy of its 2x2 block (`Region::new` takes the arrays by value), so the chunks stay
+/// readable here while it runs.
+struct PopJob {
+    x: i32,
+    z: i32,
+    region: Region,
 }
 
 /// A finished mesh, short of its GPU buffers: the vertices, and the opaque and water indices sorted by section (`by_section`).
@@ -226,6 +236,9 @@ struct Entry {
     lit: bool,
     /// populate() has run on this chunk (it also wrote into its +X/+Z/+X+Z neighbours).
     populated: bool,
+    /// A stamp from `ChunkManager::stamp` taken when the entry was made and at every edit or `put_region`: a populate job that was
+    /// snapshotted at another stamp was computed from an older chunk and is dropped (`populate_land`).
+    rev: u32,
     /// Differs from what the seed generates (edited, or written into by a populate) and is not on disk yet.
     dirty: bool,
     /// The mesh matches the chunk as it is: built, or on its way from a worker (the mesh may still be `None`: a chunk of pure air has
@@ -245,8 +258,8 @@ pub struct ChunkManager {
     /// Player chunk at the last unload pass.
     center: Option<Key>,
     max_in_flight: usize,
-    /// populate() runs here, on the render thread, one chunk per frame.
-    /// ponytail: move it to the workers if it shows up in a frame profile (it would need the 4 chunks behind a lock).
+    /// `preload` (the spawn area, before the first frame) and `populate_one` run populate here; during play `update` sends it to the
+    /// workers (`populate_dispatch`), each of which has a generator of its own.
     gen: OverworldGenerator,
     cm: WorldChunkManager,
     jobs: mpsc::Sender<Job>,
@@ -256,6 +269,15 @@ pub struct ChunkManager {
     /// Chunks with a mesh job queued or running (one at a time per chunk, so results never arrive out of order), and the most at once.
     meshing: HashSet<Key>,
     max_meshing: usize,
+    /// Finished populate jobs, waiting to be put back (`populate_land`).
+    populated_rx: mpsc::Receiver<(Key, Region)>,
+    /// Populate jobs out on the workers: the chunk each populates -> the `rev` of the four chunks of its block when it was copied.
+    populating: HashMap<Key, [u32; 4]>,
+    /// The chunks inside those blocks: a chunk is in at most one job, so two results never overwrite each other's chunks.
+    busy: HashSet<Key>,
+    max_populating: usize,
+    /// Source of `Entry.rev`.
+    stamp: u32,
     /// Pending light updates, newest last (`World.lightingToUpdate`).
     light_queue: Vec<light::Region>,
     /// `World.skylightSubtracted` (0 day .. 11 night), applied by the mesher.
@@ -299,11 +321,12 @@ impl ChunkManager {
         let (jobs, job_rx) = mpsc::channel::<Job>();
         let (done_tx, done) = mpsc::channel();
         let (built_tx, built) = mpsc::channel();
+        let (pop_tx, populated_rx) = mpsc::channel();
         let job_rx = Arc::new(Mutex::new(job_rx));
         // Leave a core for the render thread; two workers are plenty for walking speed.
         let workers = std::thread::available_parallelism().map_or(2, |n| n.get()).saturating_sub(1).clamp(1, 2);
         for i in 0..workers {
-            let (rx, tx, bt) = (job_rx.clone(), done_tx.clone(), built_tx.clone());
+            let (rx, tx, bt, pt) = (job_rx.clone(), done_tx.clone(), built_tx.clone(), pop_tx.clone());
             std::thread::Builder::new()
                 .name(format!("chunk-gen-{i}"))
                 .spawn(move || {
@@ -322,6 +345,12 @@ impl ChunkManager {
                                 let key = j.key;
                                 bt.send((key, build_job(*j, &mut cm))).is_ok()
                             }
+                            Job::Populate(j) => {
+                                // populate() draws from a Random it seeds from the chunk, so the result does not depend on the worker.
+                                let PopJob { x, z, mut region } = *j;
+                                g.populate(&mut region, x, z, &mut cm);
+                                pt.send(((x, z), region)).is_ok()
+                            }
                         };
                         if !sent {
                             break;
@@ -339,6 +368,7 @@ impl ChunkManager {
         ring.sort_by_key(|&(dx, dz)| dx * dx + dz * dz);
 
         Self { chunks: Chunks::default(), pending: HashSet::new(), ring, radius, center: None, max_in_flight: workers * 2, built, meshing: HashSet::new(), max_meshing: workers * 2,
+               populated_rx, populating: HashMap::new(), busy: HashSet::new(), max_populating: workers, stamp: 0,
                gen: OverworldGenerator::new(seed), cm: WorldChunkManager::new(seed), jobs, done, light_queue: Vec::new(), sky_sub: 0, mesh_gen: 0, dir: None, saved: HashSet::new(), writer: None, changes: Vec::new(), loot: Vec::new(), spawners: Vec::new(), culler: Culler::default(), visible: HashMap::new() }
     }
 
@@ -365,7 +395,8 @@ impl ChunkManager {
 
     pub(crate) fn insert(&mut self, key: Key, blocks: Vec<u8>) {
         let height = height_map(&blocks);
-        self.chunks.insert(key, Entry { blocks, data: Nibbles::new(), light: vec![0; VOLUME], height, lit: false, populated: false, dirty: false, meshed: false, mesh: None });
+        self.stamp = self.stamp.wrapping_add(1);
+        self.chunks.insert(key, Entry { blocks, data: Nibbles::new(), light: vec![0; VOLUME], height, lit: false, populated: false, rev: self.stamp, dirty: false, meshed: false, mesh: None });
     }
 
     /// Load a saved chunk. A file that does not decode is forgotten, so the chunk is generated instead.
@@ -544,6 +575,8 @@ impl ChunkManager {
         e.blocks[i] = id;
         e.data.set(lx, y as usize, lz, meta);
         e.dirty = true;
+        self.stamp = self.stamp.wrapping_add(1);
+        e.rev = self.stamp;
         let h = e.height[lz << 4 | lx] as i32;
         self.mark_dirty(x, z);
         self.light_after_set(x, y, z, id, h);
@@ -649,6 +682,8 @@ impl ChunkManager {
             e.blocks = b;
             e.data = d;
             e.dirty = true; // a populate writes into all four (trees, ores, ... spill over the borders)
+            self.stamp = self.stamp.wrapping_add(1);
+            e.rev = self.stamp; // a populate job copied from before this is stale
             e.lit = false; // blocks changed under the light: it is computed again once final
             // The chunk and its four neighbours (border faces) need a new mesh if they had one.
             for n in [(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)] {
@@ -814,7 +849,8 @@ impl ChunkManager {
     pub fn update(&mut self, device: &wgpu::Device, cx: i32, cz: i32) {
         let t0 = std::time::Instant::now();
         self.stream(cx, cz);
-        self.populate_pending(cx, cz, 1);
+        self.populate_land();
+        self.populate_dispatch(cx, cz);
         let populated = t0.elapsed();
         self.light_pending(cx, cz);
         let lit = t0.elapsed();
@@ -879,22 +915,48 @@ impl ChunkManager {
         }
     }
 
-    /// Run populate on up to `budget` chunks, nearest to (cx, cz) first, whose 2x2 block is loaded.
-    fn populate_pending(&mut self, cx: i32, cz: i32, mut budget: usize) {
+    /// Send populate to the workers for chunks nearest to (cx, cz) first whose 2x2 block is loaded and free (not inside a job that is
+    /// out), while fewer than `max_populating` jobs are out. The job gets a copy of the four chunks; they stay readable meanwhile.
+    fn populate_dispatch(&mut self, cx: i32, cz: i32) {
         for i in 0..self.ring.len() {
-            if budget == 0 {
+            if self.populating.len() >= self.max_populating {
                 break;
             }
-            if self.populate_one(cx + self.ring[i].0, cz + self.ring[i].1) {
-                budget -= 1;
+            let (x, z) = (cx + self.ring[i].0, cz + self.ring[i].1);
+            let keys = [(x, z), (x, z + 1), (x + 1, z), (x + 1, z + 1)];
+            if self.chunks.get(&keys[0]).map_or(true, |e| e.populated) || keys.iter().any(|k| self.busy.contains(k) || !self.chunks.contains_key(k)) {
+                continue;
+            }
+            let blocks = keys.map(|k| self.chunks[&k].blocks.clone());
+            let data = keys.map(|k| self.chunks[&k].data.clone());
+            self.populating.insert((x, z), keys.map(|k| self.chunks[&k].rev));
+            keys.iter().for_each(|&k| {
+                self.busy.insert(k);
+            });
+            let _ = self.jobs.send(Job::Populate(Box::new(PopJob { x, z, region: Region::new(x, z, blocks, data) })));
+        }
+    }
+
+    /// Put back the populate results that are in. One whose chunks were edited, grown into, or unloaded since it was copied is
+    /// dropped: it was computed from an older chunk, and the chunk, still unpopulated, is sent out again by `populate_dispatch`.
+    fn populate_land(&mut self) {
+        while let Ok((key, region)) = self.populated_rx.try_recv() {
+            let Some(revs) = self.populating.remove(&key) else { continue };
+            let keys = [(key.0, key.1), (key.0, key.1 + 1), (key.0 + 1, key.1), (key.0 + 1, key.1 + 1)];
+            keys.iter().for_each(|k| {
+                self.busy.remove(k);
+            });
+            if keys.iter().zip(revs).all(|(k, r)| self.chunks.get(k).is_some_and(|e| e.rev == r)) {
+                self.put_region(key.0, key.1, region);
+                self.chunks.get_mut(&key).unwrap().populated = true;
             }
         }
     }
 
-    /// populate chunk (x, z) if it is not yet and its 2x2 block is loaded. True if it ran.
+    /// populate chunk (x, z) here, now, if it is not yet and its 2x2 block is loaded and not out on a worker. True if it ran.
     fn populate_one(&mut self, x: i32, z: i32) -> bool {
         let keys = [(x, z), (x, z + 1), (x + 1, z), (x + 1, z + 1)];
-        if self.chunks.get(&keys[0]).map_or(true, |e| e.populated) || !keys.iter().all(|k| self.chunks.contains_key(k)) {
+        if self.chunks.get(&keys[0]).map_or(true, |e| e.populated) || !keys.iter().all(|k| self.chunks.contains_key(k)) || keys.iter().any(|k| self.busy.contains(k)) {
             return false;
         }
         let mut region = self.take_region(x, z).unwrap();
@@ -1083,6 +1145,69 @@ mod tests {
         }
         assert!(!m.chunks[&(2, 2)].populated);
         assert!(m.is_final(0, 0) && m.is_final(1, 1) && !m.is_final(2, 2));
+    }
+
+    /// populate run on a worker (`populate_dispatch` + `populate_land`) gives the blocks and metadata that `populate_one` gives in
+    /// place, and the chests and spawners with them.
+    #[test]
+    fn populate_on_a_worker_gives_the_in_place_result() {
+        let (mut a, mut b) = (ChunkManager::new(1, 1), ChunkManager::new(1, 1));
+        for z in 0..=1 {
+            for x in 0..=1 {
+                a.fresh((x, z));
+                b.fresh((x, z));
+            }
+        }
+        assert!(a.populate_one(0, 0));
+        b.populate_dispatch(0, 0);
+        assert!(b.populating.contains_key(&(0, 0)) && b.busy.len() == 4, "only chunk (0, 0) has its 2x2 block loaded");
+        for _ in 0..4000 {
+            b.populate_land();
+            if b.chunks[&(0, 0)].populated {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(b.chunks[&(0, 0)].populated && b.populating.is_empty() && b.busy.is_empty());
+        for k in [(0, 0), (0, 1), (1, 0), (1, 1)] {
+            assert!(a.chunks[&k].blocks == b.chunks[&k].blocks && a.chunks[&k].data == b.chunks[&k].data, "chunk {k:?}");
+        }
+        assert_eq!(a.loot.len(), b.loot.len());
+        assert_eq!(a.spawners.len(), b.spawners.len());
+    }
+
+    /// A populate result is dropped when a chunk of its block was edited after the copy was made; the chunk, still unpopulated, is
+    /// sent out again, and the job is out of `busy` meanwhile.
+    #[test]
+    fn a_stale_populate_result_is_dropped_and_sent_again() {
+        let mut m = ChunkManager::new(1, 1);
+        for z in 0..=1 {
+            for x in 0..=1 {
+                m.fresh((x, z));
+            }
+        }
+        m.populate_dispatch(0, 0);
+        assert!(m.populating.contains_key(&(0, 0)));
+        assert!(m.set_block_meta(3, 40, 5, 35, 0), "an edit after the copy"); // red wool where the terrain has none
+        for _ in 0..4000 {
+            m.populate_land();
+            if m.populating.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(m.populating.is_empty() && m.busy.is_empty());
+        assert!(!m.chunks[&(0, 0)].populated, "the stale result was dropped");
+        m.populate_dispatch(0, 0);
+        assert!(m.populating.contains_key(&(0, 0)), "and the chunk was sent out again");
+        for _ in 0..4000 {
+            m.populate_land();
+            if m.chunks[&(0, 0)].populated {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(m.chunks[&(0, 0)].populated);
     }
 
     /// An edit survives a restart: flushed, then read back by a fresh manager that loads (does not generate) the chunk.

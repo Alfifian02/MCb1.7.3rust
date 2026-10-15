@@ -162,7 +162,8 @@ impl PerlinNoise {
 
     #[inline]
     fn p(&self, i: i32) -> i32 {
-        self.perm[i as usize]
+        // ponytail: `& 511` is a no-op (indices are <= 511 by construction) that lets the compiler drop the bounds check.
+        self.perm[(i & 511) as usize]
     }
 
     /// NoiseGeneratorPerlin.generateNoise(x, y, z): one 3D sample, via the batch path (2 in y so
