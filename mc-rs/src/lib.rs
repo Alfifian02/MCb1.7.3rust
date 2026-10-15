@@ -85,6 +85,8 @@ const EYE_HEIGHT: f32 = 1.62 - physics::HALF.y;
 
 struct App {
     gpu: Gpu,
+    /// The renderer button was tapped: the main loop saves, drops this App and starts again on the other backend.
+    switch: bool,
     pipe: ChunkPipeline,
     chunks: ChunkManager,
     camera: FirstPersonCamera,
@@ -194,8 +196,8 @@ struct Gesture {
 }
 
 impl App {
-    async fn init(native_ptr: *mut c_void, width: u32, height: u32, dir: PathBuf) -> Result<Self, String> {
-        let gpu = Gpu::from_android_window(native_ptr, width, height).await?;
+    async fn init(native_ptr: *mut c_void, width: u32, height: u32, dir: PathBuf, prefer_gl: bool) -> Result<Self, String> {
+        let gpu = Gpu::from_android_window(native_ptr, width, height, prefer_gl).await?;
         let surface_format = gpu.surface_format();
         let pipe = ChunkPipeline::new(&gpu.device, surface_format);
         pipe.upload_atlas(&gpu.queue);
@@ -245,7 +247,7 @@ impl App {
         let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as i64);
 
         let mut app = Self {
-            gpu, pipe,
+            gpu, switch: false, pipe,
             chunks, camera,
             player,
             last_frame: Instant::now(),
@@ -418,6 +420,10 @@ impl App {
         // TEMPORARY pause-menu button: wipe the save and start the seed's world again.
         if self.touch.take_reset() {
             self.reset_world();
+            return;
+        }
+        if self.touch.take_backend() {
+            self.switch = true;
             return;
         }
         // Look drag accumulated by the touch UI since the last frame. Drained
@@ -2109,6 +2115,7 @@ impl App {
             HudPipeline::push_text_centered(v, bx + bw * 0.5, by - bh * 1.3, bh / 20.0 * if dead { 2.0 } else { 1.5 }, if dead { "You died!" } else { "Game menu" }, [1.0; 4]);
             label(v, layout.resume, if dead { "Respawn" } else { "Back to game" }, pressed(PointerRole::Pause));
             // TEMPORARY reset-world button: after the first tap it is lit and asks again.
+            label(v, layout.backend, if self.gpu.is_gl() { "Renderer: OpenGL" } else { "Renderer: Vulkan" }, pressed(PointerRole::Backend));
             label(v, layout.reset, if self.touch.reset_armed { "Tap again to confirm" } else { "Reset world" }, self.touch.reset_armed);
         }
 
@@ -2246,6 +2253,50 @@ fn sync_size(app: &AndroidApp, state: &mut Option<App>) {
     }
 }
 
+/// Where the Vulkan / OpenGL choice lives: `gl` or `vulkan` in the app's private storage (Vulkan when missing).
+fn backend_file(dir: &std::path::Path) -> PathBuf {
+    dir.join("backend")
+}
+
+/// Spawn the GPU + world init thread for the current window, on the backend saved by the pause menu's renderer button.
+fn start_init(app: &AndroidApp) -> Option<std::thread::JoinHandle<Result<App, String>>> {
+    struct NativePtr(usize);
+    unsafe impl Send for NativePtr {}
+    let window = app.native_window()?;
+    let ptr = window.ptr().as_ptr() as usize;
+    let init_w = window.width().max(1) as u32;
+    let init_h = window.height().max(1) as u32;
+    // App-private storage, where the world is saved.
+    let dir = app.internal_data_path().unwrap_or_else(std::env::temp_dir);
+    let prefer_gl = std::fs::read_to_string(backend_file(&dir)).is_ok_and(|s| s.trim() == "gl");
+    log::info!("M3: InitWindow, native {init_w}x{init_h}, starting GPU init thread ({})", if prefer_gl { "OpenGL" } else { "Vulkan" });
+    let h = std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let r = std::panic::catch_unwind(|| pollster::block_on(App::init(ptr as *mut c_void, init_w, init_h, dir, prefer_gl)));
+            match r {
+                Ok(Ok(a)) => Ok(a),
+                Ok(Err(e)) => {
+                    log::error!("M3 init error: {e}");
+                    Err(e)
+                }
+                Err(p) => {
+                    let msg = if let Some(s) = p.downcast_ref::<&str>() {
+                        s.to_string()
+                    } else if let Some(s) = p.downcast_ref::<String>() {
+                        s.clone()
+                    } else {
+                        "<unknown panic>".to_string()
+                    };
+                    log::error!("M3 init panic: {msg}");
+                    Err(format!("panic: {msg}"))
+                }
+            }
+        })
+        .expect("spawn");
+    Some(h)
+}
+
 #[no_mangle]
 fn android_main(app: AndroidApp) {
     #[cfg(target_os = "android")]
@@ -2273,42 +2324,7 @@ fn android_main(app: AndroidApp) {
                 match main_event {
                     MainEvent::InitWindow { .. } => {
                         immersive::hide_system_bars(&app);
-                        struct NativePtr(usize);
-                        unsafe impl Send for NativePtr {}
-                        let Some(window) = app.native_window() else { return };
-                        let ptr = window.ptr().as_ptr() as usize;
-                        let init_w = window.width().max(1) as u32;
-                        let init_h = window.height().max(1) as u32;
-                        // App-private storage, where the world is saved.
-                        let dir = app.internal_data_path().unwrap_or_else(std::env::temp_dir);
-                        log::info!("M3: InitWindow, native {}x{}, starting GPU init thread", init_w, init_h);
-                        let h = std::thread::Builder::new()
-                            .stack_size(8 * 1024 * 1024)
-                            .spawn(move || {
-                                let r = std::panic::catch_unwind(|| {
-                                    pollster::block_on(App::init(ptr as *mut c_void, init_w, init_h, dir))
-                                });
-                                match r {
-                                    Ok(Ok(a)) => Ok(a),
-                                    Ok(Err(e)) => {
-                                        log::error!("M3 init error: {e}");
-                                        Err(e)
-                                    }
-                                    Err(p) => {
-                                        let msg = if let Some(s) = p.downcast_ref::<&str>() {
-                                            s.to_string()
-                                        } else if let Some(s) = p.downcast_ref::<String>() {
-                                            s.clone()
-                                        } else {
-                                            "<unknown panic>".to_string()
-                                        };
-                                        log::error!("M3 init panic: {msg}");
-                                        Err(format!("panic: {msg}"))
-                                    }
-                                }
-                            })
-                            .expect("spawn");
-                        init_handle = Some(h);
+                        init_handle = start_init(&app);
                     }
                     MainEvent::InputAvailable => {
                         if let Ok(mut iter) = app.input_events_iter() {
@@ -2367,6 +2383,20 @@ fn android_main(app: AndroidApp) {
                     Ok(Err(e)) => log::error!("init failed: {e}"),
                     Err(_) => log::error!("init panicked"),
                 }
+            }
+        }
+
+        // The renderer button: save, drop the App (its surface must go before a new one can attach to the window), remember
+        // the other backend and build everything again on it.
+        if app_state.as_ref().is_some_and(|a| a.switch) {
+            if let Some(mut a) = app_state.take() {
+                a.save(usize::MAX);
+                let to_gl = !a.gpu.is_gl();
+                drop(a);
+                if let Some(dir) = app.internal_data_path() {
+                    let _ = std::fs::write(backend_file(&dir), if to_gl { "gl" } else { "vulkan" });
+                }
+                init_handle = start_init(&app);
             }
         }
 

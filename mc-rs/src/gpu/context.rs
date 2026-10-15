@@ -1,7 +1,7 @@
-//! Minimal wgpu context wrapper. Vulkan-only on Android.
+//! Minimal wgpu context wrapper. Vulkan or OpenGL ES (wgpu's GL backend), chosen by the pause menu; the other is the fallback.
 //! Reference: jinleili/wgpu-in-app (github.com/jinleili/wgpu-in-app).
 //! Key fixes vs the previous attempt:
-//!   - Force Backends::VULKAN (no GLES fallback) -- user policy requires Vulkan.
+//!   - One backend at a time (`prefer_gl` picks the first try, the other is the fallback).
 //!   - Use SurfaceTarget::Window (safe API) instead of SurfaceTargetUnsafe.
 //!   - Use surface.get_default_config(w, h) for the initial config, sized to
 //!     the actual ANativeWindow width/height (not 1x1), so we never hit the
@@ -78,6 +78,7 @@ impl Gpu {
         native_ptr: *mut c_void,
         width: u32,
         height: u32,
+        prefer_gl: bool,
     ) -> Result<Self, String> {
         if native_ptr.is_null() {
             return Err("null ANativeWindow".into());
@@ -87,10 +88,11 @@ impl Gpu {
         let height = height.max(1);
         log::info!("M3 init: native window {width}x{height}");
 
-        // Try Vulkan first; if the device has no usable Vulkan driver, fall
-        // back to GLES instead of failing to start (black screen / instant close).
+        // Try the chosen backend first; if the device has no usable driver for it, fall
+        // back to the other instead of failing to start (black screen / instant close).
         let mut last_err = String::new();
-        for backends in [wgpu::Backends::VULKAN, wgpu::Backends::GL] {
+        let order = if prefer_gl { [wgpu::Backends::GL, wgpu::Backends::VULKAN] } else { [wgpu::Backends::VULKAN, wgpu::Backends::GL] };
+        for backends in order {
             match Self::try_init(AndroidWindow(nn), backends, width, height).await {
                 Ok(g) => return Ok(g),
                 Err(e) => {
@@ -232,6 +234,11 @@ impl Gpu {
             usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_SRC | TextureUsages::COPY_DST, // the light-shaft pass reads it
             view_formats: &[],
         })
+    }
+
+    /// The backend actually running (the fallback may differ from the one asked for).
+    pub fn is_gl(&self) -> bool {
+        self.adapter.get_info().backend == wgpu::Backend::Gl
     }
 
     pub fn surface_format(&self) -> wgpu::TextureFormat {

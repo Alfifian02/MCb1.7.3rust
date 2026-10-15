@@ -1,6 +1,6 @@
 # Roadmap: Minecraft b1.7.3 -> Android in Rust
 
-Fresh start. One milestone per session. Vanilla names. Vulkan-only.
+Fresh start. One milestone per session. Vanilla names. Vulkan or OpenGL ES (wgpu's two backends), switched in the pause menu.
 Own simple save format (M7 dropped McRegion). Client-only, single player.
 
 ## Scope
@@ -621,3 +621,7 @@ M20 is done except `ItemMap` (maps are big: a colour table for every block, the 
     - `lib.rs`: the `ItemReed` branch now also places item 354 as block 92 (solid ground below, the player's box must be clear: `canBlockBePlacedAt`); a tap on a cake heals 3 below full health and adds a bite (meta + 1), the sixth bite removes it.
     - `world/chunk.rs`: `box_bounds` (drawn / outline: loses 2/16 from -X per bite), `CAKE_PHYS` (116..=121, collision 1/16 lower), not `opaque`. `render/atlas.rs`: tiles 121 top, 122 sides, 123 bitten face, 124 bottom. `world/ticks.rs`: ground not solid = gone. `world/items.rs`: drops nothing, stack of 1. `world/craft.rs`: recipe (3 milk, 2 sugar, 3 wheat, egg), and `take_result` now leaves an empty bucket for a water / lava / milk bucket (`getContainerItem`).
     - Not done: sugar has no source until M16 (sugar cane -> sugar recipe), a punch (`onBlockClicked`) does not eat, eat sound.
+- `done` OpenGL renderer + pause-menu toggle (written without a Rust toolchain: not compiled, not run; +1 test `touch_ui::tests::backend_button_fires_once`, not yet to be tested). No second renderer: wgpu already ships a GLES backend (`gles` feature) and every pass is WGSL, so OpenGL is the same frame on `Backends::GL`.
+    - `gpu/context.rs`: `from_android_window(.., prefer_gl)` tries the chosen backend first, the other as fallback; `Gpu::is_gl` reports the one actually running.
+    - `input/touch_ui.rs`: `PointerRole::Backend`, `LayoutRects::backend` (under the reset button), `take_backend`. `lib.rs`: the pause menu shows `Renderer: Vulkan` / `Renderer: OpenGL`; a tap sets `App::switch`, the main loop saves, drops the App (its surface must go before another can attach to the window), writes `gl` / `vulkan` to `<internal data>/backend` and re-runs `start_init`, so the choice survives restarts. The world reloads from the save (a second or two).
+    - ponytail: the whole App is rebuilt instead of hot-swapping the device (wgpu resources cannot cross devices). UNVERIFIED: the GL path on a device (Rgba16Float targets, compute in `sky.rs`, `downlevel_defaults` limits); if GL init fails the fallback starts Vulkan again and the button keeps showing Vulkan.

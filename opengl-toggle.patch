@@ -1,0 +1,345 @@
+diff -ruN orig/mc-rs/src/gpu/context.rs b/mc-rs/src/gpu/context.rs
+--- a/mc-rs/src/gpu/context.rs	2026-10-13 02:39:04.000000000 +0000
++++ b/mc-rs/src/gpu/context.rs	2026-10-15 05:58:14.370064815 +0000
+@@ -1,7 +1,7 @@
+-//! Minimal wgpu context wrapper. Vulkan-only on Android.
++//! Minimal wgpu context wrapper. Vulkan or OpenGL ES (wgpu's GL backend), chosen by the pause menu; the other is the fallback.
+ //! Reference: jinleili/wgpu-in-app (github.com/jinleili/wgpu-in-app).
+ //! Key fixes vs the previous attempt:
+-//!   - Force Backends::VULKAN (no GLES fallback) -- user policy requires Vulkan.
++//!   - One backend at a time (`prefer_gl` picks the first try, the other is the fallback).
+ //!   - Use SurfaceTarget::Window (safe API) instead of SurfaceTargetUnsafe.
+ //!   - Use surface.get_default_config(w, h) for the initial config, sized to
+ //!     the actual ANativeWindow width/height (not 1x1), so we never hit the
+@@ -78,6 +78,7 @@
+         native_ptr: *mut c_void,
+         width: u32,
+         height: u32,
++        prefer_gl: bool,
+     ) -> Result<Self, String> {
+         if native_ptr.is_null() {
+             return Err("null ANativeWindow".into());
+@@ -87,10 +88,11 @@
+         let height = height.max(1);
+         log::info!("M3 init: native window {width}x{height}");
+ 
+-        // Try Vulkan first; if the device has no usable Vulkan driver, fall
+-        // back to GLES instead of failing to start (black screen / instant close).
++        // Try the chosen backend first; if the device has no usable driver for it, fall
++        // back to the other instead of failing to start (black screen / instant close).
+         let mut last_err = String::new();
+-        for backends in [wgpu::Backends::VULKAN, wgpu::Backends::GL] {
++        let order = if prefer_gl { [wgpu::Backends::GL, wgpu::Backends::VULKAN] } else { [wgpu::Backends::VULKAN, wgpu::Backends::GL] };
++        for backends in order {
+             match Self::try_init(AndroidWindow(nn), backends, width, height).await {
+                 Ok(g) => return Ok(g),
+                 Err(e) => {
+@@ -234,6 +236,11 @@
+         })
+     }
+ 
++    /// The backend actually running (the fallback may differ from the one asked for).
++    pub fn is_gl(&self) -> bool {
++        self.adapter.get_info().backend == wgpu::Backend::Gl
++    }
++
+     pub fn surface_format(&self) -> wgpu::TextureFormat {
+         self.config.format
+     }
+diff -ruN orig/mc-rs/src/input/touch_ui.rs b/mc-rs/src/input/touch_ui.rs
+--- a/mc-rs/src/input/touch_ui.rs	2026-10-14 18:15:08.000000000 +0000
++++ b/mc-rs/src/input/touch_ui.rs	2026-10-15 05:58:14.372057731 +0000
+@@ -52,6 +52,8 @@
+     Pause,
+     /// Press landed on the temporary reset-world button (pause menu only). Arms on the first release, fires on the second.
+     Reset,
++    /// Press landed on the renderer button (pause menu only). Fires on release.
++    Backend,
+     /// Press landed on the inventory button. Opens / closes the screen on release.
+     Inventory,
+     /// Any other press while a screen is open. Reported as a tap on release.
+@@ -89,6 +91,8 @@
+     pub resume: Rect,
+     /// TEMPORARY: reset-world button, under `resume`.
+     pub reset: Rect,
++    /// Vulkan / OpenGL toggle, under `reset`.
++    pub backend: Rect,
+     pub hotbar: [Rect; HOTBAR_SLOTS],
+     pub jump: Rect,
+     /// The sneak button, the d-pad's centre cell.
+@@ -130,6 +134,7 @@
+         let bh = 0.16 * u;
+         let resume = ((w - bw) * 0.5, (h - bh) * 0.5, bw, bh);
+         let reset = (resume.0, resume.1 + bh * 1.25, bw, bh * 0.8);
++        let backend = (resume.0, resume.1 + bh * 2.15, bw, bh * 0.8);
+ 
+         // The d-pad: a 3 x 3 block of square cells, its bottom edge half a pad above the hotbar row, so it clears the hotbar at any ratio.
+         let dpad_gap = 0.012 * u;
+@@ -141,7 +146,7 @@
+         let jw = 0.16 * u;
+         let jump = (w - pad * 1.5 - jw, cy - jw * 0.5, jw, jw);
+ 
+-        Self { width: w, pause, inventory, resume, reset, hotbar, jump, sneak: cell(0.0, 0.0), dpad, dpad_gap }
++        Self { width: w, pause, inventory, resume, reset, backend, hotbar, jump, sneak: cell(0.0, 0.0), dpad, dpad_gap }
+     }
+ 
+     /// Hit-test a press. `None` means the press is ignored. While paused only
+@@ -151,7 +156,7 @@
+             return Some(PointerRole::Pause);
+         }
+         if paused {
+-            return in_rect(self.reset, x, y).then_some(PointerRole::Reset);
++            return if in_rect(self.reset, x, y) { Some(PointerRole::Reset) } else { in_rect(self.backend, x, y).then_some(PointerRole::Backend) };
+         }
+         if in_rect(self.inventory, x, y) {
+             return Some(PointerRole::Inventory);
+@@ -210,6 +215,7 @@
+     /// TEMPORARY reset-world button: armed by one tap (drawn bright), confirmed by the next; leaving the pause menu disarms it.
+     pub reset_armed: bool,
+     reset: bool,
++    backend: bool,
+     /// Finger events on an open screen since the last `take_screen_events`.
+     events: Vec<ScreenEv>,
+     /// Where the finger last was on the open screen: the picked-up stack floats here.
+@@ -235,6 +241,7 @@
+             inventory: false,
+             reset_armed: false,
+             reset: false,
++            backend: false,
+             events: Vec::new(),
+             cursor_pos: (w as f32 * 0.5, h as f32 * 0.5),
+         }
+@@ -245,6 +252,11 @@
+         std::mem::take(&mut self.reset)
+     }
+ 
++    /// The renderer button was tapped since the last call.
++    pub fn take_backend(&mut self) -> bool {
++        std::mem::take(&mut self.backend)
++    }
++
+     /// The inventory button was pressed and released since the last call.
+     pub fn take_inventory(&mut self) -> bool {
+         std::mem::take(&mut self.inventory)
+@@ -421,6 +433,7 @@
+                     self.reset_armed = true;
+                 }
+             }
++            PointerRole::Backend => self.backend = true,
+             PointerRole::Pause => {
+                 self.paused = !self.paused;
+                 self.reset_armed = false;
+@@ -533,6 +546,17 @@
+         assert!(ui.take_reset() && !ui.take_reset() && !ui.paused && !ui.reset_armed);
+     }
+ 
++    /// The renderer button answers only while paused, once per tap, and the pause menu stays open.
++    #[test]
++    fn backend_button_fires_once() {
++        let mut ui = TouchUi::new(W, H);
++        let (x, y) = (ui.layout.backend.0 + 5.0, ui.layout.backend.1 + 5.0);
++        assert_eq!(ui.layout.hit_test(x, y, false, false), None);
++        ui.paused = true;
++        tap(&mut ui, 1, x, y);
++        assert!(ui.take_backend() && !ui.take_backend() && ui.paused && !ui.take_reset());
++    }
++
+     /// An arrow shows the two corners beside it, a corner walks the diagonal (normalised), sliding to the next arrow swaps the corners,
+     /// and lifting the finger stops and hides them all. Every arrow / corner pairing of the eight-way pad is checked.
+     #[test]
+diff -ruN orig/mc-rs/src/lib.rs b/mc-rs/src/lib.rs
+--- a/mc-rs/src/lib.rs	2026-10-15 07:44:50.000000000 +0000
++++ b/mc-rs/src/lib.rs	2026-10-15 05:58:23.580153684 +0000
+@@ -85,6 +85,8 @@
+ 
+ struct App {
+     gpu: Gpu,
++    /// The renderer button was tapped: the main loop saves, drops this App and starts again on the other backend.
++    switch: bool,
+     pipe: ChunkPipeline,
+     chunks: ChunkManager,
+     camera: FirstPersonCamera,
+@@ -194,8 +196,8 @@
+ }
+ 
+ impl App {
+-    async fn init(native_ptr: *mut c_void, width: u32, height: u32, dir: PathBuf) -> Result<Self, String> {
+-        let gpu = Gpu::from_android_window(native_ptr, width, height).await?;
++    async fn init(native_ptr: *mut c_void, width: u32, height: u32, dir: PathBuf, prefer_gl: bool) -> Result<Self, String> {
++        let gpu = Gpu::from_android_window(native_ptr, width, height, prefer_gl).await?;
+         let surface_format = gpu.surface_format();
+         let pipe = ChunkPipeline::new(&gpu.device, surface_format);
+         pipe.upload_atlas(&gpu.queue);
+@@ -245,7 +247,7 @@
+         let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as i64);
+ 
+         let mut app = Self {
+-            gpu, pipe,
++            gpu, switch: false, pipe,
+             chunks, camera,
+             player,
+             last_frame: Instant::now(),
+@@ -420,6 +422,10 @@
+             self.reset_world();
+             return;
+         }
++        if self.touch.take_backend() {
++            self.switch = true;
++            return;
++        }
+         // Look drag accumulated by the touch UI since the last frame. Drained
+         // even when paused so a drag started before pausing doesn't replay.
+         let (look_dx, look_dy) = self.touch.take_look();
+@@ -2109,6 +2115,7 @@
+             HudPipeline::push_text_centered(v, bx + bw * 0.5, by - bh * 1.3, bh / 20.0 * if dead { 2.0 } else { 1.5 }, if dead { "You died!" } else { "Game menu" }, [1.0; 4]);
+             label(v, layout.resume, if dead { "Respawn" } else { "Back to game" }, pressed(PointerRole::Pause));
+             // TEMPORARY reset-world button: after the first tap it is lit and asks again.
++            label(v, layout.backend, if self.gpu.is_gl() { "Renderer: OpenGL" } else { "Renderer: Vulkan" }, pressed(PointerRole::Backend));
+             label(v, layout.reset, if self.touch.reset_armed { "Tap again to confirm" } else { "Reset world" }, self.touch.reset_armed);
+         }
+ 
+@@ -2246,6 +2253,50 @@
+     }
+ }
+ 
++/// Where the Vulkan / OpenGL choice lives: `gl` or `vulkan` in the app's private storage (Vulkan when missing).
++fn backend_file(dir: &std::path::Path) -> PathBuf {
++    dir.join("backend")
++}
++
++/// Spawn the GPU + world init thread for the current window, on the backend saved by the pause menu's renderer button.
++fn start_init(app: &AndroidApp) -> Option<std::thread::JoinHandle<Result<App, String>>> {
++    struct NativePtr(usize);
++    unsafe impl Send for NativePtr {}
++    let window = app.native_window()?;
++    let ptr = window.ptr().as_ptr() as usize;
++    let init_w = window.width().max(1) as u32;
++    let init_h = window.height().max(1) as u32;
++    // App-private storage, where the world is saved.
++    let dir = app.internal_data_path().unwrap_or_else(std::env::temp_dir);
++    let prefer_gl = std::fs::read_to_string(backend_file(&dir)).is_ok_and(|s| s.trim() == "gl");
++    log::info!("M3: InitWindow, native {init_w}x{init_h}, starting GPU init thread ({})", if prefer_gl { "OpenGL" } else { "Vulkan" });
++    let h = std::thread::Builder::new()
++        .stack_size(8 * 1024 * 1024)
++        .spawn(move || {
++            let r = std::panic::catch_unwind(|| pollster::block_on(App::init(ptr as *mut c_void, init_w, init_h, dir, prefer_gl)));
++            match r {
++                Ok(Ok(a)) => Ok(a),
++                Ok(Err(e)) => {
++                    log::error!("M3 init error: {e}");
++                    Err(e)
++                }
++                Err(p) => {
++                    let msg = if let Some(s) = p.downcast_ref::<&str>() {
++                        s.to_string()
++                    } else if let Some(s) = p.downcast_ref::<String>() {
++                        s.clone()
++                    } else {
++                        "<unknown panic>".to_string()
++                    };
++                    log::error!("M3 init panic: {msg}");
++                    Err(format!("panic: {msg}"))
++                }
++            }
++        })
++        .expect("spawn");
++    Some(h)
++}
++
+ #[no_mangle]
+ fn android_main(app: AndroidApp) {
+     #[cfg(target_os = "android")]
+@@ -2273,42 +2324,7 @@
+                 match main_event {
+                     MainEvent::InitWindow { .. } => {
+                         immersive::hide_system_bars(&app);
+-                        struct NativePtr(usize);
+-                        unsafe impl Send for NativePtr {}
+-                        let Some(window) = app.native_window() else { return };
+-                        let ptr = window.ptr().as_ptr() as usize;
+-                        let init_w = window.width().max(1) as u32;
+-                        let init_h = window.height().max(1) as u32;
+-                        // App-private storage, where the world is saved.
+-                        let dir = app.internal_data_path().unwrap_or_else(std::env::temp_dir);
+-                        log::info!("M3: InitWindow, native {}x{}, starting GPU init thread", init_w, init_h);
+-                        let h = std::thread::Builder::new()
+-                            .stack_size(8 * 1024 * 1024)
+-                            .spawn(move || {
+-                                let r = std::panic::catch_unwind(|| {
+-                                    pollster::block_on(App::init(ptr as *mut c_void, init_w, init_h, dir))
+-                                });
+-                                match r {
+-                                    Ok(Ok(a)) => Ok(a),
+-                                    Ok(Err(e)) => {
+-                                        log::error!("M3 init error: {e}");
+-                                        Err(e)
+-                                    }
+-                                    Err(p) => {
+-                                        let msg = if let Some(s) = p.downcast_ref::<&str>() {
+-                                            s.to_string()
+-                                        } else if let Some(s) = p.downcast_ref::<String>() {
+-                                            s.clone()
+-                                        } else {
+-                                            "<unknown panic>".to_string()
+-                                        };
+-                                        log::error!("M3 init panic: {msg}");
+-                                        Err(format!("panic: {msg}"))
+-                                    }
+-                                }
+-                            })
+-                            .expect("spawn");
+-                        init_handle = Some(h);
++                        init_handle = start_init(&app);
+                     }
+                     MainEvent::InputAvailable => {
+                         if let Ok(mut iter) = app.input_events_iter() {
+@@ -2370,6 +2386,20 @@
+             }
+         }
+ 
++        // The renderer button: save, drop the App (its surface must go before a new one can attach to the window), remember
++        // the other backend and build everything again on it.
++        if app_state.as_ref().is_some_and(|a| a.switch) {
++            if let Some(mut a) = app_state.take() {
++                a.save(usize::MAX);
++                let to_gl = !a.gpu.is_gl();
++                drop(a);
++                if let Some(dir) = app.internal_data_path() {
++                    let _ = std::fs::write(backend_file(&dir), if to_gl { "gl" } else { "vulkan" });
++                }
++                init_handle = start_init(&app);
++            }
++        }
++
+         if let Some(a) = app_state.as_mut() {
+             a.render();
+             self_main_frames += 1;
+--- a/README.md	2026-10-15 11:52:46.000000000 +0000
++++ b/README.md	2026-10-15 05:58:30.509990750 +0000
+@@ -64,7 +64,7 @@
+     lib.rs                android_main + App (input, frame, render, build_hud, sync_size)
+     immersive.rs          hides status + nav bars and extends into the notch, via JNI (Java main thread)
+     gpu/
+-      context.rs          wgpu instance + Vulkan/GL fallback for Android
++      context.rs          wgpu instance; Vulkan or GL first (`prefer_gl`, set by the pause menu's renderer button), the other as fallback
+       pipeline.rs         chunk pipeline + atlas upload + uniforms
+     render/
+       shadows.rs          photon shadow port (M3 of 6): distortion, bias, PCSS as WGSL + group 2 uniforms + blue noise
+--- a/ROADMAP.md	2026-10-15 12:39:44.000000000 +0000
++++ b/ROADMAP.md	2026-10-15 05:58:30.509990750 +0000
+@@ -1,6 +1,6 @@
+ # Roadmap: Minecraft b1.7.3 -> Android in Rust
+ 
+-Fresh start. One milestone per session. Vanilla names. Vulkan-only.
++Fresh start. One milestone per session. Vanilla names. Vulkan or OpenGL ES (wgpu's two backends), switched in the pause menu.
+ Own simple save format (M7 dropped McRegion). Client-only, single player.
+ 
+ ## Scope
+@@ -621,3 +621,7 @@
+     - `lib.rs`: the `ItemReed` branch now also places item 354 as block 92 (solid ground below, the player's box must be clear: `canBlockBePlacedAt`); a tap on a cake heals 3 below full health and adds a bite (meta + 1), the sixth bite removes it.
+     - `world/chunk.rs`: `box_bounds` (drawn / outline: loses 2/16 from -X per bite), `CAKE_PHYS` (116..=121, collision 1/16 lower), not `opaque`. `render/atlas.rs`: tiles 121 top, 122 sides, 123 bitten face, 124 bottom. `world/ticks.rs`: ground not solid = gone. `world/items.rs`: drops nothing, stack of 1. `world/craft.rs`: recipe (3 milk, 2 sugar, 3 wheat, egg), and `take_result` now leaves an empty bucket for a water / lava / milk bucket (`getContainerItem`).
+     - Not done: sugar has no source until M16 (sugar cane -> sugar recipe), a punch (`onBlockClicked`) does not eat, eat sound.
++- `done` OpenGL renderer + pause-menu toggle (written without a Rust toolchain: not compiled, not run; +1 test `touch_ui::tests::backend_button_fires_once`, not yet to be tested). No second renderer: wgpu already ships a GLES backend (`gles` feature) and every pass is WGSL, so OpenGL is the same frame on `Backends::GL`.
++    - `gpu/context.rs`: `from_android_window(.., prefer_gl)` tries the chosen backend first, the other as fallback; `Gpu::is_gl` reports the one actually running.
++    - `input/touch_ui.rs`: `PointerRole::Backend`, `LayoutRects::backend` (under the reset button), `take_backend`. `lib.rs`: the pause menu shows `Renderer: Vulkan` / `Renderer: OpenGL`; a tap sets `App::switch`, the main loop saves, drops the App (its surface must go before another can attach to the window), writes `gl` / `vulkan` to `<internal data>/backend` and re-runs `start_init`, so the choice survives restarts. The world reloads from the save (a second or two).
++    - ponytail: the whole App is rebuilt instead of hot-swapping the device (wgpu resources cannot cross devices). UNVERIFIED: the GL path on a device (Rgba16Float targets, compute in `sky.rs`, `downlevel_defaults` limits); if GL init fails the fallback starts Vulkan again and the button keeps showing Vulkan.

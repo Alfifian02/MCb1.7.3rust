@@ -64,7 +64,7 @@ mc-rs/
     lib.rs                android_main + App (input, frame, render, build_hud, sync_size)
     immersive.rs          hides status + nav bars and extends into the notch, via JNI (Java main thread)
     gpu/
-      context.rs          wgpu instance + Vulkan/GL fallback for Android
+      context.rs          wgpu instance; Vulkan or GL first (`prefer_gl`, set by the pause menu's renderer button), the other as fallback
       pipeline.rs         chunk pipeline + atlas upload + uniforms
     render/
       shadows.rs          photon shadow port (M3 of 6): distortion, bias, PCSS as WGSL + group 2 uniforms + blue noise
