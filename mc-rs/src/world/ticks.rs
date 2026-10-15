@@ -51,7 +51,20 @@ fn bid(w: &ChunkManager, x: i32, y: i32, z: i32) -> u8 {
 }
 
 /// A block of sand or gravel that left its cell (`EntityFallingSand`, 0.98 box, centre `pos`).
+/// `TileEntityPiston` as one record: a block (or the piston head) sliding from `from` to `to` over 2 ticks while its `cell` holds the
+/// invisible moving block (36); `then` is what the cell becomes when it arrives (None: air).
+#[derive(Clone, Copy)]
+pub struct Mv {
+    pub from: (i32, i32, i32),
+    pub to: (i32, i32, i32),
+    cell: (i32, i32, i32),
+    then: Option<(u8, u8)>,
+}
+
 pub struct Falling {
+    pub meta: u8,
+    /// Set for a moving piston piece (drawn by `id`, `meta` and the block's bounds, not as sand).
+    pub mv: Option<Mv>,
     pub pos: Vec3,
     pub prev: Vec3,
     vy: f32,
@@ -121,7 +134,7 @@ impl Ticks {
         let (s, c) = (self.rng.next_float() * std::f32::consts::TAU * std::f32::consts::PI / 180.0).sin_cos(); // the Java feeds radians to a degree conversion
         let fuse = if short { self.rng.next_int_bound(20) + 10 } else { 80 };
         let pos = Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
-        self.falling.push(Falling { pos, prev: pos, vy: 0.2, id: 46, age: 0, vx: -s * 0.02, vz: -c * 0.02, fuse });
+        self.falling.push(Falling { pos, prev: pos, vy: 0.2, id: 46, age: 0, vx: -s * 0.02, vz: -c * 0.02, fuse, meta: 0, mv: None });
     }
 
     /// `World.scheduleBlockUpdate`: the same block at the same cell is queued once.
@@ -369,7 +382,7 @@ impl Ticks {
                     // EntityFallingSand removes the block on its first update, which is this same tick.
                     w.set_block(x, y, z, 0);
                     let pos = Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
-                    self.falling.push(Falling { pos, prev: pos, vy: 0.0, id, age: 0, vx: 0.0, vz: 0.0, fuse: -1 });
+                    self.falling.push(Falling { pos, prev: pos, vy: 0.0, id, age: 0, vx: 0.0, vz: 0.0, fuse: -1, meta: 0, mv: None });
                 }
             }
             2 => grass(w, &mut self.rng, x, y, z),
@@ -433,8 +446,15 @@ impl Ticks {
         }
     }
 
-    /// `BlockPistonBase.func_31043_h` with the movement done at once (the Java slides the blocks over 2 ticks through `BlockPistonMoving`
-    /// and `TileEntityPiston`; ponytail: they jump, and entities are not pushed). Powered and retracted: push up to 12 blocks one cell
+    /// A moving piece (`BlockPistonMoving` + `TileEntityPiston`): `cell` becomes the invisible block 36 and a `Falling` record slides
+    /// `id` / `meta` from `from` to `to`.
+    fn piece(&mut self, w: &mut ChunkManager, cell: (i32, i32, i32), id: u8, meta: u8, from: (i32, i32, i32), to: (i32, i32, i32), then: Option<(u8, u8)>) {
+        w.set_block(cell.0, cell.1, cell.2, 36);
+        let c = Vec3::new(from.0 as f32 + 0.5, from.1 as f32 + 0.5, from.2 as f32 + 0.5);
+        self.falling.push(Falling { pos: c, prev: c, vy: 0.0, id, age: 0, vx: 0.0, vz: 0.0, fuse: -1, meta, mv: Some(Mv { from, to, cell, then }) });
+    }
+
+    /// `BlockPistonBase.func_31043_h` (the Java slides the blocks over 2 ticks; so do the pieces here, see `piece`). Powered and retracted: push up to 12 blocks one cell
     /// and put the head (34) in front; unpowered and extended: remove the head and, for the sticky one, pull the block behind it.
     fn piston(&mut self, w: &mut ChunkManager, drops: &mut Drops, x: i32, y: i32, z: i32, id: u8) {
         let (m, sticky) = (w.meta(x, y, z), id == 29);
@@ -470,21 +490,24 @@ impl Ticks {
                 w.set_block(cx, cy, cz, 0);
             }
             for &(cx, cy, cz) in cells.iter().rev() {
-                w.set_block_meta(cx + dx, cy + dy, cz + dz, bid(w, cx, cy, cz), w.meta(cx, cy, cz));
+                let (b, bm, to) = (bid(w, cx, cy, cz), w.meta(cx, cy, cz), (cx + dx, cy + dy, cz + dz));
+                self.piece(w, to, b, bm, (cx, cy, cz), to, Some((b, bm)));
             }
-            let h = at(1);
-            w.set_block_meta(h.0, h.1, h.2, 34, f as u8 | if sticky { 8 } else { 0 });
+            let (h, hm) = (at(1), f as u8 | if sticky { 8 } else { 0 });
+            self.piece(w, h, 34, hm, (x, y, z), h, Some((34, hm))); // the head slides out of the base
             w.set_block_meta(x, y, z, id, m | 8);
         } else if !powered && m & 8 != 0 {
             let h = at(1);
             if bid(w, h.0, h.1, h.2) == 34 {
-                w.set_block(h.0, h.1, h.2, 0);
+                let hm = w.meta(h.0, h.1, h.2);
+                self.piece(w, h, 34, hm, h, (x, y, z), None); // the head slides back into the base
             }
             let b = at(2);
             let pulled = bid(w, b.0, b.1, b.2);
             if sticky && pulled != 0 && can_push(pulled, w.meta(b.0, b.1, b.2)) && push_kind(pulled) == 0 {
-                w.set_block_meta(h.0, h.1, h.2, pulled, w.meta(b.0, b.1, b.2));
+                let pm = w.meta(b.0, b.1, b.2);
                 w.set_block(b.0, b.1, b.2, 0);
+                self.piece(w, h, pulled, pm, b, h, Some((pulled, pm)));
             }
             w.set_block_meta(x, y, z, id, m & 7);
         }
@@ -646,6 +669,34 @@ impl Ticks {
         let mut i = 0;
         while i < self.falling.len() {
             let f = &mut self.falling[i];
+            if let Some(mv) = f.mv {
+                // `TileEntityPiston.onUpdate`: half of the way each tick; on arrival the cell takes its block (a head whose base let go
+                // meanwhile is dropped).
+                let c = |p: (i32, i32, i32)| Vec3::new(p.0 as f32 + 0.5, p.1 as f32 + 0.5, p.2 as f32 + 0.5);
+                f.prev = f.pos;
+                f.age += 1;
+                f.pos = c(mv.from).lerp(c(mv.to), (f.age as f32 / 2.0).min(1.0));
+                if f.age < 2 {
+                    i += 1;
+                    continue;
+                }
+                self.falling.remove(i); // in order: a retracting head clears the cell before the pulled block fills it
+                let (x, y, z) = mv.cell;
+                if matches!(bid(w, x, y, z), 0 | 36) {
+                    match mv.then {
+                        Some((34, m)) if !head_wanted(w, x, y, z, m) => {
+                            w.set_block(x, y, z, 0);
+                        }
+                        Some((b, m)) => {
+                            w.set_block_meta(x, y, z, b, m);
+                        }
+                        None => {
+                            w.set_block(x, y, z, 0);
+                        }
+                    }
+                }
+                continue;
+            }
             if f.id == 46 {
                 // `EntityTNTPrimed.onUpdate`: gravity 0.04, drag 0.98, x / z x 0.7 on the ground, then the fuse.
                 // ponytail: the 0.98 box is probed as a point at its leading face (centre height for x / z), so a TNT can hang a hair over an edge.
@@ -701,6 +752,13 @@ impl Ticks {
             }
         }
     }
+}
+
+/// A head arriving wants its base to still be extended behind it (the base cell is one step back along the head's facing).
+fn head_wanted(w: &ChunkManager, x: i32, y: i32, z: i32, m: u8) -> bool {
+    let (dx, dy, dz) = SIDE[(m & 7).min(5) as usize];
+    let (bx, by, bz) = (x - dx, y - dy, z - dz);
+    matches!(bid(w, bx, by, bz), 29 | 33) && w.meta(bx, by, bz) & 8 != 0
 }
 
 /// `BlockPistonBase.func_31041_f`: powered from any side but the front, or by the "quasi-connected" cells one above (the famous
@@ -1329,6 +1387,12 @@ mod tests {
             m.set_block_meta(4, 40, z, 69, 5 | 8); // a lever on the floor beside it, on
         }
         t.notify(&mut m, &mut d);
+        assert_eq!(m.block(6, 40, 5), Some(36), "the cells hold the moving block while the pieces slide");
+        assert_eq!(t.falling.iter().filter(|f| f.mv.is_some()).count(), 6, "two blocks and a head for each piston");
+        t.fall(&mut m, &mut d);
+        assert_eq!(m.block(8, 40, 5), Some(36), "one tick is not enough");
+        t.fall(&mut m, &mut d);
+        t.notify(&mut m, &mut d);
         for z in [5, 9] {
             assert_eq!((m.block(6, 40, z), m.meta(6, 40, z), m.block(7, 40, z), m.block(8, 40, z)), (Some(34), if z == 9 { 13 } else { 5 }, Some(1), Some(4)), "head in front, both blocks one cell on");
             assert_eq!(m.meta(5, 40, z) & 8, 8);
@@ -1336,6 +1400,9 @@ mod tests {
         for z in [5, 9] {
             m.set_block_meta(4, 40, z, 69, 5);
         }
+        t.notify(&mut m, &mut d);
+        t.fall(&mut m, &mut d);
+        t.fall(&mut m, &mut d);
         t.notify(&mut m, &mut d);
         assert_eq!((m.block(6, 40, 5), m.block(7, 40, 5), m.meta(5, 40, 5)), (Some(0), Some(1), 5), "the plain one leaves the blocks where they are");
         assert_eq!((m.block(6, 40, 9), m.block(7, 40, 9)), (Some(1), Some(0)), "the sticky one pulls the nearest block back");

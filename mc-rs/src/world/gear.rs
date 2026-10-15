@@ -96,6 +96,7 @@ pub enum Befriend {
 }
 
 pub const BONE: u16 = 352;
+pub const BOAT: u16 = 333;
 pub const SADDLE: u16 = 329;
 
 /// A tap with `held` on a mob that may be befriended or mounted; `None` = nothing here (the tap attacks, or `use_on_mob` runs).

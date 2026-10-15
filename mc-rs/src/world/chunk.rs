@@ -220,6 +220,12 @@ pub fn physics_id(id: u8, meta: u8) -> u8 {
     }
 }
 
+/// Does `physics_id` read the metadata of this id? A physics query then skips the second chunk lookup for every other cell
+/// (`meta_only_where_physics_reads_it` fails when `physics_id` grows an arm this list does not know).
+pub const fn meta_matters(id: u8) -> bool {
+    matches!(id, 78 | 53 | 67 | 64 | 71 | 96 | 92)
+}
+
 /// `BlockDoor.getState`: which edge of the cell the leaf stands on (0 -Z, 1 +X, 2 +Z, 3 -X); an open door turns a quarter.
 pub const fn door_state(meta: u8) -> u8 {
     if meta & 4 == 0 { meta.wrapping_sub(1) & 3 } else { meta & 3 }
@@ -281,7 +287,7 @@ pub const fn normal_cube(id: u8) -> bool {
 pub fn collision(id: u8) -> Option<[f32; 6]> {
     const I: f32 = CACTUS_INSET;
     match id {
-        0 | 8..=11 | 27 | 28 | 30 | 50 | 51 | 55 | 59 | 63 | 65 | 66 | 68 | 69 | 70 | 72 | 75 | 76 | 77 | 78 | 90 | 93 | 94 => None, // rails have none (`getCollisionBoundingBoxFromPool` = null); ponytail: a ladder's thin box needs metadata (physics reads ids), none for now
+        0 | 8..=11 | 27 | 28 | 30 | 36 | 50 | 51 | 55 | 59 | 63 | 65 | 66 | 68 | 69 | 70 | 72 | 75 | 76 | 77 | 78 | 90 | 93 | 94 => None, // rails have none (`getCollisionBoundingBoxFromPool` = null); ponytail: a ladder's thin box needs metadata (physics reads ids), none for now
         26 => Some([0.0, 0.0, 0.0, 1.0, 9.0 / 16.0, 1.0]), // ponytail: a door stays a full cell until the query carries metadata
         _ if is_plant(id) => None,
         44 | SNOW_DEEP => Some([0.0, 0.0, 0.0, 1.0, 0.5, 1.0]),
@@ -385,6 +391,15 @@ mod tests {
 #[cfg(test)]
 mod phys_tests {
     use super::*;
+
+    #[test]
+    fn meta_only_where_physics_reads_it() {
+        for id in 0..=255u8 {
+            if !meta_matters(id) {
+                assert!((0..16).all(|m| physics_id(id, m) == id), "id {id} reads its metadata");
+            }
+        }
+    }
 
     #[test]
     fn stairs_and_doors_have_their_java_boxes() {

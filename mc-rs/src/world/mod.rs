@@ -21,3 +21,4 @@ pub mod redstone;
 pub mod decor;
 pub mod path;
 pub mod rail;
+pub mod boat;

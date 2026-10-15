@@ -20,11 +20,12 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Mutex};
 
+use embeddium::{cull::{Culler, Graph}, vis};
 use glam::Vec3;
 
 use crate::gpu::pipeline::{create_index_buffer, create_vertex_buffer};
 use crate::render::mesh;
-use crate::world::chunk::{height_map, idx, Nibbles, H, VOLUME};
+use crate::world::chunk::{height_map, idx, meta_matters, normal_cube, opaque, physics_id, Nibbles, H, VOLUME};
 use crate::world::gen::chunk_manager::WorldChunkManager;
 use crate::world::gen::overworld::OverworldGenerator;
 use crate::world::gen::noise::JavaRandom;
@@ -102,10 +103,13 @@ pub struct Mesh {
     starts: [u32; SECTIONS + 1],
     /// The water faces (blended, drawn after everything else) share `vbuf`; their indices sorted by section the same way.
     water: Option<(wgpu::Buffer, [u32; SECTIONS + 1])>,
+    /// Per section, which faces see each other through it (`embeddium::vis`): what the occlusion walk reads.
+    vis: [u64; SECTIONS],
 }
 
 /// Sections (16 blocks tall) of a chunk column: the unit the draw loop culls.
 pub const SECTIONS: usize = H / 16;
+const _: () = assert!(SECTIONS <= 8); // `ChunkManager::visible` keeps one bit per section in a u8
 
 /// Which blocks around the eye are drawn. `Cylinder`: a circle of the horizontal radius (circular horizontal distance).
 /// `Sphere`: 3D distance <= the horizontal radius. Both are also capped by the vertical radius. All distances run from the eye
@@ -180,6 +184,7 @@ struct Built {
     starts: [u32; SECTIONS + 1],
     widxs: Vec<u32>,
     wstarts: [u32; SECTIONS + 1],
+    vis: [u64; SECTIONS],
 }
 
 /// The CPU half of meshing a chunk, run by a worker with its own climate noise (`cm`) for the biome tints.
@@ -201,7 +206,12 @@ fn build_job(job: MeshJob, cm: &mut WorldChunkManager) -> Built {
     );
     let (idxs, starts) = by_section(&verts, &idxs);
     let (widxs, wstarts) = by_section(&verts, &widxs);
-    Built { verts, idxs, starts, widxs, wstarts }
+    // Only full cubes that stop light hide what is behind them: leaves, glass, ice and water are seen through, slabs and stairs are not cubes.
+    let vis = std::array::from_fn(|s| vis::compute(|x, y, z| {
+        let b = me.blocks[idx(x, s * 16 + y, z)];
+        opaque(b) && normal_cube(b)
+    }));
+    Built { verts, idxs, starts, widxs, wstarts, vis }
 }
 
 struct Entry {
@@ -255,6 +265,8 @@ pub struct ChunkManager {
     /// Save folder (M7); `None` = nothing is read or written (the tests). `saved` = chunks that have a file there.
     dir: Option<PathBuf>,
     saved: HashSet<Key>,
+    /// The save I/O thread, there while `dir` is (`with_dir`): chunk files are written there, so the render thread only encodes.
+    writer: Option<Writer>,
     /// Cells written through `set_block_meta` since the last `take_changes`: (x, y, z, old id, new id). `world::ticks`
     /// turns them into `onBlockAdded` / `onBlockRemoval` / `onNeighborBlockChange` (the `...WithNotify` setters).
     changes: Vec<(i32, i32, i32, u8, u8)>,
@@ -262,6 +274,22 @@ pub struct ChunkManager {
     loot: Vec<(Pos, Chest)>,
     /// Dungeon spawners populate placed that the game has not taken over yet (`take_spawners`).
     spawners: Vec<(Pos, u8)>,
+    /// The occlusion walk's scratch space (`update_visible`), kept between frames so a frame allocates nothing.
+    culler: Culler,
+    /// Per chunk column, the sections (bit `s`) `update_visible` found drawable this frame.
+    visible: HashMap<Key, u8>,
+}
+
+/// The loaded chunks as the occlusion walk sees them. A chunk that has no mesh (air only, or not built yet) lets the view through.
+struct Sections<'a>(&'a Chunks);
+
+impl Graph for Sections<'_> {
+    fn vis(&self, [x, y, z]: [i32; 3]) -> Option<u64> {
+        if !(0..SECTIONS as i32).contains(&y) {
+            return None;
+        }
+        self.0.get(&(x, z)).map(|e| e.mesh.as_ref().map_or(vis::FULL, |m| m.vis[y as usize]))
+    }
 }
 
 impl ChunkManager {
@@ -311,7 +339,7 @@ impl ChunkManager {
         ring.sort_by_key(|&(dx, dz)| dx * dx + dz * dz);
 
         Self { chunks: Chunks::default(), pending: HashSet::new(), ring, radius, center: None, max_in_flight: workers * 2, built, meshing: HashSet::new(), max_meshing: workers * 2,
-               gen: OverworldGenerator::new(seed), cm: WorldChunkManager::new(seed), jobs, done, light_queue: Vec::new(), sky_sub: 0, mesh_gen: 0, dir: None, saved: HashSet::new(), changes: Vec::new(), loot: Vec::new(), spawners: Vec::new() }
+               gen: OverworldGenerator::new(seed), cm: WorldChunkManager::new(seed), jobs, done, light_queue: Vec::new(), sky_sub: 0, mesh_gen: 0, dir: None, saved: HashSet::new(), writer: None, changes: Vec::new(), loot: Vec::new(), spawners: Vec::new(), culler: Culler::default(), visible: HashMap::new() }
     }
 
     /// Keep this world in `dir`: chunks found there are loaded instead of generated, and edited ones are written back
@@ -331,6 +359,7 @@ impl ChunkManager {
             })
             .collect();
         self.dir = Some(dir);
+        self.writer = Some(Writer::spawn());
         self
     }
 
@@ -341,7 +370,9 @@ impl ChunkManager {
 
     /// Load a saved chunk. A file that does not decode is forgotten, so the chunk is generated instead.
     fn load(&mut self, key: Key) {
-        let bytes = self.dir.as_ref().and_then(|d| std::fs::read(chunk_path(d, key)).ok());
+        // A write still queued is newer than the file: the chunk may have been unloaded and walked back to before it landed.
+        let queued = self.writer.as_ref().and_then(|w| w.inflight.get(&key)).map(|(_, b)| b.to_vec());
+        let bytes = queued.or_else(|| self.dir.as_ref().and_then(|d| std::fs::read(chunk_path(d, key)).ok()));
         match bytes.as_deref().and_then(save::decode_chunk) {
             Some((blocks, data, populated)) => {
                 self.insert(key, blocks);
@@ -368,24 +399,37 @@ impl ChunkManager {
         }
     }
 
-    /// Write up to `budget` unsaved chunks (`usize::MAX` = all, for pause and exit). A failed write leaves the chunk
-    /// dirty for the next call and stops this one, so a full disk costs one log line per call, not one per chunk.
+    /// Queue up to `budget` unsaved chunks for the I/O thread (`usize::MAX` = all, for pause and exit: that one also waits until
+    /// every queued write has landed, so the process may end right after). A write that fails leaves its chunk dirty again for the
+    /// next call (`reap_writes`).
     pub fn flush(&mut self, mut budget: usize) {
-        let Some(dir) = &self.dir else { return };
+        let all = budget == usize::MAX;
+        self.reap_writes(false);
+        let (Some(dir), Some(w)) = (&self.dir, &mut self.writer) else { return };
         for (&k, e) in self.chunks.iter_mut().filter(|(_, e)| e.dirty) {
             if budget == 0 {
                 break;
             }
             budget -= 1;
-            match write_entry(dir, k, e) {
-                Ok(()) => {
-                    e.dirty = false;
-                    self.saved.insert(k);
-                }
-                Err(err) => {
-                    log::warn!("save: chunk {k:?}: {err}");
-                    break;
-                }
+            w.queue(dir, k, save::encode_chunk(&e.blocks, &e.data, e.populated));
+            e.dirty = false;
+            self.saved.insert(k);
+        }
+        if all {
+            self.reap_writes(true);
+        }
+    }
+
+    /// Take the answers of the I/O thread (`wait`: until every queued write has been answered). A chunk whose write failed is
+    /// dirty again if it is still loaded (the next `flush` retries it); one already unloaded is lost, as it was when the write ran
+    /// here. One log line per call, so a full disk does not flood the log.
+    fn reap_writes(&mut self, wait: bool) {
+        let failed = self.writer.as_mut().map_or_else(Vec::new, |w| w.reap(wait));
+        let Some((k, err)) = failed.first() else { return };
+        log::warn!("save: {} chunk write(s) failed, the first {k:?}: {err}", failed.len());
+        for (k, _) in &failed {
+            if let Some(e) = self.chunks.get_mut(k) {
+                e.dirty = true;
             }
         }
     }
@@ -454,6 +498,12 @@ impl ChunkManager {
             return 0;
         }
         self.chunks.get(&(x >> 4, z >> 4)).map_or(0, |e| e.data.get((x & 15) as usize, y as usize, (z & 15) as usize))
+    }
+
+    /// `physics_id(b, meta)` of the cell holding block `b`; the metadata is only read where physics uses it (Radium
+    /// `util.chunk_access` idea: fewer chunk lookups per cell of a collision query).
+    pub fn physics_at(&self, x: i32, y: i32, z: i32, b: u8) -> u8 {
+        physics_id(b, if meta_matters(b) { self.meta(x, y, z) } else { 0 })
     }
 
     /// Break or place a block with metadata 0 (`Chunk.setBlockID`): nothing when the cell already holds `id`,
@@ -682,19 +732,53 @@ impl ChunkManager {
         })
     }
 
-    /// The main pass's draw loop: calls `draw(mesh, index range)` for every run of neighbouring sections that is inside the
-    /// `shape` around `eye` (radii `rh`, `rv` in blocks) and passes `visible(min, max)` (the frustum). Each section's box is
-    /// one block taller at both ends. Empty sections are skipped, touching ones are one range, so a chunk is mostly one draw.
+    /// Call once per frame before `draw_ranges`: finds the sections to draw from the eye. A breadth-first walk out of the eye's
+    /// section (`embeddium::cull`) that stays inside the `shape` (radii `rh`, `rv` in blocks) and the frustum (`in_frustum(min, max)`)
+    /// and does not continue through terrain that walls the view off, so caves and hills hide what is behind them. Each section's box
+    /// is one block taller at both ends. With the eye in a chunk that is not loaded there is nowhere to start: every section is tested instead.
+    /// ponytail: a hole in the loaded ring (a chunk still generating) cuts the walk there; it fills in as the chunk arrives.
+    pub fn update_visible(&mut self, eye: Vec3, shape: Shape, rh: f32, rv: f32, in_frustum: impl Fn(Vec3, Vec3) -> bool) {
+        let ok = |[x, y, z]: [i32; 3]| {
+            let min = Vec3::new(x as f32 * 16.0, y as f32 * 16.0 - 1.0, z as f32 * 16.0);
+            let max = min + Vec3::new(16.0, 18.0, 16.0);
+            in_range(shape, eye, min, max, rh, rv) && in_frustum(min, max)
+        };
+        self.visible.clear();
+        let ey = (eye.y.floor() as i32) >> 4;
+        let inside = (0..SECTIONS as i32).contains(&ey); // above or below the world the eye's section says nothing about the view
+        let origin = [chunk_coord(eye.x), ey.clamp(0, SECTIONS as i32 - 1), chunk_coord(eye.z)];
+        let mut culler = std::mem::take(&mut self.culler);
+        match culler.find_visible(&Sections(&self.chunks), origin, inside, &ok) {
+            Some(found) => {
+                for &[x, y, z] in found {
+                    *self.visible.entry((x, z)).or_default() |= 1u8 << y;
+                }
+            }
+            None => {
+                for &(x, z) in self.chunks.keys() {
+                    for y in 0..SECTIONS as i32 {
+                        if ok([x, y, z]) {
+                            *self.visible.entry((x, z)).or_default() |= 1u8 << y;
+                        }
+                    }
+                }
+            }
+        }
+        self.culler = culler;
+    }
+
+    /// The main pass's draw loop: calls `draw(mesh, index range)` for every run of neighbouring sections `update_visible` found.
+    /// Empty sections are skipped, touching ones are one range, so a chunk is mostly one draw.
     /// `water` picks the water faces (index buffer passed to `draw`) instead of the opaque ones.
-    pub fn draw_ranges(&self, eye: Vec3, shape: Shape, rh: f32, rv: f32, water: bool, visible: impl Fn(Vec3, Vec3) -> bool, mut draw: impl FnMut(&Mesh, &wgpu::Buffer, std::ops::Range<u32>)) {
+    pub fn draw_ranges(&self, eye: Vec3, water: bool, mut draw: impl FnMut(&Mesh, &wgpu::Buffer, std::ops::Range<u32>)) {
         // Translucent water blends over what is behind it, so its chunks go far to near (`WorldRenderer` sorts chunks too).
         // ponytail: whole chunks only, the faces inside one chunk keep map order; upgrade = sort the sections / faces too.
-        let mut order: Vec<_> = self.chunks.iter().collect();
+        let mut order: Vec<_> = self.visible.iter().filter_map(|(k, &mask)| self.chunks.get(k).map(|e| (k, e, mask))).collect();
         if water {
-            let d2 = |e: &(&Key, &_)| ((e.0 .0 * 16 + 8) as f32 - eye.x).powi(2) + ((e.0 .1 * 16 + 8) as f32 - eye.z).powi(2);
+            let d2 = |e: &(&Key, &Entry, u8)| ((e.0 .0 * 16 + 8) as f32 - eye.x).powi(2) + ((e.0 .1 * 16 + 8) as f32 - eye.z).powi(2);
             order.sort_by(|a, b| d2(b).total_cmp(&d2(a)));
         }
-        for (&(x, z), e) in order {
+        for (_, e, mask) in order {
             let Some(m) = e.mesh.as_ref() else { continue };
             let (ibuf, starts) = match (&m.water, water) {
                 (Some((b, s)), true) => (b, s),
@@ -703,11 +787,7 @@ impl ChunkManager {
             };
             let mut run: Option<(u32, u32)> = None;
             for s in 0..=SECTIONS {
-                let on = s < SECTIONS && starts[s + 1] > starts[s] && {
-                    let min = Vec3::new(x as f32 * 16.0, s as f32 * 16.0 - 1.0, z as f32 * 16.0);
-                    let max = min + Vec3::new(16.0, 18.0, 16.0);
-                    in_range(shape, eye, min, max, rh, rv) && visible(min, max)
-                };
+                let on = s < SECTIONS && starts[s + 1] > starts[s] && mask >> s & 1 != 0;
                 match (on, run) {
                     (true, None) => run = Some((starts[s], starts[s + 1])),
                     (true, Some((a, _))) => run = Some((a, starts[s + 1])),
@@ -763,21 +843,18 @@ impl ChunkManager {
         }
 
         // 2. Unload, only when the player crossed a chunk border. Dropping an entry frees its buffers; one that is
-        // not on disk yet is written first.
-        // ponytail: the writes run on the render thread, a handful of ~5 KB files per border crossing.
+        // not on disk yet is encoded and queued for the I/O thread first (`load` finds it there if the player walks back).
+        // ponytail: the RLE encode (~48 KB in, ~5 KB out) still runs here; the upgrade is to send the arrays and encode on the thread.
+        self.reap_writes(false);
         if self.center != Some((cx, cz)) {
             self.center = Some((cx, cz));
             let gone: Vec<Key> = self.chunks.keys().copied().filter(|&k| d2(k) > keep).collect();
             self.mesh_gen = self.mesh_gen.wrapping_add(1);
             for k in gone {
                 let Some(e) = self.chunks.remove(&k) else { continue };
-                if let (true, Some(dir)) = (e.dirty, &self.dir) {
-                    match write_entry(dir, k, &e) {
-                        Ok(()) => {
-                            self.saved.insert(k);
-                        }
-                        Err(err) => log::warn!("save: chunk {k:?} lost on unload: {err}"),
-                    }
+                if let (true, Some(dir), Some(w)) = (e.dirty, &self.dir, &mut self.writer) {
+                    w.queue(dir, k, save::encode_chunk(&e.blocks, &e.data, e.populated));
+                    self.saved.insert(k);
                 }
             }
         }
@@ -845,7 +922,7 @@ impl ChunkManager {
                 continue;
             }
             uploaded += 1;
-            let Built { verts, idxs, starts, widxs, wstarts } = b;
+            let Built { verts, idxs, starts, widxs, wstarts, vis } = b;
             let mesh = (!idxs.is_empty() || !widxs.is_empty()).then(|| Mesh {
                 vbuf: create_vertex_buffer(device, bytemuck::cast_slice(&verts)),
                 // (a chunk of only water has no opaque faces: a dummy index keeps the buffer non-empty, `index_count` is 0)
@@ -853,6 +930,7 @@ impl ChunkManager {
                 index_count: idxs.len() as u32,
                 starts,
                 water: (!widxs.is_empty()).then(|| (create_index_buffer(device, &widxs), wstarts)),
+                vis,
             });
             if let Some(e) = self.chunks.get_mut(&key) {
                 // ponytail: a rebuild with the same index count (the time-of-day relight) is taken as the same geometry, so the
@@ -895,8 +973,64 @@ fn chunk_path(dir: &Path, (x, z): Key) -> PathBuf {
     dir.join(format!("c.{x}.{z}"))
 }
 
-fn write_entry(dir: &Path, key: Key, e: &Entry) -> std::io::Result<()> {
-    save::write(&chunk_path(dir, key), &save::encode_chunk(&e.blocks, &e.data, e.populated))
+/// The save I/O thread (C2ME `rewrites-chunkio`): chunk files are written there, one after the other in the order they were
+/// queued, each through `save::write` (atomic). The manager keeps the newest queued bytes of every chunk until its write has been
+/// answered, because the file on disk can still be the older one.
+struct Writer {
+    tx: mpsc::Sender<(Key, u64, PathBuf, Arc<Vec<u8>>)>,
+    answers: mpsc::Receiver<(Key, u64, std::io::Result<()>)>,
+    /// Newest queued bytes per chunk and the sequence number of that write, until it lands.
+    inflight: HashMap<Key, (u64, Arc<Vec<u8>>)>,
+    seq: u64,
+    /// Writes sent and not answered yet: what `reap(true)` waits for (not `inflight`, which keeps an entry only for the newest write).
+    pending: usize,
+}
+
+impl Writer {
+    fn spawn() -> Self {
+        let (tx, jobs) = mpsc::channel::<(Key, u64, PathBuf, Arc<Vec<u8>>)>();
+        let (done, answers) = mpsc::channel();
+        std::thread::Builder::new()
+            .name("chunk-io".into())
+            .spawn(move || {
+                // Ends when the manager is dropped (the channel closes after the last queued write).
+                while let Ok((key, seq, path, bytes)) = jobs.recv() {
+                    if done.send((key, seq, save::write(&path, &bytes))).is_err() {
+                        break;
+                    }
+                }
+            })
+            .expect("spawn chunk io thread");
+        Self { tx, answers, inflight: HashMap::new(), seq: 0, pending: 0 }
+    }
+
+    fn queue(&mut self, dir: &Path, key: Key, bytes: Vec<u8>) {
+        self.seq += 1;
+        let bytes = Arc::new(bytes);
+        self.inflight.insert(key, (self.seq, bytes.clone()));
+        if self.tx.send((key, self.seq, chunk_path(dir, key), bytes)).is_ok() {
+            self.pending += 1;
+        }
+    }
+
+    /// Take the answers that are in (`wait`: until every sent write has been answered, or the thread is gone); the chunks whose
+    /// write failed.
+    fn reap(&mut self, wait: bool) -> Vec<(Key, std::io::Error)> {
+        let mut failed = Vec::new();
+        loop {
+            let msg = if wait && self.pending > 0 { self.answers.recv().ok() } else { self.answers.try_recv().ok() };
+            let Some((key, seq, res)) = msg else { break };
+            self.pending = self.pending.saturating_sub(1);
+            // An answer for an older write of the chunk leaves the newer one's bytes in place.
+            if self.inflight.get(&key).is_some_and(|(s, _)| *s == seq) {
+                self.inflight.remove(&key);
+            }
+            if let Err(e) = res {
+                failed.push((key, e));
+            }
+        }
+        failed
+    }
 }
 
 #[cfg(test)]
@@ -975,6 +1109,26 @@ mod tests {
         let mut c = ChunkManager::new(1, 1).with_dir(dir.clone());
         c.load((0, 0));
         assert!(!c.saved.contains(&(0, 0)) && !c.chunks.contains_key(&(0, 0)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `load` reads the newest write still queued, not the older file on disk (a chunk unloaded and walked back to before its write
+    /// landed must keep its edits), and `reap` retires the entry once its own write is answered but not for an older one.
+    #[test]
+    fn load_prefers_the_write_still_queued() {
+        let dir = std::env::temp_dir().join(format!("mc-rs-queued-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut m = ChunkManager::new(1, 1).with_dir(dir.clone());
+        std::fs::write(dir.join("c.0.0"), save::encode_chunk(&vec![0u8; VOLUME], &Nibbles::new(), true)).unwrap(); // the older file: air
+        m.saved.insert((0, 0));
+        let mut blocks = vec![0u8; VOLUME];
+        blocks[idx(3, 40, 5)] = 35;
+        m.writer.as_mut().unwrap().inflight.insert((0, 0), (7, Arc::new(save::encode_chunk(&blocks, &Nibbles::new(), true))));
+        m.load((0, 0));
+        assert_eq!(m.block(3, 40, 5), Some(35), "the queued bytes, not the file");
+        m.chunks.remove(&(0, 0));
+        m.flush(usize::MAX); // waits for nothing (no write was sent), so it must not hang on the entry above, which is not the writer's to retire
+        assert!(m.writer.as_ref().unwrap().inflight.contains_key(&(0, 0)));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

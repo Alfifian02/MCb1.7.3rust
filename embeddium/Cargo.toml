@@ -1,0 +1,10 @@
+[package]
+name = "embeddium"
+version = "0.1.0"
+edition = "2021"
+license = "LGPL-3.0-or-later"
+description = "Rust port of Embeddium's (Sodium 0.5.8) terrain visibility core: occlusion culling, buffer arena, compact vertex. std only."
+
+# No dependencies on purpose: pure CPU logic that `cargo test -p embeddium` runs on a plain Linux host
+# (the mc-rs cdylib cannot be tested there) and that cross-compiles to Android unchanged.
+[dependencies]

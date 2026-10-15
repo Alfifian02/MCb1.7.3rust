@@ -17,6 +17,7 @@ jni = "0.22"
 log = "0.4"
 env_logger = "0.11"
 pollster = "0.4"
+embeddium = { path = "../embeddium" }
 
 [dev-dependencies]
 naga = { version = "26", features = ["wgsl-in"] }

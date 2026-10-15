@@ -40,6 +40,7 @@ use crate::world::decor::{self, Edit, Key, Painting, Text};
 use crate::world::craft::{self, Furnace, Screen};
 use crate::world::items::{self, Drops, Inventory, ItemStack};
 use crate::world::gear::{self, Hook, Used};
+use crate::world::boat;
 use crate::world::mobs::{self, Ctx, Ev, Mobs};
 use crate::world::ticks::{self, Ticks};
 use crate::world::save::{self, Level};
@@ -145,6 +146,7 @@ struct App {
     inv: Inventory,
     drops: Drops,
     mobs: Mobs,
+    boats: boat::Boats,
     /// Block updates (scheduled + random ticks, notifications, falling blocks), stepped on the 20 Hz game tick.
     ticks: Ticks,
     item_mesh: ItemMesh,
@@ -281,6 +283,7 @@ impl App {
             inv: Inventory::default(),
             drops: Drops::new(seed),
             mobs: Mobs::new(seed),
+            boats: boat::Boats::default(),
             ticks: Ticks::new(seed),
             item_mesh,
             screen: None,
@@ -322,6 +325,7 @@ impl App {
         }
         self.close_sign();
         (self.paintings, self.signs) = (Vec::new(), HashMap::new());
+        self.boats = boat::Boats::default();
         let _ = std::fs::remove_dir_all(&self.dir);
         let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as i64);
         self.chunks = ChunkManager::new(SEED, RENDER_DIST).with_dir(self.dir.clone()); // the old one's workers stop on drop
@@ -460,8 +464,9 @@ impl App {
         // wherever the pig goes (`updateRidden`: no motion of its own).
         if self.touch.jumping() {
             self.mobs.list.iter_mut().for_each(|m| m.ridden = false);
+            self.boats.list.iter_mut().for_each(|b| b.ridden = false);
         }
-        let riding = self.mobs.list.iter().any(|m| m.ridden);
+        let riding = self.mobs.list.iter().any(|m| m.ridden) || self.boats.ridden().is_some();
         let asleep = self.sleep.is_some();
         if !asleep {
             self.camera.add_yaw(look_dx * LOOK_SENS);
@@ -482,7 +487,7 @@ impl App {
         self.player.vel.x = (fwd * yaw.sin() + side * yaw.cos()) * MOVE_SPEED;
         self.player.vel.z = (-fwd * yaw.cos() + side * yaw.sin()) * MOVE_SPEED;
         // Plants are drawn but not solid yet (collision shapes come with M14), so physics reads them as air.
-        let get = |x: i32, y: i32, z: i32| self.chunks.block(x, y, z).map(|b| if is_plant(b) { 0 } else { physics_id(b, self.chunks.meta(x, y, z)) });
+        let get = |x: i32, y: i32, z: i32| self.chunks.block(x, y, z).map(|b| if is_plant(b) { 0 } else { self.chunks.physics_at(x, y, z, b) });
         // The held jump button jumps (8.4 m/s, the b1.7.3 velocity) or swims up; fluids (ids 8..=11) are not solid.
         let y0 = self.player.pos.y;
         if sneaking && !riding {
@@ -521,7 +526,7 @@ impl App {
             return;
         }
         // Dropped items fall, settle and get picked up (before the target check below, which can return early).
-        self.drops.tick(dt, &|x: i32, y: i32, z: i32| self.chunks.block(x, y, z).map(|b| physics_id(b, self.chunks.meta(x, y, z))), self.player.pos, &mut self.inv);
+        self.drops.tick(dt, &|x: i32, y: i32, z: i32| self.chunks.block(x, y, z).map(|b| self.chunks.physics_at(x, y, z, b)), self.player.pos, &mut self.inv);
         let light = |x: i32, y: i32, z: i32| self.chunks.light(x, y, z);
         let ctx = Ctx { get: &get, light: &light, day: sub < 4, player: self.player.pos, eye: self.camera.pos };
         for e in self.mobs.update(dt, &ctx, &mut self.drops) {
@@ -530,6 +535,33 @@ impl App {
                 Ev::Boom(p) => self.explode(p, 3.0),
                 _ => {}
             }
+        }
+        // Boats (`EntityBoat.onUpdate`, 20 Hz ticks): the rider's own walking paddles the boat (`motion += rider.motion * 0.2`).
+        let paddle = match self.boats.ridden() {
+            Some(_) => {
+                let ((f, s), yaw) = (self.touch.move_input, self.camera.yaw);
+                glam::Vec3::new(f * yaw.sin() + s * yaw.cos(), 0.0, -f * yaw.cos() + s * yaw.sin()) * MOVE_SPEED / 20.0
+            }
+            None => glam::Vec3::ZERO,
+        };
+        let boat_events = {
+            let bget = |x: i32, y: i32, z: i32| self.chunks.block(x, y, z).map(|b| if is_plant(b) { 0 } else { physics_id(b, self.chunks.meta(x, y, z)) });
+            self.boats.update(dt, &bget, paddle)
+        };
+        for e in boat_events {
+            match e {
+                boat::Event::Drop(s, p) => self.drops.spawn_stack(s, (p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32)),
+                boat::Event::Snow(c) => {
+                    self.chunks.set_block(c.0, c.1, c.2, 0); // `Block.snow` is wiped by the hull
+                }
+            }
+        }
+        // `Entity.updateRiderPosition` for a boat: 0.4 behind the middle, feet 0.8 under the box's centre.
+        if let Some(b) = self.boats.ridden() {
+            self.player.pos = b.rider_pos(physics::HALF.y);
+            self.player.vel = glam::Vec3::ZERO;
+            self.player.on_ground = true;
+            self.camera.pos = self.player.pos + glam::Vec3::new(0.0, EYE_HEIGHT - self.sneak_y, 0.0);
         }
         // `Entity.updateRiderPosition`: the rider's feet are 0.175 over the pig's (`getMountedYOffset` 0.675, `getYOffset` -0.5).
         if let Some(m) = self.mobs.list.iter().find(|m| m.ridden) {
@@ -578,6 +610,24 @@ impl App {
             self.ticks.plate_ents.extend(self.mobs.list.iter().map(|m| { let (lo, hi) = m.aabb(); (lo, hi, true) }));
             self.ticks.step(&mut self.chunks, &mut self.drops, centre, self.weather.rain(1.0));
             self.ticks.note_events.clear(); // no audio layer yet: it would play them here
+            // `TileEntityPiston`: whatever stands in a sliding piece is carried half a block along per tick (ponytail: the player and
+            // the mobs only, and no collision check on the way).
+            for f in &self.ticks.falling {
+                let Some(mv) = f.mv else { continue };
+                let d = glam::Vec3::new((mv.to.0 - mv.from.0) as f32, (mv.to.1 - mv.from.1) as f32, (mv.to.2 - mv.from.2) as f32) * 0.5;
+                let (lo, hi) = (f.pos - glam::Vec3::splat(0.5), f.pos + glam::Vec3::splat(0.5));
+                let inside = |a: glam::Vec3, b: glam::Vec3| b.cmpgt(lo).all() && a.cmplt(hi).all();
+                let p = self.player.pos;
+                if inside(p - physics::HALF, p + physics::HALF) {
+                    self.player.pos += d;
+                }
+                for m in self.mobs.list.iter_mut() {
+                    let (a, b) = m.aabb();
+                    if inside(a, b) {
+                        m.body.pos += d;
+                    }
+                }
+            }
             for p in std::mem::take(&mut self.ticks.dispenses) {
                 self.dispense(p);
             }
@@ -718,6 +768,31 @@ impl App {
         if place {
             let (eye, fwd, slot) = (self.camera.pos, self.camera.forward(), self.touch.hotbar_slot);
             let wall = self.target.map_or(f32::MAX, |h| h.point.distance(eye.as_dvec3()) as f32);
+            // A boat the crosshair is on (and nothing nearer): an empty hand gets in (`Entity.interact`), a held item hits it
+            // (`attackEntityFrom`: damage x 10, over 40 breaks it into 3 planks and 2 sticks).
+            let mob_t = self.mobs.pick(eye, fwd, pick::REACH as f32).filter(|&(_, t)| t < wall).map(|(_, t)| t);
+            if let Some((bi, _)) = self.boats.pick(eye, fwd, pick::REACH as f32).filter(|&(_, t)| t < wall && mob_t.map_or(true, |m| t < m)) {
+                match self.inv.slots[slot].map(|s| s.id) {
+                    None => {
+                        if self.boats.ridden().is_none() {
+                            self.boats.list[bi].ridden = true;
+                        }
+                    }
+                    held => {
+                        let (dmg, wear) = mobs::attack(held);
+                        if self.boats.list[bi].hurt(dmg) {
+                            let b = self.boats.list.remove(bi);
+                            let cell = (b.pos.x.floor() as i32, b.pos.y.floor() as i32, b.pos.z.floor() as i32);
+                            self.drops.spawn_stack(ItemStack { id: boat::PLANKS, count: 3, damage: 0 }, cell);
+                            self.drops.spawn_stack(ItemStack { id: boat::STICK, count: 2, damage: 0 }, cell);
+                        }
+                        if wear > 0 {
+                            self.inv.damage(slot, wear);
+                        }
+                    }
+                }
+                return;
+            }
             if let Some((i, _)) = self.mobs.pick(eye, fwd, pick::REACH as f32).filter(|&(_, t)| t < wall) {
                 // A bone or pork on a wolf, a tap on a tame one, a saddle on a pig, a tap on a saddled one (`Entity.interact`).
                 let held = self.inv.slots[slot];
@@ -1043,7 +1118,7 @@ impl App {
             }
         }
         // Spawners see the same world as the mobs do (plants read as air).
-        let get = |x: i32, y: i32, z: i32| self.chunks.block(x, y, z).map(|b| if is_plant(b) { 0 } else { physics_id(b, self.chunks.meta(x, y, z)) });
+        let get = |x: i32, y: i32, z: i32| self.chunks.block(x, y, z).map(|b| if is_plant(b) { 0 } else { self.chunks.physics_at(x, y, z, b) });
         let light = |x: i32, y: i32, z: i32| self.chunks.light(x, y, z);
         let ctx = Ctx { get: &get, light: &light, day: false, player: self.player.pos, eye: self.camera.pos };
         let chunks = &self.chunks;
@@ -1186,12 +1261,27 @@ impl App {
                 None => self.hook = Some(Hook::cast(eye, fwd, &mut self.mobs.rng)),
             },
             gear::BUCKET | gear::WATER_BUCKET | gear::LAVA_BUCKET => self.use_bucket(slot, held.id),
+            gear::BOAT => self.use_boat(slot),
             _ => self.eat(),
         }
     }
 
     /// `ItemBucket.onItemRightClick`: a 5 block ray; an empty bucket also hits liquids and takes a source, a full one
     /// pours into the cell beside the face it hit (air or a non-solid block).
+    /// `ItemBoat.onItemUse`: the ray reaches 5 blocks and stops at water; the boat is set on top of the cell it hit.
+    fn use_boat(&mut self, slot: usize) {
+        let eye = self.camera.pos.as_dvec3();
+        let end = eye + self.camera.forward().as_dvec3() * 5.0;
+        let bounds = |x: i32, y: i32, z: i32| {
+            let b = self.chunks.block_loaded(x, y, z)?;
+            if (8..=11).contains(&b) { Some([0.0, 0.0, 0.0, 1.0, 1.0, 1.0]) } else { pick_bounds(b, self.chunks.meta(x, y, z)) }
+        };
+        let Some(hit) = pick::ray_trace(&bounds, eye, end) else { return };
+        let (x, y, z) = hit.pos;
+        self.boats.list.push(boat::Boat::new(x as f32 + 0.5, y as f32 + 1.0, z as f32 + 0.5));
+        self.inv.consume(slot);
+    }
+
     fn use_bucket(&mut self, slot: usize, held: u16) {
         let eye = self.camera.pos.as_dvec3();
         let end = eye + self.camera.forward().as_dvec3() * 5.0;
@@ -1398,14 +1488,13 @@ impl App {
         }
     }
 
-    /// Terrain (one draw per run of chunk sections in the render shape and the frustum), dropped items / mobs, and the block outline.
+    /// Terrain (one draw per run of chunk sections `ChunkManager::update_visible` found), dropped items / mobs, and the block outline.
     /// Photon: into the G-buffer; legacy: into the scene, already lit.
-    fn draw_opaque(&self, rp: &mut wgpu::RenderPass<'_>, frustum: &Frustum, item_indices: u32, outline_indices: u32) {
-        let (rh, rv) = ((RENDER_DIST * 16) as f32, (RENDER_VERT * 16) as f32);
+    fn draw_opaque(&self, rp: &mut wgpu::RenderPass<'_>, item_indices: u32, outline_indices: u32) {
         rp.set_pipeline(&self.pipe.pipeline);
         rp.set_bind_group(0, &self.pipe.bind_group, &[]);
         rp.set_bind_group(1, &self.pipe.shadow_bind, &[]);
-        self.chunks.draw_ranges(self.camera.pos, RENDER_SHAPE, rh, rv, false, |min, max| frustum.intersects_aabb(min, max), |m, ib, r| {
+        self.chunks.draw_ranges(self.camera.pos, false, |m, ib, r| {
             rp.set_vertex_buffer(0, m.vbuf.slice(..));
             rp.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
             rp.draw_indexed(r, 0, 0..1);
@@ -1449,7 +1538,7 @@ impl App {
         sign_views.sort_by(|a, b| near(a).total_cmp(&near(b)));
         let item_indices = {
             let chunks = &self.chunks;
-            self.item_mesh.update(&self.gpu.queue, &self.drops, &self.mobs, &self.ticks.falling, &self.fx, &|x, y, z| chunks.light_levels(x, y, z), self.hook.as_ref().map(|h| h.pos), &self.paintings, &sign_views, eye)
+            self.item_mesh.update(&self.gpu.queue, &self.drops, &self.mobs, &self.ticks.falling, &self.fx, &|x, y, z| chunks.light_levels(x, y, z), self.hook.as_ref().map(|h| h.pos), &self.paintings, &sign_views, (&self.boats.list, self.boats.alpha()), eye)
         };
 
         // Sky and fog colour from the sun angle, the weather and the climate under the player; the frame is cleared to
@@ -1475,6 +1564,9 @@ impl App {
         let shadow_vp = self.pipe.upload_uniforms(&self.gpu.queue, view, proj_jittered, self.shadow.light, sun_strength, self.shadow.center);
         self.shadows.update(&self.gpu.queue, self.shadow.center, self.shadow.light, e, self.camera.zfar, self.total_frames);
         let (frustum, shadow_frustum) = (Frustum::from_view_proj(proj * view), Frustum::from_view_proj(shadow_vp));
+        // Which terrain sections the camera sees (frustum, render shape, and occlusion by terrain); the main pass and the water pass both draw from it.
+        // The shadow pass below does not: terrain hidden from the camera still casts shadows.
+        self.chunks.update_visible(self.camera.pos, RENDER_SHAPE, (RENDER_DIST * 16) as f32, (RENDER_VERT * 16) as f32, |min, max| frustum.intersects_aabb(min, max));
         let fog = sky::fog_color(angle, sky_rgb, rain, thunder);
         let fog = if LEGACY { photon::legacy_lin(fog) } else { fog }; // vanilla values -> the frame's linear space
         // Terrain fog (AstraLex `NormalFog`): fades to the horizon colour at the render distance; off under water. Legacy under water:
@@ -1579,7 +1671,6 @@ impl App {
         }
         // Photon look: a G-buffer (terrain, items and the outline write albedo + light + face; the depth is kept) that the deferred pass
         // reads back. Legacy look: nothing here, the terrain is lit as it is drawn, in the scene pass below.
-        let (rh, rv) = ((RENDER_DIST * 16) as f32, (RENDER_VERT * 16) as f32);
         if !LEGACY {
             let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("gbuffer_pass"),
@@ -1597,7 +1688,7 @@ impl App {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            self.draw_opaque(&mut rp, &frustum, item_indices, outline_indices);
+            self.draw_opaque(&mut rp, item_indices, outline_indices);
         }
         // Photon's clouds (p0, d1, d2): they read the frame's opaque depth, so they run after the chunk pass.
         if let Some(clouds) = self.clouds.as_mut() {
@@ -1654,7 +1745,7 @@ impl App {
                 occlusion_query_set: None,
             });
             if LEGACY {
-                self.draw_opaque(&mut rp, &frustum, item_indices, outline_indices); // lit in `fs_main`
+                self.draw_opaque(&mut rp, item_indices, outline_indices); // lit in `fs_main`
             }
             self.sky.draw(&mut rp); // depth-tested LessEqual: only the pixels the opaque draws left at 1
             self.sky.draw_extras(&mut rp); // legacy: sunrise fan + stars
@@ -1665,7 +1756,7 @@ impl App {
             rp.set_pipeline(&self.pipe.water_pipeline);
             rp.set_bind_group(0, &self.pipe.bind_group, &[]);
             rp.set_bind_group(1, &self.pipe.shadow_bind, &[]);
-            self.chunks.draw_ranges(self.camera.pos, RENDER_SHAPE, rh, rv, true, |min, max| frustum.intersects_aabb(min, max), |m, ib, r| {
+            self.chunks.draw_ranges(self.camera.pos, true, |m, ib, r| {
                 rp.set_vertex_buffer(0, m.vbuf.slice(..));
                 rp.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
                 rp.draw_indexed(r, 0, 0..1);

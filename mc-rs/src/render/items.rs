@@ -5,6 +5,7 @@
 
 use crate::render::atlas;
 use crate::render::mesh::{lm, push_box, push_face, VF, WHITE};
+use crate::world::boat::Boat;
 use crate::world::decor::{self, Painting, Text};
 use crate::world::chunk::brightness;
 use crate::world::effects::{Effects, Fx, MAX_BOLTS, MAX_PARTICLES};
@@ -16,7 +17,9 @@ use crate::world::ticks::{Falling, MAX_FALLING};
 
 /// 24 vertices x 7 floats (`mesh::VF`) per cube, 36 indices per cube.
 /// A mob is at most 12 boxes (spider 11), an arrow one, a falling block one.
-const BOXES: usize = MAX_ITEMS * 2 + MAX_MOBS * 12 + MAX_ARROWS + MAX_FALLING + MAX_PARTICLES + MAX_BOLTS + 1;
+/// Boats drawn at once (5 boxes each).
+const MAX_BOATS: usize = 16;
+const BOXES: usize = MAX_ITEMS * 2 + MAX_MOBS * 12 + MAX_ARROWS + MAX_FALLING + MAX_PARTICLES + MAX_BOLTS + MAX_BOATS * 5 + 1;
 /// Paintings (16 px pieces, one face each), signs (a board and a post of 6 two-sided faces) and the sign text (one quad per run
 /// of lit font pixels), on top of the boxes.
 const MAX_SIGNS: usize = 32;
@@ -48,8 +51,8 @@ impl ItemMesh {
 
     /// Upload this frame's items; returns the index count to draw.
     /// `lv` = raw (sky, block) light of a cell: every entity is lit by its own cell.
-    pub fn update(&self, queue: &wgpu::Queue, drops: &Drops, mobs: &Mobs, falling: &[Falling], fx: &Effects, lv: &dyn Fn(i32, i32, i32) -> (u8, u8), hook: Option<Vec3>, paintings: &[Painting], signs: &[SignView], eye: Vec3) -> u32 {
-        let (verts, idxs) = geometry(drops, mobs, falling, fx, lv, hook, paintings, signs, eye);
+    pub fn update(&self, queue: &wgpu::Queue, drops: &Drops, mobs: &Mobs, falling: &[Falling], fx: &Effects, lv: &dyn Fn(i32, i32, i32) -> (u8, u8), hook: Option<Vec3>, paintings: &[Painting], signs: &[SignView], boats: (&[Boat], f32), eye: Vec3) -> u32 {
+        let (verts, idxs) = geometry(drops, mobs, falling, fx, lv, hook, paintings, signs, boats, eye);
         if idxs.is_empty() {
             return 0;
         }
@@ -70,7 +73,7 @@ fn lit(verts: &mut [f32], from: usize, lv: &dyn Fn(i32, i32, i32) -> (u8, u8), a
     }
 }
 
-fn geometry(drops: &Drops, mobs: &Mobs, falling: &[Falling], fx: &Effects, lv: &dyn Fn(i32, i32, i32) -> (u8, u8), hook: Option<Vec3>, paintings: &[Painting], signs: &[SignView], eye: Vec3) -> (Vec<f32>, Vec<u32>) {
+fn geometry(drops: &Drops, mobs: &Mobs, falling: &[Falling], fx: &Effects, lv: &dyn Fn(i32, i32, i32) -> (u8, u8), hook: Option<Vec3>, paintings: &[Painting], signs: &[SignView], boats: (&[Boat], f32), eye: Vec3) -> (Vec<f32>, Vec<u32>) {
     let (mut verts, mut idxs) = (Vec::new(), Vec::new());
     let a = drops.alpha();
     for e in &drops.items {
@@ -94,6 +97,11 @@ fn geometry(drops: &Drops, mobs: &Mobs, falling: &[Falling], fx: &Effects, lv: &
         push_mob(&mut verts, &mut idxs, m);
         lit(&mut verts, n0, lv, m.body.pos);
     }
+    for b in boats.0.iter().take(MAX_BOATS) {
+        let n0 = verts.len();
+        push_boat(&mut verts, &mut idxs, b, boats.1);
+        lit(&mut verts, n0, lv, b.pos);
+    }
     for a in &mobs.arrows {
         let (p, h) = (a.pos, if a.kind == 0 { 0.06 } else { 0.125 });
         let n0 = verts.len();
@@ -110,8 +118,16 @@ fn geometry(drops: &Drops, mobs: &Mobs, falling: &[Falling], fx: &Effects, lv: &
     // A falling block is a 0.98 box in its block's flat colour (`EntityFallingSand`).
     for f in falling {
         let c = f.prev.lerp(f.pos, a);
-        let h = 0.49;
         let n0 = verts.len();
+        if f.mv.is_some() {
+            // A moving piston piece: the block's own bounds (head plate, trimmed base) in its flat colour, `meta` as the damage.
+            let b = crate::world::chunk::box_bounds(f.id, f.meta).unwrap_or([0.0, 0.0, 0.0, 1.0, 1.0, 1.0]);
+            let o = c - Vec3::splat(0.5);
+            push_box(&mut verts, &mut idxs, [o.x + b[0], o.y + b[1], o.z + b[2]], [o.x + b[3], o.y + b[4], o.z + b[5]], stack_tile(ItemStack { id: f.id as u16, count: 1, damage: f.meta as u16 }), 1.0);
+            lit(&mut verts, n0, lv, c);
+            continue;
+        }
+        let h = 0.49;
         // `RenderTNTPrimed`: every other 5 ticks of the fuse the block flashes white (ponytail: a flat white box, not the additive overlay).
         let flash = f.id == 46 && f.fuse >= 0 && (f.fuse / 5) % 2 == 0;
         let tile = if flash { stack_tile(ItemStack { id: 35, count: 1, damage: 0 }) } else { stack_tile(ItemStack { id: f.id as u16, count: 1, damage: 0 }) };
@@ -326,6 +342,29 @@ fn parts(m: &Mob) -> Vec<Part> {
             v
         }
         Slime => vec![pt([-5.0, 14.0, -5.0], [10.0, 10.0, 10.0], [0.0; 3], [0.0; 3], [0.0; 2], ME)],
+    }
+}
+
+/// `RenderBoat` / `ModelBoat`: a floor and four low walls, turned to `180 - yaw` and rocking about x for a while after a hit
+/// (`sin(t) * t * damage / 10 * direction` degrees). UNVERIFIED stand-in: planks instead of `item/boat.png`.
+fn push_boat(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, b: &Boat, a: f32) {
+    let t = b.hit_time as f32 - a;
+    let rock = if t > 0.0 { (t.sin() * t * (b.damage as f32 - a).max(0.0) / 10.0 * b.rock as f32).to_radians() } else { 0.0 };
+    let root = Mat4::from_translation(b.prev.lerp(b.pos, a)) * Mat4::from_rotation_y(PI - b.yaw.to_radians()) * Mat4::from_rotation_x(rock);
+    let tile = stack_tile(ItemStack { id: 5, count: 1, damage: 0 });
+    for (min, size) in [
+        ([-0.75, -0.375, -0.5], [1.5, 0.25, 1.0]),
+        ([-0.75, -0.1875, -0.625], [0.125, 0.375, 1.25]),
+        ([0.625, -0.1875, -0.625], [0.125, 0.375, 1.25]),
+        ([-0.625, -0.1875, -0.625], [1.25, 0.375, 0.125]),
+        ([-0.625, -0.1875, 0.5], [1.25, 0.375, 0.125]),
+    ] {
+        let n0 = verts.len();
+        push_box(verts, idxs, min, [min[0] + size[0], min[1] + size[1], min[2] + size[2]], tile, 1.0);
+        for v in verts[n0..].chunks_exact_mut(VF) {
+            let w = root.transform_point3(Vec3::new(v[0], v[1], v[2]));
+            v[..3].copy_from_slice(&w.to_array());
+        }
     }
 }
 

@@ -867,13 +867,22 @@ impl Mobs {
                     let d = Vec3::new(i as f32, j as f32, k as f32) / 15.0 * 2.0 - Vec3::ONE;
                     let (d, mut p) = (d / d.length() * 0.3, at);
                     let mut s = power * (0.7 + self.rng.next_float() * 0.6);
+                    // Radium `world.explosions` (`performRayCast`): a 0.3 step re-enters the same cell ~3 times, so the cell
+                    // and its cost are kept from the last step; the strength still drops on every step, as in the Java.
+                    let mut last: Option<((i32, i32, i32), f32)> = None;
                     while s > 0.0 {
                         let c = cell(p);
-                        if let Some(id) = get(c.0, c.1, c.2).filter(|&b| b > 0) {
-                            s -= (resistance(id) / 5.0 + 0.3) * 0.3;
-                        }
-                        if s > 0.0 {
-                            cells.insert(c);
+                        match last {
+                            Some((k, cost)) if k == c => s -= cost,
+                            _ => {
+                                let cost = get(c.0, c.1, c.2).filter(|&b| b > 0).map_or(0.0, |id| (resistance(id) / 5.0 + 0.3) * 0.3);
+                                last = Some((c, cost));
+                                s -= cost;
+                                // New cell only: a repeat step has less strength left, so it was inserted on entry or never.
+                                if s > 0.0 {
+                                    cells.insert(c);
+                                }
+                            }
                         }
                         p += d;
                         s -= 0.225;
@@ -999,6 +1008,31 @@ mod tests {
         let cells = m.explode(&flat, Vec3::new(32.5, 1.5, 32.5), 3.0);
         assert!(!cells.is_empty() && cells.iter().all(|c| c.1 > 0), "{} cells", cells.len()); // bedrock at y 0 holds
         assert!(m.explode(&flat, Vec3::new(32.5, 20.5, 32.5), 3.0).len() > 20); // open air: a sphere of cells
+    }
+
+    /// Radium's per-cell cache must not change a ray: same cells as the plain one-lookup-per-step loop, same random draws.
+    #[test]
+    fn explosion_cache_matches_the_plain_ray() {
+        let plain = |seed: i64, at: Vec3, power: f32| {
+            let (mut rng, mut cells) = (JavaRandom::new(seed ^ 0x5049_47), std::collections::BTreeSet::new());
+            for i in 0..16 { for j in 0..16 { for k in 0..16 {
+                if !(matches!(i, 0 | 15) || matches!(j, 0 | 15) || matches!(k, 0 | 15)) { continue; }
+                let d = Vec3::new(i as f32, j as f32, k as f32) / 15.0 * 2.0 - Vec3::ONE;
+                let (d, mut p) = (d / d.length() * 0.3, at);
+                let mut s = power * (0.7 + rng.next_float() * 0.6);
+                while s > 0.0 {
+                    let c = cell(p);
+                    if let Some(id) = flat(c.0, c.1, c.2).filter(|&b| b > 0) { s -= (resistance(id) / 5.0 + 0.3) * 0.3; }
+                    if s > 0.0 { cells.insert(c); }
+                    p += d;
+                    s -= 0.225;
+                }
+            }}}
+            cells.into_iter().collect::<Vec<_>>()
+        };
+        for (seed, at, power) in [(1, Vec3::new(32.5, 1.5, 32.5), 3.0), (2, Vec3::new(10.2, 9.7, 40.9), 4.0), (3, Vec3::new(32.5, 20.5, 32.5), 4.0)] {
+            assert_eq!(Mobs::new(seed).explode(&flat, at, power), plain(seed, at, power));
+        }
     }
 
     /// Slimes split into four halves, and a sheep drops its colour of wool.

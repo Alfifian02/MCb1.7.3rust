@@ -291,6 +291,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "embeddium"
+version = "0.1.0"
+
+[[package]]
 name = "env_filter"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -694,6 +698,7 @@ dependencies = [
  "android-activity",
  "android_logger",
  "bytemuck",
+ "embeddium",
  "env_logger",
  "glam",
  "jni",

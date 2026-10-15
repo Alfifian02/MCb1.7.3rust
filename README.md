@@ -50,6 +50,7 @@ original. Anything that cannot be derived from the b1.7.3 sources is marked
 | Trapdoor (M19)       | written WITHOUT a Rust toolchain: not compiled, not run (+1 test not run) | `BlockTrapDoor`: flat 3/16 flap or standing against its wall, tap flips it, placed on a side face of a normal cube, drops itself when the wall goes, 6 planks -> 2. No sound, no redstone. See ROADMAP changelog. |
 | Cake (M19)           | written WITHOUT a Rust toolchain: not compiled, not run (+1 test, +2 asserts not run) | `BlockCake` + `ItemReed` use: place on solid ground, tap eats a slice (heals 3 below full health, 6 slices), bitten box + tiles, gone with its ground, recipe gives the milk buckets back as empty ones. Needs `seeds-reeds.patch` (M15). Sugar has no recipe until M16. See ROADMAP changelog. |
 | Sign + painting (M19), cactus on mobs (M17), TNT recipe + flash (M18) | written WITHOUT a Rust toolchain: not compiled, not run | `world/decor.rs`: `EntityPainting` / `EnumArt` / `ItemPainting` (motive drawn among those that fit, tap to break, re-check every 101 ticks), `BlockSign` / `ItemSign` / `TileEntitySign` with an on-screen-keyboard `GuiEditSign`, post and wall models from `sign.png`, text in world, saved in the `decor` file; `art/kz.png` + `sign.png` joined the atlas. See ROADMAP changelog. |
+| Piston animation (M21), boats (M22), speed ports | written WITHOUT a Rust toolchain: not compiled, not run (the piston patch was `cargo check`ed and tested in a Linux scratch crate) | Pistons slide half a block a tick through a moving block 36 and carry entities (`ticks.rs`); `world/boat.rs`: `EntityBoat` + boat item + recipe, paddled by walking, planks model. Speed: chunk files are written by an I/O thread (C2ME), collision boxes and explosion rays are cached (Radium), terrain sections hidden behind terrain are not drawn (`embeddium/` crate, LGPL-3.0-or-later, `COPYING*`). See ROADMAP changelog. |
 | M9..M14              | pending | Everything else: see ROADMAP.md for the order. |
 
 Latest commit on `main`: see `git log -1`. Latest released APK: see the
@@ -90,6 +91,7 @@ mc-rs/
       pick.rs             M5 ray trace + place rules
       dig.rs              hardness table + dig-time maths (PlayerControllerSP) + canHarvestBlock gate
       items.rs            ItemStack, 36-slot Inventory (hotbar = 0..9), idDropped/quantityDropped rules, EntityItem physics + pickup + throw
+      boat.rs             M22: `EntityBoat` (buoyancy, paddling, wall smash), the boat list
       decor.rs            M19: paintings (`EntityPainting`, `EnumArt`) and signs (`TileEntitySign`, the editor's keyboard), `decor` save codec
       chest.rs            chest storage: tile entity, placement/open rules, large-chest grouping, face tiles, reach
       craft.rs            M6: tools (EnumToolMaterial, getStrVsBlock, canHarvestBlock), recipes (CraftingManager), inventory/workbench screen (Container clicks) + its GUI geometry
@@ -105,6 +107,7 @@ mc-rs/
         populate.rs       Region (2x2 chunks) + populate() and every WorldGen* class
         noise.rs          PerlinNoise + OctaveNoise, java.util.Random clone
         overworld.rs      ChunkProviderGenerate port (density + biome surface)
+embeddium/               std-only crate (Sodium/Embeddium port): section occlusion culling (`vis`, `cull`), buffer arena, compact vertex; `cargo test -p embeddium` runs on a plain host
 keystore/
   debug.keystore         committed long-lived keystore (CI signs release APKs)
 .github/workflows/

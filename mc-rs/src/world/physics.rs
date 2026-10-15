@@ -90,7 +90,9 @@ pub fn step_box(player: &mut Player, half: Vec3, dt: f32, jumping: bool, get: Bl
     let (vx, vz) = (player.vel.x, player.vel.z);
     let web = touching(player.pos, half, get, 30);
     let scale = if web { Vec3::new(0.25, 0.05, 0.25) } else { Vec3::ONE };
-    player.pos = sweep_axis(player.pos, half, player.vel * scale * dt, get, &mut player.vel, player.on_ground && !(water || lava));
+    let delta = player.vel * scale * dt;
+    let boxes = Boxes::collect(player.pos, half, delta, get);
+    player.pos = sweep_axis(player.pos, half, delta, &boxes, &mut player.vel, player.on_ground && !(water || lava));
     if web {
         player.vel = Vec3::ZERO;
     }
@@ -105,7 +107,7 @@ pub fn step_box(player: &mut Player, half: Vec3, dt: f32, jumping: bool, get: Bl
         let up = player.pos + Vec3::new(vx * dt, 0.6, vz * dt);
         if blocked && !aabb_any(up, half, get, |b| b > 0) { player.vel.y = 6.0; }
     }
-    player.on_ground = ground_test(player.pos, half, get);
+    player.on_ground = boxes.hits(player.pos - Vec3::new(0.0, 0.002, 0.0), half); // the box a hair lower overlaps something
     (water, lava)
 }
 
@@ -135,17 +137,55 @@ pub fn sneak(player: &mut Player, half: Vec3, dt: f32, get: BlockQuery<'_>) {
     }
 }
 
-/// Standing on something: the box, a hair lower, overlaps a collision box (a slab or a cactus top is not at a cell edge).
-fn ground_test(pos: Vec3, h: Vec3, get: BlockQuery<'_>) -> bool {
-    aabb_hits_solid(pos - Vec3::new(0.0, 0.002, 0.0), h, get)
+/// Radium `entity.collisions.movement` (Lithium `LithiumEntityCollisions.getBlockCollisions`): the collision boxes of the volume
+/// one move can reach are read from the world once, then every probe of that move (the three axes, the step-up, the 12-step
+/// bisections, the ground test) is tested against this short list instead of asking `get` for every cell of the box again.
+/// A box remembers its cell, and a probe only counts the cells `aabb_hits_solid` would have scanned for it, so the answers are
+/// the same as before (`boxes_agree_with_the_per_cell_scan`).
+struct Boxes {
+    lo: Vec3,
+    hi: Vec3,
+    list: Vec<([i32; 3], Vec3, Vec3)>,
+}
+
+impl Boxes {
+    /// Every probe of a `sweep_axis` of `delta` from `pos` stays within `delta` of it, plus two step-ups (`STEP`) upwards.
+    fn collect(pos: Vec3, h: Vec3, delta: Vec3, get: BlockQuery<'_>) -> Self {
+        let m = delta.abs() + Vec3::new(0.01, 2.0 * STEP + 0.01, 0.01);
+        let (lo, hi) = (pos - h - m, pos + h + m);
+        let mut list = Vec::new();
+        for cy in lo.y.floor() as i32..=hi.y.floor() as i32 {
+            for cz in lo.z.floor() as i32..=hi.z.floor() as i32 {
+                for cx in lo.x.floor() as i32..=hi.x.floor() as i32 {
+                    let Some(id) = get(cx, cy, cz) else { continue };
+                    let (boxes, n) = collisions(id);
+                    let o = Vec3::new(cx as f32, cy as f32, cz as f32);
+                    for c in &boxes[..n] {
+                        list.push(([cx, cy, cz], o + Vec3::from_slice(&c[..3]), o + Vec3::from_slice(&c[3..])));
+                    }
+                }
+            }
+        }
+        Self { lo, hi, list }
+    }
+
+    /// `aabb_hits_solid` over the collected boxes.
+    fn hits(&self, p: Vec3, h: Vec3) -> bool {
+        let (lo, hi) = (p - h, p + h);
+        debug_assert!(lo.cmpge(self.lo).all() && hi.cmple(self.hi).all(), "probe outside the collected volume");
+        let (c0, c1) = ([lo.x.floor() as i32, lo.y.floor() as i32, lo.z.floor() as i32], [hi.x.floor() as i32, hi.y.floor() as i32, hi.z.floor() as i32]);
+        self.list.iter().any(|(c, bl, bh)| {
+            (0..3).all(|a| c[a] >= c0[a] && c[a] <= c1[a]) && hi.x > bl.x && lo.x < bh.x && hi.y > bl.y && lo.y < bh.y && hi.z > bl.z && lo.z < bh.z
+        })
+    }
 }
 
 /// `Entity.stepHeight`: a grounded box that is blocked sideways climbs an obstacle up to this high (a slab) without a jump.
 const STEP: f32 = 0.5;
 
-fn sweep_axis(pos: Vec3, h: Vec3, delta: Vec3, get: BlockQuery<'_>, vel: &mut Vec3, grounded: bool) -> Vec3 {
+fn sweep_axis(pos: Vec3, h: Vec3, delta: Vec3, boxes: &Boxes, vel: &mut Vec3, grounded: bool) -> Vec3 {
     let mut p = pos;
-    let hits = |q: Vec3| aabb_hits_solid(q, h, get);
+    let hits = |q: Vec3| boxes.hits(q, h);
     // One horizontal axis (`axis` 0 = x, 2 = z). Blocked: step up when grounded and the raised box is free, else stop at the wall.
     for axis in [0, 2] {
         let mut d = Vec3::ZERO;
@@ -165,15 +205,15 @@ fn sweep_axis(pos: Vec3, h: Vec3, delta: Vec3, get: BlockQuery<'_>, vel: &mut Ve
     }
     // Y axis
     let mut try_p = p + Vec3::new(0.0, delta.y, 0.0);
-    if aabb_hits_solid(try_p, h, get) {
-        try_p.y = snap(p.y, delta.y, |y| aabb_hits_solid(Vec3::new(p.x, y, p.z), h, get));
+    if hits(try_p) {
+        try_p.y = snap(p.y, delta.y, |y| hits(Vec3::new(p.x, y, p.z)));
         vel.y = 0.0;
     }
     try_p
 }
 
 /// Does the box at `p` strictly overlap the collision box (`getCollisionBoundingBoxFromPool`) of a block it touches?
-fn aabb_hits_solid(p: Vec3, h: Vec3, get: BlockQuery<'_>) -> bool {
+pub fn aabb_hits_solid(p: Vec3, h: Vec3, get: BlockQuery<'_>) -> bool {
     let (lo, hi) = (p - h, p + h);
     for cy in lo.y.floor() as i32..=hi.y.floor() as i32 {
         for cz in lo.z.floor() as i32..=hi.z.floor() as i32 {
@@ -242,7 +282,7 @@ mod tests {
         for _ in 0..120 { step(&mut p, 1.0 / 60.0, false, &get); }
         assert!(p.on_ground, "pos.y = {}", p.pos.y);
         step(&mut p, 1.0 / 60.0, true, &get);
-        assert!(p.pos.y > 10.0 + HALF.y + 0.05 && !ground_test(p.pos, HALF, &get));
+        assert!(p.pos.y > 10.0 + HALF.y + 0.05 && !aabb_hits_solid(p.pos - Vec3::new(0.0, 0.002, 0.0), HALF, &get));
     }
 
     /// Ladder: a wall of ladder (cell x = 0) against stone (x = 1): pushing into the stone climbs, no push slides at 3 m/s.
@@ -370,5 +410,28 @@ mod tests {
         assert!(x > 10.5 && (y - 10.5).abs() < 0.01, "slab: x = {x}, feet y = {y}");
         let (x, y) = at(1);
         assert!(x < 9.71 && (y - 10.0).abs() < 0.01, "block: x = {x}, feet y = {y}");
+    }
+
+    /// Radium's collected list answers every probe of a move like the per-cell scan: a mixed world (slab, fence 1.5 high,
+    /// cactus, stairs, door, air, `None` below 0) and probes spread over the volume a move can reach.
+    #[test]
+    fn boxes_agree_with_the_per_cell_scan() {
+        let ids = [0, 0, 1, 44, 85, 81, 26, 0, crate::world::chunk::STAIRS_PHYS + 1, crate::world::chunk::DOOR_PHYS + 2, 8];
+        let get = |x: i32, y: i32, z: i32| -> Option<u8> {
+            if y < 0 { return None; }
+            let k = (x.wrapping_mul(73856093) ^ y.wrapping_mul(19349663) ^ z.wrapping_mul(83492791)) as u32 >> 3;
+            Some(ids[k as usize % ids.len()])
+        };
+        let mut seed = 12345u32;
+        let mut next = || { seed = seed.wrapping_mul(1664525).wrapping_add(1013904223); (seed >> 8) as f32 / (1u32 << 24) as f32 };
+        for _ in 0..300 {
+            let pos = Vec3::new(next() * 8.0, next() * 6.0, next() * 8.0);
+            let delta = (Vec3::new(next(), next(), next()) - 0.5) * 2.0;
+            let boxes = Boxes::collect(pos, HALF, delta, &get);
+            for _ in 0..20 {
+                let q = pos + (Vec3::new(next(), next(), next()) * 2.0 - 1.0) * delta.abs() + Vec3::Y * next() * 2.0 * STEP;
+                assert_eq!(boxes.hits(q, HALF), aabb_hits_solid(q, HALF, &get), "probe {q}");
+            }
+        }
     }
 }

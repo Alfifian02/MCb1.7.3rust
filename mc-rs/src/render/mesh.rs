@@ -364,7 +364,7 @@ pub fn build_split_tinted(smooth: bool, blocks: &[u8], data: &Nibbles, nb_data: 
                     continue;
                 }
                 // Sign posts and wall signs (`getRenderType` -1): no block shape, `render::items` draws the model.
-                if raw == 0 || matches!(raw, 63 | 68) {
+                if raw == 0 || matches!(raw, 36 | 63 | 68) { // 36: the moving piston block is drawn by `Falling` pieces
                     continue;
                 }
                 let blk = raw;
