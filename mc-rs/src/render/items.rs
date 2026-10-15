@@ -6,6 +6,7 @@
 use crate::render::atlas;
 use crate::render::mesh::{lm, push_box, push_face, VF, WHITE};
 use crate::world::boat::Boat;
+use crate::world::minecart::Cart;
 use crate::world::decor::{self, Painting, Text};
 use crate::world::chunk::brightness;
 use crate::world::effects::{Effects, Fx, MAX_BOLTS, MAX_PARTICLES};
@@ -19,7 +20,9 @@ use crate::world::ticks::{Falling, MAX_FALLING};
 /// A mob is at most 12 boxes (spider 11), an arrow one, a falling block one.
 /// Boats drawn at once (5 boxes each).
 const MAX_BOATS: usize = 16;
-const BOXES: usize = MAX_ITEMS * 2 + MAX_MOBS * 12 + MAX_ARROWS + MAX_FALLING + MAX_PARTICLES + MAX_BOLTS + MAX_BOATS * 5 + 1;
+/// Carts drawn at once (floor, four walls and the furnace: 6 boxes each).
+const MAX_CARTS: usize = 16;
+const BOXES: usize = MAX_ITEMS * 2 + MAX_MOBS * 12 + MAX_ARROWS + MAX_FALLING + MAX_PARTICLES + MAX_BOLTS + MAX_BOATS * 5 + MAX_CARTS * 6 + 1;
 /// Paintings (16 px pieces, one face each), signs (a board and a post of 6 two-sided faces) and the sign text (one quad per run
 /// of lit font pixels), on top of the boxes.
 const MAX_SIGNS: usize = 32;
@@ -51,8 +54,8 @@ impl ItemMesh {
 
     /// Upload this frame's items; returns the index count to draw.
     /// `lv` = raw (sky, block) light of a cell: every entity is lit by its own cell.
-    pub fn update(&self, queue: &wgpu::Queue, drops: &Drops, mobs: &Mobs, falling: &[Falling], fx: &Effects, lv: &dyn Fn(i32, i32, i32) -> (u8, u8), hook: Option<Vec3>, paintings: &[Painting], signs: &[SignView], boats: (&[Boat], f32), eye: Vec3) -> u32 {
-        let (verts, idxs) = geometry(drops, mobs, falling, fx, lv, hook, paintings, signs, boats, eye);
+    pub fn update(&self, queue: &wgpu::Queue, drops: &Drops, mobs: &Mobs, falling: &[Falling], fx: &Effects, lv: &dyn Fn(i32, i32, i32) -> (u8, u8), hook: Option<Vec3>, paintings: &[Painting], signs: &[SignView], boats: (&[Boat], f32), carts: (&[Cart], f32), eye: Vec3) -> u32 {
+        let (verts, idxs) = geometry(drops, mobs, falling, fx, lv, hook, paintings, signs, boats, carts, eye);
         if idxs.is_empty() {
             return 0;
         }
@@ -73,7 +76,7 @@ fn lit(verts: &mut [f32], from: usize, lv: &dyn Fn(i32, i32, i32) -> (u8, u8), a
     }
 }
 
-fn geometry(drops: &Drops, mobs: &Mobs, falling: &[Falling], fx: &Effects, lv: &dyn Fn(i32, i32, i32) -> (u8, u8), hook: Option<Vec3>, paintings: &[Painting], signs: &[SignView], boats: (&[Boat], f32), eye: Vec3) -> (Vec<f32>, Vec<u32>) {
+fn geometry(drops: &Drops, mobs: &Mobs, falling: &[Falling], fx: &Effects, lv: &dyn Fn(i32, i32, i32) -> (u8, u8), hook: Option<Vec3>, paintings: &[Painting], signs: &[SignView], boats: (&[Boat], f32), carts: (&[Cart], f32), eye: Vec3) -> (Vec<f32>, Vec<u32>) {
     let (mut verts, mut idxs) = (Vec::new(), Vec::new());
     let a = drops.alpha();
     for e in &drops.items {
@@ -96,6 +99,11 @@ fn geometry(drops: &Drops, mobs: &Mobs, falling: &[Falling], fx: &Effects, lv: &
         let n0 = verts.len();
         push_mob(&mut verts, &mut idxs, m);
         lit(&mut verts, n0, lv, m.body.pos);
+    }
+    for c in carts.0.iter().take(MAX_CARTS) {
+        let n0 = verts.len();
+        push_cart(&mut verts, &mut idxs, c, carts.1);
+        lit(&mut verts, n0, lv, c.pos);
     }
     for b in boats.0.iter().take(MAX_BOATS) {
         let n0 = verts.len();
@@ -342,6 +350,34 @@ fn parts(m: &Mob) -> Vec<Part> {
             v
         }
         Slime => vec![pt([-5.0, 14.0, -5.0], [10.0, 10.0, 10.0], [0.0; 3], [0.0; 3], [0.0; 2], ME)],
+    }
+}
+
+/// `RenderMinecart` / `ModelMinecart`: a floor and four walls in iron-block tiles, turned to `180 - yaw` and rocking after a hit, and
+/// for the furnace cart a furnace block 0.75 wide on the floor (`renderBlockAsItem` at 0.75, 0.3125 up). UNVERIFIED stand-in for
+/// `item/cart.png`; no pitch on slopes.
+fn push_cart(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, c: &Cart, a: f32) {
+    let t = c.hit_time as f32 - a;
+    let rock = if t > 0.0 { (t.sin() * t * (c.damage as f32 - a).max(0.0) / 10.0 * c.rock as f32).to_radians() } else { 0.0 };
+    let root = Mat4::from_translation(c.prev.lerp(c.pos, a)) * Mat4::from_rotation_y(PI - c.yaw.to_radians()) * Mat4::from_rotation_x(rock);
+    let iron = stack_tile(ItemStack { id: 42, count: 1, damage: 0 });
+    let mut parts = vec![
+        ([-0.625, -0.3, -0.5], [1.25, 0.125, 1.0], iron),
+        ([-0.625, -0.175, -0.5], [0.125, 0.5, 1.0], iron),
+        ([0.5, -0.175, -0.5], [0.125, 0.5, 1.0], iron),
+        ([-0.5, -0.175, -0.5], [1.0, 0.5, 0.125], iron),
+        ([-0.5, -0.175, 0.375], [1.0, 0.5, 0.125], iron),
+    ];
+    if c.kind == 2 {
+        parts.push(([-0.375, -0.175, -0.375], [0.75, 0.75, 0.75], stack_tile(ItemStack { id: 61, count: 1, damage: 0 })));
+    }
+    for (min, size, tile) in parts {
+        let n0 = verts.len();
+        push_box(verts, idxs, min, [min[0] + size[0], min[1] + size[1], min[2] + size[2]], tile, 1.0);
+        for v in verts[n0..].chunks_exact_mut(VF) {
+            let w = root.transform_point3(Vec3::new(v[0], v[1], v[2]));
+            v[..3].copy_from_slice(&w.to_array());
+        }
     }
 }
 

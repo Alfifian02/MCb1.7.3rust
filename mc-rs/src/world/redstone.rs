@@ -19,7 +19,7 @@ fn nc(w: &ChunkManager, x: i32, y: i32, z: i32) -> bool {
 
 /// `Block.canProvidePower`.
 pub fn can_provide_power(id: u8) -> bool {
-    matches!(id, 55 | 69 | 70 | 72 | 75 | 76 | 77)
+    matches!(id, 28 | 55 | 69 | 70 | 72 | 75 | 76 | 77)
 }
 
 /// `BlockRedstoneTorch.isPoweringTo` of a lit torch: everywhere but toward the block it hangs on (metadata 1 -x wall, 2 +x, 3 -z, 4 +z, 5 floor).
@@ -32,7 +32,7 @@ pub fn weak(w: &ChunkManager, x: i32, y: i32, z: i32, side: u8, wires: bool) -> 
     let m = w.meta(x, y, z);
     match get(w, x, y, z) {
         55 => wires && m > 0 && wire_powers(w, x, y, z, side),
-        69 | 77 => m & 8 != 0,
+        28 | 69 | 77 => m & 8 != 0, // `BlockDetectorRail.isPoweringTo`: on while a cart is over it
         70 | 72 => m > 0,
         76 => torch_powers(m, side),
         94 => repeater_powers(m, side),
@@ -53,6 +53,7 @@ pub fn strong(w: &ChunkManager, x: i32, y: i32, z: i32, side: u8, wires: bool) -
         69 => m & 8 != 0 && matches!((m & 7, side), (5 | 6, 1) | (4, 2) | (3, 3) | (2, 4) | (1, 5)),
         77 => m & 8 != 0 && matches!((m & 7, side), (5, 1) | (4, 2) | (3, 3) | (2, 4) | (1, 5)),
         70 | 72 => m > 0 && side == 1,
+        28 => m & 8 != 0 && side == 1, // `isIndirectlyPoweringTo`: the block above
         76 => side == 0 && torch_powers(m, 0),
         94 => repeater_powers(m, side),
         _ => false,

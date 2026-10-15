@@ -41,6 +41,7 @@ use crate::world::craft::{self, Furnace, Screen};
 use crate::world::items::{self, Drops, Inventory, ItemStack};
 use crate::world::gear::{self, Hook, Used};
 use crate::world::boat;
+use crate::world::minecart;
 use crate::world::mobs::{self, Ctx, Ev, Mobs};
 use crate::world::ticks::{self, Ticks};
 use crate::world::save::{self, Level};
@@ -153,6 +154,9 @@ struct App {
     drops: Drops,
     mobs: Mobs,
     boats: boat::Boats,
+    carts: minecart::Carts,
+    /// Detector rails switched on by a cart, to be switched off when it has gone (`scheduleBlockUpdate` of `BlockDetectorRail`).
+    detectors: std::collections::HashSet<(i32, i32, i32)>,
     /// Block updates (scheduled + random ticks, notifications, falling blocks), stepped on the 20 Hz game tick.
     ticks: Ticks,
     item_mesh: ItemMesh,
@@ -291,6 +295,8 @@ impl App {
             drops: Drops::new(seed),
             mobs: Mobs::new(seed),
             boats: boat::Boats::default(),
+            carts: minecart::Carts::new(seed),
+            detectors: std::collections::HashSet::new(),
             ticks: Ticks::new(seed),
             item_mesh,
             screen: None,
@@ -344,6 +350,8 @@ impl App {
         self.close_sign();
         (self.paintings, self.signs) = (Vec::new(), HashMap::new());
         self.boats = boat::Boats::default();
+        self.carts = minecart::Carts::default();
+        self.detectors.clear();
         let _ = std::fs::remove_dir_all(&self.dir);
         let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as i64);
         self.chunks = ChunkManager::new_typed(SEED, RENDER_DIST, self.realistic).with_dir(self.dir.clone()); // the old one's workers stop on drop
@@ -495,8 +503,9 @@ impl App {
         if self.touch.jumping() {
             self.mobs.list.iter_mut().for_each(|m| m.ridden = false);
             self.boats.list.iter_mut().for_each(|b| b.ridden = false);
+            self.carts.list.iter_mut().for_each(|c| c.ridden = false);
         }
-        let riding = self.mobs.list.iter().any(|m| m.ridden) || self.boats.ridden().is_some();
+        let riding = self.mobs.list.iter().any(|m| m.ridden) || self.boats.ridden().is_some() || self.carts.ridden().is_some();
         let asleep = self.sleep.is_some();
         if !asleep {
             let k = LOOK_SENS * (self.camera.fov_y * 0.5).tan() / (70_f32.to_radians() * 0.5).tan();
@@ -586,6 +595,51 @@ impl App {
                     self.chunks.set_block(c.0, c.1, c.2, 0); // `Block.snow` is wiped by the hull
                 }
             }
+        }
+        // Minecarts (`EntityMinecart.onUpdate`): on the rails the cart is its own master; a rider only slows it.
+        let cart_events = {
+            let raw = |x: i32, y: i32, z: i32| match self.chunks.block(x, y, z) {
+                Some(b) => (b, self.chunks.meta(x, y, z)),
+                None => (0, 0),
+            };
+            let cget = |x: i32, y: i32, z: i32| self.chunks.block(x, y, z).map(|b| if is_plant(b) { 0 } else { physics_id(b, self.chunks.meta(x, y, z)) });
+            self.carts.update(dt, &minecart::Env { get: &cget, raw: &raw })
+        };
+        for e in cart_events {
+            match e {
+                minecart::Event::Drop(s, p) => self.drops.spawn_stack(s, (p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32)),
+                minecart::Event::Smoke(p) => self.fx.puff(p),
+            }
+        }
+        // `BlockDetectorRail.setStateIfMinecartInteractsWithRail`: on while a cart is over it, off when it has gone.
+        for c in self.carts.cells() {
+            if self.chunks.block(c.0, c.1, c.2) == Some(28) && self.carts.over_detector(c) {
+                self.detectors.insert(c);
+                let m = self.chunks.meta(c.0, c.1, c.2);
+                if m & 8 == 0 {
+                    self.chunks.set_block_meta(c.0, c.1, c.2, 28, m | 8);
+                    self.chunks.ping(c.0, c.1 - 1, c.2);
+                }
+            }
+        }
+        for c in self.detectors.iter().copied().collect::<Vec<_>>() {
+            if self.chunks.block(c.0, c.1, c.2) != Some(28) {
+                self.detectors.remove(&c);
+            } else if !self.carts.over_detector(c) {
+                self.detectors.remove(&c);
+                let m = self.chunks.meta(c.0, c.1, c.2);
+                if m & 8 != 0 {
+                    self.chunks.set_block_meta(c.0, c.1, c.2, 28, m & 7);
+                    self.chunks.ping(c.0, c.1 - 1, c.2);
+                }
+            }
+        }
+        // `Entity.updateRiderPosition` for a cart: on the cart's centre line, feet 0.8 under the box's centre.
+        if let Some(c) = self.carts.ridden() {
+            self.player.pos = c.rider_pos(physics::HALF.y);
+            self.player.vel = glam::Vec3::ZERO;
+            self.player.on_ground = true;
+            self.camera.pos = self.player.pos + glam::Vec3::new(0.0, EYE_HEIGHT - self.sneak_y, 0.0);
         }
         // `Entity.updateRiderPosition` for a boat: 0.4 behind the middle, feet 0.8 under the box's centre.
         if let Some(b) = self.boats.ridden() {
@@ -802,7 +856,41 @@ impl App {
             // A boat the crosshair is on (and nothing nearer): an empty hand gets in (`Entity.interact`), a held item hits it
             // (`attackEntityFrom`: damage x 10, over 40 breaks it into 3 planks and 2 sticks).
             let mob_t = self.mobs.pick(eye, fwd, pick::REACH as f32).filter(|&(_, t)| t < wall).map(|(_, t)| t);
-            if let Some((bi, _)) = self.boats.pick(eye, fwd, pick::REACH as f32).filter(|&(_, t)| t < wall && mob_t.map_or(true, |m| t < m)) {
+            let boat_t = self.boats.pick(eye, fwd, pick::REACH as f32).filter(|&(_, t)| t < wall && mob_t.map_or(true, |m| t < m));
+            // A cart the same way (`EntityMinecart.interact`): the empty one takes a rider, the furnace one is pushed away from you
+            // (coal is burnt first); a held item otherwise hits it, over 40 damage breaks it into the cart (and the furnace).
+            if let Some((ci, _)) = self.carts.pick(eye, fwd, pick::REACH as f32).filter(|&(_, t)| t < wall && mob_t.map_or(true, |m| t < m) && boat_t.map_or(true, |b| t < b.1)) {
+                let held = self.inv.slots[slot].map(|s| s.id);
+                let furnace = self.carts.list[ci].kind == 2;
+                match held {
+                    None if furnace => {
+                        self.carts.list[ci].push_from(self.player.pos, false);
+                    }
+                    None => {
+                        if self.carts.ridden().is_none() {
+                            self.carts.list[ci].ridden = true;
+                        }
+                    }
+                    Some(minecart::COAL) if furnace => {
+                        if self.carts.list[ci].push_from(self.player.pos, true) {
+                            self.inv.consume(slot);
+                        }
+                    }
+                    held => {
+                        let (dmg, wear) = mobs::attack(held);
+                        if self.carts.list[ci].hurt(dmg) {
+                            let c = self.carts.list.remove(ci);
+                            let cell = (c.pos.x.floor() as i32, c.pos.y.floor() as i32, c.pos.z.floor() as i32);
+                            c.drops().into_iter().for_each(|s| self.drops.spawn_stack(s, cell));
+                        }
+                        if wear > 0 {
+                            self.inv.damage(slot, wear);
+                        }
+                    }
+                }
+                return;
+            }
+            if let Some((bi, _)) = boat_t {
                 match self.inv.slots[slot].map(|s| s.id) {
                     None => {
                         if self.boats.ridden().is_none() {
@@ -1066,6 +1154,19 @@ impl App {
                         self.chunks.set_block(x, y, z, 60);
                         self.inv.damage(slot, 1);
                     }
+                }
+                return;
+            }
+            // ItemMinecart.onItemUse: aimed at a rail, the cart is set in the rail's cell (its centre, 0.5 up).
+            if let Some(kind) = self.inv.slots[slot].and_then(|s| match s.id {
+                minecart::EMPTY => Some(0),
+                minecart::WITH_FURNACE => Some(2),
+                _ => None,
+            }) {
+                let (x, y, z) = hit.pos;
+                if matches!(self.chunks.block_loaded(x, y, z), Some(27 | 28 | 66)) {
+                    self.carts.list.push(minecart::Cart::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5, kind));
+                    self.inv.consume(slot);
                 }
                 return;
             }
@@ -1569,7 +1670,7 @@ impl App {
         sign_views.sort_by(|a, b| near(a).total_cmp(&near(b)));
         let item_indices = {
             let chunks = &self.chunks;
-            self.item_mesh.update(&self.gpu.queue, &self.drops, &self.mobs, &self.ticks.falling, &self.fx, &|x, y, z| chunks.light_levels(x, y, z), self.hook.as_ref().map(|h| h.pos), &self.paintings, &sign_views, (&self.boats.list, self.boats.alpha()), eye)
+            self.item_mesh.update(&self.gpu.queue, &self.drops, &self.mobs, &self.ticks.falling, &self.fx, &|x, y, z| chunks.light_levels(x, y, z), self.hook.as_ref().map(|h| h.pos), &self.paintings, &sign_views, (&self.boats.list, self.boats.alpha()), (&self.carts.list, self.carts.alpha()), eye)
         };
 
         // Sky and fog colour from the sun angle, the weather and the climate under the player; the frame is cleared to

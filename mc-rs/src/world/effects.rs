@@ -272,6 +272,12 @@ impl Effects {
 
     /// `Entity.onEntityUpdate` on entering water: `1 + width * 20` bubbles, then as many splashes, at the water surface
     /// (`pos.y` = floor(box bottom) + 1) within `width` of the axis. `v` = the entity's motion per tick.
+    /// A puff of smoke at a point (the furnace cart's `largesmoke`; the same sprite as any smoke).
+    pub fn puff(&mut self, pos: Vec3) {
+        let p = Particle::smoke(&mut self.rng, pos);
+        self.particles.push(p);
+    }
+
     pub fn splash(&mut self, pos: Vec3, width: f32, v: Vec3) {
         let n = {
             let mut c = 0;

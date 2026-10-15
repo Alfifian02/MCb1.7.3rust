@@ -267,6 +267,8 @@ pub fn recipes() -> &'static [Recipe] {
             shaped(&["###", "#X#", "###"], &[('#', STICK), ('X', 35)], 321, 1),        // painting: 8 sticks round a wool
             shaped(&["X#X", "#X#", "X#X"], &[('X', 289), ('#', 12)], 46, 1),  // TNT: gunpowder + sand
             shaped(&["# #", "###"], &[('#', PLANKS)], 333, 1), // boat
+            shaped(&["# #", "###"], &[('#', 265)], 328, 1), // minecart: 5 iron ingots
+            shapeless(&[61, 328], 343, 1), // minecart with furnace: furnace + minecart
             shaped(&["X X", "X#X", "X X"], &[('X', 265), ('#', STICK)], 66, 16), // rails: 6 iron + a stick
             shaped(&["X X", "X#X", "XRX"], &[('X', 266), ('#', STICK), ('R', 331)], 27, 6), // powered rails: 6 gold + stick + redstone
             shaped(&["X X", "X#X", "XRX"], &[('X', 265), ('#', 70), ('R', 331)], 28, 6), // detector rails: 6 iron + stone plate + redstone

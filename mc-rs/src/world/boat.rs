@@ -25,6 +25,25 @@ pub enum Event {
     Snow((i32, i32, i32)),
 }
 
+/// `Entity.moveEntity` for a box with no step height: y, then x, then z, each as far as it goes (in 5 cm steps). Returns the new
+/// centre and which axes hit something.
+pub fn sweep(pos: Vec3, half: Vec3, d: Vec3, get: BlockQuery<'_>) -> (Vec3, [bool; 3]) {
+    let (mut p, mut hit) = (pos, [false; 3]);
+    for a in [1usize, 0, 2] {
+        let n = (d[a].abs() / 0.05).ceil() as i32;
+        for _ in 0..n {
+            let mut q = p;
+            q[a] += d[a] / n as f32;
+            if aabb_hits_solid(q, half, get) {
+                hit[a] = true;
+                break;
+            }
+            p = q;
+        }
+    }
+    (p, hit)
+}
+
 #[derive(Clone)]
 pub struct Boat {
     /// The centre of the box (`posY` is `minY + height / 2`).
@@ -92,24 +111,17 @@ impl Boat {
         (fl(lo.x)..fl(hi.x + 1.0)).any(|x| (fl(lo_y)..fl(hi_y + 1.0)).any(|y| (fl(lo.z)..fl(hi.z + 1.0)).any(|z| matches!(get(x, y, z), Some(8 | 9)))))
     }
 
-    /// `moveEntity` for a box with no step height: y, then x, then z, each as far as it goes.
+    /// `moveEntity`: the motion of an axis that hit is lost, `collided` and `on_ground` are set from what hit.
     fn move_by(&mut self, get: BlockQuery<'_>, d: Vec3) {
-        let (mut hit_xz, mut hit_y) = (false, false);
-        for a in [1usize, 0, 2] {
-            let n = (d[a].abs() / 0.05).ceil() as i32;
-            for _ in 0..n {
-                let mut p = self.pos;
-                p[a] += d[a] / n as f32;
-                if aabb_hits_solid(p, HALF, get) {
-                    self.vel[a] = 0.0;
-                    if a == 1 { hit_y = true } else { hit_xz = true }
-                    break;
-                }
-                self.pos = p;
+        let (p, hit) = sweep(self.pos, HALF, d, get);
+        self.pos = p;
+        for a in 0..3 {
+            if hit[a] {
+                self.vel[a] = 0.0;
             }
         }
-        self.collided = hit_xz;
-        self.on_ground = hit_y && d.y < 0.0;
+        self.collided = hit[0] || hit[2];
+        self.on_ground = hit[1] && d.y < 0.0;
     }
 
     /// `EntityBoat.onUpdate`, one 20 Hz tick. `rider` is the rider's own motion this tick (blocks per tick). False: it broke.
