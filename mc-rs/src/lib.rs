@@ -331,7 +331,7 @@ impl App {
 
     /// The distant terrain of the dimension in `self.dir`: the overworld has it, the Nether does not.
     fn new_lod(&self) -> Option<Lod> {
-        (!self.nether).then(|| Lod::new(self.seed, self.tectonic))
+        (!self.nether).then(|| Lod::new(self.seed, self.tectonic, Some(self.dir.join("lod"))))
     }
 
     /// The overworld's folder, whichever dimension this is.
@@ -574,6 +574,11 @@ impl App {
         if self.touch.take_reset() {
             self.reset_world(true);
             return;
+        }
+        if self.touch.take_pregen() {
+            if let Some(l) = self.lod.as_mut() {
+                l.toggle_pregen();
+            }
         }
         if self.touch.take_quit() {
             self.quit_to_title();
@@ -2459,6 +2464,10 @@ impl App {
             // TEMPORARY reset-world button: after the first tap it is lit and asks again.
             label(v, layout.reset, if self.touch.reset_armed { "Tap again to confirm" } else { "Reset world" }, self.touch.reset_armed);
             label(v, layout.quit, "Save and quit to title", pressed(PointerRole::Quit));
+            // The pre-generation switch (Voxy World Gen): lit while it runs, with the chunks generated so far.
+            let (on, n) = self.lod.as_ref().map_or((false, 0), |l| l.pregen());
+            let text = if self.lod.is_none() { "Pregen: overworld only".to_string() } else if on { format!("Pregen: {n} chunks (tap to stop)") } else { format!("Pregen: off, {n} chunks") };
+            label(v, layout.pregen, &text, on || pressed(PointerRole::Pregen));
         }
 
         // Cap to the buffer capacity; extra quads are silently dropped.

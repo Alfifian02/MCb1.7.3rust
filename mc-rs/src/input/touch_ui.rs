@@ -52,6 +52,8 @@ pub enum PointerRole {
     Pause,
     /// Press landed on the temporary reset-world button (pause menu only). Arms on the first release, fires on the second.
     Reset,
+    /// Press landed on the pre-generate button (pause menu only, top-left). Fires on release.
+    Pregen,
     /// Press landed on the save-and-quit-to-title button (pause menu only). Fires on release.
     Quit,
     /// Press landed on the zoom button. Zoomed while held (`TouchUi::zooming`).
@@ -97,6 +99,8 @@ pub struct LayoutRects {
     pub reset: Rect,
     /// `GuiIngameMenu`'s "Save and quit to title", under `reset`.
     pub quit: Rect,
+    /// The pre-generation switch, top-left (the pause menu only).
+    pub pregen: Rect,
     pub hotbar: [Rect; HOTBAR_SLOTS],
     pub jump: Rect,
     /// The sneak button, the d-pad's centre cell.
@@ -151,7 +155,9 @@ impl LayoutRects {
         let jw = 0.16 * u;
         let jump = (w - pad * 1.5 - jw, cy - jw * 0.5, jw, jw);
 
-        Self { width: w, pause, inventory, zoom, resume, reset, quit, hotbar, jump, sneak: cell(0.0, 0.0), dpad, dpad_gap }
+        let pregen = (pad, pad, (0.6 * u).min(w * 0.4), ps * 0.8);
+
+        Self { width: w, pause, inventory, zoom, resume, reset, quit, pregen, hotbar, jump, sneak: cell(0.0, 0.0), dpad, dpad_gap }
     }
 
     /// Hit-test a press. `None` means the press is ignored. While paused only
@@ -161,7 +167,13 @@ impl LayoutRects {
             return Some(PointerRole::Pause);
         }
         if paused {
-            return if in_rect(self.reset, x, y) { Some(PointerRole::Reset) } else { in_rect(self.quit, x, y).then_some(PointerRole::Quit) };
+            return if in_rect(self.reset, x, y) {
+                Some(PointerRole::Reset)
+            } else if in_rect(self.pregen, x, y) {
+                Some(PointerRole::Pregen)
+            } else {
+                in_rect(self.quit, x, y).then_some(PointerRole::Quit)
+            };
         }
         if in_rect(self.inventory, x, y) {
             return Some(PointerRole::Inventory);
@@ -224,6 +236,7 @@ pub struct TouchUi {
     pub reset_armed: bool,
     reset: bool,
     quit: bool,
+    pregen: bool,
     /// A menu screen (`menu::Menu`) is up: every press is a tap, the pause and inventory buttons included.
     pub menu: bool,
     /// Finger events on an open screen since the last `take_screen_events`.
@@ -252,6 +265,7 @@ impl TouchUi {
             reset_armed: false,
             reset: false,
             quit: false,
+            pregen: false,
             menu: false,
             events: Vec::new(),
             cursor_pos: (w as f32 * 0.5, h as f32 * 0.5),
@@ -261,6 +275,11 @@ impl TouchUi {
     /// The reset-world button was confirmed (tapped twice) since the last call.
     pub fn take_reset(&mut self) -> bool {
         std::mem::take(&mut self.reset)
+    }
+
+    /// The pre-generate button was tapped since the last call.
+    pub fn take_pregen(&mut self) -> bool {
+        std::mem::take(&mut self.pregen)
     }
 
     /// The quit-to-title button was tapped since the last call.
@@ -462,6 +481,7 @@ impl TouchUi {
                 }
             }
             PointerRole::Quit => self.quit = true,
+            PointerRole::Pregen => self.pregen = true,
             PointerRole::Pause => {
                 self.paused = !self.paused;
                 self.reset_armed = false;

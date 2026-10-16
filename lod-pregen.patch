@@ -1,0 +1,550 @@
+
+--- a/README.md	2026-10-16 12:52:17.628244534 +0000
++++ b/README.md	2026-10-16 12:52:17.675677030 +0000
+@@ -20,7 +20,7 @@
+ | M1  Blocks + chunks  | done | Hand-built 16x16x128 stone chunk, neighbour-culled mesher, 32-bit indices. |
+ | M2  Camera + physics | done | First-person walk + jump + swept AABB collision. Jump is now a button (see M12). |
+ | M3  Overworld gen    | done | 48x128x48 super-chunk, sea level 64, 6 ore types (coal, iron, gold, diamond, redstone, lapis). Terrain was rebuilt in M4a-c, see below. |
+-| M12 Touch UX         | done (d-pad: compiled and ran, not yet to be tested) | Landscape-only. PE-style d-pad (Stone D-pad sprites) with 8 directions: an arrow shows its two corners, the centre is sneak (toggle); look drag anywhere else, jump button, hotbar tap, pause menu. Sneak (b1.7.3): x0.3 speed, no walking off edges, holds on ladders, eye 0.08 lower. See ROADMAP changelog. |
++| M12 Touch UX         | done (d-pad: compiled and ran, not yet to be tested) | Landscape-only. PE-style d-pad (Stone D-pad sprites) with 8 directions: an arrow shows its two corners, the centre is sneak (toggle); look drag anywhere else, jump button, hotbar tap, pause menu. Sneak (b1.7.3): x0.3 speed, no walking off edges, holds on ladders, eye 0.08 lower. **Pregen** button (pause menu, top-left) makes the tiles around the player with trees, nearest first, and keeps them in `<world>/lod/` (Voxy World Gen). See ROADMAP changelog. |
+ | M4a-c Faithful terrain + biomes | done | java.util.Random, Perlin/simplex noise, WorldChunkManager (climate -> 10 biomes), generateTerrain and replaceBlocksForBiome. Bit-exact against the real b1.7.3 classes on 18 chunks (3 seeds), golden test passes (`tools/golden/`). |
+ | M4e Fix pass | done (compiled and ran on an Android device) | 48x48 stitching index, jump ground probe, eye height, aspect/resize sync, immersive nav bar, climate float constants. See the changelog in ROADMAP.md. |
+ | M4f Chunk manager | done (now compiles and its tests pass on a Linux host; compiled and ran on an Android device) | Chunks keyed by (cx, cz), one mesh per chunk, circular render-distance ring (4 chunks) that loads/unloads as you walk, terrain generated on 1-2 worker threads, cross-chunk face culling. Replaces the 48x48 super-chunk. |
+
+--- a/ROADMAP.md	2026-10-16 12:52:17.622147158 +0000
++++ b/ROADMAP.md	2026-10-16 12:52:17.674962306 +0000
+@@ -67,6 +67,11 @@
+ First `cargo test --lib` and a build: everything merged on 2026-10-16 (Tectonic, the Nether, the title screen, the light thread, lazy noise, distant terrain) was written without a Rust toolchain; only the std-only crates (`tectonic`, `embeddium`, `lod`) and the `world/gen` tests were run, in a Linux scratch crate. Then, in the easy-first order: the Nether's ghast, fireball and pig-zombie (M11), the rest of M14 (options, chat, models), the map item (M20); M21 (redstone) goes on from part 5 (the piston shaft model).
+ 
+ ## Changelog
++- 2026-10-16 (2): Pregen button + persistence (Voxy World Gen's pre-generation; the first LoD patch compiled and ran, the screenshots still showed guessed trees floating in the air and the user asked for the Voxy feature itself). Written WITHOUT a toolchain again: not compiled, not run; `cargo test --lib --release lod` / `touch_ui` first (`a_tile_file_round_trips`, `pregen_goes_nearest_first_and_counts_chunks` new; `a_cell_keeps_...` changed).
++    - Pause menu, top-left: `Pregen: off, N chunks` / `Pregen: N chunks (tap to stop)` (`LayoutRects::pregen`, `PointerRole::Pregen`, `TouchUi::take_pregen`, `Lod::toggle_pregen` / `Lod::pregen`). On: the worker (`pregen_step` = `DistanceGraph.findWork`) makes the tile nearest the player that is not real yet within `RADIUS` (a tile = Voxy's 4 x 4 chunk batch) with its trees, 16 chunks a tile, one per loop turn; a waiting view build or ingest goes first. Stops by itself when the range is done. The tiles it makes are meshed again (`made` channel -> `dirty`) when they were drawn as a guess.
++    - Persistence (`ChunkPersistence`): tiles with trees are written to `<world>/lod/<x>_<z>.lod` (`Store::flush`, after every job; temp file + rename; runs of equal columns, magic `L2` + world type + trees; another type or a cut file is ignored) and read back by `Store::tile` before generating, so pre-generation survives a restart and ingested edits are kept. A world reset wipes the folder with the rest.
++    - Floating trees: a coarse cell's leaf mass now stands on the ground (`resolve`), only step 1 has a trunk and a gap under the crown.
++    - ponytail: the count is tiles in memory or on disk x 16, not distinct chunks of the ring; no pause between tiles (the worker thread is busy while it is on: expect a warm phone); the Nether has no LoD, the button says so; tiles beyond ~13 tiles of the player are not made. UNVERIFIED: speed per tile on a device, disk size (a rough 10-60 KB a tile).
+ - 2026-10-16: LoD rework: real chunks become the LoD (Voxy's ingest, `voxy_worldgen_v2` as the reference). Written WITHOUT a Rust toolchain: not compiled, not run; run `cargo test --lib --release lod` first (`a_tree_is_leaves_over_its_own_ground`, `a_tree_meshes_as_a_box_on_a_trunk`, `an_ingested_chunk_replaces_the_guess` are new; `a_cell_keeps_...` and `a_tile_meshes_...` changed).
+     - Why it looked buggy (video + screenshots): (1) a column was only its top block, so a tree was a pillar from the top leaf to the lawn with a trunk-coloured wall, and at coarse steps a 16 x 16 pillar; (2) the LoD was a second opinion of the generator: no edits, populate order not the ring's, no trees beyond 300 blocks, and it showed a guess over chunks that were already loaded (the ring draws 4 chunks, 7 stay loaded). Why it felt choppy: the index buffer was re-created for every near tile each time the eye moved 2 blocks, even when the set of covered cells had not changed.
+     - Ingest: `ChunkManager::settle_around` (after a populate lands, a populate runs, or a saved chunk loads) hands a chunk over once all four populates that write into it are done (`settled`); on unload it is handed over again if it had been (edits). `take_ingest` -> `Lod::ingest` -> worker `Store::ingest` (kept in `Store::real`, laid over its tile now and in every tile made later, pruned beyond 48 chunks). The tiles it touches (and neighbours, for edge walls) are meshed again `REMESH_WAIT` = 2 s after the first chunk of a burst (Voxy's `ChunkUpdateTracker` throttle). Replaces `take_unloaded` / `far::columns`; `world/far.rs` and `lod/` stay in the tree, unused.
+
+--- a/mc-rs/src/input/touch_ui.rs	2026-10-16 12:52:17.625066957 +0000
++++ b/mc-rs/src/input/touch_ui.rs	2026-10-16 08:27:49.446502463 +0000
+@@ -52,6 +52,8 @@
+     Pause,
+     /// Press landed on the temporary reset-world button (pause menu only). Arms on the first release, fires on the second.
+     Reset,
++    /// Press landed on the pre-generate button (pause menu only, top-left). Fires on release.
++    Pregen,
+     /// Press landed on the save-and-quit-to-title button (pause menu only). Fires on release.
+     Quit,
+     /// Press landed on the zoom button. Zoomed while held (`TouchUi::zooming`).
+@@ -97,6 +99,8 @@
+     pub reset: Rect,
+     /// `GuiIngameMenu`'s "Save and quit to title", under `reset`.
+     pub quit: Rect,
++    /// The pre-generation switch, top-left (the pause menu only).
++    pub pregen: Rect,
+     pub hotbar: [Rect; HOTBAR_SLOTS],
+     pub jump: Rect,
+     /// The sneak button, the d-pad's centre cell.
+@@ -151,7 +155,9 @@
+         let jw = 0.16 * u;
+         let jump = (w - pad * 1.5 - jw, cy - jw * 0.5, jw, jw);
+ 
+-        Self { width: w, pause, inventory, zoom, resume, reset, quit, hotbar, jump, sneak: cell(0.0, 0.0), dpad, dpad_gap }
++        let pregen = (pad, pad, (0.6 * u).min(w * 0.4), ps * 0.8);
++
++        Self { width: w, pause, inventory, zoom, resume, reset, quit, pregen, hotbar, jump, sneak: cell(0.0, 0.0), dpad, dpad_gap }
+     }
+ 
+     /// Hit-test a press. `None` means the press is ignored. While paused only
+@@ -161,7 +167,13 @@
+             return Some(PointerRole::Pause);
+         }
+         if paused {
+-            return if in_rect(self.reset, x, y) { Some(PointerRole::Reset) } else { in_rect(self.quit, x, y).then_some(PointerRole::Quit) };
++            return if in_rect(self.reset, x, y) {
++                Some(PointerRole::Reset)
++            } else if in_rect(self.pregen, x, y) {
++                Some(PointerRole::Pregen)
++            } else {
++                in_rect(self.quit, x, y).then_some(PointerRole::Quit)
++            };
+         }
+         if in_rect(self.inventory, x, y) {
+             return Some(PointerRole::Inventory);
+@@ -224,6 +236,7 @@
+     pub reset_armed: bool,
+     reset: bool,
+     quit: bool,
++    pregen: bool,
+     /// A menu screen (`menu::Menu`) is up: every press is a tap, the pause and inventory buttons included.
+     pub menu: bool,
+     /// Finger events on an open screen since the last `take_screen_events`.
+@@ -252,6 +265,7 @@
+             reset_armed: false,
+             reset: false,
+             quit: false,
++            pregen: false,
+             menu: false,
+             events: Vec::new(),
+             cursor_pos: (w as f32 * 0.5, h as f32 * 0.5),
+@@ -263,6 +277,11 @@
+         std::mem::take(&mut self.reset)
+     }
+ 
++    /// The pre-generate button was tapped since the last call.
++    pub fn take_pregen(&mut self) -> bool {
++        std::mem::take(&mut self.pregen)
++    }
++
+     /// The quit-to-title button was tapped since the last call.
+     pub fn take_quit(&mut self) -> bool {
+         std::mem::take(&mut self.quit)
+@@ -462,6 +481,7 @@
+                 }
+             }
+             PointerRole::Quit => self.quit = true,
++            PointerRole::Pregen => self.pregen = true,
+             PointerRole::Pause => {
+                 self.paused = !self.paused;
+                 self.reset_armed = false;
+
+--- a/mc-rs/src/lib.rs	2026-10-16 12:52:17.624820365 +0000
++++ b/mc-rs/src/lib.rs	2026-10-16 08:27:49.448144900 +0000
+@@ -331,7 +331,7 @@
+ 
+     /// The distant terrain of the dimension in `self.dir`: the overworld has it, the Nether does not.
+     fn new_lod(&self) -> Option<Lod> {
+-        (!self.nether).then(|| Lod::new(self.seed, self.tectonic))
++        (!self.nether).then(|| Lod::new(self.seed, self.tectonic, Some(self.dir.join("lod"))))
+     }
+ 
+     /// The overworld's folder, whichever dimension this is.
+@@ -575,6 +575,11 @@
+             self.reset_world(true);
+             return;
+         }
++        if self.touch.take_pregen() {
++            if let Some(l) = self.lod.as_mut() {
++                l.toggle_pregen();
++            }
++        }
+         if self.touch.take_quit() {
+             self.quit_to_title();
+             return;
+@@ -2459,6 +2464,10 @@
+             // TEMPORARY reset-world button: after the first tap it is lit and asks again.
+             label(v, layout.reset, if self.touch.reset_armed { "Tap again to confirm" } else { "Reset world" }, self.touch.reset_armed);
+             label(v, layout.quit, "Save and quit to title", pressed(PointerRole::Quit));
++            // The pre-generation switch (Voxy World Gen): lit while it runs, with the chunks generated so far.
++            let (on, n) = self.lod.as_ref().map_or((false, 0), |l| l.pregen());
++            let text = if self.lod.is_none() { "Pregen: overworld only".to_string() } else if on { format!("Pregen: {n} chunks (tap to stop)") } else { format!("Pregen: off, {n} chunks") };
++            label(v, layout.pregen, &text, on || pressed(PointerRole::Pregen));
+         }
+ 
+         // Cap to the buffer capacity; extra quads are silently dropped.
+
+--- a/mc-rs/src/world/lod.rs	2026-10-16 12:52:17.626343281 +0000
++++ b/mc-rs/src/world/lod.rs	2026-10-16 08:27:49.445984407 +0000
+@@ -24,6 +24,11 @@
+ //! (`REMESH_WAIT`, Voxy's `ChunkUpdateTracker` throttle). So the band between the drawn ring and the loaded chunks, the player's
+ //! edits and the exact trees are what the LoD shows, not a second opinion of the generator.
+ //!
++//! Pre-generation (Voxy World Gen's whole point; the pause menu's `Pregen` button, `Lod::toggle_pregen`): while it is on, the worker
++//! makes the tiles around the player nearest first (`pregen_step` = `DistanceGraph.findWork`: a tile is Voxy's 4 x 4 chunk batch),
++//! each with its trees (generate + populate, the chunk ring's own path) and keeps them on disk (`<world>/lod/`, = `ChunkPersistence`),
++//! so what the LoD shows is a chunk that was generated, not a guess. View builds still go first; the count shown is chunks done.
++//!
+ //! A tree is a box of leaves over its own ground (`Col::leaf`), not a tower from the top leaf down to the lawn: the old top-block-only
+ //! column made every tree a pillar with a trunk-coloured wall. A forest cell (a quarter of it under leaves) at a coarse step keeps the
+ //! tree mass at the mean crown height, a lone tree on a lawn is dropped (`resolve`).
+@@ -39,13 +44,16 @@
+ use crate::render::atlas;
+ use crate::render::mesh::{lm, tint_of, Tints, WHITE};
+ use crate::world::chunk::{brightness, idx, is_plant, Nibbles};
+-use crate::world::chunks::{biome_tints, in_range, Shape};
++use crate::world::chunks::{biome_tints, chunk_coord, in_range, Shape};
+ use crate::world::gen::chunk_manager::WorldChunkManager;
+ use crate::world::gen::overworld::{OverworldGenerator, SEA_LEVEL};
+ use crate::world::gen::populate::Region;
+ use glam::Vec3;
+ use std::collections::{HashMap, HashSet};
+-use std::sync::mpsc::{channel, Receiver, Sender};
++use std::path::{Path, PathBuf};
++use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering::Relaxed};
++use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
++use std::sync::Arc;
+ use std::time::{Duration, Instant};
+ 
+ /// How far the far terrain reaches, and the distance the fog completes at (it starts at a quarter of it).
+@@ -167,14 +175,14 @@
+ /// The cell of `s` x `s` columns at (x0, z0) of a tile (`Mipper.mip`): of the children take the one whose ground is the highest, so
+ /// a peak and a cliff edge stay in the far view. A shore cell that is mostly water and whose land is low stays water (otherwise one
+ /// beach block would make a 16 block wide island of every bay). The trees of the cell become one box of leaves at the mean height of
+-/// the crowns when a quarter of the cell is under leaves (a forest keeps its mass), else none (a lone tree is a lawn at this scale).
++/// the crowns (standing on the ground) when a quarter of the cell is under leaves (a forest keeps its mass), else none (a lone tree is a lawn at this scale).
+ fn resolve(t: &Tile0, x0: usize, z0: usize, s: usize) -> Col {
+     if s == 1 {
+         return t.cols[x0 * 64 + z0];
+     }
+     let (mut best, mut best_h) = (Col::default(), -1.0f32);
+     let (mut wet, mut water) = (Col::default(), 0usize);
+-    let (mut crown, mut leaves, mut lsum, mut bsum) = (Col::default(), 0u32, 0u32, 0u32);
++    let (mut crown, mut leaves, mut lsum) = (Col::default(), 0u32, 0u32);
+     for x in x0..x0 + s {
+         for z in z0..z0 + s {
+             let c = t.cols[x * 64 + z];
+@@ -182,7 +190,7 @@
+                 continue;
+             }
+             if c.leaf > 0 {
+-                (leaves, lsum, bsum) = (leaves + 1, lsum + c.leaf as u32, bsum + c.lb as u32);
++                (leaves, lsum) = (leaves + 1, lsum + c.leaf as u32);
+                 if c.leaf > crown.leaf {
+                     crown = c;
+                 }
+@@ -206,7 +214,8 @@
+     }
+     let mut r = ground(best);
+     if r.wtop == 0 && leaves * 4 >= (s * s) as u32 {
+-        let (lt, lb) = ((lsum / leaves) as u8, ((bsum / leaves) as u8).max(r.top + 1));
++        // From the ground up: a cell wider than a block has no trunk to float over (a box in the air looked like a bug).
++        let (lt, lb) = ((lsum / leaves) as u8, r.top + 1);
+         if lt > lb {
+             (r.leaf, r.lb, r.lmeta, r.ltint) = (lt, lb, crown.lmeta, crown.ltint);
+         }
+@@ -270,6 +279,62 @@
+     tiles: HashMap<(i32, i32), Tile0>,
+     /// The columns of the real chunks `Lod::ingest` handed over, by chunk: laid over a tile whenever it is made (so they outlive it).
+     real: HashMap<(i32, i32), Vec<Col>>,
++    /// `<world>/lod`: tiles made with their trees are kept here (`flush`), None = nothing is read or written (the tests).
++    dir: Option<PathBuf>,
++    tectonic: bool,
++    /// Tiles in memory that differ from their file.
++    dirty: HashSet<(i32, i32)>,
++    /// Tiles that are real (with trees) now or were loaded from a file: the pre-generation's progress.
++    done: HashSet<(i32, i32)>,
++}
++
++const MAGIC: [u8; 2] = *b"L2";
++
++fn tile_path(d: &Path, k: (i32, i32)) -> PathBuf {
++    d.join(format!("{}_{}.lod", k.0, k.1))
++}
++
++/// A tile file: magic, world type, trees, then runs of equal columns (u16 count + the 14 bytes of a `Col`).
++fn encode(t: &Tile0, tectonic: bool) -> Vec<u8> {
++    let mut o = vec![MAGIC[0], MAGIC[1], tectonic as u8, t.trees as u8];
++    let mut i = 0;
++    while i < t.cols.len() {
++        let mut n = 1;
++        while i + n < t.cols.len() && n < 65535 && t.cols[i + n] == t.cols[i] {
++            n += 1;
++        }
++        let c = t.cols[i];
++        o.extend_from_slice(&(n as u16).to_le_bytes());
++        o.extend_from_slice(&[c.id, c.top, c.meta, c.wtop, c.tint[0], c.tint[1], c.tint[2], c.leaf, c.lb, c.lmeta, c.ltint[0], c.ltint[1], c.ltint[2], c.log as u8]);
++        i += n;
++    }
++    o
++}
++
++/// The tile in `b`, None when it is not a tile file of this format and world type or is cut short.
++fn decode(b: &[u8], tectonic: bool) -> Option<Tile0> {
++    if b.len() < 4 || b[..2] != MAGIC[..] || (b[2] != 0) != tectonic {
++        return None;
++    }
++    let mut cols = Vec::with_capacity(64 * 64);
++    let mut p = 4;
++    while p + 16 <= b.len() && cols.len() <= 64 * 64 {
++        let n = u16::from_le_bytes([b[p], b[p + 1]]) as usize;
++        let c = &b[p + 2..p + 16];
++        let col = Col { id: c[0], top: c[1], meta: c[2], wtop: c[3], tint: [c[4], c[5], c[6]], leaf: c[7], lb: c[8], lmeta: c[9], ltint: [c[10], c[11], c[12]], log: c[13] != 0 };
++        cols.extend(std::iter::repeat(col).take(n));
++        p += 16;
++    }
++    (cols.len() == 64 * 64 && p == b.len()).then(|| Tile0 { cols, trees: b[3] != 0 })
++}
++
++/// What the render thread and the worker share: the pre-generation switch and its count, and the chunk the player is in.
++#[derive(Default)]
++struct Shared {
++    on: AtomicBool,
++    chunks: AtomicU32,
++    cx: AtomicI32,
++    cz: AtomicI32,
+ }
+ 
+ /// Lay the columns of real chunk `k` over its place in tile `t`.
+@@ -281,10 +346,49 @@
+ }
+ 
+ impl Store {
++    fn new(g: OverworldGenerator, cm: WorldChunkManager, dir: Option<PathBuf>, tectonic: bool) -> Self {
++        Store { g, cm, tiles: HashMap::new(), real: HashMap::new(), dir, tectonic, dirty: HashSet::new(), done: HashSet::new() }
++    }
++
++    fn load(&self, k: (i32, i32)) -> Option<Tile0> {
++        decode(&std::fs::read(tile_path(self.dir.as_ref()?, k)).ok()?, self.tectonic)
++    }
++
++    /// Write the tiles that changed (to a temporary file first, then moved over the old one).
++    fn flush(&mut self) {
++        let Some(d) = self.dir.clone() else { return };
++        for k in std::mem::take(&mut self.dirty) {
++            let Some(t) = self.tiles.get(&k) else { continue };
++            let p = tile_path(&d, k);
++            if let Err(e) = std::fs::write(p.with_extension("tmp"), encode(t, self.tectonic)).and_then(|_| std::fs::rename(p.with_extension("tmp"), &p)) {
++                log::warn!("lod: {p:?}: {e}");
++            }
++        }
++    }
++
++    /// Lay the real chunks that are known over tile `k`; true if there were any.
++    fn overlay(&self, t: &mut Tile0, k: (i32, i32)) -> bool {
++        let mut any = false;
++        for ci in 0..4 {
++            for cj in 0..4 {
++                let c = (k.0 * 4 + ci, k.1 * 4 + cj);
++                if let Some(r) = self.real.get(&c) {
++                    put(t, c, r);
++                    any = true;
++                }
++            }
++        }
++        any
++    }
++
+     /// A real chunk replaces what the generator guessed for it: in its tile if that is made, and in the tile when it is made.
+     fn ingest(&mut self, k: (i32, i32), cols: Vec<Col>) {
+-        if let Some(t) = self.tiles.get_mut(&(k.0.div_euclid(4), k.1.div_euclid(4))) {
++        let tk = (k.0.div_euclid(4), k.1.div_euclid(4));
++        if let Some(t) = self.tiles.get_mut(&tk) {
+             put(t, k, &cols);
++            if t.trees {
++                self.dirty.insert(tk);
++            }
+         }
+         self.real.insert(k, cols);
+     }
+@@ -292,7 +396,19 @@
+     /// The columns of tile `k`, made now if missing (or if `trees` are wanted and it has none).
+     fn tile(&mut self, k: (i32, i32), trees: bool) -> &Tile0 {
+         if self.tiles.get(&k).map_or(true, |t| trees && !t.trees) {
+-            let t = self.make(k, trees);
++            let loaded = self.load(k).filter(|t| t.trees || !trees);
++            let fresh = loaded.is_none();
++            let mut t = match loaded {
++                Some(t) => t,
++                None => self.make(k, trees),
++            };
++            let real = self.overlay(&mut t, k);
++            if t.trees {
++                self.done.insert(k);
++                if fresh || real {
++                    self.dirty.insert(k);
++                }
++            }
+             self.tiles.insert(k, t);
+         }
+         &self.tiles[&k]
+@@ -341,16 +457,7 @@
+                 }
+             }
+         }
+-        let mut t = Tile0 { cols, trees };
+-        for ci in 0..4 {
+-            for cj in 0..4 {
+-                let c = (k.0 * 4 + ci, k.1 * 4 + cj);
+-                if let Some(r) = self.real.get(&c) {
+-                    put(&mut t, c, r);
+-                }
+-            }
+-        }
+-        t
++        Tile0 { cols, trees }
+     }
+ 
+     /// Drop the tiles farthest from `k` once there are more than `KEEP_TILES`.
+@@ -609,6 +716,28 @@
+ enum Msg {
+     Build(i32, i32, i32, bool),
+     Ingest((i32, i32), Vec<Col>),
++    /// Look at the pre-generation switch again.
++    Wake,
++}
++
++/// Voxy's `DistanceGraph.findWork`: the nearest tile (a 4 x 4 batch of chunks) within `RADIUS` of the player that is not real yet, made
++/// now with its trees (or read from its file). None = every tile in range is done. The count is chunks (16 a tile).
++fn pregen_step(st: &mut Store, sh: &Shared) -> Option<(i32, i32)> {
++    let (tx, tz) = (sh.cx.load(Relaxed).div_euclid(4), sh.cz.load(Relaxed).div_euclid(4));
++    let n = (RADIUS / TILE as f32) as i32 + 1;
++    let mut best: Option<(i32, (i32, i32))> = None;
++    for x in tx - n..=tx + n {
++        for z in tz - n..=tz + n {
++            let d = (x - tx).pow(2) + (z - tz).pow(2);
++            if d <= n * n && !st.done.contains(&(x, z)) && best.map_or(true, |b| d < b.0) {
++                best = Some((d, (x, z)));
++            }
++        }
++    }
++    let (_, k) = best?;
++    st.tile(k, true);
++    sh.chunks.store(st.done.len() as u32 * 16, Relaxed);
++    Some(k)
+ }
+ 
+ pub struct Lod {
+@@ -618,15 +747,21 @@
+     dirty: HashMap<(i32, i32), Instant>,
+     job: Sender<Msg>,
+     rx: Receiver<Built>,
++    /// Tiles the pre-generation made, to be meshed again (they may have been drawn as a guess).
++    made: Receiver<(i32, i32)>,
++    sh: Arc<Shared>,
+     /// The tiles `update` found in the frustum.
+     visible: Vec<(i32, i32)>,
+ }
+ 
+ impl Lod {
+     /// A LoD for the world of `seed` (Tectonic or vanilla terrain, like the chunk ring), generated on its own thread.
+-    pub fn new(seed: i64, tectonic: bool) -> Self {
++    pub fn new(seed: i64, tectonic: bool, dir: Option<PathBuf>) -> Self {
+         let (job, jobs) = channel::<Msg>();
+         let (done, rx) = channel::<Built>();
++        let (made_tx, made) = channel::<(i32, i32)>();
++        let sh = Arc::new(Shared::default());
++        let shared = sh.clone();
+         std::thread::Builder::new()
+             .name("lod".into())
+             .spawn(move || {
+@@ -634,23 +769,61 @@
+                 if tectonic {
+                     g = g.tectonic();
+                 }
+-                let mut store = Store { g, cm: WorldChunkManager::new(seed), tiles: HashMap::new(), real: HashMap::new() };
+-                // Ends when the `Lod` (and so `job`) is dropped.
+-                while let Ok(m) = jobs.recv() {
++                if let Some(d) = &dir {
++                    let _ = std::fs::create_dir_all(d);
++                }
++                let mut store = Store::new(g, WorldChunkManager::new(seed), dir, tectonic);
++                // Ends when the `Lod` (and so `job`) is dropped. While the pre-generation is on, a view build or an ingest that is
++                // waiting goes first and a tile is made whenever there is none.
++                loop {
++                    let m = if shared.on.load(Relaxed) {
++                        match jobs.try_recv() {
++                            Ok(m) => Some(m),
++                            Err(TryRecvError::Empty) => None,
++                            Err(TryRecvError::Disconnected) => break,
++                        }
++                    } else {
++                        match jobs.recv() {
++                            Ok(m) => Some(m),
++                            Err(_) => break,
++                        }
++                    };
+                     match m {
+-                        Msg::Ingest(k, cols) => store.ingest(k, cols),
+-                        Msg::Build(tx, tz, step, trees) => {
++                        Some(Msg::Wake) => {}
++                        Some(Msg::Ingest(k, cols)) => store.ingest(k, cols),
++                        Some(Msg::Build(tx, tz, step, trees)) => {
+                             let b = build(&mut store, (tx, tz), step, trees);
++                            store.flush();
+                             store.prune((tx, tz));
+                             if done.send(b).is_err() {
+                                 break;
+                             }
+                         }
++                        None => match pregen_step(&mut store, &shared) {
++                            Some(k) => {
++                                store.flush();
++                                store.prune((shared.cx.load(Relaxed).div_euclid(4), shared.cz.load(Relaxed).div_euclid(4)));
++                                let _ = made_tx.send(k);
++                            }
++                            None => shared.on.store(false, Relaxed),
++                        },
+                     }
+                 }
++                store.flush();
+             })
+             .expect("lod thread");
+-        Lod { tiles: HashMap::new(), pending: HashSet::new(), dirty: HashMap::new(), job, rx, visible: Vec::new() }
++        Lod { tiles: HashMap::new(), pending: HashSet::new(), dirty: HashMap::new(), job, rx, made, sh, visible: Vec::new() }
++    }
++
++    /// The pause menu's button: start or stop pre-generating the tiles around the player.
++    pub fn toggle_pregen(&mut self) {
++        self.sh.on.store(!self.sh.on.load(Relaxed), Relaxed);
++        let _ = self.job.send(Msg::Wake);
++    }
++
++    /// (is it on, chunks generated so far).
++    pub fn pregen(&self) -> (bool, u32) {
++        (self.sh.on.load(Relaxed), self.sh.chunks.load(Relaxed))
+     }
+ 
+     /// The columns of a real chunk (`columns`), from the chunk manager: they replace the guessed ones. Its tile, and the neighbour tiles
+@@ -681,6 +854,14 @@
+             let t = Tile { step: b.step, trees: b.trees, vbuf, ibuf: None, index_count: 0, cells: b.cells, all: b.idx, hole: None, cov: Vec::new(), stale: true };
+             self.tiles.insert(b.key, t);
+         }
++        self.sh.cx.store(chunk_coord(eye.x), Relaxed);
++        self.sh.cz.store(chunk_coord(eye.z), Relaxed);
++        while let Ok(k) = self.made.try_recv() {
++            // A tile drawn from the guess is meshed again with its real columns.
++            if self.tiles.get(&k).map_or(self.pending.contains(&k), |t| !t.trees) {
++                self.dirty.entry(k).or_insert_with(Instant::now);
++            }
++        }
+         let ts = TILE as f32;
+         let r = RADIUS + ts * 0.75;
+         let centre = |k: (i32, i32)| ((k.0 as f32 + 0.5) * ts, (k.1 as f32 + 0.5) * ts);
+@@ -772,7 +953,7 @@
+     }
+ 
+     fn store() -> Store {
+-        Store { g: OverworldGenerator::new(0xCAFEBABE), cm: WorldChunkManager::new(0xCAFEBABE), tiles: HashMap::new(), real: HashMap::new() }
++        Store::new(OverworldGenerator::new(0xCAFEBABE), WorldChunkManager::new(0xCAFEBABE), None, false)
+     }
+ 
+     /// A column reads past plants to the top block, and the water over a floor is kept apart from it.
+@@ -812,7 +993,7 @@
+         // A forest cell (half of it under leaves) keeps its tree mass; one tree on a lawn is not worth a 4 block wide box.
+         let t = tile_of(|x, z| if x < 2 { tree(land(70)) } else { land(70) });
+         let c = resolve(&t, 0, 0, 4);
+-        assert_eq!((c.top, c.leaf, c.lb), (70, 78, 74));
++        assert_eq!((c.top, c.leaf, c.lb), (70, 78, 71), "the mass stands on the ground");
+         let t = tile_of(|x, z| if (x, z) == (1, 1) { tree(land(70)) } else { land(70) });
+         assert_eq!(resolve(&t, 0, 0, 4).leaf, 0);
+         let t = tile_of(|x, z| if (x, z) == (1, 1) { land(64) } else { sea(40) });
+@@ -875,4 +1056,28 @@
+         assert_eq!(st.tiles[&(0, 0)].cols[(48 + 1) * 64 + 48 + 1].top, 98, "a tile that exists is patched in place");
+         assert_ne!(st.tiles[&(0, 0)].cols[16 * 64 + 7].top, 99, "chunk (1, 0) was not touched");
+     }
++
++    /// A tile file reads back the tile it was made from, and nothing else (another world type, a cut file).
++    #[test]
++    fn a_tile_file_round_trips() {
++        let t = tile_of(|x, z| if x < 5 { tree(land((60 + z % 7) as u8)) } else if z < 9 { sea(40) } else { land(70) });
++        let b = encode(&t, true);
++        let u = decode(&b, true).unwrap();
++        assert!(u.cols == t.cols && !u.trees);
++        assert!(decode(&b, false).is_none(), "a vanilla world does not read a Tectonic tile");
++        assert!(decode(&b[..b.len() - 3], true).is_none() && decode(&[], true).is_none());
++    }
++
++    /// The pre-generation makes the tile nearest the player first, one at a time, counts chunks, and ends when the range is done.
++    #[test]
++    fn pregen_goes_nearest_first_and_counts_chunks() {
++        let (mut st, sh) = (store(), Shared::default());
++        sh.cx.store(70, Relaxed); // chunk 70 = tile 17
++        let k = pregen_step(&mut st, &sh).unwrap();
++        assert_eq!(k, (17, 0));
++        assert!(st.tiles[&k].trees && sh.chunks.load(Relaxed) == 16);
++        let k2 = pregen_step(&mut st, &sh).unwrap();
++        assert_ne!(k2, k);
++        assert_eq!(sh.chunks.load(Relaxed), 32);
++    }
+ }
