@@ -71,9 +71,10 @@ const TILE: i32 = 64;
 const TREES: f32 = 520.0;
 /// The LoD under the real chunks sits this much lower (and its walls this much inside), so the real surface always wins.
 const EPS: f32 = 0.04;
-/// How far inside the real chunks' range a land voxel is cut out (the eye is quantised to 2 blocks: 1.74 at most). Water is a
+/// How far inside the real chunks' range a land voxel is cut out (the eye is quantised to 2 blocks: 1.74 at most; a chunk that is in
+/// range but not meshed yet is `ChunkManager::drawn`'s business, no longer the slack's). Water is a
 /// translucent sheet in the real pass, so it is cut closer: a LoD sheet under it would show through as a second layer of water.
-const LAND_SLACK: f32 = 8.0;
+const LAND_SLACK: f32 = 3.0;
 const WATER_SLACK: f32 = 2.5;
 /// Tiles asked of the worker at once.
 const MAX_PENDING: usize = 2;
@@ -576,12 +577,13 @@ impl Quads {
         }
     }
 
-    /// A wall of the voxel at (x0, z0) facing `side`, from `yb` to `yt`, `EPS` inside the voxel; `v0` is where the tile starts (a
+    /// A wall of the voxel at (x0, z0) facing `side`, from `yb` to `yt`, exactly on the voxel's boundary (an inset would leave a slit
+    /// between the wall's foot and the lower neighbour's top face, which starts on the boundary); `v0` is where the tile starts (a
     /// 1/8 high snow layer shows the top eighth).
     #[allow(clippy::too_many_arguments)]
     fn wall(&mut self, side: Side, x0: f32, z0: f32, sf: f32, yt: f32, yb: f32, v0: f32, id: u8, meta: u8, tint: f32) {
-        let ((di, dj), tile, shade, corners) = side;
-        let p = corners.map(|cn| [x0 + cn[0] * sf - EPS * di as f32, if cn[1] > 0.5 { yt } else { yb }, z0 + cn[2] * sf - EPS * dj as f32]);
+        let (_, tile, shade, corners) = side;
+        let p = corners.map(|cn| [x0 + cn[0] * sf, if cn[1] > 0.5 { yt } else { yb }, z0 + cn[2] * sf]);
         let uv = [face_uv(id, meta, tile, 0.0, v0), face_uv(id, meta, tile, 1.0, v0), face_uv(id, meta, tile, 1.0, 1.0), face_uv(id, meta, tile, 0.0, 1.0)];
         self.quad(p, uv, shade, tint);
     }
@@ -681,17 +683,33 @@ fn build(store: &mut Store, key: (i32, i32), step: i32, trees: bool) -> Built {
                     }
                     // A wall is only shortened by EPS where a top / bottom face is: between two stacked voxels the walls meet, otherwise
                     // a 2 * EPS slit shows the sky through every step of a cliff (white lines, blocks that look cut apart).
-                    let (wt, wb) = (y0 + hgt - if up_hidden { 0.0 } else { EPS }, y0 + if down_hidden { 0.0 } else { EPS });
+                    let wt = y0 + hgt - if up_hidden { 0.0 } else { EPS };
                     for side in SIDES {
                         let ((di, dj), ..) = side;
-                        if hide(nb(di, 0, dj)) {
+                        let o = nb(di, 0, dj);
+                        // Water beside a land voxel hides its wall only under the water's surface: where the water's top voxel is, the
+                        // land stands 1/9 above the sheet, and culling that strip left a white line along every shore.
+                        let up = nb(di, 1, dj);
+                        if if o == 9 { up == 9 || opq(up, s) } else { hide(o) } {
                             continue;
                         }
+                        // The foot of the wall meets the top face of the lower neighbour (EPS under its voxel's top), or the water's sheet
+                        // (1/9 and EPS under it), or the bottom face of this voxel; where the wall goes on into the voxel under it, it is flush.
+                        let below = nb(di, -1, dj);
+                        let wb = if !down_hidden {
+                            y0 + EPS
+                        } else if below == 9 {
+                            y0 - 1.0 / 9.0 - EPS
+                        } else if opq(below, s) {
+                            y0 - EPS
+                        } else {
+                            y0
+                        };
                         q.wall(side, x0, z0, sf, wt, wb, 1.0 - hgt / sf, id, meta, tint);
                         let edge = (di == -1 && gi == 1) || (di == 1 && gi == n) || (dj == -1 && gj == 1) || (dj == 1 && gj == n);
                         // The skirt hangs from the lowest exposed voxel of the face, through the solid ground under it.
                         if edge && ki > 0 && opq(nb(0, -1, 0), s) && opq(nb(di, -1, dj), s) {
-                            q.wall(side, x0, z0, sf, y0, y0 - skirt, 0.0, 1, 0, pack(PLAIN));
+                            q.wall(side, x0, z0, sf, y0 - EPS, y0 - skirt, 0.0, 1, 0, pack(PLAIN));
                         }
                     }
                 }
