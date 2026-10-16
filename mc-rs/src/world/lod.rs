@@ -88,13 +88,13 @@ const HEIGHT: usize = 128;
 
 /// Cell width (blocks) of a tile whose centre is `dist` blocks from the eye.
 fn step_for(dist: f32) -> i32 {
-    if dist < 120.0 {
+    if dist < 150.0 {
         1
-    } else if dist < 200.0 {
+    } else if dist < 250.0 {
         2
-    } else if dist < 330.0 {
+    } else if dist < 400.0 {
         4
-    } else if dist < 520.0 {
+    } else if dist < 600.0 {
         8
     } else {
         16
@@ -672,22 +672,26 @@ fn build(store: &mut Store, key: (i32, i32), step: i32, trees: bool) -> Built {
                     let nb = |di: i32, dk: i32, dj: i32| vid(at((gi as i32 + di) as usize, ki + dk, (gj as i32 + dj) as usize));
                     // A face is hidden by an opaque neighbour, by water (its sheet is drawn instead) and by the same block (glass, ice).
                     let hide = |o: u8| o != 0 && (o == 9 || opq(o, s) || o == id);
-                    if !hide(nb(0, 1, 0)) {
+                    let (up_hidden, down_hidden) = (hide(nb(0, 1, 0)), hide(nb(0, -1, 0)));
+                    if !up_hidden {
                         q.flat(true, x0, z0, sf, y0 + hgt - EPS, id, meta, tint);
                     }
-                    if !hide(nb(0, -1, 0)) {
+                    if !down_hidden {
                         q.flat(false, x0, z0, sf, y0 + EPS, id, meta, if id == 2 { pack(PLAIN) } else { tint });
                     }
+                    // A wall is only shortened by EPS where a top / bottom face is: between two stacked voxels the walls meet, otherwise
+                    // a 2 * EPS slit shows the sky through every step of a cliff (white lines, blocks that look cut apart).
+                    let (wt, wb) = (y0 + hgt - if up_hidden { 0.0 } else { EPS }, y0 + if down_hidden { 0.0 } else { EPS });
                     for side in SIDES {
                         let ((di, dj), ..) = side;
                         if hide(nb(di, 0, dj)) {
                             continue;
                         }
-                        q.wall(side, x0, z0, sf, y0 + hgt - EPS, y0 + EPS, 1.0 - hgt / sf, id, meta, tint);
+                        q.wall(side, x0, z0, sf, wt, wb, 1.0 - hgt / sf, id, meta, tint);
                         let edge = (di == -1 && gi == 1) || (di == 1 && gi == n) || (dj == -1 && gj == 1) || (dj == 1 && gj == n);
                         // The skirt hangs from the lowest exposed voxel of the face, through the solid ground under it.
                         if edge && ki > 0 && opq(nb(0, -1, 0), s) && opq(nb(di, -1, dj), s) {
-                            q.wall(side, x0, z0, sf, y0 + EPS, y0 - skirt, 0.0, 1, 0, pack(PLAIN));
+                            q.wall(side, x0, z0, sf, y0, y0 - skirt, 0.0, 1, 0, pack(PLAIN));
                         }
                     }
                 }
@@ -951,8 +955,11 @@ impl Lod {
                 }
             }
         }
-        // A tile that is not there at all is a hole to the sky: those first, nearest first, then the ones that only change.
-        want.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
+        // A tile that is not there at all is a hole to the sky, so it goes before one that only changes; but not at any price: a tree
+        // upgrade closer than `UPGRADE_LAG` blocks goes before a missing tile that far (else no tree shows until the whole view is made).
+        const UPGRADE_LAG: f32 = 200.0;
+        let key = |w: &(bool, f32, (i32, i32), i32, bool)| w.1 + if w.0 { UPGRADE_LAG } else { 0.0 };
+        want.sort_by(|a, b| key(a).total_cmp(&key(b)));
         for (_, _, k, step, trees) in want {
             if self.pending.len() >= MAX_PENDING {
                 break;
