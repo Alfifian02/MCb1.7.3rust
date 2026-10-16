@@ -1850,8 +1850,9 @@ impl App {
         // Which terrain sections the camera sees (frustum, render shape, and occlusion by terrain); the main pass and the water pass both draw from it.
         // The shadow pass below does not: terrain hidden from the camera still casts shadows.
         self.chunks.update_visible(self.camera.pos, RENDER_SHAPE, (RENDER_DIST * 16) as f32, (RENDER_VERT * 16) as f32, |min, max| frustum.intersects_aabb(min, max));
-        let _gone = self.chunks.take_unloaded(); // drained in the Nether too; the voxel LoD does not ingest unloaded chunks (ponytail of its entry)
+        let fresh = self.chunks.take_ingest(); // drained in the Nether too (no LoD there)
         if let Some(l) = self.lod.as_mut() {
+            fresh.into_iter().for_each(|(k, cols)| l.ingest(k, cols));
             l.update(&self.gpu.device, e, (RENDER_DIST * 16) as f32, (RENDER_VERT * 16) as f32, |min, max| frustum.intersects_aabb(min, max));
         }
         let fog = if self.nether { hell } else { sky::fog_color(angle, sky_rgb, rain, thunder) };

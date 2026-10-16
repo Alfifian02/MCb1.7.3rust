@@ -78,7 +78,6 @@ const SLOW_CHUNK_WORK: std::time::Duration = std::time::Duration::from_millis(16
 /// ponytail: the read + decode runs on the render thread (about 32 KB of work per chunk); move it to the workers if it shows.
 const LOADS_PER_FRAME: usize = 8;
 
-/// Chunk coordinate of a world-space coordinate (floor division by 16).
 /// The grass and foliage colour of every column of chunk (cx, cz) (`BlockGrass.colorMultiplier` and friends read the climate of the
 /// column itself, no blending). ponytail: the climate noise is sampled again for every (re)mesh; cache it per chunk if remeshing shows up in a profile.
 pub(crate) fn biome_tints(cm: &mut WorldChunkManager, cx: i32, cz: i32) -> mesh::Tints {
@@ -92,6 +91,12 @@ pub(crate) fn biome_tints(cm: &mut WorldChunkManager, cx: i32, cz: i32) -> mesh:
     t
 }
 
+/// The far terrain's columns of a loaded chunk.
+fn cols_of(cm: &mut WorldChunkManager, k: Key, e: &Entry) -> Vec<crate::world::lod::Col> {
+    crate::world::lod::columns(&e.blocks, &e.data, &biome_tints(cm, k.0, k.1))
+}
+
+/// Chunk coordinate of a world-space coordinate (floor division by 16).
 pub fn chunk_coord(v: f32) -> i32 {
     (v.floor() as i32) >> 4
 }
@@ -302,8 +307,11 @@ pub struct ChunkManager {
     culler: Culler,
     /// Per chunk column, the sections (bit `s`) `update_visible` found drawable this frame.
     visible: HashMap<Key, u8>,
-    /// The far-terrain columns of chunks unloaded since `take_unloaded` (`world::far`): real blocks (trees, edits) replace generated ones.
-    unloaded: Vec<(Key, lod::Tile)>,
+    /// Chunks whose blocks are final, as columns for the far terrain (`world::lod`, Voxy's ingest), until `take_ingest`.
+    ingest: Vec<(Key, Vec<crate::world::lod::Col>)>,
+    /// The chunks handed over while loaded: one that unloads is handed over again (it may have been edited), any other is not (its
+    /// neighbours are gone by then, it cannot tell whether it was final).
+    ingested: HashSet<Key>,
 }
 
 /// The loaded chunks as the occlusion walk sees them. A chunk that has no mesh (air only, or not built yet) lets the view through.
@@ -389,7 +397,7 @@ impl ChunkManager {
 
         Self { chunks: Chunks::default(), pending: HashSet::new(), ring, radius, center: None, max_in_flight: workers * 2, built, meshing: HashSet::new(), max_meshing: workers * 2,
                populated_rx, populating: HashMap::new(), busy: HashSet::new(), max_populating: workers, stamp: 0,
-               gen: make(seed), cm: WorldChunkManager::new(seed), jobs, done, light: light::LightLink::spawn(), sky_sub: 0, mesh_gen: 0, dir: None, saved: HashSet::new(), writer: None, changes: Vec::new(), loot: Vec::new(), spawners: Vec::new(), culler: Culler::default(), visible: HashMap::new(), unloaded: Vec::new() }
+               gen: make(seed), cm: WorldChunkManager::new(seed), jobs, done, light: light::LightLink::spawn(), sky_sub: 0, mesh_gen: 0, dir: None, saved: HashSet::new(), writer: None, changes: Vec::new(), loot: Vec::new(), spawners: Vec::new(), culler: Culler::default(), visible: HashMap::new(), ingest: Vec::new(), ingested: HashSet::new() }
     }
 
     /// Keep this world in `dir`: chunks found there are loaded instead of generated, and edited ones are written back
@@ -436,6 +444,7 @@ impl ChunkManager {
                     e.data = data;
                     e.populated = populated;
                 }
+                self.settle_around(key);
             }
             None => {
                 log::warn!("save: chunk {key:?} unreadable, generating it again");
@@ -908,9 +917,28 @@ impl ChunkManager {
         }
     }
 
-    /// The far-terrain columns of the chunks unloaded since the last call.
-    pub fn take_unloaded(&mut self) -> Vec<(Key, lod::Tile)> {
-        std::mem::take(&mut self.unloaded)
+    /// The columns of the chunks that became final (or were unloaded after an edit) since the last call: what the far terrain shows
+    /// instead of a guess.
+    pub fn take_ingest(&mut self) -> Vec<(Key, Vec<crate::world::lod::Col>)> {
+        std::mem::take(&mut self.ingest)
+    }
+
+    /// Chunk `k` has the four populates that write into it behind it (its own and the three before it in -x / -z): its blocks are final.
+    fn settled(&self, k: Key) -> bool {
+        [(0, 0), (-1, 0), (0, -1), (-1, -1)].iter().all(|d| self.chunks.get(&(k.0 + d.0, k.1 + d.1)).is_some_and(|e| e.populated))
+    }
+
+    /// Hand chunk `k` to the far terrain once, when it is settled. Called for the chunks a populate or a load may have settled.
+    fn settle_around(&mut self, k: Key) {
+        for d in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+            let c = (k.0 + d.0, k.1 + d.1);
+            if self.ingested.contains(&c) || !self.settled(c) {
+                continue;
+            }
+            let cols = cols_of(&mut self.cm, c, &self.chunks[&c]);
+            self.ingest.push((c, cols));
+            self.ingested.insert(c);
+        }
     }
 
     fn stream(&mut self, cx: i32, cz: i32) {
@@ -936,7 +964,10 @@ impl ChunkManager {
             self.mesh_gen = self.mesh_gen.wrapping_add(1);
             for k in gone {
                 let Some(e) = self.chunks.remove(&k) else { continue };
-                self.unloaded.push((k, crate::world::far::columns(&e.blocks)));
+                if self.ingested.remove(&k) {
+                    let cols = cols_of(&mut self.cm, k, &e);
+                    self.ingest.push((k, cols));
+                }
                 self.light_remove(k);
                 if let (true, Some(dir), Some(w)) = (e.dirty, &self.dir, &mut self.writer) {
                     w.queue(dir, k, save::encode_chunk(&e.blocks, &e.data, e.populated));
@@ -999,6 +1030,7 @@ impl ChunkManager {
             if keys.iter().zip(revs).all(|(k, r)| self.chunks.get(k).is_some_and(|e| e.rev == r)) {
                 self.put_region(key.0, key.1, region);
                 self.chunks.get_mut(&key).unwrap().populated = true;
+                self.settle_around(key);
             }
         }
     }
@@ -1013,6 +1045,7 @@ impl ChunkManager {
         self.gen.populate(&mut region, x, z, &mut self.cm);
         self.put_region(x, z, region);
         self.chunks.get_mut(&keys[0]).unwrap().populated = true;
+        self.settle_around((x, z));
         true
     }
 
