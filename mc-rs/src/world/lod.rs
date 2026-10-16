@@ -1,52 +1,57 @@
 //! Far terrain, Voxy style: the view reaches `RADIUS` blocks with the SAME blocks, textures, tints and face shades as the real
 //! chunks, not a smooth painted heightfield.
 //!
-//! Voxy keeps the real block data of far sections, mips it 2x2x2 at a time (`Mipper.mip`: of the eight children take the
-//! top-most, most opaque one) and meshes every level with the block's own model. Here the world is 128 high, so a "section" is a
-//! column grid: a worker thread makes the real columns of a 64 x 64 tile (`OverworldGenerator::generate`, plus `populate` for
-//! the trees when the tile is near; the same generator, so the same terrain and the same biome tints as the chunk ring), keeps
-//! them (`Store`), and meshes a tile at a step of 1, 2, 4, 8 or 16 blocks by distance. One cell = one column of `step` x `step`
-//! blocks: its top block's tile on the top face (leaves for a tree top, snow, ice, sand ...), a side wall to every lower neighbour
-//! built from the block's side tile (grass side overlay, dirt, stone below), water as one sheet coloured like the translucent water
-//! over its floor. At step 1 it is the block terrain itself, so where the real chunks stop the LoD goes on with the same pixels.
+//! Voxy keeps the real 3D block data of far sections, mips it 2x2x2 at a time (`Mipper.mip`) and meshes every level as voxels:
+//! a face is drawn wherever a solid voxel touches a see-through one (`RenderDataFactory`, `shouldMeshNonOpaqueBlockFace`). This
+//! file does the same for a 128 high world. A worker thread makes the real columns of a 64 x 64 tile (`OverworldGenerator::generate`,
+//! plus `populate` for the trees when the tile is near; the same generator, so the same terrain and biome tints as the chunk
+//! ring) and keeps each column as a few vertical runs of equal blocks (`Span`: tree crown, trunk, grass, dirt ...; below the
+//! last run it is stone). To mesh a tile at a step of 1, 2, 4, 8 or 16 blocks it fills a dense voxel grid of the tile plus one cell
+//! of margin (the neighbours' columns), mips it `log2(step)` times (`mip`) and emits a face for every solid / see-through
+//! boundary (`build`). So a tree is a real mass of leaf voxels on a trunk (not a pillar from the crown to the lawn), a cliff
+//! is a stack of voxels whose height is a multiple of the step (not an arbitrary wall), and an overhang or a crown over a gap
+//! stays what it is.
 //!
-//! Blending with the real chunks (what was wrong before: a smooth flat-coloured heightfield, a 56 block hole inside a 64 block ring,
-//! different shading on both sides):
+//! The mip differs from Voxy's in two places, both chosen against the bugs seen in the screenshots:
+//! - Voxy turns a cell solid when ANY of its eight children is, which bloats terrain by up to a step (peaks become pillars). Here
+//!   a cell is solid when at least half of its children are (rounds the surface to the nearest step, no bias), except leaves / logs,
+//!   which count from one child (a forest keeps its canopy) - UNVERIFIED against how it looks, picked on paper.
+//! - Voxy picks the child of highest opacity, so leaves over dirt turn into dirt. Here the upper four children are looked at first
+//!   (what you see from above), then opacity, then Voxy's own tie-break (+y, +z, +x).
+//!
+//! Blending with the real chunks:
 //! - same atlas tiles, same grass / foliage tint, same face shade (top 1.0, Z sides 0.8, X sides 0.6), same light (sky 15), same fog;
-//! - the LoD is cut out exactly where real sections are drawn (`world::chunks::in_range`, the test `update_visible` uses, 8 blocks
-//!   inside it so the eye's 2 block quantisation and a chunk still being meshed never open a gap), and the part that stays under
-//!   the real chunks is `EPS` lower (walls `EPS` inside their cell) so the real surface always wins the depth test: no z-fighting.
+//! - the LoD is cut out only where real sections are drawn AND have a mesh (`Lod::update`'s `drawn`, `ChunkManager::drawn`): the old
+//!   cut followed the ring's range alone, so a chunk still generating or meshing left a hole to the sky. The part that stays under
+//!   the real chunks is `EPS` lower (walls `EPS` inside their voxel) so the real surface always wins the depth test.
+//! - a face on a tile's edge hangs a skirt into the ground (`build`): the neighbour tile may be at another step, and the two surfaces
+//!   then differ by up to a step.
 //!
-//! Real chunks first (Voxy's `VoxelIngestService`): the worker's own generator only guesses what no chunk has shown yet. Every chunk
-//! the chunk manager has finished (all four populates that write into it done, `ChunkManager::take_ingest`) and every one it unloads
-//! after an edit is turned into columns (`columns`) and handed to `Lod::ingest`; they replace the guessed columns of their tile, now
-//! and in every tile made later (`Store::real`), and the tile is meshed again a moment after the last chunk of a burst
-//! (`REMESH_WAIT`, Voxy's `ChunkUpdateTracker` throttle). So the band between the drawn ring and the loaded chunks, the player's
-//! edits and the exact trees are what the LoD shows, not a second opinion of the generator.
+//! Real chunks first (Voxy's `VoxelIngestService`): every chunk the chunk manager has finished (all four populates that write into
+//! it done, `ChunkManager::take_ingest`) and every one it unloads after an edit is turned into columns (`columns`) and handed to
+//! `Lod::ingest`; they replace the guessed columns of their tile, now and in every tile made later (`Store::real`), and the tile
+//! is meshed again a moment after the last chunk of a burst (`REMESH_WAIT`, Voxy's `ChunkUpdateTracker` throttle).
 //!
-//! Pre-generation (Voxy World Gen's whole point; the pause menu's `Pregen` button, `Lod::toggle_pregen`): while it is on, the worker
-//! makes the tiles around the player nearest first (`pregen_step` = `DistanceGraph.findWork`: a tile is Voxy's 4 x 4 chunk batch),
-//! each with its trees (generate + populate, the chunk ring's own path) and keeps them on disk (`<world>/lod/`, = `ChunkPersistence`),
-//! so what the LoD shows is a chunk that was generated, not a guess. View builds still go first; the count shown is chunks done.
+//! Missing tiles are asked for before tiles that only lack their trees (Voxy shows a coarse section where a fine one is not ready;
+//! a tile that is not there at all is a hole to the sky), and a tile whose trees are not grown yet is made bare, fast.
 //!
-//! A tree is a box of leaves over its own ground (`Col::leaf`), not a tower from the top leaf down to the lawn: the old top-block-only
-//! column made every tree a pillar with a trunk-coloured wall. A forest cell (a quarter of it under leaves) at a coarse step keeps the
-//! tree mass at the mean crown height, a lone tree on a lawn is dropped (`resolve`).
+//! Pre-generation (Voxy World Gen's `DistanceGraph.findWork`; the pause menu's `Pregen` button, `Lod::toggle_pregen`): while it is
+//! on, the worker makes the tiles around the player nearest first, each with its trees, and keeps them on disk (`<world>/lod/`).
 //!
-//! ponytail: no persistence (the guessed tiles are generated again each run, nearest first; real chunks are ingested again as they are
-//! visited); a cell is one ground block over its whole footprint plus one leaf box, no caves / overhangs / interiors (a wall shows the
-//! blocks under the top one by a depth rule, `wall_block`); a trunk is drawn only at step 1; trees beyond `TREES` blocks of where the
-//! tile was asked for are not grown (a forest there is a lawn); edits far from the player are only seen once their chunk has been
-//! loaded; one worker thread. UNVERIFIED: written without a toolchain (not compiled, not run), nothing measured on a device; the
-//! distances (`step_for`, `TREES`) and the slack values were picked on paper.
+//! ponytail: a column keeps the runs down to `DEPTH` blocks under its ground and is stone below (caves and ravines under the surface
+//! are not in the LoD, only the openings you could see into from outside are lost); plants (flowers, tall grass) are skipped; water
+//! is one sheet at the top of the water (no sides, coloured by the depth over its floor); faces are one quad per voxel face (no
+//! greedy merge: a step-1 tile of a forest is the most expensive); trees beyond `TREES` blocks are not grown (a forest there is a
+//! lawn); one worker thread. UNVERIFIED: written without a toolchain (not compiled, not run), nothing measured on a device; the
+//! distances (`step_for`, `TREES`), the slack values and the mip thresholds were picked on paper.
 
 use crate::gpu::pipeline::{create_index_buffer, create_vertex_buffer, Vertex};
 use crate::render::atlas;
-use crate::render::mesh::{lm, tint_of, Tints, WHITE};
-use crate::world::chunk::{brightness, idx, is_plant, Nibbles};
+use crate::render::mesh::{lm, tint_of, Tints};
+use crate::world::chunk::{brightness, idx, is_plant, opaque, Nibbles};
 use crate::world::chunks::{biome_tints, chunk_coord, in_range, Shape};
 use crate::world::gen::chunk_manager::WorldChunkManager;
-use crate::world::gen::overworld::{OverworldGenerator, SEA_LEVEL};
+use crate::world::gen::overworld::OverworldGenerator;
 use crate::world::gen::populate::Region;
 use glam::Vec3;
 use std::collections::{HashMap, HashSet};
@@ -66,17 +71,20 @@ const TILE: i32 = 64;
 const TREES: f32 = 520.0;
 /// The LoD under the real chunks sits this much lower (and its walls this much inside), so the real surface always wins.
 const EPS: f32 = 0.04;
-/// How far inside the real chunks' range a land cell is cut out (the eye is quantised to 2 blocks: 1.74 at most; the rest is slack
-/// for a chunk that is in range but not meshed yet). Water is a translucent sheet in the real pass, so it is cut closer: a LoD sheet
-/// under it would show through as a second layer of water.
+/// How far inside the real chunks' range a land voxel is cut out (the eye is quantised to 2 blocks: 1.74 at most). Water is a
+/// translucent sheet in the real pass, so it is cut closer: a LoD sheet under it would show through as a second layer of water.
 const LAND_SLACK: f32 = 8.0;
 const WATER_SLACK: f32 = 2.5;
 /// Tiles asked of the worker at once.
 const MAX_PENDING: usize = 2;
-/// The worker keeps this many tiles of columns (~60 KB each), the farthest are dropped past it.
-const KEEP_TILES: usize = 700;
+/// The worker keeps this many tiles of columns (~100 KB each), the farthest are dropped past it. The view needs about 510.
+const KEEP_TILES: usize = 600;
 /// A tile that got real chunks is meshed again this long after the first of them (a burst of chunks costs one rebuild).
 const REMESH_WAIT: Duration = Duration::from_secs(2);
+/// Blocks a column keeps under its ground (the ground block and the three under it); stone (sandstone under sand) below.
+const DEPTH: usize = 4;
+/// The world's height in blocks.
+const HEIGHT: usize = 128;
 
 /// Cell width (blocks) of a tile whose centre is `dist` blocks from the eye.
 fn step_for(dist: f32) -> i32 {
@@ -93,78 +101,55 @@ fn step_for(dist: f32) -> i32 {
     }
 }
 
-/// One block column as the LoD keeps it: the ground you see and the tree over it, if any. `id` 0 = nothing (never in a real column:
-/// bedrock is at the bottom).
-#[derive(Clone, Copy, Default, PartialEq, Debug)]
-pub struct Col {
-    /// The top block that is not air, a plant, water or a tree (ice, snow layer and cactus count).
+const PLAIN: [u8; 3] = [255, 255, 255];
+
+/// A run of equal blocks in a column: y in `y0..y1`, `mesh::tint_of` of them in this column (grass / foliage colour, white
+/// otherwise). Air, plants and (below the ground) everything under `DEPTH` are not kept.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Span {
+    y0: u8,
+    y1: u8,
     id: u8,
-    top: u8,
     meta: u8,
-    /// y of the highest water block above `top`, 0 = no water over it.
-    wtop: u8,
-    /// `mesh::tint_of` of that block in this column (grass / foliage colour, white otherwise).
     tint: [u8; 3],
-    /// A tree over the ground: y of the top face of its highest leaf (0 = no tree), y of its lowest leaf block, the leaves' metadata
-    /// (species) and tint, and whether a trunk stands under them.
-    leaf: u8,
-    lb: u8,
-    lmeta: u8,
-    ltint: [u8; 3],
-    log: bool,
 }
+
+/// One block column as the LoD keeps it: its runs, top first. Empty = nothing (never in a real column: bedrock is at the bottom).
+pub type Col = Vec<Span>;
 
 fn rgb(t: u32) -> [u8; 3] {
     [(t >> 16) as u8, (t >> 8) as u8, t as u8]
 }
 
-/// y of the top face (a snow layer is 1/8 high).
-fn land_h(c: Col) -> f32 {
-    c.top as f32 + if c.id == 78 { 0.125 } else { 1.0 }
-}
-
-/// y of the surface you see: the water's (`BlockFluid.getPercentAir` of a source: 1/9 under the cell's top) or the land's.
-fn surf_h(c: Col) -> f32 {
-    if c.wtop > 0 {
-        c.wtop as f32 + 1.0 - 1.0 / 9.0
-    } else {
-        land_h(c)
-    }
-}
-
-/// The column (x, z) of a chunk's blocks (`(x << 11) | (z << 7) | y`). Leaves seen first make a tree: they are noted and the
-/// trunk and air under them are read through to the ground; a log seen first is an ordinary block (a cabin wall, a stump).
+/// The column (x, z) of a chunk's blocks (`(x << 11) | (z << 7) | y`): every non-air, non-plant block from the top down to
+/// `DEPTH` blocks under the ground (the first opaque block that is not a log or leaves, so a tree's trunk is read through to the
+/// grass under it), as runs. Both kinds of water are one id (9).
 fn column(blocks: &[u8], meta: &Nibbles, tints: &Tints, x: usize, z: usize) -> Col {
     let base = idx(x, 0, z);
-    let mut c = Col::default();
-    for y in (0..128usize).rev() {
-        let b = blocks[base + y];
+    let mut out: Col = Vec::new();
+    let mut ground: Option<usize> = None;
+    for y in (0..HEIGHT).rev() {
+        if ground.is_some_and(|g| y + DEPTH <= g) {
+            break;
+        }
+        let mut b = blocks[base + y];
         if b == 0 || is_plant(b) {
             continue;
         }
-        if b == 8 || b == 9 {
-            if c.wtop == 0 {
-                c.wtop = y as u8;
-            }
-            continue;
+        if b == 8 {
+            b = 9;
         }
-        let m = meta.get(x, y, z);
-        let t = rgb(tint_of(tints, b, m, x * 16 + z) as u32);
-        if b == 18 {
-            if c.leaf == 0 {
-                (c.leaf, c.lmeta, c.ltint) = (y as u8 + 1, m, t);
-            }
-            c.lb = y as u8;
-            continue;
+        let m = meta.get(x, y, z) & 15;
+        let t = if matches!(b, 2 | 18) { rgb(tint_of(tints, b, m, x * 16 + z) as u32) } else { PLAIN };
+        match out.last_mut() {
+            Some(s) if s.y0 as usize == y + 1 && s.id == b && s.meta == m && s.tint == t => s.y0 = y as u8,
+            _ => out.push(Span { y0: y as u8, y1: y as u8 + 1, id: b, meta: m, tint: t }),
         }
-        if b == 17 && c.leaf > 0 {
-            c.log = true;
-            continue;
+        if ground.is_none() && opaque(b) && !matches!(b, 17 | 18) {
+            ground = Some(y);
         }
-        (c.id, c.top, c.meta, c.tint) = (b, y as u8, m, t);
-        return c;
     }
-    Col::default()
+    out
 }
 
 /// The 256 columns of a real chunk (index `x * 16 + z`), for `Lod::ingest`.
@@ -172,64 +157,12 @@ pub fn columns(blocks: &[u8], meta: &Nibbles, tints: &Tints) -> Vec<Col> {
     (0..256).map(|i| column(blocks, meta, tints, i >> 4, i & 15)).collect()
 }
 
-/// The cell of `s` x `s` columns at (x0, z0) of a tile (`Mipper.mip`): of the children take the one whose ground is the highest, so
-/// a peak and a cliff edge stay in the far view. A shore cell that is mostly water and whose land is low stays water (otherwise one
-/// beach block would make a 16 block wide island of every bay). The trees of the cell become one box of leaves at the mean height of
-/// the crowns (standing on the ground) when a quarter of the cell is under leaves (a forest keeps its mass), else none (a lone tree is a lawn at this scale).
-fn resolve(t: &Tile0, x0: usize, z0: usize, s: usize) -> Col {
-    if s == 1 {
-        return t.cols[x0 * 64 + z0];
-    }
-    let (mut best, mut best_h) = (Col::default(), -1.0f32);
-    let (mut wet, mut water) = (Col::default(), 0usize);
-    let (mut crown, mut leaves, mut lsum) = (Col::default(), 0u32, 0u32);
-    for x in x0..x0 + s {
-        for z in z0..z0 + s {
-            let c = t.cols[x * 64 + z];
-            if c.id == 0 {
-                continue;
-            }
-            if c.leaf > 0 {
-                (leaves, lsum) = (leaves + 1, lsum + c.leaf as u32);
-                if c.leaf > crown.leaf {
-                    crown = c;
-                }
-            }
-            if c.wtop > 0 {
-                water += 1;
-                if c.wtop > wet.wtop {
-                    wet = c;
-                }
-            }
-            let h = surf_h(c);
-            if h > best_h {
-                best_h = h;
-                best = c;
-            }
-        }
-    }
-    let ground = |c: Col| Col { leaf: 0, lb: 0, lmeta: 0, ltint: [0; 3], log: false, ..c };
-    if best.wtop == 0 && water * 2 > s * s && land_h(best) < SEA_LEVEL as f32 + 4.0 {
-        return ground(wet);
-    }
-    let mut r = ground(best);
-    if r.wtop == 0 && leaves * 4 >= (s * s) as u32 {
-        // From the ground up: a cell wider than a block has no trunk to float over (a box in the air looked like a bug).
-        let (lt, lb) = ((lsum / leaves) as u8, r.top + 1);
-        if lt > lb {
-            (r.leaf, r.lb, r.lmeta, r.ltint) = (lt, lb, crown.lmeta, crown.ltint);
-        }
-    }
-    r
-}
-
 /// sRGB bytes of the water over its floor, seen from above: the floor (`block_color`) lit by what is left of the sky light under
 /// `depth` blocks of water (3 a block, `Block.lightOpacity`), mixed with the water tile's average colour (47, 67, 244) at its alpha
 /// (138 / 255), in linear light. The real water is a translucent sheet over the real floor in the same way.
-fn water_rgb(c: Col) -> [u8; 3] {
-    let depth = (c.wtop as i32 - c.top as i32).max(1);
-    let br = brightness((15 - 3 * depth).max(0) as u8);
-    let floor = atlas::block_color(c.id);
+fn water_rgb(floor_id: u8, depth: i32) -> [u8; 3] {
+    let br = brightness((15 - 3 * depth.max(1)).max(0) as u8);
+    let floor = atlas::block_color(floor_id);
     let water = [47.0f32, 67.0, 244.0];
     let mix = |f: u8, w: f32| {
         let l = (f as f32 / 255.0).powf(2.2) * br;
@@ -237,20 +170,6 @@ fn water_rgb(c: Col) -> [u8; 3] {
         (o.powf(1.0 / 2.2) * 255.0).round().clamp(0.0, 255.0) as u8
     };
     [mix(floor[0], water[0]), mix(floor[1], water[1]), mix(floor[2], water[2])]
-}
-
-/// The block whose side tile a wall segment `depth` blocks under the cell's top shows: the top block itself first, then what
-/// b1.7.3's surface pass puts under it (dirt under grass, sandstone under sand), stone below.
-fn wall_block(c: Col, depth: f32) -> (u8, u8) {
-    if depth < 0.5 {
-        return (c.id, c.meta);
-    }
-    match c.id {
-        2 | 3 if depth < 4.0 => (3, 0),
-        12 => (if depth < 4.0 { 12 } else { 24 }, 0),
-        13 => (13, 0),
-        _ => (1, 0),
-    }
 }
 
 /// Atlas uv of a block's face tile at (u, v) (v up), the flat colour of the block where it has no tile.
@@ -266,10 +185,43 @@ fn pack(rgb: [u8; 3]) -> f32 {
     ((rgb[0] as u32) << 16 | (rgb[1] as u32) << 8 | rgb[2] as u32) as f32
 }
 
-/// The 64 x 64 columns of one tile (index `x * 64 + z`), and whether its trees were grown.
+/// The 64 x 64 columns of one tile (`start[x * 64 + z]..start[x * 64 + z + 1]` indexes `spans`), and whether its trees were grown.
 struct Tile0 {
-    cols: Vec<Col>,
+    start: Vec<u32>,
+    spans: Vec<Span>,
     trees: bool,
+}
+
+impl Tile0 {
+    fn from_cols(cols: &[Col], trees: bool) -> Self {
+        let mut start = Vec::with_capacity(64 * 64 + 1);
+        let mut spans = Vec::new();
+        for c in cols {
+            start.push(spans.len() as u32);
+            spans.extend_from_slice(c);
+        }
+        start.push(spans.len() as u32);
+        Tile0 { start, spans, trees }
+    }
+
+    fn col(&self, q: usize) -> &[Span] {
+        &self.spans[self.start[q] as usize..self.start[q + 1] as usize]
+    }
+
+    /// Lay the columns of real chunk `k` over its place in this tile.
+    fn put(&mut self, k: (i32, i32), cols: &[Col]) {
+        let (ox, oz) = (k.0.rem_euclid(4) as usize * 16, k.1.rem_euclid(4) as usize * 16);
+        let mut all: Vec<Col> = Vec::with_capacity(64 * 64);
+        for q in 0..64 * 64 {
+            let (x, z) = (q / 64, q % 64);
+            if (ox..ox + 16).contains(&x) && (oz..oz + 16).contains(&z) {
+                all.push(cols[(x - ox) * 16 + (z - oz)].clone());
+            } else {
+                all.push(self.col(q).to_vec());
+            }
+        }
+        *self = Tile0::from_cols(&all, self.trees);
+    }
 }
 
 /// What the worker owns: its own generator (the same world as the chunk ring's) and the columns it has made.
@@ -288,25 +240,21 @@ struct Store {
     done: HashSet<(i32, i32)>,
 }
 
-const MAGIC: [u8; 2] = *b"L2";
+const MAGIC: [u8; 2] = *b"L3";
 
 fn tile_path(d: &Path, k: (i32, i32)) -> PathBuf {
     d.join(format!("{}_{}.lod", k.0, k.1))
 }
 
-/// A tile file: magic, world type, trees, then runs of equal columns (u16 count + the 14 bytes of a `Col`).
+/// A tile file: magic, world type, trees, then per column a run count (u8) and 7 bytes a run (y0, y1, id, meta, tint).
 fn encode(t: &Tile0, tectonic: bool) -> Vec<u8> {
     let mut o = vec![MAGIC[0], MAGIC[1], tectonic as u8, t.trees as u8];
-    let mut i = 0;
-    while i < t.cols.len() {
-        let mut n = 1;
-        while i + n < t.cols.len() && n < 65535 && t.cols[i + n] == t.cols[i] {
-            n += 1;
+    for q in 0..64 * 64 {
+        let c = t.col(q);
+        o.push(c.len() as u8);
+        for s in c {
+            o.extend_from_slice(&[s.y0, s.y1, s.id, s.meta, s.tint[0], s.tint[1], s.tint[2]]);
         }
-        let c = t.cols[i];
-        o.extend_from_slice(&(n as u16).to_le_bytes());
-        o.extend_from_slice(&[c.id, c.top, c.meta, c.wtop, c.tint[0], c.tint[1], c.tint[2], c.leaf, c.lb, c.lmeta, c.ltint[0], c.ltint[1], c.ltint[2], c.log as u8]);
-        i += n;
     }
     o
 }
@@ -316,16 +264,15 @@ fn decode(b: &[u8], tectonic: bool) -> Option<Tile0> {
     if b.len() < 4 || b[..2] != MAGIC[..] || (b[2] != 0) != tectonic {
         return None;
     }
-    let mut cols = Vec::with_capacity(64 * 64);
+    let mut cols: Vec<Col> = Vec::with_capacity(64 * 64);
     let mut p = 4;
-    while p + 16 <= b.len() && cols.len() <= 64 * 64 {
-        let n = u16::from_le_bytes([b[p], b[p + 1]]) as usize;
-        let c = &b[p + 2..p + 16];
-        let col = Col { id: c[0], top: c[1], meta: c[2], wtop: c[3], tint: [c[4], c[5], c[6]], leaf: c[7], lb: c[8], lmeta: c[9], ltint: [c[10], c[11], c[12]], log: c[13] != 0 };
-        cols.extend(std::iter::repeat(col).take(n));
-        p += 16;
+    for _ in 0..64 * 64 {
+        let n = *b.get(p)? as usize;
+        let raw = b.get(p + 1..p + 1 + n * 7)?;
+        cols.push(raw.chunks_exact(7).map(|c| Span { y0: c[0], y1: c[1], id: c[2], meta: c[3], tint: [c[4], c[5], c[6]] }).collect());
+        p += 1 + n * 7;
     }
-    (cols.len() == 64 * 64 && p == b.len()).then(|| Tile0 { cols, trees: b[3] != 0 })
+    (p == b.len()).then(|| Tile0::from_cols(&cols, b[3] != 0))
 }
 
 /// What the render thread and the worker share: the pre-generation switch and its count, and the chunk the player is in.
@@ -335,14 +282,6 @@ struct Shared {
     chunks: AtomicU32,
     cx: AtomicI32,
     cz: AtomicI32,
-}
-
-/// Lay the columns of real chunk `k` over its place in tile `t`.
-fn put(t: &mut Tile0, k: (i32, i32), cols: &[Col]) {
-    let (ox, oz) = (k.0.rem_euclid(4) as usize * 16, k.1.rem_euclid(4) as usize * 16);
-    for x in 0..16 {
-        t.cols[(ox + x) * 64 + oz..(ox + x) * 64 + oz + 16].copy_from_slice(&cols[x * 16..x * 16 + 16]);
-    }
 }
 
 impl Store {
@@ -373,7 +312,7 @@ impl Store {
             for cj in 0..4 {
                 let c = (k.0 * 4 + ci, k.1 * 4 + cj);
                 if let Some(r) = self.real.get(&c) {
-                    put(t, c, r);
+                    t.put(c, r);
                     any = true;
                 }
             }
@@ -385,7 +324,7 @@ impl Store {
     fn ingest(&mut self, k: (i32, i32), cols: Vec<Col>) {
         let tk = (k.0.div_euclid(4), k.1.div_euclid(4));
         if let Some(t) = self.tiles.get_mut(&tk) {
-            put(t, k, &cols);
+            t.put(k, &cols);
             if t.trees {
                 self.dirty.insert(tk);
             }
@@ -445,7 +384,7 @@ impl Store {
                 }
             }
         }
-        let mut cols = vec![Col::default(); 64 * 64];
+        let mut cols: Vec<Col> = vec![Vec::new(); 64 * 64];
         for ci in 0..4usize {
             for cj in 0..4usize {
                 let q = (ci + m) * gn + cj + m;
@@ -457,7 +396,7 @@ impl Store {
                 }
             }
         }
-        Tile0 { cols, trees }
+        Tile0::from_cols(&cols, trees)
     }
 
     /// Drop the tiles farthest from `k` once there are more than `KEEP_TILES`.
@@ -476,14 +415,120 @@ impl Store {
     }
 }
 
-/// The cell of step `s` at global cell (gi, gj), from whatever tile holds it (made bare if missing).
-fn cell_at(store: &mut Store, gi: i32, gj: i32, s: usize) -> Col {
-    let (x, z) = (gi * s as i32, gj * s as i32);
-    let t = store.tile((x.div_euclid(TILE), z.div_euclid(TILE)), false);
-    resolve(t, x.rem_euclid(TILE) as usize, z.rem_euclid(TILE) as usize, s)
+// ---- the voxel grid: a voxel is `id | meta << 8 | tint palette index << 16` (id 0 = air) ----
+
+fn vid(v: u32) -> u8 {
+    v as u8
 }
 
-/// One cell of a tile: where it is (its top block's section decides if the real chunks cover it) and its slice of the indices.
+/// The tints of one build, as an index in the voxel (0 = white, at most 255 distinct: more share the last).
+struct Pal {
+    v: Vec<[u8; 3]>,
+    m: HashMap<[u8; 3], u32>,
+}
+
+impl Pal {
+    fn new() -> Self {
+        Pal { v: vec![PLAIN], m: HashMap::new() }
+    }
+
+    fn get(&mut self, t: [u8; 3]) -> u32 {
+        if t == PLAIN {
+            return 0;
+        }
+        if let Some(&i) = self.m.get(&t) {
+            return i;
+        }
+        if self.v.len() >= 255 {
+            return self.v.len() as u32 - 1;
+        }
+        self.v.push(t);
+        self.m.insert(t, self.v.len() as u32 - 1);
+        self.v.len() as u32 - 1
+    }
+}
+
+/// The dense level-0 grid of tile `key` plus `s` blocks of margin on its four sides, index `(y * w + z) * w + x`, `w = 64 + 2 s`.
+/// Under a column's last run it is stone (sandstone under sand). The 3 x 3 tiles around `key` must exist.
+fn fill(store: &Store, key: (i32, i32), s: usize, pal: &mut Pal) -> Vec<u32> {
+    let w = TILE as usize + 2 * s;
+    let mut g = vec![0u32; w * HEIGHT * w];
+    for rx in 0..w {
+        let wx = key.0 * TILE - s as i32 + rx as i32;
+        let (tx, lx) = (wx.div_euclid(TILE), wx.rem_euclid(TILE) as usize);
+        for rz in 0..w {
+            let wz = key.1 * TILE - s as i32 + rz as i32;
+            let (tz, lz) = (wz.div_euclid(TILE), wz.rem_euclid(TILE) as usize);
+            let col = store.tiles[&(tx, tz)].col(lx * 64 + lz);
+            let Some(last) = col.last() else { continue };
+            let under: u32 = if last.id == 12 { 24 } else { 1 };
+            for y in 0..last.y0 as usize {
+                g[(y * w + rz) * w + rx] = under;
+            }
+            for sp in col {
+                let v = sp.id as u32 | (sp.meta as u32 & 15) << 8 | pal.get(sp.tint) << 16;
+                for y in sp.y0 as usize..sp.y1 as usize {
+                    g[(y * w + rz) * w + rx] = v;
+                }
+            }
+        }
+    }
+    g
+}
+
+/// What a voxel wins with among the children of a mip: solid blocks over leaves over water.
+fn prio(id: u8) -> usize {
+    match id {
+        9 => 1,
+        18 => 2,
+        _ => 3,
+    }
+}
+
+/// `Mipper.mip` for eight children, index `dy << 2 | dz << 1 | dx`: the upper four are looked at first (what you see from above),
+/// then `prio`, then Voxy's own tie-break (the highest index). The cell is air unless enough children are not: leaves and logs
+/// are kept from one child, everything else from half of them (see the module doc).
+fn pick(k: &[u32; 8]) -> u32 {
+    let (mut n, mut best, mut key) = (0, 0u32, 0usize);
+    for (q, &v) in k.iter().enumerate() {
+        let id = vid(v);
+        if id == 0 {
+            continue;
+        }
+        n += 1;
+        let kq = (q >> 2) * 1000 + prio(id) * 8 + q;
+        if kq >= key {
+            (best, key) = (v, kq);
+        }
+    }
+    let need = if matches!(vid(best), 17 | 18) { 1 } else { 4 };
+    if n >= need && n > 0 {
+        best
+    } else {
+        0
+    }
+}
+
+/// One mip level: a grid `w` x `h` x `w` becomes `w / 2` x `h / 2` x `w / 2`.
+fn mip(src: &[u32], w: usize, h: usize) -> Vec<u32> {
+    let (w2, h2) = (w / 2, h / 2);
+    let mut out = vec![0u32; w2 * h2 * w2];
+    for y in 0..h2 {
+        for z in 0..w2 {
+            for x in 0..w2 {
+                let mut k = [0u32; 8];
+                for (q, c) in k.iter_mut().enumerate() {
+                    let (dx, dz, dy) = (q & 1, (q >> 1) & 1, q >> 2);
+                    *c = src[((y * 2 + dy) * w + z * 2 + dz) * w + x * 2 + dx];
+                }
+                out[(y * w2 + z) * w2 + x] = pick(&k);
+            }
+        }
+    }
+    out
+}
+
+/// One voxel's place in the view: where it is (its section decides if the real chunks cover it) and its slice of the indices.
 struct Cell {
     x: i32,
     y: i32,
@@ -493,7 +538,7 @@ struct Cell {
     i1: u32,
 }
 
-/// What the worker hands back: a tile's vertices, indices (cell after cell) and cells.
+/// What the worker hands back: a tile's vertices, indices (voxel after voxel) and cells.
 struct Built {
     key: (i32, i32),
     step: i32,
@@ -517,10 +562,33 @@ impl Quads {
         }
         self.idx.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
     }
+
+    /// A face looking up (`top`) or down at height `y`, over the square at (x0, z0) of side `sf`, with the block's tile.
+    #[allow(clippy::too_many_arguments)]
+    fn flat(&mut self, top: bool, x0: f32, z0: f32, sf: f32, y: f32, id: u8, meta: u8, tint: f32) {
+        let (x1, z1) = (x0 + sf, z0 + sf);
+        let uv = |u: f32, v: f32| face_uv(id, meta, if top { 1 } else { 0 }, u, v);
+        let uvs = [uv(0.0, 0.0), uv(1.0, 0.0), uv(1.0, 1.0), uv(0.0, 1.0)];
+        if top {
+            self.quad([[x0, y, z1], [x1, y, z1], [x1, y, z0], [x0, y, z0]], uvs, 1.0, tint);
+        } else {
+            self.quad([[x0, y, z0], [x1, y, z0], [x1, y, z1], [x0, y, z1]], uvs, 0.5, tint);
+        }
+    }
+
+    /// A wall of the voxel at (x0, z0) facing `side`, from `yb` to `yt`, `EPS` inside the voxel; `v0` is where the tile starts (a
+    /// 1/8 high snow layer shows the top eighth).
+    #[allow(clippy::too_many_arguments)]
+    fn wall(&mut self, side: Side, x0: f32, z0: f32, sf: f32, yt: f32, yb: f32, v0: f32, id: u8, meta: u8, tint: f32) {
+        let ((di, dj), tile, shade, corners) = side;
+        let p = corners.map(|cn| [x0 + cn[0] * sf - EPS * di as f32, if cn[1] > 0.5 { yt } else { yb }, z0 + cn[2] * sf - EPS * dj as f32]);
+        let uv = [face_uv(id, meta, tile, 0.0, v0), face_uv(id, meta, tile, 1.0, v0), face_uv(id, meta, tile, 1.0, 1.0), face_uv(id, meta, tile, 0.0, 1.0)];
+        self.quad(p, uv, shade, tint);
+    }
 }
 
-/// The four sides, in the order of `render::mesh::FACES`' +X, -X, +Z, -Z: the neighbour cell, the side index of `terrain_tile`, the face
-/// shade (X 0.6, Z 0.8), the face's unit corners (bottom-left, bottom-right, top-right, top-left seen from outside).
+/// The four sides, in the order of `render::mesh::FACES`' +X, -X, +Z, -Z: the neighbour's offset, the side index of `terrain_tile`, the
+/// face shade (X 0.6, Z 0.8), the face's unit corners (bottom-left, bottom-right, top-right, top-left seen from outside).
 type Side = ((i32, i32), u8, f32, [[f32; 3]; 4]);
 const SIDES: [Side; 4] = [
     ((1, 0), 5, 0.6, [[1.0, 0.0, 1.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [1.0, 1.0, 1.0]]),
@@ -529,135 +597,125 @@ const SIDES: [Side; 4] = [
     ((0, -1), 2, 0.8, [[1.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [1.0, 1.0, 0.0]]),
 ];
 
-/// A wall of the cell at (x0, z0) facing `side`, from `yt` down to `yb`, in segments one cell tall (a tile is mapped once per `step`
-/// blocks, so a taller quad would run off its tile in the atlas); `block(depth)` = block, metadata and tint of the segment `depth`
-/// under `yt`. The wall sits `EPS` inside its cell.
-#[allow(clippy::too_many_arguments)]
-fn wall(q: &mut Quads, side: Side, x0: f32, z0: f32, sf: f32, yt: f32, yb: f32, block: impl Fn(f32) -> (u8, u8, f32)) {
-    let ((di, dj), tile, shade, corners) = side;
-    let mut k = 0;
-    loop {
-        let (st, sb) = (yt - k as f32 * sf, (yt - (k + 1) as f32 * sf).max(yb));
-        if st <= yb + 0.001 || k > 140 {
-            break;
-        }
-        let (id, meta, tint) = block(k as f32 * sf);
-        let v0 = 1.0 - (st - sb) / sf;
-        let p = corners.map(|cn| [x0 + cn[0] * sf - EPS * di as f32, if cn[1] > 0.5 { st } else { sb }, z0 + cn[2] * sf - EPS * dj as f32]);
-        let uv = [face_uv(id, meta, tile, 0.0, v0), face_uv(id, meta, tile, 1.0, v0), face_uv(id, meta, tile, 1.0, 1.0), face_uv(id, meta, tile, 0.0, 1.0)];
-        q.quad(p, uv, shade, tint);
-        k += 1;
-    }
+/// Does a voxel hide the faces behind it? Opaque blocks do (leaves too: the real mesher draws them as cubes); a snow layer is a
+/// full block from step 2 on.
+fn opq(id: u8, s: usize) -> bool {
+    opaque(id) || (s > 1 && id == 78)
 }
 
-/// The mesh of tile `key` with a cell every `step` blocks.
+/// The mesh of tile `key` with a voxel every `step` blocks.
 fn build(store: &mut Store, key: (i32, i32), step: i32, trees: bool) -> Built {
     let s = step as usize;
     let n = TILE as usize / s;
     let trees = store.tile(key, trees).trees;
-    let grid: Vec<Col> = {
-        let t = &store.tiles[&key];
-        (0..n * n).map(|q| resolve(t, q / n * s, q % n * s, s)).collect()
-    };
-    // The cells just outside the tile, for the walls that face it.
-    let (gi0, gj0) = (key.0 * n as i32, key.1 * n as i32);
-    let mut ring: [Vec<Col>; 4] = [Vec::new(), Vec::new(), Vec::new(), Vec::new()]; // +X, -X, +Z, -Z
-    for q in 0..n as i32 {
-        ring[0].push(cell_at(store, gi0 + n as i32, gj0 + q, s));
-        ring[1].push(cell_at(store, gi0 - 1, gj0 + q, s));
-        ring[2].push(cell_at(store, gi0 + q, gj0 + n as i32, s));
-        ring[3].push(cell_at(store, gi0 + q, gj0 - 1, s));
+    for dx in -1..=1 {
+        for dz in -1..=1 {
+            if (dx, dz) != (0, 0) {
+                store.tile((key.0 + dx, key.1 + dz), false); // bare is enough for the margin
+            }
+        }
     }
-    let nb = |i: i32, j: i32| -> (Col, bool) {
-        let n = n as i32;
-        if i >= n {
-            (ring[0][j as usize], true)
-        } else if i < 0 {
-            (ring[1][j as usize], true)
-        } else if j >= n {
-            (ring[2][i as usize], true)
-        } else if j < 0 {
-            (ring[3][i as usize], true)
+    let mut pal = Pal::new();
+    let mut g = fill(store, key, s, &mut pal);
+    let (mut w, mut h) = (TILE as usize + 2 * s, HEIGHT);
+    let mut lv = 1;
+    while lv < s {
+        g = mip(&g, w, h);
+        (w, h, lv) = (w / 2, h / 2, lv * 2);
+    }
+    // Now `w == n + 2` (a voxel of margin on each side) and `h == HEIGHT / s`; the tile's voxels are 1..=n.
+    let at = |i: usize, k: i32, j: usize| -> u32 {
+        if k < 0 {
+            1 // below the world: solid, no faces down there
+        } else if k as usize >= h {
+            0
         } else {
-            (grid[(i * n + j) as usize], false)
+            g[(k as usize * w + j) * w + i]
         }
     };
     let sf = s as f32;
     // A wall on a tile's edge hangs deeper: the neighbouring tile may be coarser, and its surface then differs from the one this
-    // side measured (the old LoD's skirt, as part of the wall).
+    // side measured.
     let skirt = (2 * step).clamp(2, 32) as f32;
     let mut q = Quads { verts: Vec::new(), idx: Vec::new() };
-    let mut cells = Vec::with_capacity(n * n);
-    for i in 0..n {
-        for j in 0..n {
-            let c = grid[i * n + j];
-            if c.id == 0 {
-                continue;
-            }
-            let (x0, z0) = ((key.0 * TILE) as f32 + (i * s) as f32, (key.1 * TILE) as f32 + (j * s) as f32);
-            let (x1, z1) = (x0 + sf, z0 + sf);
-            let i0 = q.idx.len() as u32;
-            let water = c.wtop > 0;
-            if water {
-                let y = surf_h(c) - EPS;
-                let uv = atlas::atlas_uv(80, 0.0, 0.0); // the snow block's flat texel: white, so the tint is the colour
-                q.quad([[x0, y, z1], [x1, y, z1], [x1, y, z0], [x0, y, z0]], [[uv.0, uv.1]; 4], 1.0, pack(water_rgb(c)));
-            } else {
-                let h = land_h(c);
-                let y = h - EPS;
-                let uv = |u: f32, v: f32| face_uv(c.id, c.meta, 1, u, v);
-                q.quad([[x0, y, z1], [x1, y, z1], [x1, y, z0], [x0, y, z0]], [uv(0.0, 0.0), uv(1.0, 0.0), uv(1.0, 1.0), uv(0.0, 1.0)], 1.0, pack(c.tint));
-                for side in SIDES {
-                    let ((di, dj), ..) = side;
-                    let (o, edge) = nb(i as i32 + di, j as i32 + dj);
-                    let low = if o.id == 0 { h } else { surf_h(o) };
-                    let bottom = if edge { low.min(h) - skirt } else { low };
-                    if bottom >= h - 0.01 {
-                        continue;
-                    }
-                    // Down the wall: the top block's side first, what is under it below.
-                    wall(&mut q, side, x0, z0, sf, h - EPS, bottom - EPS - 0.3, |d| {
-                        let (id, meta) = wall_block(c, d);
-                        (id, meta, if id == c.id { pack(c.tint) } else { WHITE })
-                    });
+    let mut cells: Vec<Cell> = Vec::new();
+    for gi in 1..=n {
+        for gj in 1..=n {
+            let (x0, z0) = ((key.0 * TILE) as f32 + ((gi - 1) * s) as f32, (key.1 * TILE) as f32 + ((gj - 1) * s) as f32);
+            for k in 0..h {
+                let v = g[(k * w + gj) * w + gi];
+                let id = vid(v);
+                if id == 0 {
+                    continue;
                 }
-                if c.leaf > c.lb {
-                    // The tree over this ground: a box of leaves from its lowest leaf to its top face (the part of a side the neighbouring
-                    // crown already hides is left out), on a trunk at step 1.
-                    let (lt, lb) = (c.leaf as f32, c.lb as f32);
-                    let lf = |u: f32, v: f32| face_uv(18, c.lmeta, 1, u, v);
-                    let (y, yb) = (lt - EPS, lb + EPS);
-                    q.quad([[x0, y, z1], [x1, y, z1], [x1, y, z0], [x0, y, z0]], [lf(0.0, 0.0), lf(1.0, 0.0), lf(1.0, 1.0), lf(0.0, 1.0)], 1.0, pack(c.ltint));
-                    q.quad([[x0, yb, z0], [x1, yb, z0], [x1, yb, z1], [x0, yb, z1]], [lf(0.0, 0.0), lf(1.0, 0.0), lf(1.0, 1.0), lf(0.0, 1.0)], 0.5, pack(c.ltint));
+                let ki = k as i32;
+                let y0 = (k * s) as f32;
+                let i0 = q.idx.len() as u32;
+                if id == 9 {
+                    // Water: one sheet on the top voxel, coloured by what is under it.
+                    let up = vid(at(gi, ki + 1, gj));
+                    if up != 9 && !opq(up, s) {
+                        let (mut d, mut kk) = (1, ki - 1);
+                        while kk >= 0 && vid(at(gi, kk, gj)) == 9 {
+                            (d, kk) = (d + 1, kk - 1);
+                        }
+                        let floor = if kk >= 0 { vid(at(gi, kk, gj)) } else { 1 };
+                        let y = y0 + sf - 1.0 / 9.0 - EPS;
+                        let uv = atlas::atlas_uv(80, 0.0, 0.0); // the snow block's flat texel: white, so the tint is the colour
+                        let (x1, z1) = (x0 + sf, z0 + sf);
+                        q.quad([[x0, y, z1], [x1, y, z1], [x1, y, z0], [x0, y, z0]], [[uv.0, uv.1]; 4], 1.0, pack(water_rgb(floor, d * s as i32)));
+                    }
+                } else {
+                    let meta = ((v >> 8) & 15) as u8;
+                    let tint = pack(pal.v[(v >> 16) as usize]);
+                    let hgt = if id == 78 && s == 1 { 0.125 } else { sf };
+                    let nb = |di: i32, dk: i32, dj: i32| vid(at((gi as i32 + di) as usize, ki + dk, (gj as i32 + dj) as usize));
+                    // A face is hidden by an opaque neighbour, by water (its sheet is drawn instead) and by the same block (glass, ice).
+                    let hide = |o: u8| o != 0 && (o == 9 || opq(o, s) || o == id);
+                    if !hide(nb(0, 1, 0)) {
+                        q.flat(true, x0, z0, sf, y0 + hgt - EPS, id, meta, tint);
+                    }
+                    if !hide(nb(0, -1, 0)) {
+                        q.flat(false, x0, z0, sf, y0 + EPS, id, meta, if id == 2 { pack(PLAIN) } else { tint });
+                    }
                     for side in SIDES {
                         let ((di, dj), ..) = side;
-                        let (o, _) = nb(i as i32 + di, j as i32 + dj);
-                        let (ob, ot) = if o.leaf > o.lb { (o.lb as f32, o.leaf as f32) } else { (lt, lt) };
-                        let leaf = |_: f32| (18, c.lmeta, pack(c.ltint));
-                        wall(&mut q, side, x0, z0, sf, lt.min(ob) - EPS, yb, leaf);
-                        wall(&mut q, side, x0, z0, sf, y, lb.max(ot) + EPS, leaf);
-                        if step == 1 && c.log {
-                            wall(&mut q, side, x0, z0, sf, lb, h - EPS, |_| (17, c.lmeta & 3, WHITE));
+                        if hide(nb(di, 0, dj)) {
+                            continue;
+                        }
+                        q.wall(side, x0, z0, sf, y0 + hgt - EPS, y0 + EPS, 1.0 - hgt / sf, id, meta, tint);
+                        let edge = (di == -1 && gi == 1) || (di == 1 && gi == n) || (dj == -1 && gj == 1) || (dj == 1 && gj == n);
+                        // The skirt hangs from the lowest exposed voxel of the face, through the solid ground under it.
+                        if edge && ki > 0 && opq(nb(0, -1, 0), s) && opq(nb(di, -1, dj), s) {
+                            q.wall(side, x0, z0, sf, y0 + EPS, y0 - skirt, 0.0, 1, 0, pack(PLAIN));
                         }
                     }
                 }
+                let i1 = q.idx.len() as u32;
+                if i1 > i0 {
+                    let (cx, cy, cz, wet) = (x0 as i32, (k * s) as i32, z0 as i32, id == 9);
+                    match cells.last_mut() {
+                        Some(c) if (c.x, c.z, c.y >> 4, c.water) == (cx, cz, cy >> 4, wet) && c.i1 == i0 => c.i1 = i1,
+                        _ => cells.push(Cell { x: cx, y: cy, z: cz, water: wet, i0, i1 }),
+                    }
+                }
             }
-            cells.push(Cell { x: x0 as i32, y: c.top.max(c.wtop).max(c.leaf) as i32, z: z0 as i32, water, i0, i1: q.idx.len() as u32 });
         }
     }
     Built { key, step, trees, verts: q.verts, idx: q.idx, cells }
 }
 
 /// Which cells the real chunks cover around `eye` = (position, range, vertical range): the same `in_range` test as
-/// `ChunkManager::update_visible`, on the section of the cell's top block, made smaller by the slack.
-fn covered(cells: &[Cell], eye: Option<(Vec3, f32, f32)>) -> Vec<bool> {
+/// `ChunkManager::update_visible` on the section of the cell, made smaller by the slack, and only where that chunk has a mesh
+/// (`drawn`): a chunk that is in range but still generating or meshing leaves the LoD in place instead of a hole.
+fn covered(cells: &[Cell], eye: Option<(Vec3, f32, f32)>, drawn: &dyn Fn(i32, i32) -> bool) -> Vec<bool> {
     let Some((e, rh, rv)) = eye else { return vec![false; cells.len()] };
     cells
         .iter()
         .map(|c| {
             let slack = if c.water { WATER_SLACK } else { LAND_SLACK };
             let min = Vec3::new((c.x >> 4) as f32 * 16.0, (c.y >> 4) as f32 * 16.0 - 1.0, (c.z >> 4) as f32 * 16.0);
-            in_range(Shape::Sphere, e, min, min + Vec3::new(16.0, 18.0, 16.0), rh - slack, rv - 2.0)
+            in_range(Shape::Sphere, e, min, min + Vec3::new(16.0, 18.0, 16.0), rh - slack, rv - 2.0) && drawn(c.x >> 4, c.z >> 4)
         })
         .collect()
 }
@@ -692,6 +750,8 @@ struct Tile {
     all: Vec<u32>,
     /// `quant(eye)` the cut was last worked out for, None = no cut.
     hole: Option<(i32, i32, i32)>,
+    /// `ChunkManager::mesh_gen` the cut was last worked out for: a chunk mesh landing or leaving changes what is covered.
+    gen: u32,
     /// The cells the index buffer leaves out (`covered`): it is made again only when this changes, not at every step of the eye.
     cov: Vec<bool>,
     /// Not cut yet.
@@ -699,8 +759,8 @@ struct Tile {
 }
 
 impl Tile {
-    fn cut(&mut self, device: &wgpu::Device, eye: Option<((i32, i32, i32), f32, f32)>) {
-        let cov = covered(&self.cells, eye.map(|(q, rh, rv)| (quant_eye(q), rh, rv)));
+    fn cut(&mut self, device: &wgpu::Device, eye: Option<((i32, i32, i32), f32, f32)>, gen: u32, drawn: &dyn Fn(i32, i32) -> bool) {
+        let cov = covered(&self.cells, eye.map(|(q, rh, rv)| (quant_eye(q), rh, rv)), drawn);
         if self.stale || cov != self.cov {
             let idx = gather(&self.cells, &self.all, &cov);
             self.index_count = idx.len() as u32;
@@ -708,6 +768,7 @@ impl Tile {
             self.cov = cov;
         }
         self.hole = eye.map(|e| e.0);
+        self.gen = gen;
         self.stale = false;
     }
 }
@@ -847,11 +908,12 @@ impl Lod {
     /// Once per frame: take the finished tiles, ask for the missing or wrongly detailed ones nearest the eye first, drop the far ones,
     /// recut where the real chunks (`rh` blocks wide, `rv` tall around the eye) are drawn, and list the tiles `in_frustum` (a test
     /// of a world-space box) lets through.
-    pub fn update(&mut self, device: &wgpu::Device, eye: Vec3, rh: f32, rv: f32, in_frustum: impl Fn(Vec3, Vec3) -> bool) {
+    #[allow(clippy::too_many_arguments)]
+    pub fn update(&mut self, device: &wgpu::Device, eye: Vec3, rh: f32, rv: f32, gen: u32, drawn: impl Fn(i32, i32) -> bool, in_frustum: impl Fn(Vec3, Vec3) -> bool) {
         while let Ok(b) = self.rx.try_recv() {
             self.pending.remove(&b.key);
             let vbuf = create_vertex_buffer(device, &b.verts);
-            let t = Tile { step: b.step, trees: b.trees, vbuf, ibuf: None, index_count: 0, cells: b.cells, all: b.idx, hole: None, cov: Vec::new(), stale: true };
+            let t = Tile { step: b.step, trees: b.trees, vbuf, ibuf: None, index_count: 0, cells: b.cells, all: b.idx, hole: None, gen: 0, cov: Vec::new(), stale: true };
             self.tiles.insert(b.key, t);
         }
         self.sh.cx.store(chunk_coord(eye.x), Relaxed);
@@ -869,7 +931,7 @@ impl Lod {
             let (cx, cz) = centre(k);
             ((cx - eye.x).powi(2) + (cz - eye.z).powi(2)).sqrt()
         };
-        let mut want: Vec<(f32, (i32, i32), i32, bool)> = Vec::new();
+        let mut want: Vec<(bool, f32, (i32, i32), i32, bool)> = Vec::new();
         let (x0, x1) = (((eye.x - r) / ts).floor() as i32, ((eye.x + r) / ts).floor() as i32);
         let (z0, z1) = (((eye.z - r) / ts).floor() as i32, ((eye.z + r) / ts).floor() as i32);
         for tx in x0..=x1 {
@@ -879,17 +941,19 @@ impl Lod {
                 if d > r || self.pending.contains(&k) {
                     continue;
                 }
-                let (step, trees) = (step_for(d), d < TREES);
+                // A tile that is not there yet is made bare (fast); its trees come when nothing is missing.
+                let (step, trees) = (step_for(d), d < TREES && self.tiles.contains_key(&k));
                 // Finer when it should be; coarser (to give the memory back) only when it is 4x too fine, so a tile at a boundary
                 // does not flip.
                 let fresh = self.dirty.get(&k).is_some_and(|t| t.elapsed() >= REMESH_WAIT);
                 if self.tiles.get(&k).map_or(true, |t| fresh || t.step > step || t.step * 2 < step || (trees && !t.trees)) {
-                    want.push((d, k, step, trees));
+                    want.push((self.tiles.contains_key(&k), d, k, step, trees));
                 }
             }
         }
-        want.sort_by(|a, b| a.0.total_cmp(&b.0));
-        for (_, k, step, trees) in want {
+        // A tile that is not there at all is a hole to the sky: those first, nearest first, then the ones that only change.
+        want.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
+        for (_, _, k, step, trees) in want {
             if self.pending.len() >= MAX_PENDING {
                 break;
             }
@@ -906,8 +970,8 @@ impl Lod {
         for (&k, t) in self.tiles.iter_mut() {
             let near = dist(k) < rh + ts;
             let want = near.then_some(q);
-            if t.stale || t.hole != want {
-                t.cut(device, want.map(|q| (q, rh, rv)));
+            if t.stale || t.hole != want || (near && t.gen != gen) {
+                t.cut(device, want.map(|q| (q, rh, rv)), gen, &drawn);
             }
         }
         self.visible.clear();
@@ -936,114 +1000,139 @@ mod tests {
     use super::*;
     use crate::world::chunk::VOLUME;
 
+    fn sp(y0: u8, y1: u8, id: u8) -> Span {
+        Span { y0, y1, id, meta: 0, tint: if id == 2 || id == 18 { [100, 200, 80] } else { PLAIN } }
+    }
+
     fn tile_of(f: impl Fn(usize, usize) -> Col) -> Tile0 {
-        Tile0 { cols: (0..64 * 64).map(|q| f(q / 64, q % 64)).collect(), trees: false }
+        let cols: Vec<Col> = (0..64 * 64).map(|q| f(q / 64, q % 64)).collect();
+        Tile0::from_cols(&cols, false)
     }
 
+    /// Grass on dirt, the grass block at y = `top`.
     fn land(top: u8) -> Col {
-        Col { id: 2, top, tint: [100, 200, 80], ..Col::default() }
-    }
-
-    fn sea(floor: u8) -> Col {
-        Col { id: 12, top: floor, wtop: 63, tint: [255, 255, 255], ..Col::default() }
-    }
-
-    fn tree(c: Col) -> Col {
-        Col { leaf: c.top + 8, lb: c.top + 4, lmeta: 0, ltint: [40, 120, 40], log: true, ..c }
+        vec![sp(top, top + 1, 2), sp(top - 3, top, 3)]
     }
 
     fn store() -> Store {
         Store::new(OverworldGenerator::new(0xCAFEBABE), WorldChunkManager::new(0xCAFEBABE), None, false)
     }
 
-    /// A column reads past plants to the top block, and the water over a floor is kept apart from it.
+    /// A store whose 3 x 3 tiles around (0, 0) are `f`.
+    fn store_of(f: impl Fn(usize, usize) -> Col) -> Store {
+        let mut st = store();
+        for dx in -1..=1 {
+            for dz in -1..=1 {
+                st.tiles.insert((dx, dz), tile_of(&f));
+            }
+        }
+        st
+    }
+
+    fn quads(b: &Built) -> usize {
+        b.idx.len() / 6
+    }
+
+    fn top(b: &Built) -> f32 {
+        b.verts.iter().map(|v| v.pos[1]).fold(f32::MIN, f32::max)
+    }
+
+    /// A column keeps the runs down to `DEPTH` under the ground, reads a trunk through to the grass, skips plants and merges water.
     #[test]
-    fn a_column_is_its_top_block_and_the_water_over_it() {
+    fn a_column_is_runs_down_to_the_ground() {
         let (mut b, d, t) = (vec![0u8; VOLUME], Nibbles::new(), Tints::white());
         let base = idx(3, 0, 4);
         (0..=60).for_each(|y| b[base + y] = 1);
-        (61..=63).for_each(|y| b[base + y] = 9);
+        (61..=62).for_each(|y| b[base + y] = 8);
+        b[base + 63] = 9;
         b[base + 64] = 31; // tall grass: not a surface
         let c = column(&b, &d, &t, 3, 4);
-        assert_eq!((c.id, c.top, c.wtop), (1, 60, 63));
-        assert_eq!(column(&b, &d, &t, 0, 0), Col::default());
-    }
-
-    /// Leaves seen first are a tree over its ground (the trunk is read through, the lowest leaf and the top face are kept); a log seen
-    /// first is a plain block.
-    #[test]
-    fn a_tree_is_leaves_over_its_own_ground() {
-        let (mut b, d, t) = (vec![0u8; VOLUME], Nibbles::new(), Tints::white());
+        let ids: Vec<_> = c.iter().map(|s| (s.id, s.y0, s.y1)).collect();
+        assert_eq!(ids, vec![(9, 61, 64), (1, 57, 61)], "water is one run, then the floor down to DEPTH blocks");
+        assert!(column(&b, &d, &t, 0, 0).is_empty());
         let base = idx(2, 0, 9);
         (0..=63).for_each(|y| b[base + y] = if y == 63 { 2 } else { 3 });
         (64..=65).for_each(|y| b[base + y] = 17);
-        (66..=68).for_each(|y| b[base + y] = 18);
+        (68..=70).for_each(|y| b[base + y] = 18); // a gap of air between trunk and crown
         let c = column(&b, &d, &t, 2, 9);
-        assert_eq!((c.id, c.top, c.leaf, c.lb, c.log, c.wtop), (2, 63, 69, 66, true, 0));
-        (66..=68).for_each(|y| b[base + y] = 0);
-        let c = column(&b, &d, &t, 2, 9);
-        assert_eq!((c.id, c.top, c.leaf, c.log), (17, 65, 0, false));
+        let ids: Vec<_> = c.iter().map(|s| (s.id, s.y0, s.y1)).collect();
+        assert_eq!(ids, vec![(18, 68, 71), (17, 64, 66), (2, 63, 64), (3, 60, 63)], "crown, trunk and the grass under it");
     }
 
-    /// `Mipper.mip`: the highest child wins (a tree top over the lawn), and a bay with one beach block in it stays water.
+    /// `Mipper.mip`: the upper children win, a lone block of terrain in the air is dropped, half of them keep it, a lone leaf stays.
     #[test]
-    fn a_cell_keeps_the_highest_child_and_a_bay_stays_water() {
-        let t = tile_of(|x, z| if (x, z) == (1, 1) { land(90) } else { land(70) });
-        assert_eq!(resolve(&t, 0, 0, 4).top, 90);
-        // A forest cell (half of it under leaves) keeps its tree mass; one tree on a lawn is not worth a 4 block wide box.
-        let t = tile_of(|x, z| if x < 2 { tree(land(70)) } else { land(70) });
-        let c = resolve(&t, 0, 0, 4);
-        assert_eq!((c.top, c.leaf, c.lb), (70, 78, 71), "the mass stands on the ground");
-        let t = tile_of(|x, z| if (x, z) == (1, 1) { tree(land(70)) } else { land(70) });
-        assert_eq!(resolve(&t, 0, 0, 4).leaf, 0);
-        let t = tile_of(|x, z| if (x, z) == (1, 1) { land(64) } else { sea(40) });
-        let c = resolve(&t, 0, 0, 4);
-        assert!(c.wtop > 0, "one low beach block does not make an island of a 4 x 4 cell");
-        let t = tile_of(|x, _| if x < 2 { sea(40) } else { land(64) });
-        assert_eq!(resolve(&t, 0, 0, 4).wtop, 0, "half land is land");
+    fn a_mip_rounds_terrain_and_keeps_leaves() {
+        let (stone, leaf, water) = (1u32, 18u32, 9u32);
+        assert_eq!(pick(&[0; 8]), 0);
+        assert_eq!(pick(&[stone, 0, 0, 0, 0, 0, 0, 0]), 0, "one block of eight is noise");
+        assert_eq!(pick(&[stone, stone, stone, stone, 0, 0, 0, 0]), stone, "the lower half solid is solid");
+        assert_eq!(pick(&[0, 0, 0, 0, stone, stone, stone, stone]), stone);
+        assert_eq!(pick(&[stone, stone, stone, stone, leaf, 0, 0, 0]), leaf, "a crown over the ground wins");
+        assert_eq!(pick(&[0, 0, 0, 0, leaf, 0, 0, 0]), leaf, "a lone leaf stays: a forest keeps its canopy");
+        assert_eq!(pick(&[stone, stone, stone, stone, water, water, water, water]), water, "water over its floor");
+    }
+
+    /// Flat ground meshes to its tops only: no phantom walls, no faces inside the ground, nothing at the tile's edge.
+    #[test]
+    fn flat_ground_is_tops_only() {
+        let mut st = store_of(|_, _| land(70));
+        let b = build(&mut st, (0, 0), 1, false);
+        assert_eq!(quads(&b), 64 * 64);
+        assert!((top(&b) - (71.0 - EPS)).abs() < 1e-4);
+        assert!(b.idx.iter().all(|&i| (i as usize) < b.verts.len()));
+        // At step 2 the surface (top of block 70) rounds to the step: half of the voxel [70, 72) is solid, so it is solid.
+        let b = build(&mut st, (0, 0), 2, false);
+        assert_eq!(quads(&b), 32 * 32);
+        assert!((top(&b) - (72.0 - EPS)).abs() < 1e-4, "got {}", top(&b));
+    }
+
+    /// A tree on flat ground is a trunk and a crown of real voxels, not a tower from the crown down to the lawn: exactly the faces
+    /// a real chunk would draw, and nothing rises above the crown.
+    #[test]
+    fn a_tree_is_a_trunk_and_a_crown() {
+        let mut st = store_of(|x, z| if (x, z) == (10, 10) { vec![sp(74, 77, 18), sp(71, 74, 17), sp(70, 71, 2), sp(67, 70, 3)] } else { land(70) });
+        let b = build(&mut st, (0, 0), 1, false);
+        // the lawn minus the cell under the trunk, 12 trunk sides, 12 crown sides, the crown's top (trunk top / crown bottom are hidden)
+        assert_eq!(quads(&b), 4095 + 12 + 12 + 1);
+        assert!((top(&b) - (77.0 - EPS)).abs() < 1e-4);
+        assert!(b.cells.iter().any(|c| (c.x, c.z) == (10, 10) && c.y >> 4 == 4), "the crown (y 74..77) is in section 4");
+    }
+
+    /// The cut takes only what the chunk ring covers AND has a mesh for, so a chunk still being built leaves the LoD in place.
+    #[test]
+    fn the_cut_waits_for_the_real_mesh() {
+        let mut st = store_of(|_, _| land(70));
+        let b = build(&mut st, (0, 0), 1, false);
+        let eye = Some((Vec3::new(32.0, 80.0, 32.0), 64.0, 48.0));
+        let all = |_: i32, _: i32| true;
+        let none = |_: i32, _: i32| false;
+        let cut = gather(&b.cells, &b.idx, &covered(&b.cells, eye, &all));
+        assert!(cut.len() < b.idx.len(), "cells under the ring are dropped");
+        assert_eq!(gather(&b.cells, &b.idx, &covered(&b.cells, eye, &none)).len(), b.idx.len(), "no mesh, no hole");
+        let only = |cx: i32, cz: i32| (cx, cz) == (2, 2);
+        let some = gather(&b.cells, &b.idx, &covered(&b.cells, eye, &only)).len();
+        assert!(some > cut.len() && some < b.idx.len(), "one meshed chunk is one hole");
+        let far = Some((Vec3::new(1000.0, 80.0, 1000.0), 64.0, 48.0));
+        assert_eq!(gather(&b.cells, &b.idx, &covered(&b.cells, far, &all)).len(), b.idx.len(), "an eye far away drops nothing");
     }
 
     /// Deeper water is darker and bluer-greyer than a shallow sheet over the same sand.
     #[test]
     fn water_is_darker_the_deeper_it_is() {
-        let shallow = water_rgb(Col { id: 12, top: 61, wtop: 63, ..Col::default() });
-        let deep = water_rgb(Col { id: 12, top: 30, wtop: 63, ..Col::default() });
+        let (shallow, deep) = (water_rgb(12, 2), water_rgb(12, 30));
         assert!(deep[0] < shallow[0] && deep[1] < shallow[1], "{shallow:?} vs {deep:?}");
         assert!(shallow[2] > shallow[0], "water is blue");
     }
 
-    /// A real tile at step 8: every index in range, the surface inside the world, walls where the ground steps, and the cut takes the cells
-    /// the chunk ring covers and nothing else.
+    /// A real tile at step 8: every index in range, the surface inside the world, cells in index order.
     #[test]
-    fn a_tile_meshes_to_cells_and_the_ring_cuts_a_hole() {
+    fn a_generated_tile_meshes() {
         let mut st = store();
         let b = build(&mut st, (0, 0), 8, false);
-        assert_eq!(b.cells.len(), 64, "8 x 8 cells of 8 blocks");
-        assert_eq!(b.verts.len() % 4, 0);
+        assert!(!b.cells.is_empty() && b.verts.len() % 4 == 0);
         assert!(b.idx.iter().all(|&i| (i as usize) < b.verts.len()));
-        assert!(b.verts.iter().all(|v| v.pos[1] > -20.0 && v.pos[1] <= 129.0 && v.tint >= 0.0 && v.tint < 16_777_216.0));
-        assert!(b.verts.len() > 64 * 4, "a rolling tile has walls as well as tops");
-        assert!(b.cells.windows(2).all(|w| w[0].i1 == w[1].i0) && b.cells.last().unwrap().i1 as usize == b.idx.len());
-        let eye = (Vec3::new(32.0, 80.0, 32.0), 64.0, 48.0);
-        let cut = gather(&b.cells, &b.idx, &covered(&b.cells, Some(eye)));
-        assert!(cut.len() < b.idx.len(), "cells under the ring are dropped");
-        let far = (Vec3::new(1000.0, 80.0, 1000.0), 64.0, 48.0);
-        assert_eq!(gather(&b.cells, &b.idx, &covered(&b.cells, Some(far))).len(), b.idx.len(), "an eye far away drops nothing");
-    }
-
-    /// A tree on flat ground is a floating box on a trunk, not a tower: nothing but the tree rises above the lawn.
-    #[test]
-    fn a_tree_meshes_as_a_box_on_a_trunk() {
-        let mut st = store();
-        st.tiles.insert((0, 0), tile_of(|x, z| if (x, z) == (10, 10) { tree(land(70)) } else { land(70) }));
-        let b = build(&mut st, (0, 0), 1, false);
-        assert!(b.idx.iter().all(|&i| (i as usize) < b.verts.len()));
-        let cell = b.cells.iter().find(|c| (c.x, c.z) == (10, 10)).unwrap();
-        assert_eq!(cell.y, 78);
-        let high = b.verts.iter().filter(|v| v.pos[1] > 71.5).count();
-        assert!(high > 0 && high < 200, "{high} vertices over the lawn");
-        let top = b.verts.iter().map(|v| v.pos[1]).fold(f32::MIN, f32::max);
-        assert!(top > 78.9 && top < 79.0, "the leaf top is at 79 less EPS, got {top}");
+        assert!(b.verts.iter().all(|v| v.pos[1] > -40.0 && v.pos[1] <= 129.0 && v.tint >= 0.0 && v.tint < 16_777_216.0));
+        assert!(b.cells.windows(2).all(|w| w[0].i1 <= w[1].i0) && b.cells.last().unwrap().i1 as usize == b.idx.len());
     }
 
     /// A real chunk replaces the guess: in a tile made after it arrived, and in one that already exists.
@@ -1051,19 +1140,19 @@ mod tests {
     fn an_ingested_chunk_replaces_the_guess() {
         let mut st = store();
         st.ingest((1, 2), vec![land(99); 256]);
-        assert_eq!(st.tile((0, 0), false).cols[(16 + 5) * 64 + 32 + 7].top, 99);
+        assert_eq!(st.tile((0, 0), false).col((16 + 5) * 64 + 32 + 7)[0].y1, 100);
         st.ingest((3, 3), vec![land(98); 256]);
-        assert_eq!(st.tiles[&(0, 0)].cols[(48 + 1) * 64 + 48 + 1].top, 98, "a tile that exists is patched in place");
-        assert_ne!(st.tiles[&(0, 0)].cols[16 * 64 + 7].top, 99, "chunk (1, 0) was not touched");
+        assert_eq!(st.tiles[&(0, 0)].col((48 + 1) * 64 + 48 + 1)[0].y1, 99, "a tile that exists is patched in place");
+        assert_ne!(st.tiles[&(0, 0)].col(16 * 64 + 7)[0].y1, 100, "chunk (1, 0) was not touched");
     }
 
     /// A tile file reads back the tile it was made from, and nothing else (another world type, a cut file).
     #[test]
     fn a_tile_file_round_trips() {
-        let t = tile_of(|x, z| if x < 5 { tree(land((60 + z % 7) as u8)) } else if z < 9 { sea(40) } else { land(70) });
+        let t = tile_of(|x, z| if x < 5 { vec![sp(74, 77, 18), sp((60 + z % 7) as u8, 70, 3)] } else if z < 9 { vec![sp(40, 64, 9)] } else { land(70) });
         let b = encode(&t, true);
         let u = decode(&b, true).unwrap();
-        assert!(u.cols == t.cols && !u.trees);
+        assert!(u.spans == t.spans && u.start == t.start && !u.trees);
         assert!(decode(&b, false).is_none(), "a vanilla world does not read a Tectonic tile");
         assert!(decode(&b[..b.len() - 3], true).is_none() && decode(&[], true).is_none());
     }
