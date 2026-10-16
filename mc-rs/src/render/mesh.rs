@@ -506,6 +506,12 @@ fn shapes(id: u8, meta: u8, same: &dyn Fn(i32, i32) -> bool) -> ([[f32; 6]; 5], 
             o[..2].copy_from_slice(&stair_boxes(meta));
             (o, 2)
         }
+        90 => {
+            // `BlockPortal.setBlockBoundsBasedOnState`: a 4/16 thick plane along the axis of its neighbours.
+            let along_x = same(-1, 0) || same(1, 0);
+            o[0] = if along_x { [0.0, 0.0, 6.0 / 16.0, 1.0, 1.0, 10.0 / 16.0] } else { [6.0 / 16.0, 0.0, 0.0, 10.0 / 16.0, 1.0, 1.0] };
+            (o, 1)
+        }
         85 => {
             let (nx, px, nz, pz) = (same(-1, 0), same(1, 0), same(0, -1), same(0, 1));
             let along_x = nx || px || !(nz || pz); // no neighbour at all: the Java draws the x stub

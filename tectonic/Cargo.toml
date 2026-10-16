@@ -1,0 +1,9 @@
+[package]
+name = "tectonic"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Rust port of the Tectonic terrain datapack (density functions, splines, Minecraft noise). std only."
+
+# No dependencies on purpose, like `embeddium`: pure CPU logic that `cargo test -p tectonic` runs on a plain Linux host.
+[dependencies]

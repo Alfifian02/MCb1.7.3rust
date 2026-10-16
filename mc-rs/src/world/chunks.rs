@@ -232,7 +232,8 @@ struct Entry {
     light: Vec<u8>,
     /// `Chunk.heightMap`, indexed `z << 4 | x`; kept in step with `blocks` (insert, populate, edits).
     height: [u8; 256],
-    /// Initial light was computed (`light::init_chunk`); meshing waits for it.
+    /// Initial light was computed (the light thread's `init_chunk`, reported back); meshing waits for it. `light` and `lit` are the
+    /// render thread's read-only copy: only the light thread's reports write them.
     lit: bool,
     /// populate() has run on this chunk (it also wrote into its +X/+Z/+X+Z neighbours).
     populated: bool,
@@ -278,8 +279,9 @@ pub struct ChunkManager {
     max_populating: usize,
     /// Source of `Entry.rev`.
     stamp: u32,
-    /// Pending light updates, newest last (`World.lightingToUpdate`).
-    light_queue: Vec<light::Region>,
+    /// The light thread (`light.rs`): it holds the light engine and its own copy of the blocks; this side tells it what changes and
+    /// takes its reports.
+    light: light::LightLink,
     /// `World.skylightSubtracted` (0 day .. 11 night), applied by the mesher.
     sky_sub: u8,
     /// Bumped whenever the drawn geometry changes (a mesh with another size, an unload): the cached shadow map is stale then.
@@ -300,6 +302,8 @@ pub struct ChunkManager {
     culler: Culler,
     /// Per chunk column, the sections (bit `s`) `update_visible` found drawable this frame.
     visible: HashMap<Key, u8>,
+    /// The far-terrain columns of chunks unloaded since `take_unloaded` (`world::far`): real blocks (trees, edits) replace generated ones.
+    unloaded: Vec<(Key, lod::Tile)>,
 }
 
 /// The loaded chunks as the occlusion walk sees them. A chunk that has no mesh (air only, or not built yet) lets the view through.
@@ -321,8 +325,19 @@ impl ChunkManager {
         Self::new_typed(seed, radius, false)
     }
 
-    /// `new` with the world type: `realistic` = the second generator (`gen::realistic`) in every worker and for `preload`.
-    pub fn new_typed(seed: i64, radius: i32, realistic: bool) -> Self {
+    /// `new` with the world type: `tectonic` = the second generator (the `tectonic` crate's terrain) in every worker and for `preload`.
+    pub fn new_typed(seed: i64, radius: i32, tectonic: bool) -> Self {
+        let make: fn(i64) -> OverworldGenerator = if tectonic { OverworldGenerator::new_tectonic } else { OverworldGenerator::new };
+        Self::new_with(seed, radius, make)
+    }
+
+    /// The Nether: the same manager with `gen::nether` in every worker (no sky light comes out of it by itself: the ceiling is solid
+    /// bedrock, so every column's height map is 128).
+    pub fn new_nether(seed: i64, radius: i32) -> Self {
+        Self::new_with(seed, radius, OverworldGenerator::new_nether)
+    }
+
+    fn new_with(seed: i64, radius: i32, make: fn(i64) -> OverworldGenerator) -> Self {
         let (jobs, job_rx) = mpsc::channel::<Job>();
         let (done_tx, done) = mpsc::channel();
         let (built_tx, built) = mpsc::channel();
@@ -337,10 +352,7 @@ impl ChunkManager {
                 .spawn(move || {
                     // Each worker owns its generator: generate() reseeds per chunk, so the
                     // result does not depend on which worker gets which chunk.
-                    let mut g = OverworldGenerator::new(seed);
-                    if realistic {
-                        g = g.realistic();
-                    }
+                    let mut g = make(seed);
                     let mut cm = WorldChunkManager::new(seed);
                     loop {
                         // The guard is a temporary of this statement: the lock is held while
@@ -377,7 +389,7 @@ impl ChunkManager {
 
         Self { chunks: Chunks::default(), pending: HashSet::new(), ring, radius, center: None, max_in_flight: workers * 2, built, meshing: HashSet::new(), max_meshing: workers * 2,
                populated_rx, populating: HashMap::new(), busy: HashSet::new(), max_populating: workers, stamp: 0,
-               gen: if realistic { OverworldGenerator::new(seed).realistic() } else { OverworldGenerator::new(seed) }, cm: WorldChunkManager::new(seed), jobs, done, light_queue: Vec::new(), sky_sub: 0, mesh_gen: 0, dir: None, saved: HashSet::new(), writer: None, changes: Vec::new(), loot: Vec::new(), spawners: Vec::new(), culler: Culler::default(), visible: HashMap::new() }
+               gen: make(seed), cm: WorldChunkManager::new(seed), jobs, done, light: light::LightLink::spawn(), sky_sub: 0, mesh_gen: 0, dir: None, saved: HashSet::new(), writer: None, changes: Vec::new(), loot: Vec::new(), spawners: Vec::new(), culler: Culler::default(), visible: HashMap::new(), unloaded: Vec::new() }
     }
 
     /// Keep this world in `dir`: chunks found there are loaded instead of generated, and edited ones are written back
@@ -404,7 +416,12 @@ impl ChunkManager {
     pub(crate) fn insert(&mut self, key: Key, blocks: Vec<u8>) {
         let height = height_map(&blocks);
         self.stamp = self.stamp.wrapping_add(1);
-        self.chunks.insert(key, Entry { blocks, data: Nibbles::new(), light: vec![0; VOLUME], height, lit: false, populated: false, rev: self.stamp, dirty: false, meshed: false, mesh: None });
+        let copy = blocks.clone(); // for the light thread
+        let old = self.chunks.insert(key, Entry { blocks, data: Nibbles::new(), light: vec![0; VOLUME], height, lit: false, populated: false, rev: self.stamp, dirty: false, meshed: false, mesh: None });
+        if old.is_some() {
+            self.light_remove(key); // a fresh, unlit entry replaces it, light thread's copy included
+        }
+        self.light_chunk(key, copy);
     }
 
     /// Load a saved chunk. A file that does not decode is forgotten, so the chunk is generated instead.
@@ -586,9 +603,25 @@ impl ChunkManager {
         self.stamp = self.stamp.wrapping_add(1);
         e.rev = self.stamp;
         let h = e.height[lz << 4 | lx] as i32;
+        // The column's height is kept here (readers such as `sees_sky` need it at once); the light thread does the same on its copy
+        // and relights.
+        if let Some(top) = light::height_after_set(&e.blocks, lx, lz, id, y, h) {
+            e.height[lz << 4 | lx] = top as u8;
+        }
         self.mark_dirty(x, z);
-        self.light_after_set(x, y, z, id, h);
+        self.light_edit(x, y, z, id);
         true
+    }
+
+    /// Every loaded cell holding `id` (the portal search of `Teleporter.func_4106_b`, which scans the loaded chunks only here).
+    pub fn find(&self, id: u8) -> Vec<(i32, i32, i32)> {
+        let mut out = Vec::new();
+        for (&(cx, cz), e) in &self.chunks {
+            for (i, _) in e.blocks.iter().enumerate().filter(|&(_, &b)| b == id) {
+                out.push((cx * 16 + (i >> 11) as i32, (i & 127) as i32, cz * 16 + ((i >> 7) & 15) as i32));
+            }
+        }
+        out
     }
 
     pub fn take_changes(&mut self) -> Vec<(i32, i32, i32, u8, u8)> {
@@ -693,6 +726,8 @@ impl ChunkManager {
             self.stamp = self.stamp.wrapping_add(1);
             e.rev = self.stamp; // a populate job copied from before this is stale
             e.lit = false; // blocks changed under the light: it is computed again once final
+            let copy = e.blocks.clone();
+            self.light_chunk(*k, copy); // the light thread gets the new blocks (and forgets the chunk was lit)
             // The chunk and its four neighbours (border faces) need a new mesh if they had one.
             for n in [(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)] {
                 if let Some(e) = self.chunks.get_mut(&(k.0 + n.0, k.1 + n.1)) {
@@ -862,15 +897,20 @@ impl ChunkManager {
         let populated = t0.elapsed();
         self.light_pending(cx, cz);
         let lit = t0.elapsed();
-        // Meshes wait for the light queue to drain, so an edit or a new chunk is meshed once, lit.
+        // Meshes wait for the light thread to settle, so an edit or a new chunk is meshed once, lit.
         let mut built = 0;
-        if self.light_queue.is_empty() {
+        if self.light_settled() {
             built = self.mesh_pending(device, cx, cz, t0);
         }
         let total = t0.elapsed();
         if total >= SLOW_CHUNK_WORK {
             log::warn!("slow chunk work {total:?}: stream + populate {populated:?}, light done at {lit:?}, {built} mesh(es)");
         }
+    }
+
+    /// The far-terrain columns of the chunks unloaded since the last call.
+    pub fn take_unloaded(&mut self) -> Vec<(Key, lod::Tile)> {
+        std::mem::take(&mut self.unloaded)
     }
 
     fn stream(&mut self, cx: i32, cz: i32) {
@@ -896,6 +936,8 @@ impl ChunkManager {
             self.mesh_gen = self.mesh_gen.wrapping_add(1);
             for k in gone {
                 let Some(e) = self.chunks.remove(&k) else { continue };
+                self.unloaded.push((k, crate::world::far::columns(&e.blocks)));
+                self.light_remove(k);
                 if let (true, Some(dir), Some(w)) = (e.dirty, &self.dir, &mut self.writer) {
                     w.queue(dir, k, save::encode_chunk(&e.blocks, &e.data, e.populated));
                     self.saved.insert(k);

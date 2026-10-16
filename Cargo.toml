@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
-members = ["mc-rs", "embeddium"]
-default-members = ["mc-rs", "embeddium"]
+members = ["mc-rs", "embeddium", "tectonic", "lod"]
+default-members = ["mc-rs", "embeddium", "tectonic", "lod"]
 
 # Release profile tuned for low-end Android:
 # - opt-level=3: full optimization
