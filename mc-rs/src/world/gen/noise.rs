@@ -179,19 +179,6 @@ impl PerlinNoise {
     #[allow(clippy::too_many_arguments)]
     fn add(&self, out: &mut [f64], x: f64, y: f64, z: f64, sx: usize, sy: usize, sz: usize,
            dx: f64, dy: f64, dz: f64, amp: f64) {
-        self.add_masked(out, x, y, z, sx, sy, sz, dx, dy, dz, amp, None);
-    }
-
-    /// `add`, but with `need` given (3D grids only, `sy > 1`) only the samples whose entry is true are computed; the others are
-    /// left as they were. Each sample that is computed is bit for bit what `add` gives.
-    ///
-    /// The Java caches the four corner values of a lattice cell (`d1..d4` here) at the first `y` of a run of equal `yb` and reuses
-    /// them, with that first `y`'s fraction, for the rest of the run: so the corners of a run depend on its FIRST `y`, wanted or
-    /// not. That `y`'s `yb` and fraction are remembered at every run start, and the corners are worked out the first time a wanted
-    /// sample of the run needs them.
-    #[allow(clippy::too_many_arguments)]
-    fn add_masked(&self, out: &mut [f64], x: f64, y: f64, z: f64, sx: usize, sy: usize, sz: usize,
-                  dx: f64, dy: f64, dz: f64, amp: f64, need: Option<&[bool]>) {
         let inv = 1.0 / amp;
         let mut idx = 0;
         if sy == 1 {
@@ -222,8 +209,6 @@ impl PerlinNoise {
             return;
         }
         let mut last_y = -1;
-        let (mut run_yb, mut run_yf) = (0, 0.0);
-        let mut fresh = false; // d1..d4 hold the current run's corners
         let (mut d1, mut d2, mut d3, mut d4) = (0.0, 0.0, 0.0, 0.0);
         for ix in 0..sx {
             let mut xf = (x + ix as f64) * dx + self.xc;
@@ -245,17 +230,6 @@ impl PerlinNoise {
                     let v = fade(yf);
                     if iy == 0 || yb != last_y {
                         last_y = yb;
-                        run_yb = yb;
-                        run_yf = yf;
-                        fresh = false;
-                    }
-                    if need.is_some_and(|m| !m[idx]) {
-                        idx += 1;
-                        continue;
-                    }
-                    if !fresh {
-                        fresh = true;
-                        let (yb, yf) = (run_yb, run_yf);
                         let a = self.p(xb) + yb;
                         let aa = self.p(a) + zb;
                         let ab = self.p(a + 1) + zb;
@@ -303,34 +277,10 @@ impl OctaveNoise {
     #[allow(clippy::too_many_arguments)]
     pub fn generate_into(&self, out: &mut [f64], x: f64, y: f64, z: f64, sx: usize, sy: usize, sz: usize,
                          dx: f64, dy: f64, dz: f64) {
-        self.fill(out, x, y, z, sx, sy, sz, dx, dy, dz, None);
-    }
-
-    /// `generate_into` for a 3D grid (`sy > 1`) of which the caller reads only some samples: those with `need[i]` true (`i` as in
-    /// the output) are computed, bit for bit as `generate` computes them; the rest are 0.0 and must not be read.
-    #[allow(clippy::too_many_arguments)]
-    pub fn generate_masked_into(&self, out: &mut [f64], x: f64, y: f64, z: f64, sx: usize, sy: usize, sz: usize,
-                                dx: f64, dy: f64, dz: f64, need: &[bool]) {
-        assert!(sy > 1 && need.len() == sx * sy * sz && out.len() == need.len(), "a 3D grid and one flag per sample");
-        self.fill(out, x, y, z, sx, sy, sz, dx, dy, dz, Some(need));
-    }
-
-    /// `generate_masked_into` into a new vector.
-    #[allow(clippy::too_many_arguments)]
-    pub fn generate_masked(&self, x: f64, y: f64, z: f64, sx: usize, sy: usize, sz: usize,
-                           dx: f64, dy: f64, dz: f64, need: &[bool]) -> Vec<f64> {
-        let mut out = vec![0.0; sx * sy * sz];
-        self.generate_masked_into(&mut out, x, y, z, sx, sy, sz, dx, dy, dz, need);
-        out
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn fill(&self, out: &mut [f64], x: f64, y: f64, z: f64, sx: usize, sy: usize, sz: usize,
-            dx: f64, dy: f64, dz: f64, need: Option<&[bool]>) {
         out.fill(0.0);
         let mut amp = 1.0;
         for g in &self.gens {
-            g.add_masked(out, x, y, z, sx, sy, sz, dx * amp, dy * amp, dz * amp, amp, need);
+            g.add(out, x, y, z, sx, sy, sz, dx * amp, dy * amp, dz * amp, amp);
             amp /= 2.0;
         }
     }
@@ -461,88 +411,6 @@ impl SimplexOctaves {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The 3D branch of `PerlinNoise::add` as it was before the corners became lazy: worked out at the start of every run of equal
-    /// `yb`, whether or not a sample follows. The reference for the next test.
-    #[allow(clippy::too_many_arguments)]
-    fn reference_add(g: &PerlinNoise, out: &mut [f64], x: f64, y: f64, z: f64, sx: usize, sy: usize, sz: usize,
-                     dx: f64, dy: f64, dz: f64, amp: f64) {
-        let inv = 1.0 / amp;
-        let mut idx = 0;
-        let mut last_y = -1;
-        let (mut d1, mut d2, mut d3, mut d4) = (0.0, 0.0, 0.0, 0.0);
-        for ix in 0..sx {
-            let mut xf = (x + ix as f64) * dx + g.xc;
-            let xi = ifloor(xf);
-            let xb = xi & 255;
-            xf -= xi as f64;
-            let u = fade(xf);
-            for iz in 0..sz {
-                let mut zf = (z + iz as f64) * dz + g.zc;
-                let zi = ifloor(zf);
-                let zb = zi & 255;
-                zf -= zi as f64;
-                let w = fade(zf);
-                for iy in 0..sy {
-                    let mut yf = (y + iy as f64) * dy + g.yc;
-                    let yi = ifloor(yf);
-                    let yb = yi & 255;
-                    yf -= yi as f64;
-                    let v = fade(yf);
-                    if iy == 0 || yb != last_y {
-                        last_y = yb;
-                        let a = g.p(xb) + yb;
-                        let aa = g.p(a) + zb;
-                        let ab = g.p(a + 1) + zb;
-                        let b = g.p(xb + 1) + yb;
-                        let ba = g.p(b) + zb;
-                        let bb = g.p(b + 1) + zb;
-                        d1 = lerp(u, grad(g.p(aa), xf, yf, zf), grad(g.p(ba), xf - 1.0, yf, zf));
-                        d2 = lerp(u, grad(g.p(ab), xf, yf - 1.0, zf), grad(g.p(bb), xf - 1.0, yf - 1.0, zf));
-                        d3 = lerp(u, grad(g.p(aa + 1), xf, yf, zf - 1.0), grad(g.p(ba + 1), xf - 1.0, yf, zf - 1.0));
-                        d4 = lerp(u, grad(g.p(ab + 1), xf, yf - 1.0, zf - 1.0), grad(g.p(bb + 1), xf - 1.0, yf - 1.0, zf - 1.0));
-                    }
-                    let l1 = lerp(v, d1, d2);
-                    let l2 = lerp(v, d3, d4);
-                    out[idx] += lerp(w, l1, l2) * inv;
-                    idx += 1;
-                }
-            }
-        }
-    }
-
-    /// `generate` (lazy corners, no mask) equals the old algorithm bit for bit, and `generate_masked` gives the old value at every
-    /// sample it was asked for, whichever samples were left out: scales with runs of one `yb` (small `dy`) and with none (large),
-    /// and masks that leave out run starts, whole columns and everything.
-    #[test]
-    fn lazy_3d_noise_matches_the_original_algorithm() {
-        let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
-        let n = OctaveNoise::new(&mut JavaRandom::new(777), 6);
-        let (sx, sy, sz) = (5, 17, 5);
-        for &(dx, dy, dz) in &[(8.5, 4.2, 8.5), (684.412, 684.412, 684.412), (0.07, 0.05, 0.09), (0.3, 0.011, 0.3)] {
-            let mut want = vec![0.0; sx * sy * sz];
-            let mut amp = 1.0;
-            for g in &n.gens {
-                reference_add(g, &mut want, 3.0, 0.0, -7.0, sx, sy, sz, dx * amp, dy * amp, dz * amp, amp);
-                amp /= 2.0;
-            }
-            assert_eq!(bits(&n.generate(3.0, 0.0, -7.0, sx, sy, sz, dx, dy, dz)), bits(&want), "unmasked, scale {dx}");
-            let masks: [Box<dyn Fn(usize) -> bool>; 5] = [
-                Box::new(|i| (i * 7 + i / 17) % 3 != 0),
-                Box::new(|i| i % 17 == 16),          // only the top of every column
-                Box::new(|i| i % 17 != 0),           // never the first sample of a column
-                Box::new(|i| (i / 17) % 2 == 0),     // alternate columns
-                Box::new(|_| false),
-            ];
-            for (m, mask) in masks.iter().enumerate() {
-                let need: Vec<bool> = (0..sx * sy * sz).map(|i| mask(i)).collect();
-                let part = n.generate_masked(3.0, 0.0, -7.0, sx, sy, sz, dx, dy, dz, &need);
-                for i in (0..need.len()).filter(|&i| need[i]) {
-                    assert_eq!(part[i].to_bits(), want[i].to_bits(), "scale {dx}, mask {m}, sample {i}");
-                }
-            }
-        }
-    }
 
     fn close(a: &[f64], b: &[f64]) {
         assert_eq!(a.len(), b.len());

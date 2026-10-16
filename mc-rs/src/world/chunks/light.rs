@@ -6,22 +6,15 @@
 //! (`max(neighbours) - max(opacity, 1)`, or the cell's own source level) and queues the neighbours of
 //! each cell that changed, until nothing changes. Newest region first, like the Java.
 //!
-//! The engine runs on its own thread (`chunk-light`, C2ME's `threading-lighting` idea): `LightWorld` keeps its own copy of every
-//! chunk's blocks and height map and is the only writer of the light; the render thread tells it what happens (`Msg`: a chunk's
-//! blocks, an edit, an unload, the first light of a chunk) and keeps a read-only copy of the light that the thread's `Report`s
-//! replace. So a region never waits for the frame, and nothing is shared.
-//!
 //! Differences from vanilla, none of which change the settled result:
-//! - the queue is drained in time slices on the light thread (`run_light`) instead of `updatingLighting`'s 500 regions;
+//! - the queue is drained by a per-frame time budget (`run_light`) instead of `updatingLighting`'s 500 regions;
 //! - a freshly final chunk is lit in one go (`init_chunk`) because worldgen writes raw blocks instead of
 //!   calling `setBlockWithNotify`, so no per-block updates were ever queued for them;
 //! - no day/night: `skylightSubtracted` is 0 (see `render::mesh`).
 
-use super::{ChunkManager, Key, KeyHasher};
-use crate::world::chunk::{height_map, idx, light_opacity, light_value, H, VOLUME};
-use std::collections::{HashMap, HashSet};
-use std::sync::mpsc;
+use super::{ChunkManager, Key};
 use std::time::{Duration, Instant};
+use crate::world::chunk::{idx, light_opacity, light_value, H};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum Kind {
@@ -68,215 +61,18 @@ impl Region {
     }
 }
 
-/// How long the light thread works on its queue before it reports what it has (the render thread sees nothing before that).
-const LIGHT_SLICE: Duration = Duration::from_millis(5);
+/// Time per frame spent on light (replaces `World.updatingLighting`'s 500 regions). ponytail: a cell is still
+/// ~10 map lookups; a per-chunk lookup cache is the next step if loading is still slow.
+const LIGHT_BUDGET: Duration = Duration::from_millis(4);
 
-/// What the engine knows of one chunk: its own copy of the blocks and of the height map (kept in step by `Msg::Chunk` and
-/// `Msg::Edit`), and the light, which only the engine writes.
-struct LChunk {
-    blocks: Vec<u8>,
-    /// Per cell, sky light in the low nibble and block light in the high nibble (same index as `blocks`).
-    light: Vec<u8>,
-    height: [u8; 256],
-    /// `init_chunk` ran and the blocks have not been replaced since.
-    lit: bool,
-    /// The light array or the lit flag changed since the last report.
-    touched: bool,
-    /// A light value changed in this chunk or beside it (the `mark_dirty` rule): its mesh is stale.
-    stale: bool,
-}
-
-type LChunks = HashMap<Key, LChunk, std::hash::BuildHasherDefault<KeyHasher>>;
-
-/// The engine's state: what `ChunkManager` used to hold for light, on the light thread.
-#[derive(Default)]
-struct LightWorld {
-    chunks: LChunks,
-    /// Pending light updates, newest last (`World.lightingToUpdate`).
-    queue: Vec<Region>,
-}
-
-/// What the render thread tells the engine, in the order it happened.
-pub(super) enum Msg {
-    /// The blocks of a chunk, new or rewritten by populate: the height map is rebuilt, and the chunk is unlit until `Init`.
-    Chunk(Key, Vec<u8>),
-    /// The cell (x, y, z) became `id`.
-    Edit { x: i32, y: i32, z: i32, id: u8 },
-    /// The chunk was unloaded.
-    Remove(Key),
-    /// First light of the chunk (`init_chunk`).
-    Init(Key),
-}
-
-/// What the engine tells the render thread after each time slice.
-struct Report {
-    /// Messages processed since the previous report.
-    done: usize,
-    /// The queue is empty: everything the render thread sent is lit.
-    idle: bool,
-    /// Chunks written to since the previous report: key, the whole light array, the lit flag.
-    chunks: Vec<(Key, Vec<u8>, bool)>,
-    /// Chunks whose mesh went stale because their light (or a neighbour's across the edge) changed.
-    stale: Vec<Key>,
-}
-
-/// The render thread's end of the light thread.
-pub(super) struct LightLink {
-    tx: mpsc::Sender<Msg>,
-    rx: mpsc::Receiver<Report>,
-    /// Messages sent that no report has counted yet.
-    outstanding: usize,
-    /// The engine's queue was empty at its last report.
-    idle: bool,
-    /// Chunks an `Init` was sent for whose lit flag has not come back, so `light_pending` does not send it twice.
-    lighting: HashSet<Key>,
-}
-
-impl LightLink {
-    pub(super) fn spawn() -> Self {
-        let (tx, jobs) = mpsc::channel::<Msg>();
-        let (done, rx) = mpsc::channel::<Report>();
-        std::thread::Builder::new().name("chunk-light".into()).spawn(move || light_thread(jobs, done)).expect("spawn light thread");
-        Self { tx, rx, outstanding: 0, idle: true, lighting: HashSet::new() }
-    }
-}
-
-/// The light thread: take every message that is in, run the queue for a time slice, report; sleep when there is nothing to do.
-/// Ends when the manager is dropped (the message channel closes).
-fn light_thread(jobs: mpsc::Receiver<Msg>, done: mpsc::Sender<Report>) {
-    let mut w = LightWorld::default();
-    let mut n = 0usize;
-    loop {
-        if w.queue.is_empty() {
-            match jobs.recv() {
-                Ok(m) => {
-                    w.apply(m);
-                    n += 1;
-                }
-                Err(_) => return,
-            }
-        }
-        while let Ok(m) = jobs.try_recv() {
-            w.apply(m);
-            n += 1;
-        }
-        w.run_light(Some(Instant::now() + LIGHT_SLICE));
-        if done.send(w.report(std::mem::take(&mut n))).is_err() {
-            return;
-        }
-    }
-}
-
-/// The height half of `Chunk.setBlockID` + `func_1003_g`: the column's new height after the cell at `y` became `id` (`h` = the
-/// height before, `blocks` already hold `id`), `None` when it does not change. The render thread keeps its own height map with
-/// this (readers like `sees_sky` need it at once); the engine does the same on its copy in `relight_column`.
-pub(super) fn height_after_set(blocks: &[u8], lx: usize, lz: usize, id: u8, y: i32, h: i32) -> Option<i32> {
-    let from = if light_opacity(id) != 0 {
-        if y >= h { y + 1 } else { return None }
-    } else if y == h - 1 {
-        y
-    } else {
-        return None;
-    };
-    let top = column_top(blocks, lx, lz, h, from);
-    (top != h).then_some(top)
-}
-
-/// `Chunk.func_1003_g`'s height search: from `max(old, y)` down to the first opaque cell.
-fn column_top(blocks: &[u8], lx: usize, lz: usize, old: i32, y: i32) -> i32 {
-    let mut h = old.max(y);
-    while h > 0 && light_opacity(blocks[idx(lx, h as usize - 1, lz)]) == 0 {
-        h -= 1;
-    }
-    h
-}
-
-impl LightWorld {
-    /// One message from the render thread.
-    fn apply(&mut self, m: Msg) {
-        match m {
-            Msg::Chunk(k, blocks) => {
-                let height = height_map(&blocks);
-                match self.chunks.get_mut(&k) {
-                    // Rewritten by populate: the light stays until `Init` computes it again, as it did.
-                    Some(e) => {
-                        e.blocks = blocks;
-                        e.height = height;
-                        e.lit = false;
-                        e.touched = true;
-                    }
-                    None => {
-                        self.chunks.insert(k, LChunk { blocks, light: vec![0; VOLUME], height, lit: false, touched: false, stale: false });
-                    }
-                }
-            }
-            Msg::Edit { x, y, z, id } => {
-                if !(0..H as i32).contains(&y) {
-                    return;
-                }
-                let Some(e) = self.chunks.get_mut(&(x >> 4, z >> 4)) else { return };
-                let (lx, lz) = ((x & 15) as usize, (z & 15) as usize);
-                let h = e.height[lz << 4 | lx] as i32;
-                e.blocks[idx(lx, y as usize, lz)] = id;
-                self.light_after_set(x, y, z, id, h);
-            }
-            Msg::Remove(k) => {
-                self.chunks.remove(&k);
-            }
-            Msg::Init(k) => {
-                if self.chunks.contains_key(&k) {
-                    self.init_chunk(k);
-                }
-            }
-        }
-    }
-
-    /// What changed since the last report, and clear it.
-    fn report(&mut self, done: usize) -> Report {
-        let (mut chunks, mut stale) = (Vec::new(), Vec::new());
-        for (&k, e) in self.chunks.iter_mut() {
-            if e.touched {
-                e.touched = false;
-                chunks.push((k, e.light.clone(), e.lit));
-            }
-            if e.stale {
-                e.stale = false;
-                stale.push(k);
-            }
-        }
-        Report { done, idle: self.queue.is_empty(), chunks, stale }
-    }
-
-    /// A light value at column (x, z) changed: the mesh of its chunk is stale, and so is the neighbour's across a chunk edge (its
-    /// border faces look at it).
-    fn mark_dirty(&mut self, x: i32, z: i32) {
-        let (cx, cz, lx, lz) = (x >> 4, z >> 4, x & 15, z & 15);
-        // At most one neighbour per axis, so three keys at most.
-        let mut keys = [(cx, cz); 3];
-        let mut n = 1;
-        for (hit, k) in [(lx == 0, (cx - 1, cz)), (lx == 15, (cx + 1, cz)), (lz == 0, (cx, cz - 1)), (lz == 15, (cx, cz + 1))] {
-            if hit {
-                keys[n] = k;
-                n += 1;
-            }
-        }
-        for k in &keys[..n] {
-            if let Some(e) = self.chunks.get_mut(k) {
-                e.stale = true;
-            }
-        }
-    }
-
+impl ChunkManager {
     fn chunk_exists(&self, x: i32, z: i32) -> bool {
         self.chunks.contains_key(&(x >> 4, z >> 4))
     }
 
     /// Block id for light maths: air outside the world and in unloaded chunks (`World.getBlockId`).
     fn raw_block(&self, x: i32, y: i32, z: i32) -> u8 {
-        if !(0..H as i32).contains(&y) {
-            return 0;
-        }
-        self.chunks.get(&(x >> 4, z >> 4)).map_or(0, |e| e.blocks[idx((x & 15) as usize, y as usize, (z & 15) as usize)])
+        self.block_loaded(x, y, z).unwrap_or(0)
     }
 
     /// `World.getSavedLightValue`: y is clamped into the world, an unloaded chunk is dark.
@@ -289,7 +85,6 @@ impl LightWorld {
     fn put_light(&mut self, kind: Kind, x: i32, y: i32, z: i32, v: u8) {
         let Some(e) = self.chunks.get_mut(&(x >> 4, z >> 4)) else { return };
         let i = idx((x & 15) as usize, y as usize, (z & 15) as usize);
-        e.touched = true;
         e.light[i] = if kind == Kind::Sky { e.light[i] & 0xF0 | v } else { e.light[i] & 0x0F | v << 4 };
     }
 
@@ -300,6 +95,17 @@ impl LightWorld {
             self.put_light(kind, x, y, z, v);
             self.mark_dirty(x, z);
         }
+    }
+
+    /// `World.canExistingBlockSeeTheSky`.
+    pub fn sees_sky(&self, x: i32, y: i32, z: i32) -> bool {
+        if y < 0 {
+            return false;
+        }
+        if y >= H as i32 {
+            return true;
+        }
+        self.chunks.get(&(x >> 4, z >> 4)).is_some_and(|e| y >= e.height[((z & 15) << 4 | (x & 15)) as usize] as i32)
     }
 
     /// `World.getHeightValue`: 0 for an unloaded chunk.
@@ -313,13 +119,13 @@ impl LightWorld {
         if !self.chunk_exists((hi[0] + lo[0]) / 2, (hi[2] + lo[2]) / 2) {
             return;
         }
-        if self.queue.iter_mut().rev().take(5).any(|r| r.kind == kind && r.merge(lo, hi)) {
+        if self.light_queue.iter_mut().rev().take(5).any(|r| r.kind == kind && r.merge(lo, hi)) {
             return;
         }
-        self.queue.push(Region { kind, lo, hi });
-        if self.queue.len() > 1_000_000 {
+        self.light_queue.push(Region { kind, lo, hi });
+        if self.light_queue.len() > 1_000_000 {
             log::warn!("light: more than 1000000 updates, dropping the queue");
-            self.queue.clear();
+            self.light_queue.clear();
         }
     }
 
@@ -420,7 +226,7 @@ impl LightWorld {
     /// Process queued regions, newest first, until the queue is empty or `deadline` passes.
     pub(super) fn run_light(&mut self, deadline: Option<Instant>) {
         let mut n = 0u32;
-        while let Some(r) = self.queue.pop() {
+        while let Some(r) = self.light_queue.pop() {
             let big = r.volume() > 256;
             self.update_region(r);
             n += 1;
@@ -448,7 +254,7 @@ impl LightWorld {
 
     /// Light bookkeeping of `Chunk.setBlockID` after the cell (x, y, z) became `id`; `h` is the
     /// column's height from before the change.
-    fn light_after_set(&mut self, x: i32, y: i32, z: i32, id: u8, h: i32) {
+    pub(super) fn light_after_set(&mut self, x: i32, y: i32, z: i32, id: u8, h: i32) {
         if light_opacity(id) != 0 {
             if y >= h {
                 self.relight_column(x, y + 1, z);
@@ -467,7 +273,10 @@ impl LightWorld {
         let Some(e) = self.chunks.get(&(x >> 4, z >> 4)) else { return };
         let (lx, lz) = ((x & 15) as usize, (z & 15) as usize);
         let old = e.height[lz << 4 | lx] as i32;
-        let h = column_top(&e.blocks, lx, lz, old, y);
+        let mut h = old.max(y);
+        while h > 0 && light_opacity(e.blocks[idx(lx, h as usize - 1, lz)]) == 0 {
+            h -= 1;
+        }
         if h == old {
             return;
         }
@@ -524,7 +333,6 @@ impl LightWorld {
                 }
             }
             e.lit = true;
-            e.touched = true;
         }
         for x in 0..16 {
             for z in 0..16 {
@@ -567,136 +375,28 @@ impl LightWorld {
             }
         }
     }
-}
 
-impl ChunkManager {
-    /// `World.canExistingBlockSeeTheSky`.
-    pub fn sees_sky(&self, x: i32, y: i32, z: i32) -> bool {
-        if y < 0 {
-            return false;
-        }
-        if y >= H as i32 {
-            return true;
-        }
-        self.chunks.get(&(x >> 4, z >> 4)).is_some_and(|e| y >= e.height[((z & 15) << 4 | (x & 15)) as usize] as i32)
-    }
-
-    /// The stored level of the render thread's copy (tests).
-    #[cfg(test)]
-    pub(super) fn saved_light(&self, kind: Kind, x: i32, y: i32, z: i32) -> u8 {
-        let y = y.clamp(0, H as i32 - 1) as usize;
-        self.chunks.get(&(x >> 4, z >> 4)).map_or(0, |e| nib(kind, e.light[idx((x & 15) as usize, y, (z & 15) as usize)]))
-    }
-
-    fn light_send(&mut self, m: Msg) {
-        if self.light.tx.send(m).is_ok() {
-            self.light.outstanding += 1;
-            self.light.idle = false;
-        }
-    }
-
-    /// The engine gets the blocks of a chunk (new, or rewritten by populate); it is unlit until `light_init`.
-    pub(super) fn light_chunk(&mut self, key: Key, blocks: Vec<u8>) {
-        self.light.lighting.remove(&key);
-        self.light_send(Msg::Chunk(key, blocks));
-    }
-
-    /// The cell (x, y, z) became `id` (its height map is already updated here).
-    pub(super) fn light_edit(&mut self, x: i32, y: i32, z: i32, id: u8) {
-        self.light_send(Msg::Edit { x, y, z, id });
-    }
-
-    pub(super) fn light_remove(&mut self, key: Key) {
-        self.light.lighting.remove(&key);
-        self.light_send(Msg::Remove(key));
-    }
-
-    /// Ask for the first light of a chunk (`init_chunk`).
-    pub(super) fn light_init(&mut self, key: Key) {
-        self.light.lighting.insert(key);
-        self.light_send(Msg::Init(key));
-    }
-
-    /// Every message sent is lit and the engine's queue is empty: meshes (which copy the light) wait for this, so an edit or a
-    /// new chunk is meshed once, lit.
-    pub(super) fn light_settled(&self) -> bool {
-        self.light.outstanding == 0 && self.light.idle
-    }
-
-    fn apply_report(&mut self, r: Report) {
-        self.light.outstanding = self.light.outstanding.saturating_sub(r.done);
-        self.light.idle = r.idle;
-        for (k, light, lit) in r.chunks {
-            if let Some(e) = self.chunks.get_mut(&k) {
-                e.light = light;
-                e.lit = lit;
-                if lit {
-                    self.light.lighting.remove(&k);
-                }
-            }
-        }
-        for k in r.stale {
-            if let Some(e) = self.chunks.get_mut(&k) {
-                e.meshed = false;
-            }
-        }
-    }
-
-    /// Take the reports that are in. A dead light thread (it panicked) leaves the light as it is, and the gate open.
-    pub(super) fn pump_light(&mut self) {
-        loop {
-            match self.light.rx.try_recv() {
-                Ok(r) => self.apply_report(r),
-                Err(mpsc::TryRecvError::Empty) => return,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    if self.light.outstanding > 0 || !self.light.idle {
-                        log::error!("light: the light thread is gone, light is no longer updated");
-                    }
-                    self.light.outstanding = 0;
-                    self.light.idle = true;
-                    return;
-                }
-            }
-        }
-    }
-
-    /// Wait until the engine has lit everything sent so far (tests).
-    #[cfg(test)]
-    pub(super) fn settle_light(&mut self) {
-        let t = Instant::now();
-        loop {
-            self.pump_light();
-            if self.light_settled() {
-                return;
-            }
-            assert!(t.elapsed() < Duration::from_secs(60), "the light thread did not settle");
-            std::thread::sleep(Duration::from_millis(1));
-        }
-    }
-
-    /// Per frame: take the reports, and when the engine has nothing left to do send it the first light of up to 4 final chunks of
-    /// the render circle that have all 8 neighbours loaded (nearest first). Meshing waits for the engine to settle again.
+    /// Per frame, within `LIGHT_BUDGET`: light up to two final chunks of the render circle that have all
+    /// 8 neighbours loaded (nearest first), one after the other so the queue is empty when meshing runs.
     pub(super) fn light_pending(&mut self, cx: i32, cz: i32) {
-        self.pump_light();
-        if !self.light_settled() {
-            return;
-        }
-        let r2 = self.radius * self.radius;
-        let ready: Vec<Key> = self
-            .ring
-            .iter()
-            .take_while(|&&(dx, dz)| dx * dx + dz * dz <= r2)
-            .map(|&(dx, dz)| (cx + dx, cz + dz))
-            .filter(|&(x, z)| {
-                self.chunks.get(&(x, z)).is_some_and(|e| !e.lit)
-                    && !self.light.lighting.contains(&(x, z))
-                    && self.is_final(x, z)
-                    && (-1..=1).all(|dx| (-1..=1).all(|dz| self.chunks.contains_key(&(x + dx, z + dz))))
-            })
-            .take(4)
-            .collect();
-        for k in ready {
-            self.light_init(k);
+        let deadline = Instant::now() + LIGHT_BUDGET;
+        for _ in 0..2 {
+            if self.light_queue.is_empty() {
+                let r2 = self.radius * self.radius;
+                let next = self.ring.iter().take_while(|&&(dx, dz)| dx * dx + dz * dz <= r2).map(|&(dx, dz)| (cx + dx, cz + dz)).find(|&(x, z)| {
+                    self.chunks.get(&(x, z)).is_some_and(|e| !e.lit)
+                        && self.is_final(x, z)
+                        && (-1..=1).all(|dx| (-1..=1).all(|dz| self.chunks.contains_key(&(x + dx, z + dz))))
+                });
+                match next {
+                    Some(k) => self.init_chunk(k),
+                    None => break,
+                }
+            }
+            self.run_light(Some(deadline));
+            if !self.light_queue.is_empty() || Instant::now() >= deadline {
+                break;
+            }
         }
     }
 }
@@ -706,7 +406,7 @@ mod tests {
     use super::*;
     use crate::world::chunk::VOLUME;
 
-    /// 3x3 chunks of flat stone up to y = 9, all lit by the light thread, queue drained.
+    /// 3x3 chunks of flat stone up to y = 9, all lit with `init_chunk`, queue drained.
     fn flat() -> ChunkManager {
         let mut m = ChunkManager::new(1, 1);
         for cz in -1..=1 {
@@ -724,7 +424,7 @@ mod tests {
         }
         for cz in -1..=1 {
             for cx in -1..=1 {
-                m.light_init((cx, cz));
+                m.init_chunk((cx, cz));
             }
         }
         settle(&mut m);
@@ -733,48 +433,20 @@ mod tests {
     }
 
     fn settle(m: &mut ChunkManager) {
-        m.settle_light();
-    }
-
-    /// The same 3x3 flat world in an engine run directly (no thread, no messages across): `apply` is what the thread does with
-    /// each message, `run_light(None)` drains the queue.
-    fn flat_world() -> LightWorld {
-        let mut w = LightWorld::default();
-        for cz in -1..=1 {
-            for cx in -1..=1 {
-                let mut b = vec![0u8; VOLUME];
-                for x in 0..16 {
-                    for z in 0..16 {
-                        for y in 0..10 {
-                            b[idx(x, y, z)] = 1;
-                        }
-                    }
-                }
-                w.apply(Msg::Chunk((cx, cz), b));
-            }
-        }
-        for cz in -1..=1 {
-            for cx in -1..=1 {
-                w.apply(Msg::Init((cx, cz)));
-            }
-        }
-        w.run_light(None);
-        w
+        m.run_light(None);
     }
 
     /// `relit` (one chunk lookup per cell) gives what the plain formula of `update_region` gives (`saved_light` / `raw_block` /
-    /// open-sky test for the cell and its six neighbours): mid-chunk, on borders and corners, at the outer edge of the loaded area and
-    /// at the bottom and top of the world, with sky and block light in a settled state and in a stale one.
+    /// `sees_sky` for the cell and its six neighbours): mid-chunk, on borders and corners, at the outer edge of the loaded area and at
+    /// the bottom and top of the world, with sky and block light in a settled state and in a stale one.
     #[test]
     fn relit_matches_the_plain_formula() {
-        let slow = |w: &LightWorld, kind: Kind, x: i32, y: i32, z: i32| {
-            let old = w.saved_light(kind, x, y, z) as i32;
-            let id = w.raw_block(x, y, z);
+        let slow = |m: &ChunkManager, kind: Kind, x: i32, y: i32, z: i32| {
+            let old = m.saved_light(kind, x, y, z) as i32;
+            let id = m.raw_block(x, y, z);
             let opacity = (light_opacity(id) as i32).max(1);
-            let sees_sky = y >= H as i32
-                || (y >= 0 && w.chunks.get(&(x >> 4, z >> 4)).is_some_and(|e| y >= e.height[((z & 15) << 4 | (x & 15)) as usize] as i32));
             let source = match kind {
-                Kind::Sky => if sees_sky { 15 } else { 0 },
+                Kind::Sky => if m.sees_sky(x, y, z) { 15 } else { 0 },
                 Kind::Block => light_value(id) as i32,
             };
             let new = if opacity >= 15 && source == 0 {
@@ -782,51 +454,31 @@ mod tests {
             } else {
                 let n = [(-1, 0, 0), (1, 0, 0), (0, -1, 0), (0, 1, 0), (0, 0, -1), (0, 0, 1)]
                     .iter()
-                    .map(|&(dx, dy, dz)| w.saved_light(kind, x + dx, y + dy, z + dz) as i32)
+                    .map(|&(dx, dy, dz)| m.saved_light(kind, x + dx, y + dy, z + dz) as i32)
                     .max()
                     .unwrap_or(0);
                 (n - opacity).max(0).max(source)
             };
             (old, new)
         };
-        let mut w = flat_world();
-        w.apply(Msg::Edit { x: 14, y: 11, z: 8, id: 89 }); // glowstone near the +X border
-        w.apply(Msg::Edit { x: 5, y: 12, z: 5, id: 1 }); // a roof
-        w.run_light(None);
-        w.apply(Msg::Edit { x: 0, y: 11, z: 0, id: 89 }); // not run: the stored light is stale around it, so old != new somewhere
-        w.apply(Msg::Edit { x: 16, y: 10, z: 15, id: 1 });
+        let mut m = flat();
+        m.set_block(14, 11, 8, 89); // glowstone near the +X border
+        m.set_block(5, 12, 5, 1); // a roof
+        settle(&mut m);
+        m.set_block(0, 11, 0, 89); // not settled: the stored light is stale around it, so old != new somewhere
+        m.set_block(16, 10, 15, 1);
         let mut differs = false;
         for kind in [Kind::Sky, Kind::Block] {
             for (x, z) in [(5, 5), (0, 0), (15, 15), (16, 0), (-1, -1), (15, 8), (8, 0), (14, 8), (16, 15), (31, 31), (-16, -16), (0, 15)] {
                 for y in [0, 1, 9, 10, 11, 12, 60, 126, 127] {
-                    let want = slow(&w, kind, x, y, z);
+                    let want = slow(&m, kind, x, y, z);
                     differs |= want.0 != want.1;
-                    assert_eq!(w.relit(kind, x, y, z), Some(want), "{kind:?} ({x}, {y}, {z})");
+                    assert_eq!(m.relit(kind, x, y, z), Some(want), "{kind:?} ({x}, {y}, {z})");
                 }
             }
         }
         assert!(differs, "the stale state must exercise old != new");
-        assert_eq!(w.relit(Kind::Sky, 100, 5, 0), None, "chunk not loaded");
-    }
-
-    /// The light thread (messages in, reports out, applied to the render thread's copy) lights a world exactly as the engine does
-    /// when it is run directly, edits included: the same light arrays, height maps and blocks in every chunk after each step.
-    #[test]
-    fn light_thread_matches_the_engine() {
-        let mut m = flat();
-        let mut w = flat_world();
-        for (x, y, z, id) in [(5, 12, 5, 1u8), (14, 11, 8, 89), (0, 11, 0, 89), (16, 10, 15, 1), (5, 12, 5, 0), (14, 11, 8, 0), (20, 30, 3, 1)] {
-            m.set_block(x, y, z, id);
-            w.apply(Msg::Edit { x, y, z, id });
-            w.run_light(None);
-            m.settle_light();
-            for (k, e) in &m.chunks {
-                let c = &w.chunks[k];
-                assert!(e.blocks == c.blocks && e.height == c.height, "blocks or height of chunk {k:?} after ({x}, {y}, {z}) = {id}");
-                assert!(e.light == c.light, "light of chunk {k:?} after ({x}, {y}, {z}) = {id}");
-                assert!(e.lit, "chunk {k:?} lit");
-            }
-        }
+        assert_eq!(m.relit(Kind::Sky, 100, 5, 0), None, "chunk not loaded");
     }
 
     /// Sky light: 15 over open ground, 0 inside stone, a roof dims the cell under it by one step of

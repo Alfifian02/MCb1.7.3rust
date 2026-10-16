@@ -22,6 +22,5 @@ pub mod decor;
 pub mod path;
 pub mod rail;
 pub mod boat;
-pub mod far;
 pub mod minecart;
-pub mod portal;
+pub mod lod;

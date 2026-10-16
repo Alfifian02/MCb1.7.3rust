@@ -30,7 +30,7 @@ impl FirstPersonCamera {
             fov_y: 70_f32.to_radians(),
             aspect: 1.0,
             znear: 0.05,
-            zfar: crate::world::far::FAR_BLOCKS + 96.0,
+            zfar: 256.0,
         }
     }
 

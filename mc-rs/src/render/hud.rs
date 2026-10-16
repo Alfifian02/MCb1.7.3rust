@@ -46,9 +46,7 @@ pub const GUI: &[u8] = include_bytes!("../../assets/gui.rgba");
 pub const CONTAINERS: &[u8] = include_bytes!("../../assets/containers.rgba");
 /// The touch d-pad's sprites (Stone D-pad pack, 256 x 256, `tools/gen_dpad.py`): the last 256 rows of the HUD texture.
 pub const DPAD_SHEET: &[u8] = include_bytes!("../../assets/dpad.rgba");
-/// The title screen's sheet (256 x 272, `tools/gen_menu.py`): `mclogo.png`, then `background.png`: the last rows of the HUD texture.
-pub const MENU_SHEET: &[u8] = include_bytes!("../../assets/menu.rgba");
-const SHEET_H: f32 = 2576.0;
+const SHEET_H: f32 = 2304.0;
 /// Where `terrain.png` (untinted, 256 x 256) starts in the HUD texture: block icons are drawn from it (`push_cube`, `push_tile`).
 const TERRAIN_Y: f32 = 768.0;
 
@@ -77,8 +75,6 @@ pub mod sprites {
     /// the arrows are 22 x 22, the four corners 18 x 18. Pressed ones are 22 rows lower; sneak / jump are 64 x 64.
     pub const DPAD: [Sprite; 8] = dpad_row(2048.0);
     pub const DPAD_PRESSED: [Sprite; 8] = dpad_row(2070.0);
-    pub const LOGO: [Sprite; 2] = [(0.0, 2304.0, 155.0, 44.0), (0.0, 2349.0, 155.0, 44.0)];
-    pub const DIRT: Sprite = (0.0, 2560.0, 16.0, 16.0);
     pub const SNEAK: Sprite = (0.0, 2112.0, 64.0, 64.0);
     pub const SNEAK_ON: Sprite = (64.0, 2112.0, 64.0, 64.0);
     pub const JUMP: Sprite = (128.0, 2112.0, 64.0, 64.0);
@@ -135,7 +131,7 @@ fn lin(c: vec3<f32>) -> vec3<f32> {
 
 // Sharp bilinear: nearest inside a texel, a one-pixel blend only across a texel edge. The sprites are drawn at a fractional scale of the
 // screen, where plain nearest makes some texels one pixel wider than their neighbours (the grain on icons and the hotbar).
-const SHEET: vec2<f32> = vec2<f32>(256.0, 2576.0); // `SHEET_H`
+const SHEET: vec2<f32> = vec2<f32>(256.0, 2304.0); // `SHEET_H`
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
@@ -229,7 +225,7 @@ impl HudPipeline {
         });
         queue.write_texture(
             wgpu::TexelCopyTextureInfo { texture: &items_tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-            &[crate::render::atlas::ITEMS, GUI, crate::render::atlas::TERRAIN, CONTAINERS, DPAD_SHEET, MENU_SHEET].concat(), // items, the GUI sheet, terrain.png, the panels, the d-pad, the title screen
+            &[crate::render::atlas::ITEMS, GUI, crate::render::atlas::TERRAIN, CONTAINERS, DPAD_SHEET].concat(), // items, the GUI sheet, terrain.png, the panels, the d-pad
             wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(256 * 4), rows_per_image: Some(SHEET_H as u32) },
             wgpu::Extent3d { width: 256, height: SHEET_H as u32, depth_or_array_layers: 1 },
         );
@@ -333,15 +329,11 @@ impl HudPipeline {
     }
 
     /// A sprite of the HUD texture (`sprites`) stretched over the box (x, y, w, h), top-left origin; the alpha cuts it out.
-    pub fn push_gui(out: &mut Vec<HudVertex>, x: f32, y: f32, w: f32, h: f32, spr: sprites::Sprite) {
-        Self::push_gui_tinted(out, x, y, w, h, spr, [1.0; 4]);
-    }
-
-    /// `push_gui` multiplied by `c` (the dirt background is `background.png` at 25% grey).
-    pub fn push_gui_tinted(out: &mut Vec<HudVertex>, x: f32, y: f32, w: f32, h: f32, (sx, sy, sw, sh): sprites::Sprite, c: [f32; 4]) {
+    pub fn push_gui(out: &mut Vec<HudVertex>, x: f32, y: f32, w: f32, h: f32, (sx, sy, sw, sh): sprites::Sprite) {
         // A hair inside the sprite, so nearest sampling never picks up its neighbour.
         let (u0, u1) = ((sx + 0.01) / 256.0, (sx + sw - 0.01) / 256.0);
         let (v0, v1) = ((sy + 0.01) / SHEET_H, (sy + sh - 0.01) / SHEET_H);
+        let c = [1.0; 4];
         let v = |px: f32, py: f32, u: f32, vv: f32| HudVertex { pos: [px, py], color: c, uv: [u, vv] };
         let (tl, tr, br, bl) = (v(x, y, u0, v0), v(x + w, y, u1, v0), v(x + w, y + h, u1, v1), v(x, y + h, u0, v1));
         out.extend([tl, tr, br, tl, br, bl]);
