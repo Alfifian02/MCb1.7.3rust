@@ -35,7 +35,7 @@ impl Tints {
 }
 
 /// `Block.colorMultiplier` of the blocks that have one: grass top (the side overlay uses it too), tall grass (not the dead\n/// shrub, metadata 0), reeds, leaves (spruce / birch by metadata, else the foliage colour).
-fn tint_of(t: &Tints, id: u8, meta: u8, col: usize) -> f32 {
+pub(crate) fn tint_of(t: &Tints, id: u8, meta: u8, col: usize) -> f32 {
     match id {
         2 | 83 => t.grass[col],
         31 if meta != 0 => t.grass[col],

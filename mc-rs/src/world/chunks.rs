@@ -81,7 +81,7 @@ const LOADS_PER_FRAME: usize = 8;
 /// Chunk coordinate of a world-space coordinate (floor division by 16).
 /// The grass and foliage colour of every column of chunk (cx, cz) (`BlockGrass.colorMultiplier` and friends read the climate of the
 /// column itself, no blending). ponytail: the climate noise is sampled again for every (re)mesh; cache it per chunk if remeshing shows up in a profile.
-fn biome_tints(cm: &mut WorldChunkManager, cx: i32, cz: i32) -> mesh::Tints {
+pub(crate) fn biome_tints(cm: &mut WorldChunkManager, cx: i32, cz: i32) -> mesh::Tints {
     cm.load_block_generator_data(cx * 16, cz * 16, 16, 16);
     let mut t = mesh::Tints::white();
     for i in 0..256 {

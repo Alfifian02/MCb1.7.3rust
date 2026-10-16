@@ -95,7 +95,7 @@ struct App {
     switch: bool,
     pipe: ChunkPipeline,
     chunks: ChunkManager,
-    /// Far terrain behind the chunks (the Tectonic world type only): the view reaches the horizon, see `world::lod`.
+    /// Far terrain behind the chunks (both world types): the view reaches the horizon with the same blocks, see `world::lod`.
     lod: Option<Lod>,
     camera: FirstPersonCamera,
     player: Player,
@@ -260,7 +260,7 @@ impl App {
 
         let mut app = Self {
             gpu, tectonic, switch: false, pipe,
-            chunks, lod: tectonic.then(|| Lod::new(SEED)), camera,
+            chunks, lod: Some(Lod::new(SEED, tectonic)), camera,
             player,
             last_frame: Instant::now(),
             frames: 0,
@@ -358,7 +358,7 @@ impl App {
         let _ = std::fs::remove_dir_all(&self.dir);
         let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as i64);
         self.chunks = ChunkManager::new_typed(SEED, RENDER_DIST, self.tectonic).with_dir(self.dir.clone()); // the old one's workers stop on drop
-        self.lod = self.tectonic.then(|| Lod::new(SEED)); // likewise
+        self.lod = Some(Lod::new(SEED, self.tectonic)); // likewise
         self.chunks.preload(0, 0);
         self.spawn = find_spawn(&self.chunks);
         (self.sleep, self.bed_spawn) = (None, None);
@@ -1708,7 +1708,7 @@ impl App {
         // The shadow pass below does not: terrain hidden from the camera still casts shadows.
         self.chunks.update_visible(self.camera.pos, RENDER_SHAPE, (RENDER_DIST * 16) as f32, (RENDER_VERT * 16) as f32, |min, max| frustum.intersects_aabb(min, max));
         if let Some(l) = self.lod.as_mut() {
-            l.update(&self.gpu.device, e, |min, max| frustum.intersects_aabb(min, max));
+            l.update(&self.gpu.device, e, (RENDER_DIST * 16) as f32, (RENDER_VERT * 16) as f32, |min, max| frustum.intersects_aabb(min, max));
         }
         let fog = sky::fog_color(angle, sky_rgb, rain, thunder);
         let fog = if LEGACY { photon::legacy_lin(fog) } else { fog }; // vanilla values -> the frame's linear space
