@@ -89,7 +89,8 @@ pub fn step_box(player: &mut Player, half: Vec3, dt: f32, jumping: bool, get: Bl
     // Sweep each axis independently. `Entity.moveEntity` in a web: the move is x0.25 / y0.05 / x0.25 and the motion is lost.
     let (vx, vz) = (player.vel.x, player.vel.z);
     let web = touching(player.pos, half, get, 30);
-    let scale = if web { Vec3::new(0.25, 0.05, 0.25) } else { Vec3::ONE };
+    // `BlockSoulSand.onEntityCollidedWithBlock`: motionX / motionZ x 0.4 a tick. ponytail: the move is scaled instead of the motion kept.
+    let scale = if web { Vec3::new(0.25, 0.05, 0.25) } else if touching(player.pos, half, get, 88) { Vec3::new(0.4, 1.0, 0.4) } else { Vec3::ONE };
     let delta = player.vel * scale * dt;
     let boxes = Boxes::collect(player.pos, half, delta, get);
     player.pos = sweep_axis(player.pos, half, delta, &boxes, &mut player.vel, player.on_ground && !(water || lava));

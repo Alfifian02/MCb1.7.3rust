@@ -115,8 +115,6 @@ impl Config {
 
 // ------------------------------------------------------------------------------------------------ JSON (just enough for terrain.json)
 
-// The bundle has no booleans; the parser still reads them.
-#[allow(dead_code)]
 enum J {
     Null,
     Bool(bool),
@@ -922,48 +920,6 @@ impl Tectonic {
         out
     }
 
-    /// Where the ground is at the columns (x0 + i * step, z0 + j * step), i < nx, j < nz, index `i * nz + j`: blocks from the bottom of
-    /// the world, fractional (the zero of the density between two cell corners, found by bisection over the corner levels, so
-    /// ~5 evaluations of the 3D part per column instead of one per block). 0 if even the bottom is open, `height` if the top is
-    /// solid. For the far-terrain mesh: at a cell-corner column it is where `chunk` puts the top block, give or take one block.
-    // ponytail: assumes the density falls once through zero going up (the pack's caves are stubbed out, so it does); an overhang
-    // or a floating island would show its lowest or highest surface depending on where the bisection lands.
-    pub fn heights(&self, x0: i32, z0: i32, nx: usize, nz: usize, step: i32) -> Vec<f32> {
-        let Some(&arg) = self.interps.first() else { return vec![0.0; nx * nz] };
-        let ny = self.height / 8;
-        let g = Grid { on: false, x0: 0, z0: 0, min_y: self.min_y, ny: 2, tabs: Vec::new() };
-        let mut m = Memo::new();
-        let mut out = Vec::with_capacity(nx * nz);
-        for i in 0..nx {
-            for j in 0..nz {
-                m.clear(); // one column's memo at a time
-                let (x, z) = (x0 + i as i32 * step, z0 + j as i32 * step);
-                let mut at = |k: usize| self.ev(arg, x, self.min_y + k as i32 * 8, z, &mut m, &g);
-                let (mut lo, mut hi) = (0usize, ny);
-                let (mut a, mut b) = (at(lo), at(hi));
-                out.push(if a <= 0.0 {
-                    0.0
-                } else if b > 0.0 {
-                    self.height as f32
-                } else {
-                    while hi - lo > 1 {
-                        let mid = (lo + hi) / 2;
-                        let v = at(mid);
-                        if v > 0.0 {
-                            lo = mid;
-                            a = v;
-                        } else {
-                            hi = mid;
-                            b = v;
-                        }
-                    }
-                    ((lo as f64 + a / (a - b)) * 8.0) as f32
-                });
-            }
-        }
-        out
-    }
-
     /// A named `NormalNoise` of the pack at a point (tests, tuning).
     pub fn noise(&self, name: &str, x: f64, y: f64, z: f64) -> Option<f64> {
         self.noise_ix.get(name).map(|&i| self.noises[i].value(x, y, z))
@@ -1175,19 +1131,5 @@ mod tests {
             let (p, q) = (top(&c0, h, 15, z), top(&c1, h, 0, z));
             assert!((p - q).abs() <= 6, "seam at z {z}: {p} vs {q}");
         }
-    }
-
-    /// `heights` agrees with the python reference (`tools/tectonic.py golden`) and with the blocks `chunk` makes.
-    #[test]
-    fn heights_match_the_python_reference_and_the_chunk() {
-        let t = Tectonic::new(0xCAFEBABE, Config::compact(128, 64));
-        let h = t.heights(0, 0, 3, 2, 4); // columns (0,0) (0,4) (4,0) (4,4) (8,0) (8,4)
-        let c = t.chunk(0, 0);
-        for (k, (x, z)) in [(0usize, 0usize), (0, 4), (4, 0), (4, 4), (8, 0), (8, 4)].iter().enumerate() {
-            let tb = top(&c, 128, *x, *z) as f32;
-            assert!((h[k] - 1.0 - tb).abs() <= 1.0, "column {x},{z}: height {} vs top block {tb}", h[k]);
-        }
-        close(h[0] as f64, 76.709192, 0.01, "height (0,0)");
-        close(t.heights(-37, 91, 1, 1, 1)[0] as f64, 66.674136, 0.01, "height (-37,91)");
     }
 }

@@ -16,6 +16,7 @@ use crate::world::chunks::ChunkManager;
 use crate::world::gen::noise::JavaRandom;
 use crate::world::items::{Drops, ItemStack};
 use crate::world::pick::{replaceable, torch_stays, BED_DIR};
+use crate::world::portal;
 use crate::world::rail;
 use crate::world::redstone::{self, can_provide_power, SIDE};
 
@@ -250,7 +251,8 @@ impl Ticks {
             }
             // BlockRail.onBlockAdded: the shape of the new rail, and of the rails it joins.
             27 | 28 | 66 => rail::added(w, (x, y, z)),
-            // BlockFire.onBlockAdded (ponytail: no portal from obsidian before M11).
+            // BlockFire.onBlockAdded: a fire on obsidian may light a portal (a lit one replaces the fire).
+            51 if y > 0 && bid(w, x, y - 1, z) == 49 && portal::try_create(w, (x, y, z)) => {}
             51 if fire_stays(w, x, y, z) => self.schedule(x, y, z, 51, 40),
             51 => {
                 w.set_block(x, y, z, 0);
@@ -282,6 +284,10 @@ impl Ticks {
             }
             // BlockFire / BlockSnow.onNeighborBlockChange: no ground (or fuel) left.
             51 if !fire_stays(w, x, y, z) => {
+                w.set_block(x, y, z, 0);
+            }
+            // BlockPortal.onNeighborBlockChange (ponytail: it never spawns a pigman, there are none yet).
+            90 if portal::broken(&*w, (x, y, z)) => {
                 w.set_block(x, y, z, 0);
             }
             78 if !snow_ok(bid(w, x, y - 1, z)) => {

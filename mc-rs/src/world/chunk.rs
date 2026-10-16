@@ -297,6 +297,7 @@ pub fn collision(id: u8) -> Option<[f32; 6]> {
         CAKE_PHYS..=121 => Some([(1 + 2 * (id - CAKE_PHYS)) as f32 / 16.0, 0.0, 1.0 / 16.0, 15.0 / 16.0, 0.5 - 1.0 / 16.0, 15.0 / 16.0]),
         81 => Some([I, 0.0, I, 1.0 - I, 1.0 - I, 1.0 - I]),
         85 => Some([0.0, 0.0, 0.0, 1.0, 1.5, 1.0]),
+        88 => Some([0.0, 0.0, 0.0, 1.0, 14.0 / 16.0, 1.0]), // `BlockSoulSand`: 2/16 lower
         _ => Some([0.0, 0.0, 0.0, 1.0, 1.0, 1.0]),
     }
 }
@@ -304,7 +305,7 @@ pub fn collision(id: u8) -> Option<[f32; 6]> {
 /// `isOpaqueCube`: hides the faces behind it. Not the plants, fluids and boxes above; leaves, glass and ice stay in, as the
 /// mesher draws them as opaque cubes.
 pub fn opaque(id: u8) -> bool {
-    id != 0 && !is_plant(id) && !is_fluid(id) && !matches!(id, 26 | 27 | 28 | 44 | 50 | 51 | 53 | 59 | 60 | 63..=68 | 71 | 78 | 81 | 85 | 92 | 96)
+    id != 0 && !is_plant(id) && !is_fluid(id) && !matches!(id, 26 | 27 | 28 | 44 | 50 | 51 | 53 | 59 | 60 | 63..=68 | 71 | 78 | 81 | 85 | 90 | 92 | 96)
 }
 
 /// `Block.lightOpacity`: how much light a block eats (255 = fully opaque). Default is 255 for
@@ -349,7 +350,7 @@ pub fn height_map(blocks: &[u8]) -> [u8; 256] {
     for x in 0..W {
         for z in 0..D {
             let base = idx(x, 0, z);
-            let mut y = H - 1;
+            let mut y = H; // the cell at H - 1 counts too: a solid roof (the Nether) is height H
             while y > 0 && light_opacity(blocks[base + y - 1]) == 0 {
                 y -= 1;
             }

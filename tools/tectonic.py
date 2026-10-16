@@ -461,29 +461,6 @@ class Terrain:
         return out
 
 
-def column_height(t, x, z, height=128, sea=64):
-    """`Tectonic::heights` for one column: bisection over the cell-corner levels, then the zero of the linear density between two."""
-    sh = sea - 63
-    t.reset()
-    t.interp_mode = None
-    arg = t.interp_nodes()[0]["argument"]
-    at = lambda k: t.ev(arg, x, k * 8 - sh, z)
-    lo, hi = 0, height // 8
-    a, b = at(lo), at(hi)
-    if a <= 0:
-        return 0.0
-    if b > 0:
-        return float(height)
-    while hi - lo > 1:
-        mid = (lo + hi) // 2
-        v = at(mid)
-        if v > 0:
-            lo, a = mid, v
-        else:
-            hi, b = mid, v
-    return (lo + a / (a - b)) * 8.0
-
-
 def surface(col, sea=64):
     for y in range(len(col) - 1, -1, -1):
         if col[y] > 0:
@@ -520,8 +497,6 @@ def golden(t):
             lines.append(f"TOP {cx} {cz} {x} {z} {surface(ch[x][z])}")
         lines.append(f"DENS {cx} {cz} 8 70 8 {ch[8][8][70]:.6f}")
         lines.append(f"DENS {cx} {cz} 3 20 12 {ch[3][12][20]:.6f}")
-    lines.append(f"HEIGHT 0 0 {column_height(c, 0, 0):.6f}")
-    lines.append(f"HEIGHT -37 91 {column_height(c, -37, 91):.6f}")
     return "\n".join(lines)
 
 

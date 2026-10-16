@@ -662,11 +662,13 @@ pub struct Mobs {
     acc: f32,
     clock: u32,
     burst: u32,
+    /// The Nether has no overworld mobs (its own, ghast and pigman, are not written yet).
+    pub no_spawn: bool,
 }
 
 impl Mobs {
     pub fn new(seed: i64) -> Self {
-        Self { list: Vec::new(), arrows: Vec::new(), rng: JavaRandom::new(seed ^ 0x5049_47), seed, acc: 0.0, clock: 0, burst: 200 }
+        Self { list: Vec::new(), arrows: Vec::new(), rng: JavaRandom::new(seed ^ 0x5049_47), seed, acc: 0.0, clock: 0, burst: 200, no_spawn: false }
     }
 
     /// `Chunk.func_997_a(987234911)`: slimes spawn in one chunk in ten.
@@ -782,7 +784,9 @@ impl Mobs {
                     false
                 })
             });
-            self.spawn(c);
+            if !self.no_spawn {
+                self.spawn(c);
+            }
         }
         for m in &mut self.list {
             m.step(dt, c.get);

@@ -73,7 +73,7 @@ impl Region {
     }
 
     /// `World.setBlock` (`Chunk.setBlockID`): a different id resets the cell's metadata to 0, the same id changes nothing.
-    fn set(&mut self, x: i32, y: i32, z: i32, id: u8) {
+    pub(super) fn set(&mut self, x: i32, y: i32, z: i32, id: u8) {
         if self.get(x, y, z) != id {
             self.set_meta(x, y, z, id, 0);
         }
@@ -138,7 +138,7 @@ pub(crate) fn is_solid(b: u8) -> bool {
 /// Block.opaqueCubeLookup. Leaves are in it (the Java fills the lookup in the constructor, before
 /// `graphicsLevel` is set), which is why trees do not replace leaves with leaves.
 fn opaque(b: u8) -> bool {
-    matches!(b, STONE..=COBBLE | BEDROCK | SAND..=LOG | LEAVES | ORE_LAPIS | SANDSTONE | MOSSY | ORE_DIAMOND | ORE_REDSTONE | CLAY | PUMPKIN | CHEST | 5)
+    matches!(b, STONE..=COBBLE | BEDROCK | SAND..=LOG | LEAVES | ORE_LAPIS | SANDSTONE | 49 | 87..=89 | MOSSY | ORE_DIAMOND | ORE_REDSTONE | CLAY | PUMPKIN | CHEST | 5)
 }
 
 /// Block.lightOpacity.
@@ -171,6 +171,9 @@ fn can_stay(w: &Region, id: u8, x: i32, y: i32, z: i32) -> bool {
 impl OverworldGenerator {
     /// ChunkProviderGenerate.populate for chunk (cx, cz); `w` must start at (cx, cz).
     pub fn populate(&mut self, w: &mut Region, cx: i32, cz: i32, cm: &mut WorldChunkManager) {
+        if let Some(n) = self.nether.as_mut() {
+            return n.populate(w, cx, cz);
+        }
         let (bx, bz) = (cx * 16, cz * 16);
         let biome = cm.load_block_generator_data(bx + 16, bz + 16, 1, 1)[0];
         let mut r = JavaRandom::new(self.seed);
@@ -514,7 +517,7 @@ fn loot(r: &mut JavaRandom) -> Option<ItemStack> {
 }
 
 /// WorldGenFlowers: yellow/red flowers and both mushrooms.
-fn plants(w: &mut Region, r: &mut JavaRandom, id: u8, x: i32, y: i32, z: i32) {
+pub(super) fn plants(w: &mut Region, r: &mut JavaRandom, id: u8, x: i32, y: i32, z: i32) {
     for _ in 0..64 {
         let (a, b) = (r.next_int_bound(8), r.next_int_bound(8));
         let x2 = x + a - b;

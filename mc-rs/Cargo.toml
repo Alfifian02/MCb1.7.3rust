@@ -18,6 +18,7 @@ log = "0.4"
 env_logger = "0.11"
 pollster = "0.4"
 embeddium = { path = "../embeddium" }
+lod = { path = "../lod" }
 tectonic = { path = "../tectonic" }
 
 [dev-dependencies]

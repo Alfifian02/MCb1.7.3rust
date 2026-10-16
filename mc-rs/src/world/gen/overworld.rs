@@ -79,6 +79,8 @@ pub struct OverworldGenerator {
     max_cols: usize,
     /// The second world type (the `tectonic` crate): its density replaces the density pass; surface, caves and populate are unchanged.
     tectonic: Option<tectonic::Tectonic>,
+    /// The Nether (`nether.rs`): when set, `generate` and `populate` are its own.
+    pub(super) nether: Option<crate::world::gen::nether::Nether>,
 }
 
 /// The five noise samples of one density grid column (17 high), in the order `density` reads them.
@@ -105,7 +107,19 @@ impl OverworldGenerator {
         let noise_main = OctaveNoise::new(&mut rand, 10);
         let noise_height = OctaveNoise::new(&mut rand, 16);
         let noise_spawner = OctaveNoise::new(&mut rand, 8);
-        Self { seed, rand, noise_lim, noise_low, noise_base, noise_sand, noise_stone, noise_main, noise_height, noise_spawner, cols: HashMap::new(), max_cols: MAX_COLS, tectonic: None }
+        Self { seed, rand, noise_lim, noise_low, noise_base, noise_sand, noise_stone, noise_main, noise_height, noise_spawner, cols: HashMap::new(), max_cols: MAX_COLS, tectonic: None, nether: None }
+    }
+
+    /// The Nether (`gen::nether`): `generate` and `populate` hand over to it, everything else here stays unused.
+    pub fn new_nether(seed: i64) -> Self {
+        let mut g = Self::new(seed);
+        g.nether = Some(crate::world::gen::nether::Nether::new(seed));
+        g
+    }
+
+    /// `new` on the Tectonic world type.
+    pub fn new_tectonic(seed: i64) -> Self {
+        Self::new(seed).tectonic()
     }
 
     /// This generator on the Tectonic world type: the mod's terrain, fitted to this 128-high world with the sea at `SEA_LEVEL`.
@@ -127,6 +141,16 @@ impl OverworldGenerator {
 
     /// provideChunk: one 16x128x16 chunk (terrain, surface, caves), indexed `(x << 11) | (z << 7) | y`.
     pub fn generate(&mut self, chunk_x: i32, chunk_z: i32, cm: &mut WorldChunkManager) -> Vec<u8> {
+        if let Some(n) = self.nether.as_mut() {
+            return n.generate(chunk_x, chunk_z);
+        }
+        let mut blocks = self.generate_far(chunk_x, chunk_z, cm);
+        caves::carve(self.seed, chunk_x, chunk_z, &mut blocks);
+        blocks
+    }
+
+    /// `generate` without the caves: the land as seen from far away (`world::far`); they rarely reach the surface and cost the most.
+    pub fn generate_far(&mut self, chunk_x: i32, chunk_z: i32, cm: &mut WorldChunkManager) -> Vec<u8> {
         self.rand.set_seed(chunk_seed(chunk_x, chunk_z));
         let biomes = cm.load_block_generator_data(chunk_x * 16, chunk_z * 16, 16, 16);
         let mut blocks = vec![block::AIR; VOLUME];
@@ -152,7 +176,6 @@ impl OverworldGenerator {
             self.generate_terrain(chunk_x, chunk_z, &mut blocks, &cm.temperature, &cm.humidity);
         }
         self.replace_blocks_for_biome(chunk_x, chunk_z, &mut blocks, &biomes);
-        caves::carve(self.seed, chunk_x, chunk_z, &mut blocks);
         blocks
     }
 
@@ -167,8 +190,15 @@ impl OverworldGenerator {
         self.noise_main.generate_2d_into(std::slice::from_mut(&mut c.main), gx, gz, 1, 1, 1.121, 1.121);
         self.noise_height.generate_2d_into(std::slice::from_mut(&mut c.height), gx, gz, 1, 1, 200.0, 200.0);
         self.noise_base.generate_into(&mut c.base, xf, 0.0, zf, 1, 17, 1, 684.412 / 80.0, 684.412 / 160.0, 684.412 / 80.0);
-        self.noise_lim.generate_into(&mut c.lim, xf, 0.0, zf, 1, 17, 1, 684.412, 684.412, 684.412);
-        self.noise_low.generate_into(&mut c.low, xf, 0.0, zf, 1, 17, 1, 684.412, 684.412, 684.412);
+        // C2ME lazy noise: the blend in `density` takes `lim` alone where `mix < 0` and `low` alone where `mix > 1` (about 88% of the
+        // points need only one of the two), and `mix` comes from `base`, a property of this column alone, so the mask is the same
+        // for every chunk that reads it and the cache stays valid. Same expression as the blend (a NaN needs both). The unread
+        // samples stay 0.0 and are never read.
+        let mix = |b: f64| (b / 10.0 + 1.0) / 2.0;
+        let need_lim: [bool; 17] = std::array::from_fn(|i| !(mix(c.base[i]) > 1.0));
+        let need_low: [bool; 17] = std::array::from_fn(|i| !(mix(c.base[i]) < 0.0));
+        self.noise_lim.generate_masked_into(&mut c.lim, xf, 0.0, zf, 1, 17, 1, 684.412, 684.412, 684.412, &need_lim);
+        self.noise_low.generate_masked_into(&mut c.low, xf, 0.0, zf, 1, 17, 1, 684.412, 684.412, 684.412, &need_low);
         self.cols.insert((gx, gz), c);
     }
 
@@ -446,6 +476,35 @@ mod tests {
             let fresh = OverworldGenerator::new(7).generate(cx, cz, &mut cm);
             assert_eq!(shared.generate(cx, cz, &mut cm), fresh, "chunk ({cx}, {cz})");
         }
+    }
+
+    /// The lazy column (the unread lim / low samples left out) holds, at every sample the blend reads, the plain full-column value
+    /// bit for bit; `matches_java_reference` then covers terrain made through it against the real game.
+    #[test]
+    fn lazy_columns_match_the_plain_noise() {
+        let mut g = OverworldGenerator::new(12345);
+        let mut skipped = 0;
+        for (gx, gz) in [(0, 0), (-1, 0), (3, -5), (7, 7), (-9, 12), (20, -20), (100, 100), (-300, 50)] {
+            g.column(gx, gz);
+            let c = &g.cols[&(gx, gz)];
+            let (mut lim, mut low) = ([0.0; 17], [0.0; 17]);
+            g.noise_lim.generate_into(&mut lim, gx as f64, 0.0, gz as f64, 1, 17, 1, 684.412, 684.412, 684.412);
+            g.noise_low.generate_into(&mut low, gx as f64, 0.0, gz as f64, 1, 17, 1, 684.412, 684.412, 684.412);
+            for i in 0..17 {
+                let mix = (c.base[i] / 10.0 + 1.0) / 2.0;
+                if !(mix > 1.0) {
+                    assert_eq!(c.lim[i].to_bits(), lim[i].to_bits(), "lim ({gx}, {gz}) y {i}");
+                } else {
+                    skipped += 1;
+                }
+                if !(mix < 0.0) {
+                    assert_eq!(c.low[i].to_bits(), low[i].to_bits(), "low ({gx}, {gz}) y {i}");
+                } else {
+                    skipped += 1;
+                }
+            }
+        }
+        assert!(skipped > 0, "no sample was left out: the mask did nothing");
     }
 
     /// The Tectonic world type is deterministic, has relief and sea (9 chunks 24 apart, seed 0xCAFEBABE: 54..77 in the Python

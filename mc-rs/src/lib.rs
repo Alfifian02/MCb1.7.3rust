@@ -9,8 +9,10 @@ mod world;
 mod gpu;
 mod input;
 mod immersive;
+mod menu;
 
 use crate::input::touch_ui::{PointerRole, ScreenEv, TouchUi};
+use crate::menu::Menu;
 use crate::render::hud::{sprites as sp, HudPipeline, HudVertex};
 
 use android_activity::{AndroidApp, InputStatus, MainEvent, PollEvent};
@@ -33,6 +35,7 @@ use crate::render::post::{self, Post};
 use crate::render::vl::{self, LightShafts};
 use crate::render::clouds::{self, Clouds, CloudsFrame};
 use crate::render::pack::BiomeEnv;
+use crate::world::lod::{self, Lod};
 use crate::world::pick::{self, Hit};
 use crate::world::dig::{self, Dig};
 use crate::world::chest::{self, Chest};
@@ -42,7 +45,7 @@ use crate::world::items::{self, Drops, Inventory, ItemStack};
 use crate::world::gear::{self, Hook, Used};
 use crate::world::boat;
 use crate::world::minecart;
-use crate::world::lod::{self, Lod};
+use crate::world::portal;
 use crate::world::mobs::{self, Ctx, Ev, Mobs};
 use crate::world::ticks::{self, Ticks};
 use crate::world::save::{self, Level};
@@ -58,7 +61,9 @@ use crate::render::weather;
 /// Render distance in chunks (a circle of this radius is meshed and drawn, two more are generated).
 const RENDER_DIST: i32 = 4;
 /// The world seed (its save folder is `world-<seed>`).
-const SEED: i64 = 0xCAFEBABE;
+/// The world the player is in (its folder): when Android takes the window away the `App` is dropped and built again, and that world
+/// is entered again instead of the title screen.
+static LAST_WORLD: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 /// Vertical render distance in chunks (16 blocks): sections further above or below the eye are not drawn.
 const RENDER_VERT: i32 = 3;
 /// `Sphere`: what is drawn is within `RENDER_DIST` blocks-of-16 in 3D (matches the fog, which is by 3D distance);
@@ -89,14 +94,18 @@ const EYE_HEIGHT: f32 = 1.62 - physics::HALF.y;
 
 struct App {
     gpu: Gpu,
-    /// World type: false = vanilla b1.7.3 terrain, true = Tectonic (the `tectonic` crate). Saved in `<private storage>/worldtype`.
+    /// The world's type (chosen on the create screen, saved in its `info`): false = vanilla b1.7.3 terrain, true = Tectonic (the `tectonic` crate).
     tectonic: bool,
-    /// The renderer button was tapped: the main loop saves, drops this App and starts again on the other backend.
-    switch: bool,
+    /// Far terrain behind the chunks (Voxy-style voxel LoD, `world::lod`): the view reaches the horizon with the same blocks; none in
+    /// the Nether (it would be overworld terrain).
+    lod: Option<Lod>,
+    seed: i64,
+    /// The app's private storage: `saves/<folder>` holds the worlds.
+    root: PathBuf,
+    /// The title screen, world list and world creation; `Some` while no world is loaded.
+    menu: Option<Menu>,
     pipe: ChunkPipeline,
     chunks: ChunkManager,
-    /// Far terrain behind the chunks (both world types): the view reaches the horizon with the same blocks, see `world::lod`.
-    lod: Option<Lod>,
     camera: FirstPersonCamera,
     player: Player,
     last_frame: Instant,
@@ -160,6 +169,12 @@ struct App {
     carts: minecart::Carts,
     /// Detector rails switched on by a cart, to be switched off when it has gone (`scheduleBlockUpdate` of `BlockDetectorRail`).
     detectors: std::collections::HashSet<(i32, i32, i32)>,
+    /// In the Nether (its folder is `<world>/nether`; `<world>/dim` says which one a restart resumes in).
+    nether: bool,
+    /// Time inside a portal, 0..1 (`timeInPortal`: +0.0125 a tick inside, -0.05 outside; at 1 the player travels) and the 10 tick
+    /// cooldown after arriving (`timeUntilPortal`), in seconds.
+    portal_t: f32,
+    portal_cd: f32,
     /// Block updates (scheduled + random ticks, notifications, falling blocks), stepped on the 20 Hz game tick.
     ticks: Ticks,
     item_mesh: ItemMesh,
@@ -207,36 +222,16 @@ struct Gesture {
 }
 
 impl App {
-    async fn init(native_ptr: *mut c_void, width: u32, height: u32, dir: PathBuf, prefer_gl: bool) -> Result<Self, String> {
-        let gpu = Gpu::from_android_window(native_ptr, width, height, prefer_gl).await?;
+    async fn init(native_ptr: *mut c_void, width: u32, height: u32, dir: PathBuf) -> Result<Self, String> {
+        let gpu = Gpu::from_android_window(native_ptr, width, height).await?;
         let surface_format = gpu.surface_format();
         let pipe = ChunkPipeline::new(&gpu.device, surface_format);
         pipe.upload_atlas(&gpu.queue);
 
-        // The terrain around the player must be real before the first frame, so those chunks are loaded (or
-        // generated and populated) here (init runs on its own thread, not the render loop); everything further out
-        // streams in on the worker threads. A saved world resumes where the player stood, a new one at the origin.
-        // One folder per seed: chunks saved for another seed would not fit this terrain.
-        let tectonic = std::fs::read_to_string(dir.join("worldtype")).is_ok_and(|s| s.trim() == "tectonic");
-        let dir = dir.join(world_dir(tectonic));
-        let level = std::fs::read(dir.join("level")).ok().and_then(|b| Level::decode(&b));
-        let mut chunks = ChunkManager::new_typed(SEED, RENDER_DIST, tectonic).with_dir(dir.clone());
-        let (pcx, pcz) = level.as_ref().map_or((0, 0), |l| (chunk_coord(l.pos.x), chunk_coord(l.pos.z)));
-        chunks.preload(pcx, pcz);
-        let spawn = level.as_ref().map_or_else(|| find_spawn(&chunks), |l| l.spawn);
-        let start = level.as_ref().map_or(spawn, |l| l.pos);
-        log::info!("save: {} in {}", if level.is_some() { "resuming" } else { "new world" }, dir.display());
-
-        // Light and mesh the area around the player now: init runs off the render thread, so the first
-        // frame already shows terrain instead of filling in over the next few seconds.
-        let warm = Instant::now();
-        while chunks.meshed() < 24 && warm.elapsed() < Duration::from_secs(8) {
-            chunks.update(&gpu.device, chunk_coord(start.x), chunk_coord(start.z));
-            std::thread::sleep(Duration::from_millis(1));
-        }
-        log::info!("chunks: {} meshed after {:?}", chunks.meshed(), warm.elapsed());
-
-        let mut camera = FirstPersonCamera::spawn_at(start.x, start.y + EYE_HEIGHT, start.z);
+        // No world yet: the title screen is up (`enter_world` loads one, and does it again for `LAST_WORLD` below).
+        let start = glam::Vec3::ZERO;
+        let chunks = ChunkManager::new_typed(0, RENDER_DIST, false);
+        let mut camera = FirstPersonCamera::spawn_at(0.0, 80.0, 0.0);
         // spawn_at defaults to aspect 1.0 and resize() only runs when the size changes, so
         // without this the 3D view is squashed horizontally onto the real screen shape.
         camera.aspect = width as f32 / height as f32;
@@ -259,8 +254,8 @@ impl App {
         let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as i64);
 
         let mut app = Self {
-            gpu, tectonic, switch: false, pipe,
-            chunks, lod: Some(Lod::new(SEED, tectonic)), camera,
+            gpu, tectonic: false, lod: None, seed: 0, root: dir.clone(), menu: Some(Menu::new(&dir)), pipe,
+            chunks, camera,
             player,
             last_frame: Instant::now(),
             frames: 0,
@@ -300,6 +295,9 @@ impl App {
             boats: boat::Boats::default(),
             carts: minecart::Carts::new(seed),
             detectors: std::collections::HashSet::new(),
+            nether: false,
+            portal_t: 0.0,
+            portal_cd: 0.0,
             ticks: Ticks::new(seed),
             item_mesh,
             screen: None,
@@ -317,36 +315,134 @@ impl App {
             cpu_acc: 0.0,
             gesture: None,
             vitals: Vitals::default(),
-            spawn,
+            spawn: start,
             sleep: None,
             bed_spawn: None,
             dir,
             save_acc: 0.0,
         };
-        if let Some(l) = level {
-            app.restore(l);
-        }
-        if let Some((p, s)) = std::fs::read(app.dir.join("decor")).ok().and_then(|b| decor::decode(&b)) {
-            (app.paintings, app.signs) = (p, s.into_iter().collect());
+        app.touch.set_menu(true);
+        let last = LAST_WORLD.lock().ok().and_then(|l| l.clone());
+        if let Some(info) = last.and_then(|f| menu::list(&app.root).into_iter().find(|i| i.folder == f)) {
+            app.enter_world(&info);
         }
         Ok(app)
     }
 
-    /// The pause menu's world-type button: save this world (it stays in its own folder), flip the type, remember it, and start a
-    /// fresh world of the other type (its folder is wiped, as a reset does).
-    fn switch_world_type(&mut self) {
-        self.save(usize::MAX);
-        self.tectonic = !self.tectonic;
-        let root = self.dir.parent().map_or_else(std::env::temp_dir, |p| p.to_path_buf());
-        let _ = std::fs::write(root.join("worldtype"), if self.tectonic { "tectonic" } else { "vanilla" });
-        self.dir = root.join(world_dir(self.tectonic));
-        self.reset_world();
+    /// The distant terrain of the dimension in `self.dir`: the overworld has it, the Nether does not.
+    fn new_lod(&self) -> Option<Lod> {
+        (!self.nether).then(|| Lod::new(self.seed, self.tectonic))
     }
 
-    /// TEMPORARY (pause-menu reset button): delete the save folder and put everything back to a new world of `SEED`: terrain
-    /// without edits, spawn point, hotbar and inventory, health, time, weather, mobs, drops, furnaces, block updates. An open
-    /// screen's stacks are discarded, not dropped. ponytail: `preload` runs on the render thread (a second or two of freeze).
-    fn reset_world(&mut self) {
+    /// The overworld's folder, whichever dimension this is.
+    fn overworld_dir(&self) -> PathBuf {
+        if self.nether { self.dir.parent().map_or_else(|| self.dir.clone(), |p| p.to_path_buf()) } else { self.dir.clone() }
+    }
+
+    /// Back to the overworld's folder without moving anyone (a reset builds the world anew).
+    fn leave_nether(&mut self) {
+        if self.nether {
+            self.dir = self.overworld_dir();
+            self.nether = false;
+            self.mobs.no_spawn = false;
+            let _ = std::fs::write(self.dir.join("dim"), "overworld");
+        }
+    }
+
+    /// Portal travel (`Minecraft.usePortal`, `Teleporter`): save this dimension, load the other one (a new `ChunkManager` on its own
+    /// folder; `<root>/dim` remembers it), arrive at the nearest portal to the player's spot x 8 or / 8 (one is built when none
+    /// is loaded there). `respawn`: no portal, the spawn point (death in the Nether). What belongs to a dimension (mobs, items on
+    /// the ground, block updates, vehicles, furnaces, chests, spawners, signs, paintings) is swapped for what that dimension's own
+    /// `level` and `decor` files held; the player, inventory, health and bed stay. ponytail: `preload` runs on the render thread.
+    fn enter(&mut self, nether: bool, respawn: bool) {
+        if self.nether == nether {
+            return;
+        }
+        self.save(usize::MAX);
+        let ow = self.overworld_dir();
+        let _ = std::fs::write(ow.join("dim"), if nether { "nether" } else { "overworld" });
+        let (old, k) = (self.player.pos, if nether { 0.125 } else { 8.0 });
+        (self.nether, self.dir) = (nether, if nether { ow.join("nether") } else { ow });
+        let to = if respawn { self.spawn } else { glam::Vec3::new(old.x * k, old.y, old.z * k) };
+        self.chunks = chunk_manager(self.seed, self.tectonic, nether).with_dir(self.dir.clone()); // the old one's workers stop on drop
+        self.lod = self.new_lod();
+        self.chunks.preload(chunk_coord(to.x), chunk_coord(to.z));
+        self.close_sign();
+        let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as i64);
+        (self.mobs, self.drops, self.ticks) = (Mobs::new(seed), Drops::new(seed), Ticks::new(seed));
+        self.mobs.no_spawn = nether;
+        self.boats = boat::Boats::default();
+        self.carts = minecart::Carts::default();
+        (self.detectors, self.paintings, self.signs) = (Default::default(), Vec::new(), HashMap::new());
+        (self.furnaces, self.chests, self.fx.spawners, self.furn_acc) = (HashMap::new(), HashMap::new(), HashMap::new(), 0.0);
+        (self.target, self.dig, self.dig_acc, self.shadow) = (None, Dig::default(), 0.0, ShadowCache::new());
+        if let Some(l) = std::fs::read(self.dir.join("level")).ok().and_then(|b| Level::decode(&b)) {
+            self.furnaces = l.furnaces.into_iter().collect();
+            self.chests = l.chests.into_iter().collect();
+            self.fx.spawners = l.spawners.into_iter().map(|(p, kind, delay)| (p, Spawner { kind, delay })).collect();
+            self.drops.items = l.drops.into_iter().map(|(p, s, age)| items::ItemEntity::resting(p, s, age)).collect();
+        }
+        if let Some((p, s)) = std::fs::read(self.dir.join("decor")).ok().and_then(|b| decor::decode(&b)) {
+            (self.paintings, self.signs) = (p, s.into_iter().collect());
+        }
+        let mut at = to;
+        if !respawn {
+            let want = (to.x as f64, to.y as f64, to.z as f64);
+            let mut found = portal::find(&self.chunks, &self.chunks.find(portal::PORTAL), want);
+            if found.is_none() {
+                portal::make(&mut self.chunks, want, &mut crate::world::gen::noise::JavaRandom::new(seed));
+                found = portal::find(&self.chunks, &self.chunks.find(portal::PORTAL), want);
+            }
+            if let Some((x, y, z)) = found {
+                at = glam::Vec3::new(x as f32, y as f32 + physics::HALF.y + 0.01, z as f32);
+            }
+        }
+        self.player = Player { pos: at, vel: glam::Vec3::ZERO, on_ground: false };
+        self.camera.pos = at + glam::Vec3::new(0.0, EYE_HEIGHT, 0.0);
+        (self.portal_t, self.portal_cd) = (0.0, 0.5);
+        log::info!("portal: now in the {} at {at:?}", if nether { "Nether" } else { "overworld" });
+    }
+
+    /// Load a world of the list (or just made): from its `level` and chunk files where it has them, else a new one of its seed.
+    fn enter_world(&mut self, info: &menu::Info) {
+        self.dir = info.dir(&self.root);
+        (self.seed, self.tectonic) = (info.seed, info.tectonic);
+        // The world resumes in the dimension it was left in (`<world>/dim`).
+        self.nether = std::fs::read_to_string(self.dir.join("dim")).is_ok_and(|s| s.trim() == "nether");
+        if self.nether {
+            self.dir = self.dir.join("nether");
+        }
+        self.reset_world(false);
+        self.menu = None;
+        self.touch.set_menu(false);
+        self.last_frame = Instant::now();
+        if let Ok(mut l) = LAST_WORLD.lock() {
+            *l = Some(info.folder.clone());
+        }
+    }
+
+    /// The pause menu's "Save and quit to title" (`GuiIngameMenu`).
+    fn quit_to_title(&mut self) {
+        self.close_sign();
+        self.save(usize::MAX);
+        self.chunks = ChunkManager::new_typed(0, RENDER_DIST, false); // the world's workers stop on drop
+        self.lod = None;
+        self.menu = Some(Menu::new(&self.root));
+        self.touch.set_menu(true);
+        if let Ok(mut l) = LAST_WORLD.lock() {
+            *l = None;
+        }
+    }
+
+    /// Put everything back for the world in `self.dir` (`self.seed`, `self.tectonic`): `wipe` (the TEMPORARY pause-menu reset button)
+    /// deletes the save folder first and makes a new world: terrain without edits, spawn point, hotbar and inventory, health, time,
+    /// weather, mobs, drops, furnaces, block updates; otherwise it resumes from the `level`, chunk and `decor` files, a new world
+    /// where there are none. An open screen's stacks are discarded, not dropped.
+    /// ponytail: `preload` runs on the render thread (a second or two of freeze after the "Loading level" frame).
+    fn reset_world(&mut self, wipe: bool) {
+        if wipe {
+            self.leave_nether();
+        }
         if self.screen.take().is_some() {
             self.touch.set_screen(false);
         }
@@ -355,14 +451,28 @@ impl App {
         self.boats = boat::Boats::default();
         self.carts = minecart::Carts::default();
         self.detectors.clear();
-        let _ = std::fs::remove_dir_all(&self.dir);
+        if wipe {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
         let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as i64);
-        self.chunks = ChunkManager::new_typed(SEED, RENDER_DIST, self.tectonic).with_dir(self.dir.clone()); // the old one's workers stop on drop
-        self.lod = Some(Lod::new(SEED, self.tectonic)); // likewise
-        self.chunks.preload(0, 0);
-        self.spawn = find_spawn(&self.chunks);
+        let level = if wipe { None } else { std::fs::read(self.dir.join("level")).ok().and_then(|b| Level::decode(&b)) };
+        self.chunks = chunk_manager(self.seed, self.tectonic, self.nether).with_dir(self.dir.clone()); // the old one's workers stop on drop
+        self.lod = self.new_lod();
+        // The terrain around the player must be real before the first frame, so those chunks are loaded (or generated and
+        // populated) here; everything further out streams in on the worker threads.
+        let (pcx, pcz) = level.as_ref().map_or((0, 0), |l| (chunk_coord(l.pos.x), chunk_coord(l.pos.z)));
+        self.chunks.preload(pcx, pcz);
+        self.spawn = level.as_ref().map_or_else(|| find_spawn(&self.chunks), |l| l.spawn);
+        let s = level.as_ref().map_or(self.spawn, |l| l.pos);
+        log::info!("save: {} in {}", if level.is_some() { "resuming" } else { "new world" }, self.dir.display());
+        // Light and mesh the area around the player now, so the first frame already shows terrain.
+        let warm = Instant::now();
+        while self.chunks.meshed() < 24 && warm.elapsed() < Duration::from_secs(8) {
+            self.chunks.update(&self.gpu.device, chunk_coord(s.x), chunk_coord(s.z));
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        log::info!("chunks: {} meshed after {:?}", self.chunks.meshed(), warm.elapsed());
         (self.sleep, self.bed_spawn) = (None, None);
-        let s = self.spawn;
         self.player = Player { pos: s, vel: glam::Vec3::ZERO, on_ground: false };
         let aspect = self.camera.aspect;
         self.camera = FirstPersonCamera::spawn_at(s.x, s.y + EYE_HEIGHT, s.z);
@@ -372,8 +482,16 @@ impl App {
         (self.tip, self.dig, self.dig_acc, self.target, self.shadow) = ((0, 0.0), Dig::default(), 0.0, None, ShadowCache::new());
         (self.inv, self.drops, self.mobs, self.ticks) = (Inventory::default(), Drops::new(seed), Mobs::new(seed), Ticks::new(seed));
         (self.furnaces, self.furn_acc, self.vitals, self.save_acc) = (HashMap::new(), 0.0, Vitals::default(), 0.0);
+        self.chests.clear();
+        self.mobs.no_spawn = self.nether;
         self.touch.hotbar_slot = 0;
-        log::info!("reset: new world of seed {SEED:x}, spawn {s:?}");
+        if let Some(l) = level {
+            self.restore(l);
+        }
+        if let Some((p, s)) = std::fs::read(self.dir.join("decor")).ok().and_then(|b| decor::decode(&b)).filter(|_| !wipe) {
+            (self.paintings, self.signs) = (p, s.into_iter().collect());
+        }
+        log::info!("world of seed {:x} ({}), spawn {:?}", self.seed, if self.tectonic { "tectonic" } else { "vanilla" }, self.spawn);
     }
 
     /// Put a loaded `Level` back: time, look direction, hotbar slot, health, inventory, furnaces and dropped items
@@ -399,6 +517,9 @@ impl App {
     /// screen is closed first, so the cursor stack and the grid become dropped items, which are saved.
     // ponytail: runs on the render thread; the level file is ~1 KB and the chunk writes are capped per autosave.
     fn save(&mut self, chunks: usize) {
+        if self.menu.is_some() {
+            return; // no world is loaded
+        }
         // `close_screen` also calls `touch.set_screen(false)`, which resets the touch state. Autosave runs while
         // playing (no screen open), so calling it unconditionally cut every held action (move, dig, look) every 5 s.
         if self.screen.is_some() {
@@ -451,15 +572,11 @@ impl App {
         self.camera.fov_y += (target - self.camera.fov_y) * (1.0 - (-14.0 * dt).exp());
         // TEMPORARY pause-menu button: wipe the save and start the seed's world again.
         if self.touch.take_reset() {
-            self.reset_world();
+            self.reset_world(true);
             return;
         }
-        if self.touch.take_worldtype() {
-            self.switch_world_type();
-            return;
-        }
-        if self.touch.take_backend() {
-            self.switch = true;
+        if self.touch.take_quit() {
+            self.quit_to_title();
             return;
         }
         // Look drag accumulated by the touch UI since the last frame. Drained
@@ -475,9 +592,15 @@ impl App {
             self.camera.pos = self.player.pos + glam::Vec3::new(0.0, EYE_HEIGHT - self.sneak_y, 0.0);
             return;
         }
+        // Four seconds in a portal: the other dimension (`EntityPlayerSP.onLivingUpdate`).
+        if self.portal_t >= 1.0 {
+            self.enter(!self.nether, false);
+            return;
+        }
         // The death screen's resume button was pressed: come back at the spawn point with full health.
         if self.vitals.dead() {
             self.vitals = Vitals::default();
+            self.enter(false, true); // `Minecraft.respawn`: always in the overworld
             self.player.pos = self.respawn_pos();
             self.player.vel = glam::Vec3::ZERO;
         }
@@ -551,6 +674,18 @@ impl App {
         // `BlockCactus.onEntityCollidedWithBlock`: 1 damage every frame the box touches a cactus cell (the 10 tick damage window paces it).
         if !asleep && physics::touching(self.player.pos, physics::HALF, &get, 81) {
             self.vitals.hurt(1);
+        }
+        // `BlockPortal.onEntityCollidedWithBlock` -> `Entity.setInPortal`: inside a portal the timer fills (a quarter a second, drains
+        // at 1 a second outside); the cooldown after an arrival is held while the player still stands in the pane.
+        if !asleep && !riding && physics::touching(self.player.pos, physics::HALF, &get, 90) {
+            if self.portal_cd > 0.0 {
+                self.portal_cd = 0.5;
+            } else {
+                self.portal_t += 0.25 * dt;
+            }
+        } else {
+            self.portal_t = (self.portal_t - dt).max(0.0);
+            self.portal_cd = (self.portal_cd - dt).max(0.0);
         }
         self.vitals.update(dt, Env { dy: self.player.pos.y - y0, on_ground: self.player.on_ground, water, lava, ladder, eye_in_water, eye_y: e.y, in_wall });
         // Entering water splashes (`Entity.onEntityUpdate`); running out of air pops 8 bubbles round the eye (`EntityLiving.onEntityUpdate`).
@@ -1651,9 +1786,16 @@ impl App {
     }
 
     fn render(&mut self) {
+        if self.menu.is_some() {
+            self.render_menu();
+            return;
+        }
         let t0 = Instant::now();
         let dt = self.last_frame.elapsed().as_secs_f32().min(0.1); // frameTime for the post chain
         self.step_frame();
+        if self.menu.is_some() {
+            return; // "Save and quit to title" just ran
+        }
         let (pcx, pcz) = (chunk_coord(self.player.pos.x), chunk_coord(self.player.pos.z));
         self.chunks.update(&self.gpu.device, pcx, pcz);
         self.camera.zfar = if self.lod.is_some() { lod::ZFAR } else { 256.0 }; // the far terrain needs the depth range
@@ -1687,8 +1829,9 @@ impl App {
         let temp = self.chunks.temperature_at(px, pz) as f32;
         let partial = self.world_ticks.fract() as f32;
         let angle = sky::celestial_angle(self.world_ticks as u64, partial);
-        let (rain, thunder) = (self.weather.rain(partial), self.weather.thunder(partial));
-        let sky_rgb = sky::sky_color(angle, temp, rain, thunder);
+        let (rain, thunder) = if self.nether { (0.0, 0.0) } else { (self.weather.rain(partial), self.weather.thunder(partial)) };
+        let hell = [0.2, 0.03, 0.03]; // `WorldProviderHell.func_4096_a`
+        let sky_rgb = if self.nether { hell } else { sky::sky_color(angle, temp, rain, thunder) };
         // Light shafts march through the shadow map, so the shadow pass also runs for them (sunrise, sunset, rain, the moon);
         // the terrain still takes its shadow only from `sun_strength`. Not under water (the pack has its own shafts there).
         let e = self.camera.pos;
@@ -1707,17 +1850,18 @@ impl App {
         // Which terrain sections the camera sees (frustum, render shape, and occlusion by terrain); the main pass and the water pass both draw from it.
         // The shadow pass below does not: terrain hidden from the camera still casts shadows.
         self.chunks.update_visible(self.camera.pos, RENDER_SHAPE, (RENDER_DIST * 16) as f32, (RENDER_VERT * 16) as f32, |min, max| frustum.intersects_aabb(min, max));
+        let _gone = self.chunks.take_unloaded(); // drained in the Nether too; the voxel LoD does not ingest unloaded chunks (ponytail of its entry)
         if let Some(l) = self.lod.as_mut() {
             l.update(&self.gpu.device, e, (RENDER_DIST * 16) as f32, (RENDER_VERT * 16) as f32, |min, max| frustum.intersects_aabb(min, max));
         }
-        let fog = sky::fog_color(angle, sky_rgb, rain, thunder);
+        let fog = if self.nether { hell } else { sky::fog_color(angle, sky_rgb, rain, thunder) };
         let fog = if LEGACY { photon::legacy_lin(fog) } else { fog }; // vanilla values -> the frame's linear space
         // Terrain fog (AstraLex `NormalFog`): fades to the horizon colour at the render distance; off under water. Legacy under water:
         // b1.7.3's GL_EXP, density 0.1, colour (0.02, 0.02, 0.2); a negative far plane is how the shaders learn the density.
         let (fog, far) = match (LEGACY, eye_in_water) {
             (true, true) => (photon::legacy_lin([0.02, 0.02, 0.2]), -0.1),
             (_, true) => (fog, 0.0),
-            _ => (fog, if self.lod.is_some() { lod::RADIUS } else { (RENDER_DIST * 16) as f32 }),
+            _ => (fog, if self.lod.is_some() { lod::RADIUS } else { (RENDER_DIST * 16) as f32 }), // the fog ends where the far terrain does
         };
         self.pipe.set_fog(&self.gpu.queue, fog, far, rain);
         let mut lit = photon::lighting(angle, rain, self.shadow.light);
@@ -1890,8 +2034,10 @@ impl App {
             if LEGACY {
                 self.draw_opaque(&mut rp, item_indices, outline_indices); // lit in `fs_main`
             }
-            self.sky.draw(&mut rp); // depth-tested LessEqual: only the pixels the opaque draws left at 1
-            self.sky.draw_extras(&mut rp); // legacy: sunrise fan + stars
+            if !self.nether {
+                self.sky.draw(&mut rp); // depth-tested LessEqual: only the pixels the opaque draws left at 1
+                self.sky.draw_extras(&mut rp); // legacy: sunrise fan + stars
+            }
             if !LEGACY {
                 self.photon.draw_deferred(&mut rp, &self.pipe.bind_group, &self.pipe.shadow_bind);
             }
@@ -1963,6 +2109,59 @@ impl App {
             self.cpu_acc = 0.0;
             self.frames = 0;
             self.fps_last = now;
+        }
+    }
+
+    /// A frame of `menu::Menu` (the title screen, world list, creation, "Loading level"): the HUD pass over black, no world. The frame
+    /// that shows "Loading level" is presented before the world is loaded, which freezes the render thread for a moment.
+    fn render_menu(&mut self) {
+        let (w, h) = (self.gpu.config.width as f32, self.gpu.config.height as f32);
+        let Some(m) = self.menu.as_mut() else { return };
+        for ev in self.touch.take_screen_events() {
+            m.event(ev, w, h);
+        }
+        if m.quit {
+            std::process::exit(0); // Quit Game: nothing is loaded, so nothing to save
+        }
+        self.hud_verts.clear();
+        m.draw(&mut self.hud_verts, w, h);
+        self.hud_verts.truncate(self.hud.quad_capacity * 6);
+        let frame = match self.gpu.surface.get_current_texture() {
+            Ok(f) => f,
+            Err(e) => {
+                log::warn!("surface.get_current_texture: {e:?}");
+                if matches!(e, wgpu::SurfaceError::Outdated | wgpu::SurfaceError::Lost) {
+                    self.gpu.surface.configure(&self.gpu.device, &self.gpu.config);
+                }
+                return;
+            }
+        };
+        let (fw, fh) = (frame.texture.width(), frame.texture.height());
+        if fw != self.gpu.config.width || fh != self.gpu.config.height {
+            self.resize(fw, fh);
+            return;
+        }
+        let view_tex = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut enc = self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("menu") });
+        self.gpu.queue.write_buffer(&self.hud.vbuf, 0, bytemuck::cast_slice(&self.hud_verts));
+        {
+            let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("menu_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &view_tex, resolve_target: None, depth_slice: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store } })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            rp.set_pipeline(&self.hud.pipeline);
+            rp.set_bind_group(0, &self.hud.bind_group, &[]);
+            rp.set_vertex_buffer(0, self.hud.vbuf.slice(..));
+            rp.draw(0..self.hud_verts.len() as u32, 0..1);
+        }
+        self.gpu.queue.submit(std::iter::once(enc.finish()));
+        frame.present();
+        let load = self.menu.as_mut().filter(|m| m.shown_loading).and_then(|m| m.loading.take());
+        if let Some(info) = load {
+            self.enter_world(&info);
         }
     }
 
@@ -2257,9 +2456,8 @@ impl App {
             HudPipeline::push_text_centered(v, bx + bw * 0.5, by - bh * 1.3, bh / 20.0 * if dead { 2.0 } else { 1.5 }, if dead { "You died!" } else { "Game menu" }, [1.0; 4]);
             label(v, layout.resume, if dead { "Respawn" } else { "Back to game" }, pressed(PointerRole::Pause));
             // TEMPORARY reset-world button: after the first tap it is lit and asks again.
-            label(v, layout.backend, if self.gpu.is_gl() { "Renderer: OpenGL" } else { "Renderer: Vulkan" }, pressed(PointerRole::Backend));
             label(v, layout.reset, if self.touch.reset_armed { "Tap again to confirm" } else { "Reset world" }, self.touch.reset_armed);
-            label(v, layout.world, if self.touch.wt_armed { "Tap again to confirm" } else if self.tectonic { "World: Tectonic" } else { "World: Vanilla" }, self.touch.wt_armed);
+            label(v, layout.quit, "Save and quit to title", pressed(PointerRole::Quit));
         }
 
         // Cap to the buffer capacity; extra quads are silently dropped.
@@ -2270,9 +2468,9 @@ impl App {
     }
 }
 
-/// Save folder of a world type: the vanilla one keeps the name older saves have.
-fn world_dir(tectonic: bool) -> String {
-    if tectonic { format!("world-{SEED:x}-tec") } else { format!("world-{SEED:x}") }
+/// The chunk manager of a dimension of the world with this seed: the overworld's (vanilla or Tectonic generator) or the Nether's.
+fn chunk_manager(seed: i64, tectonic: bool, nether: bool) -> ChunkManager {
+    if nether { ChunkManager::new_nether(seed, RENDER_DIST) } else { ChunkManager::new_typed(seed, RENDER_DIST, tectonic) }
 }
 
 /// A new world's spawn point (feet position): dry ground closest to the centre of chunk (0, 0), not under water (a
@@ -2401,12 +2599,7 @@ fn sync_size(app: &AndroidApp, state: &mut Option<App>) {
     }
 }
 
-/// Where the Vulkan / OpenGL choice lives: `gl` or `vulkan` in the app's private storage (Vulkan when missing).
-fn backend_file(dir: &std::path::Path) -> PathBuf {
-    dir.join("backend")
-}
-
-/// Spawn the GPU + world init thread for the current window, on the backend saved by the pause menu's renderer button.
+/// Spawn the GPU init thread for the current window (Vulkan, or GLES where there is no Vulkan driver).
 fn start_init(app: &AndroidApp) -> Option<std::thread::JoinHandle<Result<App, String>>> {
     struct NativePtr(usize);
     unsafe impl Send for NativePtr {}
@@ -2416,12 +2609,11 @@ fn start_init(app: &AndroidApp) -> Option<std::thread::JoinHandle<Result<App, St
     let init_h = window.height().max(1) as u32;
     // App-private storage, where the world is saved.
     let dir = app.internal_data_path().unwrap_or_else(std::env::temp_dir);
-    let prefer_gl = std::fs::read_to_string(backend_file(&dir)).is_ok_and(|s| s.trim() == "gl");
-    log::info!("M3: InitWindow, native {init_w}x{init_h}, starting GPU init thread ({})", if prefer_gl { "OpenGL" } else { "Vulkan" });
+    log::info!("M3: InitWindow, native {init_w}x{init_h}, starting GPU init thread");
     let h = std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(move || {
-            let r = std::panic::catch_unwind(|| pollster::block_on(App::init(ptr as *mut c_void, init_w, init_h, dir, prefer_gl)));
+            let r = std::panic::catch_unwind(|| pollster::block_on(App::init(ptr as *mut c_void, init_w, init_h, dir)));
             match r {
                 Ok(Ok(a)) => Ok(a),
                 Ok(Err(e)) => {
@@ -2534,24 +2726,10 @@ fn android_main(app: AndroidApp) {
             }
         }
 
-        // The renderer button: save, drop the App (its surface must go before a new one can attach to the window), remember
-        // the other backend and build everything again on it.
-        if app_state.as_ref().is_some_and(|a| a.switch) {
-            if let Some(mut a) = app_state.take() {
-                a.save(usize::MAX);
-                let to_gl = !a.gpu.is_gl();
-                drop(a);
-                if let Some(dir) = app.internal_data_path() {
-                    let _ = std::fs::write(backend_file(&dir), if to_gl { "gl" } else { "vulkan" });
-                }
-                init_handle = start_init(&app);
-            }
-        }
-
         if let Some(a) = app_state.as_mut() {
             a.render();
             // Dynamic FPS: the paused world is frozen, so the menu runs at ~10 frames a second; a touch still wakes the poll.
-            if a.touch.paused {
+            if a.touch.paused || a.menu.is_some() {
                 std::thread::sleep(Duration::from_millis(90));
             }
             self_main_frames += 1;
