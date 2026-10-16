@@ -1,0 +1,58 @@
+diff -ruN a/README.md b/README.md
+--- a/README.md	2026-10-16 23:31:22.563957093 +0000
++++ b/README.md	2026-10-16 23:31:22.565352361 +0000
+@@ -56,7 +56,7 @@
+ | M14 menus (part 1)   | written without a toolchain: not compiled, not run (+4 tests in `menu.rs`, 1 in `touch_ui.rs`) | `menu.rs`: b1.7.3's `GuiMainMenu` (dirt, `mclogo.png`, rotated splash), `GuiSelectWorld` (scrolling list, double tap plays), `GuiCreateWorld` (name, seed, world type), delete confirm, "Loading level"; textures from the original jar (`tools/gen_menu.py`). Worlds live in `saves/<folder>/`; the pause menu got "Save and quit to title". The renderer button is gone (Vulkan first, GLES fallback stays automatic). See ROADMAP changelog. |
+ | Lazy noise (C2ME idea 5) | written without a toolchain: not compiled; the generator tests incl. the golden `matches_java_reference` pass in a Linux scratch crate | The unread samples of the two big density stacks are not computed (`OctaveNoise::generate_masked_into`, masked per cached column); bit for bit the same terrain. See ROADMAP changelog. |
+ | Distant terrain (height columns, not drawn) | written without a toolchain: not compiled, not run (+7 tests) | `lod/` crate + `world/far.rs`: the overworld drawn out to 14 chunks as height-column tiles (mip quadtree, 4 levels), generated without caves on a worker thread, saved in `<world>/far`; none in the Nether. See ROADMAP changelog. Superseded as the drawn far terrain by the Voxel LoD row below; `lod/` and `world/far.rs` stay in the tree, unused by `App`. |
+-| Voxel LoD (Voxy style) | written without a toolchain: not compiled, not run (+3 more tests in `world::lod`, 2 rewritten) | `world/lod.rs`: far terrain out to 768 blocks as real block columns of 64 x 64 tiles, mipped like Voxy's `Mipper` into cells of 1 / 2 / 4 / 8 / 16 blocks, same atlas, tints, face shades and fog as the chunks. **Real chunks first** (Voxy's ingest): every chunk the chunk manager has finished, and every one it unloads after an edit, becomes columns (`lod::columns`, `ChunkManager::take_ingest`) that replace the generator's guess (`Lod::ingest`); the generator only fills what no chunk has shown. Trees are a box of leaves over their own ground (a trunk at step 1), forests keep their mass at coarse steps. The cut under the ring is recomputed only when the covered cells change. See ROADMAP changelog. |
++| Voxel LoD (Voxy style) | written without a toolchain: not compiled, not run (10 tests in `world::lod`, rewritten 2026-10-17) | `world/lod.rs`: far terrain out to 768 blocks as real 3D block columns (runs of equal blocks) of 64 x 64 tiles, meshed as voxels at 1 / 2 / 4 / 8 / 16 blocks after a Voxy-style 2x2x2 mip (`Mipper`), faces only where a solid voxel meets a see-through one; same atlas, tints, face shades and fog as the chunks. **Real chunks first** (Voxy's ingest): `lod::columns`, `ChunkManager::take_ingest`, `Lod::ingest`. The cut under the ring only happens where a real chunk mesh exists (`ChunkManager::drawn`), so no hole to the sky. Trees are real trunk + crown voxels, terrain rounds to the step instead of bloating. See ROADMAP changelog. |
+ | M14                  | pending | Menus (part 1: title, world list, create world; see above), options, chat, real mob models, first-person hand: see ROADMAP.md. M9 audio, M10 multiplayer and M13 optimization are out of scope on purpose. |
+ 
+ Latest commit on `main`: see `git log -1`. Latest released APK: see the
+diff -ruN a/ROADMAP.md b/ROADMAP.md
+--- a/ROADMAP.md	2026-10-16 23:31:22.569521819 +0000
++++ b/ROADMAP.md	2026-10-16 23:31:22.571314336 +0000
+@@ -79,6 +79,12 @@
+     - Trees: `Col` gained `leaf` / `lb` / `lmeta` / `ltint` / `log`; `column` reads through trunk and air to the ground; `build` draws the ground normally plus a leaf box (top, bottom, sides minus what the neighbouring crown hides) and a trunk at step 1; `resolve` keeps a forest cell's mass at the mean crown height (a quarter of the cell under leaves) and drops a lone tree. `TREES` 300 -> 520, `KEEP_TILES` 900 -> 700.
+     - Cut: `indices` split into `covered` + `gather`; `Tile::cut` makes a new index buffer only when `covered` changed.
+     - ponytail: no persistence; trunk only at step 1; edits far from the player only show once their chunk loaded; one worker; `TREES` 520 makes ~3x the generate + populate work of 300 (36 chunks per tile with its margin), first fill on a phone may take minutes (lower `TREES` if so). UNVERIFIED: that it compiles, speed and memory on a device, the look of the leaf boxes.
++- 2026-10-17: LoD rewritten as 3D voxels (Voxy `Mipper` / `RenderDataFactory`) - written WITHOUT a Rust toolchain: not compiled, not run. Tests first, with `--release`: `lod::tests::{a_column_is_runs_down_to_the_ground, a_mip_rounds_terrain_and_keeps_leaves, flat_ground_is_tops_only, a_tree_is_a_trunk_and_a_crown, the_cut_waits_for_the_real_mesh, a_tile_file_round_trips, an_ingested_chunk_replaces_the_guess, a_generated_tile_meshes, water_is_darker_the_deeper_it_is, pregen_goes_nearest_first_and_counts_chunks}`.
++    - Causes of the bugs seen in screenshots: (1) a column was ONE top block + ONE leaf box, so a tree was a box from the crown (or the ground) up and a mountain a pillar of its highest block; (2) the mip took the highest child of a footprint (terrain bloated by up to a step) at an arbitrary height; (3) the LoD was cut wherever the chunk ring was IN RANGE, even where the chunk had no mesh yet: a hole to the sky; (4) tiles not made yet were holes, and trees (slow) were asked before missing tiles.
++    - `world/lod.rs`: a column is runs of blocks (`Span`, top first, down to 4 blocks under the ground, stone below); a tile is meshed from a dense voxel grid (tile + 1 voxel margin from the neighbour tiles), mipped `log2(step)` times by `pick` (upper four children first, then solid > leaves > water, then Voxy's +y/+z/+x tie-break; solid when >= half of the children are, leaves/logs from one) and faced where a solid voxel meets a see-through one (`opaque`, water culls, same block culls). Water = one sheet on the top water voxel at 1/9 under its top, coloured by depth over its floor. Snow layer = 1/8 block at step 1, full block from step 2. Tile edge faces hang a skirt into the ground (neighbour at another step). Tile files are `L3` (old `L2` files are ignored and made again).
++    - `ChunkManager::drawn(k)` (chunk has a mesh) gates the cut; `Lod::update(.., gen = chunks.mesh_gen, drawn, in_frustum)` redoes the cut when `mesh_gen` changes. Missing tiles are asked first (bare, fast), trees second.
++    - Kept: `Lod::ingest`, pregen, `columns()` (now `Vec<Vec<Span>>`), fog, `RADIUS`, `step_for`. KEEP_TILES 700 -> 600 (a tile is ~100 KB, about 510 are in view).
++    - ponytail / not done: no greedy meshing (a step-1 forest tile is many quads), plants skipped, no water sides, no caves under the ground depth, no light (sky 15 everywhere), trees only within `TREES`. UNVERIFIED: the half-of-children rule and the distances are picked on paper; if distant terrain looks eroded raise it to "any child" for ids other than leaves (`pick`'s `need`), if bloated lower it.
+ - 2026-10-16: MERGE of `Repo.zip` (Voxel LoD, Voxy style) and `Repo-merged.zip` (Tectonic, Nether, title screen, light thread, lazy noise, height-column distant terrain). Written WITHOUT a Rust toolchain: not compiled, not run. The common base was recovered by reversing `voxel-lod.patch` on `Repo.zip`; a three-way merge then left only the two LoD systems in conflict (`lib.rs`, README, ROADMAP); `mesh.rs` and `chunks.rs` merged cleanly.
+     - Both replaced the same smooth heightfield LoD. The Voxel LoD is the one `App` draws: `App.lod: Option<Lod>` (was `far`), made by `new_lod` wherever the chunk manager is made (`reset_world`, `enter`; `Lod::new(self.seed, self.tectonic)`), none in the Nether, dropped by `quit_to_title`, drawn where `far` was, `camera.zfar = lod::ZFAR` (256 without it), fog ends at `lod::RADIUS`. `take_unloaded` is still drained and dropped (the Voxel LoD does not ingest real chunks; no persistence, so `far`'s `<world>/far` save call is gone).
+     - Kept, not wired: the `lod/` crate and `world/far.rs` (`chunks.rs` still fills `unloaded` with `far::columns`, `camera.rs` still takes its initial `zfar` from `far::FAR_BLOCKS`). To go back to them: restore the `far` field, `new_far`, the `save` / `draw` / `update` calls and the fog line from the Repo-merged.zip `lib.rs`. UNVERIFIED: that `world/lod.rs` compiles against the merged generator (`OverworldGenerator::{new, tectonic, generate, populate}`, `WorldChunkManager::new`, `Region::new` are unchanged by the merged patches), run `cargo test -p tectonic -p embeddium -p lod` and `cargo test --lib --release` first.
+diff -ruN a/mc-rs/src/lib.rs b/mc-rs/src/lib.rs
+--- a/mc-rs/src/lib.rs	2026-10-16 23:31:22.575614835 +0000
++++ b/mc-rs/src/lib.rs	2026-10-16 23:31:22.577273452 +0000
+@@ -1858,7 +1858,9 @@
+         let fresh = self.chunks.take_ingest(); // drained in the Nether too (no LoD there)
+         if let Some(l) = self.lod.as_mut() {
+             fresh.into_iter().for_each(|(k, cols)| l.ingest(k, cols));
+-            l.update(&self.gpu.device, e, (RENDER_DIST * 16) as f32, (RENDER_VERT * 16) as f32, |min, max| frustum.intersects_aabb(min, max));
++            // The LoD is cut out only where a real chunk mesh exists (`drawn`), and again whenever the set of meshes changes (`mesh_gen`).
++            let chunks = &self.chunks;
++            l.update(&self.gpu.device, e, (RENDER_DIST * 16) as f32, (RENDER_VERT * 16) as f32, chunks.mesh_gen, |cx, cz| chunks.drawn((cx, cz)), |min, max| frustum.intersects_aabb(min, max));
+         }
+         let fog = if self.nether { hell } else { sky::fog_color(angle, sky_rgb, rain, thunder) };
+         let fog = if LEGACY { photon::legacy_lin(fog) } else { fog }; // vanilla values -> the frame's linear space
+diff -ruN a/mc-rs/src/world/chunks.rs b/mc-rs/src/world/chunks.rs
+--- a/mc-rs/src/world/chunks.rs	2026-10-16 23:31:22.581389326 +0000
++++ b/mc-rs/src/world/chunks.rs	2026-10-16 23:31:22.582711464 +0000
+@@ -923,6 +923,12 @@
+         std::mem::take(&mut self.ingest)
+     }
+ 
++    /// Chunk `k` has a mesh to draw: the far terrain (`world::lod`) is cut out only under chunks that do, so a chunk that is in
++    /// range but still generating or meshing leaves the far terrain in place instead of a hole.
++    pub fn drawn(&self, k: Key) -> bool {
++        self.chunks.get(&k).is_some_and(|e| e.mesh.is_some())
++    }
++
+     /// Chunk `k` has the four populates that write into it behind it (its own and the three before it in -x / -z): its blocks are final.
+     fn settled(&self, k: Key) -> bool {
+         [(0, 0), (-1, 0), (0, -1), (-1, -1)].iter().all(|d| self.chunks.get(&(k.0 + d.0, k.1 + d.1)).is_some_and(|e| e.populated))

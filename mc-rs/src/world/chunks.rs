@@ -923,6 +923,12 @@ impl ChunkManager {
         std::mem::take(&mut self.ingest)
     }
 
+    /// Chunk `k` has a mesh to draw: the far terrain (`world::lod`) is cut out only under chunks that do, so a chunk that is in
+    /// range but still generating or meshing leaves the far terrain in place instead of a hole.
+    pub fn drawn(&self, k: Key) -> bool {
+        self.chunks.get(&k).is_some_and(|e| e.mesh.is_some())
+    }
+
     /// Chunk `k` has the four populates that write into it behind it (its own and the three before it in -x / -z): its blocks are final.
     fn settled(&self, k: Key) -> bool {
         [(0, 0), (-1, 0), (0, -1), (-1, -1)].iter().all(|d| self.chunks.get(&(k.0 + d.0, k.1 + d.1)).is_some_and(|e| e.populated))
