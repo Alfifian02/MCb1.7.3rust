@@ -194,19 +194,32 @@ fn vs_shadow(@location(0) p: vec3<f32>, @location(1) uv: vec2<f32>) -> @builtin(
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let dx = dpdx(in.wp); // derivatives stay in uniform control flow; `face_index` below can then sit behind a per-pixel branch
     let dy = dpdy(in.wp);
-    let gx = dpdx(in.uv); // the uv derivatives too, in uniform control flow: the grass side below samples behind a branch
-    let gy = dpdy(in.uv);
-    let c = atlas_sample_g(in.uv, gx, gy);
+    var uv = in.uv;
+    var gx = dpdx(in.uv); // the uv derivatives too, in uniform control flow: the grass side below samples behind a branch
+    var gy = dpdy(in.uv);
+    // Far terrain (`world::lod`, `light >= 1000`, flat vertices only): the quad's uv is in BLOCKS, v up, and `light - 1000` is its
+    // terrain tile. The tile repeats once per block (Voxy's `modf` tiling), not once per voxel, so a cell of 4 or 8 blocks shows the
+    // texture at block scale and minifies to its average at a distance, instead of one tile stretched over it (the oversized look).
+    if in.light >= 1000.0 {
+        let size = vec2<f32>(textureDimensions(tex));
+        let t = floor(in.light - 1000.0 + 0.5);
+        let o = vec2<f32>(t % 16.0, floor(t / 16.0)) * 16.0;
+        let l = clamp(vec2<f32>(fract(in.uv.x), 1.0 - fract(in.uv.y)) * 16.0, vec2<f32>(0.02), vec2<f32>(15.98));
+        uv = (o + l) / size;
+        gx = gx * 16.0 / size;
+        gy = gy * 16.0 / size;
+    }
+    let c = atlas_sample_g(uv, gx, gy);
     // Cut-out textures: plants, glass. Alpha from mip 0 so a distant plant keeps its shape (the mips average alpha); the neighbouring
     // tile no longer leaks in, `atlas_sample` clamps the UV to its own tile.
-    if textureSampleLevel(tex, samp, in.uv, 0.0).a < 0.5 { discard; }
+    if textureSampleLevel(tex, samp, uv, 0.0).a < 0.5 { discard; }
     var rgb = c.rgb * in.tint;
     // Grass side (tile 3, untinted): `RenderBlocks` draws tile 38 over it, cut out and tinted with the grass colour (`in.tint`, which
     // `mesh.rs` puts on this face). Done here, on the one quad, instead of a second quad on the same plane: two coplanar quads can only be
     // told apart by the depth test, which on a phone GPU is not exact at a grazing angle, so the fringe flickered between the two.
     // Tile 38 is 3 tiles right and 2 down from tile 3.
-    if u32(in.uv.y * TH) * TW + u32(in.uv.x * f32(TW)) == 3u {
-        let ouv = in.uv + vec2<f32>(3.0 / f32(TW), 2.0 / TH);
+    if u32(uv.y * TH) * TW + u32(uv.x * f32(TW)) == 3u {
+        let ouv = uv + vec2<f32>(3.0 / f32(TW), 2.0 / TH);
         rgb = c.rgb;
         if textureSampleLevel(tex, samp, ouv, 0.0).a >= 0.5 { rgb = atlas_sample_g(ouv, gx, gy).rgb * in.tint; }
     }

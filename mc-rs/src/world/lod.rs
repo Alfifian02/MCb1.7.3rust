@@ -590,10 +590,10 @@ impl Tally {
 /// compounding):
 /// - land / water: the cell is solid when at least half of its columns are, of the kind that has more of them (ties: land), and of
 ///   the most frequent block among them; so the surface sits where half of the footprint is below it, within a block of the truth;
-/// - leaves and logs: kept from a third of the footprint (a forest keeps its canopy, one tree's crown is not bloated by its edge);
+/// - leaves and logs: kept from half of the footprint like land (from a third every crown grew by half a cell on each side: the oversized trees);
 /// - mixed heights (a tree on a hill, a shore): the biggest of the kinds, when together they fill half of it;
-/// - a trunk is one column, so no cell gets a third of it: a cell whose footprint holds a log, directly under a crown or trunk
-///   cell of its own column, keeps one (else every crown from step 2 floats, and a crown over a thick trunk of every cell was worse).
+/// - a trunk is one column, so no cell gets half of it: at step 2 a cell whose footprint holds a log, directly under a crown or trunk
+///   cell of its own column, keeps one (2 wide); from step 4 there is none (a 4 to 8 wide trunk was worse than a crown a few blocks up).
 /// `s == 1` is the grid as it is.
 fn reduce(g0: Vec<u32>, w0: usize, s: usize) -> (Vec<u32>, usize) {
     if s == 1 {
@@ -646,7 +646,7 @@ fn reduce(g0: Vec<u32>, w0: usize, s: usize) -> (Vec<u32>, usize) {
                     } else {
                         rep_water
                     }
-                } else if leaf + wood > 0 && (leaf + wood) * 3 >= t {
+                } else if leaf + wood > 0 && (leaf + wood) * 2 >= t {
                     if wood > leaf {
                         rep_wood
                     } else {
@@ -670,7 +670,7 @@ fn reduce(g0: Vec<u32>, w0: usize, s: usize) -> (Vec<u32>, usize) {
             }
             let mut hang = false; // a crown or trunk voxel is right above
             for y in (0..HEIGHT).rev() {
-                if col[y] == 0 && hang && wood_at[y] != 0 {
+                if s <= 2 && col[y] == 0 && hang && wood_at[y] != 0 {
                     col[y] = wood_at[y];
                 }
                 hang = matches!(vid(col[y]), 17 | 18);
@@ -718,26 +718,34 @@ impl Quads {
         self.idx.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
     }
 
+    /// A quad tiled once per BLOCK: `uv` is in blocks (v up) and `light` carries the terrain tile (`fs_main` wraps it, light >= 1000).
+    #[allow(clippy::too_many_arguments)]
+    fn quad_t(&mut self, p: [[f32; 3]; 4], t: u8, ur: f32, vb: f32, vt: f32, tint: f32) {
+        self.quad(p, [[0.0, vb], [ur, vb], [ur, vt], [0.0, vt]], 1000.0 + t as f32, tint);
+    }
+
     /// A face looking up (`top`) or down at height `y`, over the square at (x0, z0) of side `sf`, with the block's tile.
     #[allow(clippy::too_many_arguments)]
     fn flat(&mut self, top: bool, x0: f32, z0: f32, sf: f32, y: f32, id: u8, meta: u8, tint: f32) {
         let (x1, z1) = (x0 + sf, z0 + sf);
-        let uv = |u: f32, v: f32| face_uv(id, meta, if top { 1 } else { 0 }, u, v);
-        let uvs = [uv(0.0, 0.0), uv(1.0, 0.0), uv(1.0, 1.0), uv(0.0, 1.0)];
-        if top {
-            self.quad([[x0, y, z1], [x1, y, z1], [x1, y, z0], [x0, y, z0]], uvs, 1.0, tint);
-        } else {
-            self.quad([[x0, y, z0], [x1, y, z0], [x1, y, z1], [x0, y, z1]], uvs, 0.5, tint);
+        let p = if top { [[x0, y, z1], [x1, y, z1], [x1, y, z0], [x0, y, z0]] } else { [[x0, y, z0], [x1, y, z0], [x1, y, z1], [x0, y, z1]] };
+        if let Some(t) = atlas::terrain_tile(id, meta, if top { 1 } else { 0 }) {
+            return self.quad_t(p, t, sf, 0.0, sf, tint);
         }
+        let uv = |u: f32, v: f32| face_uv(id, meta, if top { 1 } else { 0 }, u, v);
+        self.quad(p, [uv(0.0, 0.0), uv(1.0, 0.0), uv(1.0, 1.0), uv(0.0, 1.0)], if top { 1.0 } else { 0.5 }, tint);
     }
 
     /// A wall of the voxel at (x0, z0) facing `side`, from `yb` to `yt`, exactly on the voxel's boundary (an inset would leave a slit
     /// between the wall's foot and the lower neighbour's top face, which starts on the boundary); `v0` is where the tile starts (a
-    /// 1/8 high snow layer shows the top eighth).
+    /// 1/8 high snow layer shows the top eighth). The tile repeats every block, across and up.
     #[allow(clippy::too_many_arguments)]
     fn wall(&mut self, side: Side, x0: f32, z0: f32, sf: f32, yt: f32, yb: f32, v0: f32, id: u8, meta: u8, tint: f32) {
         let (_, tile, shade, corners) = side;
         let p = corners.map(|cn| [x0 + cn[0] * sf, if cn[1] > 0.5 { yt } else { yb }, z0 + cn[2] * sf]);
+        if let Some(t) = atlas::terrain_tile(id, meta, tile) {
+            return self.quad_t(p, t, sf, v0, v0 + (yt - yb), tint);
+        }
         let uv = [face_uv(id, meta, tile, 0.0, v0), face_uv(id, meta, tile, 1.0, v0), face_uv(id, meta, tile, 1.0, 1.0), face_uv(id, meta, tile, 0.0, 1.0)];
         self.quad(p, uv, shade, tint);
     }
@@ -860,8 +868,13 @@ fn build(store: &mut Store, key: (i32, i32), step: i32, trees: bool) -> Built {
                             // of the two surfaces, on the tile's edge plane, where it is inside the ground (hidden) unless a slit opens.
                             let (kt, mt) = (tops[gj * w + gi], tops[(gj as i32 + dj) as usize * w + (gi as i32 + di) as usize]);
                             if edge && kt >= 0 && mt >= 0 && ki == kt.min(mt) {
-                                let (sid, smeta, stint) = if opaque(id) && !matches!(id, 17 | 18) { (id, meta, tint) } else { (1, 0, pack(PLAIN)) };
-                                let top = y0 + 1.0;
+                                // A snow layer is 1/8 high: the skirt hangs from ITS top (else a grey wall stood 7/8 above the snow) and shows snow.
+                                let (sid, smeta, stint) = match id {
+                                    78 => (80, 0, pack(PLAIN)),
+                                    _ if opaque(id) && !matches!(id, 17 | 18) => (id, meta, tint),
+                                    _ => (1, 0, pack(PLAIN)),
+                                };
+                                let top = y0 + hgt;
                                 q.wall(side, x0, z0, sf, top - EPS, (top - skirt as f32).max(0.0), 0.0, sid, smeta, stint);
                             }
                             continue;
@@ -1296,7 +1309,7 @@ mod tests {
     }
 
     /// `reduce`: a cell is as high as the median of its columns (not the highest, not pushed to a multiple of the step), a lone column
-    /// is noise, a crown keeps its canopy from a third of the footprint, a trunk survives under a crown, water over its floor.
+    /// is noise, a crown needs half of the footprint, a trunk survives under a crown at step 2, water over its floor.
     #[test]
     fn a_reduce_takes_the_median_height_and_keeps_crowns() {
         let (stone, leaf, log, water) = (1u32, 18u32, 17u32, 9u32);
@@ -1325,6 +1338,9 @@ mod tests {
         assert_eq!(vid(at(&g, 15)), 17, "the trunk keeps its cell under the crown");
         assert_eq!(vid(at(&g, 12)), 17, "down to the ground");
         assert_eq!(at(&g, 24), 0);
+        // from step 4 a trunk would be 4 wide: none (4 x 4 grid, one cell)
+        let big = reduce(grid_of(8, |x, y, z| if y <= 11 { stone } else if (x, z) == (0, 0) && (12..20).contains(&y) { log } else if x < 6 && z < 6 && (20..23).contains(&y) { leaf } else { 0 }), 8, 4).0;
+        assert_eq!((vid(big[(21 * 2) * 2]), big[(15 * 2) * 2]), (18, 0), "a crown, no trunk");
         // a crown cell of one column, no trunk: noise
         let lone = reduce(grid_of(4, |x, y, z| if (x, z) == (0, 0) && y == 30 { leaf } else { 0 }), 4, 2).0;
         assert!(lone.iter().all(|&v| v == 0));
@@ -1490,8 +1506,7 @@ mod tests {
     /// stay green. At step 1 it is the thin layer.
     #[test]
     fn snow_is_a_thin_layer_near_and_not_a_cube_far() {
-        let (a, b) = (atlas::terrain_uv(66, 0.0, 1.0), atlas::terrain_uv(66, 1.0, 0.0));
-        let in_snow = |v: &Vertex| v.uv[0] >= a.0 && v.uv[0] <= b.0 && v.uv[1] >= a.1 && v.uv[1] <= b.1;
+        let in_snow = |v: &Vertex| v.light == 1066.0; // the quad's tile rides in `light` (`Quads::quad_t`)
         // A crown (leaves 77..81) with snow on top (81): the cell [80, 84) held snow over leaves and turned white.
         let mut st = store_of(|_, _| vec![sp(81, 82, 78), sp(77, 81, 18), sp(60, 77, 3)]);
         let near = build(&mut st, (0, 0), 1, false);
