@@ -7,25 +7,26 @@
 //! plus `populate` for the trees when the tile is near; the same generator, so the same terrain and biome tints as the chunk
 //! ring) and keeps each column as a few vertical runs of equal blocks (`Span`: tree crown, trunk, grass, dirt ...; below the
 //! last run it is stone). To mesh a tile at a step of 1, 2, 4, 8 or 16 blocks it fills a dense voxel grid of the tile plus one cell
-//! of margin (the neighbours' columns), mips it `log2(step)` times (`mip`) and emits a face for every solid / see-through
+//! of margin (the neighbours' columns), reduces it to cells (`reduce`) and emits a face for every solid / see-through
 //! boundary (`build`). So a tree is a real mass of leaf voxels on a trunk (not a pillar from the crown to the lawn), a cliff
 //! is a stack of voxels whose height is a multiple of the step (not an arbitrary wall), and an overhang or a crown over a gap
 //! stays what it is.
 //!
-//! The mip differs from Voxy's in two places, both chosen against the bugs seen in the screenshots:
-//! - Voxy turns a cell solid when ANY of its eight children is, which bloats terrain by up to a step (peaks become pillars). Here
-//!   a cell is solid when at least half of its children are (rounds the surface to the nearest step, no bias), except leaves / logs,
-//!   which count from one child (a forest keeps its canopy) - UNVERIFIED against how it looks, picked on paper.
-//! - Voxy picks the child of highest opacity, so leaves over dirt turn into dirt. Here the upper four children are looked at first
-//!   (what you see from above), then opacity, then Voxy's own tie-break (+y, +z, +x).
+//! Where this differs from Voxy (each against a bug seen in the screenshots):
+//! - A cell is `step` x `step` blocks wide but ONE block high (`reduce`), not `step` high. Voxy's 2x2x2 mip is fine at ~2 px a voxel;
+//!   here a voxel is 4-8 px, and a hill became a stack of `step` high plates (contour stripes), rivers floated up to `step - 1`
+//!   blocks, snow lines were wrong. Now the surface is the median height of the footprint, exact to the block.
+//! - The cell looks straight at its footprint (no level-by-level rounding), leaves and logs from a third of it, and a trunk
+//!   survives under its crown (else every crown floats).
+//! - Each tile reads its neighbour's columns at its own step, so two tiles at different steps do not agree on the edge and a slit
+//!   opened along it, showing the sky (the long pale strips). Tile edges hang a skirt (`skirt_len`) under the lower surface.
 //!
 //! Blending with the real chunks:
 //! - same atlas tiles, same grass / foliage tint, same face shade (top 1.0, Z sides 0.8, X sides 0.6), same light (sky 15), same fog;
 //! - the LoD is cut out only where real sections are drawn AND have a mesh (`Lod::update`'s `drawn`, `ChunkManager::drawn`): the old
 //!   cut followed the ring's range alone, so a chunk still generating or meshing left a hole to the sky. The part that stays under
 //!   the real chunks is `EPS` lower (walls `EPS` inside their voxel) so the real surface always wins the depth test.
-//! - a face on a tile's edge hangs a skirt into the ground (`build`): the neighbour tile may be at another step, and the two surfaces
-//!   then differ by up to a step.
+//! - a tile's edge hangs a skirt into the ground (`build`): the neighbour tile may be at another step.
 //!
 //! Real chunks first (Voxy's `VoxelIngestService`): every chunk the chunk manager has finished (all four populates that write into
 //! it done, `ChunkManager::take_ingest`) and every one it unloads after an edit is turned into columns (`columns`) and handed to
@@ -523,56 +524,163 @@ fn fill(store: &Store, key: (i32, i32), s: usize, pal: &mut Pal) -> Vec<u32> {
     g
 }
 
-/// What a voxel wins with among the children of a mip: solid blocks over leaves over water.
-fn prio(id: u8) -> usize {
+/// The voxels of the columns under one cell, at one height, by kind (`reduce`).
+#[derive(Clone, Copy, PartialEq)]
+enum Kind {
+    Land,
+    Water,
+    Leaf,
+    Wood,
+}
+
+fn kind(id: u8) -> Kind {
     match id {
-        9 => 1,
-        18 => 2,
-        _ => 3,
+        9 => Kind::Water,
+        18 => Kind::Leaf,
+        17 => Kind::Wood,
+        _ => Kind::Land,
     }
 }
 
-/// `Mipper.mip` for eight children, index `dy << 2 | dz << 1 | dx`: the upper four are looked at first (what you see from above),
-/// then `prio`, then Voxy's own tie-break (the highest index). The cell is air unless enough children are not: leaves and logs
-/// are kept from two children (one bloated every crown 2x per level), everything else from half of them (see the module doc).
-fn pick(k: &[u32; 8]) -> u32 {
-    let (mut n, mut best, mut key) = (0, 0u32, 0usize);
-    for (q, &v) in k.iter().enumerate() {
-        let id = vid(v);
-        if id == 0 {
-            continue;
+/// The distinct voxels of a footprint's ground at one height (at most 6, enough for a few block types and tints), with counts.
+struct Tally {
+    v: [u32; 6],
+    n: [u16; 6],
+    len: usize,
+}
+
+impl Tally {
+    fn new() -> Self {
+        Tally { v: [0; 6], n: [0; 6], len: 0 }
+    }
+
+    fn add(&mut self, v: u32) {
+        for q in 0..self.len {
+            if self.v[q] == v {
+                self.n[q] += 1;
+                return;
+            }
         }
-        n += 1;
-        let kq = (q >> 2) * 1000 + prio(id) * 8 + q;
-        if kq >= key {
-            (best, key) = (v, kq);
+        if self.len < 6 {
+            (self.v[self.len], self.n[self.len]) = (v, 1);
+            self.len += 1;
         }
     }
-    let need = if vid(best) == 18 { 2 } else { 4 };
-    if n >= need && n > 0 {
-        best
-    } else {
-        0
+
+    /// The most frequent voxel (the first of equals), 0 when empty.
+    fn best(&self) -> u32 {
+        let mut b = 0;
+        for q in 1..self.len {
+            if self.n[q] > self.n[b] {
+                b = q;
+            }
+        }
+        if self.len == 0 {
+            0
+        } else {
+            self.v[b]
+        }
     }
 }
 
-/// One mip level: a grid `w` x `h` x `w` becomes `w / 2` x `h / 2` x `w / 2`.
-fn mip(src: &[u32], w: usize, h: usize) -> Vec<u32> {
-    let (w2, h2) = (w / 2, h / 2);
-    let mut out = vec![0u32; w2 * h2 * w2];
-    for y in 0..h2 {
-        for z in 0..w2 {
-            for x in 0..w2 {
-                let mut k = [0u32; 8];
-                for (q, c) in k.iter_mut().enumerate() {
-                    let (dx, dz, dy) = (q & 1, (q >> 1) & 1, q >> 2);
-                    *c = src[((y * 2 + dy) * w + z * 2 + dz) * w + x * 2 + dx];
+/// The level-0 grid `g0` (`w0` x `HEIGHT` x `w0`, index `(y * w0 + z) * w0 + x`) as cells of `s` x `s` columns that stay ONE block
+/// high: `w0 / s` x `HEIGHT` x `w0 / s`, same index layout. `Mipper.mip` halves y as well as x and z, so a far hill came out as a stack
+/// of `s` high plates (the contour stripes in the screenshots), a river sheet floated up to `s - 1` blocks, and each mip level rounded
+/// the level before it. Here every cell looks straight at its `s * s` columns, one height at a time (a heightmap's median, no
+/// compounding):
+/// - land / water: the cell is solid when at least half of its columns are, of the kind that has more of them (ties: land), and of
+///   the most frequent block among them; so the surface sits where half of the footprint is below it, within a block of the truth;
+/// - leaves and logs: kept from a third of the footprint (a forest keeps its canopy, one tree's crown is not bloated by its edge);
+/// - mixed heights (a tree on a hill, a shore): the biggest of the kinds, when together they fill half of it;
+/// - a trunk is one column, so no cell gets a third of it: a cell whose footprint holds a log, directly under a crown or trunk
+///   cell of its own column, keeps one (else every crown from step 2 floats, and a crown over a thick trunk of every cell was worse).
+/// `s == 1` is the grid as it is.
+fn reduce(g0: Vec<u32>, w0: usize, s: usize) -> (Vec<u32>, usize) {
+    if s == 1 {
+        return (g0, w0);
+    }
+    let w = w0 / s;
+    let t = (s * s) as u32;
+    let mut out = vec![0u32; w * HEIGHT * w];
+    let (mut col, mut wood_at) = ([0u32; HEIGHT], [0u32; HEIGHT]);
+    for j in 0..w {
+        for i in 0..w {
+            for y in 0..HEIGHT {
+                let (mut land, mut wat, mut leaf, mut wood) = (0u32, 0u32, 0u32, 0u32);
+                let (mut tl, mut rep_water, mut rep_leaf, mut rep_wood) = (Tally::new(), 0u32, 0u32, 0u32);
+                for dz in 0..s {
+                    for dx in 0..s {
+                        let v = g0[(y * w0 + j * s + dz) * w0 + i * s + dx];
+                        let id = vid(v);
+                        if id == 0 {
+                            continue;
+                        }
+                        match kind(id) {
+                            Kind::Land => {
+                                land += 1;
+                                tl.add(v);
+                            }
+                            Kind::Water => {
+                                wat += 1;
+                                rep_water = v;
+                            }
+                            Kind::Leaf => {
+                                leaf += 1;
+                                if rep_leaf == 0 {
+                                    rep_leaf = v;
+                                }
+                            }
+                            Kind::Wood => {
+                                wood += 1;
+                                if rep_wood == 0 {
+                                    rep_wood = v;
+                                }
+                            }
+                        }
+                    }
                 }
-                out[(y * w2 + z) * w2 + x] = pick(&k);
+                let (solid, all) = (land + wat, land + wat + leaf + wood);
+                col[y] = if solid > 0 && solid * 2 >= t {
+                    if land >= wat {
+                        tl.best()
+                    } else {
+                        rep_water
+                    }
+                } else if leaf + wood > 0 && (leaf + wood) * 3 >= t {
+                    if wood > leaf {
+                        rep_wood
+                    } else {
+                        rep_leaf
+                    }
+                } else if all > 0 && all * 2 >= t {
+                    let m = land.max(wat).max(leaf).max(wood);
+                    if land == m {
+                        tl.best()
+                    } else if wat == m {
+                        rep_water
+                    } else if leaf == m {
+                        rep_leaf
+                    } else {
+                        rep_wood
+                    }
+                } else {
+                    0
+                };
+                wood_at[y] = rep_wood;
+            }
+            let mut hang = false; // a crown or trunk voxel is right above
+            for y in (0..HEIGHT).rev() {
+                if col[y] == 0 && hang && wood_at[y] != 0 {
+                    col[y] = wood_at[y];
+                }
+                hang = matches!(vid(col[y]), 17 | 18);
+            }
+            for y in 0..HEIGHT {
+                out[(y * w + j) * w + i] = col[y];
             }
         }
     }
-    out
+    (out, w)
 }
 
 /// One voxel's place in the view: where it is (its section decides if the real chunks cover it) and its slice of the indices.
@@ -651,7 +759,12 @@ fn opq(id: u8, s: usize) -> bool {
     opaque(id) || (s > 1 && id == 78)
 }
 
-/// The mesh of tile `key` with a voxel every `step` blocks.
+/// How far (blocks) a tile's edge hangs a skirt under the lower of its own surface and its neighbour's, see `build`.
+fn skirt_len(step: i32) -> i32 {
+    (4 * step).clamp(8, 32)
+}
+
+/// The mesh of tile `key` with a cell every `step` blocks (`step` x `step` blocks wide, one block high: see `reduce`).
 fn build(store: &mut Store, key: (i32, i32), step: i32, trees: bool) -> Built {
     let s = step as usize;
     let n = TILE as usize / s;
@@ -664,14 +777,10 @@ fn build(store: &mut Store, key: (i32, i32), step: i32, trees: bool) -> Built {
         }
     }
     let mut pal = Pal::new();
-    let mut g = fill(store, key, s, &mut pal);
-    let (mut w, mut h) = (TILE as usize + 2 * s, HEIGHT);
-    let mut lv = 1;
-    while lv < s {
-        g = mip(&g, w, h);
-        (w, h, lv) = (w / 2, h / 2, lv * 2);
-    }
-    // Now `w == n + 2` (a voxel of margin on each side) and `h == HEIGHT / s`; the tile's voxels are 1..=n.
+    let g0 = fill(store, key, s, &mut pal);
+    let (g, w) = reduce(g0, TILE as usize + 2 * s, s);
+    // Now `w == n + 2` (a cell of margin on each side); the tile's cells are 1..=n.
+    let h = HEIGHT;
     let at = |i: usize, k: i32, j: usize| -> u32 {
         if k < 0 {
             1 // below the world: solid, no faces down there
@@ -681,10 +790,15 @@ fn build(store: &mut Store, key: (i32, i32), step: i32, trees: bool) -> Built {
             g[(k as usize * w + j) * w + i]
         }
     };
+    // The highest block of each column that is neither air nor water (-1: none): the skirts hang from it.
+    let tops: Vec<i32> = (0..w * w)
+        .map(|c| {
+            let (i, j) = (c % w, c / w);
+            (0..h as i32).rev().find(|&k| !matches!(vid(g[(k as usize * w + j) * w + i]), 0 | 9)).unwrap_or(-1)
+        })
+        .collect();
     let sf = s as f32;
-    // A wall on a tile's edge hangs deeper: the neighbouring tile may be coarser, and its surface then differs from the one this
-    // side measured.
-    let skirt = (2 * step).clamp(2, 32) as f32;
+    let skirt = skirt_len(step);
     let mut q = Quads { verts: Vec::new(), idx: Vec::new() };
     let mut cells: Vec<Cell> = Vec::new();
     for gi in 1..=n {
@@ -697,7 +811,7 @@ fn build(store: &mut Store, key: (i32, i32), step: i32, trees: bool) -> Built {
                     continue;
                 }
                 let ki = k as i32;
-                let y0 = (k * s) as f32;
+                let y0 = k as f32;
                 let i0 = q.idx.len() as u32;
                 if id == 9 {
                     // Water: one sheet on the top voxel, coloured by what is under it.
@@ -708,15 +822,15 @@ fn build(store: &mut Store, key: (i32, i32), step: i32, trees: bool) -> Built {
                             (d, kk) = (d + 1, kk - 1);
                         }
                         let floor = if kk >= 0 { vid(at(gi, kk, gj)) } else { 1 };
-                        let y = y0 + sf - 1.0 / 9.0 - EPS;
+                        let y = y0 + 1.0 - 1.0 / 9.0 - EPS;
                         let uv = atlas::atlas_uv(80, 0.0, 0.0); // the snow block's flat texel: white, so the tint is the colour
                         let (x1, z1) = (x0 + sf, z0 + sf);
-                        q.quad([[x0, y, z1], [x1, y, z1], [x1, y, z0], [x0, y, z0]], [[uv.0, uv.1]; 4], 1.0, pack(water_rgb(floor, d * s as i32)));
+                        q.quad([[x0, y, z1], [x1, y, z1], [x1, y, z0], [x0, y, z0]], [[uv.0, uv.1]; 4], 1.0, pack(water_rgb(floor, d)));
                     }
                 } else {
                     let meta = ((v >> 8) & 15) as u8;
                     let tint = pack(pal.v[(v >> 16) as usize]);
-                    let hgt = if id == 78 && s == 1 { 0.125 } else { sf };
+                    let hgt = if id == 78 && s == 1 { 0.125 } else { 1.0 };
                     let nb = |di: i32, dk: i32, dj: i32| vid(at((gi as i32 + di) as usize, ki + dk, (gj as i32 + dj) as usize));
                     // A face is hidden by an opaque neighbour, by water (its sheet is drawn instead) and by the same block (glass, ice).
                     let hide = |o: u8| o != 0 && (o == 9 || opq(o, s) || o == id);
@@ -736,7 +850,20 @@ fn build(store: &mut Store, key: (i32, i32), step: i32, trees: bool) -> Built {
                         // Water beside a land voxel hides its wall only under the water's surface: where the water's top voxel is, the
                         // land stands 1/9 above the sheet, and culling that strip left a white line along every shore.
                         let up = nb(di, 1, dj);
-                        if if o == 9 { up == 9 || opq(up, s) } else { hide(o) } {
+                        let hidden = if o == 9 { up == 9 || opq(up, s) } else { hide(o) };
+                        let edge = (di == -1 && gi == 1) || (di == 1 && gi == n) || (dj == -1 && gj == 1) || (dj == 1 && gj == n);
+                        if hidden {
+                            // Tile edge skirt. Each tile reads its neighbour's columns at ITS OWN step, so where the neighbour is
+                            // drawn at another step the two surfaces differ and neither tile has a wall there: a slit along the whole
+                            // edge, through which the sky shows (the long pale strips of the screenshots; measured on a profile
+                            // of hills: 4 -> 8 left every exposed block of the edge open). One quad hangs from just under the lower
+                            // of the two surfaces, on the tile's edge plane, where it is inside the ground (hidden) unless a slit opens.
+                            let (kt, mt) = (tops[gj * w + gi], tops[(gj as i32 + dj) as usize * w + (gi as i32 + di) as usize]);
+                            if edge && kt >= 0 && mt >= 0 && ki == kt.min(mt) {
+                                let (sid, smeta, stint) = if opaque(id) && !matches!(id, 17 | 18) { (id, meta, tint) } else { (1, 0, pack(PLAIN)) };
+                                let top = y0 + 1.0;
+                                q.wall(side, x0, z0, sf, top - EPS, (top - skirt as f32).max(0.0), 0.0, sid, smeta, stint);
+                            }
                             continue;
                         }
                         // The foot of the wall meets the top face of the lower neighbour (EPS under its voxel's top), or the water's sheet
@@ -751,17 +878,12 @@ fn build(store: &mut Store, key: (i32, i32), step: i32, trees: bool) -> Built {
                         } else {
                             y0
                         };
-                        q.wall(side, x0, z0, sf, wt, wb, 1.0 - hgt / sf, id, meta, tint);
-                        let edge = (di == -1 && gi == 1) || (di == 1 && gi == n) || (dj == -1 && gj == 1) || (dj == 1 && gj == n);
-                        // The skirt hangs from the lowest exposed voxel of the face, through the solid ground under it.
-                        if edge && ki > 0 && opq(nb(0, -1, 0), s) && opq(nb(di, -1, dj), s) {
-                            q.wall(side, x0, z0, sf, y0 - EPS, y0 - skirt, 0.0, 1, 0, pack(PLAIN));
-                        }
+                        q.wall(side, x0, z0, sf, wt, wb, 1.0 - hgt, id, meta, tint);
                     }
                 }
                 let i1 = q.idx.len() as u32;
                 if i1 > i0 {
-                    let (cx, cy, cz, wet) = (x0 as i32, (k * s) as i32, z0 as i32, id == 9);
+                    let (cx, cy, cz, wet) = (x0 as i32, k as i32, z0 as i32, id == 9);
                     match cells.last_mut() {
                         Some(c) if (c.x, c.z, c.y >> 4, c.water) == (cx, cz, cy >> 4, wet) && c.i1 == i0 => c.i1 = i1,
                         _ => cells.push(Cell { x: cx, y: cy, z: cz, water: wet, i0, i1 }),
@@ -1160,32 +1282,88 @@ mod tests {
         assert_eq!(ids, vec![(18, 68, 71), (17, 64, 66), (2, 63, 64), (3, 60, 63)], "crown, trunk and the grass under it");
     }
 
-    /// `Mipper.mip`: the upper children win, a lone block of terrain in the air is dropped, half of them keep it, a lone leaf stays.
-    #[test]
-    fn a_mip_rounds_terrain_and_keeps_leaves() {
-        let (stone, leaf, water) = (1u32, 18u32, 9u32);
-        assert_eq!(pick(&[0; 8]), 0);
-        assert_eq!(pick(&[stone, 0, 0, 0, 0, 0, 0, 0]), 0, "one block of eight is noise");
-        assert_eq!(pick(&[stone, stone, stone, stone, 0, 0, 0, 0]), stone, "the lower half solid is solid");
-        assert_eq!(pick(&[0, 0, 0, 0, stone, stone, stone, stone]), stone);
-        assert_eq!(pick(&[stone, stone, stone, stone, leaf, 0, 0, 0]), leaf, "a crown over the ground wins");
-        assert_eq!(pick(&[0, 0, 0, 0, leaf, 0, 0, 0]), 0, "one leaf of eight is noise: it bloated every crown");
-        assert_eq!(pick(&[0, 0, 0, 0, leaf, leaf, 0, 0]), leaf, "a crown's edge stays: a forest keeps its canopy");
-        assert_eq!(pick(&[stone, stone, stone, stone, water, water, water, water]), water, "water over its floor");
+    /// A `w0` x `w0` level-0 grid whose voxel at (x, y, z) is `f(x, y, z)`.
+    fn grid_of(w0: usize, f: impl Fn(usize, usize, usize) -> u32) -> Vec<u32> {
+        let mut g = vec![0u32; w0 * HEIGHT * w0];
+        for y in 0..HEIGHT {
+            for z in 0..w0 {
+                for x in 0..w0 {
+                    g[(y * w0 + z) * w0 + x] = f(x, y, z);
+                }
+            }
+        }
+        g
     }
 
-    /// Flat ground meshes to its tops only: no phantom walls, no faces inside the ground, nothing at the tile's edge.
+    /// `reduce`: a cell is as high as the median of its columns (not the highest, not pushed to a multiple of the step), a lone column
+    /// is noise, a crown keeps its canopy from a third of the footprint, a trunk survives under a crown, water over its floor.
     #[test]
-    fn flat_ground_is_tops_only() {
+    fn a_reduce_takes_the_median_height_and_keeps_crowns() {
+        let (stone, leaf, log, water) = (1u32, 18u32, 17u32, 9u32);
+        // 2 x 2 columns (a 4 x 4 grid is 2 x 2 cells): the first cell's columns are stone up to 10, 10, 10 and 14.
+        let one_tall = reduce(grid_of(4, |x, y, z| { let top = if (x, z) == (0, 0) { 14 } else { 10 }; if y < top { stone } else { 0 } }), 4, 2).0;
+        let at = |g: &[u32], y: usize| g[(y * 2) * 2];
+        assert_eq!(at(&one_tall, 9), stone);
+        assert_eq!(at(&one_tall, 10), 0, "one column of four is a spike, not a plateau");
+        // two of the four reach 14: half of the footprint, so the cell reaches it (ties go up)
+        let two_tall = reduce(grid_of(4, |x, y, z| { let top = if (x + z) % 2 == 0 { 14 } else { 10 }; if y < top { stone } else { 0 } }), 4, 2).0;
+        assert_eq!((at(&two_tall, 13), at(&two_tall, 14)), (stone, 0), "height is exact to the block, not a multiple of 2");
+        // a crown: 3 of 4 columns hold leaves at y 20..23, one trunk column (logs) 12..20, grass at 11
+        let tree = |x: usize, y: usize, z: usize| -> u32 {
+            if y <= 11 {
+                stone
+            } else if (x, z) == (0, 0) && (12..20).contains(&y) {
+                log
+            } else if (x, z) != (1, 1) && (20..23).contains(&y) {
+                leaf
+            } else {
+                0
+            }
+        };
+        let g = reduce(grid_of(4, tree), 4, 2).0;
+        assert_eq!(vid(at(&g, 21)), 18, "3 of 4 columns is a crown");
+        assert_eq!(vid(at(&g, 15)), 17, "the trunk keeps its cell under the crown");
+        assert_eq!(vid(at(&g, 12)), 17, "down to the ground");
+        assert_eq!(at(&g, 24), 0);
+        // a crown cell of one column, no trunk: noise
+        let lone = reduce(grid_of(4, |x, y, z| if (x, z) == (0, 0) && y == 30 { leaf } else { 0 }), 4, 2).0;
+        assert!(lone.iter().all(|&v| v == 0));
+        // a log with no crown over it is no trunk
+        let post = reduce(grid_of(4, |x, y, z| if (x, z) == (0, 0) && y < 20 { log } else { 0 }), 4, 2).0;
+        assert!(post.iter().all(|&v| v == 0));
+        let sea = reduce(grid_of(4, |_, y, _| if y < 40 { stone } else if y < 64 { water } else { 0 }), 4, 2).0;
+        assert_eq!((vid(at(&sea, 63)), vid(at(&sea, 64))), (9, 0));
+        // step 1 is the grid itself
+        let g1 = grid_of(2, |x, y, z| if y < 5 + x + z { stone } else { 0 });
+        assert!(reduce(g1.clone(), 2, 1).0 == g1);
+    }
+
+    /// Flat ground meshes to its tops, the tile's edge skirts and nothing else: no phantom walls, no faces inside the ground. The
+    /// surface is exact to the block at every step.
+    #[test]
+    fn flat_ground_is_tops_and_skirts_only() {
         let mut st = store_of(|_, _| land(70));
         let b = build(&mut st, (0, 0), 1, false);
-        assert_eq!(quads(&b), 64 * 64);
+        assert_eq!(quads(&b), 64 * 64 + 4 * 64, "the tops, and a skirt for every edge column");
         assert!((top(&b) - (71.0 - EPS)).abs() < 1e-4);
         assert!(b.idx.iter().all(|&i| (i as usize) < b.verts.len()));
-        // At step 2 the surface (top of block 70) rounds to the step: half of the voxel [70, 72) is solid, so it is solid.
+        // At step 2 the cells are 2 x 2 columns but still one block high: the surface does not round up to 72.
         let b = build(&mut st, (0, 0), 2, false);
-        assert_eq!(quads(&b), 32 * 32);
-        assert!((top(&b) - (72.0 - EPS)).abs() < 1e-4, "got {}", top(&b));
+        assert_eq!(quads(&b), 32 * 32 + 4 * 32);
+        assert!((top(&b) - (71.0 - EPS)).abs() < 1e-4, "got {}", top(&b));
+    }
+
+    /// The slit along the edge between two tiles at different steps: a tile hangs a skirt under the LOWER of its own surface and its
+    /// neighbour's. Here the +x neighbour is 4 blocks lower: the wall covers 67..71, the skirt hangs from 67 for `skirt_len` blocks.
+    #[test]
+    fn the_edge_skirt_hangs_under_the_lower_surface() {
+        let mut st = store_of(|_, _| land(70));
+        st.tiles.insert((1, 0), tile_of(|_, _| land(66)));
+        let b = build(&mut st, (0, 0), 4, false);
+        let low = b.verts.iter().map(|v| v.pos[1]).fold(f32::MAX, f32::min);
+        assert!((low - (67.0 - skirt_len(4) as f32)).abs() < 1e-4, "the skirt hangs {} blocks from the neighbour's top, got {low}", skirt_len(4));
+        // a skirt is on the edge plane x = 64, between the tile and its neighbour
+        assert!(b.verts.iter().any(|v| v.pos[0] == 64.0 && v.pos[1] < 66.0));
     }
 
     /// A tree on flat ground is a trunk and a crown of real voxels, not a tower from the crown down to the lawn: exactly the faces
@@ -1195,7 +1373,7 @@ mod tests {
         let mut st = store_of(|x, z| if (x, z) == (10, 10) { vec![sp(74, 77, 18), sp(71, 74, 17), sp(70, 71, 2), sp(67, 70, 3)] } else { land(70) });
         let b = build(&mut st, (0, 0), 1, false);
         // the lawn minus the cell under the trunk, 12 trunk sides, 12 crown sides, the crown's top (trunk top / crown bottom are hidden)
-        assert_eq!(quads(&b), 4095 + 12 + 12 + 1);
+        assert_eq!(quads(&b), 4095 + 12 + 12 + 1 + 4 * 64, "the lawn minus the trunk's cell, the sides, the crown top, the edge skirts");
         assert!((top(&b) - (77.0 - EPS)).abs() < 1e-4);
         assert!(b.cells.iter().any(|c| (c.x, c.z) == (10, 10) && c.y >> 4 == 4), "the crown (y 74..77) is in section 4");
     }
