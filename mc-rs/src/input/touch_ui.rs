@@ -54,6 +54,8 @@ pub enum PointerRole {
     Reset,
     /// Press landed on the pre-generate button (pause menu only, top-left). Fires on release.
     Pregen,
+    /// Press landed on the TEMPORARY fly button (pause menu only, beside Pregen). Toggles `TouchUi.flying` on release.
+    Fly,
     /// Press landed on the save-and-quit-to-title button (pause menu only). Fires on release.
     Quit,
     /// Press landed on the zoom button. Zoomed while held (`TouchUi::zooming`).
@@ -101,6 +103,8 @@ pub struct LayoutRects {
     pub quit: Rect,
     /// The pre-generation switch, top-left (the pause menu only).
     pub pregen: Rect,
+    /// TEMPORARY fly toggle, right of `pregen` (the pause menu only).
+    pub fly: Rect,
     pub hotbar: [Rect; HOTBAR_SLOTS],
     pub jump: Rect,
     /// The sneak button, the d-pad's centre cell.
@@ -156,8 +160,9 @@ impl LayoutRects {
         let jump = (w - pad * 1.5 - jw, cy - jw * 0.5, jw, jw);
 
         let pregen = (pad, pad, (0.6 * u).min(w * 0.4), ps * 0.8);
+        let fly = (pregen.0 + pregen.2 + pad * 0.5, pad, 0.3 * u, ps * 0.8);
 
-        Self { width: w, pause, inventory, zoom, resume, reset, quit, pregen, hotbar, jump, sneak: cell(0.0, 0.0), dpad, dpad_gap }
+        Self { width: w, pause, inventory, zoom, resume, reset, quit, pregen, fly, hotbar, jump, sneak: cell(0.0, 0.0), dpad, dpad_gap }
     }
 
     /// Hit-test a press. `None` means the press is ignored. While paused only
@@ -171,6 +176,8 @@ impl LayoutRects {
                 Some(PointerRole::Reset)
             } else if in_rect(self.pregen, x, y) {
                 Some(PointerRole::Pregen)
+            } else if in_rect(self.fly, x, y) {
+                Some(PointerRole::Fly)
             } else {
                 in_rect(self.quit, x, y).then_some(PointerRole::Quit)
             };
@@ -220,6 +227,8 @@ pub struct TouchUi {
     shown: [bool; 4],
     /// Sneaking: the centre button toggles it. Kept across pause and screens (only the fingers are dropped).
     pub sneak: bool,
+    /// TEMPORARY fly mode (the pause menu's Fly button); kept over pause like `sneak`.
+    pub flying: bool,
     pub pointers: HashMap<i32, Pointer>,
     pub surface_w: u32,
     pub surface_h: u32,
@@ -254,6 +263,7 @@ impl TouchUi {
             dir: None,
             shown: [false; 4],
             sneak: false,
+            flying: false,
             pointers: HashMap::new(),
             surface_w: w,
             surface_h: h,
@@ -482,6 +492,7 @@ impl TouchUi {
             }
             PointerRole::Quit => self.quit = true,
             PointerRole::Pregen => self.pregen = true,
+            PointerRole::Fly => self.flying = !self.flying,
             PointerRole::Pause => {
                 self.paused = !self.paused;
                 self.reset_armed = false;
@@ -660,6 +671,20 @@ mod tests {
         tap(&mut ui, 3, px + pw * 0.5, py + ph * 0.5);
         tap(&mut ui, 4, x, y);
         assert!(!ui.sneak);
+    }
+
+    /// The pause menu's Fly button sits beside Pregen, toggles on release and stays on after resuming.
+    #[test]
+    fn fly_button_toggles_and_survives_resume() {
+        let mut ui = TouchUi::new(W, H);
+        let (px, py, pw, ph) = ui.layout.pause;
+        tap(&mut ui, 1, px + pw * 0.5, py + ph * 0.5);
+        let (x, y) = mid(ui.layout.fly);
+        assert_eq!(ui.layout.hit_test(x, y, true, false), Some(PointerRole::Fly));
+        assert_eq!(ui.layout.hit_test(x, y, false, false), Some(PointerRole::Look));
+        tap(&mut ui, 2, x, y);
+        tap(&mut ui, 3, px + pw * 0.5, py + ph * 0.5);
+        assert!(!ui.paused && ui.flying);
     }
 
     #[test]

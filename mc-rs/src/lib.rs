@@ -665,7 +665,13 @@ impl App {
         if sneaking && !riding {
             physics::sneak(&mut self.player, physics::HALF, dt, &get); // no walking off an edge, a hold on ladders
         }
-        let (water, lava) = if asleep || riding { (false, false) } else { physics::step(&mut self.player, dt, self.touch.jumping(), &get) };
+        // TEMPORARY fly mode (pause menu button): jump climbs, sneak descends, otherwise hover; the frame's gravity is added back so `step`
+        // leaves the speed as set. ponytail: in water the drag still sags it a little; no fall damage while on.
+        let flying = self.touch.flying && !asleep && !riding;
+        if flying {
+            self.player.vel.y = (if self.touch.jumping() { 8.0 } else if sneaking { -8.0 } else { 0.0 }) + 23.0 * dt;
+        }
+        let (water, lava) = if asleep || riding { (false, false) } else { physics::step(&mut self.player, dt, self.touch.jumping() && !flying, &get) };
         // `EntityPlayerSP.onLivingUpdate` sets `ySize` 0.2 while sneaking and `moveEntity` multiplies it by 0.4 every tick: the eye hangs 0.08
         // low (1.54 up), and it comes back by the same x0.4 a tick once the button is released.
         self.sneak_y = if sneaking { 0.08 } else { self.sneak_y * 0.4f32.powf(dt * 20.0) };
@@ -692,7 +698,7 @@ impl App {
             self.portal_t = (self.portal_t - dt).max(0.0);
             self.portal_cd = (self.portal_cd - dt).max(0.0);
         }
-        self.vitals.update(dt, Env { dy: self.player.pos.y - y0, on_ground: self.player.on_ground, water, lava, ladder, eye_in_water, eye_y: e.y, in_wall });
+        self.vitals.update(dt, Env { dy: self.player.pos.y - y0, on_ground: self.player.on_ground || flying, water, lava, ladder, eye_in_water, eye_y: e.y, in_wall });
         // Entering water splashes (`Entity.onEntityUpdate`); running out of air pops 8 bubbles round the eye (`EntityLiving.onEntityUpdate`).
         let motion = self.player.vel / 20.0; // blocks per tick
         if water && !self.was_in_water {
@@ -2470,6 +2476,8 @@ impl App {
             let (on, n) = self.lod.as_ref().map_or((false, 0), |l| l.pregen());
             let text = if self.lod.is_none() { "Pregen: overworld only".to_string() } else if on { format!("Pregen: {n} chunks (tap to stop)") } else { format!("Pregen: off, {n} chunks") };
             label(v, layout.pregen, &text, on || pressed(PointerRole::Pregen));
+            // TEMPORARY fly toggle, beside Pregen.
+            label(v, layout.fly, if self.touch.flying { "Fly: on" } else { "Fly: off" }, self.touch.flying || pressed(PointerRole::Fly));
         }
 
         // Cap to the buffer capacity; extra quads are silently dropped.

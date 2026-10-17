@@ -1,0 +1,131 @@
+--- a/mc-rs/src/input/touch_ui.rs
++++ b/mc-rs/src/input/touch_ui.rs
+@@ -54,6 +54,8 @@
+     Reset,
+     /// Press landed on the pre-generate button (pause menu only, top-left). Fires on release.
+     Pregen,
++    /// Press landed on the TEMPORARY fly button (pause menu only, beside Pregen). Toggles `TouchUi.flying` on release.
++    Fly,
+     /// Press landed on the save-and-quit-to-title button (pause menu only). Fires on release.
+     Quit,
+     /// Press landed on the zoom button. Zoomed while held (`TouchUi::zooming`).
+@@ -101,6 +103,8 @@
+     pub quit: Rect,
+     /// The pre-generation switch, top-left (the pause menu only).
+     pub pregen: Rect,
++    /// TEMPORARY fly toggle, right of `pregen` (the pause menu only).
++    pub fly: Rect,
+     pub hotbar: [Rect; HOTBAR_SLOTS],
+     pub jump: Rect,
+     /// The sneak button, the d-pad's centre cell.
+@@ -156,8 +160,9 @@
+         let jump = (w - pad * 1.5 - jw, cy - jw * 0.5, jw, jw);
+ 
+         let pregen = (pad, pad, (0.6 * u).min(w * 0.4), ps * 0.8);
++        let fly = (pregen.0 + pregen.2 + pad * 0.5, pad, 0.3 * u, ps * 0.8);
+ 
+-        Self { width: w, pause, inventory, zoom, resume, reset, quit, pregen, hotbar, jump, sneak: cell(0.0, 0.0), dpad, dpad_gap }
++        Self { width: w, pause, inventory, zoom, resume, reset, quit, pregen, fly, hotbar, jump, sneak: cell(0.0, 0.0), dpad, dpad_gap }
+     }
+ 
+     /// Hit-test a press. `None` means the press is ignored. While paused only
+@@ -171,6 +176,8 @@
+                 Some(PointerRole::Reset)
+             } else if in_rect(self.pregen, x, y) {
+                 Some(PointerRole::Pregen)
++            } else if in_rect(self.fly, x, y) {
++                Some(PointerRole::Fly)
+             } else {
+                 in_rect(self.quit, x, y).then_some(PointerRole::Quit)
+             };
+@@ -220,6 +227,8 @@
+     shown: [bool; 4],
+     /// Sneaking: the centre button toggles it. Kept across pause and screens (only the fingers are dropped).
+     pub sneak: bool,
++    /// TEMPORARY fly mode (the pause menu's Fly button); kept over pause like `sneak`.
++    pub flying: bool,
+     pub pointers: HashMap<i32, Pointer>,
+     pub surface_w: u32,
+     pub surface_h: u32,
+@@ -254,6 +263,7 @@
+             dir: None,
+             shown: [false; 4],
+             sneak: false,
++            flying: false,
+             pointers: HashMap::new(),
+             surface_w: w,
+             surface_h: h,
+@@ -482,6 +492,7 @@
+             }
+             PointerRole::Quit => self.quit = true,
+             PointerRole::Pregen => self.pregen = true,
++            PointerRole::Fly => self.flying = !self.flying,
+             PointerRole::Pause => {
+                 self.paused = !self.paused;
+                 self.reset_armed = false;
+@@ -662,6 +673,20 @@
+         assert!(!ui.sneak);
+     }
+ 
++    /// The pause menu's Fly button sits beside Pregen, toggles on release and stays on after resuming.
++    #[test]
++    fn fly_button_toggles_and_survives_resume() {
++        let mut ui = TouchUi::new(W, H);
++        let (px, py, pw, ph) = ui.layout.pause;
++        tap(&mut ui, 1, px + pw * 0.5, py + ph * 0.5);
++        let (x, y) = mid(ui.layout.fly);
++        assert_eq!(ui.layout.hit_test(x, y, true, false), Some(PointerRole::Fly));
++        assert_eq!(ui.layout.hit_test(x, y, false, false), Some(PointerRole::Look));
++        tap(&mut ui, 2, x, y);
++        tap(&mut ui, 3, px + pw * 0.5, py + ph * 0.5);
++        assert!(!ui.paused && ui.flying);
++    }
++
+     #[test]
+     fn second_dpad_finger_is_ignored() {
+         let mut ui = TouchUi::new(W, H);
+--- a/mc-rs/src/lib.rs
++++ b/mc-rs/src/lib.rs
+@@ -665,7 +665,13 @@
+         if sneaking && !riding {
+             physics::sneak(&mut self.player, physics::HALF, dt, &get); // no walking off an edge, a hold on ladders
+         }
+-        let (water, lava) = if asleep || riding { (false, false) } else { physics::step(&mut self.player, dt, self.touch.jumping(), &get) };
++        // TEMPORARY fly mode (pause menu button): jump climbs, sneak descends, otherwise hover; the frame's gravity is added back so `step`
++        // leaves the speed as set. ponytail: in water the drag still sags it a little; no fall damage while on.
++        let flying = self.touch.flying && !asleep && !riding;
++        if flying {
++            self.player.vel.y = (if self.touch.jumping() { 8.0 } else if sneaking { -8.0 } else { 0.0 }) + 23.0 * dt;
++        }
++        let (water, lava) = if asleep || riding { (false, false) } else { physics::step(&mut self.player, dt, self.touch.jumping() && !flying, &get) };
+         // `EntityPlayerSP.onLivingUpdate` sets `ySize` 0.2 while sneaking and `moveEntity` multiplies it by 0.4 every tick: the eye hangs 0.08
+         // low (1.54 up), and it comes back by the same x0.4 a tick once the button is released.
+         self.sneak_y = if sneaking { 0.08 } else { self.sneak_y * 0.4f32.powf(dt * 20.0) };
+@@ -692,7 +698,7 @@
+             self.portal_t = (self.portal_t - dt).max(0.0);
+             self.portal_cd = (self.portal_cd - dt).max(0.0);
+         }
+-        self.vitals.update(dt, Env { dy: self.player.pos.y - y0, on_ground: self.player.on_ground, water, lava, ladder, eye_in_water, eye_y: e.y, in_wall });
++        self.vitals.update(dt, Env { dy: self.player.pos.y - y0, on_ground: self.player.on_ground || flying, water, lava, ladder, eye_in_water, eye_y: e.y, in_wall });
+         // Entering water splashes (`Entity.onEntityUpdate`); running out of air pops 8 bubbles round the eye (`EntityLiving.onEntityUpdate`).
+         let motion = self.player.vel / 20.0; // blocks per tick
+         if water && !self.was_in_water {
+@@ -2470,6 +2476,8 @@
+             let (on, n) = self.lod.as_ref().map_or((false, 0), |l| l.pregen());
+             let text = if self.lod.is_none() { "Pregen: overworld only".to_string() } else if on { format!("Pregen: {n} chunks (tap to stop)") } else { format!("Pregen: off, {n} chunks") };
+             label(v, layout.pregen, &text, on || pressed(PointerRole::Pregen));
++            // TEMPORARY fly toggle, beside Pregen.
++            label(v, layout.fly, if self.touch.flying { "Fly: on" } else { "Fly: off" }, self.touch.flying || pressed(PointerRole::Fly));
+         }
+ 
+         // Cap to the buffer capacity; extra quads are silently dropped.
+--- a/ROADMAP.md
++++ b/ROADMAP.md
+@@ -67,6 +67,7 @@
+ First `cargo test --lib` and a build: everything merged on 2026-10-16 (Tectonic, the Nether, the title screen, the light thread, lazy noise, distant terrain) was written without a Rust toolchain; only the std-only crates (`tectonic`, `embeddium`, `lod`) and the `world/gen` tests were run, in a Linux scratch crate. Then, in the easy-first order: the Nether's ghast, fireball and pig-zombie (M11), the rest of M14 (options, chat, models), the map item (M20); M21 (redstone) goes on from part 5 (the piston shaft model).
+ 
+ ## Changelog
++- 2026-10-17 (4): TEMPORARY Fly button in the pause menu, right of Pregen (written WITHOUT a Rust toolchain: not compiled, not run; test `touch_ui::tests::fly_button_toggles_and_survives_resume`). `PointerRole::Fly` + `LayoutRects.fly` + `TouchUi.flying` (a toggle kept over pause, like `sneak`); in `step_frame` jump climbs at 8 m/s, sneak descends, otherwise hover (gravity of the frame added back before `physics::step`), no fall damage while on. ponytail: water drag still sags the hover a little. Not b1.7.3 (no flying in survival): delete with the Reset button when done.
+ - 2026-10-17 (3): LoD visual fixes after the device screenshots (Pregen works there: compiled and ran). Scratch crate (rustc 1.75, real `lod.rs`): `lod::tests::*` 14 of 14 pass; the full crate still needs a build on the phone / CI. Easiest first.
+     - Snow: from step 2 a snow layer was a full white cube that replaced the cell it lay on (white boxes on crowns and hills at the horizon). Now `fill` drops it at step >= 2 and turns the ground block under it into the snow block (id 80); leaves under it stay green; step 1 is still the 1/8 layer. Test `snow_is_a_thin_layer_near_and_not_a_cube_far` (fails without the change).
+     - Oversized crowns: `pick` kept leaves from ONE child of eight, so every mip level doubled a crown and merged trees into boxes; now two children (logs and solids still 4). `a_mip_rounds_terrain_and_keeps_leaves` changed.
