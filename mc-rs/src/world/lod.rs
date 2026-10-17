@@ -93,14 +93,12 @@ const HEIGHT: usize = 128;
 fn step_for(dist: f32) -> i32 {
     if dist < 150.0 {
         1
-    } else if dist < 250.0 {
+    } else if dist < 280.0 {
         2
-    } else if dist < 400.0 {
+    } else if dist < 460.0 {
         4
-    } else if dist < 600.0 {
-        8
     } else {
-        16
+        8
     }
 }
 
@@ -505,10 +503,19 @@ fn fill(store: &Store, key: (i32, i32), s: usize, pal: &mut Pal) -> Vec<u32> {
             for y in 0..last.y0 as usize {
                 g[(y * w + rz) * w + rx] = under;
             }
-            for sp in col {
+            // From step 2 a snow layer is no voxel (as a full block it was a white cube on every crown and hill): the ground under it
+            // is the snow block instead, leaves stay green.
+            let snow = s > 1 && col[0].id == 78;
+            for (n, sp) in col.iter().enumerate() {
+                if snow && n == 0 {
+                    continue;
+                }
                 let v = sp.id as u32 | (sp.meta as u32 & 15) << 8 | pal.get(sp.tint) << 16;
                 for y in sp.y0 as usize..sp.y1 as usize {
                     g[(y * w + rz) * w + rx] = v;
+                }
+                if snow && n == 1 && !matches!(sp.id, 9 | 17 | 18) {
+                    g[((sp.y1 as usize - 1) * w + rz) * w + rx] = 80;
                 }
             }
         }
@@ -527,7 +534,7 @@ fn prio(id: u8) -> usize {
 
 /// `Mipper.mip` for eight children, index `dy << 2 | dz << 1 | dx`: the upper four are looked at first (what you see from above),
 /// then `prio`, then Voxy's own tie-break (the highest index). The cell is air unless enough children are not: leaves and logs
-/// are kept from one child, everything else from half of them (see the module doc).
+/// are kept from two children (one bloated every crown 2x per level), everything else from half of them (see the module doc).
 fn pick(k: &[u32; 8]) -> u32 {
     let (mut n, mut best, mut key) = (0, 0u32, 0usize);
     for (q, &v) in k.iter().enumerate() {
@@ -541,7 +548,7 @@ fn pick(k: &[u32; 8]) -> u32 {
             (best, key) = (v, kq);
         }
     }
-    let need = if matches!(vid(best), 17 | 18) { 1 } else { 4 };
+    let need = if vid(best) == 18 { 2 } else { 4 };
     if n >= need && n > 0 {
         best
     } else {
@@ -1162,7 +1169,8 @@ mod tests {
         assert_eq!(pick(&[stone, stone, stone, stone, 0, 0, 0, 0]), stone, "the lower half solid is solid");
         assert_eq!(pick(&[0, 0, 0, 0, stone, stone, stone, stone]), stone);
         assert_eq!(pick(&[stone, stone, stone, stone, leaf, 0, 0, 0]), leaf, "a crown over the ground wins");
-        assert_eq!(pick(&[0, 0, 0, 0, leaf, 0, 0, 0]), leaf, "a lone leaf stays: a forest keeps its canopy");
+        assert_eq!(pick(&[0, 0, 0, 0, leaf, 0, 0, 0]), 0, "one leaf of eight is noise: it bloated every crown");
+        assert_eq!(pick(&[0, 0, 0, 0, leaf, leaf, 0, 0]), leaf, "a crown's edge stays: a forest keeps its canopy");
         assert_eq!(pick(&[stone, stone, stone, stone, water, water, water, water]), water, "water over its floor");
     }
 
@@ -1298,5 +1306,30 @@ mod tests {
             }
         }
         lod.toggle_pregen();
+    }
+
+    /// From step 2 a snow layer is no voxel: it made a white cube of the crown (or hill) it lay on. Ground under it turns white, leaves
+    /// stay green. At step 1 it is the thin layer.
+    #[test]
+    fn snow_is_a_thin_layer_near_and_not_a_cube_far() {
+        let (a, b) = (atlas::terrain_uv(66, 0.0, 1.0), atlas::terrain_uv(66, 1.0, 0.0));
+        let in_snow = |v: &Vertex| v.uv[0] >= a.0 && v.uv[0] <= b.0 && v.uv[1] >= a.1 && v.uv[1] <= b.1;
+        // A crown (leaves 77..81) with snow on top (81): the cell [80, 84) held snow over leaves and turned white.
+        let mut st = store_of(|_, _| vec![sp(81, 82, 78), sp(77, 81, 18), sp(60, 77, 3)]);
+        let near = build(&mut st, (0, 0), 1, false);
+        assert!((top(&near) - (81.0 + 0.125 - EPS)).abs() < 1e-4, "got {}", top(&near));
+        let far = build(&mut st, (0, 0), 4, false);
+        assert!(!far.verts.iter().any(|v| in_snow(v)), "the crown stays leaves");
+        // Snow on grass: the ground shows the snow tile instead.
+        let mut st = store_of(|_, _| vec![sp(71, 72, 78), sp(70, 71, 2), sp(66, 70, 3)]);
+        let far = build(&mut st, (0, 0), 2, false);
+        assert!(far.verts.iter().any(|v| in_snow(v) && v.pos[1] > 69.0), "the ground shows the snow tile");
+    }
+
+    /// Cells get coarser with distance, never finer, and the far hills are at most 8 blocks.
+    #[test]
+    fn steps_grow_with_distance() {
+        let s: Vec<i32> = (0..100).map(|i| step_for(i as f32 * 10.0)).collect();
+        assert!(s.windows(2).all(|w| w[0] <= w[1]) && s[0] == 1 && *s.last().unwrap() == 8);
     }
 }
