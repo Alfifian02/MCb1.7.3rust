@@ -62,6 +62,10 @@ const MAX_W: f64 = 16.0;
 const WIDTH_SCALE: f64 = 1.0;
 const STREAM_DEPTH: f64 = 0.24;
 const BANK_WIDTH: f64 = 2.0;
+/// Farthest a bank is cut from the channel's edge (blocks): the slope has to reach the real terrain, or a trench is left with a wall at
+/// the end of the band (a 5 block band beside 20 blocks of hill was a 20 block cliff), and the slope's steepness (blocks up per block out).
+const VALLEY: f64 = 48.0;
+const BANK_SLOPE: f64 = 0.5;
 const DITCH_INSET: f64 = 3.0;
 const A_RIVER: f64 = 1.0;
 const SMOOTHING: usize = 3;
@@ -446,6 +450,11 @@ fn cell_of(v: f64) -> i32 {
     ((v + (CELL / 2) as f64) / CELL as f64).floor() as i32
 }
 
+/// How far from the channel's edge a river still shapes the ground.
+fn reach(w: f64) -> f64 {
+    VALLEY.max(w * BANK_WIDTH)
+}
+
 /// Distance from (x, z) to the segment and the parameter of the closest point.
 fn seg_distance(s: &Seg, x: f64, z: f64) -> (f64, f64) {
     let (dx, dz) = (s.x2 - s.x1, s.z2 - s.z1);
@@ -478,7 +487,7 @@ impl Network {
         let s = &self.segs[si];
         let w = s.w1 + (s.w2 - s.w1) * t;
         let band = 5.0f64.max(w * BANK_WIDTH);
-        if d > w + band {
+        if d > w + reach(w) {
             return None;
         }
         let grade = s.y1 + (s.y2 - s.y1) * t;
@@ -950,7 +959,7 @@ fn index_of(segs: &[Seg]) -> HashMap<(i32, i32), Vec<u32>> {
     let mut index: HashMap<(i32, i32), Vec<u32>> = HashMap::new();
     for (si, s) in segs.iter().enumerate() {
         let wmax = s.w1.max(s.w2);
-        let r = wmax + 5.0f64.max(wmax * BANK_WIDTH);
+        let r = wmax + reach(wmax);
         let b = BUCKET as f64;
         let (x0, x1) = (((s.x1.min(s.x2) - r) / b).floor() as i32, ((s.x1.max(s.x2) + r) / b).floor() as i32);
         let (z0, z1) = (((s.z1.min(s.z2) - r) / b).floor() as i32, ((s.z1.max(s.z2) + r) / b).floor() as i32);
@@ -1063,11 +1072,15 @@ impl Region {
                     // Bank: a slope up from the waterline cut into higher ground, a berm on lower ground so the water is held.
                     let k = p.distance - p.width;
                     let band = 5.0f64.max(p.width * BANK_WIDTH);
-                    // The bank's first block is level with the water cell (its top 1/9 above the water), not a block over it.
-                    let target = (ws + (k * 0.75) as i32).min(120);
+                    // The slope rises BANK_SLOPE a block from the waterline (the first block level with the water cell, its top 1/9 over the
+                    // water) and, over the outer half of the reach, eases into the terrain's own height, so a hill beside the river is a
+                    // valley side and never a wall at the end of the band.
+                    let t = ws as f64 + k * BANK_SLOPE;
+                    let u = ((k / reach(p.width) - 0.5) * 2.0).clamp(0.0, 1.0);
+                    let target = ((t + (s as f64 - t) * u * u * (3.0 - 2.0 * u)).floor() as i32).min(120);
                     let top = pick(if k < 1.5 { st.line } else { st.top }, pat);
                     if s > ws {
-                        if s > target && s - target <= 10 {
+                        if s > target {
                             for y in target + 1..=s {
                                 blocks[col + y as usize] = block::AIR;
                             }
@@ -1349,6 +1362,46 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A river through high ground has a valley side, not a wall: over a plateau 36 blocks above the water, the surface never steps by
+    /// more than 3 blocks between neighbours across the river (the old 5 block band left a cliff of ~30 at its end), the water is held,
+    /// and the plateau itself is untouched past the reach.
+    #[test]
+    fn a_river_in_high_ground_has_sloped_banks_not_walls() {
+        let reg = Region { nets: vec![Arc::new(made(&[(-200.0, 0.0, 200.0, 0.0, 2.0)]))] };
+        let (x0, z0, nx, nz) = (-16i32, -80i32, 2usize, 10usize); // chunks cx -1..1, cz -5..5
+        let mut h = vec![0i32; (nx * 16) * (nz * 16)];
+        for cx in 0..nx {
+            for cz in 0..nz {
+                let mut b = vec![block::AIR; 16 * 16 * 128];
+                for i in 0..256usize {
+                    for y in 0..100 {
+                        b[((i / 16) << 11) | ((i % 16) << 7) | y] = block::STONE;
+                    }
+                }
+                reg.carve(x0 / 16 + cx as i32, z0 / 16 + cz as i32, &mut b, &vec![Biome::Plains; 256], &vec![0.8; 256]);
+                for x in 0..16usize {
+                    for z in 0..16usize {
+                        let col = (x << 11) | (z << 7);
+                        let top = (0..128usize).rev().find(|&y| b[col + y] != block::AIR).unwrap() as i32;
+                        h[(cx * 16 + x) * (nz * 16) + cz * 16 + z] = top;
+                    }
+                }
+            }
+        }
+        let at = |x: usize, z: usize| h[x * (nz * 16) + z];
+        let mut worst = 0;
+        for x in 0..nx * 16 {
+            for z in 1..nz * 16 {
+                worst = worst.max((at(x, z) - at(x, z - 1)).abs());
+            }
+            // Water at the river (z 0), plateau far away (z -80 and 79 are 78+ blocks out).
+            assert!(at(x, 80) <= 66, "no river at x {x}: {}", at(x, 80));
+            assert_eq!(at(x, 0), 99, "the plateau is cut at the far edge");
+            assert_eq!(at(x, nz * 16 - 1), 99, "the plateau is cut at the far edge");
+        }
+        assert!(worst <= 3, "a wall of {worst} blocks beside the river");
     }
 
     /// A river opens into the sea: water already there is left alone (the bank's berm used to dam the mouth with dirt and gravel), and
