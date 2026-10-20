@@ -30,6 +30,7 @@ use crate::render::atlas;
 use crate::render::items::{ItemMesh, SignView};
 use crate::render::camera::{FirstPersonCamera, Frustum};
 use crate::render::outline::Outline;
+use crate::render::panorama::Panorama;
 use crate::render::sky::{SkyFrame, SkyRenderer};
 use crate::render::present::{Present, SCENE_FORMAT};
 use crate::render::color;
@@ -119,6 +120,8 @@ struct App {
     // M12: touch UI state + HUD renderer.
     touch: TouchUi,
     hud: HudPipeline,
+    /// The title screen's backdrop (`menu::Menu::panorama`).
+    pano: Panorama,
     /// Scratch vertex buffer for the HUD; cleared each frame, then emitted.
     hud_verts: Vec<HudVertex>,
     // M5: block under the crosshair (within reach) and its outline buffers.
@@ -226,6 +229,7 @@ impl App {
         // the window we just initialised against.
         let touch = TouchUi::new(width, height);
         let hud = HudPipeline::new(&gpu.device, &gpu.queue, surface_format, width, height);
+        let pano = Panorama::new(&gpu.device, &gpu.queue, surface_format);
         let outline = Outline::new(&gpu.device);
         let item_mesh = ItemMesh::new(&gpu.device);
         let rain_fx = weather::Weather::new(&gpu.device, &gpu.queue, SCENE_FORMAT);
@@ -245,7 +249,7 @@ impl App {
             total_frames: 0,
             started: Instant::now(),
             touch,
-            hud,
+            hud, pano,
             hud_verts: Vec::with_capacity(256),
             target: None,
             outline,
@@ -2004,6 +2008,7 @@ impl App {
         }
         self.hud_verts.clear();
         m.draw(&mut self.hud_verts, w, h, &self.opts);
+        let pano = m.panorama();
         self.hud_verts.truncate(self.hud.quad_capacity * 6);
         let frame = match self.gpu.surface.get_current_texture() {
             Ok(f) => f,
@@ -2031,6 +2036,9 @@ impl App {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
+            if pano {
+                self.pano.draw(&self.gpu.queue, &mut rp, w, h);
+            }
             rp.set_pipeline(&self.hud.pipeline);
             rp.set_bind_group(0, &self.hud.bind_group, &[]);
             rp.set_vertex_buffer(0, self.hud.vbuf.slice(..));

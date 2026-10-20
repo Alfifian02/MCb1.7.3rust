@@ -7,6 +7,7 @@ pub mod mesh;
 pub mod hud;
 pub mod font;
 pub mod outline;
+pub mod panorama;
 pub mod items;
 pub mod present;
 pub mod sky;

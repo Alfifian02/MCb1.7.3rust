@@ -390,6 +390,11 @@ impl Menu {
         (self.worlds, self.sel, self.scroll, self.scr) = (list(&self.root), None, 0.0, Scr::Select);
     }
 
+    /// The title screen itself shows the panorama (`render_menu` draws it under the HUD); every other screen keeps its dirt.
+    pub fn panorama(&self) -> bool {
+        self.scr == Scr::Main && !self.shown_loading
+    }
+
     // ---- drawing ----
 
     /// The whole screen into `v` for a `w` x `h` px surface.
@@ -403,7 +408,9 @@ impl Menu {
             let x = if center { x - tw(t) / 2.0 } else { x };
             HudPipeline::push_text(v, x * s, y * s, s, t, rgb(c));
         };
-        dirt(v, s, [0.0, 0.0, gw, gh], 0.0, 0x404040);
+        if !self.panorama() {
+            dirt(v, s, [0.0, 0.0, gw, gh], 0.0, 0x404040);
+        }
         if self.loading.is_some() {
             txt(v, hw, gh / 2.0 - 20.0, "Loading level", 0xFFFFFF, true);
             txt(v, hw, gh / 2.0 + 4.0, "Building terrain", 0xFFFFFF, true);
@@ -433,7 +440,7 @@ impl Menu {
                     let [px, py] = p.pos;
                     p.pos = [ox + px * cs - py * sn, oy + px * sn + py * cs];
                 }
-                txt(v, 2.0, 2.0, "Minecraft Beta 1.7.3", 0x505050, false);
+                txt(v, 2.0, 2.0, "Minecraft Beta 1.7.3", 0xFFFFFF, false); // was 0x505050, grey on dirt: unreadable over the panorama
                 let c = "Copyright Mojang AB. Do not distribute.";
                 txt(v, gw - tw(c) - 2.0, gh - 10.0, c, 0xFFFFFF, false);
             }
@@ -611,7 +618,7 @@ mod tests {
         assert_eq!((info.name.as_str(), info.folder.as_str(), info.tectonic), ("New World", "New World", true));
         let mut v = Vec::new();
         m.draw(&mut v, sz.0, sz.1, &Settings::default());
-        assert!(m.shown_loading && !v.is_empty());
+        assert!(m.shown_loading && !m.panorama() && !v.is_empty());
 
         let mut m = Menu::new(&root);
         tap(&mut m, "Singleplayer", sz);
