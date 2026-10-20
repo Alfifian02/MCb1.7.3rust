@@ -2678,8 +2678,9 @@ fn android_main(app: AndroidApp) {
                                     InputStatus::Handled
                                 }
                                 IEv::KeyEvent(k) => match app_state.as_mut() {
-                                    Some(a) if a.touch.pad.on_key(&k) => InputStatus::Handled,
-                                    _ => InputStatus::Unhandled,
+                                    // not a guard: a guard binds `a` immutably, `on_key` needs it mutable
+                                    Some(a) => if a.touch.pad.on_key(&k) { InputStatus::Handled } else { InputStatus::Unhandled },
+                                    None => InputStatus::Unhandled,
                                 },
                                 IEv::MotionEvent(m) => {
                                     if let Some(a) = app_state.as_mut() {
