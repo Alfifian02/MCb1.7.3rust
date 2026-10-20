@@ -69,7 +69,9 @@ pub const ITEMS_Y: usize = 256 + TILES_H;
 /// Under them `art/kz.png` (the paintings, 16 px pieces = tiles `ART_TILE0 + row * 16 + col`) and `item/sign.png` (64 x 32 at `SIGN_Y`).
 pub const ART_Y: usize = ITEMS_Y + 256;
 pub const SIGN_Y: usize = ART_Y + 256;
-pub const ATLAS_H: usize = ART_Y + 288;
+/// `mob/char.png` (64 x 32, the player skin) at `CHAR_Y`.
+pub const CHAR_Y: usize = SIGN_Y + 32;
+pub const ATLAS_H: usize = ART_Y + 320;
 /// Mip levels of the atlas (a 16 px tile has 16, 8, 4 px: three levels never mix two tiles at the middle of a tile).
 pub const MIPS: u32 = 3;
 /// `gui/items.png` as RGBA (256 x 256, 16 x 16 px sprites): `Item.iconIndex` picks the sprite (`item_icon`).
@@ -78,7 +80,7 @@ pub const ITEMS: &[u8] = include_bytes!("../../assets/items.rgba");
 pub const ITEM_TILE0: u16 = 1000;
 /// A mesh tile number from here up is a 16 px piece of `art/kz.png` (`ART_TILE0 + row * 16 + col`), see `art_uv`.
 pub const ART_TILE0: u16 = 2000;
-/// `art/kz.png` + `item/sign.png` as RGBA, 256 x 288 (`tools/gen_terrain.py`).
+/// `art/kz.png` + `item/sign.png` + `mob/char.png` as RGBA, 256 x 320 (`tools/gen_terrain.py`).
 pub const ART: &[u8] = include_bytes!("../../assets/art.rgba");
 pub const TERRAIN: &[u8] = include_bytes!("../../assets/terrain.rgba");
 
@@ -193,6 +195,11 @@ pub fn art_uv(n: u8, u: f32, v: f32) -> (f32, f32) {
 /// Atlas UV of pixel (`x`, `y`) of `item/sign.png` (y down like the png).
 pub fn sign_px(x: f32, y: f32) -> (f32, f32) {
     (x / ATLAS_W as f32, (SIGN_Y as f32 + y) / ATLAS_H as f32)
+}
+
+/// Atlas UV of pixel (`x`, `y`) of `mob/char.png` (y down like the png).
+pub fn char_px(x: f32, y: f32) -> (f32, f32) {
+    (x / ATLAS_W as f32, (CHAR_Y as f32 + y) / ATLAS_H as f32)
 }
 
 /// `Item.iconIndex` of an item id (256 and up), `None` for blocks and items the Java table does not have.
@@ -371,7 +378,7 @@ mod tests {
         // Every tile `tile_of` hands out has its own colour, and the texture covers all of them.
         assert_eq!(atlas_rgba().len(), ATLAS_W * ATLAS_H * 4);
         assert_eq!(TERRAIN.len(), 256 * 256 * 4);
-        assert_eq!(ART.len(), 256 * 288 * 4, "kz.png over sign.png");
+        assert_eq!(ART.len(), 256 * 320 * 4, "kz.png over sign.png over char.png");
         assert!(art_uv(255, 1.0, 0.0).1 * (ATLAS_H as f32) < (ART_Y + 256) as f32, "the last piece stays above the sign rows");
         assert_ne!(tile_color(260), tile_color(261));
         assert_ne!(tile_color(256), tile_color(17));

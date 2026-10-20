@@ -51,6 +51,8 @@ pub enum PointerRole {
     Pause,
     /// Press landed on the zoom button. Zoomed while held (`TouchUi::zooming`).
     Zoom,
+    /// Press landed on the view button (left of zoom). Toggles `TouchUi.third` on release.
+    View,
     /// Press landed on the inventory button. Opens / closes the screen on release.
     Inventory,
     /// Any other press while a screen is open. Reported as a tap on release.
@@ -87,6 +89,8 @@ pub struct LayoutRects {
     pub inventory: Rect,
     /// Hold to zoom (Zoomify), left of `inventory`.
     pub zoom: Rect,
+    /// Tap to toggle the third-person view, left of `zoom`.
+    pub view: Rect,
     pub hotbar: [Rect; HOTBAR_SLOTS],
     pub jump: Rect,
     /// The sneak button, the d-pad's centre cell.
@@ -115,6 +119,8 @@ impl LayoutRects {
         // UNVERIFIED: b1.7.3 opens the inventory with a key; this button's place is invented for touch.
         let inventory = (w - ps * 2.0 - pad * 1.5, pad, ps, ps);
         let zoom = (w - ps * 3.0 - pad * 2.0, pad, ps, ps);
+        // UNVERIFIED: b1.7.3 toggles the view with F5; this button's place is invented for touch.
+        let view = (w - ps * 4.0 - pad * 2.5, pad, ps, ps);
 
         // Square cells; capped so nine of them always fit the width.
         let cell = (0.105 * u).min(w / 9.5);
@@ -135,7 +141,7 @@ impl LayoutRects {
         let jw = 0.16 * u;
         let jump = (w - pad * 1.5 - jw, cy - jw * 0.5, jw, jw);
 
-        Self { width: w, pause, inventory, zoom, hotbar, jump, sneak: cell(0.0, 0.0), dpad, dpad_gap }
+        Self { width: w, pause, inventory, zoom, view, hotbar, jump, sneak: cell(0.0, 0.0), dpad, dpad_gap }
     }
 
     /// Hit-test a press. `None` means the press is ignored. The pause button always answers; while paused everything else is a tap on
@@ -155,6 +161,9 @@ impl LayoutRects {
         }
         if in_rect(self.zoom, x, y) {
             return Some(PointerRole::Zoom);
+        }
+        if in_rect(self.view, x, y) {
+            return Some(PointerRole::View);
         }
         if in_rect(self.jump, x, y) {
             return Some(PointerRole::Jump);
@@ -194,6 +203,8 @@ pub struct TouchUi {
     pub sneak: bool,
     /// TEMPORARY fly mode (the pause menu's Fly button); kept over pause like `sneak`.
     pub flying: bool,
+    /// Third-person view (`GameSettings.thirdPersonView`), toggled by the view button, kept over pause.
+    pub third: bool,
     pub pointers: HashMap<i32, Pointer>,
     pub surface_w: u32,
     pub surface_h: u32,
@@ -224,6 +235,7 @@ impl TouchUi {
             shown: [false; 4],
             sneak: false,
             flying: false,
+            third: false,
             pointers: HashMap::new(),
             surface_w: w,
             surface_h: h,
@@ -435,6 +447,7 @@ impl TouchUi {
                 log::info!("touch: pause -> {}", self.paused);
             }
             PointerRole::Inventory => self.inventory = true,
+            PointerRole::View => self.third = !self.third,
             PointerRole::Tap => {
                 self.events.push(ScreenEv::Up(ptr.last.0, ptr.last.1));
                 self.cursor_pos = ptr.last;
@@ -673,6 +686,18 @@ mod tests {
         ui.tick(0.3);
         ui.on_release(1);
         assert!(!ui.take_place() && !ui.digging());
+    }
+
+    #[test]
+    fn view_button_toggles_the_third_person() {
+        let mut ui = TouchUi::new(W, H);
+        let (x, y) = mid(ui.layout.view);
+        assert!(ui.layout.view.0 + ui.layout.view.2 < ui.layout.zoom.0, "view sits left of zoom");
+        assert_eq!(ui.layout.hit_test(x, y, false, false), Some(PointerRole::View));
+        tap(&mut ui, 1, x, y);
+        assert!(ui.third);
+        tap(&mut ui, 1, x, y);
+        assert!(!ui.third);
     }
 
     /// The zoom button is held, not tapped: `zooming` is true while the finger is down, only in play, and it clears on release.

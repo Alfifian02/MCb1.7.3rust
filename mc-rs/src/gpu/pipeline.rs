@@ -120,6 +120,7 @@ const TW: u32 = @TW@u;
 const TH: f32 = @TH@.0;
 const MIPS: f32 = @MIPS@.0; // `atlas::MIPS`
 const ITEMS_Y: f32 = @IY@.0; // `atlas::ITEMS_Y`: the flat strip is the rows 256..ITEMS_Y
+const CHAR_Y: f32 = @CY@.0; // `atlas::CHAR_Y`: the player skin, read at mip 0 (a 16 px tile clamp would shift its 4 px strips)
 // b1.7.3 `RenderBlocks` face shades (top 1, bottom 0.5, z 0.8, x 0.6) raised to 2.2: vanilla multiplies in gamma space, the frame is linear.
 const S_BOT: f32 = @SB@;
 const S_Z: f32 = @SZ@;
@@ -135,7 +136,7 @@ fn to_working(c: vec3<f32>) -> vec3<f32> { return (c * R709_TO_XYZ) * XYZ_TO_202
 fn atlas_sample_g(uv: vec2<f32>, gx: vec2<f32>, gy: vec2<f32>) -> vec4<f32> {
     let size = vec2<f32>(textureDimensions(tex));
     let p = uv * size;
-    if p.y >= 256.0 && p.y < ITEMS_Y { return textureSampleLevel(tex, samp, uv, 0.0); }
+    if (p.y >= 256.0 && p.y < ITEMS_Y) || p.y >= CHAR_Y { return textureSampleLevel(tex, samp, uv, 0.0); }
     let g = max(length(gx * size), length(gy * size)); // texels of mip 0 per pixel = 2^lod
     let pad = 0.5 * exp2(min(ceil(log2(max(g, 1.0))), MIPS - 1.0));
     let o = floor(p / 16.0) * 16.0;
@@ -314,6 +315,7 @@ fn shader_source() -> String {
         .replace("@TH@", &(atlas::ATLAS_H / 16).to_string())
         .replace("@MIPS@", &atlas::MIPS.to_string())
         .replace("@IY@", &atlas::ITEMS_Y.to_string())
+        .replace("@CY@", &atlas::CHAR_Y.to_string())
         .replace("@SB@", &format!("{:?}", 0.5f32.powf(2.2)))
         .replace("@SZ@", &format!("{:?}", 0.8f32.powf(2.2)))
         .replace("@SX@", &format!("{:?}", 0.6f32.powf(2.2)))

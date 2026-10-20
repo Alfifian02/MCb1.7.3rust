@@ -146,6 +146,10 @@ struct App {
     sneak_y: f32,
     /// Hotbar slot last seen and seconds its item name still shows (`GuiIngame` shows it ~2 s after a switch).
     tip: (usize, f32),
+    /// The local player's model state (`render::player`): body yaw, limb and arm swing, ticked at 20 Hz.
+    body: render::player::Anim,
+    /// The eye's place while the frame is drawn from behind (`third_pos`), put back after the frame.
+    third_saved: Option<glam::Vec3>,
     /// Survival digging state and the leftover time towards the next 20 Hz dig tick.
     dig: Dig,
     dig_acc: f32,
@@ -263,6 +267,8 @@ impl App {
             was_in_water: false,
             sneak_y: 0.0,
             tip: (0, 0.0),
+            body: render::player::Anim::default(),
+            third_saved: None,
             dig: Dig::default(),
             dig_acc: 0.0,
             inv: Inventory::default(),
@@ -838,6 +844,7 @@ impl App {
         self.furn_acc += dt;
         while self.furn_acc >= dig::TICK {
             self.furn_acc -= dig::TICK;
+            self.body.tick(self.player.pos.x, self.player.pos.z, self.camera.yaw.to_degrees() + 180.0);
             // The bobber: gone when the rod is not in hand, 32 blocks away, or after 1200 ticks on the ground.
             if let Some(h) = &mut self.hook {
                 let rod = self.inv.slots[self.touch.hotbar_slot].is_some_and(|s| s.id == gear::ROD);
@@ -937,6 +944,9 @@ impl App {
         // M5: pick the block under the crosshair, dig it while the dig input is held, place on a tap.
         self.touch.tick(dt);
         let place = self.touch.take_place();
+        if place {
+            self.body.swing(); // a tap places, uses or hits: `swingItem`
+        }
         // The inventory button, and taps on an open screen (its presses are not look / move / place).
         if self.touch.take_inventory() {
             if self.sign_edit.is_some() {
@@ -966,6 +976,7 @@ impl App {
                 while self.dig_acc >= dig::TICK {
                     self.dig_acc -= dig::TICK;
                     let (x, y, z) = hit.pos;
+                    self.body.swing();
                     let in_water = matches!(self.chunks.block_loaded(eye.x.floor() as i32, eye.y.floor() as i32, eye.z.floor() as i32), Some(8 | 9));
                     if let Some(id) = self.chunks.block_loaded(x, y, z) {
                         let slot = self.touch.hotbar_slot;
@@ -1812,10 +1823,33 @@ impl App {
         }
     }
 
+    /// One frame; in the third-person view the camera sits behind the eye for it and is put back after (input reads the eye).
+    fn render(&mut self) {
+        self.render_frame();
+        if let Some(p) = self.third_saved.take() {
+            self.camera.pos = p;
+        }
+    }
+
+    /// `EntityRenderer.orientCamera` for `thirdPersonView`: 4 blocks behind the eye, pulled in before terrain.
+    /// ponytail: one ray in 0.1 block steps (the Java casts 8 around it).
+    fn third_pos(&self) -> glam::Vec3 {
+        let (eye, back) = (self.camera.pos, -self.camera.forward());
+        let mut t = 0.1;
+        while t <= 4.0 {
+            let p = eye + back * t;
+            if self.chunks.block_loaded(p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32).is_some_and(normal_cube) {
+                return eye + back * (t - 0.2).max(0.0);
+            }
+            t += 0.1;
+        }
+        eye + back * 4.0
+    }
+
     /// One frame: the scene pass (sky, terrain, far terrain, entities, water, rain) into `Present`'s 8-bit scene, then its two passes
     /// (FXAA + CAS, upscale + vignette + HUD) onto the swap chain. Three render passes in all; the old chain had a shadow map, a G-buffer, a
     /// deferred pass, the light shafts and an HDR post chain of ~8 passes.
-    fn render(&mut self) {
+    fn render_frame(&mut self) {
         if self.menu.is_some() {
             self.render_menu();
             return;
@@ -1825,6 +1859,19 @@ impl App {
         if self.menu.is_some() {
             return; // "Save and quit to title" just ran
         }
+        if self.touch.third {
+            self.third_saved = Some(self.camera.pos);
+            self.camera.pos = self.third_pos();
+        }
+        // The player's own model, drawn only from behind (`RenderPlayer`; the first-person view has the hand instead, not ported yet).
+        let player_view = self.touch.third.then(|| {
+            let riding = self.mobs.list.iter().any(|m| m.ridden) || self.boats.ridden().is_some() || self.carts.ridden().is_some();
+            let held = self.inv.slots[self.touch.hotbar_slot];
+            let partial = (self.furn_acc / dig::TICK).clamp(0.0, 1.0);
+            let (pose, yaw) = self.body.pose(partial, self.camera.pitch.to_degrees(), self.touch.sneak && self.sleep.is_none(), riding, held.is_some());
+            let feet = self.player.pos - glam::Vec3::new(0.0, physics::HALF.y, 0.0);
+            render::player::View { root: render::player::root(feet, yaw), pose, held, at: self.player.pos }
+        });
         // Options: the render distance (Video Settings) and the far terrain switch (Options).
         let rd = self.opts.chunks();
         if self.chunks.radius() != rd {
@@ -1860,7 +1907,7 @@ impl App {
         let seen = |p: glam::Vec3, r: f32| p.distance_squared(eye) < reach2 && frustum.intersects_aabb(p - r, p + r);
         let item_indices = {
             let chunks = &self.chunks;
-            self.item_mesh.update(&self.gpu.queue, &self.drops, &self.mobs, &self.ticks.falling, &self.fx, &|x, y, z| chunks.light_levels(x, y, z), self.hook.as_ref().map(|h| h.pos), &self.paintings, &sign_views, (&self.boats.list, self.boats.alpha()), (&self.carts.list, self.carts.alpha()), eye, &seen)
+            self.item_mesh.update(&self.gpu.queue, &self.drops, &self.mobs, &self.ticks.falling, &self.fx, &|x, y, z| chunks.light_levels(x, y, z), self.hook.as_ref().map(|h| h.pos), &self.paintings, &sign_views, (&self.boats.list, self.boats.alpha()), (&self.carts.list, self.carts.alpha()), player_view.as_ref(), eye, &seen)
         };
 
         // Sky and fog colour from the sun angle, the weather and the climate under the player; the frame is cleared to the fog colour and
@@ -2137,6 +2184,11 @@ impl App {
             } else {
                 HudPipeline::push_gui(v, ox, oy, pw * k, ph * k, match s.gw { 2 => sp::INVENTORY, 3 => sp::CRAFTING, _ => sp::FURNACE });
             }
+            // `GuiInventory`: the player at (51, 75) of the panel, straight ahead, an item in hand lowers the arm.
+            if s.gw == 2 {
+                let pose = render::player::Pose { age: self.world_ticks as f32, holding: self.inv.slots[self.touch.hotbar_slot].is_some(), ..Default::default() };
+                HudPipeline::push_player(v, render::player::inventory_quads(ox + 51.0 * k, oy + 75.0 * k, k, &pose));
+            }
             // Icons here are drawn as big in px as the hotbar's (`16 * hw / 20` box, 0.875 of it: 14 hotbar units), not as 16 panel units.
             let icon_fill = 14.0 * layout.hotbar[0].2 / 20.0 / (16.0 * k);
             let slot = |v: &mut Vec<HudVertex>, c: (f32, f32, f32), st: Option<ItemStack>| {
@@ -2234,6 +2286,12 @@ impl App {
         for (dx, dy) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)] {
             HudPipeline::push_quad(v, qx + dx * (q + g), qy + dy * (q + g), q, q, [1.0; 4]);
         }
+
+        // View button, left of zoom: a person (head over body), lit in the third-person view.
+        let (vx, vy, vw, vh) = layout.view;
+        HudPipeline::push_button(v, vx, vy, vw, vh, if self.touch.third || pressed(PointerRole::View) || !play { 2 } else { 1 });
+        HudPipeline::push_quad(v, vx + vw * 0.38, vy + vh * 0.2, vw * 0.24, vh * 0.24, [1.0; 4]);
+        HudPipeline::push_quad(v, vx + vw * 0.32, vy + vh * 0.48, vw * 0.36, vh * 0.32, [1.0; 4]);
 
         // Zoom button, left of the inventory button: a Z (Zoomify), lit while held.
         let (zx, zy, zw, zh) = layout.zoom;

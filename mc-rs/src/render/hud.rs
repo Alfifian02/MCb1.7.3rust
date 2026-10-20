@@ -48,12 +48,14 @@ pub const CONTAINERS: &[u8] = include_bytes!("../../assets/containers.rgba");
 pub const DPAD_SHEET: &[u8] = include_bytes!("../../assets/dpad.rgba");
 /// The title screen's sheet (256 x 272, `tools/gen_menu.py`): `mclogo.png`, then `background.png`: the last rows of the HUD texture.
 pub const MENU_SHEET: &[u8] = include_bytes!("../../assets/menu.rgba");
-const SHEET_H: f32 = 2576.0;
+/// The player skin (`mob/char.png`, 64 x 32): the last 32 rows of the HUD texture, cut from the atlas's `ART` tail (`PLAYER_Y`).
+const SHEET_H: f32 = 2608.0;
+const PLAYER_Y: f32 = 2576.0;
 /// Where `terrain.png` (untinted, 256 x 256) starts in the HUD texture: block icons are drawn from it (`push_cube`, `push_tile`).
 const TERRAIN_Y: f32 = 768.0;
 
 /// Sprites as `(x, y, w, h)` in pixels of the whole HUD texture: items 0..256, widgets.png 256..512, icons.png 512..768, terrain.png
-/// 768..1024, then the container panels (inventory 1024, crafting table 1280, furnace 1536, chest 1792), then the d-pad sheet (2048).
+/// 768..1024, then the container panels (inventory 1024, crafting table 1280, furnace 1536, chest 1792), then the d-pad sheet (2048), the title sheet (2304), the player skin (2576).
 pub mod sprites {
     pub type Sprite = (f32, f32, f32, f32);
     pub const HOTBAR: Sprite = (0.0, 256.0, 182.0, 22.0);
@@ -135,7 +137,7 @@ fn lin(c: vec3<f32>) -> vec3<f32> {
 
 // Sharp bilinear: nearest inside a texel, a one-pixel blend only across a texel edge. The sprites are drawn at a fractional scale of the
 // screen, where plain nearest makes some texels one pixel wider than their neighbours (the grain on icons and the hotbar).
-const SHEET: vec2<f32> = vec2<f32>(256.0, 2576.0); // `SHEET_H`
+const SHEET: vec2<f32> = vec2<f32>(256.0, 2608.0); // `SHEET_H`
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
@@ -229,7 +231,7 @@ impl HudPipeline {
         });
         queue.write_texture(
             wgpu::TexelCopyTextureInfo { texture: &items_tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-            &[crate::render::atlas::ITEMS, GUI, crate::render::atlas::TERRAIN, CONTAINERS, DPAD_SHEET, MENU_SHEET].concat(), // items, the GUI sheet, terrain.png, the panels, the d-pad, the title screen
+            &[crate::render::atlas::ITEMS, GUI, crate::render::atlas::TERRAIN, CONTAINERS, DPAD_SHEET, MENU_SHEET, &crate::render::atlas::ART[256 * 288 * 4..]].concat(), // items, the GUI sheet, terrain.png, the panels, the d-pad, the title screen
             wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(256 * 4), rows_per_image: Some(SHEET_H as u32) },
             wgpu::Extent3d { width: 256, height: SHEET_H as u32, depth_or_array_layers: 1 },
         );
@@ -335,6 +337,20 @@ impl HudPipeline {
     /// A sprite of the HUD texture (`sprites`) stretched over the box (x, y, w, h), top-left origin; the alpha cuts it out.
     pub fn push_gui(out: &mut Vec<HudVertex>, x: f32, y: f32, w: f32, h: f32, spr: sprites::Sprite) {
         Self::push_gui_tinted(out, x, y, w, h, spr, [1.0; 4]);
+    }
+
+    /// The player model (`render::player::inventory_quads`: screen px, a larger `z` is nearer) as textured quads from the skin rows of
+    /// the sheet, far to near so a nearer part paints over a farther one (painter's order; no depth buffer in this pass), each shaded
+    /// by how squarely it faces the viewer.
+    pub fn push_player(out: &mut Vec<HudVertex>, mut quads: Vec<crate::render::player::Quad>) {
+        let depth = |q: &crate::render::player::Quad| q.p.iter().map(|p| p.z).sum::<f32>();
+        quads.sort_by(|a, b| depth(a).total_cmp(&depth(b)));
+        for q in quads {
+            let n = (q.p[1] - q.p[0]).cross(q.p[2] - q.p[0]).normalize_or_zero();
+            let s = 0.7 + 0.3 * n.z.abs();
+            let v = |k: usize| HudVertex { pos: [q.p[k].x, q.p[k].y], color: [s, s, s, 1.0], uv: [q.uv[k][0] / 256.0, (PLAYER_Y + q.uv[k][1]) / SHEET_H] };
+            out.extend([v(0), v(1), v(2), v(0), v(2), v(3)]);
+        }
     }
 
     /// `push_gui` multiplied by `c` (the dirt background is `background.png` at 25% grey).
