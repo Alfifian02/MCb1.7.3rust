@@ -106,6 +106,7 @@ pub struct Uniforms {
     /// rgb: fog colour (the frame's linear Rec. 2020), w: far plane (0 = no fog, < 0 = `GL_EXP` with density `-w`, eye in water).
     pub fog: [f32; 4],
     /// x: where the linear fog starts as a fraction of the far plane (0 = a quarter), the far terrain keeps its colours (`lod::FOG_START`).
+    /// y: radius (blocks) of the real translucent water (`fs_water`): `WATER_RANGE` with the LoD on, 1e9 (all of it) with the LoD off.
     pub fogp: [f32; 4],
 }
 
@@ -290,7 +291,7 @@ fn fs_water(in: VsOut) -> @location(0) vec4<f32> {
     let dx = dpdx(in.wp);
     let dy = dpdy(in.wp);
     let sheet = in.k >= 1000.0;
-    if (length(in.wp - u.eye.xyz) > @WR@) != sheet { discard; }
+    if (length(in.wp - u.eye.xyz) > u.fogp.y) != sheet { discard; }
     var uv = in.uv;
     var gx = dpdx(in.uv);
     var gy = dpdy(in.uv);
@@ -316,7 +317,6 @@ fn shader_source() -> String {
         .replace("@SB@", &format!("{:?}", 0.5f32.powf(2.2)))
         .replace("@SZ@", &format!("{:?}", 0.8f32.powf(2.2)))
         .replace("@SX@", &format!("{:?}", 0.6f32.powf(2.2)))
-        .replace("@WR@", &format!("{:?}", crate::world::chunks::WATER_RANGE))
 }
 
 pub struct ChunkPipeline {
@@ -423,13 +423,13 @@ impl ChunkPipeline {
     }
 
     /// The frame's uniforms, one write: the camera, the sky light the time of day takes away (/ 15), the fog (`far` 0 = off, < 0 = `GL_EXP`
-    /// density; `start` = fraction of `far` where the linear fog begins, 0 = a quarter).
-    pub fn frame(&self, queue: &Queue, view: Mat4, proj: Mat4, eye: Vec3, sky_sub: f32, fog: [f32; 3], far: f32, start: f32) {
+    /// density; `start` = fraction of `far` where the linear fog begins, 0 = a quarter; `water` = radius of the real water).
+    pub fn frame(&self, queue: &Queue, view: Mat4, proj: Mat4, eye: Vec3, sky_sub: f32, fog: [f32; 3], far: f32, start: f32, water: f32) {
         let u = Uniforms {
             view_proj: (proj * view).to_cols_array_2d(),
             eye: eye.extend(sky_sub).to_array(),
             fog: [fog[0], fog[1], fog[2], far],
-            fogp: [start, 0.0, 0.0, 0.0],
+            fogp: [start, water, 0.0, 0.0],
         };
         queue.write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&u));
     }
@@ -544,7 +544,7 @@ mod tests {
         let out_view = out.create_view(&Default::default());
         let present = crate::render::present::Present::new(&device, &queue, (N, N), (N, N), fmt);
         let eye = Vec3::new(0.0, 4.0, 0.0);
-        pipe.frame(&queue, Mat4::look_at_rh(eye, Vec3::ZERO, Vec3::NEG_Z), Mat4::perspective_rh(1.2, 1.0, 0.05, 100.0), eye, 0.0, [0.5; 3], 0.0, 0.0);
+        pipe.frame(&queue, Mat4::look_at_rh(eye, Vec3::ZERO, Vec3::NEG_Z), Mat4::perspective_rh(1.2, 1.0, 0.05, 100.0), eye, 0.0, [0.5; 3], 0.0, 0.0, 12.0);
         let pixel = |lm: f32| -> [u8; 4] {
             let (u0, u1, v1) = (16.0 / atlas::ATLAS_W as f32, 32.0 / atlas::ATLAS_W as f32, 16.0 / atlas::ATLAS_H as f32); // tile 1, stone
             // Chunk-local (origin 0), corners ordered so the shared quad indices (0, 1, 2), (2, 3, 0) face up towards the eye.

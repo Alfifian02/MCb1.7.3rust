@@ -49,7 +49,7 @@ use crate::world::ticks::{self, Ticks};
 use crate::world::save::{self, Level};
 use crate::world::sky;
 use crate::world::chunk::{is_plant, normal_cube, outline_bounds, physics_id, pick_bounds};
-use crate::world::chunks::{chunk_coord, ChunkManager, Layer, Shape};
+use crate::world::chunks::{chunk_coord, ChunkManager, Layer, Shape, WATER_RANGE};
 use crate::world::physics::{self, Player};
 use crate::world::redstone;
 use crate::world::vitals::{self, Env, Vitals};
@@ -1828,6 +1828,8 @@ impl App {
         }
         let lod_on = self.opts.lod && self.lod.is_some();
         self.lod_on = lod_on;
+        // Real water reaches `WATER_RANGE` with the LoD on (its water sheet takes over beyond); with it off there is no sheet, so the real water is drawn everywhere the player sees.
+        let wr = if lod_on { WATER_RANGE } else { 1e9 };
         let (pcx, pcz) = (chunk_coord(self.player.pos.x), chunk_coord(self.player.pos.z));
         self.chunks.update(&self.gpu.device, &self.gpu.queue, &self.pipe.origins, pcx, pcz);
         self.camera.zfar = if lod_on { lod::ZFAR } else { 256.0 }; // the far terrain needs the depth range
@@ -1869,7 +1871,7 @@ impl App {
         let e = self.camera.pos;
         let eye_in_water = matches!(self.chunks.block_loaded(e.x.floor() as i32, e.y.floor() as i32, e.z.floor() as i32), Some(8 | 9));
         // Which terrain sections the camera sees (frustum, render shape, and occlusion by terrain); every layer draws from it.
-        self.chunks.update_visible(self.camera.pos, RENDER_SHAPE, (rd * 16) as f32, (RENDER_VERT * 16) as f32, |min, max| frustum.intersects_aabb(min, max));
+        self.chunks.update_visible(self.camera.pos, RENDER_SHAPE, (rd * 16) as f32, (RENDER_VERT * 16) as f32, wr, |min, max| frustum.intersects_aabb(min, max));
         let fresh = self.chunks.take_ingest(); // drained in the Nether too (no LoD there)
         // ponytail: with the LoD switched off the fresh chunks are dropped, not kept for it (it re-reads the saved tiles when it is on again).
         if let Some(l) = self.lod.as_mut().filter(|_| lod_on) {
@@ -1883,7 +1885,7 @@ impl App {
         // colour (0.02, 0.02, 0.2); a negative far plane is how the shader learns the density.
         let (fog_c, far) = if eye_in_water { (color::legacy_lin([0.02, 0.02, 0.2]), -0.1) } else { (fog, if lod_on { lod::RADIUS } else { (rd * 16) as f32 }) };
         let start = if lod_on && !eye_in_water { lod::FOG_START } else { 0.0 };
-        self.pipe.frame(&self.gpu.queue, view, proj, e, sky::skylight_subtracted(angle, rain, thunder) as f32 / 15.0, fog_c, far, start);
+        self.pipe.frame(&self.gpu.queue, view, proj, e, sky::skylight_subtracted(angle, rain, thunder) as f32 / 15.0, fog_c, far, start, wr);
         let clear = wgpu::Color { r: fog_c[0] as f64, g: fog_c[1] as f64, b: fog_c[2] as f64, a: 1.0 };
         self.sky.update(&self.gpu.queue, &self.camera, &SkyFrame { angle, rain, seconds: self.world_ticks as f32 / 20.0 });
         self.sky.set_legacy(&self.gpu.queue, color::legacy_lin(sky::lightning_flash(sky_rgb, self.fx.flash, partial)), fog, angle, rain);

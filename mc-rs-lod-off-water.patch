@@ -1,0 +1,180 @@
+diff -ruN -x '*.pyc' orig/ROADMAP.md repo/ROADMAP.md
+--- orig/ROADMAP.md	2026-10-20 18:15:42.000000000 +0000
++++ repo/ROADMAP.md	2026-10-20 11:35:43.114576768 +0000
+@@ -110,6 +110,10 @@
+ 
+ ## Changelog
+ 
++- 2026-10-20 (6): LoD off = real water everywhere, no water ring (written WITHOUT a Rust toolchain: not compiled, not run, not seen in game; `world::chunks::tests::water_is_drawn_only_within_its_range` gained one assert; run `cargo test --lib --release chunks` and the pipeline shader test first).
++    - Cause: the real water was always cut at `WATER_RANGE` (12 blocks), in the section set (`ChunkManager::wet`) and per pixel in `fs_water`, because the LoD's water sheet is what draws the sea beyond it. With the LoD switched off (`Settings::lod`, Options) nothing drew beyond 12 blocks: a ring of water round the player and bare floor outside it.
++    - Fix, one radius with two users: `lib.rs` computes `wr = WATER_RANGE` with the LoD on and `1e9` with it off, and passes it to `ChunkManager::update_visible` (`wet` = `visible` when it is large) and to `ChunkPipeline::frame` (`Uniforms::fogp.y`, which `fs_water` reads instead of the old compile-time `@WR@`). The LoD-on path is unchanged: same constant, same complement with the sheet.
++    - ponytail / UNVERIFIED: at the very edge of the render distance a water section can be drawn whose floor section is just outside the range (the floor and the water are cut by the same box but the occlusion walk may differ); there the fog is ~100% so it should read as fog colour, check it on a device. Real water is now sorted far to near over the whole ring instead of 12 blocks (more page switches, one draw per section run as before).
+ - 2026-10-20 (5): options + game menu from b1.7.3 (written WITHOUT a Rust toolchain: not compiled, not run, not seen in game; new tests: `options::tests::*` (5), `touch_ui::tests::paused_presses_are_taps_on_the_game_menu`; the 3 pause-menu tests of `touch_ui` that tested the old buttons are gone).
+     - New `options.rs`: `GameSettings` (all 13 `EnumOptions`, `options.txt` in the app's storage in the Java format: `music:`, `mouseSensitivity:`, `viewDistance:`, `key_key.forward:` ...), `GuiOptions` (Music, Sound, Invert Mouse, Sensitivity as `GuiSlider`, Difficulty, Video Settings..., Controls..., Done), `GuiVideoSettings` (Graphics, Render Distance, Smooth Lighting, Performance, 3D Anaglyph, View Bobbing, GUI Scale, Advanced OpenGL), `GuiControls` (10 key buttons, tap = `> W <`), `GuiIngameMenu` ("Game menu", Back to game, Achievements + Statistics greyed out, Options..., Save and quit to title, "Saving level.." for the first second, the world is written as it opens). Texts are `en_US.lang`'s. The title screen's "Options..." is the same `OptionsUi`.
+     - Replaced: the pause menu of `build_hud` + its `LayoutRects` (`resume`, `reset`, `quit`, `pregen`, `fly`, `dbg`) and `PointerRole`s. While paused every press but the pause button is a `Tap` for `options::Pause` (GUI units, `ScaledResolution`). The TEMPORARY Reset world button is deleted (`take_reset`, `reset_armed`); `reset_world(wipe)` keeps its parameter, no caller passes true any more. The death screen is the same `Pause` (`PauseInfo.dead`: "You died!", Respawn).
+diff -ruN -x '*.pyc' orig/mc-rs/src/gpu/pipeline.rs repo/mc-rs/src/gpu/pipeline.rs
+--- orig/mc-rs/src/gpu/pipeline.rs	2026-10-20 21:47:44.000000000 +0000
++++ repo/mc-rs/src/gpu/pipeline.rs	2026-10-20 11:35:43.111606117 +0000
+@@ -106,6 +106,7 @@
+     /// rgb: fog colour (the frame's linear Rec. 2020), w: far plane (0 = no fog, < 0 = `GL_EXP` with density `-w`, eye in water).
+     pub fog: [f32; 4],
+     /// x: where the linear fog starts as a fraction of the far plane (0 = a quarter), the far terrain keeps its colours (`lod::FOG_START`).
++    /// y: radius (blocks) of the real translucent water (`fs_water`): `WATER_RANGE` with the LoD on, 1e9 (all of it) with the LoD off.
+     pub fogp: [f32; 4],
+ }
+ 
+@@ -290,7 +291,7 @@
+     let dx = dpdx(in.wp);
+     let dy = dpdy(in.wp);
+     let sheet = in.k >= 1000.0;
+-    if (length(in.wp - u.eye.xyz) > @WR@) != sheet { discard; }
++    if (length(in.wp - u.eye.xyz) > u.fogp.y) != sheet { discard; }
+     var uv = in.uv;
+     var gx = dpdx(in.uv);
+     var gy = dpdy(in.uv);
+@@ -316,7 +317,6 @@
+         .replace("@SB@", &format!("{:?}", 0.5f32.powf(2.2)))
+         .replace("@SZ@", &format!("{:?}", 0.8f32.powf(2.2)))
+         .replace("@SX@", &format!("{:?}", 0.6f32.powf(2.2)))
+-        .replace("@WR@", &format!("{:?}", crate::world::chunks::WATER_RANGE))
+ }
+ 
+ pub struct ChunkPipeline {
+@@ -423,13 +423,13 @@
+     }
+ 
+     /// The frame's uniforms, one write: the camera, the sky light the time of day takes away (/ 15), the fog (`far` 0 = off, < 0 = `GL_EXP`
+-    /// density; `start` = fraction of `far` where the linear fog begins, 0 = a quarter).
+-    pub fn frame(&self, queue: &Queue, view: Mat4, proj: Mat4, eye: Vec3, sky_sub: f32, fog: [f32; 3], far: f32, start: f32) {
++    /// density; `start` = fraction of `far` where the linear fog begins, 0 = a quarter; `water` = radius of the real water).
++    pub fn frame(&self, queue: &Queue, view: Mat4, proj: Mat4, eye: Vec3, sky_sub: f32, fog: [f32; 3], far: f32, start: f32, water: f32) {
+         let u = Uniforms {
+             view_proj: (proj * view).to_cols_array_2d(),
+             eye: eye.extend(sky_sub).to_array(),
+             fog: [fog[0], fog[1], fog[2], far],
+-            fogp: [start, 0.0, 0.0, 0.0],
++            fogp: [start, water, 0.0, 0.0],
+         };
+         queue.write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&u));
+     }
+@@ -544,7 +544,7 @@
+         let out_view = out.create_view(&Default::default());
+         let present = crate::render::present::Present::new(&device, &queue, (N, N), (N, N), fmt);
+         let eye = Vec3::new(0.0, 4.0, 0.0);
+-        pipe.frame(&queue, Mat4::look_at_rh(eye, Vec3::ZERO, Vec3::NEG_Z), Mat4::perspective_rh(1.2, 1.0, 0.05, 100.0), eye, 0.0, [0.5; 3], 0.0, 0.0);
++        pipe.frame(&queue, Mat4::look_at_rh(eye, Vec3::ZERO, Vec3::NEG_Z), Mat4::perspective_rh(1.2, 1.0, 0.05, 100.0), eye, 0.0, [0.5; 3], 0.0, 0.0, 12.0);
+         let pixel = |lm: f32| -> [u8; 4] {
+             let (u0, u1, v1) = (16.0 / atlas::ATLAS_W as f32, 32.0 / atlas::ATLAS_W as f32, 16.0 / atlas::ATLAS_H as f32); // tile 1, stone
+             // Chunk-local (origin 0), corners ordered so the shared quad indices (0, 1, 2), (2, 3, 0) face up towards the eye.
+diff -ruN -x '*.pyc' orig/mc-rs/src/lib.rs repo/mc-rs/src/lib.rs
+--- orig/mc-rs/src/lib.rs	2026-10-20 18:14:50.000000000 +0000
++++ repo/mc-rs/src/lib.rs	2026-10-20 11:35:27.867680251 +0000
+@@ -49,7 +49,7 @@
+ use crate::world::save::{self, Level};
+ use crate::world::sky;
+ use crate::world::chunk::{is_plant, normal_cube, outline_bounds, physics_id, pick_bounds};
+-use crate::world::chunks::{chunk_coord, ChunkManager, Layer, Shape};
++use crate::world::chunks::{chunk_coord, ChunkManager, Layer, Shape, WATER_RANGE};
+ use crate::world::physics::{self, Player};
+ use crate::world::redstone;
+ use crate::world::vitals::{self, Env, Vitals};
+@@ -1828,6 +1828,8 @@
+         }
+         let lod_on = self.opts.lod && self.lod.is_some();
+         self.lod_on = lod_on;
++        // Real water reaches `WATER_RANGE` with the LoD on (its water sheet takes over beyond); with it off there is no sheet, so the real water is drawn everywhere the player sees.
++        let wr = if lod_on { WATER_RANGE } else { 1e9 };
+         let (pcx, pcz) = (chunk_coord(self.player.pos.x), chunk_coord(self.player.pos.z));
+         self.chunks.update(&self.gpu.device, &self.gpu.queue, &self.pipe.origins, pcx, pcz);
+         self.camera.zfar = if lod_on { lod::ZFAR } else { 256.0 }; // the far terrain needs the depth range
+@@ -1869,7 +1871,7 @@
+         let e = self.camera.pos;
+         let eye_in_water = matches!(self.chunks.block_loaded(e.x.floor() as i32, e.y.floor() as i32, e.z.floor() as i32), Some(8 | 9));
+         // Which terrain sections the camera sees (frustum, render shape, and occlusion by terrain); every layer draws from it.
+-        self.chunks.update_visible(self.camera.pos, RENDER_SHAPE, (rd * 16) as f32, (RENDER_VERT * 16) as f32, |min, max| frustum.intersects_aabb(min, max));
++        self.chunks.update_visible(self.camera.pos, RENDER_SHAPE, (rd * 16) as f32, (RENDER_VERT * 16) as f32, wr, |min, max| frustum.intersects_aabb(min, max));
+         let fresh = self.chunks.take_ingest(); // drained in the Nether too (no LoD there)
+         // ponytail: with the LoD switched off the fresh chunks are dropped, not kept for it (it re-reads the saved tiles when it is on again).
+         if let Some(l) = self.lod.as_mut().filter(|_| lod_on) {
+@@ -1883,7 +1885,7 @@
+         // colour (0.02, 0.02, 0.2); a negative far plane is how the shader learns the density.
+         let (fog_c, far) = if eye_in_water { (color::legacy_lin([0.02, 0.02, 0.2]), -0.1) } else { (fog, if lod_on { lod::RADIUS } else { (rd * 16) as f32 }) };
+         let start = if lod_on && !eye_in_water { lod::FOG_START } else { 0.0 };
+-        self.pipe.frame(&self.gpu.queue, view, proj, e, sky::skylight_subtracted(angle, rain, thunder) as f32 / 15.0, fog_c, far, start);
++        self.pipe.frame(&self.gpu.queue, view, proj, e, sky::skylight_subtracted(angle, rain, thunder) as f32 / 15.0, fog_c, far, start, wr);
+         let clear = wgpu::Color { r: fog_c[0] as f64, g: fog_c[1] as f64, b: fog_c[2] as f64, a: 1.0 };
+         self.sky.update(&self.gpu.queue, &self.camera, &SkyFrame { angle, rain, seconds: self.world_ticks as f32 / 20.0 });
+         self.sky.set_legacy(&self.gpu.queue, color::legacy_lin(sky::lightning_flash(sky_rgb, self.fx.flash, partial)), fog, angle, rain);
+diff -ruN -x '*.pyc' orig/mc-rs/src/world/chunks.rs repo/mc-rs/src/world/chunks.rs
+--- orig/mc-rs/src/world/chunks.rs	2026-10-20 18:14:06.000000000 +0000
++++ repo/mc-rs/src/world/chunks.rs	2026-10-20 11:35:27.866547000 +0000
+@@ -232,7 +232,8 @@
+ /// fixes that cut by section (24 blocks, then the opacity fade) still left real water over bare sky and over LoD plates, skirts and trunks.
+ /// So the split is per PIXEL at exactly this distance: `fs_water` discards real water farther out, `fs_main` discards the LoD's water
+ /// sheet (`lod::SHEET_LIGHT`, translucent, drawn by `fs_water` too) closer in; `draw_ranges` only skips the sections that have none of it. Lever: raise it if the near water
+-/// looks too small, lower it if a pale plate shows near the edge.
++/// looks too small, lower it if a pale plate shows near the edge. Only with the LoD ON: with it off there is no sheet to hand over to, so `lib.rs`
++/// passes `1e9` instead (`update_visible`'s `wr`, `Uniforms::fogp.y`) and the real water is everything `visible` is.
+ pub const WATER_RANGE: f32 = 12.0;
+ 
+ /// Which blocks around the eye are drawn. `Cylinder`: a circle of the horizontal radius (circular horizontal distance).
+@@ -527,7 +528,7 @@
+     culler: Culler,
+     /// Per chunk column, the sections (bit `s`) `update_visible` found drawable this frame.
+     visible: HashMap<Key, u8>,
+-    /// The part of `visible` within `WATER_RANGE`: the sections whose real water is drawn (and whose LoD water sheet is cut).
++    /// The part of `visible` within the water radius `wr` (`WATER_RANGE`, or all of it with the LoD off): the sections whose real water is drawn (and whose LoD water sheet is cut).
+     wet: HashMap<Key, u8>,
+     /// Bumped when `visible` or `wet` changes (a turn, a step, a mesh): the far terrain's cut of water sheets follows it.
+     vis_gen: u32,
+@@ -1109,12 +1110,12 @@
+         })
+     }
+ 
+-    /// Call once per frame before `draw_ranges`: finds the sections to draw from the eye. A breadth-first walk out of the eye's
++    /// Call once per frame before `draw_ranges`: finds the sections to draw from the eye (`wr` = radius of the real water, `WATER_RANGE` or `1e9`). A breadth-first walk out of the eye's
+     /// section (`embeddium::cull`) that stays inside the `shape` (radii `rh`, `rv` in blocks) and the frustum (`in_frustum(min, max)`)
+     /// and does not continue through terrain that walls the view off, so caves and hills hide what is behind them. Each section's box
+     /// is one block taller at both ends. With the eye in a chunk that is not loaded there is nowhere to start: every section is tested instead.
+     /// ponytail: a hole in the loaded ring (a chunk still generating) cuts the walk there; it fills in as the chunk arrives.
+-    pub fn update_visible(&mut self, eye: Vec3, shape: Shape, rh: f32, rv: f32, in_frustum: impl Fn(Vec3, Vec3) -> bool) {
++    pub fn update_visible(&mut self, eye: Vec3, shape: Shape, rh: f32, rv: f32, wr: f32, in_frustum: impl Fn(Vec3, Vec3) -> bool) {
+         let ok = |[x, y, z]: [i32; 3]| {
+             let min = Vec3::new(x as f32 * 16.0, y as f32 * 16.0 - 1.0, z as f32 * 16.0);
+             let max = min + Vec3::new(16.0, 18.0, 16.0);
+@@ -1142,7 +1143,7 @@
+             }
+         }
+         self.culler = culler;
+-        self.wet = self.visible.iter().filter_map(|(&(x, z), &m)| Some(((x, z), near_sections(x, z, m, eye, shape, WATER_RANGE.min(rh), rv))).filter(|e| e.1 != 0)).collect();
++        self.wet = self.visible.iter().filter_map(|(&(x, z), &m)| Some(((x, z), near_sections(x, z, m, eye, shape, wr.min(rh), rv))).filter(|e| e.1 != 0)).collect();
+         let d2 = |k: &Key| ((k.0 * 16 + 8) as f32 - eye.x).powi(2) + ((k.1 * 16 + 8) as f32 - eye.z).powi(2);
+         self.order.clear();
+         self.order.extend(self.visible.keys().copied());
+@@ -1167,7 +1168,7 @@
+     /// page, and a chunk's origin (`origins`, group 1) once per chunk.
+     pub fn draw_ranges(&self, layer: Layer, rp: &mut wgpu::RenderPass<'_>, origins: &DrawOrigins) {
+         let water = layer == Layer::Water;
+-        let masks = if water { &self.wet } else { &self.visible }; // real water only within `WATER_RANGE`
++        let masks = if water { &self.wet } else { &self.visible }; // real water only within `wr` (`update_visible`)
+         let mut bound: Option<u32> = None; // a layer starts from whatever the previous draw left bound
+         let mut quads_bound = false;
+         // One chunk: its runs of sections in `layer`, only if it lives in page `only` (None = any).
+@@ -1211,7 +1212,7 @@
+         };
+         // `order` (near to far, from `update_visible`). Opaque terrain goes near to far inside each page, so what is drawn first hides the rest
+         // from the depth test (early-Z / the tiler's hidden-surface removal); translucent water blends over what is behind it, so it goes far to
+-        // near across pages (it only reaches `WATER_RANGE`, a few chunks, so it hardly switches pages).
++        // near across pages (with the LoD on it only reaches `WATER_RANGE`, a few chunks, so it hardly switches pages).
+         // ponytail: whole chunks only, the faces inside one chunk keep map order; upgrade = sort the sections / faces too. The opaque order is
+         // near to far per page, not globally: a page's chunks all come before the next page's.
+         if water {
+@@ -1560,6 +1561,8 @@
+         assert_eq!(near(1), 0b0001_1000, "a chunk 8 blocks off loses the section 9 above");
+         assert_eq!(near(3), 0, "a chunk 40 blocks off is out");
+         assert_eq!(near_sections(0, 0, 0b0000_1000, Vec3::new(8.0, 200.0, 8.0), Shape::Sphere, WATER_RANGE, 48.0), 0, "an eye far above keeps none");
++        // LoD off: `update_visible` passes `1e9.min(rh)`, so the chunk 40 blocks off keeps its water too.
++        assert_ne!(near_sections(3, 0, 0xFF, eye, Shape::Sphere, 1e9f32.min(64.0), 48.0), 0);
+     }
+ 
+     /// Edge water is a still source on a surface with air beside it: not the middle of a pool, not water with water above it.

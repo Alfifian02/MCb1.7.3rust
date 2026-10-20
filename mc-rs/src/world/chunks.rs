@@ -232,7 +232,8 @@ const _: () = assert!(SECTIONS <= 8); // `ChunkManager::visible` keeps one bit p
 /// fixes that cut by section (24 blocks, then the opacity fade) still left real water over bare sky and over LoD plates, skirts and trunks.
 /// So the split is per PIXEL at exactly this distance: `fs_water` discards real water farther out, `fs_main` discards the LoD's water
 /// sheet (`lod::SHEET_LIGHT`, translucent, drawn by `fs_water` too) closer in; `draw_ranges` only skips the sections that have none of it. Lever: raise it if the near water
-/// looks too small, lower it if a pale plate shows near the edge.
+/// looks too small, lower it if a pale plate shows near the edge. Only with the LoD ON: with it off there is no sheet to hand over to, so `lib.rs`
+/// passes `1e9` instead (`update_visible`'s `wr`, `Uniforms::fogp.y`) and the real water is everything `visible` is.
 pub const WATER_RANGE: f32 = 12.0;
 
 /// Which blocks around the eye are drawn. `Cylinder`: a circle of the horizontal radius (circular horizontal distance).
@@ -527,7 +528,7 @@ pub struct ChunkManager {
     culler: Culler,
     /// Per chunk column, the sections (bit `s`) `update_visible` found drawable this frame.
     visible: HashMap<Key, u8>,
-    /// The part of `visible` within `WATER_RANGE`: the sections whose real water is drawn (and whose LoD water sheet is cut).
+    /// The part of `visible` within the water radius `wr` (`WATER_RANGE`, or all of it with the LoD off): the sections whose real water is drawn (and whose LoD water sheet is cut).
     wet: HashMap<Key, u8>,
     /// Bumped when `visible` or `wet` changes (a turn, a step, a mesh): the far terrain's cut of water sheets follows it.
     vis_gen: u32,
@@ -1109,12 +1110,12 @@ impl ChunkManager {
         })
     }
 
-    /// Call once per frame before `draw_ranges`: finds the sections to draw from the eye. A breadth-first walk out of the eye's
+    /// Call once per frame before `draw_ranges`: finds the sections to draw from the eye (`wr` = radius of the real water, `WATER_RANGE` or `1e9`). A breadth-first walk out of the eye's
     /// section (`embeddium::cull`) that stays inside the `shape` (radii `rh`, `rv` in blocks) and the frustum (`in_frustum(min, max)`)
     /// and does not continue through terrain that walls the view off, so caves and hills hide what is behind them. Each section's box
     /// is one block taller at both ends. With the eye in a chunk that is not loaded there is nowhere to start: every section is tested instead.
     /// ponytail: a hole in the loaded ring (a chunk still generating) cuts the walk there; it fills in as the chunk arrives.
-    pub fn update_visible(&mut self, eye: Vec3, shape: Shape, rh: f32, rv: f32, in_frustum: impl Fn(Vec3, Vec3) -> bool) {
+    pub fn update_visible(&mut self, eye: Vec3, shape: Shape, rh: f32, rv: f32, wr: f32, in_frustum: impl Fn(Vec3, Vec3) -> bool) {
         let ok = |[x, y, z]: [i32; 3]| {
             let min = Vec3::new(x as f32 * 16.0, y as f32 * 16.0 - 1.0, z as f32 * 16.0);
             let max = min + Vec3::new(16.0, 18.0, 16.0);
@@ -1142,7 +1143,7 @@ impl ChunkManager {
             }
         }
         self.culler = culler;
-        self.wet = self.visible.iter().filter_map(|(&(x, z), &m)| Some(((x, z), near_sections(x, z, m, eye, shape, WATER_RANGE.min(rh), rv))).filter(|e| e.1 != 0)).collect();
+        self.wet = self.visible.iter().filter_map(|(&(x, z), &m)| Some(((x, z), near_sections(x, z, m, eye, shape, wr.min(rh), rv))).filter(|e| e.1 != 0)).collect();
         let d2 = |k: &Key| ((k.0 * 16 + 8) as f32 - eye.x).powi(2) + ((k.1 * 16 + 8) as f32 - eye.z).powi(2);
         self.order.clear();
         self.order.extend(self.visible.keys().copied());
@@ -1167,7 +1168,7 @@ impl ChunkManager {
     /// page, and a chunk's origin (`origins`, group 1) once per chunk.
     pub fn draw_ranges(&self, layer: Layer, rp: &mut wgpu::RenderPass<'_>, origins: &DrawOrigins) {
         let water = layer == Layer::Water;
-        let masks = if water { &self.wet } else { &self.visible }; // real water only within `WATER_RANGE`
+        let masks = if water { &self.wet } else { &self.visible }; // real water only within `wr` (`update_visible`)
         let mut bound: Option<u32> = None; // a layer starts from whatever the previous draw left bound
         let mut quads_bound = false;
         // One chunk: its runs of sections in `layer`, only if it lives in page `only` (None = any).
@@ -1211,7 +1212,7 @@ impl ChunkManager {
         };
         // `order` (near to far, from `update_visible`). Opaque terrain goes near to far inside each page, so what is drawn first hides the rest
         // from the depth test (early-Z / the tiler's hidden-surface removal); translucent water blends over what is behind it, so it goes far to
-        // near across pages (it only reaches `WATER_RANGE`, a few chunks, so it hardly switches pages).
+        // near across pages (with the LoD on it only reaches `WATER_RANGE`, a few chunks, so it hardly switches pages).
         // ponytail: whole chunks only, the faces inside one chunk keep map order; upgrade = sort the sections / faces too. The opaque order is
         // near to far per page, not globally: a page's chunks all come before the next page's.
         if water {
@@ -1560,6 +1561,8 @@ mod tests {
         assert_eq!(near(1), 0b0001_1000, "a chunk 8 blocks off loses the section 9 above");
         assert_eq!(near(3), 0, "a chunk 40 blocks off is out");
         assert_eq!(near_sections(0, 0, 0b0000_1000, Vec3::new(8.0, 200.0, 8.0), Shape::Sphere, WATER_RANGE, 48.0), 0, "an eye far above keeps none");
+        // LoD off: `update_visible` passes `1e9.min(rh)`, so the chunk 40 blocks off keeps its water too.
+        assert_ne!(near_sections(3, 0, 0xFF, eye, Shape::Sphere, 1e9f32.min(64.0), 48.0), 0);
     }
 
     /// Edge water is a still source on a surface with air beside it: not the middle of a pool, not water with water above it.
