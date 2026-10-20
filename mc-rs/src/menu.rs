@@ -271,6 +271,15 @@ impl Menu {
         [[hw - 100.0, 60.0, 200.0, 20.0], [hw - 100.0, 116.0, 200.0, 20.0]]
     }
 
+    /// The Controller tab waits for a pad button (only on the options screen).
+    pub fn pad_waiting(&self) -> bool {
+        self.scr == Scr::Options && self.opt.pad_waiting()
+    }
+
+    pub fn pad_button(&mut self, b: crate::input::gamepad::Btn, st: &mut Settings) {
+        self.opt.pad_button(b, st);
+    }
+
     // ---- input ----
 
     pub fn event(&mut self, ev: ScreenEv, w: f32, h: f32, st: &mut Settings) {

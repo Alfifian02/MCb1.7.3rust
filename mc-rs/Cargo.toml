@@ -21,6 +21,11 @@ embeddium = { path = "../embeddium" }
 lod = { path = "../lod" }
 tectonic = { path = "../tectonic" }
 
+[features]
+default = ["pad-rumble"]
+# Controller vibration over JNI (`src/rumble.rs`). `--no-default-features` builds without it.
+pad-rumble = []
+
 [dev-dependencies]
 naga = { version = "26", features = ["wgsl-in"] }
 

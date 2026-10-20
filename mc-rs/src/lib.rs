@@ -9,6 +9,8 @@ mod world;
 mod gpu;
 mod input;
 mod immersive;
+#[cfg(feature = "pad-rumble")]
+mod rumble;
 mod menu;
 mod options;
 
@@ -552,6 +554,8 @@ impl App {
         if dt > 1.0 / 30.0 { dt = 1.0 / 30.0; }
         if dt < 0.0 { dt = 0.0; }
         self.last_frame = now;
+        self.pad_sync(dt);
+        self.touch.pad.watch_health(self.vitals.health);
         // Zoomify: hold the zoom button for 4x (the vertical tangent / 4), eased; the look drag slows with the field of view.
         let base = 70_f32.to_radians();
         let target = if self.touch.zooming() { 2.0 * ((base * 0.5).tan() / ZOOM).atan() } else { base };
@@ -559,6 +563,7 @@ impl App {
         // Look drag accumulated by the touch UI since the last frame. Drained
         // even when paused so a drag started before pausing doesn't replay.
         let (look_dx, look_dy) = self.touch.take_look();
+        let (pad_yaw, pad_pitch) = self.touch.take_pad_look();
         // Pause: freeze the world but keep the timer warm so un-pause doesn't
         // produce a giant dt step (which would either teleport the player or
         // kill their fall).
@@ -653,6 +658,10 @@ impl App {
             let k = LOOK_SENS * (self.camera.fov_y * 0.5).tan() / (70_f32.to_radians() * 0.5).tan() * self.opts.look_scale();
             self.camera.add_yaw(look_dx * k);
             self.camera.add_pitch(look_dy * k * if self.opts.invert_mouse { -1.0 } else { 1.0 });
+            // The right stick has its own sensitivity (Controls > Controller); only the zoom narrows it.
+            let z = (self.camera.fov_y * 0.5).tan() / (70_f32.to_radians() * 0.5).tan();
+            self.camera.add_yaw(pad_yaw * z);
+            self.camera.add_pitch(pad_pitch * z);
         }
         // Analog move stick: rotate the camera-frame (fwd, side) by yaw into
         // world-space velocity. Set every frame (zero when the stick is idle),
@@ -944,6 +953,7 @@ impl App {
         // M5: pick the block under the crosshair, dig it while the dig input is held, place on a tap.
         self.touch.tick(dt);
         let place = self.touch.take_place();
+        let strike = self.touch.take_strike();
         if place {
             self.body.swing(); // a tap places, uses or hits: `swingItem`
         }
@@ -984,6 +994,7 @@ impl App {
                         if self.dig.tick(hit.pos, id, held, self.player.on_ground, in_water) {
                             let meta = self.chunks.meta(x, y, z); // before the cell is cleared: the drop depends on it
                             self.chunks.set_block(x, y, z, 0);
+                            self.touch.pad.rumble(60, 140); // `RumbleSource.INTERACTION`: a block breaks
                             self.fx.dig(hit.pos, crate::render::atlas::tile_of(id, meta)); // `addBlockDestroyEffects`
                             if let (61 | 62, Some(f)) = (id, self.furnaces.remove(&hit.pos)) {
                                 for st in f.slots.into_iter().flatten() {
@@ -1141,6 +1152,10 @@ impl App {
                 self.drops.scatter(ItemStack { id: decor::PAINTING, count: 1, damage: 0 }, (c.x.floor() as i32, c.y.floor() as i32, c.z.floor() as i32));
                 return;
             }
+        }
+        // The pad's attack tap only hits: it never places a block.
+        if strike {
+            return;
         }
         let Some(hit) = self.target else {
             if place {
@@ -1434,6 +1449,7 @@ impl App {
     }
 
     fn explode(&mut self, at: glam::Vec3, power: f32) {
+        self.touch.pad.rumble(400, 255);
         let cells = self.mobs.explode(&|x: i32, y: i32, z: i32| self.chunks.block(x, y, z), at, power);
         for (x, y, z) in cells {
             let Some(id) = self.chunks.block_loaded(x, y, z).filter(|&b| b > 0) else { continue };
@@ -2046,6 +2062,13 @@ impl App {
     /// that shows "Loading level" is presented before the world is loaded, which freezes the render thread for a moment.
     fn render_menu(&mut self) {
         let (w, h) = (self.gpu.config.width as f32, self.gpu.config.height as f32);
+        if self.menu.is_none() {
+            return;
+        }
+        let now = Instant::now();
+        let dt = now.duration_since(self.last_frame).as_secs_f32().min(0.1);
+        self.last_frame = now;
+        self.pad_sync(dt);
         let Some(m) = self.menu.as_mut() else { return };
         for ev in self.touch.take_screen_events() {
             m.event(ev, w, h, &mut self.opts);
@@ -2055,6 +2078,8 @@ impl App {
         }
         self.hud_verts.clear();
         m.draw(&mut self.hud_verts, w, h, &self.opts);
+        let cur = self.touch.pad.shows_cursor().then_some(self.touch.cursor_pos);
+        self.touch.pad.draw(&mut self.hud_verts, w, h, self.touch.hotbar_slot, cur);
         let pano = m.panorama();
         self.hud_verts.truncate(self.hud.quad_capacity * 6);
         let frame = match self.gpu.surface.get_current_texture() {
@@ -2100,6 +2125,20 @@ impl App {
     }
 
     /// What the game menu shows of the game.
+    /// The pad's frame: moves / looks / clicks through `TouchUi`, and hands a button the Controls screen waits for to it.
+    fn pad_sync(&mut self, dt: f32) {
+        self.touch.pad.capture = self.pause.as_ref().is_some_and(Pause::pad_waiting) || self.menu.as_ref().is_some_and(Menu::pad_waiting);
+        self.touch.pad_update(dt, &self.opts.pad);
+        if let Some(b) = self.touch.pad.captured.take() {
+            if let Some(p) = self.pause.as_mut() {
+                p.pad_button(b, &mut self.opts);
+            }
+            if let Some(m) = self.menu.as_mut() {
+                m.pad_button(b, &mut self.opts);
+            }
+        }
+    }
+
     fn pause_info(&self) -> PauseInfo {
         PauseInfo { dead: self.vitals.dead(), pregen: self.lod.as_ref().map(|l| l.pregen()), debug: self.lod.as_ref().map_or(0, |l| l.debug()), flying: self.touch.flying }
     }
@@ -2360,21 +2399,24 @@ impl App {
                 }
             }
 
+            // A pad in hand hides the touch buttons (Controllify's `InputMode`).
             // Touch d-pad (Stone D-pad sprites): the four arrows always, a corner only while an arrow beside it is held; the held button
             // is drawn pressed. The cell is the hit area, the button is drawn `dpad_gap` smaller inside it, a corner (18 of 22 px)
             // smaller still and centred.
             let t = &self.touch;
-            for i in (0..8).filter(|&i| t.dpad_shown(i)) {
+            for i in (0..8).filter(|&i| !t.pad.active() && t.dpad_shown(i)) {
                 let spr = if t.dir == Some(i) { sp::DPAD_PRESSED[i] } else { sp::DPAD[i] };
                 let (cx, cy, cw, ch) = layout.dpad[i];
                 let k = (cw - layout.dpad_gap) / 22.0 * spr.2; // the arrows are 22 px, a corner 18: same pixel size
                 HudPipeline::push_gui(v, cx + (cw - k) * 0.5, cy + (ch - k) * 0.5, k, k, spr);
             }
-            let (sx, sy, sw, sh) = layout.sneak;
-            let g = layout.dpad_gap * 0.5;
-            HudPipeline::push_gui(v, sx + g, sy + g, sw - 2.0 * g, sh - 2.0 * g, if t.sneak { sp::SNEAK_ON } else { sp::SNEAK });
-            let (jx, jy, jw, jh) = layout.jump;
-            HudPipeline::push_gui(v, jx, jy, jw, jh, if t.jumping() { sp::JUMP_ON } else { sp::JUMP });
+            if !t.pad.active() {
+                let (sx, sy, sw, sh) = layout.sneak;
+                let g = layout.dpad_gap * 0.5;
+                HudPipeline::push_gui(v, sx + g, sy + g, sw - 2.0 * g, sh - 2.0 * g, if t.sneak { sp::SNEAK_ON } else { sp::SNEAK });
+                let (jx, jy, jw, jh) = layout.jump;
+                HudPipeline::push_gui(v, jx, jy, jw, jh, if t.jumping() { sp::JUMP_ON } else { sp::JUMP });
+            }
         }
 
         // FPS counter, top-left. White = average over the last second, yellow = average since
@@ -2403,6 +2445,14 @@ impl App {
             if let Some(p) = &self.pause {
                 p.draw(v, w, h, &self.opts, &pause_info);
             }
+        }
+
+        // The pad's radial hotbar, and its cursor in any GUI (the pause menu, a container).
+        {
+            let (w, h) = (self.gpu.config.width as f32, self.gpu.config.height as f32);
+            let t = &self.touch;
+            let cur = (t.pad.shows_cursor() && (paused || t.screen)).then_some(t.cursor_pos);
+            t.pad.draw(v, w, h, t.hotbar_slot, cur);
         }
 
         // Cap to the buffer capacity; extra quads are silently dropped.
@@ -2619,13 +2669,25 @@ fn android_main(app: AndroidApp) {
                         if let Ok(mut iter) = app.input_events_iter() {
                             // `next` handles one queued event per call; loop so
                             // multi-touch moves and Up events are never dropped.
-                            while iter.next(|event| {
-                                if let IEv::MotionEvent(m) = event {
+                            while iter.next(|event| match event {
+                                // Game-pad sticks / triggers / hat, and its buttons (reported handled: Android would turn B into Back).
+                                IEv::MotionEvent(m) if input::gamepad::is_pad_motion(&m) => {
+                                    if let Some(a) = app_state.as_mut() {
+                                        a.touch.pad.on_motion(&m);
+                                    }
+                                    InputStatus::Handled
+                                }
+                                IEv::KeyEvent(k) => match app_state.as_mut() {
+                                    Some(a) if a.touch.pad.on_key(&k) => InputStatus::Handled,
+                                    _ => InputStatus::Unhandled,
+                                },
+                                IEv::MotionEvent(m) => {
                                     if let Some(a) = app_state.as_mut() {
                                         a.on_motion(&m);
                                     }
+                                    InputStatus::Unhandled
                                 }
-                                InputStatus::Unhandled
+                                _ => InputStatus::Unhandled,
                             }) {}
                         }
                     }
@@ -2682,8 +2744,14 @@ fn android_main(app: AndroidApp) {
                 std::thread::sleep(left); // `Performance`: Balanced 120 fps, Power saver 40
             }
             // Dynamic FPS: the paused world is frozen, so the menu runs at ~10 frames a second; a touch still wakes the poll.
-            if a.touch.paused || a.menu.is_some() {
-                std::thread::sleep(Duration::from_millis(90));
+            if (a.touch.paused || a.menu.is_some()) && !a.touch.pad.active() {
+                std::thread::sleep(Duration::from_millis(90)); // a pad cursor needs real frames
+            }
+            #[cfg(feature = "pad-rumble")]
+            {
+                if let Some((dev, ms, amp)) = a.touch.pad.take_rumble(&a.opts.pad) {
+                    rumble::buzz(&app, dev, ms, amp);
+                }
             }
             self_main_frames += 1;
             if self_main_frames == 1 || self_main_frames == 30 || self_main_frames % 300 == 0 {

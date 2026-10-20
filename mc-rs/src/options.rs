@@ -9,6 +9,7 @@
 //! Smooth Lighting and the key bindings (a touch screen has no keys; `OptionsUi::key` takes one when a keyboard event exists).
 //! Not done: Achievements and Statistics (drawn greyed out, there is no stat system).
 
+use crate::input::gamepad::{Btn, PadCfg, ACTS};
 use crate::input::touch_ui::ScreenEv;
 use crate::menu::{dirt, grad, rgb, scaled_gs, tw};
 use crate::render::hud::{HudPipeline, HudVertex};
@@ -104,6 +105,8 @@ pub struct Settings {
     /// 0 Auto, 1 Small, 2 Normal, 3 Large.
     pub gui_scale: u8,
     pub keys: [u32; 10],
+    /// Controllify's settings and button bindings (`input/gamepad.rs`).
+    pub pad: PadCfg,
     /// The far terrain is drawn (the extra `LoD` button).
     pub lod: bool,
     path: Option<PathBuf>,
@@ -126,6 +129,7 @@ impl Default for Settings {
             ambient_occlusion: true,
             gui_scale: 0,
             keys: KEY_DEFAULT,
+            pad: PadCfg::default(),
             lod: true,
             path: None,
         }
@@ -155,6 +159,7 @@ impl Settings {
                 ("fancyGraphics", ..) => s.fancy_graphics = b,
                 ("ao", ..) => s.ambient_occlusion = b,
                 ("lod", ..) => s.lod = b,
+                (k, ..) if k.starts_with("pad_") => s.pad.load(k, v),
                 _ => {
                     if let (Some(i), Ok(code)) = (KEY_IDS.iter().position(|id| k.strip_prefix("key_key.") == Some(*id)), v.parse::<u32>()) {
                         s.keys[i] = code;
@@ -175,6 +180,7 @@ impl Settings {
         for (id, code) in KEY_IDS.iter().zip(self.keys) {
             t.push_str(&format!("key_key.{id}:{code}\n"));
         }
+        self.pad.save_into(&mut t);
         if let Err(e) = std::fs::write(p, t) {
             log::warn!("options: {e}");
         }
@@ -266,7 +272,11 @@ impl Settings {
 pub enum OptScr {
     Main,
     Video,
+    /// The keys tab of Controls.
     Controls,
+    /// The Controller tab (Controllify): its button bindings, and its tuning page.
+    Pad,
+    PadTune,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -277,6 +287,12 @@ enum Act {
     Controls,
     Done,
     Key(usize),
+    TabKeys,
+    TabPad,
+    PadPage,
+    PadBind(usize),
+    PadKnob(usize),
+    PadToggle(usize),
 }
 
 /// One control: what it does, its rectangle (GUI units) and its text.
@@ -295,6 +311,18 @@ pub enum OptEv {
 
 fn inside(r: [f32; 4], x: f32, y: f32) -> bool {
     x >= r[0] && x < r[0] + r[2] && y >= r[1] && y < r[1] + r[3]
+}
+
+fn is_slider(a: Act) -> bool {
+    matches!(a, Act::Opt(o) if o.slider()) || matches!(a, Act::PadKnob(_))
+}
+
+fn set_slider(a: Act, st: &mut Settings, v: f32) {
+    match a {
+        Act::Opt(o) => st.set_float(o, v),
+        Act::PadKnob(i) => st.pad.set_knob(i, v),
+        _ => {}
+    }
 }
 
 /// `GuiSlider`'s value for a finger at `x`: its 4 px ends are not part of the track.
@@ -329,9 +357,11 @@ fn background(v: &mut Vec<HudVertex>, s: f32, gw: f32, gh: f32, world: bool) {
 pub struct OptionsUi {
     pub scr: OptScr,
     /// The slider the finger is dragging.
-    drag: Option<Opt>,
+    drag: Option<Act>,
     /// `GuiControls.buttonId`: the key button waiting for its key.
     wait: Option<usize>,
+    /// The Controller tab's button waiting for a pad press.
+    wait_pad: Option<usize>,
     /// Where the finger is (GUI units), for the highlight.
     finger: Option<(f32, f32)>,
 }
@@ -344,7 +374,7 @@ impl Default for OptionsUi {
 
 impl OptionsUi {
     pub fn new() -> Self {
-        Self { scr: OptScr::Main, drag: None, wait: None, finger: None }
+        Self { scr: OptScr::Main, drag: None, wait: None, wait_pad: None, finger: None }
     }
 
     fn widgets(&self, gw: f32, gh: f32, st: &Settings) -> Vec<Wid> {
@@ -370,7 +400,30 @@ impl OptionsUi {
                     Wid { act: Act::Key(i), r: [cell(i).0, cell(i).1, 70.0, 20.0], label: if self.wait == Some(i) { format!("> {name} <") } else { name } }
                 })
                 .collect(),
+            OptScr::Pad => ACTS
+                .iter()
+                .enumerate()
+                .map(|(i, a)| {
+                    let b = if self.wait_pad == Some(i) { "> <" } else { st.pad.binds[i].name() };
+                    Wid { act: Act::PadBind(i), r: [cell(i).0, cell(i).1, 150.0, 20.0], label: format!("{}: {b}", a.name()) }
+                })
+                .collect(),
+            OptScr::PadTune => (0..PadCfg::knob_count())
+                .map(|i| Wid { act: Act::PadKnob(i), r: [cell(i).0, cell(i).1, 150.0, 20.0], label: st.pad.knob_text(i) })
+                .chain((0..PadCfg::toggle_count()).map(|i| {
+                    let c = cell(PadCfg::knob_count() + i);
+                    Wid { act: Act::PadToggle(i), r: [c.0, c.1, 150.0, 20.0], label: st.pad.toggle_text(i) }
+                }))
+                .collect(),
         };
+        // Controls has two tabs: the keys, and the Controller (Controllify) with its buttons page and its tuning page.
+        if matches!(self.scr, OptScr::Controls | OptScr::Pad | OptScr::PadTune) {
+            w.push(Wid { act: Act::TabKeys, r: [hw - 100.0, 20.0, 99.0, 14.0], label: "Keys".into() });
+            w.push(Wid { act: Act::TabPad, r: [hw + 1.0, 20.0, 99.0, 14.0], label: "Controller".into() });
+        }
+        if matches!(self.scr, OptScr::Pad | OptScr::PadTune) {
+            w.push(wide(Act::PadPage, top + 144.0, if self.scr == OptScr::Pad { "Tuning..." } else { "Buttons..." }));
+        }
         w.push(wide(Act::Done, top + 168.0, "Done"));
         w
     }
@@ -383,19 +436,17 @@ impl OptionsUi {
         match ev {
             ScreenEv::Down(x, y) => {
                 self.finger = Some((x / s, y / s));
-                if let Some(Wid { act: Act::Opt(o), r, .. }) = at(x, y) {
-                    if o.slider() {
-                        self.drag = Some(*o);
-                        st.set_float(*o, slider_value(*r, x / s));
-                    }
+                if let Some(Wid { act, r, .. }) = at(x, y).filter(|b| is_slider(b.act)) {
+                    self.drag = Some(*act);
+                    set_slider(*act, st, slider_value(*r, x / s));
                 }
                 None
             }
             ScreenEv::Move(x, y) => {
                 self.finger = Some((x / s, y / s));
-                if let Some(o) = self.drag {
-                    if let Some(b) = wids.iter().find(|b| b.act == Act::Opt(o)) {
-                        st.set_float(o, slider_value(b.r, x / s));
+                if let Some(a) = self.drag {
+                    if let Some(b) = wids.iter().find(|b| b.act == a) {
+                        set_slider(a, st, slider_value(b.r, x / s));
                     }
                 }
                 None
@@ -415,6 +466,7 @@ impl OptionsUi {
     /// `actionPerformed`.
     fn act(&mut self, a: Act, st: &mut Settings) -> Option<OptEv> {
         self.wait = None; // `GuiControls`: any button ends the wait
+        self.wait_pad = None;
         match a {
             Act::Opt(o) => st.cycle(o),
             Act::Lod => {
@@ -430,6 +482,15 @@ impl OptionsUi {
                 self.scr = OptScr::Controls;
             }
             Act::Key(i) => self.wait = Some(i),
+            Act::TabKeys => self.scr = OptScr::Controls,
+            Act::TabPad => self.scr = OptScr::Pad,
+            Act::PadPage => self.scr = if self.scr == OptScr::Pad { OptScr::PadTune } else { OptScr::Pad },
+            Act::PadBind(i) => self.wait_pad = Some(i),
+            Act::PadKnob(_) => {}
+            Act::PadToggle(i) => {
+                st.pad.toggle(i);
+                st.save();
+            }
             Act::Done => {
                 st.save();
                 if self.scr == OptScr::Main {
@@ -450,6 +511,19 @@ impl OptionsUi {
         }
     }
 
+    /// The Controller tab waits for a pad button: `Pad` swallows the next press into `Pad::captured`.
+    pub fn pad_waiting(&self) -> bool {
+        self.wait_pad.is_some()
+    }
+
+    /// The pad button that follows a tap on a Controller binding becomes it.
+    pub fn pad_button(&mut self, b: Btn, st: &mut Settings) {
+        if let Some(i) = self.wait_pad.take() {
+            st.pad.binds[i] = b;
+            st.save();
+        }
+    }
+
     pub fn draw(&self, v: &mut Vec<HudVertex>, w: f32, h: f32, st: &Settings, world: bool) {
         let (s, gw, gh) = scaled_gs(w, h, st.gui_scale);
         let hw = (gw / 2.0).floor();
@@ -457,16 +531,20 @@ impl OptionsUi {
         let title = match self.scr {
             OptScr::Main => "Options",
             OptScr::Video => "Video Settings",
-            OptScr::Controls => "Controls",
+            OptScr::Controls | OptScr::Pad | OptScr::PadTune => "Controls",
         };
-        HudPipeline::push_text(v, (hw - tw(title) / 2.0) * s, 20.0 * s, s, title, rgb(0xFFFFFF));
+        let ty = if matches!(self.scr, OptScr::Controls | OptScr::Pad | OptScr::PadTune) { 8.0 } else { 20.0 }; // room for the tabs
+        HudPipeline::push_text(v, (hw - tw(title) / 2.0) * s, ty * s, s, title, rgb(0xFFFFFF));
         for b in self.widgets(gw, gh, st) {
             let over = self.finger.is_some_and(|(x, y)| inside(b.r, x, y));
             let knob = match b.act {
                 Act::Opt(o) if o.slider() => Some(st.float(o)),
+                Act::PadKnob(i) => Some(st.pad.knob(i)),
                 _ => None,
             };
-            button(v, s, b.r, &b.label, true, over, knob);
+            // The tab you are on is drawn greyed.
+            let on = !matches!((self.scr, b.act), (OptScr::Controls, Act::TabKeys) | (OptScr::Pad | OptScr::PadTune, Act::TabPad));
+            button(v, s, b.r, &b.label, on, over, knob);
             if let (OptScr::Controls, Act::Key(i)) = (self.scr, b.act) {
                 HudPipeline::push_text(v, (b.r[0] + 70.0 + 6.0) * s, (b.r[1] + 7.0) * s, s, KEY_NAMES[i], rgb(0xFFFFFF));
             }
@@ -589,6 +667,16 @@ impl Pause {
             }
         }
         None
+    }
+
+    pub fn pad_waiting(&self) -> bool {
+        self.opt.as_ref().is_some_and(OptionsUi::pad_waiting)
+    }
+
+    pub fn pad_button(&mut self, b: Btn, st: &mut Settings) {
+        if let Some(o) = self.opt.as_mut() {
+            o.pad_button(b, st);
+        }
     }
 
     pub fn draw(&self, v: &mut Vec<HudVertex>, w: f32, h: f32, st: &Settings, info: &PauseInfo) {
@@ -720,6 +808,39 @@ mod tests {
         assert_eq!(st.music, 1.0);
         o.event(ScreenEv::Up((r[0] + r[2]) * s, y), SZ.0, SZ.1, &mut st);
         assert!(o.drag.is_none());
+    }
+
+    /// Controls > Controller tab: rebind a button from the pad, drag a tuning slider, flip a toggle, and it all reaches options.txt.
+    #[test]
+    fn controller_tab_flow() {
+        let root = tmp("pad");
+        let mut st = Settings::load(&root);
+        let mut o = OptionsUi::new();
+        tap(&mut o, &mut st, "Controls...");
+        tap(&mut o, &mut st, "Controller");
+        assert_eq!(o.scr, OptScr::Pad);
+        tap(&mut o, &mut st, "Jump: A");
+        assert!(o.pad_waiting());
+        o.pad_button(Btn::X, &mut st);
+        assert_eq!((st.pad.binds[0], o.pad_waiting()), (Btn::X, false));
+        tap(&mut o, &mut st, "Tuning...");
+        assert_eq!(o.scr, OptScr::PadTune);
+        tap(&mut o, &mut st, "Invert Y: OFF");
+        assert!(st.pad.invert_y);
+        let (_, gw, gh) = scaled_gs(SZ.0, SZ.1, 0);
+        let r = o.widgets(gw, gh, &st).into_iter().find(|b| b.label.starts_with("Look X")).unwrap().r;
+        let (s, ..) = scaled_gs(SZ.0, SZ.1, 0);
+        let y = (r[1] + 10.0) * s;
+        o.event(ScreenEv::Down((r[0] + 4.0) * s, y), SZ.0, SZ.1, &mut st);
+        o.event(ScreenEv::Up((r[0] + 4.0) * s, y), SZ.0, SZ.1, &mut st);
+        assert_eq!(st.pad.look_h, 0.0);
+        tap(&mut o, &mut st, "Keys");
+        assert_eq!(o.scr, OptScr::Controls);
+        let back = Settings::load(&root);
+        assert_eq!((back.pad.binds[0], back.pad.invert_y, back.pad.look_h), (Btn::X, true, 0.0));
+        let mut v = Vec::new();
+        o.draw(&mut v, SZ.0, SZ.1, &st, true);
+        assert!(!v.is_empty());
     }
 
     #[test]

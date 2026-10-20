@@ -21,15 +21,16 @@
 // All positions are surface pixels, (0, 0) top-left (MotionEvent convention).
 
 use android_activity::input::{Axis, MotionAction, MotionEvent};
+use super::gamepad::{Pad, PadCfg};
 use std::collections::HashMap;
 
 /// Hotbar slot count.
 pub const HOTBAR_SLOTS: usize = 9;
 // UNVERIFIED: tap/hold timings and slop (b1.7.3 has no touch input). Picked to feel like PE.
 /// A press shorter than this, that did not move, is a tap (place).
-const TAP_SECS: f32 = 0.25;
+pub const TAP_SECS: f32 = 0.25;
 /// A press held still this long starts digging, which lasts until the finger lifts.
-const HOLD_SECS: f32 = 0.4;
+pub const HOLD_SECS: f32 = 0.4;
 /// Finger travel (fraction of the short screen side) above which a press is a look drag.
 const SLOP: f32 = 0.02;
 
@@ -223,6 +224,15 @@ pub struct TouchUi {
     events: Vec<ScreenEv>,
     /// Where the finger last was on the open screen: the picked-up stack floats here.
     pub cursor_pos: (f32, f32),
+    /// The game pad (`gamepad.rs`): its outputs below are OR-ed with the fingers'.
+    pub pad: Pad,
+    pad_jump: bool,
+    pad_dig: bool,
+    pad_zoom: bool,
+    /// Look from the right stick since the last `take_pad_look`, radians (yaw right, pitch down).
+    pad_look: (f32, f32),
+    /// The pad's attack tap: hit what is under the crosshair but never place a block.
+    strike: bool,
 }
 
 impl TouchUi {
@@ -247,7 +257,78 @@ impl TouchUi {
             menu: false,
             events: Vec::new(),
             cursor_pos: (w as f32 * 0.5, h as f32 * 0.5),
+            pad: Pad::default(),
+            pad_jump: false,
+            pad_dig: false,
+            pad_zoom: false,
+            pad_look: (0.0, 0.0),
+            strike: false,
         }
+    }
+
+    /// One frame of the game pad: drives the same state the fingers do (move, look, jump, dig, place, hotbar, inventory, pause), or in a
+    /// GUI (pause menu, container, title menu) a virtual mouse that sends the `ScreenEv`s a finger would.
+    pub fn pad_update(&mut self, dt: f32, cfg: &PadCfg) {
+        let ui = self.paused || self.screen || self.menu;
+        let o = self.pad.update(dt, cfg, ui, self.surface_w.min(self.surface_h) as f32);
+        if ui {
+            let (w, h) = (self.surface_w as f32, self.surface_h as f32);
+            let p = (self.cursor_pos.0 + o.cursor.0, self.cursor_pos.1 + o.cursor.1);
+            let p = (p.0.clamp(0.0, w - 1.0), p.1.clamp(0.0, h - 1.0));
+            if p != self.cursor_pos {
+                self.cursor_pos = p;
+                self.events.push(ScreenEv::Move(p.0, p.1));
+            }
+            match o.click {
+                Some(true) => self.events.push(ScreenEv::Down(p.0, p.1)),
+                Some(false) => self.events.push(ScreenEv::Up(p.0, p.1)),
+                None => {}
+            }
+            if o.pause || o.back {
+                if self.paused {
+                    self.resume();
+                } else if self.screen && !self.menu {
+                    self.inventory = true;
+                }
+            } else if o.inventory && self.screen && !self.menu {
+                self.inventory = true;
+            }
+            self.pad_jump = false;
+            self.pad_dig = false;
+            self.pad_zoom = false;
+            return;
+        }
+        if let Some(m) = o.mv {
+            self.move_input = m;
+        }
+        self.pad_look.0 += o.look.0;
+        self.pad_look.1 += o.look.1;
+        (self.pad_jump, self.pad_dig, self.pad_zoom) = (o.jump, o.dig, o.zoom);
+        if cfg.toggle_sneak {
+            self.sneak ^= o.sneak_down;
+        } else if o.sneak_down {
+            self.sneak = true;
+        } else if o.sneak_up {
+            self.sneak = false;
+        }
+        self.place |= o.place;
+        self.strike |= o.strike;
+        self.inventory |= o.inventory;
+        if o.pause {
+            self.pause();
+        }
+        let n = crate::input::touch_ui::HOTBAR_SLOTS as i32;
+        self.hotbar_slot = o.slot_to.unwrap_or((self.hotbar_slot as i32 + o.slot_delta).rem_euclid(n) as usize);
+    }
+
+    /// The right stick's look since the last call, radians.
+    pub fn take_pad_look(&mut self) -> (f32, f32) {
+        std::mem::take(&mut self.pad_look)
+    }
+
+    /// The pad's attack tap since the last call.
+    pub fn take_strike(&mut self) -> bool {
+        std::mem::take(&mut self.strike)
     }
 
     /// Leave the pause menu ("Back to game", "Respawn").
@@ -265,7 +346,7 @@ impl TouchUi {
 
     /// A finger is on the zoom button.
     pub fn zooming(&self) -> bool {
-        self.pointers.values().any(|p| p.role == PointerRole::Zoom)
+        self.pad_zoom || self.pointers.values().any(|p| p.role == PointerRole::Zoom)
     }
 
     /// The inventory button was pressed and released since the last call.
@@ -292,7 +373,7 @@ impl TouchUi {
 
     /// True while a look finger that was held still is down: the player is digging.
     pub fn digging(&self) -> bool {
-        self.pointers.values().any(|p| p.role == PointerRole::Look && p.broke)
+        self.pad_dig || self.pointers.values().any(|p| p.role == PointerRole::Look && p.broke)
     }
 
     /// Advance the hold timers by one frame: a look finger held still turns into digging after `HOLD_SECS`.
@@ -311,7 +392,7 @@ impl TouchUi {
 
     /// True while a finger holds the jump button.
     pub fn jumping(&self) -> bool {
-        self.pointers.values().any(|p| p.role == PointerRole::Jump)
+        self.pad_jump || self.pointers.values().any(|p| p.role == PointerRole::Jump)
     }
 
     /// Is d-pad button `i` drawn and pressable? The arrows always are; a corner only while an arrow beside it is held.
