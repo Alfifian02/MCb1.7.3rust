@@ -1,0 +1,2607 @@
+//! mc-rs: Minecraft b1.7.3 in Rust for Android.
+//!
+//! M12 - Landscape touch UX (move stick, look drag, jump button, hotbar, pause menu) on
+//! top of M2 (camera + physics) and M3 (overworld generation), with the world streamed by
+//! `world::chunks::ChunkManager` (render-distance ring, generation on worker threads).
+
+mod render;
+mod world;
+mod gpu;
+mod input;
+mod immersive;
+mod menu;
+
+use crate::input::touch_ui::{PointerRole, ScreenEv, TouchUi};
+use crate::menu::Menu;
+use crate::render::hud::{sprites as sp, HudPipeline, HudVertex};
+
+use android_activity::{AndroidApp, InputStatus, MainEvent, PollEvent};
+use android_activity::input::InputEvent as IEv;
+use core::ffi::c_void;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
+use crate::gpu::context::Gpu;
+use crate::gpu::pipeline::ChunkPipeline;
+use crate::render::atlas;
+use crate::render::items::{ItemMesh, SignView};
+use crate::render::camera::{FirstPersonCamera, Frustum};
+use crate::render::outline::Outline;
+use crate::render::sky::{SkyFrame, SkyRenderer};
+use crate::render::present::{Present, SCENE_FORMAT};
+use crate::render::color;
+use crate::world::lod::{self, Lod};
+use crate::world::pick::{self, Hit};
+use crate::world::dig::{self, Dig};
+use crate::world::chest::{self, Chest};
+use crate::world::decor::{self, Edit, Key, Painting, Text};
+use crate::world::craft::{self, Furnace, Screen};
+use crate::world::items::{self, Drops, Inventory, ItemStack};
+use crate::world::gear::{self, Hook, Used};
+use crate::world::boat;
+use crate::world::minecart;
+use crate::world::portal;
+use crate::world::mobs::{self, Ctx, Ev, Mobs};
+use crate::world::ticks::{self, Ticks};
+use crate::world::save::{self, Level};
+use crate::world::sky;
+use crate::world::chunk::{is_plant, normal_cube, outline_bounds, physics_id, pick_bounds};
+use crate::world::chunks::{chunk_coord, ChunkManager, Layer, Shape};
+use crate::world::physics::{self, Player};
+use crate::world::redstone;
+use crate::world::vitals::{self, Env, Vitals};
+use crate::world::effects::{self, Effects, Spawner};
+use crate::render::weather;
+
+/// Render distance in chunks (a circle of this radius is meshed and drawn, two more are generated).
+const RENDER_DIST: i32 = 4;
+/// The world seed (its save folder is `world-<seed>`).
+/// The world the player is in (its folder): when Android takes the window away the `App` is dropped and built again, and that world
+/// is entered again instead of the title screen.
+static LAST_WORLD: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+/// Vertical render distance in chunks (16 blocks): sections further above or below the eye are not drawn.
+const RENDER_VERT: i32 = 3;
+/// `Sphere`: what is drawn is within `RENDER_DIST` blocks-of-16 in 3D (matches the fog, which is by 3D distance);
+/// `Cylinder`: a circle of that radius at any height within `RENDER_VERT`.
+const RENDER_SHAPE: Shape = Shape::Sphere;
+
+/// Seconds of play between autosaves (the level file and a few chunks; pause and exit save everything).
+const AUTOSAVE_SECS: f32 = 5.0;
+/// Chunks written per autosave, so the first ones after generating a lot of terrain do not hitch a frame.
+const AUTOSAVE_CHUNKS: usize = 24;
+
+/// Console-Edition look: the vanilla light table + face shades. It is the only look now (the Photon passes were removed); the mesher and
+/// the sky still read this switch for their legacy branches.
+pub(crate) const LEGACY: bool = true;
+
+const LOOK_SENS: f32 = 0.004;
+/// Zoom button magnification (Zoomify's default).
+const ZOOM: f32 = 4.0;
+/// World units per second when a d-pad direction is held.
+const MOVE_SPEED: f32 = physics::WALK_SPEED;
+/// Eye offset from `player.pos`, which is the CENTRE of the 1.8-tall box. Steve's eyes are
+/// 1.62 above his feet (EntityPlayer.yOffset), i.e. 1.62 - 0.9 above the centre.
+const EYE_HEIGHT: f32 = 1.62 - physics::HALF.y;
+
+struct App {
+    gpu: Gpu,
+    /// The world's type (chosen on the create screen, saved in its `info`): false = vanilla b1.7.3 terrain, true = Tectonic (the `tectonic` crate).
+    tectonic: bool,
+    /// Far terrain behind the chunks (Voxy-style voxel LoD, `world::lod`): the view reaches the horizon with the same blocks; none in
+    /// the Nether (it would be overworld terrain).
+    lod: Option<Lod>,
+    seed: i64,
+    /// The app's private storage: `saves/<folder>` holds the worlds.
+    root: PathBuf,
+    /// The title screen, world list and world creation; `Some` while no world is loaded.
+    menu: Option<Menu>,
+    pipe: ChunkPipeline,
+    chunks: ChunkManager,
+    camera: FirstPersonCamera,
+    player: Player,
+    last_frame: Instant,
+    frames: u64,
+    fps_last: Instant,
+    /// FPS counter: average over the last second, and over the whole run (from `started`).
+    fps_recent: u32,
+    fps_overall: u32,
+    total_frames: u64,
+    started: Instant,
+    // M12: touch UI state + HUD renderer.
+    touch: TouchUi,
+    hud: HudPipeline,
+    /// Scratch vertex buffer for the HUD; cleared each frame, then emitted.
+    hud_verts: Vec<HudVertex>,
+    // M5: block under the crosshair (within reach) and its outline buffers.
+    target: Option<Hit>,
+    outline: Outline,
+    /// World time in ticks (20 per second); a new world starts at 0, sunrise.
+    world_ticks: f64,
+    /// Sun, moon and stars drawn behind the terrain, and the rain/thunder timers (not saved: a loaded world starts clear).
+    /// `weather_ticks` counts the whole ticks the weather has run, so it catches up to `world_ticks` one tick at a time.
+    sky: SkyRenderer,
+    /// The post stage: the scene target, FXAA + CAS, the upscale (`render::present`).
+    present: Present,
+    weather: sky::Weather,
+    weather_ticks: u64,
+    /// Water particles, lightning and the dungeon spawners (`world::effects`).
+    fx: Effects,
+    /// Rain and snow streaks (`render::weather`), drawn over the finished scene.
+    rain_fx: weather::Weather,
+    /// The player's box touched water last frame (`Entity.inWater`): a splash on entry.
+    was_in_water: bool,
+    /// `Entity.ySize` of the player, as far as the camera goes: how far the eye hangs below standing height (0.08 sneaking, then it decays).
+    sneak_y: f32,
+    /// Hotbar slot last seen and seconds its item name still shows (`GuiIngame` shows it ~2 s after a switch).
+    tip: (usize, f32),
+    /// Survival digging state and the leftover time towards the next 20 Hz dig tick.
+    dig: Dig,
+    dig_acc: f32,
+    /// Hotbar stacks (starts empty), dropped items on the ground and their draw buffers.
+    inv: Inventory,
+    drops: Drops,
+    mobs: Mobs,
+    boats: boat::Boats,
+    carts: minecart::Carts,
+    /// Detector rails switched on by a cart, to be switched off when it has gone (`scheduleBlockUpdate` of `BlockDetectorRail`).
+    detectors: std::collections::HashSet<(i32, i32, i32)>,
+    /// In the Nether (its folder is `<world>/nether`; `<world>/dim` says which one a restart resumes in).
+    nether: bool,
+    /// Time inside a portal, 0..1 (`timeInPortal`: +0.0125 a tick inside, -0.05 outside; at 1 the player travels) and the 10 tick
+    /// cooldown after arriving (`timeUntilPortal`), in seconds.
+    portal_t: f32,
+    portal_cd: f32,
+    /// Block updates (scheduled + random ticks, notifications, falling blocks), stepped on the 20 Hz game tick.
+    ticks: Ticks,
+    item_mesh: ItemMesh,
+    /// Open container screen (the 2x2 inventory or a workbench's 3x3) and its "place one" click toggle.
+    screen: Option<Screen>,
+    one_mode: bool,
+    /// Shift-click toggle (second button beside `one_mode`): a tap on a slot quick-moves its stack.
+    shift_mode: bool,
+    /// The fishing bobber in the water (`EntityPlayer.fishEntity`).
+    hook: Option<Hook>,
+    /// Furnace tile entities by block position (created on first use), and the time left over from the last 20 Hz tick.
+    furnaces: HashMap<(i32, i32, i32), Furnace>,
+    furn_acc: f32,
+    /// Animated water / lava / fire tiles (`render::anim`) and the time left over from their last 20 Hz tick.
+    anim: crate::render::anim::Anim,
+    anim_acc: f32,
+    /// CPU seconds spent in `render` (without the swap-chain wait) since the last FPS log line.
+    cpu_acc: f32,
+    /// Chest tile entities by block position (created on first open, or by a dungeon's populate).
+    chests: HashMap<chest::Pos, Chest>,
+    /// Paintings on walls, sign texts by block position (`TileEntitySign`) and the sign being edited (`GuiEditSign`); saved in `decor`.
+    paintings: Vec<Painting>,
+    signs: HashMap<decor::Pos, Text>,
+    sign_edit: Option<Edit>,
+    /// The finger gesture on the open screen, to tell a tap from a spread.
+    gesture: Option<Gesture>,
+    /// Health, air and fire; and where a dead player comes back (the first spawn: no beds yet).
+    vitals: Vitals,
+    spawn: glam::Vec3,
+    /// Asleep: the bed's cell (the half with bit 8) and the ticks slept (`EntityPlayer.sleepTimer`, 100 = fully asleep).
+    sleep: Option<(i32, i32, i32, u32)>,
+    /// The bed a respawn goes to while it still stands (`playerSpawnCoordinate`).
+    bed_spawn: Option<(i32, i32, i32)>,
+    /// Where this world is saved (M7) and the play time since the last autosave.
+    dir: PathBuf,
+    save_acc: f32,
+}
+
+/// A press on an open screen: where it began, whether it became a spread (a drag over slots with a stack on the
+/// cursor, one item into each slot it enters) and which slots it already filled.
+struct Gesture {
+    start: Option<craft::SlotId>,
+    spread: bool,
+    visited: Vec<craft::SlotId>,
+}
+
+impl App {
+    async fn init(native_ptr: *mut c_void, width: u32, height: u32, dir: PathBuf) -> Result<Self, String> {
+        let gpu = Gpu::from_android_window(native_ptr, width, height).await?;
+        let surface_format = gpu.surface_format();
+        let pipe = ChunkPipeline::new(&gpu.device);
+        pipe.upload_atlas(&gpu.queue);
+
+        // No world yet: the title screen is up (`enter_world` loads one, and does it again for `LAST_WORLD` below).
+        let start = glam::Vec3::ZERO;
+        let chunks = ChunkManager::new_typed(0, RENDER_DIST, false);
+        let mut camera = FirstPersonCamera::spawn_at(0.0, 80.0, 0.0);
+        // spawn_at defaults to aspect 1.0 and resize() only runs when the size changes, so
+        // without this the 3D view is squashed horizontally onto the real screen shape.
+        camera.aspect = width as f32 / height as f32;
+        let player = Player { pos: start, vel: glam::Vec3::ZERO, on_ground: false };
+
+        // M12: HUD pipeline + touch state machine. Surface dimensions match
+        // the window we just initialised against.
+        let touch = TouchUi::new(width, height);
+        let hud = HudPipeline::new(&gpu.device, &gpu.queue, surface_format, width, height);
+        let outline = Outline::new(&gpu.device);
+        let item_mesh = ItemMesh::new(&gpu.device);
+        let rain_fx = weather::Weather::new(&gpu.device, &gpu.queue, SCENE_FORMAT);
+        let sky_renderer = SkyRenderer::new(&gpu.device, &gpu.queue, SCENE_FORMAT);
+        let present = Present::new(&gpu.device, &gpu.queue, gpu.scene(), (width, height), surface_format);
+        let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as i64);
+
+        let mut app = Self {
+            gpu, tectonic: false, lod: None, seed: 0, root: dir.clone(), menu: Some(Menu::new(&dir)), pipe,
+            chunks, camera,
+            player,
+            last_frame: Instant::now(),
+            frames: 0,
+            fps_last: Instant::now(),
+            fps_recent: 0,
+            fps_overall: 0,
+            total_frames: 0,
+            started: Instant::now(),
+            touch,
+            hud,
+            hud_verts: Vec::with_capacity(256),
+            target: None,
+            outline,
+            world_ticks: 0.0,
+            sky: sky_renderer,
+            present,
+            weather: sky::Weather::new(seed),
+            weather_ticks: 0,
+            fx: Effects::new(seed),
+            rain_fx,
+            was_in_water: false,
+            sneak_y: 0.0,
+            tip: (0, 0.0),
+            dig: Dig::default(),
+            dig_acc: 0.0,
+            inv: Inventory::default(),
+            drops: Drops::new(seed),
+            mobs: Mobs::new(seed),
+            boats: boat::Boats::default(),
+            carts: minecart::Carts::new(seed),
+            detectors: std::collections::HashSet::new(),
+            nether: false,
+            portal_t: 0.0,
+            portal_cd: 0.0,
+            ticks: Ticks::new(seed),
+            item_mesh,
+            screen: None,
+            one_mode: false,
+            shift_mode: false,
+            hook: None,
+            furnaces: HashMap::new(),
+            chests: HashMap::new(),
+            paintings: Vec::new(),
+            signs: HashMap::new(),
+            sign_edit: None,
+            furn_acc: 0.0,
+            anim: crate::render::anim::Anim::new(),
+            anim_acc: 0.0,
+            cpu_acc: 0.0,
+            gesture: None,
+            vitals: Vitals::default(),
+            spawn: start,
+            sleep: None,
+            bed_spawn: None,
+            dir,
+            save_acc: 0.0,
+        };
+        app.touch.set_menu(true);
+        let last = LAST_WORLD.lock().ok().and_then(|l| l.clone());
+        if let Some(info) = last.and_then(|f| menu::list(&app.root).into_iter().find(|i| i.folder == f)) {
+            app.enter_world(&info);
+        }
+        Ok(app)
+    }
+
+    /// The distant terrain of the dimension in `self.dir`: the overworld has it, the Nether does not.
+    fn new_lod(&self) -> Option<Lod> {
+        // Pre-generation is on from the start: the view's own worker alone left the far tiles empty for minutes (`Lod::toggle_pregen` stops it).
+        (!self.nether).then(|| {
+            let mut l = Lod::new(self.seed, self.tectonic, Some(self.dir.join("lod")));
+            l.toggle_pregen();
+            l
+        })
+    }
+
+    /// The overworld's folder, whichever dimension this is.
+    fn overworld_dir(&self) -> PathBuf {
+        if self.nether { self.dir.parent().map_or_else(|| self.dir.clone(), |p| p.to_path_buf()) } else { self.dir.clone() }
+    }
+
+    /// Back to the overworld's folder without moving anyone (a reset builds the world anew).
+    fn leave_nether(&mut self) {
+        if self.nether {
+            self.dir = self.overworld_dir();
+            self.nether = false;
+            self.mobs.no_spawn = false;
+            let _ = std::fs::write(self.dir.join("dim"), "overworld");
+        }
+    }
+
+    /// Portal travel (`Minecraft.usePortal`, `Teleporter`): save this dimension, load the other one (a new `ChunkManager` on its own
+    /// folder; `<root>/dim` remembers it), arrive at the nearest portal to the player's spot x 8 or / 8 (one is built when none
+    /// is loaded there). `respawn`: no portal, the spawn point (death in the Nether). What belongs to a dimension (mobs, items on
+    /// the ground, block updates, vehicles, furnaces, chests, spawners, signs, paintings) is swapped for what that dimension's own
+    /// `level` and `decor` files held; the player, inventory, health and bed stay. ponytail: `preload` runs on the render thread.
+    fn enter(&mut self, nether: bool, respawn: bool) {
+        if self.nether == nether {
+            return;
+        }
+        self.save(usize::MAX);
+        let ow = self.overworld_dir();
+        let _ = std::fs::write(ow.join("dim"), if nether { "nether" } else { "overworld" });
+        let (old, k) = (self.player.pos, if nether { 0.125 } else { 8.0 });
+        (self.nether, self.dir) = (nether, if nether { ow.join("nether") } else { ow });
+        let to = if respawn { self.spawn } else { glam::Vec3::new(old.x * k, old.y, old.z * k) };
+        self.chunks = chunk_manager(self.seed, self.tectonic, nether).with_dir(self.dir.clone()); // the old one's workers stop on drop
+        self.lod = self.new_lod();
+        self.chunks.preload(chunk_coord(to.x), chunk_coord(to.z));
+        self.close_sign();
+        let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as i64);
+        (self.mobs, self.drops, self.ticks) = (Mobs::new(seed), Drops::new(seed), Ticks::new(seed));
+        self.mobs.no_spawn = nether;
+        self.boats = boat::Boats::default();
+        self.carts = minecart::Carts::default();
+        (self.detectors, self.paintings, self.signs) = (Default::default(), Vec::new(), HashMap::new());
+        (self.furnaces, self.chests, self.fx.spawners, self.furn_acc) = (HashMap::new(), HashMap::new(), HashMap::new(), 0.0);
+        (self.target, self.dig, self.dig_acc) = (None, Dig::default(), 0.0);
+        if let Some(l) = std::fs::read(self.dir.join("level")).ok().and_then(|b| Level::decode(&b)) {
+            self.furnaces = l.furnaces.into_iter().collect();
+            self.chests = l.chests.into_iter().collect();
+            self.fx.spawners = l.spawners.into_iter().map(|(p, kind, delay)| (p, Spawner { kind, delay })).collect();
+            self.drops.items = l.drops.into_iter().map(|(p, s, age)| items::ItemEntity::resting(p, s, age)).collect();
+        }
+        if let Some((p, s)) = std::fs::read(self.dir.join("decor")).ok().and_then(|b| decor::decode(&b)) {
+            (self.paintings, self.signs) = (p, s.into_iter().collect());
+        }
+        let mut at = to;
+        if !respawn {
+            let want = (to.x as f64, to.y as f64, to.z as f64);
+            let mut found = portal::find(&self.chunks, &self.chunks.find(portal::PORTAL), want);
+            if found.is_none() {
+                portal::make(&mut self.chunks, want, &mut crate::world::gen::noise::JavaRandom::new(seed));
+                found = portal::find(&self.chunks, &self.chunks.find(portal::PORTAL), want);
+            }
+            if let Some((x, y, z)) = found {
+                at = glam::Vec3::new(x as f32, y as f32 + physics::HALF.y + 0.01, z as f32);
+            }
+        }
+        self.player = Player { pos: at, vel: glam::Vec3::ZERO, on_ground: false };
+        self.camera.pos = at + glam::Vec3::new(0.0, EYE_HEIGHT, 0.0);
+        (self.portal_t, self.portal_cd) = (0.0, 0.5);
+        log::info!("portal: now in the {} at {at:?}", if nether { "Nether" } else { "overworld" });
+    }
+
+    /// Load a world of the list (or just made): from its `level` and chunk files where it has them, else a new one of its seed.
+    fn enter_world(&mut self, info: &menu::Info) {
+        self.dir = info.dir(&self.root);
+        (self.seed, self.tectonic) = (info.seed, info.tectonic);
+        // The world resumes in the dimension it was left in (`<world>/dim`).
+        self.nether = std::fs::read_to_string(self.dir.join("dim")).is_ok_and(|s| s.trim() == "nether");
+        if self.nether {
+            self.dir = self.dir.join("nether");
+        }
+        self.reset_world(false);
+        self.menu = None;
+        self.touch.set_menu(false);
+        self.last_frame = Instant::now();
+        if let Ok(mut l) = LAST_WORLD.lock() {
+            *l = Some(info.folder.clone());
+        }
+    }
+
+    /// The pause menu's "Save and quit to title" (`GuiIngameMenu`).
+    fn quit_to_title(&mut self) {
+        self.close_sign();
+        self.save(usize::MAX);
+        self.chunks = ChunkManager::new_typed(0, RENDER_DIST, false); // the world's workers stop on drop
+        self.lod = None;
+        self.menu = Some(Menu::new(&self.root));
+        self.touch.set_menu(true);
+        if let Ok(mut l) = LAST_WORLD.lock() {
+            *l = None;
+        }
+    }
+
+    /// Put everything back for the world in `self.dir` (`self.seed`, `self.tectonic`): `wipe` (the TEMPORARY pause-menu reset button)
+    /// deletes the save folder first and makes a new world: terrain without edits, spawn point, hotbar and inventory, health, time,
+    /// weather, mobs, drops, furnaces, block updates; otherwise it resumes from the `level`, chunk and `decor` files, a new world
+    /// where there are none. An open screen's stacks are discarded, not dropped.
+    /// ponytail: `preload` runs on the render thread (a second or two of freeze after the "Loading level" frame).
+    fn reset_world(&mut self, wipe: bool) {
+        if wipe {
+            self.leave_nether();
+        }
+        if self.screen.take().is_some() {
+            self.touch.set_screen(false);
+        }
+        self.close_sign();
+        (self.paintings, self.signs) = (Vec::new(), HashMap::new());
+        self.boats = boat::Boats::default();
+        self.carts = minecart::Carts::default();
+        self.detectors.clear();
+        if wipe {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+        let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as i64);
+        let level = if wipe { None } else { std::fs::read(self.dir.join("level")).ok().and_then(|b| Level::decode(&b)) };
+        self.chunks = chunk_manager(self.seed, self.tectonic, self.nether).with_dir(self.dir.clone()); // the old one's workers stop on drop
+        self.lod = self.new_lod();
+        // The terrain around the player must be real before the first frame, so those chunks are loaded (or generated and
+        // populated) here; everything further out streams in on the worker threads.
+        let (pcx, pcz) = level.as_ref().map_or((0, 0), |l| (chunk_coord(l.pos.x), chunk_coord(l.pos.z)));
+        self.chunks.preload(pcx, pcz);
+        self.spawn = level.as_ref().map_or_else(|| find_spawn(&self.chunks), |l| l.spawn);
+        let s = level.as_ref().map_or(self.spawn, |l| l.pos);
+        log::info!("save: {} in {}", if level.is_some() { "resuming" } else { "new world" }, self.dir.display());
+        // Light and mesh the area around the player now, so the first frame already shows terrain.
+        let warm = Instant::now();
+        while self.chunks.meshed() < 24 && warm.elapsed() < Duration::from_secs(8) {
+            self.chunks.update(&self.gpu.device, &self.gpu.queue, &self.pipe.origins, chunk_coord(s.x), chunk_coord(s.z));
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        log::info!("chunks: {} meshed after {:?}", self.chunks.meshed(), warm.elapsed());
+        (self.sleep, self.bed_spawn) = (None, None);
+        self.player = Player { pos: s, vel: glam::Vec3::ZERO, on_ground: false };
+        let aspect = self.camera.aspect;
+        self.camera = FirstPersonCamera::spawn_at(s.x, s.y + EYE_HEIGHT, s.z);
+        self.camera.aspect = aspect;
+        (self.world_ticks, self.weather_ticks, self.weather) = (0.0, 0, sky::Weather::new(seed));
+        self.fx = Effects::new(seed);
+        (self.tip, self.dig, self.dig_acc, self.target) = ((0, 0.0), Dig::default(), 0.0, None);
+        (self.inv, self.drops, self.mobs, self.ticks) = (Inventory::default(), Drops::new(seed), Mobs::new(seed), Ticks::new(seed));
+        (self.furnaces, self.furn_acc, self.vitals, self.save_acc) = (HashMap::new(), 0.0, Vitals::default(), 0.0);
+        self.chests.clear();
+        self.mobs.no_spawn = self.nether;
+        self.touch.hotbar_slot = 0;
+        if let Some(l) = level {
+            self.restore(l);
+        }
+        if let Some((p, s)) = std::fs::read(self.dir.join("decor")).ok().and_then(|b| decor::decode(&b)).filter(|_| !wipe) {
+            (self.paintings, self.signs) = (p, s.into_iter().collect());
+        }
+        log::info!("world of seed {:x} ({}), spawn {:?}", self.seed, if self.tectonic { "tectonic" } else { "vanilla" }, self.spawn);
+    }
+
+    /// Put a loaded `Level` back: time, look direction, hotbar slot, health, inventory, furnaces and dropped items
+    /// (the position and spawn were used when the app was built).
+    fn restore(&mut self, l: Level) {
+        self.world_ticks = l.ticks;
+        self.weather_ticks = l.ticks as u64;
+        self.camera.yaw = l.yaw;
+        self.camera.pitch = l.pitch;
+        self.touch.hotbar_slot = l.slot as usize;
+        self.vitals.health = l.vitals[0];
+        self.vitals.air = l.vitals[1];
+        self.vitals.fire = l.vitals[2];
+        self.inv.slots = l.inv;
+        self.furnaces = l.furnaces.into_iter().collect();
+        self.chests = l.chests.into_iter().collect();
+        self.fx.spawners = l.spawners.into_iter().map(|(p, kind, delay)| (p, Spawner { kind, delay })).collect();
+        self.bed_spawn = l.bed;
+        self.drops.items = l.drops.into_iter().map(|(p, s, age)| items::ItemEntity::resting(p, s, age)).collect();
+    }
+
+    /// Write the world to disk: the level file, then up to `chunks` unsaved chunks (`usize::MAX` = all). An open
+    /// screen is closed first, so the cursor stack and the grid become dropped items, which are saved.
+    // ponytail: runs on the render thread; the level file is ~1 KB and the chunk writes are capped per autosave.
+    fn save(&mut self, chunks: usize) {
+        if self.menu.is_some() {
+            return; // no world is loaded
+        }
+        // `close_screen` also calls `touch.set_screen(false)`, which resets the touch state. Autosave runs while
+        // playing (no screen open), so calling it unconditionally cut every held action (move, dig, look) every 5 s.
+        if self.screen.is_some() {
+            self.close_screen();
+        }
+        let level = Level {
+            ticks: self.world_ticks,
+            pos: self.player.pos,
+            spawn: self.spawn,
+            yaw: self.camera.yaw,
+            pitch: self.camera.pitch,
+            slot: self.touch.hotbar_slot as u8,
+            vitals: [self.vitals.health, self.vitals.air, self.vitals.fire],
+            inv: self.inv.slots,
+            furnaces: self.furnaces.iter().map(|(&p, f)| (p, f.clone())).collect(),
+            chests: self.chests.iter().map(|(&p, &c)| (p, c)).collect(),
+            spawners: self.fx.spawners.iter().map(|(&p, s)| (p, s.kind, s.delay)).collect(),
+            bed: self.bed_spawn,
+            drops: self.drops.items.iter().map(|e| (e.pos, e.stack, e.age)).collect(),
+        };
+        if let Err(e) = save::write(&self.dir.join("level"), &level.encode()) {
+            log::warn!("save: level file: {e}");
+        }
+        let signs: Vec<_> = self.signs.iter().map(|(&p, t)| (p, t.clone())).collect();
+        if let Err(e) = save::write(&self.dir.join("decor"), &decor::encode(&self.paintings, &signs)) {
+            log::warn!("save: decor file: {e}");
+        }
+        self.chunks.flush(chunks);
+    }
+
+    fn resize(&mut self, w: u32, h: u32) {
+        self.gpu.resize(w, h);
+        self.present.resize(&self.gpu.device, &self.gpu.queue, self.gpu.scene(), (w, h));
+        self.camera.aspect = w as f32 / h as f32;
+        self.touch.ensure_layout(w, h);
+        self.hud.resize(&self.gpu.queue, w, h);
+    }
+
+    fn step_frame(&mut self) {
+        let now = Instant::now();
+        let mut dt = now.duration_since(self.last_frame).as_secs_f32();
+        if dt > 1.0 / 30.0 { dt = 1.0 / 30.0; }
+        if dt < 0.0 { dt = 0.0; }
+        self.last_frame = now;
+        // Zoomify: hold the zoom button for 4x (the vertical tangent / 4), eased; the look drag slows with the field of view.
+        let base = 70_f32.to_radians();
+        let target = if self.touch.zooming() { 2.0 * ((base * 0.5).tan() / ZOOM).atan() } else { base };
+        self.camera.fov_y += (target - self.camera.fov_y) * (1.0 - (-14.0 * dt).exp());
+        // TEMPORARY pause-menu button: wipe the save and start the seed's world again.
+        if self.touch.take_reset() {
+            self.reset_world(true);
+            return;
+        }
+        if self.touch.take_pregen() {
+            if let Some(l) = self.lod.as_mut() {
+                l.toggle_pregen();
+            }
+        }
+        if self.touch.take_lod_debug() {
+            if let Some(l) = self.lod.as_mut() {
+                l.cycle_debug();
+            }
+        }
+        if self.touch.take_quit() {
+            self.quit_to_title();
+            return;
+        }
+        // Look drag accumulated by the touch UI since the last frame. Drained
+        // even when paused so a drag started before pausing doesn't replay.
+        let (look_dx, look_dy) = self.touch.take_look();
+        // Pause: freeze the world but keep the timer warm so un-pause doesn't
+        // produce a giant dt step (which would either teleport the player or
+        // kill their fall).
+        if self.touch.paused {
+            // Player physics is still ticked so they don't fall through the
+            // world if pause was opened mid-air, but gravity is zeroed.
+            self.player.vel = glam::Vec3::ZERO;
+            self.camera.pos = self.player.pos + glam::Vec3::new(0.0, EYE_HEIGHT - self.sneak_y, 0.0);
+            return;
+        }
+        // Four seconds in a portal: the other dimension (`EntityPlayerSP.onLivingUpdate`).
+        if self.portal_t >= 1.0 {
+            self.enter(!self.nether, false);
+            return;
+        }
+        // The death screen's resume button was pressed: come back at the spawn point with full health.
+        if self.vitals.dead() {
+            self.vitals = Vitals::default();
+            self.enter(false, true); // `Minecraft.respawn`: always in the overworld
+            self.player.pos = self.respawn_pos();
+            self.player.vel = glam::Vec3::ZERO;
+        }
+        // Autosave while playing (not with a screen open: its cursor stack is not in the inventory yet).
+        self.save_acc += dt;
+        if self.save_acc >= AUTOSAVE_SECS && self.screen.is_none() {
+            self.save_acc = 0.0;
+            self.save(AUTOSAVE_CHUNKS);
+        }
+        let slot = self.touch.hotbar_slot;
+        self.tip = if slot != self.tip.0 { (slot, 2.0) } else { (slot, (self.tip.1 - dt).max(0.0)) };
+        // Day/night: time only runs while playing; the shader reads the sky-light level from a uniform, so the meshes are not rebuilt.
+        self.world_ticks += dt as f64 * 20.0;
+        while self.weather_ticks < self.world_ticks as u64 {
+            self.weather.tick();
+            self.weather_ticks += 1;
+        }
+        let angle = sky::celestial_angle(self.world_ticks as u64, 1.0);
+        let sub = sky::skylight_subtracted(angle, self.weather.rain(1.0), self.weather.thunder(1.0));
+        self.chunks.set_sky_sub(sub);
+        // Asleep, the jump button is "leave bed" (`GuiSleepMP`); the view and the body stay put.
+        if self.sleep.is_some() && self.touch.jumping() {
+            self.wake(true);
+        }
+        // On a saddled pig the jump button is "get off" (PE dismounts with sneak; b1.7.3 has no sneak-dismount, so the jump button keeps it) and the body goes
+        // wherever the pig goes (`updateRidden`: no motion of its own).
+        if self.touch.jumping() {
+            self.mobs.list.iter_mut().for_each(|m| m.ridden = false);
+            self.boats.list.iter_mut().for_each(|b| b.ridden = false);
+            self.carts.list.iter_mut().for_each(|c| c.ridden = false);
+        }
+        let riding = self.mobs.list.iter().any(|m| m.ridden) || self.boats.ridden().is_some() || self.carts.ridden().is_some();
+        let asleep = self.sleep.is_some();
+        if !asleep {
+            let k = LOOK_SENS * (self.camera.fov_y * 0.5).tan() / (70_f32.to_radians() * 0.5).tan();
+            self.camera.add_yaw(look_dx * k);
+            self.camera.add_pitch(look_dy * k);
+        }
+        // Analog move stick: rotate the camera-frame (fwd, side) by yaw into
+        // world-space velocity. Set every frame (zero when the stick is idle),
+        // otherwise the player keeps sliding after the finger lifts.
+        let (mut fwd, mut side) = if asleep || riding { (0.0, 0.0) } else { self.touch.move_input };
+        // `MovementInputFromOptions`: sneaking scales both axes by 0.3. `EntityPlayerSP.isSneaking` is false in bed.
+        let sneaking = self.touch.sneak && !asleep;
+        if sneaking {
+            fwd *= 0.3;
+            side *= 0.3;
+        }
+        let yaw = self.camera.yaw;
+        // forward = -Z when yaw = 0; rotate by yaw around +Y.
+        self.player.vel.x = (fwd * yaw.sin() + side * yaw.cos()) * MOVE_SPEED;
+        self.player.vel.z = (-fwd * yaw.cos() + side * yaw.sin()) * MOVE_SPEED;
+        // Plants are drawn but not solid yet (collision shapes come with M14), so physics reads them as air.
+        let get = |x: i32, y: i32, z: i32| self.chunks.block(x, y, z).map(|b| if is_plant(b) { 0 } else { self.chunks.physics_at(x, y, z, b) });
+        // The held jump button jumps (8.4 m/s, the b1.7.3 velocity) or swims up; fluids (ids 8..=11) are not solid.
+        let y0 = self.player.pos.y;
+        if sneaking && !riding {
+            physics::sneak(&mut self.player, physics::HALF, dt, &get); // no walking off an edge, a hold on ladders
+        }
+        // TEMPORARY fly mode (pause menu button): jump climbs, sneak descends, otherwise hover; the frame's gravity is added back so `step`
+        // leaves the speed as set. ponytail: in water the drag still sags it a little; no fall damage while on.
+        let flying = self.touch.flying && !asleep && !riding;
+        if flying {
+            self.player.vel.y = (if self.touch.jumping() { 8.0 } else if sneaking { -8.0 } else { 0.0 }) + 23.0 * dt;
+        }
+        let (water, lava) = if asleep || riding { (false, false) } else { physics::step(&mut self.player, dt, self.touch.jumping() && !flying, &get) };
+        // `EntityPlayerSP.onLivingUpdate` sets `ySize` 0.2 while sneaking and `moveEntity` multiplies it by 0.4 every tick: the eye hangs 0.08
+        // low (1.54 up), and it comes back by the same x0.4 a tick once the button is released.
+        self.sneak_y = if sneaking { 0.08 } else { self.sneak_y * 0.4f32.powf(dt * 20.0) };
+        self.camera.pos = self.player.pos + glam::Vec3::new(0.0, EYE_HEIGHT - self.sneak_y, 0.0);
+        let e = self.camera.pos;
+        let eye_in_water = matches!(self.chunks.block_loaded(e.x.floor() as i32, e.y.floor() as i32, e.z.floor() as i32), Some(8 | 9));
+        self.vitals.armor = craft::armor_value(&self.inv.slots[items::MAIN..]);
+        // `Entity.isEntityInsideOpaqueBlock` at the head (`EntityPlayer.getEyeHeight` is 0.12 over the eye): 1 damage a tick in a wall.
+        let in_wall = effects::inside_opaque(&|x, y, z| self.chunks.block(x, y, z), self.player.pos.x, self.player.pos.y + 0.84, self.player.pos.z, 0.6);
+        let ladder = !asleep && physics::on_ladder(self.player.pos, physics::HALF, &get);
+        // `BlockCactus.onEntityCollidedWithBlock`: 1 damage every frame the box touches a cactus cell (the 10 tick damage window paces it).
+        if !asleep && physics::touching(self.player.pos, physics::HALF, &get, 81) {
+            self.vitals.hurt(1);
+        }
+        // `BlockPortal.onEntityCollidedWithBlock` -> `Entity.setInPortal`: inside a portal the timer fills (a quarter a second, drains
+        // at 1 a second outside); the cooldown after an arrival is held while the player still stands in the pane.
+        if !asleep && !riding && physics::touching(self.player.pos, physics::HALF, &get, 90) {
+            if self.portal_cd > 0.0 {
+                self.portal_cd = 0.5;
+            } else {
+                self.portal_t += 0.25 * dt;
+            }
+        } else {
+            self.portal_t = (self.portal_t - dt).max(0.0);
+            self.portal_cd = (self.portal_cd - dt).max(0.0);
+        }
+        self.vitals.update(dt, Env { dy: self.player.pos.y - y0, on_ground: self.player.on_ground || flying, water, lava, ladder, eye_in_water, eye_y: e.y, in_wall });
+        // Entering water splashes (`Entity.onEntityUpdate`); running out of air pops 8 bubbles round the eye (`EntityLiving.onEntityUpdate`).
+        let motion = self.player.vel / 20.0; // blocks per tick
+        if water && !self.was_in_water {
+            self.fx.splash(glam::Vec3::new(self.player.pos.x, (self.player.pos.y - 0.9).floor() + 1.0, self.player.pos.z), 0.6, motion);
+        }
+        self.was_in_water = water;
+        if std::mem::take(&mut self.vitals.drowned) {
+            self.fx.breath(e, motion);
+        }
+        // `InventoryPlayer.damageArmor`: every worn piece takes the damage that was dealt (before armor).
+        let wear = std::mem::take(&mut self.vitals.wear) as u16;
+        (items::MAIN..items::SLOTS).filter(|_| wear > 0).for_each(|i| self.inv.damage(i, wear));
+        if self.vitals.dead() {
+            self.die();
+            return;
+        }
+        // Dropped items fall, settle and get picked up (before the target check below, which can return early).
+        self.drops.tick(dt, &|x: i32, y: i32, z: i32| self.chunks.block(x, y, z).map(|b| self.chunks.physics_at(x, y, z, b)), self.player.pos, &mut self.inv);
+        let light = |x: i32, y: i32, z: i32| self.chunks.light(x, y, z);
+        let ctx = Ctx { get: &get, light: &light, day: sub < 4, player: self.player.pos, eye: self.camera.pos };
+        for e in self.mobs.update(dt, &ctx, &mut self.drops) {
+            match e {
+                Ev::Hurt(d) => { self.vitals.hurt(d); }
+                Ev::Boom(p) => self.explode(p, 3.0),
+                _ => {}
+            }
+        }
+        // Boats (`EntityBoat.onUpdate`, 20 Hz ticks): the rider's own walking paddles the boat (`motion += rider.motion * 0.2`).
+        let paddle = match self.boats.ridden() {
+            Some(_) => {
+                let ((f, s), yaw) = (self.touch.move_input, self.camera.yaw);
+                glam::Vec3::new(f * yaw.sin() + s * yaw.cos(), 0.0, -f * yaw.cos() + s * yaw.sin()) * MOVE_SPEED / 20.0
+            }
+            None => glam::Vec3::ZERO,
+        };
+        let boat_events = {
+            let bget = |x: i32, y: i32, z: i32| self.chunks.block(x, y, z).map(|b| if is_plant(b) { 0 } else { physics_id(b, self.chunks.meta(x, y, z)) });
+            self.boats.update(dt, &bget, paddle)
+        };
+        for e in boat_events {
+            match e {
+                boat::Event::Drop(s, p) => self.drops.spawn_stack(s, (p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32)),
+                boat::Event::Snow(c) => {
+                    self.chunks.set_block(c.0, c.1, c.2, 0); // `Block.snow` is wiped by the hull
+                }
+            }
+        }
+        // Minecarts (`EntityMinecart.onUpdate`): on the rails the cart is its own master; a rider only slows it.
+        let cart_events = {
+            let raw = |x: i32, y: i32, z: i32| match self.chunks.block(x, y, z) {
+                Some(b) => (b, self.chunks.meta(x, y, z)),
+                None => (0, 0),
+            };
+            let cget = |x: i32, y: i32, z: i32| self.chunks.block(x, y, z).map(|b| if is_plant(b) { 0 } else { physics_id(b, self.chunks.meta(x, y, z)) });
+            self.carts.update(dt, &minecart::Env { get: &cget, raw: &raw })
+        };
+        for e in cart_events {
+            match e {
+                minecart::Event::Drop(s, p) => self.drops.spawn_stack(s, (p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32)),
+                minecart::Event::Smoke(p) => self.fx.puff(p),
+            }
+        }
+        // `BlockDetectorRail.setStateIfMinecartInteractsWithRail`: on while a cart is over it, off when it has gone.
+        for c in self.carts.cells() {
+            if self.chunks.block(c.0, c.1, c.2) == Some(28) && self.carts.over_detector(c) {
+                self.detectors.insert(c);
+                let m = self.chunks.meta(c.0, c.1, c.2);
+                if m & 8 == 0 {
+                    self.chunks.set_block_meta(c.0, c.1, c.2, 28, m | 8);
+                    self.chunks.ping(c.0, c.1 - 1, c.2);
+                }
+            }
+        }
+        for c in self.detectors.iter().copied().collect::<Vec<_>>() {
+            if self.chunks.block(c.0, c.1, c.2) != Some(28) {
+                self.detectors.remove(&c);
+            } else if !self.carts.over_detector(c) {
+                self.detectors.remove(&c);
+                let m = self.chunks.meta(c.0, c.1, c.2);
+                if m & 8 != 0 {
+                    self.chunks.set_block_meta(c.0, c.1, c.2, 28, m & 7);
+                    self.chunks.ping(c.0, c.1 - 1, c.2);
+                }
+            }
+        }
+        // `Entity.updateRiderPosition` for a cart: on the cart's centre line, feet 0.8 under the box's centre.
+        if let Some(c) = self.carts.ridden() {
+            self.player.pos = c.rider_pos(physics::HALF.y);
+            self.player.vel = glam::Vec3::ZERO;
+            self.player.on_ground = true;
+            self.camera.pos = self.player.pos + glam::Vec3::new(0.0, EYE_HEIGHT - self.sneak_y, 0.0);
+        }
+        // `Entity.updateRiderPosition` for a boat: 0.4 behind the middle, feet 0.8 under the box's centre.
+        if let Some(b) = self.boats.ridden() {
+            self.player.pos = b.rider_pos(physics::HALF.y);
+            self.player.vel = glam::Vec3::ZERO;
+            self.player.on_ground = true;
+            self.camera.pos = self.player.pos + glam::Vec3::new(0.0, EYE_HEIGHT - self.sneak_y, 0.0);
+        }
+        // `Entity.updateRiderPosition`: the rider's feet are 0.175 over the pig's (`getMountedYOffset` 0.675, `getYOffset` -0.5).
+        if let Some(m) = self.mobs.list.iter().find(|m| m.ridden) {
+            let feet = m.body.pos.y - m.half.y;
+            self.player.pos = glam::Vec3::new(m.body.pos.x, feet + 0.175 + physics::HALF.y, m.body.pos.z);
+            self.player.vel = glam::Vec3::ZERO;
+            self.player.on_ground = true; // no fall damage from a pig's hop
+            self.camera.pos = self.player.pos + glam::Vec3::new(0.0, EYE_HEIGHT, 0.0);
+        }
+        // Furnaces burn on the 20 Hz tick, open or not, but only in loaded chunks (vanilla ticks loaded tile entities).
+        // The block swaps between unlit 61 and lit 62 when the fire goes on or off.
+        // `TextureFX.onTick` every 20 Hz tick (at most 2 per frame: a stall does not queue a burst of texture uploads).
+        self.anim_acc = (self.anim_acc + dt).min(2.0 * dig::TICK);
+        while self.anim_acc >= dig::TICK {
+            self.anim_acc -= dig::TICK;
+            self.pipe.animate(&self.gpu.queue, &self.anim.tick());
+            // The compass points at the world spawn and the clock shows the sky (`TextureCompassFX`, `TextureWatchFX`); the sprite
+            // is rewritten in the atlas (held items, drops) and in the HUD's copy of items.png (hotbar, inventory).
+            let g = self.anim.gauges(
+                self.camera.yaw.to_degrees() + 180.0,
+                (self.player.pos.x as f64, self.player.pos.z as f64),
+                (self.spawn.x as f64, self.spawn.z as f64),
+                sky::celestial_angle(self.world_ticks as u64, 1.0),
+            );
+            self.pipe.animate_items(&self.gpu.queue, &g);
+            self.hud.animate_items(&self.gpu.queue, &g);
+        }
+        self.furn_acc += dt;
+        while self.furn_acc >= dig::TICK {
+            self.furn_acc -= dig::TICK;
+            // The bobber: gone when the rod is not in hand, 32 blocks away, or after 1200 ticks on the ground.
+            if let Some(h) = &mut self.hook {
+                let rod = self.inv.slots[self.touch.hotbar_slot].is_some_and(|s| s.id == gear::ROD);
+                let get = |x: i32, y: i32, z: i32| self.chunks.block(x, y, z);
+                let rain = self.weather.rain(1.0) > 0.5;
+                if !rod || h.pos.distance_squared(self.player.pos) > 1024.0 || !h.tick(&get, &mut self.mobs.rng, rain) {
+                    self.hook = None;
+                }
+            }
+            let centre = (chunk_coord(self.player.pos.x), chunk_coord(self.player.pos.z));
+            self.sleep_tick(sub);
+            // `BlockPressurePlate`: the boxes of what may stand on a plate (the player, the mobs).
+            let p = self.player.pos;
+            self.ticks.plate_ents.clear();
+            self.ticks.plate_ents.push((p - physics::HALF, p + physics::HALF, true));
+            self.ticks.plate_ents.extend(self.mobs.list.iter().map(|m| { let (lo, hi) = m.aabb(); (lo, hi, true) }));
+            for (x, y, z) in self.chunks.take_fresh_water() {
+                self.ticks.wake_water(&mut self.chunks, x, y, z); // a river's edge water, Streams Reflowing's scheduleTick
+            }
+            self.ticks.step(&mut self.chunks, &mut self.drops, centre, self.weather.rain(1.0));
+            self.ticks.note_events.clear(); // no audio layer yet: it would play them here
+            // `TileEntityPiston`: whatever stands in a sliding piece is carried half a block along per tick (ponytail: the player and
+            // the mobs only, and no collision check on the way).
+            for f in &self.ticks.falling {
+                let Some(mv) = f.mv else { continue };
+                let d = glam::Vec3::new((mv.to.0 - mv.from.0) as f32, (mv.to.1 - mv.from.1) as f32, (mv.to.2 - mv.from.2) as f32) * 0.5;
+                let (lo, hi) = (f.pos - glam::Vec3::splat(0.5), f.pos + glam::Vec3::splat(0.5));
+                let inside = |a: glam::Vec3, b: glam::Vec3| b.cmpgt(lo).all() && a.cmplt(hi).all();
+                let p = self.player.pos;
+                if inside(p - physics::HALF, p + physics::HALF) {
+                    self.player.pos += d;
+                }
+                for m in self.mobs.list.iter_mut() {
+                    let (a, b) = m.aabb();
+                    if inside(a, b) {
+                        m.body.pos += d;
+                    }
+                }
+            }
+            for p in std::mem::take(&mut self.ticks.dispenses) {
+                self.dispense(p);
+            }
+            for at in std::mem::take(&mut self.ticks.booms) {
+                self.explode(at, 4.0); // `EntityTNTPrimed.explode`
+            }
+            if self.sleep.is_none() {
+                let p = self.player.pos; // the box centre is 0.9 over the feet
+                self.ticks.walk(&mut self.chunks, p.x, p.y - 0.9, p.z);
+            }
+            self.tick_effects(centre);
+            let mut flips = Vec::new();
+            for (&pos, f) in self.furnaces.iter_mut() {
+                if matches!(self.chunks.block_loaded(pos.0, pos.1, pos.2), Some(61 | 62)) && f.tick() {
+                    flips.push((pos, f.burn > 0));
+                }
+            }
+            for ((x, y, z), lit) in flips {
+                // `updateFurnaceBlockState`: the facing survives the swap.
+                let m = self.chunks.meta(x, y, z);
+                self.chunks.set_block_meta(x, y, z, if lit { 62 } else { 61 }, m);
+            }
+            // Chests: take over what a dungeon's populate put in them; one whose block is gone (dug, blown up, washed away)
+            // spills its contents (`BlockChest.onBlockRemoval`; ponytail: seen on the next 20 Hz tick, not at the removal).
+            for (p, c) in self.chunks.take_loot() {
+                self.chests.entry(p).or_insert(c);
+            }
+            // Dungeon spawners (`TileEntityMobSpawner`): taken over from populate; one whose block is gone is dropped.
+            for (p, kind) in self.chunks.take_spawners() {
+                self.fx.spawners.entry(p).or_insert(Spawner { kind, delay: 20 });
+            }
+            // Paintings check their wall every 101 ticks and drop as an item when it is gone (`EntityPainting.onUpdate`); a sign's
+            // text goes with its block, and closes the editor.
+            let chunks = &self.chunks;
+            let cell = |x: i32, y: i32, z: i32| chunks.block_loaded(x, y, z).map(|b| (b, chunks.meta(x, y, z)));
+            for p in decor::step(&mut self.paintings, &cell) {
+                let c = p.frame().0;
+                self.drops.scatter(ItemStack { id: decor::PAINTING, count: 1, damage: 0 }, (c.x.floor() as i32, c.y.floor() as i32, c.z.floor() as i32));
+            }
+            self.signs.retain(|&(x, y, z), _| self.chunks.block_loaded(x, y, z).map_or(true, |b| matches!(b, decor::POST | decor::WALL)));
+            if self.sign_edit.is_some_and(|e| !self.signs.contains_key(&e.pos)) {
+                self.close_sign();
+            }
+            self.fx.spawners.retain(|&(x, y, z), _| self.chunks.block_loaded(x, y, z).map_or(true, |b| b == effects::SPAWNER_ID));
+            let gone: Vec<_> = self.chests.keys().copied().filter(|&(x, y, z)| self.chunks.block_loaded(x, y, z).is_some_and(|b| b != chest::ID && b != chest::DISPENSER)).collect();
+            for p in gone {
+                for st in self.chests.remove(&p).into_iter().flatten().flatten() {
+                    self.drops.scatter(st, p);
+                }
+            }
+        }
+
+        // `EntityPlayer.onUpdate`: a container that is no longer usable (the chest is gone, or the eye is 8+ blocks away) closes.
+        if self.screen.as_ref().is_some_and(|s| !s.chests.is_empty() && !chest::usable(&|x, y, z| self.chunks.block(x, y, z).unwrap_or(0), self.camera.pos, &s.chests)) {
+            self.close_screen();
+        }
+
+        // M5: pick the block under the crosshair, dig it while the dig input is held, place on a tap.
+        self.touch.tick(dt);
+        let place = self.touch.take_place();
+        // The inventory button, and taps on an open screen (its presses are not look / move / place).
+        if self.touch.take_inventory() {
+            if self.sign_edit.is_some() {
+                self.close_sign();
+            } else if self.screen.is_some() {
+                self.close_screen();
+            } else {
+                self.open_screen(Screen::new(2));
+            }
+        }
+        for ev in self.touch.take_screen_events() {
+            self.on_screen_event(ev);
+        }
+        let eye = self.camera.pos.as_dvec3();
+        let end = eye + self.camera.forward().as_dvec3() * pick::REACH;
+        // The crosshair hits a block's bounds (`Block.collisionRayTrace`: a sapling's small box, half a slab); liquids are not pickable
+        // (vanilla's rayTraceBlocks skips them).
+        let bounds = |x: i32, y: i32, z: i32| self.chunks.block_loaded(x, y, z).and_then(|b| pick_bounds(b, self.chunks.meta(x, y, z)));
+        self.target = pick::ray_trace(&bounds, eye, end);
+
+        // Digging runs on the 20 Hz game tick of the Java (hardness-based time, see world::dig).
+        // A broken block drops its items (world::items) only if the held item may harvest it (stone needs a pickaxe),
+        // and wears the tool (`Item.onBlockDestroyed`: 1 use, a sword 2, a hoe none).
+        match self.target {
+            Some(hit) if self.touch.digging() => {
+                self.dig_acc += dt;
+                while self.dig_acc >= dig::TICK {
+                    self.dig_acc -= dig::TICK;
+                    let (x, y, z) = hit.pos;
+                    let in_water = matches!(self.chunks.block_loaded(eye.x.floor() as i32, eye.y.floor() as i32, eye.z.floor() as i32), Some(8 | 9));
+                    if let Some(id) = self.chunks.block_loaded(x, y, z) {
+                        let slot = self.touch.hotbar_slot;
+                        let held = self.inv.slots[slot];
+                        if self.dig.tick(hit.pos, id, held, self.player.on_ground, in_water) {
+                            let meta = self.chunks.meta(x, y, z); // before the cell is cleared: the drop depends on it
+                            self.chunks.set_block(x, y, z, 0);
+                            self.fx.dig(hit.pos, crate::render::atlas::tile_of(id, meta)); // `addBlockDestroyEffects`
+                            if let (61 | 62, Some(f)) = (id, self.furnaces.remove(&hit.pos)) {
+                                for st in f.slots.into_iter().flatten() {
+                                    self.drops.scatter(st, hit.pos);
+                                }
+                            }
+                            // PlayerControllerSP.sendBlockRemoved: `canHarvestBlock` is read before the tool wears, so
+                            // a tool that breaks on this block still harvests it; no suitable tool, no drop.
+                            let harvest = dig::can_harvest(id, held);
+                            if let Some(h) = held {
+                                self.inv.damage(slot, craft::wear_on_break(h.id, id));
+                            }
+                            if id == 84 && meta & 15 != 0 {
+                                self.drops.spawn_stack(ItemStack { id: 2255 + (meta & 15) as u16, count: 1, damage: 0 }, hit.pos); // the record comes out
+                            }
+                            if id == 46 {
+                                // `BlockTNT.onBlockDestroyedByPlayer` (unconditional): metadata 1, or flint and steel in hand (`onBlockClicked`), lights it.
+                                if meta & 1 == 1 || held.is_some_and(|h| h.id == craft::FLINT_AND_STEEL) {
+                                    self.ticks.prime(hit.pos, false);
+                                } else {
+                                    self.drops.spawn_stack(ItemStack { id: 46, count: 1, damage: 0 }, hit.pos);
+                                }
+                            } else if harvest {
+                                // BlockLeaves.harvestBlock: shears drop the leaves themselves, not a sapling.
+                                if id == 18 && held.is_some_and(|h| h.id == craft::SHEARS) {
+                                    self.drops.spawn_stack(ItemStack { id: 18, count: 1, damage: (meta & 3) as u16 }, hit.pos);
+                                } else {
+                                    self.drops.spawn_block(id, meta, hit.pos);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {
+                self.dig.reset();
+                self.dig_acc = 0.0;
+            }
+        }
+        // A tap that has a mob under the crosshair, nearer than the block behind it, hits it (`Minecraft.clickMouse`'s attack;
+        // touch has no left button, and placing a block against a pig is not worth a gesture).
+        if place {
+            let (eye, fwd, slot) = (self.camera.pos, self.camera.forward(), self.touch.hotbar_slot);
+            let wall = self.target.map_or(f32::MAX, |h| h.point.distance(eye.as_dvec3()) as f32);
+            // A boat the crosshair is on (and nothing nearer): an empty hand gets in (`Entity.interact`), a held item hits it
+            // (`attackEntityFrom`: damage x 10, over 40 breaks it into 3 planks and 2 sticks).
+            let mob_t = self.mobs.pick(eye, fwd, pick::REACH as f32).filter(|&(_, t)| t < wall).map(|(_, t)| t);
+            let boat_t = self.boats.pick(eye, fwd, pick::REACH as f32).filter(|&(_, t)| t < wall && mob_t.map_or(true, |m| t < m));
+            // A cart the same way (`EntityMinecart.interact`): the empty one takes a rider, the furnace one is pushed away from you
+            // (coal is burnt first); a held item otherwise hits it, over 40 damage breaks it into the cart (and the furnace).
+            if let Some((ci, _)) = self.carts.pick(eye, fwd, pick::REACH as f32).filter(|&(_, t)| t < wall && mob_t.map_or(true, |m| t < m) && boat_t.map_or(true, |b| t < b.1)) {
+                let held = self.inv.slots[slot].map(|s| s.id);
+                let furnace = self.carts.list[ci].kind == 2;
+                match held {
+                    None if furnace => {
+                        self.carts.list[ci].push_from(self.player.pos, false);
+                    }
+                    None => {
+                        if self.carts.ridden().is_none() {
+                            self.carts.list[ci].ridden = true;
+                        }
+                    }
+                    Some(minecart::COAL) if furnace => {
+                        if self.carts.list[ci].push_from(self.player.pos, true) {
+                            self.inv.consume(slot);
+                        }
+                    }
+                    held => {
+                        let (dmg, wear) = mobs::attack(held);
+                        if self.carts.list[ci].hurt(dmg) {
+                            let c = self.carts.list.remove(ci);
+                            let cell = (c.pos.x.floor() as i32, c.pos.y.floor() as i32, c.pos.z.floor() as i32);
+                            c.drops().into_iter().for_each(|s| self.drops.spawn_stack(s, cell));
+                        }
+                        if wear > 0 {
+                            self.inv.damage(slot, wear);
+                        }
+                    }
+                }
+                return;
+            }
+            if let Some((bi, _)) = boat_t {
+                match self.inv.slots[slot].map(|s| s.id) {
+                    None => {
+                        if self.boats.ridden().is_none() {
+                            self.boats.list[bi].ridden = true;
+                        }
+                    }
+                    held => {
+                        let (dmg, wear) = mobs::attack(held);
+                        if self.boats.list[bi].hurt(dmg) {
+                            let b = self.boats.list.remove(bi);
+                            let cell = (b.pos.x.floor() as i32, b.pos.y.floor() as i32, b.pos.z.floor() as i32);
+                            self.drops.spawn_stack(ItemStack { id: boat::PLANKS, count: 3, damage: 0 }, cell);
+                            self.drops.spawn_stack(ItemStack { id: boat::STICK, count: 2, damage: 0 }, cell);
+                        }
+                        if wear > 0 {
+                            self.inv.damage(slot, wear);
+                        }
+                    }
+                }
+                return;
+            }
+            if let Some((i, _)) = self.mobs.pick(eye, fwd, pick::REACH as f32).filter(|&(_, t)| t < wall) {
+                // A bone or pork on a wolf, a tap on a tame one, a saddle on a pig, a tap on a saddled one (`Entity.interact`).
+                let held = self.inv.slots[slot];
+                if let Some(b) = gear::befriend(&mut self.mobs.list[i], held, &mut self.mobs.rng) {
+                    let m = &self.mobs.list[i];
+                    let (feet, w, h) = (m.body.pos - glam::Vec3::new(0.0, m.half.y, 0.0), m.half.x * 2.0, m.half.y * 2.0);
+                    match b {
+                        gear::Befriend::Tamed | gear::Befriend::Failed => {
+                            self.inv.consume(slot);
+                            self.fx.hearts(feet, w, h, b == gear::Befriend::Tamed);
+                        }
+                        gear::Befriend::Healed | gear::Befriend::Saddled => self.inv.consume(slot),
+                        gear::Befriend::Sat | gear::Befriend::Stood | gear::Befriend::Mounted => {}
+                    }
+                    return;
+                }
+                if let Some(h) = self.inv.slots[slot] {
+                    // Shears / dye on a sheep, a bucket on a cow: `Entity.interact` before the attack.
+                    let used = gear::use_on_mob(&mut self.mobs.list[i], h, &mut self.mobs.rng);
+                    let at = self.mobs.list[i].body.pos;
+                    let cell = (at.x.floor() as i32, at.y.floor() as i32, at.z.floor() as i32);
+                    match used {
+                        Some(Used::Sheared(wool)) => {
+                            wool.into_iter().for_each(|w| self.drops.spawn_stack(w, cell));
+                            self.inv.damage(slot, 1);
+                            return;
+                        }
+                        Some(Used::Dyed) => {
+                            self.inv.consume(slot);
+                            return;
+                        }
+                        Some(Used::Milked) => {
+                            self.inv.slots[slot] = Some(ItemStack { id: gear::MILK_BUCKET, count: 1, damage: 0 });
+                            return;
+                        }
+                        None => {}
+                    }
+                }
+                let held = self.inv.slots[slot].map(|s| s.id);
+                let (dmg, wear) = mobs::attack(held);
+                self.mobs.hit(i, dmg, self.player.pos);
+                self.inv.damage(slot, wear);
+                return;
+            }
+        }
+        // A tap on a painting nearer than the block behind it breaks it (`EntityPainting.attackEntityFrom`: it drops as an item).
+        if place {
+            let (eye, fwd) = (self.camera.pos, self.camera.forward());
+            let wall = self.target.map_or(f32::MAX, |h| h.point.distance(eye.as_dvec3()) as f32);
+            if let Some((i, _)) = decor::pick(&self.paintings, eye, fwd, pick::REACH as f32).filter(|&(_, t)| t < wall) {
+                let c = self.paintings.remove(i).frame().0;
+                self.drops.scatter(ItemStack { id: decor::PAINTING, count: 1, damage: 0 }, (c.x.floor() as i32, c.y.floor() as i32, c.z.floor() as i32));
+                return;
+            }
+        }
+        let Some(hit) = self.target else {
+            if place {
+                self.use_held();
+            }
+            return;
+        };
+        if place {
+            // Using a workbench or a furnace opens its screen instead of placing a block against it.
+            match self.chunks.block_loaded(hit.pos.0, hit.pos.1, hit.pos.2) {
+                Some(58) => {
+                    self.open_screen(Screen::new(3));
+                    return;
+                }
+                Some(61 | 62) => {
+                    self.furnaces.entry(hit.pos).or_default();
+                    self.open_screen(Screen::at_furnace(hit.pos));
+                    return;
+                }
+                // BlockDoor.blockActivated: a wooden door swings, an iron one ignores the hand.
+                Some(64) => {
+                    self.toggle_door(hit.pos);
+                    return;
+                }
+                Some(71) => return,
+                // BlockCake.blockActivated: a slice heals 3 while below full health; the sixth slice removes the cake.
+                // ponytail: a punch (`onBlockClicked`) does not eat; holding it digs the cake away like any block.
+                Some(92) => {
+                    let (x, y, z) = hit.pos;
+                    if self.vitals.health < crate::world::vitals::MAX_HEALTH {
+                        self.vitals.heal(3);
+                        let m = self.chunks.meta(x, y, z) + 1;
+                        if m >= 6 {
+                            self.chunks.set_block(x, y, z, 0);
+                        } else {
+                            self.chunks.set_block_meta(x, y, z, 92, m);
+                        }
+                    }
+                    return;
+                }
+                // BlockTrapDoor.blockActivated: the open bit flips.
+                Some(96) => {
+                    let (x, y, z) = hit.pos;
+                    self.chunks.set_block_meta(x, y, z, 96, self.chunks.meta(x, y, z) ^ 4);
+                    return;
+                }
+                // BlockLever.blockActivated: the on bit flips. ponytail: a punch (`onBlockClicked`) does not flip it.
+                Some(69) => {
+                    let (x, y, z) = hit.pos;
+                    self.chunks.set_block_meta(x, y, z, 69, self.chunks.meta(x, y, z) ^ 8);
+                    return;
+                }
+                // BlockButton.blockActivated: pressed for 20 ticks.
+                Some(77) => {
+                    let (x, y, z) = hit.pos;
+                    let m = self.chunks.meta(x, y, z);
+                    if m & 8 == 0 && self.chunks.set_block_meta(x, y, z, 77, m | 8) {
+                        self.ticks.schedule(x, y, z, 77, 20);
+                    }
+                    return;
+                }
+                // BlockNote.blockActivated.
+                Some(25) => {
+                    let (x, y, z) = hit.pos;
+                    self.ticks.note_use(&self.chunks, x, y, z);
+                    return;
+                }
+                // BlockJukeBox.blockActivated + ItemRecord.onItemUse: a record goes in (the metadata says which: 1 = 13, 2 = cat;
+                // ponytail: the Java keeps it in a tile entity), clicking again takes it out.
+                Some(84) => {
+                    let (x, y, z) = hit.pos;
+                    let m = self.chunks.meta(x, y, z);
+                    if m != 0 {
+                        self.chunks.set_block_meta(x, y, z, 84, 0);
+                        self.drops.spawn_stack(ItemStack { id: 2255 + m as u16, count: 1, damage: 0 }, (x, y + 1, z));
+                        return;
+                    } else if let Some(s) = self.inv.slots[self.touch.hotbar_slot].filter(|s| matches!(s.id, 2256 | 2257)) {
+                        self.chunks.set_block_meta(x, y, z, 84, (s.id - 2255) as u8);
+                        self.inv.consume(self.touch.hotbar_slot);
+                        return;
+                    }
+                }
+                // BlockRedstoneRepeater.blockActivated: the delay goes 1 -> 2 -> 3 -> 4 -> 1.
+                Some(93 | 94) => {
+                    let (x, y, z) = hit.pos;
+                    let (m, id) = (self.chunks.meta(x, y, z), self.chunks.block_loaded(x, y, z).unwrap_or(93));
+                    self.chunks.set_block_meta(x, y, z, id, ((m & 12) + 4 & 12) | m & 3);
+                    return;
+                }
+                // BlockRedstoneOre.blockActivated: it lights up, then the block in hand is still placed against it.
+                Some(73) => {
+                    self.chunks.set_block(hit.pos.0, hit.pos.1, hit.pos.2, 74);
+                }
+                Some(26) => {
+                    self.use_bed(hit.pos);
+                    return;
+                }
+                // BlockDispenser.blockActivated: its 9 slots open as a screen.
+                Some(chest::DISPENSER) => {
+                    self.chests.entry(hit.pos).or_default();
+                    self.open_screen(Screen::at_dispenser(hit.pos));
+                    return;
+                }
+                Some(chest::ID) => {
+                    // `BlockChest.blockActivated`: a large chest opens as one; under a normal cube nothing opens. Never places.
+                    if let Some(group) = chest::open(&|x, y, z| self.chunks.block(x, y, z).unwrap_or(0), hit.pos) {
+                        for p in &group {
+                            self.chests.entry(*p).or_default();
+                        }
+                        self.open_screen(Screen::at_chest(group));
+                    }
+                    return;
+                }
+                _ => {}
+            }
+            // ItemHoe.onItemUse: till dirt (or grass with air above) into farmland, one use of wear. A hoe never
+            // places anything. ponytail: farmland stays farmland (no `BlockFarmland.updateTick` reverting it to dirt),
+            // it is drawn as a full cube (the original is 15/16 high) and nothing grows on it yet.
+            let slot = self.touch.hotbar_slot;
+            // ItemPainting.onItemUse: a side face; the motive is drawn among those that fit (`decor::hang`). Never places a block.
+            if self.inv.slots[slot].is_some_and(|s| s.id == decor::PAINTING) {
+                if let (Some(dir), true) = (decor::dir_of_face(hit.face), self.paintings.len() < decor::MAX_PAINTINGS) {
+                    let chunks = &self.chunks;
+                    let cell = |x: i32, y: i32, z: i32| chunks.block_loaded(x, y, z).map(|b| (b, chunks.meta(x, y, z)));
+                    if let Some(p) = decor::hang(hit.pos, dir, &self.paintings, &cell, &mut self.mobs.rng) {
+                        self.paintings.push(p);
+                        self.inv.consume(slot);
+                    }
+                }
+                return;
+            }
+            // ItemSign.onItemUse: a post on a top face, a wall sign on a side face; the editor opens on the new sign.
+            if self.inv.slots[slot].is_some_and(|s| s.id == decor::SIGN) {
+                let yaw = self.camera.yaw.to_degrees() + 180.0;
+                let placed = decor::sign_place(&|a, b, c| self.chunks.block_loaded(a, b, c).unwrap_or(0), hit.pos, hit.face, yaw);
+                if let Some(((x, y, z), id, meta)) = placed {
+                    if self.chunks.set_block_meta(x, y, z, id, meta) {
+                        self.inv.consume(slot);
+                        self.signs.insert((x, y, z), Default::default());
+                        self.sign_edit = Some(Edit::new((x, y, z)));
+                        self.touch.set_screen(true);
+                    }
+                }
+                return;
+            }
+            // ItemBed.onItemUse: only against a top face, both halves on air over solid cubes.
+            if self.inv.slots[slot].is_some_and(|s| s.id == 355) {
+                let (x, y, z) = pick::place_pos(&hit);
+                let yaw = self.camera.yaw.to_degrees() + 180.0;
+                let n = pick::bed_meta(&|a, b, c| self.chunks.block_loaded(a, b, c).unwrap_or(0), (x, y, z), yaw);
+                if let Some(n) = n.filter(|_| hit.face == 1) {
+                    let (dx, dz) = pick::BED_DIR[n as usize];
+                    self.chunks.set_block_meta(x, y, z, 26, n);
+                    self.chunks.set_block_meta(x + dx, y, z + dz, 26, n + 8);
+                    self.inv.consume(slot);
+                }
+                return;
+            }
+            // ItemDoor.onItemUse: only against a top face; both halves are written before the neighbours are told.
+            if let Some(s) = self.inv.slots[slot].filter(|s| matches!(s.id, 324 | 330)) {
+                let (x, y, z) = pick::place_pos(&hit);
+                let bid = if s.id == 324 { 64 } else { 71 };
+                let yaw = self.camera.yaw.to_degrees() + 180.0;
+                let meta = pick::door_meta(&|a, b, c| self.chunks.block_loaded(a, b, c).unwrap_or(0), (x, y, z), yaw, bid);
+                if let Some(m) = meta.filter(|_| hit.face == 1) {
+                    self.chunks.set_block_meta(x, y, z, bid, m);
+                    self.chunks.set_block_meta(x, y + 1, z, bid, m + 8);
+                    self.inv.consume(slot);
+                }
+                return;
+            }
+            // ItemFlintAndSteel.onItemUse: fire in the empty cell next to the face aimed at; one use of wear either way.
+            if self.inv.slots[slot].is_some_and(|s| s.id == craft::FLINT_AND_STEEL) {
+                let (x, y, z) = pick::place_pos(&hit);
+                if self.chunks.block_loaded(x, y, z) == Some(0) {
+                    self.chunks.set_block(x, y, z, 51);
+                }
+                self.inv.damage(slot, 1);
+                return;
+            }
+            if self.inv.slots[slot].is_some_and(|s| craft::is_hoe(s.id)) {
+                let (x, y, z) = hit.pos;
+                let (b, above) = (self.chunks.block_loaded(x, y, z), self.chunks.block_loaded(x, y + 1, z));
+                if let (Some(b), Some(above)) = (b, above) {
+                    if craft::can_till(b, above, hit.face) {
+                        self.chunks.set_block(x, y, z, 60);
+                        self.inv.damage(slot, 1);
+                    }
+                }
+                return;
+            }
+            // ItemMinecart.onItemUse: aimed at a rail, the cart is set in the rail's cell (its centre, 0.5 up).
+            if let Some(kind) = self.inv.slots[slot].and_then(|s| match s.id {
+                minecart::EMPTY => Some(0),
+                minecart::WITH_FURNACE => Some(2),
+                _ => None,
+            }) {
+                let (x, y, z) = hit.pos;
+                if matches!(self.chunks.block_loaded(x, y, z), Some(27 | 28 | 66)) {
+                    self.carts.list.push(minecart::Cart::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5, kind));
+                    self.inv.consume(slot);
+                }
+                return;
+            }
+            // ItemSeeds.onItemUse: only the top face of farmland with air above; one seed becomes a crops block (meta 0).
+            if self.inv.slots[slot].is_some_and(|s| s.id == 295) {
+                let (x, y, z) = hit.pos;
+                if hit.face == 1 && self.chunks.block_loaded(x, y, z) == Some(60) && self.chunks.block_loaded(x, y + 1, z) == Some(0) {
+                    self.chunks.set_block(x, y + 1, z, 59);
+                    self.inv.consume(slot);
+                }
+                return;
+            }
+            // ItemReed.onItemUse (sugar cane, cake): the cell beside the face aimed at, or the snow layer itself; the block's
+            // `canPlaceBlockAt` decides (reeds: `reed_ok`; cake: solid ground, and the player's box must not be in the way).
+            if self.inv.slots[slot].is_some_and(|s| matches!(s.id, 338 | 354)) {
+                let cake = self.inv.slots[slot].is_some_and(|s| s.id == 354);
+                let at = if self.chunks.block_loaded(hit.pos.0, hit.pos.1, hit.pos.2) == Some(78) { hit.pos } else { pick::place_pos(&hit) };
+                let get = |a, b, c| self.chunks.block_loaded(a, b, c).unwrap_or(0);
+                let ok = at.1 < 127 && self.chunks.block_loaded(at.0, at.1, at.2).is_some_and(pick::replaceable)
+                    && if cake { !crate::world::ticks::non_solid(get(at.0, at.1 - 1, at.2)) && !pick::overlaps_player(at, physics_id(92, 0), self.player.pos) } else { pick::reed_ok(&get, at) };
+                if ok && self.chunks.set_block_meta(at.0, at.1, at.2, if cake { 92 } else { 83 }, 0) {
+                    self.inv.consume(slot);
+                }
+                return;
+            }
+            // ItemRedstone.onItemUse: dust on the cell beside the face aimed at (`BlockRedstoneWire.canPlaceBlockAt`: solid below).
+            // ItemReed for the repeater (356 -> block 93, facing from the yaw, `onBlockPlacedBy`: scheduled at once when powered).
+            if let Some(b) = self.inv.slots[slot].and_then(|s| match s.id { 331 => Some(55u8), 356 => Some(93), _ => None }) {
+                let at = pick::place_pos(&hit);
+                let meta = pick::facing_meta(b as u16, self.camera.yaw.to_degrees() + 180.0).unwrap_or(0);
+                if at.1 < 127 && self.chunks.block_loaded(at.0, at.1, at.2).is_some_and(pick::replaceable) && ticks::can_place(&self.chunks, at.0, at.1, at.2, b) && self.chunks.set_block_meta(at.0, at.1, at.2, b, meta) {
+                    self.inv.consume(slot);
+                    if b == 93 && redstone::repeater_input(&self.chunks, at.0, at.1, at.2) {
+                        self.ticks.schedule(at.0, at.1, at.2, 93, 1);
+                    }
+                }
+                return;
+            }
+            let (x, y, z) = pick::place_pos(&hit);
+            // Items below 256 are blocks; anything else cannot be placed. ItemBlock refuses a solid block at y = 127
+            // (ponytail: plants are refused there too).
+            if let Some(s) = self.inv.slots[slot].filter(|s| s.id < 256) {
+                // A torch's facing comes from the face aimed at and what can hold it (None = nothing to hang on: no placement).
+                let floor = 5 + self.mobs.rng.next_int_bound(2) as u8; // a lever on the floor: 5 or 6
+                let meta = if matches!(s.id, 50 | 75 | 76) { pick::torch_meta(&|a, b, c| self.chunks.block_loaded(a, b, c).unwrap_or(0), (x, y, z), hit.face) } else if matches!(s.id, 33 | 29) { Some(pick::piston_facing(self.player.pos, (x, y, z), self.camera.yaw.to_degrees() + 180.0)) } else if matches!(s.id, 69 | 77) { pick::switch_meta(&|a, b, c| self.chunks.block_loaded(a, b, c).unwrap_or(0), (x, y, z), hit.face, s.id == 69, floor) } else if s.id == 96 { pick::trap_meta(hit.face, self.chunks.block_loaded(hit.pos.0, hit.pos.1, hit.pos.2).is_some_and(normal_cube)) } else { pick::facing_meta(s.id, self.camera.yaw.to_degrees() + 180.0).or(Some(items::placed_meta(s))) };
+                if let Some(meta) = meta.filter(|_| y < 127 && self.chunks.block_loaded(x, y, z).is_some_and(pick::replaceable) && !pick::overlaps_player((x, y, z), s.id as u8, self.player.pos) && ticks::can_place(&self.chunks, x, y, z, s.id as u8) && (s.id != chest::ID as u16 || chest::can_place(&|a, b, c| self.chunks.block(a, b, c).unwrap_or(0), (x, y, z)))) {
+                    if self.chunks.set_block_meta(x, y, z, s.id as u8, meta) {
+                        self.inv.consume(slot);
+                    }
+                }
+            } else {
+                self.use_held();
+            }
+        }
+    }
+
+    /// `Minecraft.clickMouse` -> `sendUseItem`: a tap that neither placed a block nor opened a screen uses the held item;
+    /// food is eaten, aimed at a block or not.
+    /// `Explosion` at `at`: the rays pick the cells (`Mobs::explode`), a broken block drops with chance 0.3 (vanilla: per item),
+    /// the player takes `(impact^2 + impact) / 2 x 8 x power + 1` (no exposure test, no knockback).
+    /// One 20 Hz tick of `world::effects`: thunderstorm rolls and what a bolt hits, particles, spawners.
+    fn tick_effects(&mut self, centre: (i32, i32)) {
+        // `World.tick`: in a thunderstorm (`func_27161_C` rain > 0.2 and `func_27160_B` thunder > 0.9) each chunk near the player
+        // rolls 1 in 100000 for a bolt on a column that is rained on (`canBlockBeRainedOn`: open to the sky, in a biome with rain).
+        if self.weather.rain(1.0) > 0.2 && self.weather.thunder(1.0) > 0.9 {
+            for (x, z) in self.fx.storm(centre) {
+                let y = self.chunks.top_solid(x, z);
+                if y >= 0 && self.chunks.biomes(x, z, 1, 1)[0].rains() {
+                    self.fx.strike(glam::Vec3::new(x as f32, y as f32, z as f32));
+                }
+            }
+        }
+        let get = |x: i32, y: i32, z: i32| self.chunks.block(x, y, z);
+        self.fx.river_life(self.player.pos, &get);
+        for b in self.fx.tick(&get) {
+            // `Entity.onStruckByLightning` for everything in the bolt's box.
+            if effects::struck(b, self.player.pos, glam::Vec3::new(0.3, 0.9, 0.3)) {
+                self.vitals.lightning();
+            }
+            for m in self.mobs.list.iter_mut().filter(|m| effects::struck(b, m.body.pos, m.half)) {
+                m.damage(5, b, &mut self.mobs.rng); // ponytail: through `damage`, so it also knocks back; no burning
+            }
+        }
+        // Spawners see the same world as the mobs do (plants read as air).
+        let get = |x: i32, y: i32, z: i32| self.chunks.block(x, y, z).map(|b| if is_plant(b) { 0 } else { self.chunks.physics_at(x, y, z, b) });
+        let light = |x: i32, y: i32, z: i32| self.chunks.light(x, y, z);
+        let ctx = Ctx { get: &get, light: &light, day: false, player: self.player.pos, eye: self.camera.pos };
+        let chunks = &self.chunks;
+        self.fx.tick_spawners(&mut self.mobs, &ctx, &|(x, _, z)| chunks.block_loaded(x, 0, z).is_some());
+    }
+
+    fn explode(&mut self, at: glam::Vec3, power: f32) {
+        let cells = self.mobs.explode(&|x: i32, y: i32, z: i32| self.chunks.block(x, y, z), at, power);
+        for (x, y, z) in cells {
+            let Some(id) = self.chunks.block_loaded(x, y, z).filter(|&b| b > 0) else { continue };
+            let meta = self.chunks.meta(x, y, z);
+            if id == 46 {
+                self.ticks.prime((x, y, z), true); // `BlockTNT.onBlockDestroyedByExplosion`: a chain, no drop
+            } else if self.mobs.rng.next_float() < 0.3 {
+                self.drops.spawn_block(id, meta, (x, y, z));
+            }
+            self.chunks.set_block(x, y, z, 0);
+        }
+        let impact = 1.0 - (self.player.pos - at).length() / (power * 2.0);
+        if impact > 0.0 {
+            self.vitals.hurt(((impact * impact + impact) / 2.0 * 8.0 * power + 1.0) as i32);
+        }
+    }
+
+    /// `World.isDaytime`: the sky-light subtraction is under 4.
+    fn daytime(&self) -> bool {
+        let angle = sky::celestial_angle(self.world_ticks as u64, 1.0);
+        sky::skylight_subtracted(angle, self.weather.rain(1.0), self.weather.thunder(1.0)) < 4
+    }
+
+    /// `EntityPlayer.func_25060_a`: the bed's free cell, else the world spawn (feet 0.1 above the cell; `pos` is the box centre).
+    fn respawn_pos(&self) -> glam::Vec3 {
+        let get = |a, b, c| self.chunks.block_loaded(a, b, c).unwrap_or(0);
+        let cell = self.bed_spawn.filter(|&(x, y, z)| get(x, y, z) == 26).and_then(|b| pick::wake_cell(&get, b, self.chunks.meta(b.0, b.1, b.2)));
+        cell.map_or(self.spawn, |(x, y, z)| glam::Vec3::new(x as f32 + 0.5, y as f32 + 1.0, z as f32 + 0.5))
+    }
+
+    /// `BlockBed.blockActivated` + `EntityPlayer.sleepInBedAt` (only the OK status: at night, within 3 / 2 / 3 blocks).
+    /// ponytail: no "you can only sleep at night" message (the HUD has no text); the hostile spawn on waking is not ported.
+    fn use_bed(&mut self, (mut x, y, mut z): (i32, i32, i32)) {
+        let mut m = self.chunks.meta(x, y, z);
+        if m & 8 == 0 {
+            let (dx, dz) = pick::BED_DIR[(m & 3) as usize];
+            (x, z) = (x + dx, z + dz);
+            if self.chunks.block_loaded(x, y, z) != Some(26) {
+                return;
+            }
+            m = self.chunks.meta(x, y, z);
+        }
+        let eye = self.player.pos + glam::Vec3::new(0.0, EYE_HEIGHT, 0.0);
+        let near = (eye.x - x as f32).abs() <= 3.0 && (eye.y - y as f32).abs() <= 2.0 && (eye.z - z as f32).abs() <= 3.0;
+        if self.sleep.is_some() || self.vitals.dead() || self.daytime() || !near {
+            return;
+        }
+        let d = m & 3;
+        let (px, pz) = (if d == 1 { 0.1 } else if d == 3 { 0.9 } else { 0.5 }, if d == 0 { 0.9 } else if d == 2 { 0.1 } else { 0.5 });
+        self.player.pos = glam::Vec3::new(x as f32 + px, y as f32 + 15.0 / 16.0 - EYE_HEIGHT, z as f32 + pz);
+        self.player.vel = glam::Vec3::ZERO;
+        // getBedOrientationInDegrees, as `rotationYaw`; our yaw is that minus 180 degrees. UNVERIFIED on a device.
+        self.camera.yaw = ([90.0f32, 0.0, 270.0, 180.0][d as usize] - 180.0).to_radians();
+        self.camera.pitch = 0.0;
+        self.chunks.set_block_meta(x, y, z, 26, m | 4);
+        self.sleep = Some((x, y, z, 0));
+    }
+
+    /// `EntityPlayer.wakeUpPlayer`: the bed is free again and the player stands beside it (`set_spawn` = the bed becomes the
+    /// respawn point).
+    fn wake(&mut self, set_spawn: bool) {
+        let Some((x, y, z, _)) = self.sleep.take() else { return };
+        let get = |a, b, c| self.chunks.block_loaded(a, b, c).unwrap_or(0);
+        let m = self.chunks.meta(x, y, z);
+        let cell = pick::wake_cell(&get, (x, y, z), m).unwrap_or((x, y + 1, z));
+        if get(x, y, z) == 26 {
+            self.chunks.set_block_meta(x, y, z, 26, m & !4);
+        }
+        self.player.pos = glam::Vec3::new(cell.0 as f32 + 0.5, cell.1 as f32 + 1.0, cell.2 as f32 + 0.5);
+        if set_spawn {
+            self.bed_spawn = Some((x, y, z));
+        }
+    }
+
+    /// One 20 Hz tick of sleeping: fully asleep (100 ticks) everyone wakes at the next morning (`World.tick`, no weather runs
+    /// during the skip); a bed that is gone or day wakes the player earlier (`EntityPlayer.onUpdate`).
+    fn sleep_tick(&mut self, sky_sub: u8) {
+        let Some((x, y, z, t)) = self.sleep else { return };
+        if t >= 100 {
+            let next = self.world_ticks as u64 + 24000;
+            self.world_ticks = (next - next % 24000) as f64;
+            self.weather_ticks = self.world_ticks as u64;
+            self.wake(true);
+        } else if self.chunks.block_loaded(x, y, z) != Some(26) {
+            self.wake(false);
+        } else if sky_sub < 4 {
+            self.wake(true);
+        } else {
+            self.sleep = Some((x, y, z, t + 1));
+        }
+    }
+
+    /// `BlockDoor.blockActivated` for a wooden door: the lower half's open bit flips, and the upper half follows.
+    fn toggle_door(&mut self, (x, y, z): (i32, i32, i32)) {
+        let y = if self.chunks.meta(x, y, z) & 8 != 0 { y - 1 } else { y };
+        if self.chunks.block_loaded(x, y, z) == Some(64) {
+            let m = self.chunks.meta(x, y, z);
+            if self.chunks.block_loaded(x, y + 1, z) == Some(64) {
+                self.chunks.set_block_meta(x, y + 1, z, 64, (m ^ 4) + 8);
+            }
+            self.chunks.set_block_meta(x, y, z, 64, m ^ 4);
+        }
+    }
+
+    /// `ItemStack.useItemRightClick` for what is held and not placed: bow, rod, bucket, else food.
+    fn use_held(&mut self) {
+        let slot = self.touch.hotbar_slot;
+        let Some(held) = self.inv.slots[slot] else { return };
+        let (eye, fwd) = (self.camera.pos, self.camera.forward());
+        match held.id {
+            // `ItemBow`: uses one arrow from the inventory and shoots it at once (no draw time in b1.7.3).
+            gear::BOW => {
+                if self.inv.take_one(gear::ARROW) {
+                    let v = gear::arrow_velocity(fwd, &mut self.mobs.rng);
+                    self.mobs.shoot(eye + fwd * 0.5, v, 0);
+                }
+            }
+            // `ItemSnowball` / `ItemEgg`: one is used up and thrown along the look direction (same heading as an arrow).
+            gear::SNOWBALL | gear::EGG => {
+                self.inv.consume(slot);
+                let v = gear::arrow_velocity(fwd, &mut self.mobs.rng);
+                self.mobs.shoot(eye - glam::Vec3::Y * 0.1, v, held.id);
+            }
+            // `ItemFishingRod`: reel in what is out (a bite gives a raw fish), else cast.
+            gear::ROD => match self.hook.take() {
+                Some(h) => {
+                    let (fish, wear) = h.catch(self.player.pos);
+                    if let Some((s, v)) = fish {
+                        self.drops.throw_from(s, h.pos, v);
+                    }
+                    self.inv.damage(slot, wear);
+                }
+                None => self.hook = Some(Hook::cast(eye, fwd, &mut self.mobs.rng)),
+            },
+            gear::BUCKET | gear::WATER_BUCKET | gear::LAVA_BUCKET => self.use_bucket(slot, held.id),
+            gear::BOAT => self.use_boat(slot),
+            _ => self.eat(),
+        }
+    }
+
+    /// `ItemBucket.onItemRightClick`: a 5 block ray; an empty bucket also hits liquids and takes a source, a full one
+    /// pours into the cell beside the face it hit (air or a non-solid block).
+    /// `ItemBoat.onItemUse`: the ray reaches 5 blocks and stops at water; the boat is set on top of the cell it hit.
+    fn use_boat(&mut self, slot: usize) {
+        let eye = self.camera.pos.as_dvec3();
+        let end = eye + self.camera.forward().as_dvec3() * 5.0;
+        let bounds = |x: i32, y: i32, z: i32| {
+            let b = self.chunks.block_loaded(x, y, z)?;
+            if (8..=11).contains(&b) { Some([0.0, 0.0, 0.0, 1.0, 1.0, 1.0]) } else { pick_bounds(b, self.chunks.meta(x, y, z)) }
+        };
+        let Some(hit) = pick::ray_trace(&bounds, eye, end) else { return };
+        let (x, y, z) = hit.pos;
+        self.boats.list.push(boat::Boat::new(x as f32 + 0.5, y as f32 + 1.0, z as f32 + 0.5));
+        self.inv.consume(slot);
+    }
+
+    fn use_bucket(&mut self, slot: usize, held: u16) {
+        let eye = self.camera.pos.as_dvec3();
+        let end = eye + self.camera.forward().as_dvec3() * 5.0;
+        let empty = held == gear::BUCKET;
+        let bounds = |x: i32, y: i32, z: i32| {
+            let b = self.chunks.block_loaded(x, y, z)?;
+            if empty && (8..=11).contains(&b) { Some([0.0, 0.0, 0.0, 1.0, 1.0, 1.0]) } else { pick_bounds(b, self.chunks.meta(x, y, z)) }
+        };
+        let Some(hit) = pick::ray_trace(&bounds, eye, end) else { return };
+        let (x, y, z) = hit.pos;
+        let filled = self.chunks.block_loaded(x, y, z).and_then(|b| gear::bucket_fill(b, self.chunks.meta(x, y, z)));
+        if let (true, Some(full)) = (empty, filled) {
+            self.chunks.set_block(x, y, z, 0);
+            self.inv.slots[slot] = Some(ItemStack { id: full, count: 1, damage: 0 });
+        } else if let Some(fluid) = gear::bucket_pour(held) {
+            let (x, y, z) = pick::place_pos(&hit);
+            if self.chunks.block_loaded(x, y, z).is_some_and(pick::replaceable) && y < 128 {
+                self.chunks.set_block_meta(x, y, z, fluid, 0);
+                self.inv.slots[slot] = Some(ItemStack { id: gear::BUCKET, count: 1, damage: 0 });
+            }
+        }
+    }
+
+    fn eat(&mut self) {
+        if let Some(n) = self.inv.eat(self.touch.hotbar_slot) {
+            self.vitals.heal(n);
+        }
+    }
+
+    /// `EntityPlayer.onDeath`: the open screen's cursor and grid, then the whole inventory, fall to the ground where he
+    /// died (ponytail: `scatter` drops one entity per stack, vanilla throws each with a random spread). The pause
+    /// menu is the death screen: its resume button respawns (top of `step_frame`).
+    fn die(&mut self) {
+        self.close_screen();
+        self.close_sign();
+        let at = (self.player.pos.x.floor() as i32, self.player.pos.y.floor() as i32, self.player.pos.z.floor() as i32);
+        for slot in self.inv.slots.iter_mut() {
+            if let Some(st) = slot.take() {
+                self.drops.scatter(st, at);
+            }
+        }
+        self.touch.pause();
+    }
+
+    /// The sign editor is done: the text stays on the sign (it is edited in place).
+    fn close_sign(&mut self) {
+        if self.sign_edit.take().is_some() {
+            self.touch.set_screen(false);
+        }
+    }
+
+    /// A tap on the sign editor: a key of the on-screen keyboard or a line of the board (`GuiEditSign.keyTyped`).
+    fn on_sign_tap(&mut self, x: f32, y: f32) {
+        let (w, h) = (self.gpu.config.width as f32, self.gpu.config.height as f32);
+        let Some(mut e) = self.sign_edit else { return };
+        let Some(k) = decor::key_at(w, h, e.shift, x, y) else { return };
+        let done = self.signs.get_mut(&e.pos).map_or(k == Key::Done, |t| e.press(k, t));
+        self.sign_edit = Some(e);
+        if done {
+            self.close_sign();
+        }
+    }
+
+    /// Open a container screen: the 2x2 inventory, a workbench's 3x3, a furnace or chests.
+    fn open_screen(&mut self, screen: Screen) {
+        self.screen = Some(screen);
+        (self.one_mode, self.shift_mode) = (false, false);
+        self.touch.set_screen(true);
+    }
+
+    /// `onCraftGuiClosed`: the cursor stack and whatever is left in the grid are thrown out in front of the player.
+    fn close_screen(&mut self) {
+        if let Some(mut s) = self.screen.take() {
+            for st in s.close() {
+                self.drops.throw(st, self.camera.pos, self.camera.forward());
+            }
+        }
+        self.touch.set_screen(false);
+    }
+
+    /// `BlockDispenser.dispenseItem`: one item of a random filled slot (`getRandomStackFromInventory`: each filled slot replaces the
+    /// pick with chance 1 / n) leaves through the front: an arrow, egg or snowball flies (speed 1.1, spread 6), anything else drops.
+    fn dispense(&mut self, (x, y, z): (i32, i32, i32)) {
+        let (dx, dz) = match self.chunks.meta(x, y, z) { 3 => (0.0, 1.0), 2 => (0.0, -1.0), 5 => (1.0, 0.0), _ => (-1.0, 0.0) };
+        let Some(c) = self.chests.get_mut(&(x, y, z)) else { return };
+        let (mut pick, mut n) = (None, 1);
+        for (i, s) in c[..9].iter().enumerate() {
+            if s.is_some() {
+                if self.mobs.rng.next_int_bound(n) == 0 {
+                    pick = Some(i);
+                }
+                n += 1;
+            }
+        }
+        let Some(i) = pick else { return }; // an empty dispenser only clicks
+        let Some(s) = c[i].as_mut() else { return };
+        let (id, damage) = (s.id, s.damage);
+        s.count -= 1;
+        if s.count == 0 {
+            c[i] = None;
+        }
+        let pos = glam::Vec3::new(x as f32 + dx * 0.6 + 0.5, y as f32 + 0.5, z as f32 + dz * 0.6 + 0.5);
+        let mut g = |sd: f32| self.mobs.rng.next_gaussian() as f32 * 0.0075 * sd;
+        if matches!(id, gear::ARROW | gear::SNOWBALL | gear::EGG) {
+            let v = glam::Vec3::new(dx, 0.1, dz).normalize() * 1.1 + glam::Vec3::new(g(6.0), g(6.0), g(6.0));
+            self.mobs.shoot(pos, v, if id == gear::ARROW { 0 } else { id });
+        } else {
+            let s = self.mobs.rng.next_double() as f32 * 0.1 + 0.2;
+            let mut g = |sd: f32| self.mobs.rng.next_gaussian() as f32 * 0.0075 * sd;
+            let v = glam::Vec3::new(dx * s + g(6.0), 0.2 + g(6.0), dz * s + g(6.0));
+            self.drops.throw_from(ItemStack { id, count: 1, damage }, pos - glam::Vec3::Y * 0.3, v);
+        }
+    }
+
+    /// The slots behind the open screen: a furnace's 3, or the chests' 27 each (upper half first); `None` for the 2x2 and the workbench.
+    fn ext(&self, s: &Screen) -> Option<Vec<Option<ItemStack>>> {
+        if let Some(f) = s.furnace.and_then(|p| self.furnaces.get(&p)) {
+            return Some(f.slots.to_vec());
+        }
+        (!s.chests.is_empty()).then(|| s.chests.iter().flat_map(|p| self.chests.get(p).copied().unwrap_or_default().into_iter().take(if s.gw == 9 { 9 } else { chest::SIZE })).collect())
+    }
+
+    /// Run `f` on the open screen with the slots behind it (`ext`): they are copied out and written back, so a large chest's
+    /// two halves are one slice, as `InventoryLargeChest` makes them. `None` when no screen is open.
+    fn with_ext<R>(&mut self, f: impl FnOnce(&mut Screen, &mut Inventory, Option<&mut [Option<ItemStack>]>) -> R) -> Option<R> {
+        let mut s = self.screen.take()?;
+        let mut ext = self.ext(&s);
+        let r = f(&mut s, &mut self.inv, ext.as_deref_mut());
+        if let Some(e) = ext {
+            if let Some(furn) = s.furnace.and_then(|p| self.furnaces.get_mut(&p)) {
+                furn.slots.copy_from_slice(&e);
+            }
+            for (p, part) in s.chests.iter().zip(e.chunks(if s.gw == 9 { 9 } else { chest::SIZE })) {
+                if let Some(c) = self.chests.get_mut(p) {
+                    c[..part.len()].copy_from_slice(part);
+                }
+            }
+        }
+        self.screen = Some(s);
+        Some(r)
+    }
+
+    /// A finger event on the open screen: a press that lifts where it began is a tap; one that drags over other
+    /// slots with a stack on the cursor spreads it, one item per slot (the start slot included).
+    fn on_screen_event(&mut self, ev: ScreenEv) {
+        if self.sign_edit.is_some() {
+            if let ScreenEv::Up(x, y) = ev {
+                self.on_sign_tap(x, y);
+            }
+            return;
+        }
+        let (w, h) = (self.gpu.config.width as f32, self.gpu.config.height as f32);
+        let Some(gw) = self.screen.as_ref().map(|s| s.gw) else { return };
+        let mut fill = Vec::new();
+        match ev {
+            ScreenEv::Down(x, y) => {
+                self.gesture = Some(Gesture { start: craft::slot_at(gw, w, h, x, y), spread: false, visited: Vec::new() });
+            }
+            ScreenEv::Move(x, y) => {
+                let (Some(g), Some(cur)) = (self.gesture.as_mut(), craft::slot_at(gw, w, h, x, y)) else { return };
+                if self.screen.as_ref().map_or(true, |s| s.cursor.is_none()) || (!g.spread && g.start == Some(cur)) {
+                    return;
+                }
+                if !g.spread {
+                    g.spread = true;
+                    fill.extend(g.start);
+                }
+                fill.push(cur);
+                fill.retain(|id| !g.visited.contains(id));
+                fill.dedup();
+                g.visited.extend(fill.iter().copied());
+            }
+            ScreenEv::Up(x, y) => {
+                if !self.gesture.take().is_some_and(|g| g.spread) {
+                    self.on_screen_tap(x, y);
+                }
+            }
+        }
+        for id in fill {
+            self.with_ext(|s, inv, ext| s.drop_one(id, inv, ext));
+        }
+    }
+
+    /// A tap on the open screen: the "place one" toggle, a slot, or outside the panel (throws the cursor stack).
+    fn on_screen_tap(&mut self, x: f32, y: f32) {
+        let (w, h) = (self.gpu.config.width as f32, self.gpu.config.height as f32);
+        let Some(gw) = self.screen.as_ref().map(|s| s.gw) else { return };
+        let one = self.one_mode;
+        if craft::on_mode_button(gw, w, h, x, y) {
+            self.one_mode = !one;
+        } else if craft::on_shift_button(gw, w, h, x, y) {
+            self.shift_mode = !self.shift_mode;
+        } else if let Some(id) = craft::slot_at(gw, w, h, x, y) {
+            let shift = self.shift_mode;
+            self.with_ext(|s, inv, ext| if shift { s.shift_click(id, inv, ext) } else { s.click(id, one, inv, ext) });
+        } else if !craft::in_panel(gw, w, h, x, y) {
+            let Some(s) = self.screen.as_mut() else { return };
+            // Click outside the window (slot -999): throw the cursor stack, or one item of it.
+            if let Some(c) = s.cursor {
+                let n = if self.one_mode { 1 } else { c.count };
+                s.cursor = (c.count > n).then(|| ItemStack { count: c.count - n, ..c });
+                self.drops.throw(ItemStack { count: n, ..c }, self.camera.pos, self.camera.forward());
+            }
+        }
+    }
+
+    /// The opaque layers of the scene pass (Sodium's order): solid terrain near to far, the far terrain, the alpha-tested terrain, then the
+    /// entities and the outline (alpha-tested too: item sprites, signs). Each layer is one pipeline switch, not one per chunk.
+    fn draw_opaque(&self, rp: &mut wgpu::RenderPass<'_>, item_indices: u32, outline_indices: u32) {
+        rp.set_bind_group(0, &self.pipe.bind_group, &[]);
+        rp.set_pipeline(&self.pipe.solid);
+        self.chunks.draw_ranges(Layer::Solid, rp, &self.pipe.origins);
+        if let Some(l) = &self.lod {
+            rp.set_pipeline(&self.pipe.lod);
+            l.draw(rp);
+        }
+        rp.set_pipeline(&self.pipe.cutout);
+        self.chunks.draw_ranges(Layer::Cutout, rp, &self.pipe.origins);
+        if item_indices > 0 || outline_indices > 0 {
+            rp.set_pipeline(&self.pipe.entity); // the float vertex, no chunk origin
+        }
+        if item_indices > 0 {
+            rp.set_vertex_buffer(0, self.item_mesh.vbuf.slice(..));
+            rp.set_index_buffer(self.item_mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
+            rp.draw_indexed(0..item_indices, 0, 0..1);
+        }
+        if outline_indices > 0 {
+            rp.set_vertex_buffer(0, self.outline.vbuf.slice(..));
+            rp.set_index_buffer(self.outline.ibuf.slice(..), wgpu::IndexFormat::Uint32);
+            rp.draw_indexed(0..outline_indices, 0, 0..1);
+        }
+    }
+
+    /// One frame: the scene pass (sky, terrain, far terrain, entities, water, rain) into `Present`'s 8-bit scene, then its two passes
+    /// (FXAA + CAS, upscale + vignette + HUD) onto the swap chain. Three render passes in all; the old chain had a shadow map, a G-buffer, a
+    /// deferred pass, the light shafts and an HDR post chain of ~8 passes.
+    fn render(&mut self) {
+        if self.menu.is_some() {
+            self.render_menu();
+            return;
+        }
+        let t0 = Instant::now();
+        self.step_frame();
+        if self.menu.is_some() {
+            return; // "Save and quit to title" just ran
+        }
+        let (pcx, pcz) = (chunk_coord(self.player.pos.x), chunk_coord(self.player.pos.z));
+        self.chunks.update(&self.gpu.device, &self.gpu.queue, &self.pipe.origins, pcx, pcz);
+        self.camera.zfar = if self.lod.is_some() { lod::ZFAR } else { 256.0 }; // the far terrain needs the depth range
+        let (view, proj) = self.camera.build_view_proj();
+        let outline_indices = self.target.map_or(0, |h| {
+            let (x, y, z) = h.pos;
+            let b = self.chunks.block_loaded(x, y, z).and_then(|b| outline_bounds(b, self.chunks.meta(x, y, z)));
+            b.map_or(0, |b| self.outline.update(&self.gpu.queue, h.pos, b))
+        });
+        let eye = self.camera.pos;
+        let mut sign_views: Vec<SignView> = self
+            .signs
+            .iter()
+            .filter_map(|(&pos, text)| {
+                let id = self.chunks.block_loaded(pos.0, pos.1, pos.2).filter(|b| matches!(*b, decor::POST | decor::WALL))?;
+                Some(SignView { pos, id, meta: self.chunks.meta(pos.0, pos.1, pos.2), text })
+            })
+            .collect();
+        let near = |s: &SignView| (glam::Vec3::new(s.pos.0 as f32 + 0.5, s.pos.1 as f32 + 0.5, s.pos.2 as f32 + 0.5) - eye).length_squared();
+        sign_views.sort_by(|a, b| near(a).total_cmp(&near(b)));
+        // Entities are only built when they are within the render range and in the camera's frustum (`radius` = a bound on their size).
+        let frustum = Frustum::from_view_proj(proj * view);
+        let reach2 = ((RENDER_DIST * 16 + 16) as f32).powi(2);
+        let seen = |p: glam::Vec3, r: f32| p.distance_squared(eye) < reach2 && frustum.intersects_aabb(p - r, p + r);
+        let item_indices = {
+            let chunks = &self.chunks;
+            self.item_mesh.update(&self.gpu.queue, &self.drops, &self.mobs, &self.ticks.falling, &self.fx, &|x, y, z| chunks.light_levels(x, y, z), self.hook.as_ref().map(|h| h.pos), &self.paintings, &sign_views, (&self.boats.list, self.boats.alpha()), (&self.carts.list, self.carts.alpha()), eye, &seen)
+        };
+
+        // Sky and fog colour from the sun angle, the weather and the climate under the player; the frame is cleared to the fog colour and
+        // the sky pass is drawn over it (vanilla order).
+        let (px, pz) = (self.camera.pos.x.floor() as i32, self.camera.pos.z.floor() as i32);
+        let temp = self.chunks.temperature_at(px, pz) as f32;
+        let partial = self.world_ticks.fract() as f32;
+        let angle = sky::celestial_angle(self.world_ticks as u64, partial);
+        let (rain, thunder) = if self.nether { (0.0, 0.0) } else { (self.weather.rain(partial), self.weather.thunder(partial)) };
+        let hell = [0.2, 0.03, 0.03]; // `WorldProviderHell.func_4096_a`
+        let sky_rgb = if self.nether { hell } else { sky::sky_color(angle, temp, rain, thunder) };
+        let e = self.camera.pos;
+        let eye_in_water = matches!(self.chunks.block_loaded(e.x.floor() as i32, e.y.floor() as i32, e.z.floor() as i32), Some(8 | 9));
+        // Which terrain sections the camera sees (frustum, render shape, and occlusion by terrain); every layer draws from it.
+        self.chunks.update_visible(self.camera.pos, RENDER_SHAPE, (RENDER_DIST * 16) as f32, (RENDER_VERT * 16) as f32, |min, max| frustum.intersects_aabb(min, max));
+        let fresh = self.chunks.take_ingest(); // drained in the Nether too (no LoD there)
+        if let Some(l) = self.lod.as_mut() {
+            fresh.into_iter().for_each(|(k, cols)| l.ingest(k, cols));
+            // The LoD is cut out only where a real chunk mesh exists (`drawn`), and again whenever the set of meshes changes (`mesh_gen`).
+            let chunks = &self.chunks;
+            l.update(&self.gpu.device, e, (RENDER_DIST * 16) as f32, (RENDER_VERT * 16) as f32, chunks.cut_gen(), |cx, cz| chunks.drawn((cx, cz)), |cx, sy, cz| chunks.shown((cx, cz), sy), |min, max| frustum.intersects_aabb(min, max));
+        }
+        let fog = color::legacy_lin(if self.nether { hell } else { sky::fog_color(angle, sky_rgb, rain, thunder) }); // vanilla values -> the frame's linear space
+        // Terrain fog (b1.7.3 `setupFog`): linear to the render distance, off the far terrain's own start; under water GL_EXP, density 0.1,
+        // colour (0.02, 0.02, 0.2); a negative far plane is how the shader learns the density.
+        let (fog_c, far) = if eye_in_water { (color::legacy_lin([0.02, 0.02, 0.2]), -0.1) } else { (fog, if self.lod.is_some() { lod::RADIUS } else { (RENDER_DIST * 16) as f32 }) };
+        let start = if self.lod.is_some() && !eye_in_water { lod::FOG_START } else { 0.0 };
+        self.pipe.frame(&self.gpu.queue, view, proj, e, sky::skylight_subtracted(angle, rain, thunder) as f32 / 15.0, fog_c, far, start);
+        let clear = wgpu::Color { r: fog_c[0] as f64, g: fog_c[1] as f64, b: fog_c[2] as f64, a: 1.0 };
+        self.sky.update(&self.gpu.queue, &self.camera, &SkyFrame { angle, rain, seconds: self.world_ticks as f32 / 20.0 });
+        self.sky.set_legacy(&self.gpu.queue, color::legacy_lin(sky::lightning_flash(sky_rgb, self.fx.flash, partial)), fog, angle, rain);
+        // Rain and snow (`EntityRenderer.renderRainSnow`), drawn in the scene pass after the water; the depth test hides the streaks behind
+        // the terrain. ponytail: not behind water (its translucent layer is not wired), no splashes on the ground.
+        if rain > 0.0 {
+            let r = weather::radius();
+            let n = (2 * r + 1) as usize;
+            let biomes = self.chunks.biomes(px - r, pz - r, n, n);
+            let chunks = &self.chunks;
+            let top = |x: i32, z: i32| chunks.top_solid(x, z);
+            let bright = |x: i32, y: i32, z: i32| crate::world::chunk::brightness(chunks.light(x, y, z));
+            let (snow, rain_quads) = weather::build(&weather::Input { eye: e, ticks: self.world_ticks as u32, partial, rain, biomes: &biomes, top_solid: &top, brightness: &bright });
+            self.rain_fx.update(&self.gpu.queue, proj * view, e, sky::sun_dir(angle).y, &snow, &rain_quads);
+        }
+        if self.frames == 0 {
+            log::info!("render: first frame, surface_format={:?}, {} chunks loaded", self.gpu.surface_format(), self.chunks.loaded());
+        }
+
+        let t_acq = Instant::now();
+        let frame = match self.gpu.surface.get_current_texture() {
+            Ok(f) => f,
+            Err(e) => {
+                log::warn!("surface.get_current_texture: {e:?}");
+                if matches!(e, wgpu::SurfaceError::Outdated | wgpu::SurfaceError::Lost) {
+                    self.gpu.surface.configure(&self.gpu.device, &self.gpu.config);
+                }
+                return;
+            }
+        };
+        let acq = t_acq.elapsed(); // the swap-chain wait (vsync / GPU back-pressure) is not CPU work
+        // Reconcile surface/config size. Native-activity doesn't always send MainEvent::WindowResized before the first frame, so the cached
+        // config.width/height can be wrong (1x1 from from_android_window). We drop the stale one (wgpu invalidates it after configure), resize, return.
+        let actual_w = frame.texture.width();
+        let actual_h = frame.texture.height();
+        if actual_w != self.gpu.config.width || actual_h != self.gpu.config.height {
+            log::info!("M3 render: frame is {actual_w}x{actual_h}, reconfiguring (was {}x{})", self.gpu.config.width, self.gpu.config.height);
+            self.resize(actual_w, actual_h);
+            return;
+        }
+        let view_tex = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        self.build_hud();
+        let hud_vertex_count = self.hud_verts.len();
+        if hud_vertex_count > 0 {
+            self.gpu.queue.write_buffer(&self.hud.vbuf, 0, bytemuck::cast_slice(&self.hud_verts));
+        }
+
+        let mut enc = self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
+        {
+            let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("scene"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: self.present.scene_view(), resolve_target: None, depth_slice: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(clear), store: wgpu::StoreOp::Store } })],
+                // The depth is only this pass's: `Discard` keeps it in the tile memory and never writes it out.
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.gpu.depth_view,
+                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Discard }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            self.draw_opaque(&mut rp, item_indices, outline_indices);
+            if !self.nether {
+                self.sky.draw(&mut rp); // depth-tested LessEqual: only the pixels the opaque draws left at 1
+                self.sky.draw_extras(&mut rp); // sunrise fan, sun, moon, stars
+            }
+            // Water last: blended over everything, no depth write.
+            rp.set_pipeline(&self.pipe.lod_water);
+            rp.set_bind_group(0, &self.pipe.bind_group, &[]); // the sky pass set its own
+            if let Some(l) = &self.lod {
+                l.draw_water(&mut rp); // the far water first (it is farther than the real water, which only reaches `WATER_RANGE`)
+            }
+            rp.set_pipeline(&self.pipe.water);
+            self.chunks.draw_ranges(Layer::Water, &mut rp, &self.pipe.origins);
+            if rain > 0.0 {
+                self.rain_fx.draw(&mut rp);
+            }
+        }
+        // FXAA + CAS, then the upscale; the HUD goes over the finished frame in the last pass (it is neither sharpened nor vignetted).
+        self.present.finish(&mut enc, &view_tex, |rp| {
+            if hud_vertex_count > 0 {
+                rp.set_pipeline(&self.hud.pipeline);
+                rp.set_bind_group(0, &self.hud.bind_group, &[]);
+                rp.set_vertex_buffer(0, self.hud.vbuf.slice(..));
+                rp.draw(0..hud_vertex_count as u32, 0..1);
+            }
+        });
+        self.gpu.queue.submit(std::iter::once(enc.finish()));
+        self.cpu_acc += t0.elapsed().saturating_sub(acq).as_secs_f32();
+        frame.present();
+
+        self.frames += 1;
+        self.total_frames += 1;
+        let now = Instant::now();
+        if now.duration_since(self.fps_last).as_secs_f32() >= 1.0 {
+            let fps = self.frames as f32 / now.duration_since(self.fps_last).as_secs_f32();
+            self.fps_recent = fps.round() as u32;
+            self.fps_overall = (self.total_frames as f32 / now.duration_since(self.started).as_secs_f32()).round() as u32;
+            log::info!("FPS: {fps:.1} (average since start {}), {} chunks loaded, CPU {:.1} ms/frame (CPU ~ frame time: CPU-bound; far below: GPU-bound)", self.fps_overall, self.chunks.loaded(), self.cpu_acc / self.frames as f32 * 1000.0);
+            self.cpu_acc = 0.0;
+            self.frames = 0;
+            self.fps_last = now;
+        }
+    }
+
+    /// A frame of `menu::Menu` (the title screen, world list, creation, "Loading level"): the HUD pass over black, no world. The frame
+    /// that shows "Loading level" is presented before the world is loaded, which freezes the render thread for a moment.
+    fn render_menu(&mut self) {
+        let (w, h) = (self.gpu.config.width as f32, self.gpu.config.height as f32);
+        let Some(m) = self.menu.as_mut() else { return };
+        for ev in self.touch.take_screen_events() {
+            m.event(ev, w, h);
+        }
+        if m.quit {
+            std::process::exit(0); // Quit Game: nothing is loaded, so nothing to save
+        }
+        self.hud_verts.clear();
+        m.draw(&mut self.hud_verts, w, h);
+        self.hud_verts.truncate(self.hud.quad_capacity * 6);
+        let frame = match self.gpu.surface.get_current_texture() {
+            Ok(f) => f,
+            Err(e) => {
+                log::warn!("surface.get_current_texture: {e:?}");
+                if matches!(e, wgpu::SurfaceError::Outdated | wgpu::SurfaceError::Lost) {
+                    self.gpu.surface.configure(&self.gpu.device, &self.gpu.config);
+                }
+                return;
+            }
+        };
+        let (fw, fh) = (frame.texture.width(), frame.texture.height());
+        if fw != self.gpu.config.width || fh != self.gpu.config.height {
+            self.resize(fw, fh);
+            return;
+        }
+        let view_tex = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut enc = self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("menu") });
+        self.gpu.queue.write_buffer(&self.hud.vbuf, 0, bytemuck::cast_slice(&self.hud_verts));
+        {
+            let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("menu_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &view_tex, resolve_target: None, depth_slice: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store } })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            rp.set_pipeline(&self.hud.pipeline);
+            rp.set_bind_group(0, &self.hud.bind_group, &[]);
+            rp.set_vertex_buffer(0, self.hud.vbuf.slice(..));
+            rp.draw(0..self.hud_verts.len() as u32, 0..1);
+        }
+        self.gpu.queue.submit(std::iter::once(enc.finish()));
+        frame.present();
+        let load = self.menu.as_mut().filter(|m| m.shown_loading).and_then(|m| m.loading.take());
+        if let Some(info) = load {
+            self.enter_world(&info);
+        }
+    }
+
+    fn on_motion(&mut self, ev: &android_activity::input::MotionEvent) {
+        self.touch.handle_motion(ev);
+    }
+
+    /// Build the HUD vertex buffer for this frame. Called between the chunk
+    /// and HUD render passes inside `render`.
+    fn build_hud(&mut self) {
+        // `ext` reads all of `self`, so it is taken before `hud_verts` is borrowed mutably.
+        let ext = self.screen.as_ref().and_then(|s| self.ext(s));
+        let v = &mut self.hud_verts;
+        v.clear();
+        let layout = &self.touch.layout;
+        let paused = self.touch.paused;
+        let pressed = |role: PointerRole| self.touch.pointers.values().any(|p| p.role == role);
+        // The in-world controls are hidden while a container screen is open.
+        let play = self.screen.is_none() && self.sign_edit.is_none();
+
+        // Crosshair: the aim point of the pick ray (first, so the quad cap never drops it).
+        if play {
+            let (w, h) = (self.gpu.config.width as f32, self.gpu.config.height as f32);
+            // `icons.png`'s cross (the Java draws it inverting the pixels behind it; here plain white), the size the two bars had.
+            let s = 0.05 * w.min(h);
+            HudPipeline::push_gui(v, w * 0.5 - s * 0.5, h * 0.5 - s * 0.5, s, s, sp::CROSSHAIR);
+        }
+
+        // Dig progress under the crosshair.
+        if play && self.dig.damage > 0.0 {
+            let (w, h) = (self.gpu.config.width as f32, self.gpu.config.height as f32);
+            let (bw, bh) = (0.12 * w.min(h), (0.012 * w.min(h)).max(3.0));
+            let (bx, by) = (w * 0.5 - bw * 0.5, h * 0.5 + 0.05 * w.min(h));
+            HudPipeline::push_quad(v, bx, by, bw, bh, [0.0, 0.0, 0.0, 0.6]);
+            HudPipeline::push_quad(v, bx, by, bw * self.dig.damage.min(1.0), bh, [1.0, 1.0, 1.0, 0.9]);
+        }
+
+        // `GuiEditSign`: the title, the board with its four lines (the one being edited is wrapped in `> <` and blinks), and the keys.
+        if let Some(e) = self.sign_edit {
+            let (w, h) = (self.gpu.config.width as f32, self.gpu.config.height as f32);
+            let (u, keys) = decor::layout(w, h, e.shift);
+            HudPipeline::push_quad(v, 0.0, 0.0, w, h, [0.0, 0.0, 0.0, 0.55]);
+            let title = "Edit sign message:";
+            HudPipeline::push_text(v, (w - HudPipeline::text_width(title) as f32 * u) / 2.0, 14.0 * u, u, title, [1.0; 4]);
+            HudPipeline::push_outlined_quad(v, (w - 130.0 * u) / 2.0, 30.0 * u, 130.0 * u, 64.0 * u, [0.62, 0.49, 0.28, 1.0], [0.25, 0.18, 0.08, 1.0], (2.0 * u).max(2.0));
+            let text = self.signs.get(&e.pos).cloned().unwrap_or_default();
+            let blink = (self.world_ticks as u64 / 6) % 2 == 0;
+            for (k, r) in &keys {
+                let label = match *k {
+                    Key::Line(i) if i == e.line && blink => format!("> {} <", text[i as usize]),
+                    Key::Line(i) => text[i as usize].clone(),
+                    k => decor::label(k),
+                };
+                let (fill, ink) = match *k {
+                    Key::Line(_) => ([0.0; 4], [0.0, 0.0, 0.0, 1.0]),
+                    Key::Shift if e.shift => ([0.2, 0.5, 0.8, 0.97], [1.0; 4]),
+                    Key::Done => ([0.2, 0.55, 0.25, 0.97], [1.0; 4]),
+                    _ => ([0.33, 0.33, 0.33, 0.97], [1.0; 4]),
+                };
+                if fill[3] > 0.0 {
+                    HudPipeline::push_outlined_quad(v, r[0], r[1], r[2], r[3], fill, [0.1, 0.1, 0.1, 1.0], (u).max(1.0));
+                }
+                let tw = HudPipeline::text_width(&label) as f32 * u;
+                HudPipeline::push_text(v, r[0] + (r[2] - tw) / 2.0, r[1] + (r[3] - 8.0 * u) / 2.0, u, &label, ink);
+            }
+        }
+
+        // Container screen: the vanilla GUI (176 x 166 units) over a dimmed frame, slots with their stacks.
+        if let Some(s) = &self.screen {
+            let (w, h) = (self.gpu.config.width as f32, self.gpu.config.height as f32);
+            let (ox, oy, k) = craft::panel(s.gw, w, h);
+            let (pw, ph) = craft::panel_size(s.gw);
+            HudPipeline::push_quad(v, 0.0, 0.0, w, h, [0.0, 0.0, 0.0, 0.55]);
+            // The panel is the pack's picture (`GuiInventory` / `GuiCrafting` / `GuiFurnace` / `GuiChest`: a chest is its rows' top, then the
+            // 96 units of the player's inventory from y = 126 of the sheet); the slots are in it, so a slot is only its stack.
+            if s.gw > 3 {
+                let top = 17.0 + 18.0 * (s.gw / 9) as f32;
+                HudPipeline::push_gui(v, ox, oy, pw * k, top * k, (0.0, sp::CHEST_Y, 176.0, top));
+                HudPipeline::push_gui(v, ox, oy + top * k, pw * k, 96.0 * k, (0.0, sp::CHEST_Y + 126.0, 176.0, 96.0));
+            } else {
+                HudPipeline::push_gui(v, ox, oy, pw * k, ph * k, match s.gw { 2 => sp::INVENTORY, 3 => sp::CRAFTING, _ => sp::FURNACE });
+            }
+            // Icons here are drawn as big in px as the hotbar's (`16 * hw / 20` box, 0.875 of it: 14 hotbar units), not as 16 panel units.
+            let icon_fill = 14.0 * layout.hotbar[0].2 / 20.0 / (16.0 * k);
+            let slot = |v: &mut Vec<HudVertex>, c: (f32, f32, f32), st: Option<ItemStack>| {
+                if let Some(st) = st {
+                    push_stack(v, (c.0 + k, c.1 + k, c.2 - 2.0 * k, c.2 - 2.0 * k), icon_fill, st);
+                }
+            };
+            let furn = s.furnace.and_then(|p| self.furnaces.get(&p));
+            for (id, ux, uy) in craft::layout(s.gw) {
+                slot(v, craft::cell(s.gw, w, h, (ux, uy)), s.get(&self.inv, ext.as_deref(), id));
+            }
+            // The labels of `drawGuiContainerForegroundLayer`, colour 0x404040: the chest's name at (8, 6), "Inventory" at (8, ySize - 96 + 2);
+            // "Crafting" at (28, 6) on the workbench, (86, 16) in the inventory; "Furnace" at (60, 6).
+            // UNVERIFIED: the non-chest positions are recalled, not read from the Java.
+            let ink = [0.25, 0.25, 0.25, 1.0];
+            let labels: &[(&str, f32, f32)] = match s.gw {
+                2 => &[("Crafting", 97.0 - craft::CRAFT_SHIFT as f32, 8.0)], // the pack's panel is the modern one: its grid is at (98, 18), moved left by CRAFT_SHIFT
+                3 => &[("Crafting", 28.0, 6.0), ("Inventory", 8.0, ph - 94.0)],
+                0 => &[("Furnace", 60.0, 6.0), ("Inventory", 8.0, ph - 94.0)],
+                9 => &[("Dispenser", 60.0, 6.0), ("Inventory", 8.0, ph - 94.0)],
+                _ => &[(if s.chests.len() > 1 { "Large chest" } else { "Chest" }, 8.0, 6.0), ("Inventory", 8.0, ph - 94.0)],
+            };
+            for &(text, ux, uy) in labels {
+                // 0.75 x: the 8 px glyphs are wider than vanilla's proportional font and ran into the grid and the buttons.
+                if text == "Crafting" {
+                    HudPipeline::push_text_outlined(v, ox + ux * k, oy + uy * k, k * 0.75, (k * 0.3).max(1.0), text, [1.0; 4]); // white, thin black outline
+                } else {
+                    HudPipeline::push_text(v, ox + ux * k, oy + uy * k, k * 0.75, text, ink);
+                }
+            }
+            if let Some(f) = furn {
+                // Cook arrow (fills left to right over 200 ticks) and flame (drains from the top), vanilla positions.
+                let u = |ux: f32, uy: f32, uw: f32, uh: f32| (ox + ux * k, oy + uy * k, uw * k, uh * k);
+                // `GuiFurnace`: the arrow is `cook * 24 / 200 + 1` wide, the flame `burn * 12 / item_burn` + 2 tall from its bottom.
+                let fy = sp::FURNACE.1;
+                let cook = (f.cook as f32 * 24.0 / 200.0).floor() + 1.0;
+                let (ax, ay, ..) = u(79.0, 34.0, 0.0, 0.0);
+                HudPipeline::push_gui(v, ax, ay, cook * k, 16.0 * k, (176.0, fy + 14.0, cook, 16.0));
+                if f.burn > 0 {
+                    let b = (f.burn as f32 * 12.0 / f.item_burn.max(1) as f32).floor();
+                    let (fx, fyy, ..) = u(56.0, 36.0 + 12.0 - b, 0.0, 0.0);
+                    HudPipeline::push_gui(v, fx, fyy, 14.0 * k, (b + 2.0) * k, (176.0, fy + 12.0 - b, 14.0, b + 2.0));
+                }
+            }
+            // The "place one" toggle: blue = whole stacks, orange with a 1 = one at a time (what the right mouse
+            // button does on a desktop). Dragging the stack over slots spreads it without the toggle.
+            let (mx, my, ms) = craft::toggle(s.gw, w, h, 1);
+            let fill = if self.one_mode { [0.85, 0.5, 0.1, 1.0] } else { [0.2, 0.4, 0.7, 1.0] };
+            HudPipeline::push_outlined_quad(v, mx, my, ms, ms, fill, [0.15, 0.15, 0.15, 1.0], k.max(2.0));
+            if self.one_mode {
+                HudPipeline::push_number(v, mx + ms * 0.32, my + ms * 0.2, ms * 0.6, 1, [1.0; 4]);
+            }
+            // The shift-click toggle: left of the other one, green when on (both sit bottom-left of the screen, `craft::toggle`).
+            let (sx, sy, ss) = craft::toggle(s.gw, w, h, 0);
+            let fill = if self.shift_mode { [0.2, 0.7, 0.3, 1.0] } else { [0.2, 0.4, 0.7, 1.0] };
+            HudPipeline::push_outlined_quad(v, sx, sy, ss, ss, fill, [0.15, 0.15, 0.15, 1.0], k.max(2.0));
+            if self.shift_mode {
+                HudPipeline::push_number(v, sx + ss * 0.32, sy + ss * 0.2, ss * 0.6, 2, [1.0; 4]);
+            }
+            // The picked-up stack floats just above the finger.
+            if let Some(c) = s.cursor {
+                let (cx, cy) = self.touch.cursor_pos;
+                let sz = 16.0 * k;
+                push_stack(v, (cx - sz * 0.5, cy - sz * 1.4, sz, sz), icon_fill, c);
+            }
+            // Item name while a finger is down (hover has no touch twin): the picked-up stack, else the stack under the
+            // finger. `GuiContainer.drawScreen` names only the hovered slot and only with an empty cursor; the held
+            // stack is named too because a tap picks the slot's stack up and the finger then covers it.
+            if self.gesture.is_some() {
+                let (cx, cy) = self.touch.cursor_pos;
+                let under = || craft::slot_at(s.gw, w, h, cx, cy).and_then(|id| s.get(&self.inv, ext.as_deref(), id));
+                if let Some(name) = s.cursor.or_else(under).and_then(items::name) {
+                    let bw = (HudPipeline::text_width(name) as f32 + 6.0) * k;
+                    let ty = if cy > 36.0 * k { cy - 34.0 * k } else { cy + 14.0 * k };
+                    HudPipeline::push_tooltip(v, (cx - bw * 0.5).clamp(0.0, (w - bw).max(0.0)), ty, k, name);
+                }
+            }
+        }
+
+        // Pause button: top-right, two bars.
+        let (px, py, pw, ph) = layout.pause;
+        HudPipeline::push_button(v, px, py, pw, ph, if pressed(PointerRole::Pause) { 2 } else { 1 });
+        let bar_w = pw * 0.18;
+        let bar_h = ph * 0.50;
+        let bar_y = py + (ph - bar_h) * 0.5;
+        let bx0 = px + (pw - bar_w * 3.0) * 0.5;
+        HudPipeline::push_quad(v, bx0, bar_y, bar_w, bar_h, [1.0; 4]);
+        HudPipeline::push_quad(v, bx0 + bar_w * 2.0, bar_y, bar_w, bar_h, [1.0; 4]);
+
+        // Inventory button, left of pause: a 2x2 grid icon (the crafting grid of the screen it opens).
+        let (ix, iy, iw, ih) = layout.inventory;
+        HudPipeline::push_button(v, ix, iy, iw, ih, if pressed(PointerRole::Inventory) || !play { 2 } else { 1 });
+        let (q, g) = (iw * 0.22, iw * 0.08);
+        let (qx, qy) = (ix + (iw - q * 2.0 - g) * 0.5, iy + (ih - q * 2.0 - g) * 0.5);
+        for (dx, dy) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)] {
+            HudPipeline::push_quad(v, qx + dx * (q + g), qy + dy * (q + g), q, q, [1.0; 4]);
+        }
+
+        // Zoom button, left of the inventory button: a Z (Zoomify), lit while held.
+        let (zx, zy, zw, zh) = layout.zoom;
+        HudPipeline::push_button(v, zx, zy, zw, zh, if pressed(PointerRole::Zoom) || !play { 2 } else { 1 });
+        HudPipeline::push_text_centered(v, zx + zw * 0.5, zy + (zh - 8.0 * zh / 20.0) * 0.5, zh / 20.0, "Z", [1.0; 4]);
+
+        // Hotbar (`GuiIngame`): the 182 x 22 strip (20 units a slot, a unit = a ninth-cell / 20), then the 24 x 24 selector over the slot
+        // in use, then the stacks. The touch cells are the slots, so the strip is drawn around them.
+        if play {
+            let (hx, hy, hw, _) = layout.hotbar[0];
+            let u = hw / 20.0;
+            HudPipeline::push_gui(v, hx - u, hy - u, 182.0 * u, 22.0 * u, sp::HOTBAR);
+            let (sx, _, _, _) = layout.hotbar[self.touch.hotbar_slot];
+            HudPipeline::push_gui(v, sx - 2.0 * u, hy - 2.0 * u, 24.0 * u, 24.0 * u, sp::SELECTOR);
+        }
+        for (i, &(hx, hy, hw, _)) in layout.hotbar.iter().enumerate().filter(|_| play) {
+            if let Some(s) = self.inv.slots[i] {
+                let u = hw / 20.0; // the slot is 20 units, its item 16 at (2, 2)
+                push_stack(v, (hx + 2.0 * u, hy + 2.0 * u, 16.0 * u, 16.0 * u), 0.875, s); // icon 14 of the 16 units
+            }
+        }
+
+        // Name of the item just switched to, centred above the hotbar and the hearts.
+        // UNVERIFIED: not in b1.7.3 (Beta 1.8 added it); the 2 s, the 0.75 scale and the spot are invented.
+        if let (true, Some(name)) = (play && self.tip.1 > 0.0, self.inv.slots[self.touch.hotbar_slot].and_then(items::name)) {
+            let (w, h) = (self.gpu.config.width as f32, self.gpu.config.height as f32);
+            let k = craft::panel(0, w, h).2;
+            let (hx, hy, hw, _) = layout.hotbar[4];
+            let bw = (HudPipeline::text_width(name) as f32 + 6.0) * k * 0.75;
+            HudPipeline::push_tooltip(v, hx + hw * 0.5 - bw * 0.5, hy - 34.0 * k, k * 0.75, name);
+        }
+
+        if play {
+            // Hearts (GuiIngame: 10, 8 units apart on the 20 unit hotbar cells, left half, above the hotbar): a full
+            // heart is 2 health. Air bubbles sit over the right half while the eye is under water: whole ones
+            // `ceil((air - 2) * 10 / 300)`, then the one that is about to pop. Armor sits on the row above, left (`GuiIngame`).
+            let (hx, hy, hw, _) = layout.hotbar[0];
+            let (sz, y) = (hw * 0.45, hy - hw * 0.6);
+            for i in 0..10 {
+                let x = hx + i as f32 * hw * 0.4;
+                let at = 2 * i + 1;
+                HudPipeline::push_gui(v, x, y, sz, sz, sp::HEART_BG);
+                if at < self.vitals.health {
+                    HudPipeline::push_gui(v, x, y, sz, sz, sp::HEART_FULL);
+                } else if at == self.vitals.health {
+                    HudPipeline::push_gui(v, x, y, sz, sz, sp::HEART_HALF);
+                }
+            }
+            // Armor bar (GuiIngame): 10 shields over the hearts, a full one is 2 armor points, a half one 1.
+            if self.vitals.armor > 0 {
+                for i in 0..10 {
+                    let x = hx + i as f32 * hw * 0.4;
+                    let at = 2 * i + 1;
+                    let s = if at < self.vitals.armor { sp::ARMOR_FULL } else if at == self.vitals.armor { sp::ARMOR_HALF } else { sp::ARMOR_EMPTY };
+                    HudPipeline::push_gui(v, x, y - sz * 1.2, sz, sz, s);
+                }
+            }
+            if self.vitals.air < vitals::MAX_AIR {
+                let air = self.vitals.air as f32;
+                let whole = ((air - 2.0) * 10.0 / 300.0).ceil().max(0.0) as i32;
+                let popping = (air * 10.0 / 300.0).ceil().max(0.0) as i32 - whole;
+                let (rx, _, rw, _) = layout.hotbar[8];
+                for i in 0..whole + popping {
+                    let s = if i < whole { sp::BUBBLE } else { sp::BUBBLE_POP };
+                    HudPipeline::push_gui(v, rx + rw - sz - i as f32 * hw * 0.4, y - hw * 0.5, sz, sz, s);
+                }
+            }
+
+            // Touch d-pad (Stone D-pad sprites): the four arrows always, a corner only while an arrow beside it is held; the held button
+            // is drawn pressed. The cell is the hit area, the button is drawn `dpad_gap` smaller inside it, a corner (18 of 22 px)
+            // smaller still and centred.
+            let t = &self.touch;
+            for i in (0..8).filter(|&i| t.dpad_shown(i)) {
+                let spr = if t.dir == Some(i) { sp::DPAD_PRESSED[i] } else { sp::DPAD[i] };
+                let (cx, cy, cw, ch) = layout.dpad[i];
+                let k = (cw - layout.dpad_gap) / 22.0 * spr.2; // the arrows are 22 px, a corner 18: same pixel size
+                HudPipeline::push_gui(v, cx + (cw - k) * 0.5, cy + (ch - k) * 0.5, k, k, spr);
+            }
+            let (sx, sy, sw, sh) = layout.sneak;
+            let g = layout.dpad_gap * 0.5;
+            HudPipeline::push_gui(v, sx + g, sy + g, sw - 2.0 * g, sh - 2.0 * g, if t.sneak { sp::SNEAK_ON } else { sp::SNEAK });
+            let (jx, jy, jw, jh) = layout.jump;
+            HudPipeline::push_gui(v, jx, jy, jw, jh, if t.jumping() { sp::JUMP_ON } else { sp::JUMP });
+        }
+
+        // FPS counter, top-left. White = average over the last second, yellow = average since
+        // the app started (includes the chunk loading at the start).
+        {
+            let dh = (self.gpu.config.height as f32 * 0.05).max(14.0);
+            let (fx, fy) = (self.gpu.config.width as f32 * 0.07, dh * 0.6);
+            HudPipeline::push_quad(v, fx - dh * 0.3, fy - dh * 0.3, dh * 3.2, dh * 2.7, [0.0, 0.0, 0.0, 0.5]);
+            HudPipeline::push_number(v, fx, fy, dh, self.fps_recent, [1.0, 1.0, 1.0, 1.0]);
+            HudPipeline::push_number(v, fx, fy + dh * 1.3, dh, self.fps_overall, [1.0, 0.85, 0.2, 1.0]);
+        }
+
+        // The LoD debug mode that is on, centred at the top (also while playing, not only in the pause menu).
+        if let Some(title) = self.lod.as_ref().map(|l| l.debug_title()).filter(|t| !t.is_empty()) {
+            let (w, dh) = (self.gpu.config.width as f32, (self.gpu.config.height as f32 * 0.05).max(14.0));
+            let tw = HudPipeline::text_width(title) as f32;
+            let k = (dh / 10.0).min(w * 0.55 / tw);
+            let (tx, ty) = (w * 0.5, dh * 0.45);
+            HudPipeline::push_quad(v, tx - tw * k * 0.5 - k * 3.0, ty - k * 2.0, tw * k + k * 6.0, 8.0 * k + k * 4.0, [0.0, 0.0, 0.0, 0.55]);
+            HudPipeline::push_text_centered(v, tx, ty, k, title, [1.0, 1.0, 0.4, 1.0]);
+        }
+
+        // Pause menu: dim the frame and show the resume button.
+        if paused {
+            let w = self.gpu.config.width as f32;
+            let h = self.gpu.config.height as f32;
+            // Dead: the same menu, tinted red; the resume button respawns.
+            let tint = if self.vitals.dead() { [0.55, 0.0, 0.0, 0.6] } else { [0.0, 0.0, 0.0, 0.55] };
+            HudPipeline::push_quad(v, 0.0, 0.0, w, h, tint);
+            // `GuiIngameMenu` / `GuiGameOver`: the title centred above, the buttons are `widgets.png`'s with their label centred (white,
+            // 0xFFFFA0 while pressed or armed, as `GuiButton` does for the one under the mouse); the resume button respawns when dead.
+            let label = |v: &mut Vec<HudVertex>, (bx, by, bw, bh): (f32, f32, f32, f32), text: &str, hot: bool| {
+                let k = bh / 20.0;
+                HudPipeline::push_button(v, bx, by, bw, bh, if hot { 2 } else { 1 });
+                let ink = if hot { [1.0, 1.0, 0.63, 1.0] } else { [0.88, 0.88, 0.88, 1.0] };
+                HudPipeline::push_text_centered(v, bx + bw * 0.5, by + (bh - 8.0 * k) * 0.5, k, text, ink);
+            };
+            let (bx, by, bw, bh) = layout.resume;
+            let dead = self.vitals.dead();
+            HudPipeline::push_text_centered(v, bx + bw * 0.5, by - bh * 1.3, bh / 20.0 * if dead { 2.0 } else { 1.5 }, if dead { "You died!" } else { "Game menu" }, [1.0; 4]);
+            label(v, layout.resume, if dead { "Respawn" } else { "Back to game" }, pressed(PointerRole::Pause));
+            // TEMPORARY reset-world button: after the first tap it is lit and asks again.
+            label(v, layout.reset, if self.touch.reset_armed { "Tap again to confirm" } else { "Reset world" }, self.touch.reset_armed);
+            label(v, layout.quit, "Save and quit to title", pressed(PointerRole::Quit));
+            // The pre-generation switch (Voxy World Gen): lit while it runs, with the chunks generated so far.
+            let (on, n) = self.lod.as_ref().map_or((false, 0), |l| l.pregen());
+            let text = if self.lod.is_none() { "Pregen: overworld only".to_string() } else if on { format!("Pregen: {n} chunks (tap to stop)") } else { format!("Pregen: off, {n} chunks") };
+            label(v, layout.pregen, &text, on || pressed(PointerRole::Pregen));
+            // LoD debug colouring, under Pregen: off / step / kind of face / tile.
+            let (dm, dt) = match self.lod.as_ref().map_or(0, |l| l.debug()) {
+                1 => (1, "LoD dbg 1: step g1 y2 o4 r8"),
+                2 => (2, "LoD dbg 2: top wht wall blu skirt pnk"),
+                3 => (3, "LoD dbg 3: tiles red/blue"),
+                4 => (4, "LoD dbg 4: LoD hidden"),
+                _ => (0, "LoD debug: off"),
+            };
+            label(v, layout.dbg, dt, dm != 0 || pressed(PointerRole::LodDebug));
+            // TEMPORARY fly toggle, beside Pregen.
+            label(v, layout.fly, if self.touch.flying { "Fly: on" } else { "Fly: off" }, self.touch.flying || pressed(PointerRole::Fly));
+        }
+
+        // Cap to the buffer capacity; extra quads are silently dropped.
+        let max = self.hud.quad_capacity * 6;
+        if v.len() > max {
+            v.truncate(max);
+        }
+    }
+}
+
+/// The chunk manager of a dimension of the world with this seed: the overworld's (vanilla or Tectonic generator) or the Nether's.
+fn chunk_manager(seed: i64, tectonic: bool, nether: bool) -> ChunkManager {
+    if nether { ChunkManager::new_nether(seed, RENDER_DIST) } else { ChunkManager::new_typed(seed, RENDER_DIST, tectonic) }
+}
+
+/// A new world's spawn point (feet position): dry ground closest to the centre of chunk (0, 0), not under water (a
+/// fixed spawn at y=60 put the camera inside the sea), and not on top of a tree. Needs chunks 0..=1 final.
+fn find_spawn(chunks: &ChunkManager) -> glam::Vec3 {
+    let top_of = |x: i32, z: i32| {
+        (0..128).rev().find(|&y| !matches!(chunks.block(x, y, z), Some(0 | 8 | 9 | 17 | 18)) && !chunks.block(x, y, z).is_some_and(is_plant)).unwrap_or(-1)
+    };
+    let mut best: Option<(i32, i32, i32, i32)> = None; // x, z, top, dist^2
+    let mut highest = (8, 8, i32::MIN);
+    for z in 0..32 {
+        for x in 0..32 {
+            let t = top_of(x, z);
+            if t > highest.2 { highest = (x, z, t); }
+            if t >= 64 {
+                let d2 = (x - 8).pow(2) + (z - 8).pow(2);
+                if best.map_or(true, |b| d2 < b.3) { best = Some((x, z, t, d2)); }
+            }
+        }
+    }
+    let (spawn_x, spawn_z, top) = match best {
+        Some((x, z, t, _)) => (x, z, t),
+        None => highest,
+    };
+    let spawn_feet_y = (top as f32) + 1.0 + 0.9;
+    log::info!("chunks: render distance {}, spawn at ({}, {}, {}), top block y={}", RENDER_DIST, spawn_x, spawn_feet_y, spawn_z, top);
+    glam::Vec3::new(spawn_x as f32 + 0.5, spawn_feet_y, spawn_z as f32 + 0.5)
+}
+
+/// The biome colour of a block icon: the plains climate (temperature 0.8, humidity 0.4), as `rgb` floats.
+fn icon_tint(c: u32) -> [f32; 3] {
+    [(c >> 16 & 255) as f32 / 255.0, (c >> 8 & 255) as f32 / 255.0, (c & 255) as f32 / 255.0]
+}
+
+/// A block stack as the inventory draws it (`RenderItem.drawItemIntoGui`): cubes (a slab half high) as an isometric cube with the
+/// grass and leaf tints, everything with another shape (plants, torches, rails, the ladder, wire, doors, signs, the lever, the
+/// button, the bed...) as its flat tile. `false`: the block has no tile (the caller draws the flat colour).
+fn push_block_icon(v: &mut Vec<HudVertex>, (x, y, w, h): (f32, f32, f32, f32), s: ItemStack) -> bool {
+    let (id, meta) = (s.id as u8, items::placed_meta(s));
+    let tile = |side: u8| atlas::terrain_tile(id, meta, side).map(u16::from);
+    let flat = crate::world::chunk::cross_shape(id).is_some() || matches!(id, 26 | 27 | 28 | 50 | 51 | 55 | 63 | 64 | 65 | 66 | 68 | 69 | 71 | 75 | 76 | 77 | 90 | 92 | 93 | 94 | 96);
+    let grass = icon_tint(crate::world::climate::grass(0.8, 0.4));
+    let white = [1.0; 3];
+    if flat {
+        let Some(t) = tile(2) else { return false };
+        let rgb = if id == 31 && meta != 0 { grass } else { white };
+        HudPipeline::push_tile(v, x, y, w, h, t, rgb);
+        return true;
+    }
+    let (Some(top), Some(left), Some(right)) = (tile(1), tile(3), tile(5)) else { return false };
+    let tint = match id {
+        2 => [grass, white, white],
+        18 => {
+            let c = match meta & 3 { 1 => crate::world::climate::PINE, 2 => crate::world::climate::BIRCH, _ => crate::world::climate::foliage(0.8, 0.4) };
+            [icon_tint(c); 3]
+        }
+        _ => [white; 3],
+    };
+    let overlay = (id == 2).then_some((38, grass));
+    // The cactus tiles are 14 wide inside a transparent border (the world mesh pulls its faces in by 1/16): trim it so the cube stays solid.
+    HudPipeline::push_cube(v, (x, y, w, h), [(top, tint[0]), (left, tint[1]), (right, tint[2])], overlay, if id == 44 { 0.5 } else { 1.0 }, if id == 81 { 1.0 } else { 0.0 });
+    true
+}
+
+/// One item stack drawn into the 16 x 16 unit item box `(x, y, w, h)` (`hw / 16` px a unit): the flat colour of its tile (a tool is a stick-coloured handle
+/// with a head in the material colour, shaped per kind, so pickaxe, axe, shovel, sword and hoe can be told apart), a wear bar
+/// under a damaged tool, and the count bottom right in the font with a shadow like `RenderItem.renderItemOverlayIntoGUI`
+/// (shown above 1 only).
+// UNVERIFIED: the head shapes and the wear-bar colours are stand-ins for the item sprites and `renderItemOverlay`.
+fn push_stack(v: &mut Vec<HudVertex>, (cx, cy, cw, ch): (f32, f32, f32, f32), fill: f32, s: ItemStack) {
+    let u = cw / 16.0;
+    // The count and the wear bar keep the 16 unit box; the icon alone is drawn `fill` of it, centred (the hotbar draws it a little smaller).
+    let (hx, hy, hw, hh) = (cx + cw * (1.0 - fill) * 0.5, cy + ch * (1.0 - fill) * 0.5, cw * fill, ch * fill);
+    let rgb = |tile: u16| {
+        let c = atlas::tile_color(tile);
+        [c[0] as f32 / 255.0, c[1] as f32 / 255.0, c[2] as f32 / 255.0, 1.0]
+    };
+    let (ix, iy, iw, ih) = (hx + u, hy + u, hw - u * 2.0, hh - u * 2.0);
+    // Blocks are their isometric cube (plants, torches, rails... their flat tile), items their `gui/items.png` sprite (tools and shears
+    // included); anything without either keeps the flat shapes.
+    if !(s.id < 256 && push_block_icon(v, (hx, hy, hw, hh), s)) {
+    match (s.id >= 256).then(|| atlas::item_icon(s.id)).flatten() {
+    Some(icon) => HudPipeline::push_sprite(v, hx, hy, hw, hh, icon),
+    None => match craft::tool(s.id) {
+        None if s.id == craft::SHEARS => {
+            // Two blades over a grip.
+            let c = rgb(items::tile(s.id).into());
+            HudPipeline::push_quad(v, ix + iw * 0.15, iy, iw * 0.2, ih * 0.6, c);
+            HudPipeline::push_quad(v, ix + iw * 0.65, iy, iw * 0.2, ih * 0.6, c);
+            HudPipeline::push_quad(v, ix + iw * 0.25, iy + ih * 0.6, iw * 0.5, ih * 0.4, rgb(17));
+        }
+        None => HudPipeline::push_quad(v, ix, iy, iw, ih, rgb(items::stack_tile(s))),
+        Some((kind, _)) => {
+            HudPipeline::push_quad(v, ix + iw * 0.42, iy, iw * 0.16, ih, rgb(17));
+            let head = rgb(items::tile(s.id).into());
+            match kind {
+                craft::Kind::Sword => {
+                    HudPipeline::push_quad(v, ix + iw * 0.4, iy, iw * 0.2, ih * 0.7, head);
+                    HudPipeline::push_quad(v, ix + iw * 0.2, iy + ih * 0.68, iw * 0.6, ih * 0.1, head);
+                }
+                craft::Kind::Hoe => HudPipeline::push_quad(v, ix + iw * 0.42, iy, iw * 0.5, ih * 0.18, head),
+                craft::Kind::Pickaxe => HudPipeline::push_quad(v, ix, iy, iw, ih * 0.22, head),
+                craft::Kind::Axe => HudPipeline::push_quad(v, ix, iy, iw * 0.58, ih * 0.38, head),
+                craft::Kind::Shovel => HudPipeline::push_quad(v, ix + iw * 0.28, iy, iw * 0.44, ih * 0.32, head),
+            }
+        }
+    }}}
+    if let Some(max) = craft::max_damage(s.id).filter(|_| s.damage > 0) {
+        // `renderItemOverlayIntoGUI`: a 13 x 2 unit bar at (2, 13), black behind the green-to-red fill.
+        let left = (1.0 - s.damage as f32 / max as f32).clamp(0.0, 1.0);
+        HudPipeline::push_quad(v, cx + 2.0 * u, cy + 13.0 * u, 13.0 * u, 2.0 * u, [0.0, 0.0, 0.0, 1.0]);
+        HudPipeline::push_quad(v, cx + 2.0 * u, cy + 13.0 * u, 13.0 * u * left, u, [1.0 - left, left, 0.0, 1.0]);
+    }
+    if s.count > 1 {
+        HudPipeline::push_count(v, cx, cy, u, s.count as u32);
+    }
+}
+
+/// Match the swapchain to the real window size. Hiding the nav bar or rotating changes the
+/// window size; a swapchain left at the old size gets scaled by Android to fit = stretched.
+fn sync_size(app: &AndroidApp, state: &mut Option<App>) {
+    let (Some(a), Some(win)) = (state.as_mut(), app.native_window()) else { return };
+    let (w, h) = (win.width().max(1) as u32, win.height().max(1) as u32);
+    if (w, h) != (a.gpu.config.width, a.gpu.config.height) {
+        a.resize(w, h);
+    }
+}
+
+/// Spawn the GPU init thread for the current window (Vulkan, or GLES where there is no Vulkan driver).
+fn start_init(app: &AndroidApp) -> Option<std::thread::JoinHandle<Result<App, String>>> {
+    struct NativePtr(usize);
+    unsafe impl Send for NativePtr {}
+    let window = app.native_window()?;
+    let ptr = window.ptr().as_ptr() as usize;
+    let init_w = window.width().max(1) as u32;
+    let init_h = window.height().max(1) as u32;
+    // App-private storage, where the world is saved.
+    let dir = app.internal_data_path().unwrap_or_else(std::env::temp_dir);
+    log::info!("M3: InitWindow, native {init_w}x{init_h}, starting GPU init thread");
+    let h = std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let r = std::panic::catch_unwind(|| pollster::block_on(App::init(ptr as *mut c_void, init_w, init_h, dir)));
+            match r {
+                Ok(Ok(a)) => Ok(a),
+                Ok(Err(e)) => {
+                    log::error!("M3 init error: {e}");
+                    Err(e)
+                }
+                Err(p) => {
+                    let msg = if let Some(s) = p.downcast_ref::<&str>() {
+                        s.to_string()
+                    } else if let Some(s) = p.downcast_ref::<String>() {
+                        s.clone()
+                    } else {
+                        "<unknown panic>".to_string()
+                    };
+                    log::error!("M3 init panic: {msg}");
+                    Err(format!("panic: {msg}"))
+                }
+            }
+        })
+        .expect("spawn");
+    Some(h)
+}
+
+#[no_mangle]
+fn android_main(app: AndroidApp) {
+    #[cfg(target_os = "android")]
+    android_logger::init_once(
+        android_logger::Config::default()
+            .with_max_level(log::LevelFilter::Info)
+            .with_tag("mc-rs"),
+    );
+    #[cfg(not(target_os = "android"))]
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .try_init();
+
+    std::panic::set_hook(Box::new(|info| {
+        log::error!("PANIC: {info}");
+    }));
+
+    let mut self_main_frames: u64 = 0;
+    let mut app_state: Option<App> = None;
+    let mut init_handle: Option<std::thread::JoinHandle<Result<App, String>>> = None;
+    let mut running = true;
+
+    while running {
+        // Once the world is up the loop must not wait for events: an empty poll sleeps its whole timeout, and that 8 ms was added to EVERY
+        // frame without a touch event (CPU time + 8 ms > 16.7 ms drops a 60 fps frame to 30). Frames are paced by the swap chain (Fifo).
+        // Before the window and the GPU exist there is nothing to draw, so the loop may sleep.
+        let wait = if app_state.is_some() { Duration::ZERO } else { Duration::from_millis(8) };
+        app.poll_events(Some(wait), |event| {
+            if let PollEvent::Main(main_event) = event {
+                match main_event {
+                    MainEvent::InitWindow { .. } => {
+                        immersive::hide_system_bars(&app);
+                        init_handle = start_init(&app);
+                    }
+                    MainEvent::InputAvailable => {
+                        if let Ok(mut iter) = app.input_events_iter() {
+                            // `next` handles one queued event per call; loop so
+                            // multi-touch moves and Up events are never dropped.
+                            while iter.next(|event| {
+                                if let IEv::MotionEvent(m) = event {
+                                    if let Some(a) = app_state.as_mut() {
+                                        a.on_motion(&m);
+                                    }
+                                }
+                                InputStatus::Unhandled
+                            }) {}
+                        }
+                    }
+                    MainEvent::TerminateWindow { .. } => {
+                        // Window is going away (home button, rotate, etc): the world is rebuilt from the save on
+                        // return, so save everything first. Then drop the surface before the ANativeWindow dies.
+                        if let Some(a) = app_state.as_mut() {
+                            a.save(usize::MAX);
+                        }
+                        app_state = None;
+                    }
+                    // The process may be killed after this without another event.
+                    MainEvent::Pause => {
+                        if let Some(a) = app_state.as_mut() {
+                            a.save(usize::MAX);
+                        }
+                    }
+                    MainEvent::GainedFocus => {
+                        immersive::hide_system_bars(&app);
+                        sync_size(&app, &mut app_state);
+                    }
+                    MainEvent::WindowResized { .. }
+                    | MainEvent::ContentRectChanged { .. }
+                    | MainEvent::InsetsChanged { .. }
+                    | MainEvent::RedrawNeeded { .. } => sync_size(&app, &mut app_state),
+                    MainEvent::Destroy { .. } => running = false,
+                    _ => {}
+                }
+            }
+        });
+
+        if init_handle.as_ref().map_or(false, |h| h.is_finished()) {
+            if let Some(h) = init_handle.take() {
+                match h.join() {
+                    Ok(Ok(a)) => {
+                        if app.native_window().is_some() {
+                            app_state = Some(a);
+                            sync_size(&app, &mut app_state);
+                            self_main_frames = 0;
+                        } else {
+                            log::warn!("init finished but window is gone; discarding");
+                        }
+                    }
+                    Ok(Err(e)) => log::error!("init failed: {e}"),
+                    Err(_) => log::error!("init panicked"),
+                }
+            }
+        }
+
+        if let Some(a) = app_state.as_mut() {
+            a.render();
+            // Dynamic FPS: the paused world is frozen, so the menu runs at ~10 frames a second; a touch still wakes the poll.
+            if a.touch.paused || a.menu.is_some() {
+                std::thread::sleep(Duration::from_millis(90));
+            }
+            self_main_frames += 1;
+            if self_main_frames == 1 || self_main_frames == 30 || self_main_frames % 300 == 0 {
+                log::info!("M3 main frame {self_main_frames}");
+            }
+        }
+        if self_main_frames % 30 == 0 {
+            sync_size(&app, &mut app_state);
+        }
+    }
+}

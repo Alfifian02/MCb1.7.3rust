@@ -1,0 +1,163 @@
+name: ci
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: mc-rs-test
+      - run: cargo test --message-format=short 2>&1 | tail -n 200
+
+  apk:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: mc-rs-apk-release
+      - name: Restore cargo-apk
+        id: cache-cargo-apk
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-apk
+          key: cargo-apk-bin-v1-${{ runner.os }}
+      - name: Install cargo-apk
+        if: steps.cache-cargo-apk.outputs.cache-hit != 'true'
+        run: cargo install cargo-apk --locked
+      # GitHub's ubuntu-22.04 image ships Android SDK WITHOUT build-tools,
+      # so aapt/apksigner/zipalign aren't on disk. Install cmdline-tools and use
+      # sdkmanager to install the build-tools package we need.
+      - name: Install Android cmdline-tools (if missing)
+        run: |
+          set -e
+          if [ ! -d "$ANDROID_HOME/cmdline-tools" ]; then
+            echo "Installing Android cmdline-tools"
+            mkdir -p "$ANDROID_HOME/cmdline-tools"
+            cd /tmp
+            curl -sLO https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+            unzip -q commandlinetools-linux-11076708_latest.zip
+            mv cmdline-tools "$ANDROID_HOME/cmdline-tools/latest"
+          fi
+          ls -la "$ANDROID_HOME/cmdline-tools/latest/bin/" | head -5
+      - name: Install Android build-tools 34.0.0
+        env:
+          ANDROID_SDK_ROOT: ${{ env.ANDROID_HOME }}
+        run: |
+          set -e
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "platform-tools" "build-tools;34.0.0"
+          ls -la "$ANDROID_HOME/build-tools/34.0.0/" | head -10
+      - name: Env for SDK/NDK
+        run: |
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
+          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+      - name: Install committed signing keystore
+        run: |
+          # Use a single long-lived keystore committed to the repo so every
+          # build produces APKs signed with the same identity. This is what
+          # lets `adb install -r` upgrade over the previously installed copy.
+          # The keystore is committed at keystore/debug.keystore; if you're
+          # worried about leaking the cert, move it to a GitHub Actions secret
+          # (ANDROID_KEYSTORE_B64) and decode it here.
+          mkdir -p "$HOME/.android"
+          cp keystore/debug.keystore "$HOME/.android/debug.keystore"
+          echo "Keystore SHA-256:"
+          sha256sum "$HOME/.android/debug.keystore"
+      - name: Build APK (release)
+        env:
+          # Tell cargo-apk to sign with the debug keystore even in release mode.
+          # Use an absolute path: cargo-apk 0.10 forwards $HOME to apksigner
+          # literally, and on GitHub-hosted runners it can land at "/.android/..."
+          # which fails with "java.io.FileNotFoundException: /.android/debug.keystore".
+          CARGO_APK_RELEASE_KEYSTORE: /home/runner/.android/debug.keystore
+          CARGO_APK_RELEASE_KEYSTORE_PASSWORD: android
+        run: |
+          set -euo pipefail
+          cd mc-rs
+          # cargo-apk defaults to debug builds (huge APK, no opt-level).
+          # --release uses our [profile.release] in workspace Cargo.toml:
+          #   opt-level=3, lto=fat, codegen-units=1, strip=true, debug=0.
+          # pipefail is critical: | tail -n 80 would otherwise swallow cargo errors.
+          # Capture the full output to a log file so we can debug on failure.
+          cargo apk build --release > /tmp/build.log 2>&1 || {
+            echo "BUILD FAILED. Full output follows:"
+            cat /tmp/build.log
+            exit 1
+          }
+          cat /tmp/build.log | tail -n 80
+          cd ..
+          echo "--- produced APKs ---"
+          find . -name 'MinecraftB173Rust.apk' -exec ls -la {} \;
+          find . -name '*.apk' -path '*/target/*' | head
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: /tmp/build.log
+          if-no-files-found: ignore
+      - name: Locate signed APK
+        id: find_apk
+        run: |
+          APK=$(find . -name 'MinecraftB173Rust.apk' | head -1)
+          if [ -z "$APK" ]; then
+            APK=$(find . -name '*.apk' -path '*/target/*' | head -1)
+          fi
+          if [ -z "$APK" ]; then
+            echo "::error::no APK produced"
+            find . -name '*.apk' 2>&1 || true
+            exit 1
+          fi
+          echo "apk=$APK" >> "$GITHUB_OUTPUT"
+          ls -la "$APK"
+      - name: Verify signature
+        env:
+          APK: ${{ steps.find_apk.outputs.apk }}
+        run: |
+          set -e
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name 'apksigner' -type f | head -1)
+          if [ -z "$APKSIGNER" ]; then
+            echo "::error::apksigner still missing after build-tools install"
+            exit 1
+          fi
+          echo "Verifying: $APK"
+          ls -la "$APK"
+          "$APKSIGNER" verify --print-certs "$APK"
+      - name: Collect APK
+        env:
+          UNSIGNED: ${{ steps.find_apk.outputs.apk }}
+        run: |
+          set -e
+          mkdir -p dist
+          cp "$UNSIGNED" dist/MinecraftB173Rust.apk
+          ls -la dist/
+          unzip -l dist/MinecraftB173Rust.apk | tail -5
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MinecraftB173Rust-apk
+          path: dist/MinecraftB173Rust.apk
+      - name: Release (for direct phone install)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: APK build ${{ github.run_number }}
+          prerelease: true
+          files: dist/MinecraftB173Rust.apk
