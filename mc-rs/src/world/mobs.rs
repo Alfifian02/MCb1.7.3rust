@@ -664,11 +664,18 @@ pub struct Mobs {
     burst: u32,
     /// The Nether has no overworld mobs (its own, ghast and pigman, are not written yet).
     pub no_spawn: bool,
+    /// `GameSettings.difficulty`: 0 Peaceful removes the monsters and spawns none.
+    pub difficulty: u8,
+}
+
+/// `IMob`: what Peaceful removes.
+fn hostile(k: Kind) -> bool {
+    matches!(k, Zombie | Skeleton | Creeper | Spider | Slime | Giant | PigZombie)
 }
 
 impl Mobs {
     pub fn new(seed: i64) -> Self {
-        Self { list: Vec::new(), arrows: Vec::new(), rng: JavaRandom::new(seed ^ 0x5049_47), seed, acc: 0.0, clock: 0, burst: 200, no_spawn: false }
+        Self { list: Vec::new(), arrows: Vec::new(), rng: JavaRandom::new(seed ^ 0x5049_47), seed, acc: 0.0, clock: 0, burst: 200, no_spawn: false, difficulty: 2 }
     }
 
     /// `Chunk.func_997_a(987234911)`: slimes spawn in one chunk in ten.
@@ -743,7 +750,7 @@ impl Mobs {
                 self.pack(c, Squid, (x, y, z), CAP_SQUID);
             }
         }
-        if self.clock % 40 == 0 && n(&self.list, &[Zombie, Skeleton, Creeper, Spider, Slime]) < CAP_MONSTERS {
+        if self.clock % 40 == 0 && self.difficulty > 0 && n(&self.list, &[Zombie, Skeleton, Creeper, Spider, Slime]) < CAP_MONSTERS {
             for _ in 0..8 {
                 let (x, z) = ring(&mut self.rng);
                 let y = ((c.player.y as i32) + self.rng.next_int_bound(41) - 20).clamp(1, 126);
@@ -761,6 +768,9 @@ impl Mobs {
     /// player must suffer or the world must do (`Hurt`, `Boom`).
     pub fn update(&mut self, dt: f32, c: &Ctx, drops: &mut Drops) -> Vec<Ev> {
         let mut ev = Vec::new();
+        if self.difficulty == 0 {
+            self.list.retain(|m| !hostile(m.kind));
+        }
         self.acc += dt;
         while self.acc >= TICK {
             self.acc -= TICK;

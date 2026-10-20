@@ -3,10 +3,11 @@
 //! (`ScaledResolution`: the biggest whole scale that leaves 320 x 240) and drawn with the HUD pipeline.
 //!
 //! UNVERIFIED (b1.7.3 has no such thing): the world-type button of the create screen (`GuiCreateWorld` has none until 1.1) and the on-screen
-//! keyboard (the sign editor's, `decor::layout`) standing in for the keyboard. Not done: Multiplayer, Mods and Texture Packs, Options and
-//! Rename (drawn greyed out like a disabled `GuiButton`), the splash's calendar days, the local time zone (dates are UTC).
+//! keyboard (the sign editor's, `decor::layout`) standing in for the keyboard. Not done: Multiplayer, Mods and Texture Packs and
+//! Rename (drawn greyed out like a disabled `GuiButton`; Options is `options.rs`), the splash's calendar days, the local time zone (dates are UTC).
 
 use crate::input::touch_ui::ScreenEv;
+use crate::options::{OptEv, OptionsUi, Settings};
 use crate::render::hud::{sprites as sp, HudPipeline, HudVertex, NO_UV};
 use crate::world::decor::{self, Key};
 use std::path::{Path, PathBuf};
@@ -115,7 +116,7 @@ fn date(secs: u64) -> String {
 }
 
 /// The width of `t` in font pixels (GUI units at scale 1).
-fn tw(t: &str) -> f32 {
+pub(crate) fn tw(t: &str) -> f32 {
     HudPipeline::text_width(t) as f32
 }
 
@@ -123,7 +124,7 @@ fn now_nanos() -> u128 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos())
 }
 
-fn rgb(c: u32) -> [f32; 4] {
+pub(crate) fn rgb(c: u32) -> [f32; 4] {
     [(c >> 16 & 255) as f32 / 255.0, (c >> 8 & 255) as f32 / 255.0, (c & 255) as f32 / 255.0, 1.0]
 }
 
@@ -133,6 +134,8 @@ pub enum Scr {
     Select,
     Create,
     Delete,
+    /// `GuiOptions`, from the title screen's "Options...".
+    Options,
 }
 
 /// A `GuiButton`: id, rectangle in GUI units, label, enabled.
@@ -163,15 +166,24 @@ pub struct Menu {
     pub loading: Option<Info>,
     pub shown_loading: bool,
     pub quit: bool,
+    opt: OptionsUi,
+    /// `GameSettings.guiScale` of the last event / frame.
+    gs: u8,
 }
 
-/// `ScaledResolution`: (scale, width, height in GUI units).
-fn scaled(w: f32, h: f32) -> (f32, f32, f32) {
+/// `ScaledResolution` with `guiScale` `gs` (0 auto, else at most that scale): (scale, width, height in GUI units).
+pub(crate) fn scaled_gs(w: f32, h: f32, gs: u8) -> (f32, f32, f32) {
+    let max = if gs == 0 { 1000.0 } else { gs as f32 };
     let mut s = 1.0;
-    while (w / (s + 1.0)).floor() >= 320.0 && (h / (s + 1.0)).floor() >= 240.0 {
+    while s < max && (w / (s + 1.0)).floor() >= 320.0 && (h / (s + 1.0)).floor() >= 240.0 {
         s += 1.0;
     }
     (s, (w / s).ceil(), (h / s).ceil())
+}
+
+#[cfg(test)]
+fn scaled(w: f32, h: f32) -> (f32, f32, f32) {
+    scaled_gs(w, h, 0)
 }
 
 impl Menu {
@@ -199,6 +211,8 @@ impl Menu {
             loading: None,
             shown_loading: false,
             quit: false,
+            opt: OptionsUi::new(),
+            gs: 0,
         }
     }
 
@@ -214,7 +228,7 @@ impl Menu {
                     b(1, hw - 100.0, y, 200.0, "Singleplayer", true),
                     b(2, hw - 100.0, y + 24.0, 200.0, "Multiplayer", false),
                     b(3, hw - 100.0, y + 48.0, 200.0, "Mods and Texture Packs", false),
-                    b(0, hw - 100.0, y + 84.0, 98.0, "Options...", false),
+                    b(0, hw - 100.0, y + 84.0, 98.0, "Options...", true),
                     b(4, hw + 2.0, y + 84.0, 98.0, "Quit Game", true),
                 ]
             }
@@ -237,6 +251,7 @@ impl Menu {
                 let y = (gh / 6.0).floor() + 96.0;
                 vec![b(0, hw - 155.0, y, 150.0, "Delete", true), b(1, hw + 5.0, y, 150.0, "Cancel", true)]
             }
+            Scr::Options => Vec::new(),
         }
     }
 
@@ -258,8 +273,15 @@ impl Menu {
 
     // ---- input ----
 
-    pub fn event(&mut self, ev: ScreenEv, w: f32, h: f32) {
-        let (s, _, gh) = scaled(w, h);
+    pub fn event(&mut self, ev: ScreenEv, w: f32, h: f32, st: &mut Settings) {
+        self.gs = st.gui_scale;
+        if self.scr == Scr::Options {
+            if self.opt.event(ev, w, h, st) == Some(OptEv::Close) {
+                self.scr = Scr::Main;
+            }
+            return;
+        }
+        let (s, _, gh) = scaled_gs(w, h, self.gs);
         match ev {
             ScreenEv::Down(x, y) => {
                 self.press = Some((x / s, y / s));
@@ -299,7 +321,7 @@ impl Menu {
             self.folder = folder_for(&self.root, &self.name);
             return;
         }
-        let (s, gw, gh) = scaled(w, h);
+        let (s, gw, gh) = scaled_gs(w, h, self.gs);
         let (gx, gy) = (x / s, y / s);
         let hit = |r: [f32; 4]| gx >= r[0] && gx < r[0] + r[2] && gy >= r[1] && gy < r[1] + r[3];
         if let Some(Btn(id, _, _, _)) = self.buttons(gw, gh).into_iter().find(|b| b.3 && hit(b.1)) {
@@ -334,6 +356,7 @@ impl Menu {
     /// `actionPerformed` of the screen's button `id`.
     fn pressed(&mut self, id: u8) {
         match (self.scr, id) {
+            (Scr::Main, 0) => (self.opt, self.scr) = (OptionsUi::new(), Scr::Options),
             (Scr::Main, 1) => self.open_list(),
             (Scr::Main, 4) => self.quit = true,
             (Scr::Select, 0) => self.scr = Scr::Main,
@@ -370,8 +393,9 @@ impl Menu {
     // ---- drawing ----
 
     /// The whole screen into `v` for a `w` x `h` px surface.
-    pub fn draw(&mut self, v: &mut Vec<HudVertex>, w: f32, h: f32) {
-        let (s, gw, gh) = scaled(w, h);
+    pub fn draw(&mut self, v: &mut Vec<HudVertex>, w: f32, h: f32, st: &Settings) {
+        self.gs = st.gui_scale;
+        let (s, gw, gh) = scaled_gs(w, h, self.gs);
         let hw = (gw / 2.0).floor();
         self.shown_loading = self.loading.is_some();
         let ms = self.born.elapsed().as_millis() as f32;
@@ -383,6 +407,10 @@ impl Menu {
         if self.loading.is_some() {
             txt(v, hw, gh / 2.0 - 20.0, "Loading level", 0xFFFFFF, true);
             txt(v, hw, gh / 2.0 + 4.0, "Building terrain", 0xFFFFFF, true);
+            return;
+        }
+        if self.scr == Scr::Options {
+            self.opt.draw(v, w, h, st, false);
             return;
         }
         if let Some(t) = self.typing {
@@ -420,6 +448,7 @@ impl Menu {
                     text_box(v, s, *r, t, false);
                 }
             }
+            Scr::Options => {}
             Scr::Delete => {
                 let name = self.sel.and_then(|i| self.worlds.get(i)).map_or("", |w| w.name.as_str());
                 txt(v, hw, 70.0, "Are you sure you want to delete this world?", 0xFFFFFF, true);
@@ -489,7 +518,7 @@ impl Menu {
 }
 
 /// `drawBackground`: `background.png` over `r` (GUI units), one texture per 32 x 32, tinted `tint`, shifted up by `scroll`. Cut at `r`'s edges.
-fn dirt(v: &mut Vec<HudVertex>, s: f32, r: [f32; 4], scroll: f32, tint: u32) {
+pub(crate) fn dirt(v: &mut Vec<HudVertex>, s: f32, r: [f32; 4], scroll: f32, tint: u32) {
     let (x1, y1) = (r[0] + r[2], r[1] + r[3]);
     let mut y = r[1];
     while y < y1 {
@@ -512,7 +541,7 @@ fn rect(v: &mut Vec<HudVertex>, s: f32, r: [f32; 4], c: u32) {
 }
 
 /// `Gui.drawGradientRect` (top colour to bottom colour), GUI units.
-fn grad(v: &mut Vec<HudVertex>, s: f32, r: [f32; 4], top: [f32; 4], bottom: [f32; 4]) {
+pub(crate) fn grad(v: &mut Vec<HudVertex>, s: f32, r: [f32; 4], top: [f32; 4], bottom: [f32; 4]) {
     let p = |x: f32, y: f32, c: [f32; 4]| HudVertex { pos: [x * s, y * s], color: c, uv: NO_UV };
     let (tl, tr, br, bl) = (p(r[0], r[1], top), p(r[0] + r[2], r[1], top), p(r[0] + r[2], r[1] + r[3], bottom), p(r[0], r[1] + r[3], bottom));
     v.extend([tl, tr, br, tl, br, bl]);
@@ -543,8 +572,8 @@ mod tests {
         let (s, gw, gh) = scaled(w, h);
         let r = m.buttons(gw, gh).into_iter().find(|b| b.2 == label && b.3).unwrap_or_else(|| panic!("no enabled {label} on {:?}", m.scr)).1;
         let (x, y) = ((r[0] + r[2] / 2.0) * s, (r[1] + r[3] / 2.0) * s);
-        m.event(ScreenEv::Down(x, y), w, h);
-        m.event(ScreenEv::Up(x, y), w, h);
+        m.event(ScreenEv::Down(x, y), w, h, &mut Settings::default());
+        m.event(ScreenEv::Up(x, y), w, h, &mut Settings::default());
     }
 
     #[test]
@@ -581,7 +610,7 @@ mod tests {
         let info = m.loading.clone().expect("create starts loading");
         assert_eq!((info.name.as_str(), info.folder.as_str(), info.tectonic), ("New World", "New World", true));
         let mut v = Vec::new();
-        m.draw(&mut v, sz.0, sz.1);
+        m.draw(&mut v, sz.0, sz.1, &Settings::default());
         assert!(m.shown_loading && !v.is_empty());
 
         let mut m = Menu::new(&root);
@@ -590,14 +619,14 @@ mod tests {
         assert_eq!((m.worlds[0].seed, m.worlds[0].tectonic), (info.seed, true));
         let (s, gw, gh) = scaled(sz.0, sz.1);
         let (x, y) = ((gw / 2.0).floor() * s, (Menu::list_box(gh).0 + 20.0) * s);
-        m.event(ScreenEv::Down(x, y), sz.0, sz.1);
-        m.event(ScreenEv::Up(x, y), sz.0, sz.1);
+        m.event(ScreenEv::Down(x, y), sz.0, sz.1, &mut Settings::default());
+        m.event(ScreenEv::Up(x, y), sz.0, sz.1, &mut Settings::default());
         assert_eq!(m.sel, Some(0));
         tap(&mut m, "Delete", sz);
         assert_eq!(m.scr, Scr::Delete);
         tap(&mut m, "Delete", sz);
         assert!(m.worlds.is_empty() && !saves(&root).join("New World").exists());
-        m.draw(&mut v, sz.0, sz.1);
+        m.draw(&mut v, sz.0, sz.1, &Settings::default());
     }
 
     #[test]

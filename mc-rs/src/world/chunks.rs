@@ -113,14 +113,12 @@ pub struct Mesh {
     slot: u32,
     /// Index elements of the solid and cut-out layers: what `mesh_gen` compares to tell whether the geometry changed.
     pub index_count: u32,
-    /// The quads are sorted by facing group, then by 16-block section (`pack`): group `g`, section `s` of the solid layer is
-    /// `starts[g * SECTIONS + s]..starts[g * SECTIONS + s + 1]`, the cut-out layer follows (`cut`). All of them, and `water`, are index
-    /// offsets into the shared index buffer: the range that draws those quads; `[END]` is where the layer ends.
-    starts: Starts,
-    cut: Starts,
-    /// The water quads (blended, drawn after everything else) follow in the same run, sorted the same way but all in `UN` (water is
-    /// drawn without back-face culling, so no facing can be skipped).
-    water: Option<Starts>,
+    /// The quads are sorted by 16-block section: section `s` of the solid layer is `starts[s]..starts[s + 1]` (`pack`), the cut-out
+    /// layer follows (`cut`). All of them, and `water`, are index offsets into the shared index buffer: the range that draws those quads.
+    starts: [u32; SECTIONS + 1],
+    cut: [u32; SECTIONS + 1],
+    /// The water quads (blended, drawn after everything else) follow in the same run, sorted by section the same way.
+    water: Option<[u32; SECTIONS + 1]>,
     /// Per section, which faces see each other through it (`embeddium::vis`): what the occlusion walk reads.
     vis: [u64; SECTIONS],
 }
@@ -261,89 +259,6 @@ pub fn in_range(shape: Shape, eye: Vec3, min: Vec3, max: Vec3, rh: f32, rv: f32)
     d.y <= rv && dh2 + if shape == Shape::Sphere { d.y * d.y } else { 0.0 } <= rh * rh
 }
 
-/// The facing groups a layer's quads are stored in (VulkanMod's `QuadFacing`, trimmed to what pays): a quad whose front side looks along
-/// +X, +Z, -Z or -X (`XP`, `ZP`, `ZN`, `XN`), and `UN`: everything else (tops, bottoms, slanted plants, torches). The order is the storage
-/// order; `UN` sits in the middle so that `UN` plus either neighbouring side group is one run, which is the common case. Tops and bottoms
-/// stay in `UN` on purpose: the eye is almost always above the terrain, so they would be drawn anyway, and each extra group costs draws.
-const NG: usize = 5;
-const XP: usize = 0;
-const ZP: usize = 1;
-const UN: usize = 2;
-const ZN: usize = 3;
-const XN: usize = 4;
-/// Where a layer's `Starts` end: the first entry past the last group's last section.
-const END: usize = NG * SECTIONS;
-/// Offsets of one layer: group `g`, section `s` is `st[g * SECTIONS + s]..st[g * SECTIONS + s + 1]`; each is where the previous ends.
-type Starts = [u32; END + 1];
-
-/// Lever: `false` puts every quad in `UN`, which is the old layout (sorted by section only) and the old draw count.
-const FACING_CULL: bool = true;
-
-/// The group of the triangle `a, b, c` (positions): the sign of its geometric normal `(b - a) x (c - a)` is the side the pipeline calls
-/// the front (`cull_mode: Back`, CCW: the mesher's outward faces have it pointing outward, see the test
-/// `facing_groups_match_the_face_templates`). Axis-aligned only if the other two components are zero (1/1024 slack for rounding): a
-/// slanted face would be seen from a side its group says it cannot be. The mesher's positions are chunk-local and on a 1/16 grid (or
-/// the torch's lean, which is slanted anyway), so its faces are classified exactly; anything else falls into `UN` (always drawn).
-fn group_of(a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> usize {
-    if !FACING_CULL {
-        return UN;
-    }
-    let (e, f) = ([b[0] - a[0], b[1] - a[1], b[2] - a[2]], [c[0] - a[0], c[1] - a[1], c[2] - a[2]]);
-    let n = [e[1] * f[2] - e[2] * f[1], e[2] * f[0] - e[0] * f[2], e[0] * f[1] - e[1] * f[0]];
-    let (ax, ay, az) = (n[0].abs(), n[1].abs(), n[2].abs());
-    const SLACK: f32 = 1.0 / 1024.0;
-    if ax > 0.0 && ay <= ax * SLACK && az <= ax * SLACK {
-        if n[0] > 0.0 { XP } else { XN }
-    } else if az > 0.0 && ax <= az * SLACK && ay <= az * SLACK {
-        if n[2] > 0.0 { ZP } else { ZN }
-    } else {
-        UN
-    }
-}
-
-/// The group of a quad as the GPU draws it (corners in drawing order; the shared index buffer draws `0, 1, 2` and `2, 3, 0`): both
-/// triangles must agree, a bent or collapsed quad is `UN`.
-fn quad_group(p: [[f32; 3]; 4]) -> usize {
-    let (a, b) = (group_of(p[0], p[1], p[2]), group_of(p[2], p[3], p[0]));
-    if a == b { a } else { UN }
-}
-
-/// Which side groups can have a face turned to the eye, for the chunk column at `k`: a +X face of the chunk lies on a plane at or beyond
-/// the chunk's west edge, so it can only face an eye east of that edge, and so on. One block of slack at each edge (the same one
-/// `update_visible` gives a section's box, and the draw loop's cover for a face on a section border). `UN` always.
-fn faces_to(eye: Vec3, k: Key) -> [bool; NG] {
-    let (x0, z0) = (k.0 as f32 * 16.0, k.1 as f32 * 16.0);
-    let mut on = [true; NG];
-    on[XP] = eye.x > x0 - 1.0;
-    on[XN] = eye.x < x0 + 17.0;
-    on[ZP] = eye.z > z0 - 1.0;
-    on[ZN] = eye.z < z0 + 17.0;
-    on
-}
-
-/// The draw ranges of one layer of one chunk: the runs of the sections in `mask` (bit `s`) in the groups in `on`, with ranges that touch
-/// merged, so skipping a group costs a draw call only when something is left on both sides of it. Empty ranges are no break.
-fn runs(starts: &Starts, mask: u8, on: [bool; NG], mut draw: impl FnMut(u32, u32)) {
-    let mut run: Option<(u32, u32)> = None;
-    for i in 0..END {
-        let (a, b) = (starts[i], starts[i + 1]);
-        if a == b || !on[i / SECTIONS] || mask >> (i % SECTIONS) & 1 == 0 {
-            continue;
-        }
-        run = match run {
-            Some((ra, rb)) if rb == a => Some((ra, b)),
-            Some((ra, rb)) => {
-                draw(ra, rb);
-                Some((a, b))
-            }
-            None => Some((a, b)),
-        };
-    }
-    if let Some((a, b)) = run {
-        draw(a, b);
-    }
-}
-
 /// One quad of the mesher's output (`mesh::build_split_tinted`): its first vertex and how its index list drew it. The mesher draws a quad
 /// as `b, b+1, b+2, b, b+2, b+3`; a smooth face may take the other diagonal (`b+1, b+2, b+3, b+1, b+3, b`) and a plant, rail or torch is
 /// seen from both sides (that list, then the same triangles reversed: 12 indices).
@@ -391,22 +306,21 @@ fn encode_vertex(f: &[f32]) -> Packed {
 }
 
 /// A chunk's quads as the GPU takes them: 16-byte vertices, four to a quad, the solid layer, then the cut-out layer, then the water, each
-/// sorted by facing group and 16-block section. `starts`, `cut` and `wstarts` are QUAD numbers from the first vertex of the mesh; layer `x`
-/// group `g` section `s` is `x[g * SECTIONS + s]..x[g * SECTIONS + s + 1]` (`Starts`).
+/// sorted by 16-block section. `starts`, `cut` and `wstarts` are QUAD numbers from the first vertex of the mesh; layer `x` section `s` is
+/// `x[s]..x[s + 1]`.
 #[derive(Debug, PartialEq)]
 struct Quads {
     verts: Vec<Packed>,
-    starts: Starts,
-    cut: Starts,
-    wstarts: Starts,
+    starts: [u32; SECTIONS + 1],
+    cut: [u32; SECTIONS + 1],
+    wstarts: [u32; SECTIONS + 1],
 }
 
-/// Sorts the mesher's quads into layers (a quad that shows a see-through tile is cut-out: the tile at the centre of its four uvs), the
-/// facing group they look along (`quad_group`; not for water) and the 16-block section they sit in (the highest vertex minus half a block
-/// picks the block, so top, side and plant faces land in their own block's section; a face on a section border may land in either, which
-/// the draw loop's one-block margin covers), and encodes them. The other diagonal becomes a rotation of the corners and the second side a
-/// second quad with the corners reversed (its own group: it looks the other way), so the one shared index pattern
-/// (`embeddium::quad_index`) draws exactly the triangles the mesher's own index list did. Inside a bucket the mesher's order is kept.
+/// Sorts the mesher's quads into layers (a quad that shows a see-through tile is cut-out: the tile at the centre of its four uvs) and
+/// the 16-block section they sit in (the highest vertex minus half a block picks the block, so top, side and plant faces land in their
+/// own block's section; a face on a section border may land in either, which the draw loop's one-block margin covers), and encodes them.
+/// The other diagonal becomes a rotation of the corners and the second side a second quad with the corners reversed, so the one shared
+/// index pattern (`embeddium::quad_index`) draws exactly the triangles the mesher's own index list did.
 fn pack(verts: &[f32], solid: &[u32], water: &[u32]) -> Quads {
     let vf = mesh::VF;
     let at = |v: u32, k: usize| &verts[(v as usize + k) * vf..][..vf];
@@ -415,39 +329,31 @@ fn pack(verts: &[f32], solid: &[u32], water: &[u32]) -> Quads {
         (((top - 0.5).floor().max(0.0) as usize) >> 4).min(SECTIONS - 1)
     };
     let centre = |v: u32| [(0..4).map(|k| at(v, k)[3]).sum::<f32>() / 4.0, (0..4).map(|k| at(v, k)[4]).sum::<f32>() / 4.0];
-    // Per layer: (bucket `group * SECTIONS + section`, first vertex, corner order) of every quad as the GPU draws it.
-    let mut layers: [Vec<(usize, u32, [usize; 4])>; 3] = Default::default();
-    let mut add = |layer: usize, q: Q| {
-        let orders: &[[usize; 4]] = match (q.flip, q.both) {
-            (true, _) => &[[1, 2, 3, 0]],
-            (false, false) => &[[0, 1, 2, 3]],
-            (false, true) => &[[0, 1, 2, 3], [0, 3, 2, 1]],
-        };
-        for &o in orders {
-            let g = if layer < 2 { quad_group(o.map(|k| [at(q.v, k)[0], at(q.v, k)[1], at(q.v, k)[2]])) } else { UN };
-            layers[layer].push((g * SECTIONS + section(q.v), q.v, o));
-        }
-    };
+    let mut layers: [Vec<(usize, Q)>; 3] = [Vec::new(), Vec::new(), Vec::new()];
     for q in quads_of(solid) {
-        add(crate::render::atlas::is_cutout(centre(q.v)) as usize, q);
+        layers[crate::render::atlas::is_cutout(centre(q.v)) as usize].push((section(q.v), q));
     }
     for q in quads_of(water) {
-        add(2, q);
+        layers[2].push((section(q.v), q));
     }
-    let mut out = Quads { verts: Vec::with_capacity((solid.len() + water.len()) / 6 * 4), starts: [0; END + 1], cut: [0; END + 1], wstarts: [0; END + 1] };
-    for (l, list) in layers.iter_mut().enumerate() {
-        list.sort_by_key(|e| e.0); // stable
-        let mut starts = [0u32; END + 1];
-        let mut n = 0;
-        for b in 0..END {
-            starts[b] = out.verts.len() as u32 / 4;
-            while n < list.len() && list[n].0 == b {
-                let (_, v, o) = list[n];
-                o.iter().for_each(|&k| out.verts.push(encode_vertex(at(v, k))));
-                n += 1;
+    let mut out = Quads { verts: Vec::with_capacity((solid.len() + water.len()) / 6 * 4), starts: [0; SECTIONS + 1], cut: [0; SECTIONS + 1], wstarts: [0; SECTIONS + 1] };
+    for (l, list) in layers.iter().enumerate() {
+        let mut starts = [0u32; SECTIONS + 1];
+        for s in 0..SECTIONS {
+            starts[s] = out.verts.len() as u32 / 4;
+            for &(_, q) in list.iter().filter(|(sec, _)| *sec == s) {
+                let mut put = |order: [usize; 4]| order.iter().for_each(|&k| out.verts.push(encode_vertex(at(q.v, k))));
+                if q.flip {
+                    put([1, 2, 3, 0]);
+                } else {
+                    put([0, 1, 2, 3]);
+                    if q.both {
+                        put([0, 3, 2, 1]);
+                    }
+                }
             }
         }
-        starts[END] = out.verts.len() as u32 / 4;
+        starts[SECTIONS] = out.verts.len() as u32 / 4;
         match l {
             0 => out.starts = starts,
             1 => out.cut = starts,
@@ -496,9 +402,9 @@ struct PopJob {
 /// A finished mesh, short of its GPU buffers: the packed quads (`pack`) and the section ranges of its three layers.
 struct Built {
     verts: Vec<Packed>,
-    starts: Starts,
-    cut: Starts,
-    wstarts: Starts,
+    starts: [u32; SECTIONS + 1],
+    cut: [u32; SECTIONS + 1],
+    wstarts: [u32; SECTIONS + 1],
     vis: [u64; SECTIONS],
 }
 
@@ -553,6 +459,14 @@ struct Entry {
     /// nothing to draw). Every edit clears it, which queues a new job once the running one (if any) has landed.
     meshed: bool,
     mesh: Option<Mesh>,
+}
+
+/// Offsets of the raw ring (radius + 2) round a chunk, nearest first.
+fn ring_for(radius: i32) -> Vec<Key> {
+    let r = radius + 2;
+    let mut ring: Vec<Key> = (-r..=r).flat_map(|dx| (-r..=r).map(move |dz| (dx, dz))).filter(|&(dx, dz)| dx * dx + dz * dz <= r * r).collect();
+    ring.sort_by_key(|&(dx, dz)| dx * dx + dz * dz);
+    ring
 }
 
 pub struct ChunkManager {
@@ -613,8 +527,6 @@ pub struct ChunkManager {
     culler: Culler,
     /// Per chunk column, the sections (bit `s`) `update_visible` found drawable this frame.
     visible: HashMap<Key, u8>,
-    /// The eye `update_visible` last ran for: `draw_ranges` skips the side groups that face away from it (`faces_to`).
-    eye: Vec3,
     /// The part of `visible` within `WATER_RANGE`: the sections whose real water is drawn (and whose LoD water sheet is cut).
     wet: HashMap<Key, u8>,
     /// Bumped when `visible` or `wet` changes (a turn, a step, a mesh): the far terrain's cut of water sheets follows it.
@@ -707,17 +619,22 @@ impl ChunkManager {
                 .expect("spawn chunk worker");
         }
 
-        let r = radius + 2;
-        let mut ring: Vec<Key> = (-r..=r)
-            .flat_map(|dx| (-r..=r).map(move |dz| (dx, dz)))
-            .filter(|&(dx, dz)| dx * dx + dz * dz <= r * r)
-            .collect();
-        ring.sort_by_key(|&(dx, dz)| dx * dx + dz * dz);
+        let ring = ring_for(radius);
 
         let gen = make(seed);
         Self { chunks: Chunks::default(), pending: HashSet::new(), ring, radius, center: None, max_in_flight: workers * 2, built, meshing: HashSet::new(), max_meshing: workers * 2,
                populated_rx, populating: HashMap::new(), busy: HashSet::new(), max_populating: workers, stamp: 0,
-               cm: gen.manager(), biome_area: None, gen, jobs, done, light: light::LightLink::spawn(), sky_sub: 0, mesh_gen: 0, dir: None, saved: HashSet::new(), writer: None, changes: Vec::new(), fresh_water: Vec::new(), loot: Vec::new(), spawners: Vec::new(), culler: Culler::default(), visible: HashMap::new(), eye: Vec3::ZERO, wet: HashMap::new(), vis_gen: 0, order: Vec::new(), ingest: Vec::new(), ingested: HashSet::new(), pages: Pages::default() }
+               cm: gen.manager(), biome_area: None, gen, jobs, done, light: light::LightLink::spawn(), sky_sub: 0, mesh_gen: 0, dir: None, saved: HashSet::new(), writer: None, changes: Vec::new(), fresh_water: Vec::new(), loot: Vec::new(), spawners: Vec::new(), culler: Culler::default(), visible: HashMap::new(), wet: HashMap::new(), vis_gen: 0, order: Vec::new(), ingest: Vec::new(), ingested: HashSet::new(), pages: Pages::default() }
+    }
+
+    /// The render distance in chunks.
+    pub fn radius(&self) -> i32 {
+        self.radius
+    }
+
+    /// A new render distance (the Video Settings option): the ring that is generated and kept follows at the next `update`.
+    pub fn set_radius(&mut self, radius: i32) {
+        (self.radius, self.ring) = (radius, ring_for(radius));
     }
 
     /// Keep this world in `dir`: chunks found there are loaded instead of generated, and edited ones are written back
@@ -1203,7 +1120,6 @@ impl ChunkManager {
             let max = min + Vec3::new(16.0, 18.0, 16.0);
             in_range(shape, eye, min, max, rh, rv) && in_frustum(min, max)
         };
-        self.eye = eye;
         let (old, old_wet) = (std::mem::take(&mut self.visible), std::mem::take(&mut self.wet));
         let ey = (eye.y.floor() as i32) >> 4;
         let inside = (0..SECTIONS as i32).contains(&ey); // above or below the world the eye's section says nothing about the view
@@ -1246,8 +1162,8 @@ impl ChunkManager {
         self.drawn(k) && self.wet.get(&k).is_some_and(|m| (0..SECTIONS as i32).contains(&sy) && m >> sy & 1 != 0)
     }
 
-    /// The main pass's draw loop: draws every run of sections `update_visible` found, in the facing groups that can face the eye (empty
-    /// ranges are skipped, touching ones are one range: `runs`), for one render `Layer`. The shared index buffer is bound once, a page's vertex buffer once per
+    /// The main pass's draw loop: draws every run of neighbouring sections `update_visible` found (empty sections are skipped, touching ones
+    /// are one range, so a chunk is mostly one draw), for one render `Layer`. The shared index buffer is bound once, a page's vertex buffer once per
     /// page, and a chunk's origin (`origins`, group 1) once per chunk.
     pub fn draw_ranges(&self, layer: Layer, rp: &mut wgpu::RenderPass<'_>, origins: &DrawOrigins) {
         let water = layer == Layer::Water;
@@ -1264,26 +1180,34 @@ impl ChunkManager {
                 (Layer::Solid, _) => &m.starts,
                 (Layer::Cutout, _) => &m.cut,
             };
-            // The side groups that cannot face the eye are skipped (`faces_to`): their quads would all be back-face culled anyway, but
-            // only after the vertex shader ran for them. Water has no groups but `UN`, which is always on.
+            let mut run: Option<(u32, u32)> = None;
             let mut grouped = false;
-            runs(starts, mask, faces_to(self.eye, *k), |a, b| {
-                if !quads_bound {
-                    let Some(q) = self.pages.quads.as_ref() else { return };
-                    rp.set_index_buffer(q.slice(..), wgpu::IndexFormat::Uint32);
-                    quads_bound = true;
+            for s in 0..=SECTIONS {
+                let on = s < SECTIONS && starts[s + 1] > starts[s] && mask >> s & 1 != 0;
+                match (on, run) {
+                    (true, None) => run = Some((starts[s], starts[s + 1])),
+                    (true, Some((a, _))) => run = Some((a, starts[s + 1])),
+                    (false, Some((a, b))) => {
+                        if !quads_bound {
+                            let Some(q) = self.pages.quads.as_ref() else { return };
+                            rp.set_index_buffer(q.slice(..), wgpu::IndexFormat::Uint32);
+                            quads_bound = true;
+                        }
+                        if bound != Some(m.page) {
+                            let Some(p) = self.pages.get(m.page) else { return };
+                            rp.set_vertex_buffer(0, p.vbuf.slice(..));
+                            bound = Some(m.page);
+                        }
+                        if !grouped {
+                            rp.set_bind_group(1, &origins.group, &[DrawOrigins::offset(m.slot)]);
+                            grouped = true;
+                        }
+                        rp.draw_indexed(a..b, 0, 0..1); // the shared indices name the page's vertices by their absolute number
+                        run = None;
+                    }
+                    _ => {}
                 }
-                if bound != Some(m.page) {
-                    let Some(p) = self.pages.get(m.page) else { return };
-                    rp.set_vertex_buffer(0, p.vbuf.slice(..));
-                    bound = Some(m.page);
-                }
-                if !grouped {
-                    rp.set_bind_group(1, &origins.group, &[DrawOrigins::offset(m.slot)]);
-                    grouped = true;
-                }
-                rp.draw_indexed(a..b, 0, 0..1); // the shared indices name the page's vertices by their absolute number
-            });
+            }
         };
         // `order` (near to far, from `update_visible`). Opaque terrain goes near to far inside each page, so what is drawn first hides the rest
         // from the depth test (early-Z / the tiler's hidden-surface removal); translucent water blends over what is behind it, so it goes far to
@@ -1501,10 +1425,10 @@ impl ChunkManager {
                     page,
                     v,
                     slot,
-                    index_count: cut[END] * quad_index::ELEMENTS_PER_QUAD,
+                    index_count: cut[SECTIONS] * quad_index::ELEMENTS_PER_QUAD,
                     starts: starts.map(|q| at(q)),
                     cut: cut.map(|q| at(q)),
-                    water: (wstarts[END] > wstarts[0]).then(|| wstarts.map(|q| at(q))),
+                    water: (wstarts[SECTIONS] > wstarts[0]).then(|| wstarts.map(|q| at(q))),
                     vis,
                 })
             } else {
@@ -1847,68 +1771,10 @@ mod tests {
             (v[i * vf + 3], v[i * vf + 4], v[i * vf + 6], v[i * vf + 7]) = (0.07, 0.01, 255.0, mesh::WHITE); // tile 1, stone: not cut-out
         });
         let q = pack(&v, &[4, 5, 6, 4, 6, 7, 0, 1, 2, 0, 2, 3], &[]);
-        let u = UN * SECTIONS; // flat quads with no area are `UN`: the old section sort
-        assert_eq!((q.verts.len(), q.starts[u + 1], q.starts[u + 2], q.starts[u + 3], q.starts[END]), (8, 1, 1, 2, 2));
+        assert_eq!((q.verts.len(), q.starts[1], q.starts[2], q.starts[3], q.starts[SECTIONS]), (8, 1, 1, 2, 2));
         assert_eq!(vertex::decode(&q.verts[0]).pos[1], 5.0);
         assert_eq!(vertex::decode(&q.verts[4]).pos[1], 40.0);
         assert!(q.cut.iter().all(|&c| c == 2) && q.wstarts.iter().all(|&c| c == 2), "no cut-out, no water: empty layers after the solid ones");
-    }
-
-    /// The six face templates of the mesher land in the group their front looks along (the calibration `group_of` relies on: the
-    /// pipeline culls back faces and the outward faces are front), tops and bottoms in `UN`; a slanted quad and a degenerate one too.
-    #[test]
-    fn facing_groups_match_the_face_templates() {
-        let vf = mesh::VF;
-        let corners = |v: &[f32]| -> [[f32; 3]; 4] { std::array::from_fn(|k| [v[k * vf], v[k * vf + 1], v[k * vf + 2]]) };
-        // `push_face` order: +X, -X, +Y, -Y, +Z, -Z.
-        for (face, want) in [XP, XN, UN, UN, ZP, ZN].into_iter().enumerate() {
-            let (mut v, mut i) = (Vec::new(), Vec::new());
-            mesh::push_face(&mut v, &mut i, face, [3.0, 4.0, 5.0], [4.0, 5.0, 6.0], 1, 1.0);
-            assert_eq!(quad_group(corners(&v)), want, "face {face}");
-        }
-        assert_eq!(quad_group([[0.0, 0.0, 0.0], [1.0, 0.0, 1.0], [1.0, 1.0, 1.0], [0.0, 1.0, 0.0]]), UN, "a plant's diagonal: normal (1, 0, -1)");
-        assert_eq!(quad_group([[0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.4, 1.0, 1.0], [0.4, 1.0, 0.0]]), UN, "a torch's lean: X-ish with a Y part");
-        assert_eq!(quad_group([[1.0; 3]; 4]), UN, "no area");
-        // Reversed corners (the second side of a plant) look the other way.
-        let (mut v, mut i) = (Vec::new(), Vec::new());
-        mesh::push_face(&mut v, &mut i, 0, [0.0; 3], [1.0; 3], 1, 1.0);
-        let c = corners(&v);
-        assert_eq!((quad_group(c), quad_group([c[0], c[3], c[2], c[1]])), (XP, XN));
-    }
-
-    /// Quads are sorted by facing before section, offsets chain, and the draw ranges skip what faces away and merge what touches.
-    #[test]
-    fn facing_sort_and_draw_runs() {
-        // One +X quad (XP) and one -X (XN) in section 0, one XP in section 1 (y = 20), one top quad (UN) in section 0.
-        let (mut v, mut i) = (Vec::new(), Vec::new());
-        for (face, y) in [(0, 2.0), (1, 2.0), (0, 20.0), (2, 2.0)] {
-            mesh::push_face(&mut v, &mut i, face, [0.0, y, 0.0], [1.0, y + 1.0, 1.0], 1, 1.0);
-        }
-        let q = pack(&v, &i, &[]);
-        let st = q.starts;
-        let at = |g: usize, s: usize| (st[g * SECTIONS + s], st[g * SECTIONS + s + 1]);
-        assert_eq!((at(XP, 0), at(XP, 1)), ((0, 1), (1, 2)), "both +X quads first, section order inside");
-        assert_eq!((at(UN, 0), at(XN, 0)), ((2, 3), (3, 4)));
-        assert_eq!((st[END], q.verts.len()), (4, 16), "every quad is somewhere");
-        // The same quads as water: no groups, all `UN`, by section (water has no back-face culling).
-        let w = pack(&v, &[], &i);
-        assert_eq!((w.wstarts[UN * SECTIONS + 1], w.wstarts[UN * SECTIONS + 2], w.wstarts[END]), (3, 4, 4));
-        let drawn = |mask: u8, on: [bool; NG]| {
-            let mut r = Vec::new();
-            runs(&st, mask, on, |a, b| r.push((a, b)));
-            r
-        };
-        let all = [true; NG];
-        assert_eq!(drawn(0b11, all), vec![(0, 4)], "everything on touches: one draw");
-        assert_eq!(drawn(0b01, all), vec![(0, 1), (2, 4)], "section 1 off splits the +X run");
-        assert_eq!(drawn(0b11, [true, true, true, true, false]), vec![(0, 3)], "-X away: the rest is one draw");
-        assert_eq!(drawn(0b11, [false, true, true, true, true]), vec![(2, 4)], "+X away");
-        assert!(drawn(0, all).is_empty());
-        // Eye east of a chunk (x 0..16 at k = (0, 0)): -X faces cannot face it, +X can; far north-west: only the faces toward it.
-        assert_eq!(faces_to(Vec3::new(40.0, 70.0, 8.0), (0, 0)), [true, true, true, true, false]);
-        assert_eq!(faces_to(Vec3::new(-40.0, 70.0, -40.0), (0, 0)), [false, false, true, true, true]);
-        assert_eq!(faces_to(Vec3::new(8.0, 70.0, 8.0), (0, 0)), [true; NG], "inside the chunk every side can face the eye");
-        assert!(faces_to(Vec3::new(-0.5, 70.0, 8.0), (0, 0))[XP], "one block of slack at the edge");
     }
 
     /// The CPU half of meshing run from a snapshot (what a worker does) gives exactly what the mesher gives on the live arrays.
@@ -2058,7 +1924,7 @@ mod tests {
         assert_eq!((pa, pb, pages.list.len()), (0, 0, 1));
         assert!(va != vb && sa != sb && va % 4 == 0 && vb % 4 == 0, "whole quads, one slot each");
         assert!(pages.quads.is_some(), "the shared index buffer exists once a mesh is in");
-        let at = |page, v, slot| Mesh { page, v, slot, index_count: 6, starts: [0; END + 1], cut: [0; END + 1], water: None, vis: [0; SECTIONS] };
+        let at = |page, v, slot| Mesh { page, v, slot, index_count: 6, starts: [0; SECTIONS + 1], cut: [0; SECTIONS + 1], water: None, vis: [0; SECTIONS] };
         pages.free(&at(pa, va, sa));
         assert_eq!(put(&mut pages), (pa, va, sa), "the run and the slot come back");
         assert!(pages.put(&device, &queue, &origins, &vec![[0u8; vertex::STRIDE]; PAGE_VERTS as usize + 4], (0, 0)).is_none());

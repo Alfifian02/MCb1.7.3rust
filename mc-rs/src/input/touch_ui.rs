@@ -8,7 +8,7 @@
 //     digs (hold to keep digging, the dig can follow the look), like Minecraft PE.
 //   - Jump button: bottom right (held = keep jumping).
 //   - Hotbar: bottom centre, tap to select. Pause: top-right, inventory button just left of it.
-//   - Paused: only the pause button and the resume button respond.
+//   - Paused: the pause button toggles it; every other press is a tap on the game menu (`options::Pause`).
 //   - A container screen is open (inventory / workbench): every press except the two buttons is a tap, reported with
 //     `take_taps` for the screen to hit-test; move, look, jump and hotbar are off.
 //
@@ -47,19 +47,8 @@ pub enum ScreenEv {
 /// What a single pointer is currently doing.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum PointerRole {
-    /// Press landed on the pause button (or the resume button while paused).
-    /// Toggles pause on release.
+    /// Press landed on the pause button. Toggles pause on release.
     Pause,
-    /// Press landed on the temporary reset-world button (pause menu only). Arms on the first release, fires on the second.
-    Reset,
-    /// Press landed on the pre-generate button (pause menu only, top-left). Fires on release.
-    Pregen,
-    /// Press landed on the TEMPORARY fly button (pause menu only, beside Pregen). Toggles `TouchUi.flying` on release.
-    Fly,
-    /// The pause menu's LoD debug button (cycles the colouring).
-    LodDebug,
-    /// Press landed on the save-and-quit-to-title button (pause menu only). Fires on release.
-    Quit,
     /// Press landed on the zoom button. Zoomed while held (`TouchUi::zooming`).
     Zoom,
     /// Press landed on the inventory button. Opens / closes the screen on release.
@@ -98,17 +87,6 @@ pub struct LayoutRects {
     pub inventory: Rect,
     /// Hold to zoom (Zoomify), left of `inventory`.
     pub zoom: Rect,
-    pub resume: Rect,
-    /// TEMPORARY: reset-world button, under `resume`.
-    pub reset: Rect,
-    /// `GuiIngameMenu`'s "Save and quit to title", under `reset`.
-    pub quit: Rect,
-    /// The pre-generation switch, top-left (the pause menu only).
-    pub pregen: Rect,
-    /// TEMPORARY fly toggle, right of `pregen` (the pause menu only).
-    pub fly: Rect,
-    /// LoD debug colouring, under `pregen` (the pause menu only).
-    pub dbg: Rect,
     pub hotbar: [Rect; HOTBAR_SLOTS],
     pub jump: Rect,
     /// The sneak button, the d-pad's centre cell.
@@ -147,12 +125,6 @@ impl LayoutRects {
             *slot = (hb_x0 + cell * i as f32, hb_y, cell, cell);
         }
 
-        let bw = (0.8 * u).min(w * 0.6);
-        let bh = 0.16 * u;
-        let resume = ((w - bw) * 0.5, (h - bh) * 0.5 - bh * 0.45, bw, bh);
-        let reset = (resume.0, resume.1 + bh * 1.25, bw, bh * 0.8);
-        let quit = (resume.0, resume.1 + bh * 2.15, bw, bh * 0.8);
-
         // The d-pad: a 3 x 3 block of square cells, its bottom edge half a pad above the hotbar row, so it clears the hotbar at any ratio.
         let dpad_gap = 0.012 * u;
         let step = 0.12 * u + dpad_gap;
@@ -163,31 +135,17 @@ impl LayoutRects {
         let jw = 0.16 * u;
         let jump = (w - pad * 1.5 - jw, cy - jw * 0.5, jw, jw);
 
-        let pregen = (pad, pad, (0.6 * u).min(w * 0.4), ps * 0.8);
-        let fly = (pregen.0 + pregen.2 + pad * 0.5, pad, 0.3 * u, ps * 0.8);
-        let dbg = (pregen.0, pregen.1 + pregen.3 + pad * 0.5, pregen.2, ps * 0.8);
-
-        Self { width: w, pause, inventory, zoom, resume, reset, quit, pregen, fly, dbg, hotbar, jump, sneak: cell(0.0, 0.0), dpad, dpad_gap }
+        Self { width: w, pause, inventory, zoom, hotbar, jump, sneak: cell(0.0, 0.0), dpad, dpad_gap }
     }
 
-    /// Hit-test a press. `None` means the press is ignored. While paused only
-    /// the pause and resume buttons respond; with a `screen` open everything but the two buttons is a tap.
+    /// Hit-test a press. `None` means the press is ignored. The pause button always answers; while paused everything else is a tap on
+    /// the game menu (`options::Pause`); with a `screen` open everything but the pause and inventory buttons is a tap.
     pub fn hit_test(&self, x: f32, y: f32, paused: bool, screen: bool) -> Option<PointerRole> {
-        if in_rect(self.pause, x, y) || (paused && in_rect(self.resume, x, y)) {
+        if in_rect(self.pause, x, y) {
             return Some(PointerRole::Pause);
         }
         if paused {
-            return if in_rect(self.reset, x, y) {
-                Some(PointerRole::Reset)
-            } else if in_rect(self.pregen, x, y) {
-                Some(PointerRole::Pregen)
-            } else if in_rect(self.fly, x, y) {
-                Some(PointerRole::Fly)
-            } else if in_rect(self.dbg, x, y) {
-                Some(PointerRole::LodDebug)
-            } else {
-                in_rect(self.quit, x, y).then_some(PointerRole::Quit)
-            };
+            return Some(PointerRole::Tap);
         }
         if in_rect(self.inventory, x, y) {
             return Some(PointerRole::Inventory);
@@ -248,12 +206,6 @@ pub struct TouchUi {
     pub screen: bool,
     /// The inventory button was released since the last `take_inventory`.
     inventory: bool,
-    /// TEMPORARY reset-world button: armed by one tap (drawn bright), confirmed by the next; leaving the pause menu disarms it.
-    pub reset_armed: bool,
-    reset: bool,
-    quit: bool,
-    pregen: bool,
-    lod_debug: bool,
     /// A menu screen (`menu::Menu`) is up: every press is a tap, the pause and inventory buttons included.
     pub menu: bool,
     /// Finger events on an open screen since the last `take_screen_events`.
@@ -280,35 +232,16 @@ impl TouchUi {
             place: false,
             screen: false,
             inventory: false,
-            reset_armed: false,
-            reset: false,
-            quit: false,
-            pregen: false,
-            lod_debug: false,
             menu: false,
             events: Vec::new(),
             cursor_pos: (w as f32 * 0.5, h as f32 * 0.5),
         }
     }
 
-    /// The reset-world button was confirmed (tapped twice) since the last call.
-    pub fn take_reset(&mut self) -> bool {
-        std::mem::take(&mut self.reset)
-    }
-
-    /// The pre-generate button was tapped since the last call.
-    pub fn take_pregen(&mut self) -> bool {
-        std::mem::take(&mut self.pregen)
-    }
-
-    /// The LoD debug button was tapped since the last call.
-    pub fn take_lod_debug(&mut self) -> bool {
-        std::mem::take(&mut self.lod_debug)
-    }
-
-    /// The quit-to-title button was tapped since the last call.
-    pub fn take_quit(&mut self) -> bool {
-        std::mem::take(&mut self.quit)
+    /// Leave the pause menu ("Back to game", "Respawn").
+    pub fn resume(&mut self) {
+        self.paused = false;
+        self.clear();
     }
 
     /// A menu screen opened or closed: like `set_screen`, but nothing on the glass is a button of the game.
@@ -496,21 +429,8 @@ impl TouchUi {
     fn on_release(&mut self, pid: i32) {
         let Some(ptr) = self.pointers.remove(&pid) else { return };
         match ptr.role {
-            PointerRole::Reset => {
-                if self.reset_armed {
-                    (self.reset, self.reset_armed, self.paused) = (true, false, false);
-                    self.clear();
-                } else {
-                    self.reset_armed = true;
-                }
-            }
-            PointerRole::Quit => self.quit = true,
-            PointerRole::Pregen => self.pregen = true,
-            PointerRole::Fly => self.flying = !self.flying,
-            PointerRole::LodDebug => self.lod_debug = true,
             PointerRole::Pause => {
                 self.paused = !self.paused;
-                self.reset_armed = false;
                 self.clear();
                 log::info!("touch: pause -> {}", self.paused);
             }
@@ -592,47 +512,24 @@ mod tests {
         }
     }
 
+    /// Paused, the pause button still answers and everything else is a tap on the game menu; `resume` closes it.
     #[test]
-    fn paused_only_pause_and_resume_respond() {
+    fn paused_presses_are_taps_on_the_game_menu() {
         let l = LayoutRects::for_surface(W, H);
-        assert_eq!(l.hit_test(1800.0, 400.0, true, false), None);
+        let (px, py) = mid(l.pause);
+        assert_eq!(l.hit_test(px, py, true, false), Some(PointerRole::Pause));
+        assert_eq!(l.hit_test(1800.0, 400.0, true, false), Some(PointerRole::Tap));
         let (jx, jy) = mid(l.jump);
-        assert_eq!(l.hit_test(jx, jy, true, false), None);
-        let (rx, ry, rw, rh) = l.resume;
-        assert_eq!(l.hit_test(rx + rw * 0.5, ry + rh * 0.5, true, false), Some(PointerRole::Pause));
-    }
-
-    /// The reset button answers only while paused, and needs two taps (the first arms it, leaving the menu disarms it).
-    #[test]
-    fn reset_needs_two_taps() {
+        assert_eq!(l.hit_test(jx, jy, true, false), Some(PointerRole::Tap));
         let mut ui = TouchUi::new(W, H);
-        let (x, y) = (ui.layout.reset.0 + 5.0, ui.layout.reset.1 + 5.0);
-        assert_eq!(ui.layout.hit_test(x, y, false, false), None);
         ui.paused = true;
-        tap(&mut ui, 1, x, y);
-        assert!(ui.reset_armed && !ui.take_reset() && ui.paused);
-        let (rx, ry, rw, rh) = ui.layout.resume;
-        tap(&mut ui, 2, rx + rw * 0.5, ry + rh * 0.5); // resume: disarms
-        assert!(!ui.reset_armed && !ui.paused);
-        ui.paused = true;
-        tap(&mut ui, 3, x, y);
-        tap(&mut ui, 4, x, y);
-        assert!(ui.take_reset() && !ui.take_reset() && !ui.paused && !ui.reset_armed);
-    }
-
-    /// The quit button answers only while paused, once per tap; a menu screen turns every press (the pause button's too) into a tap.
-    #[test]
-    fn quit_button_fires_once_and_a_menu_takes_every_press() {
-        let mut ui = TouchUi::new(W, H);
-        let (x, y) = (ui.layout.quit.0 + 5.0, ui.layout.quit.1 + 5.0);
-        assert_eq!(ui.layout.hit_test(x, y, false, false), None);
-        ui.paused = true;
-        tap(&mut ui, 1, x, y);
-        assert!(ui.take_quit() && !ui.take_quit() && ui.paused && !ui.take_reset());
-        ui.set_menu(true);
+        tap(&mut ui, 1, 1800.0, 400.0);
+        assert_eq!(ui.take_screen_events(), vec![ScreenEv::Down(1800.0, 400.0), ScreenEv::Up(1800.0, 400.0)]);
+        ui.resume();
         assert!(!ui.paused);
+        ui.set_menu(true);
         let (px, py) = mid(ui.layout.pause);
-        assert_eq!(ui.role_at(px, py), Some(PointerRole::Tap));
+        assert_eq!(ui.role_at(px, py), Some(PointerRole::Tap), "a menu screen takes every press");
     }
 
     /// An arrow shows the two corners beside it, a corner walks the diagonal (normalised), sliding to the next arrow swaps the corners,
@@ -686,20 +583,6 @@ mod tests {
         tap(&mut ui, 3, px + pw * 0.5, py + ph * 0.5);
         tap(&mut ui, 4, x, y);
         assert!(!ui.sneak);
-    }
-
-    /// The pause menu's Fly button sits beside Pregen, toggles on release and stays on after resuming.
-    #[test]
-    fn fly_button_toggles_and_survives_resume() {
-        let mut ui = TouchUi::new(W, H);
-        let (px, py, pw, ph) = ui.layout.pause;
-        tap(&mut ui, 1, px + pw * 0.5, py + ph * 0.5);
-        let (x, y) = mid(ui.layout.fly);
-        assert_eq!(ui.layout.hit_test(x, y, true, false), Some(PointerRole::Fly));
-        assert_eq!(ui.layout.hit_test(x, y, false, false), Some(PointerRole::Look));
-        tap(&mut ui, 2, x, y);
-        tap(&mut ui, 3, px + pw * 0.5, py + ph * 0.5);
-        assert!(!ui.paused && ui.flying);
     }
 
     #[test]

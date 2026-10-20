@@ -10,9 +10,11 @@ mod gpu;
 mod input;
 mod immersive;
 mod menu;
+mod options;
 
 use crate::input::touch_ui::{PointerRole, ScreenEv, TouchUi};
 use crate::menu::Menu;
+use crate::options::{Pause, PauseEv, PauseInfo, Settings};
 use crate::render::hud::{sprites as sp, HudPipeline, HudVertex};
 
 use android_activity::{AndroidApp, InputStatus, MainEvent, PollEvent};
@@ -96,6 +98,12 @@ struct App {
     root: PathBuf,
     /// The title screen, world list and world creation; `Some` while no world is loaded.
     menu: Option<Menu>,
+    /// The far terrain was drawn this frame (`opts.lod` and a dimension that has it): the draw passes read it.
+    lod_on: bool,
+    /// `GameSettings` (`<root>/options.txt`): the options screens change it, the frame reads it.
+    opts: Settings,
+    /// The game menu (`GuiIngameMenu`, or the death screen) while `touch.paused`.
+    pause: Option<Pause>,
     pipe: ChunkPipeline,
     chunks: ChunkManager,
     camera: FirstPersonCamera,
@@ -226,7 +234,7 @@ impl App {
         let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as i64);
 
         let mut app = Self {
-            gpu, tectonic: false, lod: None, seed: 0, root: dir.clone(), menu: Some(Menu::new(&dir)), pipe,
+            gpu, tectonic: false, lod: None, seed: 0, root: dir.clone(), opts: Settings::load(&dir), pause: None, lod_on: false, menu: Some(Menu::new(&dir)), pipe,
             chunks, camera,
             player,
             last_frame: Instant::now(),
@@ -397,6 +405,7 @@ impl App {
         self.chunks = ChunkManager::new_typed(0, RENDER_DIST, false); // the world's workers stop on drop
         self.lod = None;
         self.menu = Some(Menu::new(&self.root));
+        self.pause = None;
         self.touch.set_menu(true);
         if let Ok(mut l) = LAST_WORLD.lock() {
             *l = None;
@@ -537,25 +546,6 @@ impl App {
         let base = 70_f32.to_radians();
         let target = if self.touch.zooming() { 2.0 * ((base * 0.5).tan() / ZOOM).atan() } else { base };
         self.camera.fov_y += (target - self.camera.fov_y) * (1.0 - (-14.0 * dt).exp());
-        // TEMPORARY pause-menu button: wipe the save and start the seed's world again.
-        if self.touch.take_reset() {
-            self.reset_world(true);
-            return;
-        }
-        if self.touch.take_pregen() {
-            if let Some(l) = self.lod.as_mut() {
-                l.toggle_pregen();
-            }
-        }
-        if self.touch.take_lod_debug() {
-            if let Some(l) = self.lod.as_mut() {
-                l.cycle_debug();
-            }
-        }
-        if self.touch.take_quit() {
-            self.quit_to_title();
-            return;
-        }
         // Look drag accumulated by the touch UI since the last frame. Drained
         // even when paused so a drag started before pausing doesn't replay.
         let (look_dx, look_dy) = self.touch.take_look();
@@ -563,12 +553,50 @@ impl App {
         // produce a giant dt step (which would either teleport the player or
         // kill their fall).
         if self.touch.paused {
+            if self.pause.is_none() {
+                // `GuiIngameMenu` shows "Saving level..": the world is written as the menu opens.
+                self.pause = Some(Pause::new());
+                if self.screen.is_none() {
+                    self.save(AUTOSAVE_CHUNKS);
+                }
+            }
+            let (w, h) = (self.gpu.config.width as f32, self.gpu.config.height as f32);
+            let info = self.pause_info();
+            let mut asked = Vec::new();
+            for ev in self.touch.take_screen_events() {
+                if let Some(p) = self.pause.as_mut() {
+                    asked.extend(p.event(ev, w, h, &mut self.opts, &info));
+                }
+            }
+            for a in asked {
+                match a {
+                    PauseEv::Resume => self.touch.resume(),
+                    PauseEv::Quit => {
+                        self.quit_to_title();
+                        return;
+                    }
+                    PauseEv::Pregen => {
+                        if let Some(l) = self.lod.as_mut() {
+                            l.toggle_pregen();
+                        }
+                    }
+                    PauseEv::Fly => self.touch.flying = !self.touch.flying,
+                    PauseEv::LodDebug => {
+                        if let Some(l) = self.lod.as_mut() {
+                            l.cycle_debug();
+                        }
+                    }
+                }
+            }
+        }
+        if self.touch.paused {
             // Player physics is still ticked so they don't fall through the
             // world if pause was opened mid-air, but gravity is zeroed.
             self.player.vel = glam::Vec3::ZERO;
             self.camera.pos = self.player.pos + glam::Vec3::new(0.0, EYE_HEIGHT - self.sneak_y, 0.0);
             return;
         }
+        self.pause = None;
         // Four seconds in a portal: the other dimension (`EntityPlayerSP.onLivingUpdate`).
         if self.portal_t >= 1.0 {
             self.enter(!self.nether, false);
@@ -612,9 +640,9 @@ impl App {
         let riding = self.mobs.list.iter().any(|m| m.ridden) || self.boats.ridden().is_some() || self.carts.ridden().is_some();
         let asleep = self.sleep.is_some();
         if !asleep {
-            let k = LOOK_SENS * (self.camera.fov_y * 0.5).tan() / (70_f32.to_radians() * 0.5).tan();
+            let k = LOOK_SENS * (self.camera.fov_y * 0.5).tan() / (70_f32.to_radians() * 0.5).tan() * self.opts.look_scale();
             self.camera.add_yaw(look_dx * k);
-            self.camera.add_pitch(look_dy * k);
+            self.camera.add_pitch(look_dy * k * if self.opts.invert_mouse { -1.0 } else { 1.0 });
         }
         // Analog move stick: rotate the camera-frame (fwd, side) by yaw into
         // world-space velocity. Set every frame (zero when the stick is idle),
@@ -691,9 +719,16 @@ impl App {
         self.drops.tick(dt, &|x: i32, y: i32, z: i32| self.chunks.block(x, y, z).map(|b| self.chunks.physics_at(x, y, z, b)), self.player.pos, &mut self.inv);
         let light = |x: i32, y: i32, z: i32| self.chunks.light(x, y, z);
         let ctx = Ctx { get: &get, light: &light, day: sub < 4, player: self.player.pos, eye: self.camera.pos };
+        self.mobs.difficulty = self.opts.difficulty;
         for e in self.mobs.update(dt, &ctx, &mut self.drops) {
             match e {
-                Ev::Hurt(d) => { self.vitals.hurt(d); }
+                // `EntityPlayer.attackEntityFrom`: Peaceful 0, Easy d / 3 + 1, Hard d * 3 / 2.
+                Ev::Hurt(d) => {
+                    let d = match self.opts.difficulty { 0 => 0, 1 => d / 3 + 1, 3 => d * 3 / 2, _ => d };
+                    if d > 0 {
+                        self.vitals.hurt(d);
+                    }
+                }
                 Ev::Boom(p) => self.explode(p, 3.0),
                 _ => {}
             }
@@ -1752,7 +1787,7 @@ impl App {
         rp.set_bind_group(0, &self.pipe.bind_group, &[]);
         rp.set_pipeline(&self.pipe.solid);
         self.chunks.draw_ranges(Layer::Solid, rp, &self.pipe.origins);
-        if let Some(l) = &self.lod {
+        if let Some(l) = self.lod.as_ref().filter(|_| self.lod_on) {
             rp.set_pipeline(&self.pipe.lod);
             l.draw(rp);
         }
@@ -1786,9 +1821,16 @@ impl App {
         if self.menu.is_some() {
             return; // "Save and quit to title" just ran
         }
+        // Options: the render distance (Video Settings) and the far terrain switch (Options).
+        let rd = self.opts.chunks();
+        if self.chunks.radius() != rd {
+            self.chunks.set_radius(rd);
+        }
+        let lod_on = self.opts.lod && self.lod.is_some();
+        self.lod_on = lod_on;
         let (pcx, pcz) = (chunk_coord(self.player.pos.x), chunk_coord(self.player.pos.z));
         self.chunks.update(&self.gpu.device, &self.gpu.queue, &self.pipe.origins, pcx, pcz);
-        self.camera.zfar = if self.lod.is_some() { lod::ZFAR } else { 256.0 }; // the far terrain needs the depth range
+        self.camera.zfar = if lod_on { lod::ZFAR } else { 256.0 }; // the far terrain needs the depth range
         let (view, proj) = self.camera.build_view_proj();
         let outline_indices = self.target.map_or(0, |h| {
             let (x, y, z) = h.pos;
@@ -1808,7 +1850,7 @@ impl App {
         sign_views.sort_by(|a, b| near(a).total_cmp(&near(b)));
         // Entities are only built when they are within the render range and in the camera's frustum (`radius` = a bound on their size).
         let frustum = Frustum::from_view_proj(proj * view);
-        let reach2 = ((RENDER_DIST * 16 + 16) as f32).powi(2);
+        let reach2 = ((rd * 16 + 16) as f32).powi(2);
         let seen = |p: glam::Vec3, r: f32| p.distance_squared(eye) < reach2 && frustum.intersects_aabb(p - r, p + r);
         let item_indices = {
             let chunks = &self.chunks;
@@ -1827,19 +1869,20 @@ impl App {
         let e = self.camera.pos;
         let eye_in_water = matches!(self.chunks.block_loaded(e.x.floor() as i32, e.y.floor() as i32, e.z.floor() as i32), Some(8 | 9));
         // Which terrain sections the camera sees (frustum, render shape, and occlusion by terrain); every layer draws from it.
-        self.chunks.update_visible(self.camera.pos, RENDER_SHAPE, (RENDER_DIST * 16) as f32, (RENDER_VERT * 16) as f32, |min, max| frustum.intersects_aabb(min, max));
+        self.chunks.update_visible(self.camera.pos, RENDER_SHAPE, (rd * 16) as f32, (RENDER_VERT * 16) as f32, |min, max| frustum.intersects_aabb(min, max));
         let fresh = self.chunks.take_ingest(); // drained in the Nether too (no LoD there)
-        if let Some(l) = self.lod.as_mut() {
+        // ponytail: with the LoD switched off the fresh chunks are dropped, not kept for it (it re-reads the saved tiles when it is on again).
+        if let Some(l) = self.lod.as_mut().filter(|_| lod_on) {
             fresh.into_iter().for_each(|(k, cols)| l.ingest(k, cols));
             // The LoD is cut out only where a real chunk mesh exists (`drawn`), and again whenever the set of meshes changes (`mesh_gen`).
             let chunks = &self.chunks;
-            l.update(&self.gpu.device, e, (RENDER_DIST * 16) as f32, (RENDER_VERT * 16) as f32, chunks.cut_gen(), |cx, cz| chunks.drawn((cx, cz)), |cx, sy, cz| chunks.shown((cx, cz), sy), |min, max| frustum.intersects_aabb(min, max));
+            l.update(&self.gpu.device, e, (rd * 16) as f32, (RENDER_VERT * 16) as f32, chunks.cut_gen(), |cx, cz| chunks.drawn((cx, cz)), |cx, sy, cz| chunks.shown((cx, cz), sy), |min, max| frustum.intersects_aabb(min, max));
         }
         let fog = color::legacy_lin(if self.nether { hell } else { sky::fog_color(angle, sky_rgb, rain, thunder) }); // vanilla values -> the frame's linear space
         // Terrain fog (b1.7.3 `setupFog`): linear to the render distance, off the far terrain's own start; under water GL_EXP, density 0.1,
         // colour (0.02, 0.02, 0.2); a negative far plane is how the shader learns the density.
-        let (fog_c, far) = if eye_in_water { (color::legacy_lin([0.02, 0.02, 0.2]), -0.1) } else { (fog, if self.lod.is_some() { lod::RADIUS } else { (RENDER_DIST * 16) as f32 }) };
-        let start = if self.lod.is_some() && !eye_in_water { lod::FOG_START } else { 0.0 };
+        let (fog_c, far) = if eye_in_water { (color::legacy_lin([0.02, 0.02, 0.2]), -0.1) } else { (fog, if lod_on { lod::RADIUS } else { (rd * 16) as f32 }) };
+        let start = if lod_on && !eye_in_water { lod::FOG_START } else { 0.0 };
         self.pipe.frame(&self.gpu.queue, view, proj, e, sky::skylight_subtracted(angle, rain, thunder) as f32 / 15.0, fog_c, far, start);
         let clear = wgpu::Color { r: fog_c[0] as f64, g: fog_c[1] as f64, b: fog_c[2] as f64, a: 1.0 };
         self.sky.update(&self.gpu.queue, &self.camera, &SkyFrame { angle, rain, seconds: self.world_ticks as f32 / 20.0 });
@@ -1910,7 +1953,7 @@ impl App {
             // Water last: blended over everything, no depth write.
             rp.set_pipeline(&self.pipe.lod_water);
             rp.set_bind_group(0, &self.pipe.bind_group, &[]); // the sky pass set its own
-            if let Some(l) = &self.lod {
+            if let Some(l) = self.lod.as_ref().filter(|_| self.lod_on) {
                 l.draw_water(&mut rp); // the far water first (it is farther than the real water, which only reaches `WATER_RANGE`)
             }
             rp.set_pipeline(&self.pipe.water);
@@ -1952,13 +1995,13 @@ impl App {
         let (w, h) = (self.gpu.config.width as f32, self.gpu.config.height as f32);
         let Some(m) = self.menu.as_mut() else { return };
         for ev in self.touch.take_screen_events() {
-            m.event(ev, w, h);
+            m.event(ev, w, h, &mut self.opts);
         }
         if m.quit {
             std::process::exit(0); // Quit Game: nothing is loaded, so nothing to save
         }
         self.hud_verts.clear();
-        m.draw(&mut self.hud_verts, w, h);
+        m.draw(&mut self.hud_verts, w, h, &self.opts);
         self.hud_verts.truncate(self.hud.quad_capacity * 6);
         let frame = match self.gpu.surface.get_current_texture() {
             Ok(f) => f,
@@ -1999,6 +2042,11 @@ impl App {
         }
     }
 
+    /// What the game menu shows of the game.
+    fn pause_info(&self) -> PauseInfo {
+        PauseInfo { dead: self.vitals.dead(), pregen: self.lod.as_ref().map(|l| l.pregen()), debug: self.lod.as_ref().map_or(0, |l| l.debug()), flying: self.touch.flying }
+    }
+
     fn on_motion(&mut self, ev: &android_activity::input::MotionEvent) {
         self.touch.handle_motion(ev);
     }
@@ -2008,6 +2056,7 @@ impl App {
     fn build_hud(&mut self) {
         // `ext` reads all of `self`, so it is taken before `hud_verts` is borrowed mutably.
         let ext = self.screen.as_ref().and_then(|s| self.ext(s));
+        let pause_info = self.pause_info();
         let v = &mut self.hud_verts;
         v.clear();
         let layout = &self.touch.layout;
@@ -2280,43 +2329,12 @@ impl App {
             HudPipeline::push_text_centered(v, tx, ty, k, title, [1.0, 1.0, 0.4, 1.0]);
         }
 
-        // Pause menu: dim the frame and show the resume button.
+        // The game menu (`GuiIngameMenu`, the death screen when dead), over the dimmed frame.
         if paused {
-            let w = self.gpu.config.width as f32;
-            let h = self.gpu.config.height as f32;
-            // Dead: the same menu, tinted red; the resume button respawns.
-            let tint = if self.vitals.dead() { [0.55, 0.0, 0.0, 0.6] } else { [0.0, 0.0, 0.0, 0.55] };
-            HudPipeline::push_quad(v, 0.0, 0.0, w, h, tint);
-            // `GuiIngameMenu` / `GuiGameOver`: the title centred above, the buttons are `widgets.png`'s with their label centred (white,
-            // 0xFFFFA0 while pressed or armed, as `GuiButton` does for the one under the mouse); the resume button respawns when dead.
-            let label = |v: &mut Vec<HudVertex>, (bx, by, bw, bh): (f32, f32, f32, f32), text: &str, hot: bool| {
-                let k = bh / 20.0;
-                HudPipeline::push_button(v, bx, by, bw, bh, if hot { 2 } else { 1 });
-                let ink = if hot { [1.0, 1.0, 0.63, 1.0] } else { [0.88, 0.88, 0.88, 1.0] };
-                HudPipeline::push_text_centered(v, bx + bw * 0.5, by + (bh - 8.0 * k) * 0.5, k, text, ink);
-            };
-            let (bx, by, bw, bh) = layout.resume;
-            let dead = self.vitals.dead();
-            HudPipeline::push_text_centered(v, bx + bw * 0.5, by - bh * 1.3, bh / 20.0 * if dead { 2.0 } else { 1.5 }, if dead { "You died!" } else { "Game menu" }, [1.0; 4]);
-            label(v, layout.resume, if dead { "Respawn" } else { "Back to game" }, pressed(PointerRole::Pause));
-            // TEMPORARY reset-world button: after the first tap it is lit and asks again.
-            label(v, layout.reset, if self.touch.reset_armed { "Tap again to confirm" } else { "Reset world" }, self.touch.reset_armed);
-            label(v, layout.quit, "Save and quit to title", pressed(PointerRole::Quit));
-            // The pre-generation switch (Voxy World Gen): lit while it runs, with the chunks generated so far.
-            let (on, n) = self.lod.as_ref().map_or((false, 0), |l| l.pregen());
-            let text = if self.lod.is_none() { "Pregen: overworld only".to_string() } else if on { format!("Pregen: {n} chunks (tap to stop)") } else { format!("Pregen: off, {n} chunks") };
-            label(v, layout.pregen, &text, on || pressed(PointerRole::Pregen));
-            // LoD debug colouring, under Pregen: off / step / kind of face / tile.
-            let (dm, dt) = match self.lod.as_ref().map_or(0, |l| l.debug()) {
-                1 => (1, "LoD dbg 1: step g1 y2 o4 r8"),
-                2 => (2, "LoD dbg 2: top wht wall blu skirt pnk"),
-                3 => (3, "LoD dbg 3: tiles red/blue"),
-                4 => (4, "LoD dbg 4: LoD hidden"),
-                _ => (0, "LoD debug: off"),
-            };
-            label(v, layout.dbg, dt, dm != 0 || pressed(PointerRole::LodDebug));
-            // TEMPORARY fly toggle, beside Pregen.
-            label(v, layout.fly, if self.touch.flying { "Fly: on" } else { "Fly: off" }, self.touch.flying || pressed(PointerRole::Fly));
+            let (w, h) = (self.gpu.config.width as f32, self.gpu.config.height as f32);
+            if let Some(p) = &self.pause {
+                p.draw(v, w, h, &self.opts, &pause_info);
+            }
         }
 
         // Cap to the buffer capacity; extra quads are silently dropped.
@@ -2590,7 +2608,11 @@ fn android_main(app: AndroidApp) {
         }
 
         if let Some(a) = app_state.as_mut() {
+            let frame_start = Instant::now();
             a.render();
+            if let Some(left) = a.opts.frame_cap().and_then(|cap| cap.checked_sub(frame_start.elapsed())) {
+                std::thread::sleep(left); // `Performance`: Balanced 120 fps, Power saver 40
+            }
             // Dynamic FPS: the paused world is frozen, so the menu runs at ~10 frames a second; a touch still wakes the poll.
             if a.touch.paused || a.menu.is_some() {
                 std::thread::sleep(Duration::from_millis(90));
