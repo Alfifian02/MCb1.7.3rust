@@ -1969,10 +1969,15 @@ impl App {
             .collect();
         let near = |s: &SignView| (glam::Vec3::new(s.pos.0 as f32 + 0.5, s.pos.1 as f32 + 0.5, s.pos.2 as f32 + 0.5) - eye).length_squared();
         sign_views.sort_by(|a, b| near(a).total_cmp(&near(b)));
-        // Entities are only built when they are within the render range and in the camera's frustum (`radius` = a bound on their size).
         let frustum = Frustum::from_view_proj(proj * view);
+        // Which terrain sections the camera sees (frustum, render shape, and occlusion by terrain); every layer draws from it, and so does
+        // the entity test below (it needs this frame's sections, so the walk runs before the entities are built).
+        self.chunks.update_visible(self.camera.pos, RENDER_SHAPE, (rd * 16) as f32, (RENDER_VERT * 16) as f32, wr, |min, max| frustum.intersects_aabb(min, max));
+        // Entities are only built when they are within the render range, in the camera's frustum and in a section the occlusion walk reached
+        // (Sodium's `isBoxVisible`: a mob in a cave behind a hill is skipped); `radius` = a bound on their size.
         let reach2 = ((rd * 16 + 16) as f32).powi(2);
-        let seen = |p: glam::Vec3, r: f32| p.distance_squared(eye) < reach2 && frustum.intersects_aabb(p - r, p + r);
+        let terrain = &self.chunks;
+        let seen = |p: glam::Vec3, r: f32| p.distance_squared(eye) < reach2 && frustum.intersects_aabb(p - r, p + r) && terrain.box_visible(p - r, p + r);
         let item_indices = {
             let chunks = &self.chunks;
             self.item_mesh.update(&self.gpu.queue, &self.drops, &self.mobs, &self.ticks.falling, &self.fx, &|x, y, z| chunks.light_levels(x, y, z), self.hook.as_ref().map(|h| h.pos), &self.paintings, &sign_views, (&self.boats.list, self.boats.alpha()), (&self.carts.list, self.carts.alpha()), player_view.as_ref(), hand.as_ref(), eye, &seen)
@@ -1989,8 +1994,6 @@ impl App {
         let sky_rgb = if self.nether { hell } else { sky::sky_color(angle, temp, rain, thunder) };
         let e = self.camera.pos;
         let eye_in_water = matches!(self.chunks.block_loaded(e.x.floor() as i32, e.y.floor() as i32, e.z.floor() as i32), Some(8 | 9));
-        // Which terrain sections the camera sees (frustum, render shape, and occlusion by terrain); every layer draws from it.
-        self.chunks.update_visible(self.camera.pos, RENDER_SHAPE, (rd * 16) as f32, (RENDER_VERT * 16) as f32, wr, |min, max| frustum.intersects_aabb(min, max));
         let fresh = self.chunks.take_ingest(); // drained in the Nether too (no LoD there)
         // ponytail: with the LoD switched off the fresh chunks are dropped, not kept for it (it re-reads the saved tiles when it is on again).
         if let Some(l) = self.lod.as_mut().filter(|_| lod_on) {

@@ -1166,6 +1166,33 @@ impl ChunkManager {
         self.order.sort_unstable_by(|a, b| d2(a).total_cmp(&d2(b)));
     }
 
+    /// Whether an entity's box (`min`..`max`, world coordinates) touches a section `update_visible` found this frame: Sodium's
+    /// `isBoxVisible` (`RenderSectionManager`, used by its entity and block-entity culling), so a mob in a cave behind a hill is not built.
+    /// The walk lists every section it enters, air ones too, so a box in an empty section of a reachable room counts as visible. A box that
+    /// reaches above or below the world, or lies in a chunk that is not loaded, or a frame before the first `update_visible`, is visible:
+    /// there is nothing to judge it by.
+    /// ponytail: a hole in the loaded ring cuts the walk (see `update_visible`), so an entity behind the hole is hidden until the chunk loads.
+    pub fn box_visible(&self, min: Vec3, max: Vec3) -> bool {
+        if self.visible.is_empty() {
+            return true;
+        }
+        let (sy0, sy1) = ((min.y.floor() as i32) >> 4, (max.y.floor() as i32) >> 4);
+        if sy0 < 0 || sy1 >= SECTIONS as i32 {
+            return true;
+        }
+        let bits = (sy0..=sy1).fold(0u8, |m, s| m | 1u8 << s);
+        for cx in chunk_coord(min.x)..=chunk_coord(max.x) {
+            for cz in chunk_coord(min.z)..=chunk_coord(max.z) {
+                match self.visible.get(&(cx, cz)) {
+                    Some(&m) if m & bits != 0 => return true,
+                    None if !self.chunks.contains_key(&(cx, cz)) => return true,
+                    _ => {}
+                }
+            }
+        }
+        false
+    }
+
     /// Changes whenever what the far terrain is cut by changes: the set of chunks that have a mesh (`drawn`). It used to add the set of
     /// sections drawn (`vis_gen`), which changes with every turn of the camera and recut every near tile (a lookup and a range test
     /// per cell, thousands of cells a tile) each time; `lod::covered` has not read the sections since the water sheets stopped being cut.
@@ -1614,6 +1641,27 @@ mod tests {
         assert_eq!(near_sections(0, 0, 0b0000_1000, Vec3::new(8.0, 200.0, 8.0), Shape::Sphere, WATER_RANGE, 48.0), 0, "an eye far above keeps none");
         // LoD off: `update_visible` passes `1e9.min(rh)`, so the chunk 40 blocks off keeps its water too.
         assert_ne!(near_sections(3, 0, 0xFF, eye, Shape::Sphere, 1e9f32.min(64.0), 48.0), 0);
+    }
+
+    /// `box_visible`: a box is seen when one of the sections it touches was found by `update_visible`; a box in a loaded chunk the walk
+    /// did not reach is hidden, one in an unloaded chunk or above the world is not, and before the first walk nothing is hidden.
+    #[test]
+    fn entities_hide_in_sections_the_walk_did_not_reach() {
+        let mut m = ChunkManager::new(1, 1);
+        m.insert((0, 0), vec![0u8; VOLUME]);
+        m.insert((1, 0), vec![0u8; VOLUME]);
+        let v = |a: [f32; 3], b: [f32; 3]| m.box_visible(Vec3::from(a), Vec3::from(b));
+        assert!(v([23.0, 66.0, 7.0], [25.0, 68.0, 9.0]), "no walk yet: nothing is hidden");
+        m.visible.insert((0, 0), 0b0001_0000); // section 4 (y 64..79) of chunk (0, 0) only
+        let v = |a: [f32; 3], b: [f32; 3]| m.box_visible(Vec3::from(a), Vec3::from(b));
+        assert!(v([7.0, 66.0, 7.0], [9.0, 68.0, 9.0]), "inside a found section");
+        assert!(!v([7.0, 82.0, 7.0], [9.0, 84.0, 9.0]), "section 5 was not found");
+        assert!(!v([23.0, 66.0, 7.0], [25.0, 68.0, 9.0]), "chunk (1, 0) is loaded and not found");
+        assert!(!v([14.0, 82.0, 7.0], [18.0, 84.0, 9.0]), "straddles two chunks, neither found at section 5");
+        assert!(v([14.0, 66.0, 7.0], [18.0, 84.0, 9.0]), "tall box: touches section 4 of chunk (0, 0)");
+        assert!(v([-40.0, 66.0, 7.0], [-38.0, 68.0, 9.0]), "chunk (-3, 0) is not loaded");
+        assert!(v([7.0, 130.0, 7.0], [9.0, 134.0, 9.0]), "above the world");
+        assert!(v([7.0, -3.0, 7.0], [9.0, -1.0, 9.0]), "below the world");
     }
 
     /// Edge water is a still source on a surface with air beside it: not the middle of a pool, not water with water above it.

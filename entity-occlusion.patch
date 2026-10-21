@@ -1,0 +1,105 @@
+--- a/mc-rs/src/world/chunks.rs	2026-10-21 19:25:52.000000000 +0000
++++ b/mc-rs/src/world/chunks.rs	2026-10-21 08:37:02.387671624 +0000
+@@ -1166,6 +1166,33 @@
+         self.order.sort_unstable_by(|a, b| d2(a).total_cmp(&d2(b)));
+     }
+ 
++    /// Whether an entity's box (`min`..`max`, world coordinates) touches a section `update_visible` found this frame: Sodium's
++    /// `isBoxVisible` (`RenderSectionManager`, used by its entity and block-entity culling), so a mob in a cave behind a hill is not built.
++    /// The walk lists every section it enters, air ones too, so a box in an empty section of a reachable room counts as visible. A box that
++    /// reaches above or below the world, or lies in a chunk that is not loaded, or a frame before the first `update_visible`, is visible:
++    /// there is nothing to judge it by.
++    /// ponytail: a hole in the loaded ring cuts the walk (see `update_visible`), so an entity behind the hole is hidden until the chunk loads.
++    pub fn box_visible(&self, min: Vec3, max: Vec3) -> bool {
++        if self.visible.is_empty() {
++            return true;
++        }
++        let (sy0, sy1) = ((min.y.floor() as i32) >> 4, (max.y.floor() as i32) >> 4);
++        if sy0 < 0 || sy1 >= SECTIONS as i32 {
++            return true;
++        }
++        let bits = (sy0..=sy1).fold(0u8, |m, s| m | 1u8 << s);
++        for cx in chunk_coord(min.x)..=chunk_coord(max.x) {
++            for cz in chunk_coord(min.z)..=chunk_coord(max.z) {
++                match self.visible.get(&(cx, cz)) {
++                    Some(&m) if m & bits != 0 => return true,
++                    None if !self.chunks.contains_key(&(cx, cz)) => return true,
++                    _ => {}
++                }
++            }
++        }
++        false
++    }
++
+     /// Changes whenever what the far terrain is cut by changes: the set of chunks that have a mesh (`drawn`). It used to add the set of
+     /// sections drawn (`vis_gen`), which changes with every turn of the camera and recut every near tile (a lookup and a range test
+     /// per cell, thousands of cells a tile) each time; `lod::covered` has not read the sections since the water sheets stopped being cut.
+@@ -1616,6 +1643,27 @@
+         assert_ne!(near_sections(3, 0, 0xFF, eye, Shape::Sphere, 1e9f32.min(64.0), 48.0), 0);
+     }
+ 
++    /// `box_visible`: a box is seen when one of the sections it touches was found by `update_visible`; a box in a loaded chunk the walk
++    /// did not reach is hidden, one in an unloaded chunk or above the world is not, and before the first walk nothing is hidden.
++    #[test]
++    fn entities_hide_in_sections_the_walk_did_not_reach() {
++        let mut m = ChunkManager::new(1, 1);
++        m.insert((0, 0), vec![0u8; VOLUME]);
++        m.insert((1, 0), vec![0u8; VOLUME]);
++        let v = |a: [f32; 3], b: [f32; 3]| m.box_visible(Vec3::from(a), Vec3::from(b));
++        assert!(v([23.0, 66.0, 7.0], [25.0, 68.0, 9.0]), "no walk yet: nothing is hidden");
++        m.visible.insert((0, 0), 0b0001_0000); // section 4 (y 64..79) of chunk (0, 0) only
++        let v = |a: [f32; 3], b: [f32; 3]| m.box_visible(Vec3::from(a), Vec3::from(b));
++        assert!(v([7.0, 66.0, 7.0], [9.0, 68.0, 9.0]), "inside a found section");
++        assert!(!v([7.0, 82.0, 7.0], [9.0, 84.0, 9.0]), "section 5 was not found");
++        assert!(!v([23.0, 66.0, 7.0], [25.0, 68.0, 9.0]), "chunk (1, 0) is loaded and not found");
++        assert!(!v([14.0, 82.0, 7.0], [18.0, 84.0, 9.0]), "straddles two chunks, neither found at section 5");
++        assert!(v([14.0, 66.0, 7.0], [18.0, 84.0, 9.0]), "tall box: touches section 4 of chunk (0, 0)");
++        assert!(v([-40.0, 66.0, 7.0], [-38.0, 68.0, 9.0]), "chunk (-3, 0) is not loaded");
++        assert!(v([7.0, 130.0, 7.0], [9.0, 134.0, 9.0]), "above the world");
++        assert!(v([7.0, -3.0, 7.0], [9.0, -1.0, 9.0]), "below the world");
++    }
++
+     /// Edge water is a still source on a surface with air beside it: not the middle of a pool, not water with water above it.
+     #[test]
+     fn edge_water_is_a_surface_source_with_air_beside_it() {
+--- a/mc-rs/src/lib.rs	2026-10-21 15:03:32.000000000 +0000
++++ b/mc-rs/src/lib.rs	2026-10-21 08:36:41.120733393 +0000
+@@ -1969,10 +1969,15 @@
+             .collect();
+         let near = |s: &SignView| (glam::Vec3::new(s.pos.0 as f32 + 0.5, s.pos.1 as f32 + 0.5, s.pos.2 as f32 + 0.5) - eye).length_squared();
+         sign_views.sort_by(|a, b| near(a).total_cmp(&near(b)));
+-        // Entities are only built when they are within the render range and in the camera's frustum (`radius` = a bound on their size).
+         let frustum = Frustum::from_view_proj(proj * view);
++        // Which terrain sections the camera sees (frustum, render shape, and occlusion by terrain); every layer draws from it, and so does
++        // the entity test below (it needs this frame's sections, so the walk runs before the entities are built).
++        self.chunks.update_visible(self.camera.pos, RENDER_SHAPE, (rd * 16) as f32, (RENDER_VERT * 16) as f32, wr, |min, max| frustum.intersects_aabb(min, max));
++        // Entities are only built when they are within the render range, in the camera's frustum and in a section the occlusion walk reached
++        // (Sodium's `isBoxVisible`: a mob in a cave behind a hill is skipped); `radius` = a bound on their size.
+         let reach2 = ((rd * 16 + 16) as f32).powi(2);
+-        let seen = |p: glam::Vec3, r: f32| p.distance_squared(eye) < reach2 && frustum.intersects_aabb(p - r, p + r);
++        let terrain = &self.chunks;
++        let seen = |p: glam::Vec3, r: f32| p.distance_squared(eye) < reach2 && frustum.intersects_aabb(p - r, p + r) && terrain.box_visible(p - r, p + r);
+         let item_indices = {
+             let chunks = &self.chunks;
+             self.item_mesh.update(&self.gpu.queue, &self.drops, &self.mobs, &self.ticks.falling, &self.fx, &|x, y, z| chunks.light_levels(x, y, z), self.hook.as_ref().map(|h| h.pos), &self.paintings, &sign_views, (&self.boats.list, self.boats.alpha()), (&self.carts.list, self.carts.alpha()), player_view.as_ref(), hand.as_ref(), eye, &seen)
+@@ -1989,8 +1994,6 @@
+         let sky_rgb = if self.nether { hell } else { sky::sky_color(angle, temp, rain, thunder) };
+         let e = self.camera.pos;
+         let eye_in_water = matches!(self.chunks.block_loaded(e.x.floor() as i32, e.y.floor() as i32, e.z.floor() as i32), Some(8 | 9));
+-        // Which terrain sections the camera sees (frustum, render shape, and occlusion by terrain); every layer draws from it.
+-        self.chunks.update_visible(self.camera.pos, RENDER_SHAPE, (rd * 16) as f32, (RENDER_VERT * 16) as f32, wr, |min, max| frustum.intersects_aabb(min, max));
+         let fresh = self.chunks.take_ingest(); // drained in the Nether too (no LoD there)
+         // ponytail: with the LoD switched off the fresh chunks are dropped, not kept for it (it re-reads the saved tiles when it is on again).
+         if let Some(l) = self.lod.as_mut().filter(|_| lod_on) {
+--- a/roadmap/performance.md	2026-10-21 08:37:02.630829903 +0000
++++ b/roadmap/performance.md	2026-10-21 08:37:09.665712350 +0000
+@@ -49,6 +49,9 @@
+ 
+ ## Changelog
+ 
++- 2026-10-21 (6): entity occlusion culling (Sodium `RenderSectionManager.isBoxVisible`, used by its entity / block-entity culling; idea only, no code copied) (written WITHOUT a Rust toolchain: not compiled, not run; +1 test `chunks::tests::entities_hide_in_sections_the_walk_did_not_reach`; run `cargo test --lib --release chunks` first). Before: `seen(pos, radius)` in `lib.rs` (entity culling, 2026-10-18 (2)) was distance + camera frustum, so a mob in a cave behind a hill was still built into the entity mesh every frame (`ItemMesh::update` rebuilds all of it each frame, performance.md step 6). Now `ChunkManager::box_visible(min, max)` asks whether the box touches a section `update_visible` found this frame (`visible`, the `embeddium::cull` walk: frustum, render shape and occlusion by terrain; the walk lists every section it enters, air ones too, so a box in an empty section of a reachable room is visible). `seen` = distance && frustum && `box_visible`, so drops, mobs, carts, boats, arrows, falling blocks and particles all use it (`render/items.rs` is untouched: it already takes `seen`). `lib.rs`: the `update_visible` call moved up, in front of the entity build (it only needs the camera, the frustum, `rd` and `wr`), so the test reads this frame's sections, not last frame's.
++    - Visible, not judged: a box that reaches above or below the world, a box in a chunk that is not loaded, and every box before the first walk (`visible` empty). Entities beyond `RENDER_VERT` (3 chunks) above or below the eye are now hidden with the terrain there (they were drawn up to the distance reach before): a speck of an arrow far overhead.
++    - ponytail: the shadow pass shares the entity mesh (see 2026-10-18 (2)), so a mob hidden behind terrain casts no shadow into view either (off in LEGACY). A hole in the loaded ring cuts the walk (see `update_visible`), so an entity behind the hole is hidden until its chunk loads. Unmeasured on a device: compare the `CPU ms/frame` line with mobs in a cave under the player.
+ - 2026-10-21 (5): leaf culling goes to depth 1 while the leaf tiles are opaque (Xenon 20.1 `LeafCulling`: SOLID / SOLID_AGGRESSIVE end state; idea only, no code copied) (written WITHOUT a Rust toolchain: not compiled, not run; tests `mesh::tests::{the_shipped_leaf_tiles_are_opaque, leaves_hide_their_faces_against_each_other, a_row_of_leaves_is_a_box}` replace `leaves_keep_the_faces_between_them` and `deep_leaf_faces_are_culled`; run `cargo test --lib --release mesh` first; the expected counts (26 / 13 / 54 / 10) were checked with a Python model of the rule). Answers the open question of entry (3): the leaf tiles the mesher uses (53, 133, 255, `atlas::terrain_tile`) have 0 texels with alpha < 128 in `terrain.rgba` (read with Python; the fancy tiles 52 and 132 have 101 and 90), so a leaf is an opaque cube and a face between two leaves can never be seen. `render/mesh.rs`: `LEAF_DEPTH` (const 2) is now `leaf_depth()`: 1 while no leaf tile is cut-out (every leaf-leaf face dropped: a 3 x 3 x 3 crown is its 54 outside quads, was 162), 2 (the HOLLOW rule of entry (3), unchanged) as soon as an atlas has a leaf tile with a see-through texel, so a fancy atlas still works. `render/atlas.rs`: `tile_is_cutout(tile)`. Xenon's separate "solid layer for enclosed leaves" is a no-op here: `build_job` already splits by tile alpha, so opaque leaf tiles are in the `solid` layer (no `discard`).
+     - Not done: a Fancy / Fast option (`fancy_graphics` still does nothing; with fancy leaves `leaf_depth()` would have to read it). Unmeasured on a device: compare the quad count and the `FPS:` line in a forest.
+ - 2026-10-21 (4): upload budget (Sodium `UploadResourceBudget` / `LimitedResourceBudget` / `UnlimitedResourceBudget` / `UploadDurationEstimator` / `ExpDecayLinear2DEstimator`; read from `sodium-dev`: the estimation package and `RenderSectionManager`) (written WITHOUT a Rust toolchain: not compiled, not run; +10 tests in `embeddium::upload_budget`, run `cargo test -p embeddium` first). `embeddium/src/upload_budget.rs`: `UploadBudget` (limited / unlimited, `is_available`, `fits`, `consume`), `UploadDurationEstimator` (linear fit of upload ns over bytes, batches of 100, the first 100 samples weigh equally, then a batch weighs 5%, negative slope clamped), the frame constants (30% of the average frame, floor 2 ms, average frame EMA 5% clamped 1..100 ms). `world/chunks.rs`: `mesh_pending` builds a `UploadBudget` per frame (`frame_duration_budget(average frame)`, `UPLOAD_SIZE_LIMIT` 1 MiB) and uploads finished meshes while they fit: the first one always, a later one only if its bytes and its estimated cost fit; one that does not is kept in `ChunkManager::held` for the next frame (its chunk stays in `meshing`, so no second job). Each `Pages::put` is timed; a frame with writes gives the estimator one sample (average size, average ns), like Sodium's per-frame sample; a `put` that created a page is not sampled (buffer creation is not upload cost). The average frame length is measured between `update` calls. `MESH_PER_FRAME` 2 -> 8 (guard only), `CHUNK_WORK_BUDGET` removed (the 6 ms test on the chunk work of the frame is gone: stream / populate / light no longer shorten the upload).
