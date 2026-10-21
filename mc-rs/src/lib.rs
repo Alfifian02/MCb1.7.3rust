@@ -26,7 +26,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use crate::gpu::context::Gpu;
+use crate::gpu::context::{Drs, Gpu};
 use crate::gpu::pipeline::ChunkPipeline;
 use crate::render::atlas;
 use crate::render::items::{ItemMesh, SignView};
@@ -194,6 +194,8 @@ struct App {
     anim_acc: f32,
     /// CPU seconds spent in `render` (without the swap-chain wait) since the last FPS log line.
     cpu_acc: f32,
+    /// Dynamic resolution (`gpu::context::Drs`), fed by `render_frame`; off with `dynamicRes:false`.
+    drs: Drs,
     /// Chest tile entities by block position (created on first open, or by a dungeon's populate).
     chests: HashMap<chest::Pos, Chest>,
     /// Paintings on walls, sign texts by block position (`TileEntitySign`) and the sign being edited (`GuiEditSign`); saved in `decor`.
@@ -311,6 +313,7 @@ impl App {
             anim: crate::render::anim::Anim::new(),
             anim_acc: 0.0,
             cpu_acc: 0.0,
+            drs: Drs::new(crate::gpu::context::START_PCT),
             gesture: None,
             vitals: Vitals::default(),
             spawn: start,
@@ -556,10 +559,16 @@ impl App {
 
     fn resize(&mut self, w: u32, h: u32) {
         self.gpu.resize(w, h);
-        self.present.resize(&self.gpu.device, &self.gpu.queue, self.gpu.scene(), (w, h));
+        self.sync_scene();
         self.camera.aspect = w as f32 / h as f32;
         self.touch.ensure_layout(w, h);
         self.hud.resize(&self.gpu.queue, w, h);
+    }
+
+    /// The scene targets at the current scale (the surface size is the config's).
+    fn sync_scene(&mut self) {
+        let c = &self.gpu.config;
+        self.present.resize(&self.gpu.device, &self.gpu.queue, self.gpu.scene(), (c.width, c.height));
     }
 
     fn step_frame(&mut self) {
@@ -2098,8 +2107,18 @@ impl App {
             }
         });
         self.gpu.queue.submit(std::iter::once(enc.finish()));
-        self.cpu_acc += t0.elapsed().saturating_sub(acq).as_secs_f32();
+        let spent = t0.elapsed();
+        let cpu = spent.saturating_sub(acq);
+        self.cpu_acc += cpu.as_secs_f32();
         frame.present();
+        if self.opts.dynamic_res {
+            if let Some(p) = self.drs.tick(spent.as_secs_f32(), cpu.as_secs_f32()) {
+                crate::gpu::context::set_scale_pct(p);
+                self.gpu.rescale();
+                self.sync_scene();
+                log::info!("dynamic resolution: scene at {p}%");
+            }
+        }
 
         self.frames += 1;
         self.total_frames += 1;

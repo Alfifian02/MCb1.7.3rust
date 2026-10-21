@@ -10,7 +10,7 @@
 
 use core::ffi::c_void;
 use core::ptr::NonNull;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use raw_window_handle::{
@@ -50,11 +50,105 @@ impl HasWindowHandle for AndroidWindow {
 
 /// Internal render resolution as a fraction of the surface: the scene pass (colour + depth) runs at this size and the
 /// final pass upscales (bilinear + CAS). 1.0 = native. Low-end phones (Mali-G52 class) are fill-rate bound: 0.67 is 2.2x fewer pixels.
-pub const RENDER_SCALE: f32 = 0.67;
+/// This is where it starts (and stays with `dynamicRes:false`); `Drs` moves it.
+pub const START_PCT: u32 = 67;
+pub const RENDER_SCALE: f32 = START_PCT as f32 / 100.0;
+pub const SCALE_MIN: u32 = 50;
+pub const SCALE_MAX: u32 = 100;
+static SCALE_PCT: AtomicU32 = AtomicU32::new(START_PCT);
 
-/// The scene size for a surface of `w` x `h`.
+pub fn set_scale_pct(p: u32) {
+    SCALE_PCT.store(p.clamp(SCALE_MIN, SCALE_MAX), Ordering::Relaxed);
+}
+
+/// The scene size for a surface of `w` x `h` at the current scale.
 pub fn scene_size(w: u32, h: u32) -> (u32, u32) {
-    (((w as f32 * RENDER_SCALE).round() as u32).max(1), ((h as f32 * RENDER_SCALE).round() as u32).max(1))
+    let s = SCALE_PCT.load(Ordering::Relaxed) as f32 / 100.0;
+    (((w as f32 * s).round() as u32).max(1), ((h as f32 * s).round() as u32).max(1))
+}
+
+const STEP: u32 = 5;
+const WINDOW: u32 = 30; // frames averaged: half a second at 60 Hz
+const TARGET: f32 = 1.0 / 60.0; // ponytail: a fixed 60 Hz target; on a 90 / 120 Hz panel it only ever fires below 60 fps
+const BASE_WAIT: u32 = 20; // clean windows before a probe up (10 s at 60 fps)
+const MAX_WAIT: u32 = 240;
+const HOLD: u32 = 3; // clean windows after a probe up that show the new level holds
+
+/// Dynamic resolution (roadmap performance step 4): moves the scene scale by `STEP` percent between `SCALE_MIN` and `SCALE_MAX`.
+/// vsync hides spare GPU time (a frame is 16.7 ms either way), so there is no "fast" to read: it steps DOWN when a window of frames
+/// averages over `TARGET` by 20% while the CPU sat idle for a good part of it (GPU-bound; fewer pixels do nothing for a CPU-bound frame, which
+/// also never counts as clean), and probes UP after `wait` clean windows. A drop right after a probe means the level above does not hold: `wait`
+/// doubles; a probe that holds halves it again.
+pub struct Drs {
+    pct: u32,
+    n: u32,
+    total: f32,
+    cpu: f32,
+    clean: u32,
+    wait: u32,
+    up: bool,
+}
+
+impl Drs {
+    pub fn new(pct: u32) -> Self {
+        Self { pct, n: 0, total: 0.0, cpu: 0.0, clean: 0, wait: BASE_WAIT, up: false }
+    }
+
+    /// One frame: `total` seconds in `render_frame` (swap-chain wait included), `cpu` of them CPU work. `Some(percent)` when the scale changes.
+    pub fn tick(&mut self, total: f32, cpu: f32) -> Option<u32> {
+        self.total += total.min(0.05); // a load hitch counts as at most 3 frames
+        self.cpu += cpu.min(0.05);
+        self.n += 1;
+        if self.n < WINDOW {
+            return None;
+        }
+        let (total, cpu) = (self.total / self.n as f32, self.cpu / self.n as f32);
+        (self.n, self.total, self.cpu) = (0, 0.0, 0.0);
+        let old = self.pct;
+        let slow = total > TARGET * 1.2;
+        if slow && cpu < total * 0.75 {
+            if self.up && self.clean < HOLD {
+                self.wait = (self.wait * 2).min(MAX_WAIT);
+            }
+            (self.up, self.clean) = (false, 0);
+            self.pct = self.pct.saturating_sub(STEP).max(SCALE_MIN);
+        } else if slow {
+            self.clean = 0;
+        } else {
+            self.clean += 1;
+            if self.up && self.clean == HOLD {
+                (self.up, self.wait) = (false, (self.wait / 2).max(BASE_WAIT));
+            }
+            if self.clean >= self.wait && self.pct < SCALE_MAX {
+                (self.pct, self.up, self.clean) = (self.pct + STEP, true, 0);
+            }
+        }
+        (self.pct != old).then_some(self.pct)
+    }
+}
+
+#[cfg(test)]
+mod drs_tests {
+    use super::*;
+
+    #[test]
+    fn steps_down_when_gpu_bound_and_probes_up_with_backoff() {
+        assert_eq!((RENDER_SCALE * 100.0).round() as u32, START_PCT);
+        let run = |d: &mut Drs, windows: u32, total: f32, cpu: f32| (0..windows * WINDOW).filter_map(|_| d.tick(total, cpu)).last();
+        let mut d = Drs::new(START_PCT);
+        // vsync-locked 60 Hz with the CPU mostly idle: nothing moves until the probe.
+        assert_eq!(run(&mut d, BASE_WAIT - 1, 0.0167, 0.006), None);
+        assert_eq!(run(&mut d, 1, 0.0167, 0.006), Some(START_PCT + STEP));
+        // The probe fails at once (46 fps, GPU-bound): back down, and the next probe waits twice as long.
+        assert_eq!(run(&mut d, 1, 0.022, 0.008), Some(START_PCT));
+        assert_eq!(run(&mut d, 2 * BASE_WAIT - 1, 0.0167, 0.006), None);
+        assert_eq!(run(&mut d, 1, 0.0167, 0.006), Some(START_PCT + STEP));
+        // CPU-bound slow frames neither lower the resolution nor count as clean.
+        let mut c = Drs::new(START_PCT);
+        assert_eq!(run(&mut c, 3 * BASE_WAIT, 0.03, 0.028), None);
+        // The floor holds.
+        assert_eq!(run(&mut Drs::new(SCALE_MIN), 4, 0.03, 0.008), None);
+    }
 }
 
 /// `gpuErrorTrace:true` in `options.txt` (ImmediatelyFast's `debug_only_print_additional_error_information`): a wgpu error is logged
@@ -247,6 +341,11 @@ impl Gpu {
         self.config.width = width.max(1);
         self.config.height = height.max(1);
         self.surface.configure(&self.device, &self.config);
+        self.rescale();
+    }
+
+    /// The depth at the current `scene_size` (dynamic resolution: the surface stays as it is).
+    pub fn rescale(&mut self) {
         let (sw, sh) = scene_size(self.config.width, self.config.height);
         self.depth_tex = Self::create_depth(&self.device, sw, sh);
         self.depth_view = self.depth_tex.create_view(&wgpu::TextureViewDescriptor::default());

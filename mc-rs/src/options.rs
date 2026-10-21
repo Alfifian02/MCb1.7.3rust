@@ -119,6 +119,8 @@ pub struct Settings {
     pub lod: bool,
     /// Log a backtrace with every wgpu error, at most one a second (`gpu::context::set_error_trace`); a debug switch with no button.
     pub gpu_error_trace: bool,
+    /// The scene scale follows the GPU load (`gpu::context::Drs`); `dynamicRes:false` pins it at `START_PCT`. No button.
+    pub dynamic_res: bool,
     path: Option<PathBuf>,
 }
 
@@ -143,6 +145,7 @@ impl Default for Settings {
             pad: PadCfg::default(),
             lod: true,
             gpu_error_trace: false,
+            dynamic_res: true,
             path: None,
         }
     }
@@ -173,6 +176,7 @@ impl Settings {
                 ("ao", ..) => s.ambient_occlusion = b,
                 ("lod", ..) => s.lod = b,
                 ("gpuErrorTrace", ..) => s.gpu_error_trace = b,
+                ("dynamicRes", ..) => s.dynamic_res = b,
                 (k, ..) if k.starts_with("pad_") => s.pad.load(k, v),
                 _ => {
                     if let (Some(i), Ok(code)) = (KEY_IDS.iter().position(|id| k.strip_prefix("key_key.") == Some(*id)), v.parse::<u32>()) {
@@ -188,8 +192,8 @@ impl Settings {
     pub fn save(&self) {
         let Some(p) = &self.path else { return };
         let mut t = format!(
-            "music:{}\nsound:{}\ninvertYMouse:{}\nmouseSensitivity:{}\nviewDistance:{}\nguiScale:{}\nbobView:{}\nanaglyph3d:{}\nadvancedOpengl:{}\nfpsLimit:{}\ndifficulty:{}\nfancyGraphics:{}\nao:{}\nlod:{}\ndigDelay:{}\ngpuErrorTrace:{}\n",
-            self.music, self.sound, self.invert_mouse, self.sensitivity, self.render_distance, self.gui_scale, self.view_bobbing, self.anaglyph, self.advanced_opengl, self.limit_framerate, self.difficulty, self.fancy_graphics, self.ambient_occlusion, self.lod, self.dig_delay, self.gpu_error_trace
+            "music:{}\nsound:{}\ninvertYMouse:{}\nmouseSensitivity:{}\nviewDistance:{}\nguiScale:{}\nbobView:{}\nanaglyph3d:{}\nadvancedOpengl:{}\nfpsLimit:{}\ndifficulty:{}\nfancyGraphics:{}\nao:{}\nlod:{}\ndigDelay:{}\ngpuErrorTrace:{}\ndynamicRes:{}\n",
+            self.music, self.sound, self.invert_mouse, self.sensitivity, self.render_distance, self.gui_scale, self.view_bobbing, self.anaglyph, self.advanced_opengl, self.limit_framerate, self.difficulty, self.fancy_graphics, self.ambient_occlusion, self.lod, self.dig_delay, self.gpu_error_trace, self.dynamic_res
         );
         for (id, code) in KEY_IDS.iter().zip(self.keys) {
             t.push_str(&format!("key_key.{id}:{code}\n"));
@@ -789,11 +793,12 @@ mod tests {
         let mut st = Settings::load(&root);
         (st.sensitivity, st.invert_mouse, st.render_distance, st.lod, st.keys[4]) = (0.25, true, 0, false, 50);
         assert!(!st.gpu_error_trace, "a debug switch: off until options.txt says so");
-        st.gpu_error_trace = true;
+        assert!(st.dynamic_res, "on until options.txt says otherwise");
+        (st.gpu_error_trace, st.dynamic_res) = (true, false);
         st.save();
         let back = Settings::load(&root);
         assert_eq!((back.sensitivity, back.invert_mouse, back.render_distance, back.lod, back.keys[4]), (0.25, true, 0, false, 50));
-        assert!(back.gpu_error_trace);
+        assert!(back.gpu_error_trace && !back.dynamic_res);
         assert!(std::fs::read_to_string(root.join("options.txt")).unwrap().contains("key_key.jump:50"));
     }
 
