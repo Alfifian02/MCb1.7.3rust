@@ -1000,13 +1000,6 @@ impl App {
         // (vanilla's rayTraceBlocks skips them).
         let bounds = |x: i32, y: i32, z: i32| self.chunks.block_loaded(x, y, z).and_then(|b| pick_bounds(b, self.chunks.meta(x, y, z)));
         self.target = pick::ray_trace(&bounds, eye, end);
-        // The arm starts to swing while the finger rests on a block, before the hold turns into digging (`HOLD_SECS`): a swing that
-        // begins with the dig is 0.2 s after the touch. ponytail: it swings without digging for that moment, and for a finger that
-        // rests on a block without ever digging (a long press that is then dragged off it).
-        if self.touch.pressing() && self.target.is_some() {
-            self.body.swing();
-        }
-
         // Digging runs on the 20 Hz game tick of the Java (hardness-based time, see world::dig).
         // A broken block drops its items (world::items) only if the held item may harvest it (stone needs a pickaxe),
         // and wears the tool (`Item.onBlockDestroyed`: 1 use, a sword 2, a hoe none).
