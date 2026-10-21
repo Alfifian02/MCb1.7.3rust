@@ -187,6 +187,8 @@ struct App {
     /// Furnace tile entities by block position (created on first use), and the time left over from the last 20 Hz tick.
     furnaces: HashMap<(i32, i32, i32), Furnace>,
     furn_acc: f32,
+    /// Leftover wall-clock time towards the next tick of the player's model state (`body`).
+    body_acc: f32,
     /// Animated water / lava / fire tiles (`render::anim`) and the time left over from their last 20 Hz tick.
     anim: crate::render::anim::Anim,
     anim_acc: f32,
@@ -303,6 +305,7 @@ impl App {
             signs: HashMap::new(),
             sign_edit: None,
             furn_acc: 0.0,
+            body_acc: 0.0,
             anim: crate::render::anim::Anim::new(),
             anim_acc: 0.0,
             cpu_acc: 0.0,
@@ -560,6 +563,9 @@ impl App {
     fn step_frame(&mut self) {
         let now = Instant::now();
         let mut dt = now.duration_since(self.last_frame).as_secs_f32();
+        // The wall-clock frame time, for what a person times with a finger or an eye (hold to dig, dig ticks, the arm swing): `dt` below
+        // is cut at 1/30 s, which is slow motion under 30 fps (at 10 fps a 0.2 s hold took 0.6 s and the swing 1.2 s).
+        let real_dt = dt.min(0.25);
         if dt > 1.0 / 30.0 { dt = 1.0 / 30.0; }
         if dt < 0.0 { dt = 0.0; }
         self.last_frame = now;
@@ -859,14 +865,19 @@ impl App {
             self.pipe.animate_items(&self.gpu.queue, &g);
             self.hud.animate_items(&self.gpu.queue, &g);
         }
-        self.furn_acc += dt;
-        while self.furn_acc >= dig::TICK {
-            self.furn_acc -= dig::TICK;
+        // The player's model state (arm swing, walk, the hand's raise) ticks at 20 Hz of the wall clock, at most 2 a frame.
+        self.body_acc = (self.body_acc + real_dt).min(2.0 * dig::TICK);
+        while self.body_acc >= dig::TICK {
+            self.body_acc -= dig::TICK;
             let (riding, slot) = (self.riding(), self.touch.hotbar_slot);
             let sneaking = self.touch.sneak && self.sleep.is_none();
             let (ground, vy) = (self.player.on_ground && !riding, self.player.vel.y / 20.0);
             self.body.tick(self.player.pos.x, self.player.pos.z, self.camera.yaw.to_degrees() + 180.0, ground, vy, !riding && !(ground && sneaking));
             self.body.equip_tick(slot, self.inv.slots[slot]);
+        }
+        self.furn_acc += dt;
+        while self.furn_acc >= dig::TICK {
+            self.furn_acc -= dig::TICK;
             // The bobber: gone when the rod is not in hand, 32 blocks away, or after 1200 ticks on the ground.
             if let Some(h) = &mut self.hook {
                 let rod = self.inv.slots[self.touch.hotbar_slot].is_some_and(|s| s.id == gear::ROD);
@@ -964,7 +975,7 @@ impl App {
         }
 
         // M5: pick the block under the crosshair, dig it while the dig input is held, place on a tap.
-        self.touch.tick(dt);
+        self.touch.tick(real_dt);
         let mut place = self.touch.take_place();
         let strike = self.touch.take_strike();
         if place {
@@ -1001,13 +1012,19 @@ impl App {
                 self.body.swing();
             }
         }
+        // The arm starts to swing while the finger rests on a block, before the hold turns into digging (`HOLD_SECS`): a swing that
+        // begins with the dig is 0.2 s after the touch. ponytail: it swings without digging for that moment, and for a finger that
+        // rests on a block without ever digging (a long press that is then dragged off it).
+        if self.touch.pressing() && self.target.is_some() {
+            self.body.swing();
+        }
 
         // Digging runs on the 20 Hz game tick of the Java (hardness-based time, see world::dig).
         // A broken block drops its items (world::items) only if the held item may harvest it (stone needs a pickaxe),
         // and wears the tool (`Item.onBlockDestroyed`: 1 use, a sword 2, a hoe none).
         match self.target {
             Some(hit) if self.touch.digging() => {
-                self.dig_acc += dt;
+                self.dig_acc += real_dt;
                 while self.dig_acc >= dig::TICK {
                     self.dig_acc -= dig::TICK;
                     let (x, y, z) = hit.pos;
@@ -1910,7 +1927,7 @@ impl App {
             self.camera.pos = self.third_pos();
         }
         // The player's own model, drawn only from behind (`RenderPlayer`; the first-person view has the hand instead).
-        let tick_partial = (self.furn_acc / dig::TICK).clamp(0.0, 1.0);
+        let tick_partial = (self.body_acc / dig::TICK).clamp(0.0, 1.0);
         let player_view = self.touch.third.then(|| {
             let riding = self.riding();
             let held = self.inv.slots[self.touch.hotbar_slot];

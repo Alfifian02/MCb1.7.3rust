@@ -32,6 +32,8 @@ pub const TAP_SECS: f32 = 0.25;
 /// A press held still this long starts digging, which lasts until the finger lifts. At or under `TAP_SECS`, so every press is
 /// a tap or a dig (at 0.4 s a press of 0.25 to 0.4 s did nothing at all, and a dig started 0.4 s late).
 pub const HOLD_SECS: f32 = 0.2;
+/// A look finger resting this long on a block starts the arm swing (`TouchUi::pressing`), 0.14 s before the dig itself.
+pub const SWING_SECS: f32 = 0.06;
 /// Finger travel (fraction of the short screen side) above which a press is a look drag.
 const SLOP: f32 = 0.02;
 
@@ -380,6 +382,11 @@ impl TouchUi {
     /// A look finger went down since the last call: a mob under the crosshair is hit now, not when the finger lifts.
     pub fn take_press(&mut self) -> bool {
         std::mem::take(&mut self.press)
+    }
+
+    /// A look finger has rested still for `SWING_SECS` (and did not act already): the arm may start to swing.
+    pub fn pressing(&self) -> bool {
+        self.pointers.values().any(|p| p.role == PointerRole::Look && !p.used && p.held >= SWING_SECS && p.travel < self.surface_w.min(self.surface_h) as f32 * SLOP)
     }
 
     /// The look finger(s) now down already acted on the press: the release is not a tap and the hold does not dig.
@@ -751,6 +758,19 @@ mod tests {
         tap(&mut ui, 2, px + pw * 0.5, py + ph * 0.5);
         assert_eq!(ui.move_input, (0.0, 0.0));
         assert!(ui.pointers.is_empty() && ui.dir.is_none() && !ui.dpad_shown(4));
+    }
+
+    #[test]
+    fn a_resting_finger_swings_the_arm_before_it_digs() {
+        let mut ui = TouchUi::new(W, H);
+        ui.on_press(1, 1800.0, 400.0, PointerRole::Look);
+        ui.tick(0.03);
+        assert!(!ui.pressing());
+        ui.tick(0.04);
+        assert!(ui.pressing() && !ui.digging(), "swinging at 0.07 s, digging only from 0.2 s");
+        ui.on_move(1, 1900.0, 400.0);
+        assert!(!ui.pressing(), "a drag is a look");
+        ui.on_release(1);
     }
 
     #[test]
