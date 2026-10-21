@@ -149,12 +149,13 @@ fn atlas_sample_g(uv: vec2<f32>, gx: vec2<f32>, gy: vec2<f32>) -> vec4<f32> {
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
-    @location(0) uv: vec2<f32>,
-    @location(1) tint: vec3<f32>, // linear colour of the biome / leaf tint
-    @location(2) lit: f32,        // light table (x face shade x ambient occlusion on smooth faces), linear
-    @location(3) fg: f32,         // fog factor
+    @location(0) @interpolate(perspective, centroid) uv: vec2<f32>, // MSAA: centroid, so an edge pixel never reads past its quad (see `uvd`)
+    @location(1) @interpolate(perspective, centroid) tint: vec3<f32>, // linear colour of the biome / leaf tint
+    @location(2) @interpolate(perspective, centroid) lit: f32,        // light table (x face shade x ambient occlusion on smooth faces), linear
+    @location(3) @interpolate(perspective, centroid) fg: f32,         // fog factor
     @location(4) k: f32,          // < 0: the face shade is already in `lit` (every chunk vertex); >= 0: flat face, `fs_cut_flat` takes the shade from the screen; >= 1000: far terrain / water sheet (tile = k - 1000)
     @location(5) wp: vec3<f32>,
+    @location(6) uvd: vec2<f32>, // the same uv at the pixel centre: screen derivatives of a centroid value are wrong on edge pixels
 };
 
 // b1.7.3 `setupFog`: GL_LINEAR from a quarter of the far plane to the far plane (`fogp.x` moves the start); GL_EXP under water.
@@ -177,6 +178,7 @@ fn vert(vpos: vec3<f32>, vuv: vec2<f32>, vlight: f32, vlm: f32, vtint: f32, wate
     o.tint = pow(vec3<f32>(f32((tp >> 16u) & 255u), f32((tp >> 8u) & 255u), f32(tp & 255u)) / 255.0, vec3<f32>(2.2));
     o.pos = u.vp * vec4<f32>(vpos, 1.0);
     o.uv = vuv;
+    o.uvd = vuv;
     o.wp = vpos;
     o.fg = fog_factor(length(vpos - u.eye.xyz));
     if vlm >= 256.0 && !water { // smooth vertex (`mesh::SMOOTH_LM`): sky in quarter levels, block in half levels, `light` = shade x ambient occlusion
@@ -213,6 +215,7 @@ fn chunk_vert(p: vec4<u32>, t: vec2<u32>, c: vec4<f32>, water: bool) -> VsOut {
     o.tint = pow(c.rgb, vec3<f32>(2.2));
     o.pos = u.vp * vec4<f32>(vpos, 1.0);
     o.uv = vec2<f32>(t) / 65536.0;
+    o.uvd = o.uv;
     o.wp = vpos;
     o.fg = fog_factor(length(vpos - u.eye.xyz));
     if (p.w & 0x8000u) != 0u && !water {
@@ -260,8 +263,8 @@ fn far_uv(uv: vec2<f32>, k: f32) -> vec2<f32> {
 // `shade`: the face shade the caller took from the screen (`fs_cut_flat`), 1.0 where the vertex carries it (`fs_solid`, `fs_cut`).
 fn frag(in: VsOut, cut: bool, shade: f32) -> vec4<f32> {
     var uv = in.uv;
-    var gx = dpdx(in.uv);
-    var gy = dpdy(in.uv);
+    var gx = dpdx(in.uvd);
+    var gy = dpdy(in.uvd);
     if in.k >= 1000.0 {
         uv = far_uv(in.uv, in.k);
         let s = vec2<f32>(textureDimensions(tex));
@@ -323,8 +326,8 @@ fn fs_water(in: VsOut) -> @location(0) vec4<f32> {
     let sheet = in.k >= 1000.0;
     if (length(in.wp - u.eye.xyz) > u.fogp.y) != sheet { discard; }
     var uv = in.uv;
-    var gx = dpdx(in.uv);
-    var gy = dpdy(in.uv);
+    var gx = dpdx(in.uvd);
+    var gy = dpdy(in.uvd);
     if sheet {
         uv = far_uv(in.uv, in.k);
         let s = vec2<f32>(textureDimensions(tex));
@@ -550,6 +553,9 @@ mod tests {
             assert!(m.entry_points.iter().any(|p| p.name == e), "{e} missing");
         }
         assert!(!SHADER_SRC.contains("textureSample(tex"));
+        // MSAA edge pixels: every interpolated colour/uv is centroid (no extrapolation past the quad), the derivatives come from `uvd`.
+        assert_eq!(SHADER_SRC.matches("@interpolate(perspective, centroid)").count(), 4);
+        assert!(!SHADER_SRC.contains("dpdx(in.uv)") && !SHADER_SRC.contains("dpdy(in.uv)"));
         // Both alpha-to-coverage settings validate (the const is spliced).
         for a2c in [false, true] {
             let src = shader_source_with(a2c);
