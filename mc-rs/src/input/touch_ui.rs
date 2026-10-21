@@ -83,8 +83,6 @@ pub struct Pointer {
     pub travel: f32,
     /// The hold turned into digging, so releasing is not a tap.
     pub broke: bool,
-    /// The press already acted (`mark_used`: it hit what is under the crosshair): no tap on release, and no digging.
-    pub used: bool,
 }
 
 /// Screen-space layout (pixels, top-left origin).
@@ -219,8 +217,6 @@ pub struct TouchUi {
     look_delta: (f32, f32),
     /// A tap fired since the last `take_place`.
     place: bool,
-    /// A look finger went down since the last `take_press`.
-    press: bool,
     /// A container screen is open (set by `set_screen`); presses become taps.
     pub screen: bool,
     /// The inventory button was released since the last `take_inventory`.
@@ -270,7 +266,6 @@ impl TouchUi {
             pad_zoom: false,
             pad_look: (0.0, 0.0),
             strike: false,
-            press: false,
         }
     }
 
@@ -379,19 +374,9 @@ impl TouchUi {
         std::mem::take(&mut self.place)
     }
 
-    /// A look finger went down since the last call: a mob under the crosshair is hit now, not when the finger lifts.
-    pub fn take_press(&mut self) -> bool {
-        std::mem::take(&mut self.press)
-    }
-
-    /// A look finger has rested still for `SWING_SECS` (and did not act already): the arm may start to swing.
+    /// A look finger has rested still for `SWING_SECS`: the arm may start to swing.
     pub fn pressing(&self) -> bool {
-        self.pointers.values().any(|p| p.role == PointerRole::Look && !p.used && p.held >= SWING_SECS && p.travel < self.surface_w.min(self.surface_h) as f32 * SLOP)
-    }
-
-    /// The look finger(s) now down already acted on the press: the release is not a tap and the hold does not dig.
-    pub fn mark_used(&mut self) {
-        self.pointers.values_mut().filter(|p| p.role == PointerRole::Look).for_each(|p| p.used = true);
+        self.pointers.values().any(|p| p.role == PointerRole::Look && p.held >= SWING_SECS && p.travel < self.surface_w.min(self.surface_h) as f32 * SLOP)
     }
 
     /// True while a look finger that was held still is down: the player is digging.
@@ -402,7 +387,7 @@ impl TouchUi {
     /// Advance the hold timers by one frame: a look finger held still turns into digging after `HOLD_SECS`.
     pub fn tick(&mut self, dt: f32) {
         let slop = self.surface_w.min(self.surface_h) as f32 * SLOP;
-        for p in self.pointers.values_mut().filter(|p| p.role == PointerRole::Look && !p.broke && !p.used && p.travel < slop) {
+        for p in self.pointers.values_mut().filter(|p| p.role == PointerRole::Look && !p.broke && p.travel < slop) {
             p.held += dt;
             p.broke = p.held >= HOLD_SECS;
         }
@@ -455,7 +440,6 @@ impl TouchUi {
         self.move_input = (0.0, 0.0);
         self.look_delta = (0.0, 0.0);
         self.place = false;
-        self.press = false;
         self.events.clear();
     }
 
@@ -516,8 +500,7 @@ impl TouchUi {
         if role == PointerRole::Dir {
             self.set_dir(self.dir_at(x, y));
         }
-        self.press |= role == PointerRole::Look;
-        self.pointers.insert(pid, Pointer { role, last: (x, y), held: 0.0, travel: 0.0, broke: false, used: false });
+        self.pointers.insert(pid, Pointer { role, last: (x, y), held: 0.0, travel: 0.0, broke: false });
     }
 
     fn on_move(&mut self, pid: i32, x: f32, y: f32) {
@@ -566,7 +549,7 @@ impl TouchUi {
             PointerRole::Sneak => self.sneak = !self.sneak,
             PointerRole::Look => {
                 let slop = self.surface_w.min(self.surface_h) as f32 * SLOP;
-                if !ptr.broke && !ptr.used && ptr.held < TAP_SECS && ptr.travel < slop {
+                if !ptr.broke && ptr.held < TAP_SECS && ptr.travel < slop {
                     self.place = true;
                 }
             }
@@ -771,18 +754,6 @@ mod tests {
         ui.on_move(1, 1900.0, 400.0);
         assert!(!ui.pressing(), "a drag is a look");
         ui.on_release(1);
-    }
-
-    #[test]
-    fn a_press_that_hit_is_neither_a_tap_nor_a_dig() {
-        let mut ui = TouchUi::new(W, H);
-        ui.on_press(1, 1800.0, 400.0, PointerRole::Look);
-        assert!(ui.take_press() && !ui.take_press());
-        ui.mark_used();
-        ui.tick(0.5);
-        assert!(!ui.digging());
-        ui.on_release(1);
-        assert!(!ui.take_place());
     }
 
     #[test]

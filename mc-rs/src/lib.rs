@@ -976,7 +976,7 @@ impl App {
 
         // M5: pick the block under the crosshair, dig it while the dig input is held, place on a tap.
         self.touch.tick(real_dt);
-        let mut place = self.touch.take_place();
+        let place = self.touch.take_place();
         let strike = self.touch.take_strike();
         if place {
             self.body.swing(); // a tap places, uses or hits: `swingItem`
@@ -1000,18 +1000,6 @@ impl App {
         // (vanilla's rayTraceBlocks skips them).
         let bounds = |x: i32, y: i32, z: i32| self.chunks.block_loaded(x, y, z).and_then(|b| pick_bounds(b, self.chunks.meta(x, y, z)));
         self.target = pick::ray_trace(&bounds, eye, end);
-        // A press with a mob, boat or cart under the crosshair (nearer than the block behind it) acts at once as the tap it would become,
-        // instead of when the finger lifts; the release is no tap then. ponytail: a look drag that starts on a mob hits it.
-        if self.touch.take_press() && !place {
-            let (eye, fwd) = (self.camera.pos, self.camera.forward());
-            let wall = self.target.map_or(f32::MAX, |h| h.point.distance(eye.as_dvec3()) as f32);
-            let near = |o: Option<(usize, f32)>| o.is_some_and(|(_, t)| t < wall);
-            if near(self.mobs.pick(eye, fwd, pick::REACH as f32)) || near(self.boats.pick(eye, fwd, pick::REACH as f32)) || near(self.carts.pick(eye, fwd, pick::REACH as f32)) {
-                place = true;
-                self.touch.mark_used();
-                self.body.swing();
-            }
-        }
         // The arm starts to swing while the finger rests on a block, before the hold turns into digging (`HOLD_SECS`): a swing that
         // begins with the dig is 0.2 s after the touch. ponytail: it swings without digging for that moment, and for a finger that
         // rests on a block without ever digging (a long press that is then dragged off it).
