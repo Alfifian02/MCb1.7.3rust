@@ -32,6 +32,9 @@ pub const TAP_SECS: f32 = 0.25;
 /// A press held still this long starts digging, which lasts until the finger lifts; a shorter press that did not move is a tap
 /// (place), so every press is a tap or a dig, whatever this is. 0.2 s felt too eager, 0.4 s is the first value.
 pub const HOLD_SECS: f32 = 0.4;
+/// A look finger resting still this long on a block starts the arm swing (`TouchUi::pressing`), well before the dig at `HOLD_SECS`.
+/// A finger that moves more than the slop is a look drag and never swings. UNVERIFIED on a device: 0.15 s is a guess.
+pub const SWING_SECS: f32 = 0.15;
 /// Finger travel (fraction of the short screen side) above which a press is a look drag.
 const SLOP: f32 = 0.02;
 
@@ -229,6 +232,7 @@ pub struct TouchUi {
     pub pad: Pad,
     pad_jump: bool,
     pad_dig: bool,
+    pad_attack: bool,
     pad_zoom: bool,
     /// Look from the right stick since the last `take_pad_look`, radians (yaw right, pitch down).
     pad_look: (f32, f32),
@@ -261,6 +265,7 @@ impl TouchUi {
             pad: Pad::default(),
             pad_jump: false,
             pad_dig: false,
+            pad_attack: false,
             pad_zoom: false,
             pad_look: (0.0, 0.0),
             strike: false,
@@ -296,6 +301,7 @@ impl TouchUi {
             }
             self.pad_jump = false;
             self.pad_dig = false;
+            self.pad_attack = false;
             self.pad_zoom = false;
             return;
         }
@@ -304,7 +310,7 @@ impl TouchUi {
         }
         self.pad_look.0 += o.look.0;
         self.pad_look.1 += o.look.1;
-        (self.pad_jump, self.pad_dig, self.pad_zoom) = (o.jump, o.dig, o.zoom);
+        (self.pad_jump, self.pad_dig, self.pad_attack, self.pad_zoom) = (o.jump, o.dig, o.attack, o.zoom);
         if cfg.toggle_sneak {
             self.sneak ^= o.sneak_down;
         } else if o.sneak_down {
@@ -370,6 +376,11 @@ impl TouchUi {
     /// A tap (place) was requested since the last call.
     pub fn take_place(&mut self) -> bool {
         std::mem::take(&mut self.place)
+    }
+
+    /// The arm may swing: the pad's attack button is down, or a look finger has rested still for `SWING_SECS` (a drag has not).
+    pub fn pressing(&self) -> bool {
+        self.pad_attack || self.pointers.values().any(|p| p.role == PointerRole::Look && p.held >= SWING_SECS && p.travel < self.surface_w.min(self.surface_h) as f32 * SLOP)
     }
 
     /// True while a look finger that was held still is down: the player is digging.
@@ -734,6 +745,22 @@ mod tests {
         tap(&mut ui, 2, px + pw * 0.5, py + ph * 0.5);
         assert_eq!(ui.move_input, (0.0, 0.0));
         assert!(ui.pointers.is_empty() && ui.dir.is_none() && !ui.dpad_shown(4));
+    }
+
+    #[test]
+    fn a_resting_finger_swings_the_arm_before_it_digs_a_drag_does_not() {
+        let mut ui = TouchUi::new(W, H);
+        ui.on_press(1, 1800.0, 400.0, PointerRole::Look);
+        ui.tick(SWING_SECS - 0.01);
+        assert!(!ui.pressing());
+        ui.tick(0.02);
+        assert!(ui.pressing() && !ui.digging(), "swinging from SWING_SECS, digging only from HOLD_SECS");
+        ui.on_release(1);
+        ui.on_press(1, 1800.0, 400.0, PointerRole::Look);
+        ui.on_move(1, 1900.0, 400.0);
+        ui.tick(0.3);
+        assert!(!ui.pressing(), "a drag is a look");
+        ui.on_release(1);
     }
 
     #[test]

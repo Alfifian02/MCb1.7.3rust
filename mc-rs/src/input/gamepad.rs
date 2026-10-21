@@ -258,6 +258,8 @@ pub struct Out {
     pub look: (f32, f32),
     pub jump: bool,
     pub dig: bool,
+    /// The attack button is down (from the first frame: the arm swings at once, the dig waits for `HOLD_SECS`).
+    pub attack: bool,
     pub zoom: bool,
     pub sneak_down: bool,
     pub sneak_up: bool,
@@ -422,7 +424,8 @@ impl Pad {
         o.zoom = down(Act::Zoom);
         (o.sneak_down, o.sneak_up) = (just(Act::Sneak), up(Act::Sneak));
         // Attack: the touch screen's look finger. Held past HOLD_SECS digs, a short press hits.
-        if down(Act::Attack) {
+        o.attack = down(Act::Attack);
+        if o.attack {
             self.attack_t += dt;
             o.dig = self.attack_t >= HOLD_SECS;
         } else if up(Act::Attack) {
@@ -563,7 +566,8 @@ mod tests {
     fn attack_taps_hit_and_holds_dig() {
         let (mut p, c) = pad();
         p.axes(0.0, 0.0, 0.0, 0.0, 0.0, 1.0, (0.0, 0.0)); // right trigger
-        assert!(!p.update(DT, &c, false, 1000.0).dig);
+        let o = p.update(DT, &c, false, 1000.0);
+        assert!(!o.dig && o.attack, "the arm may swing from the first frame, the dig waits");
         p.axes(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, (0.0, 0.0));
         let o = p.update(DT, &c, false, 1000.0);
         assert!(o.strike && o.place, "a short press is a hit");
