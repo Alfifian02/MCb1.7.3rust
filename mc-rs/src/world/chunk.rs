@@ -17,38 +17,71 @@ pub const fn idx(x: usize, y: usize, z: usize) -> usize {
 /// `NibbleArray`: 4 bits per cell, two cells to a byte (an even cell index is the low nibble), indexed like the
 /// blocks (`idx`). A chunk's block metadata (`Chunk.data`: log species, wool colour, slab type, stair and door
 /// facing, ...) lives in one, and its bytes are the McRegion `Data` tag as they are, so saving (M7) needs no
-/// conversion. `Default` is the empty placeholder `mem::take` leaves behind; make a real one with `new`.
-#[derive(Clone, Default, PartialEq, Eq, Debug)]
+/// conversion.
+///
+/// FerriteCore's lazy / canonical-instance idea (its blockstate caches are built on first use and equal shapes share one instance):
+/// a chunk whose metadata is all 0 (desert, ocean, bare rock: most of the worldgen's chunks have no tall grass, logs or wool) holds
+/// no array at all. An empty `Vec` is "every nibble 0"; the 16 KB array is made by the first non-zero `set`. So `new`, `Default`
+/// (what `mem::take` leaves behind), a mesh job's `Snap` clone and a decoded all-zero save cost nothing, and `bytes` still hands out
+/// the full McRegion array (a shared static of zeros).
+#[derive(Clone, Default, Debug)]
 pub struct Nibbles(Vec<u8>);
+
+/// The packed bytes of an all-zero `Nibbles`.
+static ZEROS: [u8; VOLUME / 2] = [0; VOLUME / 2];
 
 impl Nibbles {
     pub fn new() -> Self {
-        Self(vec![0; VOLUME / 2])
+        Self(Vec::new())
     }
 
     pub fn get(&self, x: usize, y: usize, z: usize) -> u8 {
         let i = idx(x, y, z);
-        self.0[i >> 1] >> ((i & 1) * 4) & 15
+        self.0.get(i >> 1).map_or(0, |&b| b >> ((i & 1) * 4) & 15)
     }
 
     /// Only the low 4 bits of `v` count (`NibbleArray.setNibble`).
     pub fn set(&mut self, x: usize, y: usize, z: usize, v: u8) {
+        let v = v & 15;
+        if self.0.is_empty() {
+            if v == 0 {
+                return; // writing a 0 over nothing changes nothing
+            }
+            self.0 = vec![0; VOLUME / 2];
+        }
         let i = idx(x, y, z);
         let s = (i & 1) * 4;
         let b = &mut self.0[i >> 1];
-        *b = *b & !(15u8 << s) | (v & 15) << s;
+        *b = *b & !(15u8 << s) | v << s;
     }
 
     pub fn bytes(&self) -> &[u8] {
-        &self.0
+        if self.0.is_empty() {
+            &ZEROS
+        } else {
+            &self.0
+        }
     }
 
-    /// The packed bytes back (a loaded save); the caller has checked the length.
+    /// The packed bytes back (a loaded save); the caller has checked the length. All zeros is kept as no array.
     pub fn from_bytes(b: Vec<u8>) -> Self {
         debug_assert_eq!(b.len(), VOLUME / 2);
-        Self(b)
+        if b.iter().all(|&x| x == 0) {
+            Self::new()
+        } else {
+            Self(b)
+        }
     }
 }
+
+/// Equal when every nibble is (an array of zeros equals no array).
+impl PartialEq for Nibbles {
+    fn eq(&self, o: &Self) -> bool {
+        self.bytes() == o.bytes()
+    }
+}
+
+impl Eq for Nibbles {}
 
 /// Plants (render type 1, `getCollisionBoundingBoxFromPool` null): sapling, tall grass, dead bush, flowers, mushrooms,
 /// reeds, fire. Drawn as crossed quads (`cross_shape`), walked through, never hide a neighbour's face.
@@ -376,6 +409,21 @@ mod tests {
         assert_eq!((n.get(0, 0, 0), n.get(0, 1, 0), n.get(15, 127, 15), n.get(1, 0, 0)), (5, 9, 11, 0));
         n.set(0, 0, 0, 0);
         assert_eq!(n.bytes()[0], 0x90);
+    }
+
+    /// No array until a non-zero nibble is stored; zeros read back, compare equal to an array of zeros and clone as nothing.
+    #[test]
+    fn nibbles_allocate_on_the_first_non_zero() {
+        let mut n = Nibbles::new();
+        n.set(3, 4, 5, 0);
+        assert!(n.0.is_empty() && n.get(3, 4, 5) == 0 && n.bytes().len() == VOLUME / 2 && n.bytes().iter().all(|&b| b == 0));
+        n.set(3, 4, 5, 7);
+        assert_eq!((n.0.len(), n.get(3, 4, 5)), (VOLUME / 2, 7));
+        n.set(3, 4, 5, 0);
+        assert_eq!(n, Nibbles::new(), "an array of zeros equals no array");
+        assert!(Nibbles::from_bytes(vec![0; VOLUME / 2]).0.is_empty(), "an all-zero save keeps no array");
+        assert_eq!(Nibbles::from_bytes(n.bytes().to_vec()), n);
+        assert!(Nibbles::default().get(15, 127, 15) == 0, "the `mem::take` placeholder reads as zeros, it no longer panics");
     }
 
     /// A snow layer collides from 3 layers up (`meta & 7 >= 3`), half a block high, like the Java; 1-2 layers are walked through.

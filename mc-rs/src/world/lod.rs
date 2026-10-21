@@ -146,8 +146,14 @@ fn rgb(t: u32) -> [u8; 3] {
 /// `DEPTH` blocks under the ground (the first opaque block that is not a log or leaves, so a tree's trunk is read through to the
 /// grass under it), as runs. Both kinds of water are one id (9).
 fn column(blocks: &[u8], meta: &Nibbles, tints: &Tints, x: usize, z: usize) -> Col {
-    let base = idx(x, 0, z);
-    let mut out: Col = Vec::new();
+    let mut out = Col::new();
+    column_into(&mut out, blocks, meta, tints, x, z);
+    out
+}
+
+/// `column`, its runs appended to `out` (which may hold other columns before them: only the ones from `first` on are merged).
+fn column_into(out: &mut Vec<Span>, blocks: &[u8], meta: &Nibbles, tints: &Tints, x: usize, z: usize) {
+    let (base, first) = (idx(x, 0, z), out.len());
     let mut ground: Option<usize> = None;
     for y in (0..HEIGHT).rev() {
         if ground.is_some_and(|g| y + DEPTH <= g) {
@@ -162,7 +168,7 @@ fn column(blocks: &[u8], meta: &Nibbles, tints: &Tints, x: usize, z: usize) -> C
         }
         let m = meta.get(x, y, z) & 15;
         let t = if matches!(b, 2 | 18) { rgb(tint_of(tints, b, m, x * 16 + z) as u32) } else { PLAIN };
-        match out.last_mut() {
+        match out[first..].last_mut() {
             Some(s) if s.y0 as usize == y + 1 && s.id == b && s.meta == m && s.tint == t => s.y0 = y as u8,
             _ => out.push(Span { y0: y as u8, y1: y as u8 + 1, id: b, meta: m, tint: t }),
         }
@@ -170,12 +176,44 @@ fn column(blocks: &[u8], meta: &Nibbles, tints: &Tints, x: usize, z: usize) -> C
             ground = Some(y);
         }
     }
-    out
 }
 
-/// The 256 columns of a real chunk (index `x * 16 + z`), for `Lod::ingest`.
-pub fn columns(blocks: &[u8], meta: &Nibbles, tints: &Tints) -> Vec<Col> {
-    (0..256).map(|i| column(blocks, meta, tints, i >> 4, i & 15)).collect()
+/// Many columns in two arrays: column `q` is `spans[start[q]..start[q + 1]]`. FerriteCore's `FastMap` idea (one flat array found by
+/// arithmetic instead of a small object per entry): a `Vec<Col>` costs a 24 byte header and a heap block for every column, 256 for a
+/// chunk and 4096 for a tile, and every `Tile0::put` used to allocate all 4096 again.
+#[derive(Clone, Default, Debug)]
+pub struct Cols {
+    start: Vec<u32>,
+    spans: Vec<Span>,
+}
+
+impl Cols {
+    fn from_cols(cols: &[Col]) -> Self {
+        let mut start = Vec::with_capacity(cols.len() + 1);
+        let mut spans = Vec::with_capacity(cols.iter().map(Vec::len).sum());
+        for c in cols {
+            start.push(spans.len() as u32);
+            spans.extend_from_slice(c);
+        }
+        start.push(spans.len() as u32);
+        Cols { start, spans }
+    }
+
+    fn col(&self, q: usize) -> &[Span] {
+        &self.spans[self.start[q] as usize..self.start[q + 1] as usize]
+    }
+}
+
+/// The 256 columns of a real chunk (index `x * 16 + z`), for `Lod::ingest`, straight into one array.
+pub fn columns(blocks: &[u8], meta: &Nibbles, tints: &Tints) -> Cols {
+    let mut c = Cols { start: Vec::with_capacity(257), spans: Vec::with_capacity(256 * 6) };
+    for i in 0..256 {
+        c.start.push(c.spans.len() as u32);
+        column_into(&mut c.spans, blocks, meta, tints, i >> 4, i & 15);
+    }
+    c.start.push(c.spans.len() as u32);
+    c.spans.shrink_to_fit(); // a real chunk's columns are kept for as long as the player is within 48 chunks of it (`Store::prune`)
+    c
 }
 
 /// Atlas uv of a block's face tile at (u, v) (v up), the flat colour of the block where it has no tile.
@@ -191,42 +229,42 @@ fn pack(rgb: [u8; 3]) -> f32 {
     ((rgb[0] as u32) << 16 | (rgb[1] as u32) << 8 | rgb[2] as u32) as f32
 }
 
-/// The 64 x 64 columns of one tile (`start[x * 64 + z]..start[x * 64 + z + 1]` indexes `spans`), and whether its trees were grown.
+/// The 64 x 64 columns of one tile (`Cols`, column `x * 64 + z`), and whether its trees were grown.
 struct Tile0 {
-    start: Vec<u32>,
-    spans: Vec<Span>,
+    cols: Cols,
     trees: bool,
 }
 
 impl Tile0 {
     fn from_cols(cols: &[Col], trees: bool) -> Self {
-        let mut start = Vec::with_capacity(64 * 64 + 1);
-        let mut spans = Vec::new();
-        for c in cols {
-            start.push(spans.len() as u32);
-            spans.extend_from_slice(c);
-        }
-        start.push(spans.len() as u32);
-        Tile0 { start, spans, trees }
+        Tile0 { cols: Cols::from_cols(cols), trees }
     }
 
     fn col(&self, q: usize) -> &[Span] {
-        &self.spans[self.start[q] as usize..self.start[q + 1] as usize]
+        self.cols.col(q)
     }
 
-    /// Lay the columns of real chunk `k` over its place in this tile.
-    fn put(&mut self, k: (i32, i32), cols: &[Col]) {
+    /// Lay the columns of real chunk `k` over its place in this tile: copied slice by slice into one new array, no column of its own.
+    fn put(&mut self, k: (i32, i32), cols: &Cols) {
         let (ox, oz) = (k.0.rem_euclid(4) as usize * 16, k.1.rem_euclid(4) as usize * 16);
-        let mut all: Vec<Col> = Vec::with_capacity(64 * 64);
+        let pick = |q: usize| pick_col(&self.cols, cols, (ox, oz), q);
+        let mut out = Cols { start: Vec::with_capacity(64 * 64 + 1), spans: Vec::with_capacity((0..64 * 64).map(|q| pick(q).len()).sum()) };
         for q in 0..64 * 64 {
-            let (x, z) = (q / 64, q % 64);
-            if (ox..ox + 16).contains(&x) && (oz..oz + 16).contains(&z) {
-                all.push(cols[(x - ox) * 16 + (z - oz)].clone());
-            } else {
-                all.push(self.col(q).to_vec());
-            }
+            out.start.push(out.spans.len() as u32);
+            out.spans.extend_from_slice(pick(q));
         }
-        *self = Tile0::from_cols(&all, self.trees);
+        out.start.push(out.spans.len() as u32);
+        self.cols = out;
+    }
+}
+
+/// Column `q` of a tile, or the chunk's own column where the chunk (its 16 x 16 columns from `(ox, oz)`) lies over it.
+fn pick_col<'a>(tile: &'a Cols, chunk: &'a Cols, (ox, oz): (usize, usize), q: usize) -> &'a [Span] {
+    let (x, z) = (q / 64, q % 64);
+    if (ox..ox + 16).contains(&x) && (oz..oz + 16).contains(&z) {
+        chunk.col((x - ox) * 16 + (z - oz))
+    } else {
+        tile.col(q)
     }
 }
 
@@ -236,7 +274,7 @@ struct Store {
     cm: WorldChunkManager,
     tiles: HashMap<(i32, i32), Tile0>,
     /// The columns of the real chunks `Lod::ingest` handed over, by chunk: laid over a tile whenever it is made (so they outlive it).
-    real: HashMap<(i32, i32), Vec<Col>>,
+    real: HashMap<(i32, i32), Cols>,
     /// `<world>/lod`: tiles made with their trees are kept here (`flush`), None = nothing is read or written (the tests).
     dir: Option<PathBuf>,
     tectonic: bool,
@@ -366,7 +404,7 @@ impl Store {
     }
 
     /// A real chunk replaces what the generator guessed for it: in its tile if that is made, and in the tile when it is made.
-    fn ingest(&mut self, k: (i32, i32), cols: Vec<Col>) {
+    fn ingest(&mut self, k: (i32, i32), cols: Cols) {
         let tk = (k.0.div_euclid(4), k.1.div_euclid(4));
         if let Some(t) = self.tiles.get_mut(&tk) {
             t.put(k, &cols);
@@ -1034,7 +1072,12 @@ fn build(store: &mut Store, key: (i32, i32), step: i32, trees: bool) -> Built {
             }
         }
     }
-    Built { key, step, trees, verts: q.verts, idx: q.idx, sheet: q.sheet, cells, dbg }
+    // The tile keeps `idx` and `cells` for as long as it lives (`Tile::all`, `Tile::cells`); growing them by pushes leaves up to half of
+    // each unused.
+    let mut all = q.idx;
+    all.shrink_to_fit();
+    cells.shrink_to_fit();
+    Built { key, step, trees, verts: q.verts, idx: all, sheet: q.sheet, cells, dbg }
 }
 
 /// Which cells the real chunks cover around `eye` = (position, range, vertical range): the same `in_range` test as
@@ -1125,7 +1168,7 @@ impl Tile {
 /// What the worker is told: mesh a tile (x, z, step, trees), or take a real chunk's columns.
 enum Msg {
     Build(i32, i32, i32, bool),
-    Ingest((i32, i32), Vec<Col>),
+    Ingest((i32, i32), Cols),
     /// A tile a pre-generation thread made with its trees: (tile, columns, new = not read from its file).
     Made((i32, i32), Box<Tile0>, bool),
 }
@@ -1294,7 +1337,7 @@ impl Lod {
 
     /// The columns of a real chunk (`columns`), from the chunk manager: they replace the guessed ones. Its tile, and the neighbour tiles
     /// whose edge walls read it, are meshed again `REMESH_WAIT` after the first chunk of a burst.
-    pub fn ingest(&mut self, k: (i32, i32), cols: Vec<Col>) {
+    pub fn ingest(&mut self, k: (i32, i32), cols: Cols) {
         let _ = self.job.send(Msg::Ingest(k, cols));
         let (t, e) = ((k.0.div_euclid(4), k.1.div_euclid(4)), (k.0.rem_euclid(4), k.1.rem_euclid(4)));
         for dx in -1..=1 {
@@ -1498,6 +1541,21 @@ mod tests {
         assert_eq!(ids, vec![(18, 68, 71), (17, 64, 66), (2, 63, 64), (3, 60, 63)], "crown, trunk and the grass under it");
     }
 
+    /// A chunk's columns come out in one array, each exactly as `column` alone makes it: a run is never merged into the column before it.
+    #[test]
+    fn a_chunks_columns_are_flat_and_never_merge_across() {
+        let (mut b, d, t) = (vec![0u8; VOLUME], Nibbles::new(), Tints::white());
+        b[idx(0, 5, 0)] = 1; // column 0: stone at y 5
+        b[idx(0, 4, 1)] = 1; // column 1: stone at y 4, which would join column 0's run (y0 5) if both lived in one array unguarded
+        (0..=40).for_each(|y| b[idx(7, y, 7)] = 3);
+        let c = columns(&b, &d, &t);
+        assert_eq!((c.start.len(), c.spans.len()), (257, 3), "one run in each of the three columns that have blocks");
+        for i in 0..256 {
+            assert_eq!(c.col(i), &column(&b, &d, &t, i >> 4, i & 15)[..], "column {i}");
+        }
+        assert_eq!((c.col(1)[0].y0, c.col(1)[0].y1), (4, 5));
+    }
+
     /// A `w0` x `w0` level-0 grid whose voxel at (x, y, z) is `f(x, y, z)`.
     fn grid_of(w0: usize, f: impl Fn(usize, usize, usize) -> u32) -> Vec<u32> {
         let mut g = vec![0u32; w0 * HEIGHT * w0];
@@ -1681,9 +1739,9 @@ mod tests {
     #[test]
     fn an_ingested_chunk_replaces_the_guess() {
         let mut st = store();
-        st.ingest((1, 2), vec![land(99); 256]);
+        st.ingest((1, 2), Cols::from_cols(&vec![land(99); 256]));
         assert_eq!(st.tile((0, 0), false).col((16 + 5) * 64 + 32 + 7)[0].y1, 100);
-        st.ingest((3, 3), vec![land(98); 256]);
+        st.ingest((3, 3), Cols::from_cols(&vec![land(98); 256]));
         assert_eq!(st.tiles[&(0, 0)].col((48 + 1) * 64 + 48 + 1)[0].y1, 99, "a tile that exists is patched in place");
         assert_ne!(st.tiles[&(0, 0)].col(16 * 64 + 7)[0].y1, 100, "chunk (1, 0) was not touched");
     }
@@ -1694,7 +1752,7 @@ mod tests {
         let t = tile_of(|x, z| if x < 5 { vec![sp(74, 77, 18), sp((60 + z % 7) as u8, 70, 3)] } else if z < 9 { vec![sp(40, 64, 9)] } else { land(70) });
         let b = encode(&t, true);
         let u = decode(&b, true).unwrap();
-        assert!(u.spans == t.spans && u.start == t.start && !u.trees);
+        assert!(u.cols.spans == t.cols.spans && u.cols.start == t.cols.start && !u.trees);
         assert!(decode(&b, false).is_none(), "a vanilla world does not read a Tectonic tile");
         assert!(decode(&b[..b.len() - 3], true).is_none() && decode(&[], true).is_none());
     }

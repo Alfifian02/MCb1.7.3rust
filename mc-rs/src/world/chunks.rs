@@ -93,7 +93,7 @@ pub(crate) fn biome_tints(cm: &mut WorldChunkManager, cx: i32, cz: i32) -> mesh:
 }
 
 /// The far terrain's columns of a loaded chunk.
-fn cols_of(cm: &mut WorldChunkManager, k: Key, e: &Entry) -> Vec<crate::world::lod::Col> {
+fn cols_of(cm: &mut WorldChunkManager, k: Key, e: &Entry) -> crate::world::lod::Cols {
     crate::world::lod::columns(&e.blocks, &e.data, &biome_tints(cm, k.0, k.1))
 }
 
@@ -535,7 +535,7 @@ pub struct ChunkManager {
     /// The visible chunks near to far (`update_visible`): the order `draw_ranges` walks, once a frame instead of once a layer.
     order: Vec<Key>,
     /// Chunks whose blocks are final, as columns for the far terrain (`world::lod`, Voxy's ingest), until `take_ingest`.
-    ingest: Vec<(Key, Vec<crate::world::lod::Col>)>,
+    ingest: Vec<(Key, crate::world::lod::Cols)>,
     /// The chunks handed over while loaded: one that unloads is handed over again (it may have been edited), any other is not (its
     /// neighbours are gone by then, it cannot tell whether it was final).
     ingested: HashSet<Key>,
@@ -1259,7 +1259,7 @@ impl ChunkManager {
 
     /// The columns of the chunks that became final (or were unloaded after an edit) since the last call: what the far terrain shows
     /// instead of a guess.
-    pub fn take_ingest(&mut self) -> Vec<(Key, Vec<crate::world::lod::Col>)> {
+    pub fn take_ingest(&mut self) -> Vec<(Key, crate::world::lod::Cols)> {
         std::mem::take(&mut self.ingest)
     }
 
