@@ -364,21 +364,21 @@ fn pack(verts: &[f32], solid: &[u32], water: &[u32]) -> Quads {
     out
 }
 
-/// Blocks, metadata and light of one chunk, copied for a mesh job.
+/// Blocks, metadata and light of one chunk for a mesh job: the two big arrays are shared (`Arc`), not copied; a write while the job
+/// holds them (`Arc::make_mut`) copies that chunk's array once, so the job still sees the chunk as it was.
 struct Snap {
-    blocks: Vec<u8>,
+    blocks: Arc<Vec<u8>>,
     data: Nibbles,
-    light: Vec<u8>,
+    light: Arc<Vec<u8>>,
 }
 
 fn snap(e: &Entry) -> Snap {
-    Snap { blocks: e.blocks.clone(), data: e.data.clone(), light: e.light.clone() }
+    Snap { blocks: Arc::clone(&e.blocks), data: e.data.clone(), light: Arc::clone(&e.light) }
 }
 
 /// Everything the mesher reads, owned, so a worker can build a chunk's mesh while the manager goes on editing the live chunks: the
 /// chunk, then its +X, -X, +Z, -Z neighbours (`mesh::build_split_tinted`'s argument order).
-/// ponytail: the copy is ~0.4 MB per job (5 x 80 KB), memcpy speed, on the render thread; the upgrade is `Arc`-held chunk arrays with
-/// `Arc::make_mut` on every write, which would copy nothing but touches every writer of `blocks` / `data` / `light`.
+/// ponytail: `data` (metadata) is still cloned per job (lazy `Nibbles`: free while all 0, 16 KB otherwise); the upgrade is an `Arc` for it too.
 struct MeshJob {
     key: Key,
     sky_sub: u8,
@@ -416,12 +416,12 @@ fn build_job(job: MeshJob, cm: &mut WorldChunkManager) -> Built {
     let [me, px, nx, pz, nz] = &job.cells;
     let (verts, idxs, widxs) = mesh::build_split_tinted(
         crate::LEGACY,
-        &me.blocks,
+        &me.blocks[..],
         &me.data,
         [&px.data, &nx.data, &pz.data, &nz.data],
-        &me.light,
-        [px.blocks.as_slice(), nx.blocks.as_slice(), pz.blocks.as_slice(), nz.blocks.as_slice()],
-        [px.light.as_slice(), nx.light.as_slice(), pz.light.as_slice(), nz.light.as_slice()],
+        &me.light[..],
+        [&px.blocks[..], &nx.blocks[..], &pz.blocks[..], &nz.blocks[..]],
+        [&px.light[..], &nx.light[..], &pz.light[..], &nz.light[..]],
         job.sky_sub,
         0,
         0,
@@ -439,11 +439,12 @@ fn build_job(job: MeshJob, cm: &mut WorldChunkManager) -> Built {
 }
 
 struct Entry {
-    blocks: Vec<u8>,
+    /// Shared with the light thread's copy (`LChunk.blocks`) and with running mesh jobs until the first write to either side.
+    blocks: Arc<Vec<u8>>,
     /// Block metadata (`Chunk.data`), 4 bits per cell; worldgen only writes it in `populate`.
     data: Nibbles,
     /// Per cell, sky light in the low nibble and block light in the high nibble (same index as `blocks`).
-    light: Vec<u8>,
+    light: Arc<Vec<u8>>,
     /// `Chunk.heightMap`, indexed `z << 4 | x`; kept in step with `blocks` (insert, populate, edits).
     height: [u8; 256],
     /// Initial light was computed (the light thread's `init_chunk`, reported back); meshing waits for it. `light` and `lit` are the
@@ -662,8 +663,9 @@ impl ChunkManager {
     pub(crate) fn insert(&mut self, key: Key, blocks: Vec<u8>) {
         let height = height_map(&blocks);
         self.stamp = self.stamp.wrapping_add(1);
-        let copy = blocks.clone(); // for the light thread
-        let old = self.chunks.insert(key, Entry { blocks, data: Nibbles::new(), light: vec![0; VOLUME], height, lit: false, populated: false, rev: self.stamp, dirty: false, meshed: false, mesh: None });
+        let blocks = Arc::new(blocks);
+        let copy = Arc::clone(&blocks); // for the light thread: one array until either side writes
+        let old = self.chunks.insert(key, Entry { blocks, data: Nibbles::new(), light: Arc::new(vec![0; VOLUME]), height, lit: false, populated: false, rev: self.stamp, dirty: false, meshed: false, mesh: None });
         if let Some(old) = old {
             old.mesh.iter().for_each(|m| self.pages.free(m));
             self.light_remove(key); // a fresh, unlit entry replaces it, light thread's copy included
@@ -845,7 +847,7 @@ impl ChunkManager {
         if e.blocks[i] == id && e.data.get(lx, y as usize, lz) == meta {
             return false;
         }
-        e.blocks[i] = id;
+        Arc::make_mut(&mut e.blocks)[i] = id;
         e.data.set(lx, y as usize, lz, meta);
         e.dirty = true;
         self.stamp = self.stamp.wrapping_add(1);
@@ -984,7 +986,7 @@ impl ChunkManager {
         if !keys.iter().all(|k| self.chunks.contains_key(k)) {
             return None;
         }
-        let blocks = keys.map(|k| std::mem::take(&mut self.chunks.get_mut(&k).unwrap().blocks));
+        let blocks = keys.map(|k| Arc::unwrap_or_clone(std::mem::take(&mut self.chunks.get_mut(&k).unwrap().blocks)));
         let data = keys.map(|k| std::mem::take(&mut self.chunks.get_mut(&k).unwrap().data));
         Some(Region::new(x, z, blocks, data))
     }
@@ -1007,13 +1009,13 @@ impl ChunkManager {
         for ((k, b), d) in keys.iter().zip(blocks).zip(data) {
             let e = self.chunks.get_mut(k).unwrap();
             e.height = height_map(&b);
-            e.blocks = b;
+            e.blocks = Arc::new(b);
             e.data = d;
             e.dirty = true; // a populate writes into all four (trees, ores, ... spill over the borders)
             self.stamp = self.stamp.wrapping_add(1);
             e.rev = self.stamp; // a populate job copied from before this is stale
             e.lit = false; // blocks changed under the light: it is computed again once final
-            let copy = e.blocks.clone();
+            let copy = Arc::clone(&e.blocks);
             self.light_chunk(*k, copy); // the light thread gets the new blocks (and forgets the chunk was lit)
             // The chunk and its four neighbours (border faces) need a new mesh if they had one.
             for n in [(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)] {
@@ -1355,7 +1357,7 @@ impl ChunkManager {
             if self.chunks.get(&keys[0]).map_or(true, |e| e.populated) || keys.iter().any(|k| self.busy.contains(k) || !self.chunks.contains_key(k)) {
                 continue;
             }
-            let blocks = keys.map(|k| self.chunks[&k].blocks.clone());
+            let blocks = keys.map(|k| self.chunks[&k].blocks.to_vec());
             let data = keys.map(|k| self.chunks[&k].data.clone());
             self.populating.insert((x, z), keys.map(|k| self.chunks[&k].rev));
             keys.iter().for_each(|&k| {
@@ -1617,6 +1619,19 @@ mod tests {
         assert!(!m.set_block_meta(3, 128, 5, 35, 1)); // above the world
     }
 
+    /// The chunk arrays are shared (`Arc`) with mesh jobs and the light thread: an edit copies on write, so a snapshot taken before it
+    /// still shows the old block, and the chunk shows the new one.
+    #[test]
+    fn an_edit_leaves_a_shared_snapshot_alone() {
+        let mut m = ChunkManager::new(1, 1);
+        m.insert((0, 0), vec![0u8; VOLUME]);
+        let before = snap(&m.chunks[&(0, 0)]);
+        assert!(Arc::ptr_eq(&before.blocks, &m.chunks[&(0, 0)].blocks), "a snapshot shares the array, it does not copy it");
+        assert!(m.set_block(3, 40, 5, 1));
+        assert_eq!(before.blocks[idx(3, 40, 5)], 0);
+        assert_eq!(m.block(3, 40, 5), Some(1));
+    }
+
     /// preload populates every chunk whose 2x2 is loaded, which finishes the inner ones.
     #[test]
     fn preload_populates_and_finishes_inner_chunks() {
@@ -1786,16 +1801,16 @@ mod tests {
         let snap_of = |id: u8| {
             let mut blocks = vec![0u8; VOLUME];
             (0..16).for_each(|x| (0..16).for_each(|z| blocks[idx(x, 60, z)] = id));
-            Snap { blocks, data: Nibbles::new(), light: vec![15; VOLUME] }
+            Snap { blocks: Arc::new(blocks), data: Nibbles::new(), light: Arc::new(vec![15; VOLUME]) }
         };
         let job = MeshJob { key: (2, -3), sky_sub: 0, cells: [snap_of(1), snap_of(1), snap_of(1), snap_of(1), snap_of(1)] };
         let want = {
             let [me, px, nx, pz, nz] = &job.cells;
             let tints = biome_tints(&mut WorldChunkManager::new(1), 2, -3);
             let (v, i, w) = mesh::build_split_tinted(
-                crate::LEGACY, &me.blocks, &me.data, [&px.data, &nx.data, &pz.data, &nz.data], &me.light,
-                [px.blocks.as_slice(), nx.blocks.as_slice(), pz.blocks.as_slice(), nz.blocks.as_slice()],
-                [px.light.as_slice(), nx.light.as_slice(), pz.light.as_slice(), nz.light.as_slice()], 0, 0, 0, &tints,
+                crate::LEGACY, &me.blocks[..], &me.data, [&px.data, &nx.data, &pz.data, &nz.data], &me.light[..],
+                [&px.blocks[..], &nx.blocks[..], &pz.blocks[..], &nz.blocks[..]],
+                [&px.light[..], &nx.light[..], &pz.light[..], &nz.light[..]], 0, 0, 0, &tints,
             );
             pack(&v, &i, &w)
         };

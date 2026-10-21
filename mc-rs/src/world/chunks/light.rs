@@ -9,7 +9,8 @@
 //! The engine runs on its own thread (`chunk-light`, C2ME's `threading-lighting` idea): `LightWorld` keeps its own copy of every
 //! chunk's blocks and height map and is the only writer of the light; the render thread tells it what happens (`Msg`: a chunk's
 //! blocks, an edit, an unload, the first light of a chunk) and keeps a read-only copy of the light that the thread's `Report`s
-//! replace. So a region never waits for the frame, and nothing is shared.
+//! replace. So a region never waits for the frame. The chunk arrays are `Arc`s shared with the render thread while nobody writes
+//! (`Arc::make_mut` copies a chunk's array on its first write from either side), so an untouched chunk costs one copy of blocks and light.
 //!
 //! Differences from vanilla, none of which change the settled result:
 //! - the queue is drained in time slices on the light thread (`run_light`) instead of `updatingLighting`'s 500 regions;
@@ -20,7 +21,7 @@
 use super::{ChunkManager, Key, KeyHasher};
 use crate::world::chunk::{height_map, idx, light_opacity, light_value, H, VOLUME};
 use std::collections::{HashMap, HashSet};
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -74,9 +75,11 @@ const LIGHT_SLICE: Duration = Duration::from_millis(5);
 /// What the engine knows of one chunk: its own copy of the blocks and of the height map (kept in step by `Msg::Chunk` and
 /// `Msg::Edit`), and the light, which only the engine writes.
 struct LChunk {
-    blocks: Vec<u8>,
-    /// Per cell, sky light in the low nibble and block light in the high nibble (same index as `blocks`).
-    light: Vec<u8>,
+    /// Shared with the render thread's `Entry.blocks` until either side writes (`Arc::make_mut` copies then).
+    blocks: Arc<Vec<u8>>,
+    /// Per cell, sky light in the low nibble and block light in the high nibble (same index as `blocks`). A report hands the render
+    /// thread a second `Arc` of it; the next write of the engine copies the array once, so it is shared only while it is at rest.
+    light: Arc<Vec<u8>>,
     height: [u8; 256],
     /// `init_chunk` ran and the blocks have not been replaced since.
     lit: bool,
@@ -99,7 +102,7 @@ struct LightWorld {
 /// What the render thread tells the engine, in the order it happened.
 pub(super) enum Msg {
     /// The blocks of a chunk, new or rewritten by populate: the height map is rebuilt, and the chunk is unlit until `Init`.
-    Chunk(Key, Vec<u8>),
+    Chunk(Key, Arc<Vec<u8>>),
     /// The cell (x, y, z) became `id`.
     Edit { x: i32, y: i32, z: i32, id: u8 },
     /// The chunk was unloaded.
@@ -115,7 +118,7 @@ struct Report {
     /// The queue is empty: everything the render thread sent is lit.
     idle: bool,
     /// Chunks written to since the previous report: key, the whole light array, the lit flag.
-    chunks: Vec<(Key, Vec<u8>, bool)>,
+    chunks: Vec<(Key, Arc<Vec<u8>>, bool)>,
     /// Chunks whose mesh went stale because their light (or a neighbour's across the edge) changed.
     stale: Vec<Key>,
 }
@@ -206,7 +209,7 @@ impl LightWorld {
                         e.touched = true;
                     }
                     None => {
-                        self.chunks.insert(k, LChunk { blocks, light: vec![0; VOLUME], height, lit: false, touched: false, stale: false });
+                        self.chunks.insert(k, LChunk { blocks, light: Arc::new(vec![0; VOLUME]), height, lit: false, touched: false, stale: false });
                     }
                 }
             }
@@ -217,7 +220,7 @@ impl LightWorld {
                 let Some(e) = self.chunks.get_mut(&(x >> 4, z >> 4)) else { return };
                 let (lx, lz) = ((x & 15) as usize, (z & 15) as usize);
                 let h = e.height[lz << 4 | lx] as i32;
-                e.blocks[idx(lx, y as usize, lz)] = id;
+                Arc::make_mut(&mut e.blocks)[idx(lx, y as usize, lz)] = id;
                 self.light_after_set(x, y, z, id, h);
             }
             Msg::Remove(k) => {
@@ -237,7 +240,7 @@ impl LightWorld {
         for (&k, e) in self.chunks.iter_mut() {
             if e.touched {
                 e.touched = false;
-                chunks.push((k, e.light.clone(), e.lit));
+                chunks.push((k, Arc::clone(&e.light), e.lit));
             }
             if e.stale {
                 e.stale = false;
@@ -290,7 +293,8 @@ impl LightWorld {
         let Some(e) = self.chunks.get_mut(&(x >> 4, z >> 4)) else { return };
         let i = idx((x & 15) as usize, y as usize, (z & 15) as usize);
         e.touched = true;
-        e.light[i] = if kind == Kind::Sky { e.light[i] & 0xF0 | v } else { e.light[i] & 0x0F | v << 4 };
+        let light = Arc::make_mut(&mut e.light);
+        light[i] = if kind == Kind::Sky { light[i] & 0xF0 | v } else { light[i] & 0x0F | v << 4 };
     }
 
     /// `World.setLightValue`: write, and the mesh that shows this cell is stale.
@@ -501,7 +505,8 @@ impl LightWorld {
         let mut emitters = Vec::new();
         {
             let e = self.chunks.get_mut(&key).unwrap();
-            e.light.fill(0);
+            let light = Arc::make_mut(&mut e.light);
+            light.fill(0);
             for x in 0..16 {
                 for z in 0..16 {
                     let base = idx(x, 0, z);
@@ -509,7 +514,7 @@ impl LightWorld {
                     loop {
                         level -= light_opacity(e.blocks[base + y]) as i32;
                         if level > 0 {
-                            e.light[base + y] |= level as u8;
+                            light[base + y] |= level as u8;
                         }
                         y -= 1;
                         if !(y > 0 && level > 0) {
@@ -596,7 +601,7 @@ impl ChunkManager {
     }
 
     /// The engine gets the blocks of a chunk (new, or rewritten by populate); it is unlit until `light_init`.
-    pub(super) fn light_chunk(&mut self, key: Key, blocks: Vec<u8>) {
+    pub(super) fn light_chunk(&mut self, key: Key, blocks: Arc<Vec<u8>>) {
         self.light.lighting.remove(&key);
         self.light_send(Msg::Chunk(key, blocks));
     }
@@ -750,7 +755,7 @@ mod tests {
                         }
                     }
                 }
-                w.apply(Msg::Chunk((cx, cz), b));
+                w.apply(Msg::Chunk((cx, cz), std::sync::Arc::new(b)));
             }
         }
         for cz in -1..=1 {
