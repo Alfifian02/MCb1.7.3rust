@@ -1,6 +1,9 @@
 //! Chunk pipelines: one atlas, one uniform block, one bind group. Layers (Sodium's render passes): `solid` (no `discard`, so the tiler's
 //! hidden-surface removal works), `cutout` (alpha test: leaves, plants, glass), `lod` (cutout + depth bias) and translucent `water`.
 //! Everything is lit per VERTEX like b1.7.3 (light table, face shade, fog): the fragment shader is one atlas read and two multiplies.
+//! The face shade of a chunk mesh is baked into the vertex by the mesher (`chunks::pack`, the shade byte); only the entity, outline and far
+//! terrain pipelines (float vertices, no spare field) and the water still derive it from screen derivatives (`fs_cut_flat`, `fs_water`).
+//! The scene pass is multisampled when the adapter allows (`present::scene_samples`); the cut-out pipelines then use alpha-to-coverage.
 
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
@@ -116,6 +119,7 @@ struct U { vp: mat4x4<f32>, eye: vec4<f32>, fog: vec4<f32>, fogp: vec4<f32> };
 @group(0) @binding(1) var samp: sampler;
 @group(0) @binding(2) var tex: texture_2d<f32>;
 
+const A2C: bool = @A2C@; // the scene pass is multisampled: a cut-out writes its alpha as coverage instead of a hard `discard` at 0.5
 const TW: u32 = @TW@u;
 const TH: f32 = @TH@.0;
 const MIPS: f32 = @MIPS@.0; // `atlas::MIPS`
@@ -149,7 +153,7 @@ struct VsOut {
     @location(1) tint: vec3<f32>, // linear colour of the biome / leaf tint
     @location(2) lit: f32,        // light table (x face shade x ambient occlusion on smooth faces), linear
     @location(3) fg: f32,         // fog factor
-    @location(4) k: f32,          // < 0: smooth face (shade already in `lit`); >= 0: flat face, shade from the screen; >= 1000: far terrain / water sheet (tile = k - 1000)
+    @location(4) k: f32,          // < 0: the face shade is already in `lit` (every chunk vertex); >= 0: flat face, `fs_cut_flat` takes the shade from the screen; >= 1000: far terrain / water sheet (tile = k - 1000)
     @location(5) wp: vec3<f32>,
 };
 
@@ -216,8 +220,10 @@ fn chunk_vert(p: vec4<u32>, t: vec2<u32>, c: vec4<f32>, water: bool) -> VsOut {
         o.lit = pow(brightness(f32(v >> 5u) / 60.0, f32(v & 31u) / 30.0) * c.a, 2.2);
         o.k = -1.0;
     } else {
-        o.lit = pow(brightness(f32((p.w >> 4u) & 15u) / 15.0, f32(p.w & 15u) / 15.0), 2.2);
-        o.k = 0.0;
+        // Flat: the mesher baked the face shade into `c.a` (`chunks::pack`); water keeps 1.0 there and `fs_water` derives its own, since
+        // its quads have no culled side (seen from below the top face takes the bottom shade).
+        o.lit = pow(brightness(f32((p.w >> 4u) & 15u) / 15.0, f32(p.w & 15u) / 15.0) * c.a, 2.2);
+        o.k = -1.0;
     }
     return o;
 }
@@ -251,9 +257,8 @@ fn far_uv(uv: vec2<f32>, k: f32) -> vec2<f32> {
     return (o + clamp(vec2<f32>(fract(uv.x), 1.0 - fract(uv.y)) * 16.0, vec2<f32>(0.02), vec2<f32>(15.98))) / size;
 }
 
-fn frag(in: VsOut, cut: bool) -> vec4<f32> {
-    let dx = dpdx(in.wp);
-    let dy = dpdy(in.wp);
+// `shade`: the face shade the caller took from the screen (`fs_cut_flat`), 1.0 where the vertex carries it (`fs_solid`, `fs_cut`).
+fn frag(in: VsOut, cut: bool, shade: f32) -> vec4<f32> {
     var uv = in.uv;
     var gx = dpdx(in.uv);
     var gy = dpdy(in.uv);
@@ -268,14 +273,19 @@ fn frag(in: VsOut, cut: bool) -> vec4<f32> {
     // most one texel of mip 0 per pixel: everything near, and leaves fill most of a forest view) is read at mip 0 with the Nearest
     // magnification filter already, and the tile clamp moves the uv by under half a texel, inside the same texel: `c.a` is that alpha,
     // so the second fetch is only made for a minified tile.
+    var cover = 1.0;
     if cut {
         let size = vec2<f32>(textureDimensions(tex));
         var a = c.a;
         if max(length(gx * size), length(gy * size)) > 1.0 { a = textureSampleLevel(tex, samp, uv, 0.0).a; }
-        if a < 0.5 { discard; }
+        if A2C {
+            // Alpha-to-coverage: a narrow ramp round 0.5 (no derivative: the mip-0 texels are 0 or 1, only a minified tap is in between).
+            // ponytail: a fixed ramp, not `fwidth`-sharpened; magnified texels (0 / 1) stay as hard as the `discard` was.
+            cover = clamp((a - 0.5) * 3.0 + 0.5, 0.0, 1.0);
+            if cover <= 0.0 { discard; }
+        } else if a < 0.5 { discard; }
     }
-    var lit = in.lit;
-    if in.k >= 0.0 { lit = lit * flat_shade(in.wp, dx, dy); }
+    let lit = in.lit * shade;
     var rgb = c.rgb * in.tint;
     // Grass side (tile 3, untinted): `RenderBlocks` draws tile 38 over it, cut out and tinted with the grass colour. Done on the one quad:
     // two coplanar quads can only be told apart by the depth test, which on a phone GPU flickers at a grazing angle.
@@ -284,13 +294,24 @@ fn frag(in: VsOut, cut: bool) -> vec4<f32> {
         rgb = c.rgb;
         if textureSampleLevel(tex, samp, ouv, 0.0).a >= 0.5 { rgb = atlas_sample_g(ouv, gx, gy).rgb * in.tint; }
     }
-    return vec4<f32>(mix(to_working(rgb * lit), u.fog.rgb, in.fg), 1.0);
+    return vec4<f32>(mix(to_working(rgb * lit), u.fog.rgb, in.fg), cover);
 }
 
+// Chunk layers: no screen derivative for the shade, the vertex has it.
 @fragment
-fn fs_solid(in: VsOut) -> @location(0) vec4<f32> { return frag(in, false); }
+fn fs_solid(in: VsOut) -> @location(0) vec4<f32> { return frag(in, false, 1.0); }
 @fragment
-fn fs_cut(in: VsOut) -> @location(0) vec4<f32> { return frag(in, true); }
+fn fs_cut(in: VsOut) -> @location(0) vec4<f32> { return frag(in, true, 1.0); }
+// Entities, the outline and the far terrain (float vertices): the face shade from the derivatives of the world position, taken here in
+// uniform control flow (before `frag`'s `discard`).
+@fragment
+fn fs_cut_flat(in: VsOut) -> @location(0) vec4<f32> {
+    let dx = dpdx(in.wp);
+    let dy = dpdy(in.wp);
+    var s = 1.0;
+    if in.k >= 0.0 { s = flat_shade(in.wp, dx, dy); }
+    return frag(in, true, s);
+}
 
 // Translucent water: the texture's own alpha (b1.7.3 and the consoles: no depth absorption, no grazing reflection). A far terrain sheet
 // (`lod::SHEET_LIGHT`, `k >= 1000`) is the water beyond the real water's radius; the real water is inside it. Exact complements per pixel,
@@ -318,7 +339,13 @@ fn fs_water(in: VsOut) -> @location(0) vec4<f32> {
 
 /// The chunk shader with its constants spliced in.
 fn shader_source() -> String {
+    shader_source_with(crate::render::present::scene_samples() > 1)
+}
+
+/// `a2c`: the scene pass is multisampled, the cut-out layers write coverage.
+fn shader_source_with(a2c: bool) -> String {
     SHADER_SRC
+        .replace("@A2C@", &a2c.to_string())
         .replace("@TW@", &atlas::TILES_W.to_string())
         .replace("@TH@", &(atlas::ATLAS_H / 16).to_string())
         .replace("@MIPS@", &atlas::MIPS.to_string())
@@ -413,7 +440,8 @@ impl ChunkPipeline {
             }),
             primitive: wgpu::PrimitiveState { cull_mode: (!water).then_some(wgpu::Face::Back), ..Default::default() },
             depth_stencil: Some(wgpu::DepthStencilState { format: wgpu::TextureFormat::Depth32Float, depth_write_enabled: !water, depth_compare: wgpu::CompareFunction::Less, stencil: Default::default(), bias }),
-            multisample: Default::default(),
+            // The cut-out fragment entries write their alpha as coverage (a no-op with one sample).
+            multisample: crate::render::present::multisample(fs.starts_with("fs_cut")),
             multiview: None,
             cache: None,
         });
@@ -421,8 +449,8 @@ impl ChunkPipeline {
         Self {
             solid: make("chunk_solid", "vs_chunk", "fs_solid", false, none, true),
             cutout: make("chunk_cutout", "vs_chunk", "fs_cut", false, none, true),
-            entity: make("entity", "vs_main", "fs_cut", false, none, false),
-            lod: make("lod", "vs_main", "fs_cut", false, wgpu::DepthBiasState { constant: 8, slope_scale: 1.0, clamp: 0.0 }, false),
+            entity: make("entity", "vs_main", "fs_cut_flat", false, none, false),
+            lod: make("lod", "vs_main", "fs_cut_flat", false, wgpu::DepthBiasState { constant: 8, slope_scale: 1.0, clamp: 0.0 }, false),
             water: make("water", "vs_chunk_water", "fs_water", true, none, true),
             lod_water: make("lod_water", "vs_water", "fs_water", true, none, false),
             origins,
@@ -518,10 +546,27 @@ mod tests {
         let src = shader_source();
         let m = naga::front::wgsl::parse_str(&src).unwrap_or_else(|e| panic!("{}", e.emit_to_string(&src)));
         naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all()).validate(&m).unwrap();
-        for e in ["vs_main", "vs_water", "vs_chunk", "vs_chunk_water", "fs_solid", "fs_cut", "fs_water"] {
+        for e in ["vs_main", "vs_water", "vs_chunk", "vs_chunk_water", "fs_solid", "fs_cut", "fs_cut_flat", "fs_water"] {
             assert!(m.entry_points.iter().any(|p| p.name == e), "{e} missing");
         }
         assert!(!SHADER_SRC.contains("textureSample(tex"));
+        // Both alpha-to-coverage settings validate (the const is spliced).
+        for a2c in [false, true] {
+            let src = shader_source_with(a2c);
+            assert!(src.contains(&format!("const A2C: bool = {a2c};")));
+            let m = naga::front::wgsl::parse_str(&src).unwrap_or_else(|e| panic!("{}", e.emit_to_string(&src)));
+            naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all()).validate(&m).unwrap();
+        }
+    }
+
+    /// The chunk layers take their face shade from the vertex: the screen-derivative `flat_shade` is called by `fs_cut_flat` and
+    /// `fs_water` only (and defined once), `frag` itself never takes derivatives of the position.
+    #[test]
+    fn chunk_layers_have_no_derivative_shade() {
+        assert_eq!(SHADER_SRC.matches("flat_shade(").count(), 3, "the definition, fs_cut_flat and fs_water");
+        assert!(SHADER_SRC.contains("return frag(in, false, 1.0);") && SHADER_SRC.contains("return frag(in, true, 1.0);"));
+        let frag = &SHADER_SRC[SHADER_SRC.find("fn frag(").unwrap()..SHADER_SRC.find("// Chunk layers").unwrap()];
+        assert!(!frag.contains("dpdx(in.wp)") && !frag.contains("flat_shade"));
     }
 
     /// `WHITE` is 2^24 - 1, the last f32 below 2^24: `+ 0.5` rounds it up to 2^24 and all three colour bytes read 0 (black sides, mobs).

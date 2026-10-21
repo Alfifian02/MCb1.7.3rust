@@ -10,6 +10,9 @@
 
 use core::ffi::c_void;
 use core::ptr::NonNull;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use raw_window_handle::{
     AndroidDisplayHandle, AndroidNdkWindowHandle, HasDisplayHandle, HasWindowHandle,
     RawDisplayHandle, RawWindowHandle,
@@ -45,13 +48,49 @@ impl HasWindowHandle for AndroidWindow {
     }
 }
 
-/// Internal render resolution as a fraction of the surface: depth, G-buffer, HDR scene and the whole post chain run at this size and the
+/// Internal render resolution as a fraction of the surface: the scene pass (colour + depth) runs at this size and the
 /// final pass upscales (bilinear + CAS). 1.0 = native. Low-end phones (Mali-G52 class) are fill-rate bound: 0.67 is 2.2x fewer pixels.
 pub const RENDER_SCALE: f32 = 0.67;
 
 /// The scene size for a surface of `w` x `h`.
 pub fn scene_size(w: u32, h: u32) -> (u32, u32) {
     (((w as f32 * RENDER_SCALE).round() as u32).max(1), ((h as f32 * RENDER_SCALE).round() as u32).max(1))
+}
+
+/// `gpuErrorTrace:true` in `options.txt` (ImmediatelyFast's `debug_only_print_additional_error_information`): a wgpu error is logged
+/// with the Rust backtrace of the call that made it, so a validation error names the draw or the upload behind it. Off by default
+/// (capturing a backtrace is slow).
+static TRACE_ERRORS: AtomicBool = AtomicBool::new(false);
+static LAST_TRACE: Mutex<Option<Instant>> = Mutex::new(None);
+
+pub fn set_error_trace(on: bool) {
+    TRACE_ERRORS.store(on, Ordering::Relaxed);
+}
+
+/// Whether the error at `now` gets a backtrace: the flag is on and the last trace was over a second ago (ImmediatelyFast's throttle: a
+/// broken frame repeats its error 60 times a second, and a trace is a screenful).
+fn wants_trace(on: bool, last: &mut Option<Instant>, now: Instant) -> bool {
+    if !on || last.is_some_and(|t| now.duration_since(t) < Duration::from_secs(1)) {
+        return false;
+    }
+    *last = Some(now);
+    true
+}
+
+#[cfg(test)]
+mod trace_tests {
+    use super::*;
+
+    #[test]
+    fn a_trace_is_at_most_one_a_second_and_only_when_on() {
+        let (t0, mut last) = (Instant::now(), None);
+        assert!(!wants_trace(false, &mut last, t0), "off");
+        assert!(last.is_none());
+        assert!(wants_trace(true, &mut last, t0), "the first");
+        assert!(!wants_trace(true, &mut last, t0 + Duration::from_millis(900)), "too soon");
+        assert!(wants_trace(true, &mut last, t0 + Duration::from_millis(1000)), "a second on");
+        assert!(!wants_trace(true, &mut last, t0 + Duration::from_millis(1500)), "counted from the last trace");
+    }
 }
 
 pub struct Gpu {
@@ -131,6 +170,11 @@ impl Gpu {
             info.name, info.backend, info.vendor, info.device
         );
 
+        // MSAA for the scene pass if the adapter has it for the scene and depth formats (before anything is built with a sample count).
+        let samples = crate::render::present::pick_samples(&adapter);
+        crate::render::present::set_scene_samples(samples);
+        log::info!("M3 init: scene MSAA x{samples}");
+
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("mc-rs"),
@@ -141,7 +185,14 @@ impl Gpu {
             })
             .await
             .map_err(|e| format!("request_device: {e:?}"))?;
-        device.on_uncaptured_error(Box::new(|e| log::error!("wgpu error: {e}")));
+        device.on_uncaptured_error(Box::new(|e| {
+            let on = TRACE_ERRORS.load(Ordering::Relaxed);
+            if wants_trace(on, &mut LAST_TRACE.lock().unwrap_or_else(|p| p.into_inner()), Instant::now()) {
+                log::error!("wgpu error: {e}\n{}", std::backtrace::Backtrace::force_capture());
+            } else {
+                log::error!("wgpu error: {e}");
+            }
+        }));
         log::info!("M3 init: device + queue acquired");
 
         let caps = surface.get_capabilities(&adapter);
@@ -211,7 +262,7 @@ impl Gpu {
             label: Some("depth"),
             size: Extent3d { width: width.max(1), height: height.max(1), depth_or_array_layers: 1 },
             mip_level_count: 1,
-            sample_count: 1,
+            sample_count: crate::render::present::scene_samples(),
             dimension: TextureDimension::D2,
             format: TextureFormat::Depth32Float,
             // GPUBooster's RBO depth: attachment only (never sampled or copied), which wgpu's GLES backend makes a renderbuffer; nothing else reads it.

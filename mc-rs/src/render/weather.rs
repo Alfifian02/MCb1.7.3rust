@@ -282,7 +282,7 @@ impl Weather {
             fragment: Some(wgpu::FragmentState { module: &module, entry_point: Some("fs_weather"), targets: &[Some(wgpu::ColorTargetState { format, blend: Some(blend), write_mask: wgpu::ColorWrites::ALL })], compilation_options: wgpu::PipelineCompilationOptions::default() }),
             primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() }, // glDisable(GL_CULL_FACE)
             depth_stencil: Some(wgpu::DepthStencilState { format: wgpu::TextureFormat::Depth32Float, depth_write_enabled: false, depth_compare: wgpu::CompareFunction::Less, stencil: wgpu::StencilState::default(), bias: wgpu::DepthBiasState::default() }),
-            multisample: wgpu::MultisampleState::default(),
+            multisample: crate::render::present::multisample(false),
             multiview: None,
             cache: None,
         });

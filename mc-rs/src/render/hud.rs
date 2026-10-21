@@ -48,14 +48,19 @@ pub const CONTAINERS: &[u8] = include_bytes!("../../assets/containers.rgba");
 pub const DPAD_SHEET: &[u8] = include_bytes!("../../assets/dpad.rgba");
 /// The title screen's sheet (256 x 272, `tools/gen_menu.py`): `mclogo.png`, then `background.png`: the last rows of the HUD texture.
 pub const MENU_SHEET: &[u8] = include_bytes!("../../assets/menu.rgba");
-/// The player skin (`mob/char.png`, 64 x 32): the last 32 rows of the HUD texture, cut from the atlas's `ART` tail (`PLAYER_Y`).
-const SHEET_H: f32 = 2608.0;
+/// The player skin (`mob/char.png`, 64 x 32): 32 rows of the HUD texture, cut from the atlas's `ART` tail (`PLAYER_Y`).
+const SHEET_H: f32 = 2672.0;
 const PLAYER_Y: f32 = 2576.0;
+/// Where the font atlas starts in the HUD texture (the 64 rows after the player skin, see `font_sheet`).
+const FONT_Y: f32 = 2608.0;
+/// The font atlas: 95 glyph cells of 8 x 8 texels on a 10 texel pitch (a transparent texel on every side, so the sharp bilinear in
+/// `fs_main` never reads the neighbouring glyph), 16 columns by 6 rows, in a 256 x 64 block. The last rows of the HUD texture.
+const FONT_PITCH: usize = 10;
 /// Where `terrain.png` (untinted, 256 x 256) starts in the HUD texture: block icons are drawn from it (`push_cube`, `push_tile`).
 const TERRAIN_Y: f32 = 768.0;
 
 /// Sprites as `(x, y, w, h)` in pixels of the whole HUD texture: items 0..256, widgets.png 256..512, icons.png 512..768, terrain.png
-/// 768..1024, then the container panels (inventory 1024, crafting table 1280, furnace 1536, chest 1792), then the d-pad sheet (2048), the title sheet (2304), the player skin (2576).
+/// 768..1024, then the container panels (inventory 1024, crafting table 1280, furnace 1536, chest 1792), then the d-pad sheet (2048), the title sheet (2304), the player skin (2576), the font atlas (2608).
 pub mod sprites {
     pub type Sprite = (f32, f32, f32, f32);
     pub const HOTBAR: Sprite = (0.0, 256.0, 182.0, 22.0);
@@ -137,7 +142,6 @@ fn lin(c: vec3<f32>) -> vec3<f32> {
 
 // Sharp bilinear: nearest inside a texel, a one-pixel blend only across a texel edge. The sprites are drawn at a fractional scale of the
 // screen, where plain nearest makes some texels one pixel wider than their neighbours (the grain on icons and the hotbar).
-const SHEET: vec2<f32> = vec2<f32>(256.0, 2608.0); // `SHEET_H`
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
@@ -153,7 +157,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 "#;
 /// The shader with its one constant spliced in: whether the surface encodes sRGB itself.
 fn shader_source(srgb: bool) -> String {
-    format!("const SRGB: bool = {srgb};\n{SHADER_SRC}")
+    format!("const SRGB: bool = {srgb};\nconst SHEET: vec2<f32> = vec2<f32>(256.0, {SHEET_H:.1});\n{SHADER_SRC}") // `SHEET` = the whole HUD texture
 }
 
 /// Owns the HUD pipeline + dynamic vertex buffer. One instance per surface.
@@ -231,7 +235,7 @@ impl HudPipeline {
         });
         queue.write_texture(
             wgpu::TexelCopyTextureInfo { texture: &items_tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-            &[crate::render::atlas::ITEMS, GUI, crate::render::atlas::TERRAIN, CONTAINERS, DPAD_SHEET, MENU_SHEET, &crate::render::atlas::ART[256 * 288 * 4..]].concat(), // items, the GUI sheet, terrain.png, the panels, the d-pad, the title screen
+            &[crate::render::atlas::ITEMS, GUI, crate::render::atlas::TERRAIN, CONTAINERS, DPAD_SHEET, MENU_SHEET, &crate::render::atlas::ART[256 * 288 * 4..], &font_sheet()].concat(), // items, the GUI sheet, terrain.png, the panels, the d-pad, the title screen, the player skin, the font
             wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(256 * 4), rows_per_image: Some(SHEET_H as u32) },
             wgpu::Extent3d { width: 256, height: SHEET_H as u32, depth_or_array_layers: 1 },
         );
@@ -440,7 +444,7 @@ impl HudPipeline {
     }
 
     /// `FontRenderer.drawStringWithShadow`: `s` with its top-left at `(x, y)`, one font pixel = `k` px, the shadow one
-    /// pixel down-right in a quarter of the colour. Runs of lit pixels in a row are one quad.
+    /// pixel down-right in a quarter of the colour. A glyph is one quad.
     pub fn push_text(out: &mut Vec<HudVertex>, x: f32, y: f32, k: f32, s: &str, color: [f32; 4]) {
         let shadow = [color[0] * 0.25, color[1] * 0.25, color[2] * 0.25, color[3]];
         Self::push_glyphs(out, x + k, y + k, k, s, shadow);
@@ -456,21 +460,13 @@ impl HudPipeline {
         Self::push_glyphs(out, x, y, k, s, color);
     }
 
+    /// One textured quad per glyph (`font_sheet`), 8 x 8 font pixels of `k` px; a blank glyph (the space) draws nothing.
     fn push_glyphs(out: &mut Vec<HudVertex>, x: f32, y: f32, k: f32, s: &str, c: [f32; 4]) {
         let mut cx = x;
         for b in s.bytes() {
             let g = glyph(b);
-            for (row, bits) in font::GLYPHS[g].iter().enumerate() {
-                let mut px = 0;
-                while px < 8 {
-                    if bits >> px & 1 == 0 {
-                        px += 1;
-                        continue;
-                    }
-                    let run = (px..8).take_while(|p| bits >> p & 1 == 1).count();
-                    Self::push_quad(out, cx + px as f32 * k, y + row as f32 * k, run as f32 * k, k, c);
-                    px += run;
-                }
+            if font::GLYPHS[g].iter().any(|&bits| bits != 0) {
+                Self::push_gui_tinted(out, cx, y, 8.0 * k, 8.0 * k, glyph_sprite(g), c);
             }
             cx += font::WIDTH[g] as f32 * k;
         }
@@ -699,6 +695,30 @@ fn glyph(b: u8) -> usize {
     (if (32..=126).contains(&b) { b } else { b'?' } - 32) as usize
 }
 
+/// The font atlas as RGBA bytes (256 x 64): every lit pixel of `font::GLYPHS` white and opaque, the rest transparent. Glyph `g` is
+/// the 8 x 8 cell at `glyph_sprite(g)`. ImmediatelyFast's `font_atlas_resizing` idea: a glyph is one textured quad from a texture
+/// instead of a quad per run of lit pixels (a text was ~12 quads a glyph, 2 glyphs a letter with its shadow, 9 copies when outlined).
+fn font_sheet() -> Vec<u8> {
+    let mut px = vec![0u8; 256 * 64 * 4];
+    for (g, rows) in font::GLYPHS.iter().enumerate() {
+        let (ox, oy) = ((g % 16) * FONT_PITCH + 1, (g / 16) * FONT_PITCH + 1);
+        for (row, &bits) in rows.iter().enumerate() {
+            for x in 0..8usize {
+                if bits >> x & 1 == 1 {
+                    let i = ((oy + row) * 256 + ox + x) * 4;
+                    px[i..i + 4].copy_from_slice(&[255; 4]);
+                }
+            }
+        }
+    }
+    px
+}
+
+/// Glyph `g` (an index into `font::GLYPHS`) as a sprite of the HUD texture.
+fn glyph_sprite(g: usize) -> sprites::Sprite {
+    (((g % 16) * FONT_PITCH + 1) as f32, FONT_Y + ((g / 16) * FONT_PITCH + 1) as f32, 8.0, 8.0)
+}
+
 #[cfg(test)]
 mod text_tests {
     use super::*;
@@ -713,5 +733,51 @@ mod text_tests {
         assert!(v.len() > 6 * 20 && v.len() % 6 == 0);
         let right = (HudPipeline::text_width("Iron Pickaxe") as f32 + 6.0) * 2.0;
         assert!(v.iter().all(|p| p.pos[0] >= 0.0 && p.pos[0] <= right + 2.0)); // + the 1 px shadow
+    }
+
+    /// A glyph is one quad (6 vertices), a space none: "a b" is two glyphs, with its shadow four quads.
+    #[test]
+    fn a_glyph_is_one_quad() {
+        let mut v = Vec::new();
+        HudPipeline::push_glyphs(&mut v, 0.0, 0.0, 2.0, "a b", [1.0; 4]);
+        assert_eq!(v.len(), 12);
+        v.clear();
+        HudPipeline::push_text(&mut v, 0.0, 0.0, 2.0, "a b", [1.0; 4]);
+        assert_eq!(v.len(), 24);
+        v.clear();
+        HudPipeline::push_glyphs(&mut v, 0.0, 0.0, 2.0, "   ", [1.0; 4]);
+        assert!(v.is_empty());
+        // the second glyph starts one advance ('a' is 6 wide, the space 4) = 20 px in: the quad is 8 font pixels = 16 px wide
+        let mut v = Vec::new();
+        HudPipeline::push_glyphs(&mut v, 0.0, 0.0, 2.0, "a b", [1.0; 4]);
+        assert!((v[6].pos[0] - 20.0).abs() < 0.001 && (v[7].pos[0] - 36.0).abs() < 0.001);
+    }
+
+    /// The font block ends the HUD texture, every lit pixel of every glyph is in its cell, nothing else is lit, and the texel on every
+    /// side of a cell is transparent (what keeps `fs_main`'s sharp bilinear off the neighbouring glyph).
+    #[test]
+    fn font_sheet_is_the_glyph_bitmaps_with_a_gutter() {
+        assert_eq!(FONT_Y + 64.0, SHEET_H);
+        let px = font_sheet();
+        assert_eq!(px.len(), 256 * 64 * 4);
+        let alpha = |x: usize, y: usize| px[(y * 256 + x) * 4 + 3];
+        let mut lit = 0;
+        for (g, rows) in font::GLYPHS.iter().enumerate() {
+            let (sx, sy, w, h) = glyph_sprite(g);
+            let (sx, sy) = (sx as usize, sy as usize - FONT_Y as usize);
+            assert_eq!((w, h), (8.0, 8.0));
+            for (row, &bits) in rows.iter().enumerate() {
+                for x in 0..8usize {
+                    let on = bits >> x & 1 == 1;
+                    assert_eq!(alpha(sx + x, sy + row) == 255, on, "glyph {g} row {row} px {x}");
+                    lit += on as usize;
+                }
+            }
+            for i in 0..10 {
+                let (l, r, t, b) = (alpha(sx - 1, sy - 1 + i), alpha(sx + 8, sy - 1 + i), alpha(sx - 1 + i, sy - 1), alpha(sx - 1 + i, sy + 8));
+                assert_eq!((l, r, t, b), (0, 0, 0, 0), "gutter of glyph {g}");
+            }
+        }
+        assert_eq!(px.chunks(4).filter(|p| p[3] != 0).count(), lit);
     }
 }

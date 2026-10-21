@@ -298,8 +298,9 @@ fn quads_of(idxs: &[u32]) -> Vec<Q> {
 
 /// A mesher vertex (`mesh::VF` floats: position, uv, light, lm, tint) as the 16-byte chunk vertex. The position is chunk-local (the
 /// mesher is run with origin 0); a smooth vertex (`lm >= mesh::SMOOTH_LM`) keeps its shade x ambient occlusion in the shade byte and
-/// sets bit 15 of the light; a flat one carries `sky * 16 + block` and the shader takes its face shade from the screen.
-fn encode_vertex(f: &[f32]) -> Packed {
+/// sets bit 15 of the light; a flat one carries `sky * 16 + block` and `face_shade`, its quad's shade from the face direction (the shader
+/// used to take that from screen derivatives).
+fn encode_vertex(f: &[f32], face_shade: u8) -> Packed {
     let smooth = f[6] >= mesh::SMOOTH_LM;
     let lm = f[6] as u32;
     let tint = f[7] as u32;
@@ -308,8 +309,27 @@ fn encode_vertex(f: &[f32]) -> Packed {
         uv: [f[3], f[4]],
         light: if smooth { 0x8000 | (lm - mesh::SMOOTH_LM as u32) as u16 } else { lm as u16 },
         color: [(tint >> 16) as u8, (tint >> 8) as u8, tint as u8],
-        shade: if smooth { (f[5].clamp(0.0, 1.0) * 255.0 + 0.5) as u8 } else { 255 },
+        shade: if smooth { (f[5].clamp(0.0, 1.0) * 255.0 + 0.5) as u8 } else { face_shade },
     })
+}
+
+/// b1.7.3 `RenderBlocks` face shade of a quad (top 1.0, bottom 0.5, Z sides 0.8, X sides 0.6) as the shade byte, from the quad's first three
+/// corners (counter-clockwise seen from the front, so the cross product points out of the face): the axis the normal is longest on, and its
+/// sign for Y. This is what the chunk shader's `flat_shade` derived per pixel from screen derivatives, with the same pick for a face that is
+/// not axis aligned (a wall torch) and the same 1.0 for a degenerate one. 0.5 is 128 (0.4 % bright), the others are exact.
+fn face_shade(a: &[f32], b: &[f32], c: &[f32]) -> u8 {
+    let (u, v) = (std::array::from_fn::<f32, 3, _>(|i| b[i] - a[i]), std::array::from_fn::<f32, 3, _>(|i| c[i] - a[i]));
+    let n = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+    let (x, y, z) = (n[0].abs(), n[1].abs(), n[2].abs());
+    if n.iter().map(|k| k * k).sum::<f32>() < 1e-20 {
+        255
+    } else if x >= y && x >= z {
+        153 // 0.6
+    } else if y >= z {
+        if n[1] > 0.0 { 255 } else { 128 }
+    } else {
+        204 // 0.8
+    }
 }
 
 /// A chunk's quads as the GPU takes them: 16-byte vertices, four to a quad, the solid layer, then the cut-out layer, then the water, each
@@ -349,7 +369,11 @@ fn pack(verts: &[f32], solid: &[u32], water: &[u32]) -> Quads {
         for s in 0..SECTIONS {
             starts[s] = out.verts.len() as u32 / 4;
             for &(_, q) in list.iter().filter(|(sec, _)| *sec == s) {
-                let mut put = |order: [usize; 4]| order.iter().for_each(|&k| out.verts.push(encode_vertex(at(q.v, k))));
+                // The water layer keeps 255: its quads are not culled and `fs_water` derives the shade of the side the eye sees.
+                let mut put = |order: [usize; 4]| {
+                    let shade = if l == 2 { 255 } else { face_shade(at(q.v, order[0]), at(q.v, order[1]), at(q.v, order[2])) };
+                    order.iter().for_each(|&k| out.verts.push(encode_vertex(at(q.v, k), shade)));
+                };
                 if q.flip {
                     put([1, 2, 3, 0]);
                 } else {
@@ -2015,10 +2039,47 @@ mod tests {
         want.sort();
         got.sort();
         assert_eq!(got, want);
-        // The smooth quad keeps its light payload and shade, the flat ones do not.
+        // The smooth quad keeps its light payload and its own shade; a flat one takes the shade of the way it faces (this first quad is wound
+        // to look down: 0.5 = 128; the third looks along +Z: 0.8 = 204).
         let d = |i: usize| vertex::decode(&q.verts[i]);
-        assert_eq!((d(0).light, d(0).shade), (255, 255));
+        assert_eq!((d(0).light, d(0).shade), (255, 128));
+        assert_eq!(d(8).shade, 204);
         assert!(q.verts.iter().any(|b| vertex::decode(b).light == 0x8000 | 33 && vertex::decode(b).shade == 153), "0.6 * 255, light bit 15");
+    }
+
+    /// The baked face shade is what `flat_shade` derived: top 1.0, bottom 0.5, Z sides 0.8, X sides 0.6, the sign of Y from the winding
+    /// (counter-clockwise from the front), 1.0 for a degenerate quad; the water layer keeps 255.
+    #[test]
+    fn flat_quads_carry_their_face_shade() {
+        let vf = crate::render::mesh::VF;
+        let quads: [([[f32; 3]; 4], u8); 6] = [
+            ([[0.0, 1.0, 1.0], [1.0, 1.0, 1.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]], 255), // top (the LoD's winding for a face looking up)
+            ([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 0.0, 1.0], [0.0, 0.0, 1.0]], 128), // bottom
+            ([[1.0, 0.0, 1.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [1.0, 1.0, 1.0]], 153), // +X (`mesh::FACES[0]`)
+            ([[0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 1.0, 1.0], [0.0, 1.0, 0.0]], 153), // -X
+            ([[0.0, 0.0, 1.0], [1.0, 0.0, 1.0], [1.0, 1.0, 1.0], [0.0, 1.0, 1.0]], 204), // +Z
+            ([[0.0; 3]; 4], 255),                                                          // degenerate
+        ];
+        let mut v = vec![0.0f32; 4 * quads.len() * vf];
+        let mut idxs = Vec::new();
+        for (n, (corners, _)) in quads.iter().enumerate() {
+            for (k, c) in corners.iter().enumerate() {
+                let o = (n * 4 + k) * vf;
+                v[o..o + 3].copy_from_slice(c);
+                (v[o + 3], v[o + 4], v[o + 6], v[o + 7]) = (0.07, 0.01, 255.0, mesh::WHITE); // tile 1, stone: solid layer
+            }
+            let b = n as u32 * 4;
+            idxs.extend_from_slice(&[b, b + 1, b + 2, b, b + 2, b + 3]);
+        }
+        let q = pack(&v, &idxs, &[]);
+        assert_eq!(q.verts.len(), 4 * quads.len());
+        // Quads come out sorted by section, then in order; they all sit in section 0 here.
+        for (n, (_, want)) in quads.iter().enumerate() {
+            assert!((0..4).all(|k| vertex::decode(&q.verts[n * 4 + k]).shade == *want), "quad {n}: want {want}");
+        }
+        // The same top quad as water: 255 whatever it faces.
+        let w = pack(&v, &[], &idxs[6..12]);
+        assert!(w.verts.iter().all(|b| vertex::decode(b).shade == 255));
     }
 
     /// Meshes share a page: a freed run is handed out again (best fit), the page is not duplicated, and a mesh bigger than a page is refused.

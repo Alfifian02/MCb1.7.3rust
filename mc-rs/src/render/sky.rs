@@ -213,20 +213,20 @@ impl SkyRenderer {
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("sky_shader"), source: wgpu::ShaderSource::Wgsl(format!("{WGSL}\n{SH_WGSL}").into()) });
         let pl = |label: &str, layouts: &[&wgpu::BindGroupLayout]| device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some(label), bind_group_layouts: layouts, push_constant_ranges: &[] });
-        let render = |label: &str, fs: &str, format: wgpu::TextureFormat, depth: Option<wgpu::DepthStencilState>| device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let render = |label: &str, fs: &str, format: wgpu::TextureFormat, depth: Option<wgpu::DepthStencilState>, samples: u32| device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some(label),
             layout: Some(&pl(label, &[&layout])),
             vertex: wgpu::VertexState { module: &shader, entry_point: Some("vs_main"), buffers: &[], compilation_options: Default::default() },
             fragment: Some(wgpu::FragmentState { module: &shader, entry_point: Some(fs), targets: &[Some(format.into())], compilation_options: Default::default() }),
             primitive: Default::default(),
             depth_stencil: depth,
-            multisample: Default::default(),
+            multisample: wgpu::MultisampleState { count: samples, ..Default::default() },
             multiview: None,
             cache: None,
         });
-        let d0 = render("sky_d0", "fs_d0", wgpu::TextureFormat::Rgba16Float, None);
+        let d0 = render("sky_d0", "fs_d0", wgpu::TextureFormat::Rgba16Float, None, 1); // its own 1-sample pass
         // Only where nothing was drawn: the triangle sits at depth 1.0, the frame clears to 1.0 and the terrain writes less.
-        let pipeline = render("sky_pass", if legacy { "fs_legacy" } else { "fs_sky" }, surface_format, Some(wgpu::DepthStencilState { format: wgpu::TextureFormat::Depth32Float, depth_write_enabled: false, depth_compare: wgpu::CompareFunction::LessEqual, stencil: Default::default(), bias: Default::default() }));
+        let pipeline = render("sky_pass", if legacy { "fs_legacy" } else { "fs_sky" }, surface_format, Some(wgpu::DepthStencilState { format: wgpu::TextureFormat::Depth32Float, depth_write_enabled: false, depth_compare: wgpu::CompareFunction::LessEqual, stencil: Default::default(), bias: Default::default() }), crate::render::present::scene_samples());
 
         let sh_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("sky_sh_layout"),
@@ -254,7 +254,7 @@ impl SkyRenderer {
                 fragment: Some(wgpu::FragmentState { module: &shader, entry_point: Some(fs), targets: &[Some(wgpu::ColorTargetState { format: surface_format, blend: Some(blend), write_mask: wgpu::ColorWrites::ALL })], compilation_options: Default::default() }),
                 primitive: Default::default(),
                 depth_stencil: depth(),
-                multisample: Default::default(),
+                multisample: crate::render::present::multisample(false),
                 multiview: None,
                 cache: None,
             });

@@ -139,7 +139,7 @@ struct App {
     /// Sun, moon and stars drawn behind the terrain, and the rain/thunder timers (not saved: a loaded world starts clear).
     /// `weather_ticks` counts the whole ticks the weather has run, so it catches up to `world_ticks` one tick at a time.
     sky: SkyRenderer,
-    /// The post stage: the scene target, FXAA + CAS, the upscale (`render::present`).
+    /// The post stage: the (multisampled) scene target and the one final pass, CAS + upscale (`render::present`).
     present: Present,
     weather: sky::Weather,
     weather_ticks: u64,
@@ -250,8 +250,10 @@ impl App {
         let present = Present::new(&gpu.device, &gpu.queue, gpu.scene(), (width, height), surface_format);
         let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as i64);
 
+        let opts = Settings::load(&dir);
+        crate::gpu::context::set_error_trace(opts.gpu_error_trace);
         let mut app = Self {
-            gpu, tectonic: false, lod: None, seed: 0, root: dir.clone(), opts: Settings::load(&dir), pause: None, lod_on: false, menu: Some(Menu::new(&dir)), pipe,
+            gpu, tectonic: false, lod: None, seed: 0, root: dir.clone(), opts, pause: None, lod_on: false, menu: Some(Menu::new(&dir)), pipe,
             chunks, camera,
             player,
             last_frame: Instant::now(),
@@ -1908,9 +1910,9 @@ impl App {
         eye + back * 4.0
     }
 
-    /// One frame: the scene pass (sky, terrain, far terrain, entities, water, rain) into `Present`'s 8-bit scene, then its two passes
-    /// (FXAA + CAS, upscale + vignette + HUD) onto the swap chain. Three render passes in all; the old chain had a shadow map, a G-buffer, a
-    /// deferred pass, the light shafts and an HDR post chain of ~8 passes.
+    /// One frame: the scene pass (sky, terrain, far terrain, entities, water, rain; 4x MSAA resolved into `Present`'s 8-bit scene) and then
+    /// its one full-screen pass (CAS + upscale + vignette + the HUD) onto the swap chain. Two render passes in all; the old chain had a
+    /// shadow map, a G-buffer, a deferred pass, the light shafts and an HDR post chain of ~8 passes.
     fn render_frame(&mut self) {
         if self.menu.is_some() {
             self.render_menu();
@@ -2059,7 +2061,7 @@ impl App {
         {
             let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("scene"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: self.present.scene_view(), resolve_target: None, depth_slice: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(clear), store: wgpu::StoreOp::Store } })],
+                color_attachments: &[Some(self.present.scene_attachment(clear))], // MSAA: resolved into the scene in tile memory, never stored
                 // The depth is only this pass's: `Discard` keeps it in the tile memory and never writes it out.
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &self.gpu.depth_view,
@@ -2086,7 +2088,7 @@ impl App {
                 self.rain_fx.draw(&mut rp);
             }
         }
-        // FXAA + CAS, then the upscale; the HUD goes over the finished frame in the last pass (it is neither sharpened nor vignetted).
+        // CAS + upscale + vignette in one pass; the HUD goes over the finished frame in it (neither sharpened nor vignetted).
         self.present.finish(&mut enc, &view_tex, |rp| {
             if hud_vertex_count > 0 {
                 rp.set_pipeline(&self.hud.pipeline);
@@ -2111,7 +2113,7 @@ impl App {
             let fps = self.frames as f32 / now.duration_since(self.fps_last).as_secs_f32();
             self.fps_recent = fps.round() as u32;
             self.fps_overall = (self.total_frames as f32 / now.duration_since(self.started).as_secs_f32()).round() as u32;
-            log::info!("FPS: {fps:.1} (average since start {}), {} chunks loaded, CPU {:.1} ms/frame (CPU ~ frame time: CPU-bound; far below: GPU-bound)", self.fps_overall, self.chunks.loaded(), self.cpu_acc / self.frames as f32 * 1000.0);
+            log::info!("FPS: {fps:.1} (average since start {}), {} chunks loaded, CPU {:.1} ms/frame (CPU ~ frame time: CPU-bound; far below: GPU-bound), {} HUD vertices, {} sign texts kept", self.fps_overall, self.chunks.loaded(), self.cpu_acc / self.frames as f32 * 1000.0, self.hud_verts.len(), self.item_mesh.cached_signs());
             self.cpu_acc = 0.0;
             self.frames = 0;
             self.fps_last = now;
