@@ -34,6 +34,8 @@ pub enum Opt {
     GuiScale,
     /// Added: how long a finger or the attack button rests on a block before the arm swings and the dig starts.
     DigDelay,
+    /// Added: samples per pixel of the scene pass (Auto, Off, 2x, 4x). Read once at start-up: the pipelines are built with it.
+    Msaa,
 }
 
 impl Opt {
@@ -59,6 +61,7 @@ impl Opt {
             Opt::AmbientOcclusion => "Smooth Lighting",
             Opt::GuiScale => "GUI Scale",
             Opt::DigDelay => "Dig Delay",
+            Opt::Msaa => "MSAA",
         }
     }
 }
@@ -121,6 +124,8 @@ pub struct Settings {
     pub gpu_error_trace: bool,
     /// The scene scale follows the GPU load (`gpu::context::Drs`); `dynamicRes:false` pins it at `START_PCT`. No button.
     pub dynamic_res: bool,
+    /// MSAA samples for the next start: 0 Auto (`present::pick_samples` decides by GPU), 1, 2 or 4 (`msaa:` in options.txt).
+    pub msaa: u8,
     path: Option<PathBuf>,
 }
 
@@ -146,6 +151,7 @@ impl Default for Settings {
             lod: true,
             gpu_error_trace: false,
             dynamic_res: true,
+            msaa: 0,
             path: None,
         }
     }
@@ -177,6 +183,7 @@ impl Settings {
                 ("lod", ..) => s.lod = b,
                 ("gpuErrorTrace", ..) => s.gpu_error_trace = b,
                 ("dynamicRes", ..) => s.dynamic_res = b,
+                ("msaa", _, Some(n)) if matches!(n, 0 | 1 | 2 | 4) => s.msaa = n,
                 (k, ..) if k.starts_with("pad_") => s.pad.load(k, v),
                 _ => {
                     if let (Some(i), Ok(code)) = (KEY_IDS.iter().position(|id| k.strip_prefix("key_key.") == Some(*id)), v.parse::<u32>()) {
@@ -192,8 +199,8 @@ impl Settings {
     pub fn save(&self) {
         let Some(p) = &self.path else { return };
         let mut t = format!(
-            "music:{}\nsound:{}\ninvertYMouse:{}\nmouseSensitivity:{}\nviewDistance:{}\nguiScale:{}\nbobView:{}\nanaglyph3d:{}\nadvancedOpengl:{}\nfpsLimit:{}\ndifficulty:{}\nfancyGraphics:{}\nao:{}\nlod:{}\ndigDelay:{}\ngpuErrorTrace:{}\ndynamicRes:{}\n",
-            self.music, self.sound, self.invert_mouse, self.sensitivity, self.render_distance, self.gui_scale, self.view_bobbing, self.anaglyph, self.advanced_opengl, self.limit_framerate, self.difficulty, self.fancy_graphics, self.ambient_occlusion, self.lod, self.dig_delay, self.gpu_error_trace, self.dynamic_res
+            "music:{}\nsound:{}\ninvertYMouse:{}\nmouseSensitivity:{}\nviewDistance:{}\nguiScale:{}\nbobView:{}\nanaglyph3d:{}\nadvancedOpengl:{}\nfpsLimit:{}\ndifficulty:{}\nfancyGraphics:{}\nao:{}\nlod:{}\ndigDelay:{}\ngpuErrorTrace:{}\ndynamicRes:{}\nmsaa:{}\n",
+            self.music, self.sound, self.invert_mouse, self.sensitivity, self.render_distance, self.gui_scale, self.view_bobbing, self.anaglyph, self.advanced_opengl, self.limit_framerate, self.difficulty, self.fancy_graphics, self.ambient_occlusion, self.lod, self.dig_delay, self.gpu_error_trace, self.dynamic_res, self.msaa
         );
         for (id, code) in KEY_IDS.iter().zip(self.keys) {
             t.push_str(&format!("key_key.{id}:{code}\n"));
@@ -259,6 +266,7 @@ impl Settings {
             Opt::Difficulty => self.difficulty = (self.difficulty + 1) & 3,
             Opt::Graphics => self.fancy_graphics = !self.fancy_graphics,
             Opt::AmbientOcclusion => self.ambient_occlusion = !self.ambient_occlusion,
+            Opt::Msaa => self.msaa = match self.msaa { 0 => 1, 1 => 2, 2 => 4, _ => 0 },
             _ => {}
         }
         self.save();
@@ -288,6 +296,11 @@ impl Settings {
                 Opt::Difficulty => ["Peaceful", "Easy", "Normal", "Hard"][self.difficulty.min(3) as usize].into(),
                 Opt::GuiScale => ["Auto", "Small", "Normal", "Large"][self.gui_scale.min(3) as usize].into(),
                 Opt::FramerateLimit => ["Max FPS", "Balanced", "Power saver"][self.limit_framerate.min(2) as usize].into(),
+                // The pipelines keep the count they were built with: a change shows only at the next start.
+                Opt::Msaa => {
+                    let v = match self.msaa { 0 => "Auto", 1 => "Off", 2 => "2x", _ => "4x" };
+                    if u32::from(self.msaa) != crate::render::present::msaa_want() { format!("{v} (restart)") } else { v.into() }
+                }
                 _ => (if self.fancy_graphics { "Fancy" } else { "Fast" }).into(),
             }
         };
@@ -420,7 +433,7 @@ impl OptionsUi {
                 w.push(wide(Act::Controls, top + 120.0 + 12.0, "Controls..."));
                 w
             }
-            OptScr::Video => opts(&[Opt::Graphics, Opt::RenderDistance, Opt::AmbientOcclusion, Opt::FramerateLimit, Opt::Anaglyph, Opt::ViewBobbing, Opt::GuiScale, Opt::AdvancedOpengl]),
+            OptScr::Video => opts(&[Opt::Graphics, Opt::RenderDistance, Opt::AmbientOcclusion, Opt::FramerateLimit, Opt::Anaglyph, Opt::ViewBobbing, Opt::GuiScale, Opt::AdvancedOpengl, Opt::Msaa]),
             OptScr::Controls => (0..KEY_NAMES.len())
                 .map(|i| {
                     let name = key_name(st.keys[i]);
@@ -799,7 +812,24 @@ mod tests {
         let back = Settings::load(&root);
         assert_eq!((back.sensitivity, back.invert_mouse, back.render_distance, back.lod, back.keys[4]), (0.25, true, 0, false, 50));
         assert!(back.gpu_error_trace && !back.dynamic_res);
+        assert_eq!(back.msaa, 0, "Auto until options.txt says otherwise");
         assert!(std::fs::read_to_string(root.join("options.txt")).unwrap().contains("key_key.jump:50"));
+    }
+
+    /// The MSAA button cycles Auto -> Off -> 2x -> 4x -> Auto, reads back from options.txt, and a bad value falls back to Auto.
+    #[test]
+    fn msaa_option_cycles_and_round_trips() {
+        let root = tmp("msaa");
+        let mut st = Settings::load(&root);
+        let seen: Vec<u8> = (0..5).map(|_| { st.cycle(Opt::Msaa); st.msaa }).collect();
+        assert_eq!(seen, [1, 2, 4, 0, 1]);
+        st.msaa = 2;
+        st.save();
+        assert_eq!(Settings::load(&root).msaa, 2);
+        std::fs::write(root.join("options.txt"), "msaa:3\n").unwrap();
+        assert_eq!(Settings::load(&root).msaa, 0);
+        st.msaa = 4;
+        assert!(st.text(Opt::Msaa).starts_with("MSAA: 4x"));
     }
 
     /// Options -> LoD button -> Video Settings (cycle Render Distance) -> Done -> Controls (wait for a key) -> Done -> Done closes.

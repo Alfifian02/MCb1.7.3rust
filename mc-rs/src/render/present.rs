@@ -18,6 +18,30 @@ pub const SCENE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrg
 /// such sample count for the scene's colour and depth formats.
 pub const MSAA_WANT: u32 = 4;
 
+/// What the player asked for in `options.txt` (`msaa:`), set once before the GPU is built: 0 Auto, 1, 2 or 4.
+static WANT: AtomicU32 = AtomicU32::new(0);
+
+pub fn set_msaa_want(n: u32) {
+    WANT.store(n, Ordering::Relaxed);
+}
+
+pub fn msaa_want() -> u32 {
+    WANT.load(Ordering::Relaxed)
+}
+
+/// ponytail: Adreno below 620 (5xx, 610..619) is the low end where 4x MSAA of colour + `Depth32Float` costs more than it gives; a name
+/// heuristic, not a measurement (no other GPU family is guessed at: `msaa:` in options.txt covers them).
+fn weak_gpu(name: &str) -> bool {
+    let n = name.find("Adreno").map(|i| &name[i + 6..]).unwrap_or("");
+    n.trim_start_matches(|c: char| !c.is_ascii_digit()).chars().take_while(char::is_ascii_digit).collect::<String>().parse::<u32>().is_ok_and(|m| m < 620)
+}
+
+/// The sample count for a `want` (0 = Auto: `MSAA_WANT`, or 1 on a `weak` GPU), stepped down to the first one `ok` allows (4, 2, 1).
+fn resolve(want: u32, weak: bool, ok: impl Fn(u32) -> bool) -> u32 {
+    let want = match want { 0 if weak => 1, 0 => MSAA_WANT, w => w };
+    [4, 2].into_iter().find(|&n| n <= want && ok(n)).unwrap_or(1)
+}
+
 /// Sample count of every scene-pass pipeline and of the colour / depth targets (`Gpu::create_depth`, `Present`). Set once by
 /// `Gpu::try_init` before any of them is built; 1 until then (the headless tests run with 1).
 static SCENE_SAMPLES: AtomicU32 = AtomicU32::new(1);
@@ -30,13 +54,17 @@ pub fn set_scene_samples(n: u32) {
     SCENE_SAMPLES.store(n.max(1), Ordering::Relaxed);
 }
 
-/// `MSAA_WANT` if the adapter can render to the scene and depth formats with it, else 1.
+/// The sample count the player's `msaa:` asks for (Auto = 4, or 1 on a weak GPU), if the adapter can render to the scene and depth
+/// formats with it, else the next one down, else 1.
 pub fn pick_samples(adapter: &wgpu::Adapter) -> u32 {
-    let ok = |f| {
-        let t = adapter.get_texture_format_features(f);
-        t.allowed_usages.contains(wgpu::TextureUsages::RENDER_ATTACHMENT) && t.flags.sample_count_supported(MSAA_WANT)
+    let ok = |n: u32| {
+        let f = |f| {
+            let t = adapter.get_texture_format_features(f);
+            t.allowed_usages.contains(wgpu::TextureUsages::RENDER_ATTACHMENT) && t.flags.sample_count_supported(n)
+        };
+        f(SCENE_FORMAT) && f(wgpu::TextureFormat::Depth32Float)
     };
-    if ok(SCENE_FORMAT) && ok(wgpu::TextureFormat::Depth32Float) { MSAA_WANT } else { 1 }
+    resolve(msaa_want(), weak_gpu(&adapter.get_info().name), ok)
 }
 
 /// The state of a scene pipeline's `multisample` (alpha-to-coverage on for the cut-out layers: MSAA does not smooth a `discard` edge, but
@@ -255,6 +283,14 @@ mod tests {
     }
 
     /// Alpha-to-coverage only means something with samples; with one it must stay off (wgpu accepts it, GLES drivers may not).
+    #[test]
+    fn msaa_follows_the_option_and_the_gpu() {
+        let all = |_| true;
+        assert_eq!((resolve(0, false, all), resolve(0, true, all), resolve(1, false, all), resolve(2, true, all), resolve(4, true, all)), (4, 1, 1, 2, 4));
+        assert_eq!((resolve(4, false, |n| n <= 2), resolve(4, false, |n| n == 1), resolve(0, false, |n| n <= 2)), (2, 1, 2));
+        assert!(weak_gpu("Adreno (TM) 610") && weak_gpu("Adreno (TM) 506") && !weak_gpu("Adreno (TM) 650") && !weak_gpu("Mali-G57") && !weak_gpu("llvmpipe"));
+    }
+
     #[test]
     fn coverage_needs_samples() {
         assert!(!multisample_of(1, true).alpha_to_coverage_enabled);

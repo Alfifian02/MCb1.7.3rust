@@ -226,6 +226,10 @@ struct Gesture {
 
 impl App {
     async fn init(native_ptr: *mut c_void, width: u32, height: u32, dir: PathBuf) -> Result<Self, String> {
+        // The options come first: the MSAA count is baked into every pipeline `Gpu` and what follows build.
+        let opts = Settings::load(&dir);
+        crate::gpu::context::set_error_trace(opts.gpu_error_trace);
+        crate::render::present::set_msaa_want(u32::from(opts.msaa));
         let gpu = Gpu::from_android_window(native_ptr, width, height).await?;
         let surface_format = gpu.surface_format();
         let pipe = ChunkPipeline::new(&gpu.device);
@@ -252,8 +256,6 @@ impl App {
         let present = Present::new(&gpu.device, &gpu.queue, gpu.scene(), (width, height), surface_format);
         let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as i64);
 
-        let opts = Settings::load(&dir);
-        crate::gpu::context::set_error_trace(opts.gpu_error_trace);
         let mut app = Self {
             gpu, tectonic: false, lod: None, seed: 0, root: dir.clone(), opts, pause: None, lod_on: false, menu: Some(Menu::new(&dir)), pipe,
             chunks, camera,
