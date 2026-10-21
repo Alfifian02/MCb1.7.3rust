@@ -10,7 +10,7 @@
 //! Not done: Achievements and Statistics (drawn greyed out, there is no stat system).
 
 use crate::input::gamepad::{Btn, PadCfg, ACTS};
-use crate::input::touch_ui::ScreenEv;
+use crate::input::touch_ui::{ScreenEv, HOLD_SECS, SWING_SECS};
 use crate::menu::{dirt, grad, rgb, scaled_gs, tw};
 use crate::render::hud::{HudPipeline, HudVertex};
 use std::path::{Path, PathBuf};
@@ -32,12 +32,14 @@ pub enum Opt {
     Graphics,
     AmbientOcclusion,
     GuiScale,
+    /// Added: how long a finger or the attack button rests on a block before the arm swings and the dig starts.
+    DigDelay,
 }
 
 impl Opt {
     /// `getEnumFloat`: a slider.
     fn slider(self) -> bool {
-        matches!(self, Opt::Music | Opt::Sound | Opt::Sensitivity)
+        matches!(self, Opt::Music | Opt::Sound | Opt::Sensitivity | Opt::DigDelay)
     }
 
     /// `lang/en_US.lang`'s `options.*`.
@@ -56,9 +58,13 @@ impl Opt {
             Opt::Graphics => "Graphics",
             Opt::AmbientOcclusion => "Smooth Lighting",
             Opt::GuiScale => "GUI Scale",
+            Opt::DigDelay => "Dig Delay",
         }
     }
 }
+
+/// The Dig Delay slider's lower end, seconds.
+const DIG_MIN: f32 = 0.10;
 
 const KEY_NAMES: [&str; 10] = ["Forward", "Left", "Back", "Right", "Jump", "Sneak", "Drop", "Inventory", "Chat", "Toggle Fog"];
 /// `GameSettings.keyBindings`' ids, for `options.txt` (`key_key.forward`, ...).
@@ -90,6 +96,8 @@ pub struct Settings {
     pub music: f32,
     pub sound: f32,
     pub sensitivity: f32,
+    /// The Dig Delay slider, 0..1 (`dig_secs`).
+    pub dig_delay: f32,
     pub invert_mouse: bool,
     /// 0 Far, 1 Normal, 2 Short, 3 Tiny.
     pub render_distance: u8,
@@ -118,6 +126,7 @@ impl Default for Settings {
             music: 1.0,
             sound: 1.0,
             sensitivity: 0.5,
+            dig_delay: (SWING_SECS - DIG_MIN) / (HOLD_SECS - DIG_MIN),
             invert_mouse: false,
             render_distance: 2,
             view_bobbing: true,
@@ -148,6 +157,7 @@ impl Settings {
                 ("music", Some(f), _) => s.music = f.clamp(0.0, 1.0),
                 ("sound", Some(f), _) => s.sound = f.clamp(0.0, 1.0),
                 ("mouseSensitivity", Some(f), _) => s.sensitivity = f.clamp(0.0, 1.0),
+                ("digDelay", Some(f), _) => s.dig_delay = f.clamp(0.0, 1.0),
                 ("viewDistance", _, Some(n)) => s.render_distance = n.min(3),
                 ("guiScale", _, Some(n)) => s.gui_scale = n.min(3),
                 ("fpsLimit", _, Some(n)) => s.limit_framerate = n.min(2),
@@ -174,8 +184,8 @@ impl Settings {
     pub fn save(&self) {
         let Some(p) = &self.path else { return };
         let mut t = format!(
-            "music:{}\nsound:{}\ninvertYMouse:{}\nmouseSensitivity:{}\nviewDistance:{}\nguiScale:{}\nbobView:{}\nanaglyph3d:{}\nadvancedOpengl:{}\nfpsLimit:{}\ndifficulty:{}\nfancyGraphics:{}\nao:{}\nlod:{}\n",
-            self.music, self.sound, self.invert_mouse, self.sensitivity, self.render_distance, self.gui_scale, self.view_bobbing, self.anaglyph, self.advanced_opengl, self.limit_framerate, self.difficulty, self.fancy_graphics, self.ambient_occlusion, self.lod
+            "music:{}\nsound:{}\ninvertYMouse:{}\nmouseSensitivity:{}\nviewDistance:{}\nguiScale:{}\nbobView:{}\nanaglyph3d:{}\nadvancedOpengl:{}\nfpsLimit:{}\ndifficulty:{}\nfancyGraphics:{}\nao:{}\nlod:{}\ndigDelay:{}\n",
+            self.music, self.sound, self.invert_mouse, self.sensitivity, self.render_distance, self.gui_scale, self.view_bobbing, self.anaglyph, self.advanced_opengl, self.limit_framerate, self.difficulty, self.fancy_graphics, self.ambient_occlusion, self.lod, self.dig_delay
         );
         for (id, code) in KEY_IDS.iter().zip(self.keys) {
             t.push_str(&format!("key_key.{id}:{code}\n"));
@@ -196,6 +206,12 @@ impl Settings {
         (self.sensitivity * 0.6 + 0.2).powi(3) * 8.0
     }
 
+    /// Seconds a finger or the attack button rests on a block before the arm swings and the dig starts: `DIG_MIN` .. `HOLD_SECS` (at
+    /// the top the dig waits for the plain hold, as it did before the early dig).
+    pub fn dig_secs(&self) -> f32 {
+        DIG_MIN + self.dig_delay * (HOLD_SECS - DIG_MIN)
+    }
+
     /// The frame time the Performance option allows (`EntityRenderer`: 120 fps balanced, 40 power saver); none for Max FPS.
     pub fn frame_cap(&self) -> Option<Duration> {
         [None, Some(Duration::from_micros(8333)), Some(Duration::from_millis(25))][self.limit_framerate.min(2) as usize]
@@ -206,6 +222,7 @@ impl Settings {
             Opt::Music => self.music,
             Opt::Sound => self.sound,
             Opt::Sensitivity => self.sensitivity,
+            Opt::DigDelay => self.dig_delay,
             _ => 0.0,
         }
     }
@@ -216,6 +233,7 @@ impl Settings {
             Opt::Music => self.music = v,
             Opt::Sound => self.sound = v,
             Opt::Sensitivity => self.sensitivity = v,
+            Opt::DigDelay => self.dig_delay = v,
             _ => {}
         }
     }
@@ -247,6 +265,7 @@ impl Settings {
                 Opt::Sensitivity if f == 0.0 => "*yawn*".to_string(),
                 Opt::Sensitivity if f == 1.0 => "HYPERSPEED!!!".to_string(),
                 Opt::Sensitivity => format!("{}%", (f * 200.0) as i32),
+                Opt::DigDelay => format!("{} ms", (self.dig_secs() * 1000.0).round() as i32),
                 _ if f == 0.0 => "OFF".to_string(),
                 _ => format!("{}%", (f * 100.0) as i32),
             }
@@ -416,6 +435,10 @@ impl OptionsUi {
                 }))
                 .collect(),
         };
+        // The Dig Delay slider sits under the keys and under the pad's tuning (one setting for finger and pad).
+        if matches!(self.scr, OptScr::Controls | OptScr::PadTune) {
+            w.push(wide(Act::Opt(Opt::DigDelay), top + 120.0, &st.text(Opt::DigDelay)));
+        }
         // Controls has two tabs: the keys, and the Controller (Controllify) with its buttons page and its tuning page.
         if matches!(self.scr, OptScr::Controls | OptScr::Pad | OptScr::PadTune) {
             w.push(Wid { act: Act::TabKeys, r: [hw - 100.0, 20.0, 99.0, 14.0], label: "Keys".into() });
@@ -841,6 +864,26 @@ mod tests {
         let mut v = Vec::new();
         o.draw(&mut v, SZ.0, SZ.1, &st, true);
         assert!(!v.is_empty());
+    }
+
+    /// The Dig Delay slider: on the keys and the tuning pages, 100 ms .. `HOLD_SECS`, default `SWING_SECS`, kept in options.txt.
+    #[test]
+    fn dig_delay_slider() {
+        let root = tmp("dig");
+        let mut st = Settings::load(&root);
+        assert!((st.dig_secs() - SWING_SECS).abs() < 1e-4);
+        let mut o = OptionsUi::new();
+        tap(&mut o, &mut st, "Controls...");
+        let (s, gw, gh) = scaled_gs(SZ.0, SZ.1, 0);
+        let r = o.widgets(gw, gh, &st).into_iter().find(|b| b.label.starts_with("Dig Delay")).unwrap().r;
+        let y = (r[1] + 10.0) * s;
+        o.event(ScreenEv::Down((r[0] + r[2] - 2.0) * s, y), SZ.0, SZ.1, &mut st);
+        o.event(ScreenEv::Up((r[0] + r[2] - 2.0) * s, y), SZ.0, SZ.1, &mut st);
+        assert_eq!((st.dig_delay, st.dig_secs()), (1.0, HOLD_SECS));
+        assert_eq!(Settings::load(&root).dig_delay, 1.0);
+        tap(&mut o, &mut st, "Controller");
+        tap(&mut o, &mut st, "Tuning...");
+        assert!(o.widgets(gw, gh, &st).iter().any(|b| b.label.starts_with("Dig Delay")));
     }
 
     #[test]

@@ -975,6 +975,7 @@ impl App {
         }
 
         // M5: pick the block under the crosshair, dig it while the dig input is held, place on a tap.
+        self.touch.swing_secs = self.opts.dig_secs();
         self.touch.tick(real_dt);
         let place = self.touch.take_place();
         let strike = self.touch.take_strike();

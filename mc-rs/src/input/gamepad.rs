@@ -11,7 +11,7 @@
 //! (b1.7.3 has no sprint / off hand, and mc-rs has no chat or drop yet). UNVERIFIED on real hardware: the Android axis / key mapping
 //! follows the documented layout (X/Y left stick, Z/Rz right stick, Ltrigger/Rtrigger, hat = d-pad).
 
-use super::touch_ui::{HOLD_SECS, SWING_SECS, TAP_SECS};
+use super::touch_ui::{HOLD_SECS, TAP_SECS};
 use crate::render::hud::{HudPipeline, HudVertex};
 use android_activity::input::{Axis, KeyAction, KeyEvent, Keycode, MotionEvent, Source};
 
@@ -366,14 +366,14 @@ impl Pad {
 
     /// One frame. `ui`: a screen, the pause menu or a title menu is up (the sticks drive the cursor, not the player). `side`: the short
     /// side of the surface in px.
-    /// The attack button has been down for `SWING_SECS` (the arm swings, the dig may start: `dig_now`).
-    pub fn resting(&self) -> bool {
-        self.attack_t >= SWING_SECS
+    /// The attack button has been down for `secs` (the Dig Delay: the arm swings, the dig may start: `dig_now`).
+    pub fn resting(&self, secs: f32) -> bool {
+        self.attack_t >= secs
     }
 
     /// The caller saw a block, not a mob, under the crosshair: the press now down digs from this frame, and its release is no hit.
-    pub fn dig_now(&mut self) {
-        self.attack_dug = self.resting();
+    pub fn dig_now(&mut self, secs: f32) {
+        self.attack_dug = self.resting(secs);
     }
 
     pub fn update(&mut self, dt: f32, cfg: &PadCfg, ui: bool, side: f32) -> Out {
@@ -542,6 +542,7 @@ fn btn_of(k: Keycode) -> Option<Btn> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::input::touch_ui::SWING_SECS;
 
     const DT: f32 = 1.0 / 60.0;
 
@@ -598,13 +599,13 @@ mod tests {
         let (mut p, c) = pad();
         p.axes(0.0, 0.0, 0.0, 0.0, 0.0, 1.0, (0.0, 0.0));
         p.update(DT, &c, false, 1000.0);
-        p.dig_now();
+        p.dig_now(SWING_SECS);
         assert!(!p.update(DT, &c, false, 1000.0).dig, "held under SWING_SECS: not resting, no early dig");
-        while !p.resting() {
+        while !p.resting(SWING_SECS) {
             p.update(DT, &c, false, 1000.0);
         }
         assert!(!p.update(DT, &c, false, 1000.0).dig, "resting alone does not dig");
-        p.dig_now();
+        p.dig_now(SWING_SECS);
         assert!(p.update(DT, &c, false, 1000.0).dig && SWING_SECS < HOLD_SECS);
         p.axes(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, (0.0, 0.0));
         assert!(!p.update(DT, &c, false, 1000.0).strike, "an early dig is not a hit");

@@ -32,8 +32,9 @@ pub const TAP_SECS: f32 = 0.25;
 /// A press held still this long starts digging, which lasts until the finger lifts; a shorter press that did not move is a tap
 /// (place), so every press is a tap or a dig, whatever this is. 0.2 s felt too eager, 0.4 s is the first value.
 pub const HOLD_SECS: f32 = 0.4;
-/// A look finger resting still this long on a block starts the arm swing (`TouchUi::pressing`), well before the dig at `HOLD_SECS`.
-/// A finger that moves more than the slop is a look drag and never swings. UNVERIFIED on a device: 0.15 s is a guess.
+/// The default of the Dig Delay (`TouchUi::swing_secs`): a look finger resting still this long on a block starts the arm swing
+/// (`TouchUi::pressing`) and the dig, well before `HOLD_SECS`. A finger that moves more than the slop is a look drag and never
+/// swings. UNVERIFIED on a device: 0.15 s is a guess, the slider in Controls is the answer.
 pub const SWING_SECS: f32 = 0.15;
 /// Finger travel (fraction of the short screen side) above which a press is a look drag.
 const SLOP: f32 = 0.02;
@@ -231,6 +232,8 @@ pub struct TouchUi {
     /// The game pad (`gamepad.rs`): its outputs below are OR-ed with the fingers'.
     pub pad: Pad,
     pad_jump: bool,
+    /// The Dig Delay in seconds (`Settings::dig_secs`, set by `lib.rs` each frame).
+    pub swing_secs: f32,
     pad_dig: bool,
     pad_attack: bool,
     pad_zoom: bool,
@@ -264,6 +267,7 @@ impl TouchUi {
             cursor_pos: (w as f32 * 0.5, h as f32 * 0.5),
             pad: Pad::default(),
             pad_jump: false,
+            swing_secs: SWING_SECS,
             pad_dig: false,
             pad_attack: false,
             pad_zoom: false,
@@ -385,16 +389,16 @@ impl TouchUi {
 
     /// A look finger has rested still for `SWING_SECS` (a drag has not), or the pad's attack has been down that long.
     pub fn resting(&self) -> bool {
-        self.pad.resting() || self.pointers.values().any(|p| p.role == PointerRole::Look && p.held >= SWING_SECS && p.travel < self.surface_w.min(self.surface_h) as f32 * SLOP)
+        self.pad.resting(self.swing_secs) || self.pointers.values().any(|p| p.role == PointerRole::Look && p.held >= self.swing_secs && p.travel < self.surface_w.min(self.surface_h) as f32 * SLOP)
     }
 
     /// The resting look finger(s) start digging now, without waiting for `HOLD_SECS` (the caller saw a block, not a mob, under the
     /// crosshair); the release is no tap, as for a hold.
     pub fn dig_now(&mut self) {
-        self.pad.dig_now();
-        self.pad_dig |= self.pad.resting();
+        self.pad.dig_now(self.swing_secs);
+        self.pad_dig |= self.pad.resting(self.swing_secs);
         let slop = self.surface_w.min(self.surface_h) as f32 * SLOP;
-        self.pointers.values_mut().filter(|p| p.role == PointerRole::Look && p.held >= SWING_SECS && p.travel < slop).for_each(|p| p.broke = true);
+        self.pointers.values_mut().filter(|p| p.role == PointerRole::Look && p.held >= self.swing_secs && p.travel < slop).for_each(|p| p.broke = true);
     }
 
     /// True while a look finger that was held still is down: the player is digging.
