@@ -1,0 +1,48 @@
+--- a/mc-rs/src/world/chunks.rs	2026-10-21 00:56:13.145931958 +0000
++++ b/mc-rs/src/world/chunks.rs	2026-10-21 00:56:17.552553978 +0000
+@@ -531,8 +531,6 @@
+     visible: HashMap<Key, u8>,
+     /// The part of `visible` within the water radius `wr` (`WATER_RANGE`, or all of it with the LoD off): the sections whose real water is drawn (and whose LoD water sheet is cut).
+     wet: HashMap<Key, u8>,
+-    /// Bumped when `visible` or `wet` changes (a turn, a step, a mesh): the far terrain's cut of water sheets follows it.
+-    vis_gen: u32,
+     /// The visible chunks near to far (`update_visible`): the order `draw_ranges` walks, once a frame instead of once a layer.
+     order: Vec<Key>,
+     /// Chunks whose blocks are final, as columns for the far terrain (`world::lod`, Voxy's ingest), until `take_ingest`.
+@@ -626,7 +624,7 @@
+         let gen = make(seed);
+         Self { chunks: Chunks::default(), pending: HashSet::new(), ring, radius, center: None, max_in_flight: workers * 2, built, meshing: HashSet::new(), max_meshing: workers * 2,
+                populated_rx, populating: HashMap::new(), busy: HashSet::new(), max_populating: workers, stamp: 0,
+-               cm: gen.manager(), biome_area: None, gen, jobs, done, light: light::LightLink::spawn(), sky_sub: 0, mesh_gen: 0, dir: None, saved: HashSet::new(), writer: None, changes: Vec::new(), fresh_water: Vec::new(), loot: Vec::new(), spawners: Vec::new(), culler: Culler::default(), visible: HashMap::new(), wet: HashMap::new(), vis_gen: 0, order: Vec::new(), ingest: Vec::new(), ingested: HashSet::new(), pages: Pages::default() }
++               cm: gen.manager(), biome_area: None, gen, jobs, done, light: light::LightLink::spawn(), sky_sub: 0, mesh_gen: 0, dir: None, saved: HashSet::new(), writer: None, changes: Vec::new(), fresh_water: Vec::new(), loot: Vec::new(), spawners: Vec::new(), culler: Culler::default(), visible: HashMap::new(), wet: HashMap::new(), order: Vec::new(), ingest: Vec::new(), ingested: HashSet::new(), pages: Pages::default() }
+     }
+ 
+     /// The render distance in chunks.
+@@ -1123,7 +1121,7 @@
+             let max = min + Vec3::new(16.0, 18.0, 16.0);
+             in_range(shape, eye, min, max, rh, rv) && in_frustum(min, max)
+         };
+-        let (old, old_wet) = (std::mem::take(&mut self.visible), std::mem::take(&mut self.wet));
++        self.visible.clear();
+         let ey = (eye.y.floor() as i32) >> 4;
+         let inside = (0..SECTIONS as i32).contains(&ey); // above or below the world the eye's section says nothing about the view
+         let origin = [chunk_coord(eye.x), ey.clamp(0, SECTIONS as i32 - 1), chunk_coord(eye.z)];
+@@ -1150,14 +1148,13 @@
+         self.order.clear();
+         self.order.extend(self.visible.keys().copied());
+         self.order.sort_unstable_by(|a, b| d2(a).total_cmp(&d2(b)));
+-        if old != self.visible || old_wet != self.wet {
+-            self.vis_gen = self.vis_gen.wrapping_add(1);
+-        }
+     }
+ 
+-    /// Changes whenever what the far terrain is cut by changes: the set of meshes or the set of sections drawn.
++    /// Changes whenever what the far terrain is cut by changes: the set of chunks that have a mesh (`drawn`). It used to add the set of
++    /// sections drawn (`vis_gen`), which changes with every turn of the camera and recut every near tile (a lookup and a range test
++    /// per cell, thousands of cells a tile) each time; `lod::covered` has not read the sections since the water sheets stopped being cut.
+     pub fn cut_gen(&self) -> u32 {
+-        self.mesh_gen.wrapping_add(self.vis_gen)
++        self.mesh_gen
+     }
+ 
+     /// The real WATER of section `sy` of chunk `k` has something within `WATER_RANGE` this frame (`update_visible`) and its chunk has a mesh.
