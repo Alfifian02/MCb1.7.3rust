@@ -29,8 +29,9 @@ pub const HOTBAR_SLOTS: usize = 9;
 // UNVERIFIED: tap/hold timings and slop (b1.7.3 has no touch input). Picked to feel like PE.
 /// A press shorter than this, that did not move, is a tap (place).
 pub const TAP_SECS: f32 = 0.25;
-/// A press held still this long starts digging, which lasts until the finger lifts.
-pub const HOLD_SECS: f32 = 0.4;
+/// A press held still this long starts digging, which lasts until the finger lifts. At or under `TAP_SECS`, so every press is
+/// a tap or a dig (at 0.4 s a press of 0.25 to 0.4 s did nothing at all, and a dig started 0.4 s late).
+pub const HOLD_SECS: f32 = 0.2;
 /// Finger travel (fraction of the short screen side) above which a press is a look drag.
 const SLOP: f32 = 0.02;
 
@@ -743,12 +744,12 @@ mod tests {
         ui.tick(0.1);
         ui.on_release(1);
         assert!(ui.take_place() && !ui.digging());
-        // Hold still: digging starts at 0.4 s, lasts while the finger is down (even if it then moves),
+        // Hold still: digging starts at 0.2 s, lasts while the finger is down (even if it then moves),
         // and the release is not a tap.
         ui.on_press(1, 1800.0, 400.0, PointerRole::Look);
-        ui.tick(0.3);
-        assert!(!ui.digging());
         ui.tick(0.15);
+        assert!(!ui.digging());
+        ui.tick(0.1);
         assert!(ui.digging());
         ui.on_move(1, 1900.0, 400.0);
         ui.tick(0.1);
@@ -762,9 +763,10 @@ mod tests {
         assert!(!ui.digging());
         ui.on_release(1);
         assert!(!ui.take_place());
-        // Held still for 0.3 s: too long for a tap, too short to dig.
+        // No dead zone: a press held still past TAP_SECS is a dig, never nothing.
         ui.on_press(1, 1800.0, 400.0, PointerRole::Look);
-        ui.tick(0.3);
+        ui.tick(TAP_SECS);
+        assert!(ui.digging());
         ui.on_release(1);
         assert!(!ui.take_place() && !ui.digging());
     }

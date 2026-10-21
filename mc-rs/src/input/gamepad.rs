@@ -426,7 +426,7 @@ impl Pad {
             self.attack_t += dt;
             o.dig = self.attack_t >= HOLD_SECS;
         } else if up(Act::Attack) {
-            o.strike = self.attack_t < TAP_SECS;
+            o.strike = self.attack_t < HOLD_SECS; // the complement of `dig`: no press is neither
             self.attack_t = 0.0;
         }
         // Use: on the press, then 4 a second while held.
