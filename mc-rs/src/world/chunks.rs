@@ -4,7 +4,7 @@
 //! Per frame: `stream` (cheap, no GPU) collects finished chunks, unloads far ones, asks the
 //! workers for missing ones nearest-first, sends `populate` jobs to the workers and puts the finished
 //! ones back (`populate_dispatch`, `populate_land`); `mesh_pending` uploads the meshes
-//! the workers finished (a couple a frame) and queues jobs for the chunks that need one (the
+//! the workers finished (within the frame's upload budget) and queues jobs for the chunks that need one (the
 //! workers copy the chunk and its four neighbours, build the vertices and send them back).
 //!
 //! Three states per chunk: raw (terrain + caves, from a worker), populated (trees, ores, ...) and
@@ -21,7 +21,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Mutex};
 
-use embeddium::{arena::Arena, cull::{Culler, Graph}, quad_index, vertex::{self, Packed}, vis};
+use embeddium::{arena::Arena, cull::{Culler, Graph}, quad_index, upload_budget::{self, UploadBudget, UploadDurationEstimator}, vertex::{self, Packed}, vis};
 use glam::Vec3;
 
 use crate::gpu::pipeline::{create_index_buffer, DrawOrigins, MAX_ORIGINS};
@@ -64,13 +64,19 @@ impl std::hash::Hasher for KeyHasher {
 
 type Chunks = HashMap<Key, Entry, std::hash::BuildHasherDefault<KeyHasher>>;
 
-/// Finished meshes uploaded (buffers created) per frame, so walking into fresh terrain never stalls a frame. The meshing itself runs
-/// on the workers (`Job::Mesh`), the upload is the only part that needs the device.
-const MESH_PER_FRAME: usize = 2;
+/// The most finished meshes uploaded in a frame, whatever the budget says (a guard against a bad estimate; empty meshes count too).
+/// What normally stops a frame's uploads is the budget (`UploadBudget`, Sodium's `UploadResourceBudget`): the meshing itself runs on
+/// the workers (`Job::Mesh`), the upload is the only part that needs the device.
+const MESH_PER_FRAME: usize = 8;
 
-/// A second upload in a frame starts only while the frame's chunk work is still under this (the first one always runs, so a finished
-/// mesh never starves).
-const CHUNK_WORK_BUDGET: std::time::Duration = std::time::Duration::from_millis(6);
+/// Bytes of mesh data a frame may upload (Sodium: the staging buffer's `getUploadSizeLimit`; there is no staging buffer here, so
+/// it is a number). The first mesh of a frame always goes up whatever its size, so a finished mesh never starves; the next ones
+/// wait while they do not fit this and the time share (`upload_budget::frame_duration_budget`: 30% of the average frame, at least
+/// 2 ms). ponytail: 1 MiB is a guess (a surface chunk is some 100-500 KB); lever if the ring fills too slowly or a frame still hitches.
+const UPLOAD_SIZE_LIMIT: u64 = 1 << 20;
+
+/// The frame length assumed before the first two `update` calls give a measured one (60 Hz).
+const FIRST_FRAME_NS: f64 = 16_666_667.0;
 
 /// A frame whose chunk work (stream, populate, light, meshes) took this long or more is logged with its stages.
 const SLOW_CHUNK_WORK: std::time::Duration = std::time::Duration::from_millis(16);
@@ -540,6 +546,13 @@ pub struct ChunkManager {
     ingested: HashSet<Key>,
     /// The GPU buffers of every chunk mesh (`Mesh`), created on the first upload.
     pages: Pages,
+    /// A finished mesh the upload budget held back: the next `mesh_pending` takes it first. Its chunk stays in `meshing` meanwhile.
+    held: Option<(Key, Built)>,
+    /// What an upload of n bytes costs (a linear fit to the measured `Pages::put`), and the average frame length (ns) between
+    /// `update` calls: the two numbers the frame's `UploadBudget` is made of.
+    upload: UploadDurationEstimator,
+    frame_ns: Option<f64>,
+    last_update: Option<std::time::Instant>,
 }
 
 /// The loaded chunks as the occlusion walk sees them. A chunk that has no mesh (air only, or not built yet) lets the view through.
@@ -624,7 +637,7 @@ impl ChunkManager {
         let gen = make(seed);
         Self { chunks: Chunks::default(), pending: HashSet::new(), ring, radius, center: None, max_in_flight: workers * 2, built, meshing: HashSet::new(), max_meshing: workers * 2,
                populated_rx, populating: HashMap::new(), busy: HashSet::new(), max_populating: workers, stamp: 0,
-               cm: gen.manager(), biome_area: None, gen, jobs, done, light: light::LightLink::spawn(), sky_sub: 0, mesh_gen: 0, dir: None, saved: HashSet::new(), writer: None, changes: Vec::new(), fresh_water: Vec::new(), loot: Vec::new(), spawners: Vec::new(), culler: Culler::default(), visible: HashMap::new(), wet: HashMap::new(), order: Vec::new(), ingest: Vec::new(), ingested: HashSet::new(), pages: Pages::default() }
+               cm: gen.manager(), biome_area: None, gen, jobs, done, light: light::LightLink::spawn(), sky_sub: 0, mesh_gen: 0, dir: None, saved: HashSet::new(), writer: None, changes: Vec::new(), fresh_water: Vec::new(), loot: Vec::new(), spawners: Vec::new(), culler: Culler::default(), visible: HashMap::new(), wet: HashMap::new(), order: Vec::new(), ingest: Vec::new(), ingested: HashSet::new(), pages: Pages::default(), held: None, upload: UploadDurationEstimator::new(), frame_ns: None, last_update: None }
     }
 
     /// The render distance in chunks.
@@ -1239,6 +1252,9 @@ impl ChunkManager {
     /// Call once per frame with the player's chunk.
     pub fn update(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, origins: &DrawOrigins, cx: i32, cz: i32) {
         let t0 = std::time::Instant::now();
+        if let Some(last) = self.last_update.replace(t0) {
+            self.frame_ns = Some(upload_budget::next_average_frame(self.frame_ns, t0.duration_since(last).as_nanos() as f64));
+        }
         self.stream(cx, cz);
         self.populate_land();
         self.populate_dispatch(cx, cz);
@@ -1248,7 +1264,7 @@ impl ChunkManager {
         // Meshes wait for the light thread to settle, so an edit or a new chunk is meshed once, lit.
         let mut built = 0;
         if self.light_settled() {
-            built = self.mesh_pending(device, queue, origins, cx, cz, t0);
+            built = self.mesh_pending(device, queue, origins, cx, cz);
         }
         let total = t0.elapsed();
         if total >= SLOW_CHUNK_WORK {
@@ -1405,36 +1421,58 @@ impl ChunkManager {
         self.chunks.contains_key(&key)
     }
 
-    /// Uploads up to `MESH_PER_FRAME` finished meshes (`t0` = when this frame's chunk work began), then queues jobs for the chunks
-    /// that need one, nearest first, while fewer than `max_meshing` are out; returns how many it uploaded.
-    fn mesh_pending(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, origins: &DrawOrigins, cx: i32, cz: i32, t0: std::time::Instant) -> usize {
+    /// Uploads finished meshes while the frame's `UploadBudget` (bytes and time, Sodium's `UploadResourceBudget`) lasts, at most
+    /// `MESH_PER_FRAME`: the first always, a later one only if its size and its estimated cost (`UploadDurationEstimator`) still
+    /// fit; one that does not is kept for the next frame (`held`). Then queues jobs for the chunks that need one, nearest first,
+    /// while fewer than `max_meshing` are out; returns how many it uploaded.
+    fn mesh_pending(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, origins: &DrawOrigins, cx: i32, cz: i32) -> usize {
+        let mut budget = UploadBudget::limited(upload_budget::frame_duration_budget(self.frame_ns.unwrap_or(FIRST_FRAME_NS)), UPLOAD_SIZE_LIMIT);
         let mut uploaded = 0;
-        while uploaded == 0 || (uploaded < MESH_PER_FRAME && t0.elapsed() <= CHUNK_WORK_BUDGET) {
-            let Ok((key, b)) = self.built.try_recv() else { break };
-            if !self.accept(key) {
+        // What this frame really wrote (meshes that went into an existing page only: a new page's buffer creation is not an upload).
+        let (mut writes, mut written, mut spent_ns) = (0u64, 0u64, 0u64);
+        while uploaded < MESH_PER_FRAME {
+            let Some((key, b)) = self.held.take().or_else(|| self.built.try_recv().ok()) else { break };
+            if !self.chunks.contains_key(&key) {
+                self.meshing.remove(&key); // unloaded meanwhile (what `accept` says), and it costs no budget
                 continue;
             }
+            let bytes = b.verts.len() as u64 * VERT_BYTES;
+            if uploaded > 0 && bytes > 0 && !budget.fits(self.upload.estimate(bytes), bytes) {
+                self.held = Some((key, b));
+                break;
+            }
+            self.accept(key);
             uploaded += 1;
             let Built { verts, starts, cut, wstarts, vis } = b;
+            let pages_before = self.pages.list.len();
+            let t = std::time::Instant::now();
+            let put = if verts.is_empty() { None } else { Some(self.pages.put(device, queue, origins, &verts, key)) };
+            let spent = t.elapsed().as_nanos() as u64;
+            budget.consume(spent, bytes);
+            if matches!(put, Some(Some(_))) && self.pages.list.len() == pages_before {
+                (writes, written, spent_ns) = (writes + 1, written + bytes, spent_ns + spent);
+            }
             // One run of the page holds the three layers; the offsets are index ranges of the shared index buffer.
-            let mesh = if verts.is_empty() {
-                None
-            } else if let Some((page, v, slot)) = self.pages.put(device, queue, origins, &verts, key) {
-                let at = |q: u32| quad_index::first_index(v) + q * quad_index::ELEMENTS_PER_QUAD;
-                Some(Mesh {
-                    page,
-                    v,
-                    slot,
-                    index_count: cut[SECTIONS] * quad_index::ELEMENTS_PER_QUAD,
-                    starts: starts.map(|q| at(q)),
-                    cut: cut.map(|q| at(q)),
-                    water: (wstarts[SECTIONS] > wstarts[0]).then(|| wstarts.map(|q| at(q))),
-                    vis,
-                })
-            } else {
-                // ponytail: a mesh bigger than a page (> 1M vertices) is not drawn; `meshed` stays set, so it is not rebuilt in a loop.
-                log::error!("chunk {key:?}: mesh of {} vertices does not fit a page", verts.len());
-                None
+            let mesh = match put {
+                None => None,
+                Some(Some((page, v, slot))) => {
+                    let at = |q: u32| quad_index::first_index(v) + q * quad_index::ELEMENTS_PER_QUAD;
+                    Some(Mesh {
+                        page,
+                        v,
+                        slot,
+                        index_count: cut[SECTIONS] * quad_index::ELEMENTS_PER_QUAD,
+                        starts: starts.map(|q| at(q)),
+                        cut: cut.map(|q| at(q)),
+                        water: (wstarts[SECTIONS] > wstarts[0]).then(|| wstarts.map(|q| at(q))),
+                        vis,
+                    })
+                }
+                Some(None) => {
+                    // ponytail: a mesh bigger than a page (> 1M vertices) is not drawn; `meshed` stays set, so it is not rebuilt in a loop.
+                    log::error!("chunk {key:?}: mesh of {} vertices does not fit a page", verts.len());
+                    None
+                }
             };
             if let Some(e) = self.chunks.get_mut(&key) {
                 // ponytail: a rebuild with the same index count (the time-of-day relight) is taken as the same geometry, so the
@@ -1449,6 +1487,13 @@ impl ChunkManager {
             } else if let Some(m) = &mesh {
                 self.pages.free(m); // (cannot happen: `accept` checked) keep the arena honest
             }
+        }
+
+        // Sodium feeds the estimator one sample per frame: the average size and the average duration of that frame's uploads
+        // (the time of one mesh is not separable from the others', so the mean is what it learns from).
+        if writes > 0 {
+            self.upload.add_data(written / writes, spent_ns / writes);
+            self.upload.update_models();
         }
 
         let r2 = self.radius * self.radius;

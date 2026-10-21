@@ -1,0 +1,558 @@
+diff -ruN '--exclude=target' orig/./README.md repo/./README.md
+--- a/README.md	2026-10-21 10:51:42.000000000 +0000
++++ b/README.md	2026-10-21 04:13:49.692331704 +0000
+@@ -244,7 +244,7 @@
+ ## Performance notes
+ 
+ - World streaming: render distance is `RENDER_DIST` in `lib.rs` (4 chunks, circular, so ~49 chunks drawn,
+-  ~113 generated (radius 6) and ~149 kept). the light engine runs on its own thread (`chunk-light`, `world/chunks/light.rs`: its own copy of the blocks, the light comes back in reports); populate and chunk meshes are built on the workers (`Job::Populate` on a copy of its 2x2 block, `Job::Mesh`; ideas of C2ME's scheduler): at most one populate per worker is out, and at most 2 meshes are uploaded per frame. One draw call per chunk run (sections of a chunk that touch), from a few shared vertex/index pages (`Pages` in `chunks.rs`), bound once per page. Memory is
++  ~113 generated (radius 6) and ~149 kept). the light engine runs on its own thread (`chunk-light`, `world/chunks/light.rs`: its own copy of the blocks, the light comes back in reports); populate and chunk meshes are built on the workers (`Job::Populate` on a copy of its 2x2 block, `Job::Mesh`; ideas of C2ME's scheduler): at most one populate per worker is out, and the meshes are uploaded within a per-frame budget of bytes and time (`embeddium::upload_budget`, Sodium's `UploadResourceBudget`; at least one a frame). One draw call per chunk run (sections of a chunk that touch), from a few shared vertex/index pages (`Pages` in `chunks.rs`), bound once per page. Memory is
+   32 KB of blocks per loaded chunk. No device numbers yet for this path; the old 48x48 figure
+   (~16 ms/frame on a Pixel 4a) no longer applies.
+ - Shadows + light shafts: the shadow map is reused between redraws (`render::camera::ShadowCache`), the shadow pass culls back faces, the shafts' blend shares the HUD pass. See the ROADMAP changelog for the levers still open. Unmeasured.
+diff -ruN '--exclude=target' orig/./embeddium/src/lib.rs repo/./embeddium/src/lib.rs
+--- a/embeddium/src/lib.rs	2026-10-21 10:51:42.000000000 +0000
++++ b/embeddium/src/lib.rs	2026-10-21 04:12:44.054670473 +0000
+@@ -6,6 +6,7 @@
+ //! - [`arena`]: `GlBufferArena`'s allocator (best fit, coalescing, compacting growth) as plain bookkeeping.
+ //! - [`vertex`]: `CompactChunkVertex` cut to 16 bytes, the terrain vertex.
+ //! - [`quad_index`]: `SharedQuadIndexBuffer`, the one index buffer every quad mesh draws with.
++//! - [`upload_budget`]: `UploadResourceBudget` + `UploadDurationEstimator`, how much mesh data a frame may upload.
+ //!
+ //! Left out on purpose: `RenderSection` / region bookkeeping (the host owns its chunks), the GL layer (the host's wgpu
+ //! replaces it: no multi-draw, no persistent mapping, nothing a GLES 3.0 or Vulkan phone might lack), the options screen,
+@@ -14,5 +15,6 @@
+ pub mod arena;
+ pub mod cull;
+ pub mod quad_index;
++pub mod upload_budget;
+ pub mod vertex;
+ pub mod vis;
+diff -ruN '--exclude=target' orig/./embeddium/src/upload_budget.rs repo/./embeddium/src/upload_budget.rs
+--- a/embeddium/src/upload_budget.rs	1970-01-01 00:00:00.000000000 +0000
++++ b/embeddium/src/upload_budget.rs	2026-10-21 04:12:44.054100108 +0000
+@@ -0,0 +1,315 @@
++//! Sodium's upload budget: `UploadResourceBudget` (`LimitedResourceBudget` / `UnlimitedResourceBudget`) and
++//! `UploadDurationEstimator` (`ExpDecayLinear2DEstimator`), as plain CPU bookkeeping. Times are nanoseconds, sizes are bytes.
++//!
++//! A frame may spend a fraction of its length and a number of bytes on uploading finished meshes; the rest waits for the next
++//! frame, so many chunks finishing in the same frame no longer make one long frame. The cost of an upload is not known in advance:
++//! [`UploadDurationEstimator`] fits `duration = intercept + slope * size` to what the host measured around its `write_buffer`
++//! calls, with the weight of old data decaying exponentially (a straight port of `ExpDecayLinear2DEstimator`'s update).
++//!
++//! Left out on purpose: `MeshTaskSizeEstimator` and `JobDurationEstimator`. Sodium has to guess a task's size before the task
++//! runs (it budgets when it submits the job); here the worker has already built the mesh when the host decides to upload it, so
++//! the size is exact and there is nothing to estimate.
++
++/// `RenderSectionManager.FRAME_DURATION_UPLOAD_FRACTION`: the share of the average frame given to uploads.
++pub const FRAME_DURATION_UPLOAD_FRACTION: f64 = 0.3;
++/// `RenderSectionManager.MIN_UPLOAD_DURATION_BUDGET`: 2 ms, whatever the frame length. (Sodium's source says "2ms" in the comment
++/// and writes `10_000_000L`, which is 10 ms; the comment is taken as the intent: 10 ms would be the whole of a 60 Hz frame.)
++pub const MIN_UPLOAD_DURATION_BUDGET: u64 = 2_000_000;
++/// `RenderSectionManager.FRAME_DURATION_UPDATE_RATIO`: weight of the newest frame in the average frame length.
++pub const FRAME_DURATION_UPDATE_RATIO: f64 = 0.05;
++/// The average frame length is clamped to this range (Sodium: 1.0001 ms .. 100 ms).
++pub const FRAME_DURATION_RANGE: (f64, f64) = (1_000_100.0, 100_000_000.0);
++
++/// `UploadDurationEstimator`'s constants.
++pub const NEW_DATA_RATIO: f64 = 0.05;
++pub const INITIAL_SAMPLE_TARGET: u32 = 100;
++pub const MIN_BATCH_SIZE: usize = 100;
++/// What an upload is guessed to cost until the first fit: 100 microseconds.
++pub const INITIAL_UPLOAD_TIME_ESTIMATE: u64 = 100_000;
++
++/// `MathUtil.exponentialMovingAverage`.
++pub fn exponential_moving_average(old: f64, new: f64, new_contribution: f64) -> f64 {
++    new_contribution * new + (1.0 - new_contribution) * old
++}
++
++/// The average frame length after a frame of `frame_ns` (`None` = the first frame: it is the average).
++pub fn next_average_frame(average: Option<f64>, frame_ns: f64) -> f64 {
++    let avg = average.map_or(frame_ns, |a| exponential_moving_average(a, frame_ns, FRAME_DURATION_UPDATE_RATIO));
++    avg.clamp(FRAME_DURATION_RANGE.0, FRAME_DURATION_RANGE.1)
++}
++
++/// The duration share of a frame's budget for an average frame of `average_frame_ns`.
++pub fn frame_duration_budget(average_frame_ns: f64) -> u64 {
++    ((average_frame_ns * FRAME_DURATION_UPLOAD_FRACTION) as u64).max(MIN_UPLOAD_DURATION_BUDGET)
++}
++
++/// `UploadResourceBudget`: what a frame may still spend on uploads. Spent amounts are subtracted and may overshoot (`consume`),
++/// like Sodium's; [`UploadBudget::fits`] is the stricter question the host can ask when it knows the size beforehand.
++#[derive(Copy, Clone, Debug)]
++pub struct UploadBudget {
++    limited: bool,
++    duration: i64,
++    size: i64,
++}
++
++fn clamp_i64(v: u64) -> i64 {
++    i64::try_from(v).unwrap_or(i64::MAX)
++}
++
++impl UploadBudget {
++    /// `UnlimitedResourceBudget`: always available, consumes nothing.
++    pub fn unlimited() -> Self {
++        Self { limited: false, duration: 0, size: 0 }
++    }
++
++    /// `LimitedResourceBudget(duration, size)`.
++    pub fn limited(duration_ns: u64, size_bytes: u64) -> Self {
++        Self { limited: true, duration: clamp_i64(duration_ns), size: clamp_i64(size_bytes) }
++    }
++
++    /// `isAvailable`: some duration and some size are left.
++    pub fn is_available(&self) -> bool {
++        !self.limited || (self.duration > 0 && self.size > 0)
++    }
++
++    /// An upload of `size_bytes` that is estimated to take `duration_ns` is available and does not exceed what is left.
++    pub fn fits(&self, duration_ns: u64, size_bytes: u64) -> bool {
++        !self.limited || (self.is_available() && clamp_i64(duration_ns) <= self.duration && clamp_i64(size_bytes) <= self.size)
++    }
++
++    /// `consume`.
++    pub fn consume(&mut self, duration_ns: u64, size_bytes: u64) {
++        if self.limited {
++            self.duration = self.duration.saturating_sub(clamp_i64(duration_ns));
++            self.size = self.size.saturating_sub(clamp_i64(size_bytes));
++        }
++    }
++
++    pub fn remaining(&self) -> (i64, i64) {
++        (self.duration, self.size)
++    }
++}
++
++/// `UploadDurationEstimator`: a linear fit of upload duration (ns) over upload size (bytes), updated in batches.
++///
++/// `add_data` collects `(size, duration)` pairs; `update_models` folds them into the fit once at least [`MIN_BATCH_SIZE`] are
++/// waiting (fewer are kept for the next call, like `ClearingLinearRegressionBatch`). The first [`INITIAL_SAMPLE_TARGET`] samples
++/// weigh equally; after that a batch weighs `NEW_DATA_RATIO` of the total, so the fit follows a device that changes (thermal
++/// throttling) without jumping on one slow frame. A negative slope is clamped to a flat line.
++#[derive(Clone, Debug)]
++pub struct UploadDurationEstimator {
++    batch: Vec<(u64, u64)>,
++    gathered: u32,
++    x_mean: f64,
++    y_mean: f64,
++    covariance: f64,
++    variance: f64,
++    slope: f64,
++    intercept: f64,
++}
++
++impl Default for UploadDurationEstimator {
++    fn default() -> Self {
++        Self { batch: Vec::new(), gathered: 0, x_mean: 0.0, y_mean: 0.0, covariance: 0.0, variance: 0.0, slope: 0.0, intercept: 0.0 }
++    }
++}
++
++impl UploadDurationEstimator {
++    pub fn new() -> Self {
++        Self::default()
++    }
++
++    /// `estimateUploadDuration`: the predicted duration (ns) of uploading `size` bytes.
++    pub fn estimate(&self, size: u64) -> u64 {
++        if self.gathered == 0 {
++            return INITIAL_UPLOAD_TIME_ESTIMATE;
++        }
++        (self.intercept + self.slope * size as f64).max(0.0) as u64
++    }
++
++    /// `addData(new UploadDuration(duration, size))`.
++    pub fn add_data(&mut self, size: u64, duration_ns: u64) {
++        self.batch.push((size, duration_ns));
++    }
++
++    /// Samples waiting for `update_models`.
++    pub fn pending(&self) -> usize {
++        self.batch.len()
++    }
++
++    /// `updateModels`.
++    pub fn update_models(&mut self) {
++        if self.batch.len() < MIN_BATCH_SIZE {
++            return; // empty, or too small: keep collecting (the batch is not cleared)
++        }
++        self.fit();
++        self.batch.clear();
++    }
++
++    fn fit(&mut self) {
++        let n = self.batch.len() as f64;
++        let total_samples = self.gathered + self.batch.len() as u32;
++        let (old_weight, total_weight);
++        if total_samples <= INITIAL_SAMPLE_TARGET {
++            total_weight = total_samples as f64;
++            old_weight = self.gathered as f64;
++            self.gathered = total_samples;
++        } else {
++            old_weight = n / NEW_DATA_RATIO - n;
++            total_weight = old_weight + n;
++        }
++        let inv = 1.0 / total_weight;
++
++        let (mut x_sum, mut y_sum) = (0.0f64, 0.0f64);
++        for &(x, y) in &self.batch {
++            x_sum += x as f64;
++            y_sum += y as f64;
++        }
++        let x_mean = (self.x_mean * old_weight + x_sum) * inv;
++        let y_mean = (self.y_mean * old_weight + y_sum) * inv;
++
++        let (mut covariance_sum, mut variance_sum) = (0.0f64, 0.0f64);
++        for &(x, y) in &self.batch {
++            let (dx, dy) = (x as f64 - x_mean, y as f64 - y_mean);
++            covariance_sum += dx * dy;
++            variance_sum += dx * dx;
++        }
++
++        if variance_sum.abs() <= f64::MIN_POSITIVE {
++            // Every size alike: no slope to find. Sodium returns here with the line still at 0 (a prediction of 0 ns once a
++            // sample was counted); a flat line through the mean is the honest fit.
++            self.slope = 0.0;
++            self.intercept = y_mean;
++            self.x_mean = x_mean;
++            self.y_mean = y_mean;
++            return;
++        }
++
++        covariance_sum += self.covariance * old_weight;
++        variance_sum += self.variance * old_weight;
++
++        self.slope = (covariance_sum / variance_sum).max(0.0);
++        self.intercept = y_mean - self.slope * x_mean;
++
++        self.x_mean = x_mean;
++        self.y_mean = y_mean;
++        self.covariance = covariance_sum * inv;
++        self.variance = variance_sum * inv;
++    }
++
++    /// `toString`: `s=<slope>,y=<intercept>` (for a debug line).
++    pub fn describe(&self) -> String {
++        format!("s={:.2},y={:.0}", self.slope, self.intercept)
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn unlimited_is_always_available_and_never_runs_out() {
++        let mut b = UploadBudget::unlimited();
++        b.consume(u64::MAX, u64::MAX);
++        assert!(b.is_available() && b.fits(u64::MAX, u64::MAX));
++    }
++
++    #[test]
++    fn limited_runs_out_of_either_resource() {
++        let mut b = UploadBudget::limited(1_000, 10_000);
++        assert!(b.is_available());
++        b.consume(400, 4_000);
++        assert!(b.is_available() && b.fits(600, 6_000) && !b.fits(601, 1) && !b.fits(1, 6_001));
++        b.consume(600, 100); // duration exactly spent
++        assert!(!b.is_available());
++        let mut c = UploadBudget::limited(1_000, 10_000);
++        c.consume(1, 10_000); // size exactly spent
++        assert!(!c.is_available());
++    }
++
++    #[test]
++    fn consume_may_overshoot_like_sodium() {
++        let mut b = UploadBudget::limited(100, 100);
++        b.consume(500, 500);
++        assert_eq!(b.remaining(), (-400, -400));
++        assert!(!b.is_available());
++    }
++
++    #[test]
++    fn frame_budget_is_a_third_of_the_frame_with_a_floor() {
++        assert_eq!(frame_duration_budget(16_666_667.0), 5_000_000);
++        assert_eq!(frame_duration_budget(4_000_000.0), MIN_UPLOAD_DURATION_BUDGET);
++    }
++
++    #[test]
++    fn average_frame_starts_at_the_first_frame_and_stays_clamped() {
++        assert_eq!(next_average_frame(None, 16_000_000.0), 16_000_000.0);
++        assert_eq!(next_average_frame(None, 1.0), FRAME_DURATION_RANGE.0);
++        assert_eq!(next_average_frame(Some(16_000_000.0), 1e12), FRAME_DURATION_RANGE.1);
++        let ema = next_average_frame(Some(20_000_000.0), 10_000_000.0);
++        assert!((ema - 19_500_000.0).abs() < 1.0, "{ema}");
++    }
++
++    #[test]
++    fn estimator_guesses_before_it_has_data() {
++        let mut e = UploadDurationEstimator::new();
++        assert_eq!(e.estimate(123_456), INITIAL_UPLOAD_TIME_ESTIMATE);
++        for i in 0..(MIN_BATCH_SIZE - 1) as u64 {
++            e.add_data(1_000 + i, 5_000);
++        }
++        e.update_models(); // one short of a batch: nothing is fitted, nothing is dropped
++        assert_eq!(e.estimate(5_000), INITIAL_UPLOAD_TIME_ESTIMATE);
++        assert_eq!(e.pending(), MIN_BATCH_SIZE - 1);
++    }
++
++    #[test]
++    fn estimator_learns_a_line() {
++        let mut e = UploadDurationEstimator::new();
++        for i in 0..MIN_BATCH_SIZE as u64 {
++            let size = 10_000 + i * 700;
++            e.add_data(size, 2_000 + size * 3 / 2); // 2 us + 1.5 ns per byte
++        }
++        e.update_models();
++        assert_eq!(e.pending(), 0);
++        let got = e.estimate(100_000) as f64;
++        let want = 2_000.0 + 150_000.0;
++        assert!((got - want).abs() / want < 0.01, "got {got}, want {want}");
++    }
++
++    #[test]
++    fn estimator_follows_a_change_slowly() {
++        let mut e = UploadDurationEstimator::new();
++        let batch = |e: &mut UploadDurationEstimator, per_byte: u64| {
++            for i in 0..MIN_BATCH_SIZE as u64 {
++                let size = 10_000 + i * 700;
++                e.add_data(size, size * per_byte);
++            }
++            e.update_models();
++        };
++        batch(&mut e, 1);
++        let before = e.estimate(50_000);
++        batch(&mut e, 4); // a device that became 4x slower: past the initial sample target, the new batch weighs 5%
++        let after = e.estimate(50_000);
++        assert!(after > before && after < before * 2, "{before} -> {after}");
++    }
++
++    #[test]
++    fn a_falling_trend_is_a_flat_line_not_a_negative_cost() {
++        let mut e = UploadDurationEstimator::new();
++        for i in 0..MIN_BATCH_SIZE as u64 {
++            e.add_data(10_000 + i * 100, 900_000 - i * 1_000); // bigger uploads measured faster: noise
++        }
++        e.update_models();
++        assert_eq!(e.estimate(0), e.estimate(1_000_000));
++    }
++
++    #[test]
++    fn equal_sizes_predict_the_mean_not_zero() {
++        let mut e = UploadDurationEstimator::new();
++        for _ in 0..MIN_BATCH_SIZE {
++            e.add_data(4_096, 30_000);
++        }
++        e.update_models();
++        assert_eq!(e.estimate(4_096), 30_000);
++    }
++}
+diff -ruN '--exclude=target' orig/./mc-rs/src/world/chunks.rs repo/./mc-rs/src/world/chunks.rs
+--- a/mc-rs/src/world/chunks.rs	2026-10-21 10:51:42.000000000 +0000
++++ b/mc-rs/src/world/chunks.rs	2026-10-21 04:13:49.693632468 +0000
+@@ -4,7 +4,7 @@
+ //! Per frame: `stream` (cheap, no GPU) collects finished chunks, unloads far ones, asks the
+ //! workers for missing ones nearest-first, sends `populate` jobs to the workers and puts the finished
+ //! ones back (`populate_dispatch`, `populate_land`); `mesh_pending` uploads the meshes
+-//! the workers finished (a couple a frame) and queues jobs for the chunks that need one (the
++//! the workers finished (within the frame's upload budget) and queues jobs for the chunks that need one (the
+ //! workers copy the chunk and its four neighbours, build the vertices and send them back).
+ //!
+ //! Three states per chunk: raw (terrain + caves, from a worker), populated (trees, ores, ...) and
+@@ -21,7 +21,7 @@
+ use std::path::{Path, PathBuf};
+ use std::sync::{mpsc, Arc, Mutex};
+ 
+-use embeddium::{arena::Arena, cull::{Culler, Graph}, quad_index, vertex::{self, Packed}, vis};
++use embeddium::{arena::Arena, cull::{Culler, Graph}, quad_index, upload_budget::{self, UploadBudget, UploadDurationEstimator}, vertex::{self, Packed}, vis};
+ use glam::Vec3;
+ 
+ use crate::gpu::pipeline::{create_index_buffer, DrawOrigins, MAX_ORIGINS};
+@@ -64,13 +64,19 @@
+ 
+ type Chunks = HashMap<Key, Entry, std::hash::BuildHasherDefault<KeyHasher>>;
+ 
+-/// Finished meshes uploaded (buffers created) per frame, so walking into fresh terrain never stalls a frame. The meshing itself runs
+-/// on the workers (`Job::Mesh`), the upload is the only part that needs the device.
+-const MESH_PER_FRAME: usize = 2;
+-
+-/// A second upload in a frame starts only while the frame's chunk work is still under this (the first one always runs, so a finished
+-/// mesh never starves).
+-const CHUNK_WORK_BUDGET: std::time::Duration = std::time::Duration::from_millis(6);
++/// The most finished meshes uploaded in a frame, whatever the budget says (a guard against a bad estimate; empty meshes count too).
++/// What normally stops a frame's uploads is the budget (`UploadBudget`, Sodium's `UploadResourceBudget`): the meshing itself runs on
++/// the workers (`Job::Mesh`), the upload is the only part that needs the device.
++const MESH_PER_FRAME: usize = 8;
++
++/// Bytes of mesh data a frame may upload (Sodium: the staging buffer's `getUploadSizeLimit`; there is no staging buffer here, so
++/// it is a number). The first mesh of a frame always goes up whatever its size, so a finished mesh never starves; the next ones
++/// wait while they do not fit this and the time share (`upload_budget::frame_duration_budget`: 30% of the average frame, at least
++/// 2 ms). ponytail: 1 MiB is a guess (a surface chunk is some 100-500 KB); lever if the ring fills too slowly or a frame still hitches.
++const UPLOAD_SIZE_LIMIT: u64 = 1 << 20;
++
++/// The frame length assumed before the first two `update` calls give a measured one (60 Hz).
++const FIRST_FRAME_NS: f64 = 16_666_667.0;
+ 
+ /// A frame whose chunk work (stream, populate, light, meshes) took this long or more is logged with its stages.
+ const SLOW_CHUNK_WORK: std::time::Duration = std::time::Duration::from_millis(16);
+@@ -540,6 +546,13 @@
+     ingested: HashSet<Key>,
+     /// The GPU buffers of every chunk mesh (`Mesh`), created on the first upload.
+     pages: Pages,
++    /// A finished mesh the upload budget held back: the next `mesh_pending` takes it first. Its chunk stays in `meshing` meanwhile.
++    held: Option<(Key, Built)>,
++    /// What an upload of n bytes costs (a linear fit to the measured `Pages::put`), and the average frame length (ns) between
++    /// `update` calls: the two numbers the frame's `UploadBudget` is made of.
++    upload: UploadDurationEstimator,
++    frame_ns: Option<f64>,
++    last_update: Option<std::time::Instant>,
+ }
+ 
+ /// The loaded chunks as the occlusion walk sees them. A chunk that has no mesh (air only, or not built yet) lets the view through.
+@@ -624,7 +637,7 @@
+         let gen = make(seed);
+         Self { chunks: Chunks::default(), pending: HashSet::new(), ring, radius, center: None, max_in_flight: workers * 2, built, meshing: HashSet::new(), max_meshing: workers * 2,
+                populated_rx, populating: HashMap::new(), busy: HashSet::new(), max_populating: workers, stamp: 0,
+-               cm: gen.manager(), biome_area: None, gen, jobs, done, light: light::LightLink::spawn(), sky_sub: 0, mesh_gen: 0, dir: None, saved: HashSet::new(), writer: None, changes: Vec::new(), fresh_water: Vec::new(), loot: Vec::new(), spawners: Vec::new(), culler: Culler::default(), visible: HashMap::new(), wet: HashMap::new(), order: Vec::new(), ingest: Vec::new(), ingested: HashSet::new(), pages: Pages::default() }
++               cm: gen.manager(), biome_area: None, gen, jobs, done, light: light::LightLink::spawn(), sky_sub: 0, mesh_gen: 0, dir: None, saved: HashSet::new(), writer: None, changes: Vec::new(), fresh_water: Vec::new(), loot: Vec::new(), spawners: Vec::new(), culler: Culler::default(), visible: HashMap::new(), wet: HashMap::new(), order: Vec::new(), ingest: Vec::new(), ingested: HashSet::new(), pages: Pages::default(), held: None, upload: UploadDurationEstimator::new(), frame_ns: None, last_update: None }
+     }
+ 
+     /// The render distance in chunks.
+@@ -1239,6 +1252,9 @@
+     /// Call once per frame with the player's chunk.
+     pub fn update(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, origins: &DrawOrigins, cx: i32, cz: i32) {
+         let t0 = std::time::Instant::now();
++        if let Some(last) = self.last_update.replace(t0) {
++            self.frame_ns = Some(upload_budget::next_average_frame(self.frame_ns, t0.duration_since(last).as_nanos() as f64));
++        }
+         self.stream(cx, cz);
+         self.populate_land();
+         self.populate_dispatch(cx, cz);
+@@ -1248,7 +1264,7 @@
+         // Meshes wait for the light thread to settle, so an edit or a new chunk is meshed once, lit.
+         let mut built = 0;
+         if self.light_settled() {
+-            built = self.mesh_pending(device, queue, origins, cx, cz, t0);
++            built = self.mesh_pending(device, queue, origins, cx, cz);
+         }
+         let total = t0.elapsed();
+         if total >= SLOW_CHUNK_WORK {
+@@ -1405,36 +1421,58 @@
+         self.chunks.contains_key(&key)
+     }
+ 
+-    /// Uploads up to `MESH_PER_FRAME` finished meshes (`t0` = when this frame's chunk work began), then queues jobs for the chunks
+-    /// that need one, nearest first, while fewer than `max_meshing` are out; returns how many it uploaded.
+-    fn mesh_pending(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, origins: &DrawOrigins, cx: i32, cz: i32, t0: std::time::Instant) -> usize {
++    /// Uploads finished meshes while the frame's `UploadBudget` (bytes and time, Sodium's `UploadResourceBudget`) lasts, at most
++    /// `MESH_PER_FRAME`: the first always, a later one only if its size and its estimated cost (`UploadDurationEstimator`) still
++    /// fit; one that does not is kept for the next frame (`held`). Then queues jobs for the chunks that need one, nearest first,
++    /// while fewer than `max_meshing` are out; returns how many it uploaded.
++    fn mesh_pending(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, origins: &DrawOrigins, cx: i32, cz: i32) -> usize {
++        let mut budget = UploadBudget::limited(upload_budget::frame_duration_budget(self.frame_ns.unwrap_or(FIRST_FRAME_NS)), UPLOAD_SIZE_LIMIT);
+         let mut uploaded = 0;
+-        while uploaded == 0 || (uploaded < MESH_PER_FRAME && t0.elapsed() <= CHUNK_WORK_BUDGET) {
+-            let Ok((key, b)) = self.built.try_recv() else { break };
+-            if !self.accept(key) {
++        // What this frame really wrote (meshes that went into an existing page only: a new page's buffer creation is not an upload).
++        let (mut writes, mut written, mut spent_ns) = (0u64, 0u64, 0u64);
++        while uploaded < MESH_PER_FRAME {
++            let Some((key, b)) = self.held.take().or_else(|| self.built.try_recv().ok()) else { break };
++            if !self.chunks.contains_key(&key) {
++                self.meshing.remove(&key); // unloaded meanwhile (what `accept` says), and it costs no budget
+                 continue;
+             }
++            let bytes = b.verts.len() as u64 * VERT_BYTES;
++            if uploaded > 0 && bytes > 0 && !budget.fits(self.upload.estimate(bytes), bytes) {
++                self.held = Some((key, b));
++                break;
++            }
++            self.accept(key);
+             uploaded += 1;
+             let Built { verts, starts, cut, wstarts, vis } = b;
++            let pages_before = self.pages.list.len();
++            let t = std::time::Instant::now();
++            let put = if verts.is_empty() { None } else { Some(self.pages.put(device, queue, origins, &verts, key)) };
++            let spent = t.elapsed().as_nanos() as u64;
++            budget.consume(spent, bytes);
++            if matches!(put, Some(Some(_))) && self.pages.list.len() == pages_before {
++                (writes, written, spent_ns) = (writes + 1, written + bytes, spent_ns + spent);
++            }
+             // One run of the page holds the three layers; the offsets are index ranges of the shared index buffer.
+-            let mesh = if verts.is_empty() {
+-                None
+-            } else if let Some((page, v, slot)) = self.pages.put(device, queue, origins, &verts, key) {
+-                let at = |q: u32| quad_index::first_index(v) + q * quad_index::ELEMENTS_PER_QUAD;
+-                Some(Mesh {
+-                    page,
+-                    v,
+-                    slot,
+-                    index_count: cut[SECTIONS] * quad_index::ELEMENTS_PER_QUAD,
+-                    starts: starts.map(|q| at(q)),
+-                    cut: cut.map(|q| at(q)),
+-                    water: (wstarts[SECTIONS] > wstarts[0]).then(|| wstarts.map(|q| at(q))),
+-                    vis,
+-                })
+-            } else {
+-                // ponytail: a mesh bigger than a page (> 1M vertices) is not drawn; `meshed` stays set, so it is not rebuilt in a loop.
+-                log::error!("chunk {key:?}: mesh of {} vertices does not fit a page", verts.len());
+-                None
++            let mesh = match put {
++                None => None,
++                Some(Some((page, v, slot))) => {
++                    let at = |q: u32| quad_index::first_index(v) + q * quad_index::ELEMENTS_PER_QUAD;
++                    Some(Mesh {
++                        page,
++                        v,
++                        slot,
++                        index_count: cut[SECTIONS] * quad_index::ELEMENTS_PER_QUAD,
++                        starts: starts.map(|q| at(q)),
++                        cut: cut.map(|q| at(q)),
++                        water: (wstarts[SECTIONS] > wstarts[0]).then(|| wstarts.map(|q| at(q))),
++                        vis,
++                    })
++                }
++                Some(None) => {
++                    // ponytail: a mesh bigger than a page (> 1M vertices) is not drawn; `meshed` stays set, so it is not rebuilt in a loop.
++                    log::error!("chunk {key:?}: mesh of {} vertices does not fit a page", verts.len());
++                    None
++                }
+             };
+             if let Some(e) = self.chunks.get_mut(&key) {
+                 // ponytail: a rebuild with the same index count (the time-of-day relight) is taken as the same geometry, so the
+@@ -1451,6 +1489,13 @@
+             }
+         }
+ 
++        // Sodium feeds the estimator one sample per frame: the average size and the average duration of that frame's uploads
++        // (the time of one mesh is not separable from the others', so the mean is what it learns from).
++        if writes > 0 {
++            self.upload.add_data(written / writes, spent_ns / writes);
++            self.upload.update_models();
++        }
++
+         let r2 = self.radius * self.radius;
+         for &(dx, dz) in &self.ring {
+             if self.meshing.len() >= self.max_meshing || dx * dx + dz * dz > r2 {
+diff -ruN '--exclude=target' orig/./roadmap/performance.md repo/./roadmap/performance.md
+--- a/roadmap/performance.md	2026-10-21 10:51:42.000000000 +0000
++++ b/roadmap/performance.md	2026-10-21 04:13:49.691413570 +0000
+@@ -38,7 +38,7 @@
+ Cheap, in this order:
+ 1. **Shared quad index buffer** (`SharedQuadIndexBuffer`) - WRITTEN 2026-10-20 (not compiled, not run; see the changelog): one buffer of `0,1,2,0,2,3 + 4n` for every mesh instead of an index run per chunk; index memory down by about a third and no index upload. The mesher must emit quads sorted by section, not indices (`by_section` today sorts triangles). Needs `base_vertex` or one shared buffer per page sized to the page's vertex count; the pages already write shifted indices, so this replaces that.
+ 2. **16-byte vertex** (`embeddium/src/vertex.rs`) - WRITTEN 2026-10-20 (not compiled, not run; same as step 3 above): chunk-local u16 position + per-draw origin, u16 uv, packed light/tint. Touches `Vertex::layout`, `vs_main`, `vs_water`, `build_job` and `Pages::put` (`VERT_BYTES`).
+-3. **Upload budget by size** (`UploadResourceBudget`, `MeshTaskSizeEstimator`, `UploadDurationEstimator`): `MESH_PER_FRAME` and `CHUNK_WORK_BUDGET` are fixed counts and times today; a byte budget per frame, fed by the measured cost of `write_buffer`, smooths the frames where many chunks finish at once.
++3. **Upload budget by size** (`UploadResourceBudget`, `UploadDurationEstimator`) - WRITTEN 2026-10-21 (4) (not compiled, not run; see the changelog): a byte + time budget per frame, fed by the measured cost of `Pages::put`, replaces the fixed count and time (`CHUNK_WORK_BUDGET` is gone, `MESH_PER_FRAME` is a guard). `MeshTaskSizeEstimator` is not ported: the size is exact when the mesh is uploaded.
+ 
+ Heavier:
+ 4. **Async occlusion walk** (`CullTask`, `AsyncCameraTimingControl`): `update_visible` runs on the render thread every frame. Only worth it with a render distance well past 4 chunks.
+@@ -49,6 +49,9 @@
+ 
+ ## Changelog
+ 
++- 2026-10-21 (4): upload budget (Sodium `UploadResourceBudget` / `LimitedResourceBudget` / `UnlimitedResourceBudget` / `UploadDurationEstimator` / `ExpDecayLinear2DEstimator`; read from `sodium-dev`: the estimation package and `RenderSectionManager`) (written WITHOUT a Rust toolchain: not compiled, not run; +10 tests in `embeddium::upload_budget`, run `cargo test -p embeddium` first). `embeddium/src/upload_budget.rs`: `UploadBudget` (limited / unlimited, `is_available`, `fits`, `consume`), `UploadDurationEstimator` (linear fit of upload ns over bytes, batches of 100, the first 100 samples weigh equally, then a batch weighs 5%, negative slope clamped), the frame constants (30% of the average frame, floor 2 ms, average frame EMA 5% clamped 1..100 ms). `world/chunks.rs`: `mesh_pending` builds a `UploadBudget` per frame (`frame_duration_budget(average frame)`, `UPLOAD_SIZE_LIMIT` 1 MiB) and uploads finished meshes while they fit: the first one always, a later one only if its bytes and its estimated cost fit; one that does not is kept in `ChunkManager::held` for the next frame (its chunk stays in `meshing`, so no second job). Each `Pages::put` is timed; a frame with writes gives the estimator one sample (average size, average ns), like Sodium's per-frame sample; a `put` that created a page is not sampled (buffer creation is not upload cost). The average frame length is measured between `update` calls. `MESH_PER_FRAME` 2 -> 8 (guard only), `CHUNK_WORK_BUDGET` removed (the 6 ms test on the chunk work of the frame is gone: stream / populate / light no longer shorten the upload).
++    - Differences from Sodium, on purpose: (1) Sodium budgets when it SUBMITS a job, from an estimated size (`MeshTaskSizeEstimator`, `JobDurationEstimator`); here the job already ran on a worker and its size is exact, so only the upload is budgeted and the two size / job estimators are not ported. (2) Sodium's `MIN_UPLOAD_DURATION_BUDGET` is written `10_000_000L` with the comment "2ms"; 2 ms is used (10 ms would be a whole 60 Hz frame). (3) Sodium's size limit is the staging buffer's capacity (`getUploadSizeLimit`); wgpu's `write_buffer` has none to ask, so it is the constant 1 MiB. (4) with every size equal Sodium's fit returns before setting the line (it predicts 0 ns); here the line is flat through the mean. (5) `consume` takes the measured time of the upload, not an estimate (Sodium consumes the estimate when it submits).
++    - UNVERIFIED: that it compiles; that `write_buffer`'s CPU time says anything about the GPU copy (on Vulkan it is a memcpy into wgpu's staging belt, the copy itself runs at submit, so the estimator learns the CPU side only: if the hitches are on the GPU side the budget will not see them); `UPLOAD_SIZE_LIMIT` and the 30% share are Sodium's / a guess, not tuned. Compare the `FPS:` / `CPU ms/frame` line and the `slow chunk work` warnings while walking into fresh terrain, and how fast the ring fills (the lever if it is too slow: `UPLOAD_SIZE_LIMIT`).
+ - 2026-10-21 (3): Xenon leaf culling (Xenon 20.1 `LeafCulling`, HOLLOW mode, depth 2; idea only, no code copied) (written WITHOUT a Rust toolchain: not compiled, not run; +1 test `mesh::tests::deep_leaf_faces_are_culled`, and `leaves_keep_the_faces_between_them` must still pass; run `cargo test --lib --release mesh` first). `render/mesh.rs`: a leaf face against a leaf is dropped when the next 2 cells that way (`LEAF_DEPTH`, the `leaf` closure) are leaves too. Faces toward air and the two outer layers stay, so a crown with see-through texels keeps its look, and a face on the chunk border stays (a cell outside -1..=16 counts as not a leaf). Checked with a model of the rule in Python: a row of 6 leaves 36 -> 28 quads, 3 cells + 1 in the +X chunk 15; by hand, a row of 5 keeps 4 of its 10 end-on faces. Not measured in the game. Not done: Xenon's SOLID / SOLID_AGGRESSIVE (drop every face of a leaf enclosed by leaves) and the Fancy/Fast option (`fancy_graphics` still does nothing). Open: the leaf tile the mesher uses (`atlas::terrain_tile`: 53 / 133 / 255) has no see-through texel in the shipped `terrain.rgba` (the fancy tiles 52 and 132 have 101 and 90), while the 2026-10-18 entry says the leaf tile is cut out. If the leaves are meant to be opaque, depth 1 (drop every leaf-leaf face) loses nothing and saves more; if not, look at the device to see which tile is drawn. Unmeasured on a device: compare the `FPS:` / `CPU ms/frame` line and the quad count in a forest.
+ - 2026-10-21 (2): GPUBooster (Mr_Toad; read from `GPUBooster-GPUBooster-1_21_1-fabric.zip`: README, config, every mixin, `api/` and `rendering/`) (written WITHOUT a Rust toolchain: not compiled, not run; no test added, a removed field and a usage flag have nothing to assert, `cargo check` is the check). GPUBooster is a GL layer for vanilla (DSA object names, VBO/EBO pool, VAO cache, RBO depth) plus JOML / `Random` patches, so most of it has no counterpart on wgpu. Ported: **RBO depth**. The scene depth (`gpu/context.rs`, `create_depth`) is `RENDER_ATTACHMENT` only, was also `TEXTURE_BINDING | COPY_SRC | COPY_DST`: as far as I know wgpu's GLES backend turns an attachment-only 2D texture into a renderbuffer (GPUBooster's trick), and Vulkan sees no sampled or transfer use. The per-frame `depth_copy` (a second scene-size `Depth32Float`) and `Gpu::copy_depth` are deleted: nothing called them, their only readers (`vl.rs`, `gtao.rs`) are not in `render/mod.rs`. If those are wired back, the depth needs `TEXTURE_BINDING` again (GPUBooster says the same: RBO and shaderpacks do not mix). UNVERIFIED: that it compiles, and that the depth still draws on the GLES fallback; compare the `FPS:` / `CPU ms/frame` line.
+     - Not ported, nothing to port to: DSA for VBO / EBO / FBO / textures and bindless textures (they skip GL's bind-to-edit state; wgpu has none, only bind groups). VBO / EBO pool (the chunk arena already reuses runs of two big buffers, and every other `create_buffer` is a constructor). VAO <-> format cache (no VAOs; the pipelines are built once). `joml.fastmath`, the `ShaderProgram` uniform path, ThreatenGL's GL 4.6 context hint (`WindowMixin`), ModMenu, config, lang files, the unregistered-ids reload listener (loader and GL plumbing).

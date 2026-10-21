@@ -6,6 +6,7 @@
 //! - [`arena`]: `GlBufferArena`'s allocator (best fit, coalescing, compacting growth) as plain bookkeeping.
 //! - [`vertex`]: `CompactChunkVertex` cut to 16 bytes, the terrain vertex.
 //! - [`quad_index`]: `SharedQuadIndexBuffer`, the one index buffer every quad mesh draws with.
+//! - [`upload_budget`]: `UploadResourceBudget` + `UploadDurationEstimator`, how much mesh data a frame may upload.
 //!
 //! Left out on purpose: `RenderSection` / region bookkeeping (the host owns its chunks), the GL layer (the host's wgpu
 //! replaces it: no multi-draw, no persistent mapping, nothing a GLES 3.0 or Vulkan phone might lack), the options screen,
@@ -14,5 +15,6 @@
 pub mod arena;
 pub mod cull;
 pub mod quad_index;
+pub mod upload_budget;
 pub mod vertex;
 pub mod vis;
