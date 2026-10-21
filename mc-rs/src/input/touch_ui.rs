@@ -27,12 +27,12 @@ use std::collections::HashMap;
 /// Hotbar slot count.
 pub const HOTBAR_SLOTS: usize = 9;
 // UNVERIFIED: tap/hold timings and slop (b1.7.3 has no touch input). Picked to feel like PE.
-/// A press shorter than this, that did not move, is a tap (place).
+/// The interval of the pad's use-repeat (`gamepad.rs`).
 pub const TAP_SECS: f32 = 0.25;
-/// A press held still this long starts digging, which lasts until the finger lifts. At or under `TAP_SECS`, so every press is
-/// a tap or a dig (at 0.4 s a press of 0.25 to 0.4 s did nothing at all, and a dig started 0.4 s late).
-pub const HOLD_SECS: f32 = 0.2;
-/// A look finger resting this long on a block starts the arm swing (`TouchUi::pressing`), 0.14 s before the dig itself.
+/// A press held still this long starts digging, which lasts until the finger lifts; a shorter press that did not move is a tap
+/// (place), so every press is a tap or a dig, whatever this is. 0.2 s felt too eager, 0.4 s is the first value.
+pub const HOLD_SECS: f32 = 0.4;
+/// A look finger resting this long on a block starts the arm swing (`TouchUi::pressing`), before the dig itself.
 pub const SWING_SECS: f32 = 0.06;
 /// Finger travel (fraction of the short screen side) above which a press is a look drag.
 const SLOP: f32 = 0.02;
@@ -549,7 +549,7 @@ impl TouchUi {
             PointerRole::Sneak => self.sneak = !self.sneak,
             PointerRole::Look => {
                 let slop = self.surface_w.min(self.surface_h) as f32 * SLOP;
-                if !ptr.broke && ptr.held < TAP_SECS && ptr.travel < slop {
+                if !ptr.broke && ptr.travel < slop {
                     self.place = true;
                 }
             }
@@ -750,7 +750,7 @@ mod tests {
         ui.tick(0.03);
         assert!(!ui.pressing());
         ui.tick(0.04);
-        assert!(ui.pressing() && !ui.digging(), "swinging at 0.07 s, digging only from 0.2 s");
+        assert!(ui.pressing() && !ui.digging(), "swinging at 0.07 s, digging only from 0.4 s");
         ui.on_move(1, 1900.0, 400.0);
         assert!(!ui.pressing(), "a drag is a look");
         ui.on_release(1);
@@ -764,10 +764,10 @@ mod tests {
         ui.tick(0.1);
         ui.on_release(1);
         assert!(ui.take_place() && !ui.digging());
-        // Hold still: digging starts at 0.2 s, lasts while the finger is down (even if it then moves),
+        // Hold still: digging starts at 0.4 s, lasts while the finger is down (even if it then moves),
         // and the release is not a tap.
         ui.on_press(1, 1800.0, 400.0, PointerRole::Look);
-        ui.tick(0.15);
+        ui.tick(0.3);
         assert!(!ui.digging());
         ui.tick(0.1);
         assert!(ui.digging());
@@ -783,9 +783,13 @@ mod tests {
         assert!(!ui.digging());
         ui.on_release(1);
         assert!(!ui.take_place());
-        // No dead zone: a press held still past TAP_SECS is a dig, never nothing.
+        // No dead zone: a press just under HOLD_SECS is a tap, one at HOLD_SECS a dig, never nothing.
         ui.on_press(1, 1800.0, 400.0, PointerRole::Look);
-        ui.tick(TAP_SECS);
+        ui.tick(HOLD_SECS - 0.01);
+        ui.on_release(1);
+        assert!(ui.take_place() && !ui.digging());
+        ui.on_press(1, 1800.0, 400.0, PointerRole::Look);
+        ui.tick(HOLD_SECS);
         assert!(ui.digging());
         ui.on_release(1);
         assert!(!ui.take_place() && !ui.digging());
