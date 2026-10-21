@@ -965,7 +965,7 @@ impl App {
 
         // M5: pick the block under the crosshair, dig it while the dig input is held, place on a tap.
         self.touch.tick(dt);
-        let place = self.touch.take_place();
+        let mut place = self.touch.take_place();
         let strike = self.touch.take_strike();
         if place {
             self.body.swing(); // a tap places, uses or hits: `swingItem`
@@ -989,6 +989,18 @@ impl App {
         // (vanilla's rayTraceBlocks skips them).
         let bounds = |x: i32, y: i32, z: i32| self.chunks.block_loaded(x, y, z).and_then(|b| pick_bounds(b, self.chunks.meta(x, y, z)));
         self.target = pick::ray_trace(&bounds, eye, end);
+        // A press with a mob, boat or cart under the crosshair (nearer than the block behind it) acts at once as the tap it would become,
+        // instead of when the finger lifts; the release is no tap then. ponytail: a look drag that starts on a mob hits it.
+        if self.touch.take_press() && !place {
+            let (eye, fwd) = (self.camera.pos, self.camera.forward());
+            let wall = self.target.map_or(f32::MAX, |h| h.point.distance(eye.as_dvec3()) as f32);
+            let near = |o: Option<(usize, f32)>| o.is_some_and(|(_, t)| t < wall);
+            if near(self.mobs.pick(eye, fwd, pick::REACH as f32)) || near(self.boats.pick(eye, fwd, pick::REACH as f32)) || near(self.carts.pick(eye, fwd, pick::REACH as f32)) {
+                place = true;
+                self.touch.mark_used();
+                self.body.swing();
+            }
+        }
 
         // Digging runs on the 20 Hz game tick of the Java (hardness-based time, see world::dig).
         // A broken block drops its items (world::items) only if the held item may harvest it (stone needs a pickaxe),

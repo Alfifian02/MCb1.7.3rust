@@ -1,0 +1,225 @@
+--- a/mc-rs/src/world/chunks.rs
++++ b/mc-rs/src/world/chunks.rs
+@@ -501,6 +501,8 @@
+     /// Chunks with a mesh job queued or running (one at a time per chunk, so results never arrive out of order), and the most at once.
+     meshing: HashSet<Key>,
+     max_meshing: usize,
++    /// Chunks an edit made stale (`mark_dirty`): their next mesh job does not wait for the light engine to settle (see `mesh_pending`).
++    urgent: HashSet<Key>,
+     /// Finished populate jobs, waiting to be put back (`populate_land`).
+     populated_rx: mpsc::Receiver<(Key, Region)>,
+     /// Populate jobs out on the workers: the chunk each populates -> the `rev` of the four chunks of its block when it was copied.
+@@ -635,7 +637,7 @@
+         let ring = ring_for(radius);
+ 
+         let gen = make(seed);
+-        Self { chunks: Chunks::default(), pending: HashSet::new(), ring, radius, center: None, max_in_flight: workers * 2, built, meshing: HashSet::new(), max_meshing: workers * 2,
++        Self { chunks: Chunks::default(), pending: HashSet::new(), ring, radius, center: None, max_in_flight: workers * 2, built, meshing: HashSet::new(), max_meshing: workers * 2, urgent: HashSet::new(),
+                populated_rx, populating: HashMap::new(), busy: HashSet::new(), max_populating: workers, stamp: 0,
+                cm: gen.manager(), biome_area: None, gen, jobs, done, light: light::LightLink::spawn(), sky_sub: 0, mesh_gen: 0, dir: None, saved: HashSet::new(), writer: None, changes: Vec::new(), fresh_water: Vec::new(), loot: Vec::new(), spawners: Vec::new(), culler: Culler::default(), visible: HashMap::new(), wet: HashMap::new(), order: Vec::new(), ingest: Vec::new(), ingested: HashSet::new(), pages: Pages::default(), held: None, upload: UploadDurationEstimator::new(), frame_ns: None, last_update: None }
+     }
+@@ -1053,6 +1055,7 @@
+         for k in &keys[..n] {
+             if let Some(e) = self.chunks.get_mut(k) {
+                 e.meshed = false;
++                self.urgent.insert(*k);
+             }
+         }
+     }
+@@ -1261,11 +1264,8 @@
+         let populated = t0.elapsed();
+         self.light_pending(cx, cz);
+         let lit = t0.elapsed();
+-        // Meshes wait for the light thread to settle, so an edit or a new chunk is meshed once, lit.
+-        let mut built = 0;
+-        if self.light_settled() {
+-            built = self.mesh_pending(device, queue, origins, cx, cz);
+-        }
++        // A new chunk waits for the light thread to settle, so it is meshed once, lit; an edited one does not (`mesh_pending`).
++        let built = self.mesh_pending(device, queue, origins, cx, cz, self.light_settled());
+         let total = t0.elapsed();
+         if total >= SLOW_CHUNK_WORK {
+             log::warn!("slow chunk work {total:?}: stream + populate {populated:?}, light done at {lit:?}, {built} mesh(es)");
+@@ -1425,7 +1425,13 @@
+     /// `MESH_PER_FRAME`: the first always, a later one only if its size and its estimated cost (`UploadDurationEstimator`) still
+     /// fit; one that does not is kept for the next frame (`held`). Then queues jobs for the chunks that need one, nearest first,
+     /// while fewer than `max_meshing` are out; returns how many it uploaded.
+-    fn mesh_pending(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, origins: &DrawOrigins, cx: i32, cz: i32) -> usize {
++    ///
++    /// `settled` = the light engine has nothing left. A new chunk or a light-stale one waits for it (meshed once, lit), but an edited
++    /// chunk (`urgent`) does not: a broken block was visible for as long as the engine was busy (first light of the chunks streaming
++    /// in keeps it busy for seconds), then a frame for the report, then the job. Its mesh takes the light as it is, and the engine's
++    /// `stale` report queues the second, lit one. ponytail: two meshes per edit while the engine is busy, one when it is not.
++    fn mesh_pending(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, origins: &DrawOrigins, cx: i32, cz: i32, settled: bool) -> usize {
++        self.urgent.retain(|k| self.chunks.contains_key(k));
+         let mut budget = UploadBudget::limited(upload_budget::frame_duration_budget(self.frame_ns.unwrap_or(FIRST_FRAME_NS)), UPLOAD_SIZE_LIMIT);
+         let mut uploaded = 0;
+         // What this frame really wrote (meshes that went into an existing page only: a new page's buffer creation is not an upload).
+@@ -1507,7 +1513,7 @@
+             }
+             let c = &self.chunks;
+             let job = match (c.get(&(x, z)), c.get(&(x + 1, z)), c.get(&(x - 1, z)), c.get(&(x, z + 1)), c.get(&(x, z - 1))) {
+-                (Some(me), Some(px), Some(nx), Some(pz), Some(nz)) if !me.meshed && me.lit && self.is_final(x, z) => {
++                (Some(me), Some(px), Some(nx), Some(pz), Some(nz)) if !me.meshed && me.lit && (settled || self.urgent.contains(&(x, z))) && self.is_final(x, z) => {
+                     Some(MeshJob { key: (x, z), sky_sub: self.sky_sub, cells: [snap(me), snap(px), snap(nx), snap(pz), snap(nz)] })
+                 }
+                 _ => None,
+@@ -1517,6 +1523,7 @@
+                 e.meshed = true; // "on its way": an edit before the result lands clears it again, and a new job follows
+             }
+             self.meshing.insert((x, z));
++            self.urgent.remove(&(x, z));
+             let _ = self.jobs.send(Job::Mesh(Box::new(job)));
+         }
+         uploaded
+@@ -1872,6 +1879,7 @@
+         assert!(m.accept((0, 0)) && m.meshing.is_empty() && m.chunks[&(0, 0)].meshed, "untouched: kept, still current");
+         m.meshing.insert((0, 0));
+         m.mark_dirty(3, 3); // an edit while the job ran
++        assert!(m.urgent.contains(&(0, 0)), "an edit is meshed without waiting for the light engine");
+         assert!(m.accept((0, 0)) && m.meshing.is_empty() && !m.chunks[&(0, 0)].meshed, "edited: kept, and due a new job");
+         m.meshing.insert((0, 0));
+         m.chunks.remove(&(0, 0));
+--- a/mc-rs/src/input/touch_ui.rs
++++ b/mc-rs/src/input/touch_ui.rs
+@@ -81,6 +81,8 @@
+     pub travel: f32,
+     /// The hold turned into digging, so releasing is not a tap.
+     pub broke: bool,
++    /// The press already acted (`mark_used`: it hit what is under the crosshair): no tap on release, and no digging.
++    pub used: bool,
+ }
+ 
+ /// Screen-space layout (pixels, top-left origin).
+@@ -215,6 +217,8 @@
+     look_delta: (f32, f32),
+     /// A tap fired since the last `take_place`.
+     place: bool,
++    /// A look finger went down since the last `take_press`.
++    press: bool,
+     /// A container screen is open (set by `set_screen`); presses become taps.
+     pub screen: bool,
+     /// The inventory button was released since the last `take_inventory`.
+@@ -264,6 +268,7 @@
+             pad_zoom: false,
+             pad_look: (0.0, 0.0),
+             strike: false,
++            press: false,
+         }
+     }
+ 
+@@ -372,6 +377,16 @@
+         std::mem::take(&mut self.place)
+     }
+ 
++    /// A look finger went down since the last call: a mob under the crosshair is hit now, not when the finger lifts.
++    pub fn take_press(&mut self) -> bool {
++        std::mem::take(&mut self.press)
++    }
++
++    /// The look finger(s) now down already acted on the press: the release is not a tap and the hold does not dig.
++    pub fn mark_used(&mut self) {
++        self.pointers.values_mut().filter(|p| p.role == PointerRole::Look).for_each(|p| p.used = true);
++    }
++
+     /// True while a look finger that was held still is down: the player is digging.
+     pub fn digging(&self) -> bool {
+         self.pad_dig || self.pointers.values().any(|p| p.role == PointerRole::Look && p.broke)
+@@ -380,7 +395,7 @@
+     /// Advance the hold timers by one frame: a look finger held still turns into digging after `HOLD_SECS`.
+     pub fn tick(&mut self, dt: f32) {
+         let slop = self.surface_w.min(self.surface_h) as f32 * SLOP;
+-        for p in self.pointers.values_mut().filter(|p| p.role == PointerRole::Look && !p.broke && p.travel < slop) {
++        for p in self.pointers.values_mut().filter(|p| p.role == PointerRole::Look && !p.broke && !p.used && p.travel < slop) {
+             p.held += dt;
+             p.broke = p.held >= HOLD_SECS;
+         }
+@@ -433,6 +448,7 @@
+         self.move_input = (0.0, 0.0);
+         self.look_delta = (0.0, 0.0);
+         self.place = false;
++        self.press = false;
+         self.events.clear();
+     }
+ 
+@@ -493,7 +509,8 @@
+         if role == PointerRole::Dir {
+             self.set_dir(self.dir_at(x, y));
+         }
+-        self.pointers.insert(pid, Pointer { role, last: (x, y), held: 0.0, travel: 0.0, broke: false });
++        self.press |= role == PointerRole::Look;
++        self.pointers.insert(pid, Pointer { role, last: (x, y), held: 0.0, travel: 0.0, broke: false, used: false });
+     }
+ 
+     fn on_move(&mut self, pid: i32, x: f32, y: f32) {
+@@ -542,7 +559,7 @@
+             PointerRole::Sneak => self.sneak = !self.sneak,
+             PointerRole::Look => {
+                 let slop = self.surface_w.min(self.surface_h) as f32 * SLOP;
+-                if !ptr.broke && ptr.held < TAP_SECS && ptr.travel < slop {
++                if !ptr.broke && !ptr.used && ptr.held < TAP_SECS && ptr.travel < slop {
+                     self.place = true;
+                 }
+             }
+@@ -737,6 +754,18 @@
+     }
+ 
+     #[test]
++    fn a_press_that_hit_is_neither_a_tap_nor_a_dig() {
++        let mut ui = TouchUi::new(W, H);
++        ui.on_press(1, 1800.0, 400.0, PointerRole::Look);
++        assert!(ui.take_press() && !ui.take_press());
++        ui.mark_used();
++        ui.tick(0.5);
++        assert!(!ui.digging());
++        ui.on_release(1);
++        assert!(!ui.take_place());
++    }
++
++    #[test]
+     fn tap_places_hold_digs_drag_does_neither() {
+         let mut ui = TouchUi::new(W, H);
+         // Quick tap -> place.
+--- a/mc-rs/src/lib.rs
++++ b/mc-rs/src/lib.rs
+@@ -965,7 +965,7 @@
+ 
+         // M5: pick the block under the crosshair, dig it while the dig input is held, place on a tap.
+         self.touch.tick(dt);
+-        let place = self.touch.take_place();
++        let mut place = self.touch.take_place();
+         let strike = self.touch.take_strike();
+         if place {
+             self.body.swing(); // a tap places, uses or hits: `swingItem`
+@@ -989,6 +989,18 @@
+         // (vanilla's rayTraceBlocks skips them).
+         let bounds = |x: i32, y: i32, z: i32| self.chunks.block_loaded(x, y, z).and_then(|b| pick_bounds(b, self.chunks.meta(x, y, z)));
+         self.target = pick::ray_trace(&bounds, eye, end);
++        // A press with a mob, boat or cart under the crosshair (nearer than the block behind it) acts at once as the tap it would become,
++        // instead of when the finger lifts; the release is no tap then. ponytail: a look drag that starts on a mob hits it.
++        if self.touch.take_press() && !place {
++            let (eye, fwd) = (self.camera.pos, self.camera.forward());
++            let wall = self.target.map_or(f32::MAX, |h| h.point.distance(eye.as_dvec3()) as f32);
++            let near = |o: Option<(usize, f32)>| o.is_some_and(|(_, t)| t < wall);
++            if near(self.mobs.pick(eye, fwd, pick::REACH as f32)) || near(self.boats.pick(eye, fwd, pick::REACH as f32)) || near(self.carts.pick(eye, fwd, pick::REACH as f32)) {
++                place = true;
++                self.touch.mark_used();
++                self.body.swing();
++            }
++        }
+ 
+         // Digging runs on the 20 Hz game tick of the Java (hardness-based time, see world::dig).
+         // A broken block drops its items (world::items) only if the held item may harvest it (stone needs a pickaxe),
+--- a/roadmap/gameplay.md
++++ b/roadmap/gameplay.md
+@@ -4,6 +4,10 @@
+ 
+ ## Changelog
+ 
++- 2026-10-21 (3): FIX the delay is STILL there after (1) and (2): an edited chunk no longer waits for the light engine, and a press on a mob, boat or cart hits at once (written WITHOUT a Rust toolchain: not compiled, not run, not measured; +1 test `touch_ui::tests::a_press_that_hit_is_neither_a_tap_nor_a_dig`, an assert in `chunks::tests::mesh_results_land_and_an_edit_queues_the_next_job`). Two causes found by reading the code, both on the path from the finger to the picture:
++    - Block: `ChunkManager::update` ran `mesh_pending` (uploads and new jobs) only while `light_settled()`, i.e. the light engine had nothing left, and `light_pending` keeps sending first light for chunks streaming in. A broken block stayed on screen for as long as the engine was busy, then one more frame for its report, then the mesh job and the upload (the particles and the drop appear at once, so it reads as a delay). Now `mark_dirty` (the edit) puts the chunk in `urgent`: its job is queued at once with the light as it is, and the engine's `stale` report queues the second, lit mesh. New and light-stale chunks still wait. Uploads of finished meshes no longer wait either.
++    - Mob: a tap fired on release (the finger lifting), so a hit landed `held` seconds late. A look finger that goes down with a mob, boat or cart nearer than the block under the crosshair now acts at once as the tap (`TouchUi::take_press` / `mark_used`: that finger's release is no tap and it does not dig).
++    - ponytail: a look drag that starts while a mob is under the crosshair hits it; two meshes per edit while the engine is busy. UNVERIFIED on a device: if the delay is still there, say which one it is (the block vanishing after the crack bar fills, the hand starting to swing, or the mob reacting) and whether it is bare-handed.
+ - 2026-10-21 (2): FIX the delay is still there: the hand lowered after every tool use, and the swing started a tick late (written WITHOUT a Rust toolchain: not compiled, not run; +1 test `player::tests::tool_wear_does_not_lower_the_hand`, `the_arm_swing_runs_8_ticks_...` adjusted). Root cause in `render/player.rs`: `Anim::equip_tick` compared the held stack by `(id, damage)`, and every block broken or mob hit with a tool adds wear to `damage`, so each one counted as a new item: the hand dropped (`updateEquippedItem`) and came back over about 5 ticks (0.25 s) with the swing hidden under it. The Java compares the stack object, and `damageItem` mutates it, so it never dips; for a tool only the id counts now (`craft::max_damage`). Also `Anim::swing` starts at 0 instead of -1: the Java's first tick is progress 0, so the arm stood still for 50 ms after the action.
+     - Bare hand and non-tool items were never affected by the dip; for those the 2026-10-21 touch timing fix above is the one that applies.
+     - ponytail: two tools of one kind swapped in a slot do not lower the hand. UNVERIFIED on a device.

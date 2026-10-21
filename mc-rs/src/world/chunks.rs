@@ -501,6 +501,8 @@ pub struct ChunkManager {
     /// Chunks with a mesh job queued or running (one at a time per chunk, so results never arrive out of order), and the most at once.
     meshing: HashSet<Key>,
     max_meshing: usize,
+    /// Chunks an edit made stale (`mark_dirty`): their next mesh job does not wait for the light engine to settle (see `mesh_pending`).
+    urgent: HashSet<Key>,
     /// Finished populate jobs, waiting to be put back (`populate_land`).
     populated_rx: mpsc::Receiver<(Key, Region)>,
     /// Populate jobs out on the workers: the chunk each populates -> the `rev` of the four chunks of its block when it was copied.
@@ -635,7 +637,7 @@ impl ChunkManager {
         let ring = ring_for(radius);
 
         let gen = make(seed);
-        Self { chunks: Chunks::default(), pending: HashSet::new(), ring, radius, center: None, max_in_flight: workers * 2, built, meshing: HashSet::new(), max_meshing: workers * 2,
+        Self { chunks: Chunks::default(), pending: HashSet::new(), ring, radius, center: None, max_in_flight: workers * 2, built, meshing: HashSet::new(), max_meshing: workers * 2, urgent: HashSet::new(),
                populated_rx, populating: HashMap::new(), busy: HashSet::new(), max_populating: workers, stamp: 0,
                cm: gen.manager(), biome_area: None, gen, jobs, done, light: light::LightLink::spawn(), sky_sub: 0, mesh_gen: 0, dir: None, saved: HashSet::new(), writer: None, changes: Vec::new(), fresh_water: Vec::new(), loot: Vec::new(), spawners: Vec::new(), culler: Culler::default(), visible: HashMap::new(), wet: HashMap::new(), order: Vec::new(), ingest: Vec::new(), ingested: HashSet::new(), pages: Pages::default(), held: None, upload: UploadDurationEstimator::new(), frame_ns: None, last_update: None }
     }
@@ -1053,6 +1055,7 @@ impl ChunkManager {
         for k in &keys[..n] {
             if let Some(e) = self.chunks.get_mut(k) {
                 e.meshed = false;
+                self.urgent.insert(*k);
             }
         }
     }
@@ -1261,11 +1264,8 @@ impl ChunkManager {
         let populated = t0.elapsed();
         self.light_pending(cx, cz);
         let lit = t0.elapsed();
-        // Meshes wait for the light thread to settle, so an edit or a new chunk is meshed once, lit.
-        let mut built = 0;
-        if self.light_settled() {
-            built = self.mesh_pending(device, queue, origins, cx, cz);
-        }
+        // A new chunk waits for the light thread to settle, so it is meshed once, lit; an edited one does not (`mesh_pending`).
+        let built = self.mesh_pending(device, queue, origins, cx, cz, self.light_settled());
         let total = t0.elapsed();
         if total >= SLOW_CHUNK_WORK {
             log::warn!("slow chunk work {total:?}: stream + populate {populated:?}, light done at {lit:?}, {built} mesh(es)");
@@ -1425,7 +1425,13 @@ impl ChunkManager {
     /// `MESH_PER_FRAME`: the first always, a later one only if its size and its estimated cost (`UploadDurationEstimator`) still
     /// fit; one that does not is kept for the next frame (`held`). Then queues jobs for the chunks that need one, nearest first,
     /// while fewer than `max_meshing` are out; returns how many it uploaded.
-    fn mesh_pending(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, origins: &DrawOrigins, cx: i32, cz: i32) -> usize {
+    ///
+    /// `settled` = the light engine has nothing left. A new chunk or a light-stale one waits for it (meshed once, lit), but an edited
+    /// chunk (`urgent`) does not: a broken block was visible for as long as the engine was busy (first light of the chunks streaming
+    /// in keeps it busy for seconds), then a frame for the report, then the job. Its mesh takes the light as it is, and the engine's
+    /// `stale` report queues the second, lit one. ponytail: two meshes per edit while the engine is busy, one when it is not.
+    fn mesh_pending(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, origins: &DrawOrigins, cx: i32, cz: i32, settled: bool) -> usize {
+        self.urgent.retain(|k| self.chunks.contains_key(k));
         let mut budget = UploadBudget::limited(upload_budget::frame_duration_budget(self.frame_ns.unwrap_or(FIRST_FRAME_NS)), UPLOAD_SIZE_LIMIT);
         let mut uploaded = 0;
         // What this frame really wrote (meshes that went into an existing page only: a new page's buffer creation is not an upload).
@@ -1507,7 +1513,7 @@ impl ChunkManager {
             }
             let c = &self.chunks;
             let job = match (c.get(&(x, z)), c.get(&(x + 1, z)), c.get(&(x - 1, z)), c.get(&(x, z + 1)), c.get(&(x, z - 1))) {
-                (Some(me), Some(px), Some(nx), Some(pz), Some(nz)) if !me.meshed && me.lit && self.is_final(x, z) => {
+                (Some(me), Some(px), Some(nx), Some(pz), Some(nz)) if !me.meshed && me.lit && (settled || self.urgent.contains(&(x, z))) && self.is_final(x, z) => {
                     Some(MeshJob { key: (x, z), sky_sub: self.sky_sub, cells: [snap(me), snap(px), snap(nx), snap(pz), snap(nz)] })
                 }
                 _ => None,
@@ -1517,6 +1523,7 @@ impl ChunkManager {
                 e.meshed = true; // "on its way": an edit before the result lands clears it again, and a new job follows
             }
             self.meshing.insert((x, z));
+            self.urgent.remove(&(x, z));
             let _ = self.jobs.send(Job::Mesh(Box::new(job)));
         }
         uploaded
@@ -1872,6 +1879,7 @@ mod tests {
         assert!(m.accept((0, 0)) && m.meshing.is_empty() && m.chunks[&(0, 0)].meshed, "untouched: kept, still current");
         m.meshing.insert((0, 0));
         m.mark_dirty(3, 3); // an edit while the job ran
+        assert!(m.urgent.contains(&(0, 0)), "an edit is meshed without waiting for the light engine");
         assert!(m.accept((0, 0)) && m.meshing.is_empty() && !m.chunks[&(0, 0)].meshed, "edited: kept, and due a new job");
         m.meshing.insert((0, 0));
         m.chunks.remove(&(0, 0));
