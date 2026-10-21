@@ -63,10 +63,6 @@ pub struct Gpu {
     pub config: SurfaceConfiguration,
     pub depth_view: TextureView,
     depth_tex: Texture,
-    /// A per-frame copy of the depth (`copy_depth`): the passes that read depth as a texture while the real one is still attached to
-    /// the HDR scene pass read this, so nothing is ever sampled and attached in the same pass (some mobile GPUs draw garbage tiles then).
-    pub depth_copy_view: TextureView,
-    depth_copy: Texture,
 }
 
 impl Gpu {
@@ -179,8 +175,6 @@ impl Gpu {
         let (sw, sh) = scene_size(width, height);
         let depth_tex = Self::create_depth(&device, sw, sh);
         let depth_view = depth_tex.create_view(&wgpu::TextureViewDescriptor::default());
-        let depth_copy = Self::create_depth(&device, sw, sh);
-        let depth_copy_view = depth_copy.create_view(&wgpu::TextureViewDescriptor::default());
 
         // Leak the AndroidWindow wrapper so the surface has a stable owner.
         // The pointer came from android-activity and lives as long as the window does.
@@ -195,8 +189,6 @@ impl Gpu {
             config,
             depth_view,
             depth_tex,
-            depth_copy_view,
-            depth_copy,
         })
     }
 
@@ -207,13 +199,6 @@ impl Gpu {
         let (sw, sh) = scene_size(self.config.width, self.config.height);
         self.depth_tex = Self::create_depth(&self.device, sw, sh);
         self.depth_view = self.depth_tex.create_view(&wgpu::TextureViewDescriptor::default());
-        self.depth_copy = Self::create_depth(&self.device, sw, sh);
-        self.depth_copy_view = self.depth_copy.create_view(&wgpu::TextureViewDescriptor::default());
-    }
-
-    /// Copy the finished opaque depth into `depth_copy_view`; run after the G-buffer pass.
-    pub fn copy_depth(&self, enc: &mut wgpu::CommandEncoder) {
-        enc.copy_texture_to_texture(self.depth_tex.as_image_copy(), self.depth_copy.as_image_copy(), Extent3d { width: self.depth_tex.width(), height: self.depth_tex.height(), depth_or_array_layers: 1 });
     }
 
     /// Size of the depth / G-buffer / HDR scene (`scene_size` of the surface).
@@ -229,7 +214,8 @@ impl Gpu {
             sample_count: 1,
             dimension: TextureDimension::D2,
             format: TextureFormat::Depth32Float,
-            usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_SRC | TextureUsages::COPY_DST, // the light-shaft pass reads it
+            // GPUBooster's RBO depth: attachment only (never sampled or copied), which wgpu's GLES backend makes a renderbuffer; nothing else reads it.
+            usage: TextureUsages::RENDER_ATTACHMENT,
             view_formats: &[],
         })
     }
