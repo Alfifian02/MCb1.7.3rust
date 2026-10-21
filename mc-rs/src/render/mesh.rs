@@ -252,10 +252,13 @@ pub fn build_split_tinted(smooth: bool, blocks: &[u8], data: &Nibbles, nb_data: 
         let b = match slot(x, z) { 0 => blocks, s => nb[s - 1] };
         b[idx((x & 15) as usize, y as usize, (z & 15) as usize)]
     };
-    // Xenon's `LeafCulling.shouldCullSide` (HOLLOW): a leaf face against a leaf is dropped when the next `LEAF_DEPTH` cells that way
-    // are leaves too, so the faces within that many cells of the air stay (a see-through texel still shows the next leaf).
-    // ponytail: a cell the snapshot does not hold (x or z outside -1..=16) is "not a leaf", so a face on the chunk border stays.
-    const LEAF_DEPTH: i32 = 2;
+    // Xenon's `LeafCulling.shouldCullSide`: a leaf face against a leaf is dropped when the next `leaf_depth - 1` cells that way are leaves
+    // too. Depth 2 (Xenon's HOLLOW) keeps the faces within 2 cells of the air, so a see-through texel still shows the next leaf. When no
+    // leaf tile has a see-through texel (the shipped `terrain.rgba`: tiles 53, 133, 255) a leaf is an opaque cube, a face between two
+    // leaves can never be seen, and depth 1 drops every one of them (Xenon's SOLID / SOLID_AGGRESSIVE end up there too: both remove the
+    // faces of leaves enclosed by leaves). Such a leaf face is also in the `solid` layer already (`atlas::is_cutout`: no `discard`).
+    // ponytail: a cell the snapshot does not hold (x or z outside -1..=16) is "not a leaf", so at depth 2 a face on the chunk border stays.
+    let leaf_depth = leaf_depth();
     let leaf = |x: i32, y: i32, z: i32| (-1..=16).contains(&x) && (-1..=16).contains(&z) && rid(x, y, z) == 18;
     // Metadata of a cell for x, z in -1..=16, from this chunk or a side neighbour (fluid levels across a seam).
     let meta_at = |x: i32, y: i32, z: i32| -> u8 {
@@ -390,8 +393,8 @@ pub fn build_split_tinted(smooth: bool, blocks: &[u8], data: &Nibbles, nb_data: 
                         (is_fluid(n) && n >> 1 == blk >> 1) || n == 79 || (face_i != 2 && opaque(n))
                     } else {
                         // `BlockLeavesBase.shouldSideBeRendered` (fancy graphics): leaves do not hide against leaves, or a hollow crown shows
-                        // the sky through its edge rows as pale dashes. Only the faces deeper than `LEAF_DEPTH` leaves are dropped (Xenon).
-                        reach && opaque(n) && (blk != 18 || n != 18 || (2..=LEAF_DEPTH).all(|k| leaf(x + dx * k, y + dy * k, z + dz * k)))
+                        // the sky through its edge rows as pale dashes (only while a leaf tile has see-through texels, see `leaf_depth`). Only the faces deeper than `leaf_depth` leaves are dropped (Xenon).
+                        reach && opaque(n) && (blk != 18 || n != 18 || (2..=leaf_depth).all(|k| leaf(x + dx * k, y + dy * k, z + dz * k)))
                     };
                     if hidden {
                         continue;
@@ -653,6 +656,12 @@ pub fn push_fire(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, [x, y, z]: [f32; 3])
 }
 
 /// Simple count of generated faces (verts.len() / (4 * VF), since 4 verts per face).
+/// How many cells of leaves must lie behind a leaf-against-leaf face for the mesher to drop it: 1 (every such face) while the three leaf
+/// tiles (oak, spruce, birch) are opaque, 2 (Xenon's HOLLOW) as soon as one has a see-through texel.
+fn leaf_depth() -> i32 {
+    if (0..3).any(|m| atlas::terrain_tile(18, m, 2).map_or(false, |t| atlas::tile_is_cutout(t as u16))) { 2 } else { 1 }
+}
+
 pub fn face_count(verts: &[f32]) -> usize {
     verts.len() / (4 * VF)
 }
@@ -680,10 +689,19 @@ mod tests {
         assert_eq!((u_of(&two, 3), u_of(&two, 8)), (atlas::terrain_uv(41, 0.0, 0.0).0, atlas::terrain_uv(42, 0.0, 0.0).0));
     }
 
-    /// Two leaf cells side by side keep the faces they share (fancy leaves: a hole in the tile shows the next leaf, not the sky); two
-    /// stone cells still hide them.
+    /// The three leaf tiles of the shipped atlas have no see-through texel, so a leaf is an opaque cube and `leaf_depth` is 1. (If this
+    /// fails, a new atlas has fancy leaves: the mesher falls back to Xenon's HOLLOW depth 2 by itself, and the two counts below change.)
     #[test]
-    fn leaves_keep_the_faces_between_them() {
+    fn the_shipped_leaf_tiles_are_opaque() {
+        assert_eq!(leaf_depth(), 1);
+        for m in 0..3 { assert!(!atlas::tile_is_cutout(atlas::terrain_tile(18, m, 2).unwrap() as u16)); }
+        assert!(atlas::tile_is_cutout(atlas::terrain_tile(31, 1, 2).unwrap() as u16)); // tall grass does have see-through texels
+    }
+
+    /// Opaque leaves hide against each other like stone (`BlockLeavesBase.shouldSideBeRendered` in fast graphics): two touching cells
+    /// are one 2 x 1 box (10 quads, as for stone), a 3 x 3 x 3 crown is only its 6 x 9 outside quads, not the 6 x 27 of every cell.
+    #[test]
+    fn leaves_hide_their_faces_against_each_other() {
         let a = air();
         let faces = |id: u8| {
             let mut c = air();
@@ -691,23 +709,26 @@ mod tests {
             c[idx(6, 20, 5)] = id;
             face_count(&build(&c, &Nibbles::new(), &a, [&a[..]; 4], [&a[..]; 4], 0, 0, 0).0)
         };
-        assert_eq!((faces(18), faces(1)), (12, 10));
+        assert_eq!((faces(18), faces(1)), (10, 10));
+        let mut c = air();
+        for x in 5..8 { for y in 20..23 { for z in 5..8 { c[idx(x, y, z)] = 18; } } }
+        assert_eq!(face_count(&build(&c, &Nibbles::new(), &a, [&a[..]; 4], [&a[..]; 4], 0, 0, 0).0), 54);
     }
 
-    /// Xenon's leaf culling: in a row of leaves a face is dropped when the two cells behind it are leaves too (6 cells: 36 -> 28), and a
-    /// face on the chunk border stays because the cell two steps out is not in the snapshot (3 cells + one in the +X chunk: 15).
+    /// A row of 6 leaves is a 6 x 1 box (4 x 6 sides + 2 ends = 26 quads); at the chunk's +X border the face against a leaf of the next
+    /// chunk is dropped too (3 cells: 4 x 3 + 1 end = 13), since depth 1 needs only the neighbour cell, which the snapshot holds.
     #[test]
-    fn deep_leaf_faces_are_culled() {
+    fn a_row_of_leaves_is_a_box() {
         let a = air();
         let quads = |cells: &[usize], nbx: &[u8]| {
             let mut c = air();
             for &x in cells { c[idx(x, 20, 5)] = 18; }
             face_count(&build(&c, &Nibbles::new(), &a, [nbx, &a[..], &a[..], &a[..]], [&a[..]; 4], 0, 0, 0).0)
         };
-        assert_eq!(quads(&[4, 5, 6, 7, 8, 9], &a), 28);
+        assert_eq!(quads(&[4, 5, 6, 7, 8, 9], &a), 26);
         let mut nbx = air();
         nbx[idx(0, 20, 5)] = 18;
-        assert_eq!(quads(&[13, 14, 15], &nbx), 15);
+        assert_eq!(quads(&[13, 14, 15], &nbx), 13);
     }
 
     /// One block in the middle of a chunk is exactly one cube.

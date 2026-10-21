@@ -128,6 +128,11 @@ fn cutout_tiles() -> &'static [bool; 256] {
     T.get_or_init(|| std::array::from_fn(|t| (0..256).any(|i| TERRAIN[((t / 16 * 16 + i / 16) * ATLAS_W + t % 16 * 16 + i % 16) * 4 + 3] < 128)))
 }
 
+/// Whether terrain tile `t` has a see-through texel (a cut-out tile); the flat strip below the png is opaque.
+pub fn tile_is_cutout(t: u16) -> bool {
+    cutout_tiles().get(t as usize).copied().unwrap_or(false)
+}
+
 /// Whether a quad whose texel centre reads `uv` (atlas coordinates, 0..1) shows a cut-out terrain tile.
 pub fn is_cutout(uv: [f32; 2]) -> bool {
     let (x, y) = (uv[0] * ATLAS_W as f32, uv[1] * ATLAS_H as f32);
