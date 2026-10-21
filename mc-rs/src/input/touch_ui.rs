@@ -380,7 +380,21 @@ impl TouchUi {
 
     /// The arm may swing: the pad's attack button is down, or a look finger has rested still for `SWING_SECS` (a drag has not).
     pub fn pressing(&self) -> bool {
-        self.pad_attack || self.pointers.values().any(|p| p.role == PointerRole::Look && p.held >= SWING_SECS && p.travel < self.surface_w.min(self.surface_h) as f32 * SLOP)
+        self.pad_attack || self.resting()
+    }
+
+    /// A look finger has rested still for `SWING_SECS` (a drag has not), or the pad's attack has been down that long.
+    pub fn resting(&self) -> bool {
+        self.pad.resting() || self.pointers.values().any(|p| p.role == PointerRole::Look && p.held >= SWING_SECS && p.travel < self.surface_w.min(self.surface_h) as f32 * SLOP)
+    }
+
+    /// The resting look finger(s) start digging now, without waiting for `HOLD_SECS` (the caller saw a block, not a mob, under the
+    /// crosshair); the release is no tap, as for a hold.
+    pub fn dig_now(&mut self) {
+        self.pad.dig_now();
+        self.pad_dig |= self.pad.resting();
+        let slop = self.surface_w.min(self.surface_h) as f32 * SLOP;
+        self.pointers.values_mut().filter(|p| p.role == PointerRole::Look && p.held >= SWING_SECS && p.travel < slop).for_each(|p| p.broke = true);
     }
 
     /// True while a look finger that was held still is down: the player is digging.
@@ -761,6 +775,21 @@ mod tests {
         ui.tick(0.3);
         assert!(!ui.pressing(), "a drag is a look");
         ui.on_release(1);
+    }
+
+    #[test]
+    fn dig_now_digs_a_resting_finger_at_once_and_is_no_tap() {
+        let mut ui = TouchUi::new(W, H);
+        ui.on_press(1, 1800.0, 400.0, PointerRole::Look);
+        ui.tick(SWING_SECS - 0.01);
+        ui.dig_now();
+        assert!(!ui.digging(), "a finger that has not rested yet does not dig");
+        ui.tick(0.02);
+        assert!(ui.resting());
+        ui.dig_now();
+        assert!(ui.digging());
+        ui.on_release(1);
+        assert!(!ui.digging() && !ui.take_place());
     }
 
     #[test]

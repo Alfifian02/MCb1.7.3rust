@@ -1005,6 +1005,17 @@ impl App {
         if self.touch.pressing() && self.target.is_some() {
             self.body.swing();
         }
+        // A finger that rests on a block (no mob, boat or cart nearer) is digging: it starts now instead of at `HOLD_SECS`, so the dig
+        // does not wait for the swing that began with the rest; the pad's attack held that long digs too (its release is no hit then).
+        // ponytail: a tap longer than `SWING_SECS` on a block digs instead of placing.
+        if let Some(hit) = self.target.filter(|_| self.touch.resting()) {
+            let (eye, fwd) = (self.camera.pos, self.camera.forward());
+            let wall = hit.point.distance(eye.as_dvec3()) as f32;
+            let near = |o: Option<(usize, f32)>| o.is_some_and(|(_, t)| t < wall);
+            if !(near(self.mobs.pick(eye, fwd, pick::REACH as f32)) || near(self.boats.pick(eye, fwd, pick::REACH as f32)) || near(self.carts.pick(eye, fwd, pick::REACH as f32))) {
+                self.touch.dig_now();
+            }
+        }
 
         // Digging runs on the 20 Hz game tick of the Java (hardness-based time, see world::dig).
         // A broken block drops its items (world::items) only if the held item may harvest it (stone needs a pickaxe),

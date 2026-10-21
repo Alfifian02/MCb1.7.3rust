@@ -11,7 +11,7 @@
 //! (b1.7.3 has no sprint / off hand, and mc-rs has no chat or drop yet). UNVERIFIED on real hardware: the Android axis / key mapping
 //! follows the documented layout (X/Y left stick, Z/Rz right stick, Ltrigger/Rtrigger, hat = d-pad).
 
-use super::touch_ui::{HOLD_SECS, TAP_SECS};
+use super::touch_ui::{HOLD_SECS, SWING_SECS, TAP_SECS};
 use crate::render::hud::{HudPipeline, HudVertex};
 use android_activity::input::{Axis, KeyAction, KeyEvent, Keycode, MotionEvent, Source};
 
@@ -297,6 +297,8 @@ pub struct Pad {
     ui: bool,
     moving: bool,
     attack_t: f32,
+    /// `dig_now` was called for the press now down: it digs from here to the release, which is no hit.
+    attack_dug: bool,
     use_t: f32,
     /// The Controls screen is waiting for a button; the next press lands in `captured` and does nothing else.
     pub capture: bool,
@@ -364,6 +366,16 @@ impl Pad {
 
     /// One frame. `ui`: a screen, the pause menu or a title menu is up (the sticks drive the cursor, not the player). `side`: the short
     /// side of the surface in px.
+    /// The attack button has been down for `SWING_SECS` (the arm swings, the dig may start: `dig_now`).
+    pub fn resting(&self) -> bool {
+        self.attack_t >= SWING_SECS
+    }
+
+    /// The caller saw a block, not a mob, under the crosshair: the press now down digs from this frame, and its release is no hit.
+    pub fn dig_now(&mut self) {
+        self.attack_dug = self.resting();
+    }
+
     pub fn update(&mut self, dt: f32, cfg: &PadCfg, ui: bool, side: f32) -> Out {
         let mut o = Out::default();
         if !self.connected {
@@ -372,7 +384,7 @@ impl Pad {
         let raw = self.digital(cfg);
         if ui != self.ui {
             self.suppress |= raw;
-            (self.ui, self.wheel_open, self.wheel, self.attack_t, self.use_t) = (ui, false, None, 0.0, 0.0);
+            (self.ui, self.wheel_open, self.wheel, self.attack_t, self.attack_dug, self.use_t) = (ui, false, None, 0.0, false, 0.0);
         }
         self.suppress &= raw;
         let held = raw & !self.suppress;
@@ -427,10 +439,10 @@ impl Pad {
         o.attack = down(Act::Attack);
         if o.attack {
             self.attack_t += dt;
-            o.dig = self.attack_t >= HOLD_SECS;
+            o.dig = self.attack_dug || self.attack_t >= HOLD_SECS;
         } else if up(Act::Attack) {
-            o.strike = self.attack_t < HOLD_SECS; // the complement of `dig`: no press is neither
-            self.attack_t = 0.0;
+            o.strike = !self.attack_dug && self.attack_t < HOLD_SECS; // the complement of `dig`: no press is neither
+            (self.attack_t, self.attack_dug) = (0.0, false);
         }
         // Use: on the press, then 4 a second while held.
         if just(Act::Use) {
@@ -579,6 +591,23 @@ mod tests {
         assert!(dug);
         p.axes(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, (0.0, 0.0));
         assert!(!p.update(DT, &c, false, 1000.0).strike, "a hold is not a hit");
+    }
+
+    #[test]
+    fn dig_now_digs_a_held_attack_early_and_its_release_is_no_hit() {
+        let (mut p, c) = pad();
+        p.axes(0.0, 0.0, 0.0, 0.0, 0.0, 1.0, (0.0, 0.0));
+        p.update(DT, &c, false, 1000.0);
+        p.dig_now();
+        assert!(!p.update(DT, &c, false, 1000.0).dig, "held under SWING_SECS: not resting, no early dig");
+        while !p.resting() {
+            p.update(DT, &c, false, 1000.0);
+        }
+        assert!(!p.update(DT, &c, false, 1000.0).dig, "resting alone does not dig");
+        p.dig_now();
+        assert!(p.update(DT, &c, false, 1000.0).dig && SWING_SECS < HOLD_SECS);
+        p.axes(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, (0.0, 0.0));
+        assert!(!p.update(DT, &c, false, 1000.0).strike, "an early dig is not a hit");
     }
 
     #[test]
