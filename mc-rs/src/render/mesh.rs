@@ -252,6 +252,11 @@ pub fn build_split_tinted(smooth: bool, blocks: &[u8], data: &Nibbles, nb_data: 
         let b = match slot(x, z) { 0 => blocks, s => nb[s - 1] };
         b[idx((x & 15) as usize, y as usize, (z & 15) as usize)]
     };
+    // Xenon's `LeafCulling.shouldCullSide` (HOLLOW): a leaf face against a leaf is dropped when the next `LEAF_DEPTH` cells that way
+    // are leaves too, so the faces within that many cells of the air stay (a see-through texel still shows the next leaf).
+    // ponytail: a cell the snapshot does not hold (x or z outside -1..=16) is "not a leaf", so a face on the chunk border stays.
+    const LEAF_DEPTH: i32 = 2;
+    let leaf = |x: i32, y: i32, z: i32| (-1..=16).contains(&x) && (-1..=16).contains(&z) && rid(x, y, z) == 18;
     // Metadata of a cell for x, z in -1..=16, from this chunk or a side neighbour (fluid levels across a seam).
     let meta_at = |x: i32, y: i32, z: i32| -> u8 {
         if y < 0 || y >= H as i32 { return 0; }
@@ -384,10 +389,9 @@ pub fn build_split_tinted(smooth: bool, blocks: &[u8], data: &Nibbles, nb_data: 
                     let hidden = if heights.is_some() {
                         (is_fluid(n) && n >> 1 == blk >> 1) || n == 79 || (face_i != 2 && opaque(n))
                     } else {
-                        // `BlockLeavesBase.shouldSideBeRendered` (fancy graphics): leaves do not hide against leaves. The leaf tile has
-                        // see-through texels (cut out in `fs_main`), so a hollow crown showed the sky through its edge rows as pale dashes.
-                        // ponytail: more quads in a crown (the interior faces); upgrade = a fast-graphics switch that culls them again.
-                        reach && opaque(n) && !(blk == 18 && n == 18)
+                        // `BlockLeavesBase.shouldSideBeRendered` (fancy graphics): leaves do not hide against leaves, or a hollow crown shows
+                        // the sky through its edge rows as pale dashes. Only the faces deeper than `LEAF_DEPTH` leaves are dropped (Xenon).
+                        reach && opaque(n) && (blk != 18 || n != 18 || (2..=LEAF_DEPTH).all(|k| leaf(x + dx * k, y + dy * k, z + dz * k)))
                     };
                     if hidden {
                         continue;
@@ -688,6 +692,22 @@ mod tests {
             face_count(&build(&c, &Nibbles::new(), &a, [&a[..]; 4], [&a[..]; 4], 0, 0, 0).0)
         };
         assert_eq!((faces(18), faces(1)), (12, 10));
+    }
+
+    /// Xenon's leaf culling: in a row of leaves a face is dropped when the two cells behind it are leaves too (6 cells: 36 -> 28), and a
+    /// face on the chunk border stays because the cell two steps out is not in the snapshot (3 cells + one in the +X chunk: 15).
+    #[test]
+    fn deep_leaf_faces_are_culled() {
+        let a = air();
+        let quads = |cells: &[usize], nbx: &[u8]| {
+            let mut c = air();
+            for &x in cells { c[idx(x, 20, 5)] = 18; }
+            face_count(&build(&c, &Nibbles::new(), &a, [nbx, &a[..], &a[..], &a[..]], [&a[..]; 4], 0, 0, 0).0)
+        };
+        assert_eq!(quads(&[4, 5, 6, 7, 8, 9], &a), 28);
+        let mut nbx = air();
+        nbx[idx(0, 20, 5)] = 18;
+        assert_eq!(quads(&[13, 14, 15], &nbx), 15);
     }
 
     /// One block in the middle of a chunk is exactly one cube.

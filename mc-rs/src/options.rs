@@ -5,7 +5,7 @@
 //! Added on top of b1.7.3 (it has none of them): the `LoD: ON/OFF` button (the free slot of `GuiOptions`' grid), and the pause menu's
 //! `Pregen` / `Fly` / `LoD debug` buttons (top-left, kept from the old pause menu).
 //! UNVERIFIED: the default render distance is Short (4 chunks, what mc-rs always drew), not Far as in `GameSettings`.
-//! Stored and saved but with no effect yet: Music and Sound (no audio, M9), View Bobbing, 3D Anaglyph, Advanced OpenGL, Graphics (Fancy/Fast),
+//! Stored and saved but with no effect yet: Music and Sound (no audio, M9), 3D Anaglyph, Advanced OpenGL, Graphics (Fancy/Fast),
 //! Smooth Lighting and the key bindings (a touch screen has no keys; `OptionsUi::key` takes one when a keyboard event exists).
 //! Not done: Achievements and Statistics (drawn greyed out, there is no stat system).
 

@@ -13,6 +13,9 @@ pub struct FirstPersonCamera {
     pub aspect: f32,
     pub znear: f32,
     pub zfar: f32,
+    /// Eye-space sway applied before the look (`EntityRenderer.setupViewBobbing`); every consumer of `build_view_proj` (sky, culling,
+    /// terrain) gets it. Looking and picking (`forward`) ignore it, like the Java's.
+    pub bob: Mat4,
 }
 
 impl FirstPersonCamera {
@@ -31,6 +34,7 @@ impl FirstPersonCamera {
             aspect: 1.0,
             znear: 0.05,
             zfar: crate::world::far::FAR_BLOCKS + 96.0,
+            bob: Mat4::IDENTITY,
         }
     }
 
@@ -56,7 +60,7 @@ impl FirstPersonCamera {
 
     pub fn build_view_proj(&self) -> (Mat4, Mat4) {
         let fwd = self.forward();
-        let view = Mat4::look_at_rh(self.pos, self.pos + fwd, Vec3::Y);
+        let view = self.bob * Mat4::look_at_rh(self.pos, self.pos + fwd, Vec3::Y);
         let proj = Mat4::perspective_rh(self.fov_y, self.aspect, self.znear, self.zfar);
         (view, proj)
     }
@@ -191,6 +195,15 @@ mod tests {
         assert!(c.refresh(true, c.center, l2, 0), "light turned");
         assert!(c.refresh(true, c.center, l2, 1), "geometry changed");
         assert!(!c.refresh(false, c.center, l2, 1) && c.refresh(true, c.center, l2, 1), "dropped while unused");
+    }
+
+    #[test]
+    fn the_bob_moves_the_view_and_nothing_else() {
+        let mut cam = FirstPersonCamera::spawn_at(1.0, 2.0, 3.0);
+        let (plain, _) = cam.build_view_proj();
+        cam.bob = Mat4::from_translation(Vec3::new(0.0, -0.1, 0.0));
+        let (bobbed, _) = cam.build_view_proj();
+        assert!((bobbed.transform_point3(cam.pos) - plain.transform_point3(cam.pos) - Vec3::new(0.0, -0.1, 0.0)).length() < 1e-5);
     }
 
     #[test]

@@ -661,7 +661,7 @@ impl App {
             self.boats.list.iter_mut().for_each(|b| b.ridden = false);
             self.carts.list.iter_mut().for_each(|c| c.ridden = false);
         }
-        let riding = self.mobs.list.iter().any(|m| m.ridden) || self.boats.ridden().is_some() || self.carts.ridden().is_some();
+        let riding = self.riding();
         let asleep = self.sleep.is_some();
         if !asleep {
             let k = LOOK_SENS * (self.camera.fov_y * 0.5).tan() / (70_f32.to_radians() * 0.5).tan() * self.opts.look_scale();
@@ -862,7 +862,11 @@ impl App {
         self.furn_acc += dt;
         while self.furn_acc >= dig::TICK {
             self.furn_acc -= dig::TICK;
-            self.body.tick(self.player.pos.x, self.player.pos.z, self.camera.yaw.to_degrees() + 180.0);
+            let (riding, slot) = (self.riding(), self.touch.hotbar_slot);
+            let sneaking = self.touch.sneak && self.sleep.is_none();
+            let (ground, vy) = (self.player.on_ground && !riding, self.player.vel.y / 20.0);
+            self.body.tick(self.player.pos.x, self.player.pos.z, self.camera.yaw.to_degrees() + 180.0, ground, vy, !riding && !(ground && sneaking));
+            self.body.equip_tick(slot, self.inv.slots[slot]);
             // The bobber: gone when the rod is not in hand, 32 blocks away, or after 1200 ticks on the ground.
             if let Some(h) = &mut self.hook {
                 let rod = self.inv.slots[self.touch.hotbar_slot].is_some_and(|s| s.id == gear::ROD);
@@ -1848,6 +1852,11 @@ impl App {
         }
     }
 
+    /// On a pig, in a boat or in a cart.
+    fn riding(&self) -> bool {
+        self.mobs.list.iter().any(|m| m.ridden) || self.boats.ridden().is_some() || self.carts.ridden().is_some()
+    }
+
     /// One frame; in the third-person view the camera sits behind the eye for it and is put back after (input reads the eye).
     fn render(&mut self) {
         self.render_frame();
@@ -1888,12 +1897,12 @@ impl App {
             self.third_saved = Some(self.camera.pos);
             self.camera.pos = self.third_pos();
         }
-        // The player's own model, drawn only from behind (`RenderPlayer`; the first-person view has the hand instead, not ported yet).
+        // The player's own model, drawn only from behind (`RenderPlayer`; the first-person view has the hand instead).
+        let tick_partial = (self.furn_acc / dig::TICK).clamp(0.0, 1.0);
         let player_view = self.touch.third.then(|| {
-            let riding = self.mobs.list.iter().any(|m| m.ridden) || self.boats.ridden().is_some() || self.carts.ridden().is_some();
+            let riding = self.riding();
             let held = self.inv.slots[self.touch.hotbar_slot];
-            let partial = (self.furn_acc / dig::TICK).clamp(0.0, 1.0);
-            let (pose, yaw) = self.body.pose(partial, self.camera.pitch.to_degrees(), self.touch.sneak && self.sleep.is_none(), riding, held.is_some());
+            let (pose, yaw) = self.body.pose(tick_partial, self.camera.pitch.to_degrees(), self.touch.sneak && self.sleep.is_none(), riding, held.is_some());
             let feet = self.player.pos - glam::Vec3::new(0.0, physics::HALF.y, 0.0);
             render::player::View { root: render::player::root(feet, yaw), pose, held, at: self.player.pos }
         });
@@ -1909,7 +1918,13 @@ impl App {
         let (pcx, pcz) = (chunk_coord(self.player.pos.x), chunk_coord(self.player.pos.z));
         self.chunks.update(&self.gpu.device, &self.gpu.queue, &self.pipe.origins, pcx, pcz);
         self.camera.zfar = if lod_on { lod::ZFAR } else { 256.0 }; // the far terrain needs the depth range
+        self.camera.bob = if self.opts.view_bobbing { self.body.view_bob(tick_partial) } else { glam::Mat4::IDENTITY };
         let (view, proj) = self.camera.build_view_proj();
+        // The first-person hand (`EntityRenderer.renderHand`): not in the third-person view, not in bed.
+        let hand = (!self.touch.third && self.sleep.is_none()).then(|| {
+            let (equip, held) = self.body.equipped(tick_partial);
+            render::player::Hand { to_world: render::player::hand_to_world(&view, &self.camera.bob), equip, swing: self.body.swing_at(tick_partial), held, at: self.player.pos }
+        });
         let outline_indices = self.target.map_or(0, |h| {
             let (x, y, z) = h.pos;
             let b = self.chunks.block_loaded(x, y, z).and_then(|b| outline_bounds(b, self.chunks.meta(x, y, z)));
@@ -1932,7 +1947,7 @@ impl App {
         let seen = |p: glam::Vec3, r: f32| p.distance_squared(eye) < reach2 && frustum.intersects_aabb(p - r, p + r);
         let item_indices = {
             let chunks = &self.chunks;
-            self.item_mesh.update(&self.gpu.queue, &self.drops, &self.mobs, &self.ticks.falling, &self.fx, &|x, y, z| chunks.light_levels(x, y, z), self.hook.as_ref().map(|h| h.pos), &self.paintings, &sign_views, (&self.boats.list, self.boats.alpha()), (&self.carts.list, self.carts.alpha()), player_view.as_ref(), eye, &seen)
+            self.item_mesh.update(&self.gpu.queue, &self.drops, &self.mobs, &self.ticks.falling, &self.fx, &|x, y, z| chunks.light_levels(x, y, z), self.hook.as_ref().map(|h| h.pos), &self.paintings, &sign_views, (&self.boats.list, self.boats.alpha()), (&self.carts.list, self.carts.alpha()), player_view.as_ref(), hand.as_ref(), eye, &seen)
         };
 
         // Sky and fog colour from the sun angle, the weather and the climate under the player; the frame is cleared to the fog colour and

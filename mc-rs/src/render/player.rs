@@ -2,8 +2,8 @@
 //! `RenderPlayer` / `RenderLiving` (third-person view) and like `GuiInventory` (the preview in the inventory panel).
 //! The geometry is one function (`quads`) that both targets use: the world pushes it into the entity mesh, the HUD projects it.
 //! Anim state is `EntityLiving.onUpdate` (body yaw follows the walk, limb swing) + `EntityPlayer` arm swing.
-//! ponytail: no armor layers (`modelArmor*`, 10 more textures), ears, cloak, hurt flash or sleeping pose; the held item is a flat
-//! sprite or a cube, not the extruded `ItemRenderer` model; the inventory preview looks straight ahead (no mouse on touch).
+//! ponytail: no armor layers (`modelArmor*`, 10 more textures), ears, cloak, hurt flash or sleeping pose; the third-person held item is a flat
+//! sprite or a cube, not the extruded `ItemRenderer` model (the first-person hand has it); the inventory preview looks straight ahead (no mouse on touch).
 //! UNVERIFIED: written without a Rust toolchain: not compiled, not run.
 
 use crate::render::atlas::{self, ITEM_TILE0};
@@ -179,7 +179,17 @@ pub fn root(feet: Vec3, body_yaw: f32) -> Mat4 {
 /// The player at the given pose into the entity mesh (both windings: the Java draws with culling off), then his item.
 /// Vertices are `[x, y, z, u, v, light, lm, tint]`; the caller lights them (`items::lit`).
 pub fn push(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, root: &Mat4, pose: &Pose, held: Option<ItemStack>) {
-    for q in quads(root, pose) {
+    push_quads(verts, idxs, &quads(root, pose));
+    if let Some(s) = held {
+        let l = limbs(pose);
+        let hand = *root * matrix(&l[R_ARM]) * Mat4::from_translation(Vec3::new(-1.0, 7.0, 1.0)); // `postRender` + (-1/16, 7/16, 1/16)
+        push_held(verts, idxs, &hand, s);
+    }
+}
+
+/// Skin quads into the entity mesh, both windings.
+fn push_quads(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, qs: &[Quad]) {
+    for q in qs {
         let base = verts.len() as u32 / VF as u32;
         for (p, uv) in q.p.iter().zip(q.uv) {
             let (u, v) = atlas::char_px(uv[0], uv[1]);
@@ -187,10 +197,13 @@ pub fn push(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, root: &Mat4, pose: &Pose,
         }
         idxs.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3, base, base + 2, base + 1, base, base + 3, base + 2]);
     }
-    if let Some(s) = held {
-        let l = limbs(pose);
-        let hand = *root * matrix(&l[R_ARM]) * Mat4::from_translation(Vec3::new(-1.0, 7.0, 1.0)); // `postRender` + (-1/16, 7/16, 1/16)
-        push_held(verts, idxs, &hand, s);
+}
+
+/// Move the vertices (`[x, y, z, ..]` of `VF` floats) pushed since `verts` was sliced by `m`.
+fn place(verts: &mut [f32], m: &Mat4) {
+    for v in verts.chunks_exact_mut(VF) {
+        let w = m.transform_point3(Vec3::new(v[0], v[1], v[2]));
+        v[..3].copy_from_slice(&w.to_array());
     }
 }
 
@@ -217,9 +230,79 @@ fn push_held(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, hand: &Mat4, s: ItemStac
     };
     let m = m * Mat4::from_scale(Vec3::splat(16.0)); // item units are blocks, the arm is in pixels
     push_box(verts, idxs, min, max, tile, 1.0);
-    for v in verts[n0..].chunks_exact_mut(VF) {
-        let w = m.transform_point3(Vec3::new(v[0], v[1], v[2]));
-        v[..3].copy_from_slice(&w.to_array());
+    place(&mut verts[n0..], &m);
+}
+
+// ---- the first-person hand ----
+
+/// Hand-space squash toward the eye. The Java clears the depth buffer before the hand; the mesh shares the scene's depth, so the hand
+/// is drawn at 0.3 of its distance instead (the same pixels), where no wall the player can stand at reaches it. ponytail: the item's
+/// nearest corner (0.19 blocks) would pass the near plane (0.05) below 0.27; a pipeline with `depth_compare: Always` drops this.
+const SQUASH: f32 = 0.3;
+
+/// Eye space (as the view bob leaves it) to the world for the hand's geometry; `view` is the camera's, bob included.
+pub fn hand_to_world(view: &Mat4, bob: &Mat4) -> Mat4 {
+    view.inverse() * Mat4::from_scale(Vec3::splat(SQUASH)) * *bob
+}
+
+/// What `ItemRenderer.renderItemInFirstPerson` draws: the bare arm, or the item in hand (not the map).
+pub struct Hand {
+    pub to_world: Mat4,
+    /// `equippedProgress` (1 = raised) and the swing progress, both for this frame.
+    pub equip: f32,
+    pub swing: f32,
+    /// The item shown (it lags the hotbar while the hand is lowered).
+    pub held: Option<ItemStack>,
+    /// Where he stands (his light).
+    pub at: Vec3,
+}
+
+/// A quad of the item mesh in both windings (the Java draws with culling off), corners `p` and atlas UVs, moved by `m`.
+fn quad2(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, m: &Mat4, p: [[f32; 3]; 4], uv: [(f32, f32); 4]) {
+    let base = verts.len() as u32 / VF as u32;
+    for (c, (u, v)) in p.iter().zip(uv) {
+        let w = m.transform_point3(Vec3::from(*c));
+        verts.extend_from_slice(&[w.x, w.y, w.z, u, v, 1.0, lm(15, 0), WHITE]);
+    }
+    idxs.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3, base, base + 2, base + 1, base, base + 3, base + 2]);
+}
+
+/// `ItemRenderer.renderItem`'s sprite: both faces (mirrored like the Java's) and, for each texel column and row, a strip along the
+/// four edges, 1/16 thick (z -1/16..0); the strip at step `i` shows texel `15 - i`.
+fn sprite(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, m: &Mat4, icon: u8) {
+    let (t, uv) = (1.0 / 16.0, |u: f32, v: f32| atlas::item_uv(icon, u, v));
+    // `uv(u, v)`: u across the texture, v up (the Java's v runs down).
+    quad2(verts, idxs, m, [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]], [uv(1.0, 0.0), uv(0.0, 0.0), uv(0.0, 1.0), uv(1.0, 1.0)]);
+    quad2(verts, idxs, m, [[0.0, 1.0, -t], [1.0, 1.0, -t], [1.0, 0.0, -t], [0.0, 0.0, -t]], [uv(1.0, 1.0), uv(0.0, 1.0), uv(0.0, 0.0), uv(1.0, 0.0)]);
+    for i in 0..16 {
+        let (f, tex) = (i as f32 / 16.0, (15.5 - i as f32) / 16.0); // the column / row `15 - i`, at its centre
+        let (x, row) = (f + t, (i as f32 + 0.5) / 16.0); // `row`: the same texel row, v up
+        quad2(verts, idxs, m, [[f, 0.0, -t], [f, 0.0, 0.0], [f, 1.0, 0.0], [f, 1.0, -t]], [uv(tex, 0.0), uv(tex, 0.0), uv(tex, 1.0), uv(tex, 1.0)]);
+        quad2(verts, idxs, m, [[x, 1.0, -t], [x, 1.0, 0.0], [x, 0.0, 0.0], [x, 0.0, -t]], [uv(tex, 1.0), uv(tex, 1.0), uv(tex, 0.0), uv(tex, 0.0)]);
+        quad2(verts, idxs, m, [[0.0, x, 0.0], [1.0, x, 0.0], [1.0, x, -t], [0.0, x, -t]], [uv(1.0, row), uv(0.0, row), uv(0.0, row), uv(1.0, row)]);
+        quad2(verts, idxs, m, [[1.0, f, 0.0], [0.0, f, 0.0], [0.0, f, -t], [1.0, f, -t]], [uv(0.0, row), uv(1.0, row), uv(1.0, row), uv(0.0, row)]);
+    }
+}
+
+/// `renderItemInFirstPerson`: swing, raise and the fixed pose of the hand, in eye space after the view bob.
+pub fn push_hand(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, h: &Hand) {
+    let (s, up) = (h.swing, (1.0 - h.equip) * 0.6);
+    let (a, b, c, d) = ((s * PI).sin(), (s.sqrt() * PI).sin(), (s.sqrt() * PI * 2.0).sin(), (s * s * PI).sin());
+    let (t, rx, ry, rz) = (|x, y, z| Mat4::from_translation(Vec3::new(x, y, z)), |d: f32| Mat4::from_rotation_x(d.to_radians()), |d: f32| Mat4::from_rotation_y(d.to_radians()), |d: f32| Mat4::from_rotation_z(d.to_radians()));
+    let Some(st) = h.held else {
+        // The arm (`drawFirstPersonHand`: `setRotationAngles(0, ..)` = the default pose, the right arm alone, 1/16 a pixel).
+        let m = h.to_world * t(-b * 0.3, c * 0.4, -a * 0.4) * t(0.64, -0.6 - up, -0.72) * ry(45.0) * ry(b * 70.0) * rz(-d * 20.0) * t(-1.0, 3.6, 3.5) * rz(120.0) * rx(200.0) * ry(-135.0) * t(5.6, 0.0, 0.0) * Mat4::from_scale(Vec3::splat(1.0 / 16.0));
+        push_quads(verts, idxs, &quads(&m, &Pose::default())[R_ARM * 6..R_ARM * 6 + 6]);
+        return;
+    };
+    let rod = if st.id == crate::world::gear::ROD { ry(180.0) } else { Mat4::IDENTITY }; // `shouldRotateAroundWhenRendering`
+    let m = h.to_world * t(-b * 0.4, c * 0.2, -a * 0.2) * t(0.56, -0.52 - up, -0.72) * ry(45.0) * ry(-d * 20.0) * rz(-b * 20.0) * rx(-b * 80.0) * Mat4::from_scale(Vec3::splat(0.4)) * rod;
+    if st.id < 256 && crate::world::chunk::normal_cube(st.id as u8) {
+        let n0 = verts.len();
+        push_box(verts, idxs, [-0.5; 3], [0.5; 3], stack_tile(st), 1.0);
+        place(&mut verts[n0..], &m);
+    } else if let Some(icon) = atlas::item_icon(st.id) {
+        sprite(verts, idxs, &(m * t(0.0, -0.3, 0.0) * Mat4::from_scale(Vec3::splat(1.5)) * ry(50.0) * rz(335.0) * t(-15.0 / 16.0, -1.0 / 16.0, 0.0)), icon);
     }
 }
 
@@ -257,6 +340,18 @@ pub struct Anim {
     prev_swing: f32,
     last: Option<(f32, f32)>,
     age: u32,
+    /// `distanceWalkedModified`, `field_774_f` (the walking amount) and `field_9328_R` (the air tilt, degrees), each with last tick's.
+    walked: f32,
+    prev_walked: f32,
+    bob: f32,
+    prev_bob: f32,
+    tilt: f32,
+    prev_tilt: f32,
+    /// `ItemRenderer`: `equippedProgress`, the item it shows and the hotbar slot that was.
+    eq: f32,
+    prev_eq: f32,
+    shown: Option<ItemStack>,
+    slot: usize,
 }
 
 impl Anim {
@@ -269,9 +364,11 @@ impl Anim {
         }
     }
 
-    /// One tick: the player's position `(x, z)`, `rotationYaw` in degrees.
-    pub fn tick(&mut self, x: f32, z: f32, yaw: f32) {
+    /// One tick: the player's position `(x, z)`, `rotationYaw` in degrees, standing on something (not riding), his vertical speed in
+    /// blocks a tick, and whether his steps count (`Entity.moveEntity`: not riding, not sneaking on the ground).
+    pub fn tick(&mut self, x: f32, z: f32, yaw: f32, ground: bool, vy: f32, steps: bool) {
         (self.prev_swing, self.prev_off, self.prev_rot, self.prev_amt) = (self.swing, self.off, self.rot, self.amt);
+        (self.prev_walked, self.prev_bob, self.prev_tilt) = (self.walked, self.bob, self.tilt);
         self.age += 1;
         if self.swinging {
             self.swing_int += 1;
@@ -302,22 +399,68 @@ impl Anim {
         }
         self.amt += ((d * 4.0).min(1.0) - self.amt) * 0.4;
         self.phase += self.amt;
+        // `EntityPlayer.onLivingUpdate`: the Java reads the motion left after the tick's friction (0.546 on the ground), here the step.
+        if steps {
+            self.walked += d * 0.6;
+        }
+        self.bob += (if ground { (d * 0.546).min(0.1) } else { 0.0 } - self.bob) * 0.4;
+        self.tilt += (if ground { 0.0 } else { (-vy * 0.2).atan() * 15.0 } - self.tilt) * 0.8;
+    }
+
+    /// `ItemRenderer.updateEquippedItem`: the hand lowers when the hotbar slot or the item changes, and shows the new item once it
+    /// is down (< 0.1). ponytail: `Minecraft.clickMouse` resets the progress when a place or use changes the stack size; here any
+    /// drop of the count of the item in hand does (so does throwing one away).
+    pub fn equip_tick(&mut self, slot: usize, held: Option<ItemStack>) {
+        self.prev_eq = self.eq;
+        let key = |s: Option<ItemStack>| s.map(|s| (s.id, s.damage));
+        let same = slot == self.slot && key(held) == key(self.shown);
+        if same {
+            if held.zip(self.shown).is_some_and(|(h, s)| h.count < s.count) {
+                self.eq = 0.0;
+            }
+            self.shown = held;
+        }
+        self.eq += ((if same { 1.0 } else { 0.0 }) - self.eq).clamp(-0.4, 0.4);
+        if self.eq < 0.1 {
+            (self.shown, self.slot) = (held, slot);
+        }
+    }
+
+    /// `equippedProgress` and the item the hand shows, `partial` of the way to the next tick.
+    pub fn equipped(&self, partial: f32) -> (f32, Option<ItemStack>) {
+        (self.prev_eq + (self.eq - self.prev_eq) * partial, self.shown)
+    }
+
+    /// `getSwingProgress`: the arm swing 0..1 (the model's `onGround`).
+    pub fn swing_at(&self, partial: f32) -> f32 {
+        let mut s = self.swing - self.prev_swing;
+        if s < 0.0 {
+            s += 1.0;
+        }
+        self.prev_swing + s * partial
+    }
+
+    /// `EntityRenderer.setupViewBobbing`: the eye sways with the step. The Java extrapolates `distanceWalkedModified` from its current
+    /// value (`dwm + (dwm - prev) * partial`) instead of interpolating; kept.
+    pub fn view_bob(&self, partial: f32) -> Mat4 {
+        let w = -(self.walked + (self.walked - self.prev_walked) * partial) * PI;
+        let (a, tilt) = (self.prev_bob + (self.bob - self.prev_bob) * partial, self.prev_tilt + (self.tilt - self.prev_tilt) * partial);
+        Mat4::from_translation(Vec3::new(w.sin() * a * 0.5, -(w.cos() * a).abs(), 0.0))
+            * Mat4::from_rotation_z((w.sin() * a * 3.0).to_radians())
+            * Mat4::from_rotation_x((((w - 0.2).cos() * a).abs() * 5.0).to_radians())
+            * Mat4::from_rotation_x(tilt.to_radians())
     }
 
     /// The pose `partial` of the way to the next tick (`RenderLiving.doRenderLiving`), and the body's yaw for `root`.
     pub fn pose(&self, partial: f32, pitch: f32, sneak: bool, riding: bool, holding: bool) -> (Pose, f32) {
         let body = lerp_angle(self.prev_off, self.off, partial);
-        let mut s = self.swing - self.prev_swing; // `getSwingProgress`
-        if s < 0.0 {
-            s += 1.0;
-        }
         let pose = Pose {
             head_yaw: lerp_angle(self.prev_rot, self.rot, partial) - body,
             pitch,
             limb: self.phase - self.amt * (1.0 - partial),
             limb_amt: (self.prev_amt + (self.amt - self.prev_amt) * partial).min(1.0),
             age: self.age as f32 + partial,
-            swing: self.prev_swing + s * partial,
+            swing: self.swing_at(partial),
             sneak,
             riding,
             holding,
@@ -360,7 +503,7 @@ mod tests {
         a.swing();
         let mut seen = vec![];
         for _ in 0..9 {
-            a.tick(0.0, 0.0, 0.0);
+            a.tick(0.0, 0.0, 0.0, true, 0.0, true);
             seen.push(a.swing);
         }
         assert_eq!(seen[0], 0.0, "-1 is progress 0 on the first tick");
@@ -368,8 +511,47 @@ mod tests {
         // Walking along +x (Java yaw -90): the body turns toward the walk but never more than 75 degrees from the head.
         let mut a = Anim::default();
         for i in 0..40 {
-            a.tick(i as f32 * 0.2, 0.0, 0.0);
+            a.tick(i as f32 * 0.2, 0.0, 0.0, true, 0.0, true);
         }
         assert!(a.amt > 0.5 && (a.rot - a.off).abs() <= 75.0 + 0.01 && a.off < -20.0, "{} {}", a.amt, a.off);
+    }
+
+    #[test]
+    fn walking_bobs_the_view_and_the_hand_sits_low_right_in_front() {
+        let mut a = Anim::default();
+        a.tick(0.0, 0.0, 0.0, true, 0.0, true);
+        assert!(a.view_bob(0.5).abs_diff_eq(Mat4::IDENTITY, 1e-6), "standing still does not sway");
+        for i in 1..30 {
+            a.tick(i as f32 * 0.2, 0.0, 0.0, true, 0.0, true);
+        }
+        let m = a.view_bob(0.5);
+        assert!(a.bob > 0.09 && !m.abs_diff_eq(Mat4::IDENTITY, 1e-4) && m.w_axis.y <= 0.0, "walking sways and never lifts the eye");
+        a.tick(6.0, 0.0, 0.0, false, -0.5, true);
+        assert!(a.tilt > 0.0, "falling tilts the view");
+        // The bare arm and a held sword, in eye space: ahead (-z) and below the eye, to the right.
+        for held in [None, Some(ItemStack { id: 267, count: 1, damage: 0 })] {
+            let (mut v, mut i) = (vec![], vec![]);
+            push_hand(&mut v, &mut i, &Hand { to_world: Mat4::IDENTITY, equip: 1.0, swing: 0.0, held, at: Vec3::ZERO });
+            assert!(!i.is_empty());
+            for p in v.chunks_exact(VF) {
+                assert!(p[2] < -0.1 && p[2] > -1.6 && p[0] > -0.2 && p[0] < 1.0 && p[1] < 0.2, "{held:?}: {p:?}", held = held.is_some());
+            }
+        }
+    }
+
+    #[test]
+    fn the_hand_lowers_before_it_shows_another_item() {
+        let (sword, stone) = (Some(ItemStack { id: 267, count: 1, damage: 0 }), Some(ItemStack { id: 1, count: 1, damage: 0 }));
+        let mut a = Anim::default();
+        for _ in 0..10 {
+            a.equip_tick(0, sword);
+        }
+        assert_eq!((a.equipped(1.0).0, a.shown.map(|s| s.id)), (1.0, Some(267)));
+        a.equip_tick(1, stone);
+        assert!(a.eq < 1.0 && a.shown.map(|s| s.id) == Some(267), "still the sword while it goes down");
+        for _ in 0..4 {
+            a.equip_tick(1, stone);
+        }
+        assert_eq!(a.shown.map(|s| s.id), Some(1));
     }
 }

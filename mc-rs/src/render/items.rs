@@ -28,9 +28,10 @@ const BOXES: usize = MAX_ITEMS * 2 + MAX_MOBS * 12 + MAX_ARROWS + MAX_FALLING + 
 const MAX_SIGNS: usize = 32;
 const PIECES: usize = 512;
 const TEXT_QUADS: usize = 4096;
-// The player: 42 quads of 4 vertices, both windings (12 indices) each, and an item of at most 2 boxes.
-const EXTRA_V: usize = PIECES * 4 + MAX_SIGNS * 2 * 24 + TEXT_QUADS * 4 + 256;
-const EXTRA_I: usize = PIECES * 6 + MAX_SIGNS * 2 * 72 + TEXT_QUADS * 6 + 640;
+// The player: 42 quads of 4 vertices, both windings (12 indices) each, and an item of at most 2 boxes; or the first-person hand, an
+// item sprite of 66 quads (two faces and 64 edge strips) in both windings.
+const EXTRA_V: usize = PIECES * 4 + MAX_SIGNS * 2 * 24 + TEXT_QUADS * 4 + 320;
+const EXTRA_I: usize = PIECES * 6 + MAX_SIGNS * 2 * 72 + TEXT_QUADS * 6 + 800;
 const VERTEX_BYTES: u64 = ((BOXES * 24 + EXTRA_V) * crate::render::mesh::VF * 4) as u64;
 const INDEX_BYTES: u64 = ((BOXES * 36 + EXTRA_I) * 4) as u64;
 
@@ -55,8 +56,8 @@ impl ItemMesh {
 
     /// Upload this frame's items; returns the index count to draw.
     /// `lv` = raw (sky, block) light of a cell: every entity is lit by its own cell.
-    pub fn update(&self, queue: &wgpu::Queue, drops: &Drops, mobs: &Mobs, falling: &[Falling], fx: &Effects, lv: &dyn Fn(i32, i32, i32) -> (u8, u8), hook: Option<Vec3>, paintings: &[Painting], signs: &[SignView], boats: (&[Boat], f32), carts: (&[Cart], f32), player: Option<&crate::render::player::View>, eye: Vec3, seen: &dyn Fn(Vec3, f32) -> bool) -> u32 {
-        let (verts, idxs) = geometry(drops, mobs, falling, fx, lv, hook, paintings, signs, boats, carts, player, eye, seen);
+    pub fn update(&self, queue: &wgpu::Queue, drops: &Drops, mobs: &Mobs, falling: &[Falling], fx: &Effects, lv: &dyn Fn(i32, i32, i32) -> (u8, u8), hook: Option<Vec3>, paintings: &[Painting], signs: &[SignView], boats: (&[Boat], f32), carts: (&[Cart], f32), player: Option<&crate::render::player::View>, hand: Option<&crate::render::player::Hand>, eye: Vec3, seen: &dyn Fn(Vec3, f32) -> bool) -> u32 {
+        let (verts, idxs) = geometry(drops, mobs, falling, fx, lv, hook, paintings, signs, boats, carts, player, hand, eye, seen);
         if idxs.is_empty() {
             return 0;
         }
@@ -77,7 +78,7 @@ fn lit(verts: &mut [f32], from: usize, lv: &dyn Fn(i32, i32, i32) -> (u8, u8), a
     }
 }
 
-fn geometry(drops: &Drops, mobs: &Mobs, falling: &[Falling], fx: &Effects, lv: &dyn Fn(i32, i32, i32) -> (u8, u8), hook: Option<Vec3>, paintings: &[Painting], signs: &[SignView], boats: (&[Boat], f32), carts: (&[Cart], f32), player: Option<&crate::render::player::View>, eye: Vec3, seen: &dyn Fn(Vec3, f32) -> bool) -> (Vec<f32>, Vec<u32>) {
+fn geometry(drops: &Drops, mobs: &Mobs, falling: &[Falling], fx: &Effects, lv: &dyn Fn(i32, i32, i32) -> (u8, u8), hook: Option<Vec3>, paintings: &[Painting], signs: &[SignView], boats: (&[Boat], f32), carts: (&[Cart], f32), player: Option<&crate::render::player::View>, hand: Option<&crate::render::player::Hand>, eye: Vec3, seen: &dyn Fn(Vec3, f32) -> bool) -> (Vec<f32>, Vec<u32>) {
     let (mut verts, mut idxs) = (Vec::new(), Vec::new());
     let a = drops.alpha();
     for e in &drops.items {
@@ -109,6 +110,12 @@ fn geometry(drops: &Drops, mobs: &Mobs, falling: &[Falling], fx: &Effects, lv: &
         let n0 = verts.len();
         crate::render::player::push(&mut verts, &mut idxs, &p.root, &p.pose, p.held);
         lit(&mut verts, n0, lv, p.at);
+    }
+    // The first-person hand (`ItemRenderer`), in the first-person view only.
+    if let Some(h) = hand {
+        let n0 = verts.len();
+        crate::render::player::push_hand(&mut verts, &mut idxs, h);
+        lit(&mut verts, n0, lv, h.at);
     }
     for c in carts.0.iter().filter(|c| seen(c.pos, 2.0)).take(MAX_CARTS) {
         let n0 = verts.len();
