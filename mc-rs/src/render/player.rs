@@ -357,9 +357,11 @@ pub struct Anim {
 impl Anim {
     /// `EntityPlayer.swingItem`: the arm swings (a tap that places, hits or breaks, every dig tick). ponytail: the Java restarts at
     /// once, which would hold a dig's arm at progress 0 here; this waits for the swing in progress to end, so holding keeps swinging.
+    /// The Java starts at -1, whose first tick is progress 0 (the arm has not moved yet); this starts at 0, so the arm moves on the
+    /// first tick (50 ms sooner, 7 ticks of motion instead of 8).
     pub fn swing(&mut self) {
         if !self.swinging {
-            self.swing_int = -1;
+            self.swing_int = 0;
             self.swinging = true;
         }
     }
@@ -412,7 +414,10 @@ impl Anim {
     /// drop of the count of the item in hand does (so does throwing one away).
     pub fn equip_tick(&mut self, slot: usize, held: Option<ItemStack>) {
         self.prev_eq = self.eq;
-        let key = |s: Option<ItemStack>| s.map(|s| (s.id, s.damage));
+        // A tool's wear is the same stack (Java compares the object, and `damageItem` mutates it): only the id counts for a tool,
+        // or every block broken and every mob hit lowers the hand and hides the swing. ponytail: two tools of one kind swapped
+        // in a slot do not lower the hand.
+        let key = |s: Option<ItemStack>| s.map(|s| (s.id, if craft::max_damage(s.id).is_some() { 0 } else { s.damage }));
         let same = slot == self.slot && key(held) == key(self.shown);
         if same {
             if held.zip(self.shown).is_some_and(|(h, s)| h.count < s.count) {
@@ -506,8 +511,8 @@ mod tests {
             a.tick(0.0, 0.0, 0.0, true, 0.0, true);
             seen.push(a.swing);
         }
-        assert_eq!(seen[0], 0.0, "-1 is progress 0 on the first tick");
-        assert!(seen[1..8].windows(2).all(|w| w[1] > w[0]) && seen[8] == 0.0, "{seen:?}");
+        assert_eq!(seen[0], 1.0 / 8.0, "the arm has moved on the first tick");
+        assert!(seen[..7].windows(2).all(|w| w[1] > w[0]) && seen[7] == 0.0 && seen[8] == 0.0, "{seen:?}");
         // Walking along +x (Java yaw -90): the body turns toward the walk but never more than 75 degrees from the head.
         let mut a = Anim::default();
         for i in 0..40 {
@@ -537,6 +542,16 @@ mod tests {
                 assert!(p[2] < -0.1 && p[2] > -1.6 && p[0] > -0.2 && p[0] < 1.0 && p[1] < 0.2, "{held:?}: {p:?}", held = held.is_some());
             }
         }
+    }
+
+    #[test]
+    fn tool_wear_does_not_lower_the_hand() {
+        let mut a = Anim::default();
+        for _ in 0..10 {
+            a.equip_tick(0, Some(ItemStack { id: 267, count: 1, damage: 0 }));
+        }
+        a.equip_tick(0, Some(ItemStack { id: 267, count: 1, damage: 1 }));
+        assert_eq!(a.equipped(1.0).0, 1.0, "one use of a sword is not a new item");
     }
 
     #[test]
