@@ -264,8 +264,16 @@ fn frag(in: VsOut, cut: bool) -> vec4<f32> {
         gy = gy * 16.0 / s;
     }
     let c = atlas_sample_g(uv, gx, gy);
-    // Cut-out textures: alpha from mip 0 so a distant plant keeps its shape (the mips average alpha).
-    if cut && textureSampleLevel(tex, samp, uv, 0.0).a < 0.5 { discard; }
+    // Cut-out textures: alpha from mip 0 so a distant plant keeps its shape (the mips average alpha). A tile that is not minified (at
+    // most one texel of mip 0 per pixel: everything near, and leaves fill most of a forest view) is read at mip 0 with the Nearest
+    // magnification filter already, and the tile clamp moves the uv by under half a texel, inside the same texel: `c.a` is that alpha,
+    // so the second fetch is only made for a minified tile.
+    if cut {
+        let size = vec2<f32>(textureDimensions(tex));
+        var a = c.a;
+        if max(length(gx * size), length(gy * size)) > 1.0 { a = textureSampleLevel(tex, samp, uv, 0.0).a; }
+        if a < 0.5 { discard; }
+    }
     var lit = in.lit;
     if in.k >= 0.0 { lit = lit * flat_shade(in.wp, dx, dy); }
     var rgb = c.rgb * in.tint;
