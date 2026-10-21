@@ -117,6 +117,11 @@ struct App {
     /// FPS counter: average over the last second, and over the whole run (from `started`).
     fps_recent: u32,
     fps_overall: u32,
+    /// Shown under the FPS: CPU ms per frame and the longest frame (ms) of the last second; `frame_prev` / `worst_acc` feed the latter.
+    cpu_ms: u32,
+    worst_ms: u32,
+    worst_acc: f32,
+    frame_prev: Instant,
     total_frames: u64,
     started: Instant,
     // M12: touch UI state + HUD renderer.
@@ -252,6 +257,10 @@ impl App {
             fps_last: Instant::now(),
             fps_recent: 0,
             fps_overall: 0,
+            cpu_ms: 0,
+            worst_ms: 0,
+            worst_acc: 0.0,
+            frame_prev: Instant::now(),
             total_frames: 0,
             started: Instant::now(),
             touch,
@@ -2047,7 +2056,12 @@ impl App {
         self.frames += 1;
         self.total_frames += 1;
         let now = Instant::now();
+        self.worst_acc = self.worst_acc.max(now.duration_since(self.frame_prev).as_secs_f32());
+        self.frame_prev = now;
         if now.duration_since(self.fps_last).as_secs_f32() >= 1.0 {
+            self.cpu_ms = (self.cpu_acc / self.frames as f32 * 1000.0).round() as u32;
+            self.worst_ms = (self.worst_acc * 1000.0).round() as u32;
+            self.worst_acc = 0.0;
             let fps = self.frames as f32 / now.duration_since(self.fps_last).as_secs_f32();
             self.fps_recent = fps.round() as u32;
             self.fps_overall = (self.total_frames as f32 / now.duration_since(self.started).as_secs_f32()).round() as u32;
@@ -2424,9 +2438,20 @@ impl App {
         {
             let dh = (self.gpu.config.height as f32 * 0.05).max(14.0);
             let (fx, fy) = (self.gpu.config.width as f32 * 0.07, dh * 0.6);
-            HudPipeline::push_quad(v, fx - dh * 0.3, fy - dh * 0.3, dh * 3.2, dh * 2.7, [0.0, 0.0, 0.0, 0.5]);
-            HudPipeline::push_number(v, fx, fy, dh, self.fps_recent, [1.0, 1.0, 1.0, 1.0]);
-            HudPipeline::push_number(v, fx, fy + dh * 1.3, dh, self.fps_overall, [1.0, 0.85, 0.2, 1.0]);
+            HudPipeline::push_quad(v, fx - dh * 0.3, fy - dh * 0.3, dh * 5.2, dh * 5.3, [0.0, 0.0, 0.0, 0.5]);
+            // Number, then its label: fps now (white), fps average since start (yellow), CPU ms per frame (cyan: close to 1000 / fps
+            // = CPU-bound, far below = GPU-bound), longest frame in the last second (red: hitches).
+            let rows = [
+                (self.fps_recent, [1.0, 1.0, 1.0, 1.0], "fps"),
+                (self.fps_overall, [1.0, 0.85, 0.2, 1.0], "avg"),
+                (self.cpu_ms, [0.4, 0.9, 1.0, 1.0], "cpu ms"),
+                (self.worst_ms, [1.0, 0.4, 0.4, 1.0], "max ms"),
+            ];
+            for (i, (n, color, label)) in rows.into_iter().enumerate() {
+                let y = fy + dh * 1.3 * i as f32;
+                HudPipeline::push_number(v, fx, y, dh, n, color);
+                HudPipeline::push_text(v, fx + dh * 2.4, y + dh * 0.1, dh / 10.0, label, color);
+            }
         }
 
         // The LoD debug mode that is on, centred at the top (also while playing, not only in the pause menu).
