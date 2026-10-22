@@ -53,7 +53,8 @@
 //! its 16 (the margin is made again by the neighbour tile: a chunk cache would halve it, at ~50 KB a chunk). UNVERIFIED: nothing measured on a device; the
 //! distances (`step_for`, `TREES`), the slack values and the mip thresholds were picked on paper.
 
-use crate::gpu::pipeline::{create_index_buffer, create_vertex_buffer, Vertex};
+use crate::gpu::gfx::{Buf, Gfx};
+use crate::gpu::pipeline::Vertex;
 use crate::render::atlas;
 use crate::render::mesh::{lm, tint_of, Tints};
 use crate::world::chunk::{brightness, idx, is_plant, opaque, Nibbles};
@@ -1132,11 +1133,11 @@ fn quant_eye(q: (i32, i32, i32)) -> Vec3 {
 struct Tile {
     step: i32,
     trees: bool,
-    vbuf: wgpu::Buffer,
-    ibuf: Option<wgpu::Buffer>,
+    vbuf: Buf,
+    ibuf: Option<Buf>,
     index_count: u32,
     /// The water sheets' indices (never cut), drawn by `Lod::draw_water`.
-    sheet: Option<wgpu::Buffer>,
+    sheet: Option<Buf>,
     sheet_count: u32,
     cells: Vec<Cell>,
     all: Vec<u32>,
@@ -1151,12 +1152,12 @@ struct Tile {
 }
 
 impl Tile {
-    fn cut(&mut self, device: &wgpu::Device, eye: Option<((i32, i32, i32), f32, f32)>, gen: u32, drawn: &dyn Fn(i32, i32) -> bool, shown: &dyn Fn(i32, i32, i32) -> bool) {
+    fn cut(&mut self, gfx: Gfx, eye: Option<((i32, i32, i32), f32, f32)>, gen: u32, drawn: &dyn Fn(i32, i32) -> bool, shown: &dyn Fn(i32, i32, i32) -> bool) {
         let cov = covered(&self.cells, eye.map(|(q, rh, rv)| (quant_eye(q), rh, rv)), drawn, shown);
         if self.stale || cov != self.cov {
             let idx = gather(&self.cells, &self.all, &cov);
             self.index_count = idx.len() as u32;
-            self.ibuf = (!idx.is_empty()).then(|| create_index_buffer(device, &idx));
+            self.ibuf = (!idx.is_empty()).then(|| gfx.index(bytemuck::cast_slice(&idx)));
             self.cov = cov;
         }
         self.hole = eye.map(|e| e.0);
@@ -1357,14 +1358,14 @@ impl Lod {
     /// recut where the real chunks (`rh` blocks wide, `rv` tall around the eye) are drawn, and list the tiles `in_frustum` (a test
     /// of a world-space box) lets through.
     #[allow(clippy::too_many_arguments)]
-    pub fn update(&mut self, device: &wgpu::Device, eye: Vec3, rh: f32, rv: f32, gen: u32, drawn: impl Fn(i32, i32) -> bool, shown: impl Fn(i32, i32, i32) -> bool, in_frustum: impl Fn(Vec3, Vec3) -> bool) {
+    pub fn update(&mut self, gfx: Gfx, eye: Vec3, rh: f32, rv: f32, gen: u32, drawn: impl Fn(i32, i32) -> bool, shown: impl Fn(i32, i32, i32) -> bool, in_frustum: impl Fn(Vec3, Vec3) -> bool) {
         while let Ok(b) = self.rx.try_recv() {
             self.pending.remove(&b.key);
             if b.dbg != self.sh.dbg.load(Relaxed) {
                 continue; // made before the debug mode changed: asked for again
             }
-            let vbuf = create_vertex_buffer(device, &b.verts);
-            let sheet = (!b.sheet.is_empty()).then(|| create_index_buffer(device, &b.sheet));
+            let vbuf = gfx.vertex(bytemuck::cast_slice(&b.verts));
+            let sheet = (!b.sheet.is_empty()).then(|| gfx.index(bytemuck::cast_slice(&b.sheet)));
             let t = Tile { step: b.step, trees: b.trees, vbuf, ibuf: None, index_count: 0, sheet, sheet_count: b.sheet.len() as u32, cells: b.cells, all: b.idx, hole: None, gen: 0, cov: Vec::new(), stale: true };
             self.tiles.insert(b.key, t);
         }
@@ -1426,7 +1427,7 @@ impl Lod {
             let near = dist(k) < rh + ts;
             let want = near.then_some(q);
             if t.stale || t.hole != want || (near && t.gen != gen) {
-                t.cut(device, want.map(|q| (q, rh, rv)), gen, &drawn, &shown);
+                t.cut(gfx, want.map(|q| (q, rh, rv)), gen, &drawn, &shown);
             }
         }
         self.visible.clear();
@@ -1439,35 +1440,37 @@ impl Lod {
         self.visible.sort_by(|&a, &b| dist(a).total_cmp(&dist(b))); // near to far, like the chunks: the depth test rejects what is behind early
     }
 
-    /// Into the opaque pass, after the chunks (`ChunkPipeline`'s pipeline and bind groups are already set).
-    pub fn draw(&self, rp: &mut wgpu::RenderPass<'_>) {
+    /// The visible tiles near to far: (vertex buffer, index buffer, index count) of the opaque terrain, or of the water sheets.
+    pub fn for_each_tile(&self, water: bool, mut f: impl FnMut(&Buf, &Buf, u32)) {
         if self.sh.dbg.load(Relaxed) == 4 {
             return;
         }
         for k in &self.visible {
             let Some(t) = self.tiles.get(k) else { continue };
-            let Some(ib) = t.ibuf.as_ref() else { continue };
-            rp.set_vertex_buffer(0, t.vbuf.slice(..));
-            rp.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
-            rp.draw_indexed(0..t.index_count, 0, 0..1);
+            let (ib, n) = if water { (t.sheet.as_ref(), t.sheet_count) } else { (t.ibuf.as_ref(), t.index_count) };
+            if let Some(ib) = ib {
+                f(&t.vbuf, ib, n);
+            }
         }
     }
-}
 
-impl Lod {
+    /// Into the opaque pass, after the chunks (`ChunkPipeline`'s pipeline and bind groups are already set).
+    pub fn draw(&self, rp: &mut wgpu::RenderPass<'_>) {
+        self.for_each_tile(false, |vb, ib, n| {
+            rp.set_vertex_buffer(0, vb.wgpu().slice(..));
+            rp.set_index_buffer(ib.wgpu().slice(..), wgpu::IndexFormat::Uint32);
+            rp.draw_indexed(0..n, 0, 0..1);
+        });
+    }
+
     /// Into the water pass (`water_pipeline`'s pipeline and groups are set): the far water, translucent over the floor drawn under it.
     /// Before the real water, which only exists inside `chunks::WATER_RANGE` where `fs_water` drops these sheets.
     pub fn draw_water(&self, rp: &mut wgpu::RenderPass<'_>) {
-        if self.sh.dbg.load(Relaxed) == 4 {
-            return;
-        }
-        for k in &self.visible {
-            let Some(t) = self.tiles.get(k) else { continue };
-            let Some(ib) = t.sheet.as_ref() else { continue };
-            rp.set_vertex_buffer(0, t.vbuf.slice(..));
-            rp.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
-            rp.draw_indexed(0..t.sheet_count, 0, 0..1);
-        }
+        self.for_each_tile(true, |vb, ib, n| {
+            rp.set_vertex_buffer(0, vb.wgpu().slice(..));
+            rp.set_index_buffer(ib.wgpu().slice(..), wgpu::IndexFormat::Uint32);
+            rp.draw_indexed(0..n, 0, 0..1);
+        });
     }
 }
 

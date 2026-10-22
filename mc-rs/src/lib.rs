@@ -5,6 +5,8 @@
 //! `world::chunks::ChunkManager` (render-distance ring, generation on worker threads).
 
 mod render;
+mod gles;
+mod backend;
 mod world;
 mod gpu;
 mod input;
@@ -26,15 +28,13 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use crate::gpu::context::{Drs, Gpu};
-use crate::gpu::pipeline::ChunkPipeline;
+use crate::backend::Backend;
+use crate::gpu::context::Drs;
+use crate::gpu::gfx::{Drawn, WorldDraw};
 use crate::render::atlas;
 use crate::render::items::{ItemMesh, SignView};
 use crate::render::camera::{FirstPersonCamera, Frustum};
 use crate::render::outline::Outline;
-use crate::render::panorama::Panorama;
-use crate::render::sky::{SkyFrame, SkyRenderer};
-use crate::render::present::{Present, SCENE_FORMAT};
 use crate::render::color;
 use crate::world::lod::{self, Lod};
 use crate::world::pick::{self, Hit};
@@ -90,7 +90,8 @@ const MOVE_SPEED: f32 = physics::WALK_SPEED;
 const EYE_HEIGHT: f32 = 1.62 - physics::HALF.y;
 
 struct App {
-    gpu: Gpu,
+    /// The renderer: wgpu (Vulkan) or OpenGL ES 3.2 (`backend.rs`).
+    be: Backend,
     /// The world's type (chosen on the create screen, saved in its `info`): false = vanilla b1.7.3 terrain, true = Tectonic (the `tectonic` crate).
     tectonic: bool,
     /// Far terrain behind the chunks (Voxy-style voxel LoD, `world::lod`): the view reaches the horizon with the same blocks; none in
@@ -107,7 +108,6 @@ struct App {
     opts: Settings,
     /// The game menu (`GuiIngameMenu`, or the death screen) while `touch.paused`.
     pause: Option<Pause>,
-    pipe: ChunkPipeline,
     chunks: ChunkManager,
     camera: FirstPersonCamera,
     player: Player,
@@ -126,9 +126,6 @@ struct App {
     started: Instant,
     // M12: touch UI state + HUD renderer.
     touch: TouchUi,
-    hud: HudPipeline,
-    /// The title screen's backdrop (`menu::Menu::panorama`).
-    pano: Panorama,
     /// Scratch vertex buffer for the HUD; cleared each frame, then emitted.
     hud_verts: Vec<HudVertex>,
     // M5: block under the crosshair (within reach) and its outline buffers.
@@ -138,15 +135,10 @@ struct App {
     world_ticks: f64,
     /// Sun, moon and stars drawn behind the terrain, and the rain/thunder timers (not saved: a loaded world starts clear).
     /// `weather_ticks` counts the whole ticks the weather has run, so it catches up to `world_ticks` one tick at a time.
-    sky: SkyRenderer,
-    /// The post stage: the (multisampled) scene target and the one final pass, CAS + upscale (`render::present`).
-    present: Present,
     weather: sky::Weather,
     weather_ticks: u64,
     /// Water particles, lightning and the dungeon spawners (`world::effects`).
     fx: Effects,
-    /// Rain and snow streaks (`render::weather`), drawn over the finished scene.
-    rain_fx: weather::Weather,
     /// The player's box touched water last frame (`Entity.inWater`): a splash on entry.
     was_in_water: bool,
     /// `Entity.ySize` of the player, as far as the camera goes: how far the eye hangs below standing height (0.08 sneaking, then it decays).
@@ -231,10 +223,9 @@ impl App {
         crate::gpu::context::set_error_trace(opts.gpu_error_trace);
         crate::render::present::set_msaa_want(u32::from(opts.msaa));
         crate::render::present::set_post_want(u32::from(opts.post));
-        let gpu = Gpu::from_android_window(native_ptr, width, height).await?;
-        let surface_format = gpu.surface_format();
-        let pipe = ChunkPipeline::new(&gpu.device);
-        pipe.upload_atlas(&gpu.queue);
+        crate::gles::set_want(opts.renderer);
+        let be = Backend::new(opts.renderer == 2, native_ptr, width, height).await?;
+        log::info!("renderer: {}", be.gpu_info());
 
         // No world yet: the title screen is up (`enter_world` loads one, and does it again for `LAST_WORLD` below).
         let start = glam::Vec3::ZERO;
@@ -248,17 +239,12 @@ impl App {
         // M12: HUD pipeline + touch state machine. Surface dimensions match
         // the window we just initialised against.
         let touch = TouchUi::new(width, height);
-        let hud = HudPipeline::new(&gpu.device, &gpu.queue, surface_format, width, height);
-        let pano = Panorama::new(&gpu.device, &gpu.queue, surface_format);
-        let outline = Outline::new(&gpu.device);
-        let item_mesh = ItemMesh::new(&gpu.device);
-        let rain_fx = weather::Weather::new(&gpu.device, &gpu.queue, SCENE_FORMAT);
-        let sky_renderer = SkyRenderer::new(&gpu.device, &gpu.queue, SCENE_FORMAT);
-        let present = Present::new(&gpu.device, &gpu.queue, gpu.scene(), (width, height), surface_format);
+        let outline = Outline::new(be.gfx());
+        let item_mesh = ItemMesh::new(be.gfx());
         let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as i64);
 
         let mut app = Self {
-            gpu, tectonic: false, lod: None, seed: 0, root: dir.clone(), opts, pause: None, lod_on: false, menu: Some(Menu::new(&dir)), pipe,
+            be, tectonic: false, lod: None, seed: 0, root: dir.clone(), opts, pause: None, lod_on: false, menu: Some(Menu::new(&dir)),
             chunks, camera,
             player,
             last_frame: Instant::now(),
@@ -273,17 +259,13 @@ impl App {
             total_frames: 0,
             started: Instant::now(),
             touch,
-            hud, pano,
             hud_verts: Vec::with_capacity(256),
             target: None,
             outline,
             world_ticks: 0.0,
-            sky: sky_renderer,
-            present,
             weather: sky::Weather::new(seed),
             weather_ticks: 0,
             fx: Effects::new(seed),
-            rain_fx,
             was_in_water: false,
             sneak_y: 0.0,
             tip: (0, 0.0),
@@ -330,6 +312,7 @@ impl App {
         if let Some(info) = last.and_then(|f| menu::list(&app.root).into_iter().find(|i| i.folder == f)) {
             app.enter_world(&info);
         }
+        app.be.release(); // the GL context goes to the render thread (a no-op for wgpu)
         Ok(app)
     }
 
@@ -478,7 +461,7 @@ impl App {
         // Light and mesh the area around the player now, so the first frame already shows terrain.
         let warm = Instant::now();
         while self.chunks.meshed() < 24 && warm.elapsed() < Duration::from_secs(8) {
-            self.chunks.update(&self.gpu.device, &self.gpu.queue, &self.pipe.origins, chunk_coord(s.x), chunk_coord(s.z));
+            self.chunks.update(self.be.gfx(), self.be.origins(), chunk_coord(s.x), chunk_coord(s.z));
             std::thread::sleep(Duration::from_millis(1));
         }
         log::info!("chunks: {} meshed after {:?}", self.chunks.meshed(), warm.elapsed());
@@ -561,17 +544,9 @@ impl App {
     }
 
     fn resize(&mut self, w: u32, h: u32) {
-        self.gpu.resize(w, h);
-        self.sync_scene();
+        self.be.resize(w, h);
         self.camera.aspect = w as f32 / h as f32;
         self.touch.ensure_layout(w, h);
-        self.hud.resize(&self.gpu.queue, w, h);
-    }
-
-    /// The scene targets at the current scale (the surface size is the config's).
-    fn sync_scene(&mut self) {
-        let c = &self.gpu.config;
-        self.present.resize(&self.gpu.device, &self.gpu.queue, self.gpu.scene(), (c.width, c.height));
     }
 
     fn step_frame(&mut self) {
@@ -604,7 +579,7 @@ impl App {
                     self.save(AUTOSAVE_CHUNKS);
                 }
             }
-            let (w, h) = (self.gpu.config.width as f32, self.gpu.config.height as f32);
+            let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
             let info = self.pause_info();
             let mut asked = Vec::new();
             for ev in self.touch.take_screen_events() {
@@ -867,7 +842,7 @@ impl App {
         self.anim_acc = (self.anim_acc + dt).min(2.0 * dig::TICK);
         while self.anim_acc >= dig::TICK {
             self.anim_acc -= dig::TICK;
-            self.pipe.animate(&self.gpu.queue, &self.anim.tick());
+            self.be.animate(&self.anim.tick());
             // The compass points at the world spawn and the clock shows the sky (`TextureCompassFX`, `TextureWatchFX`); the sprite
             // is rewritten in the atlas (held items, drops) and in the HUD's copy of items.png (hotbar, inventory).
             let g = self.anim.gauges(
@@ -876,8 +851,7 @@ impl App {
                 (self.spawn.x as f64, self.spawn.z as f64),
                 sky::celestial_angle(self.world_ticks as u64, 1.0),
             );
-            self.pipe.animate_items(&self.gpu.queue, &g);
-            self.hud.animate_items(&self.gpu.queue, &g);
+            self.be.animate_items(&g);
         }
         // The player's model state (arm swing, walk, the hand's raise) ticks at 20 Hz of the wall clock, at most 2 a frame.
         self.body_acc = (self.body_acc + real_dt).min(2.0 * dig::TICK);
@@ -1714,7 +1688,7 @@ impl App {
 
     /// A tap on the sign editor: a key of the on-screen keyboard or a line of the board (`GuiEditSign.keyTyped`).
     fn on_sign_tap(&mut self, x: f32, y: f32) {
-        let (w, h) = (self.gpu.config.width as f32, self.gpu.config.height as f32);
+        let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
         let Some(mut e) = self.sign_edit else { return };
         let Some(k) = decor::key_at(w, h, e.shift, x, y) else { return };
         let done = self.signs.get_mut(&e.pos).map_or(k == Key::Done, |t| e.press(k, t));
@@ -1812,7 +1786,7 @@ impl App {
             }
             return;
         }
-        let (w, h) = (self.gpu.config.width as f32, self.gpu.config.height as f32);
+        let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
         let Some(gw) = self.screen.as_ref().map(|s| s.gw) else { return };
         let mut fill = Vec::new();
         match ev {
@@ -1846,7 +1820,7 @@ impl App {
 
     /// A tap on the open screen: the "place one" toggle, a slot, or outside the panel (throws the cursor stack).
     fn on_screen_tap(&mut self, x: f32, y: f32) {
-        let (w, h) = (self.gpu.config.width as f32, self.gpu.config.height as f32);
+        let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
         let Some(gw) = self.screen.as_ref().map(|s| s.gw) else { return };
         let one = self.one_mode;
         if craft::on_mode_button(gw, w, h, x, y) {
@@ -1864,33 +1838,6 @@ impl App {
                 s.cursor = (c.count > n).then(|| ItemStack { count: c.count - n, ..c });
                 self.drops.throw(ItemStack { count: n, ..c }, self.camera.pos, self.camera.forward());
             }
-        }
-    }
-
-    /// The opaque layers of the scene pass (Sodium's order): solid terrain near to far, the far terrain, the alpha-tested terrain, then the
-    /// entities and the outline (alpha-tested too: item sprites, signs). Each layer is one pipeline switch, not one per chunk.
-    fn draw_opaque(&self, rp: &mut wgpu::RenderPass<'_>, item_indices: u32, outline_indices: u32) {
-        rp.set_bind_group(0, &self.pipe.bind_group, &[]);
-        rp.set_pipeline(&self.pipe.solid);
-        self.chunks.draw_ranges(Layer::Solid, rp, &self.pipe.origins);
-        if let Some(l) = self.lod.as_ref().filter(|_| self.lod_on) {
-            rp.set_pipeline(&self.pipe.lod);
-            l.draw(rp);
-        }
-        rp.set_pipeline(&self.pipe.cutout);
-        self.chunks.draw_ranges(Layer::Cutout, rp, &self.pipe.origins);
-        if item_indices > 0 || outline_indices > 0 {
-            rp.set_pipeline(&self.pipe.entity); // the float vertex, no chunk origin
-        }
-        if item_indices > 0 {
-            rp.set_vertex_buffer(0, self.item_mesh.vbuf.slice(..));
-            rp.set_index_buffer(self.item_mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
-            rp.draw_indexed(0..item_indices, 0, 0..1);
-        }
-        if outline_indices > 0 {
-            rp.set_vertex_buffer(0, self.outline.vbuf.slice(..));
-            rp.set_index_buffer(self.outline.ibuf.slice(..), wgpu::IndexFormat::Uint32);
-            rp.draw_indexed(0..outline_indices, 0, 0..1);
         }
     }
 
@@ -1958,7 +1905,7 @@ impl App {
         // Real water reaches `WATER_RANGE` with the LoD on (its water sheet takes over beyond); with it off there is no sheet, so the real water is drawn everywhere the player sees.
         let wr = if lod_on { WATER_RANGE } else { 1e9 };
         let (pcx, pcz) = (chunk_coord(self.player.pos.x), chunk_coord(self.player.pos.z));
-        self.chunks.update(&self.gpu.device, &self.gpu.queue, &self.pipe.origins, pcx, pcz);
+        self.chunks.update(self.be.gfx(), self.be.origins(), pcx, pcz);
         self.camera.zfar = if lod_on { lod::ZFAR } else { 256.0 }; // the far terrain needs the depth range
         self.camera.bob = if self.opts.view_bobbing { self.body.view_bob(tick_partial) } else { glam::Mat4::IDENTITY };
         let (view, proj) = self.camera.build_view_proj();
@@ -1970,7 +1917,7 @@ impl App {
         let outline_indices = self.target.map_or(0, |h| {
             let (x, y, z) = h.pos;
             let b = self.chunks.block_loaded(x, y, z).and_then(|b| outline_bounds(b, self.chunks.meta(x, y, z)));
-            b.map_or(0, |b| self.outline.update(&self.gpu.queue, h.pos, b))
+            b.map_or(0, |b| self.outline.update(self.be.gfx(), h.pos, b))
         });
         let eye = self.camera.pos;
         let mut sign_views: Vec<SignView> = self
@@ -1994,7 +1941,7 @@ impl App {
         let seen = |p: glam::Vec3, r: f32| p.distance_squared(eye) < reach2 && frustum.intersects_aabb(p - r, p + r) && terrain.box_visible(p - r, p + r);
         let item_indices = {
             let chunks = &self.chunks;
-            self.item_mesh.update(&self.gpu.queue, &self.drops, &self.mobs, &self.ticks.falling, &self.fx, &|x, y, z| chunks.light_levels(x, y, z), self.hook.as_ref().map(|h| h.pos), &self.paintings, &sign_views, (&self.boats.list, self.boats.alpha()), (&self.carts.list, self.carts.alpha()), player_view.as_ref(), hand.as_ref(), eye, &seen)
+            self.item_mesh.update(self.be.gfx(), &self.drops, &self.mobs, &self.ticks.falling, &self.fx, &|x, y, z| chunks.light_levels(x, y, z), self.hook.as_ref().map(|h| h.pos), &self.paintings, &sign_views, (&self.boats.list, self.boats.alpha()), (&self.carts.list, self.carts.alpha()), player_view.as_ref(), hand.as_ref(), eye, &seen)
         };
 
         // Sky and fog colour from the sun angle, the weather and the climate under the player; the frame is cleared to the fog colour and
@@ -2014,20 +1961,16 @@ impl App {
             fresh.into_iter().for_each(|(k, cols)| l.ingest(k, cols));
             // The LoD is cut out only where a real chunk mesh exists (`drawn`), and again whenever the set of meshes changes (`mesh_gen`).
             let chunks = &self.chunks;
-            l.update(&self.gpu.device, e, (rd * 16) as f32, (RENDER_VERT * 16) as f32, chunks.cut_gen(), |cx, cz| chunks.drawn((cx, cz)), |cx, sy, cz| chunks.shown((cx, cz), sy), |min, max| frustum.intersects_aabb(min, max));
+            l.update(self.be.gfx(), e, (rd * 16) as f32, (RENDER_VERT * 16) as f32, chunks.cut_gen(), |cx, cz| chunks.drawn((cx, cz)), |cx, sy, cz| chunks.shown((cx, cz), sy), |min, max| frustum.intersects_aabb(min, max));
         }
         let fog = color::legacy_lin(if self.nether { hell } else { sky::fog_color(angle, sky_rgb, rain, thunder) }); // vanilla values -> the frame's linear space
         // Terrain fog (b1.7.3 `setupFog`): linear to the render distance, off the far terrain's own start; under water GL_EXP, density 0.1,
         // colour (0.02, 0.02, 0.2); a negative far plane is how the shader learns the density.
         let (fog_c, far) = if eye_in_water { (color::legacy_lin([0.02, 0.02, 0.2]), -0.1) } else { (fog, if lod_on { lod::RADIUS } else { (rd * 16) as f32 }) };
         let start = if lod_on && !eye_in_water { lod::FOG_START } else { 0.0 };
-        self.pipe.frame(&self.gpu.queue, view, proj, e, sky::skylight_subtracted(angle, rain, thunder) as f32 / 15.0, fog_c, far, start, wr);
-        let clear = wgpu::Color { r: fog_c[0] as f64, g: fog_c[1] as f64, b: fog_c[2] as f64, a: 1.0 };
-        self.sky.update(&self.gpu.queue, &self.camera, &SkyFrame { angle, rain, seconds: self.world_ticks as f32 / 20.0 });
-        self.sky.set_legacy(&self.gpu.queue, color::legacy_lin(sky::lightning_flash(sky_rgb, self.fx.flash, partial)), fog, angle, rain);
         // Rain and snow (`EntityRenderer.renderRainSnow`), drawn in the scene pass after the water; the depth test hides the streaks behind
         // the terrain. ponytail: not behind water (its translucent layer is not wired), no splashes on the ground.
-        if rain > 0.0 {
+        let precip = (rain > 0.0).then(|| {
             let r = weather::radius();
             let n = (2 * r + 1) as usize;
             let biomes = self.chunks.biomes(px - r, pz - r, n, n);
@@ -2035,90 +1978,53 @@ impl App {
             let top = |x: i32, z: i32| chunks.top_solid(x, z);
             let bright = |x: i32, y: i32, z: i32| crate::world::chunk::brightness(chunks.light(x, y, z));
             let (snow, rain_quads) = weather::build(&weather::Input { eye: e, ticks: self.world_ticks as u32, partial, rain, biomes: &biomes, top_solid: &top, brightness: &bright });
-            self.rain_fx.update(&self.gpu.queue, proj * view, e, sky::sun_dir(angle).y, &snow, &rain_quads);
-        }
+            (snow, rain_quads, sky::sun_dir(angle).y)
+        });
         if self.frames == 0 {
-            log::info!("render: first frame, surface_format={:?}, {} chunks loaded", self.gpu.surface_format(), self.chunks.loaded());
+            log::info!("render: first frame, {}, {} chunks loaded", self.be.gpu_info(), self.chunks.loaded());
         }
-
-        let t_acq = Instant::now();
-        let frame = match self.gpu.surface.get_current_texture() {
-            Ok(f) => f,
-            Err(e) => {
-                log::warn!("surface.get_current_texture: {e:?}");
-                if matches!(e, wgpu::SurfaceError::Outdated | wgpu::SurfaceError::Lost) {
-                    self.gpu.surface.configure(&self.gpu.device, &self.gpu.config);
-                }
+        self.build_hud();
+        let d = WorldDraw {
+            chunks: &self.chunks,
+            lod: self.lod.as_ref().filter(|_| lod_on),
+            items: &self.item_mesh,
+            item_indices,
+            outline: &self.outline,
+            outline_indices,
+            hud: &self.hud_verts,
+            camera: &self.camera,
+            view,
+            proj,
+            eye: e,
+            sky_sub: sky::skylight_subtracted(angle, rain, thunder) as f32 / 15.0,
+            fog: fog_c,
+            far,
+            start,
+            wr,
+            nether: self.nether,
+            angle,
+            rain,
+            seconds: self.world_ticks as f32 / 20.0,
+            zenith: color::legacy_lin(sky::lightning_flash(sky_rgb, self.fx.flash, partial)),
+            horizon: fog,
+            precip: precip.as_ref().map(|(s, r, y)| (&s[..], &r[..], *y)),
+        };
+        let acq = match self.be.draw_world(&d) {
+            Drawn::Done(acq) => acq,
+            Drawn::Resize(w, h) => {
+                log::info!("render: frame is {w}x{h}, reconfiguring");
+                self.resize(w, h);
                 return;
             }
+            Drawn::Skipped => return,
         };
-        let acq = t_acq.elapsed(); // the swap-chain wait (vsync / GPU back-pressure) is not CPU work
-        // Reconcile surface/config size. Native-activity doesn't always send MainEvent::WindowResized before the first frame, so the cached
-        // config.width/height can be wrong (1x1 from from_android_window). We drop the stale one (wgpu invalidates it after configure), resize, return.
-        let actual_w = frame.texture.width();
-        let actual_h = frame.texture.height();
-        if actual_w != self.gpu.config.width || actual_h != self.gpu.config.height {
-            log::info!("M3 render: frame is {actual_w}x{actual_h}, reconfiguring (was {}x{})", self.gpu.config.width, self.gpu.config.height);
-            self.resize(actual_w, actual_h);
-            return;
-        }
-        let view_tex = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
-        self.build_hud();
-        let hud_vertex_count = self.hud_verts.len();
-        if hud_vertex_count > 0 {
-            self.gpu.queue.write_buffer(&self.hud.vbuf, 0, bytemuck::cast_slice(&self.hud_verts));
-        }
-
-        let mut enc = self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
-        {
-            let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("scene"),
-                color_attachments: &[Some(self.present.scene_attachment(clear))], // MSAA: resolved into the scene in tile memory, never stored
-                // The depth is only this pass's: `Discard` keeps it in the tile memory and never writes it out.
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.gpu.depth_view,
-                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Discard }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-            self.draw_opaque(&mut rp, item_indices, outline_indices);
-            if !self.nether {
-                self.sky.draw(&mut rp); // depth-tested LessEqual: only the pixels the opaque draws left at 1
-                self.sky.draw_extras(&mut rp); // sunrise fan, sun, moon, stars
-            }
-            // Water last: blended over everything, no depth write.
-            rp.set_pipeline(&self.pipe.lod_water);
-            rp.set_bind_group(0, &self.pipe.bind_group, &[]); // the sky pass set its own
-            if let Some(l) = self.lod.as_ref().filter(|_| self.lod_on) {
-                l.draw_water(&mut rp); // the far water first (it is farther than the real water, which only reaches `WATER_RANGE`)
-            }
-            rp.set_pipeline(&self.pipe.water);
-            self.chunks.draw_ranges(Layer::Water, &mut rp, &self.pipe.origins);
-            if rain > 0.0 {
-                self.rain_fx.draw(&mut rp);
-            }
-        }
-        // CAS + upscale + vignette in one pass; the HUD goes over the finished frame in it (neither sharpened nor vignetted).
-        self.present.finish(&mut enc, &view_tex, |rp| {
-            if hud_vertex_count > 0 {
-                rp.set_pipeline(&self.hud.pipeline);
-                rp.set_bind_group(0, &self.hud.bind_group, &[]);
-                rp.set_vertex_buffer(0, self.hud.vbuf.slice(..));
-                rp.draw(0..hud_vertex_count as u32, 0..1);
-            }
-        });
-        self.gpu.queue.submit(std::iter::once(enc.finish()));
         let spent = t0.elapsed();
         let cpu = spent.saturating_sub(acq);
         self.cpu_acc += cpu.as_secs_f32();
-        frame.present();
         if self.opts.dynamic_res {
             if let Some(p) = self.drs.tick(spent.as_secs_f32(), cpu.as_secs_f32()) {
                 crate::gpu::context::set_scale_pct(p);
-                self.gpu.rescale();
-                self.sync_scene();
+                self.be.rescale();
                 log::info!("dynamic resolution: scene at {p}%");
             }
         }
@@ -2145,7 +2051,7 @@ impl App {
     /// A frame of `menu::Menu` (the title screen, world list, creation, "Loading level"): the HUD pass over black, no world. The frame
     /// that shows "Loading level" is presented before the world is loaded, which freezes the render thread for a moment.
     fn render_menu(&mut self) {
-        let (w, h) = (self.gpu.config.width as f32, self.gpu.config.height as f32);
+        let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
         if self.menu.is_none() {
             return;
         }
@@ -2165,43 +2071,15 @@ impl App {
         let cur = self.touch.pad.shows_cursor().then_some(self.touch.cursor_pos);
         self.touch.pad.draw(&mut self.hud_verts, w, h, self.touch.hotbar_slot, cur);
         let pano = m.panorama();
-        self.hud_verts.truncate(self.hud.quad_capacity * 6);
-        let frame = match self.gpu.surface.get_current_texture() {
-            Ok(f) => f,
-            Err(e) => {
-                log::warn!("surface.get_current_texture: {e:?}");
-                if matches!(e, wgpu::SurfaceError::Outdated | wgpu::SurfaceError::Lost) {
-                    self.gpu.surface.configure(&self.gpu.device, &self.gpu.config);
-                }
+        self.hud_verts.truncate(crate::gles::HUD_QUADS * 6);
+        match self.be.draw_menu(pano, &self.hud_verts) {
+            Drawn::Resize(w, h) => {
+                self.resize(w, h);
                 return;
             }
-        };
-        let (fw, fh) = (frame.texture.width(), frame.texture.height());
-        if fw != self.gpu.config.width || fh != self.gpu.config.height {
-            self.resize(fw, fh);
-            return;
+            Drawn::Skipped => return,
+            Drawn::Done(_) => {}
         }
-        let view_tex = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let mut enc = self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("menu") });
-        self.gpu.queue.write_buffer(&self.hud.vbuf, 0, bytemuck::cast_slice(&self.hud_verts));
-        {
-            let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("menu_pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &view_tex, resolve_target: None, depth_slice: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store } })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-            if pano {
-                self.pano.draw(&self.gpu.queue, &mut rp, w, h);
-            }
-            rp.set_pipeline(&self.hud.pipeline);
-            rp.set_bind_group(0, &self.hud.bind_group, &[]);
-            rp.set_vertex_buffer(0, self.hud.vbuf.slice(..));
-            rp.draw(0..self.hud_verts.len() as u32, 0..1);
-        }
-        self.gpu.queue.submit(std::iter::once(enc.finish()));
-        frame.present();
         let load = self.menu.as_mut().filter(|m| m.shown_loading).and_then(|m| m.loading.take());
         if let Some(info) = load {
             self.enter_world(&info);
@@ -2247,7 +2125,7 @@ impl App {
 
         // Crosshair: the aim point of the pick ray (first, so the quad cap never drops it).
         if play {
-            let (w, h) = (self.gpu.config.width as f32, self.gpu.config.height as f32);
+            let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
             // `icons.png`'s cross (the Java draws it inverting the pixels behind it; here plain white), the size the two bars had.
             let s = 0.05 * w.min(h);
             HudPipeline::push_gui(v, w * 0.5 - s * 0.5, h * 0.5 - s * 0.5, s, s, sp::CROSSHAIR);
@@ -2255,7 +2133,7 @@ impl App {
 
         // Dig progress under the crosshair.
         if play && self.dig.damage > 0.0 {
-            let (w, h) = (self.gpu.config.width as f32, self.gpu.config.height as f32);
+            let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
             let (bw, bh) = (0.12 * w.min(h), (0.012 * w.min(h)).max(3.0));
             let (bx, by) = (w * 0.5 - bw * 0.5, h * 0.5 + 0.05 * w.min(h));
             HudPipeline::push_quad(v, bx, by, bw, bh, [0.0, 0.0, 0.0, 0.6]);
@@ -2264,7 +2142,7 @@ impl App {
 
         // `GuiEditSign`: the title, the board with its four lines (the one being edited is wrapped in `> <` and blinks), and the keys.
         if let Some(e) = self.sign_edit {
-            let (w, h) = (self.gpu.config.width as f32, self.gpu.config.height as f32);
+            let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
             let (u, keys) = decor::layout(w, h, e.shift);
             HudPipeline::push_quad(v, 0.0, 0.0, w, h, [0.0, 0.0, 0.0, 0.55]);
             let title = "Edit sign message:";
@@ -2294,7 +2172,7 @@ impl App {
 
         // Container screen: the vanilla GUI (176 x 166 units) over a dimmed frame, slots with their stacks.
         if let Some(s) = &self.screen {
-            let (w, h) = (self.gpu.config.width as f32, self.gpu.config.height as f32);
+            let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
             let (ox, oy, k) = craft::panel(s.gw, w, h);
             let (pw, ph) = craft::panel_size(s.gw);
             HudPipeline::push_quad(v, 0.0, 0.0, w, h, [0.0, 0.0, 0.0, 0.55]);
@@ -2440,7 +2318,7 @@ impl App {
         // Name of the item just switched to, centred above the hotbar and the hearts.
         // UNVERIFIED: not in b1.7.3 (Beta 1.8 added it); the 2 s, the 0.75 scale and the spot are invented.
         if let (true, Some(name)) = (play && self.tip.1 > 0.0, self.inv.slots[self.touch.hotbar_slot].and_then(items::name)) {
-            let (w, h) = (self.gpu.config.width as f32, self.gpu.config.height as f32);
+            let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
             let k = craft::panel(0, w, h).2;
             let (hx, hy, hw, _) = layout.hotbar[4];
             let bw = (HudPipeline::text_width(name) as f32 + 6.0) * k * 0.75;
@@ -2506,8 +2384,8 @@ impl App {
         // FPS counter, top-left. White = average over the last second, yellow = average since
         // the app started (includes the chunk loading at the start).
         {
-            let dh = (self.gpu.config.height as f32 * 0.05).max(14.0);
-            let (fx, fy) = (self.gpu.config.width as f32 * 0.07, dh * 0.6);
+            let dh = (self.be.size().1 as f32 * 0.05).max(14.0);
+            let (fx, fy) = (self.be.size().0 as f32 * 0.07, dh * 0.6);
             HudPipeline::push_quad(v, fx - dh * 0.3, fy - dh * 0.3, dh * 5.2, dh * 5.3, [0.0, 0.0, 0.0, 0.5]);
             // Number, then its label: fps now (white), fps average since start (yellow), CPU ms per frame (cyan: close to 1000 / fps
             // = CPU-bound, far below = GPU-bound), longest frame in the last second (red: hitches).
@@ -2526,7 +2404,7 @@ impl App {
 
         // The LoD debug mode that is on, centred at the top (also while playing, not only in the pause menu).
         if let Some(title) = self.lod.as_ref().map(|l| l.debug_title()).filter(|t| !t.is_empty()) {
-            let (w, dh) = (self.gpu.config.width as f32, (self.gpu.config.height as f32 * 0.05).max(14.0));
+            let (w, dh) = (self.gpu.config.width as f32, (self.be.size().1 as f32 * 0.05).max(14.0));
             let tw = HudPipeline::text_width(title) as f32;
             let k = (dh / 10.0).min(w * 0.55 / tw);
             let (tx, ty) = (w * 0.5, dh * 0.45);
@@ -2536,7 +2414,7 @@ impl App {
 
         // The game menu (`GuiIngameMenu`, the death screen when dead), over the dimmed frame.
         if paused {
-            let (w, h) = (self.gpu.config.width as f32, self.gpu.config.height as f32);
+            let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
             if let Some(p) = &self.pause {
                 p.draw(v, w, h, &self.opts, &pause_info);
             }
@@ -2544,14 +2422,14 @@ impl App {
 
         // The pad's radial hotbar, and its cursor in any GUI (the pause menu, a container).
         {
-            let (w, h) = (self.gpu.config.width as f32, self.gpu.config.height as f32);
+            let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
             let t = &self.touch;
             let cur = (t.pad.shows_cursor() && (paused || t.screen)).then_some(t.cursor_pos);
             t.pad.draw(v, w, h, t.hotbar_slot, cur);
         }
 
         // Cap to the buffer capacity; extra quads are silently dropped.
-        let max = self.hud.quad_capacity * 6;
+        let max = crate::gles::HUD_QUADS * 6;
         if v.len() > max {
             v.truncate(max);
         }
@@ -2684,7 +2562,7 @@ fn push_stack(v: &mut Vec<HudVertex>, (cx, cy, cw, ch): (f32, f32, f32, f32), fi
 fn sync_size(app: &AndroidApp, state: &mut Option<App>) {
     let (Some(a), Some(win)) = (state.as_mut(), app.native_window()) else { return };
     let (w, h) = (win.width().max(1) as u32, win.height().max(1) as u32);
-    if (w, h) != (a.gpu.config.width, a.gpu.config.height) {
+    if (w, h) != a.be.size() {
         a.resize(w, h);
     }
 }

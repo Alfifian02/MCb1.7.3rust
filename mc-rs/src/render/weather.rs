@@ -21,12 +21,12 @@ use crate::world::gen::noise::JavaRandom;
 /// `gameSettings.fancyGraphics`: radius 10 instead of 5.
 pub const FANCY: bool = false;
 const RADIUS: i32 = if FANCY { 10 } else { 5 };
-const RAIN_OPACITY: f32 = 0.25;
-const SNOW_OPACITY: f32 = 0.75;
+pub(crate) const RAIN_OPACITY: f32 = 0.25;
+pub(crate) const SNOW_OPACITY: f32 = 0.75;
 /// `sunlight_color` of `include/sky/atmosphere.glsl`.
 const SUNLIGHT: Vec3 = Vec3::new(1.051, 0.985, 0.940);
 /// Two crossed quads, two triangles each, per column; the most columns is the fancy radius.
-const MAX_VERTS: usize = 21 * 21 * 12;
+pub(crate) const MAX_VERTS: usize = 21 * 21 * 12;
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable, Debug)]

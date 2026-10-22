@@ -77,6 +77,7 @@ mc-rs/
     immersive.rs          hides status + nav bars and extends into the notch, via JNI (Java main thread)
     gpu/
       context.rs          wgpu instance; Vulkan first, GLES as the fallback
+      gfx.rs              `Buf` / `Gfx` / `WorldDraw`: what the world code needs of a renderer, shared by both
     menu.rs               M14: title screen, world list, world creation (b1.7.3 `GuiMainMenu` / `GuiSelectWorld` / `GuiCreateWorld`)
     render/player.rs      M14: player model (b1.7.3 `ModelBiped`), animation, third-person + inventory preview
     options.rs            M14b: `GameSettings` + Options / Video Settings / Controls + the game menu (b1.7.3 `GuiOptions` / `GuiIngameMenu`)
@@ -275,3 +276,14 @@ was generated with). The CI workflow does this for you.
 - The nav bar is hidden with `setSystemUiVisibility` (deprecated since API 30 but still
   honoured on 11-14). Not yet verified on a real device.
 - Saplings, flowers, tall grass, mushrooms, dead bush and reeds are drawn as textured crossed quads (not solid); slabs, farmland, snow layer and cactus are boxes with their real bounds and collision, torches (also on a wall), fences, stairs and crops have their real shapes (stairs collide as a full cell; no door or bed shape yet), water and lava have a real surface height and flowing tops turned by flow direction (water is translucent, lava opaque); leaves are drawn as opaque cubes. Real models/textures are M14.
+
+## OpenGL ES 3.2 renderer (second renderer)
+
+`Renderer:` in Video Settings (`renderer:` in `options.txt`, next start): Auto / Vulkan use wgpu as before; **OpenGL ES** runs the same frame on a native
+EGL + GLES 3.2 renderer (`src/gles/`, `src/backend.rs`), with no wgpu device at all. If it cannot start (no EGL, no ES 3.0 context) the game starts wgpu.
+Written without a toolchain: not compiled, not run. The shaders were compiled and one lit quad drawn on Mesa: `python3 tools/gles_check.py`.
+Same optimisations as the Vulkan renderer: the 16-byte chunk vertex and one shared quad index buffer, chunk pages (one VAO per page), the chunk layers solid /
+cut-out / water, near-to-far opaque and far-to-near water, MSAA 1/2/4 in tile memory (`EXT_multisampled_render_to_texture`; else a renderbuffer blit with the
+samples invalidated), alpha-to-coverage on the cut-out layers, dynamic resolution, depth discarded at the end of the scene pass, one final pass (CAS + upscale +
+vignette + sRGB) with the HUD blended over it, orphaned streaming buffers, the same CPU side (occlusion culling, upload budget, mesh workers).
+

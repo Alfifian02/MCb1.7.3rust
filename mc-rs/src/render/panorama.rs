@@ -9,8 +9,8 @@ use std::time::Instant;
 use wgpu::*;
 
 /// Side of a face in `PANORAMA` (`N` in `tools/gen_panorama.py`).
-const FACE: u32 = 512;
-const PANORAMA: &[u8] = include_bytes!("../../assets/panorama.rgba");
+pub(crate) const FACE: u32 = 512;
+pub(crate) const PANORAMA: &[u8] = include_bytes!("../../assets/panorama.rgba");
 /// Vertical field of view in degrees (the `CubeMap` of 1.14+).
 const FOV: f32 = 85.0;
 
@@ -112,9 +112,8 @@ impl Panorama {
         Self { pipe, bind, ubuf, born: Instant::now() }
     }
 
-    /// Draws the panorama over the whole `w` x `h` target (first in the pass; the HUD goes over it).
-    pub fn draw(&self, queue: &Queue, rp: &mut RenderPass, w: f32, h: f32) {
-        let t = self.born.elapsed().as_secs_f32();
+    /// The shader's uniform for `t` seconds on a `w` x `h` target: the view-ray -> cube matrix (16 floats), then tan(fov / 2) per axis.
+    pub(crate) fn params(t: f32, w: f32, h: f32) -> [f32; 20] {
         // `GuiMainMenu`: rotate(180, x), then pitch, then yaw. Its roll of 90 degrees is not here: it stood the pack's faces on their side.
         // The pitch is 5 degrees down +-10 (vanilla's 20 +-25 looks mostly at the floor in this pack).
         let m = Mat3::from_rotation_x(PI + (5.0 + (t / 20.0).sin() * 10.0).to_radians()) * Mat3::from_rotation_y((-2.0 * t).to_radians());
@@ -122,6 +121,13 @@ impl Panorama {
         let mut u = [0f32; 20];
         u[..16].copy_from_slice(&Mat4::from_mat3(m.transpose()).to_cols_array()); // the shader needs the inverse
         u[16..18].copy_from_slice(&[ty * w / h, ty]);
+        u
+    }
+
+    /// Draws the panorama over the whole `w` x `h` target (first in the pass; the HUD goes over it).
+    pub fn draw(&self, queue: &Queue, rp: &mut RenderPass, w: f32, h: f32) {
+        let t = self.born.elapsed().as_secs_f32();
+        let u = Self::params(t, w, h);
         queue.write_buffer(&self.ubuf, 0, bytemuck::cast_slice(&u));
         rp.set_pipeline(&self.pipe);
         rp.set_bind_group(0, &self.bind, &[]);

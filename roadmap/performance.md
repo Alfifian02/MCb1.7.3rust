@@ -2,6 +2,17 @@
 
 Part of [`ROADMAP.md`](../ROADMAP.md). This part holds the open speed and memory work (the renderer rewrite's next steps, the Sodium audit, the memory audit) and the changelog of the ports that did it: C2ME (workers for meshing, light, I/O, populate, lazy noise), Embeddium / Sodium (arena, 16-byte vertices, occlusion culling), Radium, ModernFix, Noisiumed, FastNoise, FerriteCore, ImmediatelyFast (font atlas, sign text cache, GPU error traces), frame-cost passes, culling.
 
+## OpenGL ES 3.2 renderer (2026-10-22)
+
+A second, native renderer next to wgpu: `Renderer:` Auto / Vulkan / OpenGL ES in Video Settings (`renderer:` in `options.txt`, next start). Not compiled, not run (no Rust toolchain in the session); the GLSL was compiled on Mesa and a lit quad drawn through the chunk program (`tools/gles_check.py`).
+
+- **Seam.** `gpu/gfx.rs`: `Buf` (wgpu or GL buffer) and `Gfx` (make / write a buffer) are what `ChunkManager` pages, `Lod`, `ItemMesh` and `Outline` use, so the meshes are built once for both. The draw loops became `ChunkManager::for_each_run` and `Lod::for_each_tile`; wgpu's `draw_ranges` / `draw` are wrappers over them. `WorldDraw` carries one frame's CPU result to `Backend::draw_world`; the wgpu passes moved into `backend.rs` unchanged.
+- **GLES side** (`src/gles/`): `sys.rs` (EGL via `dlopen`, GL entry points through `eglGetProcAddress`; no crate, links on any host), `mod.rs` (`Gl`: ES 3.2 context, 3.0 fallback; buffers freed through a delete queue; the context moves from the init thread to the render thread), `shaders.rs` (GLSL ES 3.00 ports of every WGSL program in use: chunk x6, final, HUD, panorama, weather, sky dome / fan / stars / sun and moon), `renderer.rs` (the two passes).
+- **Conventions.** GL clip depth is -1..1: every view-projection is premultiplied by `depth_fix()` (tested). The window surface is plain RGBA8 and the final shader encodes sRGB; the scene is `SRGB8_ALPHA8`. Images are sampled with the uv they were uploaded with, so nothing is flipped.
+- **Vulkan optimisations carried over:** 16-byte vertex + shared quad index buffer, pages (VAO cached per page / tile), layer order and sort direction, MSAA kept in tile memory (`EXT_multisampled_render_to_texture`, else blit + `glInvalidateFramebuffer`), alpha-to-coverage only on cut-outs and only when multisampled, `Post: Fast`, MSAA / Auto by GPU (`present::resolve`), dynamic resolution (swap time = the wait), depth invalidated at the end of the pass, orphaned streaming buffers. Shared CPU side untouched.
+- **Not carried over (no GL equivalent worth it):** pipeline caches, bind-group dynamic offsets (the origin is one `glUniform3f` per chunk run). Possible next: `GL_EXT_disjoint_timer_query` for real GPU time in the DRS, `glProgramBinary` shader cache, `glMultiDrawElements` where `EXT_multi_draw_arrays` exists.
+- **Check first on the phone:** the log line `GLES init: ... | context 3.2, max samples N, tile-memory MSAA true/false`; if the title screen is black, `Renderer: Vulkan` brings the old path back.
+
 ## Memory and speed: what is still missing (follow-up of the FerriteCore audit, 2026-10-21)
 
 Nothing here is written. None of it was measured: there is no phone and no Rust toolchain in the sessions that audited it, the sizes come from the code. Per loaded chunk the arrays are `blocks` 32 KB + `light` 32 KB + `data` (metadata, now lazy) 16 KB at most, and the light thread holds a second copy of `blocks` and `light`. Do 1 first; the rest in this order (smallest and safest first).

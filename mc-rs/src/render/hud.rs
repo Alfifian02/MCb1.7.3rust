@@ -49,7 +49,7 @@ pub const DPAD_SHEET: &[u8] = include_bytes!("../../assets/dpad.rgba");
 /// The title screen's sheet (256 x 272, `tools/gen_menu.py`): `mclogo.png`, then `background.png`: the last rows of the HUD texture.
 pub const MENU_SHEET: &[u8] = include_bytes!("../../assets/menu.rgba");
 /// The player skin (`mob/char.png`, 64 x 32): 32 rows of the HUD texture, cut from the atlas's `ART` tail (`PLAYER_Y`).
-const SHEET_H: f32 = 2672.0;
+pub(crate) const SHEET_H: f32 = 2672.0;
 const PLAYER_Y: f32 = 2576.0;
 /// Where the font atlas starts in the HUD texture (the 64 rows after the player skin, see `font_sheet`).
 const FONT_Y: f32 = 2608.0;
@@ -160,6 +160,11 @@ fn shader_source(srgb: bool) -> String {
     format!("const SRGB: bool = {srgb};\nconst SHEET: vec2<f32> = vec2<f32>(256.0, {SHEET_H:.1});\n{SHADER_SRC}") // `SHEET` = the whole HUD texture
 }
 
+/// The whole HUD texture (256 x `SHEET_H`, RGBA8): items, the GUI sheet, terrain.png, the panels, the d-pad, the title screen, the player skin, the font.
+pub fn sheet_bytes() -> Vec<u8> {
+    [crate::render::atlas::ITEMS, GUI, crate::render::atlas::TERRAIN, CONTAINERS, DPAD_SHEET, MENU_SHEET, &crate::render::atlas::ART[256 * 288 * 4..], &font_sheet()].concat()
+}
+
 /// Owns the HUD pipeline + dynamic vertex buffer. One instance per surface.
 pub struct HudPipeline {
     pub pipeline: RenderPipeline,
@@ -235,7 +240,7 @@ impl HudPipeline {
         });
         queue.write_texture(
             wgpu::TexelCopyTextureInfo { texture: &items_tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-            &[crate::render::atlas::ITEMS, GUI, crate::render::atlas::TERRAIN, CONTAINERS, DPAD_SHEET, MENU_SHEET, &crate::render::atlas::ART[256 * 288 * 4..], &font_sheet()].concat(), // items, the GUI sheet, terrain.png, the panels, the d-pad, the title screen, the player skin, the font
+            &sheet_bytes(), // items, the GUI sheet, terrain.png, the panels, the d-pad, the title screen, the player skin, the font
             wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(256 * 4), rows_per_image: Some(SHEET_H as u32) },
             wgpu::Extent3d { width: 256, height: SHEET_H as u32, depth_or_array_layers: 1 },
         );

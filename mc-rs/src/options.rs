@@ -38,6 +38,7 @@ pub enum Opt {
     Msaa,
     /// Added: the final pass, Auto / Full (FXAA + CAS) / Fast (neither). Read once at start-up, like MSAA.
     Post,
+    Renderer,
 }
 
 impl Opt {
@@ -65,6 +66,7 @@ impl Opt {
             Opt::DigDelay => "Dig Delay",
             Opt::Msaa => "MSAA",
             Opt::Post => "Post",
+            Opt::Renderer => "Renderer",
         }
     }
 }
@@ -131,6 +133,8 @@ pub struct Settings {
     pub msaa: u8,
     /// The final pass for the next start: 0 Auto (`present::pick_fast` decides by GPU), 1 Full, 2 Fast (`post:` in options.txt).
     pub post: u8,
+    /// The renderer for the next start: 0 Auto (Vulkan), 1 Vulkan, 2 OpenGL ES 3.2 (`renderer:` in options.txt).
+    pub renderer: u8,
     path: Option<PathBuf>,
 }
 
@@ -158,6 +162,7 @@ impl Default for Settings {
             dynamic_res: true,
             msaa: 0,
             post: 0,
+            renderer: 0,
             path: None,
         }
     }
@@ -191,6 +196,7 @@ impl Settings {
                 ("dynamicRes", ..) => s.dynamic_res = b,
                 ("msaa", _, Some(n)) if matches!(n, 0 | 1 | 2 | 4) => s.msaa = n,
                 ("post", _, Some(n)) if n <= 2 => s.post = n,
+                ("renderer", _, Some(n)) if n <= 2 => s.renderer = n,
                 (k, ..) if k.starts_with("pad_") => s.pad.load(k, v),
                 _ => {
                     if let (Some(i), Ok(code)) = (KEY_IDS.iter().position(|id| k.strip_prefix("key_key.") == Some(*id)), v.parse::<u32>()) {
@@ -206,8 +212,8 @@ impl Settings {
     pub fn save(&self) {
         let Some(p) = &self.path else { return };
         let mut t = format!(
-            "music:{}\nsound:{}\ninvertYMouse:{}\nmouseSensitivity:{}\nviewDistance:{}\nguiScale:{}\nbobView:{}\nanaglyph3d:{}\nadvancedOpengl:{}\nfpsLimit:{}\ndifficulty:{}\nfancyGraphics:{}\nao:{}\nlod:{}\ndigDelay:{}\ngpuErrorTrace:{}\ndynamicRes:{}\nmsaa:{}\npost:{}\n",
-            self.music, self.sound, self.invert_mouse, self.sensitivity, self.render_distance, self.gui_scale, self.view_bobbing, self.anaglyph, self.advanced_opengl, self.limit_framerate, self.difficulty, self.fancy_graphics, self.ambient_occlusion, self.lod, self.dig_delay, self.gpu_error_trace, self.dynamic_res, self.msaa, self.post
+            "music:{}\nsound:{}\ninvertYMouse:{}\nmouseSensitivity:{}\nviewDistance:{}\nguiScale:{}\nbobView:{}\nanaglyph3d:{}\nadvancedOpengl:{}\nfpsLimit:{}\ndifficulty:{}\nfancyGraphics:{}\nao:{}\nlod:{}\ndigDelay:{}\ngpuErrorTrace:{}\ndynamicRes:{}\nmsaa:{}\npost:{}\nrenderer:{}\n",
+            self.music, self.sound, self.invert_mouse, self.sensitivity, self.render_distance, self.gui_scale, self.view_bobbing, self.anaglyph, self.advanced_opengl, self.limit_framerate, self.difficulty, self.fancy_graphics, self.ambient_occlusion, self.lod, self.dig_delay, self.gpu_error_trace, self.dynamic_res, self.msaa, self.post, self.renderer
         );
         for (id, code) in KEY_IDS.iter().zip(self.keys) {
             t.push_str(&format!("key_key.{id}:{code}\n"));
@@ -275,6 +281,7 @@ impl Settings {
             Opt::AmbientOcclusion => self.ambient_occlusion = !self.ambient_occlusion,
             Opt::Msaa => self.msaa = match self.msaa { 0 => 1, 1 => 2, 2 => 4, _ => 0 },
             Opt::Post => self.post = (self.post + 1) % 3,
+            Opt::Renderer => self.renderer = (self.renderer + 1) % 3,
             _ => {}
         }
         self.save();
@@ -312,6 +319,10 @@ impl Settings {
                 Opt::Post => {
                     let v = ["Auto", "Full", "Fast"][self.post.min(2) as usize];
                     if u32::from(self.post) != crate::render::present::post_want() { format!("{v} (restart)") } else { v.into() }
+                }
+                Opt::Renderer => {
+                    let v = ["Auto", "Vulkan", "OpenGL ES"][self.renderer.min(2) as usize];
+                    if self.renderer != crate::gles::want() { format!("{v} (restart)") } else { v.into() }
                 }
                 _ => (if self.fancy_graphics { "Fancy" } else { "Fast" }).into(),
             }
@@ -445,7 +456,7 @@ impl OptionsUi {
                 w.push(wide(Act::Controls, top + 120.0 + 12.0, "Controls..."));
                 w
             }
-            OptScr::Video => opts(&[Opt::Graphics, Opt::RenderDistance, Opt::AmbientOcclusion, Opt::FramerateLimit, Opt::Anaglyph, Opt::ViewBobbing, Opt::GuiScale, Opt::AdvancedOpengl, Opt::Msaa, Opt::Post]),
+            OptScr::Video => opts(&[Opt::Graphics, Opt::RenderDistance, Opt::AmbientOcclusion, Opt::FramerateLimit, Opt::Anaglyph, Opt::ViewBobbing, Opt::GuiScale, Opt::AdvancedOpengl, Opt::Msaa, Opt::Post, Opt::Renderer]),
             OptScr::Controls => (0..KEY_NAMES.len())
                 .map(|i| {
                     let name = key_name(st.keys[i]);

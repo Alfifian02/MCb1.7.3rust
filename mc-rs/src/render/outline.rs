@@ -2,6 +2,7 @@
 //! grown by 0.002 (`RenderGlobal.drawSelectionBox` grows the box by the same amount against
 //! z-fighting). Drawn with the chunk pipeline from one small dynamic buffer pair.
 
+use crate::gpu::gfx::{Buf, Gfx};
 use crate::render::mesh::push_box;
 
 // 0.005, not vanilla's 0.002: a phone's depth buffer cannot tell a line 0.002 off the face from the face at a distance, it z-fights.
@@ -13,21 +14,20 @@ const VERTEX_BYTES: u64 = 12 * 6 * 4 * crate::render::mesh::VF as u64 * 4;
 const INDEX_BYTES: u64 = 12 * 6 * 6 * 4;
 
 pub struct Outline {
-    pub vbuf: wgpu::Buffer,
-    pub ibuf: wgpu::Buffer,
+    pub vbuf: Buf,
+    pub ibuf: Buf,
 }
 
 impl Outline {
-    pub fn new(device: &wgpu::Device) -> Self {
-        let buf = |label, size, usage| device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size, usage: usage | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
-        Self { vbuf: buf("outline_vbuf", VERTEX_BYTES, wgpu::BufferUsages::VERTEX), ibuf: buf("outline_ibuf", INDEX_BYTES, wgpu::BufferUsages::INDEX) }
+    pub fn new(gfx: Gfx) -> Self {
+        Self { vbuf: gfx.writable(VERTEX_BYTES, false), ibuf: gfx.writable(INDEX_BYTES, true) }
     }
 
     /// Upload the outline of the box `bounds` (min xyz, max xyz) inside block `pos`; returns the index count to draw.
-    pub fn update(&self, queue: &wgpu::Queue, pos: (i32, i32, i32), bounds: [f32; 6]) -> u32 {
+    pub fn update(&self, gfx: Gfx, pos: (i32, i32, i32), bounds: [f32; 6]) -> u32 {
         let (verts, idxs) = geometry(pos, bounds);
-        queue.write_buffer(&self.vbuf, 0, bytemuck::cast_slice(&verts));
-        queue.write_buffer(&self.ibuf, 0, bytemuck::cast_slice(&idxs));
+        gfx.write(&self.vbuf, 0, bytemuck::cast_slice(&verts));
+        gfx.write(&self.ibuf, 0, bytemuck::cast_slice(&idxs));
         idxs.len() as u32
     }
 }

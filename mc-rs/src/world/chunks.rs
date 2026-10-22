@@ -24,7 +24,8 @@ use std::sync::{mpsc, Arc, Mutex};
 use embeddium::{arena::Arena, cull::{Culler, Graph}, quad_index, upload_budget::{self, UploadBudget, UploadDurationEstimator}, vertex::{self, Packed}, vis};
 use glam::Vec3;
 
-use crate::gpu::pipeline::{create_index_buffer, DrawOrigins, MAX_ORIGINS};
+use crate::gpu::gfx::{Buf, Gfx};
+use crate::gpu::pipeline::{DrawOrigins, MAX_ORIGINS};
 use crate::render::mesh;
 use crate::world::chunk::{height_map, idx, meta_matters, normal_cube, opaque, physics_id, Nibbles, H, VOLUME};
 use crate::world::gen::chunk_manager::WorldChunkManager;
@@ -115,8 +116,9 @@ pub struct Mesh {
     page: u32,
     /// First vertex in the page: a multiple of 4, so its quads are the shared index buffer's quads `v / 4 ..`.
     v: u32,
-    /// Slot of the chunk's origin in `DrawOrigins` (group 1).
+    /// Slot of the chunk's origin in `DrawOrigins` (group 1; wgpu), and the origin itself (the GL draw loop sets it as a uniform).
     slot: u32,
+    origin: [f32; 3],
     /// Index elements of the solid and cut-out layers: what `mesh_gen` compares to tell whether the geometry changed.
     pub index_count: u32,
     /// The quads are sorted by 16-block section: section `s` of the solid layer is `starts[s]..starts[s + 1]` (`pack`), the cut-out
@@ -137,13 +139,13 @@ const VERT_BYTES: u64 = embeddium::vertex::STRIDE as u64;
 
 struct Page {
     id: u32,
-    vbuf: wgpu::Buffer,
+    vbuf: Buf,
     verts: Arena,
 }
 
 impl Page {
-    fn new(device: &wgpu::Device, id: u32) -> Self {
-        let vbuf = device.create_buffer(&wgpu::BufferDescriptor { label: Some("chunk_page_vbuf"), size: PAGE_VERTS as u64 * VERT_BYTES, usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+    fn new(gfx: Gfx, id: u32) -> Self {
+        let vbuf = gfx.writable(PAGE_VERTS as u64 * VERT_BYTES, false);
         Self { id, vbuf, verts: Arena::new(PAGE_VERTS, PAGE_VERTS) }
     }
 }
@@ -157,7 +159,7 @@ struct Pages {
     list: Vec<Page>,
     next: u32,
     /// `SharedQuadIndexBuffer`: `quad_index::indices(PAGE_VERTS / 4)`, made with the first page and kept.
-    quads: Option<wgpu::Buffer>,
+    quads: Option<Buf>,
     /// Free `DrawOrigins` slots, and the first never used one.
     free_slots: Vec<u32>,
     next_slot: u32,
@@ -179,7 +181,7 @@ impl Pages {
 
     /// Copies a mesh in: `verts` are whole quads, sorted by the caller. Writes the chunk's origin to a slot. Returns the page, the first
     /// vertex and the slot; `None` when the mesh is bigger than a page or every slot is taken.
-    fn put(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, origins: &DrawOrigins, verts: &[Packed], key: Key) -> Option<(u32, u32, u32)> {
+    fn put(&mut self, gfx: Gfx, origins: Option<&DrawOrigins>, verts: &[Packed], key: Key) -> Option<(u32, u32, u32)> {
         let nv = verts.len() as u32;
         assert_eq!(nv % quad_index::VERTICES_PER_QUAD, 0, "whole quads only");
         if nv > PAGE_VERTS {
@@ -190,13 +192,13 @@ impl Pages {
             return None;
         };
         if self.quads.is_none() {
-            self.quads = Some(create_index_buffer(device, &quad_index::indices(PAGE_VERTS / quad_index::VERTICES_PER_QUAD)));
+            self.quads = Some(gfx.index(bytemuck::cast_slice(&quad_index::indices(PAGE_VERTS / quad_index::VERTICES_PER_QUAD))));
         }
         let at = self.list.iter_mut().find_map(|p| p.verts.alloc(nv).map(|v| (p.id, v)));
         let (id, v) = match at {
             Some(a) => a,
             None => {
-                let mut p = Page::new(device, self.next);
+                let mut p = Page::new(gfx, self.next);
                 self.next += 1;
                 let v = p.verts.alloc(nv).expect("a mesh that fits a page fits an empty one");
                 let id = p.id;
@@ -205,8 +207,10 @@ impl Pages {
             }
         };
         let p = self.list.iter().find(|p| p.id == id).expect("page just used");
-        queue.write_buffer(&p.vbuf, v as u64 * VERT_BYTES, bytemuck::cast_slice(verts));
-        origins.write(queue, slot, [key.0 as f32 * 16.0, 0.0, key.1 as f32 * 16.0]);
+        gfx.write(&p.vbuf, v as u64 * VERT_BYTES, bytemuck::cast_slice(verts));
+        if let (Some(o), Gfx::Wgpu(_, q)) = (origins, gfx) {
+            o.write(q, slot, [key.0 as f32 * 16.0, 0.0, key.1 as f32 * 16.0]);
+        }
         Some((id, v, slot))
     }
 
@@ -219,6 +223,18 @@ impl Pages {
             self.list.remove(n);
         }
     }
+}
+
+/// One draw of a chunk run: the page's vertex buffer, the shared quad index buffer, the chunk (`slot` for wgpu, `origin` for GL) and the
+/// index range.
+pub struct Run<'a> {
+    pub vbuf: &'a Buf,
+    pub quads: &'a Buf,
+    pub page: u32,
+    pub slot: u32,
+    pub origin: [f32; 3],
+    pub first: u32,
+    pub end: u32,
 }
 
 /// The render layers of a chunk mesh (Sodium's passes): opaque faces, alpha-tested faces, translucent water.
@@ -1229,16 +1245,38 @@ impl ChunkManager {
         self.drawn(k) && self.wet.get(&k).is_some_and(|m| (0..SECTIONS as i32).contains(&sy) && m >> sy & 1 != 0)
     }
 
-    /// The main pass's draw loop: draws every run of neighbouring sections `update_visible` found (empty sections are skipped, touching ones
-    /// are one range, so a chunk is mostly one draw), for one render `Layer`. The shared index buffer is bound once, a page's vertex buffer once per
+    /// The main pass's draw loop for the wgpu renderer: `for_each_run`, binding the shared index buffer once, a page's vertex buffer once per
     /// page, and a chunk's origin (`origins`, group 1) once per chunk.
     pub fn draw_ranges(&self, layer: Layer, rp: &mut wgpu::RenderPass<'_>, origins: &DrawOrigins) {
+        let (mut page, mut slot, mut quads) = (None, None, false);
+        self.for_each_run(layer, |r| {
+            if !quads {
+                rp.set_index_buffer(r.quads.wgpu().slice(..), wgpu::IndexFormat::Uint32);
+                quads = true;
+            }
+            if page != Some(r.page) {
+                rp.set_vertex_buffer(0, r.vbuf.wgpu().slice(..));
+                page = Some(r.page);
+            }
+            if slot != Some(r.slot) {
+                rp.set_bind_group(1, &origins.group, &[DrawOrigins::offset(r.slot)]);
+                slot = Some(r.slot);
+            }
+            rp.draw_indexed(r.first..r.end, 0, 0..1); // the shared indices name the page's vertices by their absolute number
+        });
+    }
+
+    /// Every run of neighbouring sections `update_visible` found (empty sections are skipped, touching ones are one range, so a chunk is
+    /// mostly one run), for one render `Layer`, in draw order. Both renderers walk this. Opaque terrain goes near to far inside each page, so
+    /// what is drawn first hides the rest from the depth test (early-Z / the tiler's hidden-surface removal); translucent water blends over
+    /// what is behind it, so it goes far to near across pages (with the LoD on it only reaches `WATER_RANGE`, a few chunks).
+    /// ponytail: whole chunks only, the faces inside one chunk keep map order; upgrade = sort the sections / faces too.
+    pub fn for_each_run(&self, layer: Layer, mut f: impl FnMut(Run)) {
         let water = layer == Layer::Water;
         let masks = if water { &self.wet } else { &self.visible }; // real water only within `wr` (`update_visible`)
-        let mut bound: Option<u32> = None; // a layer starts from whatever the previous draw left bound
-        let mut quads_bound = false;
+        let Some(quads) = self.pages.quads.as_ref() else { return };
         // One chunk: its runs of sections in `layer`, only if it lives in page `only` (None = any).
-        let mut visit = |rp: &mut wgpu::RenderPass<'_>, k: &Key, only: Option<u32>| {
+        let mut visit = |k: &Key, only: Option<u32>| {
             let (Some(&mask), Some(e)) = (masks.get(k), self.chunks.get(k)) else { return };
             let Some(m) = e.mesh.as_ref().filter(|m| only.map_or(true, |p| p == m.page)) else { return };
             let starts = match (layer, &m.water) {
@@ -1247,48 +1285,29 @@ impl ChunkManager {
                 (Layer::Solid, _) => &m.starts,
                 (Layer::Cutout, _) => &m.cut,
             };
+            let Some(p) = self.pages.get(m.page) else { return };
             let mut run: Option<(u32, u32)> = None;
-            let mut grouped = false;
             for s in 0..=SECTIONS {
                 let on = s < SECTIONS && starts[s + 1] > starts[s] && mask >> s & 1 != 0;
                 match (on, run) {
                     (true, None) => run = Some((starts[s], starts[s + 1])),
                     (true, Some((a, _))) => run = Some((a, starts[s + 1])),
                     (false, Some((a, b))) => {
-                        if !quads_bound {
-                            let Some(q) = self.pages.quads.as_ref() else { return };
-                            rp.set_index_buffer(q.slice(..), wgpu::IndexFormat::Uint32);
-                            quads_bound = true;
-                        }
-                        if bound != Some(m.page) {
-                            let Some(p) = self.pages.get(m.page) else { return };
-                            rp.set_vertex_buffer(0, p.vbuf.slice(..));
-                            bound = Some(m.page);
-                        }
-                        if !grouped {
-                            rp.set_bind_group(1, &origins.group, &[DrawOrigins::offset(m.slot)]);
-                            grouped = true;
-                        }
-                        rp.draw_indexed(a..b, 0, 0..1); // the shared indices name the page's vertices by their absolute number
+                        f(Run { vbuf: &p.vbuf, quads, page: m.page, slot: m.slot, origin: m.origin, first: a, end: b });
                         run = None;
                     }
                     _ => {}
                 }
             }
         };
-        // `order` (near to far, from `update_visible`). Opaque terrain goes near to far inside each page, so what is drawn first hides the rest
-        // from the depth test (early-Z / the tiler's hidden-surface removal); translucent water blends over what is behind it, so it goes far to
-        // near across pages (with the LoD on it only reaches `WATER_RANGE`, a few chunks, so it hardly switches pages).
-        // ponytail: whole chunks only, the faces inside one chunk keep map order; upgrade = sort the sections / faces too. The opaque order is
-        // near to far per page, not globally: a page's chunks all come before the next page's.
         if water {
             for k in self.order.iter().rev() {
-                visit(rp, k, None);
+                visit(k, None);
             }
         } else {
             for p in &self.pages.list {
                 for k in &self.order {
-                    visit(rp, k, Some(p.id));
+                    visit(k, Some(p.id));
                 }
             }
         }
@@ -1304,7 +1323,7 @@ impl ChunkManager {
     }
 
     /// Call once per frame with the player's chunk.
-    pub fn update(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, origins: &DrawOrigins, cx: i32, cz: i32) {
+    pub fn update(&mut self, gfx: Gfx, origins: Option<&DrawOrigins>, cx: i32, cz: i32) {
         let t0 = std::time::Instant::now();
         if let Some(last) = self.last_update.replace(t0) {
             self.frame_ns = Some(upload_budget::next_average_frame(self.frame_ns, t0.duration_since(last).as_nanos() as f64));
@@ -1316,7 +1335,7 @@ impl ChunkManager {
         self.light_pending(cx, cz);
         let lit = t0.elapsed();
         // A new chunk waits for the light thread to settle, so it is meshed once, lit; an edited one does not (`mesh_pending`).
-        let built = self.mesh_pending(device, queue, origins, cx, cz, self.light_settled());
+        let built = self.mesh_pending(gfx, origins, cx, cz, self.light_settled());
         let total = t0.elapsed();
         if total >= SLOW_CHUNK_WORK {
             log::warn!("slow chunk work {total:?}: stream + populate {populated:?}, light done at {lit:?}, {built} mesh(es)");
@@ -1481,7 +1500,7 @@ impl ChunkManager {
     /// chunk (`urgent`) does not: a broken block was visible for as long as the engine was busy (first light of the chunks streaming
     /// in keeps it busy for seconds), then a frame for the report, then the job. Its mesh takes the light as it is, and the engine's
     /// `stale` report queues the second, lit one. ponytail: two meshes per edit while the engine is busy, one when it is not.
-    fn mesh_pending(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, origins: &DrawOrigins, cx: i32, cz: i32, settled: bool) -> usize {
+    fn mesh_pending(&mut self, gfx: Gfx, origins: Option<&DrawOrigins>, cx: i32, cz: i32, settled: bool) -> usize {
         self.urgent.retain(|k| self.chunks.contains_key(k));
         let mut budget = UploadBudget::limited(upload_budget::frame_duration_budget(self.frame_ns.unwrap_or(FIRST_FRAME_NS)), UPLOAD_SIZE_LIMIT);
         let mut uploaded = 0;
@@ -1503,7 +1522,7 @@ impl ChunkManager {
             let Built { verts, starts, cut, wstarts, vis } = b;
             let pages_before = self.pages.list.len();
             let t = std::time::Instant::now();
-            let put = if verts.is_empty() { None } else { Some(self.pages.put(device, queue, origins, &verts, key)) };
+            let put = if verts.is_empty() { None } else { Some(self.pages.put(gfx, origins, &verts, key)) };
             let spent = t.elapsed().as_nanos() as u64;
             budget.consume(spent, bytes);
             if matches!(put, Some(Some(_))) && self.pages.list.len() == pages_before {
@@ -1518,6 +1537,7 @@ impl ChunkManager {
                         page,
                         v,
                         slot,
+                        origin: [key.0 as f32 * 16.0, 0.0, key.1 as f32 * 16.0],
                         index_count: cut[SECTIONS] * quad_index::ELEMENTS_PER_QUAD,
                         starts: starts.map(|q| at(q)),
                         cut: cut.map(|q| at(q)),
@@ -2095,15 +2115,15 @@ mod tests {
         let origins = crate::gpu::pipeline::ChunkPipeline::new(&device).origins;
         let mut pages = Pages::default();
         let quad = vec![[0u8; vertex::STRIDE]; 4];
-        let put = |p: &mut Pages| p.put(&device, &queue, &origins, &quad, (1, 2)).unwrap();
+        let put = |p: &mut Pages| p.put(Gfx::Wgpu(&device, &queue), Some(&origins), &quad, (1, 2)).unwrap();
         let (pa, va, sa) = put(&mut pages);
         let (pb, vb, sb) = put(&mut pages);
         assert_eq!((pa, pb, pages.list.len()), (0, 0, 1));
         assert!(va != vb && sa != sb && va % 4 == 0 && vb % 4 == 0, "whole quads, one slot each");
         assert!(pages.quads.is_some(), "the shared index buffer exists once a mesh is in");
-        let at = |page, v, slot| Mesh { page, v, slot, index_count: 6, starts: [0; SECTIONS + 1], cut: [0; SECTIONS + 1], water: None, vis: [0; SECTIONS] };
+        let at = |page, v, slot| Mesh { page, v, slot, origin: [0.0; 3], index_count: 6, starts: [0; SECTIONS + 1], cut: [0; SECTIONS + 1], water: None, vis: [0; SECTIONS] };
         pages.free(&at(pa, va, sa));
         assert_eq!(put(&mut pages), (pa, va, sa), "the run and the slot come back");
-        assert!(pages.put(&device, &queue, &origins, &vec![[0u8; vertex::STRIDE]; PAGE_VERTS as usize + 4], (0, 0)).is_none());
+        assert!(pages.put(Gfx::Wgpu(&device, &queue), Some(&origins), &vec![[0u8; vertex::STRIDE]; PAGE_VERTS as usize + 4], (0, 0)).is_none());
     }
 }

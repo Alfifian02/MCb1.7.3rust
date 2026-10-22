@@ -27,7 +27,7 @@ const SH_WGSL: &str = include_str!("sky_sh.wgsl");
 const LUT_DAT: &[u8] = include_bytes!("../../assets/scattering.dat");
 const NOISE: &[u8] = include_bytes!("../../assets/noise.rgba");
 /// The sun and the full moon, 32 x 32 each side by side (`tools/gen_celestial.py`).
-const CELESTIAL: &[u8] = include_bytes!("../../assets/celestial.rgba");
+pub(crate) const CELESTIAL: &[u8] = include_bytes!("../../assets/celestial.rgba");
 /// The LUT of `image/atmosphere/scattering.dat`: RGB16F, x = 2 x 16 (nu; Rayleigh half, Mie half), y = 64 (mu), z = 32 (mu_s).
 const LUT_SIZE: (u32, u32, u32) = (32, 64, 32);
 const NOISE_SIZE: u32 = 512;

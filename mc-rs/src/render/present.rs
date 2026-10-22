@@ -33,13 +33,13 @@ pub fn msaa_want() -> u32 {
 
 /// ponytail: Adreno below 620 (5xx, 610..619) is the low end where 4x MSAA of colour + `Depth32Float` costs more than it gives; a name
 /// heuristic, not a measurement (no other GPU family is guessed at: `msaa:` in options.txt covers them).
-fn weak_gpu(name: &str) -> bool {
+pub(crate) fn weak_gpu(name: &str) -> bool {
     let n = name.find("Adreno").map(|i| &name[i + 6..]).unwrap_or("");
     n.trim_start_matches(|c: char| !c.is_ascii_digit()).chars().take_while(char::is_ascii_digit).collect::<String>().parse::<u32>().is_ok_and(|m| m < 620)
 }
 
 /// The sample count for a `want` (0 = Auto: `MSAA_WANT`, or 1 on a `weak` GPU), stepped down to the first one `ok` allows (4, 2, 1).
-fn resolve(want: u32, weak: bool, ok: impl Fn(u32) -> bool) -> u32 {
+pub(crate) fn resolve(want: u32, weak: bool, ok: impl Fn(u32) -> bool) -> u32 {
     let want = match want { 0 if weak => 1, 0 => MSAA_WANT, w => w };
     [4, 2].into_iter().find(|&n| n <= want && ok(n)).unwrap_or(1)
 }
@@ -92,7 +92,7 @@ pub fn set_fast_post(b: bool) {
 }
 
 /// Fast for a `want` of 2, or for Auto (0) on a `weak` GPU; Full otherwise.
-fn resolve_post(want: u32, weak: bool) -> bool {
+pub(crate) fn resolve_post(want: u32, weak: bool) -> bool {
     match want { 0 => weak, 2 => true, _ => false }
 }
 

@@ -3,6 +3,7 @@
 //! ponytail: no spin (needs rotated boxes), flat full brightness, no 2nd/3rd copy for big stacks; M14 draws
 //! real item sprites.
 
+use crate::gpu::gfx::{Buf, Gfx};
 use crate::render::atlas;
 use crate::render::mesh::{lm, push_box, push_face, VF, WHITE};
 use crate::world::boat::Boat;
@@ -46,16 +47,15 @@ pub struct SignView<'a> {
 }
 
 pub struct ItemMesh {
-    pub vbuf: wgpu::Buffer,
-    pub ibuf: wgpu::Buffer,
+    pub vbuf: Buf,
+    pub ibuf: Buf,
     /// The sign text kept between frames (`SignCache`); a `Mutex` only so `update` keeps `&self`.
     signs: Mutex<SignCache>,
 }
 
 impl ItemMesh {
-    pub fn new(device: &wgpu::Device) -> Self {
-        let buf = |label, size, usage| device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size, usage: usage | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
-        Self { vbuf: buf("items_vbuf", VERTEX_BYTES, wgpu::BufferUsages::VERTEX), ibuf: buf("items_ibuf", INDEX_BYTES, wgpu::BufferUsages::INDEX), signs: Mutex::default() }
+    pub fn new(gfx: Gfx) -> Self {
+        Self { vbuf: gfx.writable(VERTEX_BYTES, false), ibuf: gfx.writable(INDEX_BYTES, true), signs: Mutex::default() }
     }
 
     /// Signs whose text is kept (the `FPS:` log line).
@@ -65,13 +65,13 @@ impl ItemMesh {
 
     /// Upload this frame's items; returns the index count to draw.
     /// `lv` = raw (sky, block) light of a cell: every entity is lit by its own cell.
-    pub fn update(&self, queue: &wgpu::Queue, drops: &Drops, mobs: &Mobs, falling: &[Falling], fx: &Effects, lv: &dyn Fn(i32, i32, i32) -> (u8, u8), hook: Option<Vec3>, paintings: &[Painting], signs: &[SignView], boats: (&[Boat], f32), carts: (&[Cart], f32), player: Option<&crate::render::player::View>, hand: Option<&crate::render::player::Hand>, eye: Vec3, seen: &dyn Fn(Vec3, f32) -> bool) -> u32 {
+    pub fn update(&self, gfx: Gfx, drops: &Drops, mobs: &Mobs, falling: &[Falling], fx: &Effects, lv: &dyn Fn(i32, i32, i32) -> (u8, u8), hook: Option<Vec3>, paintings: &[Painting], signs: &[SignView], boats: (&[Boat], f32), carts: (&[Cart], f32), player: Option<&crate::render::player::View>, hand: Option<&crate::render::player::Hand>, eye: Vec3, seen: &dyn Fn(Vec3, f32) -> bool) -> u32 {
         let (verts, idxs) = geometry(drops, mobs, falling, fx, lv, hook, paintings, signs, boats, carts, player, hand, eye, seen, &mut self.signs.lock().unwrap_or_else(|e| e.into_inner()));
         if idxs.is_empty() {
             return 0;
         }
-        queue.write_buffer(&self.vbuf, 0, bytemuck::cast_slice(&verts));
-        queue.write_buffer(&self.ibuf, 0, bytemuck::cast_slice(&idxs));
+        gfx.write(&self.vbuf, 0, bytemuck::cast_slice(&verts));
+        gfx.write(&self.ibuf, 0, bytemuck::cast_slice(&idxs));
         idxs.len() as u32
     }
 }
