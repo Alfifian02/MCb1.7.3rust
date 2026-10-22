@@ -45,7 +45,7 @@ pub(crate) fn resolve(want: u32, weak: bool, ok: impl Fn(u32) -> bool) -> u32 {
 }
 
 /// Sample count of every scene-pass pipeline and of the colour / depth targets (`Gpu::create_depth`, `Present`). Set once by
-/// `Gpu::try_init` before any of them is built; 1 until then (the headless tests run with 1).
+/// `Gpu::try_init` (the GLES `Renderer::new` too, for the debug screen) before any of them is built; 1 until then (the headless tests run with 1).
 static SCENE_SAMPLES: AtomicU32 = AtomicU32::new(1);
 
 pub fn scene_samples() -> u32 {
@@ -72,7 +72,7 @@ pub fn pick_samples(adapter: &wgpu::Adapter) -> u32 {
 /// What the player asked for in `options.txt` (`post:`), set once before the GPU is built: 0 Auto, 1 Full, 2 Fast.
 static POST_WANT: AtomicU32 = AtomicU32::new(0);
 
-/// Whether the final pass skips FXAA and CAS; set once by `Gpu::try_init` (`pick_fast`), false until then.
+/// Whether the final pass skips FXAA and CAS; set once by `Gpu::try_init` (`pick_fast`; the GLES `Renderer::new` too), false until then.
 static FAST_POST: AtomicBool = AtomicBool::new(false);
 
 pub fn set_post_want(n: u32) {

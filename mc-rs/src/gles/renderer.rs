@@ -144,6 +144,8 @@ impl Renderer {
         let weak = present::weak_gpu(&gl.name);
         let samples = present::resolve(present::msaa_want(), weak, |n| n as i32 <= gl.max_samples);
         let fast = present::resolve_post(present::post_want(), weak);
+        present::set_scene_samples(samples);
+        present::set_fast_post(fast);
         log::info!("GLES init: scene MSAA x{samples}, final pass {}", if fast { "fast (no FXAA/CAS)" } else { "full" });
         let a2c = samples > 1;
         let mut chunk = Vec::new();

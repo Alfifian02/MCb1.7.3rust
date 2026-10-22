@@ -39,6 +39,8 @@ pub enum Opt {
     /// Added: the final pass, Auto / Full (FXAA + CAS) / Fast (neither). Read once at start-up, like MSAA.
     Post,
     Renderer,
+    /// Added: the scene scale follows the GPU load (`gpu::context::Drs`) or stays at `START_PCT`. Takes effect at once.
+    DynamicRes,
 }
 
 impl Opt {
@@ -67,6 +69,7 @@ impl Opt {
             Opt::Msaa => "MSAA",
             Opt::Post => "Post",
             Opt::Renderer => "Renderer",
+            Opt::DynamicRes => "Dynamic Res",
         }
     }
 }
@@ -125,9 +128,11 @@ pub struct Settings {
     pub pad: PadCfg,
     /// The far terrain is drawn (the extra `LoD` button).
     pub lod: bool,
+    /// The debug screen (`render::debug`) is drawn instead of the FPS counter (the pause menu's `Info` button, `debugScreen` in options.txt).
+    pub debug_screen: bool,
     /// Log a backtrace with every wgpu error, at most one a second (`gpu::context::set_error_trace`); a debug switch with no button.
     pub gpu_error_trace: bool,
-    /// The scene scale follows the GPU load (`gpu::context::Drs`); `dynamicRes:false` pins it at `START_PCT`. No button.
+    /// The scene scale follows the GPU load (`gpu::context::Drs`); off (`dynamicRes:false`, the Video Settings button) it stays at `START_PCT`.
     pub dynamic_res: bool,
     /// MSAA samples for the next start: 0 Auto (`present::pick_samples` decides by GPU), 1, 2 or 4 (`msaa:` in options.txt).
     pub msaa: u8,
@@ -158,6 +163,7 @@ impl Default for Settings {
             keys: KEY_DEFAULT,
             pad: PadCfg::default(),
             lod: true,
+            debug_screen: false,
             gpu_error_trace: false,
             dynamic_res: true,
             msaa: 0,
@@ -192,6 +198,7 @@ impl Settings {
                 ("fancyGraphics", ..) => s.fancy_graphics = b,
                 ("ao", ..) => s.ambient_occlusion = b,
                 ("lod", ..) => s.lod = b,
+                ("debugScreen", ..) => s.debug_screen = b,
                 ("gpuErrorTrace", ..) => s.gpu_error_trace = b,
                 ("dynamicRes", ..) => s.dynamic_res = b,
                 ("msaa", _, Some(n)) if matches!(n, 0 | 1 | 2 | 4) => s.msaa = n,
@@ -212,8 +219,8 @@ impl Settings {
     pub fn save(&self) {
         let Some(p) = &self.path else { return };
         let mut t = format!(
-            "music:{}\nsound:{}\ninvertYMouse:{}\nmouseSensitivity:{}\nviewDistance:{}\nguiScale:{}\nbobView:{}\nanaglyph3d:{}\nadvancedOpengl:{}\nfpsLimit:{}\ndifficulty:{}\nfancyGraphics:{}\nao:{}\nlod:{}\ndigDelay:{}\ngpuErrorTrace:{}\ndynamicRes:{}\nmsaa:{}\npost:{}\nrenderer:{}\n",
-            self.music, self.sound, self.invert_mouse, self.sensitivity, self.render_distance, self.gui_scale, self.view_bobbing, self.anaglyph, self.advanced_opengl, self.limit_framerate, self.difficulty, self.fancy_graphics, self.ambient_occlusion, self.lod, self.dig_delay, self.gpu_error_trace, self.dynamic_res, self.msaa, self.post, self.renderer
+            "music:{}\nsound:{}\ninvertYMouse:{}\nmouseSensitivity:{}\nviewDistance:{}\nguiScale:{}\nbobView:{}\nanaglyph3d:{}\nadvancedOpengl:{}\nfpsLimit:{}\ndifficulty:{}\nfancyGraphics:{}\nao:{}\nlod:{}\ndigDelay:{}\ngpuErrorTrace:{}\ndynamicRes:{}\nmsaa:{}\npost:{}\nrenderer:{}\ndebugScreen:{}\n",
+            self.music, self.sound, self.invert_mouse, self.sensitivity, self.render_distance, self.gui_scale, self.view_bobbing, self.anaglyph, self.advanced_opengl, self.limit_framerate, self.difficulty, self.fancy_graphics, self.ambient_occlusion, self.lod, self.dig_delay, self.gpu_error_trace, self.dynamic_res, self.msaa, self.post, self.renderer, self.debug_screen
         );
         for (id, code) in KEY_IDS.iter().zip(self.keys) {
             t.push_str(&format!("key_key.{id}:{code}\n"));
@@ -282,6 +289,7 @@ impl Settings {
             Opt::Msaa => self.msaa = match self.msaa { 0 => 1, 1 => 2, 2 => 4, _ => 0 },
             Opt::Post => self.post = (self.post + 1) % 3,
             Opt::Renderer => self.renderer = (self.renderer + 1) % 3,
+            Opt::DynamicRes => self.dynamic_res = !self.dynamic_res,
             _ => {}
         }
         self.save();
@@ -307,6 +315,7 @@ impl Settings {
                 Opt::Anaglyph => onoff(self.anaglyph).into(),
                 Opt::AdvancedOpengl => onoff(self.advanced_opengl).into(),
                 Opt::AmbientOcclusion => onoff(self.ambient_occlusion).into(),
+                Opt::DynamicRes => onoff(self.dynamic_res).into(),
                 Opt::RenderDistance => ["Far", "Normal", "Short", "Tiny"][self.render_distance.min(3) as usize].into(),
                 Opt::Difficulty => ["Peaceful", "Easy", "Normal", "Hard"][self.difficulty.min(3) as usize].into(),
                 Opt::GuiScale => ["Auto", "Small", "Normal", "Large"][self.gui_scale.min(3) as usize].into(),
@@ -456,7 +465,7 @@ impl OptionsUi {
                 w.push(wide(Act::Controls, top + 120.0 + 12.0, "Controls..."));
                 w
             }
-            OptScr::Video => opts(&[Opt::Graphics, Opt::RenderDistance, Opt::AmbientOcclusion, Opt::FramerateLimit, Opt::Anaglyph, Opt::ViewBobbing, Opt::GuiScale, Opt::AdvancedOpengl, Opt::Msaa, Opt::Post, Opt::Renderer]),
+            OptScr::Video => opts(&[Opt::Graphics, Opt::RenderDistance, Opt::AmbientOcclusion, Opt::FramerateLimit, Opt::Anaglyph, Opt::ViewBobbing, Opt::GuiScale, Opt::AdvancedOpengl, Opt::Msaa, Opt::Post, Opt::Renderer, Opt::DynamicRes]),
             OptScr::Controls => (0..KEY_NAMES.len())
                 .map(|i| {
                     let name = key_name(st.keys[i]);
@@ -628,6 +637,8 @@ pub struct PauseInfo {
     /// `Lod::debug`.
     pub debug: u8,
     pub flying: bool,
+    /// `Settings::debug_screen`.
+    pub info: bool,
 }
 
 /// What a pause-menu button asks of the game.
@@ -638,6 +649,7 @@ pub enum PauseEv {
     Pregen,
     Fly,
     LodDebug,
+    Info,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -650,6 +662,7 @@ enum PAct {
     Pregen,
     Fly,
     Debug,
+    Info,
 }
 
 /// `GuiIngameMenu` (and the death screen, `GuiGameOver`, which shares it).
@@ -701,6 +714,7 @@ impl Pause {
         v.push((PAct::Pregen, [2.0, 2.0, 230.0, 20.0], pregen, true));
         v.push((PAct::Fly, [236.0, 2.0, 70.0, 20.0], if info.flying { "Fly: on" } else { "Fly: off" }.to_string(), true));
         v.push((PAct::Debug, [2.0, 24.0, 230.0, 20.0], debug.to_string(), true));
+        v.push((PAct::Info, [236.0, 24.0, 70.0, 20.0], if info.info { "Info: on" } else { "Info: off" }.to_string(), true));
         v
     }
 
@@ -725,6 +739,7 @@ impl Pause {
                     PAct::Pregen => Some(PauseEv::Pregen),
                     PAct::Fly => Some(PauseEv::Fly),
                     PAct::Debug => Some(PauseEv::LodDebug),
+                    PAct::Info => Some(PauseEv::Info),
                     PAct::Options => {
                         self.opt = Some(OptionsUi::new());
                         None
@@ -770,7 +785,7 @@ impl Pause {
         }
         for (act, r, label, on) in Self::buttons(gw, gh, info) {
             let over = self.finger.is_some_and(|(x, y)| inside(r, x, y));
-            let lit = (act == PAct::Pregen && info.pregen.is_some_and(|p| p.0)) || (act == PAct::Fly && info.flying) || (act == PAct::Debug && info.debug != 0);
+            let lit = (act == PAct::Pregen && info.pregen.is_some_and(|p| p.0)) || (act == PAct::Fly && info.flying) || (act == PAct::Debug && info.debug != 0) || (act == PAct::Info && info.info);
             button(v, s, r, &label, on, over || lit, None);
         }
     }
@@ -830,11 +845,12 @@ mod tests {
         (st.sensitivity, st.invert_mouse, st.render_distance, st.lod, st.keys[4]) = (0.25, true, 0, false, 50);
         assert!(!st.gpu_error_trace, "a debug switch: off until options.txt says so");
         assert!(st.dynamic_res, "on until options.txt says otherwise");
-        (st.gpu_error_trace, st.dynamic_res) = (true, false);
+        assert!(!st.debug_screen, "off until the Info button or options.txt says so");
+        (st.gpu_error_trace, st.dynamic_res, st.debug_screen) = (true, false, true);
         st.save();
         let back = Settings::load(&root);
         assert_eq!((back.sensitivity, back.invert_mouse, back.render_distance, back.lod, back.keys[4]), (0.25, true, 0, false, 50));
-        assert!(back.gpu_error_trace && !back.dynamic_res);
+        assert!(back.gpu_error_trace && !back.dynamic_res && back.debug_screen);
         assert_eq!(back.msaa, 0, "Auto until options.txt says otherwise");
         assert!(std::fs::read_to_string(root.join("options.txt")).unwrap().contains("key_key.jump:50"));
     }
@@ -879,6 +895,8 @@ mod tests {
         assert_eq!(o.scr, OptScr::Video);
         tap(&mut o, &mut st, "Render Distance: Short");
         assert_eq!(st.render_distance, 3);
+        tap(&mut o, &mut st, "Dynamic Res: ON");
+        assert!(!st.dynamic_res && st.text(Opt::DynamicRes) == "Dynamic Res: OFF");
         tap(&mut o, &mut st, "Done");
         assert_eq!(o.scr, OptScr::Main);
         tap(&mut o, &mut st, "Controls...");
@@ -969,7 +987,7 @@ mod tests {
     fn pause_menu_buttons() {
         let mut st = Settings::default();
         let mut p = Pause::new();
-        let info = PauseInfo { dead: false, pregen: Some((false, 3)), debug: 0, flying: false };
+        let info = PauseInfo { dead: false, pregen: Some((false, 3)), debug: 0, flying: false, info: false };
         let (_, gw, gh) = scaled_gs(SZ.0, SZ.1, 0);
         let press = |p: &mut Pause, st: &mut Settings, label: &str| {
             let b = Pause::buttons(gw, gh, &info).into_iter().find(|b| b.2 == label).unwrap_or_else(|| panic!("no {label}"));
@@ -982,6 +1000,7 @@ mod tests {
         assert_eq!(press(&mut p, &mut st, "Pregen: off, 3 chunks"), Some(PauseEv::Pregen));
         assert_eq!(press(&mut p, &mut st, "Fly: off"), Some(PauseEv::Fly));
         assert_eq!(press(&mut p, &mut st, "LoD debug: off"), Some(PauseEv::LodDebug));
+        assert_eq!(press(&mut p, &mut st, "Info: off"), Some(PauseEv::Info));
         assert_eq!(press(&mut p, &mut st, "Achievements"), None, "greyed out");
         assert_eq!(press(&mut p, &mut st, "Options..."), None);
         assert!(p.opt.is_some());

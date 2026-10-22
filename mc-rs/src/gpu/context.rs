@@ -50,7 +50,7 @@ impl HasWindowHandle for AndroidWindow {
 
 /// Internal render resolution as a fraction of the surface: the scene pass (colour + depth) runs at this size and the
 /// final pass upscales (bilinear + CAS). 1.0 = native. Low-end phones (Mali-G52 class) are fill-rate bound: 0.67 is 2.2x fewer pixels.
-/// This is where it starts (and stays with `dynamicRes:false`); `Drs` moves it.
+/// This is where it starts (and stays while Dynamic Res is off); `Drs` moves it.
 pub const START_PCT: u32 = 67;
 pub const RENDER_SCALE: f32 = START_PCT as f32 / 100.0;
 pub const SCALE_MIN: u32 = 50;
@@ -61,9 +61,13 @@ pub fn set_scale_pct(p: u32) {
     SCALE_PCT.store(p.clamp(SCALE_MIN, SCALE_MAX), Ordering::Relaxed);
 }
 
+pub fn scale_pct() -> u32 {
+    SCALE_PCT.load(Ordering::Relaxed)
+}
+
 /// The scene size for a surface of `w` x `h` at the current scale.
 pub fn scene_size(w: u32, h: u32) -> (u32, u32) {
-    let s = SCALE_PCT.load(Ordering::Relaxed) as f32 / 100.0;
+    let s = scale_pct() as f32 / 100.0;
     (((w as f32 * s).round() as u32).max(1), ((h as f32 * s).round() as u32).max(1))
 }
 

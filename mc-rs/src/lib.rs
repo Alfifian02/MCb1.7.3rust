@@ -32,6 +32,7 @@ use crate::backend::Backend;
 use crate::gpu::context::Drs;
 use crate::gpu::gfx::{Drawn, WorldDraw};
 use crate::render::atlas;
+use crate::render::debug::Row;
 use crate::render::items::{ItemMesh, SignView};
 use crate::render::camera::{FirstPersonCamera, Frustum};
 use crate::render::outline::Outline;
@@ -600,6 +601,10 @@ impl App {
                         }
                     }
                     PauseEv::Fly => self.touch.flying = !self.touch.flying,
+                    PauseEv::Info => {
+                        self.opts.debug_screen = !self.opts.debug_screen;
+                        self.opts.save();
+                    }
                     PauseEv::LodDebug => {
                         if let Some(l) = self.lod.as_mut() {
                             l.cycle_debug();
@@ -2027,6 +2032,11 @@ impl App {
                 self.be.rescale();
                 log::info!("dynamic resolution: scene at {p}%");
             }
+        } else if crate::gpu::context::scale_pct() != crate::gpu::context::START_PCT {
+            // Switched off in Video Settings: pin the scene at `START_PCT` again and start `Drs` from there for the next switch-on.
+            crate::gpu::context::set_scale_pct(crate::gpu::context::START_PCT);
+            self.be.rescale();
+            self.drs = Drs::new(crate::gpu::context::START_PCT);
         }
 
         self.frames += 1;
@@ -2102,11 +2112,77 @@ impl App {
     }
 
     fn pause_info(&self) -> PauseInfo {
-        PauseInfo { dead: self.vitals.dead(), pregen: self.lod.as_ref().map(|l| l.pregen()), debug: self.lod.as_ref().map_or(0, |l| l.debug()), flying: self.touch.flying }
+        PauseInfo { dead: self.vitals.dead(), pregen: self.lod.as_ref().map(|l| l.pregen()), debug: self.lod.as_ref().map_or(0, |l| l.debug()), flying: self.touch.flying, info: self.opts.debug_screen }
     }
 
     fn on_motion(&mut self, ev: &android_activity::input::MotionEvent) {
         self.touch.handle_motion(ev);
+    }
+
+    /// The rows of the debug screen (`render::debug`): left = the player and the world, right = the engine. Only built while it is on
+    /// and the game is not paused. ponytail: `meshed()` walks the chunk map once a frame (a few hundred entries) and the biome comes
+    /// from the cached one-column lookup the weather uses; neither is worth a counter of its own.
+    fn debug_rows(&mut self) -> (Vec<Row>, Vec<Row>) {
+        use crate::options::Opt;
+        use crate::render::debug::{bearing, clock, compass, fps_color, words, CYAN, GREEN, GREY, WHITE, YELLOW};
+        use crate::render::present::{fast_post, scene_samples};
+        let p = self.player.pos;
+        let feet = p.y - physics::HALF.y;
+        let (bx, by, bz) = (p.x.floor() as i32, feet.floor() as i32, p.z.floor() as i32);
+        let (sky, blk) = self.chunks.light_levels(bx, (p.y + EYE_HEIGHT).floor() as i32, bz);
+        let b = bearing(self.camera.yaw);
+        let weather = if self.weather.thunder(1.0) > 0.5 { "  thunder" } else if self.weather.rain(1.0) > 0.5 { "  rain" } else { "" };
+        let mut left = vec![
+            Row::Head("Minecraft b1.7.3 (mc-rs)".to_string()),
+            Row::Gap,
+            Row::Kv("XYZ", format!("{:.2} / {:.2} / {:.2}", p.x, feet, p.z), WHITE),
+            Row::Kv("Block", format!("{bx} {by} {bz}"), WHITE),
+            Row::Kv("Chunk", format!("{} {}  (in {} {})", bx >> 4, bz >> 4, bx & 15, bz & 15), WHITE),
+            // Pitch is shown up-positive (the camera's is down-positive).
+            Row::Kv("Facing", format!("{} ({b})  pitch {:+}", compass(b), (-self.camera.pitch.to_degrees()).round() as i32), WHITE),
+        ];
+        if !self.nether {
+            let biome = self.chunks.biomes(bx, bz, 1, 1).first().map_or("?".to_string(), |b| words(&format!("{b:?}")));
+            left.push(Row::Kv("Biome", biome, GREEN));
+        }
+        left.push(Row::Kv("Light", format!("sky {sky}  block {blk}"), WHITE));
+        left.push(Row::Kv("Time", format!("{}{weather}", clock(self.world_ticks as u64)), WHITE));
+        left.push(match self.target {
+            Some(h) => {
+                let (x, y, z) = h.pos;
+                let id = self.chunks.block(x, y, z).unwrap_or(0);
+                let name = crate::world::names::NAMES.binary_search_by_key(&(id as u16), |e| e.0).map_or_else(|_| format!("id {id}"), |i| crate::world::names::NAMES[i].1.to_string());
+                Row::Kv("Looking at", format!("{name} ({x} {y} {z})"), CYAN)
+            }
+            None => Row::Kv("Looking at", "nothing in reach".to_string(), GREY),
+        });
+
+        let (w, h) = self.be.size();
+        let fps = self.fps_recent;
+        // A setting as its button shows it (`Settings::text`, "Name: value"), so the two never disagree; "(restart)" comes along.
+        let set = |o: Opt| self.opts.text(o).split_once(": ").map_or(String::new(), |t| t.1.to_lowercase());
+        let (sc, pct, ms) = (crate::gpu::context::scene_size(w, h), crate::gpu::context::scale_pct(), scene_samples());
+        let mut right = vec![
+            Row::Kv("FPS", format!("{fps}  (avg {})", self.fps_overall), fps_color(fps)),
+            Row::Kv("Frame", format!("cpu {} ms  worst {} ms", self.cpu_ms, self.worst_ms), WHITE),
+            Row::Kv("Screen", format!("{w}x{h}"), WHITE),
+            Row::Kv("Scene", format!("{}x{}  {pct}%", sc.0, sc.1), WHITE),
+            Row::Kv("Dyn. res", set(Opt::DynamicRes), WHITE),
+            Row::Kv("MSAA", format!("{}  [{}]", if ms > 1 { format!("{ms}x") } else { "off".into() }, set(Opt::Msaa)), WHITE),
+            Row::Kv("Post", format!("{}  [{}]", if fast_post() { "fast" } else { "full" }, set(Opt::Post)), WHITE),
+            Row::Kv("Renderer", self.be.gpu_info().chars().take(30).collect::<String>(), WHITE),
+            Row::Kv("Graphics", format!("{}, smooth lighting {}", set(Opt::Graphics), set(Opt::AmbientOcclusion)), WHITE),
+            Row::Kv("Perf", set(Opt::FramerateLimit), WHITE),
+            Row::Kv("Distance", format!("{} chunks", self.opts.chunks()), WHITE),
+            Row::Kv("Chunks", format!("{} loaded  {} meshed", self.chunks.loaded(), self.chunks.meshed()), WHITE),
+            Row::Kv("LoD", if self.lod_on { "on" } else { "off" }.to_string(), YELLOW),
+        ];
+        // The LoD debug mode that is on (the standalone title at the top centre is not drawn while this screen is).
+        if let Some((mode, title)) = self.lod.as_ref().map(|l| (l.debug(), l.debug_title())).filter(|t| t.0 != 0) {
+            right.push(Row::Kv("LoD debug", format!("{mode}: {}", title.split_once(": ").map_or(title, |t| t.1)), YELLOW));
+        }
+        right.push(Row::Kv("World", if self.nether { "Nether" } else { "Overworld" }.to_string(), WHITE));
+        (left, right)
     }
 
     /// Build the HUD vertex buffer for this frame. Called between the chunk
@@ -2115,6 +2191,9 @@ impl App {
         // `ext` reads all of `self`, so it is taken before `hud_verts` is borrowed mutably.
         let ext = self.screen.as_ref().and_then(|s| self.ext(s));
         let pause_info = self.pause_info();
+        // The debug screen replaces the FPS counter and the LoD debug title; its panels are not drawn under the pause menu.
+        let info_on = self.opts.debug_screen;
+        let dbg = if info_on && !self.touch.paused { Some(self.debug_rows()) } else { None };
         let v = &mut self.hud_verts;
         v.clear();
         let layout = &self.touch.layout;
@@ -2383,7 +2462,7 @@ impl App {
 
         // FPS counter, top-left. White = average over the last second, yellow = average since
         // the app started (includes the chunk loading at the start).
-        {
+        if !info_on {
             let dh = (self.be.size().1 as f32 * 0.05).max(14.0);
             let (fx, fy) = (self.be.size().0 as f32 * 0.07, dh * 0.6);
             HudPipeline::push_quad(v, fx - dh * 0.3, fy - dh * 0.3, dh * 5.2, dh * 5.3, [0.0, 0.0, 0.0, 0.5]);
@@ -2403,13 +2482,20 @@ impl App {
         }
 
         // The LoD debug mode that is on, centred at the top (also while playing, not only in the pause menu).
-        if let Some(title) = self.lod.as_ref().map(|l| l.debug_title()).filter(|t| !t.is_empty()) {
+        if let Some(title) = self.lod.as_ref().map(|l| l.debug_title()).filter(|t| !t.is_empty() && !info_on) {
             let (w, dh) = (self.be.size().0 as f32, (self.be.size().1 as f32 * 0.05).max(14.0));
             let tw = HudPipeline::text_width(title) as f32;
             let k = (dh / 10.0).min(w * 0.55 / tw);
             let (tx, ty) = (w * 0.5, dh * 0.45);
             HudPipeline::push_quad(v, tx - tw * k * 0.5 - k * 3.0, ty - k * 2.0, tw * k + k * 6.0, 8.0 * k + k * 4.0, [0.0, 0.0, 0.0, 0.55]);
             HudPipeline::push_text_centered(v, tx, ty, k, title, [1.0, 1.0, 0.4, 1.0]);
+        }
+
+        // The debug screen (`render::debug`): two panels in the GUI scale.
+        if let Some((left, right)) = &dbg {
+            let (w, h) = self.be.size();
+            let (k, ..) = crate::menu::scaled_gs(w as f32, h as f32, self.opts.gui_scale);
+            crate::render::debug::draw(v, w as f32, k, left, right);
         }
 
         // The game menu (`GuiIngameMenu`, the death screen when dead), over the dimmed frame.

@@ -17,6 +17,8 @@ Status: ditulis tanpa Rust toolchain. Belum dikompilasi dan belum dijalankan; ja
 
 Mode tidak tersimpan. Setelah aplikasi dimulai ulang, mode kembali mati.
 
+Kalau layar **Info** menyala (tombol `Info` di menu pause, sebelah kanan tombol LoD debug), nama mode muncul sebagai baris `LoD debug` di panel kanan, bukan di tengah atas layar. Panel itu juga menulis jarak render dan status LoD, jadi satu screenshot sudah cukup untuk melaporkan pengaturannya.
+
 ---
 
 ## 2. Empat mode

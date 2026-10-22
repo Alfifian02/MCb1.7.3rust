@@ -5,6 +5,7 @@ pub mod camera;
 pub mod color;
 pub mod mesh;
 pub mod hud;
+pub mod debug;
 pub mod font;
 pub mod outline;
 pub mod panorama;
