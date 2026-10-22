@@ -36,6 +36,8 @@ pub enum Opt {
     DigDelay,
     /// Added: samples per pixel of the scene pass (Auto, Off, 2x, 4x). Read once at start-up: the pipelines are built with it.
     Msaa,
+    /// Added: the final pass, Auto / Full (FXAA + CAS) / Fast (neither). Read once at start-up, like MSAA.
+    Post,
 }
 
 impl Opt {
@@ -62,6 +64,7 @@ impl Opt {
             Opt::GuiScale => "GUI Scale",
             Opt::DigDelay => "Dig Delay",
             Opt::Msaa => "MSAA",
+            Opt::Post => "Post",
         }
     }
 }
@@ -126,6 +129,8 @@ pub struct Settings {
     pub dynamic_res: bool,
     /// MSAA samples for the next start: 0 Auto (`present::pick_samples` decides by GPU), 1, 2 or 4 (`msaa:` in options.txt).
     pub msaa: u8,
+    /// The final pass for the next start: 0 Auto (`present::pick_fast` decides by GPU), 1 Full, 2 Fast (`post:` in options.txt).
+    pub post: u8,
     path: Option<PathBuf>,
 }
 
@@ -152,6 +157,7 @@ impl Default for Settings {
             gpu_error_trace: false,
             dynamic_res: true,
             msaa: 0,
+            post: 0,
             path: None,
         }
     }
@@ -184,6 +190,7 @@ impl Settings {
                 ("gpuErrorTrace", ..) => s.gpu_error_trace = b,
                 ("dynamicRes", ..) => s.dynamic_res = b,
                 ("msaa", _, Some(n)) if matches!(n, 0 | 1 | 2 | 4) => s.msaa = n,
+                ("post", _, Some(n)) if n <= 2 => s.post = n,
                 (k, ..) if k.starts_with("pad_") => s.pad.load(k, v),
                 _ => {
                     if let (Some(i), Ok(code)) = (KEY_IDS.iter().position(|id| k.strip_prefix("key_key.") == Some(*id)), v.parse::<u32>()) {
@@ -199,8 +206,8 @@ impl Settings {
     pub fn save(&self) {
         let Some(p) = &self.path else { return };
         let mut t = format!(
-            "music:{}\nsound:{}\ninvertYMouse:{}\nmouseSensitivity:{}\nviewDistance:{}\nguiScale:{}\nbobView:{}\nanaglyph3d:{}\nadvancedOpengl:{}\nfpsLimit:{}\ndifficulty:{}\nfancyGraphics:{}\nao:{}\nlod:{}\ndigDelay:{}\ngpuErrorTrace:{}\ndynamicRes:{}\nmsaa:{}\n",
-            self.music, self.sound, self.invert_mouse, self.sensitivity, self.render_distance, self.gui_scale, self.view_bobbing, self.anaglyph, self.advanced_opengl, self.limit_framerate, self.difficulty, self.fancy_graphics, self.ambient_occlusion, self.lod, self.dig_delay, self.gpu_error_trace, self.dynamic_res, self.msaa
+            "music:{}\nsound:{}\ninvertYMouse:{}\nmouseSensitivity:{}\nviewDistance:{}\nguiScale:{}\nbobView:{}\nanaglyph3d:{}\nadvancedOpengl:{}\nfpsLimit:{}\ndifficulty:{}\nfancyGraphics:{}\nao:{}\nlod:{}\ndigDelay:{}\ngpuErrorTrace:{}\ndynamicRes:{}\nmsaa:{}\npost:{}\n",
+            self.music, self.sound, self.invert_mouse, self.sensitivity, self.render_distance, self.gui_scale, self.view_bobbing, self.anaglyph, self.advanced_opengl, self.limit_framerate, self.difficulty, self.fancy_graphics, self.ambient_occlusion, self.lod, self.dig_delay, self.gpu_error_trace, self.dynamic_res, self.msaa, self.post
         );
         for (id, code) in KEY_IDS.iter().zip(self.keys) {
             t.push_str(&format!("key_key.{id}:{code}\n"));
@@ -267,6 +274,7 @@ impl Settings {
             Opt::Graphics => self.fancy_graphics = !self.fancy_graphics,
             Opt::AmbientOcclusion => self.ambient_occlusion = !self.ambient_occlusion,
             Opt::Msaa => self.msaa = match self.msaa { 0 => 1, 1 => 2, 2 => 4, _ => 0 },
+            Opt::Post => self.post = (self.post + 1) % 3,
             _ => {}
         }
         self.save();
@@ -300,6 +308,10 @@ impl Settings {
                 Opt::Msaa => {
                     let v = match self.msaa { 0 => "Auto", 1 => "Off", 2 => "2x", _ => "4x" };
                     if u32::from(self.msaa) != crate::render::present::msaa_want() { format!("{v} (restart)") } else { v.into() }
+                }
+                Opt::Post => {
+                    let v = ["Auto", "Full", "Fast"][self.post.min(2) as usize];
+                    if u32::from(self.post) != crate::render::present::post_want() { format!("{v} (restart)") } else { v.into() }
                 }
                 _ => (if self.fancy_graphics { "Fancy" } else { "Fast" }).into(),
             }
@@ -433,7 +445,7 @@ impl OptionsUi {
                 w.push(wide(Act::Controls, top + 120.0 + 12.0, "Controls..."));
                 w
             }
-            OptScr::Video => opts(&[Opt::Graphics, Opt::RenderDistance, Opt::AmbientOcclusion, Opt::FramerateLimit, Opt::Anaglyph, Opt::ViewBobbing, Opt::GuiScale, Opt::AdvancedOpengl, Opt::Msaa]),
+            OptScr::Video => opts(&[Opt::Graphics, Opt::RenderDistance, Opt::AmbientOcclusion, Opt::FramerateLimit, Opt::Anaglyph, Opt::ViewBobbing, Opt::GuiScale, Opt::AdvancedOpengl, Opt::Msaa, Opt::Post]),
             OptScr::Controls => (0..KEY_NAMES.len())
                 .map(|i| {
                     let name = key_name(st.keys[i]);
@@ -830,6 +842,20 @@ mod tests {
         assert_eq!(Settings::load(&root).msaa, 0);
         st.msaa = 4;
         assert!(st.text(Opt::Msaa).starts_with("MSAA: 4x"));
+    }
+
+    /// The Post button cycles Auto -> Full -> Fast -> Auto, reads back from options.txt, and a bad value falls back to Auto.
+    #[test]
+    fn post_option_cycles_and_round_trips() {
+        let root = tmp("post");
+        let mut st = Settings::load(&root);
+        let seen: Vec<u8> = (0..4).map(|_| { st.cycle(Opt::Post); st.post }).collect();
+        assert_eq!(seen, [1, 2, 0, 1]);
+        st.post = 2;
+        st.save();
+        assert_eq!(Settings::load(&root).post, 2);
+        std::fs::write(root.join("options.txt"), "post:3\n").unwrap();
+        assert_eq!(Settings::load(&root).post, 0);
     }
 
     /// Options -> LoD button -> Video Settings (cycle Render Distance) -> Done -> Controls (wait for a key) -> Done -> Done closes.

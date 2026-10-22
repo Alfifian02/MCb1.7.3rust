@@ -230,6 +230,7 @@ impl App {
         let opts = Settings::load(&dir);
         crate::gpu::context::set_error_trace(opts.gpu_error_trace);
         crate::render::present::set_msaa_want(u32::from(opts.msaa));
+        crate::render::present::set_post_want(u32::from(opts.post));
         let gpu = Gpu::from_android_window(native_ptr, width, height).await?;
         let surface_format = gpu.surface_format();
         let pipe = ChunkPipeline::new(&gpu.device);

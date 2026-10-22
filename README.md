@@ -253,6 +253,7 @@ was generated with). The CI workflow does this for you.
 - Frame passes (2026-10-21 (8)): the scene pass (4x MSAA resolved in tile memory when the adapter has it) and one full-screen pass (CAS + upscale + vignette + HUD, FXAA only without MSAA); see the performance changelog.
 - Legacy frame (`LEGACY` in `lib.rs`): one scene pass (terrain lit in `fs_main`, sky, water) then the post chain (exposure 1x1, grade, final; TAA is skipped while it is off). No G-buffer, depth copy or deferred pass; those exist only for the Photon look. Unmeasured on a device.
 - MSAA (2026-10-21 (10)): `MSAA:` button in Video Settings / `msaa:` in `options.txt` (Auto, Off, 2x, 4x; takes effect at the next start); Auto is 1x on an Adreno below 620. Unmeasured on a device.
+- Final pass (2026-10-21 (11)): `Post:` button in Video Settings / `post:` in `options.txt` (Auto, Full, Fast; next start). Fast skips FXAA and CAS (one bilinear tap); Auto is Fast on an Adreno below 620. Unmeasured on a device.
 - Internal resolution starts at `gpu::context::RENDER_SCALE` (0.67) of the screen and follows the GPU load between 50% and 100% (`gpu::context::Drs`, `dynamicRes:false` in `options.txt` pins it), upscaled by the final pass; the surface shadow is looked up in the deferred pass (`render/photon.rs`), the light shafts are `render/vl.rs` only. The FPS log line shows CPU ms per frame. Unmeasured on a device.
 - M13 frustum culling is in (`render::camera::Frustum`, filtered through `ChunkManager::meshes_where`); M13 still adds
   greedy meshing.

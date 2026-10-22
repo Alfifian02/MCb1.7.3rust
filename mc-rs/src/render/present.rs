@@ -4,10 +4,12 @@
 //! pass. There used to be a second pass (FXAA + CAS into an `ldr` texture, then the upscale): that was a full-screen write and read of
 //! memory a phone GPU pays for in bandwidth. With MSAA (`scene_samples() > 1`) the scene pass resolves into `scene` in tile memory and the
 //! FXAA branch is compiled out; without it (the adapter has no 4x for the scene formats) FXAA runs in this same pass.
+//! `post` (options.txt, Video Settings): Fast skips FXAA and CAS altogether (one bilinear tap of the scene, then 709 + vignette), which on a
+//! weak GPU (Auto = `weak_gpu`) is most of this pass's cost, since it is the only pass that runs at surface size.
 //! FXAA = the 3.9 console variant (4 corner taps, 4 along the edge, none on flat areas); CAS sharpens what the upscale softens, on the same
 //! taps. Both work in `sqrt` space, the cheap perceptual one. The taps are one SCENE texel apart, whatever the output size.
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use wgpu::{BindGroup, Buffer, Device, Queue, RenderPipeline, TextureView};
 
 /// Format of the scene: 4 bytes a pixel (the old HDR scene was 8, with a mip chain and 5 full-screen passes).
@@ -67,6 +69,37 @@ pub fn pick_samples(adapter: &wgpu::Adapter) -> u32 {
     resolve(msaa_want(), weak_gpu(&adapter.get_info().name), ok)
 }
 
+/// What the player asked for in `options.txt` (`post:`), set once before the GPU is built: 0 Auto, 1 Full, 2 Fast.
+static POST_WANT: AtomicU32 = AtomicU32::new(0);
+
+/// Whether the final pass skips FXAA and CAS; set once by `Gpu::try_init` (`pick_fast`), false until then.
+static FAST_POST: AtomicBool = AtomicBool::new(false);
+
+pub fn set_post_want(n: u32) {
+    POST_WANT.store(n, Ordering::Relaxed);
+}
+
+pub fn post_want() -> u32 {
+    POST_WANT.load(Ordering::Relaxed)
+}
+
+pub fn fast_post() -> bool {
+    FAST_POST.load(Ordering::Relaxed)
+}
+
+pub fn set_fast_post(b: bool) {
+    FAST_POST.store(b, Ordering::Relaxed);
+}
+
+/// Fast for a `want` of 2, or for Auto (0) on a `weak` GPU; Full otherwise.
+fn resolve_post(want: u32, weak: bool) -> bool {
+    match want { 0 => weak, 2 => true, _ => false }
+}
+
+pub fn pick_fast(adapter: &wgpu::Adapter) -> bool {
+    resolve_post(post_want(), weak_gpu(&adapter.get_info().name))
+}
+
 /// The state of a scene pipeline's `multisample` (alpha-to-coverage on for the cut-out layers: MSAA does not smooth a `discard` edge, but
 /// the coverage mask made from the texel's alpha does).
 pub fn multisample(alpha_to_coverage: bool) -> wgpu::MultisampleState {
@@ -85,6 +118,7 @@ struct U { px: vec4<f32> }; // 1 / scene size, 1 / surface size
 
 const SRGB_SURFACE: bool = @SRGB@;
 const FXAA: bool = @FXAA@; // false when the scene pass was multisampled
+const FAST: bool = @FAST@; // no FXAA, no CAS: one bilinear tap
 const CAS_SHARPNESS: f32 = 0.5;
 const VIGNETTE: f32 = 0.04; // b1.7.3-style half-strength vignette (`Settings::legacy`: 0.08 * 0.5)
 const R2020_TO_XYZ = mat3x3<f32>(vec3<f32>(0.6369736, 0.1446172, 0.1688585), vec3<f32>(0.2627066, 0.6779996, 0.0592938), vec3<f32>(0.0, 0.0280728, 1.0608437));
@@ -101,10 +135,7 @@ fn luma(c: vec3<f32>) -> f32 { return dot(c, vec3<f32>(0.299, 0.587, 0.114)); }
 
 // The one full-screen pass: (FXAA +) CAS on the scene, bilinear upscale, Rec. 2020 -> 709, vignette, sRGB. `uv` is the surface pixel's
 // place in the scene; the taps are one scene texel apart, so at a render scale below 1 CAS sharpens exactly what the upscale softens.
-@fragment
-fn fs_fin(@builtin(position) p: vec4<f32>) -> @location(0) vec4<f32> {
-    let uv = p.xy * u.px.zw;
-    let o = u.px.xy;
+fn enhanced(uv: vec2<f32>, o: vec2<f32>) -> vec3<f32> {
     let m = tap(uv);
     let nw = tap(uv + vec2<f32>(-o.x, -o.y));
     let ne = tap(uv + vec2<f32>(o.x, -o.y));
@@ -131,7 +162,15 @@ fn fs_fin(@builtin(position) p: vec4<f32>) -> @location(0) vec4<f32> {
     var w = clamp(min(mn, vec3<f32>(1.0) - mx) / max(mx, vec3<f32>(1e-4)), vec3<f32>(0.0), vec3<f32>(1.0));
     w = (vec3<f32>(1.0) - (vec3<f32>(1.0) - w) * (vec3<f32>(1.0) - w)) * (-1.0 / mix(8.0, 5.0, CAS_SHARPNESS));
     let g = clamp(((nw + ne + sw + se) * w + f) / (vec3<f32>(1.0) + 4.0 * w), vec3<f32>(0.0), vec3<f32>(1.0));
-    var c = clamp((g * g * R2020_TO_XYZ) * XYZ_TO_709, vec3<f32>(0.0), vec3<f32>(1.0));
+    return g * g;
+}
+
+@fragment
+fn fs_fin(@builtin(position) p: vec4<f32>) -> @location(0) vec4<f32> {
+    let uv = p.xy * u.px.zw;
+    var l: vec3<f32>;
+    if FAST { l = max(textureSampleLevel(src, samp, uv, 0.0).rgb, vec3<f32>(0.0)); } else { l = enhanced(uv, u.px.xy); }
+    var c = clamp((l * R2020_TO_XYZ) * XYZ_TO_709, vec3<f32>(0.0), vec3<f32>(1.0));
     let k = uv.x * uv.y;
     c = c * pow(max(16.0 * (k - uv.x) * (k - uv.y), 1e-4), VIGNETTE);
     // The swap chain is sRGB on most phones (the hardware encodes); otherwise encode here.
@@ -140,9 +179,9 @@ fn fs_fin(@builtin(position) p: vec4<f32>) -> @location(0) vec4<f32> {
 }
 "#;
 
-/// The shader with its two switches spliced in.
-fn shader_source(srgb: bool, fxaa: bool) -> String {
-    SHADER.replace("@SRGB@", &srgb.to_string()).replace("@FXAA@", &fxaa.to_string())
+/// The shader with its three switches spliced in.
+fn shader_source(srgb: bool, fxaa: bool, fast: bool) -> String {
+    SHADER.replace("@SRGB@", &srgb.to_string()).replace("@FXAA@", &fxaa.to_string()).replace("@FAST@", &fast.to_string())
 }
 
 pub struct Present {
@@ -176,7 +215,7 @@ fn target(device: &Device, label: &str, (w, h): (u32, u32), samples: u32) -> Tex
 impl Present {
     /// `scene` = the internal size (`Gpu::scene`), `surface` = the swap chain's.
     pub fn new(device: &Device, queue: &Queue, scene: (u32, u32), surface: (u32, u32), surface_format: wgpu::TextureFormat) -> Self {
-        let src = shader_source(surface_format.is_srgb(), scene_samples() == 1);
+        let src = shader_source(surface_format.is_srgb(), scene_samples() == 1, fast_post());
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("present"), source: wgpu::ShaderSource::Wgsl(src.into()) });
         let entry = |binding, visibility, ty| wgpu::BindGroupLayoutEntry { binding, visibility, ty, count: None };
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -262,12 +301,12 @@ impl Present {
 mod tests {
     use super::*;
 
-    /// Every variant (sRGB swap chain or not, FXAA in or out) parses and validates; no GPU needed.
+    /// Every variant (sRGB swap chain or not, FXAA in or out, fast or full) parses and validates; no GPU needed.
     #[test]
     fn present_shader_validates() {
         for srgb in [true, false] {
-            for fxaa in [true, false] {
-                let src = shader_source(srgb, fxaa);
+            for (fxaa, fast) in [(true, false), (false, false), (false, true)] {
+                let src = shader_source(srgb, fxaa, fast);
                 let m = naga::front::wgsl::parse_str(&src).unwrap_or_else(|e| panic!("{}", e.emit_to_string(&src)));
                 naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all()).validate(&m).unwrap();
             }
@@ -289,6 +328,12 @@ mod tests {
         assert_eq!((resolve(0, false, all), resolve(0, true, all), resolve(1, false, all), resolve(2, true, all), resolve(4, true, all)), (4, 1, 1, 2, 4));
         assert_eq!((resolve(4, false, |n| n <= 2), resolve(4, false, |n| n == 1), resolve(0, false, |n| n <= 2)), (2, 1, 2));
         assert!(weak_gpu("Adreno (TM) 610") && weak_gpu("Adreno (TM) 506") && !weak_gpu("Adreno (TM) 650") && !weak_gpu("Mali-G57") && !weak_gpu("llvmpipe"));
+    }
+
+    /// Auto is Fast only on a weak GPU; 1 is always Full, 2 always Fast.
+    #[test]
+    fn post_follows_the_option_and_the_gpu() {
+        assert_eq!((resolve_post(0, true), resolve_post(0, false), resolve_post(1, true), resolve_post(2, false)), (true, false, false, true));
     }
 
     #[test]

@@ -49,6 +49,11 @@ Not applicable, left out on purpose: multi-draw and persistent mapping (not in w
 
 ## Changelog
 
+- 2026-10-21 (11): fast final pass (written WITHOUT a Rust toolchain: not compiled, not run; new tests `present::tests::post_follows_the_option_and_the_gpu`, `options::tests::post_option_cycles_and_round_trips`; `present_shader_validates` now also covers the fast variant; run `cargo test --lib --release present options` first):
+    - Why: the final pass is the only one at surface size, and without MSAA (the Auto setting on an Adreno 610) it ran FXAA and CAS there: five `sqrt` taps plus up to four more on an edge, for every pixel of the screen, even when the scene is drawn at 50%.
+    - `render/present.rs`: shader const `FAST`; when set, `fs_fin` is one bilinear tap of the scene, then 709 + vignette (no FXAA, no CAS, no `sqrt`). The FXAA / CAS code moved into `enhanced()` unchanged. `pick_fast`: Auto = Fast on `weak_gpu`, `post:1` Full, `post:2` Fast; set once in `Gpu::try_init` (the log line `M3 init` says which).
+    - `options.rs`: `Post:` button in Video Settings (Auto, Full, Fast; next start) / `post:` in `options.txt`.
+    - Look: a little softer edges and no sharpening; the bilinear upscale itself stays. Unmeasured on a device: compare the FPS log line with `post:1` and `post:2`.
 - 2026-10-21 (10): MSAA option for weak GPUs (Adreno 610 phone; written WITHOUT a Rust toolchain: not compiled, not run; new tests `present::tests::msaa_follows_the_option_and_the_gpu`, `options::tests::msaa_option_cycles_and_round_trips`; run `cargo test --lib --release present options` first):
     - `msaa:0|1|2|4` in `options.txt` and an `MSAA: Auto / Off / 2x / 4x` button in Video Settings (`Opt::Msaa`). The count is baked into every scene pipeline and target, so it is read ONCE: `App::init` now loads `Settings` before `Gpu::from_android_window`, `present::set_msaa_want` hands it to `present::pick_samples`, and the button says `(restart)` while it differs from the value the game started with.
     - Auto = 4x, but 1x on an Adreno below 620 (`present::weak_gpu`, a name heuristic: ponytail, no other family is guessed at); an explicit 2x / 4x steps down to what the adapter supports (4, 2, 1). With 1x, alpha-to-coverage is already off (`multisample_of`) and FXAA runs in the final pass.
