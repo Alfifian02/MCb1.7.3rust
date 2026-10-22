@@ -2404,7 +2404,7 @@ impl App {
 
         // The LoD debug mode that is on, centred at the top (also while playing, not only in the pause menu).
         if let Some(title) = self.lod.as_ref().map(|l| l.debug_title()).filter(|t| !t.is_empty()) {
-            let (w, dh) = (self.gpu.config.width as f32, (self.be.size().1 as f32 * 0.05).max(14.0));
+            let (w, dh) = (self.be.size().0 as f32, (self.be.size().1 as f32 * 0.05).max(14.0));
             let tw = HudPipeline::text_width(title) as f32;
             let k = (dh / 10.0).min(w * 0.55 / tw);
             let (tx, ty) = (w * 0.5, dh * 0.45);
