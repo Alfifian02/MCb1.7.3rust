@@ -36,6 +36,7 @@ pub const TEXTURE_WRAP_T: Enum = 0x2803;
 pub const NEAREST: Int = 0x2600;
 pub const LINEAR: Int = 0x2601;
 pub const LINEAR_MIPMAP_LINEAR: Int = 0x2703;
+pub const LINEAR_MIPMAP_NEAREST: Int = 0x2701;
 pub const REPEAT: Int = 0x2901;
 pub const CLAMP_TO_EDGE: Int = 0x812F;
 pub const RGBA: Enum = 0x1908;

@@ -1,0 +1,146 @@
+--- a/mc-rs/src/gles/shaders.rs	2026-10-23 03:15:50.540063912 +0000
++++ b/mc-rs/src/gles/shaders.rs	2026-10-23 03:15:50.559609579 +0000
+@@ -120,7 +120,7 @@
+ "#;
+ 
+ const CHUNK_FS: &str = r#"
+-uniform sampler2D u_tex;
++uniform mediump sampler2D u_tex;
+ const float TW = @TW@.0;
+ const float TH = @TH@.0;
+ const float MIPS = @MIPS@.0;
+@@ -130,25 +130,30 @@
+ const float S_BOT = @SB@;
+ const float S_Z = @SZ@;
+ const float S_X = @SX@;
+-const mat3 R709_TO_XYZ = mat3(vec3(0.4124, 0.3576, 0.1805), vec3(0.2126, 0.7152, 0.0722), vec3(0.0193, 0.1192, 0.9505));
+-const mat3 XYZ_TO_2020 = mat3(vec3(1.7166084, -0.3556621, -0.2533601), vec3(-0.6666829, 1.6164776, 0.0157685), vec3(0.0176422, -0.0427763, 0.94222867));
+-vec3 to_working(vec3 c) { return (c * R709_TO_XYZ) * XYZ_TO_2020; }
++// Rec. 709 -> XYZ -> Rec. 2020 folded into one matrix (the product of the two the wgpu path multiplies by), and run at half precision.
++const mat3 W709_TO_2020 = mat3(vec3(0.627425692, 0.329289106, 0.0433502375), vec3(0.0690274419, 0.91957858, 0.0113613785), vec3(0.0163664152, 0.0880288984, 0.895684319));
++mediump vec3 to_working(mediump vec3 c) { return c * W709_TO_2020; }
+ 
+ centroid in vec2 v_uv;
+-centroid in vec3 v_tint;
+-centroid in float v_lit;
+-centroid in float v_fg;
++centroid in mediump vec3 v_tint;
++centroid in mediump float v_lit;
++centroid in mediump float v_fg;
+ flat in float v_k;
+ in vec3 v_wp;
+ in vec2 v_uvd;
+ layout(location = 0) out vec4 o_color;
+ 
+ // The one atlas read: tile-clamped by half a texel of the coarsest mip touched (see gpu/pipeline.rs).
+-vec4 atlas_sample_g(vec2 uv, vec2 gx, vec2 gy) {
++// Squared texel footprint (no sqrt: `log2(max(g, 1)) == 0.5 * log2(max(g * g, 1))`, `g > 1` == `g * g > 1`).
++float grad2(vec2 gx, vec2 gy) {
++    vec2 a = gx * SIZE;
++    vec2 b = gy * SIZE;
++    return max(dot(a, a), dot(b, b));
++}
++mediump vec4 atlas_sample_g(vec2 uv, vec2 gx, vec2 gy) {
+     vec2 p = uv * SIZE;
+     if ((p.y >= 256.0 && p.y < ITEMS_Y) || p.y >= CHAR_Y) { return textureLod(u_tex, uv, 0.0); }
+-    float g = max(length(gx * SIZE), length(gy * SIZE));
+-    float pad = 0.5 * exp2(min(ceil(log2(max(g, 1.0))), MIPS - 1.0));
++    float pad = 0.5 * exp2(min(ceil(0.5 * log2(max(grad2(gx, gy), 1.0))), MIPS - 1.0));
+     vec2 o = floor(p / 16.0) * 16.0;
+     return textureGrad(u_tex, clamp(p, o + vec2(pad), o + vec2(16.0 - pad)) / SIZE, gx, gy);
+ }
+@@ -169,6 +174,7 @@
+ }
+ 
+ vec4 frag(bool cut, float shade) {
++    mediump vec3 fc = fog.rgb;
+     vec2 uv = v_uv;
+     vec2 gx = dFdx(v_uvd);
+     vec2 gy = dFdy(v_uvd);
+@@ -177,11 +183,11 @@
+         gx = gx * 16.0 / SIZE;
+         gy = gy * 16.0 / SIZE;
+     }
+-    vec4 c = atlas_sample_g(uv, gx, gy);
++    mediump vec4 c = atlas_sample_g(uv, gx, gy);
+     float cover = 1.0;
+     if (cut) {
+         float a = c.a;
+-        if (max(length(gx * SIZE), length(gy * SIZE)) > 1.0) { a = textureLod(u_tex, uv, 0.0).a; }
++        if (grad2(gx, gy) > 1.0) { a = textureLod(u_tex, uv, 0.0).a; }
+ #if A2C
+         cover = clamp((a - 0.5) * 3.0 + 0.5, 0.0, 1.0);
+         if (cover <= 0.0) { discard; }
+@@ -189,15 +195,15 @@
+         if (a < 0.5) { discard; }
+ #endif
+     }
+-    float lit = v_lit * shade;
+-    vec3 rgb = c.rgb * v_tint;
++    mediump float lit = v_lit * shade;
++    mediump vec3 rgb = c.rgb * v_tint;
+     // Grass side (tile 3, untinted): tile 38 over it, cut out and tinted, on the one quad.
+     if (uint(uv.y * TH) * uint(TW) + uint(uv.x * TW) == 3u) {
+         vec2 ouv = uv + vec2(3.0 / TW, 2.0 / TH);
+         rgb = c.rgb;
+         if (textureLod(u_tex, ouv, 0.0).a >= 0.5) { rgb = atlas_sample_g(ouv, gx, gy).rgb * v_tint; }
+     }
+-    return vec4(mix(to_working(rgb * lit), fog.rgb, v_fg), cover);
++    return vec4(mix(to_working(rgb * lit), fc, v_fg), cover);
+ }
+ 
+ void main() {
+@@ -224,9 +230,10 @@
+         gx = gx * 16.0 / SIZE;
+         gy = gy * 16.0 / SIZE;
+     }
+-    vec4 c = atlas_sample_g(uv, gx, gy);
++    mediump vec4 c = atlas_sample_g(uv, gx, gy);
+     if (sheet) { c = vec4(c.rgb * v_tint, c.a); }
+-    o_color = vec4(mix(to_working(c.rgb * v_lit * flat_shade(v_wp, dx, dy)), fog.rgb, v_fg), c.a);
++    mediump vec3 fc = fog.rgb;
++    o_color = vec4(mix(to_working(c.rgb * (v_lit * flat_shade(v_wp, dx, dy))), fc, v_fg), c.a);
+ #endif
+ }
+ "#;
+@@ -275,8 +282,7 @@
+ layout(location = 0) out vec4 o_color;
+ const float CAS_SHARPNESS = 0.5;
+ const float VIGNETTE = 0.04;
+-const mat3 R2020_TO_XYZ = mat3(vec3(0.6369736, 0.1446172, 0.1688585), vec3(0.2627066, 0.6779996, 0.0592938), vec3(0.0, 0.0280728, 1.0608437));
+-const mat3 XYZ_TO_709 = mat3(vec3(3.2406, -1.5372, -0.4986), vec3(-0.9689, 1.8758, 0.0415), vec3(0.0557, -0.2040, 1.0570));
++const mat3 R2020_TO_709 = mat3(vec3(1.66034406, -0.587571585, -0.0728802431), vec3(-0.124378681, 1.13283707, -0.00835867706), vec3(-0.0181127169, -0.100583791, 1.11862127));
+ vec3 tap(vec2 uv) { return sqrt(max(textureLod(u_src, uv, 0.0).rgb, vec3(0.0))); }
+ float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
+ vec3 enhanced(vec2 uv, vec2 o) {
+@@ -313,7 +319,7 @@
+ #else
+     vec3 l = enhanced(uv, u_px.xy);
+ #endif
+-    vec3 c = clamp((l * R2020_TO_XYZ) * XYZ_TO_709, vec3(0.0), vec3(1.0));
++    vec3 c = clamp(l * R2020_TO_709, vec3(0.0), vec3(1.0));
+     float k = uv.x * uv.y;
+     c = c * pow(max(16.0 * (k - uv.x) * (k - uv.y), 1e-4), VIGNETTE);
+     c = mix(1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, 12.92 * c, vec3(lessThanEqual(c, vec3(0.0031308))));
+--- a/mc-rs/src/gles/renderer.rs	2026-10-23 03:15:50.540034218 +0000
++++ b/mc-rs/src/gles/renderer.rs	2026-10-23 03:16:03.544675791 +0000
+@@ -210,7 +210,8 @@
+                 (w, h) = (w / 2, h / 2);
+             }
+         }
+-        tex_params(f, TEXTURE_2D, LINEAR_MIPMAP_LINEAR, NEAREST, REPEAT);
++        // Post: Fast (weak GPUs) reads one mip per sample instead of blending two: half the texture-unit work.
++        tex_params(f, TEXTURE_2D, if fast { LINEAR_MIPMAP_NEAREST } else { LINEAR_MIPMAP_LINEAR }, NEAREST, REPEAT);
+         // The HUD sheet (plain RGBA8: the HUD writes sRGB bytes straight to a non-sRGB surface).
+         let hud_t = texture(U_HUD, TEXTURE_2D);
+         // SAFETY: as above, one level.
+--- a/mc-rs/src/gles/sys.rs	2026-10-23 03:15:50.540128647 +0000
++++ b/mc-rs/src/gles/sys.rs	2026-10-23 03:16:03.544083242 +0000
+@@ -36,6 +36,7 @@
+ pub const NEAREST: Int = 0x2600;
+ pub const LINEAR: Int = 0x2601;
+ pub const LINEAR_MIPMAP_LINEAR: Int = 0x2703;
++pub const LINEAR_MIPMAP_NEAREST: Int = 0x2701;
+ pub const REPEAT: Int = 0x2901;
+ pub const CLAMP_TO_EDGE: Int = 0x812F;
+ pub const RGBA: Enum = 0x1908;

@@ -210,7 +210,8 @@ impl Renderer {
                 (w, h) = (w / 2, h / 2);
             }
         }
-        tex_params(f, TEXTURE_2D, LINEAR_MIPMAP_LINEAR, NEAREST, REPEAT);
+        // Post: Fast (weak GPUs) reads one mip per sample instead of blending two: half the texture-unit work.
+        tex_params(f, TEXTURE_2D, if fast { LINEAR_MIPMAP_NEAREST } else { LINEAR_MIPMAP_LINEAR }, NEAREST, REPEAT);
         // The HUD sheet (plain RGBA8: the HUD writes sRGB bytes straight to a non-sRGB surface).
         let hud_t = texture(U_HUD, TEXTURE_2D);
         // SAFETY: as above, one level.

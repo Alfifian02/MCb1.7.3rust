@@ -10,6 +10,10 @@
 //! `lava_tunnel/total` are stubbed to "nothing here"; mc-rs keeps its own b1.7.3 caves), biomes, surface rules, aquifers, blending
 //! with old chunks, and the `ultrasmooth` option.
 //!
+//! The graph is rewritten once when it is built (`Tectonic::simplify`, after C2ME's density function compiler): wrappers dropped,
+//! constants folded, constant `range_choice`s cut, equal nodes merged, all to the bit. Evaluation keeps one memo slot per node, valid
+//! for the current column (nodes that do not depend on y) or point (the others), so nothing is hashed or cleared.
+//!
 //! The `cache_*` / `flat_cache` / `blend_density` wrappers are the identity: the game evaluates the whole tree on cell corners
 //! (x, z a multiple of 4, y a multiple of 8), where a quart-resolution cache returns the very same value. Only `interpolated`
 //! does something (trilinear between corners), and everything that does not depend on y is computed once per corner column.
@@ -534,6 +538,7 @@ impl Blended {
 
 // ------------------------------------------------------------------------------------------------ density functions
 
+#[derive(Clone, Copy)]
 enum Node {
     Const(f64),
     Y,
@@ -570,24 +575,75 @@ enum Node {
     Spline(usize),
 }
 
+#[derive(Clone, Copy)]
 enum SplineVal {
     Const(f32),
     Sub(usize),
 }
 
+#[derive(Clone, Copy)]
 struct Point {
     loc: f32,
     der: f32,
     val: SplineVal,
 }
 
+#[derive(Clone)]
 struct Spline {
     coord: u32,
     pts: Vec<Point>,
 }
 
-/// Evaluation memo of the nodes that do not depend on y: (node, x, z) -> value.
-type Memo = HashMap<(u32, i32, i32), f64>;
+/// Evaluation memo, one slot per node (no hashing). A node that does not depend on y is valid for the current column (`column`), any
+/// other node for the current point (`point`): the value is read back while the slot's stamp equals it. Every node is in exactly one
+/// of the two classes, so the two counters (one `tick`) never meet on a slot. Nothing is cleared between columns or points.
+struct Memo {
+    val: Vec<f64>,
+    stamp: Vec<u32>,
+    tick: u32,
+    col: u32,
+    pt: u32,
+}
+
+impl Memo {
+    fn new(nodes: usize) -> Self {
+        // Stamps start at 0 and the counters at 1, so a fresh slot never matches.
+        Memo { val: vec![0.0; nodes], stamp: vec![0; nodes], tick: 1, col: 1, pt: 1 }
+    }
+
+    /// A new (x, z) column: the y-independent values of the last one are stale.
+    fn column(&mut self) {
+        self.tick += 1;
+        self.col = self.tick;
+    }
+
+    /// A new point: the y-dependent values of the last one are stale. Call it for every y, and after `column`.
+    fn point(&mut self) {
+        self.tick += 1;
+        self.pt = self.tick;
+    }
+}
+
+// The arithmetic of the nodes that `simplify` also folds: one copy, so a folded constant is the very same f64 operations.
+fn half_neg(v: f64) -> f64 {
+    if v < 0.0 { v * 0.5 } else { v }
+}
+fn quarter_neg(v: f64) -> f64 {
+    if v < 0.0 { v * 0.25 } else { v }
+}
+fn squeeze(v: f64) -> f64 {
+    let c = v.clamp(-1.0, 1.0);
+    c / 2.0 - c * c * c / 24.0
+}
+fn square(v: f64) -> f64 {
+    v * v
+}
+fn cube(v: f64) -> f64 {
+    v * v * v
+}
+fn invert(v: f64) -> f64 {
+    1.0 / v
+}
 
 /// The corner values of every `interpolated` node of the chunk being filled.
 struct Grid {
@@ -807,6 +863,65 @@ impl Builder<'_> {
     }
 }
 
+/// The value of a node that is a constant.
+fn const_of(nodes: &[Node], k: u32) -> Option<f64> {
+    match nodes[k as usize] {
+        Node::Const(v) => Some(v),
+        _ => None,
+    }
+}
+
+/// A unary node over operand `a` (already in the new list): a constant if `a` is one, else the node itself.
+fn fold1(nodes: &[Node], mk: fn(u32) -> Node, a: u32, f: fn(f64) -> f64) -> Node {
+    match const_of(nodes, a) {
+        Some(v) => Node::Const(f(v)),
+        None => mk(a),
+    }
+}
+
+/// A binary node: a constant if both operands are; else the node, operands in id order when `swap` is allowed (so `a + b` and
+/// `b + a` are one node).
+fn fold2(nodes: &[Node], mk: fn(u32, u32) -> Node, a: u32, b: u32, swap: bool, f: fn(f64, f64) -> f64) -> Node {
+    if let (Some(p), Some(q)) = (const_of(nodes, a), const_of(nodes, b)) {
+        return Node::Const(f(p, q));
+    }
+    if swap && b < a { mk(b, a) } else { mk(a, b) }
+}
+
+/// What makes two nodes the same node: the variant and every field (floats by their bits).
+fn key(n: &Node) -> [u64; 7] {
+    let f = |v: f64| v.to_bits();
+    match *n {
+        Node::Const(v) => [0, f(v), 0, 0, 0, 0, 0],
+        Node::Y => [1, 0, 0, 0, 0, 0, 0],
+        Node::ShiftX => [2, 0, 0, 0, 0, 0, 0],
+        Node::ShiftZ => [3, 0, 0, 0, 0, 0, 0],
+        Node::Base3d => [4, 0, 0, 0, 0, 0, 0],
+        Node::Add(a, b) => [5, a as u64, b as u64, 0, 0, 0, 0],
+        Node::Mul(a, b) => [6, a as u64, b as u64, 0, 0, 0, 0],
+        Node::Min(a, b) => [7, a as u64, b as u64, 0, 0, 0, 0],
+        Node::Max(a, b) => [8, a as u64, b as u64, 0, 0, 0, 0],
+        Node::Pass(a) => [9, a as u64, 0, 0, 0, 0, 0],
+        Node::Interp(t) => [10, t as u64, 0, 0, 0, 0, 0],
+        Node::Abs(a) => [11, a as u64, 0, 0, 0, 0, 0],
+        Node::Square(a) => [12, a as u64, 0, 0, 0, 0, 0],
+        Node::Cube(a) => [13, a as u64, 0, 0, 0, 0, 0],
+        Node::HalfNeg(a) => [14, a as u64, 0, 0, 0, 0, 0],
+        Node::QuarterNeg(a) => [15, a as u64, 0, 0, 0, 0, 0],
+        Node::Squeeze(a) => [16, a as u64, 0, 0, 0, 0, 0],
+        Node::Clamp(a, lo, hi) => [17, a as u64, f(lo), f(hi), 0, 0, 0],
+        Node::ClampFn(a, lo, hi) => [18, a as u64, lo as u64, hi as u64, 0, 0, 0],
+        Node::Invert(a) => [19, a as u64, 0, 0, 0, 0, 0],
+        Node::Gradient(a, b, c, d) => [20, f(a), f(b), f(c), f(d), 0, 0],
+        Node::Range(a, lo, hi, x, y) => [21, a as u64, f(lo), f(hi), x as u64, y as u64, 0],
+        Node::Noise(nz, xs, ys) => [22, nz as u64, f(xs), f(ys), 0, 0, 0],
+        Node::Shifted(nz, xs, ys, sx, sy, sz) => [23, nz as u64, f(xs), f(ys), sx as u64, sy as u64, sz as u64],
+        Node::CfgNoise(nz, scale, sx, sz) => [24, nz as u64, f(scale), sx as u64, sz as u64, 0, 0],
+        // A spline is never merged with another: the index is its identity.
+        Node::Spline(s) => [25, s as u64, 0, 0, 0, 0, 0],
+    }
+}
+
 // ------------------------------------------------------------------------------------------------ the terrain
 
 pub struct Tectonic {
@@ -839,6 +954,11 @@ impl Tectonic {
     }
 
     pub fn from_bundle(json: &str, seed: i64, cfg: Config) -> Result<Self, String> {
+        Self::build(json, seed, cfg, true)
+    }
+
+    /// `simplify`: run the graph optimiser (always, outside the tests that compare it with the plain graph).
+    fn build(json: &str, seed: i64, cfg: Config, simplify: bool) -> Result<Self, String> {
         assert!(cfg.max_y > cfg.min_y && (cfg.max_y - cfg.min_y) % 8 == 0, "height must be a multiple of 8");
         let j = Parser { s: json.as_bytes(), i: 0 }.val()?;
         let field = |k: &str| j.get(k).ok_or_else(|| format!("terrain.json: no \"{k}\""));
@@ -876,7 +996,124 @@ impl Tectonic {
         let root_name = field("root")?.str().ok_or("terrain.json: root is not a name")?;
         let root = b.named(root_name)?;
         let Builder { nodes, dep, ids, splines, interps, .. } = b;
-        Ok(Tectonic { nodes, dep, splines, interps, ids, root, noises, noise_ix, offset, blended, min_y: cfg.min_y, height: (cfg.max_y - cfg.min_y) as usize })
+        let mut t = Tectonic { nodes, dep, splines, interps, ids, root, noises, noise_ix, offset, blended, min_y: cfg.min_y, height: (cfg.max_y - cfg.min_y) as usize };
+        if simplify {
+            t.simplify();
+        }
+        Ok(t)
+    }
+
+    /// Rewrites the node graph once, after it is built (the ideas of C2ME's density function compiler, `c2me-opts-dfc`, MIT: tree
+    /// normalisation, constant folding, branch elimination; here also the identity wrappers and common subexpressions go). Every
+    /// rewrite keeps the value of every node to the bit: a fold runs the same f64 operation the evaluator would, a `Range` is cut
+    /// only for a constant input or equal arms, an operand swap only for `+` and `*` (commutative to the bit), never for `min` /
+    /// `max` (the sign of a zero). Nodes are only ever added after their operands, so one forward pass sees every operand mapped.
+    /// Dead nodes stay in the list (a few slots in the memo; `function` may still ask for a named node that nothing uses any more).
+    fn simplify(&mut self) {
+        let old = std::mem::take(&mut self.nodes);
+        let old_dep = std::mem::take(&mut self.dep);
+        let old_interps = std::mem::take(&mut self.interps);
+        let mut nodes: Vec<Node> = Vec::with_capacity(old.len());
+        let mut dep: Vec<bool> = Vec::with_capacity(old.len());
+        let mut interps: Vec<u32> = Vec::new();
+        let mut seen: HashMap<[u64; 7], u32> = HashMap::new();
+        // Old node index -> new node index.
+        let mut map: Vec<u32> = Vec::with_capacity(old.len());
+        for (i, n) in old.iter().enumerate() {
+            let m = |k: u32| map[k as usize];
+            let r = match *n {
+                Node::Const(_) | Node::Y | Node::ShiftX | Node::ShiftZ | Node::Base3d | Node::Gradient(..) | Node::Noise(..) => *n,
+                // The cache wrappers are the identity (see the module doc): refer to the argument itself.
+                Node::Pass(a) => {
+                    let k = m(a);
+                    map.push(k);
+                    continue;
+                }
+                Node::Interp(t) => {
+                    let arg = m(old_interps[t]);
+                    let found = interps.iter().position(|&a| a == arg);
+                    let pos = match found {
+                        Some(p) => p,
+                        None => {
+                            interps.push(arg);
+                            interps.len() - 1
+                        }
+                    };
+                    Node::Interp(pos)
+                }
+                Node::Add(a, b) => fold2(&nodes, Node::Add, m(a), m(b), true, |p, q| p + q),
+                Node::Mul(a, b) => fold2(&nodes, Node::Mul, m(a), m(b), true, |p, q| p * q),
+                Node::Min(a, b) => fold2(&nodes, Node::Min, m(a), m(b), false, f64::min),
+                Node::Max(a, b) => fold2(&nodes, Node::Max, m(a), m(b), false, f64::max),
+                Node::Abs(a) => fold1(&nodes, Node::Abs, m(a), f64::abs),
+                Node::Square(a) => fold1(&nodes, Node::Square, m(a), square),
+                Node::Cube(a) => fold1(&nodes, Node::Cube, m(a), cube),
+                Node::HalfNeg(a) => fold1(&nodes, Node::HalfNeg, m(a), half_neg),
+                Node::QuarterNeg(a) => fold1(&nodes, Node::QuarterNeg, m(a), quarter_neg),
+                Node::Squeeze(a) => fold1(&nodes, Node::Squeeze, m(a), squeeze),
+                Node::Invert(a) => fold1(&nodes, Node::Invert, m(a), invert),
+                Node::Clamp(a, lo, hi) => match const_of(&nodes, m(a)) {
+                    Some(v) => Node::Const(v.max(lo).min(hi)),
+                    None => Node::Clamp(m(a), lo, hi),
+                },
+                Node::ClampFn(a, lo, hi) => match (const_of(&nodes, m(a)), const_of(&nodes, m(lo)), const_of(&nodes, m(hi))) {
+                    (Some(v), Some(lo), Some(hi)) => Node::Const(v.max(lo).min(hi)),
+                    _ => Node::ClampFn(m(a), m(lo), m(hi)),
+                },
+                Node::Range(a, lo, hi, inside, outside) => {
+                    let (a, inside, outside) = (m(a), m(inside), m(outside));
+                    // A constant input picks its arm now; equal arms need no input at all.
+                    let pick = match const_of(&nodes, a) {
+                        Some(v) => Some(if v >= lo && v < hi { inside } else { outside }),
+                        None if inside == outside => Some(inside),
+                        None => None,
+                    };
+                    if let Some(k) = pick {
+                        map.push(k);
+                        continue;
+                    }
+                    Node::Range(a, lo, hi, inside, outside)
+                }
+                Node::Shifted(nz, xs, ys, sx, sy, sz) => Node::Shifted(nz, xs, ys, m(sx), m(sy), m(sz)),
+                Node::CfgNoise(nz, scale, sx, sz) => Node::CfgNoise(nz, scale, m(sx), m(sz)),
+                Node::Spline(s) => Node::Spline(s),
+            };
+            // y-dependence from the new operands (never lower than the truth); a spline keeps the builder's answer.
+            let d = match r {
+                Node::Const(_) | Node::ShiftX | Node::ShiftZ => false,
+                Node::Y | Node::Base3d | Node::Gradient(..) | Node::Interp(_) => true,
+                Node::Noise(_, _, ys) => ys != 0.0,
+                Node::Spline(_) => old_dep[i],
+                Node::Add(a, b) | Node::Mul(a, b) | Node::Min(a, b) | Node::Max(a, b) => dep[a as usize] || dep[b as usize],
+                Node::Pass(a) | Node::Abs(a) | Node::Square(a) | Node::Cube(a) | Node::HalfNeg(a) | Node::QuarterNeg(a) | Node::Squeeze(a)
+                | Node::Invert(a) | Node::Clamp(a, _, _) => dep[a as usize],
+                Node::ClampFn(a, lo, hi) => dep[a as usize] || dep[lo as usize] || dep[hi as usize],
+                Node::Range(a, _, _, x, y) => dep[a as usize] || dep[x as usize] || dep[y as usize],
+                Node::Shifted(_, _, ys, sx, sy, sz) => ys != 0.0 || dep[sx as usize] || dep[sy as usize] || dep[sz as usize],
+                Node::CfgNoise(_, _, sx, sz) => dep[sx as usize] || dep[sz as usize],
+            };
+            let k = key(&r);
+            let id = match seen.get(&k) {
+                Some(&id) => id,
+                None => {
+                    nodes.push(r);
+                    dep.push(d);
+                    seen.insert(k, (nodes.len() - 1) as u32);
+                    (nodes.len() - 1) as u32
+                }
+            };
+            map.push(id);
+        }
+        for sp in &mut self.splines {
+            sp.coord = map[sp.coord as usize];
+        }
+        for v in self.ids.values_mut() {
+            *v = map[*v as usize];
+        }
+        self.root = map[self.root as usize];
+        self.nodes = nodes;
+        self.dep = dep;
+        self.interps = interps;
     }
 
     /// Number of blocks of a column.
@@ -891,27 +1128,32 @@ impl Tectonic {
         let ny = h / 8 + 1;
         // ponytail: the memo lives for one chunk, so the border columns shared with the neighbours (5 x 5 corners for 4 x 4 cells,
         // ~56 % more 2D work than needed) are computed again by each; upgrade is a column cache across chunks like `OverworldGenerator::cols`.
-        let mut m = Memo::new();
+        let mut m = Memo::new(self.nodes.len());
         let mut g = Grid { on: false, x0: cx * 16, z0: cz * 16, min_y: self.min_y, ny, tabs: Vec::new() };
-        // Pass 1: each `interpolated` argument on the 5 x ny x 5 cell corners.
-        for &arg in &self.interps {
-            let mut tab = vec![0.0; 25 * ny];
-            for gx in 0..5usize {
-                for gz in 0..5usize {
+        // Pass 1: each `interpolated` argument on the 5 x ny x 5 cell corners. Column by column, so the y-independent nodes of a
+        // corner column are computed once for every table.
+        let mut tabs = vec![vec![0.0; 25 * ny]; self.interps.len()];
+        for gx in 0..5usize {
+            for gz in 0..5usize {
+                m.column();
+                let (x, z) = (g.x0 + gx as i32 * 4, g.z0 + gz as i32 * 4);
+                for (t, &arg) in self.interps.iter().enumerate() {
                     for gy in 0..ny {
-                        let (x, y, z) = (g.x0 + gx as i32 * 4, self.min_y + gy as i32 * 8, g.z0 + gz as i32 * 4);
-                        tab[(gx * 5 + gz) * ny + gy] = self.ev(arg, x, y, z, &mut m, &g);
+                        m.point();
+                        tabs[t][(gx * 5 + gz) * ny + gy] = self.ev(arg, x, self.min_y + gy as i32 * 8, z, &mut m, &g);
                     }
                 }
             }
-            g.tabs.push(tab);
         }
+        g.tabs = tabs;
         g.on = true;
         // Pass 2: the whole tree on every block, `interpolated` nodes reading their corners.
         let mut out = vec![0f32; 256 * h];
         for x in 0..16usize {
             for z in 0..16usize {
+                m.column();
                 for y in 0..h {
+                    m.point();
                     let d = self.ev(self.root, g.x0 + x as i32, self.min_y + y as i32, g.z0 + z as i32, &mut m, &g);
                     out[(x * 16 + z) * h + y] = d as f32;
                 }
@@ -925,9 +1167,13 @@ impl Tectonic {
     /// height from far away (`mc-rs`'s rivers), not for placing blocks: an overhang above a gap is not seen.
     pub fn surface(&self, x: i32, z: i32) -> i32 {
         let g = Grid { on: false, x0: 0, z0: 0, min_y: self.min_y, ny: 2, tabs: Vec::new() };
-        let mut m = Memo::new();
+        let mut m = Memo::new(self.nodes.len());
+        m.column();
         let top = self.height as i32 - 1;
-        let mut solid = |y: i32| self.ev(self.root, x, self.min_y + y, z, &mut m, &g) > 0.0;
+        let mut solid = |y: i32| {
+            m.point();
+            self.ev(self.root, x, self.min_y + y, z, &mut m, &g) > 0.0
+        };
         let mut y = top;
         while y >= 0 && !solid(y) {
             y -= 8;
@@ -955,19 +1201,24 @@ impl Tectonic {
     pub fn function(&self, name: &str, x: i32, y: i32, z: i32) -> Option<f64> {
         let id = *self.ids.get(name)?;
         let g = Grid { on: false, x0: 0, z0: 0, min_y: self.min_y, ny: 2, tabs: Vec::new() };
-        Some(self.ev(id, x, y, z, &mut Memo::new(), &g))
+        let mut m = Memo::new(self.nodes.len());
+        m.column();
+        m.point();
+        Some(self.ev(id, x, y, z, &mut m, &g))
     }
 
     fn ev(&self, id: u32, x: i32, y: i32, z: i32, m: &mut Memo, g: &Grid) -> f64 {
         let i = id as usize;
-        if self.dep[i] || matches!(self.nodes[i], Node::Const(_)) {
-            return self.node(i, x, y, z, m, g);
-        }
-        if let Some(&v) = m.get(&(id, x, z)) {
+        if let Node::Const(v) = self.nodes[i] {
             return v;
         }
+        let now = if self.dep[i] { m.pt } else { m.col };
+        if m.stamp[i] == now {
+            return m.val[i];
+        }
         let v = self.node(i, x, y, z, m, g);
-        m.insert((id, x, z), v);
+        m.val[i] = v;
+        m.stamp[i] = now;
         v
     }
 
@@ -999,33 +1250,18 @@ impl Tectonic {
                 }
             }
             Node::Abs(a) => e!(*a).abs(),
-            Node::Square(a) => {
-                let v = e!(*a);
-                v * v
-            }
-            Node::Cube(a) => {
-                let v = e!(*a);
-                v * v * v
-            }
-            Node::HalfNeg(a) => {
-                let v = e!(*a);
-                if v < 0.0 { v * 0.5 } else { v }
-            }
-            Node::QuarterNeg(a) => {
-                let v = e!(*a);
-                if v < 0.0 { v * 0.25 } else { v }
-            }
-            Node::Squeeze(a) => {
-                let c = e!(*a).clamp(-1.0, 1.0);
-                c / 2.0 - c * c * c / 24.0
-            }
+            Node::Square(a) => square(e!(*a)),
+            Node::Cube(a) => cube(e!(*a)),
+            Node::HalfNeg(a) => half_neg(e!(*a)),
+            Node::QuarterNeg(a) => quarter_neg(e!(*a)),
+            Node::Squeeze(a) => squeeze(e!(*a)),
             Node::Clamp(a, lo, hi) => e!(*a).max(*lo).min(*hi),
             Node::ClampFn(a, lo, hi) => {
                 let v = e!(*a);
                 let (lo, hi) = (e!(*lo), e!(*hi));
                 v.max(lo).min(hi)
             }
-            Node::Invert(a) => 1.0 / e!(*a),
+            Node::Invert(a) => invert(e!(*a)),
             Node::Gradient(fy, ty, fv, tv) => {
                 let u = ((yf - fy) / (ty - fy)).clamp(0.0, 1.0);
                 fv + u * (tv - fv)
@@ -1131,6 +1367,63 @@ mod tests {
         let c = t.chunk(-2, 3);
         assert_eq!((top(&c, h, 0, 0), top(&c, h, 7, 9), top(&c, h, 15, 15)), (68, 68, 68));
         close(c[(8 * 16 + 8) * h + 70] as f64, -0.044689, 2e-3, "density (8,70,8)");
+    }
+
+    fn plain(seed: i64, cfg: Config) -> Tectonic {
+        Tectonic::build(BUNDLE, seed, cfg, false).unwrap()
+    }
+
+    /// The optimised graph answers with the plain graph's bits: whole chunks, surfaces and every named function.
+    #[test]
+    fn simplified_graph_gives_the_plain_graphs_bits() {
+        let cfg = Config::compact(128, 64);
+        let (fast, slow) = (Tectonic::new(0xCAFEBABE, cfg.clone()), plain(0xCAFEBABE, cfg));
+        assert!(fast.nodes.len() < slow.nodes.len(), "{} vs {}", fast.nodes.len(), slow.nodes.len());
+        for (cx, cz) in [(0, 0), (-2, 3), (17, -9)] {
+            let (a, b) = (fast.chunk(cx, cz), slow.chunk(cx, cz));
+            assert!(a.iter().zip(&b).all(|(p, q)| p.to_bits() == q.to_bits()), "chunk {cx},{cz}");
+        }
+        for (x, z) in [(0, 0), (-37, 211), (1000, -1000), (5, 5)] {
+            assert_eq!(fast.surface(x, z), slow.surface(x, z), "surface {x},{z}");
+        }
+        let names: Vec<String> = slow.ids.keys().cloned().collect();
+        for n in &names {
+            for (x, y, z) in [(64, 70, -32), (-300, 20, 411)] {
+                let (a, b) = (fast.function(n, x, y, z), slow.function(n, x, y, z));
+                assert_eq!(a.map(f64::to_bits), b.map(f64::to_bits), "{n} at {x},{y},{z}");
+            }
+        }
+    }
+
+    #[test]
+    fn simplify_drops_the_wrappers() {
+        let t = Tectonic::new(1, Config::compact(128, 64));
+        assert!(!t.nodes.iter().any(|n| matches!(n, Node::Pass(_))));
+        // An `interpolated` argument has one table, however many nodes pointed at it.
+        let mut args = t.interps.clone();
+        args.sort();
+        args.dedup();
+        assert_eq!(args.len(), t.interps.len());
+    }
+
+    /// One memo across columns and points gives what a fresh memo gives.
+    #[test]
+    fn memo_follows_the_column_and_the_point() {
+        let t = Tectonic::new(5, Config::compact(128, 64));
+        let g = Grid { on: false, x0: 0, z0: 0, min_y: t.min_y, ny: 2, tabs: Vec::new() };
+        let mut shared = Memo::new(t.nodes.len());
+        for (x, z) in [(10, -20), (11, -20), (10, -21)] {
+            shared.column();
+            for y in [-1, 30, 31, 90] {
+                shared.point();
+                let a = t.ev(t.root, x, y, z, &mut shared, &g);
+                let mut fresh = Memo::new(t.nodes.len());
+                fresh.column();
+                fresh.point();
+                let b = t.ev(t.root, x, y, z, &mut fresh, &g);
+                assert_eq!(a.to_bits(), b.to_bits(), "({x},{y},{z})");
+            }
+        }
     }
 
     /// Deterministic, solid at the bottom, open at the top, and neighbouring chunks meet (no seam on the shared border).
