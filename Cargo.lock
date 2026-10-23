@@ -730,6 +730,7 @@ dependencies = [
  "ndk",
  "pollster",
  "raw-window-handle",
+ "starlight",
  "tectonic",
  "wgpu",
 ]
@@ -1125,6 +1126,10 @@ checksum = "eda41003dc44290527a59b13432d4a0379379fa074b70174882adfbdfd917844"
 dependencies = [
  "bitflags 2.13.2",
 ]
+
+[[package]]
+name = "starlight"
+version = "0.1.0"
 
 [[package]]
 name = "static_assertions"

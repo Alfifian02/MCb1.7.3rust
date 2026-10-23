@@ -21,6 +21,7 @@ lewton = "0.10" # pure-Rust Ogg Vorbis decoder (audio/)
 embeddium = { path = "../embeddium" }
 lod = { path = "../lod" }
 tectonic = { path = "../tectonic" }
+starlight = { path = "../starlight" }
 
 [features]
 default = ["pad-rumble"]

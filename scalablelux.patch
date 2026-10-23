@@ -1,0 +1,2294 @@
+diff -ruN a/Cargo.lock b/Cargo.lock
+--- a/Cargo.lock	2026-10-23 06:56:56.000000000 +0000
++++ b/Cargo.lock	2026-10-23 06:05:01.892329820 +0000
+@@ -730,6 +730,7 @@
+  "ndk",
+  "pollster",
+  "raw-window-handle",
++ "starlight",
+  "tectonic",
+  "wgpu",
+ ]
+@@ -1127,6 +1128,10 @@
+ ]
+ 
+ [[package]]
++name = "starlight"
++version = "0.1.0"
++
++[[package]]
+ name = "static_assertions"
+ version = "1.1.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+diff -ruN a/Cargo.toml b/Cargo.toml
+--- a/Cargo.toml	2026-10-23 11:51:42.000000000 +0000
++++ b/Cargo.toml	2026-10-23 06:05:01.892329820 +0000
+@@ -1,7 +1,7 @@
+ [workspace]
+ resolver = "2"
+-members = ["mc-rs", "embeddium", "tectonic", "lod"]
+-default-members = ["mc-rs", "embeddium", "tectonic", "lod"]
++members = ["mc-rs", "embeddium", "tectonic", "lod", "starlight"]
++default-members = ["mc-rs", "embeddium", "tectonic", "lod", "starlight"]
+ 
+ # Release profile tuned for low-end Android:
+ # - opt-level=3: full optimization
+diff -ruN a/README.md b/README.md
+--- a/README.md	2026-10-23 06:53:22.000000000 +0000
++++ b/README.md	2026-10-23 06:05:01.892329820 +0000
+@@ -59,6 +59,7 @@
+ | ImmediatelyFast ideas | written without a toolchain: not compiled, not run (+7 tests, 1 extended) | `render/hud.rs`: the HUD text is one textured quad per glyph from a font atlas at the end of the HUD texture (was a quad per run of lit pixels: about 7x fewer text vertices); `render/items.rs`: `SignCache` keeps a sign's text quads between frames (5 s expiry); `gpuErrorTrace:true` in `options.txt` logs a backtrace with each wgpu error (`gpu/context.rs`). The rest of ImmediatelyFast (batching, map and animated-item atlases, framebuffer switching, Apple GL upload, resource pack handling) has no counterpart in mc-rs. Idea source: ImmediatelyFast 26.3, RaphiMC, LGPL-3.0. See the performance changelog. |
+ | FerriteCore ideas | written without a toolchain: not compiled, not run (+2 tests) | Lazy `Nibbles` (no array while all metadata is 0), flat `lod::Cols` for a real chunk's columns (no `Vec` per column; `Tile0::put` no longer clones 4096), exact-size LoD vectors. The rest of FerriteCore (blockstate / model / component dedupe, thread detector) has no counterpart in mc-rs. Idea source: FerriteCore, malte0811, MIT. See ROADMAP changelog. |
+ | Lazy noise (C2ME idea 5) | written without a toolchain: not compiled; the generator tests incl. the golden `matches_java_reference` pass in a Linux scratch crate | The unread samples of the two big density stacks are not computed (`OctaveNoise::generate_masked_into`, masked per cached column); bit for bit the same terrain. See ROADMAP changelog. |
++| ScalableLux light engine | `starlight` crate: 2 tests pass on a Linux host; `cargo check --lib --tests` for aarch64-linux-android passes; not run on a device | `starlight/` (LGPL-3.0-or-later, `COPYING*`): ScalableLux 26.2.0 (Starlight) as a std-only crate, replacing the b1.7.3 region relaxation in `world/chunks/light.rs`: FIFO light increase / decrease with direction bitsets and `WRITE` / `RECHECK` flags, `checkBlock`, stateless sky sources from the height map, chunk edge checks, no light written into unlit chunks, and ScalableLux's parallel light updates (tasks on disjoint 3x3 chunk windows, scoped threads, `default_workers()` = cores / 3). Same settled light as before (tests compare it with a brute-force fixpoint, 3 injected bugs are caught). See the performance changelog. |
+ | Distant terrain (height columns, not drawn) | written without a toolchain: not compiled, not run (+7 tests) | `lod/` crate + `world/far.rs`: the overworld drawn out to 14 chunks as height-column tiles (mip quadtree, 4 levels), generated without caves on a worker thread, saved in `<world>/far`; none in the Nether. See ROADMAP changelog. Superseded as the drawn far terrain by the Voxel LoD row below; `lod/` and `world/far.rs` stay in the tree, unused by `App`. |
+ | Voxel LoD (Voxy style) | written without a toolchain: not compiled, not run (10 tests in `world::lod`, rewritten 2026-10-17) | `world/lod.rs`: far terrain out to 768 blocks as real 3D block columns (runs of equal blocks) of 64 x 64 tiles, meshed as voxels at 1 / 2 / 4 / 8 / 16 blocks after a Voxy-style 2x2x2 mip (`Mipper`), faces only where a solid voxel meets a see-through one; same atlas, tints, face shades and fog as the chunks. **Real chunks first** (Voxy's ingest): `lod::columns`, `ChunkManager::take_ingest`, `Lod::ingest`. The cut under the ring only happens where a real chunk mesh exists (`ChunkManager::drawn`), so no hole to the sky. Trees are real trunk + crown voxels up to 420 blocks and a leaf carpet over dense forest beyond (2026-10-18), the terrain fog starts at 88% of the view, pre-generation runs from the start; terrain rounds to the step instead of bloating. See ROADMAP changelog. |
+ | River steps (organic slope) | written without a toolchain: not compiled, not run (+3 tests: `hydro::tests::a_lower_river_does_not_overwrite_a_higher_one`, `ticks::tests::woken_edge_water_spreads_into_levels`, `chunks::tests::edge_water_is_a_surface_source_with_air_beside_it`) | A river from a neighbouring plate is no longer cut by a lower river's bank (`Region::plan_at`), and the still water at a step or a cut bank is woken like the mod's `scheduleTick` (`ChunkManager::edge_water`, `Ticks::wake_water`) so the fluid sim writes the slope as real levels. See ROADMAP changelog. |
+@@ -120,7 +121,7 @@
+       save.rs             M7: chunk file codec (RLE), `Level` codec (player, inventory, furnaces, drops), atomic write
+       effects.rs          particles (splash, bubbles), lightning, suffocation, dungeon spawners
+       vitals.rs           health, air, fire, fall damage (EntityLiving.attackEntityFrom and friends)
+-      chunks/light.rs     M5 light engine (port of World/Chunk lighting)
++      chunks/light.rs     M5 light engine thread: messages, tasks, reports; the engine itself is the `starlight` crate
+       lod.rs              far terrain: column store + mip + textured cell mesher on its own thread (Voxy ideas), cut out where the ring draws
+       ticks.rs            M6b block updates: scheduled + random ticks, notifications, water/lava, sand, leaves, saplings, crops
+       gen/
+@@ -129,6 +130,7 @@
+         populate.rs       Region (2x2 chunks) + populate() and every WorldGen* class
+         noise.rs          PerlinNoise + OctaveNoise, java.util.Random clone
+         overworld.rs      ChunkProviderGenerate port (density + biome surface)
++starlight/               std-only crate (ScalableLux / Starlight port, LGPL-3.0-or-later, `COPYING*`): light propagation, sky sources, edge checks, parallel tasks; `cargo test -p starlight` runs on a plain host
+ embeddium/               std-only crate (Sodium/Embeddium port): section occlusion culling (`vis`, `cull`), buffer arena, compact vertex; `cargo test -p embeddium` runs on a plain host
+ tectonic/                std-only crate (Tectonic port, MIT): `terrain.json` (the datapack bundled by `tools/tectonic.py`) + a density-function interpreter and Minecraft's noise; `cargo test -p tectonic` runs on a plain host
+ lod/                     std-only crate: distant terrain (height-column tiles, mip quadtree, selection, mesher, save file); `cargo test -p lod` runs on a plain host
+diff -ruN a/mc-rs/Cargo.toml b/mc-rs/Cargo.toml
+--- a/mc-rs/Cargo.toml	2026-10-23 06:53:22.000000000 +0000
++++ b/mc-rs/Cargo.toml	2026-10-23 06:05:01.896890515 +0000
+@@ -21,6 +21,7 @@
+ embeddium = { path = "../embeddium" }
+ lod = { path = "../lod" }
+ tectonic = { path = "../tectonic" }
++starlight = { path = "../starlight" }
+ 
+ [features]
+ default = ["pad-rumble"]
+diff -ruN a/mc-rs/src/world/chunks/light.rs b/mc-rs/src/world/chunks/light.rs
+--- a/mc-rs/src/world/chunks/light.rs	2026-10-23 11:51:42.000000000 +0000
++++ b/mc-rs/src/world/chunks/light.rs	2026-10-23 06:05:01.896890515 +0000
+@@ -1,10 +1,8 @@
+-//! M5 light engine: a port of the b1.7.3 lighting in `World` (`scheduleLightingUpdate`,
+-//! `neighborLightPropagationChanged`, get/setLightValue), `MetadataChunkBlock.func_4127_a` (the region
+-//! relaxation) and `Chunk` (`generateSkylightMap`, `func_1003_g` relight, `func_996_c` lateral
+-//! scheduling). Two light kinds per cell: sky (15 straight down from open sky) and block (emitters,
+-//! `Block.lightValue`). Every update recomputes a box of cells from their six neighbours
+-//! (`max(neighbours) - max(opacity, 1)`, or the cell's own source level) and queues the neighbours of
+-//! each cell that changed, until nothing changes. Newest region first, like the Java.
++//! M5 light engine: ScalableLux's (Starlight's) light engine in the `starlight` crate, on top of the b1.7.3 rules: two light kinds per
++//! cell (sky: 15 straight down from open sky, `y >= height`; block: emitters, `Block.lightValue`), a cell holds
++//! `max(own source, max(neighbours) - max(opacity, 1))`. The b1.7.3 version (`MetadataChunkBlock.func_4127_a`: recompute a box of
++//! cells from their six neighbours until nothing changes) is gone; the settled light is the same (the crate's tests check it against a
++//! brute-force fixpoint, and `settled_light_is_the_plain_formula` below against the old formula with the real block tables).
+ //!
+ //! The engine runs on its own thread (`chunk-light`, C2ME's `threading-lighting` idea): `LightWorld` keeps its own copy of every
+ //! chunk's blocks and height map and is the only writer of the light; the render thread tells it what happens (`Msg`: a chunk's
+@@ -12,91 +10,64 @@
+ //! replace. So a region never waits for the frame. The chunk arrays are `Arc`s shared with the render thread while nobody writes
+ //! (`Arc::make_mut` copies a chunk's array on its first write from either side), so an untouched chunk costs one copy of blocks and light.
+ //!
++//! Stateless like Starlight: a message changes the blocks and the height map at once and only queues a `Task` (the cell, or the
++//! first light of the chunk); the light is computed when the task runs, from the blocks as they are then, and every edit of a chunk
++//! that piled up since is one pass. Tasks whose 3x3 chunk windows are disjoint run in parallel (ScalableLux's parallel light
++//! updates, `starlight::run`; `starlight::default_workers()` threads, a third of the cores: one task runs on the light thread itself).
++//!
+ //! Differences from vanilla, none of which change the settled result:
+ //! - the queue is drained in time slices on the light thread (`run_light`) instead of `updatingLighting`'s 500 regions;
+-//! - a freshly final chunk is lit in one go (`init_chunk`) because worldgen writes raw blocks instead of
+-//!   calling `setBlockWithNotify`, so no per-block updates were ever queued for them;
++//! - a freshly final chunk is lit in one go (`Msg::Init`) because worldgen writes raw blocks instead of calling
++//!   `setBlockWithNotify`, so no per-block updates were ever queued for them;
++//! - a chunk that is not lit is not part of the light world (nothing is written into it, it is read as absent); its first light
++//!   checks its seams with the lit chunks around it, both ways;
+ //! - no day/night: `skylightSubtracted` is 0 (see `render::mesh`).
+ 
+ use super::{ChunkManager, Key, KeyHasher};
+ use crate::world::chunk::{height_map, idx, light_opacity, light_value, H, VOLUME};
++use starlight::{Blocks, Chunk as LChunk, Task};
++#[cfg(test)]
++use starlight::Kind;
+ use std::collections::{HashMap, HashSet};
+ use std::sync::{mpsc, Arc};
+ use std::time::{Duration, Instant};
+ 
+-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+-pub(super) enum Kind {
+-    Sky,
+-    Block,
++/// The block tables the engine reads (`getLightDampening`, `getLightEmission`).
++struct Mc;
++
++impl Blocks for Mc {
++    fn opacity(id: u8) -> u8 {
++        light_opacity(id)
++    }
++    fn emission(id: u8) -> u8 {
++        light_value(id)
++    }
+ }
+ 
++// The crate has its own copy of the chunk layout; it must be this one (`idx` is checked by `chunk_layout_matches_the_engine`).
++const _: () = assert!(starlight::H == H && starlight::VOLUME == VOLUME);
++
+ /// The `kind` half of a raw light byte (sky in the low nibble, block light in the high one).
++#[cfg(test)]
+ fn nib(kind: Kind, v: u8) -> u8 {
+     if kind == Kind::Sky { v & 15 } else { v >> 4 }
+ }
+ 
+-/// `MetadataChunkBlock`: a box of cells (inclusive) whose light must be recomputed.
+-#[derive(Clone, Copy, Debug)]
+-pub(super) struct Region {
+-    kind: Kind,
+-    lo: [i32; 3],
+-    hi: [i32; 3],
+-}
+-
+-impl Region {
+-    fn volume(&self) -> i32 {
+-        (0..3).map(|a| self.hi[a] - self.lo[a] + 1).product()
+-    }
+-
+-    /// `MetadataChunkBlock.func_866_a`: grow this region to also cover `lo..=hi` if that adds
+-    /// at most 2 cells of volume. True if it now covers it.
+-    fn merge(&mut self, lo: [i32; 3], hi: [i32; 3]) -> bool {
+-        if (0..3).all(|a| lo[a] >= self.lo[a] && hi[a] <= self.hi[a]) {
+-            return true;
+-        }
+-        if !(0..3).all(|a| lo[a] >= self.lo[a] - 1 && hi[a] <= self.hi[a] + 1) {
+-            return false;
+-        }
+-        let old: i32 = (0..3).map(|a| self.hi[a] - self.lo[a]).product();
+-        let (nlo, nhi): (Vec<i32>, Vec<i32>) = (0..3).map(|a| (lo[a].min(self.lo[a]), hi[a].max(self.hi[a]))).unzip();
+-        let new: i32 = (0..3).map(|a| nhi[a] - nlo[a]).product();
+-        if new - old <= 2 {
+-            self.lo = [nlo[0], nlo[1], nlo[2]];
+-            self.hi = [nhi[0], nhi[1], nhi[2]];
+-            return true;
+-        }
+-        false
+-    }
+-}
+-
+ /// How long the light thread works on its queue before it reports what it has (the render thread sees nothing before that).
+ const LIGHT_SLICE: Duration = Duration::from_millis(5);
+ 
+-/// What the engine knows of one chunk: its own copy of the blocks and of the height map (kept in step by `Msg::Chunk` and
+-/// `Msg::Edit`), and the light, which only the engine writes.
+-struct LChunk {
+-    /// Shared with the render thread's `Entry.blocks` until either side writes (`Arc::make_mut` copies then).
+-    blocks: Arc<Vec<u8>>,
+-    /// Per cell, sky light in the low nibble and block light in the high nibble (same index as `blocks`). A report hands the render
+-    /// thread a second `Arc` of it; the next write of the engine copies the array once, so it is shared only while it is at rest.
+-    light: Arc<Vec<u8>>,
+-    height: [u8; 256],
+-    /// `init_chunk` ran and the blocks have not been replaced since.
+-    lit: bool,
+-    /// The light array or the lit flag changed since the last report.
+-    touched: bool,
+-    /// A light value changed in this chunk or beside it (the `mark_dirty` rule): its mesh is stale.
+-    stale: bool,
+-}
+-
+ type LChunks = HashMap<Key, LChunk, std::hash::BuildHasherDefault<KeyHasher>>;
+ 
+ /// The engine's state: what `ChunkManager` used to hold for light, on the light thread.
+ #[derive(Default)]
+ struct LightWorld {
++    /// What the engine knows of each chunk: its own copy of the blocks and of the height map (kept in step by `Msg::Chunk` and
++    /// `Msg::Edit`), and the light, which only the engine writes.
+     chunks: LChunks,
+-    /// Pending light updates, newest last (`World.lightingToUpdate`).
+-    queue: Vec<Region>,
++    /// Pending light work per chunk (`StarLightInterface`'s `ChunkTasks`).
++    tasks: HashMap<Key, Task>,
++    /// Threads for `starlight::run` (0 = 1).
++    workers: usize,
+ }
+ 
+ /// What the render thread tells the engine, in the order it happened.
+@@ -107,7 +78,7 @@
+     Edit { x: i32, y: i32, z: i32, id: u8 },
+     /// The chunk was unloaded.
+     Remove(Key),
+-    /// First light of the chunk (`init_chunk`).
++    /// First light of the chunk (`light_chunk`).
+     Init(Key),
+ }
+ 
+@@ -147,10 +118,10 @@
+ /// The light thread: take every message that is in, run the queue for a time slice, report; sleep when there is nothing to do.
+ /// Ends when the manager is dropped (the message channel closes).
+ fn light_thread(jobs: mpsc::Receiver<Msg>, done: mpsc::Sender<Report>) {
+-    let mut w = LightWorld::default();
++    let mut w = LightWorld { workers: starlight::default_workers(), ..Default::default() };
+     let mut n = 0usize;
+     loop {
+-        if w.queue.is_empty() {
++        if w.tasks.is_empty() {
+             match jobs.recv() {
+                 Ok(m) => {
+                     w.apply(m);
+@@ -200,6 +171,7 @@
+         match m {
+             Msg::Chunk(k, blocks) => {
+                 let height = height_map(&blocks);
++                self.tasks.remove(&k);
+                 match self.chunks.get_mut(&k) {
+                     // Rewritten by populate: the light stays until `Init` computes it again, as it did.
+                     Some(e) => {
+@@ -217,18 +189,26 @@
+                 if !(0..H as i32).contains(&y) {
+                     return;
+                 }
+-                let Some(e) = self.chunks.get_mut(&(x >> 4, z >> 4)) else { return };
++                let k = (x >> 4, z >> 4);
++                let Some(e) = self.chunks.get_mut(&k) else { return };
+                 let (lx, lz) = ((x & 15) as usize, (z & 15) as usize);
+                 let h = e.height[lz << 4 | lx] as i32;
+                 Arc::make_mut(&mut e.blocks)[idx(lx, y as usize, lz)] = id;
+-                self.light_after_set(x, y, z, id, h);
++                if let Some(top) = height_after_set(&e.blocks, lx, lz, id, y, h) {
++                    e.height[lz << 4 | lx] = top as u8;
++                }
++                // An unlit chunk lights from its blocks as they are when its first light runs.
++                if e.lit {
++                    self.tasks.entry(k).or_default().edits.push([x, y, z]);
++                }
+             }
+             Msg::Remove(k) => {
+                 self.chunks.remove(&k);
++                self.tasks.remove(&k);
+             }
+             Msg::Init(k) => {
+                 if self.chunks.contains_key(&k) {
+-                    self.init_chunk(k);
++                    self.tasks.entry(k).or_default().init = true;
+                 }
+             }
+         }
+@@ -247,330 +227,19 @@
+                 stale.push(k);
+             }
+         }
+-        Report { done, idle: self.queue.is_empty(), chunks, stale }
+-    }
+-
+-    /// A light value at column (x, z) changed: the mesh of its chunk is stale, and so is the neighbour's across a chunk edge (its
+-    /// border faces look at it).
+-    fn mark_dirty(&mut self, x: i32, z: i32) {
+-        let (cx, cz, lx, lz) = (x >> 4, z >> 4, x & 15, z & 15);
+-        // At most one neighbour per axis, so three keys at most.
+-        let mut keys = [(cx, cz); 3];
+-        let mut n = 1;
+-        for (hit, k) in [(lx == 0, (cx - 1, cz)), (lx == 15, (cx + 1, cz)), (lz == 0, (cx, cz - 1)), (lz == 15, (cx, cz + 1))] {
+-            if hit {
+-                keys[n] = k;
+-                n += 1;
+-            }
+-        }
+-        for k in &keys[..n] {
+-            if let Some(e) = self.chunks.get_mut(k) {
+-                e.stale = true;
+-            }
+-        }
+-    }
+-
+-    fn chunk_exists(&self, x: i32, z: i32) -> bool {
+-        self.chunks.contains_key(&(x >> 4, z >> 4))
+-    }
+-
+-    /// Block id for light maths: air outside the world and in unloaded chunks (`World.getBlockId`).
+-    fn raw_block(&self, x: i32, y: i32, z: i32) -> u8 {
+-        if !(0..H as i32).contains(&y) {
+-            return 0;
+-        }
+-        self.chunks.get(&(x >> 4, z >> 4)).map_or(0, |e| e.blocks[idx((x & 15) as usize, y as usize, (z & 15) as usize)])
++        Report { done, idle: self.tasks.is_empty(), chunks, stale }
+     }
+ 
+-    /// `World.getSavedLightValue`: y is clamped into the world, an unloaded chunk is dark.
++    /// `World.getSavedLightValue`: y is clamped into the world, an unloaded chunk is dark (tests).
++    #[cfg(test)]
+     pub(super) fn saved_light(&self, kind: Kind, x: i32, y: i32, z: i32) -> u8 {
+         let y = y.clamp(0, H as i32 - 1) as usize;
+         self.chunks.get(&(x >> 4, z >> 4)).map_or(0, |e| nib(kind, e.light[idx((x & 15) as usize, y, (z & 15) as usize)]))
+     }
+ 
+-    /// Write a nibble without telling the mesher.
+-    fn put_light(&mut self, kind: Kind, x: i32, y: i32, z: i32, v: u8) {
+-        let Some(e) = self.chunks.get_mut(&(x >> 4, z >> 4)) else { return };
+-        let i = idx((x & 15) as usize, y as usize, (z & 15) as usize);
+-        e.touched = true;
+-        let light = Arc::make_mut(&mut e.light);
+-        light[i] = if kind == Kind::Sky { light[i] & 0xF0 | v } else { light[i] & 0x0F | v << 4 };
+-    }
+-
+-    /// `World.setLightValue`: write, and the mesh that shows this cell is stale.
+-    fn set_saved_light(&mut self, kind: Kind, x: i32, y: i32, z: i32, v: u8) {
+-        // (`update_region`, the only caller, has checked that the cell's chunk is loaded)
+-        if (0..H as i32).contains(&y) {
+-            self.put_light(kind, x, y, z, v);
+-            self.mark_dirty(x, z);
+-        }
+-    }
+-
+-    /// `World.getHeightValue`: 0 for an unloaded chunk.
+-    fn height_at(&self, x: i32, z: i32) -> i32 {
+-        self.chunks.get(&(x >> 4, z >> 4)).map_or(0, |e| e.height[((z & 15) << 4 | (x & 15)) as usize] as i32)
+-    }
+-
+-    /// `World.scheduleLightingUpdate`: queue a region unless the chunk under its middle is missing,
+-    /// folding it into one of the last 5 queued regions of the same kind when that is nearly free.
+-    fn schedule_light(&mut self, kind: Kind, lo: [i32; 3], hi: [i32; 3]) {
+-        if !self.chunk_exists((hi[0] + lo[0]) / 2, (hi[2] + lo[2]) / 2) {
+-            return;
+-        }
+-        if self.queue.iter_mut().rev().take(5).any(|r| r.kind == kind && r.merge(lo, hi)) {
+-            return;
+-        }
+-        self.queue.push(Region { kind, lo, hi });
+-        if self.queue.len() > 1_000_000 {
+-            log::warn!("light: more than 1000000 updates, dropping the queue");
+-            self.queue.clear();
+-        }
+-    }
+-
+-    /// `World.neighborLightPropagationChanged`: cell (x, y, z) should now be at least `v` (the changed
+-    /// neighbour's level minus 1); queue it if its stored level differs from what it should be.
+-    fn neighbor_changed(&mut self, kind: Kind, x: i32, y: i32, z: i32, v: i32) {
+-        if !(0..H as i32).contains(&y) {
+-            return;
+-        }
+-        // One lookup of the cell's chunk gives the open-sky test (`sees_sky`), the block (`raw_block`) and the stored level.
+-        let Some(e) = self.chunks.get(&(x >> 4, z >> 4)) else { return };
+-        let (lx, lz) = ((x & 15) as usize, (z & 15) as usize);
+-        let v = match kind {
+-            Kind::Sky if y >= e.height[lz << 4 | lx] as i32 => 15,
+-            Kind::Sky => v,
+-            Kind::Block => v.max(light_value(e.blocks[idx(lx, y as usize, lz)]) as i32),
+-        };
+-        if nib(kind, e.light[idx(lx, y as usize, lz)]) as i32 != v {
+-            self.schedule_light(kind, [x, y, z], [x, y, z]);
+-        }
+-    }
+-
+-    /// A cell's stored level and the level it should have: `max(neighbours) - max(opacity, 1)`, or its own source level
+-    /// (`MetadataChunkBlock.func_4127_a`). The cell's chunk is looked up once, and its neighbours' only where they lie across a
+-    /// chunk border (it used to be ~9 lookups). `y` is inside the world. `None`: the chunk is not loaded.
+-    fn relit(&self, kind: Kind, x: i32, y: i32, z: i32) -> Option<(i32, i32)> {
+-        let e = self.chunks.get(&(x >> 4, z >> 4))?;
+-        let (lx, lz) = ((x & 15) as usize, (z & 15) as usize);
+-        // Stored level of a cell beside this one (`saved_light`: y is clamped into the world).
+-        let at = |nx: i32, ny: i32, nz: i32| -> i32 {
+-            if nx >> 4 == x >> 4 && nz >> 4 == z >> 4 {
+-                nib(kind, e.light[idx((nx & 15) as usize, ny.clamp(0, H as i32 - 1) as usize, (nz & 15) as usize)]) as i32
+-            } else {
+-                self.saved_light(kind, nx, ny, nz) as i32
+-            }
+-        };
+-        let id = e.blocks[idx(lx, y as usize, lz)];
+-        let opacity = (light_opacity(id) as i32).max(1);
+-        let source = match kind {
+-            Kind::Sky => if y >= e.height[lz << 4 | lx] as i32 { 15 } else { 0 },
+-            Kind::Block => light_value(id) as i32,
+-        };
+-        let old = at(x, y, z);
+-        let new = if opacity >= 15 && source == 0 {
+-            0
+-        } else {
+-            let n = at(x - 1, y, z).max(at(x + 1, y, z)).max(at(x, y - 1, z)).max(at(x, y + 1, z)).max(at(x, y, z - 1)).max(at(x, y, z + 1));
+-            (n - opacity).max(0).max(source)
+-        };
+-        Some((old, new))
+-    }
+-
+-    /// `MetadataChunkBlock.func_4127_a`: recompute every cell of the region, queueing the neighbours of
+-    /// each cell whose level changed.
+-    fn update_region(&mut self, mut r: Region) {
+-        if r.volume() > 32768 {
+-            log::warn!("light: region too large, skipping");
+-            return;
+-        }
+-        let kind = r.kind;
+-        let mut near: Option<(Key, bool)> = None; // chunk -> its 3x3 surroundings are loaded
+-        for x in r.lo[0]..=r.hi[0] {
+-            for z in r.lo[2]..=r.hi[2] {
+-                let key = (x >> 4, z >> 4);
+-                let ok = match near {
+-                    Some((k, ok)) if k == key => ok,
+-                    _ => {
+-                        // World.doChunksNearChunkExist(x, 0, z, 1): chunks of x-1..=x+1, z-1..=z+1.
+-                        let ok = ((x - 1) >> 4..=(x + 1) >> 4).all(|cx| ((z - 1) >> 4..=(z + 1) >> 4).all(|cz| self.chunks.contains_key(&(cx, cz))));
+-                        near = Some((key, ok));
+-                        ok
+-                    }
+-                };
+-                if !ok {
+-                    continue;
+-                }
+-                r.lo[1] = r.lo[1].max(0);
+-                r.hi[1] = r.hi[1].min(H as i32 - 1);
+-                for y in r.lo[1]..=r.hi[1] {
+-                    let Some((old, new)) = self.relit(kind, x, y, z) else { continue };
+-                    if old != new {
+-                        self.set_saved_light(kind, x, y, z, new as u8);
+-                        let p = (new - 1).max(0);
+-                        self.neighbor_changed(kind, x - 1, y, z, p);
+-                        self.neighbor_changed(kind, x, y - 1, z, p);
+-                        self.neighbor_changed(kind, x, y, z - 1, p);
+-                        // The +side neighbours are inside the region (and recomputed by this loop) unless
+-                        // this is the last cell on that axis.
+-                        if x + 1 >= r.hi[0] { self.neighbor_changed(kind, x + 1, y, z, p) }
+-                        if y + 1 >= r.hi[1] { self.neighbor_changed(kind, x, y + 1, z, p) }
+-                        if z + 1 >= r.hi[2] { self.neighbor_changed(kind, x, y, z + 1, p) }
+-                    }
+-                }
+-            }
+-        }
+-    }
+-
+-    /// Process queued regions, newest first, until the queue is empty or `deadline` passes.
++    /// Run the queued tasks until none are left or `deadline` passes (checked between waves of parallel tasks).
+     pub(super) fn run_light(&mut self, deadline: Option<Instant>) {
+-        let mut n = 0u32;
+-        while let Some(r) = self.queue.pop() {
+-            let big = r.volume() > 256;
+-            self.update_region(r);
+-            n += 1;
+-            // The clock is read after a big region or every 32nd one: most regions are a single cell, which costs less than
+-            // `Instant::now` does (so the budget can overshoot by a few dozen cells, microseconds).
+-            if (big || n % 32 == 0) && deadline.is_some_and(|d| Instant::now() >= d) {
+-                break;
+-            }
+-        }
+-    }
+-
+-    /// `Chunk.func_996_c`: the column's neighbours may need light from it (or it from them) between the
+-    /// two heights.
+-    fn schedule_lateral(&mut self, x: i32, z: i32) {
+-        let h = self.height_at(x, z);
+-        for (nx, nz) in [(x - 1, z), (x + 1, z), (x, z - 1), (x, z + 1)] {
+-            let nh = self.height_at(nx, nz);
+-            if nh > h {
+-                self.schedule_light(Kind::Sky, [nx, h, nz], [nx, nh, nz]);
+-            } else if nh < h {
+-                self.schedule_light(Kind::Sky, [nx, nh, nz], [nx, h, nz]);
+-            }
+-        }
+-    }
+-
+-    /// Light bookkeeping of `Chunk.setBlockID` after the cell (x, y, z) became `id`; `h` is the
+-    /// column's height from before the change.
+-    fn light_after_set(&mut self, x: i32, y: i32, z: i32, id: u8, h: i32) {
+-        if light_opacity(id) != 0 {
+-            if y >= h {
+-                self.relight_column(x, y + 1, z);
+-            }
+-        } else if y == h - 1 {
+-            self.relight_column(x, y, z);
+-        }
+-        self.schedule_light(Kind::Sky, [x, y, z], [x, y, z]);
+-        self.schedule_light(Kind::Block, [x, y, z], [x, y, z]);
+-        self.schedule_lateral(x, z);
+-    }
+-
+-    /// `Chunk.func_1003_g`: the column's height map changed because of an edit at or above `y`; fix
+-    /// the height, the straight-down skylight, and queue the sideways fallout.
+-    fn relight_column(&mut self, x: i32, y: i32, z: i32) {
+-        let Some(e) = self.chunks.get(&(x >> 4, z >> 4)) else { return };
+-        let (lx, lz) = ((x & 15) as usize, (z & 15) as usize);
+-        let old = e.height[lz << 4 | lx] as i32;
+-        let h = column_top(&e.blocks, lx, lz, old, y);
+-        if h == old {
+-            return;
+-        }
+-        self.chunks.get_mut(&(x >> 4, z >> 4)).unwrap().height[lz << 4 | lx] = h as u8;
+-        if h < old {
+-            (h..old).for_each(|yy| self.put_light(Kind::Sky, x, yy, z, 15));
+-        } else {
+-            self.schedule_light(Kind::Sky, [x, old, z], [x, h, z]);
+-            (old..h).for_each(|yy| self.put_light(Kind::Sky, x, yy, z, 0));
+-        }
+-        // Skylight under the new top, losing `opacity` (at least 1) per cell.
+-        let (mut yy, mut level) = (h, 15);
+-        while yy > 0 && level > 0 {
+-            yy -= 1;
+-            level = (level - (light_opacity(self.raw_block(x, yy, z)) as i32).max(1)).max(0);
+-            self.put_light(Kind::Sky, x, yy, z, level as u8);
+-        }
+-        while yy > 0 && light_opacity(self.raw_block(x, yy - 1, z)) == 0 {
+-            yy -= 1;
+-        }
+-        if yy != h {
+-            self.schedule_light(Kind::Sky, [x - 1, yy, z - 1], [x + 1, h, z + 1]);
+-        }
+-    }
+-
+-    /// First light of a final chunk: `Chunk.generateSkylightMap` (column skylight from the height
+-    /// map), the lateral scheduling for every column, every emitter, and the seams with chunks that
+-    /// are already lit (their light is recomputed across the border both ways).
+-    fn init_chunk(&mut self, key: Key) {
+-        let (ox, oz) = (key.0 * 16, key.1 * 16);
+-        let mut emitters = Vec::new();
+-        {
+-            let e = self.chunks.get_mut(&key).unwrap();
+-            let light = Arc::make_mut(&mut e.light);
+-            light.fill(0);
+-            for x in 0..16 {
+-                for z in 0..16 {
+-                    let base = idx(x, 0, z);
+-                    let (mut level, mut y) = (15i32, H - 1);
+-                    loop {
+-                        level -= light_opacity(e.blocks[base + y]) as i32;
+-                        if level > 0 {
+-                            light[base + y] |= level as u8;
+-                        }
+-                        y -= 1;
+-                        if !(y > 0 && level > 0) {
+-                            break;
+-                        }
+-                    }
+-                }
+-            }
+-            for (i, &b) in e.blocks.iter().enumerate() {
+-                if light_value(b) > 0 {
+-                    emitters.push([ox + (i >> 11) as i32, (i & 127) as i32, oz + ((i >> 7) & 15) as i32]);
+-                }
+-            }
+-            e.lit = true;
+-            e.touched = true;
+-        }
+-        for x in 0..16 {
+-            for z in 0..16 {
+-                self.schedule_lateral(ox + x, oz + z);
+-            }
+-        }
+-        for p in emitters {
+-            self.schedule_light(Kind::Block, p, p);
+-        }
+-        // Seams: the border column on each side of every border with a lit neighbour. Sky light only needs
+-        // recomputing up to the tallest column of the two chunks (above that both sides are open sky);
+-        // block light only if either chunk holds any.
+-        for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+-            let nk = (key.0 + dx, key.1 + dz);
+-            let (top, glow) = match (self.chunks.get(&key), self.chunks.get(&nk)) {
+-                (Some(me), Some(n)) if n.lit => (
+-                    (*me.height.iter().chain(n.height.iter()).max().unwrap() as i32 + 1).min(H as i32 - 1),
+-                    me.light.iter().chain(n.light.iter()).any(|&v| v >> 4 != 0),
+-                ),
+-                _ => continue,
+-            };
+-            // Our border column and the neighbour's facing one: (x range, z range) of the strip.
+-            let strip = |cx: i32, cz: i32, d: (i32, i32), y1: i32| {
+-                let (x0, z0) = (cx * 16, cz * 16);
+-                let (xs, zs) = match d {
+-                    (-1, 0) => ((x0, x0), (z0, z0 + 15)),
+-                    (1, 0) => ((x0 + 15, x0 + 15), (z0, z0 + 15)),
+-                    (0, -1) => ((x0, x0 + 15), (z0, z0)),
+-                    _ => ((x0, x0 + 15), (z0 + 15, z0 + 15)),
+-                };
+-                ([xs.0, 0, zs.0], [xs.1, y1, zs.1])
+-            };
+-            for (k, d) in [(key, (dx, dz)), (nk, (-dx, -dz))] {
+-                let (lo, hi) = strip(k.0, k.1, d, top);
+-                self.schedule_light(Kind::Sky, lo, hi);
+-                if glow {
+-                    let (lo, hi) = strip(k.0, k.1, d, H as i32 - 1);
+-                    self.schedule_light(Kind::Block, lo, hi);
+-                }
+-            }
+-        }
++        starlight::run::<Mc, _>(&mut self.chunks, &mut self.tasks, self.workers, deadline);
+     }
+ }
+ 
+@@ -767,51 +436,43 @@
+         w
+     }
+ 
+-    /// `relit` (one chunk lookup per cell) gives what the plain formula of `update_region` gives (`saved_light` / `raw_block` /
+-    /// open-sky test for the cell and its six neighbours): mid-chunk, on borders and corners, at the outer edge of the loaded area and
+-    /// at the bottom and top of the world, with sky and block light in a settled state and in a stale one.
++    /// The settled light of the engine is what the plain b1.7.3 formula gives (`MetadataChunkBlock.func_4127_a`: `max(neighbours) -
++    /// max(opacity, 1)` or the cell's own source level, with the real block tables), at mid-chunk cells, borders and corners, the outer
++    /// edge of the loaded area and the bottom and top of the world, after edits (a roof, glowstone near a border, a removed one).
+     #[test]
+-    fn relit_matches_the_plain_formula() {
+-        let slow = |w: &LightWorld, kind: Kind, x: i32, y: i32, z: i32| {
+-            let old = w.saved_light(kind, x, y, z) as i32;
+-            let id = w.raw_block(x, y, z);
+-            let opacity = (light_opacity(id) as i32).max(1);
+-            let sees_sky = y >= H as i32
+-                || (y >= 0 && w.chunks.get(&(x >> 4, z >> 4)).is_some_and(|e| y >= e.height[((z & 15) << 4 | (x & 15)) as usize] as i32));
+-            let source = match kind {
+-                Kind::Sky => if sees_sky { 15 } else { 0 },
+-                Kind::Block => light_value(id) as i32,
+-            };
+-            let new = if opacity >= 15 && source == 0 {
+-                0
+-            } else {
+-                let n = [(-1, 0, 0), (1, 0, 0), (0, -1, 0), (0, 1, 0), (0, 0, -1), (0, 0, 1)]
+-                    .iter()
+-                    .map(|&(dx, dy, dz)| w.saved_light(kind, x + dx, y + dy, z + dz) as i32)
+-                    .max()
+-                    .unwrap_or(0);
+-                (n - opacity).max(0).max(source)
+-            };
+-            (old, new)
+-        };
++    fn settled_light_is_the_plain_formula() {
+         let mut w = flat_world();
+-        w.apply(Msg::Edit { x: 14, y: 11, z: 8, id: 89 }); // glowstone near the +X border
+-        w.apply(Msg::Edit { x: 5, y: 12, z: 5, id: 1 }); // a roof
+-        w.run_light(None);
+-        w.apply(Msg::Edit { x: 0, y: 11, z: 0, id: 89 }); // not run: the stored light is stale around it, so old != new somewhere
+-        w.apply(Msg::Edit { x: 16, y: 10, z: 15, id: 1 });
+-        let mut differs = false;
++        for (x, y, z, id) in [(14, 11, 8, 89u8), (5, 12, 5, 1), (0, 11, 0, 89), (16, 10, 15, 1), (14, 11, 8, 0)] {
++            w.apply(Msg::Edit { x, y, z, id });
++            w.run_light(None);
++        }
+         for kind in [Kind::Sky, Kind::Block] {
+             for (x, z) in [(5, 5), (0, 0), (15, 15), (16, 0), (-1, -1), (15, 8), (8, 0), (14, 8), (16, 15), (31, 31), (-16, -16), (0, 15)] {
+                 for y in [0, 1, 9, 10, 11, 12, 60, 126, 127] {
+-                    let want = slow(&w, kind, x, y, z);
+-                    differs |= want.0 != want.1;
+-                    assert_eq!(w.relit(kind, x, y, z), Some(want), "{kind:?} ({x}, {y}, {z})");
++                    let Some(e) = w.chunks.get(&(x >> 4, z >> 4)) else { continue };
++                    let id = e.blocks[idx((x & 15) as usize, y as usize, (z & 15) as usize)];
++                    let source = match kind {
++                        Kind::Sky => if y >= e.height[((z & 15) << 4 | (x & 15)) as usize] as i32 { 15 } else { 0 },
++                        Kind::Block => light_value(id) as i32,
++                    };
++                    let n = [(-1, 0, 0), (1, 0, 0), (0, -1, 0), (0, 1, 0), (0, 0, -1), (0, 0, 1)]
++                        .iter()
++                        .filter(|&&(_, dy, _)| (0..H as i32).contains(&(y + dy)))
++                        .map(|&(dx, dy, dz)| w.saved_light(kind, x + dx, y + dy, z + dz) as i32)
++                        .max()
++                        .unwrap_or(0);
++                    let want = (n - (light_opacity(id) as i32).max(1)).max(0).max(source);
++                    assert_eq!(w.saved_light(kind, x, y, z) as i32, want, "{kind:?} ({x}, {y}, {z})");
+                 }
+             }
+         }
+-        assert!(differs, "the stale state must exercise old != new");
+-        assert_eq!(w.relit(Kind::Sky, 100, 5, 0), None, "chunk not loaded");
++    }
++
++    /// The crate's copy of the cell layout is the game's.
++    #[test]
++    fn chunk_layout_matches_the_engine() {
++        assert_eq!(idx(3, 5, 7), 3 << 11 | 7 << 7 | 5);
++        assert_eq!((starlight::H, starlight::VOLUME), (H, VOLUME));
+     }
+ 
+     /// The light thread (messages in, reports out, applied to the render thread's copy) lights a world exactly as the engine does
+diff -ruN a/roadmap/performance.md b/roadmap/performance.md
+--- a/roadmap/performance.md	2026-10-23 07:57:56.000000000 +0000
++++ b/roadmap/performance.md	2026-10-23 06:05:01.896890515 +0000
+@@ -59,6 +59,13 @@
+ Not applicable, left out on purpose: multi-draw and persistent mapping (not in wgpu's downlevel set, none on a GLES fallback), mixins and the Forge / Fabric glue, the options screen, `ColorProviderRegistry` (biome tints are `biome_tints` already).
+ 
+ ## Changelog
++- 2026-10-23: ScalableLux port (ScalableLux 26.2.0 = Starlight + parallel light updates, LGPL-3.0; read `README.md`, `TECHNICAL_DETAILS.md`, `StarLightEngine`, `BlockStarLightEngine`, `SkyStarLightEngine`, `StarLightInterface`, `Config`, `GlobalExecutors`). New std-only workspace crate `starlight/` (`COPYING*` from ScalableLux, same text as `embeddium/`); `world/chunks/light.rs` keeps the light thread and its message protocol and hands the work to it. Verified: `cargo test -p starlight` (2 tests) passes on a Linux host with rustc 1.99; `cargo check --lib --tests` for aarch64-linux-android passes; the `LightWorld`-level mc-rs tests (`settled_light_is_the_plain_formula`, `chunk_layout_matches_the_engine`) and the thread protocol were run in a scratch crate on the same sources. NOT run: the `ChunkManager`-level tests in `light.rs` (`light_thread_matches_the_engine`, `light_settles_after_edits`: the cdylib cannot be built on a host), anything on a device.
++    - What is ported: the propagator (`performLightIncrease` / `performLightDecrease`: one FIFO each per kind, entries with a direction bitset so the cell a level came from is not read again, nothing below level 2 queued, `WRITE` / `RECHECK` flags), `checkBlock` and `calculateLightValue`, the stateless sky sources (the column's source run is brought in line with its height by scanning the light, like `tryPropagateSkylight`; the first light of a chunk queues only the source cells beside a darker column), `checkChunkEdges` (both sides of a seam with a lit neighbour, wrong cells collected first and then checked) and ScalableLux's parallel updates (`run`: waves of up to `default_workers()` tasks whose 3x3 chunk windows are disjoint, a window is moved out of the map for the task so there is no lock, scoped threads, one task runs inline). `default_workers()` is ScalableLux's `Config.PARALLELISM` default, cores / 3 at least 1.
++    - What changed around it: `Msg::Edit` writes the block and the height at once and only queues the cell in the chunk's `Task` (an edit of an unlit chunk is dropped: its first light reads the blocks as they are), so all edits of a chunk that piled up are one pass; a chunk that is not lit is absent for the engine (nothing is written into it); `Region`, `update_region`, `relit`, `schedule_light`, `schedule_lateral`, `relight_column`, `init_chunk` and `mark_dirty` are gone (the stale / touched flags are set where the light is written, the neighbour across a border included).
++    - Why it is the same light: both compute `L = max(source, max(neighbours) - max(opacity, 1))` (sky source `y >= height`, block source the emission). `starlight::tests::settled_light_is_the_fixpoint` compares the settled light with a flood-fill brute force over random terrain (stone, caves, leaves, water, glowstone, torches) after batches of first lights in random order, random edits and a re-light of an already lit chunk, with 1 and 3 workers; three bugs injected on purpose (no scan for a covered column, no edge checks, no re-propagation of brighter neighbours in a decrease) each make it fail.
++    - Measured on the Linux host (x86_64, release, not a phone; 9 x 9 chunks of hilly terrain with trees, water, torches and caves; old engine = the repo as uploaded, both on the same light-thread-less `LightWorld`): first light of 81 chunks 52 ms -> 35 ms (1 worker; 3 workers 39 ms, no gain: waves of 3 are rare while every task is a first light), 300 single edits one run each 84 ms -> 9 ms, 300 edits queued and run once 9 ms. The old engine left 3 stale water cells in the interior (`want 9, got 12` under water), the new one none: every interior cell obeys the formula.
++    - ponytail: a wave waits for its slowest task (ScalableLux's per-chunk lock tokens on a persistent pool have no barrier; upgrade path: a pool plus per-chunk busy flags); `Arc::make_mut` runs per light write, an atomic check each (unshare once per touched chunk); `light_chunk` reads all 32768 blocks for emitters (Starlight skips sections whose palette has none; a per-chunk emitter count would do); the 3x3 window is enough because light never goes further than 15 cells and a chunk is 16 wide; unloading a chunk leaves the light it gave its neighbours until the next edit near it (same as vanilla). Not ported: `SWMRNibbleArray` (null / zero / full nibble states: a flat array per chunk here), the vanilla light interface, the save format (the game does not save light), conditionally transparent blocks (none in b1.7.3), section emptiness maps. No option for the thread count (the const lives in `default_workers()`).
++    - UNVERIFIED on a device: frame time and the first-light time on a phone, that the parallel waves help there (cores / 3 is 1 on a 4-core phone, so no thread is spawned), and the look of the meshes after an edit (stale flags are set where the old `mark_dirty` set them).
+ 
+ - 2026-10-23: C2ME's density function compiler ideas in the `tectonic` crate (`c2me-opts-dfc`, MIT; ideas only, no code copied) (written WITHOUT a Rust toolchain: not compiled, not run; +3 tests `tectonic::tests::{simplified_graph_gives_the_plain_graphs_bits, simplify_drops_the_wrappers, memo_follows_the_column_and_the_point}`, not run; the existing `chunk_matches_the_python_reference` must still pass). `OpenCL` module of C2ME is All Rights Reserved and needs f64, which GLES lacks: not used.
+     - Before: `Tectonic::ev` kept y-independent values in a `HashMap<(node, x, z), f64>` (SipHash) and recomputed every y-dependent node on every visit. Counted, not measured: pass 2 asks for the root on 32768 blocks, and the part of the root outside the one `interpolated` node is 8 nodes (3 y-independent, no noise), so the map was probed ~100k times a chunk; the noise work is in pass 1 (425 points of the `interpolated` argument, `base_3d_noise` is 40 octaves of each).
+diff -ruN a/starlight/COPYING b/starlight/COPYING
+--- a/starlight/COPYING	1970-01-01 00:00:00.000000000 +0000
++++ b/starlight/COPYING	2026-10-23 06:05:01.896890515 +0000
+@@ -0,0 +1,674 @@
++                    GNU GENERAL PUBLIC LICENSE
++                       Version 3, 29 June 2007
++
++ Copyright (C) 2007 Free Software Foundation, Inc. <https://fsf.org/>
++ Everyone is permitted to copy and distribute verbatim copies
++ of this license document, but changing it is not allowed.
++
++                            Preamble
++
++  The GNU General Public License is a free, copyleft license for
++software and other kinds of works.
++
++  The licenses for most software and other practical works are designed
++to take away your freedom to share and change the works.  By contrast,
++the GNU General Public License is intended to guarantee your freedom to
++share and change all versions of a program--to make sure it remains free
++software for all its users.  We, the Free Software Foundation, use the
++GNU General Public License for most of our software; it applies also to
++any other work released this way by its authors.  You can apply it to
++your programs, too.
++
++  When we speak of free software, we are referring to freedom, not
++price.  Our General Public Licenses are designed to make sure that you
++have the freedom to distribute copies of free software (and charge for
++them if you wish), that you receive source code or can get it if you
++want it, that you can change the software or use pieces of it in new
++free programs, and that you know you can do these things.
++
++  To protect your rights, we need to prevent others from denying you
++these rights or asking you to surrender the rights.  Therefore, you have
++certain responsibilities if you distribute copies of the software, or if
++you modify it: responsibilities to respect the freedom of others.
++
++  For example, if you distribute copies of such a program, whether
++gratis or for a fee, you must pass on to the recipients the same
++freedoms that you received.  You must make sure that they, too, receive
++or can get the source code.  And you must show them these terms so they
++know their rights.
++
++  Developers that use the GNU GPL protect your rights with two steps:
++(1) assert copyright on the software, and (2) offer you this License
++giving you legal permission to copy, distribute and/or modify it.
++
++  For the developers' and authors' protection, the GPL clearly explains
++that there is no warranty for this free software.  For both users' and
++authors' sake, the GPL requires that modified versions be marked as
++changed, so that their problems will not be attributed erroneously to
++authors of previous versions.
++
++  Some devices are designed to deny users access to install or run
++modified versions of the software inside them, although the manufacturer
++can do so.  This is fundamentally incompatible with the aim of
++protecting users' freedom to change the software.  The systematic
++pattern of such abuse occurs in the area of products for individuals to
++use, which is precisely where it is most unacceptable.  Therefore, we
++have designed this version of the GPL to prohibit the practice for those
++products.  If such problems arise substantially in other domains, we
++stand ready to extend this provision to those domains in future versions
++of the GPL, as needed to protect the freedom of users.
++
++  Finally, every program is threatened constantly by software patents.
++States should not allow patents to restrict development and use of
++software on general-purpose computers, but in those that do, we wish to
++avoid the special danger that patents applied to a free program could
++make it effectively proprietary.  To prevent this, the GPL assures that
++patents cannot be used to render the program non-free.
++
++  The precise terms and conditions for copying, distribution and
++modification follow.
++
++                       TERMS AND CONDITIONS
++
++  0. Definitions.
++
++  "This License" refers to version 3 of the GNU General Public License.
++
++  "Copyright" also means copyright-like laws that apply to other kinds of
++works, such as semiconductor masks.
++
++  "The Program" refers to any copyrightable work licensed under this
++License.  Each licensee is addressed as "you".  "Licensees" and
++"recipients" may be individuals or organizations.
++
++  To "modify" a work means to copy from or adapt all or part of the work
++in a fashion requiring copyright permission, other than the making of an
++exact copy.  The resulting work is called a "modified version" of the
++earlier work or a work "based on" the earlier work.
++
++  A "covered work" means either the unmodified Program or a work based
++on the Program.
++
++  To "propagate" a work means to do anything with it that, without
++permission, would make you directly or secondarily liable for
++infringement under applicable copyright law, except executing it on a
++computer or modifying a private copy.  Propagation includes copying,
++distribution (with or without modification), making available to the
++public, and in some countries other activities as well.
++
++  To "convey" a work means any kind of propagation that enables other
++parties to make or receive copies.  Mere interaction with a user through
++a computer network, with no transfer of a copy, is not conveying.
++
++  An interactive user interface displays "Appropriate Legal Notices"
++to the extent that it includes a convenient and prominently visible
++feature that (1) displays an appropriate copyright notice, and (2)
++tells the user that there is no warranty for the work (except to the
++extent that warranties are provided), that licensees may convey the
++work under this License, and how to view a copy of this License.  If
++the interface presents a list of user commands or options, such as a
++menu, a prominent item in the list meets this criterion.
++
++  1. Source Code.
++
++  The "source code" for a work means the preferred form of the work
++for making modifications to it.  "Object code" means any non-source
++form of a work.
++
++  A "Standard Interface" means an interface that either is an official
++standard defined by a recognized standards body, or, in the case of
++interfaces specified for a particular programming language, one that
++is widely used among developers working in that language.
++
++  The "System Libraries" of an executable work include anything, other
++than the work as a whole, that (a) is included in the normal form of
++packaging a Major Component, but which is not part of that Major
++Component, and (b) serves only to enable use of the work with that
++Major Component, or to implement a Standard Interface for which an
++implementation is available to the public in source code form.  A
++"Major Component", in this context, means a major essential component
++(kernel, window system, and so on) of the specific operating system
++(if any) on which the executable work runs, or a compiler used to
++produce the work, or an object code interpreter used to run it.
++
++  The "Corresponding Source" for a work in object code form means all
++the source code needed to generate, install, and (for an executable
++work) run the object code and to modify the work, including scripts to
++control those activities.  However, it does not include the work's
++System Libraries, or general-purpose tools or generally available free
++programs which are used unmodified in performing those activities but
++which are not part of the work.  For example, Corresponding Source
++includes interface definition files associated with source files for
++the work, and the source code for shared libraries and dynamically
++linked subprograms that the work is specifically designed to require,
++such as by intimate data communication or control flow between those
++subprograms and other parts of the work.
++
++  The Corresponding Source need not include anything that users
++can regenerate automatically from other parts of the Corresponding
++Source.
++
++  The Corresponding Source for a work in source code form is that
++same work.
++
++  2. Basic Permissions.
++
++  All rights granted under this License are granted for the term of
++copyright on the Program, and are irrevocable provided the stated
++conditions are met.  This License explicitly affirms your unlimited
++permission to run the unmodified Program.  The output from running a
++covered work is covered by this License only if the output, given its
++content, constitutes a covered work.  This License acknowledges your
++rights of fair use or other equivalent, as provided by copyright law.
++
++  You may make, run and propagate covered works that you do not
++convey, without conditions so long as your license otherwise remains
++in force.  You may convey covered works to others for the sole purpose
++of having them make modifications exclusively for you, or provide you
++with facilities for running those works, provided that you comply with
++the terms of this License in conveying all material for which you do
++not control copyright.  Those thus making or running the covered works
++for you must do so exclusively on your behalf, under your direction
++and control, on terms that prohibit them from making any copies of
++your copyrighted material outside their relationship with you.
++
++  Conveying under any other circumstances is permitted solely under
++the conditions stated below.  Sublicensing is not allowed; section 10
++makes it unnecessary.
++
++  3. Protecting Users' Legal Rights From Anti-Circumvention Law.
++
++  No covered work shall be deemed part of an effective technological
++measure under any applicable law fulfilling obligations under article
++11 of the WIPO copyright treaty adopted on 20 December 1996, or
++similar laws prohibiting or restricting circumvention of such
++measures.
++
++  When you convey a covered work, you waive any legal power to forbid
++circumvention of technological measures to the extent such circumvention
++is effected by exercising rights under this License with respect to
++the covered work, and you disclaim any intention to limit operation or
++modification of the work as a means of enforcing, against the work's
++users, your or third parties' legal rights to forbid circumvention of
++technological measures.
++
++  4. Conveying Verbatim Copies.
++
++  You may convey verbatim copies of the Program's source code as you
++receive it, in any medium, provided that you conspicuously and
++appropriately publish on each copy an appropriate copyright notice;
++keep intact all notices stating that this License and any
++non-permissive terms added in accord with section 7 apply to the code;
++keep intact all notices of the absence of any warranty; and give all
++recipients a copy of this License along with the Program.
++
++  You may charge any price or no price for each copy that you convey,
++and you may offer support or warranty protection for a fee.
++
++  5. Conveying Modified Source Versions.
++
++  You may convey a work based on the Program, or the modifications to
++produce it from the Program, in the form of source code under the
++terms of section 4, provided that you also meet all of these conditions:
++
++    a) The work must carry prominent notices stating that you modified
++    it, and giving a relevant date.
++
++    b) The work must carry prominent notices stating that it is
++    released under this License and any conditions added under section
++    7.  This requirement modifies the requirement in section 4 to
++    "keep intact all notices".
++
++    c) You must license the entire work, as a whole, under this
++    License to anyone who comes into possession of a copy.  This
++    License will therefore apply, along with any applicable section 7
++    additional terms, to the whole of the work, and all its parts,
++    regardless of how they are packaged.  This License gives no
++    permission to license the work in any other way, but it does not
++    invalidate such permission if you have separately received it.
++
++    d) If the work has interactive user interfaces, each must display
++    Appropriate Legal Notices; however, if the Program has interactive
++    interfaces that do not display Appropriate Legal Notices, your
++    work need not make them do so.
++
++  A compilation of a covered work with other separate and independent
++works, which are not by their nature extensions of the covered work,
++and which are not combined with it such as to form a larger program,
++in or on a volume of a storage or distribution medium, is called an
++"aggregate" if the compilation and its resulting copyright are not
++used to limit the access or legal rights of the compilation's users
++beyond what the individual works permit.  Inclusion of a covered work
++in an aggregate does not cause this License to apply to the other
++parts of the aggregate.
++
++  6. Conveying Non-Source Forms.
++
++  You may convey a covered work in object code form under the terms
++of sections 4 and 5, provided that you also convey the
++machine-readable Corresponding Source under the terms of this License,
++in one of these ways:
++
++    a) Convey the object code in, or embodied in, a physical product
++    (including a physical distribution medium), accompanied by the
++    Corresponding Source fixed on a durable physical medium
++    customarily used for software interchange.
++
++    b) Convey the object code in, or embodied in, a physical product
++    (including a physical distribution medium), accompanied by a
++    written offer, valid for at least three years and valid for as
++    long as you offer spare parts or customer support for that product
++    model, to give anyone who possesses the object code either (1) a
++    copy of the Corresponding Source for all the software in the
++    product that is covered by this License, on a durable physical
++    medium customarily used for software interchange, for a price no
++    more than your reasonable cost of physically performing this
++    conveying of source, or (2) access to copy the
++    Corresponding Source from a network server at no charge.
++
++    c) Convey individual copies of the object code with a copy of the
++    written offer to provide the Corresponding Source.  This
++    alternative is allowed only occasionally and noncommercially, and
++    only if you received the object code with such an offer, in accord
++    with subsection 6b.
++
++    d) Convey the object code by offering access from a designated
++    place (gratis or for a charge), and offer equivalent access to the
++    Corresponding Source in the same way through the same place at no
++    further charge.  You need not require recipients to copy the
++    Corresponding Source along with the object code.  If the place to
++    copy the object code is a network server, the Corresponding Source
++    may be on a different server (operated by you or a third party)
++    that supports equivalent copying facilities, provided you maintain
++    clear directions next to the object code saying where to find the
++    Corresponding Source.  Regardless of what server hosts the
++    Corresponding Source, you remain obligated to ensure that it is
++    available for as long as needed to satisfy these requirements.
++
++    e) Convey the object code using peer-to-peer transmission, provided
++    you inform other peers where the object code and Corresponding
++    Source of the work are being offered to the general public at no
++    charge under subsection 6d.
++
++  A separable portion of the object code, whose source code is excluded
++from the Corresponding Source as a System Library, need not be
++included in conveying the object code work.
++
++  A "User Product" is either (1) a "consumer product", which means any
++tangible personal property which is normally used for personal, family,
++or household purposes, or (2) anything designed or sold for incorporation
++into a dwelling.  In determining whether a product is a consumer product,
++doubtful cases shall be resolved in favor of coverage.  For a particular
++product received by a particular user, "normally used" refers to a
++typical or common use of that class of product, regardless of the status
++of the particular user or of the way in which the particular user
++actually uses, or expects or is expected to use, the product.  A product
++is a consumer product regardless of whether the product has substantial
++commercial, industrial or non-consumer uses, unless such uses represent
++the only significant mode of use of the product.
++
++  "Installation Information" for a User Product means any methods,
++procedures, authorization keys, or other information required to install
++and execute modified versions of a covered work in that User Product from
++a modified version of its Corresponding Source.  The information must
++suffice to ensure that the continued functioning of the modified object
++code is in no case prevented or interfered with solely because
++modification has been made.
++
++  If you convey an object code work under this section in, or with, or
++specifically for use in, a User Product, and the conveying occurs as
++part of a transaction in which the right of possession and use of the
++User Product is transferred to the recipient in perpetuity or for a
++fixed term (regardless of how the transaction is characterized), the
++Corresponding Source conveyed under this section must be accompanied
++by the Installation Information.  But this requirement does not apply
++if neither you nor any third party retains the ability to install
++modified object code on the User Product (for example, the work has
++been installed in ROM).
++
++  The requirement to provide Installation Information does not include a
++requirement to continue to provide support service, warranty, or updates
++for a work that has been modified or installed by the recipient, or for
++the User Product in which it has been modified or installed.  Access to a
++network may be denied when the modification itself materially and
++adversely affects the operation of the network or violates the rules and
++protocols for communication across the network.
++
++  Corresponding Source conveyed, and Installation Information provided,
++in accord with this section must be in a format that is publicly
++documented (and with an implementation available to the public in
++source code form), and must require no special password or key for
++unpacking, reading or copying.
++
++  7. Additional Terms.
++
++  "Additional permissions" are terms that supplement the terms of this
++License by making exceptions from one or more of its conditions.
++Additional permissions that are applicable to the entire Program shall
++be treated as though they were included in this License, to the extent
++that they are valid under applicable law.  If additional permissions
++apply only to part of the Program, that part may be used separately
++under those permissions, but the entire Program remains governed by
++this License without regard to the additional permissions.
++
++  When you convey a copy of a covered work, you may at your option
++remove any additional permissions from that copy, or from any part of
++it.  (Additional permissions may be written to require their own
++removal in certain cases when you modify the work.)  You may place
++additional permissions on material, added by you to a covered work,
++for which you have or can give appropriate copyright permission.
++
++  Notwithstanding any other provision of this License, for material you
++add to a covered work, you may (if authorized by the copyright holders of
++that material) supplement the terms of this License with terms:
++
++    a) Disclaiming warranty or limiting liability differently from the
++    terms of sections 15 and 16 of this License; or
++
++    b) Requiring preservation of specified reasonable legal notices or
++    author attributions in that material or in the Appropriate Legal
++    Notices displayed by works containing it; or
++
++    c) Prohibiting misrepresentation of the origin of that material, or
++    requiring that modified versions of such material be marked in
++    reasonable ways as different from the original version; or
++
++    d) Limiting the use for publicity purposes of names of licensors or
++    authors of the material; or
++
++    e) Declining to grant rights under trademark law for use of some
++    trade names, trademarks, or service marks; or
++
++    f) Requiring indemnification of licensors and authors of that
++    material by anyone who conveys the material (or modified versions of
++    it) with contractual assumptions of liability to the recipient, for
++    any liability that these contractual assumptions directly impose on
++    those licensors and authors.
++
++  All other non-permissive additional terms are considered "further
++restrictions" within the meaning of section 10.  If the Program as you
++received it, or any part of it, contains a notice stating that it is
++governed by this License along with a term that is a further
++restriction, you may remove that term.  If a license document contains
++a further restriction but permits relicensing or conveying under this
++License, you may add to a covered work material governed by the terms
++of that license document, provided that the further restriction does
++not survive such relicensing or conveying.
++
++  If you add terms to a covered work in accord with this section, you
++must place, in the relevant source files, a statement of the
++additional terms that apply to those files, or a notice indicating
++where to find the applicable terms.
++
++  Additional terms, permissive or non-permissive, may be stated in the
++form of a separately written license, or stated as exceptions;
++the above requirements apply either way.
++
++  8. Termination.
++
++  You may not propagate or modify a covered work except as expressly
++provided under this License.  Any attempt otherwise to propagate or
++modify it is void, and will automatically terminate your rights under
++this License (including any patent licenses granted under the third
++paragraph of section 11).
++
++  However, if you cease all violation of this License, then your
++license from a particular copyright holder is reinstated (a)
++provisionally, unless and until the copyright holder explicitly and
++finally terminates your license, and (b) permanently, if the copyright
++holder fails to notify you of the violation by some reasonable means
++prior to 60 days after the cessation.
++
++  Moreover, your license from a particular copyright holder is
++reinstated permanently if the copyright holder notifies you of the
++violation by some reasonable means, this is the first time you have
++received notice of violation of this License (for any work) from that
++copyright holder, and you cure the violation prior to 30 days after
++your receipt of the notice.
++
++  Termination of your rights under this section does not terminate the
++licenses of parties who have received copies or rights from you under
++this License.  If your rights have been terminated and not permanently
++reinstated, you do not qualify to receive new licenses for the same
++material under section 10.
++
++  9. Acceptance Not Required for Having Copies.
++
++  You are not required to accept this License in order to receive or
++run a copy of the Program.  Ancillary propagation of a covered work
++occurring solely as a consequence of using peer-to-peer transmission
++to receive a copy likewise does not require acceptance.  However,
++nothing other than this License grants you permission to propagate or
++modify any covered work.  These actions infringe copyright if you do
++not accept this License.  Therefore, by modifying or propagating a
++covered work, you indicate your acceptance of this License to do so.
++
++  10. Automatic Licensing of Downstream Recipients.
++
++  Each time you convey a covered work, the recipient automatically
++receives a license from the original licensors, to run, modify and
++propagate that work, subject to this License.  You are not responsible
++for enforcing compliance by third parties with this License.
++
++  An "entity transaction" is a transaction transferring control of an
++organization, or substantially all assets of one, or subdividing an
++organization, or merging organizations.  If propagation of a covered
++work results from an entity transaction, each party to that
++transaction who receives a copy of the work also receives whatever
++licenses to the work the party's predecessor in interest had or could
++give under the previous paragraph, plus a right to possession of the
++Corresponding Source of the work from the predecessor in interest, if
++the predecessor has it or can get it with reasonable efforts.
++
++  You may not impose any further restrictions on the exercise of the
++rights granted or affirmed under this License.  For example, you may
++not impose a license fee, royalty, or other charge for exercise of
++rights granted under this License, and you may not initiate litigation
++(including a cross-claim or counterclaim in a lawsuit) alleging that
++any patent claim is infringed by making, using, selling, offering for
++sale, or importing the Program or any portion of it.
++
++  11. Patents.
++
++  A "contributor" is a copyright holder who authorizes use under this
++License of the Program or a work on which the Program is based.  The
++work thus licensed is called the contributor's "contributor version".
++
++  A contributor's "essential patent claims" are all patent claims
++owned or controlled by the contributor, whether already acquired or
++hereafter acquired, that would be infringed by some manner, permitted
++by this License, of making, using, or selling its contributor version,
++but do not include claims that would be infringed only as a
++consequence of further modification of the contributor version.  For
++purposes of this definition, "control" includes the right to grant
++patent sublicenses in a manner consistent with the requirements of
++this License.
++
++  Each contributor grants you a non-exclusive, worldwide, royalty-free
++patent license under the contributor's essential patent claims, to
++make, use, sell, offer for sale, import and otherwise run, modify and
++propagate the contents of its contributor version.
++
++  In the following three paragraphs, a "patent license" is any express
++agreement or commitment, however denominated, not to enforce a patent
++(such as an express permission to practice a patent or covenant not to
++sue for patent infringement).  To "grant" such a patent license to a
++party means to make such an agreement or commitment not to enforce a
++patent against the party.
++
++  If you convey a covered work, knowingly relying on a patent license,
++and the Corresponding Source of the work is not available for anyone
++to copy, free of charge and under the terms of this License, through a
++publicly available network server or other readily accessible means,
++then you must either (1) cause the Corresponding Source to be so
++available, or (2) arrange to deprive yourself of the benefit of the
++patent license for this particular work, or (3) arrange, in a manner
++consistent with the requirements of this License, to extend the patent
++license to downstream recipients.  "Knowingly relying" means you have
++actual knowledge that, but for the patent license, your conveying the
++covered work in a country, or your recipient's use of the covered work
++in a country, would infringe one or more identifiable patents in that
++country that you have reason to believe are valid.
++
++  If, pursuant to or in connection with a single transaction or
++arrangement, you convey, or propagate by procuring conveyance of, a
++covered work, and grant a patent license to some of the parties
++receiving the covered work authorizing them to use, propagate, modify
++or convey a specific copy of the covered work, then the patent license
++you grant is automatically extended to all recipients of the covered
++work and works based on it.
++
++  A patent license is "discriminatory" if it does not include within
++the scope of its coverage, prohibits the exercise of, or is
++conditioned on the non-exercise of one or more of the rights that are
++specifically granted under this License.  You may not convey a covered
++work if you are a party to an arrangement with a third party that is
++in the business of distributing software, under which you make payment
++to the third party based on the extent of your activity of conveying
++the work, and under which the third party grants, to any of the
++parties who would receive the covered work from you, a discriminatory
++patent license (a) in connection with copies of the covered work
++conveyed by you (or copies made from those copies), or (b) primarily
++for and in connection with specific products or compilations that
++contain the covered work, unless you entered into that arrangement,
++or that patent license was granted, prior to 28 March 2007.
++
++  Nothing in this License shall be construed as excluding or limiting
++any implied license or other defenses to infringement that may
++otherwise be available to you under applicable patent law.
++
++  12. No Surrender of Others' Freedom.
++
++  If conditions are imposed on you (whether by court order, agreement or
++otherwise) that contradict the conditions of this License, they do not
++excuse you from the conditions of this License.  If you cannot convey a
++covered work so as to satisfy simultaneously your obligations under this
++License and any other pertinent obligations, then as a consequence you may
++not convey it at all.  For example, if you agree to terms that obligate you
++to collect a royalty for further conveying from those to whom you convey
++the Program, the only way you could satisfy both those terms and this
++License would be to refrain entirely from conveying the Program.
++
++  13. Use with the GNU Affero General Public License.
++
++  Notwithstanding any other provision of this License, you have
++permission to link or combine any covered work with a work licensed
++under version 3 of the GNU Affero General Public License into a single
++combined work, and to convey the resulting work.  The terms of this
++License will continue to apply to the part which is the covered work,
++but the special requirements of the GNU Affero General Public License,
++section 13, concerning interaction through a network will apply to the
++combination as such.
++
++  14. Revised Versions of this License.
++
++  The Free Software Foundation may publish revised and/or new versions of
++the GNU General Public License from time to time.  Such new versions will
++be similar in spirit to the present version, but may differ in detail to
++address new problems or concerns.
++
++  Each version is given a distinguishing version number.  If the
++Program specifies that a certain numbered version of the GNU General
++Public License "or any later version" applies to it, you have the
++option of following the terms and conditions either of that numbered
++version or of any later version published by the Free Software
++Foundation.  If the Program does not specify a version number of the
++GNU General Public License, you may choose any version ever published
++by the Free Software Foundation.
++
++  If the Program specifies that a proxy can decide which future
++versions of the GNU General Public License can be used, that proxy's
++public statement of acceptance of a version permanently authorizes you
++to choose that version for the Program.
++
++  Later license versions may give you additional or different
++permissions.  However, no additional obligations are imposed on any
++author or copyright holder as a result of your choosing to follow a
++later version.
++
++  15. Disclaimer of Warranty.
++
++  THERE IS NO WARRANTY FOR THE PROGRAM, TO THE EXTENT PERMITTED BY
++APPLICABLE LAW.  EXCEPT WHEN OTHERWISE STATED IN WRITING THE COPYRIGHT
++HOLDERS AND/OR OTHER PARTIES PROVIDE THE PROGRAM "AS IS" WITHOUT WARRANTY
++OF ANY KIND, EITHER EXPRESSED OR IMPLIED, INCLUDING, BUT NOT LIMITED TO,
++THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++PURPOSE.  THE ENTIRE RISK AS TO THE QUALITY AND PERFORMANCE OF THE PROGRAM
++IS WITH YOU.  SHOULD THE PROGRAM PROVE DEFECTIVE, YOU ASSUME THE COST OF
++ALL NECESSARY SERVICING, REPAIR OR CORRECTION.
++
++  16. Limitation of Liability.
++
++  IN NO EVENT UNLESS REQUIRED BY APPLICABLE LAW OR AGREED TO IN WRITING
++WILL ANY COPYRIGHT HOLDER, OR ANY OTHER PARTY WHO MODIFIES AND/OR CONVEYS
++THE PROGRAM AS PERMITTED ABOVE, BE LIABLE TO YOU FOR DAMAGES, INCLUDING ANY
++GENERAL, SPECIAL, INCIDENTAL OR CONSEQUENTIAL DAMAGES ARISING OUT OF THE
++USE OR INABILITY TO USE THE PROGRAM (INCLUDING BUT NOT LIMITED TO LOSS OF
++DATA OR DATA BEING RENDERED INACCURATE OR LOSSES SUSTAINED BY YOU OR THIRD
++PARTIES OR A FAILURE OF THE PROGRAM TO OPERATE WITH ANY OTHER PROGRAMS),
++EVEN IF SUCH HOLDER OR OTHER PARTY HAS BEEN ADVISED OF THE POSSIBILITY OF
++SUCH DAMAGES.
++
++  17. Interpretation of Sections 15 and 16.
++
++  If the disclaimer of warranty and limitation of liability provided
++above cannot be given local legal effect according to their terms,
++reviewing courts shall apply local law that most closely approximates
++an absolute waiver of all civil liability in connection with the
++Program, unless a warranty or assumption of liability accompanies a
++copy of the Program in return for a fee.
++
++                     END OF TERMS AND CONDITIONS
++
++            How to Apply These Terms to Your New Programs
++
++  If you develop a new program, and you want it to be of the greatest
++possible use to the public, the best way to achieve this is to make it
++free software which everyone can redistribute and change under these terms.
++
++  To do so, attach the following notices to the program.  It is safest
++to attach them to the start of each source file to most effectively
++state the exclusion of warranty; and each file should have at least
++the "copyright" line and a pointer to where the full notice is found.
++
++    <one line to give the program's name and a brief idea of what it does.>
++    Copyright (C) <year>  <name of author>
++
++    This program is free software: you can redistribute it and/or modify
++    it under the terms of the GNU General Public License as published by
++    the Free Software Foundation, either version 3 of the License, or
++    (at your option) any later version.
++
++    This program is distributed in the hope that it will be useful,
++    but WITHOUT ANY WARRANTY; without even the implied warranty of
++    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++    GNU General Public License for more details.
++
++    You should have received a copy of the GNU General Public License
++    along with this program.  If not, see <https://www.gnu.org/licenses/>.
++
++Also add information on how to contact you by electronic and paper mail.
++
++  If the program does terminal interaction, make it output a short
++notice like this when it starts in an interactive mode:
++
++    <program>  Copyright (C) <year>  <name of author>
++    This program comes with ABSOLUTELY NO WARRANTY; for details type `show w'.
++    This is free software, and you are welcome to redistribute it
++    under certain conditions; type `show c' for details.
++
++The hypothetical commands `show w' and `show c' should show the appropriate
++parts of the General Public License.  Of course, your program's commands
++might be different; for a GUI interface, you would use an "about box".
++
++  You should also get your employer (if you work as a programmer) or school,
++if any, to sign a "copyright disclaimer" for the program, if necessary.
++For more information on this, and how to apply and follow the GNU GPL, see
++<https://www.gnu.org/licenses/>.
++
++  The GNU General Public License does not permit incorporating your program
++into proprietary programs.  If your program is a subroutine library, you
++may consider it more useful to permit linking proprietary applications with
++the library.  If this is what you want to do, use the GNU Lesser General
++Public License instead of this License.  But first, please read
++<https://www.gnu.org/licenses/why-not-lgpl.html>.
+diff -ruN a/starlight/COPYING.LESSER b/starlight/COPYING.LESSER
+--- a/starlight/COPYING.LESSER	1970-01-01 00:00:00.000000000 +0000
++++ b/starlight/COPYING.LESSER	2026-10-23 06:05:01.897443061 +0000
+@@ -0,0 +1,165 @@
++                   GNU LESSER GENERAL PUBLIC LICENSE
++                       Version 3, 29 June 2007
++
++ Copyright (C) 2007 Free Software Foundation, Inc. <https://fsf.org/>
++ Everyone is permitted to copy and distribute verbatim copies
++ of this license document, but changing it is not allowed.
++
++
++  This version of the GNU Lesser General Public License incorporates
++the terms and conditions of version 3 of the GNU General Public
++License, supplemented by the additional permissions listed below.
++
++  0. Additional Definitions.
++
++  As used herein, "this License" refers to version 3 of the GNU Lesser
++General Public License, and the "GNU GPL" refers to version 3 of the GNU
++General Public License.
++
++  "The Library" refers to a covered work governed by this License,
++other than an Application or a Combined Work as defined below.
++
++  An "Application" is any work that makes use of an interface provided
++by the Library, but which is not otherwise based on the Library.
++Defining a subclass of a class defined by the Library is deemed a mode
++of using an interface provided by the Library.
++
++  A "Combined Work" is a work produced by combining or linking an
++Application with the Library.  The particular version of the Library
++with which the Combined Work was made is also called the "Linked
++Version".
++
++  The "Minimal Corresponding Source" for a Combined Work means the
++Corresponding Source for the Combined Work, excluding any source code
++for portions of the Combined Work that, considered in isolation, are
++based on the Application, and not on the Linked Version.
++
++  The "Corresponding Application Code" for a Combined Work means the
++object code and/or source code for the Application, including any data
++and utility programs needed for reproducing the Combined Work from the
++Application, but excluding the System Libraries of the Combined Work.
++
++  1. Exception to Section 3 of the GNU GPL.
++
++  You may convey a covered work under sections 3 and 4 of this License
++without being bound by section 3 of the GNU GPL.
++
++  2. Conveying Modified Versions.
++
++  If you modify a copy of the Library, and, in your modifications, a
++facility refers to a function or data to be supplied by an Application
++that uses the facility (other than as an argument passed when the
++facility is invoked), then you may convey a copy of the modified
++version:
++
++   a) under this License, provided that you make a good faith effort to
++   ensure that, in the event an Application does not supply the
++   function or data, the facility still operates, and performs
++   whatever part of its purpose remains meaningful, or
++
++   b) under the GNU GPL, with none of the additional permissions of
++   this License applicable to that copy.
++
++  3. Object Code Incorporating Material from Library Header Files.
++
++  The object code form of an Application may incorporate material from
++a header file that is part of the Library.  You may convey such object
++code under terms of your choice, provided that, if the incorporated
++material is not limited to numerical parameters, data structure
++layouts and accessors, or small macros, inline functions and templates
++(ten or fewer lines in length), you do both of the following:
++
++   a) Give prominent notice with each copy of the object code that the
++   Library is used in it and that the Library and its use are
++   covered by this License.
++
++   b) Accompany the object code with a copy of the GNU GPL and this license
++   document.
++
++  4. Combined Works.
++
++  You may convey a Combined Work under terms of your choice that,
++taken together, effectively do not restrict modification of the
++portions of the Library contained in the Combined Work and reverse
++engineering for debugging such modifications, if you also do each of
++the following:
++
++   a) Give prominent notice with each copy of the Combined Work that
++   the Library is used in it and that the Library and its use are
++   covered by this License.
++
++   b) Accompany the Combined Work with a copy of the GNU GPL and this license
++   document.
++
++   c) For a Combined Work that displays copyright notices during
++   execution, include the copyright notice for the Library among
++   these notices, as well as a reference directing the user to the
++   copies of the GNU GPL and this license document.
++
++   d) Do one of the following:
++
++       0) Convey the Minimal Corresponding Source under the terms of this
++       License, and the Corresponding Application Code in a form
++       suitable for, and under terms that permit, the user to
++       recombine or relink the Application with a modified version of
++       the Linked Version to produce a modified Combined Work, in the
++       manner specified by section 6 of the GNU GPL for conveying
++       Corresponding Source.
++
++       1) Use a suitable shared library mechanism for linking with the
++       Library.  A suitable mechanism is one that (a) uses at run time
++       a copy of the Library already present on the user's computer
++       system, and (b) will operate properly with a modified version
++       of the Library that is interface-compatible with the Linked
++       Version.
++
++   e) Provide Installation Information, but only if you would otherwise
++   be required to provide such information under section 6 of the
++   GNU GPL, and only to the extent that such information is
++   necessary to install and execute a modified version of the
++   Combined Work produced by recombining or relinking the
++   Application with a modified version of the Linked Version. (If
++   you use option 4d0, the Installation Information must accompany
++   the Minimal Corresponding Source and Corresponding Application
++   Code. If you use option 4d1, you must provide the Installation
++   Information in the manner specified by section 6 of the GNU GPL
++   for conveying Corresponding Source.)
++
++  5. Combined Libraries.
++
++  You may place library facilities that are a work based on the
++Library side by side in a single library together with other library
++facilities that are not Applications and are not covered by this
++License, and convey such a combined library under terms of your
++choice, if you do both of the following:
++
++   a) Accompany the combined library with a copy of the same work based
++   on the Library, uncombined with any other library facilities,
++   conveyed under the terms of this License.
++
++   b) Give prominent notice with the combined library that part of it
++   is a work based on the Library, and explaining where to find the
++   accompanying uncombined form of the same work.
++
++  6. Revised Versions of the GNU Lesser General Public License.
++
++  The Free Software Foundation may publish revised and/or new versions
++of the GNU Lesser General Public License from time to time. Such new
++versions will be similar in spirit to the present version, but may
++differ in detail to address new problems or concerns.
++
++  Each version is given a distinguishing version number. If the
++Library as you received it specifies that a certain numbered version
++of the GNU Lesser General Public License "or any later version"
++applies to it, you have the option of following the terms and
++conditions either of that published version or of any later version
++published by the Free Software Foundation. If the Library as you
++received it does not specify a version number of the GNU Lesser
++General Public License, you may choose any version of the GNU Lesser
++General Public License ever published by the Free Software Foundation.
++
++  If the Library as you received it specifies that a proxy can decide
++whether future versions of the GNU Lesser General Public License shall
++apply, that proxy's public statement of acceptance of any version is
++permanent authorization for you to choose that version for the
++Library.
+diff -ruN a/starlight/Cargo.toml b/starlight/Cargo.toml
+--- a/starlight/Cargo.toml	1970-01-01 00:00:00.000000000 +0000
++++ b/starlight/Cargo.toml	2026-10-23 06:05:01.897457668 +0000
+@@ -0,0 +1,10 @@
++[package]
++name = "starlight"
++version = "0.1.0"
++edition = "2021"
++license = "LGPL-3.0-or-later"
++description = "Rust port of ScalableLux's (Starlight fork, 26.2.0) light engine core: queue-based light increase / decrease, stateless skylight sources, chunk edge checks, parallel light tasks on disjoint chunk windows. std only."
++
++# No dependencies on purpose: pure CPU logic that `cargo test -p starlight` runs on a plain Linux host
++# (the mc-rs cdylib cannot be tested there) and that cross-compiles to Android unchanged.
++[dependencies]
+diff -ruN a/starlight/src/lib.rs b/starlight/src/lib.rs
+--- a/starlight/src/lib.rs	1970-01-01 00:00:00.000000000 +0000
++++ b/starlight/src/lib.rs	2026-10-23 06:05:01.897475356 +0000
+@@ -0,0 +1,718 @@
++//! Rust port of the core of ScalableLux 26.2.0 (Starlight, LGPL-3.0): the light engine that replaces the vanilla one.
++//! std only, no `unsafe`; the only threads are the scoped ones of [`run`].
++//!
++//! What is ported (`StarLightEngine`, `BlockStarLightEngine`, `SkyStarLightEngine`, `StarLightInterface`):
++//! - the propagator: one FIFO of increases and one of decreases per light kind, entries carry a direction bitset (the
++//!   neighbour a level came from is never asked again) and the `WRITE` / `RECHECK` flags (`increase`, `decrease`);
++//! - `checkBlock` / `calculateLightValue`: a changed block resets its cell and re-derives it from its neighbours;
++//! - stateless sky sources: a column's sources are `y >= height`, fixed up by scanning the light of the column (`edits`),
++//!   and the first light of a chunk queues only the source cells that touch a darker column (`light_chunk`);
++//! - chunk edge checks when a chunk is lit beside lit neighbours (`check_edges`), and no light written into unlit chunks;
++//! - ScalableLux's parallel light updates: a task owns a 3x3 window of chunks (light never travels further than 15 cells, a
++//!   chunk is 16), tasks with disjoint windows run on scoped threads ([`run`]).
++//!
++//! Left out on purpose: `SWMRNibbleArray` (null / zero / full nibble states, the host keeps flat arrays), the vanilla light
++//! interface, the save format (the host does not save light), conditionally transparent blocks (b1.7.3 has none) and
++//! section emptiness maps (a chunk here is one 128-high array).
++//!
++//! The settled light is the same as the b1.7.3 relaxation's: `L(c) = max(source(c), max(L(n)) - max(opacity(c), 1))`, with
++//! sky sources at `y >= height` and block sources at the cell's emission; `tests` check it against a brute-force fixpoint.
++//!
++//! Cell layout of the host (`mc-rs/src/world/chunk.rs`): index `x << 11 | z << 7 | y`, `H` = 128 high, one light byte per cell
++//! with sky in the low nibble and block light in the high one, `height[z << 4 | x]` = first y with no opaque cell above.
++
++use std::collections::HashMap;
++use std::hash::BuildHasher;
++use std::marker::PhantomData;
++use std::sync::Arc;
++use std::time::Instant;
++
++pub const H: usize = 128;
++pub const VOLUME: usize = 16 * 16 * H;
++pub type Key = (i32, i32);
++
++/// What the engine needs to know about a block id (`getLightDampening`, `getLightEmission`).
++pub trait Blocks {
++    fn opacity(id: u8) -> u8;
++    fn emission(id: u8) -> u8;
++}
++
++/// One chunk as the engine sees it. `blocks` and `height` belong to the host (the engine only reads them), `light` is
++/// written by the engine alone; `touched` / `stale` say what the host must pick up (light array changed / mesh outdated).
++pub struct Chunk {
++    pub blocks: Arc<Vec<u8>>,
++    pub light: Arc<Vec<u8>>,
++    pub height: [u8; 256],
++    /// `light_chunk` ran and the blocks have not been replaced since. Unlit chunks are invisible to the engine's neighbours.
++    pub lit: bool,
++    pub touched: bool,
++    pub stale: bool,
++}
++
++/// Work queued for one chunk: its first light, and block changes (world coordinates) in it. Stateless like Starlight's
++/// `ChunkTasks`: the engine reads the blocks as they are when the task runs, so edits can be applied to the host's chunk at
++/// once and their light queued here, in any amount, and one pass handles them all.
++#[derive(Default)]
++pub struct Task {
++    pub init: bool,
++    pub edits: Vec<[i32; 3]>,
++}
++
++#[derive(Clone, Copy, PartialEq, Eq, Debug)]
++pub enum Kind {
++    Sky,
++    Block,
++}
++
++impl Kind {
++    fn shift(self) -> u32 {
++        if self == Kind::Sky { 0 } else { 4 }
++    }
++}
++
++// Directions: -x, +x, -z, +z, -y, +y; the opposite of `d` is `d ^ 1`.
++const DIRS: [(i32, i32, i32); 6] = [(-1, 0, 0), (1, 0, 0), (0, 0, -1), (0, 0, 1), (0, -1, 0), (0, 1, 0)];
++const DOWN: u8 = 4;
++const UP: u8 = 5;
++const ALL: u8 = 63;
++const WRITE: u8 = 1; // the increase writes the level to its own cell first (re-propagated block sources)
++const RECHECK: u8 = 2; // the increase only runs if its cell still holds the level it was queued with
++
++fn but(d: usize) -> u8 {
++    ALL & !(1 << (d ^ 1))
++}
++
++/// A queue entry, window coordinates (`x`, `z` in 0..48): `lvl` is the level the cell holds (increase) or the level to
++/// take away from the neighbours (decrease); `dirs` the neighbours to visit.
++#[derive(Clone, Copy)]
++struct Q {
++    x: u8,
++    y: u8,
++    z: u8,
++    lvl: u8,
++    dirs: u8,
++    flags: u8,
++}
++
++fn q(x: i32, y: i32, z: i32, lvl: u8, dirs: u8, flags: u8) -> Q {
++    Q { x: x as u8, y: y as u8, z: z as u8, lvl, dirs, flags }
++}
++
++/// The 3x3 chunks a task owns, moved out of the host's map for the length of the task (so tasks with disjoint windows can
++/// run on different threads with no lock). Only the centre and lit neighbours are in it: the others read as absent.
++struct Window {
++    cx0: i32,
++    cz0: i32,
++    c: [Option<Chunk>; 9],
++}
++
++impl Window {
++    fn take<S: BuildHasher>(map: &mut HashMap<Key, Chunk, S>, key: Key) -> Option<Self> {
++        if !map.contains_key(&key) {
++            return None;
++        }
++        let mut c: [Option<Chunk>; 9] = Default::default();
++        for s in 0..9i32 {
++            let k = (key.0 - 1 + s % 3, key.1 - 1 + s / 3);
++            if s == 4 || map.get(&k).is_some_and(|e| e.lit) {
++                c[s as usize] = map.remove(&k);
++            }
++        }
++        Some(Self { cx0: key.0 - 1, cz0: key.1 - 1, c })
++    }
++
++    fn put_back<S: BuildHasher>(self, map: &mut HashMap<Key, Chunk, S>) {
++        for (s, c) in self.c.into_iter().enumerate() {
++            if let Some(c) = c {
++                map.insert((self.cx0 + s as i32 % 3, self.cz0 + s as i32 / 3), c);
++            }
++        }
++    }
++
++    /// (chunk slot, cell index) of a window cell; `None` outside the world, the window or a present chunk.
++    fn at(&self, x: i32, y: i32, z: i32) -> Option<(usize, usize)> {
++        if !(0..48).contains(&x) || !(0..48).contains(&z) || !(0..H as i32).contains(&y) {
++            return None;
++        }
++        let s = (x >> 4) as usize + 3 * (z >> 4) as usize;
++        self.c[s].as_ref()?;
++        Some((s, ((x & 15) as usize) << 11 | ((z & 15) as usize) << 7 | y as usize))
++    }
++
++    fn ch(&self, s: usize) -> &Chunk {
++        self.c[s].as_ref().unwrap()
++    }
++
++    fn lvl(&self, k: Kind, s: usize, i: usize) -> u8 {
++        self.ch(s).light[i] >> k.shift() & 15
++    }
++
++    fn id(&self, s: usize, i: usize) -> u8 {
++        self.ch(s).blocks[i]
++    }
++
++    /// `Chunk.heightMap` of the column holding the cell `i`.
++    fn height(&self, s: usize, i: usize) -> i32 {
++        self.ch(s).height[(i >> 7 & 15) << 4 | i >> 11] as i32
++    }
++
++    fn height_at(&self, x: i32, z: i32) -> Option<i32> {
++        self.at(x, 0, z).map(|(s, i)| self.height(s, i))
++    }
++
++    /// Write a nibble; a change marks the chunk (and the neighbour across a border the cell touches: its border faces look at
++    /// this cell) as touched / stale.
++    fn put(&mut self, k: Kind, s: usize, i: usize, v: u8) {
++        let sh = k.shift();
++        let c = self.c[s].as_mut().unwrap();
++        let old = c.light[i];
++        let new = old & !(15 << sh) | v << sh;
++        if new == old {
++            return;
++        }
++        // ponytail: `make_mut` is an atomic check per write (the arrays are shared with the host between reports); unshare once per chunk to remove it.
++        Arc::make_mut(&mut c.light)[i] = new;
++        c.touched = true;
++        c.stale = true;
++        let (lx, lz) = (i >> 11, i >> 7 & 15);
++        for (hit, ok, o) in [(lx == 0, s % 3 > 0, -1i32), (lx == 15, s % 3 < 2, 1), (lz == 0, s / 3 > 0, -3), (lz == 15, s / 3 < 2, 3)] {
++            if hit && ok {
++                if let Some(n) = self.c[(s as i32 + o) as usize].as_mut() {
++                    n.stale = true;
++                }
++            }
++        }
++    }
++}
++
++/// The propagator and the two task kinds, with its queues kept between calls (`StarLightEngine`'s increase / decrease queues).
++struct Engine<B> {
++    inc: Vec<Q>,
++    dec: Vec<Q>,
++    _b: PhantomData<fn() -> B>,
++}
++
++impl<B: Blocks> Engine<B> {
++    fn new() -> Self {
++        Self { inc: Vec::new(), dec: Vec::new(), _b: PhantomData }
++    }
++
++    /// `performLightIncrease`: raise the neighbours of every entry to `level - max(1, opacity)` where that is more than they
++    /// hold, and queue them. The cell an entry came from is not visited again, and nothing below level 2 is queued.
++    fn increase(&mut self, w: &mut Window, k: Kind) {
++        let mut r = 0;
++        while r < self.inc.len() {
++            let e = self.inc[r];
++            r += 1;
++            let (x, y, z) = (e.x as i32, e.y as i32, e.z as i32);
++            if e.flags & RECHECK != 0 {
++                if w.at(x, y, z).map(|(s, i)| w.lvl(k, s, i)) != Some(e.lvl) {
++                    continue; // something changed since it was queued
++                }
++            } else if e.flags & WRITE != 0 {
++                if let Some((s, i)) = w.at(x, y, z) {
++                    w.put(k, s, i, e.lvl);
++                }
++            }
++            for d in 0..6 {
++                if e.dirs >> d & 1 == 0 {
++                    continue;
++                }
++                let (nx, ny, nz) = (x + DIRS[d].0, y + DIRS[d].1, z + DIRS[d].2);
++                let Some((s, i)) = w.at(nx, ny, nz) else { continue };
++                let cur = w.lvl(k, s, i) as i32;
++                if cur >= e.lvl as i32 - 1 {
++                    continue; // already as bright as this entry could make it, and no block read for it
++                }
++                let t = e.lvl as i32 - (B::opacity(w.id(s, i)) as i32).max(1);
++                if t <= cur {
++                    continue;
++                }
++                w.put(k, s, i, t as u8);
++                if t > 1 {
++                    self.inc.push(q(nx, ny, nz, t as u8, but(d), 0));
++                }
++            }
++        }
++        self.inc.clear();
++    }
++
++    /// `performLightDecrease`, then the increases it (and the caller) queued. A neighbour brighter than what this entry could
++    /// have given it is lit by something else: queue it again (`RECHECK`); otherwise zero it (queueing its own emission
++    /// again) and go on from it.
++    fn decrease(&mut self, w: &mut Window, k: Kind) {
++        let mut r = 0;
++        while r < self.dec.len() {
++            let e = self.dec[r];
++            r += 1;
++            let (x, y, z) = (e.x as i32, e.y as i32, e.z as i32);
++            for d in 0..6 {
++                if e.dirs >> d & 1 == 0 {
++                    continue;
++                }
++                let (nx, ny, nz) = (x + DIRS[d].0, y + DIRS[d].1, z + DIRS[d].2);
++                let Some((s, i)) = w.at(nx, ny, nz) else { continue };
++                let l = w.lvl(k, s, i);
++                if l == 0 {
++                    continue;
++                }
++                let id = w.id(s, i);
++                let t = (e.lvl as i32 - (B::opacity(id) as i32).max(1)).max(0);
++                if l as i32 > t {
++                    self.inc.push(q(nx, ny, nz, l, ALL, RECHECK));
++                    continue;
++                }
++                if k == Kind::Block && B::emission(id) != 0 {
++                    self.inc.push(q(nx, ny, nz, B::emission(id), ALL, WRITE));
++                }
++                w.put(k, s, i, 0);
++                if t > 0 {
++                    self.dec.push(q(nx, ny, nz, t as u8, but(d), 0));
++                }
++            }
++        }
++        self.dec.clear();
++        self.increase(w, k);
++    }
++
++    /// `checkBlock`: the cell's block changed (opacity, emission): drop it to what the block gives by itself and let the
++    /// decrease re-derive the neighbours (which re-derives this cell from them). A sky source keeps its 15.
++    fn check_block(&mut self, w: &mut Window, k: Kind, x: i32, y: i32, z: i32) {
++        let Some((s, i)) = w.at(x, y, z) else { return };
++        let cur = w.lvl(k, s, i);
++        if k == Kind::Block {
++            let e = B::emission(w.id(s, i));
++            w.put(k, s, i, e);
++            if e != 0 {
++                self.inc.push(q(x, y, z, e, ALL, 0));
++            }
++        } else if cur == 15 {
++            self.inc.push(q(x, y, z, 15, ALL, 0));
++        } else {
++            w.put(k, s, i, 0);
++        }
++        self.dec.push(q(x, y, z, cur, ALL, 0));
++    }
++
++    /// `calculateLightValue`: the level a cell should hold. Stops early: more than `expect` means "at least this", equal to it
++    /// means correct, less than it is the real value.
++    fn calc(&self, w: &Window, k: Kind, x: i32, y: i32, z: i32, expect: i32) -> i32 {
++        let Some((s, i)) = w.at(x, y, z) else { return 0 };
++        let id = w.id(s, i);
++        let mut level = match k {
++            Kind::Block => B::emission(id) as i32,
++            Kind::Sky => if y >= w.height(s, i) { 15 } else { 0 },
++        };
++        let op = (B::opacity(id) as i32).max(1);
++        if level >= 14 || level > expect || op >= 15 {
++            return level;
++        }
++        for d in 0..6 {
++            let Some((s2, i2)) = w.at(x + DIRS[d].0, y + DIRS[d].1, z + DIRS[d].2) else { continue };
++            let nl = w.lvl(k, s2, i2) as i32;
++            if nl - 1 <= level {
++                continue;
++            }
++            level = level.max(nl - op);
++            if level > expect {
++                return level;
++            }
++        }
++        level
++    }
++
++    /// `checkChunkEdges`: both sides of every seam with a lit neighbour must agree with what their neighbours say. Wrong cells
++    /// are collected first (`check_block` clobbers light that later `calc`s would read) and then checked.
++    fn check_edges(&mut self, w: &mut Window) {
++        for k in [Kind::Sky, Kind::Block] {
++            let mut bad: Vec<[i32; 3]> = Vec::new();
++            for d in 0..4 {
++                let (dx, dz) = (DIRS[d].0, DIRS[d].2);
++                if w.c[(4 + dx + 3 * dz) as usize].is_none() {
++                    continue;
++                }
++                let seam = |t: i32| if dx != 0 { (if dx < 0 { 16 } else { 31 }, 16 + t) } else { (16 + t, if dz < 0 { 16 } else { 31 }) };
++                // Above both columns' heights every cell on both sides is a source: only the block light has to look there.
++                let top = if k == Kind::Sky {
++                    (0..16).flat_map(|t| { let (x, z) = seam(t); [w.height_at(x, z), w.height_at(x + dx, z + dz)] }).flatten().max().unwrap_or(0).min(H as i32 - 1) + 1
++                } else {
++                    H as i32
++                };
++                for t in 0..16 {
++                    let (x, z) = seam(t);
++                    for y in 0..top {
++                        for (cx, cz) in [(x, z), (x + dx, z + dz)] {
++                            let (s, i) = w.at(cx, y, cz).unwrap();
++                            let cur = w.lvl(k, s, i) as i32;
++                            if self.calc(w, k, cx, y, cz, cur) != cur {
++                                bad.push([cx, y, cz]);
++                            }
++                        }
++                    }
++                }
++            }
++            bad.sort_unstable();
++            bad.dedup();
++            for [x, y, z] in bad {
++                self.check_block(w, k, x, y, z);
++            }
++            self.decrease(w, k);
++        }
++    }
++
++    /// `lightChunk`: the first light of the centre chunk: sky sources at `y >= height`, block sources, propagation, edge checks.
++    fn light_chunk(&mut self, w: &mut Window) {
++        let c = w.c[4].as_mut().unwrap();
++        c.light = Arc::new(vec![0; VOLUME]);
++        (c.lit, c.touched, c.stale) = (true, true, true);
++        {
++            let Chunk { light, height, blocks, .. } = c;
++            let light = Arc::get_mut(light).unwrap();
++            for col in 0..256 {
++                let base = (col & 15) << 11 | (col >> 4) << 7;
++                light[base + height[col] as usize..base + H].fill(15);
++            }
++            // ponytail: reads all 32768 blocks; Starlight skips sections whose palette has no emitter (a per-chunk emitter count would do).
++            for (i, &id) in blocks.iter().enumerate() {
++                let e = B::emission(id);
++                if e != 0 {
++                    light[i] |= e << 4;
++                    self.inc.push(q(16 + (i >> 11) as i32, (i & 127) as i32, 16 + (i >> 7 & 15) as i32, e, ALL, 0));
++                }
++            }
++        }
++        let block_sources = std::mem::take(&mut self.inc);
++        // Sky: only the source cells beside a darker column propagate (the top block under a column too).
++        for col in 0..256 {
++            let (x, z) = (16 + (col & 15) as i32, 16 + (col >> 4) as i32);
++            let h = w.ch(4).height[col] as i32;
++            let nh = [(x - 1, z), (x + 1, z), (x, z - 1), (x, z + 1)].map(|(nx, nz)| w.height_at(nx, nz));
++            let top = nh.iter().flatten().copied().max().unwrap_or(0).max(h + 1).min(H as i32);
++            for y in h..top {
++                let mut dirs = (0..4).filter(|&d| nh[d].is_some_and(|n| n > y)).fold(0u8, |m, d| m | 1 << d);
++                if y == h && h > 0 {
++                    dirs |= 1 << DOWN;
++                }
++                if dirs != 0 {
++                    self.inc.push(q(x, y, z, 15, dirs, 0));
++                }
++            }
++        }
++        self.increase(w, Kind::Sky);
++        self.inc = block_sources;
++        self.increase(w, Kind::Block);
++        self.check_edges(w);
++    }
++
++    /// `propagateBlockChanges` for both kinds. The host already holds the new blocks and heights. Sky: the column's source run
++    /// is brought in line with its height (dark cells at and above it become sources, lit cells below it stop being), then
++    /// every changed cell is checked; positions that are sources after the change need nothing.
++    fn edits(&mut self, w: &mut Window, pos: &[[i32; 3]]) {
++        let mut cols: Vec<(i32, i32)> = pos.iter().map(|p| (p[0], p[2])).collect();
++        cols.sort_unstable();
++        cols.dedup();
++        for (x, z) in cols {
++            let Some(h) = w.height_at(x, z) else { continue };
++            for y in h..H as i32 {
++                let (s, i) = w.at(x, y, z).unwrap();
++                if w.lvl(Kind::Sky, s, i) == 15 {
++                    break;
++                }
++                w.put(Kind::Sky, s, i, 15);
++                self.inc.push(q(x, y, z, 15, if y > h { ALL & !(1 << UP) & !(1 << DOWN) } else { ALL & !(1 << UP) }, 0));
++            }
++            for y in (0..h).rev() {
++                let (s, i) = w.at(x, y, z).unwrap();
++                if w.lvl(Kind::Sky, s, i) != 15 {
++                    break;
++                }
++                w.put(Kind::Sky, s, i, 0);
++                self.dec.push(q(x, y, z, 15, ALL & !(1 << UP), 0));
++            }
++        }
++        for &[x, y, z] in pos {
++            if w.height_at(x, z).is_some_and(|h| y < h) {
++                self.check_block(w, Kind::Sky, x, y, z);
++            }
++        }
++        self.decrease(w, Kind::Sky);
++        for &[x, y, z] in pos {
++            self.check_block(w, Kind::Block, x, y, z);
++        }
++        self.decrease(w, Kind::Block);
++    }
++}
++
++/// One task on its window. `key` is the centre chunk; positions come in world coordinates.
++fn run_task<B: Blocks>(item: &mut (Key, Task, Window)) {
++    let (key, task, w) = item;
++    let mut e = Engine::<B>::new();
++    if task.init {
++        e.light_chunk(w);
++    }
++    let (ox, oz) = (w.cx0 * 16, w.cz0 * 16);
++    let pos: Vec<[i32; 3]> = task.edits.iter().filter(|p| (p[0] >> 4, p[2] >> 4) == *key).map(|p| [p[0] - ox, p[1], p[2] - oz]).collect();
++    if !pos.is_empty() {
++        e.edits(w, &pos);
++    }
++}
++
++/// ScalableLux's `Config.PARALLELISM` default: a third of the cores, at least 1.
++pub fn default_workers() -> usize {
++    std::thread::available_parallelism().map_or(1, |n| (n.get() / 3).max(1))
++}
++
++/// Run queued tasks until none are left or `deadline` passes (checked between waves). A wave is up to `workers` tasks whose
++/// windows are disjoint (centres more than 2 chunks apart in x or z), run on scoped threads; one task runs inline. Edits of a
++/// chunk that is not lit, and tasks of a chunk that is gone, are dropped: its first light computes from the blocks it has.
++/// ponytail: a wave waits for its slowest task; ScalableLux's per-chunk lock tokens on a persistent pool have no barrier.
++pub fn run<B: Blocks, S: BuildHasher>(chunks: &mut HashMap<Key, Chunk, S>, tasks: &mut HashMap<Key, Task>, workers: usize, deadline: Option<Instant>) {
++    while !tasks.is_empty() && deadline.map_or(true, |d| Instant::now() < d) {
++        let mut wave: Vec<(Key, Task, Window)> = Vec::new();
++        let keys: Vec<Key> = tasks.keys().copied().collect();
++        for k in keys {
++            if wave.len() >= workers.max(1) {
++                break;
++            }
++            if wave.iter().any(|(o, ..)| (o.0 - k.0).abs() <= 2 && (o.1 - k.1).abs() <= 2) {
++                continue; // waits for the next wave
++            }
++            let t = tasks.remove(&k).unwrap();
++            if !chunks.get(&k).is_some_and(|c| t.init || c.lit) {
++                continue;
++            }
++            if let Some(w) = Window::take(chunks, k) {
++                wave.push((k, t, w));
++            }
++        }
++        if let [one] = wave.as_mut_slice() {
++            run_task::<B>(one);
++        } else {
++            std::thread::scope(|s| {
++                for item in wave.iter_mut() {
++                    s.spawn(move || run_task::<B>(item));
++                }
++            });
++        }
++        for (.., w) in wave {
++            w.put_back(chunks);
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    /// 0 air, 1 stone, 2 leaves (opacity 1), 3 water (opacity 3), 4 glowstone (15), 5 torch (14).
++    struct T;
++    impl Blocks for T {
++        fn opacity(id: u8) -> u8 {
++            match id { 0 | 4 | 5 => 0, 2 => 1, 3 => 3, _ => 255 }
++        }
++        fn emission(id: u8) -> u8 {
++            match id { 4 => 15, 5 => 14, _ => 0 }
++        }
++    }
++
++    struct Rng(u64);
++    impl Rng {
++        fn next(&mut self, n: u32) -> u32 {
++            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
++            ((self.0 >> 33) as u32) % n
++        }
++    }
++
++    fn cell(x: usize, y: usize, z: usize) -> usize {
++        x << 11 | z << 7 | y
++    }
++
++    fn heights(blocks: &[u8]) -> [u8; 256] {
++        let mut h = [0u8; 256];
++        for x in 0..16 {
++            for z in 0..16 {
++                let mut y = H;
++                while y > 0 && T::opacity(blocks[cell(x, y - 1, z)]) == 0 {
++                    y -= 1;
++                }
++                h[z << 4 | x] = y as u8;
++            }
++        }
++        h
++    }
++
++    /// Random terrain: stone to a random height, a cave or two, leaves, water, glowstone and torches.
++    fn terrain(r: &mut Rng) -> Vec<u8> {
++        let mut b = vec![0u8; VOLUME];
++        for x in 0..16 {
++            for z in 0..16 {
++                let top = 30 + r.next(30) as usize;
++                for y in 0..top {
++                    b[cell(x, y, z)] = 1;
++                }
++                if r.next(6) == 0 {
++                    b[cell(x, top, z)] = 3;
++                    b[cell(x, top + 1, z)] = 3;
++                }
++                if r.next(10) == 0 {
++                    b[cell(x, top + 3, z)] = 2;
++                }
++            }
++        }
++        for _ in 0..6 {
++            let (cx, cy, cz) = (r.next(16) as usize, 10 + r.next(30) as usize, r.next(16) as usize);
++            for _ in 0..40 {
++                let (x, y, z) = ((cx + r.next(5) as usize).min(15), cy + r.next(3) as usize, (cz + r.next(5) as usize).min(15));
++                b[cell(x, y, z)] = 0;
++            }
++        }
++        for _ in 0..8 {
++            b[cell(r.next(16) as usize, 5 + r.next(60) as usize, r.next(16) as usize)] = [4, 5][r.next(2) as usize];
++        }
++        b
++    }
++
++    /// The test world: chunks (0..GX, 0..GZ).
++    const GX: i32 = 7;
++    const GZ: i32 = 2;
++
++    fn slot(k: Key) -> Option<usize> {
++        ((0..GX).contains(&k.0) && (0..GZ).contains(&k.1)).then(|| (k.0 * GZ + k.1) as usize)
++    }
++
++    /// The settled light of the lit chunks by brute force: start every cell at its own source level and flood outwards until no
++    /// cell rises (chunks that are not lit are absent). No decreases, no flags: nothing in common with the engine but the rule.
++    fn oracle(chunks: &HashMap<Key, Chunk>) -> HashMap<Key, Vec<u8>> {
++        let mut out: Vec<Option<Vec<u8>>> = (0..GX * GZ).map(|_| None).collect();
++        let mut blocks: Vec<&[u8]> = vec![&[]; (GX * GZ) as usize];
++        let mut work: Vec<(usize, usize)> = Vec::new();
++        for (k, c) in chunks.iter().filter(|(_, c)| c.lit) {
++            let (s, mut l) = (slot(*k).unwrap(), vec![0u8; VOLUME]);
++            for x in 0..16 {
++                for z in 0..16 {
++                    for y in 0..H {
++                        let i = cell(x, y, z);
++                        l[i] = if y as u8 >= c.height[z << 4 | x] { 15 } else { 0 } | T::emission(c.blocks[i]) << 4;
++                        if l[i] != 0 {
++                            work.push((s, i));
++                        }
++                    }
++                }
++            }
++            (out[s], blocks[s]) = (Some(l), &c.blocks);
++        }
++        while let Some((s, i)) = work.pop() {
++            let v = out[s].as_ref().unwrap()[i];
++            let (x, y, z) = ((i >> 11) as i32, (i & 127) as i32, (i >> 7 & 15) as i32);
++            for (dx, dy, dz) in DIRS {
++                let (nx, ny, nz) = (x + dx, y + dy, z + dz);
++                let k = ((s as i32) / GZ + (nx >> 4), (s as i32) % GZ + (nz >> 4));
++                let Some(ns) = slot(k).filter(|&t| out[t].is_some() && (0..H as i32).contains(&ny)) else { continue };
++                let ni = cell((nx & 15) as usize, ny as usize, (nz & 15) as usize);
++                let op = (T::opacity(blocks[ns][ni]) as i32).max(1);
++                let n = out[ns].as_mut().unwrap();
++                let (sky, blk) = (((v & 15) as i32 - op).max((n[ni] & 15) as i32), ((v >> 4) as i32 - op).max((n[ni] >> 4) as i32));
++                let new = sky as u8 | (blk as u8) << 4;
++                if new != n[ni] {
++                    n[ni] = new;
++                    work.push((ns, ni));
++                }
++            }
++        }
++        out.into_iter().enumerate().filter_map(|(s, l)| l.map(|l| (((s as i32) / GZ, (s as i32) % GZ), l))).collect()
++    }
++
++    fn assert_settled(chunks: &HashMap<Key, Chunk>, what: &str) {
++        for (k, want) in oracle(chunks) {
++            let got = &chunks[&k].light;
++            if let Some(i) = (0..VOLUME).find(|&i| got[i] != want[i]) {
++                panic!("{what}: chunk {k:?} cell ({}, {}, {}): sky/block {}/{} want {}/{}", i >> 11, i & 127, i >> 7 & 15, got[i] & 15, got[i] >> 4, want[i] & 15, want[i] >> 4);
++            }
++        }
++    }
++
++    /// Replace the blocks of a chunk (unlit until its next `init`).
++    fn fill(chunks: &mut HashMap<Key, Chunk>, k: Key, b: Vec<u8>) {
++        let height = heights(&b);
++        match chunks.get_mut(&k) {
++            Some(c) => (c.blocks, c.height, c.lit) = (Arc::new(b), height, false),
++            None => {
++                chunks.insert(k, Chunk { blocks: Arc::new(b), light: Arc::new(vec![0; VOLUME]), height, lit: false, touched: false, stale: false });
++            }
++        }
++    }
++
++    /// The host's side of an edit: block and height at once, light queued in the task of a lit chunk.
++    fn edit(chunks: &mut HashMap<Key, Chunk>, tasks: &mut HashMap<Key, Task>, x: i32, y: i32, z: i32, id: u8) {
++        let k = (x >> 4, z >> 4);
++        let c = chunks.get_mut(&k).unwrap();
++        Arc::make_mut(&mut c.blocks)[cell((x & 15) as usize, y as usize, (z & 15) as usize)] = id;
++        c.height = heights(&c.blocks);
++        if c.lit {
++            tasks.entry(k).or_default().edits.push([x, y, z]);
++        }
++    }
++
++    /// Random edits, first lights and re-lights in random order, with 1 and 3 workers: after each batch the engine's light is the fixpoint.
++    #[test]
++    fn settled_light_is_the_fixpoint() {
++        for (seed, workers) in [(1, 1), (2, 3), (3, 3)] {
++            let mut r = Rng(seed);
++            let mut chunks: HashMap<Key, Chunk> = HashMap::new();
++            let mut tasks: HashMap<Key, Task> = HashMap::new();
++            // 7 x 2 chunks: the two ends can be lit in the same wave.
++            let keys: Vec<Key> = (0..GX).flat_map(|x| (0..GZ).map(move |z| (x, z))).collect();
++            for &k in &keys {
++                let b = terrain(&mut r);
++                fill(&mut chunks, k, b);
++            }
++            let mut order = keys.clone();
++            for i in (1..order.len()).rev() {
++                order.swap(i, r.next(i as u32 + 1) as usize);
++            }
++            for (n, group) in order.chunks(5).enumerate() {
++                for &k in group {
++                    tasks.entry(k).or_default().init = true;
++                }
++                run::<T, _>(&mut chunks, &mut tasks, workers, None);
++                assert_settled(&chunks, &format!("seed {seed} lit group {n}"));
++                for _ in 0..12 {
++                    let lit: Vec<Key> = keys.iter().copied().filter(|k| chunks[k].lit).collect();
++                    let k = lit[r.next(lit.len() as u32) as usize];
++                    let (x, y, z) = (k.0 * 16 + r.next(16) as i32, 20 + r.next(60) as i32, k.1 * 16 + r.next(16) as i32);
++                    edit(&mut chunks, &mut tasks, x, y, z, [0, 1, 2, 3, 4, 5][r.next(6) as usize]);
++                }
++                run::<T, _>(&mut chunks, &mut tasks, workers, None);
++                assert_settled(&chunks, &format!("seed {seed} edits after group {n}"));
++            }
++            // A lit chunk is rewritten (populate) and lit again beside lit neighbours.
++            let k = (3, 1);
++            let b = terrain(&mut r);
++            fill(&mut chunks, k, b);
++            tasks.remove(&k);
++            tasks.entry(k).or_default().init = true;
++            run::<T, _>(&mut chunks, &mut tasks, workers, None);
++            assert_settled(&chunks, &format!("seed {seed} re-lit"));
++        }
++    }
++
++    /// Edits of a chunk that is not lit are dropped, and its first light still sees the blocks as they are.
++    #[test]
++    fn unlit_chunk_ignores_edits_and_lights_from_its_blocks() {
++        let mut r = Rng(9);
++        let mut chunks: HashMap<Key, Chunk> = HashMap::new();
++        let mut tasks: HashMap<Key, Task> = HashMap::new();
++        for k in [(0, 0), (1, 0)] {
++            let b = terrain(&mut r);
++            fill(&mut chunks, k, b);
++        }
++        tasks.entry((0, 0)).or_default().init = true;
++        run::<T, _>(&mut chunks, &mut tasks, 1, None);
++        edit(&mut chunks, &mut tasks, 20, 40, 3, 4); // chunk (1, 0) is not lit: no task
++        assert!(tasks.is_empty());
++        tasks.entry((1, 0)).or_default().init = true;
++        run::<T, _>(&mut chunks, &mut tasks, 1, None);
++        assert_settled(&chunks, "late first light");
++        assert_eq!(chunks[&(1, 0)].light[cell(4, 40, 3)] >> 4, 15, "the glowstone placed before the first light");
++    }
++}
