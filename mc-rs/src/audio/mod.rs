@@ -17,6 +17,16 @@ use std::sync::mpsc::{sync_channel, Receiver};
 use std::sync::{Arc, Mutex};
 
 const RATE: f64 = 44100.0;
+/// Headroom for the effects: the shipped effects are mastered hot (median peak -2.5 dBFS, 73 of 194 above -1) and the music is not (peaks
+/// about -9 dBFS), so two overlapping effects at full gain went past full scale and hard-clipped: that is the harsh, too loud sound.
+/// 0.5 is -6 dB on the effects; the Sound option still scales them on top. The record (13, peaks at 0 dBFS) is left as it is.
+const VOICE_GAIN: f32 = 0.5;
+
+/// A soft knee instead of a hard clamp for what still goes past full scale (many voices at once): linear for small samples.
+fn soft_limit(x: f32) -> i16 {
+    (32768.0 * (x / 32768.0).tanh()).clamp(-32768.0, 32767.0) as i16
+}
+
 /// OpenAL's usual source limit; a new sound past it replaces the oldest.
 const MAX_VOICES: usize = 32;
 /// `StepSound` of each `table::BLOCK_STEP` index: (key, volume, pitch). Key "" = `Block.soundPowderFootstep` etc. as in `Block.java`.
@@ -112,6 +122,7 @@ impl Mix {
                 }
                 v.pos += v.step;
             }
+            (l, r) = (l * VOICE_GAIN, r * VOICE_GAIN);
             if let Some(m) = &mut self.music {
                 let (a, b) = m.next();
                 l += a * self.music_vol;
@@ -122,8 +133,8 @@ impl Mix {
                 l += a;
                 r += b;
             }
-            f[0] = l.clamp(-32768.0, 32767.0) as i16;
-            f[1] = r.clamp(-32768.0, 32767.0) as i16;
+            f[0] = soft_limit(l);
+            f[1] = soft_limit(r);
         }
         self.voices.retain(|v| (v.pos as usize) < v.clip.pcm.len());
         self.music = self.music.take().filter(|m| !m.done);
@@ -322,6 +333,17 @@ mod tests {
         assert_eq!((step_of(1), step_of(2), step_of(12), step_of(20), step_of(35), step_of(41), step_of(0)), (4, 3, 8, 6, 7, 5, 0));
         assert_eq!(STEP[step_of(20)].1, "random.glass"); // glass breaks as glass, sand as gravel
         assert_eq!(STEP[step_of(12)].1, "step.gravel");
+    }
+
+    #[test]
+    fn loud_voices_stack_without_hard_clipping() {
+        let clip = Arc::new(Clip { pcm: vec![30000; 64], rate: RATE });
+        let mut m = Mix::default();
+        m.voices = (0..4).map(|_| Voice { clip: clip.clone(), pos: 0.0, step: 1.0, gl: 1.0, gr: 1.0 }).collect();
+        let mut out = vec![0i16; 2 * 32];
+        m.render(&mut out);
+        // 4 x 30000 x 0.5 = 60000 would be clamped to 32767; the soft knee stays below it and above one voice's share.
+        assert!(out.iter().all(|&s| (30000..32767).contains(&s)), "{:?}", &out[..4]);
     }
 
     #[test]
