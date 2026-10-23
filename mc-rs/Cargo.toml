@@ -17,6 +17,7 @@ jni = "0.22"
 log = "0.4"
 env_logger = "0.11"
 pollster = "0.4"
+lewton = "0.10" # pure-Rust Ogg Vorbis decoder (audio/)
 embeddium = { path = "../embeddium" }
 lod = { path = "../lod" }
 tectonic = { path = "../tectonic" }
@@ -30,6 +31,7 @@ pad-rumble = []
 naga = { version = "26", features = ["wgsl-in"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
+ndk = { version = "0.9", features = ["audio"] } # AAudio output (audio/); the version android-activity 0.6 already uses
 android_logger = "0.14"
 
 [package.metadata.android]

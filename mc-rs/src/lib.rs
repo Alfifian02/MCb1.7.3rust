@@ -4,6 +4,7 @@
 //! top of M2 (camera + physics) and M3 (overworld generation), with the world streamed by
 //! `world::chunks::ChunkManager` (render-distance ring, generation on worker threads).
 
+mod audio;
 mod render;
 mod gles;
 mod backend;
@@ -169,6 +170,8 @@ struct App {
     portal_cd: f32,
     /// Block updates (scheduled + random ticks, notifications, falling blocks), stepped on the 20 Hz game tick.
     ticks: Ticks,
+    /// Sounds (`SoundManager`): effects, music and records, `audio/`.
+    audio: audio::Audio,
     item_mesh: ItemMesh,
     /// Open container screen (the 2x2 inventory or a workbench's 3x3) and its "place one" click toggle.
     screen: Option<Screen>,
@@ -284,6 +287,7 @@ impl App {
             portal_t: 0.0,
             portal_cd: 0.0,
             ticks: Ticks::new(seed),
+            audio: audio::Audio::new(),
             item_mesh,
             screen: None,
             one_mode: false,
@@ -891,7 +895,9 @@ impl App {
                 self.ticks.wake_water(&mut self.chunks, x, y, z); // a river's edge water, Streams Reflowing's scheduleTick
             }
             self.ticks.step(&mut self.chunks, &mut self.drops, centre, self.weather.rain(1.0));
-            self.ticks.note_events.clear(); // no audio layer yet: it would play them here
+            for ((x, y, z), n, inst) in std::mem::take(&mut self.ticks.note_events) {
+                self.audio.note(glam::Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5), n, inst); // `BlockNote.playBlock`
+            }
             // `TileEntityPiston`: whatever stands in a sliding piece is carried half a block along per tick (ponytail: the player and
             // the mobs only, and no collision check on the way).
             for f in &self.ticks.falling {
@@ -918,8 +924,17 @@ impl App {
             }
             if self.sleep.is_none() {
                 let p = self.player.pos; // the box centre is 0.9 over the feet
-                self.ticks.walk(&mut self.chunks, p.x, p.y - 0.9, p.z);
+                if let Some((id, snow)) = self.ticks.walk(&mut self.chunks, p.x, p.y - 0.9, p.z) {
+                    // `Entity.moveEntity`: the block under the feet steps at 0.15 x its volume (snow on top: the snow's own sound); liquids are silent.
+                    if !matches!(id, 8..=11) {
+                        let (_, key, pitch) = audio::STEP[if snow { 7 } else { audio::step_of(id) }];
+                        self.audio.play_here(key, 0.15, pitch);
+                    }
+                }
             }
+            self.audio.listener(self.player.pos + glam::Vec3::new(0.0, EYE_HEIGHT, 0.0), self.camera.yaw.to_degrees() + 180.0);
+            self.audio.set_volumes(self.opts.sound, self.opts.music);
+            self.audio.tick(); // `playRandomMusicIfReady`
             self.tick_effects(centre);
             let mut flips = Vec::new();
             for (&pos, f) in self.furnaces.iter_mut() {
@@ -1028,6 +1043,9 @@ impl App {
                         if self.dig.tick(hit.pos, id, held, self.player.on_ground, in_water) {
                             let meta = self.chunks.meta(x, y, z); // before the cell is cleared: the drop depends on it
                             self.chunks.set_block(x, y, z, 0);
+                            // `RenderGlobal` break effect: `stepSoundDir()` at ((volume + 1) / 2, pitch x 0.8).
+                            let (brk, pitch) = (audio::STEP[audio::step_of(id)].1, audio::STEP[audio::step_of(id)].2 * 0.8);
+                            self.audio.play(brk, glam::Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5), 1.0, pitch);
                             self.touch.pad.rumble(60, 140); // `RumbleSource.INTERACTION`: a block breaks
                             self.fx.dig(hit.pos, crate::render::atlas::tile_of(id, meta)); // `addBlockDestroyEffects`
                             if let (61 | 62, Some(f)) = (id, self.furnaces.remove(&hit.pos)) {
@@ -1042,6 +1060,7 @@ impl App {
                                 self.inv.damage(slot, craft::wear_on_break(h.id, id));
                             }
                             if id == 84 && meta & 15 != 0 {
+                                self.audio.play_record(None, glam::Vec3::ZERO);
                                 self.drops.spawn_stack(ItemStack { id: 2255 + (meta & 15) as u16, count: 1, damage: 0 }, hit.pos); // the record comes out
                             }
                             if id == 46 {
@@ -1264,10 +1283,12 @@ impl App {
                     let m = self.chunks.meta(x, y, z);
                     if m != 0 {
                         self.chunks.set_block_meta(x, y, z, 84, 0);
+                        self.audio.play_record(None, glam::Vec3::ZERO); // `playRecord(null)`
                         self.drops.spawn_stack(ItemStack { id: 2255 + m as u16, count: 1, damage: 0 }, (x, y + 1, z));
                         return;
                     } else if let Some(s) = self.inv.slots[self.touch.hotbar_slot].filter(|s| matches!(s.id, 2256 | 2257)) {
                         self.chunks.set_block_meta(x, y, z, 84, (s.id - 2255) as u8);
+                        self.audio.play_record(Some(if s.id == 2256 { "13" } else { "cat" }), glam::Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5));
                         self.inv.consume(self.touch.hotbar_slot);
                         return;
                     }

@@ -114,19 +114,22 @@ impl Ticks {
     /// The step trigger of `Entity.moveEntity` for the player (walked distance x 0.6 past `nextStepDistance`, block under the
     /// feet) and `BlockFarmland.onEntityWalking`: a step on farmland turns it to dirt 1 time in 4. Call once per 20 Hz tick with
     /// the feet position. ponytail: mobs and the fence-under-block rule are skipped; a jump over farmland counts like a step.
-    pub fn walk(&mut self, w: &mut ChunkManager, x: f32, feet_y: f32, z: f32) {
+    pub fn walk(&mut self, w: &mut ChunkManager, x: f32, feet_y: f32, z: f32) -> Option<(u8, bool)> {
         let (px, pz) = self.last_xz.replace((x, z)).unwrap_or((x, z));
         self.walked += (x - px).hypot(z - pz).min(1.0) * 0.6; // min: a respawn or bed teleport is not a walk
         let (cx, cy, cz) = (x.floor() as i32, (feet_y - 0.2).floor() as i32, z.floor() as i32);
         let id = bid(w, cx, cy, cz);
+        let mut stepped = None;
         if self.walked > self.next_step as f32 && id > 0 {
             self.next_step += 1;
+            stepped = Some((id, bid(w, cx, cy + 1, cz) == 78)); // the block stepped on, and snow on top of it
             if id == 60 && self.rng.next_int_bound(4) == 0 {
                 w.set_block(cx, cy, cz, 3);
             } else if id == 73 {
                 w.set_block(cx, cy, cz, 74); // `BlockRedstoneOre.onEntityWalking`
             }
         }
+        stepped
     }
 
     /// `new EntityTNTPrimed` at the cell centre: a hop of 0.2 and a drift of 0.02 in a random direction, fuse 80 ticks, or

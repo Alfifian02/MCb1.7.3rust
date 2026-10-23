@@ -21,7 +21,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Mutex};
 
-use embeddium::{arena::Arena, cull::{Culler, Graph}, quad_index, upload_budget::{self, UploadBudget, UploadDurationEstimator}, vertex::{self, Packed}, vis};
+use embeddium::{arena::Arena, quad_index, upload_budget::{self, UploadBudget, UploadDurationEstimator}, vertex::{self, Packed}, vis};
 use glam::Vec3;
 
 use crate::gpu::gfx::{Buf, Gfx};
@@ -37,6 +37,7 @@ use crate::world::gen::populate::Region;
 use crate::world::save;
 
 mod light;
+mod wide;
 
 type Key = (i32, i32);
 
@@ -573,8 +574,11 @@ pub struct ChunkManager {
     loot: Vec<(Pos, Chest)>,
     /// Dungeon spawners populate placed that the game has not taken over yet (`take_spawners`).
     spawners: Vec<(Pos, u8)>,
-    /// The occlusion walk's scratch space (`update_visible`), kept between frames so a frame allocates nothing.
-    culler: Culler,
+    /// The occlusion walk without the frustum, refreshed on a worker (`wide`): `update_visible` only tests it against the frustum.
+    wide: wide::WideCull,
+    /// What that walk reads: the `vis` of every loaded chunk's sections (a chunk without a mesh lets the view through). Every change goes
+    /// through `graph.set` (a chunk loads or unloads, a mesh arrives with other occlusion data), which is what makes the walk redo itself.
+    graph: wide::Snapshot,
     /// Per chunk column, the sections (bit `s`) `update_visible` found drawable this frame.
     visible: HashMap<Key, u8>,
     /// The part of `visible` within the water radius `wr` (`WATER_RANGE`, or all of it with the LoD off): the sections whose real water is drawn (and whose LoD water sheet is cut).
@@ -595,18 +599,6 @@ pub struct ChunkManager {
     upload: UploadDurationEstimator,
     frame_ns: Option<f64>,
     last_update: Option<std::time::Instant>,
-}
-
-/// The loaded chunks as the occlusion walk sees them. A chunk that has no mesh (air only, or not built yet) lets the view through.
-struct Sections<'a>(&'a Chunks);
-
-impl Graph for Sections<'_> {
-    fn vis(&self, [x, y, z]: [i32; 3]) -> Option<u64> {
-        if !(0..SECTIONS as i32).contains(&y) {
-            return None;
-        }
-        self.0.get(&(x, z)).map(|e| e.mesh.as_ref().map_or(vis::FULL, |m| m.vis[y as usize]))
-    }
 }
 
 impl ChunkManager {
@@ -679,7 +671,7 @@ impl ChunkManager {
         let gen = make(seed);
         Self { chunks: Chunks::default(), pending: HashSet::new(), ring, radius, center: None, max_in_flight: workers * 2, built, meshing: HashSet::new(), max_meshing: workers * 2, urgent: HashSet::new(),
                populated_rx, populating: HashMap::new(), busy: HashSet::new(), max_populating: workers, stamp: 0,
-               cm: gen.manager(), biome_area: None, gen, jobs, done, light: light::LightLink::spawn(), sky_sub: 0, mesh_gen: 0, dir: None, saved: HashSet::new(), writer: None, changes: Vec::new(), fresh_water: Vec::new(), loot: Vec::new(), spawners: Vec::new(), culler: Culler::default(), visible: HashMap::new(), wet: HashMap::new(), order: Vec::new(), ingest: Vec::new(), ingested: HashSet::new(), pages: Pages::default(), held: None, upload: UploadDurationEstimator::new(), frame_ns: None, last_update: None }
+               cm: gen.manager(), biome_area: None, gen, jobs, done, light: light::LightLink::spawn(), sky_sub: 0, mesh_gen: 0, dir: None, saved: HashSet::new(), writer: None, changes: Vec::new(), fresh_water: Vec::new(), loot: Vec::new(), spawners: Vec::new(), wide: wide::WideCull::spawn(), graph: wide::Snapshot::default(), visible: HashMap::new(), wet: HashMap::new(), order: Vec::new(), ingest: Vec::new(), ingested: HashSet::new(), pages: Pages::default(), held: None, upload: UploadDurationEstimator::new(), frame_ns: None, last_update: None }
     }
 
     /// The render distance in chunks.
@@ -723,6 +715,7 @@ impl ChunkManager {
             old.mesh.iter().for_each(|m| self.pages.free(m));
             self.light_remove(key); // a fresh, unlit entry replaces it, light thread's copy included
         }
+        self.graph.set(key, Some([vis::FULL; SECTIONS])); // no mesh yet: the view passes through
         self.light_chunk(key, copy);
     }
 
@@ -1166,39 +1159,37 @@ impl ChunkManager {
         })
     }
 
-    /// Call once per frame before `draw_ranges`: finds the sections to draw from the eye (`wr` = radius of the real water, `WATER_RANGE` or `1e9`). A breadth-first walk out of the eye's
-    /// section (`embeddium::cull`) that stays inside the `shape` (radii `rh`, `rv` in blocks) and the frustum (`in_frustum(min, max)`)
-    /// and does not continue through terrain that walls the view off, so caves and hills hide what is behind them. Each section's box
-    /// is one block taller at both ends. With the eye in a chunk that is not loaded there is nowhere to start: every section is tested instead.
-    /// ponytail: a hole in the loaded ring (a chunk still generating) cuts the walk there; it fills in as the chunk arrives.
+    /// Call once per frame before `draw_ranges`: finds the sections to draw from the eye (`wr` = radius of the real water, `WATER_RANGE` or `1e9`).
+    /// The sections come from a breadth-first walk out of the eye's section (`embeddium::cull`) that stays inside the `shape` (radii `rh`,
+    /// `rv` in blocks) and does not continue through terrain that walls the view off, so caves and hills hide what is behind them. That walk
+    /// does not look at the frustum or where in its section the eye is, so it is redone only when the eye changes section or a chunk's
+    /// occlusion data changes, on a worker (`wide`); this frame's part is testing it against the frustum (`in_frustum(min, max)`) and the real
+    /// eye. Each section's box is one block taller at both ends. With the eye in a chunk that is not loaded there is nowhere to start: every
+    /// section is tested instead.
+    /// ponytail: a hole in the loaded ring (a chunk still generating) cuts the walk there; it fills in as the chunk arrives. After a change
+    /// the walk in use is a frame or two old: a chunk whose mesh just arrived is drawn from the next walk on.
     pub fn update_visible(&mut self, eye: Vec3, shape: Shape, rh: f32, rv: f32, wr: f32, in_frustum: impl Fn(Vec3, Vec3) -> bool) {
-        let ok = |[x, y, z]: [i32; 3]| {
-            let min = Vec3::new(x as f32 * 16.0, y as f32 * 16.0 - 1.0, z as f32 * 16.0);
-            let max = min + Vec3::new(16.0, 18.0, 16.0);
-            in_range(shape, eye, min, max, rh, rv) && in_frustum(min, max)
-        };
-        self.visible.clear();
         let ey = (eye.y.floor() as i32) >> 4;
         let inside = (0..SECTIONS as i32).contains(&ey); // above or below the world the eye's section says nothing about the view
         let origin = [chunk_coord(eye.x), ey.clamp(0, SECTIONS as i32 - 1), chunk_coord(eye.z)];
-        let mut culler = std::mem::take(&mut self.culler);
-        match culler.find_visible(&Sections(&self.chunks), origin, inside, &ok) {
-            Some(found) => {
-                for &[x, y, z] in found {
-                    *self.visible.entry((x, z)).or_default() |= 1u8 << y;
-                }
+        let wide = self.wide.get(&self.graph, wide::WideKey { origin, inside, shape, rh, rv });
+        self.visible.clear();
+        for &((x, z), mask) in &wide.cols {
+            // The column's box holds those of its sections: most columns of a wide walk are behind the camera or out of the side.
+            let min = Vec3::new(x as f32 * 16.0, -1.0, z as f32 * 16.0);
+            let max = min + Vec3::new(16.0, H as f32 + 2.0, 16.0);
+            if !in_range(shape, eye, min, max, rh, rv) || !in_frustum(min, max) {
+                continue;
             }
-            None => {
-                for &(x, z) in self.chunks.keys() {
-                    for y in 0..SECTIONS as i32 {
-                        if ok([x, y, z]) {
-                            *self.visible.entry((x, z)).or_default() |= 1u8 << y;
-                        }
-                    }
-                }
+            let seen = (0..SECTIONS as i32).filter(|&y| mask >> y & 1 != 0).fold(0u8, |m, y| {
+                let min = Vec3::new(x as f32 * 16.0, y as f32 * 16.0 - 1.0, z as f32 * 16.0);
+                let max = min + Vec3::new(16.0, 18.0, 16.0);
+                if in_range(shape, eye, min, max, rh, rv) && in_frustum(min, max) { m | 1u8 << y } else { m }
+            });
+            if seen != 0 {
+                self.visible.insert((x, z), seen);
             }
         }
-        self.culler = culler;
         self.wet = self.visible.iter().filter_map(|(&(x, z), &m)| Some(((x, z), near_sections(x, z, m, eye, shape, wr.min(rh), rv))).filter(|e| e.1 != 0)).collect();
         let d2 = |k: &Key| ((k.0 * 16 + 8) as f32 - eye.x).powi(2) + ((k.1 * 16 + 8) as f32 - eye.z).powi(2);
         self.order.clear();
@@ -1395,6 +1386,7 @@ impl ChunkManager {
             self.mesh_gen = self.mesh_gen.wrapping_add(1);
             for k in gone {
                 let Some(e) = self.chunks.remove(&k) else { continue };
+                self.graph.set(k, None);
                 e.mesh.iter().for_each(|m| self.pages.free(m));
                 if self.ingested.remove(&k) {
                     let cols = cols_of(&mut self.cm, k, &e);
@@ -1556,6 +1548,11 @@ impl ChunkManager {
                 // shadow map is not redrawn for it; an edit that keeps the count is picked up by the next sun / movement refresh.
                 if e.mesh.as_ref().map_or(0, |m| m.index_count) != mesh.as_ref().map_or(0, |m| m.index_count) {
                     self.mesh_gen = self.mesh_gen.wrapping_add(1);
+                }
+                // Only other occlusion data makes the walk redo itself: the time-of-day relight rebuilds a mesh with the same `vis`.
+                let (was, now) = (e.mesh.as_ref().map_or([vis::FULL; SECTIONS], |m| m.vis), mesh.as_ref().map_or([vis::FULL; SECTIONS], |m| m.vis));
+                if was != now {
+                    self.graph.set(key, Some(now));
                 }
                 // The new runs are in before the old ones go, so a page holding only this chunk is not dropped and made again.
                 if let Some(old) = std::mem::replace(&mut e.mesh, mesh) {
