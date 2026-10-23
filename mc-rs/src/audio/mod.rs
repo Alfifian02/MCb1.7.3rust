@@ -153,8 +153,15 @@ pub struct Audio {
     /// `SoundManager.ticksBeforeMusic`.
     before_music: i32,
     #[allow(dead_code)]
-    out: Option<Box<dyn std::any::Any>>,
+    out: Option<Keep>,
 }
+
+/// The output stream, held only so it keeps playing and closes when `Audio` drops. `App` is built on the GPU init thread and handed to
+/// the main thread (`start_init`), so `Audio` has to be `Send`; the AAudio stream is a raw handle and is not.
+/// SAFETY: nothing ever calls the stream after `start_output`; the only thing done to it later is dropping it (`AAudioStream_close`),
+/// which AAudio allows from any thread.
+struct Keep(#[allow(dead_code)] Box<dyn std::any::Any>);
+unsafe impl Send for Keep {}
 
 impl Audio {
     pub fn new() -> Self {
@@ -272,7 +279,7 @@ impl Audio {
 }
 
 #[cfg(target_os = "android")]
-fn start_output(mix: Arc<Mutex<Mix>>) -> Option<Box<dyn std::any::Any>> {
+fn start_output(mix: Arc<Mutex<Mix>>) -> Option<Keep> {
     use ndk::audio::{AudioCallbackResult, AudioDirection, AudioFormat, AudioPerformanceMode, AudioStreamBuilder};
     let s = AudioStreamBuilder::new().ok()?
         .direction(AudioDirection::Output).format(AudioFormat::PCM_I16).channel_count(2).sample_rate(44100)
@@ -287,11 +294,11 @@ fn start_output(mix: Arc<Mutex<Mix>>) -> Option<Box<dyn std::any::Any>> {
         }))
         .open_stream().ok()?;
     s.request_start().ok()?;
-    Some(Box::new(s))
+    Some(Keep(Box::new(s)))
 }
 
 #[cfg(not(target_os = "android"))]
-fn start_output(_: Arc<Mutex<Mix>>) -> Option<Box<dyn std::any::Any>> {
+fn start_output(_: Arc<Mutex<Mix>>) -> Option<Keep> {
     None
 }
 
