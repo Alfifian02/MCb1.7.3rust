@@ -17,7 +17,7 @@
 //! M13 frustum culling: each chunk's bounds are known from its key
 //! ((cx*16, 0, cz*16) .. +(16, 128, 16)), so it is one `filter` on `meshes()` in the draw loop.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Mutex};
 
@@ -110,7 +110,7 @@ pub fn chunk_coord(v: f32) -> i32 {
     (v.floor() as i32) >> 4
 }
 
-/// A chunk's mesh as a run of one `Page` (Sodium's region arena): its vertices at `v..` (16 bytes each, `embeddium::vertex`), sorted by
+/// A chunk's mesh as a run of one `Page` (Sodium's region arena): its vertices at `v..` (12 bytes each, `embeddium::vertex`), sorted by
 /// layer and section, four to a quad. The GPU buffers belong to the page and the index buffer is the one shared by every page
 /// (`embeddium::quad_index`), so a chunk costs no buffer and no index upload of its own and the draw loop binds a page, not a chunk.
 pub struct Mesh {
@@ -132,7 +132,7 @@ pub struct Mesh {
     vis: [u64; SECTIONS],
 }
 
-/// Vertices per page (`PAGE_VERTS * 16` bytes). A page is one vertex buffer carved up by an `embeddium::arena::Arena`; a few pages hold
+/// Vertices per page (`PAGE_VERTS * 12` bytes). A page is one vertex buffer carved up by an `embeddium::arena::Arena`; a few pages hold
 /// the whole ring. A mesh that is bigger than a page is not drawn. Lever: a bigger page = fewer buffer switches in the draw loop,
 /// but memory is taken a page at a time. The shared index buffer is sized for one page (`PAGE_VERTS / 4` quads, 6 MiB) and serves all.
 const PAGE_VERTS: u32 = 1 << 20;
@@ -313,43 +313,266 @@ fn quads_of(idxs: &[u32]) -> Vec<Q> {
     out
 }
 
-/// A mesher vertex (`mesh::VF` floats: position, uv, light, lm, tint) as the 16-byte chunk vertex. The position is chunk-local (the
-/// mesher is run with origin 0); a smooth vertex (`lm >= mesh::SMOOTH_LM`) keeps its shade x ambient occlusion in the shade byte and
-/// sets bit 15 of the light; a flat one carries `sky * 16 + block` and `face_shade`, its quad's shade from the face direction (the shader
-/// used to take that from screen derivatives).
-fn encode_vertex(f: &[f32], face_shade: u8) -> Packed {
-    let smooth = f[6] >= mesh::SMOOTH_LM;
-    let lm = f[6] as u32;
-    let tint = f[7] as u32;
-    vertex::encode(&vertex::Vertex {
-        pos: [f[0], f[1], f[2]],
-        uv: [f[3], f[4]],
-        light: if smooth { 0x8000 | (lm - mesh::SMOOTH_LM as u32) as u16 } else { lm as u16 },
-        color: [(tint >> 16) as u8, (tint >> 8) as u8, tint as u8],
-        shade: if smooth { (f[5].clamp(0.0, 1.0) * 255.0 + 0.5) as u8 } else { face_shade },
+/// A vertex of a quad on its way to the 12-byte format (`embeddium::vertex`): the mesher's `VF` floats, with the atlas coordinate turned
+/// into a texel position inside the quad's tile.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PV {
+    /// Chunk-local (the mesher is run with origin 0).
+    pos: [f32; 3],
+    /// Texels inside the tile: (0, 0) is its top left corner; a merged run of faces runs past 16.
+    loc: [f32; 2],
+    /// `mesh::SMOOTH_LM + sky quarters * 32 + block halves` (smooth), or `sky * 16 + block` (flat).
+    lm: f32,
+    /// A smooth vertex's face shade x ambient occlusion; a flat one gets its shade from the way its quad faces.
+    lit: f32,
+    /// Packed sRGB colour (`mesh::WHITE` = none).
+    tint: f32,
+}
+
+/// A quad of four vertices (counter-clockwise from the front) and the atlas tile all four show a part of.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PQ {
+    v: [PV; 4],
+    tile: u16,
+    /// The tile shows a see-through texel somewhere (`atlas::is_cutout`): the alpha-tested layer.
+    cut: bool,
+    /// The quad tiles its texture (a merged run, see `merged`): the shader takes the fraction of the tile coordinate.
+    repeat: bool,
+}
+
+/// The tile (row * 16 + column) the point `c` (atlas coordinates, 0..1) lies in.
+fn tile_of(c: [f32; 2]) -> u16 {
+    let (x, y) = (c[0] * crate::render::atlas::ATLAS_W as f32, c[1] * crate::render::atlas::ATLAS_H as f32);
+    let w = crate::render::atlas::TILES_W;
+    ((y.max(0.0) as usize / 16) * w + (x.max(0.0) as usize / 16).min(w - 1)) as u16
+}
+
+/// The mesher's quad whose first vertex is `v`, as a `PQ`: the tile is the one at the centre of its four atlas coordinates (the corners of
+/// a face lie on the tile's edge, so a single corner could be one tile off).
+fn quad_at(verts: &[f32], v: u32) -> PQ {
+    let vf = mesh::VF;
+    let f = |k: usize| &verts[(v as usize + k) * vf..][..vf];
+    let centre = [(0..4).map(|k| f(k)[3]).sum::<f32>() / 4.0, (0..4).map(|k| f(k)[4]).sum::<f32>() / 4.0];
+    let tile = tile_of(centre);
+    let w = crate::render::atlas::TILES_W;
+    let (ox, oy) = ((tile as usize % w) as f32 * 16.0, (tile as usize / w) as f32 * 16.0);
+    let pv = |k: usize| {
+        let r = f(k);
+        PV { pos: [r[0], r[1], r[2]], loc: [r[3] * crate::render::atlas::ATLAS_W as f32 - ox, r[4] * crate::render::atlas::ATLAS_H as f32 - oy], lm: r[6], lit: r[5], tint: r[7] }
+    };
+    PQ { v: [pv(0), pv(1), pv(2), pv(3)], tile, cut: crate::render::atlas::is_cutout(centre), repeat: false }
+}
+
+/// The 16-block section a quad is sorted into: the highest vertex minus half a block picks the block, so top, side and plant faces land in
+/// their own block's section; a face on a section border may land in either, which the draw loop's one-block margin covers.
+fn section_of(q: &PQ) -> usize {
+    let top = q.v.iter().map(|v| v.pos[1]).fold(f32::MIN, f32::max);
+    (((top - 0.5).floor().max(0.0) as usize) >> 4).min(SECTIONS - 1)
+}
+
+/// A quad that is one block face on the block grid showing a whole terrain tile, the same light, shade and colour on all four corners:
+/// the only kind `merged` can join with its neighbours. `an` is the axis it is flat on, `au` / `av` the axes its corner 1 and corner 3 lie
+/// along (the template's u and v), `su` / `sv` which way the corners go along them and `du` / `dv` which way the texture runs.
+#[derive(Clone, Copy, Debug)]
+struct Unit {
+    an: usize,
+    plane: i32,
+    au: usize,
+    av: usize,
+    su: i32,
+    sv: i32,
+    du: i32,
+    dv: i32,
+    /// The cell: the lower of its two coordinates along `au` and `av`.
+    cu: i32,
+    cv: i32,
+}
+
+fn unit_of(q: &PQ) -> Option<Unit> {
+    if q.tile >= 256 || (1..4).any(|k| q.v[k].lm.to_bits() != q.v[0].lm.to_bits() || q.v[k].lit.to_bits() != q.v[0].lit.to_bits() || q.v[k].tint.to_bits() != q.v[0].tint.to_bits()) {
+        return None;
+    }
+    let p = |k: usize| q.v[k].pos;
+    let same = |a: usize| (1..4).all(|k| p(k)[a] == p(0)[a]);
+    let mut an = None;
+    for a in 0..3 {
+        if same(a) {
+            if an.is_some() {
+                return None; // a point or a line
+            }
+            an = Some(a);
+        }
+    }
+    let an = an?;
+    if p(0)[an].fract() != 0.0 {
+        return None; // a face inside the cell (slab, torch, fence...)
+    }
+    let axes = match an { 0 => [1, 2], 1 => [0, 2], _ => [0, 1] };
+    for a in axes {
+        let (lo, hi) = (0..4).fold((f32::MAX, f32::MIN), |(lo, hi), k| (lo.min(p(k)[a]), hi.max(p(k)[a])));
+        if hi - lo != 1.0 || lo.fract() != 0.0 {
+            return None; // not exactly one block wide on the grid (a fluid's corner, a cactus, a stair step)
+        }
+    }
+    let along = |k: usize| axes.into_iter().find(|&a| p(k)[a] != p(0)[a]);
+    let (au, av) = (along(1)?, along(3)?);
+    if au == av || p(1)[av] != p(0)[av] || p(3)[au] != p(0)[au] || p(2)[au] != p(1)[au] || p(2)[av] != p(3)[av] {
+        return None;
+    }
+    // The texture: the whole tile (`atlas::terrain_uv` insets it by 0.02 texel), u along corner 0 -> 1 and v along corner 0 -> 3.
+    let l = |k: usize| q.v[k].loc;
+    let near = |a: f32, b: f32| (a - b).abs() < 0.1;
+    let (dx, dy) = (l(1)[0] - l(0)[0], l(3)[1] - l(0)[1]);
+    let inside = (0..4).all(|k| l(k).iter().all(|&c| c > -0.1 && c < 16.1));
+    if !(inside && near(l(3)[0], l(0)[0]) && near(l(2)[0], l(1)[0]) && near(l(1)[1], l(0)[1]) && near(l(2)[1], l(3)[1]) && near(dx.abs(), 16.0) && near(dy.abs(), 16.0)) {
+        return None;
+    }
+    let sign = |d: f32| if d > 0.0 { 1 } else { -1 };
+    Some(Unit {
+        an,
+        plane: p(0)[an] as i32,
+        au,
+        av,
+        su: sign(p(1)[au] - p(0)[au]),
+        sv: sign(p(3)[av] - p(0)[av]),
+        du: sign(dx),
+        dv: sign(dy),
+        cu: p(0)[au].min(p(1)[au]) as i32,
+        cv: p(0)[av].min(p(3)[av]) as i32,
     })
 }
 
-/// b1.7.3 `RenderBlocks` face shade of a quad (top 1.0, bottom 0.5, Z sides 0.8, X sides 0.6) as the shade byte, from the quad's first three
-/// corners (counter-clockwise seen from the front, so the cross product points out of the face): the axis the normal is longest on, and its
-/// sign for Y. This is what the chunk shader's `flat_shade` derived per pixel from screen derivatives, with the same pick for a face that is
-/// not axis aligned (a wall torch) and the same 1.0 for a degenerate one. 0.5 is 128 (0.4 % bright), the others are exact.
-fn face_shade(a: &[f32], b: &[f32], c: &[f32]) -> u8 {
+/// What two `Unit`s must share to be one quad: the layer, the section (so a merged quad stays in the section it is drawn with), the plane,
+/// the way they face and their texture runs, the tile, and the light, shade and colour (all four corners of each agree, so the run has the
+/// same values everywhere and needs no per-cell interpolation).
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct Run {
+    cut: bool,
+    section: usize,
+    an: usize,
+    plane: i32,
+    au: usize,
+    av: usize,
+    su: i32,
+    sv: i32,
+    du: i32,
+    dv: i32,
+    tile: u16,
+    lm: u32,
+    lit: u32,
+    tint: u32,
+}
+
+/// The cells of one `Run`, and the first of its quads to build the merged ones from (`rcu`, `rcv`: its cell).
+struct Group {
+    rep: PQ,
+    rcu: i32,
+    rcv: i32,
+    cells: Vec<(i32, i32)>,
+}
+
+/// Longest side of a merged quad, in blocks: a chunk is 16 wide, a section 16 high, and 16 tiles is the texture coordinate's range
+/// (`embeddium::vertex`: 15 tiles either way from the one the quad starts in).
+const MERGE_MAX: i32 = 16;
+
+/// Greedy meshing of one plane: the rectangles (cell u, cell v, width, height) that cover `cells` once, taking the next free cell in
+/// (v, u) order, widening as far as the row runs and then heightening while whole rows follow.
+fn greedy(cells: &mut Vec<(i32, i32)>) -> Vec<(i32, i32, i32, i32)> {
+    cells.sort_unstable_by_key(|&(u, v)| (v, u));
+    let mut free: HashSet<(i32, i32)> = cells.iter().copied().collect();
+    let mut out = Vec::new();
+    for &(u0, v0) in cells.iter() {
+        if !free.contains(&(u0, v0)) {
+            continue;
+        }
+        let mut w = 1;
+        while w < MERGE_MAX && free.contains(&(u0 + w, v0)) {
+            w += 1;
+        }
+        let mut h = 1;
+        'grow: while h < MERGE_MAX {
+            for du in 0..w {
+                if !free.contains(&(u0 + du, v0 + h)) {
+                    break 'grow;
+                }
+            }
+            h += 1;
+        }
+        for dv in 0..h {
+            for du in 0..w {
+                free.remove(&(u0 + du, v0 + dv));
+            }
+        }
+        out.push((u0, v0, w, h));
+    }
+    out
+}
+
+/// The quad of the rectangle (`u0`, `v0`, `w`, `h`) of a run: the corners of `rep` (a quad of the run, in cell `rcu`, `rcv`) moved to the
+/// rectangle, the far ones stretched, and the texture coordinate stretched with them, so the tile repeats once per block.
+fn merged(rep: &PQ, run: &Run, rcu: i32, rcv: i32, u0: i32, v0: i32, w: i32, h: i32) -> PQ {
+    let mut q = *rep;
+    for (k, v) in q.v.iter_mut().enumerate() {
+        let hi_u = v.pos[run.au] == (rcu + 1) as f32;
+        let hi_v = v.pos[run.av] == (rcv + 1) as f32;
+        v.pos[run.au] += (u0 - rcu) as f32 + if hi_u { (w - 1) as f32 } else { 0.0 };
+        v.pos[run.av] += (v0 - rcv) as f32 + if hi_v { (h - 1) as f32 } else { 0.0 };
+        if k == 1 || k == 2 {
+            v.loc[0] += run.du as f32 * 16.0 * (w - 1) as f32;
+        }
+        if k == 2 || k == 3 {
+            v.loc[1] += run.dv as f32 * 16.0 * (h - 1) as f32;
+        }
+    }
+    q.repeat = w > 1 || h > 1;
+    q
+}
+
+/// b1.7.3 `RenderBlocks` face shade of a quad (top 1.0, bottom 0.5, Z sides 0.8, X sides 0.6) as a `vertex::FACE_SHADE` index, from the quad's
+/// first three corners (counter-clockwise seen from the front, so the cross product points out of the face): the axis the normal is longest
+/// on, and its sign for Y. This is what the chunk shader's `flat_shade` derived per pixel from screen derivatives, with the same pick for a
+/// face that is not axis aligned (a wall torch) and the same 1.0 for a degenerate one.
+fn face_code(a: &[f32; 3], b: &[f32; 3], c: &[f32; 3]) -> u8 {
     let (u, v) = (std::array::from_fn::<f32, 3, _>(|i| b[i] - a[i]), std::array::from_fn::<f32, 3, _>(|i| c[i] - a[i]));
     let n = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
     let (x, y, z) = (n[0].abs(), n[1].abs(), n[2].abs());
     if n.iter().map(|k| k * k).sum::<f32>() < 1e-20 {
-        255
+        0
     } else if x >= y && x >= z {
-        153 // 0.6
+        2 // 0.6
     } else if y >= z {
-        if n[1] > 0.0 { 255 } else { 128 }
+        if n[1] > 0.0 { 0 } else { 3 }
     } else {
-        204 // 0.8
+        1 // 0.8
     }
 }
 
-/// A chunk's quads as the GPU takes them: 16-byte vertices, four to a quad, the solid layer, then the cut-out layer, then the water, each
+/// A vertex as the 12-byte chunk vertex. A smooth vertex (`lm >= mesh::SMOOTH_LM`) carries its own sky quarters, block halves and its shade x
+/// ambient occlusion as a shade code; a flat one is the same with `sky * 4`, `block * 2` and its quad's face shade (`face`); water keeps shade 1
+/// (`fs_water` derives the shade of the side the eye sees).
+fn encode_vertex(v: &PV, tile: u16, repeat: bool, face: u8, water: bool) -> Packed {
+    let smooth = v.lm >= mesh::SMOOTH_LM;
+    let (sky, block) = if smooth {
+        let l = (v.lm - mesh::SMOOTH_LM) as u32;
+        ((l >> 5) as u8, (l & 31) as u8)
+    } else {
+        let l = v.lm as u32;
+        ((l >> 4) as u8 * 4, (l & 15) as u8 * 2)
+    };
+    let tint = v.tint as u32;
+    vertex::encode(&vertex::Vertex {
+        pos: v.pos,
+        tile,
+        uv: v.loc,
+        repeat,
+        sky,
+        block,
+        shade: if water { 0 } else if smooth { vertex::shade_code(v.lit) } else { face },
+        color: [(tint >> 16) as u8, (tint >> 8) as u8, tint as u8],
+    })
+}
+
+/// A chunk's quads as the GPU takes them: 12-byte vertices, four to a quad, the solid layer, then the cut-out layer, then the water, each
 /// sorted by 16-block section. `starts`, `cut` and `wstarts` are QUAD numbers from the first vertex of the mesh; layer `x` section `s` is
 /// `x[s]..x[s + 1]`.
 #[derive(Debug, PartialEq)]
@@ -361,41 +584,65 @@ struct Quads {
 }
 
 /// Sorts the mesher's quads into layers (a quad that shows a see-through tile is cut-out: the tile at the centre of its four uvs) and
-/// the 16-block section they sit in (the highest vertex minus half a block picks the block, so top, side and plant faces land in their
-/// own block's section; a face on a section border may land in either, which the draw loop's one-block margin covers), and encodes them.
-/// The other diagonal becomes a rotation of the corners and the second side a second quad with the corners reversed, so the one shared
-/// index pattern (`embeddium::quad_index`) draws exactly the triangles the mesher's own index list did.
+/// the 16-block section they sit in, joins the block faces that can be one quad (`unit_of`, `greedy`, `merged`: a flat floor of 256
+/// faces is one quad, not 256) and encodes them. The other diagonal becomes a rotation of the corners and the second side a second quad
+/// with the corners reversed, so the one shared index pattern (`embeddium::quad_index`) draws exactly the triangles the mesher's own
+/// index list did.
 fn pack(verts: &[f32], solid: &[u32], water: &[u32]) -> Quads {
-    let vf = mesh::VF;
-    let at = |v: u32, k: usize| &verts[(v as usize + k) * vf..][..vf];
-    let section = |v: u32| {
-        let top = (0..4).map(|k| at(v, k)[1]).fold(f32::MIN, f32::max);
-        (((top - 0.5).floor().max(0.0) as usize) >> 4).min(SECTIONS - 1)
-    };
-    let centre = |v: u32| [(0..4).map(|k| at(v, k)[3]).sum::<f32>() / 4.0, (0..4).map(|k| at(v, k)[4]).sum::<f32>() / 4.0];
-    let mut layers: [Vec<(usize, Q)>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+    let mut layers: [Vec<(usize, PQ, bool, bool)>; 3] = Default::default();
+    let mut groups: BTreeMap<Run, Group> = BTreeMap::new();
     for q in quads_of(solid) {
-        layers[crate::render::atlas::is_cutout(centre(q.v)) as usize].push((section(q.v), q));
+        let pq = quad_at(verts, q.v);
+        let section = section_of(&pq);
+        match (!q.flip && !q.both).then(|| unit_of(&pq)).flatten() {
+            Some(u) => {
+                let run = Run {
+                    cut: pq.cut,
+                    section,
+                    an: u.an,
+                    plane: u.plane,
+                    au: u.au,
+                    av: u.av,
+                    su: u.su,
+                    sv: u.sv,
+                    du: u.du,
+                    dv: u.dv,
+                    tile: pq.tile,
+                    lm: pq.v[0].lm.to_bits(),
+                    lit: pq.v[0].lit.to_bits(),
+                    tint: pq.v[0].tint.to_bits(),
+                };
+                groups.entry(run).or_insert_with(|| Group { rep: pq, rcu: u.cu, rcv: u.cv, cells: Vec::new() }).cells.push((u.cu, u.cv));
+            }
+            None => layers[pq.cut as usize].push((section, pq, q.flip, q.both)),
+        }
     }
     for q in quads_of(water) {
-        layers[2].push((section(q.v), q));
+        let pq = quad_at(verts, q.v);
+        layers[2].push((section_of(&pq), pq, q.flip, q.both));
+    }
+    for (run, mut g) in groups {
+        for (u0, v0, w, h) in greedy(&mut g.cells) {
+            layers[run.cut as usize].push((run.section, merged(&g.rep, &run, g.rcu, g.rcv, u0, v0, w, h), false, false));
+        }
     }
     let mut out = Quads { verts: Vec::with_capacity((solid.len() + water.len()) / 6 * 4), starts: [0; SECTIONS + 1], cut: [0; SECTIONS + 1], wstarts: [0; SECTIONS + 1] };
-    for (l, list) in layers.iter().enumerate() {
+    for (l, list) in layers.iter_mut().enumerate() {
+        list.sort_by_key(|e| e.0);
         let mut starts = [0u32; SECTIONS + 1];
+        let mut it = list.iter().peekable();
         for s in 0..SECTIONS {
             starts[s] = out.verts.len() as u32 / 4;
-            for &(_, q) in list.iter().filter(|(sec, _)| *sec == s) {
-                // The water layer keeps 255: its quads are not culled and `fs_water` derives the shade of the side the eye sees.
+            while let Some((_, q, flip, both)) = it.next_if(|e| e.0 == s) {
                 let mut put = |order: [usize; 4]| {
-                    let shade = if l == 2 { 255 } else { face_shade(at(q.v, order[0]), at(q.v, order[1]), at(q.v, order[2])) };
-                    order.iter().for_each(|&k| out.verts.push(encode_vertex(at(q.v, k), shade)));
+                    let face = face_code(&q.v[order[0]].pos, &q.v[order[1]].pos, &q.v[order[2]].pos);
+                    order.iter().for_each(|&k| out.verts.push(encode_vertex(&q.v[k], q.tile, q.repeat, face, l == 2)));
                 };
-                if q.flip {
+                if *flip {
                     put([1, 2, 3, 0]);
                 } else {
                     put([0, 1, 2, 3]);
-                    if q.both {
+                    if *both {
                         put([0, 3, 2, 1]);
                     }
                 }
@@ -2057,25 +2304,25 @@ mod tests {
         got.sort();
         assert_eq!(got, want);
         // The smooth quad keeps its light payload and its own shade; a flat one takes the shade of the way it faces (this first quad is wound
-        // to look down: 0.5 = 128; the third looks along +Z: 0.8 = 204).
+        // to look down: 0.5 = code 3; the third looks along +Z: 0.8 = code 1) and its `sky * 16 + block` as quarter and half levels.
         let d = |i: usize| vertex::decode(&q.verts[i]);
-        assert_eq!((d(0).light, d(0).shade), (255, 128));
-        assert_eq!(d(8).shade, 204);
-        assert!(q.verts.iter().any(|b| vertex::decode(b).light == 0x8000 | 33 && vertex::decode(b).shade == 153), "0.6 * 255, light bit 15");
+        assert_eq!((d(0).sky, d(0).block, d(0).shade), (60, 30, 3));
+        assert_eq!(d(8).shade, 1);
+        assert!(q.verts.iter().any(|b| { let d = vertex::decode(b); (d.sky, d.block) == (1, 1) && (vertex::shade_value(d.shade) - 0.6).abs() < 1e-6 }), "smooth: 33 = 1 * 32 + 1, shade 0.6");
     }
 
     /// The baked face shade is what `flat_shade` derived: top 1.0, bottom 0.5, Z sides 0.8, X sides 0.6, the sign of Y from the winding
-    /// (counter-clockwise from the front), 1.0 for a degenerate quad; the water layer keeps 255.
+    /// (counter-clockwise from the front), 1.0 for a degenerate quad; the water layer keeps 1.0.
     #[test]
     fn flat_quads_carry_their_face_shade() {
         let vf = crate::render::mesh::VF;
-        let quads: [([[f32; 3]; 4], u8); 6] = [
-            ([[0.0, 1.0, 1.0], [1.0, 1.0, 1.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]], 255), // top (the LoD's winding for a face looking up)
-            ([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 0.0, 1.0], [0.0, 0.0, 1.0]], 128), // bottom
-            ([[1.0, 0.0, 1.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [1.0, 1.0, 1.0]], 153), // +X (`mesh::FACES[0]`)
-            ([[0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 1.0, 1.0], [0.0, 1.0, 0.0]], 153), // -X
-            ([[0.0, 0.0, 1.0], [1.0, 0.0, 1.0], [1.0, 1.0, 1.0], [0.0, 1.0, 1.0]], 204), // +Z
-            ([[0.0; 3]; 4], 255),                                                          // degenerate
+        let quads: [([[f32; 3]; 4], u8); 6] = [ // (corners, `FACE_SHADE` index)
+            ([[0.0, 1.0, 1.0], [1.0, 1.0, 1.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]], 0), // top (the LoD's winding for a face looking up)
+            ([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 0.0, 1.0], [0.0, 0.0, 1.0]], 3), // bottom
+            ([[1.0, 0.0, 1.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [1.0, 1.0, 1.0]], 2), // +X (`mesh::FACES[0]`)
+            ([[0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 1.0, 1.0], [0.0, 1.0, 0.0]], 2), // -X
+            ([[0.0, 0.0, 1.0], [1.0, 0.0, 1.0], [1.0, 1.0, 1.0], [0.0, 1.0, 1.0]], 1), // +Z
+            ([[0.0; 3]; 4], 0),                                                          // degenerate
         ];
         let mut v = vec![0.0f32; 4 * quads.len() * vf];
         let mut idxs = Vec::new();
@@ -2096,7 +2343,66 @@ mod tests {
         }
         // The same top quad as water: 255 whatever it faces.
         let w = pack(&v, &[], &idxs[6..12]);
-        assert!(w.verts.iter().all(|b| vertex::decode(b).shade == 255));
+        assert!(w.verts.iter().all(|b| vertex::decode(b).shade == 0));
+    }
+
+    /// A mesher quad for the top face of cell (x, z) at height `y` (`mesh::FACES[2]`), showing tile 1 whole, with the given light.
+    fn top_face(v: &mut Vec<f32>, x: f32, y: f32, z: f32, lm: f32, lit: f32) -> u32 {
+        let base = v.len() as u32 / mesh::VF as u32;
+        let (w, h) = (crate::render::atlas::ATLAS_W as f32, crate::render::atlas::ATLAS_H as f32);
+        for (c, (lx, ly)) in [[0.0, 1.0, 1.0], [1.0, 1.0, 1.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]].iter().zip([(0.02, 0.02), (15.98, 0.02), (15.98, 15.98), (0.02, 15.98)]) {
+            v.extend_from_slice(&[x + c[0], y - 1.0 + c[1], z + c[2], (16.0 + lx) / w, ly / h, lit, lm, mesh::WHITE]);
+        }
+        base
+    }
+
+    /// A flat floor of 4 x 3 faces with the same light is one quad that tiles its texture 4 x 3 times; the corners keep the mesher's winding.
+    #[test]
+    fn a_flat_floor_is_one_quad() {
+        let mut v = Vec::new();
+        let mut idxs = Vec::new();
+        for z in 0..3 {
+            for x in 0..4 {
+                let b = top_face(&mut v, x as f32, 5.0, z as f32, 255.0, 1.0);
+                idxs.extend_from_slice(&[b, b + 1, b + 2, b, b + 2, b + 3]);
+            }
+        }
+        let q = pack(&v, &idxs, &[]);
+        assert_eq!(q.verts.len(), 4, "12 faces, one quad");
+        let d: Vec<_> = q.verts.iter().map(vertex::decode).collect();
+        assert!(d.iter().all(|v| v.repeat && v.tile == 1 && v.pos[1] == 5.0 && (v.sky, v.block, v.shade) == (60, 30, 0)));
+        let xz: Vec<[f32; 2]> = d.iter().map(|v| [v.pos[0], v.pos[2]]).collect();
+        assert_eq!(xz, [[0.0, 3.0], [4.0, 3.0], [4.0, 0.0], [0.0, 0.0]], "the template's corner order, stretched");
+        let uv: Vec<[f32; 2]> = d.iter().map(|v| v.uv).collect();
+        assert!((uv[0][0] - 0.0).abs() < 0.13 && (uv[1][0] - 63.98).abs() < 0.13 && (uv[0][1] - 0.0).abs() < 0.13 && (uv[3][1] - 47.98).abs() < 0.13, "{uv:?}");
+    }
+
+    /// Faces that differ in light, or that are not a whole block on the grid, are not joined: the row stays 3 quads (2 + 1 with the dark one
+    /// between) and a slab-high face stays itself.
+    #[test]
+    fn faces_that_differ_are_not_merged() {
+        let mut v = Vec::new();
+        let mut idxs = Vec::new();
+        for (x, lm) in [(0.0, 255.0), (1.0, 17.0), (2.0, 255.0), (3.0, 255.0)] {
+            let b = top_face(&mut v, x, 5.0, 0.0, lm, 1.0);
+            idxs.extend_from_slice(&[b, b + 1, b + 2, b, b + 2, b + 3]);
+        }
+        let b = top_face(&mut v, 0.0, 6.5, 2.0, 255.0, 1.0); // half a block up: not on the grid
+        idxs.extend_from_slice(&[b, b + 1, b + 2, b, b + 2, b + 3]);
+        let q = pack(&v, &idxs, &[]);
+        assert_eq!(q.verts.len(), 4 * 4, "(0), (1), (2, 3) and the slab-high one");
+        assert_eq!(q.verts.iter().filter(|b| vertex::decode(b).repeat).count(), 4, "only the pair of faces repeats");
+    }
+
+    /// A merged run never grows past 16 blocks (the chunk's width, the texture coordinate's range).
+    #[test]
+    fn a_run_stops_at_sixteen() {
+        let mut cells: Vec<(i32, i32)> = (0..16).flat_map(|v| (0..16).map(move |u| (u, v))).collect();
+        assert_eq!(greedy(&mut cells), vec![(0, 0, 16, 16)]);
+        let mut row: Vec<(i32, i32)> = (0..20).map(|u| (u, 0)).collect();
+        assert_eq!(greedy(&mut row), vec![(0, 0, 16, 1), (16, 0, 4, 1)]);
+        let mut l: Vec<(i32, i32)> = vec![(0, 0), (1, 0), (0, 1)];
+        assert_eq!(greedy(&mut l), vec![(0, 0, 2, 1), (0, 1, 1, 1)], "an L is two rectangles that cover it once");
     }
 
     /// Meshes share a page: a freed run is handed out again (best fit), the page is not duplicated, and a mesh bigger than a page is refused.

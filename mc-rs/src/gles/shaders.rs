@@ -28,9 +28,13 @@ pub enum Chunk {
 
 impl Chunk {
     pub const ALL: [Chunk; 6] = [Chunk::Solid, Chunk::Cutout, Chunk::Entity, Chunk::Lod, Chunk::Water, Chunk::LodWater];
-    /// The 16-byte `embeddium` vertex + chunk origin (else the 32-byte float vertex).
+    /// The 12-byte `embeddium` vertex + chunk origin (else the 32-byte float vertex).
     pub fn compact(self) -> bool {
         matches!(self, Chunk::Solid | Chunk::Cutout | Chunk::Water)
+    }
+    /// The opaque and cut-out chunk layers: the compact vertex and the lean varyings (no world position, flat tint and tile).
+    pub fn lean(self) -> bool {
+        self.compact() && !self.water()
     }
     pub fn water(self) -> bool {
         matches!(self, Chunk::Water | Chunk::LodWater)
@@ -58,9 +62,7 @@ float brightness(float sky, float blk) {
 
 const CHUNK_VS: &str = r#"
 #ifdef COMPACT
-layout(location = 0) in uvec4 a_p;
-layout(location = 1) in uvec2 a_t;
-layout(location = 2) in vec4 a_c;
+layout(location = 0) in uvec3 a_w;
 uniform vec3 u_origin;
 #else
 layout(location = 0) in vec3 a_p;
@@ -69,6 +71,14 @@ layout(location = 2) in float a_l;
 layout(location = 3) in float a_lm;
 layout(location = 4) in float a_t;
 #endif
+#ifdef LEAN
+centroid out vec2 v_uv;
+flat out vec3 v_tint;
+centroid out float v_lit;
+centroid out float v_fg;
+flat out float v_k;
+out vec2 v_uvd;
+#else
 centroid out vec2 v_uv;
 centroid out vec3 v_tint;
 centroid out float v_lit;
@@ -76,23 +86,35 @@ centroid out float v_fg;
 flat out float v_k;
 out vec3 v_wp;
 out vec2 v_uvd;
+#endif
+#ifdef COMPACT
+const vec2 SIZE = vec2(@AW@.0, @AH@.0);
+// `vertex::shade_value`: face shade 1, 0.8, 0.6, 0.5 times 1 - 0.2 * ambient occlusion step.
+float shade_of(uint code) {
+    uint f = code & 3u;
+    float s = 1.0;
+    if (f == 1u) { s = 0.8; } else if (f == 2u) { s = 0.6; } else if (f == 3u) { s = 0.5; }
+    return s * (1.0 - 0.2 * float(code >> 2u));
+}
+#endif
 void main() {
 #ifdef COMPACT
-    vec3 vpos = u_origin + vec3(float(a_p.x) / 2048.0 - 8.0, float(a_p.y) / 256.0 - 8.0, float(a_p.z) / 2048.0 - 8.0);
-    v_tint = pow(a_c.rgb, vec3(2.2));
-    v_uv = vec2(a_t) / 65536.0;
-    uint w = a_p.w;
-    bool sm = (w & 0x8000u) != 0u;
-#ifdef WATER
-    sm = false;
-#endif
-    if (sm) {
-        uint v = w & 0x7FFFu;
-        v_lit = pow(brightness(float(v >> 5u) / 60.0, float(v & 31u) / 30.0) * a_c.a, 2.2);
-    } else {
-        v_lit = pow(brightness(float((w >> 4u) & 15u) / 15.0, float(w & 15u) / 15.0) * a_c.a, 2.2);
-    }
+    // Three words (`embeddium::vertex`): position + repeat bit, tile + texel position, colour + light + shade.
+    uint w0 = a_w.x;
+    uint w1 = a_w.y;
+    uint w2 = a_w.z;
+    vec3 vpos = u_origin + vec3(float(w0 & 511u) / 16.0 - 8.0, float((w0 >> 18u) & 8191u) / 32.0 - 8.0, float((w0 >> 9u) & 511u) / 16.0 - 8.0);
+    vec2 tl = vec2(float((w1 >> 10u) & 2047u), float(w1 >> 21u)) * 0.25 - 240.0;
+    uint tile = w1 & 1023u;
+    v_tint = pow(vec3(float(w2 & 31u) / 31.0, float((w2 >> 5u) & 63u) / 63.0, float((w2 >> 11u) & 31u) / 31.0), vec3(2.2));
+    v_lit = pow(brightness(float((w2 >> 16u) & 63u) / 60.0, float((w2 >> 22u) & 31u) / 30.0) * shade_of(w2 >> 27u), 2.2);
+#ifdef LEAN
+    v_uv = tl / 16.0;
+    v_k = ((w0 >> 31u) != 0u) ? -float(tile) - 1.0 : float(tile);
+#else
+    v_uv = (vec2(float(tile % 16u), float(tile / 16u)) * 16.0 + tl) / SIZE;
     v_k = -1.0;
+#endif
 #else
     vec3 vpos = a_p;
     uint tp = uint(a_t);
@@ -114,7 +136,9 @@ void main() {
 #endif
     gl_Position = vp * vec4(vpos, 1.0);
     v_uvd = v_uv;
+#ifndef LEAN
     v_wp = vpos;
+#endif
     v_fg = fog_factor(length(vpos - eye.xyz));
 }
 "#;
@@ -134,6 +158,14 @@ const float S_X = @SX@;
 const mat3 W709_TO_2020 = mat3(vec3(0.627425692, 0.329289106, 0.0433502375), vec3(0.0690274419, 0.91957858, 0.0113613785), vec3(0.0163664152, 0.0880288984, 0.895684319));
 mediump vec3 to_working(mediump vec3 c) { return c * W709_TO_2020; }
 
+#ifdef LEAN
+centroid in vec2 v_uv;
+flat in mediump vec3 v_tint;
+centroid in mediump float v_lit;
+centroid in mediump float v_fg;
+flat in float v_k;
+in vec2 v_uvd;
+#else
 centroid in vec2 v_uv;
 centroid in mediump vec3 v_tint;
 centroid in mediump float v_lit;
@@ -141,6 +173,7 @@ centroid in mediump float v_fg;
 flat in float v_k;
 in vec3 v_wp;
 in vec2 v_uvd;
+#endif
 layout(location = 0) out vec4 o_color;
 
 // The one atlas read: tile-clamped by half a texel of the coarsest mip touched (see gpu/pipeline.rs).
@@ -173,6 +206,7 @@ vec2 far_uv(vec2 uv, float k) {
     return (o + clamp(vec2(fract(uv.x), 1.0 - fract(uv.y)) * 16.0, vec2(0.02), vec2(15.98))) / SIZE;
 }
 
+#ifndef LEAN
 vec4 frag(bool cut, float shade) {
     mediump vec3 fc = fog.rgb;
     vec2 uv = v_uv;
@@ -236,6 +270,47 @@ void main() {
     o_color = vec4(mix(to_working(c.rgb * (v_lit * flat_shade(v_wp, dx, dy))), fc, v_fg), c.a);
 #endif
 }
+#else
+// The opaque and cut-out chunk layers (`VsC` of gpu/pipeline.rs): the tile is flat, `v_uv` is the position inside it in tiles, and a
+// repeating quad (`v_k < 0`: a merged run of faces) takes its fraction. The face shade and the light are in the vertex.
+mediump vec4 tile_sample(vec2 o, vec2 t, vec2 gx, vec2 gy) {
+    vec2 p = o + t * 16.0;
+    if ((p.y >= 256.0 && p.y < ITEMS_Y) || p.y >= CHAR_Y) { return textureLod(u_tex, p / SIZE, 0.0); }
+    float g2 = max(dot(gx, gx), dot(gy, gy));
+    float pad = 0.5 * exp2(min(ceil(0.5 * log2(max(g2, 1.0))), MIPS - 1.0));
+    return textureGrad(u_tex, (o + clamp(t * 16.0, vec2(pad), vec2(16.0 - pad))) / SIZE, gx / SIZE, gy / SIZE);
+}
+
+void main() {
+    vec2 gx = dFdx(v_uvd) * 16.0;
+    vec2 gy = dFdy(v_uvd) * 16.0;
+    bool rep = v_k < 0.0;
+    float tile = rep ? -v_k - 1.0 : v_k;
+    float row = floor((tile + 0.5) / TW);
+    vec2 o = vec2(tile - row * TW, row) * 16.0;
+    vec2 t = rep ? fract(v_uv) : v_uv;
+    mediump vec4 c = tile_sample(o, t, gx, gy);
+    float cover = 1.0;
+#if defined(FS_CUT)
+    float a = c.a;
+    if (max(dot(gx, gx), dot(gy, gy)) > 1.0) { a = textureLod(u_tex, (o + t * 16.0) / SIZE, 0.0).a; }
+#if A2C
+    cover = clamp((a - 0.5) * 3.0 + 0.5, 0.0, 1.0);
+    if (cover <= 0.0) { discard; }
+#else
+    if (a < 0.5) { discard; }
+#endif
+#endif
+    mediump vec3 rgb = c.rgb * v_tint;
+    // Grass side (tile 3, untinted): tile 38 over it, cut out and tinted, on the one quad.
+    if (abs(tile - 3.0) < 0.5) {
+        vec2 oo = o + vec2(48.0, 32.0);
+        rgb = c.rgb;
+        if (textureLod(u_tex, (oo + t * 16.0) / SIZE, 0.0).a >= 0.5) { rgb = tile_sample(oo, t, gx, gy).rgb * v_tint; }
+    }
+    o_color = vec4(mix(to_working(rgb * v_lit), fog.rgb, v_fg), cover);
+}
+#endif
 "#;
 
 fn splice(s: &str) -> String {
@@ -260,6 +335,9 @@ pub fn chunk(which: Chunk, a2c: bool) -> Src {
     if which.water() {
         defs += "#define WATER\n";
     }
+    if which.lean() {
+        defs += "#define LEAN\n";
+    }
     let frag = match which {
         Chunk::Solid => "#define FS_SOLID\n",
         Chunk::Cutout => "#define FS_CUT\n",
@@ -267,7 +345,7 @@ pub fn chunk(which: Chunk, a2c: bool) -> Src {
         Chunk::Water | Chunk::LodWater => "",
     };
     Src {
-        vs: format!("{HEAD_V}{defs}{CHUNK_COMMON}{CHUNK_VS}"),
+        vs: splice(&format!("{HEAD_V}{defs}{CHUNK_COMMON}{CHUNK_VS}")),
         fs: splice(&format!("{HEAD_F}{defs}{frag}#define A2C {}\n{CHUNK_COMMON}{CHUNK_FS}", a2c as u8)),
     }
 }

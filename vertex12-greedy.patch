@@ -1,0 +1,1346 @@
+diff -ruN -x '*.pyc' orig/README.md repo/README.md
+--- orig/README.md	2026-10-23 13:06:44.000000000 +0000
++++ repo/README.md	2026-10-23 11:33:32.047201301 +0000
+@@ -61,6 +61,7 @@
+ | Lazy noise (C2ME idea 5) | written without a toolchain: not compiled; the generator tests incl. the golden `matches_java_reference` pass in a Linux scratch crate | The unread samples of the two big density stacks are not computed (`OctaveNoise::generate_masked_into`, masked per cached column); bit for bit the same terrain. See ROADMAP changelog. |
+ | ScalableLux light engine | `starlight` crate: 2 tests pass on a Linux host; `cargo check --lib --tests` for aarch64-linux-android passes; not run on a device | `starlight/` (LGPL-3.0-or-later, `COPYING*`): ScalableLux 26.2.0 (Starlight) as a std-only crate, replacing the b1.7.3 region relaxation in `world/chunks/light.rs`: FIFO light increase / decrease with direction bitsets and `WRITE` / `RECHECK` flags, `checkBlock`, stateless sky sources from the height map, chunk edge checks, no light written into unlit chunks, and ScalableLux's parallel light updates (tasks on disjoint 3x3 chunk windows, scoped threads, `default_workers()` = cores / 3). Same settled light as before (tests compare it with a brute-force fixpoint, 3 injected bugs are caught). See the performance changelog. |
+ | Distant terrain (height columns, not drawn) | written without a toolchain: not compiled, not run (+7 tests) | `lod/` crate + `world/far.rs`: the overworld drawn out to 14 chunks as height-column tiles (mip quadtree, 4 levels), generated without caves on a worker thread, saved in `<world>/far`; none in the Nether. See ROADMAP changelog. Superseded as the drawn far terrain by the Voxel LoD row below; `lod/` and `world/far.rs` stay in the tree, unused by `App`. |
++| 12-byte chunk vertex + greedy merging (2026-10-23) | written without a toolchain: not compiled, not run | `embeddium::vertex` is 12 bytes (3 x u32: 1/16 xz, 1/32 y, atlas tile + quarter-texel position, R5G6B5, sky/block levels, shade code); `chunks::pack` joins whole block faces of the same tile and light into one quad (up to 16 x 16, the texture repeats); the opaque / cut-out chunk shaders interpolate 9 floats instead of 13 and read the tile from the vertex (WGSL and GLSL). See the performance changelog. |
+ | Voxel LoD (Voxy style) | written without a toolchain: not compiled, not run (10 tests in `world::lod`, rewritten 2026-10-17) | `world/lod.rs`: far terrain out to 768 blocks as real 3D block columns (runs of equal blocks) of 64 x 64 tiles, meshed as voxels at 1 / 2 / 4 / 8 / 16 blocks after a Voxy-style 2x2x2 mip (`Mipper`), faces only where a solid voxel meets a see-through one; same atlas, tints, face shades and fog as the chunks. **Real chunks first** (Voxy's ingest): `lod::columns`, `ChunkManager::take_ingest`, `Lod::ingest`. The cut under the ring only happens where a real chunk mesh exists (`ChunkManager::drawn`), so no hole to the sky. Trees are real trunk + crown voxels up to 420 blocks and a leaf carpet over dense forest beyond (2026-10-18), the terrain fog starts at 88% of the view, pre-generation runs from the start; terrain rounds to the step instead of bloating. See ROADMAP changelog. |
+ | River steps (organic slope) | written without a toolchain: not compiled, not run (+3 tests: `hydro::tests::a_lower_river_does_not_overwrite_a_higher_one`, `ticks::tests::woken_edge_water_spreads_into_levels`, `chunks::tests::edge_water_is_a_surface_source_with_air_beside_it`) | A river from a neighbouring plate is no longer cut by a lower river's bank (`Region::plan_at`), and the still water at a step or a cut bank is woken like the mod's `scheduleTick` (`ChunkManager::edge_water`, `Ticks::wake_water`) so the fluid sim writes the slope as real levels. See ROADMAP changelog. |
+ | M14 player model     | written without a toolchain: not compiled, not run (+3 tests in `player.rs`, +1 in `touch_ui.rs`) | `render/player.rs`: b1.7.3 `ModelBiped` + `mob/char.png` with walk / sneak / riding / arm-swing animation, in the third-person view (new view button) and as the inventory preview. No armor, ears, cloak or hurt flash. See ROADMAP changelog. |
+@@ -261,8 +262,7 @@
+ - MSAA (2026-10-21 (10)): `MSAA:` button in Video Settings / `msaa:` in `options.txt` (Auto, Off, 2x, 4x; takes effect at the next start); Auto is 1x on an Adreno below 620. Unmeasured on a device.
+ - Final pass (2026-10-21 (11)): `Post:` button in Video Settings / `post:` in `options.txt` (Auto, Full, Fast; next start). Fast skips FXAA and CAS (one bilinear tap); Auto is Fast on an Adreno below 620. Unmeasured on a device.
+ - Internal resolution starts at `gpu::context::RENDER_SCALE` (0.67) of the screen and follows the GPU load between 50% and 100% (`gpu::context::Drs`, the `Dynamic Res` button in Video Settings, `dynamicRes:` in `options.txt`, pins it at 67% when off), upscaled by the final pass; the surface shadow is looked up in the deferred pass (`render/photon.rs`), the light shafts are `render/vl.rs` only. The FPS log line shows CPU ms per frame. Unmeasured on a device.
+-- M13 frustum culling is in (`render::camera::Frustum`, filtered through `ChunkManager::meshes_where`); M13 still adds
+-  greedy meshing.
++- M13 frustum culling is in (`render::camera::Frustum`, filtered through `ChunkManager::meshes_where`); greedy merging of whole block faces is in `chunks::pack` (2026-10-23).
+ - No JNI calls except the one `android_main` entry point; everything
+   inside the game loop is pure Rust.
+ 
+@@ -287,7 +287,7 @@
+ `Renderer:` in Video Settings (`renderer:` in `options.txt`, next start): Auto / Vulkan use wgpu as before; **OpenGL ES** runs the same frame on a native
+ EGL + GLES 3.2 renderer (`src/gles/`, `src/backend.rs`), with no wgpu device at all. If it cannot start (no EGL, no ES 3.0 context) the game starts wgpu.
+ Written without a toolchain: not compiled, not run. The shaders were compiled and one lit quad drawn on Mesa: `python3 tools/gles_check.py`.
+-Same optimisations as the Vulkan renderer: the 16-byte chunk vertex and one shared quad index buffer, chunk pages (one VAO per page), the chunk layers solid /
++Same optimisations as the Vulkan renderer: the 12-byte chunk vertex and one shared quad index buffer, chunk pages (one VAO per page), the chunk layers solid /
+ cut-out / water, near-to-far opaque and far-to-near water, MSAA 1/2/4 in tile memory (`EXT_multisampled_render_to_texture`; else a renderbuffer blit with the
+ samples invalidated), alpha-to-coverage on the cut-out layers, dynamic resolution, depth discarded at the end of the scene pass, one final pass (CAS + upscale +
+ vignette + sRGB) with the HUD blended over it, orphaned streaming buffers, the same CPU side (occlusion culling, upload budget, mesh workers).
+diff -ruN -x '*.pyc' orig/embeddium/src/lib.rs repo/embeddium/src/lib.rs
+--- orig/embeddium/src/lib.rs	2026-10-23 12:15:36.000000000 +0000
++++ repo/embeddium/src/lib.rs	2026-10-23 11:33:16.926537815 +0000
+@@ -4,7 +4,7 @@
+ //! - [`vis`]: section connectivity (`VisibilityEncoding` + a flood fill that builds it).
+ //! - [`cull`]: `OcclusionCuller`, the breadth-first walk over sections that hides whatever sits behind solid terrain.
+ //! - [`arena`]: `GlBufferArena`'s allocator (best fit, coalescing, compacting growth) as plain bookkeeping.
+-//! - [`vertex`]: `CompactChunkVertex` cut to 16 bytes, the terrain vertex.
++//! - [`vertex`]: `CompactChunkVertex` cut to 12 bytes, the terrain vertex.
+ //! - [`quad_index`]: `SharedQuadIndexBuffer`, the one index buffer every quad mesh draws with.
+ //! - [`upload_budget`]: `UploadResourceBudget` + `UploadDurationEstimator`, how much mesh data a frame may upload.
+ //!
+diff -ruN -x '*.pyc' orig/embeddium/src/vertex.rs repo/embeddium/src/vertex.rs
+--- orig/embeddium/src/vertex.rs	2026-10-23 11:51:42.000000000 +0000
++++ repo/embeddium/src/vertex.rs	2026-10-23 06:31:40.451645485 +0000
+@@ -1,104 +1,147 @@
+-//! The 16-byte terrain vertex: Sodium's `CompactChunkVertex` (20 bytes: 20-bit positions, 15-bit texture coordinates, light,
+-//! material and section index) cut down for a host that draws one chunk per origin and keeps its materials in separate pipelines.
++//! The 12-byte terrain vertex: Sodium's `CompactChunkVertex` (20 bytes: 20-bit positions, 15-bit texture coordinates, light, material
++//! and section index) cut down for a host that draws one chunk per origin, keeps its materials in separate pipelines and addresses its
++//! atlas by tile. Three little-endian `u32` words (`Uint32x3`, one attribute):
+ //!
+ //! ```text
+-//! offset  size  wgpu format  content
+-//!      0     2  Uint16x4     x, y, z (fixed point, see below), light (16 bits, the host's own packing)
+-//!      8     4  Uint16x2     u, v (atlas coordinates x 65536)
+-//!     12     4  Unorm8x4     r, g, b (colour multiplier), shade (a free 0..1 factor, the host's: ambient occlusion)
++//! word 0   bits  0..9   x      (v + 8) * 16   : -8 <= v < 24 in steps of 1/16
++//!          bits  9..18  z      (v + 8) * 16
++//!          bits 18..31  y      (v + 8) * 32   : -8 <= v < 248 in steps of 1/32
++//!          bit  31      repeat 1: the quad tiles its texture (a merged run of faces), 0: it shows the tile once
++//! word 1   bits  0..10  tile   atlas tile number (row * 16 + column of the 16 x 16 texel tiles)
++//!          bits 10..21  u      (texel + 240) * 4 : texels inside the tile, in quarter texels; a repeating quad runs past 0..16
++//!          bits 21..32  v      (texel + 240) * 4
++//! word 2   bits  0..5   red    5 bits   } sRGB colour multiplier (R5 G6 B5; white is exact)
++//!          bits  5..11  green  6 bits   }
++//!          bits 11..16  blue   5 bits   }
++//!          bits 16..22  sky    quarter levels 0..=63 (four cells' sky levels summed; a flat face is `sky * 4`)
++//!          bits 22..27  block  half levels 0..=31 (a flat face is `block * 2`)
++//!          bits 27..32  shade  `face | ao << 2`: face shade 1, 0.8, 0.6, 0.5 times `1 - 0.2 * ao` (see `shade_value`)
+ //! ```
+ //!
+-//! Positions are relative to the chunk origin, which the host supplies per draw (Sodium's `u_RegionOffset`; a dynamic-offset
+-//! uniform here, push constants are not on GLES). x and z cover -8 <= v < 24 in steps of 1/2048 (Sodium's `MODEL_ORIGIN` 8 and
+-//! `MODEL_RANGE` 32, so a model may stick out of its chunk by 8 blocks each side); y covers -8 <= v < 248 in steps of 1/256,
+-//! enough for a 128-block column and exact for every multiple of 1/16, the finest step of a block model. Texture coordinates are
+-//! the whole 16 bits: tile edges (multiples of 1/16 over a 256-wide atlas) are exact. Every attribute sits on an offset that is a
+-//! multiple of its size and the stride is a multiple of 4, which is all Vulkan and GLES vertex fetch ask for. Little endian.
++//! Positions are relative to the chunk origin, which the host supplies per draw (Sodium's `u_RegionOffset`; a dynamic-offset uniform
++//! here, push constants are not on GLES). x and z cover -8 <= v < 24 (Sodium's `MODEL_ORIGIN` 8 and `MODEL_RANGE` 32, so a model may
++//! stick out of its chunk by 8 blocks each side) in steps of 1/16, the finest step of a block model; y covers -8 <= v < 248 in steps of
++//! 1/32, so a fluid's corner is within 1/64 of its height. The 16-byte format this replaces had 1/2048 and 1/256 steps and a 16-bit
++//! atlas coordinate per axis: nothing the mesher emits needs them, and 4 bytes less per vertex is 25 % less vertex fetch and binning
++//! traffic on a tile-based GPU.
+ //!
+-//! Not taken from Sodium: the texture centroid bias (`encodeTexture` shrinks a coordinate by one unit towards its quad's centre and
+-//! stores the sign, so the shader can use a far smaller epsilon): the host's fragment shader clamps every tap into its own tile
+-//! instead. The material and section bytes: one pipeline per render layer, one origin per chunk.
++//! The atlas is addressed by tile plus texel position inside it, so a texel position is a few bits and the host's shader can tile a
++//! texture across a merged quad (`repeat`: it takes the fraction of the position, in tile units). Light is the two numbers the lighting
++//! reads (sky and block level), shade the product of a face direction and an ambient occlusion step, both from tiny tables the shader
++//! knows: the mesher's own flat and smooth light are the same encoding (a flat face is just a smooth one whose four corners agree).
++//!
++//! Not taken from Sodium: the texture centroid bias (`encodeTexture`) and the material and section bytes: the host's fragment shader
++//! clamps every tap into its own tile, there is one pipeline per render layer and one origin per chunk.
+ 
+-pub const STRIDE: usize = 16;
++pub const STRIDE: usize = 12;
+ /// One encoded vertex.
+ pub type Packed = [u8; STRIDE];
+ 
+ const ORIGIN: f32 = 8.0;
+-/// 65536 / 32 blocks.
+-pub const XZ_SCALE: f32 = 2048.0;
+-/// 65536 / 256 blocks.
+-pub const Y_SCALE: f32 = 256.0;
+-pub const UV_SCALE: f32 = 65536.0;
++/// Steps per block in x and z, and in y.
++pub const XZ_SCALE: f32 = 16.0;
++pub const Y_SCALE: f32 = 32.0;
++/// Quarter texels, biased so a repeating quad may run 15 tiles either way from the tile it starts in: `(texel + UV_BIAS) * UV_SCALE`.
++pub const UV_SCALE: f32 = 4.0;
++pub const UV_BIAS: f32 = 240.0;
++/// The shade table: `FACE_SHADE[face] * (1 - AO_STEP * ao)`.
++pub const FACE_SHADE: [f32; 4] = [1.0, 0.8, 0.6, 0.5];
++pub const AO_STEP: f32 = 0.2;
+ 
+ pub struct Vertex {
+     /// Relative to the chunk's origin in x and z, absolute in y: -8 <= x, z < 24 and -8 <= y < 248 (outside clamps).
+     pub pos: [f32; 3],
+-    /// Atlas coordinates, 0..=1 (1.0 stores as 65535 / 65536).
++    /// Atlas tile number, 0..1024.
++    pub tile: u16,
++    /// Texel position inside the tile, -240 <= v < 272 (0..=16 for a face that shows the tile once).
+     pub uv: [f32; 2],
+-    /// Sixteen bits for the host's shader.
+-    pub light: u16,
+-    /// Colour multiplier, sRGB bytes.
+-    pub color: [u8; 3],
+-    /// A factor 0..=255 for the host's shader (`/ 255`).
++    /// The quad tiles its texture: the shader takes the fraction of `uv / 16`.
++    pub repeat: bool,
++    /// Sky light in quarter levels, 0..=63.
++    pub sky: u8,
++    /// Block light in half levels, 0..=31.
++    pub block: u8,
++    /// `face | ao << 2`, 0..=31.
+     pub shade: u8,
++    /// Colour multiplier, sRGB bytes (stored as R5 G6 B5).
++    pub color: [u8; 3],
+ }
+ 
+ pub fn encode(v: &Vertex) -> Packed {
+-    let mut b = [0u8; STRIDE];
+-    b[0..2].copy_from_slice(&quantize(v.pos[0], XZ_SCALE).to_le_bytes());
+-    b[2..4].copy_from_slice(&quantize(v.pos[1], Y_SCALE).to_le_bytes());
+-    b[4..6].copy_from_slice(&quantize(v.pos[2], XZ_SCALE).to_le_bytes());
+-    b[6..8].copy_from_slice(&v.light.to_le_bytes());
+-    b[8..10].copy_from_slice(&texture(v.uv[0]).to_le_bytes());
+-    b[10..12].copy_from_slice(&texture(v.uv[1]).to_le_bytes());
+-    b[12..15].copy_from_slice(&v.color);
+-    b[15] = v.shade;
+-    b
++    let w0 = quantize(v.pos[0], XZ_SCALE, 511) | quantize(v.pos[2], XZ_SCALE, 511) << 9 | quantize(v.pos[1], Y_SCALE, 8191) << 18 | (v.repeat as u32) << 31;
++    let w1 = (v.tile as u32 & 1023) | texel(v.uv[0]) << 10 | texel(v.uv[1]) << 21;
++    let (r, g, b) = ((v.color[0] as u32 * 31 + 127) / 255, (v.color[1] as u32 * 63 + 127) / 255, (v.color[2] as u32 * 31 + 127) / 255);
++    let w2 = r | g << 5 | b << 11 | (v.sky.min(63) as u32) << 16 | (v.block.min(31) as u32) << 22 | (v.shade.min(31) as u32) << 27;
++    let mut out = [0u8; STRIDE];
++    out[0..4].copy_from_slice(&w0.to_le_bytes());
++    out[4..8].copy_from_slice(&w1.to_le_bytes());
++    out[8..12].copy_from_slice(&w2.to_le_bytes());
++    out
+ }
+ 
+ /// What the vertex shader reads back (the encoding's own rounding included): used by the host's tests.
+ pub fn decode(b: &Packed) -> Vertex {
+-    let u = |i: usize| u16::from_le_bytes([b[i], b[i + 1]]);
++    let w = |i: usize| u32::from_le_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]);
++    let (w0, w1, w2) = (w(0), w(4), w(8));
++    let c = |v: u32, bits: u32| (v * 255 + ((1 << bits) - 1) / 2) / ((1 << bits) - 1);
+     Vertex {
+-        pos: [dequantize(u(0), XZ_SCALE), dequantize(u(2), Y_SCALE), dequantize(u(4), XZ_SCALE)],
+-        uv: [u(8) as f32 / UV_SCALE, u(10) as f32 / UV_SCALE],
+-        light: u(6),
+-        color: [b[12], b[13], b[14]],
+-        shade: b[15],
++        pos: [dequantize(w0 & 511, XZ_SCALE), dequantize(w0 >> 18 & 8191, Y_SCALE), dequantize(w0 >> 9 & 511, XZ_SCALE)],
++        tile: (w1 & 1023) as u16,
++        uv: [(w1 >> 10 & 2047) as f32 / UV_SCALE - UV_BIAS, (w1 >> 21) as f32 / UV_SCALE - UV_BIAS],
++        repeat: w0 >> 31 != 0,
++        sky: (w2 >> 16 & 63) as u8,
++        block: (w2 >> 22 & 31) as u8,
++        shade: (w2 >> 27) as u8,
++        color: [c(w2 & 31, 5) as u8, c(w2 >> 5 & 63, 6) as u8, c(w2 >> 11 & 31, 5) as u8],
+     }
+ }
+ 
+-/// `(v + 8) * scale`, rounded to the nearest step; the float to integer cast saturates (out of range clamps instead of wrapping,
+-/// NaN is 0).
+-fn quantize(v: f32, scale: f32) -> u16 {
+-    ((ORIGIN + v) * scale + 0.5) as u16
++/// The factor a shade code stands for: `FACE_SHADE[code & 3] * (1 - AO_STEP * (code >> 2))`.
++pub fn shade_value(code: u8) -> f32 {
++    FACE_SHADE[(code & 3) as usize] * (1.0 - AO_STEP * (code >> 2) as f32)
++}
++
++/// The code whose factor is nearest to `v` (the mesher's face shade times a mean of cells weighing 1 or 0.2 is exactly one of them).
++pub fn shade_code(v: f32) -> u8 {
++    (0..20u8)
++        .min_by(|&a, &b| (shade_value(a) - v).abs().total_cmp(&(shade_value(b) - v).abs()))
++        .unwrap()
++}
++
++/// `(v + 8) * scale`, rounded to the nearest step; the float to integer cast saturates (negative is 0, NaN is 0), `max` is the top.
++fn quantize(v: f32, scale: f32, max: u32) -> u32 {
++    (((ORIGIN + v) * scale + 0.5) as u32).min(max)
+ }
+ 
+ /// A position component as the GPU decodes it: `value / scale - 8`. Both factors are powers of two, so this is exact.
+-pub fn dequantize(v: u16, scale: f32) -> f32 {
++pub fn dequantize(v: u32, scale: f32) -> f32 {
+     v as f32 / scale - ORIGIN
+ }
+ 
+-fn texture(v: f32) -> u16 {
+-    (v * UV_SCALE + 0.5) as u16
++fn texel(v: f32) -> u32 {
++    (((v + UV_BIAS) * UV_SCALE + 0.5) as u32).min(2047)
+ }
+ 
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+ 
++    fn vx() -> Vertex {
++        Vertex { pos: [0.0, 8.5, -8.0], tile: 700, uv: [0.5, 15.75], repeat: false, sky: 60, block: 3, shade: 6, color: [255, 130, 0] }
++    }
++
+     #[test]
+     fn layout_and_round_trip() {
+-        let b = encode(&Vertex { pos: [0.0, 8.5, -8.0], uv: [0.5, 0.0625], light: 0x8123, color: [1, 2, 3], shade: 200 });
+-        assert_eq!(u16::from_le_bytes([b[0], b[1]]), 16384); // (8 + 0) * 2048
+-        assert_eq!(u16::from_le_bytes([b[2], b[3]]), 4224); // (8 + 8.5) * 256
+-        assert_eq!(u16::from_le_bytes([b[4], b[5]]), 0);
+-        assert_eq!(u16::from_le_bytes([b[6], b[7]]), 0x8123);
+-        assert_eq!(u16::from_le_bytes([b[8], b[9]]), 32768);
+-        assert_eq!(u16::from_le_bytes([b[10], b[11]]), 4096); // 1/16 of the atlas
+-        assert_eq!(&b[12..16], &[1, 2, 3, 200]);
++        let b = encode(&vx());
++        let w = |i: usize| u32::from_le_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]);
++        assert_eq!(w(0), 128 | 0 << 9 | 528 << 18, "x (8 + 0) * 16, z 0, y (8 + 8.5) * 32");
++        assert_eq!(w(4), 700 | 962 << 10 | 1023 << 21, "(0.5 + 240) * 4, (15.75 + 240) * 4");
++        assert_eq!(w(8) >> 16, 60 | 3 << 6 | 6 << 11);
+         let d = decode(&b);
+-        assert_eq!((d.pos, d.uv, d.light, d.color, d.shade), ([0.0, 8.5, -8.0], [0.5, 0.0625], 0x8123, [1, 2, 3], 200));
++        assert_eq!((d.pos, d.tile, d.uv, d.repeat, d.sky, d.block, d.shade), ([0.0, 8.5, -8.0], 700, [0.5, 15.75], false, 60, 3, 6));
++        assert_eq!(d.color, [255, 130, 0], "the ends are exact, 130 is a step of the 6-bit green");
++        assert_eq!(decode(&encode(&Vertex { repeat: true, ..vx() })).repeat, true);
++        assert_eq!(decode(&encode(&Vertex { color: [255; 3], ..vx() })).color, [255; 3]);
+     }
+ 
+     /// The error of a position is at most half a step, and every multiple of 1/16 (block models, tile windows) is exact.
+@@ -106,33 +149,50 @@
+     fn position_error_is_half_a_step_and_sixteenths_are_exact() {
+         for i in 0..2000 {
+             let x = -8.0 + i as f32 * 0.0159;
+-            assert!((dequantize(quantize(x, XZ_SCALE), XZ_SCALE) - x).abs() <= 0.51 / XZ_SCALE);
++            assert!((dequantize(quantize(x, XZ_SCALE, 511), XZ_SCALE) - x).abs() <= 0.51 / XZ_SCALE);
+             let y = -8.0 + i as f32 * 0.127;
+-            assert!((dequantize(quantize(y, Y_SCALE), Y_SCALE) - y).abs() <= 0.51 / Y_SCALE);
++            assert!((dequantize(quantize(y, Y_SCALE, 8191), Y_SCALE) - y).abs() <= 0.51 / Y_SCALE);
+         }
+         for k in -16..(16 * 24) {
+             let v = k as f32 / 16.0;
+-            assert_eq!(dequantize(quantize(v, XZ_SCALE), XZ_SCALE), v);
+-            assert_eq!(dequantize(quantize(v, Y_SCALE), Y_SCALE), v);
++            assert_eq!(dequantize(quantize(v, XZ_SCALE, 511), XZ_SCALE), v);
++            assert_eq!(dequantize(quantize(v, Y_SCALE, 8191), Y_SCALE), v);
+         }
+-        assert_eq!(dequantize(quantize(127.0 + 1.0 / 9.0, Y_SCALE), Y_SCALE), 127.109375); // a fluid corner lands on the 1/256 grid
++        assert_eq!(dequantize(quantize(127.0 + 1.0 / 9.0, Y_SCALE, 8191), Y_SCALE), 127.125); // a fluid corner lands on the 1/32 grid
++        assert_eq!(dequantize(quantize(23.9999, XZ_SCALE, 511), XZ_SCALE), 23.9375, "the top step is 511 / 16 - 8");
+     }
+ 
+     /// Out of range clamps (a model sticking out by more than 8 blocks), it does not wrap onto the other side of the chunk.
+     #[test]
+     fn out_of_range_clamps() {
+-        assert_eq!(quantize(-100.0, XZ_SCALE), 0);
+-        assert_eq!(quantize(100.0, XZ_SCALE), u16::MAX);
+-        assert_eq!(quantize(f32::NAN, Y_SCALE), 0);
+-        assert_eq!(texture(1.0), u16::MAX);
++        assert_eq!(quantize(-100.0, XZ_SCALE, 511), 0);
++        assert_eq!(quantize(100.0, XZ_SCALE, 511), 511);
++        assert_eq!(quantize(f32::NAN, Y_SCALE, 8191), 0);
++        assert_eq!(texel(-1000.0), 0);
++        assert_eq!(texel(1000.0), 2047);
++    }
++
++    /// A face's texel positions (0 and 16, the 0.02 inset of `atlas::terrain_uv`) and a merged run's (+- 15 tiles) survive the bias.
++    #[test]
++    fn texel_positions_cover_a_merged_run() {
++        for t in [-224.0f32, -16.0, 0.0, 0.02, 15.98, 16.0, 255.98] {
++            let d = decode(&encode(&Vertex { uv: [t, t], ..vx() })).uv[0];
++            assert!((d - t).abs() <= 0.126, "{t} -> {d}");
++        }
+     }
+ 
+-    /// Tile edges of the 256-wide atlas are exact, so the shader's `u32(uv.x * 16)` tile test never lands one tile short.
++    /// Every shade the mesher can make is one code: four face shades times a mean of cells weighing 1 or 0.2.
+     #[test]
+-    fn tile_edges_are_exact() {
+-        for t in 0..16u32 {
+-            let u = t as f32 / 16.0;
+-            assert_eq!(texture(u) as f32 / UV_SCALE, u);
++    fn shade_codes_are_exact() {
++        for (f, face) in FACE_SHADE.iter().enumerate() {
++            for ao in 0..5 {
++                let want = face * (1.0 - 0.2 * ao as f32);
++                let code = shade_code(want);
++                assert!((shade_value(code) - want).abs() < 1e-6, "{want}: code {code}");
++            }
++            assert_eq!(shade_value(f as u8), *face);
+         }
++        assert_eq!(shade_code(1.0), 0);
++        assert!(shade_value(shade_code(0.48)) - 0.48 < 1e-6);
+     }
+ }
+diff -ruN -x '*.pyc' orig/mc-rs/src/gles/mod.rs repo/mc-rs/src/gles/mod.rs
+--- orig/mc-rs/src/gles/mod.rs	2026-10-23 00:48:18.000000000 +0000
++++ repo/mc-rs/src/gles/mod.rs	2026-10-23 11:33:16.929274785 +0000
+@@ -1,6 +1,6 @@
+ //! The OpenGL ES 3.2 renderer (`renderer.rs`): a second renderer, not wgpu's GL backend. EGL + GLES are called directly (`sys.rs`), so a
+ //! phone whose Vulkan driver is slow can run the same frame on its (usually better tuned) GLES driver, with the same optimisations as
+-//! the Vulkan one: the 16-byte chunk vertex, one shared quad index buffer, chunk pages (one VAO per page), the layer order solid /
++//! the Vulkan one: the 12-byte chunk vertex, one shared quad index buffer, chunk pages (one VAO per page), the layer order solid /
+ //! cut-out / water, MSAA resolved in tile memory (`EXT_multisampled_render_to_texture`, else a renderbuffer blit with the samples
+ //! invalidated), alpha-to-coverage, dynamic resolution, one final pass with the HUD. Written 3.0-safe: 3.2 is asked for first.
+ 
+diff -ruN -x '*.pyc' orig/mc-rs/src/gles/renderer.rs repo/mc-rs/src/gles/renderer.rs
+--- orig/mc-rs/src/gles/renderer.rs	2026-10-23 10:22:58.000000000 +0000
++++ repo/mc-rs/src/gles/renderer.rs	2026-10-23 11:32:12.698691037 +0000
+@@ -45,13 +45,13 @@
+     attrs: &'static [(u32, i32, Enum, bool, bool, usize)],
+ }
+ 
+-const CHUNK16: Layout = Layout { stride: 16, attrs: &[(0, 4, UNSIGNED_SHORT, true, false, 0), (1, 2, UNSIGNED_SHORT, true, false, 8), (2, 4, UNSIGNED_BYTE, false, true, 12)] };
++const CHUNK12: Layout = Layout { stride: 12, attrs: &[(0, 3, UNSIGNED_INT, true, false, 0)] };
+ const FLOAT32: Layout = Layout { stride: 32, attrs: &[(0, 3, FLOAT, false, false, 0), (1, 2, FLOAT, false, false, 12), (2, 1, FLOAT, false, false, 20), (3, 1, FLOAT, false, false, 24), (4, 1, FLOAT, false, false, 28)] };
+ const POS3: Layout = Layout { stride: 12, attrs: &[(0, 3, FLOAT, false, false, 0)] };
+ const FAN: Layout = Layout { stride: 28, attrs: &[(0, 3, FLOAT, false, false, 0), (1, 4, FLOAT, false, false, 12)] };
+ const WEATHER: Layout = Layout { stride: 36, attrs: &[(0, 3, FLOAT, false, false, 0), (1, 2, FLOAT, false, false, 12), (2, 4, FLOAT, false, false, 20)] };
+ const HUD: Layout = Layout { stride: 32, attrs: &[(0, 2, FLOAT, false, false, 0), (1, 4, FLOAT, false, false, 8), (2, 2, FLOAT, false, false, 24)] };
+-const LAYOUTS: [&Layout; 6] = [&CHUNK16, &FLOAT32, &POS3, &FAN, &WEATHER, &HUD];
++const LAYOUTS: [&Layout; 6] = [&CHUNK12, &FLOAT32, &POS3, &FAN, &WEATHER, &HUD];
+ const L_CHUNK: usize = 0;
+ const L_FLOAT: usize = 1;
+ const L_POS: usize = 2;
+@@ -824,7 +824,7 @@
+     /// The vertex layouts match the Rust vertex types they read.
+     #[test]
+     fn layouts_match_the_vertex_types() {
+-        assert_eq!(CHUNK16.stride as usize, embeddium::vertex::STRIDE);
++        assert_eq!(CHUNK12.stride as usize, embeddium::vertex::STRIDE);
+         assert_eq!(FLOAT32.stride as usize, std::mem::size_of::<crate::gpu::pipeline::Vertex>());
+         assert_eq!(WEATHER.stride as usize, std::mem::size_of::<weather::Vertex>());
+         assert_eq!(HUD.stride as usize, std::mem::size_of::<hud::HudVertex>());
+diff -ruN -x '*.pyc' orig/mc-rs/src/gles/shaders.rs repo/mc-rs/src/gles/shaders.rs
+--- orig/mc-rs/src/gles/shaders.rs	2026-10-23 10:22:58.000000000 +0000
++++ repo/mc-rs/src/gles/shaders.rs	2026-10-23 11:32:30.411572404 +0000
+@@ -28,10 +28,14 @@
+ 
+ impl Chunk {
+     pub const ALL: [Chunk; 6] = [Chunk::Solid, Chunk::Cutout, Chunk::Entity, Chunk::Lod, Chunk::Water, Chunk::LodWater];
+-    /// The 16-byte `embeddium` vertex + chunk origin (else the 32-byte float vertex).
++    /// The 12-byte `embeddium` vertex + chunk origin (else the 32-byte float vertex).
+     pub fn compact(self) -> bool {
+         matches!(self, Chunk::Solid | Chunk::Cutout | Chunk::Water)
+     }
++    /// The opaque and cut-out chunk layers: the compact vertex and the lean varyings (no world position, flat tint and tile).
++    pub fn lean(self) -> bool {
++        self.compact() && !self.water()
++    }
+     pub fn water(self) -> bool {
+         matches!(self, Chunk::Water | Chunk::LodWater)
+     }
+@@ -58,9 +62,7 @@
+ 
+ const CHUNK_VS: &str = r#"
+ #ifdef COMPACT
+-layout(location = 0) in uvec4 a_p;
+-layout(location = 1) in uvec2 a_t;
+-layout(location = 2) in vec4 a_c;
++layout(location = 0) in uvec3 a_w;
+ uniform vec3 u_origin;
+ #else
+ layout(location = 0) in vec3 a_p;
+@@ -69,6 +71,14 @@
+ layout(location = 3) in float a_lm;
+ layout(location = 4) in float a_t;
+ #endif
++#ifdef LEAN
++centroid out vec2 v_uv;
++flat out vec3 v_tint;
++centroid out float v_lit;
++centroid out float v_fg;
++flat out float v_k;
++out vec2 v_uvd;
++#else
+ centroid out vec2 v_uv;
+ centroid out vec3 v_tint;
+ centroid out float v_lit;
+@@ -76,23 +86,35 @@
+ flat out float v_k;
+ out vec3 v_wp;
+ out vec2 v_uvd;
++#endif
++#ifdef COMPACT
++const vec2 SIZE = vec2(@AW@.0, @AH@.0);
++// `vertex::shade_value`: face shade 1, 0.8, 0.6, 0.5 times 1 - 0.2 * ambient occlusion step.
++float shade_of(uint code) {
++    uint f = code & 3u;
++    float s = 1.0;
++    if (f == 1u) { s = 0.8; } else if (f == 2u) { s = 0.6; } else if (f == 3u) { s = 0.5; }
++    return s * (1.0 - 0.2 * float(code >> 2u));
++}
++#endif
+ void main() {
+ #ifdef COMPACT
+-    vec3 vpos = u_origin + vec3(float(a_p.x) / 2048.0 - 8.0, float(a_p.y) / 256.0 - 8.0, float(a_p.z) / 2048.0 - 8.0);
+-    v_tint = pow(a_c.rgb, vec3(2.2));
+-    v_uv = vec2(a_t) / 65536.0;
+-    uint w = a_p.w;
+-    bool sm = (w & 0x8000u) != 0u;
+-#ifdef WATER
+-    sm = false;
+-#endif
+-    if (sm) {
+-        uint v = w & 0x7FFFu;
+-        v_lit = pow(brightness(float(v >> 5u) / 60.0, float(v & 31u) / 30.0) * a_c.a, 2.2);
+-    } else {
+-        v_lit = pow(brightness(float((w >> 4u) & 15u) / 15.0, float(w & 15u) / 15.0) * a_c.a, 2.2);
+-    }
++    // Three words (`embeddium::vertex`): position + repeat bit, tile + texel position, colour + light + shade.
++    uint w0 = a_w.x;
++    uint w1 = a_w.y;
++    uint w2 = a_w.z;
++    vec3 vpos = u_origin + vec3(float(w0 & 511u) / 16.0 - 8.0, float((w0 >> 18u) & 8191u) / 32.0 - 8.0, float((w0 >> 9u) & 511u) / 16.0 - 8.0);
++    vec2 tl = vec2(float((w1 >> 10u) & 2047u), float(w1 >> 21u)) * 0.25 - 240.0;
++    uint tile = w1 & 1023u;
++    v_tint = pow(vec3(float(w2 & 31u) / 31.0, float((w2 >> 5u) & 63u) / 63.0, float((w2 >> 11u) & 31u) / 31.0), vec3(2.2));
++    v_lit = pow(brightness(float((w2 >> 16u) & 63u) / 60.0, float((w2 >> 22u) & 31u) / 30.0) * shade_of(w2 >> 27u), 2.2);
++#ifdef LEAN
++    v_uv = tl / 16.0;
++    v_k = ((w0 >> 31u) != 0u) ? -float(tile) - 1.0 : float(tile);
++#else
++    v_uv = (vec2(float(tile % 16u), float(tile / 16u)) * 16.0 + tl) / SIZE;
+     v_k = -1.0;
++#endif
+ #else
+     vec3 vpos = a_p;
+     uint tp = uint(a_t);
+@@ -114,7 +136,9 @@
+ #endif
+     gl_Position = vp * vec4(vpos, 1.0);
+     v_uvd = v_uv;
++#ifndef LEAN
+     v_wp = vpos;
++#endif
+     v_fg = fog_factor(length(vpos - eye.xyz));
+ }
+ "#;
+@@ -134,6 +158,14 @@
+ const mat3 W709_TO_2020 = mat3(vec3(0.627425692, 0.329289106, 0.0433502375), vec3(0.0690274419, 0.91957858, 0.0113613785), vec3(0.0163664152, 0.0880288984, 0.895684319));
+ mediump vec3 to_working(mediump vec3 c) { return c * W709_TO_2020; }
+ 
++#ifdef LEAN
++centroid in vec2 v_uv;
++flat in mediump vec3 v_tint;
++centroid in mediump float v_lit;
++centroid in mediump float v_fg;
++flat in float v_k;
++in vec2 v_uvd;
++#else
+ centroid in vec2 v_uv;
+ centroid in mediump vec3 v_tint;
+ centroid in mediump float v_lit;
+@@ -141,6 +173,7 @@
+ flat in float v_k;
+ in vec3 v_wp;
+ in vec2 v_uvd;
++#endif
+ layout(location = 0) out vec4 o_color;
+ 
+ // The one atlas read: tile-clamped by half a texel of the coarsest mip touched (see gpu/pipeline.rs).
+@@ -173,6 +206,7 @@
+     return (o + clamp(vec2(fract(uv.x), 1.0 - fract(uv.y)) * 16.0, vec2(0.02), vec2(15.98))) / SIZE;
+ }
+ 
++#ifndef LEAN
+ vec4 frag(bool cut, float shade) {
+     mediump vec3 fc = fog.rgb;
+     vec2 uv = v_uv;
+@@ -236,6 +270,47 @@
+     o_color = vec4(mix(to_working(c.rgb * (v_lit * flat_shade(v_wp, dx, dy))), fc, v_fg), c.a);
+ #endif
+ }
++#else
++// The opaque and cut-out chunk layers (`VsC` of gpu/pipeline.rs): the tile is flat, `v_uv` is the position inside it in tiles, and a
++// repeating quad (`v_k < 0`: a merged run of faces) takes its fraction. The face shade and the light are in the vertex.
++mediump vec4 tile_sample(vec2 o, vec2 t, vec2 gx, vec2 gy) {
++    vec2 p = o + t * 16.0;
++    if ((p.y >= 256.0 && p.y < ITEMS_Y) || p.y >= CHAR_Y) { return textureLod(u_tex, p / SIZE, 0.0); }
++    float g2 = max(dot(gx, gx), dot(gy, gy));
++    float pad = 0.5 * exp2(min(ceil(0.5 * log2(max(g2, 1.0))), MIPS - 1.0));
++    return textureGrad(u_tex, (o + clamp(t * 16.0, vec2(pad), vec2(16.0 - pad))) / SIZE, gx / SIZE, gy / SIZE);
++}
++
++void main() {
++    vec2 gx = dFdx(v_uvd) * 16.0;
++    vec2 gy = dFdy(v_uvd) * 16.0;
++    bool rep = v_k < 0.0;
++    float tile = rep ? -v_k - 1.0 : v_k;
++    float row = floor((tile + 0.5) / TW);
++    vec2 o = vec2(tile - row * TW, row) * 16.0;
++    vec2 t = rep ? fract(v_uv) : v_uv;
++    mediump vec4 c = tile_sample(o, t, gx, gy);
++    float cover = 1.0;
++#if defined(FS_CUT)
++    float a = c.a;
++    if (max(dot(gx, gx), dot(gy, gy)) > 1.0) { a = textureLod(u_tex, (o + t * 16.0) / SIZE, 0.0).a; }
++#if A2C
++    cover = clamp((a - 0.5) * 3.0 + 0.5, 0.0, 1.0);
++    if (cover <= 0.0) { discard; }
++#else
++    if (a < 0.5) { discard; }
++#endif
++#endif
++    mediump vec3 rgb = c.rgb * v_tint;
++    // Grass side (tile 3, untinted): tile 38 over it, cut out and tinted, on the one quad.
++    if (abs(tile - 3.0) < 0.5) {
++        vec2 oo = o + vec2(48.0, 32.0);
++        rgb = c.rgb;
++        if (textureLod(u_tex, (oo + t * 16.0) / SIZE, 0.0).a >= 0.5) { rgb = tile_sample(oo, t, gx, gy).rgb * v_tint; }
++    }
++    o_color = vec4(mix(to_working(rgb * v_lit), fog.rgb, v_fg), cover);
++}
++#endif
+ "#;
+ 
+ fn splice(s: &str) -> String {
+@@ -260,6 +335,9 @@
+     if which.water() {
+         defs += "#define WATER\n";
+     }
++    if which.lean() {
++        defs += "#define LEAN\n";
++    }
+     let frag = match which {
+         Chunk::Solid => "#define FS_SOLID\n",
+         Chunk::Cutout => "#define FS_CUT\n",
+@@ -267,7 +345,7 @@
+         Chunk::Water | Chunk::LodWater => "",
+     };
+     Src {
+-        vs: format!("{HEAD_V}{defs}{CHUNK_COMMON}{CHUNK_VS}"),
++        vs: splice(&format!("{HEAD_V}{defs}{CHUNK_COMMON}{CHUNK_VS}")),
+         fs: splice(&format!("{HEAD_F}{defs}{frag}#define A2C {}\n{CHUNK_COMMON}{CHUNK_FS}", a2c as u8)),
+     }
+ }
+diff -ruN -x '*.pyc' orig/mc-rs/src/gpu/pipeline.rs repo/mc-rs/src/gpu/pipeline.rs
+--- orig/mc-rs/src/gpu/pipeline.rs	2026-10-22 20:52:56.000000000 +0000
++++ repo/mc-rs/src/gpu/pipeline.rs	2026-10-23 11:33:16.933761991 +0000
+@@ -40,17 +40,14 @@
+     }
+ }
+ 
+-/// Layout of the 16-byte terrain vertex (`embeddium::vertex`): x y z + 16 bits of light, u v, colour + shade. Chunk meshes only;
+-/// entities, the outline and the far terrain keep the float `Vertex` above (world space, their own packing of `light`).
++/// Layout of the 12-byte terrain vertex (`embeddium::vertex`): three `u32` words (position, tile + texel position, colour + light + shade),
++/// one attribute. Chunk meshes only; entities, the outline and the far terrain keep the float `Vertex` above (world space, their own packing
++/// of `light`).
+ pub fn chunk_layout() -> wgpu::VertexBufferLayout<'static> {
+     wgpu::VertexBufferLayout {
+         array_stride: embeddium::vertex::STRIDE as u64,
+         step_mode: wgpu::VertexStepMode::Vertex,
+-        attributes: &[
+-            wgpu::VertexAttribute { format: wgpu::VertexFormat::Uint16x4, offset: 0, shader_location: 0 },
+-            wgpu::VertexAttribute { format: wgpu::VertexFormat::Uint16x2, offset: 8, shader_location: 1 },
+-            wgpu::VertexAttribute { format: wgpu::VertexFormat::Unorm8x4, offset: 12, shader_location: 2 },
+-        ],
++        attributes: &[wgpu::VertexAttribute { format: wgpu::VertexFormat::Uint32x3, offset: 0, shader_location: 0 }],
+     }
+ }
+ 
+@@ -203,41 +200,74 @@
+     return vert(p, uv, l, lm, t, true);
+ }
+ 
+-// The 16-byte chunk vertex (`embeddium::vertex`, Sodium's `CompactChunkVertex`): x, y, z are fixed point relative to the chunk origin of
+-// `draw` (x, z: 1/2048 from -8; y: 1/256 from -8), `p.w` is the light (bit 15: smooth vertex, then sky quarters << 5 | block halves;
+-// else sky << 4 | block), `t` the atlas uv x 65536, `c` the tint and, for smooth vertices, shade x ambient occlusion in `c.a`.
++// The 12-byte chunk vertex (`embeddium::vertex`, Sodium's `CompactChunkVertex`), three u32 words: x, z (1/16) and y (1/32) relative to the chunk
++// origin of `draw` + a repeat bit; the atlas tile + the texel position inside it (quarter texels, biased by 240); the colour (R5 G6 B5),
++// sky (quarter levels), block (half levels) and the shade code (face | ao << 2). Flat and smooth faces are the same encoding.
+ struct Draw { origin: vec4<f32> };
+ @group(1) @binding(0) var<uniform> draw: Draw;
++const ASIZE: vec2<f32> = vec2<f32>(@AW@.0, @AH@.0);
+ 
+-fn chunk_vert(p: vec4<u32>, t: vec2<u32>, c: vec4<f32>, water: bool) -> VsOut {
+-    var o: VsOut;
+-    let vpos = draw.origin.xyz + vec3<f32>(f32(p.x) / 2048.0 - 8.0, f32(p.y) / 256.0 - 8.0, f32(p.z) / 2048.0 - 8.0);
+-    o.tint = pow(c.rgb, vec3<f32>(2.2));
++fn chunk_pos(w: vec3<u32>) -> vec3<f32> {
++    return draw.origin.xyz + vec3<f32>(f32(w.x & 511u) / 16.0 - 8.0, f32((w.x >> 18u) & 8191u) / 32.0 - 8.0, f32((w.x >> 9u) & 511u) / 16.0 - 8.0);
++}
++// Texels inside the tile (0..16 for a face that shows it once, further for a merged run).
++fn chunk_texel(w: vec3<u32>) -> vec2<f32> {
++    return vec2<f32>(f32((w.y >> 10u) & 2047u), f32(w.y >> 21u)) * 0.25 - 240.0;
++}
++// `vertex::shade_value`: face shade 1, 0.8, 0.6, 0.5 times 1 - 0.2 * ambient occlusion step.
++fn chunk_shade(code: u32) -> f32 {
++    var s = 1.0;
++    if (code & 3u) == 1u { s = 0.8; } else if (code & 3u) == 2u { s = 0.6; } else if (code & 3u) == 3u { s = 0.5; }
++    return s * (1.0 - 0.2 * f32(code >> 2u));
++}
++fn chunk_lit(w: vec3<u32>) -> f32 {
++    return pow(brightness(f32((w.z >> 16u) & 63u) / 60.0, f32((w.z >> 22u) & 31u) / 30.0) * chunk_shade(w.z >> 27u), 2.2);
++}
++fn chunk_tint(w: vec3<u32>) -> vec3<f32> {
++    return pow(vec3<f32>(f32(w.z & 31u) / 31.0, f32((w.z >> 5u) & 63u) / 63.0, f32((w.z >> 11u) & 31u) / 31.0), vec3<f32>(2.2));
++}
++
++// The opaque and cut-out chunk layers: only what their fragment shader reads. No world position (the shade is in the vertex), the tint and
++// the tile are flat (one per quad), so 9 floats are interpolated where `VsOut` has 13.
++struct VsC {
++    @builtin(position) pos: vec4<f32>,
++    @location(0) @interpolate(perspective, centroid) uv: vec2<f32>, // in tiles inside the tile (a merged run: 0..n); centroid, as `VsOut.uv`
++    @location(1) @interpolate(perspective, centroid) lit: f32,
++    @location(2) @interpolate(perspective, centroid) fg: f32,
++    @location(3) @interpolate(flat) tint: vec3<f32>,
++    @location(4) @interpolate(flat) k: f32, // the atlas tile, or -(tile + 1) for a quad that repeats its texture
++    @location(5) uvd: vec2<f32>,            // `uv` at the pixel centre, for the derivatives
++};
++
++@vertex
++fn vs_chunk(@location(0) w: vec3<u32>) -> VsC {
++    var o: VsC;
++    let vpos = chunk_pos(w);
++    let tile = f32(w.y & 1023u);
+     o.pos = u.vp * vec4<f32>(vpos, 1.0);
+-    o.uv = vec2<f32>(t) / 65536.0;
++    o.uv = chunk_texel(w) / 16.0;
+     o.uvd = o.uv;
+-    o.wp = vpos;
++    o.lit = chunk_lit(w);
+     o.fg = fog_factor(length(vpos - u.eye.xyz));
+-    if (p.w & 0x8000u) != 0u && !water {
+-        let v = p.w & 0x7FFFu;
+-        o.lit = pow(brightness(f32(v >> 5u) / 60.0, f32(v & 31u) / 30.0) * c.a, 2.2);
+-        o.k = -1.0;
+-    } else {
+-        // Flat: the mesher baked the face shade into `c.a` (`chunks::pack`); water keeps 1.0 there and `fs_water` derives its own, since
+-        // its quads have no culled side (seen from below the top face takes the bottom shade).
+-        o.lit = pow(brightness(f32((p.w >> 4u) & 15u) / 15.0, f32(p.w & 15u) / 15.0) * c.a, 2.2);
+-        o.k = -1.0;
+-    }
++    o.tint = chunk_tint(w);
++    o.k = select(tile, -tile - 1.0, (w.x >> 31u) != 0u);
+     return o;
+ }
+-
++// Water keeps the full `VsOut` (`fs_water` wants the world position for its shade and its radius test) and an atlas uv.
+ @vertex
+-fn vs_chunk(@location(0) p: vec4<u32>, @location(1) t: vec2<u32>, @location(2) c: vec4<f32>) -> VsOut {
+-    return chunk_vert(p, t, c, false);
+-}
+-@vertex
+-fn vs_chunk_water(@location(0) p: vec4<u32>, @location(1) t: vec2<u32>, @location(2) c: vec4<f32>) -> VsOut {
+-    return chunk_vert(p, t, c, true);
++fn vs_chunk_water(@location(0) w: vec3<u32>) -> VsOut {
++    var o: VsOut;
++    let vpos = chunk_pos(w);
++    let tile = w.y & 1023u;
++    o.tint = chunk_tint(w);
++    o.pos = u.vp * vec4<f32>(vpos, 1.0);
++    o.uv = (vec2<f32>(f32(tile % TW), f32(tile / TW)) * 16.0 + chunk_texel(w)) / ASIZE;
++    o.uvd = o.uv;
++    o.wp = vpos;
++    o.fg = fog_factor(length(vpos - u.eye.xyz));
++    o.lit = chunk_lit(w);
++    o.k = -1.0;
++    return o;
+ }
+ 
+ // The face shade of a flat (non-smooth) quad from the derivatives of its world position (every face is axis aligned).
+@@ -300,11 +330,53 @@
+     return vec4<f32>(mix(to_working(rgb * lit), u.fog.rgb, in.fg), cover);
+ }
+ 
++// The chunk layers' atlas read: the tile `o` (texel origin) at the position `t` (tiles) inside it, tile-clamped like `atlas_sample_g` (same pad,
++// same strip rule), with the gradients `gx`, `gy` in texels of mip 0 per pixel.
++fn tile_sample(o: vec2<f32>, t: vec2<f32>, gx: vec2<f32>, gy: vec2<f32>) -> vec4<f32> {
++    let size = vec2<f32>(textureDimensions(tex));
++    let p = o + t * 16.0;
++    if (p.y >= 256.0 && p.y < ITEMS_Y) || p.y >= CHAR_Y { return textureSampleLevel(tex, samp, p / size, 0.0); }
++    let g = max(length(gx), length(gy));
++    let pad = 0.5 * exp2(min(ceil(log2(max(g, 1.0))), MIPS - 1.0));
++    return textureSampleGrad(tex, samp, (o + clamp(t * 16.0, vec2<f32>(pad), vec2<f32>(16.0 - pad))) / size, gx / size, gy / size);
++}
++
++// `frag` for the chunk layers (`VsC`): the tile comes flat from the vertex, the position inside it from `uv`, and a repeating quad (a merged
++// run of faces) takes its fraction, so one quad shows the tile once per block. The vertex has the face shade and the light.
++fn frag_chunk(in: VsC, cut: bool) -> vec4<f32> {
++    let gx = dpdx(in.uvd) * 16.0; // derivatives first, in uniform control flow
++    let gy = dpdy(in.uvd) * 16.0;
++    let size = vec2<f32>(textureDimensions(tex));
++    let rep = in.k < 0.0;
++    let tile = select(in.k, -in.k - 1.0, rep);
++    let row = floor((tile + 0.5) / f32(TW));
++    let o = vec2<f32>(tile - row * f32(TW), row) * 16.0;
++    let t = select(in.uv, fract(in.uv), rep);
++    let c = tile_sample(o, t, gx, gy);
++    var cover = 1.0;
++    if cut {
++        var a = c.a;
++        if max(length(gx), length(gy)) > 1.0 { a = textureSampleLevel(tex, samp, (o + t * 16.0) / size, 0.0).a; }
++        if A2C {
++            cover = clamp((a - 0.5) * 3.0 + 0.5, 0.0, 1.0);
++            if cover <= 0.0 { discard; }
++        } else if a < 0.5 { discard; }
++    }
++    var rgb = c.rgb * in.tint;
++    // Grass side (tile 3, untinted) with tile 38 over it, as in `frag`.
++    if abs(tile - 3.0) < 0.5 {
++        let oo = o + vec2<f32>(48.0, 32.0);
++        rgb = c.rgb;
++        if textureSampleLevel(tex, samp, (oo + t * 16.0) / size, 0.0).a >= 0.5 { rgb = tile_sample(oo, t, gx, gy).rgb * in.tint; }
++    }
++    return vec4<f32>(mix(to_working(rgb * in.lit), u.fog.rgb, in.fg), cover);
++}
++
+ // Chunk layers: no screen derivative for the shade, the vertex has it.
+ @fragment
+-fn fs_solid(in: VsOut) -> @location(0) vec4<f32> { return frag(in, false, 1.0); }
++fn fs_solid(in: VsC) -> @location(0) vec4<f32> { return frag_chunk(in, false); }
+ @fragment
+-fn fs_cut(in: VsOut) -> @location(0) vec4<f32> { return frag(in, true, 1.0); }
++fn fs_cut(in: VsC) -> @location(0) vec4<f32> { return frag_chunk(in, true); }
+ // Entities, the outline and the far terrain (float vertices): the face shade from the derivatives of the world position, taken here in
+ // uniform control flow (before `frag`'s `discard`).
+ @fragment
+@@ -351,6 +423,8 @@
+         .replace("@A2C@", &a2c.to_string())
+         .replace("@TW@", &atlas::TILES_W.to_string())
+         .replace("@TH@", &(atlas::ATLAS_H / 16).to_string())
++        .replace("@AW@", &atlas::ATLAS_W.to_string())
++        .replace("@AH@", &atlas::ATLAS_H.to_string())
+         .replace("@MIPS@", &atlas::MIPS.to_string())
+         .replace("@IY@", &atlas::ITEMS_Y.to_string())
+         .replace("@CY@", &atlas::CHAR_Y.to_string())
+@@ -362,7 +436,7 @@
+ pub struct ChunkPipeline {
+     /// Opaque terrain (`fs_solid`): no `discard`.
+     pub solid: RenderPipeline,
+-    /// Alpha-tested terrain (`fs_cut`). Chunk meshes (`solid`, `cutout`, `water`) read the 16-byte `chunk_layout` vertex and bind
++    /// Alpha-tested terrain (`fs_cut`). Chunk meshes (`solid`, `cutout`, `water`) read the 12-byte `chunk_layout` vertex and bind
+     /// their origin in group 1; entities, the outline and the far terrain (`entity`, `lod`, `lod_water`) read the float `Vertex`.
+     pub cutout: RenderPipeline,
+     /// Alpha-tested entities and the outline.
+@@ -554,7 +628,7 @@
+         }
+         assert!(!SHADER_SRC.contains("textureSample(tex"));
+         // MSAA edge pixels: every interpolated colour/uv is centroid (no extrapolation past the quad), the derivatives come from `uvd`.
+-        assert_eq!(SHADER_SRC.matches("@interpolate(perspective, centroid)").count(), 4);
++        assert_eq!(SHADER_SRC.matches("@interpolate(perspective, centroid)").count(), 7); // `VsOut` 4, `VsC` 3
+         assert!(!SHADER_SRC.contains("dpdx(in.uv)") && !SHADER_SRC.contains("dpdy(in.uv)"));
+         // Both alpha-to-coverage settings validate (the const is spliced).
+         for a2c in [false, true] {
+@@ -570,9 +644,9 @@
+     #[test]
+     fn chunk_layers_have_no_derivative_shade() {
+         assert_eq!(SHADER_SRC.matches("flat_shade(").count(), 3, "the definition, fs_cut_flat and fs_water");
+-        assert!(SHADER_SRC.contains("return frag(in, false, 1.0);") && SHADER_SRC.contains("return frag(in, true, 1.0);"));
++        assert!(SHADER_SRC.contains("return frag_chunk(in, false);") && SHADER_SRC.contains("return frag_chunk(in, true);"));
+         let frag = &SHADER_SRC[SHADER_SRC.find("fn frag(").unwrap()..SHADER_SRC.find("// Chunk layers").unwrap()];
+-        assert!(!frag.contains("dpdx(in.wp)") && !frag.contains("flat_shade"));
++        assert!(!frag.contains("dpdx(in.wp)") && !frag.contains("flat_shade") && !frag.contains("in.wp"));
+     }
+ 
+     /// `WHITE` is 2^24 - 1, the last f32 below 2^24: `+ 0.5` rounds it up to 2^24 and all three colour bytes read 0 (black sides, mobs).
+@@ -607,9 +681,10 @@
+         let eye = Vec3::new(0.0, 4.0, 0.0);
+         pipe.frame(&queue, Mat4::look_at_rh(eye, Vec3::ZERO, Vec3::NEG_Z), Mat4::perspective_rh(1.2, 1.0, 0.05, 100.0), eye, 0.0, [0.5; 3], 0.0, 0.0, 12.0);
+         let pixel = |lm: f32| -> [u8; 4] {
+-            let (u0, u1, v1) = (16.0 / atlas::ATLAS_W as f32, 32.0 / atlas::ATLAS_W as f32, 16.0 / atlas::ATLAS_H as f32); // tile 1, stone
++            // Tile 1 (stone), shown once: texels 0..16 of it.
++            let (u0, u1, v1) = (0.0f32, 16.0f32, 16.0f32);
+             // Chunk-local (origin 0), corners ordered so the shared quad indices (0, 1, 2), (2, 3, 0) face up towards the eye.
+-            let v = |x: f32, z: f32, u, vv| embeddium::vertex::encode(&embeddium::vertex::Vertex { pos: [x, 0.0, z], uv: [u, vv], light: lm as u16, color: [255; 3], shade: 255 });
++            let v = |x: f32, z: f32, u, vv| embeddium::vertex::encode(&embeddium::vertex::Vertex { pos: [x, 0.0, z], tile: 1, uv: [u, vv], repeat: false, sky: (lm as u8 >> 4) * 4, block: (lm as u8 & 15) * 2, shade: 0, color: [255; 3] });
+             let verts = [v(-8.0, -8.0, u0, 0.0), v(-8.0, 8.0, u0, v1), v(8.0, 8.0, u1, v1), v(8.0, -8.0, u1, 0.0)];
+             let vb = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(&verts), usage: BufferUsages::VERTEX });
+             let ib = create_index_buffer(&device, &embeddium::quad_index::indices(1));
+diff -ruN -x '*.pyc' orig/mc-rs/src/render/mesh.rs repo/mc-rs/src/render/mesh.rs
+--- orig/mc-rs/src/render/mesh.rs	2026-10-23 09:36:04.000000000 +0000
++++ repo/mc-rs/src/render/mesh.rs	2026-10-23 11:33:16.931630353 +0000
+@@ -3,7 +3,7 @@
+ //! One mesh per 16x128x16 chunk. Faces are emitted only where the neighbouring cell is air;
+ //! at the chunk edge the neighbour is read from the adjacent chunk, so no faces are wasted on
+ //! the seams between loaded chunks. Vertex positions are world coordinates plus the `ox`, `oz` it is given (`world::chunks::build_job` passes 0: the
+-//! chunk-local positions the 16-byte chunk vertex wants; `chunks::pack` turns this output into it).
++//! chunk-local positions the 12-byte chunk vertex wants; `chunks::pack` turns this output into it).
+ //!
+ //! Vertex format: position(3) + uv(2) + light(1) + lm(1) + tint(1) = `VF` (8) floats = 32 bytes (`gpu::pipeline::Vertex`).
+ //! `light` = face shade (RenderBlocks: top 1.0, bottom 0.5, Z sides 0.8, X sides 0.6) times the
+diff -ruN -x '*.pyc' orig/mc-rs/src/world/chunks.rs repo/mc-rs/src/world/chunks.rs
+--- orig/mc-rs/src/world/chunks.rs	2026-10-23 06:42:58.000000000 +0000
++++ repo/mc-rs/src/world/chunks.rs	2026-10-23 06:33:44.766817087 +0000
+@@ -17,7 +17,7 @@
+ //! M13 frustum culling: each chunk's bounds are known from its key
+ //! ((cx*16, 0, cz*16) .. +(16, 128, 16)), so it is one `filter` on `meshes()` in the draw loop.
+ 
+-use std::collections::{HashMap, HashSet};
++use std::collections::{BTreeMap, HashMap, HashSet};
+ use std::path::{Path, PathBuf};
+ use std::sync::{mpsc, Arc, Mutex};
+ 
+@@ -110,7 +110,7 @@
+     (v.floor() as i32) >> 4
+ }
+ 
+-/// A chunk's mesh as a run of one `Page` (Sodium's region arena): its vertices at `v..` (16 bytes each, `embeddium::vertex`), sorted by
++/// A chunk's mesh as a run of one `Page` (Sodium's region arena): its vertices at `v..` (12 bytes each, `embeddium::vertex`), sorted by
+ /// layer and section, four to a quad. The GPU buffers belong to the page and the index buffer is the one shared by every page
+ /// (`embeddium::quad_index`), so a chunk costs no buffer and no index upload of its own and the draw loop binds a page, not a chunk.
+ pub struct Mesh {
+@@ -132,7 +132,7 @@
+     vis: [u64; SECTIONS],
+ }
+ 
+-/// Vertices per page (`PAGE_VERTS * 16` bytes). A page is one vertex buffer carved up by an `embeddium::arena::Arena`; a few pages hold
++/// Vertices per page (`PAGE_VERTS * 12` bytes). A page is one vertex buffer carved up by an `embeddium::arena::Arena`; a few pages hold
+ /// the whole ring. A mesh that is bigger than a page is not drawn. Lever: a bigger page = fewer buffer switches in the draw loop,
+ /// but memory is taken a page at a time. The shared index buffer is sized for one page (`PAGE_VERTS / 4` quads, 6 MiB) and serves all.
+ const PAGE_VERTS: u32 = 1 << 20;
+@@ -313,43 +313,266 @@
+     out
+ }
+ 
+-/// A mesher vertex (`mesh::VF` floats: position, uv, light, lm, tint) as the 16-byte chunk vertex. The position is chunk-local (the
+-/// mesher is run with origin 0); a smooth vertex (`lm >= mesh::SMOOTH_LM`) keeps its shade x ambient occlusion in the shade byte and
+-/// sets bit 15 of the light; a flat one carries `sky * 16 + block` and `face_shade`, its quad's shade from the face direction (the shader
+-/// used to take that from screen derivatives).
+-fn encode_vertex(f: &[f32], face_shade: u8) -> Packed {
+-    let smooth = f[6] >= mesh::SMOOTH_LM;
+-    let lm = f[6] as u32;
+-    let tint = f[7] as u32;
+-    vertex::encode(&vertex::Vertex {
+-        pos: [f[0], f[1], f[2]],
+-        uv: [f[3], f[4]],
+-        light: if smooth { 0x8000 | (lm - mesh::SMOOTH_LM as u32) as u16 } else { lm as u16 },
+-        color: [(tint >> 16) as u8, (tint >> 8) as u8, tint as u8],
+-        shade: if smooth { (f[5].clamp(0.0, 1.0) * 255.0 + 0.5) as u8 } else { face_shade },
++/// A vertex of a quad on its way to the 12-byte format (`embeddium::vertex`): the mesher's `VF` floats, with the atlas coordinate turned
++/// into a texel position inside the quad's tile.
++#[derive(Clone, Copy, Debug, PartialEq)]
++struct PV {
++    /// Chunk-local (the mesher is run with origin 0).
++    pos: [f32; 3],
++    /// Texels inside the tile: (0, 0) is its top left corner; a merged run of faces runs past 16.
++    loc: [f32; 2],
++    /// `mesh::SMOOTH_LM + sky quarters * 32 + block halves` (smooth), or `sky * 16 + block` (flat).
++    lm: f32,
++    /// A smooth vertex's face shade x ambient occlusion; a flat one gets its shade from the way its quad faces.
++    lit: f32,
++    /// Packed sRGB colour (`mesh::WHITE` = none).
++    tint: f32,
++}
++
++/// A quad of four vertices (counter-clockwise from the front) and the atlas tile all four show a part of.
++#[derive(Clone, Copy, Debug, PartialEq)]
++struct PQ {
++    v: [PV; 4],
++    tile: u16,
++    /// The tile shows a see-through texel somewhere (`atlas::is_cutout`): the alpha-tested layer.
++    cut: bool,
++    /// The quad tiles its texture (a merged run, see `merged`): the shader takes the fraction of the tile coordinate.
++    repeat: bool,
++}
++
++/// The tile (row * 16 + column) the point `c` (atlas coordinates, 0..1) lies in.
++fn tile_of(c: [f32; 2]) -> u16 {
++    let (x, y) = (c[0] * crate::render::atlas::ATLAS_W as f32, c[1] * crate::render::atlas::ATLAS_H as f32);
++    let w = crate::render::atlas::TILES_W;
++    ((y.max(0.0) as usize / 16) * w + (x.max(0.0) as usize / 16).min(w - 1)) as u16
++}
++
++/// The mesher's quad whose first vertex is `v`, as a `PQ`: the tile is the one at the centre of its four atlas coordinates (the corners of
++/// a face lie on the tile's edge, so a single corner could be one tile off).
++fn quad_at(verts: &[f32], v: u32) -> PQ {
++    let vf = mesh::VF;
++    let f = |k: usize| &verts[(v as usize + k) * vf..][..vf];
++    let centre = [(0..4).map(|k| f(k)[3]).sum::<f32>() / 4.0, (0..4).map(|k| f(k)[4]).sum::<f32>() / 4.0];
++    let tile = tile_of(centre);
++    let w = crate::render::atlas::TILES_W;
++    let (ox, oy) = ((tile as usize % w) as f32 * 16.0, (tile as usize / w) as f32 * 16.0);
++    let pv = |k: usize| {
++        let r = f(k);
++        PV { pos: [r[0], r[1], r[2]], loc: [r[3] * crate::render::atlas::ATLAS_W as f32 - ox, r[4] * crate::render::atlas::ATLAS_H as f32 - oy], lm: r[6], lit: r[5], tint: r[7] }
++    };
++    PQ { v: [pv(0), pv(1), pv(2), pv(3)], tile, cut: crate::render::atlas::is_cutout(centre), repeat: false }
++}
++
++/// The 16-block section a quad is sorted into: the highest vertex minus half a block picks the block, so top, side and plant faces land in
++/// their own block's section; a face on a section border may land in either, which the draw loop's one-block margin covers.
++fn section_of(q: &PQ) -> usize {
++    let top = q.v.iter().map(|v| v.pos[1]).fold(f32::MIN, f32::max);
++    (((top - 0.5).floor().max(0.0) as usize) >> 4).min(SECTIONS - 1)
++}
++
++/// A quad that is one block face on the block grid showing a whole terrain tile, the same light, shade and colour on all four corners:
++/// the only kind `merged` can join with its neighbours. `an` is the axis it is flat on, `au` / `av` the axes its corner 1 and corner 3 lie
++/// along (the template's u and v), `su` / `sv` which way the corners go along them and `du` / `dv` which way the texture runs.
++#[derive(Clone, Copy, Debug)]
++struct Unit {
++    an: usize,
++    plane: i32,
++    au: usize,
++    av: usize,
++    su: i32,
++    sv: i32,
++    du: i32,
++    dv: i32,
++    /// The cell: the lower of its two coordinates along `au` and `av`.
++    cu: i32,
++    cv: i32,
++}
++
++fn unit_of(q: &PQ) -> Option<Unit> {
++    if q.tile >= 256 || (1..4).any(|k| q.v[k].lm.to_bits() != q.v[0].lm.to_bits() || q.v[k].lit.to_bits() != q.v[0].lit.to_bits() || q.v[k].tint.to_bits() != q.v[0].tint.to_bits()) {
++        return None;
++    }
++    let p = |k: usize| q.v[k].pos;
++    let same = |a: usize| (1..4).all(|k| p(k)[a] == p(0)[a]);
++    let mut an = None;
++    for a in 0..3 {
++        if same(a) {
++            if an.is_some() {
++                return None; // a point or a line
++            }
++            an = Some(a);
++        }
++    }
++    let an = an?;
++    if p(0)[an].fract() != 0.0 {
++        return None; // a face inside the cell (slab, torch, fence...)
++    }
++    let axes = match an { 0 => [1, 2], 1 => [0, 2], _ => [0, 1] };
++    for a in axes {
++        let (lo, hi) = (0..4).fold((f32::MAX, f32::MIN), |(lo, hi), k| (lo.min(p(k)[a]), hi.max(p(k)[a])));
++        if hi - lo != 1.0 || lo.fract() != 0.0 {
++            return None; // not exactly one block wide on the grid (a fluid's corner, a cactus, a stair step)
++        }
++    }
++    let along = |k: usize| axes.into_iter().find(|&a| p(k)[a] != p(0)[a]);
++    let (au, av) = (along(1)?, along(3)?);
++    if au == av || p(1)[av] != p(0)[av] || p(3)[au] != p(0)[au] || p(2)[au] != p(1)[au] || p(2)[av] != p(3)[av] {
++        return None;
++    }
++    // The texture: the whole tile (`atlas::terrain_uv` insets it by 0.02 texel), u along corner 0 -> 1 and v along corner 0 -> 3.
++    let l = |k: usize| q.v[k].loc;
++    let near = |a: f32, b: f32| (a - b).abs() < 0.1;
++    let (dx, dy) = (l(1)[0] - l(0)[0], l(3)[1] - l(0)[1]);
++    let inside = (0..4).all(|k| l(k).iter().all(|&c| c > -0.1 && c < 16.1));
++    if !(inside && near(l(3)[0], l(0)[0]) && near(l(2)[0], l(1)[0]) && near(l(1)[1], l(0)[1]) && near(l(2)[1], l(3)[1]) && near(dx.abs(), 16.0) && near(dy.abs(), 16.0)) {
++        return None;
++    }
++    let sign = |d: f32| if d > 0.0 { 1 } else { -1 };
++    Some(Unit {
++        an,
++        plane: p(0)[an] as i32,
++        au,
++        av,
++        su: sign(p(1)[au] - p(0)[au]),
++        sv: sign(p(3)[av] - p(0)[av]),
++        du: sign(dx),
++        dv: sign(dy),
++        cu: p(0)[au].min(p(1)[au]) as i32,
++        cv: p(0)[av].min(p(3)[av]) as i32,
+     })
+ }
+ 
+-/// b1.7.3 `RenderBlocks` face shade of a quad (top 1.0, bottom 0.5, Z sides 0.8, X sides 0.6) as the shade byte, from the quad's first three
+-/// corners (counter-clockwise seen from the front, so the cross product points out of the face): the axis the normal is longest on, and its
+-/// sign for Y. This is what the chunk shader's `flat_shade` derived per pixel from screen derivatives, with the same pick for a face that is
+-/// not axis aligned (a wall torch) and the same 1.0 for a degenerate one. 0.5 is 128 (0.4 % bright), the others are exact.
+-fn face_shade(a: &[f32], b: &[f32], c: &[f32]) -> u8 {
++/// What two `Unit`s must share to be one quad: the layer, the section (so a merged quad stays in the section it is drawn with), the plane,
++/// the way they face and their texture runs, the tile, and the light, shade and colour (all four corners of each agree, so the run has the
++/// same values everywhere and needs no per-cell interpolation).
++#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
++struct Run {
++    cut: bool,
++    section: usize,
++    an: usize,
++    plane: i32,
++    au: usize,
++    av: usize,
++    su: i32,
++    sv: i32,
++    du: i32,
++    dv: i32,
++    tile: u16,
++    lm: u32,
++    lit: u32,
++    tint: u32,
++}
++
++/// The cells of one `Run`, and the first of its quads to build the merged ones from (`rcu`, `rcv`: its cell).
++struct Group {
++    rep: PQ,
++    rcu: i32,
++    rcv: i32,
++    cells: Vec<(i32, i32)>,
++}
++
++/// Longest side of a merged quad, in blocks: a chunk is 16 wide, a section 16 high, and 16 tiles is the texture coordinate's range
++/// (`embeddium::vertex`: 15 tiles either way from the one the quad starts in).
++const MERGE_MAX: i32 = 16;
++
++/// Greedy meshing of one plane: the rectangles (cell u, cell v, width, height) that cover `cells` once, taking the next free cell in
++/// (v, u) order, widening as far as the row runs and then heightening while whole rows follow.
++fn greedy(cells: &mut Vec<(i32, i32)>) -> Vec<(i32, i32, i32, i32)> {
++    cells.sort_unstable_by_key(|&(u, v)| (v, u));
++    let mut free: HashSet<(i32, i32)> = cells.iter().copied().collect();
++    let mut out = Vec::new();
++    for &(u0, v0) in cells.iter() {
++        if !free.contains(&(u0, v0)) {
++            continue;
++        }
++        let mut w = 1;
++        while w < MERGE_MAX && free.contains(&(u0 + w, v0)) {
++            w += 1;
++        }
++        let mut h = 1;
++        'grow: while h < MERGE_MAX {
++            for du in 0..w {
++                if !free.contains(&(u0 + du, v0 + h)) {
++                    break 'grow;
++                }
++            }
++            h += 1;
++        }
++        for dv in 0..h {
++            for du in 0..w {
++                free.remove(&(u0 + du, v0 + dv));
++            }
++        }
++        out.push((u0, v0, w, h));
++    }
++    out
++}
++
++/// The quad of the rectangle (`u0`, `v0`, `w`, `h`) of a run: the corners of `rep` (a quad of the run, in cell `rcu`, `rcv`) moved to the
++/// rectangle, the far ones stretched, and the texture coordinate stretched with them, so the tile repeats once per block.
++fn merged(rep: &PQ, run: &Run, rcu: i32, rcv: i32, u0: i32, v0: i32, w: i32, h: i32) -> PQ {
++    let mut q = *rep;
++    for (k, v) in q.v.iter_mut().enumerate() {
++        let hi_u = v.pos[run.au] == (rcu + 1) as f32;
++        let hi_v = v.pos[run.av] == (rcv + 1) as f32;
++        v.pos[run.au] += (u0 - rcu) as f32 + if hi_u { (w - 1) as f32 } else { 0.0 };
++        v.pos[run.av] += (v0 - rcv) as f32 + if hi_v { (h - 1) as f32 } else { 0.0 };
++        if k == 1 || k == 2 {
++            v.loc[0] += run.du as f32 * 16.0 * (w - 1) as f32;
++        }
++        if k == 2 || k == 3 {
++            v.loc[1] += run.dv as f32 * 16.0 * (h - 1) as f32;
++        }
++    }
++    q.repeat = w > 1 || h > 1;
++    q
++}
++
++/// b1.7.3 `RenderBlocks` face shade of a quad (top 1.0, bottom 0.5, Z sides 0.8, X sides 0.6) as a `vertex::FACE_SHADE` index, from the quad's
++/// first three corners (counter-clockwise seen from the front, so the cross product points out of the face): the axis the normal is longest
++/// on, and its sign for Y. This is what the chunk shader's `flat_shade` derived per pixel from screen derivatives, with the same pick for a
++/// face that is not axis aligned (a wall torch) and the same 1.0 for a degenerate one.
++fn face_code(a: &[f32; 3], b: &[f32; 3], c: &[f32; 3]) -> u8 {
+     let (u, v) = (std::array::from_fn::<f32, 3, _>(|i| b[i] - a[i]), std::array::from_fn::<f32, 3, _>(|i| c[i] - a[i]));
+     let n = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+     let (x, y, z) = (n[0].abs(), n[1].abs(), n[2].abs());
+     if n.iter().map(|k| k * k).sum::<f32>() < 1e-20 {
+-        255
++        0
+     } else if x >= y && x >= z {
+-        153 // 0.6
++        2 // 0.6
+     } else if y >= z {
+-        if n[1] > 0.0 { 255 } else { 128 }
++        if n[1] > 0.0 { 0 } else { 3 }
+     } else {
+-        204 // 0.8
++        1 // 0.8
+     }
+ }
+ 
+-/// A chunk's quads as the GPU takes them: 16-byte vertices, four to a quad, the solid layer, then the cut-out layer, then the water, each
++/// A vertex as the 12-byte chunk vertex. A smooth vertex (`lm >= mesh::SMOOTH_LM`) carries its own sky quarters, block halves and its shade x
++/// ambient occlusion as a shade code; a flat one is the same with `sky * 4`, `block * 2` and its quad's face shade (`face`); water keeps shade 1
++/// (`fs_water` derives the shade of the side the eye sees).
++fn encode_vertex(v: &PV, tile: u16, repeat: bool, face: u8, water: bool) -> Packed {
++    let smooth = v.lm >= mesh::SMOOTH_LM;
++    let (sky, block) = if smooth {
++        let l = (v.lm - mesh::SMOOTH_LM) as u32;
++        ((l >> 5) as u8, (l & 31) as u8)
++    } else {
++        let l = v.lm as u32;
++        ((l >> 4) as u8 * 4, (l & 15) as u8 * 2)
++    };
++    let tint = v.tint as u32;
++    vertex::encode(&vertex::Vertex {
++        pos: v.pos,
++        tile,
++        uv: v.loc,
++        repeat,
++        sky,
++        block,
++        shade: if water { 0 } else if smooth { vertex::shade_code(v.lit) } else { face },
++        color: [(tint >> 16) as u8, (tint >> 8) as u8, tint as u8],
++    })
++}
++
++/// A chunk's quads as the GPU takes them: 12-byte vertices, four to a quad, the solid layer, then the cut-out layer, then the water, each
+ /// sorted by 16-block section. `starts`, `cut` and `wstarts` are QUAD numbers from the first vertex of the mesh; layer `x` section `s` is
+ /// `x[s]..x[s + 1]`.
+ #[derive(Debug, PartialEq)]
+@@ -361,41 +584,65 @@
+ }
+ 
+ /// Sorts the mesher's quads into layers (a quad that shows a see-through tile is cut-out: the tile at the centre of its four uvs) and
+-/// the 16-block section they sit in (the highest vertex minus half a block picks the block, so top, side and plant faces land in their
+-/// own block's section; a face on a section border may land in either, which the draw loop's one-block margin covers), and encodes them.
+-/// The other diagonal becomes a rotation of the corners and the second side a second quad with the corners reversed, so the one shared
+-/// index pattern (`embeddium::quad_index`) draws exactly the triangles the mesher's own index list did.
++/// the 16-block section they sit in, joins the block faces that can be one quad (`unit_of`, `greedy`, `merged`: a flat floor of 256
++/// faces is one quad, not 256) and encodes them. The other diagonal becomes a rotation of the corners and the second side a second quad
++/// with the corners reversed, so the one shared index pattern (`embeddium::quad_index`) draws exactly the triangles the mesher's own
++/// index list did.
+ fn pack(verts: &[f32], solid: &[u32], water: &[u32]) -> Quads {
+-    let vf = mesh::VF;
+-    let at = |v: u32, k: usize| &verts[(v as usize + k) * vf..][..vf];
+-    let section = |v: u32| {
+-        let top = (0..4).map(|k| at(v, k)[1]).fold(f32::MIN, f32::max);
+-        (((top - 0.5).floor().max(0.0) as usize) >> 4).min(SECTIONS - 1)
+-    };
+-    let centre = |v: u32| [(0..4).map(|k| at(v, k)[3]).sum::<f32>() / 4.0, (0..4).map(|k| at(v, k)[4]).sum::<f32>() / 4.0];
+-    let mut layers: [Vec<(usize, Q)>; 3] = [Vec::new(), Vec::new(), Vec::new()];
++    let mut layers: [Vec<(usize, PQ, bool, bool)>; 3] = Default::default();
++    let mut groups: BTreeMap<Run, Group> = BTreeMap::new();
+     for q in quads_of(solid) {
+-        layers[crate::render::atlas::is_cutout(centre(q.v)) as usize].push((section(q.v), q));
++        let pq = quad_at(verts, q.v);
++        let section = section_of(&pq);
++        match (!q.flip && !q.both).then(|| unit_of(&pq)).flatten() {
++            Some(u) => {
++                let run = Run {
++                    cut: pq.cut,
++                    section,
++                    an: u.an,
++                    plane: u.plane,
++                    au: u.au,
++                    av: u.av,
++                    su: u.su,
++                    sv: u.sv,
++                    du: u.du,
++                    dv: u.dv,
++                    tile: pq.tile,
++                    lm: pq.v[0].lm.to_bits(),
++                    lit: pq.v[0].lit.to_bits(),
++                    tint: pq.v[0].tint.to_bits(),
++                };
++                groups.entry(run).or_insert_with(|| Group { rep: pq, rcu: u.cu, rcv: u.cv, cells: Vec::new() }).cells.push((u.cu, u.cv));
++            }
++            None => layers[pq.cut as usize].push((section, pq, q.flip, q.both)),
++        }
+     }
+     for q in quads_of(water) {
+-        layers[2].push((section(q.v), q));
++        let pq = quad_at(verts, q.v);
++        layers[2].push((section_of(&pq), pq, q.flip, q.both));
++    }
++    for (run, mut g) in groups {
++        for (u0, v0, w, h) in greedy(&mut g.cells) {
++            layers[run.cut as usize].push((run.section, merged(&g.rep, &run, g.rcu, g.rcv, u0, v0, w, h), false, false));
++        }
+     }
+     let mut out = Quads { verts: Vec::with_capacity((solid.len() + water.len()) / 6 * 4), starts: [0; SECTIONS + 1], cut: [0; SECTIONS + 1], wstarts: [0; SECTIONS + 1] };
+-    for (l, list) in layers.iter().enumerate() {
++    for (l, list) in layers.iter_mut().enumerate() {
++        list.sort_by_key(|e| e.0);
+         let mut starts = [0u32; SECTIONS + 1];
++        let mut it = list.iter().peekable();
+         for s in 0..SECTIONS {
+             starts[s] = out.verts.len() as u32 / 4;
+-            for &(_, q) in list.iter().filter(|(sec, _)| *sec == s) {
+-                // The water layer keeps 255: its quads are not culled and `fs_water` derives the shade of the side the eye sees.
++            while let Some((_, q, flip, both)) = it.next_if(|e| e.0 == s) {
+                 let mut put = |order: [usize; 4]| {
+-                    let shade = if l == 2 { 255 } else { face_shade(at(q.v, order[0]), at(q.v, order[1]), at(q.v, order[2])) };
+-                    order.iter().for_each(|&k| out.verts.push(encode_vertex(at(q.v, k), shade)));
++                    let face = face_code(&q.v[order[0]].pos, &q.v[order[1]].pos, &q.v[order[2]].pos);
++                    order.iter().for_each(|&k| out.verts.push(encode_vertex(&q.v[k], q.tile, q.repeat, face, l == 2)));
+                 };
+-                if q.flip {
++                if *flip {
+                     put([1, 2, 3, 0]);
+                 } else {
+                     put([0, 1, 2, 3]);
+-                    if q.both {
++                    if *both {
+                         put([0, 3, 2, 1]);
+                     }
+                 }
+@@ -2057,25 +2304,25 @@
+         got.sort();
+         assert_eq!(got, want);
+         // The smooth quad keeps its light payload and its own shade; a flat one takes the shade of the way it faces (this first quad is wound
+-        // to look down: 0.5 = 128; the third looks along +Z: 0.8 = 204).
++        // to look down: 0.5 = code 3; the third looks along +Z: 0.8 = code 1) and its `sky * 16 + block` as quarter and half levels.
+         let d = |i: usize| vertex::decode(&q.verts[i]);
+-        assert_eq!((d(0).light, d(0).shade), (255, 128));
+-        assert_eq!(d(8).shade, 204);
+-        assert!(q.verts.iter().any(|b| vertex::decode(b).light == 0x8000 | 33 && vertex::decode(b).shade == 153), "0.6 * 255, light bit 15");
++        assert_eq!((d(0).sky, d(0).block, d(0).shade), (60, 30, 3));
++        assert_eq!(d(8).shade, 1);
++        assert!(q.verts.iter().any(|b| { let d = vertex::decode(b); (d.sky, d.block) == (1, 1) && (vertex::shade_value(d.shade) - 0.6).abs() < 1e-6 }), "smooth: 33 = 1 * 32 + 1, shade 0.6");
+     }
+ 
+     /// The baked face shade is what `flat_shade` derived: top 1.0, bottom 0.5, Z sides 0.8, X sides 0.6, the sign of Y from the winding
+-    /// (counter-clockwise from the front), 1.0 for a degenerate quad; the water layer keeps 255.
++    /// (counter-clockwise from the front), 1.0 for a degenerate quad; the water layer keeps 1.0.
+     #[test]
+     fn flat_quads_carry_their_face_shade() {
+         let vf = crate::render::mesh::VF;
+-        let quads: [([[f32; 3]; 4], u8); 6] = [
+-            ([[0.0, 1.0, 1.0], [1.0, 1.0, 1.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]], 255), // top (the LoD's winding for a face looking up)
+-            ([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 0.0, 1.0], [0.0, 0.0, 1.0]], 128), // bottom
+-            ([[1.0, 0.0, 1.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [1.0, 1.0, 1.0]], 153), // +X (`mesh::FACES[0]`)
+-            ([[0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 1.0, 1.0], [0.0, 1.0, 0.0]], 153), // -X
+-            ([[0.0, 0.0, 1.0], [1.0, 0.0, 1.0], [1.0, 1.0, 1.0], [0.0, 1.0, 1.0]], 204), // +Z
+-            ([[0.0; 3]; 4], 255),                                                          // degenerate
++        let quads: [([[f32; 3]; 4], u8); 6] = [ // (corners, `FACE_SHADE` index)
++            ([[0.0, 1.0, 1.0], [1.0, 1.0, 1.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]], 0), // top (the LoD's winding for a face looking up)
++            ([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 0.0, 1.0], [0.0, 0.0, 1.0]], 3), // bottom
++            ([[1.0, 0.0, 1.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [1.0, 1.0, 1.0]], 2), // +X (`mesh::FACES[0]`)
++            ([[0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 1.0, 1.0], [0.0, 1.0, 0.0]], 2), // -X
++            ([[0.0, 0.0, 1.0], [1.0, 0.0, 1.0], [1.0, 1.0, 1.0], [0.0, 1.0, 1.0]], 1), // +Z
++            ([[0.0; 3]; 4], 0),                                                          // degenerate
+         ];
+         let mut v = vec![0.0f32; 4 * quads.len() * vf];
+         let mut idxs = Vec::new();
+@@ -2096,7 +2343,66 @@
+         }
+         // The same top quad as water: 255 whatever it faces.
+         let w = pack(&v, &[], &idxs[6..12]);
+-        assert!(w.verts.iter().all(|b| vertex::decode(b).shade == 255));
++        assert!(w.verts.iter().all(|b| vertex::decode(b).shade == 0));
++    }
++
++    /// A mesher quad for the top face of cell (x, z) at height `y` (`mesh::FACES[2]`), showing tile 1 whole, with the given light.
++    fn top_face(v: &mut Vec<f32>, x: f32, y: f32, z: f32, lm: f32, lit: f32) -> u32 {
++        let base = v.len() as u32 / mesh::VF as u32;
++        let (w, h) = (crate::render::atlas::ATLAS_W as f32, crate::render::atlas::ATLAS_H as f32);
++        for (c, (lx, ly)) in [[0.0, 1.0, 1.0], [1.0, 1.0, 1.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]].iter().zip([(0.02, 0.02), (15.98, 0.02), (15.98, 15.98), (0.02, 15.98)]) {
++            v.extend_from_slice(&[x + c[0], y - 1.0 + c[1], z + c[2], (16.0 + lx) / w, ly / h, lit, lm, mesh::WHITE]);
++        }
++        base
++    }
++
++    /// A flat floor of 4 x 3 faces with the same light is one quad that tiles its texture 4 x 3 times; the corners keep the mesher's winding.
++    #[test]
++    fn a_flat_floor_is_one_quad() {
++        let mut v = Vec::new();
++        let mut idxs = Vec::new();
++        for z in 0..3 {
++            for x in 0..4 {
++                let b = top_face(&mut v, x as f32, 5.0, z as f32, 255.0, 1.0);
++                idxs.extend_from_slice(&[b, b + 1, b + 2, b, b + 2, b + 3]);
++            }
++        }
++        let q = pack(&v, &idxs, &[]);
++        assert_eq!(q.verts.len(), 4, "12 faces, one quad");
++        let d: Vec<_> = q.verts.iter().map(vertex::decode).collect();
++        assert!(d.iter().all(|v| v.repeat && v.tile == 1 && v.pos[1] == 5.0 && (v.sky, v.block, v.shade) == (60, 30, 0)));
++        let xz: Vec<[f32; 2]> = d.iter().map(|v| [v.pos[0], v.pos[2]]).collect();
++        assert_eq!(xz, [[0.0, 3.0], [4.0, 3.0], [4.0, 0.0], [0.0, 0.0]], "the template's corner order, stretched");
++        let uv: Vec<[f32; 2]> = d.iter().map(|v| v.uv).collect();
++        assert!((uv[0][0] - 0.0).abs() < 0.13 && (uv[1][0] - 63.98).abs() < 0.13 && (uv[0][1] - 0.0).abs() < 0.13 && (uv[3][1] - 47.98).abs() < 0.13, "{uv:?}");
++    }
++
++    /// Faces that differ in light, or that are not a whole block on the grid, are not joined: the row stays 3 quads (2 + 1 with the dark one
++    /// between) and a slab-high face stays itself.
++    #[test]
++    fn faces_that_differ_are_not_merged() {
++        let mut v = Vec::new();
++        let mut idxs = Vec::new();
++        for (x, lm) in [(0.0, 255.0), (1.0, 17.0), (2.0, 255.0), (3.0, 255.0)] {
++            let b = top_face(&mut v, x, 5.0, 0.0, lm, 1.0);
++            idxs.extend_from_slice(&[b, b + 1, b + 2, b, b + 2, b + 3]);
++        }
++        let b = top_face(&mut v, 0.0, 6.5, 2.0, 255.0, 1.0); // half a block up: not on the grid
++        idxs.extend_from_slice(&[b, b + 1, b + 2, b, b + 2, b + 3]);
++        let q = pack(&v, &idxs, &[]);
++        assert_eq!(q.verts.len(), 4 * 4, "(0), (1), (2, 3) and the slab-high one");
++        assert_eq!(q.verts.iter().filter(|b| vertex::decode(b).repeat).count(), 4, "only the pair of faces repeats");
++    }
++
++    /// A merged run never grows past 16 blocks (the chunk's width, the texture coordinate's range).
++    #[test]
++    fn a_run_stops_at_sixteen() {
++        let mut cells: Vec<(i32, i32)> = (0..16).flat_map(|v| (0..16).map(move |u| (u, v))).collect();
++        assert_eq!(greedy(&mut cells), vec![(0, 0, 16, 16)]);
++        let mut row: Vec<(i32, i32)> = (0..20).map(|u| (u, 0)).collect();
++        assert_eq!(greedy(&mut row), vec![(0, 0, 16, 1), (16, 0, 4, 1)]);
++        let mut l: Vec<(i32, i32)> = vec![(0, 0), (1, 0), (0, 1)];
++        assert_eq!(greedy(&mut l), vec![(0, 0, 2, 1), (0, 1, 1, 1)], "an L is two rectangles that cover it once");
+     }
+ 
+     /// Meshes share a page: a freed run is handed out again (best fit), the page is not duplicated, and a mesh bigger than a page is refused.
+diff -ruN -x '*.pyc' orig/roadmap/performance.md repo/roadmap/performance.md
+--- orig/roadmap/performance.md	2026-10-23 13:06:44.000000000 +0000
++++ repo/roadmap/performance.md	2026-10-23 11:33:32.046183088 +0000
+@@ -219,3 +219,23 @@
+   10 ms per frame instead of a cell count and lights up to 2 chunks per frame; seam recomputation skips cells above the tallest
+   column and block light when neither chunk has any; `App::init` (off the render thread) lights and meshes the spawn area
+   (>= 24 chunk meshes or 8 s) before the first frame. Still open: populate and meshing run on the render thread.
++
++- `done` 12-byte chunk vertex + greedy quad merging (2026-10-23; written without a toolchain: not compiled, not run; new tests in `embeddium::vertex`
++  and `world::chunks`, the WGSL still has to pass `chunk_shader_validates`):
++    - `embeddium/src/vertex.rs`: 16 -> 12 bytes, one `Uint32x3` attribute. Word 0: x, z in 1/16 (9 bits), y in 1/32 (13 bits), a repeat bit. Word 1:
++      atlas tile (10 bits) + texel position inside the tile in quarter texels (11 + 11 bits, biased by 240 so a merged run may run 15 tiles
++      either way). Word 2: colour R5 G6 B5, sky quarter levels (6 bits), block half levels (5 bits), shade code (5 bits: face 1 / .8 / .6 / .5
++      times `1 - 0.2 * ao`; every shade the mesher makes is exactly one code). Flat and smooth faces are the same encoding now (a flat face is
++      `sky * 4`, `block * 2`), so the vertex shader has no smooth/flat branch. 25 % less vertex traffic (fetch and the Adreno binning pass).
++    - `world/chunks.rs::pack`: the mesher's quads are classified (`unit_of`: a whole block face on the grid, whole tile, same light / shade /
++      colour on the four corners), grouped by layer, section, plane, facing, tile and light (`Run`), and joined with greedy rectangles up to 16 x 16
++      (`greedy`, `merged`). A merged quad tiles its texture (`repeat` bit); everything else (slabs, stairs, plants, fluids, faces with ambient
++      occlusion steps, doors) goes through unchanged. A flat grass field is a few quads instead of hundreds. Sections and layers are kept: a
++      merged quad stays in the section it was found in.
++    - Shaders (WGSL `vs_chunk` / `frag_chunk`, GLSL `LEAN` programs): the opaque and cut-out layers use `VsC`: 9 interpolated floats instead of
++      13 (no world position, the tint and the tile are `flat`), the tile is read from the vertex instead of derived from the uv per pixel,
++      `tile_sample` is `atlas_sample_g` for a known tile. Water keeps `VsOut` and an atlas uv computed in the vertex shader.
++    - Changed on purpose: x / z of a vertex are on the 1/16 grid (plants 0.9 wide become 0.875, a torch's lean is rounded to 1/16), a fluid
++      corner is on the 1/32 grid, the tint has 5-6-5 bits.
++    - Not done: merging faces with different light (needs per-cell light in a texture or a bigger vertex), merging across sections, a per-quad
++      instanced draw (16 bytes per quad instead of 48), `Uint32x2` (8 bytes) which would need the tile table in a uniform.

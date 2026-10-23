@@ -45,13 +45,13 @@ struct Layout {
     attrs: &'static [(u32, i32, Enum, bool, bool, usize)],
 }
 
-const CHUNK16: Layout = Layout { stride: 16, attrs: &[(0, 4, UNSIGNED_SHORT, true, false, 0), (1, 2, UNSIGNED_SHORT, true, false, 8), (2, 4, UNSIGNED_BYTE, false, true, 12)] };
+const CHUNK12: Layout = Layout { stride: 12, attrs: &[(0, 3, UNSIGNED_INT, true, false, 0)] };
 const FLOAT32: Layout = Layout { stride: 32, attrs: &[(0, 3, FLOAT, false, false, 0), (1, 2, FLOAT, false, false, 12), (2, 1, FLOAT, false, false, 20), (3, 1, FLOAT, false, false, 24), (4, 1, FLOAT, false, false, 28)] };
 const POS3: Layout = Layout { stride: 12, attrs: &[(0, 3, FLOAT, false, false, 0)] };
 const FAN: Layout = Layout { stride: 28, attrs: &[(0, 3, FLOAT, false, false, 0), (1, 4, FLOAT, false, false, 12)] };
 const WEATHER: Layout = Layout { stride: 36, attrs: &[(0, 3, FLOAT, false, false, 0), (1, 2, FLOAT, false, false, 12), (2, 4, FLOAT, false, false, 20)] };
 const HUD: Layout = Layout { stride: 32, attrs: &[(0, 2, FLOAT, false, false, 0), (1, 4, FLOAT, false, false, 8), (2, 2, FLOAT, false, false, 24)] };
-const LAYOUTS: [&Layout; 6] = [&CHUNK16, &FLOAT32, &POS3, &FAN, &WEATHER, &HUD];
+const LAYOUTS: [&Layout; 6] = [&CHUNK12, &FLOAT32, &POS3, &FAN, &WEATHER, &HUD];
 const L_CHUNK: usize = 0;
 const L_FLOAT: usize = 1;
 const L_POS: usize = 2;
@@ -824,7 +824,7 @@ mod tests {
     /// The vertex layouts match the Rust vertex types they read.
     #[test]
     fn layouts_match_the_vertex_types() {
-        assert_eq!(CHUNK16.stride as usize, embeddium::vertex::STRIDE);
+        assert_eq!(CHUNK12.stride as usize, embeddium::vertex::STRIDE);
         assert_eq!(FLOAT32.stride as usize, std::mem::size_of::<crate::gpu::pipeline::Vertex>());
         assert_eq!(WEATHER.stride as usize, std::mem::size_of::<weather::Vertex>());
         assert_eq!(HUD.stride as usize, std::mem::size_of::<hud::HudVertex>());

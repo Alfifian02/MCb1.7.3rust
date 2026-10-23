@@ -40,17 +40,14 @@ impl Vertex {
     }
 }
 
-/// Layout of the 16-byte terrain vertex (`embeddium::vertex`): x y z + 16 bits of light, u v, colour + shade. Chunk meshes only;
-/// entities, the outline and the far terrain keep the float `Vertex` above (world space, their own packing of `light`).
+/// Layout of the 12-byte terrain vertex (`embeddium::vertex`): three `u32` words (position, tile + texel position, colour + light + shade),
+/// one attribute. Chunk meshes only; entities, the outline and the far terrain keep the float `Vertex` above (world space, their own packing
+/// of `light`).
 pub fn chunk_layout() -> wgpu::VertexBufferLayout<'static> {
     wgpu::VertexBufferLayout {
         array_stride: embeddium::vertex::STRIDE as u64,
         step_mode: wgpu::VertexStepMode::Vertex,
-        attributes: &[
-            wgpu::VertexAttribute { format: wgpu::VertexFormat::Uint16x4, offset: 0, shader_location: 0 },
-            wgpu::VertexAttribute { format: wgpu::VertexFormat::Uint16x2, offset: 8, shader_location: 1 },
-            wgpu::VertexAttribute { format: wgpu::VertexFormat::Unorm8x4, offset: 12, shader_location: 2 },
-        ],
+        attributes: &[wgpu::VertexAttribute { format: wgpu::VertexFormat::Uint32x3, offset: 0, shader_location: 0 }],
     }
 }
 
@@ -203,41 +200,74 @@ fn vs_water(@location(0) p: vec3<f32>, @location(1) uv: vec2<f32>, @location(2) 
     return vert(p, uv, l, lm, t, true);
 }
 
-// The 16-byte chunk vertex (`embeddium::vertex`, Sodium's `CompactChunkVertex`): x, y, z are fixed point relative to the chunk origin of
-// `draw` (x, z: 1/2048 from -8; y: 1/256 from -8), `p.w` is the light (bit 15: smooth vertex, then sky quarters << 5 | block halves;
-// else sky << 4 | block), `t` the atlas uv x 65536, `c` the tint and, for smooth vertices, shade x ambient occlusion in `c.a`.
+// The 12-byte chunk vertex (`embeddium::vertex`, Sodium's `CompactChunkVertex`), three u32 words: x, z (1/16) and y (1/32) relative to the chunk
+// origin of `draw` + a repeat bit; the atlas tile + the texel position inside it (quarter texels, biased by 240); the colour (R5 G6 B5),
+// sky (quarter levels), block (half levels) and the shade code (face | ao << 2). Flat and smooth faces are the same encoding.
 struct Draw { origin: vec4<f32> };
 @group(1) @binding(0) var<uniform> draw: Draw;
+const ASIZE: vec2<f32> = vec2<f32>(@AW@.0, @AH@.0);
 
-fn chunk_vert(p: vec4<u32>, t: vec2<u32>, c: vec4<f32>, water: bool) -> VsOut {
-    var o: VsOut;
-    let vpos = draw.origin.xyz + vec3<f32>(f32(p.x) / 2048.0 - 8.0, f32(p.y) / 256.0 - 8.0, f32(p.z) / 2048.0 - 8.0);
-    o.tint = pow(c.rgb, vec3<f32>(2.2));
+fn chunk_pos(w: vec3<u32>) -> vec3<f32> {
+    return draw.origin.xyz + vec3<f32>(f32(w.x & 511u) / 16.0 - 8.0, f32((w.x >> 18u) & 8191u) / 32.0 - 8.0, f32((w.x >> 9u) & 511u) / 16.0 - 8.0);
+}
+// Texels inside the tile (0..16 for a face that shows it once, further for a merged run).
+fn chunk_texel(w: vec3<u32>) -> vec2<f32> {
+    return vec2<f32>(f32((w.y >> 10u) & 2047u), f32(w.y >> 21u)) * 0.25 - 240.0;
+}
+// `vertex::shade_value`: face shade 1, 0.8, 0.6, 0.5 times 1 - 0.2 * ambient occlusion step.
+fn chunk_shade(code: u32) -> f32 {
+    var s = 1.0;
+    if (code & 3u) == 1u { s = 0.8; } else if (code & 3u) == 2u { s = 0.6; } else if (code & 3u) == 3u { s = 0.5; }
+    return s * (1.0 - 0.2 * f32(code >> 2u));
+}
+fn chunk_lit(w: vec3<u32>) -> f32 {
+    return pow(brightness(f32((w.z >> 16u) & 63u) / 60.0, f32((w.z >> 22u) & 31u) / 30.0) * chunk_shade(w.z >> 27u), 2.2);
+}
+fn chunk_tint(w: vec3<u32>) -> vec3<f32> {
+    return pow(vec3<f32>(f32(w.z & 31u) / 31.0, f32((w.z >> 5u) & 63u) / 63.0, f32((w.z >> 11u) & 31u) / 31.0), vec3<f32>(2.2));
+}
+
+// The opaque and cut-out chunk layers: only what their fragment shader reads. No world position (the shade is in the vertex), the tint and
+// the tile are flat (one per quad), so 9 floats are interpolated where `VsOut` has 13.
+struct VsC {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) @interpolate(perspective, centroid) uv: vec2<f32>, // in tiles inside the tile (a merged run: 0..n); centroid, as `VsOut.uv`
+    @location(1) @interpolate(perspective, centroid) lit: f32,
+    @location(2) @interpolate(perspective, centroid) fg: f32,
+    @location(3) @interpolate(flat) tint: vec3<f32>,
+    @location(4) @interpolate(flat) k: f32, // the atlas tile, or -(tile + 1) for a quad that repeats its texture
+    @location(5) uvd: vec2<f32>,            // `uv` at the pixel centre, for the derivatives
+};
+
+@vertex
+fn vs_chunk(@location(0) w: vec3<u32>) -> VsC {
+    var o: VsC;
+    let vpos = chunk_pos(w);
+    let tile = f32(w.y & 1023u);
     o.pos = u.vp * vec4<f32>(vpos, 1.0);
-    o.uv = vec2<f32>(t) / 65536.0;
+    o.uv = chunk_texel(w) / 16.0;
+    o.uvd = o.uv;
+    o.lit = chunk_lit(w);
+    o.fg = fog_factor(length(vpos - u.eye.xyz));
+    o.tint = chunk_tint(w);
+    o.k = select(tile, -tile - 1.0, (w.x >> 31u) != 0u);
+    return o;
+}
+// Water keeps the full `VsOut` (`fs_water` wants the world position for its shade and its radius test) and an atlas uv.
+@vertex
+fn vs_chunk_water(@location(0) w: vec3<u32>) -> VsOut {
+    var o: VsOut;
+    let vpos = chunk_pos(w);
+    let tile = w.y & 1023u;
+    o.tint = chunk_tint(w);
+    o.pos = u.vp * vec4<f32>(vpos, 1.0);
+    o.uv = (vec2<f32>(f32(tile % TW), f32(tile / TW)) * 16.0 + chunk_texel(w)) / ASIZE;
     o.uvd = o.uv;
     o.wp = vpos;
     o.fg = fog_factor(length(vpos - u.eye.xyz));
-    if (p.w & 0x8000u) != 0u && !water {
-        let v = p.w & 0x7FFFu;
-        o.lit = pow(brightness(f32(v >> 5u) / 60.0, f32(v & 31u) / 30.0) * c.a, 2.2);
-        o.k = -1.0;
-    } else {
-        // Flat: the mesher baked the face shade into `c.a` (`chunks::pack`); water keeps 1.0 there and `fs_water` derives its own, since
-        // its quads have no culled side (seen from below the top face takes the bottom shade).
-        o.lit = pow(brightness(f32((p.w >> 4u) & 15u) / 15.0, f32(p.w & 15u) / 15.0) * c.a, 2.2);
-        o.k = -1.0;
-    }
+    o.lit = chunk_lit(w);
+    o.k = -1.0;
     return o;
-}
-
-@vertex
-fn vs_chunk(@location(0) p: vec4<u32>, @location(1) t: vec2<u32>, @location(2) c: vec4<f32>) -> VsOut {
-    return chunk_vert(p, t, c, false);
-}
-@vertex
-fn vs_chunk_water(@location(0) p: vec4<u32>, @location(1) t: vec2<u32>, @location(2) c: vec4<f32>) -> VsOut {
-    return chunk_vert(p, t, c, true);
 }
 
 // The face shade of a flat (non-smooth) quad from the derivatives of its world position (every face is axis aligned).
@@ -300,11 +330,53 @@ fn frag(in: VsOut, cut: bool, shade: f32) -> vec4<f32> {
     return vec4<f32>(mix(to_working(rgb * lit), u.fog.rgb, in.fg), cover);
 }
 
+// The chunk layers' atlas read: the tile `o` (texel origin) at the position `t` (tiles) inside it, tile-clamped like `atlas_sample_g` (same pad,
+// same strip rule), with the gradients `gx`, `gy` in texels of mip 0 per pixel.
+fn tile_sample(o: vec2<f32>, t: vec2<f32>, gx: vec2<f32>, gy: vec2<f32>) -> vec4<f32> {
+    let size = vec2<f32>(textureDimensions(tex));
+    let p = o + t * 16.0;
+    if (p.y >= 256.0 && p.y < ITEMS_Y) || p.y >= CHAR_Y { return textureSampleLevel(tex, samp, p / size, 0.0); }
+    let g = max(length(gx), length(gy));
+    let pad = 0.5 * exp2(min(ceil(log2(max(g, 1.0))), MIPS - 1.0));
+    return textureSampleGrad(tex, samp, (o + clamp(t * 16.0, vec2<f32>(pad), vec2<f32>(16.0 - pad))) / size, gx / size, gy / size);
+}
+
+// `frag` for the chunk layers (`VsC`): the tile comes flat from the vertex, the position inside it from `uv`, and a repeating quad (a merged
+// run of faces) takes its fraction, so one quad shows the tile once per block. The vertex has the face shade and the light.
+fn frag_chunk(in: VsC, cut: bool) -> vec4<f32> {
+    let gx = dpdx(in.uvd) * 16.0; // derivatives first, in uniform control flow
+    let gy = dpdy(in.uvd) * 16.0;
+    let size = vec2<f32>(textureDimensions(tex));
+    let rep = in.k < 0.0;
+    let tile = select(in.k, -in.k - 1.0, rep);
+    let row = floor((tile + 0.5) / f32(TW));
+    let o = vec2<f32>(tile - row * f32(TW), row) * 16.0;
+    let t = select(in.uv, fract(in.uv), rep);
+    let c = tile_sample(o, t, gx, gy);
+    var cover = 1.0;
+    if cut {
+        var a = c.a;
+        if max(length(gx), length(gy)) > 1.0 { a = textureSampleLevel(tex, samp, (o + t * 16.0) / size, 0.0).a; }
+        if A2C {
+            cover = clamp((a - 0.5) * 3.0 + 0.5, 0.0, 1.0);
+            if cover <= 0.0 { discard; }
+        } else if a < 0.5 { discard; }
+    }
+    var rgb = c.rgb * in.tint;
+    // Grass side (tile 3, untinted) with tile 38 over it, as in `frag`.
+    if abs(tile - 3.0) < 0.5 {
+        let oo = o + vec2<f32>(48.0, 32.0);
+        rgb = c.rgb;
+        if textureSampleLevel(tex, samp, (oo + t * 16.0) / size, 0.0).a >= 0.5 { rgb = tile_sample(oo, t, gx, gy).rgb * in.tint; }
+    }
+    return vec4<f32>(mix(to_working(rgb * in.lit), u.fog.rgb, in.fg), cover);
+}
+
 // Chunk layers: no screen derivative for the shade, the vertex has it.
 @fragment
-fn fs_solid(in: VsOut) -> @location(0) vec4<f32> { return frag(in, false, 1.0); }
+fn fs_solid(in: VsC) -> @location(0) vec4<f32> { return frag_chunk(in, false); }
 @fragment
-fn fs_cut(in: VsOut) -> @location(0) vec4<f32> { return frag(in, true, 1.0); }
+fn fs_cut(in: VsC) -> @location(0) vec4<f32> { return frag_chunk(in, true); }
 // Entities, the outline and the far terrain (float vertices): the face shade from the derivatives of the world position, taken here in
 // uniform control flow (before `frag`'s `discard`).
 @fragment
@@ -351,6 +423,8 @@ fn shader_source_with(a2c: bool) -> String {
         .replace("@A2C@", &a2c.to_string())
         .replace("@TW@", &atlas::TILES_W.to_string())
         .replace("@TH@", &(atlas::ATLAS_H / 16).to_string())
+        .replace("@AW@", &atlas::ATLAS_W.to_string())
+        .replace("@AH@", &atlas::ATLAS_H.to_string())
         .replace("@MIPS@", &atlas::MIPS.to_string())
         .replace("@IY@", &atlas::ITEMS_Y.to_string())
         .replace("@CY@", &atlas::CHAR_Y.to_string())
@@ -362,7 +436,7 @@ fn shader_source_with(a2c: bool) -> String {
 pub struct ChunkPipeline {
     /// Opaque terrain (`fs_solid`): no `discard`.
     pub solid: RenderPipeline,
-    /// Alpha-tested terrain (`fs_cut`). Chunk meshes (`solid`, `cutout`, `water`) read the 16-byte `chunk_layout` vertex and bind
+    /// Alpha-tested terrain (`fs_cut`). Chunk meshes (`solid`, `cutout`, `water`) read the 12-byte `chunk_layout` vertex and bind
     /// their origin in group 1; entities, the outline and the far terrain (`entity`, `lod`, `lod_water`) read the float `Vertex`.
     pub cutout: RenderPipeline,
     /// Alpha-tested entities and the outline.
@@ -554,7 +628,7 @@ mod tests {
         }
         assert!(!SHADER_SRC.contains("textureSample(tex"));
         // MSAA edge pixels: every interpolated colour/uv is centroid (no extrapolation past the quad), the derivatives come from `uvd`.
-        assert_eq!(SHADER_SRC.matches("@interpolate(perspective, centroid)").count(), 4);
+        assert_eq!(SHADER_SRC.matches("@interpolate(perspective, centroid)").count(), 7); // `VsOut` 4, `VsC` 3
         assert!(!SHADER_SRC.contains("dpdx(in.uv)") && !SHADER_SRC.contains("dpdy(in.uv)"));
         // Both alpha-to-coverage settings validate (the const is spliced).
         for a2c in [false, true] {
@@ -570,9 +644,9 @@ mod tests {
     #[test]
     fn chunk_layers_have_no_derivative_shade() {
         assert_eq!(SHADER_SRC.matches("flat_shade(").count(), 3, "the definition, fs_cut_flat and fs_water");
-        assert!(SHADER_SRC.contains("return frag(in, false, 1.0);") && SHADER_SRC.contains("return frag(in, true, 1.0);"));
+        assert!(SHADER_SRC.contains("return frag_chunk(in, false);") && SHADER_SRC.contains("return frag_chunk(in, true);"));
         let frag = &SHADER_SRC[SHADER_SRC.find("fn frag(").unwrap()..SHADER_SRC.find("// Chunk layers").unwrap()];
-        assert!(!frag.contains("dpdx(in.wp)") && !frag.contains("flat_shade"));
+        assert!(!frag.contains("dpdx(in.wp)") && !frag.contains("flat_shade") && !frag.contains("in.wp"));
     }
 
     /// `WHITE` is 2^24 - 1, the last f32 below 2^24: `+ 0.5` rounds it up to 2^24 and all three colour bytes read 0 (black sides, mobs).
@@ -607,9 +681,10 @@ mod tests {
         let eye = Vec3::new(0.0, 4.0, 0.0);
         pipe.frame(&queue, Mat4::look_at_rh(eye, Vec3::ZERO, Vec3::NEG_Z), Mat4::perspective_rh(1.2, 1.0, 0.05, 100.0), eye, 0.0, [0.5; 3], 0.0, 0.0, 12.0);
         let pixel = |lm: f32| -> [u8; 4] {
-            let (u0, u1, v1) = (16.0 / atlas::ATLAS_W as f32, 32.0 / atlas::ATLAS_W as f32, 16.0 / atlas::ATLAS_H as f32); // tile 1, stone
+            // Tile 1 (stone), shown once: texels 0..16 of it.
+            let (u0, u1, v1) = (0.0f32, 16.0f32, 16.0f32);
             // Chunk-local (origin 0), corners ordered so the shared quad indices (0, 1, 2), (2, 3, 0) face up towards the eye.
-            let v = |x: f32, z: f32, u, vv| embeddium::vertex::encode(&embeddium::vertex::Vertex { pos: [x, 0.0, z], uv: [u, vv], light: lm as u16, color: [255; 3], shade: 255 });
+            let v = |x: f32, z: f32, u, vv| embeddium::vertex::encode(&embeddium::vertex::Vertex { pos: [x, 0.0, z], tile: 1, uv: [u, vv], repeat: false, sky: (lm as u8 >> 4) * 4, block: (lm as u8 & 15) * 2, shade: 0, color: [255; 3] });
             let verts = [v(-8.0, -8.0, u0, 0.0), v(-8.0, 8.0, u0, v1), v(8.0, 8.0, u1, v1), v(8.0, -8.0, u1, 0.0)];
             let vb = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(&verts), usage: BufferUsages::VERTEX });
             let ib = create_index_buffer(&device, &embeddium::quad_index::indices(1));

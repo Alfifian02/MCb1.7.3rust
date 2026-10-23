@@ -1,6 +1,6 @@
 //! The OpenGL ES 3.2 renderer (`renderer.rs`): a second renderer, not wgpu's GL backend. EGL + GLES are called directly (`sys.rs`), so a
 //! phone whose Vulkan driver is slow can run the same frame on its (usually better tuned) GLES driver, with the same optimisations as
-//! the Vulkan one: the 16-byte chunk vertex, one shared quad index buffer, chunk pages (one VAO per page), the layer order solid /
+//! the Vulkan one: the 12-byte chunk vertex, one shared quad index buffer, chunk pages (one VAO per page), the layer order solid /
 //! cut-out / water, MSAA resolved in tile memory (`EXT_multisampled_render_to_texture`, else a renderbuffer blit with the samples
 //! invalidated), alpha-to-coverage, dynamic resolution, one final pass with the HUD. Written 3.0-safe: 3.2 is asked for first.
 

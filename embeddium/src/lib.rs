@@ -4,7 +4,7 @@
 //! - [`vis`]: section connectivity (`VisibilityEncoding` + a flood fill that builds it).
 //! - [`cull`]: `OcclusionCuller`, the breadth-first walk over sections that hides whatever sits behind solid terrain.
 //! - [`arena`]: `GlBufferArena`'s allocator (best fit, coalescing, compacting growth) as plain bookkeeping.
-//! - [`vertex`]: `CompactChunkVertex` cut to 16 bytes, the terrain vertex.
+//! - [`vertex`]: `CompactChunkVertex` cut to 12 bytes, the terrain vertex.
 //! - [`quad_index`]: `SharedQuadIndexBuffer`, the one index buffer every quad mesh draws with.
 //! - [`upload_budget`]: `UploadResourceBudget` + `UploadDurationEstimator`, how much mesh data a frame may upload.
 //!

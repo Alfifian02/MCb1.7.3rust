@@ -219,3 +219,23 @@ Not applicable, left out on purpose: multi-draw and persistent mapping (not in w
   10 ms per frame instead of a cell count and lights up to 2 chunks per frame; seam recomputation skips cells above the tallest
   column and block light when neither chunk has any; `App::init` (off the render thread) lights and meshes the spawn area
   (>= 24 chunk meshes or 8 s) before the first frame. Still open: populate and meshing run on the render thread.
+
+- `done` 12-byte chunk vertex + greedy quad merging (2026-10-23; written without a toolchain: not compiled, not run; new tests in `embeddium::vertex`
+  and `world::chunks`, the WGSL still has to pass `chunk_shader_validates`):
+    - `embeddium/src/vertex.rs`: 16 -> 12 bytes, one `Uint32x3` attribute. Word 0: x, z in 1/16 (9 bits), y in 1/32 (13 bits), a repeat bit. Word 1:
+      atlas tile (10 bits) + texel position inside the tile in quarter texels (11 + 11 bits, biased by 240 so a merged run may run 15 tiles
+      either way). Word 2: colour R5 G6 B5, sky quarter levels (6 bits), block half levels (5 bits), shade code (5 bits: face 1 / .8 / .6 / .5
+      times `1 - 0.2 * ao`; every shade the mesher makes is exactly one code). Flat and smooth faces are the same encoding now (a flat face is
+      `sky * 4`, `block * 2`), so the vertex shader has no smooth/flat branch. 25 % less vertex traffic (fetch and the Adreno binning pass).
+    - `world/chunks.rs::pack`: the mesher's quads are classified (`unit_of`: a whole block face on the grid, whole tile, same light / shade /
+      colour on the four corners), grouped by layer, section, plane, facing, tile and light (`Run`), and joined with greedy rectangles up to 16 x 16
+      (`greedy`, `merged`). A merged quad tiles its texture (`repeat` bit); everything else (slabs, stairs, plants, fluids, faces with ambient
+      occlusion steps, doors) goes through unchanged. A flat grass field is a few quads instead of hundreds. Sections and layers are kept: a
+      merged quad stays in the section it was found in.
+    - Shaders (WGSL `vs_chunk` / `frag_chunk`, GLSL `LEAN` programs): the opaque and cut-out layers use `VsC`: 9 interpolated floats instead of
+      13 (no world position, the tint and the tile are `flat`), the tile is read from the vertex instead of derived from the uv per pixel,
+      `tile_sample` is `atlas_sample_g` for a known tile. Water keeps `VsOut` and an atlas uv computed in the vertex shader.
+    - Changed on purpose: x / z of a vertex are on the 1/16 grid (plants 0.9 wide become 0.875, a torch's lean is rounded to 1/16), a fluid
+      corner is on the 1/32 grid, the tint has 5-6-5 bits.
+    - Not done: merging faces with different light (needs per-cell light in a texture or a bigger vertex), merging across sections, a per-quad
+      instanced draw (16 bytes per quad instead of 48), `Uint32x2` (8 bytes) which would need the tile table in a uniform.

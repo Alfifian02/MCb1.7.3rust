@@ -3,7 +3,7 @@
 //! One mesh per 16x128x16 chunk. Faces are emitted only where the neighbouring cell is air;
 //! at the chunk edge the neighbour is read from the adjacent chunk, so no faces are wasted on
 //! the seams between loaded chunks. Vertex positions are world coordinates plus the `ox`, `oz` it is given (`world::chunks::build_job` passes 0: the
-//! chunk-local positions the 16-byte chunk vertex wants; `chunks::pack` turns this output into it).
+//! chunk-local positions the 12-byte chunk vertex wants; `chunks::pack` turns this output into it).
 //!
 //! Vertex format: position(3) + uv(2) + light(1) + lm(1) + tint(1) = `VF` (8) floats = 32 bytes (`gpu::pipeline::Vertex`).
 //! `light` = face shade (RenderBlocks: top 1.0, bottom 0.5, Z sides 0.8, X sides 0.6) times the
