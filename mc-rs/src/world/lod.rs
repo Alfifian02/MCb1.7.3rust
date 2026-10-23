@@ -60,7 +60,7 @@ use crate::render::mesh::{lm, tint_of, Tints};
 use crate::world::chunk::{brightness, idx, is_plant, opaque, Nibbles};
 use crate::world::chunks::{biome_tints, chunk_coord, in_range, Shape};
 use crate::world::gen::chunk_manager::WorldChunkManager;
-use crate::world::gen::overworld::OverworldGenerator;
+use crate::world::gen::overworld::{OverworldGenerator, WorldType};
 use crate::world::gen::populate::Region;
 use glam::Vec3;
 use std::collections::{HashMap, HashSet};
@@ -278,7 +278,7 @@ struct Store {
     real: HashMap<(i32, i32), Cols>,
     /// `<world>/lod`: tiles made with their trees are kept here (`flush`), None = nothing is read or written (the tests).
     dir: Option<PathBuf>,
-    tectonic: bool,
+    ty: WorldType,
     /// Tiles in memory that differ from their file.
     dirty: HashSet<(i32, i32)>,
     /// The pre-generation's progress, shared with its threads (`Shared::pg`).
@@ -292,8 +292,8 @@ fn tile_path(d: &Path, k: (i32, i32)) -> PathBuf {
 }
 
 /// A tile file: magic, world type, trees, then per column a run count (u8) and 7 bytes a run (y0, y1, id, meta, tint).
-fn encode(t: &Tile0, tectonic: bool) -> Vec<u8> {
-    let mut o = vec![MAGIC[0], MAGIC[1], tectonic as u8, t.trees as u8];
+fn encode(t: &Tile0, ty: WorldType) -> Vec<u8> {
+    let mut o = vec![MAGIC[0], MAGIC[1], ty as u8, t.trees as u8];
     for q in 0..64 * 64 {
         let c = t.col(q);
         o.push(c.len() as u8);
@@ -305,8 +305,8 @@ fn encode(t: &Tile0, tectonic: bool) -> Vec<u8> {
 }
 
 /// The tile in `b`, None when it is not a tile file of this format and world type or is cut short.
-fn decode(b: &[u8], tectonic: bool) -> Option<Tile0> {
-    if b.len() < 4 || b[..2] != MAGIC[..] || (b[2] != 0) != tectonic {
+fn decode(b: &[u8], ty: WorldType) -> Option<Tile0> {
+    if b.len() < 4 || b[..2] != MAGIC[..] || b[2] != ty as u8 {
         return None;
     }
     let mut cols: Vec<Col> = Vec::with_capacity(64 * 64);
@@ -348,8 +348,8 @@ impl Shared {
 }
 
 impl Store {
-    fn new(g: OverworldGenerator, cm: WorldChunkManager, dir: Option<PathBuf>, tectonic: bool, sh: Arc<Shared>) -> Self {
-        Store { g, cm, tiles: HashMap::new(), real: HashMap::new(), dir, tectonic, dirty: HashSet::new(), sh }
+    fn new(g: OverworldGenerator, cm: WorldChunkManager, dir: Option<PathBuf>, ty: WorldType, sh: Arc<Shared>) -> Self {
+        Store { g, cm, tiles: HashMap::new(), real: HashMap::new(), dir, ty, dirty: HashSet::new(), sh }
     }
 
     /// Tile `k` is real (with trees) now or was loaded from its file: counted by the pre-generation, never asked of it again.
@@ -374,7 +374,7 @@ impl Store {
     }
 
     fn load(&self, k: (i32, i32)) -> Option<Tile0> {
-        decode(&std::fs::read(tile_path(self.dir.as_ref()?, k)).ok()?, self.tectonic)
+        decode(&std::fs::read(tile_path(self.dir.as_ref()?, k)).ok()?, self.ty)
     }
 
     /// Write the tiles that changed (to a temporary file first, then moved over the old one).
@@ -383,7 +383,7 @@ impl Store {
         for k in std::mem::take(&mut self.dirty) {
             let Some(t) = self.tiles.get(&k) else { continue };
             let p = tile_path(&d, k);
-            if let Err(e) = std::fs::write(p.with_extension("tmp"), encode(t, self.tectonic)).and_then(|_| std::fs::rename(p.with_extension("tmp"), &p)) {
+            if let Err(e) = std::fs::write(p.with_extension("tmp"), encode(t, self.ty)).and_then(|_| std::fs::rename(p.with_extension("tmp"), &p)) {
                 log::warn!("lod: {p:?}: {e}");
             }
         }
@@ -1194,19 +1194,11 @@ fn claim(sh: &Shared) -> Option<(i32, i32)> {
     Some(k)
 }
 
-fn generator(seed: i64, tectonic: bool) -> OverworldGenerator {
-    if tectonic {
-        OverworldGenerator::world_tectonic(seed)
-    } else {
-        OverworldGenerator::world(seed)
-    }
-}
-
 /// One pre-generation thread (Voxy World Gen's `maxActiveTasks`: several at once, apart from the thread that meshes the view, so a
 /// long queue of view builds never starves it). While the switch is on it takes the nearest free tile, reads its file or makes it with
 /// its trees, and hands it to the worker; when nothing is left it waits for the player to move.
 /// Its own generator is made at its first tile, so a world that never pre-generates pays nothing.
-fn pregen_thread(sh: Arc<Shared>, job: Sender<Msg>, seed: i64, tectonic: bool, dir: Option<PathBuf>) {
+fn pregen_thread(sh: Arc<Shared>, job: Sender<Msg>, seed: i64, ty: WorldType, dir: Option<PathBuf>) {
     crate::world::nice(19); // it runs all the time: only on what the render thread and the chunk workers leave free
     let mut gen: Option<(OverworldGenerator, WorldChunkManager)> = None;
     while !sh.quit.load(Relaxed) {
@@ -1216,11 +1208,11 @@ fn pregen_thread(sh: Arc<Shared>, job: Sender<Msg>, seed: i64, tectonic: bool, d
             std::thread::sleep(Duration::from_millis(100));
             continue;
         };
-        let file = dir.as_ref().and_then(|d| decode(&std::fs::read(tile_path(d, k)).ok()?, tectonic)).filter(|t| t.trees);
+        let file = dir.as_ref().and_then(|d| decode(&std::fs::read(tile_path(d, k)).ok()?, ty)).filter(|t| t.trees);
         let fresh = file.is_none();
         let t = file.unwrap_or_else(|| {
             let (g, cm) = gen.get_or_insert_with(|| {
-                let g = generator(seed, tectonic);
+                let g = ty.generator(seed);
                 let cm = g.manager();
                 (g, cm)
             });
@@ -1254,8 +1246,8 @@ pub struct Lod {
 }
 
 impl Lod {
-    /// A LoD for the world of `seed` (Tectonic or vanilla terrain, like the chunk ring), generated on its own thread.
-    pub fn new(seed: i64, tectonic: bool, dir: Option<PathBuf>) -> Self {
+    /// A LoD for the world of `seed` (of this world type, like the chunk ring), generated on its own thread.
+    pub fn new(seed: i64, ty: WorldType, dir: Option<PathBuf>) -> Self {
         let (job, jobs) = channel::<Msg>();
         let (done, rx) = channel::<Built>();
         let (made_tx, made) = channel::<(i32, i32)>();
@@ -1263,7 +1255,7 @@ impl Lod {
         let shared = sh.clone();
         for i in 0..pregen_threads() {
             let (sh, job, dir) = (sh.clone(), job.clone(), dir.clone());
-            std::thread::Builder::new().name(format!("lod-pregen{i}")).spawn(move || pregen_thread(sh, job, seed, tectonic, dir)).expect("lod pregen thread");
+            std::thread::Builder::new().name(format!("lod-pregen{i}")).spawn(move || pregen_thread(sh, job, seed, ty, dir)).expect("lod pregen thread");
         }
         std::thread::Builder::new()
             .name("lod".into())
@@ -1272,9 +1264,9 @@ impl Lod {
                 if let Some(d) = &dir {
                     let _ = std::fs::create_dir_all(d);
                 }
-                let g = generator(seed, tectonic);
+                let g = ty.generator(seed);
                 let cm = g.manager();
-                let mut store = Store::new(g, cm, dir, tectonic, shared);
+                let mut store = Store::new(g, cm, dir, ty, shared);
                 // Ends when the `Lod` (and so `job`) is dropped.
                 while let Ok(m) = jobs.recv() {
                     match m {
@@ -1500,7 +1492,7 @@ mod tests {
     }
 
     fn store() -> Store {
-        Store::new(OverworldGenerator::new(0xCAFEBABE), WorldChunkManager::new(0xCAFEBABE), None, false, Arc::default())
+        Store::new(OverworldGenerator::new(0xCAFEBABE), WorldChunkManager::new(0xCAFEBABE), None, WorldType::Vanilla, Arc::default())
     }
 
     /// A store whose 3 x 3 tiles around (0, 0) are `f`.
@@ -1753,11 +1745,12 @@ mod tests {
     #[test]
     fn a_tile_file_round_trips() {
         let t = tile_of(|x, z| if x < 5 { vec![sp(74, 77, 18), sp((60 + z % 7) as u8, 70, 3)] } else if z < 9 { vec![sp(40, 64, 9)] } else { land(70) });
-        let b = encode(&t, true);
-        let u = decode(&b, true).unwrap();
+        let b = encode(&t, WorldType::Tectonic);
+        let u = decode(&b, WorldType::Tectonic).unwrap();
         assert!(u.cols.spans == t.cols.spans && u.cols.start == t.cols.start && !u.trees);
-        assert!(decode(&b, false).is_none(), "a vanilla world does not read a Tectonic tile");
-        assert!(decode(&b[..b.len() - 3], true).is_none() && decode(&[], true).is_none());
+        assert!(decode(&b, WorldType::Vanilla).is_none(), "a vanilla world does not read a Tectonic tile");
+        assert!(decode(&b, WorldType::Blooming).is_none(), "nor a Blooming one");
+        assert!(decode(&b[..b.len() - 3], WorldType::Tectonic).is_none() && decode(&[], WorldType::Tectonic).is_none());
     }
 
     /// Threads take the tile nearest the player first, never the same one twice, never a finished one.
@@ -1792,7 +1785,7 @@ mod tests {
     /// ran (the worker took it only when idle). Now its own threads make tiles while builds keep coming.
     #[test]
     fn pregen_runs_while_the_view_is_busy() {
-        let mut lod = Lod::new(0xCAFEBABE, false, None);
+        let mut lod = Lod::new(0xCAFEBABE, WorldType::Vanilla, None);
         lod.toggle_pregen();
         let (t0, mut next) = (Instant::now(), 0);
         let mut ask = |lod: &Lod| {

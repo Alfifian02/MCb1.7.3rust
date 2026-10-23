@@ -38,6 +38,7 @@ use crate::render::items::{ItemMesh, SignView};
 use crate::render::camera::{FirstPersonCamera, Frustum};
 use crate::render::outline::Outline;
 use crate::render::color;
+use crate::world::gen::overworld::WorldType;
 use crate::world::lod::{self, Lod};
 use crate::world::pick::{self, Hit};
 use crate::world::dig::{self, Dig};
@@ -94,8 +95,8 @@ const EYE_HEIGHT: f32 = 1.62 - physics::HALF.y;
 struct App {
     /// The renderer: wgpu (Vulkan) or OpenGL ES 3.2 (`backend.rs`).
     be: Backend,
-    /// The world's type (chosen on the create screen, saved in its `info`): false = vanilla b1.7.3 terrain, true = Tectonic (the `tectonic` crate).
-    tectonic: bool,
+    /// The world's type (chosen on the create screen, saved in its `info`): vanilla b1.7.3 terrain, Tectonic (the `tectonic` crate) or Blooming (Vanilla + the Blooming Biosphere biomes).
+    world_type: WorldType,
     /// Far terrain behind the chunks (Voxy-style voxel LoD, `world::lod`): the view reaches the horizon with the same blocks; none in
     /// the Nether (it would be overworld terrain).
     lod: Option<Lod>,
@@ -233,7 +234,7 @@ impl App {
 
         // No world yet: the title screen is up (`enter_world` loads one, and does it again for `LAST_WORLD` below).
         let start = glam::Vec3::ZERO;
-        let chunks = ChunkManager::new_typed(0, RENDER_DIST, false);
+        let chunks = ChunkManager::new_typed(0, RENDER_DIST, WorldType::Vanilla);
         let mut camera = FirstPersonCamera::spawn_at(0.0, 80.0, 0.0);
         // spawn_at defaults to aspect 1.0 and resize() only runs when the size changes, so
         // without this the 3D view is squashed horizontally onto the real screen shape.
@@ -248,7 +249,7 @@ impl App {
         let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as i64);
 
         let mut app = Self {
-            be, tectonic: false, lod: None, seed: 0, root: dir.clone(), opts, pause: None, lod_on: false, menu: Some(Menu::new(&dir)),
+            be, world_type: WorldType::Vanilla, lod: None, seed: 0, root: dir.clone(), opts, pause: None, lod_on: false, menu: Some(Menu::new(&dir)),
             chunks, camera,
             player,
             last_frame: Instant::now(),
@@ -325,7 +326,7 @@ impl App {
     fn new_lod(&self) -> Option<Lod> {
         // Pre-generation is on from the start: the view's own worker alone left the far tiles empty for minutes (`Lod::toggle_pregen` stops it).
         (!self.nether).then(|| {
-            let mut l = Lod::new(self.seed, self.tectonic, Some(self.dir.join("lod")));
+            let mut l = Lod::new(self.seed, self.world_type, Some(self.dir.join("lod")));
             l.toggle_pregen();
             l
         })
@@ -361,7 +362,7 @@ impl App {
         let (old, k) = (self.player.pos, if nether { 0.125 } else { 8.0 });
         (self.nether, self.dir) = (nether, if nether { ow.join("nether") } else { ow });
         let to = if respawn { self.spawn } else { glam::Vec3::new(old.x * k, old.y, old.z * k) };
-        self.chunks = chunk_manager(self.seed, self.tectonic, nether).with_dir(self.dir.clone()); // the old one's workers stop on drop
+        self.chunks = chunk_manager(self.seed, self.world_type, nether).with_dir(self.dir.clone()); // the old one's workers stop on drop
         self.lod = self.new_lod();
         self.chunks.preload(chunk_coord(to.x), chunk_coord(to.z));
         self.close_sign();
@@ -403,7 +404,7 @@ impl App {
     /// Load a world of the list (or just made): from its `level` and chunk files where it has them, else a new one of its seed.
     fn enter_world(&mut self, info: &menu::Info) {
         self.dir = info.dir(&self.root);
-        (self.seed, self.tectonic) = (info.seed, info.tectonic);
+        (self.seed, self.world_type) = (info.seed, info.ty);
         // The world resumes in the dimension it was left in (`<world>/dim`).
         self.nether = std::fs::read_to_string(self.dir.join("dim")).is_ok_and(|s| s.trim() == "nether");
         if self.nether {
@@ -422,7 +423,7 @@ impl App {
     fn quit_to_title(&mut self) {
         self.close_sign();
         self.save(usize::MAX);
-        self.chunks = ChunkManager::new_typed(0, RENDER_DIST, false); // the world's workers stop on drop
+        self.chunks = ChunkManager::new_typed(0, RENDER_DIST, WorldType::Vanilla); // the world's workers stop on drop
         self.lod = None;
         self.menu = Some(Menu::new(&self.root));
         self.pause = None;
@@ -432,7 +433,7 @@ impl App {
         }
     }
 
-    /// Put everything back for the world in `self.dir` (`self.seed`, `self.tectonic`): `wipe` (the TEMPORARY pause-menu reset button)
+    /// Put everything back for the world in `self.dir` (`self.seed`, `self.world_type`): `wipe` (the TEMPORARY pause-menu reset button)
     /// deletes the save folder first and makes a new world: terrain without edits, spawn point, hotbar and inventory, health, time,
     /// weather, mobs, drops, furnaces, block updates; otherwise it resumes from the `level`, chunk and `decor` files, a new world
     /// where there are none. An open screen's stacks are discarded, not dropped.
@@ -454,7 +455,7 @@ impl App {
         }
         let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as i64);
         let level = if wipe { None } else { std::fs::read(self.dir.join("level")).ok().and_then(|b| Level::decode(&b)) };
-        self.chunks = chunk_manager(self.seed, self.tectonic, self.nether).with_dir(self.dir.clone()); // the old one's workers stop on drop
+        self.chunks = chunk_manager(self.seed, self.world_type, self.nether).with_dir(self.dir.clone()); // the old one's workers stop on drop
         self.lod = self.new_lod();
         // The terrain around the player must be real before the first frame, so those chunks are loaded (or generated and
         // populated) here; everything further out streams in on the worker threads.
@@ -489,7 +490,7 @@ impl App {
         if let Some((p, s)) = std::fs::read(self.dir.join("decor")).ok().and_then(|b| decor::decode(&b)).filter(|_| !wipe) {
             (self.paintings, self.signs) = (p, s.into_iter().collect());
         }
-        log::info!("world of seed {:x} ({}), spawn {:?}", self.seed, if self.tectonic { "tectonic" } else { "vanilla" }, self.spawn);
+        log::info!("world of seed {:x} ({}), spawn {:?}", self.seed, self.world_type.name(), self.spawn);
     }
 
     /// Put a loaded `Level` back: time, look direction, hotbar slot, health, inventory, furnaces and dropped items
@@ -2543,9 +2544,9 @@ impl App {
     }
 }
 
-/// The chunk manager of a dimension of the world with this seed: the overworld's (vanilla or Tectonic generator) or the Nether's.
-fn chunk_manager(seed: i64, tectonic: bool, nether: bool) -> ChunkManager {
-    if nether { ChunkManager::new_nether(seed, RENDER_DIST) } else { ChunkManager::new_typed(seed, RENDER_DIST, tectonic) }
+/// The chunk manager of a dimension of the world with this seed: the overworld's (of the world's type) or the Nether's.
+fn chunk_manager(seed: i64, ty: WorldType, nether: bool) -> ChunkManager {
+    if nether { ChunkManager::new_nether(seed, RENDER_DIST) } else { ChunkManager::new_typed(seed, RENDER_DIST, ty) }
 }
 
 /// A new world's spawn point (feet position): dry ground closest to the centre of chunk (0, 0), not under water (a

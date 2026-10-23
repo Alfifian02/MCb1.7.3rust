@@ -133,14 +133,14 @@ impl BiomeEnv {
     pub fn update(&mut self, biome: Biome, temperature: f64, humidity: f64, dt: f32) {
         // Biome.getEnableRain / getEnableSnow: desert rains never, taiga and tundra snow.
         let (arid, snowy, taiga, jungle, swamp) = (
-            matches!(biome, Biome::Desert | Biome::Savanna) as u8 as f32,
-            matches!(biome, Biome::Tundra) as u8 as f32,
+            matches!(biome, Biome::Desert | Biome::Savanna | Biome::Chaparral) as u8 as f32,
+            matches!(biome, Biome::Tundra | Biome::SnowyBirchGrove) as u8 as f32,
             matches!(biome, Biome::Taiga) as u8 as f32,
-            matches!(biome, Biome::Rainforest) as u8 as f32,
-            matches!(biome, Biome::Swamp) as u8 as f32,
+            matches!(biome, Biome::Rainforest | Biome::WetWoodland) as u8 as f32,
+            matches!(biome, Biome::Swamp | Biome::Marsh) as u8 as f32,
         );
         let snow = (snowy + taiga).min(1.0);
-        let rain = if matches!(biome, Biome::Desert) { 0.0 } else { 1.0 - snow };
+        let rain = if matches!(biome, Biome::Desert | Biome::Chaparral) { 0.0 } else { 1.0 - snow };
         let sandstorm = matches!(biome, Biome::Desert) as u8 as f32;
         let (t, h) = (temperature as f32 * 2.0 - 1.0, humidity as f32 * 2.0 - 1.0);
         let k = |tau: f32| if self.primed { 1.0 - (-dt / tau).exp() } else { 1.0 };

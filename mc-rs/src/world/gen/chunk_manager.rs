@@ -118,6 +118,8 @@ struct Cell {
 pub struct WorldChunkManager {
     /// The terrain follows the parameters (see `shaped`).
     shaped: bool,
+    /// The Blooming world type: the biomes come from `Biome::blooming` (see `blooming`).
+    blooming: bool,
     shift: Normal,
     temp: Normal,
     humid: Normal,
@@ -138,6 +140,7 @@ impl WorldChunkManager {
         let mk = |salt: i64, first: i32, amps: &[f64]| Normal::new(seed.wrapping_mul(-7046029254386353131).wrapping_add(salt), first, amps);
         Self {
             shaped: true,
+            blooming: false,
             shift: mk(6, -3, &[1.0, 1.0, 1.0, 0.0]),
             temp: mk(1, -10, &[1.5, 0.0, 1.0, 0.0, 0.0, 0.0]),
             humid: mk(2, -8, &[1.0, 1.0, 0.0, 0.0, 0.0, 0.0]),
@@ -158,6 +161,13 @@ impl WorldChunkManager {
         self
     }
 
+    /// This manager for the Blooming world type: the Vanilla terrain and climate, with the Blooming Biosphere biomes placed by
+    /// `Biome::blooming` where the plain table would put its own.
+    pub fn blooming(mut self, on: bool) -> Self {
+        self.blooming = on;
+        self
+    }
+
     /// Biome, 0..1 climate and wanted terrain of one quart (4 x 4 blocks), as the game samples them. The coordinates are in quarts;
     /// the shift bends the borders (about 16 blocks) so they do not follow the noise's grid.
     fn cell(&self, qx: i32, qz: i32) -> Cell {
@@ -173,7 +183,8 @@ impl WorldChunkManager {
             (0.5, 0.0, 0.45)
         };
         let (off, steep) = terrain(c, e, w);
-        Cell { biome: Biome::from_params(t, h, c, e, w), t: through(t, &TEMPERATURE), h: through(h, &HUMIDITY), off, steep }
+        let biome = if self.blooming { Biome::blooming(t, h, c, e, w) } else { Biome::from_params(t, h, c, e, w) };
+        Cell { biome, t: through(t, &TEMPERATURE), h: through(h, &HUMIDITY), off, steep }
     }
 
     /// (0..1 temperature, 0..1 humidity, surface offset, steepness) at a block: what `OverworldGenerator::probe` needs to read the
@@ -370,6 +381,24 @@ mod tests {
                 assert!(!gone.contains(&b), "{b:?} in an unshaped world");
             }
         }
+    }
+
+    /// The Blooming world type shows some of its biomes (a Vanilla one never does) on the same climate.
+    #[test]
+    fn blooming_manager_adds_its_biomes() {
+        let (mut plain, mut bloom) = (WorldChunkManager::new(0xCAFEBABE), WorldChunkManager::new(0xCAFEBABE).blooming(true));
+        let mut new = 0;
+        for i in -64..64 {
+            for j in -64..64 {
+                let (x, z) = (i * 32, j * 32);
+                let a = plain.load_block_generator_data(x, z, 1, 1)[0];
+                let b = bloom.load_block_generator_data(x, z, 1, 1)[0];
+                assert!(a.colors().is_none(), "{a:?} in a vanilla world");
+                assert_eq!((plain.temperature[0], plain.humidity[0]), (bloom.temperature[0], bloom.humidity[0]), "climate ({x}, {z})");
+                new += b.colors().is_some() as i32;
+            }
+        }
+        assert!(new > 0, "no Blooming biome in 4096 x 4096 blocks");
     }
 
     /// The spawn search looks 32 blocks around the origin: there is land there whatever the seed.

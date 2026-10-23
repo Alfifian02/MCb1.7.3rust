@@ -1,0 +1,985 @@
+diff -ruN orig/mc-rs/src/lib.rs repo2/mc-rs/src/lib.rs
+--- orig/mc-rs/src/lib.rs	2026-10-23 06:53:22.000000000 +0000
++++ repo2/mc-rs/src/lib.rs	2026-10-23 23:31:42.657323831 +0000
+@@ -38,6 +38,7 @@
+ use crate::render::camera::{FirstPersonCamera, Frustum};
+ use crate::render::outline::Outline;
+ use crate::render::color;
++use crate::world::gen::overworld::WorldType;
+ use crate::world::lod::{self, Lod};
+ use crate::world::pick::{self, Hit};
+ use crate::world::dig::{self, Dig};
+@@ -94,8 +95,8 @@
+ struct App {
+     /// The renderer: wgpu (Vulkan) or OpenGL ES 3.2 (`backend.rs`).
+     be: Backend,
+-    /// The world's type (chosen on the create screen, saved in its `info`): false = vanilla b1.7.3 terrain, true = Tectonic (the `tectonic` crate).
+-    tectonic: bool,
++    /// The world's type (chosen on the create screen, saved in its `info`): vanilla b1.7.3 terrain, Tectonic (the `tectonic` crate) or Blooming (Vanilla + the Blooming Biosphere biomes).
++    world_type: WorldType,
+     /// Far terrain behind the chunks (Voxy-style voxel LoD, `world::lod`): the view reaches the horizon with the same blocks; none in
+     /// the Nether (it would be overworld terrain).
+     lod: Option<Lod>,
+@@ -233,7 +234,7 @@
+ 
+         // No world yet: the title screen is up (`enter_world` loads one, and does it again for `LAST_WORLD` below).
+         let start = glam::Vec3::ZERO;
+-        let chunks = ChunkManager::new_typed(0, RENDER_DIST, false);
++        let chunks = ChunkManager::new_typed(0, RENDER_DIST, WorldType::Vanilla);
+         let mut camera = FirstPersonCamera::spawn_at(0.0, 80.0, 0.0);
+         // spawn_at defaults to aspect 1.0 and resize() only runs when the size changes, so
+         // without this the 3D view is squashed horizontally onto the real screen shape.
+@@ -248,7 +249,7 @@
+         let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as i64);
+ 
+         let mut app = Self {
+-            be, tectonic: false, lod: None, seed: 0, root: dir.clone(), opts, pause: None, lod_on: false, menu: Some(Menu::new(&dir)),
++            be, world_type: WorldType::Vanilla, lod: None, seed: 0, root: dir.clone(), opts, pause: None, lod_on: false, menu: Some(Menu::new(&dir)),
+             chunks, camera,
+             player,
+             last_frame: Instant::now(),
+@@ -325,7 +326,7 @@
+     fn new_lod(&self) -> Option<Lod> {
+         // Pre-generation is on from the start: the view's own worker alone left the far tiles empty for minutes (`Lod::toggle_pregen` stops it).
+         (!self.nether).then(|| {
+-            let mut l = Lod::new(self.seed, self.tectonic, Some(self.dir.join("lod")));
++            let mut l = Lod::new(self.seed, self.world_type, Some(self.dir.join("lod")));
+             l.toggle_pregen();
+             l
+         })
+@@ -361,7 +362,7 @@
+         let (old, k) = (self.player.pos, if nether { 0.125 } else { 8.0 });
+         (self.nether, self.dir) = (nether, if nether { ow.join("nether") } else { ow });
+         let to = if respawn { self.spawn } else { glam::Vec3::new(old.x * k, old.y, old.z * k) };
+-        self.chunks = chunk_manager(self.seed, self.tectonic, nether).with_dir(self.dir.clone()); // the old one's workers stop on drop
++        self.chunks = chunk_manager(self.seed, self.world_type, nether).with_dir(self.dir.clone()); // the old one's workers stop on drop
+         self.lod = self.new_lod();
+         self.chunks.preload(chunk_coord(to.x), chunk_coord(to.z));
+         self.close_sign();
+@@ -403,7 +404,7 @@
+     /// Load a world of the list (or just made): from its `level` and chunk files where it has them, else a new one of its seed.
+     fn enter_world(&mut self, info: &menu::Info) {
+         self.dir = info.dir(&self.root);
+-        (self.seed, self.tectonic) = (info.seed, info.tectonic);
++        (self.seed, self.world_type) = (info.seed, info.ty);
+         // The world resumes in the dimension it was left in (`<world>/dim`).
+         self.nether = std::fs::read_to_string(self.dir.join("dim")).is_ok_and(|s| s.trim() == "nether");
+         if self.nether {
+@@ -422,7 +423,7 @@
+     fn quit_to_title(&mut self) {
+         self.close_sign();
+         self.save(usize::MAX);
+-        self.chunks = ChunkManager::new_typed(0, RENDER_DIST, false); // the world's workers stop on drop
++        self.chunks = ChunkManager::new_typed(0, RENDER_DIST, WorldType::Vanilla); // the world's workers stop on drop
+         self.lod = None;
+         self.menu = Some(Menu::new(&self.root));
+         self.pause = None;
+@@ -432,7 +433,7 @@
+         }
+     }
+ 
+-    /// Put everything back for the world in `self.dir` (`self.seed`, `self.tectonic`): `wipe` (the TEMPORARY pause-menu reset button)
++    /// Put everything back for the world in `self.dir` (`self.seed`, `self.world_type`): `wipe` (the TEMPORARY pause-menu reset button)
+     /// deletes the save folder first and makes a new world: terrain without edits, spawn point, hotbar and inventory, health, time,
+     /// weather, mobs, drops, furnaces, block updates; otherwise it resumes from the `level`, chunk and `decor` files, a new world
+     /// where there are none. An open screen's stacks are discarded, not dropped.
+@@ -454,7 +455,7 @@
+         }
+         let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as i64);
+         let level = if wipe { None } else { std::fs::read(self.dir.join("level")).ok().and_then(|b| Level::decode(&b)) };
+-        self.chunks = chunk_manager(self.seed, self.tectonic, self.nether).with_dir(self.dir.clone()); // the old one's workers stop on drop
++        self.chunks = chunk_manager(self.seed, self.world_type, self.nether).with_dir(self.dir.clone()); // the old one's workers stop on drop
+         self.lod = self.new_lod();
+         // The terrain around the player must be real before the first frame, so those chunks are loaded (or generated and
+         // populated) here; everything further out streams in on the worker threads.
+@@ -489,7 +490,7 @@
+         if let Some((p, s)) = std::fs::read(self.dir.join("decor")).ok().and_then(|b| decor::decode(&b)).filter(|_| !wipe) {
+             (self.paintings, self.signs) = (p, s.into_iter().collect());
+         }
+-        log::info!("world of seed {:x} ({}), spawn {:?}", self.seed, if self.tectonic { "tectonic" } else { "vanilla" }, self.spawn);
++        log::info!("world of seed {:x} ({}), spawn {:?}", self.seed, self.world_type.name(), self.spawn);
+     }
+ 
+     /// Put a loaded `Level` back: time, look direction, hotbar slot, health, inventory, furnaces and dropped items
+@@ -2543,9 +2544,9 @@
+     }
+ }
+ 
+-/// The chunk manager of a dimension of the world with this seed: the overworld's (vanilla or Tectonic generator) or the Nether's.
+-fn chunk_manager(seed: i64, tectonic: bool, nether: bool) -> ChunkManager {
+-    if nether { ChunkManager::new_nether(seed, RENDER_DIST) } else { ChunkManager::new_typed(seed, RENDER_DIST, tectonic) }
++/// The chunk manager of a dimension of the world with this seed: the overworld's (of the world's type) or the Nether's.
++fn chunk_manager(seed: i64, ty: WorldType, nether: bool) -> ChunkManager {
++    if nether { ChunkManager::new_nether(seed, RENDER_DIST) } else { ChunkManager::new_typed(seed, RENDER_DIST, ty) }
+ }
+ 
+ /// A new world's spawn point (feet position): dry ground closest to the centre of chunk (0, 0), not under water (a
+diff -ruN orig/mc-rs/src/menu.rs repo2/mc-rs/src/menu.rs
+--- orig/mc-rs/src/menu.rs	2026-10-23 11:51:42.000000000 +0000
++++ repo2/mc-rs/src/menu.rs	2026-10-23 23:32:09.425208419 +0000
+@@ -10,6 +10,7 @@
+ use crate::options::{OptEv, OptionsUi, Settings};
+ use crate::render::hud::{sprites as sp, HudPipeline, HudVertex, NO_UV};
+ use crate::world::decor::{self, Key};
++use crate::world::gen::overworld::WorldType;
+ use std::path::{Path, PathBuf};
+ use std::time::{Instant, SystemTime, UNIX_EPOCH};
+ 
+@@ -25,7 +26,7 @@
+     pub folder: String,
+     pub name: String,
+     pub seed: i64,
+-    pub tectonic: bool,
++    pub ty: WorldType,
+     /// Seconds since the epoch of the last save (`SaveFormatComparator.lastTimePlayed`).
+     pub modified: u64,
+     pub bytes: u64,
+@@ -43,7 +44,7 @@
+     pub fn write(&self, root: &Path) {
+         let d = self.dir(root);
+         let _ = std::fs::create_dir_all(&d);
+-        let text = format!("{}\n{}\n{}\n", self.name, self.seed, if self.tectonic { "tectonic" } else { "vanilla" });
++        let text = format!("{}\n{}\n{}\n", self.name, self.seed, self.ty.name());
+         if let Err(e) = std::fs::write(d.join("info"), text) {
+             log::warn!("world info {}: {e}", self.folder);
+         }
+@@ -57,7 +58,7 @@
+         let secs = |p: PathBuf| std::fs::metadata(p).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0, |t| t.as_secs());
+         let bytes = std::fs::read_dir(&d).map_or(0, |r| r.flatten().filter_map(|e| e.metadata().ok()).map(|m| m.len()).sum());
+         let modified = secs(d.join("level")).max(secs(d.join("info")));
+-        Some(Self { folder: folder.into(), name: name.into(), seed, tectonic: ty.trim() == "tectonic", modified, bytes })
++        Some(Self { folder: folder.into(), name: name.into(), seed, ty: WorldType::parse(ty), modified, bytes })
+     }
+ }
+ 
+@@ -69,7 +70,7 @@
+     if from.is_dir() && !saves(root).join(old).exists() {
+         let _ = std::fs::create_dir_all(saves(root));
+         if std::fs::rename(&from, saves(root).join(old)).is_ok() {
+-            Info { folder: old.into(), name: "Old world".into(), seed: LEGACY_SEED, tectonic: false, modified: 0, bytes: 0 }.write(root);
++            Info { folder: old.into(), name: "Old world".into(), seed: LEGACY_SEED, ty: WorldType::Vanilla, modified: 0, bytes: 0 }.write(root);
+         }
+     }
+     let mut v: Vec<Info> = std::fs::read_dir(saves(root)).map_or_else(|_| Vec::new(), |r| r.flatten().filter_map(|e| Info::read(root, e.file_name().to_str()?)).collect());
+@@ -152,7 +153,7 @@
+     name: String,
+     seed: String,
+     folder: String,
+-    tectonic: bool,
++    ty: WorldType,
+     /// The text field being typed in (0 name, 1 seed): the keyboard is up.
+     typing: Option<u8>,
+     shift: bool,
+@@ -200,7 +201,7 @@
+             name: String::new(),
+             seed: String::new(),
+             folder: String::new(),
+-            tectonic: false,
++            ty: WorldType::Vanilla,
+             typing: None,
+             shift: false,
+             press: None,
+@@ -242,7 +243,7 @@
+             Scr::Create => {
+                 let y = (gh / 4.0).floor() + 108.0;
+                 vec![
+-                    b(2, hw - 100.0, y - 22.0, 200.0, if self.tectonic { "World Type: Tectonic" } else { "World Type: Vanilla" }, true),
++                    b(2, hw - 100.0, y - 22.0, 200.0, match self.ty { WorldType::Vanilla => "World Type: Vanilla", WorldType::Tectonic => "World Type: Tectonic", WorldType::Blooming => "World Type: Blooming" }, true),
+                     b(0, hw - 100.0, y, 200.0, "Create New World", !self.name.is_empty()),
+                     b(1, hw - 100.0, y + 24.0, 200.0, "Cancel", true),
+                 ]
+@@ -372,16 +373,16 @@
+             (Scr::Select, 1) => self.loading = self.sel.and_then(|i| self.worlds.get(i)).cloned(),
+             (Scr::Select, 2) => self.scr = Scr::Delete,
+             (Scr::Select, 3) => {
+-                (self.name, self.seed, self.tectonic, self.typing, self.scr) = (String::from("New World"), String::new(), false, None, Scr::Create);
++                (self.name, self.seed, self.ty, self.typing, self.scr) = (String::from("New World"), String::new(), WorldType::Vanilla, None, Scr::Create);
+                 self.folder = folder_for(&self.root, &self.name);
+             }
+             (Scr::Create, 0) => {
+-                let info = Info { folder: folder_for(&self.root, &self.name), name: self.name.clone(), seed: parse_seed(&self.seed, now_nanos() as i64), tectonic: self.tectonic, modified: 0, bytes: 0 };
++                let info = Info { folder: folder_for(&self.root, &self.name), name: self.name.clone(), seed: parse_seed(&self.seed, now_nanos() as i64), ty: self.ty, modified: 0, bytes: 0 };
+                 info.write(&self.root);
+                 self.loading = Some(info);
+             }
+             (Scr::Create, 1) => self.scr = Scr::Select,
+-            (Scr::Create, 2) => self.tectonic = !self.tectonic,
++            (Scr::Create, 2) => self.ty = self.ty.next(),
+             (Scr::Delete, 0) => {
+                 if let Some(w) = self.sel.and_then(|i| self.worlds.get(i)) {
+                     if let Err(e) = std::fs::remove_dir_all(w.dir(&self.root)) {
+@@ -494,7 +495,7 @@
+                 rect(v, s, [hw - 110.0, y - 2.0, 220.0, 36.0], 0x808080);
+                 rect(v, s, [hw - 109.0, y - 1.0, 218.0, 34.0], 0x000000);
+             }
+-            let kind = if wd.tectonic { "Tectonic" } else { "Vanilla" };
++            let kind = match wd.ty { WorldType::Vanilla => "Vanilla", WorldType::Tectonic => "Tectonic", WorldType::Blooming => "Blooming" };
+             let line = format!("{} ({}, {:?} MB) {kind}", wd.folder, date(wd.modified), (wd.bytes / 1024 * 100 / 1024) as f32 / 100.0);
+             HudPipeline::push_text(v, (hw - 108.0) * s, (y + 1.0) * s, s, &wd.name, rgb(0xFFFFFF));
+             HudPipeline::push_text(v, (hw - 108.0) * s, (y + 12.0) * s, s, &line, rgb(0x808080));
+@@ -610,7 +611,7 @@
+         assert_eq!(folder_for(&root, " x "), "x-");
+     }
+ 
+-    /// Main -> Select -> Create (a name, the tectonic type) -> the world is on disk, listed, loading; then delete it.
++    /// Main -> Select -> Create (a name, the Blooming type: two taps of the type button) -> the world is on disk, listed, loading; then delete it.
+     #[test]
+     fn create_list_and_delete_a_world() {
+         let root = tmp("flow");
+@@ -621,10 +622,12 @@
+         tap(&mut m, "Create New World", sz);
+         assert_eq!((m.scr, m.name.as_str()), (Scr::Create, "New World"));
+         tap(&mut m, "World Type: Vanilla", sz);
+-        assert!(m.tectonic);
++        assert_eq!(m.ty, WorldType::Tectonic);
++        tap(&mut m, "World Type: Tectonic", sz);
++        assert_eq!(m.ty, WorldType::Blooming);
+         tap(&mut m, "Create New World", sz);
+         let info = m.loading.clone().expect("create starts loading");
+-        assert_eq!((info.name.as_str(), info.folder.as_str(), info.tectonic), ("New World", "New World", true));
++        assert_eq!((info.name.as_str(), info.folder.as_str(), info.ty), ("New World", "New World", WorldType::Blooming));
+         let mut v = Vec::new();
+         m.draw(&mut v, sz.0, sz.1, &Settings::default());
+         assert!(m.shown_loading && !m.panorama() && !v.is_empty());
+@@ -632,7 +635,7 @@
+         let mut m = Menu::new(&root);
+         tap(&mut m, "Singleplayer", sz);
+         assert_eq!(m.worlds.len(), 1);
+-        assert_eq!((m.worlds[0].seed, m.worlds[0].tectonic), (info.seed, true));
++        assert_eq!((m.worlds[0].seed, m.worlds[0].ty), (info.seed, WorldType::Blooming));
+         let (s, gw, gh) = scaled(sz.0, sz.1);
+         let (x, y) = ((gw / 2.0).floor() * s, (Menu::list_box(gh).0 + 20.0) * s);
+         m.event(ScreenEv::Down(x, y), sz.0, sz.1, &mut Settings::default());
+@@ -651,7 +654,7 @@
+         std::fs::create_dir_all(root.join("world-cafebabe")).unwrap();
+         std::fs::create_dir_all(root.join("world-cafebabe-rtg")).unwrap();
+         let l = list(&root);
+-        assert_eq!((l.len(), l[0].tectonic, l[0].seed), (1, false, LEGACY_SEED), "the Realistic save is left alone");
++        assert_eq!((l.len(), l[0].ty, l[0].seed), (1, WorldType::Vanilla, LEGACY_SEED), "the Realistic save is left alone");
+         assert!(root.join("world-cafebabe-rtg").is_dir());
+     }
+ }
+diff -ruN orig/mc-rs/src/render/pack.rs repo2/mc-rs/src/render/pack.rs
+--- orig/mc-rs/src/render/pack.rs	2026-10-23 11:51:42.000000000 +0000
++++ repo2/mc-rs/src/render/pack.rs	2026-10-23 23:32:48.724934008 +0000
+@@ -133,14 +133,14 @@
+     pub fn update(&mut self, biome: Biome, temperature: f64, humidity: f64, dt: f32) {
+         // Biome.getEnableRain / getEnableSnow: desert rains never, taiga and tundra snow.
+         let (arid, snowy, taiga, jungle, swamp) = (
+-            matches!(biome, Biome::Desert | Biome::Savanna) as u8 as f32,
+-            matches!(biome, Biome::Tundra) as u8 as f32,
++            matches!(biome, Biome::Desert | Biome::Savanna | Biome::Chaparral) as u8 as f32,
++            matches!(biome, Biome::Tundra | Biome::SnowyBirchGrove) as u8 as f32,
+             matches!(biome, Biome::Taiga) as u8 as f32,
+-            matches!(biome, Biome::Rainforest) as u8 as f32,
+-            matches!(biome, Biome::Swamp) as u8 as f32,
++            matches!(biome, Biome::Rainforest | Biome::WetWoodland) as u8 as f32,
++            matches!(biome, Biome::Swamp | Biome::Marsh) as u8 as f32,
+         );
+         let snow = (snowy + taiga).min(1.0);
+-        let rain = if matches!(biome, Biome::Desert) { 0.0 } else { 1.0 - snow };
++        let rain = if matches!(biome, Biome::Desert | Biome::Chaparral) { 0.0 } else { 1.0 - snow };
+         let sandstorm = matches!(biome, Biome::Desert) as u8 as f32;
+         let (t, h) = (temperature as f32 * 2.0 - 1.0, humidity as f32 * 2.0 - 1.0);
+         let k = |tau: f32| if self.primed { 1.0 - (-dt / tau).exp() } else { 1.0 };
+diff -ruN orig/mc-rs/src/world/biome.rs repo2/mc-rs/src/world/biome.rs
+--- orig/mc-rs/src/world/biome.rs	2026-10-23 11:51:42.000000000 +0000
++++ repo2/mc-rs/src/world/biome.rs	2026-10-23 23:32:48.724416184 +0000
+@@ -1,4 +1,4 @@
+-//! The 13 biomes of this world and where they are placed. `Biome::from_params` is the Minecraft 1.18+ placement (the Overworld
++//! The 19 biomes of this world and where they are placed (13 in every world, 6 more in a Blooming world). `Biome::from_params` is the Minecraft 1.18+ placement (the Overworld
+ //! section of the wiki's "World generation"), folded onto the Beta biomes; `from_climate` is b1.7.3's `BiomeGenBase.getBiome` /
+ //! `getBiomeFromLookup` (a 2D temperature x humidity table), kept for the golden tests.
+ 
+@@ -20,6 +20,21 @@
+     Beach,
+     /// High, eroded ground: bare stone, snow-capped by the snow line where it is cold.
+     Mountains,
++    // The six biomes of the Blooming Biosphere datapack that this world can show (`Biome::blooming`, the Blooming world type only).
++    // Tidepools is not ported (all coral and tuff). Substitutions: dark oak / acacia / jungle -> oak, cherry -> birch, mud / podzol /
++    // coarse dirt / packed mud -> dirt, the new flowers and double plants -> what Beta has (or nothing).
++    /// Cool, damp woods of birch, spruce and oak (the datapack's `autumnal_forest`).
++    AutumnalForest,
++    /// Warm, dry scrub of oaks and birches (`chaparral`).
++    Chaparral,
++    /// Flat wetland with a few oaks and lots of grass (`marsh`).
++    Marsh,
++    /// Temperate oak woods (`oak_woodland`).
++    OakWoodland,
++    /// Dense warm rainforest (the datapack's `rainforest`; renamed, `Rainforest` is Beta's).
++    WetWoodland,
++    /// Cold birch grove (the datapack's `snowy_cherry_grove`, cherry trees being birches here).
++    SnowyBirchGrove,
+ }
+ 
+ /// The game's `MIDDLE_BIOMES`, rows temperature 0..4 (frozen to hot), columns humidity 0..4 (dry to wet), on this world's biomes:
+@@ -36,15 +51,112 @@
+     ]
+ };
+ 
++/// Blooming Biosphere's surface boxes, (biome, [temperature, humidity, continentalness, erosion, weirdness] as (min, max)), generated from
++/// `data/minecraft/dimension/overworld.json` (the depth-0 entries of its six land biomes, in its order, repeats dropped).
++#[rustfmt::skip]
++const BLOOMING: &[(Biome, [(f64, f64); 5])] = &[
++    (Biome::AutumnalForest, [(-0.45, -0.15), (0.1, 0.3), (-0.19, 0.3), (-0.2225, 0.05), (-1.0, -0.266667)]),
++    (Biome::OakWoodland, [(-0.15, 0.2), (-0.1, 0.1), (-0.19, 0.3), (-0.2225, 0.05), (-1.0, -0.266667)]),
++    (Biome::WetWoodland, [(0.2, 0.55), (0.3, 1.0), (-0.19, 1.0), (-0.2225, 0.05), (-1.0, -0.266667)]),
++    (Biome::SnowyBirchGrove, [(-1.0, -0.45), (0.1, 0.7), (-0.11, 0.03), (-1.0, -0.375), (-1.0, -0.766667)]),
++    (Biome::WetWoodland, [(0.2, 0.55), (0.3, 1.0), (-0.11, 0.03), (-1.0, 0.55), (-1.0, -0.766667)]),
++    (Biome::AutumnalForest, [(-0.45, -0.15), (0.1, 0.3), (-0.11, 0.03), (-0.78, 0.55), (-1.0, -0.766667)]),
++    (Biome::OakWoodland, [(-0.15, 0.2), (-0.1, 0.1), (-0.11, 0.03), (-0.78, 0.55), (-1.0, -0.766667)]),
++    (Biome::Marsh, [(-0.15, 0.55), (-1.0, -0.35), (-0.11, 1.0), (0.55, 1.0), (-1.0, -0.933333)]),
++    (Biome::Marsh, [(-0.15, 0.55), (0.7, 1.0), (-0.11, 1.0), (0.55, 1.0), (-1.0, -0.933333)]),
++    (Biome::SnowyBirchGrove, [(-1.0, -0.45), (0.1, 0.7), (0.03, 1.0), (-1.0, -0.375), (-1.0, -0.933333)]),
++    (Biome::WetWoodland, [(0.2, 0.55), (0.3, 1.0), (0.03, 1.0), (-1.0, 0.55), (-1.0, -0.933333)]),
++    (Biome::AutumnalForest, [(-0.45, -0.15), (0.1, 0.3), (0.03, 0.3), (-0.78, 0.45), (-1.0, -0.933333)]),
++    (Biome::OakWoodland, [(-0.15, 0.2), (-0.1, 0.1), (0.03, 0.3), (-0.78, 0.45), (-1.0, -0.933333)]),
++    (Biome::AutumnalForest, [(-0.45, -0.15), (0.1, 0.3), (0.3, 1.0), (-0.2225, 0.45), (-1.0, -0.933333)]),
++    (Biome::OakWoodland, [(-0.15, 0.2), (-0.1, 0.1), (0.3, 1.0), (-0.2225, 0.45), (-1.0, -0.933333)]),
++    (Biome::AutumnalForest, [(-0.45, -0.15), (0.1, 0.3), (-0.19, -0.11), (-1.0, 1.0), (-0.933333, -0.766667)]),
++    (Biome::OakWoodland, [(-0.15, 0.2), (-0.1, 0.1), (-0.19, -0.11), (-1.0, 1.0), (-0.933333, -0.766667)]),
++    (Biome::WetWoodland, [(0.2, 0.55), (0.3, 1.0), (-0.19, 0.03), (-1.0, 1.0), (-0.933333, -0.766667)]),
++    (Biome::AutumnalForest, [(-0.45, -0.15), (0.1, 0.3), (-0.11, 1.0), (0.55, 1.0), (-0.933333, -0.4)]),
++    (Biome::OakWoodland, [(-0.15, 0.2), (-0.1, 0.1), (-0.11, 1.0), (0.55, 1.0), (-0.933333, -0.4)]),
++    (Biome::SnowyBirchGrove, [(-1.0, -0.45), (0.1, 0.7), (0.03, 1.0), (-0.78, -0.375), (-0.933333, -0.766667)]),
++    (Biome::WetWoodland, [(0.2, 0.55), (0.3, 1.0), (0.03, 1.0), (-0.78, 1.0), (-0.933333, -0.766667)]),
++    (Biome::AutumnalForest, [(-0.45, -0.15), (0.1, 0.3), (0.03, 1.0), (0.05, 0.45), (-0.933333, -0.05)]),
++    (Biome::OakWoodland, [(-0.15, 0.2), (-0.1, 0.1), (0.03, 1.0), (0.05, 0.45), (-0.933333, -0.05)]),
++    (Biome::SnowyBirchGrove, [(-1.0, -0.45), (0.1, 0.7), (-0.19, 0.03), (-0.78, -0.375), (-0.766667, -0.566667)]),
++    (Biome::AutumnalForest, [(-0.45, -0.15), (0.1, 0.3), (-0.19, 0.03), (-0.78, 0.45), (-0.766667, -0.4)]),
++    (Biome::OakWoodland, [(-0.15, 0.2), (-0.1, 0.1), (-0.19, 0.03), (-0.78, 0.45), (-0.766667, -0.4)]),
++    (Biome::WetWoodland, [(0.2, 0.55), (0.3, 1.0), (-0.19, 0.03), (-0.78, 1.0), (-0.766667, -0.4)]),
++    (Biome::AutumnalForest, [(-0.45, -0.15), (0.1, 0.3), (-0.19, 1.0), (0.55, 1.0), (-0.766667, -0.4)]),
++    (Biome::OakWoodland, [(-0.15, 0.2), (-0.1, 0.1), (-0.19, 1.0), (0.55, 1.0), (-0.766667, -0.4)]),
++    (Biome::WetWoodland, [(0.2, 0.55), (0.3, 1.0), (0.03, 1.0), (-0.375, 1.0), (-0.766667, -0.4)]),
++    (Biome::AutumnalForest, [(-0.45, -0.15), (0.1, 0.3), (-0.19, -0.11), (-1.0, 1.0), (-0.566667, -0.4)]),
++    (Biome::OakWoodland, [(-0.15, 0.2), (-0.1, 0.1), (-0.19, -0.11), (-1.0, 1.0), (-0.566667, -0.4)]),
++    (Biome::WetWoodland, [(0.2, 0.55), (0.3, 1.0), (-0.19, 0.03), (-1.0, 1.0), (-0.566667, -0.4)]),
++    (Biome::SnowyBirchGrove, [(-1.0, -0.45), (0.1, 0.7), (-0.11, 0.03), (-1.0, -0.375), (-0.566667, -0.266667)]),
++    (Biome::AutumnalForest, [(-0.45, -0.15), (0.1, 0.3), (-0.11, 0.03), (0.45, 1.0), (-0.566667, -0.4)]),
++    (Biome::OakWoodland, [(-0.15, 0.2), (-0.1, 0.1), (-0.11, 0.03), (0.45, 1.0), (-0.566667, -0.4)]),
++    (Biome::SnowyBirchGrove, [(-1.0, -0.45), (0.1, 0.7), (0.03, 1.0), (-0.78, -0.375), (-0.566667, -0.05)]),
++    (Biome::WetWoodland, [(0.2, 0.55), (0.3, 1.0), (0.03, 1.0), (-0.78, 1.0), (-0.566667, -0.4)]),
++    (Biome::WetWoodland, [(0.2, 0.55), (0.3, 1.0), (-0.11, 0.8), (-1.0, 0.55), (-0.4, -0.05)]),
++    (Biome::AutumnalForest, [(-0.45, -0.15), (0.1, 0.3), (-0.11, 0.03), (-0.78, 0.55), (-0.4, -0.05)]),
++    (Biome::OakWoodland, [(-0.15, 0.2), (-0.1, 0.1), (-0.11, 0.03), (-0.78, 0.55), (-0.4, -0.05)]),
++    (Biome::Marsh, [(-0.15, 0.55), (-1.0, -0.35), (-0.11, 1.0), (0.55, 1.0), (-0.4, 0.4)]),
++    (Biome::Marsh, [(-0.15, 0.55), (0.7, 1.0), (-0.11, 1.0), (0.55, 1.0), (-0.4, 0.4)]),
++    (Biome::SnowyBirchGrove, [(-1.0, -0.45), (0.1, 0.7), (0.03, 1.0), (-1.0, -0.375), (-0.4, -0.05)]),
++    (Biome::AutumnalForest, [(-0.45, -0.15), (0.1, 0.3), (0.03, 0.3), (-0.78, 0.45), (-0.4, -0.05)]),
++    (Biome::OakWoodland, [(-0.15, 0.2), (-0.1, 0.1), (0.03, 0.3), (-0.78, 0.45), (-0.4, -0.05)]),
++    (Biome::AutumnalForest, [(-0.45, -0.15), (0.1, 0.3), (0.3, 1.0), (-0.2225, 0.45), (-0.4, -0.05)]),
++    (Biome::OakWoodland, [(-0.15, 0.2), (-0.1, 0.1), (0.3, 1.0), (-0.2225, 0.45), (-0.4, -0.05)]),
++    (Biome::WetWoodland, [(0.2, 0.55), (0.3, 1.0), (0.8, 1.0), (-1.0, 0.55), (-0.4, -0.266667)]),
++    (Biome::AutumnalForest, [(-0.45, -0.15), (0.1, 0.3), (-0.11, 0.8), (-1.0, 0.55), (-0.266667, -0.05)]),
++    (Biome::OakWoodland, [(-0.15, 0.2), (-0.1, 0.1), (-0.11, 0.8), (-1.0, 0.55), (-0.266667, -0.05)]),
++    (Biome::AutumnalForest, [(-0.45, -0.15), (0.1, 0.3), (0.8, 1.0), (-1.0, 0.45), (-0.266667, -0.05)]),
++    (Biome::OakWoodland, [(-0.15, 0.2), (-0.1, 0.1), (0.8, 1.0), (-1.0, 0.45), (-0.266667, -0.05)]),
++    (Biome::WetWoodland, [(0.2, 0.55), (0.3, 1.0), (0.8, 1.0), (-1.0, 0.45), (-0.266667, -0.05)]),
++    (Biome::Marsh, [(-1.0, 1.0), (-1.0, 1.0), (0.8, 1.0), (0.45, 0.55), (-0.266667, -0.05)]),
++    (Biome::Chaparral, [(0.2, 0.55), (-0.35, -0.1), (0.03, 1.0), (-1.0, -0.375), (-0.05, 0.266667)]),
++    (Biome::Chaparral, [(0.2, 0.55), (-0.35, -0.1), (-0.11, 1.0), (-1.0, 0.45), (0.05, 0.266667)]),
++    (Biome::SnowyBirchGrove, [(-1.0, -0.45), (0.1, 0.3), (0.03, 1.0), (-1.0, -0.375), (0.05, 0.4)]),
++    (Biome::Marsh, [(-1.0, 1.0), (-1.0, 1.0), (0.03, 1.0), (0.45, 0.55), (0.05, 0.266667)]),
++    (Biome::Chaparral, [(0.2, 0.55), (-0.35, -0.1), (-0.19, 0.3), (-0.2225, 0.45), (0.266667, 1.0)]),
++    (Biome::SnowyBirchGrove, [(-1.0, -0.45), (0.1, 0.3), (-0.11, 0.03), (-1.0, -0.375), (0.266667, 0.566667)]),
++    (Biome::WetWoodland, [(0.2, 0.55), (0.3, 1.0), (-0.11, 0.03), (-1.0, -0.78), (0.266667, 0.566667)]),
++    (Biome::Chaparral, [(0.2, 0.55), (-0.35, -0.1), (-0.11, 0.03), (-0.78, 0.45), (0.266667, 1.0)]),
++    (Biome::WetWoodland, [(0.2, 0.55), (0.3, 1.0), (0.03, 1.0), (-1.0, -0.78), (0.266667, 0.4)]),
++    (Biome::Chaparral, [(0.2, 0.55), (-0.35, -0.1), (0.03, 0.3), (-0.78, 0.55), (0.266667, 0.4)]),
++    (Biome::WetWoodland, [(0.2, 0.55), (0.3, 1.0), (0.3, 1.0), (-0.78, -0.2225), (0.266667, 0.566667)]),
++    (Biome::Chaparral, [(0.2, 0.55), (-0.35, -0.1), (0.3, 1.0), (-0.2225, 0.55), (0.266667, 0.4)]),
++    (Biome::Chaparral, [(0.2, 0.55), (-0.35, -0.1), (-0.19, -0.11), (-1.0, 0.45), (0.4, 0.566667)]),
++    (Biome::Chaparral, [(0.2, 0.55), (-0.35, -0.1), (-0.19, 1.0), (0.55, 1.0), (0.4, 0.933333)]),
++    (Biome::SnowyBirchGrove, [(-1.0, -0.45), (0.1, 0.3), (0.03, 1.0), (-0.78, -0.375), (0.4, 0.566667)]),
++    (Biome::WetWoodland, [(0.2, 0.55), (0.3, 1.0), (0.03, 1.0), (-0.78, -0.2225), (0.4, 0.566667)]),
++    (Biome::Chaparral, [(0.2, 0.55), (-0.35, -0.1), (0.03, 1.0), (0.45, 1.0), (0.4, 0.933333)]),
++    (Biome::WetWoodland, [(0.2, 0.55), (0.3, 1.0), (0.3, 1.0), (-0.2225, 0.05), (0.4, 0.933333)]),
++    (Biome::Chaparral, [(0.2, 0.55), (-0.35, -0.1), (0.3, 1.0), (0.05, 1.0), (0.4, 0.933333)]),
++    (Biome::SnowyBirchGrove, [(-1.0, -0.45), (0.1, 0.3), (-0.19, 0.03), (-0.78, -0.375), (0.566667, 0.766667)]),
++    (Biome::Chaparral, [(0.2, 0.55), (-0.35, -0.1), (-0.19, 0.03), (-0.78, 0.45), (0.566667, 0.933333)]),
++    (Biome::WetWoodland, [(0.2, 0.55), (0.3, 1.0), (0.03, 1.0), (-0.375, -0.2225), (0.566667, 0.933333)]),
++    (Biome::Chaparral, [(0.2, 0.55), (-0.35, -0.1), (-0.19, -0.11), (-1.0, 0.45), (0.766667, 0.933333)]),
++    (Biome::SnowyBirchGrove, [(-1.0, -0.45), (0.1, 0.3), (-0.11, 0.03), (-1.0, -0.375), (0.766667, 1.0)]),
++    (Biome::WetWoodland, [(0.2, 0.55), (0.3, 1.0), (-0.11, 0.03), (-1.0, -0.78), (0.766667, 1.0)]),
++    (Biome::SnowyBirchGrove, [(-1.0, -0.45), (0.1, 0.3), (0.03, 1.0), (-0.78, -0.375), (0.766667, 1.0)]),
++    (Biome::WetWoodland, [(0.2, 0.55), (0.3, 1.0), (0.03, 1.0), (-0.78, -0.2225), (0.766667, 0.933333)]),
++    (Biome::Marsh, [(-0.15, 0.55), (-1.0, -0.35), (-0.11, 1.0), (0.55, 1.0), (0.933333, 1.0)]),
++    (Biome::Marsh, [(-0.15, 0.55), (0.7, 1.0), (-0.11, 1.0), (0.55, 1.0), (0.933333, 1.0)]),
++    (Biome::SnowyBirchGrove, [(-1.0, -0.45), (0.1, 0.3), (0.03, 1.0), (-1.0, -0.375), (0.933333, 1.0)]),
++    (Biome::WetWoodland, [(0.2, 0.55), (0.3, 1.0), (0.03, 1.0), (-1.0, -0.78), (0.933333, 1.0)]),
++    (Biome::Chaparral, [(0.2, 0.55), (-0.35, -0.1), (0.03, 0.3), (-0.78, 0.55), (0.933333, 1.0)]),
++    (Biome::WetWoodland, [(0.2, 0.55), (0.3, 1.0), (0.3, 1.0), (-0.78, -0.2225), (0.933333, 1.0)]),
++    (Biome::Chaparral, [(0.2, 0.55), (-0.35, -0.1), (0.3, 1.0), (-0.2225, 0.55), (0.933333, 1.0)]),
++];
++
+ impl Biome {
+-    /// `BiomeGenBase.getEnableSnow` (taiga, tundra; ice desert is never selected).
++    /// `BiomeGenBase.getEnableSnow` (taiga, tundra, the snowy birch grove; ice desert is never selected).
+     pub fn snows(self) -> bool {
+-        matches!(self, Biome::Taiga | Biome::Tundra)
++        matches!(self, Biome::Taiga | Biome::Tundra | Biome::SnowyBirchGrove)
+     }
+ 
+-    /// `BiomeGenBase.canSpawnLightningBolt`: rain falls where it does not snow and rain is not disabled (desert).
++    /// `BiomeGenBase.canSpawnLightningBolt`: rain falls where it does not snow and rain is not disabled (desert, and the datapack's
++    /// chaparral, which has no precipitation).
+     pub fn rains(self) -> bool {
+-        !self.snows() && self != Biome::Desert
++        !self.snows() && !matches!(self, Biome::Desert | Biome::Chaparral)
+     }
+ 
+     /// The overworld table of Minecraft 1.18+ (`OverworldBiomeBuilder`) for one surface point, from the five climate parameters
+@@ -76,6 +188,33 @@
+         }
+     }
+ 
++    /// `from_params` of the Blooming world type: the surface boxes of the Blooming Biosphere datapack (its `dimension/overworld.json`,
++    /// depth 0, in that file's order) win where the point is inside one, else the table above. The datapack cuts its biomes out of
++    /// the game's own middle-table cells, so this is the same placement, folded onto this world's biomes.
++    /// ponytail: a box is "inside or not"; the game takes the nearest box of all of them, so it also lets a vanilla box win where a
++    /// new one is merely close. Upgrade: a distance over the 7 parameters if the borders look too hard.
++    pub fn blooming(t: f64, h: f64, c: f64, e: f64, w: f64) -> Biome {
++        let p = [t, h, c, e, w];
++        BLOOMING
++            .iter()
++            .find(|(_, r)| p.iter().zip(r).all(|(v, &(lo, hi))| (lo..=hi).contains(v)))
++            .map_or_else(|| Biome::from_params(t, h, c, e, w), |&(b, _)| b)
++    }
++
++    /// The datapack's `grass_color` and `foliage_color` (`r << 16 | g << 8 | b`) of a Blooming biome, `None` for the others (their
++    /// colours come from the climate maps).
++    pub fn colors(self) -> Option<(u32, u32)> {
++        match self {
++            Biome::AutumnalForest => Some((10076245, 12998969)),
++            Biome::Chaparral => Some((11385946, 8758586)),
++            Biome::Marsh => Some((6260806, 6982711)),
++            Biome::OakWoodland => Some((10665811, 8564020)),
++            Biome::WetWoodland => Some((7065392, 4700193)),
++            Biome::SnowyBirchGrove => Some((9023837, 8038732)),
++            _ => None,
++        }
++    }
++
+     /// getBiomeFromLookup(temperature, humidity); both in [0, 1].
+     #[cfg(test)]
+     pub fn from_climate(temperature: f64, humidity: f64) -> Biome {
+@@ -143,6 +282,7 @@
+             Biome::Tundra => 10,
+             // Not in b1.7.3: the golden never sees them.
+             Biome::Ocean | Biome::Beach | Biome::Mountains => u8::MAX,
++            Biome::AutumnalForest | Biome::Chaparral | Biome::Marsh | Biome::OakWoodland | Biome::WetWoodland | Biome::SnowyBirchGrove => u8::MAX,
+         }
+     }
+ }
+@@ -188,4 +328,23 @@
+         assert_eq!(at(0.0, 0.5, 0.8, 0.0), Biome::Swamp); // the bottom of a valley, flat ground
+         assert_eq!((Biome::Ocean.filler_block(), Biome::Beach.top_block(), Biome::Mountains.top_block()), (12, 12, 1));
+     }
++
++    /// The Blooming table: a point inside a box is a Blooming biome (the first box that holds it), outside all of them it is the
++    /// plain table's, the sea stays the sea, and the snowy grove snows.
++    #[test]
++    fn blooming_boxes_place_their_biomes() {
++        for &(b, r) in BLOOMING {
++            let m = r.map(|(lo, hi)| (lo + hi) / 2.0);
++            assert!(Biome::blooming(m[0], m[1], m[2], m[3], m[4]).colors().is_some(), "{b:?}: the middle of its own box");
++            assert!(r[2].0 >= -0.19, "{b:?} reaches the sea");
++        }
++        // The first box: cool, damp, inland, low erosion, weirdness down to -0.27.
++        assert_eq!(Biome::blooming(-0.3, 0.2, 0.1, -0.1, -0.5), Biome::AutumnalForest);
++        // The same point in a world without the datapack is a taiga (cell 1, 3 of the middle table).
++        assert_eq!(Biome::from_params(-0.3, 0.2, 0.1, -0.1, -0.5), Biome::Taiga);
++        // Out at sea nothing changes.
++        assert_eq!(Biome::blooming(-0.3, 0.2, -0.5, -0.1, -0.5), Biome::Ocean);
++        assert!(Biome::SnowyBirchGrove.snows() && !Biome::SnowyBirchGrove.rains() && Biome::Marsh.rains() && !Biome::Chaparral.rains());
++        assert_eq!(Biome::Taiga.colors(), None);
++    }
+ }
+diff -ruN orig/mc-rs/src/world/chunks.rs repo2/mc-rs/src/world/chunks.rs
+--- orig/mc-rs/src/world/chunks.rs	2026-10-23 18:42:10.000000000 +0000
++++ repo2/mc-rs/src/world/chunks.rs	2026-10-23 23:30:56.523980040 +0000
+@@ -30,7 +30,7 @@
+ use crate::world::chunk::{height_map, idx, meta_matters, normal_cube, opaque, physics_id, Nibbles, H, VOLUME};
+ use crate::world::gen::chunk_manager::WorldChunkManager;
+ use crate::world::gen::hydro;
+-use crate::world::gen::overworld::OverworldGenerator;
++use crate::world::gen::overworld::{OverworldGenerator, WorldType};
+ use crate::world::gen::noise::JavaRandom;
+ use crate::world::chest::{Chest, Pos};
+ use crate::world::gen::populate::Region;
+@@ -90,12 +90,14 @@
+ /// The grass and foliage colour of every column of chunk (cx, cz) (`BlockGrass.colorMultiplier` and friends read the climate of the
+ /// column itself, no blending). ponytail: the climate noise is sampled again for every (re)mesh; cache it per chunk if remeshing shows up in a profile.
+ pub(crate) fn biome_tints(cm: &mut WorldChunkManager, cx: i32, cz: i32) -> mesh::Tints {
+-    cm.load_block_generator_data(cx * 16, cz * 16, 16, 16);
++    let biomes = cm.load_block_generator_data(cx * 16, cz * 16, 16, 16);
+     let mut t = mesh::Tints::white();
+     for i in 0..256 {
+         let (temp, humid) = (cm.temperature[i], cm.humidity[i]);
+-        t.grass[i] = crate::world::climate::grass(temp, humid) as f32;
+-        t.foliage[i] = crate::world::climate::foliage(temp, humid) as f32;
++        // The Blooming biomes have their own colours (the datapack's); every other biome reads the climate maps.
++        let (grass, foliage) = biomes[i].colors().unwrap_or_else(|| (crate::world::climate::grass(temp, humid), crate::world::climate::foliage(temp, humid)));
++        t.grass[i] = grass as f32;
++        t.foliage[i] = foliage as f32;
+     }
+     t
+ }
+@@ -852,13 +854,17 @@
+     /// `radius` is the render distance in chunks. Dropping the manager closes the job channel,
+     /// which ends the workers.
+     pub fn new(seed: i64, radius: i32) -> Self {
+-        Self::new_typed(seed, radius, false)
++        Self::new_typed(seed, radius, WorldType::Vanilla)
+     }
+ 
+-    /// `new` with the world type: `tectonic` = the second generator (the `tectonic` crate's terrain) in every worker and for `preload`.
+-    pub fn new_typed(seed: i64, radius: i32, tectonic: bool) -> Self {
+-        let make: fn(i64) -> OverworldGenerator = if tectonic { OverworldGenerator::world_tectonic } else { OverworldGenerator::world };
+-        hydro::watch(Some(hydro::Hydro::of(seed, tectonic))); // the currents of this world
++    /// `new` with the world type (`WorldType::generator`) in every worker and for `preload`.
++    pub fn new_typed(seed: i64, radius: i32, ty: WorldType) -> Self {
++        let make: fn(i64) -> OverworldGenerator = match ty {
++            WorldType::Vanilla => OverworldGenerator::world,
++            WorldType::Tectonic => OverworldGenerator::world_tectonic,
++            WorldType::Blooming => OverworldGenerator::world_blooming,
++        };
++        hydro::watch(Some(hydro::Hydro::of(seed, ty == WorldType::Tectonic))); // the currents of this world (Blooming's are Vanilla's)
+         Self::new_with(seed, radius, make)
+     }
+ 
+diff -ruN orig/mc-rs/src/world/gen/chunk_manager.rs repo2/mc-rs/src/world/gen/chunk_manager.rs
+--- orig/mc-rs/src/world/gen/chunk_manager.rs	2026-10-23 11:51:42.000000000 +0000
++++ repo2/mc-rs/src/world/gen/chunk_manager.rs	2026-10-23 23:30:36.720015423 +0000
+@@ -118,6 +118,8 @@
+ pub struct WorldChunkManager {
+     /// The terrain follows the parameters (see `shaped`).
+     shaped: bool,
++    /// The Blooming world type: the biomes come from `Biome::blooming` (see `blooming`).
++    blooming: bool,
+     shift: Normal,
+     temp: Normal,
+     humid: Normal,
+@@ -138,6 +140,7 @@
+         let mk = |salt: i64, first: i32, amps: &[f64]| Normal::new(seed.wrapping_mul(-7046029254386353131).wrapping_add(salt), first, amps);
+         Self {
+             shaped: true,
++            blooming: false,
+             shift: mk(6, -3, &[1.0, 1.0, 1.0, 0.0]),
+             temp: mk(1, -10, &[1.5, 0.0, 1.0, 0.0, 0.0, 0.0]),
+             humid: mk(2, -8, &[1.0, 1.0, 0.0, 0.0, 0.0, 0.0]),
+@@ -158,6 +161,13 @@
+         self
+     }
+ 
++    /// This manager for the Blooming world type: the Vanilla terrain and climate, with the Blooming Biosphere biomes placed by
++    /// `Biome::blooming` where the plain table would put its own.
++    pub fn blooming(mut self, on: bool) -> Self {
++        self.blooming = on;
++        self
++    }
++
+     /// Biome, 0..1 climate and wanted terrain of one quart (4 x 4 blocks), as the game samples them. The coordinates are in quarts;
+     /// the shift bends the borders (about 16 blocks) so they do not follow the noise's grid.
+     fn cell(&self, qx: i32, qz: i32) -> Cell {
+@@ -173,7 +183,8 @@
+             (0.5, 0.0, 0.45)
+         };
+         let (off, steep) = terrain(c, e, w);
+-        Cell { biome: Biome::from_params(t, h, c, e, w), t: through(t, &TEMPERATURE), h: through(h, &HUMIDITY), off, steep }
++        let biome = if self.blooming { Biome::blooming(t, h, c, e, w) } else { Biome::from_params(t, h, c, e, w) };
++        Cell { biome, t: through(t, &TEMPERATURE), h: through(h, &HUMIDITY), off, steep }
+     }
+ 
+     /// (0..1 temperature, 0..1 humidity, surface offset, steepness) at a block: what `OverworldGenerator::probe` needs to read the
+@@ -372,6 +383,24 @@
+         }
+     }
+ 
++    /// The Blooming world type shows some of its biomes (a Vanilla one never does) on the same climate.
++    #[test]
++    fn blooming_manager_adds_its_biomes() {
++        let (mut plain, mut bloom) = (WorldChunkManager::new(0xCAFEBABE), WorldChunkManager::new(0xCAFEBABE).blooming(true));
++        let mut new = 0;
++        for i in -64..64 {
++            for j in -64..64 {
++                let (x, z) = (i * 32, j * 32);
++                let a = plain.load_block_generator_data(x, z, 1, 1)[0];
++                let b = bloom.load_block_generator_data(x, z, 1, 1)[0];
++                assert!(a.colors().is_none(), "{a:?} in a vanilla world");
++                assert_eq!((plain.temperature[0], plain.humidity[0]), (bloom.temperature[0], bloom.humidity[0]), "climate ({x}, {z})");
++                new += b.colors().is_some() as i32;
++            }
++        }
++        assert!(new > 0, "no Blooming biome in 4096 x 4096 blocks");
++    }
++
+     /// The spawn search looks 32 blocks around the origin: there is land there whatever the seed.
+     #[test]
+     fn origin_is_land() {
+diff -ruN orig/mc-rs/src/world/gen/hydro.rs repo2/mc-rs/src/world/gen/hydro.rs
+--- orig/mc-rs/src/world/gen/hydro.rs	2026-10-23 11:51:42.000000000 +0000
++++ repo2/mc-rs/src/world/gen/hydro.rs	2026-10-23 23:32:48.725724773 +0000
+@@ -992,9 +992,9 @@
+     use block::*;
+     match b {
+         Biome::Desert | Biome::Beach | Biome::Ocean => Style { bed: &[SAND], line: &[SAND], top: &[SAND], fill: SAND },
+-        Biome::Savanna | Biome::Shrubland => Style { bed: &[SAND, GRAVEL, SAND], line: &[SAND, DIRT], top: &[GRASS], fill: DIRT },
++        Biome::Savanna | Biome::Shrubland | Biome::Chaparral => Style { bed: &[SAND, GRAVEL, SAND], line: &[SAND, DIRT], top: &[GRASS], fill: DIRT },
+         Biome::Mountains => Style { bed: &[GRAVEL, STONE], line: &[GRAVEL], top: &[STONE], fill: STONE },
+-        Biome::Swamp => Style { bed: &[DIRT, CLAY], line: &[DIRT, GRASS], top: &[GRASS], fill: DIRT },
++        Biome::Swamp | Biome::Marsh => Style { bed: &[DIRT, CLAY], line: &[DIRT, GRASS], top: &[GRASS], fill: DIRT },
+         _ => Style { bed: &[CLAY, GRAVEL], line: &[GRAVEL], top: &[GRASS], fill: DIRT },
+     }
+ }
+diff -ruN orig/mc-rs/src/world/gen/overworld.rs repo2/mc-rs/src/world/gen/overworld.rs
+--- orig/mc-rs/src/world/gen/overworld.rs	2026-10-23 11:51:42.000000000 +0000
++++ repo2/mc-rs/src/world/gen/overworld.rs	2026-10-23 23:30:45.377585173 +0000
+@@ -60,6 +60,51 @@
+     pub const ORE_LAPIS: u8 = 21;
+ }
+ 
++/// The world type chosen on the create screen and saved in the world's `info`.
++#[derive(Copy, Clone, Debug, PartialEq, Eq)]
++pub enum WorldType {
++    /// b1.7.3 terrain and biomes, on the 1.18+ placement.
++    Vanilla,
++    /// The `tectonic` crate's terrain.
++    Tectonic,
++    /// Vanilla, plus six biomes of the Blooming Biosphere datapack (`Biome::blooming`).
++    Blooming,
++}
++
++impl WorldType {
++    /// The word in the world's `info` file.
++    pub fn name(self) -> &'static str {
++        match self {
++            WorldType::Vanilla => "vanilla",
++            WorldType::Tectonic => "tectonic",
++            WorldType::Blooming => "blooming",
++        }
++    }
++
++    /// `name` back; anything else (an old or hand-edited file) is Vanilla.
++    pub fn parse(s: &str) -> Self {
++        [WorldType::Tectonic, WorldType::Blooming].into_iter().find(|t| t.name() == s.trim()).unwrap_or(WorldType::Vanilla)
++    }
++
++    /// The create screen's button: the next type, round and round.
++    pub fn next(self) -> Self {
++        match self {
++            WorldType::Vanilla => WorldType::Tectonic,
++            WorldType::Tectonic => WorldType::Blooming,
++            WorldType::Blooming => WorldType::Vanilla,
++        }
++    }
++
++    /// The generator of a played overworld of this type.
++    pub fn generator(self, seed: i64) -> OverworldGenerator {
++        match self {
++            WorldType::Vanilla => OverworldGenerator::world(seed),
++            WorldType::Tectonic => OverworldGenerator::world_tectonic(seed),
++            WorldType::Blooming => OverworldGenerator::world_blooming(seed),
++        }
++    }
++}
++
+ pub struct OverworldGenerator {
+     /// World seed (MapGenBase and populate re-seed from it).
+     pub(super) seed: i64,
+@@ -86,6 +131,8 @@
+     /// Rivers, streams and lakes (`gen::hydro`), carved after the surface pass: set by `world` / `world_tectonic`, so the goldens
+     /// that build the generator with `new` stay b1.7.3 bit for bit.
+     hydro: Option<Arc<Hydro>>,
++    /// The Blooming world type: `manager` makes the chunk manager that places the Blooming Biosphere biomes.
++    blooming: bool,
+ }
+ 
+ /// The five noise samples of one density grid column (17 high), in the order `density` reads them.
+@@ -165,7 +212,7 @@
+         let noise_main = OctaveNoise::new(&mut rand, 10);
+         let noise_height = OctaveNoise::new(&mut rand, 16);
+         let noise_spawner = OctaveNoise::new(&mut rand, 8);
+-        Self { seed, rand, noise_lim, noise_low, noise_base, noise_sand, noise_stone, noise_main, noise_height, noise_spawner, cols: HashMap::new(), max_cols: MAX_COLS, tectonic: None, nether: None, hydro: None }
++        Self { seed, rand, noise_lim, noise_low, noise_base, noise_sand, noise_stone, noise_main, noise_height, noise_spawner, cols: HashMap::new(), max_cols: MAX_COLS, tectonic: None, nether: None, hydro: None, blooming: false }
+     }
+ 
+     /// The Nether (`gen::nether`): `generate` and `populate` hand over to it, everything else here stays unused.
+@@ -196,6 +243,13 @@
+         Self::new_tectonic(seed).with_hydro()
+     }
+ 
++    /// `world` on the Blooming world type: Vanilla terrain, rivers and lakes, with the Blooming Biosphere biomes.
++    pub fn world_blooming(seed: i64) -> Self {
++        let mut g = Self::world(seed);
++        g.blooming = true;
++        g
++    }
++
+     fn with_hydro(mut self) -> Self {
+         self.hydro = Some(Hydro::of(self.seed, self.tectonic.is_some()));
+         self
+@@ -229,7 +283,7 @@
+     /// The chunk manager for this generator's world: only the vanilla terrain follows its climate parameters (`shape`); Tectonic's
+     /// comes from elsewhere. Every place that makes a generator makes its manager with this.
+     pub fn manager(&self) -> WorldChunkManager {
+-        WorldChunkManager::new(self.seed).shaped(self.tectonic.is_none())
++        WorldChunkManager::new(self.seed).shaped(self.tectonic.is_none()).blooming(self.blooming)
+     }
+ 
+     /// Highest solid block at column (x, z) of a grid `depth` blocks deep in Z, or -1 if none.
+diff -ruN orig/mc-rs/src/world/gen/populate.rs repo2/mc-rs/src/world/gen/populate.rs
+--- orig/mc-rs/src/world/gen/populate.rs	2026-10-23 11:51:42.000000000 +0000
++++ repo2/mc-rs/src/world/gen/populate.rs	2026-10-23 23:33:25.192367084 +0000
+@@ -225,6 +225,13 @@
+             Biome::Forest | Biome::Rainforest | Biome::Taiga => n + 5,
+             Biome::SeasonalForest => n + 2,
+             Biome::Desert | Biome::Tundra | Biome::Plains => -20,
++            // The Blooming biomes: the datapack's trees per chunk (its weighted counts as one roll each).
++            Biome::AutumnalForest => if r.next_int_bound(9) == 0 { 6 } else { 9 },
++            Biome::Chaparral => 3 + i32::from(r.next_int_bound(7) < 5),
++            Biome::Marsh => i32::from(r.next_int_bound(4) == 0),
++            Biome::OakWoodland => 7 + i32::from(r.next_int_bound(12) < 7),
++            Biome::WetWoodland => if r.next_int_bound(7) == 0 { 10 } else { 20 },
++            Biome::SnowyBirchGrove => 10 + i32::from(r.next_int_bound(10) == 0),
+             _ => 0,
+         };
+         for _ in 0..trees {
+@@ -238,6 +245,10 @@
+             Biome::Forest | Biome::Taiga => 2,
+             Biome::SeasonalForest => 4,
+             Biome::Plains => 3,
++            // Blooming: the datapack's flower rarities (1 in 3, 1 in 5, 1 to 3 patches in the wet woodland); the grove has none.
++            Biome::AutumnalForest | Biome::Marsh => i32::from(r.next_int_bound(3) == 0),
++            Biome::Chaparral | Biome::OakWoodland => i32::from(r.next_int_bound(5) == 0),
++            Biome::WetWoodland => 1 + r.next_int_bound(3),
+             _ => 0,
+         };
+         for _ in 0..n {
+@@ -248,11 +259,16 @@
+             Biome::Rainforest | Biome::Plains => 10,
+             Biome::Forest | Biome::SeasonalForest => 2,
+             Biome::Taiga => 1,
++            // Blooming: the datapack's grass patches per chunk (its double tall grass and ferns are the single ones here).
++            Biome::WetWoodland => 10,
++            Biome::AutumnalForest | Biome::OakWoodland => 4,
++            Biome::Chaparral | Biome::SnowyBirchGrove => 5,
++            Biome::Marsh => 15,
+             _ => 0,
+         };
+         for _ in 0..n {
+             // The grass type is drawn first: a fern (2) in two tries of three in a rainforest, else tall grass (1).
+-            let kind = if biome == Biome::Rainforest && r.next_int_bound(3) != 0 { 2 } else { 1 };
++            let kind = if matches!(biome, Biome::Rainforest | Biome::WetWoodland) && r.next_int_bound(3) != 0 { 2 } else { 1 };
+             let (x, y, z) = (bx + r.next_int_bound(16) + 8, r.next_int_bound(128), bz + r.next_int_bound(16) + 8);
+             ground_plants(w, &mut r, TALL_GRASS, 128, kind, x, y, z);
+         }
+@@ -650,7 +666,15 @@
+                     Tree::Oak
+                 }
+             }
+-            Biome::Rainforest => if r.next_int_bound(3) == 0 { Tree::Big } else { Tree::Oak },
++            Biome::Rainforest | Biome::WetWoodland => if r.next_int_bound(3) == 0 { Tree::Big } else { Tree::Oak },
++            // The datapack's mixes on Beta's three species: dark oak, acacia and jungle are oaks, cherry is a birch.
++            Biome::AutumnalForest => match r.next_int_bound(3) {
++                0 => Tree::Birch,
++                1 => Tree::Taiga2,
++                _ => Tree::Oak,
++            },
++            Biome::Chaparral => if r.next_int_bound(4) == 0 { Tree::Birch } else { Tree::Oak },
++            Biome::SnowyBirchGrove => if r.next_int_bound(5) == 0 { Tree::Oak } else { Tree::Birch },
+             Biome::Taiga => if r.next_int_bound(3) == 0 { Tree::Taiga1 } else { Tree::Taiga2 },
+             _ => if r.next_int_bound(10) == 0 { Tree::Big } else { Tree::Oak },
+         }
+diff -ruN orig/mc-rs/src/world/lod.rs repo2/mc-rs/src/world/lod.rs
+--- orig/mc-rs/src/world/lod.rs	2026-10-22 19:34:20.000000000 +0000
++++ repo2/mc-rs/src/world/lod.rs	2026-10-23 23:31:21.602672182 +0000
+@@ -60,7 +60,7 @@
+ use crate::world::chunk::{brightness, idx, is_plant, opaque, Nibbles};
+ use crate::world::chunks::{biome_tints, chunk_coord, in_range, Shape};
+ use crate::world::gen::chunk_manager::WorldChunkManager;
+-use crate::world::gen::overworld::OverworldGenerator;
++use crate::world::gen::overworld::{OverworldGenerator, WorldType};
+ use crate::world::gen::populate::Region;
+ use glam::Vec3;
+ use std::collections::{HashMap, HashSet};
+@@ -278,7 +278,7 @@
+     real: HashMap<(i32, i32), Cols>,
+     /// `<world>/lod`: tiles made with their trees are kept here (`flush`), None = nothing is read or written (the tests).
+     dir: Option<PathBuf>,
+-    tectonic: bool,
++    ty: WorldType,
+     /// Tiles in memory that differ from their file.
+     dirty: HashSet<(i32, i32)>,
+     /// The pre-generation's progress, shared with its threads (`Shared::pg`).
+@@ -292,8 +292,8 @@
+ }
+ 
+ /// A tile file: magic, world type, trees, then per column a run count (u8) and 7 bytes a run (y0, y1, id, meta, tint).
+-fn encode(t: &Tile0, tectonic: bool) -> Vec<u8> {
+-    let mut o = vec![MAGIC[0], MAGIC[1], tectonic as u8, t.trees as u8];
++fn encode(t: &Tile0, ty: WorldType) -> Vec<u8> {
++    let mut o = vec![MAGIC[0], MAGIC[1], ty as u8, t.trees as u8];
+     for q in 0..64 * 64 {
+         let c = t.col(q);
+         o.push(c.len() as u8);
+@@ -305,8 +305,8 @@
+ }
+ 
+ /// The tile in `b`, None when it is not a tile file of this format and world type or is cut short.
+-fn decode(b: &[u8], tectonic: bool) -> Option<Tile0> {
+-    if b.len() < 4 || b[..2] != MAGIC[..] || (b[2] != 0) != tectonic {
++fn decode(b: &[u8], ty: WorldType) -> Option<Tile0> {
++    if b.len() < 4 || b[..2] != MAGIC[..] || b[2] != ty as u8 {
+         return None;
+     }
+     let mut cols: Vec<Col> = Vec::with_capacity(64 * 64);
+@@ -348,8 +348,8 @@
+ }
+ 
+ impl Store {
+-    fn new(g: OverworldGenerator, cm: WorldChunkManager, dir: Option<PathBuf>, tectonic: bool, sh: Arc<Shared>) -> Self {
+-        Store { g, cm, tiles: HashMap::new(), real: HashMap::new(), dir, tectonic, dirty: HashSet::new(), sh }
++    fn new(g: OverworldGenerator, cm: WorldChunkManager, dir: Option<PathBuf>, ty: WorldType, sh: Arc<Shared>) -> Self {
++        Store { g, cm, tiles: HashMap::new(), real: HashMap::new(), dir, ty, dirty: HashSet::new(), sh }
+     }
+ 
+     /// Tile `k` is real (with trees) now or was loaded from its file: counted by the pre-generation, never asked of it again.
+@@ -374,7 +374,7 @@
+     }
+ 
+     fn load(&self, k: (i32, i32)) -> Option<Tile0> {
+-        decode(&std::fs::read(tile_path(self.dir.as_ref()?, k)).ok()?, self.tectonic)
++        decode(&std::fs::read(tile_path(self.dir.as_ref()?, k)).ok()?, self.ty)
+     }
+ 
+     /// Write the tiles that changed (to a temporary file first, then moved over the old one).
+@@ -383,7 +383,7 @@
+         for k in std::mem::take(&mut self.dirty) {
+             let Some(t) = self.tiles.get(&k) else { continue };
+             let p = tile_path(&d, k);
+-            if let Err(e) = std::fs::write(p.with_extension("tmp"), encode(t, self.tectonic)).and_then(|_| std::fs::rename(p.with_extension("tmp"), &p)) {
++            if let Err(e) = std::fs::write(p.with_extension("tmp"), encode(t, self.ty)).and_then(|_| std::fs::rename(p.with_extension("tmp"), &p)) {
+                 log::warn!("lod: {p:?}: {e}");
+             }
+         }
+@@ -1194,19 +1194,11 @@
+     Some(k)
+ }
+ 
+-fn generator(seed: i64, tectonic: bool) -> OverworldGenerator {
+-    if tectonic {
+-        OverworldGenerator::world_tectonic(seed)
+-    } else {
+-        OverworldGenerator::world(seed)
+-    }
+-}
+-
+ /// One pre-generation thread (Voxy World Gen's `maxActiveTasks`: several at once, apart from the thread that meshes the view, so a
+ /// long queue of view builds never starves it). While the switch is on it takes the nearest free tile, reads its file or makes it with
+ /// its trees, and hands it to the worker; when nothing is left it waits for the player to move.
+ /// Its own generator is made at its first tile, so a world that never pre-generates pays nothing.
+-fn pregen_thread(sh: Arc<Shared>, job: Sender<Msg>, seed: i64, tectonic: bool, dir: Option<PathBuf>) {
++fn pregen_thread(sh: Arc<Shared>, job: Sender<Msg>, seed: i64, ty: WorldType, dir: Option<PathBuf>) {
+     crate::world::nice(19); // it runs all the time: only on what the render thread and the chunk workers leave free
+     let mut gen: Option<(OverworldGenerator, WorldChunkManager)> = None;
+     while !sh.quit.load(Relaxed) {
+@@ -1216,11 +1208,11 @@
+             std::thread::sleep(Duration::from_millis(100));
+             continue;
+         };
+-        let file = dir.as_ref().and_then(|d| decode(&std::fs::read(tile_path(d, k)).ok()?, tectonic)).filter(|t| t.trees);
++        let file = dir.as_ref().and_then(|d| decode(&std::fs::read(tile_path(d, k)).ok()?, ty)).filter(|t| t.trees);
+         let fresh = file.is_none();
+         let t = file.unwrap_or_else(|| {
+             let (g, cm) = gen.get_or_insert_with(|| {
+-                let g = generator(seed, tectonic);
++                let g = ty.generator(seed);
+                 let cm = g.manager();
+                 (g, cm)
+             });
+@@ -1254,8 +1246,8 @@
+ }
+ 
+ impl Lod {
+-    /// A LoD for the world of `seed` (Tectonic or vanilla terrain, like the chunk ring), generated on its own thread.
+-    pub fn new(seed: i64, tectonic: bool, dir: Option<PathBuf>) -> Self {
++    /// A LoD for the world of `seed` (of this world type, like the chunk ring), generated on its own thread.
++    pub fn new(seed: i64, ty: WorldType, dir: Option<PathBuf>) -> Self {
+         let (job, jobs) = channel::<Msg>();
+         let (done, rx) = channel::<Built>();
+         let (made_tx, made) = channel::<(i32, i32)>();
+@@ -1263,7 +1255,7 @@
+         let shared = sh.clone();
+         for i in 0..pregen_threads() {
+             let (sh, job, dir) = (sh.clone(), job.clone(), dir.clone());
+-            std::thread::Builder::new().name(format!("lod-pregen{i}")).spawn(move || pregen_thread(sh, job, seed, tectonic, dir)).expect("lod pregen thread");
++            std::thread::Builder::new().name(format!("lod-pregen{i}")).spawn(move || pregen_thread(sh, job, seed, ty, dir)).expect("lod pregen thread");
+         }
+         std::thread::Builder::new()
+             .name("lod".into())
+@@ -1272,9 +1264,9 @@
+                 if let Some(d) = &dir {
+                     let _ = std::fs::create_dir_all(d);
+                 }
+-                let g = generator(seed, tectonic);
++                let g = ty.generator(seed);
+                 let cm = g.manager();
+-                let mut store = Store::new(g, cm, dir, tectonic, shared);
++                let mut store = Store::new(g, cm, dir, ty, shared);
+                 // Ends when the `Lod` (and so `job`) is dropped.
+                 while let Ok(m) = jobs.recv() {
+                     match m {
+@@ -1500,7 +1492,7 @@
+     }
+ 
+     fn store() -> Store {
+-        Store::new(OverworldGenerator::new(0xCAFEBABE), WorldChunkManager::new(0xCAFEBABE), None, false, Arc::default())
++        Store::new(OverworldGenerator::new(0xCAFEBABE), WorldChunkManager::new(0xCAFEBABE), None, WorldType::Vanilla, Arc::default())
+     }
+ 
+     /// A store whose 3 x 3 tiles around (0, 0) are `f`.
+@@ -1753,11 +1745,12 @@
+     #[test]
+     fn a_tile_file_round_trips() {
+         let t = tile_of(|x, z| if x < 5 { vec![sp(74, 77, 18), sp((60 + z % 7) as u8, 70, 3)] } else if z < 9 { vec![sp(40, 64, 9)] } else { land(70) });
+-        let b = encode(&t, true);
+-        let u = decode(&b, true).unwrap();
++        let b = encode(&t, WorldType::Tectonic);
++        let u = decode(&b, WorldType::Tectonic).unwrap();
+         assert!(u.cols.spans == t.cols.spans && u.cols.start == t.cols.start && !u.trees);
+-        assert!(decode(&b, false).is_none(), "a vanilla world does not read a Tectonic tile");
+-        assert!(decode(&b[..b.len() - 3], true).is_none() && decode(&[], true).is_none());
++        assert!(decode(&b, WorldType::Vanilla).is_none(), "a vanilla world does not read a Tectonic tile");
++        assert!(decode(&b, WorldType::Blooming).is_none(), "nor a Blooming one");
++        assert!(decode(&b[..b.len() - 3], WorldType::Tectonic).is_none() && decode(&[], WorldType::Tectonic).is_none());
+     }
+ 
+     /// Threads take the tile nearest the player first, never the same one twice, never a finished one.
+@@ -1792,7 +1785,7 @@
+     /// ran (the worker took it only when idle). Now its own threads make tiles while builds keep coming.
+     #[test]
+     fn pregen_runs_while_the_view_is_busy() {
+-        let mut lod = Lod::new(0xCAFEBABE, false, None);
++        let mut lod = Lod::new(0xCAFEBABE, WorldType::Vanilla, None);
+         lod.toggle_pregen();
+         let (t0, mut next) = (Instant::now(), 0);
+         let mut ask = |lod: &Lod| {
+diff -ruN orig/roadmap/world.md repo2/roadmap/world.md
+--- orig/roadmap/world.md	2026-10-23 11:51:42.000000000 +0000
++++ repo2/roadmap/world.md	2026-10-23 23:33:54.059711994 +0000
+@@ -47,6 +47,13 @@
+ 
+ ## Changelog
+ 
++- 2026-10-24: the Blooming world type, a hand port of the Blooming Biosphere 1.1.14 datapack onto Vanilla (written WITHOUT a Rust toolchain: not compiled, not run; +2 tests `biome::tests::blooming_boxes_place_their_biomes` and `chunk_manager::tests::blooming_manager_adds_its_biomes`, `menu::tests::create_list_and_delete_a_world` and `lod::tests::a_tile_file_round_trips` extended).
++    - Create screen: the type button now cycles Vanilla, Tectonic, Blooming (`overworld::WorldType`, saved as `blooming` in the world's `info`, an old or unknown word reads as Vanilla). `tectonic: bool` became `WorldType` in `lib.rs`, `menu.rs`, `chunks.rs` and `lod.rs` (a LoD tile file keeps its type byte: 0 and 1 as before, 2 Blooming). Blooming = Vanilla terrain and rivers (`OverworldGenerator::world_blooming`, `WorldChunkManager::blooming`) with six more biomes.
++    - Placement: `Biome::blooming` reads the 90 depth-0 boxes of the datapack's `dimension/overworld.json` for its six land biomes (a generated table in `biome.rs`, the boxes never overlap) and falls back to `from_params`. Biomes: AutumnalForest, Chaparral, Marsh, OakWoodland, WetWoodland (the datapack's `rainforest`, renamed: `Rainforest` is Beta's), SnowyBirchGrove (its `snowy_cherry_grove`). Tidepools is skipped (20 coral blocks and tuff).
++    - Substituted for Beta's blocks: dark oak, acacia and jungle trees are oaks, cherry is birch, autumnal also grows spruce; mud, podzol, packed mud, coarse dirt, terracotta, diorite and andesite surfaces are the normal grass and dirt (the surface needs no change); the new flowers and the double plants are Beta's dandelion, rose, tall grass and fern or nothing. Dropped: leaf litter, moss, petals, dripleaf, vines, lily pads, bamboo, melons, firefly bushes, seagrass, bee nests, fossils, emerald and infested ore, boulders, fallen logs and branches (Beta's logs have no horizontal axis), the datapack's cliffs and its noise settings.
++    - Per chunk (`populate.rs`): the datapack's tree counts (weighted lists as one roll), flower rarities and grass patches; the tint is the datapack's `grass_color` and `foliage_color` (`Biome::colors`, read by `biome_tints`, so the LoD matches); the snowy grove snows, chaparral has no rain (as its `has_precipitation`), the weather, fog and river-bed styles borrow the nearest Beta biome.
++    - ponytail: a box is inside or not (the game takes the nearest of all boxes, vanilla ones included); the water colour of the biomes is not ported; one biome per chunk for populate, as Beta. UNVERIFIED: the compile, both new tests, the share of each biome in a real world (a uniform sample of the parameters puts the six at about 8 % of inland points), how it looks.
++
+ - 2026-10-20 (8): FIX, tall walls beside a river whose water lies far below (two device screenshots: terraced dirt cliffs of 10..20 blocks on both sides of a low river). Tested in a Linux scratch crate holding `hydro.rs` + `biome.rs` only (rustc 1.75): all 13 tests there pass, incl. the new one; the rest of the crate was not compiled or run, not checked in game.
+     - Cause (`Region::carve`, bank branch): a river only shaped the ground up to `max(5, 2 * width)` blocks from its channel, and the bank was cut only where the terrain stood at most 10 blocks over its slope (`s - target <= 10`). Beside a hill the slope stopped 5 blocks out at `ws + 3`, so the terrain there was either left whole (more than 10 over: a sheer wall from the channel's edge) or cut and left standing as a wall of up to 10 at the end of the band. The water level (grade of the 16-block grid) is often far under the real terrain of a column, so this showed everywhere there was a hill.
+     - Fix (`hydro.rs`, one function and two consts): `reach(w)` = `max(VALLEY 48, 2 w)` is how far a river still shapes the ground (`Network::plan` and `index_of` use it; `Plan::blend` and the flowers keep the old band). The bank rises `BANK_SLOPE` 0.5 a block from the waterline (was 0.75, only to the band) and over the outer half of the reach eases into the terrain's own height (smoothstep), so the cut ends flush with the land: a hill beside a river is a valley side. The 10 block limit is gone. Low ground (the levee) is unchanged.

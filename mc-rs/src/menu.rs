@@ -10,6 +10,7 @@ use crate::input::touch_ui::ScreenEv;
 use crate::options::{OptEv, OptionsUi, Settings};
 use crate::render::hud::{sprites as sp, HudPipeline, HudVertex, NO_UV};
 use crate::world::decor::{self, Key};
+use crate::world::gen::overworld::WorldType;
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -25,7 +26,7 @@ pub struct Info {
     pub folder: String,
     pub name: String,
     pub seed: i64,
-    pub tectonic: bool,
+    pub ty: WorldType,
     /// Seconds since the epoch of the last save (`SaveFormatComparator.lastTimePlayed`).
     pub modified: u64,
     pub bytes: u64,
@@ -43,7 +44,7 @@ impl Info {
     pub fn write(&self, root: &Path) {
         let d = self.dir(root);
         let _ = std::fs::create_dir_all(&d);
-        let text = format!("{}\n{}\n{}\n", self.name, self.seed, if self.tectonic { "tectonic" } else { "vanilla" });
+        let text = format!("{}\n{}\n{}\n", self.name, self.seed, self.ty.name());
         if let Err(e) = std::fs::write(d.join("info"), text) {
             log::warn!("world info {}: {e}", self.folder);
         }
@@ -57,7 +58,7 @@ impl Info {
         let secs = |p: PathBuf| std::fs::metadata(p).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0, |t| t.as_secs());
         let bytes = std::fs::read_dir(&d).map_or(0, |r| r.flatten().filter_map(|e| e.metadata().ok()).map(|m| m.len()).sum());
         let modified = secs(d.join("level")).max(secs(d.join("info")));
-        Some(Self { folder: folder.into(), name: name.into(), seed, tectonic: ty.trim() == "tectonic", modified, bytes })
+        Some(Self { folder: folder.into(), name: name.into(), seed, ty: WorldType::parse(ty), modified, bytes })
     }
 }
 
@@ -69,7 +70,7 @@ pub fn list(root: &Path) -> Vec<Info> {
     if from.is_dir() && !saves(root).join(old).exists() {
         let _ = std::fs::create_dir_all(saves(root));
         if std::fs::rename(&from, saves(root).join(old)).is_ok() {
-            Info { folder: old.into(), name: "Old world".into(), seed: LEGACY_SEED, tectonic: false, modified: 0, bytes: 0 }.write(root);
+            Info { folder: old.into(), name: "Old world".into(), seed: LEGACY_SEED, ty: WorldType::Vanilla, modified: 0, bytes: 0 }.write(root);
         }
     }
     let mut v: Vec<Info> = std::fs::read_dir(saves(root)).map_or_else(|_| Vec::new(), |r| r.flatten().filter_map(|e| Info::read(root, e.file_name().to_str()?)).collect());
@@ -152,7 +153,7 @@ pub struct Menu {
     name: String,
     seed: String,
     folder: String,
-    tectonic: bool,
+    ty: WorldType,
     /// The text field being typed in (0 name, 1 seed): the keyboard is up.
     typing: Option<u8>,
     shift: bool,
@@ -200,7 +201,7 @@ impl Menu {
             name: String::new(),
             seed: String::new(),
             folder: String::new(),
-            tectonic: false,
+            ty: WorldType::Vanilla,
             typing: None,
             shift: false,
             press: None,
@@ -242,7 +243,7 @@ impl Menu {
             Scr::Create => {
                 let y = (gh / 4.0).floor() + 108.0;
                 vec![
-                    b(2, hw - 100.0, y - 22.0, 200.0, if self.tectonic { "World Type: Tectonic" } else { "World Type: Vanilla" }, true),
+                    b(2, hw - 100.0, y - 22.0, 200.0, match self.ty { WorldType::Vanilla => "World Type: Vanilla", WorldType::Tectonic => "World Type: Tectonic", WorldType::Blooming => "World Type: Blooming" }, true),
                     b(0, hw - 100.0, y, 200.0, "Create New World", !self.name.is_empty()),
                     b(1, hw - 100.0, y + 24.0, 200.0, "Cancel", true),
                 ]
@@ -372,16 +373,16 @@ impl Menu {
             (Scr::Select, 1) => self.loading = self.sel.and_then(|i| self.worlds.get(i)).cloned(),
             (Scr::Select, 2) => self.scr = Scr::Delete,
             (Scr::Select, 3) => {
-                (self.name, self.seed, self.tectonic, self.typing, self.scr) = (String::from("New World"), String::new(), false, None, Scr::Create);
+                (self.name, self.seed, self.ty, self.typing, self.scr) = (String::from("New World"), String::new(), WorldType::Vanilla, None, Scr::Create);
                 self.folder = folder_for(&self.root, &self.name);
             }
             (Scr::Create, 0) => {
-                let info = Info { folder: folder_for(&self.root, &self.name), name: self.name.clone(), seed: parse_seed(&self.seed, now_nanos() as i64), tectonic: self.tectonic, modified: 0, bytes: 0 };
+                let info = Info { folder: folder_for(&self.root, &self.name), name: self.name.clone(), seed: parse_seed(&self.seed, now_nanos() as i64), ty: self.ty, modified: 0, bytes: 0 };
                 info.write(&self.root);
                 self.loading = Some(info);
             }
             (Scr::Create, 1) => self.scr = Scr::Select,
-            (Scr::Create, 2) => self.tectonic = !self.tectonic,
+            (Scr::Create, 2) => self.ty = self.ty.next(),
             (Scr::Delete, 0) => {
                 if let Some(w) = self.sel.and_then(|i| self.worlds.get(i)) {
                     if let Err(e) = std::fs::remove_dir_all(w.dir(&self.root)) {
@@ -494,7 +495,7 @@ impl Menu {
                 rect(v, s, [hw - 110.0, y - 2.0, 220.0, 36.0], 0x808080);
                 rect(v, s, [hw - 109.0, y - 1.0, 218.0, 34.0], 0x000000);
             }
-            let kind = if wd.tectonic { "Tectonic" } else { "Vanilla" };
+            let kind = match wd.ty { WorldType::Vanilla => "Vanilla", WorldType::Tectonic => "Tectonic", WorldType::Blooming => "Blooming" };
             let line = format!("{} ({}, {:?} MB) {kind}", wd.folder, date(wd.modified), (wd.bytes / 1024 * 100 / 1024) as f32 / 100.0);
             HudPipeline::push_text(v, (hw - 108.0) * s, (y + 1.0) * s, s, &wd.name, rgb(0xFFFFFF));
             HudPipeline::push_text(v, (hw - 108.0) * s, (y + 12.0) * s, s, &line, rgb(0x808080));
@@ -610,7 +611,7 @@ mod tests {
         assert_eq!(folder_for(&root, " x "), "x-");
     }
 
-    /// Main -> Select -> Create (a name, the tectonic type) -> the world is on disk, listed, loading; then delete it.
+    /// Main -> Select -> Create (a name, the Blooming type: two taps of the type button) -> the world is on disk, listed, loading; then delete it.
     #[test]
     fn create_list_and_delete_a_world() {
         let root = tmp("flow");
@@ -621,10 +622,12 @@ mod tests {
         tap(&mut m, "Create New World", sz);
         assert_eq!((m.scr, m.name.as_str()), (Scr::Create, "New World"));
         tap(&mut m, "World Type: Vanilla", sz);
-        assert!(m.tectonic);
+        assert_eq!(m.ty, WorldType::Tectonic);
+        tap(&mut m, "World Type: Tectonic", sz);
+        assert_eq!(m.ty, WorldType::Blooming);
         tap(&mut m, "Create New World", sz);
         let info = m.loading.clone().expect("create starts loading");
-        assert_eq!((info.name.as_str(), info.folder.as_str(), info.tectonic), ("New World", "New World", true));
+        assert_eq!((info.name.as_str(), info.folder.as_str(), info.ty), ("New World", "New World", WorldType::Blooming));
         let mut v = Vec::new();
         m.draw(&mut v, sz.0, sz.1, &Settings::default());
         assert!(m.shown_loading && !m.panorama() && !v.is_empty());
@@ -632,7 +635,7 @@ mod tests {
         let mut m = Menu::new(&root);
         tap(&mut m, "Singleplayer", sz);
         assert_eq!(m.worlds.len(), 1);
-        assert_eq!((m.worlds[0].seed, m.worlds[0].tectonic), (info.seed, true));
+        assert_eq!((m.worlds[0].seed, m.worlds[0].ty), (info.seed, WorldType::Blooming));
         let (s, gw, gh) = scaled(sz.0, sz.1);
         let (x, y) = ((gw / 2.0).floor() * s, (Menu::list_box(gh).0 + 20.0) * s);
         m.event(ScreenEv::Down(x, y), sz.0, sz.1, &mut Settings::default());
@@ -651,7 +654,7 @@ mod tests {
         std::fs::create_dir_all(root.join("world-cafebabe")).unwrap();
         std::fs::create_dir_all(root.join("world-cafebabe-rtg")).unwrap();
         let l = list(&root);
-        assert_eq!((l.len(), l[0].tectonic, l[0].seed), (1, false, LEGACY_SEED), "the Realistic save is left alone");
+        assert_eq!((l.len(), l[0].ty, l[0].seed), (1, WorldType::Vanilla, LEGACY_SEED), "the Realistic save is left alone");
         assert!(root.join("world-cafebabe-rtg").is_dir());
     }
 }

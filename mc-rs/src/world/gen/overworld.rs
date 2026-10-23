@@ -60,6 +60,51 @@ pub mod block {
     pub const ORE_LAPIS: u8 = 21;
 }
 
+/// The world type chosen on the create screen and saved in the world's `info`.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum WorldType {
+    /// b1.7.3 terrain and biomes, on the 1.18+ placement.
+    Vanilla,
+    /// The `tectonic` crate's terrain.
+    Tectonic,
+    /// Vanilla, plus six biomes of the Blooming Biosphere datapack (`Biome::blooming`).
+    Blooming,
+}
+
+impl WorldType {
+    /// The word in the world's `info` file.
+    pub fn name(self) -> &'static str {
+        match self {
+            WorldType::Vanilla => "vanilla",
+            WorldType::Tectonic => "tectonic",
+            WorldType::Blooming => "blooming",
+        }
+    }
+
+    /// `name` back; anything else (an old or hand-edited file) is Vanilla.
+    pub fn parse(s: &str) -> Self {
+        [WorldType::Tectonic, WorldType::Blooming].into_iter().find(|t| t.name() == s.trim()).unwrap_or(WorldType::Vanilla)
+    }
+
+    /// The create screen's button: the next type, round and round.
+    pub fn next(self) -> Self {
+        match self {
+            WorldType::Vanilla => WorldType::Tectonic,
+            WorldType::Tectonic => WorldType::Blooming,
+            WorldType::Blooming => WorldType::Vanilla,
+        }
+    }
+
+    /// The generator of a played overworld of this type.
+    pub fn generator(self, seed: i64) -> OverworldGenerator {
+        match self {
+            WorldType::Vanilla => OverworldGenerator::world(seed),
+            WorldType::Tectonic => OverworldGenerator::world_tectonic(seed),
+            WorldType::Blooming => OverworldGenerator::world_blooming(seed),
+        }
+    }
+}
+
 pub struct OverworldGenerator {
     /// World seed (MapGenBase and populate re-seed from it).
     pub(super) seed: i64,
@@ -86,6 +131,8 @@ pub struct OverworldGenerator {
     /// Rivers, streams and lakes (`gen::hydro`), carved after the surface pass: set by `world` / `world_tectonic`, so the goldens
     /// that build the generator with `new` stay b1.7.3 bit for bit.
     hydro: Option<Arc<Hydro>>,
+    /// The Blooming world type: `manager` makes the chunk manager that places the Blooming Biosphere biomes.
+    blooming: bool,
 }
 
 /// The five noise samples of one density grid column (17 high), in the order `density` reads them.
@@ -165,7 +212,7 @@ impl OverworldGenerator {
         let noise_main = OctaveNoise::new(&mut rand, 10);
         let noise_height = OctaveNoise::new(&mut rand, 16);
         let noise_spawner = OctaveNoise::new(&mut rand, 8);
-        Self { seed, rand, noise_lim, noise_low, noise_base, noise_sand, noise_stone, noise_main, noise_height, noise_spawner, cols: HashMap::new(), max_cols: MAX_COLS, tectonic: None, nether: None, hydro: None }
+        Self { seed, rand, noise_lim, noise_low, noise_base, noise_sand, noise_stone, noise_main, noise_height, noise_spawner, cols: HashMap::new(), max_cols: MAX_COLS, tectonic: None, nether: None, hydro: None, blooming: false }
     }
 
     /// The Nether (`gen::nether`): `generate` and `populate` hand over to it, everything else here stays unused.
@@ -194,6 +241,13 @@ impl OverworldGenerator {
     /// `world` on the Tectonic world type.
     pub fn world_tectonic(seed: i64) -> Self {
         Self::new_tectonic(seed).with_hydro()
+    }
+
+    /// `world` on the Blooming world type: Vanilla terrain, rivers and lakes, with the Blooming Biosphere biomes.
+    pub fn world_blooming(seed: i64) -> Self {
+        let mut g = Self::world(seed);
+        g.blooming = true;
+        g
     }
 
     fn with_hydro(mut self) -> Self {
@@ -229,7 +283,7 @@ impl OverworldGenerator {
     /// The chunk manager for this generator's world: only the vanilla terrain follows its climate parameters (`shape`); Tectonic's
     /// comes from elsewhere. Every place that makes a generator makes its manager with this.
     pub fn manager(&self) -> WorldChunkManager {
-        WorldChunkManager::new(self.seed).shaped(self.tectonic.is_none())
+        WorldChunkManager::new(self.seed).shaped(self.tectonic.is_none()).blooming(self.blooming)
     }
 
     /// Highest solid block at column (x, z) of a grid `depth` blocks deep in Z, or -1 if none.

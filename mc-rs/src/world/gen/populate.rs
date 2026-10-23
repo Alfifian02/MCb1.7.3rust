@@ -225,6 +225,13 @@ impl OverworldGenerator {
             Biome::Forest | Biome::Rainforest | Biome::Taiga => n + 5,
             Biome::SeasonalForest => n + 2,
             Biome::Desert | Biome::Tundra | Biome::Plains => -20,
+            // The Blooming biomes: the datapack's trees per chunk (its weighted counts as one roll each).
+            Biome::AutumnalForest => if r.next_int_bound(9) == 0 { 6 } else { 9 },
+            Biome::Chaparral => 3 + i32::from(r.next_int_bound(7) < 5),
+            Biome::Marsh => i32::from(r.next_int_bound(4) == 0),
+            Biome::OakWoodland => 7 + i32::from(r.next_int_bound(12) < 7),
+            Biome::WetWoodland => if r.next_int_bound(7) == 0 { 10 } else { 20 },
+            Biome::SnowyBirchGrove => 10 + i32::from(r.next_int_bound(10) == 0),
             _ => 0,
         };
         for _ in 0..trees {
@@ -238,6 +245,10 @@ impl OverworldGenerator {
             Biome::Forest | Biome::Taiga => 2,
             Biome::SeasonalForest => 4,
             Biome::Plains => 3,
+            // Blooming: the datapack's flower rarities (1 in 3, 1 in 5, 1 to 3 patches in the wet woodland); the grove has none.
+            Biome::AutumnalForest | Biome::Marsh => i32::from(r.next_int_bound(3) == 0),
+            Biome::Chaparral | Biome::OakWoodland => i32::from(r.next_int_bound(5) == 0),
+            Biome::WetWoodland => 1 + r.next_int_bound(3),
             _ => 0,
         };
         for _ in 0..n {
@@ -248,11 +259,16 @@ impl OverworldGenerator {
             Biome::Rainforest | Biome::Plains => 10,
             Biome::Forest | Biome::SeasonalForest => 2,
             Biome::Taiga => 1,
+            // Blooming: the datapack's grass patches per chunk (its double tall grass and ferns are the single ones here).
+            Biome::WetWoodland => 10,
+            Biome::AutumnalForest | Biome::OakWoodland => 4,
+            Biome::Chaparral | Biome::SnowyBirchGrove => 5,
+            Biome::Marsh => 15,
             _ => 0,
         };
         for _ in 0..n {
             // The grass type is drawn first: a fern (2) in two tries of three in a rainforest, else tall grass (1).
-            let kind = if biome == Biome::Rainforest && r.next_int_bound(3) != 0 { 2 } else { 1 };
+            let kind = if matches!(biome, Biome::Rainforest | Biome::WetWoodland) && r.next_int_bound(3) != 0 { 2 } else { 1 };
             let (x, y, z) = (bx + r.next_int_bound(16) + 8, r.next_int_bound(128), bz + r.next_int_bound(16) + 8);
             ground_plants(w, &mut r, TALL_GRASS, 128, kind, x, y, z);
         }
@@ -650,7 +666,15 @@ impl Tree {
                     Tree::Oak
                 }
             }
-            Biome::Rainforest => if r.next_int_bound(3) == 0 { Tree::Big } else { Tree::Oak },
+            Biome::Rainforest | Biome::WetWoodland => if r.next_int_bound(3) == 0 { Tree::Big } else { Tree::Oak },
+            // The datapack's mixes on Beta's three species: dark oak, acacia and jungle are oaks, cherry is a birch.
+            Biome::AutumnalForest => match r.next_int_bound(3) {
+                0 => Tree::Birch,
+                1 => Tree::Taiga2,
+                _ => Tree::Oak,
+            },
+            Biome::Chaparral => if r.next_int_bound(4) == 0 { Tree::Birch } else { Tree::Oak },
+            Biome::SnowyBirchGrove => if r.next_int_bound(5) == 0 { Tree::Oak } else { Tree::Birch },
             Biome::Taiga => if r.next_int_bound(3) == 0 { Tree::Taiga1 } else { Tree::Taiga2 },
             _ => if r.next_int_bound(10) == 0 { Tree::Big } else { Tree::Oak },
         }

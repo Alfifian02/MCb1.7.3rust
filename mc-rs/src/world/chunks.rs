@@ -30,7 +30,7 @@ use crate::render::mesh;
 use crate::world::chunk::{height_map, idx, meta_matters, normal_cube, opaque, physics_id, Nibbles, H, VOLUME};
 use crate::world::gen::chunk_manager::WorldChunkManager;
 use crate::world::gen::hydro;
-use crate::world::gen::overworld::OverworldGenerator;
+use crate::world::gen::overworld::{OverworldGenerator, WorldType};
 use crate::world::gen::noise::JavaRandom;
 use crate::world::chest::{Chest, Pos};
 use crate::world::gen::populate::Region;
@@ -90,12 +90,14 @@ const LOADS_PER_FRAME: usize = 8;
 /// The grass and foliage colour of every column of chunk (cx, cz) (`BlockGrass.colorMultiplier` and friends read the climate of the
 /// column itself, no blending). ponytail: the climate noise is sampled again for every (re)mesh; cache it per chunk if remeshing shows up in a profile.
 pub(crate) fn biome_tints(cm: &mut WorldChunkManager, cx: i32, cz: i32) -> mesh::Tints {
-    cm.load_block_generator_data(cx * 16, cz * 16, 16, 16);
+    let biomes = cm.load_block_generator_data(cx * 16, cz * 16, 16, 16);
     let mut t = mesh::Tints::white();
     for i in 0..256 {
         let (temp, humid) = (cm.temperature[i], cm.humidity[i]);
-        t.grass[i] = crate::world::climate::grass(temp, humid) as f32;
-        t.foliage[i] = crate::world::climate::foliage(temp, humid) as f32;
+        // The Blooming biomes have their own colours (the datapack's); every other biome reads the climate maps.
+        let (grass, foliage) = biomes[i].colors().unwrap_or_else(|| (crate::world::climate::grass(temp, humid), crate::world::climate::foliage(temp, humid)));
+        t.grass[i] = grass as f32;
+        t.foliage[i] = foliage as f32;
     }
     t
 }
@@ -852,13 +854,17 @@ impl ChunkManager {
     /// `radius` is the render distance in chunks. Dropping the manager closes the job channel,
     /// which ends the workers.
     pub fn new(seed: i64, radius: i32) -> Self {
-        Self::new_typed(seed, radius, false)
+        Self::new_typed(seed, radius, WorldType::Vanilla)
     }
 
-    /// `new` with the world type: `tectonic` = the second generator (the `tectonic` crate's terrain) in every worker and for `preload`.
-    pub fn new_typed(seed: i64, radius: i32, tectonic: bool) -> Self {
-        let make: fn(i64) -> OverworldGenerator = if tectonic { OverworldGenerator::world_tectonic } else { OverworldGenerator::world };
-        hydro::watch(Some(hydro::Hydro::of(seed, tectonic))); // the currents of this world
+    /// `new` with the world type (`WorldType::generator`) in every worker and for `preload`.
+    pub fn new_typed(seed: i64, radius: i32, ty: WorldType) -> Self {
+        let make: fn(i64) -> OverworldGenerator = match ty {
+            WorldType::Vanilla => OverworldGenerator::world,
+            WorldType::Tectonic => OverworldGenerator::world_tectonic,
+            WorldType::Blooming => OverworldGenerator::world_blooming,
+        };
+        hydro::watch(Some(hydro::Hydro::of(seed, ty == WorldType::Tectonic))); // the currents of this world (Blooming's are Vanilla's)
         Self::new_with(seed, radius, make)
     }
 

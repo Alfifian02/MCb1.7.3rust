@@ -992,9 +992,9 @@ fn style(b: Biome) -> Style {
     use block::*;
     match b {
         Biome::Desert | Biome::Beach | Biome::Ocean => Style { bed: &[SAND], line: &[SAND], top: &[SAND], fill: SAND },
-        Biome::Savanna | Biome::Shrubland => Style { bed: &[SAND, GRAVEL, SAND], line: &[SAND, DIRT], top: &[GRASS], fill: DIRT },
+        Biome::Savanna | Biome::Shrubland | Biome::Chaparral => Style { bed: &[SAND, GRAVEL, SAND], line: &[SAND, DIRT], top: &[GRASS], fill: DIRT },
         Biome::Mountains => Style { bed: &[GRAVEL, STONE], line: &[GRAVEL], top: &[STONE], fill: STONE },
-        Biome::Swamp => Style { bed: &[DIRT, CLAY], line: &[DIRT, GRASS], top: &[GRASS], fill: DIRT },
+        Biome::Swamp | Biome::Marsh => Style { bed: &[DIRT, CLAY], line: &[DIRT, GRASS], top: &[GRASS], fill: DIRT },
         _ => Style { bed: &[CLAY, GRAVEL], line: &[GRAVEL], top: &[GRASS], fill: DIRT },
     }
 }
