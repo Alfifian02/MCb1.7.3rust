@@ -1,0 +1,127 @@
+diff --git a/Cargo.lock b/Cargo.lock
+--- a/Cargo.lock	2026-10-23 00:09:18.919800201 +0000
++++ b/Cargo.lock	2026-10-23 00:09:19.013402361 +0000
+@@ -190,6 +190,12 @@
+ ]
+ 
+ [[package]]
++name = "byteorder"
++version = "1.5.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
++
++[[package]]
+ name = "bytes"
+ version = "1.12.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -640,6 +646,17 @@
+ checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
+ 
+ [[package]]
++name = "lewton"
++version = "0.10.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "777b48df9aaab155475a83a7df3070395ea1ac6902f5cd062b8f2b028075c030"
++dependencies = [
++ "byteorder",
++ "ogg",
++ "tinyvec",
++]
++
++[[package]]
+ name = "libc"
+ version = "0.2.190"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -706,9 +723,11 @@
+  "env_logger",
+  "glam",
+  "jni",
++ "lewton",
+  "lod",
+  "log",
+  "naga",
++ "ndk",
+  "pollster",
+  "raw-window-handle",
+  "tectonic",
+@@ -758,6 +777,7 @@
+  "log",
+  "ndk-sys",
+  "num_enum",
++ "raw-window-handle",
+  "thiserror 1.0.69",
+ ]
+ 
+@@ -818,6 +838,15 @@
+ ]
+ 
+ [[package]]
++name = "ogg"
++version = "0.8.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "6951b4e8bf21c8193da321bcce9c9dd2e13c858fe078bf9054a288b419ae5d6e"
++dependencies = [
++ "byteorder",
++]
++
++[[package]]
+ name = "once_cell"
+ version = "1.21.4"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -1170,6 +1199,12 @@
+ ]
+ 
+ [[package]]
++name = "tinyvec"
++version = "1.13.3"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
++
++[[package]]
+ name = "toml_datetime"
+ version = "1.1.1+spec-1.1.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+diff --git a/mc-rs/src/audio/mod.rs b/mc-rs/src/audio/mod.rs
+--- a/mc-rs/src/audio/mod.rs	2026-10-23 00:09:18.913402362 +0000
++++ b/mc-rs/src/audio/mod.rs	2026-10-23 00:09:18.917608817 +0000
+@@ -153,9 +153,16 @@
+     /// `SoundManager.ticksBeforeMusic`.
+     before_music: i32,
+     #[allow(dead_code)]
+-    out: Option<Box<dyn std::any::Any>>,
++    out: Option<Keep>,
+ }
+ 
++/// The output stream, held only so it keeps playing and closes when `Audio` drops. `App` is built on the GPU init thread and handed to
++/// the main thread (`start_init`), so `Audio` has to be `Send`; the AAudio stream is a raw handle and is not.
++/// SAFETY: nothing ever calls the stream after `start_output`; the only thing done to it later is dropping it (`AAudioStream_close`),
++/// which AAudio allows from any thread.
++struct Keep(#[allow(dead_code)] Box<dyn std::any::Any>);
++unsafe impl Send for Keep {}
++
+ impl Audio {
+     pub fn new() -> Self {
+         let mix = Arc::new(Mutex::new(Mix::default()));
+@@ -272,7 +279,7 @@
+ }
+ 
+ #[cfg(target_os = "android")]
+-fn start_output(mix: Arc<Mutex<Mix>>) -> Option<Box<dyn std::any::Any>> {
++fn start_output(mix: Arc<Mutex<Mix>>) -> Option<Keep> {
+     use ndk::audio::{AudioCallbackResult, AudioDirection, AudioFormat, AudioPerformanceMode, AudioStreamBuilder};
+     let s = AudioStreamBuilder::new().ok()?
+         .direction(AudioDirection::Output).format(AudioFormat::PCM_I16).channel_count(2).sample_rate(44100)
+@@ -287,11 +294,11 @@
+         }))
+         .open_stream().ok()?;
+     s.request_start().ok()?;
+-    Some(Box::new(s))
++    Some(Keep(Box::new(s)))
+ }
+ 
+ #[cfg(not(target_os = "android"))]
+-fn start_output(_: Arc<Mutex<Mix>>) -> Option<Box<dyn std::any::Any>> {
++fn start_output(_: Arc<Mutex<Mix>>) -> Option<Keep> {
+     None
+ }
+ 
