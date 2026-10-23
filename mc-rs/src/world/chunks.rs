@@ -446,7 +446,7 @@ fn unit_of(q: &PQ) -> Option<Unit> {
 /// the way they face and their texture runs, the tile, and the light, shade and colour (all four corners of each agree, so the run has the
 /// same values everywhere and needs no per-cell interpolation).
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct Run {
+struct Join {
     cut: bool,
     section: usize,
     an: usize,
@@ -463,7 +463,7 @@ struct Run {
     tint: u32,
 }
 
-/// The cells of one `Run`, and the first of its quads to build the merged ones from (`rcu`, `rcv`: its cell).
+/// The cells of one `Join`, and the first of its quads to build the merged ones from (`rcu`, `rcv`: its cell).
 struct Group {
     rep: PQ,
     rcu: i32,
@@ -510,7 +510,7 @@ fn greedy(cells: &mut Vec<(i32, i32)>) -> Vec<(i32, i32, i32, i32)> {
 
 /// The quad of the rectangle (`u0`, `v0`, `w`, `h`) of a run: the corners of `rep` (a quad of the run, in cell `rcu`, `rcv`) moved to the
 /// rectangle, the far ones stretched, and the texture coordinate stretched with them, so the tile repeats once per block.
-fn merged(rep: &PQ, run: &Run, rcu: i32, rcv: i32, u0: i32, v0: i32, w: i32, h: i32) -> PQ {
+fn merged(rep: &PQ, run: &Join, rcu: i32, rcv: i32, u0: i32, v0: i32, w: i32, h: i32) -> PQ {
     let mut q = *rep;
     for (k, v) in q.v.iter_mut().enumerate() {
         let hi_u = v.pos[run.au] == (rcu + 1) as f32;
@@ -590,13 +590,13 @@ struct Quads {
 /// index list did.
 fn pack(verts: &[f32], solid: &[u32], water: &[u32]) -> Quads {
     let mut layers: [Vec<(usize, PQ, bool, bool)>; 3] = Default::default();
-    let mut groups: BTreeMap<Run, Group> = BTreeMap::new();
+    let mut groups: BTreeMap<Join, Group> = BTreeMap::new();
     for q in quads_of(solid) {
         let pq = quad_at(verts, q.v);
         let section = section_of(&pq);
         match (!q.flip && !q.both).then(|| unit_of(&pq)).flatten() {
             Some(u) => {
-                let run = Run {
+                let run = Join {
                     cut: pq.cut,
                     section,
                     an: u.an,
