@@ -1962,9 +1962,12 @@ impl App {
     /// that keeps the crosshair on what the eye's pick ray hits.
     fn shoulder_shot(&mut self) -> render::shoulder::Shot {
         let (eye, chunks) = (self.camera.pos, &self.chunks);
-        let solid = |p: glam::Vec3| chunks.block_loaded(p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32).is_some_and(normal_cube);
+        let solid = |p: glam::Vec3| chunks.block_loaded(p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32).is_some_and(|b| crate::world::chunk::collision(b).is_some()); // leaves, glass, slabs, fences too, not only full opaque cubes
         let aim = self.target.map(|h| (h.point.as_vec3() - eye).length());
         let dt = Instant::now().duration_since(self.frame_prev).as_secs_f32().min(0.1);
+        if self.touch.take_swap() {
+            self.shoulder.swap();
+        }
         self.shoulder.update(&render::shoulder::Frame {
             dt,
             eye,
@@ -2009,12 +2012,12 @@ impl App {
         if self.menu.is_some() {
             return; // "Save and quit to title" just ran
         }
-        let mut rig_view = glam::Mat4::IDENTITY; // the shoulder-surf shot's roll / convergence / kicks, composed into `camera.bob` below
+        let (mut rig_view, mut close) = (glam::Mat4::IDENTITY, false); // the shoulder-surf shot's roll / convergence / kicks, composed into `camera.bob` below
         if self.touch.third {
             self.third_saved = Some((self.camera.pos, self.camera.fov_y));
             if self.touch.shoulder {
                 let shot = self.shoulder_shot();
-                (self.camera.pos, rig_view) = (shot.pos, shot.view);
+                (self.camera.pos, rig_view, close) = (shot.pos, shot.view, shot.close);
                 self.camera.fov_y *= shot.fov_scale;
             } else {
                 self.camera.pos = self.third_pos();
@@ -2025,7 +2028,7 @@ impl App {
         }
         // The player's own model, drawn only from behind (`RenderPlayer`; the first-person view has the hand instead).
         let tick_partial = (self.body_acc / dig::TICK).clamp(0.0, 1.0);
-        let player_view = self.touch.third.then(|| {
+        let player_view = (self.touch.third && !close).then(|| {
             let riding = self.riding();
             let held = self.inv.slots[self.touch.hotbar_slot];
             let (pose, yaw) = self.body.pose(tick_partial, self.camera.pitch.to_degrees(), self.touch.sneak && self.sleep.is_none(), riding, held.is_some());
@@ -2047,7 +2050,7 @@ impl App {
         self.camera.bob = rig_view * if self.opts.view_bobbing { self.body.view_bob(tick_partial) } else { glam::Mat4::IDENTITY };
         let (view, proj) = self.camera.build_view_proj();
         // The first-person hand (`EntityRenderer.renderHand`): not in the third-person view, not in bed.
-        let hand = (!self.touch.third && self.sleep.is_none()).then(|| {
+        let hand = ((!self.touch.third || close) && self.sleep.is_none()).then(|| {
             let (equip, held) = self.body.equipped(tick_partial);
             render::player::Hand { to_world: render::player::hand_to_world(&view, &self.camera.bob), equip, swing: self.body.swing_at(tick_partial), held, at: self.player.pos }
         });

@@ -4,6 +4,11 @@ Part of [`ROADMAP.md`](../ROADMAP.md). This part is the changelog of what is dra
 
 ## Changelog
 
+- 2026-10-24 (4): shoulder-surf fixes after the first screenshots (written WITHOUT a toolchain: not compiled, not run; +1 test in `render::shoulder`, the view-button test extended).
+    - Clipping: the camera's solid is `chunk::collision(id).is_some()` (leaves, glass, slabs, fences count; `normal_cube` let it through the leaf canopy). Rays are radius 0.28 with a 0.3 margin, `free` bisects its last step (no 0.1 steps), a 2-pass sphere push-out keeps the camera off walls it slides along, and a camera inside a cell falls back to the eye.
+    - Head filling the screen (second screenshot: the camera squeezed into the head): inside 0.8 blocks of the eye (out at 1.1) `Shot::close` is set; `lib.rs` then draws the first-person hand and leaves the model out. This is also the start of the dolly.
+    - Recovery: the pull-in released at omega 4 (about a second), now 10; the dolly 5.5 -> 8.
+    - Shoulders: a tap of the view button in this view swaps them (`Rig::swap`, `TouchUi::take_swap`); a hold of `HOLD_SECS` leaves to first person like before. The slide (omega 10) swings the camera out 0.5 blocks wide while it crosses behind the head, and the wall test keeps its hands off for 1.2 s after a manual swap.
 - 2026-10-24 (3): shoulder-surf view (written WITHOUT a Rust toolchain: not compiled, not run, not seen on a device; +4 tests in `render::shoulder`, `touch_ui::tests::view_button_cycles_first_third_shoulder` replaces the toggle test; run `cargo test --lib shoulder touch_ui` first, then look at it; `python3 tools/shoulder_proto.py` runs the camera maths in Python and passes).
     - Button: the view button (left of zoom) cycles first person -> third (b1.7.3's 4 blocks behind) -> shoulder surf (`TouchUi.shoulder`, only meaningful with `third`). Kept over pause like `third`; not saved.
     - `render/shoulder.rs` (new, pure: `Rig::update(&Frame) -> Shot`; the caller passes `dt` and a `solid` probe). `Spring::crit` is the exact critically damped solution (any `dt`, no overshoot), `Spring::bounce` an under-damped one in 1/240 s substeps.

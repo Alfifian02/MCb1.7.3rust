@@ -213,6 +213,8 @@ pub struct TouchUi {
     pub third: bool,
     /// With `third`: the cinematic over-the-shoulder camera (`render::shoulder`) instead of the 4-blocks-behind one. The view button's second tap.
     pub shoulder: bool,
+    /// The view button was tapped in the shoulder view: swap shoulders (`take_swap`). A hold there goes on to the next view instead.
+    swap: bool,
     pub pointers: HashMap<i32, Pointer>,
     pub surface_w: u32,
     pub surface_h: u32,
@@ -259,6 +261,7 @@ impl TouchUi {
             flying: false,
             third: false,
             shoulder: false,
+            swap: false,
             pointers: HashMap::new(),
             surface_w: w,
             surface_h: h,
@@ -417,10 +420,15 @@ impl TouchUi {
     /// Advance the hold timers by one frame: a look finger held still turns into digging after `HOLD_SECS`.
     pub fn tick(&mut self, dt: f32) {
         let slop = self.surface_w.min(self.surface_h) as f32 * SLOP;
-        for p in self.pointers.values_mut().filter(|p| p.role == PointerRole::Look && !p.broke && p.travel < slop) {
+        for p in self.pointers.values_mut().filter(|p| matches!(p.role, PointerRole::Look | PointerRole::View) && !p.broke && p.travel < slop) {
             p.held += dt;
             p.broke = p.held >= HOLD_SECS;
         }
+    }
+
+    /// True once per tap of the view button in the shoulder view.
+    pub fn take_swap(&mut self) -> bool {
+        std::mem::take(&mut self.swap)
     }
 
     /// Read and clear the accumulated look drag (pixels).
@@ -566,6 +574,7 @@ impl TouchUi {
                 log::info!("touch: pause -> {}", self.paused);
             }
             PointerRole::Inventory => self.inventory = true,
+            PointerRole::View if self.third && self.shoulder && !ptr.broke => self.swap = true,
             PointerRole::View => (self.third, self.shoulder) = match (self.third, self.shoulder) {
                 (false, _) => (true, false),
                 (true, false) => (true, true),
@@ -858,7 +867,11 @@ mod tests {
         tap(&mut ui, 1, x, y);
         assert!(ui.third && ui.shoulder);
         tap(&mut ui, 1, x, y);
-        assert!(!ui.third && !ui.shoulder);
+        assert!(ui.third && ui.shoulder && ui.take_swap() && !ui.take_swap(), "a tap in the shoulder view swaps shoulders");
+        ui.on_press(1, x, y, PointerRole::View);
+        ui.tick(HOLD_SECS);
+        ui.on_release(1);
+        assert!(!ui.third && !ui.shoulder && !ui.take_swap(), "a hold leaves it");
     }
 
     /// The zoom button is held, not tapped: `zooming` is true while the finger is down, only in play, and it clears on release.

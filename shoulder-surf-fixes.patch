@@ -1,0 +1,300 @@
+diff -ruN a/mc-rs/src/input/touch_ui.rs b/mc-rs/src/input/touch_ui.rs
+--- a/mc-rs/src/input/touch_ui.rs	2026-10-24 07:58:42.883016881 +0000
++++ b/mc-rs/src/input/touch_ui.rs	2026-10-24 07:58:42.887001797 +0000
+@@ -213,6 +213,8 @@
+     pub third: bool,
+     /// With `third`: the cinematic over-the-shoulder camera (`render::shoulder`) instead of the 4-blocks-behind one. The view button's second tap.
+     pub shoulder: bool,
++    /// The view button was tapped in the shoulder view: swap shoulders (`take_swap`). A hold there goes on to the next view instead.
++    swap: bool,
+     pub pointers: HashMap<i32, Pointer>,
+     pub surface_w: u32,
+     pub surface_h: u32,
+@@ -259,6 +261,7 @@
+             flying: false,
+             third: false,
+             shoulder: false,
++            swap: false,
+             pointers: HashMap::new(),
+             surface_w: w,
+             surface_h: h,
+@@ -417,12 +420,17 @@
+     /// Advance the hold timers by one frame: a look finger held still turns into digging after `HOLD_SECS`.
+     pub fn tick(&mut self, dt: f32) {
+         let slop = self.surface_w.min(self.surface_h) as f32 * SLOP;
+-        for p in self.pointers.values_mut().filter(|p| p.role == PointerRole::Look && !p.broke && p.travel < slop) {
++        for p in self.pointers.values_mut().filter(|p| matches!(p.role, PointerRole::Look | PointerRole::View) && !p.broke && p.travel < slop) {
+             p.held += dt;
+             p.broke = p.held >= HOLD_SECS;
+         }
+     }
+ 
++    /// True once per tap of the view button in the shoulder view.
++    pub fn take_swap(&mut self) -> bool {
++        std::mem::take(&mut self.swap)
++    }
++
+     /// Read and clear the accumulated look drag (pixels).
+     pub fn take_look(&mut self) -> (f32, f32) {
+         std::mem::take(&mut self.look_delta)
+@@ -566,6 +574,7 @@
+                 log::info!("touch: pause -> {}", self.paused);
+             }
+             PointerRole::Inventory => self.inventory = true,
++            PointerRole::View if self.third && self.shoulder && !ptr.broke => self.swap = true,
+             PointerRole::View => (self.third, self.shoulder) = match (self.third, self.shoulder) {
+                 (false, _) => (true, false),
+                 (true, false) => (true, true),
+@@ -858,7 +867,11 @@
+         tap(&mut ui, 1, x, y);
+         assert!(ui.third && ui.shoulder);
+         tap(&mut ui, 1, x, y);
+-        assert!(!ui.third && !ui.shoulder);
++        assert!(ui.third && ui.shoulder && ui.take_swap() && !ui.take_swap(), "a tap in the shoulder view swaps shoulders");
++        ui.on_press(1, x, y, PointerRole::View);
++        ui.tick(HOLD_SECS);
++        ui.on_release(1);
++        assert!(!ui.third && !ui.shoulder && !ui.take_swap(), "a hold leaves it");
+     }
+ 
+     /// The zoom button is held, not tapped: `zooming` is true while the finger is down, only in play, and it clears on release.
+diff -ruN a/mc-rs/src/lib.rs b/mc-rs/src/lib.rs
+--- a/mc-rs/src/lib.rs	2026-10-24 07:58:42.882728339 +0000
++++ b/mc-rs/src/lib.rs	2026-10-24 07:58:42.886920469 +0000
+@@ -1962,9 +1962,12 @@
+     /// that keeps the crosshair on what the eye's pick ray hits.
+     fn shoulder_shot(&mut self) -> render::shoulder::Shot {
+         let (eye, chunks) = (self.camera.pos, &self.chunks);
+-        let solid = |p: glam::Vec3| chunks.block_loaded(p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32).is_some_and(normal_cube);
++        let solid = |p: glam::Vec3| chunks.block_loaded(p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32).is_some_and(|b| crate::world::chunk::collision(b).is_some()); // leaves, glass, slabs, fences too, not only full opaque cubes
+         let aim = self.target.map(|h| (h.point.as_vec3() - eye).length());
+         let dt = Instant::now().duration_since(self.frame_prev).as_secs_f32().min(0.1);
++        if self.touch.take_swap() {
++            self.shoulder.swap();
++        }
+         self.shoulder.update(&render::shoulder::Frame {
+             dt,
+             eye,
+@@ -2009,12 +2012,12 @@
+         if self.menu.is_some() {
+             return; // "Save and quit to title" just ran
+         }
+-        let mut rig_view = glam::Mat4::IDENTITY; // the shoulder-surf shot's roll / convergence / kicks, composed into `camera.bob` below
++        let (mut rig_view, mut close) = (glam::Mat4::IDENTITY, false); // the shoulder-surf shot's roll / convergence / kicks, composed into `camera.bob` below
+         if self.touch.third {
+             self.third_saved = Some((self.camera.pos, self.camera.fov_y));
+             if self.touch.shoulder {
+                 let shot = self.shoulder_shot();
+-                (self.camera.pos, rig_view) = (shot.pos, shot.view);
++                (self.camera.pos, rig_view, close) = (shot.pos, shot.view, shot.close);
+                 self.camera.fov_y *= shot.fov_scale;
+             } else {
+                 self.camera.pos = self.third_pos();
+@@ -2025,7 +2028,7 @@
+         }
+         // The player's own model, drawn only from behind (`RenderPlayer`; the first-person view has the hand instead).
+         let tick_partial = (self.body_acc / dig::TICK).clamp(0.0, 1.0);
+-        let player_view = self.touch.third.then(|| {
++        let player_view = (self.touch.third && !close).then(|| {
+             let riding = self.riding();
+             let held = self.inv.slots[self.touch.hotbar_slot];
+             let (pose, yaw) = self.body.pose(tick_partial, self.camera.pitch.to_degrees(), self.touch.sneak && self.sleep.is_none(), riding, held.is_some());
+@@ -2047,7 +2050,7 @@
+         self.camera.bob = rig_view * if self.opts.view_bobbing { self.body.view_bob(tick_partial) } else { glam::Mat4::IDENTITY };
+         let (view, proj) = self.camera.build_view_proj();
+         // The first-person hand (`EntityRenderer.renderHand`): not in the third-person view, not in bed.
+-        let hand = (!self.touch.third && self.sleep.is_none()).then(|| {
++        let hand = ((!self.touch.third || close) && self.sleep.is_none()).then(|| {
+             let (equip, held) = self.body.equipped(tick_partial);
+             render::player::Hand { to_world: render::player::hand_to_world(&view, &self.camera.bob), equip, swing: self.body.swing_at(tick_partial), held, at: self.player.pos }
+         });
+diff -ruN a/mc-rs/src/render/shoulder.rs b/mc-rs/src/render/shoulder.rs
+--- a/mc-rs/src/render/shoulder.rs	2026-10-24 07:58:42.882671532 +0000
++++ b/mc-rs/src/render/shoulder.rs	2026-10-24 07:58:42.886745296 +0000
+@@ -14,8 +14,10 @@
+ //!   the distance itself is spring-eased (a rack-focus, not a snap).
+ //! - **Shoulder swap**: a wall within 0.7 blocks of the preferred side and clear air on the other flips the side (0.9 s cool-down);
+ //!   the offset slides across behind the head.
+-//! - **Collision**: five rays (centre + 4 around, radius 0.22) from the eye to the wanted place; the camera stops short at once,
+-//!   and eases back out at ~4 / s.
++//! - **Collision**: five rays (centre + 4 around, radius 0.28) from the eye to the wanted place; the camera stops short at once,
++//!   eases back out at ~10 / s, and a sphere push-out (radius 0.3) keeps it off walls it slides along. Squeezed within 0.8 blocks of
++//!   the head it reports `Shot::close` and the caller draws the hand instead of the model.
++- **Shoulder swap**: also by hand (`Rig::swap`), swinging out wide behind the head while it crosses.
+ //! - **Bank**: roll into a strafe or a turn (4.6 degrees at most), spring-eased.
+ //! - **Impacts**: a landing dips the pivot (under-damped spring, scaled by the fall speed), a jump lifts it, a hit kicks pitch and roll
+ //!   with a side that alternates.
+@@ -32,6 +34,8 @@
+ const SUB: f32 = 1.0 / 240.0;
+ /// Ray / probe step (blocks).
+ const STEP: f32 = 0.1;
++/// The camera's collision radius (blocks): the ray margin and the push-out reach. Over the near plane's corner at 70 degrees.
++const RADIUS: f32 = 0.3;
+ 
+ /// One scalar spring (position `x`, velocity `v`).
+ #[derive(Clone, Copy, Default, Debug)]
+@@ -76,7 +80,13 @@
+     while t < max {
+         t += STEP;
+         if solid(from + dir * t) {
+-            return (t - STEP).max(0.0);
++            // Bisect the last step, so a camera pushed off a wall moves smoothly instead of in 0.1 jumps.
++            let (mut lo, mut hi) = (t - STEP, t);
++            for _ in 0..4 {
++                let m = (lo + hi) * 0.5;
++                if solid(from + dir * m) { hi = m } else { lo = m }
++            }
++            return lo.max(0.0);
+         }
+     }
+     max
+@@ -111,6 +121,9 @@
+     pub pos: Vec3,
+     /// Multiplier for `camera.fov_y` this frame.
+     pub fov_scale: f32,
++    /// The camera is so close to the head (tight space, or the start of the dolly) that the player model would fill the screen:
++    /// the caller leaves it out and draws the first-person hand. Hysteresis 0.8 / 1.1 blocks.
++    pub close: bool,
+     /// A view-space rotation (roll, convergence, kicks, sway), to go in `camera.bob`: `view = shot.view * look_at`.
+     pub view: Mat4,
+ }
+@@ -142,6 +155,7 @@
+     was_ground: bool,
+     /// -1 = unknown (just reset).
+     prev_health: i32,
++    hidden: bool,
+ }
+ 
+ impl Default for Rig {
+@@ -175,6 +189,7 @@
+             prev_vy: 0.0,
+             was_ground: true,
+             prev_health: -1,
++            hidden: false,
+         }
+     }
+ 
+@@ -183,6 +198,12 @@
+         *self = Self::new();
+     }
+ 
++    /// Over to the other shoulder now (the view button's tap in this view). The wall test leaves the choice alone for 1.2 s.
++    pub fn swap(&mut self) {
++        self.side = -self.side;
++        self.swap_cool = 1.2;
++    }
++
+     fn pivot_vec(&self) -> Vec3 {
+         Vec3::new(self.pivot[0].x, self.pivot[1].x, self.pivot[2].x)
+     }
+@@ -197,7 +218,7 @@
+         let up = right.cross(fwd);
+ 
+         // Dolly in, stance, speed.
+-        self.blend.crit(1.0, 5.5, dt);
++        self.blend.crit(1.0, 8.0, dt);
+         let w = self.blend.x.clamp(0.0, 1.0);
+         let speed = Vec3::new(f.vel.x, 0.0, f.vel.z).length();
+         self.sneak_s.crit(b(f.sneak), 9.0, dt);
+@@ -232,11 +253,12 @@
+             self.side = -self.side;
+             self.swap_cool = 0.9;
+         }
+-        self.side_s.crit(self.side, 7.0, dt);
++        self.side_s.crit(self.side, 10.0, dt);
+ 
+         // The shot's shape (blocks): behind, a shoulder to the side, a little above the eye.
+         let mut dist = 2.6 + 0.8 * spr - 0.35 * sn;
+         dist += (1.2 - dist) * z;
++        dist += 0.5 * (1.0 - self.side_s.x.abs().min(1.0)); // crossing over: swing out wide behind the head, not through it
+         let mut shoulder = 0.62 - 0.05 * sn;
+         shoulder += (0.8 - shoulder) * z;
+         let mut rise = 0.2 - 0.25 * sn;
+@@ -266,18 +288,32 @@
+             1.0
+         } else {
+             let dir = to / len;
+-            let best = [(0.0, 0.0), (0.22, 0.0), (-0.22, 0.0), (0.0, 0.22), (0.0, -0.22)]
++            let best = [(0.0, 0.0), (0.28, 0.0), (-0.28, 0.0), (0.0, 0.28), (0.0, -0.28)]
+                 .iter()
+                 .map(|&(a, c)| free(f.solid, f.eye + right * a + up * c, dir, len))
+                 .fold(len, f32::min);
+-            ((best - 0.2).max(0.0) / len).min(1.0)
++            ((best - RADIUS).max(0.0) / len).min(1.0)
+         };
+         if clear < self.frac {
+             self.frac = clear;
+         } else {
+-            self.frac += (clear - self.frac) * (1.0 - (-4.0 * dt).exp());
++            self.frac += (clear - self.frac) * (1.0 - (-10.0 * dt).exp());
++        }
++        let mut pos = f.eye + to * self.frac;
++        // Push the camera's sphere out of whatever it still grazes (a ray along a wall stops at the wall, not RADIUS short of it).
++        for _ in 0..2 {
++            for dir in [Vec3::X, -Vec3::X, Vec3::Y, -Vec3::Y, Vec3::Z, -Vec3::Z] {
++                let d = free(f.solid, pos, dir, RADIUS);
++                if d < RADIUS {
++                    pos -= dir * (RADIUS - d);
++                }
++            }
+         }
+-        let pos = f.eye + to * self.frac;
++        if (f.solid)(pos) {
++            pos = f.eye; // squeezed into a cell: the eye is the one place known to be free
++        }
++        let near = (pos - f.eye).length();
++        self.hidden = near < 0.8 || (self.hidden && near < 1.1);
+ 
+         // Convergence: aim the camera's centre at the point the eye ray reaches at the aimed block's distance (rack-focused).
+         self.focus.crit(f.aim.unwrap_or(28.0).clamp(4.0, 64.0), 5.0, dt);
+@@ -304,7 +340,7 @@
+         self.fov.crit(1.0 + 0.045 * spr + 0.03 * spd, 6.0, dt);
+         let fov_scale = self.fov.x + 0.10 * 4.0 * w * (1.0 - w);
+ 
+-        Shot { pos, fov_scale, view }
++        Shot { pos, fov_scale, close: self.hidden, view }
+     }
+ }
+ 
+@@ -375,6 +411,26 @@
+         assert!(rig.side_s.x < -0.9, "{}", rig.side_s.x);
+     }
+ 
++    /// A manual swap flips the side and the camera never goes through the head; squeezed into a tunnel the model is left out.
++    #[test]
++    fn swap_by_hand_and_hide_when_squeezed() {
++        let open = |_: Vec3| false;
++        let mut rig = Rig::new();
++        let s = settle(&mut rig, &frame(&open, None));
++        assert!(!s.close && rig.side_s.x > 0.9);
++        rig.swap();
++        let f = frame(&open, None);
++        for _ in 0..600 {
++            let s = rig.update(&f);
++            assert!(s.pos.is_finite());
++        }
++        assert!(rig.side_s.x < -0.9);
++        let tunnel = |p: Vec3| p.z > 0.35 || p.x.abs() > 0.5 || p.y > 0.5 || p.y < -1.0;
++        let mut rig = Rig::new();
++        let s = settle(&mut rig, &frame(&tunnel, None));
++        assert!(s.close && s.pos.is_finite() && !tunnel(s.pos), "{:?}", s.pos);
++    }
++
+     /// A hard landing dips the pivot and it rings back to rest; a hit kicks and settles; `reset` starts the dolly over.
+     #[test]
+     fn impacts_ring_and_settle() {
+diff -ruN a/roadmap/rendering.md b/roadmap/rendering.md
+--- a/roadmap/rendering.md	2026-10-24 07:58:42.883737549 +0000
++++ b/roadmap/rendering.md	2026-10-24 07:58:42.887075760 +0000
+@@ -4,6 +4,11 @@
+ 
+ ## Changelog
+ 
++- 2026-10-24 (4): shoulder-surf fixes after the first screenshots (written WITHOUT a toolchain: not compiled, not run; +1 test in `render::shoulder`, the view-button test extended).
++    - Clipping: the camera's solid is `chunk::collision(id).is_some()` (leaves, glass, slabs, fences count; `normal_cube` let it through the leaf canopy). Rays are radius 0.28 with a 0.3 margin, `free` bisects its last step (no 0.1 steps), a 2-pass sphere push-out keeps the camera off walls it slides along, and a camera inside a cell falls back to the eye.
++    - Head filling the screen (second screenshot: the camera squeezed into the head): inside 0.8 blocks of the eye (out at 1.1) `Shot::close` is set; `lib.rs` then draws the first-person hand and leaves the model out. This is also the start of the dolly.
++    - Recovery: the pull-in released at omega 4 (about a second), now 10; the dolly 5.5 -> 8.
++    - Shoulders: a tap of the view button in this view swaps them (`Rig::swap`, `TouchUi::take_swap`); a hold of `HOLD_SECS` leaves to first person like before. The slide (omega 10) swings the camera out 0.5 blocks wide while it crosses behind the head, and the wall test keeps its hands off for 1.2 s after a manual swap.
+ - 2026-10-24 (3): shoulder-surf view (written WITHOUT a Rust toolchain: not compiled, not run, not seen on a device; +4 tests in `render::shoulder`, `touch_ui::tests::view_button_cycles_first_third_shoulder` replaces the toggle test; run `cargo test --lib shoulder touch_ui` first, then look at it; `python3 tools/shoulder_proto.py` runs the camera maths in Python and passes).
+     - Button: the view button (left of zoom) cycles first person -> third (b1.7.3's 4 blocks behind) -> shoulder surf (`TouchUi.shoulder`, only meaningful with `third`). Kept over pause like `third`; not saved.
+     - `render/shoulder.rs` (new, pure: `Rig::update(&Frame) -> Shot`; the caller passes `dt` and a `solid` probe). `Spring::crit` is the exact critically damped solution (any `dt`, no overshoot), `Spring::bounce` an under-damped one in 1/240 s substeps.

@@ -14,8 +14,10 @@
 //!   the distance itself is spring-eased (a rack-focus, not a snap).
 //! - **Shoulder swap**: a wall within 0.7 blocks of the preferred side and clear air on the other flips the side (0.9 s cool-down);
 //!   the offset slides across behind the head.
-//! - **Collision**: five rays (centre + 4 around, radius 0.22) from the eye to the wanted place; the camera stops short at once,
-//!   and eases back out at ~4 / s.
+//! - **Collision**: five rays (centre + 4 around, radius 0.28) from the eye to the wanted place; the camera stops short at once,
+//!   eases back out at ~10 / s, and a sphere push-out (radius 0.3) keeps it off walls it slides along. Squeezed within 0.8 blocks of
+//!   the head it reports `Shot::close` and the caller draws the hand instead of the model.
+- **Shoulder swap**: also by hand (`Rig::swap`), swinging out wide behind the head while it crosses.
 //! - **Bank**: roll into a strafe or a turn (4.6 degrees at most), spring-eased.
 //! - **Impacts**: a landing dips the pivot (under-damped spring, scaled by the fall speed), a jump lifts it, a hit kicks pitch and roll
 //!   with a side that alternates.
@@ -32,6 +34,8 @@ use glam::{Mat4, Vec3};
 const SUB: f32 = 1.0 / 240.0;
 /// Ray / probe step (blocks).
 const STEP: f32 = 0.1;
+/// The camera's collision radius (blocks): the ray margin and the push-out reach. Over the near plane's corner at 70 degrees.
+const RADIUS: f32 = 0.3;
 
 /// One scalar spring (position `x`, velocity `v`).
 #[derive(Clone, Copy, Default, Debug)]
@@ -76,7 +80,13 @@ fn free(solid: &dyn Fn(Vec3) -> bool, from: Vec3, dir: Vec3, max: f32) -> f32 {
     while t < max {
         t += STEP;
         if solid(from + dir * t) {
-            return (t - STEP).max(0.0);
+            // Bisect the last step, so a camera pushed off a wall moves smoothly instead of in 0.1 jumps.
+            let (mut lo, mut hi) = (t - STEP, t);
+            for _ in 0..4 {
+                let m = (lo + hi) * 0.5;
+                if solid(from + dir * m) { hi = m } else { lo = m }
+            }
+            return lo.max(0.0);
         }
     }
     max
@@ -111,6 +121,9 @@ pub struct Shot {
     pub pos: Vec3,
     /// Multiplier for `camera.fov_y` this frame.
     pub fov_scale: f32,
+    /// The camera is so close to the head (tight space, or the start of the dolly) that the player model would fill the screen:
+    /// the caller leaves it out and draws the first-person hand. Hysteresis 0.8 / 1.1 blocks.
+    pub close: bool,
     /// A view-space rotation (roll, convergence, kicks, sway), to go in `camera.bob`: `view = shot.view * look_at`.
     pub view: Mat4,
 }
@@ -142,6 +155,7 @@ pub struct Rig {
     was_ground: bool,
     /// -1 = unknown (just reset).
     prev_health: i32,
+    hidden: bool,
 }
 
 impl Default for Rig {
@@ -175,12 +189,19 @@ impl Rig {
             prev_vy: 0.0,
             was_ground: true,
             prev_health: -1,
+            hidden: false,
         }
     }
 
     /// Back to the start: the next `update` dollies out from the eye again. Called every frame the view is not the shoulder one.
     pub fn reset(&mut self) {
         *self = Self::new();
+    }
+
+    /// Over to the other shoulder now (the view button's tap in this view). The wall test leaves the choice alone for 1.2 s.
+    pub fn swap(&mut self) {
+        self.side = -self.side;
+        self.swap_cool = 1.2;
     }
 
     fn pivot_vec(&self) -> Vec3 {
@@ -197,7 +218,7 @@ impl Rig {
         let up = right.cross(fwd);
 
         // Dolly in, stance, speed.
-        self.blend.crit(1.0, 5.5, dt);
+        self.blend.crit(1.0, 8.0, dt);
         let w = self.blend.x.clamp(0.0, 1.0);
         let speed = Vec3::new(f.vel.x, 0.0, f.vel.z).length();
         self.sneak_s.crit(b(f.sneak), 9.0, dt);
@@ -232,11 +253,12 @@ impl Rig {
             self.side = -self.side;
             self.swap_cool = 0.9;
         }
-        self.side_s.crit(self.side, 7.0, dt);
+        self.side_s.crit(self.side, 10.0, dt);
 
         // The shot's shape (blocks): behind, a shoulder to the side, a little above the eye.
         let mut dist = 2.6 + 0.8 * spr - 0.35 * sn;
         dist += (1.2 - dist) * z;
+        dist += 0.5 * (1.0 - self.side_s.x.abs().min(1.0)); // crossing over: swing out wide behind the head, not through it
         let mut shoulder = 0.62 - 0.05 * sn;
         shoulder += (0.8 - shoulder) * z;
         let mut rise = 0.2 - 0.25 * sn;
@@ -266,18 +288,32 @@ impl Rig {
             1.0
         } else {
             let dir = to / len;
-            let best = [(0.0, 0.0), (0.22, 0.0), (-0.22, 0.0), (0.0, 0.22), (0.0, -0.22)]
+            let best = [(0.0, 0.0), (0.28, 0.0), (-0.28, 0.0), (0.0, 0.28), (0.0, -0.28)]
                 .iter()
                 .map(|&(a, c)| free(f.solid, f.eye + right * a + up * c, dir, len))
                 .fold(len, f32::min);
-            ((best - 0.2).max(0.0) / len).min(1.0)
+            ((best - RADIUS).max(0.0) / len).min(1.0)
         };
         if clear < self.frac {
             self.frac = clear;
         } else {
-            self.frac += (clear - self.frac) * (1.0 - (-4.0 * dt).exp());
+            self.frac += (clear - self.frac) * (1.0 - (-10.0 * dt).exp());
         }
-        let pos = f.eye + to * self.frac;
+        let mut pos = f.eye + to * self.frac;
+        // Push the camera's sphere out of whatever it still grazes (a ray along a wall stops at the wall, not RADIUS short of it).
+        for _ in 0..2 {
+            for dir in [Vec3::X, -Vec3::X, Vec3::Y, -Vec3::Y, Vec3::Z, -Vec3::Z] {
+                let d = free(f.solid, pos, dir, RADIUS);
+                if d < RADIUS {
+                    pos -= dir * (RADIUS - d);
+                }
+            }
+        }
+        if (f.solid)(pos) {
+            pos = f.eye; // squeezed into a cell: the eye is the one place known to be free
+        }
+        let near = (pos - f.eye).length();
+        self.hidden = near < 0.8 || (self.hidden && near < 1.1);
 
         // Convergence: aim the camera's centre at the point the eye ray reaches at the aimed block's distance (rack-focused).
         self.focus.crit(f.aim.unwrap_or(28.0).clamp(4.0, 64.0), 5.0, dt);
@@ -304,7 +340,7 @@ impl Rig {
         self.fov.crit(1.0 + 0.045 * spr + 0.03 * spd, 6.0, dt);
         let fov_scale = self.fov.x + 0.10 * 4.0 * w * (1.0 - w);
 
-        Shot { pos, fov_scale, view }
+        Shot { pos, fov_scale, close: self.hidden, view }
     }
 }
 
@@ -373,6 +409,26 @@ mod tests {
         let mut rig = Rig::new();
         settle(&mut rig, &frame(&wall, None));
         assert!(rig.side_s.x < -0.9, "{}", rig.side_s.x);
+    }
+
+    /// A manual swap flips the side and the camera never goes through the head; squeezed into a tunnel the model is left out.
+    #[test]
+    fn swap_by_hand_and_hide_when_squeezed() {
+        let open = |_: Vec3| false;
+        let mut rig = Rig::new();
+        let s = settle(&mut rig, &frame(&open, None));
+        assert!(!s.close && rig.side_s.x > 0.9);
+        rig.swap();
+        let f = frame(&open, None);
+        for _ in 0..600 {
+            let s = rig.update(&f);
+            assert!(s.pos.is_finite());
+        }
+        assert!(rig.side_s.x < -0.9);
+        let tunnel = |p: Vec3| p.z > 0.35 || p.x.abs() > 0.5 || p.y > 0.5 || p.y < -1.0;
+        let mut rig = Rig::new();
+        let s = settle(&mut rig, &frame(&tunnel, None));
+        assert!(s.close && s.pos.is_finite() && !tunnel(s.pos), "{:?}", s.pos);
     }
 
     /// A hard landing dips the pivot and it rings back to rest; a hit kicks and settles; `reset` starts the dolly over.
