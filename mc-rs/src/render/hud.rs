@@ -69,6 +69,9 @@ pub mod sprites {
     pub const HEART_BG: Sprite = (16.0, 512.0, 9.0, 9.0);
     pub const HEART_FULL: Sprite = (52.0, 512.0, 9.0, 9.0);
     pub const HEART_HALF: Sprite = (61.0, 512.0, 9.0, 9.0);
+    /// Stamina's overlay (the mod's `heart_overlay.png`: a grey heart, 0x7a, opaque here; the draw tints it to alpha 0x9c / 0xcc) in the corner
+    /// icons.png leaves empty (`tools/gen_gui.py`). Drawn as half hearts: columns 1..5 and 5..9.
+    pub const STAMINA: Sprite = (192.0, 512.0, 9.0, 9.0);
     pub const ARMOR_EMPTY: Sprite = (16.0, 521.0, 9.0, 9.0);
     pub const ARMOR_HALF: Sprite = (25.0, 521.0, 9.0, 9.0);
     pub const ARMOR_FULL: Sprite = (34.0, 521.0, 9.0, 9.0);
@@ -639,7 +642,7 @@ mod tests {
             assert!((0..(w * h) as usize).any(|i| d(x + (i % w as usize) as f32, y + (i / w as usize) as f32) > 0), "d-pad sprite at {x},{y} is empty");
         }
         let a = |x: f32, y: f32| GUI[((y as usize - 256) * 256 + x as usize) * 4 + 3]; // GUI starts at row 256 of the texture
-        for (x, y, w, h) in [sprites::HOTBAR, sprites::SELECTOR, sprites::HEART_FULL, sprites::HEART_BG, sprites::BUBBLE, sprites::ARMOR_FULL, sprites::CROSSHAIR] {
+        for (x, y, w, h) in [sprites::HOTBAR, sprites::SELECTOR, sprites::HEART_FULL, sprites::HEART_BG, sprites::BUBBLE, sprites::ARMOR_FULL, sprites::CROSSHAIR, sprites::STAMINA] {
             let seen = (0..(w * h) as usize).any(|i| a(x + (i % w as usize) as f32, y + (i / w as usize) as f32) > 0);
             assert!(seen, "sprite at {x},{y} is empty");
         }

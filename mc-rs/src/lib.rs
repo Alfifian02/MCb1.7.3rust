@@ -711,11 +711,15 @@ impl App {
             self.player.vel.x += yaw.sin() * push;
             self.player.vel.z -= yaw.cos() * push;
         }
+        // Stamina's slowdown: x0.9 while locked, x0.85 more while sprinting on little (it multiplies the walk, the sprint's push and the jump's).
+        let slow = self.vitals.stamina.speed(self.sprint.on());
+        self.player.vel.x *= slow;
+        self.player.vel.z *= slow;
         let (vx0, vz0) = (self.player.vel.x, self.player.vel.z);
         // Plants are drawn but not solid yet (collision shapes come with M14), so physics reads them as air.
         let get = |x: i32, y: i32, z: i32| self.chunks.block(x, y, z).map(|b| if is_plant(b) { 0 } else { self.chunks.physics_at(x, y, z, b) });
         // The held jump button jumps (8.4 m/s, the b1.7.3 velocity) or swims up; fluids (ids 8..=11) are not solid.
-        let y0 = self.player.pos.y;
+        let (y0, grounded) = (self.player.pos.y, self.player.on_ground);
         if sneaking && !riding {
             physics::sneak(&mut self.player, physics::HALF, dt, &get); // no walking off an edge, a hold on ladders
         }
@@ -726,6 +730,10 @@ impl App {
             self.player.vel.y = (if self.touch.jumping() { 8.0 } else if sneaking { -8.0 } else { 0.0 }) + 23.0 * dt;
         }
         let (water, lava) = if asleep || riding { (false, false) } else { physics::step(&mut self.player, dt, self.touch.jumping() && !flying, &get) };
+        // `LivingJumpEvent` (Stamina): a jump that left the ground costs 10; one a ceiling stopped zeroed `vel.y`, so it is free.
+        if grounded && !water && !flying && !asleep && !riding && self.touch.jumping() && self.player.vel.y > 0.0 {
+            self.vitals.stamina.jump();
+        }
         // `horizontalCollision`: `step` zeroes the velocity of the axis a wall stopped (a stepped-up slab keeps it).
         self.sprint_blocked |= !asleep && !riding && ((vx0 != 0.0 && self.player.vel.x == 0.0) || (vz0 != 0.0 && self.player.vel.z == 0.0));
         // `EntityPlayerSP.onLivingUpdate` sets `ySize` 0.2 while sneaking and `moveEntity` multiplies it by 0.4 every tick: the eye hangs 0.08
@@ -1224,6 +1232,7 @@ impl App {
                     self.mobs.shove(i, d * sprint::KNOCK + glam::Vec3::Y * sprint::KNOCK_UP);
                 }
                 self.mobs.hit(i, dmg, self.player.pos);
+                self.vitals.stamina.hit(); // Stamina: a hit dealt puts the player in combat for 15 s (ponytail: also one the mob's damage window ignored)
                 self.inv.damage(slot, wear);
                 return;
             }
@@ -1511,8 +1520,10 @@ impl App {
             ground: self.player.on_ground,
             blocked: std::mem::take(&mut self.sprint_blocked),
             water: self.was_in_water,
-            can: !asleep && !riding && !self.vitals.dead(),
+            can: !asleep && !riding && !self.vitals.dead() && self.vitals.stamina.can_sprint(), // an empty bar locks the sprint (Stamina)
         });
+        // Stamina (`StaminaFeature.onPlayerTick`): a sprint consumes, anything else regenerates. The debug Fly button stands in for creative (no cost).
+        self.vitals.stamina.tick(self.sprint.on() && !self.touch.flying, self.vitals.health, self.vitals.armor);
         if self.sprint.on() && !self.was_in_water {
             let (p, v) = (self.player.pos, self.player.vel / 20.0);
             let (x, y, z) = (p.x.floor() as i32, (p.y - 0.9 - 0.2).floor() as i32, p.z.floor() as i32); // 0.2 under the feet
@@ -2223,6 +2234,8 @@ impl App {
         }
         left.push(Row::Kv("Light", format!("sky {sky}  block {blk}"), WHITE));
         left.push(Row::Kv("Time", format!("{}{weather}", clock(self.world_ticks as u64)), WHITE));
+        let st = &self.vitals.stamina; // `StaminaFeatureClient`'s debug entry
+        left.push(Row::Kv("Stamina", format!("{:.1} / {:.1}  locked {}", st.cur, st.max, st.locked), if st.locked { YELLOW } else { WHITE }));
         left.push(match self.target {
             Some(h) => {
                 let (x, y, z) = h.pos;
@@ -2495,6 +2508,13 @@ impl App {
                 } else if at == self.vitals.health {
                     HudPipeline::push_gui(v, x, y, sz, sz, sp::HEART_HALF);
                 }
+            }
+            // Stamina (`StaminaFeatureClient.renderStamina`): the half hearts it no longer covers, from the right, get a grey half-heart overlay
+            // (alpha 0x9c, 0xcc while locked), 4 of the heart's 9 px each. ponytail: the hearts do not shake at low health here, so neither does it.
+            let (st, hp) = (&self.vitals.stamina, self.vitals.health.min(vitals::MAX_HEALTH));
+            for h in st.halves(hp)..hp {
+                let (u, spr) = (if h % 2 == 0 { 1.0 } else { 5.0 }, sp::STAMINA);
+                HudPipeline::push_gui_tinted(v, hx + (h / 2) as f32 * hw * 0.4 + u * sz / 9.0, y, sz * 4.0 / 9.0, sz, (spr.0 + u, spr.1, 4.0, spr.3), [1.0, 1.0, 1.0, if st.locked { 0.8 } else { 0.612 }]);
             }
             // Armor bar (GuiIngame): 10 shields over the hearts, a full one is 2 armor points, a half one 1.
             if self.vitals.armor > 0 {

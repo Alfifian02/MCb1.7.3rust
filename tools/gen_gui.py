@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Writes mc-rs/assets/gui.rgba: the pack's gui/widgets.png (hotbar strip, selector) over gui/icons.png (crosshair, hearts, armor,
-air bubbles), 256 x 512 RGBA, from a modern-named resource pack (Legacy Restoration). Run from the repo root:
+air bubbles, and Stamina's overlay), 256 x 512 RGBA, from a modern-named resource pack (Legacy Restoration). Run from the repo root:
 python3 tools/gen_gui.py Legacy_Restoration.zip  (needs Pillow). The sprites' places are b1.7.3's (`GuiIngame`): they have not moved.
 Also writes mc-rs/assets/containers.rgba: gui/container/{inventory,crafting_table,furnace,generic_54}.png stacked (256 x 1024). The
 pack's inventory keeps the offhand slot of later versions at (76, 61); b1.7.3 has none, so it is painted over with the panel grey."""
@@ -13,6 +13,13 @@ png = lambda n: Image.open(io.BytesIO(z.read(root + n))).convert("RGBA")
 out = Image.new("RGBA", (256, 512))
 out.paste(png("widgets.png"), (0, 0))
 out.paste(png("icons.png"), (0, 256))
+# Stamina's hearts overlay (the mod's heart_overlay.png: a grey 0x7a heart, drawn tinted to alpha 0x9c / 0xcc) in the corner icons.png leaves
+# empty: HUD texture (192, 512), `hud::sprites::STAMINA`.
+STAMINA = ['         ', '  XX XX  ', ' XXXXXXX ', ' XXXXXXX ', ' XXXXXXX ', '  XXXXX  ', '   XXX   ', '    X    ', '         ']
+for y, row in enumerate(STAMINA):
+    for x, c in enumerate(row):
+        if c == "X":
+            out.putpixel((192 + x, 256 + y), (0x7A, 0x7A, 0x7A, 255))
 open("mc-rs/assets/gui.rgba", "wb").write(out.tobytes())
 print("wrote mc-rs/assets/gui.rgba")
 

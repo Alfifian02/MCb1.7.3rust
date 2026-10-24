@@ -6,6 +6,7 @@
 //! ponytail: no damage flash or knockback, no burning/hurt sounds (all later).
 
 use crate::world::dig::TICK;
+use crate::world::stamina::Stamina;
 
 pub const MAX_HEALTH: i32 = 20;
 pub const MAX_AIR: i32 = 300;
@@ -43,11 +44,13 @@ pub struct Vitals {
     rem: i32,
     /// Set when the air ran out and the drowning bubbles pop (`EntityLiving.onEntityUpdate`); the caller takes it.
     pub drowned: bool,
+    /// Stamina (`world::stamina`): here so health and armor set its maximum, a damage marks combat, and every respawn / reset fills it.
+    pub stamina: Stamina,
 }
 
 impl Default for Vitals {
     fn default() -> Self {
-        Self { health: MAX_HEALTH, air: MAX_AIR, fire: 0, hearts_life: 0, last_damage: 0, fall: 0.0, acc: 0.0, armor: 0, wear: 0, rem: 0, drowned: false }
+        Self { health: MAX_HEALTH, air: MAX_AIR, fire: 0, hearts_life: 0, last_damage: 0, fall: 0.0, acc: 0.0, armor: 0, wear: 0, rem: 0, drowned: false, stamina: Stamina::default() }
     }
 }
 
@@ -78,6 +81,7 @@ impl Vitals {
             self.health -= self.absorb(dmg);
         }
         self.last_damage = dmg;
+        self.stamina.hit(); // `LivingDamageEvent.Post`: any damage taken puts the player in combat for 15 s
         true
     }
 
@@ -200,5 +204,14 @@ mod tests {
         assert_eq!(v.health, 16);
         v.tick(&Env::default());
         assert_eq!(v.air, MAX_AIR);
+
+        // Any damage taken is combat for the stamina: the next sprint tick costs 1, not the calm 0.8.
+        let mut v = Vitals::default();
+        v.stamina.tick(true, MAX_HEALTH, 0);
+        assert_eq!(v.stamina.cur, 200.0 - 0.8);
+        let mut v = Vitals::default();
+        v.hurt(1);
+        v.stamina.tick(true, MAX_HEALTH, 0);
+        assert_eq!(v.stamina.cur, 199.0);
     }
 }
