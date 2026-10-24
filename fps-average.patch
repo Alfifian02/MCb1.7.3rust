@@ -1,0 +1,80 @@
+--- a/mc-rs/src/lib.rs	2026-10-24 05:26:06.362017337 +0000
++++ b/mc-rs/src/lib.rs	2026-10-24 05:26:06.377476207 +0000
+@@ -118,9 +118,9 @@
+     last_frame: Instant,
+     frames: u64,
+     fps_last: Instant,
+-    /// FPS counter: average over the last second, and over the whole run (from `started`).
++    /// FPS counter: average over the last second, and a moving average over the last ~10 s of play (`fps_avg`; 0 = not started).
+     fps_recent: u32,
+-    fps_overall: u32,
++    fps_avg: f32,
+     /// Shown under the FPS: CPU ms per frame and the longest frame (ms) of the last second; `frame_prev` / `worst_acc` feed the latter.
+     cpu_ms: u32,
+     worst_ms: u32,
+@@ -128,8 +128,6 @@
+     /// The previous frame was a paused one (its idle wait is not a spike).
+     was_paused: bool,
+     frame_prev: Instant,
+-    total_frames: u64,
+-    started: Instant,
+     // M12: touch UI state + HUD renderer.
+     touch: TouchUi,
+     /// Scratch vertex buffer for the HUD; cleared each frame, then emitted.
+@@ -263,14 +261,12 @@
+             frames: 0,
+             fps_last: Instant::now(),
+             fps_recent: 0,
+-            fps_overall: 0,
++            fps_avg: 0.0,
+             cpu_ms: 0,
+             worst_ms: 0,
+             worst_acc: 0.0,
+             was_paused: false,
+             frame_prev: Instant::now(),
+-            total_frames: 0,
+-            started: Instant::now(),
+             touch,
+             hud_verts: Vec::with_capacity(256),
+             target: None,
+@@ -423,7 +419,8 @@
+         self.reset_world(false);
+         self.menu = None;
+         self.touch.set_menu(false);
+-        (self.last_frame, self.frame_prev) = (Instant::now(), Instant::now()); // the load and the menu before it are not a frame
++        (self.last_frame, self.frame_prev, self.fps_last) = (Instant::now(), Instant::now(), Instant::now()); // the load and the menu before it are not a frame
++        (self.frames, self.cpu_acc, self.fps_avg) = (0, 0.0, 0.0); // a new world starts the FPS average again
+         if let Ok(mut l) = LAST_WORLD.lock() {
+             *l = Some(info.folder.clone());
+         }
+@@ -2135,7 +2132,6 @@
+         }
+ 
+         self.frames += 1;
+-        self.total_frames += 1;
+         let now = Instant::now();
+         // A paused frame, and the first one after it, waited on purpose (the idle poll): not a spike.
+         if !(self.touch.paused || self.was_paused) {
+@@ -2149,8 +2145,11 @@
+             self.worst_acc = 0.0;
+             let fps = self.frames as f32 / now.duration_since(self.fps_last).as_secs_f32();
+             self.fps_recent = fps.round() as u32;
+-            self.fps_overall = (self.total_frames as f32 / now.duration_since(self.started).as_secs_f32()).round() as u32;
+-            log::info!("FPS: {fps:.1} (average since start {}), {} chunks loaded, CPU {:.1} ms/frame (CPU ~ frame time: CPU-bound; far below: GPU-bound), {} HUD vertices, {} sign texts kept", self.fps_overall, self.chunks.loaded(), self.cpu_acc / self.frames as f32 * 1000.0, self.hud_verts.len(), self.item_mesh.cached_signs());
++            // Moving average, 0.1 a second (~10 s); not fed while paused (the menu idles on purpose) and seeded by its first second.
++            if !self.touch.paused {
++                self.fps_avg = if self.fps_avg == 0.0 { fps } else { self.fps_avg * 0.9 + fps * 0.1 };
++            }
++            log::info!("FPS: {fps:.1} (average of the last ~10 s {:.0}), {} chunks loaded, CPU {:.1} ms/frame (CPU ~ frame time: CPU-bound; far below: GPU-bound), {} HUD vertices, {} sign texts kept", self.fps_avg, self.chunks.loaded(), self.cpu_acc / self.frames as f32 * 1000.0, self.hud_verts.len(), self.item_mesh.cached_signs());
+             self.cpu_acc = 0.0;
+             self.frames = 0;
+             self.fps_last = now;
+@@ -2264,7 +2263,7 @@
+         let set = |o: Opt| self.opts.text(o).split_once(": ").map_or(String::new(), |t| t.1.to_lowercase());
+         let (sc, pct, ms) = (crate::gpu::context::scene_size(w, h), crate::gpu::context::scale_pct(), scene_samples());
+         let mut right = vec![
+-            Row::Kv("FPS", format!("{fps}  (avg {})", self.fps_overall), fps_color(fps)),
++            Row::Kv("FPS", format!("{fps}  (avg {:.0})", self.fps_avg), fps_color(fps)),
+             Row::Kv("Frame", format!("cpu {} ms  worst {} ms", self.cpu_ms, self.worst_ms), WHITE),
+             Row::Kv("Screen", format!("{w}x{h}"), WHITE),
+             Row::Kv("Scene", format!("{}x{}  {pct}%", sc.0, sc.1), WHITE),

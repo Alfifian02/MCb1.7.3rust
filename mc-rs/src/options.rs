@@ -670,6 +670,8 @@ pub struct Pause {
     opt: Option<OptionsUi>,
     finger: Option<(f32, f32)>,
     born: Instant,
+    /// The world was written for this opening (done on the second frame, see `step_frame`).
+    pub saved: bool,
 }
 
 impl Default for Pause {
@@ -680,7 +682,7 @@ impl Default for Pause {
 
 impl Pause {
     pub fn new() -> Self {
-        Self { opt: None, finger: None, born: Instant::now() }
+        Self { opt: None, finger: None, born: Instant::now(), saved: false }
     }
 
     /// (action, rectangle, text, enabled), GUI units.

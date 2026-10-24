@@ -118,16 +118,16 @@ struct App {
     last_frame: Instant,
     frames: u64,
     fps_last: Instant,
-    /// FPS counter: average over the last second, and over the whole run (from `started`).
+    /// FPS counter: average over the last second, and a moving average over the last ~10 s of play (`fps_avg`; 0 = not started).
     fps_recent: u32,
-    fps_overall: u32,
+    fps_avg: f32,
     /// Shown under the FPS: CPU ms per frame and the longest frame (ms) of the last second; `frame_prev` / `worst_acc` feed the latter.
     cpu_ms: u32,
     worst_ms: u32,
     worst_acc: f32,
+    /// The previous frame was a paused one (its idle wait is not a spike).
+    was_paused: bool,
     frame_prev: Instant,
-    total_frames: u64,
-    started: Instant,
     // M12: touch UI state + HUD renderer.
     touch: TouchUi,
     /// Scratch vertex buffer for the HUD; cleared each frame, then emitted.
@@ -261,13 +261,12 @@ impl App {
             frames: 0,
             fps_last: Instant::now(),
             fps_recent: 0,
-            fps_overall: 0,
+            fps_avg: 0.0,
             cpu_ms: 0,
             worst_ms: 0,
             worst_acc: 0.0,
+            was_paused: false,
             frame_prev: Instant::now(),
-            total_frames: 0,
-            started: Instant::now(),
             touch,
             hud_verts: Vec::with_capacity(256),
             target: None,
@@ -420,7 +419,8 @@ impl App {
         self.reset_world(false);
         self.menu = None;
         self.touch.set_menu(false);
-        self.last_frame = Instant::now();
+        (self.last_frame, self.frame_prev, self.fps_last) = (Instant::now(), Instant::now(), Instant::now()); // the load and the menu before it are not a frame
+        (self.frames, self.cpu_acc, self.fps_avg) = (0, 0.0, 0.0); // a new world starts the FPS average again
         if let Ok(mut l) = LAST_WORLD.lock() {
             *l = Some(info.folder.clone());
         }
@@ -589,8 +589,13 @@ impl App {
         // kill their fall).
         if self.touch.paused {
             if self.pause.is_none() {
-                // `GuiIngameMenu` shows "Saving level..": the world is written as the menu opens.
                 self.pause = Some(Pause::new());
+            } else if self.pause.as_ref().is_some_and(|p| !p.saved) {
+                // `GuiIngameMenu` shows "Saving level..": the world is written on the menu's second frame, so the first one (the tap that
+                // opened it) is on screen before the encode and the file writes, not after them.
+                if let Some(p) = self.pause.as_mut() {
+                    p.saved = true;
+                }
                 if self.screen.is_none() {
                     self.save(AUTOSAVE_CHUNKS);
                 }
@@ -2127,9 +2132,12 @@ impl App {
         }
 
         self.frames += 1;
-        self.total_frames += 1;
         let now = Instant::now();
-        self.worst_acc = self.worst_acc.max(now.duration_since(self.frame_prev).as_secs_f32());
+        // A paused frame, and the first one after it, waited on purpose (the idle poll): not a spike.
+        if !(self.touch.paused || self.was_paused) {
+            self.worst_acc = self.worst_acc.max(now.duration_since(self.frame_prev).as_secs_f32());
+        }
+        self.was_paused = self.touch.paused;
         self.frame_prev = now;
         if now.duration_since(self.fps_last).as_secs_f32() >= 1.0 {
             self.cpu_ms = (self.cpu_acc / self.frames as f32 * 1000.0).round() as u32;
@@ -2137,8 +2145,11 @@ impl App {
             self.worst_acc = 0.0;
             let fps = self.frames as f32 / now.duration_since(self.fps_last).as_secs_f32();
             self.fps_recent = fps.round() as u32;
-            self.fps_overall = (self.total_frames as f32 / now.duration_since(self.started).as_secs_f32()).round() as u32;
-            log::info!("FPS: {fps:.1} (average since start {}), {} chunks loaded, CPU {:.1} ms/frame (CPU ~ frame time: CPU-bound; far below: GPU-bound), {} HUD vertices, {} sign texts kept", self.fps_overall, self.chunks.loaded(), self.cpu_acc / self.frames as f32 * 1000.0, self.hud_verts.len(), self.item_mesh.cached_signs());
+            // Moving average, 0.1 a second (~10 s); not fed while paused (the menu idles on purpose) and seeded by its first second.
+            if !self.touch.paused {
+                self.fps_avg = if self.fps_avg == 0.0 { fps } else { self.fps_avg * 0.9 + fps * 0.1 };
+            }
+            log::info!("FPS: {fps:.1} (average of the last ~10 s {:.0}), {} chunks loaded, CPU {:.1} ms/frame (CPU ~ frame time: CPU-bound; far below: GPU-bound), {} HUD vertices, {} sign texts kept", self.fps_avg, self.chunks.loaded(), self.cpu_acc / self.frames as f32 * 1000.0, self.hud_verts.len(), self.item_mesh.cached_signs());
             self.cpu_acc = 0.0;
             self.frames = 0;
             self.fps_last = now;
@@ -2252,7 +2263,7 @@ impl App {
         let set = |o: Opt| self.opts.text(o).split_once(": ").map_or(String::new(), |t| t.1.to_lowercase());
         let (sc, pct, ms) = (crate::gpu::context::scene_size(w, h), crate::gpu::context::scale_pct(), scene_samples());
         let mut right = vec![
-            Row::Kv("FPS", format!("{fps}  (avg {})", self.fps_overall), fps_color(fps)),
+            Row::Kv("FPS", format!("{fps}  (avg {:.0})", self.fps_avg), fps_color(fps)),
             Row::Kv("Frame", format!("cpu {} ms  worst {} ms", self.cpu_ms, self.worst_ms), WHITE),
             Row::Kv("Screen", format!("{w}x{h}"), WHITE),
             Row::Kv("Scene", format!("{}x{}  {pct}%", sc.0, sc.1), WHITE),
@@ -2556,27 +2567,6 @@ impl App {
             }
         }
 
-        // FPS counter, top-left. White = average over the last second, yellow = average since
-        // the app started (includes the chunk loading at the start).
-        if !info_on {
-            let dh = (self.be.size().1 as f32 * 0.05).max(14.0);
-            let (fx, fy) = (self.be.size().0 as f32 * 0.07, dh * 0.6);
-            HudPipeline::push_quad(v, fx - dh * 0.3, fy - dh * 0.3, dh * 5.2, dh * 5.3, [0.0, 0.0, 0.0, 0.5]);
-            // Number, then its label: fps now (white), fps average since start (yellow), CPU ms per frame (cyan: close to 1000 / fps
-            // = CPU-bound, far below = GPU-bound), longest frame in the last second (red: hitches).
-            let rows = [
-                (self.fps_recent, [1.0, 1.0, 1.0, 1.0], "fps"),
-                (self.fps_overall, [1.0, 0.85, 0.2, 1.0], "avg"),
-                (self.cpu_ms, [0.4, 0.9, 1.0, 1.0], "cpu ms"),
-                (self.worst_ms, [1.0, 0.4, 0.4, 1.0], "max ms"),
-            ];
-            for (i, (n, color, label)) in rows.into_iter().enumerate() {
-                let y = fy + dh * 1.3 * i as f32;
-                HudPipeline::push_number(v, fx, y, dh, n, color);
-                HudPipeline::push_text(v, fx + dh * 2.4, y + dh * 0.1, dh / 10.0, label, color);
-            }
-        }
-
         // The LoD debug mode that is on, centred at the top (also while playing, not only in the pause menu).
         if let Some(title) = self.lod.as_ref().map(|l| l.debug_title()).filter(|t| !t.is_empty() && !info_on) {
             let (w, dh) = (self.be.size().0 as f32, (self.be.size().1 as f32 * 0.05).max(14.0));
@@ -2807,12 +2797,21 @@ fn android_main(app: AndroidApp) {
     let mut app_state: Option<App> = None;
     let mut init_handle: Option<std::thread::JoinHandle<Result<App, String>>> = None;
     let mut running = true;
+    let mut last_input = Instant::now();
 
     while running {
         // Once the world is up the loop must not wait for events: an empty poll sleeps its whole timeout, and that 8 ms was added to EVERY
         // frame without a touch event (CPU time + 8 ms > 16.7 ms drops a 60 fps frame to 30). Frames are paced by the swap chain (Fifo).
         // Before the window and the GPU exist there is nothing to draw, so the loop may sleep.
-        let wait = if app_state.is_some() { Duration::ZERO } else { Duration::from_millis(8) };
+        // A menu left alone for a second (the world is frozen behind it) idles in the poll itself: 33 ms on the title screen, 90 ms behind the
+        // game menu. Any touch or pad event ends the poll at once, so the menu answers a finger in one frame instead of up to 90 ms later.
+        let wait = match app_state.as_ref() {
+            None => Duration::from_millis(8),
+            Some(a) if (a.touch.paused || a.menu.is_some()) && !a.touch.pad.active() && last_input.elapsed() > Duration::from_secs(1) => {
+                Duration::from_millis(if a.menu.is_some() { 33 } else { 90 })
+            }
+            Some(_) => Duration::ZERO,
+        };
         app.poll_events(Some(wait), |event| {
             if let PollEvent::Main(main_event) = event {
                 match main_event {
@@ -2821,6 +2820,7 @@ fn android_main(app: AndroidApp) {
                         init_handle = start_init(&app);
                     }
                     MainEvent::InputAvailable => {
+                        last_input = Instant::now();
                         if let Ok(mut iter) = app.input_events_iter() {
                             // `next` handles one queued event per call; loop so
                             // multi-touch moves and Up events are never dropped.
@@ -2898,10 +2898,6 @@ fn android_main(app: AndroidApp) {
             a.render();
             if let Some(left) = a.opts.frame_cap().and_then(|cap| cap.checked_sub(frame_start.elapsed())) {
                 std::thread::sleep(left); // `Performance`: Balanced 120 fps, Power saver 40
-            }
-            // Dynamic FPS: the paused world is frozen, so the menu runs at ~10 frames a second; a touch still wakes the poll.
-            if (a.touch.paused || a.menu.is_some()) && !a.touch.pad.active() {
-                std::thread::sleep(Duration::from_millis(90)); // a pad cursor needs real frames
             }
             #[cfg(feature = "pad-rumble")]
             {
