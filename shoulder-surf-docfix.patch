@@ -1,0 +1,11 @@
+--- a/mc-rs/src/render/shoulder.rs	2026-10-24 08:04:07.438111726 +0000
++++ b/mc-rs/src/render/shoulder.rs	2026-10-24 08:04:07.439970135 +0000
+@@ -17,7 +17,7 @@
+ //! - **Collision**: five rays (centre + 4 around, radius 0.28) from the eye to the wanted place; the camera stops short at once,
+ //!   eases back out at ~10 / s, and a sphere push-out (radius 0.3) keeps it off walls it slides along. Squeezed within 0.8 blocks of
+ //!   the head it reports `Shot::close` and the caller draws the hand instead of the model.
+-- **Shoulder swap**: also by hand (`Rig::swap`), swinging out wide behind the head while it crosses.
++//! - **Shoulder swap**: also by hand (`Rig::swap`), swinging out wide behind the head while it crosses.
+ //! - **Bank**: roll into a strafe or a turn (4.6 degrees at most), spring-eased.
+ //! - **Impacts**: a landing dips the pivot (under-damped spring, scaled by the fall speed), a jump lifts it, a hit kicks pitch and roll
+ //!   with a side that alternates.
