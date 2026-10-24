@@ -84,6 +84,155 @@ fn of(b: Biome) -> [f32; N] {
     }
 }
 
+
+/// The 19 biomes in the order of `AtmosCfg::looks`.
+pub const ALL: [Biome; 19] = {
+    use Biome::*;
+    [Plains, Forest, Rainforest, Swamp, SeasonalForest, Savanna, Shrubland, Taiga, Desert, Tundra, Ocean, Beach, Mountains, AutumnalForest, Chaparral, Marsh, OakWoodland, WetWoodland, SnowyBirchGrove]
+};
+
+/// Where `b` is in `ALL`.
+pub fn idx(b: Biome) -> usize {
+    ALL.iter().position(|&x| x == b).unwrap_or(0)
+}
+
+/// The name the editor and `options.txt` use.
+pub fn name(b: Biome) -> &'static str {
+    use Biome::*;
+    match b {
+        Plains => "Plains",
+        Forest => "Forest",
+        Rainforest => "Rainforest",
+        Swamp => "Swamp",
+        SeasonalForest => "Seasonal Forest",
+        Savanna => "Savanna",
+        Shrubland => "Shrubland",
+        Taiga => "Taiga",
+        Desert => "Desert",
+        Tundra => "Tundra",
+        Ocean => "Ocean",
+        Beach => "Beach",
+        Mountains => "Mountains",
+        AutumnalForest => "Autumnal Forest",
+        Chaparral => "Chaparral",
+        Marsh => "Marsh",
+        OakWoodland => "Oak Woodland",
+        WetWoodland => "Wet Woodland",
+        SnowyBirchGrove => "Snowy Birch Grove",
+    }
+}
+
+/// How the editor shows a knob's value.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum Fmt {
+    /// 0..1 as 0..255 (a colour channel).
+    Byte,
+    Percent,
+    /// `x1.25`
+    Times,
+    /// per mille of a block (the fog density).
+    Milli,
+}
+
+/// One slider of the editor: a slot of the look and its range.
+#[derive(Copy, Clone, Debug)]
+pub struct Knob {
+    pub name: &'static str,
+    pub i: usize,
+    pub lo: f32,
+    pub hi: f32,
+    pub fmt: Fmt,
+}
+
+const fn kn(name: &'static str, i: usize, lo: f32, hi: f32, fmt: Fmt) -> Knob {
+    Knob { name, i, lo, hi, fmt }
+}
+
+/// The editor's tabs and their sliders. By convention the first three sliders of a tab are a colour (red, green, blue; the swatch shows them).
+pub const TABS: [(&str, &[Knob]); 5] = [
+    ("Sky", &[kn("Red", Z, 0.0, 1.0, Fmt::Byte), kn("Green", Z + 1, 0.0, 1.0, Fmt::Byte), kn("Blue", Z + 2, 0.0, 1.0, Fmt::Byte), kn("Gradient", CURVE, 0.5, 2.0, Fmt::Times)]),
+    ("Fog", &[kn("Red", H, 0.0, 1.0, Fmt::Byte), kn("Green", H + 1, 0.0, 1.0, Fmt::Byte), kn("Blue", H + 2, 0.0, 1.0, Fmt::Byte), kn("Density", DENS, 0.0, 0.02, Fmt::Milli)]),
+    ("Clouds", &[kn("Red", CL, 0.0, 1.0, Fmt::Byte), kn("Green", CL + 1, 0.0, 1.0, Fmt::Byte), kn("Blue", CL + 2, 0.0, 1.0, Fmt::Byte), kn("Cover", COVER, 0.0, 1.0, Fmt::Percent), kn("Speed", SPEED, 0.0, 3.0, Fmt::Times)]),
+    ("Haze", &[kn("Red", HZ, 0.0, 1.0, Fmt::Byte), kn("Green", HZ + 1, 0.0, 1.0, Fmt::Byte), kn("Blue", HZ + 2, 0.0, 1.0, Fmt::Byte), kn("Strength", HA, 0.0, 1.0, Fmt::Percent)]),
+    ("Stars", &[kn("Red", ST, 0.0, 1.0, Fmt::Byte), kn("Green", ST + 1, 0.0, 1.0, Fmt::Byte), kn("Blue", ST + 2, 0.0, 1.0, Fmt::Byte), kn("Brightness", SMUL, 0.0, 2.0, Fmt::Times)]),
+];
+
+impl Knob {
+    /// The slider position 0..1 of a look's value.
+    pub fn pos(&self, look: &[f32; N]) -> f32 {
+        ((look[self.i] - self.lo) / (self.hi - self.lo)).clamp(0.0, 1.0)
+    }
+
+    /// `Name: value` for the slider's label.
+    pub fn text(&self, look: &[f32; N]) -> String {
+        let v = look[self.i];
+        match self.fmt {
+            Fmt::Byte => format!("{}: {}", self.name, (v * 255.0).round() as u32),
+            Fmt::Percent => format!("{}: {}%", self.name, (v * 100.0).round() as u32),
+            Fmt::Times => format!("{}: x{v:.2}", self.name),
+            Fmt::Milli => format!("{}: {:.1}", self.name, v * 1000.0),
+        }
+    }
+}
+
+/// The looks of all biomes as the player tuned them (`Settings::atmos`, `atmos_<n>:` lines of options.txt) and what the editor tells the game.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AtmosCfg {
+    pub looks: [[f32; N]; 19],
+    /// The biome under the player, written by the game every frame: the editor opens on it.
+    pub here: Biome,
+    /// While the editor is open: every column counts as this biome and the frame follows at once, so each slider is seen live. Not saved.
+    pub view: Option<Biome>,
+}
+
+impl Default for AtmosCfg {
+    fn default() -> Self {
+        Self { looks: ALL.map(of), here: Biome::Plains, view: None }
+    }
+}
+
+impl AtmosCfg {
+    pub fn look(&self, b: Biome) -> &[f32; N] {
+        &self.looks[idx(b)]
+    }
+
+    /// Set slot `i` of a biome's look, kept inside the knob's range.
+    pub fn set(&mut self, b: Biome, k: &Knob, pos: f32) {
+        self.looks[idx(b)][k.i] = k.lo + pos.clamp(0.0, 1.0) * (k.hi - k.lo);
+    }
+
+    /// Back to the built-in look of one biome.
+    pub fn reset(&mut self, b: Biome) {
+        self.looks[idx(b)] = of(b);
+    }
+
+    pub fn reset_all(&mut self) {
+        self.looks = ALL.map(of);
+    }
+
+    /// Has the player changed this biome?
+    pub fn edited(&self, b: Biome) -> bool {
+        self.looks[idx(b)] != of(b)
+    }
+
+    /// `atmos_<n>:v,v,...` for every edited biome (n = index in `ALL`).
+    pub fn save_into(&self, t: &mut String) {
+        for (n, &b) in ALL.iter().enumerate().filter(|&(_, &b)| self.edited(b)) {
+            let v: Vec<String> = self.looks[idx(b)].iter().map(|v| format!("{v:.3}")).collect();
+            t.push_str(&format!("atmos_{n}:{}\n", v.join(",")));
+        }
+    }
+
+    /// One `atmos_<n>` line; a bad one (index out of range, wrong count, not a number, outside 0..2) is skipped.
+    pub fn load(&mut self, k: &str, v: &str) {
+        let Some(n) = k.strip_prefix("atmos_").and_then(|n| n.parse::<usize>().ok()).filter(|&n| n < ALL.len()) else { return };
+        let vals: Vec<f32> = v.split(',').filter_map(|x| x.trim().parse::<f32>().ok().filter(|f| (0.0..=2.0).contains(f))).collect();
+        if vals.len() == N && v.split(',').count() == N {
+            self.looks[n].copy_from_slice(&vals);
+        }
+    }
+}
+
 /// What the renderers read each frame (`WorldDraw::atmos`). Colours with a `linear` note are already in the frame's working space.
 #[derive(Copy, Clone, Debug)]
 pub struct Frame {
@@ -113,6 +262,7 @@ pub struct Atmos {
     since: f32,
     ready: bool,
     cloud_x: f32,
+    here: Biome,
 }
 
 impl Default for Atmos {
@@ -123,7 +273,7 @@ impl Default for Atmos {
 
 impl Atmos {
     pub fn new() -> Self {
-        Self { cur: of(Biome::Plains), goal: of(Biome::Plains), since: 0.0, ready: false, cloud_x: 0.0 }
+        Self { cur: of(Biome::Plains), goal: of(Biome::Plains), since: 0.0, ready: false, cloud_x: 0.0, here: Biome::Plains }
     }
 
     /// The next `update` jumps to the look under the player instead of easing there (a new world, a dimension change).
@@ -131,21 +281,25 @@ impl Atmos {
         self.ready = false;
     }
 
-    /// `dt` real seconds; `at` the player's block column; `biome` the biome of a column.
-    pub fn update(&mut self, dt: f32, at: (i32, i32), mut biome: impl FnMut(i32, i32) -> Biome) {
+    /// `dt` real seconds; `at` the player's block column; `cfg` the looks (and the editor's view); `biome` the biome of a column.
+    /// Returns the biome of the player's own column. With `cfg.view` set the goal is that biome's look, recomputed and reached at once.
+    pub fn update(&mut self, dt: f32, at: (i32, i32), cfg: &AtmosCfg, mut biome: impl FnMut(i32, i32) -> Biome) -> Biome {
         self.since += dt;
-        if !self.ready || self.since >= 0.25 {
+        if !self.ready || self.since >= 0.25 || cfg.view.is_some() {
             self.since = 0.0;
             self.goal = [0.0; N];
+            self.here = cfg.view.unwrap_or_else(|| biome(at.0, at.1));
             for (dx, dz, w) in RING {
-                let l = of(biome(at.0 + dx, at.1 + dz));
+                let b = cfg.view.unwrap_or_else(|| biome(at.0 + dx, at.1 + dz));
+                let l = cfg.looks[idx(b)];
                 self.goal.iter_mut().zip(l).for_each(|(g, v)| *g += v * w);
             }
         }
-        let k = if self.ready { 1.0 - (-dt / TAU).exp() } else { 1.0 };
+        let k = if self.ready && cfg.view.is_none() { 1.0 - (-dt / TAU).exp() } else { 1.0 };
         self.cur.iter_mut().zip(self.goal).for_each(|(c, g)| *c += (g - *c) * k);
         self.ready = true;
         self.cloud_x += dt * DRIFT * self.cur[SPEED];
+        self.here
     }
 
     /// This frame's sky, fog, haze, clouds and stars for the sun `angle` (`world::sky::celestial_angle`) and the weather.
@@ -192,7 +346,7 @@ mod tests {
     #[test]
     fn noon_is_the_biomes_colour_and_night_is_dark() {
         let mut a = Atmos::new();
-        a.update(0.016, (0, 0), all(Biome::Desert));
+        a.update(0.016, (0, 0), &AtmosCfg::default(), all(Biome::Desert));
         let noon = a.frame(0.0, 0.0, 0.0);
         let want = of(Biome::Desert);
         for i in 0..3 {
@@ -209,11 +363,11 @@ mod tests {
     fn crossing_a_border_eases_over_seconds_without_a_jump() {
         let g = Z + 1; // the green of the sky top: Plains 0.62, Swamp 0.80
         let mut a = Atmos::new();
-        a.update(0.016, (0, 0), all(Biome::Plains)); // the first update jumps
+        a.update(0.016, (0, 0), &AtmosCfg::default(), all(Biome::Plains)); // the first update jumps
         let start = a.cur[g];
         let (goal, mut last, mut biggest) = (of(Biome::Swamp)[g], start, 0.0_f32);
         for _ in 0..600 {
-            a.update(0.016, (0, 0), all(Biome::Swamp)); // ~9.6 s
+            a.update(0.016, (0, 0), &AtmosCfg::default(), all(Biome::Swamp)); // ~9.6 s
             biggest = biggest.max((a.cur[g] - last).abs());
             last = a.cur[g];
         }
@@ -221,10 +375,12 @@ mod tests {
         assert!(biggest < 0.02 * (goal - start).abs(), "one frame moved {biggest}");
         // one 1 s frame or sixty of 1/60 s end up close (the goal is looked up four times a second, so not equal)
         let (mut x, mut y) = (Atmos::new(), Atmos::new());
-        x.update(0.0, (0, 0), all(Biome::Plains));
-        y.update(0.0, (0, 0), all(Biome::Plains));
-        x.update(1.0, (0, 0), all(Biome::Swamp));
-        (0..60).for_each(|_| y.update(1.0 / 60.0, (0, 0), all(Biome::Swamp)));
+        x.update(0.0, (0, 0), &AtmosCfg::default(), all(Biome::Plains));
+        y.update(0.0, (0, 0), &AtmosCfg::default(), all(Biome::Plains));
+        x.update(1.0, (0, 0), &AtmosCfg::default(), all(Biome::Swamp));
+        (0..60).for_each(|_| {
+            y.update(1.0 / 60.0, (0, 0), &AtmosCfg::default(), all(Biome::Swamp));
+        });
         assert!((x.cur[g] - y.cur[g]).abs() < 0.03, "{} vs {}", x.cur[g], y.cur[g]);
     }
 
@@ -233,7 +389,7 @@ mod tests {
         let g = Z + 1; // Plains 0.62, Forest 0.46
         let mut a = Atmos::new();
         // forest to the east beyond 40 blocks, plains elsewhere: only the (48, 0) sample is in it
-        a.update(0.0, (0, 0), |x, _| if x >= 40 { Biome::Forest } else { Biome::Plains });
+        a.update(0.0, (0, 0), &AtmosCfg::default(), |x, _| if x >= 40 { Biome::Forest } else { Biome::Plains });
         let (p, f) = (of(Biome::Plains)[g], of(Biome::Forest)[g]);
         assert!((a.cur[g] - p).abs() > 0.01 && (a.cur[g] - p).abs() < (f - p).abs() * 0.5, "{} between {p} and {f}", a.cur[g]);
     }
@@ -241,11 +397,11 @@ mod tests {
     #[test]
     fn clouds_drift_with_the_speed_of_the_biome_and_reset_jumps() {
         let mut a = Atmos::new();
-        a.update(0.0, (0, 0), all(Biome::Plains));
-        a.update(10.0, (0, 0), all(Biome::Plains));
+        a.update(0.0, (0, 0), &AtmosCfg::default(), all(Biome::Plains));
+        a.update(10.0, (0, 0), &AtmosCfg::default(), all(Biome::Plains));
         assert!((a.frame(0.0, 0.0, 0.0).cloudp[2] - 6.0).abs() < 0.01, "10 s at 0.6 blocks/s");
         a.reset();
-        a.update(0.016, (0, 0), all(Biome::Ocean));
+        a.update(0.016, (0, 0), &AtmosCfg::default(), all(Biome::Ocean));
         assert!((a.cur[Z] - of(Biome::Ocean)[Z]).abs() < 1e-6, "reset jumps");
     }
 
@@ -256,6 +412,51 @@ mod tests {
             let l = of(b);
             assert!(l.iter().all(|v| (0.0..=2.0).contains(v)), "{b:?}: {l:?}");
             assert!(l[DENS] > 0.0 && l[DENS] < 0.02 && l[CURVE] > 0.0, "{b:?}");
+        }
+    }
+    #[test]
+    fn the_editor_sees_its_edit_at_once_and_it_survives_options_txt() {
+        let mut cfg = AtmosCfg::default();
+        let k = TABS[1].1[0]; // Fog, red
+        cfg.set(Biome::Desert, &k, 0.25);
+        assert!(cfg.edited(Biome::Desert) && !cfg.edited(Biome::Plains));
+        assert_eq!(k.text(cfg.look(Biome::Desert)), "Red: 64");
+        // `view`: one frame later (not two seconds later) the fog is the edited one, wherever the player stands
+        cfg.view = Some(Biome::Desert);
+        let mut a = Atmos::new();
+        a.update(0.016, (0, 0), &AtmosCfg::default(), all(Biome::Ocean)); // ready, standing in an ocean
+        assert_eq!(a.update(0.016, (0, 0), &cfg, all(Biome::Ocean)), Biome::Desert);
+        assert!((a.cur[H] - 0.25).abs() < 1e-5, "{}", a.cur[H]);
+        // saved lines hold only the edited biome and load back; bad lines change nothing
+        let mut t = String::new();
+        cfg.save_into(&mut t);
+        assert_eq!(t.lines().count(), 1);
+        let mut back = AtmosCfg::default();
+        for l in t.lines() {
+            let (k, v) = l.split_once(':').unwrap();
+            back.load(k, v);
+        }
+        assert!((back.look(Biome::Desert)[H] - 0.25).abs() < 1e-3 && back.look(Biome::Plains) == &of(Biome::Plains));
+        let nine = vec!["9"; N].join(",");
+        for bad in [("atmos_99", "0.1"), ("atmos_0", "1,2,3"), ("atmos_0", "x"), ("atmos_0", nine.as_str())] {
+            back.load(bad.0, bad.1);
+        }
+        assert!(!back.edited(Biome::Plains));
+        back.reset(Biome::Desert);
+        assert!(!back.edited(Biome::Desert));
+    }
+
+    #[test]
+    fn every_knob_is_in_range_and_names_a_slot() {
+        for b in ALL {
+            assert_eq!(ALL[idx(b)], b);
+            for (_, knobs) in TABS {
+                for k in knobs {
+                    assert!(k.i < N && k.lo < k.hi, "{k:?}");
+                    let (p, v) = (k.pos(&of(b)), of(b)[k.i]);
+                    assert!((0.0..=1.0).contains(&p) && (v - (k.lo + p * (k.hi - k.lo))).abs() < 1e-5, "{b:?} {k:?}: {v} out of range");
+                }
+            }
         }
     }
 }

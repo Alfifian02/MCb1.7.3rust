@@ -13,6 +13,8 @@ use crate::input::gamepad::{Btn, PadCfg, ACTS};
 use crate::input::touch_ui::{ScreenEv, HOLD_SECS, SWING_SECS};
 use crate::menu::{dirt, grad, rgb, scaled_gs, tw};
 use crate::render::hud::{HudPipeline, HudVertex};
+use crate::world::atmos::{self, AtmosCfg};
+use crate::world::biome::Biome;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -140,6 +142,8 @@ pub struct Settings {
     pub post: u8,
     /// The renderer for the next start: 0 Auto (Vulkan), 1 Vulkan, 2 OpenGL ES 3.2 (`renderer:` in options.txt).
     pub renderer: u8,
+    /// The look of every biome's sky as the player tuned it (the sun button of Video Settings, `world::atmos`), `atmos_<n>:` in options.txt.
+    pub atmos: AtmosCfg,
     path: Option<PathBuf>,
 }
 
@@ -169,6 +173,7 @@ impl Default for Settings {
             msaa: 0,
             post: 0,
             renderer: 0,
+            atmos: AtmosCfg::default(),
             path: None,
         }
     }
@@ -205,6 +210,7 @@ impl Settings {
                 ("post", _, Some(n)) if n <= 2 => s.post = n,
                 ("renderer", _, Some(n)) if n <= 2 => s.renderer = n,
                 (k, ..) if k.starts_with("pad_") => s.pad.load(k, v),
+                (k, ..) if k.starts_with("atmos_") => s.atmos.load(k, v),
                 _ => {
                     if let (Some(i), Ok(code)) = (KEY_IDS.iter().position(|id| k.strip_prefix("key_key.") == Some(*id)), v.parse::<u32>()) {
                         s.keys[i] = code;
@@ -226,6 +232,7 @@ impl Settings {
             t.push_str(&format!("key_key.{id}:{code}\n"));
         }
         self.pad.save_into(&mut t);
+        self.atmos.save_into(&mut t);
         if let Err(e) = std::fs::write(p, t) {
             log::warn!("options: {e}");
         }
@@ -349,6 +356,8 @@ pub enum OptScr {
     /// The Controller tab (Controllify): its button bindings, and its tuning page.
     Pad,
     PadTune,
+    /// The live atmosphere editor (the sun button of Video Settings, in a world only): the world stays undimmed beside its panel.
+    Atmos,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -365,6 +374,24 @@ enum Act {
     PadBind(usize),
     PadKnob(usize),
     PadToggle(usize),
+    /// The sun button of Video Settings.
+    Atmos,
+    AtTab(usize),
+    AtKnob(usize),
+    AtStep(i32),
+    AtList,
+    AtPick(usize),
+    AtHere,
+    AtReset,
+    AtResetAll,
+}
+
+/// Which biome and tab the atmosphere editor shows, and whether its biome list is open.
+#[derive(Clone, Copy, Debug)]
+struct AtmosEd {
+    biome: Biome,
+    tab: usize,
+    list: bool,
 }
 
 /// One control: what it does, its rectangle (GUI units) and its text.
@@ -386,13 +413,14 @@ fn inside(r: [f32; 4], x: f32, y: f32) -> bool {
 }
 
 fn is_slider(a: Act) -> bool {
-    matches!(a, Act::Opt(o) if o.slider()) || matches!(a, Act::PadKnob(_))
+    matches!(a, Act::Opt(o) if o.slider()) || matches!(a, Act::PadKnob(_) | Act::AtKnob(_))
 }
 
-fn set_slider(a: Act, st: &mut Settings, v: f32) {
+fn set_slider(a: Act, st: &mut Settings, v: f32, ed: &AtmosEd) {
     match a {
         Act::Opt(o) => st.set_float(o, v),
         Act::PadKnob(i) => st.pad.set_knob(i, v),
+        Act::AtKnob(j) => st.atmos.set(ed.biome, &atmos::TABS[ed.tab].1[j], v),
         _ => {}
     }
 }
@@ -416,6 +444,58 @@ pub(crate) fn button(v: &mut Vec<HudVertex>, s: f32, r: [f32; 4], label: &str, o
     HudPipeline::push_text(v, (r[0] + (r[2] - tw(label)) / 2.0) * s, (r[1] + (r[3] - 8.0) / 2.0) * s, s, label, rgb(c));
 }
 
+/// The atmosphere editor's controls (GUI units, a panel 212 wide down the left edge): the biome (`<` name `>`), the tabs, the tab's
+/// sliders, or the biome list, the two resets and Done.
+fn atmos_widgets(ed: &AtmosEd, st: &Settings) -> Vec<Wid> {
+    let x0 = 4.0;
+    let w = |act, r: [f32; 4], label: String| Wid { act, r, label };
+    let b = ed.biome;
+    let mut v = vec![
+        w(Act::AtStep(-1), [x0, 4.0, 20.0, 16.0], "<".into()),
+        w(Act::AtList, [x0 + 22.0, 4.0, 168.0, 16.0], format!("{}{}", atmos::name(b), if st.atmos.edited(b) { " *" } else { "" })),
+        w(Act::AtStep(1), [x0 + 192.0, 4.0, 20.0, 16.0], ">".into()),
+    ];
+    for (i, (name, _)) in atmos::TABS.iter().enumerate() {
+        v.push(w(Act::AtTab(i), [x0 + (i as f32 * 42.4).floor(), 24.0, 41.0, 14.0], name.to_string()));
+    }
+    if ed.list {
+        v.push(w(Act::AtHere, [x0, 42.0, 212.0, 14.0], format!("Under me: {}", atmos::name(st.atmos.here))));
+        for (i, &o) in atmos::ALL.iter().enumerate() {
+            v.push(w(Act::AtPick(i), [x0 + (i % 2) as f32 * 107.0, 58.0 + (i / 2) as f32 * 15.0, 105.0, 14.0], atmos::name(o).to_string()));
+        }
+    } else {
+        let look = st.atmos.look(b);
+        for (j, k) in atmos::TABS[ed.tab].1.iter().enumerate() {
+            v.push(w(Act::AtKnob(j), [x0, 44.0 + j as f32 * 22.0, 150.0, 20.0], k.text(look)));
+        }
+        v.push(w(Act::AtReset, [x0, 170.0, 104.0, 18.0], "Reset biome".into()));
+        v.push(w(Act::AtResetAll, [x0 + 108.0, 170.0, 104.0, 18.0], "Reset all".into()));
+    }
+    v.push(w(Act::Done, [x0, 214.0, 212.0, 18.0], "Done".into()));
+    v
+}
+
+/// The sun of the editor's button: a 13 x 13 pixel sun in the style of b1.7.3's `sun.png` (a square yellow disc, edged, with rays), centred on `r`.
+fn sun(v: &mut Vec<HudVertex>, s: f32, r: [f32; 4]) {
+    let (ox, oy) = (r[0] + ((r[2] - 13.0) / 2.0).floor(), r[1] + ((r[3] - 13.0) / 2.0).floor());
+    for y in 0..13i32 {
+        for x in 0..13i32 {
+            let (dx, dy) = (x - 6, y - 6);
+            let core = dx.abs().max(dy.abs());
+            let c = if core == 3 {
+                0xE08A12
+            } else if core < 3 {
+                if matches!((dx, dy), (-2, -2) | (-1, -2) | (-2, -1)) { 0xFFF7B8 } else { 0xFFD93B }
+            } else if (dx == 0 || dy == 0 || dx.abs() == dy.abs()) && core >= 5 {
+                0xFFB62E
+            } else {
+                continue;
+            };
+            HudPipeline::push_quad(v, (ox + x as f32) * s, (oy + y as f32) * s, s, s, rgb(c));
+        }
+    }
+}
+
 /// `drawDefaultBackground`: the dimmed world when one is behind, else the dirt.
 fn background(v: &mut Vec<HudVertex>, s: f32, gw: f32, gh: f32, world: bool) {
     if world {
@@ -436,6 +516,9 @@ pub struct OptionsUi {
     wait_pad: Option<usize>,
     /// Where the finger is (GUI units), for the highlight.
     finger: Option<(f32, f32)>,
+    /// A world is behind the screen (the pause menu): Video Settings then has the sun button.
+    world: bool,
+    ed: AtmosEd,
 }
 
 impl Default for OptionsUi {
@@ -446,7 +529,12 @@ impl Default for OptionsUi {
 
 impl OptionsUi {
     pub fn new() -> Self {
-        Self { scr: OptScr::Main, drag: None, wait: None, wait_pad: None, finger: None }
+        Self { scr: OptScr::Main, drag: None, wait: None, wait_pad: None, finger: None, world: false, ed: AtmosEd { biome: Biome::Plains, tab: 0, list: false } }
+    }
+
+    /// The options of the pause menu: a world is behind them, so the atmosphere editor can be opened.
+    pub fn in_game() -> Self {
+        Self { world: true, ..Self::new() }
     }
 
     fn widgets(&self, gw: f32, gh: f32, st: &Settings) -> Vec<Wid> {
@@ -465,7 +553,15 @@ impl OptionsUi {
                 w.push(wide(Act::Controls, top + 120.0 + 12.0, "Controls..."));
                 w
             }
-            OptScr::Video => opts(&[Opt::Graphics, Opt::RenderDistance, Opt::AmbientOcclusion, Opt::FramerateLimit, Opt::Anaglyph, Opt::ViewBobbing, Opt::GuiScale, Opt::AdvancedOpengl, Opt::Msaa, Opt::Post, Opt::Renderer, Opt::DynamicRes]),
+            OptScr::Video => {
+                let mut w = opts(&[Opt::Graphics, Opt::RenderDistance, Opt::AmbientOcclusion, Opt::FramerateLimit, Opt::Anaglyph, Opt::ViewBobbing, Opt::GuiScale, Opt::AdvancedOpengl, Opt::Msaa, Opt::Post, Opt::Renderer, Opt::DynamicRes]);
+                // Bottom right: the sun, which opens the live atmosphere editor.
+                if self.world {
+                    w.push(Wid { act: Act::Atmos, r: [gw - 24.0, gh - 24.0, 20.0, 20.0], label: String::new() });
+                }
+                w
+            }
+            OptScr::Atmos => atmos_widgets(&self.ed, st),
             OptScr::Controls => (0..KEY_NAMES.len())
                 .map(|i| {
                     let name = key_name(st.keys[i]);
@@ -500,7 +596,9 @@ impl OptionsUi {
         if matches!(self.scr, OptScr::Pad | OptScr::PadTune) {
             w.push(wide(Act::PadPage, top + 144.0, if self.scr == OptScr::Pad { "Tuning..." } else { "Buttons..." }));
         }
-        w.push(wide(Act::Done, top + 168.0, "Done"));
+        if self.scr != OptScr::Atmos {
+            w.push(wide(Act::Done, top + 168.0, "Done"));
+        }
         w
     }
 
@@ -514,7 +612,7 @@ impl OptionsUi {
                 self.finger = Some((x / s, y / s));
                 if let Some(Wid { act, r, .. }) = at(x, y).filter(|b| is_slider(b.act)) {
                     self.drag = Some(*act);
-                    set_slider(*act, st, slider_value(*r, x / s));
+                    set_slider(*act, st, slider_value(*r, x / s), &self.ed);
                 }
                 None
             }
@@ -522,7 +620,7 @@ impl OptionsUi {
                 self.finger = Some((x / s, y / s));
                 if let Some(a) = self.drag {
                     if let Some(b) = wids.iter().find(|b| b.act == a) {
-                        set_slider(a, st, slider_value(b.r, x / s));
+                        set_slider(a, st, slider_value(b.r, x / s), &self.ed);
                     }
                 }
                 None
@@ -567,15 +665,48 @@ impl OptionsUi {
                 st.pad.toggle(i);
                 st.save();
             }
+            Act::Atmos => {
+                self.ed = AtmosEd { biome: st.atmos.here, tab: 0, list: false };
+                st.atmos.view = Some(self.ed.biome);
+                self.scr = OptScr::Atmos;
+            }
+            Act::AtTab(i) => (self.ed.tab, self.ed.list) = (i, false),
+            Act::AtKnob(_) => {}
+            Act::AtList => self.ed.list = !self.ed.list,
+            Act::AtStep(d) => self.show(st, atmos::ALL[(atmos::idx(self.ed.biome) as i32 + d).rem_euclid(atmos::ALL.len() as i32) as usize]),
+            Act::AtPick(i) => self.show(st, atmos::ALL[i]),
+            Act::AtHere => {
+                let b = st.atmos.here;
+                self.show(st, b);
+            }
+            Act::AtReset => {
+                st.atmos.reset(self.ed.biome);
+                st.save();
+            }
+            Act::AtResetAll => {
+                st.atmos.reset_all();
+                st.save();
+            }
             Act::Done => {
                 st.save();
                 if self.scr == OptScr::Main {
                     return Some(OptEv::Close);
                 }
+                if self.scr == OptScr::Atmos {
+                    st.atmos.view = None; // the sky goes back to the biome under the player, easing over 2 s
+                    self.scr = OptScr::Video;
+                    return None;
+                }
                 self.scr = OptScr::Main;
             }
         }
         None
+    }
+
+    /// The editor shows (and the game draws everywhere) the look of `b`.
+    fn show(&mut self, st: &mut Settings, b: Biome) {
+        self.ed = AtmosEd { biome: b, list: false, ..self.ed };
+        st.atmos.view = Some(b);
     }
 
     /// `GuiControls.keyTyped`: the key that follows a tap on a key button becomes its binding.
@@ -603,27 +734,51 @@ impl OptionsUi {
     pub fn draw(&self, v: &mut Vec<HudVertex>, w: f32, h: f32, st: &Settings, world: bool) {
         let (s, gw, gh) = scaled_gs(w, h, st.gui_scale);
         let hw = (gw / 2.0).floor();
-        background(v, s, gw, gh, world);
-        let title = match self.scr {
-            OptScr::Main => "Options",
-            OptScr::Video => "Video Settings",
-            OptScr::Controls | OptScr::Pad | OptScr::PadTune => "Controls",
-        };
-        let ty = if matches!(self.scr, OptScr::Controls | OptScr::Pad | OptScr::PadTune) { 8.0 } else { 20.0 }; // room for the tabs
-        HudPipeline::push_text(v, (hw - tw(title) / 2.0) * s, ty * s, s, title, rgb(0xFFFFFF));
+        if self.scr == OptScr::Atmos {
+            // No dimming: the world is the preview. Only the panel's own shade, on the left.
+            grad(v, s, [0.0, 0.0, 220.0, gh], [0.0, 0.0, 0.0, 0.62], [0.0, 0.0, 0.0, 0.76]);
+        } else {
+            background(v, s, gw, gh, world);
+            let title = match self.scr {
+                OptScr::Main => "Options",
+                OptScr::Video => "Video Settings",
+                _ => "Controls",
+            };
+            let ty = if matches!(self.scr, OptScr::Controls | OptScr::Pad | OptScr::PadTune) { 8.0 } else { 20.0 }; // room for the tabs
+            HudPipeline::push_text(v, (hw - tw(title) / 2.0) * s, ty * s, s, title, rgb(0xFFFFFF));
+        }
         for b in self.widgets(gw, gh, st) {
             let over = self.finger.is_some_and(|(x, y)| inside(b.r, x, y));
             let knob = match b.act {
                 Act::Opt(o) if o.slider() => Some(st.float(o)),
                 Act::PadKnob(i) => Some(st.pad.knob(i)),
+                Act::AtKnob(j) => Some(atmos::TABS[self.ed.tab].1[j].pos(st.atmos.look(self.ed.biome))),
                 _ => None,
             };
             // The tab you are on is drawn greyed.
-            let on = !matches!((self.scr, b.act), (OptScr::Controls, Act::TabKeys) | (OptScr::Pad | OptScr::PadTune, Act::TabPad));
+            let on = !matches!((self.scr, b.act), (OptScr::Controls, Act::TabKeys) | (OptScr::Pad | OptScr::PadTune, Act::TabPad))
+                && !matches!(b.act, Act::AtTab(i) if i == self.ed.tab && !self.ed.list)
+                && !matches!(b.act, Act::AtPick(i) if atmos::ALL[i] == self.ed.biome);
             button(v, s, b.r, &b.label, on, over, knob);
+            match b.act {
+                Act::Atmos => sun(v, s, b.r),
+                // A gold dot on a biome whose look the player changed.
+                Act::AtPick(i) if st.atmos.edited(atmos::ALL[i]) => HudPipeline::push_quad(v, (b.r[0] + b.r[2] - 5.0) * s, (b.r[1] + 2.0) * s, 3.0 * s, 3.0 * s, rgb(0xFFD93B)),
+                _ => {}
+            }
             if let (OptScr::Controls, Act::Key(i)) = (self.scr, b.act) {
                 HudPipeline::push_text(v, (b.r[0] + 70.0 + 6.0) * s, (b.r[1] + 7.0) * s, s, KEY_NAMES[i], rgb(0xFFFFFF));
             }
+        }
+        if self.scr == OptScr::Atmos && !self.ed.list {
+            // The tab's colour (its first three sliders) as it is authored, and its hex code.
+            let (look, k0) = (st.atmos.look(self.ed.biome), atmos::TABS[self.ed.tab].1[0].i);
+            let c: [f32; 3] = [look[k0], look[k0 + 1], look[k0 + 2]];
+            HudPipeline::push_quad(v, 159.0 * s, 43.0 * s, 54.0 * s, 46.0 * s, rgb(0xA0A0A0));
+            HudPipeline::push_quad(v, 160.0 * s, 44.0 * s, 52.0 * s, 44.0 * s, [c[0], c[1], c[2], 1.0]);
+            let hex = format!("#{:02X}{:02X}{:02X}", (c[0] * 255.0).round() as u32, (c[1] * 255.0).round() as u32, (c[2] * 255.0).round() as u32);
+            HudPipeline::push_text(v, (186.0 - tw(&hex) / 2.0) * s, 93.0 * s, s, &hex, rgb(0xE0E0E0));
+            HudPipeline::push_text(v, 4.0 * s, 158.0 * s, s, "Noon colours; night and rain follow", rgb(0xA0A0A0));
         }
     }
 }
@@ -743,7 +898,7 @@ impl Pause {
                     PAct::Debug => Some(PauseEv::LodDebug),
                     PAct::Info => Some(PauseEv::Info),
                     PAct::Options => {
-                        self.opt = Some(OptionsUi::new());
+                        self.opt = Some(OptionsUi::in_game());
                         None
                     }
                     PAct::Achievements | PAct::Stats => None,
@@ -983,6 +1138,50 @@ mod tests {
         tap(&mut o, &mut st, "Controller");
         tap(&mut o, &mut st, "Tuning...");
         assert!(o.widgets(gw, gh, &st).iter().any(|b| b.label.starts_with("Dig Delay")));
+    }
+
+    /// Video Settings > the sun (in a world only) > the editor: the biome under the player, a slider edits it live, the edit reaches
+    /// options.txt, `<` `>` and the list change the biome, Done goes back and the preview ends.
+    #[test]
+    fn atmosphere_editor_flow() {
+        let root = tmp("atmos");
+        let mut st = Settings::load(&root);
+        st.atmos.here = Biome::Desert;
+        let mut title = OptionsUi::new();
+        tap(&mut title, &mut st, "Video Settings...");
+        let (_, gw, gh) = scaled_gs(SZ.0, SZ.1, 0);
+        assert!(title.widgets(gw, gh, &st).iter().all(|b| b.act != Act::Atmos), "no sun without a world");
+        let mut o = OptionsUi::in_game();
+        tap(&mut o, &mut st, "Video Settings...");
+        let sun = o.widgets(gw, gh, &st).into_iter().find(|b| b.act == Act::Atmos).unwrap().r;
+        assert!(sun[0] + sun[2] >= gw - 4.0 && sun[1] + sun[3] >= gh - 4.0, "bottom right: {sun:?}");
+        let (x, y) = px(sun, &st);
+        o.event(ScreenEv::Up(x, y), SZ.0, SZ.1, &mut st);
+        assert_eq!((o.scr, st.atmos.view), (OptScr::Atmos, Some(Biome::Desert)));
+        tap(&mut o, &mut st, "Fog");
+        // the red slider all the way left
+        let r = o.widgets(gw, gh, &st).into_iter().find(|b| b.label.starts_with("Red")).unwrap().r;
+        let (s, ..) = scaled_gs(SZ.0, SZ.1, 0);
+        let y = (r[1] + 10.0) * s;
+        o.event(ScreenEv::Down((r[0] + 4.0) * s, y), SZ.0, SZ.1, &mut st);
+        o.event(ScreenEv::Up((r[0] + 4.0) * s, y), SZ.0, SZ.1, &mut st);
+        assert_eq!(st.atmos.look(Biome::Desert)[3], 0.0);
+        assert!(st.atmos.edited(Biome::Desert) && !st.atmos.edited(Biome::Plains));
+        assert_eq!(Settings::load(&root).atmos.look(Biome::Desert)[3], 0.0, "saved when the slider is let go");
+        // next biome, then one from the list
+        tap(&mut o, &mut st, "<");
+        assert_eq!(st.atmos.view, Some(Biome::Taiga));
+        tap(&mut o, &mut st, "Taiga"); // the biome button opens the list
+        tap(&mut o, &mut st, "Swamp");
+        assert_eq!((st.atmos.view, o.ed.list), (Some(Biome::Swamp), false));
+        // Reset all brings the table back, Done ends the preview
+        tap(&mut o, &mut st, "Reset all");
+        assert!(!st.atmos.edited(Biome::Desert));
+        tap(&mut o, &mut st, "Done");
+        assert_eq!((o.scr, st.atmos.view), (OptScr::Video, None));
+        let mut v = Vec::new();
+        o.draw(&mut v, SZ.0, SZ.1, &st, true);
+        assert!(!v.is_empty());
     }
 
     #[test]

@@ -2058,7 +2058,10 @@ impl App {
             world::atmos::Frame::OFF
         } else {
             let (chunks, dt) = (&mut self.chunks, Instant::now().duration_since(self.frame_prev).as_secs_f32().min(0.25));
-            self.atmos.update(dt, (px, pz), |x, z| chunks.climate_at(x, z).0);
+            if !self.touch.paused {
+                self.opts.atmos.view = None; // the editor's preview lives only while its screen is up
+            }
+            self.opts.atmos.here = self.atmos.update(dt, (px, pz), &self.opts.atmos, |x, z| chunks.climate_at(x, z).0);
             self.atmos.frame(angle, rain, thunder)
         };
         let sky_rgb = if self.nether { hell } else { atm.sky };
@@ -2818,9 +2821,10 @@ fn android_main(app: AndroidApp) {
         // Before the window and the GPU exist there is nothing to draw, so the loop may sleep.
         // A menu left alone for a second (the world is frozen behind it) idles in the poll itself: 33 ms on the title screen, 90 ms behind the
         // game menu. Any touch or pad event ends the poll at once, so the menu answers a finger in one frame instead of up to 90 ms later.
+        // Not while the atmosphere editor is up: the clouds drift behind it, so it runs at full rate.
         let wait = match app_state.as_ref() {
             None => Duration::from_millis(8),
-            Some(a) if (a.touch.paused || a.menu.is_some()) && !a.touch.pad.active() && last_input.elapsed() > Duration::from_secs(1) => {
+            Some(a) if (a.touch.paused || a.menu.is_some()) && a.opts.atmos.view.is_none() && !a.touch.pad.active() && last_input.elapsed() > Duration::from_secs(1) => {
                 Duration::from_millis(if a.menu.is_some() { 33 } else { 90 })
             }
             Some(_) => Duration::ZERO,
