@@ -23,15 +23,17 @@
 //! * **Width** (`NetworkTracer.a(.., HydraulicGeometry, ..)`, every slider 0.5 by default, so on): the half width is
 //!   `min(16, 0.4 + sqrt(acc * 256 / 2500))`, then follows the slope (steeper: narrower), the climate, a slow random variation, braiding
 //!   on flat loose ground and delta mouths over the last 64 blocks into the sea, kept inside the base width's inset class.
+//! * **Short streams** (`minStreamLength`, here `MIN_LEN` 160 blocks): a source's stretch to the confluence where it is not the biggest branch, or to the
+//!   sea, must be that long, else its cells are dropped (repeated until nothing short is left).
 //! * **Column plan** (`RiverEngine.plan`): a column is in the channel when its distance to the centre line is under the half width,
-//!   in the bank up to `max(5, 2 * width)` further; water surface `max(sea - 1, floor(grade) - inset)`, depth `max(1, round(2 * width * 0.24))`.
+//!   in the bank up to `max(5, 2 * width)` further; water surface `max(sea - 1, floor(grade - inset))`, then made level with a bigger river at a confluence (`LEVEL_RUN`), depth `max(1, round(2 * width * 0.24))`.
 //! * **Current** (`FlowSpeed`): `clamp((slope / (1/7))^(1/3) * clamp(base width / width, 0.6, 1.8), 0.25, 2)`, times a depth factor.
 //!
 //! UNVERIFIED (not in the bytecode I traced, or chosen here): the carve's block rules and bank profile (the mod's `RiverCarverFeature`
 //! is 6700 instructions of `place` plus bank templates; only its plan, heights and materials by biome are followed), the lake level
 //! (`spill - inset`), the mod's `cohesion` (taken as `0.4 + 0.6 * wetness`), how a plate's margin meets its neighbour (the owner's
 //! network wins and a neighbour's fills the gaps), the plate seed, the push strength of the current, and how any of it plays on a device.
-//! NOT PORTED: the stage that drops chains shorter than `minStreamLength` 75 and `connectNetwork` (plate borders), lakes' 3-block masks,
+//! NOT PORTED: `connectNetwork` (plate borders), lakes' 3-block masks,
 //! waterfalls, the bed's channel bars and bend asymmetry in the carve (the width side of the hydraulics is ported), bank templates and
 //! features, plants, the fluid block and its flow rendering, drifting items, particles, sound (mc-rs has no audio), disk cache of
 //! networks, village bridges and structure promises (b1.7.3 has neither). The Python reference is `tools/hydro_proto.py` (without the
@@ -86,6 +88,14 @@ const LAKE_MIN_DEPTH: f64 = 1.5;
 const TAIL_CAP: usize = 6000;
 /// Blocks a second per unit of the mod's flow speed (0.25..2): UNVERIFIED, the mod pushes by its settings.
 const PUSH: f64 = 1.5;
+/// A stream that is not the biggest branch where it joins another (or that ends in the sea) must run at least this many blocks from its
+/// source, measured on the 16-block grid path (the mod's `minStreamLength` is 75; the player wants the small rivers long, so more). Chaikin and the
+/// meander add about 15% to what is drawn.
+const MIN_LEN: f64 = 160.0;
+/// Where a stream joins a bigger river its water first runs level with the big river's surface over `LEVEL_RUN` blocks plus twice the big
+/// river's half width (so the whole overlap of the two channels is one level), then rises to its own grade over `LEVEL_RAMP` blocks.
+const LEVEL_RUN: f64 = 24.0;
+const LEVEL_RAMP: f64 = 48.0;
 const BUCKET: i32 = 16;
 const MAX_PLATES: usize = 12;
 const NONE: usize = usize::MAX;
@@ -389,7 +399,7 @@ fn dedupe(pts: Vec<Pt>) -> Vec<Pt> {
 
 // ---- the network of one plate ------------------------------------------------------------------------------------------------
 
-/// A straight piece of a river, `1` upstream to `2` downstream: position, grade (the water surface plus its inset), half width,
+/// A straight piece of a river, `1` upstream to `2` downstream: position, water surface (its floor is the top water block), half width,
 /// flow speed and the distance still to run to the sea at each end.
 #[derive(Clone, Copy)]
 struct Seg {
@@ -418,6 +428,7 @@ pub struct Plan {
     pub blend: f64,
     pub distance: f64,
     pub width: f64,
+    /// The water surface here (a float; `water_y` is its floor).
     pub grade: f64,
     /// Unit direction of the flow.
     pub dir: [f64; 2],
@@ -491,7 +502,7 @@ impl Network {
             return None;
         }
         let grade = s.y1 + (s.y2 - s.y1) * t;
-        let water_y = (SEA_LEVEL - 1).max(grade.floor() as i32 - inset_for(w));
+        let water_y = (SEA_LEVEL - 1).max(grade.floor() as i32);
         let depth = ((2.0 * w * STREAM_DEPTH + 0.5).floor() as i32).max(1);
         let len = (s.x2 - s.x1).hypot(s.z2 - s.z1).max(1e-6);
         Some(Plan {
@@ -777,6 +788,56 @@ fn build(seed: i64, key: (i32, i32), probe: &mut dyn FnMut(i32, i32) -> (f64, f6
         stream[k] = stream[k] && !drop[k];
     }
 
+    // Minimum length (the mod's `minStreamLength`): a stream from its source to where it joins a bigger branch, or to the sea, must run at least
+    // `MIN_LEN` blocks, else its cells go (a stub of a few cells that empties into the big river). A stream that is the biggest branch where
+    // it joins, or that leaves the window, stays. Repeated, because a dropped branch can leave the next stretch a short source of its own.
+    for _ in 0..8 {
+        let (mut inflow, mut main_in) = (vec![0u8; n], vec![NONE; n]);
+        for k in 0..n {
+            if stream[k] && recv[k] != NONE && stream[recv[k]] {
+                let r = recv[k];
+                inflow[r] += 1;
+                if main_in[r] == NONE || (acc[k], k) > (acc[main_in[r]], main_in[r]) {
+                    main_in[r] = k;
+                }
+            }
+        }
+        let mut cut = Vec::new();
+        for s0 in 0..n {
+            if !stream[s0] || inflow[s0] != 0 {
+                continue;
+            }
+            let (mut path, mut len) = (vec![s0], 0.0);
+            let short = loop {
+                let (cur, r) = (*path.last().unwrap(), recv[*path.last().unwrap()]);
+                if r == NONE {
+                    break false;
+                }
+                let diag = (cur / nz != r / nz) && (cur % nz != r % nz);
+                len += if diag { c * std::f64::consts::SQRT_2 } else { c };
+                if !stream[r] {
+                    break len < MIN_LEN;
+                }
+                if inflow[r] >= 2 {
+                    break len < MIN_LEN && main_in[r] != cur;
+                }
+                if len >= MIN_LEN {
+                    break false;
+                }
+                path.push(r);
+            };
+            if short {
+                cut.extend(path);
+            }
+        }
+        if cut.is_empty() {
+            break;
+        }
+        for k in cut {
+            stream[k] = false;
+        }
+    }
+
     // Every river must end in the sea. One that leaves the window is traced on over the real terrain; one that finds none is culled.
     let mut memo: HashMap<(i32, i32), f64> = HashMap::new();
     let mut height = |gx: i32, gz: i32| -> f64 { *memo.entry((gx, gz)).or_insert_with(|| probe(gx, gz).0) };
@@ -880,7 +941,16 @@ fn build(seed: i64, key: (i32, i32), probe: &mut dyn FnMut(i32, i32) -> (f64, f6
         }
         wet[at(i as usize, j as usize)]
     };
-    let mut segs: Vec<Seg> = Vec::new();
+    struct Chain {
+        start: usize,
+        last: usize,
+        pts: Vec<Pt>,
+        width: Vec<f64>,
+        speed: Vec<f64>,
+        arc: Vec<f64>,
+        out_base: f64,
+    }
+    let mut chains: Vec<Chain> = Vec::new();
     let mut cid = 0i64;
     for &start in order.iter().rev() {
         if !drawn[start] || inflow[start] == 1 {
@@ -932,20 +1002,54 @@ fn build(seed: i64, key: (i32, i32), probe: &mut dyn FnMut(i32, i32) -> (f64, f6
         }
         let to_sea = tails.contains_key(&last) || (!drawn[last] && h[last] < sea_h);
         let (width, speed) = hydraulic_widths(&pts, plate_seed, cid - 1, to_sea, &wet_near);
+        chains.push(Chain { start, last, pts, width, speed, arc, out_base });
+    }
+
+    // Water surface of every point: the grade less the inset, never rising downstream. Downstream chains first (the flood order puts a
+    // chain's start after the start of the chain it flows into), so a stream joining a bigger river can take that river's level where they meet:
+    // it runs level with it for `LEVEL_RUN` blocks (+ 2 half widths of the big river, which is its channel's whole overlap), then rises to its own
+    // level over `LEVEL_RAMP`. The big river's own first stretch is held level too, so the meeting point is one flat water.
+    let rank: HashMap<usize, usize> = order.iter().enumerate().map(|(i, &k)| (k, i)).collect();
+    chains.sort_by_key(|ch| rank[&ch.start]);
+    let mut starts: HashMap<usize, (f64, f64)> = HashMap::new(); // a confluence cell -> (water surface, half width) where the river below it begins
+    let mut segs: Vec<Seg> = Vec::new();
+    for ch in &chains {
+        let m = ch.pts.len();
+        let mut lv: Vec<f64> = (0..m).map(|i| ch.pts[i].y - inset_for(ch.width[i]) as f64).collect();
+        for i in 1..m {
+            lv[i] = lv[i].min(lv[i - 1]);
+        }
+        if inflow[ch.start] >= 2 {
+            let hold = LEVEL_RUN + 2.0 * ch.width[0];
+            for i in 1..m {
+                if ch.arc[0] - ch.arc[i] > hold {
+                    break;
+                }
+                lv[i] = lv[0];
+            }
+        }
+        if let Some(&(t, wide)) = starts.get(&ch.last) {
+            let (t, run) = (t.min(lv[m - 1]), LEVEL_RUN + 2.0 * wide);
+            for i in 0..m {
+                let f = ((ch.arc[i] - run) / LEVEL_RAMP).clamp(0.0, 1.0);
+                lv[i] = t + (lv[i] - t) * f * f * (3.0 - 2.0 * f);
+            }
+        }
+        starts.insert(ch.start, (lv[0], ch.width[0]));
         for i in 0..m.saturating_sub(1) {
-            let (p, q) = (pts[i], pts[i + 1]);
+            let (p, q) = (ch.pts[i], ch.pts[i + 1]);
             segs.push(Seg {
                 x1: p.x,
                 z1: p.z,
-                y1: p.y,
-                w1: width[i],
+                y1: lv[i],
+                w1: ch.width[i],
                 x2: q.x,
                 z2: q.z,
-                y2: q.y,
-                w2: width[i + 1],
-                sp: (speed[i] + speed[i + 1]) * 0.5,
-                o1: out_base + arc[i],
-                o2: out_base + arc[i + 1],
+                y2: lv[i + 1],
+                w2: ch.width[i + 1],
+                sp: (ch.speed[i] + ch.speed[i + 1]) * 0.5,
+                o1: ch.out_base + ch.arc[i],
+                o2: ch.out_base + ch.arc[i + 1],
             });
         }
     }
@@ -1315,7 +1419,7 @@ mod tests {
         assert!(water > 100 && touched > 0 && touched < chunks, "{water} water blocks, {touched} of {chunks} chunks touched");
     }
 
-    /// A hand-made network: segments (x1, z1, x2, z2, half width) at grade 64.5.
+    /// A hand-made network: segments (x1, z1, x2, z2, half width) at grade 64.5 (the water lies `inset_for(w)` under it).
     fn made(list: &[(f64, f64, f64, f64, f64)]) -> Network {
         made_at(64.5, list)
     }
@@ -1324,7 +1428,10 @@ mod tests {
     fn made_at(grade: f64, list: &[(f64, f64, f64, f64, f64)]) -> Network {
         let segs: Vec<Seg> = list
             .iter()
-            .map(|&(x1, z1, x2, z2, w)| Seg { x1, z1, y1: grade, w1: w, x2, z2, y2: grade, w2: w, sp: 1.0, o1: 0.0, o2: 0.0 })
+            .map(|&(x1, z1, x2, z2, w)| {
+                let y = grade - inset_for(w) as f64;
+                Seg { x1, z1, y1: y, w1: w, x2, z2, y2: y, w2: w, sp: 1.0, o1: 0.0, o2: 0.0 }
+            })
             .collect();
         Network { index: index_of(&segs), segs, lake_of: Vec::new(), lake_top: Vec::new(), g0: (0, 0), n: (0, 0) }
     }
@@ -1448,8 +1555,92 @@ mod tests {
     #[test]
     fn the_current_follows_the_river() {
         let net = build(SEED, plate_at(SEED, 0.0, 0.0), &mut land);
-        let s = net.segs.iter().find(|s| s.x2 - s.x1 < -4.0 && s.w1 > 1.0).copied().expect("a river going west");
+        let s = net.segs.iter().find(|s| s.x2 - s.x1 < -1.0 && s.w1 > 1.0).copied().expect("a river going west");
         let c = net.flow_at(((s.x1 + s.x2) / 2.0) as f32, ((s.z1 + s.z2) / 2.0) as f32).expect("water at the middle of a piece");
         assert!(c[0] < 0.0 && (0.3..=3.1).contains(&c[0].hypot(c[1])), "{c:?}");
+    }
+
+    /// Rougher land than `land`, so the plate has real branching: (surface, humidity) of node (gx, gz).
+    fn rugged(gx: i32, gz: i32) -> (f64, f64) {
+        let (x, z) = (gx as f64, gz as f64);
+        (66.0 + 0.0667 * (gx + 60) as f64 + 0.01 * z.abs() + 7.0 * (x * 0.09 + 1.0).sin() * (z * 0.07).cos() + 4.0 * (x * 0.17).sin() * (z * 0.19 + 2.0).cos() + 2.0 * (x * 0.31).sin() * (z * 0.27).cos(), 0.7)
+    }
+
+    /// Steep, rough land: streams fall fast, so a tributary's own water stands well over the river it joins.
+    fn steep(gx: i32, gz: i32) -> (f64, f64) {
+        let (x, z) = (gx as f64, gz as f64);
+        (66.0 + 0.35 * (gx + 60) as f64 + 0.02 * z.abs() + 9.0 * (x * 0.13 + 1.0).sin() * (z * 0.11).cos() + 3.0 * (x * 0.29).sin() * (z * 0.23 + 2.0).cos(), 0.7)
+    }
+
+    fn at_key(x: f64, z: f64) -> (i64, i64) {
+        ((x * 1000.0).round() as i64, (z * 1000.0).round() as i64)
+    }
+
+    /// Where a stream joins a bigger river, its water runs at the big river's level for the last `LEVEL_RUN` blocks (the surface of the
+    /// river below the confluence is the one both are made level with), on both test lands.
+    #[test]
+    fn a_stream_joins_a_bigger_river_at_the_same_level() {
+        for land_fn in [land as fn(i32, i32) -> (f64, f64), rugged, steep] {
+            let net = build(SEED, plate_at(SEED, 0.0, 0.0), &mut |a, b| land_fn(a, b));
+            let (mut ends, mut starts): (HashMap<(i64, i64), Vec<usize>>, HashMap<(i64, i64), usize>) = (HashMap::new(), HashMap::new());
+            for (i, s) in net.segs.iter().enumerate() {
+                ends.entry(at_key(s.x2, s.z2)).or_default().push(i);
+                starts.insert(at_key(s.x1, s.z1), i);
+            }
+            let mut joins = 0;
+            for (k, e) in &ends {
+                let (Some(&d), true) = (starts.get(k), e.len() >= 2) else { continue };
+                let level = |y: f64| (SEA_LEVEL - 1).max(y.floor() as i32);
+                let down = level(net.segs[d].y1);
+                for &i in e {
+                    joins += 1;
+                    let (mut j, mut run) = (i, 0.0);
+                    loop {
+                        let s = &net.segs[j];
+                        assert_eq!(level(s.y2), down, "stream ends {run:.0} blocks from its confluence at another level than the river below it");
+                        run += (s.x2 - s.x1).hypot(s.z2 - s.z1);
+                        if run > LEVEL_RUN || j == 0 || at_key(net.segs[j - 1].x2, net.segs[j - 1].z2) != at_key(s.x1, s.z1) {
+                            break;
+                        }
+                        j -= 1;
+                    }
+                }
+            }
+            assert!(joins > 0, "no confluence to test");
+        }
+    }
+
+    /// A stream does not run into a bigger one (or the sea) after a stub of a few cells: every source's stretch to its first confluence is
+    /// long (`MIN_LEN` on the grid path; smoothing shortens a little). Only on lands where no short source is the biggest branch of its
+    /// confluence (that one stays: it is where the river below begins, `steep` has such a case).
+    #[test]
+    fn small_streams_are_long() {
+        for land_fn in [land as fn(i32, i32) -> (f64, f64), rugged] {
+            let net = build(SEED, plate_at(SEED, 0.0, 0.0), &mut |a, b| land_fn(a, b));
+            let (mut ends, mut starts): (HashMap<(i64, i64), usize>, HashMap<(i64, i64), usize>) = (HashMap::new(), HashMap::new());
+            for (i, s) in net.segs.iter().enumerate() {
+                *ends.entry(at_key(s.x2, s.z2)).or_default() += 1;
+                starts.insert(at_key(s.x1, s.z1), i);
+            }
+            let mut sources = 0;
+            for (k, &i) in &starts {
+                if ends.contains_key(k) {
+                    continue;
+                }
+                sources += 1;
+                let (mut j, mut len) = (i, 0.0);
+                loop {
+                    let s = &net.segs[j];
+                    len += (s.x2 - s.x1).hypot(s.z2 - s.z1);
+                    let e = at_key(s.x2, s.z2);
+                    match starts.get(&e) {
+                        Some(&n) if ends[&e] < 2 => j = n,
+                        _ => break,
+                    }
+                }
+                assert!(len >= MIN_LEN * 0.8, "a source runs only {len:.0} blocks to its confluence");
+            }
+            assert!(sources > 0);
+        }
     }
 }

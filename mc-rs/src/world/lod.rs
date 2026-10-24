@@ -285,7 +285,7 @@ struct Store {
     sh: Arc<Shared>,
 }
 
-const MAGIC: [u8; 2] = *b"L6"; // L3 tiles were made with the b1.7.3 climate, L4 before the terrain followed it, L5 before the rivers: another terrain, so they are made again
+const MAGIC: [u8; 2] = *b"L7"; // L3 tiles were made with the b1.7.3 climate, L4 before the terrain followed it, L5 before the rivers, L6 before the rivers met level and ran long: another terrain, so they are made again
 
 fn tile_path(d: &Path, k: (i32, i32)) -> PathBuf {
     d.join(format!("{}_{}.lod", k.0, k.1))
