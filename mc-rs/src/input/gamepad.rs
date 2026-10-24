@@ -261,6 +261,8 @@ pub struct Out {
     /// The attack button is down (from the first frame: the arm swings at once, the dig waits for `HOLD_SECS`).
     pub attack: bool,
     pub zoom: bool,
+    /// L3 is held: the sprint key (`input.unused` of Retro Sprint). Fixed, not a `PadCfg` bind: the buttons page has no row left.
+    pub sprint: bool,
     pub sneak_down: bool,
     pub sneak_up: bool,
     pub place: bool,
@@ -434,6 +436,7 @@ impl Pad {
         }
         o.jump = down(Act::Jump);
         o.zoom = down(Act::Zoom);
+        o.sprint = held & Btn::L3.bit() != 0;
         (o.sneak_down, o.sneak_up) = (just(Act::Sneak), up(Act::Sneak));
         // Attack: the touch screen's look finger. Held past HOLD_SECS digs, a short press hits.
         o.attack = down(Act::Attack);
@@ -560,6 +563,16 @@ mod tests {
         assert!((x - 0.6).abs() < 1e-5 && (y - 0.8).abs() < 1e-5);
         let (x, _) = ease(0.5, 0.0, 2);
         assert!((x - 0.25).abs() < 1e-5);
+    }
+
+    #[test]
+    fn l3_is_the_sprint_key() {
+        let (mut p, c) = pad();
+        assert!(!p.update(DT, &c, false, 1000.0).sprint);
+        p.key(Btn::L3, true);
+        assert!(p.update(DT, &c, false, 1000.0).sprint);
+        p.key(Btn::L3, false);
+        assert!(!p.update(DT, &c, false, 1000.0).sprint);
     }
 
     #[test]

@@ -867,6 +867,14 @@ impl Mobs {
         self.list[i].damage(dmg, from, &mut self.rng);
     }
 
+    /// Retro Sprint's `target.addVelocity` (m/s here): added to the motion as it is, so the hit's own `knockBack` that follows halves it
+    /// when it lands (a hit inside the damage window keeps it whole, as in the mod). No steering for 10 ticks, like after a knockback.
+    pub fn shove(&mut self, i: usize, v: Vec3) {
+        let m = &mut self.list[i];
+        m.body.vel += v;
+        m.free = m.free.max(10);
+    }
+
     /// `Explosion.doExplosionA`: 16 x 16 x 16 rays from the surface of a cube, each losing strength to the blocks it crosses
     /// (resistance / 5 + 0.3, x 0.3) and 0.225 a step; the blocks left with strength are destroyed. Also hurts the mobs
     /// in range (`(impact^2 + impact) / 2 x 8 x power + 1`, no exposure test). Returns the cells to clear.
@@ -980,6 +988,21 @@ mod tests {
         assert_eq!(w.health, 7, "inside the damage window, an equal hit is ignored");
         for _ in 0..12 { w.tick(&mut rng, &c, &mut ev); }
         assert!(w.health < 7, "the window ran out and the cactus hurts again");
+    }
+
+    /// Retro Sprint's shove adds to the motion and stops the steering; the hit's `knockBack` that follows halves it (a hit inside
+    /// the damage window leaves it whole).
+    #[test]
+    fn a_shove_is_halved_by_the_knockback_that_follows() {
+        let mut ms = Mobs::new(1);
+        let mut rng = JavaRandom::new(4);
+        ms.list.push(Mob::new(Cow, 32.5, 10.0, 32.5, 0.0, &mut rng));
+        ms.shove(0, Vec3::new(0.0, 0.0, 24.0));
+        assert_eq!((ms.list[0].body.vel.z, ms.list[0].free), (24.0, 10));
+        ms.hit(0, 1, Vec3::new(32.5, 10.0, 31.5)); // the player stands at -z of the cow: pushed to +z by 8 m/s more
+        assert_eq!(ms.list[0].body.vel.z, 24.0 / 2.0 + 8.0, "halved, plus the knockback's 8 m/s");
+        ms.hit(0, 1, Vec3::new(32.5, 10.0, 31.5)); // inside the window: no second knockback
+        assert_eq!(ms.list[0].body.vel.z, 20.0);
     }
 
     /// Snowballs and eggs fly like arrows, hurt for 0 and are gone on a block; only the egg asks to hatch.

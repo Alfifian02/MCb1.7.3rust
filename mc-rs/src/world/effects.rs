@@ -331,6 +331,17 @@ impl Effects {
     }
 
     /// `EntityLiving.onEntityUpdate` when the air runs out: 8 bubbles around `pos` (the eye of the player).
+    /// Retro Sprint's `EntityMixin.addParticles` (its `BlockDustParticle`, a `tilecrack_` piece): one speck of the block under the feet per tick
+    /// while sprinting, at the feet within the box's width, thrown against the run (`v` = the player's motion in blocks/tick: `-v * 4`, 1.5 up).
+    pub fn sprint_dust(&mut self, feet: Vec3, v: Vec3, tile: u16) {
+        if self.particles.len() > 3000 {
+            return;
+        }
+        let at = feet + Vec3::new((self.rng.next_float() - 0.5) * 0.6, 0.1, (self.rng.next_float() - 0.5) * 0.6);
+        let p = Particle::dig(&mut self.rng, at, Vec3::new(-v.x * 4.0, 1.5, -v.z * 4.0), tile);
+        self.particles.push(p);
+    }
+
     /// `EffectRenderer.addBlockDestroyEffects`: 4 x 4 x 4 pieces, each flung away from the cell centre. ponytail: capped at 3000
     /// live particles; the whole block tile is drawn (vanilla crops a random 4 x 4 pixel patch), untinted, not lit by the cell.
     pub fn dig(&mut self, (x, y, z): (i32, i32, i32), tile: u16) {

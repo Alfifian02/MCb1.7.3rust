@@ -237,6 +237,8 @@ pub struct TouchUi {
     pad_dig: bool,
     pad_attack: bool,
     pad_zoom: bool,
+    /// The pad's L3 is held (`gamepad::Out::sprint`): the sprint key.
+    pub pad_sprint: bool,
     /// Look from the right stick since the last `take_pad_look`, radians (yaw right, pitch down).
     pad_look: (f32, f32),
     /// The pad's attack tap: hit what is under the crosshair but never place a block.
@@ -271,6 +273,7 @@ impl TouchUi {
             pad_dig: false,
             pad_attack: false,
             pad_zoom: false,
+            pad_sprint: false,
             pad_look: (0.0, 0.0),
             strike: false,
         }
@@ -307,6 +310,7 @@ impl TouchUi {
             self.pad_dig = false;
             self.pad_attack = false;
             self.pad_zoom = false;
+            self.pad_sprint = false;
             return;
         }
         if let Some(m) = o.mv {
@@ -315,6 +319,7 @@ impl TouchUi {
         self.pad_look.0 += o.look.0;
         self.pad_look.1 += o.look.1;
         (self.pad_jump, self.pad_dig, self.pad_attack, self.pad_zoom) = (o.jump, o.dig, o.attack, o.zoom);
+        self.pad_sprint = o.sprint;
         if cfg.toggle_sneak {
             self.sneak ^= o.sneak_down;
         } else if o.sneak_down {

@@ -1,0 +1,614 @@
+diff -ruN a/mc-rs/src/input/gamepad.rs b/mc-rs/src/input/gamepad.rs
+--- a/mc-rs/src/input/gamepad.rs	2026-10-23 09:03:32.000000000 +0000
++++ b/mc-rs/src/input/gamepad.rs	2026-10-24 01:39:17.474443684 +0000
+@@ -261,6 +261,8 @@
+     /// The attack button is down (from the first frame: the arm swings at once, the dig waits for `HOLD_SECS`).
+     pub attack: bool,
+     pub zoom: bool,
++    /// L3 is held: the sprint key (`input.unused` of Retro Sprint). Fixed, not a `PadCfg` bind: the buttons page has no row left.
++    pub sprint: bool,
+     pub sneak_down: bool,
+     pub sneak_up: bool,
+     pub place: bool,
+@@ -434,6 +436,7 @@
+         }
+         o.jump = down(Act::Jump);
+         o.zoom = down(Act::Zoom);
++        o.sprint = held & Btn::L3.bit() != 0;
+         (o.sneak_down, o.sneak_up) = (just(Act::Sneak), up(Act::Sneak));
+         // Attack: the touch screen's look finger. Held past HOLD_SECS digs, a short press hits.
+         o.attack = down(Act::Attack);
+@@ -563,6 +566,16 @@
+     }
+ 
+     #[test]
++    fn l3_is_the_sprint_key() {
++        let (mut p, c) = pad();
++        assert!(!p.update(DT, &c, false, 1000.0).sprint);
++        p.key(Btn::L3, true);
++        assert!(p.update(DT, &c, false, 1000.0).sprint);
++        p.key(Btn::L3, false);
++        assert!(!p.update(DT, &c, false, 1000.0).sprint);
++    }
++
++    #[test]
+     fn walks_looks_and_jumps() {
+         let (mut p, c) = pad();
+         p.axes(0.0, -1.0, 1.0, 0.0, 0.0, 0.0, (0.0, 0.0));
+diff -ruN a/mc-rs/src/input/touch_ui.rs b/mc-rs/src/input/touch_ui.rs
+--- a/mc-rs/src/input/touch_ui.rs	2026-10-23 09:03:32.000000000 +0000
++++ b/mc-rs/src/input/touch_ui.rs	2026-10-24 01:39:06.016821456 +0000
+@@ -237,6 +237,8 @@
+     pad_dig: bool,
+     pad_attack: bool,
+     pad_zoom: bool,
++    /// The pad's L3 is held (`gamepad::Out::sprint`): the sprint key.
++    pub pad_sprint: bool,
+     /// Look from the right stick since the last `take_pad_look`, radians (yaw right, pitch down).
+     pad_look: (f32, f32),
+     /// The pad's attack tap: hit what is under the crosshair but never place a block.
+@@ -271,6 +273,7 @@
+             pad_dig: false,
+             pad_attack: false,
+             pad_zoom: false,
++            pad_sprint: false,
+             pad_look: (0.0, 0.0),
+             strike: false,
+         }
+@@ -307,6 +310,7 @@
+             self.pad_dig = false;
+             self.pad_attack = false;
+             self.pad_zoom = false;
++            self.pad_sprint = false;
+             return;
+         }
+         if let Some(m) = o.mv {
+@@ -315,6 +319,7 @@
+         self.pad_look.0 += o.look.0;
+         self.pad_look.1 += o.look.1;
+         (self.pad_jump, self.pad_dig, self.pad_attack, self.pad_zoom) = (o.jump, o.dig, o.attack, o.zoom);
++        self.pad_sprint = o.sprint;
+         if cfg.toggle_sneak {
+             self.sneak ^= o.sneak_down;
+         } else if o.sneak_down {
+diff -ruN a/mc-rs/src/lib.rs b/mc-rs/src/lib.rs
+--- a/mc-rs/src/lib.rs	2026-10-24 06:36:58.000000000 +0000
++++ b/mc-rs/src/lib.rs	2026-10-24 01:40:31.473656412 +0000
+@@ -54,6 +54,7 @@
+ use crate::world::ticks::{self, Ticks};
+ use crate::world::save::{self, Level};
+ use crate::world::sky;
++use crate::world::sprint::{self, Sprint};
+ use crate::world::chunk::{is_plant, normal_cube, outline_bounds, physics_id, pick_bounds};
+ use crate::world::chunks::{chunk_coord, ChunkManager, Layer, Shape, WATER_RANGE};
+ use crate::world::physics::{self, Player};
+@@ -146,6 +147,10 @@
+     was_in_water: bool,
+     /// `Entity.ySize` of the player, as far as the camera goes: how far the eye hangs below standing height (0.08 sneaking, then it decays).
+     sneak_y: f32,
++    /// Sprinting (`world::sprint`, Retro Sprint): ticked at 20 Hz, its push and field of view are read every frame.
++    sprint: Sprint,
++    /// A wall stopped the player's move on x or z since the last sprint tick (`horizontalCollision`).
++    sprint_blocked: bool,
+     /// Hotbar slot last seen and seconds its item name still shows (`GuiIngame` shows it ~2 s after a switch).
+     tip: (usize, f32),
+     /// The local player's model state (`render::player`): body yaw, limb and arm swing, ticked at 20 Hz.
+@@ -273,6 +278,8 @@
+             fx: Effects::new(seed),
+             was_in_water: false,
+             sneak_y: 0.0,
++            sprint: Sprint::default(),
++            sprint_blocked: false,
+             tip: (0, 0.0),
+             body: render::player::Anim::default(),
+             third_saved: None,
+@@ -478,6 +485,7 @@
+         self.camera.aspect = aspect;
+         (self.world_ticks, self.weather_ticks, self.weather) = (0.0, 0, sky::Weather::new(seed));
+         self.fx = Effects::new(seed);
++        self.sprint = Sprint::default();
+         (self.tip, self.dig, self.dig_acc, self.target) = ((0, 0.0), Dig::default(), 0.0, None);
+         (self.inv, self.drops, self.mobs, self.ticks) = (Inventory::default(), Drops::new(seed), Mobs::new(seed), Ticks::new(seed));
+         (self.furnaces, self.furn_acc, self.vitals, self.save_acc) = (HashMap::new(), 0.0, Vitals::default(), 0.0);
+@@ -567,7 +575,9 @@
+         self.pad_sync(dt);
+         self.touch.pad.watch_health(self.vitals.health);
+         // Zoomify: hold the zoom button for 4x (the vertical tangent / 4), eased; the look drag slows with the field of view.
+-        let base = 70_f32.to_radians();
++        // Retro Sprint: the field of view x 1.15 while sprinting (eased), and the zoom starts from it.
++        self.sprint.fov_step(dt);
++        let base = 70_f32.to_radians() * self.sprint.fov;
+         let target = if self.touch.zooming() { 2.0 * ((base * 0.5).tan() / ZOOM).atan() } else { base };
+         self.camera.fov_y += (target - self.camera.fov_y) * (1.0 - (-14.0 * dt).exp());
+         // Look drag accumulated by the touch UI since the last frame. Drained
+@@ -634,6 +644,7 @@
+         // The death screen's resume button was pressed: come back at the spawn point with full health.
+         if self.vitals.dead() {
+             self.vitals = Vitals::default();
++            self.sprint.stop();
+             self.enter(false, true); // `Minecraft.respawn`: always in the overworld
+             self.player.pos = self.respawn_pos();
+             self.player.vel = glam::Vec3::ZERO;
+@@ -669,11 +680,11 @@
+         let riding = self.riding();
+         let asleep = self.sleep.is_some();
+         if !asleep {
+-            let k = LOOK_SENS * (self.camera.fov_y * 0.5).tan() / (70_f32.to_radians() * 0.5).tan() * self.opts.look_scale();
++            let k = LOOK_SENS * (self.camera.fov_y / self.sprint.fov * 0.5).tan() / (70_f32.to_radians() * 0.5).tan() * self.opts.look_scale(); // the sprint's wider view does not speed the look up
+             self.camera.add_yaw(look_dx * k);
+             self.camera.add_pitch(look_dy * k * if self.opts.invert_mouse { -1.0 } else { 1.0 });
+             // The right stick has its own sensitivity (Controls > Controller); only the zoom narrows it.
+-            let z = (self.camera.fov_y * 0.5).tan() / (70_f32.to_radians() * 0.5).tan();
++            let z = (self.camera.fov_y / self.sprint.fov * 0.5).tan() / (70_f32.to_radians() * 0.5).tan();
+             self.camera.add_yaw(pad_yaw * z);
+             self.camera.add_pitch(pad_pitch * z);
+         }
+@@ -691,6 +702,16 @@
+         // forward = -Z when yaw = 0; rotate by yaw around +Y.
+         self.player.vel.x = (fwd * yaw.sin() + side * yaw.cos()) * MOVE_SPEED;
+         self.player.vel.z = (-fwd * yaw.cos() + side * yaw.sin()) * MOVE_SPEED;
++        // Retro Sprint (`LivingEntityMixin`): the sprint pushes along the facing on top of the walk, and a jump on the ground adds the jump push.
++        if !asleep && !riding {
++            if self.touch.jumping() && self.player.on_ground && !self.was_in_water {
++                self.sprint.jump();
++            }
++            let push = self.sprint.add();
++            self.player.vel.x += yaw.sin() * push;
++            self.player.vel.z -= yaw.cos() * push;
++        }
++        let (vx0, vz0) = (self.player.vel.x, self.player.vel.z);
+         // Plants are drawn but not solid yet (collision shapes come with M14), so physics reads them as air.
+         let get = |x: i32, y: i32, z: i32| self.chunks.block(x, y, z).map(|b| if is_plant(b) { 0 } else { self.chunks.physics_at(x, y, z, b) });
+         // The held jump button jumps (8.4 m/s, the b1.7.3 velocity) or swims up; fluids (ids 8..=11) are not solid.
+@@ -705,6 +726,8 @@
+             self.player.vel.y = (if self.touch.jumping() { 8.0 } else if sneaking { -8.0 } else { 0.0 }) + 23.0 * dt;
+         }
+         let (water, lava) = if asleep || riding { (false, false) } else { physics::step(&mut self.player, dt, self.touch.jumping() && !flying, &get) };
++        // `horizontalCollision`: `step` zeroes the velocity of the axis a wall stopped (a stepped-up slab keeps it).
++        self.sprint_blocked |= !asleep && !riding && ((vx0 != 0.0 && self.player.vel.x == 0.0) || (vz0 != 0.0 && self.player.vel.z == 0.0));
+         // `EntityPlayerSP.onLivingUpdate` sets `ySize` 0.2 while sneaking and `moveEntity` multiplies it by 0.4 every tick: the eye hangs 0.08
+         // low (1.54 up), and it comes back by the same x0.4 a tick once the button is released.
+         self.sneak_y = if sneaking { 0.08 } else { self.sneak_y * 0.4f32.powf(dt * 20.0) };
+@@ -887,6 +910,7 @@
+             }
+             let centre = (chunk_coord(self.player.pos.x), chunk_coord(self.player.pos.z));
+             self.sleep_tick(sub);
++            self.sprint_tick();
+             // `BlockPressurePlate`: the boxes of what may stand on a plate (the player, the mobs).
+             let p = self.player.pos;
+             self.ticks.plate_ents.clear();
+@@ -1192,6 +1216,13 @@
+                 }
+                 let held = self.inv.slots[slot].map(|s| s.id);
+                 let (dmg, wear) = mobs::attack(held);
++                // Retro Sprint (`PlayerEntityMixin.onAttack`): a sprinting hit shoves the target the way the player looks, before the hit's own
++                // knockback, and ends the sprint (the walk is set from the input every frame, so the mod's x0.6 on the player's motion has no use here).
++                if self.sprint.attack() {
++                    let f = self.camera.forward();
++                    let d = glam::Vec3::new(f.x, 0.0, f.z).normalize_or_zero();
++                    self.mobs.shove(i, d * sprint::KNOCK + glam::Vec3::Y * sprint::KNOCK_UP);
++                }
+                 self.mobs.hit(i, dmg, self.player.pos);
+                 self.inv.damage(slot, wear);
+                 return;
+@@ -1468,6 +1499,29 @@
+             }
+         }
+     }
++
++    /// One 20 Hz tick of sprinting (`ClientPlayerEntityMixin.tickSprintingMovement`) and its dust (`EntityMixin.addParticles`: a speck of the
++    /// block below the feet while sprinting out of the water). The forward input is the d-pad's / the stick's, sneaking already x0.3.
++    fn sprint_tick(&mut self) {
++        let (asleep, riding) = (self.sleep.is_some(), self.riding());
++        let fwd = if asleep || riding { 0.0 } else { self.touch.move_input.0 * if self.touch.sneak { 0.3 } else { 1.0 } };
++        self.sprint.tick(sprint::In {
++            fwd,
++            key: self.touch.pad_sprint,
++            ground: self.player.on_ground,
++            blocked: std::mem::take(&mut self.sprint_blocked),
++            water: self.was_in_water,
++            can: !asleep && !riding && !self.vitals.dead(),
++        });
++        if self.sprint.on() && !self.was_in_water {
++            let (p, v) = (self.player.pos, self.player.vel / 20.0);
++            let (x, y, z) = (p.x.floor() as i32, (p.y - 0.9 - 0.2).floor() as i32, p.z.floor() as i32); // 0.2 under the feet
++            if let Some(id) = self.chunks.block(x, y, z).filter(|&b| b > 0 && !matches!(b, 8..=11)) {
++                let tile = atlas::tile_of(id, self.chunks.meta(x, y, z));
++                self.fx.sprint_dust(glam::Vec3::new(p.x, p.y - 0.9, p.z), v, tile);
++            }
++        }
++    }
+ 
+     /// `Minecraft.clickMouse` -> `sendUseItem`: a tap that neither placed a block nor opened a screen uses the held item;
+     /// food is eaten, aimed at a block or not.
+diff -ruN a/mc-rs/src/world/effects.rs b/mc-rs/src/world/effects.rs
+--- a/mc-rs/src/world/effects.rs	2026-10-23 11:51:42.000000000 +0000
++++ b/mc-rs/src/world/effects.rs	2026-10-24 01:39:06.017173417 +0000
+@@ -331,6 +331,17 @@
+     }
+ 
+     /// `EntityLiving.onEntityUpdate` when the air runs out: 8 bubbles around `pos` (the eye of the player).
++    /// Retro Sprint's `EntityMixin.addParticles` (its `BlockDustParticle`, a `tilecrack_` piece): one speck of the block under the feet per tick
++    /// while sprinting, at the feet within the box's width, thrown against the run (`v` = the player's motion in blocks/tick: `-v * 4`, 1.5 up).
++    pub fn sprint_dust(&mut self, feet: Vec3, v: Vec3, tile: u16) {
++        if self.particles.len() > 3000 {
++            return;
++        }
++        let at = feet + Vec3::new((self.rng.next_float() - 0.5) * 0.6, 0.1, (self.rng.next_float() - 0.5) * 0.6);
++        let p = Particle::dig(&mut self.rng, at, Vec3::new(-v.x * 4.0, 1.5, -v.z * 4.0), tile);
++        self.particles.push(p);
++    }
++
+     /// `EffectRenderer.addBlockDestroyEffects`: 4 x 4 x 4 pieces, each flung away from the cell centre. ponytail: capped at 3000
+     /// live particles; the whole block tile is drawn (vanilla crops a random 4 x 4 pixel patch), untinted, not lit by the cell.
+     pub fn dig(&mut self, (x, y, z): (i32, i32, i32), tile: u16) {
+diff -ruN a/mc-rs/src/world/mobs.rs b/mc-rs/src/world/mobs.rs
+--- a/mc-rs/src/world/mobs.rs	2026-10-23 11:51:42.000000000 +0000
++++ b/mc-rs/src/world/mobs.rs	2026-10-24 01:39:35.035844357 +0000
+@@ -867,6 +867,14 @@
+         self.list[i].damage(dmg, from, &mut self.rng);
+     }
+ 
++    /// Retro Sprint's `target.addVelocity` (m/s here): added to the motion as it is, so the hit's own `knockBack` that follows halves it
++    /// when it lands (a hit inside the damage window keeps it whole, as in the mod). No steering for 10 ticks, like after a knockback.
++    pub fn shove(&mut self, i: usize, v: Vec3) {
++        let m = &mut self.list[i];
++        m.body.vel += v;
++        m.free = m.free.max(10);
++    }
++
+     /// `Explosion.doExplosionA`: 16 x 16 x 16 rays from the surface of a cube, each losing strength to the blocks it crosses
+     /// (resistance / 5 + 0.3, x 0.3) and 0.225 a step; the blocks left with strength are destroyed. Also hurts the mobs
+     /// in range (`(impact^2 + impact) / 2 x 8 x power + 1`, no exposure test). Returns the cells to clear.
+@@ -982,6 +990,21 @@
+         assert!(w.health < 7, "the window ran out and the cactus hurts again");
+     }
+ 
++    /// Retro Sprint's shove adds to the motion and stops the steering; the hit's `knockBack` that follows halves it (a hit inside
++    /// the damage window leaves it whole).
++    #[test]
++    fn a_shove_is_halved_by_the_knockback_that_follows() {
++        let mut ms = Mobs::new(1);
++        let mut rng = JavaRandom::new(4);
++        ms.list.push(Mob::new(Cow, 32.5, 10.0, 32.5, 0.0, &mut rng));
++        ms.shove(0, Vec3::new(0.0, 0.0, 24.0));
++        assert_eq!((ms.list[0].body.vel.z, ms.list[0].free), (24.0, 10));
++        ms.hit(0, 1, Vec3::new(32.5, 10.0, 31.5)); // the player stands at -z of the cow: pushed to +z by 8 m/s more
++        assert_eq!(ms.list[0].body.vel.z, 24.0 / 2.0 + 8.0, "halved, plus the knockback's 8 m/s");
++        ms.hit(0, 1, Vec3::new(32.5, 10.0, 31.5)); // inside the window: no second knockback
++        assert_eq!(ms.list[0].body.vel.z, 20.0);
++    }
++
+     /// Snowballs and eggs fly like arrows, hurt for 0 and are gone on a block; only the egg asks to hatch.
+     #[test]
+     fn thrown_items_land_quietly_and_an_egg_hatches() {
+diff -ruN a/mc-rs/src/world/mod.rs b/mc-rs/src/world/mod.rs
+--- a/mc-rs/src/world/mod.rs	2026-10-23 11:51:42.000000000 +0000
++++ b/mc-rs/src/world/mod.rs	2026-10-24 01:39:06.013568296 +0000
+@@ -26,6 +26,7 @@
+ pub mod lod;
+ pub mod minecart;
+ pub mod portal;
++pub mod sprint;
+ 
+ /// Lowers the calling thread's scheduling priority (`nice` 0..19; 19 = runs only on what the others leave). Linux and Android keep the
+ /// nice value per THREAD (`PRIO_PROCESS` with `who` 0 is the calling task, not the process), so each background thread calls this first
+diff -ruN a/mc-rs/src/world/sprint.rs b/mc-rs/src/world/sprint.rs
+--- a/mc-rs/src/world/sprint.rs	1970-01-01 00:00:00.000000000 +0000
++++ b/mc-rs/src/world/sprint.rs	2026-10-24 01:38:55.264052361 +0000
+@@ -0,0 +1,271 @@
++//! Sprinting: a port of Retro Sprint (periut, b1.7.3 through Ornithe / Babric mixins), the parts mc-rs has.
++//! Read from its sources: `ClientPlayerEntityMixin` (start / stop), `LivingEntityMixin` (speed, jump), `PlayerEntityMixin` (hit),
++//! `GameRendererMixin*` (field of view), `EntityMixin` (dust). Nothing here touches the world: `lib.rs` feeds `tick` once per 20 Hz tick
++//! and reads the numbers back, so the whole state machine runs on a plain host (`cargo test -p mc-rs --lib sprint`).
++//!
++//! Not ported: the network packets (no multiplayer), the STAPI / RetroAPI key binding (a keyboard has no events in mc-rs yet),
++//! hunger (`canSprint` is a constant `true` in the mod and b1.7.3 has no food bar; `In::can` carries what mc-rs does forbid).
++
++/// The mod asks `movementForward >= 0.8` with a keyboard's 1.0. mc-rs normalises the d-pad's diagonals to 0.707, so 0.7 is "forward held"
++/// for an arrow, a corner and a stick pushed up.
++pub const FWD_MIN: f32 = 0.7;
++/// `sprintStartTicks`: a second press of forward within 7 ticks (0.35 s) of the first starts the sprint.
++pub const WINDOW: u8 = 7;
++/// `setSprinting(true)` arms `ticksSinceSprintingChanged` = 600: a sprint ends by itself after 30 s (press again to go on).
++pub const LIMIT: u16 = 600;
++/// `GameRendererMixinCaptureVar.method_1305`: the field of view x 1.15 while sprinting; it follows by half the gap each tick.
++pub const FOV: f32 = 1.15;
++/// Ground drag of b1.7.3 (`0.6 * 0.91`) and air drag (`0.91`), per tick.
++const GROUND_DRAG: f32 = 0.546;
++const AIR_DRAG: f32 = 0.91;
++/// `LivingEntityMixin.increaseMovementSpeed`: +0.035 blocks/tick along the facing each tick (while slower than 0.25). Against the
++/// ground drag that settles at 0.035 / (1 - 0.546) = 0.077 blocks/tick over what the input gives, so the sprint adds this many m/s
++/// to the walk (4.3 m/s -> 5.8 m/s, x1.35). mc-rs sets the walking velocity from the input every frame, so only this part is kept.
++pub const ADD: f32 = 0.035 / (1.0 - GROUND_DRAG) * 20.0;
++/// `addedSpeedOnSprintJump`: +0.2 blocks/tick along the facing on a jump, then the drag takes it back (x0.91 a tick in the air).
++pub const JUMP: f32 = 0.2 * 20.0;
++/// `PlayerEntityMixin.applyKnockback`: the target gets 1.2 blocks/tick away from where the player looks and 0.1 up (m/s here).
++pub const KNOCK: f32 = 1.2 * 20.0;
++pub const KNOCK_UP: f32 = 0.1 * 20.0;
++
++/// What one tick of the game says about the player.
++#[derive(Clone, Copy, Default, Debug)]
++pub struct In {
++    /// `input.movementForward` after sneaking scaled it (sneaking x0.3 is under `FWD_MIN`, so it ends a sprint like in the mod).
++    pub fwd: f32,
++    /// The sprint key is held (`input.unused`): sprints at once, no double tap.
++    pub key: bool,
++    pub ground: bool,
++    /// `horizontalCollision`: a wall stopped the move on x or z since the last tick.
++    pub blocked: bool,
++    /// `isInFluid(Material.WATER)`.
++    pub water: bool,
++    /// False while riding, asleep or dead.
++    pub can: bool,
++}
++
++pub struct Sprint {
++    on: bool,
++    /// Ticks left of the 30 s (`ticksSinceSprintingChanged`).
++    left: u16,
++    /// `sprintStartTicks`.
++    start: u8,
++    /// `prevMovementForward`.
++    prev: f32,
++    /// The forward push in m/s: `ADD` while it runs, more after a jump, back to `ADD` by the drag.
++    extra: f32,
++    /// `movementFovMultiplier`: 1.0 .. `FOV`, eased every frame by `fov_step`.
++    pub fov: f32,
++}
++
++impl Default for Sprint {
++    /// The mod's `movementFovMultiplier` starts at 0 (the view pops in on the first frame); this one starts at 1.
++    fn default() -> Self {
++        Self { on: false, left: 0, start: 0, prev: 0.0, extra: 0.0, fov: 1.0 }
++    }
++}
++
++impl Sprint {
++    pub fn on(&self) -> bool {
++        self.on
++    }
++
++    /// `setSprinting`.
++    fn set(&mut self, on: bool) {
++        self.on = on;
++        self.left = if on { LIMIT } else { 0 };
++        self.extra = if on { ADD } else { 0.0 };
++    }
++
++    pub fn stop(&mut self) {
++        self.set(false);
++    }
++
++    /// One 20 Hz tick: `ClientPlayerEntityMixin.tickSprintingMovement`.
++    pub fn tick(&mut self, i: In) {
++        if self.left > 0 {
++            self.left -= 1;
++            if self.left == 0 {
++                self.set(false);
++            }
++        }
++        self.start = self.start.saturating_sub(1);
++        let forward = i.fwd >= FWD_MIN;
++        // `bl3`: forward went down and up again (the press edge).
++        let pressed = self.prev < FWD_MIN && forward;
++        if i.can && i.ground && forward && !self.on {
++            if i.key {
++                self.set(true);
++            } else if self.start == 0 {
++                self.start = WINDOW;
++            } else if pressed {
++                self.set(true);
++                self.start = 0;
++            }
++        }
++        if self.on && (!forward || i.blocked || !i.can || i.water) {
++            self.set(false);
++        }
++        self.prev = i.fwd;
++        // `velocity` drag between ticks: the jump's push dies by the air or ground drag, never under the plain sprint's.
++        if self.on {
++            self.extra = (self.extra * if i.ground { GROUND_DRAG } else { AIR_DRAG }).max(ADD);
++        }
++    }
++
++    /// m/s along the facing to add to the walking velocity (0 when not sprinting).
++    pub fn add(&self) -> f32 {
++        if self.on { self.extra } else { 0.0 }
++    }
++
++    /// The jump impulse fired this frame (`LivingEntityMixin.addedSpeedOnSprintJump`).
++    pub fn jump(&mut self) {
++        if self.on {
++            self.extra += JUMP;
++        }
++    }
++
++    /// `PlayerEntityMixin.onAttack`: a hit while sprinting is the strong one and ends the sprint. True if it was one.
++    pub fn attack(&mut self) -> bool {
++        let was = self.on;
++        self.set(false);
++        was
++    }
++
++    /// The field of view multiplier follows its target by half the gap per tick (`movementFovMultiplier += (target - it) * 0.5`).
++    pub fn fov_step(&mut self, dt: f32) {
++        let target = if self.on { FOV } else { 1.0 };
++        self.fov += (target - self.fov) * (1.0 - 0.5f32.powf(dt * 20.0));
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    const GO: In = In { fwd: 1.0, key: false, ground: true, blocked: false, water: false, can: true };
++    const STILL: In = In { fwd: 0.0, ..GO };
++
++    fn run(s: &mut Sprint, steps: &[In]) {
++        steps.iter().for_each(|&i| s.tick(i));
++    }
++
++    /// The constants are the mod's: sprinting is 1.35 x the walk (5.8 m/s against 4.3), the jump pushes 4 m/s, the hit 24 m/s.
++    #[test]
++    fn numbers_come_from_the_mod() {
++        let walk = 0.1 / (1.0 - GROUND_DRAG) * 20.0; // the settled walk: 0.1 blocks/tick through the same drag
++        assert!(((walk + ADD) / walk - 1.35).abs() < 0.01, "{}", (walk + ADD) / walk);
++        assert!((ADD - 1.54).abs() < 0.01 && JUMP == 4.0 && KNOCK == 24.0 && KNOCK_UP == 2.0);
++    }
++
++    /// A second press within 7 ticks sprints; one held press, however long, never does; a late second press only arms again.
++    #[test]
++    fn double_tap_starts_a_sprint_and_a_hold_does_not() {
++        let mut s = Sprint::default();
++        run(&mut s, &[GO, STILL, GO]);
++        assert!(s.on(), "tap, release, tap");
++        let mut s = Sprint::default();
++        run(&mut s, &[GO; 100]);
++        assert!(!s.on(), "holding forward is no double tap");
++        let mut s = Sprint::default();
++        run(&mut s, &[GO]);
++        run(&mut s, &[STILL; 10]);
++        run(&mut s, &[GO]);
++        assert!(!s.on(), "the second press came after the window");
++        run(&mut s, &[STILL, GO]);
++        assert!(s.on(), "but that press armed a new window");
++    }
++
++    /// The key sprints at once; only on the ground; and a sprint needs `can`.
++    #[test]
++    fn the_key_sprints_on_the_ground_only() {
++        let mut s = Sprint::default();
++        s.tick(In { key: true, ground: false, ..GO });
++        assert!(!s.on());
++        s.tick(In { key: true, can: false, ..GO });
++        assert!(!s.on());
++        s.tick(In { key: true, ..GO });
++        assert!(s.on());
++    }
++
++    /// Forward released (or sneaking: x0.3), a wall, water, riding / sleeping all end it; the arrows' diagonal (0.707) keeps it.
++    #[test]
++    fn it_ends_like_the_mod_says() {
++        for end in [In { fwd: 0.0, ..GO }, In { fwd: 0.3, ..GO }, In { blocked: true, ..GO }, In { water: true, ..GO }, In { can: false, ..GO }] {
++            let mut s = Sprint::default();
++            s.tick(In { key: true, ..GO });
++            assert!(s.on());
++            s.tick(end);
++            assert!(!s.on() && s.add() == 0.0, "{end:?}");
++        }
++        let mut s = Sprint::default();
++        s.tick(In { key: true, fwd: std::f32::consts::FRAC_1_SQRT_2, ..GO });
++        s.tick(In { fwd: std::f32::consts::FRAC_1_SQRT_2, ..GO });
++        assert!(s.on(), "forward-left on the d-pad still sprints");
++    }
++
++    /// 600 ticks and it runs out, even with forward held; the key (or a new double tap) starts the next one.
++    #[test]
++    fn a_sprint_lasts_thirty_seconds() {
++        let mut s = Sprint::default();
++        s.tick(In { key: true, ..GO });
++        run(&mut s, &[GO; 599]);
++        assert!(s.on());
++        s.tick(GO);
++        assert!(!s.on(), "600 ticks after it started");
++        s.tick(In { key: true, ..GO });
++        assert!(s.on());
++    }
++
++    /// The push is `ADD`; a jump adds `JUMP`, the air drag takes it back to `ADD` in a few ticks, the ground faster; it is 0 when not sprinting.
++    #[test]
++    fn a_sprint_jump_pushes_and_the_drag_takes_it_back() {
++        let mut s = Sprint::default();
++        s.jump();
++        assert_eq!(s.add(), 0.0, "no push without a sprint");
++        s.tick(In { key: true, ..GO });
++        assert!((s.add() - ADD).abs() < 1e-4, "a plain sprint pushes by ADD, the drag never goes under it");
++        s.jump();
++        assert!((s.add() - (ADD + JUMP)).abs() < 1e-4);
++        s.tick(In { ground: false, ..GO });
++        let one = s.add();
++        assert!((one - (ADD + JUMP) * AIR_DRAG).abs() < 1e-3, "{one}");
++        for _ in 0..40 {
++            s.tick(In { ground: false, ..GO });
++        }
++        assert!((s.add() - ADD).abs() < 1e-4, "never below the plain sprint's push");
++        s.jump();
++        s.tick(GO);
++        assert!(s.add() < (ADD + JUMP) * 0.6, "the ground drag is much stronger");
++    }
++
++    /// A hit while sprinting is the strong one and stops the sprint; the next one is plain.
++    #[test]
++    fn a_sprint_hit_ends_the_sprint() {
++        let mut s = Sprint::default();
++        s.tick(In { key: true, ..GO });
++        assert!(s.attack() && !s.on() && !s.attack());
++    }
++
++    /// The field of view goes to 1.15 x and back by half the gap per tick, at any frame rate.
++    #[test]
++    fn the_view_widens_and_comes_back() {
++        let (mut a, mut b) = (Sprint::default(), Sprint::default());
++        a.tick(In { key: true, ..GO });
++        b.tick(In { key: true, ..GO });
++        for _ in 0..20 {
++            a.fov_step(0.05);
++        }
++        for _ in 0..60 {
++            b.fov_step(1.0 / 60.0);
++        }
++        assert!((a.fov - b.fov).abs() < 1e-3 && (a.fov - FOV).abs() < 1e-3, "{} {}", a.fov, b.fov);
++        a.stop();
++        a.fov_step(0.05);
++        assert!((a.fov - (FOV + 1.0) / 2.0).abs() < 1e-3, "half the gap in one tick: {}", a.fov);
++        for _ in 0..20 {
++            a.fov_step(0.05);
++        }
++        assert!((a.fov - 1.0).abs() < 1e-3);
++    }
++}
+--- a/README.md	2026-10-23 18:37:06.000000000 +0000
++++ b/README.md	2026-10-24 01:40:08.309343458 +0000
+@@ -55,7 +55,7 @@
+ | Tectonic world type | written without a toolchain: not compiled, not run (+4 tests in `tectonic`, +1 in `gen::overworld`); the Python reference ran | `tectonic/` crate: Tectonic's terrain datapack (continents, erosion, ridges, splines, regions; `terrain.json`) evaluated by a Rust density-function interpreter with Minecraft's noise, fitted to 128 blocks; it replaced the Realistic world type (`realistic.rs` is gone). The pause menu's `World: ...` button (two taps) saves, switches the type and resets. Caves, rivers and lava tunnels of the mod are not ported. See ROADMAP changelog. |
+ | M14 menus (part 1)   | written without a toolchain: not compiled, not run (+4 tests in `menu.rs`, 1 in `touch_ui.rs`) | `menu.rs`: b1.7.3's `GuiMainMenu` (a rotating cube-map panorama, `render/panorama.rs`; `mclogo.png`, rotated splash; dirt on the other screens), `GuiSelectWorld` (scrolling list, double tap plays), `GuiCreateWorld` (name, seed, world type), delete confirm, "Loading level"; textures from the original jar (`tools/gen_menu.py`). Worlds live in `saves/<folder>/`; the pause menu got "Save and quit to title". The renderer button is gone (Vulkan first, GLES fallback stays automatic). See ROADMAP changelog. |
+ | M14b Options + game menu | written without a toolchain: not compiled, not run (+5 tests in `options.rs`, 1 in `touch_ui.rs`) | `options.rs`: b1.7.3's `GameSettings` (`options.txt`), `GuiOptions`, `GuiVideoSettings`, `GuiControls`, `GuiSlider` and `GuiIngameMenu`, from the pause button and the title screen's "Options...". Replaces the old pause menu (its Reset world button is gone); Pregen, Fly and LoD debug stay top-left; new `LoD: ON/OFF` button in Options. Sensitivity, invert, render distance, GUI scale, performance cap and difficulty act; music, sound, bobbing, anaglyph, advanced OpenGL, graphics, smooth lighting and the keys are stored only. See ROADMAP changelog. |
+-| M15 Controller (Controllify port) | written without a toolchain: not compiled, not run (+7 tests in `gamepad.rs`, 1 in `options.rs`) | `input/gamepad.rs`: isXander's Controllify, the parts b1.7.3 has. Sticks walk and look (Controllify's deadzone, 6 look curves, 10 deg/tick at 100%), triggers dig / hit / place, bumpers and the hotbar wheel pick slots, a virtual mouse drives every menu and container, touch buttons hide while a pad is in use, rumble on damage / block break / explosion (`rumble.rs`, JNI). New **Controls > Controller** tab (buttons page + tuning page), saved as `pad_*` in `options.txt`. Not ported: gyro, DualSense extras, on-screen keyboard, glyph packs, chat / drop / perspective / sprint (not in mc-rs / b1.7.3). |
++| M15 Controller (Controllify port) | written without a toolchain: not compiled, not run (+7 tests in `gamepad.rs`, 1 in `options.rs`) | `input/gamepad.rs`: isXander's Controllify, the parts b1.7.3 has. Sticks walk and look (Controllify's deadzone, 6 look curves, 10 deg/tick at 100%), triggers dig / hit / place, bumpers and the hotbar wheel pick slots, a virtual mouse drives every menu and container, touch buttons hide while a pad is in use, rumble on damage / block break / explosion (`rumble.rs`, JNI). New **Controls > Controller** tab (buttons page + tuning page), saved as `pad_*` in `options.txt`. Not ported: gyro, DualSense extras, on-screen keyboard, glyph packs, chat / drop / perspective (not in mc-rs / b1.7.3); sprint is the row below, on L3. |
+ | ImmediatelyFast ideas | written without a toolchain: not compiled, not run (+7 tests, 1 extended) | `render/hud.rs`: the HUD text is one textured quad per glyph from a font atlas at the end of the HUD texture (was a quad per run of lit pixels: about 7x fewer text vertices); `render/items.rs`: `SignCache` keeps a sign's text quads between frames (5 s expiry); `gpuErrorTrace:true` in `options.txt` logs a backtrace with each wgpu error (`gpu/context.rs`). The rest of ImmediatelyFast (batching, map and animated-item atlases, framebuffer switching, Apple GL upload, resource pack handling) has no counterpart in mc-rs. Idea source: ImmediatelyFast 26.3, RaphiMC, LGPL-3.0. See the performance changelog. |
+ | FerriteCore ideas | written without a toolchain: not compiled, not run (+2 tests) | Lazy `Nibbles` (no array while all metadata is 0), flat `lod::Cols` for a real chunk's columns (no `Vec` per column; `Tile0::put` no longer clones 4096), exact-size LoD vectors. The rest of FerriteCore (blockstate / model / component dedupe, thread detector) has no counterpart in mc-rs. Idea source: FerriteCore, malte0811, MIT. See ROADMAP changelog. |
+ | Lazy noise (C2ME idea 5) | written without a toolchain: not compiled; the generator tests incl. the golden `matches_java_reference` pass in a Linux scratch crate | The unread samples of the two big density stacks are not computed (`OctaveNoise::generate_masked_into`, masked per cached column); bit for bit the same terrain. See ROADMAP changelog. |
+@@ -67,6 +67,7 @@
+ | M14 player model     | written without a toolchain: not compiled, not run (+3 tests in `player.rs`, +1 in `touch_ui.rs`) | `render/player.rs`: b1.7.3 `ModelBiped` + `mob/char.png` with walk / sneak / riding / arm-swing animation, in the third-person view (new view button) and as the inventory preview. No armor, ears, cloak or hurt flash. See ROADMAP changelog. |
+ | Debug screen (Info) | type-checked for aarch64-linux-android (`cargo check --lib --tests`), not run (+2 tests in `render/debug.rs`, 2 extended in `options.rs`) | `render/debug.rs`: two translucent panels in the GUI scale for screenshots (left: position, chunk, facing, biome, light, time, aimed block; right: FPS, frame time, screen and scene size with the scene scale, Dynamic Res, MSAA, Post, renderer, graphics and smooth lighting, Performance, render distance, chunks, LoD). Pause menu button `Info: on/off` (`debugScreen` in `options.txt`); while on it replaces the FPS counter and the LoD debug title. See the rendering changelog. |
+ | Audio (M9)           | written without a toolchain: not compiled, not run (+3 tests in `audio/`) | `audio/`: `SoundManager` / `SoundPool`. All 194 effects (80 `SoundPool` keys: `step.*`, `mob.*`, `random.*`, `note.*`, `ambient.*`, `liquid.*`, `fire.*`, `portal.*`, `tile.piston.*`, `damage.*`), 12 music tracks and records 13 / cat are embedded from the b1.7.3 asset index (`tools/gen_sounds.py` -> `assets/sound/`, `audio/table.rs`). Software mixer (pitch by resampling, linear distance gain, pan), lewton decoder, AAudio output via `ndk`; music on a stream thread, one random track 10-20 min apart. Wired: Music / Sound options, footsteps, block break sound (`Block.stepSound`, table read from `Block.java`), note blocks, jukebox records. Not wired yet: every other `playSoundEffect` call of the Java (mobs, hurt, doors, buttons, fire, water, explosions, rain, thunder, cave ambience, pistons, portal). The 12 `streaming/*.mus` files are not b1.7.3 and are left out. |
++| Sprint (Retro Sprint port) | written without a toolchain: not compiled, not run (+10 tests: 8 in `world/sprint.rs`, 1 in `mobs.rs`, 1 in `gamepad.rs`) | `world/sprint.rs`: periut's Retro Sprint (b1.7.3 mixins), read from its sources. Double tap forward within 7 ticks (touch d-pad arrow, a corner, or the stick pushed up) or hold L3 on the pad; sprinting adds 0.035 blocks/tick along the facing (x1.35 of the walk), a jump adds 0.2 blocks/tick, the field of view x1.15 (eased), a hit shoves the target 1.2 blocks/tick and ends the sprint, specks of the block below fly while it runs. Ends on releasing forward / sneaking, a wall, water, riding, sleeping or after 30 s. See the gameplay changelog. |
+ | M14                  | pending | Menus (part 1: title, world list, create world; see above), options, chat, real mob models, player armor: see [`roadmap/gameplay.md`](roadmap/gameplay.md). M10 multiplayer and M13 optimization are out of scope on purpose. |
+ 
+ Latest commit on `main`: see `git log -1`. Latest released APK: see the
+@@ -118,6 +119,7 @@
+       decor.rs            M19: paintings (`EntityPainting`, `EnumArt`) and signs (`TileEntitySign`, the editor's keyboard), `decor` save codec
+       chest.rs            chest storage: tile entity, placement/open rules, large-chest grouping, face tiles, reach
+       craft.rs            M6: tools (EnumToolMaterial, getStrVsBlock, canHarvestBlock), recipes (CraftingManager), inventory/workbench screen (Container clicks) + its GUI geometry
++      sprint.rs           Retro Sprint port: double-tap / key start, stop rules, push, jump push, field of view; pure, tested on a host
+       sky.rs              day/night + weather: sun angle, skylight subtracted, sky/fog/sunrise colours, star brightness + positions, `Weather` (rain/thunder timers)
+       save.rs             M7: chunk file codec (RLE), `Level` codec (player, inventory, furnaces, drops), atomic write
+       effects.rs          particles (splash, bubbles), lightning, suffocation, dungeon spawners
+diff -ruN a/roadmap/gameplay.md b/roadmap/gameplay.md
+--- a/roadmap/gameplay.md	2026-10-23 06:53:22.000000000 +0000
++++ b/roadmap/gameplay.md	2026-10-24 01:40:08.310441569 +0000
+@@ -4,6 +4,13 @@
+ 
+ ## Changelog
+ 
++- 2026-10-24: sprinting, a port of Retro Sprint (periut; `retrosprint-master`, read in full: `ClientPlayerEntityMixin`, `LivingEntityMixin`, `PlayerEntityMixin`, `EntityMixin`, `GameRendererMixin*`, `WorldRendererMixin`, `BlockDustParticle`) (written WITHOUT a Rust toolchain: not compiled, not run; +10 tests: `sprint::tests::*` (8), `mobs::tests::a_shove_is_halved_by_the_knockback_that_follows`, `gamepad::tests::l3_is_the_sprint_key`; run `cargo test --lib --release sprint mobs gamepad` first).
++    - `world/sprint.rs` (new, pure): `Sprint::tick` is `tickSprintingMovement` once per 20 Hz tick. Start: on the ground with forward held, the key (pad L3) sprints at once; otherwise the first press arms `sprintStartTicks` = 7 and a second press (forward released and pressed again, `bl3`) inside it sprints. Stop: forward released (sneaking scales it x0.3, so it ends a sprint too), a wall (`horizontalCollision`), water, riding, sleeping, dead, or 600 ticks after the start (`ticksSinceSprintingChanged`). Numbers: the push `ADD` = 0.035 / (1 - 0.546) blocks/tick = 1.54 m/s along the facing (settles at x1.35 of the walk, derived from the b1.7.3 drag, not measured), the jump push 0.2 blocks/tick that the air drag (x0.91) or the ground drag (x0.546) takes back down to `ADD`, field of view x1.15 by half the gap per tick (`fov_step`, frame-rate independent), hit shove 1.2 blocks/tick + 0.1 up.
++    - `lib.rs`: `sprint_tick` in the 20 Hz loop (forward = `touch.move_input.0`, x0.3 when sneaking; `ground` = `player.on_ground`; `blocked` = a frame since the last tick in which `physics::step` zeroed a horizontal velocity that was set; water = `was_in_water`); `step_frame` adds `sprint.add()` along the yaw to the walking velocity (the walk is set from the input every frame, so only the sprint's own part is added), fires `sprint.jump()` on a ground jump, scales the base field of view by `sprint.fov` (the look sensitivity divides it out again, so a sprint does not speed the look up), and `sprint_tick` throws one `Fx::Dig` speck of the block 0.2 under the feet per tick while it runs (`Effects::sprint_dust`: `-v * 4` sideways, 1.5 up, like `EntityMixin.addParticles`). A tap on a mob while sprinting calls `Mobs::shove` (the mod's `addVelocity` along the look, added before the hit's own `knockBack`, which halves it) and ends the sprint. Reset with the world and on respawn.
++    - `input/gamepad.rs` + `touch_ui.rs`: `Out::sprint` = L3 held, `TouchUi::pad_sprint`. L3 is fixed, not a `PadCfg` bind: the buttons page already fills its 6 rows (a 13th bind would sit on the `Tuning...` button). Touch needs no button: the d-pad's up arrow (or a corner: 0.707 counts as forward, `FWD_MIN` 0.7) tapped twice is the start.
++    - Not ported: the `ClientCommandC2SPacket` 4 / 5 of the multiplayer / server mixins (no multiplayer), the STAPI / RetroAPI key binding and a keyboard sprint key (`Opt` keys are stored only), the Unitweaks FOV compat (commented out in the mod), the hand's own field of view (mc-rs draws the hand in the same projection), the mod's x0.6 on the player's motion after a hit (the walk is set from the input every frame).
++    - Differences from the mod, on purpose: the field of view multiplier starts at 1 (the mod's static starts at 0, so its first frame pops); the dust is not drawn for fluids (the mod would draw a lava speck); the jump push is kept for the whole airtime as a decaying extra instead of true momentum, because mc-rs has no air momentum (the walk velocity is replaced every frame).
++    - ponytail: 7 ticks (0.35 s) is a tight double tap for a finger, `sprint::WINDOW` is the knob; the 30 s limit is the mod's and means a touch player must tap again after half a minute (`sprint::LIMIT`); no hunger gate (b1.7.3 has no food bar). UNVERIFIED on a device: the feel of 1.35x on the d-pad, the 30 s limit, the dust size; the b1.7.3 drag numbers (0.546 / 0.91) are read from `EntityLiving.moveEntityWithHeading`, not from this tree.
+ - 2026-10-23: M9 audio, import of every b1.7.3 sound (written WITHOUT a Rust toolchain: not compiled, not run; +3 tests `audio::tests::{every_name_the_java_plays_exists_and_decodes, step_table_matches_block_java, a_voice_is_heard_on_the_near_side_and_ends}`; the generator ran and every copied file decodes with ffmpeg). `tools/gen_sounds.py` copies the `.ogg` files out of `b1.7.json` to `mc-rs/assets/sound/` (24 MB, embedded with `include_bytes!`) and writes `audio/table.rs` with `SoundPool`'s names (extension cut, trailing digits stripped, `/` -> `.`; `sound/` and `newsound/` share keys). Needs `lewton` (new, `Cargo.lock` must be regenerated) and `ndk` 0.9 with `audio` (already in the lock via android-activity). Hooks in `lib.rs`: volumes, listener, music timer at 20 Hz, steps (`Ticks::walk` now returns the block stepped on), break sound, note blocks, jukebox. ponytail: AAudio only (no desktop output), music is embedded (APK +~20 MB; upgrade: APK assets + `AssetManager`), 32 voices, streams must be 44.1 kHz. UNVERIFIED: paulscode's attenuation curve (`1 - d / max`), the `ndk::audio` signatures, `Opt::Sound` scaling of records. Not wired: the other `playSoundEffect` calls (grep them in `World`, `Entity*`, `Block*`; the keys already exist in `SFX`).
+ - 2026-10-22: README points at `roadmap/` (docs only, no code): there is no root `ROADMAP.md` in the repo, the roadmap is this folder. The three links to `ROADMAP.md` in `README.md` now go to `roadmap/` and `roadmap/gameplay.md`; the many "ROADMAP changelog" mentions in the README stay and mean these files. UNVERIFIED: the `Part of [ROADMAP.md](../ROADMAP.md)` line at the top of the four part files is still a dead link.
+ - 2026-10-21 (11): the Dig Delay is a slider (written WITHOUT a Rust toolchain: not compiled, not run; +1 test `options::tests::dig_delay_slider`, `gamepad` tests pass `SWING_SECS` now). `Settings.dig_delay` (0..1, `digDelay` in options.txt) -> `Settings::dig_secs()` = 100 ms .. `HOLD_SECS` (400 ms; at the top the early dig of (9) and (10) is off and the dig waits for the plain hold), default `SWING_SECS` = 150 ms. `Opt::DigDelay` is one more `GuiSlider` (label `Dig Delay: 150 ms`), under the keys on the Controls page and under the pad's tuning page: one setting for finger and pad. `lib.rs` copies it to `TouchUi.swing_secs` each frame; `TouchUi::resting` / `dig_now` and `Pad::resting(secs)` / `dig_now(secs)` use it, and so does the early arm swing of a resting finger (the pad's swing from the first frame is untouched). `SWING_SECS` stays as the default.

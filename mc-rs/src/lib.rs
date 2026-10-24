@@ -54,6 +54,7 @@ use crate::world::mobs::{self, Ctx, Ev, Mobs};
 use crate::world::ticks::{self, Ticks};
 use crate::world::save::{self, Level};
 use crate::world::sky;
+use crate::world::sprint::{self, Sprint};
 use crate::world::chunk::{is_plant, normal_cube, outline_bounds, physics_id, pick_bounds};
 use crate::world::chunks::{chunk_coord, ChunkManager, Layer, Shape, WATER_RANGE};
 use crate::world::physics::{self, Player};
@@ -146,6 +147,10 @@ struct App {
     was_in_water: bool,
     /// `Entity.ySize` of the player, as far as the camera goes: how far the eye hangs below standing height (0.08 sneaking, then it decays).
     sneak_y: f32,
+    /// Sprinting (`world::sprint`, Retro Sprint): ticked at 20 Hz, its push and field of view are read every frame.
+    sprint: Sprint,
+    /// A wall stopped the player's move on x or z since the last sprint tick (`horizontalCollision`).
+    sprint_blocked: bool,
     /// Hotbar slot last seen and seconds its item name still shows (`GuiIngame` shows it ~2 s after a switch).
     tip: (usize, f32),
     /// The local player's model state (`render::player`): body yaw, limb and arm swing, ticked at 20 Hz.
@@ -273,6 +278,8 @@ impl App {
             fx: Effects::new(seed),
             was_in_water: false,
             sneak_y: 0.0,
+            sprint: Sprint::default(),
+            sprint_blocked: false,
             tip: (0, 0.0),
             body: render::player::Anim::default(),
             third_saved: None,
@@ -478,6 +485,7 @@ impl App {
         self.camera.aspect = aspect;
         (self.world_ticks, self.weather_ticks, self.weather) = (0.0, 0, sky::Weather::new(seed));
         self.fx = Effects::new(seed);
+        self.sprint = Sprint::default();
         (self.tip, self.dig, self.dig_acc, self.target) = ((0, 0.0), Dig::default(), 0.0, None);
         (self.inv, self.drops, self.mobs, self.ticks) = (Inventory::default(), Drops::new(seed), Mobs::new(seed), Ticks::new(seed));
         (self.furnaces, self.furn_acc, self.vitals, self.save_acc) = (HashMap::new(), 0.0, Vitals::default(), 0.0);
@@ -567,7 +575,9 @@ impl App {
         self.pad_sync(dt);
         self.touch.pad.watch_health(self.vitals.health);
         // Zoomify: hold the zoom button for 4x (the vertical tangent / 4), eased; the look drag slows with the field of view.
-        let base = 70_f32.to_radians();
+        // Retro Sprint: the field of view x 1.15 while sprinting (eased), and the zoom starts from it.
+        self.sprint.fov_step(dt);
+        let base = 70_f32.to_radians() * self.sprint.fov;
         let target = if self.touch.zooming() { 2.0 * ((base * 0.5).tan() / ZOOM).atan() } else { base };
         self.camera.fov_y += (target - self.camera.fov_y) * (1.0 - (-14.0 * dt).exp());
         // Look drag accumulated by the touch UI since the last frame. Drained
@@ -634,6 +644,7 @@ impl App {
         // The death screen's resume button was pressed: come back at the spawn point with full health.
         if self.vitals.dead() {
             self.vitals = Vitals::default();
+            self.sprint.stop();
             self.enter(false, true); // `Minecraft.respawn`: always in the overworld
             self.player.pos = self.respawn_pos();
             self.player.vel = glam::Vec3::ZERO;
@@ -669,11 +680,11 @@ impl App {
         let riding = self.riding();
         let asleep = self.sleep.is_some();
         if !asleep {
-            let k = LOOK_SENS * (self.camera.fov_y * 0.5).tan() / (70_f32.to_radians() * 0.5).tan() * self.opts.look_scale();
+            let k = LOOK_SENS * (self.camera.fov_y / self.sprint.fov * 0.5).tan() / (70_f32.to_radians() * 0.5).tan() * self.opts.look_scale(); // the sprint's wider view does not speed the look up
             self.camera.add_yaw(look_dx * k);
             self.camera.add_pitch(look_dy * k * if self.opts.invert_mouse { -1.0 } else { 1.0 });
             // The right stick has its own sensitivity (Controls > Controller); only the zoom narrows it.
-            let z = (self.camera.fov_y * 0.5).tan() / (70_f32.to_radians() * 0.5).tan();
+            let z = (self.camera.fov_y / self.sprint.fov * 0.5).tan() / (70_f32.to_radians() * 0.5).tan();
             self.camera.add_yaw(pad_yaw * z);
             self.camera.add_pitch(pad_pitch * z);
         }
@@ -691,6 +702,16 @@ impl App {
         // forward = -Z when yaw = 0; rotate by yaw around +Y.
         self.player.vel.x = (fwd * yaw.sin() + side * yaw.cos()) * MOVE_SPEED;
         self.player.vel.z = (-fwd * yaw.cos() + side * yaw.sin()) * MOVE_SPEED;
+        // Retro Sprint (`LivingEntityMixin`): the sprint pushes along the facing on top of the walk, and a jump on the ground adds the jump push.
+        if !asleep && !riding {
+            if self.touch.jumping() && self.player.on_ground && !self.was_in_water {
+                self.sprint.jump();
+            }
+            let push = self.sprint.add();
+            self.player.vel.x += yaw.sin() * push;
+            self.player.vel.z -= yaw.cos() * push;
+        }
+        let (vx0, vz0) = (self.player.vel.x, self.player.vel.z);
         // Plants are drawn but not solid yet (collision shapes come with M14), so physics reads them as air.
         let get = |x: i32, y: i32, z: i32| self.chunks.block(x, y, z).map(|b| if is_plant(b) { 0 } else { self.chunks.physics_at(x, y, z, b) });
         // The held jump button jumps (8.4 m/s, the b1.7.3 velocity) or swims up; fluids (ids 8..=11) are not solid.
@@ -705,6 +726,8 @@ impl App {
             self.player.vel.y = (if self.touch.jumping() { 8.0 } else if sneaking { -8.0 } else { 0.0 }) + 23.0 * dt;
         }
         let (water, lava) = if asleep || riding { (false, false) } else { physics::step(&mut self.player, dt, self.touch.jumping() && !flying, &get) };
+        // `horizontalCollision`: `step` zeroes the velocity of the axis a wall stopped (a stepped-up slab keeps it).
+        self.sprint_blocked |= !asleep && !riding && ((vx0 != 0.0 && self.player.vel.x == 0.0) || (vz0 != 0.0 && self.player.vel.z == 0.0));
         // `EntityPlayerSP.onLivingUpdate` sets `ySize` 0.2 while sneaking and `moveEntity` multiplies it by 0.4 every tick: the eye hangs 0.08
         // low (1.54 up), and it comes back by the same x0.4 a tick once the button is released.
         self.sneak_y = if sneaking { 0.08 } else { self.sneak_y * 0.4f32.powf(dt * 20.0) };
@@ -887,6 +910,7 @@ impl App {
             }
             let centre = (chunk_coord(self.player.pos.x), chunk_coord(self.player.pos.z));
             self.sleep_tick(sub);
+            self.sprint_tick();
             // `BlockPressurePlate`: the boxes of what may stand on a plate (the player, the mobs).
             let p = self.player.pos;
             self.ticks.plate_ents.clear();
@@ -1192,6 +1216,13 @@ impl App {
                 }
                 let held = self.inv.slots[slot].map(|s| s.id);
                 let (dmg, wear) = mobs::attack(held);
+                // Retro Sprint (`PlayerEntityMixin.onAttack`): a sprinting hit shoves the target the way the player looks, before the hit's own
+                // knockback, and ends the sprint (the walk is set from the input every frame, so the mod's x0.6 on the player's motion has no use here).
+                if self.sprint.attack() {
+                    let f = self.camera.forward();
+                    let d = glam::Vec3::new(f.x, 0.0, f.z).normalize_or_zero();
+                    self.mobs.shove(i, d * sprint::KNOCK + glam::Vec3::Y * sprint::KNOCK_UP);
+                }
                 self.mobs.hit(i, dmg, self.player.pos);
                 self.inv.damage(slot, wear);
                 return;
@@ -1465,6 +1496,29 @@ impl App {
                 }
             } else {
                 self.use_held();
+            }
+        }
+    }
+
+    /// One 20 Hz tick of sprinting (`ClientPlayerEntityMixin.tickSprintingMovement`) and its dust (`EntityMixin.addParticles`: a speck of the
+    /// block below the feet while sprinting out of the water). The forward input is the d-pad's / the stick's, sneaking already x0.3.
+    fn sprint_tick(&mut self) {
+        let (asleep, riding) = (self.sleep.is_some(), self.riding());
+        let fwd = if asleep || riding { 0.0 } else { self.touch.move_input.0 * if self.touch.sneak { 0.3 } else { 1.0 } };
+        self.sprint.tick(sprint::In {
+            fwd,
+            key: self.touch.pad_sprint,
+            ground: self.player.on_ground,
+            blocked: std::mem::take(&mut self.sprint_blocked),
+            water: self.was_in_water,
+            can: !asleep && !riding && !self.vitals.dead(),
+        });
+        if self.sprint.on() && !self.was_in_water {
+            let (p, v) = (self.player.pos, self.player.vel / 20.0);
+            let (x, y, z) = (p.x.floor() as i32, (p.y - 0.9 - 0.2).floor() as i32, p.z.floor() as i32); // 0.2 under the feet
+            if let Some(id) = self.chunks.block(x, y, z).filter(|&b| b > 0 && !matches!(b, 8..=11)) {
+                let tile = atlas::tile_of(id, self.chunks.meta(x, y, z));
+                self.fx.sprint_dust(glam::Vec3::new(p.x, p.y - 0.9, p.z), v, tile);
             }
         }
     }
