@@ -52,4 +52,29 @@ assert peak <= 1.0 + 1e-9 and abs(x - 1) < 1e-6
 a = crit(0.0, 2.0, 1.0, 7.0, 0.5); b = (0.0, 2.0)
 for i in range(50): b = crit(b[0], b[1], 1.0, 7.0, 0.01)
 assert abs(a[0]-b[0]) < 1e-9 and abs(a[1]-b[1]) < 1e-9
+
+# strafing toward the camera's shoulder: the pivot's x spring lags the player by up to the 0.6 cap, which used to eat the whole 0.62
+# shoulder offset and put the player on the crosshair; the clamp (lag toward the head's line cut to 0) keeps it at the standing offset.
+def strafe(clamped, v=4.3, dt=1/60, shoulder=0.62):
+    eye, px, pv, least = 0.0, shoulder, 0.0, 9.0
+    for _ in range(240):
+        eye += v*dt
+        want = eye + shoulder
+        px, pv = crit(px, pv, want, 12.0, dt)
+        lat = px - want
+        if clamped and lat*shoulder < 0: px = want          # `Rig::update`: lag toward the head's line is dropped
+        if abs(px - want) > 0.6: px = want + math.copysign(0.6, px - want)
+        least = min(least, px - eye)
+    return least
+old, new = strafe(False), strafe(True)
+print("camera offset from the player's line while strafing: before", round(old, 3), "after", round(new, 3), "(standing 0.62)")
+assert old < 0.1 and abs(new - 0.62) < 1e-6
+
+# the glide starts on the vanilla third-person place: first frame of `Rig::update` in open air, yaw 0 (behind = +z), eye at the origin
+RADIUS, THIRD = 0.3, 4.3
+dt = 1/60; blend, _ = crit(0.0, 0.0, 1.0, 16.0, dt)
+dist = 2.6; to = np.array([0.62*blend, 0.2*blend, THIRD + (dist - THIRD)*blend]); ln = np.linalg.norm(to)
+pos = to * ((ln - RADIUS)/ln)
+print("first frame: blend", round(blend, 4), "camera", pos.round(3))
+assert 3.85 < pos[2] < 4.0 and abs(pos[0]) < 0.05
 print("ok")
