@@ -356,7 +356,7 @@ pub enum OptScr {
     /// The Controller tab (Controllify): its button bindings, and its tuning page.
     Pad,
     PadTune,
-    /// The live atmosphere editor (the sun button of Video Settings, in a world only): the world stays undimmed beside its panel.
+    /// The live atmosphere editor (the sun button of the game menu): the world stays undimmed beside its panel. Only `OptionsUi::atmos` opens it.
     Atmos,
 }
 
@@ -374,8 +374,6 @@ enum Act {
     PadBind(usize),
     PadKnob(usize),
     PadToggle(usize),
-    /// The sun button of Video Settings.
-    Atmos,
     AtTab(usize),
     AtKnob(usize),
     AtStep(i32),
@@ -516,8 +514,6 @@ pub struct OptionsUi {
     wait_pad: Option<usize>,
     /// Where the finger is (GUI units), for the highlight.
     finger: Option<(f32, f32)>,
-    /// A world is behind the screen (the pause menu): Video Settings then has the sun button.
-    world: bool,
     ed: AtmosEd,
 }
 
@@ -529,12 +525,14 @@ impl Default for OptionsUi {
 
 impl OptionsUi {
     pub fn new() -> Self {
-        Self { scr: OptScr::Main, drag: None, wait: None, wait_pad: None, finger: None, world: false, ed: AtmosEd { biome: Biome::Plains, tab: 0, list: false } }
+        Self { scr: OptScr::Main, drag: None, wait: None, wait_pad: None, finger: None, ed: AtmosEd { biome: Biome::Plains, tab: 0, list: false } }
     }
 
-    /// The options of the pause menu: a world is behind them, so the atmosphere editor can be opened.
-    pub fn in_game() -> Self {
-        Self { world: true, ..Self::new() }
+    /// The atmosphere editor (the game menu's sun), on the biome under the player; the world behind it is the live preview.
+    pub fn atmos(st: &mut Settings) -> Self {
+        let ed = AtmosEd { biome: st.atmos.here, tab: 0, list: false };
+        st.atmos.view = Some(ed.biome);
+        Self { scr: OptScr::Atmos, ed, ..Self::new() }
     }
 
     fn widgets(&self, gw: f32, gh: f32, st: &Settings) -> Vec<Wid> {
@@ -553,14 +551,7 @@ impl OptionsUi {
                 w.push(wide(Act::Controls, top + 120.0 + 12.0, "Controls..."));
                 w
             }
-            OptScr::Video => {
-                let mut w = opts(&[Opt::Graphics, Opt::RenderDistance, Opt::AmbientOcclusion, Opt::FramerateLimit, Opt::Anaglyph, Opt::ViewBobbing, Opt::GuiScale, Opt::AdvancedOpengl, Opt::Msaa, Opt::Post, Opt::Renderer, Opt::DynamicRes]);
-                // Bottom right: the sun, which opens the live atmosphere editor.
-                if self.world {
-                    w.push(Wid { act: Act::Atmos, r: [gw - 24.0, gh - 24.0, 20.0, 20.0], label: String::new() });
-                }
-                w
-            }
+            OptScr::Video => opts(&[Opt::Graphics, Opt::RenderDistance, Opt::AmbientOcclusion, Opt::FramerateLimit, Opt::Anaglyph, Opt::ViewBobbing, Opt::GuiScale, Opt::AdvancedOpengl, Opt::Msaa, Opt::Post, Opt::Renderer, Opt::DynamicRes]),
             OptScr::Atmos => atmos_widgets(&self.ed, st),
             OptScr::Controls => (0..KEY_NAMES.len())
                 .map(|i| {
@@ -665,11 +656,6 @@ impl OptionsUi {
                 st.pad.toggle(i);
                 st.save();
             }
-            Act::Atmos => {
-                self.ed = AtmosEd { biome: st.atmos.here, tab: 0, list: false };
-                st.atmos.view = Some(self.ed.biome);
-                self.scr = OptScr::Atmos;
-            }
             Act::AtTab(i) => (self.ed.tab, self.ed.list) = (i, false),
             Act::AtKnob(_) => {}
             Act::AtList => self.ed.list = !self.ed.list,
@@ -694,8 +680,7 @@ impl OptionsUi {
                 }
                 if self.scr == OptScr::Atmos {
                     st.atmos.view = None; // the sky goes back to the biome under the player, easing over 2 s
-                    self.scr = OptScr::Video;
-                    return None;
+                    return Some(OptEv::Close); // back to the game menu
                 }
                 self.scr = OptScr::Main;
             }
@@ -760,11 +745,11 @@ impl OptionsUi {
                 && !matches!(b.act, Act::AtTab(i) if i == self.ed.tab && !self.ed.list)
                 && !matches!(b.act, Act::AtPick(i) if atmos::ALL[i] == self.ed.biome);
             button(v, s, b.r, &b.label, on, over, knob);
-            match b.act {
-                Act::Atmos => sun(v, s, b.r),
-                // A gold dot on a biome whose look the player changed.
-                Act::AtPick(i) if st.atmos.edited(atmos::ALL[i]) => HudPipeline::push_quad(v, (b.r[0] + b.r[2] - 5.0) * s, (b.r[1] + 2.0) * s, 3.0 * s, 3.0 * s, rgb(0xFFD93B)),
-                _ => {}
+            // A gold dot on a biome whose look the player changed.
+            if let Act::AtPick(i) = b.act {
+                if st.atmos.edited(atmos::ALL[i]) {
+                    HudPipeline::push_quad(v, (b.r[0] + b.r[2] - 5.0) * s, (b.r[1] + 2.0) * s, 3.0 * s, 3.0 * s, rgb(0xFFD93B));
+                }
             }
             if let (OptScr::Controls, Act::Key(i)) = (self.scr, b.act) {
                 HudPipeline::push_text(v, (b.r[0] + 70.0 + 6.0) * s, (b.r[1] + 7.0) * s, s, KEY_NAMES[i], rgb(0xFFFFFF));
@@ -818,6 +803,8 @@ enum PAct {
     Fly,
     Debug,
     Info,
+    /// The sun, bottom right: the live atmosphere editor.
+    Atmos,
 }
 
 /// `GuiIngameMenu` (and the death screen, `GuiGameOver`, which shares it).
@@ -872,6 +859,10 @@ impl Pause {
         v.push((PAct::Fly, [236.0, 2.0, 70.0, 20.0], if info.flying { "Fly: on" } else { "Fly: off" }.to_string(), true));
         v.push((PAct::Debug, [2.0, 24.0, 230.0, 20.0], debug.to_string(), true));
         v.push((PAct::Info, [236.0, 24.0, 70.0, 20.0], if info.info { "Info: on" } else { "Info: off" }.to_string(), true));
+        // Bottom right: the sun (not on the death screen).
+        if !info.dead {
+            v.push((PAct::Atmos, [gw - 24.0, gh - 24.0, 20.0, 20.0], String::new(), true));
+        }
         v
     }
 
@@ -898,7 +889,11 @@ impl Pause {
                     PAct::Debug => Some(PauseEv::LodDebug),
                     PAct::Info => Some(PauseEv::Info),
                     PAct::Options => {
-                        self.opt = Some(OptionsUi::in_game());
+                        self.opt = Some(OptionsUi::new());
+                        None
+                    }
+                    PAct::Atmos => {
+                        self.opt = Some(OptionsUi::atmos(st));
                         None
                     }
                     PAct::Achievements | PAct::Stats => None,
@@ -944,6 +939,9 @@ impl Pause {
             let over = self.finger.is_some_and(|(x, y)| inside(r, x, y));
             let lit = (act == PAct::Pregen && info.pregen.is_some_and(|p| p.0)) || (act == PAct::Fly && info.flying) || (act == PAct::Debug && info.debug != 0) || (act == PAct::Info && info.info);
             button(v, s, r, &label, on, over || lit, None);
+            if act == PAct::Atmos {
+                sun(v, s, r);
+            }
         }
     }
 }
@@ -1140,48 +1138,47 @@ mod tests {
         assert!(o.widgets(gw, gh, &st).iter().any(|b| b.label.starts_with("Dig Delay")));
     }
 
-    /// Video Settings > the sun (in a world only) > the editor: the biome under the player, a slider edits it live, the edit reaches
-    /// options.txt, `<` `>` and the list change the biome, Done goes back and the preview ends.
+    /// The game menu's sun (bottom right, not on the death screen) > the editor: the biome under the player, a slider edits it live, the
+    /// edit reaches options.txt, `<` and the list change the biome, Done goes back to the game menu and the preview ends.
     #[test]
     fn atmosphere_editor_flow() {
         let root = tmp("atmos");
         let mut st = Settings::load(&root);
         st.atmos.here = Biome::Desert;
-        let mut title = OptionsUi::new();
-        tap(&mut title, &mut st, "Video Settings...");
-        let (_, gw, gh) = scaled_gs(SZ.0, SZ.1, 0);
-        assert!(title.widgets(gw, gh, &st).iter().all(|b| b.act != Act::Atmos), "no sun without a world");
-        let mut o = OptionsUi::in_game();
-        tap(&mut o, &mut st, "Video Settings...");
-        let sun = o.widgets(gw, gh, &st).into_iter().find(|b| b.act == Act::Atmos).unwrap().r;
+        let (s, gw, gh) = scaled_gs(SZ.0, SZ.1, 0);
+        let info = PauseInfo { dead: false, pregen: None, debug: 0, flying: false, info: false };
+        let sun = Pause::buttons(gw, gh, &info).into_iter().find(|b| b.0 == PAct::Atmos).unwrap().1;
         assert!(sun[0] + sun[2] >= gw - 4.0 && sun[1] + sun[3] >= gh - 4.0, "bottom right: {sun:?}");
+        assert!(Pause::buttons(gw, gh, &PauseInfo { dead: true, ..info }).iter().all(|b| b.0 != PAct::Atmos), "none on the death screen");
+        let mut p = Pause::new();
         let (x, y) = px(sun, &st);
-        o.event(ScreenEv::Up(x, y), SZ.0, SZ.1, &mut st);
-        assert_eq!((o.scr, st.atmos.view), (OptScr::Atmos, Some(Biome::Desert)));
+        p.event(ScreenEv::Up(x, y), SZ.0, SZ.1, &mut st, &info);
+        assert_eq!(st.atmos.view, Some(Biome::Desert));
+        let mut o = p.opt.take().expect("the editor is open");
+        assert_eq!(o.scr, OptScr::Atmos);
         tap(&mut o, &mut st, "Fog");
         // the red slider all the way left
         let r = o.widgets(gw, gh, &st).into_iter().find(|b| b.label.starts_with("Red")).unwrap().r;
-        let (s, ..) = scaled_gs(SZ.0, SZ.1, 0);
         let y = (r[1] + 10.0) * s;
         o.event(ScreenEv::Down((r[0] + 4.0) * s, y), SZ.0, SZ.1, &mut st);
         o.event(ScreenEv::Up((r[0] + 4.0) * s, y), SZ.0, SZ.1, &mut st);
         assert_eq!(st.atmos.look(Biome::Desert)[3], 0.0);
         assert!(st.atmos.edited(Biome::Desert) && !st.atmos.edited(Biome::Plains));
         assert_eq!(Settings::load(&root).atmos.look(Biome::Desert)[3], 0.0, "saved when the slider is let go");
-        // next biome, then one from the list
+        // the previous biome, then one from the list
         tap(&mut o, &mut st, "<");
         assert_eq!(st.atmos.view, Some(Biome::Taiga));
         tap(&mut o, &mut st, "Taiga"); // the biome button opens the list
         tap(&mut o, &mut st, "Swamp");
         assert_eq!((st.atmos.view, o.ed.list), (Some(Biome::Swamp), false));
-        // Reset all brings the table back, Done ends the preview
+        // Reset all brings the table back, Done ends the preview and closes the editor
         tap(&mut o, &mut st, "Reset all");
         assert!(!st.atmos.edited(Biome::Desert));
-        tap(&mut o, &mut st, "Done");
-        assert_eq!((o.scr, st.atmos.view), (OptScr::Video, None));
         let mut v = Vec::new();
         o.draw(&mut v, SZ.0, SZ.1, &st, true);
         assert!(!v.is_empty());
+        assert_eq!(tap(&mut o, &mut st, "Done"), Some(OptEv::Close));
+        assert_eq!(st.atmos.view, None);
     }
 
     #[test]

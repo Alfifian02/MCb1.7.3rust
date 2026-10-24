@@ -57,7 +57,7 @@ pub enum PointerRole {
     Pause,
     /// Press landed on the zoom button. Zoomed while held (`TouchUi::zooming`).
     Zoom,
-    /// Press landed on the view button (left of zoom). Toggles `TouchUi.third` on release.
+    /// Press landed on the view button (left of zoom). Cycles first person -> third -> shoulder surf (`TouchUi.third` / `shoulder`) on release.
     View,
     /// Press landed on the inventory button. Opens / closes the screen on release.
     Inventory,
@@ -211,6 +211,8 @@ pub struct TouchUi {
     pub flying: bool,
     /// Third-person view (`GameSettings.thirdPersonView`), toggled by the view button, kept over pause.
     pub third: bool,
+    /// With `third`: the cinematic over-the-shoulder camera (`render::shoulder`) instead of the 4-blocks-behind one. The view button's second tap.
+    pub shoulder: bool,
     pub pointers: HashMap<i32, Pointer>,
     pub surface_w: u32,
     pub surface_h: u32,
@@ -256,6 +258,7 @@ impl TouchUi {
             sneak: false,
             flying: false,
             third: false,
+            shoulder: false,
             pointers: HashMap::new(),
             surface_w: w,
             surface_h: h,
@@ -563,7 +566,11 @@ impl TouchUi {
                 log::info!("touch: pause -> {}", self.paused);
             }
             PointerRole::Inventory => self.inventory = true,
-            PointerRole::View => self.third = !self.third,
+            PointerRole::View => (self.third, self.shoulder) = match (self.third, self.shoulder) {
+                (false, _) => (true, false),
+                (true, false) => (true, true),
+                (true, true) => (false, false),
+            },
             PointerRole::Tap => {
                 self.events.push(ScreenEv::Up(ptr.last.0, ptr.last.1));
                 self.cursor_pos = ptr.last;
@@ -841,15 +848,17 @@ mod tests {
     }
 
     #[test]
-    fn view_button_toggles_the_third_person() {
+    fn view_button_cycles_first_third_shoulder() {
         let mut ui = TouchUi::new(W, H);
         let (x, y) = mid(ui.layout.view);
         assert!(ui.layout.view.0 + ui.layout.view.2 < ui.layout.zoom.0, "view sits left of zoom");
         assert_eq!(ui.layout.hit_test(x, y, false, false), Some(PointerRole::View));
         tap(&mut ui, 1, x, y);
-        assert!(ui.third);
+        assert!(ui.third && !ui.shoulder);
         tap(&mut ui, 1, x, y);
-        assert!(!ui.third);
+        assert!(ui.third && ui.shoulder);
+        tap(&mut ui, 1, x, y);
+        assert!(!ui.third && !ui.shoulder);
     }
 
     /// The zoom button is held, not tapped: `zooming` is true while the finger is down, only in play, and it clears on release.

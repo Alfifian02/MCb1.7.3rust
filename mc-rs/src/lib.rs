@@ -158,7 +158,9 @@ struct App {
     /// The local player's model state (`render::player`): body yaw, limb and arm swing, ticked at 20 Hz.
     body: render::player::Anim,
     /// The eye's place while the frame is drawn from behind (`third_pos`), put back after the frame.
-    third_saved: Option<glam::Vec3>,
+    third_saved: Option<(glam::Vec3, f32)>,
+    /// The shoulder-surf camera (`render::shoulder`), reset on every frame it is not the view in use.
+    shoulder: render::shoulder::Rig,
     /// Survival digging state and the leftover time towards the next 20 Hz dig tick.
     dig: Dig,
     dig_acc: f32,
@@ -285,6 +287,7 @@ impl App {
             tip: (0, 0.0),
             body: render::player::Anim::default(),
             third_saved: None,
+            shoulder: render::shoulder::Rig::new(),
             dig: Dig::default(),
             dig_acc: 0.0,
             inv: Inventory::default(),
@@ -1950,9 +1953,32 @@ impl App {
     /// One frame; in the third-person view the camera sits behind the eye for it and is put back after (input reads the eye).
     fn render(&mut self) {
         self.render_frame();
-        if let Some(p) = self.third_saved.take() {
-            self.camera.pos = p;
+        if let Some((p, fov)) = self.third_saved.take() {
+            (self.camera.pos, self.camera.fov_y) = (p, fov);
         }
+    }
+
+    /// The shoulder-surf shot for this frame (`render::shoulder`): where the camera sits, the field-of-view scale and the view-space turn
+    /// that keeps the crosshair on what the eye's pick ray hits.
+    fn shoulder_shot(&mut self) -> render::shoulder::Shot {
+        let (eye, chunks) = (self.camera.pos, &self.chunks);
+        let solid = |p: glam::Vec3| chunks.block_loaded(p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32).is_some_and(normal_cube);
+        let aim = self.target.map(|h| (h.point.as_vec3() - eye).length());
+        let dt = Instant::now().duration_since(self.frame_prev).as_secs_f32().min(0.1);
+        self.shoulder.update(&render::shoulder::Frame {
+            dt,
+            eye,
+            yaw: self.camera.yaw,
+            pitch: self.camera.pitch,
+            vel: self.player.vel,
+            on_ground: self.player.on_ground,
+            sneak: self.touch.sneak && self.sleep.is_none(),
+            sprint: self.sprint.on(),
+            zoom: self.touch.zooming(),
+            health: self.vitals.health,
+            aim,
+            solid: &solid,
+        })
     }
 
     /// `EntityRenderer.orientCamera` for `thirdPersonView`: 4 blocks behind the eye, pulled in before terrain.
@@ -1983,9 +2009,19 @@ impl App {
         if self.menu.is_some() {
             return; // "Save and quit to title" just ran
         }
+        let mut rig_view = glam::Mat4::IDENTITY; // the shoulder-surf shot's roll / convergence / kicks, composed into `camera.bob` below
         if self.touch.third {
-            self.third_saved = Some(self.camera.pos);
-            self.camera.pos = self.third_pos();
+            self.third_saved = Some((self.camera.pos, self.camera.fov_y));
+            if self.touch.shoulder {
+                let shot = self.shoulder_shot();
+                (self.camera.pos, rig_view) = (shot.pos, shot.view);
+                self.camera.fov_y *= shot.fov_scale;
+            } else {
+                self.camera.pos = self.third_pos();
+                self.shoulder.reset();
+            }
+        } else {
+            self.shoulder.reset();
         }
         // The player's own model, drawn only from behind (`RenderPlayer`; the first-person view has the hand instead).
         let tick_partial = (self.body_acc / dig::TICK).clamp(0.0, 1.0);
@@ -2008,7 +2044,7 @@ impl App {
         let (pcx, pcz) = (chunk_coord(self.player.pos.x), chunk_coord(self.player.pos.z));
         self.chunks.update(self.be.gfx(), self.be.origins(), pcx, pcz);
         self.camera.zfar = if lod_on { lod::ZFAR } else { 256.0 }; // the far terrain needs the depth range
-        self.camera.bob = if self.opts.view_bobbing { self.body.view_bob(tick_partial) } else { glam::Mat4::IDENTITY };
+        self.camera.bob = rig_view * if self.opts.view_bobbing { self.body.view_bob(tick_partial) } else { glam::Mat4::IDENTITY };
         let (view, proj) = self.camera.build_view_proj();
         // The first-person hand (`EntityRenderer.renderHand`): not in the third-person view, not in bed.
         let hand = (!self.touch.third && self.sleep.is_none()).then(|| {
