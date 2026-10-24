@@ -125,7 +125,7 @@ const CARPET_MAX: i32 = 3;
 
 const PLAIN: [u8; 3] = [255, 255, 255];
 
-/// A run of equal blocks in a column: y in `y0..y1`, `mesh::tint_of` of them in this column (grass / foliage colour, white
+/// A run of equal blocks in a column: y in `y0..y1`, `mesh::tint_of` of them in this column (grass / foliage / water colour, white
 /// otherwise). Air, plants and (below the ground) everything under `DEPTH` are not kept.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Span {
@@ -168,7 +168,9 @@ fn column_into(out: &mut Vec<Span>, blocks: &[u8], meta: &Nibbles, tints: &Tints
             b = 9;
         }
         let m = meta.get(x, y, z) & 15;
-        let t = if matches!(b, 2 | 18) { rgb(tint_of(tints, b, m, x * 16 + z) as u32) } else { PLAIN };
+        let t = if matches!(b, 2 | 9 | 18) { rgb(tint_of(tints, b, m, x * 16 + z) as u32) } else { PLAIN };
+        // Water: the blended colour in steps of 8 (a tile's palette holds 255 tints, and a gradient of 256 columns would eat it).
+        let t = if b == 9 && t != PLAIN { t.map(|c| (c / 8 * 8 + 4).min(254)) } else { t };
         match out[first..].last_mut() {
             Some(s) if s.y0 as usize == y + 1 && s.id == b && s.meta == m && s.tint == t => s.y0 = y as u8,
             _ => out.push(Span { y0: y as u8, y1: y as u8 + 1, id: b, meta: m, tint: t }),
@@ -285,7 +287,7 @@ struct Store {
     sh: Arc<Shared>,
 }
 
-const MAGIC: [u8; 2] = *b"L7"; // L3 tiles were made with the b1.7.3 climate, L4 before the terrain followed it, L5 before the rivers, L6 before the rivers met level and ran long: another terrain, so they are made again
+const MAGIC: [u8; 2] = *b"L9"; // L8 before the water carried its biome colour, L7 before the overlapping channels shared one level, L3 tiles were made with the b1.7.3 climate, L4 before the terrain followed it, L5 before the rivers, L6 before the rivers met level and ran long: another terrain, so they are made again
 
 fn tile_path(d: &Path, k: (i32, i32)) -> PathBuf {
     d.join(format!("{}_{}.lod", k.0, k.1))
@@ -856,9 +858,9 @@ impl Quads {
     }
 
     /// A water sheet over the square at (x0, z0), side `sf`, at height `y`: the water tile, tiled once per block (`fs_water` wraps the uv).
-    fn sheet_quad(&mut self, x0: f32, z0: f32, sf: f32, y: f32) {
+    fn sheet_quad(&mut self, x0: f32, z0: f32, sf: f32, y: f32, tint: f32) {
         let (x1, z1) = (x0 + sf, z0 + sf);
-        self.quad([[x0, y, z1], [x1, y, z1], [x1, y, z0], [x0, y, z0]], [[0.0, 0.0], [sf, 0.0], [sf, sf], [0.0, sf]], SHEET_LIGHT, pack(PLAIN));
+        self.quad([[x0, y, z1], [x1, y, z1], [x1, y, z0], [x0, y, z0]], [[0.0, 0.0], [sf, 0.0], [sf, sf], [0.0, sf]], SHEET_LIGHT, tint);
     }
 
     /// A quad tiled once per BLOCK: `uv` is in blocks (v up) and `light` carries the terrain tile (`fs_main` wraps it, light >= 1000).
@@ -977,7 +979,7 @@ fn build(store: &mut Store, key: (i32, i32), step: i32, trees: bool) -> Built {
                     let up = vid(at(gi, ki + 1, gj));
                     if up != 9 && !opq(up, s) {
                         q.kind = K_WATER;
-                        q.sheet_quad(x0, z0, sf, y0 + 1.0 - 1.0 / 9.0); // exactly the real water's top: `fs_water` splits the two per pixel, so any height gap is a ring
+                        q.sheet_quad(x0, z0, sf, y0 + 1.0 - 1.0 / 9.0, pack(pal.v[(v >> 16) as usize])); // the water's biome colour, as the real water // exactly the real water's top: `fs_water` splits the two per pixel, so any height gap is a ring
                     }
                 } else {
                     let meta = ((v >> 8) & 15) as u8;

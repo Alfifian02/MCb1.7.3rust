@@ -1,0 +1,93 @@
+diff -ruN a/mc-rs/src/world/gen/hydro.rs b/mc-rs/src/world/gen/hydro.rs
+--- a/mc-rs/src/world/gen/hydro.rs	2026-10-24 13:19:58.401749443 +0000
++++ b/mc-rs/src/world/gen/hydro.rs	2026-10-24 13:19:58.403136351 +0000
+@@ -492,6 +492,25 @@
+         best.map(|(i, _, d, t)| (i, t, d))
+     }
+ 
++    /// The lowest water surface among every segment whose channel holds the point (clearance <= 0), `None` if no channel does.
++    /// `nearest` picks ONE segment, so where two channels overlap (a confluence, the inside of a bend, a braid) the column took the level
++    /// of whichever centre line was nearer and the border between the two levels ran along that arbitrary diagonal: a sawtooth of water
++    /// standing at different heights side by side. One level per column removes the border; the lowest wins so water is never held
++    /// above a neighbouring channel's floor.
++    fn channel_grade(&self, x: f64, z: f64) -> Option<f64> {
++        let b = ((x / BUCKET as f64).floor() as i32, (z / BUCKET as f64).floor() as i32);
++        let mut low: Option<f64> = None;
++        for &i in self.index.get(&b)? {
++            let s = &self.segs[i as usize];
++            let (d, t) = seg_distance(s, x, z);
++            if d <= s.w1 + (s.w2 - s.w1) * t {
++                let g = s.y1 + (s.y2 - s.y1) * t;
++                low = Some(low.map_or(g, |l: f64| l.min(g)));
++            }
++        }
++        low
++    }
++
+     /// `RiverEngine.plan` at a point, `None` away from every river.
+     pub fn plan(&self, x: f64, z: f64) -> Option<Plan> {
+         let (si, t, d) = self.nearest(x, z)?;
+@@ -1119,7 +1138,20 @@
+     /// of the plate's own network (often a lower one) cut or skipped the channel of a higher river from a neighbouring plate: the upper
+     /// water was left standing on a cliff, or the river was gone. Ties go to the earlier network (the plate's own).
+     fn plan_at(&self, x: f64, z: f64) -> Option<Plan> {
+-        self.nets.iter().filter_map(|n| n.plan(x, z)).reduce(|a, b| if b.clearance() < a.clearance() { b } else { a })
++        let mut p = self.nets.iter().filter_map(|n| n.plan(x, z)).reduce(|a, b| if b.clearance() < a.clearance() { b } else { a })?;
++        if p.in_channel {
++            // One water surface per channel column, over every segment and every network that overlaps it, so rivers that meet (or bend
++            // back on themselves, or cross a plate border) merge into one flat water instead of a patchwork of levels.
++            if let Some(g) = self.nets.iter().filter_map(|n| n.channel_grade(x, z)).reduce(f64::min) {
++                if g < p.grade {
++                    let depth = p.water_y - p.bed_y;
++                    p.grade = g;
++                    p.water_y = (SEA_LEVEL - 1).max(g.floor() as i32);
++                    p.bed_y = p.water_y - depth;
++                }
++            }
++        }
++        Some(p)
+     }
+ 
+     /// Cut this region's rivers and fill its lakes into chunk (cx, cz), `(x << 11) | (z << 7) | y`, after terrain and surface.
+@@ -1438,6 +1470,29 @@
+ 
+     /// A river on a terrace is not overwritten by a lower river whose bank reaches it: the lower network comes first, as the plate's own
+     /// does. Its bank used to take the upper channel's columns (cut or skipped), leaving no river or water standing on a cliff.
++    /// Two channels that overlap (a stream joining a river, at different levels) are one water: every column of the overlap has the same
++    /// surface whichever centre line is nearer, so there is no diagonal border of steps between them.
++    #[test]
++    fn overlapping_channels_share_one_water_level() {
++        let big = made_at(70.5, &[(-40.0, 0.0, 60.0, 0.0, 5.0)]);
++        let small = made_at(73.5, &[(10.0, -30.0, 10.0, 3.0, 2.0)]);
++        let reg = Region { nets: vec![Arc::new(big), Arc::new(small)] };
++        let low = reg.plan_at(40.0, 0.5).unwrap().water_y; // the big river alone
++        let mut seen = 0;
++        for xi in 0..20 {
++            for zi in 0..16 {
++                let (x, z) = (4.0 + xi as f64 * 0.7, -3.5 + zi as f64 * 0.5);
++                let p = reg.plan_at(x, z).unwrap();
++                let in_small = (x - 10.0).abs() <= 2.0 && z >= -30.0 && z <= 3.0;
++                if p.in_channel && in_small && z.abs() <= 5.0 {
++                    assert_eq!(p.water_y, low, "overlap column ({x}, {z}) stands at {} not {low}", p.water_y);
++                    seen += 1;
++                }
++            }
++        }
++        assert!(seen > 20, "the channels never overlapped in the test ({seen})");
++    }
++
+     #[test]
+     fn a_lower_river_does_not_overwrite_a_higher_one() {
+         let lower = Arc::new(made_at(66.5, &[(-40.0, 0.0, 60.0, 0.0, 4.0)]));
+diff -ruN a/mc-rs/src/world/lod.rs b/mc-rs/src/world/lod.rs
+--- a/mc-rs/src/world/lod.rs	2026-10-24 13:20:02.925508208 +0000
++++ b/mc-rs/src/world/lod.rs	2026-10-24 13:20:02.924332541 +0000
+@@ -285,7 +285,7 @@
+     sh: Arc<Shared>,
+ }
+ 
+-const MAGIC: [u8; 2] = *b"L7"; // L3 tiles were made with the b1.7.3 climate, L4 before the terrain followed it, L5 before the rivers, L6 before the rivers met level and ran long: another terrain, so they are made again
++const MAGIC: [u8; 2] = *b"L8"; // L7 before the overlapping channels shared one level, L3 tiles were made with the b1.7.3 climate, L4 before the terrain followed it, L5 before the rivers, L6 before the rivers met level and ran long: another terrain, so they are made again
+ 
+ fn tile_path(d: &Path, k: (i32, i32)) -> PathBuf {
+     d.join(format!("{}_{}.lod", k.0, k.1))

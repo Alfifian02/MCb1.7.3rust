@@ -215,6 +215,31 @@ impl Biome {
         }
     }
 
+    /// The colour of this biome's water (`r << 16 | g << 8 | b`): the values the game gave each biome's `water_color` (1.13 to 1.17 set).
+    /// Every biome has its own, so a river, a lake and the sea all take the tint of the land they lie in (`chunks::biome_tints` blends
+    /// it over the neighbouring columns, so a border is a gradient). b1.7.3 has one water colour for all; this is NOT from it.
+    /// UNVERIFIED: the numbers are from memory of the game's biome files (Blooming's six are picked by their nearest cousin), not read
+    /// from a file here; the biomes this world folds together (Savanna / Shrubland, Tundra, ...) take the nearest one of the game's.
+    pub fn water_color(self) -> u32 {
+        match self {
+            Biome::Rainforest | Biome::WetWoodland => 0x14A2C5, // jungle
+            Biome::Swamp => 0x617B64,
+            Biome::Marsh => 0x4C7F6A,
+            Biome::SeasonalForest => 0x3F76E4, // the game's default
+            Biome::Forest | Biome::OakWoodland => 0x1E97F2,
+            Biome::Savanna | Biome::Chaparral => 0x2C8B9C,
+            Biome::Shrubland => 0x3C9FB0,
+            Biome::Taiga | Biome::AutumnalForest => 0x287097,
+            Biome::Desert => 0x32A598,
+            Biome::Plains => 0x44AFF5,
+            Biome::Tundra => 0x3D57D6,
+            Biome::Ocean => 0x1787D4,
+            Biome::Beach => 0x157CAB,
+            Biome::Mountains => 0x007BF7,
+            Biome::SnowyBirchGrove => 0x5DB7EF, // cherry grove
+        }
+    }
+
     /// getBiomeFromLookup(temperature, humidity); both in [0, 1].
     #[cfg(test)]
     pub fn from_climate(temperature: f64, humidity: f64) -> Biome {
@@ -290,6 +315,19 @@ impl Biome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every biome of the world has a water colour of its own: no two share one, except the pairs that name the same cousin on purpose.
+    #[test]
+    fn every_biome_has_a_water_colour() {
+        let all = crate::world::atmos::ALL;
+        let mut seen: Vec<u32> = all.iter().map(|b| b.water_color()).collect();
+        assert!(seen.iter().all(|&c| c <= 0xFF_FF_FF && c != 0xFF_FF_FF), "white is `WHITE`, the untinted sentinel");
+        seen.sort_unstable();
+        seen.dedup();
+        assert!(seen.len() >= all.len() - 4, "{} colours for {} biomes", seen.len(), all.len());
+        assert_ne!(Biome::Swamp.water_color(), Biome::Plains.water_color());
+        assert_ne!(Biome::Desert.water_color(), Biome::Tundra.water_color());
+    }
 
     #[test]
     fn climate_corners() {

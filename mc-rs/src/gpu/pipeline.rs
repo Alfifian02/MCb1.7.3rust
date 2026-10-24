@@ -394,6 +394,12 @@ fn fs_cut_flat(in: VsOut) -> @location(0) vec4<f32> {
 // Translucent water: the texture's own alpha (b1.7.3 and the consoles: no depth absorption, no grazing reflection). A far terrain sheet
 // (`lod::SHEET_LIGHT`, `k >= 1000`) is the water beyond the real water's radius; the real water is inside it. Exact complements per pixel,
 // so there is never a hole or a double layer between them.
+// A biome's water: the tile keeps its own light and dark (its luminance against the tile's average, 0.1085 in linear light) and takes the
+// biome's colour (`tint`, linear). White (`WHITE`, no biome) leaves the tile as it is.
+fn water_rgb(c: vec3<f32>, tint: vec3<f32>) -> vec3<f32> {
+    if tint.r + tint.g + tint.b >= 2.99 { return c; }
+    return tint * (dot(c, vec3<f32>(0.2126, 0.7152, 0.0722)) / 0.1085);
+}
 @fragment
 fn fs_water(in: VsOut) -> @location(0) vec4<f32> {
     let dx = dpdx(in.wp);
@@ -410,7 +416,8 @@ fn fs_water(in: VsOut) -> @location(0) vec4<f32> {
         gy = gy * 16.0 / s;
     }
     var c = atlas_sample_g(uv, gx, gy);
-    if sheet { c = vec4<f32>(c.rgb * in.tint, c.a); } // white, but cyan in the LoD debug mode
+    // The LoD debug sheet (tile 1066) is multiplied by its cyan; every water (real or a sheet, tile 1205) takes its biome's colour.
+    if sheet && in.k < 1200.0 { c = vec4<f32>(c.rgb * in.tint, c.a); } else { c = vec4<f32>(water_rgb(c.rgb, in.tint), c.a); }
     return vec4<f32>(mix(to_working(c.rgb * in.lit * flat_shade(in.wp, dx, dy)), u.fog.rgb, in.fg), c.a);
 }
 "#;

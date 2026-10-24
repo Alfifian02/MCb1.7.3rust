@@ -90,8 +90,15 @@ const LOADS_PER_FRAME: usize = 8;
 /// The grass and foliage colour of every column of chunk (cx, cz) (`BlockGrass.colorMultiplier` and friends read the climate of the
 /// column itself, no blending). ponytail: the climate noise is sampled again for every (re)mesh; cache it per chunk if remeshing shows up in a profile.
 pub(crate) fn biome_tints(cm: &mut WorldChunkManager, cx: i32, cz: i32) -> mesh::Tints {
+    // Water: each column's colour is the mean of its biome's colour over the 7 x 7 columns round it (`WATER_BLEND` each way), read from
+    // an area padded by that much, so a river leaving one biome for the next shifts tint over a few blocks and never in a hard line,
+    // and the two chunks either side of a seam agree. (Read first: the call below leaves the climate maps for the chunk itself.)
+    const W: usize = 16 + 2 * WATER_BLEND as usize;
+    let pad: Vec<u32> = cm.load_block_generator_data(cx * 16 - WATER_BLEND, cz * 16 - WATER_BLEND, W, W).iter().map(|b| b.water_color()).collect();
+    let water = blend_water(&pad);
     let biomes = cm.load_block_generator_data(cx * 16, cz * 16, 16, 16);
     let mut t = mesh::Tints::white();
+    t.water = water;
     for i in 0..256 {
         let (temp, humid) = (cm.temperature[i], cm.humidity[i]);
         // The Blooming biomes have their own colours (the datapack's); every other biome reads the climate maps.
@@ -100,6 +107,32 @@ pub(crate) fn biome_tints(cm: &mut WorldChunkManager, cx: i32, cz: i32) -> mesh:
         t.foliage[i] = foliage as f32;
     }
     t
+}
+
+/// Columns each way a water colour is averaged over (7 x 7). ponytail: a box mean of the packed sRGB bytes, not of the linear light;
+/// a Gaussian or a linear-light mean is the upgrade if a border shows banding.
+const WATER_BLEND: i32 = 3;
+
+/// The packed water colours (`r << 16 | g << 8 | b`) of a chunk's 16 x 16 columns (`x * 16 + z`) from the colours of the area padded by
+/// `WATER_BLEND` on every side (`(16 + 2 * WATER_BLEND)` squared, index `x * W + z`): the mean over the box round each column.
+fn blend_water(pad: &[u32]) -> [f32; 256] {
+    let (r, w) = (WATER_BLEND as usize, 16 + 2 * WATER_BLEND as usize);
+    let n = (2 * r + 1) * (2 * r + 1);
+    std::array::from_fn(|i| {
+        let (x, z) = (i / 16 + r, i % 16 + r);
+        let mut sum = [0usize; 3];
+        for a in x - r..=x + r {
+            for b in z - r..=z + r {
+                let c = pad[a * w + b] as usize;
+                sum[0] += c >> 16 & 255;
+                sum[1] += c >> 8 & 255;
+                sum[2] += c & 255;
+            }
+        }
+        // Rounded; never 0xFFFFFF (that is the untinted `WHITE`), though no biome colour is near it.
+        let c = (((sum[0] + n / 2) / n) << 16 | ((sum[1] + n / 2) / n) << 8 | (sum[2] + n / 2) / n) as u32;
+        c.min(0xFF_FF_FE) as f32
+    })
 }
 
 /// The far terrain's columns of a loaded chunk.
@@ -1912,6 +1945,31 @@ impl Writer {
 
 #[cfg(test)]
 mod tests {
+    /// One biome all over is its own colour; two halves meet in a gradient that starts `WATER_BLEND` columns before the border and ends as
+    /// far after it, in between the two colours.
+    #[test]
+    fn water_colours_blend_across_a_border() {
+        let w = 16 + 2 * WATER_BLEND as usize;
+        let (a, b) = (0x3F76E4u32, 0x617B64u32);
+        let flat = blend_water(&vec![a; w * w]);
+        assert!(flat.iter().all(|&c| c == a as f32), "a uniform area keeps its colour");
+        // Chunk columns x < 8 are `a`, the rest `b` (the pad's x = 3 + 8).
+        let pad: Vec<u32> = (0..w * w).map(|i| if i / w < 8 + WATER_BLEND as usize { a } else { b }).collect();
+        let m = blend_water(&pad);
+        let at = |x: usize| m[x * 16 + 4] as u32;
+        assert_eq!(at(0), a, "far from the border");
+        assert_eq!(at(15), b, "far from the border");
+        let (lo, hi) = ((a >> 16 & 255).min(b >> 16 & 255), (a >> 16 & 255).max(b >> 16 & 255));
+        for x in 5..11 {
+            let r = at(x) >> 16 & 255;
+            assert!((lo..=hi).contains(&r), "column {x}: red {r} not between {lo} and {hi}");
+        }
+        assert!(at(7) != a && at(8) != b, "the gradient reaches both sides of the border");
+        for x in 0..15 {
+            assert!(at(x) >> 16 & 255 <= at(x + 1) >> 16 & 255, "red never turns back at column {x}");
+        }
+    }
+
     use super::*;
     use crate::world::chunk::VOLUME;
     use std::time::{Duration, Instant};

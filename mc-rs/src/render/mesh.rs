@@ -27,18 +27,22 @@ pub const WHITE: f32 = 16_777_215.0;
 pub struct Tints {
     pub grass: [f32; 256],
     pub foliage: [f32; 256],
+    /// The water colour of each column (`Biome::water_color`, blended over the neighbours): the fragment shaders recolour the water tile with it.
+    pub water: [f32; 256],
 }
 
 impl Tints {
     pub fn white() -> Self {
-        Self { grass: [WHITE; 256], foliage: [WHITE; 256] }
+        Self { grass: [WHITE; 256], foliage: [WHITE; 256], water: [WHITE; 256] }
     }
 }
 
-/// `Block.colorMultiplier` of the blocks that have one: grass top (the side overlay uses it too), tall grass (not the dead\n/// shrub, metadata 0), reeds, leaves (spruce / birch by metadata, else the foliage colour).
+/// `Block.colorMultiplier` of the blocks that have one (water: the biome's colour, which the water shaders use to recolour the tile, not
+/// multiply it; NOT b1.7.3): grass top (the side overlay uses it too), tall grass (not the dead\n/// shrub, metadata 0), reeds, leaves (spruce / birch by metadata, else the foliage colour).
 pub(crate) fn tint_of(t: &Tints, id: u8, meta: u8, col: usize) -> f32 {
     match id {
         2 | 83 => t.grass[col],
+        8 | 9 => t.water[col],
         31 if meta != 0 => t.grass[col],
         18 => match meta & 3 { 1 => climate::PINE as f32, 2 => climate::BIRCH as f32, _ => t.foliage[col] },
         _ => WHITE,
@@ -973,6 +977,21 @@ mod tests {
         assert!(v.chunks(6).any(|p| (p[0] - 6.0).abs() < 1e-5), "the bar of the first fence reaches the second");
         let (s, b) = ([0.0, 0.0, 0.0, 1.0, 1.0, 1.0f32], shapes(53, 1, &|_, _| false));
         assert!(b.1 == 2 && b.0[0] != s && !opaque(53) && !opaque(85) && !opaque(59));
+    }
+
+    /// Water carries its column's biome colour on every face, and a column with no tint stays white (the shaders keep the tile as it is).
+    #[test]
+    fn water_carries_the_biome_colour() {
+        let (mut c, z, a) = (vec![0u8; VOLUME], vec![0u8; VOLUME], vec![0xFFu8; VOLUME]);
+        c[idx(5, 64, 5)] = 9;
+        c[idx(9, 64, 9)] = 9;
+        let mut t = Tints::white();
+        t.water[5 * 16 + 5] = 0x617B64 as f32;
+        let e = Nibbles::new();
+        let (v, _, w) = build_split_tinted(false, &c, &e, [&e; 4], &a, [&z[..]; 4], [&a[..]; 4], 0, 0, 0, &t);
+        assert!(!w.is_empty(), "water goes to the water layer");
+        assert_eq!(v.chunks(VF).filter(|q| q[7] == 0x617B64 as f32).count(), 24, "all six faces of the swamp cell");
+        assert_eq!(v.chunks(VF).filter(|q| q[7] == WHITE).count(), 24, "the untinted cell keeps white");
     }
 
     /// Grass is one quad per face (the side's overlay is composited in the shader): its top and its 4 sides carry the column's grass

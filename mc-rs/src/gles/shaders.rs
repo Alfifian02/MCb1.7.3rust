@@ -242,6 +242,13 @@ vec4 frag(bool cut, float shade) {
     return vec4(mix(to_working(rgb * lit), fc, v_fg), cover);
 }
 
+// A biome's water: the tile keeps its own light and dark (its luminance against the tile's average, 0.1085 in linear light) and takes the
+// biome's colour (`v_tint`, linear). White (no biome) leaves the tile as it is. Twin of `water_rgb` in gpu/pipeline.rs.
+mediump vec3 water_rgb(mediump vec3 c, mediump vec3 tint) {
+    if (tint.r + tint.g + tint.b >= 2.99) { return c; }
+    return tint * (dot(c, vec3(0.2126, 0.7152, 0.0722)) / 0.1085);
+}
+
 void main() {
 #if defined(FS_SOLID)
     o_color = frag(false, 1.0);
@@ -267,7 +274,8 @@ void main() {
         gy = gy * 16.0 / SIZE;
     }
     mediump vec4 c = atlas_sample_g(uv, gx, gy);
-    if (sheet) { c = vec4(c.rgb * v_tint, c.a); }
+    // The LoD debug sheet (tile 1066) is multiplied by its cyan; every water (real or a sheet, tile 1205) takes its biome's colour.
+    if (sheet && v_k < 1200.0) { c = vec4(c.rgb * v_tint, c.a); } else { c = vec4(water_rgb(c.rgb, v_tint), c.a); }
     mediump vec3 fc = fog.rgb;
     o_color = vec4(mix(to_working(c.rgb * (v_lit * flat_shade(v_wp, dx, dy))), fc, v_fg), c.a);
 #endif
