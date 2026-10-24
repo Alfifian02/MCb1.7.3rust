@@ -1108,7 +1108,10 @@ impl ChunkManager {
     /// nothing when the chunk is not loaded.
     pub fn find_blocks(&self, cx: i32, cz: i32, ids: &[u8], mut f: impl FnMut(i32, i32, i32, u8)) {
         let Some(e) = self.chunks.get(&(cx, cz)) else { return };
-        for (i, &b) in e.blocks.iter().enumerate().filter(|(_, b)| ids.contains(b)) {
+        // One table read a block instead of a search of `ids` (this walks all 32768 cells, once a frame).
+        let mut want = [false; 256];
+        ids.iter().for_each(|&i| want[i as usize] = true);
+        for (i, &b) in e.blocks.iter().enumerate().filter(|(_, &b)| want[b as usize]) {
             f(cx * 16 + (i >> 11) as i32, (i & 127) as i32, cz * 16 + ((i >> 7) & 15) as i32, b);
         }
     }

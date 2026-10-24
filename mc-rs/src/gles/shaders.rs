@@ -4,7 +4,7 @@
 //! shader encodes), the scene target is `SRGB8_ALPHA8`. `tools/gles_check.py` compiles and draws every program on Mesa (`cargo test`
 //! does the same through `gles::tests` when an EGL driver exists).
 
-use crate::render::atlas;
+use crate::render::{atlas, look};
 
 const HEAD_V: &str = "#version 300 es\nprecision highp float;\nprecision highp int;\n";
 const HEAD_F: &str = "#version 300 es\nprecision highp float;\nprecision highp int;\nprecision highp sampler2D;\nprecision highp sampler2DArray;\n";
@@ -51,6 +51,7 @@ const CHUNK_COMMON: &str = r#"
 layout(std140) uniform U { mat4 vp; vec4 eye; vec4 fog; vec4 fogp; vec4 warm; vec4 cool; vec4 sun; vec4 fx; };
 // `render::look`: the extra exponent of the face shades (`warm.w`).
 float boost(float s) { return pow(s, 1.0 + warm.w); }
+float boosted(float s, float sb) { return warm.w > 0.0 ? sb : s; }
 float fog_factor(float d) {
     if (fog.w < 0.0) { return 1.0 - exp(fog.w * d); }
     if (fog.w == 0.0) { return 0.0; }
@@ -114,7 +115,9 @@ void main() {
     uint tile = w1 & 1023u;
     // Leaves (tiles 53, 133, 255) sway a little (`fx.z` blocks, 0 = off): a smooth function of the position, so shared corners move together.
     if (fx.z > 0.0 && (tile == 53u || tile == 133u || tile == 255u)) {
-        vpos += vec3(sin(fx.x * 1.3 + vpos.x * 0.9 + vpos.z * 0.6), 0.5 * sin(fx.x * 1.9 + vpos.y * 1.1 + vpos.x * 0.7), cos(fx.x * 1.1 + vpos.z * 0.8 + vpos.y * 0.5)) * fx.z;
+        float sx = sin(fx.x * 1.3 + vpos.x * 0.9 + vpos.z * 0.6);
+        float sz = cos(fx.x * 1.1 + vpos.z * 0.8 + vpos.y * 0.5);
+        vpos += vec3(sx, 0.25 * (sx - sz), sz) * fx.z;
     }
     v_tint = pow(vec3(float(w2 & 31u) / 31.0, float((w2 >> 5u) & 63u) / 63.0, float((w2 >> 11u) & 31u) / 31.0), vec3(2.2));
     v_lit = pow(brightness(float((w2 >> 16u) & 63u) / 60.0, float((w2 >> 22u) & 31u) / 30.0) * shade_of(w2 >> 27u), 2.2);
@@ -164,6 +167,10 @@ const vec2 SIZE = vec2(@AW@.0, @AH@.0);
 const float S_BOT = @SB@;
 const float S_Z = @SZ@;
 const float S_X = @SX@;
+// With Warm Light's extra exponent baked (`look::boosted`): `flat_shade` runs per pixel on the far terrain, a `pow` there is too dear.
+const float S_BOT_B = @SBB@;
+const float S_Z_B = @SZB@;
+const float S_X_B = @SXB@;
 // Rec. 709 -> XYZ -> Rec. 2020 folded into one matrix (the product of the two the wgpu path multiplies by), and run at half precision.
 const mat3 W709_TO_2020 = mat3(vec3(0.627425692, 0.329289106, 0.0433502375), vec3(0.0690274419, 0.91957858, 0.0113613785), vec3(0.0163664152, 0.0880288984, 0.895684319));
 mediump vec3 to_working(mediump vec3 c) { return c * W709_TO_2020; }
@@ -213,9 +220,9 @@ float flat_shade(vec3 wp, vec3 dx, vec3 dy) {
     vec3 c = cross(dx, dy);
     if (dot(c, c) < 1e-20) { return 1.0; }
     vec3 a = abs(c);
-    if (a.x >= a.y && a.x >= a.z) { return boost(S_X); }
-    if (a.y >= a.z) { return (c.y * dot(c, eye.xyz - wp) > 0.0) ? 1.0 : boost(S_BOT); }
-    return boost(S_Z);
+    if (a.x >= a.y && a.x >= a.z) { return boosted(S_X, S_X_B); }
+    if (a.y >= a.z) { return (c.y * dot(c, eye.xyz - wp) > 0.0) ? 1.0 : boosted(S_BOT, S_BOT_B); }
+    return boosted(S_Z, S_Z_B);
 }
 
 vec2 far_uv(vec2 uv, float k) {
@@ -307,12 +314,17 @@ void main() {
         a = mix(a, a * 0.82, t * fx.y);
     }
     mediump vec3 rgb = finish(col, v_lit * flat_shade(v_wp, dx, dy), v_fg);
-    vec3 n3 = cross(dx, dy);
-    if (sun.w > 0.0 && abs(n3.y) > 0.8 * length(n3)) {
-        vec3 n = normalize(vec3(0.06 * sin(v_wp.x * 2.3 + fx.x * 1.3) + 0.04 * sin(v_wp.z * 3.7 - fx.x * 0.9), 1.0, 0.06 * cos(v_wp.z * 2.1 + fx.x * 1.1) + 0.04 * cos(v_wp.x * 3.1 + fx.x * 0.8)));
-        float g = pow(max(dot(n, normalize(sun.xyz + v)), 0.0), 160.0) * sun.w * (1.0 - v_fg);
-        rgb += vec3(1.0, 0.95, 0.8) * g;
-        a = max(a, min(g, 1.0));
+    // The ripples tilt the normal by at most 0.1 in x and z, so a half vector with y <= 0.85 reaches 0.93 at best (0.93^160 < 1e-5): those
+    // pixels (nearly all of them) skip the trig, the normalize and the pow.
+    if (sun.w > 0.0) {
+        vec3 hv = normalize(sun.xyz + v);
+        vec3 n3 = cross(dx, dy);
+        if (hv.y > 0.85 && abs(n3.y) > 0.8 * length(n3)) {
+            vec3 n = normalize(vec3(0.06 * sin(v_wp.x * 2.3 + fx.x * 1.3) + 0.04 * sin(v_wp.z * 3.7 - fx.x * 0.9), 1.0, 0.06 * cos(v_wp.z * 2.1 + fx.x * 1.1) + 0.04 * cos(v_wp.x * 3.1 + fx.x * 0.8)));
+            float g = pow(max(dot(n, hv), 0.0), 160.0) * sun.w * (1.0 - v_fg);
+            rgb += vec3(1.0, 0.95, 0.8) * g;
+            a = max(a, min(g, 1.0));
+        }
     }
     o_color = vec4(rgb, a);
 #endif
@@ -371,6 +383,9 @@ fn splice(s: &str) -> String {
         .replace("@SB@", &format!("{:?}", 0.5f32.powf(2.2)))
         .replace("@SZ@", &format!("{:?}", 0.8f32.powf(2.2)))
         .replace("@SX@", &format!("{:?}", 0.6f32.powf(2.2)))
+        .replace("@SBB@", &format!("{:?}", look::boosted(0.5f32.powf(2.2))))
+        .replace("@SZB@", &format!("{:?}", look::boosted(0.8f32.powf(2.2))))
+        .replace("@SXB@", &format!("{:?}", look::boosted(0.6f32.powf(2.2))))
 }
 
 /// The chunk program `which`; `a2c`: the scene pass is multisampled and the cut-out layers write coverage.

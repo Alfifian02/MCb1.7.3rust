@@ -10,7 +10,7 @@ use glam::{Mat4, Vec3};
 use wgpu::{BindGroup, Buffer, BufferUsages, Device, Queue, RenderPipeline, Texture};
 use wgpu::util::DeviceExt;
 
-use crate::render::{atlas, look::Look, present::SCENE_FORMAT};
+use crate::render::{atlas, look::{self, Look}, present::SCENE_FORMAT};
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
@@ -143,6 +143,10 @@ const CHAR_Y: f32 = @CY@.0; // `atlas::CHAR_Y`: the player skin, read at mip 0 (
 const S_BOT: f32 = @SB@;
 const S_Z: f32 = @SZ@;
 const S_X: f32 = @SX@;
+// The same with Warm Light's extra exponent baked (`look::boosted`): `flat_shade` runs per pixel on the far terrain, a `pow` there is too dear.
+const S_BOT_B: f32 = @SBB@;
+const S_Z_B: f32 = @SZB@;
+const S_X_B: f32 = @SXB@;
 const R709_TO_XYZ = mat3x3<f32>(vec3<f32>(0.4124, 0.3576, 0.1805), vec3<f32>(0.2126, 0.7152, 0.0722), vec3<f32>(0.0193, 0.1192, 0.9505));
 const XYZ_TO_2020 = mat3x3<f32>(vec3<f32>(1.7166084, -0.3556621, -0.2533601), vec3<f32>(-0.6666829, 1.6164776, 0.0157685), vec3<f32>(0.0176422, -0.0427763, 0.94222867));
 fn to_working(c: vec3<f32>) -> vec3<f32> { return (c * R709_TO_XYZ) * XYZ_TO_2020; }
@@ -156,6 +160,7 @@ const AER = vec3<f32>(0.95, 0.99, 1.07);
 const WATER_DEEP = vec3<f32>(0.55, 0.65, 0.85);
 const WATER_SHALLOW = vec3<f32>(0.80, 1.15, 1.10);
 fn boost(s: f32) -> f32 { return pow(s, 1.0 + u.warm.w); }
+fn boosted(s: f32, sb: f32) -> f32 { return select(s, sb, u.warm.w > 0.0); }
 fn finish(rgb: vec3<f32>, lit: f32, fg: f32) -> vec3<f32> {
     let c = to_working(rgb * lit * mix(u.cool.rgb, u.warm.rgb, smoothstep(0.15, 0.7, lit)));
     return mix(c * mix(vec3<f32>(1.0), AER, fg * u.cool.w), u.fog.rgb, fg);
@@ -280,7 +285,9 @@ fn vs_chunk(@location(0) w: vec3<u32>) -> VsC {
     // Leaves (tiles 53, 133, 255) sway a little (`u.fx.z` blocks, 0 = off): a smooth function of the position, so shared corners move together.
     if u.fx.z > 0.0 && (tile == 53.0 || tile == 133.0 || tile == 255.0) {
         let t = u.fx.x;
-        vpos += vec3<f32>(sin(t * 1.3 + vpos.x * 0.9 + vpos.z * 0.6), 0.5 * sin(t * 1.9 + vpos.y * 1.1 + vpos.x * 0.7), cos(t * 1.1 + vpos.z * 0.8 + vpos.y * 0.5)) * u.fx.z;
+        let sx = sin(t * 1.3 + vpos.x * 0.9 + vpos.z * 0.6);
+        let sz = cos(t * 1.1 + vpos.z * 0.8 + vpos.y * 0.5);
+        vpos += vec3<f32>(sx, 0.25 * (sx - sz), sz) * u.fx.z;
     }
     o.pos = u.vp * vec4<f32>(vpos, 1.0);
     o.uv = chunk_texel(w) / 16.0;
@@ -314,9 +321,9 @@ fn flat_shade(wp: vec3<f32>, dx: vec3<f32>, dy: vec3<f32>) -> f32 {
     let c = cross(dx, dy);
     if dot(c, c) < 1e-20 { return 1.0; }
     let a = abs(c);
-    if a.x >= a.y && a.x >= a.z { return boost(S_X); }
-    if a.y >= a.z { return select(boost(S_BOT), 1.0, c.y * dot(c, u.eye.xyz - wp) > 0.0); }
-    return boost(S_Z);
+    if a.x >= a.y && a.x >= a.z { return boosted(S_X, S_X_B); }
+    if a.y >= a.z { return select(boosted(S_BOT, S_BOT_B), 1.0, c.y * dot(c, u.eye.xyz - wp) > 0.0); }
+    return boosted(S_Z, S_Z_B);
 }
 
 // Far terrain (`world::lod`, `k >= 1000`) and its water sheet: the quad's uv is in BLOCKS, v up, and `k - 1000` is its terrain tile. The
@@ -466,13 +473,18 @@ fn fs_water(in: VsOut) -> @location(0) vec4<f32> {
     }
     var rgb = finish(col, in.lit * flat_shade(in.wp, dx, dy), in.fg);
     // Sun (moon) glint on the tops: a Blinn highlight on a slightly rippled surface; `u.sun.w` = 0 skips it.
-    let n3 = cross(dx, dy);
-    if u.sun.w > 0.0 && abs(n3.y) > 0.8 * length(n3) {
-        let t = u.fx.x;
-        let n = normalize(vec3<f32>(0.06 * sin(in.wp.x * 2.3 + t * 1.3) + 0.04 * sin(in.wp.z * 3.7 - t * 0.9), 1.0, 0.06 * cos(in.wp.z * 2.1 + t * 1.1) + 0.04 * cos(in.wp.x * 3.1 + t * 0.8)));
-        let g = pow(max(dot(n, normalize(u.sun.xyz + v)), 0.0), 160.0) * u.sun.w * (1.0 - in.fg);
-        rgb += vec3<f32>(1.0, 0.95, 0.8) * g;
-        a = max(a, min(g, 1.0));
+    // The ripples tilt the normal by at most 0.1 in x and z, so a half vector with y <= 0.85 reaches 0.93 at best (0.93^160 < 1e-5): those
+    // pixels (nearly all of them) skip the trig, the normalize and the pow.
+    if u.sun.w > 0.0 {
+        let hv = normalize(u.sun.xyz + v);
+        let n3 = cross(dx, dy);
+        if hv.y > 0.85 && abs(n3.y) > 0.8 * length(n3) {
+            let t = u.fx.x;
+            let n = normalize(vec3<f32>(0.06 * sin(in.wp.x * 2.3 + t * 1.3) + 0.04 * sin(in.wp.z * 3.7 - t * 0.9), 1.0, 0.06 * cos(in.wp.z * 2.1 + t * 1.1) + 0.04 * cos(in.wp.x * 3.1 + t * 0.8)));
+            let g = pow(max(dot(n, hv), 0.0), 160.0) * u.sun.w * (1.0 - in.fg);
+            rgb += vec3<f32>(1.0, 0.95, 0.8) * g;
+            a = max(a, min(g, 1.0));
+        }
     }
     return vec4<f32>(rgb, a);
 }
@@ -507,6 +519,9 @@ fn shader_source_with(a2c: bool) -> String {
         .replace("@SB@", &format!("{:?}", 0.5f32.powf(2.2)))
         .replace("@SZ@", &format!("{:?}", 0.8f32.powf(2.2)))
         .replace("@SX@", &format!("{:?}", 0.6f32.powf(2.2)))
+        .replace("@SBB@", &format!("{:?}", look::boosted(0.5f32.powf(2.2))))
+        .replace("@SZB@", &format!("{:?}", look::boosted(0.8f32.powf(2.2))))
+        .replace("@SXB@", &format!("{:?}", look::boosted(0.6f32.powf(2.2))))
 }
 
 /// Source alpha x colour added to the frame: the halos' blend (the alpha channel is unused).

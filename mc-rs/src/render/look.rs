@@ -29,6 +29,11 @@ const DAY_COOL: [f32; 3] = [0.96, 0.985, 1.04];
 const DUSK_COOL: [f32; 3] = [0.90, 0.96, 1.09];
 /// Extra exponent of the face shades (1 + this): the sides and the underside of a block sink a little deeper.
 const FACE_BOOST: f32 = 0.10;
+/// A face shade as the shaders see it with Warm Light on: `s` to the power 1 + `FACE_BOOST`. The far terrain's `flat_shade` takes its three
+/// constants from here (`@SXB@`...) instead of a `pow` per pixel; `Look::new` sets `warm[3]` to `FACE_BOOST` or 0, nothing between.
+pub fn boosted(s: f32) -> f32 {
+    s.powf(1.0 + FACE_BOOST)
+}
 /// How much of the distance tint the fog factor brings (`AER` in the shaders), 0..1.
 const AERIAL: f32 = 1.0;
 /// The water's pull towards its turquoise / deep blue, and the glint's brightness (sun; the moon's is `MOON_GLINT` of it).
@@ -38,7 +43,7 @@ const MOON_GLINT: f32 = 0.25;
 /// Leaf sway, blocks: low / on.
 const SWAY: [f32; 3] = [0.0, 0.025, 0.04];
 /// Motes alive at once: off / low / on.
-const MOTE_CAP: [usize; 3] = [0, 10, 24];
+const MOTE_CAP: [usize; 3] = [0, 6, 14];
 
 /// What the player chose (`Settings::look`, `look_*:` lines of options.txt).
 #[derive(Clone, Debug, PartialEq)]
@@ -160,12 +165,12 @@ impl Look {
 
 // ---- Sprites: soft additive discs (halos and motes), one pipeline in each renderer (`fs_glow`) ----
 
-/// Quads a frame can hold: the buffers' size.
-pub const MAX_QUADS: usize = 80;
-/// Halos drawn at once (the nearest).
-const MAX_GLOW: usize = 36;
+/// Quads a frame can hold: the buffers' size (`MAX_GLOW` halos + the sun's + the most motes alive: 16 + 1 + 14).
+pub const MAX_QUADS: usize = 40;
+/// Halos drawn at once (the nearest): each is a quad of up to 3.4 blocks blended over the frame, so this is the fill-rate cap.
+const MAX_GLOW: usize = 16;
 /// Halos fade out between these distances, blocks.
-const GLOW_FADE: (f32, f32) = (24.0, 40.0);
+const GLOW_FADE: (f32, f32) = (16.0, 28.0);
 
 /// A soft disc facing the camera. `nofog`: the sun's, drawn at the far plane where the fog would erase it.
 #[derive(Copy, Clone, Debug)]
@@ -263,8 +268,12 @@ fn halo(id: u8) -> ([f32; 3], f32, f32, f32) {
 /// towards the eye so a wall behind a torch does not cut it in half.
 pub fn halos(scan: &Scan, eye: Vec3, out: &mut Vec<Quad>) {
     let mut near: Vec<(f32, [i32; 4])> = scan.cells().filter(|c| !is_flower(c[3])).map(|c| ((Vec3::new(c[0] as f32 + 0.5, c[1] as f32 + 0.5, c[2] as f32 + 0.5) - eye).length_squared(), c)).filter(|(d, _)| *d < GLOW_FADE.1 * GLOW_FADE.1).collect();
-    near.sort_by(|a, b| a.0.total_cmp(&b.0));
-    for (d2, c) in near.into_iter().take(MAX_GLOW) {
+    if near.len() > MAX_GLOW {
+        // The nearest MAX_GLOW in any order (the blend is additive, so the draw order does not matter): no full sort.
+        near.select_nth_unstable_by(MAX_GLOW, |a, b| a.0.total_cmp(&b.0));
+        near.truncate(MAX_GLOW);
+    }
+    for (d2, c) in near {
         let (rgb, half, a, up) = halo(c[3] as u8);
         let centre = Vec3::new(c[0] as f32 + 0.5, c[1] as f32 + up, c[2] as f32 + 0.5);
         let to_eye = eye - centre;
@@ -464,6 +473,21 @@ mod tests {
         assert_eq!((n.warm, n.cool, n.rays, n.glow), (Look::OFF.warm, Look::OFF.cool, false, false));
     }
 
+    /// `warm[3]` is `FACE_BOOST` or 0, which is all the far terrain's baked shade constants (`boosted`) can express.
+    #[test]
+    fn the_face_boost_is_all_or_nothing() {
+        let c = LookCfg::default();
+        let mut w = env(0.5);
+        assert_eq!(Look::new(&c, &w).warm[3], FACE_BOOST);
+        assert_eq!(Look::new(&LookCfg { warm: false, ..c.clone() }, &w).warm[3], 0.0);
+        w.underwater = true;
+        assert_eq!(Look::new(&c, &w).warm[3], 0.0);
+        w.underwater = false;
+        w.nether = true;
+        assert_eq!(Look::new(&c, &w).warm[3], 0.0);
+        assert!((boosted(0.5) - 0.5f32.powf(1.1)).abs() < 1e-6);
+    }
+
     /// The glint needs the sun (or moon) above the horizon and dry weather; under water nothing but the grade is left.
     #[test]
     fn glint_and_underwater() {
@@ -505,7 +529,8 @@ mod tests {
         s.absorb((-1, 0), (0, 0), (0..16).map(|i| [-16 + i, 70, 3, 11]));
         let mut out = Vec::new();
         halos(&s, Vec3::new(8.0, 70.0, 8.0), &mut out);
-        assert!(!out.is_empty() && out.len() <= MAX_GLOW);
+        assert_eq!(out.len(), MAX_GLOW);
+        assert!(out.iter().all(|q| q.half == 1.5), "48 emitters in reach: the nearest 16 are the glowstones (no full sort needed)");
         let mut far = Vec::new();
         halos(&s, Vec3::new(500.0, 70.0, 8.0), &mut far);
         assert!(far.is_empty(), "nothing within reach");
