@@ -9,8 +9,11 @@
 /// The mod asks `movementForward >= 0.8` with a keyboard's 1.0. mc-rs normalises the d-pad's diagonals to 0.707, so 0.7 is "forward held"
 /// for an arrow, a corner and a stick pushed up.
 pub const FWD_MIN: f32 = 0.7;
-/// `sprintStartTicks`: a second press of forward within 7 ticks (0.35 s) of the first starts the sprint.
+/// `sprintStartTicks`: a second press of forward within 7 ticks (0.35 s) of the first tap's release starts the sprint.
 pub const WINDOW: u8 = 7;
+/// A tap is a press of at most this many ticks (0.2 s). The mod arms the window on ANY first press, so walking a few steps, stopping and
+/// walking again sprinted; here a press held longer than a tap is a walk and arms nothing (a finger tap or a click is 2..3 ticks).
+pub const TAP: u8 = 4;
 /// `setSprinting(true)` arms `ticksSinceSprintingChanged` = 600: a sprint ends by itself after 30 s (press again to go on).
 pub const LIMIT: u16 = 600;
 /// `GameRendererMixinCaptureVar.method_1305`: the field of view x 1.15 while sprinting; it follows by half the gap each tick.
@@ -48,8 +51,10 @@ pub struct Sprint {
     on: bool,
     /// Ticks left of the 30 s (`ticksSinceSprintingChanged`).
     left: u16,
-    /// `sprintStartTicks`.
+    /// `sprintStartTicks`: ticks left to press again after a tap's release (0 = not armed).
     start: u8,
+    /// Ticks the current forward press has been held (saturating).
+    held: u8,
     /// `prevMovementForward`.
     prev: f32,
     /// The forward push in m/s: `ADD` while it runs, more after a jump, back to `ADD` by the drag.
@@ -61,7 +66,7 @@ pub struct Sprint {
 impl Default for Sprint {
     /// The mod's `movementFovMultiplier` starts at 0 (the view pops in on the first frame); this one starts at 1.
     fn default() -> Self {
-        Self { on: false, left: 0, start: 0, prev: 0.0, extra: 0.0, fov: 1.0 }
+        Self { on: false, left: 0, start: 0, held: 0, prev: 0.0, extra: 0.0, fov: 1.0 }
     }
 }
 
@@ -93,12 +98,15 @@ impl Sprint {
         let forward = i.fwd >= FWD_MIN;
         // `bl3`: forward went down and up again (the press edge).
         let pressed = self.prev < FWD_MIN && forward;
+        // Releasing a TAP opens the window for the second press; releasing a walk (held longer) closes it.
+        if self.prev >= FWD_MIN && !forward {
+            self.start = if self.held <= TAP { WINDOW } else { 0 };
+        }
+        self.held = if pressed { 1 } else if forward { self.held.saturating_add(1) } else { 0 };
         if i.can && i.ground && forward && !self.on {
             if i.key {
                 self.set(true);
-            } else if self.start == 0 {
-                self.start = WINDOW;
-            } else if pressed {
+            } else if pressed && self.start > 0 {
                 self.set(true);
                 self.start = 0;
             }
@@ -158,22 +166,34 @@ mod tests {
         assert!((ADD - 1.54).abs() < 0.01 && JUMP == 4.0 && KNOCK == 24.0 && KNOCK_UP == 2.0);
     }
 
-    /// A second press within 7 ticks sprints; one held press, however long, never does; a late second press only arms again.
+    /// A tap, then a second press within 7 ticks of its release sprints; one held press never does; a late second press only starts over;
+    /// and walking a few steps, stopping and walking again (the first press held longer than a tap) is no double tap.
     #[test]
-    fn double_tap_starts_a_sprint_and_a_hold_does_not() {
+    fn double_tap_starts_a_sprint_and_a_hold_or_a_walk_does_not() {
         let mut s = Sprint::default();
         run(&mut s, &[GO, STILL, GO]);
         assert!(s.on(), "tap, release, tap");
         let mut s = Sprint::default();
+        run(&mut s, &[GO; TAP as usize]);
+        run(&mut s, &[STILL; 3]);
+        run(&mut s, &[GO]);
+        assert!(s.on(), "a tap of the longest length and a gap of 3 ticks");
+        let mut s = Sprint::default();
         run(&mut s, &[GO; 100]);
         assert!(!s.on(), "holding forward is no double tap");
+        let mut s = Sprint::default();
+        run(&mut s, &[GO; TAP as usize + 1]);
+        run(&mut s, &[STILL, GO]);
+        assert!(!s.on(), "walk, stop, walk: the first press was longer than a tap");
+        run(&mut s, &[STILL, GO, STILL, GO]);
+        assert!(s.on(), "but a real double tap after it still works");
         let mut s = Sprint::default();
         run(&mut s, &[GO]);
         run(&mut s, &[STILL; 10]);
         run(&mut s, &[GO]);
         assert!(!s.on(), "the second press came after the window");
         run(&mut s, &[STILL, GO]);
-        assert!(s.on(), "but that press armed a new window");
+        assert!(s.on(), "but that press was a tap and armed a new window");
     }
 
     /// The key sprints at once; only on the ground; and a sprint needs `can`.

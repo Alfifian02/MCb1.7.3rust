@@ -1,0 +1,118 @@
+--- a/README.md	2026-10-24 04:42:10.273414063 +0000
++++ b/README.md	2026-10-24 04:42:58.120560446 +0000
+@@ -68,7 +68,7 @@
+ | M14 player model     | written without a toolchain: not compiled, not run (+3 tests in `player.rs`, +1 in `touch_ui.rs`) | `render/player.rs`: b1.7.3 `ModelBiped` + `mob/char.png` with walk / sneak / riding / arm-swing animation, in the third-person view (new view button) and as the inventory preview. No armor, ears, cloak or hurt flash. See ROADMAP changelog. |
+ | Debug screen (Info) | type-checked for aarch64-linux-android (`cargo check --lib --tests`), not run (+2 tests in `render/debug.rs`, 2 extended in `options.rs`) | `render/debug.rs`: two translucent panels in the GUI scale for screenshots (left: position, chunk, facing, biome, light, time, aimed block; right: FPS, frame time, screen and scene size with the scene scale, Dynamic Res, MSAA, Post, renderer, graphics and smooth lighting, Performance, render distance, chunks, LoD). Pause menu button `Info: on/off` (`debugScreen` in `options.txt`); while on it replaces the FPS counter and the LoD debug title. See the rendering changelog. |
+ | Audio (M9)           | written without a toolchain: not compiled, not run (+3 tests in `audio/`) | `audio/`: `SoundManager` / `SoundPool`. All 194 effects (80 `SoundPool` keys: `step.*`, `mob.*`, `random.*`, `note.*`, `ambient.*`, `liquid.*`, `fire.*`, `portal.*`, `tile.piston.*`, `damage.*`), 12 music tracks and records 13 / cat are embedded from the b1.7.3 asset index (`tools/gen_sounds.py` -> `assets/sound/`, `audio/table.rs`). Software mixer (pitch by resampling, linear distance gain, pan), lewton decoder, AAudio output via `ndk`; music on a stream thread, one random track 10-20 min apart. Wired: Music / Sound options, footsteps, block break sound (`Block.stepSound`, table read from `Block.java`), note blocks, jukebox records. Not wired yet: every other `playSoundEffect` call of the Java (mobs, hurt, doors, buttons, fire, water, explosions, rain, thunder, cave ambience, pistons, portal). The 12 `streaming/*.mus` files are not b1.7.3 and are left out. |
+-| Sprint (Retro Sprint port) | written without a toolchain: not compiled, not run (+10 tests: 8 in `world/sprint.rs`, 1 in `mobs.rs`, 1 in `gamepad.rs`) | `world/sprint.rs`: periut's Retro Sprint (b1.7.3 mixins), read from its sources. Double tap forward within 7 ticks (touch d-pad arrow, a corner, or the stick pushed up) or hold L3 on the pad; sprinting adds 0.035 blocks/tick along the facing (x1.35 of the walk), a jump adds 0.2 blocks/tick, the field of view x1.15 (eased), a hit shoves the target 1.2 blocks/tick and ends the sprint, specks of the block below fly while it runs. Ends on releasing forward / sneaking, a wall, water, riding, sleeping or after 30 s. See the gameplay changelog. |
++| Sprint (Retro Sprint port) | written without a toolchain: not compiled, not run (+10 tests: 8 in `world/sprint.rs`, 1 in `mobs.rs`, 1 in `gamepad.rs`) | `world/sprint.rs`: periut's Retro Sprint (b1.7.3 mixins), read from its sources. Double tap forward (touch d-pad arrow, a corner, or the stick pushed up): a tap of at most 4 ticks, then a second press within 7 ticks of its release; a longer press is a walk and never sprints or hold L3 on the pad; sprinting adds 0.035 blocks/tick along the facing (x1.35 of the walk), a jump adds 0.2 blocks/tick, the field of view x1.15 (eased), a hit shoves the target 1.2 blocks/tick and ends the sprint, specks of the block below fly while it runs. Ends on releasing forward / sneaking, a wall, water, riding, sleeping or after 30 s. See the gameplay changelog. |
+ | Stamina (Stamina port) | written without a full toolchain: type-checked and `stamina::tests::*` (5) + `vitals::tests::damage_like_java` run in a Linux scratch crate; the HUD and `lib.rs` wiring not run on a device | `world/stamina.rs`: insane96mcp's Stamina (NeoForge 26.1.2), read from its sources, its default numbers. 200 stamina (10 per health point, armor -2.5% a point); a sprint costs 1 a tick (x0.8 out of combat, 15 s after a hit dealt or taken), a jump 10; empty = locked: no sprinting until it regenerates (2 a tick, x0.6 while locked) to 40%; at 20% health the bar is emptied and locked; locked walks x0.9, sprinting under 40 / 20% x0.85 more. HUD: grey half-heart overlay on the hearts it no longer covers (darker while locked), `Stamina` row in the debug screen. Not ported: Vigour / Curse of Weariness, the Vigour effect, swimming, mining cost, hunger spend, the command, the sync, the config. See the gameplay changelog. |
+ | M14                  | pending | Menus (part 1: title, world list, create world; see above), options, chat, real mob models, player armor: see [`roadmap/gameplay.md`](roadmap/gameplay.md). M10 multiplayer and M13 optimization are out of scope on purpose. |
+ 
+--- a/mc-rs/src/world/sprint.rs	2026-10-24 04:42:14.436373891 +0000
++++ b/mc-rs/src/world/sprint.rs	2026-10-24 04:42:24.295124727 +0000
+@@ -9,8 +9,11 @@
+ /// The mod asks `movementForward >= 0.8` with a keyboard's 1.0. mc-rs normalises the d-pad's diagonals to 0.707, so 0.7 is "forward held"
+ /// for an arrow, a corner and a stick pushed up.
+ pub const FWD_MIN: f32 = 0.7;
+-/// `sprintStartTicks`: a second press of forward within 7 ticks (0.35 s) of the first starts the sprint.
++/// `sprintStartTicks`: a second press of forward within 7 ticks (0.35 s) of the first tap's release starts the sprint.
+ pub const WINDOW: u8 = 7;
++/// A tap is a press of at most this many ticks (0.2 s). The mod arms the window on ANY first press, so walking a few steps, stopping and
++/// walking again sprinted; here a press held longer than a tap is a walk and arms nothing (a finger tap or a click is 2..3 ticks).
++pub const TAP: u8 = 4;
+ /// `setSprinting(true)` arms `ticksSinceSprintingChanged` = 600: a sprint ends by itself after 30 s (press again to go on).
+ pub const LIMIT: u16 = 600;
+ /// `GameRendererMixinCaptureVar.method_1305`: the field of view x 1.15 while sprinting; it follows by half the gap each tick.
+@@ -48,8 +51,10 @@
+     on: bool,
+     /// Ticks left of the 30 s (`ticksSinceSprintingChanged`).
+     left: u16,
+-    /// `sprintStartTicks`.
++    /// `sprintStartTicks`: ticks left to press again after a tap's release (0 = not armed).
+     start: u8,
++    /// Ticks the current forward press has been held (saturating).
++    held: u8,
+     /// `prevMovementForward`.
+     prev: f32,
+     /// The forward push in m/s: `ADD` while it runs, more after a jump, back to `ADD` by the drag.
+@@ -61,7 +66,7 @@
+ impl Default for Sprint {
+     /// The mod's `movementFovMultiplier` starts at 0 (the view pops in on the first frame); this one starts at 1.
+     fn default() -> Self {
+-        Self { on: false, left: 0, start: 0, prev: 0.0, extra: 0.0, fov: 1.0 }
++        Self { on: false, left: 0, start: 0, held: 0, prev: 0.0, extra: 0.0, fov: 1.0 }
+     }
+ }
+ 
+@@ -93,12 +98,15 @@
+         let forward = i.fwd >= FWD_MIN;
+         // `bl3`: forward went down and up again (the press edge).
+         let pressed = self.prev < FWD_MIN && forward;
++        // Releasing a TAP opens the window for the second press; releasing a walk (held longer) closes it.
++        if self.prev >= FWD_MIN && !forward {
++            self.start = if self.held <= TAP { WINDOW } else { 0 };
++        }
++        self.held = if pressed { 1 } else if forward { self.held.saturating_add(1) } else { 0 };
+         if i.can && i.ground && forward && !self.on {
+             if i.key {
+                 self.set(true);
+-            } else if self.start == 0 {
+-                self.start = WINDOW;
+-            } else if pressed {
++            } else if pressed && self.start > 0 {
+                 self.set(true);
+                 self.start = 0;
+             }
+@@ -158,22 +166,34 @@
+         assert!((ADD - 1.54).abs() < 0.01 && JUMP == 4.0 && KNOCK == 24.0 && KNOCK_UP == 2.0);
+     }
+ 
+-    /// A second press within 7 ticks sprints; one held press, however long, never does; a late second press only arms again.
++    /// A tap, then a second press within 7 ticks of its release sprints; one held press never does; a late second press only starts over;
++    /// and walking a few steps, stopping and walking again (the first press held longer than a tap) is no double tap.
+     #[test]
+-    fn double_tap_starts_a_sprint_and_a_hold_does_not() {
++    fn double_tap_starts_a_sprint_and_a_hold_or_a_walk_does_not() {
+         let mut s = Sprint::default();
+         run(&mut s, &[GO, STILL, GO]);
+         assert!(s.on(), "tap, release, tap");
+         let mut s = Sprint::default();
++        run(&mut s, &[GO; TAP as usize]);
++        run(&mut s, &[STILL; 3]);
++        run(&mut s, &[GO]);
++        assert!(s.on(), "a tap of the longest length and a gap of 3 ticks");
++        let mut s = Sprint::default();
+         run(&mut s, &[GO; 100]);
+         assert!(!s.on(), "holding forward is no double tap");
+         let mut s = Sprint::default();
++        run(&mut s, &[GO; TAP as usize + 1]);
++        run(&mut s, &[STILL, GO]);
++        assert!(!s.on(), "walk, stop, walk: the first press was longer than a tap");
++        run(&mut s, &[STILL, GO, STILL, GO]);
++        assert!(s.on(), "but a real double tap after it still works");
++        let mut s = Sprint::default();
+         run(&mut s, &[GO]);
+         run(&mut s, &[STILL; 10]);
+         run(&mut s, &[GO]);
+         assert!(!s.on(), "the second press came after the window");
+         run(&mut s, &[STILL, GO]);
+-        assert!(s.on(), "but that press armed a new window");
++        assert!(s.on(), "but that press was a tap and armed a new window");
+     }
+ 
+     /// The key sprints at once; only on the ground; and a sprint needs `can`.
+--- a/roadmap/gameplay.md	2026-10-24 04:42:14.437697277 +0000
++++ b/roadmap/gameplay.md	2026-10-24 04:42:58.119891464 +0000
+@@ -4,6 +4,11 @@
+ 
+ ## Changelog
+ 
++- 2026-10-24 (3): FIX, sprint started on walk, stop, walk (player: it must be a double tap of forward, not a quick walk-stop-walk). Tested standalone (`sprint.rs` is std-only; rustc 1.75): its 8 tests pass; the rest of mc-rs not compiled, not run, not checked on a device.
++    - Cause (`Sprint::tick`): Retro Sprint arms its 7 tick window on ANY first press of forward (`sprintStartTicks == 0` -> 7), however long it is held, so a few steps, a stop and a new press inside the window sprinted. The mod's keyboard has no such case worth a name; a d-pad walk does.
++    - Fix: a press only counts as the first tap if it is released within `sprint::TAP` ticks (4 = 0.2 s; a finger tap or a click is 2..3). Releasing a tap arms `WINDOW` (7 ticks, now counted from the release, not the first press, so tap + gap are separate); releasing a longer press (a walk) disarms it. The second press of a window sprints as before; the key / L3 still sprints at once; every other rule (ground, `can`, wall, water, 30 s) is unchanged. New field `Sprint.held`. `lib.rs` is untouched.
++    - Test `double_tap_starts_a_sprint_and_a_hold_or_a_walk_does_not` (replaces `double_tap_starts_a_sprint_and_a_hold_does_not`): tap-release-tap, a tap of exactly `TAP` ticks with a 3 tick gap, a hold of 100, walk (`TAP + 1`) stop walk (no sprint, and a real double tap right after still works), a late second press.
++    - ponytail: `TAP` and `WINDOW` are the two knobs (raise `TAP` to 6 if a slow tap on the d-pad does not register, lower it to 3 if a short step still sprints); a stick flicked up, back and up again counts the same way. UNVERIFIED on a device: the feel of both numbers.
+ - 2026-10-24 (2): stamina on the sprint, a port of Stamina (insane96mcp, NeoForge 26.1.2; `Stamina-26_1_2.zip`, read: `StaminaFeature` (tick, jump, slowdown), `StaminaHandler`, `StaminaFeatureClient` (overlay, debug entry), `IStaminaModifier`, the changelog, `en_us.json`, the two overlay textures; the enchantments, the Vigour effect, runes, data-pack conditions, command, network sync and Mobs Properties Randomness hooks have no counterpart here) (written WITHOUT a full toolchain: `world/stamina.rs` and `vitals.rs` were type-checked and their tests run in a Linux scratch crate (6 pass); the whole crate does not build on a host (`ndk-sys` is Android only), so the `lib.rs` and `hud.rs` edits are NOT compiled; +5 tests `stamina::tests::*`, +2 asserts in `vitals::tests::damage_like_java`, the `STAMINA` sprite in `hud::tests::gui_sheet_has_the_sprites`; run `cargo test --lib --release -- stamina vitals hud` first).
+     - `world/stamina.rs` (new, pure): `Stamina::tick` is `onPlayerTick` once per 20 Hz tick, with the mod's defaults. Full = 200 (10 per health point), x(1 - 0.025 per armor point), x health / 20 as the health falls. A sprint costs 1 a tick (x0.8 when not hit or hurt in the last 300 ticks), a jump 10; the bar at 0 locks (`consumeStamina`, jump included). Not sprinting it regenerates 2 a tick (x0.6 locked, x(1 - 0.025 armor)); the lock opens when the stamina of the tick before is 40% of the maximum; at 20% health or less the bar is emptied and locked and does not regenerate. `speed`: x0.9 while locked, x0.85 more while sprinting on under 40 or under 20% (`ADD_MULTIPLIED_TOTAL`, they multiply). `halves(health)` = the hearts overlay's `ceil(stamina / (max / health))`.
+     - `Vitals.stamina`: health and armor are its maximum, `Vitals::hurt` marks combat (the mod's `LivingDamageEvent.Post` for any damage, falls and lava too), and every `Vitals::default()` (respawn, new world) fills it, as the mod's respawn does.
