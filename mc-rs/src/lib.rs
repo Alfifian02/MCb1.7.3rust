@@ -141,6 +141,8 @@ struct App {
     /// `weather_ticks` counts the whole ticks the weather has run, so it catches up to `world_ticks` one tick at a time.
     weather: sky::Weather,
     weather_ticks: u64,
+    /// The biome's sky, fog, haze, clouds and stars, eased in real time (`world::atmos`).
+    atmos: world::atmos::Atmos,
     /// Water particles, lightning and the dungeon spawners (`world::effects`).
     fx: Effects,
     /// The player's box touched water last frame (`Entity.inWater`): a splash on entry.
@@ -274,6 +276,7 @@ impl App {
             world_ticks: 0.0,
             weather: sky::Weather::new(seed),
             weather_ticks: 0,
+            atmos: world::atmos::Atmos::new(),
             fx: Effects::new(seed),
             was_in_water: false,
             sneak_y: 0.0,
@@ -484,6 +487,7 @@ impl App {
         self.camera = FirstPersonCamera::spawn_at(s.x, s.y + EYE_HEIGHT, s.z);
         self.camera.aspect = aspect;
         (self.world_ticks, self.weather_ticks, self.weather) = (0.0, 0, sky::Weather::new(seed));
+        self.atmos.reset();
         self.fx = Effects::new(seed);
         self.sprint = Sprint::default();
         (self.tip, self.dig, self.dig_acc, self.target) = ((0, 0.0), Dig::default(), 0.0, None);
@@ -2044,12 +2048,20 @@ impl App {
         // Sky and fog colour from the sun angle, the weather and the climate under the player; the frame is cleared to the fog colour and
         // the sky pass is drawn over it (vanilla order).
         let (px, pz) = (self.camera.pos.x.floor() as i32, self.camera.pos.z.floor() as i32);
-        let temp = self.chunks.temperature_at(px, pz) as f32;
         let partial = self.world_ticks.fract() as f32;
         let angle = sky::celestial_angle(self.world_ticks as u64, partial);
         let (rain, thunder) = if self.nether { (0.0, 0.0) } else { (self.weather.rain(partial), self.weather.thunder(partial)) };
         let hell = [0.2, 0.03, 0.03]; // `WorldProviderHell.func_4096_a`
-        let sky_rgb = if self.nether { hell } else { sky::sky_color(angle, temp, rain, thunder) };
+        // The biome's look (`world::atmos`): 9 columns around the player, eased over seconds; in the Nether the next overworld frame jumps.
+        let atm = if self.nether {
+            self.atmos.reset();
+            world::atmos::Frame::OFF
+        } else {
+            let (chunks, dt) = (&mut self.chunks, Instant::now().duration_since(self.frame_prev).as_secs_f32().min(0.25));
+            self.atmos.update(dt, (px, pz), |x, z| chunks.climate_at(x, z).0);
+            self.atmos.frame(angle, rain, thunder)
+        };
+        let sky_rgb = if self.nether { hell } else { atm.sky };
         let e = self.camera.pos;
         let eye_in_water = matches!(self.chunks.block_loaded(e.x.floor() as i32, e.y.floor() as i32, e.z.floor() as i32), Some(8 | 9));
         let fresh = self.chunks.take_ingest(); // drained in the Nether too (no LoD there)
@@ -2060,7 +2072,7 @@ impl App {
             let chunks = &self.chunks;
             l.update(self.be.gfx(), e, (rd * 16) as f32, (RENDER_VERT * 16) as f32, chunks.cut_gen(), |cx, cz| chunks.drawn((cx, cz)), |cx, sy, cz| chunks.shown((cx, cz), sy), |min, max| frustum.intersects_aabb(min, max));
         }
-        let fog = color::legacy_lin(if self.nether { hell } else { sky::fog_color(angle, sky_rgb, rain, thunder) }); // vanilla values -> the frame's linear space
+        let fog = color::legacy_lin(if self.nether { hell } else { atm.fog }); // vanilla values -> the frame's linear space
         // Terrain fog (b1.7.3 `setupFog`): linear to the render distance, off the far terrain's own start; under water GL_EXP, density 0.1,
         // colour (0.02, 0.02, 0.2); a negative far plane is how the shader learns the density.
         let (fog_c, far) = if eye_in_water { (color::legacy_lin([0.02, 0.02, 0.2]), -0.1) } else { (fog, if lod_on { lod::RADIUS } else { (rd * 16) as f32 }) };
@@ -2104,6 +2116,7 @@ impl App {
             seconds: self.world_ticks as f32 / 20.0,
             zenith: color::legacy_lin(sky::lightning_flash(sky_rgb, self.fx.flash, partial)),
             horizon: fog,
+            atmos: atm,
             precip: precip.as_ref().map(|(s, r, y)| (&s[..], &r[..], *y)),
         };
         let acq = match self.be.draw_world(&d) {

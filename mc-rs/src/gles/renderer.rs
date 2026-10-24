@@ -37,6 +37,10 @@ struct SkyU {
     horizon: [f32; 4],
     stars: [f32; 4],
     vp: [[f32; 4]; 4],
+    eye: [f32; 4],
+    cloud: [f32; 4],
+    cloudp: [f32; 4],
+    haze: [f32; 4],
 }
 
 /// A vertex layout: stride and (location, components, type, integer, normalised, offset).
@@ -549,14 +553,14 @@ impl Renderer {
             view_proj: (fix * d.proj * d.view).to_cols_array_2d(),
             eye: d.eye.extend(d.sky_sub).to_array(),
             fog: [d.fog[0], d.fog[1], d.fog[2], d.far],
-            fogp: [d.start, d.wr, 0.0, 0.0],
+            fogp: [d.start, d.wr, d.atmos.density, 0.0],
         };
         self.gl.write(&self.ubo_frame, 0, bytemuck::bytes_of(&u));
         let sun = crate::world::sky::sun_dir(d.angle);
         let mut view = d.view;
         view.w_axis = Vec4::W; // the sky travels with the viewer
         let svp = fix * d.proj * view;
-        let stars = crate::world::sky::star_brightness(d.angle) * (1.0 - d.rain);
+        let stars = crate::world::sky::star_brightness(d.angle) * (1.0 - d.rain) * d.atmos.star[3];
         let su = SkyU {
             inv_vp: svp.inverse().to_cols_array_2d(),
             sun_dir: sun.extend(0.0).to_array(),
@@ -565,8 +569,12 @@ impl Renderer {
             misc: [d.rain, 0.0, d.seconds, 0.0],
             zenith: [d.zenith[0], d.zenith[1], d.zenith[2], 0.0],
             horizon: [d.horizon[0], d.horizon[1], d.horizon[2], 0.0],
-            stars: [1.0, 1.0, 1.0, stars],
+            stars: [d.atmos.star[0], d.atmos.star[1], d.atmos.star[2], stars],
             vp: svp.to_cols_array_2d(),
+            eye: d.eye.extend(d.atmos.density).to_array(),
+            cloud: d.atmos.cloud,
+            cloudp: d.atmos.cloudp,
+            haze: d.atmos.haze,
         };
         self.gl.write(&self.ubo_sky, 0, bytemuck::bytes_of(&su));
         let fan = sky::fan_vertices(d.angle, d.rain, sun);
@@ -828,7 +836,7 @@ mod tests {
         assert_eq!(FLOAT32.stride as usize, std::mem::size_of::<crate::gpu::pipeline::Vertex>());
         assert_eq!(WEATHER.stride as usize, std::mem::size_of::<weather::Vertex>());
         assert_eq!(HUD.stride as usize, std::mem::size_of::<hud::HudVertex>());
-        assert_eq!(std::mem::size_of::<SkyU>(), 288);
+        assert_eq!(std::mem::size_of::<SkyU>(), 352); // 288 + eye, cloud, cloudp, haze (biome atmosphere)
         assert_eq!(std::mem::size_of::<Uniforms>(), 112);
     }
 

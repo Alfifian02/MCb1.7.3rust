@@ -19,6 +19,7 @@ use std::f32::consts::TAU;
 use wgpu::util::DeviceExt;
 
 use crate::render::camera::FirstPersonCamera;
+use crate::world::atmos::Frame;
 use crate::world::sky;
 
 /// The library part of the shader (group 0 only).
@@ -61,6 +62,12 @@ pub struct Params {
     /// legacy sky: star colour, alpha = star brightness (`set_legacy`); then the view-projection without translation.
     stars: [f32; 4],
     vp: [[f32; 4]; 4],
+    /// legacy sky, written by `set_legacy`: xyz = eye (the clouds are a layer in the world, the sky pass has no translation), w = fog density;
+    /// cloud colour + alpha; `world::atmos::Frame::cloudp`; haze colour + strength.
+    eye: [f32; 4],
+    cloud: [f32; 4],
+    cloudp: [f32; 4],
+    haze: [f32; 4],
 }
 
 /// The pack's Iris uniforms (`shaders.properties`) from mc-rs's sun angle. The pack's `sunAngle` is 0 at sunrise, ours 0 at noon;
@@ -89,6 +96,10 @@ pub fn params(f: &SkyFrame, camera: &FirstPersonCamera) -> Params {
         horizon: [0.0; 4],
         stars: [1.0, 1.0, 1.0, 0.0],
         vp: (proj * view).to_cols_array_2d(),
+        eye: [0.0; 4],
+        cloud: [0.0; 4],
+        cloudp: [0.0; 4],
+        haze: [0.0; 4],
     }
 }
 
@@ -310,13 +321,15 @@ impl SkyRenderer {
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&params(f, camera)));
     }
 
-    /// Legacy sky colours (linear working space). Call after `update`, which rewrites the whole block.
-    /// Also the star brightness (`World.getStarBrightness` x (1 - rain)) and the sunrise fan of this `angle`.
-    pub fn set_legacy(&self, queue: &wgpu::Queue, zenith: [f32; 3], horizon: [f32; 3], angle: f32, rain: f32) {
+    /// Legacy sky colours (linear working space), the biome's atmosphere (`a`: haze, clouds, star tint) and the eye. Call after `update`, which
+    /// rewrites the whole block. Also the star brightness (`World.getStarBrightness` x (1 - rain) x the biome's) and the sunrise fan of this `angle`.
+    pub fn set_legacy(&self, queue: &wgpu::Queue, zenith: [f32; 3], horizon: [f32; 3], angle: f32, rain: f32, a: &Frame, eye: Vec3) {
         use std::sync::atomic::Ordering::Relaxed;
-        let stars = sky::star_brightness(angle) * (1.0 - rain);
-        let v = [[zenith[0], zenith[1], zenith[2], 0.0], [horizon[0], horizon[1], horizon[2], 0.0], [1.0, 1.0, 1.0, stars]];
+        let stars = sky::star_brightness(angle) * (1.0 - rain) * a.star[3];
+        let v = [[zenith[0], zenith[1], zenith[2], 0.0], [horizon[0], horizon[1], horizon[2], 0.0], [a.star[0], a.star[1], a.star[2], stars]];
         queue.write_buffer(&self.uniform_buffer, std::mem::offset_of!(Params, zenith) as u64, bytemuck::bytes_of(&v));
+        let tail = [[eye.x, eye.y, eye.z, a.density], a.cloud, a.cloudp, a.haze];
+        queue.write_buffer(&self.uniform_buffer, std::mem::offset_of!(Params, eye) as u64, bytemuck::bytes_of(&tail));
         if let Some(g) = &self.geo {
             let fan = fan_vertices(angle, rain, sky::sun_dir(angle));
             if !fan.is_empty() {

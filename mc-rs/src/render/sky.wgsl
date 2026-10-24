@@ -22,6 +22,10 @@ struct Sky {
     horizon: vec4<f32>,     // legacy sky only: fog colour
     stars: vec4<f32>,       // legacy sky only: star colour (rgb) and alpha = star brightness
     vp: mat4x4<f32>,        // legacy sky only: world direction -> clip (view rotation + projection)
+    eye: vec4<f32>,         // legacy sky only: eye (xyz), fog density (w)
+    cloud: vec4<f32>,       // legacy sky only: cloud colour (linear), alpha
+    cloudp: vec4<f32>,      // legacy sky only: cloud threshold, layer height, drift (blocks along +x), sky gradient exponent
+    haze: vec4<f32>,        // legacy sky only: haze band colour (linear), strength
 };
 
 @group(0) @binding(0) var<uniform> sky: Sky;
@@ -493,13 +497,78 @@ fn fs_sky(in: VsOut) -> @location(0) vec4<f32> {
     return vec4<f32>(stand_in_tonemap(draw_sky(ray_dir, atmosphere, vec4<f32>(0.0, 0.0, 0.0, 1.0), in.sun_color)), 1.0);
 }
 
-// Console-Edition sky (`lib.rs` LEGACY): b1.7.3 `RenderGlobal.renderSky` in two lines. The dome is the sky colour, the fog colour
-// shows at the horizon. The sun and moon are textured quads (`vs_body`), the stars and the sunrise fan geometry (`vs_stars`, `vs_fan`).
+// The biome's clouds: b1.7.3's fancy clouds (12-block cells, 4 thick, drifting along +x) found per pixel instead of drawn as geometry.
+// A cell is filled when two octaves of value noise over the cell grid pass `cloudp.x`; the ray walks the cells from where it enters the
+// layer (cell by cell, 8 at most) and hits an underside or a side wall, which are shaded like the Java's faces. Only sky pixels run it.
+fn cloud_hash(p: vec2<i32>) -> f32 {
+    var h = bitcast<u32>(p.x) * 374761393u + bitcast<u32>(p.y) * 668265263u;
+    h = (h ^ (h >> 13u)) * 1274126177u;
+    return f32(h ^ (h >> 16u)) * (1.0 / 4294967296.0);
+}
+
+fn cloud_noise(p: vec2<f32>) -> f32 {
+    let c = vec2<i32>(floor(p));
+    let f = fract(p);
+    let u = f * f * (3.0 - 2.0 * f);
+    let a = mix(cloud_hash(c), cloud_hash(c + vec2<i32>(1, 0)), u.x);
+    let b = mix(cloud_hash(c + vec2<i32>(0, 1)), cloud_hash(c + vec2<i32>(1, 1)), u.x);
+    return mix(a, b, u.y);
+}
+
+fn cloud_filled(c: vec2<i32>) -> bool {
+    let p = vec2<f32>(c);
+    return 0.65 * cloud_noise(p * 0.2) + 0.35 * cloud_noise(p * 0.55 + vec2<f32>(31.0, 17.0)) > sky.cloudp.x;
+}
+
+// (shade, distance) of the first cloud the ray meets; shade 0 = none.
+fn cloud_march(ro: vec3<f32>, rd: vec3<f32>) -> vec2<f32> {
+    let y0 = sky.cloudp.y;
+    let y1 = y0 + 4.0;
+    if rd.y < 0.01 || ro.y > y1 { return vec2<f32>(0.0); }
+    let t_end = (y1 - ro.y) / rd.y;
+    var t = max((y0 - ro.y) / rd.y, 0.0);
+    let q0 = (ro.xz + rd.xz * t - vec2<f32>(sky.cloudp.z, 0.0)) / 12.0; // cloud space: the layer drifts along +x
+    var d = rd.xz / 12.0;
+    d = select(d, vec2<f32>(1e-6), abs(d) < vec2<f32>(1e-6));
+    let fwd = d > vec2<f32>(0.0);
+    let st = select(vec2<i32>(-1), vec2<i32>(1), fwd);
+    var cell = vec2<i32>(floor(q0));
+    var tmax = vec2<f32>(t) + (vec2<f32>(cell) + select(vec2<f32>(0.0), vec2<f32>(1.0), fwd) - q0) / d;
+    let tdelta = abs(1.0 / d);
+    var face = select(0.8, 0.62, ro.y < y0); // the underside, or a wall when the eye is inside the layer
+    for (var i = 0; i < 8; i++) {
+        if t >= t_end { break; }
+        if cloud_filled(cell) { return vec2<f32>(face, t); }
+        if tmax.x < tmax.y {
+            t = tmax.x;
+            tmax.x += tdelta.x;
+            cell.x += st.x;
+            face = 0.86;
+        } else {
+            t = tmax.y;
+            tmax.y += tdelta.y;
+            cell.y += st.y;
+            face = 0.76;
+        }
+    }
+    return vec2<f32>(0.0);
+}
+
+// The Console-Edition sky (`lib.rs` LEGACY; the sun and moon are textured quads `vs_body`, the stars and the sunrise fan geometry `vs_stars`,
+// `vs_fan`): horizon -> top by the biome's exponent, its haze band over the horizon, then its clouds melting into the fog.
 @fragment
 fn fs_legacy(in: VsOut) -> @location(0) vec4<f32> {
     let p = sky.inv_vp * vec4<f32>(in.ndc, 1.0, 1.0);
     let r = normalize(p.xyz / p.w);
-    return vec4<f32>(mix(sky.horizon.rgb, sky.zenith.rgb, clamp01(r.y * 2.5)), 1.0);
+    var col = mix(sky.horizon.rgb, sky.zenith.rgb, pow(clamp01(r.y * 2.5), sky.cloudp.w));
+    col = mix(col, sky.haze.rgb, sky.haze.a * smoothstep(0.0, 0.05, r.y) * exp(-r.y * 7.0));
+    let c = cloud_march(sky.eye.xyz, r);
+    if c.x > 0.0 {
+        let k = c.y * sky.eye.w * 1.5;
+        let lit = mix(sky.cloud.rgb * c.x, sky.horizon.rgb, 1.0 - exp(-k * k));
+        col = mix(col, lit, sky.cloud.a * (1.0 - smoothstep(1500.0, 2600.0, c.y)));
+    }
+    return vec4<f32>(col, 1.0);
 }
 
 // Console-Edition stars and sunrise fan: real geometry (`world::sky::star_vertices`, `sunrise_color`), drawn after `fs_legacy` over

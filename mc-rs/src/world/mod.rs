@@ -6,6 +6,7 @@ pub mod biome;
 pub mod gen;
 pub mod pick;
 pub mod sky;
+pub mod atmos;
 pub mod dig;
 pub mod items;
 pub mod mobs;

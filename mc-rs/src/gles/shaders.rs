@@ -51,7 +51,9 @@ float fog_factor(float d) {
     if (fog.w < 0.0) { return 1.0 - exp(fog.w * d); }
     if (fog.w == 0.0) { return 0.0; }
     float s0 = fogp.x > 0.0 ? fogp.x : 0.25;
-    return clamp((d - s0 * fog.w) / ((1.0 - s0) * fog.w), 0.0, 1.0);
+    float lin = clamp((d - s0 * fog.w) / ((1.0 - s0) * fog.w), 0.0, 1.0);
+    float k = d * fogp.z; // the biome's haze (`world::atmos`)
+    return 1.0 - (1.0 - lin) * exp(-k * k);
 }
 // World.lightBrightnessTable; sky and blk are light levels / 15, eye.w the sky light the time of day takes away.
 float brightness(float sky, float blk) {
@@ -519,7 +521,7 @@ void main() {{
 }
 
 const SKY_BLOCK: &str = r#"
-layout(std140) uniform S { mat4 inv_vp; vec4 sun_dir; vec4 moon_dir; mat4 celestial; vec4 misc; vec4 zenith; vec4 horizon; vec4 stars; mat4 vp; };
+layout(std140) uniform S { mat4 inv_vp; vec4 sun_dir; vec4 moon_dir; mat4 celestial; vec4 misc; vec4 zenith; vec4 horizon; vec4 stars; mat4 vp; vec4 eye; vec4 cloud; vec4 cloudp; vec4 haze; };
 "#;
 
 /// The sky dome (`fs_legacy`): one triangle at depth 1.
@@ -532,13 +534,63 @@ void main() {
     v_ndc = p;
 }
 "#;
+    // The biome's sky, haze and clouds: the same code as `fs_legacy` / `cloud_march` in `render/sky.wgsl`.
     let fs = r#"
 in vec2 v_ndc;
 layout(location = 0) out vec4 o_color;
+float cloud_hash(ivec2 p) {
+    uint h = uint(p.x) * 374761393u + uint(p.y) * 668265263u;
+    h = (h ^ (h >> 13u)) * 1274126177u;
+    return float(h ^ (h >> 16u)) * (1.0 / 4294967296.0);
+}
+float cloud_noise(vec2 p) {
+    ivec2 c = ivec2(floor(p));
+    vec2 f = fract(p);
+    vec2 u = f * f * (3.0 - 2.0 * f);
+    float a = mix(cloud_hash(c), cloud_hash(c + ivec2(1, 0)), u.x);
+    float b = mix(cloud_hash(c + ivec2(0, 1)), cloud_hash(c + ivec2(1, 1)), u.x);
+    return mix(a, b, u.y);
+}
+bool cloud_filled(ivec2 c) {
+    vec2 p = vec2(c);
+    return 0.65 * cloud_noise(p * 0.2) + 0.35 * cloud_noise(p * 0.55 + vec2(31.0, 17.0)) > cloudp.x;
+}
+vec2 cloud_march(vec3 ro, vec3 rd) {
+    float y0 = cloudp.y;
+    float y1 = y0 + 4.0;
+    if (rd.y < 0.01 || ro.y > y1) { return vec2(0.0); }
+    float t_end = (y1 - ro.y) / rd.y;
+    float t = max((y0 - ro.y) / rd.y, 0.0);
+    vec2 q0 = (ro.xz + rd.xz * t - vec2(cloudp.z, 0.0)) / 12.0;
+    vec2 d = rd.xz / 12.0;
+    if (abs(d.x) < 1e-6) { d.x = 1e-6; }
+    if (abs(d.y) < 1e-6) { d.y = 1e-6; }
+    bvec2 fwd = greaterThan(d, vec2(0.0));
+    ivec2 st = ivec2(fwd.x ? 1 : -1, fwd.y ? 1 : -1);
+    ivec2 cell = ivec2(floor(q0));
+    vec2 tmax = vec2(t) + (vec2(cell) + vec2(fwd.x ? 1.0 : 0.0, fwd.y ? 1.0 : 0.0) - q0) / d;
+    vec2 tdelta = abs(1.0 / d);
+    float face = ro.y < y0 ? 0.62 : 0.8;
+    for (int i = 0; i < 8; i++) {
+        if (t >= t_end) { break; }
+        if (cloud_filled(cell)) { return vec2(face, t); }
+        if (tmax.x < tmax.y) { t = tmax.x; tmax.x += tdelta.x; cell.x += st.x; face = 0.86; }
+        else { t = tmax.y; tmax.y += tdelta.y; cell.y += st.y; face = 0.76; }
+    }
+    return vec2(0.0);
+}
 void main() {
     vec4 p = inv_vp * vec4(v_ndc, 1.0, 1.0);
     vec3 r = normalize(p.xyz / p.w);
-    o_color = vec4(mix(horizon.rgb, zenith.rgb, clamp(r.y * 2.5, 0.0, 1.0)), 1.0);
+    vec3 col = mix(horizon.rgb, zenith.rgb, pow(clamp(r.y * 2.5, 0.0, 1.0), cloudp.w));
+    col = mix(col, haze.rgb, haze.a * smoothstep(0.0, 0.05, r.y) * exp(-r.y * 7.0));
+    vec2 c = cloud_march(eye.xyz, r);
+    if (c.x > 0.0) {
+        float k = c.y * eye.w * 1.5;
+        vec3 lit = mix(cloud.rgb * c.x, horizon.rgb, 1.0 - exp(-k * k));
+        col = mix(col, lit, cloud.a * (1.0 - smoothstep(1500.0, 2600.0, c.y)));
+    }
+    o_color = vec4(col, 1.0);
 }
 "#;
     Src { vs: format!("{HEAD_V}{SKY_BLOCK}{vs}"), fs: format!("{HEAD_F}{SKY_BLOCK}{fs}") }

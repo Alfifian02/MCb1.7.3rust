@@ -1363,12 +1363,6 @@ impl ChunkManager {
         }
     }
 
-    /// `WorldChunkManager.getTemperature` at a block column (for the sky colour).
-    pub fn temperature_at(&mut self, x: i32, z: i32) -> f64 {
-        self.cm.load_block_generator_data(x, z, 1, 1);
-        self.cm.temperature[0]
-    }
-
     /// The biome and climate (`temperature`, `humidity`, both 0..1) of a block column, for the pack's weather and fog.
     pub fn climate_at(&mut self, x: i32, z: i32) -> (crate::world::biome::Biome, f64, f64) {
         let biome = self.cm.load_block_generator_data(x, z, 1, 1)[0];

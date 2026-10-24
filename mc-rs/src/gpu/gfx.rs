@@ -108,6 +108,8 @@ pub struct WorldDraw<'a> {
     pub seconds: f32,
     pub zenith: [f32; 3],
     pub horizon: [f32; 3],
+    /// The biome's haze, clouds, star tint and fog density (`world::atmos`); `Frame::OFF` in the Nether.
+    pub atmos: crate::world::atmos::Frame,
     /// Rain and snow quads, when it rains (`weather::build`), and the sun's height for their colour.
     pub precip: Option<(&'a [crate::render::weather::Vertex], &'a [crate::render::weather::Vertex], f32)>,
 }

@@ -185,6 +185,21 @@ pub fn fog_color(angle: f32, sky: [f32; 3], rain: f32, thunder: f32) -> [f32; 3]
     c
 }
 
+/// Cloud colour (`World.func_628_d` with the cloud colour 0xFFFFFF): white, greyed by rain (to 0.6 of its brightness) and thunder (0.2),
+/// dimmed by the time of day (down to 0.1 / 0.1 / 0.15 at night).
+/// UNVERIFIED: written from memory of the Java, which is not in the repo zip; only the shape (white at noon, dark at night, grey in rain) is tested.
+pub fn cloud_color(angle: f32, rain: f32, thunder: f32) -> [f32; 3] {
+    let k = (mh_cos(angle * PI * 2.0) * 2.0 + 0.5).clamp(0.0, 1.0);
+    // towards `grey` x the colour's luminance by `s` x 95%
+    let grey = |c: [f32; 3], s: f32, g: f32| -> [f32; 3] {
+        let (l, keep) = ((c[0] * 0.3 + c[1] * 0.59 + c[2] * 0.11) * g, 1.0 - s * 0.95);
+        c.map(|v| v * keep + l * (1.0 - keep))
+    };
+    let c = grey([1.0; 3], rain, 0.6);
+    let c = [c[0] * (k * 0.9 + 0.1), c[1] * (k * 0.9 + 0.1), c[2] * (k * 0.85 + 0.15)];
+    grey(c, thunder, 0.2)
+}
+
 /// Orange glow along the horizon at sunrise and sunset (`WorldProvider.calcSunriseSunsetColors`): RGBA, or `None`
 /// while the sun is far from the horizon.
 pub fn sunrise_color(angle: f32) -> Option<[f32; 4]> {
@@ -286,6 +301,15 @@ mod tests {
         assert!(fog(0.0, 0.0) > fog(1.0, 0.0) && fog(1.0, 0.0) > fog(1.0, 1.0));
         let sub = |r, t| skylight_subtracted(0.0, r, t);
         assert!(sub(0.0, 0.0) == 0 && sub(1.0, 0.0) > 0 && sub(1.0, 1.0) > sub(1.0, 0.0));
+    }
+
+    /// Cloud colour: white at noon, dark at night, grey in rain, darker in thunder (shape only: not checked against the Java).
+    #[test]
+    fn cloud_colour_follows_day_and_weather() {
+        assert!(cloud_color(0.0, 0.0, 0.0).iter().all(|&v| (v - 1.0).abs() < 1e-6));
+        assert!(cloud_color(0.5, 0.0, 0.0).iter().all(|&v| v < 0.2));
+        let (rain, storm) = (cloud_color(0.0, 1.0, 0.0), cloud_color(0.0, 1.0, 1.0));
+        assert!(rain[0] < 0.7 && storm[0] < rain[0] * 0.5 && (rain[0] - rain[2]).abs() < 0.05);
     }
 
     /// Celestial angle, horizon colour, sunrise glow and star brightness against the real `WorldProvider` / `World`,
