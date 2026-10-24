@@ -36,9 +36,9 @@ pub struct Region {
     /// Block metadata of the same chunks (`Chunk.data`).
     d: [Nibbles; 4],
     /// The tile entities populate filled: dungeon chests and their loot (`WorldGenDungeons`).
-    loot: Vec<(Pos, Chest)>,
+    pub(super) loot: Vec<(Pos, Chest)>,
     /// Dungeon spawners and the mob index `pickMobSpawner` drew (0..4).
-    spawners: Vec<(Pos, u8)>,
+    pub(super) spawners: Vec<(Pos, u8)>,
 }
 
 impl Region {
@@ -80,7 +80,7 @@ impl Region {
     }
 
     /// `World.setBlockAndMetadata`: id and metadata (low 4 bits) are both written.
-    fn set_meta(&mut self, x: i32, y: i32, z: i32, id: u8, meta: u8) {
+    pub(super) fn set_meta(&mut self, x: i32, y: i32, z: i32, id: u8, meta: u8) {
         if let Some((c, i)) = self.at(x, y, z) {
             self.b[c][i] = id;
             self.d[c].set((x & 15) as usize, y as usize, (z & 15) as usize, meta);
@@ -324,6 +324,11 @@ impl OverworldGenerator {
                     }
                 }
             }
+        }
+        // Structory (Blooming only): last, so no feature of this populate cuts into a building. Draws from its own Randoms.
+        if let Some(mut s) = self.structory.take() {
+            s.populate(self, w, cx, cz, cm);
+            self.structory = Some(s);
         }
     }
 }

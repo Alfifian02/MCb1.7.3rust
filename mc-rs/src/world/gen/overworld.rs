@@ -133,6 +133,8 @@ pub struct OverworldGenerator {
     hydro: Option<Arc<Hydro>>,
     /// The Blooming world type: `manager` makes the chunk manager that places the Blooming Biosphere biomes.
     blooming: bool,
+    /// Structory's structures (`structory.rs`), Blooming only; taken out while `populate` runs (it needs `&mut self` for the ground).
+    pub(super) structory: Option<crate::world::gen::structory::Structory>,
 }
 
 /// The five noise samples of one density grid column (17 high), in the order `density` reads them.
@@ -212,7 +214,7 @@ impl OverworldGenerator {
         let noise_main = OctaveNoise::new(&mut rand, 10);
         let noise_height = OctaveNoise::new(&mut rand, 16);
         let noise_spawner = OctaveNoise::new(&mut rand, 8);
-        Self { seed, rand, noise_lim, noise_low, noise_base, noise_sand, noise_stone, noise_main, noise_height, noise_spawner, cols: HashMap::new(), max_cols: MAX_COLS, tectonic: None, nether: None, hydro: None, blooming: false }
+        Self { seed, rand, noise_lim, noise_low, noise_base, noise_sand, noise_stone, noise_main, noise_height, noise_spawner, cols: HashMap::new(), max_cols: MAX_COLS, tectonic: None, nether: None, hydro: None, blooming: false, structory: None }
     }
 
     /// The Nether (`gen::nether`): `generate` and `populate` hand over to it, everything else here stays unused.
@@ -247,6 +249,7 @@ impl OverworldGenerator {
     pub fn world_blooming(seed: i64) -> Self {
         let mut g = Self::world(seed);
         g.blooming = true;
+        g.structory = crate::world::gen::structory::Structory::new(seed);
         g
     }
 
