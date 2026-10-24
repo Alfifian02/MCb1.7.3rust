@@ -1,0 +1,1713 @@
+diff --git a/README.md b/README.md
+index be8a505..8b7a180 100644
+--- a/README.md
++++ b/README.md
+@@ -68,6 +68,7 @@ original. Anything that cannot be derived from the b1.7.3 sources is marked
+ | River steps (organic slope) | written without a toolchain: not compiled, not run (+3 tests: `hydro::tests::a_lower_river_does_not_overwrite_a_higher_one`, `ticks::tests::woken_edge_water_spreads_into_levels`, `chunks::tests::edge_water_is_a_surface_source_with_air_beside_it`) | A river from a neighbouring plate is no longer cut by a lower river's bank (`Region::plan_at`), and the still water at a step or a cut bank is woken like the mod's `scheduleTick` (`ChunkManager::edge_water`, `Ticks::wake_water`) so the fluid sim writes the slope as real levels. See ROADMAP changelog. |
+ | M14 player model     | written without a toolchain: not compiled, not run (+3 tests in `player.rs`, +1 in `touch_ui.rs`) | `render/player.rs`: b1.7.3 `ModelBiped` + `mob/char.png` with walk / sneak / riding / arm-swing animation, in the third-person view (new view button) and as the inventory preview. No armor, ears, cloak or hurt flash. See ROADMAP changelog. |
+ | Debug screen (Info) | type-checked for aarch64-linux-android (`cargo check --lib --tests`), not run (+2 tests in `render/debug.rs`, 2 extended in `options.rs`) | `render/debug.rs`: two translucent panels in the GUI scale for screenshots (left: position, chunk, facing, biome, light, time, aimed block; right: FPS, frame time, screen and scene size with the scene scale, Dynamic Res, MSAA, Post, renderer, graphics and smooth lighting, Performance, render distance, chunks, LoD). Pause menu button `Info: on/off` (`debugScreen` in `options.txt`); while on it replaces the FPS counter and the LoD debug title. See the rendering changelog. |
++| Visual polish (Look) | type-checked on a Linux host (`cargo check --lib --tests`, a stand-in `android-activity`), tests of the touched modules pass there, the WGSL validates with naga and every assembled GLSL with glslang; not run on a device (+8 tests in `render/look.rs`, +1 each in `options.rs` and `atmos.rs`, the sky fan test extended) | `render/look.rs` + the final pass and chunk shaders of BOTH renderers: one `Vibrance` dial (Video Settings, default 30%, 0 = off) scales a grade in the final pass (vibrance, not saturation; a gentle S-curve; warm highlights / cool shadows). `Effects...` (Video Settings) has five switches: Warm Light (golden low sun, bluer shade, faces sink a little deeper), Water Look (depth gradient + sun glint), Glow (soft additive halos on lava, torches, glowstone and the sun only), Motion (off / low / on: leaf sway, motes near flowers and water, light rays at a low sun) and Haze (aerial perspective). Capped: 36 halos, 10 / 24 motes, 80 sprites a frame. `look_*` in `options.txt`. See the rendering changelog. |
+ | Audio (M9)           | written without a toolchain: not compiled, not run (+3 tests in `audio/`) | `audio/`: `SoundManager` / `SoundPool`. All 194 effects (80 `SoundPool` keys: `step.*`, `mob.*`, `random.*`, `note.*`, `ambient.*`, `liquid.*`, `fire.*`, `portal.*`, `tile.piston.*`, `damage.*`), 12 music tracks and records 13 / cat are embedded from the b1.7.3 asset index (`tools/gen_sounds.py` -> `assets/sound/`, `audio/table.rs`). Software mixer (pitch by resampling, linear distance gain, pan), lewton decoder, AAudio output via `ndk`; music on a stream thread, one random track 10-20 min apart. Wired: Music / Sound options, footsteps, block break sound (`Block.stepSound`, table read from `Block.java`), note blocks, jukebox records. Not wired yet: every other `playSoundEffect` call of the Java (mobs, hurt, doors, buttons, fire, water, explosions, rain, thunder, cave ambience, pistons, portal). The 12 `streaming/*.mus` files are not b1.7.3 and are left out. |
+ | Sprint (Retro Sprint port) | written without a toolchain: not compiled, not run (+10 tests: 8 in `world/sprint.rs`, 1 in `mobs.rs`, 1 in `gamepad.rs`) | `world/sprint.rs`: periut's Retro Sprint (b1.7.3 mixins), read from its sources. Double tap forward (touch d-pad arrow, a corner, or the stick pushed up): a tap of at most 4 ticks, then a second press within 7 ticks of its release; a longer press is a walk and never sprints or hold L3 on the pad; sprinting adds 0.035 blocks/tick along the facing (x1.35 of the walk), a jump adds 0.2 blocks/tick, the field of view x1.15 (eased), a hit shoves the target 1.2 blocks/tick and ends the sprint, specks of the block below fly while it runs. Ends on releasing forward / sneaking, a wall, water, riding, sleeping or after 30 s. See the gameplay changelog. |
+ | Stamina (Stamina port) | written without a full toolchain: type-checked and `stamina::tests::*` (5) + `vitals::tests::damage_like_java` run in a Linux scratch crate; the HUD and `lib.rs` wiring not run on a device | `world/stamina.rs`: insane96mcp's Stamina (NeoForge 26.1.2), read from its sources, its default numbers. 200 stamina (10 per health point, armor -2.5% a point); a sprint costs 1 a tick (x0.8 out of combat, 15 s after a hit dealt or taken), a jump 10; empty = locked: no sprinting until it regenerates (2 a tick, x0.6 while locked) to 40%; at 20% health the bar is emptied and locked; locked walks x0.9, sprinting under 40 / 20% x0.85 more. HUD: grey half-heart overlay on the hearts it no longer covers (darker while locked), `Stamina` row in the debug screen. Not ported: Vigour / Curse of Weariness, the Vigour effect, swimming, mining cost, hunger spend, the command, the sync, the config. See the gameplay changelog. |
+diff --git a/mc-rs/src/backend.rs b/mc-rs/src/backend.rs
+index 0c0426f..fec7a34 100644
+--- a/mc-rs/src/backend.rs
++++ b/mc-rs/src/backend.rs
+@@ -75,10 +75,11 @@ impl Wg {
+     /// The scene pass (sky, terrain, far terrain, entities, water, rain; 4x MSAA resolved into `Present`'s 8-bit scene) and then its one
+     /// full-screen pass (CAS + upscale + vignette + the HUD) onto the swap chain. Two render passes in all.
+     fn draw_world(&mut self, d: &WorldDraw) -> Drawn {
+-        self.pipe.frame(&self.gpu.queue, d.view, d.proj, d.eye, d.sky_sub, d.fog, d.far, d.start, d.wr, d.atmos.density);
++        self.pipe.frame(&self.gpu.queue, d.view, d.proj, d.eye, d.sky_sub, d.fog, d.far, d.start, d.wr, d.atmos.density, &d.look);
++        self.present.set_grade(&self.gpu.queue, d.look.grade);
+         let clear = wgpu::Color { r: d.fog[0] as f64, g: d.fog[1] as f64, b: d.fog[2] as f64, a: 1.0 };
+         self.sky.update(&self.gpu.queue, d.camera, &SkyFrame { angle: d.angle, rain: d.rain, seconds: d.seconds });
+-        self.sky.set_legacy(&self.gpu.queue, d.zenith, d.horizon, d.angle, d.rain, &d.atmos, d.eye);
++        self.sky.set_legacy(&self.gpu.queue, d.zenith, d.horizon, d.angle, d.rain, &d.atmos, d.eye, d.look.rays);
+         // Rain and snow, drawn in the scene pass after the water; the depth test hides the streaks behind the terrain.
+         if let Some((snow, rain, sun_y)) = d.precip {
+             self.rain_fx.update(&self.gpu.queue, d.proj * d.view, d.eye, sun_y, snow, rain);
+@@ -134,6 +135,13 @@ impl Wg {
+             }
+             rp.set_pipeline(&self.pipe.water);
+             d.chunks.draw_ranges(crate::world::chunks::Layer::Water, &mut rp, &self.pipe.origins);
++            if d.glow_indices > 0 {
++                // Halos and motes: additive soft discs over the finished scene, depth-tested and not written.
++                rp.set_pipeline(&self.pipe.glow);
++                rp.set_vertex_buffer(0, d.glow.vbuf.wgpu().slice(..));
++                rp.set_index_buffer(d.glow.ibuf.wgpu().slice(..), wgpu::IndexFormat::Uint32);
++                rp.draw_indexed(0..d.glow_indices, 0, 0..1);
++            }
+             if d.precip.is_some() {
+                 self.rain_fx.draw(&mut rp);
+             }
+diff --git a/mc-rs/src/gles/renderer.rs b/mc-rs/src/gles/renderer.rs
+index 706e3a4..15c4156 100644
+--- a/mc-rs/src/gles/renderer.rs
++++ b/mc-rs/src/gles/renderer.rs
+@@ -125,6 +125,8 @@ pub struct Renderer {
+     body_v: Buf,
+     weather_buf: Buf,
+     born: Instant,
++    /// The Vibrance dial's grade of the frame being drawn (`Look::grade`), read by `finish`.
++    grade: [f32; 4],
+     /// The pipeline state last set, so a pass does not repeat it.
+     cur_prog: u32,
+     cur_vao: u32,
+@@ -158,7 +160,7 @@ impl Renderer {
+             chunk.push((c, gl.program(&s.vs, &s.fs, &["u_tex", "u_origin"]).map_err(|e| format!("{c:?}: {e}"))?));
+         }
+         let mk = |s: shaders::Src, u: &[&str], what: &str| gl.program(&s.vs, &s.fs, u).map_err(|e| format!("{what}: {e}"));
+-        let present = mk(shaders::present(samples == 1, fast), &["u_src", "u_px"], "present")?;
++        let present = mk(shaders::present(samples == 1, fast), &["u_src", "u_px", "u_grade"], "present")?;
+         let hud = mk(shaders::hud(hud::SHEET_H), &["u_items", "u_size"], "hud")?;
+         let pano = mk(shaders::panorama(), &["u_tex", "u_m", "u_t"], "panorama")?;
+         let dome = mk(shaders::sky_dome(), &[], "sky dome")?;
+@@ -263,7 +265,7 @@ impl Renderer {
+         let star_v = gl.buffer(sv.len(), sv, STATIC_DRAW);
+         let star_i = gl.buffer(si.len(), si, STATIC_DRAW);
+         let body_v = gl.buffer(bv.len(), bv, STATIC_DRAW);
+-        let fan_buf = gl.buffer(48 * 28, &[], DYNAMIC_DRAW);
++        let fan_buf = gl.buffer(sky::FAN_MAX * 28, &[], DYNAMIC_DRAW);
+         let hud_buf = gl.buffer(HUD_QUADS * 6 * HUD_VERT, &[], STREAM_DRAW);
+         let weather_buf = gl.buffer(2 * weather::MAX_VERTS * std::mem::size_of::<weather::Vertex>(), &[], STREAM_DRAW);
+ 
+@@ -273,7 +275,7 @@ impl Renderer {
+             gl, size, samples, fast, chunk, present, hud, pano, dome, fan, stars, body, weather, ubo_frame, ubo_sky,
+             atlas: atlas_t, hud_tex: hud_t, body_tex: body_t, snow_tex: snow_t, rain_tex: rain_t, pano_tex: pano_t,
+             vaos: HashMap::new(), empty_vao, hud_buf, fan_buf, star_v, star_i, star_n: star_idx.len() as i32, body_v, weather_buf,
+-            born: Instant::now(), cur_prog: 0, cur_vao: 0, blend: Blend::Off,
++            born: Instant::now(), grade: [0.0; 4], cur_prog: 0, cur_vao: 0, blend: Blend::Off,
+         };
+         r.targets()?;
+         Ok(r)
+@@ -554,7 +556,13 @@ impl Renderer {
+             eye: d.eye.extend(d.sky_sub).to_array(),
+             fog: [d.fog[0], d.fog[1], d.fog[2], d.far],
+             fogp: [d.start, d.wr, d.atmos.density, 0.0],
+-        };
++            warm: [0.0; 4],
++            cool: [0.0; 4],
++            sun: [0.0; 4],
++            fx: [0.0; 4],
++        }
++        .with_look(&d.look);
++        self.grade = d.look.grade;
+         self.gl.write(&self.ubo_frame, 0, bytemuck::bytes_of(&u));
+         let sun = crate::world::sky::sun_dir(d.angle);
+         let mut view = d.view;
+@@ -577,7 +585,7 @@ impl Renderer {
+             haze: d.atmos.haze,
+         };
+         self.gl.write(&self.ubo_sky, 0, bytemuck::bytes_of(&su));
+-        let fan = sky::fan_vertices(d.angle, d.rain, sun);
++        let fan = sky::fan_vertices(d.angle, d.rain, sun, d.look.rays);
+         self.gl.write(&self.fan_buf, 0, bytemuck::cast_slice(&fan));
+         let hud_n = d.hud.len().min(HUD_QUADS * 6);
+         self.gl.stream(&self.hud_buf, HUD_QUADS * 6 * HUD_VERT, bytemuck::cast_slice(&d.hud[..hud_n]));
+@@ -673,6 +681,14 @@ impl Renderer {
+             self.tiles(d, true, Chunk::LodWater);
+         }
+         self.runs(d, Layer::Water, Chunk::Water);
++        if d.glow_indices > 0 {
++            // Halos and motes: additive, depth-tested, no depth write (the water's state), the entity vertex.
++            self.set_blend(Blend::Add);
++            let (p, _) = self.chunk_prog(Chunk::Glow);
++            self.use_prog(p);
++            self.draw_buf(&d.glow.vbuf, &d.glow.ibuf, d.glow_indices);
++            self.set_blend(Blend::Alpha);
++        }
+         if let Some((snow, rain, sun_y)) = d.precip {
+             self.rain(d, snow, rain, sun_y, fix);
+         }
+@@ -755,6 +771,7 @@ impl Renderer {
+                     (f.ActiveTexture)(TEXTURE0 + U_SCENE);
+                     (f.BindTexture)(TEXTURE_2D, self.t.scene);
+                     (f.Uniform4f)(l[1], 1.0 / sw as f32, 1.0 / sh as f32, 1.0 / w as f32, 1.0 / h as f32);
++                    (f.Uniform4f)(l[2], self.grade[0], self.grade[1], self.grade[2], self.grade[3]);
+                 }
+                 self.bind_empty();
+                 // SAFETY: as above.
+@@ -837,7 +854,7 @@ mod tests {
+         assert_eq!(WEATHER.stride as usize, std::mem::size_of::<weather::Vertex>());
+         assert_eq!(HUD.stride as usize, std::mem::size_of::<hud::HudVertex>());
+         assert_eq!(std::mem::size_of::<SkyU>(), 352); // 288 + eye, cloud, cloudp, haze (biome atmosphere)
+-        assert_eq!(std::mem::size_of::<Uniforms>(), 112);
++        assert_eq!(std::mem::size_of::<Uniforms>(), 176);
+     }
+ 
+     /// Every program's source assembles with each define, and the cut-out ones get alpha-to-coverage only when multisampled.
+diff --git a/mc-rs/src/gles/shaders.rs b/mc-rs/src/gles/shaders.rs
+index ce3e4b0..a7a6ae8 100644
+--- a/mc-rs/src/gles/shaders.rs
++++ b/mc-rs/src/gles/shaders.rs
+@@ -15,7 +15,7 @@ pub struct Src {
+     pub fs: String,
+ }
+ 
+-/// Which chunk-shader program: the six pipelines of `gpu::pipeline::ChunkPipeline`.
++/// Which chunk-shader program: the seven pipelines of `gpu::pipeline::ChunkPipeline`.
+ #[derive(Copy, Clone, PartialEq, Eq, Debug)]
+ pub enum Chunk {
+     Solid,
+@@ -24,10 +24,12 @@ pub enum Chunk {
+     Lod,
+     Water,
+     LodWater,
++    /// Additive soft discs (`render::look`: halos, motes); the entity vertex, `fs_glow`.
++    Glow,
+ }
+ 
+ impl Chunk {
+-    pub const ALL: [Chunk; 6] = [Chunk::Solid, Chunk::Cutout, Chunk::Entity, Chunk::Lod, Chunk::Water, Chunk::LodWater];
++    pub const ALL: [Chunk; 7] = [Chunk::Solid, Chunk::Cutout, Chunk::Entity, Chunk::Lod, Chunk::Water, Chunk::LodWater, Chunk::Glow];
+     /// The 12-byte `embeddium` vertex + chunk origin (else the 32-byte float vertex).
+     pub fn compact(self) -> bool {
+         matches!(self, Chunk::Solid | Chunk::Cutout | Chunk::Water)
+@@ -46,7 +48,9 @@ impl Chunk {
+ }
+ 
+ const CHUNK_COMMON: &str = r#"
+-layout(std140) uniform U { mat4 vp; vec4 eye; vec4 fog; vec4 fogp; };
++layout(std140) uniform U { mat4 vp; vec4 eye; vec4 fog; vec4 fogp; vec4 warm; vec4 cool; vec4 sun; vec4 fx; };
++// `render::look`: the extra exponent of the face shades (`warm.w`).
++float boost(float s) { return pow(s, 1.0 + warm.w); }
+ float fog_factor(float d) {
+     if (fog.w < 0.0) { return 1.0 - exp(fog.w * d); }
+     if (fog.w == 0.0) { return 0.0; }
+@@ -96,7 +100,7 @@ float shade_of(uint code) {
+     uint f = code & 3u;
+     float s = 1.0;
+     if (f == 1u) { s = 0.8; } else if (f == 2u) { s = 0.6; } else if (f == 3u) { s = 0.5; }
+-    return s * (1.0 - 0.2 * float(code >> 2u));
++    return boost(s) * (1.0 - 0.2 * float(code >> 2u));
+ }
+ #endif
+ void main() {
+@@ -108,6 +112,10 @@ void main() {
+     vec3 vpos = u_origin + vec3(float(w0 & 511u) / 16.0 - 8.0, float((w0 >> 18u) & 8191u) / 32.0 - 8.0, float((w0 >> 9u) & 511u) / 16.0 - 8.0);
+     vec2 tl = vec2(float((w1 >> 10u) & 2047u), float(w1 >> 21u)) * 0.25 - 240.0;
+     uint tile = w1 & 1023u;
++    // Leaves (tiles 53, 133, 255) sway a little (`fx.z` blocks, 0 = off): a smooth function of the position, so shared corners move together.
++    if (fx.z > 0.0 && (tile == 53u || tile == 133u || tile == 255u)) {
++        vpos += vec3(sin(fx.x * 1.3 + vpos.x * 0.9 + vpos.z * 0.6), 0.5 * sin(fx.x * 1.9 + vpos.y * 1.1 + vpos.x * 0.7), cos(fx.x * 1.1 + vpos.z * 0.8 + vpos.y * 0.5)) * fx.z;
++    }
+     v_tint = pow(vec3(float(w2 & 31u) / 31.0, float((w2 >> 5u) & 63u) / 63.0, float((w2 >> 11u) & 31u) / 31.0), vec3(2.2));
+     v_lit = pow(brightness(float((w2 >> 16u) & 63u) / 60.0, float((w2 >> 22u) & 31u) / 30.0) * shade_of(w2 >> 27u), 2.2);
+ #ifdef LEAN
+@@ -159,6 +167,14 @@ const float S_X = @SX@;
+ // Rec. 709 -> XYZ -> Rec. 2020 folded into one matrix (the product of the two the wgpu path multiplies by), and run at half precision.
+ const mat3 W709_TO_2020 = mat3(vec3(0.627425692, 0.329289106, 0.0433502375), vec3(0.0690274419, 0.91957858, 0.0113613785), vec3(0.0163664152, 0.0880288984, 0.895684319));
+ mediump vec3 to_working(mediump vec3 c) { return c * W709_TO_2020; }
++// `render::look` (see `finish` in gpu/pipeline.rs): lit side `warm.rgb`, shaded side `cool.rgb`, a faint blue, brighter tint with the fog factor.
++const vec3 AER = vec3(0.95, 0.99, 1.07);
++const vec3 WATER_DEEP = vec3(0.55, 0.65, 0.85); // multipliers of the biome-coloured water, as in gpu/pipeline.rs
++const vec3 WATER_SHALLOW = vec3(0.80, 1.15, 1.10);
++mediump vec3 finish(mediump vec3 rgb, mediump float lit, mediump float fg) {
++    mediump vec3 c = to_working(rgb * lit * mix(cool.rgb, warm.rgb, smoothstep(0.15, 0.7, lit)));
++    return mix(c * mix(vec3(1.0), AER, fg * cool.w), fog.rgb, fg);
++}
+ 
+ #ifdef LEAN
+ centroid in vec2 v_uv;
+@@ -197,9 +213,9 @@ float flat_shade(vec3 wp, vec3 dx, vec3 dy) {
+     vec3 c = cross(dx, dy);
+     if (dot(c, c) < 1e-20) { return 1.0; }
+     vec3 a = abs(c);
+-    if (a.x >= a.y && a.x >= a.z) { return S_X; }
+-    if (a.y >= a.z) { return (c.y * dot(c, eye.xyz - wp) > 0.0) ? 1.0 : S_BOT; }
+-    return S_Z;
++    if (a.x >= a.y && a.x >= a.z) { return boost(S_X); }
++    if (a.y >= a.z) { return (c.y * dot(c, eye.xyz - wp) > 0.0) ? 1.0 : boost(S_BOT); }
++    return boost(S_Z);
+ }
+ 
+ vec2 far_uv(vec2 uv, float k) {
+@@ -239,7 +255,7 @@ vec4 frag(bool cut, float shade) {
+         rgb = c.rgb;
+         if (textureLod(u_tex, ouv, 0.0).a >= 0.5) { rgb = atlas_sample_g(ouv, gx, gy).rgb * v_tint; }
+     }
+-    return vec4(mix(to_working(rgb * lit), fc, v_fg), cover);
++    return vec4(finish(rgb, lit, v_fg), cover);
+ }
+ 
+ // A biome's water: the tile keeps its own light and dark (its luminance against the tile's average, 0.1085 in linear light) and takes the
+@@ -260,6 +276,11 @@ void main() {
+     float s = 1.0;
+     if (v_k >= 0.0) { s = flat_shade(v_wp, dx, dy); }
+     o_color = frag(true, s);
++#elif defined(FS_GLOW)
++    float r = 1.0 - dot(v_uv, v_uv);
++    if (r <= 0.0) { discard; }
++    bool nofog = v_k >= 10.0;
++    o_color = vec4(to_working(v_tint), (v_k - (nofog ? 10.0 : 0.0)) * (nofog ? 1.0 : 1.0 - v_fg) * r * r);
+ #else
+     vec3 dx = dFdx(v_wp);
+     vec3 dy = dFdy(v_wp);
+@@ -276,8 +297,24 @@ void main() {
+     mediump vec4 c = atlas_sample_g(uv, gx, gy);
+     // The LoD debug sheet (tile 1066) is multiplied by its cyan; every water (real or a sheet, tile 1205) takes its biome's colour.
+     if (sheet && v_k < 1200.0) { c = vec4(c.rgb * v_tint, c.a); } else { c = vec4(water_rgb(c.rgb, v_tint), c.a); }
+-    mediump vec3 fc = fog.rgb;
+-    o_color = vec4(mix(to_working(c.rgb * (v_lit * flat_shade(v_wp, dx, dy))), fc, v_fg), c.a);
++    // Depth gradient (`fx.y`, it scales the biome's colour) and sun glint (`sun.w`), as `fs_water` in gpu/pipeline.rs.
++    mediump vec3 col = c.rgb;
++    mediump float a = c.a;
++    vec3 v = normalize(eye.xyz - v_wp);
++    if (fx.y > 0.0) {
++        float t = smoothstep(0.1, 0.9, abs(v.y));
++        col = col * mix(vec3(1.0), mix(WATER_DEEP, WATER_SHALLOW, t), fx.y);
++        a = mix(a, a * 0.82, t * fx.y);
++    }
++    mediump vec3 rgb = finish(col, v_lit * flat_shade(v_wp, dx, dy), v_fg);
++    vec3 n3 = cross(dx, dy);
++    if (sun.w > 0.0 && abs(n3.y) > 0.8 * length(n3)) {
++        vec3 n = normalize(vec3(0.06 * sin(v_wp.x * 2.3 + fx.x * 1.3) + 0.04 * sin(v_wp.z * 3.7 - fx.x * 0.9), 1.0, 0.06 * cos(v_wp.z * 2.1 + fx.x * 1.1) + 0.04 * cos(v_wp.x * 3.1 + fx.x * 0.8)));
++        float g = pow(max(dot(n, normalize(sun.xyz + v)), 0.0), 160.0) * sun.w * (1.0 - v_fg);
++        rgb += vec3(1.0, 0.95, 0.8) * g;
++        a = max(a, min(g, 1.0));
++    }
++    o_color = vec4(rgb, a);
+ #endif
+ }
+ #else
+@@ -318,7 +355,7 @@ void main() {
+         rgb = c.rgb;
+         if (textureLod(u_tex, (oo + t * 16.0) / SIZE, 0.0).a >= 0.5) { rgb = tile_sample(oo, t, gx, gy).rgb * v_tint; }
+     }
+-    o_color = vec4(mix(to_working(rgb * v_lit), fog.rgb, v_fg), cover);
++    o_color = vec4(finish(rgb, v_lit, v_fg), cover);
+ }
+ #endif
+ "#;
+@@ -352,6 +389,7 @@ pub fn chunk(which: Chunk, a2c: bool) -> Src {
+         Chunk::Solid => "#define FS_SOLID\n",
+         Chunk::Cutout => "#define FS_CUT\n",
+         Chunk::Entity | Chunk::Lod => "#define FS_CUT_FLAT\n",
++        Chunk::Glow => "#define FS_GLOW\n",
+         Chunk::Water | Chunk::LodWater => "",
+     };
+     Src {
+@@ -367,12 +405,23 @@ pub fn present(fxaa: bool, fast: bool) -> Src {
+     let fs = r#"
+ uniform sampler2D u_src;
+ uniform vec4 u_px; // 1 / scene size, 1 / surface size
++uniform vec4 u_grade; // the Vibrance dial's grade (`render::look`)
+ layout(location = 0) out vec4 o_color;
+ const float CAS_SHARPNESS = 0.5;
+ const float VIGNETTE = 0.04;
+ const mat3 R2020_TO_709 = mat3(vec3(1.66034406, -0.587571585, -0.0728802431), vec3(-0.124378681, 1.13283707, -0.00835867706), vec3(-0.0181127169, -0.100583791, 1.11862127));
+ vec3 tap(vec2 uv) { return sqrt(max(textureLod(u_src, uv, 0.0).rgb, vec3(0.0))); }
+ float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
++// Vibrance, S-curve and the warm / cool split (see `grade` in render/present.rs), in sqrt space; `u_grade.x` = 0 skips it.
++vec3 grade(vec3 c) {
++    vec3 g = sqrt(c);
++    float l = luma(g);
++    g = mix(vec3(l), g, 1.0 + u_grade.x * (1.0 - (max(g.r, max(g.g, g.b)) - min(g.r, min(g.g, g.b)))));
++    g = mix(g, g * g * (3.0 - 2.0 * g), u_grade.y);
++    float k = (smoothstep(0.2, 0.8, l) - 0.5) * 2.0 * u_grade.z;
++    g = clamp(g + vec3(k, 0.0, -k), vec3(0.0), vec3(1.0));
++    return g * g;
++}
+ vec3 enhanced(vec2 uv, vec2 o) {
+     vec3 m = tap(uv);
+     vec3 nw = tap(uv + vec2(-o.x, -o.y));
+@@ -408,6 +457,7 @@ void main() {
+     vec3 l = enhanced(uv, u_px.xy);
+ #endif
+     vec3 c = clamp(l * R2020_TO_709, vec3(0.0), vec3(1.0));
++    if (u_grade.x > 0.0) { c = grade(c); }
+     float k = uv.x * uv.y;
+     c = c * pow(max(16.0 * (k - uv.x) * (k - uv.y), 1e-4), VIGNETTE);
+     c = mix(1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, 12.92 * c, vec3(lessThanEqual(c, vec3(0.0031308))));
+diff --git a/mc-rs/src/gpu/gfx.rs b/mc-rs/src/gpu/gfx.rs
+index 80a1dd8..e696630 100644
+--- a/mc-rs/src/gpu/gfx.rs
++++ b/mc-rs/src/gpu/gfx.rs
+@@ -90,6 +90,11 @@ pub struct WorldDraw<'a> {
+     pub item_indices: u32,
+     pub outline: &'a crate::render::outline::Outline,
+     pub outline_indices: u32,
++    /// Halos and motes (`render::look`): the sprite buffers and how many indices of them to draw (0 = none this frame).
++    pub glow: &'a crate::render::look::GlowMesh,
++    pub glow_indices: u32,
++    /// The frame's look: the grade of the final pass and the chunk shaders' tones (`Look::OFF` changes nothing).
++    pub look: crate::render::look::Look,
+     pub hud: &'a [crate::render::hud::HudVertex],
+     pub camera: &'a crate::render::camera::FirstPersonCamera,
+     pub view: glam::Mat4,
+diff --git a/mc-rs/src/gpu/pipeline.rs b/mc-rs/src/gpu/pipeline.rs
+index 2a0d505..5fb7325 100644
+--- a/mc-rs/src/gpu/pipeline.rs
++++ b/mc-rs/src/gpu/pipeline.rs
+@@ -10,7 +10,7 @@ use glam::{Mat4, Vec3};
+ use wgpu::{BindGroup, Buffer, BufferUsages, Device, Queue, RenderPipeline, Texture};
+ use wgpu::util::DeviceExt;
+ 
+-use crate::render::{atlas, present::SCENE_FORMAT};
++use crate::render::{atlas, look::Look, present::SCENE_FORMAT};
+ 
+ #[repr(C)]
+ #[derive(Copy, Clone, Pod, Zeroable)]
+@@ -109,10 +109,26 @@ pub struct Uniforms {
+     /// y: radius (blocks) of the real translucent water (`fs_water`): `WATER_RANGE` with the LoD on, 1e9 (all of it) with the LoD off.
+     /// z: the biome's haze, `exp(-(d z)^2)` left of a thing d blocks away on top of the linear fog (`world::atmos`); 0 = none.
+     pub fogp: [f32; 4],
++    /// `render::look::Look`: rgb tone of lit surfaces, w = extra face-shade exponent.
++    pub warm: [f32; 4],
++    /// rgb tone of shaded surfaces, w = aerial tint strength.
++    pub cool: [f32; 4],
++    /// xyz: direction to the sun (moon at night), w: water glint strength.
++    pub sun: [f32; 4],
++    /// x: seconds, y: water depth gradient, z: leaf sway (blocks).
++    pub fx: [f32; 4],
++}
++
++impl Uniforms {
++    /// The look's four blocks (`Look::OFF` leaves every shader as it was).
++    pub fn with_look(mut self, l: &Look) -> Self {
++        (self.warm, self.cool, self.sun, self.fx) = (l.warm, l.cool, l.sun, l.fx);
++        self
++    }
+ }
+ 
+ const SHADER_SRC: &str = r#"
+-struct U { vp: mat4x4<f32>, eye: vec4<f32>, fog: vec4<f32>, fogp: vec4<f32> };
++struct U { vp: mat4x4<f32>, eye: vec4<f32>, fog: vec4<f32>, fogp: vec4<f32>, warm: vec4<f32>, cool: vec4<f32>, sun: vec4<f32>, fx: vec4<f32> };
+ @group(0) @binding(0) var<uniform> u: U;
+ @group(0) @binding(1) var samp: sampler;
+ @group(0) @binding(2) var tex: texture_2d<f32>;
+@@ -131,6 +147,20 @@ const R709_TO_XYZ = mat3x3<f32>(vec3<f32>(0.4124, 0.3576, 0.1805), vec3<f32>(0.2
+ const XYZ_TO_2020 = mat3x3<f32>(vec3<f32>(1.7166084, -0.3556621, -0.2533601), vec3<f32>(-0.6666829, 1.6164776, 0.0157685), vec3<f32>(0.0176422, -0.0427763, 0.94222867));
+ fn to_working(c: vec3<f32>) -> vec3<f32> { return (c * R709_TO_XYZ) * XYZ_TO_2020; }
+ 
++// `render::look`: the lit side takes `u.warm.rgb`, the shaded side `u.cool.rgb` (by how bright the face is, so the faces turned from the light
++// go bluer by themselves); the fog factor brings a faint blue, brighter tint on the way to the fog colour (aerial perspective, `u.cool.w`).
++// All of it is the identity with `Look::OFF`.
++const AER = vec3<f32>(0.95, 0.99, 1.07);
++// The water's multipliers at the deep and the shallow end (on the biome-coloured tile, linear): deeper is darker and bluer, shallower lifts
++// green and blue towards turquoise.
++const WATER_DEEP = vec3<f32>(0.55, 0.65, 0.85);
++const WATER_SHALLOW = vec3<f32>(0.80, 1.15, 1.10);
++fn boost(s: f32) -> f32 { return pow(s, 1.0 + u.warm.w); }
++fn finish(rgb: vec3<f32>, lit: f32, fg: f32) -> vec3<f32> {
++    let c = to_working(rgb * lit * mix(u.cool.rgb, u.warm.rgb, smoothstep(0.15, 0.7, lit)));
++    return mix(c * mix(vec3<f32>(1.0), AER, fg * u.cool.w), u.fog.rgb, fg);
++}
++
+ // The one atlas read. A minified tile (distance, a slanted face, `RENDER_SCALE`) is filtered bilinear + trilinear, and a tap of that
+ // footprint within half a texel of the tile edge reads the NEIGHBOURING tile, so the UV is clamped into its own 16-texel tile by half a
+ // texel of the coarsest mip the sampler will touch. Magnified (Nearest) it changes nothing. The flat-colour strip is read at mip 0.
+@@ -221,7 +251,7 @@ fn chunk_texel(w: vec3<u32>) -> vec2<f32> {
+ fn chunk_shade(code: u32) -> f32 {
+     var s = 1.0;
+     if (code & 3u) == 1u { s = 0.8; } else if (code & 3u) == 2u { s = 0.6; } else if (code & 3u) == 3u { s = 0.5; }
+-    return s * (1.0 - 0.2 * f32(code >> 2u));
++    return boost(s) * (1.0 - 0.2 * f32(code >> 2u));
+ }
+ fn chunk_lit(w: vec3<u32>) -> f32 {
+     return pow(brightness(f32((w.z >> 16u) & 63u) / 60.0, f32((w.z >> 22u) & 31u) / 30.0) * chunk_shade(w.z >> 27u), 2.2);
+@@ -245,8 +275,13 @@ struct VsC {
+ @vertex
+ fn vs_chunk(@location(0) w: vec3<u32>) -> VsC {
+     var o: VsC;
+-    let vpos = chunk_pos(w);
++    var vpos = chunk_pos(w);
+     let tile = f32(w.y & 1023u);
++    // Leaves (tiles 53, 133, 255) sway a little (`u.fx.z` blocks, 0 = off): a smooth function of the position, so shared corners move together.
++    if u.fx.z > 0.0 && (tile == 53.0 || tile == 133.0 || tile == 255.0) {
++        let t = u.fx.x;
++        vpos += vec3<f32>(sin(t * 1.3 + vpos.x * 0.9 + vpos.z * 0.6), 0.5 * sin(t * 1.9 + vpos.y * 1.1 + vpos.x * 0.7), cos(t * 1.1 + vpos.z * 0.8 + vpos.y * 0.5)) * u.fx.z;
++    }
+     o.pos = u.vp * vec4<f32>(vpos, 1.0);
+     o.uv = chunk_texel(w) / 16.0;
+     o.uvd = o.uv;
+@@ -279,9 +314,9 @@ fn flat_shade(wp: vec3<f32>, dx: vec3<f32>, dy: vec3<f32>) -> f32 {
+     let c = cross(dx, dy);
+     if dot(c, c) < 1e-20 { return 1.0; }
+     let a = abs(c);
+-    if a.x >= a.y && a.x >= a.z { return S_X; }
+-    if a.y >= a.z { return select(S_BOT, 1.0, c.y * dot(c, u.eye.xyz - wp) > 0.0); }
+-    return S_Z;
++    if a.x >= a.y && a.x >= a.z { return boost(S_X); }
++    if a.y >= a.z { return select(boost(S_BOT), 1.0, c.y * dot(c, u.eye.xyz - wp) > 0.0); }
++    return boost(S_Z);
+ }
+ 
+ // Far terrain (`world::lod`, `k >= 1000`) and its water sheet: the quad's uv is in BLOCKS, v up, and `k - 1000` is its terrain tile. The
+@@ -330,7 +365,7 @@ fn frag(in: VsOut, cut: bool, shade: f32) -> vec4<f32> {
+         rgb = c.rgb;
+         if textureSampleLevel(tex, samp, ouv, 0.0).a >= 0.5 { rgb = atlas_sample_g(ouv, gx, gy).rgb * in.tint; }
+     }
+-    return vec4<f32>(mix(to_working(rgb * lit), u.fog.rgb, in.fg), cover);
++    return vec4<f32>(finish(rgb, lit, in.fg), cover);
+ }
+ 
+ // The chunk layers' atlas read: the tile `o` (texel origin) at the position `t` (tiles) inside it, tile-clamped like `atlas_sample_g` (same pad,
+@@ -372,7 +407,7 @@ fn frag_chunk(in: VsC, cut: bool) -> vec4<f32> {
+         rgb = c.rgb;
+         if textureSampleLevel(tex, samp, (oo + t * 16.0) / size, 0.0).a >= 0.5 { rgb = tile_sample(oo, t, gx, gy).rgb * in.tint; }
+     }
+-    return vec4<f32>(mix(to_working(rgb * in.lit), u.fog.rgb, in.fg), cover);
++    return vec4<f32>(finish(rgb, in.lit, in.fg), cover);
+ }
+ 
+ // Chunk layers: no screen derivative for the shade, the vertex has it.
+@@ -418,7 +453,38 @@ fn fs_water(in: VsOut) -> @location(0) vec4<f32> {
+     var c = atlas_sample_g(uv, gx, gy);
+     // The LoD debug sheet (tile 1066) is multiplied by its cyan; every water (real or a sheet, tile 1205) takes its biome's colour.
+     if sheet && in.k < 1200.0 { c = vec4<f32>(c.rgb * in.tint, c.a); } else { c = vec4<f32>(water_rgb(c.rgb, in.tint), c.a); }
+-    return vec4<f32>(mix(to_working(c.rgb * in.lit * flat_shade(in.wp, dx, dy)), u.fog.rgb, in.fg), c.a);
++    // Depth gradient (`u.fx.y`): looking steeply down is shallow (the biome's water lifted towards turquoise), a grazing look the deep (darker, bluer).
++    // It scales the biome's colour, so a swamp stays green and a jungle teal. ponytail: the view angle stands in for the real depth (the meshes
++    // carry none); the upgrade is the water column's depth per vertex (the tint carries the biome's colour).
++    var col = c.rgb;
++    var a = c.a;
++    let v = normalize(u.eye.xyz - in.wp);
++    if u.fx.y > 0.0 {
++        let t = smoothstep(0.1, 0.9, abs(v.y));
++        col = col * mix(vec3<f32>(1.0), mix(WATER_DEEP, WATER_SHALLOW, t), u.fx.y);
++        a = mix(a, a * 0.82, t * u.fx.y);
++    }
++    var rgb = finish(col, in.lit * flat_shade(in.wp, dx, dy), in.fg);
++    // Sun (moon) glint on the tops: a Blinn highlight on a slightly rippled surface; `u.sun.w` = 0 skips it.
++    let n3 = cross(dx, dy);
++    if u.sun.w > 0.0 && abs(n3.y) > 0.8 * length(n3) {
++        let t = u.fx.x;
++        let n = normalize(vec3<f32>(0.06 * sin(in.wp.x * 2.3 + t * 1.3) + 0.04 * sin(in.wp.z * 3.7 - t * 0.9), 1.0, 0.06 * cos(in.wp.z * 2.1 + t * 1.1) + 0.04 * cos(in.wp.x * 3.1 + t * 0.8)));
++        let g = pow(max(dot(n, normalize(u.sun.xyz + v)), 0.0), 160.0) * u.sun.w * (1.0 - in.fg);
++        rgb += vec3<f32>(1.0, 0.95, 0.8) * g;
++        a = max(a, min(g, 1.0));
++    }
++    return vec4<f32>(rgb, a);
++}
++
++// A soft additive disc (`render::look`: halos of lava, torches, glowstone and the sun; motes). `k` is the strength (+ 10: no fog), the uv the
++// corner -1..1, the tint its colour; the blend is src alpha + one.
++@fragment
++fn fs_glow(in: VsOut) -> @location(0) vec4<f32> {
++    let r = 1.0 - dot(in.uv, in.uv);
++    if r <= 0.0 { discard; }
++    let nofog = in.k >= 10.0;
++    return vec4<f32>(to_working(in.tint), (in.k - select(0.0, 10.0, nofog)) * select(1.0 - in.fg, 1.0, nofog) * r * r);
+ }
+ "#;
+ 
+@@ -443,6 +509,12 @@ fn shader_source_with(a2c: bool) -> String {
+         .replace("@SX@", &format!("{:?}", 0.6f32.powf(2.2)))
+ }
+ 
++/// Source alpha x colour added to the frame: the halos' blend (the alpha channel is unused).
++const GLOW_BLEND: wgpu::BlendState = wgpu::BlendState {
++    color: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::SrcAlpha, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add },
++    alpha: wgpu::BlendComponent::OVER,
++};
++
+ pub struct ChunkPipeline {
+     /// Opaque terrain (`fs_solid`): no `discard`.
+     pub solid: RenderPipeline,
+@@ -459,6 +531,8 @@ pub struct ChunkPipeline {
+     pub lod: RenderPipeline,
+     /// Translucent water (`fs_water`), drawn after everything opaque.
+     pub water: RenderPipeline,
++    /// Additive soft discs (`fs_glow`): halos and motes, after the water, depth-tested and not written.
++    pub glow: RenderPipeline,
+     uniform_buf: Buffer,
+     atlas_tex: Texture,
+     pub bind_group: BindGroup,
+@@ -522,7 +596,7 @@ impl ChunkPipeline {
+             fragment: Some(wgpu::FragmentState {
+                 module: &shader,
+                 entry_point: Some(fs),
+-                targets: &[Some(wgpu::ColorTargetState { format: SCENE_FORMAT, blend: water.then_some(wgpu::BlendState::ALPHA_BLENDING), write_mask: wgpu::ColorWrites::ALL })],
++                targets: &[Some(wgpu::ColorTargetState { format: SCENE_FORMAT, blend: if fs == "fs_glow" { Some(GLOW_BLEND) } else { water.then_some(wgpu::BlendState::ALPHA_BLENDING) }, write_mask: wgpu::ColorWrites::ALL })],
+                 compilation_options: Default::default(),
+             }),
+             primitive: wgpu::PrimitiveState { cull_mode: (!water).then_some(wgpu::Face::Back), ..Default::default() },
+@@ -540,6 +614,7 @@ impl ChunkPipeline {
+             lod: make("lod", "vs_main", "fs_cut_flat", false, wgpu::DepthBiasState { constant: 8, slope_scale: 1.0, clamp: 0.0 }, false),
+             water: make("water", "vs_chunk_water", "fs_water", true, none, true),
+             lod_water: make("lod_water", "vs_water", "fs_water", true, none, false),
++            glow: make("glow", "vs_main", "fs_glow", true, none, false),
+             origins,
+             uniform_buf,
+             atlas_tex,
+@@ -549,13 +624,18 @@ impl ChunkPipeline {
+ 
+     /// The frame's uniforms, one write: the camera, the sky light the time of day takes away (/ 15), the fog (`far` 0 = off, < 0 = `GL_EXP`
+     /// density; `start` = fraction of `far` where the linear fog begins, 0 = a quarter; `water` = radius of the real water; `haze` = the biome's exp² density).
+-    pub fn frame(&self, queue: &Queue, view: Mat4, proj: Mat4, eye: Vec3, sky_sub: f32, fog: [f32; 3], far: f32, start: f32, water: f32, haze: f32) {
++    pub fn frame(&self, queue: &Queue, view: Mat4, proj: Mat4, eye: Vec3, sky_sub: f32, fog: [f32; 3], far: f32, start: f32, water: f32, haze: f32, look: &Look) {
+         let u = Uniforms {
+             view_proj: (proj * view).to_cols_array_2d(),
+             eye: eye.extend(sky_sub).to_array(),
+             fog: [fog[0], fog[1], fog[2], far],
+             fogp: [start, water, haze, 0.0],
+-        };
++            warm: [0.0; 4],
++            cool: [0.0; 4],
++            sun: [0.0; 4],
++            fx: [0.0; 4],
++        }
++        .with_look(look);
+         queue.write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&u));
+     }
+ 
+@@ -633,7 +713,7 @@ mod tests {
+         let src = shader_source();
+         let m = naga::front::wgsl::parse_str(&src).unwrap_or_else(|e| panic!("{}", e.emit_to_string(&src)));
+         naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all()).validate(&m).unwrap();
+-        for e in ["vs_main", "vs_water", "vs_chunk", "vs_chunk_water", "fs_solid", "fs_cut", "fs_cut_flat", "fs_water"] {
++        for e in ["vs_main", "vs_water", "vs_chunk", "vs_chunk_water", "fs_solid", "fs_cut", "fs_cut_flat", "fs_water", "fs_glow"] {
+             assert!(m.entry_points.iter().any(|p| p.name == e), "{e} missing");
+         }
+         assert!(!SHADER_SRC.contains("textureSample(tex"));
+@@ -689,7 +769,7 @@ mod tests {
+         let out_view = out.create_view(&Default::default());
+         let present = crate::render::present::Present::new(&device, &queue, (N, N), (N, N), fmt);
+         let eye = Vec3::new(0.0, 4.0, 0.0);
+-        pipe.frame(&queue, Mat4::look_at_rh(eye, Vec3::ZERO, Vec3::NEG_Z), Mat4::perspective_rh(1.2, 1.0, 0.05, 100.0), eye, 0.0, [0.5; 3], 0.0, 0.0, 12.0, 0.0);
++        pipe.frame(&queue, Mat4::look_at_rh(eye, Vec3::ZERO, Vec3::NEG_Z), Mat4::perspective_rh(1.2, 1.0, 0.05, 100.0), eye, 0.0, [0.5; 3], 0.0, 0.0, 12.0, 0.0, &Look::OFF);
+         let pixel = |lm: f32| -> [u8; 4] {
+             // Tile 1 (stone), shown once: texels 0..16 of it.
+             let (u0, u1, v1) = (0.0f32, 16.0f32, 16.0f32);
+@@ -712,8 +792,8 @@ mod tests {
+                 rp.set_bind_group(0, &pipe.bind_group, &[]);
+                 rp.set_vertex_buffer(0, vb.slice(..));
+                 rp.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
+-                for p in [&pipe.solid, &pipe.cutout, &pipe.entity, &pipe.lod, &pipe.water, &pipe.lod_water] {
+-                    rp.set_pipeline(p); // all six must be valid with this pass; water blends over: it is skipped by its radius test
++                for p in [&pipe.solid, &pipe.cutout, &pipe.entity, &pipe.lod, &pipe.water, &pipe.lod_water, &pipe.glow] {
++                    rp.set_pipeline(p); // all seven must be valid with this pass; water blends over: it is skipped by its radius test
+                     if std::ptr::eq(p, &pipe.solid) {
+                         rp.set_bind_group(1, &pipe.origins.group, &[DrawOrigins::offset(0)]);
+                         rp.draw_indexed(0..embeddium::quad_index::index_count(4), 0, 0..1);
+diff --git a/mc-rs/src/lib.rs b/mc-rs/src/lib.rs
+index 92d3ee9..381957f 100644
+--- a/mc-rs/src/lib.rs
++++ b/mc-rs/src/lib.rs
+@@ -36,6 +36,7 @@ use crate::render::atlas;
+ use crate::render::debug::Row;
+ use crate::render::items::{ItemMesh, SignView};
+ use crate::render::camera::{FirstPersonCamera, Frustum};
++use crate::render::look::{self, GlowMesh, Look};
+ use crate::render::outline::Outline;
+ use crate::render::color;
+ use crate::world::gen::overworld::WorldType;
+@@ -128,6 +129,10 @@ struct App {
+     /// The previous frame was a paused one (its idle wait is not a spike).
+     was_paused: bool,
+     frame_prev: Instant,
++    /// `render::look`: the emitters and flowers round the player, the drifting motes, and the sprite buffers of the halos and motes.
++    scan: look::Scan,
++    motes: look::Motes,
++    glow: GlowMesh,
+     // M12: touch UI state + HUD renderer.
+     touch: TouchUi,
+     /// Scratch vertex buffer for the HUD; cleared each frame, then emitted.
+@@ -255,6 +260,7 @@ impl App {
+         let touch = TouchUi::new(width, height);
+         let outline = Outline::new(be.gfx());
+         let item_mesh = ItemMesh::new(be.gfx());
++        let glow = GlowMesh::new(be.gfx());
+         let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as i64);
+ 
+         let mut app = Self {
+@@ -271,6 +277,9 @@ impl App {
+             worst_acc: 0.0,
+             was_paused: false,
+             frame_prev: Instant::now(),
++            scan: Default::default(),
++            motes: Default::default(),
++            glow,
+             touch,
+             hud_verts: Vec::with_capacity(256),
+             target: None,
+@@ -2135,6 +2144,26 @@ impl App {
+             log::info!("render: first frame, {}, {} chunks loaded", self.be.gpu_info(), self.chunks.loaded());
+         }
+         self.build_hud();
++        // The look (`render::look`): the grade, the light's tones, the water, the sway; then the halos and motes it allows, capped.
++        let sun_v = sky::sun_dir(angle);
++        let look = Look::new(&self.opts.look, &look::Env { sun: sun_v, rain, seconds: self.world_ticks as f32 / 20.0, nether: self.nether, underwater: eye_in_water });
++        let glow_indices = {
++            let dt = Instant::now().duration_since(self.frame_prev).as_secs_f32().min(0.25);
++            let mut quads = Vec::new();
++            if look.glow || look.motes > 0 {
++                self.scan.update(&self.chunks, (pcx, pcz));
++                let chunks = &self.chunks;
++                let mut water = |x: i32, y: i32, z: i32| matches!(chunks.block_loaded(x, y, z), Some(8 | 9)) && chunks.block_loaded(x, y + 1, z) == Some(0);
++                self.motes.update(dt, e, look.motes, if sun_v.y < 0.0 { 1.0 } else { 0.0 }, &self.scan, &mut water);
++                if look.glow {
++                    look::halos(&self.scan, e, &mut quads);
++                    quads.extend(look::sun_halo(&look, sun_v, e, self.camera.zfar, rain));
++                }
++                self.motes.quads(&mut quads);
++            }
++            let (right, up) = look::axes(&view);
++            self.glow.update(self.be.gfx(), &look::vertices(&quads, right, up))
++        };
+         let d = WorldDraw {
+             chunks: &self.chunks,
+             lod: self.lod.as_ref().filter(|_| lod_on),
+@@ -2142,6 +2171,9 @@ impl App {
+             item_indices,
+             outline: &self.outline,
+             outline_indices,
++            glow: &self.glow,
++            glow_indices,
++            look,
+             hud: &self.hud_verts,
+             camera: &self.camera,
+             view,
+diff --git a/mc-rs/src/options.rs b/mc-rs/src/options.rs
+index d57a870..f04a3e3 100644
+--- a/mc-rs/src/options.rs
++++ b/mc-rs/src/options.rs
+@@ -13,6 +13,7 @@ use crate::input::gamepad::{Btn, PadCfg, ACTS};
+ use crate::input::touch_ui::{ScreenEv, HOLD_SECS, SWING_SECS};
+ use crate::menu::{dirt, grad, rgb, scaled_gs, tw};
+ use crate::render::hud::{HudPipeline, HudVertex};
++use crate::render::look::LookCfg;
+ use crate::world::atmos::{self, AtmosCfg};
+ use crate::world::biome::Biome;
+ use std::path::{Path, PathBuf};
+@@ -43,12 +44,20 @@ pub enum Opt {
+     Renderer,
+     /// Added: the scene scale follows the GPU load (`gpu::context::Drs`) or stays at `START_PCT`. Takes effect at once.
+     DynamicRes,
++    /// Added: the one dial of the colour grade (`render::look`), 0 = off. Takes effect at once.
++    Vibrance,
++    /// Added (Effects screen): warm directional light, water depth + glint, soft halos on emitters, motion (off / low / on), aerial haze.
++    FxWarm,
++    FxWater,
++    FxGlow,
++    FxMotion,
++    FxHaze,
+ }
+ 
+ impl Opt {
+     /// `getEnumFloat`: a slider.
+     fn slider(self) -> bool {
+-        matches!(self, Opt::Music | Opt::Sound | Opt::Sensitivity | Opt::DigDelay)
++        matches!(self, Opt::Music | Opt::Sound | Opt::Sensitivity | Opt::DigDelay | Opt::Vibrance)
+     }
+ 
+     /// `lang/en_US.lang`'s `options.*`.
+@@ -72,6 +81,12 @@ impl Opt {
+             Opt::Post => "Post",
+             Opt::Renderer => "Renderer",
+             Opt::DynamicRes => "Dynamic Res",
++            Opt::Vibrance => "Vibrance",
++            Opt::FxWarm => "Warm Light",
++            Opt::FxWater => "Water Look",
++            Opt::FxGlow => "Glow",
++            Opt::FxMotion => "Motion",
++            Opt::FxHaze => "Haze",
+         }
+     }
+ }
+@@ -144,6 +159,8 @@ pub struct Settings {
+     pub renderer: u8,
+     /// The look of every biome's sky as the player tuned it (the sun button of Video Settings, `world::atmos`), `atmos_<n>:` in options.txt.
+     pub atmos: AtmosCfg,
++    /// The Vibrance dial and the effect switches (`render::look`), `look_*` in options.txt.
++    pub look: LookCfg,
+     path: Option<PathBuf>,
+ }
+ 
+@@ -174,6 +191,7 @@ impl Default for Settings {
+             post: 0,
+             renderer: 0,
+             atmos: AtmosCfg::default(),
++            look: LookCfg::default(),
+             path: None,
+         }
+     }
+@@ -211,6 +229,7 @@ impl Settings {
+                 ("renderer", _, Some(n)) if n <= 2 => s.renderer = n,
+                 (k, ..) if k.starts_with("pad_") => s.pad.load(k, v),
+                 (k, ..) if k.starts_with("atmos_") => s.atmos.load(k, v),
++                (k, ..) if k.starts_with("look_") => s.look.load(k, v),
+                 _ => {
+                     if let (Some(i), Ok(code)) = (KEY_IDS.iter().position(|id| k.strip_prefix("key_key.") == Some(*id)), v.parse::<u32>()) {
+                         s.keys[i] = code;
+@@ -233,6 +252,7 @@ impl Settings {
+         }
+         self.pad.save_into(&mut t);
+         self.atmos.save_into(&mut t);
++        self.look.save_into(&mut t);
+         if let Err(e) = std::fs::write(p, t) {
+             log::warn!("options: {e}");
+         }
+@@ -265,6 +285,7 @@ impl Settings {
+             Opt::Sound => self.sound,
+             Opt::Sensitivity => self.sensitivity,
+             Opt::DigDelay => self.dig_delay,
++            Opt::Vibrance => self.look.vibrance,
+             _ => 0.0,
+         }
+     }
+@@ -276,6 +297,7 @@ impl Settings {
+             Opt::Sound => self.sound = v,
+             Opt::Sensitivity => self.sensitivity = v,
+             Opt::DigDelay => self.dig_delay = v,
++            Opt::Vibrance => self.look.vibrance = v,
+             _ => {}
+         }
+     }
+@@ -297,6 +319,11 @@ impl Settings {
+             Opt::Post => self.post = (self.post + 1) % 3,
+             Opt::Renderer => self.renderer = (self.renderer + 1) % 3,
+             Opt::DynamicRes => self.dynamic_res = !self.dynamic_res,
++            Opt::FxWarm => self.look.warm = !self.look.warm,
++            Opt::FxWater => self.look.water = !self.look.water,
++            Opt::FxGlow => self.look.glow = !self.look.glow,
++            Opt::FxMotion => self.look.motion = (self.look.motion + 1) % 3,
++            Opt::FxHaze => self.look.haze = !self.look.haze,
+             _ => {}
+         }
+         self.save();
+@@ -323,6 +350,11 @@ impl Settings {
+                 Opt::AdvancedOpengl => onoff(self.advanced_opengl).into(),
+                 Opt::AmbientOcclusion => onoff(self.ambient_occlusion).into(),
+                 Opt::DynamicRes => onoff(self.dynamic_res).into(),
++                Opt::FxWarm => onoff(self.look.warm).into(),
++                Opt::FxWater => onoff(self.look.water).into(),
++                Opt::FxGlow => onoff(self.look.glow).into(),
++                Opt::FxMotion => ["OFF", "Low", "On"][self.look.motion.min(2) as usize].into(),
++                Opt::FxHaze => onoff(self.look.haze).into(),
+                 Opt::RenderDistance => ["Far", "Normal", "Short", "Tiny"][self.render_distance.min(3) as usize].into(),
+                 Opt::Difficulty => ["Peaceful", "Easy", "Normal", "Hard"][self.difficulty.min(3) as usize].into(),
+                 Opt::GuiScale => ["Auto", "Small", "Normal", "Large"][self.gui_scale.min(3) as usize].into(),
+@@ -353,6 +385,8 @@ pub enum OptScr {
+     Video,
+     /// The keys tab of Controls.
+     Controls,
++    /// The Effects page of Video Settings (`render::look`'s switches).
++    Fx,
+     /// The Controller tab (Controllify): its button bindings, and its tuning page.
+     Pad,
+     PadTune,
+@@ -365,6 +399,8 @@ enum Act {
+     Opt(Opt),
+     Lod,
+     Video,
++    /// Video Settings' Effects... button.
++    Fx,
+     Controls,
+     Done,
+     Key(usize),
+@@ -551,7 +587,13 @@ impl OptionsUi {
+                 w.push(wide(Act::Controls, top + 120.0 + 12.0, "Controls..."));
+                 w
+             }
+-            OptScr::Video => opts(&[Opt::Graphics, Opt::RenderDistance, Opt::AmbientOcclusion, Opt::FramerateLimit, Opt::Anaglyph, Opt::ViewBobbing, Opt::GuiScale, Opt::AdvancedOpengl, Opt::Msaa, Opt::Post, Opt::Renderer, Opt::DynamicRes]),
++            OptScr::Video => {
++                // The 7th row: the Vibrance dial and the way to the effect switches (Done stays at +168).
++                let mut w = opts(&[Opt::Graphics, Opt::RenderDistance, Opt::AmbientOcclusion, Opt::FramerateLimit, Opt::Anaglyph, Opt::ViewBobbing, Opt::GuiScale, Opt::AdvancedOpengl, Opt::Msaa, Opt::Post, Opt::Renderer, Opt::DynamicRes, Opt::Vibrance]);
++                w.push(Wid { act: Act::Fx, r: [cell(13).0, cell(13).1, 150.0, 20.0], label: "Effects...".into() });
++                w
++            }
++            OptScr::Fx => opts(&[Opt::FxWarm, Opt::FxWater, Opt::FxGlow, Opt::FxMotion, Opt::FxHaze]),
+             OptScr::Atmos => atmos_widgets(&self.ed, st),
+             OptScr::Controls => (0..KEY_NAMES.len())
+                 .map(|i| {
+@@ -642,6 +684,10 @@ impl OptionsUi {
+                 st.save();
+                 self.scr = OptScr::Video;
+             }
++            Act::Fx => {
++                st.save();
++                self.scr = OptScr::Fx;
++            }
+             Act::Controls => {
+                 st.save();
+                 self.scr = OptScr::Controls;
+@@ -682,7 +728,7 @@ impl OptionsUi {
+                     st.atmos.view = None; // the sky goes back to the biome under the player, easing over 2 s
+                     return Some(OptEv::Close); // back to the game menu
+                 }
+-                self.scr = OptScr::Main;
++                self.scr = if self.scr == OptScr::Fx { OptScr::Video } else { OptScr::Main };
+             }
+         }
+         None
+@@ -727,6 +773,7 @@ impl OptionsUi {
+             let title = match self.scr {
+                 OptScr::Main => "Options",
+                 OptScr::Video => "Video Settings",
++                OptScr::Fx => "Effects",
+                 _ => "Controls",
+             };
+             let ty = if matches!(self.scr, OptScr::Controls | OptScr::Pad | OptScr::PadTune) { 8.0 } else { 20.0 }; // room for the tabs
+@@ -1026,6 +1073,35 @@ mod tests {
+         assert!(st.text(Opt::Msaa).starts_with("MSAA: 4x"));
+     }
+ 
++    /// The Vibrance dial sits in Video Settings (conservative default, 0 = off), the switches one screen deeper (Done goes back to Video), and
++    /// everything reads back from options.txt.
++    #[test]
++    fn vibrance_and_effects_are_reachable_and_saved() {
++        let root = tmp("look");
++        let mut st = Settings::load(&root);
++        assert_eq!((st.text(Opt::Vibrance).as_str(), st.look.motion), ("Vibrance: 30%", 1));
++        let mut o = OptionsUi::new();
++        tap(&mut o, &mut st, "Video Settings...");
++        tap(&mut o, &mut st, "Effects...");
++        assert_eq!(o.scr, OptScr::Fx);
++        tap(&mut o, &mut st, "Motion: Low");
++        tap(&mut o, &mut st, "Glow: ON");
++        tap(&mut o, &mut st, "Haze: ON");
++        assert_eq!((st.look.motion, st.look.glow, st.look.haze), (2, false, false));
++        tap(&mut o, &mut st, "Motion: On");
++        assert_eq!(st.look.motion, 0, "off, low, on, off again");
++        tap(&mut o, &mut st, "Done");
++        assert_eq!(o.scr, OptScr::Video);
++        st.set_float(Opt::Vibrance, 0.0);
++        assert_eq!(st.text(Opt::Vibrance), "Vibrance: OFF");
++        st.save();
++        let back = Settings::load(&root);
++        assert_eq!(back.look, st.look);
++        std::fs::write(root.join("options.txt"), "look_vibrance:5\nlook_motion:7\n").unwrap();
++        let bad = Settings::load(&root);
++        assert!(bad.look.vibrance == 1.0 && bad.look.motion == LookCfg::default().motion, "out of range: clamped / ignored");
++    }
++
+     /// The Post button cycles Auto -> Full -> Fast -> Auto, reads back from options.txt, and a bad value falls back to Auto.
+     #[test]
+     fn post_option_cycles_and_round_trips() {
+diff --git a/mc-rs/src/render/look.rs b/mc-rs/src/render/look.rs
+new file mode 100644
+index 0000000..b00efc3
+--- /dev/null
++++ b/mc-rs/src/render/look.rs
+@@ -0,0 +1,564 @@
++//! Visual polish on top of the Console-Edition look, bounded and switchable. Pure CPU (the only GPU parts are `GlowMesh`'s two buffers),
++//! computed once a frame in `Look::new` and read by BOTH renderers (`WorldDraw::look`), so the wgpu and the GLES path cannot drift.
++//!
++//! * One dial: `vibrance` (Video Settings, 0 = the grade is off) scales the whole grade of the final pass: vibrance (not saturation: the
++//!   already vivid colours stay put), a gentle S-curve and a warm-highlight / cool-shadow split. Conservative default, bounded top end.
++//! * Five switches (Video Settings > Effects...), each can be turned off: `warm` (golden low sun, bluer shade, a little more face
++//!   shading), `water` (depth gradient + sun glint), `glow` (soft additive halos on lava, torches, glowstone and the sun only),
++//!   `motion` (off / low / on: leaf sway, a few drifting motes near flowers and water, light rays at a low sun), `haze` (aerial perspective).
++//! * Caps: at most `MAX_GLOW` halos, `MOTE_CAP` motes and `MAX_QUADS` sprites a frame, whatever the world holds.
++//!
++//! Nothing here is b1.7.3; every number is a taste value. UNVERIFIED on a device: all of them (by eye only).
++
++use crate::gpu::gfx::{Buf, Gfx};
++use crate::render::mesh::VF;
++use crate::world::chunks::ChunkManager;
++use glam::{Mat4, Vec3};
++use std::collections::HashMap;
++
++/// The Vibrance dial's default: about a third of its range, a light touch.
++pub const VIBRANCE_DEFAULT: f32 = 0.3;
++// The grade at dial 1.0 (the dial scales all three together).
++const GRADE_VIB: f32 = 0.5; // vibrance amount: a dull colour gains up to +50%, a vivid one almost nothing
++const GRADE_CURVE: f32 = 0.35; // S-curve blend
++const GRADE_SPLIT: f32 = 0.05; // warm / cool split, per channel
++// Light tones (multipliers of the lit colour, in the frame's linear space).
++const DAY_WARM: [f32; 3] = [1.015, 1.0, 0.985];
++const GOLD: [f32; 3] = [1.10, 0.97, 0.76];
++const DAY_COOL: [f32; 3] = [0.96, 0.985, 1.04];
++const DUSK_COOL: [f32; 3] = [0.90, 0.96, 1.09];
++/// Extra exponent of the face shades (1 + this): the sides and the underside of a block sink a little deeper.
++const FACE_BOOST: f32 = 0.10;
++/// How much of the distance tint the fog factor brings (`AER` in the shaders), 0..1.
++const AERIAL: f32 = 1.0;
++/// The water's pull towards its turquoise / deep blue, and the glint's brightness (sun; the moon's is `MOON_GLINT` of it).
++const WATER_DEPTH: f32 = 0.55;
++const GLINT: f32 = 0.9;
++const MOON_GLINT: f32 = 0.25;
++/// Leaf sway, blocks: low / on.
++const SWAY: [f32; 3] = [0.0, 0.025, 0.04];
++/// Motes alive at once: off / low / on.
++const MOTE_CAP: [usize; 3] = [0, 10, 24];
++
++/// What the player chose (`Settings::look`, `look_*:` lines of options.txt).
++#[derive(Clone, Debug, PartialEq)]
++pub struct LookCfg {
++    /// 0..1; 0 turns the grade off.
++    pub vibrance: f32,
++    pub warm: bool,
++    pub water: bool,
++    pub glow: bool,
++    /// 0 off, 1 low, 2 on.
++    pub motion: u8,
++    pub haze: bool,
++}
++
++impl Default for LookCfg {
++    fn default() -> Self {
++        Self { vibrance: VIBRANCE_DEFAULT, warm: true, water: true, glow: true, motion: 1, haze: true }
++    }
++}
++
++impl LookCfg {
++    /// One `look_*` line; a bad one is skipped.
++    pub fn load(&mut self, k: &str, v: &str) {
++        let (b, n) = (v == "true", v.parse::<f32>().ok());
++        match (k, n) {
++            ("look_vibrance", Some(f)) => self.vibrance = f.clamp(0.0, 1.0),
++            ("look_motion", Some(f)) if (0.0..=2.0).contains(&f) => self.motion = f as u8,
++            ("look_warm", _) => self.warm = b,
++            ("look_water", _) => self.water = b,
++            ("look_glow", _) => self.glow = b,
++            ("look_haze", _) => self.haze = b,
++            _ => {}
++        }
++    }
++
++    pub fn save_into(&self, t: &mut String) {
++        t.push_str(&format!("look_vibrance:{:.3}\nlook_warm:{}\nlook_water:{}\nlook_glow:{}\nlook_motion:{}\nlook_haze:{}\n", self.vibrance, self.warm, self.water, self.glow, self.motion, self.haze));
++    }
++}
++
++/// What a frame knows that the look depends on.
++pub struct Env {
++    /// Unit vector towards the sun (the moon is the opposite one).
++    pub sun: Vec3,
++    pub rain: f32,
++    pub seconds: f32,
++    pub nether: bool,
++    /// The eye is in water: no halos, motes or glints, no warm light (the underwater fog rules).
++    pub underwater: bool,
++}
++
++/// The frame's look: the uniform values both renderers write (`grade` to the final pass, the rest to the chunk shaders) plus what the CPU
++/// needs for sprites. `Look::OFF` changes nothing in any shader.
++#[derive(Copy, Clone, Debug, PartialEq)]
++pub struct Look {
++    /// Final pass: x vibrance amount, y S-curve blend, z warm / cool split (all 0 = the grade is skipped).
++    pub grade: [f32; 4],
++    /// Chunk shaders: rgb tone of a lit surface; w = extra face-shade exponent.
++    pub warm: [f32; 4],
++    /// rgb tone of a shaded surface; w = aerial tint strength.
++    pub cool: [f32; 4],
++    /// xyz: direction to the sun (the moon at night); w: glint strength (0 = none).
++    pub sun: [f32; 4],
++    /// x: seconds; y: water depth gradient strength; z: leaf sway in blocks; w: unused.
++    pub fx: [f32; 4],
++    /// Light rays fan out of a low sun (`sky::fan_vertices`).
++    pub rays: bool,
++    /// 0..1 how golden the light is (low sun, dry): the sun halo's colour and the rays follow it.
++    pub gold: f32,
++    /// Halos and motes are drawn.
++    pub glow: bool,
++    pub motes: usize,
++}
++
++fn smooth(a: f32, b: f32, x: f32) -> f32 {
++    let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
++    t * t * (3.0 - 2.0 * t)
++}
++
++fn lerp3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
++    std::array::from_fn(|i| a[i] + (b[i] - a[i]) * t)
++}
++
++impl Look {
++    pub const OFF: Look = Look { grade: [0.0; 4], warm: [1.0, 1.0, 1.0, 0.0], cool: [1.0, 1.0, 1.0, 0.0], sun: [0.0, 1.0, 0.0, 0.0], fx: [0.0; 4], rays: false, gold: 0.0, glow: false, motes: 0 };
++
++    pub fn new(c: &LookCfg, e: &Env) -> Self {
++        let mut l = Self::OFF;
++        let v = c.vibrance.clamp(0.0, 1.0);
++        l.grade = [GRADE_VIB * v, GRADE_CURVE * v, GRADE_SPLIT * v, 0.0];
++        l.fx[0] = e.seconds;
++        let dry = 1.0 - e.rain;
++        let y = e.sun.y;
++        // Gold peaks with the sun just above the horizon and is gone by 45% of the way up (or in rain).
++        l.gold = smooth(-0.12, 0.05, y) * (1.0 - smooth(0.05, 0.45, y)) * dry;
++        if e.nether {
++            return l; // the Nether keeps its own colours; only the grade (and the sprite switches' defaults) apply
++        }
++        if c.warm && !e.underwater {
++            let (w, k) = (lerp3(DAY_WARM, GOLD, l.gold), lerp3(DAY_COOL, DUSK_COOL, l.gold));
++            l.warm = [w[0], w[1], w[2], FACE_BOOST];
++            l.cool = [k[0], k[1], k[2], 0.0];
++        }
++        if c.haze && !e.underwater {
++            l.cool[3] = AERIAL * (1.0 - 0.5 * e.rain);
++        }
++        if c.water && !e.underwater {
++            l.fx[1] = WATER_DEPTH;
++            let (d, s) = if y >= 0.0 { (e.sun, GLINT) } else { (-e.sun, MOON_GLINT * GLINT) };
++            l.sun = [d.x, d.y, d.z, s * smooth(0.02, 0.2, d.y) * dry];
++        }
++        l.fx[2] = SWAY[c.motion.min(2) as usize];
++        l.rays = c.motion > 0 && !e.underwater;
++        l.glow = c.glow && !e.underwater;
++        l.motes = if e.underwater { 0 } else { MOTE_CAP[c.motion.min(2) as usize] };
++        l
++    }
++}
++
++// ---- Sprites: soft additive discs (halos and motes), one pipeline in each renderer (`fs_glow`) ----
++
++/// Quads a frame can hold: the buffers' size.
++pub const MAX_QUADS: usize = 80;
++/// Halos drawn at once (the nearest).
++const MAX_GLOW: usize = 36;
++/// Halos fade out between these distances, blocks.
++const GLOW_FADE: (f32, f32) = (24.0, 40.0);
++
++/// A soft disc facing the camera. `nofog`: the sun's, drawn at the far plane where the fog would erase it.
++#[derive(Copy, Clone, Debug)]
++pub struct Quad {
++    pub pos: Vec3,
++    pub half: f32,
++    /// Colour as seen (gamma), the vertex stage linearises it like any tint.
++    pub rgb: [f32; 3],
++    pub a: f32,
++    pub nofog: bool,
++}
++
++/// The block ids the scan keeps: lava (flowing, still), torch, glowstone, then the two flowers.
++const SCAN_IDS: [u8; 6] = [10, 11, 50, 89, 37, 38];
++const SCAN_R: i32 = 2;
++/// Cells kept per chunk and kind (halo emitters / flowers).
++const PER_CHUNK: usize = 16;
++
++fn is_flower(id: i32) -> bool {
++    matches!(id, 37 | 38)
++}
++
++/// The emitters and flowers around the player: one chunk a frame, round robin over the (2 * SCAN_R + 1)^2 around it, so a torch placed
++/// or broken shows within about half a second and the cost is one pass over 32 KB a frame.
++#[derive(Default)]
++pub struct Scan {
++    cache: HashMap<(i32, i32), Vec<[i32; 4]>>,
++    tick: usize,
++}
++
++impl Scan {
++    /// The chunk to rescan this frame, given the player's chunk.
++    fn next_key(&mut self, (cx, cz): (i32, i32)) -> (i32, i32) {
++        let n = 2 * SCAN_R + 1;
++        let i = (self.tick % (n * n) as usize) as i32;
++        self.tick += 1;
++        (cx + i % n - SCAN_R, cz + i / n - SCAN_R)
++    }
++
++    /// Keep what a scan of chunk `key` found (`[x, y, z, id]`): lava once per 4 blocks (a lake is one halo a few cells apart), the
++    /// rest as it comes, `PER_CHUNK` of each kind at most; drop chunks that are out of reach.
++    fn absorb(&mut self, key: (i32, i32), player: (i32, i32), cells: impl Iterator<Item = [i32; 4]>) {
++        let mut kept: Vec<[i32; 4]> = Vec::new();
++        let (mut glows, mut flowers) = (0, 0);
++        for c in cells {
++            let lava = matches!(c[3], 10 | 11);
++            if is_flower(c[3]) {
++                flowers += 1;
++                if flowers > PER_CHUNK {
++                    continue;
++                }
++            } else {
++                if glows >= PER_CHUNK || (lava && kept.iter().any(|k| matches!(k[3], 10 | 11) && (k[0] - c[0]).abs() + (k[1] - c[1]).abs() + (k[2] - c[2]).abs() < 4)) {
++                    continue;
++                }
++                glows += 1;
++            }
++            kept.push(c);
++        }
++        if kept.is_empty() {
++            self.cache.remove(&key);
++        } else {
++            self.cache.insert(key, kept);
++        }
++        self.cache.retain(|k, _| (k.0 - player.0).abs() <= SCAN_R + 1 && (k.1 - player.1).abs() <= SCAN_R + 1);
++    }
++
++    /// Rescan one chunk. Lava only counts where it meets air above (a halo on a buried lava cell would shine through the ground).
++    pub fn update(&mut self, chunks: &ChunkManager, player: (i32, i32)) {
++        let key = self.next_key(player);
++        let mut found = Vec::new();
++        chunks.find_blocks(key.0, key.1, &SCAN_IDS, |x, y, z, id| {
++            if !matches!(id, 10 | 11) || chunks.block_loaded(x, y + 1, z) == Some(0) {
++                found.push([x, y, z, id as i32]);
++            }
++        });
++        self.absorb(key, player, found.into_iter());
++    }
++
++    fn cells(&self) -> impl Iterator<Item = [i32; 4]> + '_ {
++        self.cache.values().flatten().copied()
++    }
++}
++
++/// The halo of an emitter: (colour, half size in blocks, strength, height of its centre above the cell's floor).
++fn halo(id: u8) -> ([f32; 3], f32, f32, f32) {
++    match id {
++        10 | 11 => ([1.0, 0.45, 0.12], 1.7, 0.42, 1.05),
++        50 => ([1.0, 0.62, 0.22], 1.0, 0.50, 0.75),
++        _ => ([1.0, 0.80, 0.42], 1.5, 0.46, 0.5), // glowstone
++    }
++}
++
++/// The halos of the emitters in `scan` nearest to `eye`, at most `MAX_GLOW`, faded out with distance. Each is pulled half a block
++/// towards the eye so a wall behind a torch does not cut it in half.
++pub fn halos(scan: &Scan, eye: Vec3, out: &mut Vec<Quad>) {
++    let mut near: Vec<(f32, [i32; 4])> = scan.cells().filter(|c| !is_flower(c[3])).map(|c| ((Vec3::new(c[0] as f32 + 0.5, c[1] as f32 + 0.5, c[2] as f32 + 0.5) - eye).length_squared(), c)).filter(|(d, _)| *d < GLOW_FADE.1 * GLOW_FADE.1).collect();
++    near.sort_by(|a, b| a.0.total_cmp(&b.0));
++    for (d2, c) in near.into_iter().take(MAX_GLOW) {
++        let (rgb, half, a, up) = halo(c[3] as u8);
++        let centre = Vec3::new(c[0] as f32 + 0.5, c[1] as f32 + up, c[2] as f32 + 0.5);
++        let to_eye = eye - centre;
++        let d = d2.sqrt();
++        if to_eye.length() < 0.8 {
++            continue; // the camera is inside the halo
++        }
++        let fade = 1.0 - smooth(GLOW_FADE.0, GLOW_FADE.1, d);
++        out.push(Quad { pos: centre + to_eye.normalize() * 0.5, half, rgb, a: a * fade, nofog: false });
++    }
++}
++
++/// The sun's halo: at 92% of the far plane in its direction (so terrain in front still hides it), soft, golden when the sun is low.
++pub fn sun_halo(l: &Look, sun: Vec3, eye: Vec3, far: f32, rain: f32) -> Option<Quad> {
++    let up = smooth(-0.10, 0.05, sun.y);
++    (l.glow && up > 0.0 && rain < 1.0).then(|| {
++        let d = far * 0.92;
++        Quad { pos: eye + sun * d, half: d * 0.22, rgb: lerp3([1.0, 0.95, 0.80], [1.0, 0.72, 0.35], l.gold), a: 0.30 * up * (1.0 - rain), nofog: true }
++    })
++}
++
++/// A drifting speck: pollen by day above a flower, a firefly at night above water or a flower.
++#[derive(Copy, Clone, Debug)]
++struct Mote {
++    p: Vec3,
++    age: f32,
++    life: f32,
++    phase: f32,
++    fly: bool,
++}
++
++#[derive(Default)]
++pub struct Motes {
++    list: Vec<Mote>,
++    seed: u32,
++    since: f32,
++}
++
++const SPAWN_EVERY: f32 = 0.35;
++const MOTE_RANGE: f32 = 14.0;
++
++impl Motes {
++    fn rand(&mut self) -> f32 {
++        // xorshift32; the seed starts at 0, which would stay 0.
++        self.seed = if self.seed == 0 { 0x9E37_79B9 } else { self.seed };
++        self.seed ^= self.seed << 13;
++        self.seed ^= self.seed >> 17;
++        self.seed ^= self.seed << 5;
++        (self.seed >> 8) as f32 / (1u32 << 24) as f32
++    }
++
++    pub fn len(&self) -> usize {
++        self.list.len()
++    }
++
++    /// Move the motes `dt` seconds, retire the old and far ones and, every `SPAWN_EVERY`, start one if under `cap`. `night` 0..1;
++    /// `surface(x, y, z)`: is that cell water with air above it (the firefly's place).
++    pub fn update(&mut self, dt: f32, eye: Vec3, cap: usize, night: f32, scan: &Scan, surface: &mut impl FnMut(i32, i32, i32) -> bool) {
++        for m in &mut self.list {
++            m.age += dt;
++            let t = m.age + m.phase;
++            let v = if m.fly { Vec3::new((t * 0.9).sin() * 0.35, (t * 1.7).sin() * 0.15, (t * 0.7).cos() * 0.35) } else { Vec3::new((t * 0.7).sin() * 0.15, 0.12, (t * 0.5).cos() * 0.15) };
++            m.p += v * dt;
++        }
++        self.list.retain(|m| m.age < m.life && (m.p - eye).length_squared() < (MOTE_RANGE + 8.0).powi(2));
++        self.list.truncate(cap);
++        self.since += dt;
++        if cap == 0 || self.list.len() >= cap || self.since < SPAWN_EVERY {
++            return;
++        }
++        self.since = 0.0;
++        let fly = night > 0.5;
++        let phase = self.rand() * 6.28;
++        let spawn = if !fly || self.rand() < 0.5 {
++            // Above a flower within range.
++            let near: Vec<[i32; 4]> = scan.cells().filter(|c| is_flower(c[3]) && (Vec3::new(c[0] as f32, c[1] as f32, c[2] as f32) - eye).length_squared() < MOTE_RANGE * MOTE_RANGE).collect();
++            (!near.is_empty()).then(|| near[(self.rand() * near.len() as f32) as usize % near.len()]).map(|c| Vec3::new(c[0] as f32 + 0.2 + 0.6 * self.rand(), c[1] as f32 + 0.5 + 0.6 * self.rand(), c[2] as f32 + 0.2 + 0.6 * self.rand()))
++        } else {
++            // Above water: a few random probes round the player.
++            (0..6).find_map(|_| {
++                let (dx, dz, dy) = ((self.rand() - 0.5) * 2.0 * MOTE_RANGE, (self.rand() - 0.5) * 2.0 * MOTE_RANGE, (self.rand() - 0.5) * 6.0);
++                let c = (eye + Vec3::new(dx, dy, dz)).floor();
++                surface(c.x as i32, c.y as i32, c.z as i32).then(|| c + Vec3::new(0.5, 1.2 + 1.2 * self.rand(), 0.5))
++            })
++        };
++        if let Some(p) = spawn {
++            let life = 5.0 + 4.0 * self.rand();
++            self.list.push(Mote { p, age: 0.0, life, phase, fly });
++        }
++    }
++
++    pub fn quads(&self, out: &mut Vec<Quad>) {
++        for m in &self.list {
++            let env = m.age.min(m.life - m.age).clamp(0.0, 1.0);
++            let q = if m.fly {
++                let pulse = 0.35 + 0.65 * (0.5 + 0.5 * (m.age * 4.0 + m.phase).sin());
++                Quad { pos: m.p, half: 0.07, rgb: [0.70, 1.0, 0.30], a: 0.9 * env * pulse, nofog: false }
++            } else {
++                Quad { pos: m.p, half: 0.045, rgb: [1.0, 0.92, 0.55], a: 0.7 * env, nofog: false }
++            };
++            out.push(q);
++        }
++    }
++}
++
++/// `quads` as float vertices of the entity layout (`mesh::VF`: position, uv, light, lm, tint): the corner (-1..1) is the uv, the light slot
++/// carries the strength (+ 10 for `nofog`), the tint the packed colour. `right` / `up` are the camera's axes.
++pub fn vertices(quads: &[Quad], right: Vec3, up: Vec3) -> Vec<f32> {
++    let mut v = Vec::with_capacity(quads.len().min(MAX_QUADS) * 4 * VF);
++    for q in quads.iter().take(MAX_QUADS) {
++        let tint = ((q.rgb[0].clamp(0.0, 1.0) * 255.0) as u32) << 16 | ((q.rgb[1].clamp(0.0, 1.0) * 255.0) as u32) << 8 | (q.rgb[2].clamp(0.0, 1.0) * 255.0) as u32;
++        for (cu, cv) in [(-1.0f32, -1.0f32), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
++            let p = q.pos + (right * cu + up * cv) * q.half;
++            v.extend_from_slice(&[p.x, p.y, p.z, cu, cv, q.a + if q.nofog { 10.0 } else { 0.0 }, 0.0, tint as f32]);
++        }
++    }
++    v
++}
++
++/// The camera's right and up axes in the world, from a view matrix (the rows of its rotation).
++pub fn axes(view: &Mat4) -> (Vec3, Vec3) {
++    (Vec3::new(view.x_axis.x, view.y_axis.x, view.z_axis.x), Vec3::new(view.x_axis.y, view.y_axis.y, view.z_axis.y))
++}
++
++/// The sprite buffers: `MAX_QUADS` quads of the entity vertex, and their (fixed) indices.
++pub struct GlowMesh {
++    pub vbuf: Buf,
++    pub ibuf: Buf,
++}
++
++impl GlowMesh {
++    pub fn new(gfx: Gfx) -> Self {
++        let idx: Vec<u32> = (0..MAX_QUADS as u32).flat_map(|i| [0, 1, 2, 2, 3, 0].map(|k| i * 4 + k)).collect();
++        Self { vbuf: gfx.writable((MAX_QUADS * 4 * VF * 4) as u64, false), ibuf: gfx.index(bytemuck::cast_slice(&idx)) }
++    }
++
++    /// Upload `verts` (from `vertices`); returns the index count to draw.
++    pub fn update(&self, gfx: Gfx, verts: &[f32]) -> u32 {
++        if verts.is_empty() {
++            return 0;
++        }
++        gfx.write(&self.vbuf, 0, bytemuck::cast_slice(verts));
++        (verts.len() / (4 * VF) * 6) as u32
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn env(sun_y: f32) -> Env {
++        Env { sun: Vec3::new((1.0 - sun_y * sun_y).sqrt(), sun_y, 0.0), rain: 0.0, seconds: 3.0, nether: false, underwater: false }
++    }
++
++    /// Options.txt round trip, a bad line is skipped and the dial stays inside 0..1.
++    #[test]
++    fn config_round_trips_and_stays_bounded() {
++        let mut c = LookCfg { vibrance: 0.8, warm: false, water: true, glow: false, motion: 2, haze: false };
++        let mut t = String::new();
++        c.save_into(&mut t);
++        let mut back = LookCfg::default();
++        t.lines().filter_map(|l| l.split_once(':')).for_each(|(k, v)| back.load(k, v));
++        assert_eq!(back, c);
++        c.load("look_vibrance", "7");
++        c.load("look_motion", "9");
++        c.load("look_vibrance", "nope");
++        assert!(c.vibrance == 1.0 && c.motion == 2);
++    }
++
++    /// Dial 0 is no grade at all; every effect off is `Look::OFF` apart from the clock; the default is a light touch.
++    #[test]
++    fn off_changes_nothing_and_the_default_is_conservative() {
++        let off = LookCfg { vibrance: 0.0, warm: false, water: false, glow: false, motion: 0, haze: false };
++        let l = Look::new(&off, &env(0.05));
++        assert_eq!((l.grade, l.warm, l.cool, l.sun, l.rays, l.motes), (Look::OFF.grade, Look::OFF.warm, Look::OFF.cool, Look::OFF.sun, false, 0));
++        assert_eq!((l.fx[1], l.fx[2]), (0.0, 0.0));
++        let d = Look::new(&LookCfg::default(), &env(0.9));
++        assert!(d.grade[0] > 0.0 && d.grade[0] <= 0.2 && d.grade[1] <= 0.12 && d.grade[2] <= 0.02, "{:?}", d.grade);
++        let top = Look::new(&LookCfg { vibrance: 1.0, ..LookCfg::default() }, &env(0.9));
++        assert!(top.grade[0] <= GRADE_VIB && top.grade[1] <= GRADE_CURVE && top.grade[2] <= GRADE_SPLIT);
++    }
++
++    /// The light is golden with the sun low and plain at noon; shade is bluer than light; rain and the Nether take it away.
++    #[test]
++    fn light_is_golden_at_a_low_sun_only() {
++        let c = LookCfg::default();
++        let (low, noon) = (Look::new(&c, &env(0.05)), Look::new(&c, &env(0.95)));
++        assert!(low.gold > 0.95 && noon.gold == 0.0);
++        assert!(low.warm[0] > low.warm[2] + 0.25 && (noon.warm[0] - noon.warm[2]).abs() < 0.05);
++        assert!(low.cool[2] > low.cool[0] && noon.cool[2] > noon.cool[0]);
++        let mut wet = env(0.05);
++        wet.rain = 1.0;
++        assert_eq!(Look::new(&c, &wet).gold, 0.0);
++        let mut hell = env(0.05);
++        hell.nether = true;
++        let n = Look::new(&c, &hell);
++        assert_eq!((n.warm, n.cool, n.rays, n.glow), (Look::OFF.warm, Look::OFF.cool, false, false));
++    }
++
++    /// The glint needs the sun (or moon) above the horizon and dry weather; under water nothing but the grade is left.
++    #[test]
++    fn glint_and_underwater() {
++        let c = LookCfg::default();
++        assert!(Look::new(&c, &env(0.6)).sun[3] > 0.5 && Look::new(&c, &env(-0.6)).sun[3] < 0.3 && Look::new(&c, &env(-0.6)).sun[1] > 0.0);
++        assert_eq!(Look::new(&c, &env(-0.01)).sun[3], 0.0);
++        let mut w = env(0.3);
++        w.underwater = true;
++        let u = Look::new(&c, &w);
++        assert_eq!((u.warm, u.cool[3], u.sun[3], u.fx[1], u.glow, u.motes), (Look::OFF.warm, 0.0, 0.0, 0.0, false, 0));
++        assert!(u.grade[0] > 0.0);
++    }
++
++    /// A lake of lava is one halo per 4 blocks, a chunk keeps at most `PER_CHUNK` of each kind, and chunks out of reach are dropped.
++    #[test]
++    fn scan_dedupes_lava_and_caps_per_chunk() {
++        let mut s = Scan::default();
++        let lava = (0..8).flat_map(|x| (0..8).map(move |z| [x, 10, z, 11]));
++        let torches = (0..40).map(|i| [i % 16, 20, i / 16, 50]);
++        s.absorb((0, 0), (0, 0), lava.chain(torches));
++        let c = &s.cache[&(0, 0)];
++        let (l, t) = (c.iter().filter(|c| c[3] == 11).count(), c.iter().filter(|c| c[3] == 50).count());
++        let lava: Vec<_> = c.iter().filter(|c| c[3] == 11).collect();
++        assert!(l >= 1 && l < 16 && t + l <= PER_CHUNK, "{l} lava {t} torches");
++        assert!(lava.iter().enumerate().all(|(i, a)| lava[i + 1..].iter().all(|b| (a[0] - b[0]).abs() + (a[1] - b[1]).abs() + (a[2] - b[2]).abs() >= 4)));
++        s.absorb((9, 9), (9, 9), std::iter::empty()); // the player moved far away: (0, 0) goes
++        assert!(s.cache.is_empty());
++        // round robin visits every chunk of the square before repeating
++        let seen: std::collections::HashSet<_> = (0..25).map(|_| s.next_key((5, 5))).collect();
++        assert_eq!(seen.len(), 25);
++    }
++
++    /// Halos are the nearest `MAX_GLOW`, faded with distance, none inside the camera; the sun's sits at the far plane and is hidden below the horizon.
++    #[test]
++    fn halos_are_capped_and_fade() {
++        let mut s = Scan::default();
++        s.absorb((0, 0), (0, 0), (0..16).map(|i| [i, 70, 3, 89]));
++        s.absorb((1, 0), (0, 0), (0..16).map(|i| [16 + i, 70, 3, 50]));
++        s.absorb((-1, 0), (0, 0), (0..16).map(|i| [-16 + i, 70, 3, 11]));
++        let mut out = Vec::new();
++        halos(&s, Vec3::new(8.0, 70.0, 8.0), &mut out);
++        assert!(!out.is_empty() && out.len() <= MAX_GLOW);
++        let mut far = Vec::new();
++        halos(&s, Vec3::new(500.0, 70.0, 8.0), &mut far);
++        assert!(far.is_empty(), "nothing within reach");
++        let l = Look::new(&LookCfg::default(), &env(0.3));
++        let q = sun_halo(&l, Vec3::new(0.0, 0.5, 0.75f32.sqrt()), Vec3::ZERO, 1000.0, 0.0).unwrap();
++        assert!((q.pos.length() - 920.0).abs() < 1e-2 && q.nofog && q.a > 0.0);
++        assert!(sun_halo(&l, Vec3::new(1.0, -0.4, 0.0), Vec3::ZERO, 1000.0, 0.0).is_none());
++        assert!(sun_halo(&Look::OFF, Vec3::Y, Vec3::ZERO, 1000.0, 0.0).is_none());
++    }
++
++    /// Motes never exceed the cap, come only from flowers by day, fade in and out, and `cap` 0 clears them.
++    #[test]
++    fn motes_are_capped_and_local() {
++        let mut s = Scan::default();
++        s.absorb((0, 0), (0, 0), (0..6).map(|i| [i, 64, 2, 38]));
++        let mut m = Motes::default();
++        let eye = Vec3::new(3.0, 66.0, 3.0);
++        let mut water = |_: i32, _: i32, _: i32| false;
++        for _ in 0..400 {
++            m.update(0.1, eye, 5, 0.0, &s, &mut water);
++            assert!(m.len() <= 5);
++        }
++        assert!(m.len() > 0, "flowers feed pollen by day");
++        let mut q = Vec::new();
++        m.quads(&mut q);
++        assert!(q.iter().all(|q| (q.pos - eye).length() < MOTE_RANGE + 8.0 && q.a >= 0.0 && q.a <= 0.7 && !q.nofog));
++        let mut none = Scan::default();
++        none.absorb((0, 0), (0, 0), std::iter::empty());
++        let mut dry = Motes::default();
++        for _ in 0..100 {
++            dry.update(0.1, eye, 5, 1.0, &none, &mut water); // night, no flowers, no water: nothing starts
++        }
++        assert_eq!(dry.len(), 0);
++        let mut shore = |_: i32, _: i32, _: i32| true;
++        for _ in 0..100 {
++            dry.update(0.1, eye, 5, 1.0, &none, &mut shore);
++        }
++        assert!(dry.len() > 0, "fireflies over water at night");
++        m.update(0.1, eye, 0, 0.0, &s, &mut water);
++        assert_eq!(m.len(), 0);
++    }
++
++    /// The quad vertices fill the entity layout, carry the strength in the light slot and stay within the buffer.
++    #[test]
++    fn vertices_fit_the_layout() {
++        let q = Quad { pos: Vec3::new(1.0, 2.0, 3.0), half: 0.5, rgb: [1.0, 0.5, 0.0], a: 0.4, nofog: true };
++        let v = vertices(&[q, q], Vec3::X, Vec3::Y);
++        assert_eq!(v.len(), 2 * 4 * VF);
++        assert_eq!((v[0], v[1], v[3], v[4]), (0.5, 1.5, -1.0, -1.0));
++        assert!((v[5] - 10.4).abs() < 1e-4 && v[6] == 0.0 && v[7] == (255u32 << 16 | 127 << 8) as f32);
++        let many = vec![q; MAX_QUADS + 20];
++        assert_eq!(vertices(&many, Vec3::X, Vec3::Y).len(), MAX_QUADS * 4 * VF);
++        let (r, u) = axes(&Mat4::IDENTITY);
++        assert_eq!((r, u), (Vec3::X, Vec3::Y));
++    }
++}
+diff --git a/mc-rs/src/render/mod.rs b/mc-rs/src/render/mod.rs
+index 01aa67b..9deff8c 100644
+--- a/mc-rs/src/render/mod.rs
++++ b/mc-rs/src/render/mod.rs
+@@ -15,3 +15,4 @@ pub mod present;
+ pub mod sky;
+ pub mod weather;
+ pub mod shoulder;
++pub mod look;
+diff --git a/mc-rs/src/render/present.rs b/mc-rs/src/render/present.rs
+index 62b8a69..5c32923 100644
+--- a/mc-rs/src/render/present.rs
++++ b/mc-rs/src/render/present.rs
+@@ -111,7 +111,7 @@ fn multisample_of(count: u32, alpha_to_coverage: bool) -> wgpu::MultisampleState
+ }
+ 
+ const SHADER: &str = r#"
+-struct U { px: vec4<f32> }; // 1 / scene size, 1 / surface size
++struct U { px: vec4<f32>, grade: vec4<f32> }; // 1 / scene size, 1 / surface size; the Vibrance dial's grade (`render::look`)
+ @group(0) @binding(0) var<uniform> u: U;
+ @group(0) @binding(1) var samp: sampler;
+ @group(0) @binding(2) var src: texture_2d<f32>;
+@@ -133,6 +133,18 @@ fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+ fn tap(uv: vec2<f32>) -> vec3<f32> { return sqrt(max(textureSampleLevel(src, samp, uv, 0.0).rgb, vec3<f32>(0.0))); }
+ fn luma(c: vec3<f32>) -> f32 { return dot(c, vec3<f32>(0.299, 0.587, 0.114)); }
+ 
++// The grade (`u.grade`: vibrance amount, S-curve blend, warm / cool split; all 0 = skipped), in sqrt space like the taps. Vibrance lifts the
++// colours that have little saturation and leaves the vivid ones alone (a saturation boost would push the greens and blues first).
++fn grade(c: vec3<f32>) -> vec3<f32> {
++    var g = sqrt(c);
++    let l = luma(g);
++    g = mix(vec3<f32>(l), g, 1.0 + u.grade.x * (1.0 - (max(g.r, max(g.g, g.b)) - min(g.r, min(g.g, g.b)))));
++    g = mix(g, g * g * (3.0 - 2.0 * g), u.grade.y);
++    let k = (smoothstep(0.2, 0.8, l) - 0.5) * 2.0 * u.grade.z; // + in the highlights, - in the shadows
++    g = clamp(g + vec3<f32>(k, 0.0, -k), vec3<f32>(0.0), vec3<f32>(1.0));
++    return g * g;
++}
++
+ // The one full-screen pass: (FXAA +) CAS on the scene, bilinear upscale, Rec. 2020 -> 709, vignette, sRGB. `uv` is the surface pixel's
+ // place in the scene; the taps are one scene texel apart, so at a render scale below 1 CAS sharpens exactly what the upscale softens.
+ fn enhanced(uv: vec2<f32>, o: vec2<f32>) -> vec3<f32> {
+@@ -171,6 +183,7 @@ fn fs_fin(@builtin(position) p: vec4<f32>) -> @location(0) vec4<f32> {
+     var l: vec3<f32>;
+     if FAST { l = max(textureSampleLevel(src, samp, uv, 0.0).rgb, vec3<f32>(0.0)); } else { l = enhanced(uv, u.px.xy); }
+     var c = clamp((l * R2020_TO_XYZ) * XYZ_TO_709, vec3<f32>(0.0), vec3<f32>(1.0));
++    if u.grade.x > 0.0 { c = grade(c); }
+     let k = uv.x * uv.y;
+     c = c * pow(max(16.0 * (k - uv.x) * (k - uv.y), 1e-4), VIGNETTE);
+     // The swap chain is sRGB on most phones (the hardware encodes); otherwise encode here.
+@@ -239,7 +252,7 @@ impl Present {
+             cache: None,
+         });
+         let samp = device.create_sampler(&wgpu::SamplerDescriptor { mag_filter: wgpu::FilterMode::Linear, min_filter: wgpu::FilterMode::Linear, address_mode_u: wgpu::AddressMode::ClampToEdge, address_mode_v: wgpu::AddressMode::ClampToEdge, ..Default::default() });
+-        let ubuf = device.create_buffer(&wgpu::BufferDescriptor { label: Some("present_u"), size: 16, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
++        let ubuf = device.create_buffer(&wgpu::BufferDescriptor { label: Some("present_u"), size: 32, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+         let (scene_v, msaa, bind) = Self::size(device, queue, &layout, &samp, &ubuf, scene, surface);
+         Self { scene: scene_v, msaa, fin, layout, samp, ubuf, bind }
+     }
+@@ -267,6 +280,11 @@ impl Present {
+         (self.scene, self.msaa, self.bind) = Self::size(device, queue, &self.layout, &self.samp, &self.ubuf, scene, surface);
+     }
+ 
++    /// The Vibrance dial's grade for this frame (`Look::grade`), read by the final pass.
++    pub fn set_grade(&self, queue: &Queue, grade: [f32; 4]) {
++        queue.write_buffer(&self.ubuf, 16, bytemuck::bytes_of(&grade));
++    }
++
+     /// The 1-sample scene (what the final pass reads). The scene pass draws into `scene_attachment` instead.
+     pub fn scene_view(&self) -> &TextureView {
+         &self.scene
+diff --git a/mc-rs/src/render/sky.rs b/mc-rs/src/render/sky.rs
+index 74d9aab..36209e7 100644
+--- a/mc-rs/src/render/sky.rs
++++ b/mc-rs/src/render/sky.rs
+@@ -107,7 +107,10 @@ pub fn params(f: &SkyFrame, camera: &FirstPersonCamera) -> Params {
+ /// 100 out towards the sun's horizon point with the glow colour, the ring of radius 120 (rising 40 * alpha on the sun's side) fully
+ /// transparent. The Java builds it with three `glRotatef`; written out, the ring is `h * 120 cos f + up * 40 a cos f + side * 120 sin f`
+ /// with `h` the horizontal direction of the sun. Colours are linearised (`color::legacy_lin`) like the rest of the legacy sky.
+-pub fn fan_vertices(angle: f32, rain: f32, sun: Vec3) -> Vec<[f32; 7]> {
++///
++/// `rays` (`render::look`, the Motion option) adds `RAYS` thin triangles that fan out of the sun's disc over the sky above it and fade to
++/// nothing at their tips: light rays, only here, where the sun is low (the fan is empty at noon and at night).
++pub fn fan_vertices(angle: f32, rain: f32, sun: Vec3, rays: bool) -> Vec<[f32; 7]> {
+     let (Some(c), h) = (sky::sunrise_color(angle), Vec3::new(sun.x, 0.0, sun.z).normalize_or_zero()) else { return Vec::new() };
+     if h == Vec3::ZERO { return Vec::new(); }
+     let rgb = crate::render::color::legacy_lin([c[0], c[1], c[2]]);
+@@ -116,12 +119,28 @@ pub fn fan_vertices(angle: f32, rain: f32, sun: Vec3) -> Vec<[f32; 7]> {
+     let ring = |f: f32| h * (120.0 * f.cos()) + Vec3::Y * (40.0 * a * f.cos()) + side * (120.0 * f.sin());
+     let v = |p: Vec3, alpha: f32| [p.x, p.y, p.z, rgb[0], rgb[1], rgb[2], alpha];
+     let centre = v(h * 100.0, a);
+-    (0..16).flat_map(|j| {
++    let mut out: Vec<[f32; 7]> = (0..16).flat_map(|j| {
+         let (f0, f1) = (j as f32 * TAU / 16.0, (j + 1) as f32 * TAU / 16.0);
+         [centre, v(ring(f0), 0.0), v(ring(f1), 0.0)]
+-    }).collect()
++    }).collect();
++    if rays {
++        let (s, side) = (sun.normalize_or_zero(), Vec3::Y.cross(h));
++        let up = s.cross(Vec3::Y.cross(s).normalize_or_zero()); // up the sky, perpendicular to the sun's direction
++        for i in 0..RAYS {
++            let (th, hash) = ((i as f32 - 3.0) / 3.0 * 1.1, ((i * 37) % 7) as f32 / 7.0); // spread over +-63 degrees, each its own length and strength
++            let (d, perp) = (up * th.cos() + side * th.sin(), side * th.cos() - up * th.sin());
++            let (p, al) = (s * 100.0, a * 0.16 * (0.6 + 0.4 * hash));
++            out.extend([v(p + perp * 3.5, al), v(p - perp * 3.5, al), v(p + d * (55.0 + 30.0 * hash), 0.0)]);
++        }
++    }
++    out
+ }
+ 
++/// Light rays of `fan_vertices`.
++const RAYS: usize = 7;
++/// Vertices the fan and its rays can take: the size of the fan's vertex buffers (16 + `RAYS` triangles).
++pub const FAN_MAX: usize = (16 + RAYS) * 3;
++
+ /// Stars and sunrise fan of the Console-Edition sky (see `fs_geo` in `sky.wgsl`).
+ struct Geo {
+     stars: wgpu::RenderPipeline,
+@@ -302,7 +321,7 @@ impl SkyRenderer {
+                 star_v: buf("sky_star_v", bytemuck::cast_slice(&verts), wgpu::BufferUsages::VERTEX),
+                 star_i: buf("sky_star_i", bytemuck::cast_slice(&idx), wgpu::BufferUsages::INDEX),
+                 star_n: idx.len() as u32,
+-                fan_v: device.create_buffer(&wgpu::BufferDescriptor { label: Some("sky_fan_v"), size: 48 * 28, usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }),
++                fan_v: device.create_buffer(&wgpu::BufferDescriptor { label: Some("sky_fan_v"), size: FAN_MAX as u64 * 28, usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }),
+                 fan_n: Default::default(),
+                 star_alpha: Default::default(),
+             }
+@@ -323,7 +342,7 @@ impl SkyRenderer {
+ 
+     /// Legacy sky colours (linear working space), the biome's atmosphere (`a`: haze, clouds, star tint) and the eye. Call after `update`, which
+     /// rewrites the whole block. Also the star brightness (`World.getStarBrightness` x (1 - rain) x the biome's) and the sunrise fan of this `angle`.
+-    pub fn set_legacy(&self, queue: &wgpu::Queue, zenith: [f32; 3], horizon: [f32; 3], angle: f32, rain: f32, a: &Frame, eye: Vec3) {
++    pub fn set_legacy(&self, queue: &wgpu::Queue, zenith: [f32; 3], horizon: [f32; 3], angle: f32, rain: f32, a: &Frame, eye: Vec3, rays: bool) {
+         use std::sync::atomic::Ordering::Relaxed;
+         let stars = sky::star_brightness(angle) * (1.0 - rain) * a.star[3];
+         let v = [[zenith[0], zenith[1], zenith[2], 0.0], [horizon[0], horizon[1], horizon[2], 0.0], [a.star[0], a.star[1], a.star[2], stars]];
+@@ -331,7 +350,7 @@ impl SkyRenderer {
+         let tail = [[eye.x, eye.y, eye.z, a.density], a.cloud, a.cloudp, a.haze];
+         queue.write_buffer(&self.uniform_buffer, std::mem::offset_of!(Params, eye) as u64, bytemuck::bytes_of(&tail));
+         if let Some(g) = &self.geo {
+-            let fan = fan_vertices(angle, rain, sky::sun_dir(angle));
++            let fan = fan_vertices(angle, rain, sky::sun_dir(angle), rays);
+             if !fan.is_empty() {
+                 queue.write_buffer(&g.fan_v, 0, bytemuck::cast_slice(&fan));
+             }
+@@ -402,15 +421,19 @@ mod tests {
+     /// The sunrise fan exists only near the horizon, is centred 100 out towards the sun's horizon point, fades to nothing at its rim.
+     #[test]
+     fn fan_hugs_the_sun_at_the_horizon() {
+-        assert!(fan_vertices(0.0, 0.0, sky::sun_dir(0.0)).is_empty(), "no fan at noon");
++        assert!(fan_vertices(0.0, 0.0, sky::sun_dir(0.0), true).is_empty(), "no fan (and no rays) at noon");
+         let sun = sky::sun_dir(0.25); // sunset: the sun sits on the horizon
+-        let fan = fan_vertices(0.25, 0.0, sun);
++        let fan = fan_vertices(0.25, 0.0, sun, false);
+         assert_eq!(fan.len(), 16 * 3);
+         let h = Vec3::new(sun.x, 0.0, sun.z).normalize();
+         let c = Vec3::new(fan[0][0], fan[0][1], fan[0][2]);
+         assert!((c - h * 100.0).length() < 1e-3 && fan[0][6] > 0.0);
+         assert!(fan.chunks(3).all(|t| t[1][6] == 0.0 && t[2][6] == 0.0 && t[0][6] == fan[0][6]));
+-        assert!(fan_vertices(0.25, 1.0, sun).iter().all(|v| v[6] == 0.0), "rain hides the glow");
++        assert!(fan_vertices(0.25, 1.0, sun, true).iter().all(|v| v[6] == 0.0), "rain hides the glow and the rays");
++        // rays: seven more triangles, each a base at the sun and a tip with no alpha, never brighter than a sixth of the glow
++        let with = fan_vertices(0.25, 0.0, sun, true);
++        assert_eq!(with.len(), FAN_MAX);
++        assert!(with[48..].chunks(3).all(|t| t[2][6] == 0.0 && t[0][6] > 0.0 && t[0][6] <= fan[0][6] * 0.17 && (Vec3::new(t[0][0], t[0][1], t[0][2]) - sun * 100.0).length() < 4.0));
+     }
+ 
+     /// The celestial texture is the sun and the moon, 32 x 32 each: bright at their middle, black at the corners (additive blending).
+diff --git a/mc-rs/src/world/atmos.rs b/mc-rs/src/world/atmos.rs
+index d1c90e5..25f4a33 100644
+--- a/mc-rs/src/world/atmos.rs
++++ b/mc-rs/src/world/atmos.rs
+@@ -56,9 +56,27 @@ const fn mk(z: [f32; 3], h: [f32; 3], hz: [f32; 3], ha: f32, dens: f32, cl: [f32
+     [z[0], z[1], z[2], h[0], h[1], h[2], hz[0], hz[1], hz[2], ha, dens, cl[0], cl[1], cl[2], cover, speed, st[0], st[1], st[2], smul, curve]
+ }
+ 
+-/// The look of a biome. Colours are vanilla's framebuffer values (gamma), like `world::sky`.
+-#[rustfmt::skip]
++/// More chroma round the colour's own luma (1 = unchanged), then scaled in value.
++fn rich(c: [f32; 3], chroma: f32, value: f32) -> [f32; 3] {
++    let l = c[0] * 0.3 + c[1] * 0.59 + c[2] * 0.11;
++    std::array::from_fn(|i| ((l + (c[i] - l) * chroma) * value).clamp(0.0, 1.0))
++}
++
++/// The look of a biome as the game ships it: the table below with its sky top a bit richer (12% more chroma, 3% deeper) and its haze band
++/// 8% richer, so the zenith reads as a deeper blue and the band over the horizon keeps its hue. The horizon / fog colour is left alone (the
++/// terrain's fog fades into it), and so are the clouds and stars. `AtmosCfg` stores whatever the player edits on top of this.
+ fn of(b: Biome) -> [f32; N] {
++    let mut l = raw(b);
++    for (i, chroma, value) in [(Z, 1.12, 0.97), (HZ, 1.08, 1.0)] {
++        let c = rich([l[i], l[i + 1], l[i + 2]], chroma, value);
++        l[i..i + 3].copy_from_slice(&c);
++    }
++    l
++}
++
++/// The table: colours are vanilla's framebuffer values (gamma), like `world::sky`.
++#[rustfmt::skip]
++fn raw(b: Biome) -> [f32; N] {
+     use Biome::*;
+     match b {
+         //                 sky top             horizon / fog        haze colour         ha    dens    cloud tint          cover spd  star tint           smul curve
+@@ -339,6 +357,20 @@ impl Atmos {
+ mod tests {
+     use super::*;
+ 
++    /// The shipped sky is richer than the table (more chroma, a little deeper), the fog colour and every value stay as they were, and in range.
++    #[test]
++    fn shipped_looks_are_richer_than_the_table() {
++        let sat = |c: &[f32]| c.iter().cloned().fold(0.0_f32, f32::max) - c.iter().cloned().fold(1.0_f32, f32::min);
++        for b in ALL {
++            let (a, r) = (of(b), raw(b));
++            assert!(sat(&a[Z..Z + 3]) >= sat(&r[Z..Z + 3]) * 0.97 || r[Z..Z + 3].iter().any(|&v| v >= 0.97), "{b:?}");
++            assert_eq!(&a[H..H + 3], &r[H..H + 3], "{b:?}: the fog colour is the terrain's fade");
++            assert!(a.iter().all(|v| (0.0..=2.0).contains(v)));
++        }
++        let (p, q) = (of(Biome::Plains), raw(Biome::Plains));
++        assert!(p[Z + 2] - p[Z] > q[Z + 2] - q[Z], "plains' zenith is a deeper blue: {:?} vs {:?}", &p[Z..Z + 3], &q[Z..Z + 3]);
++    }
++
+     fn all(b: Biome) -> impl FnMut(i32, i32) -> Biome {
+         move |_, _| b
+     }
+diff --git a/mc-rs/src/world/chunks.rs b/mc-rs/src/world/chunks.rs
+index 236e696..2e7c31b 100644
+--- a/mc-rs/src/world/chunks.rs
++++ b/mc-rs/src/world/chunks.rs
+@@ -1104,6 +1104,15 @@ impl ChunkManager {
+         self.chunks.get(&(x >> 4, z >> 4)).map(|e| e.blocks[idx((x & 15) as usize, y as usize, (z & 15) as usize)])
+     }
+ 
++    /// Calls `f(x, y, z, id)` for every cell of chunk `(cx, cz)` whose block is one of `ids` (the emitters and flowers `render::look` scans);
++    /// nothing when the chunk is not loaded.
++    pub fn find_blocks(&self, cx: i32, cz: i32, ids: &[u8], mut f: impl FnMut(i32, i32, i32, u8)) {
++        let Some(e) = self.chunks.get(&(cx, cz)) else { return };
++        for (i, &b) in e.blocks.iter().enumerate().filter(|(_, b)| ids.contains(b)) {
++            f(cx * 16 + (i >> 11) as i32, (i & 127) as i32, cz * 16 + ((i >> 7) & 15) as i32, b);
++        }
++    }
++
+     /// Raw (sky, block) light of a cell, what the mesher's `lm` takes: entities are lit by the cell they are in
+     /// (`Entity.getBrightnessForRender`). Open sky above the world and unloaded chunks read as full sky light.
+     pub fn light_levels(&self, x: i32, y: i32, z: i32) -> (u8, u8) {
+diff --git a/roadmap/rendering.md b/roadmap/rendering.md
+index a9bd2c8..9410d48 100644
+--- a/roadmap/rendering.md
++++ b/roadmap/rendering.md
+@@ -4,6 +4,16 @@ Part of [`ROADMAP.md`](../ROADMAP.md). This part is the changelog of what is dra
+ 
+ ## Changelog
+ 
++- 2026-10-25: look polish: one Vibrance dial and five switches (type-checked on a Linux host and the shaders validated, not run on a device: all the numbers are taste values, judged by eye only; +8 tests in `render::look`, +1 in `options` and `world::atmos`, the `render::sky` fan test extended).
++    - Where: `render/look.rs` computes one `Look` per frame (`Look::new(cfg, env)`), carried by `WorldDraw::look`; both renderers write the same numbers (the final pass's grade, the chunk block `U`: `warm`, `cool`, `sun`, `fx`, 176 bytes). `Look::OFF` is the identity in every shader.
++    - 1 Grade: `grade()` in the final pass (`present.rs`, and the GLES `present` source), in sqrt space, skipped when the dial is 0. Vibrance lifts what is dull (`1 + v * (1 - saturation)`) and leaves vivid greens and blues alone; S-curve `mix(g, g*g*(3-2g), k)`; warm highlights / cool shadows `+-k` on red / blue by luma. The dial scales all three: at 1.0 vibrance +0.5, curve 0.35, split 0.05; default 0.3 (+0.15 / 0.105 / 0.015). Costs one `if` and a few ALU in the pass that already runs, in Fast and Full alike.
++    - 2 Warm light: no new varying. `finish()` multiplies the lit colour by `mix(cool, warm, smoothstep(0.15, 0.7, lit))`: bright faces take the warm tone, faces turned from the light (side, underside) and the shade go bluer by themselves, torch light stays warm. `warm` goes gold (1.10, 0.97, 0.76) with the sun low and dry (`Look::gold`, peak just above the horizon, gone by 45% up) and `cool` bluer then. The face shades get an extra exponent (1.10: `boost()` in `chunk_shade` and `flat_shade`, so the far terrain matches), the sides sink about 6%.
++    - 3 Water and sky: `fs_water` (and the GLES water branch): the view angle scales the biome's water colour (upstream's `water_rgb`, entry 2026-10-24 (7)): lifted towards turquoise looking down, darker and bluer at a grazing look, so a swamp stays green and a jungle teal; a Blinn glint of the sun (the moon at 25%) on a slightly rippled surface, tops only, none in rain. ponytail: the view angle stands in for the real depth, the meshes carry none; the upgrade is the water column's depth per vertex (the vertex tint now carries the biome's colour, so it needs another field). Sky: `atmos::of` is the old table through `rich()`: the sky top +12% chroma and 3% deeper, the haze band +8%; the fog colour (the terrain's fade), clouds and stars untouched; edits saved by the player stay as they are.
++    - 4 Glow: no bloom pass. `Scan` (one chunk a frame, round robin over 5 x 5 chunks, `ChunkManager::find_blocks`) keeps lava (surface cells, one per 4 blocks), torches, glowstone and flowers; `halos` draws the 36 nearest as camera-facing soft discs pulled half a block towards the eye, fading out between 24 and 40 blocks; the sun's halo sits at 92% of the far plane (terrain in front hides it) and goes gold when low. One new pipeline in each renderer (`ChunkPipeline::glow`, `Chunk::Glow`): the entity vertex, `fs_glow`, blend src alpha + one, depth-tested, not written, drawn after the water.
++    - 5 Motion (Off / Low / On): leaves (tiles 53, 133, 255) sway 0.025 / 0.04 blocks in `vs_chunk` (a smooth function of the position, so corners stay joined); `Motes`: pollen above flowers by day, fireflies above water or flowers at night, at most 10 / 24 alive, 5 to 9 s each, one start every 0.35 s, within 14 blocks; light rays: 7 thin triangles out of the sun in `sky::fan_vertices` (now `fan_vertices(angle, rain, sun, rays)`, buffers `sky::FAN_MAX`), which only exists with the sun low, so the rays appear only then (alpha at most 0.16 of the glow).
++    - 6 Haze: the fog factor brings a faint blue, brighter tint (`AER`) on the way to the fog colour (`finish()`), gone at both ends, so the far edge still meets the sky.
++    - Options: Video Settings gets a 7th row, the `Vibrance` slider and `Effects...` (new `OptScr::Fx`: Warm Light, Water Look, Glow, Motion, Haze; Done goes back to Video). Saved as `look_vibrance`, `look_warm`, `look_water`, `look_glow`, `look_motion`, `look_haze` in `options.txt`; a bad value is skipped, the dial is clamped to 0..1.
++    - Not done / limits: no real bloom of anything but the emitters (a sprite, not a blur); the water depth is the view angle; halos hide behind walls with the depth test only (no soft intersection); the sun glare of the sky quads is unchanged. Under water, in the Nether and with every switch off the effects are off (the grade stays unless the dial is 0).
+ - 2026-10-24 (7): every biome has its own water colour: rivers, lakes and the sea take the tint of the land they lie in (written WITHOUT a Rust toolchain: not compiled, not run, not seen on a device; +3 tests: `biome::tests::every_biome_has_a_water_colour`, `mesh::tests::water_carries_the_biome_colour`, `chunks::tests::water_colours_blend_across_a_border`). NOT b1.7.3 (one water colour for all there); a rendering addition on top of the river work.
+     - Colours (`Biome::water_color`, all 19 biomes): the game's own per-biome `water_color` values (1.13 to 1.17 set: jungle `14A2C5`, swamp `617B64`, forest `1E97F2`, plains `44AFF5`, taiga `287097`, desert `32A598`, savanna `2C8B9C`, tundra `3D57D6`, ocean `1787D4`, beach `157CAB`, mountains `007BF7`, cherry grove `5DB7EF`, default `3F76E4`); the biomes this world folds together and the six Blooming ones take their nearest cousin.
+     - Blend (`chunks::biome_tints` -> `Tints::water`, `blend_water`): a column's colour is the mean over the 7 x 7 columns round it (`WATER_BLEND` 3), read from an area padded by 3, so a river crossing a biome border shifts tint over a few blocks and two chunks agree at their seam.

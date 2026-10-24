@@ -75,10 +75,11 @@ impl Wg {
     /// The scene pass (sky, terrain, far terrain, entities, water, rain; 4x MSAA resolved into `Present`'s 8-bit scene) and then its one
     /// full-screen pass (CAS + upscale + vignette + the HUD) onto the swap chain. Two render passes in all.
     fn draw_world(&mut self, d: &WorldDraw) -> Drawn {
-        self.pipe.frame(&self.gpu.queue, d.view, d.proj, d.eye, d.sky_sub, d.fog, d.far, d.start, d.wr, d.atmos.density);
+        self.pipe.frame(&self.gpu.queue, d.view, d.proj, d.eye, d.sky_sub, d.fog, d.far, d.start, d.wr, d.atmos.density, &d.look);
+        self.present.set_grade(&self.gpu.queue, d.look.grade);
         let clear = wgpu::Color { r: d.fog[0] as f64, g: d.fog[1] as f64, b: d.fog[2] as f64, a: 1.0 };
         self.sky.update(&self.gpu.queue, d.camera, &SkyFrame { angle: d.angle, rain: d.rain, seconds: d.seconds });
-        self.sky.set_legacy(&self.gpu.queue, d.zenith, d.horizon, d.angle, d.rain, &d.atmos, d.eye);
+        self.sky.set_legacy(&self.gpu.queue, d.zenith, d.horizon, d.angle, d.rain, &d.atmos, d.eye, d.look.rays);
         // Rain and snow, drawn in the scene pass after the water; the depth test hides the streaks behind the terrain.
         if let Some((snow, rain, sun_y)) = d.precip {
             self.rain_fx.update(&self.gpu.queue, d.proj * d.view, d.eye, sun_y, snow, rain);
@@ -134,6 +135,13 @@ impl Wg {
             }
             rp.set_pipeline(&self.pipe.water);
             d.chunks.draw_ranges(crate::world::chunks::Layer::Water, &mut rp, &self.pipe.origins);
+            if d.glow_indices > 0 {
+                // Halos and motes: additive soft discs over the finished scene, depth-tested and not written.
+                rp.set_pipeline(&self.pipe.glow);
+                rp.set_vertex_buffer(0, d.glow.vbuf.wgpu().slice(..));
+                rp.set_index_buffer(d.glow.ibuf.wgpu().slice(..), wgpu::IndexFormat::Uint32);
+                rp.draw_indexed(0..d.glow_indices, 0, 0..1);
+            }
             if d.precip.is_some() {
                 self.rain_fx.draw(&mut rp);
             }

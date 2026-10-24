@@ -56,9 +56,27 @@ const fn mk(z: [f32; 3], h: [f32; 3], hz: [f32; 3], ha: f32, dens: f32, cl: [f32
     [z[0], z[1], z[2], h[0], h[1], h[2], hz[0], hz[1], hz[2], ha, dens, cl[0], cl[1], cl[2], cover, speed, st[0], st[1], st[2], smul, curve]
 }
 
-/// The look of a biome. Colours are vanilla's framebuffer values (gamma), like `world::sky`.
-#[rustfmt::skip]
+/// More chroma round the colour's own luma (1 = unchanged), then scaled in value.
+fn rich(c: [f32; 3], chroma: f32, value: f32) -> [f32; 3] {
+    let l = c[0] * 0.3 + c[1] * 0.59 + c[2] * 0.11;
+    std::array::from_fn(|i| ((l + (c[i] - l) * chroma) * value).clamp(0.0, 1.0))
+}
+
+/// The look of a biome as the game ships it: the table below with its sky top a bit richer (12% more chroma, 3% deeper) and its haze band
+/// 8% richer, so the zenith reads as a deeper blue and the band over the horizon keeps its hue. The horizon / fog colour is left alone (the
+/// terrain's fog fades into it), and so are the clouds and stars. `AtmosCfg` stores whatever the player edits on top of this.
 fn of(b: Biome) -> [f32; N] {
+    let mut l = raw(b);
+    for (i, chroma, value) in [(Z, 1.12, 0.97), (HZ, 1.08, 1.0)] {
+        let c = rich([l[i], l[i + 1], l[i + 2]], chroma, value);
+        l[i..i + 3].copy_from_slice(&c);
+    }
+    l
+}
+
+/// The table: colours are vanilla's framebuffer values (gamma), like `world::sky`.
+#[rustfmt::skip]
+fn raw(b: Biome) -> [f32; N] {
     use Biome::*;
     match b {
         //                 sky top             horizon / fog        haze colour         ha    dens    cloud tint          cover spd  star tint           smul curve
@@ -338,6 +356,20 @@ impl Atmos {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The shipped sky is richer than the table (more chroma, a little deeper), the fog colour and every value stay as they were, and in range.
+    #[test]
+    fn shipped_looks_are_richer_than_the_table() {
+        let sat = |c: &[f32]| c.iter().cloned().fold(0.0_f32, f32::max) - c.iter().cloned().fold(1.0_f32, f32::min);
+        for b in ALL {
+            let (a, r) = (of(b), raw(b));
+            assert!(sat(&a[Z..Z + 3]) >= sat(&r[Z..Z + 3]) * 0.97 || r[Z..Z + 3].iter().any(|&v| v >= 0.97), "{b:?}");
+            assert_eq!(&a[H..H + 3], &r[H..H + 3], "{b:?}: the fog colour is the terrain's fade");
+            assert!(a.iter().all(|v| (0.0..=2.0).contains(v)));
+        }
+        let (p, q) = (of(Biome::Plains), raw(Biome::Plains));
+        assert!(p[Z + 2] - p[Z] > q[Z + 2] - q[Z], "plains' zenith is a deeper blue: {:?} vs {:?}", &p[Z..Z + 3], &q[Z..Z + 3]);
+    }
 
     fn all(b: Biome) -> impl FnMut(i32, i32) -> Biome {
         move |_, _| b

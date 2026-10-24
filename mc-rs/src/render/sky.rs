@@ -107,7 +107,10 @@ pub fn params(f: &SkyFrame, camera: &FirstPersonCamera) -> Params {
 /// 100 out towards the sun's horizon point with the glow colour, the ring of radius 120 (rising 40 * alpha on the sun's side) fully
 /// transparent. The Java builds it with three `glRotatef`; written out, the ring is `h * 120 cos f + up * 40 a cos f + side * 120 sin f`
 /// with `h` the horizontal direction of the sun. Colours are linearised (`color::legacy_lin`) like the rest of the legacy sky.
-pub fn fan_vertices(angle: f32, rain: f32, sun: Vec3) -> Vec<[f32; 7]> {
+///
+/// `rays` (`render::look`, the Motion option) adds `RAYS` thin triangles that fan out of the sun's disc over the sky above it and fade to
+/// nothing at their tips: light rays, only here, where the sun is low (the fan is empty at noon and at night).
+pub fn fan_vertices(angle: f32, rain: f32, sun: Vec3, rays: bool) -> Vec<[f32; 7]> {
     let (Some(c), h) = (sky::sunrise_color(angle), Vec3::new(sun.x, 0.0, sun.z).normalize_or_zero()) else { return Vec::new() };
     if h == Vec3::ZERO { return Vec::new(); }
     let rgb = crate::render::color::legacy_lin([c[0], c[1], c[2]]);
@@ -116,11 +119,27 @@ pub fn fan_vertices(angle: f32, rain: f32, sun: Vec3) -> Vec<[f32; 7]> {
     let ring = |f: f32| h * (120.0 * f.cos()) + Vec3::Y * (40.0 * a * f.cos()) + side * (120.0 * f.sin());
     let v = |p: Vec3, alpha: f32| [p.x, p.y, p.z, rgb[0], rgb[1], rgb[2], alpha];
     let centre = v(h * 100.0, a);
-    (0..16).flat_map(|j| {
+    let mut out: Vec<[f32; 7]> = (0..16).flat_map(|j| {
         let (f0, f1) = (j as f32 * TAU / 16.0, (j + 1) as f32 * TAU / 16.0);
         [centre, v(ring(f0), 0.0), v(ring(f1), 0.0)]
-    }).collect()
+    }).collect();
+    if rays {
+        let (s, side) = (sun.normalize_or_zero(), Vec3::Y.cross(h));
+        let up = s.cross(Vec3::Y.cross(s).normalize_or_zero()); // up the sky, perpendicular to the sun's direction
+        for i in 0..RAYS {
+            let (th, hash) = ((i as f32 - 3.0) / 3.0 * 1.1, ((i * 37) % 7) as f32 / 7.0); // spread over +-63 degrees, each its own length and strength
+            let (d, perp) = (up * th.cos() + side * th.sin(), side * th.cos() - up * th.sin());
+            let (p, al) = (s * 100.0, a * 0.16 * (0.6 + 0.4 * hash));
+            out.extend([v(p + perp * 3.5, al), v(p - perp * 3.5, al), v(p + d * (55.0 + 30.0 * hash), 0.0)]);
+        }
+    }
+    out
 }
+
+/// Light rays of `fan_vertices`.
+const RAYS: usize = 7;
+/// Vertices the fan and its rays can take: the size of the fan's vertex buffers (16 + `RAYS` triangles).
+pub const FAN_MAX: usize = (16 + RAYS) * 3;
 
 /// Stars and sunrise fan of the Console-Edition sky (see `fs_geo` in `sky.wgsl`).
 struct Geo {
@@ -302,7 +321,7 @@ impl SkyRenderer {
                 star_v: buf("sky_star_v", bytemuck::cast_slice(&verts), wgpu::BufferUsages::VERTEX),
                 star_i: buf("sky_star_i", bytemuck::cast_slice(&idx), wgpu::BufferUsages::INDEX),
                 star_n: idx.len() as u32,
-                fan_v: device.create_buffer(&wgpu::BufferDescriptor { label: Some("sky_fan_v"), size: 48 * 28, usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }),
+                fan_v: device.create_buffer(&wgpu::BufferDescriptor { label: Some("sky_fan_v"), size: FAN_MAX as u64 * 28, usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }),
                 fan_n: Default::default(),
                 star_alpha: Default::default(),
             }
@@ -323,7 +342,7 @@ impl SkyRenderer {
 
     /// Legacy sky colours (linear working space), the biome's atmosphere (`a`: haze, clouds, star tint) and the eye. Call after `update`, which
     /// rewrites the whole block. Also the star brightness (`World.getStarBrightness` x (1 - rain) x the biome's) and the sunrise fan of this `angle`.
-    pub fn set_legacy(&self, queue: &wgpu::Queue, zenith: [f32; 3], horizon: [f32; 3], angle: f32, rain: f32, a: &Frame, eye: Vec3) {
+    pub fn set_legacy(&self, queue: &wgpu::Queue, zenith: [f32; 3], horizon: [f32; 3], angle: f32, rain: f32, a: &Frame, eye: Vec3, rays: bool) {
         use std::sync::atomic::Ordering::Relaxed;
         let stars = sky::star_brightness(angle) * (1.0 - rain) * a.star[3];
         let v = [[zenith[0], zenith[1], zenith[2], 0.0], [horizon[0], horizon[1], horizon[2], 0.0], [a.star[0], a.star[1], a.star[2], stars]];
@@ -331,7 +350,7 @@ impl SkyRenderer {
         let tail = [[eye.x, eye.y, eye.z, a.density], a.cloud, a.cloudp, a.haze];
         queue.write_buffer(&self.uniform_buffer, std::mem::offset_of!(Params, eye) as u64, bytemuck::bytes_of(&tail));
         if let Some(g) = &self.geo {
-            let fan = fan_vertices(angle, rain, sky::sun_dir(angle));
+            let fan = fan_vertices(angle, rain, sky::sun_dir(angle), rays);
             if !fan.is_empty() {
                 queue.write_buffer(&g.fan_v, 0, bytemuck::cast_slice(&fan));
             }
@@ -402,15 +421,19 @@ mod tests {
     /// The sunrise fan exists only near the horizon, is centred 100 out towards the sun's horizon point, fades to nothing at its rim.
     #[test]
     fn fan_hugs_the_sun_at_the_horizon() {
-        assert!(fan_vertices(0.0, 0.0, sky::sun_dir(0.0)).is_empty(), "no fan at noon");
+        assert!(fan_vertices(0.0, 0.0, sky::sun_dir(0.0), true).is_empty(), "no fan (and no rays) at noon");
         let sun = sky::sun_dir(0.25); // sunset: the sun sits on the horizon
-        let fan = fan_vertices(0.25, 0.0, sun);
+        let fan = fan_vertices(0.25, 0.0, sun, false);
         assert_eq!(fan.len(), 16 * 3);
         let h = Vec3::new(sun.x, 0.0, sun.z).normalize();
         let c = Vec3::new(fan[0][0], fan[0][1], fan[0][2]);
         assert!((c - h * 100.0).length() < 1e-3 && fan[0][6] > 0.0);
         assert!(fan.chunks(3).all(|t| t[1][6] == 0.0 && t[2][6] == 0.0 && t[0][6] == fan[0][6]));
-        assert!(fan_vertices(0.25, 1.0, sun).iter().all(|v| v[6] == 0.0), "rain hides the glow");
+        assert!(fan_vertices(0.25, 1.0, sun, true).iter().all(|v| v[6] == 0.0), "rain hides the glow and the rays");
+        // rays: seven more triangles, each a base at the sun and a tip with no alpha, never brighter than a sixth of the glow
+        let with = fan_vertices(0.25, 0.0, sun, true);
+        assert_eq!(with.len(), FAN_MAX);
+        assert!(with[48..].chunks(3).all(|t| t[2][6] == 0.0 && t[0][6] > 0.0 && t[0][6] <= fan[0][6] * 0.17 && (Vec3::new(t[0][0], t[0][1], t[0][2]) - sun * 100.0).length() < 4.0));
     }
 
     /// The celestial texture is the sun and the moon, 32 x 32 each: bright at their middle, black at the corners (additive blending).

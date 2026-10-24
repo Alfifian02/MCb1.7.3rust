@@ -13,6 +13,7 @@ use crate::input::gamepad::{Btn, PadCfg, ACTS};
 use crate::input::touch_ui::{ScreenEv, HOLD_SECS, SWING_SECS};
 use crate::menu::{dirt, grad, rgb, scaled_gs, tw};
 use crate::render::hud::{HudPipeline, HudVertex};
+use crate::render::look::LookCfg;
 use crate::world::atmos::{self, AtmosCfg};
 use crate::world::biome::Biome;
 use std::path::{Path, PathBuf};
@@ -43,12 +44,20 @@ pub enum Opt {
     Renderer,
     /// Added: the scene scale follows the GPU load (`gpu::context::Drs`) or stays at `START_PCT`. Takes effect at once.
     DynamicRes,
+    /// Added: the one dial of the colour grade (`render::look`), 0 = off. Takes effect at once.
+    Vibrance,
+    /// Added (Effects screen): warm directional light, water depth + glint, soft halos on emitters, motion (off / low / on), aerial haze.
+    FxWarm,
+    FxWater,
+    FxGlow,
+    FxMotion,
+    FxHaze,
 }
 
 impl Opt {
     /// `getEnumFloat`: a slider.
     fn slider(self) -> bool {
-        matches!(self, Opt::Music | Opt::Sound | Opt::Sensitivity | Opt::DigDelay)
+        matches!(self, Opt::Music | Opt::Sound | Opt::Sensitivity | Opt::DigDelay | Opt::Vibrance)
     }
 
     /// `lang/en_US.lang`'s `options.*`.
@@ -72,6 +81,12 @@ impl Opt {
             Opt::Post => "Post",
             Opt::Renderer => "Renderer",
             Opt::DynamicRes => "Dynamic Res",
+            Opt::Vibrance => "Vibrance",
+            Opt::FxWarm => "Warm Light",
+            Opt::FxWater => "Water Look",
+            Opt::FxGlow => "Glow",
+            Opt::FxMotion => "Motion",
+            Opt::FxHaze => "Haze",
         }
     }
 }
@@ -144,6 +159,8 @@ pub struct Settings {
     pub renderer: u8,
     /// The look of every biome's sky as the player tuned it (the sun button of Video Settings, `world::atmos`), `atmos_<n>:` in options.txt.
     pub atmos: AtmosCfg,
+    /// The Vibrance dial and the effect switches (`render::look`), `look_*` in options.txt.
+    pub look: LookCfg,
     path: Option<PathBuf>,
 }
 
@@ -174,6 +191,7 @@ impl Default for Settings {
             post: 0,
             renderer: 0,
             atmos: AtmosCfg::default(),
+            look: LookCfg::default(),
             path: None,
         }
     }
@@ -211,6 +229,7 @@ impl Settings {
                 ("renderer", _, Some(n)) if n <= 2 => s.renderer = n,
                 (k, ..) if k.starts_with("pad_") => s.pad.load(k, v),
                 (k, ..) if k.starts_with("atmos_") => s.atmos.load(k, v),
+                (k, ..) if k.starts_with("look_") => s.look.load(k, v),
                 _ => {
                     if let (Some(i), Ok(code)) = (KEY_IDS.iter().position(|id| k.strip_prefix("key_key.") == Some(*id)), v.parse::<u32>()) {
                         s.keys[i] = code;
@@ -233,6 +252,7 @@ impl Settings {
         }
         self.pad.save_into(&mut t);
         self.atmos.save_into(&mut t);
+        self.look.save_into(&mut t);
         if let Err(e) = std::fs::write(p, t) {
             log::warn!("options: {e}");
         }
@@ -265,6 +285,7 @@ impl Settings {
             Opt::Sound => self.sound,
             Opt::Sensitivity => self.sensitivity,
             Opt::DigDelay => self.dig_delay,
+            Opt::Vibrance => self.look.vibrance,
             _ => 0.0,
         }
     }
@@ -276,6 +297,7 @@ impl Settings {
             Opt::Sound => self.sound = v,
             Opt::Sensitivity => self.sensitivity = v,
             Opt::DigDelay => self.dig_delay = v,
+            Opt::Vibrance => self.look.vibrance = v,
             _ => {}
         }
     }
@@ -297,6 +319,11 @@ impl Settings {
             Opt::Post => self.post = (self.post + 1) % 3,
             Opt::Renderer => self.renderer = (self.renderer + 1) % 3,
             Opt::DynamicRes => self.dynamic_res = !self.dynamic_res,
+            Opt::FxWarm => self.look.warm = !self.look.warm,
+            Opt::FxWater => self.look.water = !self.look.water,
+            Opt::FxGlow => self.look.glow = !self.look.glow,
+            Opt::FxMotion => self.look.motion = (self.look.motion + 1) % 3,
+            Opt::FxHaze => self.look.haze = !self.look.haze,
             _ => {}
         }
         self.save();
@@ -323,6 +350,11 @@ impl Settings {
                 Opt::AdvancedOpengl => onoff(self.advanced_opengl).into(),
                 Opt::AmbientOcclusion => onoff(self.ambient_occlusion).into(),
                 Opt::DynamicRes => onoff(self.dynamic_res).into(),
+                Opt::FxWarm => onoff(self.look.warm).into(),
+                Opt::FxWater => onoff(self.look.water).into(),
+                Opt::FxGlow => onoff(self.look.glow).into(),
+                Opt::FxMotion => ["OFF", "Low", "On"][self.look.motion.min(2) as usize].into(),
+                Opt::FxHaze => onoff(self.look.haze).into(),
                 Opt::RenderDistance => ["Far", "Normal", "Short", "Tiny"][self.render_distance.min(3) as usize].into(),
                 Opt::Difficulty => ["Peaceful", "Easy", "Normal", "Hard"][self.difficulty.min(3) as usize].into(),
                 Opt::GuiScale => ["Auto", "Small", "Normal", "Large"][self.gui_scale.min(3) as usize].into(),
@@ -353,6 +385,8 @@ pub enum OptScr {
     Video,
     /// The keys tab of Controls.
     Controls,
+    /// The Effects page of Video Settings (`render::look`'s switches).
+    Fx,
     /// The Controller tab (Controllify): its button bindings, and its tuning page.
     Pad,
     PadTune,
@@ -365,6 +399,8 @@ enum Act {
     Opt(Opt),
     Lod,
     Video,
+    /// Video Settings' Effects... button.
+    Fx,
     Controls,
     Done,
     Key(usize),
@@ -551,7 +587,13 @@ impl OptionsUi {
                 w.push(wide(Act::Controls, top + 120.0 + 12.0, "Controls..."));
                 w
             }
-            OptScr::Video => opts(&[Opt::Graphics, Opt::RenderDistance, Opt::AmbientOcclusion, Opt::FramerateLimit, Opt::Anaglyph, Opt::ViewBobbing, Opt::GuiScale, Opt::AdvancedOpengl, Opt::Msaa, Opt::Post, Opt::Renderer, Opt::DynamicRes]),
+            OptScr::Video => {
+                // The 7th row: the Vibrance dial and the way to the effect switches (Done stays at +168).
+                let mut w = opts(&[Opt::Graphics, Opt::RenderDistance, Opt::AmbientOcclusion, Opt::FramerateLimit, Opt::Anaglyph, Opt::ViewBobbing, Opt::GuiScale, Opt::AdvancedOpengl, Opt::Msaa, Opt::Post, Opt::Renderer, Opt::DynamicRes, Opt::Vibrance]);
+                w.push(Wid { act: Act::Fx, r: [cell(13).0, cell(13).1, 150.0, 20.0], label: "Effects...".into() });
+                w
+            }
+            OptScr::Fx => opts(&[Opt::FxWarm, Opt::FxWater, Opt::FxGlow, Opt::FxMotion, Opt::FxHaze]),
             OptScr::Atmos => atmos_widgets(&self.ed, st),
             OptScr::Controls => (0..KEY_NAMES.len())
                 .map(|i| {
@@ -642,6 +684,10 @@ impl OptionsUi {
                 st.save();
                 self.scr = OptScr::Video;
             }
+            Act::Fx => {
+                st.save();
+                self.scr = OptScr::Fx;
+            }
             Act::Controls => {
                 st.save();
                 self.scr = OptScr::Controls;
@@ -682,7 +728,7 @@ impl OptionsUi {
                     st.atmos.view = None; // the sky goes back to the biome under the player, easing over 2 s
                     return Some(OptEv::Close); // back to the game menu
                 }
-                self.scr = OptScr::Main;
+                self.scr = if self.scr == OptScr::Fx { OptScr::Video } else { OptScr::Main };
             }
         }
         None
@@ -727,6 +773,7 @@ impl OptionsUi {
             let title = match self.scr {
                 OptScr::Main => "Options",
                 OptScr::Video => "Video Settings",
+                OptScr::Fx => "Effects",
                 _ => "Controls",
             };
             let ty = if matches!(self.scr, OptScr::Controls | OptScr::Pad | OptScr::PadTune) { 8.0 } else { 20.0 }; // room for the tabs
@@ -1024,6 +1071,35 @@ mod tests {
         assert_eq!(Settings::load(&root).msaa, 0);
         st.msaa = 4;
         assert!(st.text(Opt::Msaa).starts_with("MSAA: 4x"));
+    }
+
+    /// The Vibrance dial sits in Video Settings (conservative default, 0 = off), the switches one screen deeper (Done goes back to Video), and
+    /// everything reads back from options.txt.
+    #[test]
+    fn vibrance_and_effects_are_reachable_and_saved() {
+        let root = tmp("look");
+        let mut st = Settings::load(&root);
+        assert_eq!((st.text(Opt::Vibrance).as_str(), st.look.motion), ("Vibrance: 30%", 1));
+        let mut o = OptionsUi::new();
+        tap(&mut o, &mut st, "Video Settings...");
+        tap(&mut o, &mut st, "Effects...");
+        assert_eq!(o.scr, OptScr::Fx);
+        tap(&mut o, &mut st, "Motion: Low");
+        tap(&mut o, &mut st, "Glow: ON");
+        tap(&mut o, &mut st, "Haze: ON");
+        assert_eq!((st.look.motion, st.look.glow, st.look.haze), (2, false, false));
+        tap(&mut o, &mut st, "Motion: On");
+        assert_eq!(st.look.motion, 0, "off, low, on, off again");
+        tap(&mut o, &mut st, "Done");
+        assert_eq!(o.scr, OptScr::Video);
+        st.set_float(Opt::Vibrance, 0.0);
+        assert_eq!(st.text(Opt::Vibrance), "Vibrance: OFF");
+        st.save();
+        let back = Settings::load(&root);
+        assert_eq!(back.look, st.look);
+        std::fs::write(root.join("options.txt"), "look_vibrance:5\nlook_motion:7\n").unwrap();
+        let bad = Settings::load(&root);
+        assert!(bad.look.vibrance == 1.0 && bad.look.motion == LookCfg::default().motion, "out of range: clamped / ignored");
     }
 
     /// The Post button cycles Auto -> Full -> Fast -> Auto, reads back from options.txt, and a bad value falls back to Auto.

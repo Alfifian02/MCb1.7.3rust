@@ -36,6 +36,7 @@ use crate::render::atlas;
 use crate::render::debug::Row;
 use crate::render::items::{ItemMesh, SignView};
 use crate::render::camera::{FirstPersonCamera, Frustum};
+use crate::render::look::{self, GlowMesh, Look};
 use crate::render::outline::Outline;
 use crate::render::color;
 use crate::world::gen::overworld::WorldType;
@@ -128,6 +129,10 @@ struct App {
     /// The previous frame was a paused one (its idle wait is not a spike).
     was_paused: bool,
     frame_prev: Instant,
+    /// `render::look`: the emitters and flowers round the player, the drifting motes, and the sprite buffers of the halos and motes.
+    scan: look::Scan,
+    motes: look::Motes,
+    glow: GlowMesh,
     // M12: touch UI state + HUD renderer.
     touch: TouchUi,
     /// Scratch vertex buffer for the HUD; cleared each frame, then emitted.
@@ -255,6 +260,7 @@ impl App {
         let touch = TouchUi::new(width, height);
         let outline = Outline::new(be.gfx());
         let item_mesh = ItemMesh::new(be.gfx());
+        let glow = GlowMesh::new(be.gfx());
         let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as i64);
 
         let mut app = Self {
@@ -271,6 +277,9 @@ impl App {
             worst_acc: 0.0,
             was_paused: false,
             frame_prev: Instant::now(),
+            scan: Default::default(),
+            motes: Default::default(),
+            glow,
             touch,
             hud_verts: Vec::with_capacity(256),
             target: None,
@@ -2135,6 +2144,26 @@ impl App {
             log::info!("render: first frame, {}, {} chunks loaded", self.be.gpu_info(), self.chunks.loaded());
         }
         self.build_hud();
+        // The look (`render::look`): the grade, the light's tones, the water, the sway; then the halos and motes it allows, capped.
+        let sun_v = sky::sun_dir(angle);
+        let look = Look::new(&self.opts.look, &look::Env { sun: sun_v, rain, seconds: self.world_ticks as f32 / 20.0, nether: self.nether, underwater: eye_in_water });
+        let glow_indices = {
+            let dt = Instant::now().duration_since(self.frame_prev).as_secs_f32().min(0.25);
+            let mut quads = Vec::new();
+            if look.glow || look.motes > 0 {
+                self.scan.update(&self.chunks, (pcx, pcz));
+                let chunks = &self.chunks;
+                let mut water = |x: i32, y: i32, z: i32| matches!(chunks.block_loaded(x, y, z), Some(8 | 9)) && chunks.block_loaded(x, y + 1, z) == Some(0);
+                self.motes.update(dt, e, look.motes, if sun_v.y < 0.0 { 1.0 } else { 0.0 }, &self.scan, &mut water);
+                if look.glow {
+                    look::halos(&self.scan, e, &mut quads);
+                    quads.extend(look::sun_halo(&look, sun_v, e, self.camera.zfar, rain));
+                }
+                self.motes.quads(&mut quads);
+            }
+            let (right, up) = look::axes(&view);
+            self.glow.update(self.be.gfx(), &look::vertices(&quads, right, up))
+        };
         let d = WorldDraw {
             chunks: &self.chunks,
             lod: self.lod.as_ref().filter(|_| lod_on),
@@ -2142,6 +2171,9 @@ impl App {
             item_indices,
             outline: &self.outline,
             outline_indices,
+            glow: &self.glow,
+            glow_indices,
+            look,
             hud: &self.hud_verts,
             camera: &self.camera,
             view,

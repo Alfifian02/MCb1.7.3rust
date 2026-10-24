@@ -1104,6 +1104,15 @@ impl ChunkManager {
         self.chunks.get(&(x >> 4, z >> 4)).map(|e| e.blocks[idx((x & 15) as usize, y as usize, (z & 15) as usize)])
     }
 
+    /// Calls `f(x, y, z, id)` for every cell of chunk `(cx, cz)` whose block is one of `ids` (the emitters and flowers `render::look` scans);
+    /// nothing when the chunk is not loaded.
+    pub fn find_blocks(&self, cx: i32, cz: i32, ids: &[u8], mut f: impl FnMut(i32, i32, i32, u8)) {
+        let Some(e) = self.chunks.get(&(cx, cz)) else { return };
+        for (i, &b) in e.blocks.iter().enumerate().filter(|(_, b)| ids.contains(b)) {
+            f(cx * 16 + (i >> 11) as i32, (i & 127) as i32, cz * 16 + ((i >> 7) & 15) as i32, b);
+        }
+    }
+
     /// Raw (sky, block) light of a cell, what the mesher's `lm` takes: entities are lit by the cell they are in
     /// (`Entity.getBrightnessForRender`). Open sky above the world and unloaded chunks read as full sky light.
     pub fn light_levels(&self, x: i32, y: i32, z: i32) -> (u8, u8) {

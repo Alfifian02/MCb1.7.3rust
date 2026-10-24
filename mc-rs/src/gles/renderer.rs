@@ -125,6 +125,8 @@ pub struct Renderer {
     body_v: Buf,
     weather_buf: Buf,
     born: Instant,
+    /// The Vibrance dial's grade of the frame being drawn (`Look::grade`), read by `finish`.
+    grade: [f32; 4],
     /// The pipeline state last set, so a pass does not repeat it.
     cur_prog: u32,
     cur_vao: u32,
@@ -158,7 +160,7 @@ impl Renderer {
             chunk.push((c, gl.program(&s.vs, &s.fs, &["u_tex", "u_origin"]).map_err(|e| format!("{c:?}: {e}"))?));
         }
         let mk = |s: shaders::Src, u: &[&str], what: &str| gl.program(&s.vs, &s.fs, u).map_err(|e| format!("{what}: {e}"));
-        let present = mk(shaders::present(samples == 1, fast), &["u_src", "u_px"], "present")?;
+        let present = mk(shaders::present(samples == 1, fast), &["u_src", "u_px", "u_grade"], "present")?;
         let hud = mk(shaders::hud(hud::SHEET_H), &["u_items", "u_size"], "hud")?;
         let pano = mk(shaders::panorama(), &["u_tex", "u_m", "u_t"], "panorama")?;
         let dome = mk(shaders::sky_dome(), &[], "sky dome")?;
@@ -263,7 +265,7 @@ impl Renderer {
         let star_v = gl.buffer(sv.len(), sv, STATIC_DRAW);
         let star_i = gl.buffer(si.len(), si, STATIC_DRAW);
         let body_v = gl.buffer(bv.len(), bv, STATIC_DRAW);
-        let fan_buf = gl.buffer(48 * 28, &[], DYNAMIC_DRAW);
+        let fan_buf = gl.buffer(sky::FAN_MAX * 28, &[], DYNAMIC_DRAW);
         let hud_buf = gl.buffer(HUD_QUADS * 6 * HUD_VERT, &[], STREAM_DRAW);
         let weather_buf = gl.buffer(2 * weather::MAX_VERTS * std::mem::size_of::<weather::Vertex>(), &[], STREAM_DRAW);
 
@@ -273,7 +275,7 @@ impl Renderer {
             gl, size, samples, fast, chunk, present, hud, pano, dome, fan, stars, body, weather, ubo_frame, ubo_sky,
             atlas: atlas_t, hud_tex: hud_t, body_tex: body_t, snow_tex: snow_t, rain_tex: rain_t, pano_tex: pano_t,
             vaos: HashMap::new(), empty_vao, hud_buf, fan_buf, star_v, star_i, star_n: star_idx.len() as i32, body_v, weather_buf,
-            born: Instant::now(), cur_prog: 0, cur_vao: 0, blend: Blend::Off,
+            born: Instant::now(), grade: [0.0; 4], cur_prog: 0, cur_vao: 0, blend: Blend::Off,
         };
         r.targets()?;
         Ok(r)
@@ -554,7 +556,13 @@ impl Renderer {
             eye: d.eye.extend(d.sky_sub).to_array(),
             fog: [d.fog[0], d.fog[1], d.fog[2], d.far],
             fogp: [d.start, d.wr, d.atmos.density, 0.0],
-        };
+            warm: [0.0; 4],
+            cool: [0.0; 4],
+            sun: [0.0; 4],
+            fx: [0.0; 4],
+        }
+        .with_look(&d.look);
+        self.grade = d.look.grade;
         self.gl.write(&self.ubo_frame, 0, bytemuck::bytes_of(&u));
         let sun = crate::world::sky::sun_dir(d.angle);
         let mut view = d.view;
@@ -577,7 +585,7 @@ impl Renderer {
             haze: d.atmos.haze,
         };
         self.gl.write(&self.ubo_sky, 0, bytemuck::bytes_of(&su));
-        let fan = sky::fan_vertices(d.angle, d.rain, sun);
+        let fan = sky::fan_vertices(d.angle, d.rain, sun, d.look.rays);
         self.gl.write(&self.fan_buf, 0, bytemuck::cast_slice(&fan));
         let hud_n = d.hud.len().min(HUD_QUADS * 6);
         self.gl.stream(&self.hud_buf, HUD_QUADS * 6 * HUD_VERT, bytemuck::cast_slice(&d.hud[..hud_n]));
@@ -673,6 +681,14 @@ impl Renderer {
             self.tiles(d, true, Chunk::LodWater);
         }
         self.runs(d, Layer::Water, Chunk::Water);
+        if d.glow_indices > 0 {
+            // Halos and motes: additive, depth-tested, no depth write (the water's state), the entity vertex.
+            self.set_blend(Blend::Add);
+            let (p, _) = self.chunk_prog(Chunk::Glow);
+            self.use_prog(p);
+            self.draw_buf(&d.glow.vbuf, &d.glow.ibuf, d.glow_indices);
+            self.set_blend(Blend::Alpha);
+        }
         if let Some((snow, rain, sun_y)) = d.precip {
             self.rain(d, snow, rain, sun_y, fix);
         }
@@ -755,6 +771,7 @@ impl Renderer {
                     (f.ActiveTexture)(TEXTURE0 + U_SCENE);
                     (f.BindTexture)(TEXTURE_2D, self.t.scene);
                     (f.Uniform4f)(l[1], 1.0 / sw as f32, 1.0 / sh as f32, 1.0 / w as f32, 1.0 / h as f32);
+                    (f.Uniform4f)(l[2], self.grade[0], self.grade[1], self.grade[2], self.grade[3]);
                 }
                 self.bind_empty();
                 // SAFETY: as above.
@@ -837,7 +854,7 @@ mod tests {
         assert_eq!(WEATHER.stride as usize, std::mem::size_of::<weather::Vertex>());
         assert_eq!(HUD.stride as usize, std::mem::size_of::<hud::HudVertex>());
         assert_eq!(std::mem::size_of::<SkyU>(), 352); // 288 + eye, cloud, cloudp, haze (biome atmosphere)
-        assert_eq!(std::mem::size_of::<Uniforms>(), 112);
+        assert_eq!(std::mem::size_of::<Uniforms>(), 176);
     }
 
     /// Every program's source assembles with each define, and the cut-out ones get alpha-to-coverage only when multisampled.

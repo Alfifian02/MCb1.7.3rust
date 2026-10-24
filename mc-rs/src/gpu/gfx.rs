@@ -90,6 +90,11 @@ pub struct WorldDraw<'a> {
     pub item_indices: u32,
     pub outline: &'a crate::render::outline::Outline,
     pub outline_indices: u32,
+    /// Halos and motes (`render::look`): the sprite buffers and how many indices of them to draw (0 = none this frame).
+    pub glow: &'a crate::render::look::GlowMesh,
+    pub glow_indices: u32,
+    /// The frame's look: the grade of the final pass and the chunk shaders' tones (`Look::OFF` changes nothing).
+    pub look: crate::render::look::Look,
     pub hud: &'a [crate::render::hud::HudVertex],
     pub camera: &'a crate::render::camera::FirstPersonCamera,
     pub view: glam::Mat4,

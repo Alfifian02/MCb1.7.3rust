@@ -10,7 +10,7 @@ use glam::{Mat4, Vec3};
 use wgpu::{BindGroup, Buffer, BufferUsages, Device, Queue, RenderPipeline, Texture};
 use wgpu::util::DeviceExt;
 
-use crate::render::{atlas, present::SCENE_FORMAT};
+use crate::render::{atlas, look::Look, present::SCENE_FORMAT};
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
@@ -109,10 +109,26 @@ pub struct Uniforms {
     /// y: radius (blocks) of the real translucent water (`fs_water`): `WATER_RANGE` with the LoD on, 1e9 (all of it) with the LoD off.
     /// z: the biome's haze, `exp(-(d z)^2)` left of a thing d blocks away on top of the linear fog (`world::atmos`); 0 = none.
     pub fogp: [f32; 4],
+    /// `render::look::Look`: rgb tone of lit surfaces, w = extra face-shade exponent.
+    pub warm: [f32; 4],
+    /// rgb tone of shaded surfaces, w = aerial tint strength.
+    pub cool: [f32; 4],
+    /// xyz: direction to the sun (moon at night), w: water glint strength.
+    pub sun: [f32; 4],
+    /// x: seconds, y: water depth gradient, z: leaf sway (blocks).
+    pub fx: [f32; 4],
+}
+
+impl Uniforms {
+    /// The look's four blocks (`Look::OFF` leaves every shader as it was).
+    pub fn with_look(mut self, l: &Look) -> Self {
+        (self.warm, self.cool, self.sun, self.fx) = (l.warm, l.cool, l.sun, l.fx);
+        self
+    }
 }
 
 const SHADER_SRC: &str = r#"
-struct U { vp: mat4x4<f32>, eye: vec4<f32>, fog: vec4<f32>, fogp: vec4<f32> };
+struct U { vp: mat4x4<f32>, eye: vec4<f32>, fog: vec4<f32>, fogp: vec4<f32>, warm: vec4<f32>, cool: vec4<f32>, sun: vec4<f32>, fx: vec4<f32> };
 @group(0) @binding(0) var<uniform> u: U;
 @group(0) @binding(1) var samp: sampler;
 @group(0) @binding(2) var tex: texture_2d<f32>;
@@ -130,6 +146,20 @@ const S_X: f32 = @SX@;
 const R709_TO_XYZ = mat3x3<f32>(vec3<f32>(0.4124, 0.3576, 0.1805), vec3<f32>(0.2126, 0.7152, 0.0722), vec3<f32>(0.0193, 0.1192, 0.9505));
 const XYZ_TO_2020 = mat3x3<f32>(vec3<f32>(1.7166084, -0.3556621, -0.2533601), vec3<f32>(-0.6666829, 1.6164776, 0.0157685), vec3<f32>(0.0176422, -0.0427763, 0.94222867));
 fn to_working(c: vec3<f32>) -> vec3<f32> { return (c * R709_TO_XYZ) * XYZ_TO_2020; }
+
+// `render::look`: the lit side takes `u.warm.rgb`, the shaded side `u.cool.rgb` (by how bright the face is, so the faces turned from the light
+// go bluer by themselves); the fog factor brings a faint blue, brighter tint on the way to the fog colour (aerial perspective, `u.cool.w`).
+// All of it is the identity with `Look::OFF`.
+const AER = vec3<f32>(0.95, 0.99, 1.07);
+// The water's multipliers at the deep and the shallow end (on the biome-coloured tile, linear): deeper is darker and bluer, shallower lifts
+// green and blue towards turquoise.
+const WATER_DEEP = vec3<f32>(0.55, 0.65, 0.85);
+const WATER_SHALLOW = vec3<f32>(0.80, 1.15, 1.10);
+fn boost(s: f32) -> f32 { return pow(s, 1.0 + u.warm.w); }
+fn finish(rgb: vec3<f32>, lit: f32, fg: f32) -> vec3<f32> {
+    let c = to_working(rgb * lit * mix(u.cool.rgb, u.warm.rgb, smoothstep(0.15, 0.7, lit)));
+    return mix(c * mix(vec3<f32>(1.0), AER, fg * u.cool.w), u.fog.rgb, fg);
+}
 
 // The one atlas read. A minified tile (distance, a slanted face, `RENDER_SCALE`) is filtered bilinear + trilinear, and a tap of that
 // footprint within half a texel of the tile edge reads the NEIGHBOURING tile, so the UV is clamped into its own 16-texel tile by half a
@@ -221,7 +251,7 @@ fn chunk_texel(w: vec3<u32>) -> vec2<f32> {
 fn chunk_shade(code: u32) -> f32 {
     var s = 1.0;
     if (code & 3u) == 1u { s = 0.8; } else if (code & 3u) == 2u { s = 0.6; } else if (code & 3u) == 3u { s = 0.5; }
-    return s * (1.0 - 0.2 * f32(code >> 2u));
+    return boost(s) * (1.0 - 0.2 * f32(code >> 2u));
 }
 fn chunk_lit(w: vec3<u32>) -> f32 {
     return pow(brightness(f32((w.z >> 16u) & 63u) / 60.0, f32((w.z >> 22u) & 31u) / 30.0) * chunk_shade(w.z >> 27u), 2.2);
@@ -245,8 +275,13 @@ struct VsC {
 @vertex
 fn vs_chunk(@location(0) w: vec3<u32>) -> VsC {
     var o: VsC;
-    let vpos = chunk_pos(w);
+    var vpos = chunk_pos(w);
     let tile = f32(w.y & 1023u);
+    // Leaves (tiles 53, 133, 255) sway a little (`u.fx.z` blocks, 0 = off): a smooth function of the position, so shared corners move together.
+    if u.fx.z > 0.0 && (tile == 53.0 || tile == 133.0 || tile == 255.0) {
+        let t = u.fx.x;
+        vpos += vec3<f32>(sin(t * 1.3 + vpos.x * 0.9 + vpos.z * 0.6), 0.5 * sin(t * 1.9 + vpos.y * 1.1 + vpos.x * 0.7), cos(t * 1.1 + vpos.z * 0.8 + vpos.y * 0.5)) * u.fx.z;
+    }
     o.pos = u.vp * vec4<f32>(vpos, 1.0);
     o.uv = chunk_texel(w) / 16.0;
     o.uvd = o.uv;
@@ -279,9 +314,9 @@ fn flat_shade(wp: vec3<f32>, dx: vec3<f32>, dy: vec3<f32>) -> f32 {
     let c = cross(dx, dy);
     if dot(c, c) < 1e-20 { return 1.0; }
     let a = abs(c);
-    if a.x >= a.y && a.x >= a.z { return S_X; }
-    if a.y >= a.z { return select(S_BOT, 1.0, c.y * dot(c, u.eye.xyz - wp) > 0.0); }
-    return S_Z;
+    if a.x >= a.y && a.x >= a.z { return boost(S_X); }
+    if a.y >= a.z { return select(boost(S_BOT), 1.0, c.y * dot(c, u.eye.xyz - wp) > 0.0); }
+    return boost(S_Z);
 }
 
 // Far terrain (`world::lod`, `k >= 1000`) and its water sheet: the quad's uv is in BLOCKS, v up, and `k - 1000` is its terrain tile. The
@@ -330,7 +365,7 @@ fn frag(in: VsOut, cut: bool, shade: f32) -> vec4<f32> {
         rgb = c.rgb;
         if textureSampleLevel(tex, samp, ouv, 0.0).a >= 0.5 { rgb = atlas_sample_g(ouv, gx, gy).rgb * in.tint; }
     }
-    return vec4<f32>(mix(to_working(rgb * lit), u.fog.rgb, in.fg), cover);
+    return vec4<f32>(finish(rgb, lit, in.fg), cover);
 }
 
 // The chunk layers' atlas read: the tile `o` (texel origin) at the position `t` (tiles) inside it, tile-clamped like `atlas_sample_g` (same pad,
@@ -372,7 +407,7 @@ fn frag_chunk(in: VsC, cut: bool) -> vec4<f32> {
         rgb = c.rgb;
         if textureSampleLevel(tex, samp, (oo + t * 16.0) / size, 0.0).a >= 0.5 { rgb = tile_sample(oo, t, gx, gy).rgb * in.tint; }
     }
-    return vec4<f32>(mix(to_working(rgb * in.lit), u.fog.rgb, in.fg), cover);
+    return vec4<f32>(finish(rgb, in.lit, in.fg), cover);
 }
 
 // Chunk layers: no screen derivative for the shade, the vertex has it.
@@ -418,7 +453,38 @@ fn fs_water(in: VsOut) -> @location(0) vec4<f32> {
     var c = atlas_sample_g(uv, gx, gy);
     // The LoD debug sheet (tile 1066) is multiplied by its cyan; every water (real or a sheet, tile 1205) takes its biome's colour.
     if sheet && in.k < 1200.0 { c = vec4<f32>(c.rgb * in.tint, c.a); } else { c = vec4<f32>(water_rgb(c.rgb, in.tint), c.a); }
-    return vec4<f32>(mix(to_working(c.rgb * in.lit * flat_shade(in.wp, dx, dy)), u.fog.rgb, in.fg), c.a);
+    // Depth gradient (`u.fx.y`): looking steeply down is shallow (the biome's water lifted towards turquoise), a grazing look the deep (darker, bluer).
+    // It scales the biome's colour, so a swamp stays green and a jungle teal. ponytail: the view angle stands in for the real depth (the meshes
+    // carry none); the upgrade is the water column's depth per vertex (the tint carries the biome's colour).
+    var col = c.rgb;
+    var a = c.a;
+    let v = normalize(u.eye.xyz - in.wp);
+    if u.fx.y > 0.0 {
+        let t = smoothstep(0.1, 0.9, abs(v.y));
+        col = col * mix(vec3<f32>(1.0), mix(WATER_DEEP, WATER_SHALLOW, t), u.fx.y);
+        a = mix(a, a * 0.82, t * u.fx.y);
+    }
+    var rgb = finish(col, in.lit * flat_shade(in.wp, dx, dy), in.fg);
+    // Sun (moon) glint on the tops: a Blinn highlight on a slightly rippled surface; `u.sun.w` = 0 skips it.
+    let n3 = cross(dx, dy);
+    if u.sun.w > 0.0 && abs(n3.y) > 0.8 * length(n3) {
+        let t = u.fx.x;
+        let n = normalize(vec3<f32>(0.06 * sin(in.wp.x * 2.3 + t * 1.3) + 0.04 * sin(in.wp.z * 3.7 - t * 0.9), 1.0, 0.06 * cos(in.wp.z * 2.1 + t * 1.1) + 0.04 * cos(in.wp.x * 3.1 + t * 0.8)));
+        let g = pow(max(dot(n, normalize(u.sun.xyz + v)), 0.0), 160.0) * u.sun.w * (1.0 - in.fg);
+        rgb += vec3<f32>(1.0, 0.95, 0.8) * g;
+        a = max(a, min(g, 1.0));
+    }
+    return vec4<f32>(rgb, a);
+}
+
+// A soft additive disc (`render::look`: halos of lava, torches, glowstone and the sun; motes). `k` is the strength (+ 10: no fog), the uv the
+// corner -1..1, the tint its colour; the blend is src alpha + one.
+@fragment
+fn fs_glow(in: VsOut) -> @location(0) vec4<f32> {
+    let r = 1.0 - dot(in.uv, in.uv);
+    if r <= 0.0 { discard; }
+    let nofog = in.k >= 10.0;
+    return vec4<f32>(to_working(in.tint), (in.k - select(0.0, 10.0, nofog)) * select(1.0 - in.fg, 1.0, nofog) * r * r);
 }
 "#;
 
@@ -443,6 +509,12 @@ fn shader_source_with(a2c: bool) -> String {
         .replace("@SX@", &format!("{:?}", 0.6f32.powf(2.2)))
 }
 
+/// Source alpha x colour added to the frame: the halos' blend (the alpha channel is unused).
+const GLOW_BLEND: wgpu::BlendState = wgpu::BlendState {
+    color: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::SrcAlpha, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add },
+    alpha: wgpu::BlendComponent::OVER,
+};
+
 pub struct ChunkPipeline {
     /// Opaque terrain (`fs_solid`): no `discard`.
     pub solid: RenderPipeline,
@@ -459,6 +531,8 @@ pub struct ChunkPipeline {
     pub lod: RenderPipeline,
     /// Translucent water (`fs_water`), drawn after everything opaque.
     pub water: RenderPipeline,
+    /// Additive soft discs (`fs_glow`): halos and motes, after the water, depth-tested and not written.
+    pub glow: RenderPipeline,
     uniform_buf: Buffer,
     atlas_tex: Texture,
     pub bind_group: BindGroup,
@@ -522,7 +596,7 @@ impl ChunkPipeline {
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
                 entry_point: Some(fs),
-                targets: &[Some(wgpu::ColorTargetState { format: SCENE_FORMAT, blend: water.then_some(wgpu::BlendState::ALPHA_BLENDING), write_mask: wgpu::ColorWrites::ALL })],
+                targets: &[Some(wgpu::ColorTargetState { format: SCENE_FORMAT, blend: if fs == "fs_glow" { Some(GLOW_BLEND) } else { water.then_some(wgpu::BlendState::ALPHA_BLENDING) }, write_mask: wgpu::ColorWrites::ALL })],
                 compilation_options: Default::default(),
             }),
             primitive: wgpu::PrimitiveState { cull_mode: (!water).then_some(wgpu::Face::Back), ..Default::default() },
@@ -540,6 +614,7 @@ impl ChunkPipeline {
             lod: make("lod", "vs_main", "fs_cut_flat", false, wgpu::DepthBiasState { constant: 8, slope_scale: 1.0, clamp: 0.0 }, false),
             water: make("water", "vs_chunk_water", "fs_water", true, none, true),
             lod_water: make("lod_water", "vs_water", "fs_water", true, none, false),
+            glow: make("glow", "vs_main", "fs_glow", true, none, false),
             origins,
             uniform_buf,
             atlas_tex,
@@ -549,13 +624,18 @@ impl ChunkPipeline {
 
     /// The frame's uniforms, one write: the camera, the sky light the time of day takes away (/ 15), the fog (`far` 0 = off, < 0 = `GL_EXP`
     /// density; `start` = fraction of `far` where the linear fog begins, 0 = a quarter; `water` = radius of the real water; `haze` = the biome's exp² density).
-    pub fn frame(&self, queue: &Queue, view: Mat4, proj: Mat4, eye: Vec3, sky_sub: f32, fog: [f32; 3], far: f32, start: f32, water: f32, haze: f32) {
+    pub fn frame(&self, queue: &Queue, view: Mat4, proj: Mat4, eye: Vec3, sky_sub: f32, fog: [f32; 3], far: f32, start: f32, water: f32, haze: f32, look: &Look) {
         let u = Uniforms {
             view_proj: (proj * view).to_cols_array_2d(),
             eye: eye.extend(sky_sub).to_array(),
             fog: [fog[0], fog[1], fog[2], far],
             fogp: [start, water, haze, 0.0],
-        };
+            warm: [0.0; 4],
+            cool: [0.0; 4],
+            sun: [0.0; 4],
+            fx: [0.0; 4],
+        }
+        .with_look(look);
         queue.write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&u));
     }
 
@@ -633,7 +713,7 @@ mod tests {
         let src = shader_source();
         let m = naga::front::wgsl::parse_str(&src).unwrap_or_else(|e| panic!("{}", e.emit_to_string(&src)));
         naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all()).validate(&m).unwrap();
-        for e in ["vs_main", "vs_water", "vs_chunk", "vs_chunk_water", "fs_solid", "fs_cut", "fs_cut_flat", "fs_water"] {
+        for e in ["vs_main", "vs_water", "vs_chunk", "vs_chunk_water", "fs_solid", "fs_cut", "fs_cut_flat", "fs_water", "fs_glow"] {
             assert!(m.entry_points.iter().any(|p| p.name == e), "{e} missing");
         }
         assert!(!SHADER_SRC.contains("textureSample(tex"));
@@ -689,7 +769,7 @@ mod tests {
         let out_view = out.create_view(&Default::default());
         let present = crate::render::present::Present::new(&device, &queue, (N, N), (N, N), fmt);
         let eye = Vec3::new(0.0, 4.0, 0.0);
-        pipe.frame(&queue, Mat4::look_at_rh(eye, Vec3::ZERO, Vec3::NEG_Z), Mat4::perspective_rh(1.2, 1.0, 0.05, 100.0), eye, 0.0, [0.5; 3], 0.0, 0.0, 12.0, 0.0);
+        pipe.frame(&queue, Mat4::look_at_rh(eye, Vec3::ZERO, Vec3::NEG_Z), Mat4::perspective_rh(1.2, 1.0, 0.05, 100.0), eye, 0.0, [0.5; 3], 0.0, 0.0, 12.0, 0.0, &Look::OFF);
         let pixel = |lm: f32| -> [u8; 4] {
             // Tile 1 (stone), shown once: texels 0..16 of it.
             let (u0, u1, v1) = (0.0f32, 16.0f32, 16.0f32);
@@ -712,8 +792,8 @@ mod tests {
                 rp.set_bind_group(0, &pipe.bind_group, &[]);
                 rp.set_vertex_buffer(0, vb.slice(..));
                 rp.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
-                for p in [&pipe.solid, &pipe.cutout, &pipe.entity, &pipe.lod, &pipe.water, &pipe.lod_water] {
-                    rp.set_pipeline(p); // all six must be valid with this pass; water blends over: it is skipped by its radius test
+                for p in [&pipe.solid, &pipe.cutout, &pipe.entity, &pipe.lod, &pipe.water, &pipe.lod_water, &pipe.glow] {
+                    rp.set_pipeline(p); // all seven must be valid with this pass; water blends over: it is skipped by its radius test
                     if std::ptr::eq(p, &pipe.solid) {
                         rp.set_bind_group(1, &pipe.origins.group, &[DrawOrigins::offset(0)]);
                         rp.draw_indexed(0..embeddium::quad_index::index_count(4), 0, 0..1);

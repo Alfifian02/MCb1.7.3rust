@@ -111,7 +111,7 @@ fn multisample_of(count: u32, alpha_to_coverage: bool) -> wgpu::MultisampleState
 }
 
 const SHADER: &str = r#"
-struct U { px: vec4<f32> }; // 1 / scene size, 1 / surface size
+struct U { px: vec4<f32>, grade: vec4<f32> }; // 1 / scene size, 1 / surface size; the Vibrance dial's grade (`render::look`)
 @group(0) @binding(0) var<uniform> u: U;
 @group(0) @binding(1) var samp: sampler;
 @group(0) @binding(2) var src: texture_2d<f32>;
@@ -132,6 +132,18 @@ fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
 
 fn tap(uv: vec2<f32>) -> vec3<f32> { return sqrt(max(textureSampleLevel(src, samp, uv, 0.0).rgb, vec3<f32>(0.0))); }
 fn luma(c: vec3<f32>) -> f32 { return dot(c, vec3<f32>(0.299, 0.587, 0.114)); }
+
+// The grade (`u.grade`: vibrance amount, S-curve blend, warm / cool split; all 0 = skipped), in sqrt space like the taps. Vibrance lifts the
+// colours that have little saturation and leaves the vivid ones alone (a saturation boost would push the greens and blues first).
+fn grade(c: vec3<f32>) -> vec3<f32> {
+    var g = sqrt(c);
+    let l = luma(g);
+    g = mix(vec3<f32>(l), g, 1.0 + u.grade.x * (1.0 - (max(g.r, max(g.g, g.b)) - min(g.r, min(g.g, g.b)))));
+    g = mix(g, g * g * (3.0 - 2.0 * g), u.grade.y);
+    let k = (smoothstep(0.2, 0.8, l) - 0.5) * 2.0 * u.grade.z; // + in the highlights, - in the shadows
+    g = clamp(g + vec3<f32>(k, 0.0, -k), vec3<f32>(0.0), vec3<f32>(1.0));
+    return g * g;
+}
 
 // The one full-screen pass: (FXAA +) CAS on the scene, bilinear upscale, Rec. 2020 -> 709, vignette, sRGB. `uv` is the surface pixel's
 // place in the scene; the taps are one scene texel apart, so at a render scale below 1 CAS sharpens exactly what the upscale softens.
@@ -171,6 +183,7 @@ fn fs_fin(@builtin(position) p: vec4<f32>) -> @location(0) vec4<f32> {
     var l: vec3<f32>;
     if FAST { l = max(textureSampleLevel(src, samp, uv, 0.0).rgb, vec3<f32>(0.0)); } else { l = enhanced(uv, u.px.xy); }
     var c = clamp((l * R2020_TO_XYZ) * XYZ_TO_709, vec3<f32>(0.0), vec3<f32>(1.0));
+    if u.grade.x > 0.0 { c = grade(c); }
     let k = uv.x * uv.y;
     c = c * pow(max(16.0 * (k - uv.x) * (k - uv.y), 1e-4), VIGNETTE);
     // The swap chain is sRGB on most phones (the hardware encodes); otherwise encode here.
@@ -239,7 +252,7 @@ impl Present {
             cache: None,
         });
         let samp = device.create_sampler(&wgpu::SamplerDescriptor { mag_filter: wgpu::FilterMode::Linear, min_filter: wgpu::FilterMode::Linear, address_mode_u: wgpu::AddressMode::ClampToEdge, address_mode_v: wgpu::AddressMode::ClampToEdge, ..Default::default() });
-        let ubuf = device.create_buffer(&wgpu::BufferDescriptor { label: Some("present_u"), size: 16, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        let ubuf = device.create_buffer(&wgpu::BufferDescriptor { label: Some("present_u"), size: 32, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
         let (scene_v, msaa, bind) = Self::size(device, queue, &layout, &samp, &ubuf, scene, surface);
         Self { scene: scene_v, msaa, fin, layout, samp, ubuf, bind }
     }
@@ -265,6 +278,11 @@ impl Present {
 
     pub fn resize(&mut self, device: &Device, queue: &Queue, scene: (u32, u32), surface: (u32, u32)) {
         (self.scene, self.msaa, self.bind) = Self::size(device, queue, &self.layout, &self.samp, &self.ubuf, scene, surface);
+    }
+
+    /// The Vibrance dial's grade for this frame (`Look::grade`), read by the final pass.
+    pub fn set_grade(&self, queue: &Queue, grade: [f32; 4]) {
+        queue.write_buffer(&self.ubuf, 16, bytemuck::bytes_of(&grade));
     }
 
     /// The 1-sample scene (what the final pass reads). The scene pass draws into `scene_attachment` instead.
