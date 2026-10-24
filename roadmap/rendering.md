@@ -4,6 +4,10 @@ Part of [`ROADMAP.md`](../ROADMAP.md). This part is the changelog of what is dra
 
 ## Changelog
 
+- 2026-10-24 (5): shoulder-surf: faster dolly, smoother follow, no automatic swap (written WITHOUT a toolchain: not compiled, not run; one test replaced in `render::shoulder`).
+    - Dolly: omega 8 -> 16 (about 0.3 s to the shoulder, no overshoot).
+    - Smoother: pivot omega 16 / 26 -> 12 / 16 (xz / y); the pull-in is a fast ease (omega 30) instead of a snap, the release 8; the push-out and the eye fallback still catch what the ease leaves; the bank follows a smoothed turn rate (`Rig::turn`, omega 14), so a lumpy touch drag no longer jitters the roll.
+    - A wall no longer flips the shoulder. The side is the player's (view button tap = `Rig::swap`); near a wall on the camera's side the offset closes up toward the head (`Rig::room`, 2 rays, 0.35 clearance, omega 12) and opens again. `a_wall_on_one_side_swaps_the_shoulder` became `a_wall_on_one_side_squeezes_but_never_swaps`. This also drops the 1.2 s hands-off after a manual swap of entry (4).
 - 2026-10-24 (4): shoulder-surf fixes after the first screenshots (written WITHOUT a toolchain: not compiled, not run; +1 test in `render::shoulder`, the view-button test extended).
     - Clipping: the camera's solid is `chunk::collision(id).is_some()` (leaves, glass, slabs, fences count; `normal_cube` let it through the leaf canopy). Rays are radius 0.28 with a 0.3 margin, `free` bisects its last step (no 0.1 steps), a 2-pass sphere push-out keeps the camera off walls it slides along, and a camera inside a cell falls back to the eye.
     - Head filling the screen (second screenshot: the camera squeezed into the head): inside 0.8 blocks of the eye (out at 1.1) `Shot::close` is set; `lib.rs` then draws the first-person hand and leaves the model out. This is also the start of the dolly.

@@ -1,0 +1,176 @@
+diff -ruN a/mc-rs/src/render/shoulder.rs b/mc-rs/src/render/shoulder.rs
+--- a/mc-rs/src/render/shoulder.rs	2026-10-24 08:22:57.128819828 +0000
++++ b/mc-rs/src/render/shoulder.rs	2026-10-24 08:22:57.148182589 +0000
+@@ -5,19 +5,19 @@
+ //! `cargo test --lib shoulder` runs on a plain host, and `tools/shoulder_proto.py` is the Python twin of the maths.
+ //!
+ //! What it does, per frame (`Rig::update`):
+-//! - **Dolly in**: a critically damped blend 0 -> 1 glides the camera from the eye out to the shoulder; the field of view whips
++//! - **Dolly in**: a critically damped blend 0 -> 1 (omega 16, about 0.3 s) glides the camera from the eye out to the shoulder; the field of view whips
+ //!   wider on the way (speed feel) and settles.
+ //! - **Shoulder anchor + lag**: the camera orbits a pivot a shoulder-width right of the eye. The pivot follows the player through
+ //!   springs (slower on xz than on y), so a sprint or a stop leaves the camera a little behind, then catches up. Capped at 0.6 blocks.
+ //! - **Aim convergence**: the camera sits off the eye's line, so the crosshair would miss what the pick ray (from the eye) hits.
+ //!   A small view-space turn (`Shot::view`) aims the camera's centre at the point the eye ray reaches at the aimed block's distance,
+ //!   the distance itself is spring-eased (a rack-focus, not a snap).
+-//! - **Shoulder swap**: a wall within 0.7 blocks of the preferred side and clear air on the other flips the side (0.9 s cool-down);
+-//!   the offset slides across behind the head.
++//! - **Squeeze, never swap**: a wall close on the camera's side does not flip the shoulder (only the player does); the offset closes
++//!   up toward the head and opens again, eased.
+ //! - **Collision**: five rays (centre + 4 around, radius 0.28) from the eye to the wanted place; the camera stops short at once,
+ //!   eases back out at ~10 / s, and a sphere push-out (radius 0.3) keeps it off walls it slides along. Squeezed within 0.8 blocks of
+ //!   the head it reports `Shot::close` and the caller draws the hand instead of the model.
+-//! - **Shoulder swap**: also by hand (`Rig::swap`), swinging out wide behind the head while it crosses.
++//! - **Shoulder swap**: by hand only (`Rig::swap`), swinging out wide behind the head while it crosses.
+ //! - **Bank**: roll into a strafe or a turn (4.6 degrees at most), spring-eased.
+ //! - **Impacts**: a landing dips the pivot (under-damped spring, scaled by the fall speed), a jump lifts it, a hit kicks pitch and roll
+ //!   with a side that alternates.
+@@ -25,7 +25,7 @@
+ //!   and widens the view a touch.
+ //! - **Hand-held sway**: a few slow sines in yaw / pitch / roll, calmer the faster the player moves.
+ //!
+-//! ponytail: the swap test is two rays on each side (head and waist), not a swept sphere; the pull-in is one segment from the eye to
++//! ponytail: the side-room test is two rays (head and waist), not a swept sphere; the pull-in is one segment from the eye to
+ //! the wanted place, so it can cut a corner a swept capsule would clear. Upgrade: sphere-cast the 5 rays against the voxel boxes.
+ 
+ use glam::{Mat4, Vec3};
+@@ -135,7 +135,10 @@
+     /// +1 = camera over the right shoulder, -1 = the left.
+     side: f32,
+     side_s: Spring,
+-    swap_cool: f32,
++    /// Room (blocks) to the camera's side of the head, eased: the shoulder offset never goes past it.
++    room: Spring,
++    /// Smoothed turn rate (rad/s), the bank's input.
++    turn: Spring,
+     /// Fraction of the eye -> wanted-place segment that is free.
+     frac: f32,
+     focus: Spring,
+@@ -172,7 +175,8 @@
+             primed: false,
+             side: 1.0,
+             side_s: Spring::at(1.0),
+-            swap_cool: 0.0,
++            room: Spring::at(1.0),
++            turn: Spring::default(),
+             frac: 1.0,
+             focus: Spring::at(28.0),
+             roll: Spring::default(),
+@@ -198,10 +202,9 @@
+         *self = Self::new();
+     }
+ 
+-    /// Over to the other shoulder now (the view button's tap in this view). The wall test leaves the choice alone for 1.2 s.
++    /// Over to the other shoulder (the view button's tap in this view). Only the player does this: a wall never flips the side.
+     pub fn swap(&mut self) {
+         self.side = -self.side;
+-        self.swap_cool = 1.2;
+     }
+ 
+     fn pivot_vec(&self) -> Vec3 {
+@@ -218,7 +221,7 @@
+         let up = right.cross(fwd);
+ 
+         // Dolly in, stance, speed.
+-        self.blend.crit(1.0, 8.0, dt);
++        self.blend.crit(1.0, 16.0, dt); // ~0.3 s to the shoulder
+         let w = self.blend.x.clamp(0.0, 1.0);
+         let speed = Vec3::new(f.vel.x, 0.0, f.vel.z).length();
+         self.sneak_s.crit(b(f.sneak), 9.0, dt);
+@@ -245,14 +248,9 @@
+         self.kick[0].bounce(0.0, 24.0, 0.3, dt);
+         self.kick[1].bounce(0.0, 24.0, 0.3, dt);
+ 
+-        // Shoulder swap: a wall close on the preferred side, air on the other.
+-        self.swap_cool = (self.swap_cool - dt).max(0.0);
+-        let probe = |dir: Vec3| [0.1_f32, -0.7].iter().map(|dy| free(f.solid, f.eye + Vec3::Y * *dy, dir, 1.2)).fold(1.2, f32::min);
+-        let (pref, other) = (probe(right * self.side), probe(-right * self.side));
+-        if self.swap_cool == 0.0 && pref < 0.7 && other > pref + 0.5 {
+-            self.side = -self.side;
+-            self.swap_cool = 0.9;
+-        }
++        // A wall close on the camera's side does not flip the shoulder: the offset closes up toward the head, smoothly, and opens again.
++        let room = [0.1_f32, -0.7].iter().map(|dy| free(f.solid, f.eye + Vec3::Y * *dy, right * self.side, 1.2)).fold(1.2, f32::min);
++        self.room.crit((room - 0.35).max(0.0), 12.0, dt);
+         self.side_s.crit(self.side, 10.0, dt);
+ 
+         // The shot's shape (blocks): behind, a shoulder to the side, a little above the eye.
+@@ -261,6 +259,7 @@
+         dist += 0.5 * (1.0 - self.side_s.x.abs().min(1.0)); // crossing over: swing out wide behind the head, not through it
+         let mut shoulder = 0.62 - 0.05 * sn;
+         shoulder += (0.8 - shoulder) * z;
++        shoulder = shoulder.min(self.room.x.max(0.0));
+         let mut rise = 0.2 - 0.25 * sn;
+         rise += (0.08 - rise) * z;
+ 
+@@ -270,9 +269,9 @@
+             self.pivot = [Spring::at(want.x), Spring::at(want.y), Spring::at(want.z)];
+             self.primed = true;
+         }
+-        self.pivot[0].crit(want.x, 16.0, dt);
+-        self.pivot[1].crit(want.y, 26.0, dt);
+-        self.pivot[2].crit(want.z, 16.0, dt);
++        self.pivot[0].crit(want.x, 12.0, dt);
++        self.pivot[1].crit(want.y, 16.0, dt);
++        self.pivot[2].crit(want.z, 12.0, dt);
+         let off = self.pivot_vec() - want;
+         if off.length() > 0.6 {
+             let c = want + off.normalize() * 0.6;
+@@ -294,11 +293,9 @@
+                 .fold(len, f32::min);
+             ((best - RADIUS).max(0.0) / len).min(1.0)
+         };
+-        if clear < self.frac {
+-            self.frac = clear;
+-        } else {
+-            self.frac += (clear - self.frac) * (1.0 - (-10.0 * dt).exp());
+-        }
++        // In fast (the push-out below catches what is left), out slowly; neither is a snap.
++        let rate = if clear < self.frac { 30.0 } else { 8.0 };
++        self.frac += (clear - self.frac) * (1.0 - (-rate * dt).exp());
+         let mut pos = f.eye + to * self.frac;
+         // Push the camera's sphere out of whatever it still grazes (a ray along a wall stops at the wall, not RADIUS short of it).
+         for _ in 0..2 {
+@@ -324,7 +321,8 @@
+         // Bank into a strafe or a turn.
+         let yaw_rate = if dt > 1e-4 { ((f.yaw - self.prev_yaw) / dt).clamp(-6.0, 6.0) } else { 0.0 };
+         self.prev_yaw = f.yaw;
+-        self.roll.crit((f.vel.dot(right) * 0.010 + yaw_rate * 0.012).clamp(-0.08, 0.08), 7.0, dt);
++        self.turn.crit(yaw_rate, 14.0, dt); // a touch drag arrives in lumps: the bank follows its envelope
++        self.roll.crit((f.vel.dot(right) * 0.010 + self.turn.x * 0.012).clamp(-0.08, 0.08), 7.0, dt);
+ 
+         // Hand-held sway, calmer at speed.
+         let (t, calm) = (self.clock, (1.0 - 0.6 * spd) * w);
+@@ -402,13 +400,14 @@
+         assert!(s.pos.is_finite() && s.pos.z < 0.9, "{:?}", s.pos);
+     }
+ 
+-    /// A wall on the right shoulder flips the camera to the left one.
++    /// A wall on the right shoulder never flips the camera to the left one: it closes up toward the head and stays out of the wall.
+     #[test]
+-    fn a_wall_on_one_side_swaps_the_shoulder() {
++    fn a_wall_on_one_side_squeezes_but_never_swaps() {
+         let wall = |p: Vec3| p.x > 0.5; // yaw 0: right is +x
+         let mut rig = Rig::new();
+-        settle(&mut rig, &frame(&wall, None));
+-        assert!(rig.side_s.x < -0.9, "{}", rig.side_s.x);
++        let s = settle(&mut rig, &frame(&wall, None));
++        assert!(rig.side_s.x > 0.9, "still the right shoulder: {}", rig.side_s.x);
++        assert!(s.pos.x < 0.5 && s.pos.is_finite(), "{:?}", s.pos);
+     }
+ 
+     /// A manual swap flips the side and the camera never goes through the head; squeezed into a tunnel the model is left out.
+diff -ruN a/roadmap/rendering.md b/roadmap/rendering.md
+--- a/roadmap/rendering.md	2026-10-24 08:22:57.144248872 +0000
++++ b/roadmap/rendering.md	2026-10-24 08:22:57.149719151 +0000
+@@ -4,6 +4,10 @@
+ 
+ ## Changelog
+ 
++- 2026-10-24 (5): shoulder-surf: faster dolly, smoother follow, no automatic swap (written WITHOUT a toolchain: not compiled, not run; one test replaced in `render::shoulder`).
++    - Dolly: omega 8 -> 16 (about 0.3 s to the shoulder, no overshoot).
++    - Smoother: pivot omega 16 / 26 -> 12 / 16 (xz / y); the pull-in is a fast ease (omega 30) instead of a snap, the release 8; the push-out and the eye fallback still catch what the ease leaves; the bank follows a smoothed turn rate (`Rig::turn`, omega 14), so a lumpy touch drag no longer jitters the roll.
++    - A wall no longer flips the shoulder. The side is the player's (view button tap = `Rig::swap`); near a wall on the camera's side the offset closes up toward the head (`Rig::room`, 2 rays, 0.35 clearance, omega 12) and opens again. `a_wall_on_one_side_swaps_the_shoulder` became `a_wall_on_one_side_squeezes_but_never_swaps`. This also drops the 1.2 s hands-off after a manual swap of entry (4).
+ - 2026-10-24 (4): shoulder-surf fixes after the first screenshots (written WITHOUT a toolchain: not compiled, not run; +1 test in `render::shoulder`, the view-button test extended).
+     - Clipping: the camera's solid is `chunk::collision(id).is_some()` (leaves, glass, slabs, fences count; `normal_cube` let it through the leaf canopy). Rays are radius 0.28 with a 0.3 margin, `free` bisects its last step (no 0.1 steps), a 2-pass sphere push-out keeps the camera off walls it slides along, and a camera inside a cell falls back to the eye.
+     - Head filling the screen (second screenshot: the camera squeezed into the head): inside 0.8 blocks of the eye (out at 1.1) `Shot::close` is set; `lib.rs` then draws the first-person hand and leaves the model out. This is also the start of the dolly.
