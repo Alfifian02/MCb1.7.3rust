@@ -220,6 +220,8 @@ pub const SPREAD_SECS: f32 = 0.9;
 pub const ROLL_SECS: f32 = 0.7;
 /// Walk farther than this from it and it rolls itself up (blocks, from the eye).
 pub const AWAY: f32 = 6.5;
+/// Seconds the pack takes to come up into both hands.
+pub const CARRY_SECS: f32 = 0.35;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Step {
@@ -258,14 +260,29 @@ impl Mat {
         v
     }
 
-    /// Spread the cloth on the top of the block hit at `point` (`top` = the y of the air cell above it), away from `eye`. Needs flat
-    /// ground: under all nine samples a full block (`floor`) with nothing (`air`) in the cell on it.
-    pub fn lay(point: Vec3, eye: Vec3, top: i32, air: &dyn Fn(i32, i32, i32) -> bool, floor: &dyn Fn(i32, i32, i32) -> bool) -> Option<Mat> {
+    /// The cloth as it would be spread on the top of the block hit at `point` (`top` = the y of the air cell above it), away from `eye`,
+    /// not yet checked against the ground (`fits`).
+    pub fn plan(point: Vec3, eye: Vec3, top: i32) -> Mat {
         let (dx, dz) = (point.x - eye.x, point.z - eye.z);
         let along_x = dx.abs() > dz.abs();
         let sign = if (if along_x { dx } else { dz }) < 0.0 { -1.0 } else { 1.0 };
-        let m = Mat { c: Vec3::new(point.x, top as f32, point.z), along_x, sign, t: 0.0, dir: 1 };
-        Self::samples(m.c, along_x).iter().all(|&(x, z)| floor(x, top - 1, z) && air(x, top, z)).then_some(m)
+        Mat { c: Vec3::new(point.x, top as f32, point.z), along_x, sign, t: 0.0, dir: 1 }
+    }
+
+    /// Flat ground: under all nine samples a full block (`floor`) with nothing (`air`) in the cell on it.
+    pub fn fits(&self, air: &dyn Fn(i32, i32, i32) -> bool, floor: &dyn Fn(i32, i32, i32) -> bool) -> bool {
+        let top = self.c.y as i32;
+        Self::samples(self.c, self.along_x).iter().all(|&(x, z)| floor(x, top - 1, z) && air(x, top, z))
+    }
+
+    pub fn lay(point: Vec3, eye: Vec3, top: i32, air: &dyn Fn(i32, i32, i32) -> bool, floor: &dyn Fn(i32, i32, i32) -> bool) -> Option<Mat> {
+        let m = Self::plan(point, eye, top);
+        m.fits(air, floor).then_some(m)
+    }
+
+    /// The same cloth fully spread and still: the preview shown while the pack is carried.
+    pub fn shown(self) -> Mat {
+        Mat { t: 1.0, dir: 0, ..self }
     }
 
     /// Still worth keeping: near enough, and the ground under it is still there.
@@ -393,6 +410,19 @@ mod tests {
         assert_eq!(slot_at(&inv, w, h, x, y), Some(SlotId::Inv(9)));
         assert_eq!(slot_at(&inv, w, h, 2.0, 2.0), None);
         assert!(!in_mat(w, h, 2.0, 2.0) && in_mat(w, h, w / 2.0, h / 2.0));
+    }
+
+    #[test]
+    fn a_planned_cloth_fits_exactly_where_lay_accepts_it() {
+        let floor = |_x: i32, y: i32, _z: i32| y == 63;
+        let air = |x: i32, y: i32, z: i32| y >= 64 && (x, y, z) != (5, 64, 5);
+        let eye = Vec3::new(3.5, 65.6, 0.5);
+        for (p, ok) in [(Vec3::new(3.5, 64.0, 3.5), true), (Vec3::new(5.2, 64.0, 5.2), false)] {
+            let m = Mat::plan(p, eye, 64);
+            assert_eq!((m.fits(&air, &floor), Mat::lay(p, eye, 64, &air, &floor) == Some(m)), (ok, ok));
+        }
+        let shown = Mat::plan(Vec3::new(3.5, 64.0, 3.5), eye, 64).shown();
+        assert_eq!((shown.boxes().len(), shown.dir), (1, 0), "the preview is the spread cloth alone");
     }
 
     #[test]

@@ -1,0 +1,337 @@
+diff -ruN a/README.md b/README.md
+--- a/README.md	2026-10-25 03:41:31.380178543 +0000
++++ b/README.md	2026-10-25 03:44:20.599656608 +0000
+@@ -76,7 +76,7 @@
+ | Atmosphere editor (2026-10-24) | written without a toolchain: not compiled, not run (+2 tests in `world/atmos.rs`, +1 in `options.rs`) | Pause menu > the pixel sun at its bottom right corner (not on the death screen). A panel down the left; the world stays undimmed beside it and follows every slider at once. `<` name `>` or the list picks the biome (opens on the one under the player, a gold dot marks edited ones); tabs Sky / Fog / Clouds / Haze / Stars hold all 21 values of `world::atmos`'s look (colour as red / green / blue sliders with a swatch and hex code, plus gradient, fog density, cloud cover and speed, haze strength, star brightness). `Reset biome` / `Reset all`. Edited biomes are saved as `atmos_<n>:` lines of options.txt (n = the biome's place in `atmos::ALL`) when a slider is let go. Colours are the biome's noon colours: night and rain still follow the vanilla curves. Not there: a time-of-day / weather preview, copy and paste of a look, an in-world list of the biome under the cursor. |
+ | Shoulder-surf view (2026-10-24) | written without a toolchain: not compiled, not run, not seen on a device (+8 tests in `render/shoulder.rs`, the view-button test rewritten in `touch_ui.rs`); `python3 tools/shoulder_proto.py` (the twin of the maths) passes | `render/shoulder.rs`: a cinematic over-the-shoulder camera, the view button's second tap (first person -> third -> shoulder surf). NOT b1.7.3. Glides in from the vanilla third-person place (4 blocks behind the eye, no dolly out from the head, no field-of-view whip), a pivot a shoulder to the right that follows through springs (slower on xz than y), crosshair convergence (the camera turns to the point the eye's pick ray hits, rack-focused), automatic shoulder swap at a wall, 5-ray collision (instant in, eased out), bank into strafes and turns, landing dip / jump lift / hit kick on under-damped springs, sneak tuck, zoom = aiming shot, sprint pull-back, hand-held sway. See the rendering changelog. |
+ | Grazing + idle behaviours (2026-10-25) | written without a toolchain: not compiled, not run; **NOT b1.7.3** (+4 tests in `world/mobs.rs`, +1 in `render/items.rs`; run `cargo test --lib mobs items` first) | Part of the smart animals switch (`animalAi`, on by default; `animalAi:false` gives the b1.7.3 AI back byte for byte). `Mob::idle`: a calm pig, cow, sheep or hen pauses to do something instead of only standing: a cow or sheep on grass **grazes** (3 to 8 s), a pig **roots** on grass or dirt (2 to 5 s), a hen **pecks** (1 to 2 s), and a cow, sheep or pig now and then **rests** (8 to 20 s). Eating and resting stay put, do not turn, and end when a person comes within 4 blocks or the animal is hit. Each wander walk has its own gait (a stroll at 0.6 to 1.0 x the walk, a hen sometimes dashes at 1.5 x). The head is drawn dipped to the ground (`Mob::head`, `Mob::munch`, `render/items.rs::head_dip`) with a chew or a quick peck. The grass is not eaten and nothing lies down. See the gameplay changelog. |
+-| Immersive pack (The Forest style, 2026-10-25) | written without a toolchain: not compiled, not run, not seen on a device (+4 tests in `world/pack.rs`, `menu.rs` flow test extended); **NOT b1.7.3** | `world/pack.rs` + `lib.rs` + `render/items.rs` + `menu.rs`: with the world's **Immersive Pack** switch on (Create World screen, saved as the 4th line of `<world>/info`; worlds made before it keep the panel), the inventory button no longer opens the inventory: it spreads a cloth on the flat ground under the crosshair (needs a full block under 9 samples of a 2.0 x 1.6 footprint, nothing but air or plants on it; else a message). The cloth unrolls in the world (0.9 s, a roll that shrinks as it travels), then the screen opens as the cloth: items lie in zones by category (tools & gear, food, materials, other), each at its own size, shrunk together when a zone is crowded; the crafting mat (2 x 2), worn armor and the quick-select row (hotbar) have fixed places. Same `SlotId`s and `Screen::click` as the panel, so crafting, armor, spread-drag, place-one and shift-click work unchanged. Closing, walking 6.5 blocks off or losing the ground rolls it up. A workbench, furnace and chest keep their own panels. Switch off = the old panel. See the gameplay changelog. |
++| Immersive pack (The Forest style, 2026-10-25) | written without a toolchain: not compiled, not run, not seen on a device (+5 tests in `world/pack.rs`, `menu.rs` flow test extended, carry check in `render/player.rs`); **NOT b1.7.3** | `world/pack.rs` + `lib.rs` + `render/items.rs` + `menu.rs`: with the world's **Immersive Pack** switch on (Create World screen, saved as the 4th line of `<world>/info`; worlds made before it keep the panel), the inventory button no longer opens the inventory: the player takes the pack in both hands (it rises from below, the held item is hidden) and the cloth shows on the flat ground under the crosshair, lime where it fits and red where it does not (needs a full block under 9 samples of a 2.0 x 1.6 footprint, nothing but air or plants on it); a tap, like placing a block, spreads it there (on a red one only a message shows), the button again puts the pack away. The cloth unrolls in the world (0.9 s, a roll that shrinks as it travels), then the screen opens as the cloth: items lie in zones by category (tools & gear, food, materials, other), each at its own size, shrunk together when a zone is crowded; the crafting mat (2 x 2), worn armor and the quick-select row (hotbar) have fixed places. Same `SlotId`s and `Screen::click` as the panel, so crafting, armor, spread-drag, place-one and shift-click work unchanged. Closing, walking 6.5 blocks off or losing the ground rolls it up. A workbench, furnace and chest keep their own panels. Switch off = the old panel. See the gameplay changelog. |
+ | M14                  | pending | Menus (part 1: title, world list, create world; see above), options, chat, real mob models, player armor: see [`roadmap/gameplay.md`](roadmap/gameplay.md). M10 multiplayer and M13 optimization are out of scope on purpose. |
+ 
+ Latest commit on `main`: see `git log -1`. Latest released APK: see the
+diff -ruN a/mc-rs/src/lib.rs b/mc-rs/src/lib.rs
+--- a/mc-rs/src/lib.rs	2026-10-25 03:41:31.376539689 +0000
++++ b/mc-rs/src/lib.rs	2026-10-25 03:44:00.735336086 +0000
+@@ -200,6 +200,10 @@
+     mat: Option<pack::Mat>,
+     mat_ui: bool,
+     hint: f32,
++    /// The pack carried in both hands before it is spread (`Some` = how far it is raised, 0 to 1), and the cloth as it would lie under
++    /// the crosshair with whether the ground fits (`pack_tick`): the preview, green or red.
++    carry: Option<f32>,
++    ghost: Option<(pack::Mat, bool)>,
+     /// The fishing bobber in the water (`EntityPlayer.fishEntity`).
+     hook: Option<Hook>,
+     /// Furnace tile entities by block position (created on first use), and the time left over from the last 20 Hz tick.
+@@ -325,6 +329,8 @@
+             mat: None,
+             mat_ui: false,
+             hint: 0.0,
++            carry: None,
++            ghost: None,
+             hook: None,
+             furnaces: HashMap::new(),
+             chests: HashMap::new(),
+@@ -398,7 +404,7 @@
+         self.lod = self.new_lod();
+         self.chunks.preload(chunk_coord(to.x), chunk_coord(to.z));
+         self.close_sign();
+-        self.mat = None; // the cloth stays in the dimension it was spread in; `pack_tick` closes its screen
++        (self.carry, self.mat) = (None, None); // the cloth stays in the dimension it was spread in; `pack_tick` closes its screen
+         let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as i64);
+         (self.mobs, self.drops, self.ticks) = (Mobs::new(seed), Drops::new(seed), Ticks::new(seed));
+         self.mobs.no_spawn = nether;
+@@ -480,7 +486,7 @@
+         if self.screen.take().is_some() {
+             self.touch.set_screen(false);
+         }
+-        (self.mat, self.mat_ui, self.hint) = (None, false, 0.0);
++        (self.mat, self.mat_ui, self.hint, self.carry, self.ghost) = (None, false, 0.0, None, None);
+         self.close_sign();
+         (self.paintings, self.signs) = (Vec::new(), HashMap::new());
+         self.boats = boat::Boats::default();
+@@ -1055,6 +1061,7 @@
+         self.touch.swing_secs = self.opts.dig_secs();
+         self.touch.tick(real_dt);
+         let place = self.touch.take_place();
++        let place = if self.carry.is_some() { if place { self.put_pack() } false } else { place }; // a carried pack takes the tap
+         let strike = self.touch.take_strike();
+         if place {
+             self.body.swing(); // a tap places, uses or hits: `swingItem`
+@@ -1066,7 +1073,7 @@
+             } else if self.screen.is_some() {
+                 self.close_screen();
+             } else if self.pack_rule {
+-                self.lay_mat(); // the pack is a cloth: spread it on flat ground first, the screen opens when it lies flat
++                self.pack_button(); // the pack is a cloth: take it in both hands, then a tap spreads it on flat ground and the screen opens
+             } else {
+                 self.open_screen(Screen::new(2));
+             }
+@@ -1089,7 +1096,7 @@
+         // A finger that rests on a block (no mob, boat or cart nearer) is digging: it starts now instead of at `HOLD_SECS`, so the dig
+         // does not wait for the swing that began with the rest; the pad's attack held that long digs too (its release is no hit then).
+         // ponytail: a tap longer than `SWING_SECS` on a block digs instead of placing.
+-        if let Some(hit) = self.target.filter(|_| self.touch.resting()) {
++        if let Some(hit) = self.target.filter(|_| self.touch.resting() && self.carry.is_none()) {
+             let (eye, fwd) = (self.camera.pos, self.camera.forward());
+             let wall = hit.point.distance(eye.as_dvec3()) as f32;
+             let near = |o: Option<(usize, f32)>| o.is_some_and(|(_, t)| t < wall);
+@@ -1877,28 +1884,30 @@
+         }
+     }
+ 
+-    /// The inventory button with the immersive pack on and nothing open: spread the cloth on the flat ground under the crosshair (the
+-    /// top of a full block, `pack::Mat::lay` checks the whole footprint), or, while it is still unrolling, roll it up again.
+-    fn lay_mat(&mut self) {
++    /// The inventory button with the immersive pack on and nothing open: take the pack in both hands (the same button puts it away
++    /// again), or, with the cloth already out and still unrolling, roll it up again.
++    fn pack_button(&mut self) {
+         if let Some(m) = self.mat.as_mut() {
+             if m.dir > 0 {
+                 m.dir = -1;
+             }
+             return;
+         }
+-        if self.riding() || self.sleep.is_some() || self.vitals.dead() {
+-            return;
+-        }
+-        let chunks = &self.chunks;
+-        let air = |x: i32, y: i32, z: i32| chunks.block_loaded(x, y, z).is_some_and(|b| b == 0 || (is_plant(b) && b != 51)); // grass and flowers do not stop a cloth (they poke through it), fire does
+-        let floor = |x: i32, y: i32, z: i32| chunks.block_loaded(x, y, z).is_some_and(normal_cube);
+-        let lay = self.target.filter(|h| h.face == 1).and_then(|h| pack::Mat::lay(h.point.as_vec3(), self.camera.pos, h.pos.1 + 1, &air, &floor));
+-        match lay {
+-            Some(m) => {
+-                self.mat = Some(m);
++        self.carry = match self.carry {
++            Some(_) => None,
++            None if self.riding() || self.sleep.is_some() || self.vitals.dead() => None,
++            None => Some(0.0),
++        };
++    }
++
++    /// The place tap while the pack is carried: spread the cloth where the preview is green; anywhere else only the message shows.
++    fn put_pack(&mut self) {
++        match self.ghost.take() {
++            Some((m, true)) => {
++                (self.mat, self.carry) = (Some(m), None);
+                 self.audio.play_here("step.cloth", 0.7, 1.0);
+             }
+-            None => self.hint = 2.5,
++            _ => self.hint = 2.5,
+         }
+     }
+ 
+@@ -1906,6 +1915,21 @@
+     /// walks off or the ground under it goes (the screen closes first, its stacks are thrown as always).
+     fn pack_tick(&mut self, dt: f32) {
+         self.hint = (self.hint - dt).max(0.0);
++        if self.riding() || self.sleep.is_some() || self.vitals.dead() || self.screen.is_some() {
++            self.carry = None; // a screen opens only by a tap, which a carried pack swallows; a ride, a bed or death put it away
++        }
++        self.ghost = None;
++        if let Some(t) = self.carry.as_mut() {
++            *t = (*t + dt / pack::CARRY_SECS).min(1.0);
++            let chunks = &self.chunks;
++            let air = |x: i32, y: i32, z: i32| chunks.block_loaded(x, y, z).is_some_and(|b| b == 0 || (is_plant(b) && b != 51)); // grass and flowers do not stop a cloth (they poke through it), fire does
++            let floor = |x: i32, y: i32, z: i32| chunks.block_loaded(x, y, z).is_some_and(normal_cube);
++            // ponytail: the target is the last frame's (`pack_tick` runs before the pick), a one-frame lag on the preview.
++            self.ghost = self.target.filter(|h| h.face == 1).map(|h| {
++                let m = pack::Mat::plan(h.point.as_vec3(), self.camera.pos, h.pos.1 + 1);
++                (m, m.fits(&air, &floor))
++            });
++        }
+         let Some(mut m) = self.mat.take() else {
+             if self.mat_ui {
+                 self.close_screen(); // the cloth is gone (another dimension): the screen has nothing to lie on
+@@ -2183,7 +2207,7 @@
+         // The first-person hand (`EntityRenderer.renderHand`): not in the third-person view, not in bed.
+         let hand = ((!self.touch.third || close) && self.sleep.is_none()).then(|| {
+             let (equip, held) = self.body.equipped(tick_partial);
+-            render::player::Hand { to_world: render::player::hand_to_world(&view, &self.camera.bob), equip, swing: self.body.swing_at(tick_partial), held, at: self.player.pos }
++            render::player::Hand { to_world: render::player::hand_to_world(&view, &self.camera.bob), equip, swing: self.body.swing_at(tick_partial), held, at: self.player.pos, pack: self.carry.map_or(0.0, |t| t.max(0.01)) }
+         });
+         let outline_indices = self.target.map_or(0, |h| {
+             let (x, y, z) = h.pos;
+@@ -2212,7 +2236,9 @@
+         let seen = |p: glam::Vec3, r: f32| p.distance_squared(eye) < reach2 && frustum.intersects_aabb(p - r, p + r) && terrain.box_visible(p - r, p + r);
+         let item_indices = {
+             let chunks = &self.chunks;
+-            self.item_mesh.update(self.be.gfx(), &self.drops, &self.mobs, &self.ticks.falling, &self.fx, &|x, y, z| chunks.light_levels(x, y, z), self.hook.as_ref().map(|h| h.pos), &self.paintings, &sign_views, (&self.boats.list, self.boats.alpha()), (&self.carts.list, self.carts.alpha()), player_view.as_ref(), hand.as_ref(), self.mat.as_ref(), eye, &seen)
++            let shown = self.ghost.map(|(m, ok)| (m.shown(), ok));
++            let cloth = self.mat.as_ref().map(|m| (m, 12)).or(shown.as_ref().map(|(m, ok)| (m, if *ok { 5 } else { 14 }))); // brown, or the preview's lime / red wool
++            self.item_mesh.update(self.be.gfx(), &self.drops, &self.mobs, &self.ticks.falling, &self.fx, &|x, y, z| chunks.light_levels(x, y, z), self.hook.as_ref().map(|h| h.pos), &self.paintings, &sign_views, (&self.boats.list, self.boats.alpha()), (&self.carts.list, self.carts.alpha()), player_view.as_ref(), hand.as_ref(), cloth, eye, &seen)
+         };
+ 
+         // Sky and fog colour from the sun angle, the weather and the climate under the player; the frame is cleared to the fog colour and
+diff -ruN a/mc-rs/src/render/items.rs b/mc-rs/src/render/items.rs
+--- a/mc-rs/src/render/items.rs	2026-10-25 03:41:31.322325669 +0000
++++ b/mc-rs/src/render/items.rs	2026-10-25 03:44:00.735904376 +0000
+@@ -65,7 +65,7 @@
+ 
+     /// Upload this frame's items; returns the index count to draw.
+     /// `lv` = raw (sky, block) light of a cell: every entity is lit by its own cell.
+-    pub fn update(&self, gfx: Gfx, drops: &Drops, mobs: &Mobs, falling: &[Falling], fx: &Effects, lv: &dyn Fn(i32, i32, i32) -> (u8, u8), hook: Option<Vec3>, paintings: &[Painting], signs: &[SignView], boats: (&[Boat], f32), carts: (&[Cart], f32), player: Option<&crate::render::player::View>, hand: Option<&crate::render::player::Hand>, mat: Option<&crate::world::pack::Mat>, eye: Vec3, seen: &dyn Fn(Vec3, f32) -> bool) -> u32 {
++    pub fn update(&self, gfx: Gfx, drops: &Drops, mobs: &Mobs, falling: &[Falling], fx: &Effects, lv: &dyn Fn(i32, i32, i32) -> (u8, u8), hook: Option<Vec3>, paintings: &[Painting], signs: &[SignView], boats: (&[Boat], f32), carts: (&[Cart], f32), player: Option<&crate::render::player::View>, hand: Option<&crate::render::player::Hand>, mat: Option<(&crate::world::pack::Mat, u8)>, eye: Vec3, seen: &dyn Fn(Vec3, f32) -> bool) -> u32 {
+         let (verts, idxs) = geometry(drops, mobs, falling, fx, lv, hook, paintings, signs, boats, carts, player, hand, mat, eye, seen, &mut self.signs.lock().unwrap_or_else(|e| e.into_inner()));
+         if idxs.is_empty() {
+             return 0;
+@@ -87,7 +87,7 @@
+     }
+ }
+ 
+-fn geometry(drops: &Drops, mobs: &Mobs, falling: &[Falling], fx: &Effects, lv: &dyn Fn(i32, i32, i32) -> (u8, u8), hook: Option<Vec3>, paintings: &[Painting], signs: &[SignView], boats: (&[Boat], f32), carts: (&[Cart], f32), player: Option<&crate::render::player::View>, hand: Option<&crate::render::player::Hand>, mat: Option<&crate::world::pack::Mat>, eye: Vec3, seen: &dyn Fn(Vec3, f32) -> bool, sign_cache: &mut SignCache) -> (Vec<f32>, Vec<u32>) {
++fn geometry(drops: &Drops, mobs: &Mobs, falling: &[Falling], fx: &Effects, lv: &dyn Fn(i32, i32, i32) -> (u8, u8), hook: Option<Vec3>, paintings: &[Painting], signs: &[SignView], boats: (&[Boat], f32), carts: (&[Cart], f32), player: Option<&crate::render::player::View>, hand: Option<&crate::render::player::Hand>, mat: Option<(&crate::world::pack::Mat, u8)>, eye: Vec3, seen: &dyn Fn(Vec3, f32) -> bool, sign_cache: &mut SignCache) -> (Vec<f32>, Vec<u32>) {
+     let (mut verts, mut idxs) = (Vec::new(), Vec::new());
+     let a = drops.alpha();
+     for e in &drops.items {
+@@ -136,11 +136,12 @@
+         push_boat(&mut verts, &mut idxs, b, boats.1);
+         lit(&mut verts, n0, lv, b.pos);
+     }
+-    // The pack's cloth spread on the ground (`world::pack`): a flat box of brown wool and the roll it comes off.
+-    if let Some(m) = mat.filter(|m| seen(m.c, 3.0)) {
++    // The pack's cloth spread on the ground (`world::pack`): a flat box of wool (`wool` = its colour: brown, or the carried pack's
++    // preview, lime where it fits and red where it does not) and the roll it comes off.
++    if let Some((m, wool)) = mat.filter(|(m, _)| seen(m.c, 3.0)) {
+         let n0 = verts.len();
+         for (lo, hi) in m.boxes() {
+-            push_box(&mut verts, &mut idxs, lo, hi, atlas::tile_of(35, 12), 1.0);
++            push_box(&mut verts, &mut idxs, lo, hi, atlas::tile_of(35, wool), 1.0);
+         }
+         lit(&mut verts, n0, lv, m.c + Vec3::Y * 0.5);
+     }
+diff -ruN a/mc-rs/src/render/player.rs b/mc-rs/src/render/player.rs
+--- a/mc-rs/src/render/player.rs	2026-10-25 03:41:31.323626959 +0000
++++ b/mc-rs/src/render/player.rs	2026-10-25 03:44:20.598859556 +0000
+@@ -255,6 +255,8 @@
+     pub held: Option<ItemStack>,
+     /// Where he stands (his light).
+     pub at: Vec3,
++    /// The immersive pack carried in both hands, raised 0..1 (`lib.rs` `carry`); 0 = not carried. It replaces the arm and the item.
++    pub pack: f32,
+ }
+ 
+ /// A quad of the item mesh in both windings (the Java draws with culling off), corners `p` and atlas UVs, moved by `m`.
+@@ -289,6 +291,19 @@
+     let (s, up) = (h.swing, (1.0 - h.equip) * 0.6);
+     let (a, b, c, d) = ((s * PI).sin(), (s.sqrt() * PI).sin(), (s.sqrt() * PI * 2.0).sin(), (s * s * PI).sin());
+     let (t, rx, ry, rz) = (|x, y, z| Mat4::from_translation(Vec3::new(x, y, z)), |d: f32| Mat4::from_rotation_x(d.to_radians()), |d: f32| Mat4::from_rotation_y(d.to_radians()), |d: f32| Mat4::from_rotation_z(d.to_radians()));
++    if h.pack > 0.0 {
++        // Both hands round the pack's roll in front of the chest, coming up from below. ponytail: the arms are the bare hand's pose and
++        // its mirror, held still (no swing, no sway); the roll is one box of brown wool.
++        let low = (1.0 - crate::world::pack::ease(h.pack)) * 0.8;
++        for (s, limb) in [(1.0_f32, R_ARM), (-1.0, R_ARM + 1)] {
++            let m = h.to_world * t(s * 0.64, -0.6 - low, -0.72) * ry(s * 45.0) * t(-s, 3.6, 3.5) * rz(s * 120.0) * rx(200.0) * ry(s * -135.0) * t(s * 5.6, 0.0, 0.0) * Mat4::from_scale(Vec3::splat(1.0 / 16.0));
++            push_quads(verts, idxs, &quads(&m, &Pose::default())[limb * 6..limb * 6 + 6]);
++        }
++        let n0 = verts.len();
++        push_box(verts, idxs, [-0.5, -0.12, -0.14], [0.5, 0.12, 0.14], atlas::tile_of(35, 12), 1.0);
++        place(&mut verts[n0..], &(h.to_world * t(0.0, -0.5 - low, -0.85)));
++        return;
++    }
+     let Some(st) = h.held else {
+         // The arm (`drawFirstPersonHand`: `setRotationAngles(0, ..)` = the default pose, the right arm alone, 1/16 a pixel).
+         let m = h.to_world * t(-b * 0.3, c * 0.4, -a * 0.4) * t(0.64, -0.6 - up, -0.72) * ry(45.0) * ry(b * 70.0) * rz(-d * 20.0) * t(-1.0, 3.6, 3.5) * rz(120.0) * rx(200.0) * ry(-135.0) * t(5.6, 0.0, 0.0) * Mat4::from_scale(Vec3::splat(1.0 / 16.0));
+@@ -536,12 +551,18 @@
+         // The bare arm and a held sword, in eye space: ahead (-z) and below the eye, to the right.
+         for held in [None, Some(ItemStack { id: 267, count: 1, damage: 0 })] {
+             let (mut v, mut i) = (vec![], vec![]);
+-            push_hand(&mut v, &mut i, &Hand { to_world: Mat4::IDENTITY, equip: 1.0, swing: 0.0, held, at: Vec3::ZERO });
++            push_hand(&mut v, &mut i, &Hand { to_world: Mat4::IDENTITY, equip: 1.0, swing: 0.0, held, at: Vec3::ZERO, pack: 0.0 });
+             assert!(!i.is_empty());
+             for p in v.chunks_exact(VF) {
+                 assert!(p[2] < -0.1 && p[2] > -1.6 && p[0] > -0.2 && p[0] < 1.0 && p[1] < 0.2, "{held:?}: {p:?}", held = held.is_some());
+             }
+         }
++        // The pack in both hands: ahead of the eye, one arm on each side of the middle.
++        let (mut v, mut i) = (vec![], vec![]);
++        push_hand(&mut v, &mut i, &Hand { to_world: Mat4::IDENTITY, equip: 1.0, swing: 0.0, held: None, at: Vec3::ZERO, pack: 1.0 });
++        assert!(!i.is_empty());
++        let xs: Vec<f32> = v.chunks_exact(VF).map(|p| p[0]).collect();
++        assert!(v.chunks_exact(VF).all(|p| p[2] < -0.1 && p[2] > -1.6) && xs.iter().any(|&x| x < -0.2) && xs.iter().any(|&x| x > 0.2), "the carry has an arm and a side each");
+     }
+ 
+     #[test]
+diff -ruN a/mc-rs/src/world/pack.rs b/mc-rs/src/world/pack.rs
+--- a/mc-rs/src/world/pack.rs	2026-10-25 03:41:31.371245344 +0000
++++ b/mc-rs/src/world/pack.rs	2026-10-25 03:43:37.200123372 +0000
+@@ -220,6 +220,8 @@
+ pub const ROLL_SECS: f32 = 0.7;
+ /// Walk farther than this from it and it rolls itself up (blocks, from the eye).
+ pub const AWAY: f32 = 6.5;
++/// Seconds the pack takes to come up into both hands.
++pub const CARRY_SECS: f32 = 0.35;
+ 
+ #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+ pub enum Step {
+@@ -258,14 +260,29 @@
+         v
+     }
+ 
+-    /// Spread the cloth on the top of the block hit at `point` (`top` = the y of the air cell above it), away from `eye`. Needs flat
+-    /// ground: under all nine samples a full block (`floor`) with nothing (`air`) in the cell on it.
+-    pub fn lay(point: Vec3, eye: Vec3, top: i32, air: &dyn Fn(i32, i32, i32) -> bool, floor: &dyn Fn(i32, i32, i32) -> bool) -> Option<Mat> {
++    /// The cloth as it would be spread on the top of the block hit at `point` (`top` = the y of the air cell above it), away from `eye`,
++    /// not yet checked against the ground (`fits`).
++    pub fn plan(point: Vec3, eye: Vec3, top: i32) -> Mat {
+         let (dx, dz) = (point.x - eye.x, point.z - eye.z);
+         let along_x = dx.abs() > dz.abs();
+         let sign = if (if along_x { dx } else { dz }) < 0.0 { -1.0 } else { 1.0 };
+-        let m = Mat { c: Vec3::new(point.x, top as f32, point.z), along_x, sign, t: 0.0, dir: 1 };
+-        Self::samples(m.c, along_x).iter().all(|&(x, z)| floor(x, top - 1, z) && air(x, top, z)).then_some(m)
++        Mat { c: Vec3::new(point.x, top as f32, point.z), along_x, sign, t: 0.0, dir: 1 }
++    }
++
++    /// Flat ground: under all nine samples a full block (`floor`) with nothing (`air`) in the cell on it.
++    pub fn fits(&self, air: &dyn Fn(i32, i32, i32) -> bool, floor: &dyn Fn(i32, i32, i32) -> bool) -> bool {
++        let top = self.c.y as i32;
++        Self::samples(self.c, self.along_x).iter().all(|&(x, z)| floor(x, top - 1, z) && air(x, top, z))
++    }
++
++    pub fn lay(point: Vec3, eye: Vec3, top: i32, air: &dyn Fn(i32, i32, i32) -> bool, floor: &dyn Fn(i32, i32, i32) -> bool) -> Option<Mat> {
++        let m = Self::plan(point, eye, top);
++        m.fits(air, floor).then_some(m)
++    }
++
++    /// The same cloth fully spread and still: the preview shown while the pack is carried.
++    pub fn shown(self) -> Mat {
++        Mat { t: 1.0, dir: 0, ..self }
+     }
+ 
+     /// Still worth keeping: near enough, and the ground under it is still there.
+@@ -396,6 +413,19 @@
+     }
+ 
+     #[test]
++    fn a_planned_cloth_fits_exactly_where_lay_accepts_it() {
++        let floor = |_x: i32, y: i32, _z: i32| y == 63;
++        let air = |x: i32, y: i32, z: i32| y >= 64 && (x, y, z) != (5, 64, 5);
++        let eye = Vec3::new(3.5, 65.6, 0.5);
++        for (p, ok) in [(Vec3::new(3.5, 64.0, 3.5), true), (Vec3::new(5.2, 64.0, 5.2), false)] {
++            let m = Mat::plan(p, eye, 64);
++            assert_eq!((m.fits(&air, &floor), Mat::lay(p, eye, 64, &air, &floor) == Some(m)), (ok, ok));
++        }
++        let shown = Mat::plan(Vec3::new(3.5, 64.0, 3.5), eye, 64).shown();
++        assert_eq!((shown.boxes().len(), shown.dir), (1, 0), "the preview is the spread cloth alone");
++    }
++
++    #[test]
+     fn the_cloth_needs_flat_clear_ground_unrolls_and_rolls_up() {
+         let floor = |_x: i32, y: i32, _z: i32| y == 63;
+         let air = |x: i32, y: i32, z: i32| y >= 64 && (x, y, z) != (5, 64, 5);
+diff -ruN a/roadmap/gameplay.md b/roadmap/gameplay.md
+--- a/roadmap/gameplay.md	2026-10-25 03:41:31.376968577 +0000
++++ b/roadmap/gameplay.md	2026-10-25 03:44:20.600651523 +0000
+@@ -4,6 +4,11 @@
+ 
+ ## Changelog
+ 
++- 2026-10-25 (7): the immersive pack is carried before it is spread (**NOT b1.7.3**; written WITHOUT a Rust toolchain: not compiled, not run, not seen on a device; +1 test `pack::tests::a_planned_cloth_fits_exactly_where_lay_accepts_it`, the hand test in `render/player.rs` extended; run `cargo test --lib pack menu player` first). Suggestion of the player: the button should put the pack in both hands and wait for a tap to spread it on flat ground, like placing a block. It replaces the Flow paragraph of (6): `lay_mat` is gone.
++    - Flow (`lib.rs`: `pack_button`, `put_pack`, `pack_tick`): the button with `pack_rule` and nothing open sets `carry = Some(0)` (again = put away; with the cloth already out and unrolling it still rolls it up). While `carry` is set `pack_tick` raises it (`pack::CARRY_SECS` 0.35 s) and computes `ghost` = `Mat::plan` at the face-up block under the crosshair, with `Mat::fits` (the ground check that `lay` did, now split out; `lay` = `plan` + `fits`). The place tap is swallowed (`place` is false for the rest of the frame, so nothing is placed, used or hit): `put_pack` turns a green `ghost` into `mat` (the unroll and the screen are as in (6)), a red or missing one shows the 2.5 s message. Holding a finger on a block does not dig while carrying. A ride, a bed, death, an open screen, a dimension change, a world reset and leaving the world drop the carry.
++    - Drawing: the entity pass takes the cloth as `(&Mat, wool colour)`: the real cloth is brown (12), the preview is `Mat::shown` (spread, still) in lime (5) where it fits and red (14) where it does not, the same two boxes' budget. The hand: `Hand::pack` (0 = not carried) makes `push_hand` draw both arms and a roll of brown wool in front of the chest instead of the arm or the item in hand; the arms are the bare hand's matrix and its mirror (`t(s * ..) * ry(s * 45) * ... * rz(s * 120) ...`, `R_ARM` and `R_ARM + 1`), raised from 0.8 below by `pack::ease`.
++    - ponytail: the arms are held still (no swing, no sway) and are not drawn in the third-person view; the preview uses the last frame's target (a one-frame lag); the hotbar slot can still be changed while carrying (the item stays hidden); the pack is not carried across a restart.
++    - UNVERIFIED: that it compiles (the `or` of two `Option<(&Mat, u8)>` in `render`, the borrow of `self.chunks` next to `self.carry` in `pack_tick`), the mirrored arm pose (derived by reflecting the bare hand's matrix in x, never seen: if the left arm points the wrong way, flip the signs of `ry` / `rz` for `s = -1`), the roll's place between the hands, the lime / red read on a grass, snow or dark floor, and that a tap while carrying never reaches the place code.
+ - 2026-10-25 (6): immersive pack, the inventory as a cloth spread on the ground, after The Forest (**NOT b1.7.3**; written WITHOUT a Rust toolchain: not compiled, not run, not seen on a device; +4 tests `pack::tests::{items_have_a_zone_and_their_own_size, the_cloth_never_overflows_or_overlaps, a_touch_finds_its_slot_or_the_empty_cloth, the_cloth_needs_flat_clear_ground_unrolls_and_rolls_up}`, `menu::tests::create_list_and_delete_a_world` extended, `old_saves_move_into_the_list` extended; run `cargo test --lib pack menu` first). Source of the idea: the Forest wiki's Inventory page (an inventory you open on purpose, items grouped, hover info, a crafting mat) and the request: the pack must be spread on a flat surface before the inventory can be used, items have different sizes and sit in categories, and the whole thing can be turned off when a world is created.
+     - Switch: `menu::Info::pack`, the 4th line of `<world>/info` (`1` / `0`; absent = off, so every world made before keeps the panel). The Create World screen has `Immersive Pack: ON/OFF` (on by default, between the type and Create buttons); `App::enter_world` copies it to `pack_rule`. There is no switch in the pause menu: it is a world rule, like the type.
+     - Flow (`lib.rs`: `lay_mat`, `pack_tick`, `close_screen`): the inventory button with `pack_rule` and nothing open calls `lay_mat`: the block under the crosshair must be hit on its top face and `pack::Mat::lay` checks 9 samples of the footprint (2.0 across x 1.6 along, spread away from the player along x or z, whichever he faces more): a full block (`normal_cube`) under each, air or a plant (not fire) on it. Else the message "Look at flat, clear ground to spread your pack" shows 2.5 s. `pack_tick` (once a frame) unrolls it (`SPREAD_SECS` 0.9) and opens `Screen::new(2)` with `mat_ui` set; the button while it unrolls rolls it back. Closing the screen (button, death) rolls it up (0.7 s) and removes it. It rolls itself up when the eye is 6.5 blocks away (`pack::AWAY`) or the ground under it goes (the screen closes first, its cursor stack is thrown as always), and is dropped on a dimension change and a world reset.

@@ -200,6 +200,10 @@ struct App {
     mat: Option<pack::Mat>,
     mat_ui: bool,
     hint: f32,
+    /// The pack carried in both hands before it is spread (`Some` = how far it is raised, 0 to 1), and the cloth as it would lie under
+    /// the crosshair with whether the ground fits (`pack_tick`): the preview, green or red.
+    carry: Option<f32>,
+    ghost: Option<(pack::Mat, bool)>,
     /// The fishing bobber in the water (`EntityPlayer.fishEntity`).
     hook: Option<Hook>,
     /// Furnace tile entities by block position (created on first use), and the time left over from the last 20 Hz tick.
@@ -325,6 +329,8 @@ impl App {
             mat: None,
             mat_ui: false,
             hint: 0.0,
+            carry: None,
+            ghost: None,
             hook: None,
             furnaces: HashMap::new(),
             chests: HashMap::new(),
@@ -398,7 +404,7 @@ impl App {
         self.lod = self.new_lod();
         self.chunks.preload(chunk_coord(to.x), chunk_coord(to.z));
         self.close_sign();
-        self.mat = None; // the cloth stays in the dimension it was spread in; `pack_tick` closes its screen
+        (self.carry, self.mat) = (None, None); // the cloth stays in the dimension it was spread in; `pack_tick` closes its screen
         let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as i64);
         (self.mobs, self.drops, self.ticks) = (Mobs::new(seed), Drops::new(seed), Ticks::new(seed));
         self.mobs.no_spawn = nether;
@@ -480,7 +486,7 @@ impl App {
         if self.screen.take().is_some() {
             self.touch.set_screen(false);
         }
-        (self.mat, self.mat_ui, self.hint) = (None, false, 0.0);
+        (self.mat, self.mat_ui, self.hint, self.carry, self.ghost) = (None, false, 0.0, None, None);
         self.close_sign();
         (self.paintings, self.signs) = (Vec::new(), HashMap::new());
         self.boats = boat::Boats::default();
@@ -1055,6 +1061,7 @@ impl App {
         self.touch.swing_secs = self.opts.dig_secs();
         self.touch.tick(real_dt);
         let place = self.touch.take_place();
+        let place = if self.carry.is_some() { if place { self.put_pack() } false } else { place }; // a carried pack takes the tap
         let strike = self.touch.take_strike();
         if place {
             self.body.swing(); // a tap places, uses or hits: `swingItem`
@@ -1066,7 +1073,7 @@ impl App {
             } else if self.screen.is_some() {
                 self.close_screen();
             } else if self.pack_rule {
-                self.lay_mat(); // the pack is a cloth: spread it on flat ground first, the screen opens when it lies flat
+                self.pack_button(); // the pack is a cloth: take it in both hands, then a tap spreads it on flat ground and the screen opens
             } else {
                 self.open_screen(Screen::new(2));
             }
@@ -1089,7 +1096,7 @@ impl App {
         // A finger that rests on a block (no mob, boat or cart nearer) is digging: it starts now instead of at `HOLD_SECS`, so the dig
         // does not wait for the swing that began with the rest; the pad's attack held that long digs too (its release is no hit then).
         // ponytail: a tap longer than `SWING_SECS` on a block digs instead of placing.
-        if let Some(hit) = self.target.filter(|_| self.touch.resting()) {
+        if let Some(hit) = self.target.filter(|_| self.touch.resting() && self.carry.is_none()) {
             let (eye, fwd) = (self.camera.pos, self.camera.forward());
             let wall = hit.point.distance(eye.as_dvec3()) as f32;
             let near = |o: Option<(usize, f32)>| o.is_some_and(|(_, t)| t < wall);
@@ -1877,28 +1884,30 @@ impl App {
         }
     }
 
-    /// The inventory button with the immersive pack on and nothing open: spread the cloth on the flat ground under the crosshair (the
-    /// top of a full block, `pack::Mat::lay` checks the whole footprint), or, while it is still unrolling, roll it up again.
-    fn lay_mat(&mut self) {
+    /// The inventory button with the immersive pack on and nothing open: take the pack in both hands (the same button puts it away
+    /// again), or, with the cloth already out and still unrolling, roll it up again.
+    fn pack_button(&mut self) {
         if let Some(m) = self.mat.as_mut() {
             if m.dir > 0 {
                 m.dir = -1;
             }
             return;
         }
-        if self.riding() || self.sleep.is_some() || self.vitals.dead() {
-            return;
-        }
-        let chunks = &self.chunks;
-        let air = |x: i32, y: i32, z: i32| chunks.block_loaded(x, y, z).is_some_and(|b| b == 0 || (is_plant(b) && b != 51)); // grass and flowers do not stop a cloth (they poke through it), fire does
-        let floor = |x: i32, y: i32, z: i32| chunks.block_loaded(x, y, z).is_some_and(normal_cube);
-        let lay = self.target.filter(|h| h.face == 1).and_then(|h| pack::Mat::lay(h.point.as_vec3(), self.camera.pos, h.pos.1 + 1, &air, &floor));
-        match lay {
-            Some(m) => {
-                self.mat = Some(m);
+        self.carry = match self.carry {
+            Some(_) => None,
+            None if self.riding() || self.sleep.is_some() || self.vitals.dead() => None,
+            None => Some(0.0),
+        };
+    }
+
+    /// The place tap while the pack is carried: spread the cloth where the preview is green; anywhere else only the message shows.
+    fn put_pack(&mut self) {
+        match self.ghost.take() {
+            Some((m, true)) => {
+                (self.mat, self.carry) = (Some(m), None);
                 self.audio.play_here("step.cloth", 0.7, 1.0);
             }
-            None => self.hint = 2.5,
+            _ => self.hint = 2.5,
         }
     }
 
@@ -1906,6 +1915,21 @@ impl App {
     /// walks off or the ground under it goes (the screen closes first, its stacks are thrown as always).
     fn pack_tick(&mut self, dt: f32) {
         self.hint = (self.hint - dt).max(0.0);
+        if self.riding() || self.sleep.is_some() || self.vitals.dead() || self.screen.is_some() {
+            self.carry = None; // a screen opens only by a tap, which a carried pack swallows; a ride, a bed or death put it away
+        }
+        self.ghost = None;
+        if let Some(t) = self.carry.as_mut() {
+            *t = (*t + dt / pack::CARRY_SECS).min(1.0);
+            let chunks = &self.chunks;
+            let air = |x: i32, y: i32, z: i32| chunks.block_loaded(x, y, z).is_some_and(|b| b == 0 || (is_plant(b) && b != 51)); // grass and flowers do not stop a cloth (they poke through it), fire does
+            let floor = |x: i32, y: i32, z: i32| chunks.block_loaded(x, y, z).is_some_and(normal_cube);
+            // ponytail: the target is the last frame's (`pack_tick` runs before the pick), a one-frame lag on the preview.
+            self.ghost = self.target.filter(|h| h.face == 1).map(|h| {
+                let m = pack::Mat::plan(h.point.as_vec3(), self.camera.pos, h.pos.1 + 1);
+                (m, m.fits(&air, &floor))
+            });
+        }
         let Some(mut m) = self.mat.take() else {
             if self.mat_ui {
                 self.close_screen(); // the cloth is gone (another dimension): the screen has nothing to lie on
@@ -2183,7 +2207,7 @@ impl App {
         // The first-person hand (`EntityRenderer.renderHand`): not in the third-person view, not in bed.
         let hand = ((!self.touch.third || close) && self.sleep.is_none()).then(|| {
             let (equip, held) = self.body.equipped(tick_partial);
-            render::player::Hand { to_world: render::player::hand_to_world(&view, &self.camera.bob), equip, swing: self.body.swing_at(tick_partial), held, at: self.player.pos }
+            render::player::Hand { to_world: render::player::hand_to_world(&view, &self.camera.bob), equip, swing: self.body.swing_at(tick_partial), held, at: self.player.pos, pack: self.carry.map_or(0.0, |t| t.max(0.01)) }
         });
         let outline_indices = self.target.map_or(0, |h| {
             let (x, y, z) = h.pos;
@@ -2212,7 +2236,9 @@ impl App {
         let seen = |p: glam::Vec3, r: f32| p.distance_squared(eye) < reach2 && frustum.intersects_aabb(p - r, p + r) && terrain.box_visible(p - r, p + r);
         let item_indices = {
             let chunks = &self.chunks;
-            self.item_mesh.update(self.be.gfx(), &self.drops, &self.mobs, &self.ticks.falling, &self.fx, &|x, y, z| chunks.light_levels(x, y, z), self.hook.as_ref().map(|h| h.pos), &self.paintings, &sign_views, (&self.boats.list, self.boats.alpha()), (&self.carts.list, self.carts.alpha()), player_view.as_ref(), hand.as_ref(), self.mat.as_ref(), eye, &seen)
+            let shown = self.ghost.map(|(m, ok)| (m.shown(), ok));
+            let cloth = self.mat.as_ref().map(|m| (m, 12)).or(shown.as_ref().map(|(m, ok)| (m, if *ok { 5 } else { 14 }))); // brown, or the preview's lime / red wool
+            self.item_mesh.update(self.be.gfx(), &self.drops, &self.mobs, &self.ticks.falling, &self.fx, &|x, y, z| chunks.light_levels(x, y, z), self.hook.as_ref().map(|h| h.pos), &self.paintings, &sign_views, (&self.boats.list, self.boats.alpha()), (&self.carts.list, self.carts.alpha()), player_view.as_ref(), hand.as_ref(), cloth, eye, &seen)
         };
 
         // Sky and fog colour from the sun angle, the weather and the climate under the player; the frame is cleared to the fog colour and
