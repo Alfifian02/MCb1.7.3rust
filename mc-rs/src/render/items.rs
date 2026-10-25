@@ -513,6 +513,15 @@ fn push_boat(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, b: &Boat, a: f32) {
     }
 }
 
+/// The parts of `parts(m)` that are the head: the first one, and a hen's beak; a squid and a slime have none.
+fn is_head(k: crate::world::mobs::Kind, i: usize) -> bool {
+    match k {
+        Squid | Slime => false,
+        Chicken => i < 2,
+        _ => i == 0,
+    }
+}
+
 /// Model y of the ground under a mob: the root translation of `push_mob` (the legs end at 24, 0.125 px under it).
 const GROUND: f32 = 23.875;
 
@@ -544,7 +553,7 @@ fn head_dip(m: &Mob, head: &Part) -> Option<(f32, f32)> {
 fn push_mob(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, m: &Mob) {
     let feet = m.body.pos - Vec3::new(0.0, m.half.y, 0.0);
     let root = Mat4::from_translation(feet)
-        * Mat4::from_rotation_y(PI - m.yaw.to_radians())
+        * Mat4::from_rotation_y(PI - m.body_yaw.to_radians())
         * Mat4::from_scale(Vec3::new(-1.0, -1.0, 1.0) * m.size / 16.0)
         * Mat4::from_translation(Vec3::new(0.0, -23.875, 0.0));
     let own = match m.kind {
@@ -555,15 +564,23 @@ fn push_mob(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, m: &Mob) {
     let tint = if m.hurt > 0 { Some(14) } else if m.fuse > 0 && m.fuse % 6 < 3 { Some(0) } else { None };
     let model = parts(m);
     let dip = model.first().and_then(|h| head_dip(m, h));
+    // `ModelBase.setRotationAngles` for the head: turned by how far the head (`yaw`) is from the body (`body_yaw`, at most 75 degrees) and
+    // tipped by `head_pitch`; a head that grazes keeps only the dip. In this model space (y and x mirrored) a positive turn is the head's lead.
+    let lead = crate::world::mobs::lead(m.yaw, m.body_yaw).to_radians();
+    let tip = m.head_pitch * (1.0 - m.head);
     for (i, (min, size, mut rp, rot, sw, col)) in model.into_iter().enumerate() {
         let tile = stack_tile(ItemStack { id: 35, count: 1, damage: tint.unwrap_or(if col == ME { own } else { col }) as u16 });
         let mut rx = rot[0] + (m.limb * 0.6662 + sw[0]).cos() * sw[1] * m.limb_amt;
-        // The head (and a hen's beak, part 1) hangs from the same pivot: it turns down and the pivot moves down with it.
-        if let (Some((a, shift)), true) = (dip, i == 0 || (m.kind == Chicken && i == 1)) {
-            rx += a;
-            rp[1] += shift;
+        let mut ry = rot[1];
+        // The head (and a hen's beak, part 1) hangs from the same pivot: it turns to lead the body, tips, and goes down when it grazes.
+        if is_head(m.kind, i) {
+            (ry, rx) = (ry + lead, rx + tip);
+            if let Some((a, shift)) = dip {
+                rx += a;
+                rp[1] += shift;
+            }
         }
-        let mat = root * Mat4::from_translation(Vec3::from(rp)) * Mat4::from_rotation_z(rot[2]) * Mat4::from_rotation_y(rot[1]) * Mat4::from_rotation_x(rx);
+        let mat = root * Mat4::from_translation(Vec3::from(rp)) * Mat4::from_rotation_z(rot[2]) * Mat4::from_rotation_y(ry) * Mat4::from_rotation_x(rx);
         let n0 = verts.len();
         push_box(verts, idxs, min, [min[0] + size[0], min[1] + size[1], min[2] + size[2]], tile, 1.0);
         for v in verts[n0..].chunks_exact_mut(VF) {

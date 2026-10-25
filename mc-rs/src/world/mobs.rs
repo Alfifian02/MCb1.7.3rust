@@ -11,7 +11,9 @@
 //! lava or cactus), a stray one drifts back to its herd, and one that is hit runs from the blow for 4 to 6 s at 1.5 x its speed. Light is not read by the wander weights. No sounds, no death
 //! animation, no fall/lava damage, no breeding, mobs are not saved. A wolf can be tamed with a bone, sits, follows its owner and is put beside them; a pig takes a saddle and
 //! the player rides it (it keeps its own AI, as in b1.7.3: no steering). Walk speed is the terminal speed
-//! of `moveFlying` (`moveSpeed` x 0.1 x 0.98 against 0.546 drag), not accumulated momentum. Explosions have no exposure
+//! of `moveFlying` (`moveSpeed` x 0.1 x 0.98 against 0.546 drag), reached the way the Java does, by momentum (see `step`: 0.546 a tick on the
+//! ground, 0.91 in the air, so a mob eases into a walk, glides to a stop and keeps its run over a hop), and the body trails the head
+//! (`body_yaw` = `renderYawOffset`, `head_pitch` = `faceEntity`'s pitch): both closer to b1.7.3 than the old instant speed and stiff turn. Explosions have no exposure
 //! test, and knock the player back not at all. Normal difficulty. Ghast (needs the Nether) and the pig-zombie spawn are not here.
 //! NOT b1.7.3 either (same switch, `Mobs::smart`): calm animals graze, root, peck and rest (`Mob::idle`). A cow or sheep on grass lowers its head and
 //! chews 3 to 8 s, a pig roots on grass or dirt 2 to 5 s, a hen pecks the ground in short 1 to 2 s runs, and a cow, sheep or pig now and then stands
@@ -140,6 +142,11 @@ pub struct Mob {
     /// 0 = head up .. 1 = head down on the ground (eased every frame), and the chewing / pecking phase the renderer bobs it by.
     pub head: f32,
     pub munch: f32,
+    /// `renderYawOffset`: where the body points. It trails `yaw` (the head) and follows the way the mob moves, within 75 degrees of the head.
+    pub body_yaw: f32,
+    /// `rotationPitch` of a mob looking at the player (radians, down is positive), eased toward `look_pitch` every frame.
+    pub head_pitch: f32,
+    look_pitch: f32,
 }
 
 pub enum Ev {
@@ -189,6 +196,11 @@ fn sees(get: BlockQuery<'_>, a: Vec3, b: Vec3) -> bool {
     })
 }
 
+/// How far the head (`yaw`) leads the body (`body_yaw`), degrees in -75..=75: what the renderer turns the head by.
+pub fn lead(yaw: f32, body_yaw: f32) -> f32 {
+    norm(yaw - body_yaw).clamp(-75.0, 75.0)
+}
+
 /// Pig, cow, sheep and chicken: the animals the smart walk and panic are for (a wolf has its own AI, a squid swims).
 fn animal(k: Kind) -> bool {
     matches!(k, Pig | Cow | Sheep | Chicken)
@@ -223,7 +235,7 @@ impl Mob {
         Self { kind, body: Player { pos, vel: Vec3::ZERO, on_ground: false }, yaw, health: hp, limb: 0.0, limb_amt: 0.0, hurt: 0, size, color, sheared: false,
             fuse: 0, tame: false, sitting: false, saddled: false, ridden: false, half, age: 0, yaw_vel: 0.0, look: None, goal: None, fspeed: 0.0, jumping: false, wet: false, blocked: false, life: 0,
             last: 0, target: false, shot: false, lit: false, anger: 0, attack_time: 0, hop: 0, egg: rng.next_int_bound(6000) + 6000, fire: 0,
-            free: 0, swim: Vec3::ZERO, path: Vec::new(), path_i: 0, smart: false, wander: false, panic: 0, scare: Vec3::ZERO, mate: None, graze: 0, rest: 0, gait: 1.0, head: 0.0, munch: 0.0 }
+            free: 0, swim: Vec3::ZERO, path: Vec::new(), path_i: 0, smart: false, wander: false, panic: 0, scare: Vec3::ZERO, mate: None, graze: 0, rest: 0, gait: 1.0, head: 0.0, munch: 0.0, body_yaw: yaw, head_pitch: 0.0, look_pitch: 0.0 }
     }
 
     /// `EntityWolf.interact`, a bone that took: tamed, sitting, full health, calm.
@@ -443,6 +455,13 @@ impl Mob {
         if !alive {
             return false;
         }
+        // `faceEntity`: while it looks at the player or hunts them the head tips up or down to their eye (at most 40 degrees).
+        self.look_pitch = if (self.target || self.look.is_some()) && !matches!(k, Squid | Slime) {
+            let h = (d.x * d.x + d.z * d.z).sqrt().max(0.5);
+            (-(c.eye.y - (pos.y + self.half.y * 0.8)).atan2(h)).clamp(-0.7, 0.7)
+        } else {
+            0.0
+        };
         if k == Wolf && self.tame && !self.sitting && d2 > 256.0 {
             self.teleport_to(c);
         }
@@ -654,7 +673,18 @@ impl Mob {
         } else if self.kind == Squid {
             self.body.vel = if self.wet { self.swim * 20.0 } else { Vec3::new(0.0, self.body.vel.y, 0.0) };
         } else {
-            (self.body.vel.x, self.body.vel.z) = (-s * self.fspeed, c * self.fspeed);
+            let (tx, tz) = (-s * self.fspeed, c * self.fspeed);
+            if self.wet {
+                (self.body.vel.x, self.body.vel.z) = (tx, tz); // `step_box` scales the swim speed itself
+            } else {
+                // `moveEntityWithHeading` adds to the motion and drags it by 0.546 on the ground, 0.91 in the air, every tick: the speed
+                // builds up toward the walk speed and dies away when it stops, and a hop keeps its run. Same top speed as before.
+                let keep = (if self.body.on_ground { 0.546f32 } else { 0.91 }).powf(ticks);
+                self.body.vel.x = tx + (self.body.vel.x - tx) * keep;
+                self.body.vel.z = tz + (self.body.vel.z - tz) * keep;
+                if tx == 0.0 && self.body.vel.x.abs() < 0.02 { self.body.vel.x = 0.0 }
+                if tz == 0.0 && self.body.vel.z.abs() < 0.02 { self.body.vel.z = 0.0 }
+            }
         }
         if self.kind == Spider && self.blocked && self.target {
             self.body.vel.y = 4.0; // `isOnLadder` while against a wall: climbs 0.2 a tick
@@ -670,6 +700,13 @@ impl Mob {
         let moved = ((self.body.pos.x - before.x).powi(2) + (self.body.pos.z - before.z).powi(2)).sqrt() / ticks;
         self.limb_amt += ((moved * 4.0).min(1.0) - self.limb_amt) * (1.0 - 0.6f32.powf(ticks));
         self.limb += self.limb_amt * ticks;
+        // `EntityLiving.onUpdate`: the body turns toward the way it moves (0.3 of the gap a tick, not while knocked back), then is held within
+        // 75 degrees of the head, so the head leads a turn and the body follows. Per frame here, not per tick.
+        let (mx, mz) = (self.body.pos.x - before.x, self.body.pos.z - before.z);
+        let heading = if self.free == 0 && (mx * mx + mz * mz).sqrt() / ticks > 0.05 { mz.atan2(mx).to_degrees() - 90.0 } else { self.body_yaw };
+        self.body_yaw += norm(heading - self.body_yaw) * (1.0 - 0.7f32.powf(ticks));
+        self.body_yaw = self.yaw - norm(self.yaw - self.body_yaw).clamp(-75.0, 75.0);
+        self.head_pitch += (self.look_pitch - self.head_pitch) * (1.0 - 0.7f32.powf(ticks));
         // NOT b1.7.3: the head eases down while it grazes, roots or pecks (0.5 s), and the chewing phase runs while it is down.
         let down = if self.graze > 0 { 1.0 } else { 0.0 };
         self.head += (down - self.head) * (1.0 - 0.8f32.powf(ticks));
@@ -1494,5 +1531,54 @@ mod tests {
         assert!(cow.iter().cloned().fold(0.0, f32::max) - cow.iter().cloned().fold(2.0, f32::min) > 0.2, "every cow walk had the same gait");
         let hen = gaits(Chicken);
         assert!(hen.iter().any(|&g| g == 1.5) && hen.iter().any(|&g| g < 1.0), "hen gaits {hen:?}");
+    }
+
+    /// `moveEntityWithHeading`: a walking mob eases up to its speed (1 tick: 1 - 0.546 of it), reaches it, and glides to a stop instead of cutting off.
+    #[test]
+    fn a_mob_eases_into_a_walk_and_glides_to_a_stop() {
+        let mut rng = JavaRandom::new(5);
+        let mut p = Mob::new(Pig, 32.5, 10.0, 8.5, 0.0, &mut rng);
+        for _ in 0..6 { p.step(TICK, &flat) } // settle on the ground
+        p.fspeed = 3.0;
+        p.step(TICK, &flat);
+        assert!(p.body.vel.z > 0.5 && p.body.vel.z < 2.0, "first tick {}", p.body.vel.z);
+        for _ in 0..12 { p.step(TICK, &flat) }
+        assert!(p.body.vel.z > 2.9, "top speed {}", p.body.vel.z);
+        p.fspeed = 0.0;
+        p.step(TICK, &flat);
+        assert!(p.body.vel.z > 0.5, "stopped dead: {}", p.body.vel.z);
+        for _ in 0..12 { p.step(TICK, &flat) }
+        assert_eq!(p.body.vel.z, 0.0);
+    }
+
+    /// `renderYawOffset`: a turned head leads, the body follows the way it walks (not snapping) and stays within 75 degrees of the head.
+    #[test]
+    fn the_body_trails_the_head_and_follows_the_walk() {
+        let mut rng = JavaRandom::new(6);
+        let mut p = Mob::new(Pig, 32.5, 10.0, 32.5, 0.0, &mut rng);
+        for _ in 0..6 { p.step(TICK, &flat) }
+        p.yaw = 90.0; // the head turns; the body stands
+        p.step(TICK, &flat);
+        assert!((p.body_yaw - 15.0).abs() < 0.01 && lead(p.yaw, p.body_yaw) == 75.0, "body {}", p.body_yaw);
+        p.fspeed = 3.0; // and walks the way the head points (yaw 90 is -x)
+        p.step(TICK, &flat);
+        assert!(p.body_yaw > 15.0 && p.body_yaw < 90.0, "snapped: {}", p.body_yaw);
+        for _ in 0..20 { p.step(TICK, &flat) }
+        assert!(norm(p.body_yaw - 90.0).abs() < 5.0, "body {}", p.body_yaw);
+    }
+
+    /// `faceEntity`: a mob that looks at a player above it tips its head up (negative), and level with it keeps it level.
+    #[test]
+    fn a_mob_looking_at_the_player_tips_its_head_toward_their_eyes() {
+        let l = |_, _, _| 15u8;
+        let up = ctx(Vec3::new(32.5, 13.0, 36.0), &l);
+        let mut rng = JavaRandom::new(8);
+        let mut p = Mob::new(Pig, 32.5, 10.0, 32.5, 0.0, &mut rng);
+        let mut ev = Vec::new();
+        for _ in 0..6 { p.step(TICK, &flat) }
+        p.look = Some(30);
+        p.tick(&mut rng, &up, &mut ev);
+        for _ in 0..30 { p.step(TICK, &flat) }
+        assert!(p.head_pitch < -0.1, "head pitch {}", p.head_pitch);
     }
 }
