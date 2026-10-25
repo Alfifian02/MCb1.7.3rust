@@ -130,6 +130,9 @@ pub mod sprites {
         /// The pin button of the recipe card, off and on (10 x 10, drawn once).
         pub const PIN: Sprite = at(220.0, 32.0, 10.0, 10.0);
         pub const PIN_ON: Sprite = at(230.0, 32.0, 10.0, 10.0);
+        /// What an empty armor slot shows (helmet, chestplate, leggings, boots): the outline figure cut in four, each exactly its size (white on clear,
+        /// tinted by the draw, which fits it to the cell keeping its proportions).
+        pub const ARMOR: [Sprite; 4] = [at(0.0, 56.0, 10.0, 11.0), at(12.0, 56.0, 14.0, 13.0), at(28.0, 56.0, 10.0, 17.0), at(40.0, 56.0, 16.0, 11.0)];
     }
     const fn dpad_row(y: f32) -> [Sprite; 8] {
         // literals, not `i * 22.0`: float arithmetic in a `const fn` needs Rust 1.82
@@ -883,7 +886,7 @@ mod text_tests {
     fn satchel_sheet_has_its_sprites_and_the_helpers_stay_inside() {
         assert_eq!(SATCHEL_SHEET.len(), 256 * 256 * 4);
         use sprites::sat::*;
-        let all = [BAG, COVER, PARCH, PAGE_EDGE, BINDING, CURL, ARROW, POCKET, BELT, BUCKLE, CLASP, STRAP, SLOT, RIM, BTN, BTN_ON, TAB, ENTRY, ENTRY_SEL, CARD, GEM, RULE, PIN, PIN_ON];
+        let all = [BAG, COVER, PARCH, PAGE_EDGE, BINDING, CURL, ARROW, POCKET, BELT, BUCKLE, CLASP, STRAP, SLOT, RIM, BTN, BTN_ON, TAB, ENTRY, ENTRY_SEL, CARD, GEM, RULE, PIN, PIN_ON, ARMOR[0], ARMOR[1], ARMOR[2], ARMOR[3]];
         for (i, &(x, y, w, h)) in all.iter().enumerate() {
             assert!(x >= 0.0 && x + w <= 256.0 && y >= SATCHEL_Y && y + h <= SHEET_H, "sprite {i} inside the block");
             let lit = (0..h as usize).flat_map(|r| (0..w as usize).map(move |c| (c, r))).filter(|&(c, r)| SATCHEL_SHEET[(((y - SATCHEL_Y) as usize + r) * 256 + x as usize + c) * 4 + 3] != 0).count();

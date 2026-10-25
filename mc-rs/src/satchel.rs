@@ -230,7 +230,6 @@ pub struct Frame {
     pub cells: Vec<(SlotId, [f32; 4])>,
     /// The pocket band behind each row of cells (the armor row, three of the bag, the belt), and whether it is the belt's.
     pub rows: Vec<([f32; 4], bool)>,
-    pub labels: Vec<(&'static str, f32, f32)>,
     pub btns: Vec<(Btn, [f32; 4])>,
     pub book: Option<BookFrame>,
 }
@@ -246,7 +245,7 @@ impl Frame {
         let pad = (0.03 * h).max(11.0 * u).round();
         let rise = (1.0 - ease(sat.age / RISE_SECS)) * 0.1 * h;
         let (top, bh) = (0.17 * h + rise, 0.74 * h);
-        let mut f = Frame { k, bag: [0.0; 4], cells: Vec::new(), rows: Vec::new(), labels: Vec::new(), btns: Vec::new(), book: None };
+        let mut f = Frame { k, bag: [0.0; 4], cells: Vec::new(), rows: Vec::new(), btns: Vec::new(), book: None };
 
         // The bag: 9 columns, the armor row on top, the belt at the foot. With the book closed the bag and the cover lie side by side, centred
         // together; as the book opens the bag glides to the left 45% of the screen and the book's spine to the middle of the right 55%.
@@ -263,8 +262,6 @@ impl Frame {
         let top = top.round();
         f.bag = [x, top, pw, ph];
         let (bx, by) = (x + pad, top + pad);
-        // The armor tag sits in the empty five cells right of the armor row, centred on it (`draw` sets it at `tk + 1`).
-        f.labels.push(("Armor", bx + 4.0 * cell + 6.0 * u, by + (cell - 8.0 * (tk + 1.0)) * 0.5));
         let band = |y: f32, n: f32, rows: f32| [bx - 2.0 * u, y - 2.0 * u, n * cell + 4.0 * u, rows * cell + 4.0 * u];
         f.rows.push((band(by, 4.0, 1.0), false));
         for i in 0..4 {
@@ -425,8 +422,7 @@ const WARN: [f32; 4] = [0.85, 0.5, 0.1, 1.0];
 const MUTE: [f32; 4] = [0.55, 0.47, 0.34, 1.0];
 const GOLD: [f32; 4] = [0.9, 0.76, 0.38, 1.0];
 const SELECTED: [f32; 4] = [0.95, 0.85, 0.1, 1.0];
-/// Ink on the grey tag, and on the brown cover.
-const TAB_INK: [f32; 4] = [0.11, 0.14, 0.22, 1.0];
+/// Ink on the brown cover.
 const COVER_INK: [f32; 4] = [0.91, 0.85, 0.64, 1.0];
 
 /// The rim of a filled slot: its item's category, tinted lightly (tools blue, food green, materials brown, the rest grey).
@@ -516,18 +512,22 @@ pub fn draw(v: &mut Vec<HudVertex>, (w, h): (f32, f32), sat: &Satchel, c: &Ctx) 
     for &(r, belt) in &f.rows {
         nine(v, r, if belt { art::BELT } else { art::POCKET }, 4.0, u);
     }
-    let lk = tk + 1.0; // the tags are one pixel bigger than a button's text (`Frame::new` centres them on that)
-    for &(text, x, y) in &f.labels {
-        let tw = HudPipeline::text_width(text) as f32 * lk;
-        HudPipeline::push_nine(v, (x - 3.0 * u, y - u, tw + 6.0 * u, 8.0 * lk + 2.0 * u), art::TAB, 3.0, u, WHITE, true);
-        HudPipeline::push_text_flat(v, x, y, lk, text, TAB_INK);
-    }
     for &(id, r) in &f.cells {
         let st = c.screen.get(c.inv, None, id);
         // The selected belt slot keeps its yellow rim; an item's category rim shows only under a finger.
         let touched = c.down && inside(r, c.finger.0, c.finger.1);
         let rim = if id == SlotId::Inv(c.hotbar) { Some(SELECTED) } else if touched { st.map(|s| tint(s.id)) } else { None };
         slot(v, r, st, rim, u);
+        // An empty armor slot shows the shape of what goes in it (no label needed), dark and faint like a hole in the stone.
+        if let (None, SlotId::Inv(i)) = (st, id) {
+            if i >= MAIN {
+                // Fitted into 80% of the cell, proportions kept (the shapes differ in size: the head is small, the legs are tall).
+                let spr = art::ARMOR[MAIN + 3 - i];
+                let sc = (r[2] * 0.8 / spr.2).min(r[3] * 0.8 / spr.3);
+                let (dw, dh) = (spr.2 * sc, spr.3 * sc);
+                HudPipeline::push_gui_tinted(v, r[0] + (r[2] - dw) * 0.5, r[1] + (r[3] - dh) * 0.5, dw, dh, spr, [0.0, 0.0, 0.0, 0.45]);
+            }
+        }
     }
 
     // Buttons: the toggles show their number while on.
@@ -1025,19 +1025,14 @@ mod tests {
         }
     }
 
-    /// Armor, bag and belt are three blocks with a clear gap between them, and the armor tag lies right of the armor cells on their row.
+    /// Armor, bag and belt are three blocks with a clear gap between them.
     #[test]
-    fn the_blocks_are_apart_and_the_armor_tag_sits_beside_its_row() {
+    fn the_blocks_are_apart() {
         let f = frame(&open_book(), &Inventory::default(), 2);
         let u = units(f.k).0;
         let row = |id: SlotId| f.cells.iter().find(|(i, _)| *i == id).expect("cell").1;
         let (armor, top, last, belt) = (row(SlotId::Inv(MAIN)), row(SlotId::Inv(9)), row(SlotId::Inv(35)), row(SlotId::Inv(0)));
         assert!(top[1] - (armor[1] + armor[3]) >= 11.0 * u && belt[1] - (last[1] + last[3]) >= 11.0 * u, "gaps between the blocks");
-        let &(text, x, y) = f.labels.first().expect("the armor tag");
-        let (w, h) = (HudPipeline::text_width(text) as f32 * (units(f.k).0 + 1.0), 8.0 * (units(f.k).0 + 1.0));
-        let helmet_row_end = armor[0] + armor[2]; // `armor` is the last (boots) cell of the row
-        assert!(x >= helmet_row_end && x + w <= f.bag[0] + f.bag[2], "beside the armor cells, inside the bag");
-        assert!(y >= armor[1] && y + h <= armor[1] + armor[3], "on the armor row");
         assert!(f.bag[1] + f.bag[3] <= SIZE.1);
     }
 
