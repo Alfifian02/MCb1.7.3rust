@@ -546,6 +546,12 @@ impl HudPipeline {
         Self::push_glyphs(out, x, y, k, s, color);
     }
 
+    /// `s` with its top-left at `(x, y)` snapped to whole pixels and NO shadow: the satchel's ink on paper and its labels on panels
+    /// (`push_text`'s shadow reads as a second copy of the text on parchment). `k` is a whole number of pixels there.
+    pub fn push_text_flat(out: &mut Vec<HudVertex>, x: f32, y: f32, k: f32, s: &str, color: [f32; 4]) {
+        Self::push_glyphs(out, x.round(), y.round(), k, s, color);
+    }
+
     /// One textured quad per glyph (`font_sheet`), 8 x 8 font pixels of `k` px; a blank glyph (the space) draws nothing.
     fn push_glyphs(out: &mut Vec<HudVertex>, x: f32, y: f32, k: f32, s: &str, c: [f32; 4]) {
         let mut cx = x;

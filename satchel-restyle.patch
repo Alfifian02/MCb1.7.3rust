@@ -1,0 +1,1354 @@
+diff -u a/README.md b/README.md
+--- a/README.md	2026-10-25 23:13:07.450300217 +0000
++++ b/README.md	2026-10-25 23:13:07.451500209 +0000
+@@ -81,6 +81,7 @@
+ | Immersive inventory in 3D (2026-10-25) | written without a toolchain: not compiled, not run, not seen on a device (+6 tests in `world/pack.rs`); **NOT b1.7.3** | `world/pack.rs` + `lib.rs` + `render/items.rs`: the cloth screen is in the world. The camera glides to a 78 degree down pose that frames the 2.0 x 1.16 cloth to 96% of the screen while it spreads (and back when it rolls up); every stack lies on the cloth, a block as a small textured cube, anything else as a flat two-sided sprite, lit by the cell above with a cheap contact-shadow quad under it; zones, crafting mat, armor, quick select and the toggles are raised flat patches; the stacks come up one by one and the held stack floats over the finger. A finger is a ray: flat things go ray -> cloth plane -> units -> `pack::slot_at`, cubes are tested as boxes (`pack::pick`). Labels, counts, wear bars and names stay HUD, projected from the 3D positions. No item physics, no throwing from the cloth, nothing saved. See the gameplay changelog. |
+ | Satchel + recipe book (2026-10-26) | written without a toolchain: not compiled, not run, not seen on a device (+6 tests in `world/book.rs`, +8 in `satchel.rs`, 1 extended in `options.rs`); **NOT b1.7.3** | `satchel.rs` + `world/book.rs` + `lib.rs`: with the world's Immersive Pack on, the inventory button opens a flat leather bag with a closed recipe book beside it (the camera never moves; the cloth and its panning view are behind `packCloth:true` in `options.txt`; one fixed 9 x 3 grid with the armor row and the quick belt, grain, stitching, rivets, a pocket band behind each row, a strap on the belt, and a slot rim tinted by its item's category) and a workbench opens the same screen with its 3x3 grid. The recipe book lies closed beside the bag, the two centred together (a leather cover with a strap, a clasp and `Tap to open`); a tap on it swings the cover away and a two-page book opens (pages grow from the spine while the bag glides left; a `Close` tab above the spine shuts it): the left page lists six categories (tools & gear, food, blocks, redstone & rails, other, furnace), then the recipes of one as a scrolling list (green dot = the bag has everything and the grid fits, red = something is short, orange = a furnace's); the right page is the crafting grid with the picked recipe's card under it (what the bag holds of each ingredient, `Needs a workbench (3x3)` on a 3x3 recipe at the 2x2 grid). A tap on a recipe puts one set of its ingredients into the grid (what lay there goes back to the bag); a press on the result held 0.5 s crafts all; Pin keeps a recipe's ingredients on the play HUD; the `Unknown recipes` toggle (`bookDiscovery` in `options.txt`) hides recipes none of whose items the player ever held (`?` box, `???`; the notes are the 69-byte `<world>/book` file). Closing puts the grid and the held stack back in the bag. Sound: step.cloth. See the gameplay changelog. |
+ | Satchel UI overhaul (2026-10-26) | written without a toolchain: not compiled, not run, not seen on a device (+1 test in `render/hud.rs`; `satchel.rs` tests unchanged and re-derived by hand); `tools/gen_satchel_ui.py` ran | The bag and the recipe book are pixel art instead of flat quads: `assets/satchel.rgba` (256 x 256, the last block of the HUD texture, `SHEET_H` 3120) with stitched leather, pocket / belt / buckle rows, inset Minecraft-style slots with a category rim, a burgundy leather cover (strap, clasp, studs), aged parchment pages with a red-stitched binding and a turned corner, leather plates for buttons and tags. `HudPipeline::push_nine` / `push_tiled` draw 9-slices and tiles at one pixel size (`u` = the text's). Layout: more padding inside the leather and the pages, the book's cover shows 13 px of thick leather round the pages, the discovery toggle and its hint moved up (the hint was cut off by the page's foot). **NOT b1.7.3.** See the gameplay changelog. |
++| Satchel restyle (2026-10-26) | written without a toolchain: not compiled, not run, not seen on a device (+4 tests in `satchel.rs`); `tools/gen_satchel_ui.py` ran | The satchel and the recipe book in a grey GUI-pack look: stone panel with a red seam and corner marks, vanilla slots that touch, a brown book with a red-stitched spine, parchment pages in a brown frame. Text is flat (no shadow), whole-pixel sized and fitted to its box; the crafting grid is sized by the page's width as well as the height so the result never leaves the page; the category rim shows only under a finger. **NOT b1.7.3.** See the gameplay changelog. |
+ | M14                  | pending | Menus (part 1: title, world list, create world; see above), options, player armor and real mob models (both done, see the player model row above and `roadmap/gameplay.md`); only the chat (overlay, later) is left; a bed tapped by day says so: see [`roadmap/gameplay.md`](roadmap/gameplay.md). M10 multiplayer and M13 optimization are out of scope on purpose. |
+ 
+ Latest commit on `main`: see `git log -1`. Latest released APK: see the
+diff -u a/mc-rs/src/render/hud.rs b/mc-rs/src/render/hud.rs
+--- a/mc-rs/src/render/hud.rs	2026-10-25 23:13:07.433341387 +0000
++++ b/mc-rs/src/render/hud.rs	2026-10-25 23:13:07.434600330 +0000
+@@ -546,6 +546,12 @@
+         Self::push_glyphs(out, x, y, k, s, color);
+     }
+ 
++    /// `s` with its top-left at `(x, y)` snapped to whole pixels and NO shadow: the satchel's ink on paper and its labels on panels
++    /// (`push_text`'s shadow reads as a second copy of the text on parchment). `k` is a whole number of pixels there.
++    pub fn push_text_flat(out: &mut Vec<HudVertex>, x: f32, y: f32, k: f32, s: &str, color: [f32; 4]) {
++        Self::push_glyphs(out, x.round(), y.round(), k, s, color);
++    }
++
+     /// One textured quad per glyph (`font_sheet`), 8 x 8 font pixels of `k` px; a blank glyph (the space) draws nothing.
+     fn push_glyphs(out: &mut Vec<HudVertex>, x: f32, y: f32, k: f32, s: &str, c: [f32; 4]) {
+         let mut cx = x;
+diff -u a/mc-rs/src/satchel.rs b/mc-rs/src/satchel.rs
+--- a/mc-rs/src/satchel.rs	2026-10-25 23:13:07.426252122 +0000
++++ b/mc-rs/src/satchel.rs	2026-10-25 23:13:07.427751924 +0000
+@@ -10,8 +10,8 @@
+ //!   and `world::craft::Screen`, and `lib.rs` only routes the finger.
+ //!
+ //! - Look (2026-10-26, UI overhaul): pixel art from `assets/satchel.rgba` (`tools/gen_satchel_ui.py`, `hud::sprites::sat`), 9-slices and tiles at one
+-//!   pixel size (`u` = the text's pixel): stitched leather with rivets, a pocket / belt / buckle per row, an inset slot with a category rim,
+-//!   a burgundy cover with a strap and clasp, aged parchment with a red-stitched binding, leather plates for buttons and tags.
++//!   pixel size (`u` = the text's pixel): a grey bevelled stone panel with corner marks and a red stitched seam, a pocket / belt band behind each block of slots, vanilla inset slots that touch (the category rim shows only under a finger),
++//!   a plain brown book with a red-stitched spine, aged parchment with a red-stitched binding, grey bevelled plates for buttons and tags. Text is flat (no shadow), whole-pixel sized and fitted to its box (`fitted`, `text_fit`, `text_in`, `paragraph`).
+ //!
+ //! UNVERIFIED: written without a compiler or a device. The proportions are in fractions of the surface height (`h`), the text unit is
+ //! `craft::panel(0, w, h).2`; both are guesses to tune on the phone.
+@@ -111,6 +111,69 @@
+     x >= r[0] && x < r[0] + r[2] && y >= r[1] && y < r[1] + r[3]
+ }
+ 
++/// The text size and the sprite pixel from the text unit `k`, in whole screen pixels: a glyph or a sprite pixel that is a fraction of a
++/// screen pixel is smeared by the HUD's bilinear sampler, which is what made the old text look doubled. (title / button size, small size)
++fn units(k: f32) -> (f32, f32) {
++    ((0.75 * k).round().max(1.0), (0.6 * k).round().max(1.0))
++}
++
++/// `s` at size `k`, stepped down a whole pixel at a time (never under 1) until it is at most `maxw` wide, then cut with a dot if it still
++/// is: (size, text).
++fn fitted(s: &str, k: f32, maxw: f32) -> (f32, String) {
++    let wide = |t: &str, k: f32| HudPipeline::text_width(t) as f32 * k;
++    let mut k = k;
++    while k > 1.0 && wide(s, k) > maxw {
++        k = (k - 1.0).max(1.0);
++    }
++    let mut t = s.to_string();
++    if wide(&t, k) > maxw {
++        while !t.is_empty() && wide(&format!("{t}."), k) > maxw {
++            t.pop();
++        }
++        t.push('.');
++    }
++    (k, t)
++}
++
++/// Flat text (no shadow) with its left edge at `x` and its top at `y` (for size `k`), fitted into `maxw`; a shrunk text stays centred on
++/// the line it would have had.
++fn text_fit(v: &mut Vec<HudVertex>, (x, y): (f32, f32), k: f32, maxw: f32, s: &str, col: [f32; 4]) {
++    let (kk, t) = fitted(s, k, maxw);
++    HudPipeline::push_text_flat(v, x, y + 4.0 * (k - kk), kk, &t, col);
++}
++
++/// Flat text centred on `cx`, kept inside `[lo, hi]` (shrunk to fit it, pushed in when it would stick out).
++fn text_in(v: &mut Vec<HudVertex>, cx: f32, y: f32, k: f32, (lo, hi): (f32, f32), s: &str, col: [f32; 4]) {
++    let (kk, t) = fitted(s, k, hi - lo);
++    let w = HudPipeline::text_width(&t) as f32 * kk;
++    HudPipeline::push_text_flat(v, (cx - w * 0.5).clamp(lo, (hi - w).max(lo)), y + 4.0 * (k - kk), kk, &t, col);
++}
++
++/// The words of `s` in lines of at most `maxw` px at size `k` (a word wider than that stays alone on its line).
++fn lines(s: &str, k: f32, maxw: f32) -> Vec<String> {
++    let mut out: Vec<String> = Vec::new();
++    for word in s.split_whitespace() {
++        let joined = out.last().map(|l| format!("{l} {word}"));
++        match joined {
++            Some(j) if HudPipeline::text_width(&j) as f32 * k <= maxw => *out.last_mut().expect("a line") = j,
++            _ => out.push(word.to_string()),
++        }
++    }
++    out
++}
++
++/// A paragraph in the rect `r` (a 4-pixel margin of the sprite's), flat and wrapped, the last lines that do not fit left out.
++fn paragraph(v: &mut Vec<HudVertex>, r: [f32; 4], (k, u): (f32, f32), s: &str, col: [f32; 4]) {
++    let mut y = r[1] + 4.0 * u;
++    for line in lines(s, k, r[2] - 8.0 * u) {
++        if y + 8.0 * k > r[1] + r[3] - 2.0 * u {
++            break;
++        }
++        HudPipeline::push_text_flat(v, r[0] + 4.0 * u, y, k, &line, col);
++        y += 10.0 * k;
++    }
++}
++
+ /// The whole book, as rects in px.
+ #[derive(Default)]
+ pub struct BookFrame {
+@@ -132,6 +195,9 @@
+     pub card: [f32; 4],
+     pub pin: [f32; 4],
+     pub hide: [f32; 4],
++    /// The clearance of a page's content from its rim, and the height of a page's header (set once the book is open).
++    pub p: f32,
++    pub hh: f32,
+ }
+ 
+ pub struct Frame {
+@@ -151,43 +217,51 @@
+     /// is fixed, every slot has its cell).
+     pub fn new(sat: &Satchel, _inv: &Inventory, gw: usize, w: f32, h: f32) -> Self {
+         let k = craft::panel(0, w, h).2;
+-        let pad = 0.03 * h; // room for the leather's border and its seam
++        let (tk, sk) = units(k);
++        let u = tk; // one sprite pixel
++        // The panel's border is 8 sprite pixels and its seam and corner marks lie inside 7 of them: the slots start clear of both.
++        let pad = (0.03 * h).max(11.0 * u).round();
+         let rise = (1.0 - ease(sat.age / RISE_SECS)) * 0.1 * h;
+         let (top, bh) = (0.17 * h + rise, 0.74 * h);
+-        let lh = 8.0 * 0.6 * k + 4.0;
++        let lh = 8.0 * sk + 2.0 * u;
+         let mut f = Frame { k, bag: [0.0; 4], cells: Vec::new(), rows: Vec::new(), labels: Vec::new(), btns: Vec::new(), book: None };
+ 
+         // The bag: 9 columns, the armor row on top, the belt at the foot. With the book closed the bag and the cover lie side by side, centred
+         // together; as the book opens the bag glides to the left 45% of the screen and the book's spine to the middle of the right 55%.
+-        let pitch = ((0.455 * w - 2.0 * pad) / 9.0).min((bh - 2.0 * pad - lh) / 5.55);
+-        let (pw, ph) = (9.0 * pitch + 2.0 * pad, 5.55 * pitch + 2.0 * pad + lh);
++        // Slots touch, like Minecraft's: a cell is one slot sprite and the next starts where its border ends. A pocket band lies behind each
++        // block of them (the armor row, the bag's three rows, the belt), two sprite pixels wider than it, clear of the seam.
++        let gv = 6.0 * u; // the gap between those blocks
++        let cell = ((0.455 * w - 2.0 * pad) / 9.0).min((bh - 2.0 * pad - lh - 2.0 * gv) / 5.0).floor().max(1.0);
++        let (pw, ph) = (9.0 * cell + 2.0 * pad, 5.0 * cell + 2.0 * gv + 2.0 * pad + lh);
+         let (open_x, gap, half) = (0.012 * w, 0.02 * w, (BOOK_R - BOOK_L) * 0.5 * w); // half = a page of the open book
+         let closed_x = ((w - (pw + gap + half)) * 0.5).max(open_x);
+         let e = ease(sat.book_t);
+-        let x = lerp(closed_x, open_x, e);
++        let x = lerp(closed_x, open_x, e).round();
+         let spine = lerp(closed_x + pw + gap + half * 0.5, (BOOK_L + BOOK_R) * 0.5 * w, e);
++        let top = top.round();
+         f.bag = [x, top, pw, ph];
+-        let (bx, by, cell) = (x + pad, top + pad + lh, pitch * 0.92);
++        let (bx, by) = (x + pad, top + pad + lh);
+         f.labels.push(("Armor", bx, top + pad));
+-        let band = |y: f32, n: f32| [bx - 0.4 * pad, y - 0.12 * pitch, n * pitch + 0.4 * pad, cell + 0.18 * pitch]; // a lip above the cells, a hem under them
+-        f.rows.push((band(by, 4.0), false));
++        let band = |y: f32, n: f32, rows: f32| [bx - 2.0 * u, y - 2.0 * u, n * cell + 4.0 * u, rows * cell + 4.0 * u];
++        f.rows.push((band(by, 4.0, 1.0), false));
+         for i in 0..4 {
+-            f.cells.push((SlotId::Inv(MAIN + 3 - i), [bx + i as f32 * pitch, by, cell, cell])); // helmet first
++            f.cells.push((SlotId::Inv(MAIN + 3 - i), [bx + i as f32 * cell, by, cell, cell])); // helmet first
+         }
++        let my = by + cell + gv;
++        f.rows.push((band(my, 9.0, 3.0), false));
+         for r in 0..3 {
+-            let y = by + (1.15 + r as f32) * pitch;
+-            f.rows.push((band(y, 9.0), false));
+             for c in 0..9 {
+-                f.cells.push((SlotId::Inv(9 + r * 9 + c), [bx + c as f32 * pitch, y, cell, cell]));
++                f.cells.push((SlotId::Inv(9 + r * 9 + c), [bx + c as f32 * cell, my + r as f32 * cell, cell, cell]));
+             }
+         }
+-        f.rows.push((band(by + 4.55 * pitch, 9.0), true));
++        let belt_y = my + 3.0 * cell + gv;
++        f.rows.push((band(belt_y, 9.0, 1.0), true));
+         for c in 0..9 {
+-            f.cells.push((SlotId::Inv(c), [bx + c as f32 * pitch, by + 4.55 * pitch, cell, cell]));
++            f.cells.push((SlotId::Inv(c), [bx + c as f32 * cell, belt_y, cell, cell]));
+         }
+ 
+         // The buttons above the bag, and the close button at the screen's corner.
+-        let (by, bh2, tk) = (0.035 * h + rise, 0.095 * h, 0.75 * k);
++        let (by, bh2) = (0.035 * h + rise, 0.095 * h);
+         let mut x = f.bag[0];
+         for (b, label) in [(Btn::Sort, "Sort"), (Btn::Shift, "Shift"), (Btn::One, "One")] {
+             let bw = HudPipeline::text_width(label) as f32 * tk + 6.0 * tk;
+@@ -255,7 +329,9 @@
+     if !b.open {
+         return b;
+     }
+-    let (p, hh) = (0.028 * h, 0.085 * h); // `p`: clear of the page's rim
++    let u = units(craft::panel(0, w, h).2).0;
++    let (p, hh) = ((0.028 * h).max(8.0 * u).round(), 0.085 * h); // `p`: clear of the page's rim (6 sprite pixels thick)
++    (b.p, b.hh) = (p, hh);
+     let slide = (1.0 - ease(sat.page_t)) * 0.05 * w;
+     let l = b.left;
+     match sat.cat {
+@@ -283,16 +359,20 @@
+     }
+     // Right page: the grid (2 x 2 or 3 x 3), the arrow and the result; the card of the picked recipe under them.
+     let (r, gw) = (b.right, gw.clamp(2, 3));
+-    let (c, g) = (if gw == 2 { 0.11 * h } else { 0.085 * h }, 0.012 * h);
+-    let (gx, gy) = (r[0] + p + 0.01 * w, r[1] + hh);
++    // The cells touch (no gap). A cell is the smaller of the height's share and what the page's width leaves for the grid, the arrow and
++    // the result (1.2 cells): a narrow screen shrinks the grid instead of pushing the result off the page.
++    let (gx, gy) = ((r[0] + p + 0.01 * w).round(), (r[1] + hh).round());
++    let (ga, aw) = (0.004 * w, 0.03 * w);
++    let room = r[0] + r[2] - p - gx - 2.0 * ga - aw;
++    let c = (if gw == 2 { 0.11 * h } else { 0.085 * h }).min(room / (gw as f32 + 1.2)).floor().max(1.0);
+     for i in 0..gw * gw {
+-        b.grid.push((SlotId::Grid(i), [gx + (i % gw) as f32 * (c + g), gy + (i / gw) as f32 * (c + g), c, c]));
++        b.grid.push((SlotId::Grid(i), [gx + (i % gw) as f32 * c, gy + (i / gw) as f32 * c, c, c]));
+     }
+-    let gh = gw as f32 * (c + g) - g;
+-    let (ax, aw) = (gx + gw as f32 * (c + g) + 0.004 * w, 0.03 * w);
++    let gh = gw as f32 * c;
++    let ax = gx + gh + ga;
+     b.arrow = [ax, gy + gh * 0.5 - 0.02 * h, aw, 0.04 * h];
+-    let rc = c * 1.2;
+-    b.grid.push((SlotId::Result, [ax + aw + 0.004 * w, gy + (gh - rc) * 0.5, rc, rc]));
++    let rc = (c * 1.2).floor();
++    b.grid.push((SlotId::Result, [(ax + aw + ga).floor(), (gy + (gh - rc) * 0.5).round(), rc, rc]));
+     let cy = gy + gh + 0.03 * h;
+     b.card = [r[0] + p, cy, r[2] - 2.0 * p, r[1] + r[3] - 0.185 * h - cy];
+     b.pin = [r[0] + r[2] - p - 0.2 * r[2], r[1] + p, 0.2 * r[2], hh - p];
+@@ -317,6 +397,9 @@
+ const MUTE: [f32; 4] = [0.55, 0.47, 0.34, 1.0];
+ const GOLD: [f32; 4] = [0.9, 0.76, 0.38, 1.0];
+ const SELECTED: [f32; 4] = [0.95, 0.85, 0.1, 1.0];
++/// Ink on the grey tag, and on the brown cover.
++const TAB_INK: [f32; 4] = [0.11, 0.14, 0.22, 1.0];
++const COVER_INK: [f32; 4] = [0.91, 0.85, 0.64, 1.0];
+ 
+ /// The rim of a filled slot: its item's category, tinted lightly (tools blue, food green, materials brown, the rest grey).
+ fn tint(id: u16) -> [f32; 4] {
+@@ -369,7 +452,7 @@
+ fn button(v: &mut Vec<HudVertex>, r: [f32; 4], (tk, u): (f32, f32), text: &str, state: u8) {
+     let c = if state == 0 { [0.6, 0.6, 0.6, 1.0] } else { WHITE };
+     HudPipeline::push_nine(v, (r[0], r[1], r[2], r[3]), if state == 2 { art::BTN_ON } else { art::BTN }, 4.0, u, c, true);
+-    HudPipeline::push_text_centered(v, r[0] + r[2] * 0.5, r[1] + (r[3] - 8.0 * tk) * 0.5, tk, text, [1.0, 0.97, 0.85, 1.0]);
++    text_in(v, r[0] + r[2] * 0.5, r[1] + (r[3] - 8.0 * tk) * 0.5, tk, (r[0] + 2.0 * u, r[0] + r[2] - 2.0 * u), text, [0.96, 0.96, 0.96, 1.0]);
+ }
+ 
+ /// A title's rule under a page's header: an ink line across the page.
+@@ -380,7 +463,8 @@
+ /// The whole screen: the dimmed world, the bag, the book, the stack on the finger and the name of what it touches.
+ pub fn draw(v: &mut Vec<HudVertex>, (w, h): (f32, f32), sat: &Satchel, c: &Ctx) {
+     let f = Frame::new(sat, c.inv, c.screen.gw, w, h);
+-    let (k, tk, sk) = (f.k, 0.75 * f.k, 0.6 * f.k);
++    let k = f.k;
++    let (tk, sk) = units(k);
+     let u = tk;
+     HudPipeline::push_quad(v, 0.0, 0.0, w, h, [0.0, 0.0, 0.0, 0.5]);
+ 
+@@ -388,22 +472,18 @@
+     // the armor pocket's lip, then every cell.
+     nine(v, f.bag, art::BAG, 8.0, u);
+     for &(r, belt) in &f.rows {
+-        if belt {
+-            nine(v, r, art::BELT, 4.0, u);
+-            let (bh, bw) = (r[3] * 0.5, r[3] * 0.5 * 12.0 / 16.0);
+-            HudPipeline::push_gui(v, r[0] + r[2] - 10.0, r[1] + (r[3] - bh) * 0.5, bw, bh, art::BUCKLE);
+-        } else {
+-            nine(v, r, art::POCKET, 4.0, u);
+-        }
++        nine(v, r, if belt { art::BELT } else { art::POCKET }, 4.0, u);
+     }
+     for &(text, x, y) in &f.labels {
+         let tw = HudPipeline::text_width(text) as f32 * sk;
+         HudPipeline::push_nine(v, (x - 3.0 * u, y - u, tw + 6.0 * u, 8.0 * sk + 2.0 * u), art::TAB, 3.0, u, WHITE, true);
+-        HudPipeline::push_text(v, x, y, sk, text, INK);
++        HudPipeline::push_text_flat(v, x, y, sk, text, TAB_INK);
+     }
+     for &(id, r) in &f.cells {
+         let st = c.screen.get(c.inv, None, id);
+-        let rim = if id == SlotId::Inv(c.hotbar) { Some(SELECTED) } else { st.map(|s| tint(s.id)) };
++        // The selected belt slot keeps its yellow rim; an item's category rim shows only under a finger.
++        let touched = c.down && inside(r, c.finger.0, c.finger.1);
++        let rim = if id == SlotId::Inv(c.hotbar) { Some(SELECTED) } else if touched { st.map(|s| tint(s.id)) } else { None };
+         slot(v, r, st, rim, u);
+     }
+ 
+@@ -448,12 +528,12 @@
+     // wider than the closed cover), the paper (one sheet while it opens, aged at its rim), and the red-stitched binding at the spine.
+     if sat.book_t > 0.0 {
+         let cm = 0.013 * w * ease(sat.book_t * 2.0);
+-        nine(v, [b.rect[0] - cm, b.rect[1] - cm, b.rect[2] + 2.0 * cm, b.rect[3] + 2.0 * cm], art::COVER, 8.0, u);
++        nine(v, [b.rect[0] - cm, b.rect[1], b.rect[2] + 2.0 * cm, b.rect[3]], art::COVER, 8.0, u); // wider than the pages, never taller
+         let r = (b.rect[0], b.rect[1], b.rect[2], b.rect[3]);
+         HudPipeline::push_tiled(v, r, art::PARCH, u, WHITE);
+-        HudPipeline::push_nine(v, r, art::PAGE_EDGE, 4.0, u, WHITE, false);
++        HudPipeline::push_nine(v, r, art::PAGE_EDGE, 6.0, u, WHITE, false);
+         if sat.book_t > 0.3 {
+-            HudPipeline::push_tiled(v, (r.0 + r.2 * 0.5 - 4.0 * u, r.1 + u, 8.0 * u, r.3 - 2.0 * u), art::BINDING, u, WHITE);
++            HudPipeline::push_tiled(v, (r.0 + r.2 * 0.5 - 4.0 * u, r.1 + 6.0 * u, 8.0 * u, r.3 - 12.0 * u), art::BINDING, u, WHITE);
+         }
+     }
+     if sat.book_t < 0.5 {
+@@ -467,7 +547,7 @@
+     }
+     // The corner of the right page, turned up.
+     HudPipeline::push_gui(v, b.right[0] + b.right[2] - 14.0 * u, b.right[1] + b.right[3] - 14.0 * u, 12.0 * u, 12.0 * u, art::CURL);
+-    let (p, hh) = (0.028 * h, 0.085 * h);
++    let (p, hh) = (b.p, b.hh);
+     let entries = book::entries();
+     let gw = c.screen.gw;
+     let title_y = |r: [f32; 4]| r[1] + (hh - 8.0 * tk) * 0.5;
+@@ -477,16 +557,18 @@
+     // Left page: the categories, or the recipes of one.
+     match sat.cat {
+         None => {
+-            HudPipeline::push_text(v, b.left[0] + p, title_y(b.left), tk, "Recipes", INK);
++            text_fit(v, (b.left[0] + p, title_y(b.left)), tk, b.left[2] - 2.0 * p, "Recipes", INK);
+             for &(i, r) in &b.cats {
+                 let ids = book::in_cat(CATS[i]);
+                 nine(v, r, art::ENTRY, 3.0, u);
+                 if let Some(e) = ids.first().map(|&e| &entries[e]) {
+                     crate::push_stack(v, (r[0] + 3.0 * u, r[1] + (r[3] - r[3] * 0.8) * 0.5, r[3] * 0.8, r[3] * 0.8), 0.875, ItemStack { count: 1, ..e.out });
+                 }
+-                HudPipeline::push_text(v, r[0] + r[3] + 4.0 * u, r[1] + (r[3] - 8.0 * tk) * 0.5, tk, CATS[i].label(), INK);
+                 let n = ids.len().to_string();
+-                HudPipeline::push_text(v, r[0] + r[2] - HudPipeline::text_width(&n) as f32 * tk - 5.0 * u, r[1] + (r[3] - 8.0 * tk) * 0.5, tk, &n, INK);
++                let nw = HudPipeline::text_width(&n) as f32 * tk;
++                let (lx, ty) = (r[0] + r[3] + 4.0 * u, r[1] + (r[3] - 8.0 * tk) * 0.5);
++                text_fit(v, (lx, ty), tk, r[0] + r[2] - 8.0 * u - nw - lx, CATS[i].label(), INK);
++                HudPipeline::push_text_flat(v, r[0] + r[2] - nw - 5.0 * u, ty, tk, &n, INK);
+             }
+         }
+         Some(ci) => {
+@@ -495,7 +577,8 @@
+                 let (aw, ah) = (12.0 * u * 0.9, 9.0 * u * 0.9);
+                 HudPipeline::push_gui_tinted(v, r[0] + (r[2] - aw) * 0.5, r[1] + (r[3] - ah) * 0.5, aw, ah, art::ARROW, INK);
+             }
+-            HudPipeline::push_text(v, b.left[0] + p + 0.14 * b.left[2] + 8.0 * u, title_y(b.left), tk, CATS[ci.min(CATS.len() - 1)].label(), INK);
++            let tx = b.left[0] + p + 0.14 * b.left[2] + 8.0 * u;
++            text_fit(v, (tx, title_y(b.left)), tk, b.left[0] + b.left[2] - p - tx, CATS[ci.min(CATS.len() - 1)].label(), INK);
+             for &(ei, r) in &b.rows {
+                 let e = &entries[ei];
+                 let known = !c.discovery || c.notes.known(e);
+@@ -508,10 +591,11 @@
+                     crate::push_stack(v, ib, 0.875, ItemStack { count: 1, ..e.out });
+                 } else {
+                     HudPipeline::push_nine(v, (ib.0, ib.1, ib.2, ib.3), art::SLOT, 2.0, u, WHITE, true);
+-                    HudPipeline::push_text_centered(v, ib.0 + ib.2 * 0.5, ib.1 + (ib.3 - 8.0 * tk) * 0.5, tk, "?", [0.7, 0.7, 0.75, 1.0]);
++                    text_in(v, ib.0 + ib.2 * 0.5, ib.1 + (ib.3 - 8.0 * tk) * 0.5, tk, (ib.0, ib.0 + ib.2), "?", [0.85, 0.85, 0.9, 1.0]);
+                 }
+                 let name = if known { items::name(e.out).unwrap_or("?") } else { "???" };
+-                HudPipeline::push_text(v, ib.0 + isz + 6.0 * u, r[1] + (r[3] - 8.0 * tk) * 0.5, tk, name, INK);
++                let nx = ib.0 + isz + 6.0 * u;
++                text_fit(v, (nx, r[1] + (r[3] - 8.0 * tk) * 0.5), tk, r[0] + r[2] - r[3] * 0.34 - 8.0 * u - nx, name, INK); // up to the gem
+                 // The gem at the right: green = the bag has it all and the grid fits; orange = a furnace's; red = something is short.
+                 let dot = if !known { MUTE } else if e.grid == 0 { WARN } else if ok { GOOD } else { BAD };
+                 let ds = r[3] * 0.34;
+@@ -528,7 +612,7 @@
+     }
+ 
+     // Right page: title, pin, the grid with its arrow and result, the card of the picked recipe.
+-    HudPipeline::push_text(v, b.right[0] + p, title_y(b.right), tk, if gw == 3 { "Workbench" } else { "Crafting" }, INK);
++    text_fit(v, (b.right[0] + p, title_y(b.right)), tk, b.pin[0] - 2.0 * u - b.right[0] - p, if gw == 3 { "Workbench" } else { "Crafting" }, INK);
+     if let Some(sel) = sat.sel {
+         let pinned = c.notes.pinned == Some(sel);
+         button(v, b.pin, (sk, u), if pinned { "Unpin" } else { "Pin" }, if pinned { 2 } else { 1 });
+@@ -538,10 +622,10 @@
+         let rim = (id == SlotId::Result && st.is_some()).then_some(GOOD);
+         slot(v, r, st, rim, u);
+     }
+-    HudPipeline::push_text_centered(v, b.arrow[0] + b.arrow[2] * 0.5, b.arrow[1] + (b.arrow[3] - 8.0 * tk) * 0.5, tk, "->", INK);
++    text_in(v, b.arrow[0] + b.arrow[2] * 0.5, b.arrow[1] + (b.arrow[3] - 8.0 * tk) * 0.5, tk, (b.arrow[0], b.arrow[0] + b.arrow[2]), "->", INK);
+     if c.hold {
+         if let Some((_, r)) = b.grid.iter().find(|(id, _)| *id == SlotId::Result) {
+-            HudPipeline::push_text_centered(v, r[0] + r[2] * 0.5, r[1] - 10.0 * sk, sk, "Release: craft all", GOOD);
++            text_in(v, r[0] + r[2] * 0.5, r[1] - 10.0 * sk, sk, (b.right[0] + p, b.right[0] + b.right[2] - p), "Release: craft all", GOOD);
+         }
+     }
+     draw_card(v, sat, b, c, (tk, sk, u));
+@@ -549,26 +633,24 @@
+     // The discovery toggle and the hint under it.
+     nine(v, b.hide, art::ENTRY, 3.0, u);
+     let label = if c.discovery { "Unknown recipes: hidden" } else { "Unknown recipes: shown" };
+-    HudPipeline::push_text_centered(v, b.hide[0] + b.hide[2] * 0.5, b.hide[1] + (b.hide[3] - 8.0 * sk) * 0.5, sk, label, INK);
+-    HudPipeline::push_text_centered(v, b.hide[0] + b.hide[2] * 0.5, b.hide[1] + b.hide[3] + 3.0 * sk, sk, "Hold the result to craft all", [0.4, 0.3, 0.2, 1.0]);
++    text_in(v, b.hide[0] + b.hide[2] * 0.5, b.hide[1] + (b.hide[3] - 8.0 * sk) * 0.5, sk, (b.hide[0] + 2.0 * u, b.hide[0] + b.hide[2] - 2.0 * u), label, INK);
++    text_in(v, b.hide[0] + b.hide[2] * 0.5, b.hide[1] + b.hide[3] + 3.0 * sk, sk, (b.right[0] + p, b.right[0] + b.right[2] - p), "Hold the result to craft all", [0.4, 0.3, 0.2, 1.0]);
+ }
+ 
+-/// The closed book: a burgundy leather cover (seam, tooled line, gold studs), a strap with a clasp, the book icon and its title; the
+-/// writing only while the cover is flat (it is foreshortened, narrower, while it swings).
++/// The closed book: a plain brown cover with a red-stitched spine (the sprite's left border) and a sliver of page edge, the book icon and
++/// its title; the writing only while the cover is flat (it is foreshortened, narrower, while it swings). No clasp, no strap.
+ fn draw_cover(v: &mut Vec<HudVertex>, r: [f32; 4], sat: &Satchel, (tk, sk, u): (f32, f32, f32)) {
+     if r[2] < 8.0 * u {
+         return;
+     }
+     nine(v, r, art::COVER, 8.0, u);
+-    let sx = r[0] + r[2] * 0.78; // the strap, down the cover, and its clasp
+-    HudPipeline::push_tiled(v, (sx, r[1] + u, 8.0 * u, r[3] - 2.0 * u), art::STRAP, u, WHITE);
+-    HudPipeline::push_gui(v, sx - 2.0 * u, r[1] + r[3] * 0.5 - 10.0 * u, 12.0 * u, 20.0 * u, art::CLASP);
+     if sat.book_t < 0.1 {
+-        let (cx, isz) = (r[0] + r[2] * 0.39, (r[2] * 0.3).min(r[3] * 0.25));
++        let (lo, hi) = (r[0] + 10.0 * u, r[0] + r[2] - 4.0 * u); // right of the spine
++        let (cx, isz) = ((lo + hi) * 0.5, ((hi - lo) * 0.4).min(r[3] * 0.25));
+         crate::push_stack(v, (cx - isz * 0.5, r[1] + r[3] * 0.3, isz, isz), 0.875, ItemStack { id: 340, count: 1, damage: 0 });
+-        HudPipeline::push_text_centered(v, cx, r[1] + r[3] * 0.3 + isz + 6.0 * u, tk, "Recipes", GOLD);
++        text_in(v, cx, r[1] + r[3] * 0.3 + isz + 6.0 * u, tk, (lo, hi), "Recipes", COVER_INK);
+         if !sat.book {
+-            HudPipeline::push_text_centered(v, cx, r[1] + r[3] * 0.86, sk, "Tap to open", [0.85, 0.7, 0.55, 1.0]);
++            text_in(v, cx, r[1] + r[3] * 0.86, sk, (lo, hi), "Tap to open", [0.74, 0.66, 0.48, 1.0]);
+         }
+     }
+ }
+@@ -579,20 +661,18 @@
+     nine(v, r, art::CARD, 3.0, u);
+     let line = u * 0.5;
+     let Some(e) = sat.sel.and_then(|i| book::entries().get(i)) else {
+-        HudPipeline::push_text(v, r[0] + 4.0 * u, r[1] + 4.0 * u, sk, "Pick a recipe on the left page:", INK);
+-        HudPipeline::push_text(v, r[0] + 4.0 * u, r[1] + 4.0 * u + 12.0 * sk, sk, "its items go into the grid.", INK);
++        paragraph(v, r, (sk, u), "Pick a recipe on the left page: its items go into the grid.", INK);
+         return;
+     };
+     if c.discovery && !c.notes.known(e) {
+-        HudPipeline::push_text(v, r[0] + 4.0 * u, r[1] + 4.0 * u, sk, "???  Find one of its items", INK);
+-        HudPipeline::push_text(v, r[0] + 4.0 * u, r[1] + 4.0 * u + 12.0 * sk, sk, "to learn this recipe.", INK);
++        paragraph(v, r, (sk, u), "??? Find one of its items to learn this recipe.", INK);
+         return;
+     }
+     let isz = (r[3] * 0.3).min(r[2] * 0.2);
+     crate::push_stack(v, (r[0] + 3.0 * u, r[1] + 3.0 * u, isz, isz), 0.875, ItemStack { count: 1, ..e.out });
+     let name = items::name(e.out).unwrap_or("?");
+     let head = if e.out.count > 1 { format!("{name} x{}", e.out.count) } else { name.to_string() };
+-    HudPipeline::push_text(v, r[0] + isz + 8.0 * u, r[1] + 3.0 * u + (isz - 8.0 * tk) * 0.5, tk * 0.85, &head, INK);
++    text_fit(v, (r[0] + isz + 8.0 * u, r[1] + 3.0 * u + (isz - 8.0 * tk) * 0.5), tk, r[2] - isz - 12.0 * u, &head, INK);
+     let gw = c.screen.gw;
+     let short = book::missing(e, c.inv, &c.screen.grid);
+     let (note, col) = match (e.src, e.grid) {
+@@ -601,7 +681,7 @@
+         _ if short.is_empty() => ("Tap the recipe again to refill", GOOD),
+         _ => ("Missing ingredients", BAD),
+     };
+-    HudPipeline::push_text(v, r[0] + 4.0 * u, r[1] + isz + 8.0 * u, sk, note, col);
++    text_fit(v, (r[0] + 4.0 * u, r[1] + isz + 8.0 * u), sk, r[2] - 8.0 * u, note, col);
+     // Ingredients, five to a row: the item, then what the bag has over what the recipe wants.
+     let (cw, rowy) = (r[2] / 5.0, r[1] + isz + 8.0 * u + 12.0 * sk);
+     let chip = ((r[3] - (rowy - r[1])).min(cw) * 0.7).max(1.0);
+@@ -613,7 +693,8 @@
+         crate::push_stack(v, (x, y, chip, chip), 0.875, item(code));
+         let have = book::have(c.inv, &c.screen.grid, code);
+         let t = format!("{have}/{need}");
+-        HudPipeline::push_text_centered(v, x + chip * 0.5, y + chip + 2.0 * line, sk, &t, if have >= u32::from(need) { GOOD } else { BAD });
++        let lo = x - (cw - chip) * 0.5; // this ingredient's column
++        text_in(v, x + chip * 0.5, y + chip + 2.0 * line, sk, (lo, lo + cw), &t, if have >= u32::from(need) { GOOD } else { BAD });
+     }
+ }
+ 
+@@ -716,6 +797,71 @@
+         assert_ne!(f.hit(&open, f.book.as_ref().expect("book").right[0] + 2.0, f.book.as_ref().expect("book").right[1] + 2.0), Pick::Btn(Btn::Book));
+     }
+ 
++    /// The slots touch each other (rows and columns), start clear of the panel's 8-pixel border and its seam, and the pocket bands stay
++    /// inside the border: the old cells covered the seam on the left.
++    #[test]
++    fn slots_touch_and_sit_clear_of_the_border() {
++        for (w, h) in [(1604.0, 720.0), (1280.0, 720.0), (2400.0, 1080.0), (1920.0, 1080.0)] {
++            let f = Frame::new(&open_book(), &Inventory::default(), 2, w, h);
++            let u = units(f.k).0;
++            let (lo, hi) = (f.bag[0] + 10.0 * u, f.bag[0] + f.bag[2] - 10.0 * u);
++            for &(_, r) in &f.cells {
++                assert!(r[0] >= lo - 0.01 && r[0] + r[2] <= hi + 0.01, "a slot is clear of the border at {w}x{h}: {r:?}");
++                assert_eq!(r[2], r[3], "slots are square");
++            }
++            for &(r, _) in &f.rows {
++                assert!(r[0] >= f.bag[0] + 8.0 * u && r[0] + r[2] <= f.bag[0] + f.bag[2] - 8.0 * u, "a band stays inside the border: {r:?}");
++            }
++            let first = f.cells.iter().filter(|(id, _)| matches!(id, SlotId::Inv(i) if (9..MAIN).contains(i))).map(|&(_, r)| r).collect::<Vec<_>>();
++            for pair in first.windows(2).filter(|p| p[0][1] == p[1][1]) {
++                assert!((pair[1][0] - pair[0][0] - pair[0][2]).abs() < 0.01, "neighbours touch");
++            }
++            assert!(f.bag[1] + f.bag[3] <= h, "the bag fits the height at {w}x{h}");
++        }
++    }
++
++    /// The grid, the arrow and the result stay on the right page on every screen shape (the old sizes came from the height only).
++    #[test]
++    fn the_result_stays_on_the_page_on_every_screen() {
++        for (w, h) in [(1604.0, 720.0), (1280.0, 720.0), (2400.0, 1080.0), (1920.0, 1080.0), (2340.0, 1080.0), (1560.0, 720.0)] {
++            for gw in [2, 3] {
++                let f = Frame::new(&open_book(), &Inventory::default(), gw, w, h);
++                let b = f.book.as_ref().expect("book");
++                let edge = b.right[0] + b.right[2] - b.p;
++                for &(_, r) in &b.grid {
++                    assert!(r[0] >= b.right[0] + b.p - 0.01 && r[0] + r[2] <= edge + 0.01, "{gw}x{gw} cell {r:?} at {w}x{h} (edge {edge})");
++                }
++                assert!(b.arrow[0] + b.arrow[2] <= b.grid.last().expect("result").1[0] + 0.01, "the arrow is left of the result");
++            }
++        }
++    }
++
++    /// The book is as tall closed as open (the back cover only grows sideways), and the cover is one page wide.
++    #[test]
++    fn the_book_is_as_tall_closed_as_open() {
++        let inv = Inventory::default();
++        let mut closed = Satchel::new(false);
++        closed.tick(10.0);
++        let (c, o) = (frame(&closed, &inv, 2), frame(&open_book(), &inv, 2));
++        let (rc, ro) = (c.book.expect("closed").rect, o.book.expect("open").rect);
++        assert_eq!((rc[1], rc[3]), (ro[1], ro[3]));
++        assert!(rc[2] < ro[2]);
++    }
++
++    /// A text is stepped down whole pixels and then cut until it fits; a paragraph wraps within its width.
++    #[test]
++    fn text_is_fitted_and_wrapped_within_its_box() {
++        for (s, k, maxw) in [("Redstone & rails", 3.0, 150.0), ("Redstone & rails", 3.0, 40.0), ("Hold the result to craft all", 2.0, 60.0), ("X", 3.0, 100.0)] {
++            let (kk, t) = fitted(s, k, maxw);
++            assert!(kk >= 1.0 && kk <= k && kk.fract() == 0.0 && HudPipeline::text_width(&t) as f32 * kk <= maxw.max(8.0), "{s}: {kk} {t}");
++        }
++        assert_eq!(fitted("X", 3.0, 100.0), (3.0, "X".to_string()), "a text that fits keeps its size");
++        for l in lines("Pick a recipe on the left page: its items go into the grid.", 2.0, 150.0) {
++            assert!(HudPipeline::text_width(&l) as f32 * 2.0 <= 150.0 || !l.contains(' '), "{l}");
++        }
++        assert_eq!(units(3.99), (3.0, 2.0));
++    }
++
+     #[test]
+     fn a_slot_rim_is_tinted_by_category() {
+         assert_ne!(tint(270), tint(297), "a pickaxe and bread differ");
+diff -u a/roadmap/gameplay.md b/roadmap/gameplay.md
+--- a/roadmap/gameplay.md	2026-10-25 23:13:07.445185809 +0000
++++ b/roadmap/gameplay.md	2026-10-25 23:13:07.446356834 +0000
+@@ -4,6 +4,12 @@
+ 
+ ## Changelog
+ 
++- 2026-10-26 (17): satchel restyle: grey stone GUI-pack look, flat text, touching slots, a brown book (**NOT b1.7.3**; written WITHOUT a Rust toolchain: not compiled, not run, not seen on a device; +4 tests in `satchel.rs`: `slots_touch_and_sit_clear_of_the_border`, `the_result_stays_on_the_page_on_every_screen`, `the_book_is_as_tall_closed_as_open`, `text_is_fitted_and_wrapped_within_its_box`; run `cargo test --lib satchel hud` first). Player's report on (16): the text looked doubled and ran out of its boxes, the bag's slots were too big and covered the seam on the left, the look was Pixel RPG Fantasy and flat, and the result slot of the book's grid left the page. The sprite sheet was previewed first (`python3 tools/gen_satchel_ui.py --preview DIR` writes the sheet and two mock screens with the game's font); `--write` writes `assets/satchel.rgba`.
++    - Text (`satchel.rs`): `HudPipeline::push_text_flat` (no shadow, origin snapped to whole pixels) replaces `push_text` / `push_text_centered` on the satchel; the old shadow, one font pixel down-right in a quarter of the ink, read as a second copy on parchment. `units(k)` rounds the title / button size (0.75 k) and the small size (0.6 k) to whole pixels, so a glyph and a sprite pixel (`u`) are whole screen pixels (the `tk * 0.85` card head is gone). `fitted` steps a text down whole pixels, then cuts it with a dot; `text_fit` (left edge + width), `text_in` (centred, kept inside `[lo, hi]`), `paragraph` / `lines` (wrapped, cut at the foot) are used for every label, title, button, row, card line and toggle.
++    - Slots: cells touch (pitch = cell, like the vanilla texture) and are `floor`ed to whole pixels; `pad` = max(0.03 h, 11 sprite pixels) because the panel's border is 8 sprite pixels and its seam and corner marks lie inside 7 (the old 0.03 h was less than that at the phone's scale, so the cells covered the seam); the pocket bands are one per block (armor row, the 3 rows, the belt), 2 sprite pixels wider than it; blocks are `6 u` apart; no buckle. The crafting grid's cells touch too.
++    - Grid on the page: a cell is `min(height's share, (page width left of the content - 2 gaps - arrow) / (grid width + 1.2))`, so the result never leaves the page (before, a cell came from the height and the page from the width: at 1920 x 1080 the 2x2 result stuck out by 84 px, 3x3 at 1604 x 720 by 4 px). `BookFrame::p` / `hh` carry the page clearance (`max(0.028 h, 8 u)`, the frame is 6 u) to the drawing.
++    - Look: `tools/gen_satchel_ui.py` rewritten, same sprite names, sizes and places: light-grey stone panel (4-tone per-pixel noise, dark outline, lit / shadowed bevel, corner marks, red stitched seam), vanilla inset slots (the category rim shows only under a finger; the selected belt slot keeps its yellow rim), grey bevelled buttons (`BTN_ON` blue), a slate tab, a brown book cover (`COVER`: the left border is the spine with red stitches, a cream page edge right and at the foot; no strap, no clasp, `STRAP` / `CLASP` / `BUCKLE` stay in the sheet unused), a brown frame round the pages (`PAGE_EDGE`, 6 px, so `push_nine` takes 6.0), denser parchment. The open book's back cover grows only sideways (`cm`), so the book is as tall closed as open.
++    - UNVERIFIED: that it compiles, the sizes at 1604 x 720 (`tk` 3, `sk` 2, cell 73, grid cells 79 / 61), the look on the phone, that `tools/gen_satchel_ui.py --write` was run after the patch (the sheet is part of it).
+ - 2026-10-26 (16): UI overhaul of the satchel and the recipe book (**NOT b1.7.3**; written WITHOUT a Rust toolchain: not compiled, not run, not seen on a device; +1 test in `render/hud.rs`: `satchel_sheet_has_its_sprites_and_the_helpers_stay_inside`, the font test now ends at `SATCHEL_Y`; run `cargo test --lib hud satchel` first). Request of the player: more detail and a Minecraft look, like a pixel-art GUI pack (grey beveled panels with title tabs) and a parchment book with a red stitched binding.
+     - Art: `tools/gen_satchel_ui.py` draws `mc-rs/assets/satchel.rgba` from code (no outside art): BAG / COVER 9-slices (grain, bevel, seam of stitches, gold studs), PARCH (a seamless mottled tile), PAGE_EDGE (aged rim, round corners), BINDING (crease + red stitches), POCKET / BELT / BUCKLE / STRAP / CLASP, SLOT (inset) + RIM (white, tinted by the item's category), BTN / BTN_ON / TAB plates, ENTRY / ENTRY_SEL / CARD parchment pieces, GEM, RULE, CURL, ARROW. It is the last 256 rows of the HUD texture (`hud::SATCHEL_Y` 2864, `SHEET_H` 3120; the GLES renderer reads `SHEET_H` too). `tools/gen_satchel_ui.py --preview x.png` writes a 4x picture of the sheet.
+     - Code: `HudPipeline::push_tiled` (a sprite repeated over a box, the last tile cut, not squeezed) and `push_nine` (corners, tiled edges and middle; corners shrink in a small box). `satchel::draw` uses only those, at one pixel size `u` = the text's pixel (0.75 GUI unit), so glyphs, stitches and rivets agree. Only the dimmed world and the scroll bar are still quads.
+diff -u a/tools/gen_satchel_ui.py b/tools/gen_satchel_ui.py
+--- a/tools/gen_satchel_ui.py	2026-10-25 23:13:07.439359624 +0000
++++ b/tools/gen_satchel_ui.py	2026-10-25 23:13:07.440618639 +0000
+@@ -1,17 +1,18 @@
+ #!/usr/bin/env python3
+-"""Writes mc-rs/assets/satchel.rgba: the pixel art of the satchel and its recipe book (`satchel.rs`), 256 x 256 RGBA, the last block of the
+-HUD texture (`hud::SATCHEL_Y`). Everything is drawn here from code (no outside art, nothing to license): leather with grain, stitches and
+-rivets, an inset Minecraft-style slot, parchment with a red stitched binding, a burgundy cover. Run from the repo root:
+-python3 tools/gen_satchel_ui.py   (needs Pillow; `--preview out.png` also writes a 4x picture of the sheet).
+-The sprites' places are the `SPRITES` table below; `hud::sprites::sat` repeats them (a test in `hud.rs` checks the two agree on what is
+-opaque). Tiles (`PARCH`, the 9-slice edges) are periodic, so `hud::push_tiled` / `push_nine` repeat them without a seam."""
++"""Writes mc-rs/assets/satchel.rgba: pixel art of the satchel and its recipe book (`satchel.rs`), 256 x 256 RGBA, the last block of the
++HUD texture (`hud::SATCHEL_Y`). Everything is drawn from code. Style (2026-10-26 restyle, Minecraft GUI-pack look): light-grey bevelled
++panels with per-pixel stone noise (3-4 tones), a dark outline, small pixel corner ornaments and a red stitched seam; vanilla b1.7.3 inset
++slots; a parchment book with a brown frame and a red stitched binding; the closed book is a parchment scroll with a red cord.
++Sprite names, sizes and places are the old `SPRITES` table, so `hud::sprites::sat` needs no change.
++  python3 tools/gen_satchel_ui.py --preview DIR    writes DIR/satchel_sheet.png (4x), DIR/mock_open.png, DIR/mock_closed.png (3x); NO asset
++  python3 tools/gen_satchel_ui.py --write          writes mc-rs/assets/satchel.rgba (run `cargo test --lib hud satchel` after)
++Needs Pillow. The mock screens use the real b1.7.3 font (`render/font.rs`) at integer scale and NO text shadow."""
++import re
+ import sys
+ from PIL import Image
+ 
+ W = H = 256
+ sheet = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+-
+-# name: (x, y, w, h)
+ SPRITES = {
+     "BAG": (0, 0, 32, 32), "COVER": (32, 0, 32, 32), "PARCH": (64, 0, 32, 32), "PAGE_EDGE": (96, 0, 16, 16),
+     "BINDING": (112, 0, 8, 16), "CURL": (120, 0, 12, 12), "ARROW": (132, 0, 16, 12),
+@@ -19,6 +20,7 @@
+     "SLOT": (64, 32, 18, 18), "RIM": (82, 32, 18, 18), "BTN": (100, 32, 16, 16), "BTN_ON": (116, 32, 16, 16), "TAB": (132, 32, 16, 16),
+     "ENTRY": (148, 32, 16, 16), "ENTRY_SEL": (164, 32, 16, 16), "CARD": (180, 32, 16, 16), "GEM": (196, 32, 8, 8), "RULE": (204, 32, 16, 4)
+ }
++CLEAR = (0, 0, 0, 0)
+ 
+ 
+ def hx(s):
+@@ -26,14 +28,13 @@
+ 
+ 
+ def h2(x, y, seed=0):
+-    """A deterministic hash in 0..1."""
+     n = (x * 374761393 + y * 668265263 + seed * 2147483647) & 0xFFFFFFFF
+     n = ((n ^ (n >> 13)) * 1274126177) & 0xFFFFFFFF
+     return ((n ^ (n >> 16)) & 0xFFFF) / 65535.0
+ 
+ 
+ def new(name):
+-    return Image.new("RGBA", SPRITES[name][2:], (0, 0, 0, 0))
++    return Image.new("RGBA", SPRITES[name][2:], CLEAR)
+ 
+ 
+ def put(name, img):
+@@ -46,91 +47,89 @@
+     return tuple(max(0, min(255, int(v * f))) for v in c[:3]) + (255,)
+ 
+ 
+-def mix(a, b, t):
+-    return tuple(int(a[i] + (b[i] - a[i]) * t) for i in range(3)) + (255,)
+-
++def pick(tones, r, wts=(0.5, 0.2, 0.2, 0.1)):
++    t = 0.0
++    for c, wt in zip(tones, wts):
++        t += wt
++        if r < t:
++            return c
++    return tones[-1]
+ 
+-# ---- leather ----
+ 
+-def leather(name, base, border, outline_w=1, studs=True, seam=True, seam_col=None, tooled=None, grain=0.12, period=16):
+-    """A 9-slice of leather: dark outline, a lit top / left and a shadowed bottom / right edge, grain that repeats every `period`
+-    pixels (so the stretched edges tile), a seam of stitches `border / 2` in, a stud in each corner."""
+-    img = new(name)
++def noise_fill(img, tones, seed, period=16, wts=(0.5, 0.2, 0.2, 0.1)):
++    """Per-pixel noise in 3-4 tones, periodic so a stretched 9-slice edge tiles without a seam."""
+     w, h = img.size
+-    dark, light, edge = shade(base, 0.62), shade(base, 1.32), shade(base, 0.32)
+-    seam_col = seam_col or (214, 172, 106, 255)
+     for y in range(h):
+         for x in range(w):
+-            # grain: short horizontal fibres, periodic along both axes
+-            gx, gy = x % period, y % period
+-            r = h2(gx // 3, gy, 1)
+-            c = base
+-            if r < 0.18:
+-                c = shade(base, 1 - grain)
+-            elif r > 0.86:
+-                c = shade(base, 1 + grain)
+-            if h2(gx, gy, 7) > 0.93:
+-                c = shade(base, 0.8)
+-            img.putpixel((x, y), c)
++            img.putpixel((x, y), pick(tones, h2(x % period, y % period, seed), wts))
++
++
++RED, RED_D = hx("#d8433f"), hx("#8e2623")
++INK = hx("#2b1b0c")
++
++
++def corner_mark(img, base, sx, sy, main, hi):
++    """A small pixel bracket + dot, like the corner marks of the GUI pack's panels."""
++    w, h = img.size
++    ox, oy = (0 if sx > 0 else w - 1), (0 if sy > 0 else h - 1)
++    pts = [(3, 3), (4, 3), (5, 3), (6, 3), (3, 4), (3, 5), (3, 6), (5, 5)]
++    for dx, dy in pts:
++        img.putpixel((ox + sx * (dx + 1), oy + sy * (dy + 1)), hi)
++    for dx, dy in pts:
++        img.putpixel((ox + sx * dx, oy + sy * dy), main)
++
++
++def panel(name, tones, outline, hi, lo, mark, seam=True, seed=3, wts=(0.5, 0.2, 0.2, 0.1)):
++    """A 9-slice (border 8): noise, dark outline, lit top-left / shadowed bottom-right edge, corner marks, a red stitched seam."""
++    img = new(name)
++    w, h = img.size
++    noise_fill(img, tones, seed, 16, wts)
+     for y in range(h):
+         for x in range(w):
+             d = min(x, y, w - 1 - x, h - 1 - y)
+-            if d < outline_w:
+-                img.putpixel((x, y), edge)
+-            elif d == outline_w:
+-                # lit on the top / left, shadowed on the bottom / right
+-                top_left = min(x, y) <= min(w - 1 - x, h - 1 - y)
+-                img.putpixel((x, y), light if top_left else dark)
+-    if tooled:  # a blind-tooled line, a dark groove with a lit lip
+-        o = tooled
+-        for i in range(o, w - o):
+-            for j in (o, h - 1 - o):
+-                img.putpixel((i, j), shade(base, 0.7))
+-        for j in range(o, h - o):
+-            for i in (o, w - 1 - o):
+-                img.putpixel((i, j), shade(base, 0.7))
++            if d == 0:
++                img.putpixel((x, y), outline)
++            elif d == 1:
++                img.putpixel((x, y), hi if min(x, y) <= min(w - 1 - x, h - 1 - y) else lo)
+     if seam:
+-        s = border // 2 + 1
+-        for i in range(s + 2, w - s - 2):
++        for i in range(8, w - 8):
+             if (i // 2) % 2 == 0:
+-                for j in (s, h - 1 - s):
+-                    img.putpixel((i, j), seam_col)
+-                    img.putpixel((i, j + 1 if j == s else j - 1), shade(base, 0.55))
+-        for j in range(s + 2, h - s - 2):
++                img.putpixel((i, 4), RED)
++                img.putpixel((i, 5), RED_D)
++                img.putpixel((i, h - 5), RED)
++                img.putpixel((i, h - 6), RED_D)
++        for j in range(8, h - 8):
+             if (j // 2) % 2 == 0:
+-                for i in (s, w - 1 - s):
+-                    img.putpixel((i, j), seam_col)
+-                    img.putpixel((i + 1 if i == s else i - 1, j), shade(base, 0.55))
+-    if studs:
+-        s = border // 2 + 1
+-        for cx, cy in ((s, s), (w - 1 - s, s), (s, h - 1 - s), (w - 1 - s, h - 1 - s)):
+-            for dy in range(-1, 2):
+-                for dx in range(-1, 2):
+-                    col = (232, 196, 100, 255)
+-                    if dx == -1 and dy == -1:
+-                        col = (255, 240, 170, 255)
+-                    elif dx == 1 and dy == 1:
+-                        col = (130, 92, 30, 255)
+-                    elif dx != 0 and dy != 0 and (dx, dy) in ((1, -1), (-1, 1)):
+-                        col = (190, 150, 62, 255)
+-                    img.putpixel((cx + dx, cy + dy), col)
++                img.putpixel((4, j), RED)
++                img.putpixel((5, j), RED_D)
++                img.putpixel((w - 5, j), RED)
++                img.putpixel((w - 6, j), RED_D)
++    for sx, sy in ((1, 1), (-1, 1), (1, -1), (-1, -1)):
++        corner_mark(img, None, sx, sy, mark, hi)
++    img.putpixel((0, 0), CLEAR)
++    img.putpixel((w - 1, 0), CLEAR)
++    img.putpixel((0, h - 1), CLEAR)
++    img.putpixel((w - 1, h - 1), CLEAR)
+     put(name, img)
+     return img
+ 
+ 
+-leather("BAG", hx("#5c3d24"), 8)
+-leather("COVER", hx("#6a2a24"), 8, tooled=5, seam_col=(228, 190, 100, 255), grain=0.1)
++# ---- the bag: a light-grey stone panel ----
++GREY = [hx("#c6c6c6"), hx("#bbbbc0"), hx("#d0d0d2"), hx("#aeaeb6")]
++panel("BAG", GREY, hx("#14141c"), hx("#fbfbfb"), hx("#6a6a78"), hx("#4a5470"))
+ 
+ 
+ def pocket():
+-    """A darker leather pocket band: a lit lip along the top, stitched along the foot."""
+-    img = leather("POCKET", hx("#3f2817"), 4, studs=False, seam=False, grain=0.1, period=16)
++    """A darker stone band behind a row: a lit lip on top, red stitches along the foot."""
++    img = new("POCKET")
++    noise_fill(img, [hx("#9a9aa2"), hx("#8e8e98"), hx("#a6a6ae"), hx("#82828c")], 5)
+     w, h = img.size
+     for x in range(w):
+-        img.putpixel((x, 1), hx("#8c6538"))
+-        img.putpixel((x, 2), hx("#5d3f22"))
++        img.putpixel((x, 0), hx("#5a5a66"))
++        img.putpixel((x, 1), hx("#e4e4e8"))
++        img.putpixel((x, h - 1), hx("#6a6a78"))
+         if (x // 2) % 2 == 0:
+-            img.putpixel((x, h - 4), (200, 160, 98, 255))
++            img.putpixel((x, h - 4), RED)
+     put("POCKET", img)
+ 
+ 
+@@ -138,242 +137,171 @@
+ 
+ 
+ def belt():
+-    img = leather("BELT", hx("#2c1a0e"), 4, studs=False, seam=False, grain=0.08, period=16)
++    """The quick belt's band: darker slate, two rows of red stitches."""
++    img = new("BELT")
++    noise_fill(img, [hx("#60626f"), hx("#555763"), hx("#6a6c7a"), hx("#4a4c58")], 6)
+     w, h = img.size
+-    for x in range(w):  # two rows of stitches, holes every 8
++    for x in range(w):
++        img.putpixel((x, 0), hx("#2c2e38"))
++        img.putpixel((x, h - 1), hx("#2c2e38"))
+         if (x // 2) % 2 == 0:
+-            img.putpixel((x, 3), (200, 160, 98, 255))
+-            img.putpixel((x, h - 4), (200, 160, 98, 255))
+-    for x0 in (3, 11):
+-        for dx in (0, 1):
+-            img.putpixel((x0 + dx, 7), hx("#120905"))
+-            img.putpixel((x0 + dx, 8), hx("#120905"))
++            img.putpixel((x, 3), RED)
++            img.putpixel((x, h - 4), RED)
+     put("BELT", img)
+ 
+ 
+ belt()
+ 
+-# ---- metal ----
+ 
+-
+-def metal(name, rect_outer, rect_inner=None, extra=None):
++def small_plate(name, fill, edge, mark):
++    """BUCKLE / CLASP: a small plate with a corner-mark, a hole for the cord."""
+     img = new(name)
+     w, h = img.size
++    noise_fill(img, fill, 8, 8)
+     for y in range(h):
+         for x in range(w):
+-            c = None
+-            if x < w and y < h:
+-                inner_hole = rect_inner and rect_inner[0] <= x < rect_inner[0] + rect_inner[2] and rect_inner[1] <= y < rect_inner[1] + rect_inner[3]
+-                if not inner_hole:
+-                    c = (232, 196, 100, 255)
+-                    if x == 0 or y == 0:
+-                        c = (255, 240, 170, 255)
+-                    if x == w - 1 or y == h - 1:
+-                        c = (130, 92, 30, 255)
+-                    if (x + y) % 5 == 0 and 0 < x < w - 1 and 0 < y < h - 1:
+-                        c = (214, 176, 80, 255)
+-                else:
+-                    c = (60, 38, 16, 255)
+-            img.putpixel((x, y), c if c else (0, 0, 0, 0))
+-    if extra:
+-        extra(img)
++            d = min(x, y, w - 1 - x, h - 1 - y)
++            if d == 0:
++                img.putpixel((x, y), edge)
++            elif d == 1:
++                img.putpixel((x, y), hx("#f4f4f6") if min(x, y) <= min(w - 1 - x, h - 1 - y) else hx("#5e5e6c"))
++    for x, y in ((0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)):
++        img.putpixel((x, y), CLEAR)
++    for dx, dy in ((3, 3), (4, 3), (3, 4)):
++        img.putpixel((dx, dy), mark)
++        img.putpixel((w - 1 - dx, h - 1 - dy), mark)
+     put(name, img)
+ 
+ 
+-def buckle_extra(img):
+-    w, h = img.size
+-    for y in range(5, 11):  # the prong across the middle hole
+-        img.putpixel((w // 2, y), (255, 240, 170, 255))
+-        img.putpixel((w // 2 + 1, y), (130, 92, 30, 255))
+-
+-
+-metal("BUCKLE", None, (3, 3, 6, 10), buckle_extra)
+-
++small_plate("BUCKLE", GREY, hx("#14141c"), hx("#4a5470"))
++small_plate("CLASP", [hx("#8a2f2c"), hx("#7a2623"), hx("#9a3835"), hx("#6a1f1c")], hx("#2a0c0b"), hx("#f0c8c4"))
+ 
+-def clasp_extra(img):
+-    w, h = img.size
+-    for (x, y) in ((0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)):  # round the corners
+-        img.putpixel((x, y), (0, 0, 0, 0))
+-    hole = (60, 38, 16, 255)
+-    for (x, y) in [(x, y) for y in (6, 7, 8, 9) for x in (4, 5, 6, 7) if not (y in (6, 9) and x in (4, 7))] + [(5, y) for y in (10, 11, 12, 13)] + [(6, y) for y in (10, 11, 12, 13)]:
+-        img.putpixel((x, y), hole)  # a keyhole
+-
+-
+-metal("CLASP", None, None, clasp_extra)
+-
+-# the strap on the cover: a darker vertical band with stitched edges
++# the cord of the closed scroll: a red band with darker stitched edges
+ img = new("STRAP")
+ for y in range(16):
+     for x in range(8):
+-        c = hx("#3a1814")
+-        if h2(x, y, 3) > 0.85:
+-            c = hx("#2a100d")
++        c = pick([hx("#c23c38"), hx("#b23430"), hx("#d24a45"), hx("#9c2a27")], h2(x, y, 3))
+         if x in (0, 7):
+-            c = hx("#1c0a08")
+-        if x in (1, 6) and (y // 2) % 2 == 0:
+-            c = (214, 172, 106, 255)
++            c = hx("#561513")
++        elif x in (1, 6):
++            c = hx("#e66a64") if x == 1 else hx("#7a1f1c")
+         img.putpixel((x, y), c)
+ put("STRAP", img)
+ 
+-# ---- slots, buttons, plates ----
+-
++# ---- slots (vanilla b1.7.3 inset), the rim shown only on a touch ----
+ img = new("SLOT")
+ for y in range(18):
+     for x in range(18):
+-        c = hx("#2e2a30")
+-        if h2(x, y, 9) > 0.9:
+-            c = hx("#35303a")
+-        if y == 0 or x == 0:
+-            c = hx("#0e0b0d")
+-        elif y == 1 or x == 1:
+-            c = hx("#1b171c")
+-        if y == 17 or x == 17:
+-            c = hx("#8a6a48")
+-        elif y == 16 or x == 16:
+-            c = hx("#5a432b")
++        c = pick([hx("#8b8b8b"), hx("#848484"), hx("#929292"), hx("#7d7d7d")], h2(x, y, 9), (0.62, 0.15, 0.15, 0.08))
++        if x == 0 or y == 0:
++            c = hx("#373737")
++        elif x == 17 or y == 17:
++            c = hx("#ffffff")
++        elif x == 1 or y == 1:
++            c = shade(c, 0.88)
+         img.putpixel((x, y), c)
++img.putpixel((17, 0), hx("#8b8b8b"))
++img.putpixel((0, 17), hx("#8b8b8b"))
+ put("SLOT", img)
+ 
+ img = new("RIM")
+ for i in range(18):
+     for p in ((i, 0), (i, 17), (0, i), (17, i), (i, 1), (i, 16), (1, i), (16, i)):
+         img.putpixel(p, (255, 255, 255, 255))
+-for p in ((1, 1), (16, 1), (1, 16), (16, 16)):
+-    pass
+ put("RIM", img)
+ 
+ 
+-def plate(name, base, outline, border=3, gloss=True, noise=0.06):
++def plate(name, tones, outline, hi, lo):
+     img = new(name)
+     w, h = img.size
++    noise_fill(img, tones, 5, 8, (0.6, 0.2, 0.2, 0.0))
+     for y in range(h):
+         for x in range(w):
+-            c = base if h2(x % 8, y % 8, 5) > 0.15 else shade(base, 1 - noise * 2)
+             d = min(x, y, w - 1 - x, h - 1 - y)
+             if d == 0:
+-                c = outline
++                img.putpixel((x, y), outline)
+             elif d == 1:
+-                c = shade(base, 1.28) if min(x, y) <= min(w - 1 - x, h - 1 - y) else shade(base, 0.7)
+-            img.putpixel((x, y), c)
+-    for (x, y) in ((0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)):
+-        img.putpixel((x, y), (0, 0, 0, 0))
++                img.putpixel((x, y), hi if min(x, y) <= min(w - 1 - x, h - 1 - y) else lo)
++    for x, y in ((0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)):
++        img.putpixel((x, y), CLEAR)
+     put(name, img)
+-    return img
+ 
+ 
+-plate("BTN", hx("#6f4c2c"), hx("#1d110a"))
+-plate("BTN_ON", hx("#9a6f2e"), hx("#2a1a08"))
+-plate("TAB", hx("#c19a62"), hx("#3a2410"))
++plate("BTN", [hx("#707070"), hx("#686868"), hx("#787878"), hx("#606060")], hx("#101010"), hx("#b4b4b4"), hx("#383838"))
++plate("BTN_ON", [hx("#7a82c8"), hx("#7078bc"), hx("#868ed2"), hx("#666eb0")], hx("#101018"), hx("#c8ceff"), hx("#3a4078"))
++plate("TAB", [hx("#b6c2d6"), hx("#aab6cc"), hx("#c2ccdc"), hx("#9eaac0")], hx("#1c2438"), hx("#ffffff"), hx("#6a7690"))
+ 
+ # ---- parchment ----
+ 
+ 
+-def periodic_noise(x, y, cell, period, seed):
+-    """Smooth value noise that repeats every `period` pixels."""
+-    n = period // cell
+-    gx, gy = x / cell, y / cell
+-    x0, y0 = int(gx) % n, int(gy) % n
+-    x1, y1 = (x0 + 1) % n, (y0 + 1) % n
+-    fx, fy = gx - int(gx), gy - int(gy)
+-    fx, fy = fx * fx * (3 - 2 * fx), fy * fy * (3 - 2 * fy)
+-    a, b = h2(x0, y0, seed), h2(x1, y0, seed)
+-    c, d = h2(x0, y1, seed), h2(x1, y1, seed)
+-    return (a + (b - a) * fx) * (1 - fy) + (c + (d - c) * fx) * fy
+-
+-
+-TONES = [hx("#cfc19f"), hx("#d9ccab"), hx("#e3d7b7"), hx("#ece1c4")]
+-img = new("PARCH")
+-for y in range(32):
+-    for x in range(32):
+-        v = 0.6 * periodic_noise(x, y, 8, 32, 11) + 0.4 * periodic_noise(x, y, 4, 32, 12)
+-        c = TONES[min(3, int(v * 4.4))]
+-        r = h2(x, y, 13)
+-        if r > 0.985:
+-            c = hx("#f4ecd4")
+-        elif r < 0.012:
+-            c = hx("#bfb08c")
+-        img.putpixel((x, y), c)
+-put("PARCH", img)
++def parch_tile():
++    """Seamless parchment, 4 tones, short horizontal fibres, a few specks."""
++    img = new("PARCH")
++    tones = [hx("#d9c99c"), hx("#cdbb8c"), hx("#e3d5ab"), hx("#bfae80")]
++    for y in range(32):
++        for x in range(32):
++            r = 0.55 * h2(x // 2 % 16, y, 11) + 0.45 * h2(x, y, 12)
++            c = pick(tones, r, (0.46, 0.24, 0.2, 0.1))
++            if h2(x, y, 13) > 0.985:
++                c = hx("#efe4c0")
++            elif h2(x, y, 14) < 0.01:
++                c = hx("#a8976a")
++            img.putpixel((x, y), c)
++    put("PARCH", img)
++
++
++parch_tile()
+ 
+-# the page's rim: aged gold, then a lighter band; the inside is clear (the tile shows through); the corners are cut round
++# the book's frame: dark outline, brown leather with grain, a dark inner shadow, a light tan lip; the inside is clear
+ img = new("PAGE_EDGE")
++LEATHER = [hx("#8a5a2e"), hx("#7c4f27"), hx("#97642f"), hx("#6c4420")]
+ for y in range(16):
+     for x in range(16):
+         d = min(x, y, 15 - x, 15 - y)
+         c = None
+         if d == 0:
+-            c = hx("#7a5a2e")
+-        elif d == 1:
+-            c = hx("#b99a58")
+-        elif d == 2:
+-            c = hx("#d2b676")
+-        elif d == 3:
+-            c = hx("#e0cc98")
+-        if c is not None and h2(x % 8, y % 8, 21) > 0.82 and d > 0:
+-            c = shade(c, 0.93)
+-        img.putpixel((x, y), c if c else (0, 0, 0, 0))
+-for (x, y) in ((0, 0), (15, 0), (0, 15), (15, 15)):
+-    img.putpixel((x, y), (0, 0, 0, 0))
+-for (x, y) in ((1, 1), (14, 1), (1, 14), (14, 14)):
+-    img.putpixel((x, y), hx("#7a5a2e"))
++            c = hx("#24140a")
++        elif d in (1, 2, 3):
++            c = pick(LEATHER, h2(x % 8, y % 8, 21))
++            if d == 1:
++                c = shade(c, 1.25) if min(x, y) < min(15 - x, 15 - y) else shade(c, 0.8)
++        elif d == 4:
++            c = hx("#4e3016")
++        elif d == 5:
++            c = hx("#e8d8a4")
++        img.putpixel((x, y), c if c else CLEAR)
++for x, y in ((0, 0), (15, 0), (0, 15), (15, 15)):
++    img.putpixel((x, y), CLEAR)
+ put("PAGE_EDGE", img)
+ 
+-# the binding at the spine: both pages sink into it, a red thread stitches it
+-RED, RED_D = hx("#ec5a56"), hx("#a8322f")
++# the binding: both pages sink into the crease, red stitches shaped like "("
+ img = new("BINDING")
+ for y in range(16):
+     for x in range(8):
+-        d = min(x, 7 - x)  # 0 at the outer edges, 3 at the crease
+-        c = [hx("#d2c5a2"), hx("#bcae88"), hx("#a39470"), hx("#8d7e5b")][d]
++        d = min(x, 7 - x)
++        c = [hx("#d6c79c"), hx("#bfae82"), hx("#a39468"), hx("#8a7a52")][d]
+         if h2(x, y, 31) > 0.9:
+-            c = shade(c, 0.94)
++            c = shade(c, 0.93)
+         img.putpixel((x, y), c)
+-# two stitches a period, each leaning like a "(": 6 rows long, a gap of 2
+ for y0 in (0, 8):
+     for i in range(6):
+-        y = y0 + i
+-        x = 3 if i in (0, 5) else 2 if i in (1, 4) else 2
+-        img.putpixel((x, y), RED)
+-        img.putpixel((x + 1, y), RED_D)
++        x = 3 if i in (0, 5) else 2
++        img.putpixel((x, y0 + i), hx("#ec5a56"))
++        img.putpixel((x + 1, y0 + i), RED_D)
+ put("BINDING", img)
+ 
+-# a page corner turned up, and the arrow that turns it back
+-CURL_ROWS = [
+-    "............",
+-    "..........x.",
+-    ".........xx.",
+-    "........xxx.",
+-    ".......xxxx.",
+-    "......xxxxx.",
+-    ".....xxxxxx.",
+-    "....xxxxxxx.",
+-    "...xxxxxxxx.",
+-    "..xxxxxxxxx.",
+-    ".xxxxxxxxxxx",
+-    "............",
+-]
++CURL_ROWS = ["............", "..........x.", ".........xx.", "........xxx.", ".......xxxx.", "......xxxxx.", ".....xxxxxx.",
++             "....xxxxxxx.", "...xxxxxxxx.", "..xxxxxxxxx.", ".xxxxxxxxxxx", "............"]
+ img = new("CURL")
+ for y, row in enumerate(CURL_ROWS):
+     for x, ch in enumerate(row):
+         if ch == "x":
+-            on_fold = (x + y) == 11 or (x + y) == 12
+-            img.putpixel((x, y), hx("#8f7a4a") if on_fold else hx("#f1e8cf") if (x + y) > 13 else hx("#dccfa8"))
++            fold = (x + y) in (11, 12)
++            img.putpixel((x, y), hx("#7a6638") if fold else hx("#f1e8cf") if (x + y) > 13 else hx("#d6c79c"))
+ put("CURL", img)
+ 
+-ARROW_ROWS = [
+-    "......x.........",
+-    ".....xxx........",
+-    "....xxxxxxxxxx..",
+-    "...xxxxxxxxxxxx.",
+-    "....xxx......xxx",
+-    ".....x........xx",
+-    "..............xx",
+-    "..............xx",
+-    ".............xxx",
+-    "...........xxxx.",
+-    "..xxxxxxxxxxx...",
+-    "................",
+-]
++ARROW_ROWS = ["......x.........", ".....xxx........", "....xxxxxxxxxx..", "...xxxxxxxxxxxx.", "....xxx......xxx", ".....x........xx",
++              "..............xx", "..............xx", ".............xxx", "...........xxxx.", "..xxxxxxxxxxx...", "................"]
+ img = new("ARROW")
+ for y, row in enumerate(ARROW_ROWS):
+     for x, ch in enumerate(row):
+@@ -381,59 +309,242 @@
+             img.putpixel((x, y), (255, 255, 255, 255))
+ put("ARROW", img)
+ 
+-# ---- parchment pieces on the pages ----
+ 
+-
+-def card(name, base, light, dark, outline, border=3):
++def card(name, tones, outline, light, dark):
+     img = new(name)
+     w, h = img.size
++    noise_fill(img, tones, 17, 8, (0.55, 0.25, 0.2, 0.0))
+     for y in range(h):
+         for x in range(w):
+-            c = base if h2(x % 8, y % 8, 17) > 0.12 else shade(base, 0.96)
+             d = min(x, y, w - 1 - x, h - 1 - y)
+             if d == 0:
+-                c = outline
++                img.putpixel((x, y), outline)
+             elif d == 1:
+-                c = light if min(x, y) < min(w - 1 - x, h - 1 - y) else dark
+-            img.putpixel((x, y), c)
+-    for (x, y) in ((0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)):
+-        img.putpixel((x, y), (0, 0, 0, 0))
++                img.putpixel((x, y), light if min(x, y) < min(w - 1 - x, h - 1 - y) else dark)
++    for x, y in ((0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)):
++        img.putpixel((x, y), CLEAR)
+     put(name, img)
+ 
+ 
+-card("ENTRY", hx("#d8c9a2"), hx("#efe3c1"), hx("#b9a67a"), hx("#8a6b3c"))
+-card("ENTRY_SEL", hx("#f2e3a8"), hx("#fff6cc"), hx("#d6b85a"), hx("#c08a1a"))
+-# the card of the picked recipe is sunk into the page: shadow on the top / left, lip on the bottom / right
+-card("CARD", hx("#c9b98f"), hx("#a5936a"), hx("#e9dcb8"), hx("#7b5e34"))
++card("ENTRY", [hx("#d8c9a2"), hx("#cfbf94"), hx("#e0d3ae"), hx("#c4b488")], hx("#6a4e26"), hx("#f2e8c8"), hx("#b09c6c"))
++card("ENTRY_SEL", [hx("#f2e3a8"), hx("#e8d894"), hx("#f8ecbc"), hx("#dccc82")], hx("#b07a14"), hx("#fff8d0"), hx("#cca642"))
++card("CARD", [hx("#c4b488"), hx("#baa97c"), hx("#cdbf94"), hx("#b09e72")], hx("#5e4422"), hx("#9c8a5c"), hx("#e6dab4"))
+ 
+ img = new("GEM")
+ for y in range(8):
+     for x in range(8):
+         dx, dy = x - 3.5, y - 3.5
+         if abs(dx) + abs(dy) <= 4:
+-            c = (255, 255, 255, 255)
+-            if abs(dx) + abs(dy) > 3.2:
+-                c = (150, 150, 150, 255)
+-            elif dx < 0 and dy < 0:
+-                c = (255, 255, 255, 255)
+-            else:
+-                c = (205, 205, 205, 255)
++            c = (150, 150, 150, 255) if abs(dx) + abs(dy) > 3.2 else (255, 255, 255, 255) if dx < 0 and dy < 0 else (205, 205, 205, 255)
+             img.putpixel((x, y), c)
+ put("GEM", img)
+ 
+-# a title's rule: an ink line with a dot every 8 pixels
+ img = new("RULE")
+ for x in range(16):
+     img.putpixel((x, 1), hx("#5e4425"))
+-    img.putpixel((x, 2), hx("#9b8456")) if x % 8 else img.putpixel((x, 2), hx("#5e4425"))
++    img.putpixel((x, 2), hx("#5e4425") if x % 8 == 0 else hx("#9b8456"))
+ put("RULE", img)
+ 
+-open("mc-rs/assets/satchel.rgba", "wb").write(sheet.tobytes())
+-print("wrote mc-rs/assets/satchel.rgba")
++
++def book_cover():
++    """COVER (9-slice, border 8): a plain brown book. The spine is the left border: darker leather with a crease and a column of red
++    stitches. A sliver of cream page edge shows on the right and the foot. No clasp, no strap."""
++    img = new("COVER")
++    brown = [hx("#7a4a26"), hx("#6e4222"), hx("#855330"), hx("#623a1c")]
++    spine = [hx("#4a2a14"), hx("#42250f"), hx("#523018"), hx("#3a200d")]
++    for y in range(32):
++        for x in range(32):
++            c = pick(spine if x < 8 else brown, h2(x % 16, y % 16, 7), (0.5, 0.2, 0.2, 0.1))
++            d = min(x, y, 31 - x, 31 - y)
++            if d == 0:
++                c = hx("#24140a")
++            elif d == 1:
++                c = hx("#a8703c") if min(x, y) <= min(31 - x, 31 - y) else hx("#3e2410")
++            elif (x == 29 and 2 <= y <= 29) or (y == 29 and 8 <= x <= 29):
++                c = hx("#e8d8a4") if h2(x, y, 9) > 0.2 else hx("#cdbd88")  # page edge
++            if x == 6 and 2 <= y <= 29:
++                c = hx("#1e0f06")  # crease
++            elif x == 7 and 2 <= y <= 29:
++                c = hx("#8a5a30")
++            if x in (3, 4) and 8 <= y < 24 and (y // 2) % 2 == 0:
++                c = RED if x == 3 else RED_D  # the stitches of the spine, periodic in y so the edge tiles
++            img.putpixel((x, y), c)
++    for x, y in ((0, 0), (31, 0), (0, 31), (31, 31)):
++        img.putpixel((x, y), CLEAR)
++    put("COVER", img)
++
++
++book_cover()
++
++# ======================= preview =======================
++
++
++def load_font():
++    src = open("mc-rs/src/render/font.rs").read()
++    rows = [[int(v) for v in m.split(",")] for m in re.findall(r"\[([0-9, ]+)\]", src.split("pub const WIDTH")[0])]
++    wid = [int(v) for v in re.findall(r"\d+", src.split("pub const WIDTH")[1].split("=")[1])]
++    assert len(rows) == 95 and len(wid) == 95
++    return rows, wid
++
++
++GLYPHS, WIDTH = load_font()
++
++
++def tw(s):
++    return sum(WIDTH[ord(c) - 32] for c in s)
++
++
++def text(dst, x, y, s, col):
++    for ch in s:
++        g = ord(ch) - 32
++        for r, bits in enumerate(GLYPHS[g]):
++            for b in range(8):
++                if bits >> b & 1:
++                    dst.putpixel((x + b, y + r), col)
++        x += WIDTH[g]
++
++
++def wrap(s, maxw):
++    lines, cur = [], ""
++    for word in s.split():
++        t = (cur + " " + word).strip()
++        if tw(t) <= maxw:
++            cur = t
++        else:
++            lines.append(cur)
++            cur = word
++    return lines + [cur]
++
++
++def spr(name):
++    x, y, w, h = SPRITES[name]
++    return sheet.crop((x, y, x + w, y + h))
++
++
++def nine(dst, name, x, y, w, h, b):
++    s = spr(name)
++    sw, sh = s.size
++
++    def tile(box, dx, dy, dw, dh):
++        t = s.crop(box)
++        for yy in range(0, dh, t.size[1]):
++            for xx in range(0, dw, t.size[0]):
++                dst.alpha_composite(t.crop((0, 0, min(t.size[0], dw - xx), min(t.size[1], dh - yy))), (dx + xx, dy + yy))
++    tile((0, 0, b, b), x, y, b, b)
++    tile((sw - b, 0, sw, b), x + w - b, y, b, b)
++    tile((0, sh - b, b, sh), x, y + h - b, b, b)
++    tile((sw - b, sh - b, sw, sh), x + w - b, y + h - b, b, b)
++    tile((b, 0, sw - b, b), x + b, y, w - 2 * b, b)
++    tile((b, sh - b, sw - b, sh), x + b, y + h - b, w - 2 * b, b)
++    tile((0, b, b, sh - b), x, y + b, b, h - 2 * b)
++    tile((sw - b, b, sw, sh - b), x + w - b, y + b, b, h - 2 * b)
++    tile((b, b, sw - b, sh - b), x + b, y + b, w - 2 * b, h - 2 * b)
++
++
++def tile_rect(dst, name, x, y, w, h):
++    t = spr(name)
++    for yy in range(0, h, t.size[1]):
++        for xx in range(0, w, t.size[0]):
++            dst.alpha_composite(t.crop((0, 0, min(t.size[0], w - xx), min(t.size[1], h - yy))), (x + xx, y + yy))
++
++
++def tint(img, col):
++    px = img.load()
++    for y in range(img.size[1]):
++        for x in range(img.size[0]):
++            r, g, b, a = px[x, y]
++            px[x, y] = (r * col[0] // 255, g * col[1] // 255, b * col[2] // 255, a)
++    return img
++
++
++def item(dst, x, y, col):
++    for yy in range(12):
++        for xx in range(12):
++            c = shade(col, 1.3 if (xx + yy) < 6 else 0.7 if (xx + yy) > 16 else 1.0)
++            if xx in (0, 11) or yy in (0, 11):
++                c = shade(col, 0.4)
++            dst.putpixel((x + 3 + xx, y + 3 + yy), c)
++
++
++ITEMS = [(0, 0, hx("#8a5a2e")), (1, 0, hx("#3a8a32")), (2, 0, hx("#e08a8a")), (3, 0, hx("#2c2c2c")), (4, 0, hx("#c8a060")), (6, 0, hx("#b87a30"))]
++
++
++def mock(open_book):
++    cv = Image.new("RGBA", (400, 188), CLEAR)
++    for y in range(188):
++        for x in range(400):
++            cv.putpixel((x, y), pick([hx("#4a3426"), hx("#3e2c20"), hx("#54402e"), hx("#33261b")], h2(x // 2, y // 2, 2)))
++    cv.alpha_composite(Image.new("RGBA", (400, 188), (0, 0, 0, 90)))
++    bx, by, bw, bh = 6, 20, 186, 130
++    nine(cv, "BAG", bx, by, bw, bh, 8)
++    nine(cv, "TAB", 66, 11, 66, 15, 4)
++    text(cv, 66 + (66 - tw("Inventory")) // 2, 14, "Inventory", hx("#1c2438"))
++    gx, gy = bx + 16, by + 34
++    for i in range(4):
++        cv.alpha_composite(spr("SLOT"), (gx + i * 17, by + 12))
++    text(cv, gx + 4 * 17 + 6, by + 16, "Armor", hx("#3a3a4a"))
++    tile_rect(cv, "POCKET", gx - 3, gy - 3, 9 * 17 + 7, 3 * 17 + 7)
++    for r in range(3):
++        for c in range(9):
++            cv.alpha_composite(spr("SLOT"), (gx + c * 17, gy + r * 17))
++    tile_rect(cv, "BELT", gx - 3, gy + 3 * 17 + 6, 9 * 17 + 7, 24)
++    for c in range(9):
++        cv.alpha_composite(spr("SLOT"), (gx + c * 17, gy + 3 * 17 + 9))
++    for c, r, col in ITEMS:
++        item(cv, gx + c * 17, gy + r * 17 if r else gy + 3 * 17 + 9, col)
++    cv.alpha_composite(tint(spr("RIM"), (90, 160, 255)), (gx + 2 * 17, gy + 3 * 17 + 9))  # the rim, only on a touch
++    nine(cv, "BTN", 6, 3, 30, 14, 3)
++    text(cv, 6 + (30 - tw("Sort")) // 2, 6, "Sort", hx("#f0f0f0"))
++    nine(cv, "BTN", 372, 3, 20, 14, 3)
++    text(cv, 372 + (20 - tw("X")) // 2, 6, "X", hx("#f0f0f0"))
++    if open_book:
++        L, T, R, B = 198, 20, 396, 182
++        tile_rect(cv, "PARCH", L + 4, T + 4, R - L - 8, B - T - 8)
++        nine(cv, "PAGE_EDGE", L, T, R - L, B - T, 6)
++        sp = 297
++        tile_rect(cv, "BINDING", sp, T + 6, 8, B - T - 12)
++        text(cv, L + 12, T + 12, "Recipes", INK)
++        cats = [("Tools & gear", "50"), ("Food", "6"), ("Blocks", "43"), ("Redstone & rails", "15"), ("Furnace", "10")]
++        for i, (n, k) in enumerate(cats):
++            ey = T + 26 + i * 25
++            nine(cv, "ENTRY_SEL" if i == 0 else "ENTRY", L + 10, ey, 84, 22, 3)
++            lab = n
++            while tw(lab) > 84 - 8 - tw(k) - 8:  # shrink-to-fit stand-in: cut with a dot
++                lab = lab[:-2] + "."
++            text(cv, L + 16, ey + 7, lab, INK)
++            text(cv, L + 10 + 84 - 6 - tw(k), ey + 7, k, hx("#5e4425"))
++        rx = sp + 8 + 6  # left edge of the right page's content
++        right = R - 6 - 4  # the page's content ends here (frame 6 + a margin 4)
++        text(cv, rx, T + 12, "Crafting", INK)
++        for r in range(2):
++            for c in range(2):
++                cv.alpha_composite(spr("SLOT"), (rx + c * 17, T + 28 + r * 17))
++        ax = rx + 2 * 17 + 2
++        cv.alpha_composite(tint(spr("ARROW"), (60, 40, 20)), (ax, T + 40))
++        res = right - 18
++        assert ax + 16 <= res and res + 18 <= right, (ax, res, right)
++        cv.alpha_composite(spr("SLOT"), (res, T + 36))
++        nine(cv, "CARD", rx, T + 70, right - rx, 70, 3)
++        for i, ln in enumerate(wrap("Pick a recipe on the left page: its items go into the grid.", right - rx - 8)):
++            text(cv, rx + 4, T + 76 + i * 10, ln, INK)
++        cv.alpha_composite(spr("CURL"), (R - 18, B - 18))
++    else:
++        sx, sy, sw, sh = 232, 36, 112, 112
++        nine(cv, "COVER", sx, sy, sw, sh, 8)
++        tcol = hx("#e8d8a4")
++        text(cv, sx + 12 + (sw - 12 - tw("Recipes")) // 2, sy + sh // 2 - 12, "Recipes", tcol)
++        text(cv, sx + 12 + (sw - 12 - tw("Tap to open")) // 2, sy + sh // 2 + 4, "Tap to open", shade(tcol, 0.75))
++    return cv
++
+ 
+ if "--preview" in sys.argv:
+     out = sys.argv[sys.argv.index("--preview") + 1]
+     bg = Image.new("RGBA", (W, H), (70, 90, 70, 255))
+     bg.alpha_composite(sheet)
+-    bg.resize((W * 4, H * 4), Image.NEAREST).save(out)
+-    print("wrote", out)
++    bg.resize((W * 4, H * 4), Image.NEAREST).save(out + "/satchel_sheet.png")
++    mock(True).resize((1200, 564), Image.NEAREST).save(out + "/mock_open.png")
++    mock(False).resize((1200, 564), Image.NEAREST).save(out + "/mock_closed.png")
++    print("wrote previews to", out)
++if "--write" in sys.argv:
++    open("mc-rs/assets/satchel.rgba", "wb").write(sheet.tobytes())
++    print("wrote mc-rs/assets/satchel.rgba")
