@@ -504,6 +504,30 @@ fn push_boat(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, b: &Boat, a: f32) {
     }
 }
 
+/// Model y of the ground under a mob: the root translation of `push_mob` (the legs end at 24, 0.125 px under it).
+const GROUND: f32 = 23.875;
+
+/// NOT b1.7.3 (smart animals graze, root and peck, `Mob::head`): how far the head box `head` (parts[0]) is dipped, as (pitch in radians, shift
+/// down in model pixels), so that its lowest front corner touches the ground at `m.head` = 1. The pitch is the base angle (cow, sheep 1.1, pig 0.6,
+/// hen 0.9) x `m.head`, with a slow chew (+-0.08 rad) on the cow, sheep and pig and quick dips on the hen, both by `m.munch`. `None` for a head that
+/// is up and for the kinds that do not eat from the ground. UNVERIFIED by eye: the angles and the bob.
+fn head_dip(m: &Mob, head: &Part) -> Option<(f32, f32)> {
+    let base = match m.kind {
+        Cow | Sheep => 1.1,
+        Pig => 0.6,
+        Chicken => 0.9,
+        _ => return None,
+    };
+    if m.head < 0.01 {
+        return None;
+    }
+    let s = m.munch.sin();
+    let a = m.head * if m.kind == Chicken { base * (0.35 + 0.65 * (0.5 + 0.5 * s)) } else { base + 0.08 * s };
+    let (min, size, rp, ..) = *head;
+    let low = (min[1] + size[1]) * a.cos() - min[2] * a.sin();
+    Some((a, (GROUND - rp[1] - low).max(0.0) * m.head))
+}
+
 /// Mobs drawn like `RenderLiving`: turned to face their yaw, scaled 1/16 (times `size`) and flipped upside down (model y
 /// points down), 24 px above the ground; parts turn about their rotation point, x then y then z, legs and arms swinging
 /// with `limb`. UNVERIFIED stand-ins: one flat wool colour per kind (`mobs::spec`), red (wool 14) while hurt, white while a
@@ -520,9 +544,16 @@ fn push_mob(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, m: &Mob) {
         k => crate::world::mobs::colour(k),
     };
     let tint = if m.hurt > 0 { Some(14) } else if m.fuse > 0 && m.fuse % 6 < 3 { Some(0) } else { None };
-    for (min, size, rp, rot, sw, col) in parts(m) {
+    let model = parts(m);
+    let dip = model.first().and_then(|h| head_dip(m, h));
+    for (i, (min, size, mut rp, rot, sw, col)) in model.into_iter().enumerate() {
         let tile = stack_tile(ItemStack { id: 35, count: 1, damage: tint.unwrap_or(if col == ME { own } else { col }) as u16 });
-        let rx = rot[0] + (m.limb * 0.6662 + sw[0]).cos() * sw[1] * m.limb_amt;
+        let mut rx = rot[0] + (m.limb * 0.6662 + sw[0]).cos() * sw[1] * m.limb_amt;
+        // The head (and a hen's beak, part 1) hangs from the same pivot: it turns down and the pivot moves down with it.
+        if let (Some((a, shift)), true) = (dip, i == 0 || (m.kind == Chicken && i == 1)) {
+            rx += a;
+            rp[1] += shift;
+        }
         let mat = root * Mat4::from_translation(Vec3::from(rp)) * Mat4::from_rotation_z(rot[2]) * Mat4::from_rotation_y(rot[1]) * Mat4::from_rotation_x(rx);
         let n0 = verts.len();
         push_box(verts, idxs, min, [min[0] + size[0], min[1] + size[1], min[2] + size[2]], tile, 1.0);
@@ -536,6 +567,25 @@ fn push_mob(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, m: &Mob) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// NOT b1.7.3: a head that is up is not dipped; with it down the nose rests on the ground (model y `GROUND`), never through it.
+    #[test]
+    fn a_grazing_head_dips_to_the_ground_not_through_it() {
+        let mut rng = crate::world::gen::noise::JavaRandom::new(1);
+        for kind in [Cow, Sheep, Pig, Chicken] {
+            let mut m = Mob::new(kind, 0.0, 0.0, 0.0, 0.0, &mut rng);
+            assert!(head_dip(&m, &parts(&m)[0]).is_none(), "{kind:?} dipped with its head up");
+            m.head = 1.0;
+            let ps = parts(&m);
+            let (a, shift) = head_dip(&m, &ps[0]).unwrap();
+            assert!(a > 0.3 && shift > 0.0, "{kind:?}: pitch {a}, shift {shift}");
+            let (min, size, rp, ..) = ps[0];
+            let low = rp[1] + shift + (min[1] + size[1]) * a.cos() - min[2] * a.sin();
+            assert!((low - GROUND).abs() < 0.01, "{kind:?}: the nose is at {low}, the ground at {GROUND}");
+        }
+        let wolf = Mob::new(Wolf, 0.0, 0.0, 0.0, 0.0, &mut rng);
+        assert!(head_dip(&wolf, &parts(&wolf)[0]).is_none());
+    }
 
     fn text() -> Text {
         ["Hello".into(), "world".into(), String::new(), "!".into()]

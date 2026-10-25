@@ -149,7 +149,7 @@ pub struct Settings {
     pub debug_screen: bool,
     /// Log a backtrace with every wgpu error, at most one a second (`gpu::context::set_error_trace`); a debug switch with no button.
     pub gpu_error_trace: bool,
-    /// Smart animals (`Mobs::smart`, not b1.7.3): a switch with no button, `animalAi:false` in options.txt turns it off.
+    /// Smart animals (`Mobs::smart`, not b1.7.3): path-walked wandering, herding, panic, and the grazing / rooting / pecking / resting pauses; a switch with no button, `animalAi:false` in options.txt turns all of it off.
     pub animal_ai: bool,
     /// The scene scale follows the GPU load (`gpu::context::Drs`); off (`dynamicRes:false`, the Video Settings button) it stays at `START_PCT`.
     pub dynamic_res: bool,

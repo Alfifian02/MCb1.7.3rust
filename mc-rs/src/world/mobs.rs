@@ -13,6 +13,12 @@
 //! the player rides it (it keeps its own AI, as in b1.7.3: no steering). Walk speed is the terminal speed
 //! of `moveFlying` (`moveSpeed` x 0.1 x 0.98 against 0.546 drag), not accumulated momentum. Explosions have no exposure
 //! test, and knock the player back not at all. Normal difficulty. Ghast (needs the Nether) and the pig-zombie spawn are not here.
+//! NOT b1.7.3 either (same switch, `Mobs::smart`): calm animals graze, root, peck and rest (`Mob::idle`). A cow or sheep on grass lowers its head and
+//! chews 3 to 8 s, a pig roots on grass or dirt 2 to 5 s, a hen pecks the ground in short 1 to 2 s runs, and a cow, sheep or pig now and then stands
+//! still for 8 to 20 s; each walk has its own gait (a stroll at 0.6 to 1.0 x the walk, a hen sometimes dashes at 1.5 x). Eating, rooting or resting
+//! ends when a person comes within 4 blocks or when the animal is hit. The head is drawn dipped (`Mob::head`, `Mob::munch`, `render/items.rs`).
+//! ponytail: the grass is not eaten (no block write from `Mobs`, and b1.7.3 sheep never regrow wool anyway), no lying down, no sounds, no baby animals.
+//! UNVERIFIED: every number above by eye, and that it compiles.
 //! UNVERIFIED: spawn rules and rates (vanilla spawns animals while generating chunks and every tick per chunk for monsters),
 //! the arrow gravity 0.03, the model boxes (the spider/wolf/squid ones from memory) and every colour (flat stand-ins).
 
@@ -126,6 +132,14 @@ pub struct Mob {
     scare: Vec3,
     /// The nearest mob of its kind within 24 blocks (`Mobs::herd`), what a stray animal drifts back to.
     mate: Option<Vec3>,
+    /// NOT b1.7.3 (smart animals): ticks left of grazing / rooting / pecking (head down, still) and of resting (still, head up).
+    graze: u16,
+    rest: u16,
+    /// Walk speed of the current wander walk, in units of `moveSpeed` (a stroll 0.6..1.0, a hen's dash 1.5).
+    gait: f32,
+    /// 0 = head up .. 1 = head down on the ground (eased every frame), and the chewing / pecking phase the renderer bobs it by.
+    pub head: f32,
+    pub munch: f32,
 }
 
 pub enum Ev {
@@ -209,7 +223,7 @@ impl Mob {
         Self { kind, body: Player { pos, vel: Vec3::ZERO, on_ground: false }, yaw, health: hp, limb: 0.0, limb_amt: 0.0, hurt: 0, size, color, sheared: false,
             fuse: 0, tame: false, sitting: false, saddled: false, ridden: false, half, age: 0, yaw_vel: 0.0, look: None, goal: None, fspeed: 0.0, jumping: false, wet: false, blocked: false, life: 0,
             last: 0, target: false, shot: false, lit: false, anger: 0, attack_time: 0, hop: 0, egg: rng.next_int_bound(6000) + 6000, fire: 0,
-            free: 0, swim: Vec3::ZERO, path: Vec::new(), path_i: 0, smart: false, wander: false, panic: 0, scare: Vec3::ZERO, mate: None }
+            free: 0, swim: Vec3::ZERO, path: Vec::new(), path_i: 0, smart: false, wander: false, panic: 0, scare: Vec3::ZERO, mate: None, graze: 0, rest: 0, gait: 1.0, head: 0.0, munch: 0.0 }
     }
 
     /// `EntityWolf.interact`, a bone that took: tamed, sitting, full health, calm.
@@ -254,17 +268,52 @@ impl Mob {
     /// one when it is time: 1 tick in 80 when calm, every fourth tick while it panics (at most two path searches each).
     fn roam(&mut self, rng: &mut JavaRandom, c: &Ctx) {
         self.panic = self.panic.saturating_sub(1);
+        // NOT b1.7.3: a grazing or resting animal stays where it is until its time is up or a person comes within 4 blocks.
+        if self.graze > 0 || self.rest > 0 {
+            if (c.player - self.body.pos).length_squared() < 16.0 {
+                (self.graze, self.rest) = (0, 0);
+            } else {
+                (self.graze, self.rest) = (self.graze.saturating_sub(1), self.rest.saturating_sub(1));
+                return;
+            }
+        }
         let w = self.half.x * 2.0;
         let size = ((w + 1.0).floor() as i32, (self.half.y * 2.0 + 1.0).floor() as i32, (w + 1.0).floor() as i32);
         if self.wander && self.path_i >= self.path.len() {
             (self.wander, self.goal) = (false, None);
             self.path.clear();
         }
-        if !self.wander && ((self.panic > 0 && self.panic % 4 == 0) || (self.panic == 0 && rng.next_int_bound(80) == 0)) {
+        if !self.wander && self.panic == 0 && rng.next_int_bound(70) == 0 {
+            self.idle(rng, c, false);
+        }
+        if self.graze == 0 && self.rest == 0 && !self.wander && ((self.panic > 0 && self.panic % 4 == 0) || (self.panic == 0 && rng.next_int_bound(80) == 0)) {
             self.pick_dest(rng, c, size);
         }
         if self.wander {
             self.follow(size, w, None);
+        }
+    }
+
+    /// NOT b1.7.3: what a calm smart animal does with a pause, where it stands (`arrived`: it has just ended a walk, so it is more likely to eat).
+    /// A cow or sheep on grass grazes (60..160 ticks), a pig on grass or dirt roots (40..100), a hen on any solid ground pecks (15..40); else
+    /// 1 pause in 8 of a cow, sheep or pig is a rest (160..400 ticks). ponytail: the grass stays (see the module doc).
+    fn idle(&mut self, rng: &mut JavaRandom, c: &Ctx, arrived: bool) {
+        if (c.player - self.body.pos).length_squared() < 16.0 {
+            return; // no settling down with a person within 4 blocks
+        }
+        let bite = if arrived { 3 } else { 1 };
+        let (x, y, z) = cell(self.body.pos - Vec3::Y * (self.half.y - 0.1));
+        let ground = (c.get)(x, y - 1, z);
+        let eats = match self.kind {
+            Cow | Sheep if ground == Some(2) => Some(60 + rng.next_int_bound(100)),
+            Pig if matches!(ground, Some(2 | 3)) => Some(40 + rng.next_int_bound(60)),
+            Chicken if solid(ground) => Some(15 + rng.next_int_bound(25)),
+            _ => None,
+        };
+        match eats {
+            Some(n) if rng.next_int_bound(4) < bite => self.graze = n as u16,
+            _ if matches!(self.kind, Cow | Sheep | Pig) && rng.next_int_bound(8) == 0 => self.rest = 160 + rng.next_int_bound(240) as u16,
+            _ => {}
         }
     }
 
@@ -302,6 +351,8 @@ impl Mob {
         for &(_, dest) in cands.iter().take(2) {
             if let Some(p) = path::find(c.get, start, dest, size, 16.0) {
                 (self.path, self.path_i, self.wander) = (p, 0, true);
+                // NOT b1.7.3: each walk has its own gait; a hen sometimes dashes.
+                self.gait = if self.kind == Chicken && rng.next_int_bound(4) == 0 { 1.5 } else { 0.6 + rng.next_float() * 0.4 };
                 return;
             }
         }
@@ -501,6 +552,7 @@ impl Mob {
         let speed = match k {
             PigZombie if self.target => 0.95,
             _ if self.panic > 0 => spec(k).3 * PANIC_SPEED,
+            _ if self.wander => spec(k).3 * self.gait, // only a smart animal wanders by path
             _ => spec(k).3,
         };
         if let (Some((gx, gz)), true) = (self.goal, self.goal.is_some() && (self.target || self.panic > 0 || rng.next_int_bound(100) != 0)) {
@@ -525,21 +577,28 @@ impl Mob {
             if self.wander {
                 (self.wander, self.path_i) = (false, 0); // a pause (or the path's end): the next walk is chosen afresh
                 self.path.clear();
+                if self.panic == 0 {
+                    self.idle(rng, c, true); // NOT b1.7.3: it may graze, root, peck or rest here
+                }
             }
             if self.old(rng, d2) {
                 return false;
             }
             self.fspeed = 0.0;
-            if rng.next_float() < 0.02 {
-                if d2 < 64.0 { self.look = Some(10 + rng.next_int_bound(20)) } else { self.yaw_vel = (rng.next_float() - 0.5) * 20.0 }
-            }
-            if let Some(t) = self.look {
-                let d = c.player - pos;
-                self.yaw += norm((d.z.atan2(d.x)).to_degrees() - 90.0 - self.yaw).clamp(-10.0, 10.0);
-                self.look = (t > 0 && d2 <= 64.0).then_some(t - 1);
+            if self.graze > 0 || self.rest > 0 {
+                (self.look, self.yaw_vel) = (None, 0.0); // NOT b1.7.3: an animal eating or resting does not turn
             } else {
-                if rng.next_float() < 0.05 { self.yaw_vel = (rng.next_float() - 0.5) * 20.0 }
-                self.yaw += self.yaw_vel;
+                if rng.next_float() < 0.02 {
+                    if d2 < 64.0 { self.look = Some(10 + rng.next_int_bound(20)) } else { self.yaw_vel = (rng.next_float() - 0.5) * 20.0 }
+                }
+                if let Some(t) = self.look {
+                    let d = c.player - pos;
+                    self.yaw += norm((d.z.atan2(d.x)).to_degrees() - 90.0 - self.yaw).clamp(-10.0, 10.0);
+                    self.look = (t > 0 && d2 <= 64.0).then_some(t - 1);
+                } else {
+                    if rng.next_float() < 0.05 { self.yaw_vel = (rng.next_float() - 0.5) * 20.0 }
+                    self.yaw += self.yaw_vel;
+                }
             }
             // Vanilla leaves `isJumping` as it was; a mob that last hopped would hop for ever, so it is cleared here.
             self.jumping = self.wet && rng.next_float() < 0.8;
@@ -611,6 +670,12 @@ impl Mob {
         let moved = ((self.body.pos.x - before.x).powi(2) + (self.body.pos.z - before.z).powi(2)).sqrt() / ticks;
         self.limb_amt += ((moved * 4.0).min(1.0) - self.limb_amt) * (1.0 - 0.6f32.powf(ticks));
         self.limb += self.limb_amt * ticks;
+        // NOT b1.7.3: the head eases down while it grazes, roots or pecks (0.5 s), and the chewing phase runs while it is down.
+        let down = if self.graze > 0 { 1.0 } else { 0.0 };
+        self.head += (down - self.head) * (1.0 - 0.8f32.powf(ticks));
+        if self.head > 0.5 {
+            self.munch += ticks * if self.kind == Chicken { 0.9 } else { 0.3 };
+        }
     }
 
     /// `EntityLiving.attackEntityFrom`: a hit inside the 10-tick window only pays the difference; the first one knocks back.
@@ -628,6 +693,7 @@ impl Mob {
         if self.smart && animal(self.kind) && self.health > 0 && !self.ridden {
             (self.panic, self.scare) = (PANIC_TICKS + rng.next_int_bound(40) as u16, from);
             (self.wander, self.goal) = (false, None);
+            (self.graze, self.rest) = (0, 0);
             self.path.clear();
         }
         self.hit(dmg, from);
@@ -1328,5 +1394,105 @@ mod tests {
             for _ in 0..3 { m.step(TICK / 3.0, &flat) }
         }
         assert!((m.body.pos - mate).length() < 12.0, "still {} blocks from the herd", (m.body.pos - mate).length());
+    }
+
+    /// NOT b1.7.3: a cow on grass grazes for 3 to 8 s standing still, its head eased down; a person within 4 blocks lifts the head, a blow ends it.
+    #[test]
+    fn a_cow_grazes_still_head_down_and_stops_for_a_visitor_or_a_blow() {
+        let l = |_, _, _| 15u8;
+        let far = ctx(Vec3::new(32.0, 11.0, 60.0), &l);
+        let mut rng = JavaRandom::new(9);
+        let mut cow = Mob::new(Cow, 32.5, 10.0, 32.5, 0.0, &mut rng);
+        cow.smart = true;
+        for _ in 0..64 {
+            if cow.graze > 0 { break }
+            cow.idle(&mut rng, &far, true);
+            cow.rest = 0;
+        }
+        assert!((60..160).contains(&cow.graze), "never started grazing: {}", cow.graze);
+        let (start, mut ev) = (cow.body.pos, Vec::new());
+        for _ in 0..30 {
+            cow.tick(&mut rng, &far, &mut ev);
+            for _ in 0..3 { cow.step(TICK / 3.0, &flat) }
+        }
+        assert!((cow.body.pos.x - start.x).abs() < 0.01 && (cow.body.pos.z - start.z).abs() < 0.01, "walked while grazing");
+        assert!(cow.head > 0.9, "head not down: {}", cow.head);
+        let near = ctx(Vec3::new(32.5, 11.0, 34.0), &l);
+        cow.tick(&mut rng, &near, &mut ev);
+        assert_eq!(cow.graze, 0, "it kept grazing with a person 1.5 blocks away");
+        for _ in 0..30 {
+            cow.tick(&mut rng, &near, &mut ev);
+            for _ in 0..3 { cow.step(TICK / 3.0, &flat) }
+        }
+        assert!(cow.head < 0.5, "head still down: {}", cow.head);
+        cow.graze = 100;
+        cow.damage(1, cow.body.pos + Vec3::X * 2.0, &mut rng);
+        assert_eq!((cow.graze, cow.rest), (0, 0), "a blow must end the meal");
+    }
+
+    /// NOT b1.7.3: a pig roots (40..100 ticks), a hen pecks (15..40), a cow or sheep sometimes rests (160..400) instead; a zombie and a wolf do none of it.
+    #[test]
+    fn each_kind_has_its_own_pause() {
+        let l = |_, _, _| 15u8;
+        let c = ctx(Vec3::new(32.0, 11.0, 60.0), &l);
+        let mut rng = JavaRandom::new(21);
+        let mut pause = |kind: Kind| {
+            let (mut g, mut r) = (0u16, 0u16);
+            for _ in 0..400 {
+                let mut m = Mob::new(kind, 32.5, 10.0, 32.5, 0.0, &mut rng);
+                m.idle(&mut rng, &c, true);
+                (g, r) = (g.max(m.graze), r.max(m.rest));
+            }
+            (g, r)
+        };
+        let pig = pause(Pig);
+        assert!((40..100).contains(&pig.0) && pig.1 >= 160, "pig {pig:?}");
+        let hen = pause(Chicken);
+        assert!((15..40).contains(&hen.0) && hen.1 == 0, "hen {hen:?}");
+        let cow = pause(Cow);
+        assert!((60..160).contains(&cow.0) && (160..400).contains(&cow.1), "cow {cow:?}");
+        assert_eq!(pause(Zombie), (0, 0));
+        assert_eq!(pause(Wolf), (0, 0));
+    }
+
+    /// NOT b1.7.3: a resting animal stands still and does not turn.
+    #[test]
+    fn a_resting_animal_stays_put_and_does_not_turn() {
+        let l = |_, _, _| 15u8;
+        let c = ctx(Vec3::new(32.0, 11.0, 60.0), &l);
+        let mut rng = JavaRandom::new(2);
+        let mut sheep = Mob::new(Sheep, 32.5, 10.0, 32.5, 0.0, &mut rng);
+        (sheep.smart, sheep.rest) = (true, 100);
+        let (start, mut ev) = (sheep.body.pos, Vec::new());
+        for _ in 0..99 {
+            sheep.tick(&mut rng, &c, &mut ev);
+            for _ in 0..3 { sheep.step(TICK / 3.0, &flat) }
+        }
+        assert_eq!(sheep.rest, 1);
+        assert_eq!(sheep.yaw, 0.0);
+        assert!((sheep.body.pos.x - start.x).abs() < 0.01 && (sheep.body.pos.z - start.z).abs() < 0.01);
+    }
+
+    /// NOT b1.7.3: each walk has its own gait (0.6 to 1.0 x the walk) and only a hen ever dashes (1.5 x).
+    #[test]
+    fn walks_have_their_own_gait_and_only_hens_dash() {
+        let l = |_, _, _| 15u8;
+        let c = ctx(Vec3::new(32.0, 11.0, 60.0), &l);
+        let mut rng = JavaRandom::new(4);
+        let mut gaits = |kind: Kind| {
+            let mut v = Vec::new();
+            for _ in 0..200 {
+                let mut m = Mob::new(kind, 32.5, 10.0, 32.5, 0.0, &mut rng);
+                m.smart = true;
+                m.pick_dest(&mut rng, &c, (1, 2, 1));
+                if m.wander { v.push(m.gait) }
+            }
+            v
+        };
+        let cow = gaits(Cow);
+        assert!(cow.len() > 100 && cow.iter().all(|g| (0.6..=1.0).contains(g)), "cow gaits {cow:?}");
+        assert!(cow.iter().cloned().fold(0.0, f32::max) - cow.iter().cloned().fold(2.0, f32::min) > 0.2, "every cow walk had the same gait");
+        let hen = gaits(Chicken);
+        assert!(hen.iter().any(|&g| g == 1.5) && hen.iter().any(|&g| g < 1.0), "hen gaits {hen:?}");
     }
 }
