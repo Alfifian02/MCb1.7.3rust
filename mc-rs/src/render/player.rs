@@ -36,6 +36,8 @@ pub struct View {
     pub root: Mat4,
     pub pose: Pose,
     pub held: Option<ItemStack>,
+    /// The armor he wears, as `armor_quads` takes it.
+    pub worn: Worn,
     /// Where he stands (his light).
     pub at: Vec3,
 }
@@ -130,16 +132,46 @@ fn matrix(l: &Limb) -> Mat4 {
     Mat4::from_translation(Vec3::from(l.rp)) * Mat4::from_rotation_z(l.rot[2]) * Mat4::from_rotation_y(l.rot[1]) * Mat4::from_rotation_x(l.rot[0])
 }
 
-/// A model quad: four corners and their skin pixels (`mob/char.png`, 64 x 32, y down).
+/// A model quad: four corners and their skin pixels (64 x 32, y down) of the skin in atlas slot `slot` (`atlas::skin_px`).
 pub struct Quad {
     pub p: [Vec3; 4],
     pub uv: [[f32; 2]; 4],
+    pub slot: u8,
 }
+
+/// The armor on the model, by armor slot (0 helmet, 1 chestplate, 2 leggings, 3 boots): the material (0 leather, chain, iron, diamond,
+/// gold) of the piece in it, if any.
+pub type Worn = [Option<u8>; 4];
 
 /// `ModelRenderer.addBox` + `TexturedQuad` (0.1 px inset, `flipFace` when mirrored) for every part, through `root`.
 pub fn quads(root: &Mat4, pose: &Pose) -> Vec<Quad> {
+    limb_quads(root, limbs(pose), 0, [true; 7])
+}
+
+/// `RenderPlayer.setArmorModel` for each piece worn: the same pose on a model inflated by 1 (helmet, chestplate, boots; `ModelBiped(1.0)`,
+/// `armor/<material>_1.png`) or 0.5 (leggings, `ModelBiped(0.5)`, `_2.png`), showing only the parts of its slot: the head and hat,
+/// the body and arms, the body and legs, the legs.
+pub fn armor_quads(root: &Mat4, pose: &Pose, worn: &Worn) -> Vec<Quad> {
+    let mut out = Vec::new();
+    for (slot, m) in worn.iter().enumerate() {
+        let Some(m) = *m else { continue };
+        let (grow, layer, show) = match slot {
+            0 => (1.0, 1, [true, true, false, false, false, false, false]),
+            1 => (1.0, 1, [false, false, true, true, true, false, false]),
+            2 => (0.5, 2, [false, false, true, false, false, true, true]),
+            _ => (1.0, 1, [false, false, false, false, false, true, true]),
+        };
+        let mut l = limbs(pose);
+        l.iter_mut().for_each(|l| l.grow += grow);
+        out.extend(limb_quads(root, l, atlas::armor_slot(m, layer), show));
+    }
+    out
+}
+
+/// The quads of the limbs with `show` set, all textured from `slot`.
+fn limb_quads(root: &Mat4, limbs: [Limb; 7], slot: u8, show: [bool; 7]) -> Vec<Quad> {
     let mut out = Vec::with_capacity(42);
-    for l in limbs(pose) {
+    for (_, l) in limbs.into_iter().enumerate().filter(|(i, _)| show[*i]) {
         let m = *root * matrix(&l);
         let ([dx, dy, dz], (ox, oy), g) = (l.size, l.tex, l.grow);
         let (mut x1, y1, z1) = (l.min[0] - g, l.min[1] - g, l.min[2] - g);
@@ -159,7 +191,7 @@ pub fn quads(root: &Mat4, pose: &Pose) -> Vec<Quad> {
         ];
         for (vi, [u0, v0, u1, v1]) in faces {
             let uv = [[u1 - 0.1, v0 + 0.1], [u0 + 0.1, v0 + 0.1], [u0 + 0.1, v1 - 0.1], [u1 - 0.1, v1 - 0.1]];
-            let mut q = Quad { p: std::array::from_fn(|k| m.transform_point3(Vec3::from(c[vi[k]]))), uv };
+            let mut q = Quad { p: std::array::from_fn(|k| m.transform_point3(Vec3::from(c[vi[k]]))), uv, slot };
             if l.mirror {
                 q.p.reverse();
                 q.uv.reverse();
@@ -178,8 +210,9 @@ pub fn root(feet: Vec3, body_yaw: f32) -> Mat4 {
 
 /// The player at the given pose into the entity mesh (both windings: the Java draws with culling off), then his item.
 /// Vertices are `[x, y, z, u, v, light, lm, tint]`; the caller lights them (`items::lit`).
-pub fn push(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, root: &Mat4, pose: &Pose, held: Option<ItemStack>) {
+pub fn push(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, root: &Mat4, pose: &Pose, held: Option<ItemStack>, worn: &Worn) {
     push_quads(verts, idxs, &quads(root, pose));
+    push_quads(verts, idxs, &armor_quads(root, pose, worn));
     if let Some(s) = held {
         let l = limbs(pose);
         let hand = *root * matrix(&l[R_ARM]) * Mat4::from_translation(Vec3::new(-1.0, 7.0, 1.0)); // `postRender` + (-1/16, 7/16, 1/16)
@@ -192,7 +225,7 @@ fn push_quads(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, qs: &[Quad]) {
     for q in qs {
         let base = verts.len() as u32 / VF as u32;
         for (p, uv) in q.p.iter().zip(q.uv) {
-            let (u, v) = atlas::char_px(uv[0], uv[1]);
+            let (u, v) = atlas::skin_px(q.slot, uv[0], uv[1]);
             verts.extend_from_slice(&[p.x, p.y, p.z, u, v, 1.0, lm(15, 0), WHITE]);
         }
         idxs.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3, base, base + 2, base + 1, base, base + 3, base + 2]);
@@ -323,9 +356,11 @@ pub fn push_hand(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, h: &Hand) {
 
 /// `GuiInventory.drawGuiContainerBackgroundLayer`: the player at `(x, y)` (his feet; the panel's (51, 75)) with `k` px a GUI unit,
 /// scale 30, front toward the viewer. `z` (larger = nearer) only orders the quads.
-pub fn inventory_quads(x: f32, y: f32, k: f32, pose: &Pose) -> Vec<Quad> {
+pub fn inventory_quads(x: f32, y: f32, k: f32, pose: &Pose, worn: &Worn) -> Vec<Quad> {
     let m = Mat4::from_translation(Vec3::new(x, y, 0.0)) * Mat4::from_scale(Vec3::new(30.0, 30.0, -30.0) * k * (15.0 / 16.0 / 16.0)) * Mat4::from_translation(Vec3::new(0.0, -23.875, 0.0));
-    quads(&m, pose)
+    let mut q = quads(&m, pose);
+    q.extend(armor_quads(&m, pose, worn));
+    q
 }
 
 // ---- animation state ----
@@ -504,6 +539,34 @@ mod tests {
         let (u, v) = atlas::char_px(12.0, 12.0);
         let px = ((v * atlas::ATLAS_H as f32) as usize * atlas::ATLAS_W + (u * atlas::ATLAS_W as f32) as usize) * 4;
         assert_eq!(atlas::atlas_rgba()[px + 3], 255, "skin pixel at the head's face");
+    }
+
+    /// `RenderPlayer.setArmorModel`: each slot shows its own parts of the inflated model, from its own armor skin, and a part with no
+    /// piece on it stays bare.
+    #[test]
+    fn armor_shows_its_slots_parts_inflated_from_the_armor_skin() {
+        let (root, pose) = (Mat4::IDENTITY, Pose::default());
+        let skin = quads(&root, &pose);
+        assert!(armor_quads(&root, &pose, &[None; 4]).is_empty());
+        let counts: Vec<usize> = (0..4).map(|s| armor_quads(&root, &pose, &std::array::from_fn(|i| (i == s).then_some(2))).len()).collect();
+        assert_eq!(counts, [12, 18, 18, 12], "head + hat; body + arms; body + legs; legs");
+        // Diamond (3) leggings use layer 2, iron (2) boots layer 1; every slot is the atlas slot of its own png.
+        let both = armor_quads(&root, &pose, &[None, None, Some(3), Some(2)]);
+        assert!(both[..18].iter().all(|q| q.slot == atlas::armor_slot(3, 2)) && both[18..].iter().all(|q| q.slot == atlas::armor_slot(2, 1)));
+        assert_eq!((atlas::armor_slot(0, 1), atlas::armor_slot(4, 2)), (1, 10));
+        // The chestplate (+1 px) wraps the body: its front face lies in front of the skin's body front (face 4 of part 2) by 1 px, the
+        // leggings (+0.5) by half that.
+        let front = |q: &Quad| q.p[0].z.min(q.p[2].z);
+        let (chest, legs) = (armor_quads(&root, &pose, &[None, Some(0), None, None]), armor_quads(&root, &pose, &[None, None, Some(0), None]));
+        assert!((front(&skin[2 * 6 + 4]) - front(&chest[0 * 6 + 4])).abs() - 1.0 < 1e-4);
+        assert!((front(&skin[2 * 6 + 4]) - front(&legs[4])).abs() - 0.5 < 1e-4);
+        // The armor skins are in the atlas: the helmet's top (8..24, 0..8 of the png), opaque for iron.
+        let (u, v) = atlas::skin_px(atlas::armor_slot(2, 1), 12.0, 4.0);
+        let px = ((v * atlas::ATLAS_H as f32) as usize * atlas::ATLAS_W + (u * atlas::ATLAS_W as f32) as usize) * 4;
+        assert_eq!(atlas::atlas_rgba()[px + 3], 255, "iron helmet pixel");
+        // A pig is another skin altogether, not the player's.
+        let (pu, pv) = atlas::skin_px(atlas::skin::PIG, 8.0, 8.0);
+        assert!(pu >= 192.0 / 256.0 && pv > atlas::char_px(0.0, 64.0).1, "slot 11: fourth column of the third band");
     }
 
     #[test]

@@ -22,10 +22,17 @@ open("mc-rs/assets/grasscolor.rgb", "wb").write(grass.convert("RGB").tobytes())
 open("mc-rs/assets/foliagecolor.rgb", "wb").write(foliage.convert("RGB").tobytes())
 open("mc-rs/assets/items.rgba", "wb").write(png("gui/items.png").tobytes())
 # art/kz.png (painting motives, 256x256), item/sign.png (64x32, the sign model) and mob/char.png (64x32, the player skin) under it, 256x320: `render::atlas::ART`
-art = Image.new("RGBA", (256, 320), (0, 0, 0, 0))
+# From row 288 on, 64 x 32 skins four to a row (`render::atlas::skin_px`): slot 0 mob/char.png, 1..=10 armor/<cloth, chain, iron, diamond, gold>_<1, 2>.png
+# (slot 1 + 2 * material + layer - 1), 11.. the mobs in `SKINS` order; 26 slots = 7 bands, 512 rows in all.
+SKINS = ["char"] + [f"armor/{m}_{i}" for m in ("cloth", "chain", "iron", "diamond", "gold") for i in (1, 2)] + [
+    f"mob/{n}" for n in ("pig", "cow", "chicken", "sheep", "sheep_fur", "wolf", "wolf_tame", "wolf_angry", "squid", "zombie", "pigzombie", "skeleton", "creeper", "spider", "slime")]
+SKINS[0] = "mob/char"
+art = Image.new("RGBA", (256, 288 + 32 * ((len(SKINS) + 3) // 4)), (0, 0, 0, 0))
 art.paste(png("art/kz.png"), (0, 0))
 art.paste(png("item/sign.png"), (0, 256))
-art.paste(png("mob/char.png"), (0, 288))
+for n, name in enumerate(SKINS):
+    assert png(name + ".png").size == (64, 32), name
+    art.paste(png(name + ".png"), ((n % 4) * 64, 288 + (n // 4) * 32))
 open("mc-rs/assets/art.rgba", "wb").write(art.tobytes())
 
 # item id -> items.png tile, from Item.java: `new ItemX(<id - 256>, ...).setIconCoord(col, row)` or `.setIconIndex(n)`

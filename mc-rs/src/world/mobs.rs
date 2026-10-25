@@ -52,7 +52,7 @@ const PANIC_SPEED: f32 = 1.5;
 pub enum Kind { Pig, Cow, Sheep, Chicken, Wolf, Squid, Zombie, PigZombie, Giant, Skeleton, Creeper, Spider, Slime }
 use Kind::*;
 
-/// (width, height, health, moveSpeed, attackStrength, flat colour = wool metadata).
+/// (width, height, health, moveSpeed, attackStrength, a flat colour as wool metadata: unused since the mobs have their skins).
 fn spec(k: Kind) -> (f32, f32, i32, f32, i32, u8) {
     match k {
         Pig => (0.9, 0.9, 10, 0.7, 0, 6),
@@ -69,11 +69,6 @@ fn spec(k: Kind) -> (f32, f32, i32, f32, i32, u8) {
         Spider => (1.4, 0.9, 20, 0.8, 2, 15),
         Slime => (0.6, 0.6, 1, 0.7, 0, 5),
     }
-}
-
-/// The flat stand-in colour of a kind (wool metadata), for the renderer.
-pub fn colour(k: Kind) -> u8 {
-    spec(k).5
 }
 
 pub struct Mob {

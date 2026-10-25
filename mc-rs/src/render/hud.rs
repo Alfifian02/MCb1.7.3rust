@@ -48,11 +48,11 @@ pub const CONTAINERS: &[u8] = include_bytes!("../../assets/containers.rgba");
 pub const DPAD_SHEET: &[u8] = include_bytes!("../../assets/dpad.rgba");
 /// The title screen's sheet (256 x 272, `tools/gen_menu.py`): `mclogo.png`, then `background.png`: the last rows of the HUD texture.
 pub const MENU_SHEET: &[u8] = include_bytes!("../../assets/menu.rgba");
-/// The player skin (`mob/char.png`, 64 x 32): 32 rows of the HUD texture, cut from the atlas's `ART` tail (`PLAYER_Y`).
-pub(crate) const SHEET_H: f32 = 2672.0;
+/// The skins (`mob/char.png` and the armor, 64 x 32 each, four to a row, `atlas::skin_px`): 224 rows of the HUD texture, cut from the atlas's `ART` tail (`PLAYER_Y`).
+pub(crate) const SHEET_H: f32 = 2864.0;
 const PLAYER_Y: f32 = 2576.0;
 /// Where the font atlas starts in the HUD texture (the 64 rows after the player skin, see `font_sheet`).
-const FONT_Y: f32 = 2608.0;
+const FONT_Y: f32 = 2800.0;
 /// The font atlas: 95 glyph cells of 8 x 8 texels on a 10 texel pitch (a transparent texel on every side, so the sharp bilinear in
 /// `fs_main` never reads the neighbouring glyph), 16 columns by 6 rows, in a 256 x 64 block. The last rows of the HUD texture.
 const FONT_PITCH: usize = 10;
@@ -60,7 +60,7 @@ const FONT_PITCH: usize = 10;
 const TERRAIN_Y: f32 = 768.0;
 
 /// Sprites as `(x, y, w, h)` in pixels of the whole HUD texture: items 0..256, widgets.png 256..512, icons.png 512..768, terrain.png
-/// 768..1024, then the container panels (inventory 1024, crafting table 1280, furnace 1536, chest 1792), then the d-pad sheet (2048), the title sheet (2304), the player skin (2576), the font atlas (2608).
+/// 768..1024, then the container panels (inventory 1024, crafting table 1280, furnace 1536, chest 1792), then the d-pad sheet (2048), the title sheet (2304), the skins (2576), the font atlas (2800).
 pub mod sprites {
     pub type Sprite = (f32, f32, f32, f32);
     pub const HOTBAR: Sprite = (0.0, 256.0, 182.0, 22.0);
@@ -360,7 +360,7 @@ impl HudPipeline {
         for q in quads {
             let n = (q.p[1] - q.p[0]).cross(q.p[2] - q.p[0]).normalize_or_zero();
             let s = 0.7 + 0.3 * n.z.abs();
-            let v = |k: usize| HudVertex { pos: [q.p[k].x, q.p[k].y], color: [s, s, s, 1.0], uv: [q.uv[k][0] / 256.0, (PLAYER_Y + q.uv[k][1]) / SHEET_H] };
+            let v = |k: usize| HudVertex { pos: [q.p[k].x, q.p[k].y], color: [s, s, s, 1.0], uv: [(q.uv[k][0] + (q.slot % 4) as f32 * 64.0) / 256.0, (PLAYER_Y + (q.slot / 4) as f32 * 32.0 + q.uv[k][1]) / SHEET_H] };
             out.extend([v(0), v(1), v(2), v(0), v(2), v(3)]);
         }
     }

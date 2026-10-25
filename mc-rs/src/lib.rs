@@ -2101,6 +2101,14 @@ impl App {
     }
 
     /// On a pig, in a boat or in a cart.
+    /// The armor the player wears for `render::player` (`RenderPlayer.setArmorModel`): `armorInventory[3 - slot]`, the slots after `MAIN`.
+    fn worn(&self) -> render::player::Worn {
+        std::array::from_fn(|slot| {
+            let s = self.inv.slots[world::items::MAIN + 3 - slot]?;
+            world::craft::armor(s.id).filter(|a| a.0 == slot).map(|a| a.1 as u8)
+        })
+    }
+
     fn riding(&self) -> bool {
         self.mobs.list.iter().any(|m| m.ridden) || self.boats.ridden().is_some() || self.carts.ridden().is_some()
     }
@@ -2188,7 +2196,7 @@ impl App {
             let held = self.inv.slots[self.touch.hotbar_slot];
             let (pose, yaw) = self.body.pose(tick_partial, self.camera.pitch.to_degrees(), self.touch.sneak && self.sleep.is_none(), riding, held.is_some());
             let feet = self.player.pos - glam::Vec3::new(0.0, physics::HALF.y, 0.0);
-            render::player::View { root: render::player::root(feet, yaw), pose, held, at: self.player.pos }
+            render::player::View { root: render::player::root(feet, yaw), pose, held, worn: self.worn(), at: self.player.pos }
         });
         // Options: the render distance (Video Settings) and the far terrain switch (Options).
         let rd = self.opts.chunks();
@@ -2529,6 +2537,7 @@ impl App {
         // The debug screen replaces the FPS counter and the LoD debug title; its panels are not drawn under the pause menu.
         let info_on = self.opts.debug_screen;
         let dbg = if info_on && !self.touch.paused { Some(self.debug_rows()) } else { None };
+        let worn = self.worn();
         let v = &mut self.hud_verts;
         v.clear();
         let layout = &self.touch.layout;
@@ -2608,7 +2617,7 @@ impl App {
             // `GuiInventory`: the player at (51, 75) of the panel, straight ahead, an item in hand lowers the arm.
             if s.gw == 2 {
                 let pose = render::player::Pose { age: self.world_ticks as f32, holding: self.inv.slots[self.touch.hotbar_slot].is_some(), ..Default::default() };
-                HudPipeline::push_player(v, render::player::inventory_quads(ox + 51.0 * k, oy + 75.0 * k, k, &pose));
+                HudPipeline::push_player(v, render::player::inventory_quads(ox + 51.0 * k, oy + 75.0 * k, k, &pose, &worn));
             }
             // Icons here are drawn as big in px as the hotbar's (`16 * hw / 20` box, 0.875 of it: 14 hotbar units), not as 16 panel units.
             let icon_fill = 14.0 * layout.hotbar[0].2 / 20.0 / (16.0 * k);

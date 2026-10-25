@@ -1,0 +1,1550 @@
+diff --git a/README.md b/README.md
+index 8c391a5..8cfb909 100644
+--- a/README.md
++++ b/README.md
+@@ -66,7 +66,7 @@ original. Anything that cannot be derived from the b1.7.3 sources is marked
+ | Voxel LoD (Voxy style) | written without a toolchain: not compiled, not run (10 tests in `world::lod`, rewritten 2026-10-17) | `world/lod.rs`: far terrain out to 768 blocks as real 3D block columns (runs of equal blocks) of 64 x 64 tiles, meshed as voxels at 1 / 2 / 4 / 8 / 16 blocks after a Voxy-style 2x2x2 mip (`Mipper`), faces only where a solid voxel meets a see-through one; same atlas, tints, face shades and fog as the chunks. **Real chunks first** (Voxy's ingest): `lod::columns`, `ChunkManager::take_ingest`, `Lod::ingest`. The cut under the ring only happens where a real chunk mesh exists (`ChunkManager::drawn`), so no hole to the sky. Trees are real trunk + crown voxels up to 420 blocks and a leaf carpet over dense forest beyond (2026-10-18), the terrain fog starts at 88% of the view, pre-generation runs from the start; terrain rounds to the step instead of bloating. See ROADMAP changelog. |
+ | River merge + length (2026-10-24) | written without a full toolchain: the 16 `hydro::tests` (2 new) pass in a Linux scratch crate; the rest not compiled, not run | `world/gen/hydro.rs`: a stream joining a bigger river runs level with it (flat over the channel overlap, then rises to its own surface), and a source shorter than `MIN_LEN` 160 blocks before a confluence where it is not the biggest branch (or the sea) is dropped. See the world changelog. |
+ | River steps (organic slope) | written without a toolchain: not compiled, not run (+3 tests: `hydro::tests::a_lower_river_does_not_overwrite_a_higher_one`, `ticks::tests::woken_edge_water_spreads_into_levels`, `chunks::tests::edge_water_is_a_surface_source_with_air_beside_it`) | A river from a neighbouring plate is no longer cut by a lower river's bank (`Region::plan_at`), and the still water at a step or a cut bank is woken like the mod's `scheduleTick` (`ChunkManager::edge_water`, `Ticks::wake_water`) so the fluid sim writes the slope as real levels. See ROADMAP changelog. |
+-| M14 player model     | written without a toolchain: not compiled, not run (+3 tests in `player.rs`, +1 in `touch_ui.rs`) | `render/player.rs`: b1.7.3 `ModelBiped` + `mob/char.png` with walk / sneak / riding / arm-swing animation, in the third-person view (new view button) and as the inventory preview. No armor, ears, cloak or hurt flash. See ROADMAP changelog. |
++| M14 player model     | written without a toolchain: not compiled, not run (+3 tests in `player.rs`, +1 in `touch_ui.rs`) | `render/player.rs`: b1.7.3 `ModelBiped` + `mob/char.png` with walk / sneak / riding / arm-swing animation, in the third-person view (new view button) and as the inventory preview. No armor, ears, cloak or hurt flash. See ROADMAP changelog. Armor on the model (`armor_quads`: `RenderPlayer.setArmorModel`, the worn pieces drawn again on a `ModelBiped` inflated by 1, or 0.5 for the leggings, from `armor/<material>_1|2.png`, in the third-person view and in the inventory preview) and the 26 skins (player, 10 armor, 15 mob textures) packed four to a row under `CHAR_Y` in the atlas and the HUD sheet (`atlas::skin_px`, `tools/gen_terrain.py` `SKINS`); Mobs from the real `mob/*.png` skins (`render/items.rs`: `ModelQuadruped`, `ModelCow` horns + udder, `ModelSheep2` + the `ModelSheep1` fleece pass tinted by `fleeceColorTable`, `ModelChicken` with chin, `ModelWolf` with ears, snout, mane, tail and the sitting pose, `ModelSquid` tentacle angles, `ModelBiped` / skeleton / creeper / spider / slime core and face, wolf skin by tame / angry); compiled and `render::player` + `render::items` tests run in a Linux scratch crate (a stand-in `android-activity`), not run on a device. |
+ | Debug screen (Info) | type-checked for aarch64-linux-android (`cargo check --lib --tests`), not run (+2 tests in `render/debug.rs`, 2 extended in `options.rs`) | `render/debug.rs`: two translucent panels in the GUI scale for screenshots (left: position, chunk, facing, biome, light, time, aimed block; right: FPS, frame time, screen and scene size with the scene scale, Dynamic Res, MSAA, Post, renderer, graphics and smooth lighting, Performance, render distance, chunks, LoD). Pause menu button `Info: on/off` (`debugScreen` in `options.txt`); while on it replaces the FPS counter and the LoD debug title. See the rendering changelog. |
+ | Visual polish (Look) | type-checked on a Linux host (`cargo check --lib --tests`, a stand-in `android-activity`), tests of the touched modules pass there, the WGSL validates with naga and every assembled GLSL with glslang; not run on a device (+8 tests in `render/look.rs`, +1 each in `options.rs` and `atmos.rs`, the sky fan test extended) | `render/look.rs` + the final pass and chunk shaders of BOTH renderers: one `Vibrance` dial (Video Settings, default 30%, 0 = off) scales a grade in the final pass (vibrance, not saturation; a gentle S-curve; warm highlights / cool shadows). `Effects...` (Video Settings) has five switches: Warm Light (golden low sun, bluer shade, faces sink a little deeper), Water Look (depth gradient + sun glint), Glow (soft additive halos on lava, torches, glowstone and the sun only), Motion (off / low / on: leaf sway, motes near flowers and water, light rays at a low sun) and Haze (aerial perspective). Capped: 16 halos, 6 / 14 motes, 40 sprites a frame. `look_*` in `options.txt`. See the rendering changelog. |
+ | Audio (M9)           | written without a toolchain: not compiled, not run (+3 tests in `audio/`) | `audio/`: `SoundManager` / `SoundPool`. All 194 effects (80 `SoundPool` keys: `step.*`, `mob.*`, `random.*`, `note.*`, `ambient.*`, `liquid.*`, `fire.*`, `portal.*`, `tile.piston.*`, `damage.*`), 12 music tracks and records 13 / cat are embedded from the b1.7.3 asset index (`tools/gen_sounds.py` -> `assets/sound/`, `audio/table.rs`). Software mixer (pitch by resampling, linear distance gain, pan), lewton decoder, AAudio output via `ndk`; music on a stream thread, one random track 10-20 min apart. Wired: Music / Sound options, footsteps, block break sound (`Block.stepSound`, table read from `Block.java`), note blocks, jukebox records. Not wired yet: every other `playSoundEffect` call of the Java (mobs, hurt, doors, buttons, fire, water, explosions, rain, thunder, cave ambience, pistons, portal). The 12 `streaming/*.mus` files are not b1.7.3 and are left out. |
+@@ -78,7 +78,7 @@ original. Anything that cannot be derived from the b1.7.3 sources is marked
+ | Grazing + idle behaviours (2026-10-25) | written without a toolchain: not compiled, not run; **NOT b1.7.3** (+4 tests in `world/mobs.rs`, +1 in `render/items.rs`; run `cargo test --lib mobs items` first) | Part of the smart animals switch (`animalAi`, on by default; `animalAi:false` gives the b1.7.3 AI back byte for byte). `Mob::idle`: a calm pig, cow, sheep or hen pauses to do something instead of only standing: a cow or sheep on grass **grazes** (3 to 8 s), a pig **roots** on grass or dirt (2 to 5 s), a hen **pecks** (1 to 2 s), and a cow, sheep or pig now and then **rests** (8 to 20 s). Eating and resting stay put, do not turn, and end when a person comes within 4 blocks or the animal is hit. Each wander walk has its own gait (a stroll at 0.6 to 1.0 x the walk, a hen sometimes dashes at 1.5 x). The head is drawn dipped to the ground (`Mob::head`, `Mob::munch`, `render/items.rs::head_dip`) with a chew or a quick peck. The grass is not eaten and nothing lies down. See the gameplay changelog. |
+ | Immersive pack (The Forest style, 2026-10-25) | written without a toolchain: not compiled, not run, not seen on a device (+5 tests in `world/pack.rs`, `menu.rs` flow test extended, carry check in `render/player.rs`); **NOT b1.7.3** | `world/pack.rs` + `lib.rs` + `render/items.rs` + `menu.rs`: with the world's **Immersive Pack** switch on (Create World screen, saved as the 4th line of `<world>/info`; worlds made before it keep the panel), the inventory button no longer opens the inventory: the player takes the pack in both hands (it rises from below, the held item is hidden) and the cloth shows on the flat ground under the crosshair, lime where it fits and red where it does not (needs a full block under 9 samples of a 2.0 x 1.6 footprint, nothing but air or plants on it); a tap, like placing a block, spreads it there (on a red one only a message shows), the button again puts the pack away. The cloth unrolls in the world (0.9 s, a roll that shrinks as it travels), then the screen opens as the cloth: items lie in zones by category (tools & gear, food, materials, other), each at its own size, shrunk together when a zone is crowded; the crafting mat (2 x 2), worn armor and the quick-select row (hotbar) have fixed places. Same `SlotId`s and `Screen::click` as the panel, so crafting, armor, spread-drag, place-one and shift-click work unchanged. Closing, walking 6.5 blocks off or losing the ground rolls it up. A workbench, furnace and chest keep their own panels. Switch off = the old panel. See the gameplay changelog. |
+ | Organic mob movement (2026-10-25) | written without a toolchain: not compiled, not run; closer to b1.7.3 (+3 tests in `world/mobs.rs`; run `cargo test --lib mobs items` first) | Taken from `EntityLiving` of the decompiled b1.7.3 and applied to **every** mob, whatever `animalAi` says. **Momentum** (`Mob::step`): the horizontal speed no longer jumps to the walk speed, it builds up and dies away like `moveEntityWithHeading` (0.546 a tick on the ground, 0.91 in the air, so a hop keeps its run); same top speed; water and lava as before. **Body trails head** (`body_yaw` = `renderYawOffset`): the body follows the way the mob moves (0.3 of the gap a tick, not while knocked back) and stays within 75 degrees of the head, which now turns on its own pivot (`render/items.rs`). **Head tip** (`head_pitch`): a mob that looks at the player or hunts them tips its head up or down to their eye (40 degrees at most, `faceEntity`). Timing is per frame, not per tick. |
+-| M14                  | pending | Menus (part 1: title, world list, create world; see above), options, chat, real mob models, player armor: see [`roadmap/gameplay.md`](roadmap/gameplay.md). M10 multiplayer and M13 optimization are out of scope on purpose. |
++| M14                  | pending | Menus (part 1: title, world list, create world; see above), options, player armor and real mob models (both done, see the player model row above and `roadmap/gameplay.md`); only the chat (overlay + bed messages, later) is left: see [`roadmap/gameplay.md`](roadmap/gameplay.md). M10 multiplayer and M13 optimization are out of scope on purpose. |
+ 
+ Latest commit on `main`: see `git log -1`. Latest released APK: see the
+ `MinecraftB173Rust-apk` artifact on the GitHub Actions run.
+diff --git a/mc-rs/assets/art.rgba b/mc-rs/assets/art.rgba
+index bb71db0a2bad7d77fa655d09da109d81789cf3df..ad08fce4e48d85de9b9dc63fe101294eb1ae743c 100644
+GIT binary patch
+delta 98895
+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
+SF;2=EgoD5Yrw(Po`2Q~#{2tc;
+
+delta 338
+zcmZo@P-tinX=q_=VQOLC!lKZ){DA=r^Kyk27Dgzm1J3G!vnIe<Q{b!_aMm0a#_d2;
+z9xyFi02N!d1jbkaW2}KOHb5EMwy-3C^(|o9wu2=D%$&irY!3@F$S?uM?E(itB#`}q
+zX}iD?B=!j;_8BPq0n@e%EDm7h2bi{9K`?J1n0FA&2MFd9ICI$xm>b`~7$0DaFEGXr
+J7~>C=0RUvZc=G@N
+
+diff --git a/mc-rs/src/lib.rs b/mc-rs/src/lib.rs
+index ef17a6c..a99bb6c 100644
+--- a/mc-rs/src/lib.rs
++++ b/mc-rs/src/lib.rs
+@@ -2101,6 +2101,14 @@ impl App {
+     }
+ 
+     /// On a pig, in a boat or in a cart.
++    /// The armor the player wears for `render::player` (`RenderPlayer.setArmorModel`): `armorInventory[3 - slot]`, the slots after `MAIN`.
++    fn worn(&self) -> render::player::Worn {
++        std::array::from_fn(|slot| {
++            let s = self.inv.slots[world::items::MAIN + 3 - slot]?;
++            world::craft::armor(s.id).filter(|a| a.0 == slot).map(|a| a.1 as u8)
++        })
++    }
++
+     fn riding(&self) -> bool {
+         self.mobs.list.iter().any(|m| m.ridden) || self.boats.ridden().is_some() || self.carts.ridden().is_some()
+     }
+@@ -2188,7 +2196,7 @@ impl App {
+             let held = self.inv.slots[self.touch.hotbar_slot];
+             let (pose, yaw) = self.body.pose(tick_partial, self.camera.pitch.to_degrees(), self.touch.sneak && self.sleep.is_none(), riding, held.is_some());
+             let feet = self.player.pos - glam::Vec3::new(0.0, physics::HALF.y, 0.0);
+-            render::player::View { root: render::player::root(feet, yaw), pose, held, at: self.player.pos }
++            render::player::View { root: render::player::root(feet, yaw), pose, held, worn: self.worn(), at: self.player.pos }
+         });
+         // Options: the render distance (Video Settings) and the far terrain switch (Options).
+         let rd = self.opts.chunks();
+@@ -2529,6 +2537,7 @@ impl App {
+         // The debug screen replaces the FPS counter and the LoD debug title; its panels are not drawn under the pause menu.
+         let info_on = self.opts.debug_screen;
+         let dbg = if info_on && !self.touch.paused { Some(self.debug_rows()) } else { None };
++        let worn = self.worn();
+         let v = &mut self.hud_verts;
+         v.clear();
+         let layout = &self.touch.layout;
+@@ -2608,7 +2617,7 @@ impl App {
+             // `GuiInventory`: the player at (51, 75) of the panel, straight ahead, an item in hand lowers the arm.
+             if s.gw == 2 {
+                 let pose = render::player::Pose { age: self.world_ticks as f32, holding: self.inv.slots[self.touch.hotbar_slot].is_some(), ..Default::default() };
+-                HudPipeline::push_player(v, render::player::inventory_quads(ox + 51.0 * k, oy + 75.0 * k, k, &pose));
++                HudPipeline::push_player(v, render::player::inventory_quads(ox + 51.0 * k, oy + 75.0 * k, k, &pose, &worn));
+             }
+             // Icons here are drawn as big in px as the hotbar's (`16 * hw / 20` box, 0.875 of it: 14 hotbar units), not as 16 panel units.
+             let icon_fill = 14.0 * layout.hotbar[0].2 / 20.0 / (16.0 * k);
+diff --git a/mc-rs/src/render/atlas.rs b/mc-rs/src/render/atlas.rs
+index b17d065..51e0096 100644
+--- a/mc-rs/src/render/atlas.rs
++++ b/mc-rs/src/render/atlas.rs
+@@ -71,7 +71,9 @@ pub const ART_Y: usize = ITEMS_Y + 256;
+ pub const SIGN_Y: usize = ART_Y + 256;
+ /// `mob/char.png` (64 x 32, the player skin) at `CHAR_Y`.
+ pub const CHAR_Y: usize = SIGN_Y + 32;
+-pub const ATLAS_H: usize = ART_Y + 320;
++/// From `CHAR_Y` on, 64 x 32 skins four to a row (`skin_px`, 26 slots = 7 bands, 224 rows): slot 0 `mob/char.png`, then the armor and the mobs.
++pub const SKIN_SLOTS: usize = 26;
++pub const ATLAS_H: usize = ART_Y + 256 + 32 + 32 * SKIN_SLOTS.div_ceil(4);
+ /// Mip levels of the atlas (a 16 px tile has 16, 8, 4 px: three levels never mix two tiles at the middle of a tile).
+ pub const MIPS: u32 = 3;
+ /// `gui/items.png` as RGBA (256 x 256, 16 x 16 px sprites): `Item.iconIndex` picks the sprite (`item_icon`).
+@@ -204,7 +206,36 @@ pub fn sign_px(x: f32, y: f32) -> (f32, f32) {
+ 
+ /// Atlas UV of pixel (`x`, `y`) of `mob/char.png` (y down like the png).
+ pub fn char_px(x: f32, y: f32) -> (f32, f32) {
+-    (x / ATLAS_W as f32, (CHAR_Y as f32 + y) / ATLAS_H as f32)
++    skin_px(0, x, y)
++}
++
++/// Atlas UV of pixel (`x`, `y`) of the 64 x 32 skin in `slot` (y down like the png; `tools/gen_terrain.py` `SKINS` is the order).
++pub fn skin_px(slot: u8, x: f32, y: f32) -> (f32, f32) {
++    (((slot % 4) as f32 * 64.0 + x) / ATLAS_W as f32, (CHAR_Y as f32 + (slot / 4) as f32 * 32.0 + y) / ATLAS_H as f32)
++}
++
++/// Skin slot of `armor/<cloth, chain, iron, diamond, gold>_<layer>.png` (`RenderPlayer.armorFilenamePrefix`; layer 2 is the leggings).
++pub const fn armor_slot(material: u8, layer: u8) -> u8 {
++    1 + 2 * material + layer - 1
++}
++
++/// Skin slots of the mob textures (`mob/<name>.png`).
++pub mod skin {
++    pub const PIG: u8 = 11;
++    pub const COW: u8 = 12;
++    pub const CHICKEN: u8 = 13;
++    pub const SHEEP: u8 = 14;
++    pub const SHEEP_FUR: u8 = 15;
++    pub const WOLF: u8 = 16;
++    pub const WOLF_TAME: u8 = 17;
++    pub const WOLF_ANGRY: u8 = 18;
++    pub const SQUID: u8 = 19;
++    pub const ZOMBIE: u8 = 20;
++    pub const PIGZOMBIE: u8 = 21;
++    pub const SKELETON: u8 = 22;
++    pub const CREEPER: u8 = 23;
++    pub const SPIDER: u8 = 24;
++    pub const SLIME: u8 = 25;
+ }
+ 
+ /// `Item.iconIndex` of an item id (256 and up), `None` for blocks and items the Java table does not have.
+@@ -383,7 +414,8 @@ mod tests {
+         // Every tile `tile_of` hands out has its own colour, and the texture covers all of them.
+         assert_eq!(atlas_rgba().len(), ATLAS_W * ATLAS_H * 4);
+         assert_eq!(TERRAIN.len(), 256 * 256 * 4);
+-        assert_eq!(ART.len(), 256 * 320 * 4, "kz.png over sign.png over char.png");
++        assert_eq!(ART.len(), 256 * (ATLAS_H - ART_Y) * 4, "kz.png over sign.png over the skins");
++        assert_eq!(ATLAS_H % 16, 0, "the shaders count tile rows");
+         assert!(art_uv(255, 1.0, 0.0).1 * (ATLAS_H as f32) < (ART_Y + 256) as f32, "the last piece stays above the sign rows");
+         assert_ne!(tile_color(260), tile_color(261));
+         assert_ne!(tile_color(256), tile_color(17));
+diff --git a/mc-rs/src/render/hud.rs b/mc-rs/src/render/hud.rs
+index efbbbb9..1cc9aac 100644
+--- a/mc-rs/src/render/hud.rs
++++ b/mc-rs/src/render/hud.rs
+@@ -48,11 +48,11 @@ pub const CONTAINERS: &[u8] = include_bytes!("../../assets/containers.rgba");
+ pub const DPAD_SHEET: &[u8] = include_bytes!("../../assets/dpad.rgba");
+ /// The title screen's sheet (256 x 272, `tools/gen_menu.py`): `mclogo.png`, then `background.png`: the last rows of the HUD texture.
+ pub const MENU_SHEET: &[u8] = include_bytes!("../../assets/menu.rgba");
+-/// The player skin (`mob/char.png`, 64 x 32): 32 rows of the HUD texture, cut from the atlas's `ART` tail (`PLAYER_Y`).
+-pub(crate) const SHEET_H: f32 = 2672.0;
++/// The skins (`mob/char.png` and the armor, 64 x 32 each, four to a row, `atlas::skin_px`): 224 rows of the HUD texture, cut from the atlas's `ART` tail (`PLAYER_Y`).
++pub(crate) const SHEET_H: f32 = 2864.0;
+ const PLAYER_Y: f32 = 2576.0;
+ /// Where the font atlas starts in the HUD texture (the 64 rows after the player skin, see `font_sheet`).
+-const FONT_Y: f32 = 2608.0;
++const FONT_Y: f32 = 2800.0;
+ /// The font atlas: 95 glyph cells of 8 x 8 texels on a 10 texel pitch (a transparent texel on every side, so the sharp bilinear in
+ /// `fs_main` never reads the neighbouring glyph), 16 columns by 6 rows, in a 256 x 64 block. The last rows of the HUD texture.
+ const FONT_PITCH: usize = 10;
+@@ -60,7 +60,7 @@ const FONT_PITCH: usize = 10;
+ const TERRAIN_Y: f32 = 768.0;
+ 
+ /// Sprites as `(x, y, w, h)` in pixels of the whole HUD texture: items 0..256, widgets.png 256..512, icons.png 512..768, terrain.png
+-/// 768..1024, then the container panels (inventory 1024, crafting table 1280, furnace 1536, chest 1792), then the d-pad sheet (2048), the title sheet (2304), the player skin (2576), the font atlas (2608).
++/// 768..1024, then the container panels (inventory 1024, crafting table 1280, furnace 1536, chest 1792), then the d-pad sheet (2048), the title sheet (2304), the skins (2576), the font atlas (2800).
+ pub mod sprites {
+     pub type Sprite = (f32, f32, f32, f32);
+     pub const HOTBAR: Sprite = (0.0, 256.0, 182.0, 22.0);
+@@ -360,7 +360,7 @@ impl HudPipeline {
+         for q in quads {
+             let n = (q.p[1] - q.p[0]).cross(q.p[2] - q.p[0]).normalize_or_zero();
+             let s = 0.7 + 0.3 * n.z.abs();
+-            let v = |k: usize| HudVertex { pos: [q.p[k].x, q.p[k].y], color: [s, s, s, 1.0], uv: [q.uv[k][0] / 256.0, (PLAYER_Y + q.uv[k][1]) / SHEET_H] };
++            let v = |k: usize| HudVertex { pos: [q.p[k].x, q.p[k].y], color: [s, s, s, 1.0], uv: [(q.uv[k][0] + (q.slot % 4) as f32 * 64.0) / 256.0, (PLAYER_Y + (q.slot / 4) as f32 * 32.0 + q.uv[k][1]) / SHEET_H] };
+             out.extend([v(0), v(1), v(2), v(0), v(2), v(3)]);
+         }
+     }
+diff --git a/mc-rs/src/render/items.rs b/mc-rs/src/render/items.rs
+index 8a7f452..2558f37 100644
+--- a/mc-rs/src/render/items.rs
++++ b/mc-rs/src/render/items.rs
+@@ -16,7 +16,7 @@ use std::sync::Mutex;
+ use std::time::{Duration, Instant};
+ 
+ use crate::world::items::{stack_tile, Drops, ItemStack, MAX_ITEMS};
+-use crate::world::mobs::{Kind::*, Mob, Mobs, MAX_ARROWS, MAX_MOBS};
++use crate::world::mobs::{Kind, Kind::*, Mob, Mobs, MAX_ARROWS, MAX_MOBS};
+ use crate::world::ticks::{Falling, MAX_FALLING};
+ 
+ /// 24 vertices x 7 floats (`mesh::VF`) per cube, 36 indices per cube.
+@@ -117,7 +117,7 @@ fn geometry(drops: &Drops, mobs: &Mobs, falling: &[Falling], fx: &Effects, lv: &
+     // The local player (`RenderPlayer`), only in the third-person view.
+     if let Some(p) = player {
+         let n0 = verts.len();
+-        crate::render::player::push(&mut verts, &mut idxs, &p.root, &p.pose, p.held);
++        crate::render::player::push(&mut verts, &mut idxs, &p.root, &p.pose, p.held, &p.worn);
+         lit(&mut verts, n0, lv, p.at);
+     }
+     // The first-person hand (`ItemRenderer`), in the first-person view only.
+@@ -378,87 +378,257 @@ fn push_model_box(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, m: &Mat4, min: [f32
+     }
+ }
+ 
+-/// One model box: (min, size, rotation point, rotation x/y/z, swing phase + amplitude, wool colour or `ME`), in model pixels.
+-type Part = ([f32; 3], [f32; 3], [f32; 3], [f32; 3], [f32; 2], u8);
+-const ME: u8 = 255;
++/// One model box: (min, size, rotation point, rotation x/y/z, swing phase + amplitude, texture), in model pixels.
++type Part = ([f32; 3], [f32; 3], [f32; 3], [f32; 3], [f32; 2], Tx);
++/// `ModelRenderer.setTextureOffset`, `addBox`'s inflation and `mirror` of one box.
++#[derive(Clone, Copy)]
++struct Tx {
++    o: (f32, f32),
++    grow: f32,
++    mirror: bool,
++}
+ use std::f32::consts::{FRAC_PI_2 as Q, FRAC_PI_4 as E, PI};
+ 
+-fn pt(min: [f32; 3], size: [f32; 3], rp: [f32; 3], rot: [f32; 3], sw: [f32; 2], col: u8) -> Part {
+-    (min, size, rp, rot, sw, col)
++fn pt(min: [f32; 3], size: [f32; 3], rp: [f32; 3], rot: [f32; 3], sw: [f32; 2], o: (f32, f32)) -> Part {
++    (min, size, rp, rot, sw, Tx { o, grow: 0.0, mirror: false })
++}
++
++/// `addBox`'s inflation `g` on a box.
++fn grown(mut p: Part, g: f32) -> Part {
++    p.5.grow = g;
++    p
++}
++
++/// A mirrored box (`ModelRenderer.mirror`, the left limbs of `ModelBiped`).
++fn mirrored(mut p: Part) -> Part {
++    p.5.mirror = true;
++    p
+ }
+ 
+-/// `ModelQuadruped`: head, the body lying down, four legs (`cos(limb x 0.6662 + phase) x 1.4 x amount`); one leg length `l`.
+-fn quad(head: ([f32; 3], [f32; 3], [f32; 3]), body: ([f32; 3], [f32; 3], [f32; 3]), l: f32, x: f32, back: f32, front: f32, col: [u8; 3]) -> Vec<Part> {
+-    let leg = |rx: f32, z: f32, ph: f32| pt([-2.0, 0.0, -2.0], [4.0, l, 4.0], [rx, 24.0 - l, z], [0.0; 3], [ph, 1.4], col[2]);
++/// `ModelQuadruped`: head, the body lying down, four legs (`cos(limb x 0.6662 + phase) x 1.4 x amount`); one leg length `l`. `tex` is the
++/// texture offset of the head and of the body; the legs are at (0, 16).
++fn quad(head: ([f32; 3], [f32; 3], [f32; 3]), body: ([f32; 3], [f32; 3], [f32; 3]), l: f32, x: f32, back: f32, front: f32, tex: [(f32, f32); 2]) -> Vec<Part> {
++    let leg = |rx: f32, z: f32, ph: f32| pt([-2.0, 0.0, -2.0], [4.0, l, 4.0], [rx, 24.0 - l, z], [0.0; 3], [ph, 1.4], (0.0, 16.0));
+     vec![
+-        pt(head.0, head.1, head.2, [0.0; 3], [0.0; 2], col[0]),
+-        pt(body.0, body.1, body.2, [Q, 0.0, 0.0], [0.0; 2], col[1]),
++        pt(head.0, head.1, head.2, [0.0; 3], [0.0; 2], tex[0]),
++        pt(body.0, body.1, body.2, [Q, 0.0, 0.0], [0.0; 2], tex[1]),
+         leg(-x, back, 0.0), leg(x, back, PI), leg(-x, front, PI), leg(x, front, 0.0),
+     ]
+ }
+ 
+-/// `ModelBiped`-shaped (zombie, skeleton, giant): arms `w` wide, raised when `raised` (`ModelZombie`).
++/// `ModelBiped`-shaped (zombie, skeleton, giant): arms `w` wide, raised when `raised` (`ModelZombie`). Head (0, 0), body (16, 16),
++/// arms (40, 16), legs (0, 16); the left arm and leg are mirrored.
+ fn biped(w: f32, raised: bool) -> Vec<Part> {
+     let (o, a) = (if w == 4.0 { 0.0 } else { 1.0 }, if raised { -Q } else { 0.0 });
+     let amp = if raised { 0.0 } else { 1.0 };
+     vec![
+-        pt([-4.0, -8.0, -4.0], [8.0, 8.0, 8.0], [0.0; 3], [0.0; 3], [0.0; 2], ME),
+-        pt([-4.0, 0.0, -2.0], [8.0, 12.0, 4.0], [0.0; 3], [0.0; 3], [0.0; 2], ME),
+-        pt([-3.0 + 2.0 * o, -2.0, -2.0 + o], [w, 12.0, w], [-5.0, 2.0, 0.0], [a, 0.0, 0.0], [PI, amp], ME),
+-        pt([-1.0, -2.0, -2.0 + o], [w, 12.0, w], [5.0, 2.0, 0.0], [a, 0.0, 0.0], [0.0, amp], ME),
+-        pt([-2.0 + o, 0.0, -2.0 + o], [w, 12.0, w], [-2.0, 12.0, 0.0], [0.0; 3], [0.0, 1.4], ME),
+-        pt([-2.0 + o, 0.0, -2.0 + o], [w, 12.0, w], [2.0, 12.0, 0.0], [0.0; 3], [PI, 1.4], ME),
++        pt([-4.0, -8.0, -4.0], [8.0, 8.0, 8.0], [0.0; 3], [0.0; 3], [0.0; 2], (0.0, 0.0)),
++        pt([-4.0, 0.0, -2.0], [8.0, 12.0, 4.0], [0.0; 3], [0.0; 3], [0.0; 2], (16.0, 16.0)),
++        pt([-3.0 + 2.0 * o, -2.0, -2.0 + o], [w, 12.0, w], [-5.0, 2.0, 0.0], [a, 0.0, 0.0], [PI, amp], (40.0, 16.0)),
++        mirrored(pt([-1.0, -2.0, -2.0 + o], [w, 12.0, w], [5.0, 2.0, 0.0], [a, 0.0, 0.0], [0.0, amp], (40.0, 16.0))),
++        pt([-2.0 + o, 0.0, -2.0 + o], [w, 12.0, w], [-2.0, 12.0, 0.0], [0.0; 3], [0.0, 1.4], (0.0, 16.0)),
++        mirrored(pt([-2.0 + o, 0.0, -2.0 + o], [w, 12.0, w], [2.0, 12.0, 0.0], [0.0; 3], [PI, 1.4], (0.0, 16.0))),
+     ]
+ }
+ 
++/// How many of the first parts hang from the head's pivot and follow its dip (`head_dip`): the cow's horns, the hen's bill and chin.
++fn head_n(kind: Kind) -> usize {
++    match kind {
++        Cow | Chicken => 3,
++        Pig | Sheep => 1,
++        _ => 0,
++    }
++}
++
++/// `ModelWolf`, standing or sitting (`setLivingAnimations`); the tail angle is `EntityWolf.setTailRotation`.
++fn wolf(m: &Mob) -> Vec<Part> {
++    let tail = if m.anger > 0 { PI * 0.49 } else if m.tame { (0.55 - (20 - m.health).clamp(0, 20) as f32 * 0.02) * PI } else { PI * 0.2 };
++    let head = |min: [f32; 3], size: [f32; 3], rp: [f32; 3], o: (f32, f32)| pt(min, size, rp, [0.0; 3], [0.0; 2], o);
++    let leg = |x: f32, y: f32, z: f32, rx: f32, ph: f32, amp: f32| pt([-1.0, 0.0, -1.0], [2.0, 8.0, 2.0], [x, y, z], [rx, 0.0, 0.0], [ph, amp], (0.0, 18.0));
++    let h = [-1.0, 13.5, -7.0];
++    let mut v = vec![
++        head([-3.0, -3.0, -2.0], [6.0, 6.0, 4.0], h, (0.0, 0.0)),
++        head([-3.0, -5.0, 0.0], [2.0, 2.0, 1.0], h, (16.0, 14.0)),
++        head([1.0, -5.0, 0.0], [2.0, 2.0, 1.0], h, (16.0, 14.0)),
++        head([-2.0, 0.0, -5.0], [3.0, 3.0, 4.0], [-0.5, 13.5, -7.0], (0.0, 10.0)),
++    ];
++    if m.sitting {
++        v.extend([
++            pt([-4.0, -2.0, -3.0], [6.0, 9.0, 6.0], [0.0, 18.0, 0.0], [PI * 0.25, 0.0, 0.0], [0.0; 2], (18.0, 14.0)),
++            pt([-4.0, -3.0, -3.0], [8.0, 6.0, 7.0], [-1.0, 16.0, -3.0], [PI * 0.4, 0.0, 0.0], [0.0; 2], (21.0, 0.0)),
++            leg(-2.5, 22.0, 2.0, PI * 1.5, 0.0, 0.0),
++            leg(0.5, 22.0, 2.0, PI * 1.5, 0.0, 0.0),
++            leg(-2.49, 17.0, -4.0, PI * 1.85, 0.0, 0.0),
++            leg(0.51, 17.0, -4.0, PI * 1.85, 0.0, 0.0),
++            pt([-1.0, 0.0, -1.0], [2.0, 8.0, 2.0], [-1.0, 21.0, 6.0], [tail, 0.0, 0.0], [0.0; 2], (9.0, 18.0)),
++        ]);
++    } else {
++        v.extend([
++            pt([-4.0, -2.0, -3.0], [6.0, 9.0, 6.0], [0.0, 14.0, 2.0], [Q, 0.0, 0.0], [0.0; 2], (18.0, 14.0)),
++            pt([-4.0, -3.0, -3.0], [8.0, 6.0, 7.0], [-1.0, 14.0, -3.0], [Q, 0.0, 0.0], [0.0; 2], (21.0, 0.0)),
++            leg(-2.5, 16.0, 7.0, 0.0, 0.0, 1.4),
++            leg(0.5, 16.0, 7.0, 0.0, PI, 1.4),
++            leg(-2.5, 16.0, -4.0, 0.0, PI, 1.4),
++            leg(0.5, 16.0, -4.0, 0.0, 0.0, 1.4),
++            pt([-1.0, 0.0, -1.0], [2.0, 8.0, 2.0], [-1.0, 12.0, 8.0], [tail, 0.0, 0.0], [0.0; 2], (9.0, 18.0)),
++        ]);
++    }
++    v
++}
++
+ fn parts(m: &Mob) -> Vec<Part> {
+     match m.kind {
+-        Pig => quad(([-4.0, -4.0, -8.0], [8.0, 8.0, 8.0], [0.0, 12.0, -6.0]), ([-5.0, -10.0, -7.0], [10.0, 16.0, 8.0], [0.0, 11.0, 2.0]), 6.0, 3.0, 7.0, -5.0, [ME; 3]),
+-        Cow => quad(([-4.0, -4.0, -6.0], [8.0, 8.0, 6.0], [0.0, 4.0, -8.0]), ([-6.0, -10.0, -7.0], [12.0, 18.0, 10.0], [0.0, 5.0, 2.0]), 12.0, 4.0, 7.0, -6.0, [ME; 3]),
+-        // Sheep: the body is fleece, head and legs the grey skin.
+-        Sheep => quad(([-3.0, -4.0, -6.0], [6.0, 6.0, 8.0], [0.0, 6.0, -8.0]), ([-4.0, -10.0, -7.0], [8.0, 16.0, 6.0], [0.0, 5.0, 2.0]), 12.0, 3.0, 7.0, -5.0, [8, 255, 8]),
+-        Wolf => quad(([-3.0, -3.0, -4.0], [6.0, 6.0, 4.0], [0.0, 13.5, -7.0]), ([-3.0, -3.0, -3.0], [6.0, 9.0, 6.0], [0.0, 14.0, 2.0]), 8.0, 2.0, 7.0, -4.0, [ME; 3]),
++        Pig => quad(([-4.0, -4.0, -8.0], [8.0, 8.0, 8.0], [0.0, 12.0, -6.0]), ([-5.0, -10.0, -7.0], [10.0, 16.0, 8.0], [0.0, 11.0, 2.0]), 6.0, 3.0, 7.0, -5.0, [(0.0, 0.0), (28.0, 8.0)]),
++        // `ModelCow`: the horns (22, 0) follow the head, the udder (52, 0) hangs under the back of the body.
++        Cow => {
++            let mut v = quad(([-4.0, -4.0, -6.0], [8.0, 8.0, 6.0], [0.0, 4.0, -8.0]), ([-6.0, -10.0, -7.0], [12.0, 18.0, 10.0], [0.0, 5.0, 2.0]), 12.0, 4.0, 7.0, -6.0, [(0.0, 0.0), (18.0, 4.0)]);
++            v.insert(1, pt([-4.0, -5.0, -4.0], [1.0, 3.0, 1.0], [0.0, 3.0, -7.0], [0.0; 3], [0.0; 2], (22.0, 0.0)));
++            v.insert(2, pt([3.0, -5.0, -4.0], [1.0, 3.0, 1.0], [0.0, 3.0, -7.0], [0.0; 3], [0.0; 2], (22.0, 0.0)));
++            v.push(pt([-2.0, -3.0, 0.0], [4.0, 6.0, 2.0], [0.0, 14.0, 6.0], [Q, 0.0, 0.0], [0.0; 2], (52.0, 0.0)));
++            v
++        }
++        // `ModelSheep2`: the skin (head, body, legs) under the fleece of `fur`.
++        Sheep => quad(([-3.0, -4.0, -6.0], [6.0, 6.0, 8.0], [0.0, 6.0, -8.0]), ([-4.0, -10.0, -7.0], [8.0, 16.0, 6.0], [0.0, 5.0, 2.0]), 12.0, 3.0, 7.0, -5.0, [(0.0, 0.0), (28.0, 8.0)]),
++        Wolf => wolf(m),
++        // `ModelChicken`: head, bill and chin hang from one pivot.
+         Chicken => vec![
+-            pt([-2.0, -6.0, -2.0], [4.0, 6.0, 3.0], [0.0, 15.0, -4.0], [0.0; 3], [0.0; 2], ME),
+-            pt([-2.0, -4.0, -4.0], [4.0, 2.0, 2.0], [0.0, 15.0, -4.0], [0.0; 3], [0.0; 2], 4),
+-            pt([-3.0, -4.0, -3.0], [6.0, 8.0, 6.0], [0.0, 16.0, 0.0], [Q, 0.0, 0.0], [0.0; 2], ME),
+-            pt([-1.0, 0.0, -3.0], [3.0, 5.0, 3.0], [-2.0, 19.0, 1.0], [0.0; 3], [0.0, 1.4], 4),
+-            pt([-1.0, 0.0, -3.0], [3.0, 5.0, 3.0], [1.0, 19.0, 1.0], [0.0; 3], [PI, 1.4], 4),
+-            pt([0.0, 0.0, -3.0], [1.0, 4.0, 6.0], [-4.0, 13.0, 0.0], [0.0; 3], [0.0; 2], ME),
+-            pt([0.0, 0.0, -3.0], [1.0, 4.0, 6.0], [3.0, 13.0, 0.0], [0.0; 3], [0.0; 2], ME),
++            pt([-2.0, -6.0, -2.0], [4.0, 6.0, 3.0], [0.0, 15.0, -4.0], [0.0; 3], [0.0; 2], (0.0, 0.0)),
++            pt([-2.0, -4.0, -4.0], [4.0, 2.0, 2.0], [0.0, 15.0, -4.0], [0.0; 3], [0.0; 2], (14.0, 0.0)),
++            pt([-1.0, -2.0, -3.0], [2.0, 2.0, 2.0], [0.0, 15.0, -4.0], [0.0; 3], [0.0; 2], (14.0, 4.0)),
++            pt([-3.0, -4.0, -3.0], [6.0, 8.0, 6.0], [0.0, 16.0, 0.0], [Q, 0.0, 0.0], [0.0; 2], (0.0, 9.0)),
++            pt([-1.0, 0.0, -3.0], [3.0, 5.0, 3.0], [-2.0, 19.0, 1.0], [0.0; 3], [0.0, 1.4], (26.0, 0.0)),
++            pt([-1.0, 0.0, -3.0], [3.0, 5.0, 3.0], [1.0, 19.0, 1.0], [0.0; 3], [PI, 1.4], (26.0, 0.0)),
++            pt([0.0, 0.0, -3.0], [1.0, 4.0, 6.0], [-4.0, 13.0, 0.0], [0.0; 3], [0.0; 2], (24.0, 13.0)),
++            pt([-1.0, 0.0, -3.0], [1.0, 4.0, 6.0], [4.0, 13.0, 0.0], [0.0; 3], [0.0; 2], (24.0, 13.0)),
+         ],
+         Squid => {
+-            let mut v = vec![pt([-6.0, -8.0, -6.0], [12.0, 16.0, 12.0], [0.0, 8.0, 0.0], [0.0; 3], [0.0; 2], ME)];
++            let mut v = vec![pt([-6.0, -8.0, -6.0], [12.0, 16.0, 12.0], [0.0, 8.0, 0.0], [0.0; 3], [0.0; 2], (0.0, 0.0))];
+             v.extend((0..8).map(|i| {
+                 let a = i as f32 * E;
+-                pt([-1.0, 0.0, -1.0], [2.0, 18.0, 2.0], [a.cos() * 5.0, 15.0, a.sin() * 5.0], [0.0; 3], [0.0; 2], ME)
++                pt([-1.0, 0.0, -1.0], [2.0, 18.0, 2.0], [a.cos() * 5.0, 15.0, a.sin() * 5.0], [0.0, -a + Q, 0.0], [0.0; 2], (48.0, 0.0))
+             }));
+             v
+         }
+         Zombie | PigZombie | Giant => biped(4.0, true),
+         Skeleton => biped(2.0, false),
++        // `ModelCreeper` (b1.7.3's `var2` is 4: the legs end 2 px above the model's ground line).
+         Creeper => {
+-            let leg = |x: f32, z: f32, ph: f32| pt([-2.0, 0.0, -2.0], [4.0, 6.0, 4.0], [x, 18.0, z], [0.0; 3], [ph, 1.4], ME);
++            let leg = |x: f32, z: f32, ph: f32| pt([-2.0, 0.0, -2.0], [4.0, 6.0, 4.0], [x, 16.0, z], [0.0; 3], [ph, 1.4], (0.0, 16.0));
+             vec![
+-                pt([-4.0, -8.0, -4.0], [8.0, 8.0, 8.0], [0.0, 4.0, 0.0], [0.0; 3], [0.0; 2], ME),
+-                pt([-4.0, 0.0, -2.0], [8.0, 12.0, 4.0], [0.0, 4.0, 0.0], [0.0; 3], [0.0; 2], ME),
++                pt([-4.0, -8.0, -4.0], [8.0, 8.0, 8.0], [0.0, 4.0, 0.0], [0.0; 3], [0.0; 2], (0.0, 0.0)),
++                pt([-4.0, 0.0, -2.0], [8.0, 12.0, 4.0], [0.0, 4.0, 0.0], [0.0; 3], [0.0; 2], (16.0, 16.0)),
+                 leg(-2.0, 4.0, 0.0), leg(2.0, 4.0, PI), leg(-2.0, -4.0, PI), leg(2.0, -4.0, 0.0),
+             ]
+         }
+         Spider => {
+             let mut v = vec![
+-                pt([-4.0, -4.0, -8.0], [8.0, 8.0, 8.0], [0.0, 15.0, -3.0], [0.0; 3], [0.0; 2], ME),
+-                pt([-3.0, -3.0, -3.0], [6.0, 6.0, 6.0], [0.0, 15.0, 0.0], [0.0; 3], [0.0; 2], ME),
+-                pt([-5.0, -4.0, -6.0], [10.0, 8.0, 12.0], [0.0, 15.0, 9.0], [0.0; 3], [0.0; 2], ME),
++                pt([-4.0, -4.0, -8.0], [8.0, 8.0, 8.0], [0.0, 15.0, -3.0], [0.0; 3], [0.0; 2], (32.0, 4.0)),
++                pt([-3.0, -3.0, -3.0], [6.0, 6.0, 6.0], [0.0, 15.0, 0.0], [0.0; 3], [0.0; 2], (0.0, 0.0)),
++                pt([-5.0, -4.0, -6.0], [10.0, 8.0, 12.0], [0.0, 15.0, 9.0], [0.0; 3], [0.0; 2], (0.0, 12.0)),
+             ];
+             let (ry, rz) = ([E, -E, E / 2.0, -E / 2.0, -E / 2.0, E / 2.0, -E, E], [-E, E, -0.58, 0.58, -0.58, 0.58, -E, E]);
+             v.extend((0..8).map(|i| {
+                 let left = i % 2 == 1;
+-                pt([if left { -1.0 } else { -15.0 }, -1.0, -1.0], [16.0, 2.0, 2.0], [if left { 4.0 } else { -4.0 }, 15.0, 2.0 - (i / 2) as f32], [0.0, ry[i], rz[i]], [0.0; 2], ME)
++                pt([if left { -1.0 } else { -15.0 }, -1.0, -1.0], [16.0, 2.0, 2.0], [if left { 4.0 } else { -4.0 }, 15.0, 2.0 - (i / 2) as f32], [0.0, ry[i], rz[i]], [0.0; 2], (18.0, 0.0))
+             }));
+             v
+         }
+-        Slime => vec![pt([-5.0, 14.0, -5.0], [10.0, 10.0, 10.0], [0.0; 3], [0.0; 3], [0.0; 2], ME)],
++        // `ModelSlime(16)`: the core, the eyes and the mouth. ponytail: the outer jelly layer (`ModelSlime(0)`, a translucent pass) is not
++        // drawn: the entity pass has no blending, and at 78% alpha it would hide the face.
++        Slime => vec![
++            pt([-3.0, 17.0, -3.0], [6.0, 6.0, 6.0], [0.0; 3], [0.0; 3], [0.0; 2], (0.0, 16.0)),
++            pt([-3.25, 18.0, -3.5], [2.0, 2.0, 2.0], [0.0; 3], [0.0; 3], [0.0; 2], (32.0, 0.0)),
++            pt([1.25, 18.0, -3.5], [2.0, 2.0, 2.0], [0.0; 3], [0.0; 3], [0.0; 2], (32.0, 4.0)),
++            pt([0.0, 21.0, -3.5], [1.0, 1.0, 1.0], [0.0; 3], [0.0; 3], [0.0; 2], (32.0, 8.0)),
++        ],
++    }
++}
++
++/// `ModelSheep1`, the fleece pass (`RenderSheep.setWoolColorAndRender`): the same pose on inflated head, body and upper legs, from
++/// `mob/sheep_fur.png`. Empty for a shorn sheep.
++fn fur(m: &Mob) -> Vec<Part> {
++    if m.kind != Sheep || m.sheared {
++        return Vec::new();
++    }
++    let leg = |x: f32, z: f32, ph: f32| grown(pt([-2.0, 0.0, -2.0], [4.0, 6.0, 4.0], [x, 12.0, z], [0.0; 3], [ph, 1.4], (0.0, 16.0)), 0.5);
++    vec![
++        grown(pt([-3.0, -4.0, -4.0], [6.0, 6.0, 6.0], [0.0, 6.0, -8.0], [0.0; 3], [0.0; 2], (0.0, 0.0)), 0.6),
++        grown(pt([-4.0, -10.0, -7.0], [8.0, 16.0, 6.0], [0.0, 5.0, 2.0], [Q, 0.0, 0.0], [0.0; 2], (28.0, 8.0)), 1.75),
++        leg(-3.0, 7.0, 0.0), leg(3.0, 7.0, PI), leg(-3.0, -5.0, PI), leg(3.0, -5.0, 0.0),
++    ]
++}
++
++/// The skin texture slot of `m` (`Entity.texture`; the wolf's changes with `EntityWolf.getEntityTexture`).
++fn skin_of(m: &Mob) -> u8 {
++    use crate::render::atlas::skin;
++    match m.kind {
++        Pig => skin::PIG,
++        Cow => skin::COW,
++        Chicken => skin::CHICKEN,
++        Sheep => skin::SHEEP,
++        Wolf if m.tame => skin::WOLF_TAME,
++        Wolf if m.anger > 0 => skin::WOLF_ANGRY,
++        Wolf => skin::WOLF,
++        Squid => skin::SQUID,
++        Zombie | Giant => skin::ZOMBIE,
++        PigZombie => skin::PIGZOMBIE,
++        Skeleton => skin::SKELETON,
++        Creeper => skin::CREEPER,
++        Spider => skin::SPIDER,
++        Slime => skin::SLIME,
++    }
++}
++
++/// `EntitySheep.fleeceColorTable` as a vertex tint.
++fn fleece(color: u8) -> f32 {
++    const T: [[f32; 3]; 16] = [
++        [1.0, 1.0, 1.0], [0.95, 0.7, 0.2], [0.9, 0.5, 0.85], [0.6, 0.7, 0.95], [0.9, 0.9, 0.2], [0.5, 0.8, 0.1], [0.95, 0.7, 0.8], [0.3, 0.3, 0.3],
++        [0.6, 0.6, 0.6], [0.3, 0.6, 0.7], [0.7, 0.4, 0.9], [0.2, 0.4, 0.8], [0.5, 0.4, 0.3], [0.4, 0.5, 0.2], [0.8, 0.3, 0.3], [0.1, 0.1, 0.1],
++    ];
++    let c = T[color as usize & 15];
++    tint(c[0], c[1], c[2])
++}
++
++/// A vertex tint (`mesh::WHITE`'s packing) from linear 0..1 channels.
++fn tint(r: f32, g: f32, b: f32) -> f32 {
++    let q = |c: f32| (c.clamp(0.0, 1.0) * 255.0).round() as u32;
++    ((q(r) << 16) | (q(g) << 8) | q(b)) as f32
++}
++
++/// `ModelRenderer.addBox` + `TexturedQuad` for a 64 x 32 skin in atlas slot `slot` (`push_model_box`'s unwrap, plus the inflation and
++/// the mirror of `ModelRenderer`): the box at `min` with `size` in model pixels through `m`, both windings, multiplied by `tint`.
++fn push_skin_box(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, m: &Mat4, min: [f32; 3], size: [f32; 3], t: Tx, slot: u8, tint: f32) {
++    let g = t.grow;
++    let (mut x1, y1, z1) = (min[0] - g, min[1] - g, min[2] - g);
++    let (mut x2, y2, z2) = (min[0] + size[0] + g, min[1] + size[1] + g, min[2] + size[2] + g);
++    if t.mirror {
++        std::mem::swap(&mut x1, &mut x2);
++    }
++    let (dx, dy, dz, ox, oy) = (size[0], size[1], size[2], t.o.0, t.o.1);
++    let c = [[x1, y1, z1], [x2, y1, z1], [x2, y2, z1], [x1, y2, z1], [x1, y1, z2], [x2, y1, z2], [x2, y2, z2], [x1, y2, z2]];
++    let faces: [([usize; 4], [f32; 4]); 6] = [
++        ([5, 1, 2, 6], [ox + dz + dx, oy + dz, ox + dz + dx + dz, oy + dz + dy]),
++        ([0, 4, 7, 3], [ox, oy + dz, ox + dz, oy + dz + dy]),
++        ([5, 4, 0, 1], [ox + dz, oy, ox + dz + dx, oy + dz]),
++        ([2, 3, 7, 6], [ox + dz + dx, oy, ox + dz + dx + dx, oy + dz]),
++        ([1, 0, 3, 2], [ox + dz, oy + dz, ox + dz + dx, oy + dz + dy]),
++        ([4, 5, 6, 7], [ox + dz + dx + dz, oy + dz, ox + dz + dx + dz + dx, oy + dz + dy]),
++    ];
++    for (vi, [u0, v0, u1, v1]) in faces {
++        let base = verts.len() as u32 / VF as u32;
++        let mut q: [(Vec3, (f32, f32)); 4] = [(Vec3::ZERO, (0.0, 0.0)); 4];
++        let uv = [(u1 - 0.1, v0 + 0.1), (u0 + 0.1, v0 + 0.1), (u0 + 0.1, v1 - 0.1), (u1 - 0.1, v1 - 0.1)];
++        for k in 0..4 {
++            q[k] = (m.transform_point3(Vec3::from(c[vi[k]])), uv[k]);
++        }
++        if t.mirror {
++            q.reverse(); // `flipFace`
++        }
++        for (p, uv) in q {
++            let (au, av) = atlas::skin_px(slot, uv.0, uv.1);
++            verts.extend_from_slice(&[p.x, p.y, p.z, au, av, 1.0, lm(15, 0), tint]);
++        }
++        idxs.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3, base, base + 2, base + 1, base, base + 3, base + 2]);
+     }
+ }
+ 
+@@ -513,12 +683,12 @@ fn push_boat(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, b: &Boat, a: f32) {
+     }
+ }
+ 
+-/// The parts of `parts(m)` that are the head: the first one, and a hen's beak; a squid and a slime have none.
++/// The parts of `parts(m)` that are the head: those on its pivot (`head_n`: a cow's horns, a hen's bill and chin), else the first one; a squid and a slime have none.
+ fn is_head(k: crate::world::mobs::Kind, i: usize) -> bool {
+-    match k {
+-        Squid | Slime => false,
+-        Chicken => i < 2,
+-        _ => i == 0,
++    i < match k {
++        Squid | Slime => 0,
++        Cow | Chicken => head_n(k),
++        _ => 1,
+     }
+ }
+ 
+@@ -546,33 +716,38 @@ fn head_dip(m: &Mob, head: &Part) -> Option<(f32, f32)> {
+     Some((a, (GROUND - rp[1] - low).max(0.0) * m.head))
+ }
+ 
+-/// Mobs drawn like `RenderLiving`: turned to face their yaw, scaled 1/16 (times `size`) and flipped upside down (model y
++/// Mobs drawn like `RenderLiving`: turned to face their body (`body_yaw`), scaled 1/16 (times `size`) and flipped upside down (model y
+ /// points down), 24 px above the ground; parts turn about their rotation point, x then y then z, legs and arms swinging
+-/// with `limb`. UNVERIFIED stand-ins: one flat wool colour per kind (`mobs::spec`), red (wool 14) while hurt, white while a
+-/// creeper's fuse burns; the real textures come with M14.
++/// with `limb`; each from the mob's own skin (`skin_of`), a sheep's fleece as a second pass (`fur`) tinted by its colour. UNVERIFIED
++/// stand-ins: a hurt mob is tinted red (the Java blends a red overlay), a creeper's burning fuse flashes flat white.
+ fn push_mob(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, m: &Mob) {
+     let feet = m.body.pos - Vec3::new(0.0, m.half.y, 0.0);
+     let root = Mat4::from_translation(feet)
+         * Mat4::from_rotation_y(PI - m.body_yaw.to_radians())
+         * Mat4::from_scale(Vec3::new(-1.0, -1.0, 1.0) * m.size / 16.0)
+         * Mat4::from_translation(Vec3::new(0.0, -23.875, 0.0));
+-    let own = match m.kind {
+-        Sheep if m.sheared => 8, // bare skin
+-        Sheep => m.color,
+-        k => crate::world::mobs::colour(k),
+-    };
+-    let tint = if m.hurt > 0 { Some(14) } else if m.fuse > 0 && m.fuse % 6 < 3 { Some(0) } else { None };
++    let flash = m.fuse > 0 && m.fuse % 6 < 3;
++    let red = if m.hurt > 0 { tint(1.0, 0.4, 0.4) } else { WHITE };
+     let model = parts(m);
+     let dip = model.first().and_then(|h| head_dip(m, h));
++    draw_parts(verts, idxs, m, &root, &model, skin_of(m), red, flash, dip);
++    let fleece_pass = fur(m);
++    if !fleece_pass.is_empty() {
++        let c = if m.hurt > 0 { tint(0.8, 0.3, 0.3) } else { fleece(m.color) };
++        draw_parts(verts, idxs, m, &root, &fleece_pass, atlas::skin::SHEEP_FUR, c, false, dip);
++    }
++}
++
++/// One pass of `push_mob`: `model` posed for `m` and drawn from skin `slot` (flat white for a `flash`).
++fn draw_parts(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, m: &Mob, root: &Mat4, model: &[Part], slot: u8, tint: f32, flash: bool, dip: Option<(f32, f32)>) {
+     // `ModelBase.setRotationAngles` for the head: turned by how far the head (`yaw`) is from the body (`body_yaw`, at most 75 degrees) and
+     // tipped by `head_pitch`; a head that grazes keeps only the dip. In this model space (y and x mirrored) a positive turn is the head's lead.
+     let lead = crate::world::mobs::lead(m.yaw, m.body_yaw).to_radians();
+     let tip = m.head_pitch * (1.0 - m.head);
+-    for (i, (min, size, mut rp, rot, sw, col)) in model.into_iter().enumerate() {
+-        let tile = stack_tile(ItemStack { id: 35, count: 1, damage: tint.unwrap_or(if col == ME { own } else { col }) as u16 });
++    for (i, &(min, size, mut rp, rot, sw, tx)) in model.iter().enumerate() {
+         let mut rx = rot[0] + (m.limb * 0.6662 + sw[0]).cos() * sw[1] * m.limb_amt;
+         let mut ry = rot[1];
+-        // The head (and a hen's beak, part 1) hangs from the same pivot: it turns to lead the body, tips, and goes down when it grazes.
++        // The head and what hangs from its pivot (a cow's horns, a hen's bill and chin) lead the body, tip, and go down when it grazes.
+         if is_head(m.kind, i) {
+             (ry, rx) = (ry + lead, rx + tip);
+             if let Some((a, shift)) = dip {
+@@ -580,12 +755,17 @@ fn push_mob(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, m: &Mob) {
+                 rp[1] += shift;
+             }
+         }
+-        let mat = root * Mat4::from_translation(Vec3::from(rp)) * Mat4::from_rotation_z(rot[2]) * Mat4::from_rotation_y(ry) * Mat4::from_rotation_x(rx);
+-        let n0 = verts.len();
+-        push_box(verts, idxs, min, [min[0] + size[0], min[1] + size[1], min[2] + size[2]], tile, 1.0);
+-        for v in verts[n0..].chunks_exact_mut(VF) {
+-            let w = mat.transform_point3(Vec3::new(v[0], v[1], v[2]));
+-            v[..3].copy_from_slice(&w.to_array());
++        let mat = *root * Mat4::from_translation(Vec3::from(rp)) * Mat4::from_rotation_z(rot[2]) * Mat4::from_rotation_y(ry) * Mat4::from_rotation_x(rx);
++        if flash {
++            let white = stack_tile(ItemStack { id: 35, count: 1, damage: 0 });
++            let n0 = verts.len();
++            push_box(verts, idxs, min, [min[0] + size[0], min[1] + size[1], min[2] + size[2]], white, 1.0);
++            for v in verts[n0..].chunks_exact_mut(VF) {
++                let w = mat.transform_point3(Vec3::new(v[0], v[1], v[2]));
++                v[..3].copy_from_slice(&w.to_array());
++            }
++        } else {
++            push_skin_box(verts, idxs, &mat, min, size, tx, slot, tint);
+         }
+     }
+ }
+@@ -613,6 +793,57 @@ mod tests {
+         assert!(head_dip(&wolf, &parts(&wolf)[0]).is_none());
+     }
+ 
++    /// Every box of every mob unwraps inside its 64 x 32 skin, and what `push_mob` draws reads that skin's atlas slot (not the flat strip,
++    /// not another skin); a sheep wears fleece until it is shorn; a wolf's skin follows its state.
++    #[test]
++    fn mob_boxes_unwrap_inside_their_skin() {
++        let mut rng = crate::world::gen::noise::JavaRandom::new(1);
++        for kind in [Pig, Cow, Sheep, Chicken, Wolf, Squid, Zombie, PigZombie, Giant, Skeleton, Creeper, Spider, Slime] {
++            let mut m = Mob::new(kind, 0.0, 0.0, 0.0, 0.0, &mut rng);
++            let mut boxes = parts(&m);
++            boxes.extend(fur(&m));
++            for (min, size, _, _, _, tx) in &boxes {
++                let (w, h) = (2.0 * (size[0] + size[2]), size[1] + size[2]);
++                assert!(tx.o.0 + w <= 64.0 && tx.o.1 + h <= 32.0, "{kind:?}: box {min:?} {size:?} at {:?} leaves the skin", tx.o);
++            }
++            let (mut v, mut i) = (Vec::new(), Vec::new());
++            push_mob(&mut v, &mut i, &m);
++            assert_eq!(v.len(), boxes.len() * 24 * VF, "{kind:?}: 24 vertices a box");
++            let slots: Vec<u8> = (0..26).collect();
++            for vert in v.chunks_exact(VF) {
++                let (x, y) = (vert[3] * atlas::ATLAS_W as f32, vert[4] * atlas::ATLAS_H as f32 - atlas::CHAR_Y as f32);
++                assert!(y >= 0.0, "{kind:?}: a vertex reads above the skins");
++                let slot = slots.iter().copied().find(|&s| x >= (s % 4) as f32 * 64.0 && x <= (s % 4) as f32 * 64.0 + 64.0 && y >= (s / 4) as f32 * 32.0 && y <= (s / 4) as f32 * 32.0 + 32.0).unwrap();
++                assert!(slot == skin_of(&m) || (kind == Sheep && slot == atlas::skin::SHEEP_FUR), "{kind:?}: read slot {slot}");
++            }
++            m.sheared = true;
++            assert!(fur(&m).is_empty());
++        }
++        let mut wolf = Mob::new(Wolf, 0.0, 0.0, 0.0, 0.0, &mut rng);
++        assert_eq!(skin_of(&wolf), atlas::skin::WOLF);
++        wolf.anger = 10;
++        assert_eq!(skin_of(&wolf), atlas::skin::WOLF_ANGRY);
++        wolf.tame = true;
++        assert_eq!(skin_of(&wolf), atlas::skin::WOLF_TAME, "tamed beats angry, as `EntityWolf.getEntityTexture`");
++        assert_eq!(parts(&wolf).len(), 11, "head, ears, snout, body, mane, four legs, tail");
++        wolf.sitting = true;
++        let sat = parts(&wolf);
++        assert!(sat[4].2[1] > 16.0 && sat[8].3[0] > 5.0, "the body sinks to 18 and the hind legs fold forward");
++        // Cow: head, two horns, body, four legs, udder; the horns follow the head's dip.
++        let cow = Mob::new(Cow, 0.0, 0.0, 0.0, 0.0, &mut rng);
++        assert_eq!((parts(&cow).len(), head_n(Cow)), (9, 3));
++    }
++
++    /// `tint` packs like `WHITE`; the fleece table and the red of a hurt mob go through it.
++    #[test]
++    fn tints_pack_like_white() {
++        assert_eq!(tint(1.0, 1.0, 1.0), WHITE);
++        assert_eq!(fleece(0), WHITE);
++        assert_eq!(fleece(15), tint(0.1, 0.1, 0.1));
++        assert_eq!(tint(1.0, 0.0, 0.0), 16_711_680.0);
++        assert_eq!(fleece(16), fleece(0), "the colour is a nibble");
++    }
++
+     fn text() -> Text {
+         ["Hello".into(), "world".into(), String::new(), "!".into()]
+     }
+diff --git a/mc-rs/src/render/player.rs b/mc-rs/src/render/player.rs
+index 1169efa..853f3e2 100644
+--- a/mc-rs/src/render/player.rs
++++ b/mc-rs/src/render/player.rs
+@@ -36,6 +36,8 @@ pub struct View {
+     pub root: Mat4,
+     pub pose: Pose,
+     pub held: Option<ItemStack>,
++    /// The armor he wears, as `armor_quads` takes it.
++    pub worn: Worn,
+     /// Where he stands (his light).
+     pub at: Vec3,
+ }
+@@ -130,16 +132,46 @@ fn matrix(l: &Limb) -> Mat4 {
+     Mat4::from_translation(Vec3::from(l.rp)) * Mat4::from_rotation_z(l.rot[2]) * Mat4::from_rotation_y(l.rot[1]) * Mat4::from_rotation_x(l.rot[0])
+ }
+ 
+-/// A model quad: four corners and their skin pixels (`mob/char.png`, 64 x 32, y down).
++/// A model quad: four corners and their skin pixels (64 x 32, y down) of the skin in atlas slot `slot` (`atlas::skin_px`).
+ pub struct Quad {
+     pub p: [Vec3; 4],
+     pub uv: [[f32; 2]; 4],
++    pub slot: u8,
+ }
+ 
++/// The armor on the model, by armor slot (0 helmet, 1 chestplate, 2 leggings, 3 boots): the material (0 leather, chain, iron, diamond,
++/// gold) of the piece in it, if any.
++pub type Worn = [Option<u8>; 4];
++
+ /// `ModelRenderer.addBox` + `TexturedQuad` (0.1 px inset, `flipFace` when mirrored) for every part, through `root`.
+ pub fn quads(root: &Mat4, pose: &Pose) -> Vec<Quad> {
++    limb_quads(root, limbs(pose), 0, [true; 7])
++}
++
++/// `RenderPlayer.setArmorModel` for each piece worn: the same pose on a model inflated by 1 (helmet, chestplate, boots; `ModelBiped(1.0)`,
++/// `armor/<material>_1.png`) or 0.5 (leggings, `ModelBiped(0.5)`, `_2.png`), showing only the parts of its slot: the head and hat,
++/// the body and arms, the body and legs, the legs.
++pub fn armor_quads(root: &Mat4, pose: &Pose, worn: &Worn) -> Vec<Quad> {
++    let mut out = Vec::new();
++    for (slot, m) in worn.iter().enumerate() {
++        let Some(m) = *m else { continue };
++        let (grow, layer, show) = match slot {
++            0 => (1.0, 1, [true, true, false, false, false, false, false]),
++            1 => (1.0, 1, [false, false, true, true, true, false, false]),
++            2 => (0.5, 2, [false, false, true, false, false, true, true]),
++            _ => (1.0, 1, [false, false, false, false, false, true, true]),
++        };
++        let mut l = limbs(pose);
++        l.iter_mut().for_each(|l| l.grow += grow);
++        out.extend(limb_quads(root, l, atlas::armor_slot(m, layer), show));
++    }
++    out
++}
++
++/// The quads of the limbs with `show` set, all textured from `slot`.
++fn limb_quads(root: &Mat4, limbs: [Limb; 7], slot: u8, show: [bool; 7]) -> Vec<Quad> {
+     let mut out = Vec::with_capacity(42);
+-    for l in limbs(pose) {
++    for (_, l) in limbs.into_iter().enumerate().filter(|(i, _)| show[*i]) {
+         let m = *root * matrix(&l);
+         let ([dx, dy, dz], (ox, oy), g) = (l.size, l.tex, l.grow);
+         let (mut x1, y1, z1) = (l.min[0] - g, l.min[1] - g, l.min[2] - g);
+@@ -159,7 +191,7 @@ pub fn quads(root: &Mat4, pose: &Pose) -> Vec<Quad> {
+         ];
+         for (vi, [u0, v0, u1, v1]) in faces {
+             let uv = [[u1 - 0.1, v0 + 0.1], [u0 + 0.1, v0 + 0.1], [u0 + 0.1, v1 - 0.1], [u1 - 0.1, v1 - 0.1]];
+-            let mut q = Quad { p: std::array::from_fn(|k| m.transform_point3(Vec3::from(c[vi[k]]))), uv };
++            let mut q = Quad { p: std::array::from_fn(|k| m.transform_point3(Vec3::from(c[vi[k]]))), uv, slot };
+             if l.mirror {
+                 q.p.reverse();
+                 q.uv.reverse();
+@@ -178,8 +210,9 @@ pub fn root(feet: Vec3, body_yaw: f32) -> Mat4 {
+ 
+ /// The player at the given pose into the entity mesh (both windings: the Java draws with culling off), then his item.
+ /// Vertices are `[x, y, z, u, v, light, lm, tint]`; the caller lights them (`items::lit`).
+-pub fn push(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, root: &Mat4, pose: &Pose, held: Option<ItemStack>) {
++pub fn push(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, root: &Mat4, pose: &Pose, held: Option<ItemStack>, worn: &Worn) {
+     push_quads(verts, idxs, &quads(root, pose));
++    push_quads(verts, idxs, &armor_quads(root, pose, worn));
+     if let Some(s) = held {
+         let l = limbs(pose);
+         let hand = *root * matrix(&l[R_ARM]) * Mat4::from_translation(Vec3::new(-1.0, 7.0, 1.0)); // `postRender` + (-1/16, 7/16, 1/16)
+@@ -192,7 +225,7 @@ fn push_quads(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, qs: &[Quad]) {
+     for q in qs {
+         let base = verts.len() as u32 / VF as u32;
+         for (p, uv) in q.p.iter().zip(q.uv) {
+-            let (u, v) = atlas::char_px(uv[0], uv[1]);
++            let (u, v) = atlas::skin_px(q.slot, uv[0], uv[1]);
+             verts.extend_from_slice(&[p.x, p.y, p.z, u, v, 1.0, lm(15, 0), WHITE]);
+         }
+         idxs.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3, base, base + 2, base + 1, base, base + 3, base + 2]);
+@@ -323,9 +356,11 @@ pub fn push_hand(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, h: &Hand) {
+ 
+ /// `GuiInventory.drawGuiContainerBackgroundLayer`: the player at `(x, y)` (his feet; the panel's (51, 75)) with `k` px a GUI unit,
+ /// scale 30, front toward the viewer. `z` (larger = nearer) only orders the quads.
+-pub fn inventory_quads(x: f32, y: f32, k: f32, pose: &Pose) -> Vec<Quad> {
++pub fn inventory_quads(x: f32, y: f32, k: f32, pose: &Pose, worn: &Worn) -> Vec<Quad> {
+     let m = Mat4::from_translation(Vec3::new(x, y, 0.0)) * Mat4::from_scale(Vec3::new(30.0, 30.0, -30.0) * k * (15.0 / 16.0 / 16.0)) * Mat4::from_translation(Vec3::new(0.0, -23.875, 0.0));
+-    quads(&m, pose)
++    let mut q = quads(&m, pose);
++    q.extend(armor_quads(&m, pose, worn));
++    q
+ }
+ 
+ // ---- animation state ----
+@@ -506,6 +541,34 @@ mod tests {
+         assert_eq!(atlas::atlas_rgba()[px + 3], 255, "skin pixel at the head's face");
+     }
+ 
++    /// `RenderPlayer.setArmorModel`: each slot shows its own parts of the inflated model, from its own armor skin, and a part with no
++    /// piece on it stays bare.
++    #[test]
++    fn armor_shows_its_slots_parts_inflated_from_the_armor_skin() {
++        let (root, pose) = (Mat4::IDENTITY, Pose::default());
++        let skin = quads(&root, &pose);
++        assert!(armor_quads(&root, &pose, &[None; 4]).is_empty());
++        let counts: Vec<usize> = (0..4).map(|s| armor_quads(&root, &pose, &std::array::from_fn(|i| (i == s).then_some(2))).len()).collect();
++        assert_eq!(counts, [12, 18, 18, 12], "head + hat; body + arms; body + legs; legs");
++        // Diamond (3) leggings use layer 2, iron (2) boots layer 1; every slot is the atlas slot of its own png.
++        let both = armor_quads(&root, &pose, &[None, None, Some(3), Some(2)]);
++        assert!(both[..18].iter().all(|q| q.slot == atlas::armor_slot(3, 2)) && both[18..].iter().all(|q| q.slot == atlas::armor_slot(2, 1)));
++        assert_eq!((atlas::armor_slot(0, 1), atlas::armor_slot(4, 2)), (1, 10));
++        // The chestplate (+1 px) wraps the body: its front face lies in front of the skin's body front (face 4 of part 2) by 1 px, the
++        // leggings (+0.5) by half that.
++        let front = |q: &Quad| q.p[0].z.min(q.p[2].z);
++        let (chest, legs) = (armor_quads(&root, &pose, &[None, Some(0), None, None]), armor_quads(&root, &pose, &[None, None, Some(0), None]));
++        assert!((front(&skin[2 * 6 + 4]) - front(&chest[0 * 6 + 4])).abs() - 1.0 < 1e-4);
++        assert!((front(&skin[2 * 6 + 4]) - front(&legs[4])).abs() - 0.5 < 1e-4);
++        // The armor skins are in the atlas: the helmet's top (8..24, 0..8 of the png), opaque for iron.
++        let (u, v) = atlas::skin_px(atlas::armor_slot(2, 1), 12.0, 4.0);
++        let px = ((v * atlas::ATLAS_H as f32) as usize * atlas::ATLAS_W + (u * atlas::ATLAS_W as f32) as usize) * 4;
++        assert_eq!(atlas::atlas_rgba()[px + 3], 255, "iron helmet pixel");
++        // A pig is another skin altogether, not the player's.
++        let (pu, pv) = atlas::skin_px(atlas::skin::PIG, 8.0, 8.0);
++        assert!(pu >= 192.0 / 256.0 && pv > atlas::char_px(0.0, 64.0).1, "slot 11: fourth column of the third band");
++    }
++
+     #[test]
+     fn walking_swings_legs_opposite_and_sneaking_leans() {
+         let walk = Pose { limb: 1.0, limb_amt: 1.0, ..Pose::default() };
+diff --git a/mc-rs/src/world/mobs.rs b/mc-rs/src/world/mobs.rs
+index f616755..b0ce007 100644
+--- a/mc-rs/src/world/mobs.rs
++++ b/mc-rs/src/world/mobs.rs
+@@ -52,7 +52,7 @@ const PANIC_SPEED: f32 = 1.5;
+ pub enum Kind { Pig, Cow, Sheep, Chicken, Wolf, Squid, Zombie, PigZombie, Giant, Skeleton, Creeper, Spider, Slime }
+ use Kind::*;
+ 
+-/// (width, height, health, moveSpeed, attackStrength, flat colour = wool metadata).
++/// (width, height, health, moveSpeed, attackStrength, a flat colour as wool metadata: unused since the mobs have their skins).
+ fn spec(k: Kind) -> (f32, f32, i32, f32, i32, u8) {
+     match k {
+         Pig => (0.9, 0.9, 10, 0.7, 0, 6),
+@@ -71,11 +71,6 @@ fn spec(k: Kind) -> (f32, f32, i32, f32, i32, u8) {
+     }
+ }
+ 
+-/// The flat stand-in colour of a kind (wool metadata), for the renderer.
+-pub fn colour(k: Kind) -> u8 {
+-    spec(k).5
+-}
+-
+ pub struct Mob {
+     pub kind: Kind,
+     /// `pos` is the centre of the box.
+diff --git a/roadmap/gameplay.md b/roadmap/gameplay.md
+index 6ad0372..ae7f2d1 100644
+--- a/roadmap/gameplay.md
++++ b/roadmap/gameplay.md
+@@ -94,7 +94,9 @@ Part of [`ROADMAP.md`](../ROADMAP.md). The to-do milestones of this part (M11 Ne
+     - Untouched on purpose: the 5-tick wait after a block breaks (`Dig.wait`, `blockHitWait` in the Java) and the first tick that only locks the target (`clickBlock`), both faithful. A tap still fires on release (a drag has to be told from a tap); the next step, if a hit still feels late, is to hit a mob already under the crosshair on the press.
+     - ponytail: UNVERIFIED on a device: 0.2 s is a guess; a finger resting still on the glass while aiming now digs after 0.2 s instead of 0.4 s.
+ - 2026-10-20 (9): player model (written without a toolchain: not compiled, not run; +3 tests in `render/player.rs`, +1 in `touch_ui.rs`). `ModelBiped` (head, headwear, body, arms, legs; `mob/char.png`) with `setRotationAngles` (walk swing, sneak, riding, item in hand, arm swing, idle sway) in one geometry function (`player::quads`) used twice: the third-person view (`RenderPlayer` / `RenderLiving` transform, into the entity mesh; a new view button left of zoom toggles `TouchUi.third`, the camera sits 4 blocks behind the eye pulled in before terrain, as `orientCamera`) and the inventory preview (`GuiInventory`: panel (51, 75), scale 30, projected into the HUD, painter's order). `player::Anim` is `EntityLiving.onUpdate` (body yaw follows the walk within 75 degrees of the head, limb swing) + `EntityPlayer` arm swing, ticked at 20 Hz in the furnace loop; taps and dig ticks swing. `char.png` is the last 32 rows of `art.rgba` (256 x 320, `tools/gen_terrain.py`; `atlas::CHAR_Y`, read at mip 0 in the shader) and the HUD sheet's tail (2608 rows).
+-    - ponytail: no armor layers, ears, cloak, hurt flash, sleeping pose, mouse-follow in the inventory (touch has no mouse); the held item is a cube (blocks) or a flat sprite slab with the three `renderSpecials` transforms, not the extruded `ItemRenderer` model; `Anim::swing` waits for the swing in progress instead of restarting (the Java restart would pin a held dig at progress 0); one camera ray, not 8. UNVERIFIED: the held-item transforms and the view button's place; `Pose.holding` stands in for `field_1278_i`.
++    - ponytail: no ears, cloak or pumpkin on the head (the armor layers are in, see below), hurt flash, sleeping pose, mouse-follow in the inventory (touch has no mouse); the held item is a cube (blocks) or a flat sprite slab with the three `renderSpecials` transforms, not the extruded `ItemRenderer` model; `Anim::swing` waits for the swing in progress instead of restarting (the Java restart would pin a held dig at progress 0); one camera ray, not 8. UNVERIFIED: the held-item transforms and the view button's place; `Pose.holding` stands in for `field_1278_i`.
++    - Armor on the model: `player::armor_quads` is `RenderPlayer.setArmorModel`: each worn piece draws the parts of its slot again on a model inflated by 1 (helmet + hat, chestplate: body + arms, boots: legs) or 0.5 (leggings: body + legs), same pose, from `armor/<cloth, chain, iron, diamond, gold>_1.png` (`_2.png` for the leggings); `Game::worn` reads `armorInventory[3 - slot]` through `craft::armor` (material = `(id - 298) / 4`). Third-person view and `GuiInventory` preview. The skins live in the atlas (and the HUD sheet) four to a row from `CHAR_Y` (`atlas::skin_px(slot, x, y)`, 26 slots: 0 `mob/char.png`, 1..=10 armor, 11..=25 mobs, order of `SKINS` in `tools/gen_terrain.py`; the shader already reads everything under `CHAR_Y` at mip 0). The atlas is 256 x 1056, the HUD sheet 256 x 2864. ponytail: leather is not dyed (no dye in b1.7.3), no damage/hurt tint on the armor.
++    - Real mob models: `items::parts` is now the b1.7.3 model classes box by box with `setTextureOffset`, inflation and `mirror` (`Tx`), drawn by `push_skin_box` from the mob's skin slot (`atlas::skin`, `skin_of`): pig, cow (horns, udder), sheep (`ModelSheep2` skin + `fur`: `ModelSheep1` from `sheep_fur.png`, tinted by `fleeceColorTable`, none once shorn), chicken (bill, chin, wings), wolf (ears, snout, mane, tail angle of `setTailRotation`, the sitting pose; `wolf.png` / `wolf_tame.png` / `wolf_angry.png`), squid (tentacles turned about y), zombie / pig zombie / giant / skeleton (`ModelBiped`, mirrored left limbs), creeper, spider, slime core + face. `head_n` lets the cow's horns and the hen's bill and chin follow the grazing head dip. The creeper follows b1.7.3's model (legs at 16, so its feet end 2 px above the ground line); the old stand-in put them at 18. `mobs::colour` is gone. ponytail: a hurt mob is a red vertex tint, not the Java's red overlay; the creeper's fuse flash is flat white and has no swell; no wing flap, no head turn toward the target, no tail wag, no slime squish; the slime's outer jelly layer (a translucent pass at 78% alpha) is not drawn, the entity pass has no blending; no spider eyes, no saddle layer on a pig, no hat on zombies and skeletons.
+ - 2026-10-20 (7): the title screen's backdrop is the SMANTRI panorama (a rotating cube map) instead of dirt (written WITHOUT a Rust toolchain: not compiled, not run, not seen in game; new test `render::panorama::tests::asset_matches_face_and_shader_validates`, +1 assert in `menu::tests`; run `cargo test --lib --release panorama menu` first).
+     - New `render/panorama.rs` (`Panorama`): `assets/panorama.rgba` (6 faces of 512 x 512, `tools/gen_panorama.py smantri_panorama.zip`, resized from the pack's 1024) in one 2D-array texture; one full-screen triangle, the fragment shader turns the view ray into (face, uv) with `GuiMainMenu`'s face order (0 +z, 1 +x, 2 -z, 3 -x, 4 -y, 5 +y). FOV 85, yaw -2 degrees a second, pitch 5 +-10 degrees. `render_menu` draws it inside the menu pass before the HUD, only while `Menu::panorama()` (title screen, not loading); the world list, create, delete, options and loading screens keep the dirt.
+     - Checked off-device: a numpy copy of the shader's mapping over the real faces (upright, faces join at every seam). Vanilla's extra 90 degree roll is NOT in the matrix: with it this pack's faces came out on their side.
+@@ -196,7 +198,7 @@ Part of [`ROADMAP.md`](../ROADMAP.md). The to-do milestones of this part (M11 Ne
+     - `Chunks::light` (= `World.getBlockLightValue`), `lib.rs`: `Ctx`/`Ev` hooks (`Hurt` -> `Vitals.hurt`, so armor works; `Boom` -> `App::explode`: blocks
+       cleared, 30% drop, player damage), tap-to-hit now for every mob (`Mobs::hit`).
+     - `render/items.rs`: `parts` = the b1.7.3 models (`ModelQuadruped`, `ModelBiped`/`ModelZombie`/`ModelSkeleton`, `ModelCreeper`, `ModelChicken`, spider, squid,
+-      wolf, slime from memory) as flat wool-coloured boxes (red when hurt, white fuse flash); arrows are small boxes.
++      wolf, slime from memory) as boxes (since M14 textured, see below; tinted red when hurt, flat white fuse flash); arrows are small boxes.
+     - Not done: Ghast and the zombie-pigman spawn (M11), wolf spawning (needs biomes), taming, shearing, milking, saddles, A*, sounds, saving mobs, explosion
+       exposure/knockback, arrows sticking in blocks, a skeleton/spider jockey, the textures (M14).
+ - `done` cheap table fills (compiled and ran, not yet to be tested, `table_fills` test not yet to be tested; `craft.rs`, `items.rs`, `vitals.rs`, `lib.rs`):
+diff --git a/tools/gen_terrain.py b/tools/gen_terrain.py
+index cae8a54..769111a 100644
+--- a/tools/gen_terrain.py
++++ b/tools/gen_terrain.py
+@@ -22,10 +22,17 @@ open("mc-rs/assets/grasscolor.rgb", "wb").write(grass.convert("RGB").tobytes())
+ open("mc-rs/assets/foliagecolor.rgb", "wb").write(foliage.convert("RGB").tobytes())
+ open("mc-rs/assets/items.rgba", "wb").write(png("gui/items.png").tobytes())
+ # art/kz.png (painting motives, 256x256), item/sign.png (64x32, the sign model) and mob/char.png (64x32, the player skin) under it, 256x320: `render::atlas::ART`
+-art = Image.new("RGBA", (256, 320), (0, 0, 0, 0))
++# From row 288 on, 64 x 32 skins four to a row (`render::atlas::skin_px`): slot 0 mob/char.png, 1..=10 armor/<cloth, chain, iron, diamond, gold>_<1, 2>.png
++# (slot 1 + 2 * material + layer - 1), 11.. the mobs in `SKINS` order; 26 slots = 7 bands, 512 rows in all.
++SKINS = ["char"] + [f"armor/{m}_{i}" for m in ("cloth", "chain", "iron", "diamond", "gold") for i in (1, 2)] + [
++    f"mob/{n}" for n in ("pig", "cow", "chicken", "sheep", "sheep_fur", "wolf", "wolf_tame", "wolf_angry", "squid", "zombie", "pigzombie", "skeleton", "creeper", "spider", "slime")]
++SKINS[0] = "mob/char"
++art = Image.new("RGBA", (256, 288 + 32 * ((len(SKINS) + 3) // 4)), (0, 0, 0, 0))
+ art.paste(png("art/kz.png"), (0, 0))
+ art.paste(png("item/sign.png"), (0, 256))
+-art.paste(png("mob/char.png"), (0, 288))
++for n, name in enumerate(SKINS):
++    assert png(name + ".png").size == (64, 32), name
++    art.paste(png(name + ".png"), ((n % 4) * 64, 288 + (n // 4) * 32))
+ open("mc-rs/assets/art.rgba", "wb").write(art.tobytes())
+ 
+ # item id -> items.png tile, from Item.java: `new ItemX(<id - 256>, ...).setIconCoord(col, row)` or `.setIconIndex(n)`
+diff --git a/tools/gles_check.py b/tools/gles_check.py
+index d1873c5..b3af085 100644
+--- a/tools/gles_check.py
++++ b/tools/gles_check.py
+@@ -13,7 +13,7 @@ def splice(s):
+     return (s.replace("@TW@", "16").replace("@TH@", "%d" % (ATLAS_H // 16)).replace("@MIPS@", "3").replace("@IY@", "288")
+             .replace("@CY@", "%d" % CHAR_Y).replace("@AW@", "256").replace("@AH@", "%d" % ATLAS_H)
+             .replace("@SB@", repr(0.5 ** 2.2)).replace("@SZ@", repr(0.8 ** 2.2)).replace("@SX@", repr(0.6 ** 2.2)))
+-ITEMS_Y = 288; ART_Y = ITEMS_Y + 256; SIGN_Y = ART_Y + 256; CHAR_Y = SIGN_Y + 32; ATLAS_H = ART_Y + 320
++ITEMS_Y = 288; ART_Y = ITEMS_Y + 256; SIGN_Y = ART_Y + 256; CHAR_Y = SIGN_Y + 32; ATLAS_H = ART_Y + 512
+ progs = {}
+ for name, defs, frag in [("solid", "#define COMPACT\n", "#define FS_SOLID\n"), ("cutout", "#define COMPACT\n", "#define FS_CUT\n"),
+                          ("entity", "", "#define FS_CUT_FLAT\n"), ("lod", "", "#define FS_CUT_FLAT\n"),
+@@ -25,7 +25,7 @@ present_fs = [r for r in raw if "enhanced" in r][0]
+ for fxaa, fast in [(1, 0), (0, 0), (0, 1)]:
+     progs[f"present_{fxaa}{fast}"] = (HEAD_V + FULL_VS, HEAD_F + f"#define FXAA {fxaa}\n#define FAST {fast}\n" + present_fs)
+ hv = [r for r in raw if "a_pos" in r][0]
+-hf = fmt([r for r in raw if "SHEET" in r][0]).replace("{sheet_h:.1}", "2672.0")
++hf = fmt([r for r in raw if "SHEET" in r][0]).replace("{sheet_h:.1}", "2864.0")
+ progs["hud"] = (HEAD_V + hv, HEAD_F + hf)
+ pv = [r for r in raw if "u_t.xy" in r][0]; pf = [r for r in raw if "sampler2DArray u_tex" in r][0]
+ progs["pano"] = (HEAD_V + pv, HEAD_F + pf)

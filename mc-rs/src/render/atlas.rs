@@ -71,7 +71,9 @@ pub const ART_Y: usize = ITEMS_Y + 256;
 pub const SIGN_Y: usize = ART_Y + 256;
 /// `mob/char.png` (64 x 32, the player skin) at `CHAR_Y`.
 pub const CHAR_Y: usize = SIGN_Y + 32;
-pub const ATLAS_H: usize = ART_Y + 320;
+/// From `CHAR_Y` on, 64 x 32 skins four to a row (`skin_px`, 26 slots = 7 bands, 224 rows): slot 0 `mob/char.png`, then the armor and the mobs.
+pub const SKIN_SLOTS: usize = 26;
+pub const ATLAS_H: usize = ART_Y + 256 + 32 + 32 * SKIN_SLOTS.div_ceil(4);
 /// Mip levels of the atlas (a 16 px tile has 16, 8, 4 px: three levels never mix two tiles at the middle of a tile).
 pub const MIPS: u32 = 3;
 /// `gui/items.png` as RGBA (256 x 256, 16 x 16 px sprites): `Item.iconIndex` picks the sprite (`item_icon`).
@@ -204,7 +206,36 @@ pub fn sign_px(x: f32, y: f32) -> (f32, f32) {
 
 /// Atlas UV of pixel (`x`, `y`) of `mob/char.png` (y down like the png).
 pub fn char_px(x: f32, y: f32) -> (f32, f32) {
-    (x / ATLAS_W as f32, (CHAR_Y as f32 + y) / ATLAS_H as f32)
+    skin_px(0, x, y)
+}
+
+/// Atlas UV of pixel (`x`, `y`) of the 64 x 32 skin in `slot` (y down like the png; `tools/gen_terrain.py` `SKINS` is the order).
+pub fn skin_px(slot: u8, x: f32, y: f32) -> (f32, f32) {
+    (((slot % 4) as f32 * 64.0 + x) / ATLAS_W as f32, (CHAR_Y as f32 + (slot / 4) as f32 * 32.0 + y) / ATLAS_H as f32)
+}
+
+/// Skin slot of `armor/<cloth, chain, iron, diamond, gold>_<layer>.png` (`RenderPlayer.armorFilenamePrefix`; layer 2 is the leggings).
+pub const fn armor_slot(material: u8, layer: u8) -> u8 {
+    1 + 2 * material + layer - 1
+}
+
+/// Skin slots of the mob textures (`mob/<name>.png`).
+pub mod skin {
+    pub const PIG: u8 = 11;
+    pub const COW: u8 = 12;
+    pub const CHICKEN: u8 = 13;
+    pub const SHEEP: u8 = 14;
+    pub const SHEEP_FUR: u8 = 15;
+    pub const WOLF: u8 = 16;
+    pub const WOLF_TAME: u8 = 17;
+    pub const WOLF_ANGRY: u8 = 18;
+    pub const SQUID: u8 = 19;
+    pub const ZOMBIE: u8 = 20;
+    pub const PIGZOMBIE: u8 = 21;
+    pub const SKELETON: u8 = 22;
+    pub const CREEPER: u8 = 23;
+    pub const SPIDER: u8 = 24;
+    pub const SLIME: u8 = 25;
 }
 
 /// `Item.iconIndex` of an item id (256 and up), `None` for blocks and items the Java table does not have.
@@ -383,7 +414,8 @@ mod tests {
         // Every tile `tile_of` hands out has its own colour, and the texture covers all of them.
         assert_eq!(atlas_rgba().len(), ATLAS_W * ATLAS_H * 4);
         assert_eq!(TERRAIN.len(), 256 * 256 * 4);
-        assert_eq!(ART.len(), 256 * 320 * 4, "kz.png over sign.png over char.png");
+        assert_eq!(ART.len(), 256 * (ATLAS_H - ART_Y) * 4, "kz.png over sign.png over the skins");
+        assert_eq!(ATLAS_H % 16, 0, "the shaders count tile rows");
         assert!(art_uv(255, 1.0, 0.0).1 * (ATLAS_H as f32) < (ART_Y + 256) as f32, "the last piece stays above the sign rows");
         assert_ne!(tile_color(260), tile_color(261));
         assert_ne!(tile_color(256), tile_color(17));

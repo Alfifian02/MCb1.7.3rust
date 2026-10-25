@@ -16,7 +16,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use crate::world::items::{stack_tile, Drops, ItemStack, MAX_ITEMS};
-use crate::world::mobs::{Kind::*, Mob, Mobs, MAX_ARROWS, MAX_MOBS};
+use crate::world::mobs::{Kind, Kind::*, Mob, Mobs, MAX_ARROWS, MAX_MOBS};
 use crate::world::ticks::{Falling, MAX_FALLING};
 
 /// 24 vertices x 7 floats (`mesh::VF`) per cube, 36 indices per cube.
@@ -117,7 +117,7 @@ fn geometry(drops: &Drops, mobs: &Mobs, falling: &[Falling], fx: &Effects, lv: &
     // The local player (`RenderPlayer`), only in the third-person view.
     if let Some(p) = player {
         let n0 = verts.len();
-        crate::render::player::push(&mut verts, &mut idxs, &p.root, &p.pose, p.held);
+        crate::render::player::push(&mut verts, &mut idxs, &p.root, &p.pose, p.held, &p.worn);
         lit(&mut verts, n0, lv, p.at);
     }
     // The first-person hand (`ItemRenderer`), in the first-person view only.
@@ -378,87 +378,257 @@ fn push_model_box(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, m: &Mat4, min: [f32
     }
 }
 
-/// One model box: (min, size, rotation point, rotation x/y/z, swing phase + amplitude, wool colour or `ME`), in model pixels.
-type Part = ([f32; 3], [f32; 3], [f32; 3], [f32; 3], [f32; 2], u8);
-const ME: u8 = 255;
+/// One model box: (min, size, rotation point, rotation x/y/z, swing phase + amplitude, texture), in model pixels.
+type Part = ([f32; 3], [f32; 3], [f32; 3], [f32; 3], [f32; 2], Tx);
+/// `ModelRenderer.setTextureOffset`, `addBox`'s inflation and `mirror` of one box.
+#[derive(Clone, Copy)]
+struct Tx {
+    o: (f32, f32),
+    grow: f32,
+    mirror: bool,
+}
 use std::f32::consts::{FRAC_PI_2 as Q, FRAC_PI_4 as E, PI};
 
-fn pt(min: [f32; 3], size: [f32; 3], rp: [f32; 3], rot: [f32; 3], sw: [f32; 2], col: u8) -> Part {
-    (min, size, rp, rot, sw, col)
+fn pt(min: [f32; 3], size: [f32; 3], rp: [f32; 3], rot: [f32; 3], sw: [f32; 2], o: (f32, f32)) -> Part {
+    (min, size, rp, rot, sw, Tx { o, grow: 0.0, mirror: false })
 }
 
-/// `ModelQuadruped`: head, the body lying down, four legs (`cos(limb x 0.6662 + phase) x 1.4 x amount`); one leg length `l`.
-fn quad(head: ([f32; 3], [f32; 3], [f32; 3]), body: ([f32; 3], [f32; 3], [f32; 3]), l: f32, x: f32, back: f32, front: f32, col: [u8; 3]) -> Vec<Part> {
-    let leg = |rx: f32, z: f32, ph: f32| pt([-2.0, 0.0, -2.0], [4.0, l, 4.0], [rx, 24.0 - l, z], [0.0; 3], [ph, 1.4], col[2]);
+/// `addBox`'s inflation `g` on a box.
+fn grown(mut p: Part, g: f32) -> Part {
+    p.5.grow = g;
+    p
+}
+
+/// A mirrored box (`ModelRenderer.mirror`, the left limbs of `ModelBiped`).
+fn mirrored(mut p: Part) -> Part {
+    p.5.mirror = true;
+    p
+}
+
+/// `ModelQuadruped`: head, the body lying down, four legs (`cos(limb x 0.6662 + phase) x 1.4 x amount`); one leg length `l`. `tex` is the
+/// texture offset of the head and of the body; the legs are at (0, 16).
+fn quad(head: ([f32; 3], [f32; 3], [f32; 3]), body: ([f32; 3], [f32; 3], [f32; 3]), l: f32, x: f32, back: f32, front: f32, tex: [(f32, f32); 2]) -> Vec<Part> {
+    let leg = |rx: f32, z: f32, ph: f32| pt([-2.0, 0.0, -2.0], [4.0, l, 4.0], [rx, 24.0 - l, z], [0.0; 3], [ph, 1.4], (0.0, 16.0));
     vec![
-        pt(head.0, head.1, head.2, [0.0; 3], [0.0; 2], col[0]),
-        pt(body.0, body.1, body.2, [Q, 0.0, 0.0], [0.0; 2], col[1]),
+        pt(head.0, head.1, head.2, [0.0; 3], [0.0; 2], tex[0]),
+        pt(body.0, body.1, body.2, [Q, 0.0, 0.0], [0.0; 2], tex[1]),
         leg(-x, back, 0.0), leg(x, back, PI), leg(-x, front, PI), leg(x, front, 0.0),
     ]
 }
 
-/// `ModelBiped`-shaped (zombie, skeleton, giant): arms `w` wide, raised when `raised` (`ModelZombie`).
+/// `ModelBiped`-shaped (zombie, skeleton, giant): arms `w` wide, raised when `raised` (`ModelZombie`). Head (0, 0), body (16, 16),
+/// arms (40, 16), legs (0, 16); the left arm and leg are mirrored.
 fn biped(w: f32, raised: bool) -> Vec<Part> {
     let (o, a) = (if w == 4.0 { 0.0 } else { 1.0 }, if raised { -Q } else { 0.0 });
     let amp = if raised { 0.0 } else { 1.0 };
     vec![
-        pt([-4.0, -8.0, -4.0], [8.0, 8.0, 8.0], [0.0; 3], [0.0; 3], [0.0; 2], ME),
-        pt([-4.0, 0.0, -2.0], [8.0, 12.0, 4.0], [0.0; 3], [0.0; 3], [0.0; 2], ME),
-        pt([-3.0 + 2.0 * o, -2.0, -2.0 + o], [w, 12.0, w], [-5.0, 2.0, 0.0], [a, 0.0, 0.0], [PI, amp], ME),
-        pt([-1.0, -2.0, -2.0 + o], [w, 12.0, w], [5.0, 2.0, 0.0], [a, 0.0, 0.0], [0.0, amp], ME),
-        pt([-2.0 + o, 0.0, -2.0 + o], [w, 12.0, w], [-2.0, 12.0, 0.0], [0.0; 3], [0.0, 1.4], ME),
-        pt([-2.0 + o, 0.0, -2.0 + o], [w, 12.0, w], [2.0, 12.0, 0.0], [0.0; 3], [PI, 1.4], ME),
+        pt([-4.0, -8.0, -4.0], [8.0, 8.0, 8.0], [0.0; 3], [0.0; 3], [0.0; 2], (0.0, 0.0)),
+        pt([-4.0, 0.0, -2.0], [8.0, 12.0, 4.0], [0.0; 3], [0.0; 3], [0.0; 2], (16.0, 16.0)),
+        pt([-3.0 + 2.0 * o, -2.0, -2.0 + o], [w, 12.0, w], [-5.0, 2.0, 0.0], [a, 0.0, 0.0], [PI, amp], (40.0, 16.0)),
+        mirrored(pt([-1.0, -2.0, -2.0 + o], [w, 12.0, w], [5.0, 2.0, 0.0], [a, 0.0, 0.0], [0.0, amp], (40.0, 16.0))),
+        pt([-2.0 + o, 0.0, -2.0 + o], [w, 12.0, w], [-2.0, 12.0, 0.0], [0.0; 3], [0.0, 1.4], (0.0, 16.0)),
+        mirrored(pt([-2.0 + o, 0.0, -2.0 + o], [w, 12.0, w], [2.0, 12.0, 0.0], [0.0; 3], [PI, 1.4], (0.0, 16.0))),
     ]
+}
+
+/// How many of the first parts hang from the head's pivot and follow its dip (`head_dip`): the cow's horns, the hen's bill and chin.
+fn head_n(kind: Kind) -> usize {
+    match kind {
+        Cow | Chicken => 3,
+        Pig | Sheep => 1,
+        _ => 0,
+    }
+}
+
+/// `ModelWolf`, standing or sitting (`setLivingAnimations`); the tail angle is `EntityWolf.setTailRotation`.
+fn wolf(m: &Mob) -> Vec<Part> {
+    let tail = if m.anger > 0 { PI * 0.49 } else if m.tame { (0.55 - (20 - m.health).clamp(0, 20) as f32 * 0.02) * PI } else { PI * 0.2 };
+    let head = |min: [f32; 3], size: [f32; 3], rp: [f32; 3], o: (f32, f32)| pt(min, size, rp, [0.0; 3], [0.0; 2], o);
+    let leg = |x: f32, y: f32, z: f32, rx: f32, ph: f32, amp: f32| pt([-1.0, 0.0, -1.0], [2.0, 8.0, 2.0], [x, y, z], [rx, 0.0, 0.0], [ph, amp], (0.0, 18.0));
+    let h = [-1.0, 13.5, -7.0];
+    let mut v = vec![
+        head([-3.0, -3.0, -2.0], [6.0, 6.0, 4.0], h, (0.0, 0.0)),
+        head([-3.0, -5.0, 0.0], [2.0, 2.0, 1.0], h, (16.0, 14.0)),
+        head([1.0, -5.0, 0.0], [2.0, 2.0, 1.0], h, (16.0, 14.0)),
+        head([-2.0, 0.0, -5.0], [3.0, 3.0, 4.0], [-0.5, 13.5, -7.0], (0.0, 10.0)),
+    ];
+    if m.sitting {
+        v.extend([
+            pt([-4.0, -2.0, -3.0], [6.0, 9.0, 6.0], [0.0, 18.0, 0.0], [PI * 0.25, 0.0, 0.0], [0.0; 2], (18.0, 14.0)),
+            pt([-4.0, -3.0, -3.0], [8.0, 6.0, 7.0], [-1.0, 16.0, -3.0], [PI * 0.4, 0.0, 0.0], [0.0; 2], (21.0, 0.0)),
+            leg(-2.5, 22.0, 2.0, PI * 1.5, 0.0, 0.0),
+            leg(0.5, 22.0, 2.0, PI * 1.5, 0.0, 0.0),
+            leg(-2.49, 17.0, -4.0, PI * 1.85, 0.0, 0.0),
+            leg(0.51, 17.0, -4.0, PI * 1.85, 0.0, 0.0),
+            pt([-1.0, 0.0, -1.0], [2.0, 8.0, 2.0], [-1.0, 21.0, 6.0], [tail, 0.0, 0.0], [0.0; 2], (9.0, 18.0)),
+        ]);
+    } else {
+        v.extend([
+            pt([-4.0, -2.0, -3.0], [6.0, 9.0, 6.0], [0.0, 14.0, 2.0], [Q, 0.0, 0.0], [0.0; 2], (18.0, 14.0)),
+            pt([-4.0, -3.0, -3.0], [8.0, 6.0, 7.0], [-1.0, 14.0, -3.0], [Q, 0.0, 0.0], [0.0; 2], (21.0, 0.0)),
+            leg(-2.5, 16.0, 7.0, 0.0, 0.0, 1.4),
+            leg(0.5, 16.0, 7.0, 0.0, PI, 1.4),
+            leg(-2.5, 16.0, -4.0, 0.0, PI, 1.4),
+            leg(0.5, 16.0, -4.0, 0.0, 0.0, 1.4),
+            pt([-1.0, 0.0, -1.0], [2.0, 8.0, 2.0], [-1.0, 12.0, 8.0], [tail, 0.0, 0.0], [0.0; 2], (9.0, 18.0)),
+        ]);
+    }
+    v
 }
 
 fn parts(m: &Mob) -> Vec<Part> {
     match m.kind {
-        Pig => quad(([-4.0, -4.0, -8.0], [8.0, 8.0, 8.0], [0.0, 12.0, -6.0]), ([-5.0, -10.0, -7.0], [10.0, 16.0, 8.0], [0.0, 11.0, 2.0]), 6.0, 3.0, 7.0, -5.0, [ME; 3]),
-        Cow => quad(([-4.0, -4.0, -6.0], [8.0, 8.0, 6.0], [0.0, 4.0, -8.0]), ([-6.0, -10.0, -7.0], [12.0, 18.0, 10.0], [0.0, 5.0, 2.0]), 12.0, 4.0, 7.0, -6.0, [ME; 3]),
-        // Sheep: the body is fleece, head and legs the grey skin.
-        Sheep => quad(([-3.0, -4.0, -6.0], [6.0, 6.0, 8.0], [0.0, 6.0, -8.0]), ([-4.0, -10.0, -7.0], [8.0, 16.0, 6.0], [0.0, 5.0, 2.0]), 12.0, 3.0, 7.0, -5.0, [8, 255, 8]),
-        Wolf => quad(([-3.0, -3.0, -4.0], [6.0, 6.0, 4.0], [0.0, 13.5, -7.0]), ([-3.0, -3.0, -3.0], [6.0, 9.0, 6.0], [0.0, 14.0, 2.0]), 8.0, 2.0, 7.0, -4.0, [ME; 3]),
+        Pig => quad(([-4.0, -4.0, -8.0], [8.0, 8.0, 8.0], [0.0, 12.0, -6.0]), ([-5.0, -10.0, -7.0], [10.0, 16.0, 8.0], [0.0, 11.0, 2.0]), 6.0, 3.0, 7.0, -5.0, [(0.0, 0.0), (28.0, 8.0)]),
+        // `ModelCow`: the horns (22, 0) follow the head, the udder (52, 0) hangs under the back of the body.
+        Cow => {
+            let mut v = quad(([-4.0, -4.0, -6.0], [8.0, 8.0, 6.0], [0.0, 4.0, -8.0]), ([-6.0, -10.0, -7.0], [12.0, 18.0, 10.0], [0.0, 5.0, 2.0]), 12.0, 4.0, 7.0, -6.0, [(0.0, 0.0), (18.0, 4.0)]);
+            v.insert(1, pt([-4.0, -5.0, -4.0], [1.0, 3.0, 1.0], [0.0, 3.0, -7.0], [0.0; 3], [0.0; 2], (22.0, 0.0)));
+            v.insert(2, pt([3.0, -5.0, -4.0], [1.0, 3.0, 1.0], [0.0, 3.0, -7.0], [0.0; 3], [0.0; 2], (22.0, 0.0)));
+            v.push(pt([-2.0, -3.0, 0.0], [4.0, 6.0, 2.0], [0.0, 14.0, 6.0], [Q, 0.0, 0.0], [0.0; 2], (52.0, 0.0)));
+            v
+        }
+        // `ModelSheep2`: the skin (head, body, legs) under the fleece of `fur`.
+        Sheep => quad(([-3.0, -4.0, -6.0], [6.0, 6.0, 8.0], [0.0, 6.0, -8.0]), ([-4.0, -10.0, -7.0], [8.0, 16.0, 6.0], [0.0, 5.0, 2.0]), 12.0, 3.0, 7.0, -5.0, [(0.0, 0.0), (28.0, 8.0)]),
+        Wolf => wolf(m),
+        // `ModelChicken`: head, bill and chin hang from one pivot.
         Chicken => vec![
-            pt([-2.0, -6.0, -2.0], [4.0, 6.0, 3.0], [0.0, 15.0, -4.0], [0.0; 3], [0.0; 2], ME),
-            pt([-2.0, -4.0, -4.0], [4.0, 2.0, 2.0], [0.0, 15.0, -4.0], [0.0; 3], [0.0; 2], 4),
-            pt([-3.0, -4.0, -3.0], [6.0, 8.0, 6.0], [0.0, 16.0, 0.0], [Q, 0.0, 0.0], [0.0; 2], ME),
-            pt([-1.0, 0.0, -3.0], [3.0, 5.0, 3.0], [-2.0, 19.0, 1.0], [0.0; 3], [0.0, 1.4], 4),
-            pt([-1.0, 0.0, -3.0], [3.0, 5.0, 3.0], [1.0, 19.0, 1.0], [0.0; 3], [PI, 1.4], 4),
-            pt([0.0, 0.0, -3.0], [1.0, 4.0, 6.0], [-4.0, 13.0, 0.0], [0.0; 3], [0.0; 2], ME),
-            pt([0.0, 0.0, -3.0], [1.0, 4.0, 6.0], [3.0, 13.0, 0.0], [0.0; 3], [0.0; 2], ME),
+            pt([-2.0, -6.0, -2.0], [4.0, 6.0, 3.0], [0.0, 15.0, -4.0], [0.0; 3], [0.0; 2], (0.0, 0.0)),
+            pt([-2.0, -4.0, -4.0], [4.0, 2.0, 2.0], [0.0, 15.0, -4.0], [0.0; 3], [0.0; 2], (14.0, 0.0)),
+            pt([-1.0, -2.0, -3.0], [2.0, 2.0, 2.0], [0.0, 15.0, -4.0], [0.0; 3], [0.0; 2], (14.0, 4.0)),
+            pt([-3.0, -4.0, -3.0], [6.0, 8.0, 6.0], [0.0, 16.0, 0.0], [Q, 0.0, 0.0], [0.0; 2], (0.0, 9.0)),
+            pt([-1.0, 0.0, -3.0], [3.0, 5.0, 3.0], [-2.0, 19.0, 1.0], [0.0; 3], [0.0, 1.4], (26.0, 0.0)),
+            pt([-1.0, 0.0, -3.0], [3.0, 5.0, 3.0], [1.0, 19.0, 1.0], [0.0; 3], [PI, 1.4], (26.0, 0.0)),
+            pt([0.0, 0.0, -3.0], [1.0, 4.0, 6.0], [-4.0, 13.0, 0.0], [0.0; 3], [0.0; 2], (24.0, 13.0)),
+            pt([-1.0, 0.0, -3.0], [1.0, 4.0, 6.0], [4.0, 13.0, 0.0], [0.0; 3], [0.0; 2], (24.0, 13.0)),
         ],
         Squid => {
-            let mut v = vec![pt([-6.0, -8.0, -6.0], [12.0, 16.0, 12.0], [0.0, 8.0, 0.0], [0.0; 3], [0.0; 2], ME)];
+            let mut v = vec![pt([-6.0, -8.0, -6.0], [12.0, 16.0, 12.0], [0.0, 8.0, 0.0], [0.0; 3], [0.0; 2], (0.0, 0.0))];
             v.extend((0..8).map(|i| {
                 let a = i as f32 * E;
-                pt([-1.0, 0.0, -1.0], [2.0, 18.0, 2.0], [a.cos() * 5.0, 15.0, a.sin() * 5.0], [0.0; 3], [0.0; 2], ME)
+                pt([-1.0, 0.0, -1.0], [2.0, 18.0, 2.0], [a.cos() * 5.0, 15.0, a.sin() * 5.0], [0.0, -a + Q, 0.0], [0.0; 2], (48.0, 0.0))
             }));
             v
         }
         Zombie | PigZombie | Giant => biped(4.0, true),
         Skeleton => biped(2.0, false),
+        // `ModelCreeper` (b1.7.3's `var2` is 4: the legs end 2 px above the model's ground line).
         Creeper => {
-            let leg = |x: f32, z: f32, ph: f32| pt([-2.0, 0.0, -2.0], [4.0, 6.0, 4.0], [x, 18.0, z], [0.0; 3], [ph, 1.4], ME);
+            let leg = |x: f32, z: f32, ph: f32| pt([-2.0, 0.0, -2.0], [4.0, 6.0, 4.0], [x, 16.0, z], [0.0; 3], [ph, 1.4], (0.0, 16.0));
             vec![
-                pt([-4.0, -8.0, -4.0], [8.0, 8.0, 8.0], [0.0, 4.0, 0.0], [0.0; 3], [0.0; 2], ME),
-                pt([-4.0, 0.0, -2.0], [8.0, 12.0, 4.0], [0.0, 4.0, 0.0], [0.0; 3], [0.0; 2], ME),
+                pt([-4.0, -8.0, -4.0], [8.0, 8.0, 8.0], [0.0, 4.0, 0.0], [0.0; 3], [0.0; 2], (0.0, 0.0)),
+                pt([-4.0, 0.0, -2.0], [8.0, 12.0, 4.0], [0.0, 4.0, 0.0], [0.0; 3], [0.0; 2], (16.0, 16.0)),
                 leg(-2.0, 4.0, 0.0), leg(2.0, 4.0, PI), leg(-2.0, -4.0, PI), leg(2.0, -4.0, 0.0),
             ]
         }
         Spider => {
             let mut v = vec![
-                pt([-4.0, -4.0, -8.0], [8.0, 8.0, 8.0], [0.0, 15.0, -3.0], [0.0; 3], [0.0; 2], ME),
-                pt([-3.0, -3.0, -3.0], [6.0, 6.0, 6.0], [0.0, 15.0, 0.0], [0.0; 3], [0.0; 2], ME),
-                pt([-5.0, -4.0, -6.0], [10.0, 8.0, 12.0], [0.0, 15.0, 9.0], [0.0; 3], [0.0; 2], ME),
+                pt([-4.0, -4.0, -8.0], [8.0, 8.0, 8.0], [0.0, 15.0, -3.0], [0.0; 3], [0.0; 2], (32.0, 4.0)),
+                pt([-3.0, -3.0, -3.0], [6.0, 6.0, 6.0], [0.0, 15.0, 0.0], [0.0; 3], [0.0; 2], (0.0, 0.0)),
+                pt([-5.0, -4.0, -6.0], [10.0, 8.0, 12.0], [0.0, 15.0, 9.0], [0.0; 3], [0.0; 2], (0.0, 12.0)),
             ];
             let (ry, rz) = ([E, -E, E / 2.0, -E / 2.0, -E / 2.0, E / 2.0, -E, E], [-E, E, -0.58, 0.58, -0.58, 0.58, -E, E]);
             v.extend((0..8).map(|i| {
                 let left = i % 2 == 1;
-                pt([if left { -1.0 } else { -15.0 }, -1.0, -1.0], [16.0, 2.0, 2.0], [if left { 4.0 } else { -4.0 }, 15.0, 2.0 - (i / 2) as f32], [0.0, ry[i], rz[i]], [0.0; 2], ME)
+                pt([if left { -1.0 } else { -15.0 }, -1.0, -1.0], [16.0, 2.0, 2.0], [if left { 4.0 } else { -4.0 }, 15.0, 2.0 - (i / 2) as f32], [0.0, ry[i], rz[i]], [0.0; 2], (18.0, 0.0))
             }));
             v
         }
-        Slime => vec![pt([-5.0, 14.0, -5.0], [10.0, 10.0, 10.0], [0.0; 3], [0.0; 3], [0.0; 2], ME)],
+        // `ModelSlime(16)`: the core, the eyes and the mouth. ponytail: the outer jelly layer (`ModelSlime(0)`, a translucent pass) is not
+        // drawn: the entity pass has no blending, and at 78% alpha it would hide the face.
+        Slime => vec![
+            pt([-3.0, 17.0, -3.0], [6.0, 6.0, 6.0], [0.0; 3], [0.0; 3], [0.0; 2], (0.0, 16.0)),
+            pt([-3.25, 18.0, -3.5], [2.0, 2.0, 2.0], [0.0; 3], [0.0; 3], [0.0; 2], (32.0, 0.0)),
+            pt([1.25, 18.0, -3.5], [2.0, 2.0, 2.0], [0.0; 3], [0.0; 3], [0.0; 2], (32.0, 4.0)),
+            pt([0.0, 21.0, -3.5], [1.0, 1.0, 1.0], [0.0; 3], [0.0; 3], [0.0; 2], (32.0, 8.0)),
+        ],
+    }
+}
+
+/// `ModelSheep1`, the fleece pass (`RenderSheep.setWoolColorAndRender`): the same pose on inflated head, body and upper legs, from
+/// `mob/sheep_fur.png`. Empty for a shorn sheep.
+fn fur(m: &Mob) -> Vec<Part> {
+    if m.kind != Sheep || m.sheared {
+        return Vec::new();
+    }
+    let leg = |x: f32, z: f32, ph: f32| grown(pt([-2.0, 0.0, -2.0], [4.0, 6.0, 4.0], [x, 12.0, z], [0.0; 3], [ph, 1.4], (0.0, 16.0)), 0.5);
+    vec![
+        grown(pt([-3.0, -4.0, -4.0], [6.0, 6.0, 6.0], [0.0, 6.0, -8.0], [0.0; 3], [0.0; 2], (0.0, 0.0)), 0.6),
+        grown(pt([-4.0, -10.0, -7.0], [8.0, 16.0, 6.0], [0.0, 5.0, 2.0], [Q, 0.0, 0.0], [0.0; 2], (28.0, 8.0)), 1.75),
+        leg(-3.0, 7.0, 0.0), leg(3.0, 7.0, PI), leg(-3.0, -5.0, PI), leg(3.0, -5.0, 0.0),
+    ]
+}
+
+/// The skin texture slot of `m` (`Entity.texture`; the wolf's changes with `EntityWolf.getEntityTexture`).
+fn skin_of(m: &Mob) -> u8 {
+    use crate::render::atlas::skin;
+    match m.kind {
+        Pig => skin::PIG,
+        Cow => skin::COW,
+        Chicken => skin::CHICKEN,
+        Sheep => skin::SHEEP,
+        Wolf if m.tame => skin::WOLF_TAME,
+        Wolf if m.anger > 0 => skin::WOLF_ANGRY,
+        Wolf => skin::WOLF,
+        Squid => skin::SQUID,
+        Zombie | Giant => skin::ZOMBIE,
+        PigZombie => skin::PIGZOMBIE,
+        Skeleton => skin::SKELETON,
+        Creeper => skin::CREEPER,
+        Spider => skin::SPIDER,
+        Slime => skin::SLIME,
+    }
+}
+
+/// `EntitySheep.fleeceColorTable` as a vertex tint.
+fn fleece(color: u8) -> f32 {
+    const T: [[f32; 3]; 16] = [
+        [1.0, 1.0, 1.0], [0.95, 0.7, 0.2], [0.9, 0.5, 0.85], [0.6, 0.7, 0.95], [0.9, 0.9, 0.2], [0.5, 0.8, 0.1], [0.95, 0.7, 0.8], [0.3, 0.3, 0.3],
+        [0.6, 0.6, 0.6], [0.3, 0.6, 0.7], [0.7, 0.4, 0.9], [0.2, 0.4, 0.8], [0.5, 0.4, 0.3], [0.4, 0.5, 0.2], [0.8, 0.3, 0.3], [0.1, 0.1, 0.1],
+    ];
+    let c = T[color as usize & 15];
+    tint(c[0], c[1], c[2])
+}
+
+/// A vertex tint (`mesh::WHITE`'s packing) from linear 0..1 channels.
+fn tint(r: f32, g: f32, b: f32) -> f32 {
+    let q = |c: f32| (c.clamp(0.0, 1.0) * 255.0).round() as u32;
+    ((q(r) << 16) | (q(g) << 8) | q(b)) as f32
+}
+
+/// `ModelRenderer.addBox` + `TexturedQuad` for a 64 x 32 skin in atlas slot `slot` (`push_model_box`'s unwrap, plus the inflation and
+/// the mirror of `ModelRenderer`): the box at `min` with `size` in model pixels through `m`, both windings, multiplied by `tint`.
+fn push_skin_box(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, m: &Mat4, min: [f32; 3], size: [f32; 3], t: Tx, slot: u8, tint: f32) {
+    let g = t.grow;
+    let (mut x1, y1, z1) = (min[0] - g, min[1] - g, min[2] - g);
+    let (mut x2, y2, z2) = (min[0] + size[0] + g, min[1] + size[1] + g, min[2] + size[2] + g);
+    if t.mirror {
+        std::mem::swap(&mut x1, &mut x2);
+    }
+    let (dx, dy, dz, ox, oy) = (size[0], size[1], size[2], t.o.0, t.o.1);
+    let c = [[x1, y1, z1], [x2, y1, z1], [x2, y2, z1], [x1, y2, z1], [x1, y1, z2], [x2, y1, z2], [x2, y2, z2], [x1, y2, z2]];
+    let faces: [([usize; 4], [f32; 4]); 6] = [
+        ([5, 1, 2, 6], [ox + dz + dx, oy + dz, ox + dz + dx + dz, oy + dz + dy]),
+        ([0, 4, 7, 3], [ox, oy + dz, ox + dz, oy + dz + dy]),
+        ([5, 4, 0, 1], [ox + dz, oy, ox + dz + dx, oy + dz]),
+        ([2, 3, 7, 6], [ox + dz + dx, oy, ox + dz + dx + dx, oy + dz]),
+        ([1, 0, 3, 2], [ox + dz, oy + dz, ox + dz + dx, oy + dz + dy]),
+        ([4, 5, 6, 7], [ox + dz + dx + dz, oy + dz, ox + dz + dx + dz + dx, oy + dz + dy]),
+    ];
+    for (vi, [u0, v0, u1, v1]) in faces {
+        let base = verts.len() as u32 / VF as u32;
+        let mut q: [(Vec3, (f32, f32)); 4] = [(Vec3::ZERO, (0.0, 0.0)); 4];
+        let uv = [(u1 - 0.1, v0 + 0.1), (u0 + 0.1, v0 + 0.1), (u0 + 0.1, v1 - 0.1), (u1 - 0.1, v1 - 0.1)];
+        for k in 0..4 {
+            q[k] = (m.transform_point3(Vec3::from(c[vi[k]])), uv[k]);
+        }
+        if t.mirror {
+            q.reverse(); // `flipFace`
+        }
+        for (p, uv) in q {
+            let (au, av) = atlas::skin_px(slot, uv.0, uv.1);
+            verts.extend_from_slice(&[p.x, p.y, p.z, au, av, 1.0, lm(15, 0), tint]);
+        }
+        idxs.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3, base, base + 2, base + 1, base, base + 3, base + 2]);
     }
 }
 
@@ -513,12 +683,12 @@ fn push_boat(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, b: &Boat, a: f32) {
     }
 }
 
-/// The parts of `parts(m)` that are the head: the first one, and a hen's beak; a squid and a slime have none.
+/// The parts of `parts(m)` that are the head: those on its pivot (`head_n`: a cow's horns, a hen's bill and chin), else the first one; a squid and a slime have none.
 fn is_head(k: crate::world::mobs::Kind, i: usize) -> bool {
-    match k {
-        Squid | Slime => false,
-        Chicken => i < 2,
-        _ => i == 0,
+    i < match k {
+        Squid | Slime => 0,
+        Cow | Chicken => head_n(k),
+        _ => 1,
     }
 }
 
@@ -546,33 +716,38 @@ fn head_dip(m: &Mob, head: &Part) -> Option<(f32, f32)> {
     Some((a, (GROUND - rp[1] - low).max(0.0) * m.head))
 }
 
-/// Mobs drawn like `RenderLiving`: turned to face their yaw, scaled 1/16 (times `size`) and flipped upside down (model y
+/// Mobs drawn like `RenderLiving`: turned to face their body (`body_yaw`), scaled 1/16 (times `size`) and flipped upside down (model y
 /// points down), 24 px above the ground; parts turn about their rotation point, x then y then z, legs and arms swinging
-/// with `limb`. UNVERIFIED stand-ins: one flat wool colour per kind (`mobs::spec`), red (wool 14) while hurt, white while a
-/// creeper's fuse burns; the real textures come with M14.
+/// with `limb`; each from the mob's own skin (`skin_of`), a sheep's fleece as a second pass (`fur`) tinted by its colour. UNVERIFIED
+/// stand-ins: a hurt mob is tinted red (the Java blends a red overlay), a creeper's burning fuse flashes flat white.
 fn push_mob(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, m: &Mob) {
     let feet = m.body.pos - Vec3::new(0.0, m.half.y, 0.0);
     let root = Mat4::from_translation(feet)
         * Mat4::from_rotation_y(PI - m.body_yaw.to_radians())
         * Mat4::from_scale(Vec3::new(-1.0, -1.0, 1.0) * m.size / 16.0)
         * Mat4::from_translation(Vec3::new(0.0, -23.875, 0.0));
-    let own = match m.kind {
-        Sheep if m.sheared => 8, // bare skin
-        Sheep => m.color,
-        k => crate::world::mobs::colour(k),
-    };
-    let tint = if m.hurt > 0 { Some(14) } else if m.fuse > 0 && m.fuse % 6 < 3 { Some(0) } else { None };
+    let flash = m.fuse > 0 && m.fuse % 6 < 3;
+    let red = if m.hurt > 0 { tint(1.0, 0.4, 0.4) } else { WHITE };
     let model = parts(m);
     let dip = model.first().and_then(|h| head_dip(m, h));
+    draw_parts(verts, idxs, m, &root, &model, skin_of(m), red, flash, dip);
+    let fleece_pass = fur(m);
+    if !fleece_pass.is_empty() {
+        let c = if m.hurt > 0 { tint(0.8, 0.3, 0.3) } else { fleece(m.color) };
+        draw_parts(verts, idxs, m, &root, &fleece_pass, atlas::skin::SHEEP_FUR, c, false, dip);
+    }
+}
+
+/// One pass of `push_mob`: `model` posed for `m` and drawn from skin `slot` (flat white for a `flash`).
+fn draw_parts(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, m: &Mob, root: &Mat4, model: &[Part], slot: u8, tint: f32, flash: bool, dip: Option<(f32, f32)>) {
     // `ModelBase.setRotationAngles` for the head: turned by how far the head (`yaw`) is from the body (`body_yaw`, at most 75 degrees) and
     // tipped by `head_pitch`; a head that grazes keeps only the dip. In this model space (y and x mirrored) a positive turn is the head's lead.
     let lead = crate::world::mobs::lead(m.yaw, m.body_yaw).to_radians();
     let tip = m.head_pitch * (1.0 - m.head);
-    for (i, (min, size, mut rp, rot, sw, col)) in model.into_iter().enumerate() {
-        let tile = stack_tile(ItemStack { id: 35, count: 1, damage: tint.unwrap_or(if col == ME { own } else { col }) as u16 });
+    for (i, &(min, size, mut rp, rot, sw, tx)) in model.iter().enumerate() {
         let mut rx = rot[0] + (m.limb * 0.6662 + sw[0]).cos() * sw[1] * m.limb_amt;
         let mut ry = rot[1];
-        // The head (and a hen's beak, part 1) hangs from the same pivot: it turns to lead the body, tips, and goes down when it grazes.
+        // The head and what hangs from its pivot (a cow's horns, a hen's bill and chin) lead the body, tip, and go down when it grazes.
         if is_head(m.kind, i) {
             (ry, rx) = (ry + lead, rx + tip);
             if let Some((a, shift)) = dip {
@@ -580,12 +755,17 @@ fn push_mob(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, m: &Mob) {
                 rp[1] += shift;
             }
         }
-        let mat = root * Mat4::from_translation(Vec3::from(rp)) * Mat4::from_rotation_z(rot[2]) * Mat4::from_rotation_y(ry) * Mat4::from_rotation_x(rx);
-        let n0 = verts.len();
-        push_box(verts, idxs, min, [min[0] + size[0], min[1] + size[1], min[2] + size[2]], tile, 1.0);
-        for v in verts[n0..].chunks_exact_mut(VF) {
-            let w = mat.transform_point3(Vec3::new(v[0], v[1], v[2]));
-            v[..3].copy_from_slice(&w.to_array());
+        let mat = *root * Mat4::from_translation(Vec3::from(rp)) * Mat4::from_rotation_z(rot[2]) * Mat4::from_rotation_y(ry) * Mat4::from_rotation_x(rx);
+        if flash {
+            let white = stack_tile(ItemStack { id: 35, count: 1, damage: 0 });
+            let n0 = verts.len();
+            push_box(verts, idxs, min, [min[0] + size[0], min[1] + size[1], min[2] + size[2]], white, 1.0);
+            for v in verts[n0..].chunks_exact_mut(VF) {
+                let w = mat.transform_point3(Vec3::new(v[0], v[1], v[2]));
+                v[..3].copy_from_slice(&w.to_array());
+            }
+        } else {
+            push_skin_box(verts, idxs, &mat, min, size, tx, slot, tint);
         }
     }
 }
@@ -611,6 +791,57 @@ mod tests {
         }
         let wolf = Mob::new(Wolf, 0.0, 0.0, 0.0, 0.0, &mut rng);
         assert!(head_dip(&wolf, &parts(&wolf)[0]).is_none());
+    }
+
+    /// Every box of every mob unwraps inside its 64 x 32 skin, and what `push_mob` draws reads that skin's atlas slot (not the flat strip,
+    /// not another skin); a sheep wears fleece until it is shorn; a wolf's skin follows its state.
+    #[test]
+    fn mob_boxes_unwrap_inside_their_skin() {
+        let mut rng = crate::world::gen::noise::JavaRandom::new(1);
+        for kind in [Pig, Cow, Sheep, Chicken, Wolf, Squid, Zombie, PigZombie, Giant, Skeleton, Creeper, Spider, Slime] {
+            let mut m = Mob::new(kind, 0.0, 0.0, 0.0, 0.0, &mut rng);
+            let mut boxes = parts(&m);
+            boxes.extend(fur(&m));
+            for (min, size, _, _, _, tx) in &boxes {
+                let (w, h) = (2.0 * (size[0] + size[2]), size[1] + size[2]);
+                assert!(tx.o.0 + w <= 64.0 && tx.o.1 + h <= 32.0, "{kind:?}: box {min:?} {size:?} at {:?} leaves the skin", tx.o);
+            }
+            let (mut v, mut i) = (Vec::new(), Vec::new());
+            push_mob(&mut v, &mut i, &m);
+            assert_eq!(v.len(), boxes.len() * 24 * VF, "{kind:?}: 24 vertices a box");
+            let slots: Vec<u8> = (0..26).collect();
+            for vert in v.chunks_exact(VF) {
+                let (x, y) = (vert[3] * atlas::ATLAS_W as f32, vert[4] * atlas::ATLAS_H as f32 - atlas::CHAR_Y as f32);
+                assert!(y >= 0.0, "{kind:?}: a vertex reads above the skins");
+                let slot = slots.iter().copied().find(|&s| x >= (s % 4) as f32 * 64.0 && x <= (s % 4) as f32 * 64.0 + 64.0 && y >= (s / 4) as f32 * 32.0 && y <= (s / 4) as f32 * 32.0 + 32.0).unwrap();
+                assert!(slot == skin_of(&m) || (kind == Sheep && slot == atlas::skin::SHEEP_FUR), "{kind:?}: read slot {slot}");
+            }
+            m.sheared = true;
+            assert!(fur(&m).is_empty());
+        }
+        let mut wolf = Mob::new(Wolf, 0.0, 0.0, 0.0, 0.0, &mut rng);
+        assert_eq!(skin_of(&wolf), atlas::skin::WOLF);
+        wolf.anger = 10;
+        assert_eq!(skin_of(&wolf), atlas::skin::WOLF_ANGRY);
+        wolf.tame = true;
+        assert_eq!(skin_of(&wolf), atlas::skin::WOLF_TAME, "tamed beats angry, as `EntityWolf.getEntityTexture`");
+        assert_eq!(parts(&wolf).len(), 11, "head, ears, snout, body, mane, four legs, tail");
+        wolf.sitting = true;
+        let sat = parts(&wolf);
+        assert!(sat[4].2[1] > 16.0 && sat[8].3[0] > 5.0, "the body sinks to 18 and the hind legs fold forward");
+        // Cow: head, two horns, body, four legs, udder; the horns follow the head's dip.
+        let cow = Mob::new(Cow, 0.0, 0.0, 0.0, 0.0, &mut rng);
+        assert_eq!((parts(&cow).len(), head_n(Cow)), (9, 3));
+    }
+
+    /// `tint` packs like `WHITE`; the fleece table and the red of a hurt mob go through it.
+    #[test]
+    fn tints_pack_like_white() {
+        assert_eq!(tint(1.0, 1.0, 1.0), WHITE);
+        assert_eq!(fleece(0), WHITE);
+        assert_eq!(fleece(15), tint(0.1, 0.1, 0.1));
+        assert_eq!(tint(1.0, 0.0, 0.0), 16_711_680.0);
+        assert_eq!(fleece(16), fleece(0), "the colour is a nibble");
     }
 
     fn text() -> Text {

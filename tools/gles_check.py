@@ -13,7 +13,7 @@ def splice(s):
     return (s.replace("@TW@", "16").replace("@TH@", "%d" % (ATLAS_H // 16)).replace("@MIPS@", "3").replace("@IY@", "288")
             .replace("@CY@", "%d" % CHAR_Y).replace("@AW@", "256").replace("@AH@", "%d" % ATLAS_H)
             .replace("@SB@", repr(0.5 ** 2.2)).replace("@SZ@", repr(0.8 ** 2.2)).replace("@SX@", repr(0.6 ** 2.2)))
-ITEMS_Y = 288; ART_Y = ITEMS_Y + 256; SIGN_Y = ART_Y + 256; CHAR_Y = SIGN_Y + 32; ATLAS_H = ART_Y + 320
+ITEMS_Y = 288; ART_Y = ITEMS_Y + 256; SIGN_Y = ART_Y + 256; CHAR_Y = SIGN_Y + 32; ATLAS_H = ART_Y + 512
 progs = {}
 for name, defs, frag in [("solid", "#define COMPACT\n", "#define FS_SOLID\n"), ("cutout", "#define COMPACT\n", "#define FS_CUT\n"),
                          ("entity", "", "#define FS_CUT_FLAT\n"), ("lod", "", "#define FS_CUT_FLAT\n"),
@@ -25,7 +25,7 @@ present_fs = [r for r in raw if "enhanced" in r][0]
 for fxaa, fast in [(1, 0), (0, 0), (0, 1)]:
     progs[f"present_{fxaa}{fast}"] = (HEAD_V + FULL_VS, HEAD_F + f"#define FXAA {fxaa}\n#define FAST {fast}\n" + present_fs)
 hv = [r for r in raw if "a_pos" in r][0]
-hf = fmt([r for r in raw if "SHEET" in r][0]).replace("{sheet_h:.1}", "2672.0")
+hf = fmt([r for r in raw if "SHEET" in r][0]).replace("{sheet_h:.1}", "2864.0")
 progs["hud"] = (HEAD_V + hv, HEAD_F + hf)
 pv = [r for r in raw if "u_t.xy" in r][0]; pf = [r for r in raw if "sampler2DArray u_tex" in r][0]
 progs["pano"] = (HEAD_V + pv, HEAD_F + pf)
