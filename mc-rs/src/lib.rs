@@ -805,6 +805,7 @@ impl App {
         let light = |x: i32, y: i32, z: i32| self.chunks.light(x, y, z);
         let ctx = Ctx { get: &get, light: &light, day: sub < 4, player: self.player.pos, eye: self.camera.pos };
         self.mobs.difficulty = self.opts.difficulty;
+        self.mobs.smart = self.opts.animal_ai;
         for e in self.mobs.update(dt, &ctx, &mut self.drops) {
             match e {
                 // `EntityPlayer.attackEntityFrom`: Peaceful 0, Easy d / 3 + 1, Hard d * 3 / 2.
@@ -1567,7 +1568,9 @@ impl App {
             for (x, z) in self.fx.storm(centre) {
                 let y = self.chunks.top_solid(x, z);
                 if y >= 0 && self.chunks.biomes(x, z, 1, 1)[0].rains() {
-                    self.fx.strike(glam::Vec3::new(x as f32, y as f32, z as f32));
+                    let at = glam::Vec3::new(x as f32, y as f32, z as f32);
+                    self.fx.strike(at);
+                    self.fx.clap(at, self.camera.pos);
                 }
             }
         }
@@ -1580,6 +1583,28 @@ impl App {
             }
             for m in self.mobs.list.iter_mut().filter(|m| effects::struck(b, m.body.pos, m.half)) {
                 m.damage(5, b, &mut self.mobs.rng); // ponytail: through `damage`, so it also knocks back; no burning
+            }
+        }
+        // The rain you hear: a patter clip every few ticks where it rains (not snow, not in the Nether), dull under a roof, none deep down.
+        let (px, pz) = (self.player.pos.x.floor() as i32, self.player.pos.z.floor() as i32);
+        let roof = self.chunks.top_solid(px, pz) as f32 - self.camera.pos.y;
+        if !self.nether && self.weather.rain(1.0) > 0.2 {
+            if let Some((vol, pitch)) = self.fx.patter(self.weather.rain(1.0), roof) {
+                if self.chunks.biomes(px, pz, 1, 1)[0].rains() {
+                    self.audio.play_here("ambient.weather.rain", vol, pitch);
+                }
+            }
+        }
+        // `EntityLightningBolt`: thunder (pitch 0.8 + 0.2 r) and, for a near bolt, a crack (`random.explode`, 0.5 + 0.2 r). Vanilla plays the
+        // thunder at volume 10000, the same loudness everywhere; 12 dies out over about 190 blocks, so a far storm is a quiet rumble.
+        // Through a roof it is quieter and lower (`effects::muffle`).
+        let m = effects::muffle(roof);
+        for c in self.fx.heard() {
+            let r = self.mobs.rng.next_float();
+            self.audio.play_gain("ambient.weather.thunder", c.at, 12.0, (0.8 + r * 0.2) * (0.7 + 0.3 * m), m);
+            if c.dist < 40.0 {
+                self.audio.play_gain("random.explode", c.at, 2.0, (0.5 + r * 0.2) * (0.7 + 0.3 * m), m);
+                self.touch.pad.rumble(250, (80.0 + 175.0 * (1.0 - c.dist / 40.0)) as u8);
             }
         }
         // Spawners see the same world as the mobs do (plants read as air).
@@ -2146,7 +2171,7 @@ impl App {
         self.build_hud();
         // The look (`render::look`): the grade, the light's tones, the water, the sway; then the halos and motes it allows, capped.
         let sun_v = sky::sun_dir(angle);
-        let look = Look::new(&self.opts.look, &look::Env { sun: sun_v, rain, seconds: self.world_ticks as f32 / 20.0, nether: self.nether, underwater: eye_in_water });
+        let look = Look::new(&self.opts.look, &look::Env { sun: sun_v, rain, seconds: self.world_ticks as f32 / 20.0, nether: self.nether, underwater: eye_in_water, bolt: self.fx.light(partial) });
         let glow_indices = {
             let dt = Instant::now().duration_since(self.frame_prev).as_secs_f32().min(0.25);
             let mut quads = Vec::new();

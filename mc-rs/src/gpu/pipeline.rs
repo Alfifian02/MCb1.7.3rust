@@ -117,18 +117,20 @@ pub struct Uniforms {
     pub sun: [f32; 4],
     /// x: seconds, y: water depth gradient, z: leaf sway (blocks).
     pub fx: [f32; 4],
+    /// `Effects::light`: xyz where the last bolt shines from, w how bright it flashes now (0 = none, the shaders skip it).
+    pub bolt: [f32; 4],
 }
 
 impl Uniforms {
     /// The look's four blocks (`Look::OFF` leaves every shader as it was).
     pub fn with_look(mut self, l: &Look) -> Self {
-        (self.warm, self.cool, self.sun, self.fx) = (l.warm, l.cool, l.sun, l.fx);
+        (self.warm, self.cool, self.sun, self.fx, self.bolt) = (l.warm, l.cool, l.sun, l.fx, l.bolt);
         self
     }
 }
 
 const SHADER_SRC: &str = r#"
-struct U { vp: mat4x4<f32>, eye: vec4<f32>, fog: vec4<f32>, fogp: vec4<f32>, warm: vec4<f32>, cool: vec4<f32>, sun: vec4<f32>, fx: vec4<f32> };
+struct U { vp: mat4x4<f32>, eye: vec4<f32>, fog: vec4<f32>, fogp: vec4<f32>, warm: vec4<f32>, cool: vec4<f32>, sun: vec4<f32>, fx: vec4<f32>, bolt: vec4<f32> };
 @group(0) @binding(0) var<uniform> u: U;
 @group(0) @binding(1) var samp: sampler;
 @group(0) @binding(2) var tex: texture_2d<f32>;
@@ -207,6 +209,15 @@ fn brightness(sky: f32, blk: f32) -> f32 {
     return (l / (4.0 - 3.0 * l)) * 0.95 + 0.05;
 }
 
+// A lightning bolt's light (`u.bolt`, `Effects::light`): a floor everywhere (a flash lights the whole land) and a falloff to 96 blocks round the strike,
+// pulling `lit` towards 1 so shadow and night go bright; `shade` keeps the faces turned from the sky a little darker. UNVERIFIED by eye.
+// ponytail: per vertex, no face normal towards the bolt, one white light (a merged 16 x 16 quad interpolates between its corners).
+fn bolt_lit(lit: f32, wp: vec3<f32>, shade: f32) -> f32 {
+    if u.bolt.w <= 0.0 { return lit; }
+    let f = clamp(1.0 - length(wp - u.bolt.xyz) / 96.0, 0.0, 1.0);
+    return lit + (1.0 - lit) * u.bolt.w * (0.15 + 0.7 * f * f) * shade;
+}
+
 fn vert(vpos: vec3<f32>, vuv: vec2<f32>, vlight: f32, vlm: f32, vtint: f32, water: bool) -> VsOut {
     var o: VsOut;
     let tp = u32(vtint); // exact: the packed colour is an integer below 2^24 (`+ 0.5` would round `WHITE` up to 2^24 = black)
@@ -219,11 +230,11 @@ fn vert(vpos: vec3<f32>, vuv: vec2<f32>, vlight: f32, vlm: f32, vtint: f32, wate
     if vlm >= 256.0 && !water { // smooth vertex (`mesh::SMOOTH_LM`): sky in quarter levels, block in half levels, `light` = shade x ambient occlusion
         let v = vlm - 256.0;
         let s = floor(v / 32.0 + 0.001);
-        o.lit = pow(brightness(s / 60.0, (v - s * 32.0) / 30.0) * vlight, 2.2);
+        o.lit = bolt_lit(pow(brightness(s / 60.0, (v - s * 32.0) / 30.0) * vlight, 2.2), vpos, vlight);
         o.k = -1.0;
     } else { // flat: `sky * 16 + block`, the face shade comes from the screen (`flat_shade`)
         let s = floor(vlm / 16.0 + 0.001);
-        o.lit = pow(brightness(s / 15.0, (vlm - s * 16.0) / 15.0), 2.2);
+        o.lit = bolt_lit(pow(brightness(s / 15.0, (vlm - s * 16.0) / 15.0), 2.2), vpos, 1.0);
         o.k = vlight;
     }
     return o;
@@ -292,7 +303,7 @@ fn vs_chunk(@location(0) w: vec3<u32>) -> VsC {
     o.pos = u.vp * vec4<f32>(vpos, 1.0);
     o.uv = chunk_texel(w) / 16.0;
     o.uvd = o.uv;
-    o.lit = chunk_lit(w);
+    o.lit = bolt_lit(chunk_lit(w), vpos, chunk_shade(w.z >> 27u));
     o.fg = fog_factor(length(vpos - u.eye.xyz));
     o.tint = chunk_tint(w);
     o.k = select(tile, -tile - 1.0, (w.x >> 31u) != 0u);
@@ -310,7 +321,7 @@ fn vs_chunk_water(@location(0) w: vec3<u32>) -> VsOut {
     o.uvd = o.uv;
     o.wp = vpos;
     o.fg = fog_factor(length(vpos - u.eye.xyz));
-    o.lit = chunk_lit(w);
+    o.lit = bolt_lit(chunk_lit(w), vpos, chunk_shade(w.z >> 27u));
     o.k = -1.0;
     return o;
 }
@@ -649,6 +660,7 @@ impl ChunkPipeline {
             cool: [0.0; 4],
             sun: [0.0; 4],
             fx: [0.0; 4],
+            bolt: [0.0; 4],
         }
         .with_look(look);
         queue.write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&u));

@@ -222,12 +222,17 @@ impl Audio {
 
     /// `playSound`: positional, `vol > 1` carries further (`16 * vol` blocks) but never gets louder than 1.
     pub fn play(&mut self, name: &str, at: Vec3, vol: f32, pitch: f32) {
+        self.play_gain(name, at, vol, pitch, 1.0);
+    }
+
+    /// `play` with the loudness scaled by `gain` (0..1) without shortening its reach: a sound heard through a roof.
+    pub fn play_gain(&mut self, name: &str, at: Vec3, vol: f32, pitch: f32, gain: f32) {
         if self.sound == 0.0 || vol <= 0.0 {
             return;
         }
         let Some((_, clip)) = self.pick(name) else { return };
         let (d, dir) = (at - self.ears, (at - self.ears).normalize_or_zero());
-        let g = (1.0 - d.length() / (16.0 * vol.max(1.0))).max(0.0) * vol.min(1.0) * self.sound;
+        let g = (1.0 - d.length() / (16.0 * vol.max(1.0))).max(0.0) * vol.min(1.0) * self.sound * gain;
         let pan = dir.dot(self.right); // -1 left .. 1 right; constant power
         let (l, r) = (((1.0 - pan) * 0.5).sqrt(), ((1.0 + pan) * 0.5).sqrt());
         if g > 0.0 {

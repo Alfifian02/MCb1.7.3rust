@@ -560,6 +560,7 @@ impl Renderer {
             cool: [0.0; 4],
             sun: [0.0; 4],
             fx: [0.0; 4],
+            bolt: [0.0; 4],
         }
         .with_look(&d.look);
         self.grade = d.look.grade;
@@ -854,7 +855,7 @@ mod tests {
         assert_eq!(WEATHER.stride as usize, std::mem::size_of::<weather::Vertex>());
         assert_eq!(HUD.stride as usize, std::mem::size_of::<hud::HudVertex>());
         assert_eq!(std::mem::size_of::<SkyU>(), 352); // 288 + eye, cloud, cloudp, haze (biome atmosphere)
-        assert_eq!(std::mem::size_of::<Uniforms>(), 176);
+        assert_eq!(std::mem::size_of::<Uniforms>(), 192);
     }
 
     /// Every program's source assembles with each define, and the cut-out ones get alpha-to-coverage only when multisampled.

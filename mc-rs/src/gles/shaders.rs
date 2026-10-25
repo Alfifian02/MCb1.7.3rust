@@ -48,7 +48,7 @@ impl Chunk {
 }
 
 const CHUNK_COMMON: &str = r#"
-layout(std140) uniform U { mat4 vp; vec4 eye; vec4 fog; vec4 fogp; vec4 warm; vec4 cool; vec4 sun; vec4 fx; };
+layout(std140) uniform U { mat4 vp; vec4 eye; vec4 fog; vec4 fogp; vec4 warm; vec4 cool; vec4 sun; vec4 fx; vec4 bolt; };
 // `render::look`: the extra exponent of the face shades (`warm.w`).
 float boost(float s) { return pow(s, 1.0 + warm.w); }
 float boosted(float s, float sb) { return warm.w > 0.0 ? sb : s; }
@@ -64,6 +64,12 @@ float fog_factor(float d) {
 float brightness(float sky, float blk) {
     float l = max(max(sky - eye.w, 0.0), blk);
     return (l / (4.0 - 3.0 * l)) * 0.95 + 0.05;
+}
+// A lightning bolt's light (`bolt`, see `bolt_lit` in gpu/pipeline.rs, line for line).
+float bolt_lit(float lit, vec3 wp, float shade) {
+    if (bolt.w <= 0.0) { return lit; }
+    float f = clamp(1.0 - length(wp - bolt.xyz) / 96.0, 0.0, 1.0);
+    return lit + (1.0 - lit) * bolt.w * (0.15 + 0.7 * f * f) * shade;
 }
 "#;
 
@@ -120,7 +126,8 @@ void main() {
         vpos += vec3(sx, 0.25 * (sx - sz), sz) * fx.z;
     }
     v_tint = pow(vec3(float(w2 & 31u) / 31.0, float((w2 >> 5u) & 63u) / 63.0, float((w2 >> 11u) & 31u) / 31.0), vec3(2.2));
-    v_lit = pow(brightness(float((w2 >> 16u) & 63u) / 60.0, float((w2 >> 22u) & 31u) / 30.0) * shade_of(w2 >> 27u), 2.2);
+    float sh = shade_of(w2 >> 27u);
+    v_lit = bolt_lit(pow(brightness(float((w2 >> 16u) & 63u) / 60.0, float((w2 >> 22u) & 31u) / 30.0) * sh, 2.2), vpos, sh);
 #ifdef LEAN
     v_uv = tl / 16.0;
     v_k = ((w0 >> 31u) != 0u) ? -float(tile) - 1.0 : float(tile);
@@ -137,13 +144,13 @@ void main() {
     if (a_lm >= 256.0) {
         float v = a_lm - 256.0;
         float s = floor(v / 32.0 + 0.001);
-        v_lit = pow(brightness(s / 60.0, (v - s * 32.0) / 30.0) * a_l, 2.2);
+        v_lit = bolt_lit(pow(brightness(s / 60.0, (v - s * 32.0) / 30.0) * a_l, 2.2), vpos, a_l);
         v_k = -1.0;
     } else
 #endif
     {
         float s = floor(a_lm / 16.0 + 0.001);
-        v_lit = pow(brightness(s / 15.0, (a_lm - s * 16.0) / 15.0), 2.2);
+        v_lit = bolt_lit(pow(brightness(s / 15.0, (a_lm - s * 16.0) / 15.0), 2.2), vpos, 1.0);
         v_k = a_l;
     }
 #endif

@@ -4,7 +4,7 @@
 //! particles and bolts as small flat boxes.
 //! UNVERIFIED: `EntityFlameFX` / `EntitySmokeFX` motion is from memory (marked below); the bolt's column is straight (vanilla draws a
 //! jagged one from `field_27029_a`); a bolt's strike column and spawner kind are not drawn from the world's `field_9437_g` LCG.
-//! ponytail: no sounds (thunder, splash), no fire from a bolt (no fire block yet), no charged creeper / pigman conversion, the
+//! ponytail: no splash sound (thunder is heard: `Effects::clap` / `heard`), no fire from a bolt (no fire block yet), no charged creeper / pigman conversion, the
 //! spawner's spinning mob cage is not drawn, mobs do not suffocate (only the player).
 
 use std::collections::HashMap;
@@ -20,6 +20,26 @@ use crate::world::physics::BlockQuery;
 
 pub const MAX_PARTICLES: usize = 256;
 pub const MAX_BOLTS: usize = 4;
+/// Blocks above the strike the bolt's light shines from (`Effects::light`).
+const BOLT_LIGHT_Y: f32 = 6.0;
+/// Sound covers about 17 blocks a tick (340 m/s at 20 ticks/s): a far bolt is seen first and heard later.
+const SOUND_PER_TICK: f32 = 17.0;
+/// How much of a sound outdoors gets through `roof` blocks of cover (the blocks from the head up to the top of the column, <= 0: open):
+/// half under a roof, down to 0.3 deep under the ground (thunder is still felt there, as in the game).
+pub fn muffle(roof: f32) -> f32 {
+    if roof <= 0.0 { 1.0 } else { (0.55 - roof * 0.02).max(0.3) }
+}
+
+/// Thunderclaps on their way at once.
+const MAX_CLAPS: usize = 8;
+
+/// A thunderclap whose sound has not reached the player yet.
+pub struct Clap {
+    pub at: Vec3,
+    /// Blocks from the player when it struck.
+    pub dist: f32,
+    wait: i32,
+}
 /// `Block.mobSpawner`.
 pub const SPAWNER_ID: u8 = 52;
 
@@ -286,11 +306,44 @@ pub struct Effects {
     pub spawners: HashMap<Pos, Spawner>,
     /// `World.field_27172_i`: 2 while a bolt strikes, fades one a tick; the sky is pulled towards a flash colour (`sky::lightning_flash`).
     pub flash: i32,
+    /// Where the last bolt struck: the light that flash casts on the terrain comes from here (`light`), still while the flash fades after the bolt is gone.
+    pub struck_at: Vec3,
+    pub claps: Vec<Clap>,
+    /// Ticks until the next rain clip.
+    rain_wait: i32,
 }
 
 impl Effects {
     pub fn new(seed: i64) -> Self {
-        Self { rng: JavaRandom::new(seed ^ 0x4658), particles: Vec::new(), bolts: Vec::new(), spawners: HashMap::new(), flash: 0 }
+        Self { rng: JavaRandom::new(seed ^ 0x4658), particles: Vec::new(), bolts: Vec::new(), spawners: HashMap::new(), flash: 0, struck_at: Vec3::ZERO, claps: Vec::new(), rain_wait: 0 }
+    }
+
+    /// A bolt struck at `bolt` and the player's ears are at `ears`: queue its thunder, late by the sound's travel time.
+    pub fn clap(&mut self, bolt: Vec3, ears: Vec3) {
+        let dist = (bolt - ears).length();
+        if self.claps.len() < MAX_CLAPS {
+            self.claps.push(Clap { at: bolt, dist, wait: (dist / SOUND_PER_TICK) as i32 });
+        }
+    }
+
+    /// One 20 Hz tick of the rain's sound: `Some((volume, pitch))` when a patter clip is due. `rain` is the rain strength, `roof` the blocks
+    /// from the head up to the top of the column (<= 0: open sky). Open: a bright patter; under a roof: the same, quieter and lower, as on a
+    /// roof; more than 12 blocks under the surface: silence. A clip every 8 to 15 ticks, so a few overlap (the mixer has 32 voices).
+    pub fn patter(&mut self, rain: f32, roof: f32) -> Option<(f32, f32)> {
+        self.rain_wait -= 1;
+        if rain <= 0.2 || roof > 12.0 || self.rain_wait > 0 {
+            return None;
+        }
+        self.rain_wait = 8 + self.rng.next_int_bound(8);
+        let r = self.rng.next_float();
+        Some(if roof <= 0.0 { (0.22 * rain, 0.9 + 0.2 * r) } else { (0.08 * rain, 0.5 + 0.1 * r) })
+    }
+
+    /// One 20 Hz tick: the claps whose sound arrives now (the caller plays them).
+    pub fn heard(&mut self) -> Vec<Clap> {
+        let (due, later): (Vec<_>, Vec<_>) = std::mem::take(&mut self.claps).into_iter().partition(|c| c.wait <= 0);
+        self.claps = later.into_iter().map(|c| Clap { wait: c.wait - 1, ..c }).collect();
+        due
     }
 
     fn add(&mut self, p: Particle) {
@@ -433,6 +486,15 @@ impl Effects {
         }
     }
 
+    /// The bolt's light on the terrain, for the chunk shaders (`render::look::Look::bolt`): xyz = where it shines from (a few blocks above the
+    /// strike, so the ground round it and the trunks and walls above it are lit), w = how bright now, 1 at the strike fading to 0 over the two ticks
+    /// of `flash` (the same fade as the sky's, `sky::lightning_flash`); 0 = no flash, the shaders skip it.
+    /// ponytail: one light, the last bolt to strike; two bolts at once light the terrain round the later one only.
+    pub fn light(&self, partial: f32) -> [f32; 4] {
+        let k = if self.flash > 0 { (self.flash as f32 - partial).clamp(0.0, 1.0) } else { 0.0 };
+        (self.struck_at + Vec3::Y * BOLT_LIGHT_Y).extend(k).to_array()
+    }
+
     /// One 20 Hz tick of the particles and bolts. Returns the positions of the bolts that strike now: the caller hurts what
     /// `struck` says is in their box (`Entity.onStruckByLightning`).
     pub fn tick(&mut self, get: BlockQuery<'_>) -> Vec<Vec3> {
@@ -442,6 +504,7 @@ impl Effects {
             if b.tick(&mut self.rng) {
                 hits.push(b.pos);
                 self.flash = 2;
+                self.struck_at = b.pos;
             }
         }
         self.bolts.retain(|b| !b.dead);
@@ -559,6 +622,62 @@ mod tests {
         }
         assert!(b.dead);
         assert!(struck(Vec3::ZERO, Vec3::new(1.0, 4.0, 0.0), Vec3::new(0.3, 0.9, 0.3)) && !struck(Vec3::ZERO, Vec3::new(5.0, 0.0, 0.0), Vec3::splat(0.3)));
+    }
+
+    /// Cover takes the loudness down in steps and never to nothing.
+    #[test]
+    fn a_roof_muffles_but_never_silences() {
+        assert_eq!(muffle(-2.0), 1.0);
+        assert!(muffle(1.0) < 0.6 && muffle(1.0) > muffle(6.0) && muffle(6.0) > muffle(12.0));
+        assert_eq!(muffle(60.0), 0.3);
+    }
+
+    /// Rain patters only in rain, louder in the open than under a roof, not at all deep underground, and not every tick.
+    #[test]
+    fn rain_patters_on_a_beat_and_less_under_a_roof() {
+        let mut fx = Effects::new(4);
+        let count = |fx: &mut Effects, rain: f32, roof: f32| (0..200).filter_map(|_| fx.patter(rain, roof)).collect::<Vec<_>>();
+        assert!(count(&mut fx, 0.1, -3.0).is_empty(), "no rain, no sound");
+        let open = count(&mut fx, 1.0, -3.0);
+        assert!(open.len() >= 200 / 15 - 1 && open.len() <= 200 / 8 + 1, "{} clips in 10 s", open.len());
+        let roofed = count(&mut fx, 1.0, 3.0);
+        assert!(!roofed.is_empty() && roofed.iter().all(|c| c.0 < 0.1 && c.1 < 0.65) && open.iter().all(|c| c.0 > 0.2 && c.1 > 0.85));
+        assert!(count(&mut fx, 1.0, 20.0).is_empty(), "deep underground");
+    }
+
+    /// Thunder is heard after the flash by the distance over 17 blocks a tick, and at most `MAX_CLAPS` wait at once.
+    #[test]
+    fn thunder_arrives_after_the_flash() {
+        let mut fx = Effects::new(3);
+        fx.clap(Vec3::new(170.0, 0.0, 0.0), Vec3::ZERO); // 10 ticks away
+        fx.clap(Vec3::ZERO, Vec3::ZERO);
+        let now = fx.heard();
+        assert!(now.len() == 1 && now[0].dist == 0.0);
+        for _ in 0..9 {
+            assert!(fx.heard().is_empty());
+        }
+        let late = fx.heard();
+        assert!(late.len() == 1 && late[0].dist == 170.0);
+        for _ in 0..20 {
+            fx.clap(Vec3::ZERO, Vec3::ZERO);
+        }
+        assert_eq!(fx.claps.len(), MAX_CLAPS);
+    }
+
+    /// A strike lights the terrain from just above where it hit, at full strength, and the light is gone with the flash two ticks later.
+    #[test]
+    fn a_strike_lights_the_terrain_and_fades() {
+        let mut fx = Effects::new(5);
+        assert_eq!(fx.light(0.0)[3], 0.0);
+        fx.bolts.push(Bolt::new(Vec3::new(10.0, 64.0, 20.0), &mut JavaRandom::new(1)));
+        fx.tick(&|_, _, _| Some(0));
+        let l = fx.light(0.0);
+        assert_eq!((l[0], l[1], l[2], l[3]), (10.0, 64.0 + BOLT_LIGHT_Y, 20.0, 1.0));
+        assert!(fx.light(0.5)[3] > 0.0);
+        fx.bolts.clear();
+        fx.tick(&|_, _, _| Some(0));
+        fx.tick(&|_, _, _| Some(0));
+        assert_eq!(fx.light(0.0)[3], 0.0);
     }
 
     /// Taming throws 7 hearts (or 7 smoke puffs) over the wolf; a heart drifts up and is gone after 16 ticks.

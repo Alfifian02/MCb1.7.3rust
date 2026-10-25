@@ -93,6 +93,8 @@ pub struct Env {
     pub nether: bool,
     /// The eye is in water: no halos, motes or glints, no warm light (the underwater fog rules).
     pub underwater: bool,
+    /// `Effects::light`: where the last bolt shines from and how bright it flashes now (w = 0: none).
+    pub bolt: [f32; 4],
 }
 
 /// The frame's look: the uniform values both renderers write (`grade` to the final pass, the rest to the chunk shaders) plus what the CPU
@@ -109,6 +111,8 @@ pub struct Look {
     pub sun: [f32; 4],
     /// x: seconds; y: water depth gradient strength; z: leaf sway in blocks; w: unused.
     pub fx: [f32; 4],
+    /// xyz: where a lightning bolt lights the terrain from; w: how bright (0 = none). Not a setting: straight from `Env`, even in the Nether.
+    pub bolt: [f32; 4],
     /// Light rays fan out of a low sun (`sky::fan_vertices`).
     pub rays: bool,
     /// 0..1 how golden the light is (low sun, dry): the sun halo's colour and the rays follow it.
@@ -128,13 +132,14 @@ fn lerp3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
 }
 
 impl Look {
-    pub const OFF: Look = Look { grade: [0.0; 4], warm: [1.0, 1.0, 1.0, 0.0], cool: [1.0, 1.0, 1.0, 0.0], sun: [0.0, 1.0, 0.0, 0.0], fx: [0.0; 4], rays: false, gold: 0.0, glow: false, motes: 0 };
+    pub const OFF: Look = Look { grade: [0.0; 4], warm: [1.0, 1.0, 1.0, 0.0], cool: [1.0, 1.0, 1.0, 0.0], sun: [0.0, 1.0, 0.0, 0.0], fx: [0.0; 4], bolt: [0.0; 4], rays: false, gold: 0.0, glow: false, motes: 0 };
 
     pub fn new(c: &LookCfg, e: &Env) -> Self {
         let mut l = Self::OFF;
         let v = c.vibrance.clamp(0.0, 1.0);
         l.grade = [GRADE_VIB * v, GRADE_CURVE * v, GRADE_SPLIT * v, 0.0];
         l.fx[0] = e.seconds;
+        l.bolt = e.bolt;
         let dry = 1.0 - e.rain;
         let y = e.sun.y;
         // Gold peaks with the sun just above the horizon and is gone by 45% of the way up (or in rain).
@@ -425,7 +430,7 @@ mod tests {
     use super::*;
 
     fn env(sun_y: f32) -> Env {
-        Env { sun: Vec3::new((1.0 - sun_y * sun_y).sqrt(), sun_y, 0.0), rain: 0.0, seconds: 3.0, nether: false, underwater: false }
+        Env { sun: Vec3::new((1.0 - sun_y * sun_y).sqrt(), sun_y, 0.0), rain: 0.0, seconds: 3.0, nether: false, underwater: false, bolt: [0.0; 4] }
     }
 
     /// Options.txt round trip, a bad line is skipped and the dial stays inside 0..1.

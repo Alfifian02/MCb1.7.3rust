@@ -5,8 +5,10 @@
 //! `loot` (`dropFewItems`) and the few special cases below: `EntityMob.attackEntity` melee, skeleton arrows (`EntityArrow`),
 //! creeper fuse and `Explosion`, spider leap and wall climbing, slime hopping and splitting, squid swimming, chicken egg and
 //! slow fall, zombie/skeleton burning in daylight, zombie pigman and wolf anger.
-//! ponytail: `Pathfinder` (A*, `world::path`) is used only to chase a target and for a tame wolf following its owner; wandering
-//! is a straight walk to the chosen cell, and a blocked mob hops, so it climbs one-block steps but does not go round walls there. Light is not read by the wander weights. No sounds, no death
+//! ponytail: `Pathfinder` (A*, `world::path`) chases a target, brings a tame wolf to its owner and, for the "smart animals" below, walks every
+//! pig / cow / sheep / chicken to its wander cell; every other mob's wandering is a straight walk to the chosen cell, and a blocked mob hops, so it climbs one-block steps but does not go round walls there.
+//! NOT b1.7.3 (`Mobs::smart`, `animalAi` in options.txt, on by default): smart animals only walk to cells they can stand in and reach (no cliffs, water,
+//! lava or cactus), a stray one drifts back to its herd, and one that is hit runs from the blow for 4 to 6 s at 1.5 x its speed. Light is not read by the wander weights. No sounds, no death
 //! animation, no fall/lava damage, no breeding, mobs are not saved. A wolf can be tamed with a bone, sits, follows its owner and is put beside them; a pig takes a saddle and
 //! the player rides it (it keeps its own AI, as in b1.7.3: no steering). Walk speed is the terminal speed
 //! of `moveFlying` (`moveSpeed` x 0.1 x 0.98 against 0.546 drag), not accumulated momentum. Explosions have no exposure
@@ -34,6 +36,9 @@ const CAP_SQUID: usize = 3;
 const TICK: f32 = 0.05;
 /// m/s per unit of `moveSpeed`: 0.7 walks at 3 m/s.
 const WALK: f32 = 3.0 / 0.7;
+/// Smart animals (not b1.7.3): a hit animal runs for `PANIC_TICKS` + 0..40 ticks at `PANIC_SPEED` x its walk. UNVERIFIED by eye.
+const PANIC_TICKS: u16 = 80;
+const PANIC_SPEED: f32 = 1.5;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kind { Pig, Cow, Sheep, Chicken, Wolf, Squid, Zombie, PigZombie, Giant, Skeleton, Creeper, Spider, Slime }
@@ -113,6 +118,14 @@ pub struct Mob {
     /// `pathToEntity` and the index of the point being walked to (`PathEntity.currentPathIndex`).
     path: Vec<(i32, i32, i32)>,
     path_i: usize,
+    /// Smart animals (`Mobs::herd` sets it each tick): the path is a wander / flee walk, not a chase.
+    smart: bool,
+    wander: bool,
+    /// Ticks left of running from `scare`, the place of the blow (`damage`).
+    panic: u16,
+    scare: Vec3,
+    /// The nearest mob of its kind within 24 blocks (`Mobs::herd`), what a stray animal drifts back to.
+    mate: Option<Vec3>,
 }
 
 pub enum Ev {
@@ -162,6 +175,17 @@ fn sees(get: BlockQuery<'_>, a: Vec3, b: Vec3) -> bool {
     })
 }
 
+/// Pig, cow, sheep and chicken: the animals the smart walk and panic are for (a wolf has its own AI, a squid swims).
+fn animal(k: Kind) -> bool {
+    matches!(k, Pig | Cow | Sheep | Chicken)
+}
+
+/// The cell a mob `h` cells tall can stand in in column (x, z), within 3 cells of `y`, highest first: a solid floor that is not a cactus, and
+/// nothing but air in its body cells (so never in water or lava).
+fn stand_y(get: BlockQuery<'_>, x: i32, y: i32, z: i32, h: i32) -> Option<i32> {
+    (y - 3..=y + 3).rev().find(|&f| solid(get(x, f - 1, z)) && get(x, f - 1, z) != Some(81) && (0..h).all(|i| get(x, f + i, z) == Some(0)))
+}
+
 impl Mob {
     /// `feet` is the cell the mob stands in (its bottom face is the cell's floor).
     pub fn new(kind: Kind, x: f32, feet: f32, z: f32, yaw: f32, rng: &mut JavaRandom) -> Self {
@@ -185,7 +209,7 @@ impl Mob {
         Self { kind, body: Player { pos, vel: Vec3::ZERO, on_ground: false }, yaw, health: hp, limb: 0.0, limb_amt: 0.0, hurt: 0, size, color, sheared: false,
             fuse: 0, tame: false, sitting: false, saddled: false, ridden: false, half, age: 0, yaw_vel: 0.0, look: None, goal: None, fspeed: 0.0, jumping: false, wet: false, blocked: false, life: 0,
             last: 0, target: false, shot: false, lit: false, anger: 0, attack_time: 0, hop: 0, egg: rng.next_int_bound(6000) + 6000, fire: 0,
-            free: 0, swim: Vec3::ZERO, path: Vec::new(), path_i: 0 }
+            free: 0, swim: Vec3::ZERO, path: Vec::new(), path_i: 0, smart: false, wander: false, panic: 0, scare: Vec3::ZERO, mate: None }
     }
 
     /// `EntityWolf.interact`, a bone that took: tamed, sitting, full health, calm.
@@ -210,6 +234,11 @@ impl Mob {
             self.path = path::find(c.get, (lo.x.floor() as i32, lo.y.floor() as i32, lo.z.floor() as i32), target, size, 16.0).unwrap_or_default();
             self.path_i = 0;
         }
+        self.follow(size, w, Some((c.player.x, c.player.z)));
+    }
+
+    /// Walk the path: points are passed within `w * 2` of them, and the goal is the next one, or `end` when the path has run out.
+    fn follow(&mut self, size: (i32, i32, i32), w: f32, end: Option<(f32, f32)>) {
         let at = |&(x, _, z): &(i32, i32, i32)| (x as f32 + size.0 as f32 * 0.5, z as f32 + size.2 as f32 * 0.5);
         while let Some(p) = self.path.get(self.path_i).map(at) {
             let (dx, dz) = (p.0 - self.body.pos.x, p.1 - self.body.pos.z);
@@ -218,7 +247,64 @@ impl Mob {
             }
             self.path_i += 1;
         }
-        self.goal = Some(self.path.get(self.path_i).map_or((c.player.x, c.player.z), at));
+        self.goal = self.path.get(self.path_i).map(at).or(end);
+    }
+
+    /// The calm / scared walk of a smart animal (see `pick_dest`): follow the path it has and end it at its last point, then choose the next
+    /// one when it is time: 1 tick in 80 when calm, every fourth tick while it panics (at most two path searches each).
+    fn roam(&mut self, rng: &mut JavaRandom, c: &Ctx) {
+        self.panic = self.panic.saturating_sub(1);
+        let w = self.half.x * 2.0;
+        let size = ((w + 1.0).floor() as i32, (self.half.y * 2.0 + 1.0).floor() as i32, (w + 1.0).floor() as i32);
+        if self.wander && self.path_i >= self.path.len() {
+            (self.wander, self.goal) = (false, None);
+            self.path.clear();
+        }
+        if !self.wander && ((self.panic > 0 && self.panic % 4 == 0) || (self.panic == 0 && rng.next_int_bound(80) == 0)) {
+            self.pick_dest(rng, c, size);
+        }
+        if self.wander {
+            self.follow(size, w, None);
+        }
+    }
+
+    /// A cell a smart animal walks to, and the path there. Calm: of 10 random cells within 6 blocks the best by `func_31026_E`'s weights (grass 10,
+    /// anything else -0.5), but only cells it can stand in, and +4 for the ones nearer its herd when it has strayed more than 6 blocks off. Scared:
+    /// of 6 cells 6..10 blocks off, within 60 degrees of straight away from the blow, the farthest from it. Of the best two the first one the
+    /// path-finder reaches is taken; none reachable = it stays put.
+    fn pick_dest(&mut self, rng: &mut JavaRandom, c: &Ctx, size: (i32, i32, i32)) {
+        let (here, scared) = (self.body.pos, self.panic > 0);
+        let floor = (here.y - self.half.y).floor() as i32;
+        let mut cands: Vec<(f32, (i32, i32, i32))> = Vec::new();
+        for _ in 0..(if scared { 6 } else { 10 }) {
+            let (dx, dz) = if scared {
+                let away = here - self.scare;
+                let a = away.z.atan2(away.x) + (rng.next_float() - 0.5) * 2.1;
+                let r = 6.0 + rng.next_float() * 4.0;
+                (a.cos() * r, a.sin() * r)
+            } else {
+                (rng.next_int_bound(13) as f32 - 6.0, rng.next_int_bound(13) as f32 - 6.0)
+            };
+            let (x, z) = ((here.x + dx).floor() as i32, (here.z + dz).floor() as i32);
+            let Some(y) = stand_y(c.get, x, floor, z, size.1) else { continue };
+            let spot = Vec3::new(x as f32 + 0.5, y as f32, z as f32 + 0.5);
+            let mut w = if scared { (spot - self.scare).length() } else if (c.get)(x, y - 1, z) == Some(2) { 10.0 } else { -0.5 };
+            if let (Some(m), false) = (self.mate, scared) {
+                if (m - here).length() > 6.0 && (m - spot).length() < (m - here).length() - 2.0 {
+                    w += 4.0;
+                }
+            }
+            cands.push((w, (x, y, z)));
+        }
+        cands.sort_by(|a, b| b.0.total_cmp(&a.0));
+        let lo = self.aabb().0;
+        let start = (lo.x.floor() as i32, lo.y.floor() as i32, lo.z.floor() as i32);
+        for &(_, dest) in cands.iter().take(2) {
+            if let Some(p) = path::find(c.get, start, dest, size, 16.0) {
+                (self.path, self.path_i, self.wander) = (p, 0, true);
+                return;
+            }
+        }
     }
 
     /// `EntityWolf.getPathOrWalkableBlock`, the far branch: beside the owner, on the ring of the 5 x 5 around them, in a cell with
@@ -386,11 +472,17 @@ impl Mob {
             return true;
         }
         let chasing = self.target || (k == Wolf && self.tame && d2 > 25.0);
-        if !chasing {
+        if chasing && self.wander {
+            (self.wander, self.path_i) = (false, 0);
+            self.path.clear();
+        }
+        if !chasing && !self.wander {
             self.path.clear();
         }
         if chasing {
             self.chase(rng, c); // a tame wolf more than 5 blocks off follows its owner the same way
+        } else if self.smart && animal(k) {
+            self.roam(rng, c);
         } else if (self.goal.is_none() && rng.next_int_bound(80) == 0) || rng.next_int_bound(80) == 0 {
             // `func_31026_E`: of 10 random cells within 6 x 3 x 6 the best weight, grass 10.
             let mut best: Option<(f32, (i32, i32))> = None;
@@ -408,9 +500,10 @@ impl Mob {
         }
         let speed = match k {
             PigZombie if self.target => 0.95,
+            _ if self.panic > 0 => spec(k).3 * PANIC_SPEED,
             _ => spec(k).3,
         };
-        if let (Some((gx, gz)), true) = (self.goal, self.goal.is_some() && (self.target || rng.next_int_bound(100) != 0)) {
+        if let (Some((gx, gz)), true) = (self.goal, self.goal.is_some() && (self.target || self.panic > 0 || rng.next_int_bound(100) != 0)) {
             self.jumping = false;
             let (dx, dz) = (gx - pos.x, gz - pos.z);
             // A point of a path is passed by `chase` (within width x 2); only a bare goal (a wander cell, the player) ends here.
@@ -429,6 +522,10 @@ impl Mob {
         } else {
             // EntityLiving.updatePlayerActionState: stand, look at a player within 8, or turn at random.
             self.goal = None;
+            if self.wander {
+                (self.wander, self.path_i) = (false, 0); // a pause (or the path's end): the next walk is chosen afresh
+                self.path.clear();
+            }
             if self.old(rng, d2) {
                 return false;
             }
@@ -526,6 +623,12 @@ impl Mob {
         if self.health > 0 && matches!(self.kind, PigZombie | Wolf) && !(self.kind == Wolf && self.tame) {
             self.anger = if self.kind == Wolf { 1 << 20 } else { 400 + rng.next_int_bound(400) };
             self.target = true;
+        }
+        // Smart animals (not b1.7.3) run from the blow.
+        if self.smart && animal(self.kind) && self.health > 0 && !self.ridden {
+            (self.panic, self.scare) = (PANIC_TICKS + rng.next_int_bound(40) as u16, from);
+            (self.wander, self.goal) = (false, None);
+            self.path.clear();
         }
         self.hit(dmg, from);
     }
@@ -666,6 +769,8 @@ pub struct Mobs {
     pub no_spawn: bool,
     /// `GameSettings.difficulty`: 0 Peaceful removes the monsters and spawns none.
     pub difficulty: u8,
+    /// Smart animals (not b1.7.3, `animalAi` in options.txt): walk by path, drift back to the herd, run when hit.
+    pub smart: bool,
 }
 
 /// `IMob`: what Peaceful removes.
@@ -675,7 +780,25 @@ fn hostile(k: Kind) -> bool {
 
 impl Mobs {
     pub fn new(seed: i64) -> Self {
-        Self { list: Vec::new(), arrows: Vec::new(), rng: JavaRandom::new(seed ^ 0x5049_47), seed, acc: 0.0, clock: 0, burst: 200, no_spawn: false, difficulty: 2 }
+        Self { list: Vec::new(), arrows: Vec::new(), rng: JavaRandom::new(seed ^ 0x5049_47), seed, acc: 0.0, clock: 0, burst: 200, no_spawn: false, difficulty: 2, smart: true }
+    }
+
+    /// Before each AI tick: the `smart` switch and each animal's nearest mate of its kind within 24 blocks (`Mob::mate`, the herd's pull).
+    fn herd(&mut self) {
+        let at: Vec<(Kind, Vec3)> = if self.smart { self.list.iter().map(|m| (m.kind, m.body.pos)).collect() } else { Vec::new() };
+        for (i, m) in self.list.iter_mut().enumerate() {
+            let (kind, here) = (m.kind, m.body.pos);
+            m.smart = self.smart;
+            m.mate = if self.smart && animal(kind) {
+                at.iter()
+                    .enumerate()
+                    .filter(|&(j, &(k, p))| j != i && k == kind && (p - here).length_squared() < 576.0)
+                    .map(|(_, &(_, p))| p)
+                    .min_by(|a, b| (*a - here).length_squared().total_cmp(&(*b - here).length_squared()))
+            } else {
+                None
+            };
+        }
     }
 
     /// `Chunk.func_997_a(987234911)`: slimes spawn in one chunk in ten.
@@ -775,6 +898,7 @@ impl Mobs {
         while self.acc >= TICK {
             self.acc -= TICK;
             self.clock += 1;
+            self.herd();
             let rng = &mut self.rng;
             self.list.retain_mut(|m| m.tick(rng, c, &mut ev));
             self.arrows.retain_mut(|a| a.tick(c, &mut ev));
@@ -1148,5 +1272,61 @@ mod tests {
         }
         assert!(round, "it went round the end of the wall");
         assert!(near < 5.5, "and came to its owner: closest {near}");
+    }
+
+    /// Smart animals (not b1.7.3) only walk to cells they can reach: on a plateau five blocks above the ground a pig wanders for two minutes
+    /// and never steps off it (the old straight walk would).
+    #[test]
+    fn a_smart_pig_never_walks_off_a_cliff() {
+        let island = |x: i32, y: i32, z: i32| if ((28..=36).contains(&x) && (28..=36).contains(&z)) || y <= 4 { flat(x, y, z) } else { flat(x, y, z).map(|_| 0) };
+        let l = |_, _, _| 15u8;
+        let player = Vec3::new(32.5, 11.0, 52.5);
+        let c = Ctx { get: &island, light: &l, day: false, player, eye: player + Vec3::Y * 0.6 };
+        let mut rng = JavaRandom::new(11);
+        let mut p = Mob::new(Pig, 32.5, 10.0, 32.5, 0.0, &mut rng);
+        p.smart = true;
+        let (start, mut far, mut ev) = (p.body.pos, 0.0f32, Vec::new());
+        for _ in 0..2400 {
+            p.tick(&mut rng, &c, &mut ev);
+            for _ in 0..3 { p.step(TICK / 3.0, &island) }
+            far = far.max((p.body.pos - start).length());
+            assert!(p.body.pos.y > 9.9 && p.body.pos.x > 27.5 && p.body.pos.x < 37.5 && p.body.pos.z > 27.5 && p.body.pos.z < 37.5, "left the plateau: {:?}", p.body.pos);
+        }
+        assert!(far > 1.0, "never moved");
+    }
+
+    /// A hit animal runs: five seconds after a blow from 2 blocks off it is well over 9 blocks from where the blow came.
+    #[test]
+    fn a_hit_animal_runs_from_the_blow() {
+        let l = |_, _, _| 15u8;
+        let c = ctx(Vec3::new(32.0, 11.0, 60.0), &l);
+        let mut rng = JavaRandom::new(3);
+        let mut cow = Mob::new(Cow, 32.5, 10.0, 32.5, 0.0, &mut rng);
+        cow.smart = true;
+        let blow = cow.body.pos + Vec3::X * 2.0;
+        cow.damage(1, blow, &mut rng);
+        let mut ev = Vec::new();
+        for _ in 0..100 {
+            cow.tick(&mut rng, &c, &mut ev);
+            for _ in 0..3 { cow.step(TICK / 3.0, &flat) }
+        }
+        assert!((cow.body.pos - blow).length() > 9.0, "it stayed near the blow: {:?}", cow.body.pos);
+    }
+
+    /// A sheep 28 blocks from its mate wanders back to within 12 blocks of it in two minutes.
+    #[test]
+    fn a_stray_animal_drifts_back_to_its_herd() {
+        let l = |_, _, _| 15u8;
+        let c = ctx(Vec3::new(30.0, 11.0, 12.0), &l);
+        let mate = Vec3::new(40.5, 10.9, 10.5);
+        let mut rng = JavaRandom::new(5);
+        let mut m = Mob::new(Sheep, 12.5, 10.0, 10.5, 0.0, &mut rng);
+        (m.smart, m.mate) = (true, Some(mate));
+        let mut ev = Vec::new();
+        for _ in 0..2400 {
+            m.tick(&mut rng, &c, &mut ev);
+            for _ in 0..3 { m.step(TICK / 3.0, &flat) }
+        }
+        assert!((m.body.pos - mate).length() < 12.0, "still {} blocks from the herd", (m.body.pos - mate).length());
     }
 }
