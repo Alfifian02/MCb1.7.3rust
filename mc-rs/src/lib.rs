@@ -49,6 +49,7 @@ use crate::world::craft::{self, Furnace, Screen};
 use crate::world::items::{self, Drops, Inventory, ItemStack};
 use crate::world::gear::{self, Hook, Used};
 use crate::world::boat;
+use crate::world::pack;
 use crate::world::minecart;
 use crate::world::portal;
 use crate::world::mobs::{self, Ctx, Ev, Mobs};
@@ -193,6 +194,12 @@ struct App {
     one_mode: bool,
     /// Shift-click toggle (second button beside `one_mode`): a tap on a slot quick-moves its stack.
     shift_mode: bool,
+    /// The immersive pack (`world::pack`): on for this world (`menu::Info::pack`), the cloth spread on the ground (if any), whether the
+    /// open inventory screen is that cloth (the vanilla panel otherwise), and the seconds the "find flat ground" message has left.
+    pack_rule: bool,
+    mat: Option<pack::Mat>,
+    mat_ui: bool,
+    hint: f32,
     /// The fishing bobber in the water (`EntityPlayer.fishEntity`).
     hook: Option<Hook>,
     /// Furnace tile entities by block position (created on first use), and the time left over from the last 20 Hz tick.
@@ -314,6 +321,10 @@ impl App {
             screen: None,
             one_mode: false,
             shift_mode: false,
+            pack_rule: false,
+            mat: None,
+            mat_ui: false,
+            hint: 0.0,
             hook: None,
             furnaces: HashMap::new(),
             chests: HashMap::new(),
@@ -387,6 +398,7 @@ impl App {
         self.lod = self.new_lod();
         self.chunks.preload(chunk_coord(to.x), chunk_coord(to.z));
         self.close_sign();
+        self.mat = None; // the cloth stays in the dimension it was spread in; `pack_tick` closes its screen
         let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as i64);
         (self.mobs, self.drops, self.ticks) = (Mobs::new(seed), Drops::new(seed), Ticks::new(seed));
         self.mobs.no_spawn = nether;
@@ -426,6 +438,7 @@ impl App {
     fn enter_world(&mut self, info: &menu::Info) {
         self.dir = info.dir(&self.root);
         (self.seed, self.world_type) = (info.seed, info.ty);
+        self.pack_rule = info.pack;
         // The world resumes in the dimension it was left in (`<world>/dim`).
         self.nether = std::fs::read_to_string(self.dir.join("dim")).is_ok_and(|s| s.trim() == "nether");
         if self.nether {
@@ -467,6 +480,7 @@ impl App {
         if self.screen.take().is_some() {
             self.touch.set_screen(false);
         }
+        (self.mat, self.mat_ui, self.hint) = (None, false, 0.0);
         self.close_sign();
         (self.paintings, self.signs) = (Vec::new(), HashMap::new());
         self.boats = boat::Boats::default();
@@ -1051,6 +1065,8 @@ impl App {
                 self.close_sign();
             } else if self.screen.is_some() {
                 self.close_screen();
+            } else if self.pack_rule {
+                self.lay_mat(); // the pack is a cloth: spread it on flat ground first, the screen opens when it lies flat
             } else {
                 self.open_screen(Screen::new(2));
             }
@@ -1058,6 +1074,7 @@ impl App {
         for ev in self.touch.take_screen_events() {
             self.on_screen_event(ev);
         }
+        self.pack_tick(real_dt);
         let eye = self.camera.pos.as_dvec3();
         let end = eye + self.camera.forward().as_dvec3() * pick::REACH;
         // The crosshair hits a block's bounds (`Block.collisionRayTrace`: a sapling's small box, half a slab); liquids are not pickable
@@ -1851,6 +1868,79 @@ impl App {
             }
         }
         self.touch.set_screen(false);
+        if std::mem::take(&mut self.mat_ui) {
+            // The pack's cloth rolls itself up (it is removed when `pack_tick` sees it done).
+            if let Some(m) = self.mat.as_mut() {
+                m.dir = -1;
+            }
+            self.audio.play_here("step.cloth", 0.6, 0.8);
+        }
+    }
+
+    /// The inventory button with the immersive pack on and nothing open: spread the cloth on the flat ground under the crosshair (the
+    /// top of a full block, `pack::Mat::lay` checks the whole footprint), or, while it is still unrolling, roll it up again.
+    fn lay_mat(&mut self) {
+        if let Some(m) = self.mat.as_mut() {
+            if m.dir > 0 {
+                m.dir = -1;
+            }
+            return;
+        }
+        if self.riding() || self.sleep.is_some() || self.vitals.dead() {
+            return;
+        }
+        let chunks = &self.chunks;
+        let air = |x: i32, y: i32, z: i32| chunks.block_loaded(x, y, z).is_some_and(|b| b == 0 || (is_plant(b) && b != 51)); // grass and flowers do not stop a cloth (they poke through it), fire does
+        let floor = |x: i32, y: i32, z: i32| chunks.block_loaded(x, y, z).is_some_and(normal_cube);
+        let lay = self.target.filter(|h| h.face == 1).and_then(|h| pack::Mat::lay(h.point.as_vec3(), self.camera.pos, h.pos.1 + 1, &air, &floor));
+        match lay {
+            Some(m) => {
+                self.mat = Some(m);
+                self.audio.play_here("step.cloth", 0.7, 1.0);
+            }
+            None => self.hint = 2.5,
+        }
+    }
+
+    /// The cloth's life, once a frame: it unrolls and the screen opens on it; it rolls up and goes; it rolls itself up when the player
+    /// walks off or the ground under it goes (the screen closes first, its stacks are thrown as always).
+    fn pack_tick(&mut self, dt: f32) {
+        self.hint = (self.hint - dt).max(0.0);
+        let Some(mut m) = self.mat.take() else {
+            if self.mat_ui {
+                self.close_screen(); // the cloth is gone (another dimension): the screen has nothing to lie on
+            }
+            return;
+        };
+        let chunks = &self.chunks;
+        let floor = |x: i32, y: i32, z: i32| chunks.block_loaded(x, y, z).is_some_and(normal_cube);
+        if m.dir >= 0 && !m.valid(self.camera.pos, &floor) {
+            m.dir = -1;
+            self.close_screen(); // `self.mat` is empty just now, so this only closes the screen
+        }
+        if m.dir == 0 && !self.mat_ui {
+            m.dir = -1;
+        }
+        match m.tick(dt) {
+            pack::Step::Idle => self.mat = Some(m),
+            pack::Step::Gone => {}
+            pack::Step::Open => {
+                if self.screen.is_none() && self.sign_edit.is_none() && !self.vitals.dead() {
+                    self.open_screen(Screen::new(2));
+                    self.mat_ui = true;
+                } else {
+                    m.dir = -1;
+                }
+                self.mat = Some(m);
+            }
+        }
+    }
+
+    /// The slot under a finger of the open screen: a cell of the pack's cloth, or a slot of the vanilla panel.
+    fn slot_under(&self, x: f32, y: f32) -> Option<craft::SlotId> {
+        let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
+        let gw = self.screen.as_ref()?.gw;
+        if self.mat_ui { pack::slot_at(&self.inv, w, h, x, y) } else { craft::slot_at(gw, w, h, x, y) }
     }
 
     /// `BlockDispenser.dispenseItem`: one item of a random filled slot (`getRandomStackFromInventory`: each filled slot replaces the
@@ -1924,15 +2014,17 @@ impl App {
             }
             return;
         }
-        let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
-        let Some(gw) = self.screen.as_ref().map(|s| s.gw) else { return };
+        if self.screen.is_none() {
+            return;
+        }
         let mut fill = Vec::new();
         match ev {
             ScreenEv::Down(x, y) => {
-                self.gesture = Some(Gesture { start: craft::slot_at(gw, w, h, x, y), spread: false, visited: Vec::new() });
+                self.gesture = Some(Gesture { start: self.slot_under(x, y), spread: false, visited: Vec::new() });
             }
             ScreenEv::Move(x, y) => {
-                let (Some(g), Some(cur)) = (self.gesture.as_mut(), craft::slot_at(gw, w, h, x, y)) else { return };
+                let under = self.slot_under(x, y);
+                let (Some(g), Some(cur)) = (self.gesture.as_mut(), under) else { return };
                 if self.screen.as_ref().map_or(true, |s| s.cursor.is_none()) || (!g.spread && g.start == Some(cur)) {
                     return;
                 }
@@ -1961,14 +2053,19 @@ impl App {
         let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
         let Some(gw) = self.screen.as_ref().map(|s| s.gw) else { return };
         let one = self.one_mode;
-        if craft::on_mode_button(gw, w, h, x, y) {
+        let (on_one, on_shift, inside) = if self.mat_ui {
+            (pack::on_toggle(1, w, h, x, y), pack::on_toggle(0, w, h, x, y), pack::in_mat(w, h, x, y))
+        } else {
+            (craft::on_mode_button(gw, w, h, x, y), craft::on_shift_button(gw, w, h, x, y), craft::in_panel(gw, w, h, x, y))
+        };
+        if on_one {
             self.one_mode = !one;
-        } else if craft::on_shift_button(gw, w, h, x, y) {
+        } else if on_shift {
             self.shift_mode = !self.shift_mode;
-        } else if let Some(id) = craft::slot_at(gw, w, h, x, y) {
+        } else if let Some(id) = self.slot_under(x, y) {
             let shift = self.shift_mode;
             self.with_ext(|s, inv, ext| if shift { s.shift_click(id, inv, ext) } else { s.click(id, one, inv, ext) });
-        } else if !craft::in_panel(gw, w, h, x, y) {
+        } else if !inside {
             let Some(s) = self.screen.as_mut() else { return };
             // Click outside the window (slot -999): throw the cursor stack, or one item of it.
             if let Some(c) = s.cursor {
@@ -2115,7 +2212,7 @@ impl App {
         let seen = |p: glam::Vec3, r: f32| p.distance_squared(eye) < reach2 && frustum.intersects_aabb(p - r, p + r) && terrain.box_visible(p - r, p + r);
         let item_indices = {
             let chunks = &self.chunks;
-            self.item_mesh.update(self.be.gfx(), &self.drops, &self.mobs, &self.ticks.falling, &self.fx, &|x, y, z| chunks.light_levels(x, y, z), self.hook.as_ref().map(|h| h.pos), &self.paintings, &sign_views, (&self.boats.list, self.boats.alpha()), (&self.carts.list, self.carts.alpha()), player_view.as_ref(), hand.as_ref(), eye, &seen)
+            self.item_mesh.update(self.be.gfx(), &self.drops, &self.mobs, &self.ticks.falling, &self.fx, &|x, y, z| chunks.light_levels(x, y, z), self.hook.as_ref().map(|h| h.pos), &self.paintings, &sign_views, (&self.boats.list, self.boats.alpha()), (&self.carts.list, self.carts.alpha()), player_view.as_ref(), hand.as_ref(), self.mat.as_ref(), eye, &seen)
         };
 
         // Sky and fog colour from the sun angle, the weather and the climate under the player; the frame is cleared to the fog colour and
@@ -2461,8 +2558,14 @@ impl App {
             }
         }
 
+        // The immersive pack: the inventory as a cloth with every item lying in the zone of its category (`world::pack`).
+        if let Some(s) = self.screen.as_ref().filter(|_| self.mat_ui) {
+            let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
+            draw_pack(v, (w, h), &self.inv, s, (self.one_mode, self.shift_mode), self.touch.hotbar_slot, self.touch.cursor_pos, self.gesture.is_some());
+        }
+
         // Container screen: the vanilla GUI (176 x 166 units) over a dimmed frame, slots with their stacks.
-        if let Some(s) = &self.screen {
+        if let Some(s) = self.screen.as_ref().filter(|_| !self.mat_ui) {
             let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
             let (ox, oy, k) = craft::panel(s.gw, w, h);
             let (pw, ph) = craft::panel_size(s.gw);
@@ -2604,6 +2707,15 @@ impl App {
                 let u = hw / 20.0; // the slot is 20 units, its item 16 at (2, 2)
                 push_stack(v, (hx + 2.0 * u, hy + 2.0 * u, 16.0 * u, 16.0 * u), 0.875, s); // icon 14 of the 16 units
             }
+        }
+
+        // The pack found no flat ground under the crosshair (`lay_mat`).
+        if play && self.hint > 0.0 {
+            let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
+            let k = craft::panel(0, w, h).2 * 0.75;
+            let msg = "Look at flat, clear ground to spread your pack";
+            let bw = (HudPipeline::text_width(msg) as f32 + 6.0) * k;
+            HudPipeline::push_tooltip(v, (w - bw) * 0.5, h * 0.62, k, msg);
         }
 
         // Name of the item just switched to, centred above the hotbar and the hearts.
@@ -2755,6 +2867,108 @@ fn find_spawn(chunks: &ChunkManager) -> glam::Vec3 {
 /// The biome colour of a block icon: the plains climate (temperature 0.8, humidity 0.4), as `rgb` floats.
 fn icon_tint(c: u32) -> [f32; 3] {
     [(c >> 16 & 255) as f32 / 255.0, (c >> 8 & 255) as f32 / 255.0, (c & 255) as f32 / 255.0]
+}
+
+/// The open inventory as the pack's cloth (`world::pack`), over a light dim so the world and the cloth on the ground stay in view: a
+/// brown weave with stitched edges; patches for the crafting mat, the worn armor and one zone per category; every item on it at the
+/// size `pack::layout` gave it; the quick-select row below. `finger` = a finger is down (then the stack's name shows).
+/// UNVERIFIED: the colours and the stitch spacing are by eye; nothing here has been seen on a device.
+fn draw_pack(v: &mut Vec<HudVertex>, (w, h): (f32, f32), inv: &Inventory, s: &Screen, (one, shift): (bool, bool), hot: usize, cursor_at: (f32, f32), finger: bool) {
+    let (ox, oy, k) = pack::panel(w, h);
+    let px = |a: [f32; 4]| pack::px(w, h, a);
+    HudPipeline::push_quad(v, 0.0, 0.0, w, h, [0.0, 0.0, 0.0, 0.35]);
+    let c = px([0.0, 0.0, pack::W, pack::H]);
+    HudPipeline::push_quad(v, c[0] - 2.0 * k, c[1] - 2.0 * k, c[2] + 4.0 * k, c[3] + 4.0 * k, [0.10, 0.07, 0.04, 1.0]);
+    HudPipeline::push_quad(v, c[0], c[1], c[2], c[3], [0.36, 0.26, 0.16, 1.0]);
+    // The weave: a faint thread every 8 units each way.
+    let mut t = 8.0;
+    while t < pack::W {
+        HudPipeline::push_quad(v, ox + t * k, oy, k * 0.8, c[3], [0.0, 0.0, 0.0, 0.07]);
+        t += 8.0;
+    }
+    let mut t = 8.0;
+    while t < pack::H {
+        HudPipeline::push_quad(v, ox, oy + t * k, c[2], k * 0.8, [0.0, 0.0, 0.0, 0.07]);
+        t += 8.0;
+    }
+    // The stitched hem.
+    let thread = [0.78, 0.66, 0.42, 1.0];
+    let mut t = 8.0;
+    while t < pack::W - 8.0 {
+        for y in [4.0, pack::H - 5.0] {
+            HudPipeline::push_quad(v, ox + t * k, oy + y * k, 4.0 * k, k, thread);
+        }
+        t += 8.0;
+    }
+    let mut t = 8.0;
+    while t < pack::H - 8.0 {
+        for x in [4.0, pack::W - 5.0] {
+            HudPipeline::push_quad(v, ox + x * k, oy + t * k, k, 4.0 * k, thread);
+        }
+        t += 8.0;
+    }
+    let patch = |v: &mut Vec<HudVertex>, r: [f32; 4], label: &str| {
+        let p = px(r);
+        HudPipeline::push_outlined_quad(v, p[0], p[1], p[2], p[3], [0.47, 0.35, 0.22, 0.95], [0.2, 0.14, 0.08, 1.0], (k * 0.8).max(1.0));
+        HudPipeline::push_text(v, p[0] + 3.0 * k, p[1] + 2.5 * k, k * 0.6, label, [0.96, 0.9, 0.72, 1.0]);
+    };
+    patch(&mut *v, pack::CRAFT, "Crafting mat");
+    patch(&mut *v, pack::WEAR, "Worn");
+    for (cat, r) in pack::ZONES {
+        patch(&mut *v, r, cat.label());
+    }
+    let q = px(pack::QUICK);
+    HudPipeline::push_outlined_quad(v, q[0], q[1], q[2], q[3], [0.47, 0.35, 0.22, 0.95], [0.2, 0.14, 0.08, 1.0], (k * 0.8).max(1.0));
+    HudPipeline::push_text(v, ox + 8.0 * k, oy + 196.0 * k, k * 0.55, "Quick", [0.96, 0.9, 0.72, 1.0]);
+    HudPipeline::push_text(v, ox + 8.0 * k, oy + 205.0 * k, k * 0.55, "select", [0.96, 0.9, 0.72, 1.0]);
+    // The arrow from the 2 x 2 grid to its result.
+    let thread = [0.96, 0.9, 0.72, 0.9];
+    let a = px([64.0, 58.0, 9.0, 3.0]);
+    HudPipeline::push_quad(v, a[0], a[1], a[2], a[3], thread);
+    let a = px([71.0, 55.0, 3.0, 9.0]);
+    HudPipeline::push_quad(v, a[0], a[1], a[2], a[3], thread);
+    // The cells: a sunken frame where the pack has a fixed place, nothing for an item that just lies on the cloth.
+    let fixed = |id: craft::SlotId| matches!(id, craft::SlotId::Grid(_) | craft::SlotId::Result) || matches!(id, craft::SlotId::Inv(i) if i < 9 || i >= items::MAIN);
+    for cell in &pack::layout(inv).cells {
+        let p = px(cell.r);
+        if fixed(cell.id) {
+            HudPipeline::push_outlined_quad(v, p[0], p[1], p[2], p[3], [0.0, 0.0, 0.0, 0.3], [0.13, 0.09, 0.05, 1.0], (k * 0.7).max(1.0));
+        }
+        if let Some(st) = s.get(inv, None, cell.id) {
+            push_stack(v, (p[0], p[1], p[2], p[3]), 0.92, st);
+        }
+        if cell.id == craft::SlotId::Inv(hot) {
+            HudPipeline::push_outlined_quad(v, p[0] - k, p[1] - k, p[2] + 2.0 * k, p[3] + 2.0 * k, [0.0; 4], [1.0, 0.85, 0.3, 1.0], (k * 1.2).max(2.0));
+        }
+    }
+    // The two touch toggles under the armor: shift-click (green, 2) and place one (orange, 1).
+    for (which, on) in [(0_usize, shift), (1, one)] {
+        let p = px(pack::toggle(which));
+        let fill = match (on, which) {
+            (false, _) => [0.2, 0.4, 0.7, 1.0],
+            (true, 0) => [0.2, 0.7, 0.3, 1.0],
+            (true, _) => [0.85, 0.5, 0.1, 1.0],
+        };
+        HudPipeline::push_outlined_quad(v, p[0], p[1], p[2], p[3], fill, [0.15, 0.15, 0.15, 1.0], (k * 0.8).max(2.0));
+        if on {
+            HudPipeline::push_number(v, p[0] + p[2] * 0.32, p[1] + p[3] * 0.2, p[2] * 0.6, if which == 0 { 2 } else { 1 }, [1.0; 4]);
+        }
+    }
+    // The picked-up stack floats just above the finger, and a finger down names the stack it holds or rests on.
+    let (cx, cy) = cursor_at;
+    if let Some(cur) = s.cursor {
+        let sz = 26.0 * k;
+        push_stack(v, (cx - sz * 0.5, cy - sz * 1.4, sz, sz), 0.92, cur);
+    }
+    if finger {
+        let under = || pack::slot_at(inv, w, h, cx, cy).and_then(|id| s.get(inv, None, id));
+        if let Some(name) = s.cursor.or_else(under).and_then(items::name) {
+            let tk = k * 0.75;
+            let bw = (HudPipeline::text_width(name) as f32 + 6.0) * tk;
+            let ty = if cy > 40.0 * tk { cy - 36.0 * tk } else { cy + 16.0 * tk };
+            HudPipeline::push_tooltip(v, (cx - bw * 0.5).clamp(0.0, (w - bw).max(0.0)), ty, tk, name);
+        }
+    }
 }
 
 /// A block stack as the inventory draws it (`RenderItem.drawItemIntoGui`): cubes (a slab half high) as an isometric cube with the

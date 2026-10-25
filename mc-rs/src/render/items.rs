@@ -23,9 +23,9 @@ use crate::world::ticks::{Falling, MAX_FALLING};
 /// A mob is at most 12 boxes (spider 11), an arrow one, a falling block one.
 /// Boats drawn at once (5 boxes each).
 const MAX_BOATS: usize = 16;
-/// Carts drawn at once (floor, four walls and the furnace: 6 boxes each).
+/// Carts drawn at once (floor, four walls and the furnace: 6 boxes each); the pack's cloth and its roll are 2 boxes more.
 const MAX_CARTS: usize = 16;
-const BOXES: usize = MAX_ITEMS * 2 + MAX_MOBS * 12 + MAX_ARROWS + MAX_FALLING + MAX_PARTICLES + MAX_BOLTS + MAX_BOATS * 5 + MAX_CARTS * 6 + 1;
+const BOXES: usize = MAX_ITEMS * 2 + MAX_MOBS * 12 + MAX_ARROWS + MAX_FALLING + MAX_PARTICLES + MAX_BOLTS + MAX_BOATS * 5 + MAX_CARTS * 6 + 2 + 1;
 /// Paintings (16 px pieces, one face each), signs (a board and a post of 6 two-sided faces) and the sign text (one quad per run
 /// of lit font pixels), on top of the boxes.
 const MAX_SIGNS: usize = 32;
@@ -65,8 +65,8 @@ impl ItemMesh {
 
     /// Upload this frame's items; returns the index count to draw.
     /// `lv` = raw (sky, block) light of a cell: every entity is lit by its own cell.
-    pub fn update(&self, gfx: Gfx, drops: &Drops, mobs: &Mobs, falling: &[Falling], fx: &Effects, lv: &dyn Fn(i32, i32, i32) -> (u8, u8), hook: Option<Vec3>, paintings: &[Painting], signs: &[SignView], boats: (&[Boat], f32), carts: (&[Cart], f32), player: Option<&crate::render::player::View>, hand: Option<&crate::render::player::Hand>, eye: Vec3, seen: &dyn Fn(Vec3, f32) -> bool) -> u32 {
-        let (verts, idxs) = geometry(drops, mobs, falling, fx, lv, hook, paintings, signs, boats, carts, player, hand, eye, seen, &mut self.signs.lock().unwrap_or_else(|e| e.into_inner()));
+    pub fn update(&self, gfx: Gfx, drops: &Drops, mobs: &Mobs, falling: &[Falling], fx: &Effects, lv: &dyn Fn(i32, i32, i32) -> (u8, u8), hook: Option<Vec3>, paintings: &[Painting], signs: &[SignView], boats: (&[Boat], f32), carts: (&[Cart], f32), player: Option<&crate::render::player::View>, hand: Option<&crate::render::player::Hand>, mat: Option<&crate::world::pack::Mat>, eye: Vec3, seen: &dyn Fn(Vec3, f32) -> bool) -> u32 {
+        let (verts, idxs) = geometry(drops, mobs, falling, fx, lv, hook, paintings, signs, boats, carts, player, hand, mat, eye, seen, &mut self.signs.lock().unwrap_or_else(|e| e.into_inner()));
         if idxs.is_empty() {
             return 0;
         }
@@ -87,7 +87,7 @@ fn lit(verts: &mut [f32], from: usize, lv: &dyn Fn(i32, i32, i32) -> (u8, u8), a
     }
 }
 
-fn geometry(drops: &Drops, mobs: &Mobs, falling: &[Falling], fx: &Effects, lv: &dyn Fn(i32, i32, i32) -> (u8, u8), hook: Option<Vec3>, paintings: &[Painting], signs: &[SignView], boats: (&[Boat], f32), carts: (&[Cart], f32), player: Option<&crate::render::player::View>, hand: Option<&crate::render::player::Hand>, eye: Vec3, seen: &dyn Fn(Vec3, f32) -> bool, sign_cache: &mut SignCache) -> (Vec<f32>, Vec<u32>) {
+fn geometry(drops: &Drops, mobs: &Mobs, falling: &[Falling], fx: &Effects, lv: &dyn Fn(i32, i32, i32) -> (u8, u8), hook: Option<Vec3>, paintings: &[Painting], signs: &[SignView], boats: (&[Boat], f32), carts: (&[Cart], f32), player: Option<&crate::render::player::View>, hand: Option<&crate::render::player::Hand>, mat: Option<&crate::world::pack::Mat>, eye: Vec3, seen: &dyn Fn(Vec3, f32) -> bool, sign_cache: &mut SignCache) -> (Vec<f32>, Vec<u32>) {
     let (mut verts, mut idxs) = (Vec::new(), Vec::new());
     let a = drops.alpha();
     for e in &drops.items {
@@ -135,6 +135,14 @@ fn geometry(drops: &Drops, mobs: &Mobs, falling: &[Falling], fx: &Effects, lv: &
         let n0 = verts.len();
         push_boat(&mut verts, &mut idxs, b, boats.1);
         lit(&mut verts, n0, lv, b.pos);
+    }
+    // The pack's cloth spread on the ground (`world::pack`): a flat box of brown wool and the roll it comes off.
+    if let Some(m) = mat.filter(|m| seen(m.c, 3.0)) {
+        let n0 = verts.len();
+        for (lo, hi) in m.boxes() {
+            push_box(&mut verts, &mut idxs, lo, hi, atlas::tile_of(35, 12), 1.0);
+        }
+        lit(&mut verts, n0, lv, m.c + Vec3::Y * 0.5);
     }
     for a in mobs.arrows.iter().filter(|a| seen(a.pos, 1.0)) {
         let (p, h) = (a.pos, if a.kind == 0 { 0.06 } else { 0.125 });

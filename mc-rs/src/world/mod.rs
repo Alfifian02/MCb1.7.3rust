@@ -29,6 +29,7 @@ pub mod minecart;
 pub mod portal;
 pub mod sprint;
 pub mod stamina;
+pub mod pack;
 
 /// Lowers the calling thread's scheduling priority (`nice` 0..19; 19 = runs only on what the others leave). Linux and Android keep the
 /// nice value per THREAD (`PRIO_PROCESS` with `who` 0 is the calling task, not the process), so each background thread calls this first
