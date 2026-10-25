@@ -9,9 +9,13 @@
 //! - Everything here is geometry (`Frame`) and drawing (`draw`, `draw_pin`); the screen's state is `Satchel`, the rules are `world::book`
 //!   and `world::craft::Screen`, and `lib.rs` only routes the finger.
 //!
+//! - Look (2026-10-26, UI overhaul): pixel art from `assets/satchel.rgba` (`tools/gen_satchel_ui.py`, `hud::sprites::sat`), 9-slices and tiles at one
+//!   pixel size (`u` = the text's pixel): stitched leather with rivets, a pocket / belt / buckle per row, an inset slot with a category rim,
+//!   a burgundy cover with a strap and clasp, aged parchment with a red-stitched binding, leather plates for buttons and tags.
+//!
 //! UNVERIFIED: written without a compiler or a device. The proportions are in fractions of the surface height (`h`), the text unit is
 //! `craft::panel(0, w, h).2`; both are guesses to tune on the phone.
-//! ponytail: the world behind is dimmed, not blurred (a blur is a post pass); an unknown recipe is a dark box with a `?`, not a true
+//! ponytail: the world behind is dimmed, not blurred (a blur is a post pass); a page is ~200 tiled quads (a wrapping sampler would be one); an unknown recipe is a dark box with a `?`, not a true
 //! silhouette of the sprite (`push_stack` has no tint); partly visible list rows are not drawn instead of being clipped.
 
 use crate::render::hud::{HudPipeline, HudVertex};
@@ -91,8 +95,8 @@ impl Satchel {
 }
 
 /// Where the open book spans, in fractions of the width; its spine is the middle.
-const BOOK_L: f32 = 0.475;
-const BOOK_R: f32 = 0.988;
+const BOOK_L: f32 = 0.485;
+const BOOK_R: f32 = 0.985;
 
 fn lerp(a: f32, b: f32, t: f32) -> f32 {
     a + (b - a) * t
@@ -147,7 +151,7 @@ impl Frame {
     /// is fixed, every slot has its cell).
     pub fn new(sat: &Satchel, _inv: &Inventory, gw: usize, w: f32, h: f32) -> Self {
         let k = craft::panel(0, w, h).2;
-        let pad = 0.018 * h;
+        let pad = 0.03 * h; // room for the leather's border and its seam
         let rise = (1.0 - ease(sat.age / RISE_SECS)) * 0.1 * h;
         let (top, bh) = (0.17 * h + rise, 0.74 * h);
         let lh = 8.0 * 0.6 * k + 4.0;
@@ -165,7 +169,7 @@ impl Frame {
         f.bag = [x, top, pw, ph];
         let (bx, by, cell) = (x + pad, top + pad + lh, pitch * 0.92);
         f.labels.push(("Armor", bx, top + pad));
-        let band = |y: f32, n: f32| [bx - 0.4 * pad, y - 0.06 * pitch, n * pitch + 0.4 * pad, cell + 0.12 * pitch];
+        let band = |y: f32, n: f32| [bx - 0.4 * pad, y - 0.12 * pitch, n * pitch + 0.4 * pad, cell + 0.18 * pitch]; // a lip above the cells, a hem under them
         f.rows.push((band(by, 4.0), false));
         for i in 0..4 {
             f.cells.push((SlotId::Inv(MAIN + 3 - i), [bx + i as f32 * pitch, by, cell, cell])); // helmet first
@@ -251,7 +255,7 @@ fn book_frame(sat: &Satchel, gw: usize, (w, h): (f32, f32), (top, bh): (f32, f32
     if !b.open {
         return b;
     }
-    let (p, hh) = (0.015 * h, 0.085 * h);
+    let (p, hh) = (0.028 * h, 0.085 * h); // `p`: clear of the page's rim
     let slide = (1.0 - ease(sat.page_t)) * 0.05 * w;
     let l = b.left;
     match sat.cat {
@@ -279,7 +283,7 @@ fn book_frame(sat: &Satchel, gw: usize, (w, h): (f32, f32), (top, bh): (f32, f32
     }
     // Right page: the grid (2 x 2 or 3 x 3), the arrow and the result; the card of the picked recipe under them.
     let (r, gw) = (b.right, gw.clamp(2, 3));
-    let (c, g) = (if gw == 2 { 0.12 * h } else { 0.09 * h }, 0.012 * h);
+    let (c, g) = (if gw == 2 { 0.11 * h } else { 0.085 * h }, 0.012 * h);
     let (gx, gy) = (r[0] + p + 0.01 * w, r[1] + hh);
     for i in 0..gw * gw {
         b.grid.push((SlotId::Grid(i), [gx + (i % gw) as f32 * (c + g), gy + (i / gw) as f32 * (c + g), c, c]));
@@ -290,26 +294,29 @@ fn book_frame(sat: &Satchel, gw: usize, (w, h): (f32, f32), (top, bh): (f32, f32
     let rc = c * 1.2;
     b.grid.push((SlotId::Result, [ax + aw + 0.004 * w, gy + (gh - rc) * 0.5, rc, rc]));
     let cy = gy + gh + 0.03 * h;
-    b.card = [r[0] + p, cy, r[2] - 2.0 * p, r[1] + r[3] - 0.115 * h - cy];
+    b.card = [r[0] + p, cy, r[2] - 2.0 * p, r[1] + r[3] - 0.185 * h - cy];
     b.pin = [r[0] + r[2] - p - 0.2 * r[2], r[1] + p, 0.2 * r[2], hh - p];
-    b.hide = [r[0] + p, r[1] + r[3] - 0.1 * h, r[2] - 2.0 * p, 0.07 * h];
+    b.hide = [r[0] + p, r[1] + r[3] - 0.17 * h, r[2] - 2.0 * p, 0.07 * h]; // the hint under it ends above the page's rim
     b
 }
 
 // ---- Drawing ----
+//
+// Every panel is pixel art from `assets/satchel.rgba` (`tools/gen_satchel_ui.py`, `hud::sprites::sat`), drawn as 9-slices and tiles at one
+// pixel size, `u` = 0.75 GUI units = the text's own pixel (`tk`), so a glyph, a stitch and a rivet are the same size. Slots, plates and
+// buttons are the same sprites at every size. The only quads left are the dimmed world and the scroll bar.
 
-const LEATHER: [f32; 4] = [0.36, 0.24, 0.14, 0.97];
-const PAPER: [f32; 4] = [0.93, 0.86, 0.66, 0.98];
-const PAPER_DIM: [f32; 4] = [0.85, 0.77, 0.56, 1.0];
+use crate::render::hud::sprites::sat as art;
+
+const WHITE: [f32; 4] = [1.0; 4];
 const INK: [f32; 4] = [0.22, 0.15, 0.08, 1.0];
-const SLOT: [f32; 4] = [0.17, 0.16, 0.19, 1.0];
-const RIM: [f32; 4] = [0.45, 0.36, 0.26, 1.0];
+const CREAM: [f32; 4] = [0.96, 0.9, 0.72, 1.0];
 const GOOD: [f32; 4] = [0.25, 0.6, 0.2, 1.0];
 const BAD: [f32; 4] = [0.75, 0.2, 0.15, 1.0];
 const WARN: [f32; 4] = [0.85, 0.5, 0.1, 1.0];
-const COVER: [f32; 4] = [0.36, 0.15, 0.13, 1.0];
+const MUTE: [f32; 4] = [0.55, 0.47, 0.34, 1.0];
 const GOLD: [f32; 4] = [0.9, 0.76, 0.38, 1.0];
-const STITCH: [f32; 4] = [0.84, 0.68, 0.42, 0.9];
+const SELECTED: [f32; 4] = [0.95, 0.85, 0.1, 1.0];
 
 /// The rim of a filled slot: its item's category, tinted lightly (tools blue, food green, materials brown, the rest grey).
 fn tint(id: u16) -> [f32; 4] {
@@ -318,39 +325,6 @@ fn tint(id: u16) -> [f32; 4] {
         pack::Cat::Food => [0.42, 0.68, 0.36, 1.0],
         pack::Cat::Materials => [0.66, 0.5, 0.32, 1.0],
         pack::Cat::Misc => [0.62, 0.62, 0.68, 1.0],
-    }
-}
-
-/// A cheap repeatable noise in 0..1 for the leather's grain.
-fn noise(i: u32) -> f32 {
-    (i.wrapping_mul(2654435761).rotate_left(13).wrapping_mul(40503) >> 8 & 0xffff) as f32 / 65535.0
-}
-
-/// Leather (the bag's, the book's cover, in colour `base`): grain, a seam of stitches round the edge, a rivet at each corner. `line` is the px of a thin line.
-fn leather(v: &mut Vec<HudVertex>, r: [f32; 4], line: f32, base: [f32; 4]) {
-    HudPipeline::push_outlined_quad(v, r[0], r[1], r[2], r[3], base, [0.2, 0.13, 0.07, 1.0], line * 2.0);
-    for i in 0..90u32 {
-        let (gx, gy, gl) = (r[0] + noise(i * 3) * r[2], r[1] + noise(i * 3 + 1) * r[3], (2.0 + 6.0 * noise(i * 3 + 2)) * line);
-        let (x, w) = (gx.min(r[0] + r[2] - gl), gl.min(r[2]));
-        HudPipeline::push_quad(v, x, gy.min(r[1] + r[3] - line), w, line, if i % 2 == 0 { [0.28, 0.18, 0.1, 0.35] } else { [0.5, 0.36, 0.22, 0.3] });
-    }
-    let (m, dash, gap) = (4.0 * line, 6.0 * line, 4.0 * line);
-    let (x0, y0, x1, y1) = (r[0] + m, r[1] + m, r[0] + r[2] - m, r[1] + r[3] - m);
-    let mut x = x0;
-    while x + dash <= x1 {
-        HudPipeline::push_quad(v, x, y0, dash, line, STITCH);
-        HudPipeline::push_quad(v, x, y1 - line, dash, line, STITCH);
-        x += dash + gap;
-    }
-    let mut y = y0;
-    while y + dash <= y1 {
-        HudPipeline::push_quad(v, x0, y, line, dash, STITCH);
-        HudPipeline::push_quad(v, x1 - line, y, line, dash, STITCH);
-        y += dash + gap;
-    }
-    for (cx, cy) in [(x0, y0), (x1, y0), (x0, y1), (x1, y1)] {
-        let d = 3.0 * line;
-        HudPipeline::push_outlined_quad(v, cx - d, cy - d, 2.0 * d, 2.0 * d, [0.72, 0.58, 0.3, 1.0], [0.25, 0.17, 0.08, 1.0], line);
     }
 }
 
@@ -375,43 +349,62 @@ fn item(c: u16) -> ItemStack {
     ItemStack { id, count: 1, damage }
 }
 
-/// A slot cell with the stack in it.
-fn slot(v: &mut Vec<HudVertex>, r: [f32; 4], st: Option<ItemStack>, rim: [f32; 4], line: f32) {
-    HudPipeline::push_outlined_quad(v, r[0], r[1], r[2], r[3], SLOT, rim, line);
+/// `spr` as a 9-slice (`b` sprite pixels of corner) over the rect `r`.
+fn nine(v: &mut Vec<HudVertex>, r: [f32; 4], spr: crate::render::hud::sprites::Sprite, b: f32, u: f32) {
+    HudPipeline::push_nine(v, (r[0], r[1], r[2], r[3]), spr, b, u, WHITE, true);
+}
+
+/// A slot cell: the inset slot, a rim in `rim` when it has one, the stack in it.
+fn slot(v: &mut Vec<HudVertex>, r: [f32; 4], st: Option<ItemStack>, rim: Option<[f32; 4]>, u: f32) {
+    nine(v, r, art::SLOT, 2.0, u);
+    if let Some(c) = rim {
+        HudPipeline::push_nine(v, (r[0], r[1], r[2], r[3]), art::RIM, 2.0, u, c, false);
+    }
     if let Some(st) = st {
         crate::push_stack(v, (r[0], r[1], r[2], r[3]), 0.875, st);
     }
 }
 
-fn button(v: &mut Vec<HudVertex>, r: [f32; 4], tk: f32, text: &str, state: u8) {
-    HudPipeline::push_button(v, r[0], r[1], r[2], r[3], state);
-    HudPipeline::push_text_centered(v, r[0] + r[2] * 0.5, r[1] + (r[3] - 8.0 * tk) * 0.5, tk, text, [1.0; 4]);
+/// A leather plate with its label: `state` 0 disabled, 1 normal, 2 on.
+fn button(v: &mut Vec<HudVertex>, r: [f32; 4], (tk, u): (f32, f32), text: &str, state: u8) {
+    let c = if state == 0 { [0.6, 0.6, 0.6, 1.0] } else { WHITE };
+    HudPipeline::push_nine(v, (r[0], r[1], r[2], r[3]), if state == 2 { art::BTN_ON } else { art::BTN }, 4.0, u, c, true);
+    HudPipeline::push_text_centered(v, r[0] + r[2] * 0.5, r[1] + (r[3] - 8.0 * tk) * 0.5, tk, text, [1.0, 0.97, 0.85, 1.0]);
+}
+
+/// A title's rule under a page's header: an ink line across the page.
+fn rule(v: &mut Vec<HudVertex>, page: [f32; 4], hh: f32, p: f32, u: f32) {
+    HudPipeline::push_tiled(v, (page[0] + p, page[1] + hh - 4.3 * u, page[2] - 2.0 * p, 4.0 * u), art::RULE, u, WHITE);
 }
 
 /// The whole screen: the dimmed world, the bag, the book, the stack on the finger and the name of what it touches.
 pub fn draw(v: &mut Vec<HudVertex>, (w, h): (f32, f32), sat: &Satchel, c: &Ctx) {
     let f = Frame::new(sat, c.inv, c.screen.gw, w, h);
     let (k, tk, sk) = (f.k, 0.75 * f.k, 0.6 * f.k);
-    let line = (k * 0.35).max(1.0);
+    let u = tk;
     HudPipeline::push_quad(v, 0.0, 0.0, w, h, [0.0, 0.0, 0.0, 0.5]);
 
-    // The bag: leather, a pocket band behind each row (the belt's is a strap with a buckle), then every cell.
-    leather(v, f.bag, line, LEATHER);
+    // The bag: leather with its seam and rivets; a pocket behind each row (the belt's is a strap with a buckle), the label tag sewn over
+    // the armor pocket's lip, then every cell.
+    nine(v, f.bag, art::BAG, 8.0, u);
     for &(r, belt) in &f.rows {
-        HudPipeline::push_quad(v, r[0], r[1], r[2], r[3], if belt { [0.2, 0.13, 0.07, 1.0] } else { [0.27, 0.17, 0.1, 1.0] });
-        HudPipeline::push_quad(v, r[0], r[1], r[2], line * 1.5, [0.55, 0.4, 0.24, 1.0]); // the pocket's lip
         if belt {
-            let bw = r[3] * 0.5;
-            HudPipeline::push_outlined_quad(v, r[0] + r[2] - bw * 0.5, r[1] + r[3] * 0.2, bw, r[3] * 0.6, [0.78, 0.66, 0.34, 1.0], [0.3, 0.22, 0.1, 1.0], line);
+            nine(v, r, art::BELT, 4.0, u);
+            let (bh, bw) = (r[3] * 0.5, r[3] * 0.5 * 12.0 / 16.0);
+            HudPipeline::push_gui(v, r[0] + r[2] - 10.0, r[1] + (r[3] - bh) * 0.5, bw, bh, art::BUCKLE);
+        } else {
+            nine(v, r, art::POCKET, 4.0, u);
         }
     }
     for &(text, x, y) in &f.labels {
-        HudPipeline::push_text(v, x, y, sk, text, [0.96, 0.9, 0.72, 1.0]);
+        let tw = HudPipeline::text_width(text) as f32 * sk;
+        HudPipeline::push_nine(v, (x - 3.0 * u, y - u, tw + 6.0 * u, 8.0 * sk + 2.0 * u), art::TAB, 3.0, u, WHITE, true);
+        HudPipeline::push_text(v, x, y, sk, text, INK);
     }
     for &(id, r) in &f.cells {
         let st = c.screen.get(c.inv, None, id);
-        let rim = if id == SlotId::Inv(c.hotbar) { [0.95, 0.85, 0.1, 1.0] } else { st.map_or(RIM, |s| tint(s.id)) };
-        slot(v, r, st, rim, line);
+        let rim = if id == SlotId::Inv(c.hotbar) { Some(SELECTED) } else { st.map(|s| tint(s.id)) };
+        slot(v, r, st, rim, u);
     }
 
     // Buttons: the toggles show their number while on.
@@ -423,11 +416,11 @@ pub fn draw(v: &mut Vec<HudVertex>, (w, h): (f32, f32), sat: &Satchel, c: &Ctx) 
             Btn::Shift => (if c.shift { "2" } else { "Shift" }, if c.shift { 2 } else { 1 }),
             Btn::One => (if c.one { "1" } else { "One" }, if c.one { 2 } else { 1 }),
         };
-        button(v, r, tk, text, state);
+        button(v, r, (tk, u), text, state);
     }
 
     if let Some(b) = &f.book {
-        draw_book(v, (w, h), (sat, b), c, (tk, sk, line));
+        draw_book(v, (w, h), (sat, b), c, (tk, sk, u));
     }
 
     // The stack on the finger floats above it; a finger down names what it holds or rests on.
@@ -450,28 +443,36 @@ pub fn draw(v: &mut Vec<HudVertex>, (w, h): (f32, f32), sat: &Satchel, c: &Ctx) 
     }
 }
 
-fn draw_book(v: &mut Vec<HudVertex>, (w, h): (f32, f32), (sat, b): (&Satchel, &BookFrame), c: &Ctx, (tk, sk, line): (f32, f32, f32)) {
-    let _ = w;
-    // The pages under, from the first frame of the opening; the cover over them swings away (it narrows towards its left edge, the hinge)
-    // until half way.
+fn draw_book(v: &mut Vec<HudVertex>, (w, h): (f32, f32), (sat, b): (&Satchel, &BookFrame), c: &Ctx, (tk, sk, u): (f32, f32, f32)) {
+    // Under the cover that swings away: the back cover, thick leather round the pages (it grows with the opening, so it never shows
+    // wider than the closed cover), the paper (one sheet while it opens, aged at its rim), and the red-stitched binding at the spine.
     if sat.book_t > 0.0 {
-        HudPipeline::push_outlined_quad(v, b.rect[0], b.rect[1], b.rect[2], b.rect[3], PAPER, [0.3, 0.2, 0.1, 1.0], line * 2.0);
+        let cm = 0.013 * w * ease(sat.book_t * 2.0);
+        nine(v, [b.rect[0] - cm, b.rect[1] - cm, b.rect[2] + 2.0 * cm, b.rect[3] + 2.0 * cm], art::COVER, 8.0, u);
+        let r = (b.rect[0], b.rect[1], b.rect[2], b.rect[3]);
+        HudPipeline::push_tiled(v, r, art::PARCH, u, WHITE);
+        HudPipeline::push_nine(v, r, art::PAGE_EDGE, 4.0, u, WHITE, false);
+        if sat.book_t > 0.3 {
+            HudPipeline::push_tiled(v, (r.0 + r.2 * 0.5 - 4.0 * u, r.1 + u, 8.0 * u, r.3 - 2.0 * u), art::BINDING, u, WHITE);
+        }
     }
     if sat.book_t < 0.5 {
-        draw_cover(v, [b.rect[0], b.rect[1], b.rect[2] * (1.0 - 2.0 * sat.book_t), b.rect[3]], sat, (tk, sk, line));
+        draw_cover(v, [b.rect[0], b.rect[1], b.rect[2] * (1.0 - 2.0 * sat.book_t), b.rect[3]], sat, (tk, sk, u));
     }
     if !b.open {
         return;
     }
     if sat.book {
-        button(v, b.tab, tk, "Close", 1);
+        button(v, b.tab, (tk, u), "Close", 1);
     }
-    let spine_x = b.left[0] + b.left[2] + (b.right[0] - b.left[0] - b.left[2]) * 0.5;
-    HudPipeline::push_quad(v, spine_x - line, b.rect[1], line * 2.0, b.rect[3], [0.3, 0.2, 0.1, 1.0]);
-    let (p, hh) = (0.015 * h, 0.085 * h);
+    // The corner of the right page, turned up.
+    HudPipeline::push_gui(v, b.right[0] + b.right[2] - 14.0 * u, b.right[1] + b.right[3] - 14.0 * u, 12.0 * u, 12.0 * u, art::CURL);
+    let (p, hh) = (0.028 * h, 0.085 * h);
     let entries = book::entries();
     let gw = c.screen.gw;
     let title_y = |r: [f32; 4]| r[1] + (hh - 8.0 * tk) * 0.5;
+    rule(v, b.left, hh, p, u);
+    rule(v, b.right, hh, p, u);
 
     // Left page: the categories, or the recipes of one.
     match sat.cat {
@@ -479,46 +480,48 @@ fn draw_book(v: &mut Vec<HudVertex>, (w, h): (f32, f32), (sat, b): (&Satchel, &B
             HudPipeline::push_text(v, b.left[0] + p, title_y(b.left), tk, "Recipes", INK);
             for &(i, r) in &b.cats {
                 let ids = book::in_cat(CATS[i]);
-                HudPipeline::push_outlined_quad(v, r[0], r[1], r[2], r[3], PAPER_DIM, RIM, line);
+                nine(v, r, art::ENTRY, 3.0, u);
                 if let Some(e) = ids.first().map(|&e| &entries[e]) {
-                    crate::push_stack(v, (r[0] + 2.0 * line, r[1] + (r[3] - r[3] * 0.8) * 0.5, r[3] * 0.8, r[3] * 0.8), 0.875, ItemStack { count: 1, ..e.out });
+                    crate::push_stack(v, (r[0] + 3.0 * u, r[1] + (r[3] - r[3] * 0.8) * 0.5, r[3] * 0.8, r[3] * 0.8), 0.875, ItemStack { count: 1, ..e.out });
                 }
-                HudPipeline::push_text(v, r[0] + r[3] + 4.0 * line, r[1] + (r[3] - 8.0 * tk) * 0.5, tk, CATS[i].label(), INK);
+                HudPipeline::push_text(v, r[0] + r[3] + 4.0 * u, r[1] + (r[3] - 8.0 * tk) * 0.5, tk, CATS[i].label(), INK);
                 let n = ids.len().to_string();
-                HudPipeline::push_text(v, r[0] + r[2] - HudPipeline::text_width(&n) as f32 * tk - 6.0 * line, r[1] + (r[3] - 8.0 * tk) * 0.5, tk, &n, INK);
+                HudPipeline::push_text(v, r[0] + r[2] - HudPipeline::text_width(&n) as f32 * tk - 5.0 * u, r[1] + (r[3] - 8.0 * tk) * 0.5, tk, &n, INK);
             }
         }
         Some(ci) => {
             if let Some(r) = b.back {
-                button(v, r, tk, "<", 1);
+                nine(v, r, art::ENTRY, 3.0, u);
+                let (aw, ah) = (12.0 * u * 0.9, 9.0 * u * 0.9);
+                HudPipeline::push_gui_tinted(v, r[0] + (r[2] - aw) * 0.5, r[1] + (r[3] - ah) * 0.5, aw, ah, art::ARROW, INK);
             }
-            HudPipeline::push_text(v, b.left[0] + p + 0.14 * b.left[2] + 8.0 * line, title_y(b.left), tk, CATS[ci.min(CATS.len() - 1)].label(), INK);
+            HudPipeline::push_text(v, b.left[0] + p + 0.14 * b.left[2] + 8.0 * u, title_y(b.left), tk, CATS[ci.min(CATS.len() - 1)].label(), INK);
             for &(ei, r) in &b.rows {
                 let e = &entries[ei];
                 let known = !c.discovery || c.notes.known(e);
                 let ok = known && book::craftable(e, gw, c.inv, &c.screen.grid);
                 let sel = sat.sel == Some(ei);
-                HudPipeline::push_outlined_quad(v, r[0], r[1], r[2], r[3], if sel { [1.0, 0.95, 0.7, 1.0] } else { PAPER_DIM }, if sel { [0.95, 0.75, 0.1, 1.0] } else { RIM }, line);
+                nine(v, r, if sel { art::ENTRY_SEL } else { art::ENTRY }, 3.0, u);
                 let isz = r[3] * 0.82;
-                let ib = (r[0] + 3.0 * line, r[1] + (r[3] - isz) * 0.5, isz, isz);
+                let ib = (r[0] + 3.0 * u, r[1] + (r[3] - isz) * 0.5, isz, isz);
                 if known {
                     crate::push_stack(v, ib, 0.875, ItemStack { count: 1, ..e.out });
                 } else {
-                    HudPipeline::push_quad(v, ib.0, ib.1, ib.2, ib.3, [0.1, 0.1, 0.12, 1.0]);
+                    HudPipeline::push_nine(v, (ib.0, ib.1, ib.2, ib.3), art::SLOT, 2.0, u, WHITE, true);
                     HudPipeline::push_text_centered(v, ib.0 + ib.2 * 0.5, ib.1 + (ib.3 - 8.0 * tk) * 0.5, tk, "?", [0.7, 0.7, 0.75, 1.0]);
                 }
                 let name = if known { items::name(e.out).unwrap_or("?") } else { "???" };
-                HudPipeline::push_text(v, ib.0 + isz + 6.0 * line, r[1] + (r[3] - 8.0 * tk) * 0.5, tk, name, INK);
-                // The dot at the right: green = the bag has it all and the grid fits; orange = a furnace's; red = something is short.
-                let dot = if !known { RIM } else if e.grid == 0 { WARN } else if ok { GOOD } else { BAD };
-                let ds = r[3] * 0.3;
-                HudPipeline::push_quad(v, r[0] + r[2] - ds - 6.0 * line, r[1] + (r[3] - ds) * 0.5, ds, ds, dot);
+                HudPipeline::push_text(v, ib.0 + isz + 6.0 * u, r[1] + (r[3] - 8.0 * tk) * 0.5, tk, name, INK);
+                // The gem at the right: green = the bag has it all and the grid fits; orange = a furnace's; red = something is short.
+                let dot = if !known { MUTE } else if e.grid == 0 { WARN } else if ok { GOOD } else { BAD };
+                let ds = r[3] * 0.34;
+                HudPipeline::push_gui_tinted(v, r[0] + r[2] - ds - 5.0 * u, r[1] + (r[3] - ds) * 0.5, ds, ds, art::GEM, dot);
             }
             if b.max_scroll > 0.0 {
                 // A thin scroll bar along the list's right edge.
                 if let Some(l) = b.list {
                     let (bar, at) = (l[3] * l[3] / (l[3] + b.max_scroll), sat.scroll / b.max_scroll);
-                    HudPipeline::push_quad(v, l[0] + l[2] - 2.0 * line, l[1] + (l[3] - bar) * at, 2.0 * line, bar, [0.3, 0.2, 0.1, 0.6]);
+                    HudPipeline::push_quad(v, l[0] + l[2] - 0.6 * u, l[1] + (l[3] - bar) * at, 0.6 * u, bar, [0.3, 0.2, 0.1, 0.6]);
                 }
             }
         }
@@ -528,12 +531,12 @@ fn draw_book(v: &mut Vec<HudVertex>, (w, h): (f32, f32), (sat, b): (&Satchel, &B
     HudPipeline::push_text(v, b.right[0] + p, title_y(b.right), tk, if gw == 3 { "Workbench" } else { "Crafting" }, INK);
     if let Some(sel) = sat.sel {
         let pinned = c.notes.pinned == Some(sel);
-        button(v, b.pin, sk, if pinned { "Unpin" } else { "Pin" }, if pinned { 2 } else { 1 });
+        button(v, b.pin, (sk, u), if pinned { "Unpin" } else { "Pin" }, if pinned { 2 } else { 1 });
     }
     for &(id, r) in &b.grid {
         let st = c.screen.get(c.inv, None, id);
-        let rim = if id == SlotId::Result && st.is_some() { GOOD } else { RIM };
-        slot(v, r, st, rim, line);
+        let rim = (id == SlotId::Result && st.is_some()).then_some(GOOD);
+        slot(v, r, st, rim, u);
     }
     HudPipeline::push_text_centered(v, b.arrow[0] + b.arrow[2] * 0.5, b.arrow[1] + (b.arrow[3] - 8.0 * tk) * 0.5, tk, "->", INK);
     if c.hold {
@@ -541,55 +544,55 @@ fn draw_book(v: &mut Vec<HudVertex>, (w, h): (f32, f32), (sat, b): (&Satchel, &B
             HudPipeline::push_text_centered(v, r[0] + r[2] * 0.5, r[1] - 10.0 * sk, sk, "Release: craft all", GOOD);
         }
     }
-    draw_card(v, sat, b, c, (tk, sk, line));
+    draw_card(v, sat, b, c, (tk, sk, u));
 
     // The discovery toggle and the hint under it.
-    HudPipeline::push_outlined_quad(v, b.hide[0], b.hide[1], b.hide[2], b.hide[3], PAPER_DIM, RIM, line);
+    nine(v, b.hide, art::ENTRY, 3.0, u);
     let label = if c.discovery { "Unknown recipes: hidden" } else { "Unknown recipes: shown" };
     HudPipeline::push_text_centered(v, b.hide[0] + b.hide[2] * 0.5, b.hide[1] + (b.hide[3] - 8.0 * sk) * 0.5, sk, label, INK);
     HudPipeline::push_text_centered(v, b.hide[0] + b.hide[2] * 0.5, b.hide[1] + b.hide[3] + 3.0 * sk, sk, "Hold the result to craft all", [0.4, 0.3, 0.2, 1.0]);
 }
 
-/// The closed book: a leather cover with a page edge, a strap and clasp, the book icon and its title; the writing only while the cover
-/// is flat (it is foreshortened, narrower, while it swings).
-fn draw_cover(v: &mut Vec<HudVertex>, r: [f32; 4], sat: &Satchel, (tk, sk, line): (f32, f32, f32)) {
-    if r[2] < 8.0 * line {
+/// The closed book: a burgundy leather cover (seam, tooled line, gold studs), a strap with a clasp, the book icon and its title; the
+/// writing only while the cover is flat (it is foreshortened, narrower, while it swings).
+fn draw_cover(v: &mut Vec<HudVertex>, r: [f32; 4], sat: &Satchel, (tk, sk, u): (f32, f32, f32)) {
+    if r[2] < 8.0 * u {
         return;
     }
-    leather(v, r, line, COVER);
-    HudPipeline::push_quad(v, r[0] + r[2] - 4.0 * line, r[1] + 3.0 * line, 2.0 * line, r[3] - 6.0 * line, PAPER); // the page edge
-    let (sx, sw) = (r[0] + r[2] * 0.78, r[2] * 0.07); // the strap, down the cover, and its clasp
-    HudPipeline::push_quad(v, sx, r[1], sw, r[3], [0.2, 0.1, 0.08, 1.0]);
-    HudPipeline::push_outlined_quad(v, sx - sw * 0.3, r[1] + r[3] * 0.5 - sw, sw * 1.6, sw * 2.0, GOLD, [0.3, 0.22, 0.1, 1.0], line);
+    nine(v, r, art::COVER, 8.0, u);
+    let sx = r[0] + r[2] * 0.78; // the strap, down the cover, and its clasp
+    HudPipeline::push_tiled(v, (sx, r[1] + u, 8.0 * u, r[3] - 2.0 * u), art::STRAP, u, WHITE);
+    HudPipeline::push_gui(v, sx - 2.0 * u, r[1] + r[3] * 0.5 - 10.0 * u, 12.0 * u, 20.0 * u, art::CLASP);
     if sat.book_t < 0.1 {
         let (cx, isz) = (r[0] + r[2] * 0.39, (r[2] * 0.3).min(r[3] * 0.25));
         crate::push_stack(v, (cx - isz * 0.5, r[1] + r[3] * 0.3, isz, isz), 0.875, ItemStack { id: 340, count: 1, damage: 0 });
-        HudPipeline::push_text_centered(v, cx, r[1] + r[3] * 0.3 + isz + 6.0 * line, tk, "Recipes", GOLD);
+        HudPipeline::push_text_centered(v, cx, r[1] + r[3] * 0.3 + isz + 6.0 * u, tk, "Recipes", GOLD);
         if !sat.book {
             HudPipeline::push_text_centered(v, cx, r[1] + r[3] * 0.86, sk, "Tap to open", [0.85, 0.7, 0.55, 1.0]);
         }
     }
 }
 
-/// The picked recipe: result, a line on where it is made, the ingredients with what the bag has of each.
-fn draw_card(v: &mut Vec<HudVertex>, sat: &Satchel, b: &BookFrame, c: &Ctx, (tk, sk, line): (f32, f32, f32)) {
+/// The picked recipe, on a card sunk into the page: result, a line on where it is made, the ingredients with what the bag has of each.
+fn draw_card(v: &mut Vec<HudVertex>, sat: &Satchel, b: &BookFrame, c: &Ctx, (tk, sk, u): (f32, f32, f32)) {
     let r = b.card;
-    HudPipeline::push_outlined_quad(v, r[0], r[1], r[2], r[3], PAPER_DIM, RIM, line);
+    nine(v, r, art::CARD, 3.0, u);
+    let line = u * 0.5;
     let Some(e) = sat.sel.and_then(|i| book::entries().get(i)) else {
-        HudPipeline::push_text(v, r[0] + 6.0 * line, r[1] + 6.0 * line, sk, "Pick a recipe on the left page:", INK);
-        HudPipeline::push_text(v, r[0] + 6.0 * line, r[1] + 6.0 * line + 12.0 * sk, sk, "its items go into the grid.", INK);
+        HudPipeline::push_text(v, r[0] + 4.0 * u, r[1] + 4.0 * u, sk, "Pick a recipe on the left page:", INK);
+        HudPipeline::push_text(v, r[0] + 4.0 * u, r[1] + 4.0 * u + 12.0 * sk, sk, "its items go into the grid.", INK);
         return;
     };
     if c.discovery && !c.notes.known(e) {
-        HudPipeline::push_text(v, r[0] + 6.0 * line, r[1] + 6.0 * line, sk, "???  Find one of its items", INK);
-        HudPipeline::push_text(v, r[0] + 6.0 * line, r[1] + 6.0 * line + 12.0 * sk, sk, "to learn this recipe.", INK);
+        HudPipeline::push_text(v, r[0] + 4.0 * u, r[1] + 4.0 * u, sk, "???  Find one of its items", INK);
+        HudPipeline::push_text(v, r[0] + 4.0 * u, r[1] + 4.0 * u + 12.0 * sk, sk, "to learn this recipe.", INK);
         return;
     }
     let isz = (r[3] * 0.3).min(r[2] * 0.2);
-    crate::push_stack(v, (r[0] + 4.0 * line, r[1] + 4.0 * line, isz, isz), 0.875, ItemStack { count: 1, ..e.out });
+    crate::push_stack(v, (r[0] + 3.0 * u, r[1] + 3.0 * u, isz, isz), 0.875, ItemStack { count: 1, ..e.out });
     let name = items::name(e.out).unwrap_or("?");
     let head = if e.out.count > 1 { format!("{name} x{}", e.out.count) } else { name.to_string() };
-    HudPipeline::push_text(v, r[0] + isz + 10.0 * line, r[1] + 4.0 * line + (isz - 8.0 * tk) * 0.5, tk * 0.85, &head, INK);
+    HudPipeline::push_text(v, r[0] + isz + 8.0 * u, r[1] + 3.0 * u + (isz - 8.0 * tk) * 0.5, tk * 0.85, &head, INK);
     let gw = c.screen.gw;
     let short = book::missing(e, c.inv, &c.screen.grid);
     let (note, col) = match (e.src, e.grid) {
@@ -598,9 +601,9 @@ fn draw_card(v: &mut Vec<HudVertex>, sat: &Satchel, b: &BookFrame, c: &Ctx, (tk,
         _ if short.is_empty() => ("Tap the recipe again to refill", GOOD),
         _ => ("Missing ingredients", BAD),
     };
-    HudPipeline::push_text(v, r[0] + 6.0 * line, r[1] + isz + 10.0 * line, sk, note, col);
+    HudPipeline::push_text(v, r[0] + 4.0 * u, r[1] + isz + 8.0 * u, sk, note, col);
     // Ingredients, five to a row: the item, then what the bag has over what the recipe wants.
-    let (cw, rowy) = (r[2] / 5.0, r[1] + isz + 10.0 * line + 12.0 * sk);
+    let (cw, rowy) = (r[2] / 5.0, r[1] + isz + 8.0 * u + 12.0 * sk);
     let chip = ((r[3] - (rowy - r[1])).min(cw) * 0.7).max(1.0);
     for (n, &(code, need)) in e.need.iter().enumerate() {
         let (x, y) = (r[0] + (n % 5) as f32 * cw + (cw - chip) * 0.5, rowy + (n / 5) as f32 * (chip + 12.0 * sk + 4.0 * line));
