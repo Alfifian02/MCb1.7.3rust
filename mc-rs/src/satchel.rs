@@ -3,8 +3,8 @@
 //!
 //! - One layout: the bag is a 9 x 3 grid with the quick belt and the armor row (big cells for a thumb), as leather with stitching, rivets,
 //!   a pocket band behind each row and a strap round the belt; a slot's rim is tinted by its item's category (`pack::category`).
-//! - The bag is always at the left and never moves. The book lies closed on its right (a leather cover, a clasp, `Tap to open`); a tap swings
-//!   the cover away and both pages grow from the spine, a `Close` tab above the spine shuts it. Open: the left page is the categories, then the recipes of one as a list; the right page is the crafting grid
+//! - The bag and the closed book lie side by side, centred together (the book: a leather cover, a clasp, `Tap to open`). A tap swings the
+//!   cover away, both pages grow from the spine, and the bag glides to the left while the spine glides to its place, a `Close` tab above the spine shuts it. Open: the left page is the categories, then the recipes of one as a list; the right page is the crafting grid
 //!   (2 x 2, or 3 x 3 at a workbench) with the card of the picked recipe under it (`world::book`).
 //! - Everything here is geometry (`Frame`) and drawing (`draw`, `draw_pin`); the screen's state is `Satchel`, the rules are `world::book`
 //!   and `world::craft::Screen`, and `lib.rs` only routes the finger.
@@ -90,6 +90,14 @@ impl Satchel {
     }
 }
 
+/// Where the open book spans, in fractions of the width; its spine is the middle.
+const BOOK_L: f32 = 0.475;
+const BOOK_R: f32 = 0.988;
+
+fn lerp(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t
+}
+
 fn ease(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
@@ -145,10 +153,15 @@ impl Frame {
         let lh = 8.0 * 0.6 * k + 4.0;
         let mut f = Frame { k, bag: [0.0; 4], cells: Vec::new(), rows: Vec::new(), labels: Vec::new(), btns: Vec::new(), book: None };
 
-        // The bag: 9 columns of the left 45% of the screen, the armor row on top, the belt at the foot. It stays there, book or no book.
+        // The bag: 9 columns, the armor row on top, the belt at the foot. With the book closed the bag and the cover lie side by side, centred
+        // together; as the book opens the bag glides to the left 45% of the screen and the book's spine to the middle of the right 55%.
         let pitch = ((0.455 * w - 2.0 * pad) / 9.0).min((bh - 2.0 * pad - lh) / 5.55);
         let (pw, ph) = (9.0 * pitch + 2.0 * pad, 5.55 * pitch + 2.0 * pad + lh);
-        let x = 0.012 * w;
+        let (open_x, gap, half) = (0.012 * w, 0.02 * w, (BOOK_R - BOOK_L) * 0.5 * w); // half = a page of the open book
+        let closed_x = ((w - (pw + gap + half)) * 0.5).max(open_x);
+        let e = ease(sat.book_t);
+        let x = lerp(closed_x, open_x, e);
+        let spine = lerp(closed_x + pw + gap + half * 0.5, (BOOK_L + BOOK_R) * 0.5 * w, e);
         f.bag = [x, top, pw, ph];
         let (bx, by, cell) = (x + pad, top + pad + lh, pitch * 0.92);
         f.labels.push(("Armor", bx, top + pad));
@@ -180,7 +193,7 @@ impl Frame {
         let cw = HudPipeline::text_width("X") as f32 * tk + 8.0 * tk;
         f.btns.push((Btn::Close, [w - 0.02 * w - cw, by, cw, bh2]));
 
-        f.book = Some(book_frame(sat, gw, w, h, top, bh));
+        f.book = Some(book_frame(sat, gw, (w, h), (top, bh), spine));
         f
     }
 
@@ -225,16 +238,16 @@ impl Frame {
 }
 
 /// The book's rects: closed, a cover one page wide; opening, both pages grow from the spine; the contents exist once it is open.
-fn book_frame(sat: &Satchel, gw: usize, w: f32, h: f32, top: f32, bh: f32) -> BookFrame {
-    let (bx0, bx1) = (0.475 * w, 0.988 * w);
-    let (spine, half) = ((bx0 + bx1) * 0.5, (bx1 - bx0) * 0.5);
+fn book_frame(sat: &Satchel, gw: usize, (w, h): (f32, f32), (top, bh): (f32, f32), spine: f32) -> BookFrame {
+    let (bx0, bx1) = (BOOK_L * w, BOOK_R * w);
+    let (spine_open, half) = ((bx0 + bx1) * 0.5, (bx1 - bx0) * 0.5); // `spine` is where it is now, on its way there
     let e = ease(sat.book_t);
-    // Closed it is one page wide, centred on the spine; opening, it grows to both pages.
+    // Closed it is one page wide, centred on the spine; opening, it grows to both pages (and the spine slides to its place).
     let tab = [spine - 0.05 * w, top - 0.07 * h, 0.1 * w, 0.07 * h];
     let mut b = BookFrame { rect: [spine - half * (1.0 + e) * 0.5, top, half * (1.0 + e), bh], open: sat.book_t >= 0.98, tab, ..Default::default() };
     let gap = 0.003 * w;
     b.left = [bx0, top, half - gap, bh];
-    b.right = [spine + gap, top, half - gap, bh];
+    b.right = [spine_open + gap, top, half - gap, bh];
     if !b.open {
         return b;
     }
@@ -663,13 +676,24 @@ mod tests {
     }
 
     #[test]
-    fn opening_the_book_leaves_the_bag_alone() {
+    fn opening_the_book_glides_the_bag_left_and_never_into_the_cover() {
         let inv = Inventory::default();
-        let mut closed = Satchel::new(false);
-        closed.tick(10.0);
-        let (a, b) = (frame(&closed, &inv, 2), frame(&open_book(), &inv, 2));
-        assert_eq!(a.bag, b.bag);
-        assert_eq!(a.cells, b.cells, "every cell stays where it is");
+        let at = |t: f32| {
+            let mut s = Satchel::new(true);
+            (s.age, s.book_t) = (10.0, t);
+            frame(&s, &inv, 2)
+        };
+        let (c, m, o) = (at(0.0), at(0.5), at(1.0));
+        assert_eq!((c.bag[2], c.bag[3]), (o.bag[2], o.bag[3]), "the bag keeps its size");
+        assert!(c.bag[0] > m.bag[0] && m.bag[0] > o.bag[0], "it glides left");
+        let dx = o.bag[0] - c.bag[0];
+        for ((i, r), (j, q)) in c.cells.iter().zip(&o.cells) {
+            assert!(i == j && (r[2], r[3]) == (q[2], q[3]) && (q[0] - r[0] - dx).abs() < 0.01 && q[1] == r[1], "cell {i:?} only moves sideways");
+        }
+        for f in [&c, &m, &o] {
+            let r = f.book.as_ref().expect("book").rect;
+            assert!(r[0] >= f.bag[0] + f.bag[2] && r[0] + r[2] <= SIZE.0, "the book stays right of the bag and on the screen: {r:?}");
+        }
     }
 
     #[test]
