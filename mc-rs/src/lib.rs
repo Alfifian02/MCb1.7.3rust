@@ -270,9 +270,9 @@ struct Gesture {
     grab: Option<(f32, f32)>,
     moved: bool,
     down: (f32, f32),
-    /// Seconds the finger has been down (a press on the satchel's result this long crafts all), and on the book's list the scroll it began at.
+    /// Seconds the finger has been down (a press on the satchel's result this long crafts all), and on the book's list (or the recipe card: `true`) the scroll it began at.
     age: f32,
-    list: Option<f32>,
+    list: Option<(bool, f32)>,
 }
 
 /// Pixels a finger must travel before a press on empty cloth is a pan and not a tap.
@@ -2120,11 +2120,11 @@ impl App {
         Some(satchel::Frame::new(sat, &self.inv, s.gw, w as f32, h as f32).hit(sat, x, y))
     }
 
-    /// How far the book's list can scroll (px).
-    fn sat_max_scroll(&self) -> f32 {
+    /// How far the book's list (or the recipe card's ingredients) can scroll (px).
+    fn sat_max_scroll(&self, card: bool) -> f32 {
         let (Some(sat), Some(s)) = (self.sat.as_ref(), self.screen.as_ref()) else { return 0.0 };
         let (w, h) = self.be.size();
-        satchel::Frame::new(sat, &self.inv, s.gw, w as f32, h as f32).book.map_or(0.0, |b| b.max_scroll)
+        satchel::Frame::new(sat, &self.inv, s.gw, w as f32, h as f32).book.map_or(0.0, |b| if card { b.card_max } else { b.max_scroll })
     }
 
     /// A tap on the open satchel: a button, a page of the book, a recipe (it fills the grid), a slot, or past it all (a held stack is thrown).
@@ -2182,7 +2182,7 @@ impl App {
                     self.drops.throw(ItemStack { count: n, ..c }, self.camera.pos, self.camera.forward());
                 }
             }
-            Pick::List | Pick::Panel => {}
+            Pick::List | Pick::Panel | Pick::Card => {}
         }
     }
 
@@ -2192,6 +2192,7 @@ impl App {
         let Some(e) = book::entries().get(i) else { return };
         if let Some(s) = self.sat.as_mut() {
             s.sel = Some(i);
+            s.card_scroll = 0.0;
         }
         if self.opts.book_discovery && !self.notes.known(e) {
             return;
@@ -2340,7 +2341,8 @@ impl App {
                 let pick = self.sat_hit(x, y);
                 let btn = (self.mat_ui && self.pack_btn(x, y).is_some()) || pick.is_some_and(|p| !matches!(p, satchel::Pick::Slot(_)));
                 let list = match (self.sat.as_ref(), pick) {
-                    (Some(s), Some(satchel::Pick::Row(_) | satchel::Pick::List)) => Some(s.scroll),
+                    (Some(s), Some(satchel::Pick::Row(_) | satchel::Pick::List)) => Some((false, s.scroll)),
+                    (Some(s), Some(satchel::Pick::Card)) => Some((true, s.card_scroll)),
                     _ => None,
                 };
                 let start = if btn { None } else { self.slot_under(x, y) };
@@ -2350,12 +2352,13 @@ impl App {
             }
             ScreenEv::Move(x, y) => {
                 // A drag that began on the book's list scrolls it; lifting after one is not a tap.
-                if let Some((s0, down, moved)) = self.gesture.as_ref().and_then(|g| g.list.map(|s0| (s0, g.down, g.moved))) {
+                if let Some(((card, s0), down, moved)) = self.gesture.as_ref().and_then(|g| g.list.map(|l| (l, g.down, g.moved))) {
                     let moved = moved || (x - down.0).hypot(y - down.1) > PAN_SLOP;
                     if moved {
-                        let max = self.sat_max_scroll();
+                        let max = self.sat_max_scroll(card);
                         if let Some(s) = self.sat.as_mut() {
-                            s.scroll = (s0 - (y - down.1)).clamp(0.0, max);
+                            let to = (s0 - (y - down.1)).clamp(0.0, max);
+                            if card { s.card_scroll = to } else { s.scroll = to }
                         }
                     }
                     if let Some(g) = self.gesture.as_mut() {

@@ -18,7 +18,8 @@ SPRITES = {
     "BINDING": (112, 0, 8, 16), "CURL": (120, 0, 12, 12), "ARROW": (132, 0, 16, 12),
     "POCKET": (0, 32, 16, 16), "BELT": (16, 32, 16, 16), "BUCKLE": (32, 32, 12, 16), "CLASP": (44, 32, 12, 20), "STRAP": (56, 32, 8, 16),
     "SLOT": (64, 32, 18, 18), "RIM": (82, 32, 18, 18), "BTN": (100, 32, 16, 16), "BTN_ON": (116, 32, 16, 16), "TAB": (132, 32, 16, 16),
-    "ENTRY": (148, 32, 16, 16), "ENTRY_SEL": (164, 32, 16, 16), "CARD": (180, 32, 16, 16), "GEM": (196, 32, 8, 8), "RULE": (204, 32, 16, 4)
+    "ENTRY": (148, 32, 16, 16), "ENTRY_SEL": (164, 32, 16, 16), "CARD": (180, 32, 16, 16), "GEM": (196, 32, 8, 8), "RULE": (204, 32, 16, 4),
+    "PIN": (220, 32, 10, 10), "PIN_ON": (230, 32, 10, 10)
 }
 CLEAR = (0, 0, 0, 0)
 
@@ -344,6 +345,23 @@ for x in range(16):
     img.putpixel((x, 1), hx("#5e4425"))
     img.putpixel((x, 2), hx("#5e4425") if x % 8 == 0 else hx("#9b8456"))
 put("RULE", img)
+
+
+def pin(name, fill, hi, edge, hole):
+    """A 10 x 10 map pin (round head, tapering point): outlined and dull when off, red and glossy when on."""
+    inside = lambda x, y: (x - 4.5) ** 2 + (y - 3.8) ** 2 <= 3.9 ** 2 or (y >= 3.8 and abs(x - 4.5) <= (9.9 - y) * 0.62)
+    img = new(name)
+    for y in range(10):
+        for x in range(10):
+            if not inside(x + 0.5, y + 0.5):
+                continue
+            rim = any(not inside(x + 0.5 + dx, y + 0.5 + dy) for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)))
+            img.putpixel((x, y), edge if rim else hole if (3 <= x <= 5 and 2 <= y <= 4 and (x - 4.5) ** 2 + (y - 3.8) ** 2 <= 1.3) else hi if (x + y) <= 5 else fill)
+    put(name, img)
+
+
+pin("PIN", hx("#b9a878"), hx("#d8c9a2"), hx("#5e4422"), hx("#5e4422"))
+pin("PIN_ON", hx("#c8281e"), hx("#ff7a6a"), hx("#4a0c0c"), hx("#4a0c0c"))
 
 
 def book_cover():

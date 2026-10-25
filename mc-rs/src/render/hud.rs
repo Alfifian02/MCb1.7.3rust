@@ -127,6 +127,9 @@ pub mod sprites {
         pub const CARD: Sprite = at(180.0, 32.0, 16.0, 16.0);
         pub const GEM: Sprite = at(196.0, 32.0, 8.0, 8.0);
         pub const RULE: Sprite = at(204.0, 32.0, 16.0, 4.0);
+        /// The pin button of the recipe card, off and on (10 x 10, drawn once).
+        pub const PIN: Sprite = at(220.0, 32.0, 10.0, 10.0);
+        pub const PIN_ON: Sprite = at(230.0, 32.0, 10.0, 10.0);
     }
     const fn dpad_row(y: f32) -> [Sprite; 8] {
         // literals, not `i * 22.0`: float arithmetic in a `const fn` needs Rust 1.82
@@ -880,7 +883,7 @@ mod text_tests {
     fn satchel_sheet_has_its_sprites_and_the_helpers_stay_inside() {
         assert_eq!(SATCHEL_SHEET.len(), 256 * 256 * 4);
         use sprites::sat::*;
-        let all = [BAG, COVER, PARCH, PAGE_EDGE, BINDING, CURL, ARROW, POCKET, BELT, BUCKLE, CLASP, STRAP, SLOT, RIM, BTN, BTN_ON, TAB, ENTRY, ENTRY_SEL, CARD, GEM, RULE];
+        let all = [BAG, COVER, PARCH, PAGE_EDGE, BINDING, CURL, ARROW, POCKET, BELT, BUCKLE, CLASP, STRAP, SLOT, RIM, BTN, BTN_ON, TAB, ENTRY, ENTRY_SEL, CARD, GEM, RULE, PIN, PIN_ON];
         for (i, &(x, y, w, h)) in all.iter().enumerate() {
             assert!(x >= 0.0 && x + w <= 256.0 && y >= SATCHEL_Y && y + h <= SHEET_H, "sprite {i} inside the block");
             let lit = (0..h as usize).flat_map(|r| (0..w as usize).map(move |c| (c, r))).filter(|&(c, r)| SATCHEL_SHEET[(((y - SATCHEL_Y) as usize + r) * 256 + x as usize + c) * 4 + 3] != 0).count();

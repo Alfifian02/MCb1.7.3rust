@@ -53,6 +53,8 @@ pub enum Pick {
     /// The pin button of the right page's header and the discovery toggle.
     Pin,
     Hide,
+    /// The recipe card under the grid: a drag there scrolls its ingredients.
+    Card,
     /// Leather or paper with nothing on it: a tap does nothing, and does not throw the held stack.
     Panel,
     /// Past every panel: a held stack is thrown.
@@ -69,11 +71,13 @@ pub struct Satchel {
     pub scroll: f32,
     pub page_t: f32,
     pub sel: Option<usize>,
+    /// The pixels the recipe card's ingredient rows are scrolled (drawn snapped to a whole row).
+    pub card_scroll: f32,
 }
 
 impl Satchel {
     pub fn new(book: bool) -> Self {
-        Self { age: 0.0, book, book_t: 0.0, cat: None, scroll: 0.0, page_t: 1.0, sel: None }
+        Self { age: 0.0, book, book_t: 0.0, cat: None, scroll: 0.0, page_t: 1.0, sel: None, card_scroll: 0.0 }
     }
 
     pub fn tick(&mut self, dt: f32) {
@@ -137,16 +141,33 @@ fn fitted(s: &str, k: f32, maxw: f32) -> (f32, String) {
 
 /// Flat text (no shadow) with its left edge at `x` and its top at `y` (for size `k`), fitted into `maxw`; a shrunk text stays centred on
 /// the line it would have had.
-fn text_fit(v: &mut Vec<HudVertex>, (x, y): (f32, f32), k: f32, maxw: f32, s: &str, col: [f32; 4]) {
+fn text_fit(v: &mut Vec<HudVertex>, at: (f32, f32), k: f32, maxw: f32, s: &str, col: [f32; 4]) {
+    text_fit_o(v, at, k, maxw, s, col, 0.0);
+}
+
+/// Flat text, or with a black outline `o` px wide when `o` > 0 (the recipe card's text: coloured ink alone is hard to read on parchment).
+fn put(v: &mut Vec<HudVertex>, (x, y): (f32, f32), k: f32, s: &str, col: [f32; 4], o: f32) {
+    if o > 0.0 {
+        HudPipeline::push_text_outlined(v, x.round(), y.round(), k, o, s, col);
+    } else {
+        HudPipeline::push_text_flat(v, x, y, k, s, col);
+    }
+}
+
+fn text_fit_o(v: &mut Vec<HudVertex>, (x, y): (f32, f32), k: f32, maxw: f32, s: &str, col: [f32; 4], o: f32) {
     let (kk, t) = fitted(s, k, maxw);
-    HudPipeline::push_text_flat(v, x, y + 4.0 * (k - kk), kk, &t, col);
+    put(v, (x, y + 4.0 * (k - kk)), kk, &t, col, o);
 }
 
 /// Flat text centred on `cx`, kept inside `[lo, hi]` (shrunk to fit it, pushed in when it would stick out).
-fn text_in(v: &mut Vec<HudVertex>, cx: f32, y: f32, k: f32, (lo, hi): (f32, f32), s: &str, col: [f32; 4]) {
+fn text_in(v: &mut Vec<HudVertex>, cx: f32, y: f32, k: f32, range: (f32, f32), s: &str, col: [f32; 4]) {
+    text_in_o(v, cx, y, k, range, s, col, 0.0);
+}
+
+fn text_in_o(v: &mut Vec<HudVertex>, cx: f32, y: f32, k: f32, (lo, hi): (f32, f32), s: &str, col: [f32; 4], o: f32) {
     let (kk, t) = fitted(s, k, hi - lo);
     let w = HudPipeline::text_width(&t) as f32 * kk;
-    HudPipeline::push_text_flat(v, (cx - w * 0.5).clamp(lo, (hi - w).max(lo)), y + 4.0 * (k - kk), kk, &t, col);
+    put(v, ((cx - w * 0.5).clamp(lo, (hi - w).max(lo)), y + 4.0 * (k - kk)), kk, &t, col, o);
 }
 
 /// The words of `s` in lines of at most `maxw` px at size `k` (a word wider than that stays alone on its line).
@@ -163,13 +184,13 @@ fn lines(s: &str, k: f32, maxw: f32) -> Vec<String> {
 }
 
 /// A paragraph in the rect `r` (a 4-pixel margin of the sprite's), flat and wrapped, the last lines that do not fit left out.
-fn paragraph(v: &mut Vec<HudVertex>, r: [f32; 4], (k, u): (f32, f32), s: &str, col: [f32; 4]) {
+fn paragraph(v: &mut Vec<HudVertex>, r: [f32; 4], (k, u): (f32, f32), s: &str, col: [f32; 4], o: f32) {
     let mut y = r[1] + 4.0 * u;
     for line in lines(s, k, r[2] - 8.0 * u) {
         if y + 8.0 * k > r[1] + r[3] - 2.0 * u {
             break;
         }
-        HudPipeline::push_text_flat(v, r[0] + 4.0 * u, y, k, &line, col);
+        put(v, (r[0] + 4.0 * u, y), k, &line, col, o);
         y += 10.0 * k;
     }
 }
@@ -195,6 +216,8 @@ pub struct BookFrame {
     pub card: [f32; 4],
     pub pin: [f32; 4],
     pub hide: [f32; 4],
+    /// How far the card's ingredient rows can scroll (px).
+    pub card_max: f32,
     /// The clearance of a page's content from its rim, and the height of a page's header (set once the book is open).
     pub p: f32,
     pub hh: f32,
@@ -217,22 +240,21 @@ impl Frame {
     /// is fixed, every slot has its cell).
     pub fn new(sat: &Satchel, _inv: &Inventory, gw: usize, w: f32, h: f32) -> Self {
         let k = craft::panel(0, w, h).2;
-        let (tk, sk) = units(k);
+        let tk = units(k).0;
         let u = tk; // one sprite pixel
         // The panel's border is 8 sprite pixels and its seam and corner marks lie inside 7 of them: the slots start clear of both.
         let pad = (0.03 * h).max(11.0 * u).round();
         let rise = (1.0 - ease(sat.age / RISE_SECS)) * 0.1 * h;
         let (top, bh) = (0.17 * h + rise, 0.74 * h);
-        let lh = 8.0 * sk + 2.0 * u;
         let mut f = Frame { k, bag: [0.0; 4], cells: Vec::new(), rows: Vec::new(), labels: Vec::new(), btns: Vec::new(), book: None };
 
         // The bag: 9 columns, the armor row on top, the belt at the foot. With the book closed the bag and the cover lie side by side, centred
         // together; as the book opens the bag glides to the left 45% of the screen and the book's spine to the middle of the right 55%.
         // Slots touch, like Minecraft's: a cell is one slot sprite and the next starts where its border ends. A pocket band lies behind each
         // block of them (the armor row, the bag's three rows, the belt), two sprite pixels wider than it, clear of the seam.
-        let gv = 6.0 * u; // the gap between those blocks
-        let cell = ((0.455 * w - 2.0 * pad) / 9.0).min((bh - 2.0 * pad - lh - 2.0 * gv) / 5.0).floor().max(1.0);
-        let (pw, ph) = (9.0 * cell + 2.0 * pad, 5.0 * cell + 2.0 * gv + 2.0 * pad + lh);
+        let gv = 12.0 * u; // the gap between those blocks: the armor, the bag and the belt read as three separate things
+        let cell = ((0.455 * w - 2.0 * pad) / 9.0).min((bh - 2.0 * pad - 2.0 * gv) / 5.0).floor().max(1.0);
+        let (pw, ph) = (9.0 * cell + 2.0 * pad, 5.0 * cell + 2.0 * gv + 2.0 * pad);
         let (open_x, gap, half) = (0.012 * w, 0.02 * w, (BOOK_R - BOOK_L) * 0.5 * w); // half = a page of the open book
         let closed_x = ((w - (pw + gap + half)) * 0.5).max(open_x);
         let e = ease(sat.book_t);
@@ -240,8 +262,9 @@ impl Frame {
         let spine = lerp(closed_x + pw + gap + half * 0.5, (BOOK_L + BOOK_R) * 0.5 * w, e);
         let top = top.round();
         f.bag = [x, top, pw, ph];
-        let (bx, by) = (x + pad, top + pad + lh);
-        f.labels.push(("Armor", bx, top + pad));
+        let (bx, by) = (x + pad, top + pad);
+        // The armor tag sits in the empty five cells right of the armor row, centred on it (`draw` sets it at `tk + 1`).
+        f.labels.push(("Armor", bx + 4.0 * cell + 6.0 * u, by + (cell - 8.0 * (tk + 1.0)) * 0.5));
         let band = |y: f32, n: f32, rows: f32| [bx - 2.0 * u, y - 2.0 * u, n * cell + 4.0 * u, rows * cell + 4.0 * u];
         f.rows.push((band(by, 4.0, 1.0), false));
         for i in 0..4 {
@@ -296,7 +319,8 @@ impl Frame {
                     .or_else(|| (sat.sel.is_some() && inside(b.pin, x, y)).then_some(Pick::Pin))
                     .or_else(|| inside(b.hide, x, y).then_some(Pick::Hide))
                     .or_else(|| b.grid.iter().find(|(_, r)| inside(*r, x, y)).map(|&(id, _)| Pick::Slot(id)))
-                    .or_else(|| b.list.filter(|r| inside(*r, x, y)).map(|_| Pick::List));
+                    .or_else(|| b.list.filter(|r| inside(*r, x, y)).map(|_| Pick::List))
+                    .or_else(|| inside(b.card, x, y).then_some(Pick::Card));
                 if let Some(h) = hit {
                     return h;
                 }
@@ -329,22 +353,24 @@ fn book_frame(sat: &Satchel, gw: usize, (w, h): (f32, f32), (top, bh): (f32, f32
     if !b.open {
         return b;
     }
-    let u = units(craft::panel(0, w, h).2).0;
-    let (p, hh) = ((0.028 * h).max(8.0 * u).round(), 0.085 * h); // `p`: clear of the page's rim (6 sprite pixels thick)
+    let (u, sk) = units(craft::panel(0, w, h).2);
+    // `p`: clear of the page's rim (6 sprite pixels thick) by 4 more; the header's content lies in `p ..= hh - 6u`, above its rule.
+    let (p, hh) = ((0.04 * h).max(10.0 * u).round(), 0.11 * h);
+    let zh = hh - p - 6.0 * u;
     (b.p, b.hh) = (p, hh);
     let slide = (1.0 - ease(sat.page_t)) * 0.05 * w;
     let l = b.left;
     match sat.cat {
         None => {
             let cg = 0.012 * h;
-            let ch = (l[3] - hh - p - 5.0 * cg) / 6.0;
+            let ch = (l[3] - hh - 1.5 * p - 5.0 * cg) / 6.0;
             for i in 0..CATS.len() {
-                b.cats.push((i, [l[0] + p + slide, l[1] + hh + i as f32 * (ch + cg), l[2] - 2.0 * p, ch]));
+                b.cats.push((i, [l[0] + p + slide, l[1] + hh + 0.5 * p + i as f32 * (ch + cg), l[2] - 2.0 * p, ch]));
             }
         }
         Some(ci) => {
-            b.back = Some([l[0] + p, l[1] + p, 0.14 * l[2], hh - p]);
-            let list = [l[0] + p + slide, l[1] + hh + p, l[2] - 2.0 * p, l[3] - hh - 2.0 * p];
+            b.back = Some([l[0] + p, l[1] + p, 0.14 * l[2], zh]);
+            let list = [l[0] + p + slide, l[1] + hh + 0.5 * p, l[2] - 2.0 * p, l[3] - hh - 1.5 * p];
             b.list = Some(list);
             b.row_h = 0.1 * h;
             let ids = book::in_cat(CATS[ci.min(CATS.len() - 1)]);
@@ -361,10 +387,10 @@ fn book_frame(sat: &Satchel, gw: usize, (w, h): (f32, f32), (top, bh): (f32, f32
     let (r, gw) = (b.right, gw.clamp(2, 3));
     // The cells touch (no gap). A cell is the smaller of the height's share and what the page's width leaves for the grid, the arrow and
     // the result (1.2 cells): a narrow screen shrinks the grid instead of pushing the result off the page.
-    let (gx, gy) = ((r[0] + p + 0.01 * w).round(), (r[1] + hh).round());
+    let (gx, gy) = ((r[0] + p + 0.01 * w).round(), (r[1] + hh + 3.0 * u).round());
     let (ga, aw) = (0.004 * w, 0.03 * w);
     let room = r[0] + r[2] - p - gx - 2.0 * ga - aw;
-    let c = (if gw == 2 { 0.11 * h } else { 0.085 * h }).min(room / (gw as f32 + 1.2)).floor().max(1.0);
+    let c = (if gw == 2 { 0.11 * h } else { 0.075 * h }).min(room / (gw as f32 + 1.2)).floor().max(1.0);
     for i in 0..gw * gw {
         b.grid.push((SlotId::Grid(i), [gx + (i % gw) as f32 * c, gy + (i / gw) as f32 * c, c, c]));
     }
@@ -373,9 +399,11 @@ fn book_frame(sat: &Satchel, gw: usize, (w, h): (f32, f32), (top, bh): (f32, f32
     b.arrow = [ax, gy + gh * 0.5 - 0.02 * h, aw, 0.04 * h];
     let rc = (c * 1.2).floor();
     b.grid.push((SlotId::Result, [(ax + aw + ga).floor(), (gy + (gh - rc) * 0.5).round(), rc, rc]));
-    let cy = gy + gh + 0.03 * h;
-    b.card = [r[0] + p, cy, r[2] - 2.0 * p, r[1] + r[3] - 0.185 * h - cy];
-    b.pin = [r[0] + r[2] - p - 0.2 * r[2], r[1] + p, 0.2 * r[2], hh - p];
+    let cy = gy + gh + 0.02 * h;
+    b.card = [r[0] + p, cy, r[2] - 2.0 * p, r[1] + r[3] - 0.18 * h - cy];
+    b.card_max = sat.sel.and_then(|i| book::entries().get(i)).map_or(0.0, |e| card_m(b.card, (sk, u), e.need.len()).max);
+    // The pin's hit box is a square down to the rule; its picture (10 sprite pixels) hangs from the top of it.
+    b.pin = [r[0] + r[2] - p - (hh - p), r[1] + p, hh - p, hh - p];
     b.hide = [r[0] + p, r[1] + r[3] - 0.17 * h, r[2] - 2.0 * p, 0.07 * h]; // the hint under it ends above the page's rim
     b
 }
@@ -444,8 +472,22 @@ fn slot(v: &mut Vec<HudVertex>, r: [f32; 4], st: Option<ItemStack>, rim: Option<
         HudPipeline::push_nine(v, (r[0], r[1], r[2], r[3]), art::RIM, 2.0, u, c, false);
     }
     if let Some(st) = st {
-        crate::push_stack(v, (r[0], r[1], r[2], r[3]), 0.875, st);
+        // The count is drawn here, not by `push_stack`: that one keeps the count in a 16 unit box the size of the whole cell, which
+        // ends on the cell's border (the cell is 18 units, the item 16) and is as big as the vanilla one.
+        crate::push_stack(v, (r[0], r[1], r[2], r[3]), 0.875, ItemStack { count: 1, ..st });
+        if st.count > 1 {
+            count(v, r, u, st.count as u32);
+        }
     }
+}
+
+/// A stack's count in the lower right corner of the cell `r`, a whole-pixel size (about a third of the item's) and clear of the border.
+fn count(v: &mut Vec<HudVertex>, r: [f32; 4], u: f32, n: u32) {
+    let k = (r[2] / 32.0).round().max(1.0);
+    let m = 2.0 * u + 2.0; // the border and a little air
+    let s = n.to_string();
+    let w = HudPipeline::text_width(&s) as f32 * k;
+    HudPipeline::push_text(v, (r[0] + r[2] - m - k - w).round(), (r[1] + r[3] - m - 9.0 * k).round(), k, &s, WHITE); // 9 k: the glyph and its shadow
 }
 
 /// A leather plate with its label: `state` 0 disabled, 1 normal, 2 on.
@@ -474,10 +516,11 @@ pub fn draw(v: &mut Vec<HudVertex>, (w, h): (f32, f32), sat: &Satchel, c: &Ctx) 
     for &(r, belt) in &f.rows {
         nine(v, r, if belt { art::BELT } else { art::POCKET }, 4.0, u);
     }
+    let lk = tk + 1.0; // the tags are one pixel bigger than a button's text (`Frame::new` centres them on that)
     for &(text, x, y) in &f.labels {
-        let tw = HudPipeline::text_width(text) as f32 * sk;
-        HudPipeline::push_nine(v, (x - 3.0 * u, y - u, tw + 6.0 * u, 8.0 * sk + 2.0 * u), art::TAB, 3.0, u, WHITE, true);
-        HudPipeline::push_text_flat(v, x, y, sk, text, TAB_INK);
+        let tw = HudPipeline::text_width(text) as f32 * lk;
+        HudPipeline::push_nine(v, (x - 3.0 * u, y - u, tw + 6.0 * u, 8.0 * lk + 2.0 * u), art::TAB, 3.0, u, WHITE, true);
+        HudPipeline::push_text_flat(v, x, y, lk, text, TAB_INK);
     }
     for &(id, r) in &f.cells {
         let st = c.screen.get(c.inv, None, id);
@@ -550,7 +593,7 @@ fn draw_book(v: &mut Vec<HudVertex>, (w, h): (f32, f32), (sat, b): (&Satchel, &B
     let (p, hh) = (b.p, b.hh);
     let entries = book::entries();
     let gw = c.screen.gw;
-    let title_y = |r: [f32; 4]| r[1] + (hh - 8.0 * tk) * 0.5;
+    let title_y = |r: [f32; 4]| r[1] + p + (hh - p - 6.0 * u - 8.0 * tk) * 0.5; // centred between the page's margin and the rule
     rule(v, b.left, hh, p, u);
     rule(v, b.right, hh, p, u);
 
@@ -613,10 +656,10 @@ fn draw_book(v: &mut Vec<HudVertex>, (w, h): (f32, f32), (sat, b): (&Satchel, &B
 
     // Right page: title, pin, the grid with its arrow and result, the card of the picked recipe.
     text_fit(v, (b.right[0] + p, title_y(b.right)), tk, b.pin[0] - 2.0 * u - b.right[0] - p, if gw == 3 { "Workbench" } else { "Crafting" }, INK);
-    if let Some(sel) = sat.sel {
-        let pinned = c.notes.pinned == Some(sel);
-        button(v, b.pin, (sk, u), if pinned { "Unpin" } else { "Pin" }, if pinned { 2 } else { 1 });
-    }
+    // The pin: a picture that turns red when this recipe is pinned (dim while none is picked).
+    let pinned = sat.sel.is_some_and(|s| c.notes.pinned == Some(s));
+    let a = if sat.sel.is_some() { 1.0 } else { 0.4 };
+    HudPipeline::push_gui_tinted(v, b.pin[0] + (b.pin[2] - 10.0 * u) * 0.5, b.pin[1], 10.0 * u, 10.0 * u, if pinned { art::PIN_ON } else { art::PIN }, [1.0, 1.0, 1.0, a]);
     for &(id, r) in &b.grid {
         let st = c.screen.get(c.inv, None, id);
         let rim = (id == SlotId::Result && st.is_some()).then_some(GOOD);
@@ -655,46 +698,80 @@ fn draw_cover(v: &mut Vec<HudVertex>, r: [f32; 4], sat: &Satchel, (tk, sk, u): (
     }
 }
 
-/// The picked recipe, on a card sunk into the page: result, a line on where it is made, the ingredients with what the bag has of each.
+/// The card's sizes from its rect `r`, the small text size and the sprite pixel, for `n` ingredients: the header (icon + name + note) is fixed,
+/// the ingredients lie five to a row below it and scroll a whole row at a time (no scissor here, so a row half out of the card is not drawn).
+struct CardM {
+    isz: f32,
+    top: f32,
+    cw: f32,
+    chip: f32,
+    pitch: f32,
+    max: f32,
+}
+
+fn card_m(r: [f32; 4], (sk, u): (f32, f32), n: usize) -> CardM {
+    let isz = (r[2] * 0.12).floor();
+    let top = isz + 6.0 * u;
+    let cw = r[2] / 5.0;
+    let chip = (cw * 0.6).floor();
+    let pitch = chip + 12.0 * sk + 2.0 * u;
+    let rows = ((n + 4) / 5) as f32;
+    CardM { isz, top, cw, chip, pitch, max: (rows * pitch - (r[3] - top - u)).max(0.0) }
+}
+
+/// Brighter than `GOOD` / `BAD` / `WARN`: these sit on a black outline, not on bare parchment.
+const GOOD_T: [f32; 4] = [0.45, 0.95, 0.35, 1.0];
+const BAD_T: [f32; 4] = [1.0, 0.4, 0.35, 1.0];
+const WARN_T: [f32; 4] = [1.0, 0.72, 0.2, 1.0];
+
+/// The picked recipe, on a card sunk into the page: result, a line on where it is made, the ingredients with what the bag has of each
+/// (all outlined text; the ingredient rows scroll).
 fn draw_card(v: &mut Vec<HudVertex>, sat: &Satchel, b: &BookFrame, c: &Ctx, (tk, sk, u): (f32, f32, f32)) {
     let r = b.card;
     nine(v, r, art::CARD, 3.0, u);
-    let line = u * 0.5;
+    let o = (u * 0.34).round().max(1.0);
     let Some(e) = sat.sel.and_then(|i| book::entries().get(i)) else {
-        paragraph(v, r, (sk, u), "Pick a recipe on the left page: its items go into the grid.", INK);
+        paragraph(v, r, (sk, u), "Pick a recipe on the left page: its items go into the grid.", WHITE, o);
         return;
     };
     if c.discovery && !c.notes.known(e) {
-        paragraph(v, r, (sk, u), "??? Find one of its items to learn this recipe.", INK);
+        paragraph(v, r, (sk, u), "??? Find one of its items to learn this recipe.", WHITE, o);
         return;
     }
-    let isz = (r[3] * 0.3).min(r[2] * 0.2);
-    crate::push_stack(v, (r[0] + 3.0 * u, r[1] + 3.0 * u, isz, isz), 0.875, ItemStack { count: 1, ..e.out });
+    let m = card_m(r, (sk, u), e.need.len());
+    crate::push_stack(v, (r[0] + 3.0 * u, r[1] + 3.0 * u, m.isz, m.isz), 0.875, ItemStack { count: 1, ..e.out });
     let name = items::name(e.out).unwrap_or("?");
     let head = if e.out.count > 1 { format!("{name} x{}", e.out.count) } else { name.to_string() };
-    text_fit(v, (r[0] + isz + 8.0 * u, r[1] + 3.0 * u + (isz - 8.0 * tk) * 0.5), tk, r[2] - isz - 12.0 * u, &head, INK);
-    let gw = c.screen.gw;
+    let (tx, gw) = (r[0] + 6.0 * u + m.isz, c.screen.gw);
+    let mw = r[0] + r[2] - 3.0 * u - tx;
+    text_fit_o(v, (tx, r[1] + 2.0 * u), tk, mw, &head, WHITE, o);
     let short = book::missing(e, c.inv, &c.screen.grid);
     let (note, col) = match (e.src, e.grid) {
-        (Src::Smelt(_), _) => ("Smelt it in a furnace", WARN),
-        (_, g) if g > gw => ("Needs a workbench (3x3)", WARN),
-        _ if short.is_empty() => ("Tap the recipe again to refill", GOOD),
-        _ => ("Missing ingredients", BAD),
+        (Src::Smelt(_), _) => ("Smelt it in a furnace", WARN_T),
+        (_, g) if g > gw => ("Needs a workbench (3x3)", WARN_T),
+        _ if short.is_empty() => ("Tap the recipe again to refill", GOOD_T),
+        _ => ("Missing ingredients", BAD_T),
     };
-    text_fit(v, (r[0] + 4.0 * u, r[1] + isz + 8.0 * u), sk, r[2] - 8.0 * u, note, col);
-    // Ingredients, five to a row: the item, then what the bag has over what the recipe wants.
-    let (cw, rowy) = (r[2] / 5.0, r[1] + isz + 8.0 * u + 12.0 * sk);
-    let chip = ((r[3] - (rowy - r[1])).min(cw) * 0.7).max(1.0);
+    text_fit_o(v, (tx, r[1] + 2.0 * u + 8.0 * tk + u), sk, mw, note, col, o);
+    // Ingredients, five to a row: the item, then what the bag has over what the recipe wants. ponytail: the scroll snaps to a row.
+    let (y0, rh) = (r[1] + m.top, m.chip + 8.0 * sk + 2.0 * u);
+    let off = (sat.card_scroll.clamp(0.0, m.max) / m.pitch).round() * m.pitch;
     for (n, &(code, need)) in e.need.iter().enumerate() {
-        let (x, y) = (r[0] + (n % 5) as f32 * cw + (cw - chip) * 0.5, rowy + (n / 5) as f32 * (chip + 12.0 * sk + 4.0 * line));
-        if y + chip > r[1] + r[3] {
-            break;
+        let (x, y) = (r[0] + (n % 5) as f32 * m.cw + (m.cw - m.chip) * 0.5, y0 + (n / 5) as f32 * m.pitch - off);
+        if y < y0 - 0.5 || y + rh > r[1] + r[3] - 0.5 {
+            continue;
         }
-        crate::push_stack(v, (x, y, chip, chip), 0.875, item(code));
+        crate::push_stack(v, (x, y, m.chip, m.chip), 0.875, item(code));
         let have = book::have(c.inv, &c.screen.grid, code);
         let t = format!("{have}/{need}");
-        let lo = x - (cw - chip) * 0.5; // this ingredient's column
-        text_in(v, x + chip * 0.5, y + chip + 2.0 * line, sk, (lo, lo + cw), &t, if have >= u32::from(need) { GOOD } else { BAD });
+        let lo = x - (m.cw - m.chip) * 0.5; // this ingredient's column
+        text_in_o(v, x + m.chip * 0.5, y + m.chip + u, sk, (lo, lo + m.cw), &t, if have >= u32::from(need) { GOOD_T } else { BAD_T }, o);
+    }
+    if m.max > 0.0 {
+        // A thin scroll bar along the card's right edge.
+        let (vh, at) = (r[3] - m.top, sat.card_scroll.clamp(0.0, m.max) / m.max);
+        let bar = vh * vh / (vh + m.max);
+        HudPipeline::push_quad(v, r[0] + r[2] - 1.5 * u, y0 + (vh - bar) * at, 0.8 * u, bar, [0.3, 0.2, 0.1, 0.6]);
     }
 }
 
@@ -929,5 +1006,65 @@ mod tests {
         assert_eq!(f.hit(&sat, b.right[0] + 2.0, b.right[1] + b.right[3] - 2.0), Pick::Panel);
         let (x, y) = centre(f.btns.iter().find(|(b, _)| *b == Btn::Close).expect("close").1);
         assert_eq!(f.hit(&sat, x, y), Pick::Btn(Btn::Close));
+    }
+
+    /// A count lies inside its cell, inside it (the vanilla count's box ended a sixteenth past it), on every screen shape.
+    #[test]
+    fn a_count_stays_inside_its_cell() {
+        for (w, h) in [(1604.0, 720.0), (1280.0, 720.0), (2400.0, 1080.0), (1920.0, 1080.0)] {
+            let f = Frame::new(&open_book(), &Inventory::default(), 2, w, h);
+            let u = units(f.k).0;
+            for &(_, r) in f.cells.iter().step_by(7) {
+                for n in [2, 64] {
+                    let mut v = Vec::new();
+                    count(&mut v, r, u, n);
+                    assert!(!v.is_empty());
+                    assert!(v.iter().all(|q| q.pos[0] >= r[0] + u && q.pos[0] <= r[0] + r[2] - 0.5 * u && q.pos[1] >= r[1] + u && q.pos[1] <= r[1] + r[3] - 0.5 * u), "{n} in {r:?} at {w}x{h}");
+                }
+            }
+        }
+    }
+
+    /// Armor, bag and belt are three blocks with a clear gap between them, and the armor tag lies right of the armor cells on their row.
+    #[test]
+    fn the_blocks_are_apart_and_the_armor_tag_sits_beside_its_row() {
+        let f = frame(&open_book(), &Inventory::default(), 2);
+        let u = units(f.k).0;
+        let row = |id: SlotId| f.cells.iter().find(|(i, _)| *i == id).expect("cell").1;
+        let (armor, top, last, belt) = (row(SlotId::Inv(MAIN)), row(SlotId::Inv(9)), row(SlotId::Inv(35)), row(SlotId::Inv(0)));
+        assert!(top[1] - (armor[1] + armor[3]) >= 11.0 * u && belt[1] - (last[1] + last[3]) >= 11.0 * u, "gaps between the blocks");
+        let &(text, x, y) = f.labels.first().expect("the armor tag");
+        let (w, h) = (HudPipeline::text_width(text) as f32 * (units(f.k).0 + 1.0), 8.0 * (units(f.k).0 + 1.0));
+        let helmet_row_end = armor[0] + armor[2]; // `armor` is the last (boots) cell of the row
+        assert!(x >= helmet_row_end && x + w <= f.bag[0] + f.bag[2], "beside the armor cells, inside the bag");
+        assert!(y >= armor[1] && y + h <= armor[1] + armor[3], "on the armor row");
+        assert!(f.bag[1] + f.bag[3] <= SIZE.1);
+    }
+
+    /// The page's content keeps clear of its rim (6 sprite pixels), the pin is a picture whose box lies in the header, and the card
+    /// shows at least one row of ingredients below its header and scrolls only when there are more rows than fit.
+    #[test]
+    fn the_page_has_margins_a_pin_box_and_a_scrolling_card() {
+        let inv = Inventory::default();
+        for gw in [2, 3] {
+            let mut sat = open_book();
+            sat.sel = Some(0);
+            let f = frame(&sat, &inv, gw);
+            let b = f.book.as_ref().expect("book");
+            let (u, sk) = units(f.k);
+            assert!(b.p >= 10.0 * u, "content is 4 sprite pixels clear of the rim");
+            assert!(b.pin[1] >= b.right[1] + b.p && b.pin[1] + b.pin[3] <= b.right[1] + b.hh + 0.01 && b.pin[0] + b.pin[2] <= b.right[0] + b.right[2] - b.p + 0.01, "pin box in the header");
+            let (x, y) = centre(b.pin);
+            assert_eq!(f.hit(&sat, x, y), Pick::Pin);
+            assert!(b.pin[1] + b.pin[3] <= b.grid[0].1[1], "the pin does not reach the grid");
+            let one = card_m(b.card, (sk, u), 1);
+            assert!(b.card[3] - one.top >= one.chip + 8.0 * sk + 2.0 * u, "a row of ingredients fits the card ({gw}x{gw})");
+            assert_eq!(one.max, 0.0, "one row never scrolls");
+            assert_eq!(card_m(b.card, (sk, u), 5).max, 0.0, "five fit in one row");
+            assert!(card_m(b.card, (sk, u), 11).max > 0.0, "three rows scroll");
+            let (x, y) = centre(b.card);
+            assert_eq!(f.hit(&sat, x, y), Pick::Card);
+            assert!(b.card[1] + b.card[3] < b.hide[1], "the card ends above the toggle");
+        }
     }
 }
