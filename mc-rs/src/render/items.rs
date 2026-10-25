@@ -755,6 +755,9 @@ fn push_cart(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, c: &Cart, a: f32) {
     if c.kind == 2 {
         parts.push(([-0.375, -0.175, -0.375], [0.75, 0.75, 0.75], stack_tile(ItemStack { id: 61, count: 1, damage: 0 })));
     }
+    if c.kind == 1 {
+        parts.push(([-0.375, -0.175, -0.375], [0.75, 0.75, 0.75], stack_tile(ItemStack { id: 54, count: 1, damage: 0 })));
+    }
     for (min, size, tile) in parts {
         let n0 = verts.len();
         push_box(verts, idxs, min, [min[0] + size[0], min[1] + size[1], min[2] + size[2]], tile, 1.0);

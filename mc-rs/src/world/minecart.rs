@@ -1,4 +1,4 @@
-//! M22 minecarts: `EntityMinecart` (empty, type 0, and with a furnace, type 2) and `ItemMinecart` (in `lib.rs`).
+//! M22 minecarts: `EntityMinecart` (empty, type 0, with a chest, type 1, and with a furnace, type 2) and `ItemMinecart` (in `lib.rs`).
 //! On a rail the cart follows the rail's line exactly (`func_514_g` finds the point on it, the speed is turned to run along it,
 //! slopes pull it by 1/128 a tick, a powered rail that is on adds 0.06 and one that is off brakes it, a rider slows it to 75%);
 //! off a rail it falls and slides like a boat on land. Units are the Java ones: blocks and blocks per 20 Hz tick, yaw in degrees.
@@ -22,6 +22,8 @@ const Y_OFF: f32 = 0.35;
 const TICK: f32 = 1.0 / 20.0;
 pub const EMPTY: u16 = 328;
 pub const WITH_FURNACE: u16 = 343;
+pub const WITH_CHEST: u16 = 342;
+pub const CHEST: u16 = 54;
 pub const COAL: u16 = 263;
 pub const FURNACE: u16 = 61;
 
@@ -137,12 +139,16 @@ impl Cart {
         self.damage > 40
     }
 
-    /// What it drops when it breaks: the cart, and for a furnace cart the furnace.
+    /// What it drops when it breaks: the cart, and for a furnace cart the furnace, for a chest cart the chest
+    /// (`EntityMinecart.attackEntityFrom`; the chest's 27 slots are not kept yet).
     pub fn drops(&self) -> Vec<ItemStack> {
         let one = |id| ItemStack { id, count: 1, damage: 0 };
         let mut v = vec![one(EMPTY)];
         if self.kind == 2 {
             v.push(one(FURNACE));
+        }
+        if self.kind == 1 {
+            v.push(one(CHEST));
         }
         v
     }

@@ -1,10 +1,10 @@
 //! M14: the screens before a world is loaded, ported from b1.7.3: `GuiMainMenu` (dirt, `mclogo.png`, the yellow splash), `GuiSelectWorld`
-//! (+ `GuiSlot`, `GuiWorldSlot`), `GuiCreateWorld`, `GuiYesNo` (delete) and the "Loading level" screen. Everything is laid out in GUI units
+//! (+ `GuiSlot`, `GuiWorldSlot`), `GuiCreateWorld`, `GuiRenameWorld`, `GuiYesNo` (delete) and the "Loading level" screen. Everything is laid out in GUI units
 //! (`ScaledResolution`: the biggest whole scale that leaves 320 x 240) and drawn with the HUD pipeline.
 //!
 //! UNVERIFIED (b1.7.3 has no such thing): the world-type button of the create screen (`GuiCreateWorld` has none until 1.1) and the on-screen
-//! keyboard (the sign editor's, `decor::layout`) standing in for the keyboard. Not done: Multiplayer, Mods and Texture Packs and
-//! Rename (drawn greyed out like a disabled `GuiButton`; Options is `options.rs`), the splash's calendar days, the local time zone (dates are UTC).
+//! keyboard (the sign editor's, `decor::layout`) standing in for the keyboard. Not done: Multiplayer and Mods and Texture Packs
+//! (drawn greyed out like a disabled `GuiButton`; Options is `options.rs`), the splash's calendar days, the local time zone (dates are UTC).
 
 use crate::input::touch_ui::ScreenEv;
 use crate::options::{OptEv, OptionsUi, Settings};
@@ -82,6 +82,14 @@ pub fn list(root: &Path) -> Vec<Info> {
     v
 }
 
+/// `GuiRenameWorld` -> `ISaveFormat.func_22170_a`: only the name changes, the folder keeps its name (as in b1.7.3). The `info` file is
+/// written again and its time put back, so the list (sorted by time played) keeps its order.
+fn rename_world(root: &Path, w: &Info, name: &str) {
+    Info { name: name.chars().take(MAX_NAME).collect(), ..w.clone() }.write(root);
+    let t = UNIX_EPOCH + std::time::Duration::from_secs(w.modified);
+    let _ = std::fs::File::options().write(true).open(w.dir(root).join("info")).and_then(|f| f.set_modified(t));
+}
+
 /// `GuiCreateWorld.func_22129_j`: the name as a folder name (the characters a file name cannot have become `_`), `-` added until unused.
 fn folder_for(root: &Path, name: &str) -> String {
     let mut f: String = name.trim().chars().map(|c| if "/\\:*?\"<>|`".contains(c) { '_' } else { c }).collect();
@@ -139,6 +147,8 @@ pub enum Scr {
     Select,
     Create,
     Delete,
+    /// `GuiRenameWorld`, from the list's "Rename" (the typed name is `Menu::name`).
+    Rename,
     /// `GuiOptions`, from the title screen's "Options...".
     Options,
 }
@@ -242,7 +252,7 @@ impl Menu {
             }
             Scr::Select => vec![
                 b(1, hw - 154.0, gh - 52.0, 150.0, "Play Selected World", self.sel.is_some()),
-                b(6, hw - 154.0, gh - 28.0, 70.0, "Rename", false),
+                b(6, hw - 154.0, gh - 28.0, 70.0, "Rename", self.sel.is_some()),
                 b(2, hw - 74.0, gh - 28.0, 70.0, "Delete", self.sel.is_some()),
                 b(3, hw + 4.0, gh - 52.0, 150.0, "Create New World", true),
                 b(0, hw + 4.0, gh - 28.0, 150.0, "Cancel", true),
@@ -259,6 +269,10 @@ impl Menu {
             Scr::Delete => {
                 let y = (gh / 6.0).floor() + 96.0;
                 vec![b(0, hw - 155.0, y, 150.0, "Delete", true), b(1, hw + 5.0, y, 150.0, "Cancel", true)]
+            }
+            Scr::Rename => {
+                let y = (gh / 4.0).floor() + 96.0 + 12.0; // `GuiRenameWorld.initGui`
+                vec![b(0, hw - 100.0, y, 200.0, "Rename", !self.name.trim().is_empty()), b(1, hw - 100.0, y + 24.0, 200.0, "Cancel", true)]
             }
             Scr::Options => Vec::new(),
         }
@@ -367,6 +381,11 @@ impl Menu {
                     self.typing = Some(i as u8);
                 }
             }
+            Scr::Rename => {
+                if hit(Self::fields(gw)[0]) {
+                    self.typing = Some(0); // the same name field as the create screen's, at y 60
+                }
+            }
             _ => {}
         }
     }
@@ -380,6 +399,12 @@ impl Menu {
             (Scr::Select, 0) => self.scr = Scr::Main,
             (Scr::Select, 1) => self.loading = self.sel.and_then(|i| self.worlds.get(i)).cloned(),
             (Scr::Select, 2) => self.scr = Scr::Delete,
+            (Scr::Select, 6) => {
+                // `GuiRenameWorld`: the field starts with the world's name.
+                if let Some(n) = self.sel.and_then(|i| self.worlds.get(i)).map(|w| w.name.clone()) {
+                    (self.name, self.typing, self.scr) = (n, None, Scr::Rename);
+                }
+            }
             (Scr::Select, 3) => {
                 (self.name, self.seed, self.ty, self.typing, self.scr) = (String::from("New World"), String::new(), WorldType::Vanilla, None, Scr::Create);
                 self.pack = true;
@@ -402,6 +427,17 @@ impl Menu {
                 self.open_list();
             }
             (Scr::Delete, 1) => self.scr = Scr::Select,
+            (Scr::Rename, 0) => {
+                let name = self.name.trim().to_string();
+                if let Some(w) = self.sel.and_then(|i| self.worlds.get(i)).cloned() {
+                    if !name.is_empty() {
+                        rename_world(&self.root, &w, &name);
+                    }
+                    self.open_list();
+                    self.sel = self.worlds.iter().position(|x| x.folder == w.folder); // the list keeps its order and the choice
+                }
+            }
+            (Scr::Rename, 1) => self.scr = Scr::Select,
             _ => {}
         }
     }
@@ -476,6 +512,11 @@ impl Menu {
                 }
             }
             Scr::Options => {}
+            Scr::Rename => {
+                txt(v, hw, (gh / 4.0).floor() - 40.0, "Rename World", 0xFFFFFF, true); // height / 4 - 60 + 20
+                txt(v, hw - 100.0, 47.0, "World Name", 0xA0A0A0, false);
+                text_box(v, s, Self::fields(gw)[0], &self.name, false);
+            }
             Scr::Delete => {
                 let name = self.sel.and_then(|i| self.worlds.get(i)).map_or("", |w| w.name.as_str());
                 txt(v, hw, 70.0, "Are you sure you want to delete this world?", 0xFFFFFF, true);
@@ -661,6 +702,44 @@ mod tests {
         tap(&mut m, "Delete", sz);
         assert!(m.worlds.is_empty() && !saves(&root).join("New World").exists());
         m.draw(&mut v, sz.0, sz.1, &Settings::default());
+    }
+
+    /// Select -> Rename: the field starts with the name, a blank one disables the button, the new name is saved, the folder, the other
+    /// settings, the order of the list and the choice stay.
+    #[test]
+    fn rename_changes_the_name_only() {
+        let root = tmp("rename");
+        let sz = (2400.0, 1080.0);
+        let info = |f: &str, n: &str| Info { folder: f.into(), name: n.into(), seed: 5, ty: WorldType::Tectonic, pack: true, modified: 0, bytes: 0 };
+        info("a", "Alpha").write(&root);
+        info("b", "Beta").write(&root);
+        for (f, s) in [("a", 1000), ("b", 2000)] {
+            let file = std::fs::File::options().write(true).open(saves(&root).join(f).join("info")).unwrap();
+            file.set_modified(UNIX_EPOCH + std::time::Duration::from_secs(s)).unwrap();
+        }
+        let mut m = Menu::new(&root);
+        tap(&mut m, "Singleplayer", sz);
+        let folders = |m: &Menu| m.worlds.iter().map(|w| w.folder.clone()).collect::<Vec<_>>();
+        assert_eq!(folders(&m), ["b", "a"], "the last played first");
+        let (_, gw, gh) = scaled(sz.0, sz.1);
+        assert!(m.buttons(gw, gh).iter().any(|b| b.2 == "Rename" && !b.3), "nothing chosen: Rename is greyed out");
+        m.sel = Some(1);
+        tap(&mut m, "Rename", sz);
+        assert_eq!((m.scr, m.name.as_str()), (Scr::Rename, "Alpha"));
+        m.name = "  ".into();
+        assert!(m.buttons(gw, gh).iter().any(|b| b.2 == "Rename" && !b.3), "a blank name cannot be saved");
+        let mut v = Vec::new();
+        m.draw(&mut v, sz.0, sz.1, &Settings::default());
+        assert!(!v.is_empty());
+        tap(&mut m, "Cancel", sz);
+        assert_eq!((m.scr, m.worlds[1].name.as_str()), (Scr::Select, "Alpha"));
+        tap(&mut m, "Rename", sz);
+        m.name = "Gamma ".into();
+        tap(&mut m, "Rename", sz);
+        assert_eq!((m.scr, m.sel, folders(&m)), (Scr::Select, Some(1), vec!["b".to_string(), "a".to_string()]));
+        let a = &m.worlds[1];
+        assert_eq!((a.name.as_str(), a.seed, a.ty, a.pack), ("Gamma", 5, WorldType::Tectonic, true));
+        assert!(saves(&root).join("a").is_dir() && !saves(&root).join("Gamma").exists(), "the folder keeps its name");
     }
 
     #[test]

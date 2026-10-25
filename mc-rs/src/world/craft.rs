@@ -268,7 +268,10 @@ pub fn recipes() -> &'static [Recipe] {
             shaped(&["X#X", "#X#", "X#X"], &[('X', 289), ('#', 12)], 46, 1),  // TNT: gunpowder + sand
             shaped(&["# #", "###"], &[('#', PLANKS)], 333, 1), // boat
             shaped(&["# #", "###"], &[('#', 265)], 328, 1), // minecart: 5 iron ingots
-            shapeless(&[61, 328], 343, 1), // minecart with furnace: furnace + minecart
+            shaped(&["A", "B"], &[('A', 61), ('B', 328)], 343, 1), // minecart with furnace (CraftingManager): furnace over minecart
+            shaped(&["A", "B"], &[('A', 54), ('B', 328)], 342, 1), // minecart with chest (CraftingManager): chest over minecart
+            shaped(&[" # ", "#X#", " # "], &[('#', 265), ('X', 331)], 345, 1), // compass: 4 iron ingots round redstone
+            shaped(&[" # ", "#X#", " # "], &[('#', 266), ('X', 331)], 347, 1), // clock (`pocketSundial`): 4 gold ingots round redstone
             shaped(&["X X", "X#X", "X X"], &[('X', 265), ('#', STICK)], 66, 16), // rails: 6 iron + a stick
             shaped(&["X X", "X#X", "XRX"], &[('X', 266), ('#', STICK), ('R', 331)], 27, 6), // powered rails: 6 gold + stick + redstone
             shaped(&["X X", "X#X", "XRX"], &[('X', 265), ('#', 70), ('R', 331)], 28, 6), // detector rails: 6 iron + stone plate + redstone
@@ -780,6 +783,14 @@ mod tests {
         assert_eq!(out(&[(1, 265), (2, 265)], 2), Some((359, 1)), "shears in a 2x2");
         assert_eq!(out(&[(0, 265), (3, 265)], 2), Some((359, 1)), "shears, mirrored");
         assert_eq!(out(&[(1, 265), (3, 265)], 3), Some((359, 1)), "shears in a 3x3");
+        let ring = |ingot| [(1, ingot), (3, ingot), (5, ingot), (7, ingot), (4, 331)];
+        assert_eq!(out(&ring(265), 3), Some((345, 1)), "compass");
+        assert_eq!(out(&ring(266), 3), Some((347, 1)), "clock");
+        assert_eq!(out(&[(0, 54), (2, 328)], 2), Some((342, 1)), "minecart with chest, in a 2x2");
+        assert_eq!(out(&[(0, 328), (2, 54)], 2), None, "chest under the cart is nothing");
+        assert_eq!(out(&[(0, 61), (2, 328)], 2), Some((343, 1)), "minecart with furnace, furnace on top");
+        assert_eq!(out(&[(0, 328), (2, 61)], 2), None, "a furnace under the cart is nothing (it was shapeless before)");
+        assert_eq!(out(&[(0, 61), (1, 328)], 2), None, "side by side is nothing");
     }
 
     /// The `Container.func_27280_a` rules: pick up, put one, take the result (uses up the grid), swap, top up, close.

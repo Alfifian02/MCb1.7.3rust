@@ -989,6 +989,7 @@ impl App {
                 (self.player.pos.x as f64, self.player.pos.z as f64),
                 (self.spawn.x as f64, self.spawn.z as f64),
                 sky::celestial_angle(self.world_ticks as u64, 1.0),
+                self.nether,
             );
             self.be.animate_items(&g);
         }
@@ -1570,6 +1571,7 @@ impl App {
             // ItemMinecart.onItemUse: aimed at a rail, the cart is set in the rail's cell (its centre, 0.5 up).
             if let Some(kind) = self.inv.slots[slot].and_then(|s| match s.id {
                 minecart::EMPTY => Some(0),
+                minecart::WITH_CHEST => Some(1),
                 minecart::WITH_FURNACE => Some(2),
                 _ => None,
             }) {

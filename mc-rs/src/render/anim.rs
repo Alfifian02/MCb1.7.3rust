@@ -200,10 +200,16 @@ impl Anim {
 
     /// One 20 Hz tick of `TextureCompassFX` and `TextureWatchFX`: the new pictures of the compass and clock items,
     /// `(items.png tile, RGBA)`. `yaw` is `rotationYaw` in degrees, `pos` the player's x / z, `spawn` the world spawn x / z and
-    /// `celestial` `World.getCelestialAngle(1.0)`. ponytail: no Nether branch (the needle spinning at random), no anaglyph.
-    pub fn gauges(&mut self, yaw: f32, pos: (f64, f64), spawn: (f64, f64), celestial: f32) -> [(u8, Tile); 2] {
-        chase(&mut self.compass, (yaw as f64 - 90.0).to_radians() - (spawn.1 - pos.1).atan2(spawn.0 - pos.0));
-        chase(&mut self.clock, -(celestial as f64) * std::f64::consts::TAU);
+    /// `celestial` `World.getCelestialAngle(1.0)`. `nether`: `worldProvider.isNether`, where both hands aim at a new random angle
+    /// (`Math.random() * PI * 2`) every tick and so spin. ponytail: no anaglyph.
+    pub fn gauges(&mut self, yaw: f32, pos: (f64, f64), spawn: (f64, f64), celestial: f32, nether: bool) -> [(u8, Tile); 2] {
+        let (compass_to, clock_to) = if nether {
+            (self.rng.f() as f64 * std::f64::consts::TAU, self.rng.f() as f64 * std::f64::consts::TAU)
+        } else {
+            ((yaw as f64 - 90.0).to_radians() - (spawn.1 - pos.1).atan2(spawn.0 - pos.0), -(celestial as f64) * std::f64::consts::TAU)
+        };
+        chase(&mut self.compass, compass_to);
+        chase(&mut self.clock, clock_to);
         [(COMPASS, compass(&items_tile(COMPASS), self.compass.0)), (CLOCK, watch(&items_tile(CLOCK), self.clock.0))]
     }
 
@@ -250,19 +256,28 @@ mod tests {
     #[test]
     fn compass_and_clock_follow_their_targets() {
         let mut a = Anim::new();
-        let mut last = a.gauges(0.0, (0.0, 0.0), (10.0, 0.0), 0.0);
+        let mut last = a.gauges(0.0, (0.0, 0.0), (10.0, 0.0), 0.0, false);
         for _ in 0..200 {
-            last = a.gauges(0.0, (0.0, 0.0), (10.0, 0.0), 0.0);
+            last = a.gauges(0.0, (0.0, 0.0), (10.0, 0.0), 0.0, false);
         }
-        let again = a.gauges(0.0, (0.0, 0.0), (10.0, 0.0), 0.0);
+        let again = a.gauges(0.0, (0.0, 0.0), (10.0, 0.0), 0.0, false);
         assert!(last[0].1 == again[0].1 && last[1].1 == again[1].1, "both hands have settled");
         assert!(again[0].1.chunks(4).any(|p| p == [255, 20, 20, 255]), "red needle tip");
         let (base, noon) = (items_tile(CLOCK), again[1].1);
         let midnight = {
             let mut b = Anim::new();
-            (0..200).map(|_| b.gauges(0.0, (0.0, 0.0), (10.0, 0.0), 0.5)).last().unwrap()[1].1
+            (0..200).map(|_| b.gauges(0.0, (0.0, 0.0), (10.0, 0.0), 0.5, false)).last().unwrap()[1].1
         };
         assert!(noon != midnight, "the dial turns with the sky");
         assert!((0..256).filter(|&i| !(base[i * 4] == base[i * 4 + 2] && base[i * 4 + 1] == 0 && base[i * 4 + 2] > 0)).all(|i| noon[i * 4..][..4] == base[i * 4..][..4]));
+    }
+
+    /// In the Nether neither hand settles: the target is a new random angle every tick, so the pictures keep changing.
+    #[test]
+    fn the_nether_spins_both_hands() {
+        let mut a = Anim::new();
+        let shots: Vec<[(u8, Tile); 2]> = (0..60).map(|_| a.gauges(0.0, (0.0, 0.0), (10.0, 0.0), 0.0, true)).collect();
+        assert!(shots[30..].windows(2).filter(|w| w[0][0].1 != w[1][0].1).count() > 10, "the needle keeps moving");
+        assert!(shots[30..].windows(2).filter(|w| w[0][1].1 != w[1][1].1).count() > 10, "the dial keeps moving");
     }
 }
