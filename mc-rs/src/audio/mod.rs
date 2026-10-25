@@ -152,6 +152,92 @@ fn decode(data: &[u8]) -> Option<Clip> {
     Some(Clip { pcm, rate })
 }
 
+/// Whether `name` is a `SoundPool` key (the tests of whoever queues sounds check their names with it).
+#[cfg(test)]
+pub fn exists(name: &str) -> bool {
+    table::SFX.iter().any(|e| e.0 == name)
+}
+
+/// A `World.playSoundEffect` a world system queued (`Ticks::sounds`); the frame hands each one to `Audio::play`.
+pub struct Snd {
+    pub name: &'static str,
+    pub at: Vec3,
+    pub vol: f32,
+    pub pitch: f32,
+}
+
+/// The sounds the world makes around the player on its own: `World.updateBlocksAndPlayCaveSounds` (`cave`, 20 Hz) and the sound half of
+/// `World.randomDisplayUpdates` (`display`, 20 Hz: running water, fire, a portal's hum). The particles of the second are not here.
+pub struct Ambient {
+    /// `World.soundCounter`: ticks until a cave sound may play again.
+    counter: i32,
+    /// `World.field_9437_g`, the LCG that picks one cell per chunk.
+    lcg: i32,
+    rng: JavaRandom,
+}
+
+impl Ambient {
+    pub fn new(seed: i64) -> Self {
+        let mut rng = JavaRandom::new(seed ^ 0xCA5E);
+        let counter = rng.next_int_bound(12000);
+        Self { counter, lcg: rng.next_int(), rng }
+    }
+
+    /// One tick of the cave sounds: with the counter at 0, each chunk within 9 of the player picks one cell, and a dark air cell
+    /// (light <= `rand(8)`, no sky light) between 2 and 8 blocks from the player plays `ambient.cave.cave`, then 6000 to 18000 ticks of silence.
+    /// `probe` is (block id, `getFullBlockLightValue`, sky light) of a cell; an unloaded cell reads as solid.
+    pub fn cave(&mut self, ears: Vec3, probe: &dyn Fn(i32, i32, i32) -> (u8, u8, u8)) -> Option<Snd> {
+        self.counter = (self.counter - 1).max(0);
+        let (pcx, pcz) = ((ears.x / 16.0).floor() as i32, (ears.z / 16.0).floor() as i32);
+        for cx in pcx - 9..=pcx + 9 {
+            for cz in pcz - 9..=pcz + 9 {
+                if self.counter != 0 {
+                    return None;
+                }
+                self.lcg = self.lcg.wrapping_mul(3).wrapping_add(1013904223);
+                let r = self.lcg >> 2;
+                let (x, z, y) = (cx * 16 + (r & 15), cz * 16 + ((r >> 8) & 15), (r >> 16) & 127);
+                let (id, full, sky) = probe(x, y, z);
+                if id == 0 && full as i32 <= self.rng.next_int_bound(8) && sky == 0 {
+                    let at = Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
+                    let d2 = (at - ears).length_squared(); // `getClosestPlayer(.., 8.0)` and `getDistanceSq > 4`
+                    if d2 < 64.0 && d2 > 4.0 {
+                        self.counter = self.rng.next_int_bound(12000) + 6000;
+                        return Some(Snd { name: "ambient.cave.cave", at, vol: 0.7, pitch: 0.8 + self.rng.next_float() * 0.2 });
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// One tick of `randomDisplayUpdates`: 1000 cells within 16 of `(x, y, z)` (the sum of two draws: nearer is likelier), and what
+    /// each one's `randomDisplayTick` says aloud: flowing water 1 in 64 (levels 1..=7), fire 1 in 24, a portal 1 in 100.
+    pub fn display(&mut self, (px, py, pz): (i32, i32, i32), block: &dyn Fn(i32, i32, i32) -> u8, meta: &dyn Fn(i32, i32, i32) -> u8, out: &mut Vec<Snd>) {
+        for _ in 0..1000 {
+            let x = px + self.rng.next_int_bound(16) - self.rng.next_int_bound(16);
+            let y = py + self.rng.next_int_bound(16) - self.rng.next_int_bound(16);
+            let z = pz + self.rng.next_int_bound(16) - self.rng.next_int_bound(16);
+            let id = block(x, y, z);
+            if !matches!(id, 8 | 9 | 51 | 90) {
+                continue;
+            }
+            let at = Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
+            if matches!(id, 8 | 9) {
+                if self.rng.next_int_bound(64) == 0 && (1..8).contains(&meta(x, y, z)) {
+                    out.push(Snd { name: "liquid.water", at, vol: self.rng.next_float() * 0.25 + 0.75, pitch: self.rng.next_float() + 0.5 });
+                }
+            } else if id == 51 {
+                if self.rng.next_int_bound(24) == 0 {
+                    out.push(Snd { name: "fire.fire", at, vol: 1.0 + self.rng.next_float(), pitch: self.rng.next_float() * 0.7 + 0.3 });
+                }
+            } else if self.rng.next_int_bound(100) == 0 {
+                out.push(Snd { name: "portal.portal", at, vol: 1.0, pitch: self.rng.next_float() * 0.4 + 0.8 });
+            }
+        }
+    }
+}
+
 pub struct Audio {
     mix: Arc<Mutex<Mix>>,
     cache: HashMap<usize, Arc<Clip>>,
@@ -246,6 +332,27 @@ impl Audio {
         self.play(name, e, vol, pitch);
     }
 
+    /// One draw of the sound random, for the pitches `base + r * spread` that callers build themselves.
+    pub fn rnd(&mut self) -> f32 {
+        self.rng.next_float()
+    }
+
+    /// `playSoundAtEntity` with the entity pitch `(r - r) * 0.2 + 1`, times `mul` (`jit` false: exactly `mul`, as a creeper's fuse at 0.5).
+    /// The draws come from here, not from the mob's own random, so a sound never changes what a mob does.
+    pub fn cry(&mut self, name: &str, at: Vec3, vol: f32, mul: f32, jit: bool) {
+        let pitch = if jit { ((self.rng.next_float() - self.rng.next_float()) * 0.2 + 1.0) * mul } else { mul };
+        self.play(name, at, vol, pitch);
+    }
+
+    /// `RenderGlobal` aux effect 1003 (a door or trapdoor moved): open or close, one in two whichever it did (`Math.random() < 0.5`).
+    /// The b1.7.3 asset index has neither `random.door_open` nor `random.door_close`, so the original is silent here too and so is this;
+    /// a sound pack that adds them to `table::SFX` is all it needs.
+    pub fn door(&mut self, at: Vec3) {
+        let name = if self.rng.next_float() < 0.5 { "random.door_open" } else { "random.door_close" };
+        let pitch = self.rng.next_float() * 0.1 + 0.9;
+        self.play(name, at, 1.0, pitch);
+    }
+
     /// `playSoundFX` (GUI clicks): not positional, volume x 0.25.
     pub fn play_fx(&mut self, name: &str, vol: f32, pitch: f32) {
         if self.sound == 0.0 {
@@ -321,6 +428,29 @@ fn start_output(_: Arc<Mutex<Mix>>) -> Option<Keep> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_world_hums_where_there_is_fire_and_water_and_cave_sounds_wait_their_turn() {
+        let mut a = Ambient::new(7);
+        let mut out = Vec::new();
+        a.display((0, 64, 0), &|_, _, _| 51, &|_, _, _| 0, &mut out);
+        assert!(out.len() > 10 && out.iter().all(|s| s.name == "fire.fire" && (1.0..2.0).contains(&s.vol) && (0.3..1.0).contains(&s.pitch)));
+        out.clear();
+        a.display((0, 64, 0), &|_, _, _| 9, &|_, _, _| 0, &mut out);
+        assert!(out.is_empty(), "still water (level 0) is silent");
+        a.display((0, 64, 0), &|_, _, _| 8, &|_, _, _| 3, &mut out);
+        assert!(!out.is_empty() && out.iter().all(|s| s.name == "liquid.water"));
+        // A dark open cave: the first sound comes from a cell 2 to 8 blocks away, then it is quiet for 6000 ticks.
+        let (ears, dark) = (Vec3::new(8.0, 40.0, 8.0), |_: i32, _: i32, _: i32| (0u8, 0u8, 0u8));
+        a.counter = 0;
+        let s = (0..20000).find_map(|_| a.cave(ears, &dark)).expect("some chunk picks a cell near enough");
+        let d = (s.at - ears).length();
+        assert!(s.name == "ambient.cave.cave" && d > 2.0 && d < 8.0 && s.vol == 0.7 && (0.8..1.0).contains(&s.pitch));
+        assert!((0..5999).all(|_| a.cave(ears, &dark).is_none()));
+        // Daylight (sky light) or solid rock never speaks.
+        a.counter = 0;
+        assert!((0..300).all(|_| a.cave(ears, &|_, _, _| (0, 0, 15)).is_none() && a.cave(ears, &|_, _, _| (1, 0, 0)).is_none()));
+    }
 
     #[test]
     fn every_name_the_java_plays_exists_and_decodes() {

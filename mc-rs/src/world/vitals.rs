@@ -31,6 +31,9 @@ pub struct Env {
 
 pub struct Vitals {
     pub health: i32,
+    /// Set by a fresh hit (`random.hurt`, also the death cry) and by a landing that hurt (the block's step sound); the frame takes them.
+    pub cry: bool,
+    pub thud: bool,
     pub air: i32,
     pub fire: i32,
     /// `heartsLife`: 20 right after a hit, counts down; while above 10 only a bigger hit than `last_damage` counts.
@@ -50,7 +53,7 @@ pub struct Vitals {
 
 impl Default for Vitals {
     fn default() -> Self {
-        Self { health: MAX_HEALTH, air: MAX_AIR, fire: 0, hearts_life: 0, last_damage: 0, fall: 0.0, acc: 0.0, armor: 0, wear: 0, rem: 0, drowned: false, stamina: Stamina::default() }
+        Self { health: MAX_HEALTH, cry: false, thud: false, air: MAX_AIR, fire: 0, hearts_life: 0, last_damage: 0, fall: 0.0, acc: 0.0, armor: 0, wear: 0, rem: 0, drowned: false, stamina: Stamina::default() }
     }
 }
 
@@ -79,6 +82,7 @@ impl Vitals {
         } else {
             self.hearts_life = 20;
             self.health -= self.absorb(dmg);
+            self.cry = true;
         }
         self.last_damage = dmg;
         self.stamina.hit(); // `LivingDamageEvent.Post`: any damage taken puts the player in combat for 15 s
@@ -110,6 +114,7 @@ impl Vitals {
             self.fall = 0.0;
             if dmg > 0 {
                 self.hurt(dmg);
+                self.thud = true;
             }
         } else if e.dy < 0.0 {
             self.fall -= e.dy;
@@ -168,6 +173,20 @@ impl Vitals {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A fresh hit sets `cry` (the top-up of a bigger hit inside the window does not), a landing that hurt sets `thud`.
+    #[test]
+    fn a_fresh_hit_cries_and_a_hard_landing_thuds() {
+        let mut v = Vitals::default();
+        v.hurt(4);
+        assert!(std::mem::take(&mut v.cry) && !v.thud);
+        v.hurt(6);
+        assert!(!v.cry, "inside the window");
+        let mut v = Vitals::default();
+        for _ in 0..10 { v.update(0.0, Env { dy: -1.0, ..Env::default() }); }
+        v.update(0.0, Env { on_ground: true, ..Env::default() });
+        assert!(v.cry && v.thud);
+    }
 
     /// A 10 block fall costs 7 (ceil(10 - 3)); water cancels it; the damage window ignores equal hits and tops up
     /// bigger ones; drowning starts after 300 + 20 ticks and then costs 2 every 20.

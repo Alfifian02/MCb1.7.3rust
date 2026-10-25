@@ -188,6 +188,8 @@ struct App {
     ticks: Ticks,
     /// Sounds (`SoundManager`): effects, music and records, `audio/`.
     audio: audio::Audio,
+    /// Cave sounds and the water, fire and portal hum around the player (`World` 20 Hz).
+    ambient: audio::Ambient,
     item_mesh: ItemMesh,
     /// Open container screen (the 2x2 inventory or a workbench's 3x3) and its "place one" click toggle.
     screen: Option<Screen>,
@@ -342,6 +344,7 @@ impl App {
             portal_cd: 0.0,
             ticks: Ticks::new(seed),
             audio: audio::Audio::new(),
+            ambient: audio::Ambient::new(seed),
             item_mesh,
             screen: None,
             one_mode: false,
@@ -709,6 +712,8 @@ impl App {
         self.pause = None;
         // Four seconds in a portal: the other dimension (`EntityPlayerSP.onLivingUpdate`).
         if self.portal_t >= 1.0 {
+            let p = self.audio.rnd() * 0.4 + 0.8;
+            self.audio.play_fx("portal.travel", 1.0, p);
             self.enter(!self.nether, false);
             return;
         }
@@ -827,6 +832,10 @@ impl App {
             if self.portal_cd > 0.0 {
                 self.portal_cd = 0.5;
             } else {
+                if self.portal_t == 0.0 {
+                    let p = self.audio.rnd() * 0.4 + 0.8;
+                    self.audio.play_fx("portal.trigger", 1.0, p); // `EntityPlayerSP`: the timer starts
+                }
                 self.portal_t += 0.25 * dt;
             }
         } else {
@@ -837,11 +846,27 @@ impl App {
         // Entering water splashes (`Entity.onEntityUpdate`); running out of air pops 8 bubbles round the eye (`EntityLiving.onEntityUpdate`).
         let motion = self.player.vel / 20.0; // blocks per tick
         if water && !self.was_in_water {
+            // `Entity.onEntityUpdate`: `random.splash`, as loud as the fall in is fast (`sqrt(vx² * 0.2 + vy² + vz² * 0.2) * 0.2`, at most 1).
+            let v = (((motion.x * motion.x + motion.z * motion.z) * 0.2 + motion.y * motion.y).sqrt() * 0.2).min(1.0);
+            let p = 1.0 + (self.audio.rnd() - self.audio.rnd()) * 0.4;
+            self.audio.play_here("random.splash", v, p);
             self.fx.splash(glam::Vec3::new(self.player.pos.x, (self.player.pos.y - 0.9).floor() + 1.0, self.player.pos.z), 0.6, motion);
         }
         self.was_in_water = water;
         if std::mem::take(&mut self.vitals.drowned) {
             self.fx.breath(e, motion);
+        }
+        // `random.hurt` for a fresh hit (and the death), then a hard landing's step sound at half volume and 3/4 pitch (`EntityLiving.fall`).
+        if std::mem::take(&mut self.vitals.cry) {
+            let p = 1.0 + (self.audio.rnd() - self.audio.rnd()) * 0.2;
+            self.audio.play_here("random.hurt", 1.0, p);
+        }
+        if std::mem::take(&mut self.vitals.thud) {
+            let below = self.chunks.block_loaded(self.player.pos.x.floor() as i32, (self.player.pos.y - 1.1).floor() as i32, self.player.pos.z.floor() as i32).unwrap_or(0);
+            let (key, _, pitch) = audio::STEP[audio::step_of(below)];
+            if below > 0 {
+                self.audio.play_here(key, 0.5, pitch * 0.75);
+            }
         }
         // `InventoryPlayer.damageArmor`: every worn piece takes the damage that was dealt (before armor).
         let wear = std::mem::take(&mut self.vitals.wear) as u16;
@@ -866,6 +891,7 @@ impl App {
                     }
                 }
                 Ev::Boom(p) => self.explode(p, 3.0),
+                Ev::Snd(name, at, vol, mul, jit) => self.audio.cry(name, at, vol, mul, jit),
                 _ => {}
             }
         }
@@ -1000,6 +1026,21 @@ impl App {
                 self.ticks.wake_water(&mut self.chunks, x, y, z); // a river's edge water, Streams Reflowing's scheduleTick
             }
             self.ticks.step(&mut self.chunks, &mut self.drops, centre, self.weather.rain(1.0));
+            for s in std::mem::take(&mut self.ticks.sounds) {
+                self.audio.play(s.name, s.at, s.vol, s.pitch);
+            }
+            {
+                let ch = &self.chunks;
+                let ears = self.camera.pos;
+                if let Some(s) = self.ambient.cave(ears, &|x, y, z| (ch.block_loaded(x, y, z).unwrap_or(1), ch.light_at(x, y, z, 0), ch.light_levels(x, y, z).0)) {
+                    self.audio.play(s.name, s.at, s.vol, s.pitch);
+                }
+                let mut heard = Vec::new();
+                self.ambient.display((ears.x.floor() as i32, ears.y.floor() as i32, ears.z.floor() as i32), &|x, y, z| ch.block_loaded(x, y, z).unwrap_or(0), &|x, y, z| ch.meta(x, y, z), &mut heard);
+                for s in heard {
+                    self.audio.play(s.name, s.at, s.vol, s.pitch);
+                }
+            }
             for ((x, y, z), n, inst) in std::mem::take(&mut self.ticks.note_events) {
                 self.audio.note(glam::Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5), n, inst); // `BlockNote.playBlock`
             }
@@ -1375,7 +1416,9 @@ impl App {
                 // BlockLever.blockActivated: the on bit flips. ponytail: a punch (`onBlockClicked`) does not flip it.
                 Some(69) => {
                     let (x, y, z) = hit.pos;
+                    let on = self.chunks.meta(x, y, z) & 8 == 0; // `BlockLever`: pitch 0.6 turning on, 0.5 off
                     self.chunks.set_block_meta(x, y, z, 69, self.chunks.meta(x, y, z) ^ 8);
+                    self.audio.play("random.click", glam::Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5), 0.3, if on { 0.6 } else { 0.5 });
                     return;
                 }
                 // BlockButton.blockActivated: pressed for 20 ticks.
@@ -1384,6 +1427,7 @@ impl App {
                     let m = self.chunks.meta(x, y, z);
                     if m & 8 == 0 && self.chunks.set_block_meta(x, y, z, 77, m | 8) {
                         self.ticks.schedule(x, y, z, 77, 20);
+                        self.audio.play("random.click", glam::Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5), 0.3, 0.6);
                     }
                     return;
                 }
@@ -1503,6 +1547,8 @@ impl App {
             if self.inv.slots[slot].is_some_and(|s| s.id == craft::FLINT_AND_STEEL) {
                 let (x, y, z) = pick::place_pos(&hit);
                 if self.chunks.block_loaded(x, y, z) == Some(0) {
+                    let p = self.audio.rnd() * 0.4 + 0.8;
+                    self.audio.play("fire.ignite", glam::Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5), 1.0, p);
                     self.chunks.set_block(x, y, z, 51);
                 }
                 self.inv.damage(slot, 1);
@@ -1514,6 +1560,8 @@ impl App {
                 if let (Some(b), Some(above)) = (b, above) {
                     if craft::can_till(b, above, hit.face) {
                         self.chunks.set_block(x, y, z, 60);
+                        let (key, _, pitch) = audio::STEP[audio::step_of(60)]; // `ItemHoe`: the tilled field's step sound
+                        self.audio.play(key, glam::Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5), 1.0, pitch * 0.8);
                         self.inv.damage(slot, 1);
                     }
                 }
@@ -1576,6 +1624,8 @@ impl App {
                 let meta = if matches!(s.id, 50 | 75 | 76) { pick::torch_meta(&|a, b, c| self.chunks.block_loaded(a, b, c).unwrap_or(0), (x, y, z), hit.face) } else if matches!(s.id, 33 | 29) { Some(pick::piston_facing(self.player.pos, (x, y, z), self.camera.yaw.to_degrees() + 180.0)) } else if matches!(s.id, 69 | 77) { pick::switch_meta(&|a, b, c| self.chunks.block_loaded(a, b, c).unwrap_or(0), (x, y, z), hit.face, s.id == 69, floor) } else if s.id == 96 { pick::trap_meta(hit.face, self.chunks.block_loaded(hit.pos.0, hit.pos.1, hit.pos.2).is_some_and(normal_cube)) } else { pick::facing_meta(s.id, self.camera.yaw.to_degrees() + 180.0).or(Some(items::placed_meta(s))) };
                 if let Some(meta) = meta.filter(|_| y < 127 && self.chunks.block_loaded(x, y, z).is_some_and(pick::replaceable) && !pick::overlaps_player((x, y, z), s.id as u8, self.player.pos) && ticks::can_place(&self.chunks, x, y, z, s.id as u8) && (s.id != chest::ID as u16 || chest::can_place(&|a, b, c| self.chunks.block(a, b, c).unwrap_or(0), (x, y, z)))) {
                     if self.chunks.set_block_meta(x, y, z, s.id as u8, meta) {
+                        let (key, _, pitch) = audio::STEP[audio::step_of(s.id as u8)]; // `ItemBlock`: step sound, volume (1 + 1) / 2, pitch * 0.8
+                        self.audio.play(key, glam::Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5), 1.0, pitch * 0.8);
                         self.inv.consume(slot);
                     }
                 }
@@ -1671,6 +1721,7 @@ impl App {
 
     fn explode(&mut self, at: glam::Vec3, power: f32) {
         self.touch.pad.rumble(400, 255);
+        self.audio.cry("random.explode", at, 4.0, 0.7, true); // `Explosion`: volume 4, pitch `(1 + (r - r) * 0.2) * 0.7`
         let cells = self.mobs.explode(&|x: i32, y: i32, z: i32| self.chunks.block(x, y, z), at, power);
         for (x, y, z) in cells {
             let Some(id) = self.chunks.block_loaded(x, y, z).filter(|&b| b > 0) else { continue };
@@ -1775,6 +1826,7 @@ impl App {
                 self.chunks.set_block_meta(x, y + 1, z, 64, (m ^ 4) + 8);
             }
             self.chunks.set_block_meta(x, y, z, 64, m ^ 4);
+            self.audio.door(glam::Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5)); // aux effect 1003 (silent: no such asset in b1.7.3)
         }
     }
 

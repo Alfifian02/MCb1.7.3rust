@@ -100,6 +100,10 @@ pub struct Ticks {
     notes: HashMap<(i32, i32, i32), (u8, bool)>,
     /// Notes played this tick (cell, note, instrument 0 harp / 1 bass drum / 2 snare / 3 click / 4 bass); no audio yet, the caller drains it.
     pub note_events: Vec<((i32, i32, i32), u8, u8)>,
+    /// `World.playSoundEffect` calls of the blocks this tick (pistons, buttons, plates, TNT, fizz); the caller drains it into `Audio`.
+    pub sounds: Vec<crate::audio::Snd>,
+    /// The random of those sounds' pitches, apart from `rng` so a sound never changes what a block does.
+    snd: JavaRandom,
     /// `Entity.distanceWalkedModified` / `nextStepDistance` of the player and where the last tick left him (x, z).
     walked: f32,
     next_step: i32,
@@ -108,7 +112,7 @@ pub struct Ticks {
 
 impl Ticks {
     pub fn new(seed: i64) -> Self {
-        Self { now: 0, seq: 0, due: BTreeSet::new(), pending: HashSet::new(), rng: JavaRandom::new(seed ^ 0xB10C), lcg: 0x2545_F491, wet: false, falling: Vec::new(), booms: Vec::new(), plate_ents: Vec::new(), dispenses: Vec::new(), torch_flips: Vec::new(), notes: HashMap::new(), note_events: Vec::new(), walked: 0.0, next_step: 1, last_xz: None }
+        Self { now: 0, seq: 0, due: BTreeSet::new(), pending: HashSet::new(), rng: JavaRandom::new(seed ^ 0xB10C), lcg: 0x2545_F491, wet: false, falling: Vec::new(), booms: Vec::new(), plate_ents: Vec::new(), dispenses: Vec::new(), torch_flips: Vec::new(), notes: HashMap::new(), note_events: Vec::new(), sounds: Vec::new(), snd: JavaRandom::new(seed ^ 0x534F_554E), walked: 0.0, next_step: 1, last_xz: None }
     }
 
     /// The step trigger of `Entity.moveEntity` for the player (walked distance x 0.6 past `nextStepDistance`, block under the
@@ -132,12 +136,21 @@ impl Ticks {
         stepped
     }
 
+    /// Queue a sound at the centre of a cell, `dy` up from it; `pitch` is `base + r * spread` (r from the sound random).
+    fn say(&mut self, name: &'static str, (x, y, z): (i32, i32, i32), dy: f32, vol: f32, base: f32, spread: f32) {
+        let pitch = base + self.snd.next_float() * spread;
+        self.sounds.push(crate::audio::Snd { name, at: Vec3::new(x as f32 + 0.5, y as f32 + dy, z as f32 + 0.5), vol, pitch });
+    }
+
     /// `new EntityTNTPrimed` at the cell centre: a hop of 0.2 and a drift of 0.02 in a random direction, fuse 80 ticks, or
     /// `rand(20) + 10` when an explosion set it off (`BlockTNT.onBlockDestroyedByExplosion`). Not capped by `MAX_FALLING`.
     pub fn prime(&mut self, (x, y, z): (i32, i32, i32), short: bool) {
         let (s, c) = (self.rng.next_float() * std::f32::consts::TAU * std::f32::consts::PI / 180.0).sin_cos(); // the Java feeds radians to a degree conversion
         let fuse = if short { self.rng.next_int_bound(20) + 10 } else { 80 };
         let pos = Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
+        if !short {
+            self.sounds.push(crate::audio::Snd { name: "random.fuse", at: pos, vol: 1.0, pitch: 1.0 }); // `onBlockDestroyedByPlayer`; a chain blast is silent
+        }
         self.falling.push(Falling { pos, prev: pos, vy: 0.2, id: 46, age: 0, vx: -s * 0.02, vz: -c * 0.02, fuse, meta: 0, mv: None });
     }
 
@@ -238,7 +251,9 @@ impl Ticks {
     fn added(&mut self, w: &mut ChunkManager, x: i32, y: i32, z: i32, id: u8) {
         match id {
             8..=11 => {
-                harden(w, x, y, z, id);
+                if harden(w, x, y, z, id) {
+                    self.say("random.fizz", (x, y, z), 0.5, 0.5, 2.2, 0.8); // `triggerLavaMixEffects`
+                }
                 if id == 8 || id == 10 {
                     self.schedule(x, y, z, id, tick_rate(id));
                 }
@@ -278,7 +293,9 @@ impl Ticks {
         let power = changed == 255 || can_provide_power(changed);
         match id {
             8..=11 => {
-                harden(w, x, y, z, id);
+                if harden(w, x, y, z, id) {
+                    self.say("random.fizz", (x, y, z), 0.5, 0.5, 2.2, 0.8);
+                }
                 // BlockStationary: a still fluid wakes up as a flowing one.
                 if matches!(bid(w, x, y, z), 9 | 11) {
                     w.set_quiet(x, y, z, id - 1, w.meta(x, y, z));
@@ -437,6 +454,7 @@ impl Ticks {
             // BlockButton.updateTick: the 20 ticks are over.
             77 if w.meta(x, y, z) & 8 != 0 => {
                 w.set_block_meta(x, y, z, 77, w.meta(x, y, z) & 7);
+                self.say("random.click", (x, y, z), 0.5, 0.3, 0.5, 0.0);
             }
             70 | 72 if w.meta(x, y, z) != 0 => self.plate(w, x, y, z),
             // BlockRedstoneOre.updateTick: the glow ends.
@@ -514,6 +532,7 @@ impl Ticks {
             let (h, hm) = (at(1), f as u8 | if sticky { 8 } else { 0 });
             self.piece(w, h, 34, hm, (x, y, z), h, Some((34, hm))); // the head slides out of the base
             w.set_block_meta(x, y, z, id, m | 8);
+            self.say("tile.piston.out", (x, y, z), 0.5, 0.5, 0.6, 0.25);
         } else if !powered && m & 8 != 0 {
             let h = at(1);
             if bid(w, h.0, h.1, h.2) == 34 {
@@ -528,6 +547,7 @@ impl Ticks {
                 self.piece(w, h, pulled, pm, b, h, Some((pulled, pm)));
             }
             w.set_block_meta(x, y, z, id, m & 7);
+            self.say("tile.piston.in", (x, y, z), 0.5, 0.5, 0.6, 0.15);
         }
     }
 
@@ -561,7 +581,10 @@ impl Ticks {
         let burnt = |s: &Self| s.torch_flips.iter().filter(|f| f.0 == (x, y, z)).count() >= 8;
         if id == 76 && input {
             w.set_block_meta(x, y, z, 75, m);
-            self.torch_flips.push(((x, y, z), now)); // ponytail: no fizz sound and smoke when it burns out
+            self.torch_flips.push(((x, y, z), now)); // ponytail: no smoke when it burns out
+            if burnt(self) {
+                self.say("random.fizz", (x, y, z), 0.5, 0.5, 2.2, 0.8);
+            }
         } else if id == 75 && !input && !burnt(self) {
             w.set_block_meta(x, y, z, 76, m);
         }
@@ -577,6 +600,7 @@ impl Ticks {
         let on = w.meta(x, y, z) == 1;
         if hit != on {
             w.set_block_meta(x, y, z, id, hit as u8);
+            self.say("random.click", (x, y, z), 0.1, 0.3, if hit { 0.6 } else { 0.5 }, 0.0);
         }
         if hit {
             self.schedule(x, y, z, id, 20);
@@ -674,6 +698,8 @@ impl Ticks {
                     let old = bid(w, x + dx, y, z + dz);
                     if old > 0 && !lava {
                         drops.spawn_block(old, w.meta(x + dx, y, z + dz), (x + dx, y, z + dz));
+                    } else if old > 0 {
+                        self.say("random.fizz", (x + dx, y, z + dz), 0.5, 0.5, 2.2, 0.8); // `flowIntoBlock`: lava on a block
                     }
                     w.set_block_meta(x + dx, y, z + dz, id, nd as u8);
                 }
@@ -879,18 +905,19 @@ fn optimal_directions(w: &ChunkManager, x: i32, y: i32, z: i32, id: u8) -> [bool
 }
 
 /// `BlockFluid.checkForHarden`: lava next to water (sides or above) becomes obsidian (source) or cobblestone (flow <= 4).
-fn harden(w: &mut ChunkManager, x: i32, y: i32, z: i32, id: u8) {
+fn harden(w: &mut ChunkManager, x: i32, y: i32, z: i32, id: u8) -> bool {
     if id < 10 || bid(w, x, y, z) != id {
-        return;
+        return false;
     }
     let wet = [(0, 0, -1), (0, 0, 1), (-1, 0, 0), (1, 0, 0), (0, 1, 0)].iter().any(|&(dx, dy, dz)| matches!(bid(w, x + dx, y + dy, z + dz), 8 | 9));
     if wet {
-        match w.meta(x, y, z) {
+        return match w.meta(x, y, z) {
             0 => w.set_block(x, y, z, 49),
             1..=4 => w.set_block(x, y, z, 4),
             _ => false,
         };
     }
+    false
 }
 
 /// `BlockFlower` / mushroom / reed / cactus `canBlockStay`.
@@ -1437,6 +1464,7 @@ mod tests {
         t.notify(&mut m, &mut d);
         assert_eq!(m.block(6, 40, 5), Some(36), "the cells hold the moving block while the pieces slide");
         assert_eq!(t.falling.iter().filter(|f| f.mv.is_some()).count(), 6, "two blocks and a head for each piston");
+        assert_eq!(t.sounds.iter().filter(|s| s.name == "tile.piston.out" && (0.6..0.85).contains(&s.pitch)).count(), 2, "each piston grunts once on the way out");
         t.fall(&mut m, &mut d);
         assert_eq!(m.block(8, 40, 5), Some(36), "one tick is not enough");
         t.fall(&mut m, &mut d);
@@ -1454,6 +1482,7 @@ mod tests {
         t.notify(&mut m, &mut d);
         assert_eq!((m.block(6, 40, 5), m.block(7, 40, 5), m.meta(5, 40, 5)), (Some(0), Some(1), 5), "the plain one leaves the blocks where they are");
         assert_eq!((m.block(6, 40, 9), m.block(7, 40, 9)), (Some(1), Some(0)), "the sticky one pulls the nearest block back");
+        assert_eq!(t.sounds.iter().filter(|s| s.name == "tile.piston.in").count(), 2);
         // obsidian stops it
         m.set_block(6, 40, 12, 49);
         m.set_block_meta(5, 40, 12, 33, 5);

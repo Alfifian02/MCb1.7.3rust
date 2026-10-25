@@ -154,9 +154,58 @@ pub struct Mob {
     /// `rotationPitch` of a mob looking at the player (radians, down is positive), eased toward `look_pitch` every frame.
     pub head_pitch: f32,
     look_pitch: f32,
+    /// Sound state: `livingSoundTime`, the cry a hit left to be heard (`Mobs::update` takes it), a slime in the air, a zombie pigman just
+    /// angered (`becomeAngryAt`) and the ticks left of its `randomSoundDelay`.
+    talk: i32,
+    cry: Option<Cry>,
+    airborne: bool,
+    enraged: bool,
+    growl: u8,
+}
+
+/// What a mob says: `getLivingSound` now and then, `getHurtSound` on a fresh hit, `getDeathSound` on the killing one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Cry { Say, Hurt, Die }
+
+/// `getLivingSound` / `getHurtSound` / `getDeathSound` and `getSoundVolume` of each kind (b1.7.3 names; `EntityLiving`'s default for the
+/// hurt and the death is `random.hurt`, for the living sound none). `wolf`: 0 bark, 1 panting, 2 whine, 3 growl, picked by the caller.
+fn cry(k: Kind, c: Cry, wolf: u8) -> Option<(&'static str, f32)> {
+    let vol = match k { Cow | Wolf | Squid => 0.4, Slime => 0.6, _ => 1.0 };
+    let n = match (k, c) {
+        (Pig, Cry::Die) => "mob.pigdeath",
+        (Pig, _) => "mob.pig",
+        (Cow, Cry::Say) => "mob.cow",
+        (Cow, _) => "mob.cowhurt",
+        (Sheep, _) => "mob.sheep",
+        (Chicken, Cry::Say) => "mob.chicken",
+        (Chicken, _) => "mob.chickenhurt",
+        (Wolf, Cry::Say) => ["mob.wolf.bark", "mob.wolf.panting", "mob.wolf.whine", "mob.wolf.growl"][wolf as usize & 3],
+        (Wolf, Cry::Hurt) => "mob.wolf.hurt",
+        (Wolf, Cry::Die) => "mob.wolf.death",
+        (Squid, _) => return None,
+        (Zombie, Cry::Say) => "mob.zombie",
+        (Zombie, Cry::Hurt) => "mob.zombiehurt",
+        (Zombie, Cry::Die) => "mob.zombiedeath",
+        (PigZombie, Cry::Say) => "mob.zombiepig.zpig",
+        (PigZombie, Cry::Hurt) => "mob.zombiepig.zpighurt",
+        (PigZombie, Cry::Die) => "mob.zombiepig.zpigdeath",
+        (Skeleton, Cry::Say) => "mob.skeleton",
+        (Skeleton, _) => "mob.skeletonhurt",
+        (Creeper, Cry::Say) | (Giant, Cry::Say) => return None,
+        (Creeper, Cry::Hurt) => "mob.creeper",
+        (Creeper, Cry::Die) => "mob.creeperdeath",
+        (Spider, Cry::Die) => "mob.spiderdeath",
+        (Spider, _) => "mob.spider",
+        (Slime, Cry::Say) => return None,
+        (Slime, _) => "mob.slime",
+        (Giant, _) => "random.hurt",
+    };
+    Some((n, vol))
 }
 
 pub enum Ev {
+    /// A sound at a place: name, where, volume, pitch factor and whether the usual `(r - r) * 0.2` spread applies (`Audio::cry`).
+    Snd(&'static str, Vec3, f32, f32, bool),
     /// Damage to the player (before armor).
     Hurt(i32),
     /// A creeper went off here.
@@ -242,7 +291,7 @@ impl Mob {
         Self { kind, body: Player { pos, vel: Vec3::ZERO, on_ground: false }, yaw, health: hp, limb: 0.0, limb_amt: 0.0, hurt: 0, size, color, sheared: false,
             fuse: 0, tame: false, sitting: false, saddled: false, ridden: false, half, age: 0, yaw_vel: 0.0, look: None, goal: None, fspeed: 0.0, jumping: false, wet: false, blocked: false, life: 0,
             last: 0, target: false, shot: false, lit: false, anger: 0, attack_time: 0, hop: 0, egg: rng.next_int_bound(6000) + 6000, fire: 0,
-            free: 0, swim: Vec3::ZERO, path: Vec::new(), path_i: 0, smart: false, wander: false, panic: 0, scare: Vec3::ZERO, mate: None, graze: 0, rest: 0, gait: 1.0, head: 0.0, munch: 0.0, body_yaw: yaw, head_pitch: 0.0, look_pitch: 0.0 }
+            free: 0, swim: Vec3::ZERO, path: Vec::new(), path_i: 0, smart: false, wander: false, panic: 0, scare: Vec3::ZERO, mate: None, graze: 0, rest: 0, gait: 1.0, head: 0.0, munch: 0.0, body_yaw: yaw, head_pitch: 0.0, look_pitch: 0.0, talk: 0, cry: None, airborne: false, enraged: false, growl: 0 }
     }
 
     /// `EntityWolf.interact`, a bone that took: tamed, sitting, full health, calm.
@@ -433,7 +482,11 @@ impl Mob {
         }
         if self.fire > 0 {
             self.fire -= 1;
-            if self.wet { self.fire = 0 } else if self.fire % 20 == 0 { self.health -= 1; self.hurt = 10 }
+            if self.wet { self.fire = 0 } else if self.fire % 20 == 0 {
+                self.health -= 1;
+                self.hurt = 10;
+                self.cry = Some(if self.health <= 0 { Cry::Die } else { Cry::Hurt });
+            }
         }
         // `BlockCactus.onEntityCollidedWithBlock`: 1 damage per tick of contact (the 10-tick window paces it), no anger, no knockback.
         if physics::touching(pos, self.half, c.get, 81) {
@@ -454,6 +507,7 @@ impl Mob {
                 _ => false,
             };
         }
+        let hop = self.hop;
         let alive = match k {
             Squid => self.ai_squid(rng, d2),
             Slime => self.ai_slime(rng, c, d2),
@@ -461,6 +515,16 @@ impl Mob {
         };
         if !alive {
             return false;
+        }
+        if k == Slime {
+            // `EntitySlime`: a hop of a size 2 or 4 slime squelches low (`* 0.8`), a size 4 one landing high (`/ 0.8`); volume 0.6.
+            if self.jumping && self.hop > hop && self.size > 1.0 {
+                ev.push(Ev::Snd("mob.slime", pos, 0.6, 0.8, true));
+            }
+            if self.body.on_ground && self.airborne && self.size > 2.0 {
+                ev.push(Ev::Snd("mob.slime", pos, 0.6, 1.25, true));
+            }
+            self.airborne = !self.body.on_ground;
         }
         // `faceEntity`: while it looks at the player or hunts them the head tips up or down to their eye (at most 40 degrees).
         self.look_pitch = if (self.target || self.look.is_some()) && !matches!(k, Squid | Slime) {
@@ -477,6 +541,7 @@ impl Mob {
             if self.egg <= 0 {
                 self.egg = rng.next_int_bound(6000) + 6000;
                 ev.push(Ev::Egg(pos));
+                ev.push(Ev::Snd("mob.chickenplop", pos, 1.0, 1.0, true));
             }
         }
         if !self.target {
@@ -504,6 +569,9 @@ impl Mob {
             Creeper => {
                 if see && ((!self.lit && dist < 3.0) || (self.lit && dist < 7.0)) {
                     self.lit = true;
+                    if self.fuse == 0 {
+                        ev.push(Ev::Snd("random.fuse", pos, 1.0, 0.5, false)); // `timeSinceIgnited == 0`: the hiss starts, at pitch 0.5
+                    }
                     self.fuse += 1;
                     self.shot = true;
                     if self.fuse >= 30 {
@@ -515,7 +583,13 @@ impl Mob {
                     self.fuse = self.fuse.saturating_sub(1);
                 }
             }
-            Slime if self.size > 1.0 && dist < 0.6 * self.size + 0.4 && see => ev.push(Ev::Hurt(self.size as i32)),
+            Slime if self.size > 1.0 && dist < 0.6 * self.size + 0.4 && see => {
+                ev.push(Ev::Hurt(self.size as i32));
+                if self.attack_time == 0 {
+                    self.attack_time = 10; // `onCollideWithPlayer` plays it when `attackEntityFrom` took: a new hit every 10 ticks
+                    ev.push(Ev::Snd("mob.slimeattack", pos, 1.0, 1.0, true));
+                }
+            }
             Zombie | PigZombie | Giant | Wolf | Spider => {
                 let bright = (c.light)(cx, cy, cz) >= 8;
                 if k == Spider && bright && rng.next_int_bound(100) == 0 {
@@ -722,6 +796,32 @@ impl Mob {
         }
     }
 
+    /// `EntityLiving.onEntityUpdate`'s talking: each tick `rand(1000) < livingSoundTime++`, and then the mob says its piece and waits (the
+    /// `getTalkInterval`: 80 ticks, 120 for animals and squid). Also a zombie pigman's grunt `randomSoundDelay` after it was angered.
+    /// `snd` is the sound random of `Mobs`, not the AI's, so a mob never behaves differently for being heard.
+    fn talk(&mut self, snd: &mut JavaRandom, ev: &mut Vec<Ev>) {
+        let pos = self.body.pos;
+        let t = self.talk;
+        self.talk += 1;
+        if snd.next_int_bound(1000) < t {
+            self.talk = -if matches!(self.kind, Pig | Cow | Sheep | Chicken | Wolf | Squid) { 120 } else { 80 };
+            // `EntityWolf.getLivingSound`: growl when angry, else 1 in 3 pants (or whines, tamed and under 10 health), else bark.
+            let wolf = if self.anger > 0 && !self.tame { 3 } else if snd.next_int_bound(3) == 0 { if self.tame && self.health < 10 { 2 } else { 1 } } else { 0 };
+            if let Some((n, v)) = cry(self.kind, Cry::Say, wolf) {
+                ev.push(Ev::Snd(n, pos, v, 1.0, true));
+            }
+        }
+        if self.enraged {
+            (self.enraged, self.growl) = (false, snd.next_int_bound(40) as u8);
+        }
+        if self.growl > 0 {
+            self.growl -= 1;
+            if self.growl == 0 {
+                ev.push(Ev::Snd("mob.zombiepig.zpigangry", pos, 2.0, 1.8, true));
+            }
+        }
+    }
+
     /// `EntityLiving.attackEntityFrom`: a hit inside the 10-tick window only pays the difference; the first one knocks back.
     /// A zombie pigman or wolf hit turns on its attacker.
     pub fn damage(&mut self, dmg: i32, from: Vec3, rng: &mut JavaRandom) {
@@ -732,6 +832,7 @@ impl Mob {
         if self.health > 0 && matches!(self.kind, PigZombie | Wolf) && !(self.kind == Wolf && self.tame) {
             self.anger = if self.kind == Wolf { 1 << 20 } else { 400 + rng.next_int_bound(400) };
             self.target = true;
+            self.enraged = self.kind == PigZombie;
         }
         // Smart animals (not b1.7.3) run from the blow.
         if self.smart && animal(self.kind) && self.health > 0 && !self.ridden {
@@ -759,6 +860,7 @@ impl Mob {
             self.life = 20;
             self.health -= dmg;
             self.hurt = 10;
+            self.cry = Some(if self.health <= 0 { Cry::Die } else { Cry::Hurt }); // only a fresh hit is heard, not the top-up inside the window
             let (dx, dz) = (from.x - self.body.pos.x, from.z - self.body.pos.z);
             let d = (dx * dx + dz * dz).sqrt();
             if d > 1e-4 {
@@ -871,6 +973,8 @@ pub struct Mobs {
     pub list: Vec<Mob>,
     pub arrows: Vec<Arrow>,
     pub rng: JavaRandom,
+    /// The random of the sounds (`Mob::talk`), apart from `rng` so that hearing a mob changes nothing it does.
+    snd: JavaRandom,
     seed: i64,
     acc: f32,
     clock: u32,
@@ -890,7 +994,7 @@ fn hostile(k: Kind) -> bool {
 
 impl Mobs {
     pub fn new(seed: i64) -> Self {
-        Self { list: Vec::new(), arrows: Vec::new(), rng: JavaRandom::new(seed ^ 0x5049_47), seed, acc: 0.0, clock: 0, burst: 200, no_spawn: false, difficulty: 2, smart: true }
+        Self { list: Vec::new(), arrows: Vec::new(), rng: JavaRandom::new(seed ^ 0x5049_47), snd: JavaRandom::new(seed ^ 0x534E_44), seed, acc: 0.0, clock: 0, burst: 200, no_spawn: false, difficulty: 2, smart: true }
     }
 
     /// Before each AI tick: the `smart` switch and each animal's nearest mate of its kind within 24 blocks (`Mob::mate`, the herd's pull).
@@ -1019,8 +1123,14 @@ impl Mobs {
             self.acc -= TICK;
             self.clock += 1;
             self.herd();
-            let rng = &mut self.rng;
-            self.list.retain_mut(|m| m.tick(rng, c, &mut ev));
+            let (rng, snd) = (&mut self.rng, &mut self.snd);
+            self.list.retain_mut(|m| {
+                let alive = m.tick(rng, c, &mut ev);
+                if alive {
+                    m.talk(snd, &mut ev);
+                }
+                alive
+            });
             self.arrows.retain_mut(|a| a.tick(c, &mut ev));
             // A player's arrow inside a mob's box (grown 0.3, like `EntityArrow`) hurts it and is gone.
             let (list, rng) = (&mut self.list, &mut self.rng);
@@ -1044,6 +1154,12 @@ impl Mobs {
         }
         for m in &mut self.list {
             m.step(dt, c.get);
+            // What a hit since the last frame made it cry out (a kill too: it is removed below).
+            if let Some(k) = m.cry.take() {
+                if let Some((n, v)) = cry(m.kind, k, 0) {
+                    ev.push(Ev::Snd(n, m.body.pos, v, 1.0, true));
+                }
+            }
         }
         let mut out = Vec::new();
         for e in ev {
@@ -1060,7 +1176,7 @@ impl Mobs {
                         }
                     }
                 }
-                Ev::Hurt(_) | Ev::Boom(_) => out.push(e),
+                Ev::Hurt(_) | Ev::Boom(_) | Ev::Snd(..) => out.push(e),
                 Ev::Shoot(..) => {}
             }
         }
@@ -1285,6 +1401,32 @@ mod tests {
     }
 
     /// Snowballs and eggs fly like arrows, hurt for 0 and are gone on a block; only the egg asks to hatch.
+    #[test]
+    fn a_fresh_hit_cries_a_kill_dies_and_every_name_is_in_the_sound_table() {
+        let mut rng = JavaRandom::new(5);
+        let mut cow = Mob::new(Cow, 32.5, 10.0, 32.5, 0.0, &mut rng);
+        cow.damage(2, cow.body.pos + Vec3::X, &mut rng);
+        assert_eq!((cow.cry.take(), cry(Cow, Cry::Hurt, 0)), (Some(Cry::Hurt), Some(("mob.cowhurt", 0.4))));
+        cow.damage(5, cow.body.pos, &mut rng); // inside the window and bigger: pays the difference, no new cry
+        assert!(cow.cry.is_none());
+        let mut sheep = Mob::new(Sheep, 32.5, 10.0, 32.5, 0.0, &mut rng);
+        sheep.damage(99, sheep.body.pos + Vec3::X, &mut rng);
+        assert_eq!(sheep.cry, Some(Cry::Die));
+        // The fuse hisses once, at pitch 0.5 with no spread.
+        let l = |_, _, _| 0u8;
+        let near = ctx(Vec3::new(32.5, 11.0, 33.5), &l);
+        let (mut k, mut ev) = (Mob::new(Creeper, 32.5, 10.0, 32.5, 0.0, &mut rng), Vec::new());
+        (0..40).any(|_| !k.tick(&mut rng, &near, &mut ev));
+        assert_eq!(ev.iter().filter(|e| matches!(e, Ev::Snd("random.fuse", _, _, p, false) if *p == 0.5)).count(), 1);
+        for kind in [Pig, Cow, Sheep, Chicken, Wolf, Squid, Zombie, PigZombie, Giant, Skeleton, Creeper, Spider, Slime] {
+            for c in [Cry::Say, Cry::Hurt, Cry::Die] {
+                for w in 0..4 {
+                    assert!(cry(kind, c, w).map_or(true, |(n, v)| crate::audio::exists(n) && v > 0.0), "{kind:?} {c:?}");
+                }
+            }
+        }
+    }
+
     #[test]
     fn thrown_items_land_quietly_and_an_egg_hatches() {
         let l = |_, _, _| 0u8;
