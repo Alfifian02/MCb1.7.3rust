@@ -206,6 +206,13 @@ struct App {
     /// the crosshair with whether the ground fits (`pack_tick`): the preview, green or red.
     carry: Option<f32>,
     ghost: Option<(pack::Mat, bool)>,
+    /// The immersive screen in the world (`pack::scene`): the camera as it was before the cloth moved it for this frame (put back after),
+    /// what lies on the cloth this frame (the touch and the text read it too), the seconds since the cloth finished spreading (the stacks
+    /// come up one by one) and how far the cursor stack is lifted (0..1).
+    pack_saved: Option<(glam::Vec3, f32, f32, f32)>,
+    pack_scene: Option<pack::Scene>,
+    pack_age: f32,
+    pack_lift: f32,
     /// The fishing bobber in the water (`EntityPlayer.fishEntity`).
     hook: Option<Hook>,
     /// Furnace tile entities by block position (created on first use), and the time left over from the last 20 Hz tick.
@@ -330,6 +337,10 @@ impl App {
             pack_rule: false,
             mat: None,
             mat_ui: false,
+            pack_saved: None,
+            pack_scene: None,
+            pack_age: 0.0,
+            pack_lift: 0.0,
             hint: 0.0,
             hint_msg: "",
             carry: None,
@@ -490,6 +501,7 @@ impl App {
             self.touch.set_screen(false);
         }
         (self.mat, self.mat_ui, self.hint, self.carry, self.ghost) = (None, false, 0.0, None, None);
+        (self.pack_scene, self.pack_age, self.pack_lift) = (None, 0.0, 0.0);
         self.close_sign();
         (self.paintings, self.signs) = (Vec::new(), HashMap::new());
         self.boats = boat::Boats::default();
@@ -1921,6 +1933,10 @@ impl App {
     /// walks off or the ground under it goes (the screen closes first, its stacks are thrown as always).
     fn pack_tick(&mut self, dt: f32) {
         self.hint = (self.hint - dt).max(0.0);
+        // The open screen's two clocks: since it opened, and the cursor stack's lift (up in 0.12 s).
+        let held = self.mat_ui && self.screen.as_ref().is_some_and(|s| s.cursor.is_some());
+        self.pack_age = if self.mat_ui { self.pack_age + dt } else { 0.0 };
+        self.pack_lift += (f32::from(u8::from(held)) - self.pack_lift).clamp(-dt / 0.12, dt / 0.12);
         if self.riding() || self.sleep.is_some() || self.vitals.dead() || self.screen.is_some() {
             self.carry = None; // a screen opens only by a tap, which a carried pack swallows; a ride, a bed or death put it away
         }
@@ -1970,7 +1986,27 @@ impl App {
     fn slot_under(&self, x: f32, y: f32) -> Option<craft::SlotId> {
         let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
         let gw = self.screen.as_ref()?.gw;
-        if self.mat_ui { pack::slot_at(&self.inv, w, h, x, y) } else { craft::slot_at(gw, w, h, x, y) }
+        if self.mat_ui {
+            // The finger is a ray at the cloth: the cubes are tested as boxes, everything flat as the cloth unit it lands on (`pack::pick`).
+            let (m, lays) = (self.mat.as_ref()?, self.pack_scene.as_ref().map_or(&[][..], |s| &s.lays[..]));
+            pack::pick(&self.inv, lays, m, &m.rig(w / h), w / h, (w, h), (x, y))
+        } else {
+            craft::slot_at(gw, w, h, x, y)
+        }
+    }
+
+    /// What lies on the open cloth this frame: the patches, the stacks (coming up one by one), and the cursor stack hanging over the finger.
+    fn pack_scene_now(&self) -> Option<pack::Scene> {
+        let s = self.screen.as_ref().filter(|_| self.mat_ui && self.mat.is_some())?;
+        let held = s.cursor.zip(self.cloth_at(self.touch.cursor_pos, pack::REST)).map(|(st, at)| (st, at, self.pack_lift));
+        Some(pack::scene(&self.inv, &|id| s.get(&self.inv, None, id), self.touch.hotbar_slot, (self.one_mode, self.shift_mode), self.pack_age, held))
+    }
+
+    /// The cloth unit under a finger of the open pack screen, on the plane `h` blocks up (`pack::Mat::touch`).
+    fn cloth_at(&self, at: (f32, f32), h: f32) -> Option<(f32, f32)> {
+        let (w, hh) = { let (w, hh) = self.be.size(); (w as f32, hh as f32) };
+        let m = self.mat.as_ref()?;
+        m.touch(&m.rig(w / hh), w / hh, (w, hh), at, h)
     }
 
     /// `BlockDispenser.dispenseItem`: one item of a random filled slot (`getRandomStackFromInventory`: each filled slot replaces the
@@ -2084,7 +2120,8 @@ impl App {
         let Some(gw) = self.screen.as_ref().map(|s| s.gw) else { return };
         let one = self.one_mode;
         let (on_one, on_shift, inside) = if self.mat_ui {
-            (pack::on_toggle(1, w, h, x, y), pack::on_toggle(0, w, h, x, y), pack::in_mat(w, h, x, y))
+            let at = self.cloth_at((x, y), pack::REST);
+            (at.is_some_and(|(a, b)| pack::on_toggle(1, a, b)), at.is_some_and(|(a, b)| pack::on_toggle(0, a, b)), at.is_some_and(|(a, b)| pack::in_mat(a, b)))
         } else {
             (craft::on_mode_button(gw, w, h, x, y), craft::on_shift_button(gw, w, h, x, y), craft::in_panel(gw, w, h, x, y))
         };
@@ -2122,6 +2159,9 @@ impl App {
     /// One frame; in the third-person view the camera sits behind the eye for it and is put back after (input reads the eye).
     fn render(&mut self) {
         self.render_frame();
+        if let Some((p, yaw, pitch, fov)) = self.pack_saved.take() {
+            (self.camera.pos, self.camera.yaw, self.camera.pitch, self.camera.fov_y) = (p, yaw, pitch, fov);
+        }
         if let Some((p, fov)) = self.third_saved.take() {
             (self.camera.pos, self.camera.fov_y) = (p, fov);
         }
@@ -2217,9 +2257,16 @@ impl App {
         self.chunks.update(self.be.gfx(), self.be.origins(), pcx, pcz);
         self.camera.zfar = if lod_on { lod::ZFAR } else { 256.0 }; // the far terrain needs the depth range
         self.camera.bob = rig_view * if self.opts.view_bobbing { self.body.view_bob(tick_partial) } else { glam::Mat4::IDENTITY };
+        // The cloth takes the camera while it spreads and while it is open (it glides back as the cloth rolls up), put back after the frame.
+        if let Some(m) = self.mat.filter(|m| m.t > 0.0) {
+            let from = pack::Rig { pos: self.camera.pos, yaw: self.camera.yaw, pitch: self.camera.pitch, fov: self.camera.fov_y };
+            self.pack_saved = Some((from.pos, from.yaw, from.pitch, from.fov));
+            let r = m.glide(from, self.camera.aspect);
+            (self.camera.pos, self.camera.yaw, self.camera.pitch, self.camera.fov_y, self.camera.bob) = (r.pos, r.yaw, r.pitch, r.fov, glam::Mat4::IDENTITY);
+        }
         let (view, proj) = self.camera.build_view_proj();
         // The first-person hand (`EntityRenderer.renderHand`): not in the third-person view, not in bed.
-        let hand = ((!self.touch.third || close) && self.sleep.is_none()).then(|| {
+        let hand = ((!self.touch.third || close) && self.sleep.is_none() && self.mat.is_none()).then(|| {
             let (equip, held) = self.body.equipped(tick_partial);
             render::player::Hand { to_world: render::player::hand_to_world(&view, &self.camera.bob), equip, swing: self.body.swing_at(tick_partial), held, at: self.player.pos, pack: self.carry.map_or(0.0, |t| t.max(0.01)) }
         });
@@ -2248,10 +2295,11 @@ impl App {
         let reach2 = ((rd * 16 + 16) as f32).powi(2);
         let terrain = &self.chunks;
         let seen = |p: glam::Vec3, r: f32| p.distance_squared(eye) < reach2 && frustum.intersects_aabb(p - r, p + r) && terrain.box_visible(p - r, p + r);
+        self.pack_scene = self.pack_scene_now();
         let item_indices = {
             let chunks = &self.chunks;
             let shown = self.ghost.map(|(m, ok)| (m.shown(), ok));
-            let cloth = self.mat.as_ref().map(|m| (m, 12)).or(shown.as_ref().map(|(m, ok)| (m, if *ok { 5 } else { 14 }))); // brown, or the preview's lime / red wool
+            let cloth = self.mat.as_ref().map(|m| render::items::PackDraw { mat: m, wool: 12, scene: self.pack_scene.as_ref() }).or(shown.as_ref().map(|(m, ok)| render::items::PackDraw { mat: m, wool: if *ok { 5 } else { 14 }, scene: None })); // brown, or the preview's lime / red wool
             self.item_mesh.update(self.be.gfx(), &self.drops, &self.mobs, &self.ticks.falling, &self.fx, &|x, y, z| chunks.light_levels(x, y, z), self.hook.as_ref().map(|h| h.pos), &self.paintings, &sign_views, (&self.boats.list, self.boats.alpha()), (&self.carts.list, self.carts.alpha()), player_view.as_ref(), hand.as_ref(), cloth, eye, &seen)
         };
 
@@ -2540,6 +2588,11 @@ impl App {
         // `ext` reads all of `self`, so it is taken before `hud_verts` is borrowed mutably.
         let ext = self.screen.as_ref().and_then(|s| self.ext(s));
         let pause_info = self.pause_info();
+        // The pack screen's text is projected from the cloth through this frame's camera (the cloth's), and the finger's unit names the stack.
+        let pack_hud = self.mat.filter(|_| self.mat_ui).map(|m| {
+            let (view, proj) = self.camera.build_view_proj();
+            (m, proj * view, self.cloth_at(self.touch.cursor_pos, pack::REST), self.slot_under(self.touch.cursor_pos.0, self.touch.cursor_pos.1))
+        });
         // The debug screen replaces the FPS counter and the LoD debug title; its panels are not drawn under the pause menu.
         let info_on = self.opts.debug_screen;
         let dbg = if info_on && !self.touch.paused { Some(self.debug_rows()) } else { None };
@@ -2600,9 +2653,9 @@ impl App {
         }
 
         // The immersive pack: the inventory as a cloth with every item lying in the zone of its category (`world::pack`).
-        if let Some(s) = self.screen.as_ref().filter(|_| self.mat_ui) {
+        if let (Some(s), Some((m, vp, finger, picked)), Some(sc)) = (self.screen.as_ref().filter(|_| self.mat_ui), pack_hud, self.pack_scene.as_ref()) {
             let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
-            draw_pack(v, (w, h), &self.inv, s, (self.one_mode, self.shift_mode), self.touch.hotbar_slot, self.touch.cursor_pos, self.gesture.is_some());
+            draw_pack(v, (w, h), (&m, vp), &self.inv, s, sc, (self.one_mode, self.shift_mode), (self.touch.cursor_pos, finger, picked), self.gesture.is_some());
         }
 
         // Container screen: the vanilla GUI (176 x 166 units) over a dimmed frame, slots with their stacks.
@@ -2910,101 +2963,49 @@ fn icon_tint(c: u32) -> [f32; 3] {
     [(c >> 16 & 255) as f32 / 255.0, (c >> 8 & 255) as f32 / 255.0, (c & 255) as f32 / 255.0]
 }
 
-/// The open inventory as the pack's cloth (`world::pack`), over a light dim so the world and the cloth on the ground stay in view: a
-/// brown weave with stitched edges; patches for the crafting mat, the worn armor and one zone per category; every item on it at the
-/// size `pack::layout` gave it; the quick-select row below. `finger` = a finger is down (then the stack's name shows).
-/// UNVERIFIED: the colours and the stitch spacing are by eye; nothing here has been seen on a device.
-fn draw_pack(v: &mut Vec<HudVertex>, (w, h): (f32, f32), inv: &Inventory, s: &Screen, (one, shift): (bool, bool), hot: usize, cursor_at: (f32, f32), finger: bool) {
-    let (ox, oy, k) = pack::panel(w, h);
-    let px = |a: [f32; 4]| pack::px(w, h, a);
-    HudPipeline::push_quad(v, 0.0, 0.0, w, h, [0.0, 0.0, 0.0, 0.35]);
-    let c = px([0.0, 0.0, pack::W, pack::H]);
-    HudPipeline::push_quad(v, c[0] - 2.0 * k, c[1] - 2.0 * k, c[2] + 4.0 * k, c[3] + 4.0 * k, [0.10, 0.07, 0.04, 1.0]);
-    HudPipeline::push_quad(v, c[0], c[1], c[2], c[3], [0.36, 0.26, 0.16, 1.0]);
-    // The weave: a faint thread every 8 units each way.
-    let mut t = 8.0;
-    while t < pack::W {
-        HudPipeline::push_quad(v, ox + t * k, oy, k * 0.8, c[3], [0.0, 0.0, 0.0, 0.07]);
-        t += 8.0;
-    }
-    let mut t = 8.0;
-    while t < pack::H {
-        HudPipeline::push_quad(v, ox, oy + t * k, c[2], k * 0.8, [0.0, 0.0, 0.0, 0.07]);
-        t += 8.0;
-    }
-    // The stitched hem.
-    let thread = [0.78, 0.66, 0.42, 1.0];
-    let mut t = 8.0;
-    while t < pack::W - 8.0 {
-        for y in [4.0, pack::H - 5.0] {
-            HudPipeline::push_quad(v, ox + t * k, oy + y * k, 4.0 * k, k, thread);
-        }
-        t += 8.0;
-    }
-    let mut t = 8.0;
-    while t < pack::H - 8.0 {
-        for x in [4.0, pack::W - 5.0] {
-            HudPipeline::push_quad(v, ox + x * k, oy + t * k, k, 4.0 * k, thread);
-        }
-        t += 8.0;
-    }
-    let patch = |v: &mut Vec<HudVertex>, r: [f32; 4], label: &str| {
-        let p = px(r);
-        HudPipeline::push_outlined_quad(v, p[0], p[1], p[2], p[3], [0.47, 0.35, 0.22, 0.95], [0.2, 0.14, 0.08, 1.0], (k * 0.8).max(1.0));
-        HudPipeline::push_text(v, p[0] + 3.0 * k, p[1] + 2.5 * k, k * 0.6, label, [0.96, 0.9, 0.72, 1.0]);
+/// The text of the open cloth (`world::pack`), over the 3D scene `render::items` draws: each place is projected from its spot on the
+/// cloth through `vp` (this frame's camera), so labels, counts, wear bars, the toggles' numbers and the name of the stack under a
+/// finger sit on what they belong to. `finger` = (px, the cloth unit under it, the slot it is over); `down` = a finger is down (then the stack's name shows).
+fn draw_pack(v: &mut Vec<HudVertex>, (w, h): (f32, f32), (m, vp): (&pack::Mat, glam::Mat4), inv: &Inventory, s: &Screen, sc: &pack::Scene, (one, shift): (bool, bool), (cursor_at, finger, picked): ((f32, f32), Option<(f32, f32)>, Option<craft::SlotId>), down: bool) {
+    // A cloth unit `h` blocks up, in px, and the px a unit measures there.
+    let to_px = |x: f32, y: f32, hh: f32| {
+        let c = vp * m.at(x, y, hh).extend(1.0);
+        (c.w > 0.0).then(|| ((c.x / c.w * 0.5 + 0.5) * w, (0.5 - c.y / c.w * 0.5) * h))
     };
-    patch(&mut *v, pack::CRAFT, "Crafting mat");
-    patch(&mut *v, pack::WEAR, "Worn");
+    let unit_px = |x: f32, y: f32, hh: f32| Some((to_px(x + 10.0, y, hh)?.0 - to_px(x, y, hh)?.0).abs() / 10.0);
+    let ink = [0.96, 0.9, 0.72, 1.0];
+    let label = |v: &mut Vec<HudVertex>, x: f32, y: f32, k: f32, text: &str| {
+        if let (Some(p), Some(u)) = (to_px(x, y, 0.05), unit_px(x, y, 0.05)) {
+            HudPipeline::push_text(v, p.0, p.1, u * k, text, ink);
+        }
+    };
+    label(v, pack::CRAFT[0] + 3.0, pack::CRAFT[1] + 2.5, 0.6, "Crafting mat");
+    label(v, pack::WEAR[0] + 3.0, pack::WEAR[1] + 2.5, 0.6, "Worn");
     for (cat, r) in pack::ZONES {
-        patch(&mut *v, r, cat.label());
+        label(v, r[0] + 3.0, r[1] + 2.5, 0.6, cat.label());
     }
-    let q = px(pack::QUICK);
-    HudPipeline::push_outlined_quad(v, q[0], q[1], q[2], q[3], [0.47, 0.35, 0.22, 0.95], [0.2, 0.14, 0.08, 1.0], (k * 0.8).max(1.0));
-    HudPipeline::push_text(v, ox + 8.0 * k, oy + 196.0 * k, k * 0.55, "Quick", [0.96, 0.9, 0.72, 1.0]);
-    HudPipeline::push_text(v, ox + 8.0 * k, oy + 205.0 * k, k * 0.55, "select", [0.96, 0.9, 0.72, 1.0]);
-    // The arrow from the 2 x 2 grid to its result.
-    let thread = [0.96, 0.9, 0.72, 0.9];
-    let a = px([64.0, 58.0, 9.0, 3.0]);
-    HudPipeline::push_quad(v, a[0], a[1], a[2], a[3], thread);
-    let a = px([71.0, 55.0, 3.0, 9.0]);
-    HudPipeline::push_quad(v, a[0], a[1], a[2], a[3], thread);
-    // The cells: a sunken frame where the pack has a fixed place, nothing for an item that just lies on the cloth.
-    let fixed = |id: craft::SlotId| matches!(id, craft::SlotId::Grid(_) | craft::SlotId::Result) || matches!(id, craft::SlotId::Inv(i) if i < 9 || i >= items::MAIN);
-    for cell in &pack::layout(inv).cells {
-        let p = px(cell.r);
-        if fixed(cell.id) {
-            HudPipeline::push_outlined_quad(v, p[0], p[1], p[2], p[3], [0.0, 0.0, 0.0, 0.3], [0.13, 0.09, 0.05, 1.0], (k * 0.7).max(1.0));
-        }
-        if let Some(st) = s.get(inv, None, cell.id) {
-            push_stack(v, (p[0], p[1], p[2], p[3]), 0.92, st);
-        }
-        if cell.id == craft::SlotId::Inv(hot) {
-            HudPipeline::push_outlined_quad(v, p[0] - k, p[1] - k, p[2] + 2.0 * k, p[3] + 2.0 * k, [0.0; 4], [1.0, 0.85, 0.3, 1.0], (k * 1.2).max(2.0));
-        }
-    }
-    // The two touch toggles under the armor: shift-click (green, 2) and place one (orange, 1).
+    label(v, 8.0, 196.0, 0.55, "Quick");
+    label(v, 8.0, 205.0, 0.55, "select");
+    // The numbers on the two toggles (shift-click 2, place one 1), when on.
     for (which, on) in [(0_usize, shift), (1, one)] {
-        let p = px(pack::toggle(which));
-        let fill = match (on, which) {
-            (false, _) => [0.2, 0.4, 0.7, 1.0],
-            (true, 0) => [0.2, 0.7, 0.3, 1.0],
-            (true, _) => [0.85, 0.5, 0.1, 1.0],
-        };
-        HudPipeline::push_outlined_quad(v, p[0], p[1], p[2], p[3], fill, [0.15, 0.15, 0.15, 1.0], (k * 0.8).max(2.0));
-        if on {
-            HudPipeline::push_number(v, p[0] + p[2] * 0.32, p[1] + p[3] * 0.2, p[2] * 0.6, if which == 0 { 2 } else { 1 }, [1.0; 4]);
+        let r = pack::toggle(which);
+        if let (true, Some(a), Some(b)) = (on, to_px(r[0], r[1], 0.052), to_px(r[0] + r[2], r[1] + r[3], 0.052)) {
+            HudPipeline::push_number(v, a.0 + (b.0 - a.0) * 0.32, a.1 + (b.1 - a.1) * 0.2, (b.1 - a.1) * 0.6, if which == 0 { 2 } else { 1 }, [1.0; 4]);
         }
     }
-    // The picked-up stack floats just above the finger, and a finger down names the stack it holds or rests on.
-    let (cx, cy) = cursor_at;
-    if let Some(cur) = s.cursor {
-        let sz = 26.0 * k;
-        push_stack(v, (cx - sz * 0.5, cy - sz * 1.4, sz, sz), 0.92, cur);
+    // The count and wear bar of every stack that has come up, in its cell seen at its top.
+    for l in sc.lays.iter().filter(|l| l.grow >= 1.0) {
+        let t = l.top();
+        if let (Some(a), Some(b)) = (to_px(l.r[0], l.r[1], t), to_px(l.r[0] + l.r[2], l.r[1] + l.r[3], t)) {
+            push_overlay(v, (a.0.min(b.0), a.1.min(b.1), (b.0 - a.0).abs(), (b.1 - a.1).abs()), l.stack);
+        }
     }
-    if finger {
-        let under = || pack::slot_at(inv, w, h, cx, cy).and_then(|id| s.get(inv, None, id));
-        if let Some(name) = s.cursor.or_else(under).and_then(items::name) {
-            let tk = k * 0.75;
+    // A finger down names the stack it holds or rests on.
+    if down {
+        let (cx, cy) = cursor_at;
+        let under = || picked.and_then(|id| s.get(inv, None, id));
+        if let (Some(name), Some(u)) = (s.cursor.or_else(under).and_then(items::name), unit_px(finger.map_or(200.0, |f| f.0), finger.map_or(116.0, |f| f.1), 0.05)) {
+            let tk = u * 0.75;
             let bw = (HudPipeline::text_width(name) as f32 + 6.0) * tk;
             let ty = if cy > 40.0 * tk { cy - 36.0 * tk } else { cy + 16.0 * tk };
             HudPipeline::push_tooltip(v, (cx - bw * 0.5).clamp(0.0, (w - bw).max(0.0)), ty, tk, name);
@@ -3018,7 +3019,7 @@ fn draw_pack(v: &mut Vec<HudVertex>, (w, h): (f32, f32), inv: &Inventory, s: &Sc
 fn push_block_icon(v: &mut Vec<HudVertex>, (x, y, w, h): (f32, f32, f32, f32), s: ItemStack) -> bool {
     let (id, meta) = (s.id as u8, items::placed_meta(s));
     let tile = |side: u8| atlas::terrain_tile(id, meta, side).map(u16::from);
-    let flat = crate::world::chunk::cross_shape(id).is_some() || matches!(id, 26 | 27 | 28 | 50 | 51 | 55 | 63 | 64 | 65 | 66 | 68 | 69 | 71 | 75 | 76 | 77 | 90 | 92 | 93 | 94 | 96);
+    let flat = pack::flat_icon(id);
     let grass = icon_tint(crate::world::climate::grass(0.8, 0.4));
     let white = [1.0; 3];
     if flat {
@@ -3085,6 +3086,13 @@ fn push_stack(v: &mut Vec<HudVertex>, (cx, cy, cw, ch): (f32, f32, f32, f32), fi
             }
         }
     }}}
+    push_overlay(v, (cx, cy, cw, ch), s);
+}
+
+/// The wear bar under a damaged tool and the count of a stack, in the 16 unit box `(cx, cy, cw, ch)` (what `push_stack` ends with; the
+/// pack's 3D stacks have only this on the HUD).
+fn push_overlay(v: &mut Vec<HudVertex>, (cx, cy, cw, _): (f32, f32, f32, f32), s: ItemStack) {
+    let u = cw / 16.0;
     if let Some(max) = craft::max_damage(s.id).filter(|_| s.damage > 0) {
         // `renderItemOverlayIntoGUI`: a 13 x 2 unit bar at (2, 13), black behind the green-to-red fill.
         let left = (1.0 - s.damage as f32 / max as f32).clamp(0.0, 1.0);

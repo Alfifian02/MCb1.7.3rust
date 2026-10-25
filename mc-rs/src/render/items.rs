@@ -15,7 +15,8 @@ use glam::{Mat4, Vec3};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use crate::world::items::{stack_tile, Drops, ItemStack, MAX_ITEMS};
+use crate::world::items::{placed_meta, stack_tile, Drops, ItemStack, MAX_ITEMS};
+use crate::world::pack::{self, Lay, Mat, Scene};
 use crate::world::mobs::{Kind, Kind::*, Mob, Mobs, MAX_ARROWS, MAX_MOBS};
 use crate::world::ticks::{Falling, MAX_FALLING};
 
@@ -23,9 +24,9 @@ use crate::world::ticks::{Falling, MAX_FALLING};
 /// A mob is at most 12 boxes (spider 11), an arrow one, a falling block one.
 /// Boats drawn at once (5 boxes each).
 const MAX_BOATS: usize = 16;
-/// Carts drawn at once (floor, four walls and the furnace: 6 boxes each); the pack's cloth and its roll are 2 boxes more.
+/// Carts drawn at once (floor, four walls and the furnace: 6 boxes each); the pack's cloth and all that lies on it are `pack::BOXES` more.
 const MAX_CARTS: usize = 16;
-const BOXES: usize = MAX_ITEMS * 2 + MAX_MOBS * 12 + MAX_ARROWS + MAX_FALLING + MAX_PARTICLES + MAX_BOLTS + MAX_BOATS * 5 + MAX_CARTS * 6 + 2 + 1;
+const BOXES: usize = MAX_ITEMS * 2 + MAX_MOBS * 12 + MAX_ARROWS + MAX_FALLING + MAX_PARTICLES + MAX_BOLTS + MAX_BOATS * 5 + MAX_CARTS * 6 + pack::BOXES + 1;
 /// Paintings (16 px pieces, one face each), signs (a board and a post of 6 two-sided faces) and the sign text (one quad per run
 /// of lit font pixels), on top of the boxes.
 const MAX_SIGNS: usize = 32;
@@ -65,8 +66,8 @@ impl ItemMesh {
 
     /// Upload this frame's items; returns the index count to draw.
     /// `lv` = raw (sky, block) light of a cell: every entity is lit by its own cell.
-    pub fn update(&self, gfx: Gfx, drops: &Drops, mobs: &Mobs, falling: &[Falling], fx: &Effects, lv: &dyn Fn(i32, i32, i32) -> (u8, u8), hook: Option<Vec3>, paintings: &[Painting], signs: &[SignView], boats: (&[Boat], f32), carts: (&[Cart], f32), player: Option<&crate::render::player::View>, hand: Option<&crate::render::player::Hand>, mat: Option<(&crate::world::pack::Mat, u8)>, eye: Vec3, seen: &dyn Fn(Vec3, f32) -> bool) -> u32 {
-        let (verts, idxs) = geometry(drops, mobs, falling, fx, lv, hook, paintings, signs, boats, carts, player, hand, mat, eye, seen, &mut self.signs.lock().unwrap_or_else(|e| e.into_inner()));
+    pub fn update(&self, gfx: Gfx, drops: &Drops, mobs: &Mobs, falling: &[Falling], fx: &Effects, lv: &dyn Fn(i32, i32, i32) -> (u8, u8), hook: Option<Vec3>, paintings: &[Painting], signs: &[SignView], boats: (&[Boat], f32), carts: (&[Cart], f32), player: Option<&crate::render::player::View>, hand: Option<&crate::render::player::Hand>, pack: Option<PackDraw>, eye: Vec3, seen: &dyn Fn(Vec3, f32) -> bool) -> u32 {
+        let (verts, idxs) = geometry(drops, mobs, falling, fx, lv, hook, paintings, signs, boats, carts, player, hand, pack, eye, seen, &mut self.signs.lock().unwrap_or_else(|e| e.into_inner()));
         if idxs.is_empty() {
             return 0;
         }
@@ -79,7 +80,13 @@ impl ItemMesh {
 /// Light the boxes pushed since vertex float `from` like `Entity.getBrightnessForRender`: the levels of the cell `at`, in the
 /// mesher's `lm` (the day's share is the `amb.x` uniform, as for terrain). ponytail: `light` is the brighter of the two levels.
 fn lit(verts: &mut [f32], from: usize, lv: &dyn Fn(i32, i32, i32) -> (u8, u8), at: Vec3) {
+    lit_by(verts, from, lv, at, 0);
+}
+
+/// `lit` with both levels `dim` lower (the pack's contact shadows: the same cell's light, darker).
+fn lit_by(verts: &mut [f32], from: usize, lv: &dyn Fn(i32, i32, i32) -> (u8, u8), at: Vec3, dim: u8) {
     let (sky, block) = lv(at.x.floor() as i32, at.y.floor() as i32, at.z.floor() as i32);
+    let (sky, block) = (sky.saturating_sub(dim), block.saturating_sub(dim));
     let b = brightness(sky.max(block));
     for v in verts[from..].chunks_exact_mut(VF) {
         v[5] = b;
@@ -87,7 +94,7 @@ fn lit(verts: &mut [f32], from: usize, lv: &dyn Fn(i32, i32, i32) -> (u8, u8), a
     }
 }
 
-fn geometry(drops: &Drops, mobs: &Mobs, falling: &[Falling], fx: &Effects, lv: &dyn Fn(i32, i32, i32) -> (u8, u8), hook: Option<Vec3>, paintings: &[Painting], signs: &[SignView], boats: (&[Boat], f32), carts: (&[Cart], f32), player: Option<&crate::render::player::View>, hand: Option<&crate::render::player::Hand>, mat: Option<(&crate::world::pack::Mat, u8)>, eye: Vec3, seen: &dyn Fn(Vec3, f32) -> bool, sign_cache: &mut SignCache) -> (Vec<f32>, Vec<u32>) {
+fn geometry(drops: &Drops, mobs: &Mobs, falling: &[Falling], fx: &Effects, lv: &dyn Fn(i32, i32, i32) -> (u8, u8), hook: Option<Vec3>, paintings: &[Painting], signs: &[SignView], boats: (&[Boat], f32), carts: (&[Cart], f32), player: Option<&crate::render::player::View>, hand: Option<&crate::render::player::Hand>, pack: Option<PackDraw>, eye: Vec3, seen: &dyn Fn(Vec3, f32) -> bool, sign_cache: &mut SignCache) -> (Vec<f32>, Vec<u32>) {
     let (mut verts, mut idxs) = (Vec::new(), Vec::new());
     let a = drops.alpha();
     for e in &drops.items {
@@ -137,13 +144,23 @@ fn geometry(drops: &Drops, mobs: &Mobs, falling: &[Falling], fx: &Effects, lv: &
         lit(&mut verts, n0, lv, b.pos);
     }
     // The pack's cloth spread on the ground (`world::pack`): a flat box of wool (`wool` = its colour: brown, or the carried pack's
-    // preview, lime where it fits and red where it does not) and the roll it comes off.
-    if let Some((m, wool)) = mat.filter(|(m, _)| seen(m.c, 3.0)) {
-        let n0 = verts.len();
+    // preview, lime where it fits and red where it does not) and the roll it comes off; with its screen open, the flat patches and the
+    // stacks on it, all lit by the cell above the cloth, then their contact shadows (dimmer by `SHADOW_DIM` levels).
+    if let Some(p) = pack.filter(|p| seen(p.mat.c, 3.0)) {
+        let (m, n0, at) = (p.mat, verts.len(), p.mat.c + Vec3::Y * 0.5);
         for (lo, hi) in m.boxes() {
-            push_box(&mut verts, &mut idxs, lo, hi, atlas::tile_of(35, wool), 1.0);
+            push_box(&mut verts, &mut idxs, lo, hi, atlas::tile_of(35, p.wool), 1.0);
         }
-        lit(&mut verts, n0, lv, m.c + Vec3::Y * 0.5);
+        if let Some(sc) = p.scene {
+            sc.flats.iter().for_each(|f| push_flat(&mut verts, &mut idxs, m, f));
+            sc.lays.iter().for_each(|l| push_lay(&mut verts, &mut idxs, m, l, false));
+        }
+        lit(&mut verts, n0, lv, at);
+        if let Some(sc) = p.scene {
+            let s0 = verts.len();
+            sc.lays.iter().for_each(|l| push_lay(&mut verts, &mut idxs, m, l, true));
+            lit_by(&mut verts, s0, lv, at, SHADOW_DIM);
+        }
     }
     for a in mobs.arrows.iter().filter(|a| seen(a.pos, 1.0)) {
         let (p, h) = (a.pos, if a.kind == 0 { 0.06 } else { 0.125 });
@@ -224,6 +241,94 @@ fn geometry(drops: &Drops, mobs: &Mobs, falling: &[Falling], fx: &Effects, lv: &
     }
     sign_cache.sweep(now);
     (verts, idxs)
+}
+
+/// The pack's cloth for `ItemMesh::update`: the cloth, its wool colour (brown, or the carried pack's preview: lime / red), and, with the
+/// screen open, what lies on it.
+pub struct PackDraw<'a> {
+    pub mat: &'a Mat,
+    pub wool: u8,
+    pub scene: Option<&'a Scene>,
+}
+
+/// Levels a contact shadow is darker than the cell's light.
+const SHADOW_DIM: u8 = 5;
+
+/// A flat patch of the cloth (`pack::Flat`): a thin box, so it has an edge to catch the light.
+fn push_flat(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, m: &Mat, f: &pack::Flat) {
+    let (a, b) = (m.at(f.r[0], f.r[1], f.lo), m.at(f.r[0] + f.r[2], f.r[1] + f.r[3], f.hi));
+    push_box(verts, idxs, a.min(b).to_array(), a.max(b).to_array(), atlas::tile_of(f.tile.0, f.tile.1), 1.0);
+}
+
+/// A flat quad in both windings: a sprite lying on the cloth is seen from above, one lifted on the finger from any side. Corners near
+/// left, near right, far right, far left; `uv(u, v)` is the atlas place of a corner (u across, v up).
+fn push_quad2(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, p: [Vec3; 4], tint: f32, uv: &dyn Fn(f32, f32) -> (f32, f32)) {
+    let base = verts.len() as u32 / VF as u32;
+    for (c, (u, v)) in p.iter().zip([(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]) {
+        let (au, av) = uv(u, v);
+        verts.extend_from_slice(&[c.x, c.y, c.z, au, av, 1.0, lm(15, 0), tint]);
+    }
+    idxs.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3, base, base + 2, base + 1, base, base + 3, base + 2]);
+}
+
+/// `ColorizerGrass` / `ColorizerFoliage` for a block face, as the mesher packs it (`mesh::WHITE` = none).
+fn block_tint(id: u8, meta: u8, face: usize) -> f32 {
+    use crate::world::climate;
+    (match id {
+        2 if face == 2 => climate::grass(0.8, 0.4),
+        18 => match meta & 3 {
+            1 => climate::PINE,
+            2 => climate::BIRCH,
+            _ => climate::foliage(0.8, 0.4),
+        },
+        _ => return WHITE,
+    }) as f32
+}
+
+/// One stack lying on the cloth (`pack::Lay`), or its shadow. A block with a cube's shape is a small cube in its terrain tiles (the
+/// bottom is never seen, so it is not built); everything else is one flat two-sided quad: the `items.png` sprite, the block's own
+/// tile for a plant or a torch, the flat colour where there is neither. No 16-layer extrusion like the hand's: ~45 stacks on a
+/// low-end phone. The shadow is a quad on the cloth a little toward the player and to the right: a sprite's own image (dimmed by
+/// `lit_by`, so a tool throws its own outline), a cube's footprint in dark wool; it moves out as the stack lifts.
+fn push_lay(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, m: &Mat, l: &Lay, shadow: bool) {
+    let side = l.side();
+    if side <= 0.0 {
+        return;
+    }
+    let (cx, cy) = l.centre();
+    let (s, meta, half) = (l.stack, placed_meta(l.stack), side * pack::UNIT * 0.5);
+    let (u, r) = m.axes();
+    let (h, off) = if shadow { (pack::REST + 0.001, (r * 0.5 - u) * (0.012 + l.lift * 0.5)) } else { (l.base(), Vec3::ZERO) };
+    let c = m.at(cx, cy, h) + off;
+    let quad = |k: f32| [c - r * half * k - u * half * k, c + r * half * k - u * half * k, c + r * half * k + u * half * k, c - r * half * k + u * half * k];
+    if l.cube() {
+        if shadow {
+            let dark = atlas::tile_of(35, 7);
+            push_quad2(verts, idxs, quad(1.05), WHITE, &|u, v| atlas::atlas_uv(dark, u, v));
+            return;
+        }
+        let (a, b) = (m.at(cx - side * 0.5, cy - side * 0.5, h), m.at(cx + side * 0.5, cy + side * 0.5, h + l.height()));
+        for face in [0, 1, 2, 4, 5] {
+            let n0 = verts.len();
+            push_face(verts, idxs, face, a.min(b).to_array(), a.max(b).to_array(), 0, 1.0);
+            for (k, v) in verts[n0..].chunks_exact_mut(VF).enumerate() {
+                let (au, av) = atlas::face_uv(s.id as u8, meta, face, [0.0, 1.0, 1.0, 0.0][k], [0.0, 0.0, 1.0, 1.0][k]);
+                (v[3], v[4], v[7]) = (au, av, block_tint(s.id as u8, meta, face));
+            }
+        }
+        return;
+    }
+    let uv = move |u: f32, v: f32| -> (f32, f32) {
+        if s.id < 256 {
+            atlas::face_uv(s.id as u8, meta, 5, u, v)
+        } else if let Some(icon) = atlas::item_icon(s.id) {
+            atlas::item_uv(icon, u, v)
+        } else {
+            atlas::atlas_uv(stack_tile(s), u, v)
+        }
+    };
+    let tint = if s.id == 31 && meta != 0 { block_tint(2, 0, 2) } else { WHITE };
+    push_quad2(verts, idxs, quad(1.0), tint, &uv);
 }
 
 /// A sign's root transform (`TileEntitySignRenderer.renderTileEntitySignAt`: the board's centre at 2/3 scale, turned by the
