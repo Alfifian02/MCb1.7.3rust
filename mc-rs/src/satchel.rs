@@ -1,10 +1,10 @@
 //! The satchel: the immersive pack's flat replacement (`world::pack`'s cloth stays behind `packCloth:true`). The camera never moves; the
-//! inventory button lifts a leather bag in front of the view and, on a second button, a recipe book opens beside it.
+//! inventory button lifts a leather bag in front of the view with a closed recipe book lying beside it; a tap on the book opens it.
 //!
 //! - One layout: the bag is a 9 x 3 grid with the quick belt and the armor row (big cells for a thumb), as leather with stitching, rivets,
 //!   a pocket band behind each row and a strap round the belt; a slot's rim is tinted by its item's category (`pack::category`).
-//! - Book closed: the bag alone, centred. Book open: the bag only slides left (same size, same cells) and the book opens on its right:
-//!   the book opens on its right: the left page is the categories, then the recipes of one as a list; the right page is the crafting grid
+//! - The bag is always at the left and never moves. The book lies closed on its right (a leather cover, a clasp, `Tap to open`); a tap swings
+//!   the cover away and both pages grow from the spine, a `Close` tab above the spine shuts it. Open: the left page is the categories, then the recipes of one as a list; the right page is the crafting grid
 //!   (2 x 2, or 3 x 3 at a workbench) with the card of the picked recipe under it (`world::book`).
 //! - Everything here is geometry (`Frame`) and drawing (`draw`, `draw_pin`); the screen's state is `Satchel`, the rules are `world::book`
 //!   and `world::craft::Screen`, and `lib.rs` only routes the finger.
@@ -95,10 +95,6 @@ fn ease(t: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
-fn lerp(a: f32, b: f32, t: f32) -> f32 {
-    a + (b - a) * t
-}
-
 fn inside(r: [f32; 4], x: f32, y: f32) -> bool {
     x >= r[0] && x < r[0] + r[2] && y >= r[1] && y < r[1] + r[3]
 }
@@ -106,8 +102,11 @@ fn inside(r: [f32; 4], x: f32, y: f32) -> bool {
 /// The whole book, as rects in px.
 #[derive(Default)]
 pub struct BookFrame {
+    /// The cover while closed, the pages while open (both grow from the spine).
     pub rect: [f32; 4],
     pub open: bool,
+    /// The `Close` tab above the spine (hit while the book is open).
+    pub tab: [f32; 4],
     pub left: [f32; 4],
     pub right: [f32; 4],
     pub cats: Vec<(usize, [f32; 4])>,
@@ -146,11 +145,10 @@ impl Frame {
         let lh = 8.0 * 0.6 * k + 4.0;
         let mut f = Frame { k, bag: [0.0; 4], cells: Vec::new(), rows: Vec::new(), labels: Vec::new(), btns: Vec::new(), book: None };
 
-        // The bag: 9 columns of the left 45% of the screen, the armor row on top, the belt at the foot. Closed, it is centred; opening the
-        // book only slides it left, the cells keep their size and place inside it.
+        // The bag: 9 columns of the left 45% of the screen, the armor row on top, the belt at the foot. It stays there, book or no book.
         let pitch = ((0.455 * w - 2.0 * pad) / 9.0).min((bh - 2.0 * pad - lh) / 5.55);
         let (pw, ph) = (9.0 * pitch + 2.0 * pad, 5.55 * pitch + 2.0 * pad + lh);
-        let x = lerp((w - pw) * 0.5, 0.012 * w, ease(sat.book_t));
+        let x = 0.012 * w;
         f.bag = [x, top, pw, ph];
         let (bx, by, cell) = (x + pad, top + pad + lh, pitch * 0.92);
         f.labels.push(("Armor", bx, top + pad));
@@ -174,7 +172,7 @@ impl Frame {
         // The buttons above the bag, and the close button at the screen's corner.
         let (by, bh2, tk) = (0.035 * h + rise, 0.095 * h, 0.75 * k);
         let mut x = f.bag[0];
-        for (b, label) in [(Btn::Book, "Book"), (Btn::Sort, "Sort"), (Btn::Shift, "Shift"), (Btn::One, "One")] {
+        for (b, label) in [(Btn::Sort, "Sort"), (Btn::Shift, "Shift"), (Btn::One, "One")] {
             let bw = HudPipeline::text_width(label) as f32 * tk + 6.0 * tk;
             f.btns.push((b, [x, by, bw, bh2]));
             x += bw + 0.012 * h;
@@ -182,9 +180,7 @@ impl Frame {
         let cw = HudPipeline::text_width("X") as f32 * tk + 8.0 * tk;
         f.btns.push((Btn::Close, [w - 0.02 * w - cw, by, cw, bh2]));
 
-        if sat.book_t > 0.0 {
-            f.book = Some(book_frame(sat, gw, w, h, top, bh));
-        }
+        f.book = Some(book_frame(sat, gw, w, h, top, bh));
         f
     }
 
@@ -194,6 +190,10 @@ impl Frame {
             return Pick::Btn(*b);
         }
         if let Some(b) = &self.book {
+            // A closed (or closing) book opens at a tap; an open one closes at its tab.
+            if (!sat.book && inside(b.rect, x, y)) || (sat.open() && inside(b.tab, x, y)) {
+                return Pick::Btn(Btn::Book);
+            }
             if b.open && sat.open() {
                 let hit = b
                     .cats
@@ -224,12 +224,14 @@ impl Frame {
     }
 }
 
-/// The book's rects: both pages grow from the spine while it opens; the contents exist once it is open.
+/// The book's rects: closed, a cover one page wide; opening, both pages grow from the spine; the contents exist once it is open.
 fn book_frame(sat: &Satchel, gw: usize, w: f32, h: f32, top: f32, bh: f32) -> BookFrame {
     let (bx0, bx1) = (0.475 * w, 0.988 * w);
     let (spine, half) = ((bx0 + bx1) * 0.5, (bx1 - bx0) * 0.5);
     let e = ease(sat.book_t);
-    let mut b = BookFrame { rect: [spine - half * e, top, 2.0 * half * e, bh], open: sat.book_t >= 0.98, ..Default::default() };
+    // Closed it is one page wide, centred on the spine; opening, it grows to both pages.
+    let tab = [spine - 0.05 * w, top - 0.07 * h, 0.1 * w, 0.07 * h];
+    let mut b = BookFrame { rect: [spine - half * (1.0 + e) * 0.5, top, half * (1.0 + e), bh], open: sat.book_t >= 0.98, tab, ..Default::default() };
     let gap = 0.003 * w;
     b.left = [bx0, top, half - gap, bh];
     b.right = [spine + gap, top, half - gap, bh];
@@ -292,6 +294,8 @@ const RIM: [f32; 4] = [0.45, 0.36, 0.26, 1.0];
 const GOOD: [f32; 4] = [0.25, 0.6, 0.2, 1.0];
 const BAD: [f32; 4] = [0.75, 0.2, 0.15, 1.0];
 const WARN: [f32; 4] = [0.85, 0.5, 0.1, 1.0];
+const COVER: [f32; 4] = [0.36, 0.15, 0.13, 1.0];
+const GOLD: [f32; 4] = [0.9, 0.76, 0.38, 1.0];
 const STITCH: [f32; 4] = [0.84, 0.68, 0.42, 0.9];
 
 /// The rim of a filled slot: its item's category, tinted lightly (tools blue, food green, materials brown, the rest grey).
@@ -309,9 +313,9 @@ fn noise(i: u32) -> f32 {
     (i.wrapping_mul(2654435761).rotate_left(13).wrapping_mul(40503) >> 8 & 0xffff) as f32 / 65535.0
 }
 
-/// The bag's leather: grain, a seam of stitches round the edge, a rivet at each corner. `line` is the px of a thin line.
-fn leather(v: &mut Vec<HudVertex>, r: [f32; 4], line: f32) {
-    HudPipeline::push_outlined_quad(v, r[0], r[1], r[2], r[3], LEATHER, [0.2, 0.13, 0.07, 1.0], line * 2.0);
+/// Leather (the bag's, the book's cover, in colour `base`): grain, a seam of stitches round the edge, a rivet at each corner. `line` is the px of a thin line.
+fn leather(v: &mut Vec<HudVertex>, r: [f32; 4], line: f32, base: [f32; 4]) {
+    HudPipeline::push_outlined_quad(v, r[0], r[1], r[2], r[3], base, [0.2, 0.13, 0.07, 1.0], line * 2.0);
     for i in 0..90u32 {
         let (gx, gy, gl) = (r[0] + noise(i * 3) * r[2], r[1] + noise(i * 3 + 1) * r[3], (2.0 + 6.0 * noise(i * 3 + 2)) * line);
         let (x, w) = (gx.min(r[0] + r[2] - gl), gl.min(r[2]));
@@ -379,7 +383,7 @@ pub fn draw(v: &mut Vec<HudVertex>, (w, h): (f32, f32), sat: &Satchel, c: &Ctx) 
     HudPipeline::push_quad(v, 0.0, 0.0, w, h, [0.0, 0.0, 0.0, 0.5]);
 
     // The bag: leather, a pocket band behind each row (the belt's is a strap with a buckle), then every cell.
-    leather(v, f.bag, line);
+    leather(v, f.bag, line, LEATHER);
     for &(r, belt) in &f.rows {
         HudPipeline::push_quad(v, r[0], r[1], r[2], r[3], if belt { [0.2, 0.13, 0.07, 1.0] } else { [0.27, 0.17, 0.1, 1.0] });
         HudPipeline::push_quad(v, r[0], r[1], r[2], line * 1.5, [0.55, 0.4, 0.24, 1.0]); // the pocket's lip
@@ -435,9 +439,19 @@ pub fn draw(v: &mut Vec<HudVertex>, (w, h): (f32, f32), sat: &Satchel, c: &Ctx) 
 
 fn draw_book(v: &mut Vec<HudVertex>, (w, h): (f32, f32), (sat, b): (&Satchel, &BookFrame), c: &Ctx, (tk, sk, line): (f32, f32, f32)) {
     let _ = w;
-    HudPipeline::push_outlined_quad(v, b.rect[0], b.rect[1], b.rect[2], b.rect[3], PAPER, [0.3, 0.2, 0.1, 1.0], line * 2.0);
+    // The pages under, from the first frame of the opening; the cover over them swings away (it narrows towards its left edge, the hinge)
+    // until half way.
+    if sat.book_t > 0.0 {
+        HudPipeline::push_outlined_quad(v, b.rect[0], b.rect[1], b.rect[2], b.rect[3], PAPER, [0.3, 0.2, 0.1, 1.0], line * 2.0);
+    }
+    if sat.book_t < 0.5 {
+        draw_cover(v, [b.rect[0], b.rect[1], b.rect[2] * (1.0 - 2.0 * sat.book_t), b.rect[3]], sat, (tk, sk, line));
+    }
     if !b.open {
         return;
+    }
+    if sat.book {
+        button(v, b.tab, tk, "Close", 1);
     }
     let spine_x = b.left[0] + b.left[2] + (b.right[0] - b.left[0] - b.left[2]) * 0.5;
     HudPipeline::push_quad(v, spine_x - line, b.rect[1], line * 2.0, b.rect[3], [0.3, 0.2, 0.1, 1.0]);
@@ -521,6 +535,27 @@ fn draw_book(v: &mut Vec<HudVertex>, (w, h): (f32, f32), (sat, b): (&Satchel, &B
     let label = if c.discovery { "Unknown recipes: hidden" } else { "Unknown recipes: shown" };
     HudPipeline::push_text_centered(v, b.hide[0] + b.hide[2] * 0.5, b.hide[1] + (b.hide[3] - 8.0 * sk) * 0.5, sk, label, INK);
     HudPipeline::push_text_centered(v, b.hide[0] + b.hide[2] * 0.5, b.hide[1] + b.hide[3] + 3.0 * sk, sk, "Hold the result to craft all", [0.4, 0.3, 0.2, 1.0]);
+}
+
+/// The closed book: a leather cover with a page edge, a strap and clasp, the book icon and its title; the writing only while the cover
+/// is flat (it is foreshortened, narrower, while it swings).
+fn draw_cover(v: &mut Vec<HudVertex>, r: [f32; 4], sat: &Satchel, (tk, sk, line): (f32, f32, f32)) {
+    if r[2] < 8.0 * line {
+        return;
+    }
+    leather(v, r, line, COVER);
+    HudPipeline::push_quad(v, r[0] + r[2] - 4.0 * line, r[1] + 3.0 * line, 2.0 * line, r[3] - 6.0 * line, PAPER); // the page edge
+    let (sx, sw) = (r[0] + r[2] * 0.78, r[2] * 0.07); // the strap, down the cover, and its clasp
+    HudPipeline::push_quad(v, sx, r[1], sw, r[3], [0.2, 0.1, 0.08, 1.0]);
+    HudPipeline::push_outlined_quad(v, sx - sw * 0.3, r[1] + r[3] * 0.5 - sw, sw * 1.6, sw * 2.0, GOLD, [0.3, 0.22, 0.1, 1.0], line);
+    if sat.book_t < 0.1 {
+        let (cx, isz) = (r[0] + r[2] * 0.39, (r[2] * 0.3).min(r[3] * 0.25));
+        crate::push_stack(v, (cx - isz * 0.5, r[1] + r[3] * 0.3, isz, isz), 0.875, ItemStack { id: 340, count: 1, damage: 0 });
+        HudPipeline::push_text_centered(v, cx, r[1] + r[3] * 0.3 + isz + 6.0 * line, tk, "Recipes", GOLD);
+        if !sat.book {
+            HudPipeline::push_text_centered(v, cx, r[1] + r[3] * 0.86, sk, "Tap to open", [0.85, 0.7, 0.55, 1.0]);
+        }
+    }
 }
 
 /// The picked recipe: result, a line on where it is made, the ingredients with what the bag has of each.
@@ -628,17 +663,30 @@ mod tests {
     }
 
     #[test]
-    fn opening_the_book_only_slides_the_bag() {
+    fn opening_the_book_leaves_the_bag_alone() {
         let inv = Inventory::default();
-        let (mut closed, open) = (Satchel::new(false), open_book());
+        let mut closed = Satchel::new(false);
         closed.tick(10.0);
-        let (a, b) = (frame(&closed, &inv, 2), frame(&open, &inv, 2));
-        assert_eq!((a.bag[2], a.bag[3]), (b.bag[2], b.bag[3]), "the bag keeps its size");
-        let dx = b.bag[0] - a.bag[0];
-        assert!(dx < 0.0 && a.cells.len() == b.cells.len());
-        for ((i, r), (j, q)) in a.cells.iter().zip(&b.cells) {
-            assert!(i == j && (r[2], r[3]) == (q[2], q[3]) && (q[0] - r[0] - dx).abs() < 0.01 && q[1] == r[1], "cell {i:?} only moves sideways");
-        }
+        let (a, b) = (frame(&closed, &inv, 2), frame(&open_book(), &inv, 2));
+        assert_eq!(a.bag, b.bag);
+        assert_eq!(a.cells, b.cells, "every cell stays where it is");
+    }
+
+    #[test]
+    fn a_closed_book_lies_beside_the_bag_and_a_tap_opens_it() {
+        let inv = Inventory::default();
+        let mut closed = Satchel::new(false);
+        closed.tick(10.0);
+        let f = frame(&closed, &inv, 2);
+        let r = f.book.as_ref().expect("the book is there from the start").rect;
+        assert!(r[0] > f.bag[0] + f.bag[2] && r[0] + r[2] <= SIZE.0 && r[1] >= 0.0 && r[1] + r[3] <= SIZE.1, "on the screen, right of the bag");
+        let (x, y) = centre(r);
+        assert_eq!(f.hit(&closed, x, y), Pick::Btn(Btn::Book));
+        // Open, the cover's place is a page (a tap there does nothing) and the tab above the spine shuts it.
+        let (open, f) = (open_book(), frame(&open_book(), &inv, 2));
+        let (x, y) = centre(f.book.as_ref().expect("book").tab);
+        assert_eq!(f.hit(&open, x, y), Pick::Btn(Btn::Book));
+        assert_ne!(f.hit(&open, f.book.as_ref().expect("book").right[0] + 2.0, f.book.as_ref().expect("book").right[1] + 2.0), Pick::Btn(Btn::Book));
     }
 
     #[test]
