@@ -160,6 +160,25 @@ pub struct Recipe {
 }
 
 impl Recipe {
+    /// What the recipe makes (the recipe book, `world::book`).
+    pub fn out(&self) -> ItemStack {
+        self.out
+    }
+
+    /// The pattern's width and height, `None` for a shapeless recipe.
+    pub fn shape(&self) -> Option<(usize, usize)> {
+        (self.w > 0).then_some((self.w, self.h))
+    }
+
+    /// The ingredient codes: a shaped recipe's pattern row by row (0 = an empty cell), a shapeless one's list.
+    pub fn pattern(&self) -> &[u16] {
+        if self.w == 0 {
+            &self.cells[..self.cells.iter().position(|&c| c == 0).unwrap_or(9)]
+        } else {
+            &self.cells[..self.w * self.h]
+        }
+    }
+
     /// `ShapedRecipes.matches` on a `gw` x `gw` grid of item ids: the pattern may sit anywhere in the 3x3 area
     /// (cells outside a 2x2 grid are empty), mirrored or not, and every other cell must be empty.
     fn matches(&self, grid: &[u16; 9], gw: usize) -> bool {
@@ -184,8 +203,13 @@ impl Recipe {
 }
 
 /// Ingredient / result code: wool and dye keep their colour in the bits above the id (ids stay below 512).
-fn code(id: u16, damage: u16) -> u16 {
+pub fn code(id: u16, damage: u16) -> u16 {
     if matches!(id, 35 | 351) { id | (damage & 15) << 9 } else { id }
+}
+
+/// `code` the other way: the item id and the damage (the colour of a wool or a dye, else 0).
+pub fn unpack(code: u16) -> (u16, u16) {
+    (code & 511, code >> 9)
 }
 
 fn shapeless(ings: &[u16], out: u16, n: u8) -> Recipe {
@@ -326,7 +350,7 @@ pub fn find(grid: &[Option<ItemStack>; 9], gw: usize) -> Option<ItemStack> {
 // ---- Furnace ----
 
 /// `FurnaceRecipes`: what smelting `id` gives.
-fn smelting(id: u16) -> Option<ItemStack> {
+pub fn smelting(id: u16) -> Option<ItemStack> {
     let (out, damage) = match id {
         15 => (265, 0),  // iron ore -> iron ingot
         14 => (266, 0),  // gold ore -> gold ingot

@@ -16,6 +16,7 @@ mod immersive;
 mod rumble;
 mod menu;
 mod options;
+mod satchel;
 
 use crate::input::touch_ui::{PointerRole, ScreenEv, TouchUi};
 use crate::menu::Menu;
@@ -50,6 +51,7 @@ use crate::world::items::{self, Drops, Inventory, ItemStack};
 use crate::world::gear::{self, Hook, Used};
 use crate::world::boat;
 use crate::world::pack;
+use crate::world::book;
 use crate::world::minecart;
 use crate::world::portal;
 use crate::world::mobs::{self, Ctx, Ev, Mobs};
@@ -218,6 +220,10 @@ struct App {
     /// Where the camera is over the table (a cloth unit: the centre of the view), and where it is gliding to (a tab was tapped).
     pack_focus: (f32, f32),
     pack_goal: Option<(f32, f32)>,
+    /// The satchel (`satchel.rs`, the flat bag and the recipe book) while its screen is open, and what the player has seen / pinned in the
+    /// book (`world::book::Notes`, the `book` file of the world).
+    sat: Option<satchel::Satchel>,
+    notes: book::Notes,
     /// The fishing bobber in the water (`EntityPlayer.fishEntity`).
     hook: Option<Hook>,
     /// Furnace tile entities by block position (created on first use), and the time left over from the last 20 Hz tick.
@@ -264,6 +270,9 @@ struct Gesture {
     grab: Option<(f32, f32)>,
     moved: bool,
     down: (f32, f32),
+    /// Seconds the finger has been down (a press on the satchel's result this long crafts all), and on the book's list the scroll it began at.
+    age: f32,
+    list: Option<f32>,
 }
 
 /// Pixels a finger must travel before a press on empty cloth is a pan and not a tap.
@@ -358,6 +367,8 @@ impl App {
             pack_lift: 0.0,
             pack_focus: pack::tab_focus(0),
             pack_goal: None,
+            sat: None,
+            notes: book::Notes::default(),
             hint: 0.0,
             hint_msg: "",
             carry: None,
@@ -520,6 +531,7 @@ impl App {
         (self.mat, self.mat_ui, self.hint, self.carry, self.ghost) = (None, false, 0.0, None, None);
         (self.pack_scene, self.pack_age, self.pack_lift) = (None, 0.0, 0.0);
         (self.pack_focus, self.pack_goal) = (pack::tab_focus(0), None);
+        self.sat = None;
         self.close_sign();
         (self.paintings, self.signs) = (Vec::new(), HashMap::new());
         self.boats = boat::Boats::default();
@@ -567,6 +579,8 @@ impl App {
         if let Some((p, s)) = std::fs::read(self.dir.join("decor")).ok().and_then(|b| decor::decode(&b)).filter(|_| !wipe) {
             (self.paintings, self.signs) = (p, s.into_iter().collect());
         }
+        // The recipe book's notes (what was held, the pinned recipe): a new world starts with none.
+        self.notes = std::fs::read(self.dir.join("book")).ok().and_then(|b| book::Notes::decode(&b)).filter(|_| !wipe).unwrap_or_default();
         log::info!("world of seed {:x} ({}), spawn {:?}", self.seed, self.world_type.name(), self.spawn);
     }
 
@@ -622,6 +636,9 @@ impl App {
         let signs: Vec<_> = self.signs.iter().map(|(&p, t)| (p, t.clone())).collect();
         if let Err(e) = save::write(&self.dir.join("decor"), &decor::encode(&self.paintings, &signs)) {
             log::warn!("save: decor file: {e}");
+        }
+        if let Err(e) = save::write(&self.dir.join("book"), &self.notes.encode()) {
+            log::warn!("save: book file: {e}");
         }
         self.chunks.flush(chunks);
     }
@@ -1145,7 +1162,11 @@ impl App {
             } else if self.screen.is_some() {
                 self.close_screen();
             } else if self.pack_rule {
-                self.pack_button(); // the pack is a cloth: take it in both hands, then a tap spreads it on flat ground and the screen opens
+                if self.opts.pack_cloth {
+                    self.pack_button(); // the old pack is a cloth: take it in both hands, then a tap spreads it on flat ground and the screen opens
+                } else if !self.riding() && self.sleep.is_none() && !self.vitals.dead() {
+                    self.open_satchel(Screen::new(2)); // the satchel: the flat bag, and a button for the recipe book
+                }
             } else {
                 self.open_screen(Screen::new(2));
             }
@@ -1379,7 +1400,11 @@ impl App {
             // Using a workbench or a furnace opens its screen instead of placing a block against it.
             match self.chunks.block_loaded(hit.pos.0, hit.pos.1, hit.pos.2) {
                 Some(58) => {
-                    self.open_screen(Screen::new(3));
+                    if self.pack_rule && !self.opts.pack_cloth {
+                        self.open_satchel(Screen::new(3)); // the bag, and the book open on its 3x3 grid
+                    } else {
+                        self.open_screen(Screen::new(3));
+                    }
                     return;
                 }
                 Some(61 | 62) => {
@@ -1956,7 +1981,16 @@ impl App {
 
     /// `onCraftGuiClosed`: the cursor stack and whatever is left in the grid are thrown out in front of the player.
     fn close_screen(&mut self) {
+        let was_sat = self.sat.take().is_some();
         if let Some(mut s) = self.screen.take() {
+            if was_sat {
+                // The satchel puts the grid and the held stack back in the bag; only what does not fit is thrown.
+                if let Some(mut c) = s.cursor.take() {
+                    self.inv.add(&mut c);
+                    s.cursor = (c.count > 0).then_some(c);
+                }
+                book::stash(&mut s, &mut self.inv);
+            }
             for st in s.close() {
                 self.drops.throw(st, self.camera.pos, self.camera.forward());
             }
@@ -2003,11 +2037,23 @@ impl App {
     /// walks off or the ground under it goes (the screen closes first, its stacks are thrown as always).
     fn pack_tick(&mut self, dt: f32) {
         self.hint = (self.hint - dt).max(0.0);
+        // The satchel's clocks, the finger's (a long press on the result), and the book's notes of what the bag has held.
+        if let Some(g) = self.gesture.as_mut() {
+            g.age += dt;
+        }
+        if let Some(s) = self.sat.as_mut() {
+            s.tick(dt);
+        }
+        if self.sat.is_some() && (self.vitals.dead() || self.sleep.is_some()) {
+            self.close_screen();
+        }
+        let grid = self.screen.as_ref().map_or([None; 9], |s| s.grid);
+        self.notes.observe(&self.inv, &grid);
         // The open screen's two clocks: since it opened, and the cursor stack's lift (up in 0.12 s).
         let held = self.mat_ui && self.screen.as_ref().is_some_and(|s| s.cursor.is_some());
         self.pack_age = if self.mat_ui { self.pack_age + dt } else { 0.0 };
         self.pack_lift += (f32::from(u8::from(held)) - self.pack_lift).clamp(-dt / 0.12, dt / 0.12);
-        self.touch.pack_open = self.mat_ui; // the four HUD buttons are 3D buttons of the table while it is open
+        self.touch.pack_open = self.mat_ui || self.sat.is_some(); // the four HUD buttons are the table's own (or the satchel's) while it is open
         if let Some(g) = self.pack_goal {
             // A tab glides the camera: it closes 12 / s of the way to it, and lands when it is half a unit off.
             let k = 1.0 - (-dt * 12.0).exp();
@@ -2059,10 +2105,116 @@ impl App {
         }
     }
 
+    /// Open the satchel (`satchel.rs`) on `screen`: the 2x2 inventory (the book closed) or a workbench's 3x3 (the book open).
+    fn open_satchel(&mut self, screen: Screen) {
+        let bench = screen.gw == 3;
+        self.open_screen(screen);
+        self.sat = Some(satchel::Satchel::new(bench));
+        self.audio.play_here("step.cloth", 0.6, 1.0);
+    }
+
+    /// What the finger is on in the open satchel (`satchel::Frame::hit`); `None` when it is not open.
+    fn sat_hit(&self, x: f32, y: f32) -> Option<satchel::Pick> {
+        let (sat, s) = (self.sat.as_ref()?, self.screen.as_ref()?);
+        let (w, h) = self.be.size();
+        Some(satchel::Frame::new(sat, &self.inv, s.gw, w as f32, h as f32).hit(sat, x, y))
+    }
+
+    /// How far the book's list can scroll (px).
+    fn sat_max_scroll(&self) -> f32 {
+        let (Some(sat), Some(s)) = (self.sat.as_ref(), self.screen.as_ref()) else { return 0.0 };
+        let (w, h) = self.be.size();
+        satchel::Frame::new(sat, &self.inv, s.gw, w as f32, h as f32).book.map_or(0.0, |b| b.max_scroll)
+    }
+
+    /// A tap on the open satchel: a button, a page of the book, a recipe (it fills the grid), a slot, or past it all (a held stack is thrown).
+    fn on_sat_tap(&mut self, x: f32, y: f32) {
+        use satchel::{Btn, Pick};
+        let Some(p) = self.sat_hit(x, y) else { return };
+        match p {
+            Pick::Btn(Btn::Close) => self.close_screen(),
+            Pick::Btn(Btn::Book) => {
+                // Closing the book puts what is in its grid back in the bag.
+                let closing = self.sat.as_mut().map_or(false, |s| {
+                    s.book = !s.book;
+                    !s.book
+                });
+                if let (true, Some(s)) = (closing, self.screen.as_mut()) {
+                    book::stash(s, &mut self.inv);
+                }
+            }
+            Pick::Btn(Btn::Sort) => {
+                pack::sort(&mut self.inv);
+                self.audio.play_here("step.cloth", 0.5, 1.2);
+            }
+            Pick::Btn(Btn::Shift) => self.shift_mode = !self.shift_mode,
+            Pick::Btn(Btn::One) => self.one_mode = !self.one_mode,
+            Pick::Cat(i) => {
+                if let Some(s) = self.sat.as_mut() {
+                    s.turn(Some(i));
+                }
+            }
+            Pick::Back => {
+                if let Some(s) = self.sat.as_mut() {
+                    s.turn(None);
+                }
+            }
+            Pick::Row(i) => self.sat_pick(i),
+            Pick::Pin => {
+                if let Some(sel) = self.sat.as_ref().and_then(|s| s.sel) {
+                    self.notes.pinned = if self.notes.pinned == Some(sel) { None } else { Some(sel) };
+                }
+            }
+            Pick::Hide => {
+                self.opts.book_discovery = !self.opts.book_discovery;
+                self.opts.save();
+            }
+            Pick::Slot(id) => {
+                let (one, shift) = (self.one_mode, self.shift_mode);
+                self.with_ext(|s, inv, ext| if shift { s.shift_click(id, inv, ext) } else { s.click(id, one, inv, ext) });
+            }
+            Pick::Outside => {
+                let Some(s) = self.screen.as_mut() else { return };
+                // Click outside the window (slot -999): throw the cursor stack, or one item of it.
+                if let Some(c) = s.cursor {
+                    let n = if self.one_mode { 1 } else { c.count };
+                    s.cursor = (c.count > n).then(|| ItemStack { count: c.count - n, ..c });
+                    self.drops.throw(ItemStack { count: n, ..c }, self.camera.pos, self.camera.forward());
+                }
+            }
+            Pick::List | Pick::Panel => {}
+        }
+    }
+
+    /// A tap on a recipe of the book's list: it is picked, and when the bag has it all and the grid fits, its ingredients go into the grid
+    /// (what lay there goes back to the bag). A recipe the player has not met yet (Unknown recipes: hidden) is picked but not filled.
+    fn sat_pick(&mut self, i: usize) {
+        let Some(e) = book::entries().get(i) else { return };
+        if let Some(s) = self.sat.as_mut() {
+            s.sel = Some(i);
+        }
+        if self.opts.book_discovery && !self.notes.known(e) {
+            return;
+        }
+        let filled = match self.screen.as_mut() {
+            Some(s) if s.cursor.is_none() => book::fill(e, s, &mut self.inv),
+            _ => false,
+        };
+        if filled {
+            self.audio.play_here("step.cloth", 0.4, 1.4);
+        }
+    }
+
     /// The slot under a finger of the open screen: a cell of the pack's cloth, or a slot of the vanilla panel.
     fn slot_under(&self, x: f32, y: f32) -> Option<craft::SlotId> {
         let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
         let gw = self.screen.as_ref()?.gw;
+        if self.sat.is_some() {
+            return match self.sat_hit(x, y)? {
+                satchel::Pick::Slot(id) => Some(id),
+                _ => None,
+            };
+        }
         if self.mat_ui {
             // The finger is a ray at the cloth: the cubes are tested as boxes, everything flat as the cloth unit it lands on (`pack::pick`).
             let (m, lays) = (self.mat.as_ref()?, self.pack_scene.as_ref().map_or(&[][..], |s| &s.lays[..]));
@@ -2184,13 +2336,33 @@ impl App {
         match ev {
             ScreenEv::Down(x, y) => {
                 // On the pack's cloth a press on a 3D button is only a tap; one on empty cloth or ground may become a pan of the camera.
-                let btn = self.mat_ui && self.pack_btn(x, y).is_some();
+                // In the satchel anything but a slot is a tap (a button, a page); a press on the book's list may become a scroll.
+                let pick = self.sat_hit(x, y);
+                let btn = (self.mat_ui && self.pack_btn(x, y).is_some()) || pick.is_some_and(|p| !matches!(p, satchel::Pick::Slot(_)));
+                let list = match (self.sat.as_ref(), pick) {
+                    (Some(s), Some(satchel::Pick::Row(_) | satchel::Pick::List)) => Some(s.scroll),
+                    _ => None,
+                };
                 let start = if btn { None } else { self.slot_under(x, y) };
                 let on_cell = start.is_some_and(|id| pack::has_cell(&self.inv, id));
                 let grab = if self.mat_ui && !btn && !on_cell { self.cloth_at((x, y), pack::REST) } else { None };
-                self.gesture = Some(Gesture { start, spread: false, visited: Vec::new(), btn, grab, moved: false, down: (x, y) });
+                self.gesture = Some(Gesture { start, spread: false, visited: Vec::new(), btn, grab, moved: false, down: (x, y), age: 0.0, list });
             }
             ScreenEv::Move(x, y) => {
+                // A drag that began on the book's list scrolls it; lifting after one is not a tap.
+                if let Some((s0, down, moved)) = self.gesture.as_ref().and_then(|g| g.list.map(|s0| (s0, g.down, g.moved))) {
+                    let moved = moved || (x - down.0).hypot(y - down.1) > PAN_SLOP;
+                    if moved {
+                        let max = self.sat_max_scroll();
+                        if let Some(s) = self.sat.as_mut() {
+                            s.scroll = (s0 - (y - down.1)).clamp(0.0, max);
+                        }
+                    }
+                    if let Some(g) = self.gesture.as_mut() {
+                        g.moved = moved;
+                    }
+                    return;
+                }
                 if let Some((btn, grab, moved, down)) = self.gesture.as_ref().filter(|g| g.btn || g.grab.is_some()).map(|g| (g.btn, g.grab, g.moved, g.down)) {
                     // A drag that began on empty cloth or ground slides the camera over the table so the spot stays under the finger.
                     if let (false, Some(grab)) = (btn, grab) {
@@ -2220,7 +2392,15 @@ impl App {
                 g.visited.extend(fill.iter().copied());
             }
             ScreenEv::Up(x, y) => {
-                if !self.gesture.take().is_some_and(|g| g.spread || g.moved) {
+                let g = self.gesture.take();
+                // The satchel's result held for a while crafts all (`book::craft_all`); anything else lifts as a tap.
+                let hold = self.sat.is_some() && g.as_ref().is_some_and(|g| g.start == Some(craft::SlotId::Result) && g.age >= satchel::HOLD_SECS && (x - g.down.0).hypot(y - g.down.1) < PAN_SLOP);
+                if hold {
+                    let n = self.screen.as_mut().map_or(0, |s| book::craft_all(s, &mut self.inv));
+                    if n > 0 {
+                        self.audio.play_here("step.cloth", 0.5, 1.3);
+                    }
+                } else if !g.is_some_and(|g| g.spread || g.moved) {
                     self.on_screen_tap(x, y);
                 }
             }
@@ -2232,6 +2412,10 @@ impl App {
 
     /// A tap on the open screen: the "place one" toggle, a slot, or outside the panel (throws the cursor stack).
     fn on_screen_tap(&mut self, x: f32, y: f32) {
+        if self.sat.is_some() {
+            self.on_sat_tap(x, y);
+            return;
+        }
         let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
         let Some(gw) = self.screen.as_ref().map(|s| s.gw) else { return };
         let one = self.one_mode;
@@ -2778,8 +2962,16 @@ impl App {
             draw_pack(v, (w, h), (&m, vp), &self.inv, s, sc, (self.one_mode, self.shift_mode), (self.touch.cursor_pos, finger, picked), self.gesture.is_some(), self.pack_focus);
         }
 
+        // The satchel: the flat bag and the recipe book (`satchel.rs`).
+        if let (Some(s), Some(sat)) = (self.screen.as_ref(), self.sat.as_ref()) {
+            let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
+            let hold = self.gesture.as_ref().is_some_and(|g| g.start == Some(craft::SlotId::Result) && g.age >= satchel::HOLD_SECS);
+            let ctx = satchel::Ctx { inv: &self.inv, screen: s, notes: &self.notes, one: self.one_mode, shift: self.shift_mode, discovery: self.opts.book_discovery, hotbar: self.touch.hotbar_slot, finger: self.touch.cursor_pos, down: self.gesture.is_some(), hold };
+            satchel::draw(v, (w, h), sat, &ctx);
+        }
+
         // Container screen: the vanilla GUI (176 x 166 units) over a dimmed frame, slots with their stacks.
-        if let Some(s) = self.screen.as_ref().filter(|_| !self.mat_ui) {
+        if let Some(s) = self.screen.as_ref().filter(|_| !self.mat_ui && self.sat.is_none()) {
             let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
             let (ox, oy, k) = craft::panel(s.gw, w, h);
             let (pw, ph) = craft::panel_size(s.gw);
@@ -2878,7 +3070,7 @@ impl App {
         }
 
         // The four buttons top-right (pause, inventory, view, zoom) are not drawn while the pack's table is open: its edges carry the buttons.
-        if !self.mat_ui {
+        if !self.mat_ui && self.sat.is_none() {
         // Pause button: top-right, two bars.
         let (px, py, pw, ph) = layout.pause;
         HudPipeline::push_button(v, px, py, pw, ph, if pressed(PointerRole::Pause) { 2 } else { 1 });
@@ -2924,6 +3116,12 @@ impl App {
                 let u = hw / 20.0; // the slot is 20 units, its item 16 at (2, 2)
                 push_stack(v, (hx + 2.0 * u, hy + 2.0 * u, 16.0 * u, 16.0 * u), 0.875, s); // icon 14 of the 16 units
             }
+        }
+
+        // The recipe pinned in the book: what it wants, and what the bag has of each.
+        if let (true, Some(e)) = (play, self.notes.pinned.and_then(|i| book::entries().get(i))) {
+            let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
+            satchel::draw_pin(v, (w, h), e, &self.inv);
         }
 
         // The pack found no flat ground under the crosshair, or a bed was tapped by day.

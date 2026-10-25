@@ -1,0 +1,1598 @@
+diff -ruN a/README.md b/README.md
+--- a/README.md	2026-10-25 19:08:43.936058963 +0000
++++ b/README.md	2026-10-25 19:08:44.405048176 +0000
+@@ -79,6 +79,7 @@
+ | Immersive pack (The Forest style, 2026-10-25) | written without a toolchain: not compiled, not run, not seen on a device (+5 tests in `world/pack.rs`, `menu.rs` flow test extended, carry check in `render/player.rs`); **NOT b1.7.3** | `world/pack.rs` + `lib.rs` + `render/items.rs` + `menu.rs`: with the world's **Immersive Pack** switch on (Create World screen, saved as the 4th line of `<world>/info`; worlds made before it keep the panel), the inventory button no longer opens the inventory: the player takes the pack in both hands (it rises from below, the held item is hidden) and the cloth shows on the flat ground under the crosshair, lime where it fits and red where it does not (needs a full block under 9 samples of a 2.0 x 1.6 footprint, nothing but air or plants on it); a tap, like placing a block, spreads it there (on a red one only a message shows), the button again puts the pack away. The cloth unrolls in the world (0.9 s, a roll that shrinks as it travels), then the screen opens as the cloth: items lie in zones by category (tools & gear, food, materials, other), each at its own size, shrunk together when a zone is crowded; the crafting mat (2 x 2), worn armor and the quick-select row (hotbar) have fixed places. Same `SlotId`s and `Screen::click` as the panel, so crafting, armor, spread-drag, place-one and shift-click work unchanged. Closing, walking 6.5 blocks off or losing the ground rolls it up. A workbench, furnace and chest keep their own panels. Switch off = the old panel. See the gameplay changelog. **Update 2026-10-25 (12):** the screen is a fixed table (main cloth, a small crafting cloth in front, an armor stand at its right, the quick-select belt) that the camera pans over by dragging on empty cloth or ground; four 3D tabs (Pack, Crafting, Armor, Quick) jump the view to a part, four 3D buttons (close, shift-click, place one, sort) lie at its edges, and the four HUD buttons, the two blue toggles and the `Quick select` text are gone. See the gameplay changelog. |
+ | Organic mob movement (2026-10-25) | written without a toolchain: not compiled, not run; closer to b1.7.3 (+3 tests in `world/mobs.rs`; run `cargo test --lib mobs items` first) | Taken from `EntityLiving` of the decompiled b1.7.3 and applied to **every** mob, whatever `animalAi` says. **Momentum** (`Mob::step`): the horizontal speed no longer jumps to the walk speed, it builds up and dies away like `moveEntityWithHeading` (0.546 a tick on the ground, 0.91 in the air, so a hop keeps its run); same top speed; water and lava as before. **Body trails head** (`body_yaw` = `renderYawOffset`): the body follows the way the mob moves (0.3 of the gap a tick, not while knocked back) and stays within 75 degrees of the head, which now turns on its own pivot (`render/items.rs`). **Head tip** (`head_pitch`): a mob that looks at the player or hunts them tips its head up or down to their eye (40 degrees at most, `faceEntity`). Timing is per frame, not per tick. |
+ | Immersive inventory in 3D (2026-10-25) | written without a toolchain: not compiled, not run, not seen on a device (+6 tests in `world/pack.rs`); **NOT b1.7.3** | `world/pack.rs` + `lib.rs` + `render/items.rs`: the cloth screen is in the world. The camera glides to a 78 degree down pose that frames the 2.0 x 1.16 cloth to 96% of the screen while it spreads (and back when it rolls up); every stack lies on the cloth, a block as a small textured cube, anything else as a flat two-sided sprite, lit by the cell above with a cheap contact-shadow quad under it; zones, crafting mat, armor, quick select and the toggles are raised flat patches; the stacks come up one by one and the held stack floats over the finger. A finger is a ray: flat things go ray -> cloth plane -> units -> `pack::slot_at`, cubes are tested as boxes (`pack::pick`). Labels, counts, wear bars and names stay HUD, projected from the 3D positions. No item physics, no throwing from the cloth, nothing saved. See the gameplay changelog. |
++| Satchel + recipe book (2026-10-26) | written without a toolchain: not compiled, not run, not seen on a device (+6 tests in `world/book.rs`, +5 in `satchel.rs`, 1 extended in `options.rs`); **NOT b1.7.3** | `satchel.rs` + `world/book.rs` + `lib.rs`: with the world's Immersive Pack on, the inventory button opens a flat bag (the camera never moves; the cloth and its panning view are behind `packCloth:true` in `options.txt`) and a workbench opens the same screen with its 3x3 grid. Book closed: the bag with its zones. Book button: the bag slides left and packs into a 9 x 3 grid with the armor row and the quick belt, and a two-page book opens (pages grow from the spine): the left page lists six categories (tools & gear, food, blocks, redstone & rails, other, furnace), then the recipes of one as a scrolling list (green dot = the bag has everything and the grid fits, red = something is short, orange = a furnace's); the right page is the crafting grid with the picked recipe's card under it (what the bag holds of each ingredient, `Needs a workbench (3x3)` on a 3x3 recipe at the 2x2 grid). A tap on a recipe puts one set of its ingredients into the grid (what lay there goes back to the bag); a press on the result held 0.5 s crafts all; Pin keeps a recipe's ingredients on the play HUD; the `Unknown recipes` toggle (`bookDiscovery` in `options.txt`) hides recipes none of whose items the player ever held (`?` box, `???`; the notes are the 69-byte `<world>/book` file). Closing puts the grid and the held stack back in the bag. Sound: step.cloth. See the gameplay changelog. |
+ | M14                  | pending | Menus (part 1: title, world list, create world; see above), options, player armor and real mob models (both done, see the player model row above and `roadmap/gameplay.md`); only the chat (overlay, later) is left; a bed tapped by day says so: see [`roadmap/gameplay.md`](roadmap/gameplay.md). M10 multiplayer and M13 optimization are out of scope on purpose. |
+ 
+ Latest commit on `main`: see `git log -1`. Latest released APK: see the
+@@ -94,6 +95,7 @@
+     gpu/
+       context.rs          wgpu instance; Vulkan first, GLES as the fallback
+       gfx.rs              `Buf` / `Gfx` / `WorldDraw`: what the world code needs of a renderer, shared by both
++    satchel.rs            the flat bag and the recipe book screen (geometry, hit-test, drawing), `lib.rs` routes the finger
+     menu.rs               M14: title screen, world list, world creation (b1.7.3 `GuiMainMenu` / `GuiSelectWorld` / `GuiCreateWorld`)
+     render/player.rs      M14: player model (b1.7.3 `ModelBiped`), animation, third-person + inventory preview
+     options.rs            M14b: `GameSettings` + Options / Video Settings / Controls + the game menu (b1.7.3 `GuiOptions` / `GuiIngameMenu`)
+@@ -130,6 +132,7 @@
+       boat.rs             M22: `EntityBoat` (buoyancy, paddling, wall smash), the boat list
+       decor.rs            M19: paintings (`EntityPainting`, `EnumArt`) and signs (`TileEntitySign`, the editor's keyboard), `decor` save codec
+       chest.rs            chest storage: tile entity, placement/open rules, large-chest grouping, face tiles, reach
++      book.rs             recipe book: every recipe + smelting by category, craftable / missing, auto-fill, craft all, `Notes` (what was held, the pin); pure
+       craft.rs            M6: tools (EnumToolMaterial, getStrVsBlock, canHarvestBlock), recipes (CraftingManager), inventory/workbench screen (Container clicks) + its GUI geometry
+       sprint.rs           Retro Sprint port: double-tap / key start, stop rules, push, jump push, field of view; pure, tested on a host
+       stamina.rs          Stamina port: the bar (sprint / jump cost, regeneration, lock, slowdown, hearts overlay count); pure, tested on a host
+diff -ruN a/mc-rs/src/lib.rs b/mc-rs/src/lib.rs
+--- a/mc-rs/src/lib.rs	2026-10-25 19:08:44.142692807 +0000
++++ b/mc-rs/src/lib.rs	2026-10-25 19:08:44.377024419 +0000
+@@ -16,6 +16,7 @@
+ mod rumble;
+ mod menu;
+ mod options;
++mod satchel;
+ 
+ use crate::input::touch_ui::{PointerRole, ScreenEv, TouchUi};
+ use crate::menu::Menu;
+@@ -50,6 +51,7 @@
+ use crate::world::gear::{self, Hook, Used};
+ use crate::world::boat;
+ use crate::world::pack;
++use crate::world::book;
+ use crate::world::minecart;
+ use crate::world::portal;
+ use crate::world::mobs::{self, Ctx, Ev, Mobs};
+@@ -218,6 +220,10 @@
+     /// Where the camera is over the table (a cloth unit: the centre of the view), and where it is gliding to (a tab was tapped).
+     pack_focus: (f32, f32),
+     pack_goal: Option<(f32, f32)>,
++    /// The satchel (`satchel.rs`, the flat bag and the recipe book) while its screen is open, and what the player has seen / pinned in the
++    /// book (`world::book::Notes`, the `book` file of the world).
++    sat: Option<satchel::Satchel>,
++    notes: book::Notes,
+     /// The fishing bobber in the water (`EntityPlayer.fishEntity`).
+     hook: Option<Hook>,
+     /// Furnace tile entities by block position (created on first use), and the time left over from the last 20 Hz tick.
+@@ -264,6 +270,9 @@
+     grab: Option<(f32, f32)>,
+     moved: bool,
+     down: (f32, f32),
++    /// Seconds the finger has been down (a press on the satchel's result this long crafts all), and on the book's list the scroll it began at.
++    age: f32,
++    list: Option<f32>,
+ }
+ 
+ /// Pixels a finger must travel before a press on empty cloth is a pan and not a tap.
+@@ -358,6 +367,8 @@
+             pack_lift: 0.0,
+             pack_focus: pack::tab_focus(0),
+             pack_goal: None,
++            sat: None,
++            notes: book::Notes::default(),
+             hint: 0.0,
+             hint_msg: "",
+             carry: None,
+@@ -520,6 +531,7 @@
+         (self.mat, self.mat_ui, self.hint, self.carry, self.ghost) = (None, false, 0.0, None, None);
+         (self.pack_scene, self.pack_age, self.pack_lift) = (None, 0.0, 0.0);
+         (self.pack_focus, self.pack_goal) = (pack::tab_focus(0), None);
++        self.sat = None;
+         self.close_sign();
+         (self.paintings, self.signs) = (Vec::new(), HashMap::new());
+         self.boats = boat::Boats::default();
+@@ -567,6 +579,8 @@
+         if let Some((p, s)) = std::fs::read(self.dir.join("decor")).ok().and_then(|b| decor::decode(&b)).filter(|_| !wipe) {
+             (self.paintings, self.signs) = (p, s.into_iter().collect());
+         }
++        // The recipe book's notes (what was held, the pinned recipe): a new world starts with none.
++        self.notes = std::fs::read(self.dir.join("book")).ok().and_then(|b| book::Notes::decode(&b)).filter(|_| !wipe).unwrap_or_default();
+         log::info!("world of seed {:x} ({}), spawn {:?}", self.seed, self.world_type.name(), self.spawn);
+     }
+ 
+@@ -623,6 +637,9 @@
+         if let Err(e) = save::write(&self.dir.join("decor"), &decor::encode(&self.paintings, &signs)) {
+             log::warn!("save: decor file: {e}");
+         }
++        if let Err(e) = save::write(&self.dir.join("book"), &self.notes.encode()) {
++            log::warn!("save: book file: {e}");
++        }
+         self.chunks.flush(chunks);
+     }
+ 
+@@ -1145,7 +1162,11 @@
+             } else if self.screen.is_some() {
+                 self.close_screen();
+             } else if self.pack_rule {
+-                self.pack_button(); // the pack is a cloth: take it in both hands, then a tap spreads it on flat ground and the screen opens
++                if self.opts.pack_cloth {
++                    self.pack_button(); // the old pack is a cloth: take it in both hands, then a tap spreads it on flat ground and the screen opens
++                } else if !self.riding() && self.sleep.is_none() && !self.vitals.dead() {
++                    self.open_satchel(Screen::new(2)); // the satchel: the flat bag, and a button for the recipe book
++                }
+             } else {
+                 self.open_screen(Screen::new(2));
+             }
+@@ -1379,7 +1400,11 @@
+             // Using a workbench or a furnace opens its screen instead of placing a block against it.
+             match self.chunks.block_loaded(hit.pos.0, hit.pos.1, hit.pos.2) {
+                 Some(58) => {
+-                    self.open_screen(Screen::new(3));
++                    if self.pack_rule && !self.opts.pack_cloth {
++                        self.open_satchel(Screen::new(3)); // the bag, and the book open on its 3x3 grid
++                    } else {
++                        self.open_screen(Screen::new(3));
++                    }
+                     return;
+                 }
+                 Some(61 | 62) => {
+@@ -1956,7 +1981,16 @@
+ 
+     /// `onCraftGuiClosed`: the cursor stack and whatever is left in the grid are thrown out in front of the player.
+     fn close_screen(&mut self) {
++        let was_sat = self.sat.take().is_some();
+         if let Some(mut s) = self.screen.take() {
++            if was_sat {
++                // The satchel puts the grid and the held stack back in the bag; only what does not fit is thrown.
++                if let Some(mut c) = s.cursor.take() {
++                    self.inv.add(&mut c);
++                    s.cursor = (c.count > 0).then_some(c);
++                }
++                book::stash(&mut s, &mut self.inv);
++            }
+             for st in s.close() {
+                 self.drops.throw(st, self.camera.pos, self.camera.forward());
+             }
+@@ -2003,11 +2037,23 @@
+     /// walks off or the ground under it goes (the screen closes first, its stacks are thrown as always).
+     fn pack_tick(&mut self, dt: f32) {
+         self.hint = (self.hint - dt).max(0.0);
++        // The satchel's clocks, the finger's (a long press on the result), and the book's notes of what the bag has held.
++        if let Some(g) = self.gesture.as_mut() {
++            g.age += dt;
++        }
++        if let Some(s) = self.sat.as_mut() {
++            s.tick(dt);
++        }
++        if self.sat.is_some() && (self.vitals.dead() || self.sleep.is_some()) {
++            self.close_screen();
++        }
++        let grid = self.screen.as_ref().map_or([None; 9], |s| s.grid);
++        self.notes.observe(&self.inv, &grid);
+         // The open screen's two clocks: since it opened, and the cursor stack's lift (up in 0.12 s).
+         let held = self.mat_ui && self.screen.as_ref().is_some_and(|s| s.cursor.is_some());
+         self.pack_age = if self.mat_ui { self.pack_age + dt } else { 0.0 };
+         self.pack_lift += (f32::from(u8::from(held)) - self.pack_lift).clamp(-dt / 0.12, dt / 0.12);
+-        self.touch.pack_open = self.mat_ui; // the four HUD buttons are 3D buttons of the table while it is open
++        self.touch.pack_open = self.mat_ui || self.sat.is_some(); // the four HUD buttons are the table's own (or the satchel's) while it is open
+         if let Some(g) = self.pack_goal {
+             // A tab glides the camera: it closes 12 / s of the way to it, and lands when it is half a unit off.
+             let k = 1.0 - (-dt * 12.0).exp();
+@@ -2059,10 +2105,116 @@
+         }
+     }
+ 
++    /// Open the satchel (`satchel.rs`) on `screen`: the 2x2 inventory (the book closed) or a workbench's 3x3 (the book open).
++    fn open_satchel(&mut self, screen: Screen) {
++        let bench = screen.gw == 3;
++        self.open_screen(screen);
++        self.sat = Some(satchel::Satchel::new(bench));
++        self.audio.play_here("step.cloth", 0.6, 1.0);
++    }
++
++    /// What the finger is on in the open satchel (`satchel::Frame::hit`); `None` when it is not open.
++    fn sat_hit(&self, x: f32, y: f32) -> Option<satchel::Pick> {
++        let (sat, s) = (self.sat.as_ref()?, self.screen.as_ref()?);
++        let (w, h) = self.be.size();
++        Some(satchel::Frame::new(sat, &self.inv, s.gw, w as f32, h as f32).hit(sat, x, y))
++    }
++
++    /// How far the book's list can scroll (px).
++    fn sat_max_scroll(&self) -> f32 {
++        let (Some(sat), Some(s)) = (self.sat.as_ref(), self.screen.as_ref()) else { return 0.0 };
++        let (w, h) = self.be.size();
++        satchel::Frame::new(sat, &self.inv, s.gw, w as f32, h as f32).book.map_or(0.0, |b| b.max_scroll)
++    }
++
++    /// A tap on the open satchel: a button, a page of the book, a recipe (it fills the grid), a slot, or past it all (a held stack is thrown).
++    fn on_sat_tap(&mut self, x: f32, y: f32) {
++        use satchel::{Btn, Pick};
++        let Some(p) = self.sat_hit(x, y) else { return };
++        match p {
++            Pick::Btn(Btn::Close) => self.close_screen(),
++            Pick::Btn(Btn::Book) => {
++                // Closing the book puts what is in its grid back in the bag.
++                let closing = self.sat.as_mut().map_or(false, |s| {
++                    s.book = !s.book;
++                    !s.book
++                });
++                if let (true, Some(s)) = (closing, self.screen.as_mut()) {
++                    book::stash(s, &mut self.inv);
++                }
++            }
++            Pick::Btn(Btn::Sort) => {
++                pack::sort(&mut self.inv);
++                self.audio.play_here("step.cloth", 0.5, 1.2);
++            }
++            Pick::Btn(Btn::Shift) => self.shift_mode = !self.shift_mode,
++            Pick::Btn(Btn::One) => self.one_mode = !self.one_mode,
++            Pick::Cat(i) => {
++                if let Some(s) = self.sat.as_mut() {
++                    s.turn(Some(i));
++                }
++            }
++            Pick::Back => {
++                if let Some(s) = self.sat.as_mut() {
++                    s.turn(None);
++                }
++            }
++            Pick::Row(i) => self.sat_pick(i),
++            Pick::Pin => {
++                if let Some(sel) = self.sat.as_ref().and_then(|s| s.sel) {
++                    self.notes.pinned = if self.notes.pinned == Some(sel) { None } else { Some(sel) };
++                }
++            }
++            Pick::Hide => {
++                self.opts.book_discovery = !self.opts.book_discovery;
++                self.opts.save();
++            }
++            Pick::Slot(id) => {
++                let (one, shift) = (self.one_mode, self.shift_mode);
++                self.with_ext(|s, inv, ext| if shift { s.shift_click(id, inv, ext) } else { s.click(id, one, inv, ext) });
++            }
++            Pick::Outside => {
++                let Some(s) = self.screen.as_mut() else { return };
++                // Click outside the window (slot -999): throw the cursor stack, or one item of it.
++                if let Some(c) = s.cursor {
++                    let n = if self.one_mode { 1 } else { c.count };
++                    s.cursor = (c.count > n).then(|| ItemStack { count: c.count - n, ..c });
++                    self.drops.throw(ItemStack { count: n, ..c }, self.camera.pos, self.camera.forward());
++                }
++            }
++            Pick::List | Pick::Panel => {}
++        }
++    }
++
++    /// A tap on a recipe of the book's list: it is picked, and when the bag has it all and the grid fits, its ingredients go into the grid
++    /// (what lay there goes back to the bag). A recipe the player has not met yet (Unknown recipes: hidden) is picked but not filled.
++    fn sat_pick(&mut self, i: usize) {
++        let Some(e) = book::entries().get(i) else { return };
++        if let Some(s) = self.sat.as_mut() {
++            s.sel = Some(i);
++        }
++        if self.opts.book_discovery && !self.notes.known(e) {
++            return;
++        }
++        let filled = match self.screen.as_mut() {
++            Some(s) if s.cursor.is_none() => book::fill(e, s, &mut self.inv),
++            _ => false,
++        };
++        if filled {
++            self.audio.play_here("step.cloth", 0.4, 1.4);
++        }
++    }
++
+     /// The slot under a finger of the open screen: a cell of the pack's cloth, or a slot of the vanilla panel.
+     fn slot_under(&self, x: f32, y: f32) -> Option<craft::SlotId> {
+         let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
+         let gw = self.screen.as_ref()?.gw;
++        if self.sat.is_some() {
++            return match self.sat_hit(x, y)? {
++                satchel::Pick::Slot(id) => Some(id),
++                _ => None,
++            };
++        }
+         if self.mat_ui {
+             // The finger is a ray at the cloth: the cubes are tested as boxes, everything flat as the cloth unit it lands on (`pack::pick`).
+             let (m, lays) = (self.mat.as_ref()?, self.pack_scene.as_ref().map_or(&[][..], |s| &s.lays[..]));
+@@ -2184,13 +2336,33 @@
+         match ev {
+             ScreenEv::Down(x, y) => {
+                 // On the pack's cloth a press on a 3D button is only a tap; one on empty cloth or ground may become a pan of the camera.
+-                let btn = self.mat_ui && self.pack_btn(x, y).is_some();
++                // In the satchel anything but a slot is a tap (a button, a page); a press on the book's list may become a scroll.
++                let pick = self.sat_hit(x, y);
++                let btn = (self.mat_ui && self.pack_btn(x, y).is_some()) || pick.is_some_and(|p| !matches!(p, satchel::Pick::Slot(_)));
++                let list = match (self.sat.as_ref(), pick) {
++                    (Some(s), Some(satchel::Pick::Row(_) | satchel::Pick::List)) => Some(s.scroll),
++                    _ => None,
++                };
+                 let start = if btn { None } else { self.slot_under(x, y) };
+                 let on_cell = start.is_some_and(|id| pack::has_cell(&self.inv, id));
+                 let grab = if self.mat_ui && !btn && !on_cell { self.cloth_at((x, y), pack::REST) } else { None };
+-                self.gesture = Some(Gesture { start, spread: false, visited: Vec::new(), btn, grab, moved: false, down: (x, y) });
++                self.gesture = Some(Gesture { start, spread: false, visited: Vec::new(), btn, grab, moved: false, down: (x, y), age: 0.0, list });
+             }
+             ScreenEv::Move(x, y) => {
++                // A drag that began on the book's list scrolls it; lifting after one is not a tap.
++                if let Some((s0, down, moved)) = self.gesture.as_ref().and_then(|g| g.list.map(|s0| (s0, g.down, g.moved))) {
++                    let moved = moved || (x - down.0).hypot(y - down.1) > PAN_SLOP;
++                    if moved {
++                        let max = self.sat_max_scroll();
++                        if let Some(s) = self.sat.as_mut() {
++                            s.scroll = (s0 - (y - down.1)).clamp(0.0, max);
++                        }
++                    }
++                    if let Some(g) = self.gesture.as_mut() {
++                        g.moved = moved;
++                    }
++                    return;
++                }
+                 if let Some((btn, grab, moved, down)) = self.gesture.as_ref().filter(|g| g.btn || g.grab.is_some()).map(|g| (g.btn, g.grab, g.moved, g.down)) {
+                     // A drag that began on empty cloth or ground slides the camera over the table so the spot stays under the finger.
+                     if let (false, Some(grab)) = (btn, grab) {
+@@ -2220,7 +2392,15 @@
+                 g.visited.extend(fill.iter().copied());
+             }
+             ScreenEv::Up(x, y) => {
+-                if !self.gesture.take().is_some_and(|g| g.spread || g.moved) {
++                let g = self.gesture.take();
++                // The satchel's result held for a while crafts all (`book::craft_all`); anything else lifts as a tap.
++                let hold = self.sat.is_some() && g.as_ref().is_some_and(|g| g.start == Some(craft::SlotId::Result) && g.age >= satchel::HOLD_SECS && (x - g.down.0).hypot(y - g.down.1) < PAN_SLOP);
++                if hold {
++                    let n = self.screen.as_mut().map_or(0, |s| book::craft_all(s, &mut self.inv));
++                    if n > 0 {
++                        self.audio.play_here("step.cloth", 0.5, 1.3);
++                    }
++                } else if !g.is_some_and(|g| g.spread || g.moved) {
+                     self.on_screen_tap(x, y);
+                 }
+             }
+@@ -2232,6 +2412,10 @@
+ 
+     /// A tap on the open screen: the "place one" toggle, a slot, or outside the panel (throws the cursor stack).
+     fn on_screen_tap(&mut self, x: f32, y: f32) {
++        if self.sat.is_some() {
++            self.on_sat_tap(x, y);
++            return;
++        }
+         let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
+         let Some(gw) = self.screen.as_ref().map(|s| s.gw) else { return };
+         let one = self.one_mode;
+@@ -2778,8 +2962,16 @@
+             draw_pack(v, (w, h), (&m, vp), &self.inv, s, sc, (self.one_mode, self.shift_mode), (self.touch.cursor_pos, finger, picked), self.gesture.is_some(), self.pack_focus);
+         }
+ 
++        // The satchel: the flat bag and the recipe book (`satchel.rs`).
++        if let (Some(s), Some(sat)) = (self.screen.as_ref(), self.sat.as_ref()) {
++            let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
++            let hold = self.gesture.as_ref().is_some_and(|g| g.start == Some(craft::SlotId::Result) && g.age >= satchel::HOLD_SECS);
++            let ctx = satchel::Ctx { inv: &self.inv, screen: s, notes: &self.notes, one: self.one_mode, shift: self.shift_mode, discovery: self.opts.book_discovery, hotbar: self.touch.hotbar_slot, finger: self.touch.cursor_pos, down: self.gesture.is_some(), hold };
++            satchel::draw(v, (w, h), sat, &ctx);
++        }
++
+         // Container screen: the vanilla GUI (176 x 166 units) over a dimmed frame, slots with their stacks.
+-        if let Some(s) = self.screen.as_ref().filter(|_| !self.mat_ui) {
++        if let Some(s) = self.screen.as_ref().filter(|_| !self.mat_ui && self.sat.is_none()) {
+             let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
+             let (ox, oy, k) = craft::panel(s.gw, w, h);
+             let (pw, ph) = craft::panel_size(s.gw);
+@@ -2878,7 +3070,7 @@
+         }
+ 
+         // The four buttons top-right (pause, inventory, view, zoom) are not drawn while the pack's table is open: its edges carry the buttons.
+-        if !self.mat_ui {
++        if !self.mat_ui && self.sat.is_none() {
+         // Pause button: top-right, two bars.
+         let (px, py, pw, ph) = layout.pause;
+         HudPipeline::push_button(v, px, py, pw, ph, if pressed(PointerRole::Pause) { 2 } else { 1 });
+@@ -2926,6 +3118,12 @@
+             }
+         }
+ 
++        // The recipe pinned in the book: what it wants, and what the bag has of each.
++        if let (true, Some(e)) = (play, self.notes.pinned.and_then(|i| book::entries().get(i))) {
++            let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
++            satchel::draw_pin(v, (w, h), e, &self.inv);
++        }
++
+         // The pack found no flat ground under the crosshair, or a bed was tapped by day.
+         if play && self.hint > 0.0 {
+             let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
+diff -ruN a/mc-rs/src/options.rs b/mc-rs/src/options.rs
+--- a/mc-rs/src/options.rs	2026-10-25 19:08:44.143693434 +0000
++++ b/mc-rs/src/options.rs	2026-10-25 19:08:44.398212261 +0000
+@@ -151,6 +151,12 @@
+     pub gpu_error_trace: bool,
+     /// Smart animals (`Mobs::smart`, not b1.7.3): path-walked wandering, herding, panic, and the grazing / rooting / pecking / resting pauses; a switch with no button, `animalAi:false` in options.txt turns all of it off.
+     pub animal_ai: bool,
++    /// The inventory button spreads the old cloth on the ground and pans a camera over it (`world::pack`, dizzying) instead of opening the
++    /// satchel and its recipe book (`satchel.rs`); a switch with no button, `packCloth:true` in options.txt.
++    pub pack_cloth: bool,
++    /// The recipe book hides what the player has not met yet: a recipe none of whose items was ever held shows as a silhouette and `???`
++    /// (`world::book::Notes::known`). The book's own toggle, `bookDiscovery` in options.txt.
++    pub book_discovery: bool,
+     /// The scene scale follows the GPU load (`gpu::context::Drs`); off (`dynamicRes:false`, the Video Settings button) it stays at `START_PCT`.
+     pub dynamic_res: bool,
+     /// MSAA samples for the next start: 0 Auto (`present::pick_samples` decides by GPU), 1, 2 or 4 (`msaa:` in options.txt).
+@@ -189,6 +195,8 @@
+             debug_screen: false,
+             gpu_error_trace: false,
+             animal_ai: true,
++            pack_cloth: false,
++            book_discovery: false,
+             dynamic_res: true,
+             msaa: 0,
+             post: 0,
+@@ -227,6 +235,8 @@
+                 ("debugScreen", ..) => s.debug_screen = b,
+                 ("gpuErrorTrace", ..) => s.gpu_error_trace = b,
+                 ("animalAi", ..) => s.animal_ai = b,
++                ("packCloth", ..) => s.pack_cloth = b,
++                ("bookDiscovery", ..) => s.book_discovery = b,
+                 ("dynamicRes", ..) => s.dynamic_res = b,
+                 ("msaa", _, Some(n)) if matches!(n, 0 | 1 | 2 | 4) => s.msaa = n,
+                 ("post", _, Some(n)) if n <= 2 => s.post = n,
+@@ -248,8 +258,8 @@
+     pub fn save(&self) {
+         let Some(p) = &self.path else { return };
+         let mut t = format!(
+-            "music:{}\nsound:{}\ninvertYMouse:{}\nmouseSensitivity:{}\nviewDistance:{}\nguiScale:{}\nbobView:{}\nanaglyph3d:{}\nadvancedOpengl:{}\nfpsLimit:{}\ndifficulty:{}\nfancyGraphics:{}\nao:{}\nlod:{}\ndigDelay:{}\ngpuErrorTrace:{}\ndynamicRes:{}\nmsaa:{}\npost:{}\nrenderer:{}\ndebugScreen:{}\nanimalAi:{}\n",
+-            self.music, self.sound, self.invert_mouse, self.sensitivity, self.render_distance, self.gui_scale, self.view_bobbing, self.anaglyph, self.advanced_opengl, self.limit_framerate, self.difficulty, self.fancy_graphics, self.ambient_occlusion, self.lod, self.dig_delay, self.gpu_error_trace, self.dynamic_res, self.msaa, self.post, self.renderer, self.debug_screen, self.animal_ai
++            "music:{}\nsound:{}\ninvertYMouse:{}\nmouseSensitivity:{}\nviewDistance:{}\nguiScale:{}\nbobView:{}\nanaglyph3d:{}\nadvancedOpengl:{}\nfpsLimit:{}\ndifficulty:{}\nfancyGraphics:{}\nao:{}\nlod:{}\ndigDelay:{}\ngpuErrorTrace:{}\ndynamicRes:{}\nmsaa:{}\npost:{}\nrenderer:{}\ndebugScreen:{}\nanimalAi:{}\npackCloth:{}\nbookDiscovery:{}\n",
++            self.music, self.sound, self.invert_mouse, self.sensitivity, self.render_distance, self.gui_scale, self.view_bobbing, self.anaglyph, self.advanced_opengl, self.limit_framerate, self.difficulty, self.fancy_graphics, self.ambient_occlusion, self.lod, self.dig_delay, self.gpu_error_trace, self.dynamic_res, self.msaa, self.post, self.renderer, self.debug_screen, self.animal_ai, self.pack_cloth, self.book_discovery
+         );
+         for (id, code) in KEY_IDS.iter().zip(self.keys) {
+             t.push_str(&format!("key_key.{id}:{code}\n"));
+@@ -1053,11 +1063,12 @@
+         assert!(st.dynamic_res, "on until options.txt says otherwise");
+         assert!(!st.debug_screen, "off until the Info button or options.txt says so");
+         assert!(st.animal_ai, "on until options.txt says otherwise");
+-        (st.gpu_error_trace, st.dynamic_res, st.debug_screen) = (true, false, true);
++        assert!(!st.pack_cloth && !st.book_discovery, "the satchel with every recipe shown, until options.txt says otherwise");
++        (st.gpu_error_trace, st.dynamic_res, st.debug_screen, st.pack_cloth, st.book_discovery) = (true, false, true, true, true);
+         st.save();
+         let back = Settings::load(&root);
+         assert_eq!((back.sensitivity, back.invert_mouse, back.render_distance, back.lod, back.keys[4]), (0.25, true, 0, false, 50));
+-        assert!(back.gpu_error_trace && !back.dynamic_res && back.debug_screen);
++        assert!(back.gpu_error_trace && !back.dynamic_res && back.debug_screen && back.pack_cloth && back.book_discovery);
+         assert_eq!(back.msaa, 0, "Auto until options.txt says otherwise");
+         assert!(std::fs::read_to_string(root.join("options.txt")).unwrap().contains("key_key.jump:50"));
+     }
+diff -ruN a/mc-rs/src/satchel.rs b/mc-rs/src/satchel.rs
+--- a/mc-rs/src/satchel.rs	1970-01-01 00:00:00.000000000 +0000
++++ b/mc-rs/src/satchel.rs	2026-10-25 19:08:44.380812695 +0000
+@@ -0,0 +1,672 @@
++//! The satchel: the immersive pack's flat replacement (`world::pack`'s cloth stays behind `packCloth:true`). The camera never moves; the
++//! inventory button lifts a leather bag in front of the view and, on a second button, a recipe book opens beside it.
++//!
++//! - Book closed: the bag alone, centred, with its items in the zone of their category (`pack::layout`) as the cloth had them.
++//! - Book open: the bag slides left and packs itself into a 9 x 3 grid with the quick belt and the armor row (big cells for a thumb);
++//!   the book opens on its right: the left page is the categories, then the recipes of one as a list; the right page is the crafting grid
++//!   (2 x 2, or 3 x 3 at a workbench) with the card of the picked recipe under it (`world::book`).
++//! - Everything here is geometry (`Frame`) and drawing (`draw`, `draw_pin`); the screen's state is `Satchel`, the rules are `world::book`
++//!   and `world::craft::Screen`, and `lib.rs` only routes the finger.
++//!
++//! UNVERIFIED: written without a compiler or a device. The proportions are in fractions of the surface height (`h`), the text unit is
++//! `craft::panel(0, w, h).2`; both are guesses to tune on the phone.
++//! ponytail: the world behind is dimmed, not blurred (a blur is a post pass); an unknown recipe is a dark box with a `?`, not a true
++//! silhouette of the sprite (`push_stack` has no tint); partly visible list rows are not drawn instead of being clipped.
++
++use crate::render::hud::{HudPipeline, HudVertex};
++use crate::world::book::{self, Src, CATS};
++use crate::world::craft::{self, Screen, SlotId};
++use crate::world::items::{self, Inventory, ItemStack, MAIN};
++use crate::world::pack;
++
++/// Seconds the bag takes to come up, the book to open, a list to slide in; a press on the result this long crafts all.
++pub const RISE_SECS: f32 = 0.25;
++pub const BOOK_SECS: f32 = 0.3;
++pub const PAGE_SECS: f32 = 0.2;
++pub const HOLD_SECS: f32 = 0.5;
++
++#[derive(Clone, Copy, PartialEq, Eq, Debug)]
++pub enum Btn {
++    Close,
++    Book,
++    Sort,
++    Shift,
++    One,
++}
++
++/// What a finger is on.
++#[derive(Clone, Copy, PartialEq, Eq, Debug)]
++pub enum Pick {
++    Slot(SlotId),
++    Btn(Btn),
++    /// A category button of the left page (index into `book::CATS`), the back arrow over a list.
++    Cat(usize),
++    Back,
++    /// A recipe of the list (index into `book::entries()`), the empty part of the list (a drag there scrolls).
++    Row(usize),
++    List,
++    /// The pin button of the right page's header and the discovery toggle.
++    Pin,
++    Hide,
++    /// Leather or paper with nothing on it: a tap does nothing, and does not throw the held stack.
++    Panel,
++    /// Past every panel: a held stack is thrown.
++    Outside,
++}
++
++pub struct Satchel {
++    pub age: f32,
++    /// The book is (being) opened / closed, and how far it is, 0 to 1.
++    pub book: bool,
++    pub book_t: f32,
++    /// The category page of the left page (`book::CATS` index), the pixels the list is scrolled, the slide-in of a page, the picked recipe.
++    pub cat: Option<usize>,
++    pub scroll: f32,
++    pub page_t: f32,
++    pub sel: Option<usize>,
++}
++
++impl Satchel {
++    pub fn new(book: bool) -> Self {
++        Self { age: 0.0, book, book_t: 0.0, cat: None, scroll: 0.0, page_t: 1.0, sel: None }
++    }
++
++    pub fn tick(&mut self, dt: f32) {
++        self.age += dt;
++        let to = if self.book { 1.0 } else { 0.0 };
++        self.book_t += (to - self.book_t).clamp(-dt / BOOK_SECS, dt / BOOK_SECS);
++        self.page_t = (self.page_t + dt / PAGE_SECS).min(1.0);
++    }
++
++    /// A page of the left page turns: the list starts at its top and slides in.
++    pub fn turn(&mut self, cat: Option<usize>) {
++        (self.cat, self.scroll, self.page_t) = (cat, 0.0, 0.0);
++    }
++
++    /// The book is fully open: its contents answer the finger.
++    pub fn open(&self) -> bool {
++        self.book && self.book_t >= 0.98
++    }
++}
++
++fn ease(t: f32) -> f32 {
++    let t = t.clamp(0.0, 1.0);
++    t * t * (3.0 - 2.0 * t)
++}
++
++fn lerp(a: f32, b: f32, t: f32) -> f32 {
++    a + (b - a) * t
++}
++
++fn inside(r: [f32; 4], x: f32, y: f32) -> bool {
++    x >= r[0] && x < r[0] + r[2] && y >= r[1] && y < r[1] + r[3]
++}
++
++/// The whole book, as rects in px.
++#[derive(Default)]
++pub struct BookFrame {
++    pub rect: [f32; 4],
++    pub open: bool,
++    pub left: [f32; 4],
++    pub right: [f32; 4],
++    pub cats: Vec<(usize, [f32; 4])>,
++    pub back: Option<[f32; 4]>,
++    pub list: Option<[f32; 4]>,
++    pub rows: Vec<(usize, [f32; 4])>,
++    pub row_h: f32,
++    pub max_scroll: f32,
++    pub grid: Vec<(SlotId, [f32; 4])>,
++    pub arrow: [f32; 4],
++    pub card: [f32; 4],
++    pub pin: [f32; 4],
++    pub hide: [f32; 4],
++}
++
++pub struct Frame {
++    /// The text unit (px per GUI unit).
++    pub k: f32,
++    pub bag: [f32; 4],
++    pub cells: Vec<(SlotId, [f32; 4])>,
++    /// The zones of the bag with their names (book closed), the belt and the armor stand behind their cells.
++    pub patches: Vec<(&'static str, [f32; 4])>,
++    pub belt: Option<[f32; 4]>,
++    pub stand: Option<[f32; 4]>,
++    pub labels: Vec<(&'static str, f32, f32)>,
++    pub btns: Vec<(Btn, [f32; 4])>,
++    pub book: Option<BookFrame>,
++    zones: bool,
++    /// The first free main slot (a held stack put on empty cloth goes there).
++    free: Option<usize>,
++}
++
++impl Frame {
++    /// Every rect of the screen for `w` x `h` px, this state of the satchel, this inventory and a crafting grid `gw` wide.
++    pub fn new(sat: &Satchel, inv: &Inventory, gw: usize, w: f32, h: f32) -> Self {
++        let k = craft::panel(0, w, h).2;
++        let pad = 0.018 * h;
++        let rise = (1.0 - ease(sat.age / RISE_SECS)) * 0.1 * h;
++        let (top, bh) = (0.17 * h + rise, 0.74 * h);
++        let lh = 8.0 * 0.6 * k + 4.0;
++        let mut f = Frame { k, bag: [0.0; 4], cells: Vec::new(), patches: Vec::new(), belt: None, stand: None, labels: Vec::new(), btns: Vec::new(), book: None, zones: false, free: (9..MAIN).find(|&i| inv.slots[i].is_none()) };
++
++        if sat.book || sat.book_t > 0.0 {
++            // The bag packed into a grid: 9 columns of the left 45% of the screen, the armor row on top, the belt at the foot.
++            let pitch = ((0.455 * w - 2.0 * pad) / 9.0).min((bh - 2.0 * pad - lh) / 5.55);
++            let (pw, ph) = (9.0 * pitch + 2.0 * pad, 5.55 * pitch + 2.0 * pad + lh);
++            let x = lerp((w - pw) * 0.5, 0.012 * w, ease(sat.book_t));
++            f.bag = [x, top, pw, ph];
++            let (bx, by, cell) = (x + pad, top + pad + lh, pitch * 0.92);
++            f.labels.push(("Armor", bx, top + pad));
++            for i in 0..4 {
++                f.cells.push((SlotId::Inv(MAIN + 3 - i), [bx + i as f32 * pitch, by, cell, cell])); // helmet first
++            }
++            for r in 0..3 {
++                for c in 0..9 {
++                    f.cells.push((SlotId::Inv(9 + r * 9 + c), [bx + c as f32 * pitch, by + (1.15 + r as f32) * pitch, cell, cell]));
++                }
++            }
++            for c in 0..9 {
++                f.cells.push((SlotId::Inv(c), [bx + c as f32 * pitch, by + 4.55 * pitch, cell, cell]));
++            }
++        } else {
++            // The cloth's zones, flat: 460 x 232 units (the main cloth and the armor stand beside it) scaled to fit.
++            f.zones = true;
++            let s = ((bh - 2.0 * pad) / 232.0).min((0.9 * w - 2.0 * pad) / 460.0);
++            let (pw, ph) = (460.0 * s + 2.0 * pad, 232.0 * s + 2.0 * pad);
++            let x = (w - pw) * 0.5;
++            f.bag = [x, top, pw, ph];
++            let (ox, oy) = (x + pad, top + pad);
++            let u = |r: [f32; 4]| [ox + r[0] * s, oy + r[1] * s, r[2] * s, r[3] * s];
++            for c in pack::layout(inv).cells.iter().filter(|c| matches!(c.id, SlotId::Inv(_))) {
++                f.cells.push((c.id, u(c.r)));
++            }
++            f.patches = pack::ZONES.iter().map(|(cat, r)| (cat.label(), u(*r))).collect();
++            f.belt = Some(u(pack::QUICK));
++            f.stand = Some(u(pack::STAND));
++            f.labels.push(("Armor", ox + (pack::STAND[0] + 4.0) * s, oy + (pack::STAND[1] + 3.0) * s));
++        }
++
++        // The buttons above the bag, and the close button at the screen's corner.
++        let (by, bh2, tk) = (0.035 * h + rise, 0.095 * h, 0.75 * k);
++        let mut x = f.bag[0];
++        for (b, label) in [(Btn::Book, "Book"), (Btn::Sort, "Sort"), (Btn::Shift, "Shift"), (Btn::One, "One")] {
++            let bw = HudPipeline::text_width(label) as f32 * tk + 6.0 * tk;
++            f.btns.push((b, [x, by, bw, bh2]));
++            x += bw + 0.012 * h;
++        }
++        let cw = HudPipeline::text_width("X") as f32 * tk + 8.0 * tk;
++        f.btns.push((Btn::Close, [w - 0.02 * w - cw, by, cw, bh2]));
++
++        if sat.book_t > 0.0 {
++            f.book = Some(book_frame(sat, gw, w, h, top, bh));
++        }
++        f
++    }
++
++    /// What is under `(x, y)`.
++    pub fn hit(&self, sat: &Satchel, x: f32, y: f32) -> Pick {
++        if let Some((b, _)) = self.btns.iter().find(|(_, r)| inside(*r, x, y)) {
++            return Pick::Btn(*b);
++        }
++        if let Some(b) = &self.book {
++            if b.open && sat.open() {
++                let hit = b
++                    .cats
++                    .iter()
++                    .find(|(_, r)| inside(*r, x, y))
++                    .map(|&(i, _)| Pick::Cat(i))
++                    .or_else(|| b.back.filter(|r| inside(*r, x, y)).map(|_| Pick::Back))
++                    .or_else(|| b.rows.iter().find(|(_, r)| inside(*r, x, y)).map(|&(i, _)| Pick::Row(i)))
++                    .or_else(|| (sat.sel.is_some() && inside(b.pin, x, y)).then_some(Pick::Pin))
++                    .or_else(|| inside(b.hide, x, y).then_some(Pick::Hide))
++                    .or_else(|| b.grid.iter().find(|(_, r)| inside(*r, x, y)).map(|&(id, _)| Pick::Slot(id)))
++                    .or_else(|| b.list.filter(|r| inside(*r, x, y)).map(|_| Pick::List));
++                if let Some(h) = hit {
++                    return h;
++                }
++            }
++            if inside(b.rect, x, y) {
++                return Pick::Panel;
++            }
++        }
++        if let Some((id, _)) = self.cells.iter().find(|(_, r)| inside(*r, x, y)) {
++            return Pick::Slot(*id);
++        }
++        // The empty cloth of a zone takes a held stack in the first free main slot, as the cloth did (`pack::slot_at`).
++        if self.zones && self.patches.iter().any(|(_, r)| inside(*r, x, y)) {
++            if let Some(free) = self.free {
++                return Pick::Slot(SlotId::Inv(free));
++            }
++        }
++        if inside(self.bag, x, y) {
++            return Pick::Panel;
++        }
++        Pick::Outside
++    }
++}
++
++/// The book's rects: both pages grow from the spine while it opens; the contents exist once it is open.
++fn book_frame(sat: &Satchel, gw: usize, w: f32, h: f32, top: f32, bh: f32) -> BookFrame {
++    let (bx0, bx1) = (0.475 * w, 0.988 * w);
++    let (spine, half) = ((bx0 + bx1) * 0.5, (bx1 - bx0) * 0.5);
++    let e = ease(sat.book_t);
++    let mut b = BookFrame { rect: [spine - half * e, top, 2.0 * half * e, bh], open: sat.book_t >= 0.98, ..Default::default() };
++    let gap = 0.003 * w;
++    b.left = [bx0, top, half - gap, bh];
++    b.right = [spine + gap, top, half - gap, bh];
++    if !b.open {
++        return b;
++    }
++    let (p, hh) = (0.015 * h, 0.085 * h);
++    let slide = (1.0 - ease(sat.page_t)) * 0.05 * w;
++    let l = b.left;
++    match sat.cat {
++        None => {
++            let cg = 0.012 * h;
++            let ch = (l[3] - hh - p - 5.0 * cg) / 6.0;
++            for i in 0..CATS.len() {
++                b.cats.push((i, [l[0] + p + slide, l[1] + hh + i as f32 * (ch + cg), l[2] - 2.0 * p, ch]));
++            }
++        }
++        Some(ci) => {
++            b.back = Some([l[0] + p, l[1] + p, 0.14 * l[2], hh - p]);
++            let list = [l[0] + p + slide, l[1] + hh + p, l[2] - 2.0 * p, l[3] - hh - 2.0 * p];
++            b.list = Some(list);
++            b.row_h = 0.1 * h;
++            let ids = book::in_cat(CATS[ci.min(CATS.len() - 1)]);
++            b.max_scroll = (ids.len() as f32 * b.row_h - list[3]).max(0.0);
++            for (n, &ei) in ids.iter().enumerate() {
++                let y = list[1] + n as f32 * b.row_h - sat.scroll;
++                if y >= list[1] - 0.5 && y + b.row_h <= list[1] + list[3] + 0.5 {
++                    b.rows.push((ei, [list[0], y, list[2], b.row_h - 0.008 * h]));
++                }
++            }
++        }
++    }
++    // Right page: the grid (2 x 2 or 3 x 3), the arrow and the result; the card of the picked recipe under them.
++    let (r, gw) = (b.right, gw.clamp(2, 3));
++    let (c, g) = (if gw == 2 { 0.12 * h } else { 0.09 * h }, 0.012 * h);
++    let (gx, gy) = (r[0] + p + 0.01 * w, r[1] + hh);
++    for i in 0..gw * gw {
++        b.grid.push((SlotId::Grid(i), [gx + (i % gw) as f32 * (c + g), gy + (i / gw) as f32 * (c + g), c, c]));
++    }
++    let gh = gw as f32 * (c + g) - g;
++    let (ax, aw) = (gx + gw as f32 * (c + g) + 0.004 * w, 0.03 * w);
++    b.arrow = [ax, gy + gh * 0.5 - 0.02 * h, aw, 0.04 * h];
++    let rc = c * 1.2;
++    b.grid.push((SlotId::Result, [ax + aw + 0.004 * w, gy + (gh - rc) * 0.5, rc, rc]));
++    let cy = gy + gh + 0.03 * h;
++    b.card = [r[0] + p, cy, r[2] - 2.0 * p, r[1] + r[3] - 0.115 * h - cy];
++    b.pin = [r[0] + r[2] - p - 0.2 * r[2], r[1] + p, 0.2 * r[2], hh - p];
++    b.hide = [r[0] + p, r[1] + r[3] - 0.1 * h, r[2] - 2.0 * p, 0.07 * h];
++    b
++}
++
++// ---- Drawing ----
++
++const LEATHER: [f32; 4] = [0.36, 0.24, 0.14, 0.97];
++const PAPER: [f32; 4] = [0.93, 0.86, 0.66, 0.98];
++const PAPER_DIM: [f32; 4] = [0.85, 0.77, 0.56, 1.0];
++const INK: [f32; 4] = [0.22, 0.15, 0.08, 1.0];
++const SLOT: [f32; 4] = [0.17, 0.16, 0.19, 1.0];
++const RIM: [f32; 4] = [0.45, 0.36, 0.26, 1.0];
++const GOOD: [f32; 4] = [0.25, 0.6, 0.2, 1.0];
++const BAD: [f32; 4] = [0.75, 0.2, 0.15, 1.0];
++const WARN: [f32; 4] = [0.85, 0.5, 0.1, 1.0];
++
++/// What `draw` needs besides the satchel and its frame.
++pub struct Ctx<'a> {
++    pub inv: &'a Inventory,
++    pub screen: &'a Screen,
++    pub notes: &'a book::Notes,
++    pub one: bool,
++    pub shift: bool,
++    /// The book hides what the player has not met (`Settings::book_discovery`).
++    pub discovery: bool,
++    pub hotbar: usize,
++    /// The finger: where it is, whether it is down, and whether a press on the result has lasted `HOLD_SECS`.
++    pub finger: (f32, f32),
++    pub down: bool,
++    pub hold: bool,
++}
++
++fn item(c: u16) -> ItemStack {
++    let (id, damage) = craft::unpack(c);
++    ItemStack { id, count: 1, damage }
++}
++
++/// A slot cell with the stack in it.
++fn slot(v: &mut Vec<HudVertex>, r: [f32; 4], st: Option<ItemStack>, rim: [f32; 4], line: f32) {
++    HudPipeline::push_outlined_quad(v, r[0], r[1], r[2], r[3], SLOT, rim, line);
++    if let Some(st) = st {
++        crate::push_stack(v, (r[0], r[1], r[2], r[3]), 0.875, st);
++    }
++}
++
++fn button(v: &mut Vec<HudVertex>, r: [f32; 4], tk: f32, text: &str, state: u8) {
++    HudPipeline::push_button(v, r[0], r[1], r[2], r[3], state);
++    HudPipeline::push_text_centered(v, r[0] + r[2] * 0.5, r[1] + (r[3] - 8.0 * tk) * 0.5, tk, text, [1.0; 4]);
++}
++
++/// The whole screen: the dimmed world, the bag, the book, the stack on the finger and the name of what it touches.
++pub fn draw(v: &mut Vec<HudVertex>, (w, h): (f32, f32), sat: &Satchel, c: &Ctx) {
++    let f = Frame::new(sat, c.inv, c.screen.gw, w, h);
++    let (k, tk, sk) = (f.k, 0.75 * f.k, 0.6 * f.k);
++    let line = (k * 0.35).max(1.0);
++    HudPipeline::push_quad(v, 0.0, 0.0, w, h, [0.0, 0.0, 0.0, 0.5]);
++
++    // The bag: leather, the zones and the belt and the armor stand behind their cells, then every cell.
++    HudPipeline::push_outlined_quad(v, f.bag[0], f.bag[1], f.bag[2], f.bag[3], LEATHER, [0.2, 0.13, 0.07, 1.0], line * 2.0);
++    for (name, r) in &f.patches {
++        HudPipeline::push_quad(v, r[0], r[1], r[2], r[3], [0.46, 0.32, 0.2, 1.0]);
++        HudPipeline::push_text(v, r[0] + 3.0 * sk, r[1] + 2.0 * sk, sk, name, [0.96, 0.9, 0.72, 1.0]);
++    }
++    for r in f.belt.iter().chain(f.stand.iter()) {
++        HudPipeline::push_quad(v, r[0], r[1], r[2], r[3], [0.3, 0.2, 0.12, 1.0]);
++    }
++    for &(text, x, y) in &f.labels {
++        HudPipeline::push_text(v, x, y, sk, text, [0.96, 0.9, 0.72, 1.0]);
++    }
++    for &(id, r) in &f.cells {
++        let rim = if id == SlotId::Inv(c.hotbar) { [0.95, 0.85, 0.1, 1.0] } else { RIM };
++        slot(v, r, c.screen.get(c.inv, None, id), rim, line);
++    }
++
++    // Buttons: the toggles show their number while on.
++    for &(b, r) in &f.btns {
++        let (text, state) = match b {
++            Btn::Close => ("X", 1),
++            Btn::Book => ("Book", if sat.book { 2 } else { 1 }),
++            Btn::Sort => ("Sort", 1),
++            Btn::Shift => (if c.shift { "2" } else { "Shift" }, if c.shift { 2 } else { 1 }),
++            Btn::One => (if c.one { "1" } else { "One" }, if c.one { 2 } else { 1 }),
++        };
++        button(v, r, tk, text, state);
++    }
++
++    if let Some(b) = &f.book {
++        draw_book(v, (w, h), (sat, b), c, (tk, sk, line));
++    }
++
++    // The stack on the finger floats above it; a finger down names what it holds or rests on.
++    let (fx, fy) = c.finger;
++    if let Some(st) = c.screen.cursor {
++        let sz = 16.0 * k;
++        crate::push_stack(v, (fx - sz * 0.5, fy - sz * 1.4, sz, sz), 0.875, st);
++    }
++    if c.down {
++        let under = || match f.hit(sat, fx, fy) {
++            Pick::Slot(id) => c.screen.get(c.inv, None, id),
++            Pick::Row(i) => book::entries().get(i).map(|e| e.out).filter(|_| !c.discovery || c.notes.known(&book::entries()[i])),
++            _ => None,
++        };
++        if let Some(name) = c.screen.cursor.or_else(under).and_then(items::name) {
++            let bw = (HudPipeline::text_width(name) as f32 + 6.0) * tk;
++            let ty = if fy > 36.0 * tk { fy - 34.0 * tk } else { fy + 14.0 * tk };
++            HudPipeline::push_tooltip(v, (fx - bw * 0.5).clamp(0.0, (w - bw).max(0.0)), ty, tk, name);
++        }
++    }
++}
++
++fn draw_book(v: &mut Vec<HudVertex>, (w, h): (f32, f32), (sat, b): (&Satchel, &BookFrame), c: &Ctx, (tk, sk, line): (f32, f32, f32)) {
++    let _ = w;
++    HudPipeline::push_outlined_quad(v, b.rect[0], b.rect[1], b.rect[2], b.rect[3], PAPER, [0.3, 0.2, 0.1, 1.0], line * 2.0);
++    if !b.open {
++        return;
++    }
++    let spine_x = b.left[0] + b.left[2] + (b.right[0] - b.left[0] - b.left[2]) * 0.5;
++    HudPipeline::push_quad(v, spine_x - line, b.rect[1], line * 2.0, b.rect[3], [0.3, 0.2, 0.1, 1.0]);
++    let (p, hh) = (0.015 * h, 0.085 * h);
++    let entries = book::entries();
++    let gw = c.screen.gw;
++    let title_y = |r: [f32; 4]| r[1] + (hh - 8.0 * tk) * 0.5;
++
++    // Left page: the categories, or the recipes of one.
++    match sat.cat {
++        None => {
++            HudPipeline::push_text(v, b.left[0] + p, title_y(b.left), tk, "Recipes", INK);
++            for &(i, r) in &b.cats {
++                let ids = book::in_cat(CATS[i]);
++                HudPipeline::push_outlined_quad(v, r[0], r[1], r[2], r[3], PAPER_DIM, RIM, line);
++                if let Some(e) = ids.first().map(|&e| &entries[e]) {
++                    crate::push_stack(v, (r[0] + 2.0 * line, r[1] + (r[3] - r[3] * 0.8) * 0.5, r[3] * 0.8, r[3] * 0.8), 0.875, ItemStack { count: 1, ..e.out });
++                }
++                HudPipeline::push_text(v, r[0] + r[3] + 4.0 * line, r[1] + (r[3] - 8.0 * tk) * 0.5, tk, CATS[i].label(), INK);
++                let n = ids.len().to_string();
++                HudPipeline::push_text(v, r[0] + r[2] - HudPipeline::text_width(&n) as f32 * tk - 6.0 * line, r[1] + (r[3] - 8.0 * tk) * 0.5, tk, &n, INK);
++            }
++        }
++        Some(ci) => {
++            if let Some(r) = b.back {
++                button(v, r, tk, "<", 1);
++            }
++            HudPipeline::push_text(v, b.left[0] + p + 0.14 * b.left[2] + 8.0 * line, title_y(b.left), tk, CATS[ci.min(CATS.len() - 1)].label(), INK);
++            for &(ei, r) in &b.rows {
++                let e = &entries[ei];
++                let known = !c.discovery || c.notes.known(e);
++                let ok = known && book::craftable(e, gw, c.inv, &c.screen.grid);
++                let sel = sat.sel == Some(ei);
++                HudPipeline::push_outlined_quad(v, r[0], r[1], r[2], r[3], if sel { [1.0, 0.95, 0.7, 1.0] } else { PAPER_DIM }, if sel { [0.95, 0.75, 0.1, 1.0] } else { RIM }, line);
++                let isz = r[3] * 0.82;
++                let ib = (r[0] + 3.0 * line, r[1] + (r[3] - isz) * 0.5, isz, isz);
++                if known {
++                    crate::push_stack(v, ib, 0.875, ItemStack { count: 1, ..e.out });
++                } else {
++                    HudPipeline::push_quad(v, ib.0, ib.1, ib.2, ib.3, [0.1, 0.1, 0.12, 1.0]);
++                    HudPipeline::push_text_centered(v, ib.0 + ib.2 * 0.5, ib.1 + (ib.3 - 8.0 * tk) * 0.5, tk, "?", [0.7, 0.7, 0.75, 1.0]);
++                }
++                let name = if known { items::name(e.out).unwrap_or("?") } else { "???" };
++                HudPipeline::push_text(v, ib.0 + isz + 6.0 * line, r[1] + (r[3] - 8.0 * tk) * 0.5, tk, name, INK);
++                // The dot at the right: green = the bag has it all and the grid fits; orange = a furnace's; red = something is short.
++                let dot = if !known { RIM } else if e.grid == 0 { WARN } else if ok { GOOD } else { BAD };
++                let ds = r[3] * 0.3;
++                HudPipeline::push_quad(v, r[0] + r[2] - ds - 6.0 * line, r[1] + (r[3] - ds) * 0.5, ds, ds, dot);
++            }
++            if b.max_scroll > 0.0 {
++                // A thin scroll bar along the list's right edge.
++                if let Some(l) = b.list {
++                    let (bar, at) = (l[3] * l[3] / (l[3] + b.max_scroll), sat.scroll / b.max_scroll);
++                    HudPipeline::push_quad(v, l[0] + l[2] - 2.0 * line, l[1] + (l[3] - bar) * at, 2.0 * line, bar, [0.3, 0.2, 0.1, 0.6]);
++                }
++            }
++        }
++    }
++
++    // Right page: title, pin, the grid with its arrow and result, the card of the picked recipe.
++    HudPipeline::push_text(v, b.right[0] + p, title_y(b.right), tk, if gw == 3 { "Workbench" } else { "Crafting" }, INK);
++    if let Some(sel) = sat.sel {
++        let pinned = c.notes.pinned == Some(sel);
++        button(v, b.pin, sk, if pinned { "Unpin" } else { "Pin" }, if pinned { 2 } else { 1 });
++    }
++    for &(id, r) in &b.grid {
++        let st = c.screen.get(c.inv, None, id);
++        let rim = if id == SlotId::Result && st.is_some() { GOOD } else { RIM };
++        slot(v, r, st, rim, line);
++    }
++    HudPipeline::push_text_centered(v, b.arrow[0] + b.arrow[2] * 0.5, b.arrow[1] + (b.arrow[3] - 8.0 * tk) * 0.5, tk, "->", INK);
++    if c.hold {
++        if let Some((_, r)) = b.grid.iter().find(|(id, _)| *id == SlotId::Result) {
++            HudPipeline::push_text_centered(v, r[0] + r[2] * 0.5, r[1] - 10.0 * sk, sk, "Release: craft all", GOOD);
++        }
++    }
++    draw_card(v, sat, b, c, (tk, sk, line));
++
++    // The discovery toggle and the hint under it.
++    HudPipeline::push_outlined_quad(v, b.hide[0], b.hide[1], b.hide[2], b.hide[3], PAPER_DIM, RIM, line);
++    let label = if c.discovery { "Unknown recipes: hidden" } else { "Unknown recipes: shown" };
++    HudPipeline::push_text_centered(v, b.hide[0] + b.hide[2] * 0.5, b.hide[1] + (b.hide[3] - 8.0 * sk) * 0.5, sk, label, INK);
++    HudPipeline::push_text_centered(v, b.hide[0] + b.hide[2] * 0.5, b.hide[1] + b.hide[3] + 3.0 * sk, sk, "Hold the result to craft all", [0.4, 0.3, 0.2, 1.0]);
++}
++
++/// The picked recipe: result, a line on where it is made, the ingredients with what the bag has of each.
++fn draw_card(v: &mut Vec<HudVertex>, sat: &Satchel, b: &BookFrame, c: &Ctx, (tk, sk, line): (f32, f32, f32)) {
++    let r = b.card;
++    HudPipeline::push_outlined_quad(v, r[0], r[1], r[2], r[3], PAPER_DIM, RIM, line);
++    let Some(e) = sat.sel.and_then(|i| book::entries().get(i)) else {
++        HudPipeline::push_text(v, r[0] + 6.0 * line, r[1] + 6.0 * line, sk, "Pick a recipe on the left page:", INK);
++        HudPipeline::push_text(v, r[0] + 6.0 * line, r[1] + 6.0 * line + 12.0 * sk, sk, "its items go into the grid.", INK);
++        return;
++    };
++    if c.discovery && !c.notes.known(e) {
++        HudPipeline::push_text(v, r[0] + 6.0 * line, r[1] + 6.0 * line, sk, "???  Find one of its items", INK);
++        HudPipeline::push_text(v, r[0] + 6.0 * line, r[1] + 6.0 * line + 12.0 * sk, sk, "to learn this recipe.", INK);
++        return;
++    }
++    let isz = (r[3] * 0.3).min(r[2] * 0.2);
++    crate::push_stack(v, (r[0] + 4.0 * line, r[1] + 4.0 * line, isz, isz), 0.875, ItemStack { count: 1, ..e.out });
++    let name = items::name(e.out).unwrap_or("?");
++    let head = if e.out.count > 1 { format!("{name} x{}", e.out.count) } else { name.to_string() };
++    HudPipeline::push_text(v, r[0] + isz + 10.0 * line, r[1] + 4.0 * line + (isz - 8.0 * tk) * 0.5, tk * 0.85, &head, INK);
++    let gw = c.screen.gw;
++    let short = book::missing(e, c.inv, &c.screen.grid);
++    let (note, col) = match (e.src, e.grid) {
++        (Src::Smelt(_), _) => ("Smelt it in a furnace", WARN),
++        (_, g) if g > gw => ("Needs a workbench (3x3)", WARN),
++        _ if short.is_empty() => ("Tap the recipe again to refill", GOOD),
++        _ => ("Missing ingredients", BAD),
++    };
++    HudPipeline::push_text(v, r[0] + 6.0 * line, r[1] + isz + 10.0 * line, sk, note, col);
++    // Ingredients, five to a row: the item, then what the bag has over what the recipe wants.
++    let (cw, rowy) = (r[2] / 5.0, r[1] + isz + 10.0 * line + 12.0 * sk);
++    let chip = ((r[3] - (rowy - r[1])).min(cw) * 0.7).max(1.0);
++    for (n, &(code, need)) in e.need.iter().enumerate() {
++        let (x, y) = (r[0] + (n % 5) as f32 * cw + (cw - chip) * 0.5, rowy + (n / 5) as f32 * (chip + 12.0 * sk + 4.0 * line));
++        if y + chip > r[1] + r[3] {
++            break;
++        }
++        crate::push_stack(v, (x, y, chip, chip), 0.875, item(code));
++        let have = book::have(c.inv, &c.screen.grid, code);
++        let t = format!("{have}/{need}");
++        HudPipeline::push_text_centered(v, x + chip * 0.5, y + chip + 2.0 * line, sk, &t, if have >= u32::from(need) { GOOD } else { BAD });
++    }
++}
++
++/// The pinned recipe on the play HUD, a small card at the left edge: the result, then every ingredient with what the bag holds of it.
++pub fn draw_pin(v: &mut Vec<HudVertex>, (w, h): (f32, f32), e: &book::Entry, inv: &Inventory) {
++    let k = craft::panel(0, w, h).2 * 0.5;
++    let (x, y, row) = (0.012 * w, 0.28 * h, 18.0 * k);
++    let n = e.need.len() as f32 + 1.0;
++    HudPipeline::push_quad(v, x, y, 90.0 * k, row * n + 4.0 * k, [0.0, 0.0, 0.0, 0.45]);
++    let name = items::name(e.out).unwrap_or("?");
++    crate::push_stack(v, (x + 2.0 * k, y + 2.0 * k, 16.0 * k, 16.0 * k), 0.875, ItemStack { count: 1, ..e.out });
++    HudPipeline::push_text(v, x + 20.0 * k, y + 2.0 * k + 4.0 * k, k, name, [1.0; 4]);
++    for (i, &(code, need)) in e.need.iter().enumerate() {
++        let ry = y + 2.0 * k + row * (i as f32 + 1.0);
++        crate::push_stack(v, (x + 2.0 * k, ry, 16.0 * k, 16.0 * k), 0.875, item(code));
++        let have = book::have(inv, &[None; 9], code);
++        let t = format!("{have}/{need}");
++        HudPipeline::push_text(v, x + 20.0 * k, ry + 4.0 * k, k, &t, if have >= u32::from(need) { [0.5, 1.0, 0.5, 1.0] } else { [1.0, 0.45, 0.4, 1.0] });
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    const SIZE: (f32, f32) = (1604.0, 720.0);
++
++    fn frame(sat: &Satchel, inv: &Inventory, gw: usize) -> Frame {
++        Frame::new(sat, inv, gw, SIZE.0, SIZE.1)
++    }
++
++    fn open_book() -> Satchel {
++        let mut s = Satchel::new(true);
++        s.tick(10.0);
++        s
++    }
++
++    fn centre(r: [f32; 4]) -> (f32, f32) {
++        (r[0] + r[2] * 0.5, r[1] + r[3] * 0.5)
++    }
++
++    #[test]
++    fn every_slot_has_one_cell_that_a_finger_finds_in_both_layouts() {
++        let mut inv = Inventory::default();
++        inv.slots[12] = Some(ItemStack { id: 17, count: 5, damage: 0 });
++        for sat in [{ let mut s = Satchel::new(false); s.tick(10.0); s }, open_book()] {
++            let f = frame(&sat, &inv, 2);
++            for i in (0..9).chain(MAIN..MAIN + 4) {
++                let c = f.cells.iter().filter(|(id, _)| *id == SlotId::Inv(i)).count();
++                assert_eq!(c, 1, "slot {i}");
++            }
++            for &(id, r) in &f.cells {
++                let (x, y) = centre(r);
++                assert_eq!(f.hit(&sat, x, y), Pick::Slot(id));
++                assert!(r[0] >= 0.0 && r[1] >= 0.0 && r[0] + r[2] <= SIZE.0 && r[1] + r[3] <= SIZE.1, "on the screen: {r:?}");
++            }
++        }
++        // The packed grid holds all 27 main slots; the cloth's zones only the filled ones.
++        let packed = frame(&open_book(), &inv, 2);
++        assert_eq!(packed.cells.iter().filter(|(id, _)| matches!(id, SlotId::Inv(i) if (9..MAIN).contains(i))).count(), 27);
++        let mut closed = Satchel::new(false);
++        closed.tick(10.0);
++        let zones = frame(&closed, &inv, 2);
++        assert_eq!(zones.cells.iter().filter(|(id, _)| matches!(id, SlotId::Inv(i) if (9..MAIN).contains(i))).count(), 1);
++        // Empty cloth of a zone is the first free main slot.
++        let p = zones.patches[0].1;
++        assert_eq!(zones.hit(&closed, p[0] + p[2] - 2.0, p[1] + p[3] - 2.0), Pick::Slot(SlotId::Inv(9)));
++    }
++
++    #[test]
++    fn cells_are_big_enough_for_a_thumb_beside_the_book() {
++        let f = frame(&open_book(), &Inventory::default(), 2);
++        let min = f.cells.iter().map(|(_, r)| r[2]).fold(f32::MAX, f32::min);
++        assert!(min >= 0.08 * SIZE.1, "a slot is {min} px");
++        let b = f.book.as_ref().expect("book");
++        assert!(f.bag[0] + f.bag[2] < b.left[0], "the bag and the book do not overlap");
++    }
++
++    #[test]
++    fn the_book_turns_pages_lists_recipes_and_scrolls() {
++        let inv = Inventory::default();
++        let mut sat = open_book();
++        let f = frame(&sat, &inv, 2);
++        let b = f.book.as_ref().expect("book");
++        assert_eq!(b.cats.len(), CATS.len());
++        let (x, y) = centre(b.cats[0].1);
++        assert_eq!(f.hit(&sat, x, y), Pick::Cat(0));
++        sat.turn(Some(0));
++        sat.tick(1.0);
++        let f = frame(&sat, &inv, 2);
++        let b = f.book.as_ref().expect("book");
++        assert!(b.back.is_some() && !b.rows.is_empty());
++        let (x, y) = centre(b.rows[0].1);
++        assert_eq!(f.hit(&sat, x, y), Pick::Row(b.rows[0].0));
++        let (x, y) = centre(b.back.expect("back"));
++        assert_eq!(f.hit(&sat, x, y), Pick::Back);
++        // Scrolled down, other rows show and the first is gone.
++        let first = b.rows[0].0;
++        sat.scroll = b.max_scroll.min(2.5 * b.row_h);
++        let f = frame(&sat, &inv, 2);
++        let b = f.book.as_ref().expect("book");
++        assert!(b.max_scroll > 0.0 && b.rows.iter().all(|(i, _)| *i != first) == (sat.scroll >= b.row_h));
++    }
++
++    #[test]
++    fn the_right_page_has_the_grid_the_screen_asks_for() {
++        let inv = Inventory::default();
++        let sat = open_book();
++        for (gw, cells) in [(2, 4), (3, 9)] {
++            let f = frame(&sat, &inv, gw);
++            let b = f.book.as_ref().expect("book");
++            assert_eq!(b.grid.iter().filter(|(id, _)| matches!(id, SlotId::Grid(_))).count(), cells);
++            let r = b.grid.iter().find(|(id, _)| *id == SlotId::Result).expect("result").1;
++            assert!(r[0] + r[2] <= b.right[0] + b.right[2], "the result stays on the page ({gw}x{gw})");
++            assert!(b.card[3] > 0.1 * SIZE.1, "the card has room ({gw}x{gw})");
++            let (x, y) = centre(r);
++            assert_eq!(f.hit(&sat, x, y), Pick::Slot(SlotId::Result));
++        }
++    }
++
++    #[test]
++    fn a_finger_past_everything_throws_and_the_papers_do_not() {
++        let inv = Inventory::default();
++        let sat = open_book();
++        let f = frame(&sat, &inv, 2);
++        assert_eq!(f.hit(&sat, 2.0, SIZE.1 - 2.0), Pick::Outside);
++        let b = f.book.as_ref().expect("book");
++        assert_eq!(f.hit(&sat, b.right[0] + 2.0, b.right[1] + b.right[3] - 2.0), Pick::Panel);
++        let (x, y) = centre(f.btns.iter().find(|(b, _)| *b == Btn::Close).expect("close").1);
++        assert_eq!(f.hit(&sat, x, y), Pick::Btn(Btn::Close));
++    }
++}
+diff -ruN a/mc-rs/src/world/book.rs b/mc-rs/src/world/book.rs
+--- a/mc-rs/src/world/book.rs	1970-01-01 00:00:00.000000000 +0000
++++ b/mc-rs/src/world/book.rs	2026-10-25 19:08:44.397741156 +0000
+@@ -0,0 +1,381 @@
++//! The recipe book of the satchel (`satchel.rs`). NOT b1.7.3: there the crafting grid is all there is, and the player has to know the
++//! recipes. Everything here is pure (no GPU, no `lib.rs` state) and reads the one list of recipes the crafting grid uses
++//! (`craft::recipes()`), so a recipe added there shows up in the book with no line more.
++//!
++//! - `entries()`: every recipe of `CraftingManager` that this port has, plus every smelting (`FurnaceRecipes`), sorted into six
++//!   categories (`Cat`); the left page of the book lists them.
++//! - `craftable` / `missing` / `need`: what the bag holds against what a recipe wants (green / red on the card).
++//! - `fill`: a tap on a recipe puts one set of its ingredients into the grid (what lay in the grid goes back to the bag first);
++//!   `craft_all` is a long press on the result: fill, take, fill, take, until the bag runs dry or full.
++//! - `Notes`: the items the player has ever held (so unknown recipes can show as a silhouette) and the one recipe pinned to the HUD;
++//!   a 69 byte `book` file in the world folder.
++//! ponytail: the pin is an index into `entries()`, so a release that adds recipes can shift it; the file is checked against the list's
++//! length and a stale pin is dropped, not repaired.
++
++use std::sync::OnceLock;
++
++use crate::world::craft::{self, Screen, SlotId};
++use crate::world::items::{Inventory, ItemStack, MAIN};
++use crate::world::pack;
++
++/// The six pages of the left side of the book.
++#[derive(Clone, Copy, PartialEq, Eq, Debug)]
++pub enum Cat {
++    Tools,
++    Food,
++    Blocks,
++    Redstone,
++    Other,
++    Furnace,
++}
++
++pub const CATS: [Cat; 6] = [Cat::Tools, Cat::Food, Cat::Blocks, Cat::Redstone, Cat::Other, Cat::Furnace];
++
++impl Cat {
++    pub fn label(self) -> &'static str {
++        match self {
++            Cat::Tools => "Tools & gear",
++            Cat::Food => "Food",
++            Cat::Blocks => "Blocks",
++            Cat::Redstone => "Redstone & rails",
++            Cat::Other => "Other",
++            Cat::Furnace => "Furnace",
++        }
++    }
++}
++
++/// Where an entry comes from: the `i`-th recipe of `craft::recipes()`, or the smelting of an item (its id).
++#[derive(Clone, Copy, PartialEq, Eq, Debug)]
++pub enum Src {
++    Craft(usize),
++    Smelt(u16),
++}
++
++pub struct Entry {
++    pub src: Src,
++    pub out: ItemStack,
++    /// The ingredient codes (`craft::code`) with how many of each, sorted by code.
++    pub need: Vec<(u16, u8)>,
++    pub cat: Cat,
++    /// The smallest grid it fits: 2 (the inventory's), 3 (a workbench's), 0 for a smelting (no grid, a furnace).
++    pub grid: usize,
++}
++
++/// What a block of redstone and transport is made of: lever, torch, repeater, button, plates, jukebox, note block, dispenser, the two
++/// pistons, the three rails and the three carts.
++const REDSTONE: [u16; 17] = [23, 25, 27, 28, 29, 33, 66, 69, 70, 72, 76, 77, 84, 328, 342, 343, 356];
++
++fn category(out: ItemStack) -> Cat {
++    if REDSTONE.contains(&out.id) {
++        return Cat::Redstone;
++    }
++    match pack::category(out.id) {
++        pack::Cat::Tools => Cat::Tools,
++        pack::Cat::Food => Cat::Food,
++        _ if out.id < 256 => Cat::Blocks,
++        _ => Cat::Other,
++    }
++}
++
++/// Every recipe and smelting, category by category, each by result id and damage.
++pub fn entries() -> &'static [Entry] {
++    static E: OnceLock<Vec<Entry>> = OnceLock::new();
++    E.get_or_init(|| {
++        let mut v: Vec<Entry> = craft::recipes()
++            .iter()
++            .enumerate()
++            .map(|(i, r)| {
++                let mut need: Vec<(u16, u8)> = Vec::new();
++                for &c in r.pattern().iter().filter(|&&c| c != 0) {
++                    match need.iter_mut().find(|n| n.0 == c) {
++                        Some(n) => n.1 += 1,
++                        None => need.push((c, 1)),
++                    }
++                }
++                need.sort_unstable();
++                let grid = match r.shape() {
++                    Some((w, h)) if w <= 2 && h <= 2 => 2,
++                    None if r.pattern().len() <= 4 => 2,
++                    _ => 3,
++                };
++                Entry { src: Src::Craft(i), out: r.out(), need, cat: category(r.out()), grid }
++            })
++            .collect();
++        v.extend((1..512u16).filter_map(|id| craft::smelting(id).map(|out| Entry { src: Src::Smelt(id), out, need: vec![(id, 1)], cat: Cat::Furnace, grid: 0 })));
++        v.sort_by_key(|e| (CATS.iter().position(|&c| c == e.cat), e.out.id, e.out.damage));
++        v
++    })
++}
++
++/// The entries of one category, as indices into `entries()`.
++pub fn in_cat(cat: Cat) -> Vec<usize> {
++    entries().iter().enumerate().filter(|(_, e)| e.cat == cat).map(|(i, _)| i).collect()
++}
++
++/// How many of the ingredient `code` the bag (main inventory and quick belt) and the grid hold together.
++pub fn have(inv: &Inventory, grid: &[Option<ItemStack>; 9], code: u16) -> u32 {
++    inv.slots[..MAIN].iter().chain(grid.iter()).flatten().filter(|s| craft::code(s.id, s.damage) == code).map(|s| u32::from(s.count)).sum()
++}
++
++/// What `e` still lacks: (ingredient code, how many short), nothing short = empty.
++pub fn missing(e: &Entry, inv: &Inventory, grid: &[Option<ItemStack>; 9]) -> Vec<(u16, u32)> {
++    e.need.iter().filter_map(|&(c, n)| u32::from(n).checked_sub(have(inv, grid, c)).filter(|&s| s > 0).map(|s| (c, s))).collect()
++}
++
++/// A grid of width `gw` could make it now: it fits the grid and nothing is short. A smelting is never made in the grid.
++pub fn craftable(e: &Entry, gw: usize, inv: &Inventory, grid: &[Option<ItemStack>; 9]) -> bool {
++    e.grid != 0 && e.grid <= gw && missing(e, inv, grid).is_empty()
++}
++
++/// Put what lies in the grid back into the bag; whatever has no room stays. True when the grid is empty after.
++pub fn stash(screen: &mut Screen, inv: &mut Inventory) -> bool {
++    for cell in screen.grid.iter_mut() {
++        if let Some(mut s) = cell.take() {
++            inv.add(&mut s);
++            *cell = (s.count > 0).then_some(s);
++        }
++    }
++    screen.grid.iter().all(Option::is_none)
++}
++
++/// A tap on a recipe: the grid is cleared into the bag and one set of ingredients goes from the bag into the recipe's own cells (the
++/// main slots first, the quick belt last). Nothing changes, and false, when the entry is a smelting, does not fit the screen's grid,
++/// something is short, or the grid cannot be emptied.
++pub fn fill(e: &Entry, screen: &mut Screen, inv: &mut Inventory) -> bool {
++    let (gw, Src::Craft(ri)) = (screen.gw, e.src) else { return false };
++    if !(gw == 2 || gw == 3) || e.grid > gw {
++        return false;
++    }
++    let (g0, i0) = (screen.grid, inv.slots);
++    let undo = |screen: &mut Screen, inv: &mut Inventory| {
++        screen.grid = g0;
++        inv.slots = i0;
++        false
++    };
++    if !stash(screen, inv) || !missing(e, inv, &screen.grid).is_empty() {
++        return undo(screen, inv);
++    }
++    let r = &craft::recipes()[ri];
++    let mut cells = [0u16; 9];
++    match r.shape() {
++        Some((w, h)) => {
++            for y in 0..h {
++                for x in 0..w {
++                    cells[y * gw + x] = r.pattern()[y * w + x];
++                }
++            }
++        }
++        None => cells[..r.pattern().len()].copy_from_slice(r.pattern()),
++    }
++    for (i, &c) in cells.iter().enumerate().filter(|&(_, &c)| c != 0) {
++        let Some(slot) = (9..MAIN).chain(0..9).find(|&k| inv.slots[k].is_some_and(|s| craft::code(s.id, s.damage) == c)) else { return undo(screen, inv) };
++        let Some(s) = inv.slots[slot].as_mut() else { return undo(screen, inv) };
++        let one = ItemStack { count: 1, ..*s };
++        s.count -= 1;
++        if s.count == 0 {
++            inv.slots[slot] = None;
++        }
++        screen.grid[i] = Some(one);
++    }
++    if screen.result().is_none() {
++        return undo(screen, inv); // the recipe did not match its own pattern: a bug, but never a lost item
++    }
++    true
++}
++
++/// A long press on the result: craft what the grid makes, refill it from the bag with the same recipe and craft again, until the bag
++/// has no more ingredients or no room for the result. Returns how many rounds took a result; the grid ends empty when it can be.
++pub fn craft_all(screen: &mut Screen, inv: &mut Inventory) -> u32 {
++    let Some(first) = screen.result().filter(|_| screen.cursor.is_none()) else { return 0 };
++    let mut rounds = 0;
++    for _ in 0..256 {
++        if screen.result().is_none() {
++            let gw = screen.gw;
++            let again = entries().iter().find(|e| matches!(e.src, Src::Craft(_)) && e.out.id == first.id && e.out.damage == first.damage && craftable(e, gw, inv, &screen.grid));
++            if !again.is_some_and(|e| fill(e, screen, inv)) {
++                break;
++            }
++        }
++        let g = screen.grid;
++        screen.shift_click(SlotId::Result, inv, None);
++        if screen.grid == g {
++            break; // no room: nothing was taken
++        }
++        rounds += 1;
++    }
++    stash(screen, inv);
++    rounds
++}
++
++// ---- What the player has seen, and the pinned recipe ----
++
++/// The items the player has ever held (one bit per id below 512) and the recipe pinned to the HUD.
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub struct Notes {
++    seen: [u8; 64],
++    pub pinned: Option<usize>,
++}
++
++const MAGIC: &[u8; 3] = b"BK1";
++
++impl Default for Notes {
++    fn default() -> Self {
++        Self { seen: [0; 64], pinned: None }
++    }
++}
++
++impl Notes {
++    pub fn seen(&self, id: u16) -> bool {
++        id < 512 && self.seen[usize::from(id) / 8] >> (id % 8) & 1 == 1
++    }
++
++    /// Note an item; true when it was new.
++    pub fn see(&mut self, id: u16) -> bool {
++        let new = id < 512 && !self.seen(id);
++        if new {
++            self.seen[usize::from(id) / 8] |= 1 << (id % 8);
++        }
++        new
++    }
++
++    /// Note every item in the bag and the grid (once per 20 Hz tick); true when any was new, so the caller saves.
++    pub fn observe(&mut self, inv: &Inventory, grid: &[Option<ItemStack>; 9]) -> bool {
++        inv.slots.iter().chain(grid.iter()).flatten().fold(false, |any, s| self.see(s.id) | any)
++    }
++
++    /// A recipe is known once its result or any of its ingredients has been held; the rest can show as a silhouette.
++    pub fn known(&self, e: &Entry) -> bool {
++        self.seen(e.out.id) || e.need.iter().any(|&(c, _)| self.seen(craft::unpack(c).0))
++    }
++
++    pub fn encode(&self) -> Vec<u8> {
++        let pin = self.pinned.map_or(u16::MAX, |p| p as u16);
++        let mut b = MAGIC.to_vec();
++        b.extend(pin.to_le_bytes());
++        b.extend(self.seen);
++        b
++    }
++
++    /// `None` for anything that is not an `encode` (wrong size or magic). A pin past the end of the list is dropped.
++    pub fn decode(b: &[u8]) -> Option<Self> {
++        if b.len() != 69 || !b.starts_with(MAGIC) {
++            return None;
++        }
++        let pin = usize::from(u16::from_le_bytes([b[3], b[4]]));
++        Some(Self { seen: std::array::from_fn(|i| b[5 + i]), pinned: Some(pin).filter(|&p| p < entries().len()) })
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn stack(id: u16, count: u8) -> ItemStack {
++        ItemStack { id, count, damage: 0 }
++    }
++
++    fn entry(out: u16, damage: u16, grid: usize) -> &'static Entry {
++        entries().iter().find(|e| e.out.id == out && e.out.damage == damage && e.grid == grid && matches!(e.src, Src::Craft(_))).expect("entry")
++    }
++
++    fn count(inv: &Inventory, id: u16) -> u32 {
++        inv.slots.iter().flatten().filter(|s| s.id == id).map(|s| u32::from(s.count)).sum()
++    }
++
++    #[test]
++    fn every_recipe_and_smelting_is_listed_in_a_category() {
++        let e = entries();
++        assert_eq!(e.iter().filter(|e| matches!(e.src, Src::Craft(_))).count(), craft::recipes().len());
++        assert!(e.iter().any(|e| e.src == Src::Smelt(15) && e.out.id == 265 && e.cat == Cat::Furnace), "iron ore -> iron ingot");
++        assert!(CATS.iter().all(|&c| !in_cat(c).is_empty()), "no empty page");
++        assert!(e.windows(2).all(|w| CATS.iter().position(|&c| c == w[0].cat) <= CATS.iter().position(|&c| c == w[1].cat)), "sorted by page");
++        assert_eq!((entry(5, 0, 2).cat, entry(270, 0, 3).cat, entry(297, 0, 3).cat, entry(33, 0, 3).cat), (Cat::Blocks, Cat::Tools, Cat::Food, Cat::Redstone));
++        assert_eq!(entry(58, 0, 2).need, vec![(5, 4)], "a workbench is four planks and fits the 2x2");
++        assert_eq!(entry(270, 0, 3).need, vec![(5, 3), (280, 2)], "a wooden pickaxe wants the 3x3");
++    }
++
++    #[test]
++    fn a_tap_fills_the_grid_and_the_result_shows() {
++        let (mut inv, mut s) = (Inventory::default(), Screen::new(2));
++        inv.slots[10] = Some(stack(17, 3));
++        assert!(craftable(entry(5, 0, 2), 2, &inv, &s.grid));
++        assert!(fill(entry(5, 0, 2), &mut s, &mut inv));
++        assert_eq!((s.grid[0].map(|g| g.id), count(&inv, 17)), (Some(17), 2));
++        assert_eq!(s.result().map(|r| (r.id, r.count)), Some((5, 4)), "one log makes four planks");
++        // A second recipe takes the first one's items back first.
++        inv.slots[11] = Some(stack(5, 2));
++        assert!(!fill(entry(58, 0, 2), &mut s, &mut inv), "two planks are not a workbench");
++        assert_eq!(s.grid[0].map(|g| g.id), Some(17), "a refused fill leaves the grid as it was");
++        inv.slots[11] = Some(stack(5, 4));
++        assert!(fill(entry(58, 0, 2), &mut s, &mut inv));
++        assert_eq!((count(&inv, 17), count(&inv, 5), s.result().map(|r| r.id)), (3, 0, Some(58)));
++    }
++
++    #[test]
++    fn a_workbench_recipe_needs_the_3x3_grid() {
++        let mut inv = Inventory::default();
++        inv.slots[9] = Some(stack(5, 3));
++        inv.slots[10] = Some(stack(280, 2));
++        let pick = entry(270, 0, 3);
++        assert!(craftable(pick, 3, &inv, &[None; 9]) && !craftable(pick, 2, &inv, &[None; 9]));
++        let mut small = Screen::new(2);
++        assert!(!fill(pick, &mut small, &mut inv) && count(&inv, 5) == 3, "the 2x2 grid refuses it and nothing moves");
++        let mut bench = Screen::new(3);
++        assert!(fill(pick, &mut bench, &mut inv));
++        assert_eq!((bench.result().map(|r| r.id), count(&inv, 5), count(&inv, 280)), (Some(270), 0, 0));
++    }
++
++    #[test]
++    fn what_is_short_is_named_and_dyes_keep_their_colour() {
++        let mut inv = Inventory::default();
++        inv.slots[9] = Some(stack(5, 1));
++        assert_eq!(missing(entry(58, 0, 2), &inv, &[None; 9]), vec![(5, 3)]);
++        // Red dye (351 damage 1) + white wool = red wool (35 damage 14): shapeless, and the colour decides.
++        inv.slots[10] = Some(ItemStack { id: 351, count: 1, damage: 1 });
++        inv.slots[11] = Some(stack(35, 1));
++        let red = entry(35, 14, 2);
++        let mut s = Screen::new(2);
++        assert!(fill(red, &mut s, &mut inv));
++        assert_eq!(s.result().map(|r| (r.id, r.damage)), Some((35, 14)));
++        let mut green = Inventory::default();
++        green.slots[9] = Some(ItemStack { id: 351, count: 1, damage: 2 });
++        green.slots[10] = Some(stack(35, 1));
++        assert!(!craftable(red, 2, &green, &[None; 9]), "green dye is not red dye");
++    }
++
++    #[test]
++    fn a_long_press_crafts_until_the_bag_runs_dry() {
++        let (mut inv, mut s) = (Inventory::default(), Screen::new(2));
++        inv.slots[9] = Some(stack(17, 3));
++        assert!(fill(entry(5, 0, 2), &mut s, &mut inv));
++        assert_eq!(craft_all(&mut s, &mut inv), 3);
++        assert_eq!((count(&inv, 17), count(&inv, 5)), (0, 12), "three logs, twelve planks");
++        assert!(s.grid.iter().all(Option::is_none));
++        // No room for the result (a second log keeps its slot taken): nothing is lost, it stops, the log goes back to the bag.
++        let mut full = Inventory::default();
++        full.slots[..MAIN].iter_mut().for_each(|c| *c = Some(stack(3, 64)));
++        full.slots[9] = Some(stack(17, 2));
++        let mut t = Screen::new(2);
++        assert!(fill(entry(5, 0, 2), &mut t, &mut full));
++        assert_eq!(craft_all(&mut t, &mut full), 0);
++        assert_eq!((count(&full, 17), count(&full, 5)), (2, 0));
++    }
++
++    #[test]
++    fn notes_remember_what_was_held_and_round_trip() {
++        let mut n = Notes::default();
++        assert!(!n.known(entry(5, 0, 2)), "nothing seen: a silhouette");
++        let mut inv = Inventory::default();
++        inv.slots[0] = Some(stack(17, 1));
++        assert!(n.observe(&inv, &[None; 9]) && !n.observe(&inv, &[None; 9]));
++        assert!(n.known(entry(5, 0, 2)), "a log is an ingredient of planks: known");
++        assert!(!n.known(entry(61, 0, 3)), "a furnace wants cobblestone, not seen");
++        n.pinned = Some(3);
++        let b = n.encode();
++        assert_eq!((b.len(), Notes::decode(&b)), (69, Some(n.clone())));
++        assert_eq!(Notes::decode(&b[..68]), None);
++        let mut far = n.clone();
++        far.pinned = Some(entries().len() + 5);
++        assert_eq!(Notes::decode(&far.encode()).map(|d| d.pinned), Some(None), "a pin past the list is dropped");
++    }
++}
+diff -ruN a/mc-rs/src/world/craft.rs b/mc-rs/src/world/craft.rs
+--- a/mc-rs/src/world/craft.rs	2026-10-25 19:08:44.162126742 +0000
++++ b/mc-rs/src/world/craft.rs	2026-10-25 19:08:44.397852918 +0000
+@@ -160,6 +160,25 @@
+ }
+ 
+ impl Recipe {
++    /// What the recipe makes (the recipe book, `world::book`).
++    pub fn out(&self) -> ItemStack {
++        self.out
++    }
++
++    /// The pattern's width and height, `None` for a shapeless recipe.
++    pub fn shape(&self) -> Option<(usize, usize)> {
++        (self.w > 0).then_some((self.w, self.h))
++    }
++
++    /// The ingredient codes: a shaped recipe's pattern row by row (0 = an empty cell), a shapeless one's list.
++    pub fn pattern(&self) -> &[u16] {
++        if self.w == 0 {
++            &self.cells[..self.cells.iter().position(|&c| c == 0).unwrap_or(9)]
++        } else {
++            &self.cells[..self.w * self.h]
++        }
++    }
++
+     /// `ShapedRecipes.matches` on a `gw` x `gw` grid of item ids: the pattern may sit anywhere in the 3x3 area
+     /// (cells outside a 2x2 grid are empty), mirrored or not, and every other cell must be empty.
+     fn matches(&self, grid: &[u16; 9], gw: usize) -> bool {
+@@ -184,10 +203,15 @@
+ }
+ 
+ /// Ingredient / result code: wool and dye keep their colour in the bits above the id (ids stay below 512).
+-fn code(id: u16, damage: u16) -> u16 {
++pub fn code(id: u16, damage: u16) -> u16 {
+     if matches!(id, 35 | 351) { id | (damage & 15) << 9 } else { id }
+ }
+ 
++/// `code` the other way: the item id and the damage (the colour of a wool or a dye, else 0).
++pub fn unpack(code: u16) -> (u16, u16) {
++    (code & 511, code >> 9)
++}
++
+ fn shapeless(ings: &[u16], out: u16, n: u8) -> Recipe {
+     let mut cells = [0; 9];
+     cells[..ings.len()].copy_from_slice(ings);
+@@ -326,7 +350,7 @@
+ // ---- Furnace ----
+ 
+ /// `FurnaceRecipes`: what smelting `id` gives.
+-fn smelting(id: u16) -> Option<ItemStack> {
++pub fn smelting(id: u16) -> Option<ItemStack> {
+     let (out, damage) = match id {
+         15 => (265, 0),  // iron ore -> iron ingot
+         14 => (266, 0),  // gold ore -> gold ingot
+diff -ruN a/mc-rs/src/world/mod.rs b/mc-rs/src/world/mod.rs
+--- a/mc-rs/src/world/mod.rs	2026-10-25 19:08:44.166472649 +0000
++++ b/mc-rs/src/world/mod.rs	2026-10-25 19:08:44.398168522 +0000
+@@ -30,6 +30,7 @@
+ pub mod sprint;
+ pub mod stamina;
+ pub mod pack;
++pub mod book;
+ 
+ /// Lowers the calling thread's scheduling priority (`nice` 0..19; 19 = runs only on what the others leave). Linux and Android keep the
+ /// nice value per THREAD (`PRIO_PROCESS` with `who` 0 is the calling task, not the process), so each background thread calls this first
+diff -ruN a/roadmap/gameplay.md b/roadmap/gameplay.md
+--- a/roadmap/gameplay.md	2026-10-25 19:08:44.169004935 +0000
++++ b/roadmap/gameplay.md	2026-10-25 19:08:44.398652725 +0000
+@@ -4,6 +4,15 @@
+ 
+ ## Changelog
+ 
++- 2026-10-26 (15): the flat satchel and a recipe book replace the pack's cloth screen (**NOT b1.7.3**; written WITHOUT a Rust toolchain: not compiled, not run, not seen on a device; +6 tests in `world/book.rs`, +5 in `satchel.rs`, `options_txt_round_trips` extended; run `cargo test --lib book satchel options` first). Request of the player: the 3D table was too dizzying to use all the time; a bag for the inventory and a book of every recipe beside it, the book's left page the categories then the list, its right page the 2x2 grid. `Screen::click`, `SlotId`, `pack::layout` / `sort` and the vanilla panels (furnace, chests, the pack switch off) are untouched; the cloth, `Mat`, the camera glide and the tabs stay in `pack.rs` and run only with `packCloth:true`.
++    - Screen (`satchel.rs`): `Frame::new(sat, inv, gw, w, h)` is every rect in px (fractions of the height, text unit `craft::panel(0, w, h).2`), `Frame::hit` says what a finger is on (`Pick`), `draw` / `draw_pin` paint it; `lib.rs` only opens it (`open_satchel`: the inventory button, or a workbench with the book already open), routes the finger (`on_sat_tap`, `sat_pick`, a drag on the list scrolls, a press on the result held `HOLD_SECS` crafts all) and closes it (`close_screen` puts the grid and the held stack back in the bag first). `TouchUi::pack_open` is set while it is up (every press a tap, the four HUD buttons hidden), buttons: Book, Sort, Shift, One above the bag, X at the corner. The bag rises in 0.25 s, the book opens in 0.3 s (both pages grow from the spine), a category slides in in 0.2 s. The world behind is dimmed.
++    - Book closed: the bag with the cloth's zones (flat, scaled to fit). Book open: the bag slides to the left 45% and packs into 9 x 3 + the belt + the armor row (cells at least 8% of the height, checked by a test), so the thumb has room; every slot keeps its `SlotId`.
++    - Recipes (`world/book.rs`): `entries()` is every `craft::recipes()` entry (new accessors `Recipe::out` / `shape` / `pattern`, `craft::code` / `unpack` / `smelting` public) plus every smelting, in six `Cat`s; `craftable` / `missing` / `have` count the bag (main slots, the belt) and the grid; `fill` (a tap on a recipe) empties the grid into the bag, then takes one set of ingredients (main slots first, the belt last) into the recipe's own cells, and changes nothing when it fails (a 3x3 recipe at the 2x2 grid, something short, no room); `craft_all` is fill + `shift_click(Result)` in a loop until the bag runs dry or full; wool and dye match by colour (`craft::code`).
++    - Notes (`book::Notes`, `<world>/book`, 69 bytes `BK1` + pin + 64 bytes of seen item ids, written with the level): `observe` marks every id the bag or grid holds each frame; `known(entry)` = its result or any ingredient was held; with `bookDiscovery:true` (the toggle on the right page) an unknown recipe is a dark `?` box and `???`, is not filled, and its card says to find an item; off (the default) everything shows. Pin: one recipe's card (result, each ingredient with have / need, green / red) at the left of the play HUD (`draw_pin`).
++    - New: `packCloth` and `bookDiscovery` in `options.txt` (`Settings::pack_cloth`, `book_discovery`, default off).
++    - Not done, on purpose (ponytail): no blur behind the bag (dimmed); an unknown recipe is a dark box, not the item's silhouette (`push_stack` has no tint); list rows half out of the list are not drawn instead of clipped; the pin is an index into `entries()` (a later release that adds recipes can shift it: a pin past the list is dropped); no item physics or shadows in the flat bag, the items are the HUD icons; the furnace and chests keep their vanilla panels; furnace recipes are information only; the cloth code is not deleted yet (delete `Mat` and the camera glide once the satchel has been seen on a device).
++    - UNVERIFIED: all proportions (fractions of the height), the colours, the sound, and the touch feel of the list scroll and the 0.5 s hold; tune them on the phone.
++    - Rebased on the upstream with entry (14): the book reads `craft::recipes()`, so the new furnace-cart, chest-cart, compass and clock recipes are listed with no line more; the chest cart (342) joins the redstone & rails page with the other carts.
+ - 2026-10-25 (14): furnace cart recipe, Nether compass / clock spin, Rename world (written WITHOUT a Rust toolchain: not compiled, not run; +1 test `menu::tests::rename_changes_the_name_only`, +1 `anim::tests::the_nether_spins_both_hands`, +3 asserts in `craft::tests::recipes_match_like_java`).
+     - `craft.rs`: the minecart with furnace is `shaped(["A","B"])` (furnace over minecart) as in `CraftingManager`; it was shapeless (any order, any cells).
+     - `anim.rs` `Anim::gauges(.., nether)`: in the Nether both targets are `random * 2 pi` every tick (`TextureCompassFX.onTick`, `TextureWatchFX.onTick`: `worldProvider.isNether`), so needle and dial spin; `lib.rs` passes `self.nether`. The overworld path is unchanged. (The compass and clock already animated before this entry; entry (13)'s "Not done" line said they did not, which was wrong.)

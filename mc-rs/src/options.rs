@@ -151,6 +151,12 @@ pub struct Settings {
     pub gpu_error_trace: bool,
     /// Smart animals (`Mobs::smart`, not b1.7.3): path-walked wandering, herding, panic, and the grazing / rooting / pecking / resting pauses; a switch with no button, `animalAi:false` in options.txt turns all of it off.
     pub animal_ai: bool,
+    /// The inventory button spreads the old cloth on the ground and pans a camera over it (`world::pack`, dizzying) instead of opening the
+    /// satchel and its recipe book (`satchel.rs`); a switch with no button, `packCloth:true` in options.txt.
+    pub pack_cloth: bool,
+    /// The recipe book hides what the player has not met yet: a recipe none of whose items was ever held shows as a silhouette and `???`
+    /// (`world::book::Notes::known`). The book's own toggle, `bookDiscovery` in options.txt.
+    pub book_discovery: bool,
     /// The scene scale follows the GPU load (`gpu::context::Drs`); off (`dynamicRes:false`, the Video Settings button) it stays at `START_PCT`.
     pub dynamic_res: bool,
     /// MSAA samples for the next start: 0 Auto (`present::pick_samples` decides by GPU), 1, 2 or 4 (`msaa:` in options.txt).
@@ -189,6 +195,8 @@ impl Default for Settings {
             debug_screen: false,
             gpu_error_trace: false,
             animal_ai: true,
+            pack_cloth: false,
+            book_discovery: false,
             dynamic_res: true,
             msaa: 0,
             post: 0,
@@ -227,6 +235,8 @@ impl Settings {
                 ("debugScreen", ..) => s.debug_screen = b,
                 ("gpuErrorTrace", ..) => s.gpu_error_trace = b,
                 ("animalAi", ..) => s.animal_ai = b,
+                ("packCloth", ..) => s.pack_cloth = b,
+                ("bookDiscovery", ..) => s.book_discovery = b,
                 ("dynamicRes", ..) => s.dynamic_res = b,
                 ("msaa", _, Some(n)) if matches!(n, 0 | 1 | 2 | 4) => s.msaa = n,
                 ("post", _, Some(n)) if n <= 2 => s.post = n,
@@ -248,8 +258,8 @@ impl Settings {
     pub fn save(&self) {
         let Some(p) = &self.path else { return };
         let mut t = format!(
-            "music:{}\nsound:{}\ninvertYMouse:{}\nmouseSensitivity:{}\nviewDistance:{}\nguiScale:{}\nbobView:{}\nanaglyph3d:{}\nadvancedOpengl:{}\nfpsLimit:{}\ndifficulty:{}\nfancyGraphics:{}\nao:{}\nlod:{}\ndigDelay:{}\ngpuErrorTrace:{}\ndynamicRes:{}\nmsaa:{}\npost:{}\nrenderer:{}\ndebugScreen:{}\nanimalAi:{}\n",
-            self.music, self.sound, self.invert_mouse, self.sensitivity, self.render_distance, self.gui_scale, self.view_bobbing, self.anaglyph, self.advanced_opengl, self.limit_framerate, self.difficulty, self.fancy_graphics, self.ambient_occlusion, self.lod, self.dig_delay, self.gpu_error_trace, self.dynamic_res, self.msaa, self.post, self.renderer, self.debug_screen, self.animal_ai
+            "music:{}\nsound:{}\ninvertYMouse:{}\nmouseSensitivity:{}\nviewDistance:{}\nguiScale:{}\nbobView:{}\nanaglyph3d:{}\nadvancedOpengl:{}\nfpsLimit:{}\ndifficulty:{}\nfancyGraphics:{}\nao:{}\nlod:{}\ndigDelay:{}\ngpuErrorTrace:{}\ndynamicRes:{}\nmsaa:{}\npost:{}\nrenderer:{}\ndebugScreen:{}\nanimalAi:{}\npackCloth:{}\nbookDiscovery:{}\n",
+            self.music, self.sound, self.invert_mouse, self.sensitivity, self.render_distance, self.gui_scale, self.view_bobbing, self.anaglyph, self.advanced_opengl, self.limit_framerate, self.difficulty, self.fancy_graphics, self.ambient_occlusion, self.lod, self.dig_delay, self.gpu_error_trace, self.dynamic_res, self.msaa, self.post, self.renderer, self.debug_screen, self.animal_ai, self.pack_cloth, self.book_discovery
         );
         for (id, code) in KEY_IDS.iter().zip(self.keys) {
             t.push_str(&format!("key_key.{id}:{code}\n"));
@@ -1053,11 +1063,12 @@ mod tests {
         assert!(st.dynamic_res, "on until options.txt says otherwise");
         assert!(!st.debug_screen, "off until the Info button or options.txt says so");
         assert!(st.animal_ai, "on until options.txt says otherwise");
-        (st.gpu_error_trace, st.dynamic_res, st.debug_screen) = (true, false, true);
+        assert!(!st.pack_cloth && !st.book_discovery, "the satchel with every recipe shown, until options.txt says otherwise");
+        (st.gpu_error_trace, st.dynamic_res, st.debug_screen, st.pack_cloth, st.book_discovery) = (true, false, true, true, true);
         st.save();
         let back = Settings::load(&root);
         assert_eq!((back.sensitivity, back.invert_mouse, back.render_distance, back.lod, back.keys[4]), (0.25, true, 0, false, 50));
-        assert!(back.gpu_error_trace && !back.dynamic_res && back.debug_screen);
+        assert!(back.gpu_error_trace && !back.dynamic_res && back.debug_screen && back.pack_cloth && back.book_discovery);
         assert_eq!(back.msaa, 0, "Auto until options.txt says otherwise");
         assert!(std::fs::read_to_string(root.join("options.txt")).unwrap().contains("key_key.jump:50"));
     }
