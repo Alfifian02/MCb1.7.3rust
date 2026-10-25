@@ -38,7 +38,19 @@ use crate::world::physics::{self, BlockQuery, Player};
 /// Render buffer sizes: most mobs and arrows alive at once.
 pub const MAX_MOBS: usize = 48;
 pub const MAX_ARROWS: usize = 16;
+/// Animals within `NEAR` blocks of the player (the spawn ring's outer edge), at most.
 const CAP_ANIMALS: usize = 12;
+/// NOT b1.7.3 (it tops animals up every 400 ticks against a cap on the whole loaded area): `Mobs::spawn` tries every `ANIMAL_EVERY` ticks,
+/// so a herd that was killed or walked off is back in seconds; the ceiling is the old 12 but counted around the player, so far strays no
+/// longer hold the refill back. UNVERIFIED by eye: every number here.
+const ANIMAL_EVERY: u32 = 100;
+const NEAR: f32 = 48.0;
+/// A new pack starts no nearer than this to another animal (herds spread out), and none of a kind that already has `CAP_KIND` within `NEAR`.
+const SPACING: f32 = 12.0;
+const CAP_KIND: usize = 5;
+const ANIMALS: [Kind; 5] = [Pig, Cow, Sheep, Chicken, Wolf];
+/// `Mobs::count_near`'s radius for a count that is not local (monsters, squid: the old global caps).
+const ANYWHERE: f32 = f32::INFINITY;
 const CAP_MONSTERS: usize = 10;
 const CAP_SQUID: usize = 3;
 const TICK: f32 = 0.05;
@@ -924,7 +936,12 @@ impl Mobs {
         }
     }
 
-    /// A pack of 1..=4 of `kind` around the cell (x, y, z).
+    /// How many of `kinds` stand within `r` blocks of `at`, level (`ANYWHERE`: all of them).
+    fn count_near(&self, kinds: &[Kind], at: Vec3, r: f32) -> usize {
+        self.list.iter().filter(|m| kinds.contains(&m.kind) && (m.body.pos.x - at.x).powi(2) + (m.body.pos.z - at.z).powi(2) < r * r).count()
+    }
+
+    /// A pack of 1..=4 of `kind` around the cell (x, y, z); animals are counted around the player, the rest everywhere.
     fn pack(&mut self, c: &Ctx, kind: Kind, (x, y, z): (i32, i32, i32), cap: usize) {
         for _ in 0..1 + self.rng.next_int_bound(4) {
             let (px, pz) = (x + self.rng.next_int_bound(6) - self.rng.next_int_bound(6), z + self.rng.next_int_bound(6) - self.rng.next_int_bound(6));
@@ -936,11 +953,12 @@ impl Mobs {
                 continue;
             }
             let kinds: &[Kind] = match kind {
-                Pig | Cow | Sheep | Chicken | Wolf => &[Pig, Cow, Sheep, Chicken, Wolf],
+                Pig | Cow | Sheep | Chicken | Wolf => &ANIMALS,
                 Squid => &[Squid],
                 _ => &[Zombie, Skeleton, Creeper, Spider, Slime, Giant, PigZombie],
             };
-            if self.list.iter().filter(|m| kinds.contains(&m.kind)).count() < cap && self.list.len() < MAX_MOBS {
+            let r = if ANIMALS.contains(&kind) { NEAR } else { ANYWHERE };
+            if self.count_near(kinds, c.player, r) < cap && self.list.len() < MAX_MOBS {
                 let yaw = self.rng.next_float() * 360.0;
                 let m = Mob::new(kind, px as f32 + 0.5, py as f32, pz as f32 + 0.5, yaw, &mut self.rng);
                 self.list.push(m);
@@ -948,28 +966,32 @@ impl Mobs {
         }
     }
 
-    /// `SpawnerAnimals`: animals and squid every 400 ticks (and a burst at start), monsters every 40, 24..48 blocks away.
+    /// `SpawnerAnimals`: animals every `ANIMAL_EVERY` ticks and squid every 400 (both with a burst at start), monsters every 40, 24..48 blocks away.
     fn spawn(&mut self, c: &Ctx) {
         let n = |l: &[Mob], ks: &[Kind]| l.iter().filter(|m| ks.contains(&m.kind)).count();
         let ring = |r: &mut JavaRandom| {
             let (a, d) = (r.next_float() * std::f32::consts::TAU, 24.0 + r.next_float() * 24.0);
             ((c.player.x + a.cos() * d).floor() as i32, (c.player.z + a.sin() * d).floor() as i32)
         };
-        if self.burst > 0 || self.clock % 400 == 0 {
-            self.burst = self.burst.saturating_sub(1);
-            if n(&self.list, &[Pig, Cow, Sheep, Chicken, Wolf]) < CAP_ANIMALS {
+        let burst = self.burst > 0;
+        self.burst = self.burst.saturating_sub(1);
+        if burst || self.clock % ANIMAL_EVERY == 0 {
+            // The fuller the surroundings, the rarer the attempt: the herds ease into the cap instead of hitting it.
+            let near = self.count_near(&ANIMALS, c.player, NEAR);
+            if near < CAP_ANIMALS && self.rng.next_int_bound(CAP_ANIMALS as i32) as usize >= near {
                 let (x, z) = ring(&mut self.rng);
                 // Weights of the plains list: sheep 12, pig 10, chicken 10, cow 8 (wolves live in forests: not spawned here).
                 let kind = match self.rng.next_int_bound(40) { 0..=11 => Sheep, 12..=21 => Pig, 22..=31 => Chicken, _ => Cow };
-                if let Some(y) = grass_top(c.get, x, z) {
+                let apart = self.count_near(&ANIMALS, Vec3::new(x as f32, 0.0, z as f32), SPACING) == 0;
+                if let Some(y) = grass_top(c.get, x, z).filter(|_| apart && self.count_near(&[kind], c.player, NEAR) < CAP_KIND) {
                     self.pack(c, kind, (x, y + 1, z), CAP_ANIMALS);
                 }
             }
-            if n(&self.list, &[Squid]) < CAP_SQUID {
-                let (x, z) = ring(&mut self.rng);
-                let y = 46 + self.rng.next_int_bound(17);
-                self.pack(c, Squid, (x, y, z), CAP_SQUID);
-            }
+        }
+        if (burst || self.clock % 400 == 0) && n(&self.list, &[Squid]) < CAP_SQUID {
+            let (x, z) = ring(&mut self.rng);
+            let y = 46 + self.rng.next_int_bound(17);
+            self.pack(c, Squid, (x, y, z), CAP_SQUID);
         }
         if self.clock % 40 == 0 && self.difficulty > 0 && n(&self.list, &[Zombie, Skeleton, Creeper, Spider, Slime]) < CAP_MONSTERS {
             for _ in 0..8 {
@@ -1159,6 +1181,41 @@ mod tests {
 
     fn ctx<'a>(player: Vec3, light: &'a dyn Fn(i32, i32, i32) -> u8) -> Ctx<'a> {
         Ctx { get: &flat, light, day: false, player, eye: player + Vec3::Y * 0.6 }
+    }
+
+    /// NOT b1.7.3: animals top up every `ANIMAL_EVERY` ticks (more in the first 400 than the one pack the old 400-tick rule made), never past
+    /// `CAP_ANIMALS` around the player (a stray walking in is the slack) and no pack of a kind with `CAP_KIND` around, and a pack starts `SPACING` from the others.
+    #[test]
+    fn animals_refill_fast_never_crowd_and_keep_apart() {
+        let wide = |_: i32, y: i32, _: i32| Some(match y { 0 => 7, 1..=8 => 1, 9 => 2, _ => 0 });
+        let l = |_, _, _| 15u8;
+        let player = Vec3::new(0.5, 11.0, 0.5);
+        let c = Ctx { get: &wide, light: &l, day: true, player, eye: player + Vec3::Y * 0.6 };
+        let flat = |a: Vec3, b: Vec3| ((a.x - b.x).powi(2) + (a.z - b.z).powi(2)).sqrt();
+        for seed in 1..=6 {
+            let (mut m, mut drops) = (Mobs::new(seed), Drops::new(1));
+            m.burst = 0;
+            let (mut early, mut apart, mut top) = (0, f32::MAX, (0, 0));
+            for t in 1..=3000 {
+                let before: Vec<Vec3> = m.list.iter().map(|a| a.body.pos).collect();
+                m.update(TICK, &c, &mut drops);
+                let near = m.count_near(&ANIMALS, player, NEAR);
+                top = (top.0.max(near), top.1.max([Pig, Cow, Sheep, Chicken].map(|k| m.count_near(&[k], player, NEAR)).into_iter().max().unwrap()));
+                if t == 400 {
+                    early = near;
+                }
+                // A mob of age 0 that was nowhere before is new: the nearest animal of before to the middle of the pack.
+                let fresh: Vec<Vec3> = m.list.iter().filter(|a| a.age == 0 && before.iter().all(|&b| flat(b, a.body.pos) > 1.5)).map(|a| a.body.pos).collect();
+                if !fresh.is_empty() {
+                    let mid = fresh.iter().sum::<Vec3>() / fresh.len() as f32;
+                    apart = before.iter().fold(apart, |d, &b| d.min(flat(b, mid)));
+                }
+            }
+            eprintln!("seed {seed}: early {early}, top {top:?}, apart {apart}");
+            assert!(early >= 5, "seed {seed}: {early} animals after 400 ticks (the old rule gave at most one pack of 4)");
+            assert!(top.0 <= CAP_ANIMALS + 3 && top.1 <= CAP_KIND + 3, "seed {seed}: crowded, {top:?}");
+            assert!(apart >= SPACING - 8.0, "seed {seed}: a pack began {apart} blocks from another herd");
+        }
     }
 
     /// A pig on grass settles, wanders off its start and stays on the ground; a hit hurts, knocks back and kills after

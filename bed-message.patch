@@ -1,0 +1,91 @@
+diff --git a/README.md b/README.md
+index 8cfb909..6d5be45 100644
+--- a/README.md
++++ b/README.md
+@@ -78,7 +78,7 @@ original. Anything that cannot be derived from the b1.7.3 sources is marked
+ | Grazing + idle behaviours (2026-10-25) | written without a toolchain: not compiled, not run; **NOT b1.7.3** (+4 tests in `world/mobs.rs`, +1 in `render/items.rs`; run `cargo test --lib mobs items` first) | Part of the smart animals switch (`animalAi`, on by default; `animalAi:false` gives the b1.7.3 AI back byte for byte). `Mob::idle`: a calm pig, cow, sheep or hen pauses to do something instead of only standing: a cow or sheep on grass **grazes** (3 to 8 s), a pig **roots** on grass or dirt (2 to 5 s), a hen **pecks** (1 to 2 s), and a cow, sheep or pig now and then **rests** (8 to 20 s). Eating and resting stay put, do not turn, and end when a person comes within 4 blocks or the animal is hit. Each wander walk has its own gait (a stroll at 0.6 to 1.0 x the walk, a hen sometimes dashes at 1.5 x). The head is drawn dipped to the ground (`Mob::head`, `Mob::munch`, `render/items.rs::head_dip`) with a chew or a quick peck. The grass is not eaten and nothing lies down. See the gameplay changelog. |
+ | Immersive pack (The Forest style, 2026-10-25) | written without a toolchain: not compiled, not run, not seen on a device (+5 tests in `world/pack.rs`, `menu.rs` flow test extended, carry check in `render/player.rs`); **NOT b1.7.3** | `world/pack.rs` + `lib.rs` + `render/items.rs` + `menu.rs`: with the world's **Immersive Pack** switch on (Create World screen, saved as the 4th line of `<world>/info`; worlds made before it keep the panel), the inventory button no longer opens the inventory: the player takes the pack in both hands (it rises from below, the held item is hidden) and the cloth shows on the flat ground under the crosshair, lime where it fits and red where it does not (needs a full block under 9 samples of a 2.0 x 1.6 footprint, nothing but air or plants on it); a tap, like placing a block, spreads it there (on a red one only a message shows), the button again puts the pack away. The cloth unrolls in the world (0.9 s, a roll that shrinks as it travels), then the screen opens as the cloth: items lie in zones by category (tools & gear, food, materials, other), each at its own size, shrunk together when a zone is crowded; the crafting mat (2 x 2), worn armor and the quick-select row (hotbar) have fixed places. Same `SlotId`s and `Screen::click` as the panel, so crafting, armor, spread-drag, place-one and shift-click work unchanged. Closing, walking 6.5 blocks off or losing the ground rolls it up. A workbench, furnace and chest keep their own panels. Switch off = the old panel. See the gameplay changelog. |
+ | Organic mob movement (2026-10-25) | written without a toolchain: not compiled, not run; closer to b1.7.3 (+3 tests in `world/mobs.rs`; run `cargo test --lib mobs items` first) | Taken from `EntityLiving` of the decompiled b1.7.3 and applied to **every** mob, whatever `animalAi` says. **Momentum** (`Mob::step`): the horizontal speed no longer jumps to the walk speed, it builds up and dies away like `moveEntityWithHeading` (0.546 a tick on the ground, 0.91 in the air, so a hop keeps its run); same top speed; water and lava as before. **Body trails head** (`body_yaw` = `renderYawOffset`): the body follows the way the mob moves (0.3 of the gap a tick, not while knocked back) and stays within 75 degrees of the head, which now turns on its own pivot (`render/items.rs`). **Head tip** (`head_pitch`): a mob that looks at the player or hunts them tips its head up or down to their eye (40 degrees at most, `faceEntity`). Timing is per frame, not per tick. |
+-| M14                  | pending | Menus (part 1: title, world list, create world; see above), options, player armor and real mob models (both done, see the player model row above and `roadmap/gameplay.md`); only the chat (overlay + bed messages, later) is left: see [`roadmap/gameplay.md`](roadmap/gameplay.md). M10 multiplayer and M13 optimization are out of scope on purpose. |
++| M14                  | pending | Menus (part 1: title, world list, create world; see above), options, player armor and real mob models (both done, see the player model row above and `roadmap/gameplay.md`); only the chat (overlay, later) is left; a bed tapped by day says so: see [`roadmap/gameplay.md`](roadmap/gameplay.md). M10 multiplayer and M13 optimization are out of scope on purpose. |
+ 
+ Latest commit on `main`: see `git log -1`. Latest released APK: see the
+ `MinecraftB173Rust-apk` artifact on the GitHub Actions run.
+diff --git a/mc-rs/src/lib.rs b/mc-rs/src/lib.rs
+index a99bb6c..04e2573 100644
+--- a/mc-rs/src/lib.rs
++++ b/mc-rs/src/lib.rs
+@@ -200,6 +200,8 @@ struct App {
+     mat: Option<pack::Mat>,
+     mat_ui: bool,
+     hint: f32,
++    /// What `hint` shows: the pack's message (`put_pack`) or the bed's (`use_bed`).
++    hint_msg: &'static str,
+     /// The pack carried in both hands before it is spread (`Some` = how far it is raised, 0 to 1), and the cloth as it would lie under
+     /// the crosshair with whether the ground fits (`pack_tick`): the preview, green or red.
+     carry: Option<f32>,
+@@ -329,6 +331,7 @@ impl App {
+             mat: None,
+             mat_ui: false,
+             hint: 0.0,
++            hint_msg: "",
+             carry: None,
+             ghost: None,
+             hook: None,
+@@ -1671,8 +1674,8 @@ impl App {
+         cell.map_or(self.spawn, |(x, y, z)| glam::Vec3::new(x as f32 + 0.5, y as f32 + 1.0, z as f32 + 0.5))
+     }
+ 
+-    /// `BlockBed.blockActivated` + `EntityPlayer.sleepInBedAt` (only the OK status: at night, within 3 / 2 / 3 blocks).
+-    /// ponytail: no "you can only sleep at night" message (the HUD has no text); the hostile spawn on waking is not ported.
++    /// `BlockBed.blockActivated` + `EntityPlayer.sleepInBedAt` (the OK status: at night, within 3 / 2 / 3 blocks; by day NOT_POSSIBLE_NOW says so).
++    /// ponytail: no other message (too far, monsters near); the hostile spawn on waking is not ported.
+     fn use_bed(&mut self, (mut x, y, mut z): (i32, i32, i32)) {
+         let mut m = self.chunks.meta(x, y, z);
+         if m & 8 == 0 {
+@@ -1685,6 +1688,9 @@ impl App {
+         }
+         let eye = self.player.pos + glam::Vec3::new(0.0, EYE_HEIGHT, 0.0);
+         let near = (eye.x - x as f32).abs() <= 3.0 && (eye.y - y as f32).abs() <= 2.0 && (eye.z - z as f32).abs() <= 3.0;
++        if self.sleep.is_none() && !self.vitals.dead() && self.daytime() {
++            (self.hint, self.hint_msg) = (2.5, "You can only sleep at night");
++        }
+         if self.sleep.is_some() || self.vitals.dead() || self.daytime() || !near {
+             return;
+         }
+@@ -1907,7 +1913,7 @@ impl App {
+                 (self.mat, self.carry) = (Some(m), None);
+                 self.audio.play_here("step.cloth", 0.7, 1.0);
+             }
+-            _ => self.hint = 2.5,
++            _ => (self.hint, self.hint_msg) = (2.5, "Look at flat, clear ground to spread your pack"),
+         }
+     }
+ 
+@@ -2744,11 +2750,11 @@ impl App {
+             }
+         }
+ 
+-        // The pack found no flat ground under the crosshair (`lay_mat`).
++        // The pack found no flat ground under the crosshair, or a bed was tapped by day.
+         if play && self.hint > 0.0 {
+             let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
+             let k = craft::panel(0, w, h).2 * 0.75;
+-            let msg = "Look at flat, clear ground to spread your pack";
++            let msg = self.hint_msg;
+             let bw = (HudPipeline::text_width(msg) as f32 + 6.0) * k;
+             HudPipeline::push_tooltip(v, (w - bw) * 0.5, h * 0.62, k, msg);
+         }
+diff --git a/roadmap/gameplay.md b/roadmap/gameplay.md
+index ae7f2d1..c1ea94c 100644
+--- a/roadmap/gameplay.md
++++ b/roadmap/gameplay.md
+@@ -4,6 +4,8 @@ Part of [`ROADMAP.md`](../ROADMAP.md). The to-do milestones of this part (M11 Ne
+ 
+ ## Changelog
+ 
++- 2026-10-25 (9): a bed tapped by day says "You can only sleep at night" (written WITHOUT a Rust toolchain: not compiled, not run; no test, `use_bed` needs the whole `App`). `EntityPlayer.sleepInBedAt` answers NOT_POSSIBLE_NOW by day and `BlockBed.blockActivated` shows `tile.bed.noSleep`; `use_bed` returned silently. The one-line message of the pack (`hint`, 2.5 s, lower middle) now carries its text in `hint_msg`, so the bed reuses it (a live, awake player only, as vanilla's order of checks).
++    - ponytail: no other status message (too far, monsters near). UNVERIFIED: the wording (the lang file, from memory), that it compiles (two fields set by one tuple assignment, `hint_msg` read in the HUD pass beside `v`).
+ - 2026-10-25 (8): organic mob movement from `EntityLiving` (b1.7.3 decompiled), every mob, closer to b1.7.3 and not away from it; written WITHOUT a Rust toolchain: not compiled, not run; +3 tests `mobs::tests::{a_mob_eases_into_a_walk_and_glides_to_a_stop, the_body_trails_the_head_and_follows_the_walk, a_mob_looking_at_the_player_tips_its_head_toward_their_eyes}`; run `cargo test --lib mobs items` first. What was stiff: the walk speed was set outright every frame (a mob started and stopped at full speed and a hop lost its run), the body pointed where `yaw` pointed, and `yaw` moves in 20 Hz steps (up to 30 degrees at once), so every turn was a jerk.
+     - Momentum (`Mob::step`): `vel = target + (vel - target) x keep`, `keep` = 0.546^ticks on the ground, 0.91^ticks in the air (the drags of `moveEntityWithHeading`); under 0.02 m/s it stops. In water or lava the old direct set stays (`step_box` scales the swim speed by itself). Knockback (`free`) and the squid's own swim are untouched.
+     - `body_yaw` (`renderYawOffset`): moving faster than 0.05 blocks a tick (and not knocked back) it eases to the heading of the move by 0.3 of the gap a tick; then it is held within 75 degrees of `yaw`. `render/items.rs` draws the body with it and turns the head (and a hen's beak) by `mobs::lead(yaw, body_yaw)` about its own pivot. The sign of that turn in the mirrored model space is worked out, not seen.

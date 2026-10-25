@@ -200,6 +200,8 @@ struct App {
     mat: Option<pack::Mat>,
     mat_ui: bool,
     hint: f32,
+    /// What `hint` shows: the pack's message (`put_pack`) or the bed's (`use_bed`).
+    hint_msg: &'static str,
     /// The pack carried in both hands before it is spread (`Some` = how far it is raised, 0 to 1), and the cloth as it would lie under
     /// the crosshair with whether the ground fits (`pack_tick`): the preview, green or red.
     carry: Option<f32>,
@@ -329,6 +331,7 @@ impl App {
             mat: None,
             mat_ui: false,
             hint: 0.0,
+            hint_msg: "",
             carry: None,
             ghost: None,
             hook: None,
@@ -1671,8 +1674,8 @@ impl App {
         cell.map_or(self.spawn, |(x, y, z)| glam::Vec3::new(x as f32 + 0.5, y as f32 + 1.0, z as f32 + 0.5))
     }
 
-    /// `BlockBed.blockActivated` + `EntityPlayer.sleepInBedAt` (only the OK status: at night, within 3 / 2 / 3 blocks).
-    /// ponytail: no "you can only sleep at night" message (the HUD has no text); the hostile spawn on waking is not ported.
+    /// `BlockBed.blockActivated` + `EntityPlayer.sleepInBedAt` (the OK status: at night, within 3 / 2 / 3 blocks; by day NOT_POSSIBLE_NOW says so).
+    /// ponytail: no other message (too far, monsters near); the hostile spawn on waking is not ported.
     fn use_bed(&mut self, (mut x, y, mut z): (i32, i32, i32)) {
         let mut m = self.chunks.meta(x, y, z);
         if m & 8 == 0 {
@@ -1685,6 +1688,9 @@ impl App {
         }
         let eye = self.player.pos + glam::Vec3::new(0.0, EYE_HEIGHT, 0.0);
         let near = (eye.x - x as f32).abs() <= 3.0 && (eye.y - y as f32).abs() <= 2.0 && (eye.z - z as f32).abs() <= 3.0;
+        if self.sleep.is_none() && !self.vitals.dead() && self.daytime() {
+            (self.hint, self.hint_msg) = (2.5, "You can only sleep at night");
+        }
         if self.sleep.is_some() || self.vitals.dead() || self.daytime() || !near {
             return;
         }
@@ -1907,7 +1913,7 @@ impl App {
                 (self.mat, self.carry) = (Some(m), None);
                 self.audio.play_here("step.cloth", 0.7, 1.0);
             }
-            _ => self.hint = 2.5,
+            _ => (self.hint, self.hint_msg) = (2.5, "Look at flat, clear ground to spread your pack"),
         }
     }
 
@@ -2744,11 +2750,11 @@ impl App {
             }
         }
 
-        // The pack found no flat ground under the crosshair (`lay_mat`).
+        // The pack found no flat ground under the crosshair, or a bed was tapped by day.
         if play && self.hint > 0.0 {
             let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
             let k = craft::panel(0, w, h).2 * 0.75;
-            let msg = "Look at flat, clear ground to spread your pack";
+            let msg = self.hint_msg;
             let bw = (HudPipeline::text_width(msg) as f32 + 6.0) * k;
             HudPipeline::push_tooltip(v, (w - bw) * 0.5, h * 0.62, k, msg);
         }
