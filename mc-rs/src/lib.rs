@@ -213,6 +213,9 @@ struct App {
     pack_scene: Option<pack::Scene>,
     pack_age: f32,
     pack_lift: f32,
+    /// Where the camera is over the table (a cloth unit: the centre of the view), and where it is gliding to (a tab was tapped).
+    pack_focus: (f32, f32),
+    pack_goal: Option<(f32, f32)>,
     /// The fishing bobber in the water (`EntityPlayer.fishEntity`).
     hook: Option<Hook>,
     /// Furnace tile entities by block position (created on first use), and the time left over from the last 20 Hz tick.
@@ -253,7 +256,16 @@ struct Gesture {
     start: Option<craft::SlotId>,
     spread: bool,
     visited: Vec<craft::SlotId>,
+    /// On the pack's cloth: the press began on a 3D button (a tap, nothing else), or on empty cloth or ground (`grab` = the cloth unit
+    /// under the finger: a drag pans the camera so it stays under it; `moved` = it was dragged, so lifting is not a tap).
+    btn: bool,
+    grab: Option<(f32, f32)>,
+    moved: bool,
+    down: (f32, f32),
 }
+
+/// Pixels a finger must travel before a press on empty cloth is a pan and not a tap.
+const PAN_SLOP: f32 = 12.0;
 
 impl App {
     async fn init(native_ptr: *mut c_void, width: u32, height: u32, dir: PathBuf) -> Result<Self, String> {
@@ -341,6 +353,8 @@ impl App {
             pack_scene: None,
             pack_age: 0.0,
             pack_lift: 0.0,
+            pack_focus: pack::tab_focus(0),
+            pack_goal: None,
             hint: 0.0,
             hint_msg: "",
             carry: None,
@@ -502,6 +516,7 @@ impl App {
         }
         (self.mat, self.mat_ui, self.hint, self.carry, self.ghost) = (None, false, 0.0, None, None);
         (self.pack_scene, self.pack_age, self.pack_lift) = (None, 0.0, 0.0);
+        (self.pack_focus, self.pack_goal) = (pack::tab_focus(0), None);
         self.close_sign();
         (self.paintings, self.signs) = (Vec::new(), HashMap::new());
         self.boats = boat::Boats::default();
@@ -1923,6 +1938,7 @@ impl App {
         match self.ghost.take() {
             Some((m, true)) => {
                 (self.mat, self.carry) = (Some(m), None);
+                (self.pack_focus, self.pack_goal) = (pack::tab_focus(0), None);
                 self.audio.play_here("step.cloth", 0.7, 1.0);
             }
             _ => (self.hint, self.hint_msg) = (2.5, "Look at flat, clear ground to spread your pack"),
@@ -1937,6 +1953,13 @@ impl App {
         let held = self.mat_ui && self.screen.as_ref().is_some_and(|s| s.cursor.is_some());
         self.pack_age = if self.mat_ui { self.pack_age + dt } else { 0.0 };
         self.pack_lift += (f32::from(u8::from(held)) - self.pack_lift).clamp(-dt / 0.12, dt / 0.12);
+        self.touch.pack_open = self.mat_ui; // the four HUD buttons are 3D buttons of the table while it is open
+        if let Some(g) = self.pack_goal {
+            // A tab glides the camera: it closes 12 / s of the way to it, and lands when it is half a unit off.
+            let k = 1.0 - (-dt * 12.0).exp();
+            let (f, d) = (self.pack_focus, (g.0 - self.pack_focus.0, g.1 - self.pack_focus.1));
+            (self.pack_focus, self.pack_goal) = if d.0.hypot(d.1) < 0.5 { (g, None) } else { ((f.0 + d.0 * k, f.1 + d.1 * k), Some(g)) };
+        }
         if self.riding() || self.sleep.is_some() || self.vitals.dead() || self.screen.is_some() {
             self.carry = None; // a screen opens only by a tap, which a carried pack swallows; a ride, a bed or death put it away
         }
@@ -1989,7 +2012,7 @@ impl App {
         if self.mat_ui {
             // The finger is a ray at the cloth: the cubes are tested as boxes, everything flat as the cloth unit it lands on (`pack::pick`).
             let (m, lays) = (self.mat.as_ref()?, self.pack_scene.as_ref().map_or(&[][..], |s| &s.lays[..]));
-            pack::pick(&self.inv, lays, m, &m.rig(w / h), w / h, (w, h), (x, y))
+            pack::pick(&self.inv, lays, m, &m.rig(w / h, self.pack_focus), w / h, (w, h), (x, y))
         } else {
             craft::slot_at(gw, w, h, x, y)
         }
@@ -1999,14 +2022,34 @@ impl App {
     fn pack_scene_now(&self) -> Option<pack::Scene> {
         let s = self.screen.as_ref().filter(|_| self.mat_ui && self.mat.is_some())?;
         let held = s.cursor.zip(self.cloth_at(self.touch.cursor_pos, pack::REST)).map(|(st, at)| (st, at, self.pack_lift));
-        Some(pack::scene(&self.inv, &|id| s.get(&self.inv, None, id), self.touch.hotbar_slot, (self.one_mode, self.shift_mode), self.pack_age, held))
+        Some(pack::scene(&self.inv, &|id| s.get(&self.inv, None, id), self.touch.hotbar_slot, (self.one_mode, self.shift_mode), self.pack_age, held, self.pack_focus))
     }
 
     /// The cloth unit under a finger of the open pack screen, on the plane `h` blocks up (`pack::Mat::touch`).
     fn cloth_at(&self, at: (f32, f32), h: f32) -> Option<(f32, f32)> {
         let (w, hh) = { let (w, hh) = self.be.size(); (w as f32, hh as f32) };
         let m = self.mat.as_ref()?;
-        m.touch(&m.rig(w / hh), w / hh, (w, hh), at, h)
+        m.touch(&m.rig(w / hh, self.pack_focus), w / hh, (w, hh), at, h)
+    }
+
+    /// The 3D button of the open pack under a finger (`pack::btn_at`), if any.
+    fn pack_btn(&self, x: f32, y: f32) -> Option<pack::Btn> {
+        let (a, b) = self.cloth_at((x, y), pack::BTN_H)?;
+        pack::btn_at(self.pack_focus, a, b)
+    }
+
+    /// A tap on a 3D button: close the pack, the two toggles, sort the main slots, or glide the camera to a part of the table.
+    fn pack_press(&mut self, b: pack::Btn) {
+        match b {
+            pack::Btn::Close => self.close_screen(),
+            pack::Btn::Shift => self.shift_mode = !self.shift_mode,
+            pack::Btn::One => self.one_mode = !self.one_mode,
+            pack::Btn::Sort => {
+                pack::sort(&mut self.inv);
+                self.audio.play_here("step.cloth", 0.6, 1.2);
+            }
+            pack::Btn::Tab(i) => self.pack_goal = Some(pack::tab_focus(i)),
+        }
     }
 
     /// `BlockDispenser.dispenseItem`: one item of a random filled slot (`getRandomStackFromInventory`: each filled slot replaces the
@@ -2086,9 +2129,28 @@ impl App {
         let mut fill = Vec::new();
         match ev {
             ScreenEv::Down(x, y) => {
-                self.gesture = Some(Gesture { start: self.slot_under(x, y), spread: false, visited: Vec::new() });
+                // On the pack's cloth a press on a 3D button is only a tap; one on empty cloth or ground may become a pan of the camera.
+                let btn = self.mat_ui && self.pack_btn(x, y).is_some();
+                let start = if btn { None } else { self.slot_under(x, y) };
+                let on_cell = start.is_some_and(|id| pack::has_cell(&self.inv, id));
+                let grab = if self.mat_ui && !btn && !on_cell { self.cloth_at((x, y), pack::REST) } else { None };
+                self.gesture = Some(Gesture { start, spread: false, visited: Vec::new(), btn, grab, moved: false, down: (x, y) });
             }
             ScreenEv::Move(x, y) => {
+                if let Some((btn, grab, moved, down)) = self.gesture.as_ref().filter(|g| g.btn || g.grab.is_some()).map(|g| (g.btn, g.grab, g.moved, g.down)) {
+                    // A drag that began on empty cloth or ground slides the camera over the table so the spot stays under the finger.
+                    if let (false, Some(grab)) = (btn, grab) {
+                        let moved = moved || (x - down.0).hypot(y - down.1) > PAN_SLOP;
+                        if let (true, Some(now)) = (moved, self.cloth_at((x, y), pack::REST)) {
+                            let f = self.pack_focus;
+                            (self.pack_focus, self.pack_goal) = (pack::clamp_focus((f.0 + grab.0 - now.0, f.1 + grab.1 - now.1)), None);
+                        }
+                        if let Some(g) = self.gesture.as_mut() {
+                            g.moved = moved;
+                        }
+                    }
+                    return;
+                }
                 let under = self.slot_under(x, y);
                 let (Some(g), Some(cur)) = (self.gesture.as_mut(), under) else { return };
                 if self.screen.as_ref().map_or(true, |s| s.cursor.is_none()) || (!g.spread && g.start == Some(cur)) {
@@ -2104,7 +2166,7 @@ impl App {
                 g.visited.extend(fill.iter().copied());
             }
             ScreenEv::Up(x, y) => {
-                if !self.gesture.take().is_some_and(|g| g.spread) {
+                if !self.gesture.take().is_some_and(|g| g.spread || g.moved) {
                     self.on_screen_tap(x, y);
                 }
             }
@@ -2119,9 +2181,13 @@ impl App {
         let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
         let Some(gw) = self.screen.as_ref().map(|s| s.gw) else { return };
         let one = self.one_mode;
+        if let Some(b) = self.pack_btn(x, y).filter(|_| self.mat_ui) {
+            self.pack_press(b);
+            return;
+        }
         let (on_one, on_shift, inside) = if self.mat_ui {
             let at = self.cloth_at((x, y), pack::REST);
-            (at.is_some_and(|(a, b)| pack::on_toggle(1, a, b)), at.is_some_and(|(a, b)| pack::on_toggle(0, a, b)), at.is_some_and(|(a, b)| pack::in_mat(a, b)))
+            (false, false, at.is_some_and(|(a, b)| pack::in_mat(a, b)))
         } else {
             (craft::on_mode_button(gw, w, h, x, y), craft::on_shift_button(gw, w, h, x, y), craft::in_panel(gw, w, h, x, y))
         };
@@ -2261,7 +2327,7 @@ impl App {
         if let Some(m) = self.mat.filter(|m| m.t > 0.0) {
             let from = pack::Rig { pos: self.camera.pos, yaw: self.camera.yaw, pitch: self.camera.pitch, fov: self.camera.fov_y };
             self.pack_saved = Some((from.pos, from.yaw, from.pitch, from.fov));
-            let r = m.glide(from, self.camera.aspect);
+            let r = m.glide(from, self.camera.aspect, self.pack_focus);
             (self.camera.pos, self.camera.yaw, self.camera.pitch, self.camera.fov_y, self.camera.bob) = (r.pos, r.yaw, r.pitch, r.fov, glam::Mat4::IDENTITY);
         }
         let (view, proj) = self.camera.build_view_proj();
@@ -2655,7 +2721,7 @@ impl App {
         // The immersive pack: the inventory as a cloth with every item lying in the zone of its category (`world::pack`).
         if let (Some(s), Some((m, vp, finger, picked)), Some(sc)) = (self.screen.as_ref().filter(|_| self.mat_ui), pack_hud, self.pack_scene.as_ref()) {
             let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
-            draw_pack(v, (w, h), (&m, vp), &self.inv, s, sc, (self.one_mode, self.shift_mode), (self.touch.cursor_pos, finger, picked), self.gesture.is_some());
+            draw_pack(v, (w, h), (&m, vp), &self.inv, s, sc, (self.one_mode, self.shift_mode), (self.touch.cursor_pos, finger, picked), self.gesture.is_some(), self.pack_focus);
         }
 
         // Container screen: the vanilla GUI (176 x 166 units) over a dimmed frame, slots with their stacks.
@@ -2757,6 +2823,8 @@ impl App {
             }
         }
 
+        // The four buttons top-right (pause, inventory, view, zoom) are not drawn while the pack's table is open: its edges carry the buttons.
+        if !self.mat_ui {
         // Pause button: top-right, two bars.
         let (px, py, pw, ph) = layout.pause;
         HudPipeline::push_button(v, px, py, pw, ph, if pressed(PointerRole::Pause) { 2 } else { 1 });
@@ -2786,6 +2854,7 @@ impl App {
         let (zx, zy, zw, zh) = layout.zoom;
         HudPipeline::push_button(v, zx, zy, zw, zh, if pressed(PointerRole::Zoom) || !play { 2 } else { 1 });
         HudPipeline::push_text_centered(v, zx + zw * 0.5, zy + (zh - 8.0 * zh / 20.0) * 0.5, zh / 20.0, "Z", [1.0; 4]);
+        }
 
         // Hotbar (`GuiIngame`): the 182 x 22 strip (20 units a slot, a unit = a ninth-cell / 20), then the 24 x 24 selector over the slot
         // in use, then the stacks. The touch cells are the slots, so the strip is drawn around them.
@@ -2966,7 +3035,7 @@ fn icon_tint(c: u32) -> [f32; 3] {
 /// The text of the open cloth (`world::pack`), over the 3D scene `render::items` draws: each place is projected from its spot on the
 /// cloth through `vp` (this frame's camera), so labels, counts, wear bars, the toggles' numbers and the name of the stack under a
 /// finger sit on what they belong to. `finger` = (px, the cloth unit under it, the slot it is over); `down` = a finger is down (then the stack's name shows).
-fn draw_pack(v: &mut Vec<HudVertex>, (w, h): (f32, f32), (m, vp): (&pack::Mat, glam::Mat4), inv: &Inventory, s: &Screen, sc: &pack::Scene, (one, shift): (bool, bool), (cursor_at, finger, picked): ((f32, f32), Option<(f32, f32)>, Option<craft::SlotId>), down: bool) {
+fn draw_pack(v: &mut Vec<HudVertex>, (w, h): (f32, f32), (m, vp): (&pack::Mat, glam::Mat4), inv: &Inventory, s: &Screen, sc: &pack::Scene, (one, shift): (bool, bool), (cursor_at, finger, picked): ((f32, f32), Option<(f32, f32)>, Option<craft::SlotId>), down: bool, focus: (f32, f32)) {
     // A cloth unit `h` blocks up, in px, and the px a unit measures there.
     let to_px = |x: f32, y: f32, hh: f32| {
         let c = vp * m.at(x, y, hh).extend(1.0);
@@ -2979,19 +3048,27 @@ fn draw_pack(v: &mut Vec<HudVertex>, (w, h): (f32, f32), (m, vp): (&pack::Mat, g
             HudPipeline::push_text(v, p.0, p.1, u * k, text, ink);
         }
     };
-    label(v, pack::CRAFT[0] + 3.0, pack::CRAFT[1] + 2.5, 0.6, "Crafting mat");
-    label(v, pack::WEAR[0] + 3.0, pack::WEAR[1] + 2.5, 0.6, "Worn");
+    label(v, pack::CRAFT[0] + 4.0, pack::CRAFT[1] + 3.0, 0.6, "Crafting");
+    label(v, pack::STAND[0] + 4.0, pack::STAND[1] + 3.0, 0.5, "Armor");
     for (cat, r) in pack::ZONES {
         label(v, r[0] + 3.0, r[1] + 2.5, 0.6, cat.label());
     }
-    label(v, 8.0, 196.0, 0.55, "Quick");
-    label(v, 8.0, 205.0, 0.55, "select");
-    // The numbers on the two toggles (shift-click 2, place one 1), when on.
-    for (which, on) in [(0_usize, shift), (1, one)] {
-        let r = pack::toggle(which);
-        if let (true, Some(a), Some(b)) = (on, to_px(r[0], r[1], 0.052), to_px(r[0] + r[2], r[1] + r[3], 0.052)) {
-            HudPipeline::push_number(v, a.0 + (b.0 - a.0) * 0.32, a.1 + (b.1 - a.1) * 0.2, (b.1 - a.1) * 0.6, if which == 0 { 2 } else { 1 }, [1.0; 4]);
+    // The 3D buttons at the edges of the view: a word on each (the toggles show their number while on).
+    let centred = |v: &mut Vec<HudVertex>, r: [f32; 4], k: f32, text: &str| {
+        if let (Some(p), Some(u)) = (to_px(r[0] + r[2] * 0.5, r[1] + r[3] * 0.5, pack::BTN_H), unit_px(r[0], r[1], pack::BTN_H)) {
+            let t = u * k;
+            HudPipeline::push_text(v, p.0 - HudPipeline::text_width(text) as f32 * t * 0.5, p.1 - 4.0 * t, t, text, [1.0; 4]);
         }
+    };
+    for b in pack::BTNS {
+        let text = match b {
+            pack::Btn::Close => "X",
+            pack::Btn::Shift => if shift { "2" } else { "Shift" },
+            pack::Btn::One => if one { "1" } else { "One" },
+            pack::Btn::Sort => "Sort",
+            pack::Btn::Tab(i) => pack::TABS[i],
+        };
+        centred(v, pack::btn_rect(b, focus), if matches!(b, pack::Btn::Tab(_)) { 0.75 } else { 0.55 }, text);
     }
     // The count and wear bar of every stack that has come up, in its cell seen at its top.
     for l in sc.lays.iter().filter(|l| l.grow >= 1.0) {

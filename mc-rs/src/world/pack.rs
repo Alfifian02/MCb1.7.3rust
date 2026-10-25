@@ -13,6 +13,10 @@
 //! `Mat::at` puts a cloth unit in the world, `Mat::touch` takes a finger back to one (so `slot_at` is still asked in units), and
 //! `scene` is everything that lies on it, flat patches and item stacks, for `render::items`. Text and numbers stay HUD (`lib.rs`
 //! projects them from `Mat::at`).
+//! The cloth is one end of a TABLE that stays where it is: the main cloth (zones + the quick-select belt), a small crafting cloth in
+//! front of it (nearer the player), and an armor stand at its right. The camera is what moves (`rig(aspect, focus)`): a finger
+//! dragging on empty cloth or ground pans it flat over the table, four 3D tabs jump it to a part (`tab_focus`), and four 3D buttons
+//! (close, shift-click, place one, sort) lie at the edges of the view (`btn_rect`), so the flat HUD buttons are hidden while it is open.
 //! ponytail: the cloth is axis-aligned (spread along x or z, whichever the player faces more) and the crafting grid stays 2 x 2 (a workbench still opens its own 3 x 3).
 
 use glam::{Mat4, Vec3};
@@ -94,16 +98,21 @@ const GAP: f32 = 3.0;
 /// Touch slop around a cell, in units (less than half the smallest gap, so neighbours never overlap).
 const PAD: f32 = 0.4;
 
-/// The crafting mat (2 x 2 grid, arrow, result) and the worn armor, left; the zones of the categories, right; the quick-select row below.
-pub const CRAFT: [f32; 4] = [8.0, 24.0, 104.0, 86.0];
-pub const WEAR: [f32; 4] = [8.0, 114.0, 104.0, 44.0];
-pub const QUICK: [f32; 4] = [64.0, 189.0, 272.0, 32.0];
+/// The quick-select belt along the near edge of the main cloth, and the zones of the categories above it.
+pub const QUICK: [f32; 4] = [64.0, 192.0, 272.0, 32.0];
 pub const ZONES: [(Cat, [f32; 4]); 4] = [
-    (Cat::Tools, [118.0, 24.0, 140.0, 80.0]),
-    (Cat::Food, [262.0, 24.0, 130.0, 80.0]),
-    (Cat::Materials, [118.0, 108.0, 176.0, 78.0]),
-    (Cat::Misc, [298.0, 108.0, 94.0, 78.0]),
+    (Cat::Tools, [8.0, 8.0, 190.0, 86.0]),
+    (Cat::Food, [202.0, 8.0, 190.0, 86.0]),
+    (Cat::Materials, [8.0, 98.0, 250.0, 86.0]),
+    (Cat::Misc, [262.0, 98.0, 130.0, 86.0]),
 ];
+/// The crafting cloth (2 x 2 grid, arrow, result): its own small cloth in front of the main one, nearer the player. Units go past
+/// `W` x `H` here: the table is bigger than the main cloth.
+pub const CRAFT: [f32; 4] = [92.0, 240.0, 216.0, 88.0];
+/// The armor stand beside the main cloth (player's right): four slots, helmet first.
+pub const STAND: [f32; 4] = [408.0, 24.0, 52.0, 150.0];
+/// Everything the screen has (a margin around it): the ground check, and the reach of the camera.
+pub const TABLE: [f32; 4] = [-10.0, -10.0, 490.0, 344.0];
 
 /// The room items get in a zone (a label's height above, a margin around): x, y, w, h.
 pub fn inner(r: [f32; 4]) -> [f32; 4] {
@@ -152,12 +161,12 @@ fn flow(inner: [f32; 4], items: &[(usize, f32)]) -> (Vec<(f32, f32)>, f32) {
 /// main slot, laid in the zone of its category in slot order.
 pub fn layout(inv: &Inventory) -> Layout {
     let mut cells = Vec::new();
-    for (i, (x, y)) in [(14.0, 34.0), (40.0, 34.0), (14.0, 60.0), (40.0, 60.0)].into_iter().enumerate() {
-        cells.push(Cell { id: SlotId::Grid(i), r: [x, y, 24.0, 24.0] });
+    for (i, (x, y)) in [(104.0, 248.0), (140.0, 248.0), (104.0, 284.0), (140.0, 284.0)].into_iter().enumerate() {
+        cells.push(Cell { id: SlotId::Grid(i), r: [x, y, 32.0, 32.0] });
     }
-    cells.push(Cell { id: SlotId::Result, r: [78.0, 46.0, 28.0, 28.0] });
+    cells.push(Cell { id: SlotId::Result, r: [218.0, 264.0, 40.0, 40.0] });
     for i in 0..4 {
-        cells.push(Cell { id: SlotId::Inv(MAIN + 3 - i), r: [12.0 + 24.0 * i as f32, 124.0, 22.0, 22.0] }); // helmet first
+        cells.push(Cell { id: SlotId::Inv(MAIN + 3 - i), r: [STAND[0] + 13.0, STAND[1] + 12.0 + 34.0 * i as f32, 26.0, 26.0] }); // helmet first, at the far end of the stand
     }
     for i in 0..9 {
         cells.push(Cell { id: SlotId::Inv(i), r: [QUICK[0] + 3.0 + 30.0 * i as f32, QUICK[1] + 3.0, 26.0, 26.0] });
@@ -178,27 +187,114 @@ fn inside(r: [f32; 4], x: f32, y: f32) -> bool {
     x >= r[0] && x < r[0] + r[2] && y >= r[1] && y < r[1] + r[3]
 }
 
+/// The cell a touch at `(x, y)` cloth units is on, if it is on one (a filled main slot, or a fixed place).
+fn cell_at(inv: &Inventory, x: f32, y: f32) -> Option<SlotId> {
+    layout(inv).cells.iter().find(|c| inside([c.r[0] - PAD, c.r[1] - PAD, c.r[2] + 2.0 * PAD, c.r[3] + 2.0 * PAD], x, y)).map(|c| c.id)
+}
+
+/// Whether `id` has a cell on the cloth: a filled main slot or a fixed place, but not the free slot an empty zone stands for.
+pub fn has_cell(inv: &Inventory, id: SlotId) -> bool {
+    layout(inv).cells.iter().any(|c| c.id == id)
+}
+
 /// Which slot a touch at `(x, y)` cloth units is on (`Mat::touch` gives them): a cell, or the empty cloth of a zone (then the first
 /// free main slot, so a stack held on the cursor is put down where it lies and shows in its own zone from the next frame).
 pub fn slot_at(inv: &Inventory, x: f32, y: f32) -> Option<SlotId> {
-    if let Some(c) = layout(inv).cells.iter().find(|c| inside([c.r[0] - PAD, c.r[1] - PAD, c.r[2] + 2.0 * PAD, c.r[3] + 2.0 * PAD], x, y)) {
-        return Some(c.id);
-    }
-    ZONES.iter().any(|(_, r)| inside(*r, x, y)).then(|| (9..MAIN).find(|&i| inv.slots[i].is_none()).map(SlotId::Inv)).flatten()
+    cell_at(inv, x, y).or_else(|| ZONES.iter().any(|(_, r)| inside(*r, x, y)).then(|| (9..MAIN).find(|&i| inv.slots[i].is_none()).map(SlotId::Inv)).flatten())
 }
 
-/// The two touch toggles (0 shift-click, 1 place one), under the armor.
-pub fn toggle(which: usize) -> [f32; 4] {
-    [12.0 + 22.0 * which as f32, 164.0, 18.0, 18.0]
-}
-
-pub fn on_toggle(which: usize, x: f32, y: f32) -> bool {
-    inside(toggle(which), x, y)
-}
-
-/// A touch on the cloth at all (outside it a held stack is thrown).
+/// A touch on a cloth of the table at all (on the ground around it a held stack is thrown).
 pub fn in_mat(x: f32, y: f32) -> bool {
-    inside([0.0, 0.0, W, H], x, y)
+    [[0.0, 0.0, W, H], CRAFT, STAND].into_iter().any(|r| inside(r, x, y))
+}
+
+// ---- The camera over the table, and the 3D buttons at the edges of its view ----
+
+/// What the camera frames, in units: the content plus the strips of buttons (right, `SIDE` wide) and tabs (near, `EDGE` high).
+pub const VIEW: [f32; 2] = [300.0, 176.0];
+const SIDE: f32 = 26.0;
+const EDGE: f32 = 24.0;
+
+/// The camera's reach over the table: the centre of the view stays so that the view never leaves the table by more than 20 units.
+pub fn clamp_focus((x, y): (f32, f32)) -> (f32, f32) {
+    let (hx, hy) = (VIEW[0] * 0.5, VIEW[1] * 0.5);
+    let (x0, y0, x1, y1) = (TABLE[0] - 20.0 + hx, TABLE[1] - 20.0 + hy, TABLE[0] + TABLE[2] + 20.0 - hx, TABLE[1] + TABLE[3] + 20.0 - hy);
+    (x.clamp(x0, x1), y.clamp(y0, y1))
+}
+
+/// Where the view is centred to show a part: 0 the main cloth, 1 the crafting cloth, 2 the armor stand, 3 the quick-select belt (the
+/// content sits a little up and left of the view's centre, by the strips).
+pub fn tab_focus(i: usize) -> (f32, f32) {
+    let (dx, dy) = (SIDE * 0.5, EDGE * 0.5);
+    let (x, y) = match i {
+        0 => (W * 0.5, 96.0),
+        1 => (CRAFT[0] + CRAFT[2] * 0.5, CRAFT[1] + CRAFT[3] * 0.5),
+        2 => (STAND[0] + STAND[2] * 0.5, STAND[1] + STAND[3] * 0.5),
+        _ => (W * 0.5, QUICK[1] + QUICK[3] * 0.5),
+    };
+    clamp_focus((x + dx, y + dy))
+}
+
+pub const TABS: [&str; 4] = ["Pack", "Crafting", "Armor", "Quick"];
+
+/// The 3D buttons: close, shift-click, place one, sort, then the four tabs.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Btn {
+    Close,
+    Shift,
+    One,
+    Sort,
+    Tab(usize),
+}
+
+pub const BTNS: [Btn; 8] = [Btn::Close, Btn::Shift, Btn::One, Btn::Sort, Btn::Tab(0), Btn::Tab(1), Btn::Tab(2), Btn::Tab(3)];
+
+/// The height a finger is taken to touch a button at (the top of the buttons).
+pub const BTN_H: f32 = 0.075;
+
+/// A button's place in units, for a view centred on `focus`: the four buttons down the right edge, the tabs along the near edge.
+pub fn btn_rect(b: Btn, (fx, fy): (f32, f32)) -> [f32; 4] {
+    let i = match b {
+        Btn::Tab(i) => return [fx - 130.0 + 66.0 * i as f32, fy + VIEW[1] * 0.5 - EDGE + 2.0, 62.0, 20.0],
+        Btn::Close => 0.0,
+        Btn::Shift => 1.0,
+        Btn::One => 2.0,
+        Btn::Sort => 3.0,
+    };
+    [fx + VIEW[0] * 0.5 - SIDE + 2.0, fy - VIEW[1] * 0.5 + 6.0 + 30.0 * i, 22.0, 22.0]
+}
+
+pub fn btn_at(focus: (f32, f32), x: f32, y: f32) -> Option<Btn> {
+    BTNS.into_iter().find(|&b| inside(btn_rect(b, focus), x, y))
+}
+
+/// The tab whose part the view is nearest to.
+pub fn active_tab(focus: (f32, f32)) -> usize {
+    let d = |i: usize| {
+        let t = tab_focus(i);
+        (t.0 - focus.0).powi(2) + (t.1 - focus.1).powi(2)
+    };
+    (0..4).min_by(|&a, &b| d(a).total_cmp(&d(b))).unwrap_or(0)
+}
+
+/// Sort button: the main slots 9..36 merged (same item and damage, up to `max_stack`) and ordered by zone, id and damage.
+pub fn sort(inv: &mut Inventory) {
+    let mut v: Vec<ItemStack> = inv.slots[9..MAIN].iter().flatten().copied().collect();
+    v.sort_by_key(|s| (category(s.id) as u8, s.id, s.damage));
+    let mut out: Vec<ItemStack> = Vec::with_capacity(v.len());
+    for mut s in v {
+        let (id, damage) = (s.id, s.damage);
+        for o in out.iter_mut().filter(|o| o.id == id && o.damage == damage) {
+            let n = s.count.min(items::max_stack(o.id).saturating_sub(o.count));
+            (o.count, s.count) = (o.count + n, s.count - n);
+        }
+        if s.count > 0 {
+            out.push(s);
+        }
+    }
+    for (i, slot) in inv.slots[9..MAIN].iter_mut().enumerate() {
+        *slot = out.get(i).copied();
+    }
 }
 
 // ---- The cloth in the world ----
@@ -242,12 +338,12 @@ pub fn ease(t: f32) -> f32 {
 }
 
 impl Mat {
-    /// Nine block columns under the footprint (corners, edge middles, centre).
-    fn samples(c: Vec3, along_x: bool) -> [(i32, i32); 9] {
-        let (hx, hz) = if along_x { (LEN * 0.5, WID * 0.5) } else { (WID * 0.5, LEN * 0.5) };
+    /// Nine block columns under the table (corners, edge middles, centre): the main cloth, the crafting cloth and the stand all lie on it.
+    fn samples(&self) -> [(i32, i32); 9] {
         let mut v = [(0, 0); 9];
-        for (n, (i, j)) in [(-1.0, -1.0), (0.0, -1.0), (1.0, -1.0), (-1.0, 0.0), (0.0, 0.0), (1.0, 0.0), (-1.0, 1.0), (0.0, 1.0), (1.0, 1.0)].into_iter().enumerate() {
-            v[n] = ((c.x + i * hx * 0.98).floor() as i32, (c.z + j * hz * 0.98).floor() as i32);
+        for (n, (i, j)) in [(0.01, 0.01), (0.5, 0.01), (0.99, 0.01), (0.01, 0.5), (0.5, 0.5), (0.99, 0.5), (0.01, 0.99), (0.5, 0.99), (0.99, 0.99)].into_iter().enumerate() {
+            let p = self.at(TABLE[0] + TABLE[2] * i, TABLE[1] + TABLE[3] * j, 0.0);
+            v[n] = (p.x.floor() as i32, p.z.floor() as i32);
         }
         v
     }
@@ -264,7 +360,7 @@ impl Mat {
     /// Flat ground: under all nine samples a full block (`floor`) with nothing (`air`) in the cell on it.
     pub fn fits(&self, air: &dyn Fn(i32, i32, i32) -> bool, floor: &dyn Fn(i32, i32, i32) -> bool) -> bool {
         let top = self.c.y as i32;
-        Self::samples(self.c, self.along_x).iter().all(|&(x, z)| floor(x, top - 1, z) && air(x, top, z))
+        self.samples().iter().all(|&(x, z)| floor(x, top - 1, z) && air(x, top, z))
     }
 
     pub fn lay(point: Vec3, eye: Vec3, top: i32, air: &dyn Fn(i32, i32, i32) -> bool, floor: &dyn Fn(i32, i32, i32) -> bool) -> Option<Mat> {
@@ -280,7 +376,7 @@ impl Mat {
     /// Still worth keeping: near enough, and the ground under it is still there.
     pub fn valid(&self, eye: Vec3, floor: &dyn Fn(i32, i32, i32) -> bool) -> bool {
         let y = self.c.y as i32 - 1;
-        (self.c - eye).length() < AWAY && Self::samples(self.c, self.along_x).iter().all(|&(x, z)| floor(x, y, z))
+        (self.c - eye).length() < AWAY && self.samples().iter().all(|&(x, z)| floor(x, y, z))
     }
 
     pub fn tick(&mut self, dt: f32) -> Step {
@@ -342,8 +438,8 @@ const SPRITE_FILL: f32 = 0.95;
 pub const STAGGER: f32 = 0.025;
 pub const POP: f32 = 0.2;
 
-/// The view of the open cloth: from 78 degrees down, 60 degrees tall (narrower than the game's 70, so the near edge is less than a third
-/// wider than the far one), the cloth filling `FIT` of the frame (the flat screen left 4% too).
+/// The view of the open table: from 78 degrees down, 60 degrees tall (narrower than the game's 70, so the near edge is less than a third
+/// wider than the far one), the view (`VIEW`) filling `FIT` of the frame.
 pub const PITCH: f32 = 1.361_357;
 pub const FOV: f32 = 1.047_198;
 const FIT: f32 = 0.96;
@@ -370,9 +466,9 @@ fn local_vp(aspect: f32, s: f32, d: f32) -> Mat4 {
     Mat4::perspective_rh(FOV, aspect, 0.05, 64.0) * Mat4::look_at_rh(tgt - forward(0.0, PITCH) * d, tgt, Vec3::Y)
 }
 
-/// The four corners of the cloth in that frame, on its top.
+/// The four corners of the view (`VIEW`, centred) in that frame, on the cloth's top.
 fn corners() -> [Vec3; 4] {
-    [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)].map(|(x, z)| Vec3::new(x * WID * 0.5, 0.0, z * LEN * 0.5))
+    [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)].map(|(x, z)| Vec3::new(x * VIEW[0] * UNIT * 0.5, 0.0, z * VIEW[1] * UNIT * 0.5))
 }
 
 /// A point on screen in -1..1, `None` behind the camera.
@@ -381,7 +477,7 @@ fn ndc(vp: &Mat4, c: Vec3) -> Option<(f32, f32)> {
     (p.w > 0.0).then(|| (p.x / p.w, p.y / p.w))
 }
 
-/// The nearest the camera can be, looking at the point `s` ahead of the centre, for every corner of the cloth to be within `FIT`.
+/// The nearest the camera can be, looking at the point `s` ahead of the centre, for every corner of the view to be within `FIT`.
 fn fit_dist(aspect: f32, s: f32) -> f32 {
     let (mut lo, mut hi) = (0.1_f32, 20.0_f32);
     for _ in 0..20 {
@@ -422,10 +518,11 @@ impl Mat {
         ((d.dot(r) / WID + 0.5) * W, (0.5 - d.dot(u) / LEN) * H)
     }
 
-    /// The camera pose that frames the cloth: looking down at it from behind (the player's side), as near as keeps all of it within
-    /// `FIT` of a frame of this `aspect`, and vertically centred (the look-at point slides along the cloth until the top and bottom
-    /// margins match; a few rounds are plenty).
-    pub fn rig(&self, aspect: f32) -> Rig {
+    /// The camera pose that frames the view (`VIEW` units) centred on the cloth unit `focus`: looking down at it from behind (the
+    /// player's side), as near as keeps all of it within `FIT` of a frame of this `aspect`, and vertically centred (the look-at point
+    /// slides along the cloth until the top and bottom margins match; a few rounds are plenty). Panning is a new `focus`: the pose
+    /// only slides, its angle and distance stay.
+    pub fn rig(&self, aspect: f32, focus: (f32, f32)) -> Rig {
         let mut s = 0.0_f32;
         for _ in 0..6 {
             let (d, ys) = {
@@ -438,14 +535,14 @@ impl Mat {
         }
         let (u, _) = self.axes();
         let yaw = u.x.atan2(-u.z);
-        let tgt = self.c + Vec3::Y * REST + u * s;
+        let tgt = self.at(focus.0, focus.1, REST) + u * s;
         Rig { pos: tgt - forward(yaw, PITCH) * fit_dist(aspect, s), yaw, pitch: PITCH, fov: FOV }
     }
 
     /// The camera while the cloth spreads or rolls up: from `from` (where the eye is) toward the framing pose, as far as the cloth is
     /// spread, so it arrives as the screen opens and goes back as the cloth rolls up.
-    pub fn glide(&self, from: Rig, aspect: f32) -> Rig {
-        let (to, p) = (self.rig(aspect), ease(self.t));
+    pub fn glide(&self, from: Rig, aspect: f32, focus: (f32, f32)) -> Rig {
+        let (to, p) = (self.rig(aspect, focus), ease(self.t));
         let turn = (to.yaw - from.yaw + PI).rem_euclid(TAU) - PI;
         Rig { pos: from.pos.lerp(to.pos, p), yaw: from.yaw + turn * p, pitch: from.pitch + (to.pitch - from.pitch) * p, fov: from.fov + (to.fov - from.fov) * p }
     }
@@ -565,26 +662,33 @@ pub struct Scene {
     pub lays: Vec<Lay>,
 }
 
-/// The most of each there can be (4 grid + result + 4 worn + 9 quick + 27 main + the held stack; the patches, frames, toggles, the
-/// selection and the arrow), and the boxes `render::items` keeps for the cloth: its two, the flats, and a stack with its shadow as two.
-pub const MAX_FLATS: usize = 30;
+/// The most of each there can be: 4 grid + result + 4 worn + 9 quick + 27 main + the held stack of stacks; and of patches: the 4 zones and
+/// the belt, the crafting cloth, the stand and its rail, the arrow's two, the 18 frames of the fixed places, the quick-select ring and
+/// the 8 buttons. `BOXES` is what `render::items` keeps for the table: the main cloth's two, the flats, and a stack with its shadow as two.
+pub const MAX_FLATS: usize = 37;
 pub const MAX_LAYS: usize = 46;
 pub const BOXES: usize = 2 + MAX_FLATS + 2 * MAX_LAYS;
 
 /// The patches and the stacks. `get` = what a slot holds (`Screen::get`), `hot` the selected quick slot, `(one, shift)` the two toggles,
 /// `age` the seconds since the cloth finished spreading, `held` = the cursor stack, the finger's place (units) and how far it is lifted
-/// (0..1).
-pub fn scene(inv: &Inventory, get: &dyn Fn(SlotId) -> Option<ItemStack>, hot: usize, (one, shift): (bool, bool), age: f32, held: Option<(ItemStack, (f32, f32), f32)>) -> Scene {
+/// (0..1), `focus` where the view is centred (the buttons lie at its edges).
+pub fn scene(inv: &Inventory, get: &dyn Fn(SlotId) -> Option<ItemStack>, hot: usize, (one, shift): (bool, bool), age: f32, held: Option<(ItemStack, (f32, f32), f32)>, focus: (f32, f32)) -> Scene {
     const PATCH: (u8, u8) = (24, 0); // sandstone: the zones, lighter than the cloth
     const FRAME: (u8, u8) = (35, 7); // dark grey wool: where the pack has a fixed place
+    const WOOL: (u8, u8) = (35, 12); // the cloth's own brown
+    const WOOD: (u8, u8) = (5, 0); // planks: the stand, the idle tabs
     let layout = layout(inv);
     let mut flats = Vec::with_capacity(MAX_FLATS);
-    for r in [CRAFT, WEAR, QUICK].into_iter().chain(ZONES.iter().map(|z| z.1)) {
+    for r in ZONES.iter().map(|z| z.1).chain([QUICK]) {
         flats.push(Flat { r, lo: 0.04, hi: 0.046, tile: PATCH });
     }
+    // The crafting cloth lies on the ground like the main one; the stand is a plank base with a rail at its far end.
+    flats.push(Flat { r: CRAFT, lo: 0.01, hi: 0.04, tile: WOOL });
+    flats.push(Flat { r: STAND, lo: 0.01, hi: 0.046, tile: WOOD });
+    flats.push(Flat { r: [STAND[0] + 2.0, STAND[1] - 6.0, STAND[2] - 4.0, 6.0], lo: 0.01, hi: 0.07, tile: WOOD });
     // The arrow from the 2 x 2 grid to its result.
-    for r in [[64.0, 58.0, 9.0, 3.0], [71.0, 55.0, 3.0, 9.0]] {
-        flats.push(Flat { r, lo: 0.046, hi: 0.049, tile: (35, 0) });
+    for r in [[184.0, 281.0, 24.0, 5.0], [200.0, 276.0, 5.0, 15.0]] {
+        flats.push(Flat { r, lo: 0.04, hi: 0.044, tile: (35, 0) });
     }
     let fixed = |id: SlotId| matches!(id, SlotId::Grid(_) | SlotId::Result) || matches!(id, SlotId::Inv(i) if i < 9 || i >= MAIN);
     for c in &layout.cells {
@@ -595,14 +699,18 @@ pub fn scene(inv: &Inventory, get: &dyn Fn(SlotId) -> Option<ItemStack>, hot: us
             flats.push(Flat { r: c.r, lo: 0.046, hi: 0.052, tile: FRAME });
         }
     }
-    // The two touch toggles under the armor: shift-click (green, 2) and place one (orange, 1), blue when off.
-    for (which, on) in [(0_usize, shift), (1, one)] {
-        let tile = match (on, which) {
-            (false, _) => (35, 11),
-            (true, 0) => (35, 5),
-            (true, _) => (35, 1),
+    // The 3D buttons at the edges of the view: close (red), shift-click (green when on, 2), place one (orange when on, 1), sort (yellow),
+    // and the four tabs (lime when the view is on that part).
+    let tab = active_tab(focus);
+    for b in BTNS {
+        let tile = match b {
+            Btn::Close => (35, 14),
+            Btn::Shift => if shift { (35, 5) } else { (35, 11) },
+            Btn::One => if one { (35, 1) } else { (35, 11) },
+            Btn::Sort => (35, 4),
+            Btn::Tab(i) => if i == tab { (35, 5) } else { WOOD },
         };
-        flats.push(Flat { r: toggle(which), lo: 0.046, hi: 0.052, tile });
+        flats.push(Flat { r: btn_rect(b, focus), lo: 0.06, hi: 0.075, tile });
     }
     let mut lays = Vec::with_capacity(MAX_LAYS);
     let mut n = 0.0;
@@ -655,7 +763,7 @@ mod tests {
                 assert_eq!(n, usize::from(inv.slots[i].is_some() || i < 9), "slot {i} of {ids:?}");
             }
             for c in &lay.cells {
-                assert!(c.r[0] >= 0.0 && c.r[1] >= 0.0 && c.r[0] + c.r[2] <= W && c.r[1] + c.r[3] <= H, "{c:?} off the cloth");
+                assert!(c.r[0] >= TABLE[0] && c.r[1] >= TABLE[1] && c.r[0] + c.r[2] <= TABLE[0] + TABLE[2] && c.r[1] + c.r[3] <= TABLE[1] + TABLE[3], "{c:?} off the table");
                 match c.id {
                     SlotId::Inv(i) if (9..MAIN).contains(&i) => {
                         let (_, z) = ZONES.iter().find(|(cat, _)| *cat == category(inv.slots[i].unwrap().id)).unwrap();
@@ -693,7 +801,10 @@ mod tests {
         let (x, y) = mid(ZONES[1].1); // an empty Food zone: the first free place
         assert_eq!(slot_at(&inv, x, y), Some(SlotId::Inv(9)));
         assert_eq!(slot_at(&inv, -2.0, -2.0), None);
-        assert!(!in_mat(-2.0, -2.0) && in_mat(W / 2.0, H / 2.0));
+        assert!(!in_mat(-2.0, -2.0) && in_mat(W / 2.0, H / 2.0) && in_mat(CRAFT[0] + 4.0, CRAFT[1] + 4.0) && in_mat(STAND[0] + 4.0, STAND[1] + 4.0) && !in_mat(W + 2.0, H + 40.0));
+        let (x, y) = mid(cell(SlotId::Inv(MAIN + 3))); // the stand's helmet slot is the first of it
+        assert_eq!((slot_at(&inv, x, y), y < cell(SlotId::Inv(MAIN))[1]), (Some(SlotId::Inv(MAIN + 3)), true), "helmet first, at the far end");
+        assert!(has_cell(&inv, SlotId::Inv(12)) && !has_cell(&inv, SlotId::Inv(9)), "a filled slot has a cell, the free one an empty zone stands for has none");
     }
 
     // ---- the cloth in the world ----
@@ -729,38 +840,115 @@ mod tests {
         assert!((cam.forward() - forward(2.1, 0.7)).length() < 1e-6);
     }
 
+    /// Where the view is centred, in the places the camera goes: the four parts and somewhere between.
+    fn foci() -> [(f32, f32); 5] {
+        [tab_focus(0), tab_focus(1), tab_focus(2), tab_focus(3), (230.0, 150.0)]
+    }
+
     #[test]
-    fn the_camera_frames_the_cloth_from_its_players_side_and_centred() {
+    fn the_camera_frames_the_view_from_its_players_side_and_centred() {
         for m in mats() {
             let (u, _) = m.axes();
             for aspect in [2.22_f32, 1.78, 1.33] {
-                let rig = m.rig(aspect);
-                let f = forward(rig.yaw, rig.pitch);
-                assert!((Vec3::new(f.x, 0.0, f.z).normalize() - u).length() < 1e-4, "looks along the cloth, away from the player: {m:?}");
-                assert!((rig.pos - m.c).dot(u) < 0.0 && rig.pos.y > m.c.y + 0.5, "behind and above it: {rig:?}");
-                let v = view_proj(&rig, aspect);
-                let p: Vec<(f32, f32)> = [(0.0, 0.0), (W, 0.0), (0.0, H), (W, H)].map(|(x, y)| { let n = v.project_point3(m.at(x, y, REST)); (n.x, n.y) }).to_vec();
-                let (wide, tall) = (p.iter().fold(0.0_f32, |a, q| a.max(q.0.abs())), p.iter().fold(0.0_f32, |a, q| a.max(q.1.abs())));
-                assert!(wide <= 0.97 && tall <= 0.97, "all of it in the frame: {wide} {tall} at {aspect}");
-                assert!(wide >= 0.93 || tall >= 0.93, "and nearly filling it: {wide} {tall} at {aspect}");
-                assert!((p[0].1 + p[3].1).abs() < 0.03 && p[0].0 < 0.0 && p[0].1 > 0.0 && p[3].0 > 0.0 && p[3].1 < 0.0, "far left is top left, centred: {p:?}");
+                for (fx, fy) in foci() {
+                    let rig = m.rig(aspect, (fx, fy));
+                    let f = forward(rig.yaw, rig.pitch);
+                    assert!((Vec3::new(f.x, 0.0, f.z).normalize() - u).length() < 1e-4, "looks along the cloth, away from the player: {m:?}");
+                    assert!(rig.pos.y > m.c.y + 0.5, "above it: {rig:?}");
+                    let v = view_proj(&rig, aspect);
+                    let (hx, hy) = (VIEW[0] * 0.5, VIEW[1] * 0.5);
+                    let p: Vec<(f32, f32)> = [(fx - hx, fy - hy), (fx + hx, fy - hy), (fx - hx, fy + hy), (fx + hx, fy + hy)].map(|(x, y)| { let n = v.project_point3(m.at(x, y, REST)); (n.x, n.y) }).to_vec();
+                    let (wide, tall) = (p.iter().fold(0.0_f32, |a, q| a.max(q.0.abs())), p.iter().fold(0.0_f32, |a, q| a.max(q.1.abs())));
+                    assert!(wide <= 0.97 && tall <= 0.97, "all of the view in the frame: {wide} {tall} at {aspect}");
+                    assert!(wide >= 0.93 || tall >= 0.93, "and nearly filling it: {wide} {tall} at {aspect}");
+                    assert!((p[0].1 + p[3].1).abs() < 0.03 && p[0].0 < 0.0 && p[0].1 > 0.0 && p[3].0 > 0.0 && p[3].1 < 0.0, "far left is top left, centred: {p:?}");
+                }
             }
         }
+    }
+
+    /// Panning only slides the camera: the same angle and height, moved along the ground by the cloth units the focus moved.
+    #[test]
+    fn a_pan_slides_the_camera_flat() {
+        for m in mats() {
+            let (a, b) = (m.rig(2.0, (200.0, 100.0)), m.rig(2.0, (260.0, 190.0)));
+            assert!((a.pitch, a.yaw, a.fov) == (b.pitch, b.yaw, b.fov) && (a.pos.y - b.pos.y).abs() < 1e-4, "same angle and height");
+            let slid = m.at(260.0, 190.0, 0.0) - m.at(200.0, 100.0, 0.0);
+            assert!((b.pos - a.pos - slid).length() < 1e-4, "{:?} vs {slid:?}", b.pos - a.pos);
+        }
+    }
+
+    #[test]
+    fn the_table_stays_in_reach_and_every_tab_shows_its_part() {
+        assert_eq!(clamp_focus((-1e4, 1e4)), clamp_focus(clamp_focus((-1e4, 1e4))));
+        let parts = [[0.0, 0.0, W, 190.0], CRAFT, STAND, QUICK];
+        for (i, part) in parts.into_iter().enumerate() {
+            let f = tab_focus(i);
+            assert_eq!(clamp_focus(f), f, "tab {i} is within reach");
+            // The content is the view less the strips: the button column on the right and the tabs along the near edge.
+            let (cx, cy, cw, ch) = (f.0 - VIEW[0] * 0.5, f.1 - VIEW[1] * 0.5, VIEW[0] - SIDE, VIEW[1] - EDGE);
+            let w = part[2].min(cw - 4.0);
+            assert!(part[0] + w * 0.5 >= cx && part[0] + w * 0.5 <= cx + cw && part[1] + part[3].min(ch) * 0.5 >= cy && part[1] + part[3].min(ch) * 0.5 <= cy + ch, "tab {i} has its part in the content: {part:?} in {cx} {cy} {cw} {ch}");
+            assert_eq!(active_tab(f), i);
+        }
+        for p in [CRAFT, STAND, QUICK].into_iter().chain(ZONES.iter().map(|z| z.1)).chain([[0.0, 0.0, W, H]]) {
+            assert!(p[0] >= TABLE[0] && p[1] >= TABLE[1] && p[0] + p[2] <= TABLE[0] + TABLE[2] && p[1] + p[3] <= TABLE[1] + TABLE[3], "{p:?} on the table");
+        }
+        let rects = [[0.0, 0.0, W, H], CRAFT, STAND];
+        for (a, r) in rects.iter().enumerate() {
+            for q in &rects[a + 1..] {
+                let hit = r[0] < q[0] + q[2] && q[0] < r[0] + r[2] && r[1] < q[1] + q[3] && q[1] < r[1] + r[3];
+                assert!(!hit, "{r:?} overlaps {q:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_buttons_lie_at_the_edges_of_the_view_and_a_tap_names_them() {
+        for focus in foci() {
+            let (hx, hy) = (VIEW[0] * 0.5, VIEW[1] * 0.5);
+            let content = [focus.0 - hx, focus.1 - hy, VIEW[0] - SIDE, VIEW[1] - EDGE];
+            for (a, b) in BTNS.into_iter().enumerate() {
+                let r = btn_rect(b, focus);
+                assert!(r[0] >= focus.0 - hx && r[1] >= focus.1 - hy && r[0] + r[2] <= focus.0 + hx && r[1] + r[3] <= focus.1 + hy, "{b:?} inside the view");
+                assert!(r[0] >= content[0] + content[2] - 0.01 || r[1] >= content[1] + content[3] - 0.01, "{b:?} is in a strip, not over the content");
+                assert_eq!(btn_at(focus, r[0] + r[2] * 0.5, r[1] + r[3] * 0.5), Some(b));
+                for c in &BTNS[a + 1..] {
+                    let q = btn_rect(*c, focus);
+                    assert!(!(r[0] < q[0] + q[2] && q[0] < r[0] + r[2] && r[1] < q[1] + q[3] && q[1] < r[1] + r[3]), "{b:?} overlaps {c:?}");
+                }
+            }
+            assert_eq!(btn_at(focus, focus.0 - hx + 5.0, focus.1 - hy + 5.0), None, "the content is not a button");
+        }
+    }
+
+    #[test]
+    fn sort_merges_and_orders_the_main_slots_only() {
+        let mut inv = Inventory::default();
+        inv.slots[3] = Some(ItemStack { id: 4, count: 7, damage: 0 }); // the belt is not touched
+        inv.slots[9] = Some(ItemStack { id: 4, count: 40, damage: 0 });
+        inv.slots[10] = st(268); // a sword
+        inv.slots[11] = Some(ItemStack { id: 4, count: 40, damage: 0 });
+        inv.slots[20] = st(297); // bread
+        sort(&mut inv);
+        let ids: Vec<(u16, u8)> = inv.slots[9..MAIN].iter().flatten().map(|s| (s.id, s.count)).collect();
+        assert_eq!(ids, [(268, 1), (297, 1), (4, 64), (4, 16)], "tools, food, then materials, merged up to a stack");
+        assert!(inv.slots[13..MAIN].iter().all(Option::is_none) && inv.slots[3].map(|s| s.count) == Some(7));
     }
 
     #[test]
     fn the_camera_glides_with_the_cloth() {
         let mut m = mats()[0];
         let from = Rig { pos: m.c + Vec3::new(0.0, 1.62, -2.0), yaw: 7.0, pitch: 0.2, fov: 1.2 }; // yaw 7.0 is 0.717 of a turn past 2 pi
-        let to = m.rig(2.0);
+        let (f, to) = (tab_focus(0), m.rig(2.0, tab_focus(0)));
         m.t = 0.0;
-        assert_eq!(m.glide(from, 2.0), from);
+        assert_eq!(m.glide(from, 2.0, f), from);
         m.t = 1.0;
-        let end = m.glide(from, 2.0);
+        let end = m.glide(from, 2.0, f);
         assert!((end.pos - to.pos).length() < 1e-5 && (end.pitch - to.pitch).abs() < 1e-6 && (end.fov - to.fov).abs() < 1e-6);
         assert!(((end.yaw - to.yaw + PI).rem_euclid(TAU) - PI).abs() < 1e-4, "the same way, by the short turn");
         m.t = 0.5;
-        let mid = m.glide(from, 2.0);
+        let mid = m.glide(from, 2.0, f);
         assert!(mid.pos.y < from.pos.y && mid.pos.y > to.pos.y && mid.pitch > from.pitch && mid.pitch < to.pitch);
     }
 
@@ -768,9 +956,9 @@ mod tests {
     fn a_finger_lands_on_the_unit_it_is_over() {
         let (size, aspect) = ((2400.0_f32, 1080.0_f32), 2400.0 / 1080.0);
         for m in mats() {
-            let rig = m.rig(aspect);
+            let rig = m.rig(aspect, (230.0, 150.0));
             let v = view_proj(&rig, aspect);
-            for (x, y) in [(5.0, 5.0), (200.0, 116.0), (395.0, 227.0), (64.0, 189.0), (300.0, 30.0)] {
+            for (x, y) in [(130.0, 80.0), (200.0, 116.0), (330.0, 210.0), (250.0, 189.0), (300.0, 30.0)] {
                 for h in [0.0, REST, HIT_H, 0.15] {
                     let (tx, ty) = m.touch(&rig, aspect, size, to_px(&v, m.at(x, y, h), size), h).expect("the plane is in front");
                     assert!((tx - x).abs() < 0.2 && (ty - y).abs() < 0.2, "({x}, {y}) at {h} came back ({tx}, {ty}) for {m:?}");
@@ -793,9 +981,10 @@ mod tests {
             SlotId::Inv(i) => inv.slots[i],
             _ => None,
         };
-        let sc = scene(&inv, &get, 0, (false, false), 10.0, None);
+        let focus = (200.0, 116.0);
+        let sc = scene(&inv, &get, 0, (false, false), 10.0, None, focus);
         for m in mats() {
-            let rig = m.rig(aspect);
+            let rig = m.rig(aspect, focus);
             let v = view_proj(&rig, aspect);
             let mut cubes = 0;
             for l in sc.lays.iter().filter(|l| l.id.is_some()) {
@@ -815,6 +1004,8 @@ mod tests {
             // Off every zone, nothing.
             let p = to_px(&v, m.at(W - 2.0, H - 2.0, REST), size);
             assert_eq!(pick(&inv, &sc.lays, &m, &rig, aspect, size, p), None);
+            let p = to_px(&v, m.at(STAND[0] + 4.0, STAND[1] + 4.0, REST), size); // the stand's rail, not a slot
+            assert_eq!(pick(&inv, &sc.lays, &m, &rig, aspect, size, p), None);
         }
     }
 
@@ -829,18 +1020,18 @@ mod tests {
             _ => st(1),
         };
         let held = Some((ItemStack { id: 268, count: 1, damage: 0 }, (200.0, 100.0), 1.0));
-        let sc = scene(&inv, &full, 3, (true, true), 100.0, held);
+        let sc = scene(&inv, &full, 3, (true, true), 100.0, held, tab_focus(0));
         assert!(sc.flats.len() <= MAX_FLATS && sc.lays.len() <= MAX_LAYS, "{} flats, {} stacks", sc.flats.len(), sc.lays.len());
         assert_eq!((sc.flats.len(), sc.lays.len()), (MAX_FLATS, MAX_LAYS), "the fullest scene is the budget");
         assert!(sc.lays.iter().all(|l| l.grow == 1.0) && sc.lays.last().is_some_and(|l| l.id.is_none() && l.lift > 0.0), "all grown; the held one floats");
-        assert!(sc.flats.iter().all(|f| f.hi > f.lo && f.lo >= 0.04), "above the cloth's top");
+        assert!(sc.flats.iter().all(|f| f.hi > f.lo && f.lo >= 0.01), "on the ground or above it");
         let top = |sc: &Scene| sc.lays.iter().filter(|l| l.id.is_some()).map(|l| l.top()).fold(0.0_f32, f32::max);
         assert!(top(&sc) < 0.2, "a cube is a little thing");
         // Just spread: nothing yet; then one more every STAGGER; the first ones fully grown while the last has not begun.
-        let n = |age: f32| scene(&inv, &full, 3, (false, false), age, None).lays.len();
+        let n = |age: f32| scene(&inv, &full, 3, (false, false), age, None, tab_focus(0)).lays.len();
         assert_eq!((n(0.0), n(STAGGER * 0.5), n(STAGGER * 1.5)), (0, 1, 2));
         assert_eq!(n(STAGGER * 44.0 + POP), 45);
-        let sc = scene(&inv, &full, 3, (false, false), POP, None);
+        let sc = scene(&inv, &full, 3, (false, false), POP, None, tab_focus(0));
         assert!(sc.lays[0].grow == 1.0 && sc.lays[1].grow < 1.0 && sc.lays[1].base() > sc.lays[0].base(), "the next is still dropping in");
     }
 
@@ -853,6 +1044,9 @@ mod tests {
             let m = Mat::plan(p, eye, 64);
             assert_eq!((m.fits(&air, &floor), Mat::lay(p, eye, 64, &air, &floor) == Some(m)), (ok, ok));
         }
+        // The whole table needs the ground, not only the main cloth: a hole at the stand's side (x = 1) stops it, the main cloth alone would fit.
+        let holed = |x: i32, y: i32, _z: i32| y == 63 && x != 1;
+        assert!(!Mat::plan(Vec3::new(3.3, 64.0, 3.5), eye, 64).fits(&air, &holed) && Mat::plan(Vec3::new(3.5, 64.0, 3.5), eye, 64).fits(&air, &holed));
         let shown = Mat::plan(Vec3::new(3.5, 64.0, 3.5), eye, 64).shown();
         assert_eq!((shown.boxes().len(), shown.dir), (1, 0), "the preview is the spread cloth alone");
     }
