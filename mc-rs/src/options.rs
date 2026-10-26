@@ -620,7 +620,7 @@ impl OptionsUi {
                 .enumerate()
                 .map(|(i, a)| {
                     let b = if self.wait_pad == Some(i) { "> <" } else { st.pad.binds[i].name() };
-                    Wid { act: Act::PadBind(i), r: [cell(i).0, cell(i).1, 150.0, 20.0], label: format!("{}: {b}", a.name()) }
+                    Wid { act: Act::PadBind(i), r: [cell(i).0, top + 20.0 * (i / 2) as f32, 150.0, 18.0], label: format!("{}: {b}", a.name()) }
                 })
                 .collect(),
             OptScr::PadTune => (0..PadCfg::knob_count())
@@ -641,9 +641,13 @@ impl OptionsUi {
             w.push(Wid { act: Act::TabPad, r: [hw + 1.0, 20.0, 99.0, 14.0], label: "Controller".into() });
         }
         if matches!(self.scr, OptScr::Pad | OptScr::PadTune) {
-            w.push(wide(Act::PadPage, top + 144.0, if self.scr == OptScr::Pad { "Tuning..." } else { "Buttons..." }));
+            // The buttons page has eight rows (18 px, 20 apart): Tuning and Done share the row under them.
+            let label = if self.scr == OptScr::Pad { "Tuning..." } else { "Buttons..." };
+            w.push(Wid { act: Act::PadPage, r: [hw - 100.0, top + 168.0, 98.0, 20.0], label: label.into() });
         }
-        if self.scr != OptScr::Atmos {
+        if matches!(self.scr, OptScr::Pad | OptScr::PadTune) {
+            w.push(Wid { act: Act::Done, r: [hw + 2.0, top + 168.0, 98.0, 20.0], label: "Done".into() });
+        } else if self.scr != OptScr::Atmos {
             w.push(wide(Act::Done, top + 168.0, "Done"));
         }
         w

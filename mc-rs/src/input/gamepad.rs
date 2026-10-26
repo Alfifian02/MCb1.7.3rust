@@ -7,7 +7,7 @@
 //! Each binding is rebindable in Options > Controls > Controller (`options.rs`), saved in `options.txt` as `pad_*`.
 //!
 //! Not ported (nothing in mc-rs to hang them on): gyro, DualSense LEDs / adaptive triggers / touchpad, on-screen keyboard, button-guide
-//! glyph packs, splitscreen, joystick remapping, the server vibration API, chat, perspective, sprint, swap hands, drop item
+//! glyph packs, splitscreen, joystick remapping, the server vibration API, chat, swap hands, drop item
 //! (b1.7.3 has no sprint / off hand, and mc-rs has no chat or drop yet). UNVERIFIED on real hardware: the Android axis / key mapping
 //! follows the documented layout (X/Y left stick, Z/Rz right stick, Ltrigger/Rtrigger, hat = d-pad).
 
@@ -66,22 +66,28 @@ pub enum Act {
     Zoom,
     GuiSelect,
     GuiBack,
+    /// Held: sprint (was L3, fixed).
+    Sprint,
+    /// Cycles first person, third person, over the shoulder (the view button).
+    View,
+    /// Toggles the info (debug) screen.
+    Info,
 }
 
-pub const ACTS: [Act; 12] = [Act::Jump, Act::Sneak, Act::Attack, Act::Use, Act::Inventory, Act::Pause, Act::NextSlot, Act::PrevSlot, Act::Wheel, Act::Zoom, Act::GuiSelect, Act::GuiBack];
+pub const ACTS: [Act; 15] = [Act::Jump, Act::Sneak, Act::Attack, Act::Use, Act::Inventory, Act::Pause, Act::NextSlot, Act::PrevSlot, Act::Wheel, Act::Zoom, Act::GuiSelect, Act::GuiBack, Act::Sprint, Act::View, Act::Info];
 
 impl Act {
     pub fn name(self) -> &'static str {
-        ["Jump", "Sneak", "Attack", "Use", "Inventory", "Pause", "Next slot", "Prev slot", "Hotbar wheel", "Zoom", "GUI select", "GUI back"][self as usize]
+        ["Jump", "Sneak", "Attack", "Use", "Inventory", "Pause", "Next slot", "Prev slot", "Hotbar wheel", "Zoom", "GUI select", "GUI back", "Sprint", "View", "Info"][self as usize]
     }
 
     fn id(self) -> &'static str {
-        ["jump", "sneak", "attack", "use", "inventory", "pause", "next_slot", "prev_slot", "wheel", "zoom", "gui_select", "gui_back"][self as usize]
+        ["jump", "sneak", "attack", "use", "inventory", "pause", "next_slot", "prev_slot", "wheel", "zoom", "gui_select", "gui_back", "sprint", "view", "info"][self as usize]
     }
 
-    /// `default_bind/default.json` (zoom: its `change_perspective` button, mc-rs has no perspective).
+    /// `default_bind/default.json` (zoom: its `change_perspective` button; the view bind is the d-pad's right, info its left).
     fn default(self) -> Btn {
-        [Btn::A, Btn::R3, Btn::Rt, Btn::Lt, Btn::Y, Btn::Start, Btn::Rb, Btn::Lb, Btn::Up, Btn::Back, Btn::A, Btn::B][self as usize]
+        [Btn::A, Btn::R3, Btn::Rt, Btn::Lt, Btn::Y, Btn::Start, Btn::Rb, Btn::Lb, Btn::Up, Btn::Back, Btn::A, Btn::B, Btn::L3, Btn::Right, Btn::Left][self as usize]
     }
 }
 
@@ -97,7 +103,7 @@ const CURVES: [&str; 6] = ["Linear", "Gentle", "Standard", "Strong", "Precision"
 /// Controllify's `InputSettings` (the sensitivity, deadzone, threshold and generic parts) and the bindings; lives in `Settings`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PadCfg {
-    pub binds: [Btn; 12],
+    pub binds: [Btn; ACTS.len()],
     pub look_h: f32,
     pub look_v: f32,
     pub deadzone: f32,
@@ -264,8 +270,11 @@ pub struct Out {
     /// The attack button is down (from the first frame: the arm swings at once, the dig waits for `HOLD_SECS`).
     pub attack: bool,
     pub zoom: bool,
-    /// L3 is held: the sprint key (`input.unused` of Retro Sprint). Fixed, not a `PadCfg` bind: the buttons page has no row left.
+    /// The sprint bind is held (Retro Sprint's key; L3 by default).
     pub sprint: bool,
+    /// The view / info binds were pressed.
+    pub view: bool,
+    pub info: bool,
     pub sneak_down: bool,
     pub sneak_up: bool,
     pub place: bool,
@@ -475,7 +484,7 @@ impl Pad {
         }
         o.jump = down(Act::Jump);
         o.zoom = down(Act::Zoom);
-        o.sprint = held & Btn::L3.bit() != 0;
+        (o.sprint, o.view, o.info) = (down(Act::Sprint), just(Act::View), just(Act::Info));
         (o.sneak_down, o.sneak_up) = (just(Act::Sneak), up(Act::Sneak));
         // Attack: the touch screen's look finger. Held past HOLD_SECS digs, a short press hits.
         o.attack = down(Act::Attack);
@@ -733,6 +742,27 @@ mod tests {
         p.axes(0.0, 0.0, 0.0, 1.0, 0.0, 0.0, (0.0, 0.0));
         let o = p.update(DT, &c, true, 1000.0);
         assert!(o.scroll > 0.0 && o.cursor == (0.0, 0.0), "the right stick scrolls, it does not move the cursor");
+    }
+
+    #[test]
+    fn sprint_view_and_info_follow_their_binds() {
+        let (mut p, mut c) = pad();
+        p.key(Btn::L3, true);
+        assert!(p.update(DT, &c, false, 1000.0).sprint);
+        p.key(Btn::L3, false);
+        c.binds[ACTS.iter().position(|a| *a == Act::Sprint).unwrap()] = Btn::X;
+        p.key(Btn::L3, true);
+        assert!(!p.update(DT, &c, false, 1000.0).sprint, "L3 no longer sprints once rebound");
+        p.key(Btn::L3, false);
+        p.key(Btn::X, true);
+        assert!(p.update(DT, &c, false, 1000.0).sprint);
+        p.key(Btn::X, false);
+        p.key(Btn::Right, true);
+        let o = p.update(DT, &c, false, 1000.0);
+        assert!(o.view && !o.info);
+        assert!(!p.update(DT, &c, false, 1000.0).view, "one press, one switch");
+        p.key(Btn::Left, true);
+        assert!(p.update(DT, &c, false, 1000.0).info);
     }
 
     #[test]

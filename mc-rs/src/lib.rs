@@ -2892,6 +2892,10 @@ impl App {
             self.sat_nav(d);
         }
         self.sat_pad_keys();
+        if self.touch.take_pad_info() {
+            self.opts.debug_screen = !self.opts.debug_screen;
+            self.opts.save();
+        }
         if let Some(b) = self.touch.pad.captured.take() {
             if let Some(p) = self.pause.as_mut() {
                 p.pad_button(b, &mut self.opts);

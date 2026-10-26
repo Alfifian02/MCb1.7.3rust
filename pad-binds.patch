@@ -1,0 +1,211 @@
+diff -ruN a/mc-rs/src/input/gamepad.rs b/mc-rs/src/input/gamepad.rs
+--- a/mc-rs/src/input/gamepad.rs	2026-10-26 05:17:28.249595463 +0000
++++ b/mc-rs/src/input/gamepad.rs	2026-10-26 05:17:28.360199976 +0000
+@@ -7,7 +7,7 @@
+ //! Each binding is rebindable in Options > Controls > Controller (`options.rs`), saved in `options.txt` as `pad_*`.
+ //!
+ //! Not ported (nothing in mc-rs to hang them on): gyro, DualSense LEDs / adaptive triggers / touchpad, on-screen keyboard, button-guide
+-//! glyph packs, splitscreen, joystick remapping, the server vibration API, chat, perspective, sprint, swap hands, drop item
++//! glyph packs, splitscreen, joystick remapping, the server vibration API, chat, swap hands, drop item
+ //! (b1.7.3 has no sprint / off hand, and mc-rs has no chat or drop yet). UNVERIFIED on real hardware: the Android axis / key mapping
+ //! follows the documented layout (X/Y left stick, Z/Rz right stick, Ltrigger/Rtrigger, hat = d-pad).
+ 
+@@ -66,22 +66,28 @@
+     Zoom,
+     GuiSelect,
+     GuiBack,
++    /// Held: sprint (was L3, fixed).
++    Sprint,
++    /// Cycles first person, third person, over the shoulder (the view button).
++    View,
++    /// Toggles the info (debug) screen.
++    Info,
+ }
+ 
+-pub const ACTS: [Act; 12] = [Act::Jump, Act::Sneak, Act::Attack, Act::Use, Act::Inventory, Act::Pause, Act::NextSlot, Act::PrevSlot, Act::Wheel, Act::Zoom, Act::GuiSelect, Act::GuiBack];
++pub const ACTS: [Act; 15] = [Act::Jump, Act::Sneak, Act::Attack, Act::Use, Act::Inventory, Act::Pause, Act::NextSlot, Act::PrevSlot, Act::Wheel, Act::Zoom, Act::GuiSelect, Act::GuiBack, Act::Sprint, Act::View, Act::Info];
+ 
+ impl Act {
+     pub fn name(self) -> &'static str {
+-        ["Jump", "Sneak", "Attack", "Use", "Inventory", "Pause", "Next slot", "Prev slot", "Hotbar wheel", "Zoom", "GUI select", "GUI back"][self as usize]
++        ["Jump", "Sneak", "Attack", "Use", "Inventory", "Pause", "Next slot", "Prev slot", "Hotbar wheel", "Zoom", "GUI select", "GUI back", "Sprint", "View", "Info"][self as usize]
+     }
+ 
+     fn id(self) -> &'static str {
+-        ["jump", "sneak", "attack", "use", "inventory", "pause", "next_slot", "prev_slot", "wheel", "zoom", "gui_select", "gui_back"][self as usize]
++        ["jump", "sneak", "attack", "use", "inventory", "pause", "next_slot", "prev_slot", "wheel", "zoom", "gui_select", "gui_back", "sprint", "view", "info"][self as usize]
+     }
+ 
+-    /// `default_bind/default.json` (zoom: its `change_perspective` button, mc-rs has no perspective).
++    /// `default_bind/default.json` (zoom: its `change_perspective` button; the view bind is the d-pad's right, info its left).
+     fn default(self) -> Btn {
+-        [Btn::A, Btn::R3, Btn::Rt, Btn::Lt, Btn::Y, Btn::Start, Btn::Rb, Btn::Lb, Btn::Up, Btn::Back, Btn::A, Btn::B][self as usize]
++        [Btn::A, Btn::R3, Btn::Rt, Btn::Lt, Btn::Y, Btn::Start, Btn::Rb, Btn::Lb, Btn::Up, Btn::Back, Btn::A, Btn::B, Btn::L3, Btn::Right, Btn::Left][self as usize]
+     }
+ }
+ 
+@@ -97,7 +103,7 @@
+ /// Controllify's `InputSettings` (the sensitivity, deadzone, threshold and generic parts) and the bindings; lives in `Settings`.
+ #[derive(Clone, Debug, PartialEq)]
+ pub struct PadCfg {
+-    pub binds: [Btn; 12],
++    pub binds: [Btn; ACTS.len()],
+     pub look_h: f32,
+     pub look_v: f32,
+     pub deadzone: f32,
+@@ -264,8 +270,11 @@
+     /// The attack button is down (from the first frame: the arm swings at once, the dig waits for `HOLD_SECS`).
+     pub attack: bool,
+     pub zoom: bool,
+-    /// L3 is held: the sprint key (`input.unused` of Retro Sprint). Fixed, not a `PadCfg` bind: the buttons page has no row left.
++    /// The sprint bind is held (Retro Sprint's key; L3 by default).
+     pub sprint: bool,
++    /// The view / info binds were pressed.
++    pub view: bool,
++    pub info: bool,
+     pub sneak_down: bool,
+     pub sneak_up: bool,
+     pub place: bool,
+@@ -475,7 +484,7 @@
+         }
+         o.jump = down(Act::Jump);
+         o.zoom = down(Act::Zoom);
+-        o.sprint = held & Btn::L3.bit() != 0;
++        (o.sprint, o.view, o.info) = (down(Act::Sprint), just(Act::View), just(Act::Info));
+         (o.sneak_down, o.sneak_up) = (just(Act::Sneak), up(Act::Sneak));
+         // Attack: the touch screen's look finger. Held past HOLD_SECS digs, a short press hits.
+         o.attack = down(Act::Attack);
+@@ -736,6 +745,27 @@
+     }
+ 
+     #[test]
++    fn sprint_view_and_info_follow_their_binds() {
++        let (mut p, mut c) = pad();
++        p.key(Btn::L3, true);
++        assert!(p.update(DT, &c, false, 1000.0).sprint);
++        p.key(Btn::L3, false);
++        c.binds[ACTS.iter().position(|a| *a == Act::Sprint).unwrap()] = Btn::X;
++        p.key(Btn::L3, true);
++        assert!(!p.update(DT, &c, false, 1000.0).sprint, "L3 no longer sprints once rebound");
++        p.key(Btn::L3, false);
++        p.key(Btn::X, true);
++        assert!(p.update(DT, &c, false, 1000.0).sprint);
++        p.key(Btn::X, false);
++        p.key(Btn::Right, true);
++        let o = p.update(DT, &c, false, 1000.0);
++        assert!(o.view && !o.info);
++        assert!(!p.update(DT, &c, false, 1000.0).view, "one press, one switch");
++        p.key(Btn::Left, true);
++        assert!(p.update(DT, &c, false, 1000.0).info);
++    }
++
++    #[test]
+     fn capture_swallows_the_press() {
+         let (mut p, c) = pad();
+         p.capture = true;
+diff -ruN a/mc-rs/src/input/touch_ui.rs b/mc-rs/src/input/touch_ui.rs
+--- a/mc-rs/src/input/touch_ui.rs	2026-10-26 05:17:28.249628869 +0000
++++ b/mc-rs/src/input/touch_ui.rs	2026-10-26 05:17:28.360256250 +0000
+@@ -254,6 +254,7 @@
+     nav: Option<(i32, i32)>,
+     /// B in a container screen, LB / RB pages (-1 / +1) and the right stick's scroll (px), until taken: `lib.rs` decides what they mean.
+     back: bool,
++    pad_info: bool,
+     page: i32,
+     scroll: f32,
+ }
+@@ -294,6 +295,7 @@
+             strike: false,
+             nav: None,
+             back: false,
++            pad_info: false,
+             page: 0,
+             scroll: 0.0,
+         }
+@@ -344,6 +346,10 @@
+         self.pad_look.1 += o.look.1;
+         (self.pad_jump, self.pad_dig, self.pad_attack, self.pad_zoom) = (o.jump, o.dig, o.attack, o.zoom);
+         self.pad_sprint = o.sprint;
++        if o.view {
++            self.cycle_view();
++        }
++        self.pad_info |= o.info;
+         if cfg.toggle_sneak {
+             self.sneak ^= o.sneak_down;
+         } else if o.sneak_down {
+@@ -366,6 +372,20 @@
+         std::mem::take(&mut self.pad_look)
+     }
+ 
++    /// First person -> third -> over the shoulder -> first (the view button's tap, the pad's view bind).
++    fn cycle_view(&mut self) {
++        (self.third, self.shoulder) = match (self.third, self.shoulder) {
++            (false, _) => (true, false),
++            (true, false) => (true, true),
++            (true, true) => (false, false),
++        };
++    }
++
++    /// The pad's info bind was pressed since the last call.
++    pub fn take_pad_info(&mut self) -> bool {
++        std::mem::take(&mut self.pad_info)
++    }
++
+     /// Close the open screen as the inventory button does.
+     pub fn press_inventory(&mut self) {
+         self.inventory = true;
+@@ -624,11 +644,7 @@
+             }
+             PointerRole::Inventory => self.inventory = true,
+             PointerRole::View if self.third && self.shoulder && !ptr.broke => self.swap = true,
+-            PointerRole::View => (self.third, self.shoulder) = match (self.third, self.shoulder) {
+-                (false, _) => (true, false),
+-                (true, false) => (true, true),
+-                (true, true) => (false, false),
+-            },
++            PointerRole::View => self.cycle_view(),
+             PointerRole::Tap => {
+                 self.events.push(ScreenEv::Up(ptr.last.0, ptr.last.1));
+                 self.cursor_pos = ptr.last;
+diff -ruN a/mc-rs/src/lib.rs b/mc-rs/src/lib.rs
+--- a/mc-rs/src/lib.rs	2026-10-26 05:17:28.249656669 +0000
++++ b/mc-rs/src/lib.rs	2026-10-26 05:17:28.360307875 +0000
+@@ -2892,6 +2892,10 @@
+             self.sat_nav(d);
+         }
+         self.sat_pad_keys();
++        if self.touch.take_pad_info() {
++            self.opts.debug_screen = !self.opts.debug_screen;
++            self.opts.save();
++        }
+         if let Some(b) = self.touch.pad.captured.take() {
+             if let Some(p) = self.pause.as_mut() {
+                 p.pad_button(b, &mut self.opts);
+diff -ruN a/mc-rs/src/options.rs b/mc-rs/src/options.rs
+--- a/mc-rs/src/options.rs	2026-10-26 05:17:28.249905786 +0000
++++ b/mc-rs/src/options.rs	2026-10-26 05:17:28.360596704 +0000
+@@ -620,7 +620,7 @@
+                 .enumerate()
+                 .map(|(i, a)| {
+                     let b = if self.wait_pad == Some(i) { "> <" } else { st.pad.binds[i].name() };
+-                    Wid { act: Act::PadBind(i), r: [cell(i).0, cell(i).1, 150.0, 20.0], label: format!("{}: {b}", a.name()) }
++                    Wid { act: Act::PadBind(i), r: [cell(i).0, top + 20.0 * (i / 2) as f32, 150.0, 18.0], label: format!("{}: {b}", a.name()) }
+                 })
+                 .collect(),
+             OptScr::PadTune => (0..PadCfg::knob_count())
+@@ -641,9 +641,13 @@
+             w.push(Wid { act: Act::TabPad, r: [hw + 1.0, 20.0, 99.0, 14.0], label: "Controller".into() });
+         }
+         if matches!(self.scr, OptScr::Pad | OptScr::PadTune) {
+-            w.push(wide(Act::PadPage, top + 144.0, if self.scr == OptScr::Pad { "Tuning..." } else { "Buttons..." }));
++            // The buttons page has eight rows (18 px, 20 apart): Tuning and Done share the row under them.
++            let label = if self.scr == OptScr::Pad { "Tuning..." } else { "Buttons..." };
++            w.push(Wid { act: Act::PadPage, r: [hw - 100.0, top + 168.0, 98.0, 20.0], label: label.into() });
+         }
+-        if self.scr != OptScr::Atmos {
++        if matches!(self.scr, OptScr::Pad | OptScr::PadTune) {
++            w.push(Wid { act: Act::Done, r: [hw + 2.0, top + 168.0, 98.0, 20.0], label: "Done".into() });
++        } else if self.scr != OptScr::Atmos {
+             w.push(wide(Act::Done, top + 168.0, "Done"));
+         }
+         w

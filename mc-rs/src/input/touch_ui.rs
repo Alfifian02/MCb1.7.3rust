@@ -254,6 +254,7 @@ pub struct TouchUi {
     nav: Option<(i32, i32)>,
     /// B in a container screen, LB / RB pages (-1 / +1) and the right stick's scroll (px), until taken: `lib.rs` decides what they mean.
     back: bool,
+    pad_info: bool,
     page: i32,
     scroll: f32,
 }
@@ -294,6 +295,7 @@ impl TouchUi {
             strike: false,
             nav: None,
             back: false,
+            pad_info: false,
             page: 0,
             scroll: 0.0,
         }
@@ -344,6 +346,10 @@ impl TouchUi {
         self.pad_look.1 += o.look.1;
         (self.pad_jump, self.pad_dig, self.pad_attack, self.pad_zoom) = (o.jump, o.dig, o.attack, o.zoom);
         self.pad_sprint = o.sprint;
+        if o.view {
+            self.cycle_view();
+        }
+        self.pad_info |= o.info;
         if cfg.toggle_sneak {
             self.sneak ^= o.sneak_down;
         } else if o.sneak_down {
@@ -364,6 +370,20 @@ impl TouchUi {
     /// The right stick's look since the last call, radians.
     pub fn take_pad_look(&mut self) -> (f32, f32) {
         std::mem::take(&mut self.pad_look)
+    }
+
+    /// First person -> third -> over the shoulder -> first (the view button's tap, the pad's view bind).
+    fn cycle_view(&mut self) {
+        (self.third, self.shoulder) = match (self.third, self.shoulder) {
+            (false, _) => (true, false),
+            (true, false) => (true, true),
+            (true, true) => (false, false),
+        };
+    }
+
+    /// The pad's info bind was pressed since the last call.
+    pub fn take_pad_info(&mut self) -> bool {
+        std::mem::take(&mut self.pad_info)
     }
 
     /// Close the open screen as the inventory button does.
@@ -624,11 +644,7 @@ impl TouchUi {
             }
             PointerRole::Inventory => self.inventory = true,
             PointerRole::View if self.third && self.shoulder && !ptr.broke => self.swap = true,
-            PointerRole::View => (self.third, self.shoulder) = match (self.third, self.shoulder) {
-                (false, _) => (true, false),
-                (true, false) => (true, true),
-                (true, true) => (false, false),
-            },
+            PointerRole::View => self.cycle_view(),
             PointerRole::Tap => {
                 self.events.push(ScreenEv::Up(ptr.last.0, ptr.last.1));
                 self.cursor_pos = ptr.last;
