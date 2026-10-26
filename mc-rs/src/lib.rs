@@ -2107,24 +2107,61 @@ impl App {
 
     /// Open the satchel (`satchel.rs`) on `screen`: the 2x2 inventory (the book closed) or a workbench's 3x3 (the book open).
     fn open_satchel(&mut self, screen: Screen) {
-        let bench = screen.gw == 3;
+        let (bench, gw) = (screen.gw == 3, screen.gw);
         self.open_screen(screen);
         self.sat = Some(satchel::Satchel::new(bench));
+        // A pad's cursor starts on the selected quick-belt slot, where it will lie once the bag has risen, not in the middle of the screen.
+        let mut settled = satchel::Satchel::new(bench);
+        settled.tick(10.0);
+        let (w, h) = self.be.size();
+        let f = satchel::Frame::new(&settled, &self.inv, gw, w as f32, h as f32);
+        if let Some((_, r)) = f.cells.iter().find(|(id, _)| *id == craft::SlotId::Inv(self.touch.hotbar_slot)) {
+            self.touch.cursor_pos = (r[0] + r[2] * 0.5, r[1] + r[3] * 0.5);
+        }
         self.audio.play_here("step.cloth", 0.6, 1.0);
+    }
+
+    /// A d-pad step in the open satchel: the cursor jumps to the neighbouring target (`satchel::step`), so there is no stick to push
+    /// from a slot to a button. At the foot or head of the recipe list nothing lies that way: the list scrolls a row and the cursor steps on.
+    fn sat_nav(&mut self, d: (i32, i32)) {
+        let (w, h) = self.be.size();
+        let at = self.touch.cursor_pos;
+        let targets = |me: &Self| -> Vec<[f32; 4]> {
+            match (me.sat.as_ref(), me.screen.as_ref()) {
+                (Some(sat), Some(s)) => satchel::Frame::with_grid(sat, &me.inv, &s.grid, s.gw, w as f32, h as f32).targets(sat),
+                _ => Vec::new(),
+            }
+        };
+        let mut to = satchel::step(&targets(&*self), at, d);
+        if to.is_none() && d.0 == 0 && matches!(self.sat_hit(at.0, at.1), Some(satchel::Pick::Row(_))) {
+            let max = self.sat_max_scroll(false);
+            let row_h = match (self.sat.as_ref(), self.screen.as_ref()) {
+                (Some(sat), Some(s)) => satchel::Frame::with_grid(sat, &self.inv, &s.grid, s.gw, w as f32, h as f32).book.map_or(0.0, |b| b.row_h),
+                _ => 0.0,
+            };
+            if let Some(sat) = self.sat.as_mut() {
+                sat.scroll = (sat.scroll + d.1 as f32 * row_h).clamp(0.0, max);
+            }
+            let t = targets(&*self);
+            to = satchel::step(&t, at, d).or_else(|| satchel::under(&t, at)); // the row it is on, when the list could not move
+        }
+        if let Some(r) = to {
+            self.touch.warp_cursor((r[0] + r[2] * 0.5, r[1] + r[3] * 0.5));
+        }
     }
 
     /// What the finger is on in the open satchel (`satchel::Frame::hit`); `None` when it is not open.
     fn sat_hit(&self, x: f32, y: f32) -> Option<satchel::Pick> {
         let (sat, s) = (self.sat.as_ref()?, self.screen.as_ref()?);
         let (w, h) = self.be.size();
-        Some(satchel::Frame::new(sat, &self.inv, s.gw, w as f32, h as f32).hit(sat, x, y))
+        Some(satchel::Frame::with_grid(sat, &self.inv, &s.grid, s.gw, w as f32, h as f32).hit(sat, x, y))
     }
 
     /// How far the book's list (or the recipe card's ingredients) can scroll (px).
     fn sat_max_scroll(&self, card: bool) -> f32 {
         let (Some(sat), Some(s)) = (self.sat.as_ref(), self.screen.as_ref()) else { return 0.0 };
         let (w, h) = self.be.size();
-        satchel::Frame::new(sat, &self.inv, s.gw, w as f32, h as f32).book.map_or(0.0, |b| if card { b.card_max } else { b.max_scroll })
+        satchel::Frame::with_grid(sat, &self.inv, &s.grid, s.gw, w as f32, h as f32).book.map_or(0.0, |b| if card { b.card_max } else { b.max_scroll })
     }
 
     /// A tap on the open satchel: a button, a page of the book, a recipe (it fills the grid), a slot, or past it all (a held stack is thrown).
@@ -2802,7 +2839,11 @@ impl App {
     /// The pad's frame: moves / looks / clicks through `TouchUi`, and hands a button the Controls screen waits for to it.
     fn pad_sync(&mut self, dt: f32) {
         self.touch.pad.capture = self.pause.as_ref().is_some_and(Pause::pad_waiting) || self.menu.as_ref().is_some_and(Menu::pad_waiting);
+        self.touch.pad.snap = self.sat.is_some(); // the satchel: the d-pad and the stick jump between slots and buttons
         self.touch.pad_update(dt, &self.opts.pad);
+        if let Some(d) = self.touch.take_nav() {
+            self.sat_nav(d);
+        }
         if let Some(b) = self.touch.pad.captured.take() {
             if let Some(p) = self.pause.as_mut() {
                 p.pad_button(b, &mut self.opts);
@@ -2969,7 +3010,7 @@ impl App {
         if let (Some(s), Some(sat)) = (self.screen.as_ref(), self.sat.as_ref()) {
             let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
             let hold = self.gesture.as_ref().is_some_and(|g| g.start == Some(craft::SlotId::Result) && g.age >= satchel::HOLD_SECS);
-            let ctx = satchel::Ctx { inv: &self.inv, screen: s, notes: &self.notes, one: self.one_mode, shift: self.shift_mode, discovery: self.opts.book_discovery, hotbar: self.touch.hotbar_slot, finger: self.touch.cursor_pos, down: self.gesture.is_some(), hold };
+            let ctx = satchel::Ctx { inv: &self.inv, screen: s, notes: &self.notes, one: self.one_mode, shift: self.shift_mode, discovery: self.opts.book_discovery, hotbar: self.touch.hotbar_slot, finger: self.touch.cursor_pos, down: self.gesture.is_some(), hold, pad: self.touch.pad.shows_cursor() };
             satchel::draw(v, (w, h), sat, &ctx);
         }
 
@@ -3238,7 +3279,7 @@ impl App {
         {
             let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
             let t = &self.touch;
-            let cur = (t.pad.shows_cursor() && (paused || t.screen)).then_some(t.cursor_pos);
+            let cur = (t.pad.shows_cursor() && (paused || t.screen) && self.sat.is_none()).then_some(t.cursor_pos); // the satchel frames its target instead
             t.pad.draw(v, w, h, t.hotbar_slot, cur);
         }
 

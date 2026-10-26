@@ -235,9 +235,15 @@ pub struct Frame {
 }
 
 impl Frame {
-    /// Every rect of the screen for `w` x `h` px, this state of the satchel and a crafting grid `gw` wide (`_inv` is not read: the layout
-    /// is fixed, every slot has its cell).
-    pub fn new(sat: &Satchel, _inv: &Inventory, gw: usize, w: f32, h: f32) -> Self {
+    /// Every rect of the screen for `w` x `h` px, this state of the satchel and a crafting grid `gw` wide (the layout is fixed, every slot
+    /// has its cell: the bag's contents only order the book's list).
+    pub fn new(sat: &Satchel, inv: &Inventory, gw: usize, w: f32, h: f32) -> Self {
+        Self::with_grid(sat, inv, &[None; 9], gw, w, h)
+    }
+
+    /// `new` for a screen whose crafting grid holds `grid`: the book's list puts the recipes the bag and the grid can make first, so the
+    /// rows (and what a finger finds on them) depend on both.
+    pub fn with_grid(sat: &Satchel, inv: &Inventory, grid: &[Option<ItemStack>; 9], gw: usize, w: f32, h: f32) -> Self {
         let k = craft::panel(0, w, h).2;
         let tk = units(k).0;
         let u = tk; // one sprite pixel
@@ -291,7 +297,7 @@ impl Frame {
         let cw = HudPipeline::text_width("X") as f32 * tk + 8.0 * tk;
         f.btns.push((Btn::Close, [w - 0.02 * w - cw, by, cw, bh2]));
 
-        f.book = Some(book_frame(sat, gw, (w, h), (top, bh), spine));
+        f.book = Some(book_frame(sat, (gw, inv, grid), (w, h), (top, bh), spine));
         f
     }
 
@@ -336,8 +342,58 @@ impl Frame {
     }
 }
 
+impl Frame {
+    /// Every rect a pad can rest on, the ones `hit` answers with something other than `Panel` / `Outside`: the buttons, the closed book
+    /// (a tap opens it) or an open one's tab, categories, back arrow, recipes, pin, toggle and grid, and every slot of the bag.
+    pub fn targets(&self, sat: &Satchel) -> Vec<[f32; 4]> {
+        let mut t: Vec<[f32; 4]> = self.btns.iter().map(|&(_, r)| r).collect();
+        if let Some(b) = &self.book {
+            if !sat.book {
+                t.push(b.rect);
+            }
+            if sat.open() && b.open {
+                t.push(b.tab);
+                t.extend(b.cats.iter().map(|&(_, r)| r));
+                t.extend(b.back);
+                t.extend(b.rows.iter().map(|&(_, r)| r));
+                if sat.sel.is_some() {
+                    t.push(b.pin);
+                }
+                t.push(b.hide);
+                t.extend(b.grid.iter().map(|&(_, r)| r));
+            }
+        }
+        t.extend(self.cells.iter().map(|&(_, r)| r));
+        t
+    }
+}
+
+/// The target the cursor `at` rests on.
+pub fn under(targets: &[[f32; 4]], at: (f32, f32)) -> Option<[f32; 4]> {
+    targets.iter().copied().find(|r| inside(*r, at.0, at.1))
+}
+
+/// The pad's step: the rect to jump to from the one under `at` when the d-pad says `d` (x, y; y down). Off every rect (the cursor
+/// was left where a page turned or the book glided), the nearest one. Among the rects that lie that way, within 63 degrees of it, the
+/// one with the least `along + 2 * across` (centre to centre) wins: touching slots step one by one, a button row above the bag is a
+/// step up from its columns, the book is a step right from the bag's last column. `None` when nothing lies that way.
+pub fn step(targets: &[[f32; 4]], at: (f32, f32), d: (i32, i32)) -> Option<[f32; 4]> {
+    let mid = |r: &[f32; 4]| (r[0] + r[2] * 0.5, r[1] + r[3] * 0.5);
+    let Some(cur) = under(targets, at) else {
+        let far = |r: &[f32; 4]| (mid(r).0 - at.0).hypot(mid(r).1 - at.1);
+        return targets.iter().copied().min_by(|a, b| far(a).total_cmp(&far(b)));
+    };
+    let from = mid(cur);
+    let score = |r: &[f32; 4]| {
+        let (dx, dy) = (mid(r).0 - from.0, mid(r).1 - from.1);
+        let (along, across) = if d.0 != 0 { (dx * d.0 as f32, dy.abs()) } else { (dy * d.1 as f32, dx.abs()) };
+        (along > 1.0 && across <= 2.0 * along).then_some(along + 2.0 * across)
+    };
+    targets.iter().copied().filter(|r| *r != cur).filter_map(|r| score(&r).map(|sc| (sc, r))).min_by(|a, b| a.0.total_cmp(&b.0)).map(|(_, r)| r)
+}
+
 /// The book's rects: closed, a cover one page wide; opening, both pages grow from the spine; the contents exist once it is open.
-fn book_frame(sat: &Satchel, gw: usize, (w, h): (f32, f32), (top, bh): (f32, f32), spine: f32) -> BookFrame {
+fn book_frame(sat: &Satchel, (gw, inv, grid): (usize, &Inventory, &[Option<ItemStack>; 9]), (w, h): (f32, f32), (top, bh): (f32, f32), spine: f32) -> BookFrame {
     let (bx0, bx1) = (BOOK_L * w, BOOK_R * w);
     let (spine_open, half) = ((bx0 + bx1) * 0.5, (bx1 - bx0) * 0.5); // `spine` is where it is now, on its way there
     let e = ease(sat.book_t);
@@ -370,7 +426,7 @@ fn book_frame(sat: &Satchel, gw: usize, (w, h): (f32, f32), (top, bh): (f32, f32
             let list = [l[0] + p + slide, l[1] + hh + 0.5 * p, l[2] - 2.0 * p, l[3] - hh - 1.5 * p];
             b.list = Some(list);
             b.row_h = 0.1 * h;
-            let ids = book::in_cat(CATS[ci.min(CATS.len() - 1)]);
+            let ids = book::in_cat_ready(CATS[ci.min(CATS.len() - 1)], gw, inv, grid); // what can be made now first
             b.max_scroll = (ids.len() as f32 * b.row_h - list[3]).max(0.0);
             for (n, &ei) in ids.iter().enumerate() {
                 let y = list[1] + n as f32 * b.row_h - sat.scroll;
@@ -449,6 +505,8 @@ pub struct Ctx<'a> {
     pub finger: (f32, f32),
     pub down: bool,
     pub hold: bool,
+    /// A pad drives the cursor: the target under it gets a frame and its name shows without a press.
+    pub pad: bool,
 }
 
 fn item(c: u16) -> ItemStack {
@@ -486,6 +544,14 @@ fn count(v: &mut Vec<HudVertex>, r: [f32; 4], u: f32, n: u32) {
     HudPipeline::push_text(v, (r[0] + r[2] - m - k - w).round(), (r[1] + r[3] - m - 9.0 * k).round(), k, &s, WHITE); // 9 k: the glyph and its shadow
 }
 
+/// The border of `r`, `t` px thick, inside it.
+fn frame_rect(v: &mut Vec<HudVertex>, r: [f32; 4], t: f32, col: [f32; 4]) {
+    HudPipeline::push_quad(v, r[0], r[1], r[2], t, col);
+    HudPipeline::push_quad(v, r[0], r[1] + r[3] - t, r[2], t, col);
+    HudPipeline::push_quad(v, r[0], r[1] + t, t, r[3] - 2.0 * t, col);
+    HudPipeline::push_quad(v, r[0] + r[2] - t, r[1] + t, t, r[3] - 2.0 * t, col);
+}
+
 /// A leather plate with its label: `state` 0 disabled, 1 normal, 2 on.
 fn button(v: &mut Vec<HudVertex>, r: [f32; 4], (tk, u): (f32, f32), text: &str, state: u8) {
     let c = if state == 0 { [0.6, 0.6, 0.6, 1.0] } else { WHITE };
@@ -500,7 +566,7 @@ fn rule(v: &mut Vec<HudVertex>, page: [f32; 4], hh: f32, p: f32, u: f32) {
 
 /// The whole screen: the dimmed world, the bag, the book, the stack on the finger and the name of what it touches.
 pub fn draw(v: &mut Vec<HudVertex>, (w, h): (f32, f32), sat: &Satchel, c: &Ctx) {
-    let f = Frame::new(sat, c.inv, c.screen.gw, w, h);
+    let f = Frame::with_grid(sat, c.inv, &c.screen.grid, c.screen.gw, w, h);
     let k = f.k;
     let (tk, sk) = units(k);
     let u = tk;
@@ -515,7 +581,7 @@ pub fn draw(v: &mut Vec<HudVertex>, (w, h): (f32, f32), sat: &Satchel, c: &Ctx) 
     for &(id, r) in &f.cells {
         let st = c.screen.get(c.inv, None, id);
         // The selected belt slot keeps its yellow rim; an item's category rim shows only under a finger.
-        let touched = c.down && inside(r, c.finger.0, c.finger.1);
+        let touched = (c.down || c.pad) && inside(r, c.finger.0, c.finger.1);
         let rim = if id == SlotId::Inv(c.hotbar) { Some(SELECTED) } else if touched { st.map(|s| tint(s.id)) } else { None };
         slot(v, r, st, rim, u);
         // An empty armor slot shows the shape of what goes in it (no label needed), dark and faint like a hole in the stone.
@@ -546,13 +612,22 @@ pub fn draw(v: &mut Vec<HudVertex>, (w, h): (f32, f32), sat: &Satchel, c: &Ctx) 
         draw_book(v, (w, h), (sat, b), c, (tk, sk, u));
     }
 
-    // The stack on the finger floats above it; a finger down names what it holds or rests on.
+    // A pad's cursor rests on a target (it jumps from one to the next): a white frame round it, edged in black.
     let (fx, fy) = c.finger;
+    if c.pad {
+        if let Some(r) = under(&f.targets(sat), (fx, fy)) {
+            let t = (1.5 * u).round().max(2.0);
+            frame_rect(v, [r[0] - t, r[1] - t, r[2] + 2.0 * t, r[3] + 2.0 * t], t, [0.0, 0.0, 0.0, 0.9]);
+            frame_rect(v, r, t, WHITE);
+        }
+    }
+    // The stack on the finger floats above it; a finger down (or a pad's cursor) names what it holds or rests on.
+
     if let Some(st) = c.screen.cursor {
         let sz = 16.0 * k;
         crate::push_stack(v, (fx - sz * 0.5, fy - sz * 1.4, sz, sz), 0.875, st);
     }
-    if c.down {
+    if c.down || c.pad {
         let under = || match f.hit(sat, fx, fy) {
             Pick::Slot(id) => c.screen.get(c.inv, None, id),
             Pick::Row(i) => book::entries().get(i).map(|e| e.out).filter(|_| !c.discovery || c.notes.known(&book::entries()[i])),
@@ -607,7 +682,9 @@ fn draw_book(v: &mut Vec<HudVertex>, (w, h): (f32, f32), (sat, b): (&Satchel, &B
                 if let Some(e) = ids.first().map(|&e| &entries[e]) {
                     crate::push_stack(v, (r[0] + 3.0 * u, r[1] + (r[3] - r[3] * 0.8) * 0.5, r[3] * 0.8, r[3] * 0.8), 0.875, ItemStack { count: 1, ..e.out });
                 }
-                let n = ids.len().to_string();
+                // `made/all`: how many of the page the bag can make now (just the total while none).
+                let made = ids.iter().filter(|&&e| book::ready(&entries[e], c.screen.gw, c.inv, &c.screen.grid)).count();
+                let n = if made > 0 { format!("{made}/{}", ids.len()) } else { ids.len().to_string() };
                 let nw = HudPipeline::text_width(&n) as f32 * tk;
                 let (lx, ty) = (r[0] + r[3] + 4.0 * u, r[1] + (r[3] - 8.0 * tk) * 0.5);
                 text_fit(v, (lx, ty), tk, r[0] + r[2] - 8.0 * u - nw - lx, CATS[i].label(), INK);
@@ -626,6 +703,7 @@ fn draw_book(v: &mut Vec<HudVertex>, (w, h): (f32, f32), (sat, b): (&Satchel, &B
                 let e = &entries[ei];
                 let known = !c.discovery || c.notes.known(e);
                 let ok = known && book::craftable(e, gw, c.inv, &c.screen.grid);
+                let lit = known && book::ready(e, gw, c.inv, &c.screen.grid); // the list puts these first
                 let sel = sat.sel == Some(ei);
                 nine(v, r, if sel { art::ENTRY_SEL } else { art::ENTRY }, 3.0, u);
                 let isz = r[3] * 0.82;
@@ -643,6 +721,9 @@ fn draw_book(v: &mut Vec<HudVertex>, (w, h): (f32, f32), (sat, b): (&Satchel, &B
                 let dot = if !known { MUTE } else if e.grid == 0 { WARN } else if ok { GOOD } else { BAD };
                 let ds = r[3] * 0.34;
                 HudPipeline::push_gui_tinted(v, r[0] + r[2] - ds - 5.0 * u, r[1] + (r[3] - ds) * 0.5, ds, ds, art::GEM, dot);
+                if !lit {
+                    HudPipeline::push_quad(v, r[0], r[1], r[2], r[3], [0.0, 0.0, 0.0, 0.55]); // not now: the row is dimmed, icon and name with it
+                }
             }
             if b.max_scroll > 0.0 {
                 // A thin scroll bar along the list's right edge.
@@ -1006,6 +1087,61 @@ mod tests {
         assert_eq!(f.hit(&sat, b.right[0] + 2.0, b.right[1] + b.right[3] - 2.0), Pick::Panel);
         let (x, y) = centre(f.btns.iter().find(|(b, _)| *b == Btn::Close).expect("close").1);
         assert_eq!(f.hit(&sat, x, y), Pick::Btn(Btn::Close));
+    }
+
+    /// A pad steps from slot to slot, from the bag's edge to the book, up to the buttons, and never off a screen with nothing that way.
+    #[test]
+    fn a_pad_steps_between_targets() {
+        let inv = Inventory::default();
+        let sat = open_book();
+        let f = frame(&sat, &inv, 2);
+        let t = f.targets(&sat);
+        let cell = |id: SlotId| f.cells.iter().find(|(i, _)| *i == id).expect("cell").1;
+        let on = |r: [f32; 4]| centre(r);
+        // Along a row and down a column the neighbour is the touching cell.
+        let (a, b) = (cell(SlotId::Inv(9)), cell(SlotId::Inv(10)));
+        assert_eq!(step(&t, on(a), (1, 0)), Some(b));
+        assert_eq!(step(&t, on(b), (-1, 0)), Some(a));
+        assert_eq!(step(&t, on(a), (0, 1)), Some(cell(SlotId::Inv(18))));
+        // Up from the bag's first row: the armor row (a block over it), up from that: the button row.
+        let armor_up = step(&t, on(a), (0, -1)).expect("the armor row is above");
+        assert!(f.cells.iter().any(|&(id, r)| r == armor_up && matches!(id, SlotId::Inv(i) if i >= MAIN)));
+        let btn = step(&t, on(armor_up), (0, -1)).expect("a button is above the armor");
+        assert!(f.btns.iter().any(|&(_, r)| r == btn));
+        // Nothing lies below the belt; right of the bag's last column is the book (the page's first thing), not another slot.
+        assert_eq!(step(&t, on(cell(SlotId::Inv(0))), (0, 1)), None);
+        let last = cell(SlotId::Inv(26));
+        let right = step(&t, on(last), (1, 0)).expect("the book is right of the bag");
+        assert!(right[0] > f.bag[0] + f.bag[2], "{right:?}");
+        // Off every target (a page turned under the cursor): the nearest one, in any direction.
+        let hole = (f.bag[0] + f.bag[2] + 1.0, 1.0);
+        assert!(t.iter().all(|r| !inside(*r, hole.0, hole.1)));
+        assert!(step(&t, hole, (0, 1)).is_some());
+        // Every target is on the screen and answers a finger with something (never Panel / Outside).
+        for r in &t {
+            let (x, y) = centre(*r);
+            assert!(!matches!(f.hit(&sat, x, y), Pick::Panel | Pick::Outside | Pick::List | Pick::Card), "{r:?}");
+        }
+    }
+
+    /// The recipes the bag can make come first on a page of the list and keep that order where a finger and the pad find them.
+    #[test]
+    fn the_list_puts_what_can_be_made_first() {
+        let mut inv = Inventory::default();
+        inv.slots[10] = Some(ItemStack { id: 17, count: 3, damage: 0 });
+        let blocks = CATS.iter().position(|&c| c == book::Cat::Blocks).expect("blocks");
+        let mut sat = open_book();
+        sat.turn(Some(blocks));
+        sat.tick(1.0);
+        let planks = book::entries().iter().position(|e| e.out.id == 5 && e.grid == 2 && matches!(e.src, Src::Craft(_))).expect("planks");
+        let f = Frame::with_grid(&sat, &inv, &[None; 9], 2, SIZE.0, SIZE.1);
+        let rows = &f.book.as_ref().expect("book").rows;
+        assert_eq!(rows[0].0, planks, "logs in the bag: planks are the first row");
+        let (x, y) = centre(rows[0].1);
+        assert_eq!(f.hit(&sat, x, y), Pick::Row(planks));
+        // With an empty bag the page is in its own order again.
+        let empty = Frame::with_grid(&sat, &Inventory::default(), &[None; 9], 2, SIZE.0, SIZE.1);
+        assert_eq!(empty.book.as_ref().expect("book").rows[0].0, book::in_cat(book::Cat::Blocks)[0]);
     }
 
     /// A count lies inside its cell, inside it (the vanilla count's box ended a sixteenth past it), on every screen shape.

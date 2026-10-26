@@ -248,6 +248,9 @@ const LOOK_RAD_PER_SEC: f32 = 10.0 * 20.0 * std::f32::consts::PI / 180.0;
 /// The virtual cursor at full deflection crosses this many short sides a second (`virtual_mouse` 1.0).
 const CURSOR_SPEED: f32 = 0.9;
 const HOTBAR: usize = 9;
+/// A held d-pad direction steps again after `NAV_FIRST` s, then every `NAV_REPEAT` s.
+const NAV_FIRST: f32 = 0.4;
+const NAV_REPEAT: f32 = 0.12;
 
 /// What one frame of the pad asks of the game (`TouchUi::pad_update` applies it).
 #[derive(Default, Debug)]
@@ -275,6 +278,8 @@ pub struct Out {
     /// Virtual mouse move in px, and the press / release of the click.
     pub cursor: (f32, f32),
     pub click: Option<bool>,
+    /// With `Pad::snap`: one step of the d-pad as (x, y), y down; the first on the press, then repeating while held.
+    pub nav: Option<(i32, i32)>,
 }
 
 /// Live state of the pad(s): every controller feeds the same state, like Controllify's single active input mode.
@@ -307,6 +312,10 @@ pub struct Pad {
     pub captured: Option<Btn>,
     wheel_open: bool,
     wheel: Option<usize>,
+    /// The open screen jumps between its targets (`Out::nav`) instead of the d-pad nudging the free cursor, which the stick still pushes (set by `lib.rs`: the satchel).
+    pub snap: bool,
+    nav_dir: (i32, i32),
+    nav_t: f32,
     hp: i32,
     rumble: Option<(u32, u8)>,
 }
@@ -378,6 +387,26 @@ impl Pad {
         self.attack_dug = self.resting(secs);
     }
 
+    /// The d-pad as one of four directions: a step on the press, again after `NAV_FIRST` and then every `NAV_REPEAT` while it is held, so
+    /// a long list is one hold, not a press per row.
+    fn nav_step(&mut self, dt: f32, held: u16) -> Option<(i32, i32)> {
+        let on = |b: Btn| i32::from(held & b.bit() != 0);
+        let dp = (on(Btn::Right) - on(Btn::Left), on(Btn::Down) - on(Btn::Up));
+        let dir = if dp.0 != 0 { (dp.0, 0) } else { (0, dp.1) };
+        if dir != self.nav_dir {
+            (self.nav_dir, self.nav_t) = (dir, NAV_FIRST);
+            return (dir != (0, 0)).then_some(dir);
+        }
+        if dir == (0, 0) {
+            return None;
+        }
+        self.nav_t -= dt;
+        (self.nav_t <= 0.0).then(|| {
+            self.nav_t += NAV_REPEAT;
+            dir
+        })
+    }
+
     pub fn update(&mut self, dt: f32, cfg: &PadCfg, ui: bool, side: f32) -> Out {
         let mut o = Out::default();
         if !self.connected {
@@ -387,6 +416,7 @@ impl Pad {
         if ui != self.ui {
             self.suppress |= raw;
             (self.ui, self.wheel_open, self.wheel, self.attack_t, self.attack_dug, self.use_t) = (ui, false, None, 0.0, false, 0.0);
+            self.nav_dir = (0, 0);
         }
         self.suppress &= raw;
         let held = raw & !self.suppress;
@@ -403,10 +433,14 @@ impl Pad {
         let (lx, ly, rx, ry) = (dz(self.lx), dz(self.ly), dz(self.rx), dz(self.ry));
         if ui {
             // `VirtualMouseHandler`: the left stick (eased) and the d-pad move the cursor.
+            // The stick always pushes the free cursor; on a snapping screen the d-pad jumps between targets instead of nudging it.
             let (sx, sy) = ease(lx, ly, 2);
-            let (hx, hy) = (self.hat.0.round() * 0.4, self.hat.1.round() * 0.4);
+            let (hx, hy) = if self.snap { (0.0, 0.0) } else { (self.hat.0.round() * 0.4, self.hat.1.round() * 0.4) };
             let k = side * CURSOR_SPEED * cfg.cursor * dt;
             o.cursor = ((sx + hx) * k, (sy + hy) * k);
+            if self.snap {
+                o.nav = self.nav_step(dt, held);
+            }
             o.click = if just(Act::GuiSelect) { Some(true) } else if up(Act::GuiSelect) { Some(false) } else { None };
             (o.back, o.pause, o.inventory) = (just(Act::GuiBack), just(Act::Pause), just(Act::Inventory));
             return o;
@@ -651,6 +685,34 @@ mod tests {
         p.update(DT, &c, false, 1000.0);
         p.key(Btn::Up, false);
         assert_eq!(p.update(DT, &c, false, 1000.0).slot_to, Some(2));
+    }
+
+    #[test]
+    fn snap_steps_once_on_a_press_then_repeats_while_held() {
+        let (mut p, c) = pad();
+        p.snap = true;
+        p.update(DT, &c, true, 1000.0); // the mode change: what is held now is ignored
+        p.key(Btn::Down, true);
+        let o = p.update(DT, &c, true, 1000.0);
+        assert_eq!((o.nav, o.cursor), (Some((0, 1)), (0.0, 0.0)), "a step, and the cursor is not pushed");
+        let mut steps = 0;
+        for _ in 0..60 {
+            steps += i32::from(p.update(DT, &c, true, 1000.0).nav.is_some());
+        }
+        assert!((5..=7).contains(&steps), "after the first delay a held d-pad steps every {NAV_REPEAT} s: {steps} in 1 s");
+        p.key(Btn::Down, false);
+        assert_eq!(p.update(DT, &c, true, 1000.0).nav, None);
+        // The stick never steps: it pushes the free cursor, snap or not; the d-pad does not nudge it while snapping.
+        p.axes(1.0, 0.0, 0.0, 0.0, 0.0, 0.0, (0.0, 0.0));
+        let o = p.update(DT, &c, true, 1000.0);
+        assert!(o.nav.is_none() && o.cursor.0 > 0.0);
+        p.axes(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, (1.0, 0.0));
+        let o = p.update(DT, &c, true, 1000.0);
+        assert_eq!((o.nav, o.cursor), (Some((1, 0)), (0.0, 0.0)));
+        // Without `snap` the d-pad nudges the cursor and never steps.
+        p.snap = false;
+        let o = p.update(DT, &c, true, 1000.0);
+        assert!(o.nav.is_none() && o.cursor.0 > 0.0);
     }
 
     #[test]

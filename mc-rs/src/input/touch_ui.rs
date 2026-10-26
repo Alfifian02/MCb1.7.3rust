@@ -250,6 +250,8 @@ pub struct TouchUi {
     pad_look: (f32, f32),
     /// The pad's attack tap: hit what is under the crosshair but never place a block.
     strike: bool,
+    /// A d-pad step on a screen that jumps between its targets (`Pad::snap`), until `take_nav`.
+    nav: Option<(i32, i32)>,
 }
 
 impl TouchUi {
@@ -286,6 +288,7 @@ impl TouchUi {
             pad_sprint: false,
             pad_look: (0.0, 0.0),
             strike: false,
+            nav: None,
         }
     }
 
@@ -302,6 +305,7 @@ impl TouchUi {
                 self.cursor_pos = p;
                 self.events.push(ScreenEv::Move(p.0, p.1));
             }
+            self.nav = o.nav.or(self.nav);
             match o.click {
                 Some(true) => self.events.push(ScreenEv::Down(p.0, p.1)),
                 Some(false) => self.events.push(ScreenEv::Up(p.0, p.1)),
@@ -350,6 +354,19 @@ impl TouchUi {
     /// The right stick's look since the last call, radians.
     pub fn take_pad_look(&mut self) -> (f32, f32) {
         std::mem::take(&mut self.pad_look)
+    }
+
+    /// The pad's step since the last call (only while `pad.snap`): `lib.rs` moves the cursor to the neighbouring target.
+    pub fn take_nav(&mut self) -> Option<(i32, i32)> {
+        self.nav.take()
+    }
+
+    /// Put the cursor at `p` as a finger sliding there would (a held press spreads its stack over what the cursor crosses).
+    pub fn warp_cursor(&mut self, p: (f32, f32)) {
+        if p != self.cursor_pos {
+            self.cursor_pos = p;
+            self.events.push(ScreenEv::Move(p.0, p.1));
+        }
     }
 
     /// The pad's attack tap since the last call.

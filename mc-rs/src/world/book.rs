@@ -127,6 +127,19 @@ pub fn craftable(e: &Entry, gw: usize, inv: &Inventory, grid: &[Option<ItemStack
     e.grid != 0 && e.grid <= gw && missing(e, inv, grid).is_empty()
 }
 
+/// Something the player can make right now, which the list shows first and lit: a recipe that fits the grid with nothing short, or a
+/// smelting whose ingredient the bag holds (the furnace itself is somewhere else).
+pub fn ready(e: &Entry, gw: usize, inv: &Inventory, grid: &[Option<ItemStack>; 9]) -> bool {
+    if e.grid == 0 { missing(e, inv, grid).is_empty() } else { craftable(e, gw, inv, grid) }
+}
+
+/// `in_cat` with the `ready` ones first; each group keeps its order (a stable sort), so a row only moves when the bag changes.
+pub fn in_cat_ready(cat: Cat, gw: usize, inv: &Inventory, grid: &[Option<ItemStack>; 9]) -> Vec<usize> {
+    let mut v = in_cat(cat);
+    v.sort_by_key(|&i| !ready(&entries()[i], gw, inv, grid));
+    v
+}
+
 /// Put what lies in the grid back into the bag; whatever has no room stays. True when the grid is empty after.
 pub fn stash(screen: &mut Screen, inv: &mut Inventory) -> bool {
     for cell in screen.grid.iter_mut() {
@@ -359,6 +372,32 @@ mod tests {
         assert!(fill(entry(5, 0, 2), &mut t, &mut full));
         assert_eq!(craft_all(&mut t, &mut full), 0);
         assert_eq!((count(&full, 17), count(&full, 5)), (2, 0));
+    }
+
+    #[test]
+    fn what_can_be_made_comes_first_and_keeps_its_order() {
+        let mut inv = Inventory::default();
+        let blocks = in_cat(Cat::Blocks);
+        let none = in_cat_ready(Cat::Blocks, 2, &inv, &[None; 9]);
+        assert_eq!(none, blocks, "nothing in the bag: the page keeps its own order");
+        inv.slots[10] = Some(stack(17, 3));
+        let planks = entries().iter().position(|e| e.out.id == 5 && e.grid == 2 && matches!(e.src, Src::Craft(_))).expect("planks");
+        let now = in_cat_ready(Cat::Blocks, 2, &inv, &[None; 9]);
+        assert_eq!((now.len(), now[0]), (blocks.len(), planks), "logs: planks lead");
+        assert!(now[1..].iter().all(|&i| !ready(&entries()[i], 2, &inv, &[None; 9])) && now[1..].iter().copied().eq(blocks.iter().copied().filter(|&i| i != planks)));
+        // A tap that moves the logs into the grid does not make the recipe drop: the grid counts too.
+        let mut s = Screen::new(2);
+        assert!(fill(&entries()[planks], &mut s, &mut inv));
+        assert_eq!(in_cat_ready(Cat::Blocks, 2, &inv, &s.grid)[0], planks);
+        // A 3x3 recipe is not ready at the 2x2 grid, a smelting is ready with its ore in the bag.
+        let mut rich = Inventory::default();
+        rich.slots[9] = Some(stack(5, 3));
+        rich.slots[10] = Some(stack(280, 2));
+        let pick = entries().iter().position(|e| e.out.id == 270 && e.grid == 3).expect("wooden pickaxe");
+        assert!(ready(&entries()[pick], 3, &rich, &[None; 9]) && !ready(&entries()[pick], 2, &rich, &[None; 9]));
+        rich.slots[11] = Some(stack(15, 1));
+        let smelt = entries().iter().position(|e| e.src == Src::Smelt(15)).expect("iron ore");
+        assert_eq!(in_cat_ready(Cat::Furnace, 2, &rich, &[None; 9])[0], smelt);
     }
 
     #[test]
