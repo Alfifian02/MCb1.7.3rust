@@ -964,6 +964,19 @@ impl Pause {
         None
     }
 
+    pub fn top(&self) -> bool {
+        self.opt.is_none()
+    }
+
+    /// The enabled buttons of the top page in px (none while a sub-screen is open: the d-pad nudges its cursor), for the pad's jumps.
+    pub fn targets(&self, w: f32, h: f32, st: &Settings, info: &PauseInfo) -> Vec<[f32; 4]> {
+        if self.opt.is_some() {
+            return Vec::new();
+        }
+        let (s, gw, gh) = scaled_gs(w, h, st.gui_scale);
+        Self::buttons(gw, gh, info).into_iter().filter(|b| b.3).map(|b| b.1.map(|v| v * s)).collect()
+    }
+
     pub fn pad_waiting(&self) -> bool {
         self.opt.as_ref().is_some_and(OptionsUi::pad_waiting)
     }

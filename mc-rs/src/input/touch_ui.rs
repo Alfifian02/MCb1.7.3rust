@@ -252,6 +252,10 @@ pub struct TouchUi {
     strike: bool,
     /// A d-pad step on a screen that jumps between its targets (`Pad::snap`), until `take_nav`.
     nav: Option<(i32, i32)>,
+    /// B in a container screen, LB / RB pages (-1 / +1) and the right stick's scroll (px), until taken: `lib.rs` decides what they mean.
+    back: bool,
+    page: i32,
+    scroll: f32,
 }
 
 impl TouchUi {
@@ -289,6 +293,9 @@ impl TouchUi {
             pad_look: (0.0, 0.0),
             strike: false,
             nav: None,
+            back: false,
+            page: 0,
+            scroll: 0.0,
         }
     }
 
@@ -311,7 +318,10 @@ impl TouchUi {
                 Some(false) => self.events.push(ScreenEv::Up(p.0, p.1)),
                 None => {}
             }
-            if o.pause || o.back {
+            (self.page, self.scroll) = (self.page + o.page, self.scroll + o.scroll);
+            if o.back && !self.paused && self.screen && !self.menu {
+                self.back = true; // the screen steps back one level first (`take_back`); closing is `lib.rs`'s call
+            } else if o.pause || o.back {
                 if self.paused {
                     self.resume();
                 } else if self.screen && !self.menu {
@@ -354,6 +364,24 @@ impl TouchUi {
     /// The right stick's look since the last call, radians.
     pub fn take_pad_look(&mut self) -> (f32, f32) {
         std::mem::take(&mut self.pad_look)
+    }
+
+    /// Close the open screen as the inventory button does.
+    pub fn press_inventory(&mut self) {
+        self.inventory = true;
+    }
+
+    /// B pressed in a container screen, the pages turned and the pixels scrolled since the last call.
+    pub fn take_back(&mut self) -> bool {
+        std::mem::take(&mut self.back)
+    }
+
+    pub fn take_page(&mut self) -> i32 {
+        std::mem::take(&mut self.page)
+    }
+
+    pub fn take_scroll(&mut self) -> f32 {
+        std::mem::take(&mut self.scroll)
     }
 
     /// The pad's step since the last call (only while `pad.snap`): `lib.rs` moves the cursor to the neighbouring target.

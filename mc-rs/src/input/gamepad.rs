@@ -280,6 +280,9 @@ pub struct Out {
     pub click: Option<bool>,
     /// With `Pad::snap`: one step of the d-pad as (x, y), y down; the first on the press, then repeating while held.
     pub nav: Option<(i32, i32)>,
+    /// In a GUI: LB / RB turn the book's page (-1 / +1), and the right stick scrolls (px, down is positive) like a finger dragging a list.
+    pub page: i32,
+    pub scroll: f32,
 }
 
 /// Live state of the pad(s): every controller feeds the same state, like Controllify's single active input mode.
@@ -438,6 +441,8 @@ impl Pad {
             let (hx, hy) = if self.snap { (0.0, 0.0) } else { (self.hat.0.round() * 0.4, self.hat.1.round() * 0.4) };
             let k = side * CURSOR_SPEED * cfg.cursor * dt;
             o.cursor = ((sx + hx) * k, (sy + hy) * k);
+            o.page = i32::from(pressed & Btn::Rb.bit() != 0) - i32::from(pressed & Btn::Lb.bit() != 0);
+            o.scroll = ry * k;
             if self.snap {
                 o.nav = self.nav_step(dt, held);
             }
@@ -713,6 +718,21 @@ mod tests {
         p.snap = false;
         let o = p.update(DT, &c, true, 1000.0);
         assert!(o.nav.is_none() && o.cursor.0 > 0.0);
+    }
+
+    #[test]
+    fn bumpers_page_and_the_right_stick_scrolls_in_a_gui() {
+        let (mut p, c) = pad();
+        p.update(DT, &c, true, 1000.0);
+        p.key(Btn::Rb, true);
+        assert_eq!(p.update(DT, &c, true, 1000.0).page, 1);
+        assert_eq!(p.update(DT, &c, true, 1000.0).page, 0, "a held bumper turns one page");
+        p.key(Btn::Rb, false);
+        p.key(Btn::Lb, true);
+        assert_eq!(p.update(DT, &c, true, 1000.0).page, -1);
+        p.axes(0.0, 0.0, 0.0, 1.0, 0.0, 0.0, (0.0, 0.0));
+        let o = p.update(DT, &c, true, 1000.0);
+        assert!(o.scroll > 0.0 && o.cursor == (0.0, 0.0), "the right stick scrolls, it does not move the cursor");
     }
 
     #[test]

@@ -2126,6 +2126,26 @@ impl App {
     fn sat_nav(&mut self, d: (i32, i32)) {
         let (w, h) = self.be.size();
         let at = self.touch.cursor_pos;
+        if self.sat.is_none() {
+            // Chest, furnace, bench, the 2x2 screen (no satchel) and the pause menu: the slots and the two toggles, or the buttons.
+            let t: Vec<[f32; 4]> = match self.screen.as_ref() {
+                Some(s) => {
+                    let (w, h) = (w as f32, h as f32);
+                    let cell = |(ux, uy)| craft::cell(s.gw, w, h, (ux, uy));
+                    let slots = craft::layout(s.gw).into_iter().map(|(_, ux, uy)| cell((ux, uy)));
+                    let togs = (0..2).map(|i| craft::toggle(s.gw, w, h, i));
+                    slots.chain(togs).map(|(x, y, k)| [x, y, k, k]).collect()
+                }
+                None => match self.pause.as_ref() {
+                    Some(p) => p.targets(w as f32, h as f32, &self.opts, &self.pause_info()),
+                    None => Vec::new(),
+                },
+            };
+            if let Some(r) = satchel::step(&t, at, d) {
+                self.touch.warp_cursor((r[0] + r[2] * 0.5, r[1] + r[3] * 0.5));
+            }
+            return;
+        }
         let targets = |me: &Self| -> Vec<[f32; 4]> {
             match (me.sat.as_ref(), me.screen.as_ref()) {
                 (Some(sat), Some(s)) => satchel::Frame::with_grid(sat, &me.inv, &s.grid, s.gw, w as f32, h as f32).targets(sat),
@@ -2147,6 +2167,32 @@ impl App {
         }
         if let Some(r) = to {
             self.touch.warp_cursor((r[0] + r[2] * 0.5, r[1] + r[3] * 0.5));
+        }
+    }
+
+    /// The pad's other keys in a container screen: B steps back (a category to the category list) before it closes, LB / RB turn the
+    /// book's page through the categories, the right stick scrolls the recipe card's ingredients under the cursor, else the list.
+    fn sat_pad_keys(&mut self) {
+        let (back, page, px) = (self.touch.take_back(), self.touch.take_page(), self.touch.take_scroll());
+        let at = self.touch.cursor_pos;
+        let pick = self.sat_hit(at.0, at.1);
+        let (card, max) = (matches!(pick, Some(satchel::Pick::Card)), |me: &Self, c| me.sat_max_scroll(c));
+        let (mc, ml) = (max(self, true), max(self, false));
+        if let Some(s) = self.sat.as_mut().filter(|s| s.open()) {
+            if page != 0 {
+                let n = book::CATS.len() as i32;
+                let to = s.cat.map_or(if page > 0 { 0 } else { n - 1 }, |i| (i as i32 + page).rem_euclid(n));
+                s.turn(Some(to as usize));
+            }
+            if px != 0.0 {
+                if card { s.card_scroll = (s.card_scroll + px).clamp(0.0, mc) } else { s.scroll = (s.scroll + px).clamp(0.0, ml) }
+            }
+        }
+        if back {
+            match self.sat.as_mut().filter(|s| s.open() && s.cat.is_some()) {
+                Some(s) => s.turn(None),
+                None => self.touch.press_inventory(),
+            }
         }
     }
 
@@ -2839,11 +2885,13 @@ impl App {
     /// The pad's frame: moves / looks / clicks through `TouchUi`, and hands a button the Controls screen waits for to it.
     fn pad_sync(&mut self, dt: f32) {
         self.touch.pad.capture = self.pause.as_ref().is_some_and(Pause::pad_waiting) || self.menu.as_ref().is_some_and(Menu::pad_waiting);
-        self.touch.pad.snap = self.sat.is_some(); // the satchel: the d-pad and the stick jump between slots and buttons
+        // The d-pad jumps between targets in the satchel, a chest / furnace / bench screen and the pause menu's top page; the stick is the free cursor.
+        self.touch.pad.snap = self.screen.is_some() || (self.touch.paused && self.pause.as_ref().is_some_and(Pause::top));
         self.touch.pad_update(dt, &self.opts.pad);
         if let Some(d) = self.touch.take_nav() {
             self.sat_nav(d);
         }
+        self.sat_pad_keys();
         if let Some(b) = self.touch.pad.captured.take() {
             if let Some(p) = self.pause.as_mut() {
                 p.pad_button(b, &mut self.opts);
