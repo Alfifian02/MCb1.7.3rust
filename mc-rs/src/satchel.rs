@@ -383,7 +383,7 @@ pub fn step(targets: &[[f32; 4]], at: (f32, f32), d: (i32, i32)) -> Option<[f32;
         let far = |r: &[f32; 4]| (mid(r).0 - at.0).hypot(mid(r).1 - at.1);
         return targets.iter().copied().min_by(|a, b| far(a).total_cmp(&far(b)));
     };
-    let from = mid(cur);
+    let from = mid(&cur);
     let score = |r: &[f32; 4]| {
         let (dx, dy) = (mid(r).0 - from.0, mid(r).1 - from.1);
         let (along, across) = if d.0 != 0 { (dx * d.0 as f32, dy.abs()) } else { (dy * d.1 as f32, dx.abs()) };

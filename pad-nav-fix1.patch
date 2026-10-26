@@ -1,0 +1,12 @@
+diff -ruN c/mc-rs/src/satchel.rs d/mc-rs/src/satchel.rs
+--- a/mc-rs/src/satchel.rs	2026-10-26 05:10:45.059922778 +0000
++++ b/mc-rs/src/satchel.rs	2026-10-26 05:10:45.070070557 +0000
+@@ -383,7 +383,7 @@
+         let far = |r: &[f32; 4]| (mid(r).0 - at.0).hypot(mid(r).1 - at.1);
+         return targets.iter().copied().min_by(|a, b| far(a).total_cmp(&far(b)));
+     };
+-    let from = mid(cur);
++    let from = mid(&cur);
+     let score = |r: &[f32; 4]| {
+         let (dx, dy) = (mid(r).0 - from.0, mid(r).1 - from.1);
+         let (along, across) = if d.0 != 0 { (dx * d.0 as f32, dy.abs()) } else { (dy * d.1 as f32, dx.abs()) };
