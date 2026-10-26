@@ -3166,7 +3166,7 @@ impl App {
         }
 
         // The four buttons top-right (pause, inventory, view, zoom) are not drawn while the pack's table is open: its edges carry the buttons.
-        if !self.mat_ui && self.sat.is_none() {
+        if !self.mat_ui && self.sat.is_none() && !self.touch.pad.hud_hidden() {
         // Pause button: top-right, two bars.
         let (px, py, pw, ph) = layout.pause;
         HudPipeline::push_button(v, px, py, pw, ph, if pressed(PointerRole::Pause) { 2 } else { 1 });
@@ -3282,18 +3282,18 @@ impl App {
                 }
             }
 
-            // A pad in hand hides the touch buttons (Controllify's `InputMode`).
+            // A pad, keyboard or mouse in hand hides the touch buttons (Controllify's `InputMode`); they stay where they are and still answer a finger.
             // Touch d-pad (Stone D-pad sprites): the four arrows always, a corner only while an arrow beside it is held; the held button
             // is drawn pressed. The cell is the hit area, the button is drawn `dpad_gap` smaller inside it, a corner (18 of 22 px)
             // smaller still and centred.
             let t = &self.touch;
-            for i in (0..8).filter(|&i| !t.pad.active() && t.dpad_shown(i)) {
+            for i in (0..8).filter(|&i| !t.pad.hud_hidden() && t.dpad_shown(i)) {
                 let spr = if t.dir == Some(i) { sp::DPAD_PRESSED[i] } else { sp::DPAD[i] };
                 let (cx, cy, cw, ch) = layout.dpad[i];
                 let k = (cw - layout.dpad_gap) / 22.0 * spr.2; // the arrows are 22 px, a corner 18: same pixel size
                 HudPipeline::push_gui(v, cx + (cw - k) * 0.5, cy + (ch - k) * 0.5, k, k, spr);
             }
-            if !t.pad.active() {
+            if !t.pad.hud_hidden() {
                 let (sx, sy, sw, sh) = layout.sneak;
                 let g = layout.dpad_gap * 0.5;
                 HudPipeline::push_gui(v, sx + g, sy + g, sw - 2.0 * g, sh - 2.0 * g, if t.sneak { sp::SNEAK_ON } else { sp::SNEAK });
@@ -3635,11 +3635,21 @@ fn android_main(app: AndroidApp) {
                                 }
                                 IEv::KeyEvent(k) => match app_state.as_mut() {
                                     // not a guard: a guard binds `a` immutably, `on_key` needs it mutable
-                                    Some(a) => if a.touch.pad.on_key(&k) { InputStatus::Handled } else { InputStatus::Unhandled },
+                                    Some(a) => if a.touch.pad.on_key(&k) {
+                                        InputStatus::Handled
+                                    } else {
+                                        a.touch.pad.kbm |= matches!(k.source(), android_activity::input::Source::Keyboard);
+                                        InputStatus::Unhandled
+                                    },
                                     None => InputStatus::Unhandled,
                                 },
                                 IEv::MotionEvent(m) => {
                                     if let Some(a) = app_state.as_mut() {
+                                        match m.source() {
+                                            android_activity::input::Source::Mouse => a.touch.pad.kbm = true,
+                                            android_activity::input::Source::Touchscreen => a.touch.pad.kbm = false,
+                                            _ => {}
+                                        }
                                         a.on_motion(&m);
                                     }
                                     InputStatus::Unhandled

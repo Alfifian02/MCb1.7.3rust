@@ -308,6 +308,8 @@ pub struct Pad {
     /// A pad event has been seen: until then nothing here acts.
     connected: bool,
     pub device: i32,
+    /// A keyboard or mouse was the last thing used (`lib.rs` sets it on their events and clears it on a finger).
+    pub kbm: bool,
     /// Seconds since the last pad input (the cursor and the touch buttons follow it).
     idle: f32,
     prev: u16,
@@ -537,6 +539,11 @@ impl Pad {
         self.wheel_open
     }
 
+    /// The touch buttons (everything of the HUD but the hotbar) are not drawn: a pad, keyboard or mouse is in hand. They still answer a finger.
+    pub fn hud_hidden(&self) -> bool {
+        self.active() || self.kbm
+    }
+
     pub fn shows_cursor(&self) -> bool {
         self.active()
     }
@@ -763,6 +770,17 @@ mod tests {
         assert!(!p.update(DT, &c, false, 1000.0).view, "one press, one switch");
         p.key(Btn::Left, true);
         assert!(p.update(DT, &c, false, 1000.0).info);
+    }
+
+    #[test]
+    fn keyboard_or_mouse_hides_the_touch_buttons() {
+        let (mut p, _) = pad();
+        assert!(!p.hud_hidden());
+        p.kbm = true;
+        assert!(p.hud_hidden());
+        p.kbm = false;
+        p.key(Btn::A, true);
+        assert!(p.hud_hidden(), "a pad hides them too");
     }
 
     #[test]
