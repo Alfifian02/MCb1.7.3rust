@@ -1,0 +1,35 @@
+diff --git a/roadmap/design.md b/roadmap/design.md
+--- a/roadmap/design.md	2026-10-26 06:14:17.152173094 +0000
++++ b/roadmap/design.md	2026-10-26 06:13:23.648077922 +0000
+@@ -57,3 +57,20 @@
+ - **Predators and grazers (proposal 5).** needs the smart-animal paths (`path`) and the wolf lists of entry (20) -> wolves of the taiga, forest and grove hunt sheep; sheep graze and keep a meadow short in the plains and oak woodland, so tending a pasture is a thing to do; wool and bones feed beds and taming; Hooks: mobs, `path`, smart animals, wolf taming, crafting; Overlaps: the oak woodland's herds (they would gain a reason). Needs the `animalAi` switch. Inspiration: "predator prey", "grazing animals".
+ - **Seasons in the forests (proposal 4).** needs a day count (`world_ticks`) -> in the seasonal and autumnal forests the leaf colour follows the season and apples and saplings drop in some seasons more than others; Hooks: atmosphere tints, leaf drops (entry 20), crops (`ticks`); Overlaps: the autumnal forest's flat apple bonus (it would become the autumn peak). Inspiration: "seasons mod crops".
+ - **Every biome has one export (proposal 6).** needs a table of one specific material per biome (clay of the marsh, sand and cactus of the desert, spruce and furs of the taiga, apples of the autumnal forest) -> another biome's feature needs it (bricks for the desert's buildings, glass for the forests, food for the cold); the table is the real design and is written before the code; Hooks: world generation, crafting, mobs, structures' loot; Overlaps: whatever a biome already gives. Inspiration: "biome exclusive resources".
++
++## Landmarks (proposed 2026-10-26, nothing built)
++
++Serves proposal 3 (the beam): every structure in `gen::structory` today is low and wide (ruins, chapels, camps, manors, boats, the taiga dungeon, the swamp ruin), so none has a silhouette. These do. They are built by code (the tree generator, the dungeon builder), not by new jigsaw templates, because `structory.bin` is already 994 KB. Order, easiest first: 1, 2, 3, 4, 5, 6.
++
++**The one role they all share:** a landmark can be attuned once, by right-clicking its base with the rare material of proposal 3, and the compass then points to the next landmark in that direction. The attuning mark at the foot is an existing block (a lapis block), so no new block id is needed. Together they form a chain to follow, and what each one is on its own is only a silhouette and one local reason to stop. Rule 1 is met through this role (compass, crafting) plus the hooks below.
++
++**Two rules for all six:** the base is stone (or sandstone, or ice) so that the landmark the beam points to cannot burn or be dug away by accident; and each stands only where the biome check of its set passes, so the beam never points at nothing.
++
++- **1. Standing stone (plains, tundra).** needs a flat spot -> one tall stone pillar in a ring of mossy cobblestone with a chest at its foot; Hooks: compass (attuning), loot (a chest of b1.7.3 items), light (a torch ring at night); Overlaps: none.
++- **2. The great tree (wet woodland, autumnal forest, rainforest).** needs the tree generator (`gen::populate::Tree`) scaled to 40 or more blocks -> a single giant tree whose canopy is a landmark by day and a dark roof under it; apples and saplings drop from it as from any leaves; Hooks: tree generation, leaf drops and the apple (entry 20), the wet woodland's dark spawn check, compass; Overlaps: the ordinary trees there (this one is the only tall one).
++- **3. The stilt tower (marsh, swamp).** needs shallow water -> tall wooden posts over the water with a lamp at the top (a glowstone or jack-o-lantern) and a platform with a chest; slimes spawn on the surface around it at night (entry 20) and the clay is under it; Hooks: marsh slimes (`can_spawn`), clay and reeds (`populate`), light, compass; Overlaps: the swamp ruin (that one is low and sunk).
++- **4. The stepped pyramid (desert).** needs sand -> a stepped sandstone pyramid with a trapped chamber inside (pressure plate and TNT) and a chest of better loot as the reward for the risk; Hooks: sandstone, redstone and TNT (`redstone`, `ticks`), loot, compass; Overlaps: none.
++- **5. The fire tower (chaparral).** needs dry scrub -> a stone base and a wooden top with a brazier; the wood burns easily there (entry 20), so the top can be lost to a fire while the stone base and the beam stay; Hooks: fire (`ticks::fire`), the burn rates, skeletons in the dark of the base (`mobs`), compass; Overlaps: none.
++- **6. The ice spire (snowy birch grove, tundra, ice desert).** needs snow -> a tall spike of ice blocks with a wolf den at its foot (the grove's wolf list, entry 20), bones from the skeletons around it for taming; Hooks: ice and snow (`snows`), wolf spawn lists and taming, compass; Overlaps: the taiga (same wolves, no spire).
++
++Inspiration (search words): "waystone", "ancient obelisk", "world tree", "signal fires beacon chain", "stilt hut swamp", "desert temple trap", "ice spike".
+diff --git a/roadmap/gameplay.md b/roadmap/gameplay.md
+--- a/roadmap/gameplay.md	2026-10-26 06:14:17.152310297 +0000
++++ b/roadmap/gameplay.md	2026-10-26 06:13:23.650114536 +0000
+@@ -4,6 +4,7 @@
+ 
+ ## Changelog
+ 
++- 2026-10-26 (23): `design.md` gets the landmark proposals (documents only; no code; this entry and the `design.md` section are not in the last patch sent). Six silhouettes built by code, not templates: standing stone, the great tree, the stilt tower, the stepped pyramid, the fire tower, the ice spire. All share one role (attuning the compass to the next landmark, marked by a lapis block at the foot) and two rules (a base that cannot burn; stand only where the biome check passes).
+ - 2026-10-26 (22): `design.md` proposal 3 rewritten: a beam of light in the sky pass instead of a tower in the LoD (documents only; no code). The LoD is slow in mc-rs and a tall block cannot show past the render distance anyway; the landmark's position comes from the seed (`structory::spread`), the compass gives the way in. Still to be written: the "nearest landmark" query with its biome check, and the beam itself.
+ - 2026-10-26 (21): the six biome ideas and the rule about original ideas, in `design.md` (documents only; no code). `Repo-upstream.zip` is the new base: entries (15) to (18) (satchel, recipe book) are upstream's; entries (19) and (20) and the code of (20) apply unchanged on top of it.
+     - `design.md`: new section "Original ideas: recommend them" (an original idea, not in b1.7.3, is welcome as a recommendation; the player searches for mods for inspiration; it still gets a feature line first, a NOT b1.7.3 mark, and a switch when it changes the old game) and "Ideas waiting": fog is cover, a tower that shows from far, heat and cold are stamina, predators and grazers, seasons in the forests, every biome has one export. All six are proposals with hooks and search words; none is built. Order, easiest first: 2, 3, 1, 5, 4, 6.
