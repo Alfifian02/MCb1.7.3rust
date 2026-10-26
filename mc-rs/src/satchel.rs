@@ -830,7 +830,7 @@ fn draw_card(v: &mut Vec<HudVertex>, sat: &Satchel, b: &BookFrame, c: &Ctx, (tk,
     let (note, col) = match (e.src, e.grid) {
         (Src::Smelt(_), _) => ("Smelt it in a furnace", WARN_T),
         (_, g) if g > gw => ("Needs a workbench (3x3)", WARN_T),
-        _ if short.is_empty() => ("Tap the recipe again to refill", GOOD_T),
+        _ if short.is_empty() => ("Tap again to add a set", GOOD_T),
         _ => ("Missing ingredients", BAD_T),
     };
     text_fit_o(v, (tx, r[1] + 2.0 * u + 8.0 * tk + u), sk, mw, note, col, o);

@@ -5,7 +5,8 @@
 //! - `entries()`: every recipe of `CraftingManager` that this port has, plus every smelting (`FurnaceRecipes`), sorted into six
 //!   categories (`Cat`); the left page of the book lists them.
 //! - `craftable` / `missing` / `need`: what the bag holds against what a recipe wants (green / red on the card).
-//! - `fill`: a tap on a recipe puts one set of its ingredients into the grid (what lay in the grid goes back to the bag first);
+//! - `fill`: a tap on a recipe puts one set of its ingredients into the grid (what lay in the grid goes back to the bag first); a tap
+//!   on the recipe the grid already holds adds one more set to it instead, until the bag runs dry or a cell is a full stack;
 //!   `craft_all` is a long press on the result: fill, take, fill, take, until the bag runs dry or full.
 //! - `Notes`: the items the player has ever held (so unknown recipes can show as a silhouette) and the one recipe pinned to the HUD;
 //!   a 69 byte `book` file in the world folder.
@@ -15,7 +16,7 @@
 use std::sync::OnceLock;
 
 use crate::world::craft::{self, Screen, SlotId};
-use crate::world::items::{Inventory, ItemStack, MAIN};
+use crate::world::items::{max_stack, Inventory, ItemStack, MAIN};
 use crate::world::pack;
 
 /// The six pages of the left side of the book.
@@ -151,23 +152,9 @@ pub fn stash(screen: &mut Screen, inv: &mut Inventory) -> bool {
     screen.grid.iter().all(Option::is_none)
 }
 
-/// A tap on a recipe: the grid is cleared into the bag and one set of ingredients goes from the bag into the recipe's own cells (the
-/// main slots first, the quick belt last). Nothing changes, and false, when the entry is a smelting, does not fit the screen's grid,
-/// something is short, or the grid cannot be emptied.
-pub fn fill(e: &Entry, screen: &mut Screen, inv: &mut Inventory) -> bool {
-    let (gw, Src::Craft(ri)) = (screen.gw, e.src) else { return false };
-    if !(gw == 2 || gw == 3) || e.grid > gw {
-        return false;
-    }
-    let (g0, i0) = (screen.grid, inv.slots);
-    let undo = |screen: &mut Screen, inv: &mut Inventory| {
-        screen.grid = g0;
-        inv.slots = i0;
-        false
-    };
-    if !stash(screen, inv) || !missing(e, inv, &screen.grid).is_empty() {
-        return undo(screen, inv);
-    }
+/// Where each ingredient code of recipe `ri` lies in a grid `gw` wide (`0` = an empty cell); a shaped recipe keeps its rows, a shapeless
+/// one lies in the first cells.
+fn pattern_cells(ri: usize, gw: usize) -> [u16; 9] {
     let r = &craft::recipes()[ri];
     let mut cells = [0u16; 9];
     match r.shape() {
@@ -179,6 +166,58 @@ pub fn fill(e: &Entry, screen: &mut Screen, inv: &mut Inventory) -> bool {
             }
         }
         None => cells[..r.pattern().len()].copy_from_slice(r.pattern()),
+    }
+    cells
+}
+
+/// The grid holds exactly this recipe's ingredients in its places, whatever the counts (an empty grid holds none).
+fn holds(cells: &[u16; 9], grid: &[Option<ItemStack>; 9]) -> bool {
+    cells.iter().any(|&c| c != 0) && cells.iter().zip(grid.iter()).all(|(&c, g)| g.as_ref().map_or(0, |s| craft::code(s.id, s.damage)) == c)
+}
+
+/// One more set for a grid that holds `cells` already: each of its cells grows by one, taken from the bag (the main slots first, the
+/// quick belt last). Nothing changes, and false, when the bag has run dry of an ingredient or a cell is a full stack.
+fn add_set(cells: &[u16; 9], screen: &mut Screen, inv: &mut Inventory) -> bool {
+    let (g0, i0) = (screen.grid, inv.slots);
+    for (i, &c) in cells.iter().enumerate().filter(|&(_, &c)| c != 0) {
+        let slot = (9..MAIN).chain(0..9).find(|&k| inv.slots[k].is_some_and(|s| craft::code(s.id, s.damage) == c));
+        let ok = match (slot, screen.grid[i].as_mut()) {
+            (Some(k), Some(g)) if g.count < max_stack(g.id) => {
+                inv.slots[k] = inv.slots[k].and_then(|s| (s.count > 1).then(|| ItemStack { count: s.count - 1, ..s }));
+                g.count += 1;
+                true
+            }
+            _ => false,
+        };
+        if !ok {
+            (screen.grid, inv.slots) = (g0, i0);
+            return false;
+        }
+    }
+    true
+}
+
+/// A tap on a recipe. When the grid already holds that recipe (a second tap, a third, ...), one more set joins it from the bag (`add_set`).
+/// Otherwise the grid is cleared into the bag and one set of ingredients goes from the bag into the recipe's own cells (the main slots
+/// first, the quick belt last): another recipe always starts over from one set. Nothing changes, and false, when the entry is a smelting,
+/// does not fit the screen's grid, something is short (or the bag has no more of a set to add), or the grid cannot be emptied.
+pub fn fill(e: &Entry, screen: &mut Screen, inv: &mut Inventory) -> bool {
+    let (gw, Src::Craft(ri)) = (screen.gw, e.src) else { return false };
+    if !(gw == 2 || gw == 3) || e.grid > gw {
+        return false;
+    }
+    let cells = pattern_cells(ri, gw);
+    if holds(&cells, &screen.grid) {
+        return add_set(&cells, screen, inv);
+    }
+    let (g0, i0) = (screen.grid, inv.slots);
+    let undo = |screen: &mut Screen, inv: &mut Inventory| {
+        screen.grid = g0;
+        inv.slots = i0;
+        false
+    };
+    if !stash(screen, inv) || !missing(e, inv, &screen.grid).is_empty() {
+        return undo(screen, inv);
     }
     for (i, &c) in cells.iter().enumerate().filter(|&(_, &c)| c != 0) {
         let Some(slot) = (9..MAIN).chain(0..9).find(|&k| inv.slots[k].is_some_and(|s| craft::code(s.id, s.damage) == c)) else { return undo(screen, inv) };
@@ -322,6 +361,31 @@ mod tests {
         inv.slots[11] = Some(stack(5, 4));
         assert!(fill(entry(58, 0, 2), &mut s, &mut inv));
         assert_eq!((count(&inv, 17), count(&inv, 5), s.result().map(|r| r.id)), (3, 0, Some(58)));
+    }
+
+    #[test]
+    fn tapping_the_same_recipe_again_adds_a_set_and_another_recipe_starts_over() {
+        let (mut inv, mut s) = (Inventory::default(), Screen::new(2));
+        inv.slots[10] = Some(stack(17, 3));
+        let planks = entry(5, 0, 2);
+        assert!(fill(planks, &mut s, &mut inv));
+        assert!(fill(planks, &mut s, &mut inv) && fill(planks, &mut s, &mut inv), "taps two and three each add a set");
+        assert_eq!((s.grid[0].map(|g| g.count), count(&inv, 17)), (Some(3), 0));
+        assert_eq!(s.result().map(|r| (r.id, r.count)), Some((5, 4)), "the result is still one craft; taking it uses one set");
+        assert!(!fill(planks, &mut s, &mut inv), "the bag is dry: a fourth tap does nothing");
+        assert_eq!((s.grid[0].map(|g| g.count), count(&inv, 17)), (Some(3), 0));
+        // Another recipe: the whole stack goes back to the bag and it starts from one set.
+        inv.slots[11] = Some(stack(5, 4));
+        assert!(fill(entry(58, 0, 2), &mut s, &mut inv));
+        assert_eq!((count(&inv, 17), s.result().map(|r| r.id)), (3, Some(58)));
+        assert!(s.grid.iter().flatten().all(|g| g.count == 1));
+        // A cell that is a full stack takes no more.
+        let mut inv = Inventory::default();
+        let mut s = Screen::new(2);
+        inv.slots[10] = Some(stack(17, 64));
+        assert!(fill(planks, &mut s, &mut inv));
+        s.grid[0] = Some(stack(17, 64));
+        assert!(!fill(planks, &mut s, &mut inv) && s.grid[0].map(|g| g.count) == Some(64) && count(&inv, 17) == 63);
     }
 
     #[test]

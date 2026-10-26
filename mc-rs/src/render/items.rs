@@ -1,7 +1,6 @@
-//! Dropped items: a 0.25 cube per `ItemEntity` in the flat colour of its item, hovering and bobbing like
+//! Dropped items (textured block shape or sprite quad, `player::drop_item`), hovering and bobbing like
 //! `RenderItem` (`sin(age / 10) * 0.1 + 0.1`), drawn with the chunk pipeline from one dynamic buffer pair.
-//! ponytail: no spin (needs rotated boxes), flat full brightness, no 2nd/3rd copy for big stacks; M14 draws
-//! real item sprites.
+//! ponytail: no 2nd/3rd copy for big stacks, no per-item hover phase.
 
 use crate::gpu::gfx::{Buf, Gfx};
 use crate::render::atlas;
@@ -26,7 +25,7 @@ use crate::world::ticks::{Falling, MAX_FALLING};
 const MAX_BOATS: usize = 16;
 /// Carts drawn at once (floor, four walls and the furnace: 6 boxes each); the pack's cloth and all that lies on it are `pack::BOXES` more.
 const MAX_CARTS: usize = 16;
-const BOXES: usize = MAX_ITEMS * 2 + MAX_MOBS * 12 + MAX_ARROWS + MAX_FALLING + MAX_PARTICLES + MAX_BOLTS + MAX_BOATS * 5 + MAX_CARTS * 6 + pack::BOXES + 1;
+const BOXES: usize = MAX_ITEMS * 4 + MAX_MOBS * 12 + MAX_ARROWS + MAX_FALLING + MAX_PARTICLES + MAX_BOLTS + MAX_BOATS * 5 + MAX_CARTS * 6 + pack::BOXES + 1;
 /// Paintings (16 px pieces, one face each), signs (a board and a post of 6 two-sided faces) and the sign text (one quad per run
 /// of lit font pixels), on top of the boxes.
 const MAX_SIGNS: usize = 32;
@@ -104,15 +103,11 @@ fn geometry(drops: &Drops, mobs: &Mobs, falling: &[Falling], fx: &Effects, lv: &
         if !seen(c, 1.0) {
             continue;
         }
-        let h = 0.125;
-        // An item (not a block) is its `gui/items.png` sprite, two thin crossed slabs so it shows from every side; the alpha cuts it out.
-        match Some(e.stack.id).filter(|&i| i >= 256).and_then(atlas::item_icon) {
-            Some(icon) => {
-                let (t, w, d) = (atlas::ITEM_TILE0 + icon as u16, 0.18, 0.015);
-                push_box(&mut verts, &mut idxs, [c.x - w, c.y - w, c.z - d], [c.x + w, c.y + w, c.z + d], t, 1.0);
-                push_box(&mut verts, &mut idxs, [c.x - d, c.y - w, c.z - w], [c.x + d, c.y + w, c.z + w], t, 1.0);
-            }
-            None => push_box(&mut verts, &mut idxs, [c.x - h, c.y - h, c.z - h], [c.x + h, c.y + h, c.z + h], stack_tile(e.stack), 1.0),
+        // `RenderItem`: a block is its shape (turned by the age), anything else its sprite on a quad turned toward the eye.
+        let yaw = (eye.x - c.x).atan2(eye.z - c.z);
+        if !crate::render::player::drop_item(&mut verts, &mut idxs, c, (e.age as f32 + a) / 20.0, yaw, e.stack) {
+            let h = 0.125;
+            push_box(&mut verts, &mut idxs, [c.x - h, c.y - h, c.z - h], [c.x + h, c.y + h, c.z + h], stack_tile(e.stack), 1.0);
         }
         lit(&mut verts, n0, lv, c);
     }
@@ -272,7 +267,7 @@ fn push_quad2(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, p: [Vec3; 4], tint: f32
 }
 
 /// `ColorizerGrass` / `ColorizerFoliage` for a block face, as the mesher packs it (`mesh::WHITE` = none).
-fn block_tint(id: u8, meta: u8, face: usize) -> f32 {
+pub(crate) fn block_tint(id: u8, meta: u8, face: usize) -> f32 {
     use crate::world::climate;
     (match id {
         2 if face == 2 => climate::grass(0.8, 0.4),

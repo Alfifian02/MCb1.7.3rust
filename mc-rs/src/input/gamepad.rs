@@ -292,6 +292,9 @@ pub struct Out {
     /// In a GUI: LB / RB turn the book's page (-1 / +1), and the right stick scrolls (px, down is positive) like a finger dragging a list.
     pub page: i32,
     pub scroll: f32,
+    /// In a GUI: X was pressed (`Some(false)`: the slot under the cursor is clicked for one, the "One" button's click without the toggle)
+    /// or RT (`Some(true)`: it is quick-moved, the "Shift" button's click). Not while that button is bound to a GUI action.
+    pub alt: Option<bool>,
 }
 
 /// Live state of the pad(s): every controller feeds the same state, like Controllify's single active input mode.
@@ -454,6 +457,9 @@ impl Pad {
             o.cursor = ((sx + hx) * k, (sy + hy) * k);
             o.page = i32::from(pressed & Btn::Rb.bit() != 0) - i32::from(pressed & Btn::Lb.bit() != 0);
             o.scroll = ry * k;
+            let free = |b: Btn| ![Act::GuiSelect, Act::GuiBack, Act::Pause, Act::Inventory].iter().any(|&a| cfg.binds[a as usize] == b);
+            let on = |b: Btn| pressed & b.bit() != 0 && free(b);
+            o.alt = if on(Btn::X) { Some(false) } else if on(Btn::Rt) { Some(true) } else { None };
             if self.snap {
                 o.nav = self.nav_step(dt, held);
             }
@@ -749,6 +755,24 @@ mod tests {
         p.axes(0.0, 0.0, 0.0, 1.0, 0.0, 0.0, (0.0, 0.0));
         let o = p.update(DT, &c, true, 1000.0);
         assert!(o.scroll > 0.0 && o.cursor == (0.0, 0.0), "the right stick scrolls, it does not move the cursor");
+    }
+
+    #[test]
+    fn x_and_rt_are_a_one_click_and_a_quick_move_in_a_gui() {
+        let (mut p, mut c) = pad();
+        p.update(DT, &c, true, 1000.0);
+        p.key(Btn::X, true);
+        assert_eq!(p.update(DT, &c, true, 1000.0).alt, Some(false));
+        assert_eq!(p.update(DT, &c, true, 1000.0).alt, None, "a held button acts once");
+        p.key(Btn::X, false);
+        p.axes(0.0, 0.0, 0.0, 0.0, 0.0, 1.0, (0.0, 0.0));
+        assert_eq!(p.update(DT, &c, true, 1000.0).alt, Some(true));
+        p.axes(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, (0.0, 0.0));
+        p.update(DT, &c, true, 1000.0);
+        c.binds[ACTS.iter().position(|a| *a == Act::GuiBack).unwrap()] = Btn::X;
+        p.key(Btn::X, true);
+        let o = p.update(DT, &c, true, 1000.0);
+        assert!(o.alt.is_none() && o.back, "X rebound to GUI back is back, not a click");
     }
 
     #[test]

@@ -31,7 +31,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::backend::Backend;
-use crate::gpu::context::Drs;
+use crate::gpu::context::{Drs, FrameTimes};
 use crate::gpu::gfx::{Drawn, WorldDraw};
 use crate::render::atlas;
 use crate::render::debug::Row;
@@ -127,8 +127,17 @@ struct App {
     fps_avg: f32,
     /// Shown under the FPS: CPU ms per frame and the longest frame (ms) of the last second; `frame_prev` / `worst_acc` feed the latter.
     cpu_ms: u32,
+    /// Scene-pass GPU time (`gpu::timing`): this second's sum, count, and last second's mean in tenths of a ms (0 = not measured); `gpu_buf` is the scratch for `Backend::gpu_ms`.
+    gpu_acc: f32,
+    gpu_n: u32,
+    gpu_tenths: u32,
+    gpu_buf: Vec<f32>,
     worst_ms: u32,
     worst_acc: f32,
+    /// The 99th percentile of the frame gaps of the last second (ms), `FrameTimes` feeding it, and the panel's refresh rate (60 until the display says).
+    p99_ms: u32,
+    times: FrameTimes,
+    refresh_hz: f32,
     /// The previous frame was a paused one (its idle wait is not a spike).
     was_paused: bool,
     frame_prev: Instant,
@@ -283,6 +292,7 @@ impl App {
         // The options come first: the MSAA count is baked into every pipeline `Gpu` and what follows build.
         let opts = Settings::load(&dir);
         crate::gpu::context::set_error_trace(opts.gpu_error_trace);
+        crate::gpu::context::set_frame_latency(u32::from(opts.frame_latency));
         crate::render::present::set_msaa_want(u32::from(opts.msaa));
         crate::render::present::set_post_want(u32::from(opts.post));
         crate::gles::set_want(opts.renderer);
@@ -316,8 +326,15 @@ impl App {
             fps_recent: 0,
             fps_avg: 0.0,
             cpu_ms: 0,
+            gpu_acc: 0.0,
+            gpu_n: 0,
+            gpu_tenths: 0,
+            gpu_buf: Vec::new(),
             worst_ms: 0,
             worst_acc: 0.0,
+            p99_ms: 0,
+            times: FrameTimes::default(),
+            refresh_hz: 60.0,
             was_paused: false,
             frame_prev: Instant::now(),
             scan: Default::default(),
@@ -2196,6 +2213,15 @@ impl App {
         }
     }
 
+    /// The pad's X (`shift` false) or RT (`shift` true) in a container screen: the slot under the cursor is clicked for one (place one, or
+    /// take the larger half) or quick-moved, as the "One" and "Shift" buttons do, but for this press only and without moving the cursor to
+    /// them. Nothing off a slot, or while a press is down (a held A may be spreading a stack, or counting toward craft-all).
+    fn pad_alt(&mut self, shift: bool) {
+        let at = self.touch.cursor_pos;
+        let Some(id) = self.slot_under(at.0, at.1).filter(|_| self.gesture.is_none()) else { return };
+        self.with_ext(|s, inv, ext| if shift { s.shift_click(id, inv, ext) } else { s.click(id, true, inv, ext) });
+    }
+
     /// What the finger is on in the open satchel (`satchel::Frame::hit`); `None` when it is not open.
     fn sat_hit(&self, x: f32, y: f32) -> Option<satchel::Pick> {
         let (sat, s) = (self.sat.as_ref()?, self.screen.as_ref()?);
@@ -2805,8 +2831,14 @@ impl App {
         let spent = t0.elapsed();
         let cpu = spent.saturating_sub(acq);
         self.cpu_acc += cpu.as_secs_f32();
+        // Scene-pass GPU time of the frames whose stamps arrived (a few frames late): one mean per frame for `Drs`, all of them for the debug screen.
+        self.gpu_buf.clear();
+        self.be.gpu_ms(&mut self.gpu_buf);
+        self.gpu_acc += self.gpu_buf.iter().sum::<f32>();
+        self.gpu_n += self.gpu_buf.len() as u32;
+        let gpu = (!self.gpu_buf.is_empty()).then(|| self.gpu_buf.iter().sum::<f32>() / self.gpu_buf.len() as f32 / 1000.0);
         if self.opts.dynamic_res {
-            if let Some(p) = self.drs.tick(spent.as_secs_f32(), cpu.as_secs_f32()) {
+            if let Some(p) = self.drs.tick(spent.as_secs_f32(), cpu.as_secs_f32(), gpu) {
                 crate::gpu::context::set_scale_pct(p);
                 self.be.rescale();
                 log::info!("dynamic resolution: scene at {p}%");
@@ -2815,14 +2847,16 @@ impl App {
             // Switched off in Video Settings: pin the scene at `START_PCT` again and start `Drs` from there for the next switch-on.
             crate::gpu::context::set_scale_pct(crate::gpu::context::START_PCT);
             self.be.rescale();
-            self.drs = Drs::new(crate::gpu::context::START_PCT);
+            self.drs = Drs::at(crate::gpu::context::START_PCT, self.refresh_hz);
         }
 
         self.frames += 1;
         let now = Instant::now();
         // A paused frame, and the first one after it, waited on purpose (the idle poll): not a spike.
         if !(self.touch.paused || self.was_paused) {
-            self.worst_acc = self.worst_acc.max(now.duration_since(self.frame_prev).as_secs_f32());
+            let gap = now.duration_since(self.frame_prev).as_secs_f32();
+            self.worst_acc = self.worst_acc.max(gap);
+            self.times.push(gap);
         }
         self.was_paused = self.touch.paused;
         self.frame_prev = now;
@@ -2830,6 +2864,9 @@ impl App {
             self.cpu_ms = (self.cpu_acc / self.frames as f32 * 1000.0).round() as u32;
             self.worst_ms = (self.worst_acc * 1000.0).round() as u32;
             self.worst_acc = 0.0;
+            self.p99_ms = (self.times.take_p99() * 1000.0).round() as u32;
+            self.gpu_tenths = if self.gpu_n > 0 { (self.gpu_acc / self.gpu_n as f32 * 10.0).round() as u32 } else { 0 };
+            (self.gpu_acc, self.gpu_n) = (0.0, 0);
             let fps = self.frames as f32 / now.duration_since(self.fps_last).as_secs_f32();
             self.fps_recent = fps.round() as u32;
             // Moving average, 0.1 a second (~10 s); not fed while paused (the menu idles on purpose) and seeded by its first second.
@@ -2837,6 +2874,11 @@ impl App {
                 self.fps_avg = if self.fps_avg == 0.0 { fps } else { self.fps_avg * 0.9 + fps * 0.1 };
             }
             log::info!("FPS: {fps:.1} (average of the last ~10 s {:.0}), {} chunks loaded, CPU {:.1} ms/frame (CPU ~ frame time: CPU-bound; far below: GPU-bound), {} HUD vertices, {} sign texts kept", self.fps_avg, self.chunks.loaded(), self.cpu_acc / self.frames as f32 * 1000.0, self.hud_verts.len(), self.item_mesh.cached_signs());
+            // The pacing line: the slowest 1% of frames (not the average), the worst one, the panel, the scene pass's GPU time (`gpu::timing`; n/a
+            // without timestamp queries), and how long new chunks took to become drawable.
+            let wait = self.chunks.take_mesh_wait().map_or(String::new(), |(avg, max, n)| format!(", first mesh of {n} chunks: avg {avg:.0} ms, max {max:.0} ms"));
+            let gpu = if self.gpu_tenths > 0 { format!("{:.1} ms", self.gpu_tenths as f32 / 10.0) } else { "n/a".to_string() };
+            log::info!("pacing: p99 {} ms, worst {} ms, panel {:.0} Hz, scene pass GPU {gpu}{wait}", self.p99_ms, self.worst_ms, self.refresh_hz);
             self.cpu_acc = 0.0;
             self.frames = 0;
             self.fps_last = now;
@@ -2891,6 +2933,9 @@ impl App {
         if let Some(d) = self.touch.take_nav() {
             self.sat_nav(d);
         }
+        if let Some(shift) = self.touch.take_alt() {
+            self.pad_alt(shift);
+        }
         self.sat_pad_keys();
         if self.touch.take_pad_info() {
             self.opts.debug_screen = !self.opts.debug_screen;
@@ -2908,6 +2953,15 @@ impl App {
 
     fn pause_info(&self) -> PauseInfo {
         PauseInfo { dead: self.vitals.dead(), pregen: self.lod.as_ref().map(|l| l.pregen()), debug: self.lod.as_ref().map_or(0, |l| l.debug()), flying: self.touch.flying, info: self.opts.debug_screen }
+    }
+
+    /// The display's refresh rate (`immersive::refresh_hz`): the dynamic resolution aims at it, 60 to 90 Hz.
+    fn set_refresh_hz(&mut self, hz: f32) {
+        if (hz - self.refresh_hz).abs() > 0.5 {
+            log::info!("display refresh rate {hz:.1} Hz");
+        }
+        self.refresh_hz = hz;
+        self.drs.set_refresh_hz(hz);
     }
 
     fn on_motion(&mut self, ev: &android_activity::input::MotionEvent) {
@@ -2961,7 +3015,7 @@ impl App {
         let (sc, pct, ms) = (crate::gpu::context::scene_size(w, h), crate::gpu::context::scale_pct(), scene_samples());
         let mut right = vec![
             Row::Kv("FPS", format!("{fps}  (avg {:.0})", self.fps_avg), fps_color(fps)),
-            Row::Kv("Frame", format!("cpu {} ms  worst {} ms", self.cpu_ms, self.worst_ms), WHITE),
+            Row::Kv("Frame", if self.gpu_tenths > 0 { format!("cpu {} ms  gpu {:.1} ms  p99 {} ms  worst {} ms", self.cpu_ms, self.gpu_tenths as f32 / 10.0, self.p99_ms, self.worst_ms) } else { format!("cpu {} ms  p99 {} ms  worst {} ms", self.cpu_ms, self.p99_ms, self.worst_ms) }, WHITE),
             Row::Kv("Screen", format!("{w}x{h}"), WHITE),
             Row::Kv("Scene", format!("{}x{}  {pct}%", sc.0, sc.1), WHITE),
             Row::Kv("Dyn. res", set(Opt::DynamicRes), WHITE),
@@ -3675,6 +3729,9 @@ fn android_main(app: AndroidApp) {
                     MainEvent::GainedFocus => {
                         immersive::hide_system_bars(&app);
                         sync_size(&app, &mut app_state);
+                        if let (Some(a), Some(hz)) = (app_state.as_mut(), immersive::refresh_hz(&app)) {
+                            a.set_refresh_hz(hz); // the panel may have switched mode while we were away
+                        }
                     }
                     MainEvent::WindowResized { .. }
                     | MainEvent::ContentRectChanged { .. }
@@ -3694,6 +3751,9 @@ fn android_main(app: AndroidApp) {
                             app_state = Some(a);
                             sync_size(&app, &mut app_state);
                             self_main_frames = 0;
+                            if let (Some(a), Some(hz)) = (app_state.as_mut(), immersive::refresh_hz(&app)) {
+                                a.set_refresh_hz(hz);
+                            }
                         } else {
                             log::warn!("init finished but window is gone; discarding");
                         }

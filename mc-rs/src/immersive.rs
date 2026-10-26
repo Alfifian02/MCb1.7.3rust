@@ -89,3 +89,27 @@ unsafe fn use_cutout(vm: *mut c_void, activity: *mut c_void) -> jni::errors::Res
         Ok(())
     })
 }
+
+/// The display's current refresh rate in Hz (`WindowManager.getDefaultDisplay().getRefreshRate()`: deprecated since API 30, still
+/// right on 8-14), or `None` if the call fails. Not a view call, so any thread may make it; ask again when focus returns, because the
+/// panel may have switched mode (60 / 90 / 120 Hz).
+pub fn refresh_hz(app: &AndroidApp) -> Option<f32> {
+    // SAFETY: both pointers come from `app`, which outlives the call.
+    let r = unsafe { read_refresh(app.vm_as_ptr(), app.activity_as_ptr()) };
+    r.map_err(|e| log::warn!("refresh rate not read: {e:?}")).ok().filter(|hz| hz.is_finite() && *hz >= 30.0)
+}
+
+unsafe fn read_refresh(vm: *mut c_void, activity: *mut c_void) -> jni::errors::Result<f32> {
+    let vm = unsafe { JavaVM::from_raw(vm.cast::<sys::JavaVM>()) };
+    vm.attach_current_thread(|env| {
+        let raw = activity as sys::jobject;
+        let activity = unsafe { env.as_cast_raw::<Global<JObject>>(&raw)? };
+        let windows = env
+            .call_method(&*activity, jni_str!("getWindowManager"), jni_sig!(() -> android.view.WindowManager), &[])?
+            .l()?;
+        let display = env
+            .call_method(&windows, jni_str!("getDefaultDisplay"), jni_sig!(() -> android.view.Display), &[])?
+            .l()?;
+        env.call_method(&display, jni_str!("getRefreshRate"), jni_sig!(() -> jfloat), &[])?.f()
+    })
+}

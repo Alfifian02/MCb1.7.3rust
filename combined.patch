@@ -1,0 +1,1371 @@
+diff -ruN -x '*.orig' -x '*.rej' a/mc-rs/src/backend.rs b/mc-rs/src/backend.rs
+--- a/mc-rs/src/backend.rs	2026-10-26 23:31:29.170383266 +0000
++++ b/mc-rs/src/backend.rs	2026-10-26 23:31:29.252299744 +0000
+@@ -9,6 +9,7 @@
+ use crate::gpu::context::Gpu;
+ use crate::gpu::gfx::{Drawn, Gfx, WorldDraw};
+ use crate::gpu::pipeline::{ChunkPipeline, DrawOrigins};
++use crate::gpu::timing::GpuTimer;
+ use crate::render::hud::{HudPipeline, HudVertex};
+ use crate::render::panorama::Panorama;
+ use crate::render::present::{Present, SCENE_FORMAT};
+@@ -25,6 +26,8 @@
+     sky: SkyRenderer,
+     present: Present,
+     rain_fx: weather::Weather,
++    /// Scene-pass GPU time for `Drs` (`None`: the adapter has no timestamp queries).
++    timer: Option<GpuTimer>,
+ }
+ 
+ impl Wg {
+@@ -38,7 +41,9 @@
+         let rain_fx = weather::Weather::new(&gpu.device, &gpu.queue, SCENE_FORMAT);
+         let sky = SkyRenderer::new(&gpu.device, &gpu.queue, SCENE_FORMAT);
+         let present = Present::new(&gpu.device, &gpu.queue, gpu.scene(), (w, h), fmt);
+-        Self { gpu, pipe, hud, pano, sky, present, rain_fx }
++        let timer = GpuTimer::new(&gpu.device, &gpu.queue);
++        log::info!("GPU timestamps: {}", if timer.is_some() { "on (scene pass)" } else { "off (adapter has no timestamp queries)" });
++        Self { gpu, pipe, hud, pano, sky, present, rain_fx, timer }
+     }
+ 
+     fn sync_scene(&mut self) {
+@@ -109,6 +114,7 @@
+             self.gpu.queue.write_buffer(&self.hud.vbuf, 0, bytemuck::cast_slice(d.hud));
+         }
+         let mut enc = self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
++        let slot = self.timer.as_mut().and_then(|t| t.begin()); // a busy slot leaves this frame untimed
+         {
+             let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                 label: Some("scene"),
+@@ -119,7 +125,7 @@
+                     depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Discard }),
+                     stencil_ops: None,
+                 }),
+-                timestamp_writes: None,
++                timestamp_writes: self.timer.as_ref().zip(slot).map(|(t, s)| t.writes(s)),
+                 occlusion_query_set: None,
+             });
+             self.draw_opaque(&mut rp, d);
+@@ -146,6 +152,9 @@
+                 self.rain_fx.draw(&mut rp);
+             }
+         }
++        if let (Some(t), Some(s)) = (&self.timer, slot) {
++            t.resolve(&mut enc, s);
++        }
+         // CAS + upscale + vignette in one pass; the HUD goes over the finished frame in it (neither sharpened nor vignetted).
+         self.present.finish(&mut enc, &view_tex, |rp| {
+             if hud_vertex_count > 0 {
+@@ -156,6 +165,9 @@
+             }
+         });
+         self.gpu.queue.submit(std::iter::once(enc.finish()));
++        if let (Some(t), Some(s)) = (self.timer.as_mut(), slot) {
++            t.submitted(s);
++        }
+         frame.present();
+         Drawn::Done(acq)
+     }
+@@ -252,6 +264,16 @@
+         }
+     }
+ 
++    /// Scene-pass GPU milliseconds of the recent frames whose timestamps have arrived, oldest first, pushed onto `out`. Nothing for the
++    /// GLES renderer or an adapter without timestamp queries. Never waits.
++    pub fn gpu_ms(&mut self, out: &mut Vec<f32>) {
++        if let Backend::Wgpu(w) = self {
++            if let Some(t) = &mut w.timer {
++                t.collect(&w.gpu.device, out);
++            }
++        }
++    }
++
+     /// The scene targets at the current dynamic-resolution scale.
+     pub fn rescale(&mut self) {
+         match self {
+diff -ruN -x '*.orig' -x '*.rej' a/mc-rs/src/gpu/context.rs b/mc-rs/src/gpu/context.rs
+--- a/mc-rs/src/gpu/context.rs	2026-10-26 23:31:29.170630797 +0000
++++ b/mc-rs/src/gpu/context.rs	2026-10-26 23:31:51.605806598 +0000
+@@ -57,6 +57,16 @@
+ pub const SCALE_MAX: u32 = 100;
+ static SCALE_PCT: AtomicU32 = AtomicU32::new(START_PCT);
+ 
++/// Frames the swap chain may queue ahead (`SurfaceConfiguration::desired_maximum_frame_latency`). 2 is wgpu's default and what the
++/// game always used; 1 shortens the finger-to-picture path by up to one frame but lets the CPU and the GPU overlap less, so a frame
++/// that needs more than about half the refresh period may drop to the next step down. `frameLatency:1` in `options.txt`; read once,
++/// before the surface is configured. The OpenGL ES renderer ignores it (EGL owns its queue).
++static FRAME_LATENCY: AtomicU32 = AtomicU32::new(2);
++
++pub fn set_frame_latency(n: u32) {
++    FRAME_LATENCY.store(n.clamp(1, 3), Ordering::Relaxed);
++}
++
+ pub fn set_scale_pct(p: u32) {
+     SCALE_PCT.store(p.clamp(SCALE_MIN, SCALE_MAX), Ordering::Relaxed);
+ }
+@@ -73,43 +83,76 @@
+ 
+ const STEP: u32 = 5;
+ const WINDOW: u32 = 30; // frames averaged: half a second at 60 Hz
+-const TARGET: f32 = 1.0 / 60.0; // ponytail: a fixed 60 Hz target; on a 90 / 120 Hz panel it only ever fires below 60 fps
++/// The target frame rate is the panel's refresh rate (`Drs::set_refresh_hz`, from the display) clamped to `60..=MAX_TARGET_HZ`: chasing
++/// 120 Hz would sink the scene to `SCALE_MIN` on any phone that cannot draw 120 fps, and a blurry 120 is worse than a clean 60-90.
++/// ponytail: one number for the cap; the upgrade is to follow the `Performance` option too.
++const MIN_TARGET_HZ: f32 = 60.0;
++const MAX_TARGET_HZ: f32 = 90.0;
+ const BASE_WAIT: u32 = 20; // clean windows before a probe up (10 s at 60 fps)
+ const MAX_WAIT: u32 = 240;
+ const HOLD: u32 = 3; // clean windows after a probe up that show the new level holds
++// With the scene pass's GPU time (`gpu::timing`) there is no guessing from frame time and CPU idle: the budgets are shares of the target frame time (`Drs::target`, the panel's rate).
++const GPU_DOWN: f32 = 0.85; // a window averaging over this share steps down (the final pass and the driver need the rest of the frame)
++const GPU_UP: f32 = 0.70; // a probe up only when the scene pass is predicted to stay under this share at the next level
++const GPU_WAIT: u32 = 4; // windows with that headroom before the probe (2 s at 60 fps)
+ 
+ /// Dynamic resolution (roadmap performance step 4): moves the scene scale by `STEP` percent between `SCALE_MIN` and `SCALE_MAX`.
+ /// vsync hides spare GPU time (a frame is 16.7 ms either way), so there is no "fast" to read: it steps DOWN when a window of frames
+-/// averages over `TARGET` by 20% while the CPU sat idle for a good part of it (GPU-bound; fewer pixels do nothing for a CPU-bound frame, which
+-/// also never counts as clean), and probes UP after `wait` clean windows. A drop right after a probe means the level above does not hold: `wait`
++/// averages over its target frame time (`MIN_TARGET_HZ`..`MAX_TARGET_HZ`, the panel's rate) by 20% while the CPU sat idle for a good part of it (GPU-bound; fewer pixels do nothing for a CPU-bound frame, which
++/// also never counts as clean), and probes UP after `wait` clean windows. When the adapter has timestamp queries, a window is judged on the scene
++/// pass's GPU time instead (`gpu_window`). A drop right after a probe means the level above does not hold: `wait`
+ /// doubles; a probe that holds halves it again.
+ pub struct Drs {
+     pct: u32,
+     n: u32,
+     total: f32,
+     cpu: f32,
++    gpu: f32,
++    timed: u32,
+     clean: u32,
+     wait: u32,
+     up: bool,
++    /// Seconds a frame may take before it counts as slow (before the 20% margin).
++    target: f32,
+ }
+ 
+ impl Drs {
+     pub fn new(pct: u32) -> Self {
+-        Self { pct, n: 0, total: 0.0, cpu: 0.0, clean: 0, wait: BASE_WAIT, up: false }
++        Self::at(pct, MIN_TARGET_HZ)
+     }
+ 
+-    /// One frame: `total` seconds in `render_frame` (swap-chain wait included), `cpu` of them CPU work. `Some(percent)` when the scale changes.
+-    pub fn tick(&mut self, total: f32, cpu: f32) -> Option<u32> {
++    /// Starts at `pct` aiming at the display's `hz`.
++    pub fn at(pct: u32, hz: f32) -> Self {
++        Self { pct, n: 0, total: 0.0, cpu: 0.0, gpu: 0.0, timed: 0, clean: 0, wait: BASE_WAIT, up: false, target: target_secs(hz) }
++    }
++
++    /// The display's refresh rate became known (or changed: a 60 / 90 / 120 Hz switch); the scale and the windows in progress stay.
++    pub fn set_refresh_hz(&mut self, hz: f32) {
++        self.target = target_secs(hz);
++    }
++
++    /// One frame: `total` seconds in `render_frame` (swap-chain wait included), `cpu` of them CPU work, `gpu` the scene pass's GPU seconds
++    /// when a timestamp arrived this frame (`None`: not measured). A window in which at least half the frames were timed is judged
++    /// on the GPU time alone (`gpu_window`); otherwise on `total` and `cpu` as before. `Some(percent)` when the scale changes.
++    pub fn tick(&mut self, total: f32, cpu: f32, gpu: Option<f32>) -> Option<u32> {
+         self.total += total.min(0.05); // a load hitch counts as at most 3 frames
+         self.cpu += cpu.min(0.05);
++        if let Some(g) = gpu {
++            self.gpu += g.min(0.05);
++            self.timed += 1;
++        }
+         self.n += 1;
+         if self.n < WINDOW {
+             return None;
+         }
+         let (total, cpu) = (self.total / self.n as f32, self.cpu / self.n as f32);
+-        (self.n, self.total, self.cpu) = (0, 0.0, 0.0);
++        let measured = (self.timed * 2 >= self.n).then(|| self.gpu / self.timed as f32);
++        (self.n, self.total, self.cpu, self.gpu, self.timed) = (0, 0.0, 0.0, 0.0, 0);
++        if let Some(g) = measured {
++            return self.gpu_window(g);
++        }
+         let old = self.pct;
+-        let slow = total > TARGET * 1.2;
++        let slow = total > self.target * 1.2;
+         if slow && cpu < total * 0.75 {
+             if self.up && self.clean < HOLD {
+                 self.wait = (self.wait * 2).min(MAX_WAIT);
+@@ -129,6 +172,91 @@
+         }
+         (self.pct != old).then_some(self.pct)
+     }
++
++    /// One window judged on the scene pass's average GPU time `g` (seconds). Over budget: down one step, whatever the CPU did.
++    /// Under it: a probe up only after `GPU_WAIT` windows in which the next level is predicted to fit (the pixel count grows with the
++    /// square of the scale; vertex work does not, so this overestimates the cost and errs on the safe side). The gap between
++    /// `GPU_DOWN` and `GPU_UP` keeps it from bouncing between two levels.
++    fn gpu_window(&mut self, g: f32) -> Option<u32> {
++        let old = self.pct;
++        (self.up, self.wait) = (false, BASE_WAIT); // the untimed path starts fresh if the timestamps stop
++        if g > self.target * GPU_DOWN {
++            self.clean = 0;
++            self.pct = self.pct.saturating_sub(STEP).max(SCALE_MIN);
++        } else {
++            let next = ((self.pct + STEP).min(SCALE_MAX)) as f32 / self.pct as f32;
++            if self.pct < SCALE_MAX && g * next * next < self.target * GPU_UP {
++                self.clean += 1;
++                if self.clean >= GPU_WAIT {
++                    (self.pct, self.clean) = ((self.pct + STEP).min(SCALE_MAX), 0);
++                }
++            } else {
++                self.clean = 0;
++            }
++        }
++        (self.pct != old).then_some(self.pct)
++    }
++}
++
++/// The frame time `Drs` aims at for a panel of `hz` (NaN, zero and nonsense fall back to 60 Hz).
++fn target_secs(hz: f32) -> f32 {
++    1.0 / if hz.is_finite() { hz.clamp(MIN_TARGET_HZ, MAX_TARGET_HZ) } else { MIN_TARGET_HZ }
++}
++
++/// The gaps between presented frames of one second, for the 99th percentile (`render_frame` logs it and the debug screen shows it): the
++/// average FPS hides the hitches a person feels, the worst frame is one bad luck, p99 is the slowest of every hundred.
++#[derive(Default)]
++pub struct FrameTimes(Vec<f32>);
++
++impl FrameTimes {
++    pub fn push(&mut self, secs: f32) {
++        if self.0.len() < 1024 {
++            self.0.push(secs); // ponytail: 1024 gaps is 8 s at 120 Hz; the second is read long before
++        }
++    }
++
++    /// The 99th percentile (nearest rank) of what was pushed since the last call, in seconds; 0 when nothing was. Clears.
++    pub fn take_p99(&mut self) -> f32 {
++        self.0.sort_by(f32::total_cmp);
++        let p = self.0.len().checked_sub(1).map_or(0.0, |last| self.0[(self.0.len() * 99).div_ceil(100).saturating_sub(1).min(last)]);
++        self.0.clear();
++        p
++    }
++}
++
++#[cfg(test)]
++mod pacing_tests {
++    use super::*;
++
++    #[test]
++    fn p99_is_the_hundredth_slowest_and_the_target_follows_the_panel() {
++        let mut t = FrameTimes::default();
++        assert_eq!(t.take_p99(), 0.0, "nothing pushed");
++        for _ in 0..99 {
++            t.push(0.0167);
++        }
++        t.push(0.1); // one hitch in a hundred frames is the worst frame, not yet p99
++        assert_eq!(t.take_p99(), 0.0167);
++        for _ in 0..98 {
++            t.push(0.0167);
++        }
++        (t.push(0.1), t.push(0.1)); // two in a hundred: the 99th is a hitch
++        assert_eq!(t.take_p99(), 0.1);
++        assert_eq!(t.take_p99(), 0.0, "cleared");
++        assert_eq!((target_secs(60.0), target_secs(f32::NAN), target_secs(0.0)), (1.0 / 60.0, 1.0 / 60.0, 1.0 / 60.0));
++        assert_eq!((target_secs(90.0), target_secs(120.0)), (1.0 / 90.0, 1.0 / 90.0), "capped");
++        let run = |d: &mut Drs, windows: u32, total: f32| (0..windows * WINDOW).filter_map(|_| d.tick(total, 0.004, None)).last();
++        // 90 Hz panel, GPU-bound at 60 fps: the scene steps down (on a 60 Hz target this frame time is on target).
++        assert_eq!(run(&mut Drs::at(START_PCT, 90.0), 1, 0.0167), Some(START_PCT - STEP));
++        assert_eq!(run(&mut Drs::at(START_PCT, 60.0), 1, 0.0167), None);
++        let mut d = Drs::new(START_PCT);
++        d.set_refresh_hz(90.0);
++        assert_eq!(run(&mut d, 1, 0.0167), Some(START_PCT - STEP));
++        // The GPU-time path aims at the same target: 12 ms is under 85% of 16.7 ms but over 85% of 11.1 ms.
++        let timed = |d: &mut Drs| (0..WINDOW).filter_map(|_| d.tick(0.0167, 0.006, Some(0.012))).last();
++        assert_eq!(timed(&mut Drs::at(START_PCT, 60.0)), None);
++        assert_eq!(timed(&mut Drs::at(START_PCT, 90.0)), Some(START_PCT - STEP));
++    }
+ }
+ 
+ #[cfg(test)]
+@@ -138,7 +266,7 @@
+     #[test]
+     fn steps_down_when_gpu_bound_and_probes_up_with_backoff() {
+         assert_eq!((RENDER_SCALE * 100.0).round() as u32, START_PCT);
+-        let run = |d: &mut Drs, windows: u32, total: f32, cpu: f32| (0..windows * WINDOW).filter_map(|_| d.tick(total, cpu)).last();
++        let run = |d: &mut Drs, windows: u32, total: f32, cpu: f32| (0..windows * WINDOW).filter_map(|_| d.tick(total, cpu, None)).last();
+         let mut d = Drs::new(START_PCT);
+         // vsync-locked 60 Hz with the CPU mostly idle: nothing moves until the probe.
+         assert_eq!(run(&mut d, BASE_WAIT - 1, 0.0167, 0.006), None);
+@@ -153,6 +281,27 @@
+         // The floor holds.
+         assert_eq!(run(&mut Drs::new(SCALE_MIN), 4, 0.03, 0.008), None);
+     }
++
++    #[test]
++    fn gpu_time_steps_down_over_budget_and_probes_up_only_with_headroom() {
++        // Vsync-clean frame times and an idle CPU throughout: only the GPU time speaks.
++        let run = |d: &mut Drs, windows: u32, gpu: f32| (0..windows * WINDOW).filter_map(|_| d.tick(0.0167, 0.006, Some(gpu))).last();
++        let mut d = Drs::new(START_PCT);
++        // 15 ms of 16.7 is over 85%: down at the first window (the old path would have waited for a missed vsync).
++        assert_eq!(run(&mut d, 1, 0.015), Some(START_PCT - STEP));
++        // 12 ms fits, but 5% more scale is predicted at ~14 ms: no headroom, so it holds however long it runs.
++        assert_eq!(run(&mut d, 10, 0.012), None);
++        // 8 ms has headroom (predicted ~9.3 ms): the probe comes after GPU_WAIT windows, not before.
++        assert_eq!(run(&mut d, GPU_WAIT - 1, 0.008), None);
++        assert_eq!(run(&mut d, 1, 0.008), Some(START_PCT));
++        // A window with too few timed frames (here 10 of 30) falls back to the frame-time path.
++        let mut e = Drs::new(START_PCT);
++        let sparse = (0..WINDOW).filter_map(|i| e.tick(0.022, 0.008, (i % 3 == 0).then_some(0.001))).last();
++        assert_eq!(sparse, Some(START_PCT - STEP), "GPU-bound by frame time, as before");
++        // The floor and the ceiling hold.
++        assert_eq!(run(&mut Drs::new(SCALE_MIN), 4, 0.03), None);
++        assert_eq!(run(&mut Drs::new(SCALE_MAX), 2 * GPU_WAIT, 0.002), None);
++    }
+ }
+ 
+ /// `gpuErrorTrace:true` in `options.txt` (ImmediatelyFast's `debug_only_print_additional_error_information`): a wgpu error is logged
+@@ -278,7 +427,7 @@
+         let (device, queue) = adapter
+             .request_device(&wgpu::DeviceDescriptor {
+                 label: Some("mc-rs"),
+-                required_features: wgpu::Features::empty(),
++                required_features: crate::gpu::timing::GpuTimer::features(&adapter), // scene-pass timestamps for `Drs`, if the adapter has them
+                 required_limits: wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits()),
+                 memory_hints: wgpu::MemoryHints::default(),
+                 trace: wgpu::Trace::Off,
+@@ -312,6 +461,7 @@
+         if caps.present_modes.contains(&wgpu::PresentMode::Fifo) {
+             config.present_mode = wgpu::PresentMode::Fifo;
+         }
++        config.desired_maximum_frame_latency = FRAME_LATENCY.load(Ordering::Relaxed);
+         // Android doesn't support view_formats; force empty to avoid validation
+         // error (SURFACE_VIEW_FORMATS not in downlevel properties).
+         config.view_formats = vec![];
+diff -ruN -x '*.orig' -x '*.rej' a/mc-rs/src/gpu/mod.rs b/mc-rs/src/gpu/mod.rs
+--- a/mc-rs/src/gpu/mod.rs	2026-10-26 23:31:29.170679339 +0000
++++ b/mc-rs/src/gpu/mod.rs	2026-10-26 23:31:29.254073167 +0000
+@@ -1,3 +1,4 @@
+ pub mod context;
+ pub mod gfx;
+ pub mod pipeline;
++pub mod timing;
+diff -ruN -x '*.orig' -x '*.rej' a/mc-rs/src/gpu/timing.rs b/mc-rs/src/gpu/timing.rs
+--- a/mc-rs/src/gpu/timing.rs	1970-01-01 00:00:00.000000000 +0000
++++ b/mc-rs/src/gpu/timing.rs	2026-10-26 23:31:29.254290353 +0000
+@@ -0,0 +1,157 @@
++//! GPU time of the scene pass, from timestamp queries, read back a few frames late so the CPU never waits for it.
++//!
++//! Port of `gfx/timing.rs` of Horizon (MIT, ludovic111/horizon), cut down for this renderer:
++//! - Horizon times a whole frame with extra "marker" passes where the GPU only stamps pass boundaries (Metal). Here the stamps ride on
++//!   the scene pass itself (`RenderPassDescriptor::timestamp_writes`), so no pass is added: on a tile-based phone GPU a pass that
++//!   loads and stores the swap-chain image would cost more than it measures. Only `Features::TIMESTAMP_QUERY` is needed, not
++//!   `TIMESTAMP_QUERY_INSIDE_ENCODERS`.
++//! - Only the scene pass is timed, on purpose: it is the part that scales with the dynamic-resolution scale (`gpu::context::Drs`),
++//!   and the final pass, which writes the swap-chain image, can stall on the presentation semaphore under vsync and would show
++//!   that wait as GPU work.
++//!
++//! One frame: `begin` picks a free slot, `writes` goes into the scene pass, `resolve` copies the two stamps out after the pass,
++//! `submitted` starts the read-back once the encoder is submitted, `collect` (any later frame) returns the finished ones in ms.
++//! A frame whose slot is still busy simply goes untimed.
++
++use std::sync::{
++    atomic::{AtomicU8, Ordering},
++    Arc,
++};
++
++/// Frames in flight at once: a read-back lands two or three frames after its submit.
++const SLOTS: usize = 6;
++/// Each slot's two stamps sit at their own aligned offset of the resolve buffer.
++const STRIDE: u64 = wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT;
++const FREE: u8 = 0;
++/// Resolved and submitted, the map request is out.
++const PENDING: u8 = 1;
++/// The map request finished: `collect` may read it.
++const MAPPED: u8 = 2;
++
++struct Slot {
++    buffer: wgpu::Buffer,
++    state: Arc<AtomicU8>,
++}
++
++pub struct GpuTimer {
++    queries: wgpu::QuerySet,
++    resolve: wgpu::Buffer,
++    slots: Vec<Slot>,
++    next: usize,
++    period_ns: f32,
++}
++
++impl GpuTimer {
++    /// The feature timing uses, if the adapter has it (empty: no timing). Ask for this in `request_device`.
++    pub fn features(adapter: &wgpu::Adapter) -> wgpu::Features {
++        adapter.features() & wgpu::Features::TIMESTAMP_QUERY
++    }
++
++    /// `None` when the device was made without the feature or the queue reports no timestamp period.
++    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Option<Self> {
++        if !device.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
++            return None;
++        }
++        let period_ns = queue.get_timestamp_period();
++        if !(period_ns > 0.0) {
++            return None;
++        }
++        let queries = device.create_query_set(&wgpu::QuerySetDescriptor {
++            label: Some("scene timestamps"),
++            ty: wgpu::QueryType::Timestamp,
++            count: 2 * SLOTS as u32,
++        });
++        let resolve = device.create_buffer(&wgpu::BufferDescriptor {
++            label: Some("scene timestamp resolve"),
++            size: STRIDE * SLOTS as u64,
++            usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
++            mapped_at_creation: false,
++        });
++        let slots = (0..SLOTS)
++            .map(|_| Slot {
++                buffer: device.create_buffer(&wgpu::BufferDescriptor {
++                    label: Some("scene timestamp read-back"),
++                    size: 16,
++                    usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
++                    mapped_at_creation: false,
++                }),
++                state: Arc::new(AtomicU8::new(FREE)),
++            })
++            .collect();
++        Some(Self { queries, resolve, slots, next: 0, period_ns })
++    }
++
++    /// Start timing this frame: the slot to pass to `writes`, `resolve` and `submitted`, or `None` when it is still busy.
++    pub fn begin(&mut self) -> Option<usize> {
++        (self.slots[self.next].state.load(Ordering::Acquire) == FREE).then_some(self.next)
++    }
++
++    /// The scene pass's `timestamp_writes`: its start and its end.
++    pub fn writes(&self, slot: usize) -> wgpu::RenderPassTimestampWrites<'_> {
++        wgpu::RenderPassTimestampWrites {
++            query_set: &self.queries,
++            beginning_of_pass_write_index: Some(2 * slot as u32),
++            end_of_pass_write_index: Some(2 * slot as u32 + 1),
++        }
++    }
++
++    /// After the timed pass has ended and before `encoder.finish()`: copy its two stamps to the slot's read-back buffer.
++    pub fn resolve(&self, encoder: &mut wgpu::CommandEncoder, slot: usize) {
++        let (first, at) = (2 * slot as u32, STRIDE * slot as u64);
++        encoder.resolve_query_set(&self.queries, first..first + 2, &self.resolve, at);
++        encoder.copy_buffer_to_buffer(&self.resolve, at, &self.slots[slot].buffer, 0, 16);
++    }
++
++    /// After `queue.submit`: ask for the read-back. The slot stays busy until `collect` has read it.
++    pub fn submitted(&mut self, slot: usize) {
++        let state = self.slots[slot].state.clone();
++        state.store(PENDING, Ordering::Release);
++        self.slots[slot].buffer.slice(..).map_async(wgpu::MapMode::Read, move |r| {
++            state.store(if r.is_ok() { MAPPED } else { FREE }, Ordering::Release);
++        });
++        self.next = (slot + 1) % SLOTS;
++    }
++
++    /// Scene-pass GPU milliseconds of the frames whose stamps have arrived, oldest first, pushed onto `out`. Never blocks.
++    pub fn collect(&mut self, device: &wgpu::Device, out: &mut Vec<f32>) {
++        let _ = device.poll(wgpu::PollType::Poll);
++        for i in 0..SLOTS {
++            let slot = &self.slots[(self.next + i) % SLOTS];
++            if slot.state.load(Ordering::Acquire) != MAPPED {
++                continue;
++            }
++            {
++                let data = slot.buffer.slice(..).get_mapped_range();
++                // Unaligned read: the mapping is not promised to be 8-byte aligned.
++                let stamps: [u64; 2] = bytemuck::pod_read_unaligned(&data[..16]);
++                if let Some(ms) = ticks_to_ms(stamps, self.period_ns) {
++                    out.push(ms);
++                }
++            }
++            slot.buffer.unmap();
++            slot.state.store(FREE, Ordering::Release);
++        }
++    }
++}
++
++/// Two stamps (start, end) in timestamp ticks to milliseconds. `None` when the end is before the start (a counter that wrapped or
++/// a driver that stamped out of order): that frame goes untimed rather than becoming a huge number.
++fn ticks_to_ms([start, end]: [u64; 2], period_ns: f32) -> Option<f32> {
++    end.checked_sub(start).map(|t| (t as f64 * f64::from(period_ns) / 1e6) as f32)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn ticks_become_milliseconds_and_a_backwards_pair_is_dropped() {
++        // 52 ns per tick (a typical Mali period): 250 000 ticks = 13 ms.
++        let ms = ticks_to_ms([1_000, 251_000], 52.0).unwrap();
++        assert!((ms - 13.0).abs() < 1e-4, "{ms}");
++        assert_eq!(ticks_to_ms([5, 5], 52.0), Some(0.0));
++        assert_eq!(ticks_to_ms([10, 9], 52.0), None);
++        // A counter near u64::MAX does not overflow the maths.
++        assert!(ticks_to_ms([u64::MAX - 10, u64::MAX], 1.0).is_some());
++    }
++}
+diff -ruN -x '*.orig' -x '*.rej' a/mc-rs/src/immersive.rs b/mc-rs/src/immersive.rs
+--- a/mc-rs/src/immersive.rs	2026-10-26 23:31:29.170819048 +0000
++++ b/mc-rs/src/immersive.rs	2026-10-26 23:31:29.240035843 +0000
+@@ -89,3 +89,27 @@
+         Ok(())
+     })
+ }
++
++/// The display's current refresh rate in Hz (`WindowManager.getDefaultDisplay().getRefreshRate()`: deprecated since API 30, still
++/// right on 8-14), or `None` if the call fails. Not a view call, so any thread may make it; ask again when focus returns, because the
++/// panel may have switched mode (60 / 90 / 120 Hz).
++pub fn refresh_hz(app: &AndroidApp) -> Option<f32> {
++    // SAFETY: both pointers come from `app`, which outlives the call.
++    let r = unsafe { read_refresh(app.vm_as_ptr(), app.activity_as_ptr()) };
++    r.map_err(|e| log::warn!("refresh rate not read: {e:?}")).ok().filter(|hz| hz.is_finite() && *hz >= 30.0)
++}
++
++unsafe fn read_refresh(vm: *mut c_void, activity: *mut c_void) -> jni::errors::Result<f32> {
++    let vm = unsafe { JavaVM::from_raw(vm.cast::<sys::JavaVM>()) };
++    vm.attach_current_thread(|env| {
++        let raw = activity as sys::jobject;
++        let activity = unsafe { env.as_cast_raw::<Global<JObject>>(&raw)? };
++        let windows = env
++            .call_method(&*activity, jni_str!("getWindowManager"), jni_sig!(() -> android.view.WindowManager), &[])?
++            .l()?;
++        let display = env
++            .call_method(&windows, jni_str!("getDefaultDisplay"), jni_sig!(() -> android.view.Display), &[])?
++            .l()?;
++        env.call_method(&display, jni_str!("getRefreshRate"), jni_sig!(() -> jfloat), &[])?.f()
++    })
++}
+diff -ruN -x '*.orig' -x '*.rej' a/mc-rs/src/input/gamepad.rs b/mc-rs/src/input/gamepad.rs
+--- a/mc-rs/src/input/gamepad.rs	2026-10-26 23:31:29.170853717 +0000
++++ b/mc-rs/src/input/gamepad.rs	2026-10-26 23:31:29.228841196 +0000
+@@ -292,6 +292,9 @@
+     /// In a GUI: LB / RB turn the book's page (-1 / +1), and the right stick scrolls (px, down is positive) like a finger dragging a list.
+     pub page: i32,
+     pub scroll: f32,
++    /// In a GUI: X was pressed (`Some(false)`: the slot under the cursor is clicked for one, the "One" button's click without the toggle)
++    /// or RT (`Some(true)`: it is quick-moved, the "Shift" button's click). Not while that button is bound to a GUI action.
++    pub alt: Option<bool>,
+ }
+ 
+ /// Live state of the pad(s): every controller feeds the same state, like Controllify's single active input mode.
+@@ -454,6 +457,9 @@
+             o.cursor = ((sx + hx) * k, (sy + hy) * k);
+             o.page = i32::from(pressed & Btn::Rb.bit() != 0) - i32::from(pressed & Btn::Lb.bit() != 0);
+             o.scroll = ry * k;
++            let free = |b: Btn| ![Act::GuiSelect, Act::GuiBack, Act::Pause, Act::Inventory].iter().any(|&a| cfg.binds[a as usize] == b);
++            let on = |b: Btn| pressed & b.bit() != 0 && free(b);
++            o.alt = if on(Btn::X) { Some(false) } else if on(Btn::Rt) { Some(true) } else { None };
+             if self.snap {
+                 o.nav = self.nav_step(dt, held);
+             }
+@@ -752,6 +758,24 @@
+     }
+ 
+     #[test]
++    fn x_and_rt_are_a_one_click_and_a_quick_move_in_a_gui() {
++        let (mut p, mut c) = pad();
++        p.update(DT, &c, true, 1000.0);
++        p.key(Btn::X, true);
++        assert_eq!(p.update(DT, &c, true, 1000.0).alt, Some(false));
++        assert_eq!(p.update(DT, &c, true, 1000.0).alt, None, "a held button acts once");
++        p.key(Btn::X, false);
++        p.axes(0.0, 0.0, 0.0, 0.0, 0.0, 1.0, (0.0, 0.0));
++        assert_eq!(p.update(DT, &c, true, 1000.0).alt, Some(true));
++        p.axes(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, (0.0, 0.0));
++        p.update(DT, &c, true, 1000.0);
++        c.binds[ACTS.iter().position(|a| *a == Act::GuiBack).unwrap()] = Btn::X;
++        p.key(Btn::X, true);
++        let o = p.update(DT, &c, true, 1000.0);
++        assert!(o.alt.is_none() && o.back, "X rebound to GUI back is back, not a click");
++    }
++
++    #[test]
+     fn sprint_view_and_info_follow_their_binds() {
+         let (mut p, mut c) = pad();
+         p.key(Btn::L3, true);
+diff -ruN -x '*.orig' -x '*.rej' a/mc-rs/src/input/touch_ui.rs b/mc-rs/src/input/touch_ui.rs
+--- a/mc-rs/src/input/touch_ui.rs	2026-10-26 23:31:29.170907730 +0000
++++ b/mc-rs/src/input/touch_ui.rs	2026-10-26 23:31:29.229056927 +0000
+@@ -257,6 +257,8 @@
+     pad_info: bool,
+     page: i32,
+     scroll: f32,
++    /// X (`Some(false)`, click for one) or RT (`Some(true)`, quick-move) in a container screen, until `take_alt`.
++    alt: Option<bool>,
+ }
+ 
+ impl TouchUi {
+@@ -298,6 +300,7 @@
+             pad_info: false,
+             page: 0,
+             scroll: 0.0,
++            alt: None,
+         }
+     }
+ 
+@@ -321,6 +324,9 @@
+                 None => {}
+             }
+             (self.page, self.scroll) = (self.page + o.page, self.scroll + o.scroll);
++            if self.screen && !self.paused && !self.menu {
++                self.alt = o.alt.or(self.alt);
++            }
+             if o.back && !self.paused && self.screen && !self.menu {
+                 self.back = true; // the screen steps back one level first (`take_back`); closing is `lib.rs`'s call
+             } else if o.pause || o.back {
+@@ -404,6 +410,11 @@
+         std::mem::take(&mut self.scroll)
+     }
+ 
++    /// The pad's X / RT in a container screen since the last call: `Some(false)` clicks the slot under the cursor for one, `Some(true)` quick-moves it.
++    pub fn take_alt(&mut self) -> Option<bool> {
++        self.alt.take()
++    }
++
+     /// The pad's step since the last call (only while `pad.snap`): `lib.rs` moves the cursor to the neighbouring target.
+     pub fn take_nav(&mut self) -> Option<(i32, i32)> {
+         self.nav.take()
+@@ -454,6 +465,7 @@
+     pub fn set_screen(&mut self, open: bool) {
+         self.screen = open;
+         self.cursor_pos = (self.surface_w as f32 * 0.5, self.surface_h as f32 * 0.5);
++        self.alt = None;
+         self.clear();
+     }
+ 
+diff -ruN -x '*.orig' -x '*.rej' a/mc-rs/src/lib.rs b/mc-rs/src/lib.rs
+--- a/mc-rs/src/lib.rs	2026-10-26 23:31:29.170941573 +0000
++++ b/mc-rs/src/lib.rs	2026-10-26 23:32:09.099313586 +0000
+@@ -31,7 +31,7 @@
+ use std::time::{Duration, Instant};
+ 
+ use crate::backend::Backend;
+-use crate::gpu::context::Drs;
++use crate::gpu::context::{Drs, FrameTimes};
+ use crate::gpu::gfx::{Drawn, WorldDraw};
+ use crate::render::atlas;
+ use crate::render::debug::Row;
+@@ -127,8 +127,17 @@
+     fps_avg: f32,
+     /// Shown under the FPS: CPU ms per frame and the longest frame (ms) of the last second; `frame_prev` / `worst_acc` feed the latter.
+     cpu_ms: u32,
++    /// Scene-pass GPU time (`gpu::timing`): this second's sum, count, and last second's mean in tenths of a ms (0 = not measured); `gpu_buf` is the scratch for `Backend::gpu_ms`.
++    gpu_acc: f32,
++    gpu_n: u32,
++    gpu_tenths: u32,
++    gpu_buf: Vec<f32>,
+     worst_ms: u32,
+     worst_acc: f32,
++    /// The 99th percentile of the frame gaps of the last second (ms), `FrameTimes` feeding it, and the panel's refresh rate (60 until the display says).
++    p99_ms: u32,
++    times: FrameTimes,
++    refresh_hz: f32,
+     /// The previous frame was a paused one (its idle wait is not a spike).
+     was_paused: bool,
+     frame_prev: Instant,
+@@ -283,6 +292,7 @@
+         // The options come first: the MSAA count is baked into every pipeline `Gpu` and what follows build.
+         let opts = Settings::load(&dir);
+         crate::gpu::context::set_error_trace(opts.gpu_error_trace);
++        crate::gpu::context::set_frame_latency(u32::from(opts.frame_latency));
+         crate::render::present::set_msaa_want(u32::from(opts.msaa));
+         crate::render::present::set_post_want(u32::from(opts.post));
+         crate::gles::set_want(opts.renderer);
+@@ -316,8 +326,15 @@
+             fps_recent: 0,
+             fps_avg: 0.0,
+             cpu_ms: 0,
++            gpu_acc: 0.0,
++            gpu_n: 0,
++            gpu_tenths: 0,
++            gpu_buf: Vec::new(),
+             worst_ms: 0,
+             worst_acc: 0.0,
++            p99_ms: 0,
++            times: FrameTimes::default(),
++            refresh_hz: 60.0,
+             was_paused: false,
+             frame_prev: Instant::now(),
+             scan: Default::default(),
+@@ -2196,6 +2213,15 @@
+         }
+     }
+ 
++    /// The pad's X (`shift` false) or RT (`shift` true) in a container screen: the slot under the cursor is clicked for one (place one, or
++    /// take the larger half) or quick-moved, as the "One" and "Shift" buttons do, but for this press only and without moving the cursor to
++    /// them. Nothing off a slot, or while a press is down (a held A may be spreading a stack, or counting toward craft-all).
++    fn pad_alt(&mut self, shift: bool) {
++        let at = self.touch.cursor_pos;
++        let Some(id) = self.slot_under(at.0, at.1).filter(|_| self.gesture.is_none()) else { return };
++        self.with_ext(|s, inv, ext| if shift { s.shift_click(id, inv, ext) } else { s.click(id, true, inv, ext) });
++    }
++
+     /// What the finger is on in the open satchel (`satchel::Frame::hit`); `None` when it is not open.
+     fn sat_hit(&self, x: f32, y: f32) -> Option<satchel::Pick> {
+         let (sat, s) = (self.sat.as_ref()?, self.screen.as_ref()?);
+@@ -2805,8 +2831,14 @@
+         let spent = t0.elapsed();
+         let cpu = spent.saturating_sub(acq);
+         self.cpu_acc += cpu.as_secs_f32();
++        // Scene-pass GPU time of the frames whose stamps arrived (a few frames late): one mean per frame for `Drs`, all of them for the debug screen.
++        self.gpu_buf.clear();
++        self.be.gpu_ms(&mut self.gpu_buf);
++        self.gpu_acc += self.gpu_buf.iter().sum::<f32>();
++        self.gpu_n += self.gpu_buf.len() as u32;
++        let gpu = (!self.gpu_buf.is_empty()).then(|| self.gpu_buf.iter().sum::<f32>() / self.gpu_buf.len() as f32 / 1000.0);
+         if self.opts.dynamic_res {
+-            if let Some(p) = self.drs.tick(spent.as_secs_f32(), cpu.as_secs_f32()) {
++            if let Some(p) = self.drs.tick(spent.as_secs_f32(), cpu.as_secs_f32(), gpu) {
+                 crate::gpu::context::set_scale_pct(p);
+                 self.be.rescale();
+                 log::info!("dynamic resolution: scene at {p}%");
+@@ -2815,14 +2847,16 @@
+             // Switched off in Video Settings: pin the scene at `START_PCT` again and start `Drs` from there for the next switch-on.
+             crate::gpu::context::set_scale_pct(crate::gpu::context::START_PCT);
+             self.be.rescale();
+-            self.drs = Drs::new(crate::gpu::context::START_PCT);
++            self.drs = Drs::at(crate::gpu::context::START_PCT, self.refresh_hz);
+         }
+ 
+         self.frames += 1;
+         let now = Instant::now();
+         // A paused frame, and the first one after it, waited on purpose (the idle poll): not a spike.
+         if !(self.touch.paused || self.was_paused) {
+-            self.worst_acc = self.worst_acc.max(now.duration_since(self.frame_prev).as_secs_f32());
++            let gap = now.duration_since(self.frame_prev).as_secs_f32();
++            self.worst_acc = self.worst_acc.max(gap);
++            self.times.push(gap);
+         }
+         self.was_paused = self.touch.paused;
+         self.frame_prev = now;
+@@ -2830,6 +2864,9 @@
+             self.cpu_ms = (self.cpu_acc / self.frames as f32 * 1000.0).round() as u32;
+             self.worst_ms = (self.worst_acc * 1000.0).round() as u32;
+             self.worst_acc = 0.0;
++            self.p99_ms = (self.times.take_p99() * 1000.0).round() as u32;
++            self.gpu_tenths = if self.gpu_n > 0 { (self.gpu_acc / self.gpu_n as f32 * 10.0).round() as u32 } else { 0 };
++            (self.gpu_acc, self.gpu_n) = (0.0, 0);
+             let fps = self.frames as f32 / now.duration_since(self.fps_last).as_secs_f32();
+             self.fps_recent = fps.round() as u32;
+             // Moving average, 0.1 a second (~10 s); not fed while paused (the menu idles on purpose) and seeded by its first second.
+@@ -2837,6 +2874,11 @@
+                 self.fps_avg = if self.fps_avg == 0.0 { fps } else { self.fps_avg * 0.9 + fps * 0.1 };
+             }
+             log::info!("FPS: {fps:.1} (average of the last ~10 s {:.0}), {} chunks loaded, CPU {:.1} ms/frame (CPU ~ frame time: CPU-bound; far below: GPU-bound), {} HUD vertices, {} sign texts kept", self.fps_avg, self.chunks.loaded(), self.cpu_acc / self.frames as f32 * 1000.0, self.hud_verts.len(), self.item_mesh.cached_signs());
++            // The pacing line: the slowest 1% of frames (not the average), the worst one, the panel, the scene pass's GPU time (`gpu::timing`; n/a
++            // without timestamp queries), and how long new chunks took to become drawable.
++            let wait = self.chunks.take_mesh_wait().map_or(String::new(), |(avg, max, n)| format!(", first mesh of {n} chunks: avg {avg:.0} ms, max {max:.0} ms"));
++            let gpu = if self.gpu_tenths > 0 { format!("{:.1} ms", self.gpu_tenths as f32 / 10.0) } else { "n/a".to_string() };
++            log::info!("pacing: p99 {} ms, worst {} ms, panel {:.0} Hz, scene pass GPU {gpu}{wait}", self.p99_ms, self.worst_ms, self.refresh_hz);
+             self.cpu_acc = 0.0;
+             self.frames = 0;
+             self.fps_last = now;
+@@ -2891,6 +2933,9 @@
+         if let Some(d) = self.touch.take_nav() {
+             self.sat_nav(d);
+         }
++        if let Some(shift) = self.touch.take_alt() {
++            self.pad_alt(shift);
++        }
+         self.sat_pad_keys();
+         if self.touch.take_pad_info() {
+             self.opts.debug_screen = !self.opts.debug_screen;
+@@ -2910,6 +2955,15 @@
+         PauseInfo { dead: self.vitals.dead(), pregen: self.lod.as_ref().map(|l| l.pregen()), debug: self.lod.as_ref().map_or(0, |l| l.debug()), flying: self.touch.flying, info: self.opts.debug_screen }
+     }
+ 
++    /// The display's refresh rate (`immersive::refresh_hz`): the dynamic resolution aims at it, 60 to 90 Hz.
++    fn set_refresh_hz(&mut self, hz: f32) {
++        if (hz - self.refresh_hz).abs() > 0.5 {
++            log::info!("display refresh rate {hz:.1} Hz");
++        }
++        self.refresh_hz = hz;
++        self.drs.set_refresh_hz(hz);
++    }
++
+     fn on_motion(&mut self, ev: &android_activity::input::MotionEvent) {
+         self.touch.handle_motion(ev);
+     }
+@@ -2961,7 +3015,7 @@
+         let (sc, pct, ms) = (crate::gpu::context::scene_size(w, h), crate::gpu::context::scale_pct(), scene_samples());
+         let mut right = vec![
+             Row::Kv("FPS", format!("{fps}  (avg {:.0})", self.fps_avg), fps_color(fps)),
+-            Row::Kv("Frame", format!("cpu {} ms  worst {} ms", self.cpu_ms, self.worst_ms), WHITE),
++            Row::Kv("Frame", if self.gpu_tenths > 0 { format!("cpu {} ms  gpu {:.1} ms  p99 {} ms  worst {} ms", self.cpu_ms, self.gpu_tenths as f32 / 10.0, self.p99_ms, self.worst_ms) } else { format!("cpu {} ms  p99 {} ms  worst {} ms", self.cpu_ms, self.p99_ms, self.worst_ms) }, WHITE),
+             Row::Kv("Screen", format!("{w}x{h}"), WHITE),
+             Row::Kv("Scene", format!("{}x{}  {pct}%", sc.0, sc.1), WHITE),
+             Row::Kv("Dyn. res", set(Opt::DynamicRes), WHITE),
+@@ -3675,6 +3729,9 @@
+                     MainEvent::GainedFocus => {
+                         immersive::hide_system_bars(&app);
+                         sync_size(&app, &mut app_state);
++                        if let (Some(a), Some(hz)) = (app_state.as_mut(), immersive::refresh_hz(&app)) {
++                            a.set_refresh_hz(hz); // the panel may have switched mode while we were away
++                        }
+                     }
+                     MainEvent::WindowResized { .. }
+                     | MainEvent::ContentRectChanged { .. }
+@@ -3694,6 +3751,9 @@
+                             app_state = Some(a);
+                             sync_size(&app, &mut app_state);
+                             self_main_frames = 0;
++                            if let (Some(a), Some(hz)) = (app_state.as_mut(), immersive::refresh_hz(&app)) {
++                                a.set_refresh_hz(hz);
++                            }
+                         } else {
+                             log::warn!("init finished but window is gone; discarding");
+                         }
+diff -ruN -x '*.orig' -x '*.rej' a/mc-rs/src/options.rs b/mc-rs/src/options.rs
+--- a/mc-rs/src/options.rs	2026-10-26 23:31:29.171537334 +0000
++++ b/mc-rs/src/options.rs	2026-10-26 23:31:29.240653469 +0000
+@@ -149,6 +149,8 @@
+     pub debug_screen: bool,
+     /// Log a backtrace with every wgpu error, at most one a second (`gpu::context::set_error_trace`); a debug switch with no button.
+     pub gpu_error_trace: bool,
++    /// Frames the swap chain may queue (`gpu::context::set_frame_latency`): 2 = as before, 1 = less latency, a frame that needs more than half the refresh period may then drop a step; no button. Next start.
++    pub frame_latency: u8,
+     /// Smart animals (`Mobs::smart`, not b1.7.3): path-walked wandering, herding, panic, and the grazing / rooting / pecking / resting pauses; a switch with no button, `animalAi:false` in options.txt turns all of it off.
+     pub animal_ai: bool,
+     /// The inventory button spreads the old cloth on the ground and pans a camera over it (`world::pack`, dizzying) instead of opening the
+@@ -194,6 +196,7 @@
+             lod: true,
+             debug_screen: false,
+             gpu_error_trace: false,
++            frame_latency: 2,
+             animal_ai: true,
+             pack_cloth: false,
+             book_discovery: false,
+@@ -234,6 +237,7 @@
+                 ("lod", ..) => s.lod = b,
+                 ("debugScreen", ..) => s.debug_screen = b,
+                 ("gpuErrorTrace", ..) => s.gpu_error_trace = b,
++                ("frameLatency", _, Some(n)) if (1..=3).contains(&n) => s.frame_latency = n,
+                 ("animalAi", ..) => s.animal_ai = b,
+                 ("packCloth", ..) => s.pack_cloth = b,
+                 ("bookDiscovery", ..) => s.book_discovery = b,
+@@ -258,8 +262,8 @@
+     pub fn save(&self) {
+         let Some(p) = &self.path else { return };
+         let mut t = format!(
+-            "music:{}\nsound:{}\ninvertYMouse:{}\nmouseSensitivity:{}\nviewDistance:{}\nguiScale:{}\nbobView:{}\nanaglyph3d:{}\nadvancedOpengl:{}\nfpsLimit:{}\ndifficulty:{}\nfancyGraphics:{}\nao:{}\nlod:{}\ndigDelay:{}\ngpuErrorTrace:{}\ndynamicRes:{}\nmsaa:{}\npost:{}\nrenderer:{}\ndebugScreen:{}\nanimalAi:{}\npackCloth:{}\nbookDiscovery:{}\n",
+-            self.music, self.sound, self.invert_mouse, self.sensitivity, self.render_distance, self.gui_scale, self.view_bobbing, self.anaglyph, self.advanced_opengl, self.limit_framerate, self.difficulty, self.fancy_graphics, self.ambient_occlusion, self.lod, self.dig_delay, self.gpu_error_trace, self.dynamic_res, self.msaa, self.post, self.renderer, self.debug_screen, self.animal_ai, self.pack_cloth, self.book_discovery
++            "music:{}\nsound:{}\ninvertYMouse:{}\nmouseSensitivity:{}\nviewDistance:{}\nguiScale:{}\nbobView:{}\nanaglyph3d:{}\nadvancedOpengl:{}\nfpsLimit:{}\ndifficulty:{}\nfancyGraphics:{}\nao:{}\nlod:{}\ndigDelay:{}\ngpuErrorTrace:{}\ndynamicRes:{}\nmsaa:{}\npost:{}\nrenderer:{}\ndebugScreen:{}\nanimalAi:{}\npackCloth:{}\nbookDiscovery:{}\nframeLatency:{}\n",
++            self.music, self.sound, self.invert_mouse, self.sensitivity, self.render_distance, self.gui_scale, self.view_bobbing, self.anaglyph, self.advanced_opengl, self.limit_framerate, self.difficulty, self.fancy_graphics, self.ambient_occlusion, self.lod, self.dig_delay, self.gpu_error_trace, self.dynamic_res, self.msaa, self.post, self.renderer, self.debug_screen, self.animal_ai, self.pack_cloth, self.book_discovery, self.frame_latency
+         );
+         for (id, code) in KEY_IDS.iter().zip(self.keys) {
+             t.push_str(&format!("key_key.{id}:{code}\n"));
+@@ -1080,6 +1084,8 @@
+         assert!(st.dynamic_res, "on until options.txt says otherwise");
+         assert!(!st.debug_screen, "off until the Info button or options.txt says so");
+         assert!(st.animal_ai, "on until options.txt says otherwise");
++        assert_eq!(st.frame_latency, 2, "the wgpu default until options.txt says otherwise");
++        st.frame_latency = 1;
+         assert!(!st.pack_cloth && !st.book_discovery, "the satchel with every recipe shown, until options.txt says otherwise");
+         (st.gpu_error_trace, st.dynamic_res, st.debug_screen, st.pack_cloth, st.book_discovery) = (true, false, true, true, true);
+         st.save();
+@@ -1087,6 +1093,7 @@
+         assert_eq!((back.sensitivity, back.invert_mouse, back.render_distance, back.lod, back.keys[4]), (0.25, true, 0, false, 50));
+         assert!(back.gpu_error_trace && !back.dynamic_res && back.debug_screen && back.pack_cloth && back.book_discovery);
+         assert_eq!(back.msaa, 0, "Auto until options.txt says otherwise");
++        assert_eq!(back.frame_latency, 1);
+         assert!(std::fs::read_to_string(root.join("options.txt")).unwrap().contains("key_key.jump:50"));
+     }
+ 
+diff -ruN -x '*.orig' -x '*.rej' a/mc-rs/src/render/items.rs b/mc-rs/src/render/items.rs
+--- a/mc-rs/src/render/items.rs	2026-10-26 23:31:29.172038195 +0000
++++ b/mc-rs/src/render/items.rs	2026-10-26 23:31:29.222105449 +0000
+@@ -1,7 +1,6 @@
+-//! Dropped items: a 0.25 cube per `ItemEntity` in the flat colour of its item, hovering and bobbing like
++//! Dropped items (textured block shape or sprite quad, `player::drop_item`), hovering and bobbing like
+ //! `RenderItem` (`sin(age / 10) * 0.1 + 0.1`), drawn with the chunk pipeline from one dynamic buffer pair.
+-//! ponytail: no spin (needs rotated boxes), flat full brightness, no 2nd/3rd copy for big stacks; M14 draws
+-//! real item sprites.
++//! ponytail: no 2nd/3rd copy for big stacks, no per-item hover phase.
+ 
+ use crate::gpu::gfx::{Buf, Gfx};
+ use crate::render::atlas;
+@@ -26,7 +25,7 @@
+ const MAX_BOATS: usize = 16;
+ /// Carts drawn at once (floor, four walls and the furnace: 6 boxes each); the pack's cloth and all that lies on it are `pack::BOXES` more.
+ const MAX_CARTS: usize = 16;
+-const BOXES: usize = MAX_ITEMS * 2 + MAX_MOBS * 12 + MAX_ARROWS + MAX_FALLING + MAX_PARTICLES + MAX_BOLTS + MAX_BOATS * 5 + MAX_CARTS * 6 + pack::BOXES + 1;
++const BOXES: usize = MAX_ITEMS * 4 + MAX_MOBS * 12 + MAX_ARROWS + MAX_FALLING + MAX_PARTICLES + MAX_BOLTS + MAX_BOATS * 5 + MAX_CARTS * 6 + pack::BOXES + 1;
+ /// Paintings (16 px pieces, one face each), signs (a board and a post of 6 two-sided faces) and the sign text (one quad per run
+ /// of lit font pixels), on top of the boxes.
+ const MAX_SIGNS: usize = 32;
+@@ -104,15 +103,11 @@
+         if !seen(c, 1.0) {
+             continue;
+         }
+-        let h = 0.125;
+-        // An item (not a block) is its `gui/items.png` sprite, two thin crossed slabs so it shows from every side; the alpha cuts it out.
+-        match Some(e.stack.id).filter(|&i| i >= 256).and_then(atlas::item_icon) {
+-            Some(icon) => {
+-                let (t, w, d) = (atlas::ITEM_TILE0 + icon as u16, 0.18, 0.015);
+-                push_box(&mut verts, &mut idxs, [c.x - w, c.y - w, c.z - d], [c.x + w, c.y + w, c.z + d], t, 1.0);
+-                push_box(&mut verts, &mut idxs, [c.x - d, c.y - w, c.z - w], [c.x + d, c.y + w, c.z + w], t, 1.0);
+-            }
+-            None => push_box(&mut verts, &mut idxs, [c.x - h, c.y - h, c.z - h], [c.x + h, c.y + h, c.z + h], stack_tile(e.stack), 1.0),
++        // `RenderItem`: a block is its shape (turned by the age), anything else its sprite on a quad turned toward the eye.
++        let yaw = (eye.x - c.x).atan2(eye.z - c.z);
++        if !crate::render::player::drop_item(&mut verts, &mut idxs, c, (e.age as f32 + a) / 20.0, yaw, e.stack) {
++            let h = 0.125;
++            push_box(&mut verts, &mut idxs, [c.x - h, c.y - h, c.z - h], [c.x + h, c.y + h, c.z + h], stack_tile(e.stack), 1.0);
+         }
+         lit(&mut verts, n0, lv, c);
+     }
+@@ -272,7 +267,7 @@
+ }
+ 
+ /// `ColorizerGrass` / `ColorizerFoliage` for a block face, as the mesher packs it (`mesh::WHITE` = none).
+-fn block_tint(id: u8, meta: u8, face: usize) -> f32 {
++pub(crate) fn block_tint(id: u8, meta: u8, face: usize) -> f32 {
+     use crate::world::climate;
+     (match id {
+         2 if face == 2 => climate::grass(0.8, 0.4),
+diff -ruN -x '*.orig' -x '*.rej' a/mc-rs/src/render/player.rs b/mc-rs/src/render/player.rs
+--- a/mc-rs/src/render/player.rs	2026-10-26 23:31:29.172405740 +0000
++++ b/mc-rs/src/render/player.rs	2026-10-26 23:31:29.221092063 +0000
+@@ -2,14 +2,14 @@
+ //! `RenderPlayer` / `RenderLiving` (third-person view) and like `GuiInventory` (the preview in the inventory panel).
+ //! The geometry is one function (`quads`) that both targets use: the world pushes it into the entity mesh, the HUD projects it.
+ //! Anim state is `EntityLiving.onUpdate` (body yaw follows the walk, limb swing) + `EntityPlayer` arm swing.
+-//! ponytail: no armor layers (`modelArmor*`, 10 more textures), ears, cloak, hurt flash or sleeping pose; the third-person held item is a flat
+-//! sprite or a cube, not the extruded `ItemRenderer` model (the first-person hand has it); the inventory preview looks straight ahead (no mouse on touch).
++//! ponytail: no armor layers (`modelArmor*`, 10 more textures), ears, cloak, hurt flash or sleeping pose; the held item (both views) and the dropped
++//! items go through `render_item` / `drop_item` (`ItemRenderer.renderItem`, `RenderItem`); the inventory preview looks straight ahead (no mouse on touch).
+ //! UNVERIFIED: written without a Rust toolchain: not compiled, not run.
+ 
+-use crate::render::atlas::{self, ITEM_TILE0};
++use crate::render::atlas;
+ use crate::render::mesh::{lm, push_box, VF, WHITE};
+ use crate::world::craft::{self, Kind};
+-use crate::world::items::{stack_tile, ItemStack};
++use crate::world::items::{placed_meta, ItemStack};
+ use glam::{Mat4, Vec3};
+ use std::f32::consts::PI;
+ 
+@@ -240,30 +240,116 @@
+     }
+ }
+ 
+-/// `RenderPlayer.renderSpecials`' three transforms for the item in the right hand (a block, a full-size tool, anything else). The
+-/// result is a cube (block) or a flat items.png sprite slab, moved by `hand` (model pixels, so the item's block units are x16).
++/// `RenderPlayer.renderSpecials`' three transforms for the item in the right hand (a block, a full-size tool, anything else), then
++/// `render_item`, the same `ItemRenderer.renderItem` the first-person hand uses. `hand` is in model pixels, so the item's block
++/// units are x16.
+ fn push_held(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, hand: &Mat4, s: ItemStack) {
+-    let (m, n0) = (*hand, verts.len());
+     let rx = |d: f32| Mat4::from_rotation_x(d.to_radians());
+-    let (m, tile, min, max) = if s.id < 256 && crate::world::chunk::normal_cube(s.id as u8) {
+-        let k = 0.5 * 12.0 / 16.0;
+-        (m * Mat4::from_translation(Vec3::new(0.0, 3.0, -5.0)) * rx(20.0) * Mat4::from_rotation_y(45.0_f32.to_radians()) * Mat4::from_scale(Vec3::new(k, -k, k)), stack_tile(s), [-0.5; 3], [0.5; 3])
++    let m = if is_block3d(s.id) {
++        let k = 0.5 * 0.75;
++        *hand * Mat4::from_translation(Vec3::new(0.0, 3.0, -5.0)) * rx(20.0) * Mat4::from_rotation_y(45.0_f32.to_radians()) * Mat4::from_scale(Vec3::new(k, -k, k))
++    } else if craft::tool(s.id).is_some() || matches!(s.id, 280 | 352 | 353) || s.id == crate::world::gear::ROD {
++        let k = 10.0 / 16.0;
++        let spin = if matches!(craft::tool(s.id), Some((Kind::Sword, _))) || s.id == crate::world::gear::ROD { Mat4::from_rotation_z(PI) * Mat4::from_translation(Vec3::new(0.0, -2.0, 0.0)) } else { Mat4::IDENTITY };
++        *hand * spin * Mat4::from_translation(Vec3::new(0.0, 3.0, 0.0)) * Mat4::from_scale(Vec3::new(k, -k, k)) * rx(-100.0) * Mat4::from_rotation_y(45.0_f32.to_radians())
+     } else {
+-        let Some(icon) = atlas::item_icon(s.id) else { return };
+-        let t = ITEM_TILE0 + icon as u16;
+-        let full3d = craft::tool(s.id).is_some() || matches!(s.id, 280 | 352 | 353) || s.id == crate::world::gear::ROD;
+-        let m = if full3d {
+-            let k = 10.0 / 16.0;
+-            let spin = if matches!(craft::tool(s.id), Some((Kind::Sword, _))) || s.id == crate::world::gear::ROD { Mat4::from_rotation_z(PI) * Mat4::from_translation(Vec3::new(0.0, -2.0, 0.0)) } else { Mat4::IDENTITY };
+-            m * spin * Mat4::from_translation(Vec3::new(0.0, 3.0, 0.0)) * Mat4::from_scale(Vec3::new(k, -k, k)) * rx(-100.0) * Mat4::from_rotation_y(45.0_f32.to_radians())
+-        } else {
+-            m * Mat4::from_translation(Vec3::new(4.0, 3.0, -3.0)) * Mat4::from_scale(Vec3::splat(6.0 / 16.0)) * Mat4::from_rotation_z(60.0_f32.to_radians()) * rx(-90.0) * Mat4::from_rotation_z(20.0_f32.to_radians())
+-        };
+-        (m, t, [0.0, 0.0, -1.0 / 32.0], [1.0, 1.0, 1.0 / 32.0])
++        *hand * Mat4::from_translation(Vec3::new(4.0, 3.0, -3.0)) * Mat4::from_scale(Vec3::splat(6.0 / 16.0)) * Mat4::from_rotation_z(60.0_f32.to_radians()) * rx(-90.0) * Mat4::from_rotation_z(20.0_f32.to_radians())
+     };
+-    let m = m * Mat4::from_scale(Vec3::splat(16.0)); // item units are blocks, the arm is in pixels
+-    push_box(verts, idxs, min, max, tile, 1.0);
+-    place(&mut verts[n0..], &m);
++    render_item(verts, idxs, &(m * Mat4::from_scale(Vec3::splat(16.0))), s); // item units are blocks, the arm is in pixels
++}
++
++/// `RenderBlocks.renderItemIn3d` for a block item: drawn as its (textured) shape, not as a flat sprite.
++fn is_block3d(id: u16) -> bool {
++    id < 256 && id != 0 && !crate::world::pack::flat_icon(id as u8)
++}
++
++/// The boxes (min, max in 0..1) `renderBlockOnInventory` draws for a block: the slab's half, the stairs' two steps, the fence's two
++/// posts and two rails, else the whole cell.
++fn item_boxes(id: u8) -> Vec<[f32; 6]> {
++    match id {
++        44 => vec![[0.0, 0.0, 0.0, 1.0, 0.5, 1.0]],
++        53 | 67 => vec![[0.0, 0.0, 0.0, 1.0, 0.5, 1.0], [0.0, 0.5, 0.0, 0.5, 1.0, 1.0]],
++        85 => {
++            let (a, b) = (0.125, 0.0625);
++            vec![[0.5 - a, 0.0, 0.0, 0.5 + a, 1.0, 2.0 * a], [0.5 - a, 0.0, 1.0 - 2.0 * a, 0.5 + a, 1.0, 1.0], [0.5 - b, 1.0 - 3.0 * b, -2.0 * b, 0.5 + b, 1.0 - b, 1.0 + 2.0 * b], [0.5 - b, 0.5 - 3.0 * b, -2.0 * b, 0.5 + b, 0.5 - b, 1.0 + 2.0 * b]]
++        }
++        _ => vec![[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]],
++    }
++}
++
++/// `tint` (packed sRGB) darkened by `k`.
++fn shaded(tint: f32, k: f32) -> f32 {
++    let t = tint as u32;
++    let c = |sh: u32| (((t >> sh) & 255) as f32 * k).round().min(255.0) as u32;
++    ((c(16) << 16) | (c(8) << 8) | c(0)) as f32
++}
++
++/// `renderBlockOnInventory`: block `id` as its terrain-tile faces, centred on the origin, 1 unit big, in both windings. The faces
++/// carry the item lighting as a tint (top 1, sides 0.8 / 0.6, bottom 0.5) and the grass and leaf colours.
++fn block3d(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, m: &Mat4, id: u8, meta: u8) {
++    use crate::render::mesh::push_face;
++    const SHADE: [f32; 6] = [0.6, 0.6, 1.0, 0.5, 0.8, 0.8]; // +X, -X, +Y, -Y, +Z, -Z
++    let (i0, centre) = (idxs.len(), Vec3::splat(0.5));
++    for b in item_boxes(id) {
++        for face in 0..6 {
++            let n0 = verts.len();
++            push_face(verts, idxs, face, [0.0; 3], [1.0; 3], 0, 1.0); // the unit cell's face: its corners tell which axis runs along u and v
++            let q: Vec<[f32; 3]> = verts[n0..].chunks_exact(VF).map(|v| [v[0], v[1], v[2]]).collect();
++            let axis = |a: usize, c: usize| (0..3).find(|&i| q[a][i] != q[c][i]).unwrap_or(0);
++            let (au, av) = (axis(0, 1), axis(1, 2));
++            let tint = shaded(crate::render::items::block_tint(id, meta, face), SHADE[face]);
++            for (k, v) in verts[n0..].chunks_exact_mut(VF).enumerate() {
++                let p: [f32; 3] = std::array::from_fn(|i| b[i] + q[k][i] * (b[i + 3] - b[i]));
++                // the tile window of the box (a slab shows half of its side tile), u and v run like the unit face's
++                let (pu, pv) = (if q[1][au] > q[0][au] { p[au] } else { 1.0 - p[au] }, if q[2][av] > q[1][av] { p[av] } else { 1.0 - p[av] });
++                let w = m.transform_point3(Vec3::from(p) - centre);
++                let (tu, tv) = atlas::face_uv(id, meta, face, pu, pv);
++                v[..8].copy_from_slice(&[w.x, w.y, w.z, tu, tv, 1.0, lm(15, 0), tint]);
++            }
++        }
++    }
++    let back: Vec<u32> = idxs[i0..].chunks_exact(3).flat_map(|t| [t[0], t[2], t[1]]).collect(); // the Java draws with culling off
++    idxs.extend(back);
++}
++
++/// `ItemRenderer.renderItem`: the item in `m` (item units, a block = 1, the origin at the middle of a block item), as the shape of
++/// its block (`is_block3d`) or its sprite with the Java's own placement and the 1/16 thick edge strips (plants, torches and
++/// every item are sprites from `terrain.png` or `items.png`).
++pub fn render_item(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, m: &Mat4, s: ItemStack) {
++    let meta = placed_meta(s);
++    if is_block3d(s.id) {
++        return block3d(verts, idxs, m, s.id as u8, meta);
++    }
++    let Some(uv) = sprite_uv(s, meta) else { return };
++    let t = |x, y, z| Mat4::from_translation(Vec3::new(x, y, z));
++    sprite(verts, idxs, &(*m * t(0.0, -0.3, 0.0) * Mat4::from_scale(Vec3::splat(1.5)) * Mat4::from_rotation_y(50.0_f32.to_radians()) * Mat4::from_rotation_z(335.0_f32.to_radians()) * t(-15.0 / 16.0, -1.0 / 16.0, 0.0)), &*uv);
++}
++
++/// Atlas place of the flat picture of a stack: its `items.png` sprite, or the `terrain.png` tile of a block drawn flat. `None` = nothing known.
++fn sprite_uv(s: ItemStack, meta: u8) -> Option<Box<dyn Fn(f32, f32) -> (f32, f32)>> {
++    if s.id < 256 {
++        let id = s.id as u8;
++        return Some(Box::new(move |u, v| atlas::face_uv(id, meta, 5, u, v)));
++    }
++    let icon = atlas::item_icon(s.id)?;
++    Some(Box::new(move |u, v| atlas::item_uv(icon, u, v)))
++}
++
++/// `RenderItem.doRenderItem` for a dropped stack at `c` (the bob is already in it): a block as its shape turned by `spin` radians
++/// (a quarter size, half for the ones that are not a full cube), anything else as its sprite on one flat quad half a block big
++/// turned toward the eye (`yaw`: from the item to the eye). ponytail: one copy, not the 2..4 of a big stack.
++pub fn drop_item(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, c: Vec3, spin: f32, yaw: f32, s: ItemStack) -> bool {
++    let meta = placed_meta(s);
++    if is_block3d(s.id) {
++        let id = s.id as u8;
++        let k = if crate::world::chunk::normal_cube(id) || matches!(id, 44 | 54) { 0.25 } else { 0.5 };
++        block3d(verts, idxs, &(Mat4::from_translation(c) * Mat4::from_rotation_y(spin) * Mat4::from_scale(Vec3::splat(k))), id, meta);
++        return true;
++    }
++    let Some(uv) = sprite_uv(s, meta) else { return false };
++    let m = Mat4::from_translation(c) * Mat4::from_rotation_y(yaw) * Mat4::from_scale(Vec3::splat(0.5));
++    quad2(verts, idxs, &m, [[-0.5, -0.25, 0.0], [0.5, -0.25, 0.0], [0.5, 0.75, 0.0], [-0.5, 0.75, 0.0]], [uv(0.0, 0.0), uv(1.0, 0.0), uv(1.0, 1.0), uv(0.0, 1.0)]);
++    true
+ }
+ 
+ // ---- the first-person hand ----
+@@ -293,7 +379,7 @@
+ }
+ 
+ /// A quad of the item mesh in both windings (the Java draws with culling off), corners `p` and atlas UVs, moved by `m`.
+-fn quad2(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, m: &Mat4, p: [[f32; 3]; 4], uv: [(f32, f32); 4]) {
++pub(crate) fn quad2(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, m: &Mat4, p: [[f32; 3]; 4], uv: [(f32, f32); 4]) {
+     let base = verts.len() as u32 / VF as u32;
+     for (c, (u, v)) in p.iter().zip(uv) {
+         let w = m.transform_point3(Vec3::from(*c));
+@@ -304,8 +390,8 @@
+ 
+ /// `ItemRenderer.renderItem`'s sprite: both faces (mirrored like the Java's) and, for each texel column and row, a strip along the
+ /// four edges, 1/16 thick (z -1/16..0); the strip at step `i` shows texel `15 - i`.
+-fn sprite(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, m: &Mat4, icon: u8) {
+-    let (t, uv) = (1.0 / 16.0, |u: f32, v: f32| atlas::item_uv(icon, u, v));
++fn sprite(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, m: &Mat4, uv: &dyn Fn(f32, f32) -> (f32, f32)) {
++    let t = 1.0 / 16.0;
+     // `uv(u, v)`: u across the texture, v up (the Java's v runs down).
+     quad2(verts, idxs, m, [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]], [uv(1.0, 0.0), uv(0.0, 0.0), uv(0.0, 1.0), uv(1.0, 1.0)]);
+     quad2(verts, idxs, m, [[0.0, 1.0, -t], [1.0, 1.0, -t], [1.0, 0.0, -t], [0.0, 0.0, -t]], [uv(1.0, 1.0), uv(0.0, 1.0), uv(0.0, 0.0), uv(1.0, 0.0)]);
+@@ -345,13 +431,7 @@
+     };
+     let rod = if st.id == crate::world::gear::ROD { ry(180.0) } else { Mat4::IDENTITY }; // `shouldRotateAroundWhenRendering`
+     let m = h.to_world * t(-b * 0.4, c * 0.2, -a * 0.2) * t(0.56, -0.52 - up, -0.72) * ry(45.0) * ry(-d * 20.0) * rz(-b * 20.0) * rx(-b * 80.0) * Mat4::from_scale(Vec3::splat(0.4)) * rod;
+-    if st.id < 256 && crate::world::chunk::normal_cube(st.id as u8) {
+-        let n0 = verts.len();
+-        push_box(verts, idxs, [-0.5; 3], [0.5; 3], stack_tile(st), 1.0);
+-        place(&mut verts[n0..], &m);
+-    } else if let Some(icon) = atlas::item_icon(st.id) {
+-        sprite(verts, idxs, &(m * t(0.0, -0.3, 0.0) * Mat4::from_scale(Vec3::splat(1.5)) * ry(50.0) * rz(335.0) * t(-15.0 / 16.0, -1.0 / 16.0, 0.0)), icon);
+-    }
++    render_item(verts, idxs, &m, st);
+ }
+ 
+ /// `GuiInventory.drawGuiContainerBackgroundLayer`: the player at `(x, y)` (his feet; the panel's (51, 75)) with `k` px a GUI unit,
+diff -ruN -x '*.orig' -x '*.rej' a/mc-rs/src/satchel.rs b/mc-rs/src/satchel.rs
+--- a/mc-rs/src/satchel.rs	2026-10-26 23:31:29.173276964 +0000
++++ b/mc-rs/src/satchel.rs	2026-10-26 23:31:29.228581778 +0000
+@@ -830,7 +830,7 @@
+     let (note, col) = match (e.src, e.grid) {
+         (Src::Smelt(_), _) => ("Smelt it in a furnace", WARN_T),
+         (_, g) if g > gw => ("Needs a workbench (3x3)", WARN_T),
+-        _ if short.is_empty() => ("Tap the recipe again to refill", GOOD_T),
++        _ if short.is_empty() => ("Tap again to add a set", GOOD_T),
+         _ => ("Missing ingredients", BAD_T),
+     };
+     text_fit_o(v, (tx, r[1] + 2.0 * u + 8.0 * tk + u), sk, mw, note, col, o);
+diff -ruN -x '*.orig' -x '*.rej' a/mc-rs/src/world/book.rs b/mc-rs/src/world/book.rs
+--- a/mc-rs/src/world/book.rs	2026-10-26 23:31:29.173500587 +0000
++++ b/mc-rs/src/world/book.rs	2026-10-26 23:31:29.228244082 +0000
+@@ -5,7 +5,8 @@
+ //! - `entries()`: every recipe of `CraftingManager` that this port has, plus every smelting (`FurnaceRecipes`), sorted into six
+ //!   categories (`Cat`); the left page of the book lists them.
+ //! - `craftable` / `missing` / `need`: what the bag holds against what a recipe wants (green / red on the card).
+-//! - `fill`: a tap on a recipe puts one set of its ingredients into the grid (what lay in the grid goes back to the bag first);
++//! - `fill`: a tap on a recipe puts one set of its ingredients into the grid (what lay in the grid goes back to the bag first); a tap
++//!   on the recipe the grid already holds adds one more set to it instead, until the bag runs dry or a cell is a full stack;
+ //!   `craft_all` is a long press on the result: fill, take, fill, take, until the bag runs dry or full.
+ //! - `Notes`: the items the player has ever held (so unknown recipes can show as a silhouette) and the one recipe pinned to the HUD;
+ //!   a 69 byte `book` file in the world folder.
+@@ -15,7 +16,7 @@
+ use std::sync::OnceLock;
+ 
+ use crate::world::craft::{self, Screen, SlotId};
+-use crate::world::items::{Inventory, ItemStack, MAIN};
++use crate::world::items::{max_stack, Inventory, ItemStack, MAIN};
+ use crate::world::pack;
+ 
+ /// The six pages of the left side of the book.
+@@ -151,14 +152,64 @@
+     screen.grid.iter().all(Option::is_none)
+ }
+ 
+-/// A tap on a recipe: the grid is cleared into the bag and one set of ingredients goes from the bag into the recipe's own cells (the
+-/// main slots first, the quick belt last). Nothing changes, and false, when the entry is a smelting, does not fit the screen's grid,
+-/// something is short, or the grid cannot be emptied.
++/// Where each ingredient code of recipe `ri` lies in a grid `gw` wide (`0` = an empty cell); a shaped recipe keeps its rows, a shapeless
++/// one lies in the first cells.
++fn pattern_cells(ri: usize, gw: usize) -> [u16; 9] {
++    let r = &craft::recipes()[ri];
++    let mut cells = [0u16; 9];
++    match r.shape() {
++        Some((w, h)) => {
++            for y in 0..h {
++                for x in 0..w {
++                    cells[y * gw + x] = r.pattern()[y * w + x];
++                }
++            }
++        }
++        None => cells[..r.pattern().len()].copy_from_slice(r.pattern()),
++    }
++    cells
++}
++
++/// The grid holds exactly this recipe's ingredients in its places, whatever the counts (an empty grid holds none).
++fn holds(cells: &[u16; 9], grid: &[Option<ItemStack>; 9]) -> bool {
++    cells.iter().any(|&c| c != 0) && cells.iter().zip(grid.iter()).all(|(&c, g)| g.as_ref().map_or(0, |s| craft::code(s.id, s.damage)) == c)
++}
++
++/// One more set for a grid that holds `cells` already: each of its cells grows by one, taken from the bag (the main slots first, the
++/// quick belt last). Nothing changes, and false, when the bag has run dry of an ingredient or a cell is a full stack.
++fn add_set(cells: &[u16; 9], screen: &mut Screen, inv: &mut Inventory) -> bool {
++    let (g0, i0) = (screen.grid, inv.slots);
++    for (i, &c) in cells.iter().enumerate().filter(|&(_, &c)| c != 0) {
++        let slot = (9..MAIN).chain(0..9).find(|&k| inv.slots[k].is_some_and(|s| craft::code(s.id, s.damage) == c));
++        let ok = match (slot, screen.grid[i].as_mut()) {
++            (Some(k), Some(g)) if g.count < max_stack(g.id) => {
++                inv.slots[k] = inv.slots[k].and_then(|s| (s.count > 1).then(|| ItemStack { count: s.count - 1, ..s }));
++                g.count += 1;
++                true
++            }
++            _ => false,
++        };
++        if !ok {
++            (screen.grid, inv.slots) = (g0, i0);
++            return false;
++        }
++    }
++    true
++}
++
++/// A tap on a recipe. When the grid already holds that recipe (a second tap, a third, ...), one more set joins it from the bag (`add_set`).
++/// Otherwise the grid is cleared into the bag and one set of ingredients goes from the bag into the recipe's own cells (the main slots
++/// first, the quick belt last): another recipe always starts over from one set. Nothing changes, and false, when the entry is a smelting,
++/// does not fit the screen's grid, something is short (or the bag has no more of a set to add), or the grid cannot be emptied.
+ pub fn fill(e: &Entry, screen: &mut Screen, inv: &mut Inventory) -> bool {
+     let (gw, Src::Craft(ri)) = (screen.gw, e.src) else { return false };
+     if !(gw == 2 || gw == 3) || e.grid > gw {
+         return false;
+     }
++    let cells = pattern_cells(ri, gw);
++    if holds(&cells, &screen.grid) {
++        return add_set(&cells, screen, inv);
++    }
+     let (g0, i0) = (screen.grid, inv.slots);
+     let undo = |screen: &mut Screen, inv: &mut Inventory| {
+         screen.grid = g0;
+@@ -168,18 +219,6 @@
+     if !stash(screen, inv) || !missing(e, inv, &screen.grid).is_empty() {
+         return undo(screen, inv);
+     }
+-    let r = &craft::recipes()[ri];
+-    let mut cells = [0u16; 9];
+-    match r.shape() {
+-        Some((w, h)) => {
+-            for y in 0..h {
+-                for x in 0..w {
+-                    cells[y * gw + x] = r.pattern()[y * w + x];
+-                }
+-            }
+-        }
+-        None => cells[..r.pattern().len()].copy_from_slice(r.pattern()),
+-    }
+     for (i, &c) in cells.iter().enumerate().filter(|&(_, &c)| c != 0) {
+         let Some(slot) = (9..MAIN).chain(0..9).find(|&k| inv.slots[k].is_some_and(|s| craft::code(s.id, s.damage) == c)) else { return undo(screen, inv) };
+         let Some(s) = inv.slots[slot].as_mut() else { return undo(screen, inv) };
+@@ -325,6 +364,31 @@
+     }
+ 
+     #[test]
++    fn tapping_the_same_recipe_again_adds_a_set_and_another_recipe_starts_over() {
++        let (mut inv, mut s) = (Inventory::default(), Screen::new(2));
++        inv.slots[10] = Some(stack(17, 3));
++        let planks = entry(5, 0, 2);
++        assert!(fill(planks, &mut s, &mut inv));
++        assert!(fill(planks, &mut s, &mut inv) && fill(planks, &mut s, &mut inv), "taps two and three each add a set");
++        assert_eq!((s.grid[0].map(|g| g.count), count(&inv, 17)), (Some(3), 0));
++        assert_eq!(s.result().map(|r| (r.id, r.count)), Some((5, 4)), "the result is still one craft; taking it uses one set");
++        assert!(!fill(planks, &mut s, &mut inv), "the bag is dry: a fourth tap does nothing");
++        assert_eq!((s.grid[0].map(|g| g.count), count(&inv, 17)), (Some(3), 0));
++        // Another recipe: the whole stack goes back to the bag and it starts from one set.
++        inv.slots[11] = Some(stack(5, 4));
++        assert!(fill(entry(58, 0, 2), &mut s, &mut inv));
++        assert_eq!((count(&inv, 17), s.result().map(|r| r.id)), (3, Some(58)));
++        assert!(s.grid.iter().flatten().all(|g| g.count == 1));
++        // A cell that is a full stack takes no more.
++        let mut inv = Inventory::default();
++        let mut s = Screen::new(2);
++        inv.slots[10] = Some(stack(17, 64));
++        assert!(fill(planks, &mut s, &mut inv));
++        s.grid[0] = Some(stack(17, 64));
++        assert!(!fill(planks, &mut s, &mut inv) && s.grid[0].map(|g| g.count) == Some(64) && count(&inv, 17) == 63);
++    }
++
++    #[test]
+     fn a_workbench_recipe_needs_the_3x3_grid() {
+         let mut inv = Inventory::default();
+         inv.slots[9] = Some(stack(5, 3));
+diff -ruN -x '*.orig' -x '*.rej' a/mc-rs/src/world/chunks.rs b/mc-rs/src/world/chunks.rs
+--- a/mc-rs/src/world/chunks.rs	2026-10-26 23:31:29.173747694 +0000
++++ b/mc-rs/src/world/chunks.rs	2026-10-26 23:31:29.241092063 +0000
+@@ -881,6 +881,10 @@
+     upload: UploadDurationEstimator,
+     frame_ns: Option<f64>,
+     last_update: Option<std::time::Instant>,
++    /// When each chunk without a first mesh entered the map, and what the first uploads since the last `take_mesh_wait` waited
++    /// (sum of ms, longest ms, count): the time from "chunk exists" to "chunk can be drawn", which is what streaming feels like.
++    born: HashMap<Key, std::time::Instant>,
++    mesh_wait: (f32, f32, u32),
+ }
+ 
+ impl ChunkManager {
+@@ -957,7 +961,7 @@
+         let gen = make(seed);
+         Self { chunks: Chunks::default(), pending: HashSet::new(), ring, radius, center: None, max_in_flight: workers * 2, built, meshing: HashSet::new(), max_meshing: workers * 2, urgent: HashSet::new(),
+                populated_rx, populating: HashMap::new(), busy: HashSet::new(), max_populating: workers, stamp: 0,
+-               cm: gen.manager(), biome_area: None, gen, jobs, done, light: light::LightLink::spawn(), sky_sub: 0, mesh_gen: 0, dir: None, saved: HashSet::new(), writer: None, changes: Vec::new(), fresh_water: Vec::new(), loot: Vec::new(), spawners: Vec::new(), wide: wide::WideCull::spawn(), graph: wide::Snapshot::default(), visible: HashMap::new(), wet: HashMap::new(), order: Vec::new(), ingest: Vec::new(), ingested: HashSet::new(), pages: Pages::default(), held: None, upload: UploadDurationEstimator::new(), frame_ns: None, last_update: None }
++               cm: gen.manager(), biome_area: None, gen, jobs, done, light: light::LightLink::spawn(), sky_sub: 0, mesh_gen: 0, dir: None, saved: HashSet::new(), writer: None, changes: Vec::new(), fresh_water: Vec::new(), loot: Vec::new(), spawners: Vec::new(), wide: wide::WideCull::spawn(), graph: wide::Snapshot::default(), visible: HashMap::new(), wet: HashMap::new(), order: Vec::new(), ingest: Vec::new(), ingested: HashSet::new(), pages: Pages::default(), held: None, upload: UploadDurationEstimator::new(), frame_ns: None, last_update: None, born: HashMap::new(), mesh_wait: (0.0, 0.0, 0) }
+     }
+ 
+     /// The render distance in chunks.
+@@ -1001,6 +1005,7 @@
+             old.mesh.iter().for_each(|m| self.pages.free(m));
+             self.light_remove(key); // a fresh, unlit entry replaces it, light thread's copy included
+         }
++        self.born.entry(key).or_insert_with(std::time::Instant::now);
+         self.graph.set(key, Some([vis::FULL; SECTIONS])); // no mesh yet: the view passes through
+         self.light_chunk(key, copy);
+     }
+@@ -1605,6 +1610,20 @@
+         self.chunks.len()
+     }
+ 
++    /// Chunk `key`'s first mesh just went up: how long it took since the chunk entered the map (later rebuilds are not counted).
++    fn note_mesh(&mut self, key: Key) {
++        if let Some(t) = self.born.remove(&key) {
++            let ms = t.elapsed().as_secs_f32() * 1000.0;
++            self.mesh_wait = (self.mesh_wait.0 + ms, self.mesh_wait.1.max(ms), self.mesh_wait.2 + 1);
++        }
++    }
++
++    /// `(average ms, longest ms, chunks)` of the first meshes since the last call; `None` if there were none. Clears.
++    pub fn take_mesh_wait(&mut self) -> Option<(f32, f32, u32)> {
++        let (sum, max, n) = std::mem::take(&mut self.mesh_wait);
++        (n > 0).then(|| (sum / n as f32, max, n))
++    }
++
+     /// Call once per frame with the player's chunk.
+     pub fn update(&mut self, gfx: Gfx, origins: Option<&DrawOrigins>, cx: i32, cz: i32) {
+         let t0 = std::time::Instant::now();
+@@ -1678,6 +1697,7 @@
+             self.mesh_gen = self.mesh_gen.wrapping_add(1);
+             for k in gone {
+                 let Some(e) = self.chunks.remove(&k) else { continue };
++                self.born.remove(&k);
+                 self.graph.set(k, None);
+                 e.mesh.iter().for_each(|m| self.pages.free(m));
+                 if self.ingested.remove(&k) {
+@@ -1802,6 +1822,7 @@
+                 break;
+             }
+             self.accept(key);
++            self.note_mesh(key);
+             uploaded += 1;
+             let Built { verts, starts, cut, wstarts, vis } = b;
+             let pages_before = self.pages.list.len();
+@@ -2274,6 +2295,17 @@
+         assert_eq!((b.verts, b.starts, b.cut, b.wstarts), (want.verts, want.starts, want.cut, want.wstarts));
+     }
+ 
++    #[test]
++    fn the_wait_for_a_first_mesh_counts_once_per_chunk() {
++        let mut m = ChunkManager::new(1, 1);
++        assert!(m.take_mesh_wait().is_none());
++        m.insert((0, 0), vec![0u8; VOLUME]);
++        m.note_mesh((0, 0));
++        m.note_mesh((0, 0)); // a rebuild is not a first mesh
++        assert_eq!(m.take_mesh_wait().map(|w| w.2), Some(1));
++        assert!(m.take_mesh_wait().is_none(), "cleared");
++    }
++
+     /// A result lands whether or not its chunk changed while the job ran (an edit clears `meshed`, so the next job is queued), is
+     /// dropped when the chunk was unloaded, and always frees the chunk for its next job.
+     #[test]
+diff -ruN -x '*.orig' -x '*.rej' a/roadmap/gameplay.md b/roadmap/gameplay.md
+--- a/roadmap/gameplay.md	2026-10-26 23:31:29.175759203 +0000
++++ b/roadmap/gameplay.md	2026-10-26 23:31:29.230322470 +0000
+@@ -4,6 +4,10 @@
+ 
+ ## Changelog
+ 
++- 2026-10-27 (24): the recipe book stacks sets on a repeated tap, and X / RT act on a slot in container screens (**NOT b1.7.3**; written WITHOUT a Rust toolchain: not compiled, not run, not seen on a device; +1 test in `book.rs`, +1 in `gamepad.rs`).
++    - `world/book.rs`: `fill` on the recipe the grid already holds (`holds`: the recipe's cells, in its places, any counts) calls `add_set`, which takes one more of each ingredient from the bag (main slots first, belt last) into its cell; a dry bag or a full stack changes nothing and returns false. Any other recipe clears the grid into the bag and starts from one set, as before; a recipe that is short still leaves the grid alone. The pattern code moved into `pattern_cells`. `craft_all` and shift-click on the result already craft every set in the grid. `satchel.rs`: the card's hint reads "Tap again to add a set".
++    - `input/gamepad.rs`, `touch_ui.rs`, `lib.rs`: in a container screen X clicks the slot under the cursor for one (`Screen::click(.., true)`: place one, or take the larger half) and RT quick-moves it (`shift_click`), for that press only, so the One / Shift buttons need no trip and no toggle (`Out::alt`, `TouchUi::take_alt`, `pad_alt`). A button bound to GUI select / back / pause / inventory keeps that meaning. Nothing while a press is down. No sprite, rect or colour changed.
++    - UNVERIFIED: that it compiles; X / RT as the pair (RT is the attack button in the world; a trigger held across the screen opening is ignored until released, `Pad::suppress`).
+ - 2026-10-26 (23): `design.md` gets the landmark proposals (documents only; no code; this entry and the `design.md` section are not in the last patch sent). Six silhouettes built by code, not templates: standing stone, the great tree, the stilt tower, the stepped pyramid, the fire tower, the ice spire. All share one role (attuning the compass to the next landmark, marked by a lapis block at the foot) and two rules (a base that cannot burn; stand only where the biome check passes).
+ - 2026-10-26 (22): `design.md` proposal 3 rewritten: a beam of light in the sky pass instead of a tower in the LoD (documents only; no code). The LoD is slow in mc-rs and a tall block cannot show past the render distance anyway; the landmark's position comes from the seed (`structory::spread`), the compass gives the way in. Still to be written: the "nearest landmark" query with its biome check, and the beam itself.
+ - 2026-10-26 (21): the six biome ideas and the rule about original ideas, in `design.md` (documents only; no code). `Repo-upstream.zip` is the new base: entries (15) to (18) (satchel, recipe book) are upstream's; entries (19) and (20) and the code of (20) apply unchanged on top of it.

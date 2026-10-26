@@ -149,6 +149,8 @@ pub struct Settings {
     pub debug_screen: bool,
     /// Log a backtrace with every wgpu error, at most one a second (`gpu::context::set_error_trace`); a debug switch with no button.
     pub gpu_error_trace: bool,
+    /// Frames the swap chain may queue (`gpu::context::set_frame_latency`): 2 = as before, 1 = less latency, a frame that needs more than half the refresh period may then drop a step; no button. Next start.
+    pub frame_latency: u8,
     /// Smart animals (`Mobs::smart`, not b1.7.3): path-walked wandering, herding, panic, and the grazing / rooting / pecking / resting pauses; a switch with no button, `animalAi:false` in options.txt turns all of it off.
     pub animal_ai: bool,
     /// The inventory button spreads the old cloth on the ground and pans a camera over it (`world::pack`, dizzying) instead of opening the
@@ -194,6 +196,7 @@ impl Default for Settings {
             lod: true,
             debug_screen: false,
             gpu_error_trace: false,
+            frame_latency: 2,
             animal_ai: true,
             pack_cloth: false,
             book_discovery: false,
@@ -234,6 +237,7 @@ impl Settings {
                 ("lod", ..) => s.lod = b,
                 ("debugScreen", ..) => s.debug_screen = b,
                 ("gpuErrorTrace", ..) => s.gpu_error_trace = b,
+                ("frameLatency", _, Some(n)) if (1..=3).contains(&n) => s.frame_latency = n,
                 ("animalAi", ..) => s.animal_ai = b,
                 ("packCloth", ..) => s.pack_cloth = b,
                 ("bookDiscovery", ..) => s.book_discovery = b,
@@ -258,8 +262,8 @@ impl Settings {
     pub fn save(&self) {
         let Some(p) = &self.path else { return };
         let mut t = format!(
-            "music:{}\nsound:{}\ninvertYMouse:{}\nmouseSensitivity:{}\nviewDistance:{}\nguiScale:{}\nbobView:{}\nanaglyph3d:{}\nadvancedOpengl:{}\nfpsLimit:{}\ndifficulty:{}\nfancyGraphics:{}\nao:{}\nlod:{}\ndigDelay:{}\ngpuErrorTrace:{}\ndynamicRes:{}\nmsaa:{}\npost:{}\nrenderer:{}\ndebugScreen:{}\nanimalAi:{}\npackCloth:{}\nbookDiscovery:{}\n",
-            self.music, self.sound, self.invert_mouse, self.sensitivity, self.render_distance, self.gui_scale, self.view_bobbing, self.anaglyph, self.advanced_opengl, self.limit_framerate, self.difficulty, self.fancy_graphics, self.ambient_occlusion, self.lod, self.dig_delay, self.gpu_error_trace, self.dynamic_res, self.msaa, self.post, self.renderer, self.debug_screen, self.animal_ai, self.pack_cloth, self.book_discovery
+            "music:{}\nsound:{}\ninvertYMouse:{}\nmouseSensitivity:{}\nviewDistance:{}\nguiScale:{}\nbobView:{}\nanaglyph3d:{}\nadvancedOpengl:{}\nfpsLimit:{}\ndifficulty:{}\nfancyGraphics:{}\nao:{}\nlod:{}\ndigDelay:{}\ngpuErrorTrace:{}\ndynamicRes:{}\nmsaa:{}\npost:{}\nrenderer:{}\ndebugScreen:{}\nanimalAi:{}\npackCloth:{}\nbookDiscovery:{}\nframeLatency:{}\n",
+            self.music, self.sound, self.invert_mouse, self.sensitivity, self.render_distance, self.gui_scale, self.view_bobbing, self.anaglyph, self.advanced_opengl, self.limit_framerate, self.difficulty, self.fancy_graphics, self.ambient_occlusion, self.lod, self.dig_delay, self.gpu_error_trace, self.dynamic_res, self.msaa, self.post, self.renderer, self.debug_screen, self.animal_ai, self.pack_cloth, self.book_discovery, self.frame_latency
         );
         for (id, code) in KEY_IDS.iter().zip(self.keys) {
             t.push_str(&format!("key_key.{id}:{code}\n"));
@@ -1080,6 +1084,8 @@ mod tests {
         assert!(st.dynamic_res, "on until options.txt says otherwise");
         assert!(!st.debug_screen, "off until the Info button or options.txt says so");
         assert!(st.animal_ai, "on until options.txt says otherwise");
+        assert_eq!(st.frame_latency, 2, "the wgpu default until options.txt says otherwise");
+        st.frame_latency = 1;
         assert!(!st.pack_cloth && !st.book_discovery, "the satchel with every recipe shown, until options.txt says otherwise");
         (st.gpu_error_trace, st.dynamic_res, st.debug_screen, st.pack_cloth, st.book_discovery) = (true, false, true, true, true);
         st.save();
@@ -1087,6 +1093,7 @@ mod tests {
         assert_eq!((back.sensitivity, back.invert_mouse, back.render_distance, back.lod, back.keys[4]), (0.25, true, 0, false, 50));
         assert!(back.gpu_error_trace && !back.dynamic_res && back.debug_screen && back.pack_cloth && back.book_discovery);
         assert_eq!(back.msaa, 0, "Auto until options.txt says otherwise");
+        assert_eq!(back.frame_latency, 1);
         assert!(std::fs::read_to_string(root.join("options.txt")).unwrap().contains("key_key.jump:50"));
     }
 

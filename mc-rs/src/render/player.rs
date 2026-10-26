@@ -2,14 +2,14 @@
 //! `RenderPlayer` / `RenderLiving` (third-person view) and like `GuiInventory` (the preview in the inventory panel).
 //! The geometry is one function (`quads`) that both targets use: the world pushes it into the entity mesh, the HUD projects it.
 //! Anim state is `EntityLiving.onUpdate` (body yaw follows the walk, limb swing) + `EntityPlayer` arm swing.
-//! ponytail: no armor layers (`modelArmor*`, 10 more textures), ears, cloak, hurt flash or sleeping pose; the third-person held item is a flat
-//! sprite or a cube, not the extruded `ItemRenderer` model (the first-person hand has it); the inventory preview looks straight ahead (no mouse on touch).
+//! ponytail: no armor layers (`modelArmor*`, 10 more textures), ears, cloak, hurt flash or sleeping pose; the held item (both views) and the dropped
+//! items go through `render_item` / `drop_item` (`ItemRenderer.renderItem`, `RenderItem`); the inventory preview looks straight ahead (no mouse on touch).
 //! UNVERIFIED: written without a Rust toolchain: not compiled, not run.
 
-use crate::render::atlas::{self, ITEM_TILE0};
+use crate::render::atlas;
 use crate::render::mesh::{lm, push_box, VF, WHITE};
 use crate::world::craft::{self, Kind};
-use crate::world::items::{stack_tile, ItemStack};
+use crate::world::items::{placed_meta, ItemStack};
 use glam::{Mat4, Vec3};
 use std::f32::consts::PI;
 
@@ -240,30 +240,116 @@ fn place(verts: &mut [f32], m: &Mat4) {
     }
 }
 
-/// `RenderPlayer.renderSpecials`' three transforms for the item in the right hand (a block, a full-size tool, anything else). The
-/// result is a cube (block) or a flat items.png sprite slab, moved by `hand` (model pixels, so the item's block units are x16).
+/// `RenderPlayer.renderSpecials`' three transforms for the item in the right hand (a block, a full-size tool, anything else), then
+/// `render_item`, the same `ItemRenderer.renderItem` the first-person hand uses. `hand` is in model pixels, so the item's block
+/// units are x16.
 fn push_held(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, hand: &Mat4, s: ItemStack) {
-    let (m, n0) = (*hand, verts.len());
     let rx = |d: f32| Mat4::from_rotation_x(d.to_radians());
-    let (m, tile, min, max) = if s.id < 256 && crate::world::chunk::normal_cube(s.id as u8) {
-        let k = 0.5 * 12.0 / 16.0;
-        (m * Mat4::from_translation(Vec3::new(0.0, 3.0, -5.0)) * rx(20.0) * Mat4::from_rotation_y(45.0_f32.to_radians()) * Mat4::from_scale(Vec3::new(k, -k, k)), stack_tile(s), [-0.5; 3], [0.5; 3])
+    let m = if is_block3d(s.id) {
+        let k = 0.5 * 0.75;
+        *hand * Mat4::from_translation(Vec3::new(0.0, 3.0, -5.0)) * rx(20.0) * Mat4::from_rotation_y(45.0_f32.to_radians()) * Mat4::from_scale(Vec3::new(k, -k, k))
+    } else if craft::tool(s.id).is_some() || matches!(s.id, 280 | 352 | 353) || s.id == crate::world::gear::ROD {
+        let k = 10.0 / 16.0;
+        let spin = if matches!(craft::tool(s.id), Some((Kind::Sword, _))) || s.id == crate::world::gear::ROD { Mat4::from_rotation_z(PI) * Mat4::from_translation(Vec3::new(0.0, -2.0, 0.0)) } else { Mat4::IDENTITY };
+        *hand * spin * Mat4::from_translation(Vec3::new(0.0, 3.0, 0.0)) * Mat4::from_scale(Vec3::new(k, -k, k)) * rx(-100.0) * Mat4::from_rotation_y(45.0_f32.to_radians())
     } else {
-        let Some(icon) = atlas::item_icon(s.id) else { return };
-        let t = ITEM_TILE0 + icon as u16;
-        let full3d = craft::tool(s.id).is_some() || matches!(s.id, 280 | 352 | 353) || s.id == crate::world::gear::ROD;
-        let m = if full3d {
-            let k = 10.0 / 16.0;
-            let spin = if matches!(craft::tool(s.id), Some((Kind::Sword, _))) || s.id == crate::world::gear::ROD { Mat4::from_rotation_z(PI) * Mat4::from_translation(Vec3::new(0.0, -2.0, 0.0)) } else { Mat4::IDENTITY };
-            m * spin * Mat4::from_translation(Vec3::new(0.0, 3.0, 0.0)) * Mat4::from_scale(Vec3::new(k, -k, k)) * rx(-100.0) * Mat4::from_rotation_y(45.0_f32.to_radians())
-        } else {
-            m * Mat4::from_translation(Vec3::new(4.0, 3.0, -3.0)) * Mat4::from_scale(Vec3::splat(6.0 / 16.0)) * Mat4::from_rotation_z(60.0_f32.to_radians()) * rx(-90.0) * Mat4::from_rotation_z(20.0_f32.to_radians())
-        };
-        (m, t, [0.0, 0.0, -1.0 / 32.0], [1.0, 1.0, 1.0 / 32.0])
+        *hand * Mat4::from_translation(Vec3::new(4.0, 3.0, -3.0)) * Mat4::from_scale(Vec3::splat(6.0 / 16.0)) * Mat4::from_rotation_z(60.0_f32.to_radians()) * rx(-90.0) * Mat4::from_rotation_z(20.0_f32.to_radians())
     };
-    let m = m * Mat4::from_scale(Vec3::splat(16.0)); // item units are blocks, the arm is in pixels
-    push_box(verts, idxs, min, max, tile, 1.0);
-    place(&mut verts[n0..], &m);
+    render_item(verts, idxs, &(m * Mat4::from_scale(Vec3::splat(16.0))), s); // item units are blocks, the arm is in pixels
+}
+
+/// `RenderBlocks.renderItemIn3d` for a block item: drawn as its (textured) shape, not as a flat sprite.
+fn is_block3d(id: u16) -> bool {
+    id < 256 && id != 0 && !crate::world::pack::flat_icon(id as u8)
+}
+
+/// The boxes (min, max in 0..1) `renderBlockOnInventory` draws for a block: the slab's half, the stairs' two steps, the fence's two
+/// posts and two rails, else the whole cell.
+fn item_boxes(id: u8) -> Vec<[f32; 6]> {
+    match id {
+        44 => vec![[0.0, 0.0, 0.0, 1.0, 0.5, 1.0]],
+        53 | 67 => vec![[0.0, 0.0, 0.0, 1.0, 0.5, 1.0], [0.0, 0.5, 0.0, 0.5, 1.0, 1.0]],
+        85 => {
+            let (a, b) = (0.125, 0.0625);
+            vec![[0.5 - a, 0.0, 0.0, 0.5 + a, 1.0, 2.0 * a], [0.5 - a, 0.0, 1.0 - 2.0 * a, 0.5 + a, 1.0, 1.0], [0.5 - b, 1.0 - 3.0 * b, -2.0 * b, 0.5 + b, 1.0 - b, 1.0 + 2.0 * b], [0.5 - b, 0.5 - 3.0 * b, -2.0 * b, 0.5 + b, 0.5 - b, 1.0 + 2.0 * b]]
+        }
+        _ => vec![[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]],
+    }
+}
+
+/// `tint` (packed sRGB) darkened by `k`.
+fn shaded(tint: f32, k: f32) -> f32 {
+    let t = tint as u32;
+    let c = |sh: u32| (((t >> sh) & 255) as f32 * k).round().min(255.0) as u32;
+    ((c(16) << 16) | (c(8) << 8) | c(0)) as f32
+}
+
+/// `renderBlockOnInventory`: block `id` as its terrain-tile faces, centred on the origin, 1 unit big, in both windings. The faces
+/// carry the item lighting as a tint (top 1, sides 0.8 / 0.6, bottom 0.5) and the grass and leaf colours.
+fn block3d(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, m: &Mat4, id: u8, meta: u8) {
+    use crate::render::mesh::push_face;
+    const SHADE: [f32; 6] = [0.6, 0.6, 1.0, 0.5, 0.8, 0.8]; // +X, -X, +Y, -Y, +Z, -Z
+    let (i0, centre) = (idxs.len(), Vec3::splat(0.5));
+    for b in item_boxes(id) {
+        for face in 0..6 {
+            let n0 = verts.len();
+            push_face(verts, idxs, face, [0.0; 3], [1.0; 3], 0, 1.0); // the unit cell's face: its corners tell which axis runs along u and v
+            let q: Vec<[f32; 3]> = verts[n0..].chunks_exact(VF).map(|v| [v[0], v[1], v[2]]).collect();
+            let axis = |a: usize, c: usize| (0..3).find(|&i| q[a][i] != q[c][i]).unwrap_or(0);
+            let (au, av) = (axis(0, 1), axis(1, 2));
+            let tint = shaded(crate::render::items::block_tint(id, meta, face), SHADE[face]);
+            for (k, v) in verts[n0..].chunks_exact_mut(VF).enumerate() {
+                let p: [f32; 3] = std::array::from_fn(|i| b[i] + q[k][i] * (b[i + 3] - b[i]));
+                // the tile window of the box (a slab shows half of its side tile), u and v run like the unit face's
+                let (pu, pv) = (if q[1][au] > q[0][au] { p[au] } else { 1.0 - p[au] }, if q[2][av] > q[1][av] { p[av] } else { 1.0 - p[av] });
+                let w = m.transform_point3(Vec3::from(p) - centre);
+                let (tu, tv) = atlas::face_uv(id, meta, face, pu, pv);
+                v[..8].copy_from_slice(&[w.x, w.y, w.z, tu, tv, 1.0, lm(15, 0), tint]);
+            }
+        }
+    }
+    let back: Vec<u32> = idxs[i0..].chunks_exact(3).flat_map(|t| [t[0], t[2], t[1]]).collect(); // the Java draws with culling off
+    idxs.extend(back);
+}
+
+/// `ItemRenderer.renderItem`: the item in `m` (item units, a block = 1, the origin at the middle of a block item), as the shape of
+/// its block (`is_block3d`) or its sprite with the Java's own placement and the 1/16 thick edge strips (plants, torches and
+/// every item are sprites from `terrain.png` or `items.png`).
+pub fn render_item(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, m: &Mat4, s: ItemStack) {
+    let meta = placed_meta(s);
+    if is_block3d(s.id) {
+        return block3d(verts, idxs, m, s.id as u8, meta);
+    }
+    let Some(uv) = sprite_uv(s, meta) else { return };
+    let t = |x, y, z| Mat4::from_translation(Vec3::new(x, y, z));
+    sprite(verts, idxs, &(*m * t(0.0, -0.3, 0.0) * Mat4::from_scale(Vec3::splat(1.5)) * Mat4::from_rotation_y(50.0_f32.to_radians()) * Mat4::from_rotation_z(335.0_f32.to_radians()) * t(-15.0 / 16.0, -1.0 / 16.0, 0.0)), &*uv);
+}
+
+/// Atlas place of the flat picture of a stack: its `items.png` sprite, or the `terrain.png` tile of a block drawn flat. `None` = nothing known.
+fn sprite_uv(s: ItemStack, meta: u8) -> Option<Box<dyn Fn(f32, f32) -> (f32, f32)>> {
+    if s.id < 256 {
+        let id = s.id as u8;
+        return Some(Box::new(move |u, v| atlas::face_uv(id, meta, 5, u, v)));
+    }
+    let icon = atlas::item_icon(s.id)?;
+    Some(Box::new(move |u, v| atlas::item_uv(icon, u, v)))
+}
+
+/// `RenderItem.doRenderItem` for a dropped stack at `c` (the bob is already in it): a block as its shape turned by `spin` radians
+/// (a quarter size, half for the ones that are not a full cube), anything else as its sprite on one flat quad half a block big
+/// turned toward the eye (`yaw`: from the item to the eye). ponytail: one copy, not the 2..4 of a big stack.
+pub fn drop_item(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, c: Vec3, spin: f32, yaw: f32, s: ItemStack) -> bool {
+    let meta = placed_meta(s);
+    if is_block3d(s.id) {
+        let id = s.id as u8;
+        let k = if crate::world::chunk::normal_cube(id) || matches!(id, 44 | 54) { 0.25 } else { 0.5 };
+        block3d(verts, idxs, &(Mat4::from_translation(c) * Mat4::from_rotation_y(spin) * Mat4::from_scale(Vec3::splat(k))), id, meta);
+        return true;
+    }
+    let Some(uv) = sprite_uv(s, meta) else { return false };
+    let m = Mat4::from_translation(c) * Mat4::from_rotation_y(yaw) * Mat4::from_scale(Vec3::splat(0.5));
+    quad2(verts, idxs, &m, [[-0.5, -0.25, 0.0], [0.5, -0.25, 0.0], [0.5, 0.75, 0.0], [-0.5, 0.75, 0.0]], [uv(0.0, 0.0), uv(1.0, 0.0), uv(1.0, 1.0), uv(0.0, 1.0)]);
+    true
 }
 
 // ---- the first-person hand ----
@@ -293,7 +379,7 @@ pub struct Hand {
 }
 
 /// A quad of the item mesh in both windings (the Java draws with culling off), corners `p` and atlas UVs, moved by `m`.
-fn quad2(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, m: &Mat4, p: [[f32; 3]; 4], uv: [(f32, f32); 4]) {
+pub(crate) fn quad2(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, m: &Mat4, p: [[f32; 3]; 4], uv: [(f32, f32); 4]) {
     let base = verts.len() as u32 / VF as u32;
     for (c, (u, v)) in p.iter().zip(uv) {
         let w = m.transform_point3(Vec3::from(*c));
@@ -304,8 +390,8 @@ fn quad2(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, m: &Mat4, p: [[f32; 3]; 4], 
 
 /// `ItemRenderer.renderItem`'s sprite: both faces (mirrored like the Java's) and, for each texel column and row, a strip along the
 /// four edges, 1/16 thick (z -1/16..0); the strip at step `i` shows texel `15 - i`.
-fn sprite(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, m: &Mat4, icon: u8) {
-    let (t, uv) = (1.0 / 16.0, |u: f32, v: f32| atlas::item_uv(icon, u, v));
+fn sprite(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, m: &Mat4, uv: &dyn Fn(f32, f32) -> (f32, f32)) {
+    let t = 1.0 / 16.0;
     // `uv(u, v)`: u across the texture, v up (the Java's v runs down).
     quad2(verts, idxs, m, [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]], [uv(1.0, 0.0), uv(0.0, 0.0), uv(0.0, 1.0), uv(1.0, 1.0)]);
     quad2(verts, idxs, m, [[0.0, 1.0, -t], [1.0, 1.0, -t], [1.0, 0.0, -t], [0.0, 0.0, -t]], [uv(1.0, 1.0), uv(0.0, 1.0), uv(0.0, 0.0), uv(1.0, 0.0)]);
@@ -345,13 +431,7 @@ pub fn push_hand(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, h: &Hand) {
     };
     let rod = if st.id == crate::world::gear::ROD { ry(180.0) } else { Mat4::IDENTITY }; // `shouldRotateAroundWhenRendering`
     let m = h.to_world * t(-b * 0.4, c * 0.2, -a * 0.2) * t(0.56, -0.52 - up, -0.72) * ry(45.0) * ry(-d * 20.0) * rz(-b * 20.0) * rx(-b * 80.0) * Mat4::from_scale(Vec3::splat(0.4)) * rod;
-    if st.id < 256 && crate::world::chunk::normal_cube(st.id as u8) {
-        let n0 = verts.len();
-        push_box(verts, idxs, [-0.5; 3], [0.5; 3], stack_tile(st), 1.0);
-        place(&mut verts[n0..], &m);
-    } else if let Some(icon) = atlas::item_icon(st.id) {
-        sprite(verts, idxs, &(m * t(0.0, -0.3, 0.0) * Mat4::from_scale(Vec3::splat(1.5)) * ry(50.0) * rz(335.0) * t(-15.0 / 16.0, -1.0 / 16.0, 0.0)), icon);
-    }
+    render_item(verts, idxs, &m, st);
 }
 
 /// `GuiInventory.drawGuiContainerBackgroundLayer`: the player at `(x, y)` (his feet; the panel's (51, 75)) with `k` px a GUI unit,

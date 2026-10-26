@@ -881,6 +881,10 @@ pub struct ChunkManager {
     upload: UploadDurationEstimator,
     frame_ns: Option<f64>,
     last_update: Option<std::time::Instant>,
+    /// When each chunk without a first mesh entered the map, and what the first uploads since the last `take_mesh_wait` waited
+    /// (sum of ms, longest ms, count): the time from "chunk exists" to "chunk can be drawn", which is what streaming feels like.
+    born: HashMap<Key, std::time::Instant>,
+    mesh_wait: (f32, f32, u32),
 }
 
 impl ChunkManager {
@@ -957,7 +961,7 @@ impl ChunkManager {
         let gen = make(seed);
         Self { chunks: Chunks::default(), pending: HashSet::new(), ring, radius, center: None, max_in_flight: workers * 2, built, meshing: HashSet::new(), max_meshing: workers * 2, urgent: HashSet::new(),
                populated_rx, populating: HashMap::new(), busy: HashSet::new(), max_populating: workers, stamp: 0,
-               cm: gen.manager(), biome_area: None, gen, jobs, done, light: light::LightLink::spawn(), sky_sub: 0, mesh_gen: 0, dir: None, saved: HashSet::new(), writer: None, changes: Vec::new(), fresh_water: Vec::new(), loot: Vec::new(), spawners: Vec::new(), wide: wide::WideCull::spawn(), graph: wide::Snapshot::default(), visible: HashMap::new(), wet: HashMap::new(), order: Vec::new(), ingest: Vec::new(), ingested: HashSet::new(), pages: Pages::default(), held: None, upload: UploadDurationEstimator::new(), frame_ns: None, last_update: None }
+               cm: gen.manager(), biome_area: None, gen, jobs, done, light: light::LightLink::spawn(), sky_sub: 0, mesh_gen: 0, dir: None, saved: HashSet::new(), writer: None, changes: Vec::new(), fresh_water: Vec::new(), loot: Vec::new(), spawners: Vec::new(), wide: wide::WideCull::spawn(), graph: wide::Snapshot::default(), visible: HashMap::new(), wet: HashMap::new(), order: Vec::new(), ingest: Vec::new(), ingested: HashSet::new(), pages: Pages::default(), held: None, upload: UploadDurationEstimator::new(), frame_ns: None, last_update: None, born: HashMap::new(), mesh_wait: (0.0, 0.0, 0) }
     }
 
     /// The render distance in chunks.
@@ -1001,6 +1005,7 @@ impl ChunkManager {
             old.mesh.iter().for_each(|m| self.pages.free(m));
             self.light_remove(key); // a fresh, unlit entry replaces it, light thread's copy included
         }
+        self.born.entry(key).or_insert_with(std::time::Instant::now);
         self.graph.set(key, Some([vis::FULL; SECTIONS])); // no mesh yet: the view passes through
         self.light_chunk(key, copy);
     }
@@ -1605,6 +1610,20 @@ impl ChunkManager {
         self.chunks.len()
     }
 
+    /// Chunk `key`'s first mesh just went up: how long it took since the chunk entered the map (later rebuilds are not counted).
+    fn note_mesh(&mut self, key: Key) {
+        if let Some(t) = self.born.remove(&key) {
+            let ms = t.elapsed().as_secs_f32() * 1000.0;
+            self.mesh_wait = (self.mesh_wait.0 + ms, self.mesh_wait.1.max(ms), self.mesh_wait.2 + 1);
+        }
+    }
+
+    /// `(average ms, longest ms, chunks)` of the first meshes since the last call; `None` if there were none. Clears.
+    pub fn take_mesh_wait(&mut self) -> Option<(f32, f32, u32)> {
+        let (sum, max, n) = std::mem::take(&mut self.mesh_wait);
+        (n > 0).then(|| (sum / n as f32, max, n))
+    }
+
     /// Call once per frame with the player's chunk.
     pub fn update(&mut self, gfx: Gfx, origins: Option<&DrawOrigins>, cx: i32, cz: i32) {
         let t0 = std::time::Instant::now();
@@ -1678,6 +1697,7 @@ impl ChunkManager {
             self.mesh_gen = self.mesh_gen.wrapping_add(1);
             for k in gone {
                 let Some(e) = self.chunks.remove(&k) else { continue };
+                self.born.remove(&k);
                 self.graph.set(k, None);
                 e.mesh.iter().for_each(|m| self.pages.free(m));
                 if self.ingested.remove(&k) {
@@ -1802,6 +1822,7 @@ impl ChunkManager {
                 break;
             }
             self.accept(key);
+            self.note_mesh(key);
             uploaded += 1;
             let Built { verts, starts, cut, wstarts, vis } = b;
             let pages_before = self.pages.list.len();
@@ -2272,6 +2293,17 @@ mod tests {
         let b = build_job(job, &mut WorldChunkManager::new(1));
         assert!(!b.verts.is_empty(), "a stone floor has a top face");
         assert_eq!((b.verts, b.starts, b.cut, b.wstarts), (want.verts, want.starts, want.cut, want.wstarts));
+    }
+
+    #[test]
+    fn the_wait_for_a_first_mesh_counts_once_per_chunk() {
+        let mut m = ChunkManager::new(1, 1);
+        assert!(m.take_mesh_wait().is_none());
+        m.insert((0, 0), vec![0u8; VOLUME]);
+        m.note_mesh((0, 0));
+        m.note_mesh((0, 0)); // a rebuild is not a first mesh
+        assert_eq!(m.take_mesh_wait().map(|w| w.2), Some(1));
+        assert!(m.take_mesh_wait().is_none(), "cleared");
     }
 
     /// A result lands whether or not its chunk changed while the job ran (an edit clears `meshed`, so the next job is queued), is

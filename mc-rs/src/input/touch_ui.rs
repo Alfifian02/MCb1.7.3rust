@@ -257,6 +257,8 @@ pub struct TouchUi {
     pad_info: bool,
     page: i32,
     scroll: f32,
+    /// X (`Some(false)`, click for one) or RT (`Some(true)`, quick-move) in a container screen, until `take_alt`.
+    alt: Option<bool>,
 }
 
 impl TouchUi {
@@ -298,6 +300,7 @@ impl TouchUi {
             pad_info: false,
             page: 0,
             scroll: 0.0,
+            alt: None,
         }
     }
 
@@ -321,6 +324,9 @@ impl TouchUi {
                 None => {}
             }
             (self.page, self.scroll) = (self.page + o.page, self.scroll + o.scroll);
+            if self.screen && !self.paused && !self.menu {
+                self.alt = o.alt.or(self.alt);
+            }
             if o.back && !self.paused && self.screen && !self.menu {
                 self.back = true; // the screen steps back one level first (`take_back`); closing is `lib.rs`'s call
             } else if o.pause || o.back {
@@ -404,6 +410,11 @@ impl TouchUi {
         std::mem::take(&mut self.scroll)
     }
 
+    /// The pad's X / RT in a container screen since the last call: `Some(false)` clicks the slot under the cursor for one, `Some(true)` quick-moves it.
+    pub fn take_alt(&mut self) -> Option<bool> {
+        self.alt.take()
+    }
+
     /// The pad's step since the last call (only while `pad.snap`): `lib.rs` moves the cursor to the neighbouring target.
     pub fn take_nav(&mut self) -> Option<(i32, i32)> {
         self.nav.take()
@@ -454,6 +465,7 @@ impl TouchUi {
     pub fn set_screen(&mut self, open: bool) {
         self.screen = open;
         self.cursor_pos = (self.surface_w as f32 * 0.5, self.surface_h as f32 * 0.5);
+        self.alt = None;
         self.clear();
     }
 

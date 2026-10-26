@@ -9,6 +9,7 @@ use crate::gles::renderer::Renderer as Gles;
 use crate::gpu::context::Gpu;
 use crate::gpu::gfx::{Drawn, Gfx, WorldDraw};
 use crate::gpu::pipeline::{ChunkPipeline, DrawOrigins};
+use crate::gpu::timing::GpuTimer;
 use crate::render::hud::{HudPipeline, HudVertex};
 use crate::render::panorama::Panorama;
 use crate::render::present::{Present, SCENE_FORMAT};
@@ -25,6 +26,8 @@ pub struct Wg {
     sky: SkyRenderer,
     present: Present,
     rain_fx: weather::Weather,
+    /// Scene-pass GPU time for `Drs` (`None`: the adapter has no timestamp queries).
+    timer: Option<GpuTimer>,
 }
 
 impl Wg {
@@ -38,7 +41,9 @@ impl Wg {
         let rain_fx = weather::Weather::new(&gpu.device, &gpu.queue, SCENE_FORMAT);
         let sky = SkyRenderer::new(&gpu.device, &gpu.queue, SCENE_FORMAT);
         let present = Present::new(&gpu.device, &gpu.queue, gpu.scene(), (w, h), fmt);
-        Self { gpu, pipe, hud, pano, sky, present, rain_fx }
+        let timer = GpuTimer::new(&gpu.device, &gpu.queue);
+        log::info!("GPU timestamps: {}", if timer.is_some() { "on (scene pass)" } else { "off (adapter has no timestamp queries)" });
+        Self { gpu, pipe, hud, pano, sky, present, rain_fx, timer }
     }
 
     fn sync_scene(&mut self) {
@@ -109,6 +114,7 @@ impl Wg {
             self.gpu.queue.write_buffer(&self.hud.vbuf, 0, bytemuck::cast_slice(d.hud));
         }
         let mut enc = self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
+        let slot = self.timer.as_mut().and_then(|t| t.begin()); // a busy slot leaves this frame untimed
         {
             let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("scene"),
@@ -119,7 +125,7 @@ impl Wg {
                     depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Discard }),
                     stencil_ops: None,
                 }),
-                timestamp_writes: None,
+                timestamp_writes: self.timer.as_ref().zip(slot).map(|(t, s)| t.writes(s)),
                 occlusion_query_set: None,
             });
             self.draw_opaque(&mut rp, d);
@@ -146,6 +152,9 @@ impl Wg {
                 self.rain_fx.draw(&mut rp);
             }
         }
+        if let (Some(t), Some(s)) = (&self.timer, slot) {
+            t.resolve(&mut enc, s);
+        }
         // CAS + upscale + vignette in one pass; the HUD goes over the finished frame in it (neither sharpened nor vignetted).
         self.present.finish(&mut enc, &view_tex, |rp| {
             if hud_vertex_count > 0 {
@@ -156,6 +165,9 @@ impl Wg {
             }
         });
         self.gpu.queue.submit(std::iter::once(enc.finish()));
+        if let (Some(t), Some(s)) = (self.timer.as_mut(), slot) {
+            t.submitted(s);
+        }
         frame.present();
         Drawn::Done(acq)
     }
@@ -249,6 +261,16 @@ impl Backend {
                 g.hud.resize(&g.gpu.queue, w, h);
             }
             Backend::Gles(g) => g.resize(w, h),
+        }
+    }
+
+    /// Scene-pass GPU milliseconds of the recent frames whose timestamps have arrived, oldest first, pushed onto `out`. Nothing for the
+    /// GLES renderer or an adapter without timestamp queries. Never waits.
+    pub fn gpu_ms(&mut self, out: &mut Vec<f32>) {
+        if let Backend::Wgpu(w) = self {
+            if let Some(t) = &mut w.timer {
+                t.collect(&w.gpu.device, out);
+            }
         }
     }
 
