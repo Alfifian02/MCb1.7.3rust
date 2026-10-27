@@ -8,6 +8,7 @@
 //! b1.7.3 has no food bar), `lock$belowMaxHealth` (max health is a constant 20), creative / spectator (the debug Fly button stands in),
 //! the config, the `/stamina` command, the network sync, the Mobs Properties Randomness and Rune Enchanting hooks.
 
+use crate::world::biomelife::Air;
 use crate::world::vitals::MAX_HEALTH;
 
 /// `stamina$perHalfHeart`: 10 per health point (the mod counts half hearts), so full is 200 = 200 ticks of sprint at 1 a tick.
@@ -32,6 +33,9 @@ const SLOW_BELOW: f32 = 0.20;
 const SLOW_BELOW_FLAT: f32 = 40.0;
 const SLOW: f32 = 0.15;
 const SLOW_LOCKED: f32 = 0.10;
+/// NOT Stamina's (`biomelife::air`, `biomeRules`): a sprint costs `1 + HOT * hot` times, and recovery is `1 - COLD * cold` times.
+const HOT: f32 = 0.6;
+const COLD: f32 = 0.5;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Stamina {
@@ -80,6 +84,11 @@ impl Stamina {
 
     /// One 20 Hz tick of `StaminaFeature.onPlayerTick`: a sprint consumes; otherwise it regenerates (slower while locked); a low health empties and locks it.
     pub fn tick(&mut self, sprinting: bool, health: i32, armor: i32) {
+        self.tick_in(sprinting, health, armor, Air::default());
+    }
+
+    /// `tick` in the heat or the cold of a biome (`Air::default()` is the mod's own).
+    pub fn tick_in(&mut self, sprinting: bool, health: i32, armor: i32, air: Air) {
         self.combat = self.combat.saturating_sub(1);
         if health <= 0 {
             return;
@@ -88,10 +97,10 @@ impl Stamina {
         self.max = Self::possible(armor) * ratio;
         self.cur = self.cur.min(self.max); // `setStamina` clamps to the maximum, which falls with the health
         if sprinting {
-            self.take(SPRINT * if self.combat == 0 { CALM } else { 1.0 });
+            self.take(SPRINT * if self.combat == 0 { CALM } else { 1.0 } * (1.0 + HOT * air.hot));
         } else if self.cur != self.max && ratio > LOCK_BELOW {
             let (was, locked) = (self.cur / self.max, self.locked); // the unlock test reads the stamina of before this tick's regen, as the mod does
-            self.cur = (self.cur + REGEN * (1.0 - armor as f32 * ARMOR) * if locked { REGEN_LOCKED } else { 1.0 }).min(self.max);
+            self.cur = (self.cur + REGEN * (1.0 - armor as f32 * ARMOR) * if locked { REGEN_LOCKED } else { 1.0 } * (1.0 - COLD * air.cold)).min(self.max);
             self.locked = locked && was < UNLOCK_AT;
         } else if !self.locked && ratio <= LOCK_BELOW {
             (self.cur, self.locked) = (0.0, true);
@@ -203,5 +212,17 @@ mod tests {
         s.tick(false, 10, 0);
         s.cur = 50.0;
         assert_eq!(s.halves(10), 5, "at 5 hearts of health the bar is 100 and 50 covers 5 half hearts");
+    }
+
+    /// NOT Stamina's: the desert's sun makes a sprint dearer, the tundra's cold makes the rest slower; a still air is the mod's own.
+    #[test]
+    fn heat_and_cold_move_the_bar() {
+        let (mut calm, mut hot) = (Stamina::default(), Stamina::default());
+        let (dry_calm, dry_hot) = (run_dry(&mut calm), (1..).find(|_| { hot.tick_in(true, MAX_HEALTH, 0, Air { hot: 1.0, cold: 0.0 }); hot.locked }).unwrap());
+        assert!(dry_hot < dry_calm && dry_hot as f32 > dry_calm as f32 / 1.7, "{dry_hot} < {dry_calm}");
+        let (mut warm, mut cold) = (Stamina { cur: 50.0, ..Stamina::default() }, Stamina { cur: 50.0, ..Stamina::default() });
+        warm.tick_in(false, MAX_HEALTH, 0, Air::default());
+        cold.tick_in(false, MAX_HEALTH, 0, Air { hot: 0.0, cold: 1.0 });
+        assert!((warm.cur - 50.0 - REGEN).abs() < 1e-4 && (cold.cur - 50.0 - REGEN * 0.5).abs() < 1e-4);
     }
 }

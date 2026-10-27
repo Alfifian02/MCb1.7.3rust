@@ -11,7 +11,7 @@ mc-rs/src/audio/table.rs. Names follow `SoundPool.addSound` / `Minecraft.install
 The 12 streaming/*.mus files are not imported: b1.7.3 only has records 13 and cat (`Item.record13` / `recordCat`).
 The block -> StepSound table is read from `Block.java` (`setStepSound`), the three StepSound flavours from its first lines.
 """
-import json, os, re, shutil, sys
+import glob, json, os, re, shutil, sys
 
 src = sys.argv[1] if len(sys.argv) > 1 else "."
 root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "mc-rs")
@@ -28,6 +28,8 @@ sfx, music, rec = {}, [], {}
 for path, o in sorted(objs.items()):
     if not path.endswith(".ogg"):
         continue
+    if re.match(r"newsound/mob/wolf/(bark|death|growl|hurt|panting|whine)\d*\.ogg$", path):
+        continue  # NOT b1.7.3: the wolf's cries are the voices below
     h = o["hash"]
     dst = f"{root}/assets/sound/{path}"
     os.makedirs(os.path.dirname(dst), exist_ok=True)
@@ -40,6 +42,11 @@ for path, o in sorted(objs.items()):
         music.append(inc)
     elif top == "streaming":
         rec.setdefault(key(path, False), []).append(inc)
+
+# NOT b1.7.3: the wolf voices (`wolf.zip`, 1.21.5's sound variants; the baby set is not used): assets/sound/wolf/<voice>/<cry><n>.ogg -> "mob.wolf.<voice>.<cry>".
+for p in sorted(glob.glob(f"{root}/assets/sound/wolf/*/*.ogg")):
+    voice, f = p.split("/")[-2:]
+    sfx.setdefault(f"mob.wolf.{voice}.{f.split('.')[0].rstrip('0123456789')}", []).append(f'include_bytes!("../../assets/sound/wolf/{voice}/{f}")')
 
 # Block.java: `new Xxx(<id>` ... `.setStepSound(<field>)`; BlockCloth() has no id argument (35, wool).
 SOUNDS = ["soundPowderFootstep", "soundWoodFootstep", "soundGravelFootstep", "soundGrassFootstep", "soundStoneFootstep",

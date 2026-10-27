@@ -199,7 +199,8 @@ impl OverworldGenerator {
             dungeon(w, &mut r, x, y, z);
         }
         // Veins: (count, size, replaces stone with, y range). Lapis is the odd one (two draws summed).
-        for _ in 0..10 {
+        // NOT b1.7.3: the marsh is where the clay is (proposal 6, "every biome has one export": bricks for what is built elsewhere).
+        for _ in 0..if biome == Biome::Marsh { 24 } else { 10 } {
             let (x, y, z) = (bx + r.next_int_bound(16), r.next_int_bound(128), bz + r.next_int_bound(16));
             if is_water(w.get(x, y, z)) {
                 vein(w, &mut r, x, y, z, 32, SAND, CLAY);

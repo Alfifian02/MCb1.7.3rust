@@ -99,12 +99,13 @@ pub(crate) fn biome_tints(cm: &mut WorldChunkManager, cx: i32, cz: i32) -> mesh:
     let biomes = cm.load_block_generator_data(cx * 16, cz * 16, 16, 16);
     let mut t = mesh::Tints::white();
     t.water = water;
+    let season = crate::world::biomelife::current();
     for i in 0..256 {
         let (temp, humid) = (cm.temperature[i], cm.humidity[i]);
         // The Blooming biomes have their own colours (the datapack's); every other biome reads the climate maps.
         let (grass, foliage) = biomes[i].colors().unwrap_or_else(|| (crate::world::climate::grass(temp, humid), crate::world::climate::foliage(temp, humid)));
         t.grass[i] = grass as f32;
-        t.foliage[i] = foliage as f32;
+        t.foliage[i] = crate::world::biomelife::foliage(foliage, biomes[i], season) as f32;
     }
     t
 }
@@ -815,6 +816,8 @@ pub struct ChunkManager {
     /// workers (`populate_dispatch`), each of which has a generator of its own.
     gen: OverworldGenerator,
     cm: WorldChunkManager,
+    /// A second manager for `biome_at`, which the mob tick asks through `&self` (the climate noise caches in the manager).
+    bm: std::sync::Mutex<WorldChunkManager>,
     /// The last `biomes` answer and the area it was for.
     biome_area: Option<((i32, i32, usize, usize), Vec<crate::world::biome::Biome>)>,
     jobs: mpsc::Sender<Job>,
@@ -961,7 +964,7 @@ impl ChunkManager {
         let gen = make(seed);
         Self { chunks: Chunks::default(), pending: HashSet::new(), ring, radius, center: None, max_in_flight: workers * 2, built, meshing: HashSet::new(), max_meshing: workers * 2, urgent: HashSet::new(),
                populated_rx, populating: HashMap::new(), busy: HashSet::new(), max_populating: workers, stamp: 0,
-               cm: gen.manager(), biome_area: None, gen, jobs, done, light: light::LightLink::spawn(), sky_sub: 0, mesh_gen: 0, dir: None, saved: HashSet::new(), writer: None, changes: Vec::new(), fresh_water: Vec::new(), loot: Vec::new(), spawners: Vec::new(), wide: wide::WideCull::spawn(), graph: wide::Snapshot::default(), visible: HashMap::new(), wet: HashMap::new(), order: Vec::new(), ingest: Vec::new(), ingested: HashSet::new(), pages: Pages::default(), held: None, upload: UploadDurationEstimator::new(), frame_ns: None, last_update: None, born: HashMap::new(), mesh_wait: (0.0, 0.0, 0) }
+               cm: gen.manager(), bm: std::sync::Mutex::new(gen.manager()), biome_area: None, gen, jobs, done, light: light::LightLink::spawn(), sky_sub: 0, mesh_gen: 0, dir: None, saved: HashSet::new(), writer: None, changes: Vec::new(), fresh_water: Vec::new(), loot: Vec::new(), spawners: Vec::new(), wide: wide::WideCull::spawn(), graph: wide::Snapshot::default(), visible: HashMap::new(), wet: HashMap::new(), order: Vec::new(), ingest: Vec::new(), ingested: HashSet::new(), pages: Pages::default(), held: None, upload: UploadDurationEstimator::new(), frame_ns: None, last_update: None, born: HashMap::new(), mesh_wait: (0.0, 0.0, 0) }
     }
 
     /// The render distance in chunks.
@@ -1411,6 +1414,16 @@ impl ChunkManager {
         if stale {
             self.chunks.values_mut().for_each(|e| e.meshed = false);
         }
+    }
+
+    /// NOT b1.7.3: the biome of a block column through `&self` (the mob spawner's wolf lists and coats; `climate_at` is the `&mut` one).
+    pub fn biome_at(&self, x: i32, z: i32) -> crate::world::biome::Biome {
+        self.bm.lock().unwrap().load_block_generator_data(x, z, 1, 1)[0]
+    }
+
+    /// NOT b1.7.3: a new season (`biomelife::set_season` said it changed) recolours the oak foliage, which is baked into the meshes.
+    pub fn restart_meshes(&mut self) {
+        self.chunks.values_mut().for_each(|e| e.meshed = false);
     }
 
     /// The biome and climate (`temperature`, `humidity`, both 0..1) of a block column, for the pack's weather and fog.

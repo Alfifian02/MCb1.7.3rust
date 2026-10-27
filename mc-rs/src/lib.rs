@@ -776,6 +776,11 @@ impl App {
         let angle = sky::celestial_angle(self.world_ticks as u64, 1.0);
         let sub = sky::skylight_subtracted(angle, self.weather.rain(1.0), self.weather.thunder(1.0));
         self.chunks.set_sky_sub(sub);
+        // NOT b1.7.3 (`biomeRules`): the oak foliage of the two forests follows the season; a change restarts the meshes (once an hour).
+        let season = if self.opts.biome_rules && !self.nether { world::biomelife::season(self.world_ticks as u64) } else { world::biomelife::Season::Summer };
+        if world::biomelife::set_season(season) {
+            self.chunks.restart_meshes();
+        }
         // Asleep, the jump button is "leave bed" (`GuiSleepMP`); the view and the body stay put.
         if self.sleep.is_some() && self.touch.jumping() {
             self.wake(true);
@@ -912,7 +917,9 @@ impl App {
         // Dropped items fall, settle and get picked up (before the target check below, which can return early).
         self.drops.tick(dt, &|x: i32, y: i32, z: i32| self.chunks.block(x, y, z).map(|b| self.chunks.physics_at(x, y, z, b)), self.player.pos, &mut self.inv);
         let light = |x: i32, y: i32, z: i32| self.chunks.light(x, y, z);
-        let ctx = Ctx { get: &get, light: &light, day: sub < 4, player: self.player.pos, eye: self.camera.pos };
+        let biome = |x: i32, z: i32| self.chunks.biome_at(x, z);
+        let sight = if self.opts.biome_rules && !self.nether { world::biomelife::sight(self.atmos.density()) } else { 1.0 };
+        let ctx = Ctx { get: &get, light: &light, day: sub < 4, player: self.player.pos, eye: self.camera.pos, biome: &biome, sight };
         self.mobs.difficulty = self.opts.difficulty;
         self.mobs.smart = self.opts.animal_ai;
         for e in self.mobs.update(dt, &ctx, &mut self.drops) {
@@ -926,6 +933,12 @@ impl App {
                 }
                 Ev::Boom(p) => self.explode(p, 3.0),
                 Ev::Snd(name, at, vol, mul, jit) => self.audio.cry(name, at, vol, mul, jit),
+                // NOT b1.7.3 (`animalAi`): a sheep ate; the grass spread covers the dirt again.
+                Ev::Graze((x, y, z)) => match (self.chunks.block(x, y, z), self.chunks.block(x, y - 1, z)) {
+                    (Some(31), _) => drop(self.chunks.set_block(x, y, z, 0)),
+                    (_, Some(2)) => drop(self.chunks.set_block(x, y - 1, z, 3)),
+                    _ => {}
+                },
                 _ => {}
             }
         }
@@ -1263,6 +1276,10 @@ impl App {
                                 // BlockLeaves.harvestBlock: shears drop the leaves themselves, not a sapling.
                                 if id == 18 && held.is_some_and(|h| h.id == craft::SHEARS) {
                                     self.drops.spawn_stack(ItemStack { id: 18, count: 1, damage: (meta & 3) as u16 }, hit.pos);
+                                } else if id == 18 && self.opts.biome_rules {
+                                    // NOT b1.7.3: saplings and apples by the biome and the season (`biomelife::leaf_odds`).
+                                    let odds = world::biomelife::leaf_odds(self.chunks.biome_at(hit.pos.0, hit.pos.2), world::biomelife::season(self.world_ticks as u64));
+                                    self.drops.spawn_leaf(meta, hit.pos, odds);
                                 } else {
                                     self.drops.spawn_block(id, meta, hit.pos);
                                 }
@@ -1679,6 +1696,25 @@ impl App {
         }
     }
 
+    /// NOT b1.7.3 (`biomeRules`, `biomelife::air`): the heat or cold of the biome on the player: open daylight on the head, a fire at hand
+    /// (block light of a torch, furnace or lava), a meal, and the armor worn (leather is fur, the rest is metal).
+    fn air(&self) -> world::biomelife::Air {
+        if !self.opts.biome_rules || self.nether {
+            return Default::default();
+        }
+        let (p, angle) = (self.player.pos, sky::celestial_angle(self.world_ticks as u64, 1.0));
+        let sub = sky::skylight_subtracted(angle, self.weather.rain(1.0), self.weather.thunder(1.0));
+        let (x, z) = (p.x.floor() as i32, p.z.floor() as i32);
+        let (head, feet) = ((p.y + 0.7).floor() as i32, (p.y - 0.5).floor() as i32);
+        let sun = ((self.chunks.light_levels(x, head, z).0.saturating_sub(sub) as f32 - 8.0) / 7.0).clamp(0.0, 1.0);
+        let fire = self.chunks.light_levels(x, head, z).1.max(self.chunks.light_levels(x, feet, z).1) >= world::biomelife::FIRE_LIGHT;
+        let (mut metal, mut fur) = (0u8, 0u8);
+        for a in self.inv.slots[items::MAIN..].iter().flatten().filter_map(|s| craft::armor(s.id)) {
+            if a.1 == 0 { fur += 1 } else { metal += 1 }
+        }
+        world::biomelife::air(self.opts.atmos.here, world::biomelife::Body { sun, fire, fed: self.vitals.fed > 0, metal, fur })
+    }
+
     /// One 20 Hz tick of sprinting (`ClientPlayerEntityMixin.tickSprintingMovement`) and its dust (`EntityMixin.addParticles`: a speck of the
     /// block below the feet while sprinting out of the water). The forward input is the d-pad's / the stick's, sneaking already x0.3.
     fn sprint_tick(&mut self) {
@@ -1693,7 +1729,9 @@ impl App {
             can: !asleep && !riding && !self.vitals.dead() && self.vitals.stamina.can_sprint(), // an empty bar locks the sprint (Stamina)
         });
         // Stamina (`StaminaFeature.onPlayerTick`): a sprint consumes, anything else regenerates. The debug Fly button stands in for creative (no cost).
-        self.vitals.stamina.tick(self.sprint.on() && !self.touch.flying, self.vitals.health, self.vitals.armor);
+        let air = self.air();
+        self.vitals.fed = self.vitals.fed.saturating_sub(1);
+        self.vitals.stamina.tick_in(self.sprint.on() && !self.touch.flying, self.vitals.health, self.vitals.armor, air);
         if self.sprint.on() && !self.was_in_water {
             let (p, v) = (self.player.pos, self.player.vel / 20.0);
             let (x, y, z) = (p.x.floor() as i32, (p.y - 0.9 - 0.2).floor() as i32, p.z.floor() as i32); // 0.2 under the feet
@@ -1758,7 +1796,8 @@ impl App {
         // Spawners see the same world as the mobs do (plants read as air).
         let get = |x: i32, y: i32, z: i32| self.chunks.block(x, y, z).map(|b| if is_plant(b) { 0 } else { self.chunks.physics_at(x, y, z, b) });
         let light = |x: i32, y: i32, z: i32| self.chunks.light(x, y, z);
-        let ctx = Ctx { get: &get, light: &light, day: false, player: self.player.pos, eye: self.camera.pos };
+        let biome = |x: i32, z: i32| self.chunks.biome_at(x, z);
+        let ctx = Ctx { get: &get, light: &light, day: false, player: self.player.pos, eye: self.camera.pos, biome: &biome, sight: 1.0 };
         let chunks = &self.chunks;
         self.fx.tick_spawners(&mut self.mobs, &ctx, &|(x, _, z)| chunks.block_loaded(x, 0, z).is_some());
     }
@@ -1952,6 +1991,7 @@ impl App {
     fn eat(&mut self) {
         if let Some(n) = self.inv.eat(self.touch.hotbar_slot) {
             self.vitals.heal(n);
+            self.vitals.fed = world::biomelife::FED_TICKS; // NOT b1.7.3 (`biomeRules`): food for the cold
         }
     }
 

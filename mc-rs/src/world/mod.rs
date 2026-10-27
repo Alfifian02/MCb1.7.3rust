@@ -29,6 +29,7 @@ pub mod minecart;
 pub mod portal;
 pub mod sprint;
 pub mod stamina;
+pub mod biomelife;
 pub mod pack;
 pub mod book;
 

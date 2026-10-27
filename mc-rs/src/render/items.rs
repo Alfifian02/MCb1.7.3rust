@@ -3,7 +3,7 @@
 //! ponytail: no 2nd/3rd copy for big stacks, no per-item hover phase.
 
 use crate::gpu::gfx::{Buf, Gfx};
-use crate::render::atlas;
+use crate::render::{atlas, wolf_model};
 use crate::render::mesh::{lm, push_box, push_face, VF, WHITE};
 use crate::world::boat::Boat;
 use crate::world::minecart::Cart;
@@ -534,46 +534,24 @@ fn biped(w: f32, raised: bool) -> Vec<Part> {
 /// How many of the first parts hang from the head's pivot and follow its dip (`head_dip`): the cow's horns, the hen's bill and chin.
 fn head_n(kind: Kind) -> usize {
     match kind {
+        Wolf => wolf_model::HEAD_N,
         Cow | Chicken => 3,
         Pig | Sheep => 1,
         _ => 0,
     }
 }
 
-/// `ModelWolf`, standing or sitting (`setLivingAnimations`); the tail angle is `EntityWolf.setTailRotation`.
+/// NOT b1.7.3: the wolf of Acidul's Wolves (`wolf_model`, from `tools/gen_wolf.py`), standing or sitting; the tail angle is still
+/// `EntityWolf.setTailRotation`, on both of its boxes.
 fn wolf(m: &Mob) -> Vec<Part> {
     let tail = if m.anger > 0 { PI * 0.49 } else if m.tame { (0.55 - (20 - m.health).clamp(0, 20) as f32 * 0.02) * PI } else { PI * 0.2 };
-    let head = |min: [f32; 3], size: [f32; 3], rp: [f32; 3], o: (f32, f32)| pt(min, size, rp, [0.0; 3], [0.0; 2], o);
-    let leg = |x: f32, y: f32, z: f32, rx: f32, ph: f32, amp: f32| pt([-1.0, 0.0, -1.0], [2.0, 8.0, 2.0], [x, y, z], [rx, 0.0, 0.0], [ph, amp], (0.0, 18.0));
-    let h = [-1.0, 13.5, -7.0];
-    let mut v = vec![
-        head([-3.0, -3.0, -2.0], [6.0, 6.0, 4.0], h, (0.0, 0.0)),
-        head([-3.0, -5.0, 0.0], [2.0, 2.0, 1.0], h, (16.0, 14.0)),
-        head([1.0, -5.0, 0.0], [2.0, 2.0, 1.0], h, (16.0, 14.0)),
-        head([-2.0, 0.0, -5.0], [3.0, 3.0, 4.0], [-0.5, 13.5, -7.0], (0.0, 10.0)),
-    ];
-    if m.sitting {
-        v.extend([
-            pt([-4.0, -2.0, -3.0], [6.0, 9.0, 6.0], [0.0, 18.0, 0.0], [PI * 0.25, 0.0, 0.0], [0.0; 2], (18.0, 14.0)),
-            pt([-4.0, -3.0, -3.0], [8.0, 6.0, 7.0], [-1.0, 16.0, -3.0], [PI * 0.4, 0.0, 0.0], [0.0; 2], (21.0, 0.0)),
-            leg(-2.5, 22.0, 2.0, PI * 1.5, 0.0, 0.0),
-            leg(0.5, 22.0, 2.0, PI * 1.5, 0.0, 0.0),
-            leg(-2.49, 17.0, -4.0, PI * 1.85, 0.0, 0.0),
-            leg(0.51, 17.0, -4.0, PI * 1.85, 0.0, 0.0),
-            pt([-1.0, 0.0, -1.0], [2.0, 8.0, 2.0], [-1.0, 21.0, 6.0], [tail, 0.0, 0.0], [0.0; 2], (9.0, 18.0)),
-        ]);
-    } else {
-        v.extend([
-            pt([-4.0, -2.0, -3.0], [6.0, 9.0, 6.0], [0.0, 14.0, 2.0], [Q, 0.0, 0.0], [0.0; 2], (18.0, 14.0)),
-            pt([-4.0, -3.0, -3.0], [8.0, 6.0, 7.0], [-1.0, 14.0, -3.0], [Q, 0.0, 0.0], [0.0; 2], (21.0, 0.0)),
-            leg(-2.5, 16.0, 7.0, 0.0, 0.0, 1.4),
-            leg(0.5, 16.0, 7.0, 0.0, PI, 1.4),
-            leg(-2.5, 16.0, -4.0, 0.0, PI, 1.4),
-            leg(0.5, 16.0, -4.0, 0.0, 0.0, 1.4),
-            pt([-1.0, 0.0, -1.0], [2.0, 8.0, 2.0], [-1.0, 12.0, 8.0], [tail, 0.0, 0.0], [0.0; 2], (9.0, 18.0)),
-        ]);
-    }
-    v
+    let boxes = if m.sitting { &wolf_model::SIT[..] } else { &wolf_model::STAND[..] };
+    boxes.iter().enumerate().map(|(i, &(min, size, rp, mut rot, sw, o, g))| {
+        if i >= boxes.len() - wolf_model::TAIL_N {
+            rot[0] = tail;
+        }
+        grown(pt(min, size, rp, rot, sw, o), g)
+    }).collect()
 }
 
 fn parts(m: &Mob) -> Vec<Part> {
@@ -666,9 +644,7 @@ fn skin_of(m: &Mob) -> u8 {
         Cow => skin::COW,
         Chicken => skin::CHICKEN,
         Sheep => skin::SHEEP,
-        Wolf if m.tame => skin::WOLF_TAME,
-        Wolf if m.anger > 0 => skin::WOLF_ANGRY,
-        Wolf => skin::WOLF,
+        Wolf => skin::WOLF0 + m.coat % 6 * 3 + if m.tame { 1 } else if m.anger > 0 { 2 } else { 0 },
         Squid => skin::SQUID,
         Zombie | Giant => skin::ZOMBIE,
         PigZombie => skin::PIGZOMBIE,
@@ -790,10 +766,13 @@ fn push_boat(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, b: &Boat, a: f32) {
 fn is_head(k: crate::world::mobs::Kind, i: usize) -> bool {
     i < match k {
         Squid | Slime => 0,
-        Cow | Chicken => head_n(k),
+        Cow | Chicken | Wolf => head_n(k),
         _ => 1,
     }
 }
+
+/// NOT b1.7.3: the pack's wolf is 1.2 blocks to the ears and 1.6 long; drawn at this fraction it fits the 0.8 x 0.8 box of `spec(Wolf)`.
+const WOLF_SCALE: f32 = 0.75;
 
 /// Model y of the ground under a mob: the root translation of `push_mob` (the legs end at 24, 0.125 px under it).
 const GROUND: f32 = 23.875;
@@ -827,7 +806,7 @@ fn push_mob(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, m: &Mob) {
     let feet = m.body.pos - Vec3::new(0.0, m.half.y, 0.0);
     let root = Mat4::from_translation(feet)
         * Mat4::from_rotation_y(PI - m.body_yaw.to_radians())
-        * Mat4::from_scale(Vec3::new(-1.0, -1.0, 1.0) * m.size / 16.0)
+        * Mat4::from_scale(Vec3::new(-1.0, -1.0, 1.0) * m.size * if m.kind == Wolf { WOLF_SCALE } else { 1.0 } / 16.0)
         * Mat4::from_translation(Vec3::new(0.0, -23.875, 0.0));
     let flash = m.fuse > 0 && m.fuse % 6 < 3;
     let red = if m.hurt > 0 { tint(1.0, 0.4, 0.4) } else { WHITE };
@@ -896,8 +875,8 @@ mod tests {
         assert!(head_dip(&wolf, &parts(&wolf)[0]).is_none());
     }
 
-    /// Every box of every mob unwraps inside its 64 x 32 skin, and what `push_mob` draws reads that skin's atlas slot (not the flat strip,
-    /// not another skin); a sheep wears fleece until it is shorn; a wolf's skin follows its state.
+    /// Every box of every mob unwraps inside its skin (64 x 32; the wolf's 64 x 48), and what `push_mob` draws reads that skin's atlas slot
+    /// (not the flat strip, not another skin); a sheep wears fleece until it is shorn; a wolf's skin follows its coat and state.
     #[test]
     fn mob_boxes_unwrap_inside_their_skin() {
         let mut rng = crate::world::gen::noise::JavaRandom::new(1);
@@ -905,16 +884,24 @@ mod tests {
             let mut m = Mob::new(kind, 0.0, 0.0, 0.0, 0.0, &mut rng);
             let mut boxes = parts(&m);
             boxes.extend(fur(&m));
+            let skin_h = if kind == Wolf { 48.0 } else { 32.0 };
             for (min, size, _, _, _, tx) in &boxes {
                 let (w, h) = (2.0 * (size[0] + size[2]), size[1] + size[2]);
-                assert!(tx.o.0 + w <= 64.0 && tx.o.1 + h <= 32.0, "{kind:?}: box {min:?} {size:?} at {:?} leaves the skin", tx.o);
+                assert!(tx.o.0 + w <= 64.0 && tx.o.1 + h <= skin_h, "{kind:?}: box {min:?} {size:?} at {:?} leaves the skin", tx.o);
             }
             let (mut v, mut i) = (Vec::new(), Vec::new());
             push_mob(&mut v, &mut i, &m);
             assert_eq!(v.len(), boxes.len() * 24 * VF, "{kind:?}: 24 vertices a box");
             let slots: Vec<u8> = (0..26).collect();
             for vert in v.chunks_exact(VF) {
-                let (x, y) = (vert[3] * atlas::ATLAS_W as f32, vert[4] * atlas::ATLAS_H as f32 - atlas::CHAR_Y as f32);
+                let (x, y) = (vert[3] * atlas::ATLAS_W as f32, vert[4] * atlas::ATLAS_H as f32);
+                if kind == Wolf {
+                    let k = skin_of(&m) - atlas::skin::WOLF0;
+                    let (sx, sy) = ((k % 4) as f32 * 64.0, atlas::WOLF_Y as f32 + (k / 4) as f32 * 48.0);
+                    assert!(x >= sx && x <= sx + 64.0 && y >= sy && y <= sy + 48.0, "wolf: a vertex at ({x}, {y}) leaves its skin at ({sx}, {sy})");
+                    continue;
+                }
+                let y = y - atlas::CHAR_Y as f32;
                 assert!(y >= 0.0, "{kind:?}: a vertex reads above the skins");
                 let slot = slots.iter().copied().find(|&s| x >= (s % 4) as f32 * 64.0 && x <= (s % 4) as f32 * 64.0 + 64.0 && y >= (s / 4) as f32 * 32.0 && y <= (s / 4) as f32 * 32.0 + 32.0).unwrap();
                 assert!(slot == skin_of(&m) || (kind == Sheep && slot == atlas::skin::SHEEP_FUR), "{kind:?}: read slot {slot}");
@@ -922,16 +909,23 @@ mod tests {
             m.sheared = true;
             assert!(fur(&m).is_empty());
         }
+        // NOT b1.7.3: six coats x wild, tame, angry; tamed beats angry, as `EntityWolf.getEntityTexture`.
         let mut wolf = Mob::new(Wolf, 0.0, 0.0, 0.0, 0.0, &mut rng);
-        assert_eq!(skin_of(&wolf), atlas::skin::WOLF);
+        assert_eq!(skin_of(&wolf), atlas::skin::WOLF0);
         wolf.anger = 10;
-        assert_eq!(skin_of(&wolf), atlas::skin::WOLF_ANGRY);
+        assert_eq!(skin_of(&wolf), atlas::skin::WOLF0 + 2);
         wolf.tame = true;
-        assert_eq!(skin_of(&wolf), atlas::skin::WOLF_TAME, "tamed beats angry, as `EntityWolf.getEntityTexture`");
-        assert_eq!(parts(&wolf).len(), 11, "head, ears, snout, body, mane, four legs, tail");
+        assert_eq!(skin_of(&wolf), atlas::skin::WOLF0 + 1);
+        wolf.coat = crate::world::mobs::COAT_WOODS;
+        assert_eq!(skin_of(&wolf), atlas::skin::WOLF0 + 5 * 3 + 1);
+        assert_eq!(parts(&wolf).len(), wolf_model::STAND.len());
+        assert!(wolf_model::HEAD_N > 0 && head_n(Wolf) == wolf_model::HEAD_N);
+        let stood = parts(&wolf);
         wolf.sitting = true;
         let sat = parts(&wolf);
-        assert!(sat[4].2[1] > 16.0 && sat[8].3[0] > 5.0, "the body sinks to 18 and the hind legs fold forward");
+        let (body, leg) = (stood[wolf_model::HEAD_N].2[1], stood[wolf_model::HEAD_N + 4].2[1]);
+        assert!(sat[wolf_model::HEAD_N].2[1] > body && sat[wolf_model::HEAD_N + 4].2[1] > leg, "the body sinks and the hind legs fold forward");
+        assert_eq!(sat.last().unwrap().3[0], stood.last().unwrap().3[0], "the tail keeps its angle sitting");
         // Cow: head, two horns, body, four legs, udder; the horns follow the head's dip.
         let cow = Mob::new(Cow, 0.0, 0.0, 0.0, 0.0, &mut rng);
         assert_eq!((parts(&cow).len(), head_n(Cow)), (9, 3));

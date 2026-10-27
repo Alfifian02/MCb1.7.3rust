@@ -459,8 +459,9 @@ mod tests {
             let (_, v) = table::SFX.iter().find(|e| e.0 == k).unwrap_or_else(|| panic!("{k}"));
             assert!(v.iter().all(|d| decode(d).is_some_and(|c| !c.pcm.is_empty())), "{k}");
         }
-        assert_eq!((table::SFX.len(), table::MUSIC.len(), table::RECORDS.len()), (80, 12, 2));
-        assert_eq!(table::SFX.iter().map(|e| e.1.len()).sum::<usize>(), 194);
+        // The b1.7.3 index has 80 keys in 194 files; NOT b1.7.3: its wolf's six cries (12 files) are replaced by seven voices of six (84 files).
+        assert_eq!((table::SFX.len(), table::MUSIC.len(), table::RECORDS.len()), (80 - 6 + 7 * 6, 12, 2));
+        assert_eq!(table::SFX.iter().map(|e| e.1.len()).sum::<usize>(), 194 - 12 + 7 * 12);
     }
 
     #[test]

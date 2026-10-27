@@ -26,6 +26,7 @@
 
 use glam::Vec3;
 
+use crate::world::biome::Biome;
 use crate::world::chunk::brightness;
 use crate::world::craft::{self, Kind as Tool};
 use crate::world::dig;
@@ -59,6 +60,13 @@ const WALK: f32 = 3.0 / 0.7;
 /// Smart animals (not b1.7.3): a hit animal runs for `PANIC_TICKS` + 0..40 ticks at `PANIC_SPEED` x its walk. UNVERIFIED by eye.
 const PANIC_TICKS: u16 = 80;
 const PANIC_SPEED: f32 = 1.5;
+/// NOT b1.7.3 (`animalAi`): a wild wolf runs down a sheep at this x its walk (0.3 x 1.8 beats a panicking sheep's 0.25 x 1.5). A wolf hunts
+/// for `HUNT_TICKS` out of every `3 * HUNT_TICKS` (offset by its place in the list), within `HUNT_RANGE` blocks, and bites for 2 each second;
+/// a sheep with a wild wolf within `FLEE_RANGE` runs from it. UNVERIFIED by eye.
+const HUNT_SPEED: f32 = 1.8;
+const HUNT_TICKS: u32 = 200;
+const HUNT_RANGE: f32 = 14.0;
+const FLEE_RANGE: f32 = 8.0;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kind { Pig, Cow, Sheep, Chicken, Wolf, Squid, Zombie, PigZombie, Giant, Skeleton, Creeper, Spider, Slime }
@@ -106,6 +114,13 @@ pub struct Mob {
     /// Wolf: tamed by a bone (`isWolfTamed`; the owner is the one player) and sitting (`isWolfSitting`).
     pub tame: bool,
     pub sitting: bool,
+    /// Wolf, NOT b1.7.3: the coat (`COAT_*`, the skin it wears) and the voice (`WOLF_CRY`, one of `VOICES`).
+    pub coat: u8,
+    pub voice: u8,
+    /// Wolf, NOT b1.7.3 (`animalAi`): the sheep a wild wolf is hunting, set by `Mobs::hunt`.
+    prey: Option<Vec3>,
+    /// Sheep, NOT b1.7.3 (`animalAi`): the cell it has just grazed; `Mobs::update` turns it into `Ev::Graze`.
+    bit: Option<(i32, i32, i32)>,
     /// Pig: wearing a saddle, and carrying the player (`riddenByEntity`).
     pub saddled: bool,
     pub ridden: bool,
@@ -167,8 +182,48 @@ pub struct Mob {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Cry { Say, Hurt, Die }
 
+/// NOT b1.7.3: the wolf's coats, the order of the skins in `wolf.rgba` (`atlas::skin::WOLF0 + coat * 3 + state`; `tools/gen_wolf.py`).
+pub const COAT_PALE: u8 = 0;
+pub const COAT_ASHEN: u8 = 1;
+pub const COAT_BLACK: u8 = 2;
+pub const COAT_CHESTNUT: u8 = 3;
+pub const COAT_SNOWY: u8 = 4;
+pub const COAT_WOODS: u8 = 5;
+
+/// NOT b1.7.3: where wolves spawn: the forest and the taiga (b1.7.3's lists) and the snowy birch grove.
+pub fn wolf_land(b: Biome) -> bool {
+    matches!(b, Biome::Forest | Biome::Taiga | Biome::SnowyBirchGrove)
+}
+
+/// NOT b1.7.3: the coat a wolf born in biome `b` wears (`roll` is 0..8): the woods wolf in the forests, the snowy one in the grove, and in
+/// the taiga the pale one half the time, the ashen a quarter, the black and chestnut an eighth each; the pale one elsewhere.
+pub fn coat_for(b: Biome, roll: i32) -> u8 {
+    use Biome::*;
+    match b {
+        Forest | SeasonalForest | AutumnalForest | OakWoodland | WetWoodland => COAT_WOODS,
+        SnowyBirchGrove => COAT_SNOWY,
+        Taiga => match roll {
+            4 | 5 => COAT_ASHEN,
+            6 => COAT_BLACK,
+            7 => COAT_CHESTNUT,
+            _ => COAT_PALE,
+        },
+        _ => COAT_PALE,
+    }
+}
+
+/// NOT b1.7.3: the seven voices of a wolf (the sound variants of 1.21.5, `assets/sound/wolf/<voice>/`), one per wolf for good; each has the
+/// b1.7.3 cries, in the order `cry` picks them: bark, panting, whine, growl, hurt, death.
+pub const VOICES: usize = 7;
+macro_rules! voices {
+    ($($v:literal),*) => { [$([concat!("mob.wolf.", $v, ".bark"), concat!("mob.wolf.", $v, ".panting"), concat!("mob.wolf.", $v, ".whine"),
+        concat!("mob.wolf.", $v, ".growl"), concat!("mob.wolf.", $v, ".hurt"), concat!("mob.wolf.", $v, ".death")]),*] };
+}
+const WOLF_CRY: [[&str; 6]; VOICES] = voices!("classic", "puglin", "sad", "angry", "grumpy", "big", "cute");
+
 /// `getLivingSound` / `getHurtSound` / `getDeathSound` and `getSoundVolume` of each kind (b1.7.3 names; `EntityLiving`'s default for the
-/// hurt and the death is `random.hurt`, for the living sound none). `wolf`: 0 bark, 1 panting, 2 whine, 3 growl, picked by the caller.
+/// hurt and the death is `random.hurt`, for the living sound none). `wolf`: the low two bits 0 bark, 1 panting, 2 whine, 3 growl, picked by
+/// the caller; the rest the wolf's `voice`.
 fn cry(k: Kind, c: Cry, wolf: u8) -> Option<(&'static str, f32)> {
     let vol = match k { Cow | Wolf | Squid => 0.4, Slime => 0.6, _ => 1.0 };
     let n = match (k, c) {
@@ -179,9 +234,9 @@ fn cry(k: Kind, c: Cry, wolf: u8) -> Option<(&'static str, f32)> {
         (Sheep, _) => "mob.sheep",
         (Chicken, Cry::Say) => "mob.chicken",
         (Chicken, _) => "mob.chickenhurt",
-        (Wolf, Cry::Say) => ["mob.wolf.bark", "mob.wolf.panting", "mob.wolf.whine", "mob.wolf.growl"][wolf as usize & 3],
-        (Wolf, Cry::Hurt) => "mob.wolf.hurt",
-        (Wolf, Cry::Die) => "mob.wolf.death",
+        (Wolf, Cry::Say) => WOLF_CRY[(wolf >> 2) as usize % VOICES][wolf as usize & 3],
+        (Wolf, Cry::Hurt) => WOLF_CRY[(wolf >> 2) as usize % VOICES][4],
+        (Wolf, Cry::Die) => WOLF_CRY[(wolf >> 2) as usize % VOICES][5],
         (Squid, _) => return None,
         (Zombie, Cry::Say) => "mob.zombie",
         (Zombie, Cry::Hurt) => "mob.zombiehurt",
@@ -216,6 +271,9 @@ pub enum Ev {
     Egg(Vec3),
     /// A thrown egg hit something here: 1 in 8 hatches a chicken (`EntityEgg.onUpdate`).
     Hatch(Vec3),
+    /// NOT b1.7.3: a sheep grazed the cell it stands in: the tall grass in it goes, or else the grass block under it turns to dirt (which
+    /// the grass spread covers again).
+    Graze((i32, i32, i32)),
 }
 
 pub struct Ctx<'a> {
@@ -226,6 +284,10 @@ pub struct Ctx<'a> {
     /// The player's box centre and eye.
     pub player: Vec3,
     pub eye: Vec3,
+    /// NOT b1.7.3: the biome of a column (the wolf lists and coats of `Mobs::spawn`).
+    pub biome: &'a dyn Fn(i32, i32) -> Biome,
+    /// NOT b1.7.3: how far a mob sees the player, as a fraction of 16 blocks (`biomelife::sight`, the fog; `biomeRules`).
+    pub sight: f32,
 }
 
 fn norm(mut a: f32) -> f32 {
@@ -289,7 +351,7 @@ impl Mob {
         };
         let pos = Vec3::new(x, feet + half.y + 0.01, z);
         Self { kind, body: Player { pos, vel: Vec3::ZERO, on_ground: false }, yaw, health: hp, limb: 0.0, limb_amt: 0.0, hurt: 0, size, color, sheared: false,
-            fuse: 0, tame: false, sitting: false, saddled: false, ridden: false, half, age: 0, yaw_vel: 0.0, look: None, goal: None, fspeed: 0.0, jumping: false, wet: false, blocked: false, life: 0,
+            fuse: 0, tame: false, sitting: false, prey: None, bit: None, coat: COAT_PALE, voice: if kind == Wolf { ((x.to_bits() ^ z.to_bits().rotate_left(11)) % VOICES as u32) as u8 } else { 0 }, saddled: false, ridden: false, half, age: 0, yaw_vel: 0.0, look: None, goal: None, fspeed: 0.0, jumping: false, wet: false, blocked: false, life: 0,
             last: 0, target: false, shot: false, lit: false, anger: 0, attack_time: 0, hop: 0, egg: rng.next_int_bound(6000) + 6000, fire: 0,
             free: 0, swim: Vec3::ZERO, path: Vec::new(), path_i: 0, smart: false, wander: false, panic: 0, scare: Vec3::ZERO, mate: None, graze: 0, rest: 0, gait: 1.0, head: 0.0, munch: 0.0, body_yaw: yaw, head_pitch: 0.0, look_pitch: 0.0, talk: 0, cry: None, airborne: false, enraged: false, growl: 0 }
     }
@@ -309,14 +371,19 @@ impl Mob {
     /// (`getPathToEntity(.., 16)`), and the goal is the point being walked to; points are passed within `width * 2` of them. With
     /// no path (walled in, or beyond 16) or at its end, the goal is the player themselves (the old straight walk).
     fn chase(&mut self, rng: &mut JavaRandom, c: &Ctx) {
+        self.chase_at(rng, c, c.player);
+    }
+
+    /// `chase` after any point (a hunting wolf's sheep).
+    fn chase_at(&mut self, rng: &mut JavaRandom, c: &Ctx, at: Vec3) {
         let (lo, w, h) = (self.aabb().0, self.half.x * 2.0, self.half.y * 2.0);
         let size = ((w + 1.0).floor() as i32, (h + 1.0).floor() as i32, (w + 1.0).floor() as i32);
         if self.path.is_empty() || rng.next_int_bound(20) == 0 {
-            let target = ((c.player.x - w / 2.0).floor() as i32, (c.player.y - physics::HALF.y).floor() as i32, (c.player.z - w / 2.0).floor() as i32);
+            let target = ((at.x - w / 2.0).floor() as i32, (at.y - physics::HALF.y).floor() as i32, (at.z - w / 2.0).floor() as i32);
             self.path = path::find(c.get, (lo.x.floor() as i32, lo.y.floor() as i32, lo.z.floor() as i32), target, size, 16.0).unwrap_or_default();
             self.path_i = 0;
         }
-        self.follow(size, w, Some((c.player.x, c.player.z)));
+        self.follow(size, w, Some((at.x, at.z)));
     }
 
     /// Walk the path: points are passed within `w * 2` of them, and the goal is the next one, or `end` when the path has run out.
@@ -341,6 +408,9 @@ impl Mob {
             if (c.player - self.body.pos).length_squared() < 16.0 {
                 (self.graze, self.rest) = (0, 0);
             } else {
+                if self.graze == 1 && self.kind == Sheep {
+                    self.bit = Some(cell(self.body.pos - Vec3::Y * (self.half.y - 0.1)));
+                }
                 (self.graze, self.rest) = (self.graze.saturating_sub(1), self.rest.saturating_sub(1));
                 return;
             }
@@ -501,7 +571,7 @@ impl Mob {
         if self.target {
             self.target = d2 <= 1024.0 && (self.anger > 0 || !matches!(k, PigZombie | Wolf));
         } else {
-            self.target = see && d2 < 256.0 && match k {
+            self.target = see && d2 < 256.0 * c.sight * c.sight && match k {
                 Zombie | Giant | Skeleton | Creeper | Slime => true,
                 Spider => (c.light)(cx, cy, cz) < 8,
                 _ => false,
@@ -622,7 +692,8 @@ impl Mob {
             (self.goal, self.fspeed, self.jumping) = (None, 0.0, false); // ranged attackers and a lit creeper stand and face
             return true;
         }
-        let chasing = self.target || (k == Wolf && self.tame && d2 > 25.0);
+        let hunting = self.prey.is_some() && !self.target && !self.tame;
+        let chasing = self.target || hunting || (k == Wolf && self.tame && d2 > 25.0);
         if chasing && self.wander {
             (self.wander, self.path_i) = (false, 0);
             self.path.clear();
@@ -630,7 +701,9 @@ impl Mob {
         if !chasing && !self.wander {
             self.path.clear();
         }
-        if chasing {
+        if let (true, Some(p)) = (hunting, self.prey) {
+            self.chase_at(rng, c, p); // NOT b1.7.3 (`animalAi`): a wild wolf after a sheep
+        } else if chasing {
             self.chase(rng, c); // a tame wolf more than 5 blocks off follows its owner the same way
         } else if self.smart && animal(k) {
             self.roam(rng, c);
@@ -651,11 +724,12 @@ impl Mob {
         }
         let speed = match k {
             PigZombie if self.target => 0.95,
+            _ if hunting => spec(k).3 * HUNT_SPEED,
             _ if self.panic > 0 => spec(k).3 * PANIC_SPEED,
             _ if self.wander => spec(k).3 * self.gait, // only a smart animal wanders by path
             _ => spec(k).3,
         };
-        if let (Some((gx, gz)), true) = (self.goal, self.goal.is_some() && (self.target || self.panic > 0 || rng.next_int_bound(100) != 0)) {
+        if let (Some((gx, gz)), true) = (self.goal, self.goal.is_some() && (self.target || hunting || self.panic > 0 || rng.next_int_bound(100) != 0)) {
             self.jumping = false;
             let (dx, dz) = (gx - pos.x, gz - pos.z);
             // A point of a path is passed by `chase` (within width x 2); only a bare goal (a wander cell, the player) ends here.
@@ -807,7 +881,7 @@ impl Mob {
             self.talk = -if matches!(self.kind, Pig | Cow | Sheep | Chicken | Wolf | Squid) { 120 } else { 80 };
             // `EntityWolf.getLivingSound`: growl when angry, else 1 in 3 pants (or whines, tamed and under 10 health), else bark.
             let wolf = if self.anger > 0 && !self.tame { 3 } else if snd.next_int_bound(3) == 0 { if self.tame && self.health < 10 { 2 } else { 1 } } else { 0 };
-            if let Some((n, v)) = cry(self.kind, Cry::Say, wolf) {
+            if let Some((n, v)) = cry(self.kind, Cry::Say, wolf | self.voice << 2) {
                 ev.push(Ev::Snd(n, pos, v, 1.0, true));
             }
         }
@@ -997,6 +1071,42 @@ impl Mobs {
         Self { list: Vec::new(), arrows: Vec::new(), rng: JavaRandom::new(seed ^ 0x5049_47), snd: JavaRandom::new(seed ^ 0x534E_44), seed, acc: 0.0, clock: 0, burst: 200, no_spawn: false, difficulty: 2, smart: true }
     }
 
+    /// NOT b1.7.3 (`animalAi`, proposal 5, predators and grazers): a wild, calm, standing wolf in its hunting third of the time picks the
+    /// nearest sheep within `HUNT_RANGE` (`Mob::prey`, which `ai_walk` runs after) and bites it for 2 when it is within 1.5 blocks (a second
+    /// apart); a sheep with such a wolf within `FLEE_RANGE` runs from it. A sheep a wolf kills drops what it always drops.
+    fn hunt(&mut self) {
+        let flat = |a: Vec3, b: Vec3| (a.x - b.x).hypot(a.z - b.z);
+        let sheep: Vec<(usize, Vec3)> = if self.smart { self.list.iter().enumerate().filter(|(_, m)| m.kind == Sheep && m.health > 0).map(|(i, m)| (i, m.body.pos)).collect() } else { Vec::new() };
+        let mut bites = Vec::new();
+        let mut wolves = Vec::new();
+        for (i, m) in self.list.iter_mut().enumerate() {
+            m.prey = None;
+            let hungry = (self.clock / HUNT_TICKS + i as u32) % 3 == 0;
+            if m.kind != Wolf || m.tame || m.sitting || m.target || m.anger > 0 || !hungry || sheep.is_empty() {
+                continue;
+            }
+            let at = m.body.pos;
+            wolves.push(at);
+            let near = sheep.iter().filter(|(_, p)| flat(*p, at) < HUNT_RANGE && (p.y - at.y).abs() < 4.0).min_by(|a, b| flat(a.1, at).total_cmp(&flat(b.1, at)));
+            if let Some(&(j, p)) = near {
+                m.prey = Some(p);
+                if flat(p, at) < 1.5 && (p.y - at.y).abs() < 1.5 && m.attack_time == 0 {
+                    m.attack_time = 20;
+                    bites.push((j, at));
+                }
+            }
+        }
+        for &(j, p) in &sheep {
+            if let Some(&w) = wolves.iter().filter(|w| flat(**w, p) < FLEE_RANGE).min_by(|a, b| flat(**a, p).total_cmp(&flat(**b, p))) {
+                let m = &mut self.list[j];
+                (m.panic, m.scare, m.graze, m.rest) = (m.panic.max(30), w, 0, 0);
+            }
+        }
+        for (j, from) in bites {
+            self.list[j].damage(2, from, &mut self.rng);
+        }
+    }
+
     /// Before each AI tick: the `smart` switch and each animal's nearest mate of its kind within 24 blocks (`Mob::mate`, the herd's pull).
     fn herd(&mut self) {
         let at: Vec<(Kind, Vec3)> = if self.smart { self.list.iter().map(|m| (m.kind, m.body.pos)).collect() } else { Vec::new() };
@@ -1064,7 +1174,10 @@ impl Mobs {
             let r = if ANIMALS.contains(&kind) { NEAR } else { ANYWHERE };
             if self.count_near(kinds, c.player, r) < cap && self.list.len() < MAX_MOBS {
                 let yaw = self.rng.next_float() * 360.0;
-                let m = Mob::new(kind, px as f32 + 0.5, py as f32, pz as f32 + 0.5, yaw, &mut self.rng);
+                let mut m = Mob::new(kind, px as f32 + 0.5, py as f32, pz as f32 + 0.5, yaw, &mut self.rng);
+                if kind == Wolf {
+                    m.coat = coat_for((c.biome)(px, pz), self.rng.next_int_bound(8));
+                }
                 self.list.push(m);
             }
         }
@@ -1084,8 +1197,10 @@ impl Mobs {
             let near = self.count_near(&ANIMALS, c.player, NEAR);
             if near < CAP_ANIMALS && self.rng.next_int_bound(CAP_ANIMALS as i32) as usize >= near {
                 let (x, z) = ring(&mut self.rng);
-                // Weights of the plains list: sheep 12, pig 10, chicken 10, cow 8 (wolves live in forests: not spawned here).
-                let kind = match self.rng.next_int_bound(40) { 0..=11 => Sheep, 12..=21 => Pig, 22..=31 => Chicken, _ => Cow };
+                // Weights of the plains list: sheep 12, pig 10, chicken 10, cow 8. NOT b1.7.3 (it gives wolves to the forest and the taiga, 2 of
+                // 42): the snowy birch grove has them too (`wolf_land`).
+                let wolf = wolf_land((c.biome)(x, z)) && self.rng.next_int_bound(21) == 0;
+                let kind = if wolf { Wolf } else { match self.rng.next_int_bound(40) { 0..=11 => Sheep, 12..=21 => Pig, 22..=31 => Chicken, _ => Cow } };
                 let apart = self.count_near(&ANIMALS, Vec3::new(x as f32, 0.0, z as f32), SPACING) == 0;
                 if let Some(y) = grass_top(c.get, x, z).filter(|_| apart && self.count_near(&[kind], c.player, NEAR) < CAP_KIND) {
                     self.pack(c, kind, (x, y + 1, z), CAP_ANIMALS);
@@ -1123,9 +1238,13 @@ impl Mobs {
             self.acc -= TICK;
             self.clock += 1;
             self.herd();
+            self.hunt();
             let (rng, snd) = (&mut self.rng, &mut self.snd);
             self.list.retain_mut(|m| {
                 let alive = m.tick(rng, c, &mut ev);
+                if let Some(cell) = m.bit.take() {
+                    ev.push(Ev::Graze(cell));
+                }
                 if alive {
                     m.talk(snd, &mut ev);
                 }
@@ -1156,7 +1275,7 @@ impl Mobs {
             m.step(dt, c.get);
             // What a hit since the last frame made it cry out (a kill too: it is removed below).
             if let Some(k) = m.cry.take() {
-                if let Some((n, v)) = cry(m.kind, k, 0) {
+                if let Some((n, v)) = cry(m.kind, k, m.voice << 2) {
                     ev.push(Ev::Snd(n, m.body.pos, v, 1.0, true));
                 }
             }
@@ -1176,7 +1295,7 @@ impl Mobs {
                         }
                     }
                 }
-                Ev::Hurt(_) | Ev::Boom(_) | Ev::Snd(..) => out.push(e),
+                Ev::Hurt(_) | Ev::Boom(_) | Ev::Snd(..) | Ev::Graze(_) => out.push(e),
                 Ev::Shoot(..) => {}
             }
         }
@@ -1296,7 +1415,7 @@ mod tests {
     }
 
     fn ctx<'a>(player: Vec3, light: &'a dyn Fn(i32, i32, i32) -> u8) -> Ctx<'a> {
-        Ctx { get: &flat, light, day: false, player, eye: player + Vec3::Y * 0.6 }
+        Ctx { get: &flat, light, day: false, player, eye: player + Vec3::Y * 0.6, biome: &|_, _| Biome::Plains, sight: 1.0 }
     }
 
     /// NOT b1.7.3: animals top up every `ANIMAL_EVERY` ticks (more in the first 400 than the one pack the old 400-tick rule made), never past
@@ -1306,7 +1425,7 @@ mod tests {
         let wide = |_: i32, y: i32, _: i32| Some(match y { 0 => 7, 1..=8 => 1, 9 => 2, _ => 0 });
         let l = |_, _, _| 15u8;
         let player = Vec3::new(0.5, 11.0, 0.5);
-        let c = Ctx { get: &wide, light: &l, day: true, player, eye: player + Vec3::Y * 0.6 };
+        let c = Ctx { get: &wide, light: &l, day: true, player, eye: player + Vec3::Y * 0.6, biome: &|_, _| Biome::Plains, sight: 1.0 };
         let flat = |a: Vec3, b: Vec3| ((a.x - b.x).powi(2) + (a.z - b.z).powi(2)).sqrt();
         for seed in 1..=6 {
             let (mut m, mut drops) = (Mobs::new(seed), Drops::new(1));
@@ -1373,7 +1492,7 @@ mod tests {
     fn cactus_hurts_a_mob_without_knockback_or_anger() {
         let cact = |x: i32, y: i32, z: i32| if (x, z) == (32, 32) && y == 10 { Some(81) } else { flat(x, y, z) };
         let l = |_, _, _| 15u8;
-        let c = Ctx { get: &cact, light: &l, day: false, player: Vec3::new(5.0, 20.0, 5.0), eye: Vec3::new(5.0, 20.6, 5.0) };
+        let c = Ctx { get: &cact, light: &l, day: false, player: Vec3::new(5.0, 20.0, 5.0), eye: Vec3::new(5.0, 20.6, 5.0), biome: &|_, _| Biome::Plains, sight: 1.0 };
         let mut rng = JavaRandom::new(5);
         let mut w = Mob::new(Wolf, 32.5, 10.0, 32.5, 0.0, &mut rng);
         let mut ev = Vec::new();
@@ -1420,7 +1539,7 @@ mod tests {
         assert_eq!(ev.iter().filter(|e| matches!(e, Ev::Snd("random.fuse", _, _, p, false) if *p == 0.5)).count(), 1);
         for kind in [Pig, Cow, Sheep, Chicken, Wolf, Squid, Zombie, PigZombie, Giant, Skeleton, Creeper, Spider, Slime] {
             for c in [Cry::Say, Cry::Hurt, Cry::Die] {
-                for w in 0..4 {
+                for w in 0..4 * VOICES as u8 {
                     assert!(cry(kind, c, w).map_or(true, |(n, v)| crate::audio::exists(n) && v > 0.0), "{kind:?} {c:?}");
                 }
             }
@@ -1514,6 +1633,17 @@ mod tests {
 
     /// A bone tames a wolf (1 in 3, health 20, calm, sitting); sitting it stays put, standing it follows its owner beyond 5
     /// blocks and is put beside them beyond 16; a saddle goes on a pig once and a tap then mounts it; neither despawns.
+    /// NOT b1.7.3: a wolf keeps one of seven voices for good, and its hurt and death cries are that voice's.
+    #[test]
+    fn a_wolf_has_a_voice_of_its_own() {
+        let mut rng = JavaRandom::new(3);
+        let heard: std::collections::HashSet<u8> = (0..40).map(|i| Mob::new(Wolf, i as f32 * 1.5 + 0.5, 64.0, 3.5, 0.0, &mut rng).voice).collect();
+        assert!(heard.len() >= 4 && heard.iter().all(|&v| (v as usize) < VOICES), "{heard:?}");
+        assert_eq!(cry(Wolf, Cry::Hurt, 3 << 2).map(|c| c.0), Some("mob.wolf.angry.hurt"));
+        assert_eq!(cry(Wolf, Cry::Say, 2 | 6 << 2).map(|c| c.0), Some("mob.wolf.cute.whine"));
+        assert_eq!(cry(Pig, Cry::Say, 6 << 2).map(|c| c.0), Some("mob.pig"), "only a wolf has a voice");
+    }
+
     #[test]
     fn bone_tames_a_wolf_and_a_saddled_pig_is_a_mount() {
         use crate::world::gear::{befriend, Befriend, BONE, SADDLE};
@@ -1556,7 +1686,7 @@ mod tests {
     fn tame_wolf_walks_round_a_wall_to_its_owner() {
         let walled = |x: i32, y: i32, z: i32| if x == 10 && z <= 14 && (10..=12).contains(&y) { Some(1) } else { flat(x, y, z) };
         let l = |_, _, _| 15u8;
-        let c = Ctx { get: &walled, light: &l, day: false, player: Vec3::new(15.5, 10.9, 5.5), eye: Vec3::new(15.5, 11.5, 5.5) };
+        let c = Ctx { get: &walled, light: &l, day: false, player: Vec3::new(15.5, 10.9, 5.5), eye: Vec3::new(15.5, 11.5, 5.5), biome: &|_, _| Biome::Plains, sight: 1.0 };
         let mut rng = JavaRandom::new(21);
         let mut w = Mob::new(Wolf, 5.5, 10.0, 5.5, 0.0, &mut rng);
         w.tame = true;
@@ -1578,7 +1708,7 @@ mod tests {
         let island = |x: i32, y: i32, z: i32| if ((28..=36).contains(&x) && (28..=36).contains(&z)) || y <= 4 { flat(x, y, z) } else { flat(x, y, z).map(|_| 0) };
         let l = |_, _, _| 15u8;
         let player = Vec3::new(32.5, 11.0, 52.5);
-        let c = Ctx { get: &island, light: &l, day: false, player, eye: player + Vec3::Y * 0.6 };
+        let c = Ctx { get: &island, light: &l, day: false, player, eye: player + Vec3::Y * 0.6, biome: &|_, _| Biome::Plains, sight: 1.0 };
         let mut rng = JavaRandom::new(11);
         let mut p = Mob::new(Pig, 32.5, 10.0, 32.5, 0.0, &mut rng);
         p.smart = true;
@@ -1774,5 +1904,93 @@ mod tests {
         p.tick(&mut rng, &up, &mut ev);
         for _ in 0..30 { p.step(TICK, &flat) }
         assert!(p.head_pitch < -0.1, "head pitch {}", p.head_pitch);
+    }
+
+    /// NOT b1.7.3 (`biomeRules`, proposal 2, fog is cover): a zombie 12 blocks off notices the player in clear air and not in a thick fog,
+    /// where it sees under 8 blocks.
+    #[test]
+    fn fog_shortens_how_far_a_mob_notices() {
+        let l = |_, _, _| 15u8;
+        let player = Vec3::new(32.5, 10.9, 20.5);
+        let (mut clear, mut foggy) = (ctx(player, &l), ctx(player, &l));
+        foggy.sight = crate::world::biomelife::sight(0.01);
+        let mut rng = JavaRandom::new(4);
+        for (c, want) in [(&clear, true), (&foggy, false)] {
+            let mut z = Mob::new(Zombie, 20.5, 10.0, 20.5, 0.0, &mut rng);
+            z.tick(&mut rng, c, &mut Vec::new());
+            assert_eq!(z.target, want, "sight {}", c.sight);
+        }
+        clear.sight = 1.0;
+    }
+
+    /// NOT b1.7.3: wolves are born where `wolf_land` says, in the coat of the biome, and never on the plains.
+    #[test]
+    fn wolves_are_born_in_forests_taigas_and_groves() {
+        assert!(wolf_land(Biome::Forest) && wolf_land(Biome::Taiga) && wolf_land(Biome::SnowyBirchGrove) && !wolf_land(Biome::Plains));
+        assert_eq!((coat_for(Biome::Forest, 0), coat_for(Biome::WetWoodland, 3), coat_for(Biome::SnowyBirchGrove, 7), coat_for(Biome::Plains, 7)), (COAT_WOODS, COAT_WOODS, COAT_SNOWY, COAT_PALE));
+        let taiga: Vec<u8> = (0..8).map(|r| coat_for(Biome::Taiga, r)).collect();
+        assert_eq!(taiga, [0, 0, 0, 0, COAT_ASHEN, COAT_ASHEN, COAT_BLACK, COAT_CHESTNUT]);
+        let wide = |_: i32, y: i32, _: i32| Some(match y { 0 => 7, 1..=8 => 1, 9 => 2, _ => 0 });
+        let l = |_, _, _| 15u8;
+        let player = Vec3::new(0.5, 11.0, 0.5);
+        for (biome, coat, any) in [(Biome::Forest, COAT_WOODS, true), (Biome::SnowyBirchGrove, COAT_SNOWY, true), (Biome::Plains, COAT_PALE, false)] {
+            let at = |_: i32, _: i32| biome;
+            let c = Ctx { get: &wide, light: &l, day: true, player, eye: player + Vec3::Y * 0.6, biome: &at, sight: 1.0 };
+            let mut wolves = 0;
+            for seed in 1..=8 {
+                let (mut m, mut drops) = (Mobs::new(seed), Drops::new(1));
+                m.smart = false;
+                for _ in 0..1500 {
+                    m.update(TICK, &c, &mut drops);
+                }
+                wolves += m.list.iter().filter(|a| a.kind == Wolf).inspect(|w| assert_eq!(w.coat, coat, "{biome:?}")).count();
+            }
+            assert_eq!(wolves > 0, any, "{biome:?}: {wolves} wolves in 8 worlds");
+        }
+    }
+
+    /// NOT b1.7.3 (`animalAi`, proposal 5): in its hunting third a wild wolf runs a sheep down and bites it; a sheep runs from it; a tame
+    /// wolf, a wolf with the switch off and a wolf out of its hunting time leave the sheep alone.
+    #[test]
+    fn a_wild_wolf_hunts_a_sheep() {
+        let l = |_, _, _| 15u8;
+        let c = ctx(Vec3::new(60.5, 11.0, 60.5), &l);
+        let run = |smart: bool, tame: bool, clock: u32| {
+            let mut rng = JavaRandom::new(9);
+            let (mut m, mut drops) = (Mobs::new(2), Drops::new(1));
+            (m.no_spawn, m.smart, m.clock) = (true, smart, clock);
+            let mut wolf = Mob::new(Wolf, 20.5, 10.0, 20.5, 0.0, &mut rng);
+            wolf.tame = tame;
+            m.list.push(wolf);
+            m.list.push(Mob::new(Sheep, 26.5, 10.0, 20.5, 0.0, &mut rng));
+            let mut fled = false;
+            for _ in 0..180 {
+                m.update(TICK, &c, &mut drops);
+                fled |= m.list.iter().any(|s| s.kind == Sheep && s.panic > 0);
+            }
+            let sheep = m.list.iter().find(|s| s.kind == Sheep).map_or(0, |s| s.health);
+            (sheep, fled)
+        };
+        let full = Mob::new(Sheep, 0.5, 10.0, 0.5, 0.0, &mut JavaRandom::new(1)).health;
+        let (hurt, fled) = run(true, false, 0);
+        assert!(hurt < full && fled, "the sheep has {hurt} of {full} health and fled: {fled}");
+        assert_eq!(run(true, true, 0), (full, false), "a tame wolf does not hunt");
+        assert_eq!(run(false, false, 0), (full, false), "animalAi off: no hunt");
+        assert_eq!(run(true, false, HUNT_TICKS - 1 + HUNT_TICKS), (full, false), "a wolf rests two thirds of the time");
+    }
+
+    /// NOT b1.7.3 (`animalAi`, proposal 5): a sheep that finishes grazing says which cell it ate.
+    #[test]
+    fn a_grazing_sheep_reports_the_cell_it_ate() {
+        let l = |_, _, _| 15u8;
+        let c = ctx(Vec3::new(60.5, 11.0, 60.5), &l);
+        let mut rng = JavaRandom::new(1);
+        let (mut m, mut drops) = (Mobs::new(2), Drops::new(1));
+        (m.no_spawn, m.smart) = (true, true);
+        let mut sheep = Mob::new(Sheep, 20.5, 10.0, 20.5, 0.0, &mut rng);
+        sheep.graze = 3;
+        m.list.push(sheep);
+        let ate: Vec<(i32, i32, i32)> = (0..10).flat_map(|_| m.update(TICK, &c, &mut drops)).filter_map(|e| if let Ev::Graze(c) = e { Some(c) } else { None }).collect();
+        assert_eq!(ate, [(20, 10, 20)], "once, in the cell it stands in");
     }
 }

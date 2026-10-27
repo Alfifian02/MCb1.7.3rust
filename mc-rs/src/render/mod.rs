@@ -10,6 +10,7 @@ pub mod font;
 pub mod outline;
 pub mod panorama;
 pub mod items;
+pub mod wolf_model;
 pub mod player;
 pub mod present;
 pub mod sky;

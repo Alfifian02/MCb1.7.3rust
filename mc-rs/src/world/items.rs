@@ -401,6 +401,17 @@ impl Drops {
         }
     }
 
+    /// NOT b1.7.3 (`biomeRules`, `biomelife::leaf_odds`): a broken leaf gives its sapling 1 time in `sapling` and, if it is oak, an apple
+    /// (260) 1 time in `apple`. The drops are the same stacks `spawn_block` makes.
+    pub fn spawn_leaf(&mut self, meta: u8, cell: (i32, i32, i32), (sapling, apple): (i32, i32)) {
+        if self.rng.next_int_bound(sapling) == 0 {
+            self.spawn_stack(ItemStack { id: 6, count: 1, damage: damage_dropped(18, meta) }, cell);
+        }
+        if meta & 3 == 0 && self.rng.next_int_bound(apple) == 0 {
+            self.spawn_stack(ItemStack { id: 260, count: 1, damage: 0 }, cell);
+        }
+    }
+
     /// `Block.dropBlockAsItem_do`: one stack placed at random in the middle 0.7 of `cell`, hopping up and sideways.
     /// Shears on leaves use it directly to drop the leaves block itself (`BlockLeaves.harvestBlock`).
     pub fn spawn_stack(&mut self, stack: ItemStack, (x, y, z): (i32, i32, i32)) {
@@ -565,5 +576,21 @@ mod tests {
         // A block item shows its metadata colour; a tool's wear is not metadata.
         assert_eq!(stack_tile(stack(35, 14)), atlas::tile_of(35, 14));
         assert_eq!(stack_tile(stack(270, 3)), tile(270) as u16);
+    }
+
+    /// NOT b1.7.3: broken oak leaves give apples at the odds given, other species only saplings; the stacks are those of `spawn_block`.
+    #[test]
+    fn leaves_give_apples_at_the_odds_given() {
+        let mut d = Drops::new(5);
+        for _ in 0..1000 {
+            d.spawn_leaf(0, (0, 64, 0), (20, 25));
+        }
+        let (apples, saplings) = (d.items.iter().filter(|i| i.stack.id == 260).count(), d.items.iter().filter(|i| i.stack.id == 6).count());
+        assert!((20..=65).contains(&apples) && (25..=85).contains(&saplings), "{apples} apples, {saplings} saplings of 1000 leaves (about 40 and 50)");
+        let mut spruce = Drops::new(5);
+        for _ in 0..1000 {
+            spruce.spawn_leaf(1, (0, 64, 0), (20, 1));
+        }
+        assert!(spruce.items.iter().all(|i| i.stack.id == 6 && i.stack.damage == 1), "spruce leaves: its sapling, never an apple");
     }
 }

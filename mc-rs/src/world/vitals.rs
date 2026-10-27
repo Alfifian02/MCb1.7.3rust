@@ -49,11 +49,13 @@ pub struct Vitals {
     pub drowned: bool,
     /// Stamina (`world::stamina`): here so health and armor set its maximum, a damage marks combat, and every respawn / reset fills it.
     pub stamina: Stamina,
+    /// NOT b1.7.3 (`biomeRules`): ticks left of a meal's warmth (`biomelife::FED_TICKS`); food for the cold.
+    pub fed: u32,
 }
 
 impl Default for Vitals {
     fn default() -> Self {
-        Self { health: MAX_HEALTH, cry: false, thud: false, air: MAX_AIR, fire: 0, hearts_life: 0, last_damage: 0, fall: 0.0, acc: 0.0, armor: 0, wear: 0, rem: 0, drowned: false, stamina: Stamina::default() }
+        Self { health: MAX_HEALTH, cry: false, thud: false, air: MAX_AIR, fire: 0, hearts_life: 0, last_damage: 0, fall: 0.0, acc: 0.0, armor: 0, wear: 0, rem: 0, drowned: false, fed: 0, stamina: Stamina::default() }
     }
 }
 

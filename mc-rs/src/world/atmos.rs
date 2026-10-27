@@ -320,6 +320,11 @@ impl Atmos {
         self.here
     }
 
+    /// The eased exp² fog density round the player now (`Frame::density` without a frame to build): what `biomelife::sight` reads.
+    pub fn density(&self) -> f32 {
+        self.cur[DENS]
+    }
+
     /// This frame's sky, fog, haze, clouds and stars for the sun `angle` (`world::sky::celestial_angle`) and the weather.
     pub fn frame(&self, angle: f32, rain: f32, thunder: f32) -> Frame {
         let c = &self.cur;

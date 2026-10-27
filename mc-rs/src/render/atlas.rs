@@ -73,7 +73,10 @@ pub const SIGN_Y: usize = ART_Y + 256;
 pub const CHAR_Y: usize = SIGN_Y + 32;
 /// From `CHAR_Y` on, 64 x 32 skins four to a row (`skin_px`, 26 slots = 7 bands, 224 rows): slot 0 `mob/char.png`, then the armor and the mobs.
 pub const SKIN_SLOTS: usize = 26;
-pub const ATLAS_H: usize = ART_Y + 256 + 32 + 32 * SKIN_SLOTS.div_ceil(4);
+/// Under them NOT b1.7.3: the 64 x 48 wolf skins (`wolf.rgba`, `tools/gen_wolf.py`), four to a row, `WOLF_ROWS` rows from `WOLF_Y`.
+pub const WOLF_Y: usize = ART_Y + 256 + 32 + 32 * SKIN_SLOTS.div_ceil(4);
+pub const WOLF_ROWS: usize = 240;
+pub const ATLAS_H: usize = WOLF_Y + WOLF_ROWS;
 /// Mip levels of the atlas (a 16 px tile has 16, 8, 4 px: three levels never mix two tiles at the middle of a tile).
 pub const MIPS: u32 = 3;
 /// `gui/items.png` as RGBA (256 x 256, 16 x 16 px sprites): `Item.iconIndex` picks the sprite (`item_icon`).
@@ -84,6 +87,8 @@ pub const ITEM_TILE0: u16 = 1000;
 pub const ART_TILE0: u16 = 2000;
 /// `art/kz.png` + `item/sign.png` + `mob/char.png` as RGBA, 256 x 320 (`tools/gen_terrain.py`).
 pub const ART: &[u8] = include_bytes!("../../assets/art.rgba");
+/// The wolf skins (256 x `WOLF_ROWS`): coat 0..6 (`mobs::COATS`) x wild, tame, angry, as `skin::WOLF0 + coat * 3 + state`.
+pub const WOLF: &[u8] = include_bytes!("../../assets/wolf.rgba");
 pub const TERRAIN: &[u8] = include_bytes!("../../assets/terrain.rgba");
 
 /// `EntitySheep.fleeceColorTable`: the wool colours, indexed by the cloth metadata (0 white .. 15 black).
@@ -153,6 +158,7 @@ pub fn atlas_rgba() -> Vec<u8> {
     }
     v.extend_from_slice(ITEMS);
     v.extend_from_slice(ART);
+    v.extend_from_slice(WOLF);
     v
 }
 
@@ -211,6 +217,10 @@ pub fn char_px(x: f32, y: f32) -> (f32, f32) {
 
 /// Atlas UV of pixel (`x`, `y`) of the 64 x 32 skin in `slot` (y down like the png; `tools/gen_terrain.py` `SKINS` is the order).
 pub fn skin_px(slot: u8, x: f32, y: f32) -> (f32, f32) {
+    if slot >= skin::WOLF0 {
+        let k = (slot - skin::WOLF0) as f32; // a wolf skin is 64 x 48
+        return (((k % 4.0) * 64.0 + x) / ATLAS_W as f32, (WOLF_Y as f32 + (k / 4.0).floor() * 48.0 + y) / ATLAS_H as f32);
+    }
     (((slot % 4) as f32 * 64.0 + x) / ATLAS_W as f32, (CHAR_Y as f32 + (slot / 4) as f32 * 32.0 + y) / ATLAS_H as f32)
 }
 
@@ -226,9 +236,8 @@ pub mod skin {
     pub const CHICKEN: u8 = 13;
     pub const SHEEP: u8 = 14;
     pub const SHEEP_FUR: u8 = 15;
-    pub const WOLF: u8 = 16;
-    pub const WOLF_TAME: u8 = 17;
-    pub const WOLF_ANGRY: u8 = 18;
+    // 16..=18 were the b1.7.3 wolf skins; the wolf now wears the 64 x 48 ones from `WOLF0` (`skin_px`).
+    pub const WOLF0: u8 = 64;
     pub const SQUID: u8 = 19;
     pub const ZOMBIE: u8 = 20;
     pub const PIGZOMBIE: u8 = 21;
@@ -414,7 +423,9 @@ mod tests {
         // Every tile `tile_of` hands out has its own colour, and the texture covers all of them.
         assert_eq!(atlas_rgba().len(), ATLAS_W * ATLAS_H * 4);
         assert_eq!(TERRAIN.len(), 256 * 256 * 4);
-        assert_eq!(ART.len(), 256 * (ATLAS_H - ART_Y) * 4, "kz.png over sign.png over the skins");
+        assert_eq!(ART.len(), 256 * (WOLF_Y - ART_Y) * 4, "kz.png over sign.png over the skins");
+        assert_eq!(WOLF.len(), 256 * WOLF_ROWS * 4, "six coats x three states, 64 x 48, four to a row");
+        assert_eq!(ATLAS_H % 16, 0, "the shaders count the atlas in tiles");
         assert_eq!(ATLAS_H % 16, 0, "the shaders count tile rows");
         assert!(art_uv(255, 1.0, 0.0).1 * (ATLAS_H as f32) < (ART_Y + 256) as f32, "the last piece stays above the sign rows");
         assert_ne!(tile_color(260), tile_color(261));
