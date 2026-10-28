@@ -268,6 +268,8 @@ pub enum Ev {
     /// A creeper went off here.
     Boom(Vec3),
     Shoot(Vec3, Vec3),
+    /// `random.bow` as a skeleton shoots (`false`), `random.bowhit` as an arrow hits a block, a mob or the player (`true`), here; `lib.rs` plays it.
+    Bow(Vec3, bool),
     /// A player's arrow stopped against a block here.
     Landed(Vec3),
     Egg(Vec3),
@@ -991,7 +993,11 @@ impl Arrow {
         self.age += 1;
         self.pos += self.vel;
         let (x, y, z) = cell(self.pos);
-        if self.age > 600 || solid((c.get)(x, y, z)) {
+        let on_block = solid((c.get)(x, y, z));
+        if self.age > 600 || on_block {
+            if self.kind == 0 && on_block {
+                ev.push(Ev::Bow(self.pos - self.vel, true));
+            }
             // ponytail: vanilla sticks in the block until picked up; the player's arrow drops as an item where it stopped.
             match self.kind {
                 0 if self.player => ev.push(Ev::Landed(self.pos - self.vel)),
@@ -1003,6 +1009,7 @@ impl Arrow {
         let d = self.pos - c.player;
         if !self.player && d.x.abs() < 0.4 && d.z.abs() < 0.4 && d.y.abs() < 1.0 {
             ev.push(Ev::Hurt(4));
+            ev.push(Ev::Bow(self.pos, true));
             return false;
         }
         self.vel = self.vel * 0.99 - Vec3::Y * 0.03;
@@ -1272,6 +1279,9 @@ impl Mobs {
                     if a.kind == crate::world::gear::EGG {
                         ev.push(Ev::Hatch(a.pos));
                     }
+                    if a.kind == 0 {
+                        ev.push(Ev::Bow(a.pos, true));
+                    }
                     false
                 })
             });
@@ -1291,7 +1301,10 @@ impl Mobs {
         let mut out = Vec::new();
         for e in ev {
             match e {
-                Ev::Shoot(pos, vel) if self.arrows.len() < MAX_ARROWS => self.arrows.push(Arrow { pos, vel, age: 0, player: false, kind: 0 }),
+                Ev::Shoot(pos, vel) if self.arrows.len() < MAX_ARROWS => {
+                    self.arrows.push(Arrow { pos, vel, age: 0, player: false, kind: 0 });
+                    out.push(Ev::Bow(pos, false));
+                }
                 Ev::Landed(p) => drops.spawn_stack(ItemStack { id: crate::world::gear::ARROW, count: 1, damage: 0 }, cell(p)),
                 Ev::Egg(p) => drops.spawn_stack(ItemStack { id: 344, count: 1, damage: 0 }, cell(p)),
                 Ev::Hatch(p) => {
@@ -1303,7 +1316,7 @@ impl Mobs {
                         }
                     }
                 }
-                Ev::Hurt(_) | Ev::Boom(_) | Ev::Snd(..) | Ev::Graze(_) => out.push(e),
+                Ev::Hurt(_) | Ev::Boom(_) | Ev::Snd(..) | Ev::Graze(_) | Ev::Bow(..) => out.push(e),
                 Ev::Shoot(..) => {}
             }
         }
@@ -1563,6 +1576,32 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// `random.bowhit` where an arrow meets a block, a mob or the player (not when it just times out in the air); a snowball is silent.
+    #[test]
+    fn an_arrow_sounds_where_it_hits() {
+        let l = |_, _, _| 0u8;
+        let c = ctx(Vec3::new(5.0, 20.0, 5.0), &l);
+        let arrow = |player| Arrow { pos: Vec3::new(32.5, 9.5, 32.5), vel: Vec3::new(0.0, -0.5, 0.0), age: 0, player, kind: 0 };
+        let mut ev = Vec::new();
+        assert!(!arrow(false).tick(&c, &mut ev) && matches!(ev[..], [Ev::Bow(_, true)])); // a skeleton's, on a block
+        ev.clear();
+        assert!(!arrow(true).tick(&c, &mut ev) && matches!(ev[..], [Ev::Bow(_, true), Ev::Landed(_)]));
+        ev.clear();
+        let mut late = arrow(false);
+        (late.age, late.pos.y) = (600, 20.0);
+        assert!(!late.tick(&c, &mut ev) && ev.is_empty()); // gone in the air: silent
+        let near = ctx(Vec3::new(32.5, 14.6, 32.5), &l);
+        Arrow { pos: Vec3::new(32.5, 15.0, 32.5), ..arrow(false) }.tick(&near, &mut ev);
+        assert!(matches!(ev[..], [Ev::Hurt(4), Ev::Bow(_, true)]));
+        // A player's arrow in a mob's box: the hit sounds once; a skeleton's shot sounds as it leaves.
+        let (mut ms, mut rng) = (Mobs::new(1), JavaRandom::new(3));
+        ms.list.push(Mob::new(Pig, 5.5, 20.0, 5.5, 0.0, &mut rng));
+        ms.arrows.push(Arrow { pos: Vec3::new(5.5, 20.0, 5.5), vel: Vec3::ZERO, age: 0, player: true, kind: 0 });
+        let mut drops = crate::world::items::Drops::new(1);
+        let n = |out: &[Ev]| out.iter().filter(|e| matches!(e, Ev::Bow(_, true))).count();
+        assert_eq!(n(&ms.update(0.05, &c, &mut drops)), 1);
     }
 
     #[test]

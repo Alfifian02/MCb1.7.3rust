@@ -48,6 +48,11 @@ for p in sorted(glob.glob(f"{root}/assets/sound/wolf/*/*.ogg")):
     voice, f = p.split("/")[-2:]
     sfx.setdefault(f"mob.wolf.{voice}.{f.split('.')[0].rstrip('0123456789')}", []).append(f'include_bytes!("../../assets/sound/wolf/{voice}/{f}")')
 
+# NOT b1.7.3: sounds its index lacks, from a newer pack (`mc_sounds`): assets/sound/extra/<dir>/<name><n>.ogg -> "<dir>.<name>" (random.bow: the rod's cast and the bow's shot; random.bowhit: an arrow hitting).
+for p in sorted(glob.glob(f"{root}/assets/sound/extra/*/*.ogg")):
+    d, f = p.split("/")[-2:]
+    sfx.setdefault(f"{d}.{f.split('.')[0].rstrip('0123456789')}", []).append(f'include_bytes!("../../assets/sound/extra/{d}/{f}")')
+
 # Block.java: `new Xxx(<id>` ... `.setStepSound(<field>)`; BlockCloth() has no id argument (35, wool).
 SOUNDS = ["soundPowderFootstep", "soundWoodFootstep", "soundGravelFootstep", "soundGrassFootstep", "soundStoneFootstep",
           "soundMetalFootstep", "soundGlassFootstep", "soundClothFootstep", "soundSandFootstep"]

@@ -99,6 +99,7 @@ pub static SFX: &[(&str, &[&[u8]])] = &[
     ("portal.travel", &[include_bytes!("../../assets/sound/newsound/portal/travel.ogg")]),
     ("portal.trigger", &[include_bytes!("../../assets/sound/newsound/portal/trigger.ogg")]),
     ("random.bow", &[include_bytes!("../../assets/sound/extra/random/bow.ogg")]),
+    ("random.bowhit", &[include_bytes!("../../assets/sound/extra/random/bowhit1.ogg"), include_bytes!("../../assets/sound/extra/random/bowhit2.ogg"), include_bytes!("../../assets/sound/extra/random/bowhit3.ogg"), include_bytes!("../../assets/sound/extra/random/bowhit4.ogg")]),
     ("random.breath", &[include_bytes!("../../assets/sound/newsound/random/breath.ogg")]),
     ("random.click", &[include_bytes!("../../assets/sound/newsound/random/click.ogg")]),
     ("random.drr", &[include_bytes!("../../assets/sound/newsound/random/drr.ogg")]),

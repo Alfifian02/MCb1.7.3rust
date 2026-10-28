@@ -938,6 +938,12 @@ impl App {
                 }
                 Ev::Boom(p) => self.explode(p, 3.0),
                 Ev::Snd(name, at, vol, mul, jit) => self.audio.cry(name, at, vol, mul, jit),
+                // `EntitySkeleton`'s shot is "random.bow" at 1.0, pitch `1 / (r * 0.4 + 0.8)`; `EntityArrow`'s hit is "random.bowhit" at 1.0, pitch
+                // `1.2 / (r * 0.2 + 0.9)` (both NOT in the b1.7.3 index, see `assets/sound/extra`).
+                Ev::Bow(at, hit) => {
+                    let pitch = if hit { 1.2 / (self.audio.rnd() * 0.2 + 0.9) } else { 1.0 / (self.audio.rnd() * 0.4 + 0.8) };
+                    self.audio.play(if hit { "random.bowhit" } else { "random.bow" }, at, 1.0, pitch);
+                }
                 // NOT b1.7.3 (`animalAi`): a sheep ate; the grass spread covers the dirt again.
                 Ev::Graze((x, y, z)) => match (self.chunks.block(x, y, z), self.chunks.block(x, y - 1, z)) {
                     (Some(31), _) => drop(self.chunks.set_block(x, y, z, 0)),
@@ -1942,6 +1948,9 @@ impl App {
                 if self.inv.take_one(gear::ARROW) {
                     let v = gear::arrow_velocity(fwd, &mut self.mobs.rng);
                     self.mobs.shoot(eye + fwd * 0.5, v, 0);
+                    // `ItemBow`: "random.bow" at 1.0, pitch `1 / (r * 0.4 + 0.8)` (NOT in the b1.7.3 index, see `assets/sound/extra`).
+                    let pitch = 1.0 / (self.audio.rnd() * 0.4 + 0.8);
+                    self.audio.play_here("random.bow", 1.0, pitch);
                 }
             }
             // `ItemSnowball` / `ItemEgg`: one is used up and thrown along the look direction (same heading as an arrow).
