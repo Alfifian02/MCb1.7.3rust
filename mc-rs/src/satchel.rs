@@ -641,7 +641,7 @@ pub fn draw(v: &mut Vec<HudVertex>, (w, h): (f32, f32), sat: &Satchel, c: &Ctx) 
     }
 }
 
-fn draw_book(v: &mut Vec<HudVertex>, (w, h): (f32, f32), (sat, b): (&Satchel, &BookFrame), c: &Ctx, (tk, sk, u): (f32, f32, f32)) {
+fn draw_book(v: &mut Vec<HudVertex>, (w, _h): (f32, f32), (sat, b): (&Satchel, &BookFrame), c: &Ctx, (tk, sk, u): (f32, f32, f32)) {
     // Under the cover that swings away: the back cover, thick leather round the pages (it grows with the opening, so it never shows
     // wider than the closed cover), the paper (one sheet while it opens, aged at its rim), and the red-stitched binding at the spine.
     if sat.book_t > 0.0 {

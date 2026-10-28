@@ -21,7 +21,6 @@
 //! - Where the Beta world has no such block the converter picked the nearest one (stone bricks = cobblestone, walls and iron bars =
 //!   fences, carpets = nothing, ...), see `to_beta` in the tool.
 
-use crate::world::biome::Biome;
 use crate::world::chest::Chest;
 use crate::world::chunk::idx;
 use crate::world::gen::chunk_manager::WorldChunkManager;
@@ -472,7 +471,7 @@ pub struct Start {
 fn spread(seed: i64, rx: i32, rz: i32, s: &Set) -> (i32, i32) {
     let mut r = JavaRandom::new(large_feature(seed, rx, rz, s.salt));
     let k = s.spacing - s.sep;
-    let mut one = |r: &mut JavaRandom| if s.tri { (r.next_int_bound(k) + r.next_int_bound(k)) / 2 } else { r.next_int_bound(k) };
+    let one = |r: &mut JavaRandom| if s.tri { (r.next_int_bound(k) + r.next_int_bound(k)) / 2 } else { r.next_int_bound(k) };
     let (a, b) = (one(&mut r), one(&mut r));
     (rx * s.spacing + a, rz * s.spacing + b)
 }
@@ -741,6 +740,7 @@ fn place_piece(d: &Data, s: &Struct, p: &Piece, w: &mut Region, cell: [i32; 4], 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::world::biome::Biome;
 
     #[test]
     fn the_baked_file_parses_and_biome_indices_match_the_tool() {

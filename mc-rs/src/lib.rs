@@ -60,7 +60,7 @@ use crate::world::save::{self, Level};
 use crate::world::sky;
 use crate::world::sprint::{self, Sprint};
 use crate::world::chunk::{is_plant, normal_cube, outline_bounds, physics_id, pick_bounds};
-use crate::world::chunks::{chunk_coord, ChunkManager, Layer, Shape, WATER_RANGE};
+use crate::world::chunks::{chunk_coord, ChunkManager, Shape, WATER_RANGE};
 use crate::world::physics::{self, Player};
 use crate::world::redstone;
 use crate::world::vitals::{self, Env, Vitals};

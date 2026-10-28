@@ -86,12 +86,10 @@ pub fn rail_pos(e: &Env, p: Vec3) -> Option<Vec3> {
     let end = |i: usize| Vec3::new(x as f32 + 0.5 + s[i][0] as f32 * 0.5, y as f32 + 0.5 + s[i][1] as f32 * 0.5, z as f32 + 0.5 + s[i][2] as f32 * 0.5);
     let (a, b) = (end(0), end(1));
     let (vx, vy, vz) = (b.x - a.x, (b.y - a.y) * 2.0, b.z - a.z);
-    let (mut px, mut pz) = (p.x, p.z);
+    let (px, pz) = (p.x, p.z);
     let t = if vx == 0.0 {
-        px = x as f32 + 0.5;
         pz - z as f32
     } else if vz == 0.0 {
-        pz = z as f32 + 0.5;
         px - x as f32
     } else {
         ((px - a.x) * vx + (pz - a.z) * vz) * 2.0
