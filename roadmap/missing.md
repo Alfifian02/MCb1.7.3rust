@@ -18,7 +18,7 @@ How it was made: the decompiled `minecraft/src` (675 classes: 84 blocks, 103 ite
 
 ## Smaller gaps already written down in the code or the changelogs
 
-Mob spawner: the spinning mob cage is not drawn. Sound: bucket and reed placing, fizz, `random.drr`, the dispenser's shot. Nether: animated portal texture, Nether light table. Sleeping: only the "You can only sleep at night" message exists (no too-far / monsters-near messages, no `performSleepSpawning`). These come from the README rows and `roadmap/gameplay.md`; they were not re-checked against the code.
+Mob spawner: the spinning mob cage is not drawn. Sound: `random.drr` (no known call site), the 8 smoke puffs of water poured in the Nether. Nether: animated portal texture, Nether light table. Sleeping: only the "You can only sleep at night" message exists (no too-far / monsters-near messages, no `performSleepSpawning`). These come from the README rows and `roadmap/gameplay.md`; they were not re-checked against the code.
 
 ## Checked and NOT missing
 

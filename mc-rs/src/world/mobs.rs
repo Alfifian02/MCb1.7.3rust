@@ -556,7 +556,11 @@ impl Mob {
         }
         if self.fire > 0 {
             self.fire -= 1;
-            if self.wet { self.fire = 0 } else if self.fire % 20 == 0 {
+            if self.wet {
+                // `Entity.moveEntity`: "random.fizz" at 0.7, pitch 1.6 (ponytail: `Ev::Snd`'s spread is +-0.32, the Java's +-0.4).
+                ev.push(Ev::Snd("random.fizz", pos, 0.7, 1.6, true));
+                self.fire = 0;
+            } else if self.fire % 20 == 0 {
                 self.health -= 1;
                 self.hurt = 10;
                 self.cry = Some(if self.health <= 0 { Cry::Die } else { Cry::Hurt });
@@ -1563,6 +1567,16 @@ mod tests {
         w.body.on_ground = true;
         (0..3).for_each(|_| { w.tick(&mut rng, &far, &mut ev); });
         assert_eq!(ev.iter().filter(|e| matches!(e, Ev::Snd("mob.wolf.shake", _, v, _, true) if *v == 0.4)).count(), 1);
+        // A burning mob that is in water fizzes once and is out; a dry one burns on.
+        let mut z = Mob::new(Zombie, 32.5, 10.0, 32.5, 0.0, &mut rng);
+        (z.fire, z.wet) = (50, true);
+        ev.clear();
+        z.tick(&mut rng, &far, &mut ev);
+        assert!(z.fire == 0 && matches!(ev[..], [Ev::Snd("random.fizz", _, v, p, true)] if v == 0.7 && p == 1.6));
+        (z.fire, z.wet) = (50, false);
+        ev.clear();
+        z.tick(&mut rng, &far, &mut ev);
+        assert!(z.fire == 49 && !ev.iter().any(|e| matches!(e, Ev::Snd("random.fizz", ..))));
         // The fuse hisses once, at pitch 0.5 with no spread.
         let l = |_, _, _| 0u8;
         let near = ctx(Vec3::new(32.5, 11.0, 33.5), &l);

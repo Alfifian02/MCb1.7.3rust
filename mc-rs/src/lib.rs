@@ -900,6 +900,11 @@ impl App {
             let p = 1.0 + (self.audio.rnd() - self.audio.rnd()) * 0.2;
             self.audio.play_here("random.hurt", 1.0, p);
         }
+        // `Entity.moveEntity`: a burning body in water: "random.fizz" at 0.7, pitch `1.6 + (r - r) * 0.4`.
+        if std::mem::take(&mut self.vitals.fizz) {
+            let p = 1.6 + (self.audio.rnd() - self.audio.rnd()) * 0.4;
+            self.audio.play_here("random.fizz", 0.7, p);
+        }
         if std::mem::take(&mut self.vitals.thud) {
             let below = self.chunks.block_loaded(self.player.pos.x.floor() as i32, (self.player.pos.y - 1.1).floor() as i32, self.player.pos.z.floor() as i32).unwrap_or(0);
             let (key, _, pitch) = audio::STEP[audio::step_of(below)];
@@ -1684,6 +1689,7 @@ impl App {
                     && if cake { !crate::world::ticks::non_solid(get(at.0, at.1 - 1, at.2)) && !pick::overlaps_player(at, physics_id(92, 0), self.player.pos) } else { pick::reed_ok(&get, at) };
                 if ok && self.chunks.set_block_meta(at.0, at.1, at.2, if cake { 92 } else { 83 }, 0) {
                     self.inv.consume(slot);
+                    self.placed(if cake { 92 } else { 83 }, at);
                 }
                 return;
             }
@@ -1694,6 +1700,9 @@ impl App {
                 let meta = pick::facing_meta(b as u16, self.camera.yaw.to_degrees() + 180.0).unwrap_or(0);
                 if at.1 < 127 && self.chunks.block_loaded(at.0, at.1, at.2).is_some_and(pick::replaceable) && ticks::can_place(&self.chunks, at.0, at.1, at.2, b) && self.chunks.set_block_meta(at.0, at.1, at.2, b, meta) {
                     self.inv.consume(slot);
+                    if b == 93 {
+                        self.placed(b, at); // an `ItemReed`; the dust (`ItemRedstone`) is silent
+                    }
                     if b == 93 && redstone::repeater_input(&self.chunks, at.0, at.1, at.2) {
                         self.ticks.schedule(at.0, at.1, at.2, 93, 1);
                     }
@@ -1997,6 +2006,12 @@ impl App {
         self.inv.consume(slot);
     }
 
+    /// `ItemReed.onItemUse` (as `ItemBlock`'s): the placed block's step sound at its cell, volume (1 + 1) / 2, pitch * 0.8.
+    fn placed(&mut self, id: u8, (x, y, z): (i32, i32, i32)) {
+        let (key, _, pitch) = audio::STEP[audio::step_of(id)];
+        self.audio.play(key, glam::Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5), 1.0, pitch * 0.8);
+    }
+
     fn use_bucket(&mut self, slot: usize, held: u16) {
         let eye = self.camera.pos.as_dvec3();
         let end = eye + self.camera.forward().as_dvec3() * 5.0;
@@ -2014,7 +2029,13 @@ impl App {
         } else if let Some(fluid) = gear::bucket_pour(held) {
             let (x, y, z) = pick::place_pos(&hit);
             if self.chunks.block_loaded(x, y, z).is_some_and(pick::replaceable) && y < 128 {
-                self.chunks.set_block_meta(x, y, z, fluid, 0);
+                if self.nether && fluid == 8 {
+                    // `ItemBucket`: water does not stay in the Nether; it fizzes away (ponytail: the 8 smoke puffs are not drawn).
+                    let p = 2.6 + (self.audio.rnd() - self.audio.rnd()) * 0.8;
+                    self.audio.play("random.fizz", glam::Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5), 0.5, p);
+                } else {
+                    self.chunks.set_block_meta(x, y, z, fluid, 0);
+                }
                 self.inv.slots[slot] = Some(ItemStack { id: gear::BUCKET, count: 1, damage: 0 });
             }
         }
@@ -2445,6 +2466,7 @@ impl App {
     fn dispense(&mut self, (x, y, z): (i32, i32, i32)) {
         let (dx, dz) = match self.chunks.meta(x, y, z) { 3 => (0.0, 1.0), 2 => (0.0, -1.0), 5 => (1.0, 0.0), _ => (-1.0, 0.0) };
         let Some(c) = self.chests.get_mut(&(x, y, z)) else { return };
+        let at = glam::Vec3::new(x as f32, y as f32, z as f32); // the sounds are at the block's corner, as the Java passes the ints
         let (mut pick, mut n) = (None, 1);
         for (i, s) in c[..9].iter().enumerate() {
             if s.is_some() {
@@ -2454,7 +2476,10 @@ impl App {
                 n += 1;
             }
         }
-        let Some(i) = pick else { return }; // an empty dispenser only clicks
+        let Some(i) = pick else {
+            self.audio.play("random.click", at, 1.0, 1.2); // an empty dispenser only clicks
+            return;
+        };
         let Some(s) = c[i].as_mut() else { return };
         let (id, damage) = (s.id, s.damage);
         s.count -= 1;
@@ -2466,11 +2491,13 @@ impl App {
         if matches!(id, gear::ARROW | gear::SNOWBALL | gear::EGG) {
             let v = glam::Vec3::new(dx, 0.1, dz).normalize() * 1.1 + glam::Vec3::new(g(6.0), g(6.0), g(6.0));
             self.mobs.shoot(pos, v, if id == gear::ARROW { 0 } else { id });
+            self.audio.play("random.bow", at, 1.0, 1.2); // NOT in the b1.7.3 index, see `assets/sound/extra`
         } else {
             let s = self.mobs.rng.next_double() as f32 * 0.1 + 0.2;
             let mut g = |sd: f32| self.mobs.rng.next_gaussian() as f32 * 0.0075 * sd;
             let v = glam::Vec3::new(dx * s + g(6.0), 0.2 + g(6.0), dz * s + g(6.0));
             self.drops.throw_from(ItemStack { id, count: 1, damage }, pos - glam::Vec3::Y * 0.3, v);
+            self.audio.play("random.click", at, 1.0, 1.0);
         }
     }
 

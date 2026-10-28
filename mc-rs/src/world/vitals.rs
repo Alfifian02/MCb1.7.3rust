@@ -34,6 +34,8 @@ pub struct Vitals {
     /// Set by a fresh hit (`random.hurt`, also the death cry) and by a landing that hurt (the block's step sound); the frame takes them.
     pub cry: bool,
     pub thud: bool,
+    /// Set when water puts out a burning player (`random.fizz`); the frame takes it.
+    pub fizz: bool,
     pub air: i32,
     pub fire: i32,
     /// `heartsLife`: 20 right after a hit, counts down; while above 10 only a bigger hit than `last_damage` counts.
@@ -55,7 +57,7 @@ pub struct Vitals {
 
 impl Default for Vitals {
     fn default() -> Self {
-        Self { health: MAX_HEALTH, cry: false, thud: false, air: MAX_AIR, fire: 0, hearts_life: 0, last_damage: 0, fall: 0.0, acc: 0.0, armor: 0, wear: 0, rem: 0, drowned: false, fed: 0, stamina: Stamina::default() }
+        Self { health: MAX_HEALTH, cry: false, thud: false, fizz: false, air: MAX_AIR, fire: 0, hearts_life: 0, last_damage: 0, fall: 0.0, acc: 0.0, armor: 0, wear: 0, rem: 0, drowned: false, fed: 0, stamina: Stamina::default() }
     }
 }
 
@@ -132,6 +134,7 @@ impl Vitals {
             self.hurt(1); // `attackEntityFrom(null, 1)` every tick inside a wall
         }
         if e.water {
+            self.fizz |= self.fire > 0;
             self.fire = 0;
         }
         if self.fire > 0 {
@@ -214,6 +217,15 @@ mod tests {
         v.health = 0;
         v.heal(10);
         assert!(v.dead());
+
+        // Water puts a burning player out with one fizz; no fire, no fizz.
+        let mut v = Vitals::default();
+        v.fire = 100;
+        v.tick(&Env { water: true, ..Env::default() });
+        assert!(v.fizz && v.fire == 0);
+        v.fizz = false;
+        v.tick(&Env { water: true, ..Env::default() });
+        assert!(!v.fizz);
 
         let mut v = Vitals::default();
         let under = Env { eye_in_water: true, ..Env::default() };
