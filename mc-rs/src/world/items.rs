@@ -339,13 +339,16 @@ impl ItemEntity {
 
     /// `onCollideWithPlayer`: the player's box grown by 1.0 in x and z (not y) touches this item, after the
     /// 10 tick delay. Takes what fits; true when the whole stack is gone. `player` is the centre of its box.
-    fn picked_up(&mut self, player: Vec3, inv: &mut Inventory) -> bool {
+    /// `pops` gets this item's place when something went into the bag (`random.pop` in the Java; a player's arrow is one of these too).
+    fn picked_up(&mut self, player: Vec3, inv: &mut Inventory, pops: &mut Vec<Vec3>) -> bool {
         let d = (self.pos - player).abs();
         let reach = physics::HALF.x + 1.0 + R;
         if self.delay > 0 || d.x >= reach || d.z >= reach || d.y >= physics::HALF.y + R {
             return false;
         }
-        inv.add(&mut self.stack);
+        if inv.add(&mut self.stack) {
+            pops.push(self.pos);
+        }
         self.stack.count == 0
     }
 }
@@ -358,11 +361,13 @@ pub struct Drops {
     fx: JavaRandom,
     /// Time left over from the last 20 Hz tick.
     acc: f32,
+    /// Where items went into the bag since `lib.rs` last took them: each is a `random.pop`.
+    pub pops: Vec<Vec3>,
 }
 
 impl Drops {
     pub fn new(seed: i64) -> Self {
-        Self { items: Vec::new(), rng: JavaRandom::new(seed), fx: JavaRandom::new(seed ^ 0xF00D), acc: 0.0 }
+        Self { items: Vec::new(), rng: JavaRandom::new(seed), fx: JavaRandom::new(seed ^ 0xF00D), acc: 0.0, pops: Vec::new() }
     }
 
     /// How far into the next tick we are, 0..1, for drawing between `prev` and `pos`.
@@ -457,7 +462,7 @@ impl Drops {
         self.acc += dt;
         while self.acc >= TICK {
             self.acc -= TICK;
-            self.items.retain_mut(|e| e.step(get) && !e.picked_up(player, inv));
+            self.items.retain_mut(|e| e.step(get) && !e.picked_up(player, inv, &mut self.pops));
         }
     }
 }
@@ -526,8 +531,10 @@ mod tests {
         d.tick(2.0, &floor, Vec3::new(100.0, 11.0, 0.0), &mut inv);
         assert!(d.items.iter().all(|e| (e.pos.y - (10.0 + R)).abs() < 0.01 && e.on_ground));
         // The player walks over: everything is picked up, equal items merge into one stack.
+        let before = d.items.len();
         d.tick(0.1, &floor, Vec3::new(0.5, 10.9, 0.5), &mut inv);
         assert!(d.items.is_empty());
+        assert_eq!(d.pops.len(), before); // one `random.pop` for each item that went in
         assert_eq!(inv.slots[0], Some(ItemStack { id: 4, count: 1, damage: 0 }));
         assert_eq!(inv.slots[2].map(|s| (s.id, s.count as usize)), Some((351, n)));
 
@@ -541,6 +548,10 @@ mod tests {
         }
         let mut s = ItemStack { id: 4, count: 1, damage: 0 };
         assert!(inv.add(&mut s) == false && s.count == 1);
+        d.pops.clear();
+        d.spawn_stack(s, (0, 10, 0));
+        d.tick(0.1, &floor, Vec3::new(0.5, 10.9, 0.5), &mut inv);
+        assert!(d.pops.is_empty() && d.items.len() == 1); // a full bag takes nothing: silent
         inv.slots[3] = Some(ItemStack { id: 5, count: 1, damage: 0 });
         inv.consume(3);
         assert_eq!(inv.slots[3], None);

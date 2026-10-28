@@ -142,6 +142,9 @@ pub struct Hook {
     ground: bool,
     in_ground: u16,
     catchable: u16,
+    in_water: bool,
+    /// Volume of the `random.splash` this tick made (0: none): the bobber going into the water, or a bite. `lib.rs` plays and clears it.
+    pub splash: f32,
 }
 
 fn is_water(b: Option<u8>) -> bool {
@@ -151,7 +154,7 @@ fn is_water(b: Option<u8>) -> bool {
 impl Hook {
     /// `EntityFish(world, player)`: 1.5 blocks per tick along the look direction, 0.1 below the eye.
     pub fn cast(eye: Vec3, forward: Vec3, rng: &mut JavaRandom) -> Self {
-        Self { pos: eye - Vec3::new(0.0, 0.1, 0.0), vel: arrow_velocity(forward, rng), ground: false, in_ground: 0, catchable: 0 }
+        Self { pos: eye - Vec3::new(0.0, 0.1, 0.0), vel: arrow_velocity(forward, rng), ground: false, in_ground: 0, catchable: 0, in_water: false, splash: 0.0 }
     }
 
     /// True once a fish is on the line (`ticksCatchable > 0`): reel in now.
@@ -181,12 +184,19 @@ impl Hook {
         let mut drag = 0.92;
         // Five slices of the box; the share that is under water.
         let wet = (0..5).filter(|k| is_water(cell(self.pos + Vec3::new(0.0, 0.25 * (*k as f32 + 1.0) / 5.0, 0.0)))).count() as f32 / 5.0;
+        if wet > 0.0 && !self.in_water {
+            // `Entity.handleWaterMovement`: the splash of going in, as loud as it was fast (at most 1).
+            let v = self.vel;
+            self.splash = ((v.x * v.x * 0.2 + v.y * v.y + v.z * v.z * 0.2).sqrt() * 0.2).min(1.0);
+        }
+        self.in_water = wet > 0.0;
         if wet > 0.0 {
             if self.catchable > 0 {
                 self.catchable -= 1;
             } else if rng.next_int_bound(if rain { 300 } else { 500 }) == 0 {
                 self.catchable = rng.next_int_bound(30) as u16 + 10;
                 self.vel.y -= 0.2;
+                self.splash = self.splash.max(0.25); // the bite splashes at volume 0.25
             }
         }
         if self.catchable > 0 {
@@ -254,13 +264,16 @@ mod tests {
         let get = |_: i32, y: i32, _: i32| Some(if y >= 60 && y < 64 { 9 } else if y < 60 { 1 } else { 0 });
         let mut r = JavaRandom::new(3);
         let mut h = Hook::cast(Vec3::new(0.5, 64.6, 0.5), Vec3::new(0.0, -0.2, -1.0), &mut r);
-        let mut bit = false;
+        let (mut bit, mut splashes) = (false, Vec::new());
         for _ in 0..4000 {
             assert!(h.tick(&get, &mut r, false));
+            if h.splash > 0.0 { splashes.push(std::mem::take(&mut h.splash)) }
             bit |= h.bite();
             if bit { break }
         }
         assert!(bit, "a bite within 4000 ticks (1 in 500 per tick)");
+        // One splash for going in (quiet: speed * 0.2), then the bite's 0.25.
+        assert!(splashes.len() == 2 && splashes[0] < 0.25 && splashes[1] == 0.25, "{splashes:?}");
         let (fish, wear) = h.catch(Vec3::new(0.5, 65.0, 8.5));
         assert_eq!((fish.map(|f| f.0.id), wear), (Some(349), 1));
         assert!(fish.unwrap().1.y > 0.0, "the fish arcs up toward the player");

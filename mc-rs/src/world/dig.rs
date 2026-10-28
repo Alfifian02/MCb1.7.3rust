@@ -80,6 +80,10 @@ pub struct Dig {
     pub damage: f32,
     /// Ticks to wait after a block broke (`blockHitWait`, 5).
     wait: u32,
+    /// Ticks spent on the current block (`field_1080_g`): the hit sound is made when it is a multiple of 4.
+    hits: u32,
+    /// The last `tick` was one that sounds (`PlayerControllerSP.sendBlockRemoving`'s step sound); `lib.rs` plays it.
+    pub hit: bool,
 }
 
 impl Dig {
@@ -93,6 +97,7 @@ impl Dig {
     /// Aiming at a new block restarts the damage; a block that is instant (`strength >= 1`) breaks at once,
     /// like `clickBlock`.
     pub fn tick(&mut self, pos: (i32, i32, i32), id: u8, held: Option<ItemStack>, on_ground: bool, in_water: bool) -> bool {
+        self.hit = false;
         if self.wait > 0 {
             self.wait -= 1;
             return false;
@@ -104,14 +109,18 @@ impl Dig {
         if self.target != Some(pos) {
             self.target = Some(pos);
             self.damage = 0.0;
+            self.hits = 0;
             if s < 1.0 {
                 return false;
             }
         } else {
             self.damage += s;
+            self.hit = self.hits % 4 == 0; // before the break test, like the Java: the tick that breaks it sounds too
+            self.hits += 1;
         }
         if self.damage >= 1.0 || s >= 1.0 {
             self.damage = 0.0;
+            self.hits = 0;
             self.wait = 5;
             return true;
         }
@@ -164,6 +173,21 @@ mod tests {
         assert!(matches!(ticks_with(3, held(257), 100), Some(16..=17)));
         // Stone with the wrong tool (an axe) is still the slow hand rate.
         assert!(matches!(ticks_with(1, held(271), 400), Some(151..=152)));
+    }
+
+    /// `sendBlockRemoving`: the step sound on the first of every four ticks on one block (not the tick that aims at it, not the wait after a
+    /// break), counting again from the next block.
+    #[test]
+    fn the_hit_sounds_on_every_fourth_tick_of_a_block_and_starts_over_on_the_next() {
+        let mut d = Dig::default();
+        let mut hits = |d: &mut Dig, pos, n| (1..=n).filter(|_| { d.tick(pos, 1, None, true, false); d.hit }).count(); // stone by hand: 150 ticks
+        assert_eq!(hits(&mut d, (0, 0, 0), 9), 2); // tick 1 aims (silent); ticks 2 and 6 sound
+        assert_eq!(hits(&mut d, (1, 0, 0), 2), 1); // a new block: aim, then a sound at once
+        // Dirt: breaks on its 16th or 17th tick; the sounds are ticks 2, 6, 10 and 14, then the wait is silent.
+        let mut d = Dig::default();
+        let sounds: Vec<_> = (1..).map(|i| (i, d.tick((0, 0, 0), 3, None, true, false), d.hit)).take_while(|&(_, broke, _)| !broke).filter(|t| t.2).map(|t| t.0).collect();
+        assert_eq!(sounds, [2, 6, 10, 14]);
+        assert!((0..5).all(|_| { d.tick((0, 0, 0), 3, None, true, false); !d.hit }));
     }
 
     #[test]

@@ -132,6 +132,8 @@ pub struct Mob {
     fspeed: f32,
     jumping: bool,
     wet: bool,
+    /// Wolf: it got wet and has not shaken itself dry yet (`isWolfShaking` before the shake begins).
+    damp: bool,
     blocked: bool,
     life: u8,
     last: i32,
@@ -351,7 +353,7 @@ impl Mob {
         };
         let pos = Vec3::new(x, feet + half.y + 0.01, z);
         Self { kind, body: Player { pos, vel: Vec3::ZERO, on_ground: false }, yaw, health: hp, limb: 0.0, limb_amt: 0.0, hurt: 0, size, color, sheared: false,
-            fuse: 0, tame: false, sitting: false, prey: None, bit: None, coat: COAT_PALE, voice: if kind == Wolf { ((x.to_bits() ^ z.to_bits().rotate_left(11)) % VOICES as u32) as u8 } else { 0 }, saddled: false, ridden: false, half, age: 0, yaw_vel: 0.0, look: None, goal: None, fspeed: 0.0, jumping: false, wet: false, blocked: false, life: 0,
+            fuse: 0, tame: false, sitting: false, prey: None, bit: None, coat: COAT_PALE, voice: if kind == Wolf { ((x.to_bits() ^ z.to_bits().rotate_left(11)) % VOICES as u32) as u8 } else { 0 }, saddled: false, ridden: false, half, age: 0, yaw_vel: 0.0, look: None, goal: None, fspeed: 0.0, jumping: false, wet: false, damp: false, blocked: false, life: 0,
             last: 0, target: false, shot: false, lit: false, anger: 0, attack_time: 0, hop: 0, egg: rng.next_int_bound(6000) + 6000, fire: 0,
             free: 0, swim: Vec3::ZERO, path: Vec::new(), path_i: 0, smart: false, wander: false, panic: 0, scare: Vec3::ZERO, mate: None, graze: 0, rest: 0, gait: 1.0, head: 0.0, munch: 0.0, body_yaw: yaw, head_pitch: 0.0, look_pitch: 0.0, talk: 0, cry: None, airborne: false, enraged: false, growl: 0 }
     }
@@ -564,6 +566,12 @@ impl Mob {
         }
         if k == Wolf && self.wet {
             self.sitting = false; // `EntityWolf.updatePlayerActionState`: in water it stands up
+            self.damp = true;
+        } else if k == Wolf && self.damp && self.body.on_ground && self.path_i >= self.path.len() {
+            // `EntityWolf.onLivingUpdate`: out of the water, on its feet and not walking, it shakes; `onUpdate` makes the sound as it starts.
+            // ponytail: only the sound; there is no shaking animation, and rain does not wet it. Lava counts as wet, as `wet` does.
+            self.damp = false;
+            ev.push(Ev::Snd("mob.wolf.shake", pos, 0.4, 1.0, true));
         }
         // EntityCreature.findPlayerToAttack per kind; anger (zombie pigman, wolf) sets `target` itself.
         self.anger = (self.anger - 1).max(0);
@@ -1531,6 +1539,17 @@ mod tests {
         let mut sheep = Mob::new(Sheep, 32.5, 10.0, 32.5, 0.0, &mut rng);
         sheep.damage(99, sheep.body.pos + Vec3::X, &mut rng);
         assert_eq!(sheep.cry, Some(Cry::Die));
+        // A wolf that got wet shakes once, when it is out of the water and standing: volume 0.4, with the usual spread.
+        let (mut w, mut ev) = (Mob::new(Wolf, 32.5, 10.0, 32.5, 0.0, &mut rng), Vec::new());
+        let l = |_, _, _| 0u8;
+        let far = ctx(Vec3::new(32.5, 11.0, 80.5), &l);
+        w.wet = true;
+        w.tick(&mut rng, &far, &mut ev);
+        assert!(w.damp && ev.is_empty());
+        w.wet = false;
+        w.body.on_ground = true;
+        (0..3).for_each(|_| { w.tick(&mut rng, &far, &mut ev); });
+        assert_eq!(ev.iter().filter(|e| matches!(e, Ev::Snd("mob.wolf.shake", _, v, _, true) if *v == 0.4)).count(), 1);
         // The fuse hisses once, at pitch 0.5 with no spread.
         let l = |_, _, _| 0u8;
         let near = ctx(Vec3::new(32.5, 11.0, 33.5), &l);

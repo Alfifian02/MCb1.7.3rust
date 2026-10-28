@@ -916,6 +916,11 @@ impl App {
         }
         // Dropped items fall, settle and get picked up (before the target check below, which can return early).
         self.drops.tick(dt, &|x: i32, y: i32, z: i32| self.chunks.block(x, y, z).map(|b| self.chunks.physics_at(x, y, z, b)), self.player.pos, &mut self.inv);
+        for at in std::mem::take(&mut self.drops.pops) {
+            // `EntityItem.onCollideWithPlayer` (`EntityArrow`'s is the same call): at the item, volume 0.2, pitch `((r - r) * 0.7 + 1) * 2`.
+            let pitch = ((self.audio.rnd() - self.audio.rnd()) * 0.7 + 1.0) * 2.0;
+            self.audio.play("random.pop", at, 0.2, pitch);
+        }
         let light = |x: i32, y: i32, z: i32| self.chunks.light(x, y, z);
         let biome = |x: i32, z: i32| self.chunks.biome_at(x, z);
         let sight = if self.opts.biome_rules && !self.nether { world::biomelife::sight(self.atmos.density()) } else { 1.0 };
@@ -1058,7 +1063,14 @@ impl App {
                 let rod = self.inv.slots[self.touch.hotbar_slot].is_some_and(|s| s.id == gear::ROD);
                 let get = |x: i32, y: i32, z: i32| self.chunks.block(x, y, z);
                 let rain = self.weather.rain(1.0) > 0.5;
-                if !rod || h.pos.distance_squared(self.player.pos) > 1024.0 || !h.tick(&get, &mut self.mobs.rng, rain) {
+                let alive = rod && h.pos.distance_squared(self.player.pos) <= 1024.0 && h.tick(&get, &mut self.mobs.rng, rain);
+                let splash = std::mem::take(&mut h.splash);
+                if splash > 0.0 {
+                    // `EntityFish`: "random.splash" at the bobber, pitch `1 + (r - r) * 0.4`.
+                    let pitch = 1.0 + (self.audio.rnd() - self.audio.rnd()) * 0.4;
+                    self.audio.play("random.splash", h.pos, splash, pitch);
+                }
+                if !alive {
                     self.hook = None;
                 }
             }
@@ -1242,7 +1254,13 @@ impl App {
                     if let Some(id) = self.chunks.block_loaded(x, y, z) {
                         let slot = self.touch.hotbar_slot;
                         let held = self.inv.slots[slot];
-                        if self.dig.tick(hit.pos, id, held, self.player.on_ground, in_water) {
+                        let broke = self.dig.tick(hit.pos, id, held, self.player.on_ground, in_water);
+                        if self.dig.hit {
+                            // `PlayerControllerSP.sendBlockRemoving`: the step sound at (volume + 1) / 8 and half the pitch.
+                            let (key, _, pitch) = audio::STEP[audio::step_of(id)];
+                            self.audio.play(key, glam::Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5), 0.25, pitch * 0.5);
+                        }
+                        if broke {
                             let meta = self.chunks.meta(x, y, z); // before the cell is cleared: the drop depends on it
                             self.chunks.set_block(x, y, z, 0);
                             // `RenderGlobal` break effect: `stepSoundDir()` at ((volume + 1) / 2, pitch x 0.8).
@@ -1941,7 +1959,12 @@ impl App {
                     }
                     self.inv.damage(slot, wear);
                 }
-                None => self.hook = Some(Hook::cast(eye, fwd, &mut self.mobs.rng)),
+                None => {
+                    self.hook = Some(Hook::cast(eye, fwd, &mut self.mobs.rng));
+                    // `ItemFishingRod`: "random.bow" (NOT in the b1.7.3 index, see `assets/sound/extra`) at 0.5, pitch `0.4 / (r * 0.4 + 0.8)`.
+                    let pitch = 0.4 / (self.audio.rnd() * 0.4 + 0.8);
+                    self.audio.play_here("random.bow", 0.5, pitch);
+                }
             },
             gear::BUCKET | gear::WATER_BUCKET | gear::LAVA_BUCKET => self.use_bucket(slot, held.id),
             gear::BOAT => self.use_boat(slot),

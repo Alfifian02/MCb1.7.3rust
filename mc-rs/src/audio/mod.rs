@@ -455,13 +455,14 @@ mod tests {
     #[test]
     fn every_name_the_java_plays_exists_and_decodes() {
         for k in ["random.click", "random.explode", "random.glass", "step.grass", "step.sand", "step.snow", "mob.ghast.fireball", "mob.zombiepig.zpigangry",
-                  "ambient.cave.cave", "ambient.weather.thunder", "note.bassattack", "tile.piston.in", "liquid.water", "fire.fire", "portal.portal", "random.wood click"] {
+                  "ambient.cave.cave", "ambient.weather.thunder", "note.bassattack", "tile.piston.in", "liquid.water", "fire.fire", "portal.portal", "random.wood click", "random.bow", "random.pop", "random.splash", "mob.wolf.shake"] {
             let (_, v) = table::SFX.iter().find(|e| e.0 == k).unwrap_or_else(|| panic!("{k}"));
             assert!(v.iter().all(|d| decode(d).is_some_and(|c| !c.pcm.is_empty())), "{k}");
         }
-        // The b1.7.3 index has 80 keys in 194 files; NOT b1.7.3: its wolf's six cries (12 files) are replaced by seven voices of six (84 files).
-        assert_eq!((table::SFX.len(), table::MUSIC.len(), table::RECORDS.len()), (80 - 6 + 7 * 6, 12, 2));
-        assert_eq!(table::SFX.iter().map(|e| e.1.len()).sum::<usize>(), 194 - 12 + 7 * 12);
+        // The b1.7.3 index has 80 keys in 194 files; NOT b1.7.3: its wolf's six cries (12 files) are replaced by seven voices of six (84 files),
+        // and `random.bow` (the rod's cast; one file, `assets/sound/extra`) is added because the index lacks it.
+        assert_eq!((table::SFX.len(), table::MUSIC.len(), table::RECORDS.len()), (80 - 6 + 7 * 6 + 1, 12, 2));
+        assert_eq!(table::SFX.iter().map(|e| e.1.len()).sum::<usize>(), 194 - 12 + 7 * 12 + 1);
     }
 
     #[test]
