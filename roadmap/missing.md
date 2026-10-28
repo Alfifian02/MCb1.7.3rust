@@ -8,8 +8,7 @@ How it was made: the decompiled `minecraft/src` (675 classes: 84 blocks, 103 ite
 
 | # | What | Java | State in mc-rs | Size |
 |---|------|------|----------------|------|
-| 1 | Minecart with chest: the 27 slots | `EntityMinecart` type 1 (`IInventory`) | `Cart` kind 1 is placed, drawn and dropped, but tapping it does nothing and a broken one loses its contents | medium (a chest screen over a cart, not a tile) |
-| 2 | Ghast, fireball, Nether spawns | `EntityGhast`, `EntityFireball`, `BiomeGenHell.spawnableMonsterList` (Ghast 10, PigZombie 10) | `mobs::Kind` has 13 kinds, no Ghast; `Mobs::no_spawn` stops every spawn in the Nether, so the pig zombie (which exists) never appears there; sounds for both are already in the audio table | medium |
+| 2 | Ghast and fireball | `EntityGhast`, `EntityFireball` (spawn weight Ghast 10 once it exists) | `mobs::Kind` has 13 kinds, no Ghast; the Nether spawns pig zombies only (entry 30); sounds for both are already in the audio table; skins `mob/ghast.png`, `ghast_fire.png` are in the jar | medium |
 | 3 | Map item | `ItemMap`, `MapData`, `MapItemRenderer`, `MapStorage`, recipe 358 = paper ring round a compass | nothing | medium to large (per-map saved data, a renderer) |
 | 4 | Chat | `GuiChat`, `ChatLine` | nothing (a single-player port has no sender except commands; the overlay is the deferred rest of M14) | medium |
 | 5 | Achievements and Statistics | `AchievementList`, `GuiAchievements`, `GuiAchievement` (toast), `StatList`, `GuiStats` | both buttons drawn greyed out (`menu.rs`, `options.rs`); no stat system | large (counters everywhere, saved, two screens) |
@@ -26,6 +25,10 @@ Charcoal torch (`code()` ignores coal damage). All 58 `CraftingManager` recipes 
 `ChunkProviderSky` (Skylands) exists in the Java but no dimension or world type reaches it in b1.7.3, so it is not counted.
 
 ## Done in these passes
+
+Nether spawns (entry 30): `Mobs::nether`, pig zombies only, no light test.
+
+Minecart with chest, the 27 slots (entry 29): tap with an empty hand opens a `Minecart` screen, a broken cart spills them.
 
 Compass (345), clock (347) and minecart-with-chest (342) recipes; the chest cart can be placed, is drawn and breaks into the cart and a chest (entry 13). The furnace cart recipe is shaped like the Java (furnace over minecart); the compass and clock already animated (`render/anim.rs`, an earlier version of this file said they did not) and now spin in the Nether like `TextureCompassFX` / `TextureWatchFX`; Rename world works (`GuiRenameWorld`, name only, the folder keeps its name) (entry 14). (20) Natural wolves in the forest and taiga: the audit had missed that no wild wolf ever spawned. All written without a toolchain.
 

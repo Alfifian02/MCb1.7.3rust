@@ -1,0 +1,168 @@
+diff --git a/mc-rs/src/lib.rs b/mc-rs/src/lib.rs
+index b177133..e5537c4 100644
+--- a/mc-rs/src/lib.rs
++++ b/mc-rs/src/lib.rs
+@@ -439,7 +439,7 @@ impl App {
+         if self.nether {
+             self.dir = self.overworld_dir();
+             self.nether = false;
+-            self.mobs.no_spawn = false;
++            self.mobs.nether = false;
+             let _ = std::fs::write(self.dir.join("dim"), "overworld");
+         }
+     }
+@@ -466,7 +466,7 @@ impl App {
+         (self.carry, self.mat) = (None, None); // the cloth stays in the dimension it was spread in; `pack_tick` closes its screen
+         let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as i64);
+         (self.mobs, self.drops, self.ticks) = (Mobs::new(seed), Drops::new(seed), Ticks::new(seed));
+-        self.mobs.no_spawn = nether;
++        self.mobs.nether = nether;
+         self.boats = boat::Boats::default();
+         self.carts = minecart::Carts::default();
+         (self.detectors, self.paintings, self.signs) = (Default::default(), Vec::new(), HashMap::new());
+@@ -588,7 +588,7 @@ impl App {
+         (self.inv, self.drops, self.mobs, self.ticks) = (Inventory::default(), Drops::new(seed), Mobs::new(seed), Ticks::new(seed));
+         (self.furnaces, self.furn_acc, self.vitals, self.save_acc) = (HashMap::new(), 0.0, Vitals::default(), 0.0);
+         self.chests.clear();
+-        self.mobs.no_spawn = self.nether;
++        self.mobs.nether = self.nether;
+         self.touch.hotbar_slot = 0;
+         if let Some(l) = level {
+             self.restore(l);
+diff --git a/mc-rs/src/world/mobs.rs b/mc-rs/src/world/mobs.rs
+index 87391bf..51c15d7 100644
+--- a/mc-rs/src/world/mobs.rs
++++ b/mc-rs/src/world/mobs.rs
+@@ -14,7 +14,7 @@
+ //! of `moveFlying` (`moveSpeed` x 0.1 x 0.98 against 0.546 drag), reached the way the Java does, by momentum (see `step`: 0.546 a tick on the
+ //! ground, 0.91 in the air, so a mob eases into a walk, glides to a stop and keeps its run over a hop), and the body trails the head
+ //! (`body_yaw` = `renderYawOffset`, `head_pitch` = `faceEntity`'s pitch): both closer to b1.7.3 than the old instant speed and stiff turn. Explosions have no exposure
+-//! test, and knock the player back not at all. Normal difficulty. Ghast (needs the Nether) and the pig-zombie spawn are not here.
++//! test, and knock the player back not at all. Normal difficulty. The Nether's pig zombies spawn (`Mobs::nether`); the ghast is not here.
+ //! NOT b1.7.3 either (same switch, `Mobs::smart`): calm animals graze, root, peck and rest (`Mob::idle`). A cow or sheep on grass lowers its head and
+ //! chews 3 to 8 s, a pig roots on grass or dirt 2 to 5 s, a hen pecks the ground in short 1 to 2 s runs, and a cow, sheep or pig now and then stands
+ //! still for 8 to 20 s; each walk has its own gait (a stroll at 0.6 to 1.0 x the walk, a hen sometimes dashes at 1.5 x). Eating, rooting or resting
+@@ -1072,8 +1072,10 @@ pub struct Mobs {
+     acc: f32,
+     clock: u32,
+     burst: u32,
+-    /// The Nether has no overworld mobs (its own, ghast and pigman, are not written yet).
++    /// Nothing spawns at all (the tests set it).
+     pub no_spawn: bool,
++    /// The Nether (`BiomeGenHell.spawnableMonsterList`): no animals, no squid and no overworld monsters, only pig zombies.
++    pub nether: bool,
+     /// `GameSettings.difficulty`: 0 Peaceful removes the monsters and spawns none.
+     pub difficulty: u8,
+     /// Smart animals (not b1.7.3, `animalAi` in options.txt): walk by path, drift back to the herd, run when hit.
+@@ -1087,7 +1089,7 @@ fn hostile(k: Kind) -> bool {
+ 
+ impl Mobs {
+     pub fn new(seed: i64) -> Self {
+-        Self { list: Vec::new(), arrows: Vec::new(), rng: JavaRandom::new(seed ^ 0x5049_47), snd: JavaRandom::new(seed ^ 0x534E_44), seed, acc: 0.0, clock: 0, burst: 200, no_spawn: false, difficulty: 2, smart: true }
++        Self { list: Vec::new(), arrows: Vec::new(), rng: JavaRandom::new(seed ^ 0x5049_47), snd: JavaRandom::new(seed ^ 0x534E_44), seed, acc: 0.0, clock: 0, burst: 200, no_spawn: false, nether: false, difficulty: 2, smart: true }
+     }
+ 
+     /// NOT b1.7.3 (`animalAi`, proposal 5, predators and grazers): a wild, calm, standing wolf in its hunting third of the time picks the
+@@ -1161,6 +1163,9 @@ impl Mobs {
+         match kind {
+             Pig | Cow | Sheep | Chicken | Wolf => below == Some(2) && feet == Some(0) && head == Some(0) && light > 8,
+             Squid => matches!(feet, Some(8 | 9)) && matches!(head, Some(8 | 9)) && (46..63).contains(&y),
++            // `EntityPigZombie.getCanSpawnHere`: no light test (the Nether has none), a free box, no liquid.
++            // ponytail: the ground is still asked for (the Java spawns in mid-air and lets it fall).
++            PigZombie if self.nether => solid(below) && feet == Some(0) && head == Some(0),
+             _ => {
+                 let dark = light as i32 <= self.rng.next_int_bound(8);
+                 let ground = solid(below) && feet == Some(0) && head == Some(0);
+@@ -1211,7 +1216,7 @@ impl Mobs {
+         };
+         let burst = self.burst > 0;
+         self.burst = self.burst.saturating_sub(1);
+-        if burst || self.clock % ANIMAL_EVERY == 0 {
++        if !self.nether && (burst || self.clock % ANIMAL_EVERY == 0) {
+             // The fuller the surroundings, the rarer the attempt: the herds ease into the cap instead of hitting it.
+             let near = self.count_near(&ANIMALS, c.player, NEAR);
+             if near < CAP_ANIMALS && self.rng.next_int_bound(CAP_ANIMALS as i32) as usize >= near {
+@@ -1226,16 +1231,17 @@ impl Mobs {
+                 }
+             }
+         }
+-        if (burst || self.clock % 400 == 0) && n(&self.list, &[Squid]) < CAP_SQUID {
++        if !self.nether && (burst || self.clock % 400 == 0) && n(&self.list, &[Squid]) < CAP_SQUID {
+             let (x, z) = ring(&mut self.rng);
+             let y = 46 + self.rng.next_int_bound(17);
+             self.pack(c, Squid, (x, y, z), CAP_SQUID);
+         }
+-        if self.clock % 40 == 0 && self.difficulty > 0 && n(&self.list, &[Zombie, Skeleton, Creeper, Spider, Slime]) < CAP_MONSTERS {
++        let monsters: &[Kind] = if self.nether { &[PigZombie] } else { &[Zombie, Skeleton, Creeper, Spider, Slime] };
++        if self.clock % 40 == 0 && self.difficulty > 0 && n(&self.list, monsters) < CAP_MONSTERS {
+             for _ in 0..8 {
+                 let (x, z) = ring(&mut self.rng);
+                 let y = ((c.player.y as i32) + self.rng.next_int_bound(41) - 20).clamp(1, 126);
+-                let kind = [Spider, Zombie, Skeleton, Creeper, Slime][self.rng.next_int_bound(5) as usize];
++                let kind = if self.nether { PigZombie } else { [Spider, Zombie, Skeleton, Creeper, Slime][self.rng.next_int_bound(5) as usize] };
+                 let before = self.list.len();
+                 self.pack(c, kind, (x, y, z), CAP_MONSTERS);
+                 if self.list.len() > before {
+@@ -2051,6 +2057,28 @@ mod tests {
+         assert_eq!(run(true, false, HUNT_TICKS - 1 + HUNT_TICKS), (full, false), "a wolf rests two thirds of the time");
+     }
+ 
++    /// `BiomeGenHell`: the Nether spawns pig zombies and nothing else, in the light that would keep every overworld monster away; the
++    /// same floor in the overworld spawns nobody (no grass for animals, too bright for monsters); Peaceful spawns none.
++    #[test]
++    fn the_nether_spawns_pig_zombies_only() {
++        let floor = |_: i32, y: i32, _: i32| Some(match y { 0 => 7, 1..=9 => 87, _ => 0 });
++        let l = |_, _, _| 15u8;
++        let player = Vec3::new(0.5, 11.0, 0.5);
++        let c = Ctx { get: &floor, light: &l, day: false, player, eye: player + Vec3::Y * 0.6, biome: &|_, _| Biome::Plains, sight: 1.0 };
++        let run = |nether: bool, difficulty: u8| {
++            let (mut m, mut drops) = (Mobs::new(5), Drops::new(1));
++            (m.nether, m.difficulty) = (nether, difficulty);
++            for _ in 0..2000 {
++                m.update(TICK, &c, &mut drops);
++            }
++            m.list.iter().map(|a| a.kind).collect::<Vec<_>>()
++        };
++        let hell = run(true, 2);
++        assert!(!hell.is_empty() && hell.len() <= CAP_MONSTERS && hell.iter().all(|&k| k == PigZombie), "{hell:?}");
++        assert!(run(false, 2).is_empty(), "the overworld has no use for this floor");
++        assert!(run(true, 0).is_empty(), "Peaceful");
++    }
++
+     /// NOT b1.7.3 (`animalAi`, proposal 5): a sheep that finishes grazing says which cell it ate.
+     #[test]
+     fn a_grazing_sheep_reports_the_cell_it_ate() {
+diff --git a/roadmap/gameplay.md b/roadmap/gameplay.md
+index a211cf3..63338f5 100644
+--- a/roadmap/gameplay.md
++++ b/roadmap/gameplay.md
+@@ -4,6 +4,7 @@ Part of [`ROADMAP.md`](../ROADMAP.md). The to-do milestones of this part (M11 Ne
+ 
+ ## Changelog
+ 
++- 2026-10-29 (30): Nether spawns (`missing.md` entry 2, first half). `Mobs::nether` replaces `no_spawn` in `lib.rs` (`no_spawn` stays for tests): no animals, squid or overworld monsters; the monster pass picks `PigZombie` (`BiomeGenHell.spawnableMonsterList` without the ghast, which will draw its 10 / 20 weight), and `can_spawn` skips the dark test as `EntityPigZombie.getCanSpawnHere` does. ponytail: the ground is still required (the Java spawns in mid-air). Test: `mobs::tests::the_nether_spawns_pig_zombies_only`; `mobs` compiled and its 28 tests run in a Linux scratch crate, `lib.rs` not compiled.
+ - 2026-10-29 (29): minecart with chest, its 27 slots (`missing.md` entry 1). `Cart::id` (a process-wide counter) names the slots `Cart::key()` = `(i32::MIN, id, 0)` in `App::chests`, so `Screen::at_chest`, `ext` and the spill code are the chest's own; no new screen. `EntityMinecart.interact` type 1: a tap with an empty hand opens the screen titled `Minecart` (a held item still hits, as for every vehicle here). `canInteractWith`: the cart is alive and within 8 blocks of the player (`lib.rs` `reach`, in place of `chest::usable` for that key). Breaking it spills every slot (`scatter`, one entity per stack, not 10..30 piles) next to the cart and chest drops. Not saved, as carts are not (the key is filtered out of `level`). Tests: +1 assert in `minecart::tests::hits_break_it_and_the_pieces_drop`; `minecart` compiled and tested in a Linux scratch crate (`detector_sees_the_cart_over_it_only` already fails on the base tree), `lib.rs` not compiled (wgpu 26 needs a newer rustc than the host's 1.75).
+ - 2026-10-28 (28): the rest of the sounds of (26)'s list, on top of (27). Dispenser (`BlockDispenser.dispenseItem`, at the block's corner): `random.bow` at 1.0 and pitch 1.2 for an arrow, egg or snowball, `random.click` at 1.0 / 1.0 for anything else it drops, and 1.0 / 1.2 when it is empty. `ItemReed` (sugar cane, cake, the repeater; not the dust): the placed block's step sound as `ItemBlock` makes it (`placed` in `lib.rs`). Fizz: `Vitals::fizz` and `Mob`'s wet branch make `random.fizz` once when water puts a burning body out (0.7, pitch `1.6 + (r - r) * 0.4`; a mob's spread is +-0.32 as `Ev::Snd` has it). Bucket: in the Nether a bucket of water no longer places water (`ItemBucket`): the bucket empties and `random.fizz` plays (0.5, `2.6 + (r - r) * 0.8`); **this changes what happens**, not only a sound (ponytail: the 8 smoke puffs are not drawn). Not done: `random.drr`: nothing in the repo or the archives says where the Java plays it, and a call site made up would be a guess (the Java source is not in `Repo.zip`). Tests: asserts added to the vitals and wolf / mob tests. UNVERIFIED: the Java call sites were written from memory of b1.7.3, not read from its source; the `lib.rs` wiring (does not build on a host); the pitch / volume by ear.
+ - 2026-10-28 (27): the bow's sounds, on top of (26). `Ev::Bow(at, hit)`: `random.bow` as a skeleton shoots (1.0, `1 / (r * 0.4 + 0.8)`) and as the player's bow does (`lib.rs`, same formula), `random.bowhit` where an arrow meets a block, a mob or the player (1.0, `1.2 / (r * 0.2 + 0.9)`), not when one just times out in the air, and not for snowballs and eggs. `random.bowhit` is **NOT b1.7.3** (four files, `bowhit1-4.ogg` of the `mc_sounds` pack, in `assets/sound/extra/random/`; `tools/gen_sounds.py` picks them up). The dispenser's shot is still silent. Tests: +1 in `mobs.rs`, the sound-table counts and names. UNVERIFIED: the `lib.rs` wiring (does not build on a host), the pitch / volume by ear.
+diff --git a/roadmap/missing.md b/roadmap/missing.md
+index 650ead1..ae568f0 100644
+--- a/roadmap/missing.md
++++ b/roadmap/missing.md
+@@ -8,7 +8,7 @@ How it was made: the decompiled `minecraft/src` (675 classes: 84 blocks, 103 ite
+ 
+ | # | What | Java | State in mc-rs | Size |
+ |---|------|------|----------------|------|
+-| 2 | Ghast, fireball, Nether spawns | `EntityGhast`, `EntityFireball`, `BiomeGenHell.spawnableMonsterList` (Ghast 10, PigZombie 10) | `mobs::Kind` has 13 kinds, no Ghast; `Mobs::no_spawn` stops every spawn in the Nether, so the pig zombie (which exists) never appears there; sounds for both are already in the audio table | medium |
++| 2 | Ghast and fireball | `EntityGhast`, `EntityFireball` (spawn weight Ghast 10 once it exists) | `mobs::Kind` has 13 kinds, no Ghast; the Nether spawns pig zombies only (entry 30); sounds for both are already in the audio table; skins `mob/ghast.png`, `ghast_fire.png` are in the jar | medium |
+ | 3 | Map item | `ItemMap`, `MapData`, `MapItemRenderer`, `MapStorage`, recipe 358 = paper ring round a compass | nothing | medium to large (per-map saved data, a renderer) |
+ | 4 | Chat | `GuiChat`, `ChatLine` | nothing (a single-player port has no sender except commands; the overlay is the deferred rest of M14) | medium |
+ | 5 | Achievements and Statistics | `AchievementList`, `GuiAchievements`, `GuiAchievement` (toast), `StatList`, `GuiStats` | both buttons drawn greyed out (`menu.rs`, `options.rs`); no stat system | large (counters everywhere, saved, two screens) |
+@@ -26,6 +26,8 @@ Charcoal torch (`code()` ignores coal damage). All 58 `CraftingManager` recipes
+ 
+ ## Done in these passes
+ 
++Nether spawns (entry 30): `Mobs::nether`, pig zombies only, no light test.
++
+ Minecart with chest, the 27 slots (entry 29): tap with an empty hand opens a `Minecart` screen, a broken cart spills them.
+ 
+ Compass (345), clock (347) and minecart-with-chest (342) recipes; the chest cart can be placed, is drawn and breaks into the cart and a chest (entry 13). The furnace cart recipe is shaped like the Java (furnace over minecart); the compass and clock already animated (`render/anim.rs`, an earlier version of this file said they did not) and now spin in the Nether like `TextureCompassFX` / `TextureWatchFX`; Rename world works (`GuiRenameWorld`, name only, the folder keeps its name) (entry 14). (20) Natural wolves in the forest and taiga: the audit had missed that no wild wolf ever spawned. All written without a toolchain.

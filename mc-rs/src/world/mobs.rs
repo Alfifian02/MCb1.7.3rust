@@ -14,7 +14,7 @@
 //! of `moveFlying` (`moveSpeed` x 0.1 x 0.98 against 0.546 drag), reached the way the Java does, by momentum (see `step`: 0.546 a tick on the
 //! ground, 0.91 in the air, so a mob eases into a walk, glides to a stop and keeps its run over a hop), and the body trails the head
 //! (`body_yaw` = `renderYawOffset`, `head_pitch` = `faceEntity`'s pitch): both closer to b1.7.3 than the old instant speed and stiff turn. Explosions have no exposure
-//! test, and knock the player back not at all. Normal difficulty. Ghast (needs the Nether) and the pig-zombie spawn are not here.
+//! test, and knock the player back not at all. Normal difficulty. The Nether's pig zombies spawn (`Mobs::nether`); the ghast is not here.
 //! NOT b1.7.3 either (same switch, `Mobs::smart`): calm animals graze, root, peck and rest (`Mob::idle`). A cow or sheep on grass lowers its head and
 //! chews 3 to 8 s, a pig roots on grass or dirt 2 to 5 s, a hen pecks the ground in short 1 to 2 s runs, and a cow, sheep or pig now and then stands
 //! still for 8 to 20 s; each walk has its own gait (a stroll at 0.6 to 1.0 x the walk, a hen sometimes dashes at 1.5 x). Eating, rooting or resting
@@ -1072,8 +1072,10 @@ pub struct Mobs {
     acc: f32,
     clock: u32,
     burst: u32,
-    /// The Nether has no overworld mobs (its own, ghast and pigman, are not written yet).
+    /// Nothing spawns at all (the tests set it).
     pub no_spawn: bool,
+    /// The Nether (`BiomeGenHell.spawnableMonsterList`): no animals, no squid and no overworld monsters, only pig zombies.
+    pub nether: bool,
     /// `GameSettings.difficulty`: 0 Peaceful removes the monsters and spawns none.
     pub difficulty: u8,
     /// Smart animals (not b1.7.3, `animalAi` in options.txt): walk by path, drift back to the herd, run when hit.
@@ -1087,7 +1089,7 @@ fn hostile(k: Kind) -> bool {
 
 impl Mobs {
     pub fn new(seed: i64) -> Self {
-        Self { list: Vec::new(), arrows: Vec::new(), rng: JavaRandom::new(seed ^ 0x5049_47), snd: JavaRandom::new(seed ^ 0x534E_44), seed, acc: 0.0, clock: 0, burst: 200, no_spawn: false, difficulty: 2, smart: true }
+        Self { list: Vec::new(), arrows: Vec::new(), rng: JavaRandom::new(seed ^ 0x5049_47), snd: JavaRandom::new(seed ^ 0x534E_44), seed, acc: 0.0, clock: 0, burst: 200, no_spawn: false, nether: false, difficulty: 2, smart: true }
     }
 
     /// NOT b1.7.3 (`animalAi`, proposal 5, predators and grazers): a wild, calm, standing wolf in its hunting third of the time picks the
@@ -1161,6 +1163,9 @@ impl Mobs {
         match kind {
             Pig | Cow | Sheep | Chicken | Wolf => below == Some(2) && feet == Some(0) && head == Some(0) && light > 8,
             Squid => matches!(feet, Some(8 | 9)) && matches!(head, Some(8 | 9)) && (46..63).contains(&y),
+            // `EntityPigZombie.getCanSpawnHere`: no light test (the Nether has none), a free box, no liquid.
+            // ponytail: the ground is still asked for (the Java spawns in mid-air and lets it fall).
+            PigZombie if self.nether => solid(below) && feet == Some(0) && head == Some(0),
             _ => {
                 let dark = light as i32 <= self.rng.next_int_bound(8);
                 let ground = solid(below) && feet == Some(0) && head == Some(0);
@@ -1211,7 +1216,7 @@ impl Mobs {
         };
         let burst = self.burst > 0;
         self.burst = self.burst.saturating_sub(1);
-        if burst || self.clock % ANIMAL_EVERY == 0 {
+        if !self.nether && (burst || self.clock % ANIMAL_EVERY == 0) {
             // The fuller the surroundings, the rarer the attempt: the herds ease into the cap instead of hitting it.
             let near = self.count_near(&ANIMALS, c.player, NEAR);
             if near < CAP_ANIMALS && self.rng.next_int_bound(CAP_ANIMALS as i32) as usize >= near {
@@ -1226,16 +1231,17 @@ impl Mobs {
                 }
             }
         }
-        if (burst || self.clock % 400 == 0) && n(&self.list, &[Squid]) < CAP_SQUID {
+        if !self.nether && (burst || self.clock % 400 == 0) && n(&self.list, &[Squid]) < CAP_SQUID {
             let (x, z) = ring(&mut self.rng);
             let y = 46 + self.rng.next_int_bound(17);
             self.pack(c, Squid, (x, y, z), CAP_SQUID);
         }
-        if self.clock % 40 == 0 && self.difficulty > 0 && n(&self.list, &[Zombie, Skeleton, Creeper, Spider, Slime]) < CAP_MONSTERS {
+        let monsters: &[Kind] = if self.nether { &[PigZombie] } else { &[Zombie, Skeleton, Creeper, Spider, Slime] };
+        if self.clock % 40 == 0 && self.difficulty > 0 && n(&self.list, monsters) < CAP_MONSTERS {
             for _ in 0..8 {
                 let (x, z) = ring(&mut self.rng);
                 let y = ((c.player.y as i32) + self.rng.next_int_bound(41) - 20).clamp(1, 126);
-                let kind = [Spider, Zombie, Skeleton, Creeper, Slime][self.rng.next_int_bound(5) as usize];
+                let kind = if self.nether { PigZombie } else { [Spider, Zombie, Skeleton, Creeper, Slime][self.rng.next_int_bound(5) as usize] };
                 let before = self.list.len();
                 self.pack(c, kind, (x, y, z), CAP_MONSTERS);
                 if self.list.len() > before {
@@ -2049,6 +2055,28 @@ mod tests {
         assert_eq!(run(true, true, 0), (full, false), "a tame wolf does not hunt");
         assert_eq!(run(false, false, 0), (full, false), "animalAi off: no hunt");
         assert_eq!(run(true, false, HUNT_TICKS - 1 + HUNT_TICKS), (full, false), "a wolf rests two thirds of the time");
+    }
+
+    /// `BiomeGenHell`: the Nether spawns pig zombies and nothing else, in the light that would keep every overworld monster away; the
+    /// same floor in the overworld spawns nobody (no grass for animals, too bright for monsters); Peaceful spawns none.
+    #[test]
+    fn the_nether_spawns_pig_zombies_only() {
+        let floor = |_: i32, y: i32, _: i32| Some(match y { 0 => 7, 1..=9 => 87, _ => 0 });
+        let l = |_, _, _| 15u8;
+        let player = Vec3::new(0.5, 11.0, 0.5);
+        let c = Ctx { get: &floor, light: &l, day: false, player, eye: player + Vec3::Y * 0.6, biome: &|_, _| Biome::Plains, sight: 1.0 };
+        let run = |nether: bool, difficulty: u8| {
+            let (mut m, mut drops) = (Mobs::new(5), Drops::new(1));
+            (m.nether, m.difficulty) = (nether, difficulty);
+            for _ in 0..2000 {
+                m.update(TICK, &c, &mut drops);
+            }
+            m.list.iter().map(|a| a.kind).collect::<Vec<_>>()
+        };
+        let hell = run(true, 2);
+        assert!(!hell.is_empty() && hell.len() <= CAP_MONSTERS && hell.iter().all(|&k| k == PigZombie), "{hell:?}");
+        assert!(run(false, 2).is_empty(), "the overworld has no use for this floor");
+        assert!(run(true, 0).is_empty(), "Peaceful");
     }
 
     /// NOT b1.7.3 (`animalAi`, proposal 5): a sheep that finishes grazing says which cell it ate.

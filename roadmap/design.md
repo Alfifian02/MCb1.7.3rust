@@ -32,7 +32,6 @@ Light and the day (`sky`, `climate`, `atmos`); weather and biome climate (`clima
 ## Where a feature is thin today (my reading of the code; confirm before acting)
 
 - **Shoulder-surf camera:** only `lib.rs` uses it. It is a view, so one hook may be enough, but it reads nothing from the world (no aim assist with the bow or fishing rod, no look at mobs).
-- **Chest minecart:** it has a recipe, can be placed and drawn, but holds nothing, so it is a cart that does nothing a plain cart does not (rule 3). Its 27 slots are the first item in `missing.md`.
 - **Sprint and stamina vs food:** b1.7.3 has no hunger, so stamina's only inputs are health and armor. Any later hunger or food system must be joined to the bar, not stand beside it.
 
 ## Feature lines

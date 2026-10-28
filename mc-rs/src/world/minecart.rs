@@ -5,8 +5,11 @@
 //! The furnace cart is pushed from the side it was touched on (`pushX/Z`), burns 1 fuel in 4 ticks while it pushes and is fed coal
 //! (+1200). Two carts push each other with the quirks of the Java (`prevPosX` in the closing-speed test, so they hardly ever
 //! interact away from x = 0).
-//! ponytail: the chest cart (type 1) is not made (its 27 slots need a screen that is not keyed by a block), mobs are not picked
-//! up by a passing cart, no pitch on slopes (the cart is drawn level), carts are not saved, `largesmoke` is an ordinary puff.
+//! The chest cart's 27 slots live in `App::chests` under `Cart::key` (a position no block can have), so the chest screen is shared.
+//! ponytail: mobs are not picked up by a passing cart, no pitch on slopes (the cart is drawn level), carts are not saved (neither
+//! are their slots), `largesmoke` is an ordinary puff.
+
+use std::sync::atomic::{AtomicI32, Ordering};
 
 use glam::Vec3;
 
@@ -106,6 +109,8 @@ pub fn rail_pos(e: &Env, p: Vec3) -> Option<Vec3> {
 
 #[derive(Clone)]
 pub struct Cart {
+    /// Unique per cart (`Entity.entityId`), the name of its slots in `App::chests`.
+    pub id: i32,
     pub pos: Vec3,
     pub prev: Vec3,
     pub vel: Vec3,
@@ -126,7 +131,9 @@ impl Cart {
     /// `EntityMinecart(world, x, y, z, type)`: `(x, y, z)` is half a block over the rail's cell; the centre is `yOffset` (0.35) above that.
     pub fn new(x: f32, y: f32, z: f32, kind: u8) -> Self {
         let pos = Vec3::new(x, y + Y_OFF, z);
-        Self { pos, prev: pos, vel: Vec3::ZERO, yaw: 0.0, flip: false, kind, fuel: 0, push: (0.0, 0.0), damage: 0, hit_time: 0, rock: 1, ridden: false, on_ground: false }
+        // ponytail: a process-wide counter, so callers of `new` need no id plumbing; it wraps after 2^31 carts.
+        static NEXT: AtomicI32 = AtomicI32::new(0);
+        Self { id: NEXT.fetch_add(1, Ordering::Relaxed), pos, prev: pos, vel: Vec3::ZERO, yaw: 0.0, flip: false, kind, fuel: 0, push: (0.0, 0.0), damage: 0, hit_time: 0, rock: 1, ridden: false, on_ground: false }
     }
 
     /// `attackEntityFrom`: rocks, takes `dmg * 10`; true when over 40 and it breaks.
@@ -137,8 +144,14 @@ impl Cart {
         self.damage > 40
     }
 
+    /// Where this cart's 27 slots are kept in `App::chests`: x is `i32::MIN`, which `BlockChest` never has, so the chest screen,
+    /// `chests` and the spill code take it like a chest block (`App` checks the cart, not a block, for reach).
+    pub fn key(&self) -> (i32, i32, i32) {
+        (i32::MIN, self.id, 0)
+    }
+
     /// What it drops when it breaks: the cart, and for a furnace cart the furnace, for a chest cart the chest
-    /// (`EntityMinecart.attackEntityFrom`; the chest's 27 slots are not kept yet).
+    /// (`EntityMinecart.attackEntityFrom`; the 27 slots spill from `App::chests[key]`).
     pub fn drops(&self) -> Vec<ItemStack> {
         let one = |id| ItemStack { id, count: 1, damage: 0 };
         let mut v = vec![one(EMPTY)];
@@ -601,6 +614,8 @@ mod tests {
         assert!(k.hurt(1));
         assert_eq!(k.drops().iter().map(|s| s.id).collect::<Vec<_>>(), vec![EMPTY, FURNACE]);
         assert_eq!(Cart::new(0.0, 0.0, 0.0, 0).drops().len(), 1);
+        let (a, b) = (Cart::new(0.0, 0.0, 0.0, 1), Cart::new(0.0, 0.0, 0.0, 1));
+        assert!(a.key() != b.key() && a.key().0 == i32::MIN, "each chest cart has its own slots, outside every chunk");
     }
 
     /// `func_514_g`: flat rails are 0.5 over the cell, a slope runs from the cell's floor to the top of the next.

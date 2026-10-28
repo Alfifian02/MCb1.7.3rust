@@ -439,7 +439,7 @@ impl App {
         if self.nether {
             self.dir = self.overworld_dir();
             self.nether = false;
-            self.mobs.no_spawn = false;
+            self.mobs.nether = false;
             let _ = std::fs::write(self.dir.join("dim"), "overworld");
         }
     }
@@ -466,7 +466,7 @@ impl App {
         (self.carry, self.mat) = (None, None); // the cloth stays in the dimension it was spread in; `pack_tick` closes its screen
         let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as i64);
         (self.mobs, self.drops, self.ticks) = (Mobs::new(seed), Drops::new(seed), Ticks::new(seed));
-        self.mobs.no_spawn = nether;
+        self.mobs.nether = nether;
         self.boats = boat::Boats::default();
         self.carts = minecart::Carts::default();
         (self.detectors, self.paintings, self.signs) = (Default::default(), Vec::new(), HashMap::new());
@@ -588,7 +588,7 @@ impl App {
         (self.inv, self.drops, self.mobs, self.ticks) = (Inventory::default(), Drops::new(seed), Mobs::new(seed), Ticks::new(seed));
         (self.furnaces, self.furn_acc, self.vitals, self.save_acc) = (HashMap::new(), 0.0, Vitals::default(), 0.0);
         self.chests.clear();
-        self.mobs.no_spawn = self.nether;
+        self.mobs.nether = self.nether;
         self.touch.hotbar_slot = 0;
         if let Some(l) = level {
             self.restore(l);
@@ -642,7 +642,7 @@ impl App {
             vitals: [self.vitals.health, self.vitals.air, self.vitals.fire],
             inv: self.inv.slots,
             furnaces: self.furnaces.iter().map(|(&p, f)| (p, f.clone())).collect(),
-            chests: self.chests.iter().map(|(&p, &c)| (p, c)).collect(),
+            chests: self.chests.iter().filter(|(p, _)| p.0 != i32::MIN).map(|(&p, &c)| (p, c)).collect(),
             spawners: self.fx.spawners.iter().map(|(&p, s)| (p, s.kind, s.delay)).collect(),
             bed: self.bed_spawn,
             drops: self.drops.items.iter().map(|e| (e.pos, e.stack, e.age)).collect(),
@@ -1195,7 +1195,11 @@ impl App {
         }
 
         // `EntityPlayer.onUpdate`: a container that is no longer usable (the chest is gone, or the eye is 8+ blocks away) closes.
-        if self.screen.as_ref().is_some_and(|s| !s.chests.is_empty() && !chest::usable(&|x, y, z| self.chunks.block(x, y, z).unwrap_or(0), self.camera.pos, &s.chests)) {
+        let reach = |p: &chest::Pos| match p.0 {
+            i32::MIN => self.carts.list.iter().any(|c| c.key() == *p && (self.player.pos - c.pos).length_squared() <= 64.0),
+            _ => chest::usable(&|x, y, z| self.chunks.block(x, y, z).unwrap_or(0), self.camera.pos, std::slice::from_ref(p)),
+        };
+        if self.screen.as_ref().is_some_and(|s| !s.chests.iter().all(reach)) {
             self.close_screen();
         }
 
@@ -1340,6 +1344,11 @@ impl App {
                     None if furnace => {
                         self.carts.list[ci].push_from(self.player.pos, false);
                     }
+                    None if self.carts.list[ci].kind == 1 => {
+                        let k = self.carts.list[ci].key();
+                        self.chests.entry(k).or_default();
+                        self.open_screen(Screen::at_chest(vec![k]));
+                    }
                     None => {
                         if self.carts.ridden().is_none() {
                             self.carts.list[ci].ridden = true;
@@ -1356,6 +1365,7 @@ impl App {
                             let c = self.carts.list.remove(ci);
                             let cell = (c.pos.x.floor() as i32, c.pos.y.floor() as i32, c.pos.z.floor() as i32);
                             c.drops().into_iter().for_each(|s| self.drops.spawn_stack(s, cell));
+                            self.chests.remove(&c.key()).into_iter().flatten().flatten().for_each(|s| self.drops.scatter(s, cell));
                         }
                         if wear > 0 {
                             self.inv.damage(slot, wear);
@@ -3270,7 +3280,7 @@ impl App {
                 3 => &[("Crafting", 28.0, 6.0), ("Inventory", 8.0, ph - 94.0)],
                 0 => &[("Furnace", 60.0, 6.0), ("Inventory", 8.0, ph - 94.0)],
                 9 => &[("Dispenser", 60.0, 6.0), ("Inventory", 8.0, ph - 94.0)],
-                _ => &[(if s.chests.len() > 1 { "Large chest" } else { "Chest" }, 8.0, 6.0), ("Inventory", 8.0, ph - 94.0)],
+                _ => &[(if s.chests.len() > 1 { "Large chest" } else if s.chests.first().is_some_and(|p| p.0 == i32::MIN) { "Minecart" } else { "Chest" }, 8.0, 6.0), ("Inventory", 8.0, ph - 94.0)],
             };
             for &(text, ux, uy) in labels {
                 // 0.75 x: the 8 px glyphs are wider than vanilla's proportional font and ran into the grid and the buttons.
