@@ -303,6 +303,15 @@ impl Menu {
         self.opt.pad_button(b, st);
     }
 
+    /// The options screen is up: the pad's bumpers step its tabs.
+    pub fn in_options(&self) -> bool {
+        self.scr == Scr::Options
+    }
+
+    pub fn step_tab(&mut self, d: i32, st: &mut Settings) {
+        self.opt.step_tab(d, st);
+    }
+
     // ---- input ----
 
     pub fn event(&mut self, ev: ScreenEv, w: f32, h: f32, st: &mut Settings) {

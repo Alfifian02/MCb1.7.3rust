@@ -2976,6 +2976,17 @@ impl App {
         if let Some(shift) = self.touch.take_alt() {
             self.pad_alt(shift);
         }
+        // LB / RB step the options tabs (the satchel's book takes them in `sat_pad_keys` otherwise).
+        if self.pause.as_ref().is_some_and(Pause::in_options) || self.menu.as_ref().is_some_and(Menu::in_options) {
+            let d = self.touch.take_page();
+            if d != 0 {
+                if let Some(p) = self.pause.as_mut().filter(|p| p.in_options()) {
+                    p.step_tab(d, &mut self.opts);
+                } else if let Some(m) = self.menu.as_mut() {
+                    m.step_tab(d, &mut self.opts);
+                }
+            }
+        }
         self.sat_pad_keys();
         if self.touch.take_pad_info() {
             self.opts.debug_screen = !self.opts.debug_screen;
