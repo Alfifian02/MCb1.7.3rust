@@ -14,7 +14,8 @@
 //! of `moveFlying` (`moveSpeed` x 0.1 x 0.98 against 0.546 drag), reached the way the Java does, by momentum (see `step`: 0.546 a tick on the
 //! ground, 0.91 in the air, so a mob eases into a walk, glides to a stop and keeps its run over a hop), and the body trails the head
 //! (`body_yaw` = `renderYawOffset`, `head_pitch` = `faceEntity`'s pitch): both closer to b1.7.3 than the old instant speed and stiff turn. Explosions have no exposure
-//! test, and knock the player back not at all. Normal difficulty. The Nether's pig zombies spawn (`Mobs::nether`); the ghast is not here.
+//! test, and knock the player back not at all. Normal difficulty. The Nether's pig zombies and ghasts spawn (`Mobs::nether`); the ghast (`ai_ghast`, `EntityGhast`) and its `Fireball` are here, silent and drawn as nothing
+//! until the second patch (model, skin, sound).
 //! NOT b1.7.3 either (same switch, `Mobs::smart`): calm animals graze, root, peck and rest (`Mob::idle`). A cow or sheep on grass lowers its head and
 //! chews 3 to 8 s, a pig roots on grass or dirt 2 to 5 s, a hen pecks the ground in short 1 to 2 s runs, and a cow, sheep or pig now and then stands
 //! still for 8 to 20 s; each walk has its own gait (a stroll at 0.6 to 1.0 x the walk, a hen sometimes dashes at 1.5 x). Eating, rooting or resting
@@ -54,6 +55,10 @@ const ANIMALS: [Kind; 5] = [Pig, Cow, Sheep, Chicken, Wolf];
 const ANYWHERE: f32 = f32::INFINITY;
 const CAP_MONSTERS: usize = 10;
 const CAP_SQUID: usize = 3;
+/// `EntityGhast.getMaxSpawnedInChunk` is 1 a spawn. ponytail: no chunk accounting, so this many in the whole loaded Nether. UNVERIFIED by eye.
+const CAP_GHAST: usize = 2;
+/// Render buffer size: most fireballs alive at once.
+pub const MAX_FIREBALLS: usize = 8;
 const TICK: f32 = 0.05;
 /// m/s per unit of `moveSpeed`: 0.7 walks at 3 m/s.
 const WALK: f32 = 3.0 / 0.7;
@@ -69,7 +74,7 @@ const HUNT_RANGE: f32 = 14.0;
 const FLEE_RANGE: f32 = 8.0;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Kind { Pig, Cow, Sheep, Chicken, Wolf, Squid, Zombie, PigZombie, Giant, Skeleton, Creeper, Spider, Slime }
+pub enum Kind { Pig, Cow, Sheep, Chicken, Wolf, Squid, Zombie, PigZombie, Giant, Skeleton, Creeper, Spider, Slime, Ghast }
 use Kind::*;
 
 /// (width, height, health, moveSpeed, attackStrength, a flat colour as wool metadata: unused since the mobs have their skins).
@@ -88,6 +93,7 @@ fn spec(k: Kind) -> (f32, f32, i32, f32, i32, u8) {
         Creeper => (0.6, 1.8, 20, 0.7, 0, 5),
         Spider => (1.4, 0.9, 20, 0.8, 2, 15),
         Slime => (0.6, 0.6, 1, 0.7, 0, 5),
+        Ghast => (4.0, 4.0, 10, 0.7, 0, 0),
     }
 }
 
@@ -178,6 +184,12 @@ pub struct Mob {
     airborne: bool,
     enraged: bool,
     growl: u8,
+    /// Ghast: `attackCounter` (charging from 0 to 20, -40 after a shot; the shot's flame skin shows above 10), `prevAttackCounter`, the waypoint it
+    /// drifts to and `courseChangeCooldown`.
+    pub charge: i32,
+    pub prev_charge: i32,
+    wp: Vec3,
+    course: i32,
 }
 
 /// What a mob says: `getLivingSound` now and then, `getHurtSound` on a fresh hit, `getDeathSound` on the killing one.
@@ -256,6 +268,7 @@ fn cry(k: Kind, c: Cry, wolf: u8) -> Option<(&'static str, f32)> {
         (Slime, Cry::Say) => return None,
         (Slime, _) => "mob.slime",
         (Giant, _) => "random.hurt",
+        (Ghast, _) => return None, // second patch: `mob.ghast.moan` / `scream` / `death` at volume 10
     };
     Some((n, vol))
 }
@@ -268,6 +281,10 @@ pub enum Ev {
     /// A creeper went off here.
     Boom(Vec3),
     Shoot(Vec3, Vec3),
+    /// A ghast fires: where the fireball starts and the vector it is aimed along (centre to centre; `Fireball::new` jitters it).
+    Fire(Vec3, Vec3),
+    /// A fireball burst here: `lib.rs` makes the power 1 explosion with fire (`World.newExplosion(null, x, y, z, 1.0F, true)`).
+    Burst(Vec3),
     /// `random.bow` as a skeleton shoots (`false`), `random.bowhit` as an arrow hits a block, a mob or the player (`true`), here; `lib.rs` plays it.
     Bow(Vec3, bool),
     /// A player's arrow stopped against a block here.
@@ -357,7 +374,7 @@ impl Mob {
         Self { kind, body: Player { pos, vel: Vec3::ZERO, on_ground: false }, yaw, health: hp, limb: 0.0, limb_amt: 0.0, hurt: 0, size, color, sheared: false,
             fuse: 0, tame: false, sitting: false, prey: None, bit: None, coat: COAT_PALE, voice: if kind == Wolf { ((x.to_bits() ^ z.to_bits().rotate_left(11)) % VOICES as u32) as u8 } else { 0 }, saddled: false, ridden: false, half, age: 0, yaw_vel: 0.0, look: None, goal: None, fspeed: 0.0, jumping: false, wet: false, damp: false, blocked: false, life: 0,
             last: 0, target: false, shot: false, lit: false, anger: 0, attack_time: 0, hop: 0, egg: rng.next_int_bound(6000) + 6000, fire: 0,
-            free: 0, swim: Vec3::ZERO, path: Vec::new(), path_i: 0, smart: false, wander: false, panic: 0, scare: Vec3::ZERO, mate: None, graze: 0, rest: 0, gait: 1.0, head: 0.0, munch: 0.0, body_yaw: yaw, head_pitch: 0.0, look_pitch: 0.0, talk: 0, cry: None, airborne: false, enraged: false, growl: 0 }
+            free: 0, swim: Vec3::ZERO, path: Vec::new(), path_i: 0, smart: false, wander: false, panic: 0, scare: Vec3::ZERO, mate: None, graze: 0, rest: 0, gait: 1.0, head: 0.0, munch: 0.0, body_yaw: yaw, head_pitch: 0.0, look_pitch: 0.0, talk: 0, cry: None, airborne: false, enraged: false, growl: 0, charge: 0, prev_charge: 0, wp: pos, course: 0 }
     }
 
     /// `EntityWolf.interact`, a bone that took: tamed, sitting, full health, calm.
@@ -595,6 +612,7 @@ impl Mob {
         let alive = match k {
             Squid => self.ai_squid(rng, d2),
             Slime => self.ai_slime(rng, c, d2),
+            Ghast => self.ai_ghast(rng, c, d2, ev),
             _ => self.ai_walk(rng, c, d2),
         };
         if !alive {
@@ -805,6 +823,60 @@ impl Mob {
         !self.old(rng, d2)
     }
 
+    /// `EntityGhast.updatePlayerActionState`: drift to a waypoint 16 blocks about (a new one when it is reached or 60 away), a push of 0.1 along the
+    /// way every 2..6 ticks if the course is clear, and, with the player within 64 and in sight, face them, charge for 20 ticks and fire; the
+    /// counter then sits at -40. The Java's `targetedEntity` / `aggroCooldown` only matter with several players: `getClosestPlayerToEntity(100)` is
+    /// the player whenever the 64 test passes. The quirk of the Java is kept: the push and the clearance scan use the distance to the OLD waypoint.
+    /// Silent (second patch). ponytail: the despawn on Peaceful is `Mobs::update`'s `hostile`; nothing else but the player can be a target.
+    fn ai_ghast(&mut self, rng: &mut JavaRandom, c: &Ctx, d2: f32, ev: &mut Vec<Ev>) -> bool {
+        if self.old(rng, d2) {
+            return false;
+        }
+        self.prev_charge = self.charge;
+        let (pos, half) = (self.body.pos, self.half);
+        let to = self.wp - pos;
+        let dist = to.length();
+        if dist < 1.0 || dist > 60.0 {
+            let mut r = || (rng.next_float() * 2.0 - 1.0) * 16.0;
+            self.wp = pos + Vec3::new(r(), r(), r());
+        }
+        let due = self.course <= 0;
+        self.course -= 1;
+        if due {
+            self.course += rng.next_int_bound(5) + 2;
+            // `isCourseTraversable`: the box stepped `dist - 1` times along (new waypoint - here) / OLD distance, none of the steps in a block.
+            let step = (self.wp - pos) / dist.max(1e-4);
+            let clear = (1i32..).take_while(|&i| (i as f32) < dist).all(|i| !physics::aabb_hits_solid(pos + step * i as f32, half, c.get));
+            if clear {
+                self.body.vel += to / dist.max(1e-4) * 2.0; // 0.1 blocks a tick
+            } else {
+                self.wp = pos;
+            }
+        }
+        if d2 < 64.0 * 64.0 {
+            let d = c.player - pos;
+            self.yaw = -d.x.atan2(d.z).to_degrees();
+            // `canEntityBeSeen`: from its eye (0.85 of its height above the feet) to the player's.
+            if sees(c.get, pos + Vec3::Y * (half.y * 2.0 * 0.85 - half.y), c.eye) {
+                self.charge += 1;
+                if self.charge == 20 {
+                    let (s, co) = self.yaw.to_radians().sin_cos();
+                    // `getLook(1.0)` is level here (a ghast has no pitch): 4 blocks along the heading, half its height (+ 0.5) up from its feet.
+                    ev.push(Ev::Fire(Vec3::new(pos.x - s * 4.0, pos.y + 0.5, pos.z + co * 4.0), d));
+                    self.charge = -40;
+                }
+            } else if self.charge > 0 {
+                self.charge -= 1;
+            }
+        } else {
+            self.yaw = -self.body.vel.x.atan2(self.body.vel.z).to_degrees();
+            if self.charge > 0 {
+                self.charge -= 1;
+            }
+        }
+        true
+    }
+
     /// `EntitySlime.updatePlayerActionState`: face the player, and hop every 10..30 ticks (a third of that when hunting).
     fn ai_slime(&mut self, rng: &mut JavaRandom, c: &Ctx, d2: f32) -> bool {
         if self.old(rng, d2) {
@@ -835,7 +907,14 @@ impl Mob {
     fn step(&mut self, dt: f32, get: BlockQuery<'_>) {
         let ticks = dt * 20.0;
         let (s, c) = self.yaw.to_radians().sin_cos();
-        if self.free > 0 {
+        if self.kind == Ghast {
+            // `EntityFlying.moveEntityWithHeading`: no gravity, and the motion (the course pushes of `ai_ghast`, a knockback) drags by 0.91 a tick.
+            // `step_box` pulls every body down outside liquid, so that pull is put back first. ponytail: water and lava do not drag it as in the Java.
+            self.body.vel *= 0.91f32.powf(ticks);
+            if !self.wet {
+                self.body.vel.y += 23.0 * dt;
+            }
+        } else if self.free > 0 {
             let drag = 0.546f32.powf(ticks); // knocked back or leaping: no steering until it ends
             self.body.vel.x *= drag;
             self.body.vel.z *= drag;
@@ -875,6 +954,9 @@ impl Mob {
         let heading = if self.free == 0 && (mx * mx + mz * mz).sqrt() / ticks > 0.05 { mz.atan2(mx).to_degrees() - 90.0 } else { self.body_yaw };
         self.body_yaw += norm(heading - self.body_yaw) * (1.0 - 0.7f32.powf(ticks));
         self.body_yaw = self.yaw - norm(self.yaw - self.body_yaw).clamp(-75.0, 75.0);
+        if self.kind == Ghast {
+            self.body_yaw = self.yaw; // `renderYawOffset = rotationYaw`
+        }
         self.head_pitch += (self.look_pitch - self.head_pitch) * (1.0 - 0.7f32.powf(ticks));
         // NOT b1.7.3: the head eases down while it grazes, roots or pecks (0.5 s), and the chewing phase runs while it is down.
         let down = if self.graze > 0 { 1.0 } else { 0.0 };
@@ -970,7 +1052,7 @@ impl Mob {
             PigZombie => s(320, 0, n).collect(),
             Cow => s(334, 0, n).collect(),
             Chicken | Zombie => s(288, 0, n).collect(),
-            Creeper => s(289, 0, n).collect(),
+            Creeper | Ghast => s(289, 0, n).collect(),
             Spider => s(287, 0, n).collect(),
             Slime if self.size == 1.0 => s(341, 0, n).collect(),
             Skeleton => s(262, 0, n).chain(s(352, 0, rng.next_int_bound(3))).collect(),
@@ -1021,6 +1103,76 @@ impl Arrow {
     }
 }
 
+/// `EntityFireball` of a ghast: a 1 x 1 x 1 box whose bottom centre is `pos` (`posY`; the explosion is made there), `vel` in blocks per tick like
+/// `Arrow`. It starts at rest and speeds up by `acc` (0.1 a tick along its aim) with 0.95 drag, to about 1.9 blocks a tick (0.8 in water); the
+/// Java never times it out (an unloaded chunk freezes it), so here it is gone beyond 128 blocks of the player or outside the loaded world.
+/// Hitting a block, the player or a mob makes it burst (`Ev::Burst`); the hit mob takes `damage(0)` (a snowball's knock). The ghast it came
+/// from is not hit for its first 25 ticks (ponytail: any ghast, the Java names the owner). The player turns it with `Mobs::deflect`.
+/// ponytail: the block test marches the segment in steps of 0.25 (a corner grazed between two steps can be missed); no smoke trail yet.
+pub struct Fireball {
+    pub pos: Vec3,
+    pub vel: Vec3,
+    acc: Vec3,
+    age: u16,
+}
+
+impl Fireball {
+    /// `EntityFireball(world, owner, dx, dy, dz)`: each component of the aim gets a Gaussian of 0.4, then the acceleration is that vector's direction x 0.1.
+    fn new(pos: Vec3, aim: Vec3, rng: &mut JavaRandom) -> Self {
+        let a = aim + Vec3::new(rng.next_gaussian() as f32, rng.next_gaussian() as f32, rng.next_gaussian() as f32) * 0.4;
+        Self { pos, vel: Vec3::ZERO, acc: a.normalize_or_zero() * 0.1, age: 0 }
+    }
+
+    /// The box a fireball is picked by (`getCollisionBorderSize` 1.0 round its own box).
+    fn pick_box(&self) -> (Vec3, Vec3) {
+        (self.pos + Vec3::new(-1.5, -1.0, -1.5), self.pos + Vec3::new(1.5, 2.0, 1.5))
+    }
+
+    /// `EntityFireball.onUpdate`: look along the move for a block and for an entity (boxes grown 0.3), burst at the first; else move, accelerate, drag.
+    /// Returns false when it is gone.
+    fn tick(&mut self, c: &Ctx, list: &mut [Mob], rng: &mut JavaRandom, ev: &mut Vec<Ev>) -> bool {
+        self.age += 1;
+        let (x, y, z) = cell(self.pos);
+        if (c.player - self.pos).length_squared() > 128.0 * 128.0 || (c.get)(x, y, z).is_none() {
+            return false; // far away or out of the loaded world (the Java would leave it frozen there)
+        }
+        let n = ((self.vel.length() / 0.25).ceil() as i32).max(1);
+        // `rayTraceBlocks`: the first step (0 = the cell it is in) that is in a solid cell, as a fraction of the move.
+        let block = (0..=n).map(|i| i as f32 / n as f32).find(|&t| {
+            let (x, y, z) = cell(self.pos + self.vel * t);
+            solid((c.get)(x, y, z))
+        });
+        let d = self.vel * block.unwrap_or(1.0);
+        let grown = |lo: Vec3, hi: Vec3| ray_box(self.pos, d, lo - Vec3::splat(0.3), hi + Vec3::splat(0.3)).filter(|&t| t <= 1.0);
+        let mut best: Option<(f32, Option<usize>)> = None; // (t, mob index; None = the player)
+        let (plo, phi) = (c.player - physics::HALF, c.player + physics::HALF);
+        if let Some(t) = grown(plo, phi) {
+            best = Some((t, None));
+        }
+        for (i, m) in list.iter().enumerate() {
+            if m.health <= 0 || (m.kind == Ghast && self.age < 25) {
+                continue;
+            }
+            let (lo, hi) = m.aabb();
+            if let Some(t) = grown(lo, hi).filter(|&t| best.map_or(true, |b| t < b.0)) {
+                best = Some((t, Some(i)));
+            }
+        }
+        if block.is_some() || best.is_some() {
+            if let Some((_, Some(i))) = best {
+                list[i].damage(0, self.pos, rng); // `attackEntityFrom(owner, 0)`
+            }
+            ev.push(Ev::Burst(self.pos));
+            return false;
+        }
+        self.pos += self.vel;
+        let (x, y, z) = cell(self.pos + Vec3::Y * 0.5);
+        let wet = matches!((c.get)(x, y, z), Some(8 | 9));
+        self.vel = (self.vel + self.acc) * if wet { 0.8 } else { 0.95 };
+        true
+    }
+}
+
 /// (`getAttackStrength`, wear) of hitting with `held`: `ItemSword` 4 + material, `ItemTool` 2 + material, anything else 1
 /// (`Item.getDamageVsEntity`); material bonus wood 0, stone 1, iron 2, diamond 3, gold 0. Swords wear 1, tools 2, a hoe none.
 pub fn attack(held: Option<u16>) -> (i32, u16) {
@@ -1065,6 +1217,7 @@ fn resistance(id: u8) -> f32 {
 pub struct Mobs {
     pub list: Vec<Mob>,
     pub arrows: Vec<Arrow>,
+    pub fireballs: Vec<Fireball>,
     pub rng: JavaRandom,
     /// The random of the sounds (`Mob::talk`), apart from `rng` so that hearing a mob changes nothing it does.
     snd: JavaRandom,
@@ -1084,12 +1237,12 @@ pub struct Mobs {
 
 /// `IMob`: what Peaceful removes.
 fn hostile(k: Kind) -> bool {
-    matches!(k, Zombie | Skeleton | Creeper | Spider | Slime | Giant | PigZombie)
+    matches!(k, Zombie | Skeleton | Creeper | Spider | Slime | Giant | PigZombie | Ghast)
 }
 
 impl Mobs {
     pub fn new(seed: i64) -> Self {
-        Self { list: Vec::new(), arrows: Vec::new(), rng: JavaRandom::new(seed ^ 0x5049_47), snd: JavaRandom::new(seed ^ 0x534E_44), seed, acc: 0.0, clock: 0, burst: 200, no_spawn: false, nether: false, difficulty: 2, smart: true }
+        Self { list: Vec::new(), arrows: Vec::new(), fireballs: Vec::new(), rng: JavaRandom::new(seed ^ 0x5049_47), snd: JavaRandom::new(seed ^ 0x534E_44), seed, acc: 0.0, clock: 0, burst: 200, no_spawn: false, nether: false, difficulty: 2, smart: true }
     }
 
     /// NOT b1.7.3 (`animalAi`, proposal 5, predators and grazers): a wild, calm, standing wolf in its hunting third of the time picks the
@@ -1166,6 +1319,9 @@ impl Mobs {
             // `EntityPigZombie.getCanSpawnHere`: no light test (the Nether has none), a free box, no liquid.
             // ponytail: the ground is still asked for (the Java spawns in mid-air and lets it fall).
             PigZombie if self.nether => solid(below) && feet == Some(0) && head == Some(0),
+            // `EntityGhast.getCanSpawnHere`: 1 try in 20, not on Peaceful, and room for its 4 x 4 x 4 box (5 x 5 x 5 cells round (x, y, z), air
+            // only), no ground. ponytail: the Java allows any block with no collision box (fire, grass) in the room and no liquid.
+            Ghast => self.rng.next_int_bound(20) == 0 && self.difficulty > 0 && (x - 2..=x + 2).all(|i| (z - 2..=z + 2).all(|k| (y..=y + 4).all(|j| (c.get)(i, j, k) == Some(0)))),
             _ => {
                 let dark = light as i32 <= self.rng.next_int_bound(8);
                 let ground = solid(below) && feet == Some(0) && head == Some(0);
@@ -1181,7 +1337,8 @@ impl Mobs {
 
     /// A pack of 1..=4 of `kind` around the cell (x, y, z); animals are counted around the player, the rest everywhere.
     fn pack(&mut self, c: &Ctx, kind: Kind, (x, y, z): (i32, i32, i32), cap: usize) {
-        for _ in 0..1 + self.rng.next_int_bound(4) {
+        let n = if kind == Ghast { 1 } else { 1 + self.rng.next_int_bound(4) }; // `getMaxSpawnedInChunk`
+        for _ in 0..n {
             let (px, pz) = (x + self.rng.next_int_bound(6) - self.rng.next_int_bound(6), z + self.rng.next_int_bound(6) - self.rng.next_int_bound(6));
             let py = match kind {
                 Pig | Cow | Sheep | Chicken | Wolf => grass_top(c.get, px, pz).map_or(-1, |g| g + 1),
@@ -1193,6 +1350,7 @@ impl Mobs {
             let kinds: &[Kind] = match kind {
                 Pig | Cow | Sheep | Chicken | Wolf => &ANIMALS,
                 Squid => &[Squid],
+                Ghast => &[Ghast],
                 _ => &[Zombie, Skeleton, Creeper, Spider, Slime, Giant, PigZombie],
             };
             let r = if ANIMALS.contains(&kind) { NEAR } else { ANYWHERE };
@@ -1237,13 +1395,15 @@ impl Mobs {
             self.pack(c, Squid, (x, y, z), CAP_SQUID);
         }
         let monsters: &[Kind] = if self.nether { &[PigZombie] } else { &[Zombie, Skeleton, Creeper, Spider, Slime] };
-        if self.clock % 40 == 0 && self.difficulty > 0 && n(&self.list, monsters) < CAP_MONSTERS {
+        let room = n(&self.list, monsters) < CAP_MONSTERS || (self.nether && n(&self.list, &[Ghast]) < CAP_GHAST);
+        if self.clock % 40 == 0 && self.difficulty > 0 && room {
             for _ in 0..8 {
                 let (x, z) = ring(&mut self.rng);
                 let y = ((c.player.y as i32) + self.rng.next_int_bound(41) - 20).clamp(1, 126);
-                let kind = if self.nether { PigZombie } else { [Spider, Zombie, Skeleton, Creeper, Slime][self.rng.next_int_bound(5) as usize] };
+                // `BiomeGenHell.spawnableMonsterList`: ghast 10, pig zombie 10 (a ghast has its own cap, so a crowd of pigmen does not keep it out).
+                let kind = if self.nether { if self.rng.next_int_bound(2) == 0 && n(&self.list, &[Ghast]) < CAP_GHAST { Ghast } else { PigZombie } } else { [Spider, Zombie, Skeleton, Creeper, Slime][self.rng.next_int_bound(5) as usize] };
                 let before = self.list.len();
-                self.pack(c, kind, (x, y, z), CAP_MONSTERS);
+                self.pack(c, kind, (x, y, z), if kind == Ghast { CAP_GHAST } else { CAP_MONSTERS });
                 if self.list.len() > before {
                     break;
                 }
@@ -1276,6 +1436,8 @@ impl Mobs {
                 alive
             });
             self.arrows.retain_mut(|a| a.tick(c, &mut ev));
+            let (list, rng) = (&mut self.list, &mut self.rng);
+            self.fireballs.retain_mut(|f| f.tick(c, list, rng, &mut ev));
             // A player's arrow inside a mob's box (grown 0.3, like `EntityArrow`) hurts it and is gone.
             let (list, rng) = (&mut self.list, &mut self.rng);
             self.arrows.retain(|a| {
@@ -1315,6 +1477,10 @@ impl Mobs {
                     self.arrows.push(Arrow { pos, vel, age: 0, player: false, kind: 0 });
                     out.push(Ev::Bow(pos, false));
                 }
+                Ev::Fire(at, aim) if self.fireballs.len() < MAX_FIREBALLS => {
+                    let f = Fireball::new(at, aim, &mut self.rng);
+                    self.fireballs.push(f);
+                }
                 Ev::Landed(p) => drops.spawn_stack(ItemStack { id: crate::world::gear::ARROW, count: 1, damage: 0 }, cell(p)),
                 Ev::Egg(p) => drops.spawn_stack(ItemStack { id: 344, count: 1, damage: 0 }, cell(p)),
                 Ev::Hatch(p) => {
@@ -1326,8 +1492,8 @@ impl Mobs {
                         }
                     }
                 }
-                Ev::Hurt(_) | Ev::Boom(_) | Ev::Snd(..) | Ev::Graze(_) | Ev::Bow(..) => out.push(e),
-                Ev::Shoot(..) => {}
+                Ev::Hurt(_) | Ev::Boom(_) | Ev::Burst(_) | Ev::Snd(..) | Ev::Graze(_) | Ev::Bow(..) => out.push(e),
+                Ev::Shoot(..) | Ev::Fire(..) => {}
             }
         }
         let mut i = 0;
@@ -1363,6 +1529,21 @@ impl Mobs {
             let (lo, hi) = m.aabb();
             ray_box(eye, dir, lo, hi).filter(|&t| t <= reach).map(|t| (i, t))
         }).min_by(|a, b| a.1.total_cmp(&b.1))
+    }
+
+    /// The nearest fireball on the ray within `reach` (`Entity.canBeCollidedWith`, the box grown by `getCollisionBorderSize`): (index, distance).
+    pub fn pick_fireball(&self, eye: Vec3, dir: Vec3, reach: f32) -> Option<(usize, f32)> {
+        self.fireballs.iter().enumerate().filter_map(|(i, f)| {
+            let (lo, hi) = f.pick_box();
+            ray_box(eye, dir, lo, hi).filter(|&t| t <= reach).map(|t| (i, t))
+        }).min_by(|a, b| a.1.total_cmp(&b.1))
+    }
+
+    /// `EntityFireball.attackEntityFrom(player, ..)`: the motion becomes the player's look (a unit vector, blocks per tick) and the acceleration
+    /// a tenth of it, so a punched fireball goes back the way it came. No damage, no tool wear.
+    pub fn deflect(&mut self, i: usize, look: Vec3) {
+        let f = &mut self.fireballs[i];
+        (f.vel, f.acc) = (look, look * 0.1);
     }
 
     /// `ItemBow`: a player's arrow leaves `pos` with `vel` (blocks per tick).
@@ -2057,10 +2238,10 @@ mod tests {
         assert_eq!(run(true, false, HUNT_TICKS - 1 + HUNT_TICKS), (full, false), "a wolf rests two thirds of the time");
     }
 
-    /// `BiomeGenHell`: the Nether spawns pig zombies and nothing else, in the light that would keep every overworld monster away; the
+    /// `BiomeGenHell`: the Nether spawns pig zombies and ghasts (each with its own cap) and nothing else, in the light that would keep every overworld monster away; the
     /// same floor in the overworld spawns nobody (no grass for animals, too bright for monsters); Peaceful spawns none.
     #[test]
-    fn the_nether_spawns_pig_zombies_only() {
+    fn the_nether_spawns_pig_zombies_and_ghasts_only() {
         let floor = |_: i32, y: i32, _: i32| Some(match y { 0 => 7, 1..=9 => 87, _ => 0 });
         let l = |_, _, _| 15u8;
         let player = Vec3::new(0.5, 11.0, 0.5);
@@ -2074,9 +2255,116 @@ mod tests {
             m.list.iter().map(|a| a.kind).collect::<Vec<_>>()
         };
         let hell = run(true, 2);
-        assert!(!hell.is_empty() && hell.len() <= CAP_MONSTERS && hell.iter().all(|&k| k == PigZombie), "{hell:?}");
+        assert!(!hell.is_empty() && hell.iter().all(|&k| k == PigZombie || k == Ghast), "{hell:?}");
+        assert!(hell.iter().filter(|&&k| k != Ghast).count() <= CAP_MONSTERS && hell.iter().filter(|&&k| k == Ghast).count() <= CAP_GHAST, "{hell:?}");
         assert!(run(false, 2).is_empty(), "the overworld has no use for this floor");
         assert!(run(true, 0).is_empty(), "Peaceful");
+    }
+
+    /// `EntityGhast.updatePlayerActionState`: a player in sight within 64 blocks makes it face them, count 1 a tick and, at 20, ask for a fireball
+    /// 4 blocks along its heading (the counter then sits at -40); out of sight the counter runs back down; a ghast drifts (never falls) and
+    /// leaves a pile of gunpowder 0..2 when it dies.
+    #[test]
+    fn a_ghast_charges_twenty_ticks_then_fires_and_never_falls() {
+        let l = |_, _, _| 15u8;
+        let player = Vec3::new(32.5, 10.9, 52.5);
+        let c = ctx(player, &l);
+        let mut rng = JavaRandom::new(3);
+        let mut g = Mob::new(Ghast, 32.5, 30.0, 32.5, 0.0, &mut rng);
+        let mut ev = Vec::new();
+        for t in 1..=19 {
+            assert!(g.tick(&mut rng, &c, &mut ev), "tick {t}");
+            assert_eq!(g.charge, t);
+        }
+        assert!(!ev.iter().any(|e| matches!(e, Ev::Fire(..))), "not yet");
+        g.tick(&mut rng, &c, &mut ev);
+        let fired: Vec<_> = ev.iter().filter_map(|e| if let Ev::Fire(at, aim) = e { Some((*at, *aim)) } else { None }).collect();
+        assert_eq!(fired.len(), 1);
+        assert_eq!(g.charge, -40);
+        let (at, aim) = fired[0];
+        assert!((at.z - g.body.pos.z - 4.0).abs() < 0.2 && (at.x - g.body.pos.x).abs() < 0.2, "4 blocks toward +z: {at:?}");
+        assert!((at.y - g.body.pos.y - 0.5).abs() < 1e-4);
+        assert!(aim.z > 15.0 && aim.y < 0.0, "aimed at the player: {aim:?}");
+        // Behind a wall it loses count instead.
+        let wall = |x: i32, y: i32, z: i32| if (40..44).contains(&z) { Some(1) } else { flat(x, y, z) };
+        let c2 = Ctx { get: &wall, light: &l, day: false, player, eye: player + Vec3::Y * 0.6, biome: &|_, _| Biome::Plains, sight: 1.0 };
+        g.charge = 5;
+        g.tick(&mut rng, &c2, &mut Vec::new());
+        assert_eq!(g.charge, 4);
+        // Gravity is cancelled: a second of frames at rest and it has not dropped. Dying leaves 0..2 gunpowder.
+        g.body.vel = Vec3::ZERO;
+        let y0 = g.body.pos.y;
+        for _ in 0..20 {
+            g.step(0.05, &flat);
+        }
+        assert!((g.body.pos.y - y0).abs() < 0.5, "{} -> {}", y0, g.body.pos.y);
+        let loot = g.loot(&mut rng);
+        assert!(loot.len() <= 2 && loot.iter().all(|s| s.id == 289), "{}", loot.len());
+    }
+
+    /// `EntityFireball`: from rest it speeds up by 0.1 a tick with 0.95 drag (limit 1.9), bursts where a block is in its way (the place it was at the
+    /// start of the tick), also at the player and at a mob (which is hit for 0), turns round when punched, and a ghast does not burst its own for 25 ticks.
+    #[test]
+    fn a_fireball_accelerates_bursts_on_what_it_meets_and_turns_when_punched() {
+        let l = |_, _, _| 15u8;
+        let far = Vec3::new(5.5, 40.0, 5.5);
+        let c = ctx(far, &l);
+        let mut rng = JavaRandom::new(9);
+        let mut list: Vec<Mob> = Vec::new();
+        // Down onto the grass (the top of it is y = 10).
+        let mut f = Fireball::new(Vec3::new(20.5, 20.0, 20.5), Vec3::new(0.0, -30.0, 0.0), &mut rng);
+        let mut ev = Vec::new();
+        let mut speeds = Vec::new();
+        let mut alive = true;
+        for _ in 0..60 {
+            alive = f.tick(&c, &mut list, &mut rng, &mut ev);
+            speeds.push(f.vel.length());
+            if !alive { break }
+        }
+        assert!(!alive);
+        assert!(speeds[0] > 0.09 && speeds[0] < 0.11 && speeds[1] > speeds[0], "{speeds:?}");
+        assert!(speeds.iter().all(|&s| s < 1.95), "{speeds:?}");
+        let at = ev.iter().find_map(|e| if let Ev::Burst(p) = e { Some(*p) } else { None }).expect("it burst");
+        assert!(at.y > 9.0 && at.y < 13.0 && (at.x - 20.5).abs() < 2.0, "{at:?}");
+        // At the player 20 blocks off, level.
+        let player = Vec3::new(32.5, 15.9, 52.5);
+        let c = ctx(player, &l);
+        let mut f = Fireball { pos: Vec3::new(32.5, 15.5, 32.5), vel: Vec3::ZERO, acc: Vec3::new(0.0, 0.0, 0.1), age: 0 };
+        let mut ev = Vec::new();
+        for _ in 0..60 {
+            if !f.tick(&c, &mut list, &mut rng, &mut ev) { break }
+        }
+        let at = ev.iter().find_map(|e| if let Ev::Burst(p) = e { Some(*p) } else { None }).expect("it burst");
+        assert!((at - player).length() < 4.0, "{at:?}");
+        // At a pig: the pig is hit for 0 (it still turns and is knocked) and the fireball is gone.
+        let mut pig = Mob::new(Pig, 32.5, 15.0, 45.5, 0.0, &mut rng);
+        pig.life = 0;
+        let mut list = vec![pig];
+        let mut f = Fireball { pos: Vec3::new(32.5, 15.5, 32.5), vel: Vec3::ZERO, acc: Vec3::new(0.0, 0.0, 0.1), age: 0 };
+        let mut ev = Vec::new();
+        for _ in 0..60 {
+            if !f.tick(&ctx(Vec3::new(5.5, 40.0, 5.5), &l), &mut list, &mut rng, &mut ev) { break }
+        }
+        assert!(ev.iter().any(|e| matches!(e, Ev::Burst(_))) && list[0].health == 10 && list[0].hurt > 0, "{}", list[0].health);
+        // Punched: it goes the way the player looks, accelerating along it.
+        let mut m = Mobs::new(1);
+        m.fireballs.push(Fireball { pos: Vec3::new(20.5, 20.0, 20.5), vel: Vec3::ZERO, acc: Vec3::new(0.0, -0.1, 0.0), age: 0 });
+        assert_eq!(m.pick_fireball(Vec3::new(20.5, 20.5, 17.5), Vec3::Z, 4.0).map(|p| p.0), Some(0));
+        m.deflect(0, Vec3::X);
+        let c = ctx(far, &l);
+        let x0 = m.fireballs[0].pos.x;
+        m.fireballs[0].tick(&c, &mut [], &mut rng, &mut Vec::new());
+        assert!(m.fireballs[0].pos.x > x0 + 0.9 && m.fireballs[0].vel.x > 0.9, "{:?}", m.fireballs[0].vel);
+        // Its own ghast is passed for 25 ticks, then it counts.
+        let g = Mob::new(Ghast, 20.5, 20.0, 20.5, 0.0, &mut rng);
+        let mut list = vec![g];
+        let mut f = Fireball { pos: Vec3::new(20.5, 20.0, 20.5), vel: Vec3::ZERO, acc: Vec3::new(0.0, -0.1, 0.0), age: 0 };
+        let mut ev = Vec::new();
+        f.tick(&c, &mut list, &mut rng, &mut ev);
+        assert!(ev.is_empty(), "a young fireball passes its ghast");
+        f.age = 30;
+        f.tick(&c, &mut list, &mut rng, &mut ev);
+        assert!(ev.iter().any(|e| matches!(e, Ev::Burst(_))), "an old one hits it");
     }
 
     /// NOT b1.7.3 (`animalAi`, proposal 5): a sheep that finishes grazing says which cell it ate.

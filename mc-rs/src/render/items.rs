@@ -619,6 +619,8 @@ fn parts(m: &Mob) -> Vec<Part> {
             pt([1.25, 18.0, -3.5], [2.0, 2.0, 2.0], [0.0; 3], [0.0; 3], [0.0; 2], (32.0, 4.0)),
             pt([0.0, 21.0, -3.5], [1.0, 1.0, 1.0], [0.0; 3], [0.0; 3], [0.0; 2], (32.0, 8.0)),
         ],
+        // First patch: no model yet (`ModelGhast` comes with the second); the ghast is there and shoots, but is not drawn.
+        Ghast => Vec::new(),
     }
 }
 
@@ -652,6 +654,7 @@ fn skin_of(m: &Mob) -> u8 {
         Creeper => skin::CREEPER,
         Spider => skin::SPIDER,
         Slime => skin::SLIME,
+        Ghast => skin::SLIME, // placeholder: `mob/ghast.png` and `ghast_fire.png` come with the second patch
     }
 }
 
@@ -765,7 +768,7 @@ fn push_boat(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, b: &Boat, a: f32) {
 /// The parts of `parts(m)` that are the head: those on its pivot (`head_n`: a cow's horns, a hen's bill and chin), else the first one; a squid and a slime have none.
 fn is_head(k: crate::world::mobs::Kind, i: usize) -> bool {
     i < match k {
-        Squid | Slime => 0,
+        Squid | Slime | Ghast => 0,
         Cow | Chicken | Wolf => head_n(k),
         _ => 1,
     }

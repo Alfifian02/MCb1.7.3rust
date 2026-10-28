@@ -8,7 +8,7 @@ How it was made: the decompiled `minecraft/src` (675 classes: 84 blocks, 103 ite
 
 | # | What | Java | State in mc-rs | Size |
 |---|------|------|----------------|------|
-| 2 | Ghast and fireball | `EntityGhast`, `EntityFireball` (spawn weight Ghast 10 once it exists) | `mobs::Kind` has 13 kinds, no Ghast; the Nether spawns pig zombies only (entry 30); sounds for both are already in the audio table; skins `mob/ghast.png`, `ghast_fire.png` are in the jar | medium |
+| 2 | Ghast and fireball | `EntityGhast`, `EntityFireball`, `ModelGhast`, `RenderGhast`, `RenderFireball` | first patch done (entry 31): `Kind::Ghast`, its AI, spawns, `Fireball`, the fiery explosion, punching a fireball back. Second patch open: the model and its charge squash, the skins `mob/ghast.png` / `ghast_fire.png` (in the jar), the fireball sprite, and the sounds (already in the audio table) | small to medium |
 | 3 | Map item | `ItemMap`, `MapData`, `MapItemRenderer`, `MapStorage`, recipe 358 = paper ring round a compass | nothing | medium to large (per-map saved data, a renderer) |
 | 4 | Chat | `GuiChat`, `ChatLine` | nothing (a single-player port has no sender except commands; the overlay is the deferred rest of M14) | medium |
 | 5 | Achievements and Statistics | `AchievementList`, `GuiAchievements`, `GuiAchievement` (toast), `StatList`, `GuiStats` | both buttons drawn greyed out (`menu.rs`, `options.rs`); no stat system | large (counters everywhere, saved, two screens) |

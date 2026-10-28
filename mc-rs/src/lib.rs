@@ -941,7 +941,9 @@ impl App {
                         self.vitals.hurt(d);
                     }
                 }
-                Ev::Boom(p) => self.explode(p, 3.0),
+                Ev::Boom(p) => self.explode(p, 3.0, false),
+                // `EntityFireball.onUpdate`: `newExplosion(null, x, y, z, 1.0F, true)`, the fire flag on.
+                Ev::Burst(p) => self.explode(p, 1.0, true),
                 Ev::Snd(name, at, vol, mul, jit) => self.audio.cry(name, at, vol, mul, jit),
                 // `EntitySkeleton`'s shot is "random.bow" at 1.0, pitch `1 / (r * 0.4 + 0.8)`; `EntityArrow`'s hit is "random.bowhit" at 1.0, pitch
                 // `1.2 / (r * 0.2 + 0.9)` (both NOT in the b1.7.3 index, see `assets/sound/extra`).
@@ -1137,7 +1139,7 @@ impl App {
                 self.dispense(p);
             }
             for at in std::mem::take(&mut self.ticks.booms) {
-                self.explode(at, 4.0); // `EntityTNTPrimed.explode`
+                self.explode(at, 4.0, false); // `EntityTNTPrimed.explode`
             }
             if self.sleep.is_none() {
                 let p = self.player.pos; // the box centre is 0.9 over the feet
@@ -1335,6 +1337,11 @@ impl App {
             // (`attackEntityFrom`: damage x 10, over 40 breaks it into 3 planks and 2 sticks).
             let mob_t = self.mobs.pick(eye, fwd, pick::REACH as f32).filter(|&(_, t)| t < wall).map(|(_, t)| t);
             let boat_t = self.boats.pick(eye, fwd, pick::REACH as f32).filter(|&(_, t)| t < wall && mob_t.map_or(true, |m| t < m));
+            // A ghast's fireball the crosshair is on and nothing nearer (`EntityFireball.attackEntityFrom`): it flies back along the look.
+            if let Some((fi, _)) = self.mobs.pick_fireball(eye, fwd, pick::REACH as f32).filter(|&(_, t)| t < wall && mob_t.map_or(true, |m| t < m) && boat_t.map_or(true, |b| t < b.1)) {
+                self.mobs.deflect(fi, fwd);
+                return;
+            }
             // A cart the same way (`EntityMinecart.interact`): the empty one takes a rider, the furnace one is pushed away from you
             // (coal is burnt first); a held item otherwise hits it, over 40 damage breaks it into the cart (and the furnace).
             if let Some((ci, _)) = self.carts.pick(eye, fwd, pick::REACH as f32).filter(|&(_, t)| t < wall && mob_t.map_or(true, |m| t < m) && boat_t.map_or(true, |b| t < b.1)) {
@@ -1845,10 +1852,12 @@ impl App {
         self.fx.tick_spawners(&mut self.mobs, &ctx, &|(x, _, z)| chunks.block_loaded(x, 0, z).is_some());
     }
 
-    fn explode(&mut self, at: glam::Vec3, power: f32) {
+    /// `Explosion`; `flame` is `isFlaming` (a ghast's fireball): afterwards, in each destroyed cell that is now air over an opaque block, fire 1 time in 3.
+    fn explode(&mut self, at: glam::Vec3, power: f32, flame: bool) {
         self.touch.pad.rumble(400, 255);
         self.audio.cry("random.explode", at, 4.0, 0.7, true); // `Explosion`: volume 4, pitch `(1 + (r - r) * 0.2) * 0.7`
         let cells = self.mobs.explode(&|x: i32, y: i32, z: i32| self.chunks.block(x, y, z), at, power);
+        let cells_fire = if flame { cells.clone() } else { Vec::new() };
         for (x, y, z) in cells {
             let Some(id) = self.chunks.block_loaded(x, y, z).filter(|&b| b > 0) else { continue };
             let meta = self.chunks.meta(x, y, z);
@@ -1858,6 +1867,14 @@ impl App {
                 self.drops.spawn_block(id, meta, (x, y, z));
             }
             self.chunks.set_block(x, y, z, 0);
+        }
+        if flame {
+            for &(x, y, z) in cells_fire.iter().rev() {
+                let below = self.chunks.block_loaded(x, y - 1, z).unwrap_or(0);
+                if self.chunks.block_loaded(x, y, z) == Some(0) && world::chunk::opaque(below) && self.mobs.rng.next_int_bound(3) == 0 {
+                    self.chunks.set_block(x, y, z, 51);
+                }
+            }
         }
         let impact = 1.0 - (self.player.pos - at).length() / (power * 2.0);
         if impact > 0.0 {
