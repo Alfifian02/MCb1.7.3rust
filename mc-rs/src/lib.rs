@@ -54,7 +54,7 @@ use crate::world::pack;
 use crate::world::book;
 use crate::world::minecart;
 use crate::world::portal;
-use crate::world::mobs::{self, Ctx, Ev, Mobs};
+use crate::world::mobs::{self, Ctx, Ev, Mobs, Strike};
 use crate::world::ticks::{self, Ticks};
 use crate::world::save::{self, Level};
 use crate::world::sky;
@@ -166,6 +166,8 @@ struct App {
     was_in_water: bool,
     /// `Entity.ySize` of the player, as far as the camera goes: how far the eye hangs below standing height (0.08 sneaking, then it decays).
     sneak_y: f32,
+    /// The horizontal push an explosion gave the player (m/s, `Explosion.doExplosionA`'s `motion +=`): added to the walk each frame and dying away (`frame`).
+    kick: glam::Vec3,
     /// Sprinting (`world::sprint`, Retro Sprint): ticked at 20 Hz, its push and field of view are read every frame.
     sprint: Sprint,
     /// A wall stopped the player's move on x or z since the last sprint tick (`horizontalCollision`).
@@ -351,6 +353,7 @@ impl App {
             fx: Effects::new(seed),
             was_in_water: false,
             sneak_y: 0.0,
+            kick: glam::Vec3::ZERO,
             sprint: Sprint::default(),
             sprint_blocked: false,
             tip: (0, 0.0),
@@ -830,6 +833,12 @@ impl App {
         let slow = self.vitals.stamina.speed(self.sprint.on());
         self.player.vel.x *= slow;
         self.player.vel.z *= slow;
+        // An explosion's push rides on top of the walk and the sprint (and is neither slowed by stamina nor kept in bed, on a ride or in death).
+        if asleep || riding || self.vitals.dead() {
+            self.kick = glam::Vec3::ZERO;
+        }
+        self.player.vel.x += self.kick.x;
+        self.player.vel.z += self.kick.z;
         let (vx0, vz0) = (self.player.vel.x, self.player.vel.z);
         // Plants are drawn but not solid yet (collision shapes come with M14), so physics reads them as air.
         let get = |x: i32, y: i32, z: i32| self.chunks.block(x, y, z).map(|b| if is_plant(b) { 0 } else { self.chunks.physics_at(x, y, z, b) });
@@ -845,6 +854,21 @@ impl App {
             self.player.vel.y = (if self.touch.jumping() { 8.0 } else if sneaking { -8.0 } else { 0.0 }) + 23.0 * dt;
         }
         let (water, lava) = if asleep || riding { (false, false) } else { physics::step(&mut self.player, dt, self.touch.jumping() && !flying, &get) };
+        // The push dies like the Java's motion (x0.546 a tick on the ground, x0.91 in the air, x0.8 in water, x0.5 in lava), and a wall that stopped the
+        // frame's move stopped it.
+        if self.kick != glam::Vec3::ZERO {
+            let drag = if lava { 0.5 } else if water { 0.8 } else if self.player.on_ground { 0.546 } else { 0.91f32 };
+            self.kick *= drag.powf(dt * 20.0);
+            if self.player.vel.x == 0.0 {
+                self.kick.x = 0.0;
+            }
+            if self.player.vel.z == 0.0 {
+                self.kick.z = 0.0;
+            }
+            if self.kick.length_squared() < 0.01 {
+                self.kick = glam::Vec3::ZERO;
+            }
+        }
         // `LivingJumpEvent` (Stamina): a jump that left the ground costs 10; one a ceiling stopped zeroed `vel.y`, so it is free.
         if grounded && !water && !flying && !asleep && !riding && self.touch.jumping() && self.player.vel.y > 0.0 {
             self.vitals.stamina.jump();
@@ -932,12 +956,17 @@ impl App {
         let ctx = Ctx { get: &get, light: &light, day: sub < 4, player: self.player.pos, eye: self.camera.pos, biome: &biome, sight };
         self.mobs.difficulty = self.opts.difficulty;
         self.mobs.smart = self.opts.animal_ai;
-        // What a fireball can hit besides mobs and the player (`canBeCollidedWith`).
+        // What a fireball can hit besides mobs, the player and other fireballs (`canBeCollidedWith`): boats, carts, paintings, a lit TNT (0.98 box on its middle).
         self.mobs.targets.clear();
-        self.mobs.targets.extend(self.boats.list.iter().map(|b| (b.pos - boat::HALF, b.pos + boat::HALF)));
-        self.mobs.targets.extend(self.carts.list.iter().map(|c| (c.pos - minecart::HALF, c.pos + minecart::HALF)));
-        for e in self.mobs.update(dt, &ctx, &mut self.drops) {
+        self.mobs.targets.extend(self.boats.list.iter().enumerate().map(|(i, b)| (b.pos - boat::HALF, b.pos + boat::HALF, Strike::Boat(i))));
+        self.mobs.targets.extend(self.carts.list.iter().enumerate().map(|(i, c)| (c.pos - minecart::HALF, c.pos + minecart::HALF, Strike::Cart(i))));
+        self.mobs.targets.extend(self.paintings.iter().enumerate().map(|(i, p)| { let (lo, hi) = p.bounds(); (lo, hi, Strike::Painting(i)) }));
+        self.mobs.targets.extend(self.ticks.falling.iter().filter(|f| f.id == 46 && f.mv.is_none()).map(|f| (f.pos - glam::Vec3::splat(0.49), f.pos + glam::Vec3::splat(0.49), Strike::Tnt)));
+        let evs = self.mobs.update(dt, &ctx, &mut self.drops);
+        self.struck(&evs);
+        for e in evs {
             match e {
+                Ev::Strike(_) => {} // done by `struck`, ahead of the rest (the blasts below shift the lists the indices point into)
                 // `EntityPlayer.attackEntityFrom`: Peaceful 0, Easy d / 3 + 1, Hard d * 3 / 2.
                 Ev::Hurt(d) => {
                     let d = match self.opts.difficulty { 0 => 0, 1 => d / 3 + 1, 3 => d * 3 / 2, _ => d };
@@ -1460,8 +1489,7 @@ impl App {
             let (eye, fwd) = (self.camera.pos, self.camera.forward());
             let wall = self.target.map_or(f32::MAX, |h| h.point.distance(eye.as_dvec3()) as f32);
             if let Some((i, _)) = decor::pick(&self.paintings, eye, fwd, pick::REACH as f32).filter(|&(_, t)| t < wall) {
-                let c = self.paintings.remove(i).frame().0;
-                self.drops.scatter(ItemStack { id: decor::PAINTING, count: 1, damage: 0 }, (c.x.floor() as i32, c.y.floor() as i32, c.z.floor() as i32));
+                self.break_painting(i);
                 return;
             }
         }
@@ -1873,6 +1901,14 @@ impl App {
         self.audio.cry("random.explode", at, 4.0, 0.7, true); // `Explosion`: volume 4, pitch `(1 + (r - r) * 0.2) * 0.7`
         // The fireball's (`flame`) is the one with no exploder entity: no `knockBack`, only the push.
         let cells = self.mobs.explode(&|x: i32, y: i32, z: i32| self.chunks.block(x, y, z), at, power, !flame);
+        // What the blast does to the boats, the carts and the player is worked out here, with the blocks still standing: `Explosion.doExplosionA` reads
+        // the exposure through them before `doExplosionB` takes the cells away. (Boats and carts: `vel` is blocks a tick, and `hurt` takes 10 a point.)
+        let get = |x: i32, y: i32, z: i32| self.chunks.block(x, y, z);
+        let hit = |pos: glam::Vec3, half: glam::Vec3| mobs::blast(&get, at, power, pos, pos - half, pos + half);
+        let boats: Vec<_> = self.boats.list.iter().map(|b| hit(b.pos, boat::HALF)).collect();
+        let carts: Vec<_> = self.carts.list.iter().map(|c| hit(c.pos, minecart::HALF)).collect();
+        // The player's `posY` is its eye (`yOffset` 1.62), which is what the distance and the push run from; the box is what the exposure looks at.
+        let me = mobs::blast(&get, at, power, self.player.pos + glam::Vec3::Y * EYE_HEIGHT, self.player.pos - physics::HALF, self.player.pos + physics::HALF);
         let cells_fire = if flame { cells.clone() } else { Vec::new() };
         for (x, y, z) in cells {
             let Some(id) = self.chunks.block_loaded(x, y, z).filter(|&b| b > 0) else { continue };
@@ -1892,11 +1928,6 @@ impl App {
                 }
             }
         }
-        // Boats and carts are hurt and pushed like a mob (`blast`; their `vel` is blocks a tick, and `hurt` takes 10 a point).
-        let get = |x: i32, y: i32, z: i32| self.chunks.block(x, y, z);
-        let hit = |pos: glam::Vec3, half: glam::Vec3| mobs::blast(&get, at, power, pos, pos - half, pos + half);
-        let boats: Vec<_> = self.boats.list.iter().map(|b| hit(b.pos, boat::HALF)).collect();
-        let carts: Vec<_> = self.carts.list.iter().map(|c| hit(c.pos, minecart::HALF)).collect();
         for (i, h) in boats.into_iter().enumerate().rev() {
             if let Some((dmg, push)) = h {
                 self.boats.list[i].vel += push / 20.0;
@@ -1913,11 +1944,39 @@ impl App {
                 }
             }
         }
-        // `explosionSize` is doubled before the damage is worked out, as for the mobs (`blast`). ponytail: no exposure test and no push for the player.
-        let impact = 1.0 - (self.player.pos - at).length() / (power * 2.0);
-        if impact > 0.0 {
-            self.vitals.hurt(((impact * impact + impact) / 2.0 * 8.0 * power * 2.0 + 1.0) as i32);
+        // `Explosion.doExplosionA`: `attackEntityFrom` with the damage, and `motion += direction x impact`. The walk overwrites the horizontal velocity
+        // every frame, so the horizontal push is carried in `kick` (see `frame`); the vertical one is the velocity's own.
+        if let Some((dmg, push)) = me {
+            self.vitals.hurt(dmg);
+            self.kick += glam::Vec3::new(push.x, 0.0, push.z);
+            self.player.vel.y += push.y;
         }
+    }
+
+    /// `EntityFireball.onUpdate`'s `attackEntityFrom(owner, 0)` on what it ran into (`Ev::Strike`): a boat or a cart rocks (`hurt(0)`: its own wobble,
+    /// apart from the blast's that follows, and no damage), a painting comes off the wall. The indices are of the lists as they were when `Mobs::targets`
+    /// was filled, so this runs before any blast changes them.
+    fn struck(&mut self, evs: &[Ev]) {
+        let mut paintings = Vec::new();
+        for e in evs {
+            match *e {
+                Ev::Strike(Strike::Boat(i)) => drop(self.boats.list[i].hurt(0)), // damage + 0 cannot cross the 40 that breaks it
+                Ev::Strike(Strike::Cart(i)) => drop(self.carts.list[i].hurt(0)),
+                Ev::Strike(Strike::Painting(i)) => paintings.push(i),
+                _ => {} // a lit TNT: `Entity.attackEntityFrom` only marks it hit
+            }
+        }
+        paintings.sort_unstable();
+        paintings.dedup();
+        for i in paintings.into_iter().rev() {
+            self.break_painting(i);
+        }
+    }
+
+    /// `EntityPainting.attackEntityFrom`: it comes off the wall and drops as an item.
+    fn break_painting(&mut self, i: usize) {
+        let c = self.paintings.remove(i).frame().0;
+        self.drops.scatter(ItemStack { id: decor::PAINTING, count: 1, damage: 0 }, (c.x.floor() as i32, c.y.floor() as i32, c.z.floor() as i32));
     }
 
     /// `World.isDaytime`: the sky-light subtraction is under 4.

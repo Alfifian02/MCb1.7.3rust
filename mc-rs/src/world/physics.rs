@@ -53,6 +53,18 @@ pub fn on_ladder(pos: Vec3, half: Vec3, get: BlockQuery<'_>) -> bool {
     get(pos.x.floor() as i32, (pos.y - half.y).floor() as i32, pos.z.floor() as i32) == Some(65)
 }
 
+/// What the blocks and the water a box is in do to its move (`step_box` and `step_flying` share it): the factor on the move, the drift added to it
+/// (m/s) and whether it is in a web.
+/// - `Entity.moveEntity` in a web: the move is x0.25 / y0.05 / x0.25 and the motion is lost (the caller zeroes it).
+/// - `BlockSoulSand.onEntityCollidedWithBlock`: motionX / motionZ x 0.4 a tick. ponytail: the move is scaled instead of the motion kept.
+/// - The current of a stream carries what swims in it (`Entity.handleWaterMovement` pushes by the flow vector; here `gen::hydro`'s).
+fn contact(pos: Vec3, half: Vec3, get: BlockQuery<'_>, water: bool) -> (Vec3, Vec3, bool) {
+    let web = touching(pos, half, get, 30);
+    let scale = if web { Vec3::new(0.25, 0.05, 0.25) } else if touching(pos, half, get, 88) { Vec3::new(0.4, 1.0, 0.4) } else { Vec3::ONE };
+    let drift = if water { crate::world::gen::hydro::current(pos.x, pos.z).map_or(Vec3::ZERO, |c| Vec3::new(c[0], 0.0, c[1])) } else { Vec3::ZERO };
+    (scale, drift, web)
+}
+
 /// Integrate one frame. `dt` is seconds, capped by the caller; `jumping` is the held jump button.
 /// In water or lava (`EntityLiving.moveEntityWithHeading`) there is no gravity: the vertical speed is dragged (x0.8 water,
 /// x0.5 lava per tick) and sinks 0.02 blocks/tick, a held jump swims up (+0.04 blocks/tick), and pushing against a wall
@@ -86,13 +98,9 @@ pub fn step_box(player: &mut Player, half: Vec3, dt: f32, jumping: bool, get: Bl
         }
     }
 
-    // Sweep each axis independently. `Entity.moveEntity` in a web: the move is x0.25 / y0.05 / x0.25 and the motion is lost.
+    // Sweep each axis independently.
     let (vx, vz) = (player.vel.x, player.vel.z);
-    let web = touching(player.pos, half, get, 30);
-    // `BlockSoulSand.onEntityCollidedWithBlock`: motionX / motionZ x 0.4 a tick. ponytail: the move is scaled instead of the motion kept.
-    let scale = if web { Vec3::new(0.25, 0.05, 0.25) } else if touching(player.pos, half, get, 88) { Vec3::new(0.4, 1.0, 0.4) } else { Vec3::ONE };
-    // The current of a stream carries what swims in it (`Entity.handleWaterMovement` pushes by the flow vector; here `gen::hydro`'s).
-    let drift = if water { crate::world::gen::hydro::current(player.pos.x, player.pos.z).map_or(Vec3::ZERO, |c| Vec3::new(c[0], 0.0, c[1])) } else { Vec3::ZERO };
+    let (scale, drift, web) = contact(player.pos, half, get, water);
     let delta = (player.vel * scale + drift) * dt;
     let boxes = Boxes::collect(player.pos, half, delta, get);
     player.pos = sweep_axis(player.pos, half, delta, &boxes, &mut player.vel, player.on_ground && !(water || lava));
@@ -115,16 +123,20 @@ pub fn step_box(player: &mut Player, half: Vec3, dt: f32, jumping: bool, get: Bl
 }
 
 /// `EntityFlying.moveEntityWithHeading` for a box (a ghast): no gravity, and the motion drags every tick by 0.8 in water, 0.5 in lava,
-/// 0.546 on the ground and 0.91 in the air. Returns (in water, in lava) like `step_box`.
-/// ponytail: no web, soul sand or stream current (`step_box` has them); a flier meets them rarely.
+/// 0.546 on the ground and 0.91 in the air, then the web, the soul sand and the stream's current like `step_box` (`contact`). Returns (in water, in lava)
+/// like `step_box`.
 pub fn step_flying(body: &mut Player, half: Vec3, dt: f32, get: BlockQuery<'_>) -> (bool, bool) {
     let water = touches(body.pos, half, get, 0.001, 8..=9);
     let lava = !water && touches(body.pos, half, get, 0.1, 10..=11);
     let drag = if water { 0.8f32 } else if lava { 0.5 } else if body.on_ground { 0.546 } else { 0.91 };
     body.vel *= drag.powf(dt * 20.0);
-    let delta = body.vel * dt;
+    let (scale, drift, web) = contact(body.pos, half, get, water);
+    let delta = (body.vel * scale + drift) * dt;
     let boxes = Boxes::collect(body.pos, half, delta, get);
     body.pos = sweep_axis(body.pos, half, delta, &boxes, &mut body.vel, false);
+    if web {
+        body.vel = Vec3::ZERO;
+    }
     body.on_ground = boxes.hits(body.pos - Vec3::new(0.0, 0.002, 0.0), half);
     (water, lava)
 }
@@ -305,6 +317,28 @@ mod tests {
         assert!((water.x - 8.0).abs() < 1e-4 && water.y == 0.0 && w == (true, false), "{water:?}");
         let (lava, w) = run(11);
         assert!((lava.x - 5.0).abs() < 1e-4 && lava.y == 0.0 && w == (false, true), "{lava:?}");
+    }
+
+    /// A flier in a web moves a quarter (y 0.05) of what it would and loses its motion; `contact` (shared with `step_box`) reads soul sand as x / z
+    /// x0.4 and a stream's current in water only.
+    #[test]
+    fn a_flier_is_held_by_a_web_slowed_by_soul_sand_and_carried_by_a_current() {
+        let (half, at) = (Vec3::splat(0.5), Vec3::new(8.5, 40.0, 8.5));
+        let run = |id: u8| {
+            let get = move |_: i32, _: i32, _: i32| -> Option<u8> { Some(id) };
+            let mut p = Player { pos: at, vel: Vec3::new(10.0, 10.0, 10.0), on_ground: false };
+            step_flying(&mut p, half, 0.05, &get);
+            p
+        };
+        let (air, web) = (run(0), run(30));
+        assert!(web.vel == Vec3::ZERO, "a web takes the motion: {:?}", web.vel);
+        let (da, dw) = (air.pos - at, web.pos - at);
+        assert!((dw.x / da.x - 0.25).abs() < 0.02 && (dw.z / da.z - 0.25).abs() < 0.02 && (dw.y / da.y - 0.05).abs() < 0.005, "{da:?} {dw:?}");
+        assert!(air.vel.x > 0.0, "air keeps its motion");
+        let sand = contact(at, half, &|_, _, _| Some(88), false);
+        assert_eq!((sand.0, sand.1, sand.2), (Vec3::new(0.4, 1.0, 0.4), Vec3::ZERO, false), "soul sand: x / z x0.4, no web");
+        assert_eq!(contact(at, half, &|_, _, _| Some(30), false).0, Vec3::new(0.25, 0.05, 0.25));
+        assert_eq!(contact(at, half, &|_, _, _| Some(0), false), (Vec3::ONE, Vec3::ZERO, false), "air: nothing");
     }
 
     /// Standing on a floor must read as on_ground, otherwise the jump button can never fire.

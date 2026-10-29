@@ -112,6 +112,9 @@ pub struct Mob {
     pub limb_amt: f32,
     /// `hurtTime`: ticks of red flash left.
     pub hurt: u8,
+    /// `deathTime`: 0 while it lives; from the tick `Mobs::update` finds it dead (and drops its loot) it counts 1..=20, the corpse topples
+    /// (`RenderLiving.rotateCorpse`) under the red overlay, and one tick past 20 it is removed (`EntityLiving.onUpdate`).
+    pub death: u8,
     /// Model scale: slime size 1/2/4, giant 6.
     pub size: f32,
     /// Sheep fleece colour (cloth metadata).
@@ -280,6 +283,11 @@ fn cry(k: Kind, c: Cry, wolf: u8) -> Option<(&'static str, f32)> {
     Some((n, vol))
 }
 
+/// What a fireball ran into besides the player and a mob (`canBeCollidedWith`): the index is the one in `App`'s list when `Mobs::targets` was
+/// filled. `Ev::Strike` tells `App` to do its `attackEntityFrom(owner, 0)`; a lit TNT has none (`Entity.attackEntityFrom` only marks it hit).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Strike { Boat(usize), Cart(usize), Painting(usize), Tnt }
+
 pub enum Ev {
     /// A sound at a place: name, where, volume, pitch factor and whether the usual `(r - r) * 0.2` spread applies (`Audio::cry`).
     Snd(&'static str, Vec3, f32, f32, bool),
@@ -290,6 +298,8 @@ pub enum Ev {
     Shoot(Vec3, Vec3),
     /// A ghast fires: where the fireball starts, the vector it is aimed along (centre to centre; `Fireball::new` jitters it) and the ghast's `Mob::id`.
     Fire(Vec3, Vec3, u32),
+    /// A fireball hit this before it burst (`attackEntityFrom(owner, 0)`): a boat or cart rocks, a painting comes off the wall.
+    Strike(Strike),
     /// A fireball burst here: `lib.rs` makes the power 1 explosion with fire (`World.newExplosion(null, x, y, z, 1.0F, true)`).
     Burst(Vec3),
     /// A fireball's smoke puff (`spawnParticle("smoke", x, y + 0.5, z)` every tick): where.
@@ -369,7 +379,7 @@ fn exposure(get: BlockQuery<'_>, at: Vec3, lo: Vec3, hi: Vec3) -> f32 {
 }
 
 /// `Explosion.doExplosionA`'s pass over one entity: its damage and its push in m/s, or `None` out of range. `feet` is `posX/Y/Z`
-/// (the box's bottom for a mob, its middle for a boat or a cart), `lo..hi` its box. The size is doubled first (`explosionSize *= 2`).
+/// (the box's bottom for a mob, its middle for a boat or a cart, the eye for the player: `yOffset` 1.62), `lo..hi` its box. The size is doubled first (`explosionSize *= 2`).
 pub fn blast(get: BlockQuery<'_>, at: Vec3, power: f32, feet: Vec3, lo: Vec3, hi: Vec3) -> Option<(i32, Vec3)> {
     let size = power * 2.0;
     let d = feet - at;
@@ -419,7 +429,7 @@ impl Mob {
         let pos = Vec3::new(x, feet + half.y + 0.01, z);
         // ponytail: a process-wide counter (as `Cart::new` has), so callers of `new` need no id plumbing; it wraps after 2^32 mobs.
         static NEXT: AtomicU32 = AtomicU32::new(0);
-        Self { id: NEXT.fetch_add(1, Ordering::Relaxed), kind, body: Player { pos, vel: Vec3::ZERO, on_ground: false }, yaw, health: hp, limb: 0.0, limb_amt: 0.0, hurt: 0, size, color, sheared: false,
+        Self { id: NEXT.fetch_add(1, Ordering::Relaxed), kind, body: Player { pos, vel: Vec3::ZERO, on_ground: false }, yaw, health: hp, limb: 0.0, limb_amt: 0.0, hurt: 0, death: 0, size, color, sheared: false,
             fuse: 0, tame: false, sitting: false, prey: None, bit: None, coat: COAT_PALE, voice: if kind == Wolf { ((x.to_bits() ^ z.to_bits().rotate_left(11)) % VOICES as u32) as u8 } else { 0 }, saddled: false, ridden: false, half, age: 0, yaw_vel: 0.0, look: None, goal: None, fspeed: 0.0, jumping: false, wet: false, damp: false, blocked: false, life: 0,
             last: 0, target: false, shot: false, lit: false, anger: 0, attack_time: 0, hop: 0, egg: rng.next_int_bound(6000) + 6000, fire: 0,
             free: 0, swim: Vec3::ZERO, path: Vec::new(), path_i: 0, smart: false, wander: false, panic: 0, scare: Vec3::ZERO, mate: None, graze: 0, rest: 0, gait: 1.0, head: 0.0, munch: 0.0, body_yaw: yaw, head_pitch: 0.0, look_pitch: 0.0, talk: 0, cry: None, airborne: false, enraged: false, growl: 0, charge: 0, prev_charge: 0, anim: 0.0, wp: pos, course: 0 }
@@ -609,6 +619,13 @@ impl Mob {
         self.hurt = self.hurt.saturating_sub(1);
         self.free = self.free.saturating_sub(1);
         self.attack_time = self.attack_time.saturating_sub(1);
+        if self.health <= 0 {
+            // `EntityLiving.onUpdate` + `isMovementBlocked`: the corpse counts `deathTime` (started by `Mobs::update`, which drops the loot), has no AI,
+            // does not jump or steer, and only falls and slides on what the blow gave it (`Mob::step`). `Mobs::update` removes it past 20.
+            self.death += (self.death > 0) as u8;
+            (self.jumping, self.fspeed, self.swim) = (false, 0.0, Vec3::ZERO);
+            return true;
+        }
         let (k, pos) = (self.kind, self.body.pos);
         let (d, (cx, cy, cz)) = (c.player - pos, cell(pos));
         let (d2, dist) = (d.length_squared(), d.length());
@@ -1174,14 +1191,21 @@ impl Fireball {
         Self { pos, vel: Vec3::ZERO, acc: a.normalize_or_zero() * 0.1, age: 0, owner }
     }
 
+    /// Its own box (1 x 1 x 1 on `pos`, the bottom centre): what another fireball tests its move against (grown by 0.3 there).
+    fn aabb(&self) -> (Vec3, Vec3) {
+        (self.pos - Vec3::new(0.5, 0.0, 0.5), self.pos + Vec3::new(0.5, 1.0, 0.5))
+    }
+
     /// The box a fireball is picked by (`getCollisionBorderSize` 1.0 round its own box).
     fn pick_box(&self) -> (Vec3, Vec3) {
         (self.pos + Vec3::new(-1.5, -1.0, -1.5), self.pos + Vec3::new(1.5, 2.0, 1.5))
     }
 
     /// `EntityFireball.onUpdate`: look along the move for a block and for an entity (boxes grown 0.3), burst at the first; else move, accelerate, drag.
+    /// The entities are the player, the mobs, `targets` and `others` (the other fireballs, in two slices: before and after this one). What it hit takes
+    /// `attackEntityFrom(owner, 0)`: a mob its knock, a boat, cart or painting an `Ev::Strike`, another fireball the look of this one's owner as its motion.
     /// Returns false when it is gone.
-    fn tick(&mut self, c: &Ctx, list: &mut [Mob], targets: &[(Vec3, Vec3)], rng: &mut JavaRandom, ev: &mut Vec<Ev>) -> bool {
+    fn tick(&mut self, c: &Ctx, list: &mut [Mob], targets: &[(Vec3, Vec3, Strike)], others: &mut [&mut [Fireball]], rng: &mut JavaRandom, ev: &mut Vec<Ev>) -> bool {
         self.age += 1;
         let (x, y, z) = cell(self.pos);
         if (c.player - self.pos).length_squared() > 128.0 * 128.0 || (c.get)(x, y, z).is_none() {
@@ -1195,29 +1219,47 @@ impl Fireball {
         });
         let d = self.vel * block.unwrap_or(1.0);
         let grown = |lo: Vec3, hi: Vec3| ray_box(self.pos, d, lo - Vec3::splat(0.3), hi + Vec3::splat(0.3)).filter(|&t| t <= 1.0);
-        let mut best: Option<(f32, Option<usize>)> = None; // (t, mob index; None = the player, a boat or a cart)
+        #[derive(Clone, Copy)]
+        enum Hit { Player, Mob(usize), Thing(usize), Ball(usize, usize) }
+        let mut best: Option<(f32, Hit)> = None;
+        let mut take = |t: Option<f32>, h: Hit| {
+            if let Some(t) = t.filter(|&t| best.map_or(true, |b| t < b.0)) {
+                best = Some((t, h));
+            }
+        };
         let (plo, phi) = (c.player - physics::HALF, c.player + physics::HALF);
-        if let Some(t) = grown(plo, phi) {
-            best = Some((t, None));
-        }
+        take(grown(plo, phi), Hit::Player);
         for (i, m) in list.iter().enumerate() {
             if m.health <= 0 || (m.id == self.owner && self.age < 25) {
                 continue;
             }
             let (lo, hi) = m.aabb();
-            if let Some(t) = grown(lo, hi).filter(|&t| best.map_or(true, |b| t < b.0)) {
-                best = Some((t, Some(i)));
-            }
+            take(grown(lo, hi), Hit::Mob(i));
         }
-        // A boat or a minecart (`canBeCollidedWith`) bursts it like the player does; the blast (`App::explode`) is what hurts them.
-        for &(lo, hi) in targets {
-            if let Some(t) = grown(lo, hi).filter(|&t| best.map_or(true, |b| t < b.0)) {
-                best = Some((t, None));
+        // A boat, a minecart, a painting, a lit TNT and another fireball (`canBeCollidedWith`) stop it like the player does.
+        for (i, &(lo, hi, _)) in targets.iter().enumerate() {
+            take(grown(lo, hi), Hit::Thing(i));
+        }
+        for (s, side) in others.iter().enumerate() {
+            for (j, o) in side.iter().enumerate() {
+                let (lo, hi) = o.aabb();
+                take(grown(lo, hi), Hit::Ball(s, j));
             }
         }
         if block.is_some() || best.is_some() {
-            if let Some((_, Some(i))) = best {
-                list[i].damage(0, self.pos, rng); // `attackEntityFrom(owner, 0)`
+            match best.map(|b| b.1) {
+                Some(Hit::Mob(i)) => list[i].damage(0, self.pos, rng), // `attackEntityFrom(owner, 0)`
+                Some(Hit::Thing(i)) => ev.push(Ev::Strike(targets[i].2)),
+                // `EntityFireball.attackEntityFrom`: the hit one flies along its attacker's look (the ghast's, level: it has no pitch), accelerating by a tenth of it.
+                // ponytail: an owner no longer in the list (gone since it fired) leaves the other fireball as it was; the Java keeps its last look.
+                Some(Hit::Ball(s, j)) => {
+                    if let Some(m) = list.iter().find(|m| m.id == self.owner) {
+                        let (sn, co) = m.yaw.to_radians().sin_cos();
+                        let look = Vec3::new(-sn, 0.0, co);
+                        (others[s][j].vel, others[s][j].acc) = (look, look * 0.1);
+                    }
+                }
+                _ => {}
             }
             ev.push(Ev::Burst(self.pos));
             return false;
@@ -1276,8 +1318,8 @@ pub struct Mobs {
     pub list: Vec<Mob>,
     pub arrows: Vec<Arrow>,
     pub fireballs: Vec<Fireball>,
-    /// Boxes (min, max) of the boats and carts a fireball can hit; `App` refills it each frame.
-    pub targets: Vec<(Vec3, Vec3)>,
+    /// Boxes (min, max) of what else a fireball can hit (`canBeCollidedWith`: boats, carts, paintings, a lit TNT) and what it is; `App` refills it each frame.
+    pub targets: Vec<(Vec3, Vec3, Strike)>,
     pub rng: JavaRandom,
     /// The random of the sounds (`Mob::talk`), apart from `rng` so that hearing a mob changes nothing it does.
     snd: JavaRandom,
@@ -1490,19 +1532,27 @@ impl Mobs {
                 if let Some(cell) = m.bit.take() {
                     ev.push(Ev::Graze(cell));
                 }
-                if alive {
+                if alive && m.health > 0 {
                     m.talk(snd, &mut ev);
                 }
                 alive
             });
             self.arrows.retain_mut(|a| a.tick(c, &mut ev));
-            let (list, rng, targets) = (&mut self.list, &mut self.rng, &self.targets);
-            self.fireballs.retain_mut(|f| f.tick(c, list, targets, rng, &mut ev));
+            // Each fireball sees the others as they are now (`getEntitiesWithinAABBExcludingEntity`); a burst one is gone for the ones after it.
+            let mut balls = std::mem::take(&mut self.fireballs);
+            let mut i = 0;
+            while i < balls.len() {
+                let (head, rest) = balls.split_at_mut(i);
+                let (f, tail) = rest.split_first_mut().expect("i < len");
+                if f.tick(c, &mut self.list, &self.targets, &mut [head, tail], &mut self.rng, &mut ev) { i += 1 } else { balls.remove(i); }
+            }
+            self.fireballs = balls;
             // A player's arrow inside a mob's box (grown 0.3, like `EntityArrow`) hurts it and is gone.
             let (list, rng) = (&mut self.list, &mut self.rng);
             self.arrows.retain(|a| {
                 let hit = a.player.then(|| list.iter().position(|m| {
                     let (lo, hi) = m.aabb();
+                    m.health > 0 &&
                     a.pos.cmpge(lo - Vec3::splat(0.3)).all() && a.pos.cmple(hi + Vec3::splat(0.3)).all()
                 })).flatten();
                 hit.map_or(true, |i| {
@@ -1552,7 +1602,7 @@ impl Mobs {
                         }
                     }
                 }
-                Ev::Hurt(_) | Ev::Boom(_) | Ev::Burst(_) | Ev::Smoke(_) | Ev::Snd(..) | Ev::Graze(_) | Ev::Bow(..) => out.push(e),
+                Ev::Hurt(_) | Ev::Boom(_) | Ev::Strike(_) | Ev::Burst(_) | Ev::Smoke(_) | Ev::Snd(..) | Ev::Graze(_) | Ev::Bow(..) => out.push(e),
                 Ev::Shoot(..) | Ev::Fire(..) => {}
             }
         }
@@ -1562,13 +1612,21 @@ impl Mobs {
                 i += 1;
                 continue;
             }
-            let m = self.list.swap_remove(i);
-            let p = m.body.pos;
-            for s in m.loot(&mut self.rng) {
-                drops.spawn_stack(s, cell(p));
+            let p = self.list[i].body.pos;
+            if self.list[i].death == 0 {
+                // `EntityLiving.onDeath`: the loot drops at once; the corpse stays 20 more ticks (`deathTime`).
+                self.list[i].death = 1;
+                for s in self.list[i].loot(&mut self.rng) {
+                    drops.spawn_stack(s, cell(p));
+                }
             }
+            if self.list[i].death <= 20 {
+                i += 1;
+                continue;
+            }
+            let m = self.list.swap_remove(i);
             if m.kind == Slime && m.size > 1.0 {
-                // `EntitySlime.setEntityDead`: four of half the size.
+                // `EntitySlime.setEntityDead` (at the end of the death animation): four of half the size.
                 for j in 0..4 {
                     if self.list.len() < MAX_MOBS {
                         let (ox, oz) = ((j % 2) as f32 - 0.5, (j / 2) as f32 - 0.5);
@@ -1585,7 +1643,8 @@ impl Mobs {
 
     /// The nearest mob on the ray within `reach`: (index, distance).
     pub fn pick(&self, eye: Vec3, dir: Vec3, reach: f32) -> Option<(usize, f32)> {
-        self.list.iter().enumerate().filter_map(|(i, m)| {
+        // ponytail: a corpse is not picked (the Java still has it `canBeCollidedWith` for its 20 ticks, where a tap on it does nothing).
+        self.list.iter().enumerate().filter(|(_, m)| m.health > 0).filter_map(|(i, m)| {
             let (lo, hi) = m.aabb();
             ray_box(eye, dir, lo, hi).filter(|&t| t <= reach).map(|t| (i, t))
         }).min_by(|a, b| a.1.total_cmp(&b.1))
@@ -1946,12 +2005,46 @@ mod tests {
         m.list.push(s);
         let l = |_, _, _| 15u8;
         let c = ctx(Vec3::new(5.0, 11.0, 5.0), &l);
-        m.update(TICK, &c, &mut Drops::new(1));
+        for _ in 0..21 {
+            m.update(TICK, &c, &mut Drops::new(1)); // the first finds it dead, 20 more run its `deathTime` out (`setEntityDead` splits it)
+        }
         assert_eq!(m.list.len(), 4);
         assert!(m.list.iter().all(|s| s.kind == Slime && s.size == 2.0 && s.health == 4));
         let mut sheep = Mob::new(Sheep, 1.5, 10.0, 1.5, 0.0, &mut rng);
         sheep.color = 6;
         assert_eq!(sheep.loot(&mut rng).iter().map(|s| (s.id, s.damage)).collect::<Vec<_>>(), vec![(35, 6)]);
+    }
+
+    /// b1.7.3 `EntityLiving.onDeath` / `onUpdate`: a dead mob drops its loot at once (once), lies there counting `deathTime` 1..=20 with no AI, and is
+    /// gone one tick past 20; the player's tap and an arrow pass through it.
+    #[test]
+    fn a_dead_mob_drops_at_once_lies_twenty_ticks_and_does_nothing() {
+        let mut rng = JavaRandom::new(5);
+        let l = |_, _, _| 15u8;
+        let c = ctx(Vec3::new(5.0, 11.0, 5.0), &l);
+        let (mut m, mut drops) = (Mobs::new(1), Drops::new(1));
+        m.burst = 0;
+        let mut sheep = Mob::new(Sheep, 32.5, 10.0, 32.5, 0.0, &mut rng);
+        (sheep.color, sheep.health) = (6, 0);
+        m.list.push(sheep);
+        m.update(TICK, &c, &mut drops);
+        assert_eq!((m.list.len(), m.list[0].death, drops.items.len()), (1, 1, 1), "the wool drops the moment it is found dead, the corpse stays");
+        assert!(m.pick(Vec3::new(32.5, 10.5, 28.0), Vec3::Z, 8.0).is_none(), "a corpse is not picked");
+        for k in 2..=20 {
+            m.update(TICK, &c, &mut drops);
+            assert_eq!((m.list.len(), m.list[0].death, drops.items.len()), (1, k, 1), "tick {k}");
+        }
+        m.update(TICK, &c, &mut drops);
+        assert!(m.list.is_empty(), "removed past 20");
+        assert_eq!(drops.items.len(), 1, "no second drop");
+        // A dead zombie next to the player does not hit; a live one does.
+        let near = ctx(Vec3::new(32.5, 11.0, 36.5), &l);
+        let (mut live, mut dead, mut ev) = (Mob::new(Zombie, 32.5, 10.0, 35.0, 0.0, &mut rng), Mob::new(Zombie, 32.5, 10.0, 35.0, 0.0, &mut rng), Vec::new());
+        dead.health = 0;
+        live.tick(&mut rng, &near, &mut ev);
+        assert!(ev.iter().any(|e| matches!(e, Ev::Hurt(_))));
+        ev.clear();
+        assert!((0..30).all(|_| dead.tick(&mut rng, &near, &mut ev)) && ev.is_empty(), "a corpse has no AI");
     }
 
     /// A bone tames a wolf (1 in 3, health 20, calm, sitting); sitting it stays put, standing it follows its owner beyond 5
@@ -2380,14 +2473,14 @@ mod tests {
         // Down onto the grass (the top of it is y = 10).
         let mut f = Fireball::new(Vec3::new(20.5, 20.0, 20.5), Vec3::new(0.0, -30.0, 0.0), u32::MAX, &mut rng);
         let mut ev = Vec::new();
-        f.tick(&c, &mut list, &[], &mut rng, &mut ev);
+        f.tick(&c, &mut list, &[], &mut [], &mut rng, &mut ev);
         assert!(matches!(ev[..], [Ev::Smoke(p)] if (p.y - 20.5).abs() < 1e-3), "a puff half a block above it each tick: {}", ev.len());
         let mut f = Fireball::new(Vec3::new(20.5, 20.0, 20.5), Vec3::new(0.0, -30.0, 0.0), u32::MAX, &mut rng);
         let mut ev = Vec::new();
         let mut speeds = Vec::new();
         let mut alive = true;
         for _ in 0..60 {
-            alive = f.tick(&c, &mut list, &[], &mut rng, &mut ev);
+            alive = f.tick(&c, &mut list, &[], &mut [], &mut rng, &mut ev);
             speeds.push(f.vel.length());
             if !alive { break }
         }
@@ -2402,7 +2495,7 @@ mod tests {
         let mut f = Fireball { pos: Vec3::new(32.5, 15.5, 32.5), vel: Vec3::ZERO, acc: Vec3::new(0.0, 0.0, 0.1), age: 0, owner: u32::MAX };
         let mut ev = Vec::new();
         for _ in 0..60 {
-            if !f.tick(&c, &mut list, &[], &mut rng, &mut ev) { break }
+            if !f.tick(&c, &mut list, &[], &mut [], &mut rng, &mut ev) { break }
         }
         let at = ev.iter().find_map(|e| if let Ev::Burst(p) = e { Some(*p) } else { None }).expect("it burst");
         assert!((at - player).length() < 4.0, "{at:?}");
@@ -2413,7 +2506,7 @@ mod tests {
         let mut f = Fireball { pos: Vec3::new(32.5, 15.5, 32.5), vel: Vec3::ZERO, acc: Vec3::new(0.0, 0.0, 0.1), age: 0, owner: u32::MAX };
         let mut ev = Vec::new();
         for _ in 0..60 {
-            if !f.tick(&ctx(Vec3::new(5.5, 40.0, 5.5), &l), &mut list, &[], &mut rng, &mut ev) { break }
+            if !f.tick(&ctx(Vec3::new(5.5, 40.0, 5.5), &l), &mut list, &[], &mut [], &mut rng, &mut ev) { break }
         }
         assert!(ev.iter().any(|e| matches!(e, Ev::Burst(_))) && list[0].health == 10 && list[0].hurt > 0, "{}", list[0].health);
         // Punched: it goes the way the player looks, accelerating along it.
@@ -2423,42 +2516,67 @@ mod tests {
         m.deflect(0, Vec3::X);
         let c = ctx(far, &l);
         let x0 = m.fireballs[0].pos.x;
-        m.fireballs[0].tick(&c, &mut [], &[], &mut rng, &mut Vec::new());
+        m.fireballs[0].tick(&c, &mut [], &[], &mut [], &mut rng, &mut Vec::new());
         assert!(m.fireballs[0].pos.x > x0 + 0.9 && m.fireballs[0].vel.x > 0.9, "{:?}", m.fireballs[0].vel);
         // Its own ghast is passed for 25 ticks, then it counts.
         let g = Mob::new(Ghast, 20.5, 20.0, 20.5, 0.0, &mut rng);
         let mut list = vec![g];
         let mut f = Fireball { pos: Vec3::new(20.5, 20.0, 20.5), vel: Vec3::ZERO, acc: Vec3::new(0.0, -0.1, 0.0), age: 0, owner: list[0].id };
         let mut ev = Vec::new();
-        f.tick(&c, &mut list, &[], &mut rng, &mut ev);
+        f.tick(&c, &mut list, &[], &mut [], &mut rng, &mut ev);
         assert!(!ev.iter().any(|e| matches!(e, Ev::Burst(_))), "a young fireball passes its ghast");
         f.age = 30;
-        f.tick(&c, &mut list, &[], &mut rng, &mut ev);
+        f.tick(&c, &mut list, &[], &mut [], &mut rng, &mut ev);
         assert!(ev.iter().any(|e| matches!(e, Ev::Burst(_))), "an old one hits it");
         // Another ghast is hit at once: only the owner is passed.
         let mut ev = Vec::new();
         let mut f = Fireball { pos: Vec3::new(20.5, 20.0, 20.5), vel: Vec3::ZERO, acc: Vec3::new(0.0, -0.1, 0.0), age: 0, owner: list[0].id + 1_000_000 };
-        f.tick(&c, &mut list, &[], &mut rng, &mut ev);
+        f.tick(&c, &mut list, &[], &mut [], &mut rng, &mut ev);
         assert!(ev.iter().any(|e| matches!(e, Ev::Burst(_))), "a young fireball hits another ghast");
     }
 
-    /// b1.7.3 `EntityFireball`: a boat or a minecart (`canBeCollidedWith`) stops it like a mob does.
+    /// b1.7.3 `EntityFireball`: a boat, a minecart, a painting, a lit TNT (`canBeCollidedWith`) stop it like a mob does, and say what was hit.
     #[test]
-    fn a_fireball_bursts_on_a_boat_or_cart() {
+    fn a_fireball_bursts_on_a_boat_cart_painting_or_tnt() {
+        let l = |_, _, _| 15u8;
+        let c = ctx(Vec3::new(5.5, 40.0, 5.5), &l);
+        let boxed = |s: Strike| [(Vec3::new(31.75, 15.2, 40.75), Vec3::new(33.25, 15.8, 42.25), s)];
+        let go = |targets: &[(Vec3, Vec3, Strike)]| {
+            let mut f = Fireball { pos: Vec3::new(32.5, 15.5, 32.5), vel: Vec3::ZERO, acc: Vec3::new(0.0, 0.0, 0.1), age: 0, owner: u32::MAX };
+            let (mut ev, mut rng) = (Vec::new(), JavaRandom::new(4));
+            let at = (0..80).find_map(|_| { f.tick(&c, &mut [], targets, &mut [], &mut rng, &mut ev).then_some(()).map_or(Some(f.pos.z), |_| None) });
+            (at, ev.iter().filter_map(|e| if let Ev::Strike(s) = e { Some(*s) } else { None }).collect::<Vec<_>>())
+        };
+        for s in [Strike::Boat(2), Strike::Cart(1), Strike::Painting(0), Strike::Tnt] {
+            let (z, struck) = go(&boxed(s));
+            assert!(z.is_some_and(|z| z > 39.0 && z < 41.0), "{s:?}: {z:?}");
+            assert_eq!(struck, [s], "it says what it hit");
+        }
+        assert!(go(&[]).0.map_or(true, |z| z > 42.5), "without it the ball flies on");
+    }
+
+    /// b1.7.3 `EntityFireball.attackEntityFrom`: a fireball that runs into another one bursts, and the one it hit flies off along its ghast's look.
+    #[test]
+    fn a_fireball_hitting_a_fireball_turns_it_along_its_ghasts_look() {
         let l = |_, _, _| 15u8;
         let c = ctx(Vec3::new(5.5, 40.0, 5.5), &l);
         let mut rng = JavaRandom::new(4);
-        let boat = [(Vec3::new(31.75, 15.2, 40.75), Vec3::new(33.25, 15.8, 42.25))];
-        let go = |targets: &[(Vec3, Vec3)]| {
-            let mut f = Fireball { pos: Vec3::new(32.5, 15.5, 32.5), vel: Vec3::ZERO, acc: Vec3::new(0.0, 0.0, 0.1), age: 0, owner: u32::MAX };
-            let (mut ev, mut rng) = (Vec::new(), JavaRandom::new(4));
-            let at = (0..80).find_map(|_| { f.tick(&c, &mut [], targets, &mut rng, &mut ev).then_some(()).map_or(Some(f.pos.z), |_| None) });
-            at
-        };
-        let _ = &mut rng;
-        let z = go(&boat).expect("it burst");
-        assert!(z > 39.0 && z < 41.0, "{z}");
-        assert!(go(&[]).map_or(true, |z| z > 42.5), "without it the ball flies on");
+        let mut g = Mob::new(Ghast, 20.5, 40.0, 60.5, 90.0, &mut rng); // `yaw` 90: it looks along -x
+        g.yaw = 90.0;
+        let mut list = vec![g];
+        let mut a = Fireball { pos: Vec3::new(32.5, 15.5, 32.5), vel: Vec3::ZERO, acc: Vec3::new(0.0, 0.0, 0.1), age: 0, owner: list[0].id };
+        let mut b = [Fireball { pos: Vec3::new(32.5, 15.5, 36.0), vel: Vec3::ZERO, acc: Vec3::new(0.0, 0.0, -0.1), age: 0, owner: u32::MAX }];
+        let mut ev = Vec::new();
+        let alive = (0..40).all(|_| a.tick(&c, &mut list, &[], &mut [&mut b], &mut rng, &mut ev));
+        assert!(!alive && ev.iter().any(|e| matches!(e, Ev::Burst(_))), "the first one burst on the second");
+        assert!(b[0].vel.x < -0.99 && b[0].vel.z.abs() < 1e-3 && b[0].acc.x < -0.099, "{:?} {:?}", b[0].vel, b[0].acc);
+        // The one it hit does not stop: it is still there, and `Mobs::update` keeps it.
+        let mut m = Mobs::new(1);
+        m.no_spawn = true;
+        m.fireballs.push(Fireball { pos: Vec3::new(32.5, 15.5, 32.5), vel: Vec3::ZERO, acc: Vec3::new(0.0, 0.0, 0.1), age: 0, owner: u32::MAX });
+        m.fireballs.push(Fireball { pos: Vec3::new(32.5, 15.5, 36.0), vel: Vec3::ZERO, acc: Vec3::new(0.0, 0.0, -0.1), age: 0, owner: u32::MAX });
+        let evs: Vec<Ev> = (0..40).flat_map(|_| m.update(TICK, &c, &mut Drops::new(1))).collect();
+        assert!(evs.iter().any(|e| matches!(e, Ev::Burst(_))) && m.fireballs.len() <= 1, "{}", m.fireballs.len());
     }
 
     /// b1.7.3 `Explosion.doExplosionA`: size doubled, damage `(e^2 + e) / 2 x 8 x size + 1` with `e = (1 - distance / size) x exposure`, and the

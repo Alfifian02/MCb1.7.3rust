@@ -125,7 +125,8 @@ fn geometry(drops: &Drops, mobs: &Mobs, falling: &[Falling], fx: &Effects, lv: &
         let n0 = verts.len();
         push_mob(&mut verts, &mut idxs, m, a);
         lit(&mut verts, n0, lv, m.body.pos);
-        if m.hurt > 0 {
+        // `RenderLiving`: the red overlay while `hurtTime > 0 || deathTime > 0` (a corpse stays red until it is gone).
+        if m.hurt > 0 || m.death > 0 {
             redden(&mut verts, n0);
         }
     }
@@ -851,10 +852,20 @@ fn ghast_squash(m: &Mob, partial: f32) -> Vec3 {
 /// points down), 24 px above the ground; parts turn about their rotation point, x then y then z, legs and arms swinging
 /// with `limb`; each from the mob's own skin (`skin_of`), a sheep's fleece as a second pass (`fur`) tinted by its colour. UNVERIFIED
 /// stand-ins: a creeper's burning fuse flashes flat white. A hurt mob's red overlay is made by the shader (`HURT`, `redden`).
+/// `RenderLiving.rotateCorpse`: from `deathTime` on the body rolls about its feet by `sqrt((deathTime + partial - 1) / 20 x 1.6)` (at most 1) x
+/// `getDeathMaxRotation`: 90 degrees, a spider 180 (`RenderSpider`). 0 for a living mob.
+fn corpse_roll(m: &Mob, partial: f32) -> f32 {
+    if m.death == 0 {
+        return 0.0;
+    }
+    ((m.death as f32 + partial - 1.0) / 20.0 * 1.6).sqrt().min(1.0) * if m.kind == Spider { 180.0 } else { 90.0 }
+}
+
 fn push_mob(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, m: &Mob, partial: f32) {
     let feet = m.body.pos - Vec3::new(0.0, m.half.y, 0.0);
     let root = Mat4::from_translation(feet)
         * Mat4::from_rotation_y(PI - m.body_yaw.to_radians())
+        * Mat4::from_rotation_z(corpse_roll(m, partial).to_radians())
         * Mat4::from_scale(Vec3::new(-1.0, -1.0, 1.0) * m.size * if m.kind == Wolf { WOLF_SCALE } else { 1.0 } / 16.0)
         * Mat4::from_scale(ghast_squash(m, partial))
         * Mat4::from_translation(Vec3::new(0.0, -23.875, 0.0));
@@ -1001,6 +1012,31 @@ mod tests {
         v.chunks_exact_mut(VF).for_each(|q| q[5] = 0.6); // what `lit` writes
         redden(&mut v, 0);
         assert!(v.chunks_exact(VF).all(|q| (q[5] - 2.6).abs() < 1e-6 && q[5] >= HURT && q[5] < 4.0));
+    }
+
+    /// `RenderLiving.rotateCorpse`: the body rolls `sqrt((deathTime + partial - 1) / 20 x 1.6)` of 90 degrees (a spider's 180), quickly at first, and is
+    /// down for good (clamped at 1) from the 13th tick; a living mob does not roll. A corpse moves the vertices the roll turns.
+    #[test]
+    fn a_corpse_rolls_onto_its_side_by_its_death_time() {
+        let mut rng = crate::world::gen::noise::JavaRandom::new(1);
+        let mut pig = Mob::new(Pig, 0.0, 0.0, 0.0, 0.0, &mut rng);
+        assert_eq!(corpse_roll(&pig, 0.5), 0.0);
+        pig.death = 1;
+        assert_eq!(corpse_roll(&pig, 0.0), 0.0);
+        let mid = corpse_roll(&pig, 1.0);
+        assert!((mid - (1.6f32 / 20.0).sqrt() * 90.0).abs() < 1e-3 && mid > 20.0, "{mid}");
+        pig.death = 20;
+        assert_eq!(corpse_roll(&pig, 0.0), 90.0);
+        let mut spider = Mob::new(Spider, 0.0, 0.0, 0.0, 0.0, &mut rng);
+        spider.death = 20;
+        assert_eq!(corpse_roll(&spider, 0.0), 180.0);
+        let (mut up, mut down, mut i) = (Vec::new(), Vec::new(), Vec::new());
+        pig.death = 0;
+        push_mob(&mut up, &mut i, &pig, 0.0);
+        pig.death = 20;
+        push_mob(&mut down, &mut i, &pig, 0.0);
+        let top = |v: &Vec<f32>| v.chunks_exact(VF).map(|q| q[1]).fold(f32::MIN, f32::max);
+        assert!(top(&down) < top(&up) - 0.3, "lying on its side it is lower: {} vs {}", top(&down), top(&up));
     }
 
     fn text() -> Text {
