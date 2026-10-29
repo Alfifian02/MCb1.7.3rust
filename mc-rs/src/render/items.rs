@@ -113,7 +113,7 @@ fn geometry(drops: &Drops, mobs: &Mobs, falling: &[Falling], fx: &Effects, lv: &
     }
     for m in mobs.list.iter().filter(|m| seen(m.body.pos, 4.0)) {
         let n0 = verts.len();
-        push_mob(&mut verts, &mut idxs, m);
+        push_mob(&mut verts, &mut idxs, m, a);
         lit(&mut verts, n0, lv, m.body.pos);
     }
     // The local player (`RenderPlayer`), only in the third-person view.
@@ -164,11 +164,15 @@ fn geometry(drops: &Drops, mobs: &Mobs, falling: &[Falling], fx: &Effects, lv: &
         push_box(&mut verts, &mut idxs, [p.x - h, p.y - h, p.z - h], [p.x + h, p.y + h, p.z + h], stack_tile(tile), 1.0);
         lit(&mut verts, n0, lv, p);
     }
-    // `RenderFireball`: the snowball's sprite, 2 blocks across, round (`pos` + 0.5, the middle of its box). ponytail: a full-bright cube of the sprite, not a
-    // quad facing the camera (the entity pass has no billboards).
-    for f in mobs.fireballs.iter().filter(|f| seen(f.pos, 3.0)) {
-        let c = f.pos + Vec3::Y * 0.5;
-        push_box(&mut verts, &mut idxs, [c.x - 0.5, c.y - 0.5, c.z - 0.5], [c.x + 0.5, c.y + 0.5, c.z + 0.5], stack_tile(ItemStack { id: crate::world::gear::SNOWBALL, count: 1, damage: 0 }), 1.0);
+    // `RenderFireball`: the snowball's sprite on a quad 2 blocks across turned square to the eye, centred on the middle of its box, full bright.
+    if let Some(icon) = atlas::item_icon(crate::world::gear::SNOWBALL) {
+        for f in mobs.fireballs.iter().filter(|f| seen(f.pos, 3.0)) {
+            let c = f.pos + Vec3::Y * 0.5;
+            let to = (eye - c).normalize_or_zero();
+            let right = Vec3::Y.cross(to).try_normalize().unwrap_or(Vec3::X);
+            let up = to.cross(right);
+            push_quad2(&mut verts, &mut idxs, [c - right - up, c + right - up, c + right + up, c - right + up], WHITE, &|u, v| atlas::item_uv(icon, u, v));
+        }
     }
     // The fishing bobber: a small red box.
     if let Some(p) = hook {
@@ -819,12 +823,12 @@ fn head_dip(m: &Mob, head: &Part) -> Option<(f32, f32)> {
 
 /// `RenderGhast.preRenderCallback`: with `t` = the charge over 20 (never below 0), `v = 1 / (2 t^5 + 1)`; the ghast is scaled `(8 + 1 / v) / 2` wide
 /// and deep and `(8 + v) / 2` tall, so it is 4.5 everywhere at rest and gets wider and shorter as it charges. Anything else: 1.
-/// ponytail: the Java interpolates `prevAttackCounter` with the frame's partial tick; this reads the counter as it is.
-fn ghast_squash(m: &Mob) -> Vec3 {
+/// The counter is interpolated with the frame's partial tick, `(prev + (now - prev) * partial) / 20`, as the Java does.
+fn ghast_squash(m: &Mob, partial: f32) -> Vec3 {
     if m.kind != Ghast {
         return Vec3::ONE;
     }
-    let t = (m.charge as f32 / 20.0).max(0.0);
+    let t = ((m.prev_charge as f32 + (m.charge - m.prev_charge) as f32 * partial) / 20.0).max(0.0);
     let v = 1.0 / (t.powi(5) * 2.0 + 1.0);
     let (h, w) = ((8.0 + v) / 2.0, (8.0 + 1.0 / v) / 2.0);
     Vec3::new(w, h, w)
@@ -834,12 +838,12 @@ fn ghast_squash(m: &Mob) -> Vec3 {
 /// points down), 24 px above the ground; parts turn about their rotation point, x then y then z, legs and arms swinging
 /// with `limb`; each from the mob's own skin (`skin_of`), a sheep's fleece as a second pass (`fur`) tinted by its colour. UNVERIFIED
 /// stand-ins: a hurt mob is tinted red (the Java blends a red overlay), a creeper's burning fuse flashes flat white.
-fn push_mob(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, m: &Mob) {
+fn push_mob(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, m: &Mob, partial: f32) {
     let feet = m.body.pos - Vec3::new(0.0, m.half.y, 0.0);
     let root = Mat4::from_translation(feet)
         * Mat4::from_rotation_y(PI - m.body_yaw.to_radians())
         * Mat4::from_scale(Vec3::new(-1.0, -1.0, 1.0) * m.size * if m.kind == Wolf { WOLF_SCALE } else { 1.0 } / 16.0)
-        * Mat4::from_scale(ghast_squash(m))
+        * Mat4::from_scale(ghast_squash(m, partial))
         * Mat4::from_translation(Vec3::new(0.0, -23.875, 0.0));
     let flash = m.fuse > 0 && m.fuse % 6 < 3;
     let red = if m.hurt > 0 { tint(1.0, 0.4, 0.4) } else { WHITE };
@@ -923,7 +927,7 @@ mod tests {
                 assert!(tx.o.0 + w <= 64.0 && tx.o.1 + h <= skin_h, "{kind:?}: box {min:?} {size:?} at {:?} leaves the skin", tx.o);
             }
             let (mut v, mut i) = (Vec::new(), Vec::new());
-            push_mob(&mut v, &mut i, &m);
+            push_mob(&mut v, &mut i, &m, 1.0);
             assert_eq!(v.len(), boxes.len() * 24 * VF, "{kind:?}: 24 vertices a box");
             let slots: Vec<u8> = (0..atlas::SKIN_SLOTS as u8).collect();
             for vert in v.chunks_exact(VF) {

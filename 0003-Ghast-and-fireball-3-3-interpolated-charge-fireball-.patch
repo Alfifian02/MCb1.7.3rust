@@ -1,0 +1,124 @@
+From a1567fd58b558e6bf8b976eea3f0f60631ec2908 Mon Sep 17 00:00:00 2001
+From: Dev <dev@example.com>
+Date: Thu, 29 Oct 2026 03:50:05 +0000
+Subject: [PATCH 3/3] Ghast and fireball 3/3: interpolated charge, fireball
+ billboard, docs
+
+ghast_squash interpolates the charge counter between prev_charge and
+charge by the frame's partial tick (push_mob takes the partial), as
+RenderGhast does. The fireball is now the snowball sprite on a quad
+2 blocks across turned square to the eye (RenderFireball) instead of a
+cube. README's M8 row no longer says "no ghast"; changelog entry 32
+updated. tools/gen_terrain.py was run in a scratch copy and reproduces
+the art.rgba of 2/3 byte for byte.
+
+Not compiled: no Rust toolchain was available.
+---
+ README.md                 |  2 +-
+ mc-rs/src/render/items.rs | 28 ++++++++++++++++------------
+ roadmap/gameplay.md       |  2 +-
+ 3 files changed, 18 insertions(+), 14 deletions(-)
+
+diff --git a/README.md b/README.md
+index 57588c7..e6ce0db 100644
+--- a/README.md
++++ b/README.md
+@@ -39,7 +39,7 @@ original. Anything that cannot be derived from the b1.7.3 sources is marked
+ | Real-time shadows    | compiled and ran, not yet to be tested | Port of shaderLABS/Shadow-Tutorial to wgpu, no Iris/OptiFine: sun depth pass (1024^2, distortion 0.10, foliage excluded) + per-pixel compare in the chunk shader, replaces the mesher's baked shadow ray. See ROADMAP changelog. |
+ | Volumetric light     | compiled and ran, not yet to be tested | Port of AstraLex's light shafts (`render/vl.rs`): half-resolution ray march through the sun/moon shadow map + blurred blend over the frame; the shadow pass now also runs at sunrise, sunset, in rain and at night for it. Surface shadows come from this pass too (face normal rebuilt from depth, normal + slope bias) and the mesher no longer lets leaves dim the sky light, so a tree is shaded once, by the shadow map. See ROADMAP changelog. |
+ | Photon lighting      | compiled and ran, not yet to be tested | Milestone 1 of the photon port (`render/photon.rs`): G-buffer, HDR frame, deferred lighting (sun/sky/block light); the tone map and grade are `render/post.rs` (M5). Sky, shadows, fog, clouds, post follow (see ROADMAP changelog). |
+-| M8 Mobs              | compiled and ran, not yet to be tested | 13 mobs on one AI (`EntityCreature`/`EntityLiving` wander at 20 Hz, 0.9..3.6 box physics via `physics::step_box`): pig, cow, sheep (fleece colours), chicken (eggs, slow fall), wolf (angry when hit), squid, zombie, zombie pigman, giant, skeleton (arrows), creeper (fuse + `Explosion`), spider (leap, climbs), slime (hops, splits). Boxy models with swinging limbs, tap to hit (swords 4+, tools 2+, hand 1, 10-tick hurt window, knockback), `dropFewItems` loot, zombies/skeletons burn in daylight, spawns by light/grass/water. No path-finder, ghast, taming, shearing, sound, save. See ROADMAP changelog. |
++| M8 Mobs              | compiled and ran, not yet to be tested | 13 mobs on one AI (`EntityCreature`/`EntityLiving` wander at 20 Hz, 0.9..3.6 box physics via `physics::step_box`): pig, cow, sheep (fleece colours), chicken (eggs, slow fall), wolf (angry when hit), squid, zombie, zombie pigman, giant, skeleton (arrows), creeper (fuse + `Explosion`), spider (leap, climbs), slime (hops, splits). Boxy models with swinging limbs, tap to hit (swords 4+, tools 2+, hand 1, 10-tick hurt window, knockback), `dropFewItems` loot, zombies/skeletons burn in daylight, spawns by light/grass/water. No path-finder, taming, shearing, sound, save. The Nether's ghast and its fireball are in the changelog entries 31 and 32. See ROADMAP changelog. |
+ | Chest storage        | compiled and ran, not yet to be tested | `world/chest.rs`: `TileEntityChest` (27 slots), `BlockChest` (`canPlaceBlockAt`, `blockActivated`: tap opens, a normal cube above blocks it, `getBlockTexture`: front toward the open side, large-chest halves 41/42/57/58 from the neighbours, no metadata), `InventoryLargeChest` (two chests = one 54-slot screen, upper half first), `GuiChest` geometry (`114 + 18 * rows` tall) and titles, contents saved in `level` (older saves still load), a removed chest spills its slots, dungeon chests now hold their loot. No shift-click. See ROADMAP changelog. |
+ | Photon sky (port 2/6) | compiled and ran, not yet to be tested | Photon's atmosphere LUT sky, stars, sun, moon, sky map + SH (`render/sky.rs`, `sky.wgsl`). Licence: `LICENSE-PHOTON`. See ROADMAP changelog. |
+ | Photon M5 post chain | compiled and ran, not yet to be tested | `render/post.rs` + `post.wgsl`: line-by-line port of Photon's `c2_dof`, `c4_taa_exposure`, `c5`..`c18` bloom, `c19_color_grading` (ACES RRT+ODT, rec. 2020 working space), `c21_fxaa`, `final` (CAS + dither). The world now draws into `Post`'s scene texture, the light shafts blend into it, the chain ends on the surface and the HUD is drawn over it. See ROADMAP changelog. |
+diff --git a/mc-rs/src/render/items.rs b/mc-rs/src/render/items.rs
+index e9acb86..0f62a99 100644
+--- a/mc-rs/src/render/items.rs
++++ b/mc-rs/src/render/items.rs
+@@ -113,7 +113,7 @@ fn geometry(drops: &Drops, mobs: &Mobs, falling: &[Falling], fx: &Effects, lv: &
+     }
+     for m in mobs.list.iter().filter(|m| seen(m.body.pos, 4.0)) {
+         let n0 = verts.len();
+-        push_mob(&mut verts, &mut idxs, m);
++        push_mob(&mut verts, &mut idxs, m, a);
+         lit(&mut verts, n0, lv, m.body.pos);
+     }
+     // The local player (`RenderPlayer`), only in the third-person view.
+@@ -164,11 +164,15 @@ fn geometry(drops: &Drops, mobs: &Mobs, falling: &[Falling], fx: &Effects, lv: &
+         push_box(&mut verts, &mut idxs, [p.x - h, p.y - h, p.z - h], [p.x + h, p.y + h, p.z + h], stack_tile(tile), 1.0);
+         lit(&mut verts, n0, lv, p);
+     }
+-    // `RenderFireball`: the snowball's sprite, 2 blocks across, round (`pos` + 0.5, the middle of its box). ponytail: a full-bright cube of the sprite, not a
+-    // quad facing the camera (the entity pass has no billboards).
+-    for f in mobs.fireballs.iter().filter(|f| seen(f.pos, 3.0)) {
+-        let c = f.pos + Vec3::Y * 0.5;
+-        push_box(&mut verts, &mut idxs, [c.x - 0.5, c.y - 0.5, c.z - 0.5], [c.x + 0.5, c.y + 0.5, c.z + 0.5], stack_tile(ItemStack { id: crate::world::gear::SNOWBALL, count: 1, damage: 0 }), 1.0);
++    // `RenderFireball`: the snowball's sprite on a quad 2 blocks across turned square to the eye, centred on the middle of its box, full bright.
++    if let Some(icon) = atlas::item_icon(crate::world::gear::SNOWBALL) {
++        for f in mobs.fireballs.iter().filter(|f| seen(f.pos, 3.0)) {
++            let c = f.pos + Vec3::Y * 0.5;
++            let to = (eye - c).normalize_or_zero();
++            let right = Vec3::Y.cross(to).try_normalize().unwrap_or(Vec3::X);
++            let up = to.cross(right);
++            push_quad2(&mut verts, &mut idxs, [c - right - up, c + right - up, c + right + up, c - right + up], WHITE, &|u, v| atlas::item_uv(icon, u, v));
++        }
+     }
+     // The fishing bobber: a small red box.
+     if let Some(p) = hook {
+@@ -819,12 +823,12 @@ fn head_dip(m: &Mob, head: &Part) -> Option<(f32, f32)> {
+ 
+ /// `RenderGhast.preRenderCallback`: with `t` = the charge over 20 (never below 0), `v = 1 / (2 t^5 + 1)`; the ghast is scaled `(8 + 1 / v) / 2` wide
+ /// and deep and `(8 + v) / 2` tall, so it is 4.5 everywhere at rest and gets wider and shorter as it charges. Anything else: 1.
+-/// ponytail: the Java interpolates `prevAttackCounter` with the frame's partial tick; this reads the counter as it is.
+-fn ghast_squash(m: &Mob) -> Vec3 {
++/// The counter is interpolated with the frame's partial tick, `(prev + (now - prev) * partial) / 20`, as the Java does.
++fn ghast_squash(m: &Mob, partial: f32) -> Vec3 {
+     if m.kind != Ghast {
+         return Vec3::ONE;
+     }
+-    let t = (m.charge as f32 / 20.0).max(0.0);
++    let t = ((m.prev_charge as f32 + (m.charge - m.prev_charge) as f32 * partial) / 20.0).max(0.0);
+     let v = 1.0 / (t.powi(5) * 2.0 + 1.0);
+     let (h, w) = ((8.0 + v) / 2.0, (8.0 + 1.0 / v) / 2.0);
+     Vec3::new(w, h, w)
+@@ -834,12 +838,12 @@ fn ghast_squash(m: &Mob) -> Vec3 {
+ /// points down), 24 px above the ground; parts turn about their rotation point, x then y then z, legs and arms swinging
+ /// with `limb`; each from the mob's own skin (`skin_of`), a sheep's fleece as a second pass (`fur`) tinted by its colour. UNVERIFIED
+ /// stand-ins: a hurt mob is tinted red (the Java blends a red overlay), a creeper's burning fuse flashes flat white.
+-fn push_mob(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, m: &Mob) {
++fn push_mob(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, m: &Mob, partial: f32) {
+     let feet = m.body.pos - Vec3::new(0.0, m.half.y, 0.0);
+     let root = Mat4::from_translation(feet)
+         * Mat4::from_rotation_y(PI - m.body_yaw.to_radians())
+         * Mat4::from_scale(Vec3::new(-1.0, -1.0, 1.0) * m.size * if m.kind == Wolf { WOLF_SCALE } else { 1.0 } / 16.0)
+-        * Mat4::from_scale(ghast_squash(m))
++        * Mat4::from_scale(ghast_squash(m, partial))
+         * Mat4::from_translation(Vec3::new(0.0, -23.875, 0.0));
+     let flash = m.fuse > 0 && m.fuse % 6 < 3;
+     let red = if m.hurt > 0 { tint(1.0, 0.4, 0.4) } else { WHITE };
+@@ -923,7 +927,7 @@ mod tests {
+                 assert!(tx.o.0 + w <= 64.0 && tx.o.1 + h <= skin_h, "{kind:?}: box {min:?} {size:?} at {:?} leaves the skin", tx.o);
+             }
+             let (mut v, mut i) = (Vec::new(), Vec::new());
+-            push_mob(&mut v, &mut i, &m);
++            push_mob(&mut v, &mut i, &m, 1.0);
+             assert_eq!(v.len(), boxes.len() * 24 * VF, "{kind:?}: 24 vertices a box");
+             let slots: Vec<u8> = (0..atlas::SKIN_SLOTS as u8).collect();
+             for vert in v.chunks_exact(VF) {
+diff --git a/roadmap/gameplay.md b/roadmap/gameplay.md
+index dfbadac..5db6683 100644
+--- a/roadmap/gameplay.md
++++ b/roadmap/gameplay.md
+@@ -4,7 +4,7 @@ Part of [`ROADMAP.md`](../ROADMAP.md). The to-do milestones of this part (M11 Ne
+ 
+ ## Changelog
+ 
+-- 2026-10-29 (32): Ghast and fireball, second patch: model, skins, sound and smoke, on top of (31) (`missing.md` entry 2 is done). Written WITHOUT a Rust toolchain: not compiled, not run. Model (`render/items.rs::parts`): `ModelGhast`, the 16 cube and nine tentacles whose lengths are `Random(1660).nextInt(7) + 8` in the order of the Java constructor, at the Java's rotation points (24 and 31 less 16), swaying by `0.2 sin(0.3 t + i) + 0.4` with `Mob::anim` (a frame-by-frame tick count, only a ghast advances it); `ghast_squash` is `RenderGhast.preRenderCallback` (`(8 + 1 / v) / 2` wide, `(8 + v) / 2` tall, `v = 1 / (2 t^5 + 1)`, `t` = `charge / 20`, no partial tick: ponytail) as a scale between `RenderLiving`'s and its translate. Skins: `mob/ghast.png` and `ghast_fire.png` (the latter while `charge > 10`, the Java's data watcher byte) are atlas skin slots 26 and 27 (`atlas::skin::GHAST`, `GHAST_FIRE`, `SKIN_SLOTS` 28: still 7 bands, so the atlas keeps its size); `tools/gen_terrain.py` has them in `SKINS` and `mc-rs/assets/art.rgba` was written with them pasted in (the rest of the file is as it was). Fireball: `RenderFireball`'s sprite (the snowball's, 2 across) as a full-bright cube of it (ponytail: no camera-facing quad), `MAX_FIREBALLS` more boxes in `BOXES`; the puff of smoke every tick is `Ev::Smoke` -> `Effects::puff`. Sound: `mob.ghast.moan` / `scream` / `death` at volume 10 (`cry`), `mob.ghast.charge` at counter 10 and `mob.ghast.fireball` at 20, both 10 with the usual spread; all four were already in the audio table (the `mc_sounds` pack has the same files, nothing new was needed). Tests: smoke and sound asserts added to the two of (31), the cry-name loop and `mob_boxes_unwrap_inside_their_skin` take the ghast (the latter now reads `SKIN_SLOTS`). Still not done: the interpolated charge, the red hurt overlay of the Java (a red tint here, as for every mob). UNVERIFIED: that it compiles, how it looks on a device (the squash, the tentacle sway, the fireball cube at 2 blocks across is a guess of `0.5` half-size from the box, the Java quad is 2 wide), the volume 10 by ear.
++- 2026-10-29 (32): Ghast and fireball, second patch: model, skins, sound and smoke, on top of (31) (`missing.md` entry 2 is done). Written WITHOUT a Rust toolchain: not compiled, not run. Model (`render/items.rs::parts`): `ModelGhast`, the 16 cube and nine tentacles whose lengths are `Random(1660).nextInt(7) + 8` in the order of the Java constructor, at the Java's rotation points (24 and 31 less 16), swaying by `0.2 sin(0.3 t + i) + 0.4` with `Mob::anim` (a frame-by-frame tick count, only a ghast advances it); `ghast_squash` is `RenderGhast.preRenderCallback` (`(8 + 1 / v) / 2` wide, `(8 + v) / 2` tall, `v = 1 / (2 t^5 + 1)`, `t` = the counter interpolated between `prev_charge` and `charge` by the frame's partial tick, over 20; `push_mob` now takes that partial) as a scale between `RenderLiving`'s and its translate. Skins: `mob/ghast.png` and `ghast_fire.png` (the latter while `charge > 10`, the Java's data watcher byte) are atlas skin slots 26 and 27 (`atlas::skin::GHAST`, `GHAST_FIRE`, `SKIN_SLOTS` 28: still 7 bands, so the atlas keeps its size); `tools/gen_terrain.py` has them in `SKINS` and `mc-rs/assets/art.rgba` was written with them pasted in (the rest of the file is as it was). Fireball: `RenderFireball`'s sprite (the snowball's) on a full-bright quad 2 blocks across, turned square to the eye (`push_quad2`), centred on `pos + 0.5`; the puff of smoke every tick is `Ev::Smoke` -> `Effects::puff`. Sound: `mob.ghast.moan` / `scream` / `death` at volume 10 (`cry`), `mob.ghast.charge` at counter 10 and `mob.ghast.fireball` at 20, both 10 with the usual spread; all four were already in the audio table (the `mc_sounds` pack has the same files, nothing new was needed). Tests: smoke and sound asserts added to the two of (31), the cry-name loop and `mob_boxes_unwrap_inside_their_skin` take the ghast (the latter now reads `SKIN_SLOTS`). Still not done: the red hurt overlay of the Java (a red tint here, as for every mob); the fireball does not hit boats or carts; water and lava do not drag a ghast; the explosion's knockback on mobs was not checked. UNVERIFIED: that it compiles, how it looks on a device (the squash, the tentacle sway, the quad's orientation), the volume 10 by ear.
+ - 2026-10-29 (31): Ghast and fireball, first patch: AI and projectile logic (`missing.md` entry 2; the model, skins and sounds are the second patch). Written WITHOUT a Rust toolchain: not compiled, not run (no `rustc` in the sandbox). `Kind::Ghast` (4 x 4 x 4, 10 health, drops 0..2 gunpowder, `hostile`, so Peaceful removes it); `Mob::ai_ghast` is `EntityGhast.updatePlayerActionState` (waypoint within 16 blocks, new one when reached or 60 away, a 0.1 push every 2..6 ticks if `isCourseTraversable`, the Java's use of the OLD distance kept; player within 64 and in sight: face them, `attackCounter` to 20, then `Ev::Fire` 4 blocks along its heading, counter -40; out of sight it runs back down); `Mob::step`: no gravity (`step_box`'s pull is put back), 0.91 drag a tick, `body_yaw = yaw`. `Fireball` (`EntityFireball`): 1 x 1 x 1, starts at rest, `acc` 0.1 along the aim (+ Gaussian 0.4 a component) with 0.95 drag (0.8 in water), the segment of each tick is searched for a block and for the player or a mob (boxes grown 0.3; any ghast is passed for 25 ticks, ponytail: the Java names the owner), bursts as `Ev::Burst` at the place it was at the start of the tick; the mob it hits takes `damage(0)`. `lib.rs`: `Ev::Burst` is `explode(p, 1.0, true)`; `explode` got `flame` (`Explosion.isFlaming`: in each destroyed cell now air over an opaque block, fire 1 time in 3, in reverse order); a tap on a fireball under the crosshair (nearer than the block, mob, boat or cart) calls `Mobs::deflect` (motion = look, `acc` = look x 0.1; no damage, no wear). Nether spawns: ghast 10 / pig zombie 10 (`BiomeGenHell`), `CAP_GHAST` = 2 of its own so a crowd of pigmen does not keep it out, `can_spawn` 1 try in 20 with a free 5 x 5 x 5 cell room and no ground, one a spawn. Not here: model, `ghast.png` / `ghast_fire.png` (`render/items.rs` draws a ghast as nothing and the fireball not at all), sounds (`cry` is silent for it; the charge and fireball sounds are not queued), the fireball's smoke, the dataWatcher skin flag (`Mob::charge > 10` is it), water / lava drag of the ghast, the knockback of the explosion on mobs. Tests: `mobs::tests::{a_ghast_charges_twenty_ticks_then_fires_and_never_falls, a_fireball_accelerates_bursts_on_what_it_meets_and_turns_when_punched}`, `the_nether_spawns_pig_zombies_only` is now `..._and_ghasts_only`; the fireball's numbers (burst at y 10.9 on the grass from 20 blocks up, 1.3 blocks short of the player, top speed 1.9) were checked in a Python model of the same steps. UNVERIFIED: that it compiles (`ai_ghast` / `Fireball::tick` use `physics::aabb_hits_solid`, `ray_box`, `JavaRandom::next_gaussian` as their signatures read), the `lib.rs` wiring, the feel of the ghast's drift and the spawn rate by eye. Run `cargo test --lib mobs` first.
+ - 2026-10-29 (30): Nether spawns (`missing.md` entry 2, first half). `Mobs::nether` replaces `no_spawn` in `lib.rs` (`no_spawn` stays for tests): no animals, squid or overworld monsters; the monster pass picks `PigZombie` (`BiomeGenHell.spawnableMonsterList` without the ghast, which will draw its 10 / 20 weight), and `can_spawn` skips the dark test as `EntityPigZombie.getCanSpawnHere` does. ponytail: the ground is still required (the Java spawns in mid-air). Test: `mobs::tests::the_nether_spawns_pig_zombies_only`; `mobs` compiled and its 28 tests run in a Linux scratch crate, `lib.rs` not compiled.
+ - 2026-10-29 (29): minecart with chest, its 27 slots (`missing.md` entry 1). `Cart::id` (a process-wide counter) names the slots `Cart::key()` = `(i32::MIN, id, 0)` in `App::chests`, so `Screen::at_chest`, `ext` and the spill code are the chest's own; no new screen. `EntityMinecart.interact` type 1: a tap with an empty hand opens the screen titled `Minecart` (a held item still hits, as for every vehicle here). `canInteractWith`: the cart is alive and within 8 blocks of the player (`lib.rs` `reach`, in place of `chest::usable` for that key). Breaking it spills every slot (`scatter`, one entity per stack, not 10..30 piles) next to the cart and chest drops. Not saved, as carts are not (the key is filtered out of `level`). Tests: +1 assert in `minecart::tests::hits_break_it_and_the_pieces_drop`; `minecart` compiled and tested in a Linux scratch crate (`detector_sees_the_cart_over_it_only` already fails on the base tree), `lib.rs` not compiled (wgpu 26 needs a newer rustc than the host's 1.75).
+-- 
+2.43.0
+
