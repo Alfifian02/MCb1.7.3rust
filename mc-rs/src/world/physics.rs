@@ -114,6 +114,21 @@ pub fn step_box(player: &mut Player, half: Vec3, dt: f32, jumping: bool, get: Bl
     (water, lava)
 }
 
+/// `EntityFlying.moveEntityWithHeading` for a box (a ghast): no gravity, and the motion drags every tick by 0.8 in water, 0.5 in lava,
+/// 0.546 on the ground and 0.91 in the air. Returns (in water, in lava) like `step_box`.
+/// ponytail: no web, soul sand or stream current (`step_box` has them); a flier meets them rarely.
+pub fn step_flying(body: &mut Player, half: Vec3, dt: f32, get: BlockQuery<'_>) -> (bool, bool) {
+    let water = touches(body.pos, half, get, 0.001, 8..=9);
+    let lava = !water && touches(body.pos, half, get, 0.1, 10..=11);
+    let drag = if water { 0.8f32 } else if lava { 0.5 } else if body.on_ground { 0.546 } else { 0.91 };
+    body.vel *= drag.powf(dt * 20.0);
+    let delta = body.vel * dt;
+    let boxes = Boxes::collect(body.pos, half, delta, get);
+    body.pos = sweep_axis(body.pos, half, delta, &boxes, &mut body.vel, false);
+    body.on_ground = boxes.hits(body.pos - Vec3::new(0.0, 0.002, 0.0), half);
+    (water, lava)
+}
+
 /// Sneaking (`MovementInputFromOptions.sneak`, b1.7.3), the two parts that live in the physics. Call it before `step` with the same `dt`,
 /// after the caller set the horizontal velocity (and scaled the input by 0.3, which is `MovementInputFromOptions`'s own part).
 /// - `Entity.moveEntity`, `onGround && isSneaking()`: a step along x (then along z) is cut in 0.05-block slices until the box moved there
@@ -273,6 +288,24 @@ fn snap<F: Fn(f32) -> bool>(start: f32, delta: f32, hits: F) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// b1.7.3 `EntityFlying`: no gravity, and the motion drags 0.91 a tick in air, 0.8 in water, 0.5 in lava.
+    #[test]
+    fn a_flier_drags_by_its_medium_and_does_not_sink() {
+        let half = Vec3::splat(2.0);
+        let run = |id: u8| {
+            let get = move |_: i32, _: i32, _: i32| -> Option<u8> { Some(id) };
+            let mut p = Player { pos: Vec3::new(8.5, 40.0, 8.5), vel: Vec3::new(10.0, 0.0, 0.0), on_ground: false };
+            let ticks = (0..1).map(|_| step_flying(&mut p, half, 0.05, &get)).last().unwrap();
+            (p.vel, ticks)
+        };
+        let (air, w) = run(0);
+        assert!((air.x - 9.1).abs() < 1e-4 && air.y == 0.0 && w == (false, false), "{air:?}");
+        let (water, w) = run(9);
+        assert!((water.x - 8.0).abs() < 1e-4 && water.y == 0.0 && w == (true, false), "{water:?}");
+        let (lava, w) = run(11);
+        assert!((lava.x - 5.0).abs() < 1e-4 && lava.y == 0.0 && w == (false, true), "{lava:?}");
+    }
 
     /// Standing on a floor must read as on_ground, otherwise the jump button can never fire.
     #[test]

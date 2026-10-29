@@ -82,6 +82,16 @@ fn lit(verts: &mut [f32], from: usize, lv: &dyn Fn(i32, i32, i32) -> (u8, u8), a
     lit_by(verts, from, lv, at, 0);
 }
 
+/// Added to the `light` of a hurt mob's vertices (after `lit` set it to the cell's 0..1): the entity shader reads `light` 2..3 as
+/// `RenderLiving`'s red overlay (0.4 of red over the same pixels). The flat entity path uses `light` for nothing else.
+pub(crate) const HURT: f32 = 2.0;
+
+fn redden(verts: &mut [f32], from: usize) {
+    for v in verts[from..].chunks_exact_mut(VF) {
+        v[5] += HURT;
+    }
+}
+
 /// `lit` with both levels `dim` lower (the pack's contact shadows: the same cell's light, darker).
 fn lit_by(verts: &mut [f32], from: usize, lv: &dyn Fn(i32, i32, i32) -> (u8, u8), at: Vec3, dim: u8) {
     let (sky, block) = lv(at.x.floor() as i32, at.y.floor() as i32, at.z.floor() as i32);
@@ -115,6 +125,9 @@ fn geometry(drops: &Drops, mobs: &Mobs, falling: &[Falling], fx: &Effects, lv: &
         let n0 = verts.len();
         push_mob(&mut verts, &mut idxs, m, a);
         lit(&mut verts, n0, lv, m.body.pos);
+        if m.hurt > 0 {
+            redden(&mut verts, n0);
+        }
     }
     // The local player (`RenderPlayer`), only in the third-person view.
     if let Some(p) = player {
@@ -837,7 +850,7 @@ fn ghast_squash(m: &Mob, partial: f32) -> Vec3 {
 /// Mobs drawn like `RenderLiving`: turned to face their body (`body_yaw`), scaled 1/16 (times `size`) and flipped upside down (model y
 /// points down), 24 px above the ground; parts turn about their rotation point, x then y then z, legs and arms swinging
 /// with `limb`; each from the mob's own skin (`skin_of`), a sheep's fleece as a second pass (`fur`) tinted by its colour. UNVERIFIED
-/// stand-ins: a hurt mob is tinted red (the Java blends a red overlay), a creeper's burning fuse flashes flat white.
+/// stand-ins: a creeper's burning fuse flashes flat white. A hurt mob's red overlay is made by the shader (`HURT`, `redden`).
 fn push_mob(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, m: &Mob, partial: f32) {
     let feet = m.body.pos - Vec3::new(0.0, m.half.y, 0.0);
     let root = Mat4::from_translation(feet)
@@ -846,14 +859,12 @@ fn push_mob(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, m: &Mob, partial: f32) {
         * Mat4::from_scale(ghast_squash(m, partial))
         * Mat4::from_translation(Vec3::new(0.0, -23.875, 0.0));
     let flash = m.fuse > 0 && m.fuse % 6 < 3;
-    let red = if m.hurt > 0 { tint(1.0, 0.4, 0.4) } else { WHITE };
     let model = parts(m);
     let dip = model.first().and_then(|h| head_dip(m, h));
-    draw_parts(verts, idxs, m, &root, &model, skin_of(m), red, flash, dip);
+    draw_parts(verts, idxs, m, &root, &model, skin_of(m), WHITE, flash, dip);
     let fleece_pass = fur(m);
     if !fleece_pass.is_empty() {
-        let c = if m.hurt > 0 { tint(0.8, 0.3, 0.3) } else { fleece(m.color) };
-        draw_parts(verts, idxs, m, &root, &fleece_pass, atlas::skin::SHEEP_FUR, c, false, dip);
+        draw_parts(verts, idxs, m, &root, &fleece_pass, atlas::skin::SHEEP_FUR, fleece(m.color), false, dip);
     }
 }
 
@@ -968,7 +979,7 @@ mod tests {
         assert_eq!((parts(&cow).len(), head_n(Cow)), (9, 3));
     }
 
-    /// `tint` packs like `WHITE`; the fleece table and the red of a hurt mob go through it.
+    /// `tint` packs like `WHITE`; the fleece table goes through it.
     #[test]
     fn tints_pack_like_white() {
         assert_eq!(tint(1.0, 1.0, 1.0), WHITE);
@@ -976,6 +987,20 @@ mod tests {
         assert_eq!(fleece(15), tint(0.1, 0.1, 0.1));
         assert_eq!(tint(1.0, 0.0, 0.0), 16_711_680.0);
         assert_eq!(fleece(16), fleece(0), "the colour is a nibble");
+    }
+
+    /// `RenderLiving`: a hurt mob keeps its own colours (no tint); the shader gets the red overlay from `light` 2..3 on its vertices.
+    #[test]
+    fn a_hurt_mob_is_marked_for_the_overlay_not_tinted() {
+        let mut rng = crate::world::gen::noise::JavaRandom::new(1);
+        let mut pig = Mob::new(Pig, 0.0, 0.0, 0.0, 0.0, &mut rng);
+        pig.hurt = 10;
+        let (mut v, mut i) = (Vec::new(), Vec::new());
+        push_mob(&mut v, &mut i, &pig, 0.0);
+        assert!(v.chunks_exact(VF).all(|q| q[7] == WHITE), "no red tint any more");
+        v.chunks_exact_mut(VF).for_each(|q| q[5] = 0.6); // what `lit` writes
+        redden(&mut v, 0);
+        assert!(v.chunks_exact(VF).all(|q| (q[5] - 2.6).abs() < 1e-6 && q[5] >= HURT && q[5] < 4.0));
     }
 
     fn text() -> Text {

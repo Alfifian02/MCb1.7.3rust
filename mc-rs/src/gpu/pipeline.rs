@@ -383,6 +383,9 @@ fn frag(in: VsOut, cut: bool, shade: f32) -> vec4<f32> {
         rgb = c.rgb;
         if textureSampleLevel(tex, samp, ouv, 0.0).a >= 0.5 { rgb = atlas_sample_g(ouv, gx, gy).rgb * in.tint; }
     }
+    // `RenderLiving`: a hurt mob is drawn again in red at alpha 0.4 over the same pixels (`render::items::HURT`: its `light` is 2 + the
+    // cell's, so `k` is 2..3), blended in gamma space like the Java's framebuffer: 0.6 of the texel and 0.4 of red.
+    if in.k >= 2.0 && in.k < 4.0 { rgb = pow(pow(rgb, vec3<f32>(1.0 / 2.2)) * 0.6 + vec3<f32>(0.4, 0.0, 0.0), vec3<f32>(2.2)); }
     return vec4<f32>(finish(rgb, lit, in.fg), cover);
 }
 

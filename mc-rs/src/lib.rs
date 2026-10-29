@@ -932,6 +932,10 @@ impl App {
         let ctx = Ctx { get: &get, light: &light, day: sub < 4, player: self.player.pos, eye: self.camera.pos, biome: &biome, sight };
         self.mobs.difficulty = self.opts.difficulty;
         self.mobs.smart = self.opts.animal_ai;
+        // What a fireball can hit besides mobs and the player (`canBeCollidedWith`).
+        self.mobs.targets.clear();
+        self.mobs.targets.extend(self.boats.list.iter().map(|b| (b.pos - boat::HALF, b.pos + boat::HALF)));
+        self.mobs.targets.extend(self.carts.list.iter().map(|c| (c.pos - minecart::HALF, c.pos + minecart::HALF)));
         for e in self.mobs.update(dt, &ctx, &mut self.drops) {
             match e {
                 // `EntityPlayer.attackEntityFrom`: Peaceful 0, Easy d / 3 + 1, Hard d * 3 / 2.
@@ -1370,10 +1374,7 @@ impl App {
                     held => {
                         let (dmg, wear) = mobs::attack(held);
                         if self.carts.list[ci].hurt(dmg) {
-                            let c = self.carts.list.remove(ci);
-                            let cell = (c.pos.x.floor() as i32, c.pos.y.floor() as i32, c.pos.z.floor() as i32);
-                            c.drops().into_iter().for_each(|s| self.drops.spawn_stack(s, cell));
-                            self.chests.remove(&c.key()).into_iter().flatten().flatten().for_each(|s| self.drops.scatter(s, cell));
+                            self.smash_cart(ci);
                         }
                         if wear > 0 {
                             self.inv.damage(slot, wear);
@@ -1392,10 +1393,7 @@ impl App {
                     held => {
                         let (dmg, wear) = mobs::attack(held);
                         if self.boats.list[bi].hurt(dmg) {
-                            let b = self.boats.list.remove(bi);
-                            let cell = (b.pos.x.floor() as i32, b.pos.y.floor() as i32, b.pos.z.floor() as i32);
-                            self.drops.spawn_stack(ItemStack { id: boat::PLANKS, count: 3, damage: 0 }, cell);
-                            self.drops.spawn_stack(ItemStack { id: boat::STICK, count: 2, damage: 0 }, cell);
+                            self.smash_boat(bi);
                         }
                         if wear > 0 {
                             self.inv.damage(slot, wear);
@@ -1853,11 +1851,28 @@ impl App {
         self.fx.tick_spawners(&mut self.mobs, &ctx, &|(x, _, z)| chunks.block_loaded(x, 0, z).is_some());
     }
 
+    /// A minecart that took its last hit: removed, its drops and what its chest held on the ground.
+    fn smash_cart(&mut self, ci: usize) {
+        let c = self.carts.list.remove(ci);
+        let cell = (c.pos.x.floor() as i32, c.pos.y.floor() as i32, c.pos.z.floor() as i32);
+        c.drops().into_iter().for_each(|s| self.drops.spawn_stack(s, cell));
+        self.chests.remove(&c.key()).into_iter().flatten().flatten().for_each(|s| self.drops.scatter(s, cell));
+    }
+
+    /// A boat that took its last hit: removed, 3 planks and 2 sticks dropped.
+    fn smash_boat(&mut self, bi: usize) {
+        let b = self.boats.list.remove(bi);
+        let cell = (b.pos.x.floor() as i32, b.pos.y.floor() as i32, b.pos.z.floor() as i32);
+        self.drops.spawn_stack(ItemStack { id: boat::PLANKS, count: 3, damage: 0 }, cell);
+        self.drops.spawn_stack(ItemStack { id: boat::STICK, count: 2, damage: 0 }, cell);
+    }
+
     /// `Explosion`; `flame` is `isFlaming` (a ghast's fireball): afterwards, in each destroyed cell that is now air over an opaque block, fire 1 time in 3.
     fn explode(&mut self, at: glam::Vec3, power: f32, flame: bool) {
         self.touch.pad.rumble(400, 255);
         self.audio.cry("random.explode", at, 4.0, 0.7, true); // `Explosion`: volume 4, pitch `(1 + (r - r) * 0.2) * 0.7`
-        let cells = self.mobs.explode(&|x: i32, y: i32, z: i32| self.chunks.block(x, y, z), at, power);
+        // The fireball's (`flame`) is the one with no exploder entity: no `knockBack`, only the push.
+        let cells = self.mobs.explode(&|x: i32, y: i32, z: i32| self.chunks.block(x, y, z), at, power, !flame);
         let cells_fire = if flame { cells.clone() } else { Vec::new() };
         for (x, y, z) in cells {
             let Some(id) = self.chunks.block_loaded(x, y, z).filter(|&b| b > 0) else { continue };
@@ -1877,9 +1892,31 @@ impl App {
                 }
             }
         }
+        // Boats and carts are hurt and pushed like a mob (`blast`; their `vel` is blocks a tick, and `hurt` takes 10 a point).
+        let get = |x: i32, y: i32, z: i32| self.chunks.block(x, y, z);
+        let hit = |pos: glam::Vec3, half: glam::Vec3| mobs::blast(&get, at, power, pos, pos - half, pos + half);
+        let boats: Vec<_> = self.boats.list.iter().map(|b| hit(b.pos, boat::HALF)).collect();
+        let carts: Vec<_> = self.carts.list.iter().map(|c| hit(c.pos, minecart::HALF)).collect();
+        for (i, h) in boats.into_iter().enumerate().rev() {
+            if let Some((dmg, push)) = h {
+                self.boats.list[i].vel += push / 20.0;
+                if self.boats.list[i].hurt(dmg) {
+                    self.smash_boat(i);
+                }
+            }
+        }
+        for (i, h) in carts.into_iter().enumerate().rev() {
+            if let Some((dmg, push)) = h {
+                self.carts.list[i].vel += push / 20.0;
+                if self.carts.list[i].hurt(dmg) {
+                    self.smash_cart(i);
+                }
+            }
+        }
+        // `explosionSize` is doubled before the damage is worked out, as for the mobs (`blast`). ponytail: no exposure test and no push for the player.
         let impact = 1.0 - (self.player.pos - at).length() / (power * 2.0);
         if impact > 0.0 {
-            self.vitals.hurt(((impact * impact + impact) / 2.0 * 8.0 * power + 1.0) as i32);
+            self.vitals.hurt(((impact * impact + impact) / 2.0 * 8.0 * power * 2.0 + 1.0) as i32);
         }
     }
 

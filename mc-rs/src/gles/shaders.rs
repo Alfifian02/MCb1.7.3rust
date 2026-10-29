@@ -269,6 +269,9 @@ vec4 frag(bool cut, float shade) {
         rgb = c.rgb;
         if (textureLod(u_tex, ouv, 0.0).a >= 0.5) { rgb = atlas_sample_g(ouv, gx, gy).rgb * v_tint; }
     }
+    // `RenderLiving`: a hurt mob is drawn again in red at alpha 0.4 over the same pixels (`render::items::HURT`: `v_k` is 2..3), blended in
+    // gamma space: 0.6 of the texel and 0.4 of red. Twin of `frag` in gpu/pipeline.rs.
+    if (v_k >= 2.0 && v_k < 4.0) { rgb = pow(pow(rgb, vec3(1.0 / 2.2)) * 0.6 + vec3(0.4, 0.0, 0.0), vec3(2.2)); }
     return vec4(finish(rgb, lit, v_fg), cover);
 }
 
