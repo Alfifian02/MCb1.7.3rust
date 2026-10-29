@@ -71,8 +71,8 @@ pub const ART_Y: usize = ITEMS_Y + 256;
 pub const SIGN_Y: usize = ART_Y + 256;
 /// `mob/char.png` (64 x 32, the player skin) at `CHAR_Y`.
 pub const CHAR_Y: usize = SIGN_Y + 32;
-/// From `CHAR_Y` on, 64 x 32 skins four to a row (`skin_px`, 26 slots = 7 bands, 224 rows): slot 0 `mob/char.png`, then the armor and the mobs.
-pub const SKIN_SLOTS: usize = 26;
+/// From `CHAR_Y` on, 64 x 32 skins four to a row (`skin_px`, 28 slots = 7 bands, 224 rows): slot 0 `mob/char.png`, then the armor and the mobs.
+pub const SKIN_SLOTS: usize = 28;
 /// Under them NOT b1.7.3: the 64 x 48 wolf skins (`wolf.rgba`, `tools/gen_wolf.py`), four to a row, `WOLF_ROWS` rows from `WOLF_Y`.
 pub const WOLF_Y: usize = ART_Y + 256 + 32 + 32 * SKIN_SLOTS.div_ceil(4);
 pub const WOLF_ROWS: usize = 240;
@@ -245,6 +245,9 @@ pub mod skin {
     pub const CREEPER: u8 = 23;
     pub const SPIDER: u8 = 24;
     pub const SLIME: u8 = 25;
+    pub const GHAST: u8 = 26;
+    /// `mob/ghast_fire.png`: the skin while `Mob::charge` is above 10 (`EntityGhast`'s data watcher byte 16).
+    pub const GHAST_FIRE: u8 = 27;
 }
 
 /// `Item.iconIndex` of an item id (256 and up), `None` for blocks and items the Java table does not have.

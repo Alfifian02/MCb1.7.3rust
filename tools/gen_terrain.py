@@ -23,9 +23,9 @@ open("mc-rs/assets/foliagecolor.rgb", "wb").write(foliage.convert("RGB").tobytes
 open("mc-rs/assets/items.rgba", "wb").write(png("gui/items.png").tobytes())
 # art/kz.png (painting motives, 256x256), item/sign.png (64x32, the sign model) and mob/char.png (64x32, the player skin) under it, 256x320: `render::atlas::ART`
 # From row 288 on, 64 x 32 skins four to a row (`render::atlas::skin_px`): slot 0 mob/char.png, 1..=10 armor/<cloth, chain, iron, diamond, gold>_<1, 2>.png
-# (slot 1 + 2 * material + layer - 1), 11.. the mobs in `SKINS` order; 26 slots = 7 bands, 512 rows in all.
+# (slot 1 + 2 * material + layer - 1), 11.. the mobs in `SKINS` order; 28 slots = 7 bands, 512 rows in all.
 SKINS = ["char"] + [f"armor/{m}_{i}" for m in ("cloth", "chain", "iron", "diamond", "gold") for i in (1, 2)] + [
-    f"mob/{n}" for n in ("pig", "cow", "chicken", "sheep", "sheep_fur", "wolf", "wolf_tame", "wolf_angry", "squid", "zombie", "pigzombie", "skeleton", "creeper", "spider", "slime")]
+    f"mob/{n}" for n in ("pig", "cow", "chicken", "sheep", "sheep_fur", "wolf", "wolf_tame", "wolf_angry", "squid", "zombie", "pigzombie", "skeleton", "creeper", "spider", "slime", "ghast", "ghast_fire")]
 SKINS[0] = "mob/char"
 art = Image.new("RGBA", (256, 288 + 32 * ((len(SKINS) + 3) // 4)), (0, 0, 0, 0))
 art.paste(png("art/kz.png"), (0, 0))

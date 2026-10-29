@@ -14,8 +14,7 @@
 //! of `moveFlying` (`moveSpeed` x 0.1 x 0.98 against 0.546 drag), reached the way the Java does, by momentum (see `step`: 0.546 a tick on the
 //! ground, 0.91 in the air, so a mob eases into a walk, glides to a stop and keeps its run over a hop), and the body trails the head
 //! (`body_yaw` = `renderYawOffset`, `head_pitch` = `faceEntity`'s pitch): both closer to b1.7.3 than the old instant speed and stiff turn. Explosions have no exposure
-//! test, and knock the player back not at all. Normal difficulty. The Nether's pig zombies and ghasts spawn (`Mobs::nether`); the ghast (`ai_ghast`, `EntityGhast`) and its `Fireball` are here, silent and drawn as nothing
-//! until the second patch (model, skin, sound).
+//! test, and knock the player back not at all. Normal difficulty. The Nether's pig zombies and ghasts spawn (`Mobs::nether`); the ghast (`ai_ghast`, `EntityGhast`) and its `Fireball` are here, modelled (`render/items.rs`), skinned and sounded.
 //! NOT b1.7.3 either (same switch, `Mobs::smart`): calm animals graze, root, peck and rest (`Mob::idle`). A cow or sheep on grass lowers its head and
 //! chews 3 to 8 s, a pig roots on grass or dirt 2 to 5 s, a hen pecks the ground in short 1 to 2 s runs, and a cow, sheep or pig now and then stands
 //! still for 8 to 20 s; each walk has its own gait (a stroll at 0.6 to 1.0 x the walk, a hen sometimes dashes at 1.5 x). Eating, rooting or resting
@@ -188,6 +187,8 @@ pub struct Mob {
     /// drifts to and `courseChangeCooldown`.
     pub charge: i32,
     pub prev_charge: i32,
+    /// Ghast: ticks it has existed, as a frame-by-frame float (`ModelGhast.setRotationAngles`' `var3`: the tentacles sway by it).
+    pub anim: f32,
     wp: Vec3,
     course: i32,
 }
@@ -239,7 +240,7 @@ const WOLF_CRY: [[&str; 6]; VOICES] = voices!("classic", "puglin", "sad", "angry
 /// hurt and the death is `random.hurt`, for the living sound none). `wolf`: the low two bits 0 bark, 1 panting, 2 whine, 3 growl, picked by
 /// the caller; the rest the wolf's `voice`.
 fn cry(k: Kind, c: Cry, wolf: u8) -> Option<(&'static str, f32)> {
-    let vol = match k { Cow | Wolf | Squid => 0.4, Slime => 0.6, _ => 1.0 };
+    let vol = match k { Cow | Wolf | Squid => 0.4, Slime => 0.6, Ghast => 10.0, _ => 1.0 };
     let n = match (k, c) {
         (Pig, Cry::Die) => "mob.pigdeath",
         (Pig, _) => "mob.pig",
@@ -268,7 +269,9 @@ fn cry(k: Kind, c: Cry, wolf: u8) -> Option<(&'static str, f32)> {
         (Slime, Cry::Say) => return None,
         (Slime, _) => "mob.slime",
         (Giant, _) => "random.hurt",
-        (Ghast, _) => return None, // second patch: `mob.ghast.moan` / `scream` / `death` at volume 10
+        (Ghast, Cry::Say) => "mob.ghast.moan",
+        (Ghast, Cry::Hurt) => "mob.ghast.scream",
+        (Ghast, Cry::Die) => "mob.ghast.death",
     };
     Some((n, vol))
 }
@@ -285,6 +288,8 @@ pub enum Ev {
     Fire(Vec3, Vec3),
     /// A fireball burst here: `lib.rs` makes the power 1 explosion with fire (`World.newExplosion(null, x, y, z, 1.0F, true)`).
     Burst(Vec3),
+    /// A fireball's smoke puff (`spawnParticle("smoke", x, y + 0.5, z)` every tick): where.
+    Smoke(Vec3),
     /// `random.bow` as a skeleton shoots (`false`), `random.bowhit` as an arrow hits a block, a mob or the player (`true`), here; `lib.rs` plays it.
     Bow(Vec3, bool),
     /// A player's arrow stopped against a block here.
@@ -374,7 +379,7 @@ impl Mob {
         Self { kind, body: Player { pos, vel: Vec3::ZERO, on_ground: false }, yaw, health: hp, limb: 0.0, limb_amt: 0.0, hurt: 0, size, color, sheared: false,
             fuse: 0, tame: false, sitting: false, prey: None, bit: None, coat: COAT_PALE, voice: if kind == Wolf { ((x.to_bits() ^ z.to_bits().rotate_left(11)) % VOICES as u32) as u8 } else { 0 }, saddled: false, ridden: false, half, age: 0, yaw_vel: 0.0, look: None, goal: None, fspeed: 0.0, jumping: false, wet: false, damp: false, blocked: false, life: 0,
             last: 0, target: false, shot: false, lit: false, anger: 0, attack_time: 0, hop: 0, egg: rng.next_int_bound(6000) + 6000, fire: 0,
-            free: 0, swim: Vec3::ZERO, path: Vec::new(), path_i: 0, smart: false, wander: false, panic: 0, scare: Vec3::ZERO, mate: None, graze: 0, rest: 0, gait: 1.0, head: 0.0, munch: 0.0, body_yaw: yaw, head_pitch: 0.0, look_pitch: 0.0, talk: 0, cry: None, airborne: false, enraged: false, growl: 0, charge: 0, prev_charge: 0, wp: pos, course: 0 }
+            free: 0, swim: Vec3::ZERO, path: Vec::new(), path_i: 0, smart: false, wander: false, panic: 0, scare: Vec3::ZERO, mate: None, graze: 0, rest: 0, gait: 1.0, head: 0.0, munch: 0.0, body_yaw: yaw, head_pitch: 0.0, look_pitch: 0.0, talk: 0, cry: None, airborne: false, enraged: false, growl: 0, charge: 0, prev_charge: 0, anim: 0.0, wp: pos, course: 0 }
     }
 
     /// `EntityWolf.interact`, a bone that took: tamed, sitting, full health, calm.
@@ -827,7 +832,7 @@ impl Mob {
     /// way every 2..6 ticks if the course is clear, and, with the player within 64 and in sight, face them, charge for 20 ticks and fire; the
     /// counter then sits at -40. The Java's `targetedEntity` / `aggroCooldown` only matter with several players: `getClosestPlayerToEntity(100)` is
     /// the player whenever the 64 test passes. The quirk of the Java is kept: the push and the clearance scan use the distance to the OLD waypoint.
-    /// Silent (second patch). ponytail: the despawn on Peaceful is `Mobs::update`'s `hostile`; nothing else but the player can be a target.
+    /// ponytail: the despawn on Peaceful is `Mobs::update`'s `hostile`; nothing else but the player can be a target.
     fn ai_ghast(&mut self, rng: &mut JavaRandom, c: &Ctx, d2: f32, ev: &mut Vec<Ev>) -> bool {
         if self.old(rng, d2) {
             return false;
@@ -858,8 +863,13 @@ impl Mob {
             self.yaw = -d.x.atan2(d.z).to_degrees();
             // `canEntityBeSeen`: from its eye (0.85 of its height above the feet) to the player's.
             if sees(c.get, pos + Vec3::Y * (half.y * 2.0 * 0.85 - half.y), c.eye) {
+                // `getSoundVolume` is 10: heard from far off.
+                if self.charge == 10 {
+                    ev.push(Ev::Snd("mob.ghast.charge", pos, 10.0, 1.0, true));
+                }
                 self.charge += 1;
                 if self.charge == 20 {
+                    ev.push(Ev::Snd("mob.ghast.fireball", pos, 10.0, 1.0, true));
                     let (s, co) = self.yaw.to_radians().sin_cos();
                     // `getLook(1.0)` is level here (a ghast has no pitch): 4 blocks along the heading, half its height (+ 0.5) up from its feet.
                     ev.push(Ev::Fire(Vec3::new(pos.x - s * 4.0, pos.y + 0.5, pos.z + co * 4.0), d));
@@ -956,6 +966,7 @@ impl Mob {
         self.body_yaw = self.yaw - norm(self.yaw - self.body_yaw).clamp(-75.0, 75.0);
         if self.kind == Ghast {
             self.body_yaw = self.yaw; // `renderYawOffset = rotationYaw`
+            self.anim += ticks;
         }
         self.head_pitch += (self.look_pitch - self.head_pitch) * (1.0 - 0.7f32.powf(ticks));
         // NOT b1.7.3: the head eases down while it grazes, roots or pecks (0.5 s), and the chewing phase runs while it is down.
@@ -1108,7 +1119,7 @@ impl Arrow {
 /// Java never times it out (an unloaded chunk freezes it), so here it is gone beyond 128 blocks of the player or outside the loaded world.
 /// Hitting a block, the player or a mob makes it burst (`Ev::Burst`); the hit mob takes `damage(0)` (a snowball's knock). The ghast it came
 /// from is not hit for its first 25 ticks (ponytail: any ghast, the Java names the owner). The player turns it with `Mobs::deflect`.
-/// ponytail: the block test marches the segment in steps of 0.25 (a corner grazed between two steps can be missed); no smoke trail yet.
+/// ponytail: the block test marches the segment in steps of 0.25 (a corner grazed between two steps can be missed).
 pub struct Fireball {
     pub pos: Vec3,
     pub vel: Vec3,
@@ -1169,6 +1180,7 @@ impl Fireball {
         let (x, y, z) = cell(self.pos + Vec3::Y * 0.5);
         let wet = matches!((c.get)(x, y, z), Some(8 | 9));
         self.vel = (self.vel + self.acc) * if wet { 0.8 } else { 0.95 };
+        ev.push(Ev::Smoke(self.pos + Vec3::Y * 0.5));
         true
     }
 }
@@ -1492,7 +1504,7 @@ impl Mobs {
                         }
                     }
                 }
-                Ev::Hurt(_) | Ev::Boom(_) | Ev::Burst(_) | Ev::Snd(..) | Ev::Graze(_) | Ev::Bow(..) => out.push(e),
+                Ev::Hurt(_) | Ev::Boom(_) | Ev::Burst(_) | Ev::Smoke(_) | Ev::Snd(..) | Ev::Graze(_) | Ev::Bow(..) => out.push(e),
                 Ev::Shoot(..) | Ev::Fire(..) => {}
             }
         }
@@ -1770,7 +1782,7 @@ mod tests {
         let (mut k, mut ev) = (Mob::new(Creeper, 32.5, 10.0, 32.5, 0.0, &mut rng), Vec::new());
         (0..40).any(|_| !k.tick(&mut rng, &near, &mut ev));
         assert_eq!(ev.iter().filter(|e| matches!(e, Ev::Snd("random.fuse", _, _, p, false) if *p == 0.5)).count(), 1);
-        for kind in [Pig, Cow, Sheep, Chicken, Wolf, Squid, Zombie, PigZombie, Giant, Skeleton, Creeper, Spider, Slime] {
+        for kind in [Pig, Cow, Sheep, Chicken, Wolf, Squid, Zombie, PigZombie, Giant, Skeleton, Creeper, Spider, Slime, Ghast] {
             for c in [Cry::Say, Cry::Hurt, Cry::Die] {
                 for w in 0..4 * VOICES as u8 {
                     assert!(cry(kind, c, w).map_or(true, |(n, v)| crate::audio::exists(n) && v > 0.0), "{kind:?} {c:?}");
@@ -2281,6 +2293,8 @@ mod tests {
         let fired: Vec<_> = ev.iter().filter_map(|e| if let Ev::Fire(at, aim) = e { Some((*at, *aim)) } else { None }).collect();
         assert_eq!(fired.len(), 1);
         assert_eq!(g.charge, -40);
+        let snd = |n: &str| ev.iter().filter(|e| matches!(e, Ev::Snd(m, _, v, _, true) if *m == n && *v == 10.0)).count();
+        assert_eq!((snd("mob.ghast.charge"), snd("mob.ghast.fireball")), (1, 1), "each once, at counter 10 and 20");
         let (at, aim) = fired[0];
         assert!((at.z - g.body.pos.z - 4.0).abs() < 0.2 && (at.x - g.body.pos.x).abs() < 0.2, "4 blocks toward +z: {at:?}");
         assert!((at.y - g.body.pos.y - 0.5).abs() < 1e-4);
@@ -2312,6 +2326,10 @@ mod tests {
         let mut rng = JavaRandom::new(9);
         let mut list: Vec<Mob> = Vec::new();
         // Down onto the grass (the top of it is y = 10).
+        let mut f = Fireball::new(Vec3::new(20.5, 20.0, 20.5), Vec3::new(0.0, -30.0, 0.0), &mut rng);
+        let mut ev = Vec::new();
+        f.tick(&c, &mut list, &mut rng, &mut ev);
+        assert!(matches!(ev[..], [Ev::Smoke(p)] if (p.y - 20.5).abs() < 1e-3), "a puff half a block above it each tick: {ev:?}");
         let mut f = Fireball::new(Vec3::new(20.5, 20.0, 20.5), Vec3::new(0.0, -30.0, 0.0), &mut rng);
         let mut ev = Vec::new();
         let mut speeds = Vec::new();
@@ -2361,7 +2379,7 @@ mod tests {
         let mut f = Fireball { pos: Vec3::new(20.5, 20.0, 20.5), vel: Vec3::ZERO, acc: Vec3::new(0.0, -0.1, 0.0), age: 0 };
         let mut ev = Vec::new();
         f.tick(&c, &mut list, &mut rng, &mut ev);
-        assert!(ev.is_empty(), "a young fireball passes its ghast");
+        assert!(!ev.iter().any(|e| matches!(e, Ev::Burst(_))), "a young fireball passes its ghast");
         f.age = 30;
         f.tick(&c, &mut list, &mut rng, &mut ev);
         assert!(ev.iter().any(|e| matches!(e, Ev::Burst(_))), "an old one hits it");

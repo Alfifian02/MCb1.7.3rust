@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use crate::world::items::{placed_meta, stack_tile, Drops, ItemStack, MAX_ITEMS};
 use crate::world::pack::{self, Lay, Mat, Scene};
-use crate::world::mobs::{Kind, Kind::*, Mob, Mobs, MAX_ARROWS, MAX_MOBS};
+use crate::world::mobs::{Kind, Kind::*, Mob, Mobs, MAX_ARROWS, MAX_FIREBALLS, MAX_MOBS};
 use crate::world::ticks::{Falling, MAX_FALLING};
 
 /// 24 vertices x 7 floats (`mesh::VF`) per cube, 36 indices per cube.
@@ -25,7 +25,7 @@ use crate::world::ticks::{Falling, MAX_FALLING};
 const MAX_BOATS: usize = 16;
 /// Carts drawn at once (floor, four walls and the furnace: 6 boxes each); the pack's cloth and all that lies on it are `pack::BOXES` more.
 const MAX_CARTS: usize = 16;
-const BOXES: usize = MAX_ITEMS * 4 + MAX_MOBS * 12 + MAX_ARROWS + MAX_FALLING + MAX_PARTICLES + MAX_BOLTS + MAX_BOATS * 5 + MAX_CARTS * 6 + pack::BOXES + 1;
+const BOXES: usize = MAX_ITEMS * 4 + MAX_MOBS * 12 + MAX_ARROWS + MAX_FIREBALLS + MAX_FALLING + MAX_PARTICLES + MAX_BOLTS + MAX_BOATS * 5 + MAX_CARTS * 6 + pack::BOXES + 1;
 /// Paintings (16 px pieces, one face each), signs (a board and a post of 6 two-sided faces) and the sign text (one quad per run
 /// of lit font pixels), on top of the boxes.
 const MAX_SIGNS: usize = 32;
@@ -163,6 +163,12 @@ fn geometry(drops: &Drops, mobs: &Mobs, falling: &[Falling], fx: &Effects, lv: &
         let tile = if a.kind == 0 { ItemStack { id: 35, count: 1, damage: 12 } } else { ItemStack { id: a.kind, count: 1, damage: 0 } };
         push_box(&mut verts, &mut idxs, [p.x - h, p.y - h, p.z - h], [p.x + h, p.y + h, p.z + h], stack_tile(tile), 1.0);
         lit(&mut verts, n0, lv, p);
+    }
+    // `RenderFireball`: the snowball's sprite, 2 blocks across, round (`pos` + 0.5, the middle of its box). ponytail: a full-bright cube of the sprite, not a
+    // quad facing the camera (the entity pass has no billboards).
+    for f in mobs.fireballs.iter().filter(|f| seen(f.pos, 3.0)) {
+        let c = f.pos + Vec3::Y * 0.5;
+        push_box(&mut verts, &mut idxs, [c.x - 0.5, c.y - 0.5, c.z - 0.5], [c.x + 0.5, c.y + 0.5, c.z + 0.5], stack_tile(ItemStack { id: crate::world::gear::SNOWBALL, count: 1, damage: 0 }), 1.0);
     }
     // The fishing bobber: a small red box.
     if let Some(p) = hook {
@@ -619,8 +625,18 @@ fn parts(m: &Mob) -> Vec<Part> {
             pt([1.25, 18.0, -3.5], [2.0, 2.0, 2.0], [0.0; 3], [0.0; 3], [0.0; 2], (32.0, 4.0)),
             pt([0.0, 21.0, -3.5], [1.0, 1.0, 1.0], [0.0; 3], [0.0; 3], [0.0; 2], (32.0, 8.0)),
         ],
-        // First patch: no model yet (`ModelGhast` comes with the second); the ghast is there and shoots, but is not drawn.
-        Ghast => Vec::new(),
+        // `ModelGhast`: a 16 cube and nine 2 x (8..14) x 2 tentacles (lengths from `Random(1660)`, as the Java's constructor draws them), the
+        // tentacles swaying by `0.2 sin(0.3 t + i) + 0.4` (`t` = `Mob::anim`). The rotation points are the Java's 24 and 31 less 16 (`var1`).
+        Ghast => {
+            let mut r = crate::world::gen::noise::JavaRandom::new(1660);
+            let mut v = vec![pt([-8.0, -8.0, -8.0], [16.0, 16.0, 16.0], [0.0, 8.0, 0.0], [0.0; 3], [0.0; 2], (0.0, 0.0))];
+            v.extend((0..9).map(|i| {
+                let len = (r.next_int_bound(7) + 8) as f32;
+                let (x, z) = (((i % 3) as f32 - (i / 3 % 2) as f32 * 0.5 + 0.25 - 1.0) * 5.0, ((i / 3) as f32 - 1.0) * 5.0);
+                pt([-1.0, 0.0, -1.0], [2.0, len, 2.0], [x, 15.0, z], [0.2 * (m.anim * 0.3 + i as f32).sin() + 0.4, 0.0, 0.0], [0.0; 2], (0.0, 0.0))
+            }));
+            v
+        }
     }
 }
 
@@ -654,7 +670,7 @@ fn skin_of(m: &Mob) -> u8 {
         Creeper => skin::CREEPER,
         Spider => skin::SPIDER,
         Slime => skin::SLIME,
-        Ghast => skin::SLIME, // placeholder: `mob/ghast.png` and `ghast_fire.png` come with the second patch
+        Ghast => if m.charge > 10 { skin::GHAST_FIRE } else { skin::GHAST },
     }
 }
 
@@ -801,6 +817,19 @@ fn head_dip(m: &Mob, head: &Part) -> Option<(f32, f32)> {
     Some((a, (GROUND - rp[1] - low).max(0.0) * m.head))
 }
 
+/// `RenderGhast.preRenderCallback`: with `t` = the charge over 20 (never below 0), `v = 1 / (2 t^5 + 1)`; the ghast is scaled `(8 + 1 / v) / 2` wide
+/// and deep and `(8 + v) / 2` tall, so it is 4.5 everywhere at rest and gets wider and shorter as it charges. Anything else: 1.
+/// ponytail: the Java interpolates `prevAttackCounter` with the frame's partial tick; this reads the counter as it is.
+fn ghast_squash(m: &Mob) -> Vec3 {
+    if m.kind != Ghast {
+        return Vec3::ONE;
+    }
+    let t = (m.charge as f32 / 20.0).max(0.0);
+    let v = 1.0 / (t.powi(5) * 2.0 + 1.0);
+    let (h, w) = ((8.0 + v) / 2.0, (8.0 + 1.0 / v) / 2.0);
+    Vec3::new(w, h, w)
+}
+
 /// Mobs drawn like `RenderLiving`: turned to face their body (`body_yaw`), scaled 1/16 (times `size`) and flipped upside down (model y
 /// points down), 24 px above the ground; parts turn about their rotation point, x then y then z, legs and arms swinging
 /// with `limb`; each from the mob's own skin (`skin_of`), a sheep's fleece as a second pass (`fur`) tinted by its colour. UNVERIFIED
@@ -810,6 +839,7 @@ fn push_mob(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, m: &Mob) {
     let root = Mat4::from_translation(feet)
         * Mat4::from_rotation_y(PI - m.body_yaw.to_radians())
         * Mat4::from_scale(Vec3::new(-1.0, -1.0, 1.0) * m.size * if m.kind == Wolf { WOLF_SCALE } else { 1.0 } / 16.0)
+        * Mat4::from_scale(ghast_squash(m))
         * Mat4::from_translation(Vec3::new(0.0, -23.875, 0.0));
     let flash = m.fuse > 0 && m.fuse % 6 < 3;
     let red = if m.hurt > 0 { tint(1.0, 0.4, 0.4) } else { WHITE };
@@ -883,7 +913,7 @@ mod tests {
     #[test]
     fn mob_boxes_unwrap_inside_their_skin() {
         let mut rng = crate::world::gen::noise::JavaRandom::new(1);
-        for kind in [Pig, Cow, Sheep, Chicken, Wolf, Squid, Zombie, PigZombie, Giant, Skeleton, Creeper, Spider, Slime] {
+        for kind in [Pig, Cow, Sheep, Chicken, Wolf, Squid, Zombie, PigZombie, Giant, Skeleton, Creeper, Spider, Slime, Ghast] {
             let mut m = Mob::new(kind, 0.0, 0.0, 0.0, 0.0, &mut rng);
             let mut boxes = parts(&m);
             boxes.extend(fur(&m));
@@ -895,7 +925,7 @@ mod tests {
             let (mut v, mut i) = (Vec::new(), Vec::new());
             push_mob(&mut v, &mut i, &m);
             assert_eq!(v.len(), boxes.len() * 24 * VF, "{kind:?}: 24 vertices a box");
-            let slots: Vec<u8> = (0..26).collect();
+            let slots: Vec<u8> = (0..atlas::SKIN_SLOTS as u8).collect();
             for vert in v.chunks_exact(VF) {
                 let (x, y) = (vert[3] * atlas::ATLAS_W as f32, vert[4] * atlas::ATLAS_H as f32);
                 if kind == Wolf {

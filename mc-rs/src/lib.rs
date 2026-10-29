@@ -944,6 +944,7 @@ impl App {
                 Ev::Boom(p) => self.explode(p, 3.0, false),
                 // `EntityFireball.onUpdate`: `newExplosion(null, x, y, z, 1.0F, true)`, the fire flag on.
                 Ev::Burst(p) => self.explode(p, 1.0, true),
+                Ev::Smoke(p) => self.fx.puff(p),
                 Ev::Snd(name, at, vol, mul, jit) => self.audio.cry(name, at, vol, mul, jit),
                 // `EntitySkeleton`'s shot is "random.bow" at 1.0, pitch `1 / (r * 0.4 + 0.8)`; `EntityArrow`'s hit is "random.bowhit" at 1.0, pitch
                 // `1.2 / (r * 0.2 + 0.9)` (both NOT in the b1.7.3 index, see `assets/sound/extra`).
