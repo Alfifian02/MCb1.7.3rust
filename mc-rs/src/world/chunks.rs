@@ -1112,6 +1112,13 @@ impl ChunkManager {
         self.chunks.get(&(x >> 4, z >> 4)).map(|e| e.blocks[idx((x & 15) as usize, y as usize, (z & 15) as usize)])
     }
 
+    /// The 128 blocks of the column at `x`, `z` (index = y), `None` when its chunk is not loaded (`world::map`'s scan).
+    pub fn column(&self, x: i32, z: i32) -> Option<&[u8]> {
+        let e = self.chunks.get(&(x >> 4, z >> 4))?;
+        let base = idx((x & 15) as usize, 0, (z & 15) as usize);
+        e.blocks.get(base..base + H)
+    }
+
     /// Calls `f(x, y, z, id)` for every cell of chunk `(cx, cz)` whose block is one of `ids` (the emitters and flowers `render::look` scans);
     /// nothing when the chunk is not loaded.
     pub fn find_blocks(&self, cx: i32, cz: i32, ids: &[u8], mut f: impl FnMut(i32, i32, i32, u8)) {

@@ -8,6 +8,7 @@
 use std::sync::OnceLock;
 
 use crate::world::items::{max_stack, Inventory, ItemStack, MAIN};
+use crate::world::map;
 
 // ---- Tools ----
 
@@ -296,6 +297,7 @@ pub fn recipes() -> &'static [Recipe] {
             shaped(&["A", "B"], &[('A', 54), ('B', 328)], 342, 1), // minecart with chest (CraftingManager): chest over minecart
             shaped(&[" # ", "#X#", " # "], &[('#', 265), ('X', 331)], 345, 1), // compass: 4 iron ingots round redstone
             shaped(&[" # ", "#X#", " # "], &[('#', 266), ('X', 331)], 347, 1), // clock (`pocketSundial`): 4 gold ingots round redstone
+            shaped(&["###", "#X#", "###"], &[('#', 339), ('X', 345)], map::MAP, 1), // map (`Item.mapItem`): 8 paper round a compass; `map::fresh` marks the result as it is taken
             shaped(&["X X", "X#X", "X X"], &[('X', 265), ('#', STICK)], 66, 16), // rails: 6 iron + a stick
             shaped(&["X X", "X#X", "XRX"], &[('X', 266), ('#', STICK), ('R', 331)], 27, 6), // powered rails: 6 gold + stick + redstone
             shaped(&["X X", "X#X", "XRX"], &[('X', 265), ('#', 70), ('R', 331)], 28, 6), // detector rails: 6 iron + stone plate + redstone
@@ -569,6 +571,7 @@ impl Screen {
                 self.cursor = Some(ItemStack { count: n, ..h });
                 if is_result {
                     self.take_result();
+                    self.cursor.iter_mut().for_each(map::fresh); // `ItemMap.onCreated` runs on the stack the player took (`App::map_tick`)
                 } else {
                     self.set(inv, ext, id, rest(h, n));
                 }
@@ -629,6 +632,7 @@ impl Screen {
         let Some(s) = self.get(inv, ext.as_deref(), id) else { return };
         if id == SlotId::Result {
             while let Some(mut r) = self.result() {
+                map::fresh(&mut r);
                 let before = inv.slots;
                 inv.add(&mut r);
                 if r.count > 0 {
@@ -810,6 +814,10 @@ mod tests {
         let ring = |ingot| [(1, ingot), (3, ingot), (5, ingot), (7, ingot), (4, 331)];
         assert_eq!(out(&ring(265), 3), Some((345, 1)), "compass");
         assert_eq!(out(&ring(266), 3), Some((347, 1)), "clock");
+        let paper_ring = |x: u16| [(0, 339), (1, 339), (2, 339), (3, 339), (4, x), (5, 339), (6, 339), (7, 339), (8, 339)];
+        assert_eq!(out(&paper_ring(345), 3), Some((358, 1)), "map: 8 paper round a compass");
+        assert_eq!(out(&paper_ring(331), 3), None, "redstone in the middle is no map");
+        assert_eq!(out(&paper_ring(345)[1..], 3), None, "a gap in the ring");
         assert_eq!(out(&[(0, 54), (2, 328)], 2), Some((342, 1)), "minecart with chest, in a 2x2");
         assert_eq!(out(&[(0, 328), (2, 54)], 2), None, "chest under the cart is nothing");
         assert_eq!(out(&[(0, 61), (2, 328)], 2), Some((343, 1)), "minecart with furnace, furnace on top");

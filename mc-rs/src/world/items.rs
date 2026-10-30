@@ -53,10 +53,10 @@ pub fn name(s: ItemStack) -> Option<&'static str> {
     }
 }
 
-/// `Item.maxStackSize`: tools, armor, buckets, sign, doors, bed and stew 1, snowball and egg 16, cookie 8, everything else 64.
+/// `Item.maxStackSize`: tools, armor, buckets, sign, doors, bed, stew and map 1, snowball and egg 16, cookie 8, everything else 64.
 pub fn max_stack(id: u16) -> u8 {
     match id {
-        261 | 282 | 323 | 324 | 330 | 333 | 346 | 354 | 355 | 325..=327 | 335 | 328 | 342 | 343 => 1,
+        261 | 282 | 323 | 324 | 330 | 333 | 346 | 354 | 355 | 325..=327 | 335 | 328 | 342 | 343 | 358 => 1,
         332 | 344 => 16,
         2256 | 2257 => 1, // records
         357 => 8,

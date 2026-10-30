@@ -307,6 +307,14 @@ impl Backend {
         }
     }
 
+    /// The held map's 128 x 128 RGBA pixels into the HUD texture (`world::map::MapData::rgba`).
+    pub fn upload_map(&self, px: &[u8]) {
+        match self {
+            Backend::Wgpu(w) => w.hud.upload_map(&w.gpu.queue, px),
+            Backend::Gles(g) => g.upload_map(px),
+        }
+    }
+
     pub fn draw_world(&mut self, d: &WorldDraw) -> Drawn {
         match self {
             Backend::Wgpu(w) => w.draw_world(d),

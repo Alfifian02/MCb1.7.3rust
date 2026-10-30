@@ -267,6 +267,11 @@ struct App {
     /// Where this world is saved (M7) and the play time since the last autosave.
     dir: PathBuf,
     save_acc: f32,
+    /// The world's maps (`world::map`, `<world>/data`), the (map id, version) whose pixels are in the HUD texture, and the markers of the
+    /// map in hand (`None` = no map in hand: nothing is drawn).
+    maps: world::map::Maps,
+    map_shown: (u16, u32),
+    map_held: Option<Vec<world::map::Marker>>,
 }
 
 /// A press on an open screen: where it began, whether it became a spread (a drag over slots with a stack on the
@@ -401,6 +406,9 @@ impl App {
             signs: HashMap::new(),
             sign_edit: None,
             furn_acc: 0.0,
+            maps: world::map::Maps::default(),
+            map_shown: (u16::MAX, 0),
+            map_held: None,
             body_acc: 0.0,
             anim: crate::render::anim::Anim::new(),
             anim_acc: 0.0,
@@ -602,6 +610,8 @@ impl App {
         }
         // The recipe book's notes (what was held, the pinned recipe): a new world starts with none.
         self.notes = std::fs::read(self.dir.join("book")).ok().and_then(|b| book::Notes::decode(&b)).filter(|_| !wipe).unwrap_or_default();
+        self.maps = world::map::Maps::open(Some(self.overworld_dir().join("data")));
+        (self.map_shown, self.map_held) = ((u16::MAX, 0), None);
         log::info!("world of seed {:x} ({}), spawn {:?}", self.seed, self.world_type.name(), self.spawn);
     }
 
@@ -661,7 +671,46 @@ impl App {
         if let Err(e) = save::write(&self.dir.join("book"), &self.notes.encode()) {
             log::warn!("save: book file: {e}");
         }
+        self.settle_maps();
+        self.maps.save_all();
         self.chunks.flush(chunks);
+    }
+
+    /// `ItemMap.onCreated` for the maps just crafted, then `ItemMap.onUpdate` for every map in the main inventory (`InventoryPlayer.decrementAnimations`):
+    /// the arrow on it, and for the one in hand the repaint of this tick's strip (`MapData::scan`) and the upload of its pixels when they changed.
+    fn map_tick(&mut self) {
+        use world::map::MAP;
+        self.settle_maps();
+        let dim: i8 = if self.nether { -1 } else { 0 };
+        let at = (self.player.pos.x as f64, self.player.pos.z as f64);
+        let (slot, alive, yaw) = (self.touch.hotbar_slot, !self.vitals.dead(), self.camera.yaw.to_degrees() + 180.0);
+        let spawn = (self.spawn.x.floor() as i32, self.spawn.z.floor() as i32);
+        let (chunks, no_sky) = (&self.chunks, self.nether);
+        let mut held = None;
+        for i in 0..items::MAIN {
+            let Some(mut st) = self.inv.slots[i].filter(|s| s.id == MAP) else { continue };
+            let d = self.maps.data_for(&mut st, spawn, dim);
+            d.track(alive, dim, at, yaw);
+            if i == slot {
+                d.scan(dim, no_sky, at, |x, z| chunks.column(x, z));
+                held = Some(d.markers.clone());
+                if self.map_shown != (st.damage, d.version) {
+                    self.be.upload_map(&d.rgba());
+                    self.map_shown = (st.damage, d.version);
+                }
+            }
+            self.inv.slots[i] = Some(st);
+        }
+        self.map_held = held;
+    }
+
+    /// `ItemMap.onCreated` for the maps taken from a crafting result since the last call (`map::fresh`): in the bag or on the cursor.
+    fn settle_maps(&mut self) {
+        let dim: i8 = if self.nether { -1 } else { 0 };
+        let at = (self.player.pos.x as f64, self.player.pos.z as f64);
+        for s in self.inv.slots.iter_mut().flatten().chain(self.screen.iter_mut().filter_map(|s| s.cursor.as_mut())) {
+            self.maps.settle(s, at, dim);
+        }
     }
 
     fn resize(&mut self, w: u32, h: u32) {
@@ -1125,6 +1174,7 @@ impl App {
             let centre = (chunk_coord(self.player.pos.x), chunk_coord(self.player.pos.z));
             self.sleep_tick(sub);
             self.sprint_tick();
+            self.map_tick();
             // `BlockPressurePlate`: the boxes of what may stand on a plate (the player, the mobs).
             let p = self.player.pos;
             self.ticks.plate_ents.clear();
@@ -2941,7 +2991,7 @@ impl App {
         // The first-person hand (`EntityRenderer.renderHand`): not in the third-person view, not in bed.
         let hand = ((!self.touch.third || close) && self.sleep.is_none() && self.mat.is_none()).then(|| {
             let (equip, held) = self.body.equipped(tick_partial);
-            render::player::Hand { to_world: render::player::hand_to_world(&view, &self.camera.bob), equip, swing: self.body.swing_at(tick_partial), held, at: self.player.pos, pack: self.carry.map_or(0.0, |t| t.max(0.01)) }
+            render::player::Hand { to_world: render::player::hand_to_world(&view, &self.camera.bob), equip, swing: self.body.swing_at(tick_partial), held: held.filter(|s| s.id != world::map::MAP), at: self.player.pos, pack: self.carry.map_or(0.0, |t| t.max(0.01)) }
         });
         let outline_indices = self.target.map_or(0, |h| {
             let (x, y, z) = h.pos;
@@ -3334,6 +3384,13 @@ impl App {
             // `icons.png`'s cross (the Java draws it inverting the pixels behind it; here plain white), the size the two bars had.
             let s = 0.05 * w.min(h);
             HudPipeline::push_gui(v, w * 0.5 - s * 0.5, h * 0.5 - s * 0.5, s, s, sp::CROSSHAIR);
+        }
+
+        // The map in hand (`ItemRenderer`'s map branch, here a flat sheet: UNVERIFIED place and size), right of the crosshair.
+        if let (true, Some(m)) = (play, &self.map_held) {
+            let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
+            let size = (0.62 * h).min(0.42 * w);
+            HudPipeline::push_map(v, (((w - size) * 0.5 + 0.2 * w).min(w - size - 0.02 * w), (h - size) * 0.35, size), m);
         }
 
         // Dig progress under the crosshair.

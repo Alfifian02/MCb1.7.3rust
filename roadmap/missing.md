@@ -8,7 +8,7 @@ How it was made: the decompiled `minecraft/src` (675 classes: 84 blocks, 103 ite
 
 | # | What | Java | State in mc-rs | Size |
 |---|------|------|----------------|------|
-| 3 | Map item | `ItemMap`, `MapData`, `MapItemRenderer`, `MapStorage`, recipe 358 = paper ring round a compass | nothing | medium to large (per-map saved data, a renderer) |
+| 3 | ~~Map item~~ | `ItemMap`, `MapData`, `MapItemRenderer`, `MapStorage`, recipe 358 = paper ring round a compass | **done 2026-10-30 (gameplay entry 36)**, not compiled; loaded chunks only, flat HUD sheet in hand | done |
 | 4 | Chat | `GuiChat`, `ChatLine` | nothing (a single-player port has no sender except commands; the overlay is the deferred rest of M14) | medium |
 | 5 | Achievements and Statistics | `AchievementList`, `GuiAchievements`, `GuiAchievement` (toast), `StatList`, `GuiStats` | both buttons drawn greyed out (`menu.rs`, `options.rs`); no stat system | large (counters everywhere, saved, two screens) |
 | 6 | Mods and Texture Packs | `TexturePackList`, `GuiTexturePacks` | button drawn greyed out | large, and arguably off-goal |

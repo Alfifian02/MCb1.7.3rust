@@ -402,6 +402,20 @@ impl Renderer {
         }
     }
 
+    /// The held map in the HUD sheet (`hud::MAP_Y`, 128 x 128).
+    pub fn upload_map(&self, px: &[u8]) {
+        if px.len() < 128 * 128 * 4 {
+            return;
+        }
+        let f = self.gl.f();
+        // SAFETY: `px` holds 128 x 128 RGBA texels and the write lies inside the HUD texture.
+        unsafe {
+            (f.ActiveTexture)(TEXTURE0 + U_HUD);
+            (f.BindTexture)(TEXTURE_2D, self.hud_tex);
+            (f.TexSubImage2D)(TEXTURE_2D, 0, 0, hud::SHEET_H as i32 - 128, 128, 128, RGBA, UNSIGNED_BYTE, px.as_ptr() as *const _);
+        }
+    }
+
     fn use_prog(&mut self, p: u32) {
         if self.cur_prog != p {
             // SAFETY: a program made by `Gl::program`.

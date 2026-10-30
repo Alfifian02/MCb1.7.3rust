@@ -49,12 +49,16 @@ pub const DPAD_SHEET: &[u8] = include_bytes!("../../assets/dpad.rgba");
 /// The title screen's sheet (256 x 272, `tools/gen_menu.py`): `mclogo.png`, then `background.png`: the last rows of the HUD texture.
 pub const MENU_SHEET: &[u8] = include_bytes!("../../assets/menu.rgba");
 /// The skins (`mob/char.png` and the armor, 64 x 32 each, four to a row, `atlas::skin_px`): 224 rows of the HUD texture, cut from the atlas's `ART` tail (`PLAYER_Y`).
-pub(crate) const SHEET_H: f32 = 3120.0;
+pub(crate) const SHEET_H: f32 = 3248.0;
 const PLAYER_Y: f32 = 2576.0;
 /// Where the font atlas starts in the HUD texture (the 64 rows after the player skin, see `font_sheet`).
 const FONT_Y: f32 = 2800.0;
 /// Where the satchel's pixel art starts (256 x 256, `tools/gen_satchel_ui.py`): the last rows of the HUD texture, after the font atlas.
 const SATCHEL_Y: f32 = 2864.0;
+/// Where the map block starts (256 x 128, `tools/gen_mapui.py`): the last rows of the HUD texture, after the satchel. The held map's 128 x 128
+/// pixels are rewritten here at run time (`HudPipeline::upload_map`); `mapbg.png` and `mapicons.png` sit beside them.
+const MAP_Y: f32 = 3120.0;
+pub const MAP_SHEET: &[u8] = include_bytes!("../../assets/mapui.rgba");
 /// The satchel and recipe book's sprites (`satchel.rs`).
 pub const SATCHEL_SHEET: &[u8] = include_bytes!("../../assets/satchel.rgba");
 /// The font atlas: 95 glyph cells of 8 x 8 texels on a 10 texel pitch (a transparent texel on every side, so the sharp bilinear in
@@ -99,6 +103,14 @@ pub mod sprites {
     pub const JUMP_ON: Sprite = (192.0, 2112.0, 64.0, 64.0);
     /// The satchel's pixel art (`tools/gen_satchel_ui.py`, same places): leather, slots, parchment, the red binding. The 16 / 32 px ones are 9-slices
     /// (`push_nine`), `PARCH`, `STRAP`, `BINDING` and `RULE` tile (`push_tiled`), the rest are drawn once.
+    /// The map block: the live map pixels, the paper (`mapbg.png`, drawn 142 / 128 of the map) and the marker cells (`mapicons.png`, 8 x 8 each).
+    pub mod map {
+        use super::Sprite;
+        const Y: f32 = super::super::MAP_Y;
+        pub const PIXELS: Sprite = (0.0, Y, 128.0, 128.0);
+        pub const BG: Sprite = (128.0, Y, 64.0, 64.0);
+        pub const ICONS: Sprite = (128.0, Y + 64.0, 32.0, 32.0);
+    }
     pub mod sat {
         use super::Sprite;
         const Y: f32 = super::super::SATCHEL_Y;
@@ -206,7 +218,7 @@ fn shader_source(srgb: bool) -> String {
 
 /// The whole HUD texture (256 x `SHEET_H`, RGBA8): items, the GUI sheet, terrain.png, the panels, the d-pad, the title screen, the player skin, the font.
 pub fn sheet_bytes() -> Vec<u8> {
-    [crate::render::atlas::ITEMS, GUI, crate::render::atlas::TERRAIN, CONTAINERS, DPAD_SHEET, MENU_SHEET, &crate::render::atlas::ART[256 * 288 * 4..], &font_sheet(), SATCHEL_SHEET].concat()
+    [crate::render::atlas::ITEMS, GUI, crate::render::atlas::TERRAIN, CONTAINERS, DPAD_SHEET, MENU_SHEET, &crate::render::atlas::ART[256 * 288 * 4..], &font_sheet(), SATCHEL_SHEET, MAP_SHEET].concat()
 }
 
 /// Owns the HUD pipeline + dynamic vertex buffer. One instance per surface.
@@ -232,6 +244,41 @@ impl HudPipeline {
                 wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(64), rows_per_image: Some(16) },
                 wgpu::Extent3d { width: 16, height: 16, depth_or_array_layers: 1 },
             );
+        }
+    }
+
+    /// The held map's 128 x 128 RGBA pixels (`MapData::rgba`) into the map block of the HUD texture.
+    pub fn upload_map(&self, queue: &Queue, px: &[u8]) {
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo { texture: &self.items_tex, mip_level: 0, origin: wgpu::Origin3d { x: 0, y: MAP_Y as u32, z: 0 }, aspect: wgpu::TextureAspect::All },
+            px,
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(128 * 4), rows_per_image: Some(128) },
+            wgpu::Extent3d { width: 128, height: 128, depth_or_array_layers: 1 },
+        );
+    }
+
+    /// `ItemRenderer`'s held map in a `size` px square at (x, y): the paper (-7..135 of the 128 map units, so 142), the map, then the
+    /// markers as `MapItemRenderer` places them (translate to the marker, turn by `rot` sixteenths, 8 x 8 units, the cell flipped
+    /// upside down like the Java's quad, a half unit off). Painter's order, no depth.
+    pub fn push_map(out: &mut Vec<HudVertex>, (x, y, size): (f32, f32, f32), markers: &[crate::world::map::Marker]) {
+        let k = size / 142.0;
+        Self::push_gui(out, x, y, size, size, sprites::map::BG);
+        let (ox, oy) = (x + 7.0 * k, y + 7.0 * k);
+        Self::push_gui(out, ox, oy, 128.0 * k, 128.0 * k, sprites::map::PIXELS);
+        let (ix, iy, _, _) = sprites::map::ICONS;
+        for m in markers {
+            let (cx, cy) = (ox + (m.x as f32 / 2.0 + 64.0) * k, oy + (m.z as f32 / 2.0 + 64.0) * k);
+            let a = m.rot as f32 * std::f32::consts::PI / 8.0;
+            let (s, c) = a.sin_cos();
+            let (cu, cv) = ((m.icon % 4) as f32 * 8.0, (m.icon / 4) as f32 * 8.0);
+            let v = |lx: f32, ly: f32| {
+                let (px, py) = (4.0 * lx - 0.5, 4.0 * ly + 0.5);
+                // a quad corner with y = +1 shows the cell's top row (the Java's `addVertexWithUV(-1, 1, .., u0, v0)`)
+                let (u, vv) = (if lx < 0.0 { cu + 0.01 } else { cu + 7.99 }, if ly > 0.0 { cv + 0.01 } else { cv + 7.99 });
+                HudVertex { pos: [cx + (px * c - py * s) * k, cy + (px * s + py * c) * k], color: [1.0; 4], uv: [(ix + u) / 256.0, (iy + vv) / SHEET_H] }
+            };
+            let (a, b, c2, d) = (v(-1.0, 1.0), v(1.0, 1.0), v(1.0, -1.0), v(-1.0, -1.0));
+            out.extend([a, b, c2, a, c2, d]);
         }
     }
 
@@ -856,7 +903,9 @@ mod text_tests {
     #[test]
     fn font_sheet_is_the_glyph_bitmaps_with_a_gutter() {
         assert_eq!(FONT_Y + 64.0, SATCHEL_Y);
-        assert_eq!(SATCHEL_Y + 256.0, SHEET_H);
+        assert_eq!(SATCHEL_Y + 256.0, MAP_Y);
+        assert_eq!(MAP_Y + 128.0, SHEET_H);
+        assert_eq!(MAP_SHEET.len(), 256 * 128 * 4);
         let px = font_sheet();
         assert_eq!(px.len(), 256 * 64 * 4);
         let alpha = |x: usize, y: usize| px[(y * 256 + x) * 4 + 3];

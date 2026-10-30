@@ -54,7 +54,7 @@ pub fn category(id: u16) -> Cat {
         Cat::Tools
     } else if items::heal_amount(id).is_some() || id == 354 {
         Cat::Food
-    } else if matches!(id, 321 | 323..=328 | 330 | 332 | 333 | 335 | 342..=345 | 347 | 355 | 356 | 2256 | 2257) {
+    } else if matches!(id, 321 | 323..=328 | 330 | 332 | 333 | 335 | 342..=345 | 347 | 358 | 355 | 356 | 2256 | 2257) {
         Cat::Misc
     } else {
         Cat::Materials
