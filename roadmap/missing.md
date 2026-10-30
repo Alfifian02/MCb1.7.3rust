@@ -1,14 +1,15 @@
-# What is still missing from b1.7.3 (audit of 2026-10-25)
+# What is still missing from b1.7.3 (audit of 2026-10-25, rechecked 2026-10-30)
 
 Part of the plan in [`README.md`](../README.md) (the root `ROADMAP.md` with the milestone tables was not in `Repo.zip`, so this file was made from the code).
 
-How it was made: the decompiled `minecraft/src` (675 classes: 84 blocks, 103 items, 58 entities, 45 Gui, the recipe classes, `EntityList`, `BiomeGenHell`) was compared with `mc-rs/src` by reading and grepping. Nothing was compiled or run. A gap here means "no counterpart found in the Rust"; check the code before starting one. Ordered easiest first. Updated after entry (19), against `Repo_1.zip`; the ghast / fireball / explosion parts after entry (34) (that pass was compiled and tested, see `gameplay.md`).
+How it was made: the decompiled `minecraft/src` (675 classes: 84 blocks, 103 items, 58 entities, 45 Gui, the recipe classes, `EntityList`, `BiomeGenHell`) was compared with `mc-rs/src` by reading and grepping. Nothing was compiled or run. A gap here means "no counterpart found in the Rust"; check the code before starting one. Ordered easiest first. Updated after entry (19), against `Repo_1.zip`; rechecked 2026-10-30 against the code with grep and by reading `ItemDye`, `use_held`, `ticks.rs`, `render/items.rs`, `render/anim.rs` (still not compiled, and not a class-by-class comparison); the ghast / fireball / explosion parts after entry (34) (that pass was compiled and tested, see `gameplay.md`).
 
 ## Still missing (vanilla b1.7.3)
 
 | # | What | Java | State in mc-rs | Size |
 |---|------|------|----------------|------|
 | 3 | ~~Map item~~ | `ItemMap`, `MapData`, `MapItemRenderer`, `MapStorage`, recipe 358 = paper ring round a compass | **done 2026-10-30 (gameplay entry 36)**, not compiled; loaded chunks only, flat HUD sheet in hand | done |
+| 8 | Bone meal on blocks | `ItemDye.onItemUse` (damage 15): sapling -> `BlockSapling.growTree`, crops -> `BlockCrops.fertilize` (metadata 7), grass -> spreads tall grass and flowers (`ItemDye` lines 22 on) | only the recipe (bone -> bone meal) and dyeing sheep (`gear::use_on_mob`); `lib.rs` `use_held` and the block-use path have no branch for it. `ChunkManager::grow_tree` (used by the sapling tick) exists to call | small (found 2026-10-30; not in any earlier audit) |
 | 4 | Chat | `GuiChat`, `ChatLine` | nothing (a single-player port has no sender except commands; the overlay is the deferred rest of M14) | medium |
 | 5 | Achievements and Statistics | `AchievementList`, `GuiAchievements`, `GuiAchievement` (toast), `StatList`, `GuiStats` | both buttons drawn greyed out (`menu.rs`, `options.rs`); no stat system | large (counters everywhere, saved, two screens) |
 | 6 | Mods and Texture Packs | `TexturePackList`, `GuiTexturePacks` | button drawn greyed out | large, and arguably off-goal |
@@ -16,7 +17,9 @@ How it was made: the decompiled `minecraft/src` (675 classes: 84 blocks, 103 ite
 
 ## Smaller gaps already written down in the code or the changelogs
 
-Sound: `random.drr` (no known call site), the 8 smoke puffs of water poured in the Nether. Sleeping: done in entry (35) (`performSleepSpawning`, `tile.bed.notValid`); the "too far" and "monsters near" messages do not exist in b1.7.3 (checked in `EntityPlayer.sleepInBedAt` / `BlockBed`), so they are not a gap. Still open there: the Nether's exploding bed and the lying pose. These come from the README rows and `roadmap/gameplay.md`; they were not re-checked against the code.
+Sound: `random.drr` (in `audio/table.rs`, no call site found), the 8 smoke puffs of water poured in the Nether (no trace in the code). Sleeping: done in entry (35) (`performSleepSpawning`, `tile.bed.notValid`); the "too far" and "monsters near" messages do not exist in b1.7.3 (checked in `EntityPlayer.sleepInBedAt` / `BlockBed`), so they are not a gap. Still open there: the Nether's exploding bed and the lying pose. These come from the README rows and `roadmap/gameplay.md`; the sound, smoke and bed items were only grepped, not read.
+
+Stale notes removed on 2026-10-30: the mob spawner's spinning mob is drawn (`render/items.rs`, `TileEntityMobSpawnerRenderer`), and the portal texture is animated (`render/anim.rs`, `PORTAL`). The README row of M6b that says "no fire, mushroom spread, snow/ice, rain on farmland" is also out of date: `world/ticks.rs` has `fire`, `mushroom`, `snow_ice` and `rained_on`.
 
 ## Known gaps left by entries (33) and (34) (explosions, fireballs, corpses)
 
