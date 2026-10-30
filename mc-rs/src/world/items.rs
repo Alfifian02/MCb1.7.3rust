@@ -49,7 +49,7 @@ pub fn name(s: ItemStack) -> Option<&'static str> {
         43 | 44 => Some(SLAB[(s.damage & 3) as usize]),
         263 if s.damage == 1 => Some(CHARCOAL),
         351 => Some(DYE[(s.damage & 15) as usize]),
-        id => NAMES.binary_search_by_key(&id, |e| e.0).ok().map(|i| NAMES[i].1),
+        id => NAMES.binary_search_by_key(&id, |e| e.0).ok().map(|i| NAMES[i].1).or_else(|| crate::world::combat::catalog::name(id)),
     }
 }
 
@@ -60,7 +60,7 @@ pub fn max_stack(id: u16) -> u8 {
         332 | 344 => 16,
         2256 | 2257 => 1, // records
         357 => 8,
-        _ if craft::tool(id).is_some() || craft::armor(id).is_some() => 1,
+        _ if craft::tool(id).is_some() || craft::armor(id).is_some() || crate::world::combat::catalog::get(id).is_some() => 1,
         _ => 64,
     }
 }
@@ -97,7 +97,7 @@ pub fn tile(id: u16) -> u8 {
         349 | 350 => 9,  // fish
         282 => 39,       // mushroom stew
         // Tools: the material's colour (wood, stone, iron, diamond, gold); the HUD draws the head shape on top.
-        _ => craft::tool(id).map(|(_, m)| m).or(craft::armor(id).map(|a| a.1)).map_or(255, |m| [5, 4, 42, 57, 41][m]),
+        _ => craft::tool(id).map(|(_, m)| m).or(craft::armor(id).map(|a| a.1)).or(crate::world::combat::catalog::get(id).map(|c| c.1)).map_or(255, |m| [5, 4, 42, 57, 41][m]),
     }
 }
 

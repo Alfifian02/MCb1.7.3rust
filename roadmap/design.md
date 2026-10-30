@@ -83,3 +83,7 @@ Serves proposal 3 (the beam): every structure in `gen::structory` today is low a
 - **6. The ice spire (snowy birch grove, tundra, ice desert).** needs snow -> a tall spike of ice blocks with a wolf den at its foot (the grove's wolf list, entry 20), bones from the skeletons around it for taming; Hooks: ice and snow (`snows`), wolf spawn lists and taming, compass; Overlaps: the taiga (same wolves, no spire).
 
 Inspiration (search words): "waystone", "ancient obelisk", "world tree", "signal fires beacon chain", "stilt hut swamp", "desert temple trap", "ice spike".
+
+## Cortés Combat (written 2026-10-30, NOT b1.7.3)
+
+- **Combat rework (cone reach, cooldown, charge, guard, five weapon families):** needs wood, cobblestone, iron, diamond, gold, sticks, flint and iron blocks (existing sources) -> weapons that kill mobs; Hooks: crafting (`craft::recipes`, recipe book), durability (`craft::max_damage`), mobs and their damage window (`mobs`), stamina (`vitals`, guard), the touch HUD (`input/touch_ui`), sound (`audio`); Overlaps: sword, axe, hoe (they get a profile of the same system, so each keeps a job: the sword is the wide cheap cone with no special, the hoe sweeps). Switch: `combatRules`, default off. Plan: [`combat.md`](combat.md).

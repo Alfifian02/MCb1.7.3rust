@@ -1276,6 +1276,10 @@ impl Fireball {
 /// (`getAttackStrength`, wear) of hitting with `held`: `ItemSword` 4 + material, `ItemTool` 2 + material, anything else 1
 /// (`Item.getDamageVsEntity`); material bonus wood 0, stone 1, iron 2, diamond 3, gold 0. Swords wear 1, tools 2, a hoe none.
 pub fn attack(held: Option<u16>) -> (i32, u16) {
+    // Cortes Combat weapons (NOT b1.7.3): family damage + tier bonus, wear 1. ponytail: rounded to whole points until C2 makes damage a float.
+    if let Some(d) = held.and_then(crate::world::combat::catalog::damage) {
+        return (d.round() as i32, 1);
+    }
     match held.and_then(craft::tool) {
         Some((Tool::Sword, m)) => (4 + [0, 1, 2, 3, 0][m], 1),
         Some((Tool::Hoe, _)) => (1, 0),

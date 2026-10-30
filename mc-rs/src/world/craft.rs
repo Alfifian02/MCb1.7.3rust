@@ -7,6 +7,7 @@
 
 use std::sync::OnceLock;
 
+use crate::world::combat;
 use crate::world::items::{max_stack, Inventory, ItemStack, MAIN};
 use crate::world::map;
 
@@ -55,6 +56,10 @@ pub fn max_damage(id: u16) -> Option<u16> {
     }
     if let Some((t, m)) = armor(id) {
         return Some([11, 16, 15, 13][t] * 3 << [0, 1, 2, 3, 1][m]); // ItemArmor: maxDamageArray[type] * 3 << armorLevel
+    }
+    // Cortes Combat weapons (NOT b1.7.3): the same uses as a tool of their material.
+    if let Some((_, m)) = combat::catalog::get(id) {
+        return Some(MATERIALS[m].1);
     }
     tool(id).map(|(_, m)| MATERIALS[m].1)
 }
@@ -339,6 +344,8 @@ pub fn recipes() -> &'static [Recipe] {
                 r.push(shaped(rows, &[('#', STICK), ('X', head)], TOOL_IDS[m][k], 1));
             }
         }
+        // Cortes Combat (NOT b1.7.3): 20 melee weapons, one line of data each in `combat::catalog`.
+        r.extend(combat::catalog::all().filter_map(|(f, t)| combat::catalog::recipe(f, t)).map(|(rows, key, out)| shaped(rows, &key, out, 1)));
         r
     })
 }
