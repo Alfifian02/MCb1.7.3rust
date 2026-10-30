@@ -3,7 +3,7 @@
 //! GUI Scale option) and drawn with the HUD pipeline; the strings are `lang/en_US.lang`'s.
 //!
 //! Layout (not b1.7.3's three nested screens): ONE options screen with a tab bar along the top, so any category is a single tap away:
-//! General (sound, difficulty, GUI scale, bobbing) | Graphics (quality + LoD) | Perf. (frame cap, Dynamic Res, MSAA, Post, Renderer) |
+//! General (sound, difficulty, GUI scale, bobbing) | Graphics (quality + LoD) | Perf. (frame cap, Dynamic Res, MSAA, FXAA, Post, Renderer) |
 //! Effects (Vibrance + the look switches) | Controls (Keys / Controller sub-tabs, with the look and dig settings). `Done` always closes;
 //! on a pad LB / RB step the tabs (`OptionsUi::step_tab`). The game menu keeps b1.7.3's buttons plus `Tools...` (Pregen, Fly, Info, LoD debug).
 //!
@@ -44,8 +44,10 @@ pub enum Opt {
     DigDelay,
     /// Added: samples per pixel of the scene pass (Auto, Off, 2x, 4x). Read once at start-up: the pipelines are built with it.
     Msaa,
-    /// Added: the final pass, Auto / Full (FXAA + CAS) / Fast (neither). Read once at start-up, like MSAA.
+    /// Added: the final pass, Auto / Full (CAS, and FXAA when it is on) / Fast (neither). Read once at start-up, like MSAA.
     Post,
+    /// Added: FXAA in the final pass, Auto (only without MSAA) / On (also over MSAA, beats Fast) / Off. Read once at start-up, like MSAA.
+    Fxaa,
     Renderer,
     /// Added: the scene scale follows the GPU load (`gpu::context::Drs`) or stays at `START_PCT`. Takes effect at once.
     DynamicRes,
@@ -84,6 +86,7 @@ impl Opt {
             Opt::DigDelay => "Dig Delay",
             Opt::Msaa => "MSAA",
             Opt::Post => "Post",
+            Opt::Fxaa => "FXAA",
             Opt::Renderer => "Renderer",
             Opt::DynamicRes => "Dynamic Res",
             Opt::Vibrance => "Vibrance",
@@ -171,8 +174,10 @@ pub struct Settings {
     pub dynamic_res: bool,
     /// MSAA samples for the next start: 0 Auto (`present::pick_samples` decides by GPU), 1, 2 or 4 (`msaa:` in options.txt).
     pub msaa: u8,
-    /// The final pass for the next start: 0 Auto (`present::pick_fast` decides by GPU), 1 Full, 2 Fast (`post:` in options.txt).
+    /// The final pass for the next start: 0 Auto (`present::pick_final` decides by GPU), 1 Full, 2 Fast (`post:` in options.txt).
     pub post: u8,
+    /// FXAA for the next start: 0 Auto (on only when the scene has one sample), 1 On, 2 Off (`fxaa:` in options.txt).
+    pub fxaa: u8,
     /// The renderer for the next start: 0 Auto (Vulkan), 1 Vulkan, 2 OpenGL ES 3.2 (`renderer:` in options.txt).
     pub renderer: u8,
     /// The look of every biome's sky as the player tuned it (the sun button of the game menu, `world::atmos`), `atmos_<n>:` in options.txt.
@@ -212,6 +217,7 @@ impl Default for Settings {
             dynamic_res: true,
             msaa: 0,
             post: 0,
+            fxaa: 0,
             renderer: 0,
             atmos: AtmosCfg::default(),
             look: LookCfg::default(),
@@ -254,6 +260,7 @@ impl Settings {
                 ("dynamicRes", ..) => s.dynamic_res = b,
                 ("msaa", _, Some(n)) if matches!(n, 0 | 1 | 2 | 4) => s.msaa = n,
                 ("post", _, Some(n)) if n <= 2 => s.post = n,
+                ("fxaa", _, Some(n)) if n <= 2 => s.fxaa = n,
                 ("renderer", _, Some(n)) if n <= 2 => s.renderer = n,
                 (k, ..) if k.starts_with("pad_") => s.pad.load(k, v),
                 (k, ..) if k.starts_with("atmos_") => s.atmos.load(k, v),
@@ -272,8 +279,8 @@ impl Settings {
     pub fn save(&self) {
         let Some(p) = &self.path else { return };
         let mut t = format!(
-            "music:{}\nsound:{}\ninvertYMouse:{}\nmouseSensitivity:{}\nviewDistance:{}\nguiScale:{}\nbobView:{}\nanaglyph3d:{}\nadvancedOpengl:{}\nfpsLimit:{}\ndifficulty:{}\nfancyGraphics:{}\nao:{}\nlod:{}\ndigDelay:{}\ngpuErrorTrace:{}\ndynamicRes:{}\nmsaa:{}\npost:{}\nrenderer:{}\ndebugScreen:{}\nanimalAi:{}\nbiomeRules:{}\npackCloth:{}\nbookDiscovery:{}\nframeLatency:{}\n",
-            self.music, self.sound, self.invert_mouse, self.sensitivity, self.render_distance, self.gui_scale, self.view_bobbing, self.anaglyph, self.advanced_opengl, self.limit_framerate, self.difficulty, self.fancy_graphics, self.ambient_occlusion, self.lod, self.dig_delay, self.gpu_error_trace, self.dynamic_res, self.msaa, self.post, self.renderer, self.debug_screen, self.animal_ai, self.biome_rules, self.pack_cloth, self.book_discovery, self.frame_latency
+            "music:{}\nsound:{}\ninvertYMouse:{}\nmouseSensitivity:{}\nviewDistance:{}\nguiScale:{}\nbobView:{}\nanaglyph3d:{}\nadvancedOpengl:{}\nfpsLimit:{}\ndifficulty:{}\nfancyGraphics:{}\nao:{}\nlod:{}\ndigDelay:{}\ngpuErrorTrace:{}\ndynamicRes:{}\nmsaa:{}\npost:{}\nfxaa:{}\nrenderer:{}\ndebugScreen:{}\nanimalAi:{}\nbiomeRules:{}\npackCloth:{}\nbookDiscovery:{}\nframeLatency:{}\n",
+            self.music, self.sound, self.invert_mouse, self.sensitivity, self.render_distance, self.gui_scale, self.view_bobbing, self.anaglyph, self.advanced_opengl, self.limit_framerate, self.difficulty, self.fancy_graphics, self.ambient_occlusion, self.lod, self.dig_delay, self.gpu_error_trace, self.dynamic_res, self.msaa, self.post, self.fxaa, self.renderer, self.debug_screen, self.animal_ai, self.biome_rules, self.pack_cloth, self.book_discovery, self.frame_latency
         );
         for (id, code) in KEY_IDS.iter().zip(self.keys) {
             t.push_str(&format!("key_key.{id}:{code}\n"));
@@ -345,6 +352,7 @@ impl Settings {
             Opt::AmbientOcclusion => self.ambient_occlusion = !self.ambient_occlusion,
             Opt::Msaa => self.msaa = match self.msaa { 0 => 1, 1 => 2, 2 => 4, _ => 0 },
             Opt::Post => self.post = (self.post + 1) % 3,
+            Opt::Fxaa => self.fxaa = (self.fxaa + 1) % 3,
             Opt::Renderer => self.renderer = (self.renderer + 1) % 3,
             Opt::DynamicRes => self.dynamic_res = !self.dynamic_res,
             Opt::FxWarm => self.look.warm = !self.look.warm,
@@ -395,6 +403,10 @@ impl Settings {
                 Opt::Post => {
                     let v = ["Auto", "Full", "Fast"][self.post.min(2) as usize];
                     if u32::from(self.post) != crate::render::present::post_want() { format!("{v} (restart)") } else { v.into() }
+                }
+                Opt::Fxaa => {
+                    let v = ["Auto", "On", "Off"][self.fxaa.min(2) as usize];
+                    if u32::from(self.fxaa) != crate::render::present::fxaa_want() { format!("{v} (restart)") } else { v.into() }
                 }
                 Opt::Renderer => {
                     let v = ["Auto", "Vulkan", "OpenGL ES"][self.renderer.min(2) as usize];
@@ -635,7 +647,7 @@ impl OptionsUi {
                 w.extend(opts(3, &[Opt::AmbientOcclusion, Opt::AdvancedOpengl, Opt::Anaglyph]));
                 w
             }
-            OptScr::Perf => opts(0, &[Opt::FramerateLimit, Opt::DynamicRes, Opt::Msaa, Opt::Post, Opt::Renderer]),
+            OptScr::Perf => opts(0, &[Opt::FramerateLimit, Opt::DynamicRes, Opt::Msaa, Opt::Fxaa, Opt::Post, Opt::Renderer]),
             OptScr::Fx => opts(0, &[Opt::Vibrance, Opt::FxWarm, Opt::FxWater, Opt::FxGlow, Opt::FxMotion, Opt::FxHaze]),
             OptScr::Atmos => atmos_widgets(&self.ed, st),
             OptScr::Controls => {
@@ -1173,6 +1185,22 @@ mod tests {
         assert!(st.text(Opt::Msaa).starts_with("MSAA: 4x"));
     }
 
+    /// The FXAA button cycles Auto -> On -> Off -> Auto, reads back from options.txt, and a bad value falls back to Auto.
+    #[test]
+    fn fxaa_option_cycles_and_round_trips() {
+        let root = tmp("fxaa");
+        let mut st = Settings::load(&root);
+        let seen: Vec<u8> = (0..4).map(|_| { st.cycle(Opt::Fxaa); st.fxaa }).collect();
+        assert_eq!(seen, [1, 2, 0, 1]);
+        st.fxaa = 1;
+        st.save();
+        assert_eq!(Settings::load(&root).fxaa, 1);
+        std::fs::write(root.join("options.txt"), "fxaa:3\n").unwrap();
+        assert_eq!(Settings::load(&root).fxaa, 0);
+        st.fxaa = 2;
+        assert!(st.text(Opt::Fxaa).starts_with("FXAA: Off"));
+    }
+
     /// The Vibrance dial and the switches share the Effects tab (conservative default, 0 = off), and everything reads back from options.txt.
     #[test]
     fn vibrance_and_effects_are_reachable_and_saved() {
@@ -1339,7 +1367,7 @@ mod tests {
         }
         for want in [
             "Music", "Sound", "Difficulty", "GUI Scale", "View Bobbing", "Graphics: ", "Render Distance", "LoD", "Smooth Lighting", "Advanced OpenGL", "3D Anaglyph",
-            "Performance", "Dynamic Res", "MSAA", "Post", "Renderer", "Vibrance", "Warm Light", "Water Look", "Glow", "Motion", "Haze", "Sensitivity", "Invert Mouse",
+            "Performance", "Dynamic Res", "MSAA", "FXAA", "Post", "Renderer", "Vibrance", "Warm Light", "Water Look", "Glow", "Motion", "Haze", "Sensitivity", "Invert Mouse",
             "Dig Delay", "Jump: ", "Look X", "Invert Y", "Done",
         ] {
             assert!(labels.iter().any(|l| l.starts_with(want)), "{want} is on no tab");

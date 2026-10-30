@@ -297,6 +297,7 @@ impl App {
         crate::gpu::context::set_frame_latency(u32::from(opts.frame_latency));
         crate::render::present::set_msaa_want(u32::from(opts.msaa));
         crate::render::present::set_post_want(u32::from(opts.post));
+        crate::render::present::set_fxaa_want(u32::from(opts.fxaa));
         crate::gles::set_want(opts.renderer);
         let be = Backend::new(opts.renderer == 2, native_ptr, width, height).await?;
         log::info!("renderer: {}", be.gpu_info());
@@ -478,7 +479,7 @@ impl App {
         if let Some(l) = std::fs::read(self.dir.join("level")).ok().and_then(|b| Level::decode(&b)) {
             self.furnaces = l.furnaces.into_iter().collect();
             self.chests = l.chests.into_iter().collect();
-            self.fx.spawners = l.spawners.into_iter().map(|(p, kind, delay)| (p, Spawner { kind, delay })).collect();
+            self.fx.spawners = l.spawners.into_iter().map(|(p, kind, delay)| (p, Spawner::new(kind, delay))).collect();
             self.drops.items = l.drops.into_iter().map(|(p, s, age)| items::ItemEntity::resting(p, s, age)).collect();
         }
         if let Some((p, s)) = std::fs::read(self.dir.join("decor")).ok().and_then(|b| decor::decode(&b)) {
@@ -618,7 +619,7 @@ impl App {
         self.inv.slots = l.inv;
         self.furnaces = l.furnaces.into_iter().collect();
         self.chests = l.chests.into_iter().collect();
-        self.fx.spawners = l.spawners.into_iter().map(|(p, kind, delay)| (p, Spawner { kind, delay })).collect();
+        self.fx.spawners = l.spawners.into_iter().map(|(p, kind, delay)| (p, Spawner::new(kind, delay))).collect();
         self.bed_spawn = l.bed;
         self.drops.items = l.drops.into_iter().map(|(p, s, age)| items::ItemEntity::resting(p, s, age)).collect();
     }
@@ -1207,7 +1208,7 @@ impl App {
             }
             // Dungeon spawners (`TileEntityMobSpawner`): taken over from populate; one whose block is gone is dropped.
             for (p, kind) in self.chunks.take_spawners() {
-                self.fx.spawners.entry(p).or_insert(Spawner { kind, delay: 20 });
+                self.fx.spawners.entry(p).or_insert(Spawner::new(kind, 20));
             }
             // Paintings check their wall every 101 ticks and drop as an item when it is gone (`EntityPainting.onUpdate`); a sign's
             // text goes with its block, and closes the editor.
@@ -1986,14 +1987,21 @@ impl App {
     }
 
     /// `EntityPlayer.func_25060_a`: the bed's free cell, else the world spawn (feet 0.1 above the cell; `pos` is the box centre).
-    fn respawn_pos(&self) -> glam::Vec3 {
+    /// `Minecraft.respawn`: a bed that is gone, or has no free cell beside it, says `tile.bed.notValid` and is forgotten (the new player
+    /// has no spawn coordinate). UNVERIFIED: the text is from memory of b1.7.3's `en_US.lang`, which is not in the decompiled tree.
+    /// ponytail: a bed in a chunk that is not loaded says nothing and stays remembered (the Java `prepareChunk`s it); it respawns at the world spawn.
+    fn respawn_pos(&mut self) -> glam::Vec3 {
         let get = |a, b, c| self.chunks.block_loaded(a, b, c).unwrap_or(0);
-        let cell = self.bed_spawn.filter(|&(x, y, z)| get(x, y, z) == 26).and_then(|b| pick::wake_cell(&get, b, self.chunks.meta(b.0, b.1, b.2)));
+        let cell = self.bed_spawn.filter(|&(x, y, z)| get(x, y, z) == 26).and_then(|b| pick::wake_cell(&get, b, self.chunks.meta(b.0, b.1, b.2), 0));
+        if cell.is_none() && self.bed_spawn.is_some_and(|(x, _, z)| self.chunks.block_loaded(x, 0, z).is_some()) {
+            (self.hint, self.hint_msg, self.bed_spawn) = (2.5, "Your home bed was missing or obstructed", None);
+        }
         cell.map_or(self.spawn, |(x, y, z)| glam::Vec3::new(x as f32 + 0.5, y as f32 + 1.0, z as f32 + 0.5))
     }
 
     /// `BlockBed.blockActivated` + `EntityPlayer.sleepInBedAt` (the OK status: at night, within 3 / 2 / 3 blocks; by day NOT_POSSIBLE_NOW says so).
-    /// ponytail: no other message (too far, monsters near); the hostile spawn on waking is not ported.
+    /// b1.7.3 has no other message: `TOO_FAR_AWAY` returns silently (`BlockBed` only answers `NOT_POSSIBLE_NOW`), `tile.bed.occupied` needs a second
+    /// player and there is no "monsters nearby" check (Beta 1.8 added it); monsters come at the end of the sleep instead (`sleep_spawn`).
     fn use_bed(&mut self, (mut x, y, mut z): (i32, i32, i32)) {
         let mut m = self.chunks.meta(x, y, z);
         if m & 8 == 0 {
@@ -2029,7 +2037,7 @@ impl App {
         let Some((x, y, z, _)) = self.sleep.take() else { return };
         let get = |a, b, c| self.chunks.block_loaded(a, b, c).unwrap_or(0);
         let m = self.chunks.meta(x, y, z);
-        let cell = pick::wake_cell(&get, (x, y, z), m).unwrap_or((x, y + 1, z));
+        let cell = pick::wake_cell(&get, (x, y, z), m, 0).unwrap_or((x, y + 1, z));
         if get(x, y, z) == 26 {
             self.chunks.set_block_meta(x, y, z, 26, m & !4);
         }
@@ -2039,15 +2047,41 @@ impl App {
         }
     }
 
-    /// One 20 Hz tick of sleeping: fully asleep (100 ticks) everyone wakes at the next morning (`World.tick`, no weather runs
-    /// during the skip); a bed that is gone or day wakes the player earlier (`EntityPlayer.onUpdate`).
+    /// `World.tick` -> `SpawnerAnimals.performSleepSpawning` for the sleeper at the bed (`Mobs::sleep_spawn`); the monster's cry is played.
+    fn sleep_spawn(&mut self) -> bool {
+        let Some((x, y, z, _)) = self.sleep else { return false };
+        // Spawners see the same world as the mobs do (plants read as air).
+        let get = |x: i32, y: i32, z: i32| self.chunks.block(x, y, z).map(|b| if is_plant(b) { 0 } else { self.chunks.physics_at(x, y, z, b) });
+        let light = |x: i32, y: i32, z: i32| self.chunks.light(x, y, z);
+        let biome = |x: i32, z: i32| self.chunks.biome_at(x, z);
+        let raw = |a: i32, b: i32, c: i32| self.chunks.block_loaded(a, b, c).unwrap_or(0);
+        let eye = self.player.pos + glam::Vec3::new(0.0, EYE_HEIGHT, 0.0); // asleep: `posY` is the bed's surface
+        let ctx = Ctx { get: &get, light: &light, day: false, player: self.player.pos, eye, biome: &biome, sight: 1.0 };
+        let beside = pick::wake_cell(&raw, (x, y, z), self.chunks.meta(x, y, z), 1);
+        let mut evs = Vec::new();
+        let came = self.mobs.sleep_spawn(&ctx, eye, beside, &mut evs);
+        for e in evs {
+            if let Ev::Snd(name, at, vol, mul, jit) = e {
+                self.audio.cry(name, at, vol, mul, jit);
+            }
+        }
+        came
+    }
+
+    /// One 20 Hz tick of sleeping: fully asleep (100 ticks) a monster may come first (`World.tick`: `performSleepSpawning`; it wakes the player
+    /// without making the bed their spawn and the night stays); else everyone wakes at the next morning (no weather runs during the skip);
+    /// a bed that is gone or day wakes the player earlier (`EntityPlayer.onUpdate`).
     fn sleep_tick(&mut self, sky_sub: u8) {
         let Some((x, y, z, t)) = self.sleep else { return };
         if t >= 100 {
-            let next = self.world_ticks as u64 + 24000;
-            self.world_ticks = (next - next % 24000) as f64;
-            self.weather_ticks = self.world_ticks as u64;
-            self.wake(true);
+            if self.sleep_spawn() {
+                self.wake(false);
+            } else {
+                let next = self.world_ticks as u64 + 24000;
+                self.world_ticks = (next - next % 24000) as f64;
+                self.weather_ticks = self.world_ticks as u64;
+                self.wake(true);
+            }
         } else if self.chunks.block_loaded(x, y, z) != Some(26) {
             self.wake(false);
         } else if sky_sub < 4 {
@@ -3208,7 +3242,7 @@ impl App {
     fn debug_rows(&mut self) -> (Vec<Row>, Vec<Row>) {
         use crate::options::Opt;
         use crate::render::debug::{bearing, clock, compass, fps_color, words, CYAN, GREEN, GREY, WHITE, YELLOW};
-        use crate::render::present::{fast_post, scene_samples};
+        use crate::render::present::{fast_post, fxaa, scene_samples};
         let p = self.player.pos;
         let feet = p.y - physics::HALF.y;
         let (bx, by, bz) = (p.x.floor() as i32, feet.floor() as i32, p.z.floor() as i32);
@@ -3255,6 +3289,7 @@ impl App {
             Row::Kv("Dyn. res", set(Opt::DynamicRes), WHITE),
             Row::Kv("MSAA", format!("{}  [{}]", if ms > 1 { format!("{ms}x") } else { "off".into() }, set(Opt::Msaa)), WHITE),
             Row::Kv("Post", format!("{}  [{}]", if fast_post() { "fast" } else { "full" }, set(Opt::Post)), WHITE),
+            Row::Kv("FXAA", format!("{}  [{}]", if fxaa() && !fast_post() { "on" } else { "off" }, set(Opt::Fxaa)), WHITE),
             Row::Kv("Renderer", self.be.gpu_info().chars().take(30).collect::<String>(), WHITE),
             Row::Kv("Graphics", format!("{}, smooth lighting {}", set(Opt::Graphics), set(Opt::AmbientOcclusion)), WHITE),
             Row::Kv("Perf", set(Opt::FramerateLimit), WHITE),

@@ -420,9 +420,10 @@ impl Gpu {
         // MSAA for the scene pass if the adapter has it for the scene and depth formats (before anything is built with a sample count).
         let samples = crate::render::present::pick_samples(&adapter);
         crate::render::present::set_scene_samples(samples);
-        let fast = crate::render::present::pick_fast(&adapter);
+        let (fxaa, fast) = crate::render::present::pick_final(&adapter, samples);
         crate::render::present::set_fast_post(fast);
-        log::info!("M3 init: scene MSAA x{samples}, final pass {}", if fast { "fast (no FXAA/CAS)" } else { "full" });
+        crate::render::present::set_fxaa(fxaa);
+        log::info!("M3 init: scene MSAA x{samples}, final pass {}, FXAA {fxaa}", if fast { "fast (no FXAA/CAS)" } else { "full" });
 
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {

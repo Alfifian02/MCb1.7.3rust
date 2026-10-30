@@ -182,16 +182,17 @@ pub fn bed_meta(get: &dyn Fn(i32, i32, i32) -> u8, (x, y, z): (i32, i32, i32), y
     ok.then_some(n as u8)
 }
 
-/// `BlockBed.getNearestEmptyChunkCoordinates(.., 0)`: the first standable cell in the 3x3 around the bed half, then around the one
-/// next to it (x outer, z inner), where the player wakes or respawns.
-pub fn wake_cell(get: &dyn Fn(i32, i32, i32) -> u8, (x, y, z): (i32, i32, i32), meta: u8) -> Option<(i32, i32, i32)> {
+/// `BlockBed.getNearestEmptyChunkCoordinates`: the `skip`-th (from 0) standable cell in the 3x3 around the bed half, then around the
+/// one next to it (x outer, z inner): 0 is where the player wakes or respawns, 1 where `performSleepSpawning` puts the monster.
+pub fn wake_cell(get: &dyn Fn(i32, i32, i32) -> u8, (x, y, z): (i32, i32, i32), meta: u8, skip: usize) -> Option<(i32, i32, i32)> {
     let (dx, dz) = BED_DIR[(meta & 3) as usize];
     (0..=1)
         .flat_map(|k| {
             let (x0, z0) = (x - dx * k - 1, z - dz * k - 1);
             (x0..=x0 + 2).flat_map(move |a| (z0..=z0 + 2).map(move |b| (a, b)))
         })
-        .find(|&(a, b)| normal_cube(get(a, y - 1, b)) && get(a, y, b) == 0 && get(a, y + 1, b) == 0)
+        .filter(|&(a, b)| normal_cube(get(a, y - 1, b)) && get(a, y, b) == 0 && get(a, y + 1, b) == 0)
+        .nth(skip)
         .map(|(a, b)| (a, y, b))
 }
 
@@ -375,8 +376,9 @@ mod door_tests {
         assert_eq!(bed_meta(&floor, (0, 64, 0), 90.0), Some(1));
         let half = |x: i32, y: i32, _: i32| if y == 63 && x <= 0 { 1 } else { 0 };
         assert_eq!(bed_meta(&half, (0, 64, 0), 270.0), None, "the partner cell (1, 64, 0) has no floor");
-        assert_eq!(wake_cell(&floor, (0, 64, 0), 0), Some((-1, 64, -1)));
-        assert_eq!(wake_cell(&|_, _, _| 0, (0, 64, 0), 0), None);
+        assert_eq!(wake_cell(&floor, (0, 64, 0), 0, 0), Some((-1, 64, -1)));
+        assert_eq!(wake_cell(&floor, (0, 64, 0), 0, 1), Some((-1, 64, 0)), "skip 1: the second free cell, where a monster is put");
+        assert_eq!(wake_cell(&|_, _, _| 0, (0, 64, 0), 0, 0), None);
     }
 
     #[test]

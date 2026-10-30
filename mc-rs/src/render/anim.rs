@@ -1,4 +1,4 @@
-//! Animated terrain tiles: `TextureWaterFX`, `TextureWaterFlowFX`, `TextureLavaFX`, `TextureLavaFlowFX` and `TextureFlamesFX` (x2),
+//! Animated terrain tiles: `TextureWaterFX`, `TextureWaterFlowFX`, `TextureLavaFX`, `TextureLavaFlowFX`, `TextureFlamesFX` (x2) and `TexturePortalFX`,
 //! 16 x 16 RGBA tiles redrawn every 20 Hz tick and written over their atlas tile (`ChunkPipeline::animate`).
 //! `Math.random()` is a xorshift here (the Java's is unseeded too). The anaglyph branches are left out.
 
@@ -7,6 +7,8 @@ pub const WATER_FLOW: u8 = 206;
 pub const LAVA: u8 = 237;
 pub const LAVA_FLOW: u8 = 238;
 pub const FIRE: [u8; 2] = [31, 47];
+/// `Block.portal.blockIndexInTexture`.
+pub const PORTAL: u8 = 14;
 
 pub type Tile = [u8; 1024];
 
@@ -15,6 +17,47 @@ pub const COMPASS: u8 = 54;
 pub const CLOCK: u8 = 70;
 /// `misc/dial.png` (16 x 16 RGBA): the sky painted into the clock's magenta face (`TextureWatchFX`); `tools/gen_terrain.py` writes it.
 const DIAL: &[u8] = include_bytes!("../../assets/dial.rgba");
+
+/// `TexturePortalFX`'s constructor: the 32 frames of the portal (`Random(100)`, two swirling layers wrapped on a 16 x 16 torus, `MathHelper.sin`),
+/// each 16 x 16 RGBA. The Java stores the four channels as `(byte)` casts; the values stay under 255 (the sum is at most 0.78 here), so the
+/// casts never wrap. The anaglyph branch is left out.
+fn portal_frames() -> Vec<Tile> {
+    use crate::world::gen::noise::{mh_sin, JavaRandom};
+    use std::f32::consts::PI;
+    let mut rng = JavaRandom::new(100);
+    // `if d < -1 { d += 2 }` then `if d >= 1 { d -= 2 }`, one after the other as in the Java.
+    let wrap = |mut d: f32| {
+        if d < -1.0 {
+            d += 2.0;
+        }
+        if d >= 1.0 {
+            d -= 2.0;
+        }
+        d
+    };
+    (0..32)
+        .map(|frame| {
+            let mut t = [0u8; 1024];
+            for x in 0..16 {
+                for y in 0..16 {
+                    let mut v = 0.0f32;
+                    for layer in 0..2 {
+                        let off = (layer * 8) as f32;
+                        let (a, b) = (wrap((x as f32 - off) / 16.0 * 2.0), wrap((y as f32 - off) / 16.0 * 2.0));
+                        let r2 = a * a + b * b;
+                        let ang = (b as f64).atan2(a as f64) as f32 + (frame as f32 / 32.0 * PI * 2.0 - r2 * 10.0 + (layer * 2) as f32) * (layer * 2 - 1) as f32;
+                        v += (mh_sin(ang) + 1.0) / 2.0 / (r2 + 1.0) * 0.5;
+                    }
+                    v += rng.next_float() * 0.1;
+                    let i = (y * 16 + x) * 4;
+                    let (lo, hi) = ((v * 100.0 + 155.0) as i32 as u8, (v * v * v * v * 255.0) as i32 as u8);
+                    t[i..i + 4].copy_from_slice(&[(v * v * 200.0 + 55.0) as i32 as u8, hi, lo, lo]);
+                }
+            }
+            t
+        })
+        .collect()
+}
 
 struct Rng(u64);
 impl Rng {
@@ -191,11 +234,13 @@ pub struct Anim {
     lava: Field,
     lava_flow: Field,
     fire: [[f32; 320]; 2],
+    /// `TexturePortalFX.portalTextureData`: the 32 frames, shown in turn (`portalTickCounter & 31`).
+    portal: Vec<Tile>,
 }
 
 impl Anim {
     pub fn new() -> Self {
-        Self { compass: (0.0, 0.0), clock: (0.0, 0.0), rng: Rng(0x9E37_79B9_7F4A_7C15), tick: 0, water: Field::new(), water_flow: Field::new(), lava: Field::new(), lava_flow: Field::new(), fire: [[0.0; 320]; 2] }
+        Self { compass: (0.0, 0.0), clock: (0.0, 0.0), rng: Rng(0x9E37_79B9_7F4A_7C15), tick: 0, water: Field::new(), water_flow: Field::new(), lava: Field::new(), lava_flow: Field::new(), fire: [[0.0; 320]; 2], portal: portal_frames() }
     }
 
     /// One 20 Hz tick of `TextureCompassFX` and `TextureWatchFX`: the new pictures of the compass and clock items,
@@ -214,7 +259,7 @@ impl Anim {
     }
 
     /// One 20 Hz tick: the new picture of every animated tile, `(terrain tile, RGBA)`.
-    pub fn tick(&mut self) -> [(u8, Tile); 6] {
+    pub fn tick(&mut self) -> [(u8, Tile); 7] {
         self.tick += 1;
         let (t, r) = (self.tick, &mut self.rng);
         [
@@ -224,6 +269,7 @@ impl Anim {
             (LAVA_FLOW, lava(&mut self.lava_flow, r, t, true)),
             (FIRE[0], flames(&mut self.fire[0], r)),
             (FIRE[1], flames(&mut self.fire[1], r)),
+            (PORTAL, self.portal[(t & 31) as usize]),
         ]
     }
 }
@@ -245,10 +291,24 @@ mod tests {
             match *tile {
                 WATER | WATER_FLOW => assert!((0..256).all(|k| p(k)[2] == 255 && (146..=196).contains(&p(k)[3]) && p(k)[0] >= 32 && p(k)[0] <= 64)),
                 LAVA | LAVA_FLOW => assert!((0..256).all(|k| p(k)[3] == 255 && p(k)[0] >= 155)),
+                PORTAL => assert!((0..256).all(|k| p(k)[3] >= 155 && p(k)[3] == p(k)[2] && p(k)[0] >= 55)),
                 _ => assert!((0..256).all(|k| p(k)[3] == 0 || p(k)[3] == 255) && (0..256).any(|k| p(k)[3] == 255)),
             }
         }
         assert_ne!(a.tick()[0].1[..], last[0].1[..]); // it moves
+    }
+
+    /// The portal plays its 32 frames in a loop (the counter is pre-incremented: the first tick shows frame 1), each frame differs from the next,
+    /// and frame 0 starts with the pixel of the Java's constructor worked out by hand (`Random(100)`; UNVERIFIED against a real run).
+    #[test]
+    fn the_portal_loops_through_32_frames() {
+        let frames = portal_frames();
+        assert_eq!(frames.len(), 32);
+        assert_eq!(frames[0][..4], [75, 2, 187, 187]);
+        assert!(frames.windows(2).all(|w| w[0] != w[1]));
+        let mut a = Anim::new();
+        let shown: Vec<Tile> = (0..64).map(|_| a.tick()[6].1).collect();
+        assert!(shown[0] == frames[1] && shown[31] == frames[0] && shown[32] == frames[1]);
     }
 
     /// The compass hand settles on the spawn direction and stays; the red tip is drawn; the clock face differs between noon and

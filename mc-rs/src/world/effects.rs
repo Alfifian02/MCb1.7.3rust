@@ -4,8 +4,8 @@
 //! particles and bolts as small flat boxes.
 //! UNVERIFIED: `EntityFlameFX` / `EntitySmokeFX` motion is from memory (marked below); the bolt's column is straight (vanilla draws a
 //! jagged one from `field_27029_a`); a bolt's strike column and spawner kind are not drawn from the world's `field_9437_g` LCG.
-//! ponytail: no splash sound (thunder is heard: `Effects::clap` / `heard`), no fire from a bolt (no fire block yet), no charged creeper / pigman conversion, the
-//! spawner's spinning mob cage is not drawn, mobs do not suffocate (only the player).
+//! ponytail: no splash sound (thunder is heard: `Effects::clap` / `heard`), no fire from a bolt (no fire block yet), no charged creeper / pigman conversion,
+//! mobs do not suffocate (only the player). The spawner's spinning mob cage is drawn by `render/items.rs` from `Spawner::spin`.
 
 use std::collections::HashMap;
 
@@ -297,6 +297,30 @@ pub fn dungeon_kind(i: u8) -> Kind {
 pub struct Spawner {
     pub kind: u8,
     pub delay: i32,
+    /// `TileEntityMobSpawner.yaw` / `yaw2`: the cage's turn in 10ths of a degree, now and a tick ago (never saved, as in the Java).
+    pub yaw: f64,
+    pub yaw2: f64,
+}
+
+impl Spawner {
+    pub fn new(kind: u8, delay: i32) -> Self {
+        Self { kind, delay, yaw: 0.0, yaw2: 0.0 }
+    }
+
+    /// The part of `updateEntity` that turns the cage while the player is near: `yaw` gains `1000 / (delay + 200)` and wraps past 360,
+    /// taking `yaw2` (the value a tick ago) with it so the interpolation never jumps. Call `yaw2 = yaw` first, every tick.
+    fn spin_tick(&mut self) {
+        self.yaw += (1000.0 / (self.delay as f32 + 200.0)) as f64;
+        while self.yaw > 360.0 {
+            self.yaw -= 360.0;
+            self.yaw2 -= 360.0;
+        }
+    }
+
+    /// `TileEntityMobSpawnerRenderer`: the cage's turn in degrees `partial` of the way from last tick to this one (`(yaw2 + (yaw - yaw2) * partial) * 10`).
+    pub fn spin(&self, partial: f32) -> f32 {
+        ((self.yaw2 + (self.yaw - self.yaw2) * partial as f64) * 10.0) as f32
+    }
 }
 
 pub struct Effects {
@@ -519,6 +543,7 @@ impl Effects {
         let mut all = std::mem::take(&mut self.spawners);
         for (&(x, y, z), s) in all.iter_mut() {
             let centre = Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
+            s.yaw2 = s.yaw;
             if !loaded((x, y, z)) || (c.player - centre).length() > 16.0 {
                 continue;
             }
@@ -526,6 +551,7 @@ impl Effects {
             let (sm, fl) = (Particle::smoke(&mut self.rng, at), Particle::flame(&mut self.rng, at));
             self.add(sm);
             self.add(fl);
+            s.spin_tick();
             if s.delay == -1 {
                 s.delay = 200 + self.rng.next_int_bound(600);
             }
@@ -578,6 +604,24 @@ pub fn inside_opaque(get: BlockQuery<'_>, x: f32, y: f32, z: f32, width: f32) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The cage turns `1000 / (delay + 200)` a tick (a fresh spawner, delay 20: 4.545), and across the wrap past 360 each tick still starts
+    /// where the last one ended (the drawn turn differs by whole turns only), so the cage never jumps.
+    #[test]
+    fn a_spawner_cage_turns_smoothly_across_the_wrap() {
+        let mut s = Spawner::new(1, 20);
+        let step = 1000.0 / 220.0;
+        let mut end = s.spin(1.0);
+        for _ in 0..200 {
+            s.yaw2 = s.yaw;
+            s.spin_tick();
+            assert!(s.yaw > 0.0 && s.yaw <= 360.0, "yaw {}", s.yaw);
+            assert!((s.spin(1.0) - s.spin(0.0) - step * 10.0).abs() < 0.05, "turn per tick {}", s.spin(1.0) - s.spin(0.0));
+            let gap = (s.spin(0.0) - end).rem_euclid(360.0);
+            assert!(gap < 0.05 || gap > 359.95, "this tick starts {gap} degrees from where the last ended");
+            end = s.spin(1.0);
+        }
+    }
 
     /// A splash makes as many splashes as bubbles; bubbles die out of water; a wall at the head is found; a bolt strikes on its
     /// first two ticks and always ends.

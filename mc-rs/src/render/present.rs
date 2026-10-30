@@ -72,7 +72,7 @@ pub fn pick_samples(adapter: &wgpu::Adapter) -> u32 {
 /// What the player asked for in `options.txt` (`post:`), set once before the GPU is built: 0 Auto, 1 Full, 2 Fast.
 static POST_WANT: AtomicU32 = AtomicU32::new(0);
 
-/// Whether the final pass skips FXAA and CAS; set once by `Gpu::try_init` (`pick_fast`; the GLES `Renderer::new` too), false until then.
+/// Whether the final pass skips FXAA and CAS; set once by `Gpu::try_init` (`pick_final`; the GLES `Renderer::new` too), false until then.
 static FAST_POST: AtomicBool = AtomicBool::new(false);
 
 pub fn set_post_want(n: u32) {
@@ -91,13 +91,43 @@ pub fn set_fast_post(b: bool) {
     FAST_POST.store(b, Ordering::Relaxed);
 }
 
+/// What the player asked for in `options.txt` (`fxaa:`), set once before the GPU is built: 0 Auto (FXAA only when the scene has 1 sample),
+/// 1 On (also on top of MSAA, and it beats `Post: Fast` / a weak GPU's Auto), 2 Off.
+static FXAA_WANT: AtomicU32 = AtomicU32::new(0);
+
+/// Whether the final pass runs FXAA; set once with `set_fast_post`, false until then.
+static FXAA_ON: AtomicBool = AtomicBool::new(false);
+
+pub fn set_fxaa_want(n: u32) {
+    FXAA_WANT.store(n, Ordering::Relaxed);
+}
+
+pub fn fxaa_want() -> u32 {
+    FXAA_WANT.load(Ordering::Relaxed)
+}
+
+pub fn fxaa() -> bool {
+    FXAA_ON.load(Ordering::Relaxed)
+}
+
+pub fn set_fxaa(b: bool) {
+    FXAA_ON.store(b, Ordering::Relaxed);
+}
+
+/// The final pass's `(fxaa, fast)` for the options and the GPU: FXAA is on for `fxaa` 1, or for Auto (0) when the scene has one sample;
+/// an explicit FXAA On turns Fast off (Fast has no FXAA to give), everything else is `resolve_post`.
+pub(crate) fn resolve_final(fxaa: u32, post: u32, weak: bool, samples: u32) -> (bool, bool) {
+    let on = fxaa == 1 || (fxaa == 0 && samples == 1);
+    (on, resolve_post(post, weak) && fxaa != 1)
+}
+
 /// Fast for a `want` of 2, or for Auto (0) on a `weak` GPU; Full otherwise.
 pub(crate) fn resolve_post(want: u32, weak: bool) -> bool {
     match want { 0 => weak, 2 => true, _ => false }
 }
 
-pub fn pick_fast(adapter: &wgpu::Adapter) -> bool {
-    resolve_post(post_want(), weak_gpu(&adapter.get_info().name))
+pub fn pick_final(adapter: &wgpu::Adapter, samples: u32) -> (bool, bool) {
+    resolve_final(fxaa_want(), post_want(), weak_gpu(&adapter.get_info().name), samples)
 }
 
 /// The state of a scene pipeline's `multisample` (alpha-to-coverage on for the cut-out layers: MSAA does not smooth a `discard` edge, but
@@ -117,7 +147,7 @@ struct U { px: vec4<f32>, grade: vec4<f32> }; // 1 / scene size, 1 / surface siz
 @group(0) @binding(2) var src: texture_2d<f32>;
 
 const SRGB_SURFACE: bool = @SRGB@;
-const FXAA: bool = @FXAA@; // false when the scene pass was multisampled
+const FXAA: bool = @FXAA@; // `fxaa:` in options.txt; by default only when the scene pass is not multisampled
 const FAST: bool = @FAST@; // no FXAA, no CAS: one bilinear tap
 const CAS_SHARPNESS: f32 = 0.5;
 const VIGNETTE: f32 = 0.04; // b1.7.3-style half-strength vignette (`Settings::legacy`: 0.08 * 0.5)
@@ -228,7 +258,7 @@ fn target(device: &Device, label: &str, (w, h): (u32, u32), samples: u32) -> Tex
 impl Present {
     /// `scene` = the internal size (`Gpu::scene`), `surface` = the swap chain's.
     pub fn new(device: &Device, queue: &Queue, scene: (u32, u32), surface: (u32, u32), surface_format: wgpu::TextureFormat) -> Self {
-        let src = shader_source(surface_format.is_srgb(), scene_samples() == 1, fast_post());
+        let src = shader_source(surface_format.is_srgb(), fxaa(), fast_post());
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("present"), source: wgpu::ShaderSource::Wgsl(src.into()) });
         let entry = |binding, visibility, ty| wgpu::BindGroupLayoutEntry { binding, visibility, ty, count: None };
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -352,6 +382,14 @@ mod tests {
     #[test]
     fn post_follows_the_option_and_the_gpu() {
         assert_eq!((resolve_post(0, true), resolve_post(0, false), resolve_post(1, true), resolve_post(2, false)), (true, false, false, true));
+    }
+
+    /// Auto keeps the old rule (FXAA only without MSAA, Fast on a weak GPU); On is FXAA whatever the samples and beats Fast; Off never.
+    #[test]
+    fn fxaa_follows_the_option_and_the_samples() {
+        assert_eq!((resolve_final(0, 0, false, 4), resolve_final(0, 0, false, 1), resolve_final(0, 0, true, 1)), ((false, false), (true, false), (true, true)));
+        assert_eq!((resolve_final(1, 0, false, 4), resolve_final(1, 2, true, 1), resolve_final(1, 1, false, 2)), ((true, false), (true, false), (true, false)));
+        assert_eq!((resolve_final(2, 0, false, 1), resolve_final(2, 2, false, 1)), ((false, false), (false, true)));
     }
 
     #[test]

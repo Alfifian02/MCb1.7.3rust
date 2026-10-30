@@ -12,6 +12,7 @@
 
 use crate::gpu::gfx::{Buf, Gfx};
 use crate::render::mesh::VF;
+use crate::world::chunk::{AMBIENT, NETHER_AMBIENT};
 use crate::world::chunks::ChunkManager;
 use glam::{Mat4, Vec3};
 use std::collections::HashMap;
@@ -139,6 +140,9 @@ impl Look {
         let v = c.vibrance.clamp(0.0, 1.0);
         l.grade = [GRADE_VIB * v, GRADE_CURVE * v, GRADE_SPLIT * v, 0.0];
         l.fx[0] = e.seconds;
+        // `WorldProviderHell.generateLightBrightnessTable`: the floor of the light table is 0.1, not 0.05. `fx.w` is what it is raised by (0 in the
+        // overworld, so `Look::OFF` and every overworld frame keep the old table); the shaders' `brightness` reads it.
+        l.fx[3] = if e.nether { NETHER_AMBIENT - AMBIENT } else { 0.0 };
         l.bolt = e.bolt;
         let dry = 1.0 - e.rain;
         let y = e.sun.y;
@@ -428,9 +432,27 @@ impl GlowMesh {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::world::chunk::brightness_in;
 
     fn env(sun_y: f32) -> Env {
         Env { sun: Vec3::new((1.0 - sun_y * sun_y).sqrt(), sun_y, 0.0), rain: 0.0, seconds: 3.0, nether: false, underwater: false, bolt: [0.0; 4] }
+    }
+
+    /// The Nether's frame raises the light table's floor through `fx.w` (the shaders' `l / (4 - 3 l) * (0.95 - w) + 0.05 + w`), which for all 16
+    /// levels is `WorldProviderHell`'s table; the overworld's `w` is 0, the old table, and `Look::OFF` is untouched.
+    #[test]
+    fn the_nether_lifts_the_light_table_through_fx_w() {
+        let hell = Env { nether: true, ..env(0.5) };
+        let (over, nether) = (Look::new(&LookCfg::default(), &env(0.5)), Look::new(&LookCfg::default(), &hell));
+        assert_eq!((Look::OFF.fx[3], over.fx[3]), (0.0, 0.0));
+        let table = |w: f32, k: u8| {
+            let l = k as f32 / 15.0;
+            l / (4.0 - 3.0 * l) * (0.95 - w) + 0.05 + w
+        };
+        for k in 0..=15u8 {
+            assert!((table(nether.fx[3], k) - brightness_in(k, NETHER_AMBIENT)).abs() < 1e-6, "nether level {k}");
+            assert!((table(over.fx[3], k) - brightness_in(k, AMBIENT)).abs() < 1e-6, "overworld level {k}");
+        }
     }
 
     /// Options.txt round trip, a bad line is skipped and the dial stays inside 0..1.

@@ -1513,6 +1513,57 @@ impl Mobs {
         }
     }
 
+    /// `SpawnerAnimals.performSleepSpawning` for the one player, fully asleep at `eye` (their `posX/Y/Z`, the bed's surface): up to 20 tries,
+    /// each a random cell within 32 x 16 x 32 of them and a spider, zombie or skeleton (`nightSpawnEntities`: no creeper, no slime) on the
+    /// first floor found from there (at most 16 up). It counts only when a path of more than one step from it (`createEntityPathTo`, 32)
+    /// ends within 1.5 blocks of the player on every axis, i.e. it can walk up to the bed. It then appears on the second free cell beside the
+    /// bed (`beside`, `pick::wake_cell(.., 1)`, else the cell it was found on, one up) and cries its living sound into `ev`. True when one came:
+    /// the caller wakes the player (`wakeUpPlayer(true, false, false)`) and the night is not skipped. False on Peaceful (`World.tick` asks for
+    /// difficulty >= 1) and in the Nether (nobody sleeps there).
+    /// ponytail: no `checkIfAABBIsClear` (an entity already standing in the box), the free-cell test is `can_spawn`'s (air, not any block with
+    /// no collision box), the spider's 1 in 100 skeleton rider (`creatureSpecificInit`) is not made, and the world's `rand` is `self.rng`.
+    pub fn sleep_spawn(&mut self, c: &Ctx, eye: Vec3, beside: Option<(i32, i32, i32)>, ev: &mut Vec<Ev>) -> bool {
+        if self.difficulty == 0 || self.nether {
+            return false;
+        }
+        let at = |x: i32, y: i32, z: i32| (c.get)(x, y, z);
+        let spot = |x: i32, y: i32, z: i32| solid(at(x, y - 1, z)) && at(x, y, z) == Some(0) && at(x, y + 1, z) == Some(0);
+        let (px, py, pz) = (eye.x.floor() as i32, eye.y.floor() as i32, eye.z.floor() as i32);
+        for _ in 0..20 {
+            let x = px + self.rng.next_int_bound(32) - self.rng.next_int_bound(32);
+            let z = pz + self.rng.next_int_bound(32) - self.rng.next_int_bound(32);
+            let y0 = (py + self.rng.next_int_bound(16) - self.rng.next_int_bound(16)).clamp(1, 128);
+            let kind = [Spider, Zombie, Skeleton][self.rng.next_int_bound(3) as usize];
+            let mut y = y0;
+            while y > 2 && !solid(at(x, y - 1, z)) {
+                y -= 1;
+            }
+            while !spot(x, y, z) && y < y0 + 16 && y < 128 {
+                y += 1;
+            }
+            if y >= y0 + 16 || y >= 128 || !self.can_spawn(c, kind, x, y, z) {
+                continue;
+            }
+            let (w, h, ..) = spec(kind);
+            let size = ((w + 1.0).floor() as i32, (h + 1.0).floor() as i32, (w + 1.0).floor() as i32);
+            let start = ((x as f32 + 0.5 - w / 2.0).floor() as i32, y, (z as f32 + 0.5 - w / 2.0).floor() as i32);
+            // The sleeper's box is 0.2 high and hangs `yOffset` 0.2 under `posY`, so the row the path aims for is floor(posY - 0.2) (the bed's).
+            let goal = ((eye.x - w / 2.0).floor() as i32, (eye.y - 0.2).floor() as i32, (eye.z - w / 2.0).floor() as i32);
+            let Some(end) = path::find(c.get, start, goal, size, 32.0).filter(|p| p.len() > 1).and_then(|p| p.last().copied()) else { continue };
+            if (end.0 as f32 - eye.x).abs() >= 1.5 || (end.1 as f32 - eye.y).abs() >= 1.5 || (end.2 as f32 - eye.z).abs() >= 1.5 {
+                continue;
+            }
+            let (cx, cy, cz) = beside.unwrap_or((x, y + 1, z));
+            let m = Mob::new(kind, cx as f32 + 0.5, cy as f32, cz as f32 + 0.5, 0.0, &mut self.rng);
+            if let Some((n, v)) = cry(kind, Cry::Say, 0) {
+                ev.push(Ev::Snd(n, m.body.pos, v, 1.0, true)); // `playLivingSound`
+            }
+            self.list.push(m);
+            return true;
+        }
+        false
+    }
+
     /// Advance `dt` seconds: AI at 20 Hz, movement per frame, spawns, arrows and the drops of the dead. Returns what the
     /// player must suffer or the world must do (`Hurt`, `Boom`).
     pub fn update(&mut self, dt: f32, c: &Ctx, drops: &mut Drops) -> Vec<Ev> {
@@ -2416,6 +2467,37 @@ mod tests {
         assert!(hell.iter().filter(|&&k| k != Ghast).count() <= CAP_MONSTERS && hell.iter().filter(|&&k| k == Ghast).count() <= CAP_GHAST, "{hell:?}");
         assert!(run(false, 2).is_empty(), "the overworld has no use for this floor");
         assert!(run(true, 0).is_empty(), "Peaceful");
+    }
+
+    /// `SpawnerAnimals.performSleepSpawning`: fully asleep in an open field, a spider, zombie or skeleton comes to the second free cell beside the bed
+    /// and cries (a spider's wide box never ends within 1.5 of a centred bed, so a try that draws one simply fails, as in the Java); on Peaceful or in
+    /// the Nether nobody comes; a sleeper walled in (the nearest cell a mob can reach is 1.5 or more away) gets nobody.
+    #[test]
+    fn a_monster_comes_to_a_sleeper_it_can_reach_and_to_nobody_else() {
+        let l = |_, _, _| 0u8;
+        let eye = Vec3::new(32.5, 10.0 + 15.0 / 16.0, 32.5);
+        let open = ctx(Vec3::new(32.5, 10.0, 32.5), &l);
+        let beside = Some((31, 10, 32));
+        for seed in 1..=6 {
+            let (mut m, mut ev) = (Mobs::new(seed), Vec::new());
+            assert!(m.sleep_spawn(&open, eye, beside, &mut ev), "seed {seed}");
+            let [mob] = &m.list[..] else { panic!("seed {seed}: exactly one mob, got {}", m.list.len()) };
+            assert!(matches!(mob.kind, Spider | Zombie | Skeleton), "{:?}", mob.kind);
+            assert_eq!((mob.body.pos.x, mob.body.pos.z), (31.5, 32.5), "on the second free cell beside the bed");
+            assert!(ev.len() == 1 && matches!(ev[0], Ev::Snd(..)), "its living sound");
+        }
+        for (nether, difficulty) in [(false, 0), (true, 2)] {
+            let (mut m, mut ev) = (Mobs::new(1), Vec::new());
+            (m.nether, m.difficulty) = (nether, difficulty);
+            assert!(!m.sleep_spawn(&open, eye, beside, &mut ev) && m.list.is_empty() && ev.is_empty(), "nether {nether}, difficulty {difficulty}");
+        }
+        // The bed's cell is closed in by a ring and a roof of stone: every cell a mob can stand on is 1.5 or more from the sleeper.
+        let walled = |x: i32, y: i32, z: i32| if (31..=33).contains(&x) && (31..=33).contains(&z) && (10..=13).contains(&y) && (y == 13 || (x, z) != (32, 32)) { Some(1) } else { flat(x, y, z) };
+        let shut = Ctx { get: &walled, light: &l, day: false, player: Vec3::new(32.5, 10.0, 32.5), eye, biome: &|_, _| Biome::Plains, sight: 1.0 };
+        for seed in 1..=6 {
+            let (mut m, mut ev) = (Mobs::new(seed), Vec::new());
+            assert!(!m.sleep_spawn(&shut, eye, beside, &mut ev) && m.list.is_empty(), "seed {seed}: nobody can walk up to a walled-in bed");
+        }
     }
 
     /// `EntityGhast.updatePlayerActionState`: a player in sight within 64 blocks makes it face them, count 1 a tick and, at 20, ask for a fireball

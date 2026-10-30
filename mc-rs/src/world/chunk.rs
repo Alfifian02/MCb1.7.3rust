@@ -370,10 +370,20 @@ pub const fn light_value(id: u8) -> u8 {
     }
 }
 
+/// The floor of `WorldProvider.generateLightBrightnessTable` (`var1`): the brightness of light level 0 in the overworld.
+pub const AMBIENT: f32 = 0.05;
+/// The same floor in `WorldProviderHell.generateLightBrightnessTable`: the Nether's darkest cell is twice as bright.
+pub const NETHER_AMBIENT: f32 = 0.1;
+
 /// `WorldProvider.generateLightBrightnessTable`: light level 0..=15 -> brightness 0.05..=1.0.
 pub fn brightness(level: u8) -> f32 {
+    brightness_in(level, AMBIENT)
+}
+
+/// The table with the dimension's floor `ambient` (`AMBIENT` or `NETHER_AMBIENT`): `(1 - f) / (3 f + 1) * (1 - ambient) + ambient`.
+pub fn brightness_in(level: u8, ambient: f32) -> f32 {
     let f = 1.0 - level as f32 / 15.0;
-    (1.0 - f) / (f * 3.0 + 1.0) * (1.0 - 0.05) + 0.05
+    (1.0 - f) / (f * 3.0 + 1.0) * (1.0 - ambient) + ambient
 }
 
 /// `Chunk.heightMap` for one chunk, indexed `z << 4 | x`: the y of the first cell, scanning down from
@@ -396,6 +406,20 @@ pub fn height_map(blocks: &[u8]) -> [u8; 256] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `WorldProviderHell` keeps the curve and lifts the floor from 0.05 to 0.1: level 0 is 0.1, level 15 is still 1, every level is at
+    /// least as bright as the overworld's, and the overworld's table is the one with `AMBIENT`.
+    #[test]
+    fn the_nether_table_has_a_floor_of_a_tenth() {
+        assert!((brightness_in(0, NETHER_AMBIENT) - 0.1).abs() < 1e-6 && (brightness_in(15, NETHER_AMBIENT) - 1.0).abs() < 1e-6);
+        for k in 0..=15u8 {
+            assert_eq!(brightness_in(k, AMBIENT), brightness(k));
+            assert!(brightness_in(k, NETHER_AMBIENT) >= brightness(k), "level {k}");
+            if k > 0 {
+                assert!(brightness_in(k, NETHER_AMBIENT) > brightness_in(k - 1, NETHER_AMBIENT), "level {k}");
+            }
+        }
+    }
 
     /// Same layout as the Java `NibbleArray`: low nibble first, cell index `x << 11 | z << 7 | y`, neighbours untouched.
     #[test]

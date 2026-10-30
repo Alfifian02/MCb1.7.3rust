@@ -25,7 +25,9 @@ use crate::world::ticks::{Falling, MAX_FALLING};
 const MAX_BOATS: usize = 16;
 /// Carts drawn at once (floor, four walls and the furnace: 6 boxes each); the pack's cloth and all that lies on it are `pack::BOXES` more.
 const MAX_CARTS: usize = 16;
-const BOXES: usize = MAX_ITEMS * 4 + MAX_MOBS * 12 + MAX_ARROWS + MAX_FIREBALLS + MAX_FALLING + MAX_PARTICLES + MAX_BOLTS + MAX_BOATS * 5 + MAX_CARTS * 6 + pack::BOXES + 1;
+/// Spawner cages drawn at once (one mob of at most 12 boxes each).
+const MAX_SPAWNERS: usize = 16;
+const BOXES: usize = MAX_ITEMS * 4 + MAX_MOBS * 12 + MAX_SPAWNERS * 12 + MAX_ARROWS + MAX_FIREBALLS + MAX_FALLING + MAX_PARTICLES + MAX_BOLTS + MAX_BOATS * 5 + MAX_CARTS * 6 + pack::BOXES + 1;
 /// Paintings (16 px pieces, one face each), signs (a board and a post of 6 two-sided faces) and the sign text (one quad per run
 /// of lit font pixels), on top of the boxes.
 const MAX_SIGNS: usize = 32;
@@ -129,6 +131,13 @@ fn geometry(drops: &Drops, mobs: &Mobs, falling: &[Falling], fx: &Effects, lv: &
         if m.hurt > 0 || m.death > 0 {
             redden(&mut verts, n0);
         }
+    }
+    // `TileEntityMobSpawnerRenderer`: the spawner's mob turning in its cage, lit by the cell of the block. ponytail: the first `MAX_SPAWNERS` in sight
+    // (hash order, so past 16 in view some would flicker; a dungeon room has one).
+    for (&(x, y, z), s) in fx.spawners.iter().filter(|(p, _)| seen(Vec3::new(p.0 as f32 + 0.5, p.1 as f32 + 0.5, p.2 as f32 + 0.5), 2.0)).take(MAX_SPAWNERS) {
+        let n0 = verts.len();
+        spawner_cage(&mut verts, &mut idxs, crate::world::effects::dungeon_kind(s.kind), (x, y, z), s.spin(a));
+        lit(&mut verts, n0, lv, Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5));
     }
     // The local player (`RenderPlayer`), only in the third-person view.
     if let Some(p) = player {
@@ -879,6 +888,26 @@ fn push_mob(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, m: &Mob, partial: f32) {
     }
 }
 
+/// `TileEntityMobSpawnerRenderer.renderTileEntityMobSpawner`: a fresh mob of `kind` (feet at the origin, yaw 0, limbs at rest) drawn with the
+/// transform `translate(x + 0.5, y, z + 0.5); translate(0, 0.4, 0); rotate(spin, Y); rotate(-30, X); translate(0, -0.4, 0); scale(7/16)`,
+/// so it tilts and turns about a point 0.4 above the block's floor. `spin` is `Spawner::spin` in degrees.
+fn spawner_cage(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, kind: Kind, (x, y, z): (i32, i32, i32), spin: f32) {
+    let mut m = Mob::new(kind, 0.0, 0.0, 0.0, 0.0, &mut crate::world::gen::noise::JavaRandom::new(0));
+    m.body.pos.y -= 0.01; // `Mob::new` rests the box 0.01 above the feet; the Java entity stands exactly on the origin.
+    let n0 = verts.len();
+    push_mob(verts, idxs, &m, 0.0);
+    let cage = Mat4::from_translation(Vec3::new(x as f32 + 0.5, y as f32, z as f32 + 0.5))
+        * Mat4::from_translation(Vec3::new(0.0, 0.4, 0.0))
+        * Mat4::from_rotation_y(spin.to_radians())
+        * Mat4::from_rotation_x((-30.0f32).to_radians())
+        * Mat4::from_translation(Vec3::new(0.0, -0.4, 0.0))
+        * Mat4::from_scale(Vec3::splat(7.0 / 16.0));
+    for v in verts[n0..].chunks_exact_mut(VF) {
+        let w = cage.transform_point3(Vec3::new(v[0], v[1], v[2]));
+        v[..3].copy_from_slice(&w.to_array());
+    }
+}
+
 /// One pass of `push_mob`: `model` posed for `m` and drawn from skin `slot` (flat white for a `flash`).
 fn draw_parts(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, m: &Mob, root: &Mat4, model: &[Part], slot: u8, tint: f32, flash: bool, dip: Option<(f32, f32)>) {
     // `ModelBase.setRotationAngles` for the head: turned by how far the head (`yaw`) is from the body (`body_yaw`, at most 75 degrees) and
@@ -914,6 +943,21 @@ fn draw_parts(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, m: &Mob, root: &Mat4, m
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A spawner's mob stays inside the block's neighbourhood at any turn and is drawn at all (the cage is 7/16 of the mob, tilted 30 degrees).
+    #[test]
+    fn a_spawner_cage_stays_by_its_block() {
+        for kind in [Zombie, Skeleton, Spider] {
+            for spin in [0.0, 90.0, 123.0, 1800.0] {
+                let (mut v, mut i) = (Vec::new(), Vec::new());
+                spawner_cage(&mut v, &mut i, kind, (10, 40, -5), spin);
+                assert!(!i.is_empty(), "{kind:?} drew nothing");
+                for p in v.chunks_exact(VF) {
+                    assert!((p[0] - 10.5).abs() < 1.0 && p[1] > 39.5 && p[1] < 41.5 && (p[2] + 4.5).abs() < 1.0, "{kind:?} at {spin}: {:?}", &p[..3]);
+                }
+            }
+        }
+    }
 
     /// NOT b1.7.3: a head that is up is not dipped; with it down the nose rests on the ground (model y `GROUND`), never through it.
     #[test]

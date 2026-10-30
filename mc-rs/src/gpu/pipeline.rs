@@ -203,10 +203,11 @@ fn fog_factor(d: f32) -> f32 {
     return 1.0 - (1.0 - lin) * exp(-k * k);
 }
 
-// `World.lightBrightnessTable`; `sky` and `blk` are light levels / 15, `u.eye.w` the sky light the time of day takes away.
+// `World.lightBrightnessTable`; `sky` and `blk` are light levels / 15, `u.eye.w` the sky light the time of day takes away, `u.fx.w` how far the
+// dimension raises the table's floor above 0.05 (0 in the overworld, 0.05 in the Nether: `WorldProviderHell`, floor 0.1).
 fn brightness(sky: f32, blk: f32) -> f32 {
     let l = max(max(sky - u.eye.w, 0.0), blk);
-    return (l / (4.0 - 3.0 * l)) * 0.95 + 0.05;
+    return (l / (4.0 - 3.0 * l)) * (0.95 - u.fx.w) + 0.05 + u.fx.w;
 }
 
 // A lightning bolt's light (`u.bolt`, `Effects::light`): a floor everywhere (a flash lights the whole land) and a falloff to 96 blocks round the strike,
@@ -736,6 +737,13 @@ pub fn create_index_buffer(device: &Device, idx: &[u32]) -> Buffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every light the chunk shader reads goes through the one `brightness`, which reads the Nether's raised floor from `u.fx.w`.
+    #[test]
+    fn the_shader_brightness_reads_the_dimension_floor() {
+        assert!(SHADER_SRC.contains("(l / (4.0 - 3.0 * l)) * (0.95 - u.fx.w) + 0.05 + u.fx.w"));
+        assert!(!SHADER_SRC.contains("* 0.95 + 0.05;"));
+    }
 
     /// The shader parses and validates, every entry point is there, and the atlas is read through `atlas_sample_g` only (tile-clamped, no bleed).
     #[test]

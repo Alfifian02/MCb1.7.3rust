@@ -63,7 +63,7 @@ float fog_factor(float d) {
 // World.lightBrightnessTable; sky and blk are light levels / 15, eye.w the sky light the time of day takes away.
 float brightness(float sky, float blk) {
     float l = max(max(sky - eye.w, 0.0), blk);
-    return (l / (4.0 - 3.0 * l)) * 0.95 + 0.05;
+    return (l / (4.0 - 3.0 * l)) * (0.95 - fx.w) + 0.05 + fx.w; // `fx.w`: the Nether raises the floor of the table to 0.1 (0 in the overworld)
 }
 // A lightning bolt's light (`bolt`, see `bolt_lit` in gpu/pipeline.rs, line for line).
 float bolt_lit(float lit, vec3 wp, float shade) {

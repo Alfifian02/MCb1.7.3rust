@@ -149,10 +149,11 @@ impl Renderer {
         let gl = Gl::new(window)?;
         let weak = present::weak_gpu(&gl.name);
         let samples = present::resolve(present::msaa_want(), weak, |n| n as i32 <= gl.max_samples);
-        let fast = present::resolve_post(present::post_want(), weak);
+        let (fxaa, fast) = present::resolve_final(present::fxaa_want(), present::post_want(), weak, samples);
         present::set_scene_samples(samples);
         present::set_fast_post(fast);
-        log::info!("GLES init: scene MSAA x{samples}, final pass {}", if fast { "fast (no FXAA/CAS)" } else { "full" });
+        present::set_fxaa(fxaa);
+        log::info!("GLES init: scene MSAA x{samples}, final pass {}, FXAA {fxaa}", if fast { "fast (no FXAA/CAS)" } else { "full" });
         let a2c = samples > 1;
         let mut chunk = Vec::new();
         for c in Chunk::ALL {
@@ -160,7 +161,7 @@ impl Renderer {
             chunk.push((c, gl.program(&s.vs, &s.fs, &["u_tex", "u_origin"]).map_err(|e| format!("{c:?}: {e}"))?));
         }
         let mk = |s: shaders::Src, u: &[&str], what: &str| gl.program(&s.vs, &s.fs, u).map_err(|e| format!("{what}: {e}"));
-        let present = mk(shaders::present(samples == 1, fast), &["u_src", "u_px", "u_grade"], "present")?;
+        let present = mk(shaders::present(fxaa, fast), &["u_src", "u_px", "u_grade"], "present")?;
         let hud = mk(shaders::hud(hud::SHEET_H), &["u_items", "u_size"], "hud")?;
         let pano = mk(shaders::panorama(), &["u_tex", "u_m", "u_t"], "panorama")?;
         let dome = mk(shaders::sky_dome(), &[], "sky dome")?;
