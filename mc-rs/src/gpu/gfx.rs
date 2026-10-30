@@ -70,14 +70,6 @@ impl Gfx<'_> {
             Gfx::Gl(g) => g.write(b.gl(), offset, bytes),
         }
     }
-
-    /// Rewrites a per-frame buffer of `size` bytes from its start (GL orphans the store first).
-    pub fn stream(&self, b: &Buf, size: u64, bytes: &[u8]) {
-        match self {
-            Gfx::Wgpu(_, q) => q.write_buffer(b.wgpu(), 0, bytes),
-            Gfx::Gl(g) => g.stream(b.gl(), size as usize, bytes),
-        }
-    }
 }
 
 /// Everything one world frame draws, whichever renderer draws it (`App::render_frame` builds it, `Wg::draw_world` / `gles::renderer::Renderer::draw_world`

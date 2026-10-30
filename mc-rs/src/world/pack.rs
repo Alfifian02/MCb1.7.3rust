@@ -427,6 +427,7 @@ impl Mat {
 pub const REST: f32 = 0.052;
 /// The plane a finger is taken to touch: between the flat sprites (`REST`) and the tops of the little cubes, so a tap on what is
 /// seen lands within about 2 units of it from the framing pose.
+#[cfg(test)]
 pub const HIT_H: f32 = 0.09;
 /// How high a stack held on the cursor floats (blocks), and how far above the finger (units) it hangs so the finger does not hide it.
 pub const LIFT: f32 = 0.12;

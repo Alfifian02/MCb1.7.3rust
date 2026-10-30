@@ -1,0 +1,119 @@
+diff -ruN a/mc-rs/src/gpu/context.rs b/mc-rs/src/gpu/context.rs
+--- a/mc-rs/src/gpu/context.rs
++++ b/mc-rs/src/gpu/context.rs
+@@ -52,6 +52,7 @@
+ /// final pass upscales (bilinear + CAS). 1.0 = native. Low-end phones (Mali-G52 class) are fill-rate bound: 0.67 is 2.2x fewer pixels.
+ /// This is where it starts (and stays while Dynamic Res is off); `Drs` moves it.
+ pub const START_PCT: u32 = 67;
++#[cfg(test)]
+ pub const RENDER_SCALE: f32 = START_PCT as f32 / 100.0;
+ pub const SCALE_MIN: u32 = 50;
+ pub const SCALE_MAX: u32 = 100;
+@@ -341,6 +342,8 @@
+ }
+ 
+ pub struct Gpu {
++    /// Never read: held so the `Instance` lives as long as the `Surface` and the `Device` made from it.
++    #[allow(dead_code)]
+     pub instance: Instance,
+     pub surface: Surface<'static>,
+     pub adapter: Adapter,
+diff -ruN a/mc-rs/src/gpu/gfx.rs b/mc-rs/src/gpu/gfx.rs
+--- a/mc-rs/src/gpu/gfx.rs
++++ b/mc-rs/src/gpu/gfx.rs
+@@ -70,14 +70,6 @@
+             Gfx::Gl(g) => g.write(b.gl(), offset, bytes),
+         }
+     }
+-
+-    /// Rewrites a per-frame buffer of `size` bytes from its start (GL orphans the store first).
+-    pub fn stream(&self, b: &Buf, size: u64, bytes: &[u8]) {
+-        match self {
+-            Gfx::Wgpu(_, q) => q.write_buffer(b.wgpu(), 0, bytes),
+-            Gfx::Gl(g) => g.stream(b.gl(), size as usize, bytes),
+-        }
+-    }
+ }
+ 
+ /// Everything one world frame draws, whichever renderer draws it (`App::render_frame` builds it, `Wg::draw_world` / `gles::renderer::Renderer::draw_world`
+diff -ruN a/mc-rs/src/gpu/pipeline.rs b/mc-rs/src/gpu/pipeline.rs
+--- a/mc-rs/src/gpu/pipeline.rs
++++ b/mc-rs/src/gpu/pipeline.rs
+@@ -718,6 +718,8 @@
+     }
+ }
+ 
++// Kept for `world::far::build` (the far tiles are not drawn by any renderer yet) and the shadow test.
++#[allow(dead_code)]
+ pub fn create_vertex_buffer(device: &Device, verts: &[Vertex]) -> Buffer {
+     device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+         label: Some("chunk_vbuf"),
+@@ -726,6 +728,7 @@
+     })
+ }
+ 
++#[allow(dead_code)]
+ pub fn create_index_buffer(device: &Device, idx: &[u32]) -> Buffer {
+     device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+         label: Some("chunk_ibuf"),
+diff -ruN a/mc-rs/src/input/gamepad.rs b/mc-rs/src/input/gamepad.rs
+--- a/mc-rs/src/input/gamepad.rs
++++ b/mc-rs/src/input/gamepad.rs
+@@ -541,10 +541,6 @@
+         }
+     }
+ 
+-    pub fn wheel_open(&self) -> bool {
+-        self.wheel_open
+-    }
+-
+     /// The touch buttons (everything of the HUD but the hotbar) are not drawn: a pad, keyboard or mouse is in hand. They still answer a finger.
+     pub fn hud_hidden(&self) -> bool {
+         self.active() || self.kbm
+diff -ruN a/mc-rs/src/input/touch_ui.rs b/mc-rs/src/input/touch_ui.rs
+--- a/mc-rs/src/input/touch_ui.rs
++++ b/mc-rs/src/input/touch_ui.rs
+@@ -90,7 +90,6 @@
+ /// Screen-space layout (pixels, top-left origin).
+ #[derive(Clone, Debug)]
+ pub struct LayoutRects {
+-    pub width: f32,
+     pub pause: Rect,
+     pub inventory: Rect,
+     /// Hold to zoom (Zoomify), left of `inventory`.
+@@ -147,7 +146,7 @@
+         let jw = 0.16 * u;
+         let jump = (w - pad * 1.5 - jw, cy - jw * 0.5, jw, jw);
+ 
+-        Self { width: w, pause, inventory, zoom, view, hotbar, jump, sneak: cell(0.0, 0.0), dpad, dpad_gap }
++        Self { pause, inventory, zoom, view, hotbar, jump, sneak: cell(0.0, 0.0), dpad, dpad_gap }
+     }
+ 
+     /// Hit-test a press. `None` means the press is ignored. The pause button always answers; while paused everything else is a tap on
+diff -ruN a/mc-rs/src/satchel.rs b/mc-rs/src/satchel.rs
+--- a/mc-rs/src/satchel.rs
++++ b/mc-rs/src/satchel.rs
+@@ -471,12 +471,10 @@
+ 
+ const WHITE: [f32; 4] = [1.0; 4];
+ const INK: [f32; 4] = [0.22, 0.15, 0.08, 1.0];
+-const CREAM: [f32; 4] = [0.96, 0.9, 0.72, 1.0];
+ const GOOD: [f32; 4] = [0.25, 0.6, 0.2, 1.0];
+ const BAD: [f32; 4] = [0.75, 0.2, 0.15, 1.0];
+ const WARN: [f32; 4] = [0.85, 0.5, 0.1, 1.0];
+ const MUTE: [f32; 4] = [0.55, 0.47, 0.34, 1.0];
+-const GOLD: [f32; 4] = [0.9, 0.76, 0.38, 1.0];
+ const SELECTED: [f32; 4] = [0.95, 0.85, 0.1, 1.0];
+ /// Ink on the brown cover.
+ const COVER_INK: [f32; 4] = [0.91, 0.85, 0.64, 1.0];
+diff -ruN a/mc-rs/src/world/pack.rs b/mc-rs/src/world/pack.rs
+--- a/mc-rs/src/world/pack.rs
++++ b/mc-rs/src/world/pack.rs
+@@ -427,6 +427,7 @@
+ pub const REST: f32 = 0.052;
+ /// The plane a finger is taken to touch: between the flat sprites (`REST`) and the tops of the little cubes, so a tap on what is
+ /// seen lands within about 2 units of it from the framing pose.
++#[cfg(test)]
+ pub const HIT_H: f32 = 0.09;
+ /// How high a stack held on the cursor floats (blocks), and how far above the finger (units) it hangs so the finger does not hide it.
+ pub const LIFT: f32 = 0.12;

@@ -471,12 +471,10 @@ use crate::render::hud::sprites::sat as art;
 
 const WHITE: [f32; 4] = [1.0; 4];
 const INK: [f32; 4] = [0.22, 0.15, 0.08, 1.0];
-const CREAM: [f32; 4] = [0.96, 0.9, 0.72, 1.0];
 const GOOD: [f32; 4] = [0.25, 0.6, 0.2, 1.0];
 const BAD: [f32; 4] = [0.75, 0.2, 0.15, 1.0];
 const WARN: [f32; 4] = [0.85, 0.5, 0.1, 1.0];
 const MUTE: [f32; 4] = [0.55, 0.47, 0.34, 1.0];
-const GOLD: [f32; 4] = [0.9, 0.76, 0.38, 1.0];
 const SELECTED: [f32; 4] = [0.95, 0.85, 0.1, 1.0];
 /// Ink on the brown cover.
 const COVER_INK: [f32; 4] = [0.91, 0.85, 0.64, 1.0];

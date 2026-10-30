@@ -90,7 +90,6 @@ pub struct Pointer {
 /// Screen-space layout (pixels, top-left origin).
 #[derive(Clone, Debug)]
 pub struct LayoutRects {
-    pub width: f32,
     pub pause: Rect,
     pub inventory: Rect,
     /// Hold to zoom (Zoomify), left of `inventory`.
@@ -147,7 +146,7 @@ impl LayoutRects {
         let jw = 0.16 * u;
         let jump = (w - pad * 1.5 - jw, cy - jw * 0.5, jw, jw);
 
-        Self { width: w, pause, inventory, zoom, view, hotbar, jump, sneak: cell(0.0, 0.0), dpad, dpad_gap }
+        Self { pause, inventory, zoom, view, hotbar, jump, sneak: cell(0.0, 0.0), dpad, dpad_gap }
     }
 
     /// Hit-test a press. `None` means the press is ignored. The pause button always answers; while paused everything else is a tap on

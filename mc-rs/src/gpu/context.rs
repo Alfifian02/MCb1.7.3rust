@@ -52,6 +52,7 @@ impl HasWindowHandle for AndroidWindow {
 /// final pass upscales (bilinear + CAS). 1.0 = native. Low-end phones (Mali-G52 class) are fill-rate bound: 0.67 is 2.2x fewer pixels.
 /// This is where it starts (and stays while Dynamic Res is off); `Drs` moves it.
 pub const START_PCT: u32 = 67;
+#[cfg(test)]
 pub const RENDER_SCALE: f32 = START_PCT as f32 / 100.0;
 pub const SCALE_MIN: u32 = 50;
 pub const SCALE_MAX: u32 = 100;
@@ -341,6 +342,8 @@ mod trace_tests {
 }
 
 pub struct Gpu {
+    /// Never read: held so the `Instance` lives as long as the `Surface` and the `Device` made from it.
+    #[allow(dead_code)]
     pub instance: Instance,
     pub surface: Surface<'static>,
     pub adapter: Adapter,

@@ -541,10 +541,6 @@ impl Pad {
         }
     }
 
-    pub fn wheel_open(&self) -> bool {
-        self.wheel_open
-    }
-
     /// The touch buttons (everything of the HUD but the hotbar) are not drawn: a pad, keyboard or mouse is in hand. They still answer a finger.
     pub fn hud_hidden(&self) -> bool {
         self.active() || self.kbm
