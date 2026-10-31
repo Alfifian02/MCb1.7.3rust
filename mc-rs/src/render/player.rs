@@ -248,9 +248,12 @@ fn push_held(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, hand: &Mat4, s: ItemStac
     let m = if is_block3d(s.id) {
         let k = 0.5 * 0.75;
         *hand * Mat4::from_translation(Vec3::new(0.0, 3.0, -5.0)) * rx(20.0) * Mat4::from_rotation_y(45.0_f32.to_radians()) * Mat4::from_scale(Vec3::new(k, -k, k))
-    } else if craft::tool(s.id).is_some() || matches!(s.id, 280 | 352 | 353) || s.id == crate::world::gear::ROD {
+    } else if craft::tool(s.id).is_some() || crate::world::combat::catalog::get(s.id).is_some() || matches!(s.id, 280 | 352 | 353) || s.id == crate::world::gear::ROD {
         let k = 10.0 / 16.0;
-        let spin = if matches!(craft::tool(s.id), Some((Kind::Sword, _))) || s.id == crate::world::gear::ROD { Mat4::from_rotation_z(PI) * Mat4::from_translation(Vec3::new(0.0, -2.0, 0.0)) } else { Mat4::IDENTITY };
+        // C6: dagger, ropera and shotel are drawn like the sword (blade up and to the right in the sprite); alabarda and war hammer like the pickaxe. UNVERIFIED by eye.
+        use crate::world::combat::catalog::Family;
+        let blade = matches!(crate::world::combat::catalog::get(s.id), Some((Family::Daga | Family::Ropera | Family::Shotel, _)));
+        let spin = if matches!(craft::tool(s.id), Some((Kind::Sword, _))) || blade || s.id == crate::world::gear::ROD { Mat4::from_rotation_z(PI) * Mat4::from_translation(Vec3::new(0.0, -2.0, 0.0)) } else { Mat4::IDENTITY };
         *hand * spin * Mat4::from_translation(Vec3::new(0.0, 3.0, 0.0)) * Mat4::from_scale(Vec3::new(k, -k, k)) * rx(-100.0) * Mat4::from_rotation_y(45.0_f32.to_radians())
     } else {
         *hand * Mat4::from_translation(Vec3::new(4.0, 3.0, -3.0)) * Mat4::from_scale(Vec3::splat(6.0 / 16.0)) * Mat4::from_rotation_z(60.0_f32.to_radians()) * rx(-90.0) * Mat4::from_rotation_z(20.0_f32.to_radians())

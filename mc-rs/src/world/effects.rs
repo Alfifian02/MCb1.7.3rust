@@ -94,6 +94,9 @@ pub enum Fx {
     /// A leaf or a twig adrift on a stream's current.
     Leaf,
     Twig,
+    /// Cortes Combat C7 (NOT b1.7.3): a speck of a weapon's slash (white) and of a full charge's burst (gold).
+    Slash,
+    Crit,
 }
 
 #[derive(Clone)]
@@ -165,6 +168,12 @@ impl Particle {
         Self { kind: Fx::Heart, pos, prev: pos, vel, max: 16, half: 0.05 * scale(r) * 0.75 * 2.0 }
     }
 
+    /// C7: a speck of a slash (`SlashTiming.STRIP_TICKS` long, nearly still) or of a crit burst (`vel` as given, a few ticks longer, falls a little).
+    fn spark(r: &mut JavaRandom, kind: Fx, pos: Vec3, vel: Vec3) -> Self {
+        let (max, half) = if kind == Fx::Slash { (crate::world::combat::fx::SLASH_TICKS, 0.1) } else { (8 + r.next_int_bound(8) as u16, 0.05 + r.next_float() * 0.04) };
+        Self { kind, pos, prev: pos, vel, max, half }
+    }
+
     /// One 20 Hz `onUpdate`; false when the particle is gone.
     fn tick(&mut self, get: BlockQuery<'_>, r: &mut JavaRandom) -> bool {
         self.prev = self.pos;
@@ -229,6 +238,13 @@ impl Particle {
                 self.vel.y += 0.004;
                 self.pos += self.vel;
                 self.vel *= 0.96;
+            }
+            Fx::Slash | Fx::Crit => {
+                if self.kind == Fx::Crit {
+                    self.vel.y -= 0.015;
+                }
+                self.pos += self.vel;
+                self.vel *= 0.8;
             }
         }
         if self.max == 0 {
@@ -404,6 +420,32 @@ impl Effects {
                 };
                 self.add(p);
             }
+        }
+    }
+
+    /// Cortes Combat C7 (NOT b1.7.3, UNVERIFIED): a slash or a sweep's mark, one speck on each of `points` (`combat::fx::{slash,sweep}_points`).
+    /// ponytail: capped at 3000 live particles like `dig`; the mod's 5-frame sprite strip is not drawn.
+    pub fn slash(&mut self, points: &[Vec3]) {
+        if self.particles.len() > 3000 {
+            return;
+        }
+        for &p in points {
+            let v = Vec3::new(jitter(&mut self.rng, 0.01), 0.0, jitter(&mut self.rng, 0.01));
+            let s = Particle::spark(&mut self.rng, Fx::Slash, p, v);
+            self.particles.push(s);
+        }
+    }
+
+    /// C7 (`SlashParticles.burst`): 30 gold specks over a mob's box, thrown a little outward. `half` = half the box's size.
+    pub fn crit(&mut self, centre: Vec3, half: Vec3) {
+        if self.particles.len() > 3000 {
+            return;
+        }
+        let spread = half.max(Vec3::new(0.2, 0.3, 0.2));
+        for _ in 0..crate::world::combat::fx::CRIT_SPECKS {
+            let o = Vec3::new(jitter(&mut self.rng, spread.x), jitter(&mut self.rng, spread.y * 0.7), jitter(&mut self.rng, spread.z));
+            let s = Particle::spark(&mut self.rng, Fx::Crit, centre + o, o.normalize_or_zero() * 0.12 + Vec3::Y * 0.04);
+            self.particles.push(s);
         }
     }
 

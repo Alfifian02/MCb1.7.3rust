@@ -11,6 +11,9 @@
 //! * `guard`   - C4: the sword's guard (points, arc, stagger) and the block. UNVERIFIED: not compiled.
 //! * `survival` - C4: the healing food bar.
 //! * `special` - C5: the right button: lunge, sweep, parry and the hammer's streak. UNVERIFIED: not compiled.
+//! * `tooltip` - C6: the coloured lines under a weapon's name (category, damage, speed, reach, special, durability). UNVERIFIED: not compiled.
+//! * `fx`      - C7: the camera shake table (`Rig`) and the geometry of the slash and the sweep. UNVERIFIED: not compiled.
+//! * `sound`   - C7: which recording each moment of a weapon plays, at what pitch. UNVERIFIED: not compiled.
 //! * `rules`   - C2: the world rule and the swing of whatever is held (cone, cooldown, damage); C3: `charged`, the multiplier of a held-then-released blow. UNVERIFIED: not compiled.
 //!
 //! **Exclusive to the Immersive Pack.** Every feature from Cortes Combat is on only in a world created with the Immersive
@@ -20,8 +23,11 @@
 
 pub mod catalog;
 pub mod cone;
+pub mod fx;
 pub mod guard;
 pub mod profile;
 pub mod rules;
+pub mod sound;
 pub mod special;
 pub mod survival;
+pub mod tooltip;

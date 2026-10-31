@@ -631,10 +631,12 @@ pub fn draw(v: &mut Vec<HudVertex>, (w, h): (f32, f32), sat: &Satchel, c: &Ctx) 
             Pick::Row(i) => book::entries().get(i).map(|e| e.out).filter(|_| !c.discovery || c.notes.known(&book::entries()[i])),
             _ => None,
         };
-        if let Some(name) = c.screen.cursor.or_else(under).and_then(items::name) {
-            let bw = (HudPipeline::text_width(name) as f32 + 6.0) * tk;
-            let ty = if fy > 36.0 * tk { fy - 34.0 * tk } else { fy + 14.0 * tk };
-            HudPipeline::push_tooltip(v, (fx - bw * 0.5).clamp(0.0, (w - bw).max(0.0)), ty, tk, name);
+        if let Some((st, name)) = c.screen.cursor.or_else(under).and_then(|st| items::name(st).map(|n| (st, n))) {
+            let lines = crate::world::combat::tooltip::lines(st); // C6
+            let (bw, bh) = HudPipeline::tooltip_size(name, &lines);
+            let (bw, extra) = (bw * tk, (bh - 14.0) * tk);
+            let ty = if fy > 36.0 * tk + extra { fy - 34.0 * tk - extra } else { fy + 14.0 * tk };
+            HudPipeline::push_tooltip_lines(v, (fx - bw * 0.5).clamp(0.0, (w - bw).max(0.0)), ty, tk, name, &lines);
         }
     }
 }

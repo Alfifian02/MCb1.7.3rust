@@ -231,7 +231,7 @@ fn geometry(drops: &Drops, mobs: &Mobs, falling: &[Falling], fx: &Effects, lv: &
         let (c, h) = (p.prev.lerp(p.pos, a), p.half * 0.5);
         let (tile, light) = match p.kind {
             Fx::Dig(t) => (t, 0.6), // `EntityDiggingFX`: colour x 0.6
-            k => (stack_tile(ItemStack { id: 35, count: 1, damage: match k { Fx::Bubble => 0, Fx::Splash => 3, Fx::Flame => 1, Fx::Heart => 14, Fx::Spray => 0, Fx::Leaf => 13, Fx::Twig => 12, _ => 7 } }), 1.0),
+            k => (stack_tile(ItemStack { id: 35, count: 1, damage: match k { Fx::Bubble => 0, Fx::Splash => 3, Fx::Flame => 1, Fx::Heart => 14, Fx::Spray => 0, Fx::Leaf => 13, Fx::Twig => 12, Fx::Slash => 0, Fx::Crit => 4, _ => 7 } }), 1.0),
         };
         push_box(&mut verts, &mut idxs, [c.x - h, c.y - h, c.z - h], [c.x + h, c.y + h, c.z + h], tile, light);
     }

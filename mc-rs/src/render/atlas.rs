@@ -252,7 +252,7 @@ pub mod skin {
 
 /// `Item.iconIndex` of an item id (256 and up), `None` for blocks and items the Java table does not have.
 pub fn item_icon(id: u16) -> Option<u8> {
-    super::icons::ICONS.binary_search_by_key(&id, |&(i, _)| i).ok().map(|k| super::icons::ICONS[k].1)
+    super::icons::ICONS.binary_search_by_key(&id, |&(i, _)| i).ok().map(|k| super::icons::ICONS[k].1).or_else(|| crate::world::combat::catalog::icon(id)) // C6: the Cortes weapons
 }
 
 /// `BlockDoor.getBlockTextureFromSideAndMetadata`: (tile, mirrored). The Java returns the tile negated for a mirrored face; the top
@@ -466,6 +466,7 @@ mod tests {
         assert_eq!((door_face(64, 1, 2).0, door_face(64, 9, 2).0, door_face(71, 1, 2).0), (97, 81, 98));
         assert_eq!((bed_tile(0, 0), bed_tile(0, 1), bed_tile(8, 1)), (4, 134, 135));
         assert!(super::super::icons::ICONS.windows(2).all(|w| w[0].0 < w[1].0) && item_icon(256) == Some(82) && item_icon(1) == None);
+        assert_eq!((item_icon(400), item_icon(424), item_icon(405)), (Some(208), Some(232), None)); // C6: wooden dagger, golden shotel, no wooden ropera
         assert_eq!(terrain_tile(255, 0, 0), None);
         // Terrain UVs stay inside their own tile and the flat strip stays under the png.
         let (u, v) = terrain_uv(255, 1.0, 0.0);

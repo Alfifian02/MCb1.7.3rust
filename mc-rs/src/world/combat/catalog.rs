@@ -120,6 +120,15 @@ impl Family {
     }
 }
 
+/// C6: first `gui/items.png` tile of the weapons (`tools/gen_combat_icons.py`): the sprite of item `400 + n` is tile `ICON0 + n`.
+/// Tiles 208..=232 are empty in b1.7.3's sheet and in no `icons.rs` row. UNVERIFIED: not seen on a device.
+pub const ICON0: u8 = 208;
+
+/// The `items.png` tile of a weapon, `None` for any other item.
+pub fn icon(id: u16) -> Option<u8> {
+    get(id).map(|_| ICON0 + (id - FIRST_ID) as u8)
+}
+
 /// The item id of a family at a tier, `None` if that combination does not exist.
 pub fn id(f: Family, tier: usize) -> Option<u16> {
     f.exists(tier).then(|| FIRST_ID + f.index() * TIERS as u16 + tier as u16)
@@ -179,6 +188,10 @@ mod tests {
                 assert_eq!(cells.contains(c), item != 0, "{f:?} {t} key {c}");
             }
         }
+        // C6: every weapon has its own tile inside the 25 painted ones; a non-weapon has none
+        assert_eq!(icon(FIRST_ID), Some(ICON0));
+        assert_eq!(icon(id(Family::Shotel, 4).unwrap()), Some(ICON0 + 24));
+        assert_eq!((icon(399), icon(FIRST_ID + 5)), (None, None));
         assert_eq!(get(399), None);
         assert_eq!(get(FIRST_ID + 5), None); // wooden ropera does not exist (family 1, tier 0)
         assert_eq!(get(425), None);

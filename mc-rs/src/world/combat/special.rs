@@ -30,11 +30,11 @@ pub const LUNGE_SPEED: f32 = 18.0;
 const SWEEP_SCALE: f32 = 1.35;
 /// `ParryState`: the window, the lockout from the press, and the walk's factor while the blade is out. The mod applies Slowness amplifier 3
 /// (level IV, -15 % a level = x0.4); its javadoc says "75 % off", which is one level more. The code was followed, not the comment.
-const PARRY_WINDOW: u32 = 12;
-const PARRY_COOLDOWN: u32 = 100;
+pub const PARRY_WINDOW: u32 = 12;
+pub const PARRY_COOLDOWN: u32 = 100;
 const PARRY_SLOW: f32 = 0.4;
 /// `StreakState.WINDOW_TICKS` and `DamageResolver.WARHAMMER_STEP`.
-const STREAK_WINDOW: u32 = 80;
+pub const STREAK_WINDOW: u32 = 80;
 const STREAK_STEP: f32 = 0.15;
 
 /// `LungeDamage.damageFor`: the damage of the `index`-th target (0 = first) a tick of the lunge reaches.

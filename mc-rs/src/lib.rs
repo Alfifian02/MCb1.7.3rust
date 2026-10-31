@@ -234,6 +234,8 @@ struct App {
     cd_rise: bool,
     /// C5 (NOT b1.7.3, UNVERIFIED): the right button's state: the shotel's parry, the ropera's lunge, the martillo's streak.
     sp: world::combat::special::State,
+    /// C7 (NOT b1.7.3, UNVERIFIED): the camera's live shake impulses (`combat::fx::Rig`), composed into `camera.bob` each frame.
+    shake: world::combat::fx::Rig,
     eating: Option<Eating>,
     mat: Option<pack::Mat>,
     mat_ui: bool,
@@ -415,6 +417,7 @@ impl App {
             eating: None,
             cd_rise: false,
             sp: Default::default(),
+            shake: Default::default(),
             mat: None,
             mat_ui: false,
             pack_saved: None,
@@ -549,6 +552,7 @@ impl App {
         world::combat::rules::set(info.pack); // Cortes Combat lives only in an Immersive Pack world
         (self.swing_cd, self.charge, self.eating, self.cd_rise) = (0, 0, None, false);
         self.sp = Default::default();
+        self.shake.clear();
         // The world resumes in the dimension it was left in (`<world>/dim`).
         self.nether = std::fs::read_to_string(self.dir.join("dim")).is_ok_and(|s| s.trim() == "nether");
         if self.nether {
@@ -1060,6 +1064,9 @@ impl App {
                     // C5: a lunge cannot be hurt (`LungeImmunity`), a parry turns the hit back (`ParryHandler`), then the guard.
                     if d > 0 && self.sp.lunge.is_none() && !self.parried(d, from) && !self.guarded(from) {
                         self.vitals.hurt(d);
+                        if world::combat::rules::on() {
+                            self.shake.add(world::combat::fx::Kind::Hurt, self.player.pos); // C7 (`HurtShake`)
+                        }
                     }
                 }
                 Ev::Boom(p) => self.explode(p, 3.0, false),
@@ -1581,7 +1588,8 @@ impl App {
                 let (dmg, wear) = mobs::attack(held_id);
                 // C3: the charged blow. C5: a live hammer streak adds 0.15 a hit to the multiplier (`DamageResolver`), counted before this blow.
                 let hammer = swing.is_some_and(|s| s.profile == world::combat::profile::Profile::Warhammer);
-                let dmg = dmg * (std::mem::replace(&mut self.blow, 1.0) + if hammer { self.sp.streak_bonus() } else { 0.0 });
+                let blow = std::mem::replace(&mut self.blow, 1.0);
+                let dmg = dmg * (blow + if hammer { self.sp.streak_bonus() } else { 0.0 });
                 // Retro Sprint (`PlayerEntityMixin.onAttack`): a sprinting hit shoves the target the way the player looks, before the hit's own
                 // knockback, and ends the sprint (the walk is set from the input every frame, so the mod's x0.6 on the player's motion has no use here).
                 if self.sprint.attack() {
@@ -1592,6 +1600,8 @@ impl App {
                 if let Some(s) = swing {
                     self.swing_cd = s.interval;
                     self.mobs.strike(i, dmg, self.player.pos); // the weapon's own 3-tick damage window
+                    let full = { let c = s.profile.charge(); c.ticks > 0 && blow >= 1.0 + c.bonus - 1e-4 }; // C7: a full charge (`chargeRatio >= FULL_CHARGE`)
+                    self.hit_fx(i, s.profile, blow > 1.0, full, 1.0, true);
                 } else {
                     self.mobs.hit(i, dmg, self.player.pos);
                 }
@@ -1601,6 +1611,11 @@ impl App {
                 self.vitals.stamina.hit(); // Stamina: a hit dealt puts the player in combat for 15 s (ponytail: also one the mob's damage window ignored)
                 self.inv.damage(slot, wear);
                 return;
+            }
+            // C7 (`CombatEngine.playMiss`): a swing of a weapon or tool that found nothing in its cone. ponytail: the hoe stays quiet, a tap on soil tills
+            // it and the mod's right button does that, so a swish there would be a lie; and the cooldown is still only paid by a hit (C2).
+            if let Some(s) = swing.filter(|s| held_id.is_some() && s.profile != world::combat::profile::Profile::Hoe && !self.swing_blocked(held_id)) {
+                self.cue(s.profile, world::combat::sound::Kind::Miss, 1.0, None);
             }
         }
         // A tap on a painting nearer than the block behind it breaks it (`EntityPainting.attackEntityFrom`: it drops as an item).
@@ -1955,8 +1970,11 @@ impl App {
         let (gp, me, f) = (self.held_guard(), self.player.pos, self.camera.forward());
         let Some(broke) = self.vitals.guard.block(gp, glam::Vec3::new(f.x, 0.0, f.z), me, glam::Vec3::new(from.x, me.y, from.z)) else { return false };
         self.vitals.stamina.hit();
+        // C7: `GuardHandler` shakes the view, a bigger one for the point that broke the guard, which also has its sound.
+        self.shake.add(if broke { world::combat::fx::Kind::GuardBreak } else { world::combat::fx::Kind::Guarded }, me);
         if broke {
             self.charge = 0;
+            self.cue(world::combat::profile::Profile::Sword, world::combat::sound::Kind::GuardBroken, 1.0, None);
         }
         true
     }
@@ -2045,8 +2063,13 @@ impl App {
                 // Everything in the wider arc, the weapon's flat damage, no charge. ponytail: the knockback is `strike`'s own, not the sweep's 0.8 share.
                 let hit = self.mobs.cone_n(eye, fwd, special::sweep_reach(s.reach), wall, 0);
                 let (dmg, _) = mobs::attack(held_id);
+                // C7 (`SpecialHandler`): the sweep's sound and mark play whether or not it connects; each mob struck gets a slash and no sound of its own.
+                self.cue(s.profile, world::combat::sound::Kind::Special, 1.0, None);
+                let reach = special::sweep_reach(s.reach);
+                self.fx.slash(&world::combat::fx::sweep_points(eye, fwd, reach.dist, reach.h));
                 for &i in &hit {
                     self.mobs.strike(i, dmg, self.player.pos);
+                    self.hit_fx(i, s.profile, false, false, 1.0, false);
                 }
                 if !hit.is_empty() {
                     self.vitals.stamina.hit();
@@ -2061,6 +2084,7 @@ impl App {
                 let tier = held_id.and_then(world::combat::catalog::get).map_or(0, |(_, t)| t);
                 (self.swing_cd, self.charge) = (special::lunge_cost(s.interval), 0);
                 self.body.swing();
+                self.cue(s.profile, world::combat::sound::Kind::Lunge, 1.0, None); // C7
                 let p = self.player.pos;
                 self.sp.lunge = Some(special::Lunge { dir, start: p, last: p, dist: special::lunge_distance(tier), left: special::LUNGE_WINDOW, done: Vec::new(), ticks: 0 });
             }
@@ -2086,6 +2110,7 @@ impl App {
         let (dmg, _) = mobs::attack(held_id);
         for (k, &i) in fresh.iter().enumerate() {
             self.mobs.strike(i, special::lunge_damage(dmg, k), p);
+            self.hit_fx(i, s.profile, false, false, 1.0 - k as f32 * 0.06, true); // C7: each target a sixth of a tone below the last (`LungeDamage` index)
             l.done.push(i);
         }
         if !fresh.is_empty() {
@@ -2103,7 +2128,46 @@ impl App {
         }
         self.mobs.reflect(from, d as f32, self.player.pos);
         self.vitals.stamina.hit();
+        // C7 (`ParryHandler`): the parry's sound at the attacker and a shake of the view.
+        self.cue(world::combat::profile::Profile::Sabre, world::combat::sound::Kind::Parry, 1.0, Some(from));
+        self.shake.add(world::combat::fx::Kind::Parry, from);
         true
+    }
+
+    /// C7 (`CombatSounds.play`, NOT b1.7.3, UNVERIFIED): the cue of `kind` for `profile` (`combat::sound::of`; none is silent), at `at` or, with
+    /// `None`, at the player's ears. `scale` multiplies the pitch (the lunge's falling series).
+    fn cue(&mut self, profile: world::combat::profile::Profile, kind: world::combat::sound::Kind, scale: f32, at: Option<glam::Vec3>) {
+        use world::combat::sound;
+        let Some(c) = sound::of(profile, kind) else { return };
+        let (vol, pitch) = (if kind == sound::Kind::Charge { sound::CHARGE_VOLUME } else { 1.0 }, (c.pitch * scale).clamp(sound::MIN_PITCH, sound::MAX_PITCH));
+        match at {
+            Some(p) => self.audio.play(c.name, p, vol, pitch),
+            None => self.audio.play_here(c.name, vol, pitch),
+        }
+    }
+
+    /// C7: what a blow that landed on mob `i` shows (`CombatEngine.spawnSlash`, `onKill`): a slash at the contact point (a burst of gold specks for a
+    /// charged one), the hit's sound (`sound` false for a sweep's, which has its own), and the view's shake for a kill or a full charge. Called
+    /// after the damage, so a mob at 0 health was killed by this blow (it cannot have been in the cone before).
+    fn hit_fx(&mut self, i: usize, profile: world::combat::profile::Profile, charged: bool, full: bool, scale: f32, sound: bool) {
+        use world::combat::{fx, sound::Kind};
+        let (lo, hi) = self.mobs.list[i].aabb();
+        let (eye, look) = (self.camera.pos, self.camera.forward());
+        if charged {
+            self.fx.crit((lo + hi) * 0.5, (hi - lo) * 0.5);
+        } else {
+            self.fx.slash(&fx::slash_points(eye.clamp(lo, hi), look));
+        }
+        if sound {
+            self.cue(profile, if charged { Kind::ChargedHit } else { Kind::Hit }, scale, None);
+        }
+        let at = (lo + hi) * 0.5;
+        if self.mobs.list[i].health <= 0.0 {
+            self.shake.add(fx::Kind::Kill, at);
+        }
+        if full {
+            self.shake.add(fx::Kind::ChargedHit, at);
+        }
     }
 
     /// C3 / C4 request: while a charge builds, the hand repeats the hotbar switch (the weapon rises slowly from low), one rise per cooldown of
@@ -2148,6 +2212,11 @@ impl App {
                 self.cd_rise = true; // the charge starts when the cooldown ends; until then the hand rises with it
             } else {
                 self.charge = (self.charge + 1).min(full);
+                if self.charge == world::combat::profile::MIN_CHARGE_HOLD {
+                    if let Some(s) = world::combat::rules::swing(held_id) {
+                        self.cue(s.profile, world::combat::sound::Kind::Charge, 1.0, None); // C7 (`SwingInputHandler`: once the hold passes the minimum)
+                    }
+                }
             }
         }
     }
@@ -2171,6 +2240,7 @@ impl App {
     /// block below the feet while sprinting out of the water). The forward input is the d-pad's / the stick's, sneaking already x0.3.
     fn sprint_tick(&mut self) {
         self.swing_cd = self.swing_cd.saturating_sub(1); // Cortes Combat's attack cooldown (C2), 20 Hz
+        self.shake.tick(); // C7: the camera impulses' clock
         self.charge_tick();
         self.survival_tick();
         self.special_tick();
@@ -3316,7 +3386,10 @@ impl App {
         let (pcx, pcz) = (chunk_coord(self.player.pos.x), chunk_coord(self.player.pos.z));
         self.chunks.update(self.be.gfx(), self.be.origins(), pcx, pcz);
         self.camera.zfar = if lod_on { lod::ZFAR } else { 256.0 }; // the far terrain needs the depth range
-        self.camera.bob = rig_view * if self.opts.view_bobbing { self.body.view_bob(tick_partial) } else { glam::Mat4::IDENTITY };
+        // C7 (`CameraShake.onCameraAngles`): the live impulses roll and pitch the view, in view space, ahead of the rig and the bob.
+        let (shake_pitch, shake_roll) = self.shake.angles(tick_partial, self.camera.pos);
+        let shake = glam::Mat4::from_rotation_z(shake_roll.to_radians()) * glam::Mat4::from_rotation_x(shake_pitch.to_radians());
+        self.camera.bob = shake * rig_view * if self.opts.view_bobbing { self.body.view_bob(tick_partial) } else { glam::Mat4::IDENTITY };
         // The cloth takes the camera while it spreads and while it is open (it glides back as the cloth rolls up), put back after the frame.
         if let Some(m) = self.mat.filter(|m| m.t > 0.0) {
             let from = pack::Rig { pos: self.camera.pos, yaw: self.camera.yaw, pitch: self.camera.pitch, fov: self.camera.fov_y };
@@ -3958,10 +4031,12 @@ impl App {
             if self.gesture.is_some() {
                 let (cx, cy) = self.touch.cursor_pos;
                 let under = || craft::slot_at(s.gw, w, h, cx, cy).and_then(|id| s.get(&self.inv, ext.as_deref(), id));
-                if let Some(name) = s.cursor.or_else(under).and_then(items::name) {
-                    let bw = (HudPipeline::text_width(name) as f32 + 6.0) * k;
-                    let ty = if cy > 36.0 * k { cy - 34.0 * k } else { cy + 14.0 * k };
-                    HudPipeline::push_tooltip(v, (cx - bw * 0.5).clamp(0.0, (w - bw).max(0.0)), ty, k, name);
+                if let Some((st, name)) = s.cursor.or_else(under).and_then(|st| items::name(st).map(|n| (st, n))) {
+                    let lines = world::combat::tooltip::lines(st); // C6: empty unless a Cortes weapon or tool of a pack world
+                    let (bw, bh) = HudPipeline::tooltip_size(name, &lines);
+                    let (bw, extra) = (bw * k, (bh - 14.0) * k);
+                    let ty = if cy > 36.0 * k + extra { cy - 34.0 * k - extra } else { cy + 14.0 * k };
+                    HudPipeline::push_tooltip_lines(v, (cx - bw * 0.5).clamp(0.0, (w - bw).max(0.0)), ty, k, name, &lines);
                 }
             }
         }
@@ -4243,11 +4318,13 @@ fn draw_pack(v: &mut Vec<HudVertex>, (w, h): (f32, f32), (m, vp): (&pack::Mat, g
     if down {
         let (cx, cy) = cursor_at;
         let under = || picked.and_then(|id| s.get(inv, None, id));
-        if let (Some(name), Some(u)) = (s.cursor.or_else(under).and_then(items::name), unit_px(finger.map_or(200.0, |f| f.0), finger.map_or(116.0, |f| f.1), 0.05)) {
+        if let (Some((st, name)), Some(u)) = (s.cursor.or_else(under).and_then(|st| items::name(st).map(|n| (st, n))), unit_px(finger.map_or(200.0, |f| f.0), finger.map_or(116.0, |f| f.1), 0.05)) {
             let tk = u * 0.75;
-            let bw = (HudPipeline::text_width(name) as f32 + 6.0) * tk;
-            let ty = if cy > 40.0 * tk { cy - 36.0 * tk } else { cy + 16.0 * tk };
-            HudPipeline::push_tooltip(v, (cx - bw * 0.5).clamp(0.0, (w - bw).max(0.0)), ty, tk, name);
+            let lines = world::combat::tooltip::lines(st); // C6
+            let (bw, bh) = HudPipeline::tooltip_size(name, &lines);
+            let (bw, extra) = (bw * tk, (bh - 14.0) * tk);
+            let ty = if cy > 40.0 * tk + extra { cy - 36.0 * tk - extra } else { cy + 16.0 * tk };
+            HudPipeline::push_tooltip_lines(v, (cx - bw * 0.5).clamp(0.0, (w - bw).max(0.0)), ty, tk, name, &lines);
         }
     }
 }

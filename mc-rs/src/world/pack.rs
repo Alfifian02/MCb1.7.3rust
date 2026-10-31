@@ -50,7 +50,7 @@ impl Cat {
 /// The zone an item lies in: tools, weapons, armor, bow and arrows, shears, rod; anything that heals (and cake); blocks and raw
 /// materials; and the rest (buckets, doors, sign, boat, carts, bed, records, eggs ...).
 pub fn category(id: u16) -> Cat {
-    if craft::tool(id).is_some() || craft::armor(id).is_some() || matches!(id, craft::SHEARS | craft::FLINT_AND_STEEL | gear::ROD | 261 | 262) {
+    if craft::tool(id).is_some() || craft::armor(id).is_some() || crate::world::combat::catalog::get(id).is_some() || matches!(id, craft::SHEARS | craft::FLINT_AND_STEEL | gear::ROD | 261 | 262) {
         Cat::Tools
     } else if items::heal_amount(id).is_some() || id == 354 {
         Cat::Food
@@ -72,6 +72,9 @@ pub fn size(id: u16) -> f32 {
             Kind::Shovel => 31.0,
             Kind::Hoe => 29.0,
         };
+    }
+    if let Some((f, _)) = crate::world::combat::catalog::get(id) {
+        return if f == crate::world::combat::catalog::Family::Daga { 28.0 } else { 32.0 }; // C6: a dagger is shorter than a blade or a polearm
     }
     match id {
         261 | gear::ROD => 32.0,

@@ -624,6 +624,23 @@ impl HudPipeline {
         Self::push_text(out, x + 3.0 * k, y + 3.0 * k, k, s, [1.0; 4]);
     }
 
+    /// C6: width and height, in units, of `push_tooltip_lines`' box (the widest line + 6; 14 + 10 a line).
+    pub fn tooltip_size(name: &str, lines: &[(String, [f32; 4])]) -> (f32, f32) {
+        let w = lines.iter().map(|l| Self::text_width(&l.0)).chain([Self::text_width(name)]).max().unwrap_or(0);
+        (w as f32 + 6.0, 14.0 + 10.0 * lines.len() as f32)
+    }
+
+    /// C6: `push_tooltip` with a coloured line under the name for each fact of a Cortes weapon (`combat::tooltip`); with no lines it
+    /// is `push_tooltip`. The box's top-left is at `(x, y)`, `k` px a unit.
+    pub fn push_tooltip_lines(out: &mut Vec<HudVertex>, x: f32, y: f32, k: f32, name: &str, lines: &[(String, [f32; 4])]) {
+        let (w, h) = Self::tooltip_size(name, lines);
+        Self::push_quad(out, x, y, w * k, h * k, [0.0, 0.0, 0.0, 0.75]);
+        Self::push_text(out, x + 3.0 * k, y + 3.0 * k, k, name, [1.0; 4]);
+        for (i, (text, c)) in lines.iter().enumerate() {
+            Self::push_text(out, x + 3.0 * k, y + (13.0 + 10.0 * i as f32) * k, k, text, *c);
+        }
+    }
+
     /// Seven-segment number (there is no text rendering yet, M14). `h` is the digit height in px;
     /// each digit advances by `0.71 * h`.
     pub fn push_number(out: &mut Vec<HudVertex>, x: f32, y: f32, h: f32, n: u32, color: [f32; 4]) {
