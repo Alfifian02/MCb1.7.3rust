@@ -97,6 +97,16 @@ const MOVE_SPEED: f32 = physics::WALK_SPEED;
 /// 1.62 above his feet (EntityPlayer.yOffset), i.e. 1.62 - 0.9 above the centre.
 const EYE_HEIGHT: f32 = 1.62 - physics::HALF.y;
 
+/// Cortes Combat C4 (NOT b1.7.3, UNVERIFIED): a meal in the mouth. Food takes `EAT_TICKS` (the mod's 1.21 use time) and any damage taken ends it
+/// unless the guard is up (`EatInterruptHandler`); it also ends when the hotbar slot changes or the item is gone.
+#[derive(Clone, Copy)]
+struct Eating {
+    left: u32,
+    slot: usize,
+    health: i32,
+}
+const EAT_TICKS: u32 = 32;
+
 struct App {
     /// The renderer: wgpu (Vulkan) or OpenGL ES 3.2 (`backend.rs`).
     be: Backend,
@@ -220,6 +230,7 @@ struct App {
     /// blow this frame's release delivers (1 = a plain one). NOT b1.7.3, UNVERIFIED.
     charge: u32,
     blow: f32,
+    eating: Option<Eating>,
     mat: Option<pack::Mat>,
     mat_ui: bool,
     hint: f32,
@@ -397,6 +408,7 @@ impl App {
             swing_held: None,
             charge: 0,
             blow: 1.0,
+            eating: None,
             mat: None,
             mat_ui: false,
             pack_saved: None,
@@ -529,7 +541,7 @@ impl App {
         (self.seed, self.world_type) = (info.seed, info.ty);
         self.pack_rule = info.pack;
         world::combat::rules::set(info.pack); // Cortes Combat lives only in an Immersive Pack world
-        (self.swing_cd, self.charge) = (0, 0);
+        (self.swing_cd, self.charge, self.eating) = (0, 0, None);
         // The world resumes in the dimension it was left in (`<world>/dim`).
         self.nether = std::fs::read_to_string(self.dir.join("dim")).is_ok_and(|s| s.trim() == "nether");
         if self.nether {
@@ -1032,9 +1044,9 @@ impl App {
             match e {
                 Ev::Strike(_) => {} // done by `struck`, ahead of the rest (the blasts below shift the lists the indices point into)
                 // `EntityPlayer.attackEntityFrom`: Peaceful 0, Easy d / 3 + 1, Hard d * 3 / 2.
-                Ev::Hurt(d) => {
+                Ev::Hurt(d, from) => {
                     let d = match self.opts.difficulty { 0 => 0, 1 => d / 3 + 1, 3 => d * 3 / 2, _ => d };
-                    if d > 0 {
+                    if d > 0 && !self.guarded(from) {
                         self.vitals.hurt(d);
                     }
                 }
@@ -1306,6 +1318,7 @@ impl App {
 
         // M5: pick the block under the crosshair, dig it while the dig input is held, place on a tap.
         self.touch.swing_secs = self.opts.dig_secs();
+        self.touch.guard_shown = self.held_guard().points > 0 && self.screen.is_none(); // C4: the guard button, only for an item that can guard
         self.touch.tick(real_dt);
         let place = self.touch.take_place();
         let place = if self.carry.is_some() { if place { self.put_pack() } false } else { place }; // a carried pack takes the tap
@@ -1549,8 +1562,8 @@ impl App {
                         None => {}
                     }
                 }
-                if swing.is_some() && self.swing_cd > 0 {
-                    return; // still inside the last swing's cooldown: nothing happens, and no part of the blow is paid early
+                if swing.is_some() && self.swing_blocked(held_id) {
+                    return; // still inside the last swing's cooldown (or behind a raised or staggered guard): nothing happens, and no part of the blow is paid early
                 }
                 let (dmg, wear) = mobs::attack(held_id);
                 let dmg = dmg * std::mem::replace(&mut self.blow, 1.0); // C3: the charged blow
@@ -1894,11 +1907,96 @@ impl App {
     fn swing_swallowed(&self) -> bool {
         let (eye, fwd, slot) = (self.camera.pos, self.camera.forward(), self.touch.hotbar_slot);
         let held_id = self.inv.slots[slot].map(|s| s.id);
-        if self.swing_held != held_id || self.swing_cd == 0 || world::combat::rules::swing(held_id).is_none() {
+        if world::combat::rules::swing(held_id).is_none() || !(self.swing_held == held_id && self.swing_cd > 0 || self.guard_blocks(held_id)) {
             return false;
         }
         let wall = self.target.map_or(f32::MAX, |h| h.point.distance(eye.as_dvec3()) as f32);
         self.melee_target(held_id, eye, fwd, wall).0.is_some()
+    }
+
+    /// C4: what guard the held item is worth (`guard::profile_of`; nothing with the Immersive Pack OFF).
+    fn held_guard(&self) -> world::combat::guard::GuardProfile {
+        let held = self.inv.slots[self.touch.hotbar_slot].map(|s| s.id);
+        world::combat::rules::swing(held).map_or(world::combat::guard::NONE, |s| world::combat::guard::profile_of(s.profile))
+    }
+
+    /// C4: a raised guard, or the stagger of the one in hand, stops the swing (`AttackCooldown.beginCharge`: covering and swinging are exclusive).
+    fn guard_blocks(&self, held_id: Option<u16>) -> bool {
+        let g = &self.vitals.guard;
+        g.active() || (g.stun > 0 && world::combat::rules::swing(held_id).is_some_and(|s| world::combat::guard::profile_of(s.profile).points > 0))
+    }
+
+    /// C4: the held item cannot swing now: its cooldown, or `guard_blocks`.
+    fn swing_blocked(&self, held_id: Option<u16>) -> bool {
+        self.swing_cd > 0 || self.guard_blocks(held_id)
+    }
+
+    /// C4 (`GuardHandler.onShieldBlock`): a hit from `from` into the raised guard is absorbed, a point spent and a combat mark made; the last
+    /// point breaks the guard and the charge. True if blocked. ponytail: the arc is measured on the ground plane, the mod's is 3D with the pitch.
+    fn guarded(&mut self, from: glam::Vec3) -> bool {
+        let (gp, me, f) = (self.held_guard(), self.player.pos, self.camera.forward());
+        let Some(broke) = self.vitals.guard.block(gp, glam::Vec3::new(f.x, 0.0, f.z), me, glam::Vec3::new(from.x, me.y, from.z)) else { return false };
+        self.vitals.stamina.hit();
+        if broke {
+            self.charge = 0;
+        }
+        true
+    }
+
+    /// C4, 20 Hz (only with the Immersive Pack ON): the guard follows its button and regenerates, the food bar pays for healing, a meal runs.
+    fn survival_tick(&mut self) {
+        if !world::combat::rules::on() {
+            return;
+        }
+        let (gp, down) = (self.held_guard(), self.touch.guarding() && self.sleep.is_none() && !self.vitals.dead());
+        self.vitals.guard.sync(gp);
+        if self.vitals.guard.input(down, self.eating.is_some()) {
+            self.charge = 0; // raising the guard ends a charge (`endCharge`)
+        }
+        self.vitals.guard.tick(gp);
+        let hurt = !self.vitals.dead() && self.vitals.health < vitals::MAX_HEALTH;
+        if self.vitals.food.tick(hurt) > 0 {
+            self.vitals.heal(1);
+        }
+        self.vitals.stamina.hungry = self.vitals.food.hungry();
+        self.eat_tick();
+    }
+
+    /// C4, 20 Hz: the meal in the mouth runs down; damage (unless guarding), another slot, no more food or a closed game cut it short.
+    fn eat_tick(&mut self) {
+        let Some(mut e) = self.eating else { return };
+        let food = self.touch.hotbar_slot == e.slot && self.inv.slots[e.slot].is_some_and(|s| items::heal_amount(s.id).is_some());
+        let hit = self.vitals.health < e.health && !self.vitals.guard.active();
+        if !food || hit || self.vitals.dead() || self.screen.is_some() {
+            self.eating = None;
+            return;
+        }
+        e.health = self.vitals.health; // healing raises the line a hit is measured from
+        e.left -= 1;
+        if e.left > 0 {
+            self.eating = Some(e);
+        } else {
+            self.eating = None;
+            if let Some(n) = self.inv.eat(e.slot) {
+                self.vitals.food.eat(n);
+                self.vitals.fed = world::biomelife::FED_TICKS; // NOT b1.7.3 (`biomeRules`): food for the cold
+            }
+        }
+    }
+
+    /// C3 / C4 request: while a charge builds, the hand repeats the hotbar switch (the weapon rises slowly from low), one rise per cooldown of
+    /// the weapon; at a full charge it stays raised. `None` when nothing is charging.
+    fn charge_phase(&self, partial: f32) -> Option<f32> {
+        let s = world::combat::rules::swing(self.inv.slots[self.touch.hotbar_slot].map(|s| s.id))?;
+        let full = s.profile.charge().ticks;
+        if self.charge == 0 || full == 0 || s.interval == 0 {
+            return None;
+        }
+        if self.charge >= full {
+            return Some(1.0);
+        }
+        let i = s.interval as f32;
+        Some(((self.charge as f32 - 1.0 + partial).max(0.0) % i) / i)
     }
 
     /// C3, 20 Hz: a finger (or the pad's attack) held still on a mob in the cone of a weapon that can charge builds `charge` up to the profile's
@@ -1910,7 +2008,7 @@ impl App {
             (self.swing_held, self.swing_cd, self.charge) = (held_id, 0, 0);
         }
         let full = world::combat::rules::swing(held_id).map_or(0, |s| s.profile.charge().ticks);
-        if full == 0 || self.swing_cd > 0 || self.screen.is_some() || !self.touch.resting() {
+        if full == 0 || self.swing_blocked(held_id) || self.screen.is_some() || !self.touch.resting() {
             return; // `charge_release` clears it once the finger is up or dragging
         }
         let wall = self.target.map_or(f32::MAX, |h| h.point.distance(eye.as_dvec3()) as f32);
@@ -1930,7 +2028,7 @@ impl App {
         let held_id = self.inv.slots[self.touch.hotbar_slot].map(|s| s.id);
         let wall = self.target.map_or(f32::MAX, |h| h.point.distance(eye.as_dvec3()) as f32);
         // A release with nothing in reach is no blow: it must not fall through to placing a block or using the item.
-        let hit = release && self.swing_cd == 0 && self.melee_target(held_id, eye, fwd, wall).0.is_some();
+        let hit = release && !self.swing_blocked(held_id) && self.melee_target(held_id, eye, fwd, wall).0.is_some();
         world::combat::rules::swing(held_id).filter(|_| hit).and_then(|s| world::combat::rules::charged(s.profile, held))
     }
 
@@ -1939,6 +2037,7 @@ impl App {
     fn sprint_tick(&mut self) {
         self.swing_cd = self.swing_cd.saturating_sub(1); // Cortes Combat's attack cooldown (C2), 20 Hz
         self.charge_tick();
+        self.survival_tick();
         let (asleep, riding) = (self.sleep.is_some(), self.riding());
         let fwd = if asleep || riding { 0.0 } else { self.touch.move_input.0 * if self.touch.sneak { 0.3 } else { 1.0 } };
         self.sprint.tick(sprint::In {
@@ -2343,6 +2442,15 @@ impl App {
     }
 
     fn eat(&mut self) {
+        // Cortes Combat C4 (NOT b1.7.3, only with the Immersive Pack ON): food is a meal that takes `EAT_TICKS` and feeds the healing bar
+        // (`eat_tick`), not a heal on the tap. ponytail: a tap starts it and it runs by itself; the mod holds the button.
+        if world::combat::rules::on() {
+            let slot = self.touch.hotbar_slot;
+            if self.eating.is_none() && self.inv.slots[slot].is_some_and(|s| items::heal_amount(s.id).is_some()) {
+                self.eating = Some(Eating { left: EAT_TICKS, slot, health: self.vitals.health });
+            }
+            return;
+        }
         if let Some(n) = self.inv.eat(self.touch.hotbar_slot) {
             self.vitals.heal(n);
             self.vitals.fed = world::biomelife::FED_TICKS; // NOT b1.7.3 (`biomeRules`): food for the cold
@@ -3083,7 +3191,10 @@ impl App {
         let (view, proj) = self.camera.build_view_proj();
         // The first-person hand (`EntityRenderer.renderHand`): not in the third-person view, not in bed.
         let hand = ((!self.touch.third || close) && self.sleep.is_none() && self.mat.is_none()).then(|| {
-            let (equip, held) = self.body.equipped(tick_partial);
+            let (mut equip, held) = self.body.equipped(tick_partial);
+            if let Some(p) = self.charge_phase(tick_partial) {
+                equip = p; // C3: charging repeats the switch-slot rise
+            }
             render::player::Hand { to_world: render::player::hand_to_world(&view, &self.camera.bob), equip, swing: self.body.swing_at(tick_partial), held: held.filter(|s| s.id != world::map::MAP), at: self.player.pos, pack: self.carry.map_or(0.0, |t| t.max(0.01)) }
         });
         let outline_indices = self.target.map_or(0, |h| {
@@ -3503,6 +3614,25 @@ impl App {
             let (bx, by) = (w * 0.5 - bw * 0.5, h * 0.5 + 0.05 * w.min(h) + bh * 2.0);
             let swing = world::combat::rules::swing(self.inv.slots[self.touch.hotbar_slot].map(|s| s.id));
             let full = swing.map_or(0, |s| s.profile.charge().ticks);
+            // C4: the meal's progress (brown) takes the bar's place while it is eaten.
+            if let Some(e) = self.eating {
+                HudPipeline::push_quad(v, bx, by, bw, bh, [0.0, 0.0, 0.0, 0.6]);
+                HudPipeline::push_quad(v, bx, by, bw * (1.0 - e.left as f32 / EAT_TICKS as f32), bh, [0.85, 0.55, 0.25, 0.95]);
+            }
+            // C4: the guard button over the jump button (a shield; lit while the guard is up) with one orb a point, grey while it is staggered.
+            if self.touch.guard_shown && !self.touch.pad.hud_hidden() {
+                let (gx, gy, gw, gh) = self.touch.layout.guard;
+                let g = self.vitals.guard;
+                HudPipeline::push_button(v, gx, gy, gw, gh, if self.touch.guarding() || g.active() { 2 } else { 1 });
+                let shield = if g.stun > 0 { [0.6, 0.6, 0.6, 0.8] } else { [1.0; 4] };
+                HudPipeline::push_quad(v, gx + gw * 0.27, gy + gh * 0.2, gw * 0.46, gh * 0.26, shield);
+                HudPipeline::push_quad(v, gx + gw * 0.33, gy + gh * 0.46, gw * 0.34, gh * 0.18, shield);
+                HudPipeline::push_quad(v, gx + gw * 0.42, gy + gh * 0.64, gw * 0.16, gh * 0.14, shield);
+                for i in 0..g.max {
+                    let ox = gx + gw * 0.5 + (i as f32 - (g.max as f32 - 1.0) * 0.5) * gw * 0.22 - gw * 0.07;
+                    HudPipeline::push_quad(v, ox, gy - gw * 0.2, gw * 0.14, gw * 0.14, if i < g.points { [0.4, 0.8, 1.0, 0.95] } else { [0.0, 0.0, 0.0, 0.5] });
+                }
+            }
             if self.charge > 0 && full > 0 {
                 let f = (self.charge as f32 / full as f32).min(1.0);
                 HudPipeline::push_quad(v, bx, by, bw, bh, [0.0, 0.0, 0.0, 0.6]);
@@ -3763,6 +3893,19 @@ impl App {
                     let at = 2 * i + 1;
                     let s = if at < self.vitals.armor { sp::ARMOR_FULL } else if at == self.vitals.armor { sp::ARMOR_HALF } else { sp::ARMOR_EMPTY };
                     HudPipeline::push_gui(v, x, y - sz * 1.2, sz, sz, s);
+                }
+            }
+            // C4 (NOT b1.7.3): the healing food bar, 10 icons of 2 points from the hotbar's right edge, on the hearts' row; a plain square each
+            // until the food sprites arrive (C6). Orange, red under the healing floor.
+            if world::combat::rules::on() {
+                let (rx, _, rw, _) = layout.hotbar[8];
+                for i in 0..10 {
+                    let x = rx + rw - sz - i as f32 * hw * 0.4;
+                    let f = ((self.vitals.food.level - 2 * i) as f32 / 2.0).clamp(0.0, 1.0);
+                    HudPipeline::push_quad(v, x, y, sz, sz, [0.0, 0.0, 0.0, 0.45]);
+                    if f > 0.0 {
+                        HudPipeline::push_quad(v, x, y, sz * f, sz, if self.vitals.food.hungry() { [0.85, 0.3, 0.2, 0.95] } else { [0.9, 0.6, 0.2, 0.95] });
+                    }
                 }
             }
             if self.vitals.air < vitals::MAX_AIR {

@@ -8,6 +8,8 @@
 //! * `profile` - the per-profile tables (reach, charge, knockback, special) and the tempo / charge arithmetic.
 //! * `catalog` - the five new melee families, their ids (400..=424), names, damage and recipes.
 //!
+//! * `guard`   - C4: the sword's guard (points, arc, stagger) and the block. UNVERIFIED: not compiled.
+//! * `survival` - C4: the healing food bar.
 //! * `rules`   - C2: the world rule and the swing of whatever is held (cone, cooldown, damage); C3: `charged`, the multiplier of a held-then-released blow. UNVERIFIED: not compiled.
 //!
 //! **Exclusive to the Immersive Pack.** Every feature from Cortes Combat is on only in a world created with the Immersive
@@ -17,5 +19,7 @@
 
 pub mod catalog;
 pub mod cone;
+pub mod guard;
 pub mod profile;
 pub mod rules;
+pub mod survival;

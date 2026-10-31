@@ -36,6 +36,8 @@ const SLOW_LOCKED: f32 = 0.10;
 /// NOT Stamina's (`biomelife::air`, `biomeRules`): a sprint costs `1 + HOT * hot` times, and recovery is `1 - COLD * cold` times.
 const HOT: f32 = 0.6;
 const COLD: f32 = 0.5;
+/// NOT the mod's (C4, `Food::hungry`): the recovery while the food bar is under the healing floor. UNVERIFIED by play.
+const HUNGRY: f32 = 0.75;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Stamina {
@@ -46,12 +48,14 @@ pub struct Stamina {
     pub locked: bool,
     /// Ticks left of `isInCombat` (`LAST_HIT` / `LAST_HURT`).
     combat: u16,
+    /// NOT the mod's: the healing food bar is under its floor (`Food::hungry`, set by `lib.rs` each tick), so the recovery is x0.75.
+    pub hungry: bool,
 }
 
 /// Full, like the mod's respawn (`setStamina(Float.MAX_VALUE)`): `Vitals::default()` is every respawn and reset.
 impl Default for Stamina {
     fn default() -> Self {
-        Self { cur: FULL, max: FULL, locked: false, combat: 0 }
+        Self { cur: FULL, max: FULL, locked: false, combat: 0, hungry: false }
     }
 }
 
@@ -100,7 +104,7 @@ impl Stamina {
             self.take(SPRINT * if self.combat == 0 { CALM } else { 1.0 } * (1.0 + HOT * air.hot));
         } else if self.cur != self.max && ratio > LOCK_BELOW {
             let (was, locked) = (self.cur / self.max, self.locked); // the unlock test reads the stamina of before this tick's regen, as the mod does
-            self.cur = (self.cur + REGEN * (1.0 - armor as f32 * ARMOR) * if locked { REGEN_LOCKED } else { 1.0 } * (1.0 - COLD * air.cold)).min(self.max);
+            self.cur = (self.cur + REGEN * (1.0 - armor as f32 * ARMOR) * if locked { REGEN_LOCKED } else { 1.0 } * (1.0 - COLD * air.cold) * if self.hungry { HUNGRY } else { 1.0 }).min(self.max);
             self.locked = locked && was < UNLOCK_AT;
         } else if !self.locked && ratio <= LOCK_BELOW {
             (self.cur, self.locked) = (0.0, true);
@@ -224,5 +228,8 @@ mod tests {
         warm.tick_in(false, MAX_HEALTH, 0, Air::default());
         cold.tick_in(false, MAX_HEALTH, 0, Air { hot: 0.0, cold: 1.0 });
         assert!((warm.cur - 50.0 - REGEN).abs() < 1e-4 && (cold.cur - 50.0 - REGEN * 0.5).abs() < 1e-4);
+        let mut hungry = Stamina { cur: 50.0, hungry: true, ..Stamina::default() };
+        hungry.tick_in(false, MAX_HEALTH, 0, Air::default());
+        assert!((hungry.cur - 50.0 - REGEN * HUNGRY).abs() < 1e-4, "a hungry bar recovers slower");
     }
 }

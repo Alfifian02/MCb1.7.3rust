@@ -292,7 +292,8 @@ pub enum Ev {
     /// A sound at a place: name, where, volume, pitch factor and whether the usual `(r - r) * 0.2` spread applies (`Audio::cry`).
     Snd(&'static str, Vec3, f32, f32, bool),
     /// Damage to the player (before armor).
-    Hurt(i32),
+    /// Damage to the player and where it came from (C4: the guard's arc).
+    Hurt(i32, Vec3),
     /// A creeper went off here.
     Boom(Vec3),
     Shoot(Vec3, Vec3),
@@ -751,7 +752,7 @@ impl Mob {
                 }
             }
             Slime if self.size > 1.0 && dist < 0.6 * self.size + 0.4 && see => {
-                ev.push(Ev::Hurt(self.size as i32));
+                ev.push(Ev::Hurt(self.size as i32, self.body.pos));
                 if self.attack_time == 0 {
                     self.attack_time = 10; // `onCollideWithPlayer` plays it when `attackEntityFrom` took: a new hit every 10 ticks
                     ev.push(Ev::Snd("mob.slimeattack", pos, 1.0, 1.0, true));
@@ -770,7 +771,7 @@ impl Mob {
                     }
                 } else if dist < 2.0 + (self.half.x - 0.3).max(0.0) && self.attack_time == 0 {
                     self.attack_time = 20;
-                    ev.push(Ev::Hurt(spec(k).4));
+                    ev.push(Ev::Hurt(spec(k).4, self.body.pos));
                 }
             }
             _ => {}
@@ -1165,7 +1166,7 @@ impl Arrow {
         }
         let d = self.pos - c.player;
         if !self.player && d.x.abs() < 0.4 && d.z.abs() < 0.4 && d.y.abs() < 1.0 {
-            ev.push(Ev::Hurt(4));
+            ev.push(Ev::Hurt(4, self.pos));
             ev.push(Ev::Bow(self.pos, true));
             return false;
         }
@@ -1663,7 +1664,7 @@ impl Mobs {
                         }
                     }
                 }
-                Ev::Hurt(_) | Ev::Boom(_) | Ev::Strike(_) | Ev::Burst(_) | Ev::Smoke(_) | Ev::Snd(..) | Ev::Graze(_) | Ev::Bow(..) => out.push(e),
+                Ev::Hurt(..) | Ev::Boom(_) | Ev::Strike(_) | Ev::Burst(_) | Ev::Smoke(_) | Ev::Snd(..) | Ev::Graze(_) | Ev::Bow(..) => out.push(e),
                 Ev::Shoot(..) | Ev::Fire(..) => {}
             }
         }
@@ -2003,7 +2004,7 @@ mod tests {
         assert!(!late.tick(&c, &mut ev) && ev.is_empty()); // gone in the air: silent
         let near = ctx(Vec3::new(32.5, 14.6, 32.5), &l);
         Arrow { pos: Vec3::new(32.5, 15.0, 32.5), ..arrow(false) }.tick(&near, &mut ev);
-        assert!(matches!(ev[..], [Ev::Hurt(4), Ev::Bow(_, true)]));
+        assert!(matches!(ev[..], [Ev::Hurt(4, _), Ev::Bow(_, true)]));
         // A player's arrow in a mob's box: the hit sounds once; a skeleton's shot sounds as it leaves.
         let (mut ms, mut rng) = (Mobs::new(1), JavaRandom::new(3));
         ms.list.push(Mob::new(Pig, 5.5, 20.0, 5.5, 0.0, &mut rng));
@@ -2042,7 +2043,7 @@ mod tests {
         let mut z = Mob::new(Zombie, 32.5, 10.0, 35.0, 0.0, &mut rng);
         ev.clear();
         z.tick(&mut rng, &c, &mut ev);
-        assert!(ev.iter().any(|e| matches!(e, Ev::Hurt(5))));
+        assert!(ev.iter().any(|e| matches!(e, Ev::Hurt(5, _))));
         let near = ctx(Vec3::new(32.5, 11.0, 33.5), &l);
         let mut k = Mob::new(Creeper, 32.5, 10.0, 32.5, 0.0, &mut rng);
         ev.clear();
@@ -2127,7 +2128,7 @@ mod tests {
         let (mut live, mut dead, mut ev) = (Mob::new(Zombie, 32.5, 10.0, 35.0, 0.0, &mut rng), Mob::new(Zombie, 32.5, 10.0, 35.0, 0.0, &mut rng), Vec::new());
         dead.health = 0.0;
         live.tick(&mut rng, &near, &mut ev);
-        assert!(ev.iter().any(|e| matches!(e, Ev::Hurt(_))));
+        assert!(ev.iter().any(|e| matches!(e, Ev::Hurt(..))));
         ev.clear();
         assert!((0..30).all(|_| dead.tick(&mut rng, &near, &mut ev)) && ev.is_empty(), "a corpse has no AI");
     }

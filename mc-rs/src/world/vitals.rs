@@ -6,6 +6,7 @@
 //! ponytail: no damage flash or knockback, no burning/hurt sounds (all later).
 
 use crate::world::dig::TICK;
+use crate::world::combat::{guard::Guard, survival::Food};
 use crate::world::stamina::Stamina;
 
 pub const MAX_HEALTH: i32 = 20;
@@ -53,11 +54,14 @@ pub struct Vitals {
     pub stamina: Stamina,
     /// NOT b1.7.3 (`biomeRules`): ticks left of a meal's warmth (`biomelife::FED_TICKS`); food for the cold.
     pub fed: u32,
+    /// Cortes Combat C4 (NOT b1.7.3, only with the Immersive Pack ON): the healing food bar and the sword's guard, refilled with the stamina on every respawn.
+    pub food: Food,
+    pub guard: Guard,
 }
 
 impl Default for Vitals {
     fn default() -> Self {
-        Self { health: MAX_HEALTH, cry: false, thud: false, fizz: false, air: MAX_AIR, fire: 0, hearts_life: 0, last_damage: 0, fall: 0.0, acc: 0.0, armor: 0, wear: 0, rem: 0, drowned: false, fed: 0, stamina: Stamina::default() }
+        Self { health: MAX_HEALTH, cry: false, thud: false, fizz: false, air: MAX_AIR, fire: 0, hearts_life: 0, last_damage: 0, fall: 0.0, acc: 0.0, armor: 0, wear: 0, rem: 0, drowned: false, fed: 0, stamina: Stamina::default(), food: Food::default(), guard: Guard::default() }
     }
 }
 
