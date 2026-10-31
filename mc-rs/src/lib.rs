@@ -1924,7 +1924,7 @@ impl App {
                 self.vitals.lightning();
             }
             for m in self.mobs.list.iter_mut().filter(|m| effects::struck(b, m.body.pos, m.half)) {
-                m.damage(5, b, &mut self.mobs.rng); // ponytail: through `damage`, so it also knocks back; no burning
+                m.damage(5.0, b, &mut self.mobs.rng); // ponytail: through `damage`, so it also knocks back; no burning
             }
         }
         // The rain you hear: a patter clip every few ticks where it rains (not snow, not in the Nether), dull under a roof, none deep down.
