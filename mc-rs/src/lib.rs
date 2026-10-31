@@ -230,6 +230,10 @@ struct App {
     /// blow this frame's release delivers (1 = a plain one). NOT b1.7.3, UNVERIFIED.
     charge: u32,
     blow: f32,
+    /// C3 fix: a still finger on a mob in reach of a charging weapon while its cooldown runs; the hand rises with the cooldown (`charge_phase`).
+    cd_rise: bool,
+    /// C5 (NOT b1.7.3, UNVERIFIED): the right button's state: the shotel's parry, the ropera's lunge, the martillo's streak.
+    sp: world::combat::special::State,
     eating: Option<Eating>,
     mat: Option<pack::Mat>,
     mat_ui: bool,
@@ -409,6 +413,8 @@ impl App {
             charge: 0,
             blow: 1.0,
             eating: None,
+            cd_rise: false,
+            sp: Default::default(),
             mat: None,
             mat_ui: false,
             pack_saved: None,
@@ -541,7 +547,8 @@ impl App {
         (self.seed, self.world_type) = (info.seed, info.ty);
         self.pack_rule = info.pack;
         world::combat::rules::set(info.pack); // Cortes Combat lives only in an Immersive Pack world
-        (self.swing_cd, self.charge, self.eating) = (0, 0, None);
+        (self.swing_cd, self.charge, self.eating, self.cd_rise) = (0, 0, None, false);
+        self.sp = Default::default();
         // The world resumes in the dimension it was left in (`<world>/dim`).
         self.nether = std::fs::read_to_string(self.dir.join("dim")).is_ok_and(|s| s.trim() == "nether");
         if self.nether {
@@ -906,7 +913,7 @@ impl App {
             self.player.vel.z -= yaw.cos() * push;
         }
         // Stamina's slowdown: x0.9 while locked, x0.85 more while sprinting on little (it multiplies the walk, the sprint's push and the jump's).
-        let slow = self.vitals.stamina.speed(self.sprint.on());
+        let slow = self.vitals.stamina.speed(self.sprint.on()) * self.sp.slow(); // C5: the parry's blade out slows the walk (x0.4)
         self.player.vel.x *= slow;
         self.player.vel.z *= slow;
         // An explosion's push rides on top of the walk and the sprint (and is neither slowed by stamina nor kept in bed, on a ride or in death).
@@ -915,6 +922,10 @@ impl App {
         }
         self.player.vel.x += self.kick.x;
         self.player.vel.z += self.kick.z;
+        // C5: a lunge drives the body along its line over the walk, the sprint and any push (`Lunge`: the step replaces the player's own).
+        if let Some(l) = &self.sp.lunge {
+            (self.player.vel.x, self.player.vel.z) = (l.dir.x * world::combat::special::LUNGE_SPEED, l.dir.z * world::combat::special::LUNGE_SPEED);
+        }
         let (vx0, vz0) = (self.player.vel.x, self.player.vel.z);
         // Plants are drawn but not solid yet (collision shapes come with M14), so physics reads them as air.
         let get = |x: i32, y: i32, z: i32| self.chunks.block(x, y, z).map(|b| if is_plant(b) { 0 } else { self.chunks.physics_at(x, y, z, b) });
@@ -1046,7 +1057,8 @@ impl App {
                 // `EntityPlayer.attackEntityFrom`: Peaceful 0, Easy d / 3 + 1, Hard d * 3 / 2.
                 Ev::Hurt(d, from) => {
                     let d = match self.opts.difficulty { 0 => 0, 1 => d / 3 + 1, 3 => d * 3 / 2, _ => d };
-                    if d > 0 && !self.guarded(from) {
+                    // C5: a lunge cannot be hurt (`LungeImmunity`), a parry turns the hit back (`ParryHandler`), then the guard.
+                    if d > 0 && self.sp.lunge.is_none() && !self.parried(d, from) && !self.guarded(from) {
                         self.vitals.hurt(d);
                     }
                 }
@@ -1319,6 +1331,7 @@ impl App {
         // M5: pick the block under the crosshair, dig it while the dig input is held, place on a tap.
         self.touch.swing_secs = self.opts.dig_secs();
         self.touch.guard_shown = self.held_guard().points > 0 && self.screen.is_none(); // C4: the guard button, only for an item that can guard
+        self.touch.special_shown = matches!(self.held_special(), world::combat::profile::Special::Lunge | world::combat::profile::Special::MultiHit | world::combat::profile::Special::Parry) && self.screen.is_none(); // C5
         self.touch.tick(real_dt);
         let place = self.touch.take_place();
         let place = if self.carry.is_some() { if place { self.put_pack() } false } else { place }; // a carried pack takes the tap
@@ -1378,7 +1391,7 @@ impl App {
         // A broken block drops its items (world::items) only if the held item may harvest it (stone needs a pickaxe),
         // and wears the tool (`Item.onBlockDestroyed`: 1 use, a sword 2, a hoe none).
         match self.target {
-            Some(hit) if self.touch.digging() && self.charge == 0 => {
+            Some(hit) if self.touch.digging() && self.charge == 0 && !self.cd_rise => {
                 self.dig_acc += real_dt;
                 while self.dig_acc >= dig::TICK {
                     self.dig_acc -= dig::TICK;
@@ -1566,7 +1579,9 @@ impl App {
                     return; // still inside the last swing's cooldown (or behind a raised or staggered guard): nothing happens, and no part of the blow is paid early
                 }
                 let (dmg, wear) = mobs::attack(held_id);
-                let dmg = dmg * std::mem::replace(&mut self.blow, 1.0); // C3: the charged blow
+                // C3: the charged blow. C5: a live hammer streak adds 0.15 a hit to the multiplier (`DamageResolver`), counted before this blow.
+                let hammer = swing.is_some_and(|s| s.profile == world::combat::profile::Profile::Warhammer);
+                let dmg = dmg * (std::mem::replace(&mut self.blow, 1.0) + if hammer { self.sp.streak_bonus() } else { 0.0 });
                 // Retro Sprint (`PlayerEntityMixin.onAttack`): a sprinting hit shoves the target the way the player looks, before the hit's own
                 // knockback, and ends the sprint (the walk is set from the input every frame, so the mod's x0.6 on the player's motion has no use here).
                 if self.sprint.attack() {
@@ -1579,6 +1594,9 @@ impl App {
                     self.mobs.strike(i, dmg, self.player.pos); // the weapon's own 3-tick damage window
                 } else {
                     self.mobs.hit(i, dmg, self.player.pos);
+                }
+                if hammer {
+                    self.sp.streak_hit(); // ponytail: every blow that connects counts, one the mob's damage window refused too (a martillo is 19 ticks, the window 3)
                 }
                 self.vitals.stamina.hit(); // Stamina: a hit dealt puts the player in combat for 15 s (ponytail: also one the mob's damage window ignored)
                 self.inv.damage(slot, wear);
@@ -1984,18 +2002,129 @@ impl App {
         }
     }
 
+    /// C5: what the held item's right button does (`Special::None` with the Immersive Pack OFF).
+    fn held_special(&self) -> world::combat::profile::Special {
+        let held = self.inv.slots[self.touch.hotbar_slot].map(|s| s.id);
+        world::combat::rules::swing(held).map_or(world::combat::profile::Special::None, |s| s.profile.special())
+    }
+
+    /// C5, 20 Hz: the right button's clocks, and a press on it. A press is taken even with the rule off, so it never waits for a later world.
+    fn special_tick(&mut self) {
+        let pressed = self.touch.take_special();
+        if !world::combat::rules::on() || self.vitals.dead() {
+            self.sp = Default::default();
+            return;
+        }
+        self.sp.tick();
+        if pressed {
+            self.special_press();
+        }
+        self.lunge_tick();
+    }
+
+    /// C5 (`SpecialHandler.resolve`): the sweep and the lunge spend the attack's own cooldown (4 and 8 swings) and are refused behind it or a
+    /// raised guard; the parry has a lockout of its own and does not care about the swing. Not ported: wear, Fusee (C8), sounds (C7).
+    fn special_press(&mut self) {
+        use world::combat::{profile::Special, special};
+        let held_id = self.inv.slots[self.touch.hotbar_slot].map(|s| s.id);
+        let Some(s) = world::combat::rules::swing(held_id) else { return };
+        if self.screen.is_some() || self.sleep.is_some() || self.riding() {
+            return;
+        }
+        match s.profile.special() {
+            Special::Parry => {
+                if self.sp.parry_press() {
+                    self.body.swing();
+                }
+            }
+            Special::MultiHit if !self.swing_blocked(held_id) => {
+                let (eye, fwd) = (self.camera.pos, self.camera.forward());
+                let wall = self.target.map_or(f32::MAX, |h| h.point.distance(eye.as_dvec3()) as f32);
+                (self.swing_cd, self.charge) = (special::sweep_cost(s.interval), 0); // spent whether or not it connects
+                self.body.swing();
+                // Everything in the wider arc, the weapon's flat damage, no charge. ponytail: the knockback is `strike`'s own, not the sweep's 0.8 share.
+                let hit = self.mobs.cone_n(eye, fwd, special::sweep_reach(s.reach), wall, 0);
+                let (dmg, _) = mobs::attack(held_id);
+                for &i in &hit {
+                    self.mobs.strike(i, dmg, self.player.pos);
+                }
+                if !hit.is_empty() {
+                    self.vitals.stamina.hit();
+                }
+            }
+            Special::Lunge if !self.swing_blocked(held_id) && self.sp.lunge.is_none() => {
+                let f = self.camera.forward();
+                let dir = glam::Vec3::new(f.x, 0.0, f.z).normalize_or_zero();
+                if dir == glam::Vec3::ZERO {
+                    return;
+                }
+                let tier = held_id.and_then(world::combat::catalog::get).map_or(0, |(_, t)| t);
+                (self.swing_cd, self.charge) = (special::lunge_cost(s.interval), 0);
+                self.body.swing();
+                let p = self.player.pos;
+                self.sp.lunge = Some(special::Lunge { dir, start: p, last: p, dist: special::lunge_distance(tier), left: special::LUNGE_WINDOW, done: Vec::new(), ticks: 0 });
+            }
+            _ => {}
+        }
+    }
+
+    /// C5, 20 Hz (`Lunge.tick`): the body is driven along the line in `frame`; here it ends (20 ticks, the distance of its tier, a wall or
+    /// anything that stops it, another item, a screen) and strikes what its cube meets on the way, once each, the nearest first.
+    fn lunge_tick(&mut self) {
+        use world::combat::{profile::Special, special};
+        let Some(mut l) = self.sp.lunge.take() else { return };
+        let held_id = self.inv.slots[self.touch.hotbar_slot].map(|s| s.id);
+        let Some(s) = world::combat::rules::swing(held_id).filter(|s| s.profile.special() == Special::Lunge) else { return };
+        let p = self.player.pos;
+        let travelled = (p.x - l.start.x).hypot(p.z - l.start.z);
+        let step = (p.x - l.last.x).hypot(p.z - l.last.z);
+        if l.left == 0 || travelled >= l.dist || (l.ticks > 0 && step < special::STILL) || self.screen.is_some() {
+            return;
+        }
+        let (lo, hi) = special::lunge_cube(p, s.reach.dist);
+        let fresh: Vec<usize> = self.mobs.in_box(lo, hi, p).into_iter().filter(|i| !l.done.contains(i)).collect();
+        let (dmg, _) = mobs::attack(held_id);
+        for (k, &i) in fresh.iter().enumerate() {
+            self.mobs.strike(i, special::lunge_damage(dmg, k), p);
+            l.done.push(i);
+        }
+        if !fresh.is_empty() {
+            self.vitals.stamina.hit();
+        }
+        (l.last, l.left, l.ticks) = (p, l.left - 1, l.ticks + 1);
+        self.sp.lunge = Some(l);
+    }
+
+    /// C5 (`ParryHandler`): inside the shotel's window a hit does nothing and goes back to its dealer at the same strength. True when it parried.
+    /// ponytail: the dealer is the mob standing at the hit's source; an arrow is parried too (nobody to answer it).
+    fn parried(&mut self, d: i32, from: glam::Vec3) -> bool {
+        if !self.sp.parry_take() {
+            return false;
+        }
+        self.mobs.reflect(from, d as f32, self.player.pos);
+        self.vitals.stamina.hit();
+        true
+    }
+
     /// C3 / C4 request: while a charge builds, the hand repeats the hotbar switch (the weapon rises slowly from low), one rise per cooldown of
-    /// the weapon; at a full charge it stays raised. `None` when nothing is charging.
+    /// the weapon; at a full charge it stays raised. During the cooldown that comes first (the charge cannot build yet) the same rise follows
+    /// the cooldown itself, so a hold never looks idle. `None` when nothing is charging.
     fn charge_phase(&self, partial: f32) -> Option<f32> {
         let s = world::combat::rules::swing(self.inv.slots[self.touch.hotbar_slot].map(|s| s.id))?;
         let full = s.profile.charge().ticks;
-        if self.charge == 0 || full == 0 || s.interval == 0 {
+        if full == 0 || s.interval == 0 {
+            return None;
+        }
+        let i = s.interval as f32;
+        if self.cd_rise && self.swing_cd > 0 {
+            return Some(1.0 - ((self.swing_cd as f32 - partial).max(0.0) / i).min(1.0));
+        }
+        if self.charge == 0 {
             return None;
         }
         if self.charge >= full {
             return Some(1.0);
         }
-        let i = s.interval as f32;
         Some(((self.charge as f32 - 1.0 + partial).max(0.0) % i) / i)
     }
 
@@ -2008,12 +2137,18 @@ impl App {
             (self.swing_held, self.swing_cd, self.charge) = (held_id, 0, 0);
         }
         let full = world::combat::rules::swing(held_id).map_or(0, |s| s.profile.charge().ticks);
-        if full == 0 || self.swing_blocked(held_id) || self.screen.is_some() || !self.touch.resting() {
+        let cooling = self.swing_cd > 0 && !self.guard_blocks(held_id); // only the cooldown holds it back, not a guard
+        self.cd_rise = false;
+        if full == 0 || (self.swing_blocked(held_id) && !cooling) || self.screen.is_some() || !self.touch.resting() {
             return; // `charge_release` clears it once the finger is up or dragging
         }
         let wall = self.target.map_or(f32::MAX, |h| h.point.distance(eye.as_dvec3()) as f32);
         if self.melee_target(held_id, eye, fwd, wall).0.is_some() {
-            self.charge = (self.charge + 1).min(full);
+            if cooling {
+                self.cd_rise = true; // the charge starts when the cooldown ends; until then the hand rises with it
+            } else {
+                self.charge = (self.charge + 1).min(full);
+            }
         }
     }
 
@@ -2038,6 +2173,7 @@ impl App {
         self.swing_cd = self.swing_cd.saturating_sub(1); // Cortes Combat's attack cooldown (C2), 20 Hz
         self.charge_tick();
         self.survival_tick();
+        self.special_tick();
         let (asleep, riding) = (self.sleep.is_some(), self.riding());
         let fwd = if asleep || riding { 0.0 } else { self.touch.move_input.0 * if self.touch.sneak { 0.3 } else { 1.0 } };
         self.sprint.tick(sprint::In {
@@ -3631,6 +3767,47 @@ impl App {
                 for i in 0..g.max {
                     let ox = gx + gw * 0.5 + (i as f32 - (g.max as f32 - 1.0) * 0.5) * gw * 0.22 - gw * 0.07;
                     HudPipeline::push_quad(v, ox, gy - gw * 0.2, gw * 0.14, gw * 0.14, if i < g.points { [0.4, 0.8, 1.0, 0.95] } else { [0.0, 0.0, 0.0, 0.5] });
+                }
+            }
+            // C5: the special button, where the guard's would be (no weapon has both): lit while the blade is out or the lunge runs, an icon
+            // by special (an arrow, a fan, a cross) and a dark veil that sinks as its price (cooldown) is paid.
+            if self.touch.special_shown && !self.touch.pad.hud_hidden() {
+                use world::combat::{profile::Special, special};
+                let (sx, sy, sw, sh) = self.touch.layout.special;
+                let kind = self.held_special();
+                HudPipeline::push_button(v, sx, sy, sw, sh, if self.sp.parrying() || self.sp.lunge.is_some() { 2 } else { 1 });
+                let c = [1.0; 4];
+                match kind {
+                    Special::Lunge => {
+                        HudPipeline::push_quad(v, sx + sw * 0.2, sy + sh * 0.46, sw * 0.5, sh * 0.08, c);
+                        HudPipeline::push_quad(v, sx + sw * 0.62, sy + sh * 0.36, sw * 0.16, sh * 0.28, c);
+                    }
+                    Special::MultiHit => {
+                        for k in 0..3 {
+                            HudPipeline::push_quad(v, sx + sw * (0.2 + 0.06 * k as f32), sy + sh * (0.28 + 0.16 * k as f32), sw * (0.6 - 0.12 * k as f32), sh * 0.08, c);
+                        }
+                    }
+                    _ => {
+                        HudPipeline::push_quad(v, sx + sw * 0.46, sy + sh * 0.22, sw * 0.08, sh * 0.56, c);
+                        HudPipeline::push_quad(v, sx + sw * 0.3, sy + sh * 0.36, sw * 0.4, sh * 0.08, c);
+                    }
+                }
+                let left = match (kind, swing) {
+                    (Special::Parry, _) => self.sp.parry_cooldown().0 as f32 / self.sp.parry_cooldown().1 as f32,
+                    (Special::Lunge, Some(s)) => self.swing_cd as f32 / special::lunge_cost(s.interval) as f32,
+                    (Special::MultiHit, Some(s)) => self.swing_cd as f32 / special::sweep_cost(s.interval) as f32,
+                    _ => 0.0,
+                }
+                .min(1.0);
+                if left > 0.0 {
+                    HudPipeline::push_quad(v, sx, sy + sh * (1.0 - left), sw, sh * left, [0.0, 0.0, 0.0, 0.55]);
+                }
+            }
+            // C5: the martillo's streak, one gold orb a hit (up to the nine of a full stack) where the guard orbs would be.
+            if self.sp.streak() > 0 && swing.is_some_and(|s| s.profile == world::combat::profile::Profile::Warhammer) && !self.touch.pad.hud_hidden() {
+                let (gx, gy, gw, _) = self.touch.layout.guard;
+                for i in 0..self.sp.streak().min(9) {
+                    HudPipeline::push_quad(v, gx + gw * 0.05 + i as f32 * gw * 0.1, gy - gw * 0.2, gw * 0.08, gw * 0.08, [1.0, 0.8, 0.2, 0.95]);
                 }
             }
             if self.charge > 0 && full > 0 {

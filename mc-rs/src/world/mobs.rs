@@ -1749,6 +1749,11 @@ impl Mobs {
     /// The nearest living mob inside a weapon's cone (`ConeTargets.nearestInCone`), none farther than `wall` (the block the
     /// crosshair rests on; ponytail: tested by the distance to the mob's centre, not to its nearest face). **NOT b1.7.3**, UNVERIFIED.
     pub fn cone(&self, eye: Vec3, look: Vec3, r: crate::world::combat::profile::Reach, wall: f32) -> Option<usize> {
+        self.cone_n(eye, look, r, wall, 1).first().copied()
+    }
+
+    /// The `limit` nearest living mobs inside a cone (0 = all of them), nearest first: the sweep's arc (C5). **NOT b1.7.3**, UNVERIFIED.
+    pub fn cone_n(&self, eye: Vec3, look: Vec3, r: crate::world::combat::profile::Reach, wall: f32, limit: usize) -> Vec<usize> {
         use glam::DVec3;
         let (idx, boxes): (Vec<usize>, Vec<(DVec3, DVec3)>) = self
             .list
@@ -1760,7 +1765,34 @@ impl Mobs {
                 (i, (lo.as_dvec3(), hi.as_dvec3()))
             })
             .unzip();
-        crate::world::combat::cone::nearest_in_cone(eye.as_dvec3(), look.as_dvec3(), &boxes, r, 1).first().map(|&k| idx[k])
+        crate::world::combat::cone::nearest_in_cone(eye.as_dvec3(), look.as_dvec3(), &boxes, r, limit).into_iter().map(|k| idx[k]).collect()
+    }
+
+    /// C5: the living mobs whose box meets the box `lo..hi`, nearest to `from` first (the lunge's cube). **NOT b1.7.3**, UNVERIFIED.
+    pub fn in_box(&self, lo: Vec3, hi: Vec3, from: Vec3) -> Vec<usize> {
+        let mut v: Vec<(usize, f32)> = self
+            .list
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.health > 0.0 && !m.ridden)
+            .filter(|(_, m)| {
+                let (a, b) = m.aabb();
+                a.cmple(hi).all() && b.cmpge(lo).all()
+            })
+            .map(|(i, m)| (i, m.body.pos.distance_squared(from)))
+            .collect();
+        v.sort_by(|a, b| a.1.total_cmp(&b.1));
+        v.into_iter().map(|(i, _)| i).collect()
+    }
+
+    /// C5 (`ParryHandler.reflect`): the parried hit goes back to whoever dealt it, the mob standing at `from` (a melee hit reports the
+    /// attacker's own place; a projectile's is its own, so nobody answers it). The damage window is opened first so the blow always lands.
+    pub fn reflect(&mut self, from: Vec3, dmg: f32, to: Vec3) {
+        let near = self.list.iter().enumerate().filter(|(_, m)| m.health > 0.0 && m.body.pos.distance(from) < 0.5).map(|(i, _)| i).next();
+        if let Some(i) = near {
+            self.list[i].life = 0;
+            self.list[i].damage_in(dmg, to, &mut self.rng, 10);
+        }
     }
 
     /// Retro Sprint's `target.addVelocity` (m/s here): added to the motion as it is, so the hit's own `knockBack` that follows halves it

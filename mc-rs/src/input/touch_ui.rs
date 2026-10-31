@@ -75,6 +75,8 @@ pub enum PointerRole {
     Look,
     /// Press landed on the guard button (Cortes Combat C4, only drawn and hit while `TouchUi::guard_shown`). Guarding while held.
     Guard,
+    /// Press landed on the special button (Cortes Combat C5, same place as the guard button, only drawn and hit while `TouchUi::special_shown`). A press is one use.
+    Special,
 }
 
 /// Live state of one finger on the glass.
@@ -102,6 +104,8 @@ pub struct LayoutRects {
     pub jump: Rect,
     /// The guard button, above `jump` (C4; hit only while `TouchUi::guard_shown`).
     pub guard: Rect,
+    /// The special button (C5): where the guard button is, since no weapon has both (only the sword guards, and it has no special).
+    pub special: Rect,
     /// The sneak button, the d-pad's centre cell.
     pub sneak: Rect,
     /// The d-pad's 8 cells (`DIRS` order: up, down, left, right, up_left, up_right, down_left, down_right). They tile without a gap, so
@@ -153,7 +157,7 @@ impl LayoutRects {
         let gs = 0.13 * u;
         let guard = (jump.0 + (jw - gs) * 0.5, jump.1 - gs - pad, gs, gs);
 
-        Self { pause, inventory, zoom, view, hotbar, jump, guard, sneak: cell(0.0, 0.0), dpad, dpad_gap }
+        Self { pause, inventory, zoom, view, hotbar, jump, guard, special: guard, sneak: cell(0.0, 0.0), dpad, dpad_gap }
     }
 
     /// Hit-test a press. `None` means the press is ignored. The pause button always answers; while paused everything else is a tap on
@@ -249,6 +253,10 @@ pub struct TouchUi {
     pub swing_secs: f32,
     /// The held item can guard (`lib.rs` sets it each frame, C4): the guard button is drawn and answers presses.
     pub guard_shown: bool,
+    /// The held item has a right-button special (`lib.rs` sets it each frame, C5): the special button is drawn and answers presses.
+    pub special_shown: bool,
+    /// A press on the special button since the last `take_special`.
+    special_hit: bool,
     pad_dig: bool,
     pad_attack: bool,
     pad_zoom: bool,
@@ -300,6 +308,8 @@ impl TouchUi {
             pad_jump: false,
             swing_secs: SWING_SECS,
             guard_shown: false,
+            special_shown: false,
+            special_hit: false,
             pad_dig: false,
             pad_attack: false,
             pad_zoom: false,
@@ -464,6 +474,11 @@ impl TouchUi {
         self.set_screen(open);
     }
 
+    /// A press on the special button since the last call (C5).
+    pub fn take_special(&mut self) -> bool {
+        std::mem::take(&mut self.special_hit)
+    }
+
     /// A finger is on the guard button (C4).
     pub fn guarding(&self) -> bool {
         self.pointers.values().any(|p| p.role == PointerRole::Guard)
@@ -604,7 +619,13 @@ impl TouchUi {
             return Some(PointerRole::Tap);
         }
         let role = self.layout.hit_test(x, y, self.paused, self.screen);
-        if self.guard_shown && role == Some(PointerRole::Look) && in_rect(self.layout.guard, x, y) { Some(PointerRole::Guard) } else { role }
+        if self.guard_shown && role == Some(PointerRole::Look) && in_rect(self.layout.guard, x, y) {
+            Some(PointerRole::Guard)
+        } else if self.special_shown && role == Some(PointerRole::Look) && in_rect(self.layout.special, x, y) {
+            Some(PointerRole::Special)
+        } else {
+            role
+        }
     }
 
     pub fn handle_motion(&mut self, ev: &MotionEvent) {
@@ -647,6 +668,7 @@ impl TouchUi {
         if role == PointerRole::Dir {
             self.set_dir(self.dir_at(x, y));
         }
+        self.special_hit |= role == PointerRole::Special;
         self.pointers.insert(pid, Pointer { role, last: (x, y), held: 0.0, travel: 0.0, broke: false });
     }
 
@@ -703,7 +725,7 @@ impl TouchUi {
                     self.release = true; // a hold that stayed put: `lib.rs` turns it into a charged blow if one was building
                 }
             }
-            PointerRole::Jump | PointerRole::Zoom | PointerRole::Guard => {}
+            PointerRole::Jump | PointerRole::Zoom | PointerRole::Guard | PointerRole::Special => {}
         }
     }
 }

@@ -10,6 +10,7 @@
 //!
 //! * `guard`   - C4: the sword's guard (points, arc, stagger) and the block. UNVERIFIED: not compiled.
 //! * `survival` - C4: the healing food bar.
+//! * `special` - C5: the right button: lunge, sweep, parry and the hammer's streak. UNVERIFIED: not compiled.
 //! * `rules`   - C2: the world rule and the swing of whatever is held (cone, cooldown, damage); C3: `charged`, the multiplier of a held-then-released blow. UNVERIFIED: not compiled.
 //!
 //! **Exclusive to the Immersive Pack.** Every feature from Cortes Combat is on only in a world created with the Immersive
@@ -22,4 +23,5 @@ pub mod cone;
 pub mod guard;
 pub mod profile;
 pub mod rules;
+pub mod special;
 pub mod survival;
