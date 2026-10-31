@@ -279,6 +279,8 @@ pub struct Out {
     pub sneak_up: bool,
     pub place: bool,
     pub strike: bool,
+    /// C3: the attack button went up after a hold that dug nothing (`attack_dug` false, `HOLD_SECS` passed): the end of a charge.
+    pub release: bool,
     pub inventory: bool,
     pub pause: bool,
     pub back: bool,
@@ -501,6 +503,7 @@ impl Pad {
             o.dig = self.attack_dug || self.attack_t >= HOLD_SECS;
         } else if up(Act::Attack) {
             o.strike = !self.attack_dug && self.attack_t < HOLD_SECS; // the complement of `dig`: no press is neither
+            o.release = !self.attack_dug && self.attack_t >= HOLD_SECS;
             (self.attack_t, self.attack_dug) = (0.0, false);
         }
         // Use: on the press, then 4 a second while held.

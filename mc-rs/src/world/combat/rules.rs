@@ -7,7 +7,7 @@
 //! the 10-tick damage window and no cooldown.
 
 use super::catalog;
-use super::profile::{interval_ticks, Profile, Reach};
+use super::profile::{charge_multiplier, charge_ratio, interval_ticks, Profile, Reach, MIN_CHARGE_HOLD};
 use crate::world::craft::{self, Kind};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -96,6 +96,13 @@ pub fn swing(held: Option<u16>) -> Option<Swing> {
     if on() { swing_of(held) } else { None }
 }
 
+/// C3: the damage multiplier of a blow released after `held` ticks of charge (`1 + bonus * ratio`); `None` for a profile that cannot
+/// charge or a hold under `MIN_CHARGE_HOLD` (a plain tap). `held` is capped by the caller at `Profile::charge().ticks`.
+pub fn charged(profile: Profile, held: u32) -> Option<f32> {
+    let c = profile.charge();
+    (c.ticks > 0 && held >= MIN_CHARGE_HOLD).then(|| charge_multiplier(c.bonus, charge_ratio(held, c.ticks)))
+}
+
 /// Is `id` one of the 20 weapons (an item that exists only in an Immersive Pack world)?
 pub fn is_weapon(id: u16) -> bool {
     catalog::get(id).is_some()
@@ -120,5 +127,15 @@ mod tests {
         // The first weapon of the catalog is the wooden dagger, and a bone is not a weapon.
         assert_eq!(swing_of(Some(catalog::FIRST_ID)).map(|s| s.profile), Some(Profile::Dagger));
         assert_eq!(swing_of(Some(352)), None);
+    }
+
+    // C3: a full charge pays the table's bonus, a short hold or a profile that cannot charge pays nothing extra.
+    #[test]
+    fn a_charged_blow_pays_the_profiles_bonus() {
+        assert_eq!(charged(Profile::Sword, 3), None); // under the minimum hold: a tap
+        assert_eq!(charged(Profile::Sword, 4), Some(1.0)); // the minimum hold, ratio 0
+        assert_eq!(charged(Profile::Sword, 25), Some(1.5)); // full: 1 + 0.5
+        assert_eq!(charged(Profile::Axe, 60), Some(3.0)); // 1 + 2.0
+        assert_eq!(charged(Profile::Dagger, 99), None); // cannot charge
     }
 }

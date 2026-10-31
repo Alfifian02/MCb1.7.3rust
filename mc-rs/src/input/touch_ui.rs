@@ -249,6 +249,8 @@ pub struct TouchUi {
     pad_look: (f32, f32),
     /// The pad's attack tap: hit what is under the crosshair but never place a block.
     strike: bool,
+    /// C3: a still look finger (or the pad's attack) lifted after a hold, `HOLD_SECS` or more: not a tap, the end of a charge.
+    release: bool,
     /// A d-pad step on a screen that jumps between its targets (`Pad::snap`), until `take_nav`.
     nav: Option<(i32, i32)>,
     /// B in a container screen, LB / RB pages (-1 / +1) and the right stick's scroll (px), until taken: `lib.rs` decides what they mean.
@@ -294,6 +296,7 @@ impl TouchUi {
             pad_sprint: false,
             pad_look: (0.0, 0.0),
             strike: false,
+            release: false,
             nav: None,
             back: false,
             pad_info: false,
@@ -364,6 +367,7 @@ impl TouchUi {
         }
         self.place |= o.place;
         self.strike |= o.strike;
+        self.release |= o.release;
         self.inventory |= o.inventory;
         if o.pause {
             self.pause();
@@ -425,6 +429,11 @@ impl TouchUi {
             self.cursor_pos = p;
             self.events.push(ScreenEv::Move(p.0, p.1));
         }
+    }
+
+    /// A still hold ended (finger up, or the pad's attack released) since the last call: Cortes Combat's charged blow (C3).
+    pub fn take_release(&mut self) -> bool {
+        std::mem::take(&mut self.release)
     }
 
     /// The pad's attack tap since the last call.
@@ -558,6 +567,7 @@ impl TouchUi {
         self.move_input = (0.0, 0.0);
         self.look_delta = (0.0, 0.0);
         self.place = false;
+        self.release = false;
         self.events.clear();
     }
 
@@ -670,6 +680,8 @@ impl TouchUi {
                 let slop = self.surface_w.min(self.surface_h) as f32 * SLOP;
                 if !ptr.broke && ptr.travel < slop {
                     self.place = true;
+                } else if ptr.broke && ptr.travel < slop {
+                    self.release = true; // a hold that stayed put: `lib.rs` turns it into a charged blow if one was building
                 }
             }
             PointerRole::Jump | PointerRole::Zoom => {}

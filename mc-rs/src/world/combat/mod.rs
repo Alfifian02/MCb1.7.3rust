@@ -8,7 +8,7 @@
 //! * `profile` - the per-profile tables (reach, charge, knockback, special) and the tempo / charge arithmetic.
 //! * `catalog` - the five new melee families, their ids (400..=424), names, damage and recipes.
 //!
-//! * `rules`   - C2: the world rule and the swing of whatever is held (cone, cooldown, damage). UNVERIFIED: not compiled.
+//! * `rules`   - C2: the world rule and the swing of whatever is held (cone, cooldown, damage); C3: `charged`, the multiplier of a held-then-released blow. UNVERIFIED: not compiled.
 //!
 //! **Exclusive to the Immersive Pack.** Every feature from Cortes Combat is on only in a world created with the Immersive
 //! Pack ON (`pack_rule`, `rules::set` from `enter_world`); with it OFF the b1.7.3 combat plays as before. This replaces

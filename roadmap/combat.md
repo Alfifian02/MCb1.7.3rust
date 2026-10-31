@@ -25,7 +25,7 @@ Port of the NeoForge 1.21.1 mod `cortes-combat` 1.4.12 (GPL-3.0-only; the port i
 |---|---|---|
 | C1 | `combat/{cone,profile,catalog}.rs`: cone math, profile tables, tempo / charge arithmetic, 20 weapons (ids, names, damage, durability, recipes in `craft::recipes()` so the recipe book lists them), `mobs::attack` gives them their damage (rounded) | **written, not compiled** (+3 tests) |
 | C2 | Immersive Pack gate (`combat::rules`); `f32` damage; cone targeting replaces the single ray for the held item (the bare hand too); attack cooldown per family; old tools get their profile; 3-tick damage window | written 2026-10-31, **UNVERIFIED** (not compiled, not run) |
-| C3 | Charge (hold the attack button), HUD bar and cooldown mark | |
+| C3 | Charge (hold the attack button), HUD bar and cooldown mark | written 2026-10-31, **UNVERIFIED** (not compiled, not run; +1 test in `combat::rules`) |
 | C4 | Guard + stamina, eat interrupt, healing food bar | |
 | C5 | Specials: lunge (ropera), multi_hit (alabarda, hoe), parry + double cut (shotel), streak (martillo) | |
 | C6 | Item sprites (mod PNGs into `items.rgba`, `tools/`), held-item model, tooltip lines | |
@@ -42,3 +42,10 @@ Port of the NeoForge 1.21.1 mod `cortes-combat` 1.4.12 (GPL-3.0-only; the port i
 * Vanilla 1.21 attack speeds for sword / axe / pickaxe / shovel / hoe are **from memory, UNVERIFIED** (owner accepted it). The mod has no `AxeBalance` class, only `AxeBalanceTest`: the axe keeps its damage and only gets `TEMPO[AXE]` 0.85. `SwordRebalance` (sword one lower) and `HoeRebalance` (+1.5) are applied in `combat::rules`. The bare hand is 4 ticks (`4.0 * 1.25`), not `UNARMED_INTERVAL` (12, the fallback for a non-positive speed).
 * C2 leaves out knockback per profile (not in any milestone).
 * C2 gate: one process-wide flag (`rules::set`, from `enter_world`), hidden recipes in `craft::find` and `book::in_cat`; `Mob.health` is `f32` and `Mobs::strike` / `Mobs::cone` are new.
+
+## C3 notes and gaps
+
+* Charge: a look finger (or the pad's attack) held still on a mob in the cone of a weapon with a `Profile::charge` row builds `App::charge` at 20 Hz, up to the row's `ticks`, and only once the cooldown is over. Lifting the finger delivers one blow with `rules::charged` (`1 + bonus * ratio`, `None` under `MIN_CHARGE_HOLD`): `touch.take_release` (a still hold of `HOLD_SECS` or more that ends) makes `place` true for the usual attack path, which multiplies the damage by `App::blow`. A shorter press is the plain tap, as before. Dragging the finger cancels the charge.
+* While `charge > 0` the dig is held back, so a hold on a mob no longer digs the block behind it (only for weapons that can charge).
+* HUD (`lib.rs`, under the crosshair, only with the rule on): the charge bar (white, gold when full, a red tick at the minimum hold) and, outside a charge, a thin cooldown bar that fills until the next swing.
+* Gaps: the minimum hold is `HOLD_SECS` (0.4 s = 8 ticks) on touch, so a tap and a charge never overlap but `charge_ratio` starts at 0.19 for the sword; the release uses the previous frame's block target for the wall test (ponytail); no sound or particles for a full charge (C7); `Mobs::strike` knockback still ignores the charge.

@@ -216,6 +216,10 @@ struct App {
     /// (`None` = the bare hand) that cooldown belongs to: changing item starts it over (`resetOnItemChange`).
     swing_cd: u32,
     swing_held: Option<u16>,
+    /// C3: ticks the attack has been held on a mob in reach of a weapon that can charge (`Profile::charge`), and the damage multiplier of the
+    /// blow this frame's release delivers (1 = a plain one). NOT b1.7.3, UNVERIFIED.
+    charge: u32,
+    blow: f32,
     mat: Option<pack::Mat>,
     mat_ui: bool,
     hint: f32,
@@ -391,6 +395,8 @@ impl App {
             pack_rule: false,
             swing_cd: 0,
             swing_held: None,
+            charge: 0,
+            blow: 1.0,
             mat: None,
             mat_ui: false,
             pack_saved: None,
@@ -523,7 +529,7 @@ impl App {
         (self.seed, self.world_type) = (info.seed, info.ty);
         self.pack_rule = info.pack;
         world::combat::rules::set(info.pack); // Cortes Combat lives only in an Immersive Pack world
-        self.swing_cd = 0;
+        (self.swing_cd, self.charge) = (0, 0);
         // The world resumes in the dimension it was left in (`<world>/dim`).
         self.nether = std::fs::read_to_string(self.dir.join("dim")).is_ok_and(|s| s.trim() == "nether");
         if self.nether {
@@ -1304,6 +1310,11 @@ impl App {
         let place = self.touch.take_place();
         let place = if self.carry.is_some() { if place { self.put_pack() } false } else { place }; // a carried pack takes the tap
         let strike = self.touch.take_strike();
+        // Cortes Combat C3 (NOT b1.7.3, UNVERIFIED): lifting a finger that held still on a mob ends the charge as one blow, `place` for the code below.
+        let release = self.touch.take_release();
+        let charged = self.charge_release(release);
+        self.blow = charged.unwrap_or(1.0);
+        let place = place || charged.is_some();
         if place && !self.swing_swallowed() {
             self.body.swing(); // a tap places, uses or hits: `swingItem`
         }
@@ -1354,7 +1365,7 @@ impl App {
         // A broken block drops its items (world::items) only if the held item may harvest it (stone needs a pickaxe),
         // and wears the tool (`Item.onBlockDestroyed`: 1 use, a sword 2, a hoe none).
         match self.target {
-            Some(hit) if self.touch.digging() => {
+            Some(hit) if self.touch.digging() && self.charge == 0 => {
                 self.dig_acc += real_dt;
                 while self.dig_acc >= dig::TICK {
                     self.dig_acc -= dig::TICK;
@@ -1542,6 +1553,7 @@ impl App {
                     return; // still inside the last swing's cooldown: nothing happens, and no part of the blow is paid early
                 }
                 let (dmg, wear) = mobs::attack(held_id);
+                let dmg = dmg * std::mem::replace(&mut self.blow, 1.0); // C3: the charged blow
                 // Retro Sprint (`PlayerEntityMixin.onAttack`): a sprinting hit shoves the target the way the player looks, before the hit's own
                 // knockback, and ends the sprint (the walk is set from the input every frame, so the mod's x0.6 on the player's motion has no use here).
                 if self.sprint.attack() {
@@ -1889,10 +1901,44 @@ impl App {
         self.melee_target(held_id, eye, fwd, wall).0.is_some()
     }
 
+    /// C3, 20 Hz: a finger (or the pad's attack) held still on a mob in the cone of a weapon that can charge builds `charge` up to the profile's
+    /// full hold, once the cooldown is over. Changing item starts everything over, as in the swing code (`resetOnItemChange`).
+    fn charge_tick(&mut self) {
+        let (eye, fwd, slot) = (self.camera.pos, self.camera.forward(), self.touch.hotbar_slot);
+        let held_id = self.inv.slots[slot].map(|s| s.id);
+        if self.swing_held != held_id {
+            (self.swing_held, self.swing_cd, self.charge) = (held_id, 0, 0);
+        }
+        let full = world::combat::rules::swing(held_id).map_or(0, |s| s.profile.charge().ticks);
+        if full == 0 || self.swing_cd > 0 || self.screen.is_some() || !self.touch.resting() {
+            return; // `charge_release` clears it once the finger is up or dragging
+        }
+        let wall = self.target.map_or(f32::MAX, |h| h.point.distance(eye.as_dvec3()) as f32);
+        if self.melee_target(held_id, eye, fwd, wall).0.is_some() {
+            self.charge = (self.charge + 1).min(full);
+        }
+    }
+
+    /// C3: the multiplier of the blow a release now delivers (`rules::charged`), and the end of the charge once the finger is not holding
+    /// still any more (up, or dragging: a drag cancels).
+    fn charge_release(&mut self, release: bool) -> Option<f32> {
+        let held = self.charge;
+        if !self.touch.resting() {
+            self.charge = 0;
+        }
+        let (eye, fwd) = (self.camera.pos, self.camera.forward());
+        let held_id = self.inv.slots[self.touch.hotbar_slot].map(|s| s.id);
+        let wall = self.target.map_or(f32::MAX, |h| h.point.distance(eye.as_dvec3()) as f32);
+        // A release with nothing in reach is no blow: it must not fall through to placing a block or using the item.
+        let hit = release && self.swing_cd == 0 && self.melee_target(held_id, eye, fwd, wall).0.is_some();
+        world::combat::rules::swing(held_id).filter(|_| hit).and_then(|s| world::combat::rules::charged(s.profile, held))
+    }
+
     /// One 20 Hz tick of sprinting (`ClientPlayerEntityMixin.tickSprintingMovement`) and its dust (`EntityMixin.addParticles`: a speck of the
     /// block below the feet while sprinting out of the water). The forward input is the d-pad's / the stick's, sneaking already x0.3.
     fn sprint_tick(&mut self) {
         self.swing_cd = self.swing_cd.saturating_sub(1); // Cortes Combat's attack cooldown (C2), 20 Hz
+        self.charge_tick();
         let (asleep, riding) = (self.sleep.is_some(), self.riding());
         let fwd = if asleep || riding { 0.0 } else { self.touch.move_input.0 * if self.touch.sneak { 0.3 } else { 1.0 } };
         self.sprint.tick(sprint::In {
@@ -3447,6 +3493,27 @@ impl App {
             let (bx, by) = (w * 0.5 - bw * 0.5, h * 0.5 + 0.05 * w.min(h));
             HudPipeline::push_quad(v, bx, by, bw, bh, [0.0, 0.0, 0.0, 0.6]);
             HudPipeline::push_quad(v, bx, by, bw * self.dig.damage.min(1.0), bh, [1.0, 1.0, 1.0, 0.9]);
+        }
+
+        // Cortes Combat C3 (NOT b1.7.3, UNVERIFIED): the charge bar under the crosshair (white, gold when full; a tick at the minimum hold, below which a
+        // release is a plain tap) and the cooldown mark, the attack indicator: a thin bar that fills until the next swing.
+        if play && world::combat::rules::on() {
+            let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
+            let (bw, bh) = (0.12 * w.min(h), (0.012 * w.min(h)).max(3.0));
+            let (bx, by) = (w * 0.5 - bw * 0.5, h * 0.5 + 0.05 * w.min(h) + bh * 2.0);
+            let swing = world::combat::rules::swing(self.inv.slots[self.touch.hotbar_slot].map(|s| s.id));
+            let full = swing.map_or(0, |s| s.profile.charge().ticks);
+            if self.charge > 0 && full > 0 {
+                let f = (self.charge as f32 / full as f32).min(1.0);
+                HudPipeline::push_quad(v, bx, by, bw, bh, [0.0, 0.0, 0.0, 0.6]);
+                HudPipeline::push_quad(v, bx, by, bw * f, bh, if self.charge >= full { [1.0, 0.8, 0.2, 0.95] } else { [1.0, 1.0, 1.0, 0.9] });
+                let m = world::combat::profile::MIN_CHARGE_HOLD as f32 / full as f32;
+                HudPipeline::push_quad(v, bx + bw * m, by, (bw * 0.01).max(1.0), bh, [1.0, 0.3, 0.3, 0.9]);
+            } else if let Some(s) = swing.filter(|s| self.swing_cd > 0 && self.swing_held == self.inv.slots[self.touch.hotbar_slot].map(|i| i.id) && s.interval > 0) {
+                let f = 1.0 - (self.swing_cd as f32 / s.interval as f32).min(1.0);
+                HudPipeline::push_quad(v, bx, by, bw, bh * 0.5, [0.0, 0.0, 0.0, 0.5]);
+                HudPipeline::push_quad(v, bx, by, bw * f, bh * 0.5, [0.8, 0.8, 0.8, 0.8]);
+            }
         }
 
         // `GuiEditSign`: the title, the board with its four lines (the one being edited is wrapped in `> <` and blinks), and the keys.
