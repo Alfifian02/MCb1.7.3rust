@@ -8,10 +8,14 @@
 //! * `profile` - the per-profile tables (reach, charge, knockback, special) and the tempo / charge arithmetic.
 //! * `catalog` - the five new melee families, their ids (400..=424), names, damage and recipes.
 //!
-//! Hooks into the b1.7.3 base (design.md rule 1): `craft::recipes()` (recipe book included), `craft::max_damage`,
-//! `items::{name, max_stack, tile}` and `mobs::attack`. The switch (`combatRules`, default off, design.md rule 5)
-//! arrives with C2, the first milestone that changes how an old weapon plays.
+//! * `rules`   - C2: the world rule and the swing of whatever is held (cone, cooldown, damage). UNVERIFIED: not compiled.
+//!
+//! **Exclusive to the Immersive Pack.** Every feature from Cortes Combat is on only in a world created with the Immersive
+//! Pack ON (`pack_rule`, `rules::set` from `enter_world`); with it OFF the b1.7.3 combat plays as before. This replaces
+//! the `combatRules` option the roadmap planned. Hooks into the base (design.md rule 1): `craft::find` and the recipe
+//! book (the 20 weapons), `craft::max_damage`, `items::{name, max_stack, tile}`, `mobs::{attack, strike, cone}`.
 
 pub mod catalog;
 pub mod cone;
 pub mod profile;
+pub mod rules;

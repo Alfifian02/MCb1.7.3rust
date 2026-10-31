@@ -1,6 +1,6 @@
 # Cortés Combat port (NOT b1.7.3)
 
-Port of the NeoForge 1.21.1 mod `cortes-combat` 1.4.12 (GPL-3.0-only; the port is GPL-3.0 too, the owner's permission is on record: answer 4B) into `mc-rs`. Everything here follows [`design.md`](design.md): two hooks minimum, nothing old becomes pointless, marked NOT b1.7.3, switch `combatRules` (options.txt, **default off**) once a milestone changes how an old weapon plays (from C2). Written without a toolchain: not compiled, not run (answer 31B); each module carries one `#[test]` for when it is.
+Port of the NeoForge 1.21.1 mod `cortes-combat` 1.4.12 (GPL-3.0-only; the port is GPL-3.0 too, the owner's permission is on record: answer 4B) into `mc-rs`. Everything here follows [`design.md`](design.md): two hooks minimum, nothing old becomes pointless, marked NOT b1.7.3, **exclusive to the Immersive Pack**: every Cortes Combat feature is on only in a world created with the Immersive Pack ON (`pack_rule`, the 4th line of `<world>/info`), and with it OFF the b1.7.3 combat plays as before (owner's decision, 2026-10-31; it replaces the `combatRules` option this plan had). Written without a toolchain: not compiled, not run (answer 31B); each module carries one `#[test]` for when it is.
 
 ## Decisions (from the 2026-10-30 questionnaire)
 
@@ -24,7 +24,7 @@ Port of the NeoForge 1.21.1 mod `cortes-combat` 1.4.12 (GPL-3.0-only; the port i
 | # | What | State |
 |---|---|---|
 | C1 | `combat/{cone,profile,catalog}.rs`: cone math, profile tables, tempo / charge arithmetic, 20 weapons (ids, names, damage, durability, recipes in `craft::recipes()` so the recipe book lists them), `mobs::attack` gives them their damage (rounded) | **written, not compiled** (+3 tests) |
-| C2 | `combatRules` switch; `f32` damage; cone targeting replaces the single ray for the held weapon; attack cooldown per family; old tools get their profile | next |
+| C2 | Immersive Pack gate (`combat::rules`); `f32` damage; cone targeting replaces the single ray for the held item (the bare hand too); attack cooldown per family; old tools get their profile; 3-tick damage window | written 2026-10-31, **UNVERIFIED** (not compiled, not run) |
 | C3 | Charge (hold the attack button), HUD bar and cooldown mark | |
 | C4 | Guard + stamina, eat interrupt, healing food bar | |
 | C5 | Specials: lunge (ropera), multi_hit (alabarda, hoe), parry + double cut (shotel), streak (martillo) | |
@@ -39,4 +39,6 @@ Port of the NeoForge 1.21.1 mod `cortes-combat` 1.4.12 (GPL-3.0-only; the port i
 * The mod's `src/generated` recipe JSON is older than `WeaponShape` (it shows a vertical ropera and an off-centre martillo); the code was followed.
 * Damage is `family + tier bonus` (`CortesWeaponItem.totalAttackDamage`): ropera 6.5, alabarda 4, martillo 3, daga 1.6, shotel 2.7 plus wood 0 / stone 1 / iron 2 / diamond 3 / gold 0.
 * Not done yet, found while hooking: `world/pack.rs` (satchel categories) and `render/player.rs` / `lib.rs` (held model, HUD shape) only know `craft::tool`, so the weapons show as a flat tier colour and sit in no satchel category until C6.
-* Vanilla 1.21 attack speeds for sword / axe / pickaxe / shovel / hoe and the mod's `AxeBalance` / `HoeRebalance` numbers are read in C2.
+* Vanilla 1.21 attack speeds for sword / axe / pickaxe / shovel / hoe are **from memory, UNVERIFIED** (owner accepted it). The mod has no `AxeBalance` class, only `AxeBalanceTest`: the axe keeps its damage and only gets `TEMPO[AXE]` 0.85. `SwordRebalance` (sword one lower) and `HoeRebalance` (+1.5) are applied in `combat::rules`. The bare hand is 4 ticks (`4.0 * 1.25`), not `UNARMED_INTERVAL` (12, the fallback for a non-positive speed).
+* C2 leaves out knockback per profile (not in any milestone).
+* C2 gate: one process-wide flag (`rules::set`, from `enter_world`), hidden recipes in `craft::find` and `book::in_cat`; `Mob.health` is `f32` and `Mobs::strike` / `Mobs::cone` are new.

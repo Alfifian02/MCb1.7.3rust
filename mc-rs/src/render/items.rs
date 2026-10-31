@@ -577,7 +577,7 @@ fn head_n(kind: Kind) -> usize {
 /// NOT b1.7.3: the wolf of Acidul's Wolves (`wolf_model`, from `tools/gen_wolf.py`), standing or sitting; the tail angle is still
 /// `EntityWolf.setTailRotation`, on both of its boxes.
 fn wolf(m: &Mob) -> Vec<Part> {
-    let tail = if m.anger > 0 { PI * 0.49 } else if m.tame { (0.55 - (20 - m.health).clamp(0, 20) as f32 * 0.02) * PI } else { PI * 0.2 };
+    let tail = if m.anger > 0 { PI * 0.49 } else if m.tame { (0.55 - (20.0 - m.health).clamp(0.0, 20.0) * 0.02) * PI } else { PI * 0.2 };
     let boxes = if m.sitting { &wolf_model::SIT[..] } else { &wolf_model::STAND[..] };
     boxes.iter().enumerate().map(|(i, &(min, size, rp, mut rot, sw, o, g))| {
         if i >= boxes.len() - wolf_model::TAIL_N {

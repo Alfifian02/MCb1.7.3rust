@@ -110,7 +110,9 @@ pub fn entries() -> &'static [Entry] {
 
 /// The entries of one category, as indices into `entries()`.
 pub fn in_cat(cat: Cat) -> Vec<usize> {
-    entries().iter().enumerate().filter(|(_, e)| e.cat == cat).map(|(i, _)| i).collect()
+    // The recipes of the 20 Cortes weapons are listed only in a world with the Immersive Pack ON (`combat::rules`, NOT b1.7.3).
+    let combat = super::combat::rules::on();
+    entries().iter().enumerate().filter(|(_, e)| e.cat == cat && (combat || !super::combat::rules::is_weapon(e.out.id))).map(|(i, _)| i).collect()
 }
 
 /// How many of the ingredient `code` the bag (main inventory and quick belt) and the grid hold together.

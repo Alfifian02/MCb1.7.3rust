@@ -353,7 +353,9 @@ pub fn recipes() -> &'static [Recipe] {
 /// `CraftingManager.findMatchingRecipe` for a `gw` x `gw` grid.
 pub fn find(grid: &[Option<ItemStack>; 9], gw: usize) -> Option<ItemStack> {
     let ids = grid.map(|s| s.map_or(0, |s| code(s.id, s.damage)));
-    recipes().iter().find(|r| r.matches(&ids, gw)).map(|r| r.out)
+    // The 20 Cortes weapons are made only in a world with the Immersive Pack ON (`combat::rules`, NOT b1.7.3).
+    let combat = super::combat::rules::on();
+    recipes().iter().find(|r| r.matches(&ids, gw) && (combat || !super::combat::rules::is_weapon(r.out.id))).map(|r| r.out)
 }
 
 // ---- Furnace ----

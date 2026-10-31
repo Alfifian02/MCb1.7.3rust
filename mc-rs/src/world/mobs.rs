@@ -106,7 +106,7 @@ pub struct Mob {
     pub body: Player,
     /// `rotationYaw`, degrees; the mob moves along (-sin, cos).
     pub yaw: f32,
-    pub health: i32,
+    pub health: f32,
     /// `field_704_R` / `field_705_Q`: leg swing phase and amount.
     pub limb: f32,
     pub limb_amt: f32,
@@ -148,7 +148,7 @@ pub struct Mob {
     damp: bool,
     blocked: bool,
     life: u8,
-    last: i32,
+    last: f32,
     target: bool,
     shot: bool,
     lit: bool,
@@ -429,15 +429,15 @@ impl Mob {
         let pos = Vec3::new(x, feet + half.y + 0.01, z);
         // ponytail: a process-wide counter (as `Cart::new` has), so callers of `new` need no id plumbing; it wraps after 2^32 mobs.
         static NEXT: AtomicU32 = AtomicU32::new(0);
-        Self { id: NEXT.fetch_add(1, Ordering::Relaxed), kind, body: Player { pos, vel: Vec3::ZERO, on_ground: false }, yaw, health: hp, limb: 0.0, limb_amt: 0.0, hurt: 0, death: 0, size, color, sheared: false,
+        Self { id: NEXT.fetch_add(1, Ordering::Relaxed), kind, body: Player { pos, vel: Vec3::ZERO, on_ground: false }, yaw, health: hp as f32, limb: 0.0, limb_amt: 0.0, hurt: 0, death: 0, size, color, sheared: false,
             fuse: 0, tame: false, sitting: false, prey: None, bit: None, coat: COAT_PALE, voice: if kind == Wolf { ((x.to_bits() ^ z.to_bits().rotate_left(11)) % VOICES as u32) as u8 } else { 0 }, saddled: false, ridden: false, half, age: 0, yaw_vel: 0.0, look: None, goal: None, fspeed: 0.0, jumping: false, wet: false, damp: false, blocked: false, life: 0,
-            last: 0, target: false, shot: false, lit: false, anger: 0, attack_time: 0, hop: 0, egg: rng.next_int_bound(6000) + 6000, fire: 0,
+            last: 0.0, target: false, shot: false, lit: false, anger: 0, attack_time: 0, hop: 0, egg: rng.next_int_bound(6000) + 6000, fire: 0,
             free: 0, swim: Vec3::ZERO, path: Vec::new(), path_i: 0, smart: false, wander: false, panic: 0, scare: Vec3::ZERO, mate: None, graze: 0, rest: 0, gait: 1.0, head: 0.0, munch: 0.0, body_yaw: yaw, head_pitch: 0.0, look_pitch: 0.0, talk: 0, cry: None, airborne: false, enraged: false, growl: 0, charge: 0, prev_charge: 0, anim: 0.0, wp: pos, course: 0 }
     }
 
     /// `EntityWolf.interact`, a bone that took: tamed, sitting, full health, calm.
     pub fn tame_now(&mut self) {
-        (self.tame, self.sitting, self.health, self.anger, self.target, self.goal) = (true, true, 20, 0, false, None);
+        (self.tame, self.sitting, self.health, self.anger, self.target, self.goal) = (true, true, 20.0, 0, false, None);
     }
 
     /// `setPathToEntity(null)` and `isJumping = false`: stop where it stands.
@@ -619,7 +619,7 @@ impl Mob {
         self.hurt = self.hurt.saturating_sub(1);
         self.free = self.free.saturating_sub(1);
         self.attack_time = self.attack_time.saturating_sub(1);
-        if self.health <= 0 {
+        if self.health <= 0.0 {
             // `EntityLiving.onUpdate` + `isMovementBlocked`: the corpse counts `deathTime` (started by `Mobs::update`, which drops the loot), has no AI,
             // does not jump or steer, and only falls and slides on what the blow gave it (`Mob::step`). `Mobs::update` removes it past 20.
             self.death += (self.death > 0) as u8;
@@ -643,14 +643,14 @@ impl Mob {
                 ev.push(Ev::Snd("random.fizz", pos, 0.7, 1.6, true));
                 self.fire = 0;
             } else if self.fire % 20 == 0 {
-                self.health -= 1;
+                self.health -= 1.0;
                 self.hurt = 10;
-                self.cry = Some(if self.health <= 0 { Cry::Die } else { Cry::Hurt });
+                self.cry = Some(if self.health <= 0.0 { Cry::Die } else { Cry::Hurt });
             }
         }
         // `BlockCactus.onEntityCollidedWithBlock`: 1 damage per tick of contact (the 10-tick window paces it), no anger, no knockback.
         if physics::touching(pos, self.half, c.get, 81) {
-            self.hit(1, pos);
+            self.hit(1.0, pos, 20);
         }
         if k == Wolf && self.wet {
             self.sitting = false; // `EntityWolf.updatePlayerActionState`: in water it stands up
@@ -1042,7 +1042,7 @@ impl Mob {
         if snd.next_int_bound(1000) < t {
             self.talk = -if matches!(self.kind, Pig | Cow | Sheep | Chicken | Wolf | Squid) { 120 } else { 80 };
             // `EntityWolf.getLivingSound`: growl when angry, else 1 in 3 pants (or whines, tamed and under 10 health), else bark.
-            let wolf = if self.anger > 0 && !self.tame { 3 } else if snd.next_int_bound(3) == 0 { if self.tame && self.health < 10 { 2 } else { 1 } } else { 0 };
+            let wolf = if self.anger > 0 && !self.tame { 3 } else if snd.next_int_bound(3) == 0 { if self.tame && self.health < 10.0 { 2 } else { 1 } } else { 0 };
             if let Some((n, v)) = cry(self.kind, Cry::Say, wolf | self.voice << 2) {
                 ev.push(Ev::Snd(n, pos, v, 1.0, true));
             }
@@ -1060,30 +1060,35 @@ impl Mob {
 
     /// `EntityLiving.attackEntityFrom`: a hit inside the 10-tick window only pays the difference; the first one knocks back.
     /// A zombie pigman or wolf hit turns on its attacker.
-    pub fn damage(&mut self, dmg: i32, from: Vec3, rng: &mut JavaRandom) {
+    pub fn damage(&mut self, dmg: f32, from: Vec3, rng: &mut JavaRandom) {
+        self.damage_in(dmg, from, rng, 20);
+    }
+
+    /// `damage` with the damage window it starts: `life` 20 is b1.7.3's 10 ticks; a Cortes weapon starts at `10 + IFRAME_TICKS` (**NOT b1.7.3**).
+    pub fn damage_in(&mut self, dmg: f32, from: Vec3, rng: &mut JavaRandom, life: u8) {
         if self.kind == Wolf {
             self.sitting = false; // `EntityWolf.attackEntityFrom`
         }
         // A tamed wolf hit by its owner (the only player there is) does not turn on them.
-        if self.health > 0 && matches!(self.kind, PigZombie | Wolf) && !(self.kind == Wolf && self.tame) {
+        if self.health > 0.0 && matches!(self.kind, PigZombie | Wolf) && !(self.kind == Wolf && self.tame) {
             self.anger = if self.kind == Wolf { 1 << 20 } else { 400 + rng.next_int_bound(400) };
             self.target = true;
             self.enraged = self.kind == PigZombie;
         }
         // Smart animals (not b1.7.3) run from the blow.
-        if self.smart && animal(self.kind) && self.health > 0 && !self.ridden {
+        if self.smart && animal(self.kind) && self.health > 0.0 && !self.ridden {
             (self.panic, self.scare) = (PANIC_TICKS + rng.next_int_bound(40) as u16, from);
             (self.wander, self.goal) = (false, None);
             (self.graze, self.rest) = (0, 0);
             self.path.clear();
         }
-        self.hit(dmg, from);
+        self.hit(dmg, from, life);
     }
 
     /// The damage window of `attackEntityFrom` without the attacker's anger. `from` at the mob's own place = no
     /// knockback, which is the `attackEntityFrom(null, n)` of a cactus.
-    fn hit(&mut self, dmg: i32, from: Vec3) {
-        if self.health <= 0 {
+    fn hit(&mut self, dmg: f32, from: Vec3, life: u8) {
+        if self.health <= 0.0 {
             return;
         }
         self.age = 0;
@@ -1093,10 +1098,10 @@ impl Mob {
             self.last = dmg;
         } else {
             self.last = dmg;
-            self.life = 20;
+            self.life = life;
             self.health -= dmg;
             self.hurt = 10;
-            self.cry = Some(if self.health <= 0 { Cry::Die } else { Cry::Hurt }); // only a fresh hit is heard, not the top-up inside the window
+            self.cry = Some(if self.health <= 0.0 { Cry::Die } else { Cry::Hurt }); // only a fresh hit is heard, not the top-up inside the window
             let (dx, dz) = (from.x - self.body.pos.x, from.z - self.body.pos.z);
             let d = (dx * dx + dz * dz).sqrt();
             if d > 1e-4 {
@@ -1230,7 +1235,7 @@ impl Fireball {
         let (plo, phi) = (c.player - physics::HALF, c.player + physics::HALF);
         take(grown(plo, phi), Hit::Player);
         for (i, m) in list.iter().enumerate() {
-            if m.health <= 0 || (m.id == self.owner && self.age < 25) {
+            if m.health <= 0.0 || (m.id == self.owner && self.age < 25) {
                 continue;
             }
             let (lo, hi) = m.aabb();
@@ -1248,7 +1253,7 @@ impl Fireball {
         }
         if block.is_some() || best.is_some() {
             match best.map(|b| b.1) {
-                Some(Hit::Mob(i)) => list[i].damage(0, self.pos, rng), // `attackEntityFrom(owner, 0)`
+                Some(Hit::Mob(i)) => list[i].damage(0.0, self.pos, rng), // `attackEntityFrom(owner, 0)`
                 Some(Hit::Thing(i)) => ev.push(Ev::Strike(targets[i].2)),
                 // `EntityFireball.attackEntityFrom`: the hit one flies along its attacker's look (the ghast's, level: it has no pitch), accelerating by a tenth of it.
                 // ponytail: an owner no longer in the list (gone since it fired) leaves the other fireball as it was; the Java keeps its last look.
@@ -1275,16 +1280,17 @@ impl Fireball {
 
 /// (`getAttackStrength`, wear) of hitting with `held`: `ItemSword` 4 + material, `ItemTool` 2 + material, anything else 1
 /// (`Item.getDamageVsEntity`); material bonus wood 0, stone 1, iron 2, diamond 3, gold 0. Swords wear 1, tools 2, a hoe none.
-pub fn attack(held: Option<u16>) -> (i32, u16) {
-    // Cortes Combat weapons (NOT b1.7.3): family damage + tier bonus, wear 1. ponytail: rounded to whole points until C2 makes damage a float.
-    if let Some(d) = held.and_then(crate::world::combat::catalog::damage) {
-        return (d.round() as i32, 1);
+/// In a world with the Immersive Pack ON (`combat::rules`, NOT b1.7.3) it is the Cortes swing instead: the 20 weapons, the
+/// sword one lower, the hoe 1.5 higher. UNVERIFIED: not compiled.
+pub fn attack(held: Option<u16>) -> (f32, u16) {
+    if let Some(s) = crate::world::combat::rules::swing(held) {
+        return (s.damage, s.wear);
     }
     match held.and_then(craft::tool) {
-        Some((Tool::Sword, m)) => (4 + [0, 1, 2, 3, 0][m], 1),
-        Some((Tool::Hoe, _)) => (1, 0),
-        Some((_, m)) => (2 + [0, 1, 2, 3, 0][m], 2),
-        None => (1, 0),
+        Some((Tool::Sword, m)) => ((4 + [0, 1, 2, 3, 0][m]) as f32, 1),
+        Some((Tool::Hoe, _)) => (1.0, 0),
+        Some((_, m)) => ((2 + [0, 1, 2, 3, 0][m]) as f32, 2),
+        None => (1.0, 0),
     }
 }
 
@@ -1356,7 +1362,7 @@ impl Mobs {
     /// apart); a sheep with such a wolf within `FLEE_RANGE` runs from it. A sheep a wolf kills drops what it always drops.
     fn hunt(&mut self) {
         let flat = |a: Vec3, b: Vec3| (a.x - b.x).hypot(a.z - b.z);
-        let sheep: Vec<(usize, Vec3)> = if self.smart { self.list.iter().enumerate().filter(|(_, m)| m.kind == Sheep && m.health > 0).map(|(i, m)| (i, m.body.pos)).collect() } else { Vec::new() };
+        let sheep: Vec<(usize, Vec3)> = if self.smart { self.list.iter().enumerate().filter(|(_, m)| m.kind == Sheep && m.health > 0.0).map(|(i, m)| (i, m.body.pos)).collect() } else { Vec::new() };
         let mut bites = Vec::new();
         let mut wolves = Vec::new();
         for (i, m) in self.list.iter_mut().enumerate() {
@@ -1383,7 +1389,7 @@ impl Mobs {
             }
         }
         for (j, from) in bites {
-            self.list[j].damage(2, from, &mut self.rng);
+            self.list[j].damage(2.0, from, &mut self.rng);
         }
     }
 
@@ -1587,7 +1593,7 @@ impl Mobs {
                 if let Some(cell) = m.bit.take() {
                     ev.push(Ev::Graze(cell));
                 }
-                if alive && m.health > 0 {
+                if alive && m.health > 0.0 {
                     m.talk(snd, &mut ev);
                 }
                 alive
@@ -1607,12 +1613,12 @@ impl Mobs {
             self.arrows.retain(|a| {
                 let hit = a.player.then(|| list.iter().position(|m| {
                     let (lo, hi) = m.aabb();
-                    m.health > 0 &&
+                    m.health > 0.0 &&
                     a.pos.cmpge(lo - Vec3::splat(0.3)).all() && a.pos.cmple(hi + Vec3::splat(0.3)).all()
                 })).flatten();
                 hit.map_or(true, |i| {
                     // A snowball or egg does 0 damage but still knocks back (`attackEntityFrom(thrower, 0)`).
-                    list[i].damage(if a.kind == 0 { crate::world::gear::ARROW_DAMAGE } else { 0 }, a.pos - a.vel, rng);
+                    list[i].damage(if a.kind == 0 { crate::world::gear::ARROW_DAMAGE as f32 } else { 0.0 }, a.pos - a.vel, rng);
                     if a.kind == crate::world::gear::EGG {
                         ev.push(Ev::Hatch(a.pos));
                     }
@@ -1663,7 +1669,7 @@ impl Mobs {
         }
         let mut i = 0;
         while i < self.list.len() {
-            if self.list[i].health > 0 {
+            if self.list[i].health > 0.0 {
                 i += 1;
                 continue;
             }
@@ -1687,7 +1693,7 @@ impl Mobs {
                         let (ox, oz) = ((j % 2) as f32 - 0.5, (j / 2) as f32 - 0.5);
                         let mut s = Mob::new(Slime, p.x + ox * m.size / 4.0, p.y - m.half.y, p.z + oz * m.size / 4.0, self.rng.next_float() * 360.0, &mut self.rng);
                         let size = m.size / 2.0;
-                        (s.size, s.health, s.half) = (size, (size * size) as i32, Vec3::new(0.3 * size, 0.3 * size, 0.3 * size));
+                        (s.size, s.health, s.half) = (size, (size * size) as f32, Vec3::new(0.3 * size, 0.3 * size, 0.3 * size));
                         self.list.push(s);
                     }
                 }
@@ -1699,7 +1705,7 @@ impl Mobs {
     /// The nearest mob on the ray within `reach`: (index, distance).
     pub fn pick(&self, eye: Vec3, dir: Vec3, reach: f32) -> Option<(usize, f32)> {
         // ponytail: a corpse is not picked (the Java still has it `canBeCollidedWith` for its 20 ticks, where a tap on it does nothing).
-        self.list.iter().enumerate().filter(|(_, m)| m.health > 0).filter_map(|(i, m)| {
+        self.list.iter().enumerate().filter(|(_, m)| m.health > 0.0).filter_map(|(i, m)| {
             let (lo, hi) = m.aabb();
             ray_box(eye, dir, lo, hi).filter(|&t| t <= reach).map(|t| (i, t))
         }).min_by(|a, b| a.1.total_cmp(&b.1))
@@ -1728,8 +1734,32 @@ impl Mobs {
         }
     }
 
-    pub fn hit(&mut self, i: usize, dmg: i32, from: Vec3) {
+    pub fn hit(&mut self, i: usize, dmg: f32, from: Vec3) {
         self.list[i].damage(dmg, from, &mut self.rng);
+    }
+
+    /// A Cortes weapon's blow (**NOT b1.7.3**, UNVERIFIED: not compiled): the same as `hit`, but the damage window is
+    /// `IFRAME_TICKS` (3) long instead of 10, so a dagger swinging every 6 ticks is not top-up-only on every second hit.
+    pub fn strike(&mut self, i: usize, dmg: f32, from: Vec3) {
+        let life = 10 + crate::world::combat::profile::IFRAME_TICKS as u8;
+        self.list[i].damage_in(dmg, from, &mut self.rng, life);
+    }
+
+    /// The nearest living mob inside a weapon's cone (`ConeTargets.nearestInCone`), none farther than `wall` (the block the
+    /// crosshair rests on; ponytail: tested by the distance to the mob's centre, not to its nearest face). **NOT b1.7.3**, UNVERIFIED.
+    pub fn cone(&self, eye: Vec3, look: Vec3, r: crate::world::combat::profile::Reach, wall: f32) -> Option<usize> {
+        use glam::DVec3;
+        let (idx, boxes): (Vec<usize>, Vec<(DVec3, DVec3)>) = self
+            .list
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.health > 0.0 && !m.ridden && m.body.pos.distance(eye) < wall)
+            .map(|(i, m)| {
+                let (lo, hi) = m.aabb();
+                (i, (lo.as_dvec3(), hi.as_dvec3()))
+            })
+            .unzip();
+        crate::world::combat::cone::nearest_in_cone(eye.as_dvec3(), look.as_dvec3(), &boxes, r, 1).first().map(|&k| idx[k])
     }
 
     /// Retro Sprint's `target.addVelocity` (m/s here): added to the motion as it is, so the hit's own `knockBack` that follows halves it
@@ -1782,7 +1812,7 @@ impl Mobs {
         for m in &mut self.list {
             let (lo, hi) = m.aabb();
             if let Some((dmg, push)) = blast(get, at, power, m.body.pos - Vec3::Y * m.half.y, lo, hi) {
-                m.damage(dmg, if exploder { at } else { m.body.pos }, rng);
+                m.damage(dmg as f32, if exploder { at } else { m.body.pos }, rng);
                 if !exploder {
                     m.scare = at; // it still runs from the blast
                 }
@@ -1862,16 +1892,16 @@ mod tests {
         assert!(ev.is_empty());
         assert_eq!(ray_box(Vec3::new(0.0, 0.0, -2.0), Vec3::Z, Vec3::splat(-0.45), Vec3::splat(0.45)), Some(1.55));
         assert!(ray_box(Vec3::new(2.0, 0.0, -2.0), Vec3::Z, Vec3::splat(-0.45), Vec3::splat(0.45)).is_none());
-        assert_eq!(attack(None), (1, 0));
-        assert_eq!(attack(Some(268)), (4, 1)); // wooden sword
-        assert_eq!(attack(Some(257)), (4, 2)); // iron pickaxe: 2 + 2
-        p.damage(4, p.body.pos + Vec3::X, &mut rng);
-        assert_eq!(p.health, 6);
+        assert_eq!(attack(None), (1.0, 0));
+        assert_eq!(attack(Some(268)), (4.0, 1)); // wooden sword
+        assert_eq!(attack(Some(257)), (4.0, 2)); // iron pickaxe: 2 + 2
+        p.damage(4.0, p.body.pos + Vec3::X, &mut rng);
+        assert_eq!(p.health, 6.0);
         assert!(p.body.vel.x < 0.0 && p.hurt == 10);
-        p.damage(4, p.body.pos, &mut rng); // inside the window, not bigger: ignored
-        assert_eq!(p.health, 6);
-        p.damage(6, p.body.pos, &mut rng); // bigger: pays the difference
-        assert_eq!(p.health, 4);
+        p.damage(4.0, p.body.pos, &mut rng); // inside the window, not bigger: ignored
+        assert_eq!(p.health, 6.0);
+        p.damage(6.0, p.body.pos, &mut rng); // bigger: pays the difference
+        assert_eq!(p.health, 4.0);
         let far_player = ctx(Vec3::new(232.0, 10.0, 32.0), &l);
         let mut q = Mob::new(Pig, 32.5, 10.0, 32.5, 0.0, &mut rng);
         assert!((0..50).any(|_| !q.tick(&mut rng, &far_player, &mut ev)));
@@ -1887,11 +1917,11 @@ mod tests {
         let mut w = Mob::new(Wolf, 32.5, 10.0, 32.5, 0.0, &mut rng);
         let mut ev = Vec::new();
         w.tick(&mut rng, &c, &mut ev);
-        assert_eq!((w.health, w.anger, w.body.vel.x), (7, 0, 0.0), "8 - 1, calm, not pushed");
+        assert_eq!((w.health, w.anger, w.body.vel.x), (7.0, 0, 0.0), "8 - 1, calm, not pushed");
         w.tick(&mut rng, &c, &mut ev);
-        assert_eq!(w.health, 7, "inside the damage window, an equal hit is ignored");
+        assert_eq!(w.health, 7.0, "inside the damage window, an equal hit is ignored");
         for _ in 0..12 { w.tick(&mut rng, &c, &mut ev); }
-        assert!(w.health < 7, "the window ran out and the cactus hurts again");
+        assert!(w.health < 7.0, "the window ran out and the cactus hurts again");
     }
 
     /// Retro Sprint's shove adds to the motion and stops the steering; the hit's `knockBack` that follows halves it (a hit inside
@@ -1903,9 +1933,9 @@ mod tests {
         ms.list.push(Mob::new(Cow, 32.5, 10.0, 32.5, 0.0, &mut rng));
         ms.shove(0, Vec3::new(0.0, 0.0, 24.0));
         assert_eq!((ms.list[0].body.vel.z, ms.list[0].free), (24.0, 10));
-        ms.hit(0, 1, Vec3::new(32.5, 10.0, 31.5)); // the player stands at -z of the cow: pushed to +z by 8 m/s more
+        ms.hit(0, 1.0, Vec3::new(32.5, 10.0, 31.5)); // the player stands at -z of the cow: pushed to +z by 8 m/s more
         assert_eq!(ms.list[0].body.vel.z, 24.0 / 2.0 + 8.0, "halved, plus the knockback's 8 m/s");
-        ms.hit(0, 1, Vec3::new(32.5, 10.0, 31.5)); // inside the window: no second knockback
+        ms.hit(0, 1.0, Vec3::new(32.5, 10.0, 31.5)); // inside the window: no second knockback
         assert_eq!(ms.list[0].body.vel.z, 20.0);
     }
 
@@ -1914,12 +1944,12 @@ mod tests {
     fn a_fresh_hit_cries_a_kill_dies_and_every_name_is_in_the_sound_table() {
         let mut rng = JavaRandom::new(5);
         let mut cow = Mob::new(Cow, 32.5, 10.0, 32.5, 0.0, &mut rng);
-        cow.damage(2, cow.body.pos + Vec3::X, &mut rng);
+        cow.damage(2.0, cow.body.pos + Vec3::X, &mut rng);
         assert_eq!((cow.cry.take(), cry(Cow, Cry::Hurt, 0)), (Some(Cry::Hurt), Some(("mob.cowhurt", 0.4))));
-        cow.damage(5, cow.body.pos, &mut rng); // inside the window and bigger: pays the difference, no new cry
+        cow.damage(5.0, cow.body.pos, &mut rng); // inside the window and bigger: pays the difference, no new cry
         assert!(cow.cry.is_none());
         let mut sheep = Mob::new(Sheep, 32.5, 10.0, 32.5, 0.0, &mut rng);
-        sheep.damage(99, sheep.body.pos + Vec3::X, &mut rng);
+        sheep.damage(99.0, sheep.body.pos + Vec3::X, &mut rng);
         assert_eq!(sheep.cry, Some(Cry::Die));
         // A wolf that got wet shakes once, when it is out of the water and standing: volume 0.4, with the usual spread.
         let (mut w, mut ev) = (Mob::new(Wolf, 32.5, 10.0, 32.5, 0.0, &mut rng), Vec::new());
@@ -1994,7 +2024,7 @@ mod tests {
         let mut rng = JavaRandom::new(3);
         let mut pig = Mob::new(Pig, 32.5, 10.0, 32.5, 0.0, &mut rng);
         let h = pig.health;
-        pig.damage(0, Vec3::new(30.0, 10.0, 32.5), &mut rng);
+        pig.damage(0.0, Vec3::new(30.0, 10.0, 32.5), &mut rng);
         assert_eq!(pig.health, h);
     }
 
@@ -2056,7 +2086,7 @@ mod tests {
         let mut m = Mobs::new(1);
         m.burst = 0;
         let mut s = Mob::new(Slime, 32.5, 10.0, 32.5, 0.0, &mut rng);
-        (s.size, s.health) = (4.0, 0);
+        (s.size, s.health) = (4.0, 0.0);
         m.list.push(s);
         let l = |_, _, _| 15u8;
         let c = ctx(Vec3::new(5.0, 11.0, 5.0), &l);
@@ -2064,7 +2094,7 @@ mod tests {
             m.update(TICK, &c, &mut Drops::new(1)); // the first finds it dead, 20 more run its `deathTime` out (`setEntityDead` splits it)
         }
         assert_eq!(m.list.len(), 4);
-        assert!(m.list.iter().all(|s| s.kind == Slime && s.size == 2.0 && s.health == 4));
+        assert!(m.list.iter().all(|s| s.kind == Slime && s.size == 2.0 && s.health == 4.0));
         let mut sheep = Mob::new(Sheep, 1.5, 10.0, 1.5, 0.0, &mut rng);
         sheep.color = 6;
         assert_eq!(sheep.loot(&mut rng).iter().map(|s| (s.id, s.damage)).collect::<Vec<_>>(), vec![(35, 6)]);
@@ -2080,7 +2110,7 @@ mod tests {
         let (mut m, mut drops) = (Mobs::new(1), Drops::new(1));
         m.burst = 0;
         let mut sheep = Mob::new(Sheep, 32.5, 10.0, 32.5, 0.0, &mut rng);
-        (sheep.color, sheep.health) = (6, 0);
+        (sheep.color, sheep.health) = (6, 0.0);
         m.list.push(sheep);
         m.update(TICK, &c, &mut drops);
         assert_eq!((m.list.len(), m.list[0].death, drops.items.len()), (1, 1, 1), "the wool drops the moment it is found dead, the corpse stays");
@@ -2095,7 +2125,7 @@ mod tests {
         // A dead zombie next to the player does not hit; a live one does.
         let near = ctx(Vec3::new(32.5, 11.0, 36.5), &l);
         let (mut live, mut dead, mut ev) = (Mob::new(Zombie, 32.5, 10.0, 35.0, 0.0, &mut rng), Mob::new(Zombie, 32.5, 10.0, 35.0, 0.0, &mut rng), Vec::new());
-        dead.health = 0;
+        dead.health = 0.0;
         live.tick(&mut rng, &near, &mut ev);
         assert!(ev.iter().any(|e| matches!(e, Ev::Hurt(_))));
         ev.clear();
@@ -2123,7 +2153,7 @@ mod tests {
         let item = |id| Some(ItemStack { id, count: 1, damage: 0 });
         let mut w = Mob::new(Wolf, 10.5, 10.0, 10.5, 0.0, &mut rng);
         assert!((0..60).any(|_| befriend(&mut w, item(BONE), &mut rng) == Some(Befriend::Tamed)));
-        assert!(w.tame && w.sitting && w.health == 20 && w.anger == 0);
+        assert!(w.tame && w.sitting && w.health == 20.0 && w.anger == 0);
         let (mut ev, near) = (Vec::new(), ctx(Vec3::new(20.5, 10.9, 10.5), &l));
         let start = w.body.pos;
         for _ in 0..200 {
@@ -2137,7 +2167,7 @@ mod tests {
             for _ in 0..3 { w.step(TICK / 3.0, &flat) }
         }
         assert!((w.body.pos.x - 20.5).abs() < 6.5, "it followed: x = {}", w.body.pos.x);
-        w.damage(2, near.player, &mut rng);
+        w.damage(2.0, near.player, &mut rng);
         assert!(w.anger == 0 && !w.target, "a tame wolf hit by its owner stays calm");
         let gone = ctx(Vec3::new(60.5, 10.9, 10.5), &l);
         w.tick(&mut rng, &gone, &mut ev);
@@ -2202,7 +2232,7 @@ mod tests {
         let mut cow = Mob::new(Cow, 32.5, 10.0, 32.5, 0.0, &mut rng);
         cow.smart = true;
         let blow = cow.body.pos + Vec3::X * 2.0;
-        cow.damage(1, blow, &mut rng);
+        cow.damage(1.0, blow, &mut rng);
         let mut ev = Vec::new();
         for _ in 0..100 {
             cow.tick(&mut rng, &c, &mut ev);
@@ -2258,7 +2288,7 @@ mod tests {
         }
         assert!(cow.head < 0.5, "head still down: {}", cow.head);
         cow.graze = 100;
-        cow.damage(1, cow.body.pos + Vec3::X * 2.0, &mut rng);
+        cow.damage(1.0, cow.body.pos + Vec3::X * 2.0, &mut rng);
         assert_eq!((cow.graze, cow.rest), (0, 0), "a blow must end the meal");
     }
 
@@ -2439,7 +2469,7 @@ mod tests {
                 m.update(TICK, &c, &mut drops);
                 fled |= m.list.iter().any(|s| s.kind == Sheep && s.panic > 0);
             }
-            let sheep = m.list.iter().find(|s| s.kind == Sheep).map_or(0, |s| s.health);
+            let sheep = m.list.iter().find(|s| s.kind == Sheep).map_or(0.0, |s| s.health);
             (sheep, fled)
         };
         let full = Mob::new(Sheep, 0.5, 10.0, 0.5, 0.0, &mut JavaRandom::new(1)).health;
@@ -2594,7 +2624,7 @@ mod tests {
         for _ in 0..60 {
             if !f.tick(&ctx(Vec3::new(5.5, 40.0, 5.5), &l), &mut list, &[], &mut [], &mut rng, &mut ev) { break }
         }
-        assert!(ev.iter().any(|e| matches!(e, Ev::Burst(_))) && list[0].health == 10 && list[0].hurt > 0, "{}", list[0].health);
+        assert!(ev.iter().any(|e| matches!(e, Ev::Burst(_))) && list[0].health == 10.0 && list[0].hurt > 0, "{}", list[0].health);
         // Punched: it goes the way the player looks, accelerating along it.
         let mut m = Mobs::new(1);
         m.fireballs.push(Fireball { pos: Vec3::new(20.5, 20.0, 20.5), vel: Vec3::ZERO, acc: Vec3::new(0.0, -0.1, 0.0), age: 0, owner: u32::MAX });
@@ -2691,7 +2721,7 @@ mod tests {
             let mut rng = JavaRandom::new(5);
             let mut m = Mobs::new(1);
             let mut cow = Mob::new(Cow, 32.5, 10.4, 33.5, 0.0, &mut rng);
-            cow.health = 100;
+            cow.health = 100.0;
             m.list.push(cow);
             m.explode(&flat, at, 1.0, exploder);
             m.list[0].body.vel
@@ -2713,5 +2743,17 @@ mod tests {
         m.list.push(sheep);
         let ate: Vec<(i32, i32, i32)> = (0..10).flat_map(|_| m.update(TICK, &c, &mut drops)).filter_map(|e| if let Ev::Graze(c) = e { Some(c) } else { None }).collect();
         assert_eq!(ate, [(20, 10, 20)], "once, in the cell it stands in");
+    }
+
+    /// Cortes Combat (C2, UNVERIFIED: not compiled): a weapon's blow takes a fraction, and its window is 3 ticks, not 10.
+    #[test]
+    fn a_weapon_blow_takes_fractions_and_opens_a_three_tick_window() {
+        let mut rng = JavaRandom::new(1);
+        let mut cow = Mob::new(Cow, 0.5, 10.0, 0.5, 0.0, &mut rng);
+        cow.damage_in(2.5, cow.body.pos + Vec3::X, &mut rng, 13);
+        assert_eq!((cow.health, cow.life), (7.5, 13));
+        cow.life = 10; // three ticks later the window is shut: a new blow pays in full
+        cow.damage_in(3.0, cow.body.pos + Vec3::X, &mut rng, 13);
+        assert_eq!(cow.health, 4.5);
     }
 }

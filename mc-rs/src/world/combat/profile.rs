@@ -111,7 +111,7 @@ impl Profile {
 
     /// `WeaponTables.knockback`, already clamped to the mod's ceilings (`KnockbackProfile.clampedHorizontal`).
     pub fn knockback(self) -> Knockback {
-        let (h, v) = match self {
+        let (h, v): (f32, f32) = match self {
             Profile::None => (0.12, 0.02),
             Profile::Unarmed => (0.10, 0.02),
             Profile::Sword => (0.55, 0.10),
@@ -149,7 +149,7 @@ pub const KNOCK_MAX_V: f32 = 0.70;
 
 // ---- AttackTiming ----
 
-/// Ticks of a swing with nothing in hand (`UNARMED_INTERVAL`), the longest interval, the invulnerability window a
+/// The fallback interval for a speed that is not positive (`UNARMED_INTERVAL`; the bare hand itself is 4 ticks, `rules`), the longest interval, the invulnerability window a
 /// weapon hit leaves (`IFRAME_TICKS`, answer 17B; b1.7.3's own window is 10) and the hold below which a release is a
 /// plain tap (`MIN_CHARGE_HOLD_TICKS`).
 pub const UNARMED_INTERVAL: u32 = 12;

@@ -212,6 +212,10 @@ struct App {
     /// The immersive pack (`world::pack`): on for this world (`menu::Info::pack`), the cloth spread on the ground (if any), whether the
     /// open inventory screen is that cloth (the vanilla panel otherwise), and the seconds the "find flat ground" message has left.
     pack_rule: bool,
+    /// Cortes Combat (C2, only with `pack_rule`; NOT b1.7.3, UNVERIFIED): ticks until the held item may swing again, and the item
+    /// (`None` = the bare hand) that cooldown belongs to: changing item starts it over (`resetOnItemChange`).
+    swing_cd: u32,
+    swing_held: Option<u16>,
     mat: Option<pack::Mat>,
     mat_ui: bool,
     hint: f32,
@@ -385,6 +389,8 @@ impl App {
             one_mode: false,
             shift_mode: false,
             pack_rule: false,
+            swing_cd: 0,
+            swing_held: None,
             mat: None,
             mat_ui: false,
             pack_saved: None,
@@ -516,6 +522,8 @@ impl App {
         self.dir = info.dir(&self.root);
         (self.seed, self.world_type) = (info.seed, info.ty);
         self.pack_rule = info.pack;
+        world::combat::rules::set(info.pack); // Cortes Combat lives only in an Immersive Pack world
+        self.swing_cd = 0;
         // The world resumes in the dimension it was left in (`<world>/dim`).
         self.nether = std::fs::read_to_string(self.dir.join("dim")).is_ok_and(|s| s.trim() == "nether");
         if self.nether {
@@ -1453,7 +1461,7 @@ impl App {
                     }
                     held => {
                         let (dmg, wear) = mobs::attack(held);
-                        if self.carts.list[ci].hurt(dmg) {
+                        if self.carts.list[ci].hurt(dmg as i32) {
                             self.smash_cart(ci);
                         }
                         if wear > 0 {
@@ -1472,7 +1480,7 @@ impl App {
                     }
                     held => {
                         let (dmg, wear) = mobs::attack(held);
-                        if self.boats.list[bi].hurt(dmg) {
+                        if self.boats.list[bi].hurt(dmg as i32) {
                             self.smash_boat(bi);
                         }
                         if wear > 0 {
@@ -1482,10 +1490,22 @@ impl App {
                 }
                 return;
             }
-            if let Some((i, _)) = self.mobs.pick(eye, fwd, pick::REACH as f32).filter(|&(_, t)| t < wall) {
+            // Cortes Combat (C2, **NOT b1.7.3**, UNVERIFIED; only with the world's Immersive Pack ON): the held weapon or tool swings through
+            // its cone, not along the crosshair's ray; the bare hand still takes the mob under the crosshair first, the cone being its
+            // fallback. Either way an `Entity.interact` (a saddle, a tame wolf, shears, a bone) needs the mob under the crosshair (`touch`).
+            let held_id = self.inv.slots[slot].map(|s| s.id);
+            let swing = world::combat::rules::swing(held_id);
+            if self.swing_held != held_id {
+                (self.swing_held, self.swing_cd) = (held_id, 0);
+            }
+            let ray = self.mobs.pick(eye, fwd, swing.map_or(pick::REACH as f32, |s| s.reach.dist)).filter(|&(_, t)| t < wall).map(|(i, _)| i);
+            let cone = swing.and_then(|s| self.mobs.cone(eye, fwd, s.reach, wall));
+            let target = if swing.is_some() && held_id.is_some() { cone } else { ray.or(cone) };
+            if let Some(i) = target {
+                let touch = ray == Some(i); // an interaction only with the mob under the crosshair
                 // A bone or pork on a wolf, a tap on a tame one, a saddle on a pig, a tap on a saddled one (`Entity.interact`).
                 let held = self.inv.slots[slot];
-                if let Some(b) = gear::befriend(&mut self.mobs.list[i], held, &mut self.mobs.rng) {
+                if let Some(b) = if touch { gear::befriend(&mut self.mobs.list[i], held, &mut self.mobs.rng) } else { None } {
                     let m = &self.mobs.list[i];
                     let (feet, w, h) = (m.body.pos - glam::Vec3::new(0.0, m.half.y, 0.0), m.half.x * 2.0, m.half.y * 2.0);
                     match b {
@@ -1498,7 +1518,7 @@ impl App {
                     }
                     return;
                 }
-                if let Some(h) = self.inv.slots[slot] {
+                if let Some(h) = self.inv.slots[slot].filter(|_| touch) {
                     // Shears / dye on a sheep, a bucket on a cow: `Entity.interact` before the attack.
                     let used = gear::use_on_mob(&mut self.mobs.list[i], h, &mut self.mobs.rng);
                     let at = self.mobs.list[i].body.pos;
@@ -1520,8 +1540,10 @@ impl App {
                         None => {}
                     }
                 }
-                let held = self.inv.slots[slot].map(|s| s.id);
-                let (dmg, wear) = mobs::attack(held);
+                if swing.is_some() && self.swing_cd > 0 {
+                    return; // still inside the last swing's cooldown: nothing happens, and no part of the blow is paid early
+                }
+                let (dmg, wear) = mobs::attack(held_id);
                 // Retro Sprint (`PlayerEntityMixin.onAttack`): a sprinting hit shoves the target the way the player looks, before the hit's own
                 // knockback, and ends the sprint (the walk is set from the input every frame, so the mod's x0.6 on the player's motion has no use here).
                 if self.sprint.attack() {
@@ -1529,7 +1551,12 @@ impl App {
                     let d = glam::Vec3::new(f.x, 0.0, f.z).normalize_or_zero();
                     self.mobs.shove(i, d * sprint::KNOCK + glam::Vec3::Y * sprint::KNOCK_UP);
                 }
-                self.mobs.hit(i, dmg, self.player.pos);
+                if let Some(s) = swing {
+                    self.swing_cd = s.interval;
+                    self.mobs.strike(i, dmg, self.player.pos); // the weapon's own 3-tick damage window
+                } else {
+                    self.mobs.hit(i, dmg, self.player.pos);
+                }
                 self.vitals.stamina.hit(); // Stamina: a hit dealt puts the player in combat for 15 s (ponytail: also one the mob's damage window ignored)
                 self.inv.damage(slot, wear);
                 return;
@@ -1846,6 +1873,7 @@ impl App {
     /// One 20 Hz tick of sprinting (`ClientPlayerEntityMixin.tickSprintingMovement`) and its dust (`EntityMixin.addParticles`: a speck of the
     /// block below the feet while sprinting out of the water). The forward input is the d-pad's / the stick's, sneaking already x0.3.
     fn sprint_tick(&mut self) {
+        self.swing_cd = self.swing_cd.saturating_sub(1); // Cortes Combat's attack cooldown (C2), 20 Hz
         let (asleep, riding) = (self.sleep.is_some(), self.riding());
         let fwd = if asleep || riding { 0.0 } else { self.touch.move_input.0 * if self.touch.sneak { 0.3 } else { 1.0 } };
         self.sprint.tick(sprint::In {

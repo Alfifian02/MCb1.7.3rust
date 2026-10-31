@@ -379,8 +379,8 @@ mod tests {
         assert_eq!(p.len(), SIDE * SIDE * 4);
         assert_eq!(&p[0..4], &[0, 0, 0, 16], "unseen, even cell of the checker");
         assert_eq!(&p[4..8], &[0x7F, 0xB2, 0x38, 255], "grass 8368696 = 0x7FB238 at 255 / 255");
-        assert_eq!(&p[8..12], &[0x7F * 220 / 255, 0xB2 * 220 / 255, 0x38 * 220 / 255, 255]);
-        assert_eq!(&p[12..16], &[0x7F * 180 / 255, 0xB2 * 180 / 255, 0x38 * 180 / 255, 255]);
+        assert_eq!(&p[8..12], &[(0x7Fu32 * 220 / 255) as u8, (0xB2u32 * 220 / 255) as u8, (0x38u32 * 220 / 255) as u8, 255]);
+        assert_eq!(&p[12..16], &[(0x7Fu32 * 180 / 255) as u8, (0xB2u32 * 180 / 255) as u8, (0x38u32 * 180 / 255) as u8, 255]);
         assert_eq!(p[(SIDE + 1) * 4 + 3], 16, "row 1, column 1: (i + i / 128) is even again");
         assert_eq!(p[SIDE * 4 + 3], 24, "row 1, column 0: odd");
     }

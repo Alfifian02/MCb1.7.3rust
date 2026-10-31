@@ -180,7 +180,7 @@ mod tests {
             }
         }
         assert_eq!(get(399), None);
-        assert_eq!(get(FIRST_ID + 1), None); // wooden ropera does not exist
+        assert_eq!(get(FIRST_ID + 5), None); // wooden ropera does not exist (family 1, tier 0)
         assert_eq!(get(425), None);
         assert_eq!(damage(id(Family::Ropera, 2).unwrap()), Some(8.5)); // 6.5 + iron's 2
         assert_eq!(damage(id(Family::Daga, 0).unwrap()), Some(1.6));

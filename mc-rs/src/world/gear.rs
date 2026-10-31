@@ -112,8 +112,8 @@ pub fn befriend(m: &mut Mob, held: Option<ItemStack>, rng: &mut JavaRandom) -> O
                 Befriend::Failed
             }
         }),
-        Kind::Wolf if matches!(id, Some(319 | 320)) && m.health < 20 => {
-            m.health = (m.health + 3).min(20);
+        Kind::Wolf if matches!(id, Some(319 | 320)) && m.health < 20.0 => {
+            m.health = (m.health + 3.0).min(20.0);
             Some(Befriend::Healed)
         }
         Kind::Wolf => {
