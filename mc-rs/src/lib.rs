@@ -3783,6 +3783,8 @@ impl App {
         let info_on = self.opts.debug_screen;
         let dbg = if info_on && !self.touch.paused { Some(self.debug_rows()) } else { None };
         let worn = self.worn();
+        // Read before `hud_verts` is borrowed mutably (the borrow checker forbids `&self` calls while `v` lives).
+        let held_special = self.held_special();
         let v = &mut self.hud_verts;
         v.clear();
         let layout = &self.touch.layout;
@@ -3847,7 +3849,7 @@ impl App {
             if self.touch.special_shown && !self.touch.pad.hud_hidden() {
                 use world::combat::{profile::Special, special};
                 let (sx, sy, sw, sh) = self.touch.layout.special;
-                let kind = self.held_special();
+                let kind = held_special;
                 HudPipeline::push_button(v, sx, sy, sw, sh, if self.sp.parrying() || self.sp.lunge.is_some() { 2 } else { 1 });
                 let c = [1.0; 4];
                 match kind {
