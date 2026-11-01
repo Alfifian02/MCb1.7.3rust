@@ -1085,7 +1085,6 @@ impl App {
         let wear = std::mem::take(&mut self.vitals.wear) as u16;
         self.stats.add(world::stats::DAMAGE_TAKEN, wear as u32);
         self.stats.walk(world::stats::Dist::Fall, std::mem::take(&mut self.vitals.fell) * 100.0);
-        self.move_stats(dt, water, eye_in_water, ladder, riding);
         (items::MAIN..items::SLOTS).filter(|_| wear > 0).for_each(|i| self.inv.damage(i, wear));
         if self.vitals.dead() {
             self.die();
@@ -1093,7 +1092,6 @@ impl App {
         }
         // Dropped items fall, settle and get picked up (before the target check below, which can return early).
         self.drops.tick(dt, &|x: i32, y: i32, z: i32| self.chunks.block(x, y, z).map(|b| self.chunks.physics_at(x, y, z, b)), self.player.pos, &mut self.inv);
-        self.stat_sync();
         for at in std::mem::take(&mut self.drops.pops) {
             // `EntityItem.onCollideWithPlayer` (`EntityArrow`'s is the same call): at the item, volume 0.2, pitch `((r - r) * 0.7 + 1) * 2`.
             let pitch = ((self.audio.rnd() - self.audio.rnd()) * 0.7 + 1.0) * 2.0;
@@ -1112,6 +1110,9 @@ impl App {
         self.mobs.targets.extend(self.paintings.iter().enumerate().map(|(i, p)| { let (lo, hi) = p.bounds(); (lo, hi, Strike::Painting(i)) }));
         self.mobs.targets.extend(self.ticks.falling.iter().filter(|f| f.mv.is_none()).map(|f| (f.pos - glam::Vec3::splat(0.49), f.pos + glam::Vec3::splat(0.49), Strike::Falling)));
         let evs = self.mobs.update(dt, &ctx, &mut self.drops);
+        // After the last use of `ctx` / `get` (they borrow `self.chunks`; these two take `&mut self`). A death this frame returns before them.
+        self.move_stats(dt, water, eye_in_water, ladder, riding);
+        self.stat_sync();
         self.struck(&evs);
         for e in evs {
             match e {
