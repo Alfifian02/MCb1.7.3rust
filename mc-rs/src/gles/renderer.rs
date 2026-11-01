@@ -127,6 +127,8 @@ pub struct Renderer {
     born: Instant,
     /// The Vibrance dial's grade of the frame being drawn (`Look::grade`), read by `finish`.
     grade: [f32; 4],
+    /// Brightness gain and 1 / Gamma of the frame being drawn (`Look::tone`), read by `finish`.
+    tone: [f32; 4],
     /// The pipeline state last set, so a pass does not repeat it.
     cur_prog: u32,
     cur_vao: u32,
@@ -161,7 +163,7 @@ impl Renderer {
             chunk.push((c, gl.program(&s.vs, &s.fs, &["u_tex", "u_origin"]).map_err(|e| format!("{c:?}: {e}"))?));
         }
         let mk = |s: shaders::Src, u: &[&str], what: &str| gl.program(&s.vs, &s.fs, u).map_err(|e| format!("{what}: {e}"));
-        let present = mk(shaders::present(fxaa, fast), &["u_src", "u_px", "u_grade"], "present")?;
+        let present = mk(shaders::present(fxaa, fast), &["u_src", "u_px", "u_grade", "u_tone"], "present")?;
         let hud = mk(shaders::hud(hud::SHEET_H), &["u_items", "u_size"], "hud")?;
         let pano = mk(shaders::panorama(), &["u_tex", "u_m", "u_t"], "panorama")?;
         let dome = mk(shaders::sky_dome(), &[], "sky dome")?;
@@ -276,7 +278,7 @@ impl Renderer {
             gl, size, samples, fast, chunk, present, hud, pano, dome, fan, stars, body, weather, ubo_frame, ubo_sky,
             atlas: atlas_t, hud_tex: hud_t, body_tex: body_t, snow_tex: snow_t, rain_tex: rain_t, pano_tex: pano_t,
             vaos: HashMap::new(), empty_vao, hud_buf, fan_buf, star_v, star_i, star_n: star_idx.len() as i32, body_v, weather_buf,
-            born: Instant::now(), grade: [0.0; 4], cur_prog: 0, cur_vao: 0, blend: Blend::Off,
+            born: Instant::now(), grade: [0.0; 4], tone: [1.0, 1.0, 0.0, 0.0], cur_prog: 0, cur_vao: 0, blend: Blend::Off,
         };
         r.targets()?;
         Ok(r)
@@ -579,6 +581,7 @@ impl Renderer {
         }
         .with_look(&d.look);
         self.grade = d.look.grade;
+        self.tone = d.look.tone;
         self.gl.write(&self.ubo_frame, 0, bytemuck::bytes_of(&u));
         let sun = crate::world::sky::sun_dir(d.angle);
         let mut view = d.view;
@@ -788,6 +791,7 @@ impl Renderer {
                     (f.BindTexture)(TEXTURE_2D, self.t.scene);
                     (f.Uniform4f)(l[1], 1.0 / sw as f32, 1.0 / sh as f32, 1.0 / w as f32, 1.0 / h as f32);
                     (f.Uniform4f)(l[2], self.grade[0], self.grade[1], self.grade[2], self.grade[3]);
+                    (f.Uniform4f)(l[3], self.tone[0], self.tone[1], self.tone[2], self.tone[3]);
                 }
                 self.bind_empty();
                 // SAFETY: as above.

@@ -81,7 +81,7 @@ impl Wg {
     /// full-screen pass (CAS + upscale + vignette + the HUD) onto the swap chain. Two render passes in all.
     fn draw_world(&mut self, d: &WorldDraw) -> Drawn {
         self.pipe.frame(&self.gpu.queue, d.view, d.proj, d.eye, d.sky_sub, d.fog, d.far, d.start, d.wr, d.atmos.density, &d.look);
-        self.present.set_grade(&self.gpu.queue, d.look.grade);
+        self.present.set_grade(&self.gpu.queue, d.look.grade, d.look.tone);
         let clear = wgpu::Color { r: d.fog[0] as f64, g: d.fog[1] as f64, b: d.fog[2] as f64, a: 1.0 };
         self.sky.update(&self.gpu.queue, d.camera, &SkyFrame { angle: d.angle, rain: d.rain, seconds: d.seconds });
         self.sky.set_legacy(&self.gpu.queue, d.zenith, d.horizon, d.angle, d.rain, &d.atmos, d.eye, d.look.rays);

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Python twin of the options list (`options.rs`: `frame`, `flow`, `which`; `ui.rs`: `wrap`, `fit`, `thumb`, `clip`), run with no toolchain.
+"""Python twin of the options list (`options.rs`: `frame`, `flow`, `which`, the two tabs; `ui.rs`: `wrap`, `fit`, `thumb`, `clip`), run with no toolchain.
 
 It reads the REAL font widths (`render/font.rs`), the tip sentences (`TIPS`), the setting names (`Opt::name`, the pad's `KNOBS` /
 `TOGGLES` / `ACTS`, `KEY_NAMES`) out of the Rust source, and checks what the Rust tests check and a few things they cannot see without a
@@ -68,6 +68,7 @@ def clip(quads, r):
 
 # ---- options.rs ----
 N_PAGES, PAGE_H, GROUP_H, ROW_H, ROW_PITCH, SECTION_GAP = 7, 18.0, 13.0, 20.0, 22.0, 6.0
+SIDE_PAGES = 2 * 20.0 + 6.0  # the tab buttons head the side column; the page list begins under them
 
 
 def frame(gw, gh):
@@ -87,7 +88,7 @@ def flow(items):
     y, at, starts = 0.0, [], [0.0] * N_PAGES
     for kind, arg in items:
         if kind == "page":
-            y += SECTION_GAP if arg > 0 else 0.0
+            y += SECTION_GAP if y > 0 else 0.0
             starts[arg] = y
             at.append(y)
             y += PAGE_H + 3.0
@@ -101,9 +102,9 @@ def flow(items):
     return at, starts, y + 4.0
 
 
-def which(starts, scroll, view):
+def which(starts, pages, scroll, view):
     probe = scroll + min(3.0 * ROW_PITCH, view / 2.0)
-    return next((i for i in reversed(range(N_PAGES)) if starts[i] <= probe), 0)
+    return next((i for i in reversed(pages) if starts[i] <= probe), pages[0])
 
 
 def scaled_gs(w, h, gs=0):
@@ -121,13 +122,16 @@ pad = read("input/gamepad.rs")
 knobs = re.search(r"const KNOBS: \[&str; \d+\] = \[([^\]]*)\]", pad).group(1).replace('"', "").split(", ")
 toggles = re.search(r"const TOGGLES: \[&str; \d+\] = \[([^\]]*)\]", pad).group(1).replace('"', "").split(", ")
 acts = re.search(r"\[(\"Jump\", \"Sneak\"[^\]]*)\]\[self as usize\]", pad).group(1).replace('"', "").split(", ")
+tabs = [(n, range(int(a), N_PAGES if b == "N_PAGES" else int(b))) for n, a, b in re.findall(r'\("(\w+)", (\d+), (\w+)\)', opt[opt.index("const TABS"):opt.index("fn tab_pages")])]
+page_labels = re.findall(r'\("([^"]+)", "[^"]+"\),', opt[opt.index("const PAGES"):opt.index("const TABS")])
+assert len(tabs) == 2 and len(page_labels) == N_PAGES and sorted(i for _, r in tabs for i in r) == list(range(N_PAGES)), "every page is on exactly one tab"
 tips = dict(re.findall(r'^\s*\("([^"]+)", "([^"]+)"\),$', opt[opt.index("const TIPS"):], re.M))
 assert len(tips) == int(re.search(r"const TIPS: \[\(&str, &str\); (\d+)\]", opt).group(1)), "TIPS length does not match its table"
 
 ROWS = [  # the Opt variants in `items()`, per section, and the pad's names
     ("page", 0), *[("row", n) for n in ["Music", "Sound", "Difficulty", "GuiScale", "ViewBobbing"]],
-    ("page", 1), ("group", "World"), ("row", "Graphics"), ("row", "RenderDistance"), ("row", "LoD"), ("group", "Lighting"), *[("row", n) for n in ["AmbientOcclusion", "AdvancedOpengl", "Anaglyph"]],
-    ("page", 2), ("group", "Frame rate"), ("row", "FramerateLimit"), ("row", "DynamicRes"), ("group", "Next start"), *[("row", n) for n in ["Msaa", "Fxaa", "Post", "Renderer"]],
+    ("page", 1), ("group", "Display"), ("row", "Fov"), ("row", "Brightness"), ("row", "Gamma"), ("group", "World"), ("row", "Graphics"), ("row", "RenderDistance"), ("row", "LoD"), ("group", "Lighting"), *[("row", n) for n in ["AmbientOcclusion", "AdvancedOpengl", "Anaglyph"]],
+    ("page", 2), ("group", "Frame rate"), ("row", "FramerateLimit"), ("row", "DynamicRes"), ("row", "Sustained"), ("group", "Next start"), *[("row", n) for n in ["Msaa", "Fxaa", "Post", "Renderer"]],
     ("page", 3), ("row", "Vibrance"), ("group", "Switches"), *[("row", n) for n in ["FxWarm", "FxWater", "FxGlow", "FxMotion", "FxHaze"]],
     ("page", 4), ("group", "Look and dig"), *[("row", n) for n in ["Sensitivity", "InvertMouse", "DigDelay"]], ("group", "Keyboard"), *[("key", n) for n in key_names],
     ("page", 5), *[("pad", n) for n in acts],
@@ -152,7 +156,7 @@ def main():
         s, gw, gh = scaled_gs(w, h)
         f = frame(gw, gh)
         # 2. the parts lie inside the screen and do not touch
-        boxes = {"side": [f["side"][0], f["side"][1], f["side"][2], 7 * 20.0], "list": f["list"], "tip": f["tip"], "done": f["done"]}
+        boxes = {"side": [f["side"][0], f["side"][1], f["side"][2], SIDE_PAGES + 4 * 20.0], "list": f["list"], "tip": f["tip"], "done": f["done"]}
         keys = list(boxes)
         for i, a in enumerate(keys):
             x, y, bw, bh = boxes[a]
@@ -160,7 +164,9 @@ def main():
             for b in keys[i + 1:]:
                 p, q = boxes[a], boxes[b]
                 assert p[0] + p[2] <= q[0] or q[0] + q[2] <= p[0] or p[1] + p[3] <= q[1] or q[1] + q[3] <= p[1], f"{a} touches {b} at {gw}x{gh}"
-        assert f["side"][3] >= 7 * 20.0, f"the page list does not fit at {gw}x{gh}"
+        assert f["side"][3] >= SIDE_PAGES + max(len(r) for _, r in tabs) * 20.0, f"the tabs and the page list do not fit at {gw}x{gh}"
+        for n in [t for t, _ in tabs] + page_labels:
+            assert tw(n) <= f["side"][2] - 4.0, f"'{n}' does not fit its button at {gw}x{gh}"
         # 3. every name fits beside its control, a tip fits the pane
         room = f["list"][2] - 11.0 - f["ctl"] - 14.0
         for k, n in shown:
@@ -169,22 +175,30 @@ def main():
             lines = wrap(t, f["tip"][2] - 12.0)
             cap = 8 if f["wide"] else 2
             assert len(lines) <= cap, f"tip '{n}': {len(lines)} lines in {f['tip'][2] - 12}: {lines}"
-        # 4. the list scrolls, a jump reaches every section, and the lit page follows
-        at, starts, total = flow(items)
+        # 4. each tab's list scrolls, a jump reaches every section of it, and the lit page follows
         view = f["list"][3]
-        mx = max(total - view, 0.0)
-        assert mx > 0, "the list should need scrolling at every size"
-        assert all(a < b for a, b in zip(starts, starts[1:]))
-        for i in range(N_PAGES):
-            assert which(starts, min(starts[i], mx), view) == i or i == N_PAGES - 1, f"jump to {i} lights another page at {gw}x{gh}"
-            assert which(starts, starts[i], view) == i
-        assert which(starts, 0.0, view) == 0 and which(starts, mx, view) == N_PAGES - 1
-        last = N_PAGES - 1
-        assert starts[last] < mx, "the last section starts above the bottom, so a tap on it is not clamped"
-        # 5. rows are inside the list's content and 2 units apart (a row is 20, the pitch 22)
-        rows = [y for (kind, _), y in zip(items, at) if kind == "row"]
-        assert all(b - a >= ROW_PITCH - 1e-6 for a, b in zip(rows, rows[1:])), "rows overlap"
-        assert thumb(view, total, 0.0, mx)[0] == 0.0 and sum(thumb(view, total, mx, mx)) <= view + 1e-6
+        for name, pages in tabs:
+            tab_items, at_page = [], 0
+            for it in items:
+                if it[0] == "page":
+                    at_page = it[1]
+                if at_page in pages:
+                    tab_items.append(it)
+            at, starts, total = flow(tab_items)
+            mx = max(total - view, 0.0)
+            assert mx > 0, f"the {name} list should need scrolling at every size ({gw}x{gh})"
+            assert starts[pages[0]] == 0.0, "a tab opens on its first section"
+            assert all(starts[a] < starts[b] for a, b in zip(pages, pages[1:]))
+            for i in pages:
+                assert which(starts, pages, min(starts[i], mx), view) == i or i == pages[-1], f"jump to {i} lights another page at {gw}x{gh}"
+                assert which(starts, pages, starts[i], view) == i
+            assert which(starts, pages, 0.0, view) == pages[0] and which(starts, pages, mx, view) == pages[-1]
+            # a last section shorter than the view cannot reach the top (the list stops where it ends); its tap still lights it, and the end of the list does
+            # 5. rows are inside the list's content and 2 units apart (a row is 20, the pitch 22)
+            rows = [y for (kind, _), y in zip(tab_items, at) if kind == "row"]
+            assert all(b - a >= ROW_PITCH - 1e-6 for a, b in zip(rows, rows[1:])), "rows overlap"
+            assert thumb(view, total, 0.0, mx)[0] == 0.0 and sum(thumb(view, total, mx, mx)) <= view + 1e-6
+
 
     # 6. wrap / fit
     t = "Draws far terrain as simplified blocks, out to 768 blocks."
@@ -195,7 +209,7 @@ def main():
     q = clip([(-10.0, 0.0, 30.0, 10.0, [0.0, 0.0], [1.0, 1.0])], [0.0, 0.0, 30.0, 30.0])[0]
     assert (q[0], q[2]) == (0.0, 30.0) and abs(q[4][0] - 0.25) < 1e-9 and q[5][0] == 1.0
     assert clip([(100.0, 0.0, 110.0, 10.0, [0, 0], [1, 1])], [0.0, 0.0, 30.0, 30.0]) == []
-    print("ok:", len(shown), "rows,", len(tips), "tips,", N_PAGES, "pages; widest name", max(tw(n) for _, n in shown), "units")
+    print("ok:", len(shown), "rows,", len(tips), "tips,", N_PAGES, "pages on", len(tabs), "tabs; widest name", max(tw(n) for _, n in shown), "units")
 
 
 if __name__ == "__main__":

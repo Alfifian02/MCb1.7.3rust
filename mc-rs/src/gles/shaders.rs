@@ -431,6 +431,7 @@ pub fn present(fxaa: bool, fast: bool) -> Src {
 uniform sampler2D u_src;
 uniform vec4 u_px; // 1 / scene size, 1 / surface size
 uniform vec4 u_grade; // the Vibrance dial's grade (`render::look`)
+uniform vec4 u_tone; // Brightness gain, 1 / Gamma (`render::look`); 1, 1 = skipped
 layout(location = 0) out vec4 o_color;
 const float CAS_SHARPNESS = 0.5;
 const float VIGNETTE = 0.04;
@@ -483,6 +484,7 @@ void main() {
 #endif
     vec3 c = clamp(l * R2020_TO_709, vec3(0.0), vec3(1.0));
     if (u_grade.x > 0.0) { c = grade(c); }
+    if (u_tone.x != 1.0 || u_tone.y != 1.0) { c = pow(clamp(c * u_tone.x, vec3(0.0), vec3(1.0)), vec3(u_tone.y)); }
     float k = uv.x * uv.y;
     c = c * pow(max(16.0 * (k - uv.x) * (k - uv.y), 1e-4), VIGNETTE);
     c = mix(1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, 12.92 * c, vec3(lessThanEqual(c, vec3(0.0031308))));

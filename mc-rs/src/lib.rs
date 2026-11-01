@@ -365,6 +365,7 @@ impl App {
         // spawn_at defaults to aspect 1.0 and resize() only runs when the size changes, so
         // without this the 3D view is squashed horizontally onto the real screen shape.
         camera.aspect = width as f32 / height as f32;
+        camera.fov_y = opts.fov_deg().to_radians();
         let player = Player { pos: start, vel: glam::Vec3::ZERO, on_ground: false };
 
         // M12: HUD pipeline + touch state machine. Surface dimensions match
@@ -665,6 +666,7 @@ impl App {
         let aspect = self.camera.aspect;
         self.camera = FirstPersonCamera::spawn_at(s.x, s.y + EYE_HEIGHT, s.z);
         self.camera.aspect = aspect;
+        self.camera.fov_y = self.opts.fov_deg().to_radians();
         (self.world_ticks, self.weather_ticks, self.weather) = (0.0, 0, sky::Weather::new(seed));
         self.atmos.reset();
         self.fx = Effects::new(seed);
@@ -811,7 +813,7 @@ impl App {
         // Zoomify: hold the zoom button for 4x (the vertical tangent / 4), eased; the look drag slows with the field of view.
         // Retro Sprint: the field of view x 1.15 while sprinting (eased), and the zoom starts from it.
         self.sprint.fov_step(dt);
-        let base = 70_f32.to_radians() * self.sprint.fov;
+        let base = self.opts.fov_deg().to_radians() * self.sprint.fov; // Options > FOV (70 by default)
         let target = if self.touch.zooming() { 2.0 * ((base * 0.5).tan() / ZOOM).atan() } else { base };
         self.camera.fov_y += (target - self.camera.fov_y) * (1.0 - (-14.0 * dt).exp());
         // Look drag accumulated by the touch UI since the last frame. Drained
@@ -938,11 +940,11 @@ impl App {
         let riding = self.riding();
         let asleep = self.sleep.is_some();
         if !asleep {
-            let k = LOOK_SENS * (self.camera.fov_y / self.sprint.fov * 0.5).tan() / (70_f32.to_radians() * 0.5).tan() * self.opts.look_scale(); // the sprint's wider view does not speed the look up
+            let k = LOOK_SENS * (self.camera.fov_y / self.sprint.fov * 0.5).tan() / (self.opts.fov_deg().to_radians() * 0.5).tan() * self.opts.look_scale(); // neither the sprint's wider view nor the FOV setting speeds the look up, only the zoom slows it
             self.camera.add_yaw(look_dx * k);
             self.camera.add_pitch(look_dy * k * if self.opts.invert_mouse { -1.0 } else { 1.0 });
             // The right stick has its own sensitivity (Controls > Controller); only the zoom narrows it.
-            let z = (self.camera.fov_y / self.sprint.fov * 0.5).tan() / (70_f32.to_radians() * 0.5).tan();
+            let z = (self.camera.fov_y / self.sprint.fov * 0.5).tan() / (self.opts.fov_deg().to_radians() * 0.5).tan();
             self.camera.add_yaw(pad_yaw * z);
             self.camera.add_pitch(pad_pitch * z);
         }
@@ -4328,7 +4330,7 @@ impl App {
                 let ratio = render::combat_hud::cooldown_ratio(self.swing_cd, s.interval, same);
                 // C8 (`displayedFor`): the arcabuz's brackets are its barrel's cone (the right button), not the bayonet's.
                 let angle = if s.profile == world::combat::profile::Profile::Arcabuz { s.profile.shot_reach().h } else { s.reach.h };
-                render::combat_hud::draw_gauge(v, gu, c, &self.xh, angle, (w, h), 70.0, ratio);
+                render::combat_hud::draw_gauge(v, gu, c, &self.xh, angle, (w, h), self.opts.fov_deg(), ratio);
             }
             if guard_points > 0 {
                 let g = self.vitals.guard;

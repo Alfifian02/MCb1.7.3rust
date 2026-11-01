@@ -141,7 +141,7 @@ fn multisample_of(count: u32, alpha_to_coverage: bool) -> wgpu::MultisampleState
 }
 
 const SHADER: &str = r#"
-struct U { px: vec4<f32>, grade: vec4<f32> }; // 1 / scene size, 1 / surface size; the Vibrance dial's grade (`render::look`)
+struct U { px: vec4<f32>, grade: vec4<f32>, tone: vec4<f32> }; // 1 / scene size, 1 / surface size; the Vibrance dial's grade; Brightness gain and 1 / Gamma (`render::look`)
 @group(0) @binding(0) var<uniform> u: U;
 @group(0) @binding(1) var samp: sampler;
 @group(0) @binding(2) var src: texture_2d<f32>;
@@ -174,6 +174,10 @@ fn grade(c: vec3<f32>) -> vec3<f32> {
     g = clamp(g + vec3<f32>(k, 0.0, -k), vec3<f32>(0.0), vec3<f32>(1.0));
     return g * g;
 }
+
+// Brightness (a gain on the linear colour) and Gamma (a power on it): `u.tone` = (gain, 1 / gamma). 1, 1 is skipped (and so is the zero a buffer
+// starts with).
+fn tone(c: vec3<f32>) -> vec3<f32> { return pow(clamp(c * u.tone.x, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(u.tone.y)); }
 
 // The one full-screen pass: (FXAA +) CAS on the scene, bilinear upscale, Rec. 2020 -> 709, vignette, sRGB. `uv` is the surface pixel's
 // place in the scene; the taps are one scene texel apart, so at a render scale below 1 CAS sharpens exactly what the upscale softens.
@@ -214,6 +218,7 @@ fn fs_fin(@builtin(position) p: vec4<f32>) -> @location(0) vec4<f32> {
     if FAST { l = max(textureSampleLevel(src, samp, uv, 0.0).rgb, vec3<f32>(0.0)); } else { l = enhanced(uv, u.px.xy); }
     var c = clamp((l * R2020_TO_XYZ) * XYZ_TO_709, vec3<f32>(0.0), vec3<f32>(1.0));
     if u.grade.x > 0.0 { c = grade(c); }
+    if u.tone.x > 0.0 && (u.tone.x != 1.0 || u.tone.y != 1.0) { c = tone(c); }
     let k = uv.x * uv.y;
     c = c * pow(max(16.0 * (k - uv.x) * (k - uv.y), 1e-4), VIGNETTE);
     // The swap chain is sRGB on most phones (the hardware encodes); otherwise encode here.
@@ -282,7 +287,7 @@ impl Present {
             cache: None,
         });
         let samp = device.create_sampler(&wgpu::SamplerDescriptor { mag_filter: wgpu::FilterMode::Linear, min_filter: wgpu::FilterMode::Linear, address_mode_u: wgpu::AddressMode::ClampToEdge, address_mode_v: wgpu::AddressMode::ClampToEdge, ..Default::default() });
-        let ubuf = device.create_buffer(&wgpu::BufferDescriptor { label: Some("present_u"), size: 32, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        let ubuf = device.create_buffer(&wgpu::BufferDescriptor { label: Some("present_u"), size: 48, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
         let (scene_v, msaa, bind) = Self::size(device, queue, &layout, &samp, &ubuf, scene, surface);
         Self { scene: scene_v, msaa, fin, layout, samp, ubuf, bind }
     }
@@ -310,9 +315,9 @@ impl Present {
         (self.scene, self.msaa, self.bind) = Self::size(device, queue, &self.layout, &self.samp, &self.ubuf, scene, surface);
     }
 
-    /// The Vibrance dial's grade for this frame (`Look::grade`), read by the final pass.
-    pub fn set_grade(&self, queue: &Queue, grade: [f32; 4]) {
-        queue.write_buffer(&self.ubuf, 16, bytemuck::bytes_of(&grade));
+    /// The Vibrance dial's grade and the Brightness / Gamma tone for this frame (`Look::grade`, `Look::tone`), read by the final pass.
+    pub fn set_grade(&self, queue: &Queue, grade: [f32; 4], tone: [f32; 4]) {
+        queue.write_buffer(&self.ubuf, 16, bytemuck::bytes_of(&[grade, tone]));
     }
 
     /// The 1-sample scene (what the final pass reads). The scene pass draws into `scene_attachment` instead.

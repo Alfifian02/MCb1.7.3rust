@@ -19,6 +19,14 @@ use std::collections::HashMap;
 
 /// The Vibrance dial's default: about a third of its range, a light touch.
 pub const VIBRANCE_DEFAULT: f32 = 0.3;
+/// The Brightness and Gamma sliders' default: the middle of the track, 100%.
+pub const TONE_DEFAULT: f32 = 0.5;
+/// What a Brightness / Gamma slider (0..1) says, as a factor: 50% at the left end, 100% in the middle, 150% at the right, whole percents (the
+/// options text shows the same number, so what it reads is what the final pass applies).
+pub fn tone_factor(x: f32) -> f32 {
+    ((0.5 + x.clamp(0.0, 1.0)) * 100.0).round() / 100.0
+}
+
 // The grade at dial 1.0 (the dial scales all three together).
 const GRADE_VIB: f32 = 0.5; // vibrance amount: a dull colour gains up to +50%, a vivid one almost nothing
 const GRADE_CURVE: f32 = 0.35; // S-curve blend
@@ -51,6 +59,10 @@ const MOTE_CAP: [usize; 3] = [0, 6, 14];
 pub struct LookCfg {
     /// 0..1; 0 turns the grade off.
     pub vibrance: f32,
+    /// Brightness (a gain on the final colour) and Gamma (a power on it), each a slider position 0..1 (`tone_factor`: 50% .. 150%, the middle is
+    /// no change).
+    pub brightness: f32,
+    pub gamma: f32,
     pub warm: bool,
     pub water: bool,
     pub glow: bool,
@@ -61,7 +73,7 @@ pub struct LookCfg {
 
 impl Default for LookCfg {
     fn default() -> Self {
-        Self { vibrance: VIBRANCE_DEFAULT, warm: true, water: true, glow: true, motion: 1, haze: true }
+        Self { vibrance: VIBRANCE_DEFAULT, brightness: TONE_DEFAULT, gamma: TONE_DEFAULT, warm: true, water: true, glow: true, motion: 1, haze: true }
     }
 }
 
@@ -71,6 +83,8 @@ impl LookCfg {
         let (b, n) = (v == "true", v.parse::<f32>().ok());
         match (k, n) {
             ("look_vibrance", Some(f)) => self.vibrance = f.clamp(0.0, 1.0),
+            ("look_brightness", Some(f)) => self.brightness = f.clamp(0.0, 1.0),
+            ("look_gamma", Some(f)) => self.gamma = f.clamp(0.0, 1.0),
             ("look_motion", Some(f)) if (0.0..=2.0).contains(&f) => self.motion = f as u8,
             ("look_warm", _) => self.warm = b,
             ("look_water", _) => self.water = b,
@@ -81,7 +95,7 @@ impl LookCfg {
     }
 
     pub fn save_into(&self, t: &mut String) {
-        t.push_str(&format!("look_vibrance:{:.3}\nlook_warm:{}\nlook_water:{}\nlook_glow:{}\nlook_motion:{}\nlook_haze:{}\n", self.vibrance, self.warm, self.water, self.glow, self.motion, self.haze));
+        t.push_str(&format!("look_vibrance:{:.3}\nlook_brightness:{:.3}\nlook_gamma:{:.3}\nlook_warm:{}\nlook_water:{}\nlook_glow:{}\nlook_motion:{}\nlook_haze:{}\n", self.vibrance, self.brightness, self.gamma, self.warm, self.water, self.glow, self.motion, self.haze));
     }
 }
 
@@ -104,6 +118,8 @@ pub struct Env {
 pub struct Look {
     /// Final pass: x vibrance amount, y S-curve blend, z warm / cool split (all 0 = the grade is skipped).
     pub grade: [f32; 4],
+    /// Final pass: x the Brightness gain, y the Gamma exponent (1 / gamma), both 1 = skipped. Applies in the Nether and underwater too.
+    pub tone: [f32; 4],
     /// Chunk shaders: rgb tone of a lit surface; w = extra face-shade exponent.
     pub warm: [f32; 4],
     /// rgb tone of a shaded surface; w = aerial tint strength.
@@ -133,12 +149,13 @@ fn lerp3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
 }
 
 impl Look {
-    pub const OFF: Look = Look { grade: [0.0; 4], warm: [1.0, 1.0, 1.0, 0.0], cool: [1.0, 1.0, 1.0, 0.0], sun: [0.0, 1.0, 0.0, 0.0], fx: [0.0; 4], bolt: [0.0; 4], rays: false, gold: 0.0, glow: false, motes: 0 };
+    pub const OFF: Look = Look { grade: [0.0; 4], tone: [1.0, 1.0, 0.0, 0.0], warm: [1.0, 1.0, 1.0, 0.0], cool: [1.0, 1.0, 1.0, 0.0], sun: [0.0, 1.0, 0.0, 0.0], fx: [0.0; 4], bolt: [0.0; 4], rays: false, gold: 0.0, glow: false, motes: 0 };
 
     pub fn new(c: &LookCfg, e: &Env) -> Self {
         let mut l = Self::OFF;
         let v = c.vibrance.clamp(0.0, 1.0);
         l.grade = [GRADE_VIB * v, GRADE_CURVE * v, GRADE_SPLIT * v, 0.0];
+        l.tone = [tone_factor(c.brightness), 1.0 / tone_factor(c.gamma), 0.0, 0.0];
         l.fx[0] = e.seconds;
         // `WorldProviderHell.generateLightBrightnessTable`: the floor of the light table is 0.1, not 0.05. `fx.w` is what it is raised by (0 in the
         // overworld, so `Look::OFF` and every overworld frame keep the old table); the shaders' `brightness` reads it.
@@ -458,7 +475,7 @@ mod tests {
     /// Options.txt round trip, a bad line is skipped and the dial stays inside 0..1.
     #[test]
     fn config_round_trips_and_stays_bounded() {
-        let mut c = LookCfg { vibrance: 0.8, warm: false, water: true, glow: false, motion: 2, haze: false };
+        let mut c = LookCfg { vibrance: 0.8, warm: false, water: true, glow: false, motion: 2, haze: false, ..LookCfg::default() };
         let mut t = String::new();
         c.save_into(&mut t);
         let mut back = LookCfg::default();
@@ -473,7 +490,7 @@ mod tests {
     /// Dial 0 is no grade at all; every effect off is `Look::OFF` apart from the clock; the default is a light touch.
     #[test]
     fn off_changes_nothing_and_the_default_is_conservative() {
-        let off = LookCfg { vibrance: 0.0, warm: false, water: false, glow: false, motion: 0, haze: false };
+        let off = LookCfg { vibrance: 0.0, warm: false, water: false, glow: false, motion: 0, haze: false, ..LookCfg::default() };
         let l = Look::new(&off, &env(0.05));
         assert_eq!((l.grade, l.warm, l.cool, l.sun, l.rays, l.motes), (Look::OFF.grade, Look::OFF.warm, Look::OFF.cool, Look::OFF.sun, false, 0));
         assert_eq!((l.fx[1], l.fx[2]), (0.0, 0.0));
@@ -481,6 +498,20 @@ mod tests {
         assert!(d.grade[0] > 0.0 && d.grade[0] <= 0.2 && d.grade[1] <= 0.12 && d.grade[2] <= 0.02, "{:?}", d.grade);
         let top = Look::new(&LookCfg { vibrance: 1.0, ..LookCfg::default() }, &env(0.9));
         assert!(top.grade[0] <= GRADE_VIB && top.grade[1] <= GRADE_CURVE && top.grade[2] <= GRADE_SPLIT);
+    }
+
+    /// Brightness and Gamma: the middle of the track is 100% and changes nothing (`Look::OFF`'s tone), the ends are 50% and 150%, a slider
+    /// position is rounded to a whole percent, the grade's dial does not move them, and they reach the Nether's and the underwater frame.
+    #[test]
+    fn brightness_and_gamma_are_percent_sliders() {
+        let (d, hell) = (Look::new(&LookCfg::default(), &env(0.5)), Look::new(&LookCfg::default(), &Env { nether: true, ..env(0.5) }));
+        assert_eq!((d.tone, hell.tone), (Look::OFF.tone, Look::OFF.tone));
+        assert_eq!((tone_factor(0.0), tone_factor(0.5), tone_factor(1.0), tone_factor(0.4999), tone_factor(9.0)), (0.5, 1.0, 1.5, 1.0, 1.5));
+        let c = LookCfg { brightness: 1.0, gamma: 0.0, vibrance: 0.0, ..LookCfg::default() };
+        let (l, w) = (Look::new(&c, &env(0.5)), Look::new(&c, &Env { underwater: true, nether: true, ..env(0.5) }));
+        assert_eq!((l.tone[0], l.tone[1]), (1.5, 2.0));
+        assert_eq!(l.tone, w.tone);
+        assert_eq!(l.grade, Look::OFF.grade, "the Vibrance dial at 0 still skips the grade");
     }
 
     /// The light is golden with the sun low and plain at noon; shade is bluer than light; rain and the Nether take it away.
