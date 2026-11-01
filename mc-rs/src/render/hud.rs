@@ -49,16 +49,20 @@ pub const DPAD_SHEET: &[u8] = include_bytes!("../../assets/dpad.rgba");
 /// The title screen's sheet (256 x 272, `tools/gen_menu.py`): `mclogo.png`, then `background.png`: the last rows of the HUD texture.
 pub const MENU_SHEET: &[u8] = include_bytes!("../../assets/menu.rgba");
 /// The skins (`mob/char.png` and the armor, 64 x 32 each, four to a row, `atlas::skin_px`): 224 rows of the HUD texture, cut from the atlas's `ART` tail (`PLAYER_Y`).
-pub(crate) const SHEET_H: f32 = 3248.0;
+pub(crate) const SHEET_H: f32 = 3312.0;
 const PLAYER_Y: f32 = 2576.0;
 /// Where the font atlas starts in the HUD texture (the 64 rows after the player skin, see `font_sheet`).
 const FONT_Y: f32 = 2800.0;
-/// Where the satchel's pixel art starts (256 x 256, `tools/gen_satchel_ui.py`): the last rows of the HUD texture, after the font atlas.
-const SATCHEL_Y: f32 = 2864.0;
+/// Where Cortes Combat's HUD sprites start (256 x 64, `tools/gen_combat_hud.py`): the 64 rows after the font atlas.
+const COMBAT_Y: f32 = 2864.0;
+/// Where the satchel's pixel art starts (256 x 256, `tools/gen_satchel_ui.py`): the last rows of the HUD texture, after the combat sprites.
+const SATCHEL_Y: f32 = 2928.0;
 /// Where the map block starts (256 x 128, `tools/gen_mapui.py`): the last rows of the HUD texture, after the satchel. The held map's 128 x 128
 /// pixels are rewritten here at run time (`HudPipeline::upload_map`); `mapbg.png` and `mapicons.png` sit beside them.
-const MAP_Y: f32 = 3120.0;
+const MAP_Y: f32 = 3184.0;
 pub const MAP_SHEET: &[u8] = include_bytes!("../../assets/mapui.rgba");
+/// Cortes Combat's HUD sprites (crosshair x3, guard orbs x2, charge bar x2, cooldown brackets; `tools/gen_combat_hud.py`).
+pub const COMBAT_SHEET: &[u8] = include_bytes!("../../assets/combat_hud.rgba");
 /// The satchel and recipe book's sprites (`satchel.rs`).
 pub const SATCHEL_SHEET: &[u8] = include_bytes!("../../assets/satchel.rgba");
 /// The font atlas: 95 glyph cells of 8 x 8 texels on a 10 texel pitch (a transparent texel on every side, so the sharp bilinear in
@@ -68,7 +72,7 @@ const FONT_PITCH: usize = 10;
 const TERRAIN_Y: f32 = 768.0;
 
 /// Sprites as `(x, y, w, h)` in pixels of the whole HUD texture: items 0..256, widgets.png 256..512, icons.png 512..768, terrain.png
-/// 768..1024, then the container panels (inventory 1024, crafting table 1280, furnace 1536, chest 1792), then the d-pad sheet (2048), the title sheet (2304), the skins (2576), the font atlas (2800).
+/// 768..1024, then the container panels (inventory 1024, crafting table 1280, furnace 1536, chest 1792), then the d-pad sheet (2048), the title sheet (2304), the skins (2576), the font atlas (2800), Cortes Combat's HUD (2864).
 pub mod sprites {
     pub type Sprite = (f32, f32, f32, f32);
     pub const HOTBAR: Sprite = (0.0, 256.0, 182.0, 22.0);
@@ -110,6 +114,27 @@ pub mod sprites {
         pub const PIXELS: Sprite = (0.0, Y, 128.0, 128.0);
         pub const BG: Sprite = (128.0, Y, 64.0, 64.0);
         pub const ICONS: Sprite = (128.0, Y + 64.0, 32.0, 32.0);
+    }
+    /// Cortes Combat's HUD sprites (`tools/gen_combat_hud.py`, same places). Every lit texel is stored opaque (the shader drops texels under
+    /// alpha 0.5, and these art files are fainter): the art's own alpha is the `ALPHA_*` constant, drawn as the vertex alpha.
+    pub mod cc {
+        use super::Sprite;
+        const Y: f32 = super::super::COMBAT_Y;
+        pub const CROSS: Sprite = (0.0, Y, 15.0, 15.0);
+        pub const CROSS_AIM: Sprite = (16.0, Y, 15.0, 15.0);
+        pub const CROSS_HIT: Sprite = (32.0, Y, 15.0, 15.0);
+        pub const SHIELD: Sprite = (48.0, Y, 16.0, 16.0);
+        pub const SHIELD_OFF: Sprite = (64.0, Y, 16.0, 16.0);
+        pub const CHARGE: Sprite = (0.0, Y + 16.0, 30.0, 15.0);
+        pub const CHARGE_EMPTY: Sprite = (32.0, Y + 16.0, 30.0, 15.0);
+        /// `cooldown_corchetes.png` is 23 x 15 with a bracket at columns 3..7 and its mirror at 16..20 (the ink; the rest is clear): the two halves.
+        pub const BRACKET_L: Sprite = (67.0, Y + 16.0, 4.0, 15.0);
+        pub const BRACKET_R: Sprite = (80.0, Y + 16.0, 4.0, 15.0);
+        pub const ALPHA_CROSS: f32 = 204.0 / 255.0;
+        pub const ALPHA_SHIELD: f32 = 102.0 / 255.0;
+        pub const ALPHA_SHIELD_OFF: f32 = 55.0 / 255.0;
+        pub const ALPHA_CHARGE: f32 = 204.0 / 255.0;
+        pub const ALPHA_CHARGE_EMPTY: f32 = 88.0 / 255.0;
     }
     pub mod sat {
         use super::Sprite;
@@ -216,9 +241,9 @@ fn shader_source(srgb: bool) -> String {
     format!("const SRGB: bool = {srgb};\nconst SHEET: vec2<f32> = vec2<f32>(256.0, {SHEET_H:.1});\n{SHADER_SRC}") // `SHEET` = the whole HUD texture
 }
 
-/// The whole HUD texture (256 x `SHEET_H`, RGBA8): items, the GUI sheet, terrain.png, the panels, the d-pad, the title screen, the player skin, the font.
+/// The whole HUD texture (256 x `SHEET_H`, RGBA8): items, the GUI sheet, terrain.png, the panels, the d-pad, the title screen, the player skin, the font, Cortes Combat's HUD, the satchel, the map.
 pub fn sheet_bytes() -> Vec<u8> {
-    [crate::render::atlas::ITEMS, GUI, crate::render::atlas::TERRAIN, CONTAINERS, DPAD_SHEET, MENU_SHEET, &crate::render::atlas::ART[256 * 288 * 4..], &font_sheet(), SATCHEL_SHEET, MAP_SHEET].concat()
+    [crate::render::atlas::ITEMS, GUI, crate::render::atlas::TERRAIN, CONTAINERS, DPAD_SHEET, MENU_SHEET, &crate::render::atlas::ART[256 * 288 * 4..], &font_sheet(), COMBAT_SHEET, SATCHEL_SHEET, MAP_SHEET].concat()
 }
 
 /// Owns the HUD pipeline + dynamic vertex buffer. One instance per surface.
@@ -567,6 +592,13 @@ impl HudPipeline {
         }
     }
 
+    /// A flat-coloured quad with a colour at each corner (tl, tr, br, bl), blended across it: the vignette's cells and the cone bars' segments.
+    pub fn push_quad_grad(out: &mut Vec<HudVertex>, x: f32, y: f32, w: f32, h: f32, [c_tl, c_tr, c_br, c_bl]: [[f32; 4]; 4]) {
+        let v = |px: f32, py: f32, color: [f32; 4]| HudVertex { pos: [px, py], color, uv: NO_UV };
+        let (tl, tr, br, bl) = (v(x, y, c_tl), v(x + w, y, c_tr), v(x + w, y + h, c_br), v(x, y + h, c_bl));
+        out.extend([tl, tr, br, tl, br, bl]);
+    }
+
     /// Append a single quad (top-left origin) to `out`. Two CCW triangles.
     pub fn push_quad(out: &mut Vec<HudVertex>, x: f32, y: f32, w: f32, h: f32, color: [f32; 4]) {
         let tl = HudVertex { pos: [x, y], color, uv: NO_UV };
@@ -785,6 +817,23 @@ mod tests {
         assert!(a(182, f + 7) > 0 && a(186, f + 20) > 0, "flame and arrow");
     }
 
+    /// Cortes Combat's HUD block: each sprite holds a picture, every texel is clear or fully opaque (`fs_main` drops anything under alpha 0.5,
+    /// and the art is fainter: the sprite's own alpha is a vertex alpha in `sprites::cc`), and each bracket half holds ink.
+    #[test]
+    fn combat_sheet_has_the_sprites_all_or_nothing() {
+        let a = |x: usize, y: usize| COMBAT_SHEET[((y - COMBAT_Y as usize) * 256 + x) * 4 + 3];
+        let all = [cc::CROSS, cc::CROSS_AIM, cc::CROSS_HIT, cc::SHIELD, cc::SHIELD_OFF, cc::CHARGE, cc::CHARGE_EMPTY, cc::BRACKET_L, cc::BRACKET_R];
+        for (x, y, w, h) in all {
+            let px: Vec<u8> = (0..(w * h) as usize).map(|i| a(x as usize + i % w as usize, y as usize + i / w as usize)).collect();
+            assert!(px.iter().any(|&p| p == 255), "sprite at {x},{y} is empty");
+            assert!(px.iter().all(|&p| p == 0 || p == 255), "sprite at {x},{y} has a half alpha");
+        }
+        // the brackets are the art's two inked columns and nothing is lit between them
+        for y in 0..15 {
+            assert!((71..80).all(|x| a(x, COMBAT_Y as usize + 16 + y) == 0), "row {y}: ink between the two halves");
+        }
+    }
+
     /// The GUI sheet is widgets.png over icons.png, and the sprites' places hold a picture (the hotbar's frame, a full heart, the bubble).
     #[test]
     fn gui_sheet_has_the_sprites() {
@@ -802,6 +851,7 @@ mod tests {
         }
     }
     use super::*;
+    use sprites::cc;
 
     fn approx(a: f32, b: f32) {
         assert!((a - b).abs() < 0.001, "{a} != {b}");
@@ -919,7 +969,9 @@ mod text_tests {
     /// side of a cell is transparent (what keeps `fs_main`'s sharp bilinear off the neighbouring glyph).
     #[test]
     fn font_sheet_is_the_glyph_bitmaps_with_a_gutter() {
-        assert_eq!(FONT_Y + 64.0, SATCHEL_Y);
+        assert_eq!(FONT_Y + 64.0, COMBAT_Y);
+        assert_eq!(COMBAT_Y + 64.0, SATCHEL_Y);
+        assert_eq!(COMBAT_SHEET.len(), 256 * 64 * 4);
         assert_eq!(SATCHEL_Y + 256.0, MAP_Y);
         assert_eq!(MAP_Y + 128.0, SHEET_H);
         assert_eq!(MAP_SHEET.len(), 256 * 128 * 4);

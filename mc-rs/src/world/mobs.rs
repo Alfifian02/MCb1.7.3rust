@@ -1795,6 +1795,19 @@ impl Mobs {
         }
     }
 
+    /// C8 (the arcabuz's shot, NOT b1.7.3, UNVERIFIED): `strike` with the damage window cleared first, so the blow always lands whole, and
+    /// none left behind (`ArcabuzShot`'s `invulnerableTime` 0 then 10: the target can be hit again at once).
+    pub fn shot(&mut self, i: usize, dmg: f32, from: Vec3) {
+        self.list[i].life = 0;
+        self.list[i].damage_in(dmg, from, &mut self.rng, 10);
+    }
+
+    /// C8 (`igniteForSeconds`, NOT b1.7.3, UNVERIFIED): the arcabuz's shot sets mob `i` alight for `ticks`; a longer fire is never shortened.
+    pub fn ignite(&mut self, i: usize, ticks: u16) {
+        let m = &mut self.list[i];
+        m.fire = m.fire.max(ticks);
+    }
+
     /// Retro Sprint's `target.addVelocity` (m/s here): added to the motion as it is, so the hit's own `knockBack` that follows halves it
     /// when it lands (a hit inside the damage window keeps it whole, as in the mod). No steering for 10 ticks, like after a knockback.
     pub fn shove(&mut self, i: usize, v: Vec3) {

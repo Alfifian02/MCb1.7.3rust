@@ -68,6 +68,12 @@ const fn r(dist: f32, h: f32, v: f32) -> Reach {
 const NO_CHARGE: Charge = Charge { bonus: 0.0, ticks: 0 };
 
 impl Profile {
+    /// `WeaponKinds.fights`: does the item's button hit anything (what the HUD's brackets and bar are for)? Not the bare `None` row (a block,
+    /// food) and not the pickaxe.
+    pub fn fights(self) -> bool {
+        !matches!(self, Profile::None | Profile::Pickaxe)
+    }
+
     /// `WeaponTables.reach`: what the left button hits with. Vertical is tighter than horizontal so a swing does not
     /// reach a mob at the feet or overhead.
     pub fn reach(self) -> Reach {
@@ -184,6 +190,13 @@ pub fn charge_multiplier(bonus: f32, ratio: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The HUD's brackets are for what fights: the same list as the mod's `WeaponKinds` (the bare hand included, `None` and the pickaxe not).
+    #[test]
+    fn only_none_and_the_pickaxe_do_not_fight() {
+        let idle: Vec<Profile> = ALL.into_iter().filter(|p| !p.fights()).collect();
+        assert_eq!(idle, [Profile::None, Profile::Pickaxe]);
+    }
 
     // One check for the arithmetic and the tables' sanity (the mod's AttackTimingTest + WeaponTablesTest).
     #[test]

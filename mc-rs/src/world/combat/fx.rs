@@ -9,8 +9,8 @@
 //!   flat boxes (`render/items.rs`), so the slash is a diagonal streak of white specks (a flat arc for the sweep) and a full charge is a
 //!   burst of gold ones (the mod's `CRIT`, 30 of them). No per-weapon sprite, no doubled cut (the shotel's double cut is an enchantment, dropped).
 //! * Not ported: the damage indicator (the mod deleted its call), `EXPLOSION` / `NUCLEAR` shakes (a creeper's or TNT's blast shakes
-//!   nothing here; the reactor is dropped), the client's `CAMERA_SHAKE` switch (no options row: the table is already small), the
-//!   arcabuz's recoil (C8).
+//!   nothing here; the reactor is dropped) and the client's `CAMERA_SHAKE` switch (no options row: the table is already small). The
+//!   arcabuz's recoil (C8) is `Kind::Recoil`.
 
 use glam::Vec3;
 
@@ -24,9 +24,11 @@ pub enum Kind {
     ChargedHit,
     Guarded,
     Hurt,
+    /// C8: the arcabuz's kick (`ArcabuzRecoil`: 2 degrees, 5 ticks), at the shooter.
+    Recoil,
 }
 
-pub const ALL: [Kind; 6] = [Kind::Kill, Kind::GuardBreak, Kind::Parry, Kind::ChargedHit, Kind::Guarded, Kind::Hurt];
+pub const ALL: [Kind; 7] = [Kind::Kill, Kind::GuardBreak, Kind::Parry, Kind::ChargedHit, Kind::Guarded, Kind::Hurt, Kind::Recoil];
 
 impl Kind {
     /// Degrees at point blank and the ticks the impulse lives.
@@ -38,6 +40,7 @@ impl Kind {
             Kind::ChargedHit => (1.6, 7),
             Kind::Guarded => (1.2, 5),
             Kind::Hurt => (0.8, 5),
+            Kind::Recoil => (2.0, 5),
         }
     }
 }

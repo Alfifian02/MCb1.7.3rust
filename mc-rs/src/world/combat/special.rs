@@ -5,7 +5,7 @@
 //! (`MultiHit`, 4 swings: everything in a wider arc, no charge), the shotel's parry (a 12 tick window, a 100 tick lockout, the walk at
 //! x0.4) and the martillo's streak (+0.15 of its damage per hit landed inside 80 ticks of the last). Not ported: the enchantments
 //! (Audacia, Retirada, Barredor, Segunda Pasada, Corte Gemelo, Reflejo de Acero, Capacitor, Vampirico, Ritmo de Hierro, Sentencia), the lunge's
-//! status effect, armour piercing and sounds / particles (C7), and the arcabuz's `Fusee` (C8).
+//! status effect, armour piercing and sounds / particles (C7). The arcabuz's `Fusee` is `combat::arcabuz` (C8).
 
 use super::profile::Reach;
 use glam::Vec3;

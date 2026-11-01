@@ -1,6 +1,6 @@
-"""Cortes Combat C6 (NOT b1.7.3): paint the 20 weapon sprites of the mod into mc-rs/assets/items.rgba.
+"""Cortes Combat C6 (NOT b1.7.3): paint the 21 weapon sprites of the mod into mc-rs/assets/items.rgba.
 
-Item id 400 + n (`combat::catalog`) is items.png tile 208 + n (`catalog::ICON0`), tiles 208..=232, all empty in b1.7.3's sheet and
+Item id 400 + n (`combat::catalog`) is items.png tile 208 + n (`catalog::ICON0`), tiles 208..=233, all empty in b1.7.3's sheet and
 named by no `icons.rs` row, so `render/icons.rs` needs no new line. Run AFTER tools/gen_terrain.py (that script rewrites items.rgba
 from the jar and would drop these tiles). The mod's alabarda PNGs are 32 x 32; the sheet's tiles are 16 x 16, so they are
 reduced 2:1 by nearest neighbour (UNVERIFIED by eye: a box filter may look better). Idempotent. Needs Pillow.
@@ -31,6 +31,13 @@ for f, fam in enumerate(FAMILIES):
         tile = ICON0 + 5 * f + t
         sheet.paste(im, ((tile % 16) * 16, (tile // 16) * 16))
         done += 1
+# C8: the arcabuz is `combat::catalog::ARCABUZ` = family 5, tier 0: tile 233. Its sprite is `arcabuz_icon.png` (the fuse frames are not painted).
+im = Image.open(SRC / "arcabuz_icon.png").convert("RGBA")
+if im.size != (16, 16):
+    im = im.resize((16, 16), Image.NEAREST)
+tile = ICON0 + 25
+sheet.paste(im, ((tile % 16) * 16, (tile // 16) * 16))
+done += 1
 SHEET.write_bytes(sheet.tobytes())
-print(f"{done} sprites written into {SHEET} (tiles {ICON0}..={ICON0 + 24})")
-assert done == 20, "expected the 20 weapons of combat::catalog"
+print(f"{done} sprites written into {SHEET} (tiles {ICON0}..={ICON0 + 25})")
+assert done == 21, "expected the 20 weapons and the arcabuz of combat::catalog"

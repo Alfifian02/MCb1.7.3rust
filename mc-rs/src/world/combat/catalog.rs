@@ -20,12 +20,16 @@ pub enum Family {
     Alabarda,
     Martillo,
     Shotel,
+    /// C8: one item, no tiers (`ArcabuzStats`: 6 damage, 1.4 a second, 250 uses), id `ARCABUZ`.
+    Arcabuz,
 }
 
-pub const FAMILIES: [Family; 5] = [Family::Daga, Family::Ropera, Family::Alabarda, Family::Martillo, Family::Shotel];
+pub const FAMILIES: [Family; 6] = [Family::Daga, Family::Ropera, Family::Alabarda, Family::Martillo, Family::Shotel, Family::Arcabuz];
 
 /// First item id (a free id: b1.7.3 items stop at 359 and the records start at 2256).
 pub const FIRST_ID: u16 = 400;
+/// The arcabuz: family 5, tier 0 (`FIRST_ID + 5 * TIERS`).
+pub const ARCABUZ: u16 = 425;
 const TIERS: usize = 5;
 /// `CortesTier.getAttackDamageBonus` in `craft::MATERIALS` order (wood, stone, iron, diamond, gold).
 const BONUS: [f32; TIERS] = [0.0, 1.0, 2.0, 3.0, 0.0];
@@ -47,6 +51,7 @@ impl Family {
             Family::Alabarda => Profile::Halberd,
             Family::Martillo => Profile::Warhammer,
             Family::Shotel => Profile::Sabre,
+            Family::Arcabuz => Profile::Arcabuz,
         }
     }
 
@@ -58,6 +63,7 @@ impl Family {
             Family::Alabarda => 4.0,
             Family::Martillo => 3.0,
             Family::Shotel => 2.7,
+            Family::Arcabuz => 6.0, // `ArcabuzStats.ATTACK_DAMAGE`: the player's point + 5
         }
     }
 
@@ -69,6 +75,7 @@ impl Family {
             Family::Alabarda => 0.88,
             Family::Martillo => 1.05,
             Family::Shotel => 2.0,
+            Family::Arcabuz => 1.4, // `ArcabuzStats.ATTACK_SPEED`: 4 - 2.6
         }
     }
 
@@ -83,6 +90,7 @@ impl Family {
             && match self {
                 Family::Daga => true,
                 Family::Martillo => matches!(tier, 2..=4),
+                Family::Arcabuz => tier == 0,
                 _ => tier >= 1,
             }
     }
@@ -95,6 +103,7 @@ impl Family {
             Family::Alabarda => &["XX/", "X/X", "/  "],
             Family::Martillo => &["X*X", " / ", " / "],
             Family::Shotel => &["X  ", "XX/"],
+            Family::Arcabuz => &[],
         }
     }
 
@@ -109,12 +118,13 @@ impl Family {
     }
 
     fn name(self, tier: usize) -> &'static str {
-        const N: [[&str; TIERS]; 5] = [
+        const N: [[&str; TIERS]; 6] = [
             ["Wooden Dagger", "Stone Dagger", "Iron Dagger", "Diamond Dagger", "Golden Dagger"],
             ["", "Stone Ropera", "Iron Ropera", "Diamond Ropera", "Golden Ropera"],
             ["", "Stone Alabarda", "Iron Alabarda", "Diamond Alabarda", "Golden Alabarda"],
             ["", "", "Iron War Hammer", "Diamond War Hammer", "Golden War Hammer"],
             ["", "Stone Shotel", "Iron Shotel", "Diamond Shotel", "Golden Shotel"],
+            ["Arcabuz", "", "", "", ""],
         ];
         N[self as usize][tier]
     }
@@ -159,8 +169,16 @@ pub fn name(id: u16) -> Option<&'static str> {
 
 /// The recipe of an item: grid rows, the (key, item) pairs and the result id, for `craft::recipes()`.
 pub fn recipe(f: Family, tier: usize) -> Option<(&'static [&'static str], [(char, u16); 3], u16)> {
+    if f == Family::Arcabuz {
+        return None; // its grid has four ingredients: `arcabuz_recipe`
+    }
     let out = id(f, tier)?; // first: `HEAD` / `extra` index by tier
     Some((f.rows(), [('X', HEAD[tier]), ('/', STICK), ('*', f.extra(tier))], out))
+}
+
+/// C8 (`ArcabuzRecipes`): `/ V`, ` O `, ` MM` with a stick for the mod's bamboo, flint and steel, a dispenser and planks.
+pub fn arcabuz_recipe() -> (&'static [&'static str], [(char, u16); 4], u16) {
+    (&["/ V", " O ", " MM"], [('/', STICK), ('V', 259), ('O', 23), ('M', 5)], ARCABUZ)
 }
 
 #[cfg(test)]
@@ -172,13 +190,17 @@ mod tests {
     #[test]
     fn twenty_weapons_with_round_tripping_ids() {
         let items: Vec<_> = all().collect();
-        assert_eq!(items.len(), 5 + 4 + 4 + 3 + 4);
+        assert_eq!(items.len(), 5 + 4 + 4 + 3 + 4 + 1);
         let mut seen = std::collections::HashSet::new();
         for &(f, t) in &items {
             let i = id(f, t).unwrap();
             assert!(seen.insert(i) && (FIRST_ID..512).contains(&i), "{i}");
             assert_eq!(get(i), Some((f, t)));
             assert!(!name(i).unwrap().is_empty());
+            if f == Family::Arcabuz {
+                assert_eq!((i, t, recipe(f, t)), (ARCABUZ, 0, None));
+                continue;
+            }
             let (rows, key, out) = recipe(f, t).unwrap();
             assert_eq!(out, i);
             assert!(rows.iter().all(|r| r.len() == rows[0].len()), "{f:?} grid is ragged");
@@ -194,7 +216,13 @@ mod tests {
         assert_eq!((icon(399), icon(FIRST_ID + 5)), (None, None));
         assert_eq!(get(399), None);
         assert_eq!(get(FIRST_ID + 5), None); // wooden ropera does not exist (family 1, tier 0)
-        assert_eq!(get(425), None);
+        assert_eq!(get(425), Some((Family::Arcabuz, 0)));
+        assert_eq!((get(426), get(430)), (None, None));
+        assert_eq!((name(ARCABUZ), damage(ARCABUZ), icon(ARCABUZ)), (Some("Arcabuz"), Some(6.0), Some(ICON0 + 25)));
+        assert_eq!(Family::Arcabuz.interval(), 14); // 20 / 1.4
+        let (rows, key, out) = arcabuz_recipe();
+        assert_eq!((rows.concat().len(), out), (9, ARCABUZ));
+        assert!(rows.concat().chars().filter(|c| *c != ' ').all(|c| key.iter().any(|k| k.0 == c)));
         assert_eq!(damage(id(Family::Ropera, 2).unwrap()), Some(8.5)); // 6.5 + iron's 2
         assert_eq!(damage(id(Family::Daga, 0).unwrap()), Some(1.6));
         assert_eq!(Family::Alabarda.interval(), 23);

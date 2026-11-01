@@ -6,11 +6,11 @@
 //! (`Swing`, `Profile::charge`, `special`'s constants), never recomputed, which is the mod's own rule for this class.
 //!
 //! Left out on purpose: the knockback lines (C2 does not apply a profile's knockback, so the number would be one the game does
-//! not produce), `Targets` (the sweep has no cap here), the `Fusee` and arcabuz lines (C8), and the shotel's double cut (not
-//! ported, so its charged damage is one cut). A pickaxe gets its category and durability only, as in the mod.
+//! not produce), `Targets` (the sweep has no cap here) and the shotel's double cut (not ported, so its charged damage is one cut). The
+//! arcabuz's three lines (C8) say gunpowder where the mod says Firestone. A pickaxe gets its category and durability only, as in the mod.
 
 use super::profile::{charge_multiplier, Profile, Special};
-use super::{rules, special};
+use super::{arcabuz, rules, special};
 use crate::world::craft;
 use crate::world::items::ItemStack;
 
@@ -96,6 +96,12 @@ fn of(s: ItemStack, swing: Option<rules::Swing>) -> Vec<Line> {
         Profile::Halberd => v.push(("Right click: sweeps the whole arc, and costs the same cooldown as a hit".into(), rgb(NOTE))),
         Profile::Sabre => v.push((format!("Right click: parry. A {:.1} s window, a {:.1} s cooldown", secs(special::PARRY_WINDOW), secs(special::PARRY_COOLDOWN)), rgb(NOTE))),
         Profile::Warhammer => v.push((format!("Escalates with each consecutive hit; the streak lasts {:.1} s", secs(special::STREAK_WINDOW)), rgb(NOTE))),
+        Profile::Arcabuz => {
+            // `ArcabuzStats.maximumShotDamage`: the ceiling (every target of ten), because the gun's claim is about the blast; seconds, as the mod's.
+            v.push((format!("Reload: {:.1} s", secs(arcabuz::RELOAD_TICKS)), rgb(NOTE)));
+            v.push((format!("Shot: {:.1} damage", arcabuz::shot_damage(sw.damage) * arcabuz::MAX_TARGETS as f32), rgb(NOTE)));
+            v.push(("Spends a gunpowder: hold right click to reload, press it again to light the fuse".into(), rgb(NOTE)));
+        }
         _ => {}
     }
     v
@@ -118,6 +124,10 @@ mod tests {
         assert!(!t.iter().any(|l| l.contains("Charged"))); // the ropera cannot charge
         assert!(of(ItemStack { id: 4, count: 1, damage: 0 }, rules::swing_of(Some(4))).is_empty()); // cobblestone
         assert!(of(ItemStack { id, count: 1, damage: 0 }, None).is_empty()); // the rule is off
+        let gun = catalog::ARCABUZ;
+        let g: Vec<String> = of(ItemStack { id: gun, count: 1, damage: 0 }, rules::swing_of(Some(gun))).into_iter().map(|l| l.0).collect();
+        assert!(g.contains(&"6.0 Damage".to_string()) && g.contains(&"Reload: 2.5 s".to_string()) && g.contains(&"Shot: 180.0 damage".to_string()), "{g:?}");
+        assert!(g.iter().any(|l| l.starts_with("Durability: 250/250")));
         let pick = 257; // iron pickaxe: category and durability only
         let p = of(ItemStack { id: pick, count: 1, damage: 0 }, rules::swing_of(Some(pick)));
         assert_eq!(p.iter().map(|l| l.0.as_str()).collect::<Vec<_>>(), ["Tool", "Durability: 250/250"]);

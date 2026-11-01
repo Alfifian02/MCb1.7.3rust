@@ -236,6 +236,11 @@ impl Inventory {
         Some(heal)
     }
 
+    /// Is there an `id` in the main slots (what `take_one` would take)?
+    pub fn has(&self, id: u16) -> bool {
+        self.slots[..MAIN].iter().any(|s| s.is_some_and(|s| s.id == id))
+    }
+
     /// `InventoryPlayer.consumeInventoryItem`: use up one `id` from the first stack that has it (main slots only).
     pub fn take_one(&mut self, id: u16) -> bool {
         let Some(i) = self.slots[..MAIN].iter().position(|s| s.is_some_and(|s| s.id == id)) else { return false };

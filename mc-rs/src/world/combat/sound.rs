@@ -11,7 +11,7 @@
 //! * Not ported: the pack override (`WeaponPackSounds`, YAML packs are dropped), the mace's anvil and core layers and the shovel's
 //!   lantern layer (vanilla recordings, and no mace or shovel special here), the streak's note-block ladder (`STACK_STEP`: b1.7.3 has
 //!   `note.pling`, but the mod sends it to the one player and a `Snd` here has no private channel; the streak's orbs on the HUD say it),
-//!   the arcabuz's sounds (C8), the sweeping edge and the orb (enchantment and shovel special, dropped).
+//!   the sweeping edge and the orb (enchantment and shovel special, dropped).
 
 use super::profile::Profile;
 
@@ -34,9 +34,17 @@ pub enum Kind {
     Lunge,
     /// The shotel's parry turned a hit back.
     Parry,
+    /// C8: the arcabuz's fuse was struck.
+    FuseLit,
+    /// C8: a reload began.
+    Reload,
+    /// C8: the reload ended and the powder was paid.
+    Loaded,
+    /// C8: the shot.
+    Shot,
 }
 
-pub const ALL: [Kind; 8] = [Kind::Hit, Kind::ChargedHit, Kind::Miss, Kind::Charge, Kind::GuardBroken, Kind::Special, Kind::Lunge, Kind::Parry];
+pub const ALL: [Kind; 12] = [Kind::Hit, Kind::ChargedHit, Kind::Miss, Kind::Charge, Kind::GuardBroken, Kind::Special, Kind::Lunge, Kind::Parry, Kind::FuseLit, Kind::Reload, Kind::Loaded, Kind::Shot];
 
 /// A recording by its `SoundPool` key, and the pitch it plays at.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -56,6 +64,8 @@ const HOE_SWEEP: f32 = 0.7;
 const HOE_MISS: f32 = 1.2;
 const SHOVEL_MISS: f32 = 0.8;
 const BORROWED_CHARGED: f32 = 0.8;
+const ARCABUZ_SHOT: f32 = 0.55;
+const ARCABUZ_FUSE: f32 = 1.5;
 /// The engine's own clamp on a played pitch (`SoundEngine`: [0.5, 2.0]); `Audio` has none, so `of` applies it.
 pub const MIN_PITCH: f32 = 0.5;
 pub const MAX_PITCH: f32 = 2.0;
@@ -115,6 +125,11 @@ pub fn of(p: Profile, kind: Kind) -> Option<Cue> {
         Kind::Special => ("combat.alabarda_wide_swing", if p == Profile::Hoe { HOE_SWEEP } else { 1.0 }),
         Kind::Lunge => ("combat.alabarda_wide_swing", LUNGE),
         Kind::Parry => ("combat.shotel_parry", 1.0),
+        // C8 (`ModSounds`): the shot is played far down (`ARCABUZ_SHOT_PITCH`), the fuse on the TNT's hiss (the mod borrows the creeper's) at 1.5.
+        Kind::FuseLit => ("random.fuse", ARCABUZ_FUSE),
+        Kind::Reload => ("combat.arcabuz_reload", 1.0),
+        Kind::Loaded => ("combat.arcabuz_loaded", 1.0),
+        Kind::Shot => ("combat.arcabuz_shot", ARCABUZ_SHOT),
     };
     Some(Cue { name, pitch: pitch.clamp(MIN_PITCH, MAX_PITCH) })
 }

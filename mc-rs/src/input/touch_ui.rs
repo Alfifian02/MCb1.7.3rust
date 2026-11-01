@@ -484,6 +484,11 @@ impl TouchUi {
         self.pointers.values().any(|p| p.role == PointerRole::Guard)
     }
 
+    /// A finger is on the special button (C8: the arcabuz's reload lasts as long as it is held).
+    pub fn special_held(&self) -> bool {
+        self.pointers.values().any(|p| p.role == PointerRole::Special)
+    }
+
     /// A finger is on the zoom button.
     pub fn zooming(&self) -> bool {
         self.pad_zoom || self.pointers.values().any(|p| p.role == PointerRole::Zoom)

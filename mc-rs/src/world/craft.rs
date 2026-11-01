@@ -57,7 +57,10 @@ pub fn max_damage(id: u16) -> Option<u16> {
     if let Some((t, m)) = armor(id) {
         return Some([11, 16, 15, 13][t] * 3 << [0, 1, 2, 3, 1][m]); // ItemArmor: maxDamageArray[type] * 3 << armorLevel
     }
-    // Cortes Combat weapons (NOT b1.7.3): the same uses as a tool of their material.
+    // Cortes Combat weapons (NOT b1.7.3): the same uses as a tool of their material; the arcabuz has its own (`ArcabuzStats.USES`).
+    if id == combat::catalog::ARCABUZ {
+        return Some(250);
+    }
     if let Some((_, m)) = combat::catalog::get(id) {
         return Some(MATERIALS[m].1);
     }
@@ -346,6 +349,8 @@ pub fn recipes() -> &'static [Recipe] {
         }
         // Cortes Combat (NOT b1.7.3): 20 melee weapons, one line of data each in `combat::catalog`.
         r.extend(combat::catalog::all().filter_map(|(f, t)| combat::catalog::recipe(f, t)).map(|(rows, key, out)| shaped(rows, &key, out, 1)));
+        let (rows, key, out) = combat::catalog::arcabuz_recipe(); // C8: four ingredients, so not `recipe`'s three
+        r.push(shaped(rows, &key, out, 1));
         r
     })
 }

@@ -236,6 +236,11 @@ struct App {
     sp: world::combat::special::State,
     /// C7 (NOT b1.7.3, UNVERIFIED): the camera's live shake impulses (`combat::fx::Rig`), composed into `camera.bob` each frame.
     shake: world::combat::fx::Rig,
+    /// C9 (NOT b1.7.3, UNVERIFIED): Cortes Combat's HUD state: the crosshair's reaction (20 Hz) and the damage vignette / flash (per frame).
+    xh: render::combat_hud::Crosshair,
+    dmg: render::combat_hud::DamageFx,
+    /// C8 (NOT b1.7.3, UNVERIFIED): the arcabuz's fuse and reload (`combat::arcabuz`), one for the player.
+    gun: world::combat::arcabuz::State,
     eating: Option<Eating>,
     mat: Option<pack::Mat>,
     mat_ui: bool,
@@ -418,6 +423,9 @@ impl App {
             cd_rise: false,
             sp: Default::default(),
             shake: Default::default(),
+            xh: Default::default(),
+            dmg: Default::default(),
+            gun: Default::default(),
             mat: None,
             mat_ui: false,
             pack_saved: None,
@@ -553,6 +561,7 @@ impl App {
         (self.swing_cd, self.charge, self.eating, self.cd_rise) = (0, 0, None, false);
         self.sp = Default::default();
         self.shake.clear();
+        (self.xh, self.dmg, self.gun) = Default::default();
         // The world resumes in the dimension it was left in (`<world>/dim`).
         self.nether = std::fs::read_to_string(self.dir.join("dim")).is_ok_and(|s| s.trim() == "nether");
         if self.nether {
@@ -767,6 +776,8 @@ impl App {
         self.last_frame = now;
         self.pad_sync(dt);
         self.touch.pad.watch_health(self.vitals.health);
+        // C9: the vignette and flash follow the health (only with the Immersive Pack ON; entering a world never flashes).
+        if world::combat::rules::on() { self.dmg.frame(self.vitals.health as f32, real_dt); } else { self.dmg = Default::default(); }
         // Zoomify: hold the zoom button for 4x (the vertical tangent / 4), eased; the look drag slows with the field of view.
         // Retro Sprint: the field of view x 1.15 while sprinting (eased), and the zoom starts from it.
         self.sprint.fov_step(dt);
@@ -1338,7 +1349,7 @@ impl App {
         // M5: pick the block under the crosshair, dig it while the dig input is held, place on a tap.
         self.touch.swing_secs = self.opts.dig_secs();
         self.touch.guard_shown = self.held_guard().points > 0 && self.screen.is_none(); // C4: the guard button, only for an item that can guard
-        self.touch.special_shown = matches!(self.held_special(), world::combat::profile::Special::Lunge | world::combat::profile::Special::MultiHit | world::combat::profile::Special::Parry) && self.screen.is_none(); // C5
+        self.touch.special_shown = matches!(self.held_special(), world::combat::profile::Special::Lunge | world::combat::profile::Special::MultiHit | world::combat::profile::Special::Parry | world::combat::profile::Special::Fusee) && self.screen.is_none(); // C5, C8
         self.touch.tick(real_dt);
         let place = self.touch.take_place();
         let place = if self.carry.is_some() { if place { self.put_pack() } false } else { place }; // a carried pack takes the tap
@@ -1947,6 +1958,17 @@ impl App {
         self.melee_target(held_id, eye, fwd, wall).0.is_some()
     }
 
+    /// C9, 20 Hz: the crosshair's clock. It aims (the aim sprite, a little bigger) while the held weapon has a mob in its cone.
+    fn crosshair_tick(&mut self) {
+        let held_id = self.inv.slots[self.touch.hotbar_slot].map(|s| s.id);
+        let aiming = world::combat::rules::swing(held_id).is_some_and(|s| s.profile.fights()) && {
+            let (eye, fwd) = (self.camera.pos, self.camera.forward());
+            let wall = self.target.map_or(f32::MAX, |h| h.point.distance(eye.as_dvec3()) as f32);
+            self.melee_target(held_id, eye, fwd, wall).0.is_some()
+        };
+        self.xh.tick(aiming);
+    }
+
     /// C4: what guard the held item is worth (`guard::profile_of`; nothing with the Immersive Pack OFF).
     fn held_guard(&self) -> world::combat::guard::GuardProfile {
         let held = self.inv.slots[self.touch.hotbar_slot].map(|s| s.id);
@@ -1970,6 +1992,7 @@ impl App {
         let (gp, me, f) = (self.held_guard(), self.player.pos, self.camera.forward());
         let Some(broke) = self.vitals.guard.block(gp, glam::Vec3::new(f.x, 0.0, f.z), me, glam::Vec3::new(from.x, me.y, from.z)) else { return false };
         self.vitals.stamina.hit();
+        self.xh.event(render::combat_hud::Feedback::Guarded); // C9: the crosshair goes blue grey
         // C7: `GuardHandler` shakes the view, a bigger one for the point that broke the guard, which also has its sound.
         self.shake.add(if broke { world::combat::fx::Kind::GuardBreak } else { world::combat::fx::Kind::Guarded }, me);
         if broke {
@@ -2030,7 +2053,7 @@ impl App {
     fn special_tick(&mut self) {
         let pressed = self.touch.take_special();
         if !world::combat::rules::on() || self.vitals.dead() {
-            self.sp = Default::default();
+            (self.sp, self.gun) = Default::default();
             return;
         }
         self.sp.tick();
@@ -2038,10 +2061,11 @@ impl App {
             self.special_press();
         }
         self.lunge_tick();
+        self.gun_tick();
     }
 
     /// C5 (`SpecialHandler.resolve`): the sweep and the lunge spend the attack's own cooldown (4 and 8 swings) and are refused behind it or a
-    /// raised guard; the parry has a lockout of its own and does not care about the swing. Not ported: wear, Fusee (C8), sounds (C7).
+    /// raised guard; the parry has a lockout of its own and does not care about the swing. The arcabuz's press is its own (`gun_press`, C8). Not ported: wear.
     fn special_press(&mut self) {
         use world::combat::{profile::Special, special};
         let held_id = self.inv.slots[self.touch.hotbar_slot].map(|s| s.id);
@@ -2088,7 +2112,84 @@ impl App {
                 let p = self.player.pos;
                 self.sp.lunge = Some(special::Lunge { dir, start: p, last: p, dist: special::lunge_distance(tier), left: special::LUNGE_WINDOW, done: Vec::new(), ticks: 0 });
             }
+            Special::Fusee => self.gun_press(s.profile),
             _ => {}
+        }
+    }
+
+    /// C8 (`Arcabuz.resolve`): the special button on the arcabuz lights a loaded gun's fuse or starts a reload (paid in gunpowder when it
+    /// ends). No cooldown gate: the press may be a reload, which has none.
+    fn gun_press(&mut self, profile: world::combat::profile::Profile) {
+        use world::combat::{arcabuz::Press, sound::Kind};
+        match self.gun.press(self.inv.has(world::combat::arcabuz::AMMO)) {
+            Press::Lit => {
+                self.body.swing();
+                self.cue(profile, Kind::FuseLit, 1.0, None);
+            }
+            Press::Reloading => self.cue(profile, Kind::Reload, 1.0, None),
+            Press::NoAmmo | Press::Busy => {}
+        }
+    }
+
+    /// C8, 20 Hz (`Arcabuz.tick`), while the arcabuz is in hand: the fuse burns and fires; a reload runs while the special button is down,
+    /// pays one gunpowder when it ends and spends the attack's cooldown (`AttackCooldown.consume`), or is lost when the finger lifts.
+    fn gun_tick(&mut self) {
+        use world::combat::{arcabuz::Tick, catalog, sound::Kind};
+        let held_id = self.inv.slots[self.touch.hotbar_slot].map(|s| s.id);
+        let Some(s) = world::combat::rules::swing(held_id).filter(|_| held_id == Some(catalog::ARCABUZ)) else {
+            self.gun.drop_reload();
+            return;
+        };
+        match self.gun.tick(self.touch.special_held() && self.screen.is_none(), self.inv.has(world::combat::arcabuz::AMMO)) {
+            Tick::Fire => self.gun_fire(),
+            Tick::Loaded => {
+                self.inv.take_one(world::combat::arcabuz::AMMO);
+                (self.swing_cd, self.swing_held) = (s.interval, held_id);
+                self.cue(s.profile, Kind::Loaded, 1.0, None);
+            }
+            Tick::Idle | Tick::Cancelled => {}
+        }
+    }
+
+    /// C8 (`Arcabuz.fire`): the blast. The shooter is kicked back and the view shakes; everything in the barrel's cone (6.5 blocks, 32 x 24
+    /// degrees, through walls as the mod's does not look) takes three times the melee damage, the best aimed first, ten at most, each
+    /// shoved by the gun's knockback and set alight for six seconds. A gun swapped for another item between the fuse and the bang loses the shot.
+    fn gun_fire(&mut self) {
+        use world::combat::{arcabuz, catalog, profile::Profile, sound::Kind};
+        let held_id = self.inv.slots[self.touch.hotbar_slot].map(|s| s.id);
+        let Some(s) = world::combat::rules::swing(held_id).filter(|s| s.profile == Profile::Arcabuz && held_id == Some(catalog::ARCABUZ)) else { return };
+        let (eye, look) = (self.camera.pos, self.camera.forward());
+        let (kx, kz) = arcabuz::recoil(look);
+        self.kick.x += kx * 20.0; // the explosion's push (`kick`: m/s, drag, rides on top of the walk), not `vel`, which the stick overwrites each frame
+        self.kick.z += kz * 20.0;
+        self.shake.add(world::combat::fx::Kind::Recoil, self.player.pos);
+        let found: Vec<(usize, f32, f32)> = self
+            .mobs
+            .cone_n(eye, look, s.profile.shot_reach(), f32::MAX, 0)
+            .into_iter()
+            .map(|i| {
+                let (lo, hi) = self.mobs.list[i].aabb();
+                let c = (lo + hi) * 0.5;
+                (i, arcabuz::aim_deviation(eye, look, c), c.distance_squared(eye))
+            })
+            .collect();
+        let (damage, knock, me) = (arcabuz::shot_damage(s.damage), s.profile.knockback(), self.player.pos);
+        let (mut centres, mut killed) = (Vec::new(), false);
+        for i in arcabuz::order(found) {
+            let (lo, hi) = self.mobs.list[i].aabb();
+            let away = glam::Vec3::new(self.mobs.list[i].body.pos.x - me.x, 0.0, self.mobs.list[i].body.pos.z - me.z).normalize_or_zero();
+            self.mobs.shove(i, away * knock.h * 20.0 + glam::Vec3::Y * knock.v * 20.0); // the mod's `Knockback.apply` at full push, before the hurt
+            self.mobs.shot(i, damage, me);
+            self.mobs.ignite(i, arcabuz::FIRE_TICKS);
+            killed |= self.mobs.list[i].health <= 0.0;
+            self.fx.flames((lo + hi) * 0.5, (hi - lo) * 0.5);
+            centres.push((lo + hi) * 0.5);
+        }
+        self.fx.blast(arcabuz::muzzle(eye, look), look, &centres);
+        self.cue(s.profile, Kind::Shot, 1.0, None);
+        if !centres.is_empty() {
+            self.vitals.stamina.hit();
+            self.xh.event(if killed { render::combat_hud::Feedback::Kill } else { render::combat_hud::Feedback::Hit });
         }
     }
 
@@ -2162,9 +2263,11 @@ impl App {
             self.cue(profile, if charged { Kind::ChargedHit } else { Kind::Hit }, scale, None);
         }
         let at = (lo + hi) * 0.5;
-        if self.mobs.list[i].health <= 0.0 {
+        let killed = self.mobs.list[i].health <= 0.0;
+        if killed {
             self.shake.add(fx::Kind::Kill, at);
         }
+        self.xh.event(if killed { render::combat_hud::Feedback::Kill } else { render::combat_hud::Feedback::Hit }); // C9: the crosshair grows, shakes and reddens
         if full {
             self.shake.add(fx::Kind::ChargedHit, at);
         }
@@ -2241,6 +2344,7 @@ impl App {
     fn sprint_tick(&mut self) {
         self.swing_cd = self.swing_cd.saturating_sub(1); // Cortes Combat's attack cooldown (C2), 20 Hz
         self.shake.tick(); // C7: the camera impulses' clock
+        self.crosshair_tick();
         self.charge_tick();
         self.survival_tick();
         self.special_tick();
@@ -3785,6 +3889,7 @@ impl App {
         let worn = self.worn();
         // Read before `hud_verts` is borrowed mutably (the borrow checker forbids `&self` calls while `v` lives).
         let held_special = self.held_special();
+        let guard_points = self.held_guard().points; // C9: the orbs above the crosshair
         let v = &mut self.hud_verts;
         v.clear();
         let layout = &self.touch.layout;
@@ -3793,8 +3898,21 @@ impl App {
         // The in-world controls are hidden while a container screen is open.
         let play = self.screen.is_none() && self.sign_edit.is_none();
 
-        // Crosshair: the aim point of the pick ray (first, so the quad cap never drops it).
-        if play {
+        // C9: the damage vignette and flash, under everything else. One GUI pixel of the combat HUD is the crosshair's size / 15 (the old
+        // crosshair's 0.05 of the short side, so the Immersive Pack's one keeps the size it was tuned to).
+        let rule = world::combat::rules::on();
+        let gu = { let (w, h) = self.be.size(); 0.05 * (w.min(h) as f32) / render::combat_hud::SIZE };
+        if play && rule {
+            let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
+            self.dmg.draw(v, (w, h));
+        }
+
+        // Crosshair: the aim point of the pick ray (first, so the quad cap never drops it). With the Immersive Pack ON it is Cortes Combat's:
+        // three sprites (rest, aim, hit) that grow, shake and redden with what just happened.
+        if play && rule {
+            let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
+            render::combat_hud::draw_crosshair(v, gu, (w * 0.5, h * 0.5), &self.xh);
+        } else if play {
             let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
             // `icons.png`'s cross (the Java draws it inverting the pixels behind it; here plain white), the size the two bars had.
             let s = 0.05 * w.min(h);
@@ -3850,7 +3968,7 @@ impl App {
                 use world::combat::{profile::Special, special};
                 let (sx, sy, sw, sh) = self.touch.layout.special;
                 let kind = held_special;
-                HudPipeline::push_button(v, sx, sy, sw, sh, if self.sp.parrying() || self.sp.lunge.is_some() { 2 } else { 1 });
+                HudPipeline::push_button(v, sx, sy, sw, sh, if self.sp.parrying() || self.sp.lunge.is_some() || self.gun.burning() || self.gun.reloading() { 2 } else { 1 });
                 let c = [1.0; 4];
                 match kind {
                     Special::Lunge => {
@@ -3862,6 +3980,14 @@ impl App {
                             HudPipeline::push_quad(v, sx + sw * (0.2 + 0.06 * k as f32), sy + sh * (0.28 + 0.16 * k as f32), sw * (0.6 - 0.12 * k as f32), sh * 0.08, c);
                         }
                     }
+                    Special::Fusee => {
+                        // C8: a barrel and its spark; a gold dot above it while the gun is loaded.
+                        HudPipeline::push_quad(v, sx + sw * 0.2, sy + sh * 0.46, sw * 0.5, sh * 0.1, c);
+                        HudPipeline::push_quad(v, sx + sw * 0.72, sy + sh * 0.4, sw * 0.1, sh * 0.22, [1.0, 0.7, 0.2, 1.0]);
+                        if self.gun.loaded() {
+                            HudPipeline::push_quad(v, sx + sw * 0.42, sy + sh * 0.22, sw * 0.16, sh * 0.16, [1.0, 0.8, 0.2, 0.95]);
+                        }
+                    }
                     _ => {
                         HudPipeline::push_quad(v, sx + sw * 0.46, sy + sh * 0.22, sw * 0.08, sh * 0.56, c);
                         HudPipeline::push_quad(v, sx + sw * 0.3, sy + sh * 0.36, sw * 0.4, sh * 0.08, c);
@@ -3871,6 +3997,8 @@ impl App {
                     (Special::Parry, _) => self.sp.parry_cooldown().0 as f32 / self.sp.parry_cooldown().1 as f32,
                     (Special::Lunge, Some(s)) => self.swing_cd as f32 / special::lunge_cost(s.interval) as f32,
                     (Special::MultiHit, Some(s)) => self.swing_cd as f32 / special::sweep_cost(s.interval) as f32,
+                    (Special::Fusee, _) if self.gun.burning() => self.gun.fuse_left(),
+                    (Special::Fusee, _) if self.gun.reloading() => 1.0 - self.gun.reload_progress(),
                     _ => 0.0,
                 }
                 .min(1.0);
@@ -3885,16 +4013,23 @@ impl App {
                     HudPipeline::push_quad(v, gx + gw * 0.05 + i as f32 * gw * 0.1, gy - gw * 0.2, gw * 0.08, gw * 0.08, [1.0, 0.8, 0.2, 0.95]);
                 }
             }
-            if self.charge > 0 && full > 0 {
-                let f = (self.charge as f32 / full as f32).min(1.0);
-                HudPipeline::push_quad(v, bx, by, bw, bh, [0.0, 0.0, 0.0, 0.6]);
-                HudPipeline::push_quad(v, bx, by, bw * f, bh, if self.charge >= full { [1.0, 0.8, 0.2, 0.95] } else { [1.0, 1.0, 1.0, 0.9] });
-                let m = world::combat::profile::MIN_CHARGE_HOLD as f32 / full as f32;
-                HudPipeline::push_quad(v, bx + bw * m, by, (bw * 0.01).max(1.0), bh, [1.0, 0.3, 0.3, 0.9]);
-            } else if let Some(s) = swing.filter(|s| self.swing_cd > 0 && self.swing_held == self.inv.slots[self.touch.hotbar_slot].map(|i| i.id) && s.interval > 0) {
-                let f = 1.0 - (self.swing_cd as f32 / s.interval as f32).min(1.0);
-                HudPipeline::push_quad(v, bx, by, bw, bh * 0.5, [0.0, 0.0, 0.0, 0.5]);
-                HudPipeline::push_quad(v, bx, by, bw * f, bh * 0.5, [0.8, 0.8, 0.8, 0.8]);
+            // C9 (Cortes `ChargeBar`, `CooldownBracketLayer`, `GuardOrbsLayer`): the charge bar under the crosshair (nothing before the minimum hold),
+            // the brackets at the cone's edge with a bar from the crosshair out to each that fills as the swing becomes ready, and the guard's points above.
+            let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
+            let c = (w * 0.5, h * 0.5);
+            // C8: on the arcabuz the bar is the gun's own clock: the reload filling, then the fuse burning down.
+            let bar = if self.gun.reloading() { self.gun.reload_progress() } else if self.gun.burning() { self.gun.fuse_left() } else { world::combat::profile::charge_ratio(self.charge, full) };
+            render::combat_hud::draw_charge(v, gu, c, &self.xh, bar);
+            if let Some(s) = swing.filter(|s| s.profile.fights()) {
+                let same = self.swing_held == self.inv.slots[self.touch.hotbar_slot].map(|i| i.id);
+                let ratio = render::combat_hud::cooldown_ratio(self.swing_cd, s.interval, same);
+                // C8 (`displayedFor`): the arcabuz's brackets are its barrel's cone (the right button), not the bayonet's.
+                let angle = if s.profile == world::combat::profile::Profile::Arcabuz { s.profile.shot_reach().h } else { s.reach.h };
+                render::combat_hud::draw_gauge(v, gu, c, &self.xh, angle, (w, h), 70.0, ratio);
+            }
+            if guard_points > 0 {
+                let g = self.vitals.guard;
+                render::combat_hud::draw_orbs(v, gu, c, g.points, g.max, g.held || g.stun > 0);
             }
         }
 

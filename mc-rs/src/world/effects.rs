@@ -449,6 +449,53 @@ impl Effects {
         }
     }
 
+    /// C8 (`ArcabuzMuzzle.bursts`, NOT b1.7.3, UNVERIFIED): the arcabuz's blast at its barrel: 3 flames and 18 smoke thrown along `look`, then the
+    /// specks of the shot, 4 along the line to each of `targets` or 6 in a ball when there is none. ponytail: the mod's lava drops are flames here.
+    pub fn blast(&mut self, muzzle: Vec3, look: Vec3, targets: &[Vec3]) {
+        if self.particles.len() > 3000 {
+            return;
+        }
+        for _ in 0..3 {
+            let o = Vec3::new(jitter(&mut self.rng, 0.02), jitter(&mut self.rng, 0.02), jitter(&mut self.rng, 0.02));
+            let mut p = Particle::flame(&mut self.rng, muzzle + o);
+            p.vel = look * 0.1;
+            self.particles.push(p);
+        }
+        for _ in 0..18 {
+            let mut p = Particle::smoke(&mut self.rng, muzzle);
+            p.vel = look * 0.12 + Vec3::new(jitter(&mut self.rng, 0.09), jitter(&mut self.rng, 0.09), jitter(&mut self.rng, 0.09));
+            self.particles.push(p);
+        }
+        if targets.is_empty() {
+            for _ in 0..crate::world::combat::arcabuz::SPECKS_WITHOUT_TARGET {
+                let d = Vec3::new(jitter(&mut self.rng, 1.0), jitter(&mut self.rng, 1.0), jitter(&mut self.rng, 1.0)).normalize_or_zero();
+                let mut p = Particle::flame(&mut self.rng, muzzle + d * 0.3);
+                p.vel = d * 0.15 * 0.1;
+                self.particles.push(p);
+            }
+        }
+        for &to in targets {
+            for step in 1..=crate::world::combat::arcabuz::SPECKS_PER_TARGET {
+                let t = step as f32 / (crate::world::combat::arcabuz::SPECKS_PER_TARGET + 1) as f32;
+                let p = Particle::flame(&mut self.rng, muzzle + (to - muzzle) * t);
+                self.particles.push(p);
+            }
+        }
+    }
+
+    /// C8 (`igniteForSeconds`'s flames): 12 flames over a mob's box, `half` = half its size.
+    pub fn flames(&mut self, centre: Vec3, half: Vec3) {
+        if self.particles.len() > 3000 {
+            return;
+        }
+        let spread = half.max(Vec3::new(0.25, 0.35, 0.25));
+        for _ in 0..12 {
+            let o = Vec3::new(jitter(&mut self.rng, spread.x), jitter(&mut self.rng, spread.y), jitter(&mut self.rng, spread.z));
+            let p = Particle::flame(&mut self.rng, centre + o);
+            self.particles.push(p);
+        }
+    }
+
     /// `EntityLiving.onEntityUpdate` when the air runs out: 8 bubbles around `pos` (the eye of the player).
     /// Retro Sprint's `EntityMixin.addParticles` (its `BlockDustParticle`, a `tilecrack_` piece): one speck of the block under the feet per tick
     /// while sprinting, at the feet within the box's width, thrown against the run (`v` = the player's motion in blocks/tick: `-v * 4`, 1.5 up).

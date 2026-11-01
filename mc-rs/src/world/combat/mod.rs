@@ -21,6 +21,7 @@
 //! the `combatRules` option the roadmap planned. Hooks into the base (design.md rule 1): `craft::find` and the recipe
 //! book (the 20 weapons), `craft::max_damage`, `items::{name, max_stack, tile}`, `mobs::{attack, strike, cone}`.
 
+pub mod arcabuz;
 pub mod catalog;
 pub mod cone;
 pub mod fx;
