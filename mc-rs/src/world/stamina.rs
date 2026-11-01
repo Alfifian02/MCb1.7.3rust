@@ -15,16 +15,17 @@ use crate::world::vitals::MAX_HEALTH;
 const PER_HALF_HEART: f32 = 10.0;
 const FULL: f32 = MAX_HEALTH as f32 * PER_HALF_HEART;
 /// `consumption$sprint`: a tick of sprinting; `consumption$jump`: a jump.
-const SPRINT: f32 = 1.0;
-const JUMP: f32 = 10.0;
+const SPRINT: f32 = 0.6; // retuned (mod: 1.0)
+const JUMP: f32 = 6.0; // retuned (mod: 10)
 /// `consumption$outOfCombatMultiplier`: x0.8 on the sprint when not hit or hurt in the last 300 ticks (15 s).
-const CALM: f32 = 0.8;
+const CALM: f32 = 0.7; // retuned (mod: 0.8)
 const COMBAT: u16 = 300;
 /// `regen$perTick`, `regen$modifierWhenLocked`.
-const REGEN: f32 = 2.0;
+const REGEN: f32 = 1.6; // retuned (mod: 2.0)
 const REGEN_LOCKED: f32 = 0.6;
 /// `stamina$percentageReductionPerArmorPoint` and `regen$reductionPerArmorPoint` (both 0.025): armor shrinks the maximum and the regeneration.
-const ARMOR: f32 = 0.025;
+/// Retuned (mod: 0.025 a point): a point of LOAD, which the caller weighs by material (metal 1, leather 0.4: a metal set 25%, a leather set 10%).
+const ARMOR: f32 = 0.0125;
 /// `lock$belowHealthRatio`: at or under this health ratio the stamina is emptied and locked; `lock$unlockAtHealthRatio`: it opens again at this stamina ratio.
 const LOCK_BELOW: f32 = 0.20;
 const UNLOCK_AT: f32 = 0.40;
@@ -36,8 +37,6 @@ const SLOW_LOCKED: f32 = 0.10;
 /// NOT Stamina's (`biomelife::air`, `biomeRules`): a sprint costs `1 + HOT * hot` times, and recovery is `1 - COLD * cold` times.
 const HOT: f32 = 0.6;
 const COLD: f32 = 0.5;
-/// NOT the mod's (C4, `Food::hungry`): the recovery while the food bar is under the healing floor. UNVERIFIED by play.
-const HUNGRY: f32 = 0.75;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Stamina {
@@ -48,21 +47,24 @@ pub struct Stamina {
     pub locked: bool,
     /// Ticks left of `isInCombat` (`LAST_HIT` / `LAST_HURT`).
     combat: u16,
-    /// NOT the mod's: the healing food bar is under its floor (`Food::hungry`, set by `lib.rs` each tick), so the recovery is x0.75.
-    pub hungry: bool,
+    /// NOT Stamina's (catch breath): extra regeneration this tick, set by the caller before `tick_in` (0 = none; still +0.5, a ride +0.5, a fire at
+    /// hand +0.3, at most +1.0). It speeds the locked regen too. UNVERIFIED by play.
+    pub rest: f32,
+    /// NOT Stamina's (terrain): what a sprint tick costs on the ground underfoot, set by the caller (1.0 = even ground). UNVERIFIED by play.
+    pub terrain: f32,
 }
 
 /// Full, like the mod's respawn (`setStamina(Float.MAX_VALUE)`): `Vitals::default()` is every respawn and reset.
 impl Default for Stamina {
     fn default() -> Self {
-        Self { cur: FULL, max: FULL, locked: false, combat: 0, hungry: false }
+        Self { cur: FULL, max: FULL, locked: false, combat: 0, rest: 0.0, terrain: 1.0 }
     }
 }
 
 impl Stamina {
     /// `getMaxPossibleStamina`: the maximum at full health.
-    fn possible(armor: i32) -> f32 {
-        (FULL * (1.0 - armor as f32 * ARMOR)).max(0.0)
+    fn possible(armor: f32) -> f32 {
+        (FULL * (1.0 - armor * ARMOR)).max(0.0)
     }
 
     /// `consumeStamina`: the lock closes when it runs out.
@@ -76,9 +78,24 @@ impl Stamina {
         self.combat = COMBAT;
     }
 
+    /// Within 15 s of a hit dealt or taken (`isInCombat`): `combat::mend`'s hearth waits for this to end.
+    pub fn in_combat(&self) -> bool {
+        self.combat > 0
+    }
+
     /// `onPlayerJump`: a jump costs 10.
     pub fn jump(&mut self) {
         self.take(JUMP);
+    }
+
+    /// Combat's price (NOT Stamina's): a special or a charged blow pays `n` if the bar is open (not locked, something in it). The last point can
+    /// still close the lock (`take`); a closed bar refuses, and the caller falls back to the free plain swing. UNVERIFIED by play.
+    pub fn spend(&mut self, n: f32) -> bool {
+        let ok = !self.locked && self.cur > 0.0;
+        if ok {
+            self.take(n);
+        }
+        ok
     }
 
     /// `StaminaHandler.canSprint` (the hunger spend is off).
@@ -87,12 +104,12 @@ impl Stamina {
     }
 
     /// One 20 Hz tick of `StaminaFeature.onPlayerTick`: a sprint consumes; otherwise it regenerates (slower while locked); a low health empties and locks it.
-    pub fn tick(&mut self, sprinting: bool, health: i32, armor: i32) {
+    pub fn tick(&mut self, sprinting: bool, health: i32, armor: f32) {
         self.tick_in(sprinting, health, armor, Air::default());
     }
 
     /// `tick` in the heat or the cold of a biome (`Air::default()` is the mod's own).
-    pub fn tick_in(&mut self, sprinting: bool, health: i32, armor: i32, air: Air) {
+    pub fn tick_in(&mut self, sprinting: bool, health: i32, armor: f32, air: Air) {
         self.combat = self.combat.saturating_sub(1);
         if health <= 0 {
             return;
@@ -101,10 +118,10 @@ impl Stamina {
         self.max = Self::possible(armor) * ratio;
         self.cur = self.cur.min(self.max); // `setStamina` clamps to the maximum, which falls with the health
         if sprinting {
-            self.take(SPRINT * if self.combat == 0 { CALM } else { 1.0 } * (1.0 + HOT * air.hot));
+            self.take(SPRINT * self.terrain * if self.combat == 0 { CALM } else { 1.0 } * (1.0 + HOT * air.hot));
         } else if self.cur != self.max && ratio > LOCK_BELOW {
             let (was, locked) = (self.cur / self.max, self.locked); // the unlock test reads the stamina of before this tick's regen, as the mod does
-            self.cur = (self.cur + REGEN * (1.0 - armor as f32 * ARMOR) * if locked { REGEN_LOCKED } else { 1.0 } * (1.0 - COLD * air.cold) * if self.hungry { HUNGRY } else { 1.0 }).min(self.max);
+            self.cur = (self.cur + REGEN * (1.0 - armor * ARMOR) * (1.0 + self.rest) * if locked { REGEN_LOCKED } else { 1.0 } * (1.0 - COLD * air.cold)).min(self.max);
             self.locked = locked && was < UNLOCK_AT;
         } else if !self.locked && ratio <= LOCK_BELOW {
             (self.cur, self.locked) = (0.0, true);
@@ -131,7 +148,7 @@ mod tests {
 
     /// Ticks of sprinting until the lock closes, from full.
     fn run_dry(s: &mut Stamina) -> u32 {
-        (1..).find(|_| { s.tick(true, MAX_HEALTH, 0); s.locked }).unwrap()
+        (1..).find(|_| { s.tick(true, MAX_HEALTH, 0.0); s.locked }).unwrap()
     }
 
     /// A sprint costs 1 a tick in combat (200 ticks from full) and 0.8 out of it (250); the last point closes the lock and nothing sprints.
@@ -139,20 +156,20 @@ mod tests {
     fn a_sprint_costs_a_tick_and_the_empty_bar_locks() {
         let mut s = Stamina::default();
         s.hit();
-        for _ in 0..199 {
-            s.tick(true, MAX_HEALTH, 0);
+        for _ in 0..333 {
+            s.tick(true, MAX_HEALTH, 0.0);
             s.hit();
         }
-        assert!(!s.locked && s.can_sprint() && (s.cur - 1.0).abs() < 1e-3, "{s:?}");
-        s.tick(true, MAX_HEALTH, 0);
+        assert!(!s.locked && s.can_sprint() && (s.cur - 0.2).abs() < 1e-2, "{s:?}");
+        s.tick(true, MAX_HEALTH, 0.0);
         assert!(s.locked && !s.can_sprint() && s.cur == 0.0);
-        assert_eq!(run_dry(&mut Stamina::default()), 250, "out of combat: x0.8");
+        assert_eq!(run_dry(&mut Stamina::default()), 477, "out of combat: x0.7");
         let mut s = Stamina::default();
         s.hit();
-        s.tick(true, MAX_HEALTH, 0);
-        (0..300).for_each(|_| s.tick(false, MAX_HEALTH, 0));
+        s.tick(true, MAX_HEALTH, 0.0);
+        (0..300).for_each(|_| s.tick(false, MAX_HEALTH, 0.0));
         s.cur = FULL;
-        assert_eq!(run_dry(&mut s), 250, "the 15 s of combat run out after 300 ticks");
+        assert_eq!(run_dry(&mut s), 477, "the 15 s of combat run out after 300 ticks");
     }
 
     /// Locked it regenerates at 2 x 0.6 a tick and opens at 40% of the maximum (80, a tick late: the test reads the stamina before the regen);
@@ -161,24 +178,52 @@ mod tests {
     fn regeneration_unlocks_at_forty_percent() {
         let mut s = Stamina::default();
         run_dry(&mut s);
-        let n = (1..).find(|_| { s.tick(false, MAX_HEALTH, 0); !s.locked }).unwrap();
-        assert!((67..=69).contains(&n) && s.cur >= 80.0, "{n} {s:?}");
-        (0..200).for_each(|_| s.tick(false, MAX_HEALTH, 0));
+        let n = (1..).find(|_| { s.tick(false, MAX_HEALTH, 0.0); !s.locked }).unwrap();
+        assert!((82..=87).contains(&n) && s.cur >= 80.0, "{n} {s:?}");
+        (0..200).for_each(|_| s.tick(false, MAX_HEALTH, 0.0));
         assert_eq!(s.cur, FULL);
         let mut s = Stamina::default();
-        s.tick(false, MAX_HEALTH, 20);
-        assert_eq!(s.max, FULL / 2.0, "20 armor points: -50%");
+        s.tick(false, MAX_HEALTH, 20.0);
+        assert_eq!(s.max, FULL * 0.75, "20 load points: -25%");
         s.cur = 0.0;
-        s.tick(false, MAX_HEALTH, 20);
-        assert!((s.cur - 1.0).abs() < 1e-4, "2 x (1 - 0.5): {}", s.cur);
+        s.tick(false, MAX_HEALTH, 20.0);
+        assert!((s.cur - 1.2).abs() < 1e-4, "1.6 x (1 - 0.25): {}", s.cur);
+    }
+
+    /// Combat spends the bar too: an open bar pays, the last point locks it, a locked bar refuses and a plain swing stays free.
+    #[test]
+    fn a_special_pays_and_a_locked_bar_refuses() {
+        let mut s = Stamina::default();
+        assert!(s.spend(30.0) && s.cur == FULL - 30.0 && !s.locked);
+        s.cur = 10.0;
+        assert!(s.spend(30.0) && s.locked && s.cur == 0.0, "the last point is paid and closes the lock");
+        assert!(!s.spend(1.0), "locked: refused");
+    }
+
+    /// Rest speeds the regeneration: +1.0 doubles it (and the locked regen with it).
+    #[test]
+    fn rest_speeds_the_regeneration() {
+        let (mut a, mut b) = (Stamina { cur: 50.0, ..Stamina::default() }, Stamina { cur: 50.0, rest: 1.0, ..Stamina::default() });
+        a.tick(false, MAX_HEALTH, 0.0);
+        b.tick(false, MAX_HEALTH, 0.0);
+        assert!((a.cur - 50.0 - REGEN).abs() < 1e-4 && (b.cur - 50.0 - 2.0 * REGEN).abs() < 1e-4);
+    }
+
+    /// Soft ground makes a sprint dearer and a path cheaper, in the same ratio.
+    #[test]
+    fn terrain_scales_the_sprint() {
+        let (mut flat, mut sand) = (Stamina::default(), Stamina { terrain: 1.3, ..Stamina::default() });
+        flat.tick(true, MAX_HEALTH, 0.0);
+        sand.tick(true, MAX_HEALTH, 0.0);
+        assert!(((FULL - sand.cur) / (FULL - flat.cur) - 1.3).abs() < 1e-3);
     }
 
     /// A jump costs 10: 19 leave 10, the 20th empties it and locks (the mod locks on every empty bar, jump or not); a jump costs nothing at 0.
     #[test]
     fn a_jump_costs_ten_and_the_last_ten_lock() {
         let mut s = Stamina::default();
-        (0..19).for_each(|_| s.jump());
-        assert!(!s.locked && s.cur == 10.0);
+        (0..33).for_each(|_| s.jump());
+        assert!(!s.locked && (s.cur - 2.0).abs() < 1e-3);
         s.jump();
         assert!(s.locked && s.cur == 0.0);
     }
@@ -187,13 +232,13 @@ mod tests {
     #[test]
     fn low_health_shrinks_the_bar_and_locks_it() {
         let mut s = Stamina::default();
-        s.tick(false, 10, 0);
+        s.tick(false, 10, 0.0);
         assert_eq!((s.max, s.cur, s.locked), (100.0, 100.0, false));
-        s.tick(false, 4, 0);
+        s.tick(false, 4, 0.0);
         assert_eq!((s.cur, s.locked), (0.0, true));
-        s.tick(false, 4, 0);
+        s.tick(false, 4, 0.0);
         assert_eq!(s.cur, 0.0, "no regeneration at 20% health");
-        s.tick(false, 5, 0);
+        s.tick(false, 5, 0.0);
         assert!(s.cur > 0.0 && s.locked, "{s:?}");
     }
 
@@ -213,7 +258,7 @@ mod tests {
         assert_eq!(s.halves(20), 11);
         s.cur = 0.0;
         assert_eq!(s.halves(20), 0, "empty: every heart grey");
-        s.tick(false, 10, 0);
+        s.tick(false, 10, 0.0);
         s.cur = 50.0;
         assert_eq!(s.halves(10), 5, "at 5 hearts of health the bar is 100 and 50 covers 5 half hearts");
     }
@@ -222,14 +267,15 @@ mod tests {
     #[test]
     fn heat_and_cold_move_the_bar() {
         let (mut calm, mut hot) = (Stamina::default(), Stamina::default());
-        let (dry_calm, dry_hot) = (run_dry(&mut calm), (1..).find(|_| { hot.tick_in(true, MAX_HEALTH, 0, Air { hot: 1.0, cold: 0.0 }); hot.locked }).unwrap());
+        let (dry_calm, dry_hot) = (run_dry(&mut calm), (1..).find(|_| { hot.tick_in(true, MAX_HEALTH, 0.0, Air { hot: 1.0, cold: 0.0 }); hot.locked }).unwrap());
         assert!(dry_hot < dry_calm && dry_hot as f32 > dry_calm as f32 / 1.7, "{dry_hot} < {dry_calm}");
         let (mut warm, mut cold) = (Stamina { cur: 50.0, ..Stamina::default() }, Stamina { cur: 50.0, ..Stamina::default() });
-        warm.tick_in(false, MAX_HEALTH, 0, Air::default());
-        cold.tick_in(false, MAX_HEALTH, 0, Air { hot: 0.0, cold: 1.0 });
+        warm.tick_in(false, MAX_HEALTH, 0.0, Air::default());
+        cold.tick_in(false, MAX_HEALTH, 0.0, Air { hot: 0.0, cold: 1.0 });
         assert!((warm.cur - 50.0 - REGEN).abs() < 1e-4 && (cold.cur - 50.0 - REGEN * 0.5).abs() < 1e-4);
-        let mut hungry = Stamina { cur: 50.0, hungry: true, ..Stamina::default() };
-        hungry.tick_in(false, MAX_HEALTH, 0, Air::default());
-        assert!((hungry.cur - 50.0 - REGEN * HUNGRY).abs() < 1e-4, "a hungry bar recovers slower");
+        let mut hit = Stamina::default();
+        assert!(!hit.in_combat());
+        hit.hit();
+        assert!(hit.in_combat());
     }
 }

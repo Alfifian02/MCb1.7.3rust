@@ -24,9 +24,9 @@ const AIR_DRAG: f32 = 0.91;
 /// `LivingEntityMixin.increaseMovementSpeed`: +0.035 blocks/tick along the facing each tick (while slower than 0.25). Against the
 /// ground drag that settles at 0.035 / (1 - 0.546) = 0.077 blocks/tick over what the input gives, so the sprint adds this many m/s
 /// to the walk (4.3 m/s -> 5.8 m/s, x1.35). mc-rs sets the walking velocity from the input every frame, so only this part is kept.
-pub const ADD: f32 = 0.035 / (1.0 - GROUND_DRAG) * 20.0;
+pub const ADD: f32 = 0.02 / (1.0 - GROUND_DRAG) * 20.0; // retuned (was 0.035: x1.36): x1.20. UNVERIFIED by play
 /// `addedSpeedOnSprintJump`: +0.2 blocks/tick along the facing on a jump, then the drag takes it back (x0.91 a tick in the air).
-pub const JUMP: f32 = 0.2 * 20.0;
+pub const JUMP: f32 = 0.12 * 20.0; // retuned (was 0.2: 4 m/s): 2.4 m/s
 /// `PlayerEntityMixin.applyKnockback`: the target gets 1.2 blocks/tick away from where the player looks and 0.1 up (m/s here).
 pub const KNOCK: f32 = 1.2 * 20.0;
 pub const KNOCK_UP: f32 = 0.1 * 20.0;
@@ -162,8 +162,8 @@ mod tests {
     #[test]
     fn numbers_come_from_the_mod() {
         let walk = 0.1 / (1.0 - GROUND_DRAG) * 20.0; // the settled walk: 0.1 blocks/tick through the same drag
-        assert!(((walk + ADD) / walk - 1.35).abs() < 0.01, "{}", (walk + ADD) / walk);
-        assert!((ADD - 1.54).abs() < 0.01 && JUMP == 4.0 && KNOCK == 24.0 && KNOCK_UP == 2.0);
+        assert!(((walk + ADD) / walk - 1.20).abs() < 0.01, "{}", (walk + ADD) / walk);
+        assert!((ADD - 0.88).abs() < 0.01 && (JUMP - 2.4).abs() < 1e-4 && KNOCK == 24.0 && KNOCK_UP == 2.0);
     }
 
     /// A tap, then a second press within 7 ticks of its release sprints; one held press never does; a late second press only starts over;

@@ -97,11 +97,13 @@ const MOVE_SPEED: f32 = physics::WALK_SPEED;
 /// 1.62 above his feet (EntityPlayer.yOffset), i.e. 1.62 - 0.9 above the centre.
 const EYE_HEIGHT: f32 = 1.62 - physics::HALF.y;
 
-/// Cortes Combat C4 (NOT b1.7.3, UNVERIFIED): a meal in the mouth. Food takes `EAT_TICKS` (the mod's 1.21 use time) and any damage taken ends it
-/// unless the guard is up (`EatInterruptHandler`); it also ends when the hotbar slot changes or the item is gone.
+/// Cortes Combat C4 (NOT b1.7.3, UNVERIFIED): a meal (or a bandage) in the mouth. Food takes `EAT_TICKS` (the mod's 1.21 use time), a bandage
+/// `mend::BANDAGE_USE`; any damage taken ends it unless the guard is up (`EatInterruptHandler`); it also ends when the hotbar slot changes or
+/// the item is gone. `total` is what `left` started from (the bar's scale).
 #[derive(Clone, Copy)]
 struct Eating {
     left: u32,
+    total: u32,
     slot: usize,
     health: i32,
 }
@@ -928,7 +930,7 @@ impl App {
             self.player.vel.z -= yaw.cos() * push;
         }
         // Stamina's slowdown: x0.9 while locked, x0.85 more while sprinting on little (it multiplies the walk, the sprint's push and the jump's).
-        let slow = self.vitals.stamina.speed(self.sprint.on()) * self.sp.slow(); // C5: the parry's blade out slows the walk (x0.4)
+        let slow = self.vitals.stamina.speed(self.sprint.on()) * self.sp.slow() * self.leather_speed(); // C5: the parry's blade out slows the walk (x0.4)
         self.player.vel.x *= slow;
         self.player.vel.z *= slow;
         // An explosion's push rides on top of the walk and the sprint (and is neither slowed by stamina nor kept in bed, on a ride or in death).
@@ -1918,8 +1920,46 @@ impl App {
         }
     }
 
+    /// A fire at hand: the block light of a torch, furnace or lava (`biomelife::FIRE_LIGHT`, 11: a torch within 3 blocks) in the head's or the feet's
+    /// cell. Joins the cold (`air`: no chill by a fire) and the hearth (`combat::mend`: a rest by a fire heals).
+    fn heat_at_hand(&self) -> bool {
+        let p = self.player.pos;
+        let (x, z) = (p.x.floor() as i32, p.z.floor() as i32);
+        let (head, feet) = ((p.y + 0.7).floor() as i32, (p.y - 0.5).floor() as i32);
+        self.chunks.light_levels(x, head, z).1.max(self.chunks.light_levels(x, feet, z).1) >= world::biomelife::FIRE_LIGHT
+    }
+
     /// NOT b1.7.3 (`biomeRules`, `biomelife::air`): the heat or cold of the biome on the player: open daylight on the head, a fire at hand
     /// (block light of a torch, furnace or lava), a meal, and the armor worn (leather is fur, the rest is metal).
+    /// Stamina's armor LOAD (NOT b1.7.3): the armor value weighed by the material of the pieces, metal 1 and leather 0.4 (`craft::armor`'s
+    /// material 0). ponytail: weighs by each piece's base points, not its wear. UNVERIFIED.
+    fn armor_load(&self) -> f32 {
+        let (mut sum, mut w) = (0.0, 0.0);
+        for (t, m) in self.inv.slots[items::MAIN..].iter().flatten().filter_map(|s| craft::armor(s.id)) {
+            let pts = [3.0, 8.0, 6.0, 3.0][t];
+            (sum, w) = (sum + pts * if m == 0 { 0.4 } else { 1.0 }, w + pts);
+        }
+        if w == 0.0 { 0.0 } else { self.vitals.armor as f32 * sum / w }
+    }
+
+    /// Leather is light (NOT b1.7.3): +2.5% walk and sprint per leather piece worn, +10% for the set. UNVERIFIED by play.
+    /// Terrain cost of a sprint tick (NOT b1.7.3): soul sand and snow 1.3, rails and cobblestone 0.8, else 1.0. Reads the feet and the block below.
+    /// ponytail: no slope (uphill) term; it needs the physics contact and a ground normal. UNVERIFIED.
+    fn terrain_cost(&self) -> f32 {
+        let p = self.player.pos;
+        let (x, z, y) = (p.x.floor() as i32, p.z.floor() as i32, p.y.floor() as i32);
+        let (feet, under) = (self.chunks.block(x, y, z), self.chunks.block(x, (p.y - 0.1).floor() as i32, z));
+        match (feet, under) {
+            (78, _) | (_, 88 | 80 | 78) => 1.3,
+            (27 | 28 | 66, _) | (_, 4 | 48) => 0.8,
+            _ => 1.0,
+        }
+    }
+
+    fn leather_speed(&self) -> f32 {
+        1.0 + 0.025 * self.inv.slots[items::MAIN..].iter().flatten().filter(|s| craft::armor(s.id).is_some_and(|a| a.1 == 0)).count() as f32
+    }
+
     fn air(&self) -> world::biomelife::Air {
         if !self.opts.biome_rules || self.nether {
             return Default::default();
@@ -1927,9 +1967,9 @@ impl App {
         let (p, angle) = (self.player.pos, sky::celestial_angle(self.world_ticks as u64, 1.0));
         let sub = sky::skylight_subtracted(angle, self.weather.rain(1.0), self.weather.thunder(1.0));
         let (x, z) = (p.x.floor() as i32, p.z.floor() as i32);
-        let (head, feet) = ((p.y + 0.7).floor() as i32, (p.y - 0.5).floor() as i32);
+        let head = (p.y + 0.7).floor() as i32;
         let sun = ((self.chunks.light_levels(x, head, z).0.saturating_sub(sub) as f32 - 8.0) / 7.0).clamp(0.0, 1.0);
-        let fire = self.chunks.light_levels(x, head, z).1.max(self.chunks.light_levels(x, feet, z).1) >= world::biomelife::FIRE_LIGHT;
+        let fire = self.heat_at_hand();
         let (mut metal, mut fur) = (0u8, 0u8);
         for a in self.inv.slots[items::MAIN..].iter().flatten().filter_map(|s| craft::armor(s.id)) {
             if a.1 == 0 { fur += 1 } else { metal += 1 }
@@ -2002,7 +2042,8 @@ impl App {
         true
     }
 
-    /// C4, 20 Hz (only with the Immersive Pack ON): the guard follows its button and regenerates, the food bar pays for healing, a meal runs.
+    /// C4, 20 Hz (only with the Immersive Pack ON): the guard follows its button and regenerates, the hearth and the bandage heal (`combat::mend`),
+    /// a meal runs.
     fn survival_tick(&mut self) {
         if !world::combat::rules::on() {
             return;
@@ -2013,18 +2054,18 @@ impl App {
             self.charge = 0; // raising the guard ends a charge (`endCharge`)
         }
         self.vitals.guard.tick(gp);
-        let hurt = !self.vitals.dead() && self.vitals.health < vitals::MAX_HEALTH;
-        if self.vitals.food.tick(hurt) > 0 {
-            self.vitals.heal(1);
+        if !self.vitals.dead() {
+            let (calm, warm) = (!self.vitals.stamina.in_combat(), self.heat_at_hand());
+            let give = self.vitals.mend.tick(self.vitals.health, calm, warm);
+            self.vitals.restore(give);
         }
-        self.vitals.stamina.hungry = self.vitals.food.hungry();
         self.eat_tick();
     }
 
     /// C4, 20 Hz: the meal in the mouth runs down; damage (unless guarding), another slot, no more food or a closed game cut it short.
     fn eat_tick(&mut self) {
         let Some(mut e) = self.eating else { return };
-        let food = self.touch.hotbar_slot == e.slot && self.inv.slots[e.slot].is_some_and(|s| items::heal_amount(s.id).is_some());
+        let food = self.touch.hotbar_slot == e.slot && self.inv.slots[e.slot].is_some_and(|s| items::heal_amount(s.id).is_some() || s.id == world::combat::catalog::BANDAGE);
         let hit = self.vitals.health < e.health && !self.vitals.guard.active();
         if !food || hit || self.vitals.dead() || self.screen.is_some() {
             self.eating = None;
@@ -2036,8 +2077,11 @@ impl App {
             self.eating = Some(e);
         } else {
             self.eating = None;
-            if let Some(n) = self.inv.eat(e.slot) {
-                self.vitals.food.eat(n);
+            if self.inv.slots[e.slot].is_some_and(|s| s.id == world::combat::catalog::BANDAGE) {
+                self.inv.consume(e.slot);
+                self.vitals.mend.apply(self.vitals.health); // the points come one a second from `survival_tick`
+            } else if let Some(n) = self.inv.eat(e.slot) {
+                self.vitals.heal(n);
                 self.vitals.fed = world::biomelife::FED_TICKS; // NOT b1.7.3 (`biomeRules`): food for the cold
             }
         }
@@ -2073,15 +2117,22 @@ impl App {
         if self.screen.is_some() || self.sleep.is_some() || self.riding() {
             return;
         }
+        // Combat stamina: a special pays (weighted by the weapon) and a locked bar refuses it; the plain swing stays free. UNVERIFIED.
+        let pays = matches!(s.profile.special(), Special::Parry | Special::MultiHit | Special::Lunge);
+        let cost = special::stamina_of(s.profile.special(), s.profile.weight());
+        if pays && !self.vitals.stamina.can_sprint() {
+            return;
+        }
         match s.profile.special() {
             Special::Parry => {
-                if self.sp.parry_press() {
+                if self.sp.parry_press() && self.vitals.stamina.spend(cost) {
                     self.body.swing();
                 }
             }
             Special::MultiHit if !self.swing_blocked(held_id) => {
                 let (eye, fwd) = (self.camera.pos, self.camera.forward());
                 let wall = self.target.map_or(f32::MAX, |h| h.point.distance(eye.as_dvec3()) as f32);
+                self.vitals.stamina.spend(cost);
                 (self.swing_cd, self.charge) = (special::sweep_cost(s.interval), 0); // spent whether or not it connects
                 self.body.swing();
                 // Everything in the wider arc, the weapon's flat damage, no charge. ponytail: the knockback is `strike`'s own, not the sweep's 0.8 share.
@@ -2106,6 +2157,7 @@ impl App {
                     return;
                 }
                 let tier = held_id.and_then(world::combat::catalog::get).map_or(0, |(_, t)| t);
+                self.vitals.stamina.spend(cost);
                 (self.swing_cd, self.charge) = (special::lunge_cost(s.interval), 0);
                 self.body.swing();
                 self.cue(s.profile, world::combat::sound::Kind::Lunge, 1.0, None); // C7
@@ -2336,7 +2388,11 @@ impl App {
         let wall = self.target.map_or(f32::MAX, |h| h.point.distance(eye.as_dvec3()) as f32);
         // A release with nothing in reach is no blow: it must not fall through to placing a block or using the item.
         let hit = release && !self.swing_blocked(held_id) && self.melee_target(held_id, eye, fwd, wall).0.is_some();
-        world::combat::rules::swing(held_id).filter(|_| hit).and_then(|s| world::combat::rules::charged(s.profile, held))
+        let s = world::combat::rules::swing(held_id).filter(|_| hit)?;
+        let m = world::combat::rules::charged(s.profile, held)?;
+        // Combat stamina: a charged blow pays by its ratio and weight; a locked bar leaves the plain blow (free). UNVERIFIED.
+        let ratio = world::combat::profile::charge_ratio(held, s.profile.charge().ticks);
+        self.vitals.stamina.spend(world::combat::special::stamina_charge(s.profile.weight(), ratio)).then_some(m)
     }
 
     /// One 20 Hz tick of sprinting (`ClientPlayerEntityMixin.tickSprintingMovement`) and its dust (`EntityMixin.addParticles`: a speck of the
@@ -2361,7 +2417,11 @@ impl App {
         // Stamina (`StaminaFeature.onPlayerTick`): a sprint consumes, anything else regenerates. The debug Fly button stands in for creative (no cost).
         let air = self.air();
         self.vitals.fed = self.vitals.fed.saturating_sub(1);
-        self.vitals.stamina.tick_in(self.sprint.on() && !self.touch.flying, self.vitals.health, self.vitals.armor, air);
+        // Catch breath: still +0.5, on a boat or minecart +0.5, a fire at hand +0.3, at most +1.0 (NOT Stamina's; sneaking is not still enough on its own).
+        let still = self.player.vel.x.hypot(self.player.vel.z) < 0.1 && !self.sprint.on();
+        self.vitals.stamina.rest = (if still { 0.5 } else { 0.0 } + if riding { 0.5 } else { 0.0 } + if self.heat_at_hand() { 0.3 } else { 0.0 }).min(1.0);
+        self.vitals.stamina.terrain = self.terrain_cost();
+        self.vitals.stamina.tick_in(self.sprint.on() && !self.touch.flying, self.vitals.health, self.armor_load(), air);
         if self.sprint.on() && !self.was_in_water {
             let (p, v) = (self.player.pos, self.player.vel / 20.0);
             let (x, y, z) = (p.x.floor() as i32, (p.y - 0.9 - 0.2).floor() as i32, p.z.floor() as i32); // 0.2 under the feet
@@ -2632,6 +2692,9 @@ impl App {
                 let next = self.world_ticks as u64 + 24000;
                 self.world_ticks = (next - next % 24000) as f64;
                 self.weather_ticks = self.world_ticks as u64;
+                if world::combat::rules::on() {
+                    self.vitals.restore(vitals::MAX_HEALTH); // NOT b1.7.3 (`combat::mend`): a night's sleep heals everything
+                }
                 self.wake(true);
             }
         } else if self.chunks.block_loaded(x, y, z) != Some(26) {
@@ -2752,12 +2815,18 @@ impl App {
     }
 
     fn eat(&mut self) {
-        // Cortes Combat C4 (NOT b1.7.3, only with the Immersive Pack ON): food is a meal that takes `EAT_TICKS` and feeds the healing bar
-        // (`eat_tick`), not a heal on the tap. ponytail: a tap starts it and it runs by itself; the mod holds the button.
+        // Cortes Combat C4 (NOT b1.7.3, only with the Immersive Pack ON): food is a meal that takes `EAT_TICKS` and then heals (`eat_tick`), not a heal
+        // on the tap; a bandage takes `mend::BANDAGE_USE` and then mends over time (not at full health, nor while one is working).
+        // ponytail: a tap starts it and it runs by itself; the mod holds the button.
         if world::combat::rules::on() {
             let slot = self.touch.hotbar_slot;
-            if self.eating.is_none() && self.inv.slots[slot].is_some_and(|s| items::heal_amount(s.id).is_some()) {
-                self.eating = Some(Eating { left: EAT_TICKS, slot, health: self.vitals.health });
+            let total = match self.inv.slots[slot].map(|s| s.id) {
+                Some(world::combat::catalog::BANDAGE) if self.vitals.health < vitals::MAX_HEALTH && !self.vitals.mend.bandaged() => world::combat::mend::BANDAGE_USE,
+                Some(id) if items::heal_amount(id).is_some() => EAT_TICKS,
+                _ => 0,
+            };
+            if self.eating.is_none() && total > 0 {
+                self.eating = Some(Eating { left: total, total, slot, health: self.vitals.health });
             }
             return;
         }
@@ -3943,10 +4012,10 @@ impl App {
             let (bx, by) = (w * 0.5 - bw * 0.5, h * 0.5 + 0.05 * w.min(h) + bh * 2.0);
             let swing = world::combat::rules::swing(self.inv.slots[self.touch.hotbar_slot].map(|s| s.id));
             let full = swing.map_or(0, |s| s.profile.charge().ticks);
-            // C4: the meal's progress (brown) takes the bar's place while it is eaten.
+            // C4: the meal's (or the bandage's) progress (brown) takes the bar's place while it is eaten or put on.
             if let Some(e) = self.eating {
                 HudPipeline::push_quad(v, bx, by, bw, bh, [0.0, 0.0, 0.0, 0.6]);
-                HudPipeline::push_quad(v, bx, by, bw * (1.0 - e.left as f32 / EAT_TICKS as f32), bh, [0.85, 0.55, 0.25, 0.95]);
+                HudPipeline::push_quad(v, bx, by, bw * (1.0 - e.left as f32 / e.total as f32), bh, [0.85, 0.55, 0.25, 0.95]);
             }
             // C4: the guard button over the jump button (a shield; lit while the guard is up) with one orb a point, grey while it is staggered.
             if self.touch.guard_shown && !self.touch.pad.hud_hidden() {
@@ -4282,19 +4351,6 @@ impl App {
                     let at = 2 * i + 1;
                     let s = if at < self.vitals.armor { sp::ARMOR_FULL } else if at == self.vitals.armor { sp::ARMOR_HALF } else { sp::ARMOR_EMPTY };
                     HudPipeline::push_gui(v, x, y - sz * 1.2, sz, sz, s);
-                }
-            }
-            // C4 (NOT b1.7.3): the healing food bar, 10 icons of 2 points from the hotbar's right edge, on the hearts' row; a plain square each
-            // until the food sprites arrive (C6). Orange, red under the healing floor.
-            if world::combat::rules::on() {
-                let (rx, _, rw, _) = layout.hotbar[8];
-                for i in 0..10 {
-                    let x = rx + rw - sz - i as f32 * hw * 0.4;
-                    let f = ((self.vitals.food.level - 2 * i) as f32 / 2.0).clamp(0.0, 1.0);
-                    HudPipeline::push_quad(v, x, y, sz, sz, [0.0, 0.0, 0.0, 0.45]);
-                    if f > 0.0 {
-                        HudPipeline::push_quad(v, x, y, sz * f, sz, if self.vitals.food.hungry() { [0.85, 0.3, 0.2, 0.95] } else { [0.9, 0.6, 0.2, 0.95] });
-                    }
                 }
             }
             if self.vitals.air < vitals::MAX_AIR {

@@ -57,4 +57,4 @@ Compass (345), clock (347) and minecart-with-chest (342) recipes; the chest cart
 
 ## Not b1.7.3 (do not count as fidelity)
 
-Apples from leaves, the six Blooming biome identities (entry 20), immersive pack, satchel and recipe book, shoulder-surf view, smart animals, stamina, sprint, the atmosphere editor, the Photon / look shaders, Structory, Tectonic and the river port. The rules for adding more of these are in [`design.md`](design.md).
+Apples from leaves, the six Blooming biome identities (entry 20), the healing of an Immersive Pack world (hearth, bandage, bed: entry 37), immersive pack, satchel and recipe book, shoulder-surf view, smart animals, stamina, sprint, the atmosphere editor, the Photon / look shaders, Structory, Tectonic and the river port. The rules for adding more of these are in [`design.md`](design.md).

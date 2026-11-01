@@ -351,6 +351,8 @@ pub fn recipes() -> &'static [Recipe] {
         r.extend(combat::catalog::all().filter_map(|(f, t)| combat::catalog::recipe(f, t)).map(|(rows, key, out)| shaped(rows, &key, out, 1)));
         let (rows, key, out) = combat::catalog::arcabuz_recipe(); // C8: four ingredients, so not `recipe`'s three
         r.push(shaped(rows, &key, out, 1));
+        // Healing without hunger (NOT b1.7.3, `combat::mend`): 2 paper (the marsh's reeds) and a white wool (sheep) make 2 bandages.
+        r.push(shapeless(&[339, 339, 35], combat::catalog::BANDAGE, 2));
         r
     })
 }

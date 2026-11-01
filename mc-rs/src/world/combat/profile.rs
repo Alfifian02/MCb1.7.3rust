@@ -116,6 +116,19 @@ impl Profile {
     }
 
     /// `WeaponTables.knockback`, already clamped to the mod's ceilings (`KnockbackProfile.clampedHorizontal`).
+    /// NOT the mod's: how much stamina a special or a charge of this weapon costs, x the base of `special::*_COST` (heavy pays more, so the dagger
+    /// and the ropera keep a role). UNVERIFIED by play.
+    pub fn weight(self) -> f32 {
+        match self {
+            Profile::Dagger => 0.6,
+            Profile::Sabre | Profile::Ropera => 0.8,
+            Profile::Axe => 1.2,
+            Profile::Halberd => 1.5,
+            Profile::Warhammer | Profile::Mace => 1.6,
+            _ => 1.0,
+        }
+    }
+
     pub fn knockback(self) -> Knockback {
         let (h, v): (f32, f32) = match self {
             Profile::None => (0.12, 0.02),

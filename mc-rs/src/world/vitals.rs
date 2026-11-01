@@ -1,12 +1,12 @@
 //! Player health and damage: `EntityLiving.attackEntityFrom` (the 10-tick damage window), `Entity.updateFallState` /
 //! `EntityLiving.fall`, drowning (`air`), lava and burning, and falling out of the world (`Entity.onEntityUpdate`).
-//! b1.7.3 has no hunger and no natural regeneration (only Peaceful heals), so health only goes back up on respawn
-//! until food exists.
+//! b1.7.3 has no hunger and no natural regeneration (only Peaceful heals): food heals on the tap, and in an Immersive Pack world `combat::mend`
+//! adds the hearth, the bandage and the bed. Still no hunger.
 //! Suffocation (1 damage a tick with the head in a wall) is `Env.in_wall`.
 //! ponytail: no damage flash or knockback, no burning/hurt sounds (all later).
 
 use crate::world::dig::TICK;
-use crate::world::combat::{guard::Guard, survival::Food};
+use crate::world::combat::{guard::Guard, mend::Mend};
 use crate::world::stamina::Stamina;
 
 pub const MAX_HEALTH: i32 = 20;
@@ -54,14 +54,15 @@ pub struct Vitals {
     pub stamina: Stamina,
     /// NOT b1.7.3 (`biomeRules`): ticks left of a meal's warmth (`biomelife::FED_TICKS`); food for the cold.
     pub fed: u32,
-    /// Cortes Combat C4 (NOT b1.7.3, only with the Immersive Pack ON): the healing food bar and the sword's guard, refilled with the stamina on every respawn.
-    pub food: Food,
+    /// Cortes Combat C4 (NOT b1.7.3, only with the Immersive Pack ON): healing without hunger (`combat::mend`: hearth, bandage) and the sword's guard,
+    /// both back to their start on every respawn.
+    pub mend: Mend,
     pub guard: Guard,
 }
 
 impl Default for Vitals {
     fn default() -> Self {
-        Self { health: MAX_HEALTH, cry: false, thud: false, fizz: false, air: MAX_AIR, fire: 0, hearts_life: 0, last_damage: 0, fall: 0.0, acc: 0.0, armor: 0, wear: 0, rem: 0, drowned: false, fed: 0, stamina: Stamina::default(), food: Food::default(), guard: Guard::default() }
+        Self { health: MAX_HEALTH, cry: false, thud: false, fizz: false, air: MAX_AIR, fire: 0, hearts_life: 0, last_damage: 0, fall: 0.0, acc: 0.0, armor: 0, wear: 0, rem: 0, drowned: false, fed: 0, stamina: Stamina::default(), mend: Mend::default(), guard: Guard::default() }
     }
 }
 
@@ -108,6 +109,14 @@ impl Vitals {
         if self.health > 0 {
             self.health = (self.health + n).min(MAX_HEALTH);
             self.hearts_life = 10;
+        }
+    }
+
+    /// Points from `combat::mend` (hearth, bandage) or a bed: like `heal`, but the damage window stays as it is (`heal` cuts it to half, which a
+    /// trickle of points would keep doing).
+    pub fn restore(&mut self, n: i32) {
+        if self.health > 0 {
+            self.health = (self.health + n).min(MAX_HEALTH);
         }
     }
 
@@ -221,6 +230,12 @@ mod tests {
         v.health = 0;
         v.heal(10);
         assert!(v.dead());
+        v.restore(10);
+        assert!(v.dead(), "nothing mends the dead");
+        let mut v = Vitals::default();
+        v.hurt(4);
+        v.restore(2);
+        assert_eq!((v.health, v.hearts_life), (18, 20), "`restore` leaves the damage window alone (`heal` drops it to 10)");
 
         // Water puts a burning player out with one fizz; no fire, no fizz.
         let mut v = Vitals::default();
@@ -242,13 +257,13 @@ mod tests {
         v.tick(&Env::default());
         assert_eq!(v.air, MAX_AIR);
 
-        // Any damage taken is combat for the stamina: the next sprint tick costs 1, not the calm 0.8.
+        // Any damage taken is combat for the stamina: the next sprint tick costs 0.6, not the calm 0.42.
         let mut v = Vitals::default();
-        v.stamina.tick(true, MAX_HEALTH, 0);
-        assert_eq!(v.stamina.cur, 200.0 - 0.8);
+        v.stamina.tick(true, MAX_HEALTH, 0.0);
+        assert!((v.stamina.cur - (200.0 - 0.42)).abs() < 1e-3);
         let mut v = Vitals::default();
         v.hurt(1);
-        v.stamina.tick(true, MAX_HEALTH, 0);
-        assert_eq!(v.stamina.cur, 199.0);
+        v.stamina.tick(true, MAX_HEALTH, 0.0);
+        assert!((v.stamina.cur - 199.4).abs() < 1e-3);
     }
 }

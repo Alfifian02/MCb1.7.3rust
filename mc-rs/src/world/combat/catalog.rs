@@ -30,6 +30,9 @@ pub const FAMILIES: [Family; 6] = [Family::Daga, Family::Ropera, Family::Alabard
 pub const FIRST_ID: u16 = 400;
 /// The arcabuz: family 5, tier 0 (`FIRST_ID + 5 * TIERS`).
 pub const ARCABUZ: u16 = 425;
+/// The bandage (`combat::mend`, NOT b1.7.3, only in an Immersive Pack world): the next free id, no tiers, no durability, so it is not a `get` family.
+/// Tile `ICON0 + 26` (`tools/gen_bandage_icon.py`), recipe in `craft::recipes()`.
+pub const BANDAGE: u16 = 426;
 const TIERS: usize = 5;
 /// `CortesTier.getAttackDamageBonus` in `craft::MATERIALS` order (wood, stone, iron, diamond, gold).
 const BONUS: [f32; TIERS] = [0.0, 1.0, 2.0, 3.0, 0.0];
@@ -136,6 +139,9 @@ pub const ICON0: u8 = 208;
 
 /// The `items.png` tile of a weapon, `None` for any other item.
 pub fn icon(id: u16) -> Option<u8> {
+    if id == BANDAGE {
+        return Some(ICON0 + 26);
+    }
     get(id).map(|_| ICON0 + (id - FIRST_ID) as u8)
 }
 
@@ -164,6 +170,9 @@ pub fn damage(id: u16) -> Option<f32> {
 
 /// `Item.getItemName` translated, for `items::name`.
 pub fn name(id: u16) -> Option<&'static str> {
+    if id == BANDAGE {
+        return Some("Bandage");
+    }
     get(id).map(|(f, t)| f.name(t))
 }
 
@@ -218,6 +227,7 @@ mod tests {
         assert_eq!(get(FIRST_ID + 5), None); // wooden ropera does not exist (family 1, tier 0)
         assert_eq!(get(425), Some((Family::Arcabuz, 0)));
         assert_eq!((get(426), get(430)), (None, None));
+        assert_eq!((name(BANDAGE), icon(BANDAGE), damage(BANDAGE)), (Some("Bandage"), Some(ICON0 + 26), None)); // an item, not a weapon
         assert_eq!((name(ARCABUZ), damage(ARCABUZ), icon(ARCABUZ)), (Some("Arcabuz"), Some(6.0), Some(ICON0 + 25)));
         assert_eq!(Family::Arcabuz.interval(), 14); // 20 / 1.4
         let (rows, key, out) = arcabuz_recipe();

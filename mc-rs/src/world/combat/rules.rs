@@ -103,9 +103,10 @@ pub fn charged(profile: Profile, held: u32) -> Option<f32> {
     (c.ticks > 0 && held >= MIN_CHARGE_HOLD).then(|| charge_multiplier(c.bonus, charge_ratio(held, c.ticks)))
 }
 
-/// Is `id` one of the 20 weapons (an item that exists only in an Immersive Pack world)?
+/// Is `id` one of the 20 weapons, or the bandage: an item that exists only in an Immersive Pack world (`craft::find` and the recipe book hide
+/// its recipe otherwise)? (The name is from before the bandage; ponytail: not worth a rename across the three callers.)
 pub fn is_weapon(id: u16) -> bool {
-    catalog::get(id).is_some()
+    catalog::get(id).is_some() || id == catalog::BANDAGE
 }
 
 #[cfg(test)]

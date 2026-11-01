@@ -52,7 +52,7 @@ impl Cat {
 pub fn category(id: u16) -> Cat {
     if craft::tool(id).is_some() || craft::armor(id).is_some() || crate::world::combat::catalog::get(id).is_some() || matches!(id, craft::SHEARS | craft::FLINT_AND_STEEL | gear::ROD | 261 | 262) {
         Cat::Tools
-    } else if items::heal_amount(id).is_some() || id == 354 {
+    } else if items::heal_amount(id).is_some() || id == 354 || id == crate::world::combat::catalog::BANDAGE {
         Cat::Food
     } else if matches!(id, 321 | 323..=328 | 330 | 332 | 333 | 335 | 342..=345 | 347 | 358 | 355 | 356 | 2256 | 2257) {
         Cat::Misc

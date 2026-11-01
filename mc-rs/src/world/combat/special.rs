@@ -37,6 +37,19 @@ const PARRY_SLOW: f32 = 0.4;
 pub const STREAK_WINDOW: u32 = 80;
 const STREAK_STEP: f32 = 0.15;
 
+/// Stamina a special costs (of 200 at full), x `Profile::weight`; a charge pays `CHARGE_COST` x its ratio, at least a quarter. NOT the mod's.
+const STAMINA_LUNGE: f32 = 30.0;
+const STAMINA_SWEEP: f32 = 25.0;
+const STAMINA_PARRY: f32 = 15.0;
+const STAMINA_CHARGE: f32 = 24.0;
+pub fn stamina_of(sp: super::profile::Special, w: f32) -> f32 {
+    use super::profile::Special::*;
+    w * match sp { Lunge => STAMINA_LUNGE, MultiHit => STAMINA_SWEEP, Parry => STAMINA_PARRY, _ => 0.0 }
+}
+pub fn stamina_charge(w: f32, ratio: f32) -> f32 {
+    w * STAMINA_CHARGE * ratio.max(0.25)
+}
+
 /// `LungeDamage.damageFor`: the damage of the `index`-th target (0 = first) a tick of the lunge reaches.
 pub fn lunge_damage(base: f32, index: usize) -> f32 {
     base * LUNGE_SHARE * (1.0 + index as f32 * LUNGE_STEP).min(LUNGE_MAX)

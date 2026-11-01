@@ -26,13 +26,14 @@ Light and the day (`sky`, `climate`, `atmos`); weather and biome climate (`clima
 - **Recipe book -> `craft::recipes()`.** The book lists the one recipe table the grid uses, so the compass, clock and chest cart recipes appeared in it with no line added. This is rule 4 working.
 - **Stamina -> `vitals`.** Health and armor set the bar's maximum, damage marks combat, a respawn refills it (`vitals.rs` holds the `Stamina`). Sprint and jumping spend it (`lib.rs` joins `sprint` to it).
 - **Immersive pack -> satchel, book, menu, options, fog, clouds, items, player model, touch buttons.** It is the most joined of the extras: the world's switch decides which inventory screen opens, and the satchel tints each slot by item category (`pack::category`).
+- **Healing -> stamina, light, craft, the bed** (written 2026-11-01, `combat/mend.rs`; Immersive Pack worlds only). The hearth reads the stamina's combat timer and the block light the cold already reads (`heat_at_hand`); the bandage is a `craft::recipes()` line (paper, wool) and runs on the meal's interrupt (`App::eating`); the bed's morning heals. There is no hunger.
 - **Smart animals -> `path`.** The same A* walks wolves to their owner and keeps calm animals off cliffs and water; the grazing behaviours hang on the same switch (`Mobs::smart`).
 - **Atmosphere -> `biome`, `sky`, both renderers.** One editor drives fog and sky colour per biome.
 
 ## Where a feature is thin today (my reading of the code; confirm before acting)
 
 - **Shoulder-surf camera:** only `lib.rs` uses it. It is a view, so one hook may be enough, but it reads nothing from the world (no aim assist with the bow or fishing rod, no look at mobs).
-- **Sprint and stamina vs food:** b1.7.3 has no hunger, so stamina's only inputs are health and armor. Any later hunger or food system must be joined to the bar, not stand beside it.
+- **Sprint and stamina vs food:** settled 2026-11-01 by the owner: there is **no hunger** in the Immersive Pack, now or later, and food is not the only way to heal. Stamina's inputs are health, armor and the biome's air; healing is "Healing without hunger" below. (A first C4 had a food bar joined to the stamina; it was removed.)
 
 ## Feature lines
 
@@ -84,6 +85,16 @@ Serves proposal 3 (the beam): every structure in `gen::structory` today is low a
 
 Inspiration (search words): "waystone", "ancient obelisk", "world tree", "signal fires beacon chain", "stilt hut swamp", "desert temple trap", "ice spike".
 
+## Healing without hunger (written 2026-11-01, NOT b1.7.3, Immersive Pack worlds only)
+
+Owner's decision: no hunger, and food is not the only way to heal. Healing is told by three things: what it costs (an item, quiet time, a night), when it works (anywhere, out of combat by a fire, asleep) and how fast (a burst, a trickle, all at once). Three doors that differ in all three, so none makes the others pointless (rule 2); food keeps its own (a burst of 4 to 10 after 1.6 s, and the cold). No new switch: all of it is gated by the pack (`rules::on()`), the way the combat is (rule 5); with it OFF b1.7.3 plays as before. Every number is UNVERIFIED by play. Plan and code notes: [`combat.md`](combat.md) "C4 rework".
+
+- **Hearth:** needs time out of combat (15 s) by a fire (a torch, a lit furnace or lava, block light 11) -> 1 health point every 2 s up to 12 of 20; Hooks: light (`FIRE_LIGHT`, the cold's own test), stamina (`in_combat`), torches and furnaces (a new use for an old block); Overlaps: food (food heals above 12 and in a hurry). Knob: a torch is cheap and is also what stops spawns, so a hearth is easy to make; if that is too much, count only a lit furnace and lava.
+- **Bed:** needs a night slept through to the morning (no monster came, no early leaving) -> all health; Hooks: bed and sleeping (`sleep_tick`, entry 35), the day (`sky`), the respawn point; Overlaps: none (the bed already skips the night and sets the spawn; now it also mends).
+- **Bandage:** needs 2 paper (reeds, the marsh) and 1 white wool (sheep) -> 2 bandages; one is put on in 1 s and gives 6 points over 6 s, and a hit that gets through takes it off; Hooks: crafting (`craft::recipes()`, the recipe book), the marsh's reeds (proposal 6's table: the first thing in the base that asks for them), wool (sheep, grazing, wolves), the meal's interrupt (`App::eating`), the sword's guard (a blocked hit costs nothing, so it can work behind it); Overlaps: food (food is bigger and instant but stops you for 1.6 s; a bandage is cheaper, slower and fragile).
+
+Ideas considered and not chosen (search words: "bruise", "grey health", "rally", "vampiric"): damage split into a bruise that mends alone and a wound that does not (hook: the stamina's grey hearts); a sliver of health from a parry or a kill (hook: the shotel's parry, the martillo's streak).
+
 ## Cortés Combat (written 2026-10-30, NOT b1.7.3)
 
-- **Combat rework (cone reach, cooldown, charge, guard, five weapon families):** needs wood, cobblestone, iron, diamond, gold, sticks, flint and iron blocks (existing sources) -> weapons that kill mobs; Hooks: crafting (`craft::recipes`, recipe book), durability (`craft::max_damage`), mobs and their damage window (`mobs`), stamina (`vitals`, guard), the touch HUD (`input/touch_ui`), sound (`audio`); Overlaps: sword, axe, hoe (they get a profile of the same system, so each keeps a job: the sword is the wide cheap cone with no special, the hoe sweeps). Switch: `combatRules`, default off. Plan: [`combat.md`](combat.md).
+- **Combat rework (cone reach, cooldown, charge, guard, five weapon families; healing is "Healing without hunger" above):** needs wood, cobblestone, iron, diamond, gold, sticks, flint and iron blocks (existing sources) -> weapons that kill mobs; Hooks: crafting (`craft::recipes`, recipe book), durability (`craft::max_damage`), mobs and their damage window (`mobs`), stamina (`vitals`, guard), the touch HUD (`input/touch_ui`), sound (`audio`); Overlaps: sword, axe, hoe (they get a profile of the same system, so each keeps a job: the sword is the wide cheap cone with no special, the hoe sweeps). Switch: `combatRules`, default off. Plan: [`combat.md`](combat.md).

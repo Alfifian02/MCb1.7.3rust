@@ -9,7 +9,7 @@
 //! * `catalog` - the five new melee families, their ids (400..=424), names, damage and recipes.
 //!
 //! * `guard`   - C4: the sword's guard (points, arc, stagger) and the block. UNVERIFIED: not compiled.
-//! * `survival` - C4: the healing food bar.
+//! * `mend`    - C4: healing without hunger (hearth, bandage; the bed's is in `lib.rs`). Replaces the mod's food bar (`survival`, deleted).
 //! * `special` - C5: the right button: lunge, sweep, parry and the hammer's streak. UNVERIFIED: not compiled.
 //! * `tooltip` - C6: the coloured lines under a weapon's name (category, damage, speed, reach, special, durability). UNVERIFIED: not compiled.
 //! * `fx`      - C7: the camera shake table (`Rig`) and the geometry of the slash and the sweep. UNVERIFIED: not compiled.
@@ -26,9 +26,9 @@ pub mod catalog;
 pub mod cone;
 pub mod fx;
 pub mod guard;
+pub mod mend;
 pub mod profile;
 pub mod rules;
 pub mod sound;
 pub mod special;
-pub mod survival;
 pub mod tooltip;
