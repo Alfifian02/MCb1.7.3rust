@@ -1,0 +1,1399 @@
+diff -urN repo_orig/mc-rs/src/lib.rs repo/mc-rs/src/lib.rs
+--- repo_orig/mc-rs/src/lib.rs
++++ repo/mc-rs/src/lib.rs
+@@ -16,6 +16,7 @@
+ mod rumble;
+ mod menu;
+ mod options;
++mod stats_ui;
+ mod ui;
+ mod satchel;
+ 
+@@ -131,6 +132,18 @@
+     opts: Settings,
+     /// The game menu (`GuiIngameMenu`, or the death screen) while `touch.paused`.
+     pause: Option<Pause>,
++    /// `stats.dat` of b1.7.3 (`StatFileWriter`), `<root>/stats`: shared by all worlds like the Java's per-user file. UNVERIFIED.
++    stats: world::stats::Stats,
++    /// Achievements / Statistics (`PauseEv::Stats`), drawn instead of the game menu while `Some`.
++    stats_ui: Option<stats_ui::StatsUi>,
++    toast: stats_ui::Toast,
++    /// Ticks (1/20 s) not yet counted into `MINUTES`.
++    stat_t: f32,
++    /// Where the player was at the last `move_stats`.
++    stat_pos: glam::Vec3,
++    /// Blocks fallen riding a pig (`EntityPig.fall`) and where the minecart ride began (`startMinecartCoordinates`).
++    pig_fall: f32,
++    cart_from: Option<glam::Vec3>,
+     chunks: ChunkManager,
+     camera: FirstPersonCamera,
+     player: Player,
+@@ -362,8 +375,10 @@
+         let glow = GlowMesh::new(be.gfx());
+         let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as i64);
+ 
++        let mut stats = std::fs::read(dir.join("stats")).ok().and_then(|b| world::stats::Stats::decode(&b)).unwrap_or_default();
++        stats.add(world::stats::START_GAME, 1);
+         let mut app = Self {
+-            be, world_type: WorldType::Vanilla, lod: None, seed: 0, root: dir.clone(), opts, pause: None, lod_on: false, menu: Some(Menu::new(&dir)),
++            be, world_type: WorldType::Vanilla, lod: None, seed: 0, root: dir.clone(), opts, pause: None, stats, stats_ui: None, toast: Default::default(), stat_t: 0.0, stat_pos: glam::Vec3::ZERO, pig_fall: 0.0, cart_from: None, lod_on: false, menu: Some(Menu::new(&dir)),
+             chunks, camera,
+             player,
+             last_frame: Instant::now(),
+@@ -576,6 +591,8 @@
+         if self.nether {
+             self.dir = self.dir.join("nether");
+         }
++        // UNVERIFIED: the Java counts `createWorld` on the create screen and `loadWorld` on the list; here a world with a `level` is a load.
++        self.stats.add(if self.dir.join("level").exists() { world::stats::LOAD_WORLD } else { world::stats::CREATE_WORLD }, 1);
+         self.reset_world(false);
+         self.menu = None;
+         self.touch.set_menu(false);
+@@ -589,11 +606,12 @@
+     /// The pause menu's "Save and quit to title" (`GuiIngameMenu`).
+     fn quit_to_title(&mut self) {
+         self.close_sign();
++        self.stats.add(world::stats::LEAVE_GAME, 1);
+         self.save(usize::MAX);
+         self.chunks = ChunkManager::new_typed(0, RENDER_DIST, WorldType::Vanilla); // the world's workers stop on drop
+         self.lod = None;
+         self.menu = Some(Menu::new(&self.root));
+-        self.pause = None;
++        (self.pause, self.stats_ui) = (None, None);
+         self.touch.set_menu(true);
+         if let Ok(mut l) = LAST_WORLD.lock() {
+             *l = None;
+@@ -726,6 +744,9 @@
+         if let Err(e) = save::write(&self.dir.join("book"), &self.notes.encode()) {
+             log::warn!("save: book file: {e}");
+         }
++        if let Err(e) = save::write(&self.root.join("stats"), &self.stats.encode()) {
++            log::warn!("save: stats file: {e}");
++        }
+         self.settle_maps();
+         self.maps.save_all();
+         self.chunks.flush(chunks);
+@@ -817,13 +838,18 @@
+             let info = self.pause_info();
+             let mut asked = Vec::new();
+             for ev in self.touch.take_screen_events() {
+-                if let Some(p) = self.pause.as_mut() {
++                if let Some(u) = self.stats_ui.as_mut() {
++                    if u.event(ev, w, h, &self.opts, &self.stats) {
++                        self.stats_ui = None;
++                    }
++                } else if let Some(p) = self.pause.as_mut() {
+                     asked.extend(p.event(ev, w, h, &mut self.opts, &info));
+                 }
+             }
+             for a in asked {
+                 match a {
+                     PauseEv::Resume => self.touch.resume(),
++                    PauseEv::Stats(ach) => self.stats_ui = Some(stats_ui::StatsUi::new(ach)),
+                     PauseEv::Quit => {
+                         self.quit_to_title();
+                         return;
+@@ -853,7 +879,7 @@
+             self.camera.pos = self.player.pos + glam::Vec3::new(0.0, EYE_HEIGHT - self.sneak_y, 0.0);
+             return;
+         }
+-        self.pause = None;
++        (self.pause, self.stats_ui) = (None, None);
+         // Four seconds in a portal: the other dimension (`EntityPlayerSP.onLivingUpdate`).
+         if self.portal_t >= 1.0 {
+             let p = self.audio.rnd() * 0.4 + 0.8;
+@@ -879,6 +905,13 @@
+         self.tip = if slot != self.tip.0 { (slot, 2.0) } else { (slot, (self.tip.1 - dt).max(0.0)) };
+         // Day/night: time only runs while playing; the shader reads the sky-light level from a uniform, so the meshes are not rebuilt.
+         self.world_ticks += dt as f64 * 20.0;
++        // `minutesPlayedStat`: one per tick; and the inventory hint until `openInventory` is taken (`EntityPlayerSP.onLivingUpdate`).
++        self.stat_t += dt * 20.0;
++        self.stats.add(world::stats::MINUTES, self.stat_t as u32);
++        self.stat_t = self.stat_t.fract();
++        if !self.stats.has(world::stats::OPEN_INVENTORY) {
++            self.toast.hint(world::stats::OPEN_INVENTORY);
++        }
+         while self.weather_ticks < self.world_ticks as u64 {
+             self.weather.tick();
+             self.weather_ticks += 1;
+@@ -983,6 +1016,7 @@
+         // `LivingJumpEvent` (Stamina): a jump that left the ground costs 10; one a ceiling stopped zeroed `vel.y`, so it is free.
+         if grounded && !water && !flying && !asleep && !riding && self.touch.jumping() && self.player.vel.y > 0.0 {
+             self.vitals.stamina.jump();
++            self.stats.add(world::stats::JUMP, 1);
+         }
+         // `horizontalCollision`: `step` zeroes the velocity of the axis a wall stopped (a stepped-up slab keeps it).
+         self.sprint_blocked |= !asleep && !riding && ((vx0 != 0.0 && self.player.vel.x == 0.0) || (vz0 != 0.0 && self.player.vel.z == 0.0));
+@@ -1049,6 +1083,9 @@
+         }
+         // `InventoryPlayer.damageArmor`: every worn piece takes the damage that was dealt (before armor).
+         let wear = std::mem::take(&mut self.vitals.wear) as u16;
++        self.stats.add(world::stats::DAMAGE_TAKEN, wear as u32);
++        self.stats.walk(world::stats::Dist::Fall, std::mem::take(&mut self.vitals.fell) * 100.0);
++        self.move_stats(dt, water, eye_in_water, ladder, riding);
+         (items::MAIN..items::SLOTS).filter(|_| wear > 0).for_each(|i| self.inv.damage(i, wear));
+         if self.vitals.dead() {
+             self.die();
+@@ -1056,6 +1093,7 @@
+         }
+         // Dropped items fall, settle and get picked up (before the target check below, which can return early).
+         self.drops.tick(dt, &|x: i32, y: i32, z: i32| self.chunks.block(x, y, z).map(|b| self.chunks.physics_at(x, y, z, b)), self.player.pos, &mut self.inv);
++        self.stat_sync();
+         for at in std::mem::take(&mut self.drops.pops) {
+             // `EntityItem.onCollideWithPlayer` (`EntityArrow`'s is the same call): at the item, volume 0.2, pitch `((r - r) * 0.7 + 1) * 2`.
+             let pitch = ((self.audio.rnd() - self.audio.rnd()) * 0.7 + 1.0) * 2.0;
+@@ -1450,6 +1488,9 @@
+                             // PlayerControllerSP.sendBlockRemoved: `canHarvestBlock` is read before the tool wears, so
+                             // a tool that breaks on this block still harvests it; no suitable tool, no drop.
+                             let harvest = dig::can_harvest(id, held);
++                            if harvest {
++                                self.stats.bump(world::stats::Kind::Mined, id as u16, 1); // `Block.harvestBlock`
++                            }
+                             if let Some(h) = held {
+                                 self.inv.damage(slot, craft::wear_on_break(h.id, id));
+                             }
+@@ -2808,6 +2849,7 @@
+                     let (fish, wear) = h.catch(self.player.pos);
+                     if let Some((s, v)) = fish {
+                         self.drops.throw_from(s, h.pos, v);
++                        self.stats.add(world::stats::FISH, 1);
+                     }
+                     self.inv.damage(slot, wear);
+                 }
+@@ -2906,6 +2948,7 @@
+     /// died (ponytail: `scatter` drops one entity per stack, vanilla throws each with a random spread). The pause
+     /// menu is the death screen: its resume button respawns (top of `step_frame`).
+     fn die(&mut self) {
++        self.stats.add(world::stats::DEATHS, 1);
+         self.close_screen();
+         self.close_sign();
+         let at = (self.player.pos.x.floor() as i32, self.player.pos.y.floor() as i32, self.player.pos.z.floor() as i32);
+@@ -2938,6 +2981,9 @@
+ 
+     /// Open a container screen: the 2x2 inventory, a workbench's 3x3, a furnace or chests.
+     fn open_screen(&mut self, screen: Screen) {
++        if screen.gw == 2 {
++            self.earn(world::stats::OPEN_INVENTORY); // `GuiInventory`
++        }
+         self.screen = Some(screen);
+         (self.one_mode, self.shift_mode) = (false, false);
+         self.touch.set_screen(true);
+@@ -2945,6 +2991,7 @@
+ 
+     /// `onCraftGuiClosed`: the cursor stack and whatever is left in the grid are thrown out in front of the player.
+     fn close_screen(&mut self) {
++        self.stat_sync();
+         let was_sat = self.sat.take().is_some();
+         if let Some(mut s) = self.screen.take() {
+             if was_sat {
+@@ -2957,6 +3004,7 @@
+             }
+             for st in s.close() {
+                 self.drops.throw(st, self.camera.pos, self.camera.forward());
++                self.stats.add(world::stats::DROP, 1);
+             }
+         }
+         self.touch.set_screen(false);
+@@ -3236,6 +3284,7 @@
+                     let n = if self.one_mode { 1 } else { c.count };
+                     s.cursor = (c.count > n).then(|| ItemStack { count: c.count - n, ..c });
+                     self.drops.throw(ItemStack { count: n, ..c }, self.camera.pos, self.camera.forward());
++                    self.stats.add(world::stats::DROP, 1);
+                 }
+             }
+             Pick::List | Pick::Panel | Pick::Card => {}
+@@ -3351,6 +3400,7 @@
+             let mut g = |sd: f32| self.mobs.rng.next_gaussian() as f32 * 0.0075 * sd;
+             let v = glam::Vec3::new(dx * s + g(6.0), 0.2 + g(6.0), dz * s + g(6.0));
+             self.drops.throw_from(ItemStack { id, count: 1, damage }, pos - glam::Vec3::Y * 0.3, v);
++            self.stats.add(world::stats::DROP, 1);
+             self.audio.play("random.click", at, 1.0, 1.0);
+         }
+     }
+@@ -3508,6 +3558,7 @@
+                 let n = if self.one_mode { 1 } else { c.count };
+                 s.cursor = (c.count > n).then(|| ItemStack { count: c.count - n, ..c });
+                 self.drops.throw(ItemStack { count: n, ..c }, self.camera.pos, self.camera.forward());
++                self.stats.add(world::stats::DROP, 1);
+             }
+         }
+     }
+@@ -3521,6 +3572,106 @@
+         })
+     }
+ 
++    /// `EntityPlayerSP.addStat(achievement)`: the toast when it is new.
++    fn earn(&mut self, a: usize) {
++        if self.stats.earn(a) {
++            self.toast.taken(a);
++        }
++    }
++
++    /// Moves what the world logged since the last call into the stats: pickups (`onItemPickup`), item uses and breaks, what the screens
++    /// handed out (`SlotCrafting` / `SlotFurnace`: `onCrafting` and the achievements) and the player's blows (`EntityPlayer.attackTargetEntity`).
++    fn stat_sync(&mut self) {
++        use world::stats::{self as st, Kind};
++        for id in std::mem::take(&mut self.drops.got) {
++            match id {
++                17 => self.earn(st::MINE_WOOD),
++                334 => self.earn(st::KILL_COW),
++                _ => {}
++            }
++        }
++        for id in std::mem::take(&mut self.inv.used) {
++            self.stats.bump(Kind::Used, id, 1);
++        }
++        for id in std::mem::take(&mut self.inv.broke) {
++            self.stats.bump(Kind::Depleted, id, 1);
++        }
++        for o in self.screen.as_mut().map(|s| std::mem::take(&mut s.made)).unwrap_or_default() {
++            self.stats.bump(Kind::Crafted, o.id, o.count as u32);
++            let a = match o.id {
++                58 => st::BUILD_WORKBENCH,
++                270 => st::BUILD_PICKAXE,
++                61 => st::BUILD_FURNACE,
++                290 => st::BUILD_HOE,
++                297 => st::MAKE_BREAD,
++                354 => st::BAKE_CAKE,
++                274 => st::BUILD_BETTER_PICKAXE,
++                268 => st::BUILD_SWORD,
++                265 => st::ACQUIRE_IRON,
++                350 => st::COOK_FISH,
++                _ => continue,
++            };
++            self.earn(a);
++        }
++        let (dealt, slain) = self.mobs.tally();
++        self.stats.add(st::DAMAGE_DEALT, dealt);
++        self.stats.add(st::MOB_KILLS, slain.len() as u32);
++        // `EntityMob`: not the slime or the ghast (`IMob` only).
++        use world::mobs::Kind::{Creeper, Giant, PigZombie, Skeleton, Spider, Zombie};
++        if slain.iter().any(|k| matches!(k, Zombie | PigZombie | Giant | Skeleton | Creeper | Spider)) {
++            self.earn(st::KILL_ENEMY);
++        }
++    }
++
++    /// `EntityPlayer.addMovementStat`, from this frame's displacement (the Java adds whole centimetres per tick). A move of 5+ blocks (spawn,
++    /// a portal, a respawn) is no walk. UNVERIFIED: flying counts above 5 blocks/s as the Java's 25 cm a tick.
++    fn move_stats(&mut self, dt: f32, water: bool, dive: bool, ladder: bool, riding: bool) {
++        use world::stats::Dist::*;
++        let d = self.player.pos - std::mem::replace(&mut self.stat_pos, self.player.pos);
++        let h = d.x.hypot(d.z) * 100.0;
++        if d.length() > 5.0 {
++            return;
++        }
++        let pig = riding && self.carts.ridden().is_none() && self.boats.ridden().is_none();
++        if !pig {
++            self.pig_fall = 0.0;
++        }
++        if !riding || pig {
++            self.cart_from = None;
++        }
++        if riding {
++            let k = if pig { Pig } else if self.carts.ridden().is_some() { Cart } else { Boat };
++            self.stats.walk(k, d.length() * 100.0);
++            if pig {
++                // `EntityPig.fall`: over 5 blocks with the player on it. UNVERIFIED: the frame's drop, not the pig's `fallDistance`.
++                if d.y < 0.0 {
++                    self.pig_fall -= d.y;
++                } else {
++                    if self.pig_fall > 5.0 {
++                        self.earn(world::stats::FLY_PIG);
++                    }
++                    self.pig_fall = 0.0;
++                }
++            } else if k == Cart {
++                // `addMovementStat`: a kilometre from where the ride began.
++                let from = *self.cart_from.get_or_insert(self.player.pos);
++                if (self.player.pos - from).length_squared() >= 1.0e6 {
++                    self.earn(world::stats::ON_A_RAIL);
++                }
++            }
++        } else if dive {
++            self.stats.walk(Dive, h);
++        } else if water {
++            self.stats.walk(Swim, h);
++        } else if ladder {
++            self.stats.walk(Climb, d.y.max(0.0) * 100.0);
++        } else if self.player.on_ground {
++            self.stats.walk(Walk, h);
++        } else if h > 25.0 * dt * 20.0 {
++            self.stats.walk(Fly, h);
++        }
++    }
++
+     fn riding(&self) -> bool {
+         self.mobs.list.iter().any(|m| m.ridden) || self.boats.ridden().is_some() || self.carts.ridden().is_some()
+     }
+@@ -3903,7 +4054,7 @@
+     fn pad_sync(&mut self, dt: f32) {
+         self.touch.pad.capture = self.pause.as_ref().is_some_and(Pause::pad_waiting) || self.menu.as_ref().is_some_and(Menu::pad_waiting);
+         // The d-pad jumps between targets in the satchel, a chest / furnace / bench screen and the pause menu's top page; the stick is the free cursor.
+-        self.touch.pad.snap = self.screen.is_some() || (self.touch.paused && self.pause.as_ref().is_some_and(Pause::top));
++        self.touch.pad.snap = self.screen.is_some() || (self.touch.paused && self.stats_ui.is_none() && self.pause.as_ref().is_some_and(Pause::top));
+         self.touch.pad_update(dt, &self.opts.pad);
+         if let Some(d) = self.touch.take_nav() {
+             self.sat_nav(d);
+@@ -4486,10 +4637,16 @@
+         // The game menu (`GuiIngameMenu`, the death screen when dead), over the dimmed frame.
+         if paused {
+             let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
+-            if let Some(p) = &self.pause {
++            if let Some(u) = &self.stats_ui {
++                u.draw(v, w, h, &self.opts, &self.stats);
++            } else if let Some(p) = &self.pause {
+                 p.draw(v, w, h, &self.opts, &pause_info);
+             }
+         }
++        {
++            let (w, h) = self.be.size();
++            self.toast.draw(v, w as f32, h as f32, &self.opts);
++        }
+ 
+         // The pad's radial hotbar, and its cursor in any GUI (the pause menu, a container).
+         {
+diff -urN repo_orig/mc-rs/src/options.rs repo/mc-rs/src/options.rs
+--- repo_orig/mc-rs/src/options.rs
++++ repo/mc-rs/src/options.rs
+@@ -12,7 +12,7 @@
+ //! UNVERIFIED: the default render distance is Short (4 chunks, what mc-rs always drew), not Far as in `GameSettings`.
+ //! Stored and saved but with no effect yet: Music and Sound (M9: now wired, see `audio/`), 3D Anaglyph, Advanced OpenGL, Graphics (Fancy/Fast),
+ //! Smooth Lighting and the key bindings (a touch screen has no keys; `OptionsUi::key` takes one when a keyboard event exists).
+-//! Not done: Achievements and Statistics (drawn greyed out, there is no stat system).
++//! Achievements and Statistics open `stats_ui` (`PauseEv::Stats`).
+ 
+ use crate::input::gamepad::{Btn, PadCfg, ACTS};
+ use crate::input::touch_ui::{ScreenEv, HOLD_SECS, SWING_SECS};
+@@ -799,7 +799,7 @@
+ }
+ 
+ /// `drawDefaultBackground`: the dimmed world when one is behind, else the dirt.
+-fn background(v: &mut Vec<HudVertex>, s: f32, gw: f32, gh: f32, world: bool) {
++pub(crate) fn background(v: &mut Vec<HudVertex>, s: f32, gw: f32, gh: f32, world: bool) {
+     if world {
+         grad(v, s, [0.0, 0.0, gw, gh], [16.0 / 255.0, 16.0 / 255.0, 16.0 / 255.0, 0xC0 as f32 / 255.0], [16.0 / 255.0, 16.0 / 255.0, 16.0 / 255.0, 0xD0 as f32 / 255.0]);
+     } else {
+@@ -1274,6 +1274,8 @@
+     Fly,
+     LodDebug,
+     Info,
++    /// Open `stats_ui` (true: Achievements, false: Statistics).
++    Stats(bool),
+ }
+ 
+ #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+@@ -1327,8 +1329,8 @@
+                 (PAct::Quit, [hw - 100.0, q + 120.0 - 16.0, 200.0, 20.0], "Save and quit to title".to_string(), true),
+                 (PAct::Resume, [hw - 100.0, q + 24.0 - 16.0, 200.0, 20.0], "Back to game".to_string(), true),
+                 (PAct::Options, [hw - 100.0, q + 96.0 - 16.0, 200.0, 20.0], "Options...".to_string(), true),
+-                (PAct::Achievements, [hw - 100.0, q + 48.0 - 16.0, 98.0, 20.0], "Achievements".to_string(), false),
+-                (PAct::Stats, [hw + 2.0, q + 48.0 - 16.0, 98.0, 20.0], "Statistics".to_string(), false),
++                (PAct::Achievements, [hw - 100.0, q + 48.0 - 16.0, 98.0, 20.0], "Achievements".to_string(), true),
++                (PAct::Stats, [hw + 2.0, q + 48.0 - 16.0, 98.0, 20.0], "Statistics".to_string(), true),
+                 // b1.7.3 leaves the row between Statistics and Options empty.
+                 (PAct::Tools, [hw - 100.0, q + 72.0 - 16.0, 200.0, 20.0], "Tools...".to_string(), true),
+             ]
+@@ -1403,7 +1405,7 @@
+                         self.tools = act == PAct::Tools;
+                         None
+                     }
+-                    PAct::Achievements | PAct::Stats => None,
++                    PAct::Achievements | PAct::Stats => Some(PauseEv::Stats(act == PAct::Achievements)),
+                 };
+             }
+         }
+diff -urN repo_orig/mc-rs/src/stats_ui.rs repo/mc-rs/src/stats_ui.rs
+--- repo_orig/mc-rs/src/stats_ui.rs	1970-01-01 00:00:00.000000000 +0000
++++ repo/mc-rs/src/stats_ui.rs
+@@ -0,0 +1,399 @@
++//! `GuiAchievements`, `GuiStats` (+ `GuiSlotStats*`) and `GuiAchievement` (the toast), in GUI units like `options.rs`. UNVERIFIED: not compiled, not run.
++//!
++//! Touch, not mouse: the achievement map is dragged with a finger (b1.7.3 drags with the mouse, and its arrow keys are gone) and a TAP on an
++//! achievement shows its tooltip (hover does not exist), staying until the next tap; the lists scroll by dragging; the three tabs and the
++//! column headers (tap to sort: b1.7.3's `SorterStats*` behind its header icons) and `Done` are 24 to 20 units tall. The map fills the screen
++//! instead of the 224x155 window, and rows carry the item NAME beside the icon (b1.7.3 shows it on hover).
++//! Not b1.7.3's: the achievement frames (`achievement/bg.png`, not in the HUD sheet) are plain quads, and the toast panel too.
++
++use crate::input::touch_ui::ScreenEv;
++use crate::menu::{dirt, grad, rgb, scaled_gs, tw};
++use crate::options::{background, button, Settings};
++use crate::render::atlas;
++use crate::render::hud::{HudPipeline, HudVertex};
++use crate::world::gen::noise::JavaRandom;
++use crate::world::items::{self, ItemStack};
++use crate::world::stats::*;
++use std::time::Instant;
++
++fn inside(r: [f32; 4], x: f32, y: f32) -> bool {
++    x >= r[0] && x < r[0] + r[2] && y >= r[1] && y < r[1] + r[3]
++}
++
++fn quad(v: &mut Vec<HudVertex>, s: f32, r: [f32; 4], c: [f32; 4]) {
++    HudPipeline::push_quad(v, r[0] * s, r[1] * s, r[2] * s, r[3] * s, c);
++}
++
++fn text(v: &mut Vec<HudVertex>, s: f32, x: f32, y: f32, t: &str, c: u32) {
++    HudPipeline::push_text(v, x * s, y * s, s, t, rgb(c));
++}
++
++fn stack(v: &mut Vec<HudVertex>, s: f32, x: f32, y: f32, id: u16) {
++    crate::push_stack(v, (x * s, y * s, 16.0 * s, 16.0 * s), 1.0, ItemStack { id, count: 1, damage: 0 });
++}
++
++/// `FontRenderer.func_27278_a`: words wrapped to `w` units.
++fn wrap(t: &str, w: f32) -> Vec<String> {
++    let (mut out, mut cur) = (Vec::new(), String::new());
++    for word in t.split(' ') {
++        let n = if cur.is_empty() { word.to_string() } else { format!("{cur} {word}") };
++        if tw(&n) > w && !cur.is_empty() {
++            out.push(std::mem::replace(&mut cur, word.to_string()));
++        } else {
++            cur = n;
++        }
++    }
++    out.push(cur);
++    out
++}
++
++fn item_name(id: u16) -> String {
++    items::name(ItemStack { id, count: 1, damage: 0 }).map_or_else(|| format!("#{id}"), str::to_string)
++}
++
++/// The scroll range of the map (`field_27126_s` .. `field_27123_v`), per axis: centred when the whole map fits.
++fn span(lo: i32, hi: i32, view: f32) -> (f32, f32) {
++    let (a, b) = (lo as f32 * 24.0 - 24.0, hi as f32 * 24.0 + 50.0 - view);
++    if b < a { ((a + b) / 2.0, (a + b) / 2.0) } else { (a, b) }
++}
++
++fn clamp_pan(p: (f32, f32), vw: f32, vh: f32) -> (f32, f32) {
++    let ext = |f: fn(&Ach) -> i32| (ACHS.iter().map(f).min().unwrap_or(0), ACHS.iter().map(f).max().unwrap_or(0));
++    let ((c0, c1), (r0, r1)) = (ext(|a| a.col), ext(|a| a.row));
++    let (x, y) = (span(c0, c1, vw), span(r0, r1, vh));
++    (p.0.clamp(x.0, x.1), p.1.clamp(y.0, y.1))
++}
++
++const PAGES: [&str; 3] = ["General", "Blocks", "Items"];
++/// Right edges of the three value columns, from the centre line.
++const COLS: [f32; 3] = [40.0, 95.0, 150.0];
++
++struct Press {
++    at: (f32, f32),
++    from: (f32, f32),
++    drag: bool,
++}
++
++/// 0 = Achievements, 1..=3 = Statistics General / Blocks / Items.
++pub struct StatsUi {
++    page: usize,
++    pan: Option<(f32, f32)>,
++    scroll: f32,
++    /// (column, direction): -1 largest first, 1 smallest first, 0 by id.
++    sort: (usize, i32),
++    sel: Option<usize>,
++    press: Option<Press>,
++    finger: Option<(f32, f32)>,
++    born: Instant,
++}
++
++impl StatsUi {
++    pub fn new(ach: bool) -> Self {
++        Self { page: if ach { 0 } else { 1 }, pan: None, scroll: 0.0, sort: (0, 0), sel: None, press: None, finger: None, born: Instant::now() }
++    }
++
++    /// (Done, the three tabs), GUI units.
++    fn lay(gw: f32, gh: f32) -> ([f32; 4], [[f32; 4]; 3]) {
++        let hw = (gw / 2.0).floor();
++        ([hw - 100.0, gh - 28.0, 200.0, 24.0], [0, 1, 2].map(|i| [hw - 152.0 + 102.0 * i as f32, gh - 56.0, 100.0, 24.0]))
++    }
++
++    /// The map's viewport: (top, height) with the full width.
++    fn view(gh: f32) -> (f32, f32) {
++        (24.0, gh - 24.0 - 32.0)
++    }
++
++    /// The map's scroll, centred on the first achievement until the finger moves it (`GuiAchievements.initGui`).
++    fn pan(&self, vw: f32, vh: f32) -> (f32, f32) {
++        clamp_pan(self.pan.unwrap_or((13.0 - vw / 2.0, 13.0 - vh / 2.0)), vw, vh)
++    }
++
++    /// Row height, header height, the rows shown, the list's top and bottom.
++    fn rows(&self, gh: f32, stats: &Stats) -> (f32, f32, Vec<u16>, f32, f32) {
++        let (rh, hdr) = if self.page == 1 { (14.0, 0.0) } else { (22.0, 20.0) };
++        let mut ids = if self.page == 1 { Vec::new() } else { stats.listed(self.page == 2) };
++        let (col, dir) = self.sort;
++        if dir != 0 {
++            let k = self.kinds()[col];
++            ids.sort_by_key(|&id| (dir as i64 * stats.count(k, id) as i64, id));
++        }
++        (rh, hdr, ids, 32.0, gh - 62.0)
++    }
++
++    fn kinds(&self) -> [Kind; 3] {
++        if self.page == 2 { [Kind::Crafted, Kind::Used, Kind::Mined] } else { [Kind::Depleted, Kind::Crafted, Kind::Used] }
++    }
++
++    fn max_scroll(&self, gh: f32, stats: &Stats) -> f32 {
++        let (rh, hdr, ids, top, bot) = self.rows(gh, stats);
++        let n = if self.page == 1 { GENERAL.len() } else { ids.len() };
++        (n as f32 * rh - (bot - top - hdr)).max(0.0)
++    }
++
++    /// A finger event in px. True when `Done` is tapped (back to the game menu).
++    pub fn event(&mut self, ev: ScreenEv, w: f32, h: f32, st: &Settings, stats: &Stats) -> bool {
++        let (s, gw, gh) = scaled_gs(w, h, st.gui_scale);
++        let (vy, vh) = Self::view(gh);
++        match ev {
++            ScreenEv::Down(x, y) => {
++                let p = (x / s, y / s);
++                self.finger = Some(p);
++                let from = if self.page == 0 { self.pan(gw, vh) } else { (0.0, self.scroll) };
++                self.press = Some(Press { at: p, from, drag: false });
++            }
++            ScreenEv::Move(x, y) => {
++                let p = (x / s, y / s);
++                self.finger = Some(p);
++                if let Some(pr) = self.press.as_mut() {
++                    let d = (p.0 - pr.at.0, p.1 - pr.at.1);
++                    pr.drag |= d.0.abs().max(d.1.abs()) > 4.0;
++                    if pr.drag {
++                        let from = pr.from;
++                        if self.page == 0 {
++                            self.pan = Some(clamp_pan((from.0 - d.0, from.1 - d.1), gw, vh));
++                        } else {
++                            self.scroll = (from.1 - d.1).clamp(0.0, self.max_scroll(gh, stats));
++                        }
++                    }
++                }
++            }
++            ScreenEv::Up(x, y) => {
++                self.finger = None;
++                if self.press.take().is_some_and(|p| p.drag) {
++                    return false;
++                }
++                let (gx, gy) = (x / s, y / s);
++                let (done, tabs) = Self::lay(gw, gh);
++                if inside(done, gx, gy) {
++                    return true;
++                }
++                if self.page > 0 {
++                    if let Some(i) = tabs.iter().position(|&r| inside(r, gx, gy)) {
++                        if self.page != i + 1 {
++                            (self.page, self.scroll, self.sort) = (i + 1, 0.0, (0, 0));
++                        }
++                        return false;
++                    }
++                }
++                if self.page >= 2 {
++                    let hw = (gw / 2.0).floor();
++                    if let Some(c) = COLS.iter().position(|&e| inside([hw + e - 54.0, 32.0, 56.0, 20.0], gx, gy)) {
++                        // `func_27266_c`: a new column sorts largest first, again smallest first, again by id.
++                        self.sort = match self.sort {
++                            (k, -1) if k == c => (c, 1),
++                            (k, 1) if k == c => (0, 0),
++                            _ => (c, -1),
++                        };
++                    }
++                } else if self.page == 0 {
++                    let (px, py) = self.pan(gw, vh);
++                    self.sel = ACHS.iter().position(|a| inside([a.col as f32 * 24.0 - px - 5.0, vy + a.row as f32 * 24.0 - py - 5.0, 32.0, 32.0], gx, gy) && gy >= vy && gy < vy + vh);
++                }
++            }
++        }
++        false
++    }
++
++    pub fn draw(&self, v: &mut Vec<HudVertex>, w: f32, h: f32, st: &Settings, stats: &Stats) {
++        let (s, gw, gh) = scaled_gs(w, h, st.gui_scale);
++        let hw = (gw / 2.0).floor();
++        background(v, s, gw, gh, true);
++        let bars = if self.page == 0 { self.draw_map(v, s, gw, gh, stats) } else { self.draw_list(v, s, gw, gh, stats) };
++        // The dirt bars hide what the map and the rows spill over, `GuiSlot.overlayBackground`.
++        for r in &bars {
++            dirt(v, s, *r, 0.0, 0x404040);
++        }
++        if self.page > 0 {
++            // The shadows `GuiSlot` draws under the bars: black to clear, 4 units.
++            let (clear, black, a, b) = ([0.0; 4], [0.0, 0.0, 0.0, 1.0], bars[0][3], bars[1][1]);
++            grad(v, s, [0.0, a, gw, 4.0], black, clear);
++            grad(v, s, [0.0, b - 4.0, gw, 4.0], clear, black);
++        }
++        let title = if self.page == 0 { "Achievements" } else { "Statistics" };
++        text(v, s, hw - tw(title) / 2.0, 10.0, title, 0xFFFFFF);
++        let (done, tabs) = Self::lay(gw, gh);
++        let over = |r: [f32; 4]| self.finger.is_some_and(|(x, y)| inside(r, x, y));
++        button(v, s, done, "Done", true, over(done), None);
++        if self.page > 0 {
++            for (i, r) in tabs.into_iter().enumerate() {
++                button(v, s, r, PAGES[i], true, over(r) || self.page == i + 1, None);
++            }
++        }
++        if self.page == 0 {
++            self.draw_tip(v, s, gw, gh, stats);
++        } else if self.page > 1 {
++            let names = if self.page == 2 { ["Crafted", "Used", "Mined"] } else { ["Depleted", "Crafted", "Used"] };
++            for (i, n) in names.iter().enumerate() {
++                let mark = if self.sort.1 != 0 && self.sort.0 == i { if self.sort.1 < 0 { " v" } else { " ^" } } else { "" };
++                let t = format!("{n}{mark}");
++                text(v, s, hw + COLS[i] - tw(&t), 38.0, &t, if self.sort.1 != 0 && self.sort.0 == i { 0xFFFF80 } else { 0xE0E0E0 });
++            }
++        }
++    }
++
++    /// `GuiAchievements.drawScreen`: the terrain pattern, the links, the frames. Returns the bars to cover the edges.
++    fn draw_map(&self, v: &mut Vec<HudVertex>, s: f32, gw: f32, gh: f32, stats: &Stats) -> Vec<[f32; 4]> {
++        let (vy, vh) = Self::view(gh);
++        let (px, py) = self.pan(gw, vh);
++        let (bx, by) = (px.floor() + 288.0, py.floor() + 288.0);
++        let (tx, ty, ox, oy) = ((bx as i32).div_euclid(16), (by as i32).div_euclid(16), bx.rem_euclid(16.0), by.rem_euclid(16.0));
++        let mut rnd = JavaRandom::new(0);
++        let mut r = 0;
++        while r as f32 * 16.0 - oy < vh {
++            let row = ty + r;
++            let g = 0.6 - row as f32 / 25.0 * 0.3;
++            let mut c = 0;
++            while c as f32 * 16.0 - ox < gw {
++                rnd.set_seed(1234 + (tx + c) as i64);
++                rnd.next_int();
++                let n = rnd.next_int_bound((1 + row).max(1)) + row / 2;
++                let id: u8 = if n <= 37 && row != 35 {
++                    if n == 22 { if rnd.next_int_bound(2) == 0 { 56 } else { 73 } } else if n == 10 { 15 } else if n == 8 { 16 } else if n > 4 { 1 } else if n > 0 { 3 } else { 12 }
++                } else {
++                    7
++                };
++                HudPipeline::push_tile(v, (c as f32 * 16.0 - ox) * s, (vy + r as f32 * 16.0 - oy) * s, 16.0 * s, 16.0 * s, atlas::tile_of(id, 0), [g; 3]);
++                c += 1;
++            }
++            r += 1;
++        }
++        let pulse = self.born.elapsed().as_millis() % 600;
++        let sin = (pulse as f32 / 600.0 * std::f32::consts::TAU).sin();
++        let (cx, cy) = (|c: i32| c as f32 * 24.0 - px + 11.0, |r: i32| vy + r as f32 * 24.0 - py + 11.0);
++        for (i, a) in ACHS.iter().enumerate() {
++            let Some(p) = a.parent else { continue };
++            let col = if stats.has(i) { rgb(0x707070) } else if stats.open(i) { [0.0, 1.0, 0.0, if sin > 0.6 { 1.0 } else { 0.51 }] } else { [0.0, 0.0, 0.0, 1.0] };
++            let (x0, x1) = (cx(a.col).min(cx(ACHS[p].col)), cx(a.col).max(cx(ACHS[p].col)));
++            quad(v, s, [x0, cy(a.row), x1 - x0 + 1.0, 1.0], col);
++            let (y0, y1) = (cy(a.row).min(cy(ACHS[p].row)), cy(a.row).max(cy(ACHS[p].row)));
++            quad(v, s, [cx(ACHS[p].col), y0, 1.0, y1 - y0 + 1.0], col);
++        }
++        for (i, a) in ACHS.iter().enumerate() {
++            let (x, y) = (cx(a.col) - 11.0, cy(a.row) - 11.0);
++            // UNVERIFIED stand-in for the 26x26 `bg.png` frames; the shades are `GuiAchievements`' (1.0 / 0.6..0.8 / 0.3).
++            let b = if stats.has(i) { 1.0 } else if stats.open(i) { if sin < 0.6 { 0.6 } else { 0.8 } } else { 0.3 };
++            let edge = if self.sel == Some(i) { [1.0; 3] } else if a.special { [0.88, 0.75, 0.25] } else { [0.63; 3] };
++            quad(v, s, [x - 2.0, y - 2.0, 26.0, 26.0], [edge[0] * b, edge[1] * b, edge[2] * b, 1.0]);
++            quad(v, s, [x - 1.0, y - 1.0, 24.0, 24.0], [0.16 * b, 0.16 * b, 0.16 * b, 1.0]);
++            stack(v, s, x + 3.0, y + 3.0, a.icon);
++            if !stats.open(i) {
++                quad(v, s, [x + 3.0, y + 3.0, 16.0, 16.0], [0.0, 0.0, 0.0, 0.9]);
++            }
++        }
++        vec![[0.0, 0.0, gw, vy], [0.0, vy + vh, gw, gh - vy - vh]]
++    }
++
++    /// The tooltip of the tapped achievement (`GuiAchievements`' hover text, kept on screen until the next tap).
++    fn draw_tip(&self, v: &mut Vec<HudVertex>, s: f32, gw: f32, gh: f32, stats: &Stats) {
++        let Some(i) = self.sel else { return };
++        let (a, (_, vh)) = (&ACHS[i], Self::view(gh));
++        let (px, py) = self.pan(gw, vh);
++        let (nx, ny) = (a.col as f32 * 24.0 - px, Self::view(gh).0 + a.row as f32 * 24.0 - py);
++        let open = stats.open(i);
++        let w = tw(a.name).max(120.0);
++        let body = match (open, a.parent) {
++            (false, Some(p)) => format!("Requires '{}'", ACHS[p].name),
++            _ => a.desc.to_string(),
++        };
++        let lines = wrap(&body, w);
++        let hgt = lines.len() as f32 * 10.0 + if stats.has(i) { 12.0 } else { 0.0 };
++        let x = if nx + 30.0 + w + 3.0 > gw { nx - 6.0 - w } else { nx + 30.0 };
++        let y = ny.clamp(Self::view(gh).0 + 4.0, gh - 36.0 - hgt - 14.0);
++        quad(v, s, [x - 3.0, y - 3.0, w + 6.0, hgt + 18.0], [0.0, 0.0, 0.0, 0.75]);
++        let c = if !open { if a.special { 0x808040 } else { 0x808080 } } else if a.special { 0xFFFF80 } else { 0xFFFFFF };
++        text(v, s, x, y, a.name, c);
++        for (k, l) in lines.iter().enumerate() {
++            text(v, s, x, y + 12.0 + k as f32 * 10.0, l, if open { 0xA0A0A0 } else { 0x705050 });
++        }
++        if stats.has(i) {
++            text(v, s, x, y + 14.0 + lines.len() as f32 * 10.0, "Taken!", 0x9090FF);
++        }
++    }
++
++    /// `GuiStats` and its three `GuiSlotStats*`: rows clipped by the bars returned.
++    fn draw_list(&self, v: &mut Vec<HudVertex>, s: f32, gw: f32, gh: f32, stats: &Stats) -> Vec<[f32; 4]> {
++        let (rh, hdr, ids, top, bot) = self.rows(gh, stats);
++        let hw = (gw / 2.0).floor();
++        let n = if self.page == 1 { GENERAL.len() } else { ids.len() };
++        if n == 0 {
++            text(v, s, hw - tw("Nothing yet") / 2.0, top + hdr + 20.0, "Nothing yet", 0x909090);
++        }
++        for i in 0..n {
++            let y = top + hdr - self.scroll + i as f32 * rh;
++            if y + rh < top + hdr || y > bot {
++                continue;
++            }
++            if i % 2 == 0 {
++                quad(v, s, [hw - 156.0, y, 312.0, rh], [1.0, 1.0, 1.0, 0.05]);
++            }
++            if self.page == 1 {
++                let (id, name, f) = GENERAL[i];
++                let (c, val) = (if i % 2 == 0 { 0xFFFFFF } else { 0x909090 }, fmt(f, stats.get(id)));
++                text(v, s, hw - 146.0, y + 3.0, name, c);
++                text(v, s, hw + 146.0 - tw(&val), y + 3.0, &val, c);
++            } else {
++                let id = ids[i];
++                quad(v, s, [hw - 152.0, y + 2.0, 18.0, 18.0], rgb(0x303030));
++                stack(v, s, hw - 151.0, y + 3.0, id);
++                text(v, s, hw - 130.0, y + 7.0, &item_name(id), 0xFFFFFF);
++                for (c, k) in self.kinds().into_iter().enumerate() {
++                    let val = if matches!(k, Kind::Mined) && !mineable(id) { "-".to_string() } else { fmt(Fmt::Plain, stats.count(k, id)) };
++                    text(v, s, hw + COLS[c] - tw(&val), y + 7.0, &val, 0xE0E0E0);
++                }
++            }
++        }
++        vec![[0.0, 0.0, gw, top + hdr], [0.0, bot, gw, gh - bot]]
++    }
++}
++
++/// `GuiAchievement`: the box sliding in at the top right for 3 s, "Achievement get!" or (a hint) just the description, held until stale.
++#[derive(Default)]
++pub struct Toast {
++    cur: Option<(usize, bool, Instant)>,
++}
++
++impl Toast {
++    pub fn taken(&mut self, a: usize) {
++        self.cur = Some((a, false, Instant::now()));
++    }
++
++    /// `queueAchievementInformation`: call every tick while the hint applies; it vanishes half a second after the calls stop.
++    pub fn hint(&mut self, a: usize) {
++        if !self.cur.is_some_and(|c| !c.1) {
++            self.cur = Some((a, true, Instant::now()));
++        }
++    }
++
++    pub fn draw(&self, v: &mut Vec<HudVertex>, w: f32, h: f32, st: &Settings) {
++        let Some((a, info, t)) = self.cur else { return };
++        let e = t.elapsed().as_secs_f32();
++        let up = if info {
++            if e > 0.5 {
++                return;
++            }
++            0.0
++        } else if e > 3.0 {
++            return;
++        } else {
++            let mut k = e / 3.0 * 2.0;
++            if k > 1.0 {
++                k = 2.0 - k;
++            }
++            let k = (1.0 - k * 4.0).max(0.0);
++            k * k * k * k
++        };
++        let (s, gw, _) = scaled_gs(w, h, st.gui_scale);
++        let (x, y) = (gw - 160.0, -up * 36.0);
++        quad(v, s, [x, y, 160.0, 32.0], rgb(0x808080));
++        quad(v, s, [x + 1.0, y + 1.0, 158.0, 30.0], rgb(0x1A1A1A));
++        stack(v, s, x + 8.0, y + 8.0, ACHS[a].icon);
++        if info {
++            for (k, l) in wrap(ACHS[a].desc, 120.0).iter().enumerate() {
++                text(v, s, x + 30.0, y + 7.0 + k as f32 * 10.0, l, 0xFFFFFF);
++            }
++        } else {
++            text(v, s, x + 30.0, y + 7.0, "Achievement get!", 0xFFFF00);
++            text(v, s, x + 30.0, y + 18.0, ACHS[a].name, 0xFFFFFF);
++        }
++    }
++}
+diff -urN repo_orig/mc-rs/src/world/craft.rs repo/mc-rs/src/world/craft.rs
+--- repo_orig/mc-rs/src/world/craft.rs
++++ repo/mc-rs/src/world/craft.rs
+@@ -473,6 +473,8 @@
+     pub chests: Vec<(i32, i32, i32)>,
+     pub grid: [Option<ItemStack>; 9],
+     pub cursor: Option<ItemStack>,
++    /// What the player took out of an output slot (`SlotCrafting` / `SlotFurnace.onPickupFromSlot`), for the stats; the frame drains it.
++    pub made: Vec<ItemStack>,
+ }
+ 
+ /// Put `s` into `slots`: top up matching stacks first, then fill empty slots. `s.count` is what is left.
+@@ -503,7 +505,7 @@
+ 
+ impl Screen {
+     pub fn new(gw: usize) -> Self {
+-        Self { gw, furnace: None, chests: Vec::new(), grid: [None; 9], cursor: None }
++        Self { gw, furnace: None, chests: Vec::new(), grid: [None; 9], cursor: None, made: Vec::new() }
+     }
+ 
+     /// `ContainerFurnace` for the furnace at `pos`; the caller passes that furnace to `get` and `click`.
+@@ -550,6 +552,7 @@
+     /// `SlotCrafting.onPickupFromSlot`: one of every ingredient is used up; a bucket with something in it (water, lava, milk)
+     /// leaves an empty one (`getContainerItem`).
+     fn take_result(&mut self) {
++        self.made.extend(self.result());
+         for s in self.grid.iter_mut() {
+             if let Some(t) = s {
+                 t.count -= 1;
+@@ -589,6 +592,9 @@
+                     self.take_result();
+                     self.cursor.iter_mut().for_each(map::fresh); // `ItemMap.onCreated` runs on the stack the player took (`App::map_tick`)
+                 } else {
++                    if id == SlotId::Furn(2) {
++                        self.made.push(ItemStack { count: n, ..h });
++                    }
+                     self.set(inv, ext, id, rest(h, n));
+                 }
+             }
+@@ -600,6 +606,7 @@
+                         if is_result {
+                             self.take_result();
+                         } else {
++                            self.made.push(h);
+                             self.set(inv, ext, id, None);
+                         }
+                     }
+@@ -679,7 +686,11 @@
+                 }
+             }
+             _ => {
++                let n = t.count;
+                 inv.add(&mut t);
++                if id == SlotId::Furn(2) {
++                    self.made.push(ItemStack { count: n - t.count, ..t });
++                }
+             }
+         }
+         self.set(inv, ext, id, (t.count > 0).then_some(t));
+diff -urN repo_orig/mc-rs/src/world/items.rs repo/mc-rs/src/world/items.rs
+--- repo_orig/mc-rs/src/world/items.rs
++++ repo/mc-rs/src/world/items.rs
+@@ -187,12 +187,16 @@
+ /// Starts empty, like a new survival player.
+ pub struct Inventory {
+     pub slots: [Option<ItemStack>; SLOTS],
++    /// For the stats (`StatList.objectUseStats` / `objectBreakStats`), which the frame drains: ids used (a block set down, a tool worn by
++    /// a use; food is not) and ids broken (tools and armour).
++    pub used: Vec<u16>,
++    pub broke: Vec<u16>,
+ }
+ 
+ // Not derived: `Default` stops at 32-element arrays.
+ impl Default for Inventory {
+     fn default() -> Self {
+-        Self { slots: [None; SLOTS] }
++        Self { slots: [None; SLOTS], used: Vec::new(), broke: Vec::new() }
+     }
+ }
+ 
+@@ -219,7 +223,11 @@
+         let Some(s) = &mut self.slots[slot] else { return };
+         let Some(max) = craft::max_damage(s.id) else { return };
+         s.damage += n;
++        if slot < MAIN {
++            self.used.push(s.id);
++        }
+         if s.damage > max {
++            self.broke.push(s.id);
+             self.slots[slot] = None;
+         }
+     }
+@@ -251,6 +259,9 @@
+     /// Use up one item of `slot` (`--stackSize`); an emptied stack becomes `None`.
+     pub fn consume(&mut self, slot: usize) {
+         if let Some(s) = &mut self.slots[slot] {
++            if heal_amount(s.id).is_none() {
++                self.used.push(s.id);
++            }
+             s.count -= 1;
+             if s.count == 0 {
+                 self.slots[slot] = None;
+@@ -358,7 +369,7 @@
+     /// `onCollideWithPlayer`: the player's box grown by 1.0 in x and z (not y) touches this item, after the
+     /// 10 tick delay. Takes what fits; true when the whole stack is gone. `player` is the centre of its box.
+     /// `pops` gets this item's place when something went into the bag (`random.pop` in the Java; a player's arrow is one of these too).
+-    fn picked_up(&mut self, player: Vec3, inv: &mut Inventory, pops: &mut Vec<Vec3>) -> bool {
++    fn picked_up(&mut self, player: Vec3, inv: &mut Inventory, pops: &mut Vec<Vec3>, got: &mut Vec<u16>) -> bool {
+         let d = (self.pos - player).abs();
+         let reach = physics::HALF.x + 1.0 + R;
+         if self.delay > 0 || d.x >= reach || d.z >= reach || d.y >= physics::HALF.y + R {
+@@ -366,6 +377,7 @@
+         }
+         if inv.add(&mut self.stack) {
+             pops.push(self.pos);
++            got.push(self.stack.id);
+         }
+         self.stack.count == 0
+     }
+@@ -381,11 +393,13 @@
+     acc: f32,
+     /// Where items went into the bag since `lib.rs` last took them: each is a `random.pop`.
+     pub pops: Vec<Vec3>,
++    /// The ids that went into the bag with them (`onItemPickup`: the log and the leather achievements).
++    pub got: Vec<u16>,
+ }
+ 
+ impl Drops {
+     pub fn new(seed: i64) -> Self {
+-        Self { items: Vec::new(), rng: JavaRandom::new(seed), fx: JavaRandom::new(seed ^ 0xF00D), acc: 0.0, pops: Vec::new() }
++        Self { items: Vec::new(), rng: JavaRandom::new(seed), fx: JavaRandom::new(seed ^ 0xF00D), acc: 0.0, pops: Vec::new(), got: Vec::new() }
+     }
+ 
+     /// How far into the next tick we are, 0..1, for drawing between `prev` and `pos`.
+@@ -480,7 +494,7 @@
+         self.acc += dt;
+         while self.acc >= TICK {
+             self.acc -= TICK;
+-            self.items.retain_mut(|e| e.step(get) && !e.picked_up(player, inv, &mut self.pops));
++            self.items.retain_mut(|e| e.step(get) && !e.picked_up(player, inv, &mut self.pops, &mut self.got));
+         }
+     }
+ }
+diff -urN repo_orig/mc-rs/src/world/mobs.rs repo/mc-rs/src/world/mobs.rs
+--- repo_orig/mc-rs/src/world/mobs.rs
++++ repo/mc-rs/src/world/mobs.rs
+@@ -136,6 +136,9 @@
+     /// Pig: wearing a saddle, and carrying the player (`riddenByEntity`).
+     pub saddled: bool,
+     pub ridden: bool,
++    /// The player hurt it (sticky: UNVERIFIED, the Java asks who landed the killing blow) and the health that cost, not yet reported.
++    you: bool,
++    dealt: f32,
+     pub half: Vec3,
+     age: u32,
+     yaw_vel: f32,
+@@ -431,7 +434,7 @@
+         // ponytail: a process-wide counter (as `Cart::new` has), so callers of `new` need no id plumbing; it wraps after 2^32 mobs.
+         static NEXT: AtomicU32 = AtomicU32::new(0);
+         Self { id: NEXT.fetch_add(1, Ordering::Relaxed), kind, body: Player { pos, vel: Vec3::ZERO, on_ground: false }, yaw, health: hp as f32, limb: 0.0, limb_amt: 0.0, hurt: 0, death: 0, size, color, sheared: false,
+-            fuse: 0, tame: false, sitting: false, prey: None, bit: None, coat: COAT_PALE, voice: if kind == Wolf { ((x.to_bits() ^ z.to_bits().rotate_left(11)) % VOICES as u32) as u8 } else { 0 }, saddled: false, ridden: false, half, age: 0, yaw_vel: 0.0, look: None, goal: None, fspeed: 0.0, jumping: false, wet: false, damp: false, blocked: false, life: 0,
++            fuse: 0, tame: false, sitting: false, prey: None, bit: None, coat: COAT_PALE, voice: if kind == Wolf { ((x.to_bits() ^ z.to_bits().rotate_left(11)) % VOICES as u32) as u8 } else { 0 }, saddled: false, ridden: false, you: false, dealt: 0.0, half, age: 0, yaw_vel: 0.0, look: None, goal: None, fspeed: 0.0, jumping: false, wet: false, damp: false, blocked: false, life: 0,
+             last: 0.0, target: false, shot: false, lit: false, anger: 0, attack_time: 0, hop: 0, egg: rng.next_int_bound(6000) + 6000, fire: 0,
+             free: 0, swim: Vec3::ZERO, path: Vec::new(), path_i: 0, smart: false, wander: false, panic: 0, scare: Vec3::ZERO, mate: None, graze: 0, rest: 0, gait: 1.0, head: 0.0, munch: 0.0, body_yaw: yaw, head_pitch: 0.0, look_pitch: 0.0, talk: 0, cry: None, airborne: false, enraged: false, growl: 0, charge: 0, prev_charge: 0, anim: 0.0, wp: pos, course: 0 }
+     }
+@@ -1065,6 +1068,13 @@
+         self.damage_in(dmg, from, rng, 20);
+     }
+ 
++    /// A blow of the player's (`damageDealtStat`, `onKillEntity`): `f` hurts the mob; what it cost is kept for `Mobs::tally`.
++    fn by_you(&mut self, f: impl FnOnce(&mut Mob)) {
++        let h = self.health;
++        f(self);
++        (self.you, self.dealt) = (true, self.dealt + (h - self.health).max(0.0));
++    }
++
+     /// `damage` with the damage window it starts: `life` 20 is b1.7.3's 10 ticks; a Cortes weapon starts at `10 + IFRAME_TICKS` (**NOT b1.7.3**).
+     pub fn damage_in(&mut self, dmg: f32, from: Vec3, rng: &mut JavaRandom, life: u8) {
+         if self.kind == Wolf {
+@@ -1332,6 +1342,8 @@
+ 
+ pub struct Mobs {
+     pub list: Vec<Mob>,
++    /// The kinds of mob the player killed since `tally` last ran.
++    slain: Vec<Kind>,
+     pub arrows: Vec<Arrow>,
+     pub fireballs: Vec<Fireball>,
+     /// Boxes (min, max) of what else a fireball can hit (`canBeCollidedWith`: boats, carts, paintings, a lit TNT, a falling sand / gravel block) and what it is; `App` refills it each frame.
+@@ -1360,7 +1372,7 @@
+ 
+ impl Mobs {
+     pub fn new(seed: i64) -> Self {
+-        Self { list: Vec::new(), arrows: Vec::new(), fireballs: Vec::new(), targets: Vec::new(), rng: JavaRandom::new(seed ^ 0x5049_47), snd: JavaRandom::new(seed ^ 0x534E_44), seed, acc: 0.0, clock: 0, burst: 200, no_spawn: false, nether: false, difficulty: 2, smart: true }
++        Self { list: Vec::new(), slain: Vec::new(), arrows: Vec::new(), fireballs: Vec::new(), targets: Vec::new(), rng: JavaRandom::new(seed ^ 0x5049_47), snd: JavaRandom::new(seed ^ 0x534E_44), seed, acc: 0.0, clock: 0, burst: 200, no_spawn: false, nether: false, difficulty: 2, smart: true }
+     }
+ 
+     /// NOT b1.7.3 (`animalAi`, proposal 5, predators and grazers): a wild, calm, standing wolf in its hunting third of the time picks the
+@@ -1624,7 +1636,7 @@
+                 })).flatten();
+                 hit.map_or(true, |i| {
+                     // A snowball or egg does 0 damage but still knocks back (`attackEntityFrom(thrower, 0)`).
+-                    list[i].damage(if a.kind == 0 { crate::world::gear::ARROW_DAMAGE as f32 } else { 0.0 }, a.pos - a.vel, rng);
++                    list[i].by_you(|m| m.damage(if a.kind == 0 { crate::world::gear::ARROW_DAMAGE as f32 } else { 0.0 }, a.pos - a.vel, rng));
+                     if a.kind == crate::world::gear::EGG {
+                         ev.push(Ev::Hatch(a.pos));
+                     }
+@@ -1683,6 +1695,9 @@
+             if self.list[i].death == 0 {
+                 // `EntityLiving.onDeath`: the loot drops at once; the corpse stays 20 more ticks (`deathTime`).
+                 self.list[i].death = 1;
++                if self.list[i].you {
++                    self.slain.push(self.list[i].kind);
++                }
+                 for s in self.list[i].loot(&mut self.rng) {
+                     drops.spawn_stack(s, cell(p));
+                 }
+@@ -1741,14 +1756,22 @@
+     }
+ 
+     pub fn hit(&mut self, i: usize, dmg: f32, from: Vec3) {
+-        self.list[i].damage(dmg, from, &mut self.rng);
++        let rng = &mut self.rng;
++        self.list[i].by_you(|m| m.damage(dmg, from, rng));
++    }
++
++    /// What the player did since the last call: the damage dealt (`damageDealtStat`) and the kinds killed (`mobKillsStat`, `killEnemy`).
++    pub fn tally(&mut self) -> (u32, Vec<Kind>) {
++        let d: f32 = self.list.iter_mut().map(|m| std::mem::take(&mut m.dealt)).sum();
++        (d.round() as u32, std::mem::take(&mut self.slain))
+     }
+ 
+     /// A Cortes weapon's blow (**NOT b1.7.3**, UNVERIFIED: not compiled): the same as `hit`, but the damage window is
+     /// `IFRAME_TICKS` (3) long instead of 10, so a dagger swinging every 6 ticks is not top-up-only on every second hit.
+     pub fn strike(&mut self, i: usize, dmg: f32, from: Vec3) {
+         let life = 10 + crate::world::combat::profile::IFRAME_TICKS as u8;
+-        self.list[i].damage_in(dmg, from, &mut self.rng, life);
++        let rng = &mut self.rng;
++        self.list[i].by_you(|m| m.damage_in(dmg, from, rng, life));
+     }
+ 
+     /// The nearest living mob inside a weapon's cone (`ConeTargets.nearestInCone`), none farther than `wall` (the block the
+@@ -1804,7 +1827,8 @@
+     /// none left behind (`ArcabuzShot`'s `invulnerableTime` 0 then 10: the target can be hit again at once).
+     pub fn shot(&mut self, i: usize, dmg: f32, from: Vec3) {
+         self.list[i].life = 0;
+-        self.list[i].damage_in(dmg, from, &mut self.rng, 10);
++        let rng = &mut self.rng;
++        self.list[i].by_you(|m| m.damage_in(dmg, from, rng, 10));
+     }
+ 
+     /// C8 (`igniteForSeconds`, NOT b1.7.3, UNVERIFIED): the arcabuz's shot sets mob `i` alight for `ticks`; a longer fire is never shortened.
+diff -urN repo_orig/mc-rs/src/world/mod.rs repo/mc-rs/src/world/mod.rs
+--- repo_orig/mc-rs/src/world/mod.rs
++++ repo/mc-rs/src/world/mod.rs
+@@ -28,6 +28,7 @@
+ pub mod minecart;
+ pub mod portal;
+ pub mod sprint;
++pub mod stats;
+ pub mod stamina;
+ pub mod biomelife;
+ pub mod pack;
+diff -urN repo_orig/mc-rs/src/world/stats.rs repo/mc-rs/src/world/stats.rs
+--- repo_orig/mc-rs/src/world/stats.rs	1970-01-01 00:00:00.000000000 +0000
++++ repo/mc-rs/src/world/stats.rs
+@@ -0,0 +1,272 @@
++//! Achievements and Statistics: `AchievementList`, `Achievement`, `StatList`, `StatBase` formats and the counting of `StatFileWriter`
++//! (`readStat` / `hasAchievementUnlocked` / `func_27181_b`), with the original stat ids (`statId`) as the keys. UNVERIFIED: not compiled, not run.
++//! Not b1.7.3: the file (`<root>/stats`, own format; the Java's is a checksummed JSON that `StatsSyncher` merges), and the text of the
++//! inventory hint (a touch screen has no 'E' key). One counter map serves every stat, so there is no `StatList` object graph.
++
++use std::collections::HashMap;
++
++pub const START_GAME: u32 = 1000;
++pub const CREATE_WORLD: u32 = 1001;
++pub const LOAD_WORLD: u32 = 1002;
++pub const LEAVE_GAME: u32 = 1004;
++pub const MINUTES: u32 = 1100;
++/// `distanceWalkedStat` .. `distanceByPigStat` are 2000..=2008 (see `Dist`), `jumpStat` .. `fishCaughtStat` follow.
++pub const JUMP: u32 = 2010;
++pub const DROP: u32 = 2011;
++pub const DAMAGE_DEALT: u32 = 2020;
++pub const DAMAGE_TAKEN: u32 = 2021;
++pub const DEATHS: u32 = 2022;
++pub const MOB_KILLS: u32 = 2023;
++pub const FISH: u32 = 2025;
++const ACH: u32 = 5_242_880;
++const MINE: u32 = 16_777_216;
++const CRAFT: u32 = 16_842_752;
++const USE: u32 = 16_908_288;
++const BREAK: u32 = 16_973_824;
++
++/// `Dist` stat ids, offsets from 2000.
++#[derive(Clone, Copy, PartialEq, Eq)]
++pub enum Dist { Walk, Swim, Fall, Climb, Fly, Dive, Cart, Boat, Pig }
++
++#[derive(Clone, Copy, PartialEq, Eq)]
++pub enum Fmt { Plain, Time, Dist }
++
++/// `field_25187_b`: the General list, in registration order (id, `stat.*` text, format).
++pub const GENERAL: [(u32, &str, Fmt); 23] = [
++    (1000, "Times played", Fmt::Plain), (1001, "Worlds played", Fmt::Plain), (1002, "Saves loaded", Fmt::Plain),
++    (1003, "Multiplayer joins", Fmt::Plain), (1004, "Games quit", Fmt::Plain), (1100, "Minutes Played", Fmt::Time),
++    (2000, "Distance Walked", Fmt::Dist), (2001, "Distance Swum", Fmt::Dist), (2002, "Distance Fallen", Fmt::Dist),
++    (2003, "Distance Climbed", Fmt::Dist), (2004, "Distance Flown", Fmt::Dist), (2005, "Distance Dove", Fmt::Dist),
++    (2006, "Distance by Minecart", Fmt::Dist), (2007, "Distance by Boat", Fmt::Dist), (2008, "Distance by Pig", Fmt::Dist),
++    (2010, "Jumps", Fmt::Plain), (2011, "Items Dropped", Fmt::Plain), (2020, "Damage Dealt", Fmt::Plain),
++    (2021, "Damage Taken", Fmt::Plain), (2022, "Number of Deaths", Fmt::Plain), (2023, "Mob Kills", Fmt::Plain),
++    (2024, "Player Kills", Fmt::Plain), (2025, "Fish Caught", Fmt::Plain)
++];
++
++pub struct Ach {
++    pub name: &'static str,
++    pub desc: &'static str,
++    pub col: i32,
++    pub row: i32,
++    /// The item (or block) id of `theItemStack`.
++    pub icon: u16,
++    pub parent: Option<usize>,
++    pub special: bool,
++}
++
++pub const OPEN_INVENTORY: usize = 0;
++pub const MINE_WOOD: usize = 1;
++pub const BUILD_WORKBENCH: usize = 2;
++pub const BUILD_PICKAXE: usize = 3;
++pub const BUILD_FURNACE: usize = 4;
++pub const ACQUIRE_IRON: usize = 5;
++pub const BUILD_HOE: usize = 6;
++pub const MAKE_BREAD: usize = 7;
++pub const BAKE_CAKE: usize = 8;
++pub const BUILD_BETTER_PICKAXE: usize = 9;
++pub const COOK_FISH: usize = 10;
++pub const ON_A_RAIL: usize = 11;
++pub const BUILD_SWORD: usize = 12;
++pub const KILL_ENEMY: usize = 13;
++pub const KILL_COW: usize = 14;
++pub const FLY_PIG: usize = 15;
++
++const fn a(name: &'static str, desc: &'static str, col: i32, row: i32, icon: u16, parent: Option<usize>, special: bool) -> Ach {
++    Ach { name, desc, col, row, icon, parent, special }
++}
++
++/// `AchievementList`, same order and places; the texts are `lang/stats_US.lang`'s.
++pub const ACHS: [Ach; 16] = [
++    a("Taking Inventory", "Tap the inventory button.", 0, 0, 340, None, false), // UNVERIFIED text: the Java says to press 'E'
++    a("Getting Wood", "Attack a tree until a block of wood pops out", 2, 1, 17, Some(0), false),
++    a("Benchmarking", "Craft a workbench with four blocks of planks", 4, -1, 58, Some(1), false),
++    a("Time to Mine!", "Use planks and sticks to make a pickaxe", 4, 2, 270, Some(2), false),
++    a("Hot Topic", "Construct a furnace out of eight stone blocks", 3, 4, 62, Some(3), false),
++    a("Acquire Hardware", "Smelt an iron ingot", 1, 4, 265, Some(4), false),
++    a("Time to Farm!", "Use planks and sticks to make a hoe", 2, -3, 290, Some(2), false),
++    a("Bake Bread", "Turn wheat into bread", -1, -3, 297, Some(6), false),
++    a("The Lie", "Wheat, sugar, milk and eggs!", 0, -5, 354, Some(6), false),
++    a("Getting an Upgrade", "Construct a better pickaxe", 6, 2, 274, Some(3), false),
++    a("Delicious Fish", "Catch and cook fish!", 2, 6, 350, Some(4), false),
++    a("On A Rail", "Travel by minecart at least 1 km from where you started", 2, 3, 66, Some(5), true),
++    a("Time to Strike!", "Use planks and sticks to make a sword", 6, -1, 268, Some(2), false),
++    a("Monster Hunter", "Attack and destroy a monster", 8, -1, 352, Some(12), false),
++    a("Cow Tipper", "Harvest some leather", 7, -3, 334, Some(12), false),
++    a("When Pigs Fly", "Fly a pig off a cliff", 8, -4, 329, Some(14), true),
++];
++
++/// `Block.disableStats` (`getEnableStats`): these have no "mined" stat.
++pub fn mineable(id: u16) -> bool {
++    !matches!(id, 7..=11 | 18 | 26 | 51 | 52 | 55 | 59 | 63 | 64 | 68 | 71 | 83 | 92..=94 | 96)
++}
++
++/// `StatList.replaceAllSimilarBlocks`: the block whose counter these share.
++pub fn canon(id: u16) -> u16 {
++    match id {
++        91 => 86,
++        62 => 61,
++        74 => 73,
++        76 => 75,
++        40 => 39,
++        43 => 44,
++        2 | 60 => 3,
++        _ => id,
++    }
++}
++
++/// Which of the three counters of an item (or block) id: crafted, used, and mined (blocks) or depleted (items).
++#[derive(Clone, Copy)]
++pub enum Kind { Mined, Crafted, Used, Depleted }
++
++#[derive(Default, PartialEq, Debug)]
++pub struct Stats {
++    map: HashMap<u32, u32>,
++    /// Centimetres short of a whole one, per `Dist` (the Java adds whole `Math.round` cm each tick).
++    rem: [f32; 9],
++}
++
++impl Stats {
++    pub fn get(&self, stat: u32) -> u32 {
++        self.map.get(&stat).copied().unwrap_or(0)
++    }
++
++    pub fn has(&self, a: usize) -> bool {
++        self.get(ACH + a as u32) > 0
++    }
++
++    /// `func_27181_b`: the parent is taken (or there is none), so this one can be earned and is drawn lit.
++    pub fn open(&self, a: usize) -> bool {
++        ACHS[a].parent.map_or(true, |p| self.has(p))
++    }
++
++    /// `EntityPlayerSP.addStat` for a plain stat.
++    pub fn add(&mut self, stat: u32, n: u32) {
++        if n > 0 {
++            let v = self.map.entry(stat).or_insert(0);
++            *v = v.saturating_add(n);
++        }
++    }
++
++    /// `addStat(achievement, 1)`: counted only once the parent is taken. True when it is newly taken (the toast).
++    pub fn earn(&mut self, a: usize) -> bool {
++        let new = self.open(a) && !self.has(a);
++        if self.open(a) {
++            self.add(ACH + a as u32, 1);
++        }
++        new
++    }
++
++    /// Distance in centimetres, fractions carried (`addMovementStat` rounds each tick; this rounds nothing away).
++    pub fn walk(&mut self, d: Dist, cm: f32) {
++        let r = &mut self.rem[d as usize];
++        *r += cm;
++        let n = r.floor();
++        *r -= n;
++        self.add(2000 + d as u32, n as u32);
++    }
++
++    fn key(kind: Kind, id: u16) -> u32 {
++        let id = if id < 256 { canon(id) } else { id };
++        id as u32 + match kind { Kind::Mined => MINE, Kind::Crafted => CRAFT, Kind::Used => USE, Kind::Depleted => BREAK }
++    }
++
++    pub fn count(&self, kind: Kind, id: u16) -> u32 {
++        self.get(Self::key(kind, id))
++    }
++
++    pub fn bump(&mut self, kind: Kind, id: u16, n: u32) {
++        if !matches!(kind, Kind::Mined) || mineable(id) {
++            self.add(Self::key(kind, id), n);
++        }
++    }
++
++    /// The ids of the Blocks (`blocks`) or Items tab with any count, by id (`SorterStats*` break ties that way).
++    pub fn listed(&self, blocks: bool) -> Vec<u16> {
++        let ks = if blocks { [Kind::Mined, Kind::Crafted, Kind::Used] } else { [Kind::Depleted, Kind::Crafted, Kind::Used] };
++        let mut v: Vec<u16> = self
++            .map
++            .iter()
++            .filter(|e| *e.1 > 0 && (MINE..BREAK + 65536).contains(e.0))
++            .map(|e| ((*e.0 - MINE) % 65536) as u16)
++            .filter(|&id| (id < 256) == blocks && canon(id) == id && ks.iter().any(|&k| self.count(k, id) > 0))
++            .collect();
++        v.sort_unstable();
++        v.dedup();
++        v
++    }
++
++    /// `[magic, count, (id, value)...]`, little endian.
++    pub fn encode(&self) -> Vec<u8> {
++        let mut w = b"MCS1".to_vec();
++        w.extend((self.map.len() as u32).to_le_bytes());
++        for (k, v) in &self.map {
++            w.extend(k.to_le_bytes());
++            w.extend(v.to_le_bytes());
++        }
++        w
++    }
++
++    pub fn decode(b: &[u8]) -> Option<Stats> {
++        let b = b.strip_prefix(b"MCS1")?;
++        let n = u32::from_le_bytes(b.get(..4)?.try_into().ok()?) as usize;
++        let body = b.get(4..)?;
++        if body.len() != n.checked_mul(8)? {
++            return None;
++        }
++        let map = body.chunks_exact(8).map(|c| (u32::from_le_bytes(c[..4].try_into().unwrap()), u32::from_le_bytes(c[4..].try_into().unwrap()))).collect();
++        Some(Stats { map, rem: [0.0; 9] })
++    }
++}
++
++/// `StatBase.func_27084_a` through the stat's `IStatType` (`StatTypeSimple` / `Time` / `Distance`).
++pub fn fmt(f: Fmt, v: u32) -> String {
++    let two = |x: f64, u: &str| format!("{x:.2} {u}");
++    match f {
++        Fmt::Plain => {
++            let s = v.to_string();
++            let mut out = String::new();
++            for (i, c) in s.chars().enumerate() {
++                if i > 0 && (s.len() - i) % 3 == 0 {
++                    out.push(',');
++                }
++                out.push(c);
++            }
++            out
++        }
++        Fmt::Time => {
++            let (s, m) = (v as f64 / 20.0, v as f64 / 1200.0);
++            let (h, d) = (m / 60.0, m / 1440.0);
++            if d / 365.0 > 0.5 { two(d / 365.0, "y") } else if d > 0.5 { two(d, "d") } else if h > 0.5 { two(h, "h") } else if m > 0.5 { two(m, "m") } else { format!("{s:?} s") }
++        }
++        Fmt::Dist => {
++            let (m, km) = (v as f64 / 100.0, v as f64 / 100_000.0);
++            if km > 0.5 { two(km, "km") } else if m > 0.5 { two(m, "m") } else { format!("{v} cm") }
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    /// Gating, merging, formats and the file round-trip, as the Java's rules give them.
++    #[test]
++    fn stats_like_java() {
++        let mut s = Stats::default();
++        assert!(!s.earn(BUILD_WORKBENCH), "no parent taken: not counted");
++        assert!(s.earn(OPEN_INVENTORY) && !s.earn(OPEN_INVENTORY));
++        assert!(s.earn(MINE_WOOD) && s.earn(BUILD_WORKBENCH));
++        assert!(s.open(BUILD_PICKAXE) && !s.has(BUILD_PICKAXE));
++        s.bump(Kind::Mined, 2, 3); // grass counts as dirt
++        s.bump(Kind::Mined, 18, 1); // leaves have no stat
++        s.bump(Kind::Crafted, 280, 4);
++        assert_eq!((s.count(Kind::Mined, 3), s.listed(true), s.listed(false)), (3, vec![3], vec![280]));
++        s.walk(Dist::Walk, 0.6);
++        s.walk(Dist::Walk, 0.6);
++        assert_eq!(s.get(2000), 1);
++        assert_eq!(Stats::decode(&s.encode()), Some(Stats { rem: [0.0; 9], map: s.map.clone() }));
++        assert!(Stats::decode(&s.encode()[..9]).is_none());
++        assert_eq!((fmt(Fmt::Plain, 1234567).as_str(), fmt(Fmt::Dist, 250).as_str(), fmt(Fmt::Dist, 150_000).as_str()), ("1,234,567", "2.50 m", "1.50 km"));
++        assert_eq!((fmt(Fmt::Time, 40).as_str(), fmt(Fmt::Time, 1800).as_str()), ("2.0 s", "1.50 m"));
++    }
++}
+diff -urN repo_orig/mc-rs/src/world/vitals.rs repo/mc-rs/src/world/vitals.rs
+--- repo_orig/mc-rs/src/world/vitals.rs
++++ repo/mc-rs/src/world/vitals.rs
+@@ -35,6 +35,8 @@
+     /// Set by a fresh hit (`random.hurt`, also the death cry) and by a landing that hurt (the block's step sound); the frame takes them.
+     pub cry: bool,
+     pub thud: bool,
++    /// Blocks fallen by landings of 2 or more (`EntityPlayer.fall` -> `distanceFallenStat`); the frame takes it.
++    pub fell: f32,
+     /// Set when water puts out a burning player (`random.fizz`); the frame takes it.
+     pub fizz: bool,
+     pub air: i32,
+@@ -62,7 +64,7 @@
+ 
+ impl Default for Vitals {
+     fn default() -> Self {
+-        Self { health: MAX_HEALTH, cry: false, thud: false, fizz: false, air: MAX_AIR, fire: 0, hearts_life: 0, last_damage: 0, fall: 0.0, acc: 0.0, armor: 0, wear: 0, rem: 0, drowned: false, fed: 0, stamina: Stamina::default(), mend: Mend::default(), guard: Guard::default() }
++        Self { health: MAX_HEALTH, cry: false, thud: false, fell: 0.0, fizz: false, air: MAX_AIR, fire: 0, hearts_life: 0, last_damage: 0, fall: 0.0, acc: 0.0, armor: 0, wear: 0, rem: 0, drowned: false, fed: 0, stamina: Stamina::default(), mend: Mend::default(), guard: Guard::default() }
+     }
+ }
+ 
+@@ -127,6 +129,9 @@
+             self.fall = 0.0;
+         }
+         if e.on_ground {
++            if self.fall >= 2.0 {
++                self.fell += self.fall;
++            }
+             let dmg = (self.fall - 3.0).ceil() as i32;
+             self.fall = 0.0;
+             if dmg > 0 {
+diff -urN repo_orig/roadmap/gameplay.md repo/roadmap/gameplay.md
+--- repo_orig/roadmap/gameplay.md
++++ repo/roadmap/gameplay.md
+@@ -4,6 +4,7 @@
+ 
+ ## Changelog
+ 
++- 2026-11-01 (41): Achievements and Statistics (`missing.md` 5). Written WITHOUT a Rust toolchain: not compiled, not run, not seen on a device; everything UNVERIFIED (+1 test `stats::tests::stats_like_java`). `world/stats.rs`: `AchievementList` (16, same places, `lang/stats_US.lang` texts), the general stat list, the original stat ids as the keys of one counter map, `StatFileWriter`'s rule (an achievement counts only once its parent is taken), `canon` (`replaceAllSimilarBlocks`), `mineable` (`disableStats`), the time / distance / plain formats, a file codec. `stats_ui.rs`: the Achievements screen (the terrain-pattern map, links, frames; drag to pan, TAP an achievement for its tooltip), the Statistics screen (General / Blocks / Items tabs, drag to scroll, tap a column header to sort, item names beside the icons) and the `GuiAchievement` toast (also the inventory hint until `openInventory` is taken). `options.rs`: the two buttons are enabled (`PauseEv::Stats`). Hooks in `lib.rs`: minutes, jump, drop, fish, death, damage taken (`vitals.wear`), distances (`move_stats`), mined blocks, pickups (`Drops::got`), crafted / smelted (`Screen::made`), used / depleted (`Inventory::used` / `broke`), damage dealt and kills (`Mob::by_you`, `Mobs::tally`), world create / load, quit; `Vitals::fell` for the fall distance. File: `<root>/stats`, shared by all worlds like the Java's per-user file, saved with the world. Differences: the inventory hint says "Tap the inventory button." (the Java: press 'E'); frames and toast are plain quads (`bg.png` is not in the HUD sheet); a world with a `level` file counts as loaded, else created; a kill is any death of a mob the player has hurt; food eaten is not a use; `Player Kills` and `Multiplayer joins` stay 0; the pig and minecart achievements read the frame's displacement.
+ - 2026-11-01 (40): Four gaps of `missing.md`: the sleeping pose, and what a blast does to more entities. Written WITHOUT a Rust toolchain: not compiled, not run (new tests: `a_sleeper_lies_with_the_head_at_the_pillow`, `a_blast_wears_an_item_down_and_throws_it`, `a_blast_pushes_a_falling_block`; the fireball test now also runs with a falling block). Sleeping, from `EntityRenderer.orientCamera` and `RenderPlayer`: asleep the camera yaw is `meta & 3` x 90 degrees (the Java's yaw and pitch turns cancel; it is a level view from the pillow toward the foot of the bed). (35) had used `getBedOrientationInDegrees`, which is the BODY's table in `RenderPlayer` and mirrors the other, so the view was turned wrong for most beds: FIXED here (UNVERIFIED on a device). The yaw and pitch from before lying down are put back on waking (the Java never changes `rotationYaw`). The eye is 0.12 over `posY` (the bed's surface + 15/16; `+0.42` less the view's 0.3 translation). Asleep wins over the third-person view and the model IS drawn (`RenderGlobal`), lying: `render::player::lying_root` = moved 1.8 off the pillow (`field_22063_x / z`), turned `getBedOrientationInDegrees` about Y, 90 about Z and 270 about Y, the feet at `posY - 0.2` (checked in a test: head at the pillow, level, for all 4 directions). ponytail: the head looks straight along the body (the Java keeps the old yaw and pitch against it). Blasts (`Explosion.doExplosionA`, run over what exists before `doExplosionB` makes its drops and its chained TNT): a dropped item takes the damage off its 5 health (`EntityItem.attackEntityFrom`, so most are destroyed near a TNT) and is thrown; a lit TNT, a falling sand / gravel block and an arrow or thrown snowball / egg in flight are thrown (`Falling::shove`, `Arrow::shove`; sand and gravel now also drift in x / z and stop rising under a ceiling, which a plain drop never does). A painting whose middle is within the doubled size of the blast comes off the wall and drops, whatever the damage (`EntityPainting.attackEntityFrom`). Not done: fireballs are not pushed. Fireball: `Strike::Tnt` became `Strike::Falling`: a falling sand / gravel block stops a fireball like a lit TNT (both are `canBeCollidedWith`; `Entity.attackEntityFrom` only marks it hit).
+ - 2026-11-01 (39): The two sounds `missing.md` listed. Written WITHOUT a Rust toolchain: not compiled, not run (no new test: both are in `App`; the audio count test `every_name_the_java_plays_exists_and_decodes` is updated). `random.drr`: its call sites are `EntityArrow.onUpdate`, twice: the arrow sticks in a block, and it hurts an entity, both at volume 1.0, pitch `1.2 / (r * 0.2 + 0.9)`. (27) had played `random.bowhit` there, a sound b1.7.3 does not have; `Ev::Bow(_, true)` now plays the index's own `random.drr` (already in the table), the formula is unchanged, and `random.bowhit` is gone: its table entry, `assets/sound/extra/random/bowhit1..4.ogg`, the audio test's key and counts (80 - 6 + 7 * 6 + 1 keys, 194 - 12 + 7 * 12 + 1 files). `random.bow` stays. Water poured in the Nether (`ItemBucket.onItemRightClick`): the 8 `largesmoke` puffs are drawn (`fx.puff`, at the poured cell plus a random offset on each axis, no motion); the fizz now plays where the Java plays it, at the ray's origin (the eye) plus 0.5 on each axis, not at the cell. ponytail: `Fx::puff` is the furnace cart's `largesmoke` (one sprite and size for every smoke); a refused arrow hit still sounds, as before.
+ - 2026-11-01 (38): The two bed gaps left open by (35). Written WITHOUT a Rust toolchain: not compiled, not run (+1 test `chunks::tests::a_chunk_made_while_a_worker_generates_it_is_not_replaced`). Respawn at a far bed: `respawn_pos` now `preload`s the bed chunks first, so dying far from the bed, or in the Nether, respawns at the bed instead of the world spawn, and `tile.bed.notValid` no longer needs a loaded-chunk guard. That needed a fix in `ChunkManager::stream`: a worker's generate result was `insert`ed over a chunk that already existed, which would have swapped a preloaded, populated chunk for raw terrain; a result for a chunk that is already there is now dropped. Nether bed: `use_bed` blows it up where `canRespawnHere` is false (`BlockBed.blockActivated`): the tapped half is removed, then the cell one further along `headBlockToFootBlockMap` if it is a bed too, and a power 5 fiery `explode` goes off at the middle of THAT cell. No sleep, any hour. ponytail: `preload` runs on the render thread (once per death); both bed cells are set to air directly, so no bed item is dropped (the blast would take it anyway).
+diff -urN repo_orig/roadmap/missing.md repo/roadmap/missing.md
+--- repo_orig/roadmap/missing.md
++++ repo/roadmap/missing.md
+@@ -11,7 +11,7 @@
+ | 3 | ~~Map item~~ | `ItemMap`, `MapData`, `MapItemRenderer`, `MapStorage`, recipe 358 = paper ring round a compass | **done 2026-10-30 (gameplay entry 36)**, not compiled; loaded chunks only, flat HUD sheet in hand | done |
+ | 8 | Bone meal on blocks | `ItemDye.onItemUse` (damage 15): sapling -> `BlockSapling.growTree`, crops -> `BlockCrops.fertilize` (metadata 7), grass -> spreads tall grass and flowers (`ItemDye` lines 22 on) | only the recipe (bone -> bone meal) and dyeing sheep (`gear::use_on_mob`); `lib.rs` `use_held` and the block-use path have no branch for it. `ChunkManager::grow_tree` (used by the sapling tick) exists to call | small (found 2026-10-30; not in any earlier audit) |
+ | 4 | Chat | `GuiChat`, `ChatLine` | nothing (a single-player port has no sender except commands; the overlay is the deferred rest of M14) | medium |
+-| 5 | Achievements and Statistics | `AchievementList`, `GuiAchievements`, `GuiAchievement` (toast), `StatList`, `GuiStats` | both buttons drawn greyed out (`menu.rs`, `options.rs`); no stat system | large (counters everywhere, saved, two screens) |
++| 5 | ~~Achievements and Statistics~~ | `AchievementList`, `GuiAchievements`, `GuiAchievement` (toast), `StatList`, `GuiStats` | **done 2026-11-01 (gameplay entry 41)**, not compiled: `world/stats.rs`, `stats_ui.rs`, touch screens | done |
+ | 6 | Mods and Texture Packs | `TexturePackList`, `GuiTexturePacks` | button drawn greyed out | large, and arguably off-goal |
+ | 7 | Multiplayer (M10) | `Packet*` (59 classes), `GuiMultiplayer`, `EntityOtherPlayerMP` | nothing, out of scope on purpose (README) | out of scope |
+ 

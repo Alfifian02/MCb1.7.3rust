@@ -35,6 +35,8 @@ pub struct Vitals {
     /// Set by a fresh hit (`random.hurt`, also the death cry) and by a landing that hurt (the block's step sound); the frame takes them.
     pub cry: bool,
     pub thud: bool,
+    /// Blocks fallen by landings of 2 or more (`EntityPlayer.fall` -> `distanceFallenStat`); the frame takes it.
+    pub fell: f32,
     /// Set when water puts out a burning player (`random.fizz`); the frame takes it.
     pub fizz: bool,
     pub air: i32,
@@ -62,7 +64,7 @@ pub struct Vitals {
 
 impl Default for Vitals {
     fn default() -> Self {
-        Self { health: MAX_HEALTH, cry: false, thud: false, fizz: false, air: MAX_AIR, fire: 0, hearts_life: 0, last_damage: 0, fall: 0.0, acc: 0.0, armor: 0, wear: 0, rem: 0, drowned: false, fed: 0, stamina: Stamina::default(), mend: Mend::default(), guard: Guard::default() }
+        Self { health: MAX_HEALTH, cry: false, thud: false, fell: 0.0, fizz: false, air: MAX_AIR, fire: 0, hearts_life: 0, last_damage: 0, fall: 0.0, acc: 0.0, armor: 0, wear: 0, rem: 0, drowned: false, fed: 0, stamina: Stamina::default(), mend: Mend::default(), guard: Guard::default() }
     }
 }
 
@@ -127,6 +129,9 @@ impl Vitals {
             self.fall = 0.0;
         }
         if e.on_ground {
+            if self.fall >= 2.0 {
+                self.fell += self.fall;
+            }
             let dmg = (self.fall - 3.0).ceil() as i32;
             self.fall = 0.0;
             if dmg > 0 {

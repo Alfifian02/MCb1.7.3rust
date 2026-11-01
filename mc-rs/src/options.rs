@@ -12,7 +12,7 @@
 //! UNVERIFIED: the default render distance is Short (4 chunks, what mc-rs always drew), not Far as in `GameSettings`.
 //! Stored and saved but with no effect yet: Music and Sound (M9: now wired, see `audio/`), 3D Anaglyph, Advanced OpenGL, Graphics (Fancy/Fast),
 //! Smooth Lighting and the key bindings (a touch screen has no keys; `OptionsUi::key` takes one when a keyboard event exists).
-//! Not done: Achievements and Statistics (drawn greyed out, there is no stat system).
+//! Achievements and Statistics open `stats_ui` (`PauseEv::Stats`).
 
 use crate::input::gamepad::{Btn, PadCfg, ACTS};
 use crate::input::touch_ui::{ScreenEv, HOLD_SECS, SWING_SECS};
@@ -799,7 +799,7 @@ fn sun(v: &mut Vec<HudVertex>, s: f32, r: [f32; 4]) {
 }
 
 /// `drawDefaultBackground`: the dimmed world when one is behind, else the dirt.
-fn background(v: &mut Vec<HudVertex>, s: f32, gw: f32, gh: f32, world: bool) {
+pub(crate) fn background(v: &mut Vec<HudVertex>, s: f32, gw: f32, gh: f32, world: bool) {
     if world {
         grad(v, s, [0.0, 0.0, gw, gh], [16.0 / 255.0, 16.0 / 255.0, 16.0 / 255.0, 0xC0 as f32 / 255.0], [16.0 / 255.0, 16.0 / 255.0, 16.0 / 255.0, 0xD0 as f32 / 255.0]);
     } else {
@@ -1274,6 +1274,8 @@ pub enum PauseEv {
     Fly,
     LodDebug,
     Info,
+    /// Open `stats_ui` (true: Achievements, false: Statistics).
+    Stats(bool),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1327,8 +1329,8 @@ impl Pause {
                 (PAct::Quit, [hw - 100.0, q + 120.0 - 16.0, 200.0, 20.0], "Save and quit to title".to_string(), true),
                 (PAct::Resume, [hw - 100.0, q + 24.0 - 16.0, 200.0, 20.0], "Back to game".to_string(), true),
                 (PAct::Options, [hw - 100.0, q + 96.0 - 16.0, 200.0, 20.0], "Options...".to_string(), true),
-                (PAct::Achievements, [hw - 100.0, q + 48.0 - 16.0, 98.0, 20.0], "Achievements".to_string(), false),
-                (PAct::Stats, [hw + 2.0, q + 48.0 - 16.0, 98.0, 20.0], "Statistics".to_string(), false),
+                (PAct::Achievements, [hw - 100.0, q + 48.0 - 16.0, 98.0, 20.0], "Achievements".to_string(), true),
+                (PAct::Stats, [hw + 2.0, q + 48.0 - 16.0, 98.0, 20.0], "Statistics".to_string(), true),
                 // b1.7.3 leaves the row between Statistics and Options empty.
                 (PAct::Tools, [hw - 100.0, q + 72.0 - 16.0, 200.0, 20.0], "Tools...".to_string(), true),
             ]
@@ -1403,7 +1405,7 @@ impl Pause {
                         self.tools = act == PAct::Tools;
                         None
                     }
-                    PAct::Achievements | PAct::Stats => None,
+                    PAct::Achievements | PAct::Stats => Some(PauseEv::Stats(act == PAct::Achievements)),
                 };
             }
         }

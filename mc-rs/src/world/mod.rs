@@ -28,6 +28,7 @@ pub mod lod;
 pub mod minecart;
 pub mod portal;
 pub mod sprint;
+pub mod stats;
 pub mod stamina;
 pub mod biomelife;
 pub mod pack;

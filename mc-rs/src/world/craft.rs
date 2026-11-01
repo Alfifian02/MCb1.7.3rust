@@ -473,6 +473,8 @@ pub struct Screen {
     pub chests: Vec<(i32, i32, i32)>,
     pub grid: [Option<ItemStack>; 9],
     pub cursor: Option<ItemStack>,
+    /// What the player took out of an output slot (`SlotCrafting` / `SlotFurnace.onPickupFromSlot`), for the stats; the frame drains it.
+    pub made: Vec<ItemStack>,
 }
 
 /// Put `s` into `slots`: top up matching stacks first, then fill empty slots. `s.count` is what is left.
@@ -503,7 +505,7 @@ fn rest(s: ItemStack, n: u8) -> Option<ItemStack> {
 
 impl Screen {
     pub fn new(gw: usize) -> Self {
-        Self { gw, furnace: None, chests: Vec::new(), grid: [None; 9], cursor: None }
+        Self { gw, furnace: None, chests: Vec::new(), grid: [None; 9], cursor: None, made: Vec::new() }
     }
 
     /// `ContainerFurnace` for the furnace at `pos`; the caller passes that furnace to `get` and `click`.
@@ -550,6 +552,7 @@ impl Screen {
     /// `SlotCrafting.onPickupFromSlot`: one of every ingredient is used up; a bucket with something in it (water, lava, milk)
     /// leaves an empty one (`getContainerItem`).
     fn take_result(&mut self) {
+        self.made.extend(self.result());
         for s in self.grid.iter_mut() {
             if let Some(t) = s {
                 t.count -= 1;
@@ -589,6 +592,9 @@ impl Screen {
                     self.take_result();
                     self.cursor.iter_mut().for_each(map::fresh); // `ItemMap.onCreated` runs on the stack the player took (`App::map_tick`)
                 } else {
+                    if id == SlotId::Furn(2) {
+                        self.made.push(ItemStack { count: n, ..h });
+                    }
                     self.set(inv, ext, id, rest(h, n));
                 }
             }
@@ -600,6 +606,7 @@ impl Screen {
                         if is_result {
                             self.take_result();
                         } else {
+                            self.made.push(h);
                             self.set(inv, ext, id, None);
                         }
                     }
@@ -679,7 +686,11 @@ impl Screen {
                 }
             }
             _ => {
+                let n = t.count;
                 inv.add(&mut t);
+                if id == SlotId::Furn(2) {
+                    self.made.push(ItemStack { count: n - t.count, ..t });
+                }
             }
         }
         self.set(inv, ext, id, (t.count > 0).then_some(t));

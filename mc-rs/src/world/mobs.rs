@@ -136,6 +136,9 @@ pub struct Mob {
     /// Pig: wearing a saddle, and carrying the player (`riddenByEntity`).
     pub saddled: bool,
     pub ridden: bool,
+    /// The player hurt it (sticky: UNVERIFIED, the Java asks who landed the killing blow) and the health that cost, not yet reported.
+    you: bool,
+    dealt: f32,
     pub half: Vec3,
     age: u32,
     yaw_vel: f32,
@@ -431,7 +434,7 @@ impl Mob {
         // ponytail: a process-wide counter (as `Cart::new` has), so callers of `new` need no id plumbing; it wraps after 2^32 mobs.
         static NEXT: AtomicU32 = AtomicU32::new(0);
         Self { id: NEXT.fetch_add(1, Ordering::Relaxed), kind, body: Player { pos, vel: Vec3::ZERO, on_ground: false }, yaw, health: hp as f32, limb: 0.0, limb_amt: 0.0, hurt: 0, death: 0, size, color, sheared: false,
-            fuse: 0, tame: false, sitting: false, prey: None, bit: None, coat: COAT_PALE, voice: if kind == Wolf { ((x.to_bits() ^ z.to_bits().rotate_left(11)) % VOICES as u32) as u8 } else { 0 }, saddled: false, ridden: false, half, age: 0, yaw_vel: 0.0, look: None, goal: None, fspeed: 0.0, jumping: false, wet: false, damp: false, blocked: false, life: 0,
+            fuse: 0, tame: false, sitting: false, prey: None, bit: None, coat: COAT_PALE, voice: if kind == Wolf { ((x.to_bits() ^ z.to_bits().rotate_left(11)) % VOICES as u32) as u8 } else { 0 }, saddled: false, ridden: false, you: false, dealt: 0.0, half, age: 0, yaw_vel: 0.0, look: None, goal: None, fspeed: 0.0, jumping: false, wet: false, damp: false, blocked: false, life: 0,
             last: 0.0, target: false, shot: false, lit: false, anger: 0, attack_time: 0, hop: 0, egg: rng.next_int_bound(6000) + 6000, fire: 0,
             free: 0, swim: Vec3::ZERO, path: Vec::new(), path_i: 0, smart: false, wander: false, panic: 0, scare: Vec3::ZERO, mate: None, graze: 0, rest: 0, gait: 1.0, head: 0.0, munch: 0.0, body_yaw: yaw, head_pitch: 0.0, look_pitch: 0.0, talk: 0, cry: None, airborne: false, enraged: false, growl: 0, charge: 0, prev_charge: 0, anim: 0.0, wp: pos, course: 0 }
     }
@@ -1065,6 +1068,13 @@ impl Mob {
         self.damage_in(dmg, from, rng, 20);
     }
 
+    /// A blow of the player's (`damageDealtStat`, `onKillEntity`): `f` hurts the mob; what it cost is kept for `Mobs::tally`.
+    fn by_you(&mut self, f: impl FnOnce(&mut Mob)) {
+        let h = self.health;
+        f(self);
+        (self.you, self.dealt) = (true, self.dealt + (h - self.health).max(0.0));
+    }
+
     /// `damage` with the damage window it starts: `life` 20 is b1.7.3's 10 ticks; a Cortes weapon starts at `10 + IFRAME_TICKS` (**NOT b1.7.3**).
     pub fn damage_in(&mut self, dmg: f32, from: Vec3, rng: &mut JavaRandom, life: u8) {
         if self.kind == Wolf {
@@ -1332,6 +1342,8 @@ fn resistance(id: u8) -> f32 {
 
 pub struct Mobs {
     pub list: Vec<Mob>,
+    /// The kinds of mob the player killed since `tally` last ran.
+    slain: Vec<Kind>,
     pub arrows: Vec<Arrow>,
     pub fireballs: Vec<Fireball>,
     /// Boxes (min, max) of what else a fireball can hit (`canBeCollidedWith`: boats, carts, paintings, a lit TNT, a falling sand / gravel block) and what it is; `App` refills it each frame.
@@ -1360,7 +1372,7 @@ fn hostile(k: Kind) -> bool {
 
 impl Mobs {
     pub fn new(seed: i64) -> Self {
-        Self { list: Vec::new(), arrows: Vec::new(), fireballs: Vec::new(), targets: Vec::new(), rng: JavaRandom::new(seed ^ 0x5049_47), snd: JavaRandom::new(seed ^ 0x534E_44), seed, acc: 0.0, clock: 0, burst: 200, no_spawn: false, nether: false, difficulty: 2, smart: true }
+        Self { list: Vec::new(), slain: Vec::new(), arrows: Vec::new(), fireballs: Vec::new(), targets: Vec::new(), rng: JavaRandom::new(seed ^ 0x5049_47), snd: JavaRandom::new(seed ^ 0x534E_44), seed, acc: 0.0, clock: 0, burst: 200, no_spawn: false, nether: false, difficulty: 2, smart: true }
     }
 
     /// NOT b1.7.3 (`animalAi`, proposal 5, predators and grazers): a wild, calm, standing wolf in its hunting third of the time picks the
@@ -1624,7 +1636,7 @@ impl Mobs {
                 })).flatten();
                 hit.map_or(true, |i| {
                     // A snowball or egg does 0 damage but still knocks back (`attackEntityFrom(thrower, 0)`).
-                    list[i].damage(if a.kind == 0 { crate::world::gear::ARROW_DAMAGE as f32 } else { 0.0 }, a.pos - a.vel, rng);
+                    list[i].by_you(|m| m.damage(if a.kind == 0 { crate::world::gear::ARROW_DAMAGE as f32 } else { 0.0 }, a.pos - a.vel, rng));
                     if a.kind == crate::world::gear::EGG {
                         ev.push(Ev::Hatch(a.pos));
                     }
@@ -1683,6 +1695,9 @@ impl Mobs {
             if self.list[i].death == 0 {
                 // `EntityLiving.onDeath`: the loot drops at once; the corpse stays 20 more ticks (`deathTime`).
                 self.list[i].death = 1;
+                if self.list[i].you {
+                    self.slain.push(self.list[i].kind);
+                }
                 for s in self.list[i].loot(&mut self.rng) {
                     drops.spawn_stack(s, cell(p));
                 }
@@ -1741,14 +1756,22 @@ impl Mobs {
     }
 
     pub fn hit(&mut self, i: usize, dmg: f32, from: Vec3) {
-        self.list[i].damage(dmg, from, &mut self.rng);
+        let rng = &mut self.rng;
+        self.list[i].by_you(|m| m.damage(dmg, from, rng));
+    }
+
+    /// What the player did since the last call: the damage dealt (`damageDealtStat`) and the kinds killed (`mobKillsStat`, `killEnemy`).
+    pub fn tally(&mut self) -> (u32, Vec<Kind>) {
+        let d: f32 = self.list.iter_mut().map(|m| std::mem::take(&mut m.dealt)).sum();
+        (d.round() as u32, std::mem::take(&mut self.slain))
     }
 
     /// A Cortes weapon's blow (**NOT b1.7.3**, UNVERIFIED: not compiled): the same as `hit`, but the damage window is
     /// `IFRAME_TICKS` (3) long instead of 10, so a dagger swinging every 6 ticks is not top-up-only on every second hit.
     pub fn strike(&mut self, i: usize, dmg: f32, from: Vec3) {
         let life = 10 + crate::world::combat::profile::IFRAME_TICKS as u8;
-        self.list[i].damage_in(dmg, from, &mut self.rng, life);
+        let rng = &mut self.rng;
+        self.list[i].by_you(|m| m.damage_in(dmg, from, rng, life));
     }
 
     /// The nearest living mob inside a weapon's cone (`ConeTargets.nearestInCone`), none farther than `wall` (the block the
@@ -1804,7 +1827,8 @@ impl Mobs {
     /// none left behind (`ArcabuzShot`'s `invulnerableTime` 0 then 10: the target can be hit again at once).
     pub fn shot(&mut self, i: usize, dmg: f32, from: Vec3) {
         self.list[i].life = 0;
-        self.list[i].damage_in(dmg, from, &mut self.rng, 10);
+        let rng = &mut self.rng;
+        self.list[i].by_you(|m| m.damage_in(dmg, from, rng, 10));
     }
 
     /// C8 (`igniteForSeconds`, NOT b1.7.3, UNVERIFIED): the arcabuz's shot sets mob `i` alight for `ticks`; a longer fire is never shortened.

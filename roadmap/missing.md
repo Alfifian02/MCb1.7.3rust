@@ -11,7 +11,7 @@ How it was made: the decompiled `minecraft/src` (675 classes: 84 blocks, 103 ite
 | 3 | ~~Map item~~ | `ItemMap`, `MapData`, `MapItemRenderer`, `MapStorage`, recipe 358 = paper ring round a compass | **done 2026-10-30 (gameplay entry 36)**, not compiled; loaded chunks only, flat HUD sheet in hand | done |
 | 8 | Bone meal on blocks | `ItemDye.onItemUse` (damage 15): sapling -> `BlockSapling.growTree`, crops -> `BlockCrops.fertilize` (metadata 7), grass -> spreads tall grass and flowers (`ItemDye` lines 22 on) | only the recipe (bone -> bone meal) and dyeing sheep (`gear::use_on_mob`); `lib.rs` `use_held` and the block-use path have no branch for it. `ChunkManager::grow_tree` (used by the sapling tick) exists to call | small (found 2026-10-30; not in any earlier audit) |
 | 4 | Chat | `GuiChat`, `ChatLine` | nothing (a single-player port has no sender except commands; the overlay is the deferred rest of M14) | medium |
-| 5 | Achievements and Statistics | `AchievementList`, `GuiAchievements`, `GuiAchievement` (toast), `StatList`, `GuiStats` | both buttons drawn greyed out (`menu.rs`, `options.rs`); no stat system | large (counters everywhere, saved, two screens) |
+| 5 | ~~Achievements and Statistics~~ | `AchievementList`, `GuiAchievements`, `GuiAchievement` (toast), `StatList`, `GuiStats` | **done 2026-11-01 (gameplay entry 41)**, not compiled: `world/stats.rs`, `stats_ui.rs`, touch screens | done |
 | 6 | Mods and Texture Packs | `TexturePackList`, `GuiTexturePacks` | button drawn greyed out | large, and arguably off-goal |
 | 7 | Multiplayer (M10) | `Packet*` (59 classes), `GuiMultiplayer`, `EntityOtherPlayerMP` | nothing, out of scope on purpose (README) | out of scope |
 

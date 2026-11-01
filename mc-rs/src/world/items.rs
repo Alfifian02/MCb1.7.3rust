@@ -187,12 +187,16 @@ pub const SLOTS: usize = MAIN + 4;
 /// Starts empty, like a new survival player.
 pub struct Inventory {
     pub slots: [Option<ItemStack>; SLOTS],
+    /// For the stats (`StatList.objectUseStats` / `objectBreakStats`), which the frame drains: ids used (a block set down, a tool worn by
+    /// a use; food is not) and ids broken (tools and armour).
+    pub used: Vec<u16>,
+    pub broke: Vec<u16>,
 }
 
 // Not derived: `Default` stops at 32-element arrays.
 impl Default for Inventory {
     fn default() -> Self {
-        Self { slots: [None; SLOTS] }
+        Self { slots: [None; SLOTS], used: Vec::new(), broke: Vec::new() }
     }
 }
 
@@ -219,7 +223,11 @@ impl Inventory {
         let Some(s) = &mut self.slots[slot] else { return };
         let Some(max) = craft::max_damage(s.id) else { return };
         s.damage += n;
+        if slot < MAIN {
+            self.used.push(s.id);
+        }
         if s.damage > max {
+            self.broke.push(s.id);
             self.slots[slot] = None;
         }
     }
@@ -251,6 +259,9 @@ impl Inventory {
     /// Use up one item of `slot` (`--stackSize`); an emptied stack becomes `None`.
     pub fn consume(&mut self, slot: usize) {
         if let Some(s) = &mut self.slots[slot] {
+            if heal_amount(s.id).is_none() {
+                self.used.push(s.id);
+            }
             s.count -= 1;
             if s.count == 0 {
                 self.slots[slot] = None;
@@ -358,7 +369,7 @@ impl ItemEntity {
     /// `onCollideWithPlayer`: the player's box grown by 1.0 in x and z (not y) touches this item, after the
     /// 10 tick delay. Takes what fits; true when the whole stack is gone. `player` is the centre of its box.
     /// `pops` gets this item's place when something went into the bag (`random.pop` in the Java; a player's arrow is one of these too).
-    fn picked_up(&mut self, player: Vec3, inv: &mut Inventory, pops: &mut Vec<Vec3>) -> bool {
+    fn picked_up(&mut self, player: Vec3, inv: &mut Inventory, pops: &mut Vec<Vec3>, got: &mut Vec<u16>) -> bool {
         let d = (self.pos - player).abs();
         let reach = physics::HALF.x + 1.0 + R;
         if self.delay > 0 || d.x >= reach || d.z >= reach || d.y >= physics::HALF.y + R {
@@ -366,6 +377,7 @@ impl ItemEntity {
         }
         if inv.add(&mut self.stack) {
             pops.push(self.pos);
+            got.push(self.stack.id);
         }
         self.stack.count == 0
     }
@@ -381,11 +393,13 @@ pub struct Drops {
     acc: f32,
     /// Where items went into the bag since `lib.rs` last took them: each is a `random.pop`.
     pub pops: Vec<Vec3>,
+    /// The ids that went into the bag with them (`onItemPickup`: the log and the leather achievements).
+    pub got: Vec<u16>,
 }
 
 impl Drops {
     pub fn new(seed: i64) -> Self {
-        Self { items: Vec::new(), rng: JavaRandom::new(seed), fx: JavaRandom::new(seed ^ 0xF00D), acc: 0.0, pops: Vec::new() }
+        Self { items: Vec::new(), rng: JavaRandom::new(seed), fx: JavaRandom::new(seed ^ 0xF00D), acc: 0.0, pops: Vec::new(), got: Vec::new() }
     }
 
     /// How far into the next tick we are, 0..1, for drawing between `prev` and `pos`.
@@ -480,7 +494,7 @@ impl Drops {
         self.acc += dt;
         while self.acc >= TICK {
             self.acc -= TICK;
-            self.items.retain_mut(|e| e.step(get) && !e.picked_up(player, inv, &mut self.pops));
+            self.items.retain_mut(|e| e.step(get) && !e.picked_up(player, inv, &mut self.pops, &mut self.got));
         }
     }
 }

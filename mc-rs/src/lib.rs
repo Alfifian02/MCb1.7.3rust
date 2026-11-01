@@ -16,6 +16,7 @@ mod immersive;
 mod rumble;
 mod menu;
 mod options;
+mod stats_ui;
 mod ui;
 mod satchel;
 
@@ -131,6 +132,18 @@ struct App {
     opts: Settings,
     /// The game menu (`GuiIngameMenu`, or the death screen) while `touch.paused`.
     pause: Option<Pause>,
+    /// `stats.dat` of b1.7.3 (`StatFileWriter`), `<root>/stats`: shared by all worlds like the Java's per-user file. UNVERIFIED.
+    stats: world::stats::Stats,
+    /// Achievements / Statistics (`PauseEv::Stats`), drawn instead of the game menu while `Some`.
+    stats_ui: Option<stats_ui::StatsUi>,
+    toast: stats_ui::Toast,
+    /// Ticks (1/20 s) not yet counted into `MINUTES`.
+    stat_t: f32,
+    /// Where the player was at the last `move_stats`.
+    stat_pos: glam::Vec3,
+    /// Blocks fallen riding a pig (`EntityPig.fall`) and where the minecart ride began (`startMinecartCoordinates`).
+    pig_fall: f32,
+    cart_from: Option<glam::Vec3>,
     chunks: ChunkManager,
     camera: FirstPersonCamera,
     player: Player,
@@ -362,8 +375,10 @@ impl App {
         let glow = GlowMesh::new(be.gfx());
         let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as i64);
 
+        let mut stats = std::fs::read(dir.join("stats")).ok().and_then(|b| world::stats::Stats::decode(&b)).unwrap_or_default();
+        stats.add(world::stats::START_GAME, 1);
         let mut app = Self {
-            be, world_type: WorldType::Vanilla, lod: None, seed: 0, root: dir.clone(), opts, pause: None, lod_on: false, menu: Some(Menu::new(&dir)),
+            be, world_type: WorldType::Vanilla, lod: None, seed: 0, root: dir.clone(), opts, pause: None, stats, stats_ui: None, toast: Default::default(), stat_t: 0.0, stat_pos: glam::Vec3::ZERO, pig_fall: 0.0, cart_from: None, lod_on: false, menu: Some(Menu::new(&dir)),
             chunks, camera,
             player,
             last_frame: Instant::now(),
@@ -576,6 +591,8 @@ impl App {
         if self.nether {
             self.dir = self.dir.join("nether");
         }
+        // UNVERIFIED: the Java counts `createWorld` on the create screen and `loadWorld` on the list; here a world with a `level` is a load.
+        self.stats.add(if self.dir.join("level").exists() { world::stats::LOAD_WORLD } else { world::stats::CREATE_WORLD }, 1);
         self.reset_world(false);
         self.menu = None;
         self.touch.set_menu(false);
@@ -589,11 +606,12 @@ impl App {
     /// The pause menu's "Save and quit to title" (`GuiIngameMenu`).
     fn quit_to_title(&mut self) {
         self.close_sign();
+        self.stats.add(world::stats::LEAVE_GAME, 1);
         self.save(usize::MAX);
         self.chunks = ChunkManager::new_typed(0, RENDER_DIST, WorldType::Vanilla); // the world's workers stop on drop
         self.lod = None;
         self.menu = Some(Menu::new(&self.root));
-        self.pause = None;
+        (self.pause, self.stats_ui) = (None, None);
         self.touch.set_menu(true);
         if let Ok(mut l) = LAST_WORLD.lock() {
             *l = None;
@@ -726,6 +744,9 @@ impl App {
         if let Err(e) = save::write(&self.dir.join("book"), &self.notes.encode()) {
             log::warn!("save: book file: {e}");
         }
+        if let Err(e) = save::write(&self.root.join("stats"), &self.stats.encode()) {
+            log::warn!("save: stats file: {e}");
+        }
         self.settle_maps();
         self.maps.save_all();
         self.chunks.flush(chunks);
@@ -817,13 +838,18 @@ impl App {
             let info = self.pause_info();
             let mut asked = Vec::new();
             for ev in self.touch.take_screen_events() {
-                if let Some(p) = self.pause.as_mut() {
+                if let Some(u) = self.stats_ui.as_mut() {
+                    if u.event(ev, w, h, &self.opts, &self.stats) {
+                        self.stats_ui = None;
+                    }
+                } else if let Some(p) = self.pause.as_mut() {
                     asked.extend(p.event(ev, w, h, &mut self.opts, &info));
                 }
             }
             for a in asked {
                 match a {
                     PauseEv::Resume => self.touch.resume(),
+                    PauseEv::Stats(ach) => self.stats_ui = Some(stats_ui::StatsUi::new(ach)),
                     PauseEv::Quit => {
                         self.quit_to_title();
                         return;
@@ -853,7 +879,7 @@ impl App {
             self.camera.pos = self.player.pos + glam::Vec3::new(0.0, EYE_HEIGHT - self.sneak_y, 0.0);
             return;
         }
-        self.pause = None;
+        (self.pause, self.stats_ui) = (None, None);
         // Four seconds in a portal: the other dimension (`EntityPlayerSP.onLivingUpdate`).
         if self.portal_t >= 1.0 {
             let p = self.audio.rnd() * 0.4 + 0.8;
@@ -879,6 +905,13 @@ impl App {
         self.tip = if slot != self.tip.0 { (slot, 2.0) } else { (slot, (self.tip.1 - dt).max(0.0)) };
         // Day/night: time only runs while playing; the shader reads the sky-light level from a uniform, so the meshes are not rebuilt.
         self.world_ticks += dt as f64 * 20.0;
+        // `minutesPlayedStat`: one per tick; and the inventory hint until `openInventory` is taken (`EntityPlayerSP.onLivingUpdate`).
+        self.stat_t += dt * 20.0;
+        self.stats.add(world::stats::MINUTES, self.stat_t as u32);
+        self.stat_t = self.stat_t.fract();
+        if !self.stats.has(world::stats::OPEN_INVENTORY) {
+            self.toast.hint(world::stats::OPEN_INVENTORY);
+        }
         while self.weather_ticks < self.world_ticks as u64 {
             self.weather.tick();
             self.weather_ticks += 1;
@@ -983,6 +1016,7 @@ impl App {
         // `LivingJumpEvent` (Stamina): a jump that left the ground costs 10; one a ceiling stopped zeroed `vel.y`, so it is free.
         if grounded && !water && !flying && !asleep && !riding && self.touch.jumping() && self.player.vel.y > 0.0 {
             self.vitals.stamina.jump();
+            self.stats.add(world::stats::JUMP, 1);
         }
         // `horizontalCollision`: `step` zeroes the velocity of the axis a wall stopped (a stepped-up slab keeps it).
         self.sprint_blocked |= !asleep && !riding && ((vx0 != 0.0 && self.player.vel.x == 0.0) || (vz0 != 0.0 && self.player.vel.z == 0.0));
@@ -1049,6 +1083,9 @@ impl App {
         }
         // `InventoryPlayer.damageArmor`: every worn piece takes the damage that was dealt (before armor).
         let wear = std::mem::take(&mut self.vitals.wear) as u16;
+        self.stats.add(world::stats::DAMAGE_TAKEN, wear as u32);
+        self.stats.walk(world::stats::Dist::Fall, std::mem::take(&mut self.vitals.fell) * 100.0);
+        self.move_stats(dt, water, eye_in_water, ladder, riding);
         (items::MAIN..items::SLOTS).filter(|_| wear > 0).for_each(|i| self.inv.damage(i, wear));
         if self.vitals.dead() {
             self.die();
@@ -1056,6 +1093,7 @@ impl App {
         }
         // Dropped items fall, settle and get picked up (before the target check below, which can return early).
         self.drops.tick(dt, &|x: i32, y: i32, z: i32| self.chunks.block(x, y, z).map(|b| self.chunks.physics_at(x, y, z, b)), self.player.pos, &mut self.inv);
+        self.stat_sync();
         for at in std::mem::take(&mut self.drops.pops) {
             // `EntityItem.onCollideWithPlayer` (`EntityArrow`'s is the same call): at the item, volume 0.2, pitch `((r - r) * 0.7 + 1) * 2`.
             let pitch = ((self.audio.rnd() - self.audio.rnd()) * 0.7 + 1.0) * 2.0;
@@ -1450,6 +1488,9 @@ impl App {
                             // PlayerControllerSP.sendBlockRemoved: `canHarvestBlock` is read before the tool wears, so
                             // a tool that breaks on this block still harvests it; no suitable tool, no drop.
                             let harvest = dig::can_harvest(id, held);
+                            if harvest {
+                                self.stats.bump(world::stats::Kind::Mined, id as u16, 1); // `Block.harvestBlock`
+                            }
                             if let Some(h) = held {
                                 self.inv.damage(slot, craft::wear_on_break(h.id, id));
                             }
@@ -2808,6 +2849,7 @@ impl App {
                     let (fish, wear) = h.catch(self.player.pos);
                     if let Some((s, v)) = fish {
                         self.drops.throw_from(s, h.pos, v);
+                        self.stats.add(world::stats::FISH, 1);
                     }
                     self.inv.damage(slot, wear);
                 }
@@ -2906,6 +2948,7 @@ impl App {
     /// died (ponytail: `scatter` drops one entity per stack, vanilla throws each with a random spread). The pause
     /// menu is the death screen: its resume button respawns (top of `step_frame`).
     fn die(&mut self) {
+        self.stats.add(world::stats::DEATHS, 1);
         self.close_screen();
         self.close_sign();
         let at = (self.player.pos.x.floor() as i32, self.player.pos.y.floor() as i32, self.player.pos.z.floor() as i32);
@@ -2938,6 +2981,9 @@ impl App {
 
     /// Open a container screen: the 2x2 inventory, a workbench's 3x3, a furnace or chests.
     fn open_screen(&mut self, screen: Screen) {
+        if screen.gw == 2 {
+            self.earn(world::stats::OPEN_INVENTORY); // `GuiInventory`
+        }
         self.screen = Some(screen);
         (self.one_mode, self.shift_mode) = (false, false);
         self.touch.set_screen(true);
@@ -2945,6 +2991,7 @@ impl App {
 
     /// `onCraftGuiClosed`: the cursor stack and whatever is left in the grid are thrown out in front of the player.
     fn close_screen(&mut self) {
+        self.stat_sync();
         let was_sat = self.sat.take().is_some();
         if let Some(mut s) = self.screen.take() {
             if was_sat {
@@ -2957,6 +3004,7 @@ impl App {
             }
             for st in s.close() {
                 self.drops.throw(st, self.camera.pos, self.camera.forward());
+                self.stats.add(world::stats::DROP, 1);
             }
         }
         self.touch.set_screen(false);
@@ -3236,6 +3284,7 @@ impl App {
                     let n = if self.one_mode { 1 } else { c.count };
                     s.cursor = (c.count > n).then(|| ItemStack { count: c.count - n, ..c });
                     self.drops.throw(ItemStack { count: n, ..c }, self.camera.pos, self.camera.forward());
+                    self.stats.add(world::stats::DROP, 1);
                 }
             }
             Pick::List | Pick::Panel | Pick::Card => {}
@@ -3351,6 +3400,7 @@ impl App {
             let mut g = |sd: f32| self.mobs.rng.next_gaussian() as f32 * 0.0075 * sd;
             let v = glam::Vec3::new(dx * s + g(6.0), 0.2 + g(6.0), dz * s + g(6.0));
             self.drops.throw_from(ItemStack { id, count: 1, damage }, pos - glam::Vec3::Y * 0.3, v);
+            self.stats.add(world::stats::DROP, 1);
             self.audio.play("random.click", at, 1.0, 1.0);
         }
     }
@@ -3508,6 +3558,7 @@ impl App {
                 let n = if self.one_mode { 1 } else { c.count };
                 s.cursor = (c.count > n).then(|| ItemStack { count: c.count - n, ..c });
                 self.drops.throw(ItemStack { count: n, ..c }, self.camera.pos, self.camera.forward());
+                self.stats.add(world::stats::DROP, 1);
             }
         }
     }
@@ -3519,6 +3570,106 @@ impl App {
             let s = self.inv.slots[world::items::MAIN + 3 - slot]?;
             world::craft::armor(s.id).filter(|a| a.0 == slot).map(|a| a.1 as u8)
         })
+    }
+
+    /// `EntityPlayerSP.addStat(achievement)`: the toast when it is new.
+    fn earn(&mut self, a: usize) {
+        if self.stats.earn(a) {
+            self.toast.taken(a);
+        }
+    }
+
+    /// Moves what the world logged since the last call into the stats: pickups (`onItemPickup`), item uses and breaks, what the screens
+    /// handed out (`SlotCrafting` / `SlotFurnace`: `onCrafting` and the achievements) and the player's blows (`EntityPlayer.attackTargetEntity`).
+    fn stat_sync(&mut self) {
+        use world::stats::{self as st, Kind};
+        for id in std::mem::take(&mut self.drops.got) {
+            match id {
+                17 => self.earn(st::MINE_WOOD),
+                334 => self.earn(st::KILL_COW),
+                _ => {}
+            }
+        }
+        for id in std::mem::take(&mut self.inv.used) {
+            self.stats.bump(Kind::Used, id, 1);
+        }
+        for id in std::mem::take(&mut self.inv.broke) {
+            self.stats.bump(Kind::Depleted, id, 1);
+        }
+        for o in self.screen.as_mut().map(|s| std::mem::take(&mut s.made)).unwrap_or_default() {
+            self.stats.bump(Kind::Crafted, o.id, o.count as u32);
+            let a = match o.id {
+                58 => st::BUILD_WORKBENCH,
+                270 => st::BUILD_PICKAXE,
+                61 => st::BUILD_FURNACE,
+                290 => st::BUILD_HOE,
+                297 => st::MAKE_BREAD,
+                354 => st::BAKE_CAKE,
+                274 => st::BUILD_BETTER_PICKAXE,
+                268 => st::BUILD_SWORD,
+                265 => st::ACQUIRE_IRON,
+                350 => st::COOK_FISH,
+                _ => continue,
+            };
+            self.earn(a);
+        }
+        let (dealt, slain) = self.mobs.tally();
+        self.stats.add(st::DAMAGE_DEALT, dealt);
+        self.stats.add(st::MOB_KILLS, slain.len() as u32);
+        // `EntityMob`: not the slime or the ghast (`IMob` only).
+        use world::mobs::Kind::{Creeper, Giant, PigZombie, Skeleton, Spider, Zombie};
+        if slain.iter().any(|k| matches!(k, Zombie | PigZombie | Giant | Skeleton | Creeper | Spider)) {
+            self.earn(st::KILL_ENEMY);
+        }
+    }
+
+    /// `EntityPlayer.addMovementStat`, from this frame's displacement (the Java adds whole centimetres per tick). A move of 5+ blocks (spawn,
+    /// a portal, a respawn) is no walk. UNVERIFIED: flying counts above 5 blocks/s as the Java's 25 cm a tick.
+    fn move_stats(&mut self, dt: f32, water: bool, dive: bool, ladder: bool, riding: bool) {
+        use world::stats::Dist::*;
+        let d = self.player.pos - std::mem::replace(&mut self.stat_pos, self.player.pos);
+        let h = d.x.hypot(d.z) * 100.0;
+        if d.length() > 5.0 {
+            return;
+        }
+        let pig = riding && self.carts.ridden().is_none() && self.boats.ridden().is_none();
+        if !pig {
+            self.pig_fall = 0.0;
+        }
+        if !riding || pig {
+            self.cart_from = None;
+        }
+        if riding {
+            let k = if pig { Pig } else if self.carts.ridden().is_some() { Cart } else { Boat };
+            self.stats.walk(k, d.length() * 100.0);
+            if pig {
+                // `EntityPig.fall`: over 5 blocks with the player on it. UNVERIFIED: the frame's drop, not the pig's `fallDistance`.
+                if d.y < 0.0 {
+                    self.pig_fall -= d.y;
+                } else {
+                    if self.pig_fall > 5.0 {
+                        self.earn(world::stats::FLY_PIG);
+                    }
+                    self.pig_fall = 0.0;
+                }
+            } else if k == Cart {
+                // `addMovementStat`: a kilometre from where the ride began.
+                let from = *self.cart_from.get_or_insert(self.player.pos);
+                if (self.player.pos - from).length_squared() >= 1.0e6 {
+                    self.earn(world::stats::ON_A_RAIL);
+                }
+            }
+        } else if dive {
+            self.stats.walk(Dive, h);
+        } else if water {
+            self.stats.walk(Swim, h);
+        } else if ladder {
+            self.stats.walk(Climb, d.y.max(0.0) * 100.0);
+        } else if self.player.on_ground {
+            self.stats.walk(Walk, h);
+        } else if h > 25.0 * dt * 20.0 {
+            self.stats.walk(Fly, h);
+        }
     }
 
     fn riding(&self) -> bool {
@@ -3903,7 +4054,7 @@ impl App {
     fn pad_sync(&mut self, dt: f32) {
         self.touch.pad.capture = self.pause.as_ref().is_some_and(Pause::pad_waiting) || self.menu.as_ref().is_some_and(Menu::pad_waiting);
         // The d-pad jumps between targets in the satchel, a chest / furnace / bench screen and the pause menu's top page; the stick is the free cursor.
-        self.touch.pad.snap = self.screen.is_some() || (self.touch.paused && self.pause.as_ref().is_some_and(Pause::top));
+        self.touch.pad.snap = self.screen.is_some() || (self.touch.paused && self.stats_ui.is_none() && self.pause.as_ref().is_some_and(Pause::top));
         self.touch.pad_update(dt, &self.opts.pad);
         if let Some(d) = self.touch.take_nav() {
             self.sat_nav(d);
@@ -4486,9 +4637,15 @@ impl App {
         // The game menu (`GuiIngameMenu`, the death screen when dead), over the dimmed frame.
         if paused {
             let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
-            if let Some(p) = &self.pause {
+            if let Some(u) = &self.stats_ui {
+                u.draw(v, w, h, &self.opts, &self.stats);
+            } else if let Some(p) = &self.pause {
                 p.draw(v, w, h, &self.opts, &pause_info);
             }
+        }
+        {
+            let (w, h) = self.be.size();
+            self.toast.draw(v, w as f32, h as f32, &self.opts);
         }
 
         // The pad's radial hotbar, and its cursor in any GUI (the pause menu, a container).
