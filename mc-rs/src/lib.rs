@@ -16,6 +16,7 @@ mod immersive;
 mod rumble;
 mod menu;
 mod options;
+mod ui;
 mod satchel;
 
 use crate::input::touch_ui::{PointerRole, ScreenEv, TouchUi};
@@ -96,6 +97,8 @@ const MOVE_SPEED: f32 = physics::WALK_SPEED;
 /// Eye offset from `player.pos`, which is the CENTRE of the 1.8-tall box. Steve's eyes are
 /// 1.62 above his feet (EntityPlayer.yOffset), i.e. 1.62 - 0.9 above the centre.
 const EYE_HEIGHT: f32 = 1.62 - physics::HALF.y;
+/// Asleep the eye sits this far over `posY` (the bed's surface + 15/16 less its 9/16): `orientCamera`'s `+0.42` less the `0.3` view translation.
+const SLEEP_EYE_LIFT: f32 = 0.12;
 
 /// Cortes Combat C4 (NOT b1.7.3, UNVERIFIED): a meal (or a bandage) in the mouth. Food takes `EAT_TICKS` (the mod's 1.21 use time), a bandage
 /// `mend::BANDAGE_USE`; any damage taken ends it unless the guard is up (`EatInterruptHandler`); it also ends when the hotbar slot changes or
@@ -294,6 +297,9 @@ struct App {
     spawn: glam::Vec3,
     /// Asleep: the bed's cell (the half with bit 8) and the ticks slept (`EntityPlayer.sleepTimer`, 100 = fully asleep).
     sleep: Option<(i32, i32, i32, u32)>,
+    /// The yaw and pitch the player had before lying down, put back on waking (`rotationYaw` is never touched by sleeping in the Java; the view
+    /// along the bed is `orientCamera`'s own turn).
+    sleep_view: Option<(f32, f32)>,
     /// The bed a respawn goes to while it still stands (`playerSpawnCoordinate`).
     bed_spawn: Option<(i32, i32, i32)>,
     /// Where this world is saved (M7) and the play time since the last autosave.
@@ -461,6 +467,7 @@ impl App {
             vitals: Vitals::default(),
             spawn: start,
             sleep: None,
+            sleep_view: None,
             bed_spawn: None,
             dir,
             save_acc: 0.0,
@@ -635,7 +642,7 @@ impl App {
             std::thread::sleep(Duration::from_millis(1));
         }
         log::info!("chunks: {} meshed after {:?}", self.chunks.meshed(), warm.elapsed());
-        (self.sleep, self.bed_spawn) = (None, None);
+        (self.sleep, self.sleep_view, self.bed_spawn) = (None, None, None);
         self.player = Player { pos: s, vel: glam::Vec3::ZERO, on_ground: false };
         let aspect = self.camera.aspect;
         self.camera = FirstPersonCamera::spawn_at(s.x, s.y + EYE_HEIGHT, s.z);
@@ -1065,7 +1072,7 @@ impl App {
         self.mobs.targets.extend(self.boats.list.iter().enumerate().map(|(i, b)| (b.pos - boat::HALF, b.pos + boat::HALF, Strike::Boat(i))));
         self.mobs.targets.extend(self.carts.list.iter().enumerate().map(|(i, c)| (c.pos - minecart::HALF, c.pos + minecart::HALF, Strike::Cart(i))));
         self.mobs.targets.extend(self.paintings.iter().enumerate().map(|(i, p)| { let (lo, hi) = p.bounds(); (lo, hi, Strike::Painting(i)) }));
-        self.mobs.targets.extend(self.ticks.falling.iter().filter(|f| f.id == 46 && f.mv.is_none()).map(|f| (f.pos - glam::Vec3::splat(0.49), f.pos + glam::Vec3::splat(0.49), Strike::Tnt)));
+        self.mobs.targets.extend(self.ticks.falling.iter().filter(|f| f.mv.is_none()).map(|f| (f.pos - glam::Vec3::splat(0.49), f.pos + glam::Vec3::splat(0.49), Strike::Falling)));
         let evs = self.mobs.update(dt, &ctx, &mut self.drops);
         self.struck(&evs);
         for e in evs {
@@ -2522,6 +2529,37 @@ impl App {
         let carts: Vec<_> = self.carts.list.iter().map(|c| hit(c.pos, minecart::HALF)).collect();
         // The player's `posY` is its eye (`yOffset` 1.62), which is what the distance and the push run from; the box is what the exposure looks at.
         let me = mobs::blast(&get, at, power, self.player.pos + glam::Vec3::Y * EYE_HEIGHT, self.player.pos - physics::HALF, self.player.pos + physics::HALF);
+        // The rest of `doExplosionA`'s entity pass, over what exists NOW (the drops the blocks are about to leave and the TNT they chain are made in
+        // `doExplosionB`, after it, so they are not touched): a dropped item takes the damage off its 5 health and is thrown, a lit TNT, a falling
+        // block, an arrow and a thrown snowball or egg are thrown (`motion += direction x impact`; `blast` gives m/s, the motion is blocks a tick).
+        let mut gone = Vec::new();
+        for (i, it) in self.drops.items.iter_mut().enumerate() {
+            if let Some((dmg, push)) = hit(it.pos, glam::Vec3::splat(0.125)) {
+                if it.blast(push / 20.0, dmg) {
+                    gone.push(i);
+                }
+            }
+        }
+        for i in gone.into_iter().rev() {
+            self.drops.items.remove(i);
+        }
+        for f in self.ticks.falling.iter_mut().filter(|f| f.mv.is_none()) {
+            if let Some((_, push)) = hit(f.pos, glam::Vec3::splat(0.49)) {
+                f.shove(push / 20.0);
+            }
+        }
+        for a in self.mobs.arrows.iter_mut() {
+            if let Some((_, push)) = hit(a.pos, glam::Vec3::splat(0.25)) {
+                a.shove(push / 20.0);
+            }
+        }
+        // `EntityPainting.attackEntityFrom`: any hit takes it off the wall, whatever the damage: the distance from its middle to the blast, over the
+        // doubled size, is at most 1 (the box test in `doExplosionA` is met by the middle being that close). Its item is made after the pass above.
+        let size = power * 2.0;
+        let hung: Vec<usize> = self.paintings.iter().enumerate().filter(|(_, p)| (p.frame().0 - at).length() / size <= 1.0).map(|(i, _)| i).collect();
+        for i in hung.into_iter().rev() {
+            self.break_painting(i);
+        }
         let cells_fire = if flame { cells.clone() } else { Vec::new() };
         for (x, y, z) in cells {
             let Some(id) = self.chunks.block_loaded(x, y, z).filter(|&b| b > 0) else { continue };
@@ -2576,7 +2614,7 @@ impl App {
                 Ev::Strike(Strike::Boat(i)) => drop(self.boats.list[i].hurt(0)), // damage + 0 cannot cross the 40 that breaks it
                 Ev::Strike(Strike::Cart(i)) => drop(self.carts.list[i].hurt(0)),
                 Ev::Strike(Strike::Painting(i)) => paintings.push(i),
-                _ => {} // a lit TNT: `Entity.attackEntityFrom` only marks it hit
+                _ => {} // a lit TNT or a falling block: `Entity.attackEntityFrom` only marks it hit
             }
         }
         paintings.sort_unstable();
@@ -2653,8 +2691,11 @@ impl App {
         let (px, pz) = (if d == 1 { 0.1 } else if d == 3 { 0.9 } else { 0.5 }, if d == 0 { 0.9 } else if d == 2 { 0.1 } else { 0.5 });
         self.player.pos = glam::Vec3::new(x as f32 + px, y as f32 + 15.0 / 16.0 - EYE_HEIGHT, z as f32 + pz);
         self.player.vel = glam::Vec3::ZERO;
-        // getBedOrientationInDegrees, as `rotationYaw`; our yaw is that minus 180 degrees. UNVERIFIED on a device.
-        self.camera.yaw = ([90.0f32, 0.0, 270.0, 180.0][d as usize] - 180.0).to_radians();
+        // `EntityRenderer.orientCamera` asleep: the turns by yaw and pitch cancel and what is left is `glRotatef(meta & 3 * 90, 0, 1, 0)`, which looks
+        // along `(sin a, 0, -cos a)`: from the pillow toward the foot of the bed, level. That is our yaw `a` itself. (The earlier port used
+        // `getBedOrientationInDegrees`, which is the BODY's turn in `RenderPlayer` and a different table.) UNVERIFIED on a device.
+        self.sleep_view = Some((self.camera.yaw, self.camera.pitch));
+        self.camera.yaw = (d as f32 * 90.0).to_radians();
         self.camera.pitch = 0.0;
         self.chunks.set_block_meta(x, y, z, 26, m | 4);
         self.sleep = Some((x, y, z, 0));
@@ -2664,6 +2705,9 @@ impl App {
     /// respawn point).
     fn wake(&mut self, set_spawn: bool) {
         let Some((x, y, z, _)) = self.sleep.take() else { return };
+        if let Some((yaw, pitch)) = self.sleep_view.take() {
+            (self.camera.yaw, self.camera.pitch) = (yaw, pitch);
+        }
         let get = |a, b, c| self.chunks.block_loaded(a, b, c).unwrap_or(0);
         let m = self.chunks.meta(x, y, z);
         let cell = pick::wake_cell(&get, (x, y, z), m, 0).unwrap_or((x, y + 1, z));
@@ -3547,7 +3591,14 @@ impl App {
             return; // "Save and quit to title" just ran
         }
         let (mut rig_view, mut close) = (glam::Mat4::IDENTITY, false); // the shoulder-surf shot's roll / convergence / kicks, composed into `camera.bob` below
-        if self.touch.third {
+        let asleep = self.sleep.is_some();
+        if asleep {
+            // `orientCamera`: asleep wins over the third-person view. The eye is `posY + 0.42` (`yOffset` 0.2, +1 asleep) less the 0.3 the view is
+            // translated down by: 0.12 over `posY`, which is the bed's surface + 0.375.
+            self.third_saved = Some((self.camera.pos, self.camera.fov_y));
+            self.camera.pos.y += SLEEP_EYE_LIFT;
+            self.shoulder.reset();
+        } else if self.touch.third {
             self.third_saved = Some((self.camera.pos, self.camera.fov_y));
             if self.touch.shoulder {
                 let shot = self.shoulder_shot();
@@ -3562,10 +3613,19 @@ impl App {
         }
         // The player's own model, drawn only from behind (`RenderPlayer`; the first-person view has the hand instead).
         let tick_partial = (self.body_acc / dig::TICK).clamp(0.0, 1.0);
-        let player_view = (self.touch.third && !close).then(|| {
+        // Asleep the model is drawn too, lying (`RenderGlobal`: `renderViewEntity` is skipped unless third-person or `isPlayerSleeping`).
+        let lying = self.sleep.map(|(x, y, z, _)| (self.chunks.meta(x, y, z) & 3) as usize);
+        let player_view = ((self.touch.third && !close) || asleep).then(|| {
             let riding = self.riding();
             let held = self.inv.slots[self.touch.hotbar_slot];
-            let (pose, yaw) = self.body.pose(tick_partial, self.camera.pitch.to_degrees(), self.touch.sneak && self.sleep.is_none(), riding, held.is_some());
+            let (mut pose, yaw) = self.body.pose(tick_partial, self.camera.pitch.to_degrees(), self.touch.sneak && !asleep, riding, held.is_some());
+            if let Some(d) = lying {
+                // `posY` of the Java: the eye height of a standing box, which is the bed's surface + 0.375 here. ponytail: the head looks straight along
+                // the body (the Java keeps the yaw and pitch from before lying down, which only turns the head against the body).
+                let at = self.player.pos + glam::Vec3::new(0.0, EYE_HEIGHT, 0.0);
+                (pose.head_yaw, pose.pitch, pose.limb_amt, pose.swing) = (0.0, 0.0, 0.0, 0.0);
+                return render::player::View { root: render::player::lying_root(at, d), pose, held, worn: self.worn(), at };
+            }
             let feet = self.player.pos - glam::Vec3::new(0.0, physics::HALF.y, 0.0);
             render::player::View { root: render::player::root(feet, yaw), pose, held, worn: self.worn(), at: self.player.pos }
         });

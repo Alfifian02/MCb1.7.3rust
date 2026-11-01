@@ -276,6 +276,8 @@ pub struct ItemEntity {
     pub age: u32,
     delay: u32,
     on_ground: bool,
+    /// `EntityItem.health`: 5; a blast takes the damage off it (`attackEntityFrom`). Not saved: an item comes back with 5.
+    health: i32,
 }
 
 /// Anything an item cannot pass: a block with a collision box (not air, plants, torches, water or lava). An unloaded chunk reads as
@@ -289,9 +291,20 @@ fn cell(p: Vec3) -> [i32; 3] {
 }
 
 impl ItemEntity {
+    /// `Explosion.doExplosionA` on a dropped item: `attackEntityFrom(damage)` takes it off the 5 health (true: it is gone) and `motion += direction x
+    /// impact` (`push`, blocks a tick) throws it.
+    pub fn blast(&mut self, push: Vec3, dmg: i32) -> bool {
+        self.health -= dmg;
+        self.vel += push;
+        if push.y > 0.0 {
+            self.on_ground = false;
+        }
+        self.health <= 0
+    }
+
     /// A saved item coming back: at rest, ready to be picked up (it settles on the next tick).
     pub fn resting(pos: Vec3, stack: ItemStack, age: u32) -> Self {
-        Self { pos, prev: pos, vel: Vec3::ZERO, stack, age, delay: 0, on_ground: false }
+        Self { pos, prev: pos, vel: Vec3::ZERO, stack, age, delay: 0, on_ground: false, health: 5 }
     }
 
     /// One 20 Hz `EntityItem.onUpdate`; false once it is gone (lava, 5 min old, fell out of the world).
@@ -429,7 +442,7 @@ impl Drops {
         let pos = Vec3::new(x as f32 + offset(), y as f32 + offset(), z as f32 + offset());
         let mut jitter = || (self.fx.next_double() * 0.2f32 as f64 - 0.1f32 as f64) as f32;
         let vel = Vec3::new(jitter(), 0.2, jitter());
-        self.push(ItemEntity { pos, prev: pos, vel, stack, age: 0, delay: 10, on_ground: false });
+        self.push(ItemEntity { pos, prev: pos, vel, stack, age: 0, delay: 10, on_ground: false, health: 5 });
     }
 
     /// `EntityPlayer.dropPlayerItem`: thrown from 0.3 below the eye along the look direction, 40 ticks before it can
@@ -437,12 +450,12 @@ impl Drops {
     pub fn throw(&mut self, stack: ItemStack, eye: Vec3, forward: Vec3) {
         let pos = eye - Vec3::new(0.0, 0.3, 0.0);
         let vel = forward * 0.3 + Vec3::new(0.0, 0.1, 0.0);
-        self.push(ItemEntity { pos, prev: pos, vel, stack, age: 0, delay: 40, on_ground: false });
+        self.push(ItemEntity { pos, prev: pos, vel, stack, age: 0, delay: 40, on_ground: false, health: 5 });
     }
 
     /// A stack leaving `pos` with `vel` blocks per tick (a caught fish flying to the player), pick-up delay 10.
     pub fn throw_from(&mut self, stack: ItemStack, pos: Vec3, vel: Vec3) {
-        self.push(ItemEntity { pos, prev: pos, vel, stack, age: 0, delay: 10, on_ground: false });
+        self.push(ItemEntity { pos, prev: pos, vel, stack, age: 0, delay: 10, on_ground: false, health: 5 });
     }
 
     /// A broken furnace's contents pop out of the middle of its cell (`BlockFurnace.onBlockRemoved`).
@@ -451,7 +464,7 @@ impl Drops {
         let pos = Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
         let mut jitter = || (self.fx.next_double() * 0.2 - 0.1) as f32;
         let vel = Vec3::new(jitter(), 0.2, jitter());
-        self.push(ItemEntity { pos, prev: pos, vel, stack, age: 0, delay: 10, on_ground: false });
+        self.push(ItemEntity { pos, prev: pos, vel, stack, age: 0, delay: 10, on_ground: false, health: 5 });
     }
 
     /// Add an entity, dropping the oldest one when `MAX_ITEMS` is reached.
@@ -474,6 +487,17 @@ impl Drops {
 
 #[cfg(test)]
 mod tests {
+    /// `Explosion.doExplosionA` on a dropped item: `attackEntityFrom` takes the damage off its 5 health (gone at 0) and the push is added to its motion.
+    #[test]
+    fn a_blast_wears_an_item_down_and_throws_it() {
+        let mut it = super::ItemEntity::resting(glam::Vec3::ZERO, super::ItemStack { id: 1, count: 1, damage: 0 }, 0);
+        assert!(!it.blast(glam::Vec3::new(0.1, 0.2, 0.0), 4), "5 - 4 = 1 left");
+        assert_eq!(it.vel, glam::Vec3::new(0.1, 0.2, 0.0));
+        assert!(it.blast(glam::Vec3::ZERO, 1), "1 - 1 = 0: gone");
+        let mut tough = super::ItemEntity::resting(glam::Vec3::ZERO, super::ItemStack { id: 1, count: 1, damage: 0 }, 0);
+        assert!(tough.blast(glam::Vec3::ZERO, 65), "a TNT at point blank deals 65");
+    }
+
     #[test]
     fn names_match_lang() {
         let n = |id, damage| super::name(super::ItemStack { id, count: 1, damage });

@@ -16,7 +16,8 @@
 
 use crate::input::gamepad::{Btn, PadCfg, ACTS};
 use crate::input::touch_ui::{ScreenEv, HOLD_SECS, SWING_SECS};
-use crate::menu::{dirt, grad, rgb, scaled_gs, tw};
+use crate::menu::{dirt, grad, rect, rgb, scaled_gs, tw};
+use crate::ui;
 use crate::render::hud::{HudPipeline, HudVertex};
 use crate::render::look::LookCfg;
 use crate::world::atmos::{self, AtmosCfg};
@@ -421,51 +422,34 @@ impl Settings {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum OptScr {
-    /// Sound, difficulty, GUI scale, view bobbing.
-    General,
-    /// Quality: Graphics, Render Distance, LoD, Smooth Lighting, ...
-    Graphics,
-    /// Frame cap, Dynamic Res, MSAA, Post, Renderer.
-    Perf,
-    /// Vibrance and the effect switches (`render::look`).
-    Fx,
-    /// The keys sub-tab of Controls (+ look and dig settings).
-    Controls,
-    /// The Controller tab (Controllify): its button bindings, and its tuning page.
-    Pad,
-    PadTune,
+    /// Every setting in ONE scrolling list, with the page list beside it (`PAGES`): Sodium's layout in b1.7.3's skin.
+    List,
     /// The live atmosphere editor (the sun button of the game menu): the world stays undimmed beside its panel. Only `OptionsUi::atmos` opens it.
     Atmos,
 }
 
-/// The category tabs along the top of every options page (not the atmosphere editor): label and the page a tap opens.
-const CATS: [(&str, OptScr); 5] = [("General", OptScr::General), ("Graphics", OptScr::Graphics), ("Perf.", OptScr::Perf), ("Effects", OptScr::Fx), ("Controls", OptScr::Controls)];
+/// The number of sections of the list.
+const N_PAGES: usize = 7;
 
-impl OptScr {
-    /// Index into `CATS` of the tab this page belongs to (the Controller pages belong to Controls); none for the editor.
-    fn cat(self) -> Option<usize> {
-        match self {
-            OptScr::General => Some(0),
-            OptScr::Graphics => Some(1),
-            OptScr::Perf => Some(2),
-            OptScr::Fx => Some(3),
-            OptScr::Controls | OptScr::Pad | OptScr::PadTune => Some(4),
-            OptScr::Atmos => None,
-        }
-    }
-}
+/// The sections of the list, in order: the label in the page list and the heading over the section.
+const PAGES: [(&str, &str); N_PAGES] = [
+    ("General", "General"),
+    ("Graphics", "Graphics"),
+    ("Performance", "Performance"),
+    ("Effects", "Effects"),
+    ("Controls", "Controls"),
+    ("Pad buttons", "Controller buttons"),
+    ("Pad tuning", "Controller tuning"),
+];
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Act {
     Opt(Opt),
     Lod,
-    /// A category tab (index into `CATS`).
+    /// A page of the page list (index into `PAGES`): the list jumps to its section.
     Tab(usize),
     Done,
     Key(usize),
-    TabKeys,
-    TabPad,
-    PadPage,
     PadBind(usize),
     PadKnob(usize),
     PadToggle(usize),
@@ -509,6 +493,17 @@ fn is_slider(a: Act) -> bool {
     matches!(a, Act::Opt(o) if o.slider()) || matches!(a, Act::PadKnob(_) | Act::AtKnob(_))
 }
 
+/// A setting of the list (not a page entry, Done or the editor's controls): it is clipped to the list.
+fn is_row(a: Act) -> bool {
+    matches!(a, Act::Opt(_) | Act::Lod | Act::Key(_) | Act::PadBind(_) | Act::PadKnob(_) | Act::PadToggle(_))
+}
+
+/// Saved, but nothing reads it yet (README, M14b): the key bindings (a touch screen has no keys), Graphics, Smooth Lighting, Advanced
+/// OpenGL and 3D Anaglyph. Drawn dim, like Sodium's unavailable options.
+fn unused(a: Act) -> bool {
+    matches!(a, Act::Key(_) | Act::Opt(Opt::Graphics | Opt::AmbientOcclusion | Opt::AdvancedOpengl | Opt::Anaglyph))
+}
+
 fn set_slider(a: Act, st: &mut Settings, v: f32, ed: &AtmosEd) {
     match a {
         Act::Opt(o) => st.set_float(o, v),
@@ -518,14 +513,186 @@ fn set_slider(a: Act, st: &mut Settings, v: f32, ed: &AtmosEd) {
     }
 }
 
-/// `GuiSlider`'s value for a finger at `x`: its 4 px ends are not part of the track.
+/// `GuiSlider`'s value for a finger at `x` on the control `r`: its 4 px ends are not part of the track.
 fn slider_value(r: [f32; 4], x: f32) -> f32 {
     ((x - (r[0] + 4.0)) / (r[2] - 8.0)).clamp(0.0, 1.0)
 }
 
-/// A `GuiButton` (a slider when `knob` has its value): the label centred, white-ish, yellow under the finger, grey when disabled.
-pub(crate) fn button(v: &mut Vec<HudVertex>, s: f32, r: [f32; 4], label: &str, on: bool, over: bool, knob: Option<f32>) {
-    let state = if knob.is_some() || !on { 0 } else if over { 2 } else { 1 };
+// ---- the list: its items, where they sit, and the screen's frame ----
+
+/// One line of the list: a section heading, a group heading, or a setting (what a tap does, its text "Name: value").
+enum Item {
+    Page(usize),
+    Group(&'static str),
+    Row(Act, String),
+}
+
+const PAGE_H: f32 = 18.0;
+const GROUP_H: f32 = 13.0;
+/// A row is 20 high (a `GuiButton`) and 22 apart.
+const ROW_H: f32 = 20.0;
+const ROW_PITCH: f32 = 22.0;
+const SECTION_GAP: f32 = 6.0;
+
+/// Where each item sits in the list (units from its top), the top of every section, and the list's height.
+struct Flow {
+    y: Vec<f32>,
+    starts: [f32; N_PAGES],
+    total: f32,
+}
+
+/// Lays the items out top to bottom. It does not depend on the screen's width, so a jump needs no size.
+fn flow(items: &[Item]) -> Flow {
+    let (mut y, mut at, mut starts) = (0.0f32, Vec::with_capacity(items.len()), [0.0f32; N_PAGES]);
+    for it in items {
+        match it {
+            Item::Page(i) => {
+                if *i > 0 {
+                    y += SECTION_GAP;
+                }
+                starts[*i] = y;
+                at.push(y);
+                y += PAGE_H + 3.0;
+            }
+            Item::Group(_) => {
+                y += 2.0;
+                at.push(y);
+                y += GROUP_H;
+            }
+            Item::Row(..) => {
+                at.push(y);
+                y += ROW_PITCH;
+            }
+        }
+    }
+    Flow { y: at, starts, total: y + 4.0 }
+}
+
+/// The section the page list lights while the list is scrolled to `scroll` (Sodium's `updateSectionFocus`): the last one that has begun a
+/// few rows below the top of the view.
+fn which(starts: &[f32; N_PAGES], scroll: f32, view: f32) -> usize {
+    let probe = scroll + (3.0 * ROW_PITCH).min(view / 2.0);
+    (0..N_PAGES).rev().find(|&i| starts[i] <= probe).unwrap_or(0)
+}
+
+/// Where the parts of the options screen sit (GUI units): the page list, the scrolling list, the description (a pane beside the list on a
+/// wide screen, a strip under it on a narrow one), Done, and the width of a row's control.
+struct Frame {
+    side: [f32; 4],
+    list: [f32; 4],
+    tip: [f32; 4],
+    wide: bool,
+    done: [f32; 4],
+    ctl: f32,
+}
+
+fn frame(gw: f32, gh: f32) -> Frame {
+    let wide = gw >= 520.0;
+    let (side_w, tip_w, gap) = (if wide { 100.0 } else { 80.0 }, if wide { 170.0 } else { 0.0 }, 6.0);
+    let list_w = (gw - side_w - tip_w - gap * if wide { 4.0 } else { 3.0 }).min(300.0);
+    let total = side_w + gap + list_w + if wide { gap + tip_w } else { 0.0 };
+    let x0 = ((gw - total) / 2.0).floor();
+    let (top, h) = (30.0, gh - 30.0 - 38.0);
+    let list = [x0 + side_w + gap, top, list_w, h];
+    let tip = if wide { [list[0] + list_w + gap, top, tip_w, h] } else { [x0, gh - 37.0, total - 86.0, 35.0] };
+    Frame { side: [x0, top, side_w, h], list, tip, wide, done: [x0 + total - 80.0, gh - 28.0, 80.0, 20.0], ctl: (list_w * 0.42).floor().clamp(80.0, 104.0) }
+}
+
+/// The page list's entry `i`.
+fn side_entry(f: &Frame, i: usize) -> [f32; 4] {
+    [f.side[0], f.side[1] + i as f32 * 20.0, f.side[2], 18.0]
+}
+
+/// The part of a row a slider answers to (a toggle answers all over its row): the control on its right.
+fn track(r: [f32; 4], ctl: f32) -> [f32; 4] {
+    [r[0] + r[2] - ctl - 2.0, r[1] + 2.0, ctl, 16.0]
+}
+
+/// What a finger that went down is doing, decided as it moves: a tap, a slider it is on but has not yet moved along, a drag of the list,
+/// a drag of that slider, or nothing (it slid sideways off a plain row: no tap on lift).
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Grab {
+    Tap,
+    Slider(Act),
+    Scroll,
+    Drag(Act),
+    Dead,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Press {
+    x: f32,
+    y: f32,
+    /// The list's scroll when the finger went down.
+    scroll: f32,
+    grab: Grab,
+}
+
+/// What a setting is for, by its name (the pad's knobs and switches have none of their own in `Opt`). The sentences are written to fit
+/// three lines of the narrow screen's strip; `tools/optlist_proto.py` checks that.
+const TIPS: [(&str, &str); 32] = [
+    ("Music", "Volume of the background music."),
+    ("Sound", "Volume of steps, mobs, blocks and ambience."),
+    ("Difficulty", "Peaceful removes monsters. Easy hurts less, Hard hurts more."),
+    ("GUI Scale", "Size of menus and the HUD. Auto picks the largest that fits."),
+    ("View Bobbing", "The camera sways a little as you walk."),
+    ("Render Distance", "Chunks kept around you: Far 16, Normal 8, Short 4, Tiny 2."),
+    ("LoD", "Draws far terrain as simplified blocks, out to 768 blocks."),
+    ("Performance", "Frame cap: Max FPS, Balanced (120 fps) or Power saver (40 fps)."),
+    ("Dynamic Res", "Raises and lowers the render resolution (50% to 100%) with the GPU load."),
+    ("MSAA", "Samples for smoother edges. Auto picks by GPU. Applies at the next start."),
+    ("FXAA", "Smooths edges in the final pass. Auto uses it only without MSAA. Next start."),
+    ("Post", "The final pass: Full sharpens and smooths, Fast skips both. Next start."),
+    ("Renderer", "Auto and Vulkan use wgpu, OpenGL ES the native one. Next start."),
+    ("Vibrance", "Strength of the colour grade. Off turns it off."),
+    ("Warm Light", "Golden light at a low sun and bluer shade."),
+    ("Water Look", "A depth gradient and the sun's glint on water."),
+    ("Glow", "Soft halos on lava, torches, glowstone and the sun."),
+    ("Motion", "Leaf sway, motes near flowers and water, light rays at a low sun."),
+    ("Haze", "Aerial perspective: far things fade into the sky."),
+    ("Sensitivity", "How far a finger drag turns the view."),
+    ("Invert Mouse", "Flips the vertical look."),
+    ("Dig Delay", "How long a finger rests on a block before digging starts."),
+    ("Look X", "Horizontal look speed of the right stick."),
+    ("Look Y", "Vertical look speed of the right stick."),
+    ("Deadzone", "How far a stick must move before it counts."),
+    ("Cursor", "Speed of the pad's pointer in menus."),
+    ("Trigger", "How far a trigger is pulled before it counts as pressed."),
+    ("Rumble", "Strength of the vibration on damage, digging and blasts."),
+    ("Curve", "How stick movement turns into look speed. Tap to change."),
+    ("Invert X", "Flips the horizontal look of the right stick."),
+    ("Invert Y", "Flips the vertical look of the right stick."),
+    ("Toggle Sneak", "Sneak stays on until pressed again."),
+];
+
+/// The sentence under a setting's name in the description pane.
+fn tip(act: Act, name: &str) -> &'static str {
+    if unused(act) {
+        "Saved in options.txt, but nothing reads this setting yet."
+    } else if matches!(act, Act::PadBind(_)) {
+        "Tap, then press the pad button to bind it. Tap another button to cancel."
+    } else {
+        TIPS.iter().find(|t| t.0 == name).map_or("", |t| t.1)
+    }
+}
+
+/// The colour of a control's value: green on, red off, gold when it waits for a restart, yellow while it waits for a key.
+fn value_color(val: &str) -> u32 {
+    if val.eq_ignore_ascii_case("on") {
+        0x55FF55
+    } else if val.eq_ignore_ascii_case("off") {
+        0xFF5555
+    } else if val.contains("(restart)") {
+        0xFFAA00
+    } else if val.starts_with('>') {
+        0xFFFF55
+    } else {
+        0xE0E0E0
+    }
+}
+
+/// A `GuiButton` (a slider when `knob` has its value): `state` 0 dark, 1 normal, 2 highlighted; the label centred, in `color`.
+pub(crate) fn button_c(v: &mut Vec<HudVertex>, s: f32, r: [f32; 4], label: &str, color: u32, state: u8, knob: Option<f32>) {
     HudPipeline::push_button(v, r[0] * s, r[1] * s, r[2] * s, r[3] * s, state);
     if let Some(f) = knob {
         // `GuiSlider.mouseDragged`: the two 4 px halves of the knob, `widgets.png` row 66.
@@ -533,8 +700,50 @@ pub(crate) fn button(v: &mut Vec<HudVertex>, s: f32, r: [f32; 4], label: &str, o
         HudPipeline::push_gui(v, x * s, r[1] * s, 4.0 * s, r[3] * s, (0.0, 256.0 + 66.0, 4.0, 20.0));
         HudPipeline::push_gui(v, (x + 4.0) * s, r[1] * s, 4.0 * s, r[3] * s, (196.0, 256.0 + 66.0, 4.0, 20.0));
     }
-    let c = if !on { 0xA0A0A0 } else if over { 0xFFFFA0 } else { 0xE0E0E0 };
-    HudPipeline::push_text(v, (r[0] + (r[2] - tw(label)) / 2.0) * s, (r[1] + (r[3] - 8.0) / 2.0) * s, s, label, rgb(c));
+    HudPipeline::push_text(v, (r[0] + (r[2] - tw(label)) / 2.0) * s, (r[1] + (r[3] - 8.0) / 2.0) * s, s, label, rgb(color));
+}
+
+/// A `GuiButton`: the label centred, white-ish, yellow under the finger, grey when disabled.
+pub(crate) fn button(v: &mut Vec<HudVertex>, s: f32, r: [f32; 4], label: &str, on: bool, over: bool, knob: Option<f32>) {
+    let state = if knob.is_some() || !on { 0 } else if over { 2 } else { 1 };
+    button_c(v, s, r, label, if !on { 0xA0A0A0 } else if over { 0xFFFFA0 } else { 0xE0E0E0 }, state, knob);
+}
+
+/// A section heading of the list: a dark strip with a gold stud, the name in the splash's yellow, a rule under it.
+fn heading(v: &mut Vec<HudVertex>, s: f32, r: [f32; 4], text: &str) {
+    grad(v, s, r, [0.0, 0.0, 0.0, 0.65], [0.0, 0.0, 0.0, 0.25]);
+    rect(v, s, [r[0], r[1] + r[3] - 1.0, r[2], 1.0], 0x808080);
+    rect(v, s, [r[0] + 3.0, r[1] + 6.0, 4.0, 4.0], 0xFFAA00);
+    HudPipeline::push_text(v, (r[0] + 12.0) * s, (r[1] + 5.0) * s, s, text, rgb(0xFFFF55));
+}
+
+/// A group heading inside a section: grey text and a thin rule running to the edge.
+fn group(v: &mut Vec<HudVertex>, s: f32, r: [f32; 4], text: &str) {
+    HudPipeline::push_text(v, (r[0] + 6.0) * s, (r[1] + 3.0) * s, s, text, rgb(0xAAAAAA));
+    let x = r[0] + 6.0 + tw(text) + 6.0;
+    rect(v, s, [x, r[1] + 7.0, (r[0] + r[2] - x).max(0.0), 1.0], 0x505050);
+}
+
+/// A setting: its name on the left, its control on the right (a stone button holding the value, or a slider), the chosen row framed like
+/// the chosen world of the world list.
+#[allow(clippy::too_many_arguments)]
+fn row(v: &mut Vec<HudVertex>, s: f32, r: [f32; 4], act: Act, label: &str, st: &Settings, ctl: f32, over: bool, sel: bool) {
+    let (name, val) = label.split_once(": ").unwrap_or((label, ""));
+    let dim = unused(act);
+    if sel {
+        rect(v, s, r, 0x808080);
+        rect(v, s, [r[0] + 1.0, r[1] + 1.0, r[2] - 2.0, r[3] - 2.0], 0x000000);
+    } else {
+        HudPipeline::push_quad(v, r[0] * s, r[1] * s, r[2] * s, r[3] * s, [0.0, 0.0, 0.0, 0.25]);
+    }
+    HudPipeline::push_text(v, (r[0] + 6.0) * s, (r[1] + 6.0) * s, s, &ui::fit(name, r[2] - ctl - 14.0), rgb(if dim { 0x808080 } else { 0xE0E0E0 }));
+    let knob = match act {
+        Act::Opt(o) if o.slider() => Some(st.float(o)),
+        Act::PadKnob(i) => Some(st.pad.knob(i)),
+        _ => None,
+    };
+    let c = if dim { 0x808080 } else if over { 0xFFFFA0 } else { value_color(val) };
+    button_c(v, s, track(r, ctl), val, c, if knob.is_some() || dim { 0 } else if over { 2 } else { 1 }, knob);
 }
 
 /// The atmosphere editor's controls (GUI units, a panel 212 wide down the left edge): the biome (`<` name `>`), the tabs, the tab's
@@ -598,17 +807,25 @@ fn background(v: &mut Vec<HudVertex>, s: f32, gw: f32, gh: f32, world: bool) {
     }
 }
 
-/// `GuiOptions` and the two screens under it, `GuiVideoSettings` and `GuiControls`.
+/// `GuiOptions` and the two screens under it, `GuiVideoSettings` and `GuiControls`: here one scrolling list (Sodium's layout).
 pub struct OptionsUi {
     pub scr: OptScr,
-    /// The slider the finger is dragging.
+    /// The slider the finger is dragging in the atmosphere editor (the list's sliders go through `press`).
     drag: Option<Act>,
+    /// The finger that is down on the list, and what it turned out to be doing.
+    press: Option<Press>,
     /// `GuiControls.buttonId`: the key button waiting for its key.
     wait: Option<usize>,
-    /// The Controller tab's button waiting for a pad press.
+    /// The Controller button waiting for a pad press.
     wait_pad: Option<usize>,
     /// Where the finger is (GUI units), for the highlight.
     finger: Option<(f32, f32)>,
+    /// How far the list is scrolled (units); clamped to its length wherever it is used.
+    scroll: f32,
+    /// The page the page list lights: set by a tap on it, or by the section under the top of the view as a finger scrolls.
+    page: usize,
+    /// The setting the description pane explains: the last one tapped.
+    sel: Option<Act>,
     ed: AtmosEd,
 }
 
@@ -620,7 +837,7 @@ impl Default for OptionsUi {
 
 impl OptionsUi {
     pub fn new() -> Self {
-        Self { scr: OptScr::General, drag: None, wait: None, wait_pad: None, finger: None, ed: AtmosEd { biome: Biome::Plains, tab: 0, list: false } }
+        Self { scr: OptScr::List, drag: None, press: None, wait: None, wait_pad: None, finger: None, scroll: 0.0, page: 0, sel: None, ed: AtmosEd { biome: Biome::Plains, tab: 0, list: false } }
     }
 
     /// The atmosphere editor (the game menu's sun), on the biome under the player; the world behind it is the live preview.
@@ -630,116 +847,205 @@ impl OptionsUi {
         Self { scr: OptScr::Atmos, ed, ..Self::new() }
     }
 
+    /// The list is showing (not the atmosphere editor).
+    pub fn in_list(&self) -> bool {
+        self.scr == OptScr::List
+    }
+
+    /// Every line of the list, in order. Each row's text is "Name: value", as `getKeyBinding` made it.
+    fn items(&self, st: &Settings) -> Vec<Item> {
+        use Item::{Group as G, Page as P, Row};
+        let o = |o: Opt| Row(Act::Opt(o), st.text(o));
+        let mut v = vec![
+            P(0),
+            o(Opt::Music),
+            o(Opt::Sound),
+            o(Opt::Difficulty),
+            o(Opt::GuiScale),
+            o(Opt::ViewBobbing),
+            P(1),
+            G("World"),
+            o(Opt::Graphics),
+            o(Opt::RenderDistance),
+            Row(Act::Lod, format!("LoD: {}", if st.lod { "ON" } else { "OFF" })),
+            G("Lighting"),
+            o(Opt::AmbientOcclusion),
+            o(Opt::AdvancedOpengl),
+            o(Opt::Anaglyph),
+            P(2),
+            G("Frame rate"),
+            o(Opt::FramerateLimit),
+            o(Opt::DynamicRes),
+            G("Next start"),
+            o(Opt::Msaa),
+            o(Opt::Fxaa),
+            o(Opt::Post),
+            o(Opt::Renderer),
+            P(3),
+            o(Opt::Vibrance),
+            G("Switches"),
+            o(Opt::FxWarm),
+            o(Opt::FxWater),
+            o(Opt::FxGlow),
+            o(Opt::FxMotion),
+            o(Opt::FxHaze),
+            P(4),
+            G("Look and dig"),
+            o(Opt::Sensitivity),
+            o(Opt::InvertMouse),
+            o(Opt::DigDelay),
+            G("Keyboard"),
+        ];
+        v.extend((0..KEY_NAMES.len()).map(|i| {
+            let k = key_name(st.keys[i]);
+            Row(Act::Key(i), format!("{}: {}", KEY_NAMES[i], if self.wait == Some(i) { format!("> {k} <") } else { k }))
+        }));
+        v.push(P(5));
+        v.extend(ACTS.iter().enumerate().map(|(i, a)| {
+            let b = if self.wait_pad == Some(i) { "> <" } else { st.pad.binds[i].name() };
+            Row(Act::PadBind(i), format!("{}: {b}", a.name()))
+        }));
+        v.push(P(6));
+        v.extend((0..PadCfg::knob_count()).map(|i| Row(Act::PadKnob(i), st.pad.knob_text(i))));
+        v.extend((0..PadCfg::toggle_count()).map(|i| Row(Act::PadToggle(i), st.pad.toggle_text(i))));
+        v
+    }
+
+    /// The items, where they sit, and how far the list can scroll in `f`.
+    fn extent(&self, st: &Settings, f: &Frame) -> (Vec<Item>, Flow, f32) {
+        let items = self.items(st);
+        let fl = flow(&items);
+        let max = (fl.total - f.list[3]).max(0.0);
+        (items, fl, max)
+    }
+
+    /// Scrolls the list to the top of section `i` and lights its page entry (a section near the end stops where the list does).
+    fn jump(&mut self, i: usize, st: &Settings) {
+        (self.scroll, self.page) = (flow(&self.items(st)).starts[i], i);
+    }
+
+    /// The page list, the settings in view (every one a finger could touch, partly cut ones too) and Done; the editor's own controls
+    /// when that is open.
     fn widgets(&self, gw: f32, gh: f32, st: &Settings) -> Vec<Wid> {
-        let (hw, top) = ((gw / 2.0).floor(), (gh / 6.0).floor());
-        let cell = |i: usize| (hw - 155.0 + (i % 2) as f32 * 160.0, top + 24.0 * (i / 2) as f32);
-        let wide = |act, y: f32, label: &str| Wid { act, r: [hw - 100.0, y, 200.0, 20.0], label: label.to_string() };
-        let opts = |from: usize, list: &[Opt]| -> Vec<Wid> {
-            list.iter().enumerate().map(|(i, &o)| Wid { act: Act::Opt(o), r: [cell(from + i).0, cell(from + i).1, 150.0, 20.0], label: st.text(o) }).collect()
-        };
-        let mut w = match self.scr {
-            OptScr::General => opts(0, &[Opt::Music, Opt::Sound, Opt::Difficulty, Opt::GuiScale, Opt::ViewBobbing]),
-            OptScr::Graphics => {
-                let mut w = opts(0, &[Opt::Graphics, Opt::RenderDistance]);
-                // The LoD switch (not b1.7.3) sits with the other things that decide how far and how nicely the world is drawn.
-                w.push(Wid { act: Act::Lod, r: [cell(2).0, cell(2).1, 150.0, 20.0], label: format!("LoD: {}", if st.lod { "ON" } else { "OFF" }) });
-                // ponytail: Smooth Lighting, Advanced OpenGL and 3D Anaglyph are stored only (see the header), so they go last.
-                w.extend(opts(3, &[Opt::AmbientOcclusion, Opt::AdvancedOpengl, Opt::Anaglyph]));
-                w
-            }
-            OptScr::Perf => opts(0, &[Opt::FramerateLimit, Opt::DynamicRes, Opt::Msaa, Opt::Fxaa, Opt::Post, Opt::Renderer]),
-            OptScr::Fx => opts(0, &[Opt::Vibrance, Opt::FxWarm, Opt::FxWater, Opt::FxGlow, Opt::FxMotion, Opt::FxHaze]),
-            OptScr::Atmos => atmos_widgets(&self.ed, st),
-            OptScr::Controls => {
-                let mut w: Vec<Wid> = (0..KEY_NAMES.len())
-                    .map(|i| {
-                        let name = key_name(st.keys[i]);
-                        Wid { act: Act::Key(i), r: [cell(i).0, cell(i).1, 70.0, 20.0], label: if self.wait == Some(i) { format!("> {name} <") } else { name } }
-                    })
-                    .collect();
-                // Look settings live with the controls they belong to (they were on the old main screen).
-                w.extend(opts(KEY_NAMES.len(), &[Opt::Sensitivity, Opt::InvertMouse]));
-                w
-            }
-            OptScr::Pad => ACTS
-                .iter()
-                .enumerate()
-                .map(|(i, a)| {
-                    let b = if self.wait_pad == Some(i) { "> <" } else { st.pad.binds[i].name() };
-                    Wid { act: Act::PadBind(i), r: [cell(i).0, top + 20.0 * (i / 2) as f32, 150.0, 18.0], label: format!("{}: {b}", a.name()) }
-                })
-                .collect(),
-            OptScr::PadTune => (0..PadCfg::knob_count())
-                .map(|i| Wid { act: Act::PadKnob(i), r: [cell(i).0, cell(i).1, 150.0, 20.0], label: st.pad.knob_text(i) })
-                .chain((0..PadCfg::toggle_count()).map(|i| {
-                    let c = cell(PadCfg::knob_count() + i);
-                    Wid { act: Act::PadToggle(i), r: [c.0, c.1, 150.0, 20.0], label: st.pad.toggle_text(i) }
-                }))
-                .collect(),
-        };
-        // The Dig Delay slider (one setting for finger and pad) sits under the keys and under the pad's tuning.
-        if matches!(self.scr, OptScr::Controls | OptScr::PadTune) {
-            let y = if self.scr == OptScr::Controls { top + 144.0 } else { top + 120.0 };
-            w.push(wide(Act::Opt(Opt::DigDelay), y, &st.text(Opt::DigDelay)));
+        if self.scr == OptScr::Atmos {
+            return atmos_widgets(&self.ed, st);
         }
-        // The category tabs, 5 across the 310-unit grid; the page you are on is drawn greyed.
-        if self.scr != OptScr::Atmos {
-            for (i, (name, _)) in CATS.iter().enumerate() {
-                w.push(Wid { act: Act::Tab(i), r: [hw - 155.0 + i as f32 * 62.0, 6.0, 60.0, 14.0], label: name.to_string() });
-            }
-        }
-        // Controls has two sub-tabs under them: the keys, and the Controller (Controllify) with its buttons page and its tuning page.
-        if matches!(self.scr, OptScr::Controls | OptScr::Pad | OptScr::PadTune) {
-            w.push(Wid { act: Act::TabKeys, r: [hw - 100.0, 22.0, 99.0, 14.0], label: "Keys".into() });
-            w.push(Wid { act: Act::TabPad, r: [hw + 1.0, 22.0, 99.0, 14.0], label: "Controller".into() });
-        }
-        if matches!(self.scr, OptScr::Pad | OptScr::PadTune) {
-            // The buttons page has eight rows (18 px, 20 apart): Tuning and Done share the row under them.
-            let label = if self.scr == OptScr::Pad { "Tuning..." } else { "Buttons..." };
-            w.push(Wid { act: Act::PadPage, r: [hw - 100.0, top + 168.0, 98.0, 20.0], label: label.into() });
-            w.push(Wid { act: Act::Done, r: [hw + 2.0, top + 168.0, 98.0, 20.0], label: "Done".into() });
-        } else if self.scr != OptScr::Atmos {
-            w.push(wide(Act::Done, top + 168.0, "Done"));
-        }
+        let f = frame(gw, gh);
+        let (items, fl, max) = self.extent(st, &f);
+        let scroll = self.scroll.clamp(0.0, max);
+        let mut w: Vec<Wid> = items
+            .into_iter()
+            .zip(&fl.y)
+            .filter_map(|(it, &y)| match it {
+                Item::Row(act, label) => {
+                    let r = [f.list[0] + 2.0, f.list[1] + 4.0 + y - scroll, f.list[2] - 11.0, ROW_H];
+                    (r[1] < f.list[1] + f.list[3] && r[1] + r[3] > f.list[1]).then_some(Wid { act, r, label })
+                }
+                _ => None,
+            })
+            .collect();
+        w.extend(PAGES.iter().enumerate().map(|(i, p)| Wid { act: Act::Tab(i), r: side_entry(&f, i), label: p.0.to_string() }));
+        w.push(Wid { act: Act::Done, r: f.done, label: "Done".to_string() });
         w
     }
 
-    /// A finger event in px. Sliders follow the finger, every other button acts when the finger is lifted over it.
+    /// A finger: down on a setting it selects it (a tap acts on lift); on a slider's track it grabs the slider; dragged up or down it
+    /// scrolls the list; the page list jumps to a section; Done leaves. The editor's sliders follow the finger at once.
     pub fn event(&mut self, ev: ScreenEv, w: f32, h: f32, st: &mut Settings) -> Option<OptEv> {
         let (s, gw, gh) = scaled_gs(w, h, st.gui_scale);
+        let f = frame(gw, gh);
+        let (_, fl, max) = self.extent(st, &f);
+        self.scroll = self.scroll.clamp(0.0, max);
         let wids = self.widgets(gw, gh, st);
-        let at = |x: f32, y: f32| wids.iter().find(|b| inside(b.r, x / s, y / s));
+        // The settings answer only inside the list: a row half under the list's edge is not touched through the footer.
+        let at = |x: f32, y: f32| wids.iter().find(|b| inside(b.r, x / s, y / s) && (!is_row(b.act) || inside(f.list, x / s, y / s)));
         match ev {
             ScreenEv::Down(x, y) => {
-                self.finger = Some((x / s, y / s));
+                let (gx, gy) = (x / s, y / s);
+                self.finger = Some((gx, gy));
+                let mut grab = Grab::Tap;
                 if let Some(Wid { act, r, .. }) = at(x, y).filter(|b| is_slider(b.act)) {
-                    self.drag = Some(*act);
-                    set_slider(*act, st, slider_value(*r, x / s), &self.ed);
+                    if self.scr == OptScr::Atmos {
+                        self.drag = Some(*act);
+                        set_slider(*act, st, slider_value(*r, gx), &self.ed);
+                    } else if inside(track(*r, f.ctl), gx, gy) {
+                        grab = Grab::Slider(*act);
+                    }
                 }
+                self.press = Some(Press { x: gx, y: gy, scroll: self.scroll, grab });
                 None
             }
             ScreenEv::Move(x, y) => {
-                self.finger = Some((x / s, y / s));
+                let (gx, gy) = (x / s, y / s);
+                self.finger = Some((gx, gy));
                 if let Some(a) = self.drag {
                     if let Some(b) = wids.iter().find(|b| b.act == a) {
-                        set_slider(a, st, slider_value(b.r, x / s), &self.ed);
+                        set_slider(a, st, slider_value(b.r, gx), &self.ed);
                     }
+                }
+                let mut scrolled = false;
+                if let Some(p) = self.press.as_mut() {
+                    let (dx, dy) = (gx - p.x, gy - p.y);
+                    p.grab = match p.grab {
+                        Grab::Tap | Grab::Slider(_) if dy.abs() > 4.0 && dy.abs() > dx.abs() => Grab::Scroll,
+                        Grab::Slider(a) if dx.abs() > 3.0 => Grab::Drag(a),
+                        Grab::Tap if dx.abs() > 10.0 => Grab::Dead,
+                        g => g,
+                    };
+                    match p.grab {
+                        Grab::Scroll => {
+                            self.scroll = (p.scroll - dy).clamp(0.0, max);
+                            scrolled = true;
+                        }
+                        Grab::Drag(a) => {
+                            if let Some(b) = wids.iter().find(|b| b.act == a) {
+                                set_slider(a, st, slider_value(track(b.r, f.ctl), gx), &self.ed);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if scrolled {
+                    self.page = which(&fl.starts, self.scroll, f.list[3]);
                 }
                 None
             }
             ScreenEv::Up(x, y) => {
                 self.finger = None;
                 if self.drag.take().is_some() {
-                    st.save(); // `GuiOptions` saves when the screen is left; here when the slider is let go
+                    self.press = None;
+                    st.save(); // the editor's slider is let go
                     return None;
                 }
+                match self.press.take().map_or(Grab::Tap, |p| p.grab) {
+                    Grab::Drag(_) => {
+                        st.save();
+                        return None;
+                    }
+                    Grab::Scroll | Grab::Dead => return None,
+                    Grab::Slider(a) => {
+                        // a tap on the track puts the slider there
+                        if let Some(b) = wids.iter().find(|b| b.act == a) {
+                            set_slider(a, st, slider_value(track(b.r, f.ctl), x / s), &self.ed);
+                            st.save();
+                            self.sel = Some(a);
+                        }
+                        return None;
+                    }
+                    Grab::Tap => {}
+                }
                 let act = at(x, y)?.act;
+                if is_row(act) {
+                    self.sel = Some(act);
+                    if is_slider(act) {
+                        return None; // on a slider's name: selected, nothing to flip
+                    }
+                }
                 self.act(act, st)
             }
         }
     }
 
-    /// `actionPerformed`.
     fn act(&mut self, a: Act, st: &mut Settings) -> Option<OptEv> {
         self.wait = None; // `GuiControls`: any button ends the wait
         self.wait_pad = None;
@@ -750,15 +1056,10 @@ impl OptionsUi {
                 st.save();
             }
             Act::Tab(i) => {
-                if self.scr.cat() != Some(i) {
-                    st.save();
-                    self.scr = CATS[i].1;
-                }
+                st.save();
+                self.jump(i, st);
             }
             Act::Key(i) => self.wait = Some(i),
-            Act::TabKeys => self.scr = OptScr::Controls,
-            Act::TabPad => self.scr = OptScr::Pad,
-            Act::PadPage => self.scr = if self.scr == OptScr::Pad { OptScr::PadTune } else { OptScr::Pad },
             Act::PadBind(i) => self.wait_pad = Some(i),
             Act::PadKnob(_) => {}
             Act::PadToggle(i) => {
@@ -799,12 +1100,15 @@ impl OptionsUi {
         st.atmos.view = Some(b);
     }
 
-    /// The pad's LB (-1) / RB (+1): the next tab, wrapping round. Not while a Controller button waits for its press (the bumper is the binding).
+    /// The pad's LB (-1) / RB (+1): the next section of the list, wrapping round. Not while a Controller button waits for its press (the
+    /// bumper is the binding).
     pub fn step_tab(&mut self, d: i32, st: &mut Settings) {
-        let Some(c) = self.scr.cat().filter(|_| self.wait_pad.is_none()) else { return };
+        if self.scr != OptScr::List || self.wait_pad.is_some() {
+            return;
+        }
         st.save();
-        (self.drag, self.wait) = (None, None);
-        self.scr = CATS[(c as i32 + d).rem_euclid(CATS.len() as i32) as usize].1;
+        (self.drag, self.wait, self.press) = (None, None, None);
+        self.jump((self.page as i32 + d).rem_euclid(N_PAGES as i32) as usize, st);
     }
 
     /// `GuiControls.keyTyped`: the key that follows a tap on a key button becomes its binding.
@@ -816,7 +1120,7 @@ impl OptionsUi {
         }
     }
 
-    /// The Controller tab waits for a pad button: `Pad` swallows the next press into `Pad::captured`.
+    /// The Controller buttons wait for a pad button: `Pad` swallows the next press into `Pad::captured`.
     pub fn pad_waiting(&self) -> bool {
         self.wait_pad.is_some()
     }
@@ -829,39 +1133,34 @@ impl OptionsUi {
         }
     }
 
+    /// `world`: over the dimmed game (the game menu's options) instead of the dirt of the title screen.
     pub fn draw(&self, v: &mut Vec<HudVertex>, w: f32, h: f32, st: &Settings, world: bool) {
         let (s, gw, gh) = scaled_gs(w, h, st.gui_scale);
         if self.scr == OptScr::Atmos {
-            // No dimming: the world is the preview. Only the panel's own shade, on the left.
-            grad(v, s, [0.0, 0.0, 220.0, gh], [0.0, 0.0, 0.0, 0.62], [0.0, 0.0, 0.0, 0.76]);
+            self.draw_atmos(v, s, gw, gh, st);
         } else {
-            background(v, s, gw, gh, world); // the tab bar is the title
+            self.draw_list(v, s, gw, gh, st, world);
         }
+    }
+
+    /// The atmosphere editor: no dimming (the world is the preview), only the panel's own shade down the left.
+    fn draw_atmos(&self, v: &mut Vec<HudVertex>, s: f32, gw: f32, gh: f32, st: &Settings) {
+        grad(v, s, [0.0, 0.0, 220.0, gh], [0.0, 0.0, 0.0, 0.62], [0.0, 0.0, 0.0, 0.76]);
         for b in self.widgets(gw, gh, st) {
             let over = self.finger.is_some_and(|(x, y)| inside(b.r, x, y));
             let knob = match b.act {
-                Act::Opt(o) if o.slider() => Some(st.float(o)),
-                Act::PadKnob(i) => Some(st.pad.knob(i)),
                 Act::AtKnob(j) => Some(atmos::TABS[self.ed.tab].1[j].pos(st.atmos.look(self.ed.biome))),
                 _ => None,
             };
-            // The tab you are on is drawn greyed.
-            let on = !matches!((self.scr, b.act), (OptScr::Controls, Act::TabKeys) | (OptScr::Pad | OptScr::PadTune, Act::TabPad))
-                && !matches!(b.act, Act::Tab(i) if self.scr.cat() == Some(i))
-                && !matches!(b.act, Act::AtTab(i) if i == self.ed.tab && !self.ed.list)
-                && !matches!(b.act, Act::AtPick(i) if atmos::ALL[i] == self.ed.biome);
+            let on = !matches!(b.act, Act::AtTab(i) if i == self.ed.tab && !self.ed.list) && !matches!(b.act, Act::AtPick(i) if atmos::ALL[i] == self.ed.biome);
             button(v, s, b.r, &b.label, on, over, knob);
-            // A gold dot on a biome whose look the player changed.
             if let Act::AtPick(i) = b.act {
                 if st.atmos.edited(atmos::ALL[i]) {
                     HudPipeline::push_quad(v, (b.r[0] + b.r[2] - 5.0) * s, (b.r[1] + 2.0) * s, 3.0 * s, 3.0 * s, rgb(0xFFD93B));
                 }
             }
-            if let (OptScr::Controls, Act::Key(i)) = (self.scr, b.act) {
-                HudPipeline::push_text(v, (b.r[0] + 70.0 + 6.0) * s, (b.r[1] + 7.0) * s, s, KEY_NAMES[i], rgb(0xFFFFFF));
-            }
         }
-        if self.scr == OptScr::Atmos && !self.ed.list {
+        if !self.ed.list {
             // The tab's colour (its first three sliders) as it is authored, and its hex code.
             let (look, k0) = (st.atmos.look(self.ed.biome), atmos::TABS[self.ed.tab].1[0].i);
             let c: [f32; 3] = [look[k0], look[k0 + 1], look[k0 + 2]];
@@ -870,6 +1169,85 @@ impl OptionsUi {
             let hex = format!("#{:02X}{:02X}{:02X}", (c[0] * 255.0).round() as u32, (c[1] * 255.0).round() as u32, (c[2] * 255.0).round() as u32);
             HudPipeline::push_text(v, (186.0 - tw(&hex) / 2.0) * s, 93.0 * s, s, &hex, rgb(0xE0E0E0));
             HudPipeline::push_text(v, 4.0 * s, 158.0 * s, s, "Noon colours; night and rain follow", rgb(0xA0A0A0));
+        }
+    }
+
+    /// The options list: title, page list, scrolling list, description, Done.
+    fn draw_list(&self, v: &mut Vec<HudVertex>, s: f32, gw: f32, gh: f32, st: &Settings, world: bool) {
+        background(v, s, gw, gh, world);
+        ui::title(v, s, gw, 0.0, "Options", true);
+        let f = frame(gw, gh);
+        let (items, fl, max) = self.extent(st, &f);
+        let scroll = self.scroll.clamp(0.0, max);
+        // a finger that is scrolling or dragging a slider lights nothing
+        let calm = !matches!(self.press.map(|p| p.grab), Some(Grab::Scroll | Grab::Dead | Grab::Drag(_)));
+        let over = |r: [f32; 4]| calm && self.finger.is_some_and(|(x, y)| inside(r, x, y));
+        // the page list: the section in view is the dark, pressed-in one, in yellow
+        for (i, p) in PAGES.iter().enumerate() {
+            let r = side_entry(&f, i);
+            let (cur, hot) = (i == self.page, over(r));
+            button_c(v, s, r, p.0, if cur { 0xFFFF55 } else if hot { 0xFFFFA0 } else { 0xE0E0E0 }, if cur { 0 } else if hot { 2 } else { 1 }, None);
+        }
+        // the list: the dirt scrolls with it (`GuiSlot`), what falls over its edges is cut off
+        dirt(v, s, f.list, scroll, 0x202020);
+        let from = v.len();
+        let (x, w, top) = (f.list[0] + 2.0, f.list[2] - 11.0, f.list[1] + 4.0 - scroll);
+        for (it, &dy) in items.iter().zip(&fl.y) {
+            let y = top + dy;
+            if y + ROW_PITCH < f.list[1] || y > f.list[1] + f.list[3] {
+                continue;
+            }
+            match it {
+                Item::Page(i) => heading(v, s, [x, y, w, PAGE_H], PAGES[*i].1),
+                Item::Group(g) => group(v, s, [x, y, w, GROUP_H], g),
+                Item::Row(act, label) => {
+                    let r = [x, y, w, ROW_H];
+                    row(v, s, r, *act, label, st, f.ctl, over(r), self.sel == Some(*act));
+                }
+            }
+        }
+        ui::clip(v, from, f.list.map(|u| u * s));
+        // the 4 unit fades `GuiSlot` lays over the ends of a list, then its bar and a frame
+        let (clear, black) = ([0.0; 4], [0.0, 0.0, 0.0, 1.0]);
+        grad(v, s, [f.list[0], f.list[1], f.list[2], 4.0], black, clear);
+        grad(v, s, [f.list[0], f.list[1] + f.list[3] - 4.0, f.list[2], 4.0], clear, black);
+        ui::scrollbar(v, s, f.list[0] + f.list[2] - 8.0, f.list[1], f.list[3], fl.total, scroll);
+        ui::bevel(v, s, f.list);
+        let hot = over(f.done);
+        button_c(v, s, f.done, "Done", if hot { 0xFFFFA0 } else { 0xE0E0E0 }, if hot { 2 } else { 1 }, None);
+        self.draw_tip(v, s, &f, &items);
+    }
+
+    /// The description of the chosen setting: its name, on a wide screen its value, and a sentence on what it does.
+    fn draw_tip(&self, v: &mut Vec<HudVertex>, s: f32, f: &Frame, items: &[Item]) {
+        ui::panel(v, s, f.tip, 0.55);
+        let (x, mut y, w) = (f.tip[0] + 6.0, f.tip[1] + 5.0, f.tip[2] - 12.0);
+        let text = |v: &mut Vec<HudVertex>, y: f32, t: &str, c: u32| HudPipeline::push_text(v, x * s, y * s, s, t, rgb(c));
+        let sel = self.sel.and_then(|a| {
+            items.iter().find_map(|it| match it {
+                Item::Row(r, l) if *r == a => Some((a, l.as_str())),
+                _ => None,
+            })
+        });
+        let Some((act, label)) = sel else {
+            for l in ui::wrap("Tap a setting to read what it does. Drag the list to scroll.", w).into_iter().take(if f.wide { 6 } else { 3 }) {
+                text(v, y, &l, 0xA0A0A0);
+                y += 10.0;
+            }
+            return;
+        };
+        let (name, val) = label.split_once(": ").unwrap_or((label, ""));
+        text(v, y, &ui::fit(name, w), 0xFFFF55);
+        y += 10.0;
+        let mut lines = 2;
+        if f.wide {
+            text(v, y, &ui::fit(val, w), value_color(val));
+            y += 14.0;
+            lines = 8;
+        }
+        for l in ui::wrap(tip(act, name), w).into_iter().take(lines) {
+            text(v, y, &l, 0xA0A0A0);
+            y += 10.0;
         }
     }
 }
@@ -1051,7 +1429,7 @@ impl Pause {
 
     /// An options page is open: the pad's bumpers step its tabs (`step_tab`).
     pub fn in_options(&self) -> bool {
-        self.opt.as_ref().is_some_and(|o| o.scr.cat().is_some())
+        self.opt.as_ref().is_some_and(OptionsUi::in_list)
     }
 
     pub fn step_tab(&mut self, d: i32, st: &mut Settings) {
@@ -1079,8 +1457,10 @@ impl Pause {
             HudPipeline::push_text(v, (hw - tw("You died!")) * s, 30.0 * s, 2.0 * s, "You died!", rgb(0xFFFFFF));
         } else {
             background(v, s, gw, gh, true);
-            let title = if self.tools { "Tools" } else { "Game menu" };
-            HudPipeline::push_text(v, (hw - tw(title) / 2.0) * s, 40.0 * s, s, title, rgb(0xFFFFFF));
+            ui::title(v, s, gw, 0.0, if self.tools { "Tools" } else { "Game menu" }, true);
+            // a panel behind the stack of buttons (the sun, bottom right, is not part of it)
+            let (x0, y0, x1, y1) = self.page(gw, gh, info).iter().filter(|b| b.0 != PAct::Atmos).fold((f32::MAX, f32::MAX, 0.0f32, 0.0f32), |a, b| (a.0.min(b.1[0]), a.1.min(b.1[1]), a.2.max(b.1[0] + b.1[2]), a.3.max(b.1[1] + b.1[3])));
+            ui::panel(v, s, [x0 - 12.0, y0 - 12.0, x1 - x0 + 24.0, y1 - y0 + 24.0], 0.45);
             // "Saving level.." for the first 20 ticks, its grey pulsing every 10.
             let t = self.born.elapsed().as_secs_f32();
             if t < 1.0 && !self.tools {
@@ -1118,13 +1498,34 @@ mod tests {
         ((r[0] + r[2] / 2.0) * s, (r[1] + r[3] / 2.0) * s)
     }
 
-    /// A tap on the first control of `o` whose text is `label`.
+    /// Scrolls `o` so that the setting whose text is `label` is at the top of the list (nothing for a label that is no setting).
+    fn show(o: &mut OptionsUi, st: &Settings, label: &str) {
+        let items = o.items(st);
+        if let Some(i) = items.iter().position(|it| matches!(it, Item::Row(_, l) if l == label)) {
+            o.scroll = flow(&items).y[i];
+        }
+    }
+
+    /// A tap on the first control of `o` whose text is `label` (a setting is scrolled into view first).
     fn tap(o: &mut OptionsUi, st: &mut Settings, label: &str) -> Option<OptEv> {
         let (_, gw, gh) = scaled_gs(SZ.0, SZ.1, st.gui_scale);
+        show(o, st, label);
         let r = o.widgets(gw, gh, st).into_iter().find(|b| b.label == label).unwrap_or_else(|| panic!("no {label}")).r;
         let (x, y) = px(r, st);
         o.event(ScreenEv::Down(x, y), SZ.0, SZ.1, st);
         o.event(ScreenEv::Up(x, y), SZ.0, SZ.1, st)
+    }
+
+    /// The control of the slider row starting with `label`, in px: (x, y, width, px per unit).
+    fn track_px(o: &mut OptionsUi, st: &Settings, label: &str) -> (f32, f32, f32, f32) {
+        let (s, gw, gh) = scaled_gs(SZ.0, SZ.1, st.gui_scale);
+        let items = o.items(st);
+        if let Some(i) = items.iter().position(|it| matches!(it, Item::Row(_, l) if l.starts_with(label))) {
+            o.scroll = flow(&items).y[i];
+        }
+        let r = o.widgets(gw, gh, st).into_iter().find(|b| b.label.starts_with(label)).unwrap_or_else(|| panic!("no {label}")).r;
+        let t = track(r, frame(gw, gh).ctl);
+        (t[0] * s, t[1] * s, t[2] * s, s)
     }
 
     #[test]
@@ -1209,7 +1610,7 @@ mod tests {
         assert_eq!((st.text(Opt::Vibrance).as_str(), st.look.motion), ("Vibrance: 30%", 1));
         let mut o = OptionsUi::new();
         tap(&mut o, &mut st, "Effects");
-        assert_eq!(o.scr, OptScr::Fx);
+        assert_eq!(o.page, 3);
         tap(&mut o, &mut st, "Motion: Low");
         tap(&mut o, &mut st, "Glow: ON");
         tap(&mut o, &mut st, "Haze: ON");
@@ -1217,7 +1618,7 @@ mod tests {
         tap(&mut o, &mut st, "Motion: On");
         assert_eq!(st.look.motion, 0, "off, low, on, off again");
         tap(&mut o, &mut st, "Graphics");
-        assert_eq!(o.scr, OptScr::Graphics, "a tab is one tap from any page");
+        assert_eq!(o.page, 1, "a page is one tap from any other");
         st.set_float(Opt::Vibrance, 0.0);
         assert_eq!(st.text(Opt::Vibrance), "Vibrance: OFF");
         st.save();
@@ -1242,80 +1643,145 @@ mod tests {
         assert_eq!(Settings::load(&root).post, 0);
     }
 
-    /// General -> Graphics tab (LoD, Render Distance) -> Perf. tab (Dynamic Res) -> Controls tab (wait for a key) -> Done closes from any page.
+    /// General -> Graphics (LoD, Render Distance) -> Performance (Dynamic Res) -> Controls (wait for a key, invert) -> Done closes.
     #[test]
     fn options_screens_flow() {
         let mut st = Settings::default();
         let mut o = OptionsUi::new();
-        assert_eq!(o.scr, OptScr::General);
+        assert_eq!((o.scr, o.page), (OptScr::List, 0));
         assert!(tap(&mut o, &mut st, "Graphics").is_none());
-        assert_eq!(o.scr, OptScr::Graphics);
+        assert_eq!(o.page, 1);
         assert!(tap(&mut o, &mut st, "LoD: ON").is_none() && !st.lod);
         tap(&mut o, &mut st, "Render Distance: Short");
         assert_eq!(st.render_distance, 3);
-        tap(&mut o, &mut st, "Perf.");
-        assert_eq!(o.scr, OptScr::Perf);
+        tap(&mut o, &mut st, "Performance");
+        assert_eq!(o.page, 2);
         tap(&mut o, &mut st, "Dynamic Res: ON");
         assert!(!st.dynamic_res && st.text(Opt::DynamicRes) == "Dynamic Res: OFF");
         tap(&mut o, &mut st, "Controls");
-        assert_eq!(o.scr, OptScr::Controls);
-        tap(&mut o, &mut st, "S");
-        assert!(tap(&mut o, &mut st, "> S <").is_none(), "tapping it again keeps waiting");
+        assert_eq!(o.page, 4);
+        tap(&mut o, &mut st, "Back: S");
+        assert!(tap(&mut o, &mut st, "Back: > S <").is_none(), "tapping it again keeps waiting");
         o.key(44, &mut st);
         assert_eq!(st.keys[2], 44);
         tap(&mut o, &mut st, "Invert Mouse: OFF");
-        assert!(st.invert_mouse, "the look settings moved to Controls");
+        assert!(st.invert_mouse);
         assert_eq!(tap(&mut o, &mut st, "Done"), Some(OptEv::Close));
         let mut v = Vec::new();
         o.draw(&mut v, SZ.0, SZ.1, &st, true);
         assert!(!v.is_empty());
     }
 
-    /// A slider follows the finger and ends at the track's ends.
+    /// A slider: a tap on its track puts it there, a finger moving along it follows the finger and ends at the track's ends, a tap on its
+    /// name only selects it.
     #[test]
     fn slider_drags() {
         let mut st = Settings::default();
         let mut o = OptionsUi::new();
+        let (x, y, w, s) = track_px(&mut o, &st, "Music");
+        let y = y + 4.0 * s;
+        o.event(ScreenEv::Down(x + 4.0 * s, y), SZ.0, SZ.1, &mut st);
+        assert_eq!(st.music, 1.0, "going down alone changes nothing");
+        o.event(ScreenEv::Move(x + 4.0 * s + (w - 8.0 * s) / 2.0, y), SZ.0, SZ.1, &mut st);
+        assert!((st.music - 0.5).abs() < 0.01);
+        o.event(ScreenEv::Move(x + w + 50.0 * s, y), SZ.0, SZ.1, &mut st);
+        assert_eq!(st.music, 1.0);
+        o.event(ScreenEv::Up(x + w, y), SZ.0, SZ.1, &mut st);
+        assert!(o.press.is_none());
+        // a tap at the left end
+        o.event(ScreenEv::Down(x + 4.0 * s, y), SZ.0, SZ.1, &mut st);
+        o.event(ScreenEv::Up(x + 4.0 * s, y), SZ.0, SZ.1, &mut st);
+        assert_eq!(st.music, 0.0);
+        // a tap on the name selects the row and moves nothing
         let (_, gw, gh) = scaled_gs(SZ.0, SZ.1, 0);
         let r = o.widgets(gw, gh, &st).into_iter().find(|b| b.label.starts_with("Music")).unwrap().r;
-        let (s, ..) = scaled_gs(SZ.0, SZ.1, 0);
-        let y = (r[1] + 10.0) * s;
-        o.event(ScreenEv::Down((r[0] + 4.0) * s, y), SZ.0, SZ.1, &mut st);
-        assert_eq!(st.music, 0.0);
-        o.event(ScreenEv::Move((r[0] + 4.0 + (r[2] - 8.0) / 2.0) * s, y), SZ.0, SZ.1, &mut st);
-        assert!((st.music - 0.5).abs() < 0.01);
-        o.event(ScreenEv::Move((r[0] + r[2] + 50.0) * s, y), SZ.0, SZ.1, &mut st);
-        assert_eq!(st.music, 1.0);
-        o.event(ScreenEv::Up((r[0] + r[2]) * s, y), SZ.0, SZ.1, &mut st);
-        assert!(o.drag.is_none());
+        let (nx, ny) = ((r[0] + 8.0) * s, (r[1] + 10.0) * s);
+        o.event(ScreenEv::Down(nx, ny), SZ.0, SZ.1, &mut st);
+        o.event(ScreenEv::Up(nx, ny), SZ.0, SZ.1, &mut st);
+        assert_eq!((st.music, o.sel), (0.0, Some(Act::Opt(Opt::Music))));
     }
 
-    /// Controls > Controller tab: rebind a button from the pad, drag a tuning slider, flip a toggle, and it all reaches options.txt.
+    /// Dragging up or down scrolls the list, the page list follows the section in view, a drag that starts on a slider and goes up still
+    /// scrolls, one that goes along it does not, and a drag never acts as a tap.
     #[test]
-    fn controller_tab_flow() {
+    fn dragging_scrolls_the_list() {
+        let mut st = Settings::default();
+        let mut o = OptionsUi::new();
+        let (s, gw, gh) = scaled_gs(SZ.0, SZ.1, 0);
+        let f = frame(gw, gh);
+        let (x, y) = ((f.list[0] + 20.0) * s, (f.list[1] + f.list[3] - 20.0) * s);
+        // up by 100 units from a plain row: the list moves 100, nothing flips
+        let before = st.clone();
+        o.event(ScreenEv::Down(x, y), SZ.0, SZ.1, &mut st);
+        o.event(ScreenEv::Move(x, y - 100.0 * s), SZ.0, SZ.1, &mut st);
+        o.event(ScreenEv::Up(x, y - 100.0 * s), SZ.0, SZ.1, &mut st);
+        assert!((o.scroll - 100.0).abs() < 0.01, "{}", o.scroll);
+        assert_eq!(st, before, "a drag is not a tap");
+        // a long drag stops at the end, and the last section is lit there
+        o.event(ScreenEv::Down(x, y), SZ.0, SZ.1, &mut st);
+        o.event(ScreenEv::Move(x, y - 5000.0 * s), SZ.0, SZ.1, &mut st);
+        o.event(ScreenEv::Up(x, y - 5000.0 * s), SZ.0, SZ.1, &mut st);
+        let (_, fl, max) = o.extent(&st, &f);
+        assert!((o.scroll - max).abs() < 0.01 && max > 0.0 && fl.total > f.list[3]);
+        assert_eq!(o.page, N_PAGES - 1);
+        // and back to the top
+        o.event(ScreenEv::Down(x, y - 200.0 * s), SZ.0, SZ.1, &mut st);
+        o.event(ScreenEv::Move(x, y + 5000.0 * s), SZ.0, SZ.1, &mut st);
+        o.event(ScreenEv::Up(x, y + 5000.0 * s), SZ.0, SZ.1, &mut st);
+        assert_eq!((o.scroll, o.page), (0.0, 0));
+        // from a slider's track: along it moves the slider, up scrolls
+        let (tx, ty, tw_, _) = track_px(&mut o, &st, "Music");
+        let (tx, ty) = (tx + tw_ / 2.0, ty + 4.0 * s);
+        let at = o.scroll;
+        o.event(ScreenEv::Down(tx, ty), SZ.0, SZ.1, &mut st);
+        o.event(ScreenEv::Move(tx, ty - 30.0 * s), SZ.0, SZ.1, &mut st);
+        o.event(ScreenEv::Up(tx, ty - 30.0 * s), SZ.0, SZ.1, &mut st);
+        assert!(o.scroll > at && st.music == 1.0, "up from a slider scrolls and leaves it");
+    }
+
+    /// A tap on a page jumps to its section and lights it even where the list cannot scroll that far; scrolling lights the section in view.
+    #[test]
+    fn pages_jump_and_light() {
+        let mut st = Settings::default();
+        let mut o = OptionsUi::new();
+        let (_, gw, gh) = scaled_gs(SZ.0, SZ.1, 0);
+        let f = frame(gw, gh);
+        let (items, fl, max) = o.extent(&st, &f);
+        for (i, p) in PAGES.iter().enumerate() {
+            tap(&mut o, &mut st, p.0);
+            assert_eq!(o.page, i);
+            assert!((o.scroll.clamp(0.0, max) - fl.starts[i].min(max)).abs() < 0.01, "{}", p.0);
+        }
+        assert!(fl.starts.windows(2).all(|w| w[0] < w[1]), "sections follow each other");
+        assert_eq!(items.iter().filter(|it| matches!(it, Item::Page(_))).count(), N_PAGES);
+        for i in 0..N_PAGES {
+            assert_eq!(which(&fl.starts, fl.starts[i], f.list[3]), i, "a section at the top of the view is the lit one");
+        }
+        assert_eq!(which(&fl.starts, 0.0, f.list[3]), 0);
+        assert_eq!(which(&fl.starts, max, f.list[3]), N_PAGES - 1);
+    }
+
+    /// Controller buttons and tuning: rebind a button from the pad, drag a knob, flip a switch, and it all reaches options.txt.
+    #[test]
+    fn controller_flow() {
         let root = tmp("pad");
         let mut st = Settings::load(&root);
         let mut o = OptionsUi::new();
-        tap(&mut o, &mut st, "Controls");
-        tap(&mut o, &mut st, "Controller");
-        assert_eq!(o.scr, OptScr::Pad);
+        tap(&mut o, &mut st, "Pad buttons");
+        assert_eq!(o.page, 5);
         tap(&mut o, &mut st, "Jump: A");
         assert!(o.pad_waiting());
         o.pad_button(Btn::X, &mut st);
         assert_eq!((st.pad.binds[0], o.pad_waiting()), (Btn::X, false));
-        tap(&mut o, &mut st, "Tuning...");
-        assert_eq!(o.scr, OptScr::PadTune);
+        tap(&mut o, &mut st, "Pad tuning");
+        assert_eq!(o.page, 6);
         tap(&mut o, &mut st, "Invert Y: OFF");
         assert!(st.pad.invert_y);
-        let (_, gw, gh) = scaled_gs(SZ.0, SZ.1, 0);
-        let r = o.widgets(gw, gh, &st).into_iter().find(|b| b.label.starts_with("Look X")).unwrap().r;
-        let (s, ..) = scaled_gs(SZ.0, SZ.1, 0);
-        let y = (r[1] + 10.0) * s;
-        o.event(ScreenEv::Down((r[0] + 4.0) * s, y), SZ.0, SZ.1, &mut st);
-        o.event(ScreenEv::Up((r[0] + 4.0) * s, y), SZ.0, SZ.1, &mut st);
+        let (x, y, _, s) = track_px(&mut o, &st, "Look X");
+        let y = y + 4.0 * s;
+        o.event(ScreenEv::Down(x + 4.0 * s, y), SZ.0, SZ.1, &mut st);
+        o.event(ScreenEv::Up(x + 4.0 * s, y), SZ.0, SZ.1, &mut st);
         assert_eq!(st.pad.look_h, 0.0);
-        tap(&mut o, &mut st, "Keys");
-        assert_eq!(o.scr, OptScr::Controls);
         let back = Settings::load(&root);
         assert_eq!((back.pad.binds[0], back.pad.invert_y, back.pad.look_h), (Btn::X, true, 0.0));
         let mut v = Vec::new();
@@ -1323,80 +1789,107 @@ mod tests {
         assert!(!v.is_empty());
     }
 
-    /// The Dig Delay slider: on the keys and the tuning pages, 100 ms .. `HOLD_SECS`, default `SWING_SECS`, kept in options.txt.
+    /// The Dig Delay slider (Controls): 100 ms .. `HOLD_SECS`, default `SWING_SECS`, kept in options.txt.
     #[test]
     fn dig_delay_slider() {
         let root = tmp("dig");
         let mut st = Settings::load(&root);
         assert!((st.dig_secs() - SWING_SECS).abs() < 1e-4);
         let mut o = OptionsUi::new();
-        tap(&mut o, &mut st, "Controls");
-        let (s, gw, gh) = scaled_gs(SZ.0, SZ.1, 0);
-        let r = o.widgets(gw, gh, &st).into_iter().find(|b| b.label.starts_with("Dig Delay")).unwrap().r;
-        let y = (r[1] + 10.0) * s;
-        o.event(ScreenEv::Down((r[0] + r[2] - 2.0) * s, y), SZ.0, SZ.1, &mut st);
-        o.event(ScreenEv::Up((r[0] + r[2] - 2.0) * s, y), SZ.0, SZ.1, &mut st);
+        let (x, y, w, s) = track_px(&mut o, &st, "Dig Delay");
+        let (px_, py_) = (x + w - 2.0 * s, y + 4.0 * s);
+        o.event(ScreenEv::Down(px_, py_), SZ.0, SZ.1, &mut st);
+        o.event(ScreenEv::Up(px_, py_), SZ.0, SZ.1, &mut st);
         assert_eq!((st.dig_delay, st.dig_secs()), (1.0, HOLD_SECS));
         assert_eq!(Settings::load(&root).dig_delay, 1.0);
-        tap(&mut o, &mut st, "Controller");
-        tap(&mut o, &mut st, "Tuning...");
-        assert!(o.widgets(gw, gh, &st).iter().any(|b| b.label.starts_with("Dig Delay")));
     }
 
-    /// Every page fits its screen without two controls overlapping, at the smallest GUI (320 x 240 units) and a phone's, and every
-    /// setting of the old Options / Video Settings / Effects / Controls screens is still on some tab.
+    /// At the smallest GUI (320 x 240 units) and a phone's: the page list, Done, the description and the list lie inside the screen
+    /// without touching each other, every row is inside the list's width, and every setting of the old screens is a row.
     #[test]
-    fn tabs_fit_and_keep_every_setting() {
+    fn list_fits_and_keeps_every_setting() {
         let st = Settings::default();
-        let pages = [OptScr::General, OptScr::Graphics, OptScr::Perf, OptScr::Fx, OptScr::Controls, OptScr::Pad, OptScr::PadTune];
+        let o = OptionsUi::new();
         let mut labels = Vec::new();
         for (w, h) in [(320.0, 240.0), SZ] {
             let (_, gw, gh) = scaled_gs(w, h, 0);
-            for scr in pages {
-                let o = OptionsUi { scr, ..OptionsUi::new() };
-                let ws = o.widgets(gw, gh, &st);
-                for (i, a) in ws.iter().enumerate() {
-                    assert!(a.r[0] >= 0.0 && a.r[0] + a.r[2] <= gw && a.r[1] >= 0.0 && a.r[1] + a.r[3] <= gh, "{scr:?} {}: off screen", a.label);
-                    for b in &ws[i + 1..] {
-                        let apart = a.r[0] + a.r[2] <= b.r[0] || b.r[0] + b.r[2] <= a.r[0] || a.r[1] + a.r[3] <= b.r[1] || b.r[1] + b.r[3] <= a.r[1];
-                        assert!(apart, "{scr:?}: {} overlaps {}", a.label, b.label);
-                    }
+            let f = frame(gw, gh);
+            let boxes = [("side", [f.side[0], f.side[1], f.side[2], 7.0 * 20.0]), ("list", f.list), ("tip", f.tip), ("done", f.done)];
+            for (i, (n, a)) in boxes.iter().enumerate() {
+                assert!(a[0] >= 0.0 && a[0] + a[2] <= gw && a[1] >= 0.0 && a[1] + a[3] <= gh, "{n} {a:?}: off screen at {gw}x{gh}");
+                for (m, b) in &boxes[i + 1..] {
+                    let apart = a[0] + a[2] <= b[0] || b[0] + b[2] <= a[0] || a[1] + a[3] <= b[1] || b[1] + b[3] <= a[1];
+                    assert!(apart, "{n} overlaps {m} at {gw}x{gh}");
                 }
-                labels.extend(ws.into_iter().map(|b| b.label));
+            }
+            assert!(f.side[3] >= 7.0 * 20.0, "all seven pages fit the page list");
+            let (items, fl, _) = o.extent(&st, &f);
+            for (it, &y) in items.iter().zip(&fl.y) {
+                if let Item::Row(_, l) = it {
+                    let name = l.split_once(": ").map_or(l.as_str(), |p| p.0);
+                    assert!(tw(name) <= f.list[2] - 11.0 - f.ctl - 14.0, "{name} does not fit beside its control at {gw}");
+                    assert!(y >= 0.0 && y + ROW_H <= fl.total);
+                    labels.push(l.clone());
+                }
             }
         }
         for want in [
             "Music", "Sound", "Difficulty", "GUI Scale", "View Bobbing", "Graphics: ", "Render Distance", "LoD", "Smooth Lighting", "Advanced OpenGL", "3D Anaglyph",
             "Performance", "Dynamic Res", "MSAA", "FXAA", "Post", "Renderer", "Vibrance", "Warm Light", "Water Look", "Glow", "Motion", "Haze", "Sensitivity", "Invert Mouse",
-            "Dig Delay", "Jump: ", "Look X", "Invert Y", "Done",
+            "Dig Delay", "Jump: ", "Look X", "Invert Y", "Forward", "Toggle Fog",
         ] {
-            assert!(labels.iter().any(|l| l.starts_with(want)), "{want} is on no tab");
+            assert!(labels.iter().any(|l| l.starts_with(want)), "{want} is not in the list");
+        }
+        // every control is reachable after scrolling: a row's rectangle is inside the list whenever it is the top row
+        let (_, gw, gh) = scaled_gs(320.0, 240.0, 0);
+        assert!(o.widgets(gw, gh, &st).iter().filter(|b| matches!(b.act, Act::Tab(_))).count() == N_PAGES);
+    }
+
+    /// Every sentence of the description pane fits the strip of the narrow screen (3 lines) and the pane of a wide one.
+    #[test]
+    fn tips_fit_their_panes() {
+        let (_, gw, gh) = scaled_gs(320.0, 240.0, 0);
+        let narrow = frame(gw, gh);
+        let wide = frame(2400.0 / 4.0, 1080.0 / 4.0);
+        for (name, text) in TIPS {
+            assert!(ui::wrap(text, narrow.tip[2] - 12.0).len() <= 2, "{name}: more than 2 lines in the strip");
+            assert!(ui::wrap(text, wide.tip[2] - 12.0).len() <= 8, "{name}: too long for the pane");
+            assert!(tw(name) <= narrow.tip[2] - 12.0);
+        }
+        // every named setting of the list that is not dim has a sentence
+        let st = Settings::default();
+        let o = OptionsUi::new();
+        for it in o.items(&st) {
+            if let Item::Row(a, l) = it {
+                let name = l.split_once(": ").map_or(l.as_str(), |p| p.0);
+                assert!(!tip(a, name).is_empty(), "{name} has no description");
+            }
         }
     }
 
-    /// LB / RB step the tabs, wrapping round; not on the editor, and not while a Controller button waits for its press.
+    /// LB / RB step the sections, wrapping round; not on the editor, and not while a Controller button waits for its press.
     #[test]
-    fn bumpers_step_the_tabs() {
+    fn bumpers_step_the_pages() {
         let mut st = Settings::default();
         let mut o = OptionsUi::new();
         o.step_tab(1, &mut st);
-        assert_eq!(o.scr, OptScr::Graphics);
+        assert_eq!(o.page, 1);
         o.step_tab(-1, &mut st);
         o.step_tab(-1, &mut st);
-        assert_eq!(o.scr, OptScr::Controls, "General wraps back to the last tab");
+        assert_eq!(o.page, N_PAGES - 1, "the first page wraps back to the last");
         o.step_tab(1, &mut st);
-        assert_eq!(o.scr, OptScr::General, "and forward again");
-        tap(&mut o, &mut st, "Controls");
-        tap(&mut o, &mut st, "Controller");
+        assert_eq!(o.page, 0, "and forward again");
+        tap(&mut o, &mut st, "Pad buttons");
         tap(&mut o, &mut st, "Jump: A");
         o.step_tab(1, &mut st);
-        assert_eq!(o.scr, OptScr::Pad, "the bumper is the binding while it waits");
+        assert_eq!(o.page, 5, "the bumper is the binding while it waits");
         o.pad_button(Btn::Rb, &mut st);
         o.step_tab(1, &mut st);
-        assert_eq!(o.scr, OptScr::General, "from the Controller pages the next tab after Controls");
+        assert_eq!(o.page, 6);
         let mut e = OptionsUi::atmos(&mut st);
         e.step_tab(1, &mut st);
         assert_eq!(e.scr, OptScr::Atmos);
+        assert_eq!(e.page, 0);
     }
 
     /// Both game menu pages fit at the smallest GUI and a phone's, with no two buttons on one another.

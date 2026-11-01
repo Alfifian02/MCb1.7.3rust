@@ -17,16 +17,14 @@ How it was made: the decompiled `minecraft/src` (675 classes: 84 blocks, 103 ite
 
 ## Smaller gaps already written down in the code or the changelogs
 
-Sound: nothing open (`random.drr` and the Nether's smoke: entry (39)). Sleeping: done in entry (35) (`performSleepSpawning`, `tile.bed.notValid`); the "too far" and "monsters near" messages do not exist in b1.7.3 (checked in `EntityPlayer.sleepInBedAt` / `BlockBed`), so they are not a gap. Fixed in (38): a far bed at respawn and the Nether's exploding bed. Still open there: the lying pose. These come from the README rows and `roadmap/gameplay.md`.
+Sound: nothing open (`random.drr` and the Nether's smoke: entry (39)). Sleeping: done in entry (35) (`performSleepSpawning`, `tile.bed.notValid`); the "too far" and "monsters near" messages do not exist in b1.7.3 (checked in `EntityPlayer.sleepInBedAt` / `BlockBed`), so they are not a gap. Fixed in (38): a far bed at respawn and the Nether's exploding bed. The lying pose and the camera: entry (40). These come from the README rows and `roadmap/gameplay.md`.
 
 Stale notes removed on 2026-10-30: the mob spawner's spinning mob is drawn (`render/items.rs`, `TileEntityMobSpawnerRenderer`), and the portal texture is animated (`render/anim.rs`, `PORTAL`). The README row of M6b that says "no fire, mushroom spread, snow/ice, rain on farmland" is also out of date: `world/ticks.rs` has `fire`, `mushroom`, `snow_ice` and `rained_on`.
 
 ## Known gaps left by entries (33) and (34) (explosions, fireballs, corpses)
 
 Found while porting them, not an audit of the rest of the entity code:
-- A falling sand or gravel block is `canBeCollidedWith` in the Java (`EntityFallingSand`) and does not stop a fireball here; a lit TNT does (`Mobs::targets` only takes `Falling` id 46).
-- An explosion does not break a painting inside its radius (`attackEntityFrom` on it); it only goes when its wall does. A fireball's direct hit does break it.
-- An explosion pushes mobs, boats, carts and the player only: not dropped items, a lit TNT, falling blocks or arrows (`motion +=` in `doExplosionA` reaches every entity).
+- An explosion pushes mobs, boats, carts, the player, dropped items, a lit TNT, falling blocks and arrows (entry (40)); not fireballs.
 - A creeper's blast on the player is not scaled by the difficulty like the other mob hits (`EntityMob` source); a TNT or fireball one is not in the Java either.
 - A corpse (`Mob::death` 1..=20) is not picked by a tap, passed by an arrow and not hit by a fireball; the Java keeps it `canBeCollidedWith` for the 20 ticks. A fireball hit on another fireball does nothing if the ghast that fired the first is gone from the list (the Java uses its last look).
 - Soul sand slows the move of a box (`physics::contact`) instead of keeping the motion x0.4 a tick.

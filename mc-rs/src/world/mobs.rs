@@ -286,7 +286,7 @@ fn cry(k: Kind, c: Cry, wolf: u8) -> Option<(&'static str, f32)> {
 /// What a fireball ran into besides the player and a mob (`canBeCollidedWith`): the index is the one in `App`'s list when `Mobs::targets` was
 /// filled. `Ev::Strike` tells `App` to do its `attackEntityFrom(owner, 0)`; a lit TNT has none (`Entity.attackEntityFrom` only marks it hit).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Strike { Boat(usize), Cart(usize), Painting(usize), Tnt }
+pub enum Strike { Boat(usize), Cart(usize), Painting(usize), Falling }
 
 pub enum Ev {
     /// A sound at a place: name, where, volume, pitch factor and whether the usual `(r - r) * 0.2` spread applies (`Audio::cry`).
@@ -1147,6 +1147,11 @@ pub struct Arrow {
 }
 
 impl Arrow {
+    /// `Explosion.doExplosionA`'s `motion += direction x impact` on an arrow (or a thrown snowball / egg) in flight; `v` is blocks a tick.
+    pub fn shove(&mut self, v: Vec3) {
+        self.vel += v;
+    }
+
     fn tick(&mut self, c: &Ctx, ev: &mut Vec<Ev>) -> bool {
         self.age += 1;
         self.pos += self.vel;
@@ -1329,7 +1334,7 @@ pub struct Mobs {
     pub list: Vec<Mob>,
     pub arrows: Vec<Arrow>,
     pub fireballs: Vec<Fireball>,
-    /// Boxes (min, max) of what else a fireball can hit (`canBeCollidedWith`: boats, carts, paintings, a lit TNT) and what it is; `App` refills it each frame.
+    /// Boxes (min, max) of what else a fireball can hit (`canBeCollidedWith`: boats, carts, paintings, a lit TNT, a falling sand / gravel block) and what it is; `App` refills it each frame.
     pub targets: Vec<(Vec3, Vec3, Strike)>,
     pub rng: JavaRandom,
     /// The random of the sounds (`Mob::talk`), apart from `rng` so that hearing a mob changes nothing it does.
@@ -2709,7 +2714,7 @@ mod tests {
             let at = (0..80).find_map(|_| { f.tick(&c, &mut [], targets, &mut [], &mut rng, &mut ev).then_some(()).map_or(Some(f.pos.z), |_| None) });
             (at, ev.iter().filter_map(|e| if let Ev::Strike(s) = e { Some(*s) } else { None }).collect::<Vec<_>>())
         };
-        for s in [Strike::Boat(2), Strike::Cart(1), Strike::Painting(0), Strike::Tnt] {
+        for s in [Strike::Boat(2), Strike::Cart(1), Strike::Painting(0), Strike::Falling] {
             let (z, struck) = go(&boxed(s));
             assert!(z.is_some_and(|z| z > 39.0 && z < 41.0), "{s:?}: {z:?}");
             assert_eq!(struck, [s], "it says what it hit");

@@ -8,6 +8,7 @@
 
 use crate::input::touch_ui::ScreenEv;
 use crate::options::{OptEv, OptionsUi, Settings};
+use crate::ui;
 use crate::render::hud::{sprites as sp, HudPipeline, HudVertex, NO_UV};
 use crate::world::decor::{self, Key};
 use crate::world::gen::overworld::WorldType;
@@ -505,13 +506,16 @@ impl Menu {
                     let [px, py] = p.pos;
                     p.pos = [ox + px * cs - py * sn, oy + px * sn + py * cs];
                 }
+                // a panel behind the stack of buttons, so the panorama does not fight the labels
+                let (x0, y0, x1, y1) = self.buttons(gw, gh).iter().fold((f32::MAX, f32::MAX, 0.0f32, 0.0f32), |a, b| (a.0.min(b.1[0]), a.1.min(b.1[1]), a.2.max(b.1[0] + b.1[2]), a.3.max(b.1[1] + b.1[3])));
+                ui::panel(v, s, [x0 - 12.0, y0 - 12.0, x1 - x0 + 24.0, y1 - y0 + 24.0], 0.4);
                 txt(v, 2.0, 2.0, "Minecraft Beta 1.7.3", 0xFFFFFF, false); // was 0x505050, grey on dirt: unreadable over the panorama
                 let c = "Copyright Mojang AB. Do not distribute.";
                 txt(v, gw - tw(c) - 2.0, gh - 10.0, c, 0xFFFFFF, false);
             }
             Scr::Select => self.draw_list(v, s, gw, gh),
             Scr::Create => {
-                txt(v, hw, (gh / 4.0).floor() - 40.0, "Create New World", 0xFFFFFF, true);
+                ui::title(v, s, gw, 0.0, "Create New World", true);
                 txt(v, hw - 100.0, 47.0, "World Name", 0xA0A0A0, false);
                 txt(v, hw - 100.0, 85.0, &format!("Will be saved in: {}", self.folder), 0xA0A0A0, false);
                 txt(v, hw - 100.0, 104.0, "Seed for the World Generator", 0xA0A0A0, false);
@@ -522,12 +526,14 @@ impl Menu {
             }
             Scr::Options => {}
             Scr::Rename => {
-                txt(v, hw, (gh / 4.0).floor() - 40.0, "Rename World", 0xFFFFFF, true); // height / 4 - 60 + 20
+                ui::title(v, s, gw, 0.0, "Rename World", true);
                 txt(v, hw - 100.0, 47.0, "World Name", 0xA0A0A0, false);
                 text_box(v, s, Self::fields(gw)[0], &self.name, false);
             }
             Scr::Delete => {
-                let name = self.sel.and_then(|i| self.worlds.get(i)).map_or("", |w| w.name.as_str());
+                let name = ui::fit(self.sel.and_then(|i| self.worlds.get(i)).map_or("", |w| w.name.as_str()), 140.0);
+                ui::title(v, s, gw, 0.0, "Delete World", true);
+                ui::panel(v, s, [hw - 170.0, 62.0, 340.0, 44.0], 0.5);
                 txt(v, hw, 70.0, "Are you sure you want to delete this world?", 0xFFFFFF, true);
                 txt(v, hw, 90.0, &format!("'{name}' will be lost forever! (A long time!)"), 0xFFFFFF, true);
             }
@@ -546,6 +552,11 @@ impl Menu {
         let hw = (gw / 2.0).floor();
         let (top, bottom) = Self::list_box(gh);
         dirt(v, s, [0.0, top, gw, bottom], self.scroll, 0x202020);
+        if self.worlds.is_empty() {
+            for (i, t) in ["No worlds yet.", "Tap Create New World to start one."].into_iter().enumerate() {
+                HudPipeline::push_text(v, (hw - tw(t) / 2.0) * s, (top + 16.0 + 12.0 * i as f32) * s, s, t, rgb(0x808080));
+            }
+        }
         for (i, wd) in self.worlds.iter().enumerate() {
             let y = top + 4.0 - self.scroll + i as f32 * 36.0;
             if y + 36.0 < top || y > bottom {
@@ -555,10 +566,12 @@ impl Menu {
                 rect(v, s, [hw - 110.0, y - 2.0, 220.0, 36.0], 0x808080);
                 rect(v, s, [hw - 109.0, y - 1.0, 218.0, 34.0], 0x000000);
             }
-            let kind = match wd.ty { WorldType::Vanilla => "Vanilla", WorldType::Tectonic => "Tectonic", WorldType::Blooming => "Blooming" };
-            let line = format!("{} ({}, {:?} MB) {kind}", wd.folder, date(wd.modified), (wd.bytes / 1024 * 100 / 1024) as f32 / 100.0);
-            HudPipeline::push_text(v, (hw - 108.0) * s, (y + 1.0) * s, s, &wd.name, rgb(0xFFFFFF));
-            HudPipeline::push_text(v, (hw - 108.0) * s, (y + 12.0) * s, s, &line, rgb(0x808080));
+            // the kind is a coloured tag on the right of the name
+            let (kind, kc) = match wd.ty { WorldType::Vanilla => ("Vanilla", 0xAAAAAA), WorldType::Tectonic => ("Tectonic", 0x55FFFF), WorldType::Blooming => ("Blooming", 0xFF55FF) };
+            let line = format!("{} ({}, {:?} MB)", wd.folder, date(wd.modified), (wd.bytes / 1024 * 100 / 1024) as f32 / 100.0);
+            HudPipeline::push_text(v, (hw - 108.0) * s, (y + 1.0) * s, s, &ui::fit(&wd.name, 216.0 - tw(kind) - 8.0), rgb(0xFFFFFF));
+            HudPipeline::push_text(v, (hw + 108.0 - tw(kind)) * s, (y + 1.0) * s, s, kind, rgb(kc));
+            HudPipeline::push_text(v, (hw - 108.0) * s, (y + 12.0) * s, s, &ui::fit(&line, 216.0), rgb(0x808080));
         }
         // The dirt over the list's ends, and their 4 px fade into the list.
         dirt(v, s, [0.0, 0.0, gw, top], 0.0, 0x404040);
@@ -566,16 +579,8 @@ impl Menu {
         let (clear, black) = ([0.0; 4], [0.0, 0.0, 0.0, 1.0]);
         grad(v, s, [0.0, top, gw, 4.0], black, clear);
         grad(v, s, [0.0, bottom - 4.0, gw, 4.0], clear, black);
-        let max = self.max_scroll(gh);
-        if max > 0.0 {
-            let (x, span) = (hw + 124.0, bottom - top);
-            let th = ((span * span / (self.worlds.len() as f32 * 36.0)).clamp(32.0, span - 8.0)).floor();
-            let ty = (self.scroll * (span - th) / max + top).max(top);
-            rect(v, s, [x, top, 6.0, span], 0x000000);
-            rect(v, s, [x, ty, 6.0, th], 0x808080);
-            rect(v, s, [x, ty, 5.0, th - 1.0], 0xC0C0C0);
-        }
-        HudPipeline::push_text(v, (hw - tw("Select World") / 2.0) * s, 20.0 * s, s, "Select World", rgb(0xFFFFFF));
+        ui::scrollbar(v, s, hw + 124.0, top, bottom - top, self.worlds.len() as f32 * 36.0, self.scroll);
+        ui::title(v, s, gw, 4.0, "Select World", false);
     }
 
     /// The text field being typed in, over the sign editor's keyboard (`decor::layout`, which scales by `h / 270`).
@@ -613,7 +618,7 @@ pub(crate) fn dirt(v: &mut Vec<HudVertex>, s: f32, r: [f32; 4], scroll: f32, tin
     }
 }
 
-fn rect(v: &mut Vec<HudVertex>, s: f32, r: [f32; 4], c: u32) {
+pub(crate) fn rect(v: &mut Vec<HudVertex>, s: f32, r: [f32; 4], c: u32) {
     HudPipeline::push_quad(v, r[0] * s, r[1] * s, r[2] * s, r[3] * s, rgb(c));
 }
 

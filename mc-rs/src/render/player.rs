@@ -2,7 +2,7 @@
 //! `RenderPlayer` / `RenderLiving` (third-person view) and like `GuiInventory` (the preview in the inventory panel).
 //! The geometry is one function (`quads`) that both targets use: the world pushes it into the entity mesh, the HUD projects it.
 //! Anim state is `EntityLiving.onUpdate` (body yaw follows the walk, limb swing) + `EntityPlayer` arm swing.
-//! ponytail: no armor layers (`modelArmor*`, 10 more textures), ears, cloak, hurt flash or sleeping pose; the held item (both views) and the dropped
+//! ponytail: no armor layers (`modelArmor*`, 10 more textures), ears, cloak, hurt flash (the sleeping pose is `lying_root`); the held item (both views) and the dropped
 //! items go through `render_item` / `drop_item` (`ItemRenderer.renderItem`, `RenderItem`); the inventory preview looks straight ahead (no mouse on touch).
 //! UNVERIFIED: written without a Rust toolchain: not compiled, not run.
 
@@ -206,6 +206,20 @@ fn limb_quads(root: &Mat4, limbs: [Limb; 7], slot: u8, show: [bool; 7]) -> Vec<Q
 /// (model y is down), 1/16 and `RenderPlayer.preRenderCallback`'s 15/16, lifted 24 px less 1/128.
 pub fn root(feet: Vec3, body_yaw: f32) -> Mat4 {
     Mat4::from_translation(feet) * Mat4::from_rotation_y((180.0 - body_yaw).to_radians()) * Mat4::from_scale(Vec3::new(-1.0, -1.0, 1.0) * (15.0 / 16.0 / 16.0)) * Mat4::from_translation(Vec3::new(0.0, -23.875, 0.0))
+}
+
+/// `RenderPlayer` for a sleeper (`func_22016_b` + `func_22017_a`): the model is moved 1.8 off `posX / posZ` away from the pillow (`field_22063_x` /
+/// `field_22061_z`) and, instead of the body's turn, rotated `getBedOrientationInDegrees` about Y, 90 about Z (onto its back) and 270 about Y.
+/// `pos` is `posX / posY / posZ` (the bed's surface + 15/16; the feet are `yOffset` 0.2 under it), `d` the bed's direction (`meta & 3`).
+pub fn lying_root(pos: Vec3, d: usize) -> Mat4 {
+    let (ox, oz) = [(0.0, -1.8), (1.8, 0.0), (0.0, 1.8), (-1.8, 0.0)][d & 3];
+    let bed = [90.0f32, 0.0, 270.0, 180.0][d & 3];
+    Mat4::from_translation(pos + Vec3::new(ox, -0.2, oz))
+        * Mat4::from_rotation_y(bed.to_radians())
+        * Mat4::from_rotation_z(90.0f32.to_radians())
+        * Mat4::from_rotation_y(270.0f32.to_radians())
+        * Mat4::from_scale(Vec3::new(-1.0, -1.0, 1.0) * (15.0 / 16.0 / 16.0))
+        * Mat4::from_translation(Vec3::new(0.0, -23.875, 0.0))
 }
 
 /// The player at the given pose into the entity mesh (both windings: the Java draws with culling off), then his item.
@@ -610,6 +624,26 @@ impl Anim {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A sleeper lies level, head at the pillow and feet toward the foot of the bed, whatever the bed's direction: the head is at `pos` (to
+    /// within the model's depth) and the soles 1.8 away along the bed, at `posY - 0.2`.
+    #[test]
+    fn a_sleeper_lies_with_the_head_at_the_pillow() {
+        // Pillow end of each direction, as the unit step from the bed's middle to `use_bed`'s `pos` offset (0.9 / 0.1 of the cell).
+        for (d, toward_head) in [(0usize, Vec3::Z), (1, -Vec3::X), (2, -Vec3::Z), (3, Vec3::X)] {
+            let pos = Vec3::new(10.5, 65.0 + 15.0 / 16.0, 20.5);
+            let m = lying_root(pos, d);
+            // Model pixels: x, y (down), z. The top of the head is y = -8, the soles y = 24 (before the 15/16 scale).
+            let head = m.transform_point3(Vec3::new(0.0, -8.0, 0.0));
+            let sole = m.transform_point3(Vec3::new(0.0, 24.0, 0.0));
+            let along = (head - sole).normalize();
+            assert!(along.dot(toward_head) > 0.999, "d {d}: the head is toward the pillow, not {along:?}");
+            assert!((head.y - sole.y).abs() < 1e-3, "d {d}: level");
+            assert!((head.y - (pos.y - 0.2)).abs() < 0.02, "d {d}: the model's middle line is at `posY - yOffset`: {}", head.y);
+            let len = (head - sole).length();
+            assert!((len - 32.0 * 15.0 / 256.0).abs() < 1e-3, "d {d}: 32 px of the 15/16 model: {len}");
+        }
+    }
 
     #[test]
     fn the_skin_is_in_the_atlas_and_the_model_is_42_quads() {

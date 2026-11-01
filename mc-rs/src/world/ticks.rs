@@ -77,6 +77,15 @@ pub struct Falling {
     pub fuse: i32,
 }
 
+impl Falling {
+    /// `Explosion.doExplosionA`'s `motion += direction x impact` on a lit TNT or a falling block; `v` is blocks a tick. A moving piston piece is no entity.
+    pub fn shove(&mut self, v: Vec3) {
+        if self.mv.is_none() {
+            (self.vx, self.vy, self.vz) = (self.vx + v.x, self.vy + v.y, self.vz + v.z);
+        }
+    }
+}
+
 pub struct Ticks {
     now: u64,
     seq: u64,
@@ -778,6 +787,19 @@ impl Ticks {
             f.age += 1;
             f.prev = f.pos;
             f.vy -= 0.04;
+            // A blast's push (`Falling::shove`): it drifts in x / z like the TNT does (a solid cell stops it) and a rise stops under a ceiling.
+            // All three are 0 / falling for a plain drop, so this changes nothing there. ponytail: the point probe of the TNT's, not the 0.98 box.
+            if f.vx != 0.0 || f.vz != 0.0 || f.vy > 0.0 {
+                let solid = |p: Vec3| !non_solid(bid(w, p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32));
+                if f.vy > 0.0 && solid(Vec3::new(f.pos.x, f.pos.y + f.vy + 0.49, f.pos.z)) {
+                    f.vy = 0.0;
+                }
+                let nx = f.pos.x + f.vx;
+                if solid(Vec3::new(nx + 0.49 * f.vx.signum(), f.pos.y, f.pos.z)) { f.vx = 0.0 } else { f.pos.x = nx }
+                let nz = f.pos.z + f.vz;
+                if solid(Vec3::new(f.pos.x, f.pos.y, nz + 0.49 * f.vz.signum())) { f.vz = 0.0 } else { f.pos.z = nz }
+                (f.vx, f.vz) = (f.vx * 0.98, f.vz * 0.98);
+            }
             let ny = f.pos.y + f.vy;
             let (x, z) = (f.pos.x.floor() as i32, f.pos.z.floor() as i32);
             let ground = (ny - 0.49).floor() as i32;
@@ -1288,6 +1310,15 @@ impl Ticks {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A blast's push (`Explosion.doExplosionA`: `motion += direction x impact`) is added to a falling block's motion, in all three axes.
+    #[test]
+    fn a_blast_pushes_a_falling_block() {
+        let p = Vec3::new(5.5, 20.5, 5.5);
+        let mut f = Falling { pos: p, prev: p, vy: 0.0, id: 12, age: 0, vx: 0.0, vz: 0.0, fuse: -1, meta: 0, mv: None };
+        f.shove(Vec3::new(0.3, 0.2, -0.1));
+        assert_eq!((f.vx, f.vy, f.vz), (0.3, 0.2, -0.1));
+    }
 
     #[test]
     fn burn_table_and_snow_floor() {
