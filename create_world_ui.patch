@@ -235,7 +235,61 @@ Only in repo/mc-rs/src: rumble.rs
 Only in repo/mc-rs/src: satchel.rs
 Only in repo/mc-rs/src: stats_ui.rs
 Only in repo/mc-rs/src: ui.rs
-Only in repo/mc-rs/src: world
+Only in repo/mc-rs/src/world: atmos.rs
+Only in repo/mc-rs/src/world: biome.rs
+Only in repo/mc-rs/src/world: biomelife.rs
+Only in repo/mc-rs/src/world: boat.rs
+Only in repo/mc-rs/src/world: book.rs
+Only in repo/mc-rs/src/world: chest.rs
+Only in repo/mc-rs/src/world: chunk.rs
+Only in repo/mc-rs/src/world: chunks
+Only in repo/mc-rs/src/world: chunks.rs
+Only in repo/mc-rs/src/world: climate.rs
+Only in repo/mc-rs/src/world: combat
+Only in repo/mc-rs/src/world: craft.rs
+Only in repo/mc-rs/src/world: decor.rs
+Only in repo/mc-rs/src/world: dig.rs
+Only in repo/mc-rs/src/world: effects.rs
+Only in repo/mc-rs/src/world: far.rs
+Only in repo/mc-rs/src/world: gear.rs
+Only in repo/mc-rs/src/world: gen
+Only in repo/mc-rs/src/world: items.rs
+Only in repo/mc-rs/src/world: lod.rs
+Only in repo/mc-rs/src/world: map.rs
+Only in repo/mc-rs/src/world: mapcolors.rs
+Only in repo/mc-rs/src/world: minecart.rs
+diff -u -r orig/mc-rs/src/world/mobs.rs repo/mc-rs/src/world/mobs.rs
+--- orig/mc-rs/src/world/mobs.rs	2026-11-01 19:50:44.000000000 +0000
++++ repo/mc-rs/src/world/mobs.rs	2026-11-01 13:04:00.005617720 +0000
+@@ -1581,6 +1581,12 @@
+             if (end.0 as f32 - eye.x).abs() >= 1.5 || (end.1 as f32 - eye.y).abs() >= 1.5 || (end.2 as f32 - eye.z).abs() >= 1.5 {
+                 continue;
+             }
++            // NOT b1.7.3 (UNVERIFIED, not compiled): the 1.5 test above is taken from the sleeper's posX / posZ, which lie 0.1 / 0.9 off the bed's
++            // middle, so on one side a mob standing OUTSIDE a one-block wall (2 cells away) still passed and then appeared beside the bed, inside a
++            // closed base. The cell the path ends on must also be next to the bed's head cell.
++            if (end.0 - px).abs() > 1 || (end.2 - pz).abs() > 1 {
++                continue;
++            }
+             let (cx, cy, cz) = beside.unwrap_or((x, y + 1, z));
+             let m = Mob::new(kind, cx as f32 + 0.5, cy as f32, cz as f32 + 0.5, 0.0, &mut self.rng);
+             if let Some((n, v)) = cry(kind, Cry::Say, 0) {
+Only in repo/mc-rs/src/world: mod.rs
+Only in repo/mc-rs/src/world: names.rs
+Only in repo/mc-rs/src/world: pack.rs
+Only in repo/mc-rs/src/world: path.rs
+Only in repo/mc-rs/src/world: physics.rs
+Only in repo/mc-rs/src/world: pick.rs
+Only in repo/mc-rs/src/world: portal.rs
+Only in repo/mc-rs/src/world: rail.rs
+Only in repo/mc-rs/src/world: redstone.rs
+Only in repo/mc-rs/src/world: save.rs
+Only in repo/mc-rs/src/world: sky.rs
+Only in repo/mc-rs/src/world: sprint.rs
+Only in repo/mc-rs/src/world: stamina.rs
+Only in repo/mc-rs/src/world: stats.rs
+Only in repo/mc-rs/src/world: ticks.rs
+Only in repo/mc-rs/src/world: vitals.rs
 --- orig/roadmap/gameplay.md	2026-11-01 19:50:44.000000000 +0000
 +++ repo/roadmap/gameplay.md	2026-11-01 12:58:53.744919668 +0000
 @@ -78,7 +78,7 @@

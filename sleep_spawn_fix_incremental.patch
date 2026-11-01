@@ -1,0 +1,15 @@
+--- a/mc-rs/src/world/mobs.rs
++++ b/mc-rs/src/world/mobs.rs
+@@ -1581,6 +1581,12 @@
+             if (end.0 as f32 - eye.x).abs() >= 1.5 || (end.1 as f32 - eye.y).abs() >= 1.5 || (end.2 as f32 - eye.z).abs() >= 1.5 {
+                 continue;
+             }
++            // NOT b1.7.3 (UNVERIFIED, not compiled): the 1.5 test above is taken from the sleeper's posX / posZ, which lie 0.1 / 0.9 off the bed's
++            // middle, so on one side a mob standing OUTSIDE a one-block wall (2 cells away) still passed and then appeared beside the bed, inside a
++            // closed base. The cell the path ends on must also be next to the bed's head cell.
++            if (end.0 - px).abs() > 1 || (end.2 - pz).abs() > 1 {
++                continue;
++            }
+             let (cx, cy, cz) = beside.unwrap_or((x, y + 1, z));
+             let m = Mob::new(kind, cx as f32 + 0.5, cy as f32, cz as f32 + 0.5, 0.0, &mut self.rng);
+             if let Some((n, v)) = cry(kind, Cry::Say, 0) {
