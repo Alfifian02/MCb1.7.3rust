@@ -639,7 +639,7 @@ struct Press {
 
 /// What a setting is for, by its name (the pad's knobs and switches have none of their own in `Opt`). The sentences are written to fit
 /// three lines of the narrow screen's strip; `tools/optlist_proto.py` checks that.
-const TIPS: [(&str, &str); 32] = [
+const TIPS: [(&str, &str); 33] = [
     ("Music", "Volume of the background music."),
     ("Sound", "Volume of steps, mobs, blocks and ambience."),
     ("Difficulty", "Peaceful removes monsters. Easy hurts less, Hard hurts more."),
@@ -648,7 +648,7 @@ const TIPS: [(&str, &str); 32] = [
     ("Render Distance", "Chunks kept around you: Far 16, Normal 8, Short 4, Tiny 2."),
     ("LoD", "Draws far terrain as simplified blocks, out to 768 blocks."),
     ("Performance", "Frame cap: Max FPS, Balanced (120 fps) or Power saver (40 fps)."),
-    ("Sustained Perf", "Holds clocks the chip can keep up, so long sessions throttle less. May lower the peak speed."),
+    ("Sustained Perf", "Steadier clocks for long sessions, less throttling. May lower peak speed."),
     ("Dynamic Res", "Raises and lowers the render resolution (50% to 100%) with the GPU load."),
     ("MSAA", "Samples for smoother edges. Auto picks by GPU. Applies at the next start."),
     ("FXAA", "Smooths edges in the final pass. Auto uses it only without MSAA. Next start."),
