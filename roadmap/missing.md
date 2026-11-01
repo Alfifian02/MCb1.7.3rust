@@ -17,7 +17,7 @@ How it was made: the decompiled `minecraft/src` (675 classes: 84 blocks, 103 ite
 
 ## Smaller gaps already written down in the code or the changelogs
 
-Sound: `random.drr` (in `audio/table.rs`, no call site found), the 8 smoke puffs of water poured in the Nether (no trace in the code). Sleeping: done in entry (35) (`performSleepSpawning`, `tile.bed.notValid`); the "too far" and "monsters near" messages do not exist in b1.7.3 (checked in `EntityPlayer.sleepInBedAt` / `BlockBed`), so they are not a gap. Still open there: the Nether's exploding bed and the lying pose. These come from the README rows and `roadmap/gameplay.md`; the sound, smoke and bed items were only grepped, not read.
+Sound: nothing open (`random.drr` and the Nether's smoke: entry (39)). Sleeping: done in entry (35) (`performSleepSpawning`, `tile.bed.notValid`); the "too far" and "monsters near" messages do not exist in b1.7.3 (checked in `EntityPlayer.sleepInBedAt` / `BlockBed`), so they are not a gap. Fixed in (38): a far bed at respawn and the Nether's exploding bed. Still open there: the lying pose. These come from the README rows and `roadmap/gameplay.md`.
 
 Stale notes removed on 2026-10-30: the mob spawner's spinning mob is drawn (`render/items.rs`, `TileEntityMobSpawnerRenderer`), and the portal texture is animated (`render/anim.rs`, `PORTAL`). The README row of M6b that says "no fire, mushroom spread, snow/ice, rain on farmland" is also out of date: `world/ticks.rs` has `fire`, `mushroom`, `snow_ice` and `rained_on`.
 

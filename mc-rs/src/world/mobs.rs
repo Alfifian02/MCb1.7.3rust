@@ -305,7 +305,7 @@ pub enum Ev {
     Burst(Vec3),
     /// A fireball's smoke puff (`spawnParticle("smoke", x, y + 0.5, z)` every tick): where.
     Smoke(Vec3),
-    /// `random.bow` as a skeleton shoots (`false`), `random.bowhit` as an arrow hits a block, a mob or the player (`true`), here; `lib.rs` plays it.
+    /// `random.bow` as a skeleton shoots (`false`), `random.drr` as an arrow hits a block, a mob or the player (`true`), here; `lib.rs` plays it.
     Bow(Vec3, bool),
     /// A player's arrow stopped against a block here.
     Landed(Vec3),
@@ -2033,7 +2033,7 @@ mod tests {
         }
     }
 
-    /// `random.bowhit` where an arrow meets a block, a mob or the player (not when it just times out in the air); a snowball is silent.
+    /// `random.drr` where an arrow meets a block, a mob or the player (not when it just times out in the air); a snowball is silent.
     #[test]
     fn an_arrow_sounds_where_it_hits() {
         let l = |_, _, _| 0u8;

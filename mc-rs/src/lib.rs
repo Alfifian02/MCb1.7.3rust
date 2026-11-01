@@ -1087,11 +1087,11 @@ impl App {
                 Ev::Burst(p) => self.explode(p, 1.0, true),
                 Ev::Smoke(p) => self.fx.puff(p),
                 Ev::Snd(name, at, vol, mul, jit) => self.audio.cry(name, at, vol, mul, jit),
-                // `EntitySkeleton`'s shot is "random.bow" at 1.0, pitch `1 / (r * 0.4 + 0.8)`; `EntityArrow`'s hit is "random.bowhit" at 1.0, pitch
-                // `1.2 / (r * 0.2 + 0.9)` (both NOT in the b1.7.3 index, see `assets/sound/extra`).
+                // `EntitySkeleton`'s shot is "random.bow" at 1.0, pitch `1 / (r * 0.4 + 0.8)` (NOT in the b1.7.3 index, see `assets/sound/extra`);
+                // `EntityArrow`'s hit, on a block and on a mob it hurts, is "random.drr" at 1.0, pitch `1.2 / (r * 0.2 + 0.9)`.
                 Ev::Bow(at, hit) => {
                     let pitch = if hit { 1.2 / (self.audio.rnd() * 0.2 + 0.9) } else { 1.0 / (self.audio.rnd() * 0.4 + 0.8) };
-                    self.audio.play(if hit { "random.bowhit" } else { "random.bow" }, at, 1.0, pitch);
+                    self.audio.play(if hit { "random.drr" } else { "random.bow" }, at, 1.0, pitch);
                 }
                 // NOT b1.7.3 (`animalAi`): a sheep ate; the grass spread covers the dirt again.
                 Ev::Graze((x, y, z)) => match (self.chunks.block(x, y, z), self.chunks.block(x, y - 1, z)) {
@@ -2600,12 +2600,17 @@ impl App {
 
     /// `EntityPlayer.func_25060_a`: the bed's free cell, else the world spawn (feet 0.1 above the cell; `pos` is the box centre).
     /// `Minecraft.respawn`: a bed that is gone, or has no free cell beside it, says `tile.bed.notValid` and is forgotten (the new player
-    /// has no spawn coordinate). UNVERIFIED: the text is from memory of b1.7.3's `en_US.lang`, which is not in the decompiled tree.
-    /// ponytail: a bed in a chunk that is not loaded says nothing and stays remembered (the Java `prepareChunk`s it); it respawns at the world spawn.
+    /// has no spawn coordinate). The bed's chunks are made first (`func_25060_a`'s four `prepareChunk`s; `preload` takes the 4 x 4 round it, which
+    /// holds the 3 blocks the Java reaches), so a bed far from where the player died, or one in the overworld after a death in the Nether (whose
+    /// manager is new and empty), still counts. UNVERIFIED: the text is from memory of b1.7.3's `en_US.lang`, which is not in the decompiled tree.
+    /// ponytail: `preload` runs on the render thread (once per death).
     fn respawn_pos(&mut self) -> glam::Vec3 {
+        if let Some((x, _, z)) = self.bed_spawn {
+            self.chunks.preload(chunk_coord(x as f32), chunk_coord(z as f32));
+        }
         let get = |a, b, c| self.chunks.block_loaded(a, b, c).unwrap_or(0);
         let cell = self.bed_spawn.filter(|&(x, y, z)| get(x, y, z) == 26).and_then(|b| pick::wake_cell(&get, b, self.chunks.meta(b.0, b.1, b.2), 0));
-        if cell.is_none() && self.bed_spawn.is_some_and(|(x, _, z)| self.chunks.block_loaded(x, 0, z).is_some()) {
+        if cell.is_none() && self.bed_spawn.is_some() {
             (self.hint, self.hint_msg, self.bed_spawn) = (2.5, "Your home bed was missing or obstructed", None);
         }
         cell.map_or(self.spawn, |(x, y, z)| glam::Vec3::new(x as f32 + 0.5, y as f32 + 1.0, z as f32 + 0.5))
@@ -2623,6 +2628,18 @@ impl App {
                 return;
             }
             m = self.chunks.meta(x, y, z);
+        }
+        // `BlockBed.blockActivated`: where `canRespawnHere` is false (the Nether) the bed blows up instead of letting anyone sleep: the tapped half goes,
+        // then the cell one further along `headBlockToFootBlockMap` if it is a bed too, and a power 5 fiery blast at the middle of THAT cell (the
+        // Java moves x / z before the blast; the averaged point it works out is never used). Dead or alive, whatever the hour.
+        if self.nether {
+            let (dx, dz) = pick::BED_DIR[(m & 3) as usize];
+            self.chunks.set_block(x, y, z, 0);
+            if self.chunks.block_loaded(x + dx, y, z + dz) == Some(26) {
+                self.chunks.set_block(x + dx, y, z + dz, 0);
+            }
+            self.explode(glam::Vec3::new((x + dx) as f32 + 0.5, y as f32 + 0.5, (z + dz) as f32 + 0.5), 5.0, true);
+            return;
         }
         let eye = self.player.pos + glam::Vec3::new(0.0, EYE_HEIGHT, 0.0);
         let near = (eye.x - x as f32).abs() <= 3.0 && (eye.y - y as f32).abs() <= 2.0 && (eye.z - z as f32).abs() <= 3.0;
@@ -2803,9 +2820,14 @@ impl App {
             let (x, y, z) = pick::place_pos(&hit);
             if self.chunks.block_loaded(x, y, z).is_some_and(pick::replaceable) && y < 128 {
                 if self.nether && fluid == 8 {
-                    // `ItemBucket`: water does not stay in the Nether; it fizzes away (ponytail: the 8 smoke puffs are not drawn).
+                    // `ItemBucket`: water does not stay in the Nether; it fizzes away: "random.fizz" at 0.5, pitch `2.6 + (r - r) * 0.8`, played at the ray's
+                    // origin plus 0.5 on each axis (the Java's `var7 / var9 / var11`, the eye, not the cell), then 8 `largesmoke` (still) at random points of the cell.
                     let p = 2.6 + (self.audio.rnd() - self.audio.rnd()) * 0.8;
-                    self.audio.play("random.fizz", glam::Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5), 0.5, p);
+                    self.audio.play("random.fizz", eye.as_vec3() + glam::Vec3::splat(0.5), 0.5, p);
+                    for _ in 0..8 {
+                        let at = glam::Vec3::new(x as f32 + self.audio.rnd(), y as f32 + self.audio.rnd(), z as f32 + self.audio.rnd());
+                        self.fx.puff(at);
+                    }
                 } else {
                     self.chunks.set_block_meta(x, y, z, fluid, 0);
                 }

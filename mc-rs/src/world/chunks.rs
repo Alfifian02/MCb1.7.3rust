@@ -1702,7 +1702,8 @@ impl ChunkManager {
         // 1. Collect finished chunks; ones the player already walked away from are dropped.
         while let Ok((key, blocks)) = self.done.try_recv() {
             self.pending.remove(&key);
-            if d2(key) <= keep {
+            // A chunk made meanwhile (`preload`, e.g. round a bed at a respawn) wins: `insert` would swap it for this raw one.
+            if d2(key) <= keep && !self.chunks.contains_key(&key) {
                 self.insert(key, blocks);
             }
         }
@@ -2169,6 +2170,27 @@ mod tests {
         }
         assert_eq!(a.loot.len(), b.loot.len());
         assert_eq!(a.spawners.len(), b.spawners.len());
+    }
+
+    /// A chunk made while a worker is still generating it (`preload` round a bed at a respawn) is kept: the worker's raw result, collected by a
+    /// later `stream`, no longer replaces it. The result only comes out of the channel inside `stream`, so this does not depend on timing.
+    #[test]
+    fn a_chunk_made_while_a_worker_generates_it_is_not_replaced() {
+        let mut m = ChunkManager::new(1, 1);
+        m.stream(0, 0);
+        let key = *m.pending.iter().next().expect("a generate job is out");
+        m.fresh(key);
+        let (x, z) = (key.0 * 16 + 3, key.1 * 16 + 5);
+        assert!(m.set_block_meta(x, 40, z, 35, 0), "a mark the terrain does not have"); // red wool
+        for _ in 0..4000 {
+            m.stream(0, 0);
+            if m.pending.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(m.pending.is_empty(), "the worker's result was collected");
+        assert_eq!(m.block_loaded(x, 40, z), Some(35), "and did not replace the chunk made meanwhile");
     }
 
     /// A populate result is dropped when a chunk of its block was edited after the copy was made; the chunk, still unpopulated, is
