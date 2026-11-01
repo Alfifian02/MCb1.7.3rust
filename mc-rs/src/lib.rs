@@ -4900,6 +4900,26 @@ fn start_init(app: &AndroidApp) -> Option<std::thread::JoinHandle<Result<App, St
     Some(h)
 }
 
+/// A key of the phone's soft keyboard for the menu's text field: Del erases, Enter / Back close it, the rest is looked up in the
+/// device's key map (`KeyEvent.getUnicodeChar`). UNVERIFIED: not built or run on a device (IME composition, e.g. predictive text, is not handled).
+fn menu_key(app: &AndroidApp, m: &mut Menu, k: &android_activity::input::KeyEvent) {
+    use android_activity::input::{KeyAction, KeyMapChar, Keycode};
+    if k.action() != KeyAction::Down {
+        return;
+    }
+    match k.key_code() {
+        Keycode::Del => m.backspace(),
+        Keycode::Enter | Keycode::NumpadEnter | Keycode::Back => m.end_typing(),
+        code => {
+            if let Ok(map) = app.device_key_character_map(k.device_id()) {
+                if let Ok(KeyMapChar::Unicode(c)) = map.get(code, k.meta_state()) {
+                    m.type_char(c);
+                }
+            }
+        }
+    }
+}
+
 #[no_mangle]
 fn android_main(app: AndroidApp) {
     #[cfg(target_os = "android")]
@@ -4921,6 +4941,7 @@ fn android_main(app: AndroidApp) {
     let mut init_handle: Option<std::thread::JoinHandle<Result<App, String>>> = None;
     let mut running = true;
     let mut last_input = Instant::now();
+    let mut kbd_up = false;
 
     while running {
         // Once the world is up the loop must not wait for events: an empty poll sleeps its whole timeout, and that 8 ms was added to EVERY
@@ -4958,7 +4979,13 @@ fn android_main(app: AndroidApp) {
                                 }
                                 IEv::KeyEvent(k) => match app_state.as_mut() {
                                     // not a guard: a guard binds `a` immutably, `on_key` needs it mutable
-                                    Some(a) => if a.touch.pad.on_key(&k) {
+                                    // The create / rename screen's text field: the phone's soft keyboard types into it.
+                                    Some(a) => if a.menu.as_ref().is_some_and(Menu::typing) {
+                                        if let Some(m) = a.menu.as_mut() {
+                                            menu_key(&app, m, &k);
+                                        }
+                                        InputStatus::Handled
+                                    } else if a.touch.pad.on_key(&k) {
                                         InputStatus::Handled
                                     } else {
                                         a.touch.pad.kbm |= matches!(k.source(), android_activity::input::Source::Keyboard);
@@ -5011,6 +5038,17 @@ fn android_main(app: AndroidApp) {
                 }
             }
         });
+
+        // The soft keyboard follows the menu's focused text field (shown / hidden only when that changes).
+        let want_kbd = app_state.as_ref().and_then(|a| a.menu.as_ref()).is_some_and(Menu::typing);
+        if want_kbd != kbd_up {
+            kbd_up = want_kbd;
+            if want_kbd {
+                app.show_soft_input(true);
+            } else {
+                app.hide_soft_input(false);
+            }
+        }
 
         if init_handle.as_ref().map_or(false, |h| h.is_finished()) {
             if let Some(h) = init_handle.take() {

@@ -2,15 +2,14 @@
 //! (+ `GuiSlot`, `GuiWorldSlot`), `GuiCreateWorld`, `GuiRenameWorld`, `GuiYesNo` (delete) and the "Loading level" screen. Everything is laid out in GUI units
 //! (`ScaledResolution`: the biggest whole scale that leaves 320 x 240) and drawn with the HUD pipeline.
 //!
-//! UNVERIFIED (b1.7.3 has no such thing): the world-type button of the create screen (`GuiCreateWorld` has none until 1.1) and the on-screen
-//! keyboard (the sign editor's, `decor::layout`) standing in for the keyboard. Not done: Multiplayer and Mods and Texture Packs
+//! UNVERIFIED (b1.7.3 has no such thing): the world-type button of the create screen (`GuiCreateWorld` has none until 1.1) and the phone's
+//! own soft keyboard (`lib.rs` shows it while `Menu::typing`, and feeds the keys to `type_char` / `backspace` / `end_typing`). Not done: Multiplayer and Mods and Texture Packs
 //! (drawn greyed out like a disabled `GuiButton`; Options is `options.rs`), the splash's calendar days, the local time zone (dates are UTC).
 
 use crate::input::touch_ui::ScreenEv;
 use crate::options::{OptEv, OptionsUi, Settings};
 use crate::ui;
 use crate::render::hud::{sprites as sp, HudPipeline, HudVertex, NO_UV};
-use crate::world::decor::{self, Key};
 use crate::world::gen::overworld::WorldType;
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -173,7 +172,6 @@ pub struct Menu {
     pack: bool,
     /// The text field being typed in (0 name, 1 seed): the keyboard is up.
     typing: Option<u8>,
-    shift: bool,
     // finger
     press: Option<(f32, f32)>,
     press_scroll: f32,
@@ -221,7 +219,6 @@ impl Menu {
             ty: WorldType::Vanilla,
             pack: true,
             typing: None,
-            shift: false,
             press: None,
             press_scroll: 0.0,
             dragging: false,
@@ -259,12 +256,13 @@ impl Menu {
                 b(0, hw + 4.0, gh - 28.0, 150.0, "Cancel", true),
             ],
             Scr::Create => {
-                let y = (gh / 4.0).floor() + 108.0;
+                // Below the last hint (y 140..148), with the gap between buttons growing from 2 to 6 GUI units as the screen allows.
+                let (y0, pitch) = (152.0, ((gh - 4.0 - 152.0) / 4.0).clamp(22.0, 26.0));
                 vec![
-                    b(2, hw - 100.0, y - 22.0, 200.0, match self.ty { WorldType::Vanilla => "World Type: Vanilla", WorldType::Tectonic => "World Type: Tectonic", WorldType::Blooming => "World Type: Blooming" }, true),
-                    b(3, hw - 100.0, y, 200.0, if self.pack { "Immersive Pack: ON" } else { "Immersive Pack: OFF" }, true),
-                    b(0, hw - 100.0, y + 24.0, 200.0, "Create New World", !self.name.is_empty()),
-                    b(1, hw - 100.0, y + 48.0, 200.0, "Cancel", true),
+                    b(2, hw - 100.0, y0, 200.0, match self.ty { WorldType::Vanilla => "World Type: Vanilla", WorldType::Tectonic => "World Type: Tectonic", WorldType::Blooming => "World Type: Blooming" }, true),
+                    b(3, hw - 100.0, y0 + pitch, 200.0, if self.pack { "Immersive Pack: ON" } else { "Immersive Pack: OFF" }, true),
+                    b(0, hw - 100.0, y0 + 2.0 * pitch, 200.0, "Create New World", !self.name.is_empty()),
+                    b(1, hw - 100.0, y0 + 3.0 * pitch, 200.0, "Cancel", true),
                 ]
             }
             Scr::Delete => {
@@ -315,6 +313,40 @@ impl Menu {
 
     // ---- input ----
 
+    /// A text field has the focus: the app shows the soft keyboard.
+    pub fn typing(&self) -> bool {
+        self.typing.is_some()
+    }
+
+    /// A character from the soft keyboard (printable ASCII only: that is what the HUD font has).
+    pub fn type_char(&mut self, c: char) {
+        if let Some(f) = self.field_mut().filter(|f| f.len() < MAX_NAME) {
+            if c.is_ascii_graphic() || c == ' ' {
+                f.push(c);
+            }
+        }
+        self.folder = folder_for(&self.root, &self.name);
+    }
+
+    pub fn backspace(&mut self) {
+        if let Some(f) = self.field_mut() {
+            f.pop();
+        }
+        self.folder = folder_for(&self.root, &self.name);
+    }
+
+    /// Enter / Back / a tap elsewhere: the keyboard goes down.
+    pub fn end_typing(&mut self) {
+        self.typing = None;
+    }
+
+    fn field_mut(&mut self) -> Option<&mut String> {
+        match self.typing? {
+            0 => Some(&mut self.name),
+            _ => Some(&mut self.seed),
+        }
+    }
+
     pub fn event(&mut self, ev: ScreenEv, w: f32, h: f32, st: &mut Settings) {
         self.gs = st.gui_scale;
         if self.scr == Scr::Options {
@@ -350,17 +382,8 @@ impl Menu {
 
     /// A tap at (x, y) px.
     fn click(&mut self, x: f32, y: f32, w: f32, h: f32) {
-        if let Some(t) = self.typing {
-            let field = if t == 0 { &mut self.name } else { &mut self.seed };
-            match decor::key_at(w, h, self.shift, x, y) {
-                Some(Key::Ch(c)) if field.len() < MAX_NAME => field.push(c as char),
-                Some(Key::Space) if field.len() < MAX_NAME => field.push(' '),
-                Some(Key::Back) => drop(field.pop()),
-                Some(Key::Shift) => self.shift = !self.shift,
-                Some(Key::Enter | Key::Done) => self.typing = None,
-                _ => {}
-            }
-            self.folder = folder_for(&self.root, &self.name);
+        if self.typing.is_some() {
+            self.typing = None; // a tap anywhere closes the soft keyboard (the field keeps its text)
             return;
         }
         let (s, gw, gh) = scaled_gs(w, h, self.gs);
@@ -487,7 +510,7 @@ impl Menu {
             return;
         }
         if let Some(t) = self.typing {
-            self.draw_keyboard(v, w, h, t);
+            self.draw_typing(v, s, gw, t);
             return;
         }
         match self.scr {
@@ -583,19 +606,14 @@ impl Menu {
         ui::title(v, s, gw, 4.0, "Select World", false);
     }
 
-    /// The text field being typed in, over the sign editor's keyboard (`decor::layout`, which scales by `h / 270`).
-    fn draw_keyboard(&self, v: &mut Vec<HudVertex>, w: f32, h: f32, field: u8) {
-        let (u, keys) = decor::layout(w, h, self.shift);
-        let gw = w / u;
+    /// The text field being typed in, alone at the top (the phone's soft keyboard covers the rest of the screen).
+    fn draw_typing(&self, v: &mut Vec<HudVertex>, s: f32, gw: f32, field: u8) {
         let t = if field == 0 { &self.name } else { &self.seed };
         let title = if field == 0 { "World Name" } else { "Seed for the World Generator" };
-        HudPipeline::push_text(v, (gw - tw(title)) / 2.0 * u, 14.0 * u, u, title, rgb(0xA0A0A0));
-        text_box(v, u, [(gw - 200.0) / 2.0, 40.0, 200.0, 20.0], t, true);
-        for (k, r) in keys.into_iter().filter(|(k, _)| !matches!(k, Key::Line(_))) {
-            HudPipeline::push_button(v, r[0], r[1], r[2], r[3], if k == Key::Shift && self.shift { 2 } else { 1 });
-            let l = if k == Key::Space { "".to_string() } else { decor::label(k) };
-            HudPipeline::push_text(v, r[0] + (r[2] - tw(&l) * u) / 2.0, r[1] + (r[3] - 8.0 * u) / 2.0, u, &l, rgb(0xE0E0E0));
-        }
+        let hint = "Tap anywhere to finish";
+        HudPipeline::push_text(v, (gw - tw(title)) / 2.0 * s, 14.0 * s, s, title, rgb(0xA0A0A0));
+        text_box(v, s, [(gw - 200.0) / 2.0, 40.0, 200.0, 20.0], t, true);
+        HudPipeline::push_text(v, (gw - tw(hint)) / 2.0 * s, 68.0 * s, s, hint, rgb(0xA0A0A0));
     }
 }
 
