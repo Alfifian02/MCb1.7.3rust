@@ -18,6 +18,7 @@ mod menu;
 mod options;
 mod stats_ui;
 mod ui;
+mod version;
 mod satchel;
 
 use crate::input::touch_ui::{PointerRole, ScreenEv, TouchUi};
@@ -4123,6 +4124,7 @@ impl App {
         let weather = if self.weather.thunder(1.0) > 0.5 { "  thunder" } else if self.weather.rain(1.0) > 0.5 { "  rain" } else { "" };
         let mut left = vec![
             Row::Head("Minecraft b1.7.3 (mc-rs)".to_string()),
+            Row::Kv("Build", crate::version::label(), WHITE),
             Row::Gap,
             Row::Kv("XYZ", format!("{:.2} / {:.2} / {:.2}", p.x, feet, p.z), WHITE),
             Row::Kv("Block", format!("{bx} {by} {bz}"), WHITE),

@@ -1,0 +1,1216 @@
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index 121223d..9efdf29 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -89,6 +89,9 @@ jobs:
+           # which fails with "java.io.FileNotFoundException: /.android/debug.keystore".
+           CARGO_APK_RELEASE_KEYSTORE: /home/runner/.android/debug.keystore
+           CARGO_APK_RELEASE_KEYSTORE_PASSWORD: android
++          # The build's name inside the app (`mc-rs/src/version.rs`): the run number is the number of the `build-<n>` release below.
++          MCRS_BUILD: ${{ github.run_number }}
++          MCRS_SHA: ${{ github.sha }}
+         run: |
+           set -euo pipefail
+           cd mc-rs
+diff --git a/README.md b/README.md
+index b0eb194..290d801 100644
+--- a/README.md
++++ b/README.md
+@@ -56,7 +56,7 @@ original. Anything that cannot be derived from the b1.7.3 sources is marked
+ | Tectonic world type | written without a toolchain: not compiled, not run (+4 tests in `tectonic`, +1 in `gen::overworld`); the Python reference ran | `tectonic/` crate: Tectonic's terrain datapack (continents, erosion, ridges, splines, regions; `terrain.json`) evaluated by a Rust density-function interpreter with Minecraft's noise, fitted to 128 blocks; it replaced the Realistic world type (`realistic.rs` is gone). The pause menu's `World: ...` button (two taps) saves, switches the type and resets. Caves, rivers and lava tunnels of the mod are not ported. See ROADMAP changelog. |
+ | M14 menus (part 1)   | written without a toolchain: not compiled, not run (+4 tests in `menu.rs`, 1 in `touch_ui.rs`) | `menu.rs`: b1.7.3's `GuiMainMenu` (a rotating cube-map panorama, `render/panorama.rs`; `mclogo.png`, rotated splash; dirt on the other screens), `GuiSelectWorld` (scrolling list, double tap plays), `GuiCreateWorld` (name, seed, world type), delete confirm, "Loading level"; textures from the original jar (`tools/gen_menu.py`). Worlds live in `saves/<folder>/`; the pause menu got "Save and quit to title". The renderer button is gone (Vulkan first, GLES fallback stays automatic). See ROADMAP changelog. |
+ | M14b Options + game menu | written without a toolchain: not compiled, not run (+5 tests in `options.rs`, 1 in `touch_ui.rs`) | `options.rs`: b1.7.3's `GameSettings` (`options.txt`), `GuiOptions`, `GuiVideoSettings`, `GuiControls`, `GuiSlider` and `GuiIngameMenu`, from the pause button and the title screen's "Options...". Replaces the old pause menu (its Reset world button is gone); Pregen, Fly and LoD debug stay top-left; new `LoD: ON/OFF` button in Options. Sensitivity, invert, render distance, GUI scale, performance cap and difficulty act; music, sound, bobbing, anaglyph, advanced OpenGL, graphics, smooth lighting and the keys are stored only. See ROADMAP changelog. |
+-| Options list (Sodium layout, 2026-11-01) | written without a toolchain: not compiled, not run, not seen on a device (+9 tests in `options.rs`, +4 in `ui.rs`; `tools/optlist_proto.py` runs here: layout, text widths, tips and the clip maths against the real font); **NOT b1.7.3** | `options.rs` + new `ui.rs` + `menu.rs`: the options screen is Sodium's `VideoSettingsScreen` in b1.7.3's skin. ONE scrolling list of every setting (General, Graphics, Performance, Effects, Controls, Controller buttons, Controller tuning), each row its name on the left and a stone button or slider on the right; a page list down the left jumps to a section and lights the section in view as the list scrolls (LB / RB step it); group headings; a description pane (beside the list on a wide screen, a strip under it on a narrow one) explains the last tapped setting; settings that are saved but read by nothing (Graphics, Smooth Lighting, Advanced OpenGL, 3D Anaglyph, the keys) are dim, like Sodium's unavailable options. A drag scrolls (a drag that starts on a slider and goes along it moves the slider, one that goes up scrolls), a tap acts on lift. The Keys / Controller tabs and the Tuning... page are gone (one list), Dig Delay lives under Controls only. Without a scissor in the HUD pass, `ui::clip` cuts the quads at the list's edges. The same look (title with rules and studs, bevelled panels, coloured world-kind tags, empty-list hint, shared scroll bar) on the title screen, world list, create / rename / delete screens and the game menu. Not done: search, kinetic scrolling, a mouse wheel (no events for it), restyling the atmosphere editor. |
++| Options list (Sodium layout, 2026-11-01) | written without a toolchain: not compiled, not run, not seen on a device (+9 tests in `options.rs`, +4 in `ui.rs`; `tools/optlist_proto.py` runs here: layout, text widths, tips and the clip maths against the real font); **NOT b1.7.3** | `options.rs` + new `ui.rs` + `menu.rs`: the options screen is Sodium's `VideoSettingsScreen` in b1.7.3's skin. ONE scrolling list of every setting (General, Graphics, Performance, Effects, Controls, Controller buttons, Controller tuning), each row its name on the left and a stone button or slider on the right; a page list down the left jumps to a section and lights the section in view as the list scrolls (LB / RB step it); group headings; a description pane (beside the list on a wide screen, a strip under it on a narrow one) explains the last tapped setting; settings that are saved but read by nothing (Graphics, Smooth Lighting, Advanced OpenGL, 3D Anaglyph, the keys) are dim, like Sodium's unavailable options. A drag scrolls (a drag that starts on a slider and goes along it moves the slider, one that goes up scrolls), a tap acts on lift. The Keys / Controller tabs and the Tuning... page are gone (one list), Dig Delay lives under Controls only. Without a scissor in the HUD pass, `ui::clip` cuts the quads at the list's edges. The same look (title with rules and studs, bevelled panels, coloured world-kind tags, empty-list hint, shared scroll bar) on the title screen, world list, create / rename / delete screens and the game menu. Not done: search, kinetic scrolling, a mouse wheel (no events for it), restyling the atmosphere editor. Controls (look and keys, pad buttons, pad tuning) is a tab of its own beside Settings; Graphics has an FOV slider (30 .. 110, 70 by default) and Brightness and Gamma percent sliders (50% .. 150%, final pass of both renderers). |
+ | M15 Controller (Controllify port) | written without a toolchain: not compiled, not run (+7 tests in `gamepad.rs`, 1 in `options.rs`) | `input/gamepad.rs`: isXander's Controllify, the parts b1.7.3 has. Sticks walk and look (Controllify's deadzone, 6 look curves, 10 deg/tick at 100%), triggers dig / hit / place, bumpers and the hotbar wheel pick slots, a virtual mouse drives every menu and container, touch buttons hide while a pad is in use, rumble on damage / block break / explosion (`rumble.rs`, JNI). New **Controls > Controller** tab (buttons page + tuning page), saved as `pad_*` in `options.txt`. Not ported: gyro, DualSense extras, on-screen keyboard, glyph packs, chat / drop / perspective (not in mc-rs / b1.7.3); sprint is the row below, on L3. |
+ | ImmediatelyFast ideas | written without a toolchain: not compiled, not run (+7 tests, 1 extended) | `render/hud.rs`: the HUD text is one textured quad per glyph from a font atlas at the end of the HUD texture (was a quad per run of lit pixels: about 7x fewer text vertices); `render/items.rs`: `SignCache` keeps a sign's text quads between frames (5 s expiry); `gpuErrorTrace:true` in `options.txt` logs a backtrace with each wgpu error (`gpu/context.rs`). The rest of ImmediatelyFast (batching, map and animated-item atlases, framebuffer switching, Apple GL upload, resource pack handling) has no counterpart in mc-rs. Idea source: ImmediatelyFast 26.3, RaphiMC, LGPL-3.0. See the performance changelog. |
+ | FerriteCore ideas | written without a toolchain: not compiled, not run (+2 tests) | Lazy `Nibbles` (no array while all metadata is 0), flat `lod::Cols` for a real chunk's columns (no `Vec` per column; `Tile0::put` no longer clones 4096), exact-size LoD vectors. The rest of FerriteCore (blockstate / model / component dedupe, thread detector) has no counterpart in mc-rs. Idea source: FerriteCore, malte0811, MIT. See ROADMAP changelog. |
+@@ -89,7 +89,9 @@ original. Anything that cannot be derived from the b1.7.3 sources is marked
+ | M14                  | pending | Menus (part 1: title, world list, create world; see above), options, player armor and real mob models (both done, see the player model row above and `roadmap/gameplay.md`); only the chat (overlay, later) is left; a bed tapped by day says so: see [`roadmap/gameplay.md`](roadmap/gameplay.md). M10 multiplayer and M13 optimization are out of scope on purpose. |
+ 
+ Latest commit on `main`: see `git log -1`. Latest released APK: see the
+-`MinecraftB173Rust-apk` artifact on the GitHub Actions run.
++`MinecraftB173Rust-apk` artifact on the GitHub Actions run. Which build is installed: the title screen
++(under the version line) and the debug screen show `build-<n> (<commit>)`, the tag of the GitHub release the APK came from (`version.rs`, set by
++`ci.yml`); a local build reads `dev`.
+ 
+ ## Layout
+ 
+diff --git a/mc-rs/src/backend.rs b/mc-rs/src/backend.rs
+index 1b493c0..1ca1634 100644
+--- a/mc-rs/src/backend.rs
++++ b/mc-rs/src/backend.rs
+@@ -81,7 +81,7 @@ impl Wg {
+     /// full-screen pass (CAS + upscale + vignette + the HUD) onto the swap chain. Two render passes in all.
+     fn draw_world(&mut self, d: &WorldDraw) -> Drawn {
+         self.pipe.frame(&self.gpu.queue, d.view, d.proj, d.eye, d.sky_sub, d.fog, d.far, d.start, d.wr, d.atmos.density, &d.look);
+-        self.present.set_grade(&self.gpu.queue, d.look.grade);
++        self.present.set_grade(&self.gpu.queue, d.look.grade, d.look.tone);
+         let clear = wgpu::Color { r: d.fog[0] as f64, g: d.fog[1] as f64, b: d.fog[2] as f64, a: 1.0 };
+         self.sky.update(&self.gpu.queue, d.camera, &SkyFrame { angle: d.angle, rain: d.rain, seconds: d.seconds });
+         self.sky.set_legacy(&self.gpu.queue, d.zenith, d.horizon, d.angle, d.rain, &d.atmos, d.eye, d.look.rays);
+diff --git a/mc-rs/src/gles/renderer.rs b/mc-rs/src/gles/renderer.rs
+index 92c8274..472f15c 100644
+--- a/mc-rs/src/gles/renderer.rs
++++ b/mc-rs/src/gles/renderer.rs
+@@ -127,6 +127,8 @@ pub struct Renderer {
+     born: Instant,
+     /// The Vibrance dial's grade of the frame being drawn (`Look::grade`), read by `finish`.
+     grade: [f32; 4],
++    /// Brightness gain and 1 / Gamma of the frame being drawn (`Look::tone`), read by `finish`.
++    tone: [f32; 4],
+     /// The pipeline state last set, so a pass does not repeat it.
+     cur_prog: u32,
+     cur_vao: u32,
+@@ -161,7 +163,7 @@ impl Renderer {
+             chunk.push((c, gl.program(&s.vs, &s.fs, &["u_tex", "u_origin"]).map_err(|e| format!("{c:?}: {e}"))?));
+         }
+         let mk = |s: shaders::Src, u: &[&str], what: &str| gl.program(&s.vs, &s.fs, u).map_err(|e| format!("{what}: {e}"));
+-        let present = mk(shaders::present(fxaa, fast), &["u_src", "u_px", "u_grade"], "present")?;
++        let present = mk(shaders::present(fxaa, fast), &["u_src", "u_px", "u_grade", "u_tone"], "present")?;
+         let hud = mk(shaders::hud(hud::SHEET_H), &["u_items", "u_size"], "hud")?;
+         let pano = mk(shaders::panorama(), &["u_tex", "u_m", "u_t"], "panorama")?;
+         let dome = mk(shaders::sky_dome(), &[], "sky dome")?;
+@@ -276,7 +278,7 @@ impl Renderer {
+             gl, size, samples, fast, chunk, present, hud, pano, dome, fan, stars, body, weather, ubo_frame, ubo_sky,
+             atlas: atlas_t, hud_tex: hud_t, body_tex: body_t, snow_tex: snow_t, rain_tex: rain_t, pano_tex: pano_t,
+             vaos: HashMap::new(), empty_vao, hud_buf, fan_buf, star_v, star_i, star_n: star_idx.len() as i32, body_v, weather_buf,
+-            born: Instant::now(), grade: [0.0; 4], cur_prog: 0, cur_vao: 0, blend: Blend::Off,
++            born: Instant::now(), grade: [0.0; 4], tone: [1.0, 1.0, 0.0, 0.0], cur_prog: 0, cur_vao: 0, blend: Blend::Off,
+         };
+         r.targets()?;
+         Ok(r)
+@@ -579,6 +581,7 @@ impl Renderer {
+         }
+         .with_look(&d.look);
+         self.grade = d.look.grade;
++        self.tone = d.look.tone;
+         self.gl.write(&self.ubo_frame, 0, bytemuck::bytes_of(&u));
+         let sun = crate::world::sky::sun_dir(d.angle);
+         let mut view = d.view;
+@@ -788,6 +791,7 @@ impl Renderer {
+                     (f.BindTexture)(TEXTURE_2D, self.t.scene);
+                     (f.Uniform4f)(l[1], 1.0 / sw as f32, 1.0 / sh as f32, 1.0 / w as f32, 1.0 / h as f32);
+                     (f.Uniform4f)(l[2], self.grade[0], self.grade[1], self.grade[2], self.grade[3]);
++                    (f.Uniform4f)(l[3], self.tone[0], self.tone[1], self.tone[2], self.tone[3]);
+                 }
+                 self.bind_empty();
+                 // SAFETY: as above.
+diff --git a/mc-rs/src/gles/shaders.rs b/mc-rs/src/gles/shaders.rs
+index c50aabb..895fed8 100644
+--- a/mc-rs/src/gles/shaders.rs
++++ b/mc-rs/src/gles/shaders.rs
+@@ -431,6 +431,7 @@ pub fn present(fxaa: bool, fast: bool) -> Src {
+ uniform sampler2D u_src;
+ uniform vec4 u_px; // 1 / scene size, 1 / surface size
+ uniform vec4 u_grade; // the Vibrance dial's grade (`render::look`)
++uniform vec4 u_tone; // Brightness gain, 1 / Gamma (`render::look`); 1, 1 = skipped
+ layout(location = 0) out vec4 o_color;
+ const float CAS_SHARPNESS = 0.5;
+ const float VIGNETTE = 0.04;
+@@ -483,6 +484,7 @@ void main() {
+ #endif
+     vec3 c = clamp(l * R2020_TO_709, vec3(0.0), vec3(1.0));
+     if (u_grade.x > 0.0) { c = grade(c); }
++    if (u_tone.x != 1.0 || u_tone.y != 1.0) { c = pow(clamp(c * u_tone.x, vec3(0.0), vec3(1.0)), vec3(u_tone.y)); }
+     float k = uv.x * uv.y;
+     c = c * pow(max(16.0 * (k - uv.x) * (k - uv.y), 1e-4), VIGNETTE);
+     c = mix(1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, 12.92 * c, vec3(lessThanEqual(c, vec3(0.0031308))));
+diff --git a/mc-rs/src/lib.rs b/mc-rs/src/lib.rs
+index aded489..2aadf85 100644
+--- a/mc-rs/src/lib.rs
++++ b/mc-rs/src/lib.rs
+@@ -18,6 +18,7 @@ mod menu;
+ mod options;
+ mod stats_ui;
+ mod ui;
++mod version;
+ mod satchel;
+ 
+ use crate::input::touch_ui::{PointerRole, ScreenEv, TouchUi};
+@@ -365,6 +366,7 @@ impl App {
+         // spawn_at defaults to aspect 1.0 and resize() only runs when the size changes, so
+         // without this the 3D view is squashed horizontally onto the real screen shape.
+         camera.aspect = width as f32 / height as f32;
++        camera.fov_y = opts.fov_deg().to_radians();
+         let player = Player { pos: start, vel: glam::Vec3::ZERO, on_ground: false };
+ 
+         // M12: HUD pipeline + touch state machine. Surface dimensions match
+@@ -665,6 +667,7 @@ impl App {
+         let aspect = self.camera.aspect;
+         self.camera = FirstPersonCamera::spawn_at(s.x, s.y + EYE_HEIGHT, s.z);
+         self.camera.aspect = aspect;
++        self.camera.fov_y = self.opts.fov_deg().to_radians();
+         (self.world_ticks, self.weather_ticks, self.weather) = (0.0, 0, sky::Weather::new(seed));
+         self.atmos.reset();
+         self.fx = Effects::new(seed);
+@@ -811,7 +814,7 @@ impl App {
+         // Zoomify: hold the zoom button for 4x (the vertical tangent / 4), eased; the look drag slows with the field of view.
+         // Retro Sprint: the field of view x 1.15 while sprinting (eased), and the zoom starts from it.
+         self.sprint.fov_step(dt);
+-        let base = 70_f32.to_radians() * self.sprint.fov;
++        let base = self.opts.fov_deg().to_radians() * self.sprint.fov; // Options > FOV (70 by default)
+         let target = if self.touch.zooming() { 2.0 * ((base * 0.5).tan() / ZOOM).atan() } else { base };
+         self.camera.fov_y += (target - self.camera.fov_y) * (1.0 - (-14.0 * dt).exp());
+         // Look drag accumulated by the touch UI since the last frame. Drained
+@@ -938,11 +941,11 @@ impl App {
+         let riding = self.riding();
+         let asleep = self.sleep.is_some();
+         if !asleep {
+-            let k = LOOK_SENS * (self.camera.fov_y / self.sprint.fov * 0.5).tan() / (70_f32.to_radians() * 0.5).tan() * self.opts.look_scale(); // the sprint's wider view does not speed the look up
++            let k = LOOK_SENS * (self.camera.fov_y / self.sprint.fov * 0.5).tan() / (self.opts.fov_deg().to_radians() * 0.5).tan() * self.opts.look_scale(); // neither the sprint's wider view nor the FOV setting speeds the look up, only the zoom slows it
+             self.camera.add_yaw(look_dx * k);
+             self.camera.add_pitch(look_dy * k * if self.opts.invert_mouse { -1.0 } else { 1.0 });
+             // The right stick has its own sensitivity (Controls > Controller); only the zoom narrows it.
+-            let z = (self.camera.fov_y / self.sprint.fov * 0.5).tan() / (70_f32.to_radians() * 0.5).tan();
++            let z = (self.camera.fov_y / self.sprint.fov * 0.5).tan() / (self.opts.fov_deg().to_radians() * 0.5).tan();
+             self.camera.add_yaw(pad_yaw * z);
+             self.camera.add_pitch(pad_pitch * z);
+         }
+@@ -4121,6 +4124,7 @@ impl App {
+         let weather = if self.weather.thunder(1.0) > 0.5 { "  thunder" } else if self.weather.rain(1.0) > 0.5 { "  rain" } else { "" };
+         let mut left = vec![
+             Row::Head("Minecraft b1.7.3 (mc-rs)".to_string()),
++            Row::Kv("Build", crate::version::label(), WHITE),
+             Row::Gap,
+             Row::Kv("XYZ", format!("{:.2} / {:.2} / {:.2}", p.x, feet, p.z), WHITE),
+             Row::Kv("Block", format!("{bx} {by} {bz}"), WHITE),
+@@ -4328,7 +4332,7 @@ impl App {
+                 let ratio = render::combat_hud::cooldown_ratio(self.swing_cd, s.interval, same);
+                 // C8 (`displayedFor`): the arcabuz's brackets are its barrel's cone (the right button), not the bayonet's.
+                 let angle = if s.profile == world::combat::profile::Profile::Arcabuz { s.profile.shot_reach().h } else { s.reach.h };
+-                render::combat_hud::draw_gauge(v, gu, c, &self.xh, angle, (w, h), 70.0, ratio);
++                render::combat_hud::draw_gauge(v, gu, c, &self.xh, angle, (w, h), self.opts.fov_deg(), ratio);
+             }
+             if guard_points > 0 {
+                 let g = self.vitals.guard;
+diff --git a/mc-rs/src/menu.rs b/mc-rs/src/menu.rs
+index f37c8ee..502f7ba 100644
+--- a/mc-rs/src/menu.rs
++++ b/mc-rs/src/menu.rs
+@@ -533,6 +533,7 @@ impl Menu {
+                 let (x0, y0, x1, y1) = self.buttons(gw, gh).iter().fold((f32::MAX, f32::MAX, 0.0f32, 0.0f32), |a, b| (a.0.min(b.1[0]), a.1.min(b.1[1]), a.2.max(b.1[0] + b.1[2]), a.3.max(b.1[1] + b.1[3])));
+                 ui::panel(v, s, [x0 - 12.0, y0 - 12.0, x1 - x0 + 24.0, y1 - y0 + 24.0], 0.4);
+                 txt(v, 2.0, 2.0, "Minecraft Beta 1.7.3", 0xFFFFFF, false); // was 0x505050, grey on dirt: unreadable over the panorama
++                txt(v, 2.0, 12.0, &crate::version::label(), 0xA0A0A0, false); // the CI build and commit (`version.rs`), `dev` for a local build
+                 let c = "Copyright Mojang AB. Do not distribute.";
+                 txt(v, gw - tw(c) - 2.0, gh - 10.0, c, 0xFFFFFF, false);
+             }
+diff --git a/mc-rs/src/options.rs b/mc-rs/src/options.rs
+index b96305f..763cfd6 100644
+--- a/mc-rs/src/options.rs
++++ b/mc-rs/src/options.rs
+@@ -2,10 +2,11 @@
+ //! `GuiControls`, `GuiSlider`, `GuiSmallButton` and `GuiIngameMenu`. Laid out in GUI units like `menu.rs` (`ScaledResolution`, now with the
+ //! GUI Scale option) and drawn with the HUD pipeline; the strings are `lang/en_US.lang`'s.
+ //!
+-//! Layout (not b1.7.3's three nested screens): ONE options screen with a tab bar along the top, so any category is a single tap away:
+-//! General (sound, difficulty, GUI scale, bobbing) | Graphics (quality + LoD) | Perf. (frame cap, Dynamic Res, MSAA, FXAA, Post, Renderer) |
+-//! Effects (Vibrance + the look switches) | Controls (Keys / Controller sub-tabs, with the look and dig settings). `Done` always closes;
+-//! on a pad LB / RB step the tabs (`OptionsUi::step_tab`). The game menu keeps b1.7.3's buttons plus `Tools...` (Pregen, Fly, Info, LoD debug).
++//! Layout (not b1.7.3's three nested screens): ONE options screen, a scrolling list with a page list beside it, in two tabs (`TABS`):
++//! Settings (General: sound, difficulty, GUI scale, bobbing | Graphics: FOV, Brightness, Gamma, quality + LoD | Performance: frame cap, Dynamic Res,
++//! MSAA, FXAA, Post, Renderer | Effects: Vibrance + the look switches) and Controls (look and keys | pad buttons | pad tuning), so scrolling
++//! the picture's settings never ends on a key binding. `Done` always closes; on a pad LB / RB step the pages, across both tabs
++//! (`OptionsUi::step_tab`). The game menu keeps b1.7.3's buttons plus `Tools...` (Pregen, Fly, Info, LoD debug).
+ //!
+ //! Added on top of b1.7.3 (it has none of them): the `LoD: ON/OFF` button (now on the Graphics tab), and the pause menu's
+ //! `Pregen` / `Fly` / `LoD debug` buttons (top-left, kept from the old pause menu).
+@@ -19,7 +20,7 @@ use crate::input::touch_ui::{ScreenEv, HOLD_SECS, SWING_SECS};
+ use crate::menu::{dirt, grad, rect, rgb, scaled_gs, tw};
+ use crate::ui;
+ use crate::render::hud::{HudPipeline, HudVertex};
+-use crate::render::look::LookCfg;
++use crate::render::look::{tone_factor, LookCfg};
+ use crate::world::atmos::{self, AtmosCfg};
+ use crate::world::biome::Biome;
+ use std::path::{Path, PathBuf};
+@@ -56,6 +57,13 @@ pub enum Opt {
+     Sustained,
+     /// Added: the one dial of the colour grade (`render::look`), 0 = off. Takes effect at once.
+     Vibrance,
++    /// Added (Graphics > Display): the final picture's gain and the curve of its mid-tones, 50% .. 150%, the middle of the track is 100% = no change
++    /// (`look::tone_factor`). Take effect at once.
++    Brightness,
++    Gamma,
++    /// Added (Graphics > Display): the camera's field of view, `FOV_MIN` .. `FOV_MAX` degrees over the track, 70 (what mc-rs always drew) in the middle.
++    /// A sprint still widens it by its own factor (`world::sprint`). Takes effect at once.
++    Fov,
+     /// Added (Effects screen): warm directional light, water depth + glint, soft halos on emitters, motion (off / low / on), aerial haze.
+     FxWarm,
+     FxWater,
+@@ -67,7 +75,7 @@ pub enum Opt {
+ impl Opt {
+     /// `getEnumFloat`: a slider.
+     fn slider(self) -> bool {
+-        matches!(self, Opt::Music | Opt::Sound | Opt::Sensitivity | Opt::DigDelay | Opt::Vibrance)
++        matches!(self, Opt::Music | Opt::Sound | Opt::Sensitivity | Opt::DigDelay | Opt::Vibrance | Opt::Brightness | Opt::Gamma | Opt::Fov)
+     }
+ 
+     /// `lang/en_US.lang`'s `options.*`.
+@@ -94,6 +102,9 @@ impl Opt {
+             Opt::DynamicRes => "Dynamic Res",
+             Opt::Sustained => "Sustained Perf",
+             Opt::Vibrance => "Vibrance",
++            Opt::Brightness => "Brightness",
++            Opt::Gamma => "Gamma",
++            Opt::Fov => "FOV",
+             Opt::FxWarm => "Warm Light",
+             Opt::FxWater => "Water Look",
+             Opt::FxGlow => "Glow",
+@@ -106,6 +117,10 @@ impl Opt {
+ /// The Dig Delay slider's lower end, seconds.
+ const DIG_MIN: f32 = 0.10;
+ 
++/// The FOV slider's ends, degrees; the middle of the track is 70, the field of view mc-rs drew before the slider.
++pub const FOV_MIN: f32 = 30.0;
++pub const FOV_MAX: f32 = 110.0;
++
+ const KEY_NAMES: [&str; 10] = ["Forward", "Left", "Back", "Right", "Jump", "Sneak", "Drop", "Inventory", "Chat", "Toggle Fog"];
+ /// `GameSettings.keyBindings`' ids, for `options.txt` (`key_key.forward`, ...).
+ const KEY_IDS: [&str; 10] = ["forward", "left", "back", "right", "jump", "sneak", "drop", "inventory", "chat", "fog"];
+@@ -138,6 +153,8 @@ pub struct Settings {
+     pub sensitivity: f32,
+     /// The Dig Delay slider, 0..1 (`dig_secs`).
+     pub dig_delay: f32,
++    /// The FOV slider, 0..1 (`fov_deg`); `fov:` in options.txt.
++    pub fov: f32,
+     pub invert_mouse: bool,
+     /// 0 Far, 1 Normal, 2 Short, 3 Tiny.
+     pub render_distance: u8,
+@@ -200,6 +217,7 @@ impl Default for Settings {
+             sound: 1.0,
+             sensitivity: 0.5,
+             dig_delay: (SWING_SECS - DIG_MIN) / (HOLD_SECS - DIG_MIN),
++            fov: (70.0 - FOV_MIN) / (FOV_MAX - FOV_MIN),
+             invert_mouse: false,
+             render_distance: 2,
+             view_bobbing: true,
+@@ -246,6 +264,7 @@ impl Settings {
+                 ("sound", Some(f), _) => s.sound = f.clamp(0.0, 1.0),
+                 ("mouseSensitivity", Some(f), _) => s.sensitivity = f.clamp(0.0, 1.0),
+                 ("digDelay", Some(f), _) => s.dig_delay = f.clamp(0.0, 1.0),
++                ("fov", Some(f), _) => s.fov = f.clamp(0.0, 1.0),
+                 ("viewDistance", _, Some(n)) => s.render_distance = n.min(3),
+                 ("guiScale", _, Some(n)) => s.gui_scale = n.min(3),
+                 ("fpsLimit", _, Some(n)) => s.limit_framerate = n.min(2),
+@@ -290,6 +309,7 @@ impl Settings {
+             "music:{}\nsound:{}\ninvertYMouse:{}\nmouseSensitivity:{}\nviewDistance:{}\nguiScale:{}\nbobView:{}\nanaglyph3d:{}\nadvancedOpengl:{}\nfpsLimit:{}\ndifficulty:{}\nfancyGraphics:{}\nao:{}\nlod:{}\ndigDelay:{}\ngpuErrorTrace:{}\ndynamicRes:{}\nmsaa:{}\npost:{}\nfxaa:{}\nrenderer:{}\ndebugScreen:{}\nanimalAi:{}\nbiomeRules:{}\npackCloth:{}\nbookDiscovery:{}\nframeLatency:{}\nsustainedPerf:{}\n",
+             self.music, self.sound, self.invert_mouse, self.sensitivity, self.render_distance, self.gui_scale, self.view_bobbing, self.anaglyph, self.advanced_opengl, self.limit_framerate, self.difficulty, self.fancy_graphics, self.ambient_occlusion, self.lod, self.dig_delay, self.gpu_error_trace, self.dynamic_res, self.msaa, self.post, self.fxaa, self.renderer, self.debug_screen, self.animal_ai, self.biome_rules, self.pack_cloth, self.book_discovery, self.frame_latency, self.sustained
+         );
++        t.push_str(&format!("fov:{}\n", self.fov));
+         for (id, code) in KEY_IDS.iter().zip(self.keys) {
+             t.push_str(&format!("key_key.{id}:{code}\n"));
+         }
+@@ -317,6 +337,11 @@ impl Settings {
+         DIG_MIN + self.dig_delay * (HOLD_SECS - DIG_MIN)
+     }
+ 
++    /// The field of view in whole degrees: `FOV_MIN` .. `FOV_MAX`, 70 by default (before a sprint's widening and a zoom).
++    pub fn fov_deg(&self) -> f32 {
++        (FOV_MIN + self.fov.clamp(0.0, 1.0) * (FOV_MAX - FOV_MIN)).round()
++    }
++
+     /// The frame time the Performance option allows (`EntityRenderer`: 120 fps balanced, 40 power saver); none for Max FPS.
+     pub fn frame_cap(&self) -> Option<Duration> {
+         [None, Some(Duration::from_micros(8333)), Some(Duration::from_millis(25))][self.limit_framerate.min(2) as usize]
+@@ -329,6 +354,9 @@ impl Settings {
+             Opt::Sensitivity => self.sensitivity,
+             Opt::DigDelay => self.dig_delay,
+             Opt::Vibrance => self.look.vibrance,
++            Opt::Brightness => self.look.brightness,
++            Opt::Gamma => self.look.gamma,
++            Opt::Fov => self.fov,
+             _ => 0.0,
+         }
+     }
+@@ -341,6 +369,9 @@ impl Settings {
+             Opt::Sensitivity => self.sensitivity = v,
+             Opt::DigDelay => self.dig_delay = v,
+             Opt::Vibrance => self.look.vibrance = v,
++            Opt::Brightness => self.look.brightness = v,
++            Opt::Gamma => self.look.gamma = v,
++            Opt::Fov => self.fov = v,
+             _ => {}
+         }
+     }
+@@ -384,6 +415,8 @@ impl Settings {
+                 Opt::Sensitivity if f == 1.0 => "HYPERSPEED!!!".to_string(),
+                 Opt::Sensitivity => format!("{}%", (f * 200.0) as i32),
+                 Opt::DigDelay => format!("{} ms", (self.dig_secs() * 1000.0).round() as i32),
++                Opt::Fov => format!("{}", self.fov_deg() as i32),
++                Opt::Brightness | Opt::Gamma => format!("{}%", (tone_factor(f) * 100.0).round() as i32),
+                 _ if f == 0.0 => "OFF".to_string(),
+                 _ => format!("{}%", (f * 100.0) as i32),
+             }
+@@ -446,15 +479,31 @@ const PAGES: [(&str, &str); N_PAGES] = [
+     ("Graphics", "Graphics"),
+     ("Performance", "Performance"),
+     ("Effects", "Effects"),
+-    ("Controls", "Controls"),
++    ("Look & keys", "Controls"),
+     ("Pad buttons", "Controller buttons"),
+     ("Pad tuning", "Controller tuning"),
+ ];
+ 
++/// The two tabs of the screen: its name, the first page it holds and the one after its last (`PAGES`). Controls is a tab of its own, so no
++/// scrolling through the settings of the picture ever lands on a key binding.
++const TABS: [(&str, usize, usize); 2] = [("Settings", 0, 4), ("Controls", 4, N_PAGES)];
++
++/// The pages (indices into `PAGES`) of tab `t`.
++fn tab_pages(t: usize) -> std::ops::Range<usize> {
++    TABS[t].1..TABS[t].2
++}
++
++/// The tab that holds page `i`.
++fn tab_of(i: usize) -> usize {
++    TABS.iter().position(|t| i < t.2).unwrap_or(0)
++}
++
+ #[derive(Clone, Copy, PartialEq, Debug)]
+ enum Act {
+     Opt(Opt),
+     Lod,
++    /// A tab of the screen (index into `TABS`): the list shows its pages only.
++    Switch(usize),
+     /// A page of the page list (index into `PAGES`): the list jumps to its section.
+     Tab(usize),
+     Done,
+@@ -556,7 +605,7 @@ fn flow(items: &[Item]) -> Flow {
+     for it in items {
+         match it {
+             Item::Page(i) => {
+-                if *i > 0 {
++                if y > 0.0 {
+                     y += SECTION_GAP;
+                 }
+                 starts[*i] = y;
+@@ -577,11 +626,12 @@ fn flow(items: &[Item]) -> Flow {
+     Flow { y: at, starts, total: y + 4.0 }
+ }
+ 
+-/// The section the page list lights while the list is scrolled to `scroll` (Sodium's `updateSectionFocus`): the last one that has begun a
+-/// few rows below the top of the view.
+-fn which(starts: &[f32; N_PAGES], scroll: f32, view: f32) -> usize {
++/// The section of `pages` (the shown tab's) the page list lights while the list is scrolled to `scroll` (Sodium's `updateSectionFocus`): the
++/// last one that has begun a few rows below the top of the view. The sections of the other tab are not in the list: their start is 0.
++fn which(starts: &[f32; N_PAGES], pages: std::ops::Range<usize>, scroll: f32, view: f32) -> usize {
+     let probe = scroll + (3.0 * ROW_PITCH).min(view / 2.0);
+-    (0..N_PAGES).rev().find(|&i| starts[i] <= probe).unwrap_or(0)
++    let first = pages.start;
++    pages.rev().find(|&i| starts[i] <= probe).unwrap_or(first)
+ }
+ 
+ /// Where the parts of the options screen sit (GUI units): the page list, the scrolling list, the description (a pane beside the list on a
+@@ -607,9 +657,16 @@ fn frame(gw: f32, gh: f32) -> Frame {
+     Frame { side: [x0, top, side_w, h], list, tip, wide, done: [x0 + total - 80.0, gh - 28.0, 80.0, 20.0], ctl: (list_w * 0.42).floor().clamp(80.0, 104.0) }
+ }
+ 
+-/// The page list's entry `i`.
+-fn side_entry(f: &Frame, i: usize) -> [f32; 4] {
+-    [f.side[0], f.side[1] + i as f32 * 20.0, f.side[2], 18.0]
++/// The tab buttons head the side column: tab `t`.
++fn side_tab(f: &Frame, t: usize) -> [f32; 4] {
++    [f.side[0], f.side[1] + t as f32 * 20.0, f.side[2], 18.0]
++}
++
++/// Where the page list begins under the tabs, and the page list's entry `k` (the k-th page of the shown tab).
++const SIDE_PAGES: f32 = 2.0 * 20.0 + 6.0;
++
++fn side_entry(f: &Frame, k: usize) -> [f32; 4] {
++    [f.side[0], f.side[1] + SIDE_PAGES + k as f32 * 20.0, f.side[2], 18.0]
+ }
+ 
+ /// The part of a row a slider answers to (a toggle answers all over its row): the control on its right.
+@@ -639,7 +696,7 @@ struct Press {
+ 
+ /// What a setting is for, by its name (the pad's knobs and switches have none of their own in `Opt`). The sentences are written to fit
+ /// three lines of the narrow screen's strip; `tools/optlist_proto.py` checks that.
+-const TIPS: [(&str, &str); 33] = [
++const TIPS: [(&str, &str); 36] = [
+     ("Music", "Volume of the background music."),
+     ("Sound", "Volume of steps, mobs, blocks and ambience."),
+     ("Difficulty", "Peaceful removes monsters. Easy hurts less, Hard hurts more."),
+@@ -655,6 +712,9 @@ const TIPS: [(&str, &str); 33] = [
+     ("Post", "The final pass: Full sharpens and smooths, Fast skips both. Next start."),
+     ("Renderer", "Auto and Vulkan use wgpu, OpenGL ES the native one. Next start."),
+     ("Vibrance", "Strength of the colour grade. Off turns it off."),
++    ("FOV", "Camera view angle, 30 to 110. 70 is normal; sprinting widens it."),
++    ("Brightness", "Gain on the whole picture, 50% to 150%. 100% is unchanged."),
++    ("Gamma", "Mid-tone curve, 50% to 150%. Above 100% lifts the shadows."),
+     ("Warm Light", "Golden light at a low sun and bluer shade."),
+     ("Water Look", "A depth gradient and the sun's glint on water."),
+     ("Glow", "Soft halos on lava, torches, glowstone and the sun."),
+@@ -832,6 +892,8 @@ pub struct OptionsUi {
+     finger: Option<(f32, f32)>,
+     /// How far the list is scrolled (units); clamped to its length wherever it is used.
+     scroll: f32,
++    /// The tab shown (`TABS`): the list holds its pages only.
++    tab: usize,
+     /// The page the page list lights: set by a tap on it, or by the section under the top of the view as a finger scrolls.
+     page: usize,
+     /// The setting the description pane explains: the last one tapped.
+@@ -847,7 +909,7 @@ impl Default for OptionsUi {
+ 
+ impl OptionsUi {
+     pub fn new() -> Self {
+-        Self { scr: OptScr::List, drag: None, press: None, wait: None, wait_pad: None, finger: None, scroll: 0.0, page: 0, sel: None, ed: AtmosEd { biome: Biome::Plains, tab: 0, list: false } }
++        Self { scr: OptScr::List, drag: None, press: None, wait: None, wait_pad: None, finger: None, scroll: 0.0, tab: 0, page: 0, sel: None, ed: AtmosEd { biome: Biome::Plains, tab: 0, list: false } }
+     }
+ 
+     /// The atmosphere editor (the game menu's sun), on the biome under the player; the world behind it is the live preview.
+@@ -862,8 +924,21 @@ impl OptionsUi {
+         self.scr == OptScr::List
+     }
+ 
+-    /// Every line of the list, in order. Each row's text is "Name: value", as `getKeyBinding` made it.
++    /// Every line of the shown tab's list, in order. Each row's text is "Name: value", as `getKeyBinding` made it.
+     fn items(&self, st: &Settings) -> Vec<Item> {
++        let (pages, mut at) = (tab_pages(self.tab), 0);
++        let mut v = self.all_items(st);
++        v.retain(|it| {
++            if let Item::Page(i) = it {
++                at = *i;
++            }
++            pages.contains(&at)
++        });
++        v
++    }
++
++    /// The lines of both tabs, in order.
++    fn all_items(&self, st: &Settings) -> Vec<Item> {
+         use Item::{Group as G, Page as P, Row};
+         let o = |o: Opt| Row(Act::Opt(o), st.text(o));
+         let mut v = vec![
+@@ -874,6 +949,10 @@ impl OptionsUi {
+             o(Opt::GuiScale),
+             o(Opt::ViewBobbing),
+             P(1),
++            G("Display"),
++            o(Opt::Fov),
++            o(Opt::Brightness),
++            o(Opt::Gamma),
+             G("World"),
+             o(Opt::Graphics),
+             o(Opt::RenderDistance),
+@@ -930,8 +1009,10 @@ impl OptionsUi {
+         (items, fl, max)
+     }
+ 
+-    /// Scrolls the list to the top of section `i` and lights its page entry (a section near the end stops where the list does).
++    /// Shows the tab that holds section `i`, scrolls its list to the top of the section and lights its page entry (a section near the end stops
++    /// where the list does).
+     fn jump(&mut self, i: usize, st: &Settings) {
++        self.tab = tab_of(i);
+         (self.scroll, self.page) = (flow(&self.items(st)).starts[i], i);
+     }
+ 
+@@ -955,7 +1036,8 @@ impl OptionsUi {
+                 _ => None,
+             })
+             .collect();
+-        w.extend(PAGES.iter().enumerate().map(|(i, p)| Wid { act: Act::Tab(i), r: side_entry(&f, i), label: p.0.to_string() }));
++        w.extend(TABS.iter().enumerate().map(|(t, b)| Wid { act: Act::Switch(t), r: side_tab(&f, t), label: b.0.to_string() }));
++        w.extend(tab_pages(self.tab).enumerate().map(|(k, i)| Wid { act: Act::Tab(i), r: side_entry(&f, k), label: PAGES[i].0.to_string() }));
+         w.push(Wid { act: Act::Done, r: f.done, label: "Done".to_string() });
+         w
+     }
+@@ -1017,7 +1099,7 @@ impl OptionsUi {
+                     }
+                 }
+                 if scrolled {
+-                    self.page = which(&fl.starts, self.scroll, f.list[3]);
++                    self.page = which(&fl.starts, tab_pages(self.tab), self.scroll, f.list[3]);
+                 }
+                 None
+             }
+@@ -1066,6 +1148,12 @@ impl OptionsUi {
+                 st.lod = !st.lod;
+                 st.save();
+             }
++            Act::Switch(t) => {
++                st.save();
++                if t != self.tab {
++                    self.jump(TABS[t].1, st);
++                }
++            }
+             Act::Tab(i) => {
+                 st.save();
+                 self.jump(i, st);
+@@ -1111,7 +1199,7 @@ impl OptionsUi {
+         st.atmos.view = Some(b);
+     }
+ 
+-    /// The pad's LB (-1) / RB (+1): the next section of the list, wrapping round. Not while a Controller button waits for its press (the
++    /// The pad's LB (-1) / RB (+1): the next section, wrapping round (past the last section of a tab it opens the other tab). Not while a Controller button waits for its press (the
+     /// bumper is the binding).
+     pub fn step_tab(&mut self, d: i32, st: &mut Settings) {
+         if self.scr != OptScr::List || self.wait_pad.is_some() {
+@@ -1193,11 +1281,17 @@ impl OptionsUi {
+         // a finger that is scrolling or dragging a slider lights nothing
+         let calm = !matches!(self.press.map(|p| p.grab), Some(Grab::Scroll | Grab::Dead | Grab::Drag(_)));
+         let over = |r: [f32; 4]| calm && self.finger.is_some_and(|(x, y)| inside(r, x, y));
+-        // the page list: the section in view is the dark, pressed-in one, in yellow
+-        for (i, p) in PAGES.iter().enumerate() {
+-            let r = side_entry(&f, i);
+-            let (cur, hot) = (i == self.page, over(r));
+-            button_c(v, s, r, p.0, if cur { 0xFFFF55 } else if hot { 0xFFFFA0 } else { 0xE0E0E0 }, if cur { 0 } else if hot { 2 } else { 1 }, None);
++        // the tabs, then the page list under a rule: the tab shown and the section in view are the dark, pressed-in ones, in yellow
++        let pressed = |v: &mut Vec<HudVertex>, r: [f32; 4], label: &str, cur: bool| {
++            let hot = over(r);
++            button_c(v, s, r, label, if cur { 0xFFFF55 } else if hot { 0xFFFFA0 } else { 0xE0E0E0 }, if cur { 0 } else if hot { 2 } else { 1 }, None);
++        };
++        for (t, b) in TABS.iter().enumerate() {
++            pressed(v, side_tab(&f, t), b.0, t == self.tab);
++        }
++        rect(v, s, [f.side[0], f.side[1] + SIDE_PAGES - 3.0, f.side[2], 1.0], 0x505050);
++        for (k, i) in tab_pages(self.tab).enumerate() {
++            pressed(v, side_entry(&f, k), PAGES[i].0, i == self.page);
+         }
+         // the list: the dirt scrolls with it (`GuiSlot`), what falls over its edges is cut off
+         dirt(v, s, f.list, scroll, 0x202020);
+@@ -1511,8 +1605,21 @@ mod tests {
+         ((r[0] + r[2] / 2.0) * s, (r[1] + r[3] / 2.0) * s)
+     }
+ 
++    /// Opens the tab that holds a setting whose text `hit` accepts, or a page of that name (a tab's own button stays where it is).
++    fn open_tab(o: &mut OptionsUi, st: &Settings, hit: impl Fn(&str) -> bool) {
++        let shown = o.tab;
++        for t in [shown, 0, 1] {
++            o.tab = t;
++            if o.items(st).iter().any(|it| matches!(it, Item::Row(_, l) if hit(l))) || tab_pages(t).any(|i| hit(PAGES[i].0)) {
++                return;
++            }
++        }
++        o.tab = shown;
++    }
++
+     /// Scrolls `o` so that the setting whose text is `label` is at the top of the list (nothing for a label that is no setting).
+     fn show(o: &mut OptionsUi, st: &Settings, label: &str) {
++        open_tab(o, st, |l| l == label);
+         let items = o.items(st);
+         if let Some(i) = items.iter().position(|it| matches!(it, Item::Row(_, l) if l == label)) {
+             o.scroll = flow(&items).y[i];
+@@ -1532,6 +1639,7 @@ mod tests {
+     /// The control of the slider row starting with `label`, in px: (x, y, width, px per unit).
+     fn track_px(o: &mut OptionsUi, st: &Settings, label: &str) -> (f32, f32, f32, f32) {
+         let (s, gw, gh) = scaled_gs(SZ.0, SZ.1, st.gui_scale);
++        open_tab(o, st, |l| l.starts_with(label));
+         let items = o.items(st);
+         if let Some(i) = items.iter().position(|it| matches!(it, Item::Row(_, l) if l.starts_with(label))) {
+             o.scroll = flow(&items).y[i];
+@@ -1671,8 +1779,8 @@ mod tests {
+         assert_eq!(o.page, 2);
+         tap(&mut o, &mut st, "Dynamic Res: ON");
+         assert!(!st.dynamic_res && st.text(Opt::DynamicRes) == "Dynamic Res: OFF");
+-        tap(&mut o, &mut st, "Controls");
+-        assert_eq!(o.page, 4);
++        tap(&mut o, &mut st, "Look & keys");
++        assert_eq!((o.page, o.tab), (4, 1), "the key page is on the Controls tab");
+         tap(&mut o, &mut st, "Back: S");
+         assert!(tap(&mut o, &mut st, "Back: > S <").is_none(), "tapping it again keeps waiting");
+         o.key(44, &mut st);
+@@ -1736,7 +1844,7 @@ mod tests {
+         o.event(ScreenEv::Up(x, y - 5000.0 * s), SZ.0, SZ.1, &mut st);
+         let (_, fl, max) = o.extent(&st, &f);
+         assert!((o.scroll - max).abs() < 0.01 && max > 0.0 && fl.total > f.list[3]);
+-        assert_eq!(o.page, N_PAGES - 1);
++        assert_eq!(o.page, tab_pages(o.tab).end - 1);
+         // and back to the top
+         o.event(ScreenEv::Down(x, y - 200.0 * s), SZ.0, SZ.1, &mut st);
+         o.event(ScreenEv::Move(x, y + 5000.0 * s), SZ.0, SZ.1, &mut st);
+@@ -1753,25 +1861,124 @@ mod tests {
+     }
+ 
+     /// A tap on a page jumps to its section and lights it even where the list cannot scroll that far; scrolling lights the section in view.
++    /// Each tab's list holds its own pages only, and every page of the screen is in one of them.
+     #[test]
+     fn pages_jump_and_light() {
+         let mut st = Settings::default();
+-        let mut o = OptionsUi::new();
+         let (_, gw, gh) = scaled_gs(SZ.0, SZ.1, 0);
+         let f = frame(gw, gh);
+-        let (items, fl, max) = o.extent(&st, &f);
+-        for (i, p) in PAGES.iter().enumerate() {
+-            tap(&mut o, &mut st, p.0);
+-            assert_eq!(o.page, i);
+-            assert!((o.scroll.clamp(0.0, max) - fl.starts[i].min(max)).abs() < 0.01, "{}", p.0);
++        let mut seen = 0;
++        for t in 0..TABS.len() {
++            let mut o = OptionsUi::new();
++            o.tab = t;
++            let (items, fl, max) = o.extent(&st, &f);
++            let pages = tab_pages(t);
++            for i in pages.clone() {
++                tap(&mut o, &mut st, PAGES[i].0);
++                assert_eq!((o.page, o.tab), (i, t));
++                assert!((o.scroll.clamp(0.0, max) - fl.starts[i].min(max)).abs() < 0.01, "{}", PAGES[i].0);
++            }
++            assert!(fl.starts[pages.clone()].windows(2).all(|w| w[0] < w[1]), "sections follow each other");
++            assert_eq!(fl.starts[pages.start], 0.0, "a tab's list opens on its first section");
++            assert_eq!(items.iter().filter(|it| matches!(it, Item::Page(_))).count(), pages.len());
++            for i in pages.clone() {
++                assert_eq!(which(&fl.starts, pages.clone(), fl.starts[i], f.list[3]), i, "a section at the top of the view is the lit one");
++            }
++            assert_eq!(which(&fl.starts, pages.clone(), 0.0, f.list[3]), pages.start);
++            assert_eq!(which(&fl.starts, pages.clone(), max, f.list[3]), pages.end - 1);
++            seen += pages.len();
++        }
++        assert_eq!(seen, N_PAGES, "every page is on exactly one tab");
++    }
++
++    /// Controls is a tab of its own: the Settings list has no key, pad or look setting and the Controls list has no picture or sound setting;
++    /// a tap on a tab shows its first page at the top; the bumpers and the pages cross over.
++    #[test]
++    fn controls_are_their_own_tab() {
++        let mut st = Settings::default();
++        let mut o = OptionsUi::new();
++        let acts = |t: usize| {
++            let mut u = OptionsUi::new();
++            u.tab = t;
++            u.items(&st).into_iter().filter_map(|it| if let Item::Row(a, _) = it { Some(a) } else { None }).collect::<Vec<Act>>()
++        };
++        let (settings, controls) = (acts(0), acts(1));
++        let is_control = |a: &Act| matches!(a, Act::Key(_) | Act::PadBind(_) | Act::PadKnob(_) | Act::PadToggle(_) | Act::Opt(Opt::Sensitivity | Opt::InvertMouse | Opt::DigDelay));
++        assert!(!settings.is_empty() && settings.iter().all(|a| !is_control(a)), "no control setting in the scrolling Settings list");
++        assert!(!controls.is_empty() && controls.iter().all(is_control), "only control settings in the Controls list");
++        // the tabs
++        assert_eq!((o.tab, o.page), (0, 0));
++        tap(&mut o, &mut st, "Controls");
++        assert_eq!((o.tab, o.page, o.scroll), (1, 4, 0.0));
++        tap(&mut o, &mut st, "Settings");
++        assert_eq!((o.tab, o.page, o.scroll), (0, 0, 0.0));
++        let (_, gw, gh) = scaled_gs(SZ.0, SZ.1, 0);
++        let tabs = |o: &OptionsUi| o.widgets(gw, gh, &st).iter().filter(|b| matches!(b.act, Act::Switch(_))).count();
++        assert_eq!((tabs(&o), o.widgets(gw, gh, &st).iter().filter(|b| matches!(b.act, Act::Tab(_))).count()), (2, 4));
++        o.tab = 1;
++        assert_eq!((tabs(&o), o.widgets(gw, gh, &st).iter().filter(|b| matches!(b.act, Act::Tab(_))).count()), (2, 3));
++        // a tap on the tab already shown keeps the list where it is
++        o.tab = 1;
++        o.jump(5, &st);
++        tap(&mut o, &mut st, "Controls");
++        assert!((o.tab, o.page) == (1, 5) && o.scroll > 0.0, "the page and the scroll stay");
++    }
++
++    /// Brightness and Gamma are percent sliders of the Graphics page: 100% by default, 50% .. 150% over the track, kept in options.txt and
++    /// reaching the frame's `Look::tone`.
++    #[test]
++    fn brightness_and_gamma_sliders() {
++        let root = tmp("tone");
++        let mut st = Settings::load(&root);
++        assert_eq!((st.text(Opt::Brightness).as_str(), st.text(Opt::Gamma).as_str()), ("Brightness: 100%", "Gamma: 100%"));
++        let mut o = OptionsUi::new();
++        for (label, opt) in [("Brightness", Opt::Brightness), ("Gamma", Opt::Gamma)] {
++            let (x, y, w, s) = track_px(&mut o, &st, label);
++            let y = y + 4.0 * s;
++            // a tap at the left end is 50%, at the right end 150%
++            for (at, want) in [(x + 4.0 * s, "50%"), (x + w - 2.0 * s, "150%")] {
++                o.event(ScreenEv::Down(at, y), SZ.0, SZ.1, &mut st);
++                o.event(ScreenEv::Up(at, y), SZ.0, SZ.1, &mut st);
++                assert_eq!(st.text(opt), format!("{label}: {want}"));
++            }
+         }
+-        assert!(fl.starts.windows(2).all(|w| w[0] < w[1]), "sections follow each other");
+-        assert_eq!(items.iter().filter(|it| matches!(it, Item::Page(_))).count(), N_PAGES);
+-        for i in 0..N_PAGES {
+-            assert_eq!(which(&fl.starts, fl.starts[i], f.list[3]), i, "a section at the top of the view is the lit one");
++        assert!(st.look.brightness == 1.0 && st.look.gamma == 1.0);
++        // a drag along the track follows the finger and ends saved
++        let (x, y, w, s) = track_px(&mut o, &st, "Brightness");
++        let y = y + 4.0 * s;
++        o.event(ScreenEv::Down(x + 4.0 * s, y), SZ.0, SZ.1, &mut st);
++        o.event(ScreenEv::Move(x + 4.0 * s + (w - 8.0 * s) / 2.0, y), SZ.0, SZ.1, &mut st);
++        o.event(ScreenEv::Up(x + 4.0 * s + (w - 8.0 * s) / 2.0, y), SZ.0, SZ.1, &mut st);
++        assert_eq!(st.text(Opt::Brightness), "Brightness: 100%");
++        let back = Settings::load(&root);
++        assert_eq!((back.text(Opt::Brightness), back.look.gamma), (st.text(Opt::Brightness), 1.0));
++        let tone = crate::render::look::Look::new(&back.look, &crate::render::look::Env { sun: glam::Vec3::Y, rain: 0.0, seconds: 0.0, nether: false, underwater: false, bolt: [0.0; 4] }).tone;
++        assert!(tone[0] == 1.0 && (tone[1] - 1.0 / 1.5).abs() < 1e-6, "Gamma 150% is the exponent 1 / 1.5: {tone:?}");
++        std::fs::write(root.join("options.txt"), "look_brightness:9\nlook_gamma:x\n").unwrap();
++        let bad = Settings::load(&root);
++        assert!(bad.look.brightness == 1.0 && bad.look.gamma == LookCfg::default().gamma, "out of range: clamped, not a number: ignored");
++    }
++
++    /// FOV: 70 by default (what mc-rs always drew), 30 .. 110 over the track in whole degrees, kept in options.txt; a number out of range is
++    /// clamped and a bad one ignored.
++    #[test]
++    fn fov_slider() {
++        let root = tmp("fov");
++        let mut st = Settings::load(&root);
++        assert_eq!((st.fov_deg(), st.text(Opt::Fov).as_str()), (70.0, "FOV: 70"));
++        let mut o = OptionsUi::new();
++        let (x, y, w, s) = track_px(&mut o, &st, "FOV");
++        let y = y + 4.0 * s;
++        for (at, want) in [(x + 4.0 * s, "FOV: 30"), (x + w - 2.0 * s, "FOV: 110")] {
++            o.event(ScreenEv::Down(at, y), SZ.0, SZ.1, &mut st);
++            o.event(ScreenEv::Up(at, y), SZ.0, SZ.1, &mut st);
++            assert_eq!(st.text(Opt::Fov), want);
+         }
+-        assert_eq!(which(&fl.starts, 0.0, f.list[3]), 0);
+-        assert_eq!(which(&fl.starts, max, f.list[3]), N_PAGES - 1);
++        assert_eq!(Settings::load(&root).fov_deg(), 110.0);
++        std::fs::write(root.join("options.txt"), "fov:9\n").unwrap();
++        assert_eq!(Settings::load(&root).fov_deg(), 110.0, "out of range: clamped");
++        std::fs::write(root.join("options.txt"), "fov:x\n").unwrap();
++        assert_eq!(Settings::load(&root).fov_deg(), 70.0, "not a number: ignored");
+     }
+ 
+     /// Controller buttons and tuning: rebind a button from the pad, drag a knob, flip a switch, and it all reaches options.txt.
+@@ -1822,12 +2029,11 @@ mod tests {
+     #[test]
+     fn list_fits_and_keeps_every_setting() {
+         let st = Settings::default();
+-        let o = OptionsUi::new();
+         let mut labels = Vec::new();
+         for (w, h) in [(320.0, 240.0), SZ] {
+             let (_, gw, gh) = scaled_gs(w, h, 0);
+             let f = frame(gw, gh);
+-            let boxes = [("side", [f.side[0], f.side[1], f.side[2], 7.0 * 20.0]), ("list", f.list), ("tip", f.tip), ("done", f.done)];
++            let boxes = [("side", [f.side[0], f.side[1], f.side[2], SIDE_PAGES + 4.0 * 20.0]), ("list", f.list), ("tip", f.tip), ("done", f.done)];
+             for (i, (n, a)) in boxes.iter().enumerate() {
+                 assert!(a[0] >= 0.0 && a[0] + a[2] <= gw && a[1] >= 0.0 && a[1] + a[3] <= gh, "{n} {a:?}: off screen at {gw}x{gh}");
+                 for (m, b) in &boxes[i + 1..] {
+@@ -1835,27 +2041,35 @@ mod tests {
+                     assert!(apart, "{n} overlaps {m} at {gw}x{gh}");
+                 }
+             }
+-            assert!(f.side[3] >= 7.0 * 20.0, "all seven pages fit the page list");
+-            let (items, fl, _) = o.extent(&st, &f);
+-            for (it, &y) in items.iter().zip(&fl.y) {
+-                if let Item::Row(_, l) = it {
+-                    let name = l.split_once(": ").map_or(l.as_str(), |p| p.0);
+-                    assert!(tw(name) <= f.list[2] - 11.0 - f.ctl - 14.0, "{name} does not fit beside its control at {gw}");
+-                    assert!(y >= 0.0 && y + ROW_H <= fl.total);
+-                    labels.push(l.clone());
++            assert!(f.side[3] >= SIDE_PAGES + 4.0 * 20.0, "the tabs and the longest tab's pages fit the side column");
++            for t in 0..TABS.len() {
++                let mut o = OptionsUi::new();
++                o.tab = t;
++                let (items, fl, _) = o.extent(&st, &f);
++                for (it, &y) in items.iter().zip(&fl.y) {
++                    if let Item::Row(_, l) = it {
++                        let name = l.split_once(": ").map_or(l.as_str(), |p| p.0);
++                        assert!(tw(name) <= f.list[2] - 11.0 - f.ctl - 14.0, "{name} does not fit beside its control at {gw}");
++                        assert!(y >= 0.0 && y + ROW_H <= fl.total);
++                        labels.push(l.clone());
++                    }
+                 }
+             }
++            for name in TABS.iter().map(|t| t.0).chain(PAGES.iter().map(|p| p.0)) {
++                assert!(tw(name) <= f.side[2] - 4.0, "{name} does not fit its button at {gw}");
++            }
+         }
+         for want in [
+             "Music", "Sound", "Difficulty", "GUI Scale", "View Bobbing", "Graphics: ", "Render Distance", "LoD", "Smooth Lighting", "Advanced OpenGL", "3D Anaglyph",
+             "Performance", "Dynamic Res", "Sustained Perf", "MSAA", "FXAA", "Post", "Renderer", "Vibrance", "Warm Light", "Water Look", "Glow", "Motion", "Haze", "Sensitivity", "Invert Mouse",
+-            "Dig Delay", "Jump: ", "Look X", "Invert Y", "Forward", "Toggle Fog",
++            "Dig Delay", "Jump: ", "Look X", "Invert Y", "Forward", "Toggle Fog", "Brightness", "Gamma", "FOV",
+         ] {
+             assert!(labels.iter().any(|l| l.starts_with(want)), "{want} is not in the list");
+         }
+         // every control is reachable after scrolling: a row's rectangle is inside the list whenever it is the top row
+         let (_, gw, gh) = scaled_gs(320.0, 240.0, 0);
+-        assert!(o.widgets(gw, gh, &st).iter().filter(|b| matches!(b.act, Act::Tab(_))).count() == N_PAGES);
++        let o = OptionsUi::new();
++        assert!(o.widgets(gw, gh, &st).iter().filter(|b| matches!(b.act, Act::Tab(_))).count() == tab_pages(0).len());
+     }
+ 
+     /// Every sentence of the description pane fits the strip of the narrow screen (3 lines) and the pane of a wide one.
+@@ -1872,7 +2086,7 @@ mod tests {
+         // every named setting of the list that is not dim has a sentence
+         let st = Settings::default();
+         let o = OptionsUi::new();
+-        for it in o.items(&st) {
++        for it in o.all_items(&st) {
+             if let Item::Row(a, l) = it {
+                 let name = l.split_once(": ").map_or(l.as_str(), |p| p.0);
+                 assert!(!tip(a, name).is_empty(), "{name} has no description");
+@@ -1889,9 +2103,13 @@ mod tests {
+         assert_eq!(o.page, 1);
+         o.step_tab(-1, &mut st);
+         o.step_tab(-1, &mut st);
+-        assert_eq!(o.page, N_PAGES - 1, "the first page wraps back to the last");
++        assert_eq!((o.page, o.tab), (N_PAGES - 1, 1), "the first page wraps back to the last, on the other tab");
+         o.step_tab(1, &mut st);
+-        assert_eq!(o.page, 0, "and forward again");
++        assert_eq!((o.page, o.tab), (0, 0), "and forward again");
++        for _ in 0..4 {
++            o.step_tab(1, &mut st);
++        }
++        assert_eq!((o.page, o.tab), (4, 1), "past the last page of Settings the Controls tab opens");
+         tap(&mut o, &mut st, "Pad buttons");
+         tap(&mut o, &mut st, "Jump: A");
+         o.step_tab(1, &mut st);
+diff --git a/mc-rs/src/render/look.rs b/mc-rs/src/render/look.rs
+index cd8895f..eb00c93 100644
+--- a/mc-rs/src/render/look.rs
++++ b/mc-rs/src/render/look.rs
+@@ -19,6 +19,14 @@ use std::collections::HashMap;
+ 
+ /// The Vibrance dial's default: about a third of its range, a light touch.
+ pub const VIBRANCE_DEFAULT: f32 = 0.3;
++/// The Brightness and Gamma sliders' default: the middle of the track, 100%.
++pub const TONE_DEFAULT: f32 = 0.5;
++/// What a Brightness / Gamma slider (0..1) says, as a factor: 50% at the left end, 100% in the middle, 150% at the right, whole percents (the
++/// options text shows the same number, so what it reads is what the final pass applies).
++pub fn tone_factor(x: f32) -> f32 {
++    ((0.5 + x.clamp(0.0, 1.0)) * 100.0).round() / 100.0
++}
++
+ // The grade at dial 1.0 (the dial scales all three together).
+ const GRADE_VIB: f32 = 0.5; // vibrance amount: a dull colour gains up to +50%, a vivid one almost nothing
+ const GRADE_CURVE: f32 = 0.35; // S-curve blend
+@@ -51,6 +59,10 @@ const MOTE_CAP: [usize; 3] = [0, 6, 14];
+ pub struct LookCfg {
+     /// 0..1; 0 turns the grade off.
+     pub vibrance: f32,
++    /// Brightness (a gain on the final colour) and Gamma (a power on it), each a slider position 0..1 (`tone_factor`: 50% .. 150%, the middle is
++    /// no change).
++    pub brightness: f32,
++    pub gamma: f32,
+     pub warm: bool,
+     pub water: bool,
+     pub glow: bool,
+@@ -61,7 +73,7 @@ pub struct LookCfg {
+ 
+ impl Default for LookCfg {
+     fn default() -> Self {
+-        Self { vibrance: VIBRANCE_DEFAULT, warm: true, water: true, glow: true, motion: 1, haze: true }
++        Self { vibrance: VIBRANCE_DEFAULT, brightness: TONE_DEFAULT, gamma: TONE_DEFAULT, warm: true, water: true, glow: true, motion: 1, haze: true }
+     }
+ }
+ 
+@@ -71,6 +83,8 @@ impl LookCfg {
+         let (b, n) = (v == "true", v.parse::<f32>().ok());
+         match (k, n) {
+             ("look_vibrance", Some(f)) => self.vibrance = f.clamp(0.0, 1.0),
++            ("look_brightness", Some(f)) => self.brightness = f.clamp(0.0, 1.0),
++            ("look_gamma", Some(f)) => self.gamma = f.clamp(0.0, 1.0),
+             ("look_motion", Some(f)) if (0.0..=2.0).contains(&f) => self.motion = f as u8,
+             ("look_warm", _) => self.warm = b,
+             ("look_water", _) => self.water = b,
+@@ -81,7 +95,7 @@ impl LookCfg {
+     }
+ 
+     pub fn save_into(&self, t: &mut String) {
+-        t.push_str(&format!("look_vibrance:{:.3}\nlook_warm:{}\nlook_water:{}\nlook_glow:{}\nlook_motion:{}\nlook_haze:{}\n", self.vibrance, self.warm, self.water, self.glow, self.motion, self.haze));
++        t.push_str(&format!("look_vibrance:{:.3}\nlook_brightness:{:.3}\nlook_gamma:{:.3}\nlook_warm:{}\nlook_water:{}\nlook_glow:{}\nlook_motion:{}\nlook_haze:{}\n", self.vibrance, self.brightness, self.gamma, self.warm, self.water, self.glow, self.motion, self.haze));
+     }
+ }
+ 
+@@ -104,6 +118,8 @@ pub struct Env {
+ pub struct Look {
+     /// Final pass: x vibrance amount, y S-curve blend, z warm / cool split (all 0 = the grade is skipped).
+     pub grade: [f32; 4],
++    /// Final pass: x the Brightness gain, y the Gamma exponent (1 / gamma), both 1 = skipped. Applies in the Nether and underwater too.
++    pub tone: [f32; 4],
+     /// Chunk shaders: rgb tone of a lit surface; w = extra face-shade exponent.
+     pub warm: [f32; 4],
+     /// rgb tone of a shaded surface; w = aerial tint strength.
+@@ -133,12 +149,13 @@ fn lerp3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
+ }
+ 
+ impl Look {
+-    pub const OFF: Look = Look { grade: [0.0; 4], warm: [1.0, 1.0, 1.0, 0.0], cool: [1.0, 1.0, 1.0, 0.0], sun: [0.0, 1.0, 0.0, 0.0], fx: [0.0; 4], bolt: [0.0; 4], rays: false, gold: 0.0, glow: false, motes: 0 };
++    pub const OFF: Look = Look { grade: [0.0; 4], tone: [1.0, 1.0, 0.0, 0.0], warm: [1.0, 1.0, 1.0, 0.0], cool: [1.0, 1.0, 1.0, 0.0], sun: [0.0, 1.0, 0.0, 0.0], fx: [0.0; 4], bolt: [0.0; 4], rays: false, gold: 0.0, glow: false, motes: 0 };
+ 
+     pub fn new(c: &LookCfg, e: &Env) -> Self {
+         let mut l = Self::OFF;
+         let v = c.vibrance.clamp(0.0, 1.0);
+         l.grade = [GRADE_VIB * v, GRADE_CURVE * v, GRADE_SPLIT * v, 0.0];
++        l.tone = [tone_factor(c.brightness), 1.0 / tone_factor(c.gamma), 0.0, 0.0];
+         l.fx[0] = e.seconds;
+         // `WorldProviderHell.generateLightBrightnessTable`: the floor of the light table is 0.1, not 0.05. `fx.w` is what it is raised by (0 in the
+         // overworld, so `Look::OFF` and every overworld frame keep the old table); the shaders' `brightness` reads it.
+@@ -458,7 +475,7 @@ mod tests {
+     /// Options.txt round trip, a bad line is skipped and the dial stays inside 0..1.
+     #[test]
+     fn config_round_trips_and_stays_bounded() {
+-        let mut c = LookCfg { vibrance: 0.8, warm: false, water: true, glow: false, motion: 2, haze: false };
++        let mut c = LookCfg { vibrance: 0.8, warm: false, water: true, glow: false, motion: 2, haze: false, ..LookCfg::default() };
+         let mut t = String::new();
+         c.save_into(&mut t);
+         let mut back = LookCfg::default();
+@@ -473,7 +490,7 @@ mod tests {
+     /// Dial 0 is no grade at all; every effect off is `Look::OFF` apart from the clock; the default is a light touch.
+     #[test]
+     fn off_changes_nothing_and_the_default_is_conservative() {
+-        let off = LookCfg { vibrance: 0.0, warm: false, water: false, glow: false, motion: 0, haze: false };
++        let off = LookCfg { vibrance: 0.0, warm: false, water: false, glow: false, motion: 0, haze: false, ..LookCfg::default() };
+         let l = Look::new(&off, &env(0.05));
+         assert_eq!((l.grade, l.warm, l.cool, l.sun, l.rays, l.motes), (Look::OFF.grade, Look::OFF.warm, Look::OFF.cool, Look::OFF.sun, false, 0));
+         assert_eq!((l.fx[1], l.fx[2]), (0.0, 0.0));
+@@ -483,6 +500,20 @@ mod tests {
+         assert!(top.grade[0] <= GRADE_VIB && top.grade[1] <= GRADE_CURVE && top.grade[2] <= GRADE_SPLIT);
+     }
+ 
++    /// Brightness and Gamma: the middle of the track is 100% and changes nothing (`Look::OFF`'s tone), the ends are 50% and 150%, a slider
++    /// position is rounded to a whole percent, the grade's dial does not move them, and they reach the Nether's and the underwater frame.
++    #[test]
++    fn brightness_and_gamma_are_percent_sliders() {
++        let (d, hell) = (Look::new(&LookCfg::default(), &env(0.5)), Look::new(&LookCfg::default(), &Env { nether: true, ..env(0.5) }));
++        assert_eq!((d.tone, hell.tone), (Look::OFF.tone, Look::OFF.tone));
++        assert_eq!((tone_factor(0.0), tone_factor(0.5), tone_factor(1.0), tone_factor(0.4999), tone_factor(9.0)), (0.5, 1.0, 1.5, 1.0, 1.5));
++        let c = LookCfg { brightness: 1.0, gamma: 0.0, vibrance: 0.0, ..LookCfg::default() };
++        let (l, w) = (Look::new(&c, &env(0.5)), Look::new(&c, &Env { underwater: true, nether: true, ..env(0.5) }));
++        assert_eq!((l.tone[0], l.tone[1]), (1.5, 2.0));
++        assert_eq!(l.tone, w.tone);
++        assert_eq!(l.grade, Look::OFF.grade, "the Vibrance dial at 0 still skips the grade");
++    }
++
+     /// The light is golden with the sun low and plain at noon; shade is bluer than light; rain and the Nether take it away.
+     #[test]
+     fn light_is_golden_at_a_low_sun_only() {
+diff --git a/mc-rs/src/render/present.rs b/mc-rs/src/render/present.rs
+index de216a9..8608fd2 100644
+--- a/mc-rs/src/render/present.rs
++++ b/mc-rs/src/render/present.rs
+@@ -141,7 +141,7 @@ fn multisample_of(count: u32, alpha_to_coverage: bool) -> wgpu::MultisampleState
+ }
+ 
+ const SHADER: &str = r#"
+-struct U { px: vec4<f32>, grade: vec4<f32> }; // 1 / scene size, 1 / surface size; the Vibrance dial's grade (`render::look`)
++struct U { px: vec4<f32>, grade: vec4<f32>, tone: vec4<f32> }; // 1 / scene size, 1 / surface size; the Vibrance dial's grade; Brightness gain and 1 / Gamma (`render::look`)
+ @group(0) @binding(0) var<uniform> u: U;
+ @group(0) @binding(1) var samp: sampler;
+ @group(0) @binding(2) var src: texture_2d<f32>;
+@@ -175,6 +175,10 @@ fn grade(c: vec3<f32>) -> vec3<f32> {
+     return g * g;
+ }
+ 
++// Brightness (a gain on the linear colour) and Gamma (a power on it): `u.tone` = (gain, 1 / gamma). 1, 1 is skipped (and so is the zero a buffer
++// starts with).
++fn tone(c: vec3<f32>) -> vec3<f32> { return pow(clamp(c * u.tone.x, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(u.tone.y)); }
++
+ // The one full-screen pass: (FXAA +) CAS on the scene, bilinear upscale, Rec. 2020 -> 709, vignette, sRGB. `uv` is the surface pixel's
+ // place in the scene; the taps are one scene texel apart, so at a render scale below 1 CAS sharpens exactly what the upscale softens.
+ fn enhanced(uv: vec2<f32>, o: vec2<f32>) -> vec3<f32> {
+@@ -214,6 +218,7 @@ fn fs_fin(@builtin(position) p: vec4<f32>) -> @location(0) vec4<f32> {
+     if FAST { l = max(textureSampleLevel(src, samp, uv, 0.0).rgb, vec3<f32>(0.0)); } else { l = enhanced(uv, u.px.xy); }
+     var c = clamp((l * R2020_TO_XYZ) * XYZ_TO_709, vec3<f32>(0.0), vec3<f32>(1.0));
+     if u.grade.x > 0.0 { c = grade(c); }
++    if u.tone.x > 0.0 && (u.tone.x != 1.0 || u.tone.y != 1.0) { c = tone(c); }
+     let k = uv.x * uv.y;
+     c = c * pow(max(16.0 * (k - uv.x) * (k - uv.y), 1e-4), VIGNETTE);
+     // The swap chain is sRGB on most phones (the hardware encodes); otherwise encode here.
+@@ -282,7 +287,7 @@ impl Present {
+             cache: None,
+         });
+         let samp = device.create_sampler(&wgpu::SamplerDescriptor { mag_filter: wgpu::FilterMode::Linear, min_filter: wgpu::FilterMode::Linear, address_mode_u: wgpu::AddressMode::ClampToEdge, address_mode_v: wgpu::AddressMode::ClampToEdge, ..Default::default() });
+-        let ubuf = device.create_buffer(&wgpu::BufferDescriptor { label: Some("present_u"), size: 32, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
++        let ubuf = device.create_buffer(&wgpu::BufferDescriptor { label: Some("present_u"), size: 48, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+         let (scene_v, msaa, bind) = Self::size(device, queue, &layout, &samp, &ubuf, scene, surface);
+         Self { scene: scene_v, msaa, fin, layout, samp, ubuf, bind }
+     }
+@@ -310,9 +315,9 @@ impl Present {
+         (self.scene, self.msaa, self.bind) = Self::size(device, queue, &self.layout, &self.samp, &self.ubuf, scene, surface);
+     }
+ 
+-    /// The Vibrance dial's grade for this frame (`Look::grade`), read by the final pass.
+-    pub fn set_grade(&self, queue: &Queue, grade: [f32; 4]) {
+-        queue.write_buffer(&self.ubuf, 16, bytemuck::bytes_of(&grade));
++    /// The Vibrance dial's grade and the Brightness / Gamma tone for this frame (`Look::grade`, `Look::tone`), read by the final pass.
++    pub fn set_grade(&self, queue: &Queue, grade: [f32; 4], tone: [f32; 4]) {
++        queue.write_buffer(&self.ubuf, 16, bytemuck::bytes_of(&[grade, tone]));
+     }
+ 
+     /// The 1-sample scene (what the final pass reads). The scene pass draws into `scene_attachment` instead.
+diff --git a/mc-rs/src/version.rs b/mc-rs/src/version.rs
+new file mode 100644
+index 0000000..7ea99b6
+--- /dev/null
++++ b/mc-rs/src/version.rs
+@@ -0,0 +1,39 @@
++//! Which build this is. `.github/workflows/ci.yml` builds the APK with `MCRS_BUILD` (the run number) and `MCRS_SHA` (the commit) set, so the label
++//! is the tag of the GitHub release the APK came from (`build-<n>`) and the commit it was built at. A build made anywhere else has neither and
++//! reads `dev`. Shown on the title screen and the debug screen. Nothing here touches the network (an update check is a separate, later feature).
++
++/// The CI's run number, read at compile time (`None` for a local build).
++const BUILD: Option<&str> = option_env!("MCRS_BUILD");
++/// The commit the CI built, in full (`None` for a local build).
++const SHA: Option<&str> = option_env!("MCRS_SHA");
++
++/// `build-123 (a1b2c3d)`, `build-123` without a commit, `dev` without a run number (an empty value counts as missing).
++fn label_of(build: Option<&str>, sha: Option<&str>) -> String {
++    let Some(n) = build.map(str::trim).filter(|s| !s.is_empty()) else { return "dev".to_string() };
++    match sha.map(str::trim).filter(|s| !s.is_empty()) {
++        Some(c) => format!("build-{n} ({})", c.chars().take(7).collect::<String>()),
++        None => format!("build-{n}"),
++    }
++}
++
++/// This build's label.
++pub fn label() -> String {
++    label_of(BUILD, SHA)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    /// The run number and the first 7 characters of the commit; a missing or empty run number is a local build.
++    #[test]
++    fn label_names_the_release_and_the_commit() {
++        assert_eq!(label_of(Some("123"), Some("a1b2c3d4e5f60718293a4b5c6d7e8f9012345678")), "build-123 (a1b2c3d)");
++        assert_eq!(label_of(Some("7"), Some("abc")), "build-7 (abc)");
++        assert_eq!(label_of(Some("123"), None), "build-123");
++        assert_eq!(label_of(Some("123"), Some("")), "build-123");
++        assert_eq!(label_of(None, Some("a1b2c3d")), "dev");
++        assert_eq!(label_of(Some(" "), Some("a1b2c3d")), "dev");
++        assert!(!label().is_empty());
++    }
++}
+diff --git a/roadmap/gameplay.md b/roadmap/gameplay.md
+index 68afc69..05a8892 100644
+--- a/roadmap/gameplay.md
++++ b/roadmap/gameplay.md
+@@ -530,3 +530,15 @@ Part of [`ROADMAP.md`](../ROADMAP.md). The to-do milestones of this part (M11 Ne
+     - Not done: a search box (Sodium's), kinetic scrolling, a mouse wheel, an Apply / Undo model (every setting still applies at once), restyling the atmosphere editor's panel.
+ 
+ - Create World UI pass (UNVERIFIED, not compiled): buttons start below the last hint (y 152) with a 2-6 GUI unit gap; text fields use the phone's native soft keyboard (`show_soft_input`, keys via `KeyCharacterMap`) instead of the sign editor's keyboard; while typing only the focused field shows, a tap anywhere / Enter / Back closes it.
++- `done` Options: Controls tab, Brightness and Gamma (2026-11-01; written without a toolchain: not compiled, not run, not seen on a device; +2 tests in `options.rs` (`controls_are_their_own_tab`, `brightness_and_gamma_sliders`) and +1 in `render/look.rs`, the list tests now walk both tabs; `python3 tools/optlist_proto.py` runs on a host and checks both tabs). **NOT b1.7.3.**
++    - Tabs: `options.rs` `TABS` = Settings (pages General, Graphics, Performance, Effects) and Controls (Look & keys, Pad buttons, Pad tuning). The two tab buttons head the side column, the page list sits under them and shows the shown tab's pages only; `items` keeps the lines of the shown tab (`all_items` has both), so scrolling the picture's settings never ends on a key binding. `OptionsUi::tab` is set by a tap on a tab (its first page, at the top; a tap on the shown tab changes nothing) and by `jump` (a page tap, LB / RB: past the last page of a tab the other tab opens). `which` takes the shown tab's pages (the other tab's sections start at 0). The page `Controls` is now `Look & keys` (its heading is still `Controls`).
++    - Brightness and Gamma (Graphics > Display, `Opt::Brightness` / `Opt::Gamma`, `look_brightness` / `look_gamma` in options.txt): sliders of 50% .. 150%, the middle of the track is 100% and changes nothing (`look::tone_factor`: whole percents, so the text and the pass agree). `Look::tone` = (gain, 1 / gamma), written next to the grade (wgpu: `present.rs` uniform `tone`, 48 bytes; GLES: `u_tone`): in the final pass, after the grade and before the vignette, `c = pow(clamp(c * gain, 0, 1), 1 / gamma)` in linear 709, skipped when both are 1. It reaches the Nether and underwater frames and does not depend on the Vibrance dial.
++    - ponytail: Brightness is a gain on the final colour, not b1.7.3's light-table `gammaSetting` (the table is baked into the chunk meshes); the HUD is drawn after the pass and is not changed.
++- `done` Options: FOV slider (2026-11-01; written without a toolchain: not compiled, not run, not seen on a device; +1 test in `options.rs` (`fov_slider`)). **NOT b1.7.3** (it has no field-of-view option).
++    - `Opt::Fov` (Graphics > Display, `fov:` in options.txt, the slider position 0..1): `FOV_MIN` 30 .. `FOV_MAX` 110 degrees in whole degrees (`Settings::fov_deg`), 70 in the middle of the track = the field of view mc-rs always drew, so a player who never touches it sees no change. The text is `FOV: 70` (the font has no degree sign).
++    - `lib.rs`: the camera's target is `fov_deg x sprint.fov` (the sprint's 1.15 and the zoom still apply on top and ease as before); the look drag and the right stick are normalised by the chosen FOV, not by 70, so only a zoom slows them (a wide FOV does not make the view turn faster); the combat gauge's cone is projected through the chosen FOV; the camera starts at it (start-up and after a world is entered) instead of easing in from 70.
++    - Not done: a separate FOV for the held item (it keeps following the camera's projection), a `Quake Pro` label at 110.
++- `done` Build label (2026-11-01; written without a toolchain: not compiled, not run, not seen on a device; +1 test in `version.rs`). **NOT b1.7.3.**
++    - `version.rs` reads `MCRS_BUILD` (the CI's run number) and `MCRS_SHA` at compile time (`option_env!`) and makes `build-123 (a1b2c3d)`: the tag of the `build-<n>` GitHub release the APK was published under, and the first 7 characters of the commit. No run number (a local build, `cargo test`) reads `dev`. `ci.yml` sets both on the `Build APK (release)` step.
++    - Shown on the title screen under `Minecraft Beta 1.7.3` (grey, top left) and as the `Build` row under the heading of the debug screen.
++    - Not done: asking GitHub whether a newer release exists (needs the INTERNET permission and an HTTP call; `/releases/latest` skips prereleases, and every `build-<n>` is one, so `/releases?per_page=1` would be the call).
+diff --git a/tools/optlist_proto.py b/tools/optlist_proto.py
+index 795a673..8119c69 100644
+--- a/tools/optlist_proto.py
++++ b/tools/optlist_proto.py
+@@ -1,5 +1,5 @@
+ #!/usr/bin/env python3
+-"""Python twin of the options list (`options.rs`: `frame`, `flow`, `which`; `ui.rs`: `wrap`, `fit`, `thumb`, `clip`), run with no toolchain.
++"""Python twin of the options list (`options.rs`: `frame`, `flow`, `which`, the two tabs; `ui.rs`: `wrap`, `fit`, `thumb`, `clip`), run with no toolchain.
+ 
+ It reads the REAL font widths (`render/font.rs`), the tip sentences (`TIPS`), the setting names (`Opt::name`, the pad's `KNOBS` /
+ `TOGGLES` / `ACTS`, `KEY_NAMES`) out of the Rust source, and checks what the Rust tests check and a few things they cannot see without a
+@@ -68,6 +68,7 @@ def clip(quads, r):
+ 
+ # ---- options.rs ----
+ N_PAGES, PAGE_H, GROUP_H, ROW_H, ROW_PITCH, SECTION_GAP = 7, 18.0, 13.0, 20.0, 22.0, 6.0
++SIDE_PAGES = 2 * 20.0 + 6.0  # the tab buttons head the side column; the page list begins under them
+ 
+ 
+ def frame(gw, gh):
+@@ -87,7 +88,7 @@ def flow(items):
+     y, at, starts = 0.0, [], [0.0] * N_PAGES
+     for kind, arg in items:
+         if kind == "page":
+-            y += SECTION_GAP if arg > 0 else 0.0
++            y += SECTION_GAP if y > 0 else 0.0
+             starts[arg] = y
+             at.append(y)
+             y += PAGE_H + 3.0
+@@ -101,9 +102,9 @@ def flow(items):
+     return at, starts, y + 4.0
+ 
+ 
+-def which(starts, scroll, view):
++def which(starts, pages, scroll, view):
+     probe = scroll + min(3.0 * ROW_PITCH, view / 2.0)
+-    return next((i for i in reversed(range(N_PAGES)) if starts[i] <= probe), 0)
++    return next((i for i in reversed(pages) if starts[i] <= probe), pages[0])
+ 
+ 
+ def scaled_gs(w, h, gs=0):
+@@ -121,13 +122,16 @@ pad = read("input/gamepad.rs")
+ knobs = re.search(r"const KNOBS: \[&str; \d+\] = \[([^\]]*)\]", pad).group(1).replace('"', "").split(", ")
+ toggles = re.search(r"const TOGGLES: \[&str; \d+\] = \[([^\]]*)\]", pad).group(1).replace('"', "").split(", ")
+ acts = re.search(r"\[(\"Jump\", \"Sneak\"[^\]]*)\]\[self as usize\]", pad).group(1).replace('"', "").split(", ")
++tabs = [(n, range(int(a), N_PAGES if b == "N_PAGES" else int(b))) for n, a, b in re.findall(r'\("(\w+)", (\d+), (\w+)\)', opt[opt.index("const TABS"):opt.index("fn tab_pages")])]
++page_labels = re.findall(r'\("([^"]+)", "[^"]+"\),', opt[opt.index("const PAGES"):opt.index("const TABS")])
++assert len(tabs) == 2 and len(page_labels) == N_PAGES and sorted(i for _, r in tabs for i in r) == list(range(N_PAGES)), "every page is on exactly one tab"
+ tips = dict(re.findall(r'^\s*\("([^"]+)", "([^"]+)"\),$', opt[opt.index("const TIPS"):], re.M))
+ assert len(tips) == int(re.search(r"const TIPS: \[\(&str, &str\); (\d+)\]", opt).group(1)), "TIPS length does not match its table"
+ 
+ ROWS = [  # the Opt variants in `items()`, per section, and the pad's names
+     ("page", 0), *[("row", n) for n in ["Music", "Sound", "Difficulty", "GuiScale", "ViewBobbing"]],
+-    ("page", 1), ("group", "World"), ("row", "Graphics"), ("row", "RenderDistance"), ("row", "LoD"), ("group", "Lighting"), *[("row", n) for n in ["AmbientOcclusion", "AdvancedOpengl", "Anaglyph"]],
+-    ("page", 2), ("group", "Frame rate"), ("row", "FramerateLimit"), ("row", "DynamicRes"), ("group", "Next start"), *[("row", n) for n in ["Msaa", "Fxaa", "Post", "Renderer"]],
++    ("page", 1), ("group", "Display"), ("row", "Fov"), ("row", "Brightness"), ("row", "Gamma"), ("group", "World"), ("row", "Graphics"), ("row", "RenderDistance"), ("row", "LoD"), ("group", "Lighting"), *[("row", n) for n in ["AmbientOcclusion", "AdvancedOpengl", "Anaglyph"]],
++    ("page", 2), ("group", "Frame rate"), ("row", "FramerateLimit"), ("row", "DynamicRes"), ("row", "Sustained"), ("group", "Next start"), *[("row", n) for n in ["Msaa", "Fxaa", "Post", "Renderer"]],
+     ("page", 3), ("row", "Vibrance"), ("group", "Switches"), *[("row", n) for n in ["FxWarm", "FxWater", "FxGlow", "FxMotion", "FxHaze"]],
+     ("page", 4), ("group", "Look and dig"), *[("row", n) for n in ["Sensitivity", "InvertMouse", "DigDelay"]], ("group", "Keyboard"), *[("key", n) for n in key_names],
+     ("page", 5), *[("pad", n) for n in acts],
+@@ -152,7 +156,7 @@ def main():
+         s, gw, gh = scaled_gs(w, h)
+         f = frame(gw, gh)
+         # 2. the parts lie inside the screen and do not touch
+-        boxes = {"side": [f["side"][0], f["side"][1], f["side"][2], 7 * 20.0], "list": f["list"], "tip": f["tip"], "done": f["done"]}
++        boxes = {"side": [f["side"][0], f["side"][1], f["side"][2], SIDE_PAGES + 4 * 20.0], "list": f["list"], "tip": f["tip"], "done": f["done"]}
+         keys = list(boxes)
+         for i, a in enumerate(keys):
+             x, y, bw, bh = boxes[a]
+@@ -160,7 +164,9 @@ def main():
+             for b in keys[i + 1:]:
+                 p, q = boxes[a], boxes[b]
+                 assert p[0] + p[2] <= q[0] or q[0] + q[2] <= p[0] or p[1] + p[3] <= q[1] or q[1] + q[3] <= p[1], f"{a} touches {b} at {gw}x{gh}"
+-        assert f["side"][3] >= 7 * 20.0, f"the page list does not fit at {gw}x{gh}"
++        assert f["side"][3] >= SIDE_PAGES + max(len(r) for _, r in tabs) * 20.0, f"the tabs and the page list do not fit at {gw}x{gh}"
++        for n in [t for t, _ in tabs] + page_labels:
++            assert tw(n) <= f["side"][2] - 4.0, f"'{n}' does not fit its button at {gw}x{gh}"
+         # 3. every name fits beside its control, a tip fits the pane
+         room = f["list"][2] - 11.0 - f["ctl"] - 14.0
+         for k, n in shown:
+@@ -169,22 +175,30 @@ def main():
+             lines = wrap(t, f["tip"][2] - 12.0)
+             cap = 8 if f["wide"] else 2
+             assert len(lines) <= cap, f"tip '{n}': {len(lines)} lines in {f['tip'][2] - 12}: {lines}"
+-        # 4. the list scrolls, a jump reaches every section, and the lit page follows
+-        at, starts, total = flow(items)
++        # 4. each tab's list scrolls, a jump reaches every section of it, and the lit page follows
+         view = f["list"][3]
+-        mx = max(total - view, 0.0)
+-        assert mx > 0, "the list should need scrolling at every size"
+-        assert all(a < b for a, b in zip(starts, starts[1:]))
+-        for i in range(N_PAGES):
+-            assert which(starts, min(starts[i], mx), view) == i or i == N_PAGES - 1, f"jump to {i} lights another page at {gw}x{gh}"
+-            assert which(starts, starts[i], view) == i
+-        assert which(starts, 0.0, view) == 0 and which(starts, mx, view) == N_PAGES - 1
+-        last = N_PAGES - 1
+-        assert starts[last] < mx, "the last section starts above the bottom, so a tap on it is not clamped"
+-        # 5. rows are inside the list's content and 2 units apart (a row is 20, the pitch 22)
+-        rows = [y for (kind, _), y in zip(items, at) if kind == "row"]
+-        assert all(b - a >= ROW_PITCH - 1e-6 for a, b in zip(rows, rows[1:])), "rows overlap"
+-        assert thumb(view, total, 0.0, mx)[0] == 0.0 and sum(thumb(view, total, mx, mx)) <= view + 1e-6
++        for name, pages in tabs:
++            tab_items, at_page = [], 0
++            for it in items:
++                if it[0] == "page":
++                    at_page = it[1]
++                if at_page in pages:
++                    tab_items.append(it)
++            at, starts, total = flow(tab_items)
++            mx = max(total - view, 0.0)
++            assert mx > 0, f"the {name} list should need scrolling at every size ({gw}x{gh})"
++            assert starts[pages[0]] == 0.0, "a tab opens on its first section"
++            assert all(starts[a] < starts[b] for a, b in zip(pages, pages[1:]))
++            for i in pages:
++                assert which(starts, pages, min(starts[i], mx), view) == i or i == pages[-1], f"jump to {i} lights another page at {gw}x{gh}"
++                assert which(starts, pages, starts[i], view) == i
++            assert which(starts, pages, 0.0, view) == pages[0] and which(starts, pages, mx, view) == pages[-1]
++            # a last section shorter than the view cannot reach the top (the list stops where it ends); its tap still lights it, and the end of the list does
++            # 5. rows are inside the list's content and 2 units apart (a row is 20, the pitch 22)
++            rows = [y for (kind, _), y in zip(tab_items, at) if kind == "row"]
++            assert all(b - a >= ROW_PITCH - 1e-6 for a, b in zip(rows, rows[1:])), "rows overlap"
++            assert thumb(view, total, 0.0, mx)[0] == 0.0 and sum(thumb(view, total, mx, mx)) <= view + 1e-6
++
+ 
+     # 6. wrap / fit
+     t = "Draws far terrain as simplified blocks, out to 768 blocks."
+@@ -195,7 +209,7 @@ def main():
+     q = clip([(-10.0, 0.0, 30.0, 10.0, [0.0, 0.0], [1.0, 1.0])], [0.0, 0.0, 30.0, 30.0])[0]
+     assert (q[0], q[2]) == (0.0, 30.0) and abs(q[4][0] - 0.25) < 1e-9 and q[5][0] == 1.0
+     assert clip([(100.0, 0.0, 110.0, 10.0, [0, 0], [1, 1])], [0.0, 0.0, 30.0, 30.0]) == []
+-    print("ok:", len(shown), "rows,", len(tips), "tips,", N_PAGES, "pages; widest name", max(tw(n) for _, n in shown), "units")
++    print("ok:", len(shown), "rows,", len(tips), "tips,", N_PAGES, "pages on", len(tabs), "tabs; widest name", max(tw(n) for _, n in shown), "units")
+ 
+ 
+ if __name__ == "__main__":

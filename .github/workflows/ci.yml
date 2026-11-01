@@ -89,6 +89,9 @@ jobs:
           # which fails with "java.io.FileNotFoundException: /.android/debug.keystore".
           CARGO_APK_RELEASE_KEYSTORE: /home/runner/.android/debug.keystore
           CARGO_APK_RELEASE_KEYSTORE_PASSWORD: android
+          # The build's name inside the app (`mc-rs/src/version.rs`): the run number is the number of the `build-<n>` release below.
+          MCRS_BUILD: ${{ github.run_number }}
+          MCRS_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           cd mc-rs

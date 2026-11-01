@@ -89,7 +89,9 @@ original. Anything that cannot be derived from the b1.7.3 sources is marked
 | M14                  | pending | Menus (part 1: title, world list, create world; see above), options, player armor and real mob models (both done, see the player model row above and `roadmap/gameplay.md`); only the chat (overlay, later) is left; a bed tapped by day says so: see [`roadmap/gameplay.md`](roadmap/gameplay.md). M10 multiplayer and M13 optimization are out of scope on purpose. |
 
 Latest commit on `main`: see `git log -1`. Latest released APK: see the
-`MinecraftB173Rust-apk` artifact on the GitHub Actions run.
+`MinecraftB173Rust-apk` artifact on the GitHub Actions run. Which build is installed: the title screen
+(under the version line) and the debug screen show `build-<n> (<commit>)`, the tag of the GitHub release the APK came from (`version.rs`, set by
+`ci.yml`); a local build reads `dev`.
 
 ## Layout
 

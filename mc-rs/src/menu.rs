@@ -533,6 +533,7 @@ impl Menu {
                 let (x0, y0, x1, y1) = self.buttons(gw, gh).iter().fold((f32::MAX, f32::MAX, 0.0f32, 0.0f32), |a, b| (a.0.min(b.1[0]), a.1.min(b.1[1]), a.2.max(b.1[0] + b.1[2]), a.3.max(b.1[1] + b.1[3])));
                 ui::panel(v, s, [x0 - 12.0, y0 - 12.0, x1 - x0 + 24.0, y1 - y0 + 24.0], 0.4);
                 txt(v, 2.0, 2.0, "Minecraft Beta 1.7.3", 0xFFFFFF, false); // was 0x505050, grey on dirt: unreadable over the panorama
+                txt(v, 2.0, 12.0, &crate::version::label(), 0xA0A0A0, false); // the CI build and commit (`version.rs`), `dev` for a local build
                 let c = "Copyright Mojang AB. Do not distribute.";
                 txt(v, gw - tw(c) - 2.0, gh - 10.0, c, 0xFFFFFF, false);
             }
