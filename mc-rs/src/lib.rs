@@ -4943,6 +4943,8 @@ fn android_main(app: AndroidApp) {
     let mut running = true;
     let mut last_input = Instant::now();
     let mut kbd_up = false;
+    let mut sustained: Option<bool> = None; // the last `immersive::set_sustained` value (None: ask again)
+    let mut frame_hint = -1.0f32; // the last `immersive::set_frame_rate` value (-1: the window is new, ask again)
 
     while running {
         // Once the world is up the loop must not wait for events: an empty poll sleeps its whole timeout, and that 8 ms was added to EVERY
@@ -4963,6 +4965,8 @@ fn android_main(app: AndroidApp) {
                 match main_event {
                     MainEvent::InitWindow { .. } => {
                         immersive::hide_system_bars(&app);
+                        frame_hint = -1.0;
+                        sustained = None;
                         init_handle = start_init(&app);
                     }
                     MainEvent::InputAvailable => {
@@ -5077,6 +5081,16 @@ fn android_main(app: AndroidApp) {
             a.render();
             if let Some(left) = a.opts.frame_cap().and_then(|cap| cap.checked_sub(frame_start.elapsed())) {
                 std::thread::sleep(left); // `Performance`: Balanced 120 fps, Power saver 40
+            }
+            if sustained != Some(a.opts.sustained) {
+                sustained = Some(a.opts.sustained);
+                immersive::set_sustained(&app, a.opts.sustained);
+            }
+            // The refresh-rate hint follows the Performance option (Balanced 120, Power saver 40, Max FPS none).
+            let hint = a.opts.frame_cap().map_or(0.0, |d| (1.0 / d.as_secs_f32()).round());
+            if hint != frame_hint {
+                frame_hint = hint;
+                immersive::set_frame_rate(&app, hint);
             }
             #[cfg(feature = "pad-rumble")]
             {

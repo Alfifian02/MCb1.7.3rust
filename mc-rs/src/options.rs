@@ -52,6 +52,8 @@ pub enum Opt {
     Renderer,
     /// Added: the scene scale follows the GPU load (`gpu::context::Drs`) or stays at `START_PCT`. Takes effect at once.
     DynamicRes,
+    /// Added: `Window.setSustainedPerformanceMode` (clocks the chip can hold, less thermal throttling, a lower peak). Takes effect at once.
+    Sustained,
     /// Added: the one dial of the colour grade (`render::look`), 0 = off. Takes effect at once.
     Vibrance,
     /// Added (Effects screen): warm directional light, water depth + glint, soft halos on emitters, motion (off / low / on), aerial haze.
@@ -90,6 +92,7 @@ impl Opt {
             Opt::Fxaa => "FXAA",
             Opt::Renderer => "Renderer",
             Opt::DynamicRes => "Dynamic Res",
+            Opt::Sustained => "Sustained Perf",
             Opt::Vibrance => "Vibrance",
             Opt::FxWarm => "Warm Light",
             Opt::FxWater => "Water Look",
@@ -158,6 +161,8 @@ pub struct Settings {
     pub debug_screen: bool,
     /// Log a backtrace with every wgpu error, at most one a second (`gpu::context::set_error_trace`); a debug switch with no button.
     pub gpu_error_trace: bool,
+    /// See `Opt::Sustained`; on by default (`sustainedPerf` in options.txt).
+    pub sustained: bool,
     /// Frames the swap chain may queue (`gpu::context::set_frame_latency`): 2 = as before, 1 = less latency, a frame that needs more than half the refresh period may then drop a step; no button. Next start.
     pub frame_latency: u8,
     /// Smart animals (`Mobs::smart`, not b1.7.3): path-walked wandering, herding, panic, and the grazing / rooting / pecking / resting pauses; a switch with no button, `animalAi:false` in options.txt turns all of it off.
@@ -212,6 +217,7 @@ impl Default for Settings {
             gpu_error_trace: false,
             frame_latency: 2,
             animal_ai: true,
+            sustained: true,
             biome_rules: true,
             pack_cloth: false,
             book_discovery: false,
@@ -259,6 +265,7 @@ impl Settings {
                 ("packCloth", ..) => s.pack_cloth = b,
                 ("bookDiscovery", ..) => s.book_discovery = b,
                 ("dynamicRes", ..) => s.dynamic_res = b,
+                ("sustainedPerf", ..) => s.sustained = b,
                 ("msaa", _, Some(n)) if matches!(n, 0 | 1 | 2 | 4) => s.msaa = n,
                 ("post", _, Some(n)) if n <= 2 => s.post = n,
                 ("fxaa", _, Some(n)) if n <= 2 => s.fxaa = n,
@@ -280,8 +287,8 @@ impl Settings {
     pub fn save(&self) {
         let Some(p) = &self.path else { return };
         let mut t = format!(
-            "music:{}\nsound:{}\ninvertYMouse:{}\nmouseSensitivity:{}\nviewDistance:{}\nguiScale:{}\nbobView:{}\nanaglyph3d:{}\nadvancedOpengl:{}\nfpsLimit:{}\ndifficulty:{}\nfancyGraphics:{}\nao:{}\nlod:{}\ndigDelay:{}\ngpuErrorTrace:{}\ndynamicRes:{}\nmsaa:{}\npost:{}\nfxaa:{}\nrenderer:{}\ndebugScreen:{}\nanimalAi:{}\nbiomeRules:{}\npackCloth:{}\nbookDiscovery:{}\nframeLatency:{}\n",
-            self.music, self.sound, self.invert_mouse, self.sensitivity, self.render_distance, self.gui_scale, self.view_bobbing, self.anaglyph, self.advanced_opengl, self.limit_framerate, self.difficulty, self.fancy_graphics, self.ambient_occlusion, self.lod, self.dig_delay, self.gpu_error_trace, self.dynamic_res, self.msaa, self.post, self.fxaa, self.renderer, self.debug_screen, self.animal_ai, self.biome_rules, self.pack_cloth, self.book_discovery, self.frame_latency
+            "music:{}\nsound:{}\ninvertYMouse:{}\nmouseSensitivity:{}\nviewDistance:{}\nguiScale:{}\nbobView:{}\nanaglyph3d:{}\nadvancedOpengl:{}\nfpsLimit:{}\ndifficulty:{}\nfancyGraphics:{}\nao:{}\nlod:{}\ndigDelay:{}\ngpuErrorTrace:{}\ndynamicRes:{}\nmsaa:{}\npost:{}\nfxaa:{}\nrenderer:{}\ndebugScreen:{}\nanimalAi:{}\nbiomeRules:{}\npackCloth:{}\nbookDiscovery:{}\nframeLatency:{}\nsustainedPerf:{}\n",
+            self.music, self.sound, self.invert_mouse, self.sensitivity, self.render_distance, self.gui_scale, self.view_bobbing, self.anaglyph, self.advanced_opengl, self.limit_framerate, self.difficulty, self.fancy_graphics, self.ambient_occlusion, self.lod, self.dig_delay, self.gpu_error_trace, self.dynamic_res, self.msaa, self.post, self.fxaa, self.renderer, self.debug_screen, self.animal_ai, self.biome_rules, self.pack_cloth, self.book_discovery, self.frame_latency, self.sustained
         );
         for (id, code) in KEY_IDS.iter().zip(self.keys) {
             t.push_str(&format!("key_key.{id}:{code}\n"));
@@ -356,6 +363,7 @@ impl Settings {
             Opt::Fxaa => self.fxaa = (self.fxaa + 1) % 3,
             Opt::Renderer => self.renderer = (self.renderer + 1) % 3,
             Opt::DynamicRes => self.dynamic_res = !self.dynamic_res,
+            Opt::Sustained => self.sustained = !self.sustained,
             Opt::FxWarm => self.look.warm = !self.look.warm,
             Opt::FxWater => self.look.water = !self.look.water,
             Opt::FxGlow => self.look.glow = !self.look.glow,
@@ -387,6 +395,7 @@ impl Settings {
                 Opt::AdvancedOpengl => onoff(self.advanced_opengl).into(),
                 Opt::AmbientOcclusion => onoff(self.ambient_occlusion).into(),
                 Opt::DynamicRes => onoff(self.dynamic_res).into(),
+                Opt::Sustained => onoff(self.sustained).into(),
                 Opt::FxWarm => onoff(self.look.warm).into(),
                 Opt::FxWater => onoff(self.look.water).into(),
                 Opt::FxGlow => onoff(self.look.glow).into(),
@@ -639,6 +648,7 @@ const TIPS: [(&str, &str); 32] = [
     ("Render Distance", "Chunks kept around you: Far 16, Normal 8, Short 4, Tiny 2."),
     ("LoD", "Draws far terrain as simplified blocks, out to 768 blocks."),
     ("Performance", "Frame cap: Max FPS, Balanced (120 fps) or Power saver (40 fps)."),
+    ("Sustained Perf", "Holds clocks the chip can keep up, so long sessions throttle less. May lower the peak speed."),
     ("Dynamic Res", "Raises and lowers the render resolution (50% to 100%) with the GPU load."),
     ("MSAA", "Samples for smoother edges. Auto picks by GPU. Applies at the next start."),
     ("FXAA", "Smooths edges in the final pass. Auto uses it only without MSAA. Next start."),
@@ -876,6 +886,7 @@ impl OptionsUi {
             G("Frame rate"),
             o(Opt::FramerateLimit),
             o(Opt::DynamicRes),
+            o(Opt::Sustained),
             G("Next start"),
             o(Opt::Msaa),
             o(Opt::Fxaa),
@@ -1837,7 +1848,7 @@ mod tests {
         }
         for want in [
             "Music", "Sound", "Difficulty", "GUI Scale", "View Bobbing", "Graphics: ", "Render Distance", "LoD", "Smooth Lighting", "Advanced OpenGL", "3D Anaglyph",
-            "Performance", "Dynamic Res", "MSAA", "FXAA", "Post", "Renderer", "Vibrance", "Warm Light", "Water Look", "Glow", "Motion", "Haze", "Sensitivity", "Invert Mouse",
+            "Performance", "Dynamic Res", "Sustained Perf", "MSAA", "FXAA", "Post", "Renderer", "Vibrance", "Warm Light", "Water Look", "Glow", "Motion", "Haze", "Sensitivity", "Invert Mouse",
             "Dig Delay", "Jump: ", "Look X", "Invert Y", "Forward", "Toggle Fog",
         ] {
             assert!(labels.iter().any(|l| l.starts_with(want)), "{want} is not in the list");

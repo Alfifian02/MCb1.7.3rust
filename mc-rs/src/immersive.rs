@@ -113,3 +113,60 @@ unsafe fn read_refresh(vm: *mut c_void, activity: *mut c_void) -> jni::errors::R
         env.call_method(&display, jni_str!("getRefreshRate"), jni_sig!(() -> jfloat), &[])?.f()
     })
 }
+
+/// `PowerManager.isSustainedPerformanceModeSupported()` then `Window.setSustainedPerformanceMode(true)` (PPSSPP's `PpssppActivity`): the
+/// system holds clocks the chip can keep up, so a long session does not fall off a thermal cliff. Costs some peak speed on a short one.
+/// UNVERIFIED: not built or run on a device.
+unsafe fn sustained(vm: *mut c_void, activity: *mut c_void, on: bool) -> jni::errors::Result<()> {
+    let vm = unsafe { JavaVM::from_raw(vm.cast::<sys::JavaVM>()) };
+    vm.attach_current_thread(|env| {
+        let raw = activity as sys::jobject;
+        let activity = unsafe { env.as_cast_raw::<Global<JObject>>(&raw)? };
+        let name = env.new_string("power")?;
+        let pm = env
+            .call_method(&*activity, jni_str!("getSystemService"), jni_sig!((name: java.lang.String) -> java.lang.Object), &[JValue::Object(&name)])?
+            .l()?;
+        if !env.call_method(&pm, jni_str!("isSustainedPerformanceModeSupported"), jni_sig!(() -> jboolean), &[])?.z()? {
+            return Ok(());
+        }
+        let window = env
+            .call_method(&*activity, jni_str!("getWindow"), jni_sig!(() -> android.view.Window), &[])?
+            .l()?;
+        env.call_method(&window, jni_str!("setSustainedPerformanceMode"), jni_sig!((enable: jboolean) -> void), &[JValue::Bool(on)])?;
+        Ok(())
+    })
+}
+
+/// Settings > Performance > Sustained Perf: switch the mode on or off (a window call, so on the Java main thread). A device without
+/// support only logs.
+pub fn set_sustained(app: &AndroidApp, on: bool) {
+    let app2 = app.clone();
+    app.run_on_java_main_thread(Box::new(move || {
+        // SAFETY: both pointers come from `app2`, which this closure keeps alive.
+        if let Err(e) = unsafe { sustained(app2.vm_as_ptr(), app2.activity_as_ptr(), on) } {
+            log::warn!("sustained performance mode not set: {e:?}");
+        }
+    }));
+}
+
+/// `ANativeWindow_setFrameRate(window, hz, DEFAULT)`: tells the compositor the rate the game really runs at (0 = no preference), so a
+/// 120 Hz panel is not driven faster than a 40 fps cap needs. The NDK call is API 30; this app's minimum is 26, so it is looked up with
+/// `dlsym` and skipped where it is missing. Ask again for every new window. UNVERIFIED: not built or run on a device.
+pub fn set_frame_rate(app: &AndroidApp, hz: f32) {
+    type Fn = unsafe extern "C" fn(*mut c_void, f32, i8) -> i32;
+    extern "C" {
+        fn dlsym(handle: *mut c_void, name: *const core::ffi::c_char) -> *mut c_void;
+    }
+    let Some(win) = app.native_window() else { return };
+    // SAFETY: `dlsym(RTLD_DEFAULT = null, ..)` only reads the symbol table; the pointer is a real `ANativeWindow_setFrameRate` or null,
+    // and `win` keeps the window alive for the call.
+    unsafe {
+        let p = dlsym(core::ptr::null_mut(), c"ANativeWindow_setFrameRate".as_ptr());
+        if p.is_null() {
+            return;
+        }
+        let f: Fn = core::mem::transmute::<*mut c_void, Fn>(p);
+        let r = f(win.ptr().as_ptr().cast(), hz, 0);
+        log::info!("frame rate hint {hz} Hz -> {r}");
+    }
+}
