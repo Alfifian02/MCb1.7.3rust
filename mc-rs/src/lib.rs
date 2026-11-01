@@ -1948,7 +1948,7 @@ impl App {
     fn terrain_cost(&self) -> f32 {
         let p = self.player.pos;
         let (x, z, y) = (p.x.floor() as i32, p.z.floor() as i32, p.y.floor() as i32);
-        let (feet, under) = (self.chunks.block(x, y, z), self.chunks.block(x, (p.y - 0.1).floor() as i32, z));
+        let (feet, under) = (self.chunks.block(x, y, z).unwrap_or(0), self.chunks.block(x, (p.y - 0.1).floor() as i32, z).unwrap_or(0));
         match (feet, under) {
             (78, _) | (_, 88 | 80 | 78) => 1.3,
             (27 | 28 | 66, _) | (_, 4 | 48) => 0.8,
@@ -2419,7 +2419,7 @@ impl App {
         self.vitals.fed = self.vitals.fed.saturating_sub(1);
         // Catch breath: still +0.5, on a boat or minecart +0.5, a fire at hand +0.3, at most +1.0 (NOT Stamina's; sneaking is not still enough on its own).
         let still = self.player.vel.x.hypot(self.player.vel.z) < 0.1 && !self.sprint.on();
-        self.vitals.stamina.rest = (if still { 0.5 } else { 0.0 } + if riding { 0.5 } else { 0.0 } + if self.heat_at_hand() { 0.3 } else { 0.0 }).min(1.0);
+        self.vitals.stamina.rest = (if still { 0.5_f32 } else { 0.0 } + if riding { 0.5 } else { 0.0 } + if self.heat_at_hand() { 0.3 } else { 0.0 }).min(1.0);
         self.vitals.stamina.terrain = self.terrain_cost();
         self.vitals.stamina.tick_in(self.sprint.on() && !self.touch.flying, self.vitals.health, self.armor_load(), air);
         if self.sprint.on() && !self.was_in_water {
