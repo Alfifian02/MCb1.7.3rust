@@ -2752,7 +2752,7 @@ impl App {
 
     /// `BlockBed.blockActivated` + `EntityPlayer.sleepInBedAt` (the OK status: at night, within 3 / 2 / 3 blocks; by day NOT_POSSIBLE_NOW says so).
     /// b1.7.3 has no other message: `TOO_FAR_AWAY` returns silently (`BlockBed` only answers `NOT_POSSIBLE_NOW`), `tile.bed.occupied` needs a second
-    /// player and there is no "monsters nearby" check (Beta 1.8 added it); monsters come at the end of the sleep instead (`sleep_spawn`).
+    /// player and there is no "monsters nearby" check (Beta 1.8 added it) and, since the fix of 2026-11-02, no monster comes at the end of the sleep either.
     fn use_bed(&mut self, (mut x, y, mut z): (i32, i32, i32)) {
         let mut m = self.chunks.meta(x, y, z);
         if m & 8 == 0 {
@@ -2816,44 +2816,20 @@ impl App {
         }
     }
 
-    /// `World.tick` -> `SpawnerAnimals.performSleepSpawning` for the sleeper at the bed (`Mobs::sleep_spawn`); the monster's cry is played.
-    fn sleep_spawn(&mut self) -> bool {
-        let Some((x, y, z, _)) = self.sleep else { return false };
-        // Spawners see the same world as the mobs do (plants read as air).
-        let get = |x: i32, y: i32, z: i32| self.chunks.block(x, y, z).map(|b| if is_plant(b) { 0 } else { self.chunks.physics_at(x, y, z, b) });
-        let light = |x: i32, y: i32, z: i32| self.chunks.light(x, y, z);
-        let biome = |x: i32, z: i32| self.chunks.biome_at(x, z);
-        let raw = |a: i32, b: i32, c: i32| self.chunks.block_loaded(a, b, c).unwrap_or(0);
-        let eye = self.player.pos + glam::Vec3::new(0.0, EYE_HEIGHT, 0.0); // asleep: `posY` is the bed's surface
-        let ctx = Ctx { get: &get, light: &light, day: false, player: self.player.pos, eye, biome: &biome, sight: 1.0 };
-        let beside = pick::wake_cell(&raw, (x, y, z), self.chunks.meta(x, y, z), 1);
-        let mut evs = Vec::new();
-        let came = self.mobs.sleep_spawn(&ctx, eye, beside, &mut evs);
-        for e in evs {
-            if let Ev::Snd(name, at, vol, mul, jit) = e {
-                self.audio.cry(name, at, vol, mul, jit);
-            }
-        }
-        came
-    }
-
-    /// One 20 Hz tick of sleeping: fully asleep (100 ticks) a monster may come first (`World.tick`: `performSleepSpawning`; it wakes the player
-    /// without making the bed their spawn and the night stays); else everyone wakes at the next morning (no weather runs during the skip);
-    /// a bed that is gone or day wakes the player earlier (`EntityPlayer.onUpdate`).
+    /// One 20 Hz tick of sleeping: fully asleep (100 ticks) the night is skipped and everyone wakes at the next morning (no weather runs
+    /// during the skip); a bed that is gone or day wakes the player earlier (`EntityPlayer.onUpdate`).
+    /// NOT b1.7.3: no monster is spawned beside the sleeper (`World.tick` -> `SpawnerAnimals.performSleepSpawning`, `Mobs::sleep_spawn`, is
+    /// deliberately not called: it was reported as a bug). ponytail: `Mobs::sleep_spawn` and its test stay for a future switch.
     fn sleep_tick(&mut self, sky_sub: u8) {
         let Some((x, y, z, t)) = self.sleep else { return };
         if t >= 100 {
-            if self.sleep_spawn() {
-                self.wake(false);
-            } else {
-                let next = self.world_ticks as u64 + 24000;
-                self.world_ticks = (next - next % 24000) as f64;
-                self.weather_ticks = self.world_ticks as u64;
-                if world::combat::rules::on() {
-                    self.vitals.restore(vitals::MAX_HEALTH); // NOT b1.7.3 (`combat::mend`): a night's sleep heals everything
-                }
-                self.wake(true);
+            let next = self.world_ticks as u64 + 24000;
+            self.world_ticks = (next - next % 24000) as f64;
+            self.weather_ticks = self.world_ticks as u64;
+            if world::combat::rules::on() {
+                self.vitals.restore(vitals::MAX_HEALTH); // NOT b1.7.3 (`combat::mend`): a night's sleep heals everything
             }
+            self.wake(true);
         } else if self.chunks.block_loaded(x, y, z) != Some(26) {
             self.wake(false);
         } else if sky_sub < 4 {
