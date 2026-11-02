@@ -156,19 +156,22 @@ pub fn pull(e: &Entry, inv: &mut Inventory, chests: &mut HashMap<Pos, Chest>, be
     for &(code, n) in &e.need {
         let in_bag = |inv: &Inventory| inv.slots[..MAIN].iter().flatten().filter(|s| craft::code(s.id, s.damage) == code).map(|s| u32::from(s.count)).sum::<u32>();
         let mut short = u32::from(n).saturating_sub(in_bag(&*inv));
-        for slot in order.iter().filter_map(|p| chests.get_mut(p)).flat_map(|c| c.iter_mut()) {
-            let Some(s) = slot.as_mut().filter(|s| short > 0 && craft::code(s.id, s.damage) == code) else { continue };
-            let mut moved = ItemStack { count: short.min(u32::from(s.count)) as u8, ..*s };
-            let asked = moved.count;
-            inv.add(&mut moved); // what does not fit stays in `moved`
-            let took = asked - moved.count;
-            s.count -= took;
-            short -= u32::from(took);
-            if s.count == 0 {
-                *slot = None;
-            }
-            if moved.count > 0 {
-                return; // the bag is full
+        for p in &order {
+            let Some(chest) = chests.get_mut(p) else { continue };
+            for slot in chest.iter_mut() {
+                let Some(s) = slot.as_mut().filter(|s| short > 0 && craft::code(s.id, s.damage) == code) else { continue };
+                let mut moved = ItemStack { count: short.min(u32::from(s.count)) as u8, ..*s };
+                let asked = moved.count;
+                inv.add(&mut moved); // what does not fit stays in `moved`
+                let took = asked - moved.count;
+                s.count -= took;
+                short -= u32::from(took);
+                if s.count == 0 {
+                    *slot = None;
+                }
+                if moved.count > 0 {
+                    return; // the bag is full
+                }
             }
         }
     }
