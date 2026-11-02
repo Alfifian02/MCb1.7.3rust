@@ -735,7 +735,9 @@ const TIPS: [(&str, &str); 40] = [
     ("Toggle Sneak", "Sneak stays on until pressed again."),
     ("Button Hints", "Shows what the pad's buttons do in the corner while a pad is in use."),
     ("Button Icons", "Style of the button pictures: Xbox, PlayStation, Switch or plain text. Tap to change."),
-    ("Hint Size", "Size of the button hints. 100% matches the GUI Scale."),
+    ("Icon Size", "Size of the button pictures in the hints. 100% matches the GUI Scale."),
+    ("Text Size", "Size of the hints' labels, apart from the pictures."),
+    ("Hint BG", "Opacity of the black box behind the hints. 0% shows none."),
     ("Hint Layout", "Auto: a row in menus, a list in game. Tap to change."),
 ];
 
@@ -2044,7 +2046,7 @@ mod tests {
         assert!(!st.pad.hints);
         tap(&mut o, &mut st, "Hint Layout: Auto");
         assert_eq!(st.pad.layout, 1, "Auto -> Horizontal");
-        let (x, y, w, s) = track_px(&mut o, &st, "Hint Size");
+        let (x, y, w, s) = track_px(&mut o, &st, "Icon Size");
         o.event(ScreenEv::Down(x + w - 2.0 * s, y + 4.0 * s), SZ.0, SZ.1, &mut st);
         o.event(ScreenEv::Up(x + w - 2.0 * s, y + 4.0 * s), SZ.0, SZ.1, &mut st);
         assert!(st.pad.hint_size > 1.9, "the slider's right end is 200%: {}", st.pad.hint_size);

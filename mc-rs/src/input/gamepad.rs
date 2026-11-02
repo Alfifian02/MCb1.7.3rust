@@ -8,9 +8,10 @@
 //!
 //! Button hints (`Pad::hints`): while a pad is in use a corner list names what the bound buttons do, drawn with the pictures of the "Controller
 //! Tooltip Selector" pack (Xbox, PlayStation or Switch, `tools/gen_pad_buttons.py`) or as plain text; Controls > Controller picks the style, the
-//! size (`Hint Size`, a multiplier on the GUI scale, so 100% matches it but the two stay separate) and the layout (a row along the bottom in menus,
+//! sizes (`Icon Size` for the pictures and `Text Size` for the labels, multipliers on the GUI scale, so 100% matches it but they stay separate),
+//! the backdrop (`Hint BG`: black at that opacity behind each box) and the layout (a row along the bottom in menus,
 //! a list in the corner while playing, or one of them always). The screen hands in the rects it draws (`HintView::avoid`); the hints slide along the
-//! bottom (then the top), shrink down to half their size, and are left out when nothing is clear: they never cover a button or a footer text.
+//! bottom (then the top), the pad's left-half buttons (LB, LT, L3, Back, d-pad) from the left corner and the rest from the right, shrink down to half their size, and are left out when nothing is clear: they never cover a button or a footer text.
 //!
 //! Not ported (nothing in mc-rs to hang them on): gyro, DualSense LEDs / adaptive triggers / touchpad, on-screen keyboard, splitscreen, joystick remapping, the server vibration API, chat, swap hands
 //! (b1.7.3 has no sprint / off hand, and mc-rs has no chat yet). Drop throws one item of the selected slot (`Out::drop`). UNVERIFIED on real hardware: the Android axis / key mapping
@@ -50,6 +51,11 @@ impl Btn {
 
     pub fn name(self) -> &'static str {
         ["A", "B", "X", "Y", "LB", "RB", "LT", "RT", "L3", "R3", "Start", "Back", "D-Up", "D-Down", "D-Left", "D-Right"][self as usize]
+    }
+
+    /// On the left half of a pad (the left bumper / trigger / stick, Back and the d-pad): its hint goes on the left of the screen, the others on the right.
+    fn left(self) -> bool {
+        matches!(self, Btn::Lb | Btn::Lt | Btn::L3 | Btn::Back | Btn::Up | Btn::Down | Btn::Left | Btn::Right)
     }
 
     /// The picture of this button in icon `style` (`sprites::pad`: 0 Xbox, 1 PlayStation, 2 Switch); None in the Text style. The face buttons are
@@ -103,10 +109,10 @@ impl Act {
     }
 }
 
-const KNOBS: [&str; 7] = ["Look X", "Look Y", "Deadzone", "Cursor", "Trigger", "Rumble", "Hint Size"];
-const KNOB_IDS: [&str; 7] = ["lookH", "lookV", "deadzone", "cursor", "threshold", "rumble", "hintSize"];
+const KNOBS: [&str; 9] = ["Look X", "Look Y", "Deadzone", "Cursor", "Trigger", "Rumble", "Icon Size", "Text Size", "Hint BG"];
+const KNOB_IDS: [&str; 9] = ["lookH", "lookV", "deadzone", "cursor", "threshold", "rumble", "hintSize", "textSize", "hintBack"];
 /// Each knob's value at slider 0 and 1.
-const KNOB_RANGE: [(f32, f32); 7] = [(0.0, 2.0), (0.0, 2.0), (0.0, 0.5), (0.2, 2.0), (0.1, 0.9), (0.0, 1.0), (0.5, 2.0)];
+const KNOB_RANGE: [(f32, f32); 9] = [(0.0, 2.0), (0.0, 2.0), (0.0, 0.5), (0.2, 2.0), (0.1, 0.9), (0.0, 1.0), (0.5, 2.0), (0.5, 2.0), (0.0, 1.0)];
 const TOGGLES: [&str; 7] = ["Curve", "Invert X", "Invert Y", "Toggle Sneak", "Button Hints", "Button Icons", "Hint Layout"];
 const TOGGLE_IDS: [&str; 7] = ["curve", "invertX", "invertY", "toggleSneak", "hints", "iconStyle", "hintLayout"];
 /// The button picture styles (`PadCfg::style`).
@@ -136,8 +142,12 @@ pub struct PadCfg {
     pub hints: bool,
     /// Index into `STYLES`: 0 Xbox, 1 PlayStation, 2 Switch, 3 Text.
     pub style: u8,
-    /// Size of the hints as a multiple of the GUI scale (0.5 .. 2.0; 1.0 = the same size as the GUI).
+    /// Size of the hints' button pictures as a multiple of the GUI scale (0.5 .. 2.0; 1.0 = the same size as the GUI).
     pub hint_size: f32,
+    /// Size of the hints' label text, same scale as `hint_size`, set apart from it.
+    pub text_size: f32,
+    /// Opacity of the black box behind each group of hints (0 = none .. 1).
+    pub hint_back: f32,
     /// Index into `LAYOUTS`: 0 Auto, 1 Horizontal, 2 Vertical.
     pub layout: u8,
 }
@@ -160,6 +170,8 @@ impl Default for PadCfg {
             hints: true,
             style: 0,
             hint_size: 1.0,
+            text_size: 1.0,
+            hint_back: 0.5,
             layout: 0,
         }
     }
@@ -176,7 +188,7 @@ impl PadCfg {
     }
 
     fn knob_value(&self, i: usize) -> f32 {
-        [self.look_h, self.look_v, self.deadzone, self.cursor, self.threshold, self.rumble, self.hint_size][i]
+        [self.look_h, self.look_v, self.deadzone, self.cursor, self.threshold, self.rumble, self.hint_size, self.text_size, self.hint_back][i]
     }
 
     /// The slider position (0..1) of knob `i`.
@@ -195,7 +207,9 @@ impl PadCfg {
             3 => self.cursor = v,
             4 => self.threshold = v,
             5 => self.rumble = v,
-            _ => self.hint_size = v,
+            6 => self.hint_size = v,
+            7 => self.text_size = v,
+            _ => self.hint_back = v,
         }
     }
 
@@ -290,9 +304,8 @@ pub struct HintView<'a> {
 }
 
 /// The size of the hints' box and, for each row, [button x, y, button width, label x] inside it. `btns` / `texts` are the widths of each row's
-/// button and label. A list lines the buttons up in one column; a row sets each button by its label.
-fn hint_boxes(btns: &[f32], texts: &[f32], k: f32, horiz: bool) -> ((f32, f32), Vec<[f32; 4]>) {
-    let (row, gap) = (13.0 * k, 2.0 * k);
+/// button and label, `row` its height. A list lines the buttons up in one column; a row sets each button by its label.
+fn hint_boxes(btns: &[f32], texts: &[f32], row: f32, gap: f32, horiz: bool) -> ((f32, f32), Vec<[f32; 4]>) {
     if horiz {
         let mut x = 0.0;
         let at = btns.iter().zip(texts).map(|(&b, &t)| {
@@ -310,17 +323,17 @@ fn hint_boxes(btns: &[f32], texts: &[f32], k: f32, horiz: bool) -> ((f32, f32), 
 }
 
 /// The top-left of a `(bw, bh)` box on a `w` x `h` screen that is `margin` from the edges and at least `clear` from every rect of `avoid`:
-/// along the bottom edge from the right corner to the left, then along the top edge. None when no place is clear.
-fn hint_spot(w: f32, h: f32, (bw, bh): (f32, f32), margin: f32, clear: f32, avoid: &[[f32; 4]]) -> Option<(f32, f32)> {
+/// along the bottom edge from the right corner to the left (from the left corner to the right when `left`), then along the top edge. None when no place is clear.
+fn hint_spot(w: f32, h: f32, (bw, bh): (f32, f32), margin: f32, clear: f32, avoid: &[[f32; 4]], left: bool) -> Option<(f32, f32)> {
     let free = |x: f32, y: f32| avoid.iter().all(|a| x >= a[0] + a[2] + clear || x + bw <= a[0] - clear || y >= a[1] + a[3] + clear || y + bh <= a[1] - clear);
     let step = (margin * 0.5).max(1.0);
     for y in [h - margin - bh, margin] {
-        let mut x = w - margin - bw;
-        while x >= margin - 0.01 {
+        let mut x = if left { margin } else { w - margin - bw };
+        while x >= margin - 0.01 && x <= w - margin - bw + 0.01 {
             if free(x, y) {
                 return Some((x, y));
             }
-            x -= step;
+            x += if left { step } else { -step };
         }
     }
     None
@@ -653,7 +666,8 @@ impl Pad {
 
     /// Button hints: while a pad is in use, what the bound buttons do (playing: attack, place, jump, sneak, inventory, drop; in a GUI: select,
     /// back). Each button is its picture from `sprites::pad` (`PadCfg::style`), or in the Text style a dark pill with its name. One font pixel
-    /// `k` is a whole screen pixel (the GUI scale times `Hint Size`) and a picture is 13 of them (its 26 px at half size), so both stay crisp.
+    /// `k` is a whole screen pixel (the GUI scale times `Icon Size` for the pictures, `Text Size` for the labels) and a picture is 13 of them, so both stay crisp.
+    /// The left-hand buttons of the pad get a box at the left of the screen, the right-hand ones a box at the right, each on a black backdrop of `Hint BG` opacity.
     /// The box goes where `hint_spot` finds room clear of `view.avoid`; when none does it shrinks (down to half) and tries the other layout;
     /// when still nothing is clear it is not drawn at all.
     pub fn hints(&self, v: &mut Vec<HudVertex>, cfg: &PadCfg, view: &HintView) {
@@ -683,8 +697,8 @@ impl Pad {
         if rows.is_empty() {
             return;
         }
-        let k0 = (view.s * cfg.hint_size).round().max(1.0);
-        let kmin = (k0 / 2.0).ceil().max(1.0);
+        let (ki0, kt0) = ((view.s * cfg.hint_size).round().max(1.0), (view.s * cfg.text_size).round().max(1.0));
+        let (kimin, ktmin) = ((ki0 / 2.0).ceil().max(1.0), (kt0 / 2.0).ceil().max(1.0));
         // Auto: a row in a menu (the bottom of a screen is mostly empty), a list in the corner while playing; the other one is the fallback.
         let horiz = match cfg.layout {
             1 => vec![true],
@@ -692,33 +706,55 @@ impl Pad {
             _ => vec![view.ui, !view.ui],
         };
         let clear = 4.0 * view.s;
-        let mut k = k0;
+        // The buttons on the pad's left half go to the left of the screen, the rest to the right: one box each.
+        let groups: Vec<(bool, Vec<(Btn, &str)>)> = [true, false]
+            .into_iter()
+            .map(|l| (l, rows.iter().filter(|r| r.0.left() == l).copied().collect::<Vec<_>>()))
+            .filter(|g| !g.1.is_empty())
+            .collect();
+        let a = cfg.hint_back.clamp(0.0, 1.0);
+        let (mut ki, mut kt) = (ki0, kt0);
         loop {
-            let width = |b: Btn| if b.glyph(cfg.style).is_some() { 13.0 * k } else { (HudPipeline::text_width(b.name()) as f32 + 4.0) * k };
-            let btns: Vec<f32> = rows.iter().map(|&(b, _)| width(b)).collect();
-            let texts: Vec<f32> = rows.iter().map(|&(_, t)| HudPipeline::text_width(t) as f32 * k).collect();
-            for &h in &horiz {
-                let ((bw, bh), at) = hint_boxes(&btns, &texts, k, h);
-                if let Some((x0, y0)) = hint_spot(view.w, view.h, (bw + k, bh + k), 6.0 * k, clear, view.avoid) { // + k: the text's shadow
-                    let (row, ty) = (13.0 * k, (13.0 * k - 8.0 * k) * 0.5); // the 8 px font centred on a row
-                    for (i, &(b, t)) in rows.iter().enumerate() {
-                        let [gx, gy, gw, tx] = at[i];
-                        let (gx, y) = (x0 + gx, y0 + gy);
-                        if let Some(spr) = b.glyph(cfg.style) {
-                            HudPipeline::push_gui(v, gx, y, row, row, spr);
-                        } else {
-                            HudPipeline::push_quad(v, gx, y, gw, row, [0.1, 0.1, 0.1, 0.85]);
-                            HudPipeline::push_text(v, gx + 2.0 * k, y + ty, k, b.name(), [1.0; 4]);
-                        }
-                        HudPipeline::push_text(v, x0 + tx, y + ty, k, t, [1.0; 4]);
+            let (row, gap, m) = ((13.0 * ki).max(8.0 * kt), 2.0 * ki.max(kt), ki.max(kt));
+            let pad = if a > 0.0 { 2.0 * m } else { 0.0 };
+            let width = |b: Btn| if b.glyph(cfg.style).is_some() { 13.0 * ki } else { (HudPipeline::text_width(b.name()) as f32 + 4.0) * ki };
+            let mut avoid = view.avoid.to_vec(); // the first box is one more thing the second keeps off
+            let mut put = Vec::new();
+            for (left, g) in &groups {
+                let btns: Vec<f32> = g.iter().map(|&(b, _)| width(b)).collect();
+                let texts: Vec<f32> = g.iter().map(|&(_, t)| HudPipeline::text_width(t) as f32 * kt).collect();
+                for &h in &horiz {
+                    let ((bw, bh), at) = hint_boxes(&btns, &texts, row, gap, h);
+                    let (bw, bh) = (bw + kt + 2.0 * pad, bh + kt + 2.0 * pad); // + kt: the text's shadow
+                    if let Some((x0, y0)) = hint_spot(view.w, view.h, (bw, bh), 6.0 * m, clear, &avoid, *left) {
+                        avoid.push([x0, y0, bw, bh]);
+                        put.push((g, at, [x0, y0, bw, bh]));
+                        break;
                     }
-                    return;
                 }
             }
-            if k <= kmin {
-                return; // ponytail: a hint may be left out, it may not cover a button; a smaller one still would be unreadable
+            if put.len() == groups.len() || (ki <= kimin && kt <= ktmin) {
+                // ponytail: a box may be left out at the smallest size, it may not cover a button; a smaller one still would be unreadable
+                for (g, at, [x0, y0, bw, bh]) in put {
+                    if a > 0.0 {
+                        HudPipeline::push_quad(v, x0, y0, bw, bh, [0.0, 0.0, 0.0, a]);
+                    }
+                    for (i, &(b, t)) in g.iter().enumerate() {
+                        let [gx, gy, gw, tx] = at[i];
+                        let (gx, y) = (x0 + pad + gx, y0 + pad + gy);
+                        let iy = y + (row - 13.0 * ki) * 0.5; // the picture and the 8 px font are each centred on the row
+                        if let Some(spr) = b.glyph(cfg.style) {
+                            HudPipeline::push_gui(v, gx, iy, 13.0 * ki, 13.0 * ki, spr);
+                        } else {
+                            HudPipeline::push_quad(v, gx, iy, gw, 13.0 * ki, [0.1, 0.1, 0.1, 0.85]);
+                            HudPipeline::push_text(v, gx + 2.0 * ki, iy + 2.5 * ki, ki, b.name(), [1.0; 4]);
+                        }
+                        HudPipeline::push_text(v, x0 + pad + tx, y + (row - 8.0 * kt) * 0.5, kt, t, [1.0; 4]);
+                    }
+                }
+                return;
             }
-            k -= 1.0;
+            (ki, kt) = ((ki - 1.0).max(kimin), (kt - 1.0).max(ktmin));
         }
     }
 
@@ -791,6 +827,14 @@ mod tests {
         let mut p = Pad::default();
         p.key(Btn::Start, false); // a pad is connected
         (p, PadCfg::default())
+    }
+
+    /// `pad()` with Place and Drop moved to right-hand buttons, so all the playing hints are one box on the right.
+    fn pad_right() -> (Pad, PadCfg) {
+        let (p, mut c) = pad();
+        c.binds[Act::Use as usize] = Btn::X;
+        c.binds[Act::Drop as usize] = Btn::Rb;
+        (p, c)
     }
 
     #[test]
@@ -1041,7 +1085,7 @@ mod tests {
 
     #[test]
     fn hints_never_cover_a_button_or_a_footer() {
-        let (p, mut c) = pad();
+        let (p, mut c) = pad_right();
         // the options screen of the screenshots: Done bottom right (80 x 20 units at 3 px), a list over the rest, a footer text
         let (done, list, footer) = ([1000.0, 636.0, 240.0, 60.0], [60.0, 90.0, 1000.0, 520.0], [700.0, 690.0, 330.0, 24.0]);
         let none = hint_box(&p, &c, &view(true, &[])).unwrap();
@@ -1066,15 +1110,15 @@ mod tests {
 
     #[test]
     fn hints_shrink_or_turn_before_they_give_up_and_follow_the_size() {
-        let (p, mut c) = pad();
+        let (p, mut c) = pad_right();
         let high = |c: &PadCfg, avoid: &[[f32; 4]]| hint_box(&p, c, &view(false, avoid)).map(|b| b[3] - b[1]);
         let normal = high(&c, &[]).unwrap();
-        c.hint_size = 2.0;
-        assert!(high(&c, &[]).unwrap() > normal * 1.9, "Hint Size 200% doubles the hints");
-        c.hint_size = 0.5;
+        (c.hint_size, c.text_size) = (2.0, 2.0);
+        assert!(high(&c, &[]).unwrap() > normal * 1.9, "200% doubles the hints");
+        (c.hint_size, c.text_size) = (0.5, 0.5);
         assert!(high(&c, &[]).unwrap() < normal * 0.75, "50% shrinks them (whole pixels: 3 -> 2)");
         // the screen is taken but for a strip along the bottom: the list of 6 does not fit, a row does
-        c.hint_size = 1.0;
+        (c.hint_size, c.text_size) = (1.0, 1.0);
         let strip = high(&c, &[[0.0, 0.0, 1280.0, 560.0]]).unwrap();
         assert!(strip < normal / 3.0, "a row where the list cannot go: {strip} < {normal}");
         // a Vertical list that cannot fit at full size shrinks (to half at most) instead of being drawn over something
@@ -1084,6 +1128,38 @@ mod tests {
         assert!(high(&c, &[[0.0, 0.0, 1280.0, 540.0]]).is_none(), "not even half size fits: left out");
     }
 
+    /// Left-hand buttons (Place on LT, Drop on D-Down) go to the left of the screen, the rest to the right; a menu's A / B stay right; the two sizes
+    /// are separate; the backdrop is one black quad per box at the opacity set.
+    #[test]
+    fn hints_split_left_right_with_separate_sizes_and_a_backdrop() {
+        let (p, mut c) = pad();
+        let quads = |c: &PadCfg, ui| {
+            let mut v = Vec::new();
+            p.hints(&mut v, c, &view(ui, &[]));
+            v
+        };
+        let v = quads(&c, false);
+        assert!(v.iter().any(|q| q.pos[0] < 640.0) && v.iter().any(|q| q.pos[0] > 640.0), "a box on each side");
+        assert!(quads(&c, true).iter().all(|q| q.pos[0] > 640.0), "A / B are right-hand buttons");
+        let height = |c: &PadCfg| {
+            let v = quads(c, false);
+            let ys = v.iter().map(|q| q.pos[1]);
+            ys.clone().fold(0.0, f32::max) - ys.fold(f32::MAX, f32::min)
+        };
+        let normal = height(&c);
+        c.hint_size = 2.0;
+        assert!(height(&c) > normal, "Icon Size alone makes the rows taller");
+        c.hint_size = 1.0;
+        c.text_size = 2.0;
+        assert!(height(&c) > normal, "Text Size alone makes the rows taller");
+        c.text_size = 1.0;
+        c.hint_back = 0.0;
+        let bare = quads(&c, false).len();
+        c.hint_back = 0.5;
+        assert_eq!(quads(&c, false).len(), bare + 2 * 6, "one backdrop quad (6 vertices) per box, two boxes");
+        assert!(quads(&c, false).iter().any(|q| q.color == [0.0, 0.0, 0.0, 0.5]));
+    }
+
     #[test]
     fn hint_options_round_trip() {
         let mut c = PadCfg::default();
@@ -1091,12 +1167,13 @@ mod tests {
         c.set_knob(6, 1.0);
         c.toggle(6);
         assert_eq!(c.toggle_text(6), "Hint Layout: Horizontal");
-        assert_eq!(c.knob_text(6), "Hint Size: 200%");
+        assert_eq!(c.knob_text(6), "Icon Size: 200%");
+        (c.text_size, c.hint_back) = (1.5, 0.25);
         let mut t = String::new();
         c.save_into(&mut t);
         let mut back = PadCfg::default();
         t.lines().for_each(|l| back.load(l.split_once(':').unwrap().0, l.split_once(':').unwrap().1));
-        assert_eq!((back.hint_size, back.layout), (2.0, 1));
+        assert_eq!((back.hint_size, back.layout, back.text_size, back.hint_back), (2.0, 1, 1.5, 0.25));
         back.load("pad_hintSize", "9");
         back.load("pad_hintLayout", "9");
         assert_eq!((back.hint_size, back.layout), (2.0, 2), "out-of-range values are clamped");
