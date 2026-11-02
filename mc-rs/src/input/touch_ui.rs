@@ -260,6 +260,8 @@ pub struct TouchUi {
     pad_dig: bool,
     pad_attack: bool,
     pad_zoom: bool,
+    /// The pad's (or keyboard's) Use bind is held: the guard / special button of a weapon in hand, like a finger on it (C4, C5).
+    pad_use: bool,
     /// The pad's L3 is held (`gamepad::Out::sprint`): the sprint key.
     pub pad_sprint: bool,
     /// Look from the right stick since the last `take_pad_look`, radians (yaw right, pitch down).
@@ -315,6 +317,7 @@ impl TouchUi {
             pad_dig: false,
             pad_attack: false,
             pad_zoom: false,
+            pad_use: false,
             pad_sprint: false,
             pad_look: (0.0, 0.0),
             strike: false,
@@ -367,6 +370,7 @@ impl TouchUi {
             self.pad_dig = false;
             self.pad_attack = false;
             self.pad_zoom = false;
+            self.pad_use = false;
             self.pad_sprint = false;
             return;
         }
@@ -389,7 +393,11 @@ impl TouchUi {
         } else if o.sneak_up {
             self.sneak = false;
         }
-        self.place |= o.place;
+        // A weapon with a right button (guard or special) takes the Use bind for it, as a finger on its button would; a tap-hit still places.
+        let weapon = self.guard_shown || self.special_shown;
+        self.pad_use = o.use_down;
+        self.special_hit |= self.special_shown && o.use_just;
+        self.place |= if weapon { o.strike } else { o.place };
         self.strike |= o.strike;
         self.release |= o.release;
         self.inventory |= o.inventory;
@@ -490,12 +498,12 @@ impl TouchUi {
 
     /// A finger is on the guard button (C4).
     pub fn guarding(&self) -> bool {
-        self.pointers.values().any(|p| p.role == PointerRole::Guard)
+        (self.pad_use && self.guard_shown) || self.pointers.values().any(|p| p.role == PointerRole::Guard)
     }
 
     /// A finger is on the special button (C8: the arcabuz's reload lasts as long as it is held).
     pub fn special_held(&self) -> bool {
-        self.pointers.values().any(|p| p.role == PointerRole::Special)
+        (self.pad_use && self.special_shown) || self.pointers.values().any(|p| p.role == PointerRole::Special)
     }
 
     /// A finger is on the zoom button.
@@ -1063,5 +1071,38 @@ mod tests {
         // The pause button still works with a screen open.
         tap(&mut ui, 5, px + pw * 0.5, py + 1.0);
         assert!(ui.paused);
+    }
+
+    /// The Use bind (a key or a pad button) is the right button of a weapon: it presses the special / holds the guard instead of placing.
+    #[test]
+    fn the_use_bind_is_the_weapons_right_button() {
+        use super::super::gamepad::Btn;
+        let cfg = PadCfg::default();
+        let mut ui = TouchUi::new(W, H);
+        // Nothing in hand that has a right button: Use places, as before.
+        ui.pad.key(Btn::Lt, true);
+        ui.pad_update(0.05, &cfg);
+        assert!(ui.take_place() && !ui.take_special() && !ui.guarding() && !ui.special_held());
+        ui.pad.key(Btn::Lt, false);
+        ui.pad_update(0.05, &cfg);
+        // A weapon with a special: one press is one special, held it stays held (the arcabuz's reload), and nothing is placed.
+        ui.special_shown = true;
+        ui.pad.key(Btn::Lt, true);
+        ui.pad_update(0.05, &cfg);
+        assert!(ui.take_special() && ui.special_held() && !ui.take_place() && !ui.guarding());
+        ui.pad_update(0.05, &cfg);
+        assert!(!ui.take_special() && ui.special_held(), "a held bind is one press");
+        ui.pad.key(Btn::Lt, false);
+        ui.pad_update(0.05, &cfg);
+        assert!(!ui.special_held());
+        // A guarding item: held Use is the raised guard.
+        ui.special_shown = false;
+        ui.guard_shown = true;
+        ui.pad.key(Btn::Lt, true);
+        ui.pad_update(0.05, &cfg);
+        assert!(ui.guarding() && !ui.take_place() && !ui.take_special());
+        ui.pad.key(Btn::Lt, false);
+        ui.pad_update(0.05, &cfg);
+        assert!(!ui.guarding());
     }
 }

@@ -4,6 +4,10 @@ Part of [`ROADMAP.md`](../ROADMAP.md). The to-do milestones of this part (M11 Ne
 
 ## Changelog
 
+- 2026-11-02 (49): Fix: the keyboard / pad Use bind did nothing for a weapon's right button (C4 guard, C5 special, C8 arcabuz). Written WITHOUT a Rust toolchain: not compiled, not run (+1 test `touch_ui::tests::the_use_bind_is_the_weapons_right_button`).
+    - **Cause**: `Act::Use` only ever set `place`; the shotel's parry, the ropera's lunge, the halberd's sweep, the arcabuz's fuse / reload (`take_special`, `special_held`) and the sword's guard (`guarding`) read nothing but a finger on the touch button, so the bound key or button could not trigger them.
+    - **Fix**: `Out::use_down` / `use_just` (`gamepad.rs`); `TouchUi::pad_use` makes `guarding` and `special_held` true while the bind is held and the held item has that button (`guard_shown` / `special_shown`), and a fresh press sets the special's hit. With such a weapon in hand Use no longer places (only the attack's tap-hit still does, as a touch tap); any other item places as before.
+
 - 2026-11-02 (48): Import Custom Skin got a file picker and the storage permission (NOT b1.7.3). Written WITHOUT a Rust toolchain: not compiled, not run, not seen on a device (`skin::tests::found_lists_skin_shaped_pngs_newest_first_and_import_keeps_a_copy` replaces the newest-png test, `menu::tests::importing_a_png_replaces_the_palette_look_until_reset` now goes through the picker).
     - **Why not the system picker**: `ACTION_OPEN_DOCUMENT` answers in `onActivityResult`, which a NativeActivity does not forward to native code; it needs a Java subclass, and `cargo-apk` cannot add Java. So the game asks for the permission and lists the files itself.
     - `storage.rs` (new, JNI like `immersive.rs`): `granted` (`checkSelfPermission` on `READ_MEDIA_IMAGES` or `READ_EXTERNAL_STORAGE`) and `request` (`requestPermissions`, on the Java main thread, no-op when given). `Cargo.toml` declares both (`READ_EXTERNAL_STORAGE` up to API 32). `requestPermissions` has no call-back here, so the player taps the button again after allowing.

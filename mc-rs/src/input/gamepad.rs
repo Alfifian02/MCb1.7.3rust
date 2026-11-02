@@ -377,6 +377,9 @@ pub struct Out {
     pub sneak_down: bool,
     pub sneak_up: bool,
     pub place: bool,
+    /// The Use bind is held, and went down this frame (C4 / C5: a weapon's right button is this bind, as the guard and special buttons are on the touch screen).
+    pub use_down: bool,
+    pub use_just: bool,
     pub strike: bool,
     /// C3: the attack button went up after a hold that dug nothing (`attack_dug` false, `HOLD_SECS` passed): the end of a charge.
     pub release: bool,
@@ -616,6 +619,7 @@ impl Pad {
                 (o.place, self.use_t) = (true, self.use_t - TAP_SECS);
             }
         }
+        (o.use_down, o.use_just) = (down(Act::Use), just(Act::Use));
         o.place |= o.strike;
         (o.inventory, o.pause, o.drop) = (just(Act::Inventory), just(Act::Pause), just(Act::Drop));
         o.slot_delta = just(Act::NextSlot) as i32 - just(Act::PrevSlot) as i32;
