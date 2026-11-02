@@ -471,6 +471,8 @@ pub struct Screen {
     pub gw: usize,
     pub furnace: Option<(i32, i32, i32)>,
     pub chests: Vec<(i32, i32, i32)>,
+    /// The workbench of a 3 x 3 screen (NOT b1.7.3): the chests near it feed the recipe book (`book::near_stock`, `book::pull`).
+    pub bench: Option<(i32, i32, i32)>,
     pub grid: [Option<ItemStack>; 9],
     pub cursor: Option<ItemStack>,
     /// What the player took out of an output slot (`SlotCrafting` / `SlotFurnace.onPickupFromSlot`), for the stats; the frame drains it.
@@ -505,7 +507,12 @@ fn rest(s: ItemStack, n: u8) -> Option<ItemStack> {
 
 impl Screen {
     pub fn new(gw: usize) -> Self {
-        Self { gw, furnace: None, chests: Vec::new(), grid: [None; 9], cursor: None, made: Vec::new() }
+        Self { gw, furnace: None, chests: Vec::new(), bench: None, grid: [None; 9], cursor: None, made: Vec::new() }
+    }
+
+    /// A workbench's 3 x 3 screen that knows its block, so the book can reach the chests near it.
+    pub fn at_bench(pos: (i32, i32, i32)) -> Self {
+        Self { bench: Some(pos), ..Self::new(3) }
     }
 
     /// `ContainerFurnace` for the furnace at `pos`; the caller passes that furnace to `get` and `click`.

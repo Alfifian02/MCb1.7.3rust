@@ -49,7 +49,7 @@ pub const DPAD_SHEET: &[u8] = include_bytes!("../../assets/dpad.rgba");
 /// The title screen's sheet (256 x 272, `tools/gen_menu.py`): `mclogo.png`, then `background.png`: the last rows of the HUD texture.
 pub const MENU_SHEET: &[u8] = include_bytes!("../../assets/menu.rgba");
 /// The skins (`mob/char.png` and the armor, 64 x 32 each, four to a row, `atlas::skin_px`): 224 rows of the HUD texture, cut from the atlas's `ART` tail (`PLAYER_Y`).
-pub(crate) const SHEET_H: f32 = 3312.0;
+pub(crate) const SHEET_H: f32 = 3468.0;
 const PLAYER_Y: f32 = 2576.0;
 /// Where the font atlas starts in the HUD texture (the 64 rows after the player skin, see `font_sheet`).
 const FONT_Y: f32 = 2800.0;
@@ -57,10 +57,15 @@ const FONT_Y: f32 = 2800.0;
 const COMBAT_Y: f32 = 2864.0;
 /// Where the satchel's pixel art starts (256 x 256, `tools/gen_satchel_ui.py`): the last rows of the HUD texture, after the combat sprites.
 const SATCHEL_Y: f32 = 2928.0;
-/// Where the map block starts (256 x 128, `tools/gen_mapui.py`): the last rows of the HUD texture, after the satchel. The held map's 128 x 128
+/// Where the controller button pictures start (256 x 156, `tools/gen_pad_buttons.py`): the rows after the satchel, before the map block.
+const PAD_Y: f32 = 3184.0;
+const PAD_H: f32 = 156.0;
+/// Where the map block starts (256 x 128, `tools/gen_mapui.py`): the last rows of the HUD texture, after the pad buttons. The held map's 128 x 128
 /// pixels are rewritten here at run time (`HudPipeline::upload_map`); `mapbg.png` and `mapicons.png` sit beside them.
-const MAP_Y: f32 = 3184.0;
+const MAP_Y: f32 = PAD_Y + PAD_H;
 pub const MAP_SHEET: &[u8] = include_bytes!("../../assets/mapui.rgba");
+/// The controller button pictures: 3 styles (Xbox, PlayStation, Switch) x 16 buttons of 26 x 26 (`tools/gen_pad_buttons.py`, `sprites::pad`).
+pub const PAD_SHEET: &[u8] = include_bytes!("../../assets/padbtn.rgba");
 /// Cortes Combat's HUD sprites (crosshair x3, guard orbs x2, charge bar x2, cooldown brackets; `tools/gen_combat_hud.py`).
 pub const COMBAT_SHEET: &[u8] = include_bytes!("../../assets/combat_hud.rgba");
 /// The satchel and recipe book's sprites (`satchel.rs`).
@@ -135,6 +140,14 @@ pub mod sprites {
         pub const ALPHA_SHIELD_OFF: f32 = 55.0 / 255.0;
         pub const ALPHA_CHARGE: f32 = 204.0 / 255.0;
         pub const ALPHA_CHARGE_EMPTY: f32 = 88.0 / 255.0;
+    }
+    /// The controller button pictures (`tools/gen_pad_buttons.py`): `glyph(style, i)` is button `i` (`Btn::ALL` order) of style 0 Xbox, 1 PlayStation,
+    /// 2 Switch; 26 x 26 each, 8 to a row, 52 rows a style. Opaque or clear.
+    pub mod pad {
+        use super::Sprite;
+        pub fn glyph(style: usize, i: usize) -> Sprite {
+            ((i % 8) as f32 * 26.0, super::super::PAD_Y + (style * 52 + i / 8 * 26) as f32, 26.0, 26.0)
+        }
     }
     pub mod sat {
         use super::Sprite;
@@ -243,7 +256,7 @@ fn shader_source(srgb: bool) -> String {
 
 /// The whole HUD texture (256 x `SHEET_H`, RGBA8): items, the GUI sheet, terrain.png, the panels, the d-pad, the title screen, the player skin, the font, Cortes Combat's HUD, the satchel, the map.
 pub fn sheet_bytes() -> Vec<u8> {
-    [crate::render::atlas::ITEMS, GUI, crate::render::atlas::TERRAIN, CONTAINERS, DPAD_SHEET, MENU_SHEET, &crate::render::atlas::ART[256 * 288 * 4..], &font_sheet(), COMBAT_SHEET, SATCHEL_SHEET, MAP_SHEET].concat()
+    [crate::render::atlas::ITEMS, GUI, crate::render::atlas::TERRAIN, CONTAINERS, DPAD_SHEET, MENU_SHEET, &crate::render::atlas::ART[256 * 288 * 4..], &font_sheet(), COMBAT_SHEET, SATCHEL_SHEET, PAD_SHEET, MAP_SHEET].concat()
 }
 
 /// Owns the HUD pipeline + dynamic vertex buffer. One instance per surface.
@@ -293,6 +306,13 @@ impl HudPipeline {
         let (ix, iy, _, _) = sprites::map::ICONS;
         for m in markers {
             let (cx, cy) = (ox + (m.x as f32 / 2.0 + 64.0) * k, oy + (m.z as f32 / 2.0 + 64.0) * k);
+            if m.icon == crate::world::map::DEATH {
+                // Death pile: a red cross of two bars, 6 map units across, on the pile (no cell of `mapicons.png`).
+                let (r, t) = (3.0 * k, 1.0 * k);
+                Self::push_quad(out, cx - r, cy - t * 0.5, 2.0 * r, t, [0.9, 0.1, 0.1, 1.0]);
+                Self::push_quad(out, cx - t * 0.5, cy - r, t, 2.0 * r, [0.9, 0.1, 0.1, 1.0]);
+                continue;
+            }
             let a = m.rot as f32 * std::f32::consts::PI / 8.0;
             let (s, c) = a.sin_cos();
             let (cu, cv) = ((m.icon % 4) as f32 * 8.0, (m.icon / 4) as f32 * 8.0);
@@ -817,6 +837,20 @@ mod tests {
         assert!(a(182, f + 7) > 0 && a(186, f + 20) > 0, "flame and arrow");
     }
 
+    /// Every controller button picture of every style holds ink, and is clear or fully opaque (`fs_main` drops anything under alpha 0.5).
+    #[test]
+    fn pad_sheet_has_every_button_of_every_style() {
+        for style in 0..3 {
+            for i in 0..16 {
+                let (x, y, w, h) = sprites::pad::glyph(style, i);
+                assert!(y >= PAD_Y && y + h <= MAP_Y && x + w <= 256.0, "style {style} button {i} inside the block");
+                let a: Vec<u8> = (0..(w * h) as usize).map(|k| PAD_SHEET[((y as usize - PAD_Y as usize + k / w as usize) * 256 + x as usize + k % w as usize) * 4 + 3]).collect();
+                assert!(a.iter().any(|&p| p == 255), "style {style} button {i} is empty");
+                assert!(a.iter().all(|&p| p == 0 || p == 255), "style {style} button {i} has a half alpha");
+            }
+        }
+    }
+
     /// Cortes Combat's HUD block: each sprite holds a picture, every texel is clear or fully opaque (`fs_main` drops anything under alpha 0.5,
     /// and the art is fainter: the sprite's own alpha is a vertex alpha in `sprites::cc`), and each bracket half holds ink.
     #[test]
@@ -972,8 +1006,11 @@ mod text_tests {
         assert_eq!(FONT_Y + 64.0, COMBAT_Y);
         assert_eq!(COMBAT_Y + 64.0, SATCHEL_Y);
         assert_eq!(COMBAT_SHEET.len(), 256 * 64 * 4);
-        assert_eq!(SATCHEL_Y + 256.0, MAP_Y);
+        assert_eq!(SATCHEL_Y + 256.0, PAD_Y);
+        assert_eq!(PAD_Y + PAD_H, MAP_Y);
         assert_eq!(MAP_Y + 128.0, SHEET_H);
+        assert_eq!(PAD_SHEET.len(), 256 * PAD_H as usize * 4);
+        assert_eq!(sheet_bytes().len(), 256 * SHEET_H as usize * 4);
         assert_eq!(MAP_SHEET.len(), 256 * 128 * 4);
         let px = font_sheet();
         assert_eq!(px.len(), 256 * 64 * 4);

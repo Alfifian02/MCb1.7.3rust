@@ -735,7 +735,7 @@ impl App {
             chests: self.chests.iter().filter(|(p, _)| p.0 != i32::MIN).map(|(&p, &c)| (p, c)).collect(),
             spawners: self.fx.spawners.iter().map(|(&p, s)| (p, s.kind, s.delay)).collect(),
             bed: self.bed_spawn,
-            drops: self.drops.items.iter().map(|e| (e.pos, e.stack, e.age)).collect(),
+            drops: self.drops.items.iter().map(|e| (e.pos, e.stack, e.saved_age())).collect(),
         };
         if let Err(e) = save::write(&self.dir.join("level"), &level.encode()) {
             log::warn!("save: level file: {e}");
@@ -755,6 +755,13 @@ impl App {
         self.chunks.flush(chunks);
     }
 
+    /// Craft from a nearby chest (NOT b1.7.3, Immersive Pack only): what the chests near the open workbench hold, for the book to count
+    /// (`Inventory::near`); nothing at any other screen or with the pack off.
+    fn near_tick(&mut self) {
+        let bench = self.screen.as_ref().and_then(|s| s.bench).filter(|_| world::combat::rules::on());
+        self.inv.near = bench.map_or_else(Vec::new, |b| book::near_stock(b, &self.chests));
+    }
+
     /// `ItemMap.onCreated` for the maps just crafted, then `ItemMap.onUpdate` for every map in the main inventory (`InventoryPlayer.decrementAnimations`):
     /// the arrow on it, and for the one in hand the repaint of this tick's strip (`MapData::scan`) and the upload of its pixels when they changed.
     fn map_tick(&mut self) {
@@ -765,11 +772,16 @@ impl App {
         let (slot, alive, yaw) = (self.touch.hotbar_slot, !self.vitals.dead(), self.camera.yaw.to_degrees() + 180.0);
         let spawn = (self.spawn.x.floor() as i32, self.spawn.z.floor() as i32);
         let (chunks, no_sky) = (&self.chunks, self.nether);
+        // Death pile (NOT b1.7.3, Immersive Pack only): where the pile of the last death lies, if it is still there.
+        let pile = if world::combat::rules::on() { self.drops.pile_at() } else { None };
         let mut held = None;
         for i in 0..items::MAIN {
             let Some(mut st) = self.inv.slots[i].filter(|s| s.id == MAP) else { continue };
             let d = self.maps.data_for(&mut st, spawn, dim);
             d.track(alive, dim, at, yaw);
+            if let Some(p) = pile {
+                d.pin(dim, p);
+            }
             if i == slot {
                 d.scan(dim, no_sky, at, |x, z| chunks.column(x, z));
                 held = Some(d.markers.clone());
@@ -905,7 +917,9 @@ impl App {
             self.save(AUTOSAVE_CHUNKS);
         }
         let slot = self.touch.hotbar_slot;
-        self.tip = if slot != self.tip.0 { (slot, 2.0) } else { (slot, (self.tip.1 - dt).max(0.0)) };
+        // Almanac (NOT b1.7.3): a clock in hand keeps its name and its line up, so the day can be read at any time.
+        let clock = world::combat::rules::on() && self.inv.slots[slot].is_some_and(|s| s.id == world::biomelife::CLOCK);
+        self.tip = if slot != self.tip.0 || clock { (slot, 2.0) } else { (slot, (self.tip.1 - dt).max(0.0)) };
         // Day/night: time only runs while playing; the shader reads the sky-light level from a uniform, so the meshes are not rebuilt.
         self.world_ticks += dt as f64 * 20.0;
         // `minutesPlayedStat`: one per tick; and the inventory hint until `openInventory` is taken (`EntityPlayerSP.onLivingUpdate`).
@@ -927,6 +941,7 @@ impl App {
         if world::biomelife::set_season(season) {
             self.chunks.restart_meshes();
         }
+        world::biomelife::set_now((!self.nether).then_some(self.world_ticks as u64), self.opts.biome_rules); // Almanac: the held clock's line
         // Asleep, the jump button is "leave bed" (`GuiSleepMP`); the view and the body stay put.
         if self.sleep.is_some() && self.touch.jumping() {
             self.wake(true);
@@ -1282,6 +1297,7 @@ impl App {
             self.sleep_tick(sub);
             self.sprint_tick();
             self.map_tick();
+            self.near_tick();
             // `BlockPressurePlate`: the boxes of what may stand on a plate (the player, the mobs).
             let p = self.player.pos;
             self.ticks.plate_ents.clear();
@@ -1412,6 +1428,15 @@ impl App {
         let place = place || charged.is_some();
         if place && !self.swing_swallowed() {
             self.body.swing(); // a tap places, uses or hits: `swingItem`
+        }
+        // The pad's Drop bind: one item of the selected slot, thrown the way a screen's leftovers are (`EntityPlayer.dropPlayerItem`).
+        if self.touch.take_pad_drop() && !self.vitals.dead() {
+            let slot = self.touch.hotbar_slot;
+            if let Some(s) = self.inv.slots[slot] {
+                self.drops.throw(ItemStack { count: 1, ..s }, self.camera.pos, self.camera.forward());
+                self.inv.slots[slot] = (s.count > 1).then_some(ItemStack { count: s.count - 1, ..s });
+                self.stats.add(world::stats::DROP, 1);
+            }
         }
         // The inventory button, and taps on an open screen (its presses are not look / move / place).
         if self.touch.take_inventory() {
@@ -1707,7 +1732,7 @@ impl App {
             match self.chunks.block_loaded(hit.pos.0, hit.pos.1, hit.pos.2) {
                 Some(58) => {
                     if self.pack_rule && !self.opts.pack_cloth {
-                        self.open_satchel(Screen::new(3)); // the bag, and the book open on its 3x3 grid
+                        self.open_satchel(Screen::at_bench(hit.pos)); // the bag, and the book open on its 3x3 grid (and the chests near it)
                     } else {
                         self.open_screen(Screen::new(3));
                     }
@@ -2956,9 +2981,11 @@ impl App {
         self.close_screen();
         self.close_sign();
         let at = (self.player.pos.x.floor() as i32, self.player.pos.y.floor() as i32, self.player.pos.z.floor() as i32);
+        // Death pile (NOT b1.7.3, Immersive Pack only): the drop lasts 20 minutes and the map marks it (`Drops::scatter_pile`, `map_tick`).
+        let pile = world::combat::rules::on();
         for slot in self.inv.slots.iter_mut() {
             if let Some(st) = slot.take() {
-                self.drops.scatter(st, at);
+                if pile { self.drops.scatter_pile(st, at) } else { self.drops.scatter(st, at) }
             }
         }
         self.touch.pause();
@@ -3307,7 +3334,14 @@ impl App {
             return;
         }
         let filled = match self.screen.as_mut() {
-            Some(s) if s.cursor.is_none() => book::fill(e, s, &mut self.inv),
+            Some(s) if s.cursor.is_none() => {
+                // Craft from a nearby chest (NOT b1.7.3, UNVERIFIED): the chests near this workbench give what the bag lacks.
+                if let (Some(b), true) = (s.bench, world::combat::rules::on()) {
+                    book::pull(e, &mut self.inv, &mut self.chests, b);
+                    self.inv.near = book::near_stock(b, &self.chests); // what is left, so `fill` does not count what moved twice
+                }
+                book::fill(e, s, &mut self.inv)
+            }
             _ => false,
         };
         if filled {
@@ -4037,6 +4071,7 @@ impl App {
         m.draw(&mut self.hud_verts, w, h, &self.opts);
         let cur = self.touch.pad.shows_cursor().then_some(self.touch.cursor_pos);
         self.touch.pad.draw(&mut self.hud_verts, w, h, self.touch.hotbar_slot, cur);
+        self.touch.pad.hints(&mut self.hud_verts, w, h, &self.opts.pad, true);
         let pano = m.panorama();
         self.hud_verts.truncate(crate::gles::HUD_QUADS * 6);
         match self.be.draw_menu(pano, &self.hud_verts) {
@@ -4197,6 +4232,13 @@ impl App {
         // Read before `hud_verts` is borrowed mutably (the borrow checker forbids `&self` calls while `v` lives).
         let held_special = self.held_special();
         let guard_points = self.held_guard().points; // C9: the orbs above the crosshair
+        // Gauges (NOT b1.7.3, Immersive Pack only, UNVERIFIED): the air on the body, a bandage working, the hearth ticking. Read here, before `v`.
+        let gauge = if world::combat::rules::on() && !self.vitals.dead() {
+            let (air, calm) = (self.air(), !self.vitals.stamina.in_combat());
+            Some((air, self.vitals.mend.bandaged(), world::combat::mend::Mend::hearth_on(self.vitals.health, calm, self.heat_at_hand())))
+        } else {
+            None
+        };
         let v = &mut self.hud_verts;
         v.clear();
         let layout = &self.touch.layout;
@@ -4551,12 +4593,14 @@ impl App {
 
         // Name of the item just switched to, centred above the hotbar and the hearts.
         // UNVERIFIED: not in b1.7.3 (Beta 1.8 added it); the 2 s, the 0.75 scale and the spot are invented.
-        if let (true, Some(name)) = (play && self.tip.1 > 0.0, self.inv.slots[self.touch.hotbar_slot].and_then(items::name)) {
+        if let (true, Some((st, name))) = (play && self.tip.1 > 0.0, self.inv.slots[self.touch.hotbar_slot].and_then(|st| items::name(st).map(|n| (st, n)))) {
             let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
-            let k = craft::panel(0, w, h).2;
-            let (hx, hy, hw, _) = layout.hotbar[4];
-            let bw = (HudPipeline::text_width(name) as f32 + 6.0) * k * 0.75;
-            HudPipeline::push_tooltip(v, hx + hw * 0.5 - bw * 0.5, hy - 34.0 * k, k * 0.75, name);
+            let (k0, (hx, hy, hw, _)) = (craft::panel(0, w, h).2, layout.hotbar[4]);
+            let k = k0 * 0.75;
+            // Almanac: the clock's line under its name (only the clock: a weapon's lines stay out of this flash).
+            let lines = if st.id == world::biomelife::CLOCK { world::combat::tooltip::lines(st) } else { Vec::new() };
+            let (bw, bh) = HudPipeline::tooltip_size(name, &lines);
+            HudPipeline::push_tooltip_lines(v, hx + hw * 0.5 - bw * k * 0.5, hy - 34.0 * k0 - (bh - 14.0) * k, k, name, &lines);
         }
 
         if play {
@@ -4578,9 +4622,15 @@ impl App {
             // Stamina (`StaminaFeatureClient.renderStamina`): the half hearts it no longer covers, from the right, get a grey half-heart overlay
             // (alpha 0x9c, 0xcc while locked), 4 of the heart's 9 px each. ponytail: the hearts do not shake at low health here, so neither does it.
             let (st, hp) = (&self.vitals.stamina, self.vitals.health.min(vitals::MAX_HEALTH));
+            let tint = gauge.map_or([1.0; 3], |g| world::biomelife::tint(g.0)); // Gauges: warm in the heat, cool in the cold
             for h in st.halves(hp)..hp {
                 let (u, spr) = (if h % 2 == 0 { 1.0 } else { 5.0 }, sp::STAMINA);
-                HudPipeline::push_gui_tinted(v, hx + (h / 2) as f32 * hw * 0.4 + u * sz / 9.0, y, sz * 4.0 / 9.0, sz, (spr.0 + u, spr.1, 4.0, spr.3), [1.0, 1.0, 1.0, if st.locked { 0.8 } else { 0.612 }]);
+                HudPipeline::push_gui_tinted(v, hx + (h / 2) as f32 * hw * 0.4 + u * sz / 9.0, y, sz * 4.0 / 9.0, sz, (spr.0 + u, spr.1, 4.0, spr.3), [tint[0], tint[1], tint[2], if st.locked { 0.8 } else { 0.612 }]);
+            }
+            // Gauges: the marks right of the tenth heart (heat, cold, a bandage, the hearth).
+            if let Some((air, bandaged, hearth)) = gauge {
+                let m = render::combat_hud::marks(air.hot, air.cold, bandaged, hearth);
+                render::combat_hud::draw_marks(v, (hx + 10.0 * hw * 0.4 + sz * 0.3, y), sz, &m);
             }
             // Armor bar (GuiIngame): 10 shields over the hearts, a full one is 2 armor points, a half one 1.
             if self.vitals.armor > 0 {
@@ -4659,6 +4709,7 @@ impl App {
             let t = &self.touch;
             let cur = (t.pad.shows_cursor() && (paused || t.screen) && self.sat.is_none()).then_some(t.cursor_pos); // the satchel frames its target instead
             t.pad.draw(v, w, h, t.hotbar_slot, cur);
+            t.pad.hints(v, w, h, &self.opts.pad, paused || t.screen);
         }
 
         // Cap to the buffer capacity; extra quads are silently dropped.

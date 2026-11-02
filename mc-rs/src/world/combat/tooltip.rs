@@ -11,7 +11,7 @@
 
 use super::profile::{charge_multiplier, Profile, Special};
 use super::{arcabuz, rules, special};
-use crate::world::craft;
+use crate::world::{biomelife, craft};
 use crate::world::items::ItemStack;
 
 /// One line: its text and its colour (`TooltipColor`, as vanilla's `ChatFormatting` RGB).
@@ -61,6 +61,10 @@ fn size(h: f32) -> &'static str {
 
 /// The lines under the name of `s` (empty when the rule is off or the item is no weapon).
 pub fn lines(s: ItemStack) -> Vec<Line> {
+    // Almanac (NOT b1.7.3): a clock of a pack world also names the day, the season and the wait to dusk (`biomelife::almanac_now`).
+    if s.id == biomelife::CLOCK && rules::on() {
+        return biomelife::almanac_now().map(|t| (t, rgb(RANGE))).into_iter().collect();
+    }
     of(s, rules::swing(Some(s.id)))
 }
 

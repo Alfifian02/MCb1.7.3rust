@@ -13,8 +13,10 @@
 //! ponytail: the pin is an index into `entries()`, so a release that adds recipes can shift it; the file is checked against the list's
 //! length and a stale pin is dropped, not repaired.
 
+use std::collections::HashMap;
 use std::sync::OnceLock;
 
+use crate::world::chest::{Chest, Pos};
 use crate::world::craft::{self, Screen, SlotId};
 use crate::world::items::{max_stack, Inventory, ItemStack, MAIN};
 use crate::world::pack;
@@ -115,9 +117,61 @@ pub fn in_cat(cat: Cat) -> Vec<usize> {
     entries().iter().enumerate().filter(|(_, e)| e.cat == cat && (combat || !super::combat::rules::is_weapon(e.out.id))).map(|(i, _)| i).collect()
 }
 
-/// How many of the ingredient `code` the bag (main inventory and quick belt) and the grid hold together.
+/// How many of the ingredient `code` the bag (main inventory and quick belt), the grid and the chests near the workbench (`Inventory::near`) hold together.
 pub fn have(inv: &Inventory, grid: &[Option<ItemStack>; 9], code: u16) -> u32 {
-    inv.slots[..MAIN].iter().chain(grid.iter()).flatten().filter(|s| craft::code(s.id, s.damage) == code).map(|s| u32::from(s.count)).sum()
+    let near: u32 = inv.near.iter().filter(|n| n.0 == code).map(|n| n.1).sum();
+    near + inv.slots[..MAIN].iter().chain(grid.iter()).flatten().filter(|s| craft::code(s.id, s.damage) == code).map(|s| u32::from(s.count)).sum::<u32>()
+}
+
+// ---- Craft from a nearby chest (NOT b1.7.3, Immersive Pack worlds, UNVERIFIED) ----
+
+/// A chest feeds the book when it is within this many blocks of the workbench on each axis.
+pub const NEAR: i32 = 3;
+
+/// The chests of `chests` near `bench`, in a fixed order (so a pull always starts from the same one).
+fn near_chests(bench: Pos, chests: &HashMap<Pos, Chest>) -> Vec<Pos> {
+    let mut v: Vec<Pos> = chests.keys().copied().filter(|p| (p.0 - bench.0).abs() <= NEAR && (p.1 - bench.1).abs() <= NEAR && (p.2 - bench.2).abs() <= NEAR).collect();
+    v.sort_unstable();
+    v
+}
+
+/// What the chests near `bench` hold: (ingredient code, count) for each code, for `Inventory::near`.
+pub fn near_stock(bench: Pos, chests: &HashMap<Pos, Chest>) -> Vec<(u16, u32)> {
+    let mut stock: Vec<(u16, u32)> = Vec::new();
+    for s in near_chests(bench, chests).iter().filter_map(|p| chests.get(p)).flat_map(|c| c.iter().flatten()) {
+        let code = craft::code(s.id, s.damage);
+        match stock.iter_mut().find(|n| n.0 == code) {
+            Some(n) => n.1 += u32::from(s.count),
+            None => stock.push((code, u32::from(s.count))),
+        }
+    }
+    stock
+}
+
+/// Before a tap on a recipe fills the grid: bring what the bag lacks of each ingredient out of the chests near `bench` into the bag, so `fill`
+/// finds it there. The grid is not counted (`fill` stashes it into the bag first), so this may bring a little more than a set; it is all in the
+/// bag, nothing is lost. A bag with no room leaves the rest in the chest.
+pub fn pull(e: &Entry, inv: &mut Inventory, chests: &mut HashMap<Pos, Chest>, bench: Pos) {
+    let order = near_chests(bench, chests);
+    for &(code, n) in &e.need {
+        let in_bag = |inv: &Inventory| inv.slots[..MAIN].iter().flatten().filter(|s| craft::code(s.id, s.damage) == code).map(|s| u32::from(s.count)).sum::<u32>();
+        let mut short = u32::from(n).saturating_sub(in_bag(&*inv));
+        for slot in order.iter().filter_map(|p| chests.get_mut(p)).flat_map(|c| c.iter_mut()) {
+            let Some(s) = slot.as_mut().filter(|s| short > 0 && craft::code(s.id, s.damage) == code) else { continue };
+            let mut moved = ItemStack { count: short.min(u32::from(s.count)) as u8, ..*s };
+            let asked = moved.count;
+            inv.add(&mut moved); // what does not fit stays in `moved`
+            let took = asked - moved.count;
+            s.count -= took;
+            short -= u32::from(took);
+            if s.count == 0 {
+                *slot = None;
+            }
+            if moved.count > 0 {
+                return; // the bag is full
+            }
+        }
+    }
 }
 
 /// What `e` still lacks: (ingredient code, how many short), nothing short = empty.
@@ -334,6 +388,31 @@ mod tests {
 
     fn count(inv: &Inventory, id: u16) -> u32 {
         inv.slots.iter().flatten().filter(|s| s.id == id).map(|s| u32::from(s.count)).sum()
+    }
+
+    // Craft from a nearby chest: only a chest within `NEAR` blocks of the bench is counted, a pull brings what the bag lacks (and no more of the far chest),
+    // and a bag with no room takes nothing and loses nothing.
+    #[test]
+    fn a_chest_near_the_bench_lends_its_ingredients_to_the_book() {
+        let planks = ItemStack { id: 5, count: 7, damage: 0 };
+        let (mut near, mut far): (Chest, Chest) = (Default::default(), Default::default());
+        (near[0], far[0]) = (Some(planks), Some(ItemStack { count: 50, ..planks }));
+        let mut chests: HashMap<Pos, Chest> = HashMap::from([((1, 0, 1), near), ((9, 0, 0), far)]);
+        let bench = (0, 0, 0);
+        let stock = near_stock(bench, &chests);
+        assert_eq!(stock, vec![(craft::code(5, 0), 7)], "the chest 9 blocks off is not counted");
+        let table = entry(58, 0, 2); // a workbench: 4 planks
+        let mut inv = Inventory { near: stock, ..Default::default() };
+        assert!(craftable(table, 2, &inv, &[None; 9]), "the bag is empty and the chest has the planks");
+        inv.slots[0] = Some(ItemStack { count: 1, ..planks });
+        pull(table, &mut inv, &mut chests, bench);
+        assert_eq!(count(&inv, 5), 4, "1 in the bag and 3 from the chest");
+        assert_eq!(chests[&(1, 0, 1)][0].map(|s| s.count), Some(4));
+        assert_eq!(chests[&(9, 0, 0)][0].map(|s| s.count), Some(50));
+        let mut full = Inventory::default();
+        full.slots[..MAIN].iter_mut().for_each(|s| *s = Some(ItemStack { id: 4, count: 64, damage: 0 }));
+        pull(table, &mut full, &mut chests, bench);
+        assert_eq!(chests[&(1, 0, 1)][0].map(|s| s.count), Some(4), "no room: nothing leaves the chest");
     }
 
     #[test]

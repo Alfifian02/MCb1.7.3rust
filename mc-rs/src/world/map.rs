@@ -51,6 +51,9 @@ pub struct Marker {
     pub rot: i8,
 }
 
+/// Death pile (NOT b1.7.3, UNVERIFIED): the icon of a marker that is no cell of `mapicons.png`; `HudPipeline::push_map` draws it as a red cross.
+pub const DEATH: u8 = u8::MAX;
+
 /// `MapData`.
 pub struct MapData {
     /// `field_28180_b` / `field_28179_c`: the block at the middle of the map.
@@ -121,6 +124,17 @@ impl MapData {
         if player_dim == self.dimension {
             self.markers.push(Marker { icon: 0, x: x as i32 as i8, z: z as i32 as i8, rot });
         }
+    }
+
+    /// Death pile (NOT b1.7.3, UNVERIFIED): a cross where the pile lies (`Drops::pile_at`), after `track`. In the dimension of the map only; a pile
+    /// past the map's edge is drawn on the edge, in its direction, so the cross still points the way.
+    pub fn pin(&mut self, player_dim: i8, (px, pz): (f32, f32)) {
+        if player_dim != self.dimension {
+            return;
+        }
+        let k = (1u32 << self.scale) as f32;
+        let half = |p: f32, c: i32| ((p - c as f32) / k * 2.0).clamp(-127.0, 127.0) as i8; // half pixels from the middle, as `track`'s
+        self.markers.push(Marker { icon: DEATH, x: half(px, self.x_center), z: half(pz, self.z_center), rot: 0 });
     }
 
     /// `ItemMap.func_28011_a`: repaint the strip of pixels whose column `& 15` is this tick's, in a disc of `128 / 2^scale` pixels round the
@@ -357,6 +371,20 @@ impl Maps {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Death pile: the cross sits where the pile is in half pixels from the middle (the arrow's units), an edge keeps it in view, another dimension has none.
+    #[test]
+    fn the_death_cross_is_pinned_in_the_arrows_units_and_held_at_the_edge() {
+        let mut m = MapData::new(); // centre (0, 0), scale 3: 8 blocks a pixel
+        m.pin(0, (80.0, -40.0));
+        assert_eq!(m.markers, vec![Marker { icon: DEATH, x: 20, z: -10, rot: 0 }]);
+        m.markers.clear();
+        m.pin(0, (50_000.0, -50_000.0));
+        assert_eq!((m.markers[0].x, m.markers[0].z), (127, -127), "clamped to the edge");
+        m.markers.clear();
+        m.pin(-1, (0.0, 0.0));
+        assert!(m.markers.is_empty());
+    }
 
     /// A flat world: stone to y 61, grass at 62, air above (`col` of every block).
     fn flat() -> Vec<u8> {

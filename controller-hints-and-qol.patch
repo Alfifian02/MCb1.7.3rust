@@ -1,0 +1,1455 @@
+diff --git a/README.md b/README.md
+index 290d801..cafd30b 100644
+--- a/README.md
++++ b/README.md
+@@ -57,7 +57,7 @@ original. Anything that cannot be derived from the b1.7.3 sources is marked
+ | M14 menus (part 1)   | written without a toolchain: not compiled, not run (+4 tests in `menu.rs`, 1 in `touch_ui.rs`) | `menu.rs`: b1.7.3's `GuiMainMenu` (a rotating cube-map panorama, `render/panorama.rs`; `mclogo.png`, rotated splash; dirt on the other screens), `GuiSelectWorld` (scrolling list, double tap plays), `GuiCreateWorld` (name, seed, world type), delete confirm, "Loading level"; textures from the original jar (`tools/gen_menu.py`). Worlds live in `saves/<folder>/`; the pause menu got "Save and quit to title". The renderer button is gone (Vulkan first, GLES fallback stays automatic). See ROADMAP changelog. |
+ | M14b Options + game menu | written without a toolchain: not compiled, not run (+5 tests in `options.rs`, 1 in `touch_ui.rs`) | `options.rs`: b1.7.3's `GameSettings` (`options.txt`), `GuiOptions`, `GuiVideoSettings`, `GuiControls`, `GuiSlider` and `GuiIngameMenu`, from the pause button and the title screen's "Options...". Replaces the old pause menu (its Reset world button is gone); Pregen, Fly and LoD debug stay top-left; new `LoD: ON/OFF` button in Options. Sensitivity, invert, render distance, GUI scale, performance cap and difficulty act; music, sound, bobbing, anaglyph, advanced OpenGL, graphics, smooth lighting and the keys are stored only. See ROADMAP changelog. |
+ | Options list (Sodium layout, 2026-11-01) | written without a toolchain: not compiled, not run, not seen on a device (+9 tests in `options.rs`, +4 in `ui.rs`; `tools/optlist_proto.py` runs here: layout, text widths, tips and the clip maths against the real font); **NOT b1.7.3** | `options.rs` + new `ui.rs` + `menu.rs`: the options screen is Sodium's `VideoSettingsScreen` in b1.7.3's skin. ONE scrolling list of every setting (General, Graphics, Performance, Effects, Controls, Controller buttons, Controller tuning), each row its name on the left and a stone button or slider on the right; a page list down the left jumps to a section and lights the section in view as the list scrolls (LB / RB step it); group headings; a description pane (beside the list on a wide screen, a strip under it on a narrow one) explains the last tapped setting; settings that are saved but read by nothing (Graphics, Smooth Lighting, Advanced OpenGL, 3D Anaglyph, the keys) are dim, like Sodium's unavailable options. A drag scrolls (a drag that starts on a slider and goes along it moves the slider, one that goes up scrolls), a tap acts on lift. The Keys / Controller tabs and the Tuning... page are gone (one list), Dig Delay lives under Controls only. Without a scissor in the HUD pass, `ui::clip` cuts the quads at the list's edges. The same look (title with rules and studs, bevelled panels, coloured world-kind tags, empty-list hint, shared scroll bar) on the title screen, world list, create / rename / delete screens and the game menu. Not done: search, kinetic scrolling, a mouse wheel (no events for it), restyling the atmosphere editor. Controls (look and keys, pad buttons, pad tuning) is a tab of its own beside Settings; Graphics has an FOV slider (30 .. 110, 70 by default) and Brightness and Gamma percent sliders (50% .. 150%, final pass of both renderers). |
+-| M15 Controller (Controllify port) | written without a toolchain: not compiled, not run (+7 tests in `gamepad.rs`, 1 in `options.rs`) | `input/gamepad.rs`: isXander's Controllify, the parts b1.7.3 has. Sticks walk and look (Controllify's deadzone, 6 look curves, 10 deg/tick at 100%), triggers dig / hit / place, bumpers and the hotbar wheel pick slots, a virtual mouse drives every menu and container, touch buttons hide while a pad is in use, rumble on damage / block break / explosion (`rumble.rs`, JNI). New **Controls > Controller** tab (buttons page + tuning page), saved as `pad_*` in `options.txt`. Not ported: gyro, DualSense extras, on-screen keyboard, glyph packs, chat / drop / perspective (not in mc-rs / b1.7.3); sprint is the row below, on L3. |
++| M15 Controller (Controllify port) | written without a toolchain: not compiled, not run (+7 tests in `gamepad.rs`, 1 in `options.rs`) | `input/gamepad.rs`: isXander's Controllify, the parts b1.7.3 has. Sticks walk and look (Controllify's deadzone, 6 look curves, 10 deg/tick at 100%), triggers dig / hit / place, bumpers and the hotbar wheel pick slots, a virtual mouse drives every menu and container, touch buttons hide while a pad is in use, rumble on damage / block break / explosion (`rumble.rs`, JNI). New **Controls > Controller** tab (buttons page + tuning page), saved as `pad_*` in `options.txt`. Button hints (2026-11-02): a bottom-right list of what the bound buttons do while a pad is in use (`Pad::hints`), drawn with the Controller Tooltip Selector pack's Xbox, PlayStation or Switch pictures (`assets/padbtn.rgba`, `tools/gen_pad_buttons.py`, the HUD texture's `PAD_Y` block) or as text; **Button Hints** and **Button Icons** in Controls > Controller tuning, saved as `pad_hints`, `pad_iconStyle`. New **Drop** bind (D-Down by default, `pad_drop`): throws one item of the selected slot. Written without a toolchain, not compiled. Not ported: gyro, DualSense extras, on-screen keyboard, chat / drop / perspective (not in mc-rs / b1.7.3); sprint is the row below, on L3. |
+ | ImmediatelyFast ideas | written without a toolchain: not compiled, not run (+7 tests, 1 extended) | `render/hud.rs`: the HUD text is one textured quad per glyph from a font atlas at the end of the HUD texture (was a quad per run of lit pixels: about 7x fewer text vertices); `render/items.rs`: `SignCache` keeps a sign's text quads between frames (5 s expiry); `gpuErrorTrace:true` in `options.txt` logs a backtrace with each wgpu error (`gpu/context.rs`). The rest of ImmediatelyFast (batching, map and animated-item atlases, framebuffer switching, Apple GL upload, resource pack handling) has no counterpart in mc-rs. Idea source: ImmediatelyFast 26.3, RaphiMC, LGPL-3.0. See the performance changelog. |
+ | FerriteCore ideas | written without a toolchain: not compiled, not run (+2 tests) | Lazy `Nibbles` (no array while all metadata is 0), flat `lod::Cols` for a real chunk's columns (no `Vec` per column; `Tile0::put` no longer clones 4096), exact-size LoD vectors. The rest of FerriteCore (blockstate / model / component dedupe, thread detector) has no counterpart in mc-rs. Idea source: FerriteCore, malte0811, MIT. See ROADMAP changelog. |
+ | Lazy noise (C2ME idea 5) | written without a toolchain: not compiled; the generator tests incl. the golden `matches_java_reference` pass in a Linux scratch crate | The unread samples of the two big density stacks are not computed (`OctaveNoise::generate_masked_into`, masked per cached column); bit for bit the same terrain. See ROADMAP changelog. |
+@@ -86,6 +86,7 @@ original. Anything that cannot be derived from the b1.7.3 sources is marked
+ | Satchel restyle (2026-10-26) | written without a toolchain: not compiled, not run, not seen on a device (+4 tests in `satchel.rs`); `tools/gen_satchel_ui.py` ran | The satchel and the recipe book in a grey GUI-pack look: stone panel with a red seam and corner marks, vanilla slots that touch, a brown book with a red-stitched spine, parchment pages in a brown frame. Text is flat (no shadow), whole-pixel sized and fitted to its box; the crafting grid is sized by the page's width as well as the height so the result never leaves the page; the category rim shows only under a finger. **NOT b1.7.3.** See the gameplay changelog. |
+ | Map item (2026-10-30) | written without a toolchain: not compiled, not run, not seen on a device (+8 tests in `world/map.rs`, +1 in `craft.rs`, `hud.rs` sheet test extended) | `world/map.rs` + `world/mapcolors.rs` (generated from the real classes by `tools/gen_mapcolors.py`): `ItemMap` 358, `MapData` (128 x 128 colour bytes, centre, scale, dimension), `MapStorage` (`<world>/data/map_<id>`, `idcounts`; ids from 0), `MapCoord` (the player's arrow, spinning in the Nether), `ItemMap.func_28011_a` ported line by line (16 interleaved strips a tick, shade by slope, water by depth, glass looked through, Nether hash) and `MapItemRenderer`'s colour decode. Recipe 358 = 8 paper round a compass in `craft::recipes()`; `ItemMap.onCreated` (new id, centred on the player, scale 3) runs on the next tick (`map::fresh` / `App::settle_maps`). The map in hand is a HUD sheet (`HudPipeline::push_map`, `assets/mapui.rgba` from `tools/gen_mapui.py`, `Backend::upload_map` in both renderers). Differences: only loaded chunks are read (the Java generates the 1024-block square), a flat sheet instead of the 3D two-handed model, no `map_N` label, no anaglyph grey. See the gameplay changelog. |
+ | Cortés Combat C1 (2026-10-30), C2 (2026-10-31), C6 (2026-10-31), C7 (2026-10-31) C8 (2026-11-01) and C9 (2026-10-31), UNVERIFIED, only with the Immersive Pack ON, **NOT b1.7.3** | written without a toolchain: not compiled, not run (+3 tests in `world/combat/`) | `world/combat/`: port of the mod's pure core (`ConeMath` / `Reach`, `WeaponTables`, `AttackTiming`) and 20 melee weapons (dagger, ropera, alabarda, war hammer, shotel; wood to gold, ids 400..=424) with recipes in `craft::recipes()`, names, durability and damage through `mobs::attack`. C3 (UNVERIFIED): hold the attack on a mob to charge, release for the charged blow, with a HUD charge bar, a cooldown mark and the hand rising again each cooldown while it charges. C4 (UNVERIFIED): the sword's guard (button above jump, 1 point, 90 degrees), meals that take 32 ticks (cut short by a hit) and then heal on the spot. **No hunger**: the first C4's food bar was removed on 2026-11-01 for healing without it, in the Immersive Pack only (UNVERIFIED, NOT b1.7.3): a hearth (out of combat by a fire, 1 point every 2 s up to 12), the bed (a night slept through heals all) and the bandage (item 426, 2 paper and a white wool make 2; 1 s to put on, 6 points over 6 s, a hit takes it off; `world/combat/mend.rs`, `tools/gen_bandage_icon.py`). C5 (UNVERIFIED): the right button, in the guard button's place: the ropera's lunge, the alabarda's and the hoe's sweep, the shotel's parry, the martillo's streak (the shotel's double cut is an enchantment of the mod and not ported). A hold during the cooldown now shows the hand's rise too. C6 (UNVERIFIED): the 20 weapons wear the mod's own sprites (`tools/gen_combat_icons.py` paints them into `items.rgba`, tiles 208..=232; the alabarda's 32 px art is cut down to 16), in the HUD, the satchel (category Tools), the drops and both hands (the third-person hand holds them like a tool, the blades like the sword), and a tooltip under the name in the inventory screens: category, damage, charged damage, attacks a second, reach, cone size, the right button, durability, one aside for the ropera, alabarda, shotel and martillo. C7 (UNVERIFIED, not heard or seen): the mod's own weapon sounds (35 recordings in `assets/sound/extra/combat/`, 20 keys `combat.*`: hit, charged hit, miss, charge, guard broken, sweep, lunge, parry, each at the mod's pitch), a slash streak of white specks on every hit and a gold burst on a charged one, and the mod's camera shake (kill, full charge, hit taken, guarded, guard broken, parry; at most 2.4 degrees each, 10 in total). Plan and decisions: [`roadmap/combat.md`](roadmap/combat.md). GPL-3.0 (the mod's). C9 (UNVERIFIED): the mod's HUD: a crosshair that aims, grows, shakes and reddens on a hit, cooldown brackets and bars, the charge bar, guard orbs above the crosshair and a damage vignette / flash (`render/combat_hud.rs`, `assets/combat_hud.rgba`, +20 tests). See `roadmap/combat.md`. C8 (UNVERIFIED): the arcabuz: one item (id 425, 250 uses), hold the special button to reload, press it to light the fuse, then the blast through everything in its cone (`world/combat/arcabuz.rs`, +8 tests). |
++| QoL without a new meter (2026-11-01): gauges, almanac, death pile, craft from a nearby chest, UNVERIFIED, only with the Immersive Pack ON, **NOT b1.7.3** | written without a toolchain: not compiled, not run (+6 tests) | Gauges: the stamina overlay tinted by `biomelife::tint`, marks beside the hearts for heat, cold, a bandage and the hearth (`combat_hud::draw_marks`). Almanac: a held clock shows the day, the season and the minutes to dusk (`biomelife::almanac`). Death pile: a death's drop lasts 20 minutes (`items::PILE_LIFE`) and a red cross marks it on the maps in the bag (`MapData::pin`). Craft from a nearby chest: the recipe book counts and pulls from the chests within 3 blocks of the workbench (`book::pull`, `Inventory::near`). No new meter, no new block. | `roadmap/design.md`, `roadmap/gameplay.md` (42) |
+ | M14                  | pending | Menus (part 1: title, world list, create world; see above), options, player armor and real mob models (both done, see the player model row above and `roadmap/gameplay.md`); only the chat (overlay, later) is left; a bed tapped by day says so: see [`roadmap/gameplay.md`](roadmap/gameplay.md). M10 multiplayer and M13 optimization are out of scope on purpose. |
+ 
+ Latest commit on `main`: see `git log -1`. Latest released APK: see the
+@@ -145,7 +146,7 @@ mc-rs/
+       book.rs             recipe book: every recipe + smelting by category, craftable / missing, auto-fill, craft all, `Notes` (what was held, the pin); pure
+       craft.rs            M6: tools (EnumToolMaterial, getStrVsBlock, canHarvestBlock), recipes (CraftingManager), inventory/workbench screen (Container clicks) + its GUI geometry
+       sprint.rs           Retro Sprint port: double-tap / key start, stop rules, push, jump push, field of view; pure, tested on a host
+-      biomelife.rs        NOT b1.7.3: what a biome does to play (fog cover, heat and cold, seasons, leaf odds); pure, tested on a host
++      biomelife.rs        NOT b1.7.3: what a biome does to play (fog cover, heat and cold, seasons, leaf odds, the clock's almanac line); pure, tested on a host
+       stamina.rs          Stamina port: the bar (sprint / jump cost, regeneration, lock, slowdown, hearts overlay count); pure, tested on a host
+       atmos.rs            per-biome sky / fog / haze / clouds / stars, ring sampling + real-time easing (pure, host-tested)
+       sky.rs              day/night + weather: sun angle, skylight subtracted, sky/fog/sunrise colours, star brightness + positions, `Weather` (rain/thunder timers)
+diff --git a/mc-rs/assets/padbtn.rgba b/mc-rs/assets/padbtn.rgba
+new file mode 100644
+index 0000000000000000000000000000000000000000..84e3c5a9db2ce851e273a8bff6da0664b3860c96
+GIT binary patch
+literal 159744
+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
+
+literal 0
+HcmV?d00001
+
+diff --git a/mc-rs/src/input/gamepad.rs b/mc-rs/src/input/gamepad.rs
+index 0e6f462..7711426 100644
+--- a/mc-rs/src/input/gamepad.rs
++++ b/mc-rs/src/input/gamepad.rs
+@@ -6,13 +6,15 @@
+ //! every GUI (`VirtualMouseHandler`), the radial hotbar (`HOTBAR_SLOT_SELECT`) and rumble on damage / block break / explosions.
+ //! Each binding is rebindable in Options > Controls > Controller (`options.rs`), saved in `options.txt` as `pad_*`.
+ //!
+-//! Not ported (nothing in mc-rs to hang them on): gyro, DualSense LEDs / adaptive triggers / touchpad, on-screen keyboard, button-guide
+-//! glyph packs, splitscreen, joystick remapping, the server vibration API, chat, swap hands, drop item
+-//! (b1.7.3 has no sprint / off hand, and mc-rs has no chat or drop yet). UNVERIFIED on real hardware: the Android axis / key mapping
++//! Button hints (`Pad::hints`): while a pad is in use a corner list names what the bound buttons do, drawn with the pictures of the "Controller
++//! Tooltip Selector" pack (Xbox, PlayStation or Switch, `tools/gen_pad_buttons.py`) or as plain text; Controls > Controller picks the style.
++//!
++//! Not ported (nothing in mc-rs to hang them on): gyro, DualSense LEDs / adaptive triggers / touchpad, on-screen keyboard, splitscreen, joystick remapping, the server vibration API, chat, swap hands
++//! (b1.7.3 has no sprint / off hand, and mc-rs has no chat yet). Drop throws one item of the selected slot (`Out::drop`). UNVERIFIED on real hardware: the Android axis / key mapping
+ //! follows the documented layout (X/Y left stick, Z/Rz right stick, Ltrigger/Rtrigger, hat = d-pad).
+ 
+ use super::touch_ui::{HOLD_SECS, TAP_SECS};
+-use crate::render::hud::{HudPipeline, HudVertex};
++use crate::render::hud::{sprites, HudPipeline, HudVertex};
+ use android_activity::input::{Axis, KeyAction, KeyEvent, Keycode, MotionEvent, Source};
+ 
+ /// A physical button, in `Btn::bit` order. Triggers are buttons too (analogue value over the activation threshold).
+@@ -46,9 +48,14 @@ impl Btn {
+     pub fn name(self) -> &'static str {
+         ["A", "B", "X", "Y", "LB", "RB", "LT", "RT", "L3", "R3", "Start", "Back", "D-Up", "D-Down", "D-Left", "D-Right"][self as usize]
+     }
++
++    /// The picture of this button in icon `style` (`sprites::pad`: 0 Xbox, 1 PlayStation, 2 Switch); None in the Text style. The face buttons are
++    /// Android's, which name the PLACE: A is the bottom one, B right, X left, Y top; the Switch pack has Nintendo's letters in those places.
++    fn glyph(self, style: u8) -> Option<sprites::Sprite> {
++        (style < 3).then(|| sprites::pad::glyph(style as usize, self as usize))
++    }
+ }
+ 
+-/// What a button can be bound to (Controllify's `ControlifyBindings`, the ones b1.7.3 has). Movement and look stay on the sticks.
+ #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+ pub enum Act {
+     Jump,
+@@ -72,22 +79,24 @@ pub enum Act {
+     View,
+     /// Toggles the info (debug) screen.
+     Info,
++    /// Throws one of the selected hotbar slot's items (the Drop key).
++    Drop,
+ }
+ 
+-pub const ACTS: [Act; 15] = [Act::Jump, Act::Sneak, Act::Attack, Act::Use, Act::Inventory, Act::Pause, Act::NextSlot, Act::PrevSlot, Act::Wheel, Act::Zoom, Act::GuiSelect, Act::GuiBack, Act::Sprint, Act::View, Act::Info];
++pub const ACTS: [Act; 16] = [Act::Jump, Act::Sneak, Act::Attack, Act::Use, Act::Inventory, Act::Pause, Act::NextSlot, Act::PrevSlot, Act::Wheel, Act::Zoom, Act::GuiSelect, Act::GuiBack, Act::Sprint, Act::View, Act::Info, Act::Drop];
+ 
+ impl Act {
+     pub fn name(self) -> &'static str {
+-        ["Jump", "Sneak", "Attack", "Use", "Inventory", "Pause", "Next slot", "Prev slot", "Hotbar wheel", "Zoom", "GUI select", "GUI back", "Sprint", "View", "Info"][self as usize]
++        ["Jump", "Sneak", "Attack", "Use", "Inventory", "Pause", "Next slot", "Prev slot", "Hotbar wheel", "Zoom", "GUI select", "GUI back", "Sprint", "View", "Info", "Drop"][self as usize]
+     }
+ 
+     fn id(self) -> &'static str {
+-        ["jump", "sneak", "attack", "use", "inventory", "pause", "next_slot", "prev_slot", "wheel", "zoom", "gui_select", "gui_back", "sprint", "view", "info"][self as usize]
++        ["jump", "sneak", "attack", "use", "inventory", "pause", "next_slot", "prev_slot", "wheel", "zoom", "gui_select", "gui_back", "sprint", "view", "info", "drop"][self as usize]
+     }
+ 
+-    /// `default_bind/default.json` (zoom: its `change_perspective` button; the view bind is the d-pad's right, info its left).
++    /// `default_bind/default.json` (zoom: its `change_perspective` button; the view bind is the d-pad's right, info its left, drop its down).
+     fn default(self) -> Btn {
+-        [Btn::A, Btn::R3, Btn::Rt, Btn::Lt, Btn::Y, Btn::Start, Btn::Rb, Btn::Lb, Btn::Up, Btn::Back, Btn::A, Btn::B, Btn::L3, Btn::Right, Btn::Left][self as usize]
++        [Btn::A, Btn::R3, Btn::Rt, Btn::Lt, Btn::Y, Btn::Start, Btn::Rb, Btn::Lb, Btn::Up, Btn::Back, Btn::A, Btn::B, Btn::L3, Btn::Right, Btn::Left, Btn::Down][self as usize]
+     }
+ }
+ 
+@@ -95,8 +104,10 @@ const KNOBS: [&str; 6] = ["Look X", "Look Y", "Deadzone", "Cursor", "Trigger", "
+ const KNOB_IDS: [&str; 6] = ["lookH", "lookV", "deadzone", "cursor", "threshold", "rumble"];
+ /// Each knob's value at slider 0 and 1.
+ const KNOB_RANGE: [(f32, f32); 6] = [(0.0, 2.0), (0.0, 2.0), (0.0, 0.5), (0.2, 2.0), (0.1, 0.9), (0.0, 1.0)];
+-const TOGGLES: [&str; 4] = ["Curve", "Invert X", "Invert Y", "Toggle Sneak"];
+-const TOGGLE_IDS: [&str; 4] = ["curve", "invertX", "invertY", "toggleSneak"];
++const TOGGLES: [&str; 6] = ["Curve", "Invert X", "Invert Y", "Toggle Sneak", "Button Hints", "Button Icons"];
++const TOGGLE_IDS: [&str; 6] = ["curve", "invertX", "invertY", "toggleSneak", "hints", "iconStyle"];
++/// The button picture styles (`PadCfg::style`).
++const STYLES: [&str; 4] = ["Xbox", "PlayStation", "Switch", "Text"];
+ /// `InputCurves`.
+ const CURVES: [&str; 6] = ["Linear", "Gentle", "Standard", "Strong", "Precision", "S-Curve"];
+ 
+@@ -116,6 +127,10 @@ pub struct PadCfg {
+     pub invert_x: bool,
+     pub invert_y: bool,
+     pub toggle_sneak: bool,
++    /// The corner list of what the buttons do (`Pad::hints`).
++    pub hints: bool,
++    /// Index into `STYLES`: 0 Xbox, 1 PlayStation, 2 Switch, 3 Text.
++    pub style: u8,
+ }
+ 
+ impl Default for PadCfg {
+@@ -133,6 +148,8 @@ impl Default for PadCfg {
+             invert_x: false,
+             invert_y: false,
+             toggle_sneak: true,
++            hints: true,
++            style: 0,
+         }
+     }
+ }
+@@ -178,7 +195,9 @@ impl PadCfg {
+             0 => self.curve = (self.curve + 1) % CURVES.len() as u8,
+             1 => self.invert_x = !self.invert_x,
+             2 => self.invert_y = !self.invert_y,
+-            _ => self.toggle_sneak = !self.toggle_sneak,
++            3 => self.toggle_sneak = !self.toggle_sneak,
++            4 => self.hints = !self.hints,
++            _ => self.style = (self.style + 1) % STYLES.len() as u8,
+         }
+     }
+ 
+@@ -188,7 +207,9 @@ impl PadCfg {
+             0 => CURVES[self.curve as usize % CURVES.len()],
+             1 => onoff(self.invert_x),
+             2 => onoff(self.invert_y),
+-            _ => onoff(self.toggle_sneak),
++            3 => onoff(self.toggle_sneak),
++            4 => onoff(self.hints),
++            _ => STYLES[self.style as usize % STYLES.len()],
+         };
+         format!("{}: {v}", TOGGLES[i])
+     }
+@@ -210,7 +231,9 @@ impl PadCfg {
+                 0 => self.curve = n.min(CURVES.len() as u8 - 1),
+                 1 => self.invert_x = n != 0,
+                 2 => self.invert_y = n != 0,
+-                _ => self.toggle_sneak = n != 0,
++                3 => self.toggle_sneak = n != 0,
++                4 => self.hints = n != 0,
++                _ => self.style = n.min(STYLES.len() as u8 - 1),
+             }
+         }
+     }
+@@ -223,7 +246,7 @@ impl PadCfg {
+             t.push_str(&format!("pad_{id}:{}\n", self.knob_value(i)));
+         }
+         let b = |x: bool| x as u8;
+-        t.push_str(&format!("pad_curve:{}\npad_invertX:{}\npad_invertY:{}\npad_toggleSneak:{}\n", self.curve, b(self.invert_x), b(self.invert_y), b(self.toggle_sneak)));
++        t.push_str(&format!("pad_curve:{}\npad_invertX:{}\npad_invertY:{}\npad_toggleSneak:{}\npad_hints:{}\npad_iconStyle:{}\n", self.curve, b(self.invert_x), b(self.invert_y), b(self.toggle_sneak), b(self.hints), self.style));
+     }
+ }
+ 
+@@ -282,6 +305,8 @@ pub struct Out {
+     /// C3: the attack button went up after a hold that dug nothing (`attack_dug` false, `HOLD_SECS` passed): the end of a charge.
+     pub release: bool,
+     pub inventory: bool,
++    /// The drop bind was pressed (playing only).
++    pub drop: bool,
+     pub pause: bool,
+     pub back: bool,
+     pub slot_delta: i32,
+@@ -516,7 +541,7 @@ impl Pad {
+             }
+         }
+         o.place |= o.strike;
+-        (o.inventory, o.pause) = (just(Act::Inventory), just(Act::Pause));
++        (o.inventory, o.pause, o.drop) = (just(Act::Inventory), just(Act::Pause), just(Act::Drop));
+         o.slot_delta = just(Act::NextSlot) as i32 - just(Act::PrevSlot) as i32;
+         o
+     }
+@@ -544,6 +569,36 @@ impl Pad {
+         }
+     }
+ 
++    /// Button hints: while a pad is in use, a list in the bottom-right corner of what the bound buttons do (playing: attack, place, jump, sneak,
++    /// inventory, drop; in a GUI: select, back). Each button is its picture from `sprites::pad` (`PadCfg::style`), or in the Text style a dark pill
++    /// with its name. One font pixel `k` is a whole screen pixel and a picture is 13 of them (its 26 px at half size), so both stay crisp.
++    pub fn hints(&self, v: &mut Vec<HudVertex>, w: f32, h: f32, cfg: &PadCfg, ui: bool) {
++        if !cfg.hints || !self.active() {
++            return;
++        }
++        let rows: &[(Act, &str)] = if ui { &[(Act::GuiSelect, "Select"), (Act::GuiBack, "Back")] } else { &[(Act::Attack, "Attack"), (Act::Use, "Place"), (Act::Jump, "Jump"), (Act::Sneak, "Sneak"), (Act::Inventory, "Inventory"), (Act::Drop, "Drop")] };
++        let k = (h.min(w) / 240.0).floor().max(1.0);
++        let (row, gap) = (13.0 * k, 2.0 * k);
++        let btn = |a: Act| cfg.binds[a as usize];
++        let width = |b: Btn| if b.glyph(cfg.style).is_some() { row } else { (HudPipeline::text_width(b.name()) as f32 + 4.0) * k };
++        let col = rows.iter().map(|&(a, _)| width(btn(a))).fold(0.0, f32::max);
++        let text = rows.iter().map(|&(_, t)| HudPipeline::text_width(t) as f32 * k).fold(0.0, f32::max);
++        let (margin, n) = (gap * 3.0, rows.len() as f32);
++        let (x0, y0) = (w - margin - col - gap - text, h - margin - n * row - (n - 1.0) * gap);
++        let ty = (row - 8.0 * k) * 0.5; // the 8 px font centred on a row
++        for (i, &(a, t)) in rows.iter().enumerate() {
++            let (b, y) = (btn(a), y0 + i as f32 * (row + gap));
++            let gx = x0 + (col - width(b)) * 0.5;
++            if let Some(spr) = b.glyph(cfg.style) {
++                HudPipeline::push_gui(v, gx, y, row, row, spr);
++            } else {
++                HudPipeline::push_quad(v, gx, y, width(b), row, [0.1, 0.1, 0.1, 0.85]);
++                HudPipeline::push_text(v, gx + 2.0 * k, y + ty, k, b.name(), [1.0; 4]);
++            }
++            HudPipeline::push_text(v, x0 + col + gap, y + ty, k, t, [1.0; 4]);
++        }
++    }
++
+     /// The touch buttons (everything of the HUD but the hotbar) are not drawn: a pad, keyboard or mouse is in hand. They still answer a finger.
+     pub fn hud_hidden(&self) -> bool {
+         self.active() || self.kbm
+@@ -815,8 +870,55 @@ mod tests {
+         assert!(!o.pause && p.captured == Some(Btn::Start));
+     }
+ 
++    #[test]
++    fn hints_follow_the_binds_and_the_style() {
++        let (mut p, mut c) = pad();
++        let quads = |p: &Pad, c: &PadCfg, ui| {
++            let mut v = Vec::new();
++            p.hints(&mut v, 1280.0, 720.0, c, ui);
++            v.len()
++        };
++        assert!(quads(&p, &c, false) > 0 && quads(&p, &c, false) > quads(&p, &c, true), "playing lists more than a GUI");
++        c.hints = false;
++        assert_eq!(quads(&p, &c, false), 0, "off draws nothing");
++        c.hints = true;
++        c.style = 3;
++        assert!(Btn::A.glyph(3).is_none() && Btn::A.glyph(2).is_some(), "Text has no pictures");
++        assert!(quads(&p, &c, false) > 0, "Text draws pills");
++        p.idle = 9.0;
++        assert_eq!(quads(&p, &c, false), 0, "no pad in use: no hints");
++        // every button has its own picture, in the style's rows of the sheet
++        let all: Vec<_> = Btn::ALL.iter().map(|b| b.glyph(1).unwrap()).collect();
++        assert!(all.iter().enumerate().all(|(i, a)| all[..i].iter().all(|b| a != b)));
++        assert_eq!(Btn::A.glyph(1).unwrap().1 - Btn::A.glyph(0).unwrap().1, 52.0);
++    }
++
++    #[test]
++    fn drop_is_one_press_while_playing_and_follows_its_bind() {
++        let (mut p, mut c) = pad();
++        p.key(Btn::Down, true);
++        assert!(p.update(DT, &c, false, 1000.0).drop, "D-Down drops by default");
++        assert!(!p.update(DT, &c, false, 1000.0).drop, "one press, one drop");
++        p.key(Btn::Down, false);
++        c.binds[ACTS.iter().position(|a| *a == Act::Drop).unwrap()] = Btn::X;
++        p.key(Btn::X, true);
++        assert!(p.update(DT, &c, false, 1000.0).drop);
++        p.key(Btn::X, false);
++        p.update(DT, &c, true, 1000.0);
++        p.key(Btn::X, true);
++        p.update(DT, &c, true, 1000.0);
++        assert!(!p.update(DT, &c, true, 1000.0).drop, "not in a GUI");
++    }
++
+     #[test]
+     fn config_round_trips() {
++        let mut c = PadCfg::default();
++        (c.hints, c.style) = (false, 2);
++        let mut t = String::new();
++        c.save_into(&mut t);
++        let mut back = PadCfg::default();
++        t.lines().for_each(|l| back.load(l.split_once(':').unwrap().0, l.split_once(':').unwrap().1));
++        assert_eq!((back.hints, back.style), (false, 2));
+         let mut c = PadCfg::default();
+         (c.binds[0], c.curve, c.invert_y, c.toggle_sneak) = (Btn::X, 4, true, false);
+         c.set_knob(0, 0.25);
+diff --git a/mc-rs/src/input/touch_ui.rs b/mc-rs/src/input/touch_ui.rs
+index 5cb50b4..42be4cc 100644
+--- a/mc-rs/src/input/touch_ui.rs
++++ b/mc-rs/src/input/touch_ui.rs
+@@ -273,6 +273,8 @@ pub struct TouchUi {
+     /// B in a container screen, LB / RB pages (-1 / +1) and the right stick's scroll (px), until taken: `lib.rs` decides what they mean.
+     back: bool,
+     pad_info: bool,
++    /// The pad's drop bind was pressed while playing, until `take_pad_drop`.
++    pad_drop: bool,
+     page: i32,
+     scroll: f32,
+     /// X (`Some(false)`, click for one) or RT (`Some(true)`, quick-move) in a container screen, until `take_alt`.
+@@ -320,6 +322,7 @@ impl TouchUi {
+             nav: None,
+             back: false,
+             pad_info: false,
++            pad_drop: false,
+             page: 0,
+             scroll: 0.0,
+             alt: None,
+@@ -378,6 +381,7 @@ impl TouchUi {
+             self.cycle_view();
+         }
+         self.pad_info |= o.info;
++        self.pad_drop |= o.drop;
+         if cfg.toggle_sneak {
+             self.sneak ^= o.sneak_down;
+         } else if o.sneak_down {
+@@ -410,6 +414,11 @@ impl TouchUi {
+         };
+     }
+ 
++    /// The pad's drop bind was pressed since the last call.
++    pub fn take_pad_drop(&mut self) -> bool {
++        std::mem::take(&mut self.pad_drop)
++    }
++
+     /// The pad's info bind was pressed since the last call.
+     pub fn take_pad_info(&mut self) -> bool {
+         std::mem::take(&mut self.pad_info)
+diff --git a/mc-rs/src/lib.rs b/mc-rs/src/lib.rs
+index 2aadf85..cc6c1b5 100644
+--- a/mc-rs/src/lib.rs
++++ b/mc-rs/src/lib.rs
+@@ -735,7 +735,7 @@ impl App {
+             chests: self.chests.iter().filter(|(p, _)| p.0 != i32::MIN).map(|(&p, &c)| (p, c)).collect(),
+             spawners: self.fx.spawners.iter().map(|(&p, s)| (p, s.kind, s.delay)).collect(),
+             bed: self.bed_spawn,
+-            drops: self.drops.items.iter().map(|e| (e.pos, e.stack, e.age)).collect(),
++            drops: self.drops.items.iter().map(|e| (e.pos, e.stack, e.saved_age())).collect(),
+         };
+         if let Err(e) = save::write(&self.dir.join("level"), &level.encode()) {
+             log::warn!("save: level file: {e}");
+@@ -755,6 +755,13 @@ impl App {
+         self.chunks.flush(chunks);
+     }
+ 
++    /// Craft from a nearby chest (NOT b1.7.3, Immersive Pack only): what the chests near the open workbench hold, for the book to count
++    /// (`Inventory::near`); nothing at any other screen or with the pack off.
++    fn near_tick(&mut self) {
++        let bench = self.screen.as_ref().and_then(|s| s.bench).filter(|_| world::combat::rules::on());
++        self.inv.near = bench.map_or_else(Vec::new, |b| book::near_stock(b, &self.chests));
++    }
++
+     /// `ItemMap.onCreated` for the maps just crafted, then `ItemMap.onUpdate` for every map in the main inventory (`InventoryPlayer.decrementAnimations`):
+     /// the arrow on it, and for the one in hand the repaint of this tick's strip (`MapData::scan`) and the upload of its pixels when they changed.
+     fn map_tick(&mut self) {
+@@ -765,11 +772,16 @@ impl App {
+         let (slot, alive, yaw) = (self.touch.hotbar_slot, !self.vitals.dead(), self.camera.yaw.to_degrees() + 180.0);
+         let spawn = (self.spawn.x.floor() as i32, self.spawn.z.floor() as i32);
+         let (chunks, no_sky) = (&self.chunks, self.nether);
++        // Death pile (NOT b1.7.3, Immersive Pack only): where the pile of the last death lies, if it is still there.
++        let pile = if world::combat::rules::on() { self.drops.pile_at() } else { None };
+         let mut held = None;
+         for i in 0..items::MAIN {
+             let Some(mut st) = self.inv.slots[i].filter(|s| s.id == MAP) else { continue };
+             let d = self.maps.data_for(&mut st, spawn, dim);
+             d.track(alive, dim, at, yaw);
++            if let Some(p) = pile {
++                d.pin(dim, p);
++            }
+             if i == slot {
+                 d.scan(dim, no_sky, at, |x, z| chunks.column(x, z));
+                 held = Some(d.markers.clone());
+@@ -905,7 +917,9 @@ impl App {
+             self.save(AUTOSAVE_CHUNKS);
+         }
+         let slot = self.touch.hotbar_slot;
+-        self.tip = if slot != self.tip.0 { (slot, 2.0) } else { (slot, (self.tip.1 - dt).max(0.0)) };
++        // Almanac (NOT b1.7.3): a clock in hand keeps its name and its line up, so the day can be read at any time.
++        let clock = world::combat::rules::on() && self.inv.slots[slot].is_some_and(|s| s.id == world::biomelife::CLOCK);
++        self.tip = if slot != self.tip.0 || clock { (slot, 2.0) } else { (slot, (self.tip.1 - dt).max(0.0)) };
+         // Day/night: time only runs while playing; the shader reads the sky-light level from a uniform, so the meshes are not rebuilt.
+         self.world_ticks += dt as f64 * 20.0;
+         // `minutesPlayedStat`: one per tick; and the inventory hint until `openInventory` is taken (`EntityPlayerSP.onLivingUpdate`).
+@@ -927,6 +941,7 @@ impl App {
+         if world::biomelife::set_season(season) {
+             self.chunks.restart_meshes();
+         }
++        world::biomelife::set_now((!self.nether).then_some(self.world_ticks as u64), self.opts.biome_rules); // Almanac: the held clock's line
+         // Asleep, the jump button is "leave bed" (`GuiSleepMP`); the view and the body stay put.
+         if self.sleep.is_some() && self.touch.jumping() {
+             self.wake(true);
+@@ -1282,6 +1297,7 @@ impl App {
+             self.sleep_tick(sub);
+             self.sprint_tick();
+             self.map_tick();
++            self.near_tick();
+             // `BlockPressurePlate`: the boxes of what may stand on a plate (the player, the mobs).
+             let p = self.player.pos;
+             self.ticks.plate_ents.clear();
+@@ -1413,6 +1429,15 @@ impl App {
+         if place && !self.swing_swallowed() {
+             self.body.swing(); // a tap places, uses or hits: `swingItem`
+         }
++        // The pad's Drop bind: one item of the selected slot, thrown the way a screen's leftovers are (`EntityPlayer.dropPlayerItem`).
++        if self.touch.take_pad_drop() && !self.vitals.dead() {
++            let slot = self.touch.hotbar_slot;
++            if let Some(s) = self.inv.slots[slot] {
++                self.drops.throw(ItemStack { count: 1, ..s }, self.camera.pos, self.camera.forward());
++                self.inv.slots[slot] = (s.count > 1).then_some(ItemStack { count: s.count - 1, ..s });
++                self.stats.add(world::stats::DROP, 1);
++            }
++        }
+         // The inventory button, and taps on an open screen (its presses are not look / move / place).
+         if self.touch.take_inventory() {
+             if self.sign_edit.is_some() {
+@@ -1707,7 +1732,7 @@ impl App {
+             match self.chunks.block_loaded(hit.pos.0, hit.pos.1, hit.pos.2) {
+                 Some(58) => {
+                     if self.pack_rule && !self.opts.pack_cloth {
+-                        self.open_satchel(Screen::new(3)); // the bag, and the book open on its 3x3 grid
++                        self.open_satchel(Screen::at_bench(hit.pos)); // the bag, and the book open on its 3x3 grid (and the chests near it)
+                     } else {
+                         self.open_screen(Screen::new(3));
+                     }
+@@ -2956,9 +2981,11 @@ impl App {
+         self.close_screen();
+         self.close_sign();
+         let at = (self.player.pos.x.floor() as i32, self.player.pos.y.floor() as i32, self.player.pos.z.floor() as i32);
++        // Death pile (NOT b1.7.3, Immersive Pack only): the drop lasts 20 minutes and the map marks it (`Drops::scatter_pile`, `map_tick`).
++        let pile = world::combat::rules::on();
+         for slot in self.inv.slots.iter_mut() {
+             if let Some(st) = slot.take() {
+-                self.drops.scatter(st, at);
++                if pile { self.drops.scatter_pile(st, at) } else { self.drops.scatter(st, at) }
+             }
+         }
+         self.touch.pause();
+@@ -3307,7 +3334,14 @@ impl App {
+             return;
+         }
+         let filled = match self.screen.as_mut() {
+-            Some(s) if s.cursor.is_none() => book::fill(e, s, &mut self.inv),
++            Some(s) if s.cursor.is_none() => {
++                // Craft from a nearby chest (NOT b1.7.3, UNVERIFIED): the chests near this workbench give what the bag lacks.
++                if let (Some(b), true) = (s.bench, world::combat::rules::on()) {
++                    book::pull(e, &mut self.inv, &mut self.chests, b);
++                    self.inv.near = book::near_stock(b, &self.chests); // what is left, so `fill` does not count what moved twice
++                }
++                book::fill(e, s, &mut self.inv)
++            }
+             _ => false,
+         };
+         if filled {
+@@ -4037,6 +4071,7 @@ impl App {
+         m.draw(&mut self.hud_verts, w, h, &self.opts);
+         let cur = self.touch.pad.shows_cursor().then_some(self.touch.cursor_pos);
+         self.touch.pad.draw(&mut self.hud_verts, w, h, self.touch.hotbar_slot, cur);
++        self.touch.pad.hints(&mut self.hud_verts, w, h, &self.opts.pad, true);
+         let pano = m.panorama();
+         self.hud_verts.truncate(crate::gles::HUD_QUADS * 6);
+         match self.be.draw_menu(pano, &self.hud_verts) {
+@@ -4197,6 +4232,13 @@ impl App {
+         // Read before `hud_verts` is borrowed mutably (the borrow checker forbids `&self` calls while `v` lives).
+         let held_special = self.held_special();
+         let guard_points = self.held_guard().points; // C9: the orbs above the crosshair
++        // Gauges (NOT b1.7.3, Immersive Pack only, UNVERIFIED): the air on the body, a bandage working, the hearth ticking. Read here, before `v`.
++        let gauge = if world::combat::rules::on() && !self.vitals.dead() {
++            let (air, calm) = (self.air(), !self.vitals.stamina.in_combat());
++            Some((air, self.vitals.mend.bandaged(), world::combat::mend::Mend::hearth_on(self.vitals.health, calm, self.heat_at_hand())))
++        } else {
++            None
++        };
+         let v = &mut self.hud_verts;
+         v.clear();
+         let layout = &self.touch.layout;
+@@ -4551,12 +4593,14 @@ impl App {
+ 
+         // Name of the item just switched to, centred above the hotbar and the hearts.
+         // UNVERIFIED: not in b1.7.3 (Beta 1.8 added it); the 2 s, the 0.75 scale and the spot are invented.
+-        if let (true, Some(name)) = (play && self.tip.1 > 0.0, self.inv.slots[self.touch.hotbar_slot].and_then(items::name)) {
++        if let (true, Some((st, name))) = (play && self.tip.1 > 0.0, self.inv.slots[self.touch.hotbar_slot].and_then(|st| items::name(st).map(|n| (st, n)))) {
+             let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
+-            let k = craft::panel(0, w, h).2;
+-            let (hx, hy, hw, _) = layout.hotbar[4];
+-            let bw = (HudPipeline::text_width(name) as f32 + 6.0) * k * 0.75;
+-            HudPipeline::push_tooltip(v, hx + hw * 0.5 - bw * 0.5, hy - 34.0 * k, k * 0.75, name);
++            let (k0, (hx, hy, hw, _)) = (craft::panel(0, w, h).2, layout.hotbar[4]);
++            let k = k0 * 0.75;
++            // Almanac: the clock's line under its name (only the clock: a weapon's lines stay out of this flash).
++            let lines = if st.id == world::biomelife::CLOCK { world::combat::tooltip::lines(st) } else { Vec::new() };
++            let (bw, bh) = HudPipeline::tooltip_size(name, &lines);
++            HudPipeline::push_tooltip_lines(v, hx + hw * 0.5 - bw * k * 0.5, hy - 34.0 * k0 - (bh - 14.0) * k, k, name, &lines);
+         }
+ 
+         if play {
+@@ -4578,9 +4622,15 @@ impl App {
+             // Stamina (`StaminaFeatureClient.renderStamina`): the half hearts it no longer covers, from the right, get a grey half-heart overlay
+             // (alpha 0x9c, 0xcc while locked), 4 of the heart's 9 px each. ponytail: the hearts do not shake at low health here, so neither does it.
+             let (st, hp) = (&self.vitals.stamina, self.vitals.health.min(vitals::MAX_HEALTH));
++            let tint = gauge.map_or([1.0; 3], |g| world::biomelife::tint(g.0)); // Gauges: warm in the heat, cool in the cold
+             for h in st.halves(hp)..hp {
+                 let (u, spr) = (if h % 2 == 0 { 1.0 } else { 5.0 }, sp::STAMINA);
+-                HudPipeline::push_gui_tinted(v, hx + (h / 2) as f32 * hw * 0.4 + u * sz / 9.0, y, sz * 4.0 / 9.0, sz, (spr.0 + u, spr.1, 4.0, spr.3), [1.0, 1.0, 1.0, if st.locked { 0.8 } else { 0.612 }]);
++                HudPipeline::push_gui_tinted(v, hx + (h / 2) as f32 * hw * 0.4 + u * sz / 9.0, y, sz * 4.0 / 9.0, sz, (spr.0 + u, spr.1, 4.0, spr.3), [tint[0], tint[1], tint[2], if st.locked { 0.8 } else { 0.612 }]);
++            }
++            // Gauges: the marks right of the tenth heart (heat, cold, a bandage, the hearth).
++            if let Some((air, bandaged, hearth)) = gauge {
++                let m = render::combat_hud::marks(air.hot, air.cold, bandaged, hearth);
++                render::combat_hud::draw_marks(v, (hx + 10.0 * hw * 0.4 + sz * 0.3, y), sz, &m);
+             }
+             // Armor bar (GuiIngame): 10 shields over the hearts, a full one is 2 armor points, a half one 1.
+             if self.vitals.armor > 0 {
+@@ -4659,6 +4709,7 @@ impl App {
+             let t = &self.touch;
+             let cur = (t.pad.shows_cursor() && (paused || t.screen) && self.sat.is_none()).then_some(t.cursor_pos); // the satchel frames its target instead
+             t.pad.draw(v, w, h, t.hotbar_slot, cur);
++            t.pad.hints(v, w, h, &self.opts.pad, paused || t.screen);
+         }
+ 
+         // Cap to the buffer capacity; extra quads are silently dropped.
+diff --git a/mc-rs/src/options.rs b/mc-rs/src/options.rs
+index 763cfd6..5f7c47f 100644
+--- a/mc-rs/src/options.rs
++++ b/mc-rs/src/options.rs
+@@ -733,6 +733,8 @@ const TIPS: [(&str, &str); 36] = [
+     ("Invert X", "Flips the horizontal look of the right stick."),
+     ("Invert Y", "Flips the vertical look of the right stick."),
+     ("Toggle Sneak", "Sneak stays on until pressed again."),
++    ("Button Hints", "Shows what the pad's buttons do in the corner while a pad is in use."),
++    ("Button Icons", "Style of the button pictures: Xbox, PlayStation, Switch or plain text. Tap to change."),
+ ];
+ 
+ /// The sentence under a setting's name in the description pane.
+@@ -1997,6 +1999,10 @@ mod tests {
+         assert_eq!(o.page, 6);
+         tap(&mut o, &mut st, "Invert Y: OFF");
+         assert!(st.pad.invert_y);
++        tap(&mut o, &mut st, "Button Icons: Xbox");
++        assert_eq!(st.pad.style, 1, "Xbox -> PlayStation");
++        tap(&mut o, &mut st, "Button Hints: ON");
++        assert!(!st.pad.hints);
+         let (x, y, _, s) = track_px(&mut o, &st, "Look X");
+         let y = y + 4.0 * s;
+         o.event(ScreenEv::Down(x + 4.0 * s, y), SZ.0, SZ.1, &mut st);
+@@ -2004,6 +2010,7 @@ mod tests {
+         assert_eq!(st.pad.look_h, 0.0);
+         let back = Settings::load(&root);
+         assert_eq!((back.pad.binds[0], back.pad.invert_y, back.pad.look_h), (Btn::X, true, 0.0));
++        assert_eq!((back.pad.style, back.pad.hints), (1, false));
+         let mut v = Vec::new();
+         o.draw(&mut v, SZ.0, SZ.1, &st, true);
+         assert!(!v.is_empty());
+diff --git a/mc-rs/src/render/combat_hud.rs b/mc-rs/src/render/combat_hud.rs
+index ef915ec..ae2e976 100644
+--- a/mc-rs/src/render/combat_hud.rs
++++ b/mc-rs/src/render/combat_hud.rs
+@@ -320,6 +320,43 @@ pub fn draw_orbs(out: &mut Vec<HudVertex>, gu: f32, (cx, cy): (f32, f32), points
+     }
+ }
+ 
++// ---- the gauges (NOT b1.7.3, UNVERIFIED) ----
++
++/// What the body is doing that the hearts do not show: heat or cold on it (`biomelife::air`), a bandage working, the hearth ticking.
++#[derive(Clone, Copy, PartialEq, Eq, Debug)]
++pub enum Mark {
++    Hot,
++    Cold,
++    Bandage,
++    Hearth,
++}
++
++/// Below this `hot` or `cold` the weather is not worth a mark.
++const MARK_MIN: f32 = 0.05;
++
++/// The marks to show, in a fixed order (so one does not jump when another comes and goes).
++pub fn marks(hot: f32, cold: f32, bandaged: bool, hearth: bool) -> Vec<Mark> {
++    [(hot > MARK_MIN, Mark::Hot), (cold > MARK_MIN, Mark::Cold), (bandaged, Mark::Bandage), (hearth, Mark::Hearth)].into_iter().filter(|m| m.0).map(|m| m.1).collect()
++}
++
++/// Draw `marks` in a row from `(x, y)`, each in a square of `s` pixels (a 5 x 5 pixel glyph of flat quads, 1.25 `s` apart).
++pub fn draw_marks(out: &mut Vec<HudVertex>, (x, y): (f32, f32), s: f32, marks: &[Mark]) {
++    let u = s / 5.0;
++    for (i, m) in marks.iter().enumerate() {
++        let x0 = x + i as f32 * s * 1.25;
++        // (x, y, w, h) in glyph pixels.
++        let (col, cells): ([f32; 4], &[(f32, f32, f32, f32)]) = match m {
++            Mark::Hot => ([1.0, 0.65, 0.2, 0.95], &[(1.0, 1.0, 3.0, 3.0), (2.0, 0.0, 1.0, 1.0), (2.0, 4.0, 1.0, 1.0), (0.0, 2.0, 1.0, 1.0), (4.0, 2.0, 1.0, 1.0)]),
++            Mark::Cold => ([0.7, 0.88, 1.0, 0.95], &[(0.0, 2.0, 5.0, 1.0), (2.0, 0.0, 1.0, 5.0), (0.0, 0.0, 1.0, 1.0), (4.0, 0.0, 1.0, 1.0), (0.0, 4.0, 1.0, 1.0), (4.0, 4.0, 1.0, 1.0)]),
++            Mark::Bandage => ([0.45, 0.9, 0.45, 0.95], &[(0.0, 1.5, 5.0, 2.0), (1.5, 0.0, 2.0, 5.0)]),
++            Mark::Hearth => ([1.0, 0.45, 0.15, 0.95], &[(1.0, 3.0, 3.0, 2.0), (1.5, 1.5, 2.0, 1.5), (2.0, 0.0, 1.0, 1.5)]),
++        };
++        for &(cx, cy, w, h) in cells {
++            HudPipeline::push_quad(out, x0 + cx * u, y + cy * u, w * u, h * u, col);
++        }
++    }
++}
++
+ // ---- the damage vignette and flash (`DamageOverlayLayer`, `Fade`) ----
+ 
+ /// Above this health the vignette is gone, at `FADE_END` it is full (the mod's 20-point scale is b1.7.3's too).
+@@ -420,6 +457,18 @@ mod tests {
+         }
+     }
+ 
++    // Gauges: a mark for each thing that is on, in a fixed order, and a glyph stays inside its square.
++    #[test]
++    fn the_marks_come_in_a_fixed_order_and_stay_in_their_squares() {
++        assert!(marks(0.0, 0.04, false, false).is_empty());
++        assert_eq!(marks(0.5, 0.2, true, true), [Mark::Hot, Mark::Cold, Mark::Bandage, Mark::Hearth]);
++        assert_eq!(marks(0.0, 0.0, false, true), [Mark::Hearth]);
++        let mut v = Vec::new();
++        draw_marks(&mut v, (10.0, 20.0), 10.0, &[Mark::Cold, Mark::Hearth]);
++        assert!(!v.is_empty() && v.len() % 6 == 0);
++        assert!(v.iter().all(|p| p.pos[0] >= 10.0 && p.pos[0] <= 10.0 + 10.0 * 2.25 && p.pos[1] >= 20.0 && p.pos[1] <= 30.0));
++    }
++
+     #[test]
+     fn a_resting_crosshair_is_the_plain_sprite_at_scale_one() {
+         let xh = Crosshair::default();
+diff --git a/mc-rs/src/render/hud.rs b/mc-rs/src/render/hud.rs
+index 41edb27..fc69119 100644
+--- a/mc-rs/src/render/hud.rs
++++ b/mc-rs/src/render/hud.rs
+@@ -49,7 +49,7 @@ pub const DPAD_SHEET: &[u8] = include_bytes!("../../assets/dpad.rgba");
+ /// The title screen's sheet (256 x 272, `tools/gen_menu.py`): `mclogo.png`, then `background.png`: the last rows of the HUD texture.
+ pub const MENU_SHEET: &[u8] = include_bytes!("../../assets/menu.rgba");
+ /// The skins (`mob/char.png` and the armor, 64 x 32 each, four to a row, `atlas::skin_px`): 224 rows of the HUD texture, cut from the atlas's `ART` tail (`PLAYER_Y`).
+-pub(crate) const SHEET_H: f32 = 3312.0;
++pub(crate) const SHEET_H: f32 = 3468.0;
+ const PLAYER_Y: f32 = 2576.0;
+ /// Where the font atlas starts in the HUD texture (the 64 rows after the player skin, see `font_sheet`).
+ const FONT_Y: f32 = 2800.0;
+@@ -57,10 +57,15 @@ const FONT_Y: f32 = 2800.0;
+ const COMBAT_Y: f32 = 2864.0;
+ /// Where the satchel's pixel art starts (256 x 256, `tools/gen_satchel_ui.py`): the last rows of the HUD texture, after the combat sprites.
+ const SATCHEL_Y: f32 = 2928.0;
+-/// Where the map block starts (256 x 128, `tools/gen_mapui.py`): the last rows of the HUD texture, after the satchel. The held map's 128 x 128
++/// Where the controller button pictures start (256 x 156, `tools/gen_pad_buttons.py`): the rows after the satchel, before the map block.
++const PAD_Y: f32 = 3184.0;
++const PAD_H: f32 = 156.0;
++/// Where the map block starts (256 x 128, `tools/gen_mapui.py`): the last rows of the HUD texture, after the pad buttons. The held map's 128 x 128
+ /// pixels are rewritten here at run time (`HudPipeline::upload_map`); `mapbg.png` and `mapicons.png` sit beside them.
+-const MAP_Y: f32 = 3184.0;
++const MAP_Y: f32 = PAD_Y + PAD_H;
+ pub const MAP_SHEET: &[u8] = include_bytes!("../../assets/mapui.rgba");
++/// The controller button pictures: 3 styles (Xbox, PlayStation, Switch) x 16 buttons of 26 x 26 (`tools/gen_pad_buttons.py`, `sprites::pad`).
++pub const PAD_SHEET: &[u8] = include_bytes!("../../assets/padbtn.rgba");
+ /// Cortes Combat's HUD sprites (crosshair x3, guard orbs x2, charge bar x2, cooldown brackets; `tools/gen_combat_hud.py`).
+ pub const COMBAT_SHEET: &[u8] = include_bytes!("../../assets/combat_hud.rgba");
+ /// The satchel and recipe book's sprites (`satchel.rs`).
+@@ -136,6 +141,14 @@ pub mod sprites {
+         pub const ALPHA_CHARGE: f32 = 204.0 / 255.0;
+         pub const ALPHA_CHARGE_EMPTY: f32 = 88.0 / 255.0;
+     }
++    /// The controller button pictures (`tools/gen_pad_buttons.py`): `glyph(style, i)` is button `i` (`Btn::ALL` order) of style 0 Xbox, 1 PlayStation,
++    /// 2 Switch; 26 x 26 each, 8 to a row, 52 rows a style. Opaque or clear.
++    pub mod pad {
++        use super::Sprite;
++        pub fn glyph(style: usize, i: usize) -> Sprite {
++            ((i % 8) as f32 * 26.0, super::super::PAD_Y + (style * 52 + i / 8 * 26) as f32, 26.0, 26.0)
++        }
++    }
+     pub mod sat {
+         use super::Sprite;
+         const Y: f32 = super::super::SATCHEL_Y;
+@@ -243,7 +256,7 @@ fn shader_source(srgb: bool) -> String {
+ 
+ /// The whole HUD texture (256 x `SHEET_H`, RGBA8): items, the GUI sheet, terrain.png, the panels, the d-pad, the title screen, the player skin, the font, Cortes Combat's HUD, the satchel, the map.
+ pub fn sheet_bytes() -> Vec<u8> {
+-    [crate::render::atlas::ITEMS, GUI, crate::render::atlas::TERRAIN, CONTAINERS, DPAD_SHEET, MENU_SHEET, &crate::render::atlas::ART[256 * 288 * 4..], &font_sheet(), COMBAT_SHEET, SATCHEL_SHEET, MAP_SHEET].concat()
++    [crate::render::atlas::ITEMS, GUI, crate::render::atlas::TERRAIN, CONTAINERS, DPAD_SHEET, MENU_SHEET, &crate::render::atlas::ART[256 * 288 * 4..], &font_sheet(), COMBAT_SHEET, SATCHEL_SHEET, PAD_SHEET, MAP_SHEET].concat()
+ }
+ 
+ /// Owns the HUD pipeline + dynamic vertex buffer. One instance per surface.
+@@ -293,6 +306,13 @@ impl HudPipeline {
+         let (ix, iy, _, _) = sprites::map::ICONS;
+         for m in markers {
+             let (cx, cy) = (ox + (m.x as f32 / 2.0 + 64.0) * k, oy + (m.z as f32 / 2.0 + 64.0) * k);
++            if m.icon == crate::world::map::DEATH {
++                // Death pile: a red cross of two bars, 6 map units across, on the pile (no cell of `mapicons.png`).
++                let (r, t) = (3.0 * k, 1.0 * k);
++                Self::push_quad(out, cx - r, cy - t * 0.5, 2.0 * r, t, [0.9, 0.1, 0.1, 1.0]);
++                Self::push_quad(out, cx - t * 0.5, cy - r, t, 2.0 * r, [0.9, 0.1, 0.1, 1.0]);
++                continue;
++            }
+             let a = m.rot as f32 * std::f32::consts::PI / 8.0;
+             let (s, c) = a.sin_cos();
+             let (cu, cv) = ((m.icon % 4) as f32 * 8.0, (m.icon / 4) as f32 * 8.0);
+@@ -817,6 +837,20 @@ mod tests {
+         assert!(a(182, f + 7) > 0 && a(186, f + 20) > 0, "flame and arrow");
+     }
+ 
++    /// Every controller button picture of every style holds ink, and is clear or fully opaque (`fs_main` drops anything under alpha 0.5).
++    #[test]
++    fn pad_sheet_has_every_button_of_every_style() {
++        for style in 0..3 {
++            for i in 0..16 {
++                let (x, y, w, h) = sprites::pad::glyph(style, i);
++                assert!(y >= PAD_Y && y + h <= MAP_Y && x + w <= 256.0, "style {style} button {i} inside the block");
++                let a: Vec<u8> = (0..(w * h) as usize).map(|k| PAD_SHEET[((y as usize - PAD_Y as usize + k / w as usize) * 256 + x as usize + k % w as usize) * 4 + 3]).collect();
++                assert!(a.iter().any(|&p| p == 255), "style {style} button {i} is empty");
++                assert!(a.iter().all(|&p| p == 0 || p == 255), "style {style} button {i} has a half alpha");
++            }
++        }
++    }
++
+     /// Cortes Combat's HUD block: each sprite holds a picture, every texel is clear or fully opaque (`fs_main` drops anything under alpha 0.5,
+     /// and the art is fainter: the sprite's own alpha is a vertex alpha in `sprites::cc`), and each bracket half holds ink.
+     #[test]
+@@ -972,8 +1006,11 @@ mod text_tests {
+         assert_eq!(FONT_Y + 64.0, COMBAT_Y);
+         assert_eq!(COMBAT_Y + 64.0, SATCHEL_Y);
+         assert_eq!(COMBAT_SHEET.len(), 256 * 64 * 4);
+-        assert_eq!(SATCHEL_Y + 256.0, MAP_Y);
++        assert_eq!(SATCHEL_Y + 256.0, PAD_Y);
++        assert_eq!(PAD_Y + PAD_H, MAP_Y);
+         assert_eq!(MAP_Y + 128.0, SHEET_H);
++        assert_eq!(PAD_SHEET.len(), 256 * PAD_H as usize * 4);
++        assert_eq!(sheet_bytes().len(), 256 * SHEET_H as usize * 4);
+         assert_eq!(MAP_SHEET.len(), 256 * 128 * 4);
+         let px = font_sheet();
+         assert_eq!(px.len(), 256 * 64 * 4);
+diff --git a/mc-rs/src/world/biomelife.rs b/mc-rs/src/world/biomelife.rs
+index 2ea98f4..db3c479 100644
+--- a/mc-rs/src/world/biomelife.rs
++++ b/mc-rs/src/world/biomelife.rs
+@@ -3,10 +3,11 @@
+ //! the biome, the light and the day, and `stamina`, `mobs`, `items` and the foliage tint read the answers. UNVERIFIED by eye: every number.
+ //!
+ //! Built here: proposal 2 (`sight`), 1 (`air`, `Air`), 4 (`season`, `foliage`, `leaf_odds`) and the parts of 6 that need no new block
+-//! (`Body::fed`, `Body::fur`; the marsh's clay is in `gen::populate`). Proposal 5 lives in `mobs` (`animalAi`); 3 and the landmarks are not built.
++//! (`Body::fed`, `Body::fur`; the marsh's clay is in `gen::populate`). Also the Gauges' `tint` and the clock's almanac line (`almanac`, `dusk_in`), `design.md` "QoL without a new meter". Proposal 5 lives in `mobs` (`animalAi`); 3 and the landmarks are not built.
+ 
+ use crate::world::biome::Biome::{self, *};
+-use std::sync::atomic::{AtomicU8, Ordering};
++use crate::world::sky;
++use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU8, Ordering};
+ 
+ /// Proposal 2, fog is cover: how far a mob sees you, as a fraction of its usual 16 blocks, in a fog of exp² `density` (`atmos`: plains
+ /// 0.0018, forest 0.003, wet woodland 0.006, marsh 0.0075, swamp 0.01). Clear air below 0.004 is 1; the thickest fog leaves 40%.
+@@ -69,6 +70,14 @@ pub fn air(b: Biome, w: Body) -> Air {
+     Air { hot, cold }
+ }
+ 
++/// Gauges (NOT b1.7.3, UNVERIFIED): the colour the stamina's grey overlay takes. White in clean air, warmer with `hot`, cooler with `cold`
++/// (each counts up to 1). Reads `Air` and nothing else, so the HUD joins the weather with no state of its own.
++pub fn tint(a: Air) -> [f32; 3] {
++    let (h, c) = (a.hot.clamp(0.0, 1.0), a.cold.clamp(0.0, 1.0));
++    let (warm, cool) = ([1.0, 0.7, 0.4], [0.55, 0.8, 1.0]);
++    std::array::from_fn(|i| 1.0 + h * (warm[i] - 1.0) + c * (cool[i] - 1.0))
++}
++
+ #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+ pub enum Season {
+     Spring,
+@@ -77,6 +86,12 @@ pub enum Season {
+     Winter,
+ }
+ 
++impl Season {
++    pub fn name(self) -> &'static str {
++        ["Spring", "Summer", "Autumn", "Winter"][self as usize]
++    }
++}
++
+ /// A season lasts this many days (a day is 24000 ticks, 20 minutes: an hour a season, a year of four hours).
+ pub const SEASON_DAYS: u64 = 3;
+ 
+@@ -90,6 +105,44 @@ pub fn season(ticks: u64) -> Season {
+     }
+ }
+ 
++/// Almanac (NOT b1.7.3, UNVERIFIED): the clock item (`pocketSundial`, 347), which now also reads the calendar.
++pub const CLOCK: u16 = 347;
++
++/// Ticks to the next dusk on a clear sky: the first moment the sky takes 4 light away, the line `App::sleep_tick` wakes a sleeper at (so
++/// it is also when a bed works). `None` when it is dark already. Steps of 5 s (100 ticks), which is finer than the minutes it is shown in.
++pub fn dusk_in(ticks: u64) -> Option<u64> {
++    let dark = |t: u64| sky::skylight_subtracted(sky::celestial_angle(t, 0.0), 0.0, 0.0) >= 4;
++    if dark(ticks) {
++        return None;
++    }
++    (1..=sky::TICKS_PER_DAY / 100).map(|i| i * 100).find(|&d| dark(ticks + d))
++}
++
++/// The line a held clock shows: the day, the season (only where `seasons` exist: `biomeRules`) and the minutes to dusk, or night.
++pub fn almanac(ticks: u64, seasons: bool) -> String {
++    let day = ticks / sky::TICKS_PER_DAY + 1;
++    let head = if seasons { format!("Day {day}, {}", season(ticks).name()) } else { format!("Day {day}") };
++    match dusk_in(ticks) {
++        Some(d) => format!("{head}, dusk in {} min", d.div_ceil(1200)), // 1200 ticks a minute
++        None => format!("{head}, night"),
++    }
++}
++
++/// What `almanac_now` reads, set once a frame by `App` like `SEASON` is (the tooltip that shows it is made far from the world): the world's
++/// tick (negative: no almanac, as in the Nether where the clock only spins) and whether the seasons exist.
++static NOW: AtomicI64 = AtomicI64::new(-1);
++static SEASONS: AtomicBool = AtomicBool::new(false);
++
++pub fn set_now(ticks: Option<u64>, seasons: bool) {
++    NOW.store(ticks.map_or(-1, |t| t as i64), Ordering::Relaxed);
++    SEASONS.store(seasons, Ordering::Relaxed);
++}
++
++/// The almanac line for this frame, `None` where there is no almanac.
++pub fn almanac_now() -> Option<String> {
++    u64::try_from(NOW.load(Ordering::Relaxed)).ok().map(|t| almanac(t, SEASONS.load(Ordering::Relaxed)))
++}
++
+ /// The season the foliage tint of new meshes reads (`chunks::biome_tints`, worker threads too), so `set_season` tells the caller when
+ /// every loaded mesh must restart. Summer is the colour the climate gives, and what a world with the rules off shows.
+ static SEASON: AtomicU8 = AtomicU8::new(1);
+@@ -174,6 +227,27 @@ mod tests {
+         assert_eq!(air(Tundra, Body { fur: 9, fed: true, ..Body::default() }).cold, 0.25, "four pieces count");
+     }
+ 
++    // Gauges: clean air leaves the overlay white, heat turns it warm (red over blue) and cold turns it cool.
++    #[test]
++    fn the_overlay_tint_follows_the_air() {
++        assert_eq!(tint(Air::default()), [1.0; 3]);
++        let (h, c) = (tint(Air { hot: 1.0, cold: 0.0 }), tint(Air { hot: 0.0, cold: 1.0 }));
++        assert!(h[0] > h[2] && c[2] > c[0]);
++        assert_eq!(tint(Air { hot: 9.0, cold: 0.0 }), h, "capped at 1");
++    }
++
++    // Almanac: dusk is where the sky first takes 4 light away (the bed's line), found by 5 s steps; the line has the day, the season and the wait.
++    #[test]
++    fn the_almanac_counts_to_dusk_and_names_the_day() {
++        let d = dusk_in(0).expect("morning is light");
++        assert!((9000..14000).contains(&d) && d % 100 == 0, "{d}");
++        assert_eq!(dusk_in(18000), None, "midnight is dark");
++        assert!(almanac(0, true).starts_with("Day 1, Spring, dusk in "));
++        assert_eq!(almanac(0, false).split(',').count(), 2, "no season where the seasons are off");
++        assert_eq!(almanac(24000 * 3 + 18000, true), "Day 4, Summer, night");
++        assert_eq!(almanac(24000 * 9, true).split(',').nth(1), Some(" Winter"));
++    }
++
+     /// Three days a season, four seasons, spring first; the foliage follows and summer is the plain climate colour.
+     #[test]
+     fn seasons_turn() {
+diff --git a/mc-rs/src/world/book.rs b/mc-rs/src/world/book.rs
+index 89432b8..5e7dafc 100644
+--- a/mc-rs/src/world/book.rs
++++ b/mc-rs/src/world/book.rs
+@@ -13,8 +13,10 @@
+ //! ponytail: the pin is an index into `entries()`, so a release that adds recipes can shift it; the file is checked against the list's
+ //! length and a stale pin is dropped, not repaired.
+ 
++use std::collections::HashMap;
+ use std::sync::OnceLock;
+ 
++use crate::world::chest::{Chest, Pos};
+ use crate::world::craft::{self, Screen, SlotId};
+ use crate::world::items::{max_stack, Inventory, ItemStack, MAIN};
+ use crate::world::pack;
+@@ -115,9 +117,61 @@ pub fn in_cat(cat: Cat) -> Vec<usize> {
+     entries().iter().enumerate().filter(|(_, e)| e.cat == cat && (combat || !super::combat::rules::is_weapon(e.out.id))).map(|(i, _)| i).collect()
+ }
+ 
+-/// How many of the ingredient `code` the bag (main inventory and quick belt) and the grid hold together.
++/// How many of the ingredient `code` the bag (main inventory and quick belt), the grid and the chests near the workbench (`Inventory::near`) hold together.
+ pub fn have(inv: &Inventory, grid: &[Option<ItemStack>; 9], code: u16) -> u32 {
+-    inv.slots[..MAIN].iter().chain(grid.iter()).flatten().filter(|s| craft::code(s.id, s.damage) == code).map(|s| u32::from(s.count)).sum()
++    let near: u32 = inv.near.iter().filter(|n| n.0 == code).map(|n| n.1).sum();
++    near + inv.slots[..MAIN].iter().chain(grid.iter()).flatten().filter(|s| craft::code(s.id, s.damage) == code).map(|s| u32::from(s.count)).sum::<u32>()
++}
++
++// ---- Craft from a nearby chest (NOT b1.7.3, Immersive Pack worlds, UNVERIFIED) ----
++
++/// A chest feeds the book when it is within this many blocks of the workbench on each axis.
++pub const NEAR: i32 = 3;
++
++/// The chests of `chests` near `bench`, in a fixed order (so a pull always starts from the same one).
++fn near_chests(bench: Pos, chests: &HashMap<Pos, Chest>) -> Vec<Pos> {
++    let mut v: Vec<Pos> = chests.keys().copied().filter(|p| (p.0 - bench.0).abs() <= NEAR && (p.1 - bench.1).abs() <= NEAR && (p.2 - bench.2).abs() <= NEAR).collect();
++    v.sort_unstable();
++    v
++}
++
++/// What the chests near `bench` hold: (ingredient code, count) for each code, for `Inventory::near`.
++pub fn near_stock(bench: Pos, chests: &HashMap<Pos, Chest>) -> Vec<(u16, u32)> {
++    let mut stock: Vec<(u16, u32)> = Vec::new();
++    for s in near_chests(bench, chests).iter().filter_map(|p| chests.get(p)).flat_map(|c| c.iter().flatten()) {
++        let code = craft::code(s.id, s.damage);
++        match stock.iter_mut().find(|n| n.0 == code) {
++            Some(n) => n.1 += u32::from(s.count),
++            None => stock.push((code, u32::from(s.count))),
++        }
++    }
++    stock
++}
++
++/// Before a tap on a recipe fills the grid: bring what the bag lacks of each ingredient out of the chests near `bench` into the bag, so `fill`
++/// finds it there. The grid is not counted (`fill` stashes it into the bag first), so this may bring a little more than a set; it is all in the
++/// bag, nothing is lost. A bag with no room leaves the rest in the chest.
++pub fn pull(e: &Entry, inv: &mut Inventory, chests: &mut HashMap<Pos, Chest>, bench: Pos) {
++    let order = near_chests(bench, chests);
++    for &(code, n) in &e.need {
++        let in_bag = |inv: &Inventory| inv.slots[..MAIN].iter().flatten().filter(|s| craft::code(s.id, s.damage) == code).map(|s| u32::from(s.count)).sum::<u32>();
++        let mut short = u32::from(n).saturating_sub(in_bag(&*inv));
++        for slot in order.iter().filter_map(|p| chests.get_mut(p)).flat_map(|c| c.iter_mut()) {
++            let Some(s) = slot.as_mut().filter(|s| short > 0 && craft::code(s.id, s.damage) == code) else { continue };
++            let mut moved = ItemStack { count: short.min(u32::from(s.count)) as u8, ..*s };
++            let asked = moved.count;
++            inv.add(&mut moved); // what does not fit stays in `moved`
++            let took = asked - moved.count;
++            s.count -= took;
++            short -= u32::from(took);
++            if s.count == 0 {
++                *slot = None;
++            }
++            if moved.count > 0 {
++                return; // the bag is full
++            }
++        }
++    }
+ }
+ 
+ /// What `e` still lacks: (ingredient code, how many short), nothing short = empty.
+@@ -336,6 +390,31 @@ mod tests {
+         inv.slots.iter().flatten().filter(|s| s.id == id).map(|s| u32::from(s.count)).sum()
+     }
+ 
++    // Craft from a nearby chest: only a chest within `NEAR` blocks of the bench is counted, a pull brings what the bag lacks (and no more of the far chest),
++    // and a bag with no room takes nothing and loses nothing.
++    #[test]
++    fn a_chest_near_the_bench_lends_its_ingredients_to_the_book() {
++        let planks = ItemStack { id: 5, count: 7, damage: 0 };
++        let (mut near, mut far): (Chest, Chest) = (Default::default(), Default::default());
++        (near[0], far[0]) = (Some(planks), Some(ItemStack { count: 50, ..planks }));
++        let mut chests: HashMap<Pos, Chest> = HashMap::from([((1, 0, 1), near), ((9, 0, 0), far)]);
++        let bench = (0, 0, 0);
++        let stock = near_stock(bench, &chests);
++        assert_eq!(stock, vec![(craft::code(5, 0), 7)], "the chest 9 blocks off is not counted");
++        let table = entry(58, 0, 2); // a workbench: 4 planks
++        let mut inv = Inventory { near: stock, ..Default::default() };
++        assert!(craftable(table, 2, &inv, &[None; 9]), "the bag is empty and the chest has the planks");
++        inv.slots[0] = Some(ItemStack { count: 1, ..planks });
++        pull(table, &mut inv, &mut chests, bench);
++        assert_eq!(count(&inv, 5), 4, "1 in the bag and 3 from the chest");
++        assert_eq!(chests[&(1, 0, 1)][0].map(|s| s.count), Some(4));
++        assert_eq!(chests[&(9, 0, 0)][0].map(|s| s.count), Some(50));
++        let mut full = Inventory::default();
++        full.slots[..MAIN].iter_mut().for_each(|s| *s = Some(ItemStack { id: 4, count: 64, damage: 0 }));
++        pull(table, &mut full, &mut chests, bench);
++        assert_eq!(chests[&(1, 0, 1)][0].map(|s| s.count), Some(4), "no room: nothing leaves the chest");
++    }
++
+     #[test]
+     fn every_recipe_and_smelting_is_listed_in_a_category() {
+         let e = entries();
+diff --git a/mc-rs/src/world/combat/mend.rs b/mc-rs/src/world/combat/mend.rs
+index 80f1ffc..0ea87c4 100644
+--- a/mc-rs/src/world/combat/mend.rs
++++ b/mc-rs/src/world/combat/mend.rs
+@@ -40,6 +40,12 @@ impl Mend {
+         self.left > 0
+     }
+ 
++    /// The hearth is ticking (Gauges, UNVERIFIED): quiet, a fire at hand and under the cap. `tick` keeps its own test, which also counts the point
++    /// a bandage gives in the same tick.
++    pub fn hearth_on(health: i32, calm: bool, warm: bool) -> bool {
++        calm && warm && health < HEARTH_CAP
++    }
++
+     /// The bandage is on (the caller used one up).
+     pub fn apply(&mut self, health: i32) {
+         (self.left, self.beat, self.line) = (BANDAGE_HEAL * BANDAGE_BEAT, 0, health);
+@@ -92,6 +98,7 @@ mod tests {
+         assert_eq!(run(&mut m, 5, 39, true, true), 5);
+         assert_eq!(run(&mut m, 5, 40, true, true), 6, "one a 40 ticks");
+         assert_eq!(run(&mut Mend::default(), 5, 1000, true, true), HEARTH_CAP, "and no further");
++        assert!(Mend::hearth_on(5, true, true) && !Mend::hearth_on(HEARTH_CAP, true, true) && !Mend::hearth_on(5, false, true));
+         let mut m = Mend::default();
+         m.apply(10);
+         assert!(m.bandaged());
+diff --git a/mc-rs/src/world/combat/tooltip.rs b/mc-rs/src/world/combat/tooltip.rs
+index c53d378..ca5089c 100644
+--- a/mc-rs/src/world/combat/tooltip.rs
++++ b/mc-rs/src/world/combat/tooltip.rs
+@@ -11,7 +11,7 @@
+ 
+ use super::profile::{charge_multiplier, Profile, Special};
+ use super::{arcabuz, rules, special};
+-use crate::world::craft;
++use crate::world::{biomelife, craft};
+ use crate::world::items::ItemStack;
+ 
+ /// One line: its text and its colour (`TooltipColor`, as vanilla's `ChatFormatting` RGB).
+@@ -61,6 +61,10 @@ fn size(h: f32) -> &'static str {
+ 
+ /// The lines under the name of `s` (empty when the rule is off or the item is no weapon).
+ pub fn lines(s: ItemStack) -> Vec<Line> {
++    // Almanac (NOT b1.7.3): a clock of a pack world also names the day, the season and the wait to dusk (`biomelife::almanac_now`).
++    if s.id == biomelife::CLOCK && rules::on() {
++        return biomelife::almanac_now().map(|t| (t, rgb(RANGE))).into_iter().collect();
++    }
+     of(s, rules::swing(Some(s.id)))
+ }
+ 
+diff --git a/mc-rs/src/world/craft.rs b/mc-rs/src/world/craft.rs
+index 473f250..de5bef6 100644
+--- a/mc-rs/src/world/craft.rs
++++ b/mc-rs/src/world/craft.rs
+@@ -471,6 +471,8 @@ pub struct Screen {
+     pub gw: usize,
+     pub furnace: Option<(i32, i32, i32)>,
+     pub chests: Vec<(i32, i32, i32)>,
++    /// The workbench of a 3 x 3 screen (NOT b1.7.3): the chests near it feed the recipe book (`book::near_stock`, `book::pull`).
++    pub bench: Option<(i32, i32, i32)>,
+     pub grid: [Option<ItemStack>; 9],
+     pub cursor: Option<ItemStack>,
+     /// What the player took out of an output slot (`SlotCrafting` / `SlotFurnace.onPickupFromSlot`), for the stats; the frame drains it.
+@@ -505,7 +507,12 @@ fn rest(s: ItemStack, n: u8) -> Option<ItemStack> {
+ 
+ impl Screen {
+     pub fn new(gw: usize) -> Self {
+-        Self { gw, furnace: None, chests: Vec::new(), grid: [None; 9], cursor: None, made: Vec::new() }
++        Self { gw, furnace: None, chests: Vec::new(), bench: None, grid: [None; 9], cursor: None, made: Vec::new() }
++    }
++
++    /// A workbench's 3 x 3 screen that knows its block, so the book can reach the chests near it.
++    pub fn at_bench(pos: (i32, i32, i32)) -> Self {
++        Self { bench: Some(pos), ..Self::new(3) }
+     }
+ 
+     /// `ContainerFurnace` for the furnace at `pos`; the caller passes that furnace to `get` and `click`.
+diff --git a/mc-rs/src/world/items.rs b/mc-rs/src/world/items.rs
+index 29bf5ae..eeade7a 100644
+--- a/mc-rs/src/world/items.rs
++++ b/mc-rs/src/world/items.rs
+@@ -191,12 +191,15 @@ pub struct Inventory {
+     /// a use; food is not) and ids broken (tools and armour).
+     pub used: Vec<u16>,
+     pub broke: Vec<u16>,
++    /// Craft from a nearby chest (NOT b1.7.3, UNVERIFIED): what the chests within `book::NEAR` blocks of the open workbench hold, as (ingredient code,
++    /// count). The book counts it with the bag (`book::have`); `App::near_tick` keeps it, and it is empty everywhere but at a workbench of a pack world.
++    pub near: Vec<(u16, u32)>,
+ }
+ 
+ // Not derived: `Default` stops at 32-element arrays.
+ impl Default for Inventory {
+     fn default() -> Self {
+-        Self { slots: [None; SLOTS], used: Vec::new(), broke: Vec::new() }
++        Self { slots: [None; SLOTS], used: Vec::new(), broke: Vec::new(), near: Vec::new() }
+     }
+ }
+ 
+@@ -276,6 +279,11 @@ impl Inventory {
+ const R: f32 = 0.125;
+ /// Entities kept at once; the oldest goes first. Vanilla has no cap.
+ pub const MAX_ITEMS: usize = 256;
++/// `EntityItem` lives 6000 ticks (5 minutes). A death pile (NOT b1.7.3, Immersive Pack worlds, UNVERIFIED) lives 4 times that.
++pub const LIFE: u32 = 6000;
++pub const PILE_LIFE: u32 = 4 * LIFE;
++/// The save keeps `age` in a `u32`; this high bit marks a pile item, so the level file's layout does not change (an age is far below it).
++const PILE_BIT: u32 = 1 << 31;
+ 
+ pub struct ItemEntity {
+     /// Centre of the box, and where it was one tick ago (the renderer interpolates).
+@@ -285,6 +293,8 @@ pub struct ItemEntity {
+     vel: Vec3,
+     pub stack: ItemStack,
+     pub age: u32,
++    /// Part of a death pile: it lasts `PILE_LIFE`, and the map marks where the pile lies (`Drops::pile_at`).
++    pub pile: bool,
+     delay: u32,
+     on_ground: bool,
+     /// `EntityItem.health`: 5; a blast takes the damage off it (`attackEntityFrom`). Not saved: an item comes back with 5.
+@@ -313,9 +323,14 @@ impl ItemEntity {
+         self.health <= 0
+     }
+ 
++    /// The age as the level file keeps it: the pile mark rides in the top bit, and `resting` takes it out again.
++    pub fn saved_age(&self) -> u32 {
++        self.age | if self.pile { PILE_BIT } else { 0 }
++    }
++
+     /// A saved item coming back: at rest, ready to be picked up (it settles on the next tick).
+     pub fn resting(pos: Vec3, stack: ItemStack, age: u32) -> Self {
+-        Self { pos, prev: pos, vel: Vec3::ZERO, stack, age, delay: 0, on_ground: false, health: 5 }
++        Self { pos, prev: pos, vel: Vec3::ZERO, stack, age: age & !PILE_BIT, pile: age & PILE_BIT != 0, delay: 0, on_ground: false, health: 5 }
+     }
+ 
+     /// One 20 Hz `EntityItem.onUpdate`; false once it is gone (lava, 5 min old, fell out of the world).
+@@ -363,7 +378,7 @@ impl ItemEntity {
+         self.vel.z *= f;
+         self.vel.y *= 0.98;
+         self.age += 1;
+-        self.age < 6000 && self.pos.y > -64.0
++        self.age < if self.pile { PILE_LIFE } else { LIFE } && self.pos.y > -64.0
+     }
+ 
+     /// `onCollideWithPlayer`: the player's box grown by 1.0 in x and z (not y) touches this item, after the
+@@ -456,7 +471,7 @@ impl Drops {
+         let pos = Vec3::new(x as f32 + offset(), y as f32 + offset(), z as f32 + offset());
+         let mut jitter = || (self.fx.next_double() * 0.2f32 as f64 - 0.1f32 as f64) as f32;
+         let vel = Vec3::new(jitter(), 0.2, jitter());
+-        self.push(ItemEntity { pos, prev: pos, vel, stack, age: 0, delay: 10, on_ground: false, health: 5 });
++        self.push(ItemEntity { pos, prev: pos, vel, stack, age: 0, pile: false, delay: 10, on_ground: false, health: 5 });
+     }
+ 
+     /// `EntityPlayer.dropPlayerItem`: thrown from 0.3 below the eye along the look direction, 40 ticks before it can
+@@ -464,12 +479,12 @@ impl Drops {
+     pub fn throw(&mut self, stack: ItemStack, eye: Vec3, forward: Vec3) {
+         let pos = eye - Vec3::new(0.0, 0.3, 0.0);
+         let vel = forward * 0.3 + Vec3::new(0.0, 0.1, 0.0);
+-        self.push(ItemEntity { pos, prev: pos, vel, stack, age: 0, delay: 40, on_ground: false, health: 5 });
++        self.push(ItemEntity { pos, prev: pos, vel, stack, age: 0, pile: false, delay: 40, on_ground: false, health: 5 });
+     }
+ 
+     /// A stack leaving `pos` with `vel` blocks per tick (a caught fish flying to the player), pick-up delay 10.
+     pub fn throw_from(&mut self, stack: ItemStack, pos: Vec3, vel: Vec3) {
+-        self.push(ItemEntity { pos, prev: pos, vel, stack, age: 0, delay: 10, on_ground: false, health: 5 });
++        self.push(ItemEntity { pos, prev: pos, vel, stack, age: 0, pile: false, delay: 10, on_ground: false, health: 5 });
+     }
+ 
+     /// A broken furnace's contents pop out of the middle of its cell (`BlockFurnace.onBlockRemoved`).
+@@ -478,7 +493,21 @@ impl Drops {
+         let pos = Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
+         let mut jitter = || (self.fx.next_double() * 0.2 - 0.1) as f32;
+         let vel = Vec3::new(jitter(), 0.2, jitter());
+-        self.push(ItemEntity { pos, prev: pos, vel, stack, age: 0, delay: 10, on_ground: false, health: 5 });
++        self.push(ItemEntity { pos, prev: pos, vel, stack, age: 0, pile: false, delay: 10, on_ground: false, health: 5 });
++    }
++
++    /// A death's drop (NOT b1.7.3, UNVERIFIED): `scatter`, but the item belongs to the pile (it lasts `PILE_LIFE`, and the map marks it).
++    pub fn scatter_pile(&mut self, stack: ItemStack, cell: (i32, i32, i32)) {
++        self.scatter(stack, cell);
++        if let Some(e) = self.items.last_mut() {
++            e.pile = true; // `push` always appends
++        }
++    }
++
++    /// Where the pile lies: the middle of its items on the ground plane, `None` once none is left (all picked up, burnt or old).
++    pub fn pile_at(&self) -> Option<(f32, f32)> {
++        let (n, x, z) = self.items.iter().filter(|e| e.pile).fold((0.0, 0.0, 0.0), |(n, x, z), e| (n + 1.0, x + e.pos.x, z + e.pos.z));
++        (n > 0.0).then(|| (x / n, z / n))
+     }
+ 
+     /// Add an entity, dropping the oldest one when `MAX_ITEMS` is reached.
+@@ -554,6 +583,28 @@ mod tests {
+         assert_eq!(inv.eat(2), None);
+     }
+ 
++    // Death pile: it outlives a plain drop (5 minutes) up to 20, its mark survives the level file's `age`, and it is found by the middle of its items.
++    #[test]
++    fn a_death_pile_lasts_four_times_as_long_and_is_found() {
++        let mut d = Drops::new(1);
++        let floor = |_: i32, y: i32, _: i32| Some(if y <= 9 { 1 } else { 0 });
++        let mut inv = Inventory::default();
++        d.scatter(ItemStack { id: 4, count: 1, damage: 0 }, (0, 10, 0));
++        d.scatter_pile(ItemStack { id: 5, count: 1, damage: 0 }, (0, 10, 0));
++        d.scatter_pile(ItemStack { id: 6, count: 1, damage: 0 }, (4, 10, 4));
++        let (x, z) = d.pile_at().expect("a pile");
++        assert!((x - 2.5).abs() < 0.5 && (z - 2.5).abs() < 0.5, "the middle of the two: {x} {z}");
++        let saved: Vec<u32> = d.items.iter().map(|e| e.saved_age()).collect();
++        assert!(saved[0] < PILE_BIT && saved[1] >= PILE_BIT, "only the pile is marked");
++        let back = ItemEntity::resting(Vec3::ZERO, ItemStack { id: 5, count: 1, damage: 0 }, saved[1] + 7);
++        assert!(back.pile && back.age == 7, "the mark and the age come back apart");
++        d.tick(301.0, &floor, Vec3::new(100.0, 11.0, 0.0), &mut inv); // 6020 ticks
++        assert_eq!(d.items.iter().filter(|e| e.pile).count(), 2);
++        assert_eq!(d.items.len(), 2, "the plain drop is gone");
++        d.tick(900.0, &floor, Vec3::new(100.0, 11.0, 0.0), &mut inv); // 24020 ticks in all
++        assert!(d.items.is_empty() && d.pile_at().is_none());
++    }
++
+     /// The Java drop rules, `addItemStackToInventory`, and an item falling, landing and being picked up.
+     #[test]
+     fn drops_inventory_and_item_physics() {
+diff --git a/mc-rs/src/world/map.rs b/mc-rs/src/world/map.rs
+index 5a6e5a8..f6847fe 100644
+--- a/mc-rs/src/world/map.rs
++++ b/mc-rs/src/world/map.rs
+@@ -51,6 +51,9 @@ pub struct Marker {
+     pub rot: i8,
+ }
+ 
++/// Death pile (NOT b1.7.3, UNVERIFIED): the icon of a marker that is no cell of `mapicons.png`; `HudPipeline::push_map` draws it as a red cross.
++pub const DEATH: u8 = u8::MAX;
++
+ /// `MapData`.
+ pub struct MapData {
+     /// `field_28180_b` / `field_28179_c`: the block at the middle of the map.
+@@ -123,6 +126,17 @@ impl MapData {
+         }
+     }
+ 
++    /// Death pile (NOT b1.7.3, UNVERIFIED): a cross where the pile lies (`Drops::pile_at`), after `track`. In the dimension of the map only; a pile
++    /// past the map's edge is drawn on the edge, in its direction, so the cross still points the way.
++    pub fn pin(&mut self, player_dim: i8, (px, pz): (f32, f32)) {
++        if player_dim != self.dimension {
++            return;
++        }
++        let k = (1u32 << self.scale) as f32;
++        let half = |p: f32, c: i32| ((p - c as f32) / k * 2.0).clamp(-127.0, 127.0) as i8; // half pixels from the middle, as `track`'s
++        self.markers.push(Marker { icon: DEATH, x: half(px, self.x_center), z: half(pz, self.z_center), rot: 0 });
++    }
++
+     /// `ItemMap.func_28011_a`: repaint the strip of pixels whose column `& 15` is this tick's, in a disc of `128 / 2^scale` pixels round the
+     /// player (half of it in the Nether, which has no sky). `col(x, z)` is the 128 blocks of the column at block `x`, `z` (index = y), or
+     /// `None` when its chunk is not loaded (that pixel is left alone, see the module doc).
+@@ -358,6 +372,20 @@ impl Maps {
+ mod tests {
+     use super::*;
+ 
++    // Death pile: the cross sits where the pile is in half pixels from the middle (the arrow's units), an edge keeps it in view, another dimension has none.
++    #[test]
++    fn the_death_cross_is_pinned_in_the_arrows_units_and_held_at_the_edge() {
++        let mut m = MapData::new(); // centre (0, 0), scale 3: 8 blocks a pixel
++        m.pin(0, (80.0, -40.0));
++        assert_eq!(m.markers, vec![Marker { icon: DEATH, x: 20, z: -10, rot: 0 }]);
++        m.markers.clear();
++        m.pin(0, (50_000.0, -50_000.0));
++        assert_eq!((m.markers[0].x, m.markers[0].z), (127, -127), "clamped to the edge");
++        m.markers.clear();
++        m.pin(-1, (0.0, 0.0));
++        assert!(m.markers.is_empty());
++    }
++
+     /// A flat world: stone to y 61, grass at 62, air above (`col` of every block).
+     fn flat() -> Vec<u8> {
+         (0..128).map(|y| if y < 62 { 1 } else if y == 62 { 2 } else { 0 }).collect()
+diff --git a/roadmap/combat.md b/roadmap/combat.md
+index df456b0..527ad8e 100644
+--- a/roadmap/combat.md
++++ b/roadmap/combat.md
+@@ -81,7 +81,7 @@ Owner's decisions: no hunger in the Immersive Pack, and food is not the only way
+ * **Why `Vitals::restore`**: `EntityLiving.heal` drops the damage window to half (`hearts_life` = 10), which a point every second would keep doing, giving free hits. `restore` leaves the window alone; a meal and a cake still use `heal`.
+ * **Tests**: `combat::mend::tests` (the hearth needs both calm and a fire and stops at 12; a bandage gives 6 in 120 ticks in the middle of a fight; a hit takes it off), `vitals` (`restore`), `catalog` (the bandage is an item, not a weapon), `atlas` (`item_icon` 234).
+ * **Sprite**: `tools/gen_bandage_icon.py` (run after `gen_terrain.py` and `gen_combat_icons.py`) cuts the owner's 36 x 36 screenshot (`tools/src/bandage_ref.png`, a satchel slot) down to a 14 x 15 sprite in a 16 x 16 tile with the slot's grey made clear. UNVERIFIED by eye on a device.
+-* **Not done / gaps (ponytail)**: no sound for the bandage and no HUD mark that a bandage works or that the hearth is ticking (the hearts do not change); nothing marks the hearth's cap; the torch is cheap, so a hearth can be made anywhere (it is also what keeps monsters from spawning there: if it is too easy, count only a lit furnace and lava); a bandage that is working is lost on a respawn but not saved (nothing of `Mend` is); an arrow, an egg or a snowball does not mark combat for the hearth (only damage dealt to a mob and damage taken do); the "Dendam" idea (heal from a parry or a kill) and the "bruise" idea (damage split in two) were not chosen.
++* **Not done / gaps (ponytail)**: no sound for the bandage and no HUD mark that a bandage works or that the hearth is ticking (the hearts do not change; closed 2026-11-01 by the Gauges marks, gameplay changelog (42)); nothing marks the hearth's cap; the torch is cheap, so a hearth can be made anywhere (it is also what keeps monsters from spawning there: if it is too easy, count only a lit furnace and lava); a bandage that is working is lost on a respawn but not saved (nothing of `Mend` is); an arrow, an egg or a snowball does not mark combat for the hearth (only damage dealt to a mob and damage taken do); the "Dendam" idea (heal from a parry or a kill) and the "bruise" idea (damage split in two) were not chosen.
+ 
+ ## C5 notes and gaps
+ 
+diff --git a/roadmap/design.md b/roadmap/design.md
+index f6ec02d..6cab836 100644
+--- a/roadmap/design.md
++++ b/roadmap/design.md
+@@ -34,6 +34,8 @@ Light and the day (`sky`, `climate`, `atmos`); weather and biome climate (`clima
+ 
+ - **Shoulder-surf camera:** only `lib.rs` uses it. It is a view, so one hook may be enough, but it reads nothing from the world (no aim assist with the bow or fishing rod, no look at mobs).
+ - **Sprint and stamina vs food:** settled 2026-11-01 by the owner: there is **no hunger** in the Immersive Pack, now or later, and food is not the only way to heal. Stamina's inputs are health, armor and the biome's air; healing is "Healing without hunger" below. (A first C4 had a food bar joined to the stamina; it was removed.)
++- **Pressures nobody can read:** heat and cold (`biomelife::air`), the hearth ticking and a bandage working (`combat::mend`) change play and show nothing on the HUD (`combat.md` C4 "Not done" says so for the last two). The season (`biomelife::season`) is built and has no reader at all. "QoL without a new meter" below fills these in (my reading of the code; confirm before acting).
++- **A death with no road back:** `Drops` removes an item after `age < 6000` ticks (5 minutes, `items.rs`), the compass points to the world spawn only, and a map draws the player's own marker only (`map::Marker`). Same section.
+ 
+ ## Feature lines
+ 
+@@ -95,6 +97,17 @@ Owner's decision: no hunger, and food is not the only way to heal. Healing is to
+ 
+ Ideas considered and not chosen (search words: "bruise", "grey health", "rally", "vampiric"): damage split into a bruise that mends alone and a wound that does not (hook: the stamina's grey hearts); a sliver of health from a parry or a kill (hook: the shotel's parry, the martillo's streak).
+ 
++## QoL without a new meter (written 2026-11-01, NOT b1.7.3, Immersive Pack worlds only)
++
++Read from the design as a graph: every pressure has an answer (heat and cold: armor, torch, meal; wounds: hearth, bandage, bed, food), and three gaps are left, which are all about *information and recovery*, not about difficulty: pressures that cannot be seen, a death with no road back, and instruments that read only part of the world (the compass: place of the spawn; the clock: the hour; the map: the loaded chunks). Each line below closes one gap and adds **no meter, no hunger and no new block id** (owner's decision of 2026-11-01 stands). **Built 2026-11-01 (gameplay changelog (42)), all four, UNVERIFIED: not compiled, not run.** What differs from the lines below: Gauges has no options toggle (ponytail; add one only if the marks crowd a phone); the Almanac line is a coloured line under the clock's name in the hotbar flash and in the inventory tooltip (`combat::tooltip::lines`), and the flash stays up while a clock is held; the Death pile's pile is marked by a bit in the saved `age` of its items (no new field in the level file), its marker is a red cross that `HudPipeline::push_map` draws (no cell of `mapicons.png`), and a pile outside the map is drawn on the edge in its direction; the book pulls from the chests on a tap of a recipe only (a long press on the result still crafts from the bag). All four are gated by the pack (`rules::on()`), as the combat and the healing are (rule 5): with it OFF b1.7.3 plays as before, so no new switch. Every number is UNVERIFIED by play, and nothing here was compiled or run. Proposed order, easiest first: 1, 2, 3, 4.
++
++- **Gauges:** needs the state the code already holds (`biomelife::air`'s `hot` and `cold`, `Mend::bandaged`, the hearth's test in `App::heat_at_hand`, `Stamina`) -> the stamina bar takes a warm tint while `hot` and a cool one while `cold` is above 0, and one small mark shows beside the hearts while a bandage works or the hearth is ticking; nothing is stored, nothing is spent; Hooks: HUD (`render/hud`), `biomelife`, `combat::mend`, `stamina`; Overlaps: none (the hearts and the bar keep their meaning; this only reads them). Knob: the marks are options-menu toggles if they crowd a phone screen. Also closes the "no HUD mark" gap of `combat.md` C4. Inspiration: "status effect HUD", "temperature indicator".
++- **Almanac:** needs the day count (`world_ticks`, `season`) -> holding a clock shows the day number, the season and the minutes to dusk in the item tooltip line (the one a held stack already has); Hooks: clock (`render/anim`, the tooltip), `biomelife::season`, `sky`; Overlaps: clock (it told the hour only; now it also reads the calendar, so it is no more pointless than before, rule 2). Knob: the line shows only in a world where `biomeRules` is on, because the seasons exist only there. Inspiration: "seasons almanac", "calendar clock".
++- **Death pile:** needs a death (`Vitals`, the drop of the inventory, the existing source) -> the drop stays as one pile whose items last 4 times longer (`age < 24000` instead of `6000`) and a marker is drawn on any map the player carries (`map::Marker`, `MapData::markers`); the marker goes when the pile is picked up or gone; Hooks: death and respawn (`vitals`, `App::respawn_pos`), item lifetime (`items`), the map (`world::map`), the world save (`save`, the pile's age and the marker's place); Overlaps: map (it draws only the player now; this gives it a job a compass cannot do), compass (unchanged: spawn only). Loop (rule 3): nothing is made from nothing, the same items the player lost come back, and a pile still ends in the void, lava or the clock. Known limits: a death in lava or the void leaves nothing to find; `Drops::tick` steps every item whatever its distance, so a pile far from the player ages in real time (the chunk is not needed), which is the lifetime the line promises, but whether such an item rests where it fell in an unloaded chunk is not checked; `MAX_ITEMS` (256) still drops the oldest item first. Inspiration: "death waypoint", "corpse run", "gravestone".
++- **Craft from a nearby chest:** needs chests within 3 blocks of a workbench (`chest`, the existing container) -> the recipe book counts what those chests hold in `craftable` and `missing`, and a tap on a recipe takes the missing part from them; Hooks: `chest`, `book` (`craftable`, `missing`, `fill`), `craft` (the workbench); Overlaps: the satchel and the chests (rule 2: the bag keeps its limit and the chest keeps its job as the place things wait; the 3 block rule gives the workbench a new use and means a chest far away still has to be walked to). Knob: if the bag's limit stops being a pressure in play, shrink the radius or count one chest only. Inspiration: "craft from nearby chests", "refined storage lite".
++
++Ideas considered and not chosen: a thirst or a temperature meter (a hunger by another name, against the owner's decision); a gravestone block (one hook, and a new block id); a thermometer item (Gauges reads the same state with no item).
++
+ ## Cortés Combat (written 2026-10-30, NOT b1.7.3)
+ 
+ - **Combat rework (cone reach, cooldown, charge, guard, five weapon families; healing is "Healing without hunger" above):** needs wood, cobblestone, iron, diamond, gold, sticks, flint and iron blocks (existing sources) -> weapons that kill mobs; Hooks: crafting (`craft::recipes`, recipe book), durability (`craft::max_damage`), mobs and their damage window (`mobs`), stamina (`vitals`, guard), the touch HUD (`input/touch_ui`), sound (`audio`); Overlaps: sword, axe, hoe (they get a profile of the same system, so each keeps a job: the sword is the wide cheap cone with no special, the hoe sweeps). Switch: `combatRules`, default off. Plan: [`combat.md`](combat.md).
+diff --git a/roadmap/gameplay.md b/roadmap/gameplay.md
+index 05a8892..7222436 100644
+--- a/roadmap/gameplay.md
++++ b/roadmap/gameplay.md
+@@ -4,6 +4,13 @@ Part of [`ROADMAP.md`](../ROADMAP.md). The to-do milestones of this part (M11 Ne
+ 
+ ## Changelog
+ 
++- 2026-11-01 (42): Four quality-of-life features without a new meter (`design.md` "QoL without a new meter"). Written WITHOUT a Rust toolchain: not compiled, not run, not seen on a device; every number and every pixel UNVERIFIED (+6 tests: `biomelife::tests::{the_overlay_tint_follows_the_air, the_almanac_counts_to_dusk_and_names_the_day}`, `combat_hud::tests::the_marks_come_in_a_fixed_order_and_stay_in_their_squares`, `items::tests::a_death_pile_lasts_four_times_as_long_and_is_found`, `map::tests::the_death_cross_is_pinned_in_the_arrows_units_and_held_at_the_edge`, `book::tests::a_chest_near_the_bench_lends_its_ingredients_to_the_book`; `mend::tests` gains one assert). All four only with the Immersive Pack ON (`combat::rules::on`), NOT b1.7.3, no new switch.
++    - **Gauges**: `biomelife::tint(Air)` colours the stamina's grey overlay warm in the heat and cool in the cold; `combat_hud::{Mark, marks, draw_marks}` draw up to four 5 x 5 pixel marks right of the tenth heart (sun, frost, a bandage's cross, the hearth's flame) from `Air`, `Mend::bandaged` and the new `Mend::hearth_on`; read in `build_hud` before `hud_verts` is borrowed. No state, no toggle.
++    - **Almanac**: `biomelife::{CLOCK, dusk_in, almanac, set_now, almanac_now}`: the held clock's line is "Day N, Season, dusk in M min" or "..., night" (season only with `biomeRules`; none in the Nether). Dusk is the first moment of a clear sky that takes 4 light away, the line `sleep_tick` wakes at, found in 5 s steps. `tooltip::lines` returns it for a clock; the hotbar flash now draws lines (for the clock only) and stays up while a clock is held (`App::step`'s `tip`). `App` feeds `set_now` beside `set_season`.
++    - **Death pile**: `ItemEntity.pile`, `LIFE` / `PILE_LIFE` (6000 / 24000 ticks), `Drops::{scatter_pile, pile_at}`; `die` scatters the pile with the rule on. The level file is unchanged: the saved `age` carries the pile in its top bit (`saved_age`, `resting`). `MapData::pin` adds a `map::DEATH` marker after `track` for every map in the bag; `push_map` draws it as a red cross.
++    - **Craft from a nearby chest**: `Screen.bench` (`Screen::at_bench`, a workbench of the satchel), `Inventory.near` (kept by `App::near_tick` at 20 Hz), `book::{NEAR, near_stock, pull}`; `book::have` counts `near`, so `missing`, `craftable`, `ready` and the satchel's counts see the chests within 3 blocks on each axis. A tap on a recipe `pull`s what the bag lacks into the bag, then `fill` as before.
++    - Not done: an options toggle for the marks; the book's long-press craft-all from chests; a distance readout for the pile; a marker for a pile in another dimension; sound.
++
+ - 2026-11-01 (41): Achievements and Statistics (`missing.md` 5). Written WITHOUT a Rust toolchain: not compiled, not run, not seen on a device; everything UNVERIFIED (+1 test `stats::tests::stats_like_java`). `world/stats.rs`: `AchievementList` (16, same places, `lang/stats_US.lang` texts), the general stat list, the original stat ids as the keys of one counter map, `StatFileWriter`'s rule (an achievement counts only once its parent is taken), `canon` (`replaceAllSimilarBlocks`), `mineable` (`disableStats`), the time / distance / plain formats, a file codec. `stats_ui.rs`: the Achievements screen (the terrain-pattern map, links, frames; drag to pan, TAP an achievement for its tooltip), the Statistics screen (General / Blocks / Items tabs, drag to scroll, tap a column header to sort, item names beside the icons) and the `GuiAchievement` toast (also the inventory hint until `openInventory` is taken). `options.rs`: the two buttons are enabled (`PauseEv::Stats`). Hooks in `lib.rs`: minutes, jump, drop, fish, death, damage taken (`vitals.wear`), distances (`move_stats`), mined blocks, pickups (`Drops::got`), crafted / smelted (`Screen::made`), used / depleted (`Inventory::used` / `broke`), damage dealt and kills (`Mob::by_you`, `Mobs::tally`), world create / load, quit; `Vitals::fell` for the fall distance. File: `<root>/stats`, shared by all worlds like the Java's per-user file, saved with the world. Differences: the inventory hint says "Tap the inventory button." (the Java: press 'E'); frames and toast are plain quads (`bg.png` is not in the HUD sheet); a world with a `level` file counts as loaded, else created; a kill is any death of a mob the player has hurt; food eaten is not a use; `Player Kills` and `Multiplayer joins` stay 0; the pig and minecart achievements read the frame's displacement.
+ - 2026-11-01 (40): Four gaps of `missing.md`: the sleeping pose, and what a blast does to more entities. Written WITHOUT a Rust toolchain: not compiled, not run (new tests: `a_sleeper_lies_with_the_head_at_the_pillow`, `a_blast_wears_an_item_down_and_throws_it`, `a_blast_pushes_a_falling_block`; the fireball test now also runs with a falling block). Sleeping, from `EntityRenderer.orientCamera` and `RenderPlayer`: asleep the camera yaw is `meta & 3` x 90 degrees (the Java's yaw and pitch turns cancel; it is a level view from the pillow toward the foot of the bed). (35) had used `getBedOrientationInDegrees`, which is the BODY's table in `RenderPlayer` and mirrors the other, so the view was turned wrong for most beds: FIXED here (UNVERIFIED on a device). The yaw and pitch from before lying down are put back on waking (the Java never changes `rotationYaw`). The eye is 0.12 over `posY` (the bed's surface + 15/16; `+0.42` less the view's 0.3 translation). Asleep wins over the third-person view and the model IS drawn (`RenderGlobal`), lying: `render::player::lying_root` = moved 1.8 off the pillow (`field_22063_x / z`), turned `getBedOrientationInDegrees` about Y, 90 about Z and 270 about Y, the feet at `posY - 0.2` (checked in a test: head at the pillow, level, for all 4 directions). ponytail: the head looks straight along the body (the Java keeps the old yaw and pitch against it). Blasts (`Explosion.doExplosionA`, run over what exists before `doExplosionB` makes its drops and its chained TNT): a dropped item takes the damage off its 5 health (`EntityItem.attackEntityFrom`, so most are destroyed near a TNT) and is thrown; a lit TNT, a falling sand / gravel block and an arrow or thrown snowball / egg in flight are thrown (`Falling::shove`, `Arrow::shove`; sand and gravel now also drift in x / z and stop rising under a ceiling, which a plain drop never does). A painting whose middle is within the doubled size of the blast comes off the wall and drops, whatever the damage (`EntityPainting.attackEntityFrom`). Not done: fireballs are not pushed. Fireball: `Strike::Tnt` became `Strike::Falling`: a falling sand / gravel block stops a fireball like a lit TNT (both are `canBeCollidedWith`; `Entity.attackEntityFrom` only marks it hit).
+ - 2026-11-01 (39): The two sounds `missing.md` listed. Written WITHOUT a Rust toolchain: not compiled, not run (no new test: both are in `App`; the audio count test `every_name_the_java_plays_exists_and_decodes` is updated). `random.drr`: its call sites are `EntityArrow.onUpdate`, twice: the arrow sticks in a block, and it hurts an entity, both at volume 1.0, pitch `1.2 / (r * 0.2 + 0.9)`. (27) had played `random.bowhit` there, a sound b1.7.3 does not have; `Ev::Bow(_, true)` now plays the index's own `random.drr` (already in the table), the formula is unchanged, and `random.bowhit` is gone: its table entry, `assets/sound/extra/random/bowhit1..4.ogg`, the audio test's key and counts (80 - 6 + 7 * 6 + 1 keys, 194 - 12 + 7 * 12 + 1 files). `random.bow` stays. Water poured in the Nether (`ItemBucket.onItemRightClick`): the 8 `largesmoke` puffs are drawn (`fx.puff`, at the poured cell plus a random offset on each axis, no motion); the fizz now plays where the Java plays it, at the ray's origin (the eye) plus 0.5 on each axis, not at the cell. ponytail: `Fx::puff` is the furnace cart's `largesmoke` (one sprite and size for every smoke); a refused arrow hit still sounds, as before.
+diff --git a/tools/gen_pad_buttons.py b/tools/gen_pad_buttons.py
+new file mode 100644
+index 0000000..47b7fd9
+--- /dev/null
++++ b/tools/gen_pad_buttons.py
+@@ -0,0 +1,29 @@
++#!/usr/bin/env python3
++"""Writes mc-rs/assets/padbtn.rgba (256 x 156 RGBA): the controller button pictures of AgentMindStorm's "Controller Tooltip Selector" pack, the block
++of the HUD texture at `hud::PAD_Y`. Three styles (the pack's `xbox_one_bedrock`, `ps4_bedrock` and `switch_bedrock` subpacks) of 52 rows each, in
++that order (`PadCfg::style` 0 / 1 / 2); in a style the 16 buttons are in `Btn::ALL` order, 8 to a row, 26 x 26 each:
++  A (face_button_down), B (right), X (left), Y (up), LB, RB, LT, RT, L3 (stick_left), R3 (stick_right), Start, Back (select), D-Up, D-Down, D-Left, D-Right.
++Keep in step with `hud::sprites::pad`. The art is clear or opaque (`fs_main` drops texels under alpha 0.5); transparent texels are white, so the
++sharp bilinear's blend across a picture's edge does not darken it. A picture a few px over 26 is cut to it (all its ink is inside).
++Run from the repo root: python3 tools/gen_pad_buttons.py path/to/controllertooltips (needs Pillow)."""
++import os
++import sys
++from PIL import Image
++
++src = sys.argv[1] if len(sys.argv) > 1 else "controllertooltips"
++NAMES = ["face_button_down", "face_button_right", "face_button_left", "face_button_up", "bumper_left", "bumper_right", "left_trigger", "right_trigger",
++         "stick_left", "stick_right", "start_button", "select_button", "dpad_up", "dpad_down", "dpad_left", "dpad_right"]
++out = Image.new("RGBA", (256, 156), (255, 255, 255, 0))
++# (subpack, file prefix): the pack's `switch_` files are the ones with Nintendo's letters in place (B below, A right, Y left, X above)
++for s, (sub, pre) in enumerate([("xbox_one_bedrock", "xbox"), ("ps4_bedrock", "ps4"), ("switch_bedrock", "switch")]):
++    d = f"{src}/subpacks/{sub}/textures/ui"
++    for i, n in enumerate(NAMES):
++        f = next(f"{d}/{p}_{n}.png" for p in (pre, "xbox", "generic") if os.path.exists(f"{d}/{p}_{n}.png"))
++        im = Image.open(f).convert("RGBA").crop((0, 0, 26, 26))
++        for y in range(26):
++            for x in range(26):
++                r, g, b, a = im.getpixel((x, y))
++                if a:
++                    out.putpixel((i % 8 * 26 + x, s * 52 + i // 8 * 26 + y), (r, g, b, 255))
++open("mc-rs/assets/padbtn.rgba", "wb").write(out.tobytes())
++print("wrote mc-rs/assets/padbtn.rgba")

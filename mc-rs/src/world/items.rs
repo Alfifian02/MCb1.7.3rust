@@ -191,12 +191,15 @@ pub struct Inventory {
     /// a use; food is not) and ids broken (tools and armour).
     pub used: Vec<u16>,
     pub broke: Vec<u16>,
+    /// Craft from a nearby chest (NOT b1.7.3, UNVERIFIED): what the chests within `book::NEAR` blocks of the open workbench hold, as (ingredient code,
+    /// count). The book counts it with the bag (`book::have`); `App::near_tick` keeps it, and it is empty everywhere but at a workbench of a pack world.
+    pub near: Vec<(u16, u32)>,
 }
 
 // Not derived: `Default` stops at 32-element arrays.
 impl Default for Inventory {
     fn default() -> Self {
-        Self { slots: [None; SLOTS], used: Vec::new(), broke: Vec::new() }
+        Self { slots: [None; SLOTS], used: Vec::new(), broke: Vec::new(), near: Vec::new() }
     }
 }
 
@@ -276,6 +279,11 @@ impl Inventory {
 const R: f32 = 0.125;
 /// Entities kept at once; the oldest goes first. Vanilla has no cap.
 pub const MAX_ITEMS: usize = 256;
+/// `EntityItem` lives 6000 ticks (5 minutes). A death pile (NOT b1.7.3, Immersive Pack worlds, UNVERIFIED) lives 4 times that.
+pub const LIFE: u32 = 6000;
+pub const PILE_LIFE: u32 = 4 * LIFE;
+/// The save keeps `age` in a `u32`; this high bit marks a pile item, so the level file's layout does not change (an age is far below it).
+const PILE_BIT: u32 = 1 << 31;
 
 pub struct ItemEntity {
     /// Centre of the box, and where it was one tick ago (the renderer interpolates).
@@ -285,6 +293,8 @@ pub struct ItemEntity {
     vel: Vec3,
     pub stack: ItemStack,
     pub age: u32,
+    /// Part of a death pile: it lasts `PILE_LIFE`, and the map marks where the pile lies (`Drops::pile_at`).
+    pub pile: bool,
     delay: u32,
     on_ground: bool,
     /// `EntityItem.health`: 5; a blast takes the damage off it (`attackEntityFrom`). Not saved: an item comes back with 5.
@@ -313,9 +323,14 @@ impl ItemEntity {
         self.health <= 0
     }
 
+    /// The age as the level file keeps it: the pile mark rides in the top bit, and `resting` takes it out again.
+    pub fn saved_age(&self) -> u32 {
+        self.age | if self.pile { PILE_BIT } else { 0 }
+    }
+
     /// A saved item coming back: at rest, ready to be picked up (it settles on the next tick).
     pub fn resting(pos: Vec3, stack: ItemStack, age: u32) -> Self {
-        Self { pos, prev: pos, vel: Vec3::ZERO, stack, age, delay: 0, on_ground: false, health: 5 }
+        Self { pos, prev: pos, vel: Vec3::ZERO, stack, age: age & !PILE_BIT, pile: age & PILE_BIT != 0, delay: 0, on_ground: false, health: 5 }
     }
 
     /// One 20 Hz `EntityItem.onUpdate`; false once it is gone (lava, 5 min old, fell out of the world).
@@ -363,7 +378,7 @@ impl ItemEntity {
         self.vel.z *= f;
         self.vel.y *= 0.98;
         self.age += 1;
-        self.age < 6000 && self.pos.y > -64.0
+        self.age < if self.pile { PILE_LIFE } else { LIFE } && self.pos.y > -64.0
     }
 
     /// `onCollideWithPlayer`: the player's box grown by 1.0 in x and z (not y) touches this item, after the
@@ -456,7 +471,7 @@ impl Drops {
         let pos = Vec3::new(x as f32 + offset(), y as f32 + offset(), z as f32 + offset());
         let mut jitter = || (self.fx.next_double() * 0.2f32 as f64 - 0.1f32 as f64) as f32;
         let vel = Vec3::new(jitter(), 0.2, jitter());
-        self.push(ItemEntity { pos, prev: pos, vel, stack, age: 0, delay: 10, on_ground: false, health: 5 });
+        self.push(ItemEntity { pos, prev: pos, vel, stack, age: 0, pile: false, delay: 10, on_ground: false, health: 5 });
     }
 
     /// `EntityPlayer.dropPlayerItem`: thrown from 0.3 below the eye along the look direction, 40 ticks before it can
@@ -464,12 +479,12 @@ impl Drops {
     pub fn throw(&mut self, stack: ItemStack, eye: Vec3, forward: Vec3) {
         let pos = eye - Vec3::new(0.0, 0.3, 0.0);
         let vel = forward * 0.3 + Vec3::new(0.0, 0.1, 0.0);
-        self.push(ItemEntity { pos, prev: pos, vel, stack, age: 0, delay: 40, on_ground: false, health: 5 });
+        self.push(ItemEntity { pos, prev: pos, vel, stack, age: 0, pile: false, delay: 40, on_ground: false, health: 5 });
     }
 
     /// A stack leaving `pos` with `vel` blocks per tick (a caught fish flying to the player), pick-up delay 10.
     pub fn throw_from(&mut self, stack: ItemStack, pos: Vec3, vel: Vec3) {
-        self.push(ItemEntity { pos, prev: pos, vel, stack, age: 0, delay: 10, on_ground: false, health: 5 });
+        self.push(ItemEntity { pos, prev: pos, vel, stack, age: 0, pile: false, delay: 10, on_ground: false, health: 5 });
     }
 
     /// A broken furnace's contents pop out of the middle of its cell (`BlockFurnace.onBlockRemoved`).
@@ -478,7 +493,21 @@ impl Drops {
         let pos = Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
         let mut jitter = || (self.fx.next_double() * 0.2 - 0.1) as f32;
         let vel = Vec3::new(jitter(), 0.2, jitter());
-        self.push(ItemEntity { pos, prev: pos, vel, stack, age: 0, delay: 10, on_ground: false, health: 5 });
+        self.push(ItemEntity { pos, prev: pos, vel, stack, age: 0, pile: false, delay: 10, on_ground: false, health: 5 });
+    }
+
+    /// A death's drop (NOT b1.7.3, UNVERIFIED): `scatter`, but the item belongs to the pile (it lasts `PILE_LIFE`, and the map marks it).
+    pub fn scatter_pile(&mut self, stack: ItemStack, cell: (i32, i32, i32)) {
+        self.scatter(stack, cell);
+        if let Some(e) = self.items.last_mut() {
+            e.pile = true; // `push` always appends
+        }
+    }
+
+    /// Where the pile lies: the middle of its items on the ground plane, `None` once none is left (all picked up, burnt or old).
+    pub fn pile_at(&self) -> Option<(f32, f32)> {
+        let (n, x, z) = self.items.iter().filter(|e| e.pile).fold((0.0, 0.0, 0.0), |(n, x, z), e| (n + 1.0, x + e.pos.x, z + e.pos.z));
+        (n > 0.0).then(|| (x / n, z / n))
     }
 
     /// Add an entity, dropping the oldest one when `MAX_ITEMS` is reached.
@@ -552,6 +581,28 @@ mod tests {
         assert_eq!(inv.slots[0], Some(ItemStack { id: BOWL, count: 1, damage: 0 }));
         assert_eq!(inv.eat(0), None);
         assert_eq!(inv.eat(2), None);
+    }
+
+    // Death pile: it outlives a plain drop (5 minutes) up to 20, its mark survives the level file's `age`, and it is found by the middle of its items.
+    #[test]
+    fn a_death_pile_lasts_four_times_as_long_and_is_found() {
+        let mut d = Drops::new(1);
+        let floor = |_: i32, y: i32, _: i32| Some(if y <= 9 { 1 } else { 0 });
+        let mut inv = Inventory::default();
+        d.scatter(ItemStack { id: 4, count: 1, damage: 0 }, (0, 10, 0));
+        d.scatter_pile(ItemStack { id: 5, count: 1, damage: 0 }, (0, 10, 0));
+        d.scatter_pile(ItemStack { id: 6, count: 1, damage: 0 }, (4, 10, 4));
+        let (x, z) = d.pile_at().expect("a pile");
+        assert!((x - 2.5).abs() < 0.5 && (z - 2.5).abs() < 0.5, "the middle of the two: {x} {z}");
+        let saved: Vec<u32> = d.items.iter().map(|e| e.saved_age()).collect();
+        assert!(saved[0] < PILE_BIT && saved[1] >= PILE_BIT, "only the pile is marked");
+        let back = ItemEntity::resting(Vec3::ZERO, ItemStack { id: 5, count: 1, damage: 0 }, saved[1] + 7);
+        assert!(back.pile && back.age == 7, "the mark and the age come back apart");
+        d.tick(301.0, &floor, Vec3::new(100.0, 11.0, 0.0), &mut inv); // 6020 ticks
+        assert_eq!(d.items.iter().filter(|e| e.pile).count(), 2);
+        assert_eq!(d.items.len(), 2, "the plain drop is gone");
+        d.tick(900.0, &floor, Vec3::new(100.0, 11.0, 0.0), &mut inv); // 24020 ticks in all
+        assert!(d.items.is_empty() && d.pile_at().is_none());
     }
 
     /// The Java drop rules, `addItemStackToInventory`, and an item falling, landing and being picked up.

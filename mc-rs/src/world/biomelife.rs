@@ -3,10 +3,11 @@
 //! the biome, the light and the day, and `stamina`, `mobs`, `items` and the foliage tint read the answers. UNVERIFIED by eye: every number.
 //!
 //! Built here: proposal 2 (`sight`), 1 (`air`, `Air`), 4 (`season`, `foliage`, `leaf_odds`) and the parts of 6 that need no new block
-//! (`Body::fed`, `Body::fur`; the marsh's clay is in `gen::populate`). Proposal 5 lives in `mobs` (`animalAi`); 3 and the landmarks are not built.
+//! (`Body::fed`, `Body::fur`; the marsh's clay is in `gen::populate`). Also the Gauges' `tint` and the clock's almanac line (`almanac`, `dusk_in`), `design.md` "QoL without a new meter". Proposal 5 lives in `mobs` (`animalAi`); 3 and the landmarks are not built.
 
 use crate::world::biome::Biome::{self, *};
-use std::sync::atomic::{AtomicU8, Ordering};
+use crate::world::sky;
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU8, Ordering};
 
 /// Proposal 2, fog is cover: how far a mob sees you, as a fraction of its usual 16 blocks, in a fog of exp² `density` (`atmos`: plains
 /// 0.0018, forest 0.003, wet woodland 0.006, marsh 0.0075, swamp 0.01). Clear air below 0.004 is 1; the thickest fog leaves 40%.
@@ -69,12 +70,26 @@ pub fn air(b: Biome, w: Body) -> Air {
     Air { hot, cold }
 }
 
+/// Gauges (NOT b1.7.3, UNVERIFIED): the colour the stamina's grey overlay takes. White in clean air, warmer with `hot`, cooler with `cold`
+/// (each counts up to 1). Reads `Air` and nothing else, so the HUD joins the weather with no state of its own.
+pub fn tint(a: Air) -> [f32; 3] {
+    let (h, c) = (a.hot.clamp(0.0, 1.0), a.cold.clamp(0.0, 1.0));
+    let (warm, cool) = ([1.0, 0.7, 0.4], [0.55, 0.8, 1.0]);
+    std::array::from_fn(|i| 1.0 + h * (warm[i] - 1.0) + c * (cool[i] - 1.0))
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Season {
     Spring,
     Summer,
     Autumn,
     Winter,
+}
+
+impl Season {
+    pub fn name(self) -> &'static str {
+        ["Spring", "Summer", "Autumn", "Winter"][self as usize]
+    }
 }
 
 /// A season lasts this many days (a day is 24000 ticks, 20 minutes: an hour a season, a year of four hours).
@@ -88,6 +103,44 @@ pub fn season(ticks: u64) -> Season {
         2 => Season::Autumn,
         _ => Season::Winter,
     }
+}
+
+/// Almanac (NOT b1.7.3, UNVERIFIED): the clock item (`pocketSundial`, 347), which now also reads the calendar.
+pub const CLOCK: u16 = 347;
+
+/// Ticks to the next dusk on a clear sky: the first moment the sky takes 4 light away, the line `App::sleep_tick` wakes a sleeper at (so
+/// it is also when a bed works). `None` when it is dark already. Steps of 5 s (100 ticks), which is finer than the minutes it is shown in.
+pub fn dusk_in(ticks: u64) -> Option<u64> {
+    let dark = |t: u64| sky::skylight_subtracted(sky::celestial_angle(t, 0.0), 0.0, 0.0) >= 4;
+    if dark(ticks) {
+        return None;
+    }
+    (1..=sky::TICKS_PER_DAY / 100).map(|i| i * 100).find(|&d| dark(ticks + d))
+}
+
+/// The line a held clock shows: the day, the season (only where `seasons` exist: `biomeRules`) and the minutes to dusk, or night.
+pub fn almanac(ticks: u64, seasons: bool) -> String {
+    let day = ticks / sky::TICKS_PER_DAY + 1;
+    let head = if seasons { format!("Day {day}, {}", season(ticks).name()) } else { format!("Day {day}") };
+    match dusk_in(ticks) {
+        Some(d) => format!("{head}, dusk in {} min", d.div_ceil(1200)), // 1200 ticks a minute
+        None => format!("{head}, night"),
+    }
+}
+
+/// What `almanac_now` reads, set once a frame by `App` like `SEASON` is (the tooltip that shows it is made far from the world): the world's
+/// tick (negative: no almanac, as in the Nether where the clock only spins) and whether the seasons exist.
+static NOW: AtomicI64 = AtomicI64::new(-1);
+static SEASONS: AtomicBool = AtomicBool::new(false);
+
+pub fn set_now(ticks: Option<u64>, seasons: bool) {
+    NOW.store(ticks.map_or(-1, |t| t as i64), Ordering::Relaxed);
+    SEASONS.store(seasons, Ordering::Relaxed);
+}
+
+/// The almanac line for this frame, `None` where there is no almanac.
+pub fn almanac_now() -> Option<String> {
+    u64::try_from(NOW.load(Ordering::Relaxed)).ok().map(|t| almanac(t, SEASONS.load(Ordering::Relaxed)))
 }
 
 /// The season the foliage tint of new meshes reads (`chunks::biome_tints`, worker threads too), so `set_season` tells the caller when
@@ -172,6 +225,27 @@ mod tests {
         assert!(air(Tundra, Body { fur: 4, ..Body::default() }).cold == 0.5 && air(Tundra, Body { fed: true, ..Body::default() }).cold == 0.5);
         assert!(air(Taiga, Body::default()).cold < air(Tundra, Body::default()).cold);
         assert_eq!(air(Tundra, Body { fur: 9, fed: true, ..Body::default() }).cold, 0.25, "four pieces count");
+    }
+
+    // Gauges: clean air leaves the overlay white, heat turns it warm (red over blue) and cold turns it cool.
+    #[test]
+    fn the_overlay_tint_follows_the_air() {
+        assert_eq!(tint(Air::default()), [1.0; 3]);
+        let (h, c) = (tint(Air { hot: 1.0, cold: 0.0 }), tint(Air { hot: 0.0, cold: 1.0 }));
+        assert!(h[0] > h[2] && c[2] > c[0]);
+        assert_eq!(tint(Air { hot: 9.0, cold: 0.0 }), h, "capped at 1");
+    }
+
+    // Almanac: dusk is where the sky first takes 4 light away (the bed's line), found by 5 s steps; the line has the day, the season and the wait.
+    #[test]
+    fn the_almanac_counts_to_dusk_and_names_the_day() {
+        let d = dusk_in(0).expect("morning is light");
+        assert!((9000..14000).contains(&d) && d % 100 == 0, "{d}");
+        assert_eq!(dusk_in(18000), None, "midnight is dark");
+        assert!(almanac(0, true).starts_with("Day 1, Spring, dusk in "));
+        assert_eq!(almanac(0, false).split(',').count(), 2, "no season where the seasons are off");
+        assert_eq!(almanac(24000 * 3 + 18000, true), "Day 4, Summer, night");
+        assert_eq!(almanac(24000 * 9, true).split(',').nth(1), Some(" Winter"));
     }
 
     /// Three days a season, four seasons, spring first; the foliage follows and summer is the plain climate colour.

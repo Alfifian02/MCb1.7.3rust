@@ -273,6 +273,8 @@ pub struct TouchUi {
     /// B in a container screen, LB / RB pages (-1 / +1) and the right stick's scroll (px), until taken: `lib.rs` decides what they mean.
     back: bool,
     pad_info: bool,
+    /// The pad's drop bind was pressed while playing, until `take_pad_drop`.
+    pad_drop: bool,
     page: i32,
     scroll: f32,
     /// X (`Some(false)`, click for one) or RT (`Some(true)`, quick-move) in a container screen, until `take_alt`.
@@ -320,6 +322,7 @@ impl TouchUi {
             nav: None,
             back: false,
             pad_info: false,
+            pad_drop: false,
             page: 0,
             scroll: 0.0,
             alt: None,
@@ -378,6 +381,7 @@ impl TouchUi {
             self.cycle_view();
         }
         self.pad_info |= o.info;
+        self.pad_drop |= o.drop;
         if cfg.toggle_sneak {
             self.sneak ^= o.sneak_down;
         } else if o.sneak_down {
@@ -408,6 +412,11 @@ impl TouchUi {
             (true, false) => (true, true),
             (true, true) => (false, false),
         };
+    }
+
+    /// The pad's drop bind was pressed since the last call.
+    pub fn take_pad_drop(&mut self) -> bool {
+        std::mem::take(&mut self.pad_drop)
     }
 
     /// The pad's info bind was pressed since the last call.

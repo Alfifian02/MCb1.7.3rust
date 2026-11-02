@@ -320,6 +320,43 @@ pub fn draw_orbs(out: &mut Vec<HudVertex>, gu: f32, (cx, cy): (f32, f32), points
     }
 }
 
+// ---- the gauges (NOT b1.7.3, UNVERIFIED) ----
+
+/// What the body is doing that the hearts do not show: heat or cold on it (`biomelife::air`), a bandage working, the hearth ticking.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Mark {
+    Hot,
+    Cold,
+    Bandage,
+    Hearth,
+}
+
+/// Below this `hot` or `cold` the weather is not worth a mark.
+const MARK_MIN: f32 = 0.05;
+
+/// The marks to show, in a fixed order (so one does not jump when another comes and goes).
+pub fn marks(hot: f32, cold: f32, bandaged: bool, hearth: bool) -> Vec<Mark> {
+    [(hot > MARK_MIN, Mark::Hot), (cold > MARK_MIN, Mark::Cold), (bandaged, Mark::Bandage), (hearth, Mark::Hearth)].into_iter().filter(|m| m.0).map(|m| m.1).collect()
+}
+
+/// Draw `marks` in a row from `(x, y)`, each in a square of `s` pixels (a 5 x 5 pixel glyph of flat quads, 1.25 `s` apart).
+pub fn draw_marks(out: &mut Vec<HudVertex>, (x, y): (f32, f32), s: f32, marks: &[Mark]) {
+    let u = s / 5.0;
+    for (i, m) in marks.iter().enumerate() {
+        let x0 = x + i as f32 * s * 1.25;
+        // (x, y, w, h) in glyph pixels.
+        let (col, cells): ([f32; 4], &[(f32, f32, f32, f32)]) = match m {
+            Mark::Hot => ([1.0, 0.65, 0.2, 0.95], &[(1.0, 1.0, 3.0, 3.0), (2.0, 0.0, 1.0, 1.0), (2.0, 4.0, 1.0, 1.0), (0.0, 2.0, 1.0, 1.0), (4.0, 2.0, 1.0, 1.0)]),
+            Mark::Cold => ([0.7, 0.88, 1.0, 0.95], &[(0.0, 2.0, 5.0, 1.0), (2.0, 0.0, 1.0, 5.0), (0.0, 0.0, 1.0, 1.0), (4.0, 0.0, 1.0, 1.0), (0.0, 4.0, 1.0, 1.0), (4.0, 4.0, 1.0, 1.0)]),
+            Mark::Bandage => ([0.45, 0.9, 0.45, 0.95], &[(0.0, 1.5, 5.0, 2.0), (1.5, 0.0, 2.0, 5.0)]),
+            Mark::Hearth => ([1.0, 0.45, 0.15, 0.95], &[(1.0, 3.0, 3.0, 2.0), (1.5, 1.5, 2.0, 1.5), (2.0, 0.0, 1.0, 1.5)]),
+        };
+        for &(cx, cy, w, h) in cells {
+            HudPipeline::push_quad(out, x0 + cx * u, y + cy * u, w * u, h * u, col);
+        }
+    }
+}
+
 // ---- the damage vignette and flash (`DamageOverlayLayer`, `Fade`) ----
 
 /// Above this health the vignette is gone, at `FADE_END` it is full (the mod's 20-point scale is b1.7.3's too).
@@ -418,6 +455,18 @@ mod tests {
         for _ in 0..n {
             xh.tick(aiming);
         }
+    }
+
+    // Gauges: a mark for each thing that is on, in a fixed order, and a glyph stays inside its square.
+    #[test]
+    fn the_marks_come_in_a_fixed_order_and_stay_in_their_squares() {
+        assert!(marks(0.0, 0.04, false, false).is_empty());
+        assert_eq!(marks(0.5, 0.2, true, true), [Mark::Hot, Mark::Cold, Mark::Bandage, Mark::Hearth]);
+        assert_eq!(marks(0.0, 0.0, false, true), [Mark::Hearth]);
+        let mut v = Vec::new();
+        draw_marks(&mut v, (10.0, 20.0), 10.0, &[Mark::Cold, Mark::Hearth]);
+        assert!(!v.is_empty() && v.len() % 6 == 0);
+        assert!(v.iter().all(|p| p.pos[0] >= 10.0 && p.pos[0] <= 10.0 + 10.0 * 2.25 && p.pos[1] >= 20.0 && p.pos[1] <= 30.0));
     }
 
     #[test]

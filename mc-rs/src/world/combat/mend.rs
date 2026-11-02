@@ -40,6 +40,12 @@ impl Mend {
         self.left > 0
     }
 
+    /// The hearth is ticking (Gauges, UNVERIFIED): quiet, a fire at hand and under the cap. `tick` keeps its own test, which also counts the point
+    /// a bandage gives in the same tick.
+    pub fn hearth_on(health: i32, calm: bool, warm: bool) -> bool {
+        calm && warm && health < HEARTH_CAP
+    }
+
     /// The bandage is on (the caller used one up).
     pub fn apply(&mut self, health: i32) {
         (self.left, self.beat, self.line) = (BANDAGE_HEAL * BANDAGE_BEAT, 0, health);
@@ -92,6 +98,7 @@ mod tests {
         assert_eq!(run(&mut m, 5, 39, true, true), 5);
         assert_eq!(run(&mut m, 5, 40, true, true), 6, "one a 40 ticks");
         assert_eq!(run(&mut Mend::default(), 5, 1000, true, true), HEARTH_CAP, "and no further");
+        assert!(Mend::hearth_on(5, true, true) && !Mend::hearth_on(HEARTH_CAP, true, true) && !Mend::hearth_on(5, false, true));
         let mut m = Mend::default();
         m.apply(10);
         assert!(m.bandaged());

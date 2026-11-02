@@ -6,13 +6,15 @@
 //! every GUI (`VirtualMouseHandler`), the radial hotbar (`HOTBAR_SLOT_SELECT`) and rumble on damage / block break / explosions.
 //! Each binding is rebindable in Options > Controls > Controller (`options.rs`), saved in `options.txt` as `pad_*`.
 //!
-//! Not ported (nothing in mc-rs to hang them on): gyro, DualSense LEDs / adaptive triggers / touchpad, on-screen keyboard, button-guide
-//! glyph packs, splitscreen, joystick remapping, the server vibration API, chat, swap hands, drop item
-//! (b1.7.3 has no sprint / off hand, and mc-rs has no chat or drop yet). UNVERIFIED on real hardware: the Android axis / key mapping
+//! Button hints (`Pad::hints`): while a pad is in use a corner list names what the bound buttons do, drawn with the pictures of the "Controller
+//! Tooltip Selector" pack (Xbox, PlayStation or Switch, `tools/gen_pad_buttons.py`) or as plain text; Controls > Controller picks the style.
+//!
+//! Not ported (nothing in mc-rs to hang them on): gyro, DualSense LEDs / adaptive triggers / touchpad, on-screen keyboard, splitscreen, joystick remapping, the server vibration API, chat, swap hands
+//! (b1.7.3 has no sprint / off hand, and mc-rs has no chat yet). Drop throws one item of the selected slot (`Out::drop`). UNVERIFIED on real hardware: the Android axis / key mapping
 //! follows the documented layout (X/Y left stick, Z/Rz right stick, Ltrigger/Rtrigger, hat = d-pad).
 
 use super::touch_ui::{HOLD_SECS, TAP_SECS};
-use crate::render::hud::{HudPipeline, HudVertex};
+use crate::render::hud::{sprites, HudPipeline, HudVertex};
 use android_activity::input::{Axis, KeyAction, KeyEvent, Keycode, MotionEvent, Source};
 
 /// A physical button, in `Btn::bit` order. Triggers are buttons too (analogue value over the activation threshold).
@@ -46,9 +48,14 @@ impl Btn {
     pub fn name(self) -> &'static str {
         ["A", "B", "X", "Y", "LB", "RB", "LT", "RT", "L3", "R3", "Start", "Back", "D-Up", "D-Down", "D-Left", "D-Right"][self as usize]
     }
+
+    /// The picture of this button in icon `style` (`sprites::pad`: 0 Xbox, 1 PlayStation, 2 Switch); None in the Text style. The face buttons are
+    /// Android's, which name the PLACE: A is the bottom one, B right, X left, Y top; the Switch pack has Nintendo's letters in those places.
+    fn glyph(self, style: u8) -> Option<sprites::Sprite> {
+        (style < 3).then(|| sprites::pad::glyph(style as usize, self as usize))
+    }
 }
 
-/// What a button can be bound to (Controllify's `ControlifyBindings`, the ones b1.7.3 has). Movement and look stay on the sticks.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Act {
     Jump,
@@ -72,22 +79,24 @@ pub enum Act {
     View,
     /// Toggles the info (debug) screen.
     Info,
+    /// Throws one of the selected hotbar slot's items (the Drop key).
+    Drop,
 }
 
-pub const ACTS: [Act; 15] = [Act::Jump, Act::Sneak, Act::Attack, Act::Use, Act::Inventory, Act::Pause, Act::NextSlot, Act::PrevSlot, Act::Wheel, Act::Zoom, Act::GuiSelect, Act::GuiBack, Act::Sprint, Act::View, Act::Info];
+pub const ACTS: [Act; 16] = [Act::Jump, Act::Sneak, Act::Attack, Act::Use, Act::Inventory, Act::Pause, Act::NextSlot, Act::PrevSlot, Act::Wheel, Act::Zoom, Act::GuiSelect, Act::GuiBack, Act::Sprint, Act::View, Act::Info, Act::Drop];
 
 impl Act {
     pub fn name(self) -> &'static str {
-        ["Jump", "Sneak", "Attack", "Use", "Inventory", "Pause", "Next slot", "Prev slot", "Hotbar wheel", "Zoom", "GUI select", "GUI back", "Sprint", "View", "Info"][self as usize]
+        ["Jump", "Sneak", "Attack", "Use", "Inventory", "Pause", "Next slot", "Prev slot", "Hotbar wheel", "Zoom", "GUI select", "GUI back", "Sprint", "View", "Info", "Drop"][self as usize]
     }
 
     fn id(self) -> &'static str {
-        ["jump", "sneak", "attack", "use", "inventory", "pause", "next_slot", "prev_slot", "wheel", "zoom", "gui_select", "gui_back", "sprint", "view", "info"][self as usize]
+        ["jump", "sneak", "attack", "use", "inventory", "pause", "next_slot", "prev_slot", "wheel", "zoom", "gui_select", "gui_back", "sprint", "view", "info", "drop"][self as usize]
     }
 
-    /// `default_bind/default.json` (zoom: its `change_perspective` button; the view bind is the d-pad's right, info its left).
+    /// `default_bind/default.json` (zoom: its `change_perspective` button; the view bind is the d-pad's right, info its left, drop its down).
     fn default(self) -> Btn {
-        [Btn::A, Btn::R3, Btn::Rt, Btn::Lt, Btn::Y, Btn::Start, Btn::Rb, Btn::Lb, Btn::Up, Btn::Back, Btn::A, Btn::B, Btn::L3, Btn::Right, Btn::Left][self as usize]
+        [Btn::A, Btn::R3, Btn::Rt, Btn::Lt, Btn::Y, Btn::Start, Btn::Rb, Btn::Lb, Btn::Up, Btn::Back, Btn::A, Btn::B, Btn::L3, Btn::Right, Btn::Left, Btn::Down][self as usize]
     }
 }
 
@@ -95,8 +104,10 @@ const KNOBS: [&str; 6] = ["Look X", "Look Y", "Deadzone", "Cursor", "Trigger", "
 const KNOB_IDS: [&str; 6] = ["lookH", "lookV", "deadzone", "cursor", "threshold", "rumble"];
 /// Each knob's value at slider 0 and 1.
 const KNOB_RANGE: [(f32, f32); 6] = [(0.0, 2.0), (0.0, 2.0), (0.0, 0.5), (0.2, 2.0), (0.1, 0.9), (0.0, 1.0)];
-const TOGGLES: [&str; 4] = ["Curve", "Invert X", "Invert Y", "Toggle Sneak"];
-const TOGGLE_IDS: [&str; 4] = ["curve", "invertX", "invertY", "toggleSneak"];
+const TOGGLES: [&str; 6] = ["Curve", "Invert X", "Invert Y", "Toggle Sneak", "Button Hints", "Button Icons"];
+const TOGGLE_IDS: [&str; 6] = ["curve", "invertX", "invertY", "toggleSneak", "hints", "iconStyle"];
+/// The button picture styles (`PadCfg::style`).
+const STYLES: [&str; 4] = ["Xbox", "PlayStation", "Switch", "Text"];
 /// `InputCurves`.
 const CURVES: [&str; 6] = ["Linear", "Gentle", "Standard", "Strong", "Precision", "S-Curve"];
 
@@ -116,6 +127,10 @@ pub struct PadCfg {
     pub invert_x: bool,
     pub invert_y: bool,
     pub toggle_sneak: bool,
+    /// The corner list of what the buttons do (`Pad::hints`).
+    pub hints: bool,
+    /// Index into `STYLES`: 0 Xbox, 1 PlayStation, 2 Switch, 3 Text.
+    pub style: u8,
 }
 
 impl Default for PadCfg {
@@ -133,6 +148,8 @@ impl Default for PadCfg {
             invert_x: false,
             invert_y: false,
             toggle_sneak: true,
+            hints: true,
+            style: 0,
         }
     }
 }
@@ -178,7 +195,9 @@ impl PadCfg {
             0 => self.curve = (self.curve + 1) % CURVES.len() as u8,
             1 => self.invert_x = !self.invert_x,
             2 => self.invert_y = !self.invert_y,
-            _ => self.toggle_sneak = !self.toggle_sneak,
+            3 => self.toggle_sneak = !self.toggle_sneak,
+            4 => self.hints = !self.hints,
+            _ => self.style = (self.style + 1) % STYLES.len() as u8,
         }
     }
 
@@ -188,7 +207,9 @@ impl PadCfg {
             0 => CURVES[self.curve as usize % CURVES.len()],
             1 => onoff(self.invert_x),
             2 => onoff(self.invert_y),
-            _ => onoff(self.toggle_sneak),
+            3 => onoff(self.toggle_sneak),
+            4 => onoff(self.hints),
+            _ => STYLES[self.style as usize % STYLES.len()],
         };
         format!("{}: {v}", TOGGLES[i])
     }
@@ -210,7 +231,9 @@ impl PadCfg {
                 0 => self.curve = n.min(CURVES.len() as u8 - 1),
                 1 => self.invert_x = n != 0,
                 2 => self.invert_y = n != 0,
-                _ => self.toggle_sneak = n != 0,
+                3 => self.toggle_sneak = n != 0,
+                4 => self.hints = n != 0,
+                _ => self.style = n.min(STYLES.len() as u8 - 1),
             }
         }
     }
@@ -223,7 +246,7 @@ impl PadCfg {
             t.push_str(&format!("pad_{id}:{}\n", self.knob_value(i)));
         }
         let b = |x: bool| x as u8;
-        t.push_str(&format!("pad_curve:{}\npad_invertX:{}\npad_invertY:{}\npad_toggleSneak:{}\n", self.curve, b(self.invert_x), b(self.invert_y), b(self.toggle_sneak)));
+        t.push_str(&format!("pad_curve:{}\npad_invertX:{}\npad_invertY:{}\npad_toggleSneak:{}\npad_hints:{}\npad_iconStyle:{}\n", self.curve, b(self.invert_x), b(self.invert_y), b(self.toggle_sneak), b(self.hints), self.style));
     }
 }
 
@@ -282,6 +305,8 @@ pub struct Out {
     /// C3: the attack button went up after a hold that dug nothing (`attack_dug` false, `HOLD_SECS` passed): the end of a charge.
     pub release: bool,
     pub inventory: bool,
+    /// The drop bind was pressed (playing only).
+    pub drop: bool,
     pub pause: bool,
     pub back: bool,
     pub slot_delta: i32,
@@ -516,7 +541,7 @@ impl Pad {
             }
         }
         o.place |= o.strike;
-        (o.inventory, o.pause) = (just(Act::Inventory), just(Act::Pause));
+        (o.inventory, o.pause, o.drop) = (just(Act::Inventory), just(Act::Pause), just(Act::Drop));
         o.slot_delta = just(Act::NextSlot) as i32 - just(Act::PrevSlot) as i32;
         o
     }
@@ -541,6 +566,36 @@ impl Pad {
             HudPipeline::push_quad(v, x - k, y - k * 6.0 - k, k * 3.0, k * 12.0 + 2.0 * k, [0.0, 0.0, 0.0, 0.8]);
             HudPipeline::push_quad(v, x - k * 6.0, y, k * 12.0, k, [1.0; 4]);
             HudPipeline::push_quad(v, x, y - k * 6.0, k, k * 12.0, [1.0; 4]);
+        }
+    }
+
+    /// Button hints: while a pad is in use, a list in the bottom-right corner of what the bound buttons do (playing: attack, place, jump, sneak,
+    /// inventory, drop; in a GUI: select, back). Each button is its picture from `sprites::pad` (`PadCfg::style`), or in the Text style a dark pill
+    /// with its name. One font pixel `k` is a whole screen pixel and a picture is 13 of them (its 26 px at half size), so both stay crisp.
+    pub fn hints(&self, v: &mut Vec<HudVertex>, w: f32, h: f32, cfg: &PadCfg, ui: bool) {
+        if !cfg.hints || !self.active() {
+            return;
+        }
+        let rows: &[(Act, &str)] = if ui { &[(Act::GuiSelect, "Select"), (Act::GuiBack, "Back")] } else { &[(Act::Attack, "Attack"), (Act::Use, "Place"), (Act::Jump, "Jump"), (Act::Sneak, "Sneak"), (Act::Inventory, "Inventory"), (Act::Drop, "Drop")] };
+        let k = (h.min(w) / 240.0).floor().max(1.0);
+        let (row, gap) = (13.0 * k, 2.0 * k);
+        let btn = |a: Act| cfg.binds[a as usize];
+        let width = |b: Btn| if b.glyph(cfg.style).is_some() { row } else { (HudPipeline::text_width(b.name()) as f32 + 4.0) * k };
+        let col = rows.iter().map(|&(a, _)| width(btn(a))).fold(0.0, f32::max);
+        let text = rows.iter().map(|&(_, t)| HudPipeline::text_width(t) as f32 * k).fold(0.0, f32::max);
+        let (margin, n) = (gap * 3.0, rows.len() as f32);
+        let (x0, y0) = (w - margin - col - gap - text, h - margin - n * row - (n - 1.0) * gap);
+        let ty = (row - 8.0 * k) * 0.5; // the 8 px font centred on a row
+        for (i, &(a, t)) in rows.iter().enumerate() {
+            let (b, y) = (btn(a), y0 + i as f32 * (row + gap));
+            let gx = x0 + (col - width(b)) * 0.5;
+            if let Some(spr) = b.glyph(cfg.style) {
+                HudPipeline::push_gui(v, gx, y, row, row, spr);
+            } else {
+                HudPipeline::push_quad(v, gx, y, width(b), row, [0.1, 0.1, 0.1, 0.85]);
+                HudPipeline::push_text(v, gx + 2.0 * k, y + ty, k, b.name(), [1.0; 4]);
+            }
+            HudPipeline::push_text(v, x0 + col + gap, y + ty, k, t, [1.0; 4]);
         }
     }
 
@@ -816,7 +871,54 @@ mod tests {
     }
 
     #[test]
+    fn hints_follow_the_binds_and_the_style() {
+        let (mut p, mut c) = pad();
+        let quads = |p: &Pad, c: &PadCfg, ui| {
+            let mut v = Vec::new();
+            p.hints(&mut v, 1280.0, 720.0, c, ui);
+            v.len()
+        };
+        assert!(quads(&p, &c, false) > 0 && quads(&p, &c, false) > quads(&p, &c, true), "playing lists more than a GUI");
+        c.hints = false;
+        assert_eq!(quads(&p, &c, false), 0, "off draws nothing");
+        c.hints = true;
+        c.style = 3;
+        assert!(Btn::A.glyph(3).is_none() && Btn::A.glyph(2).is_some(), "Text has no pictures");
+        assert!(quads(&p, &c, false) > 0, "Text draws pills");
+        p.idle = 9.0;
+        assert_eq!(quads(&p, &c, false), 0, "no pad in use: no hints");
+        // every button has its own picture, in the style's rows of the sheet
+        let all: Vec<_> = Btn::ALL.iter().map(|b| b.glyph(1).unwrap()).collect();
+        assert!(all.iter().enumerate().all(|(i, a)| all[..i].iter().all(|b| a != b)));
+        assert_eq!(Btn::A.glyph(1).unwrap().1 - Btn::A.glyph(0).unwrap().1, 52.0);
+    }
+
+    #[test]
+    fn drop_is_one_press_while_playing_and_follows_its_bind() {
+        let (mut p, mut c) = pad();
+        p.key(Btn::Down, true);
+        assert!(p.update(DT, &c, false, 1000.0).drop, "D-Down drops by default");
+        assert!(!p.update(DT, &c, false, 1000.0).drop, "one press, one drop");
+        p.key(Btn::Down, false);
+        c.binds[ACTS.iter().position(|a| *a == Act::Drop).unwrap()] = Btn::X;
+        p.key(Btn::X, true);
+        assert!(p.update(DT, &c, false, 1000.0).drop);
+        p.key(Btn::X, false);
+        p.update(DT, &c, true, 1000.0);
+        p.key(Btn::X, true);
+        p.update(DT, &c, true, 1000.0);
+        assert!(!p.update(DT, &c, true, 1000.0).drop, "not in a GUI");
+    }
+
+    #[test]
     fn config_round_trips() {
+        let mut c = PadCfg::default();
+        (c.hints, c.style) = (false, 2);
+        let mut t = String::new();
+        c.save_into(&mut t);
+        let mut back = PadCfg::default();
+        t.lines().for_each(|l| back.load(l.split_once(':').unwrap().0, l.split_once(':').unwrap().1));
+        assert_eq!((back.hints, back.style), (false, 2));
         let mut c = PadCfg::default();
         (c.binds[0], c.curve, c.invert_y, c.toggle_sneak) = (Btn::X, 4, true, false);
         c.set_knob(0, 0.25);

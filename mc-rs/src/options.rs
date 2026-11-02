@@ -733,6 +733,8 @@ const TIPS: [(&str, &str); 36] = [
     ("Invert X", "Flips the horizontal look of the right stick."),
     ("Invert Y", "Flips the vertical look of the right stick."),
     ("Toggle Sneak", "Sneak stays on until pressed again."),
+    ("Button Hints", "Shows what the pad's buttons do in the corner while a pad is in use."),
+    ("Button Icons", "Style of the button pictures: Xbox, PlayStation, Switch or plain text. Tap to change."),
 ];
 
 /// The sentence under a setting's name in the description pane.
@@ -1997,6 +1999,10 @@ mod tests {
         assert_eq!(o.page, 6);
         tap(&mut o, &mut st, "Invert Y: OFF");
         assert!(st.pad.invert_y);
+        tap(&mut o, &mut st, "Button Icons: Xbox");
+        assert_eq!(st.pad.style, 1, "Xbox -> PlayStation");
+        tap(&mut o, &mut st, "Button Hints: ON");
+        assert!(!st.pad.hints);
         let (x, y, _, s) = track_px(&mut o, &st, "Look X");
         let y = y + 4.0 * s;
         o.event(ScreenEv::Down(x + 4.0 * s, y), SZ.0, SZ.1, &mut st);
@@ -2004,6 +2010,7 @@ mod tests {
         assert_eq!(st.pad.look_h, 0.0);
         let back = Settings::load(&root);
         assert_eq!((back.pad.binds[0], back.pad.invert_y, back.pad.look_h), (Btn::X, true, 0.0));
+        assert_eq!((back.pad.style, back.pad.hints), (1, false));
         let mut v = Vec::new();
         o.draw(&mut v, SZ.0, SZ.1, &st, true);
         assert!(!v.is_empty());
