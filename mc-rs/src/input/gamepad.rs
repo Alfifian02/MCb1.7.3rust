@@ -170,6 +170,11 @@ impl PadCfg {
         self.binds[a as usize].bit()
     }
 
+    /// No GUI action sits on `b`: X and RT are then a container screen's place-one / quick-move (`Out::alt`), and a hint may name X.
+    fn free(&self, b: Btn) -> bool {
+        ![Act::GuiSelect, Act::GuiBack, Act::Pause, Act::Inventory].iter().any(|&a| self.binds[a as usize] == b)
+    }
+
     fn knob_value(&self, i: usize) -> f32 {
         [self.look_h, self.look_v, self.deadzone, self.cursor, self.threshold, self.rumble, self.hint_size][i]
     }
@@ -263,6 +268,14 @@ impl PadCfg {
         let b = |x: bool| x as u8;
         t.push_str(&format!("pad_curve:{}\npad_invertX:{}\npad_invertY:{}\npad_toggleSneak:{}\npad_hints:{}\npad_iconStyle:{}\npad_hintLayout:{}\n", self.curve, b(self.invert_x), b(self.invert_y), b(self.toggle_sneak), b(self.hints), self.style, self.layout));
     }
+}
+
+/// A button a contextual hint names by what it does in a GUI: the bound select / back, or X (`Out::alt`) while no bind has taken it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Role {
+    Select,
+    Alt,
+    Back,
 }
 
 /// What the hints need to know of the screen they are drawn over: its size and GUI scale (px), whether it is a menu / container, and the rects
@@ -547,7 +560,7 @@ impl Pad {
             o.cursor = ((sx + hx) * k, (sy + hy) * k);
             o.page = i32::from(pressed & Btn::Rb.bit() != 0) - i32::from(pressed & Btn::Lb.bit() != 0);
             o.scroll = ry * k;
-            let free = |b: Btn| ![Act::GuiSelect, Act::GuiBack, Act::Pause, Act::Inventory].iter().any(|&a| cfg.binds[a as usize] == b);
+            let free = |b: Btn| cfg.free(b);
             let on = |b: Btn| pressed & b.bit() != 0 && free(b);
             o.alt = if on(Btn::X) { Some(false) } else if on(Btn::Rt) { Some(true) } else { None };
             if self.snap {
@@ -609,8 +622,9 @@ impl Pad {
         o
     }
 
-    /// The radial hotbar and, in a GUI, the cursor drawn over `cursor` (px).
-    pub fn draw(&self, v: &mut Vec<HudVertex>, w: f32, h: f32, slot: usize, cursor: Option<(f32, f32)>) {
+    /// The radial hotbar and, in a GUI, the cursor drawn over `cursor` (px). The cursor's cross, shadow included, is 14 pixels of `k` wide;
+    /// `cap` (px, `f32::INFINITY` for none) is the most it may take, so over a slot the cursor stays smaller than the slot (whole pixels).
+    pub fn draw(&self, v: &mut Vec<HudVertex>, w: f32, h: f32, slot: usize, cursor: Option<(f32, f32)>, cap: f32) {
         if self.wheel_open {
             let (cx, cy, r) = (w / 2.0, h / 2.0, h.min(w) * 0.28);
             let b = h.min(w) * 0.07;
@@ -625,6 +639,7 @@ impl Pad {
         }
         if let Some((x, y)) = cursor {
             let k = (h.min(w) * 0.006).max(2.0);
+            let k = if cap.is_finite() { k.min((cap / 14.0).floor().max(1.0)) } else { k };
             HudPipeline::push_quad(v, x - k * 6.0 - k, y - k, k * 12.0 + 2.0 * k, k * 3.0, [0.0, 0.0, 0.0, 0.8]);
             HudPipeline::push_quad(v, x - k, y - k * 6.0 - k, k * 3.0, k * 12.0 + 2.0 * k, [0.0, 0.0, 0.0, 0.8]);
             HudPipeline::push_quad(v, x - k * 6.0, y, k * 12.0, k, [1.0; 4]);
@@ -638,11 +653,32 @@ impl Pad {
     /// The box goes where `hint_spot` finds room clear of `view.avoid`; when none does it shrinks (down to half) and tries the other layout;
     /// when still nothing is clear it is not drawn at all.
     pub fn hints(&self, v: &mut Vec<HudVertex>, cfg: &PadCfg, view: &HintView) {
+        self.hints_with(v, cfg, view, &[]);
+    }
+
+    /// `hints` with the rows a screen chose for what is under the cursor (`rows`, in order; X is left out while a bind has it). Empty `rows`
+    /// give the standard ones: select and back in a GUI, the playing buttons otherwise.
+    pub fn hints_with(&self, v: &mut Vec<HudVertex>, cfg: &PadCfg, view: &HintView, rows: &[(Role, &str)]) {
         if !cfg.hints || !self.active() {
             return;
         }
-        let rows: &[(Act, &str)] = if view.ui { &[(Act::GuiSelect, "Select"), (Act::GuiBack, "Back")] } else { &[(Act::Attack, "Attack"), (Act::Use, "Place"), (Act::Jump, "Jump"), (Act::Sneak, "Sneak"), (Act::Inventory, "Inventory"), (Act::Drop, "Drop")] };
         let btn = |a: Act| cfg.binds[a as usize];
+        let rows: Vec<(Btn, &str)> = if !rows.is_empty() {
+            rows.iter()
+                .filter_map(|&(r, t)| match r {
+                    Role::Select => Some(btn(Act::GuiSelect)),
+                    Role::Back => Some(btn(Act::GuiBack)),
+                    Role::Alt => cfg.free(Btn::X).then_some(Btn::X),
+                }.map(|b| (b, t)))
+                .collect()
+        } else if view.ui {
+            vec![(btn(Act::GuiSelect), "Select"), (btn(Act::GuiBack), "Back")]
+        } else {
+            [(Act::Attack, "Attack"), (Act::Use, "Place"), (Act::Jump, "Jump"), (Act::Sneak, "Sneak"), (Act::Inventory, "Inventory"), (Act::Drop, "Drop")].iter().map(|&(a, t)| (btn(a), t)).collect()
+        };
+        if rows.is_empty() {
+            return;
+        }
         let k0 = (view.s * cfg.hint_size).round().max(1.0);
         let kmin = (k0 / 2.0).ceil().max(1.0);
         // Auto: a row in a menu (the bottom of a screen is mostly empty), a list in the corner while playing; the other one is the fallback.
@@ -655,14 +691,14 @@ impl Pad {
         let mut k = k0;
         loop {
             let width = |b: Btn| if b.glyph(cfg.style).is_some() { 13.0 * k } else { (HudPipeline::text_width(b.name()) as f32 + 4.0) * k };
-            let btns: Vec<f32> = rows.iter().map(|&(a, _)| width(btn(a))).collect();
+            let btns: Vec<f32> = rows.iter().map(|&(b, _)| width(b)).collect();
             let texts: Vec<f32> = rows.iter().map(|&(_, t)| HudPipeline::text_width(t) as f32 * k).collect();
             for &h in &horiz {
                 let ((bw, bh), at) = hint_boxes(&btns, &texts, k, h);
                 if let Some((x0, y0)) = hint_spot(view.w, view.h, (bw + k, bh + k), 6.0 * k, clear, view.avoid) { // + k: the text's shadow
                     let (row, ty) = (13.0 * k, (13.0 * k - 8.0 * k) * 0.5); // the 8 px font centred on a row
-                    for (i, &(a, t)) in rows.iter().enumerate() {
-                        let (b, [gx, gy, gw, tx]) = (btn(a), at[i]);
+                    for (i, &(b, t)) in rows.iter().enumerate() {
+                        let [gx, gy, gw, tx] = at[i];
                         let (gx, y) = (x0 + gx, y0 + gy);
                         if let Some(spr) = b.glyph(cfg.style) {
                             HudPipeline::push_gui(v, gx, y, row, row, spr);
@@ -978,8 +1014,12 @@ mod tests {
 
     /// The bounding box of what `hints` drew (None when it drew nothing).
     fn hint_box(p: &Pad, c: &PadCfg, view: &HintView) -> Option<[f32; 4]> {
+        hint_box_with(p, c, view, &[])
+    }
+
+    fn hint_box_with(p: &Pad, c: &PadCfg, view: &HintView, rows: &[(Role, &str)]) -> Option<[f32; 4]> {
         let mut v = Vec::new();
-        p.hints(&mut v, c, view);
+        p.hints_with(&mut v, c, view, rows);
         v.iter().fold(None, |b: Option<[f32; 4]>, q| {
             let [x, y] = q.pos;
             Some(b.map_or([x, y, x, y], |b| [b[0].min(x), b[1].min(y), b[2].max(x), b[3].max(y)]))
@@ -1096,5 +1136,43 @@ mod tests {
         }
         assert_eq!((back.binds[0], back.curve, back.invert_y, back.toggle_sneak), (Btn::X, 4, true, false));
         assert!((back.look_h - 0.5).abs() < 1e-4);
+    }
+
+    /// In the satchel the hints take the rows of what is under the cursor and keep clear of its buttons, bag and book; X is named only while
+    /// no bind has it; the cursor stays under 60% of a slot.
+    #[test]
+    fn satchel_hints_keep_off_the_satchel_and_the_cursor_stays_small() {
+        use crate::satchel::{pad_hints, Frame, Pick, Satchel};
+        let (p, mut c) = pad();
+        let mut sat = Satchel::new(true);
+        sat.tick(10.0);
+        let (w, h) = (1604.0, 720.0);
+        let f = Frame::new(&sat, &crate::world::items::Inventory::default(), 2, w, h);
+        let avoid = f.avoid(&sat);
+        let view = HintView { w, h, s: 3.0, ui: true, avoid: &avoid };
+        let slot = Pick::Slot(crate::world::craft::SlotId::Inv(0));
+        let rows = pad_hints(&sat, slot, false);
+        let b = hint_box_with(&p, &c, &view, &rows).expect("there is room under the book");
+        assert!(avoid.iter().all(|a| apart(b, *a, 12.0)), "{avoid:?} vs {b:?}");
+        let quads = |c: &PadCfg, rows: &[(Role, &str)]| {
+            let mut v = Vec::new();
+            p.hints_with(&mut v, c, &view, rows);
+            v.len()
+        };
+        let plain = quads(&c, &[(Role::Select, "Take"), (Role::Back, "Close")]);
+        assert!(quads(&c, &[(Role::Select, "Take"), (Role::Alt, "Take half"), (Role::Back, "Close")]) > plain, "X is a row of its own");
+        c.binds[ACTS.iter().position(|a| *a == Act::GuiBack).unwrap()] = Btn::X;
+        assert_eq!(quads(&c, &[(Role::Select, "Take"), (Role::Alt, "Take half"), (Role::Back, "Close")]), plain, "X is bound: not named as place-one");
+        // the cursor: a whole-pixel cross of 14 k, k shrunk until it fits the cap; no cap keeps the old size
+        let cross = |cap: f32| {
+            let mut v = Vec::new();
+            p.draw(&mut v, w, h, 0, Some((500.0, 300.0)), cap);
+            v.iter().fold([f32::MAX, f32::MAX, f32::MIN, f32::MIN], |b, q| [b[0].min(q.pos[0]), b[1].min(q.pos[1]), b[2].max(q.pos[0]), b[3].max(q.pos[1])])
+        };
+        let slot_px = f.cells[0].1[2];
+        let small = cross(0.6 * slot_px);
+        assert!(small[2] - small[0] <= 0.6 * slot_px + 0.01 && small[3] - small[1] <= 0.6 * slot_px + 0.01, "{small:?} in a slot of {slot_px}");
+        let free = cross(f32::INFINITY);
+        assert!(free[2] - free[0] > small[2] - small[0] || (free[2] - free[0] - (small[2] - small[0])).abs() < 0.01, "the cap never makes it bigger");
     }
 }

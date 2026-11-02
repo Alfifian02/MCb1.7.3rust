@@ -4082,7 +4082,7 @@ impl App {
         self.hud_verts.clear();
         m.draw(&mut self.hud_verts, w, h, &self.opts);
         let cur = self.touch.pad.shows_cursor().then_some(self.touch.cursor_pos);
-        self.touch.pad.draw(&mut self.hud_verts, w, h, self.touch.hotbar_slot, cur);
+        self.touch.pad.draw(&mut self.hud_verts, w, h, self.touch.hotbar_slot, cur, f32::INFINITY);
         let (s, ..) = crate::menu::scaled_gs(w, h, self.opts.gui_scale);
         let avoid = m.avoid(w, h, &self.opts);
         self.touch.pad.hints(&mut self.hud_verts, &self.opts.pad, &crate::input::gamepad::HintView { w, h, s, ui: true, avoid: &avoid });
@@ -4721,10 +4721,19 @@ impl App {
         {
             let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
             let t = &self.touch;
-            let cur = (t.pad.shows_cursor() && (paused || t.screen) && self.sat.is_none()).then_some(t.cursor_pos); // the satchel frames its target instead
-            t.pad.draw(v, w, h, t.hotbar_slot, cur);
-            // What the open screen draws, for the hints to keep off: the game menu's buttons, the statistics' tabs, or the hotbar while playing.
+            let cur = (t.pad.shows_cursor() && (paused || t.screen)).then_some(t.cursor_pos); // the satchel adds a frame round its target
+            // Over a slot the cursor stays smaller than the slot: 60% of the satchel's cell or of the panel's 16-unit slot.
+            let sat_frame = self.sat.as_ref().zip(self.screen.as_ref()).filter(|_| !paused).map(|(sat, s)| (sat, s, satchel::Frame::with_grid(sat, &self.inv, &s.grid, s.gw, w, h)));
+            let cap = match (&sat_frame, self.screen.as_ref()) {
+                (Some((.., f)), _) => f.cells.first().map_or(f32::INFINITY, |(_, r)| r[2] * 0.6),
+                (None, Some(s)) if !paused && !self.mat_ui => 16.0 * craft::panel(s.gw, w, h).2 * 0.6,
+                _ => f32::INFINITY,
+            };
+            t.pad.draw(v, w, h, t.hotbar_slot, cur, cap);
+            // What the open screen draws, for the hints to keep off: the game menu's buttons, the statistics' tabs, the satchel's buttons, bag and
+            // book, or the hotbar while playing. In the satchel the rows follow what the cursor is on (`satchel::pad_hints`).
             let (s, ..) = crate::menu::scaled_gs(w, h, self.opts.gui_scale);
+            let mut rows: Vec<(crate::input::gamepad::Role, &str)> = Vec::new();
             let avoid: Vec<[f32; 4]> = if paused {
                 if let Some(u) = &self.stats_ui {
                     u.avoid(w, h, &self.opts)
@@ -4733,14 +4742,17 @@ impl App {
                 } else {
                     Vec::new()
                 }
+            } else if let Some((sat, s, f)) = &sat_frame {
+                rows = satchel::pad_hints(sat, f.hit(sat, t.cursor_pos.0, t.cursor_pos.1), s.cursor.is_some());
+                f.avoid(sat)
             } else if t.screen {
-                Vec::new() // ponytail: a container / the satchel is centred, the corner is free; no rects of its own yet
+                Vec::new() // ponytail: a chest / furnace / bench panel is centred, the corner is free; no rects of its own yet
             } else {
                 let (hx, hy, hw, _) = t.layout.hotbar[0];
                 let u = hw / 20.0;
                 vec![[hx - u, hy - u, 182.0 * u, 22.0 * u]]
             };
-            t.pad.hints(v, &self.opts.pad, &crate::input::gamepad::HintView { w, h, s, ui: paused || t.screen, avoid: &avoid });
+            t.pad.hints_with(v, &self.opts.pad, &crate::input::gamepad::HintView { w, h, s, ui: paused || t.screen, avoid: &avoid }, &rows);
         }
 
         // Cap to the buffer capacity; extra quads are silently dropped.

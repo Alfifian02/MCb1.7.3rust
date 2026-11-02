@@ -18,6 +18,7 @@
 //! ponytail: the world behind is dimmed, not blurred (a blur is a post pass); a page is ~200 tiled quads (a wrapping sampler would be one); an unknown recipe is a dark box with a `?`, not a true
 //! silhouette of the sprite (`push_stack` has no tint); partly visible list rows are not drawn instead of being clipped.
 
+use crate::input::gamepad::Role;
 use crate::render::hud::{HudPipeline, HudVertex};
 use crate::world::book::{self, Src, CATS};
 use crate::world::craft::{self, Screen, SlotId};
@@ -294,7 +295,8 @@ impl Frame {
             f.btns.push((b, [x, by, bw, bh2]));
             x += bw + 0.012 * h;
         }
-        let cw = HudPipeline::text_width("X") as f32 * tk + 8.0 * tk;
+        // The close button is twice as wide as it is tall (a thumb or a pad's cursor finds it easily); the letter stays centred in it.
+        let cw = (HudPipeline::text_width("X") as f32 * tk + 8.0 * tk).max(2.0 * bh2).min(0.12 * w);
         f.btns.push((Btn::Close, [w - 0.02 * w - cw, by, cw, bh2]));
 
         f.book = Some(book_frame(sat, (gw, inv, grid), (w, h), (top, bh), spine));
@@ -366,6 +368,50 @@ impl Frame {
         t.extend(self.cells.iter().map(|&(_, r)| r));
         t
     }
+}
+
+impl Frame {
+    /// The rects a pad's button hints keep off: every button (Close among them), the bag, the book (its cover, or both pages with the crafting
+    /// grid, the result and the recipe card on them) and, while it is open, its `Close` tab above the spine.
+    pub fn avoid(&self, sat: &Satchel) -> Vec<[f32; 4]> {
+        let mut a: Vec<[f32; 4]> = self.btns.iter().map(|&(_, r)| r).collect();
+        a.push(self.bag);
+        if let Some(b) = &self.book {
+            a.push(b.rect);
+            if sat.open() && b.open {
+                a.push(b.tab);
+            }
+        }
+        a
+    }
+}
+
+/// What the pad's buttons do over `pick` (the hints' rows: A, X, B), `holding` a stack on the cursor. Only what the press really does:
+/// `on_sat_tap` for A, `pad_alt` for X (a slot only), `sat_pad_keys` for B (a category steps back before the screen closes).
+pub fn pad_hints(sat: &Satchel, pick: Pick, holding: bool) -> Vec<(Role, &'static str)> {
+    let a = match pick {
+        Pick::Slot(SlotId::Result) => Some("Craft"),
+        Pick::Slot(_) => Some(if holding { "Place" } else { "Take" }),
+        Pick::Btn(Btn::Close) => Some("Close"),
+        Pick::Btn(Btn::Book) => Some(if sat.book { "Close book" } else { "Open book" }),
+        Pick::Btn(Btn::Sort) => Some("Sort"),
+        Pick::Btn(Btn::Shift | Btn::One) | Pick::Hide => Some("Toggle"),
+        Pick::Cat(_) => Some("Open"),
+        Pick::Back => Some("Back"),
+        Pick::Row(i) => Some(if sat.sel == Some(i) { "Add set" } else { "Pick" }), // a second tap on the held recipe adds a set
+        Pick::Pin => Some("Pin"),
+        Pick::Outside => holding.then_some("Throw"),
+        Pick::List | Pick::Panel | Pick::Card => None,
+    };
+    let x = match pick {
+        Pick::Slot(SlotId::Result) => None,
+        Pick::Slot(_) => Some(if holding { "Place one" } else { "Take half" }),
+        _ => None,
+    };
+    let mut rows: Vec<(Role, &'static str)> = a.map(|t| (Role::Select, t)).into_iter().collect();
+    rows.extend(x.map(|t| (Role::Alt, t)));
+    rows.push((Role::Back, if sat.open() && sat.cat.is_some() { "Back" } else { "Close" }));
+    rows
 }
 
 /// The target the cursor `at` rests on.
@@ -1197,5 +1243,70 @@ mod tests {
             assert_eq!(f.hit(&sat, x, y), Pick::Card);
             assert!(b.card[1] + b.card[3] < b.hide[1], "the card ends above the toggle");
         }
+    }
+
+    /// The close button is at least twice as wide as the letter needs, a thumb finds it across its whole width, and it stays clear of the
+    /// other buttons, the book's tab and the screen's edge on the screens the game runs on.
+    #[test]
+    fn the_close_button_is_wide() {
+        for (w, h) in [(1604.0, 720.0), (1280.0, 720.0), (800.0, 480.0)] {
+            let sat = open_book();
+            let f = Frame::new(&sat, &Inventory::default(), 2, w, h);
+            let close = f.btns.iter().find(|(b, _)| *b == Btn::Close).expect("close").1;
+            let tk = units(f.k).0;
+            assert!(close[2] > HudPipeline::text_width("X") as f32 * tk + 8.0 * tk, "wider than the old one at {w} x {h}");
+            assert!(close[2] >= 1.9 * close[3] || close[2] >= 0.119 * w, "about twice as wide as tall at {w} x {h}: {close:?}");
+            assert!(close[0] + close[2] <= w && close[0] >= 0.0, "on the screen");
+            let apart = |a: [f32; 4], b: [f32; 4]| a[0] >= b[0] + b[2] || b[0] >= a[0] + a[2] || a[1] >= b[1] + b[3] || b[1] >= a[1] + a[3];
+            assert!(f.btns.iter().filter(|(b, _)| *b != Btn::Close).all(|(_, r)| apart(*r, close)), "no other button touches it");
+            assert!(apart(f.book.as_ref().expect("book").tab, close), "the book's tab does not touch it");
+            for x in [close[0] + 1.0, close[0] + close[2] * 0.5, close[0] + close[2] - 1.0] {
+                assert_eq!(f.hit(&sat, x, close[1] + close[3] * 0.5), Pick::Btn(Btn::Close), "a tap at x {x}");
+            }
+        }
+    }
+
+    /// The hints name only what the press does: take / place on a slot (X: half / one), the result crafts, a recipe is picked and then adds
+    /// a set, the cover opens the book, B closes unless a category is open (then it steps back); every list ends with B.
+    #[test]
+    fn the_pad_hints_follow_what_is_under_the_cursor() {
+        let slot = Pick::Slot(SlotId::Inv(0));
+        let closed = Satchel::new(false);
+        assert_eq!(pad_hints(&closed, slot, false), [(Role::Select, "Take"), (Role::Alt, "Take half"), (Role::Back, "Close")]);
+        assert_eq!(pad_hints(&closed, slot, true), [(Role::Select, "Place"), (Role::Alt, "Place one"), (Role::Back, "Close")]);
+        assert_eq!(pad_hints(&closed, Pick::Slot(SlotId::Result), false), [(Role::Select, "Craft"), (Role::Back, "Close")]);
+        assert_eq!(pad_hints(&closed, Pick::Btn(Btn::Close), false)[0], (Role::Select, "Close"));
+        assert_eq!(pad_hints(&closed, Pick::Btn(Btn::Book), false)[0], (Role::Select, "Open book"));
+        let mut open = open_book();
+        assert_eq!(pad_hints(&open, Pick::Btn(Btn::Book), false)[0], (Role::Select, "Close book"));
+        assert_eq!(pad_hints(&open, Pick::Row(3), false)[0], (Role::Select, "Pick"));
+        open.sel = Some(3);
+        assert_eq!(pad_hints(&open, Pick::Row(3), false)[0], (Role::Select, "Add set"));
+        assert_eq!(pad_hints(&open, Pick::Row(4), false)[0], (Role::Select, "Pick"));
+        assert_eq!(pad_hints(&open, Pick::Panel, false), [(Role::Back, "Close")], "nothing to press on leather");
+        assert_eq!(pad_hints(&open, Pick::Outside, true), [(Role::Select, "Throw"), (Role::Back, "Close")]);
+        assert_eq!(pad_hints(&open, Pick::Outside, false), [(Role::Back, "Close")]);
+        open.turn(Some(0));
+        assert_eq!(pad_hints(&open, Pick::Back, false), [(Role::Select, "Back"), (Role::Back, "Back")]);
+    }
+
+    /// What the hints keep off covers every button, the bag, the book with its tab, and so the grid, the result and the recipe card on it.
+    #[test]
+    fn the_hints_keep_off_the_grid_the_close_button_and_the_card() {
+        let contains = |a: [f32; 4], r: [f32; 4]| r[0] >= a[0] - 0.01 && r[1] >= a[1] - 0.01 && r[0] + r[2] <= a[0] + a[2] + 0.01 && r[1] + r[3] <= a[1] + a[3] + 0.01;
+        for gw in [2, 3] {
+            let mut sat = open_book();
+            sat.sel = Some(0);
+            let f = frame(&sat, &Inventory::default(), gw);
+            let (avoid, b) = (f.avoid(&sat), f.book.as_ref().expect("book"));
+            let covered = |r: [f32; 4]| avoid.iter().any(|a| contains(*a, r));
+            assert!(f.btns.iter().all(|(_, r)| covered(*r)), "every button, Close among them");
+            assert!(f.cells.iter().all(|(_, r)| covered(*r)), "every slot of the bag");
+            assert!(b.grid.iter().all(|(_, r)| covered(*r)), "the grid and the result ({gw}x{gw})");
+            assert!(covered(b.card) && covered(b.tab), "the card and the tab");
+        }
+        let closed = Satchel::new(false);
+        let f = frame(&closed, &Inventory::default(), 2);
+        assert!(f.avoid(&closed).iter().any(|a| contains(*a, f.book.as_ref().expect("book").rect)), "the cover");
     }
 }
