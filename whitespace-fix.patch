@@ -1,0 +1,12 @@
+diff -ruN qa/tools/boat_proto.py qb/tools/boat_proto.py
+--- qa/tools/boat_proto.py	2026-11-02 12:14:39.293644186 +0000
++++ qb/tools/boat_proto.py	2026-11-02 12:14:39.294839460 +0000
+@@ -28,7 +28,7 @@
+ d=0.7071
+ b=run(d,d,120); print("fwd+right 120t: heading",math.degrees(b.h()),"dx",b.x-32,"dz",b.z-32,"speed",math.hypot(b.vx,b.vz))
+ ang=math.degrees(math.atan2(b.vx,-b.vz)); print("  vel dir",ang,"vs heading",math.degrees(b.h())%360)
+-b=run(1,0,60); 
++b=run(1,0,60);
+ for _ in range(60): b.tick(0,0)
+ print("coast 60t after 60 fwd: speed",math.hypot(b.vx,b.vz))
+ # smoothness: max per-tick change of heading rate and speed

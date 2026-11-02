@@ -219,6 +219,10 @@ struct App {
     drops: Drops,
     mobs: Mobs,
     boats: boat::Boats,
+    /// How far the rider's head is turned from the boat's bow (radians, within +-90 degrees): the look drag turns the head, never the boat.
+    boat_head: f32,
+    /// Seconds until a finger held on a boat punches it again.
+    punch_cd: f32,
     carts: minecart::Carts,
     /// Detector rails switched on by a cart, to be switched off when it has gone (`scheduleBlockUpdate` of `BlockDetectorRail`).
     detectors: std::collections::HashSet<(i32, i32, i32)>,
@@ -435,6 +439,8 @@ impl App {
             drops: Drops::new(seed),
             mobs: Mobs::new(seed),
             boats: boat::Boats::default(),
+            boat_head: 0.0,
+            punch_cd: 0.0,
             carts: minecart::Carts::new(seed),
             detectors: std::collections::HashSet::new(),
             nether: false,
@@ -965,11 +971,11 @@ impl App {
         let asleep = self.sleep.is_some();
         if !asleep {
             let k = LOOK_SENS * (self.camera.fov_y / self.sprint.fov * 0.5).tan() / (self.opts.fov_deg().to_radians() * 0.5).tan() * self.opts.look_scale(); // neither the sprint's wider view nor the FOV setting speeds the look up, only the zoom slows it
-            self.camera.add_yaw(look_dx * k);
+            self.turn_head(look_dx * k);
             self.camera.add_pitch(look_dy * k * if self.opts.invert_mouse { -1.0 } else { 1.0 });
             // The right stick has its own sensitivity (Controls > Controller); only the zoom narrows it.
             let z = (self.camera.fov_y / self.sprint.fov * 0.5).tan() / (self.opts.fov_deg().to_radians() * 0.5).tan();
-            self.camera.add_yaw(pad_yaw * z);
+            self.turn_head(pad_yaw * z);
             self.camera.add_pitch(pad_pitch * z);
         }
         // Analog move stick: rotate the camera-frame (fwd, side) by yaw into
@@ -1174,14 +1180,8 @@ impl App {
                 _ => {}
             }
         }
-        // Boats (`EntityBoat.onUpdate`, 20 Hz ticks): the rider's own walking paddles the boat (`motion += rider.motion * 0.2`).
-        let paddle = match self.boats.ridden() {
-            Some(_) => {
-                let ((f, s), yaw) = (self.touch.move_input, self.camera.yaw);
-                glam::Vec3::new(f * yaw.sin() + s * yaw.cos(), 0.0, -f * yaw.cos() + s * yaw.sin()) * MOVE_SPEED / 20.0
-            }
-            None => glam::Vec3::ZERO,
-        };
+        // Boats (`EntityBoat.onUpdate`, 20 Hz ticks): forward / back is the throttle, the side only turns the hull (`Boat::drive`).
+        let paddle = if self.boats.ridden().is_some() { self.touch.move_input } else { (0.0, 0.0) };
         let boat_events = {
             let bget = |x: i32, y: i32, z: i32| self.chunks.block(x, y, z).map(|b| if is_plant(b) { 0 } else { physics_id(b, self.chunks.meta(x, y, z)) });
             self.boats.update(dt, &bget, paddle)
@@ -1240,11 +1240,14 @@ impl App {
             self.camera.pos = self.player.pos + glam::Vec3::new(0.0, EYE_HEIGHT - self.sneak_y, 0.0);
         }
         // `Entity.updateRiderPosition` for a boat: 0.4 behind the middle, feet 0.8 under the box's centre.
+        // Drawn where the hull is drawn (between the last two ticks), so the view glides; the view is the bow's heading plus the head's turn.
         if let Some(b) = self.boats.ridden() {
-            self.player.pos = b.rider_pos(physics::HALF.y);
+            let a = self.boats.alpha();
+            self.player.pos = b.rider_pos(physics::HALF.y, a);
             self.player.vel = glam::Vec3::ZERO;
             self.player.on_ground = true;
             self.camera.pos = self.player.pos + glam::Vec3::new(0.0, EYE_HEIGHT - self.sneak_y, 0.0);
+            self.camera.yaw = b.heading_at(a) + self.boat_head;
         }
         // `Entity.updateRiderPosition`: the rider's feet are 0.175 over the pig's (`getMountedYOffset` 0.675, `getYOffset` -0.5).
         if let Some(m) = self.mobs.list.iter().find(|m| m.ridden) {
@@ -1280,6 +1283,10 @@ impl App {
             let sneaking = self.touch.sneak && self.sleep.is_none();
             let (ground, vy) = (self.player.on_ground && !riding, self.player.vel.y / 20.0);
             self.body.tick(self.player.pos.x, self.player.pos.z, self.camera.yaw.to_degrees() + 180.0, ground, vy, !riding && !(ground && sneaking));
+            // In a boat the body sits square to the bow; only the head follows the view.
+            if let Some(b) = self.boats.ridden() {
+                self.body.face(b.heading_at(self.boats.alpha()).to_degrees() + 180.0);
+            }
             self.body.equip_tick(slot, self.inv.slots[slot]);
         }
         self.furn_acc += dt;
@@ -1489,11 +1496,26 @@ impl App {
             }
         }
 
+        // A finger held still on a boat (or the pad's attack held) punches it every 0.4 s; it never digs the block behind it.
+        self.punch_cd = (self.punch_cd - real_dt).max(0.0);
+        let mut punching = false;
+        if self.touch.resting() && self.carry.is_none() && self.screen.is_none() {
+            let (eye, fwd) = (self.camera.pos, self.camera.forward());
+            let wall = self.target.map_or(f32::MAX, |h| h.point.distance(eye.as_dvec3()) as f32);
+            let mob_t = self.mobs.pick(eye, fwd, pick::REACH as f32).filter(|&(_, t)| t < wall).map(|(_, t)| t);
+            if let Some((bi, _)) = self.boats.pick(eye, fwd, pick::REACH as f32).filter(|&(_, t)| t < wall && mob_t.map_or(true, |m| t < m)) {
+                punching = true;
+                if self.punch_cd == 0.0 {
+                    self.punch_cd = 0.4;
+                    self.punch_boat(bi, self.touch.hotbar_slot);
+                }
+            }
+        }
         // Digging runs on the 20 Hz game tick of the Java (hardness-based time, see world::dig).
         // A broken block drops its items (world::items) only if the held item may harvest it (stone needs a pickaxe),
         // and wears the tool (`Item.onBlockDestroyed`: 1 use, a sword 2, a hoe none).
         match self.target {
-            Some(hit) if self.touch.digging() && self.charge == 0 && !self.cd_rise => {
+            Some(hit) if self.touch.digging() && !punching && self.charge == 0 && !self.cd_rise => {
                 self.dig_acc += real_dt;
                 while self.dig_acc >= dig::TICK {
                     self.dig_acc -= dig::TICK;
@@ -1613,22 +1635,14 @@ impl App {
                 }
                 return;
             }
+            // A boat: the pad's attack tap punches it (and a finger held on it, below); any other tap gets in, whatever is in the hand.
             if let Some((bi, _)) = boat_t {
-                match self.inv.slots[slot].map(|s| s.id) {
-                    None => {
-                        if self.boats.ridden().is_none() {
-                            self.boats.list[bi].ridden = true;
-                        }
-                    }
-                    held => {
-                        let (dmg, wear) = mobs::attack(held);
-                        if self.boats.list[bi].hurt(dmg as i32) {
-                            self.smash_boat(bi);
-                        }
-                        if wear > 0 {
-                            self.inv.damage(slot, wear);
-                        }
-                    }
+                if strike {
+                    self.punch_boat(bi, slot);
+                } else if !self.riding() {
+                    self.boats.list[bi].ridden = true;
+                    self.boats.list[bi].set_heading(self.camera.yaw); // the boat faces where he looks; the head starts straight
+                    self.boat_head = 0.0;
                 }
                 return;
             }
@@ -2609,6 +2623,28 @@ impl App {
         let cell = (c.pos.x.floor() as i32, c.pos.y.floor() as i32, c.pos.z.floor() as i32);
         c.drops().into_iter().for_each(|s| self.drops.spawn_stack(s, cell));
         self.chests.remove(&c.key()).into_iter().flatten().flatten().for_each(|s| self.drops.scatter(s, cell));
+    }
+
+    /// The look drag (and the right stick) by `d` radians: on foot it turns the view; in a boat only the head turns, up to 90 degrees to
+    /// either side of the bow, and past that the view stays where it is.
+    fn turn_head(&mut self, d: f32) {
+        if self.boats.ridden().is_some() {
+            self.boat_head = (self.boat_head + d).clamp(-std::f32::consts::FRAC_PI_2, std::f32::consts::FRAC_PI_2);
+        } else {
+            self.camera.add_yaw(d);
+        }
+    }
+
+    /// A punch at a boat with what is in the hand (`attackEntityFrom`: damage x 10, over 40 breaks it); the tool wears.
+    fn punch_boat(&mut self, bi: usize, slot: usize) {
+        let (dmg, wear) = mobs::attack(self.inv.slots[slot].map(|s| s.id));
+        self.body.swing();
+        if self.boats.list[bi].hurt(dmg as i32) {
+            self.smash_boat(bi);
+        }
+        if wear > 0 {
+            self.inv.damage(slot, wear);
+        }
     }
 
     /// A boat that took its last hit: removed, 3 planks and 2 sticks dropped.

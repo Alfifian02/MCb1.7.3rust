@@ -824,7 +824,7 @@ const BOAT_BOXES: [BoatBox; 9] = {
 fn push_boat(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, b: &Boat, a: f32) {
     let t = b.hit_time as f32 - a;
     let rock = if t > 0.0 { (t.sin() * t * (b.damage as f32 - a).max(0.0) / 10.0 * b.rock as f32).to_radians() } else { 0.0 };
-    let root = Mat4::from_translation(b.prev.lerp(b.pos, a)) * Mat4::from_rotation_y(PI - b.yaw.to_radians()) * Mat4::from_rotation_x(rock);
+    let root = Mat4::from_translation(b.prev.lerp(b.pos, a)) * Mat4::from_rotation_y(PI - b.yaw_at(a).to_radians()) * Mat4::from_rotation_x(rock);
     let model = root * Mat4::from_translation(Vec3::new(0.0, 0.075, 0.0)) * Mat4::from_scale(Vec3::new(-1.0, -1.0, 1.0) / 16.0) * Mat4::from_rotation_y(PI);
     for bx in &BOAT_BOXES {
         let m = model * Mat4::from_translation(Vec3::from(bx.pivot)) * Mat4::from_rotation_z(bx.rot[2]) * Mat4::from_rotation_y(bx.rot[1]) * Mat4::from_rotation_x(bx.rot[0]);

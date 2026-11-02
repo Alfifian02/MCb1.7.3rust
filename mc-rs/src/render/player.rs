@@ -564,6 +564,11 @@ impl Anim {
         self.tilt += (if ground { 0.0 } else { (-vy * 0.2).atan() * 15.0 } - self.tilt) * 0.8;
     }
 
+    /// Square the body to `yaw` (degrees, as `tick`'s): a rider in a boat sits facing the bow, and only the head turns.
+    pub fn face(&mut self, yaw: f32) {
+        self.off = yaw;
+    }
+
     /// `ItemRenderer.updateEquippedItem`: the hand lowers when the hotbar slot or the item changes, and shows the new item once it
     /// is down (< 0.1). ponytail: `Minecraft.clickMouse` resets the progress when a place or use changes the stack size; here any
     /// drop of the count of the item in hand does (so does throwing one away).
