@@ -7,7 +7,7 @@
 
 use android_activity::AndroidApp;
 use core::ffi::c_void;
-use jni::objects::{Global, JObject, JObjectArray, JString};
+use jni::objects::{Global, JObject, JObjectArray};
 use jni::{jni_sig, jni_str, sys, JValue, JavaVM};
 
 const PERMS: [&str; 2] = ["android.permission.READ_MEDIA_IMAGES", "android.permission.READ_EXTERNAL_STORAGE"];
@@ -57,7 +57,7 @@ unsafe fn ask(vm: *mut c_void, activity: *mut c_void) -> jni::errors::Result<()>
         let raw = activity as sys::jobject;
         let activity = unsafe { env.as_cast_raw::<Global<JObject>>(&raw)? };
         let class = env.find_class(jni_str!("java/lang/String"))?;
-        let list: JObjectArray<JString> = env.new_object_array(PERMS.len() as i32, &class, JObject::null())?;
+        let list: JObjectArray = env.new_object_array(PERMS.len() as i32, &class, JObject::null())?;
         for (i, p) in PERMS.into_iter().enumerate() {
             let s = env.new_string(p)?;
             list.set_element(env, i, &s)?;
