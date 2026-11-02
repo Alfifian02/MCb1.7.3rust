@@ -9,7 +9,7 @@
 use crate::render::atlas;
 use crate::render::mesh::{lm, push_box, VF, WHITE};
 use crate::world::craft::{self, Kind};
-use crate::world::items::{placed_meta, ItemStack};
+use crate::world::items::{icon_meta, ItemStack};
 use glam::{Mat4, Vec3};
 use std::f32::consts::PI;
 
@@ -285,6 +285,7 @@ fn is_block3d(id: u16) -> bool {
 fn item_boxes(id: u8) -> Vec<[f32; 6]> {
     match id {
         44 => vec![[0.0, 0.0, 0.0, 1.0, 0.5, 1.0]],
+        70 | 72 => vec![[0.0, 0.375, 0.0, 1.0, 0.625, 1.0]], // a pressure plate: a flat tile in the middle of the cell (the cell's own bounds are 1/16 high)
         53 | 67 => vec![[0.0, 0.0, 0.0, 1.0, 0.5, 1.0], [0.0, 0.5, 0.0, 0.5, 1.0, 1.0]],
         85 => {
             let (a, b) = (0.125, 0.0625);
@@ -333,7 +334,7 @@ fn block3d(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, m: &Mat4, id: u8, meta: u8
 /// its block (`is_block3d`) or its sprite with the Java's own placement and the 1/16 thick edge strips (plants, torches and
 /// every item are sprites from `terrain.png` or `items.png`).
 pub fn render_item(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, m: &Mat4, s: ItemStack) {
-    let meta = placed_meta(s);
+    let meta = icon_meta(s);
     if is_block3d(s.id) {
         return block3d(verts, idxs, m, s.id as u8, meta);
     }
@@ -348,7 +349,7 @@ fn sprite_uv(s: ItemStack, meta: u8) -> Option<Box<dyn Fn(f32, f32) -> (f32, f32
         let id = s.id as u8;
         return Some(Box::new(move |u, v| atlas::face_uv(id, meta, 5, u, v)));
     }
-    let icon = atlas::item_icon(s.id)?;
+    let icon = atlas::item_icon_dmg(s.id, s.damage)?; // a dye's colour is its damage
     Some(Box::new(move |u, v| atlas::item_uv(icon, u, v)))
 }
 
@@ -356,10 +357,10 @@ fn sprite_uv(s: ItemStack, meta: u8) -> Option<Box<dyn Fn(f32, f32) -> (f32, f32
 /// (a quarter size, half for the ones that are not a full cube), anything else as its sprite on one flat quad half a block big
 /// turned toward the eye (`yaw`: from the item to the eye). ponytail: one copy, not the 2..4 of a big stack.
 pub fn drop_item(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, c: Vec3, spin: f32, yaw: f32, s: ItemStack) -> bool {
-    let meta = placed_meta(s);
+    let meta = icon_meta(s);
     if is_block3d(s.id) {
         let id = s.id as u8;
-        let k = if crate::world::chunk::normal_cube(id) || matches!(id, 44 | 54) { 0.25 } else { 0.5 };
+        let k = if crate::world::chunk::normal_cube(id) || matches!(id, 44 | 54 | 70 | 72) { 0.25 } else { 0.5 };
         block3d(verts, idxs, &(Mat4::from_translation(c) * Mat4::from_rotation_y(spin) * Mat4::from_scale(Vec3::splat(k))), id, meta);
         return true;
     }
@@ -458,6 +459,13 @@ pub fn inventory_quads(x: f32, y: f32, k: f32, pose: &Pose, worn: &Worn) -> Vec<
     let mut q = quads(&m, pose);
     q.extend(armor_quads(&m, pose, worn));
     q
+}
+
+/// The title screen's player (NOT b1.7.3): `inventory_quads` turned `yaw` radians about his own axis (0 = facing the viewer), no armor. `k`
+/// is px a GUI unit times the size wanted.
+pub fn title_quads(x: f32, y: f32, k: f32, pose: &Pose, yaw: f32) -> Vec<Quad> {
+    let m = Mat4::from_translation(Vec3::new(x, y, 0.0)) * Mat4::from_scale(Vec3::new(30.0, 30.0, -30.0) * k * (15.0 / 16.0 / 16.0)) * Mat4::from_rotation_y(yaw) * Mat4::from_translation(Vec3::new(0.0, -23.875, 0.0));
+    quads(&m, pose)
 }
 
 // ---- animation state ----

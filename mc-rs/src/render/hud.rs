@@ -50,7 +50,7 @@ pub const DPAD_SHEET: &[u8] = include_bytes!("../../assets/dpad.rgba");
 pub const MENU_SHEET: &[u8] = include_bytes!("../../assets/menu.rgba");
 /// The skins (`mob/char.png` and the armor, 64 x 32 each, four to a row, `atlas::skin_px`): 224 rows of the HUD texture, cut from the atlas's `ART` tail (`PLAYER_Y`).
 pub(crate) const SHEET_H: f32 = 3468.0;
-const PLAYER_Y: f32 = 2576.0;
+pub(crate) const PLAYER_Y: f32 = 2576.0;
 /// Where the font atlas starts in the HUD texture (the 64 rows after the player skin, see `font_sheet`).
 const FONT_Y: f32 = 2800.0;
 /// Where Cortes Combat's HUD sprites start (256 x 64, `tools/gen_combat_hud.py`): the 64 rows after the font atlas.
@@ -283,6 +283,19 @@ impl HudPipeline {
                 wgpu::Extent3d { width: 16, height: 16, depth_or_array_layers: 1 },
             );
         }
+    }
+
+    /// The player's skin (`skin::Look::apply`, 64 x 32 RGBA) over skin slot 0 of the HUD texture: the inventory and the title screen's model.
+    pub fn upload_skin(&self, queue: &Queue, px: &[u8]) {
+        if px.len() != crate::skin::BYTES {
+            return;
+        }
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo { texture: &self.items_tex, mip_level: 0, origin: wgpu::Origin3d { x: 0, y: PLAYER_Y as u32, z: 0 }, aspect: wgpu::TextureAspect::All },
+            px,
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(64 * 4), rows_per_image: Some(32) },
+            wgpu::Extent3d { width: 64, height: 32, depth_or_array_layers: 1 },
+        );
     }
 
     /// The held map's 128 x 128 RGBA pixels (`MapData::rgba`) into the map block of the HUD texture.

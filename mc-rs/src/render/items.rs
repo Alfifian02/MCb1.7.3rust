@@ -4,7 +4,7 @@
 
 use crate::gpu::gfx::{Buf, Gfx};
 use crate::render::{atlas, wolf_model};
-use crate::render::mesh::{lm, push_box, push_face, VF, WHITE};
+use crate::render::mesh::{lm, push_block_box, push_box, push_face, VF, WHITE};
 use crate::world::boat::Boat;
 use crate::world::minecart::Cart;
 use crate::world::decor::{self, Painting, Text};
@@ -14,20 +14,20 @@ use glam::{Mat4, Vec3};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use crate::world::items::{placed_meta, stack_tile, Drops, ItemStack, MAX_ITEMS};
+use crate::world::items::{icon_meta, stack_tile, Drops, ItemStack, MAX_ITEMS};
 use crate::world::pack::{self, Lay, Mat, Scene};
 use crate::world::mobs::{Kind, Kind::*, Mob, Mobs, MAX_ARROWS, MAX_FIREBALLS, MAX_MOBS};
 use crate::world::ticks::{Falling, MAX_FALLING};
 
 /// 24 vertices x 7 floats (`mesh::VF`) per cube, 36 indices per cube.
 /// A mob is at most 12 boxes (spider 11), an arrow one, a falling block one.
-/// Boats drawn at once (5 boxes each).
+/// Boats drawn at once (9 boxes each, in both windings: 18 boxes of the budget).
 const MAX_BOATS: usize = 16;
 /// Carts drawn at once (floor, four walls and the furnace: 6 boxes each); the pack's cloth and all that lies on it are `pack::BOXES` more.
 const MAX_CARTS: usize = 16;
 /// Spawner cages drawn at once (one mob of at most 12 boxes each).
 const MAX_SPAWNERS: usize = 16;
-const BOXES: usize = MAX_ITEMS * 4 + MAX_MOBS * 12 + MAX_SPAWNERS * 12 + MAX_ARROWS + MAX_FIREBALLS + MAX_FALLING + MAX_PARTICLES + MAX_BOLTS + MAX_BOATS * 5 + MAX_CARTS * 6 + pack::BOXES + 1;
+const BOXES: usize = MAX_ITEMS * 4 + MAX_MOBS * 12 + MAX_SPAWNERS * 12 + MAX_ARROWS + MAX_FIREBALLS + MAX_FALLING + MAX_PARTICLES + MAX_BOLTS + MAX_BOATS * 18 + MAX_CARTS * 6 + pack::BOXES + 1;
 /// Paintings (16 px pieces, one face each), signs (a board and a post of 6 two-sided faces) and the sign text (one quad per run
 /// of lit font pixels), on top of the boxes.
 const MAX_SIGNS: usize = 32;
@@ -203,7 +203,7 @@ fn geometry(drops: &Drops, mobs: &Mobs, falling: &[Falling], fx: &Effects, lv: &
         push_box(&mut verts, &mut idxs, [p.x - h, p.y, p.z - h], [p.x + h, p.y + 2.0 * h, p.z + h], stack_tile(ItemStack { id: 35, count: 1, damage: 14 }), 1.0);
         lit(&mut verts, n0, lv, p);
     }
-    // A falling block is a 0.98 box in its block's flat colour (`EntityFallingSand`).
+    // A falling block is a 0.98 box in its block's own tiles (`EntityFallingSand`).
     for f in falling {
         let c = f.prev.lerp(f.pos, a);
         if !seen(c, 1.5) {
@@ -211,26 +211,28 @@ fn geometry(drops: &Drops, mobs: &Mobs, falling: &[Falling], fx: &Effects, lv: &
         }
         let n0 = verts.len();
         if f.mv.is_some() {
-            // A moving piston piece: the block's own bounds (head plate, trimmed base) in its flat colour, `meta` as the damage.
+            // A moving piston piece: the block's own bounds (head plate, trimmed base), `meta` picks the face with the piston's front.
             let b = crate::world::chunk::box_bounds(f.id, f.meta).unwrap_or([0.0, 0.0, 0.0, 1.0, 1.0, 1.0]);
             let o = c - Vec3::splat(0.5);
-            push_box(&mut verts, &mut idxs, [o.x + b[0], o.y + b[1], o.z + b[2]], [o.x + b[3], o.y + b[4], o.z + b[5]], stack_tile(ItemStack { id: f.id as u16, count: 1, damage: f.meta as u16 }), 1.0);
+            push_block_box(&mut verts, &mut idxs, [o.x, o.y, o.z], b, f.id, f.meta, 1.0); // the block's real tiles, not its flat colour
             lit(&mut verts, n0, lv, c);
             continue;
         }
         let h = 0.49;
         // `RenderTNTPrimed`: every other 5 ticks of the fuse the block flashes white (ponytail: a flat white box, not the additive overlay).
         let flash = f.id == 46 && f.fuse >= 0 && (f.fuse / 5) % 2 == 0;
-        let tile = if flash { stack_tile(ItemStack { id: 35, count: 1, damage: 0 }) } else { stack_tile(ItemStack { id: f.id as u16, count: 1, damage: 0 }) };
-        push_box(&mut verts, &mut idxs, [c.x - h, c.y - h, c.z - h], [c.x + h, c.y + h, c.z + h], tile, 1.0);
+        let (id, meta) = if flash { (35, 0) } else { (f.id, 0) }; // white wool for the flash
+        let o = c - Vec3::splat(0.5);
+        push_block_box(&mut verts, &mut idxs, [o.x, o.y, o.z], [0.5 - h, 0.5 - h, 0.5 - h, 0.5 + h, 0.5 + h, 0.5 + h], id, meta, 1.0);
         lit(&mut verts, n0, lv, c);
     }
-    // Water and spawner particles: small full-bright boxes in a flat colour (wool: white, light blue, orange, grey). ponytail: no
-    // textured quads facing the camera (`EntityFX.renderParticle`), no sprite from `particles.png`.
+    // Water and spawner particles: small full-bright boxes in a flat colour (wool: white, light blue, orange, grey); a block's specks wear its
+    // real tile (`atlas::particle_tile`). ponytail: no textured quads facing the camera (`EntityFX.renderParticle`), no sprite from
+    // `particles.png`, the whole tile (not vanilla's random 4 x 4 texel patch) on the little box.
     for p in fx.particles.iter().filter(|p| seen(p.pos, 1.0)) {
         let (c, h) = (p.prev.lerp(p.pos, a), p.half * 0.5);
         let (tile, light) = match p.kind {
-            Fx::Dig(t) => (t, 0.6), // `EntityDiggingFX`: colour x 0.6
+            Fx::Dig(t) => (t, 0.6), // `EntityDiggingFX`: colour x 0.6 (`t` is a terrain tile, `atlas::particle_tile`)
             k => (stack_tile(ItemStack { id: 35, count: 1, damage: match k { Fx::Bubble => 0, Fx::Splash => 3, Fx::Flame => 1, Fx::Heart => 14, Fx::Spray => 0, Fx::Leaf => 13, Fx::Twig => 12, Fx::Slash => 0, Fx::Crit => 4, _ => 7 } }), 1.0),
         };
         push_box(&mut verts, &mut idxs, [c.x - h, c.y - h, c.z - h], [c.x + h, c.y + h, c.z + h], tile, light);
@@ -324,7 +326,7 @@ fn push_lay(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, m: &Mat, l: &Lay, shadow:
         return;
     }
     let (cx, cy) = l.centre();
-    let (s, meta, half) = (l.stack, placed_meta(l.stack), side * pack::UNIT * 0.5);
+    let (s, meta, half) = (l.stack, icon_meta(l.stack), side * pack::UNIT * 0.5);
     let (u, r) = m.axes();
     let (h, off) = if shadow { (pack::REST + 0.001, (r * 0.5 - u) * (0.012 + l.lift * 0.5)) } else { (l.base(), Vec3::ZERO) };
     let c = m.at(cx, cy, h) + off;
@@ -349,7 +351,7 @@ fn push_lay(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, m: &Mat, l: &Lay, shadow:
     let uv = move |u: f32, v: f32| -> (f32, f32) {
         if s.id < 256 {
             atlas::face_uv(s.id as u8, meta, 5, u, v)
-        } else if let Some(icon) = atlas::item_icon(s.id) {
+        } else if let Some(icon) = atlas::item_icon_dmg(s.id, s.damage) {
             atlas::item_uv(icon, u, v)
         } else {
             atlas::atlas_uv(stack_tile(s), u, v)
@@ -785,25 +787,68 @@ fn push_cart(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, c: &Cart, a: f32) {
     }
 }
 
-/// `RenderBoat` / `ModelBoat`: a floor and four low walls, turned to `180 - yaw` and rocking about x for a while after a hit
-/// (`sin(t) * t * damage / 10 * direction` degrees). UNVERIFIED stand-in: planks instead of `item/boat.png`.
+/// One box of `ModelBoat` (1.16+, the one with a paddle on each side; texture 128 x 64): `ModelRenderer.addBox(min, size)` with its texture
+/// offset, turned about `pivot` by `rot` (z, then y, then x, `ModelRenderer.render`). Model pixels, y down.
+struct BoatBox {
+    tex: [f32; 2],
+    min: [f32; 3],
+    size: [f32; 3],
+    pivot: [f32; 3],
+    rot: [f32; 3],
+}
+
+/// The bottom, the stern (18 wide), the bow (16 wide), the two sides, then the left and the right paddle (shaft, blade) at rest
+/// (x = mid of `ModelBoat.animatePaddle`'s range -pi/3 ..= -pi/12, blades dipped; y swept back; the right one turned to pi - y).
+/// ponytail: the paddles do not row (`ModelBoat.animatePaddle`), and there is no water patch (`boat_water_mask`).
+const BOAT_BOXES: [BoatBox; 9] = {
+    const H: f32 = std::f32::consts::FRAC_PI_2;
+    const PX: f32 = -0.6545; // -(pi/3 + pi/12) / 2
+    const PY: f32 = -0.6605; // swept back (blades trailing aft), 38 degrees: UNVERIFIED by eye, the Java's y range is +-pi/4 over a stroke
+    [
+        BoatBox { tex: [0.0, 0.0], min: [-14.0, -9.0, -3.0], size: [28.0, 16.0, 3.0], pivot: [0.0, 3.0, 1.0], rot: [H, 0.0, 0.0] },
+        BoatBox { tex: [0.0, 19.0], min: [-13.0, -7.0, -1.0], size: [18.0, 6.0, 2.0], pivot: [-15.0, 4.0, 4.0], rot: [0.0, 3.0 * H, 0.0] },
+        BoatBox { tex: [0.0, 27.0], min: [-8.0, -7.0, -1.0], size: [16.0, 6.0, 2.0], pivot: [15.0, 4.0, 0.0], rot: [0.0, H, 0.0] },
+        BoatBox { tex: [0.0, 35.0], min: [-14.0, -7.0, -1.0], size: [28.0, 6.0, 2.0], pivot: [0.0, 4.0, -9.0], rot: [0.0, 2.0 * H, 0.0] },
+        BoatBox { tex: [0.0, 43.0], min: [-14.0, -7.0, -1.0], size: [28.0, 6.0, 2.0], pivot: [0.0, 4.0, 9.0], rot: [0.0, 0.0, 0.0] },
+        BoatBox { tex: [62.0, 0.0], min: [-1.0, 0.0, -5.0], size: [2.0, 2.0, 18.0], pivot: [3.0, -5.0, 9.0], rot: [PX, PY, 0.0] },
+        BoatBox { tex: [62.0, 0.0], min: [-1.001, -3.0, 8.0], size: [1.0, 6.0, 7.0], pivot: [3.0, -5.0, 9.0], rot: [PX, PY, 0.0] },
+        BoatBox { tex: [62.0, 20.0], min: [-1.0, 0.0, -5.0], size: [2.0, 2.0, 18.0], pivot: [3.0, -5.0, -9.0], rot: [PX, 2.0 * H - PY, 0.0] },
+        BoatBox { tex: [62.0, 20.0], min: [0.001, -3.0, 8.0], size: [1.0, 6.0, 7.0], pivot: [3.0, -5.0, -9.0], rot: [PX, 2.0 * H - PY, 0.0] },
+    ]
+};
+
+/// `RenderBoat` / `ModelBoat`: turned to `180 - yaw` and rocking about x for a while after a hit (`sin(t) * t * damage / 10 * direction` degrees),
+/// then the model as the Java draws it: flipped (model y is down), 1/16, its y 0 at 0.375 over the boat's feet (`posY` is the middle of the 0.6 box, so 0.075
+/// over it). The modern model has its bow on +x and `Boat::yaw` is the way the boat CAME from (b1.7.3), so the model is turned 180 degrees first (the
+/// Java 1.16 turns it 90 because its yaw is the way the boat faces). The boxes are unwrapped like `player::limb_quads` (`ModelRenderer.faces`, 0.1 px inset), both windings.
 fn push_boat(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, b: &Boat, a: f32) {
     let t = b.hit_time as f32 - a;
     let rock = if t > 0.0 { (t.sin() * t * (b.damage as f32 - a).max(0.0) / 10.0 * b.rock as f32).to_radians() } else { 0.0 };
     let root = Mat4::from_translation(b.prev.lerp(b.pos, a)) * Mat4::from_rotation_y(PI - b.yaw.to_radians()) * Mat4::from_rotation_x(rock);
-    let tile = stack_tile(ItemStack { id: 5, count: 1, damage: 0 });
-    for (min, size) in [
-        ([-0.75, -0.375, -0.5], [1.5, 0.25, 1.0]),
-        ([-0.75, -0.1875, -0.625], [0.125, 0.375, 1.25]),
-        ([0.625, -0.1875, -0.625], [0.125, 0.375, 1.25]),
-        ([-0.625, -0.1875, -0.625], [1.25, 0.375, 0.125]),
-        ([-0.625, -0.1875, 0.5], [1.25, 0.375, 0.125]),
-    ] {
-        let n0 = verts.len();
-        push_box(verts, idxs, min, [min[0] + size[0], min[1] + size[1], min[2] + size[2]], tile, 1.0);
-        for v in verts[n0..].chunks_exact_mut(VF) {
-            let w = root.transform_point3(Vec3::new(v[0], v[1], v[2]));
-            v[..3].copy_from_slice(&w.to_array());
+    let model = root * Mat4::from_translation(Vec3::new(0.0, 0.075, 0.0)) * Mat4::from_scale(Vec3::new(-1.0, -1.0, 1.0) / 16.0) * Mat4::from_rotation_y(PI);
+    for bx in &BOAT_BOXES {
+        let m = model * Mat4::from_translation(Vec3::from(bx.pivot)) * Mat4::from_rotation_z(bx.rot[2]) * Mat4::from_rotation_y(bx.rot[1]) * Mat4::from_rotation_x(bx.rot[0]);
+        let ([dx, dy, dz], [ox, oy]) = (bx.size, bx.tex);
+        let (x1, y1, z1) = (bx.min[0], bx.min[1], bx.min[2]);
+        let (x2, y2, z2) = (x1 + dx, y1 + dy, z1 + dz);
+        let c = [[x1, y1, z1], [x2, y1, z1], [x2, y2, z1], [x1, y2, z1], [x1, y1, z2], [x2, y1, z2], [x2, y2, z2], [x1, y2, z2]];
+        let faces: [([usize; 4], [f32; 4]); 6] = [
+            ([5, 1, 2, 6], [ox + dz + dx, oy + dz, ox + dz + dx + dz, oy + dz + dy]),
+            ([0, 4, 7, 3], [ox, oy + dz, ox + dz, oy + dz + dy]),
+            ([5, 4, 0, 1], [ox + dz, oy, ox + dz + dx, oy + dz]),
+            ([2, 3, 7, 6], [ox + dz + dx, oy, ox + dz + dx + dx, oy + dz]),
+            ([1, 0, 3, 2], [ox + dz, oy + dz, ox + dz + dx, oy + dz + dy]),
+            ([4, 5, 6, 7], [ox + dz + dx + dz, oy + dz, ox + dz + dx + dz + dx, oy + dz + dy]),
+        ];
+        for (vi, [u0, v0, u1, v1]) in faces {
+            let uv = [[u1 - 0.1, v0 + 0.1], [u0 + 0.1, v0 + 0.1], [u0 + 0.1, v1 - 0.1], [u1 - 0.1, v1 - 0.1]];
+            let base = verts.len() as u32 / VF as u32;
+            for k in 0..4 {
+                let p = m.transform_point3(Vec3::from(c[vi[k]]));
+                let (u, v) = atlas::boat_px(uv[k][0], uv[k][1]);
+                verts.extend_from_slice(&[p.x, p.y, p.z, u, v, 1.0, lm(15, 0), WHITE]);
+            }
+            idxs.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3, base, base + 2, base + 1, base, base + 3, base + 2]);
         }
     }
 }

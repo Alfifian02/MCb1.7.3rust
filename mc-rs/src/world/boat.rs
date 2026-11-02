@@ -5,7 +5,7 @@
 //! crash stops it and only a slanting one breaks it, exactly as in b1.7.3.
 //! Units are the Java ones: blocks and blocks per 20 Hz tick, yaw in degrees (the direction the boat came from, `atan2(dz, dx)`).
 //! ponytail: no wake splashes, no `handleWaterMovement` (flowing water does not push it; a stream's current from `gen::hydro` does), a move is made in 5 cm steps instead of
-//! the exact `moveEntity` snap, boats are not saved, no boat.png (the model is drawn in planks).
+//! the exact `moveEntity` snap, boats are not saved, the paddles of the modern model (`render::items::push_boat`, Bedrock `boat_oak.png`) rest and do not row.
 
 use glam::Vec3;
 

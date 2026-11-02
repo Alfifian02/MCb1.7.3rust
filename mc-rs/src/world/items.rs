@@ -118,6 +118,12 @@ pub fn placed_meta(s: ItemStack) -> u8 {
     }
 }
 
+/// The metadata a block item is DRAWN with (`RenderBlocks.renderBlockOnInventory`): the one it places, except a piston and a sticky piston,
+/// which are drawn as metadata 1 (the face up, so the inventory shows the piston's front and not its back plate).
+pub fn icon_meta(s: ItemStack) -> u8 {
+    if matches!(s.id, 29 | 33) { 1 } else { placed_meta(s) }
+}
+
 // ---- Block.idDropped / quantityDropped / damageDropped ----
 // ponytail: blocks whose drop reads metadata and that nothing can make or place yet (stairs)
 // are missing; their drops go in with the blocks. Slabs are here because the drop is two lines.

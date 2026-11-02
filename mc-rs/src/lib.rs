@@ -15,6 +15,7 @@ mod immersive;
 #[cfg(feature = "pad-rumble")]
 mod rumble;
 mod menu;
+mod skin;
 mod options;
 mod stats_ui;
 mod ui;
@@ -358,6 +359,10 @@ impl App {
         crate::gles::set_want(opts.renderer);
         let be = Backend::new(opts.renderer == 2, native_ptr, width, height).await?;
         log::info!("renderer: {}", be.gpu_info());
+        let look = skin::Look::load(&dir);
+        if look != skin::Look::default() {
+            be.upload_skin(&look.apply()); // the atlas and the HUD sheet are built with `mob/char.png`; the saved look goes over it
+        }
 
         // No world yet: the title screen is up (`enter_world` loads one, and does it again for `LAST_WORLD` below).
         let start = glam::Vec3::ZERO;
@@ -1508,7 +1513,7 @@ impl App {
                             let (brk, pitch) = (audio::STEP[audio::step_of(id)].1, audio::STEP[audio::step_of(id)].2 * 0.8);
                             self.audio.play(brk, glam::Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5), 1.0, pitch);
                             self.touch.pad.rumble(60, 140); // `RumbleSource.INTERACTION`: a block breaks
-                            self.fx.dig(hit.pos, crate::render::atlas::tile_of(id, meta)); // `addBlockDestroyEffects`
+                            self.fx.dig(hit.pos, crate::render::atlas::particle_tile(id, meta)); // `addBlockDestroyEffects`: the block's own tile
                             if let (61 | 62, Some(f)) = (id, self.furnaces.remove(&hit.pos)) {
                                 for st in f.slots.into_iter().flatten() {
                                     self.drops.scatter(st, hit.pos);
@@ -2529,7 +2534,7 @@ impl App {
             let (p, v) = (self.player.pos, self.player.vel / 20.0);
             let (x, y, z) = (p.x.floor() as i32, (p.y - 0.9 - 0.2).floor() as i32, p.z.floor() as i32); // 0.2 under the feet
             if let Some(id) = self.chunks.block(x, y, z).filter(|&b| b > 0 && !matches!(b, 8..=11)) {
-                let tile = atlas::tile_of(id, self.chunks.meta(x, y, z));
+                let tile = atlas::particle_tile(id, self.chunks.meta(x, y, z));
                 self.fx.sprint_dust(glam::Vec3::new(p.x, p.y - 0.9, p.z), v, tile);
             }
         }
@@ -4069,6 +4074,9 @@ impl App {
         if m.quit {
             std::process::exit(0); // Quit Game: nothing is loaded, so nothing to save
         }
+        if let Some(px) = m.take_skin() {
+            self.be.upload_skin(&px); // the skin screen changed the look
+        }
         self.hud_verts.clear();
         m.draw(&mut self.hud_verts, w, h, &self.opts);
         let cur = self.touch.pad.shows_cursor().then_some(self.touch.cursor_pos);
@@ -4823,7 +4831,7 @@ fn draw_pack(v: &mut Vec<HudVertex>, (w, h): (f32, f32), (m, vp): (&pack::Mat, g
 /// grass and leaf tints, everything with another shape (plants, torches, rails, the ladder, wire, doors, signs, the lever, the
 /// button, the bed...) as its flat tile. `false`: the block has no tile (the caller draws the flat colour).
 fn push_block_icon(v: &mut Vec<HudVertex>, (x, y, w, h): (f32, f32, f32, f32), s: ItemStack) -> bool {
-    let (id, meta) = (s.id as u8, items::placed_meta(s));
+    let (id, meta) = (s.id as u8, items::icon_meta(s));
     let tile = |side: u8| atlas::terrain_tile(id, meta, side).map(u16::from);
     let flat = pack::flat_icon(id);
     let grass = icon_tint(crate::world::climate::grass(0.8, 0.4));
@@ -4845,7 +4853,7 @@ fn push_block_icon(v: &mut Vec<HudVertex>, (x, y, w, h): (f32, f32, f32, f32), s
     };
     let overlay = (id == 2).then_some((38, grass));
     // The cactus tiles are 14 wide inside a transparent border (the world mesh pulls its faces in by 1/16): trim it so the cube stays solid.
-    HudPipeline::push_cube(v, (x, y, w, h), [(top, tint[0]), (left, tint[1]), (right, tint[2])], overlay, if id == 44 { 0.5 } else { 1.0 }, if id == 81 { 1.0 } else { 0.0 });
+    HudPipeline::push_cube(v, (x, y, w, h), [(top, tint[0]), (left, tint[1]), (right, tint[2])], overlay, pack::icon_height(id as u16), if id == 81 { 1.0 } else { 0.0 });
     true
 }
 
@@ -4866,7 +4874,7 @@ fn push_stack(v: &mut Vec<HudVertex>, (cx, cy, cw, ch): (f32, f32, f32, f32), fi
     // Blocks are their isometric cube (plants, torches, rails... their flat tile), items their `gui/items.png` sprite (tools and shears
     // included); anything without either keeps the flat shapes.
     if !(s.id < 256 && push_block_icon(v, (hx, hy, hw, hh), s)) {
-    match (s.id >= 256).then(|| atlas::item_icon(s.id)).flatten() {
+    match (s.id >= 256).then(|| atlas::item_icon_dmg(s.id, s.damage)).flatten() { // a dye's colour is its damage
     Some(icon) => HudPipeline::push_sprite(v, hx, hy, hw, hh, icon),
     None => match craft::tool(s.id) {
         None if s.id == craft::SHEARS => {

@@ -307,6 +307,17 @@ impl Backend {
         }
     }
 
+    /// The player's skin (`skin::Look::apply`) into the atlas and the HUD texture.
+    pub fn upload_skin(&self, px: &[u8]) {
+        match self {
+            Backend::Wgpu(w) => {
+                w.pipe.upload_skin(&w.gpu.queue, px);
+                w.hud.upload_skin(&w.gpu.queue, px);
+            }
+            Backend::Gles(g) => g.upload_skin(px),
+        }
+    }
+
     /// The held map's 128 x 128 RGBA pixels into the HUD texture (`world::map::MapData::rgba`).
     pub fn upload_map(&self, px: &[u8]) {
         match self {

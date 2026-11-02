@@ -104,6 +104,7 @@ pub const fn cross_shape(id: u8) -> Option<(f32, f32)> {
         39 | 40 => Some((0.2, 0.4)),   // mushrooms
         31 | 32 => Some((0.4, 0.8)),   // tall grass, dead bush
         83 => Some((0.375, 1.0)),      // reeds
+        30 => Some((0.5, 1.0)),        // cobweb (`BlockWeb`, render type 1: crossed quads, the whole cell to pick; `is_plant` stays false, it is no plant)
         51 => Some((0.5, 1.0)),        // fire (ponytail: crossed quads on tile 31, not `renderBlockFire`'s flames)
         _ => None,
     }

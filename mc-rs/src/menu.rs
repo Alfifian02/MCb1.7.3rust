@@ -10,6 +10,8 @@ use crate::input::touch_ui::ScreenEv;
 use crate::options::{OptEv, OptionsUi, Settings};
 use crate::ui;
 use crate::render::hud::{sprites as sp, HudPipeline, HudVertex, NO_UV};
+use crate::render::player;
+use crate::skin::{self, Look};
 use crate::world::gen::overworld::WorldType;
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -151,6 +153,8 @@ pub enum Scr {
     Rename,
     /// `GuiOptions`, from the title screen's "Options...".
     Options,
+    /// NOT b1.7.3: the skin customizer, from the title screen's model button (`skin::Look`: tone, hair, shirt, trousers).
+    Skin,
 }
 
 /// A `GuiButton`: id, rectangle in GUI units, label, enabled.
@@ -185,6 +189,12 @@ pub struct Menu {
     opt: OptionsUi,
     /// `GameSettings.guiScale` of the last event / frame.
     gs: u8,
+    /// The player's look (`<root>/skin.txt`), the title screen's model wears it; `skin_dirty` says the GPU does not have it yet (`take_skin`).
+    look: Look,
+    skin_dirty: bool,
+    /// The skin screen's model: degrees a drag has turned it, and the x (px) the finger was last at.
+    spin: f32,
+    drag_x: f32,
 }
 
 /// `ScaledResolution` with `guiScale` `gs` (0 auto, else at most that scale): (scale, width, height in GUI units).
@@ -229,7 +239,36 @@ impl Menu {
             quit: false,
             opt: OptionsUi::new(),
             gs: 0,
+            look: Look::load(root),
+            skin_dirty: false,
+            spin: 0.0,
+            drag_x: 0.0,
         }
+    }
+
+    /// The title screen's player stands left of the button stack: the room there (GUI units) and the middle of it.
+    fn side(hw: f32) -> (f32, f32) {
+        let space = hw - 112.0; // the stack's panel starts at hw - 100 - 12
+        (space, space / 2.0)
+    }
+
+    /// The new skin (64 x 32 RGBA) when the look changed since the last call: the app writes it into the atlas and the HUD sheet.
+    pub fn take_skin(&mut self) -> Option<Vec<u8>> {
+        std::mem::take(&mut self.skin_dirty).then(|| self.look.apply())
+    }
+
+    fn set_look(&mut self, l: Look) {
+        if l != self.look {
+            self.look = l;
+            self.look.save(&self.root);
+            self.skin_dirty = true;
+        }
+    }
+
+    /// The player as the title and skin screens show him: feet at (`cx`, `feet`) GUI units, `mult` times the inventory's size, turned `yaw`.
+    fn model(v: &mut Vec<HudVertex>, s: f32, (cx, feet): (f32, f32), mult: f32, yaw: f32, ms: f32) {
+        let pose = player::Pose { age: ms / 50.0, ..Default::default() };
+        HudPipeline::push_player(v, player::title_quads(cx * s, feet * s, s * mult, &pose, yaw));
     }
 
     // ---- layout ----
@@ -240,12 +279,16 @@ impl Menu {
         match self.scr {
             Scr::Main => {
                 let y = (gh / 4.0).floor() + 48.0;
+                // The model's button sits under his feet (the stack's bottom, y + 104), as wide as the room left of the stack allows.
+                let (space, cx) = Self::side(hw);
+                let bw = (space - 8.0).clamp(40.0, 96.0);
                 vec![
                     b(1, hw - 100.0, y, 200.0, "Singleplayer", true),
                     b(2, hw - 100.0, y + 24.0, 200.0, "Multiplayer", false),
                     b(3, hw - 100.0, y + 48.0, 200.0, "Mods and Texture Packs", false),
                     b(0, hw - 100.0, y + 84.0, 98.0, "Options...", true),
                     b(4, hw + 2.0, y + 84.0, 98.0, "Quit Game", true),
+                    b(5, (cx - bw / 2.0).max(2.0), y + 110.0, bw, if bw >= 90.0 { "Customize Skin" } else { "Skin..." }, true),
                 ]
             }
             Scr::Select => vec![
@@ -274,6 +317,20 @@ impl Menu {
                 vec![b(0, hw - 100.0, y, 200.0, "Rename", !self.name.trim().is_empty()), b(1, hw - 100.0, y + 24.0, 200.0, "Cancel", true)]
             }
             Scr::Options => Vec::new(),
+            Scr::Skin => {
+                // The right half: the four palettes, Reset and Done under the title's band; the model has the left half.
+                let (x, w) = (hw + 8.0, (hw - 16.0).min(150.0));
+                let l = |p: usize, t: &str| format!("{t}: {}", self.look.name(p));
+                let c = |id, y, label: &str| Btn(id, [x, y, w, 20.0], label.to_string(), true);
+                vec![
+                    c(1, 34.0, &l(skin::SKIN, "Skin Tone")),
+                    c(2, 58.0, &l(skin::HAIR, "Hair")),
+                    c(3, 82.0, &l(skin::SHIRT, "Shirt")),
+                    c(4, 106.0, &l(skin::PANTS, "Pants")),
+                    c(5, 134.0, "Reset"),
+                    c(0, (gh - 28.0).max(162.0), "Done"),
+                ]
+            }
         }
     }
 
@@ -359,10 +416,20 @@ impl Menu {
         match ev {
             ScreenEv::Down(x, y) => {
                 self.press = Some((x / s, y / s));
-                (self.press_scroll, self.dragging) = (self.scroll, false);
+                (self.press_scroll, self.dragging, self.drag_x) = (self.scroll, false, x);
             }
-            ScreenEv::Move(_, y) => {
-                if let Some((_, py)) = self.press {
+            ScreenEv::Move(x, y) => {
+                if let Some((px, py)) = self.press {
+                    // On the skin screen a sideways drag turns the model (and is not a tap on the button it ends over).
+                    if self.scr == Scr::Skin {
+                        if (x / s - px).abs() > 4.0 {
+                            self.dragging = true;
+                        }
+                        if self.dragging {
+                            self.spin += (x - self.drag_x) / s * 1.2;
+                        }
+                        self.drag_x = x;
+                    }
                     if (y / s - py).abs() > 4.0 {
                         self.dragging = true;
                     }
@@ -429,6 +496,14 @@ impl Menu {
             (Scr::Main, 0) => (self.opt, self.scr) = (OptionsUi::new(), Scr::Options),
             (Scr::Main, 1) => self.open_list(),
             (Scr::Main, 4) => self.quit = true,
+            (Scr::Main, 5) => (self.scr, self.spin) = (Scr::Skin, 0.0),
+            (Scr::Skin, 0) => self.scr = Scr::Main,
+            (Scr::Skin, 5) => self.set_look(Look::default()),
+            (Scr::Skin, id @ 1..=4) => {
+                let mut l = self.look;
+                l.cycle(id as usize - 1);
+                self.set_look(l);
+            }
             (Scr::Select, 0) => self.scr = Scr::Main,
             (Scr::Select, 1) => self.loading = self.sel.and_then(|i| self.worlds.get(i)).cloned(),
             (Scr::Select, 2) => self.scr = Scr::Delete,
@@ -479,9 +554,9 @@ impl Menu {
         (self.worlds, self.sel, self.scroll, self.scr) = (list(&self.root), None, 0.0, Scr::Select);
     }
 
-    /// The title screen itself shows the panorama (`render_menu` draws it under the HUD); every other screen keeps its dirt.
+    /// The title screen and the skin screen show the panorama (`render_menu` draws it under the HUD); every other screen keeps its dirt.
     pub fn panorama(&self) -> bool {
-        self.scr == Scr::Main && !self.shown_loading
+        matches!(self.scr, Scr::Main | Scr::Skin) && !self.shown_loading
     }
 
     // ---- drawing ----
@@ -530,8 +605,11 @@ impl Menu {
                     p.pos = [ox + px * cs - py * sn, oy + px * sn + py * cs];
                 }
                 // a panel behind the stack of buttons, so the panorama does not fight the labels
-                let (x0, y0, x1, y1) = self.buttons(gw, gh).iter().fold((f32::MAX, f32::MAX, 0.0f32, 0.0f32), |a, b| (a.0.min(b.1[0]), a.1.min(b.1[1]), a.2.max(b.1[0] + b.1[2]), a.3.max(b.1[1] + b.1[3])));
+                let (x0, y0, x1, y1) = self.buttons(gw, gh).iter().filter(|b| b.0 != 5).fold((f32::MAX, f32::MAX, 0.0f32, 0.0f32), |a, b| (a.0.min(b.1[0]), a.1.min(b.1[1]), a.2.max(b.1[0] + b.1[2]), a.3.max(b.1[1] + b.1[3])));
                 ui::panel(v, s, [x0 - 12.0, y0 - 12.0, x1 - x0 + 24.0, y1 - y0 + 24.0], 0.4);
+                // The player, left of the stack with his feet on its bottom line, swaying a quarter turn each way (his face stays in view).
+                let (space, cx) = Self::side(hw);
+                Self::model(v, s, (cx, y1), (space / 44.0).clamp(0.8, 1.6), 25f32.to_radians() * (ms / 1200.0).sin(), ms);
                 txt(v, 2.0, 2.0, "Minecraft Beta 1.7.3", 0xFFFFFF, false); // was 0x505050, grey on dirt: unreadable over the panorama
                 txt(v, 2.0, 12.0, &crate::version::label(), 0xA0A0A0, false); // the CI build and commit (`version.rs`), `dev` for a local build
                 let c = "Copyright Mojang AB. Do not distribute.";
@@ -549,6 +627,16 @@ impl Menu {
                 }
             }
             Scr::Options => {}
+            Scr::Skin => {
+                ui::title(v, s, gw, 0.0, "Customize Skin", true);
+                // The player, big, on the left half, turning slowly (a drag turns him by hand).
+                let mult = ((gh - 80.0) / 60.0).clamp(1.0, 3.0);
+                let feet = (gh + 24.0) / 2.0 + 56.25 * mult / 2.0;
+                Self::model(v, s, (hw / 2.0, feet), mult, (ms * 0.03 + self.spin).to_radians(), ms);
+                txt(v, hw / 2.0, gh - 12.0, "Drag to turn", 0xA0A0A0, true);
+                let (x, w) = (hw + 8.0, (hw - 16.0).min(150.0));
+                ui::panel(v, s, [x - 6.0, 30.0, w + 12.0, (gh - 28.0).max(162.0) + 26.0 - 30.0], 0.4);
+            }
             Scr::Rename => {
                 ui::title(v, s, gw, 0.0, "Rename World", true);
                 txt(v, hw - 100.0, 47.0, "World Name", 0xA0A0A0, false);
@@ -693,6 +781,51 @@ mod tests {
         assert_eq!(folder_for(&root, "a/b:c"), "a_b_c");
         std::fs::create_dir_all(saves(&root).join("x")).unwrap();
         assert_eq!(folder_for(&root, " x "), "x-");
+    }
+
+    /// Main -> the model's button -> the skin screen: each palette button steps its colour and hands the app a new skin once, the choice is kept
+    /// in `skin.txt`, a sideways drag turns the model and presses nothing, Reset and Done; both screens draw the 42 quads of the model.
+    #[test]
+    fn the_skin_screen_changes_the_look_and_hands_over_the_skin_once() {
+        let root = tmp("skin");
+        let (sz, mut st) = ((2400.0, 1080.0), Settings::default());
+        let mut m = Menu::new(&root);
+        assert!(m.take_skin().is_none(), "nothing changed yet");
+        let mut v = Vec::new();
+        m.draw(&mut v, sz.0, sz.1, &st);
+        assert!(v.len() > 42 * 6, "the title screen draws the player ({} vertices)", v.len());
+        assert!(v.iter().all(|p| p.pos[0].is_finite() && p.pos[1].is_finite()));
+        tap(&mut m, "Customize Skin", sz);
+        assert_eq!(m.scr, Scr::Skin);
+        assert!(m.panorama(), "the skin screen keeps the title screen's backdrop");
+        v.clear();
+        m.draw(&mut v, sz.0, sz.1, &st);
+        assert!(v.len() > 42 * 6, "the skin screen draws the player");
+        tap(&mut m, "Hair: Brown", sz);
+        assert_eq!(m.look, Look([0, 1, 0, 0]));
+        let px = m.take_skin().expect("a new skin");
+        assert_eq!(px.len(), skin::BYTES);
+        assert!(m.take_skin().is_none(), "handed over once");
+        tap(&mut m, "Skin Tone: Steve", sz);
+        tap(&mut m, "Shirt: Cyan", sz);
+        tap(&mut m, "Pants: Blue", sz);
+        assert_eq!(m.look, Look([1, 1, 1, 1]));
+        assert_eq!(Look::load(&root), m.look, "kept on disk");
+        assert_eq!(Menu::new(&root).look, m.look, "and found again by the next title screen");
+        let before = m.spin;
+        for ev in [ScreenEv::Down(300.0, 500.0), ScreenEv::Move(380.0, 500.0), ScreenEv::Up(380.0, 500.0)] {
+            m.event(ev, sz.0, sz.1, &mut st);
+        }
+        assert!(m.spin > before && m.look == Look([1, 1, 1, 1]) && m.scr == Scr::Skin, "a drag turns the model and nothing else");
+        tap(&mut m, "Reset", sz);
+        assert_eq!(m.look, Look::default());
+        assert!(m.take_skin().is_some() && m.take_skin().is_none());
+        tap(&mut m, "Done", sz);
+        assert_eq!(m.scr, Scr::Main);
+        // A 4:3 screen has the least room left of the stack: the button shrinks to "Skin..." and still opens the screen.
+        let small = (640.0, 480.0);
+        tap(&mut m, "Skin...", small);
+        assert_eq!(m.scr, Scr::Skin);
     }
 
     /// Main -> Select -> Create (a name, the Blooming type: two taps of the type button) -> the world is on disk, listed, loading; then delete it.

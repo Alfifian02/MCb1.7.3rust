@@ -76,7 +76,10 @@ pub const SKIN_SLOTS: usize = 28;
 /// Under them NOT b1.7.3: the 64 x 48 wolf skins (`wolf.rgba`, `tools/gen_wolf.py`), four to a row, `WOLF_ROWS` rows from `WOLF_Y`.
 pub const WOLF_Y: usize = ART_Y + 256 + 32 + 32 * SKIN_SLOTS.div_ceil(4);
 pub const WOLF_ROWS: usize = 240;
-pub const ATLAS_H: usize = WOLF_Y + WOLF_ROWS;
+/// Under the wolves NOT b1.7.3: the modern boat's 128 x 64 texture (`boat.rgba`, `tools/gen_boat.py`, left half of 256 x `BOAT_ROWS`) at `BOAT_Y`.
+pub const BOAT_Y: usize = WOLF_Y + WOLF_ROWS;
+pub const BOAT_ROWS: usize = 64;
+pub const ATLAS_H: usize = BOAT_Y + BOAT_ROWS;
 /// Mip levels of the atlas (a 16 px tile has 16, 8, 4 px: three levels never mix two tiles at the middle of a tile).
 pub const MIPS: u32 = 3;
 /// `gui/items.png` as RGBA (256 x 256, 16 x 16 px sprites): `Item.iconIndex` picks the sprite (`item_icon`).
@@ -89,6 +92,8 @@ pub const ART_TILE0: u16 = 2000;
 pub const ART: &[u8] = include_bytes!("../../assets/art.rgba");
 /// The wolf skins (256 x `WOLF_ROWS`): coat 0..6 (`mobs::COATS`) x wild, tame, angry, as `skin::WOLF0 + coat * 3 + state`.
 pub const WOLF: &[u8] = include_bytes!("../../assets/wolf.rgba");
+/// The modern boat texture (Bedrock `entity/boat/boat_oak.png`, 128 x 64) on a clear 256 x 64 sheet.
+pub const BOAT: &[u8] = include_bytes!("../../assets/boat.rgba");
 pub const TERRAIN: &[u8] = include_bytes!("../../assets/terrain.rgba");
 
 /// `EntitySheep.fleeceColorTable`: the wool colours, indexed by the cloth metadata (0 white .. 15 black).
@@ -159,6 +164,7 @@ pub fn atlas_rgba() -> Vec<u8> {
     v.extend_from_slice(ITEMS);
     v.extend_from_slice(ART);
     v.extend_from_slice(WOLF);
+    v.extend_from_slice(BOAT);
     v
 }
 
@@ -213,6 +219,11 @@ pub fn sign_px(x: f32, y: f32) -> (f32, f32) {
 /// Atlas UV of pixel (`x`, `y`) of `mob/char.png` (y down like the png).
 pub fn char_px(x: f32, y: f32) -> (f32, f32) {
     skin_px(0, x, y)
+}
+
+/// Atlas UV of pixel (`x`, `y`) of the 128 x 64 boat texture (y down like the png).
+pub fn boat_px(x: f32, y: f32) -> (f32, f32) {
+    (x / ATLAS_W as f32, (BOAT_Y as f32 + y) / ATLAS_H as f32)
 }
 
 /// Atlas UV of pixel (`x`, `y`) of the 64 x 32 skin in `slot` (y down like the png; `tools/gen_terrain.py` `SKINS` is the order).
@@ -400,8 +411,41 @@ pub const fn terrain_tile(id: u8, meta: u8, side: u8) -> Option<u8> {
         30 => 11,
         90 => 14,
         95 => if side <= 1 { 25 } else if side == 3 { 27 } else { 26 },
+        // The tiles `mesh::push_flat` / `push_torch` draw these with (the mesher does not ask here): `BlockRail` 128, 112 for a curve (metadata
+        // 6..=9); the powered rail 163 off / 179 on; the detector 195; the ladder 83; redstone dust 164 (the dot); a redstone torch 115 out / 99 lit.
+        // A sign has no tile of its own in the Java (`ItemSign` is a sprite, the model is an entity): its break specks are planks.
+        66 => if meta >= 6 { 112 } else { 128 },
+        27 => if meta & 8 == 0 { 163 } else { 179 },
+        28 => 195,
+        65 => 83,
+        55 => 164,
+        75 => 115,
+        76 => 99,
+        63 | 68 => 4,
         _ => return None,
     })
+}
+
+/// `Item.getIconFromDamage`: the `items.png` sprite of a stack. Only the dye (351) changes with its damage (`ItemDye`: `iconIndex + (d % 8) * 16 + d / 8`,
+/// the ink sac at 78 down the 14th column, then the 15th); the damage of every other item is its wear.
+pub fn item_icon_dmg(id: u16, damage: u16) -> Option<u8> {
+    let d = (damage & 15) as u8;
+    match id {
+        351 => item_icon(351).map(|i| i + (d % 8) * 16 + d / 8),
+        _ => item_icon(id),
+    }
+}
+
+/// A mesh tile number from here up is a `terrain.png` tile (`TERRAIN_TILE0 + tile`): one tile on every face of a box (`mesh::push_face`).
+pub const TERRAIN_TILE0: u16 = 3000;
+
+/// The mesh tile of a block's break / walk specks (`EntityDiggingFX`: `getBlockTextureFromSideAndMetadata(0, meta)`, so grass is dirt and a
+/// log its end grain): its real `terrain.png` tile, or the flat colour of `tile_of` where the block has none.
+pub fn particle_tile(id: u8, meta: u8) -> u16 {
+    match terrain_tile(id, meta, 0).or_else(|| terrain_tile(id, meta, 2)) {
+        Some(t) => TERRAIN_TILE0 + t as u16,
+        None => tile_of(id, meta),
+    }
 }
 
 /// UV of a corner of a block face: its terrain tile, or the flat colour of `tile_of` where there is none. `face` is the
@@ -428,6 +472,7 @@ mod tests {
         assert_eq!(TERRAIN.len(), 256 * 256 * 4);
         assert_eq!(ART.len(), 256 * (WOLF_Y - ART_Y) * 4, "kz.png over sign.png over the skins");
         assert_eq!(WOLF.len(), 256 * WOLF_ROWS * 4, "six coats x three states, 64 x 48, four to a row");
+        assert_eq!(BOAT.len(), 256 * BOAT_ROWS * 4, "the 128 x 64 boat texture on a 256 wide sheet");
         assert_eq!(ATLAS_H % 16, 0, "the shaders count the atlas in tiles");
         assert_eq!(ATLAS_H % 16, 0, "the shaders count tile rows");
         assert!(art_uv(255, 1.0, 0.0).1 * (ATLAS_H as f32) < (ART_Y + 256) as f32, "the last piece stays above the sign rows");

@@ -682,6 +682,14 @@ impl ChunkPipeline {
         }
     }
 
+    /// The player's skin (`skin::Look::apply`, 64 x 32 RGBA) over skin slot 0 of the atlas. Level 0 only: every skin row (`CHAR_Y` on) is read
+    /// at mip 0 by the shaders, so the mips of that band are never sampled.
+    pub fn upload_skin(&self, queue: &Queue, px: &[u8]) {
+        if px.len() == crate::skin::BYTES {
+            self.write_rgba(queue, 0, [0, atlas::CHAR_Y as u32], [64, 32], px);
+        }
+    }
+
     fn write_rgba(&self, queue: &Queue, level: u32, origin: [u32; 2], size: [u32; 2], rgba: &[u8]) {
         queue.write_texture(
             wgpu::TexelCopyTextureInfo { texture: &self.atlas_tex, mip_level: level, origin: wgpu::Origin3d { x: origin[0], y: origin[1], z: 0 }, aspect: wgpu::TextureAspect::All },

@@ -404,6 +404,24 @@ impl Renderer {
         }
     }
 
+    /// The player's skin (`skin::Look::apply`, 64 x 32 RGBA) over skin slot 0 of the atlas (level 0: the shaders read skins there) and of the
+    /// HUD sheet (`hud::PLAYER_Y`).
+    pub fn upload_skin(&self, px: &[u8]) {
+        if px.len() != crate::skin::BYTES {
+            return;
+        }
+        let f = self.gl.f();
+        // SAFETY: `px` holds 64 x 32 RGBA texels and both writes lie inside their textures.
+        unsafe {
+            (f.ActiveTexture)(TEXTURE0 + U_ATLAS);
+            (f.BindTexture)(TEXTURE_2D, self.atlas);
+            (f.TexSubImage2D)(TEXTURE_2D, 0, 0, atlas::CHAR_Y as i32, 64, 32, RGBA, UNSIGNED_BYTE, px.as_ptr() as *const _);
+            (f.ActiveTexture)(TEXTURE0 + U_HUD);
+            (f.BindTexture)(TEXTURE_2D, self.hud_tex);
+            (f.TexSubImage2D)(TEXTURE_2D, 0, 0, hud::PLAYER_Y as i32, 64, 32, RGBA, UNSIGNED_BYTE, px.as_ptr() as *const _);
+        }
+    }
+
     /// The held map in the HUD sheet (`hud::MAP_Y`, 128 x 128).
     pub fn upload_map(&self, px: &[u8]) {
         if px.len() < 128 * 128 * 4 {

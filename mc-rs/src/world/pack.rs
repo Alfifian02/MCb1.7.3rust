@@ -599,9 +599,19 @@ pub fn pick(inv: &Inventory, lays: &[Lay], m: &Mat, rig: &Rig, aspect: f32, size
     slot_at(inv, x, y)
 }
 
-/// The blocks the inventory draws as their flat tile and not a cube: plants, torches, rails, doors, the bed ...
+/// The blocks the inventory draws as their flat tile and not a cube: plants, the cobweb, torches, rails, doors, the bed ...
 pub fn flat_icon(id: u8) -> bool {
-    crate::world::chunk::cross_shape(id).is_some() || matches!(id, 26 | 27 | 28 | 50 | 51 | 55 | 63 | 64 | 65 | 66 | 68 | 69 | 71 | 75 | 76 | 77 | 90 | 92 | 93 | 94 | 96)
+    crate::world::chunk::cross_shape(id).is_some() || matches!(id, 26 | 27 | 28 | 30 | 50 | 51 | 55 | 63 | 64 | 65 | 66 | 68 | 69 | 71 | 75 | 76 | 77 | 90 | 92 | 93 | 94 | 96)
+}
+
+/// How high the cube of a block item is drawn, of its width: a slab is half of it, a pressure plate a quarter (a plate is 1/16 in the world;
+/// the inventory shows it as a flat tile you can tell from a block), every other cube all of it.
+pub fn icon_height(id: u16) -> f32 {
+    match id {
+        44 => 0.5,
+        70 | 72 => 0.25,
+        _ => 1.0,
+    }
 }
 
 /// A stack that lies on the cloth as a small cube (a block with a cube's shape); anything else is a flat sprite.
@@ -646,7 +656,7 @@ impl Lay {
 
     /// Height of the cube (a slab is half of it), blocks; a sprite has none.
     pub fn height(&self) -> f32 {
-        if self.cube() { self.side() * UNIT * if self.stack.id == 44 { 0.5 } else { 1.0 } } else { 0.0 }
+        if self.cube() { self.side() * UNIT * icon_height(self.stack.id) } else { 0.0 }
     }
 
     /// Where its underside is: a hair over `REST` (so its shadow lies under it), lifted, and dropping in while it grows.
