@@ -3,6 +3,7 @@
 
 use glam::Vec3;
 
+use crate::world::chunk::normal_cube;
 use crate::world::craft::SHEARS;
 use crate::world::gen::noise::JavaRandom;
 use crate::world::items::ItemStack;
@@ -222,6 +223,35 @@ impl Hook {
     }
 }
 
+/// `ItemDye.onItemUse` with bone meal (damage 15) on grass: 128 random walks that grow longer every 16 tries (`i / 16` steps of
+/// x +-1, y 0 or +-1, z +-1) from the cell above the grass; a walk dies when a step leaves the grass or lands in a normal cube.
+/// An empty end cell gets tall grass (9 in 10), else a dandelion (2 in 3) or a rose. Returns the cells to fill as
+/// (x, y, z, id, meta); an unloaded cell must read as non-air, non-grass. Draws from the item's own `Random` like the Java.
+pub fn bone_meal_grass(get: &dyn Fn(i32, i32, i32) -> u8, r: &mut JavaRandom, (x, y, z): (i32, i32, i32)) -> Vec<(i32, i32, i32, u8, u8)> {
+    let mut out: Vec<(i32, i32, i32, u8, u8)> = Vec::new();
+    'walk: for i in 0..128 {
+        let (mut a, mut b, mut c) = (x, y + 1, z);
+        for _ in 0..i / 16 {
+            a += r.next_int_bound(3) - 1;
+            b += (r.next_int_bound(3) - 1) * r.next_int_bound(3) / 2;
+            c += r.next_int_bound(3) - 1;
+            if get(a, b - 1, c) != 2 || normal_cube(get(a, b, c)) {
+                continue 'walk;
+            }
+        }
+        if get(a, b, c) == 0 && !out.iter().any(|o| (o.0, o.1, o.2) == (a, b, c)) {
+            out.push(if r.next_int_bound(10) != 0 {
+                (a, b, c, 31, 1)
+            } else if r.next_int_bound(3) != 0 {
+                (a, b, c, 37, 0)
+            } else {
+                (a, b, c, 38, 0)
+            });
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -282,5 +312,20 @@ mod tests {
         let mut d = Hook::cast(Vec3::new(0.5, 61.0, 0.5), Vec3::new(0.0, -1.0, 0.0), &mut r);
         (0..30).for_each(|_| { d.tick(&dry, &mut r, false); });
         assert_eq!(d.catch(Vec3::ZERO), (None, 2));
+    }
+
+    #[test]
+    fn bone_meal_seeds_only_empty_cells_above_grass() {
+        let flat = |_: i32, y: i32, _: i32| -> u8 { if y == 63 { 2 } else if y < 63 { 3 } else { 0 } };
+        let out = bone_meal_grass(&flat, &mut JavaRandom::new(5), (0, 63, 0));
+        assert!(out.len() > 20, "a patch, not a single plant: {}", out.len());
+        assert!(out.iter().all(|&(x, y, z, id, m)| y == 64 && x.abs() <= 7 && z.abs() <= 7 && matches!((id, m), (31, 1) | (37, 0) | (38, 0))));
+        let mut cells: Vec<_> = out.iter().map(|o| (o.0, o.2)).collect();
+        cells.sort();
+        cells.dedup();
+        assert_eq!(cells.len(), out.len(), "no cell twice");
+        assert!(out.iter().filter(|o| o.3 == 31).count() > out.len() / 2, "mostly tall grass");
+        let capped = |_: i32, y: i32, _: i32| -> u8 { if y == 63 { 2 } else if y == 64 { 1 } else { 3 } };
+        assert!(bone_meal_grass(&capped, &mut JavaRandom::new(5), (0, 63, 0)).is_empty(), "stone on top: nothing grows");
     }
 }

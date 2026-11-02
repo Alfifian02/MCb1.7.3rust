@@ -9,7 +9,7 @@ How it was made: the decompiled `minecraft/src` (675 classes: 84 blocks, 103 ite
 | # | What | Java | State in mc-rs | Size |
 |---|------|------|----------------|------|
 | 3 | ~~Map item~~ | `ItemMap`, `MapData`, `MapItemRenderer`, `MapStorage`, recipe 358 = paper ring round a compass | **done 2026-10-30 (gameplay entry 36)**, not compiled; loaded chunks only, flat HUD sheet in hand | done |
-| 8 | Bone meal on blocks | `ItemDye.onItemUse` (damage 15): sapling -> `BlockSapling.growTree`, crops -> `BlockCrops.fertilize` (metadata 7), grass -> spreads tall grass and flowers (`ItemDye` lines 22 on) | only the recipe (bone -> bone meal) and dyeing sheep (`gear::use_on_mob`); `lib.rs` `use_held` and the block-use path have no branch for it. `ChunkManager::grow_tree` (used by the sapling tick) exists to call | small (found 2026-10-30; not in any earlier audit) |
+| 8 | ~~Bone meal on blocks~~ | `ItemDye.onItemUse` (damage 15) | **done 2026-11-02**, not compiled: `lib.rs` (block-use path, before seeds) + `gear::bone_meal_grass`; sapling -> `grow_tree`, crops -> metadata 7, grass -> 128 walks of tall grass / flowers; one used up each time | done |
 | 4 | Chat | `GuiChat`, `ChatLine` | nothing (a single-player port has no sender except commands; the overlay is the deferred rest of M14) | medium |
 | 5 | ~~Achievements and Statistics~~ | `AchievementList`, `GuiAchievements`, `GuiAchievement` (toast), `StatList`, `GuiStats` | **done 2026-11-01 (gameplay entry 41)**, not compiled: `world/stats.rs`, `stats_ui.rs`, touch screens | done |
 | 6 | Mods and Texture Packs | `TexturePackList`, `GuiTexturePacks` | button drawn greyed out | large, and arguably off-goal |

@@ -1938,6 +1938,32 @@ impl App {
                 }
                 return;
             }
+            // ItemDye.onItemUse, bone meal (351, damage 15): sapling -> `growTree`, crops -> metadata 7 (`fertilize`), grass ->
+            // 128 random walks of tall grass and flowers. One is used up even when the tree does not fit. Anything else: no use.
+            if self.inv.slots[slot].is_some_and(|s| s.id == 351 && s.damage == 15) {
+                let (x, y, z) = hit.pos;
+                match self.chunks.block_loaded(x, y, z) {
+                    Some(6) => {
+                        let species = self.chunks.meta(x, y, z) & 3;
+                        self.chunks.grow_tree(x, y, z, species, &mut self.mobs.rng);
+                        self.inv.consume(slot);
+                    }
+                    Some(59) => {
+                        self.chunks.set_block_meta(x, y, z, 59, 7);
+                        self.inv.consume(slot);
+                    }
+                    Some(2) => {
+                        let get = |a, b, c| self.chunks.block_loaded(a, b, c).unwrap_or(1);
+                        let cells = gear::bone_meal_grass(&get, &mut self.mobs.rng, (x, y, z));
+                        for (a, b, c, id, m) in cells {
+                            self.chunks.set_block_meta(a, b, c, id, m);
+                        }
+                        self.inv.consume(slot);
+                    }
+                    _ => {}
+                }
+                return;
+            }
             // ItemSeeds.onItemUse: only the top face of farmland with air above; one seed becomes a crops block (meta 0).
             if self.inv.slots[slot].is_some_and(|s| s.id == 295) {
                 let (x, y, z) = hit.pos;
