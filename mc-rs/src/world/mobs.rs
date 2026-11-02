@@ -52,6 +52,19 @@ const NEAR: f32 = 48.0;
 const SPACING: f32 = 12.0;
 const CAP_KIND: usize = 5;
 const ANIMALS: [Kind; 5] = [Pig, Cow, Sheep, Chicken, Wolf];
+/// The animals of `CAP_ANIMALS` and `CAP_KIND`: the wolves have a quota of their own, so a pack of them never takes a herd's places.
+const FARM: [Kind; 4] = [Pig, Cow, Sheep, Chicken];
+/// NOT b1.7.3: wolves, counted around the player like the animals. A pack is 3..=5 (`pack` tries each member three times), a new one
+/// starts `WOLF_APART` from every other wolf, and a try is made on 1 in `WOLF_ONE_IN` of the animal ticks. UNVERIFIED by eye.
+const CAP_WOLVES: usize = 8;
+const WOLF_APART: f32 = 32.0;
+const WOLF_ONE_IN: i32 = 6;
+/// NOT b1.7.3 (`animalAi`): a pack wolf more than `PACK_LOOSE` blocks from its leader runs (`PACK_SPEED` x its walk) to catch up; the leader
+/// picks its next cell within `PACK_ROAM` (the others within 6) so the pack travels; a pack wolf despawns only beyond `PACK_STAY` (squared).
+const PACK_LOOSE: f32 = 8.0;
+const PACK_SPEED: f32 = 1.25;
+const PACK_ROAM: i32 = 16;
+const PACK_STAY: f32 = 96.0 * 96.0;
 /// `Mobs::count_near`'s radius for a count that is not local (monsters, squid: the old global caps).
 const ANYWHERE: f32 = f32::INFINITY;
 const CAP_MONSTERS: usize = 10;
@@ -131,6 +144,11 @@ pub struct Mob {
     pub voice: u8,
     /// Wolf, NOT b1.7.3 (`animalAi`): the sheep a wild wolf is hunting, set by `Mobs::hunt`.
     prey: Option<Vec3>,
+    /// Wolf, NOT b1.7.3 (`animalAi`): the pack it was born in (the `id` of its first member), where its leader is while this wolf lags
+    /// behind (`Mobs::pack_walk`), and whether it is that leader (the lowest `id` of the living wild wolves of the pack).
+    pack: Option<u32>,
+    lead: Option<Vec3>,
+    leader: bool,
     /// Sheep, NOT b1.7.3 (`animalAi`): the cell it has just grazed; `Mobs::update` turns it into `Ev::Graze`.
     bit: Option<(i32, i32, i32)>,
     /// Pig: wearing a saddle, and carrying the player (`riddenByEntity`).
@@ -215,9 +233,10 @@ pub const COAT_CHESTNUT: u8 = 3;
 pub const COAT_SNOWY: u8 = 4;
 pub const COAT_WOODS: u8 = 5;
 
-/// NOT b1.7.3: where wolves spawn: the forest and the taiga (b1.7.3's lists) and the snowy birch grove.
+/// NOT b1.7.3: where wolves spawn: the forest and the taiga (b1.7.3's lists, where the seasonal forest is a `BiomeGenForest` too), the
+/// snowy birch grove, and the Blooming woods (`coat_for` already gives them a coat).
 pub fn wolf_land(b: Biome) -> bool {
-    matches!(b, Biome::Forest | Biome::Taiga | Biome::SnowyBirchGrove)
+    matches!(b, Biome::Forest | Biome::SeasonalForest | Biome::Taiga | Biome::SnowyBirchGrove | Biome::AutumnalForest | Biome::OakWoodland | Biome::WetWoodland)
 }
 
 /// NOT b1.7.3: the coat a wolf born in biome `b` wears (`roll` is 0..8): the woods wolf in the forests, the snowy one in the grove, and in
@@ -434,7 +453,7 @@ impl Mob {
         // ponytail: a process-wide counter (as `Cart::new` has), so callers of `new` need no id plumbing; it wraps after 2^32 mobs.
         static NEXT: AtomicU32 = AtomicU32::new(0);
         Self { id: NEXT.fetch_add(1, Ordering::Relaxed), kind, body: Player { pos, vel: Vec3::ZERO, on_ground: false }, yaw, health: hp as f32, limb: 0.0, limb_amt: 0.0, hurt: 0, death: 0, size, color, sheared: false,
-            fuse: 0, tame: false, sitting: false, prey: None, bit: None, coat: COAT_PALE, voice: if kind == Wolf { ((x.to_bits() ^ z.to_bits().rotate_left(11)) % VOICES as u32) as u8 } else { 0 }, saddled: false, ridden: false, you: false, dealt: 0.0, half, age: 0, yaw_vel: 0.0, look: None, goal: None, fspeed: 0.0, jumping: false, wet: false, damp: false, blocked: false, life: 0,
+            fuse: 0, tame: false, sitting: false, prey: None, pack: None, lead: None, leader: false, bit: None, coat: COAT_PALE, voice: if kind == Wolf { ((x.to_bits() ^ z.to_bits().rotate_left(11)) % VOICES as u32) as u8 } else { 0 }, saddled: false, ridden: false, you: false, dealt: 0.0, half, age: 0, yaw_vel: 0.0, look: None, goal: None, fspeed: 0.0, jumping: false, wet: false, damp: false, blocked: false, life: 0,
             last: 0.0, target: false, shot: false, lit: false, anger: 0, attack_time: 0, hop: 0, egg: rng.next_int_bound(6000) + 6000, fire: 0,
             free: 0, swim: Vec3::ZERO, path: Vec::new(), path_i: 0, smart: false, wander: false, panic: 0, scare: Vec3::ZERO, mate: None, graze: 0, rest: 0, gait: 1.0, head: 0.0, munch: 0.0, body_yaw: yaw, head_pitch: 0.0, look_pitch: 0.0, talk: 0, cry: None, airborne: false, enraged: false, growl: 0, charge: 0, prev_charge: 0, anim: 0.0, wp: pos, course: 0 }
     }
@@ -612,7 +631,8 @@ impl Mob {
             return true;
         }
         if self.age > 600 && rng.next_int_bound(800) == 0 {
-            if d2 < 1024.0 { self.age = 0 } else { return true }
+            let stay = if self.pack.is_some() { PACK_STAY } else { 1024.0 };
+            if d2 < stay { self.age = 0 } else { return true }
         }
         false
     }
@@ -794,7 +814,8 @@ impl Mob {
             return true;
         }
         let hunting = self.prey.is_some() && !self.target && !self.tame;
-        let chasing = self.target || hunting || (k == Wolf && self.tame && d2 > 25.0);
+        let trailing = self.lead.is_some() && !self.target && !self.tame && !hunting; // NOT b1.7.3 (`animalAi`): a pack wolf catching up
+        let chasing = self.target || hunting || trailing || (k == Wolf && self.tame && d2 > 25.0);
         if chasing && self.wander {
             (self.wander, self.path_i) = (false, 0);
             self.path.clear();
@@ -804,6 +825,8 @@ impl Mob {
         }
         if let (true, Some(p)) = (hunting, self.prey) {
             self.chase_at(rng, c, p); // NOT b1.7.3 (`animalAi`): a wild wolf after a sheep
+        } else if let (true, Some(p)) = (trailing, self.lead) {
+            self.chase_at(rng, c, p); // NOT b1.7.3 (`animalAi`): a pack wolf after its leader
         } else if chasing {
             self.chase(rng, c); // a tame wolf more than 5 blocks off follows its owner the same way
         } else if self.smart && animal(k) {
@@ -812,9 +835,11 @@ impl Mob {
             // `func_31026_E`: of 10 random cells within 6 x 3 x 6 the best weight, grass 10.
             let mut best: Option<(f32, (i32, i32))> = None;
             for _ in 0..10 {
-                let x = (pos.x + rng.next_int_bound(13) as f32 - 6.0).floor() as i32;
+                // NOT b1.7.3 (`animalAi`): a pack's leader looks `PACK_ROAM` out instead of 6, so the pack travels.
+                let (span, reach) = if self.leader { (2 * PACK_ROAM + 1, PACK_ROAM as f32) } else { (13, 6.0) };
+                let x = (pos.x + rng.next_int_bound(span) as f32 - reach).floor() as i32;
                 let y = (pos.y - self.half.y + rng.next_int_bound(7) as f32 - 3.0).floor() as i32;
-                let z = (pos.z + rng.next_int_bound(13) as f32 - 6.0).floor() as i32;
+                let z = (pos.z + rng.next_int_bound(span) as f32 - reach).floor() as i32;
                 let w = if get(x, y - 1, z) == Some(2) { 10.0 } else { -0.5 };
                 if best.map_or(true, |b| w > b.0) {
                     best = Some((w, (x, z)));
@@ -826,11 +851,12 @@ impl Mob {
         let speed = match k {
             PigZombie if self.target => 0.95,
             _ if hunting => spec(k).3 * HUNT_SPEED,
+            _ if trailing => spec(k).3 * PACK_SPEED,
             _ if self.panic > 0 => spec(k).3 * PANIC_SPEED,
             _ if self.wander => spec(k).3 * self.gait, // only a smart animal wanders by path
             _ => spec(k).3,
         };
-        if let (Some((gx, gz)), true) = (self.goal, self.goal.is_some() && (self.target || hunting || self.panic > 0 || rng.next_int_bound(100) != 0)) {
+        if let (Some((gx, gz)), true) = (self.goal, self.goal.is_some() && (self.target || hunting || trailing || self.panic > 0 || rng.next_int_bound(100) != 0)) {
             self.jumping = false;
             let (dx, dz) = (gx - pos.x, gz - pos.z);
             // A point of a path is passed by `chase` (within width x 2); only a bare goal (a wander cell, the player) ends here.
@@ -1411,6 +1437,27 @@ impl Mobs {
         }
     }
 
+    /// NOT b1.7.3 (`animalAi`): the wild wolves of a pack walk as one. The living wild wolf of the pack with the lowest `id` leads (when it dies the
+    /// next one does); every other one more than `PACK_LOOSE` blocks from it gets its place in `Mob::lead` and runs to it (`ai_walk`).
+    /// A tame wolf leaves the pack's walk. With the switch off nothing is set.
+    fn pack_walk(&mut self) {
+        let wild = |m: &Mob| m.kind == Wolf && !m.tame && m.health > 0.0;
+        let mut heads: Vec<(u32, u32, Vec3)> = Vec::new();
+        for m in self.list.iter().filter(|&m| self.smart && wild(m)) {
+            let Some(p) = m.pack else { continue };
+            match heads.iter_mut().find(|h| h.0 == p) {
+                Some(h) if m.id < h.1 => (h.1, h.2) = (m.id, m.body.pos),
+                Some(_) => {}
+                None => heads.push((p, m.id, m.body.pos)),
+            }
+        }
+        for m in &mut self.list {
+            let head = m.pack.filter(|_| wild(m)).and_then(|p| heads.iter().find(|h| h.0 == p));
+            m.leader = head.is_some_and(|h| h.1 == m.id);
+            m.lead = head.filter(|h| h.1 != m.id && (h.2.x - m.body.pos.x).hypot(h.2.z - m.body.pos.z) > PACK_LOOSE).map(|h| h.2);
+        }
+    }
+
     /// Before each AI tick: the `smart` switch and each animal's nearest mate of its kind within 24 blocks (`Mob::mate`, the herd's pull).
     fn herd(&mut self) {
         let at: Vec<(Kind, Vec3)> = if self.smart { self.list.iter().map(|m| (m.kind, m.body.pos)).collect() } else { Vec::new() };
@@ -1465,10 +1512,16 @@ impl Mobs {
         self.list.iter().filter(|m| kinds.contains(&m.kind) && (m.body.pos.x - at.x).powi(2) + (m.body.pos.z - at.z).powi(2) < r * r).count()
     }
 
-    /// A pack of 1..=4 of `kind` around the cell (x, y, z); animals are counted around the player, the rest everywhere.
+    /// A pack of 1..=4 of `kind` around the cell (x, y, z); animals are counted around the player, the rest everywhere. NOT b1.7.3: a pack
+    /// of wolves is 3..=5, and each member may try three times so that the group is not thinned by the cells that fail.
     fn pack(&mut self, c: &Ctx, kind: Kind, (x, y, z): (i32, i32, i32), cap: usize) {
-        let n = if kind == Ghast { 1 } else { 1 + self.rng.next_int_bound(4) }; // `getMaxSpawnedInChunk`
-        for _ in 0..n {
+        let wolves = kind == Wolf;
+        let n = if kind == Ghast { 1 } else if wolves { 3 + self.rng.next_int_bound(3) } else { 1 + self.rng.next_int_bound(4) }; // `getMaxSpawnedInChunk`
+        let (mut left, tries, mut first) = (n, if wolves { n * 3 } else { n }, None);
+        for _ in 0..tries {
+            if left == 0 {
+                break;
+            }
             let (px, pz) = (x + self.rng.next_int_bound(6) - self.rng.next_int_bound(6), z + self.rng.next_int_bound(6) - self.rng.next_int_bound(6));
             let py = match kind {
                 Pig | Cow | Sheep | Chicken | Wolf => grass_top(c.get, px, pz).map_or(-1, |g| g + 1),
@@ -1478,7 +1531,8 @@ impl Mobs {
                 continue;
             }
             let kinds: &[Kind] = match kind {
-                Pig | Cow | Sheep | Chicken | Wolf => &ANIMALS,
+                Wolf => &[Wolf],
+                Pig | Cow | Sheep | Chicken => &FARM,
                 Squid => &[Squid],
                 Ghast => &[Ghast],
                 _ => &[Zombie, Skeleton, Creeper, Spider, Slime, Giant, PigZombie],
@@ -1489,8 +1543,10 @@ impl Mobs {
                 let mut m = Mob::new(kind, px as f32 + 0.5, py as f32, pz as f32 + 0.5, yaw, &mut self.rng);
                 if kind == Wolf {
                     m.coat = coat_for((c.biome)(px, pz), self.rng.next_int_bound(8));
+                    m.pack = Some(*first.get_or_insert(m.id)); // NOT b1.7.3: the first of them names the pack
                 }
                 self.list.push(m);
+                left -= 1;
             }
         }
     }
@@ -1506,16 +1562,24 @@ impl Mobs {
         self.burst = self.burst.saturating_sub(1);
         if !self.nether && (burst || self.clock % ANIMAL_EVERY == 0) {
             // The fuller the surroundings, the rarer the attempt: the herds ease into the cap instead of hitting it.
-            let near = self.count_near(&ANIMALS, c.player, NEAR);
+            let near = self.count_near(&FARM, c.player, NEAR);
             if near < CAP_ANIMALS && self.rng.next_int_bound(CAP_ANIMALS as i32) as usize >= near {
                 let (x, z) = ring(&mut self.rng);
-                // Weights of the plains list: sheep 12, pig 10, chicken 10, cow 8. NOT b1.7.3 (it gives wolves to the forest and the taiga, 2 of
-                // 42): the snowy birch grove has them too (`wolf_land`).
-                let wolf = wolf_land((c.biome)(x, z)) && self.rng.next_int_bound(21) == 0;
-                let kind = if wolf { Wolf } else { match self.rng.next_int_bound(40) { 0..=11 => Sheep, 12..=21 => Pig, 22..=31 => Chicken, _ => Cow } };
+                // Weights of the plains list: sheep 12, pig 10, chicken 10, cow 8. The wolves of the forest and the taiga (2 of 42 in b1.7.3)
+                // are a pack of their own below.
+                let kind = match self.rng.next_int_bound(40) { 0..=11 => Sheep, 12..=21 => Pig, 22..=31 => Chicken, _ => Cow };
                 let apart = self.count_near(&ANIMALS, Vec3::new(x as f32, 0.0, z as f32), SPACING) == 0;
                 if let Some(y) = grass_top(c.get, x, z).filter(|_| apart && self.count_near(&[kind], c.player, NEAR) < CAP_KIND) {
                     self.pack(c, kind, (x, y + 1, z), CAP_ANIMALS);
+                }
+            }
+            // NOT b1.7.3: wolves, on their own quota (`CAP_WOLVES`), in `wolf_land`, a pack at a time, away from the other wolves.
+            if self.count_near(&[Wolf], c.player, NEAR) < CAP_WOLVES && self.rng.next_int_bound(WOLF_ONE_IN) == 0 {
+                let (x, z) = ring(&mut self.rng);
+                if wolf_land((c.biome)(x, z)) && self.count_near(&[Wolf], Vec3::new(x as f32, 0.0, z as f32), WOLF_APART) == 0 {
+                    if let Some(y) = grass_top(c.get, x, z) {
+                        self.pack(c, Wolf, (x, y + 1, z), CAP_WOLVES);
+                    }
                 }
             }
         }
@@ -1611,6 +1675,7 @@ impl Mobs {
             self.clock += 1;
             self.herd();
             self.hunt();
+            self.pack_walk();
             let (rng, snd) = (&mut self.rng, &mut self.snd);
             self.list.retain_mut(|m| {
                 let alive = m.tick(rng, c, &mut ev);
@@ -2509,6 +2574,7 @@ mod tests {
     #[test]
     fn wolves_are_born_in_forests_taigas_and_groves() {
         assert!(wolf_land(Biome::Forest) && wolf_land(Biome::Taiga) && wolf_land(Biome::SnowyBirchGrove) && !wolf_land(Biome::Plains));
+        assert!([Biome::SeasonalForest, Biome::AutumnalForest, Biome::OakWoodland, Biome::WetWoodland].into_iter().all(wolf_land) && !wolf_land(Biome::Marsh));
         assert_eq!((coat_for(Biome::Forest, 0), coat_for(Biome::WetWoodland, 3), coat_for(Biome::SnowyBirchGrove, 7), coat_for(Biome::Plains, 7)), (COAT_WOODS, COAT_WOODS, COAT_SNOWY, COAT_PALE));
         let taiga: Vec<u8> = (0..8).map(|r| coat_for(Biome::Taiga, r)).collect();
         assert_eq!(taiga, [0, 0, 0, 0, COAT_ASHEN, COAT_ASHEN, COAT_BLACK, COAT_CHESTNUT]);
@@ -2529,6 +2595,67 @@ mod tests {
             }
             assert_eq!(wolves > 0, any, "{biome:?}: {wolves} wolves in 8 worlds");
         }
+    }
+
+    /// NOT b1.7.3: wolves come in packs of their own quota: a forest shows a group of at least 3, never many more than `CAP_WOLVES` around the
+    /// player, and the herds still fill up beside them.
+    #[test]
+    fn wolves_come_in_packs_on_a_quota_of_their_own() {
+        let wide = |_: i32, y: i32, _: i32| Some(match y { 0 => 7, 1..=8 => 1, 9 => 2, _ => 0 });
+        let l = |_, _, _| 15u8;
+        let player = Vec3::new(0.5, 11.0, 0.5);
+        let at = |_: i32, _: i32| Biome::Forest;
+        let c = Ctx { get: &wide, light: &l, day: true, player, eye: player + Vec3::Y * 0.6, biome: &at, sight: 1.0 };
+        let (mut pack, mut farm) = (0, 0);
+        for seed in 1..=4 {
+            let (mut m, mut drops) = (Mobs::new(seed), Drops::new(1));
+            m.smart = false;
+            for _ in 0..1500 {
+                m.update(TICK, &c, &mut drops);
+                let w = m.count_near(&[Wolf], player, NEAR);
+                assert!(w <= CAP_WOLVES + 3, "seed {seed}: {w} wolves");
+                pack = pack.max(w);
+                farm = farm.max(m.count_near(&FARM, player, NEAR));
+            }
+        }
+        assert!(pack >= 3, "no pack of 3 wolves in 4 forests: {pack}");
+        assert!(farm >= 5, "the herds were crowded out: {farm}");
+    }
+
+    /// NOT b1.7.3 (`animalAi`): the lowest `id` of a pack leads, the others far from it get its place to run to and end up near it; a tame wolf
+    /// and the switch off leave the pack's walk alone. UNVERIFIED: the closing distance is a loose bound.
+    #[test]
+    fn a_pack_trails_its_leader() {
+        let l = |_, _, _| 15u8;
+        let c = ctx(Vec3::new(60.5, 11.0, 60.5), &l);
+        let build = |smart: bool| {
+            let mut rng = JavaRandom::new(9);
+            let (mut m, drops) = (Mobs::new(2), Drops::new(1));
+            (m.no_spawn, m.smart) = (true, smart);
+            for (x, z) in [(20.5, 20.5), (35.5, 20.5), (20.5, 35.5), (35.5, 35.5)] {
+                m.list.push(Mob::new(Wolf, x, 10.0, z, 0.0, &mut rng));
+            }
+            let head = m.list[0].id;
+            m.list.iter_mut().for_each(|w| w.pack = Some(head));
+            (m, drops)
+        };
+        let (mut m, mut drops) = build(true);
+        m.update(TICK, &c, &mut drops);
+        assert!(m.list[0].leader && m.list[0].lead.is_none(), "the lowest id leads");
+        assert!(m.list[1..].iter().all(|w| !w.leader && w.lead.is_some()), "the others are 15 blocks off and run to it");
+        m.list[1].tame = true;
+        m.pack_walk();
+        assert!(m.list[1].lead.is_none() && !m.list[1].leader, "a tame wolf leaves the pack's walk");
+        m.list[1].tame = false;
+        for _ in 0..400 {
+            m.update(TICK, &c, &mut drops);
+        }
+        let head = m.list[0].body.pos;
+        let far = m.list[1..].iter().map(|w| (w.body.pos.x - head.x).hypot(w.body.pos.z - head.z)).fold(0.0, f32::max);
+        assert!(far < 2.5 * PACK_LOOSE, "the pack is spread {far} blocks round its leader");
+        let (mut off, mut drops) = build(false);
+        off.update(TICK, &c, &mut drops);
+        assert!(off.list.iter().all(|w| !w.leader && w.lead.is_none()), "animalAi off: no pack walk");
     }
 
     /// NOT b1.7.3 (`animalAi`, proposal 5): in its hunting third a wild wolf runs a sheep down and bites it; a sheep runs from it; a tame

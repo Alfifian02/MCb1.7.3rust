@@ -1,0 +1,151 @@
+diff -ruN a/mc-rs/src/world/mobs.rs b/mc-rs/src/world/mobs.rs
+--- a/mc-rs/src/world/mobs.rs	2026-11-02 00:58:20.199684212 +0000
++++ b/mc-rs/src/world/mobs.rs	2026-11-02 00:58:20.202031327 +0000
+@@ -52,6 +52,13 @@
+ const SPACING: f32 = 12.0;
+ const CAP_KIND: usize = 5;
+ const ANIMALS: [Kind; 5] = [Pig, Cow, Sheep, Chicken, Wolf];
++/// The animals of `CAP_ANIMALS` and `CAP_KIND`: the wolves have a quota of their own, so a pack of them never takes a herd's places.
++const FARM: [Kind; 4] = [Pig, Cow, Sheep, Chicken];
++/// NOT b1.7.3: wolves, counted around the player like the animals. A pack is 3..=5 (`pack` tries each member three times), a new one
++/// starts `WOLF_APART` from every other wolf, and a try is made on 1 in `WOLF_ONE_IN` of the animal ticks. UNVERIFIED by eye.
++const CAP_WOLVES: usize = 8;
++const WOLF_APART: f32 = 32.0;
++const WOLF_ONE_IN: i32 = 6;
+ /// `Mobs::count_near`'s radius for a count that is not local (monsters, squid: the old global caps).
+ const ANYWHERE: f32 = f32::INFINITY;
+ const CAP_MONSTERS: usize = 10;
+@@ -215,9 +222,10 @@
+ pub const COAT_SNOWY: u8 = 4;
+ pub const COAT_WOODS: u8 = 5;
+ 
+-/// NOT b1.7.3: where wolves spawn: the forest and the taiga (b1.7.3's lists) and the snowy birch grove.
++/// NOT b1.7.3: where wolves spawn: the forest and the taiga (b1.7.3's lists, where the seasonal forest is a `BiomeGenForest` too), the
++/// snowy birch grove, and the Blooming woods (`coat_for` already gives them a coat).
+ pub fn wolf_land(b: Biome) -> bool {
+-    matches!(b, Biome::Forest | Biome::Taiga | Biome::SnowyBirchGrove)
++    matches!(b, Biome::Forest | Biome::SeasonalForest | Biome::Taiga | Biome::SnowyBirchGrove | Biome::AutumnalForest | Biome::OakWoodland | Biome::WetWoodland)
+ }
+ 
+ /// NOT b1.7.3: the coat a wolf born in biome `b` wears (`roll` is 0..8): the woods wolf in the forests, the snowy one in the grove, and in
+@@ -1465,10 +1473,16 @@
+         self.list.iter().filter(|m| kinds.contains(&m.kind) && (m.body.pos.x - at.x).powi(2) + (m.body.pos.z - at.z).powi(2) < r * r).count()
+     }
+ 
+-    /// A pack of 1..=4 of `kind` around the cell (x, y, z); animals are counted around the player, the rest everywhere.
++    /// A pack of 1..=4 of `kind` around the cell (x, y, z); animals are counted around the player, the rest everywhere. NOT b1.7.3: a pack
++    /// of wolves is 3..=5, and each member may try three times so that the group is not thinned by the cells that fail.
+     fn pack(&mut self, c: &Ctx, kind: Kind, (x, y, z): (i32, i32, i32), cap: usize) {
+-        let n = if kind == Ghast { 1 } else { 1 + self.rng.next_int_bound(4) }; // `getMaxSpawnedInChunk`
+-        for _ in 0..n {
++        let wolves = kind == Wolf;
++        let n = if kind == Ghast { 1 } else if wolves { 3 + self.rng.next_int_bound(3) } else { 1 + self.rng.next_int_bound(4) }; // `getMaxSpawnedInChunk`
++        let (mut left, tries) = (n, if wolves { n * 3 } else { n });
++        for _ in 0..tries {
++            if left == 0 {
++                break;
++            }
+             let (px, pz) = (x + self.rng.next_int_bound(6) - self.rng.next_int_bound(6), z + self.rng.next_int_bound(6) - self.rng.next_int_bound(6));
+             let py = match kind {
+                 Pig | Cow | Sheep | Chicken | Wolf => grass_top(c.get, px, pz).map_or(-1, |g| g + 1),
+@@ -1478,7 +1492,8 @@
+                 continue;
+             }
+             let kinds: &[Kind] = match kind {
+-                Pig | Cow | Sheep | Chicken | Wolf => &ANIMALS,
++                Wolf => &[Wolf],
++                Pig | Cow | Sheep | Chicken => &FARM,
+                 Squid => &[Squid],
+                 Ghast => &[Ghast],
+                 _ => &[Zombie, Skeleton, Creeper, Spider, Slime, Giant, PigZombie],
+@@ -1491,6 +1506,7 @@
+                     m.coat = coat_for((c.biome)(px, pz), self.rng.next_int_bound(8));
+                 }
+                 self.list.push(m);
++                left -= 1;
+             }
+         }
+     }
+@@ -1506,18 +1522,26 @@
+         self.burst = self.burst.saturating_sub(1);
+         if !self.nether && (burst || self.clock % ANIMAL_EVERY == 0) {
+             // The fuller the surroundings, the rarer the attempt: the herds ease into the cap instead of hitting it.
+-            let near = self.count_near(&ANIMALS, c.player, NEAR);
++            let near = self.count_near(&FARM, c.player, NEAR);
+             if near < CAP_ANIMALS && self.rng.next_int_bound(CAP_ANIMALS as i32) as usize >= near {
+                 let (x, z) = ring(&mut self.rng);
+-                // Weights of the plains list: sheep 12, pig 10, chicken 10, cow 8. NOT b1.7.3 (it gives wolves to the forest and the taiga, 2 of
+-                // 42): the snowy birch grove has them too (`wolf_land`).
+-                let wolf = wolf_land((c.biome)(x, z)) && self.rng.next_int_bound(21) == 0;
+-                let kind = if wolf { Wolf } else { match self.rng.next_int_bound(40) { 0..=11 => Sheep, 12..=21 => Pig, 22..=31 => Chicken, _ => Cow } };
++                // Weights of the plains list: sheep 12, pig 10, chicken 10, cow 8. The wolves of the forest and the taiga (2 of 42 in b1.7.3)
++                // are a pack of their own below.
++                let kind = match self.rng.next_int_bound(40) { 0..=11 => Sheep, 12..=21 => Pig, 22..=31 => Chicken, _ => Cow };
+                 let apart = self.count_near(&ANIMALS, Vec3::new(x as f32, 0.0, z as f32), SPACING) == 0;
+                 if let Some(y) = grass_top(c.get, x, z).filter(|_| apart && self.count_near(&[kind], c.player, NEAR) < CAP_KIND) {
+                     self.pack(c, kind, (x, y + 1, z), CAP_ANIMALS);
+                 }
+             }
++            // NOT b1.7.3: wolves, on their own quota (`CAP_WOLVES`), in `wolf_land`, a pack at a time, away from the other wolves.
++            if self.count_near(&[Wolf], c.player, NEAR) < CAP_WOLVES && self.rng.next_int_bound(WOLF_ONE_IN) == 0 {
++                let (x, z) = ring(&mut self.rng);
++                if wolf_land((c.biome)(x, z)) && self.count_near(&[Wolf], Vec3::new(x as f32, 0.0, z as f32), WOLF_APART) == 0 {
++                    if let Some(y) = grass_top(c.get, x, z) {
++                        self.pack(c, Wolf, (x, y + 1, z), CAP_WOLVES);
++                    }
++                }
++            }
+         }
+         if !self.nether && (burst || self.clock % 400 == 0) && n(&self.list, &[Squid]) < CAP_SQUID {
+             let (x, z) = ring(&mut self.rng);
+@@ -2509,6 +2533,7 @@
+     #[test]
+     fn wolves_are_born_in_forests_taigas_and_groves() {
+         assert!(wolf_land(Biome::Forest) && wolf_land(Biome::Taiga) && wolf_land(Biome::SnowyBirchGrove) && !wolf_land(Biome::Plains));
++        assert!([Biome::SeasonalForest, Biome::AutumnalForest, Biome::OakWoodland, Biome::WetWoodland].into_iter().all(wolf_land) && !wolf_land(Biome::Marsh));
+         assert_eq!((coat_for(Biome::Forest, 0), coat_for(Biome::WetWoodland, 3), coat_for(Biome::SnowyBirchGrove, 7), coat_for(Biome::Plains, 7)), (COAT_WOODS, COAT_WOODS, COAT_SNOWY, COAT_PALE));
+         let taiga: Vec<u8> = (0..8).map(|r| coat_for(Biome::Taiga, r)).collect();
+         assert_eq!(taiga, [0, 0, 0, 0, COAT_ASHEN, COAT_ASHEN, COAT_BLACK, COAT_CHESTNUT]);
+@@ -2531,6 +2556,31 @@
+         }
+     }
+ 
++    /// NOT b1.7.3: wolves come in packs of their own quota: a forest shows a group of at least 3, never many more than `CAP_WOLVES` around the
++    /// player, and the herds still fill up beside them.
++    #[test]
++    fn wolves_come_in_packs_on_a_quota_of_their_own() {
++        let wide = |_: i32, y: i32, _: i32| Some(match y { 0 => 7, 1..=8 => 1, 9 => 2, _ => 0 });
++        let l = |_, _, _| 15u8;
++        let player = Vec3::new(0.5, 11.0, 0.5);
++        let at = |_: i32, _: i32| Biome::Forest;
++        let c = Ctx { get: &wide, light: &l, day: true, player, eye: player + Vec3::Y * 0.6, biome: &at, sight: 1.0 };
++        let (mut pack, mut farm) = (0, 0);
++        for seed in 1..=4 {
++            let (mut m, mut drops) = (Mobs::new(seed), Drops::new(1));
++            m.smart = false;
++            for _ in 0..1500 {
++                m.update(TICK, &c, &mut drops);
++                let w = m.count_near(&[Wolf], player, NEAR);
++                assert!(w <= CAP_WOLVES + 3, "seed {seed}: {w} wolves");
++                pack = pack.max(w);
++                farm = farm.max(m.count_near(&FARM, player, NEAR));
++            }
++        }
++        assert!(pack >= 3, "no pack of 3 wolves in 4 forests: {pack}");
++        assert!(farm >= 5, "the herds were crowded out: {farm}");
++    }
++
+     /// NOT b1.7.3 (`animalAi`, proposal 5): in its hunting third a wild wolf runs a sheep down and bites it; a sheep runs from it; a tame
+     /// wolf, a wolf with the switch off and a wolf out of its hunting time leave the sheep alone.
+     #[test]
+diff -ruN a/roadmap/gameplay.md b/roadmap/gameplay.md
+--- a/roadmap/gameplay.md	2026-11-02 00:58:20.208465301 +0000
++++ b/roadmap/gameplay.md	2026-11-02 00:58:20.211143213 +0000
+@@ -4,6 +4,7 @@
+ 
+ ## Changelog
+ 
++- 2026-11-02 (44): Wolf packs (NOT b1.7.3). Written WITHOUT a Rust toolchain: not compiled, not run (+1 test `wolves_come_in_packs_on_a_quota_of_their_own`, `wolves_are_born_in_forests_taigas_and_groves` extended; every number UNVERIFIED by eye). Why a player saw none: one animal try in 21 gave a wolf, only when the one ring cell was `Forest` / `Taiga` / grove, out of the 12 places all animals shared, and the Blooming woods were not in `wolf_land` at all. Now: `wolf_land` adds `SeasonalForest` (a `BiomeGenForest` in b1.7.3 too) and the Blooming `AutumnalForest`, `OakWoodland`, `WetWoodland`; wolves have `CAP_WOLVES` 8 around the player and no longer count in `CAP_ANIMALS` / `CAP_KIND` (new `FARM`); `Mobs::spawn` makes a wolf try of its own on 1 in `WOLF_ONE_IN` (6) animal ticks, in `wolf_land`, no other wolf within `WOLF_APART` (32); `pack` makes 3..=5 wolves and gives each member three tries. ponytail: the pack only spawns together, it does not keep together after (no follow-the-leader AI); wild wolves still despawn like any mob (`Mob::old`).
+ - 2026-11-02 (43): Bone meal on blocks (`missing.md` 8). Written WITHOUT a Rust toolchain: not compiled, not run, not seen on a device (+1 test `gear::tests::bone_meal_seeds_only_empty_cells_above_grass`). `ItemDye.onItemUse` damage 15, in the block-use path of `lib.rs` before `ItemSeeds`: sapling (6) -> `ChunkManager::grow_tree` with the species `meta & 3` (the Java's `growTree`; the item is used up even when the tree does not fit); crops (59) -> metadata 7 (`BlockCrops.fertilize`); grass (2) -> `gear::bone_meal_grass`, the 128 random walks of the Java (`i / 16` steps, a walk dies off the grass or in a normal cube; an empty end cell gets tall grass meta 1 at 9 in 10, else a dandelion 2 in 3 or a rose), drawing from the item's own `Random` (`mobs.rng`). Anything else: no use, nothing consumed. No sound (the Java has none). ponytail: an unloaded cell reads as stone, so a walk into it just ends; the sapling uses `mobs.rng` where the Java passes `world.rand` (same distribution, other stream).
+ - 2026-11-01 (42): Four quality-of-life features without a new meter (`design.md` "QoL without a new meter"). Written WITHOUT a Rust toolchain: not compiled, not run, not seen on a device; every number and every pixel UNVERIFIED (+6 tests: `biomelife::tests::{the_overlay_tint_follows_the_air, the_almanac_counts_to_dusk_and_names_the_day}`, `combat_hud::tests::the_marks_come_in_a_fixed_order_and_stay_in_their_squares`, `items::tests::a_death_pile_lasts_four_times_as_long_and_is_found`, `map::tests::the_death_cross_is_pinned_in_the_arrows_units_and_held_at_the_edge`, `book::tests::a_chest_near_the_bench_lends_its_ingredients_to_the_book`; `mend::tests` gains one assert). All four only with the Immersive Pack ON (`combat::rules::on`), NOT b1.7.3, no new switch.
+     - **Gauges**: `biomelife::tint(Air)` colours the stamina's grey overlay warm in the heat and cool in the cold; `combat_hud::{Mark, marks, draw_marks}` draw up to four 5 x 5 pixel marks right of the tenth heart (sun, frost, a bandage's cross, the hearth's flame) from `Air`, `Mend::bandaged` and the new `Mend::hearth_on`; read in `build_hud` before `hud_verts` is borrowed. No state, no toggle.
