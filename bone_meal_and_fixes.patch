@@ -1,0 +1,177 @@
+diff -ruN a/mc-rs/src/lib.rs b/mc-rs/src/lib.rs
+--- a/mc-rs/src/lib.rs	2026-11-02 00:47:51.663805510 +0000
++++ b/mc-rs/src/lib.rs	2026-11-02 00:47:51.667794129 +0000
+@@ -1938,6 +1938,32 @@
+                 }
+                 return;
+             }
++            // ItemDye.onItemUse, bone meal (351, damage 15): sapling -> `growTree`, crops -> metadata 7 (`fertilize`), grass ->
++            // 128 random walks of tall grass and flowers. One is used up even when the tree does not fit. Anything else: no use.
++            if self.inv.slots[slot].is_some_and(|s| s.id == 351 && s.damage == 15) {
++                let (x, y, z) = hit.pos;
++                match self.chunks.block_loaded(x, y, z) {
++                    Some(6) => {
++                        let species = self.chunks.meta(x, y, z) & 3;
++                        self.chunks.grow_tree(x, y, z, species, &mut self.mobs.rng);
++                        self.inv.consume(slot);
++                    }
++                    Some(59) => {
++                        self.chunks.set_block_meta(x, y, z, 59, 7);
++                        self.inv.consume(slot);
++                    }
++                    Some(2) => {
++                        let get = |a, b, c| self.chunks.block_loaded(a, b, c).unwrap_or(1);
++                        let cells = gear::bone_meal_grass(&get, &mut self.mobs.rng, (x, y, z));
++                        for (a, b, c, id, m) in cells {
++                            self.chunks.set_block_meta(a, b, c, id, m);
++                        }
++                        self.inv.consume(slot);
++                    }
++                    _ => {}
++                }
++                return;
++            }
+             // ItemSeeds.onItemUse: only the top face of farmland with air above; one seed becomes a crops block (meta 0).
+             if self.inv.slots[slot].is_some_and(|s| s.id == 295) {
+                 let (x, y, z) = hit.pos;
+diff -ruN a/mc-rs/src/options.rs b/mc-rs/src/options.rs
+--- a/mc-rs/src/options.rs	2026-11-02 00:47:51.687602538 +0000
++++ b/mc-rs/src/options.rs	2026-11-02 00:47:51.689512597 +0000
+@@ -696,7 +696,7 @@
+ 
+ /// What a setting is for, by its name (the pad's knobs and switches have none of their own in `Opt`). The sentences are written to fit
+ /// three lines of the narrow screen's strip; `tools/optlist_proto.py` checks that.
+-const TIPS: [(&str, &str); 36] = [
++const TIPS: [(&str, &str); 38] = [
+     ("Music", "Volume of the background music."),
+     ("Sound", "Volume of steps, mobs, blocks and ambience."),
+     ("Difficulty", "Peaceful removes monsters. Easy hurts less, Hard hurts more."),
+diff -ruN a/mc-rs/src/world/book.rs b/mc-rs/src/world/book.rs
+--- a/mc-rs/src/world/book.rs	2026-11-02 00:47:51.682015847 +0000
++++ b/mc-rs/src/world/book.rs	2026-11-02 00:47:51.683339198 +0000
+@@ -156,19 +156,22 @@
+     for &(code, n) in &e.need {
+         let in_bag = |inv: &Inventory| inv.slots[..MAIN].iter().flatten().filter(|s| craft::code(s.id, s.damage) == code).map(|s| u32::from(s.count)).sum::<u32>();
+         let mut short = u32::from(n).saturating_sub(in_bag(&*inv));
+-        for slot in order.iter().filter_map(|p| chests.get_mut(p)).flat_map(|c| c.iter_mut()) {
+-            let Some(s) = slot.as_mut().filter(|s| short > 0 && craft::code(s.id, s.damage) == code) else { continue };
+-            let mut moved = ItemStack { count: short.min(u32::from(s.count)) as u8, ..*s };
+-            let asked = moved.count;
+-            inv.add(&mut moved); // what does not fit stays in `moved`
+-            let took = asked - moved.count;
+-            s.count -= took;
+-            short -= u32::from(took);
+-            if s.count == 0 {
+-                *slot = None;
+-            }
+-            if moved.count > 0 {
+-                return; // the bag is full
++        for p in &order {
++            let Some(chest) = chests.get_mut(p) else { continue };
++            for slot in chest.iter_mut() {
++                let Some(s) = slot.as_mut().filter(|s| short > 0 && craft::code(s.id, s.damage) == code) else { continue };
++                let mut moved = ItemStack { count: short.min(u32::from(s.count)) as u8, ..*s };
++                let asked = moved.count;
++                inv.add(&mut moved); // what does not fit stays in `moved`
++                let took = asked - moved.count;
++                s.count -= took;
++                short -= u32::from(took);
++                if s.count == 0 {
++                    *slot = None;
++                }
++                if moved.count > 0 {
++                    return; // the bag is full
++                }
+             }
+         }
+     }
+diff -ruN a/mc-rs/src/world/gear.rs b/mc-rs/src/world/gear.rs
+--- a/mc-rs/src/world/gear.rs	2026-11-02 00:47:51.674595359 +0000
++++ b/mc-rs/src/world/gear.rs	2026-11-02 00:47:51.676949670 +0000
+@@ -3,6 +3,7 @@
+ 
+ use glam::Vec3;
+ 
++use crate::world::chunk::normal_cube;
+ use crate::world::craft::SHEARS;
+ use crate::world::gen::noise::JavaRandom;
+ use crate::world::items::ItemStack;
+@@ -222,6 +223,35 @@
+     }
+ }
+ 
++/// `ItemDye.onItemUse` with bone meal (damage 15) on grass: 128 random walks that grow longer every 16 tries (`i / 16` steps of
++/// x +-1, y 0 or +-1, z +-1) from the cell above the grass; a walk dies when a step leaves the grass or lands in a normal cube.
++/// An empty end cell gets tall grass (9 in 10), else a dandelion (2 in 3) or a rose. Returns the cells to fill as
++/// (x, y, z, id, meta); an unloaded cell must read as non-air, non-grass. Draws from the item's own `Random` like the Java.
++pub fn bone_meal_grass(get: &dyn Fn(i32, i32, i32) -> u8, r: &mut JavaRandom, (x, y, z): (i32, i32, i32)) -> Vec<(i32, i32, i32, u8, u8)> {
++    let mut out: Vec<(i32, i32, i32, u8, u8)> = Vec::new();
++    'walk: for i in 0..128 {
++        let (mut a, mut b, mut c) = (x, y + 1, z);
++        for _ in 0..i / 16 {
++            a += r.next_int_bound(3) - 1;
++            b += (r.next_int_bound(3) - 1) * r.next_int_bound(3) / 2;
++            c += r.next_int_bound(3) - 1;
++            if get(a, b - 1, c) != 2 || normal_cube(get(a, b, c)) {
++                continue 'walk;
++            }
++        }
++        if get(a, b, c) == 0 && !out.iter().any(|o| (o.0, o.1, o.2) == (a, b, c)) {
++            out.push(if r.next_int_bound(10) != 0 {
++                (a, b, c, 31, 1)
++            } else if r.next_int_bound(3) != 0 {
++                (a, b, c, 37, 0)
++            } else {
++                (a, b, c, 38, 0)
++            });
++        }
++    }
++    out
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+@@ -283,4 +313,19 @@
+         (0..30).for_each(|_| { d.tick(&dry, &mut r, false); });
+         assert_eq!(d.catch(Vec3::ZERO), (None, 2));
+     }
++
++    #[test]
++    fn bone_meal_seeds_only_empty_cells_above_grass() {
++        let flat = |_: i32, y: i32, _: i32| -> u8 { if y == 63 { 2 } else if y < 63 { 3 } else { 0 } };
++        let out = bone_meal_grass(&flat, &mut JavaRandom::new(5), (0, 63, 0));
++        assert!(out.len() > 20, "a patch, not a single plant: {}", out.len());
++        assert!(out.iter().all(|&(x, y, z, id, m)| y == 64 && x.abs() <= 7 && z.abs() <= 7 && matches!((id, m), (31, 1) | (37, 0) | (38, 0))));
++        let mut cells: Vec<_> = out.iter().map(|o| (o.0, o.2)).collect();
++        cells.sort();
++        cells.dedup();
++        assert_eq!(cells.len(), out.len(), "no cell twice");
++        assert!(out.iter().filter(|o| o.3 == 31).count() > out.len() / 2, "mostly tall grass");
++        let capped = |_: i32, y: i32, _: i32| -> u8 { if y == 63 { 2 } else if y == 64 { 1 } else { 3 } };
++        assert!(bone_meal_grass(&capped, &mut JavaRandom::new(5), (0, 63, 0)).is_empty(), "stone on top: nothing grows");
++    }
+ }
+diff -ruN a/roadmap/gameplay.md b/roadmap/gameplay.md
+--- a/roadmap/gameplay.md	2026-11-02 00:47:51.699941284 +0000
++++ b/roadmap/gameplay.md	2026-11-02 00:47:51.878457106 +0000
+@@ -4,6 +4,7 @@
+ 
+ ## Changelog
+ 
++- 2026-11-02 (43): Bone meal on blocks (`missing.md` 8). Written WITHOUT a Rust toolchain: not compiled, not run, not seen on a device (+1 test `gear::tests::bone_meal_seeds_only_empty_cells_above_grass`). `ItemDye.onItemUse` damage 15, in the block-use path of `lib.rs` before `ItemSeeds`: sapling (6) -> `ChunkManager::grow_tree` with the species `meta & 3` (the Java's `growTree`; the item is used up even when the tree does not fit); crops (59) -> metadata 7 (`BlockCrops.fertilize`); grass (2) -> `gear::bone_meal_grass`, the 128 random walks of the Java (`i / 16` steps, a walk dies off the grass or in a normal cube; an empty end cell gets tall grass meta 1 at 9 in 10, else a dandelion 2 in 3 or a rose), drawing from the item's own `Random` (`mobs.rng`). Anything else: no use, nothing consumed. No sound (the Java has none). ponytail: an unloaded cell reads as stone, so a walk into it just ends; the sapling uses `mobs.rng` where the Java passes `world.rand` (same distribution, other stream).
+ - 2026-11-01 (42): Four quality-of-life features without a new meter (`design.md` "QoL without a new meter"). Written WITHOUT a Rust toolchain: not compiled, not run, not seen on a device; every number and every pixel UNVERIFIED (+6 tests: `biomelife::tests::{the_overlay_tint_follows_the_air, the_almanac_counts_to_dusk_and_names_the_day}`, `combat_hud::tests::the_marks_come_in_a_fixed_order_and_stay_in_their_squares`, `items::tests::a_death_pile_lasts_four_times_as_long_and_is_found`, `map::tests::the_death_cross_is_pinned_in_the_arrows_units_and_held_at_the_edge`, `book::tests::a_chest_near_the_bench_lends_its_ingredients_to_the_book`; `mend::tests` gains one assert). All four only with the Immersive Pack ON (`combat::rules::on`), NOT b1.7.3, no new switch.
+     - **Gauges**: `biomelife::tint(Air)` colours the stamina's grey overlay warm in the heat and cool in the cold; `combat_hud::{Mark, marks, draw_marks}` draw up to four 5 x 5 pixel marks right of the tenth heart (sun, frost, a bandage's cross, the hearth's flame) from `Air`, `Mend::bandaged` and the new `Mend::hearth_on`; read in `build_hud` before `hud_verts` is borrowed. No state, no toggle.
+     - **Almanac**: `biomelife::{CLOCK, dusk_in, almanac, set_now, almanac_now}`: the held clock's line is "Day N, Season, dusk in M min" or "..., night" (season only with `biomeRules`; none in the Nether). Dusk is the first moment of a clear sky that takes 4 light away, the line `sleep_tick` wakes at, found in 5 s steps. `tooltip::lines` returns it for a clock; the hotbar flash now draws lines (for the clock only) and stays up while a clock is held (`App::step`'s `tip`). `App` feeds `set_now` beside `set_season`.
+diff -ruN a/roadmap/missing.md b/roadmap/missing.md
+--- a/roadmap/missing.md	2026-11-02 00:47:51.693852013 +0000
++++ b/roadmap/missing.md	2026-11-02 00:47:51.695949253 +0000
+@@ -9,7 +9,7 @@
+ | # | What | Java | State in mc-rs | Size |
+ |---|------|------|----------------|------|
+ | 3 | ~~Map item~~ | `ItemMap`, `MapData`, `MapItemRenderer`, `MapStorage`, recipe 358 = paper ring round a compass | **done 2026-10-30 (gameplay entry 36)**, not compiled; loaded chunks only, flat HUD sheet in hand | done |
+-| 8 | Bone meal on blocks | `ItemDye.onItemUse` (damage 15): sapling -> `BlockSapling.growTree`, crops -> `BlockCrops.fertilize` (metadata 7), grass -> spreads tall grass and flowers (`ItemDye` lines 22 on) | only the recipe (bone -> bone meal) and dyeing sheep (`gear::use_on_mob`); `lib.rs` `use_held` and the block-use path have no branch for it. `ChunkManager::grow_tree` (used by the sapling tick) exists to call | small (found 2026-10-30; not in any earlier audit) |
++| 8 | ~~Bone meal on blocks~~ | `ItemDye.onItemUse` (damage 15) | **done 2026-11-02**, not compiled: `lib.rs` (block-use path, before seeds) + `gear::bone_meal_grass`; sapling -> `grow_tree`, crops -> metadata 7, grass -> 128 walks of tall grass / flowers; one used up each time | done |
+ | 4 | Chat | `GuiChat`, `ChatLine` | nothing (a single-player port has no sender except commands; the overlay is the deferred rest of M14) | medium |
+ | 5 | ~~Achievements and Statistics~~ | `AchievementList`, `GuiAchievements`, `GuiAchievement` (toast), `StatList`, `GuiStats` | **done 2026-11-01 (gameplay entry 41)**, not compiled: `world/stats.rs`, `stats_ui.rs`, touch screens | done |
+ | 6 | Mods and Texture Packs | `TexturePackList`, `GuiTexturePacks` | button drawn greyed out | large, and arguably off-goal |
