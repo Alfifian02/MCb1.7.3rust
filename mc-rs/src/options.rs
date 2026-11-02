@@ -696,7 +696,7 @@ struct Press {
 
 /// What a setting is for, by its name (the pad's knobs and switches have none of their own in `Opt`). The sentences are written to fit
 /// three lines of the narrow screen's strip; `tools/optlist_proto.py` checks that.
-const TIPS: [(&str, &str); 38] = [
+const TIPS: [(&str, &str); 40] = [
     ("Music", "Volume of the background music."),
     ("Sound", "Volume of steps, mobs, blocks and ambience."),
     ("Difficulty", "Peaceful removes monsters. Easy hurts less, Hard hurts more."),
@@ -735,6 +735,8 @@ const TIPS: [(&str, &str); 38] = [
     ("Toggle Sneak", "Sneak stays on until pressed again."),
     ("Button Hints", "Shows what the pad's buttons do in the corner while a pad is in use."),
     ("Button Icons", "Style of the button pictures: Xbox, PlayStation, Switch or plain text. Tap to change."),
+    ("Hint Size", "Size of the button hints. 100% matches the GUI Scale."),
+    ("Hint Layout", "Auto: a row in menus, a list in game. Tap to change."),
 ];
 
 /// The sentence under a setting's name in the description pane.
@@ -1042,6 +1044,20 @@ impl OptionsUi {
         w.extend(tab_pages(self.tab).enumerate().map(|(k, i)| Wid { act: Act::Tab(i), r: side_entry(&f, k), label: PAGES[i].0.to_string() }));
         w.push(Wid { act: Act::Done, r: f.done, label: "Done".to_string() });
         w
+    }
+
+    /// What the options screen fills that the pad's button hints keep off (px): the page list, the list, the description pane or strip, Done and
+    /// the title; the editor's controls when that is open.
+    pub fn avoid(&self, w: f32, h: f32, st: &Settings) -> Vec<[f32; 4]> {
+        let (s, gw, gh) = scaled_gs(w, h, st.gui_scale);
+        let mut r: Vec<[f32; 4]> = if self.scr == OptScr::Atmos {
+            atmos_widgets(&self.ed, st).into_iter().map(|b| b.r).collect()
+        } else {
+            let f = frame(gw, gh);
+            vec![f.side, f.list, f.tip, f.done]
+        };
+        r.push([(gw / 2.0).floor() - 60.0, 0.0, 120.0, 24.0]); // the title
+        r.into_iter().map(|r| r.map(|u| u * s)).collect()
     }
 
     /// A finger: down on a setting it selects it (a tap acts on lift); on a slider's track it grabs the slider; dragged up or down it
@@ -1553,6 +1569,29 @@ impl Pause {
         }
     }
 
+    /// What the game menu fills that the pad's button hints keep off (px): the buttons and the panel behind them, the title, the death
+    /// screen's heading and the first second's "Saving level..".
+    pub fn avoid(&self, w: f32, h: f32, st: &Settings, info: &PauseInfo) -> Vec<[f32; 4]> {
+        if let Some(o) = &self.opt {
+            return o.avoid(w, h, st);
+        }
+        let (s, gw, gh) = scaled_gs(w, h, st.gui_scale);
+        let hw = (gw / 2.0).floor();
+        let btns: Vec<[f32; 4]> = self.page(gw, gh, info).into_iter().map(|b| b.1).collect();
+        let (x0, y0, x1, y1) = btns.iter().fold((f32::MAX, f32::MAX, 0.0f32, 0.0f32), |a, b| (a.0.min(b[0]), a.1.min(b[1]), a.2.max(b[0] + b[2]), a.3.max(b[1] + b[3])));
+        let mut r = btns;
+        r.push([hw - 60.0, 0.0, 120.0, 24.0]);
+        if info.dead {
+            r.push([hw - 60.0, 28.0, 120.0, 20.0]);
+        } else {
+            r.push([x0 - 12.0, y0 - 12.0, x1 - x0 + 24.0, y1 - y0 + 24.0]);
+        }
+        if !info.dead && !self.tools && self.born.elapsed().as_secs_f32() < 1.0 {
+            r.push([8.0, gh - 16.0, 90.0, 10.0]);
+        }
+        r.into_iter().map(|r| r.map(|u| u * s)).collect()
+    }
+
     pub fn draw(&self, v: &mut Vec<HudVertex>, w: f32, h: f32, st: &Settings, info: &PauseInfo) {
         if let Some(o) = &self.opt {
             o.draw(v, w, h, st, true);
@@ -2003,6 +2042,12 @@ mod tests {
         assert_eq!(st.pad.style, 1, "Xbox -> PlayStation");
         tap(&mut o, &mut st, "Button Hints: ON");
         assert!(!st.pad.hints);
+        tap(&mut o, &mut st, "Hint Layout: Auto");
+        assert_eq!(st.pad.layout, 1, "Auto -> Horizontal");
+        let (x, y, w, s) = track_px(&mut o, &st, "Hint Size");
+        o.event(ScreenEv::Down(x + w - 2.0 * s, y + 4.0 * s), SZ.0, SZ.1, &mut st);
+        o.event(ScreenEv::Up(x + w - 2.0 * s, y + 4.0 * s), SZ.0, SZ.1, &mut st);
+        assert!(st.pad.hint_size > 1.9, "the slider's right end is 200%: {}", st.pad.hint_size);
         let (x, y, _, s) = track_px(&mut o, &st, "Look X");
         let y = y + 4.0 * s;
         o.event(ScreenEv::Down(x + 4.0 * s, y), SZ.0, SZ.1, &mut st);
@@ -2011,6 +2056,8 @@ mod tests {
         let back = Settings::load(&root);
         assert_eq!((back.pad.binds[0], back.pad.invert_y, back.pad.look_h), (Btn::X, true, 0.0));
         assert_eq!((back.pad.style, back.pad.hints), (1, false));
+        assert_eq!(back.pad.layout, 1);
+        assert!(back.pad.hint_size > 1.9);
         let mut v = Vec::new();
         o.draw(&mut v, SZ.0, SZ.1, &st, true);
         assert!(!v.is_empty());
@@ -2077,6 +2124,26 @@ mod tests {
         let (_, gw, gh) = scaled_gs(320.0, 240.0, 0);
         let o = OptionsUi::new();
         assert!(o.widgets(gw, gh, &st).iter().filter(|b| matches!(b.act, Act::Tab(_))).count() == tab_pages(0).len());
+    }
+
+    /// The rects the options screen hands to the pad's hints cover Done, the list and the pane, and the hints end up beside Done, not on it
+    /// (the screenshot that started this: `Select` / `Back` over the Done button).
+    #[test]
+    fn button_hints_keep_off_done() {
+        let mut st = Settings::default();
+        st.pad.layout = 0;
+        let o = OptionsUi::new();
+        let (s, gw, gh) = scaled_gs(SZ.0, SZ.1, st.gui_scale);
+        let avoid = o.avoid(SZ.0, SZ.1, &st);
+        let done = frame(gw, gh).done.map(|u| u * s);
+        assert!(avoid.contains(&done), "Done is one of the rects");
+        let mut pad = crate::input::gamepad::Pad::default();
+        pad.key(Btn::Start, false); // a pad is in use
+        let mut v = Vec::new();
+        pad.hints(&mut v, &st.pad, &crate::input::gamepad::HintView { w: SZ.0, h: SZ.1, s, ui: true, avoid: &avoid });
+        assert!(!v.is_empty(), "there is room for them along the bottom");
+        let inside = |p: [f32; 2], r: [f32; 4]| p[0] > r[0] - 4.0 * s && p[0] < r[0] + r[2] + 4.0 * s && p[1] > r[1] - 4.0 * s && p[1] < r[1] + r[3] + 4.0 * s;
+        assert!(v.iter().all(|q| avoid.iter().all(|a| !inside(q.pos, *a))), "no hint vertex within 4 units of anything the screen draws");
     }
 
     /// Every sentence of the description pane fits the strip of the narrow screen (3 lines) and the pane of a wide one.

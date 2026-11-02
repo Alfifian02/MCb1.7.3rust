@@ -192,6 +192,10 @@ pub struct Menu {
     /// The player's look (`<root>/skin.txt`), the title screen's model wears it; `skin_dirty` says the GPU does not have it yet (`take_skin`).
     look: Look,
     skin_dirty: bool,
+    /// An imported skin (`skin::import`, kept as `<root>/custom_skin.png`): it replaces the palette look until Reset. `note` is the line the
+    /// skin screen shows under the buttons (what the last import did).
+    custom: Option<Vec<u8>>,
+    note: String,
     /// The skin screen's model: degrees a drag has turned it, and the x (px) the finger was last at.
     spin: f32,
     drag_x: f32,
@@ -241,6 +245,8 @@ impl Menu {
             gs: 0,
             look: Look::load(root),
             skin_dirty: false,
+            custom: skin::load_custom(root),
+            note: String::new(),
             spin: 0.0,
             drag_x: 0.0,
         }
@@ -254,7 +260,7 @@ impl Menu {
 
     /// The new skin (64 x 32 RGBA) when the look changed since the last call: the app writes it into the atlas and the HUD sheet.
     pub fn take_skin(&mut self) -> Option<Vec<u8>> {
-        std::mem::take(&mut self.skin_dirty).then(|| self.look.apply())
+        std::mem::take(&mut self.skin_dirty).then(|| self.custom.clone().unwrap_or_else(|| self.look.apply()))
     }
 
     fn set_look(&mut self, l: Look) {
@@ -320,15 +326,18 @@ impl Menu {
             Scr::Skin => {
                 // The right half: the four palettes, Reset and Done under the title's band; the model has the left half.
                 let (x, w) = (hw + 8.0, (hw - 16.0).min(150.0));
-                let l = |p: usize, t: &str| format!("{t}: {}", self.look.name(p));
-                let c = |id, y, label: &str| Btn(id, [x, y, w, 20.0], label.to_string(), true);
+                // An imported skin is not repainted: the palette buttons wait (dim) until Reset.
+                let own = self.custom.is_none();
+                let l = |p: usize, t: &str| format!("{t}: {}", if own { self.look.name(p) } else { "Custom" });
+                let c = |id, y, label: &str, on| Btn(id, [x, y, w, 20.0], label.to_string(), on);
                 vec![
-                    c(1, 34.0, &l(skin::SKIN, "Skin Tone")),
-                    c(2, 58.0, &l(skin::HAIR, "Hair")),
-                    c(3, 82.0, &l(skin::SHIRT, "Shirt")),
-                    c(4, 106.0, &l(skin::PANTS, "Pants")),
-                    c(5, 134.0, "Reset"),
-                    c(0, (gh - 28.0).max(162.0), "Done"),
+                    c(1, 34.0, &l(skin::SKIN, "Skin Tone"), own),
+                    c(2, 58.0, &l(skin::HAIR, "Hair"), own),
+                    c(3, 82.0, &l(skin::SHIRT, "Shirt"), own),
+                    c(4, 106.0, &l(skin::PANTS, "Pants"), own),
+                    c(6, 134.0, "Import Custom Skin", true),
+                    c(5, 158.0, "Reset", true),
+                    c(0, (gh - 28.0).max(210.0), "Done", true),
                 ]
             }
         }
@@ -498,7 +507,20 @@ impl Menu {
             (Scr::Main, 4) => self.quit = true,
             (Scr::Main, 5) => (self.scr, self.spin) = (Scr::Skin, 0.0),
             (Scr::Skin, 0) => self.scr = Scr::Main,
-            (Scr::Skin, 5) => self.set_look(Look::default()),
+            (Scr::Skin, 5) => {
+                if self.custom.take().is_some() {
+                    skin::clear_custom(&self.root);
+                    self.skin_dirty = true;
+                }
+                self.note.clear();
+                self.set_look(Look::default());
+            }
+            (Scr::Skin, 6) => match skin::import(&self.root) {
+                Ok((px, name)) => {
+                    (self.custom, self.skin_dirty, self.note) = (Some(px), true, format!("Imported {name}"));
+                }
+                Err(e) => self.note = e.to_string(),
+            },
             (Scr::Skin, id @ 1..=4) => {
                 let mut l = self.look;
                 l.cycle(id as usize - 1);
@@ -557,6 +579,46 @@ impl Menu {
     /// The title screen and the skin screen show the panorama (`render_menu` draws it under the HUD); every other screen keeps its dirt.
     pub fn panorama(&self) -> bool {
         matches!(self.scr, Scr::Main | Scr::Skin) && !self.shown_loading
+    }
+
+    /// What the screen fills that the pad's button hints keep off (px): the buttons, the text boxes, the footer and header texts, the list.
+    pub fn avoid(&self, w: f32, h: f32, st: &Settings) -> Vec<[f32; 4]> {
+        if self.scr == Scr::Options {
+            return self.opt.avoid(w, h, st);
+        }
+        let (s, gw, gh) = scaled_gs(w, h, st.gui_scale);
+        let hw = (gw / 2.0).floor();
+        let mut r: Vec<[f32; 4]> = self.buttons(gw, gh).into_iter().map(|b| b.1).collect();
+        r.push([hw - 60.0, 0.0, 120.0, 24.0]); // a screen's title
+        if self.loading.is_some() {
+            r.push([hw - 80.0, gh / 2.0 - 20.0, 160.0, 40.0]);
+        }
+        if self.typing.is_some() {
+            r.push([0.0, 0.0, gw, gh]); // the typing overlay: no room to spare
+        }
+        match self.scr {
+            Scr::Main => {
+                let c = "Copyright Mojang AB. Do not distribute.";
+                r.push([gw - tw(c) - 4.0, gh - 11.0, tw(c) + 4.0, 11.0]);
+                r.push([0.0, 0.0, tw(&crate::version::label()).max(tw("Minecraft Beta 1.7.3")) + 4.0, 22.0]);
+                r.push([hw - 137.0, 4.0, 320.0, 76.0]); // the logo and the splash
+            }
+            Scr::Select => {
+                let (top, bottom) = Self::list_box(gh);
+                r.push([0.0, top, gw, bottom - top]);
+            }
+            Scr::Create | Scr::Rename => {
+                r.extend(Self::fields(gw));
+                r.push([hw - 100.0, 40.0, 200.0, 112.0]); // the labels over and under the boxes
+            }
+            Scr::Delete => r.push([hw - 170.0, 62.0, 340.0, 44.0]),
+            Scr::Skin => {
+                r.push([0.0, 24.0, hw, gh - 24.0]); // the player and "Drag to turn"
+                r.push([hw + 2.0, 30.0, hw - 4.0, (gh - 28.0).max(210.0) - 4.0]);
+            }
+            Scr::Options => {}
+        }
+        r.into_iter().map(|r| r.map(|u| u * s)).collect()
     }
 
     // ---- drawing ----
@@ -635,7 +697,12 @@ impl Menu {
                 Self::model(v, s, (hw / 2.0, feet), mult, (ms * 0.03 + self.spin).to_radians(), ms);
                 txt(v, hw / 2.0, gh - 12.0, "Drag to turn", 0xA0A0A0, true);
                 let (x, w) = (hw + 8.0, (hw - 16.0).min(150.0));
-                ui::panel(v, s, [x - 6.0, 30.0, w + 12.0, (gh - 28.0).max(162.0) + 26.0 - 30.0], 0.4);
+                ui::panel(v, s, [x - 6.0, 30.0, w + 12.0, (gh - 28.0).max(210.0) + 26.0 - 30.0], 0.4);
+                // What the last import did, and where the file goes when none was found: two short lines between Reset and Done.
+                let path = if self.note.starts_with("No .png") { "Android/data/dev.mcrs.b173/files" } else { "" };
+                for (i, line) in [self.note.as_str(), path].into_iter().enumerate() {
+                    txt(v, x + w / 2.0, 184.0 + 10.0 * i as f32, &ui::fit(line, w + 8.0), 0xA0A0A0, true);
+                }
             }
             Scr::Rename => {
                 ui::title(v, s, gw, 0.0, "Rename World", true);
@@ -826,6 +893,37 @@ mod tests {
         let small = (640.0, 480.0);
         tap(&mut m, "Skin...", small);
         assert_eq!(m.scr, Scr::Skin);
+    }
+
+    /// Import Custom Skin: with no .png it says so; with one (a 1.8 style 64 x 64) the model wears it, the palette buttons go dim, the copy
+    /// is kept and found again by the next title screen, and Reset gives the palette look back and forgets the copy.
+    #[test]
+    fn importing_a_png_replaces_the_palette_look_until_reset() {
+        let root = tmp("import");
+        let sz = (2400.0, 1080.0);
+        let mut m = Menu::new(&root);
+        tap(&mut m, "Customize Skin", sz);
+        tap(&mut m, "Import Custom Skin", sz);
+        assert_eq!(m.note, "No .png in the skin folder");
+        assert!(m.custom.is_none() && m.take_skin().is_none());
+        let rgba: Vec<u8> = (0..64 * 64).flat_map(|i| [200, i as u8, 30, 255]).collect();
+        std::fs::write(root.join("dreamybull.png"), skin::tests::png_of(64, 64, png::ColorType::Rgba, &rgba)).unwrap();
+        tap(&mut m, "Import Custom Skin", sz);
+        assert_eq!(m.note, "Imported dreamybull.png");
+        let px = m.take_skin().expect("the imported skin is handed over");
+        assert_eq!(px, rgba[..skin::BYTES]);
+        assert!(m.take_skin().is_none(), "once");
+        let (_, gw, gh) = scaled(sz.0, sz.1);
+        let dim = |m: &Menu| m.buttons(gw, gh).iter().filter(|b| !b.3).count();
+        assert_eq!(dim(&m), 4, "tone, hair, shirt and pants wait while a custom skin is on");
+        assert!(m.buttons(gw, gh).iter().any(|b| b.2 == "Hair: Custom"));
+        assert!(Menu::new(&root).custom.is_some(), "found again by the next title screen");
+        tap(&mut m, "Reset", sz);
+        assert!(m.custom.is_none() && dim(&m) == 0 && !root.join("custom_skin.png").exists());
+        assert_eq!(m.take_skin().expect("the palette skin is back"), Look::default().apply());
+        let mut v = Vec::new();
+        m.draw(&mut v, sz.0, sz.1, &Settings::default());
+        assert!(v.iter().all(|p| p.pos[0].is_finite() && p.pos[1].is_finite()));
     }
 
     /// Main -> Select -> Create (a name, the Blooming type: two taps of the type button) -> the world is on disk, listed, loading; then delete it.

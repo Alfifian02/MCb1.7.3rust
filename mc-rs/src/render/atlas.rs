@@ -299,6 +299,21 @@ pub const fn bed_tile(meta: u8, side: u8) -> u8 {
     }
 }
 
+/// `RenderBlocks.renderBlockBed`: the window (`u`, `v`) of a bed half's face turned the way its direction (`meta & 3`, the head lies along
+/// `BED_DIR`) needs. The tiles are painted for a head at +X: the top's pillow end is the right edge, and a long side runs foot (u 0) to head
+/// (u 1). So the top is turned a quarter or half turn to put its right edge toward the head, and the long side that the mesher's template
+/// runs head to foot (+X face for direction 0, +Z for 1, -X for 2, -Z for 3; `face` as in `FACES`) is mirrored. Without this the top
+/// always showed the pillow at the east end, whichever way the bed lay.
+pub fn bed_uv(meta: u8, face: usize, u: f32, v: f32) -> (f32, f32) {
+    match (face, meta & 3) {
+        (2, 0) => (1.0 - v, u),
+        (2, 1) => (1.0 - u, 1.0 - v),
+        (2, 2) => (v, 1.0 - u),
+        (0, 0) | (4, 1) | (1, 2) | (5, 3) => (1.0 - u, v),
+        _ => (u, v),
+    }
+}
+
 /// Atlas UV of the pixel (`px`, `py`) (0..16, y down like the png) of terrain tile `t`.
 pub fn terrain_px(t: u8, px: f32, py: f32) -> (f32, f32) {
     (((t % 16) as f32 * 16.0 + px) / ATLAS_W as f32, ((t / 16) as f32 * 16.0 + py) / ATLAS_H as f32)
@@ -451,6 +466,7 @@ pub fn particle_tile(id: u8, meta: u8) -> u16 {
 /// UV of a corner of a block face: its terrain tile, or the flat colour of `tile_of` where there is none. `face` is the
 /// mesher's order (+X, -X, +Y, -Y, +Z, -Z).
 pub fn face_uv(id: u8, meta: u8, face: usize, u: f32, v: f32) -> (f32, f32) {
+    let (u, v) = if id == 26 { bed_uv(meta, face, u, v) } else { (u, v) };
     match terrain_tile(id, meta, [5, 4, 1, 0, 3, 2][face]) {
         Some(t) => terrain_uv(t, u, v),
         None => atlas_uv(tile_of(id, meta), u, v),
@@ -479,6 +495,21 @@ mod tests {
         assert_ne!(tile_color(260), tile_color(261));
         assert_ne!(tile_color(256), tile_color(17));
         assert!(tile_color(274)[3] == 255 && (25..=26).contains(&tile_color(274)[0])); // black wool
+    }
+
+    /// The top of a bed puts its pillow (the tile's right edge) at the head end for all four directions: `BED_DIR` is 0 south, 1 west, 2 north,
+    /// 3 east, and the point of the top at the middle of that edge of the cell maps to the middle of the tile's right edge.
+    #[test]
+    fn the_top_of_a_bed_turns_its_pillow_toward_the_head() {
+        // (direction, u, v) of the window at the head end of the top face: u runs +X, v runs -Z (v up, north).
+        for (n, u, v) in [(0u8, 0.5, 0.0), (1, 0.0, 0.5), (2, 0.5, 1.0), (3, 1.0, 0.5)] {
+            let (tu, tv) = bed_uv(n, 2, u, v);
+            assert!((tu - 1.0).abs() < 1e-6 && (tv - 0.5).abs() < 1e-6, "direction {n}: ({tu}, {tv})");
+            assert_eq!(bed_uv(n + 8, 2, u, v), (tu, tv), "the head half turns like the foot half");
+        }
+        // The bottom and the ends stay as they are.
+        assert_eq!(bed_uv(1, 3, 0.25, 0.75), (0.25, 0.75));
+        assert_eq!(bed_uv(0, 4, 0.25, 0.75), (0.25, 0.75));
     }
 
     /// Every tile `terrain_tile` hands out, for any block, damage and face, holds a picture in `assets/terrain.rgba` (the Legacy Restoration

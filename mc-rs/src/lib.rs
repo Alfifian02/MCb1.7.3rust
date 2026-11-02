@@ -360,7 +360,9 @@ impl App {
         let be = Backend::new(opts.renderer == 2, native_ptr, width, height).await?;
         log::info!("renderer: {}", be.gpu_info());
         let look = skin::Look::load(&dir);
-        if look != skin::Look::default() {
+        if let Some(px) = skin::load_custom(&dir) {
+            be.upload_skin(&px); // an imported skin (Import Custom Skin) wins over the palette look
+        } else if look != skin::Look::default() {
             be.upload_skin(&look.apply()); // the atlas and the HUD sheet are built with `mob/char.png`; the saved look goes over it
         }
 
@@ -4081,7 +4083,9 @@ impl App {
         m.draw(&mut self.hud_verts, w, h, &self.opts);
         let cur = self.touch.pad.shows_cursor().then_some(self.touch.cursor_pos);
         self.touch.pad.draw(&mut self.hud_verts, w, h, self.touch.hotbar_slot, cur);
-        self.touch.pad.hints(&mut self.hud_verts, w, h, &self.opts.pad, true);
+        let (s, ..) = crate::menu::scaled_gs(w, h, self.opts.gui_scale);
+        let avoid = m.avoid(w, h, &self.opts);
+        self.touch.pad.hints(&mut self.hud_verts, &self.opts.pad, &crate::input::gamepad::HintView { w, h, s, ui: true, avoid: &avoid });
         let pano = m.panorama();
         self.hud_verts.truncate(crate::gles::HUD_QUADS * 6);
         match self.be.draw_menu(pano, &self.hud_verts) {
@@ -4719,7 +4723,24 @@ impl App {
             let t = &self.touch;
             let cur = (t.pad.shows_cursor() && (paused || t.screen) && self.sat.is_none()).then_some(t.cursor_pos); // the satchel frames its target instead
             t.pad.draw(v, w, h, t.hotbar_slot, cur);
-            t.pad.hints(v, w, h, &self.opts.pad, paused || t.screen);
+            // What the open screen draws, for the hints to keep off: the game menu's buttons, the statistics' tabs, or the hotbar while playing.
+            let (s, ..) = crate::menu::scaled_gs(w, h, self.opts.gui_scale);
+            let avoid: Vec<[f32; 4]> = if paused {
+                if let Some(u) = &self.stats_ui {
+                    u.avoid(w, h, &self.opts)
+                } else if let Some(p) = &self.pause {
+                    p.avoid(w, h, &self.opts, &pause_info)
+                } else {
+                    Vec::new()
+                }
+            } else if t.screen {
+                Vec::new() // ponytail: a container / the satchel is centred, the corner is free; no rects of its own yet
+            } else {
+                let (hx, hy, hw, _) = t.layout.hotbar[0];
+                let u = hw / 20.0;
+                vec![[hx - u, hy - u, 182.0 * u, 22.0 * u]]
+            };
+            t.pad.hints(v, &self.opts.pad, &crate::input::gamepad::HintView { w, h, s, ui: paused || t.screen, avoid: &avoid });
         }
 
         // Cap to the buffer capacity; extra quads are silently dropped.
@@ -4938,6 +4959,10 @@ fn start_init(app: &AndroidApp) -> Option<std::thread::JoinHandle<Result<App, St
     let init_h = window.height().max(1) as u32;
     // App-private storage, where the world is saved.
     let dir = app.internal_data_path().unwrap_or_else(std::env::temp_dir);
+    // Where Import Custom Skin looks first: `Android/data/<package>/files`, which a file manager or `adb push` can reach.
+    if let Some(p) = app.external_data_path() {
+        let _ = skin::IMPORT_DIR.set(p);
+    }
     log::info!("M3: InitWindow, native {init_w}x{init_h}, starting GPU init thread");
     let h = std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)

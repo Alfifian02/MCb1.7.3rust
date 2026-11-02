@@ -98,6 +98,16 @@ impl StatsUi {
         ([hw - 100.0, gh - 28.0, 200.0, 24.0], [0, 1, 2].map(|i| [hw - 152.0 + 102.0 * i as f32, gh - 56.0, 100.0, 24.0]))
     }
 
+    /// What the screen fills that the pad's button hints keep off (px): the map or the list, Done and the tabs.
+    pub fn avoid(&self, w: f32, h: f32, st: &Settings) -> Vec<[f32; 4]> {
+        let (s, gw, gh) = scaled_gs(w, h, st.gui_scale);
+        let (done, tabs) = Self::lay(gw, gh);
+        let (top, vh) = Self::view(gh);
+        let mut r = vec![done, [0.0, top, gw, vh]];
+        r.extend(tabs);
+        r.into_iter().map(|r| r.map(|u| u * s)).collect()
+    }
+
     /// The map's viewport: (top, height) with the full width.
     fn view(gh: f32) -> (f32, f32) {
         (24.0, gh - 24.0 - 32.0)

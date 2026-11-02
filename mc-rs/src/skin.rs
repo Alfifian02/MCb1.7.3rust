@@ -7,11 +7,26 @@
 //! shoes, the mouth and the hat layer are left alone), and its brightness against the brightest pixel of its class (`REF`) is kept, so the
 //! shading of the original (`f`) is painted again in the new colour. Index 0 of every palette is the original colour and repaints nothing, so a
 //! fresh install shows `mob/char.png` byte for byte.
-//! ponytail: no skin file import (a PNG decoder would be a new dependency; `apply` takes any 64 x 32 RGBA, so it is one `load` away).
+//! Import Custom Skin (NOT b1.7.3): `import` takes the newest `.png` of the app's folder in shared storage (`IMPORT_DIR`, set at start-up) or of the
+//! private folder, `from_png` makes a 64 x 32 RGBA of it (a 64 x 32 skin as it is; a 64 x 64 one of 1.8 and later by its top half, which holds the
+//! head, the body, the right arm and the right leg: `ModelBiped` mirrors them for the left side, like the old skins), and a copy is kept as
+//! `<root>/custom_skin.png` (`load_custom`) until Reset. A custom skin replaces the palette look; `png` is the one new dependency.
+//! ponytail: 3 px "slim" arms are drawn with the 4 px model, and the 1.8 overlay layers (jacket, sleeves, trousers) are not used.
 //! UNVERIFIED: written without a Rust toolchain: not compiled, not run (the same steps were run in a Python twin and looked at).
 
 use crate::render::atlas;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+/// The folder `import` looks in first (the app's folder in shared storage, `Android/data/<package>/files`, which a file manager or `adb push`
+/// can reach): set once at start-up, so it is absent on a host and the private folder is the only place.
+pub static IMPORT_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// The imported skin as it was kept (a copy of the file that was picked) in the private folder.
+const CUSTOM: &str = "custom_skin.png";
+
+/// A skin file bigger than this is not a skin.
+const MAX_FILE: u64 = 1 << 20;
 
 /// Bytes of a 64 x 32 RGBA skin.
 pub const BYTES: usize = 64 * 32 * 4;
@@ -85,6 +100,58 @@ impl Look {
     }
 }
 
+/// The 64 x 32 RGBA skin of a PNG: 64 x 32, or 64 x 64 (its top 32 rows), any colour type and depth.
+pub fn from_png(bytes: &[u8]) -> Result<Vec<u8>, &'static str> {
+    let mut dec = png::Decoder::new(std::io::Cursor::new(bytes));
+    dec.set_transformations(png::Transformations::normalize_to_color8());
+    let mut r = dec.read_info().map_err(|_| "Not a PNG file")?;
+    let (w, h) = (r.info().width, r.info().height);
+    if w != 64 || (h != 32 && h != 64) {
+        return Err("Skin must be 64x32 or 64x64"); // checked before the buffer is made: the header is the file's word
+    }
+    let mut buf = vec![0; r.output_buffer_size()];
+    let f = r.next_frame(&mut buf).map_err(|_| "Not a PNG file")?;
+    let px = buf[..f.buffer_size()].chunks_exact(f.color_type.samples()).take(64 * 32).flat_map(|p| match f.color_type {
+        png::ColorType::Grayscale => [p[0], p[0], p[0], 255],
+        png::ColorType::GrayscaleAlpha => [p[0], p[0], p[0], p[1]],
+        png::ColorType::Rgb => [p[0], p[1], p[2], 255],
+        _ => [p[0], p[1], p[2], p[3]], // Rgba (an indexed one is expanded to Rgb / Rgba)
+    });
+    Ok(px.collect())
+}
+
+/// The kept custom skin, if there is one and it still reads.
+pub fn load_custom(root: &Path) -> Option<Vec<u8>> {
+    from_png(&std::fs::read(root.join(CUSTOM)).ok()?).ok()
+}
+
+/// Reset: forget the custom skin.
+pub fn clear_custom(root: &Path) {
+    let _ = std::fs::remove_file(root.join(CUSTOM));
+}
+
+/// Import Custom Skin: the newest `.png` of `IMPORT_DIR` and of `root`, as a skin and its file name; kept as `root/custom_skin.png`.
+pub fn import(root: &Path) -> Result<(Vec<u8>, String), &'static str> {
+    let dirs: Vec<&Path> = IMPORT_DIR.get().map(PathBuf::as_path).into_iter().chain([root]).collect();
+    import_from(&dirs, root)
+}
+
+fn import_from(dirs: &[&Path], root: &Path) -> Result<(Vec<u8>, String), &'static str> {
+    let (_, path) = dirs
+        .iter()
+        .filter_map(|d| std::fs::read_dir(d).ok())
+        .flatten()
+        .flatten()
+        .filter(|e| e.file_name() != CUSTOM && e.path().extension().is_some_and(|x| x.eq_ignore_ascii_case("png")))
+        .filter_map(|e| Some((e.metadata().ok().filter(|m| m.len() <= MAX_FILE)?.modified().ok()?, e.path())))
+        .max_by_key(|(t, _)| *t)
+        .ok_or("No .png in the skin folder")?;
+    let bytes = std::fs::read(&path).map_err(|_| "Cannot read the file")?;
+    let px = from_png(&bytes)?;
+    std::fs::write(root.join(CUSTOM), &bytes).map_err(|_| "Cannot keep the skin")?;
+    Ok((px, path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned())))
+}
+
 /// `mob/char.png` itself: the rows of skin slot 0 in `atlas::ART`.
 fn base() -> Vec<u8> {
     let row = atlas::ATLAS_W * 4;
@@ -112,8 +179,62 @@ fn class(x: usize, y: usize, [r, g, b, a]: [u8; 4]) -> Option<usize> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// A PNG of `w` x `h` pixels in `color` (8 bit), for the tests here and in `menu`.
+    pub(crate) fn png_of(w: u32, h: u32, color: png::ColorType, data: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut e = png::Encoder::new(&mut out, w, h);
+        e.set_color(color);
+        e.set_depth(png::BitDepth::Eight);
+        e.write_header().unwrap().write_image_data(data).unwrap();
+        out
+    }
+
+    #[test]
+    fn a_png_becomes_a_64_by_32_skin() {
+        // 64 x 64 RGBA: the top half is the skin, the bottom half is left out.
+        let big: Vec<u8> = (0..64 * 64 * 4).map(|i| (i / 4 % 251) as u8 | (i % 4 == 3) as u8 * 255).collect();
+        let px = from_png(&png_of(64, 64, png::ColorType::Rgba, &big)).unwrap();
+        assert_eq!(px.len(), BYTES);
+        assert_eq!(px, big[..BYTES]);
+        // 64 x 32 RGB gets full alpha; grey with alpha keeps it.
+        let rgb: Vec<u8> = (0..64 * 32 * 3).map(|i| i as u8).collect();
+        let px = from_png(&png_of(64, 32, png::ColorType::Rgb, &rgb)).unwrap();
+        assert_eq!((px[..4].to_vec(), px[7]), (vec![0, 1, 2, 255], 255));
+        let ga: Vec<u8> = (0..64 * 32 * 2).map(|i| if i % 2 == 0 { 9 } else { 77 }).collect();
+        assert_eq!(from_png(&png_of(64, 32, png::ColorType::GrayscaleAlpha, &ga)).unwrap()[..4], [9, 9, 9, 77]);
+        // Any other size, and anything that is no PNG, is refused.
+        assert!(from_png(&png_of(32, 32, png::ColorType::Rgba, &[0; 32 * 32 * 4])).is_err());
+        assert!(from_png(&png_of(64, 48, png::ColorType::Rgba, &[0; 64 * 48 * 4])).is_err());
+        assert!(from_png(b"not a png at all").is_err());
+        assert!(from_png(&[]).is_err());
+    }
+
+    #[test]
+    fn import_takes_the_newest_png_and_keeps_a_copy() {
+        let root = std::env::temp_dir().join(format!("mcrs-skin-import-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let r: &Path = &root;
+        assert_eq!(import_from(&[r], r).unwrap_err(), "No .png in the skin folder");
+        std::fs::write(root.join("notes.txt"), "x").unwrap();
+        std::fs::write(root.join("bad.PNG"), "x").unwrap();
+        assert_eq!(import_from(&[r], r).unwrap_err(), "Not a PNG file");
+        let rgba: Vec<u8> = (0..64 * 64).flat_map(|i| [i as u8, 7, 9, 255]).collect();
+        std::fs::write(root.join("mine.png"), png_of(64, 64, png::ColorType::Rgba, &rgba)).unwrap();
+        std::fs::remove_file(root.join("bad.PNG")).unwrap();
+        let (px, name) = import_from(&[r], r).unwrap();
+        assert_eq!((px.len(), name.as_str()), (BYTES, "mine.png"));
+        assert_eq!(load_custom(&root), Some(px), "kept in the private folder");
+        // The kept copy is not a candidate for the next import.
+        std::fs::remove_file(root.join("mine.png")).unwrap();
+        assert!(import_from(&[r], r).is_err());
+        clear_custom(&root);
+        assert_eq!(load_custom(&root), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn the_original_look_is_the_original_skin() {
