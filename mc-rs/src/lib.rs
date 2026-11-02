@@ -14,6 +14,7 @@ mod input;
 mod immersive;
 #[cfg(feature = "pad-rumble")]
 mod rumble;
+mod storage;
 mod menu;
 mod skin;
 mod options;
@@ -4971,10 +4972,12 @@ fn start_init(app: &AndroidApp) -> Option<std::thread::JoinHandle<Result<App, St
     let init_h = window.height().max(1) as u32;
     // App-private storage, where the world is saved.
     let dir = app.internal_data_path().unwrap_or_else(std::env::temp_dir);
-    // Where Import Custom Skin looks first: `Android/data/<package>/files`, which a file manager or `adb push` can reach.
-    if let Some(p) = app.external_data_path() {
-        let _ = skin::IMPORT_DIR.set(p);
-    }
+    // Where Import Custom Skin looks: the phone's Download and Pictures folders (they need the storage permission, `storage.rs`), a
+    // `MinecraftRS` folder of the user's own, and `Android/data/<package>/files`. ponytail: `/storage/emulated/0` is the primary user's
+    // shared storage on every phone this targets; the upgrade for a work profile or a secondary user is `Environment.getExternalStorageDirectory`.
+    let shared = std::path::Path::new("/storage/emulated/0");
+    let dirs = ["Download", "Pictures", "MinecraftRS"].map(|d| shared.join(d)).into_iter().chain(app.external_data_path()).collect();
+    let _ = skin::SKIN_DIRS.set(dirs);
     log::info!("M3: InitWindow, native {init_w}x{init_h}, starting GPU init thread");
     let h = std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
@@ -5049,6 +5052,10 @@ fn android_main(app: AndroidApp) {
     let mut frame_hint = -1.0f32; // the last `immersive::set_frame_rate` value (-1: the window is new, ask again)
 
     while running {
+        // The skin picker found nothing: ask for the storage permission (a no-op once it is given).
+        if skin::ASK_STORAGE.swap(false, std::sync::atomic::Ordering::Relaxed) {
+            storage::request(&app);
+        }
         // Once the world is up the loop must not wait for events: an empty poll sleeps its whole timeout, and that 8 ms was added to EVERY
         // frame without a touch event (CPU time + 8 ms > 16.7 ms drops a 60 fps frame to 30). Frames are paced by the swap chain (Fifo).
         // Before the window and the GPU exist there is nothing to draw, so the loop may sleep.

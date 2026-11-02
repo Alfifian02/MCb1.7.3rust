@@ -155,7 +155,12 @@ pub enum Scr {
     Options,
     /// NOT b1.7.3: the skin customizer, from the title screen's model button (`skin::Look`: tone, hair, shirt, trousers).
     Skin,
+    /// NOT b1.7.3: the list of skin files `skin::found` saw, from the skin screen's "Import Custom Skin" (`Menu::picks`).
+    Pick,
 }
+
+/// Height of a row of the skin picker (GUI units).
+const PICK_ROW: f32 = 20.0;
 
 /// A `GuiButton`: id, rectangle in GUI units, label, enabled.
 struct Btn(u8, [f32; 4], String, bool);
@@ -192,6 +197,8 @@ pub struct Menu {
     /// The player's look (`<root>/skin.txt`), the title screen's model wears it; `skin_dirty` says the GPU does not have it yet (`take_skin`).
     look: Look,
     skin_dirty: bool,
+    /// The skin files of the picker (`Scr::Pick`): name and path, newest first; `sel` and `scroll` are the list's.
+    picks: Vec<(String, PathBuf)>,
     /// An imported skin (`skin::import`, kept as `<root>/custom_skin.png`): it replaces the palette look until Reset. `note` is the line the
     /// skin screen shows under the buttons (what the last import did).
     custom: Option<Vec<u8>>,
@@ -245,6 +252,7 @@ impl Menu {
             gs: 0,
             look: Look::load(root),
             skin_dirty: false,
+            picks: Vec::new(),
             custom: skin::load_custom(root),
             note: String::new(),
             spin: 0.0,
@@ -323,6 +331,10 @@ impl Menu {
                 vec![b(0, hw - 100.0, y, 200.0, "Rename", !self.name.trim().is_empty()), b(1, hw - 100.0, y + 24.0, 200.0, "Cancel", true)]
             }
             Scr::Options => Vec::new(),
+            Scr::Pick => vec![
+                b(1, hw - 154.0, gh - 28.0, 150.0, "Use Selected Skin", self.sel.is_some()),
+                b(0, hw + 4.0, gh - 28.0, 150.0, "Cancel", true),
+            ],
             Scr::Skin => {
                 // The right half: the four palettes, Reset and Done under the title's band; the model has the left half.
                 let (x, w) = (hw + 8.0, (hw - 16.0).min(150.0));
@@ -350,7 +362,8 @@ impl Menu {
 
     fn max_scroll(&self, gh: f32) -> f32 {
         let (top, bottom) = Self::list_box(gh);
-        (self.worlds.len() as f32 * 36.0 - (bottom - top - 4.0)).max(0.0)
+        let (n, row) = if self.scr == Scr::Pick { (self.picks.len(), PICK_ROW) } else { (self.worlds.len(), 36.0) };
+        (n as f32 * row - (bottom - top - 4.0)).max(0.0)
     }
 
     /// The two text fields of the create screen (GUI units), name then seed.
@@ -442,7 +455,7 @@ impl Menu {
                     if (y / s - py).abs() > 4.0 {
                         self.dragging = true;
                     }
-                    if self.dragging && self.scr == Scr::Select {
+                    if self.dragging && matches!(self.scr, Scr::Select | Scr::Pick) {
                         self.scroll = (self.press_scroll - (y / s - py)).clamp(0.0, self.max_scroll(gh));
                     }
                 }
@@ -485,6 +498,21 @@ impl Menu {
                     }
                 }
             }
+            Scr::Pick => {
+                let (top, bottom) = Self::list_box(gh);
+                let hw = (gw / 2.0).floor();
+                if gy >= top && gy < bottom && (gx - hw).abs() < 110.0 {
+                    let i = ((gy - top + self.scroll - 4.0) / PICK_ROW).floor();
+                    if i >= 0.0 && (i as usize) < self.picks.len() {
+                        let i = i as usize;
+                        let twice = self.last_click.is_some_and(|(j, t)| j == i && t.elapsed().as_millis() < 500);
+                        (self.sel, self.last_click) = (Some(i), Some((i, Instant::now())));
+                        if twice {
+                            self.pressed(1); // a double tap is "Use Selected Skin"
+                        }
+                    }
+                }
+            }
             Scr::Create => {
                 if let Some(i) = Self::fields(gw).iter().position(|&r| hit(r)) {
                     self.typing = Some(i as u8);
@@ -515,12 +543,25 @@ impl Menu {
                 self.note.clear();
                 self.set_look(Look::default());
             }
-            (Scr::Skin, 6) => match skin::import(&self.root) {
-                Ok((px, name)) => {
-                    (self.custom, self.skin_dirty, self.note) = (Some(px), true, format!("Imported {name}"));
+            (Scr::Skin, 6) => {
+                let found = skin::found(&self.root);
+                if found.is_empty() {
+                    // Nothing seen: maybe the storage permission is missing, so the main loop asks (once granted, tap again).
+                    skin::ASK_STORAGE.store(true, std::sync::atomic::Ordering::Relaxed);
+                    self.note = "No skin .png found".to_string();
+                } else {
+                    (self.picks, self.sel, self.scroll, self.scr, self.note) = (found, None, 0.0, Scr::Pick, String::new());
                 }
-                Err(e) => self.note = e.to_string(),
-            },
+            }
+            (Scr::Pick, 0) => self.scr = Scr::Skin,
+            (Scr::Pick, 1) => {
+                let Some((name, path)) = self.sel.and_then(|i| self.picks.get(i)).cloned() else { return };
+                self.scr = Scr::Skin;
+                match skin::import_file(&path, &self.root) {
+                    Ok(px) => (self.custom, self.skin_dirty, self.note) = (Some(px), true, format!("Imported {name}")),
+                    Err(e) => self.note = e.to_string(),
+                }
+            }
             (Scr::Skin, id @ 1..=4) => {
                 let mut l = self.look;
                 l.cycle(id as usize - 1);
@@ -607,6 +648,10 @@ impl Menu {
                 let (top, bottom) = Self::list_box(gh);
                 r.push([0.0, top, gw, bottom - top]);
             }
+            Scr::Pick => {
+                let (top, bottom) = Self::list_box(gh);
+                r.push([0.0, top, gw, bottom - top]);
+            }
             Scr::Create | Scr::Rename => {
                 r.extend(Self::fields(gw));
                 r.push([hw - 100.0, 40.0, 200.0, 112.0]); // the labels over and under the boxes
@@ -678,6 +723,7 @@ impl Menu {
                 txt(v, gw - tw(c) - 2.0, gh - 10.0, c, 0xFFFFFF, false);
             }
             Scr::Select => self.draw_list(v, s, gw, gh),
+            Scr::Pick => self.draw_picks(v, s, gw, gh),
             Scr::Create => {
                 ui::title(v, s, gw, 0.0, "Create New World", true);
                 txt(v, hw - 100.0, 47.0, "World Name", 0xA0A0A0, false);
@@ -699,7 +745,7 @@ impl Menu {
                 let (x, w) = (hw + 8.0, (hw - 16.0).min(150.0));
                 ui::panel(v, s, [x - 6.0, 30.0, w + 12.0, (gh - 28.0).max(210.0) + 26.0 - 30.0], 0.4);
                 // What the last import did, and where the file goes when none was found: two short lines between Reset and Done.
-                let path = if self.note.starts_with("No .png") { "Android/data/dev.mcrs.b173/files" } else { "" };
+                let path = if self.note.starts_with("No skin") { "in Download or Pictures" } else { "" };
                 for (i, line) in [self.note.as_str(), path].into_iter().enumerate() {
                     txt(v, x + w / 2.0, 184.0 + 10.0 * i as f32, &ui::fit(line, w + 8.0), 0xA0A0A0, true);
                 }
@@ -760,6 +806,34 @@ impl Menu {
         grad(v, s, [0.0, bottom - 4.0, gw, 4.0], clear, black);
         ui::scrollbar(v, s, hw + 124.0, top, bottom - top, self.worlds.len() as f32 * 36.0, self.scroll);
         ui::title(v, s, gw, 4.0, "Select World", false);
+    }
+
+    /// The skin picker: one row per file, its name and the folder it lies in, over the same dirt, fades and scroll bar as the world list.
+    fn draw_picks(&self, v: &mut Vec<HudVertex>, s: f32, gw: f32, gh: f32) {
+        let hw = (gw / 2.0).floor();
+        let (top, bottom) = Self::list_box(gh);
+        dirt(v, s, [0.0, top, gw, bottom], self.scroll, 0x202020);
+        for (i, (name, path)) in self.picks.iter().enumerate() {
+            let y = top + 4.0 - self.scroll + i as f32 * PICK_ROW;
+            if y + PICK_ROW < top || y > bottom {
+                continue;
+            }
+            if self.sel == Some(i) {
+                rect(v, s, [hw - 110.0, y - 2.0, 220.0, PICK_ROW], 0x808080);
+                rect(v, s, [hw - 109.0, y - 1.0, 218.0, PICK_ROW - 2.0], 0x000000);
+            }
+            let dir = path.parent().and_then(|d| d.file_name()).map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+            let dir = ui::fit(&dir, 80.0);
+            HudPipeline::push_text(v, (hw - 108.0) * s, (y + 5.0) * s, s, &ui::fit(name, 216.0 - tw(&dir) - 8.0), rgb(0xFFFFFF));
+            HudPipeline::push_text(v, (hw + 108.0 - tw(&dir)) * s, (y + 5.0) * s, s, &dir, rgb(0x808080));
+        }
+        dirt(v, s, [0.0, 0.0, gw, top], 0.0, 0x404040);
+        dirt(v, s, [0.0, bottom, gw, gh], 0.0, 0x404040);
+        let (clear, black) = ([0.0; 4], [0.0, 0.0, 0.0, 1.0]);
+        grad(v, s, [0.0, top, gw, 4.0], black, clear);
+        grad(v, s, [0.0, bottom - 4.0, gw, 4.0], clear, black);
+        ui::scrollbar(v, s, hw + 124.0, top, bottom - top, self.picks.len() as f32 * PICK_ROW, self.scroll);
+        ui::title(v, s, gw, 4.0, "Select Skin", false);
     }
 
     /// The text field being typed in, alone at the top (the phone's soft keyboard covers the rest of the screen).
@@ -904,12 +978,25 @@ mod tests {
         let mut m = Menu::new(&root);
         tap(&mut m, "Customize Skin", sz);
         tap(&mut m, "Import Custom Skin", sz);
-        assert_eq!(m.note, "No .png in the skin folder");
+        assert_eq!(m.note, "No skin .png found");
+        assert!(skin::ASK_STORAGE.swap(false, std::sync::atomic::Ordering::Relaxed), "nothing found: the storage permission is asked for");
         assert!(m.custom.is_none() && m.take_skin().is_none());
         let rgba: Vec<u8> = (0..64 * 64).flat_map(|i| [200, i as u8, 30, 255]).collect();
         std::fs::write(root.join("dreamybull.png"), skin::tests::png_of(64, 64, png::ColorType::Rgba, &rgba)).unwrap();
         tap(&mut m, "Import Custom Skin", sz);
-        assert_eq!(m.note, "Imported dreamybull.png");
+        assert_eq!((m.scr, m.picks.len()), (Scr::Pick, 1));
+        let (s, gw, gh) = scaled(sz.0, sz.1);
+        assert!(!m.buttons(gw, gh).iter().any(|b| b.2 == "Use Selected Skin" && b.3), "nothing chosen yet");
+        let (top, _) = Menu::list_box(gh);
+        let (x, y) = ((gw / 2.0).floor() * s, (top + 10.0) * s);
+        m.event(ScreenEv::Down(x, y), sz.0, sz.1, &mut Settings::default());
+        m.event(ScreenEv::Up(x, y), sz.0, sz.1, &mut Settings::default());
+        assert_eq!(m.sel, Some(0));
+        let mut v = Vec::new();
+        m.draw(&mut v, sz.0, sz.1, &Settings::default());
+        assert!(v.iter().all(|p| p.pos[0].is_finite() && p.pos[1].is_finite()));
+        tap(&mut m, "Use Selected Skin", sz);
+        assert_eq!((m.scr, m.note.as_str()), (Scr::Skin, "Imported dreamybull.png"));
         let px = m.take_skin().expect("the imported skin is handed over");
         assert_eq!(px, rgba[..skin::BYTES]);
         assert!(m.take_skin().is_none(), "once");

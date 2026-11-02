@@ -45,6 +45,14 @@ build_targets = ["aarch64-linux-android"]
 min_sdk_version = 26
 target_sdk_version = 34
 
+# Import Custom Skin lists the skin .png files of Download / Pictures (`storage.rs`): READ_EXTERNAL_STORAGE up to API 32, READ_MEDIA_IMAGES from 33.
+[[package.metadata.android.uses_permission]]
+name = "android.permission.READ_EXTERNAL_STORAGE"
+max_sdk_version = 32
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.READ_MEDIA_IMAGES"
+
 [package.metadata.android.application]
 label = "MC b1.7.3 Rust"
 # No title/status bar, so the landscape surface is the full screen.

@@ -7,8 +7,9 @@
 //! shoes, the mouth and the hat layer are left alone), and its brightness against the brightest pixel of its class (`REF`) is kept, so the
 //! shading of the original (`f`) is painted again in the new colour. Index 0 of every palette is the original colour and repaints nothing, so a
 //! fresh install shows `mob/char.png` byte for byte.
-//! Import Custom Skin (NOT b1.7.3): `import` takes the newest `.png` of the app's folder in shared storage (`IMPORT_DIR`, set at start-up) or of the
-//! private folder, `from_png` makes a 64 x 32 RGBA of it (a 64 x 32 skin as it is; a 64 x 64 one of 1.8 and later by its top half, which holds the
+//! Import Custom Skin (NOT b1.7.3): `found` lists the skin-shaped `.png` files (64 x 32 or 64 x 64) of the phone's Download and Pictures folders
+//! (`SKIN_DIRS`, set at start-up; they need the storage permission, `ASK_STORAGE` -> `storage.rs`) and of the private folder, the title screen's
+//! picker shows them and `import_file` takes the one that was tapped. `from_png` makes a 64 x 32 RGBA of it (a 64 x 32 skin as it is; a 64 x 64 one of 1.8 and later by its top half, which holds the
 //! head, the body, the right arm and the right leg: `ModelBiped` mirrors them for the left side, like the old skins), and a copy is kept as
 //! `<root>/custom_skin.png` (`load_custom`) until Reset. A custom skin replaces the palette look; `png` is the one new dependency.
 //! ponytail: 3 px "slim" arms are drawn with the 4 px model, and the 1.8 overlay layers (jacket, sleeves, trousers) are not used.
@@ -16,11 +17,15 @@
 
 use crate::render::atlas;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::sync::OnceLock;
 
-/// The folder `import` looks in first (the app's folder in shared storage, `Android/data/<package>/files`, which a file manager or `adb push`
-/// can reach): set once at start-up, so it is absent on a host and the private folder is the only place.
-pub static IMPORT_DIR: OnceLock<PathBuf> = OnceLock::new();
+/// The folders `found` looks in besides the private one: the phone's shared Download, Pictures and `MinecraftRS` folders (and the app's own
+/// `Android/data/<package>/files`). Set once at start-up, so on a host the private folder is the only place.
+pub static SKIN_DIRS: OnceLock<Vec<PathBuf>> = OnceLock::new();
+
+/// Set when the picker found nothing: the main loop (it holds the `AndroidApp`) then asks for the storage permission, if it is not given yet.
+pub static ASK_STORAGE: AtomicBool = AtomicBool::new(false);
 
 /// The imported skin as it was kept (a copy of the file that was picked) in the private folder.
 const CUSTOM: &str = "custom_skin.png";
@@ -130,26 +135,43 @@ pub fn clear_custom(root: &Path) {
     let _ = std::fs::remove_file(root.join(CUSTOM));
 }
 
-/// Import Custom Skin: the newest `.png` of `IMPORT_DIR` and of `root`, as a skin and its file name; kept as `root/custom_skin.png`.
-pub fn import(root: &Path) -> Result<(Vec<u8>, String), &'static str> {
-    let dirs: Vec<&Path> = IMPORT_DIR.get().map(PathBuf::as_path).into_iter().chain([root]).collect();
-    import_from(&dirs, root)
+/// Is `path` shaped like a skin: a small PNG whose header (signature, then the IHDR's width and height) says 64 x 32 or 64 x 64?
+fn skin_shaped(path: &Path) -> bool {
+    use std::io::Read;
+    let mut head = [0u8; 24];
+    let Ok(mut f) = std::fs::File::open(path) else { return false };
+    if f.metadata().map_or(true, |m| m.len() > MAX_FILE) || f.read_exact(&mut head).is_err() {
+        return false;
+    }
+    let dim = |i: usize| u32::from_be_bytes([head[i], head[i + 1], head[i + 2], head[i + 3]]);
+    head[..8] == [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A] && dim(16) == 64 && matches!(dim(20), 32 | 64)
 }
 
-fn import_from(dirs: &[&Path], root: &Path) -> Result<(Vec<u8>, String), &'static str> {
-    let (_, path) = dirs
+/// The skins to pick from: file name and path of every skin-shaped `.png` directly in `SKIN_DIRS` and `root`, newest first.
+pub fn found(root: &Path) -> Vec<(String, PathBuf)> {
+    let dirs: Vec<&Path> = SKIN_DIRS.get().into_iter().flatten().map(PathBuf::as_path).chain([root]).collect();
+    found_in(&dirs)
+}
+
+fn found_in(dirs: &[&Path]) -> Vec<(String, PathBuf)> {
+    let mut v: Vec<_> = dirs
         .iter()
         .filter_map(|d| std::fs::read_dir(d).ok())
         .flatten()
         .flatten()
-        .filter(|e| e.file_name() != CUSTOM && e.path().extension().is_some_and(|x| x.eq_ignore_ascii_case("png")))
-        .filter_map(|e| Some((e.metadata().ok().filter(|m| m.len() <= MAX_FILE)?.modified().ok()?, e.path())))
-        .max_by_key(|(t, _)| *t)
-        .ok_or("No .png in the skin folder")?;
-    let bytes = std::fs::read(&path).map_err(|_| "Cannot read the file")?;
+        .filter(|e| e.file_name() != CUSTOM && e.path().extension().is_some_and(|x| x.eq_ignore_ascii_case("png")) && skin_shaped(&e.path()))
+        .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.file_name().to_string_lossy().into_owned(), e.path())))
+        .collect();
+    v.sort_by(|a, b| b.0.cmp(&a.0));
+    v.into_iter().map(|(_, n, p)| (n, p)).collect()
+}
+
+/// Import Custom Skin: the picked file as a skin; a copy is kept as `root/custom_skin.png`.
+pub fn import_file(path: &Path, root: &Path) -> Result<Vec<u8>, &'static str> {
+    let bytes = std::fs::read(path).map_err(|_| "Cannot read the file")?;
     let px = from_png(&bytes)?;
     std::fs::write(root.join(CUSTOM), &bytes).map_err(|_| "Cannot keep the skin")?;
-    Ok((px, path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned())))
+    Ok(px)
 }
 
 /// `mob/char.png` itself: the rows of skin slot 0 in `atlas::ART`.
@@ -213,24 +235,28 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn import_takes_the_newest_png_and_keeps_a_copy() {
+    fn found_lists_skin_shaped_pngs_newest_first_and_import_keeps_a_copy() {
         let root = std::env::temp_dir().join(format!("mcrs-skin-import-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let r: &Path = &root;
-        assert_eq!(import_from(&[r], r).unwrap_err(), "No .png in the skin folder");
+        assert!(found_in(&[r]).is_empty());
         std::fs::write(root.join("notes.txt"), "x").unwrap();
         std::fs::write(root.join("bad.PNG"), "x").unwrap();
-        assert_eq!(import_from(&[r], r).unwrap_err(), "Not a PNG file");
+        std::fs::write(root.join("photo.png"), png_of(32, 32, png::ColorType::Rgba, &[0; 32 * 32 * 4])).unwrap();
+        assert!(found_in(&[r]).is_empty(), "text, junk and a wrong size are not skins");
         let rgba: Vec<u8> = (0..64 * 64).flat_map(|i| [i as u8, 7, 9, 255]).collect();
+        std::fs::write(root.join("old.png"), png_of(64, 32, png::ColorType::Rgba, &rgba[..64 * 32 * 4])).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(30));
         std::fs::write(root.join("mine.png"), png_of(64, 64, png::ColorType::Rgba, &rgba)).unwrap();
-        std::fs::remove_file(root.join("bad.PNG")).unwrap();
-        let (px, name) = import_from(&[r], r).unwrap();
-        assert_eq!((px.len(), name.as_str()), (BYTES, "mine.png"));
+        let list = found_in(&[r]);
+        assert_eq!(list.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), ["mine.png", "old.png"]);
+        let px = import_file(&list[0].1, r).unwrap();
+        assert_eq!(px.len(), BYTES);
         assert_eq!(load_custom(&root), Some(px), "kept in the private folder");
-        // The kept copy is not a candidate for the next import.
-        std::fs::remove_file(root.join("mine.png")).unwrap();
-        assert!(import_from(&[r], r).is_err());
+        // The kept copy is not offered again.
+        assert_eq!(found_in(&[r]).len(), 2);
+        assert_eq!(import_file(&root.join("bad.PNG"), r).unwrap_err(), "Not a PNG file");
         clear_custom(&root);
         assert_eq!(load_custom(&root), None);
         let _ = std::fs::remove_dir_all(&root);
