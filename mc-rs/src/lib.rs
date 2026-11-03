@@ -3194,11 +3194,14 @@ impl App {
         }
     }
 
-    /// Open the satchel (`satchel.rs`) on `screen`: the 2x2 inventory (the book closed) or a workbench's 3x3 (the book open).
+    /// Open the satchel (`satchel.rs`) on `screen`: the 2x2 inventory (the Bag tab) or a workbench's 3x3 (the Craft tab).
     fn open_satchel(&mut self, screen: Screen) {
         let (bench, gw) = (screen.gw == 3, screen.gw);
         self.open_screen(screen);
         self.sat = Some(satchel::Satchel::new(bench));
+        if bench {
+            self.sat_first();
+        }
         // A pad's cursor starts on the selected quick-belt slot, where it will lie once the bag has risen, not in the middle of the screen.
         let mut settled = satchel::Satchel::new(bench);
         settled.tick(10.0);
@@ -3210,8 +3213,20 @@ impl App {
         self.audio.play_here("step.cloth", 0.6, 1.0);
     }
 
+    /// Pick the first recipe of the strip (what a tab change or a bench shows at once), without crafting it.
+    fn sat_first(&mut self) {
+        let (w, h) = self.be.size();
+        let first = match (self.sat.as_ref(), self.screen.as_ref()) {
+            (Some(sat), Some(s)) => satchel::Frame::with_grid(sat, &self.inv, &s.grid, s.gw, w as f32, h as f32).craft.and_then(|b| b.rows.first().map(|r| r.0)),
+            _ => None,
+        };
+        if let Some(s) = self.sat.as_mut() {
+            (s.sel, s.card_scroll) = (first, 0.0);
+        }
+    }
+
     /// A d-pad step in the open satchel: the cursor jumps to the neighbouring target (`satchel::step`), so there is no stick to push
-    /// from a slot to a button. At the foot or head of the recipe list nothing lies that way: the list scrolls a row and the cursor steps on.
+    /// from a slot to a button. At the end of the recipe strip nothing lies that way: the strip scrolls a recipe and the cursor steps on.
     fn sat_nav(&mut self, d: (i32, i32)) {
         let (w, h) = self.be.size();
         let at = self.touch.cursor_pos;
@@ -3242,46 +3257,52 @@ impl App {
             }
         };
         let mut to = satchel::step(&targets(&*self), at, d);
-        if to.is_none() && d.0 == 0 && matches!(self.sat_hit(at.0, at.1), Some(satchel::Pick::Row(_))) {
+        if to.is_none() && d.1 == 0 && matches!(self.sat_hit(at.0, at.1), Some(satchel::Pick::Row(_))) {
             let max = self.sat_max_scroll(false);
-            let row_h = match (self.sat.as_ref(), self.screen.as_ref()) {
-                (Some(sat), Some(s)) => satchel::Frame::with_grid(sat, &self.inv, &s.grid, s.gw, w as f32, h as f32).book.map_or(0.0, |b| b.row_h),
+            let row_w = match (self.sat.as_ref(), self.screen.as_ref()) {
+                (Some(sat), Some(s)) => satchel::Frame::with_grid(sat, &self.inv, &s.grid, s.gw, w as f32, h as f32).craft.map_or(0.0, |b| b.row_w),
                 _ => 0.0,
             };
             if let Some(sat) = self.sat.as_mut() {
-                sat.scroll = (sat.scroll + d.1 as f32 * row_h).clamp(0.0, max);
+                sat.scroll = (sat.scroll + d.0 as f32 * row_w).clamp(0.0, max);
             }
             let t = targets(&*self);
-            to = satchel::step(&t, at, d).or_else(|| satchel::under(&t, at)); // the row it is on, when the list could not move
+            to = satchel::step(&t, at, d).or_else(|| satchel::under(&t, at)); // the recipe it is on, when the strip could not move
         }
         if let Some(r) = to {
             self.touch.warp_cursor((r[0] + r[2] * 0.5, r[1] + r[3] * 0.5));
         }
     }
 
-    /// The pad's other keys in a container screen: B steps back (a category to the category list) before it closes, LB / RB turn the
-    /// book's page through the categories, the right stick scrolls the recipe card's ingredients under the cursor, else the list.
+    /// The pad's other keys in a container screen: B closes, LB / RB walk the tabs (the bag, then the categories, round), the right stick
+    /// scrolls the ingredient list under the cursor, else the strip of recipes.
     fn sat_pad_keys(&mut self) {
         let (back, page, px) = (self.touch.take_back(), self.touch.take_page(), self.touch.take_scroll());
         let at = self.touch.cursor_pos;
         let pick = self.sat_hit(at.0, at.1);
         let (card, max) = (matches!(pick, Some(satchel::Pick::Card)), |me: &Self, c| me.sat_max_scroll(c));
         let (mc, ml) = (max(self, true), max(self, false));
-        if let Some(s) = self.sat.as_mut().filter(|s| s.open()) {
+        let mut turned = false;
+        if let Some(s) = self.sat.as_mut() {
             if page != 0 {
-                let n = book::CATS.len() as i32;
-                let to = s.cat.map_or(if page > 0 { 0 } else { n - 1 }, |i| (i as i32 + page).rem_euclid(n));
-                s.turn(Some(to as usize));
+                let n = book::CATS.len() as i32 + 1;
+                let to = ((if s.craft { s.cat as i32 + 1 } else { 0 }) + page).rem_euclid(n);
+                if to == 0 {
+                    s.craft = false;
+                } else {
+                    s.turn(to as usize - 1);
+                    turned = true;
+                }
             }
             if px != 0.0 {
                 if card { s.card_scroll = (s.card_scroll + px).clamp(0.0, mc) } else { s.scroll = (s.scroll + px).clamp(0.0, ml) }
             }
         }
+        if turned {
+            self.sat_first();
+        }
         if back {
-            match self.sat.as_mut().filter(|s| s.open() && s.cat.is_some()) {
-                Some(s) => s.turn(None),
-                None => self.touch.press_inventory(),
-            }
+            self.touch.press_inventory();
         }
     }
 
@@ -3301,27 +3322,42 @@ impl App {
         Some(satchel::Frame::with_grid(sat, &self.inv, &s.grid, s.gw, w as f32, h as f32).hit(sat, x, y))
     }
 
-    /// How far the book's list (or the recipe card's ingredients) can scroll (px).
+    /// How far the strip of recipes (or the list of ingredients) can scroll (px).
     fn sat_max_scroll(&self, card: bool) -> f32 {
         let (Some(sat), Some(s)) = (self.sat.as_ref(), self.screen.as_ref()) else { return 0.0 };
         let (w, h) = self.be.size();
-        satchel::Frame::with_grid(sat, &self.inv, &s.grid, s.gw, w as f32, h as f32).book.map_or(0.0, |b| if card { b.card_max } else { b.max_scroll })
+        satchel::Frame::with_grid(sat, &self.inv, &s.grid, s.gw, w as f32, h as f32).craft.map_or(0.0, |b| if card { b.card_max } else { b.max_scroll })
     }
 
-    /// A tap on the open satchel: a button, a page of the book, a recipe (it fills the grid), a slot, or past it all (a held stack is thrown).
+    /// A tap on the open satchel: a button, a tab, a recipe (picked; a second tap crafts it), the result (crafts), a slot, or past it all (a held
+    /// stack is thrown).
     fn on_sat_tap(&mut self, x: f32, y: f32) {
         use satchel::{Btn, Pick};
         let Some(p) = self.sat_hit(x, y) else { return };
         match p {
             Pick::Btn(Btn::Close) => self.close_screen(),
-            Pick::Btn(Btn::Book) => {
-                // Closing the book puts what is in its grid back in the bag.
-                let closing = self.sat.as_mut().map_or(false, |s| {
-                    s.book = !s.book;
-                    !s.book
+            Pick::Btn(Btn::Bag) => {
+                if let Some(s) = self.sat.as_mut() {
+                    s.craft = false;
+                }
+            }
+            Pick::Btn(Btn::Craft) => {
+                let fresh = self.sat.as_mut().map_or(false, |s| {
+                    s.craft = true;
+                    s.sel.is_none()
                 });
-                if let (true, Some(s)) = (closing, self.screen.as_mut()) {
-                    book::stash(s, &mut self.inv);
+                if fresh {
+                    self.sat_first();
+                }
+            }
+            Pick::Btn(Btn::Info) => {
+                if let Some(s) = self.sat.as_mut() {
+                    (s.info, s.card_scroll) = (!s.info, 0.0);
+                }
+            }
+            Pick::Btn(Btn::Only) => {
+                if let Some(s) = self.sat.as_mut() {
+                    (s.only, s.scroll) = (!s.only, 0.0);
                 }
             }
             Pick::Btn(Btn::Sort) => {
@@ -3332,13 +3368,9 @@ impl App {
             Pick::Btn(Btn::One) => self.one_mode = !self.one_mode,
             Pick::Cat(i) => {
                 if let Some(s) = self.sat.as_mut() {
-                    s.turn(Some(i));
+                    s.turn(i);
                 }
-            }
-            Pick::Back => {
-                if let Some(s) = self.sat.as_mut() {
-                    s.turn(None);
-                }
+                self.sat_first();
             }
             Pick::Row(i) => self.sat_pick(i),
             Pick::Pin => {
@@ -3350,6 +3382,7 @@ impl App {
                 self.opts.book_discovery = !self.opts.book_discovery;
                 self.opts.save();
             }
+            Pick::Slot(craft::SlotId::Result) => self.sat_make(self.shift_mode), // the picked recipe's result: craft it (Shift on: all)
             Pick::Slot(id) => {
                 let (one, shift) = (self.one_mode, self.shift_mode);
                 self.with_ext(|s, inv, ext| if shift { s.shift_click(id, inv, ext) } else { s.click(id, one, inv, ext) });
@@ -3368,29 +3401,37 @@ impl App {
         }
     }
 
-    /// A tap on a recipe of the book's list: it is picked, and when the bag has it all and the grid fits, its ingredients go into the grid
-    /// (what lay there goes back to the bag). A recipe the player has not met yet (Unknown recipes: hidden) is picked but not filled.
+    /// A tap on a recipe of the strip: it is picked (its ingredients show in the preview); a tap on the recipe already picked crafts it, like
+    /// Legacy's A (`sat_make`).
     fn sat_pick(&mut self, i: usize) {
-        let Some(e) = book::entries().get(i) else { return };
+        let again = self.sat.as_ref().is_some_and(|s| s.sel == Some(i));
         if let Some(s) = self.sat.as_mut() {
-            s.sel = Some(i);
-            s.card_scroll = 0.0;
+            (s.sel, s.card_scroll) = (Some(i), 0.0);
         }
+        if again {
+            self.sat_make(self.shift_mode);
+        }
+    }
+
+    /// Craft the picked recipe into the bag (`book::make`): one set, or `all` of what the bag holds. A recipe the player has not met yet
+    /// (Unknown recipes: hidden) and a held stack craft nothing.
+    fn sat_make(&mut self, all: bool) {
+        let Some(e) = self.sat.as_ref().and_then(|s| s.sel).and_then(|i| book::entries().get(i)) else { return };
         if self.opts.book_discovery && !self.notes.known(e) {
             return;
         }
-        let filled = match self.screen.as_mut() {
+        let done = match self.screen.as_mut() {
             Some(s) if s.cursor.is_none() => {
                 // Craft from a nearby chest (NOT b1.7.3, UNVERIFIED): the chests near this workbench give what the bag lacks.
                 if let (Some(b), true) = (s.bench, world::combat::rules::on()) {
                     book::pull(e, &mut self.inv, &mut self.chests, b);
-                    self.inv.near = book::near_stock(b, &self.chests); // what is left, so `fill` does not count what moved twice
+                    self.inv.near = book::near_stock(b, &self.chests); // what is left, so `make` does not count what moved twice
                 }
-                book::fill(e, s, &mut self.inv)
+                book::make(e, s, &mut self.inv, all)
             }
             _ => false,
         };
-        if filled {
+        if done {
             self.audio.play_here("step.cloth", 0.4, 1.4);
         }
     }
@@ -3533,7 +3574,7 @@ impl App {
         match ev {
             ScreenEv::Down(x, y) => {
                 // On the pack's cloth a press on a 3D button is only a tap; one on empty cloth or ground may become a pan of the camera.
-                // In the satchel anything but a slot is a tap (a button, a page); a press on the book's list may become a scroll.
+                // In the satchel anything but a slot is a tap (a button, a tab, a recipe); a press on the strip or the ingredient list may become a scroll.
                 let pick = self.sat_hit(x, y);
                 let btn = (self.mat_ui && self.pack_btn(x, y).is_some()) || pick.is_some_and(|p| !matches!(p, satchel::Pick::Slot(_)));
                 let list = match (self.sat.as_ref(), pick) {
@@ -3547,13 +3588,13 @@ impl App {
                 self.gesture = Some(Gesture { start, spread: false, visited: Vec::new(), btn, grab, moved: false, down: (x, y), age: 0.0, list });
             }
             ScreenEv::Move(x, y) => {
-                // A drag that began on the book's list scrolls it; lifting after one is not a tap.
+                // A drag that began on the strip (or the ingredient list) scrolls it; lifting after one is not a tap.
                 if let Some(((card, s0), down, moved)) = self.gesture.as_ref().and_then(|g| g.list.map(|l| (l, g.down, g.moved))) {
                     let moved = moved || (x - down.0).hypot(y - down.1) > PAN_SLOP;
                     if moved {
                         let max = self.sat_max_scroll(card);
                         if let Some(s) = self.sat.as_mut() {
-                            let to = (s0 - (y - down.1)).clamp(0.0, max);
+                            let to = (s0 - if card { y - down.1 } else { x - down.0 }).clamp(0.0, max); // the strip slides sideways, the list up and down
                             if card { s.card_scroll = to } else { s.scroll = to }
                         }
                     }
@@ -3592,13 +3633,10 @@ impl App {
             }
             ScreenEv::Up(x, y) => {
                 let g = self.gesture.take();
-                // The satchel's result held for a while crafts all (`book::craft_all`); anything else lifts as a tap.
+                // The satchel's result held for a while crafts all (`sat_make`); anything else lifts as a tap.
                 let hold = self.sat.is_some() && g.as_ref().is_some_and(|g| g.start == Some(craft::SlotId::Result) && g.age >= satchel::HOLD_SECS && (x - g.down.0).hypot(y - g.down.1) < PAN_SLOP);
                 if hold {
-                    let n = self.screen.as_mut().map_or(0, |s| book::craft_all(s, &mut self.inv));
-                    if n > 0 {
-                        self.audio.play_here("step.cloth", 0.5, 1.3);
-                    }
+                    self.sat_make(true);
                 } else if !g.is_some_and(|g| g.spread || g.moved) {
                     self.on_screen_tap(x, y);
                 }

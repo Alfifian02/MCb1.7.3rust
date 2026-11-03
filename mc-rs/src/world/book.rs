@@ -229,6 +229,19 @@ fn pattern_cells(ri: usize, gw: usize) -> [u16; 9] {
     cells
 }
 
+/// The ingredient codes of `e` in the cells of a preview `pg` wide (`0` = empty): a recipe in its places (`pg` at least as wide as the
+/// recipe), a smelting's one input in the first cell (`pg` = 1). What the satchel shows as ghosts, red where the bag is short.
+pub fn preview(e: &Entry, pg: usize) -> [u16; 9] {
+    match e.src {
+        Src::Craft(ri) => pattern_cells(ri, pg.clamp(1, 3)),
+        Src::Smelt(_) => {
+            let mut cells = [0u16; 9];
+            cells[0] = e.need.first().map_or(0, |n| n.0);
+            cells
+        }
+    }
+}
+
 /// The grid holds exactly this recipe's ingredients in its places, whatever the counts (an empty grid holds none).
 fn holds(cells: &[u16; 9], grid: &[Option<ItemStack>; 9]) -> bool {
     cells.iter().any(|&c| c != 0) && cells.iter().zip(grid.iter()).all(|(&c, g)| g.as_ref().map_or(0, |s| craft::code(s.id, s.damage)) == c)
@@ -316,6 +329,23 @@ pub fn craft_all(screen: &mut Screen, inv: &mut Inventory) -> u32 {
     }
     stash(screen, inv);
     rounds
+}
+
+/// Legacy's A on a recipe: one set (or, with `all`, every set the bag can make) goes straight into the bag; the grid is only the machinery
+/// and ends empty. Nothing changes, and false, when a stack is on the cursor, the entry is a smelting or does not fit the screen's grid,
+/// something is short, or the bag has no room for the result.
+pub fn make(e: &Entry, screen: &mut Screen, inv: &mut Inventory, all: bool) -> bool {
+    if screen.cursor.is_some() || !stash(screen, inv) || !fill(e, screen, inv) {
+        return false;
+    }
+    if all {
+        return craft_all(screen, inv) > 0;
+    }
+    let before = screen.grid;
+    screen.shift_click(SlotId::Result, inv, None);
+    let made = screen.grid != before; // no room: nothing was taken, the grid is as it was
+    stash(screen, inv);
+    made
 }
 
 // ---- What the player has seen, and the pinned recipe ----
@@ -546,6 +576,26 @@ mod tests {
         rich.slots[11] = Some(stack(15, 1));
         let smelt = entries().iter().position(|e| e.src == Src::Smelt(15)).expect("iron ore");
         assert_eq!(in_cat_ready(Cat::Furnace, 2, &rich, &[None; 9])[0], smelt);
+    }
+
+    /// `make` crafts into the bag without a grid to tend: one set, then all that is left, and the grid is empty after each.
+    #[test]
+    fn make_crafts_straight_into_the_bag_and_leaves_the_grid_empty() {
+        let planks = entry(5, 0, 2);
+        let mut inv = Inventory::default();
+        inv.slots[10] = Some(stack(17, 3));
+        let mut s = Screen::new(2);
+        assert!(make(planks, &mut s, &mut inv, false));
+        assert!(s.grid.iter().all(Option::is_none), "the grid is machinery: empty after");
+        assert_eq!((count(&inv, 17), count(&inv, 5)), (2, u32::from(planks.out.count)));
+        assert!(make(planks, &mut s, &mut inv, true));
+        assert_eq!((count(&inv, 17), count(&inv, 5)), (0, 3 * u32::from(planks.out.count)));
+        assert!(!make(planks, &mut s, &mut inv, false), "nothing left to make it from");
+        // A stack on the cursor, or a smelting: nothing changes.
+        inv.slots[11] = Some(stack(17, 1));
+        s.cursor = Some(stack(3, 1));
+        assert!(!make(planks, &mut s, &mut inv, false) && count(&inv, 17) == 1);
+        assert_eq!(preview(planks, 2)[0], craft::code(17, 0), "a log in the first cell");
     }
 
     #[test]

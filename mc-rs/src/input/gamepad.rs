@@ -1219,13 +1219,13 @@ mod tests {
         assert!((back.look_h - 0.5).abs() < 1e-4);
     }
 
-    /// In the satchel the hints take the rows of what is under the cursor and keep clear of its buttons, bag and book; X is named only while
+    /// In the satchel the hints take the rows of what is under the cursor and keep clear of its buttons, tabs and panel; X is named only while
     /// no bind has it; the cursor stays under 60% of a slot.
     #[test]
     fn satchel_hints_keep_off_the_satchel_and_the_cursor_stays_small() {
         use crate::satchel::{pad_hints, Frame, Pick, Satchel};
         let (p, mut c) = pad();
-        let mut sat = Satchel::new(true);
+        let mut sat = Satchel::new(false);
         sat.tick(10.0);
         let (w, h) = (1604.0, 720.0);
         let f = Frame::new(&sat, &crate::world::items::Inventory::default(), 2, w, h);
@@ -1233,7 +1233,7 @@ mod tests {
         let view = HintView { w, h, s: 3.0, ui: true, avoid: &avoid };
         let slot = Pick::Slot(crate::world::craft::SlotId::Inv(0));
         let rows = pad_hints(&sat, slot, false);
-        let b = hint_box_with(&p, &c, &view, &rows).expect("there is room under the book");
+        let b = hint_box_with(&p, &c, &view, &rows).expect("there is room beside the bag");
         assert!(avoid.iter().all(|a| apart(b, *a, 12.0)), "{avoid:?} vs {b:?}");
         let quads = |c: &PadCfg, rows: &[(Role, &str)]| {
             let mut v = Vec::new();

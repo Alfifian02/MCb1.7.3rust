@@ -1,22 +1,23 @@
 //! The satchel: the immersive pack's flat replacement (`world::pack`'s cloth stays behind `packCloth:true`). The camera never moves; the
-//! inventory button lifts a leather bag in front of the view with a closed recipe book lying beside it; a tap on the book opens it.
+//! inventory button lifts one panel in front of the view, laid out like Legacy Minecraft's screens.
 //!
-//! - One layout: the bag is a 9 x 3 grid with the quick belt and the armor row (big cells for a thumb), as leather with stitching, rivets,
-//!   a pocket band behind each row and a strap round the belt; a slot's rim is tinted by its item's category (`pack::category`).
-//! - The bag and the closed book lie side by side, centred together (the book: a leather cover, a clasp, `Tap to open`). A tap swings the
-//!   cover away, both pages grow from the spine, and the bag glides to the left while the spine glides to its place, a `Close` tab above the spine shuts it. Open: the left page is the categories, then the recipes of one as a list; the right page is the crafting grid
-//!   (2 x 2, or 3 x 3 at a workbench) with the card of the picked recipe under it (`world::book`).
+//! - Two tabs. `Bag`: the armor row, the 9 x 3 bag and the quick belt, centred. `Craft`: a row of category tabs, a strip of recipes you
+//!   slide sideways, and under it two sunk panels: the picked recipe (its ingredients as a ghost grid, red where the bag is short, the
+//!   arrow and the result) and the bag (or, with `Info`, the ingredient list). There is no grid to fill by hand: the grid is machinery
+//!   (`world::book::make`), a tap on a recipe picks it, a tap on the picked recipe (or on its result) crafts one into the bag, a hold on
+//!   the result (or `Shift` on) crafts all. `Craftable` hides the recipes the bag cannot make now.
 //! - Everything here is geometry (`Frame`) and drawing (`draw`, `draw_pin`); the screen's state is `Satchel`, the rules are `world::book`
 //!   and `world::craft::Screen`, and `lib.rs` only routes the finger.
 //!
-//! - Look (2026-10-26, UI overhaul): pixel art from `assets/satchel.rgba` (`tools/gen_satchel_ui.py`, `hud::sprites::sat`), 9-slices and tiles at one
-//!   pixel size (`u` = the text's pixel): a grey bevelled stone panel with corner marks and a red stitched seam, a pocket / belt band behind each block of slots, vanilla inset slots that touch (the category rim shows only under a finger),
-//!   a plain brown book with a red-stitched spine, aged parchment with a red-stitched binding, grey bevelled plates for buttons and tags. Text is flat (no shadow), whole-pixel sized and fitted to its box (`fitted`, `text_fit`, `text_in`, `paragraph`).
+//! - Look: the existing pixel art from `assets/satchel.rgba` (`tools/gen_satchel_ui.py`, `hud::sprites::sat`), 9-slices and tiles at one
+//!   pixel size (`u` = the text's pixel): the bevelled panel, vanilla inset slots that touch, tabs and buttons as grey plates, the sunk card
+//!   for the two lower panels. Text is whole-pixel sized and fitted to its box (`fitted`, `text_in_o`, `paragraph`).
 //!
 //! UNVERIFIED: written without a compiler or a device. The proportions are in fractions of the surface height (`h`), the text unit is
 //! `craft::panel(0, w, h).2`; both are guesses to tune on the phone.
-//! ponytail: the world behind is dimmed, not blurred (a blur is a post pass); a page is ~200 tiled quads (a wrapping sampler would be one); an unknown recipe is a dark box with a `?`, not a true
-//! silhouette of the sprite (`push_stack` has no tint); partly visible list rows are not drawn instead of being clipped.
+//! ponytail: the world behind is dimmed, not blurred (a blur is a post pass); the strip scrolls a whole recipe at a time (no scissor, so
+//! no half-visible cells); an unknown recipe is a `?` in a slot, not a true silhouette; no new sprites were drawn (the sheet is built by a
+//! script), the old ones are re-used.
 
 use crate::input::gamepad::Role;
 use crate::render::hud::{HudPipeline, HudVertex};
@@ -25,19 +26,23 @@ use crate::world::craft::{self, Screen, SlotId};
 use crate::world::items::{self, Inventory, ItemStack, MAIN};
 use crate::world::pack;
 
-/// Seconds the bag takes to come up, the book to open, a list to slide in; a press on the result this long crafts all.
+/// Seconds the panel takes to come up; a press on the result this long crafts all.
 pub const RISE_SECS: f32 = 0.25;
-pub const BOOK_SECS: f32 = 0.3;
-pub const PAGE_SECS: f32 = 0.2;
 pub const HOLD_SECS: f32 = 0.5;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Btn {
     Close,
-    Book,
+    /// The `Bag` and `Craft` tabs.
+    Bag,
+    Craft,
     Sort,
     Shift,
     One,
+    /// The right panel shows the ingredients instead of the bag.
+    Info,
+    /// Only the recipes the bag can make now.
+    Only,
 }
 
 /// What a finger is on.
@@ -45,18 +50,17 @@ pub enum Btn {
 pub enum Pick {
     Slot(SlotId),
     Btn(Btn),
-    /// A category button of the left page (index into `book::CATS`), the back arrow over a list.
+    /// A category tab (index into `book::CATS`).
     Cat(usize),
-    Back,
-    /// A recipe of the list (index into `book::entries()`), the empty part of the list (a drag there scrolls).
+    /// A recipe of the strip (index into `book::entries()`), the empty part of the strip (a drag there scrolls).
     Row(usize),
     List,
-    /// The pin button of the right page's header and the discovery toggle.
+    /// The pin button of the recipe's header and the discovery toggle.
     Pin,
     Hide,
-    /// The recipe card under the grid: a drag there scrolls its ingredients.
+    /// The ingredient list of the right panel: a drag there scrolls it.
     Card,
-    /// Leather or paper with nothing on it: a tap does nothing, and does not throw the held stack.
+    /// A panel with nothing on it: a tap does nothing, and does not throw the held stack.
     Panel,
     /// Past every panel: a held stack is thrown.
     Outside,
@@ -64,47 +68,32 @@ pub enum Pick {
 
 pub struct Satchel {
     pub age: f32,
-    /// The book is (being) opened / closed, and how far it is, 0 to 1.
-    pub book: bool,
-    pub book_t: f32,
-    /// The category page of the left page (`book::CATS` index), the pixels the list is scrolled, the slide-in of a page, the picked recipe.
-    pub cat: Option<usize>,
+    /// The Craft tab is up (else the Bag tab).
+    pub craft: bool,
+    /// The category tab (`book::CATS` index), the pixels the strip is scrolled (drawn snapped to a whole recipe), the picked recipe.
+    pub cat: usize,
     pub scroll: f32,
-    pub page_t: f32,
     pub sel: Option<usize>,
-    /// The pixels the recipe card's ingredient rows are scrolled (drawn snapped to a whole row).
+    /// The pixels the ingredient rows are scrolled (drawn snapped to a whole row).
     pub card_scroll: f32,
+    /// The right panel lists the ingredients; only the recipes that can be made now.
+    pub info: bool,
+    pub only: bool,
 }
 
 impl Satchel {
-    pub fn new(book: bool) -> Self {
-        Self { age: 0.0, book, book_t: 0.0, cat: None, scroll: 0.0, page_t: 1.0, sel: None, card_scroll: 0.0 }
+    pub fn new(craft: bool) -> Self {
+        Self { age: 0.0, craft, cat: 0, scroll: 0.0, sel: None, card_scroll: 0.0, info: false, only: false }
     }
 
     pub fn tick(&mut self, dt: f32) {
         self.age += dt;
-        let to = if self.book { 1.0 } else { 0.0 };
-        self.book_t += (to - self.book_t).clamp(-dt / BOOK_SECS, dt / BOOK_SECS);
-        self.page_t = (self.page_t + dt / PAGE_SECS).min(1.0);
     }
 
-    /// A page of the left page turns: the list starts at its top and slides in.
-    pub fn turn(&mut self, cat: Option<usize>) {
-        (self.cat, self.scroll, self.page_t) = (cat, 0.0, 0.0);
+    /// A category tab is picked: the Craft tab is up on it, its strip at the start.
+    pub fn turn(&mut self, cat: usize) {
+        (self.craft, self.cat, self.scroll) = (true, cat.min(CATS.len() - 1), 0.0);
     }
-
-    /// The book is fully open: its contents answer the finger.
-    pub fn open(&self) -> bool {
-        self.book && self.book_t >= 0.98
-    }
-}
-
-/// Where the open book spans, in fractions of the width; its spine is the middle.
-const BOOK_L: f32 = 0.485;
-const BOOK_R: f32 = 0.985;
-
-fn lerp(a: f32, b: f32, t: f32) -> f32 {
-    a + (b - a) * t
 }
 
 fn ease(t: f32) -> f32 {
@@ -138,12 +127,6 @@ fn fitted(s: &str, k: f32, maxw: f32) -> (f32, String) {
         t.push('.');
     }
     (k, t)
-}
-
-/// Flat text (no shadow) with its left edge at `x` and its top at `y` (for size `k`), fitted into `maxw`; a shrunk text stays centred on
-/// the line it would have had.
-fn text_fit(v: &mut Vec<HudVertex>, at: (f32, f32), k: f32, maxw: f32, s: &str, col: [f32; 4]) {
-    text_fit_o(v, at, k, maxw, s, col, 0.0);
 }
 
 /// Flat text, or with a black outline `o` px wide when `o` > 0 (the recipe card's text: coloured ink alone is hard to read on parchment).
@@ -196,101 +179,95 @@ fn paragraph(v: &mut Vec<HudVertex>, r: [f32; 4], (k, u): (f32, f32), s: &str, c
     }
 }
 
-/// The whole book, as rects in px.
+
+/// The Craft tab's rects, in px.
 #[derive(Default)]
-pub struct BookFrame {
-    /// The cover while closed, the pages while open (both grow from the spine).
-    pub rect: [f32; 4],
-    pub open: bool,
-    /// The `Close` tab above the spine (hit while the book is open).
-    pub tab: [f32; 4],
+pub struct CraftFrame {
+    /// The strip of recipes (exactly a whole number of cells wide), the cells in view with their entry, and one cell's width.
+    pub strip: [f32; 4],
+    pub rows: Vec<(usize, [f32; 4])>,
+    pub row_w: f32,
+    pub max_scroll: f32,
+    /// The two sunk panels under the strip: the recipe (left) and the bag or the ingredients (right).
     pub left: [f32; 4],
     pub right: [f32; 4],
-    pub cats: Vec<(usize, [f32; 4])>,
-    pub back: Option<[f32; 4]>,
-    pub list: Option<[f32; 4]>,
-    pub rows: Vec<(usize, [f32; 4])>,
-    pub row_h: f32,
-    pub max_scroll: f32,
-    pub grid: Vec<(SlotId, [f32; 4])>,
+    /// The preview grid's cells (1 x 1 for a smelting, else 2 x 2 or 3 x 3), the arrow and the result.
+    pub grid: Vec<[f32; 4]>,
     pub arrow: [f32; 4],
+    pub result: [f32; 4],
+    /// The ingredient list (`Info` on) and how far it can scroll (px).
     pub card: [f32; 4],
+    pub card_max: f32,
     pub pin: [f32; 4],
     pub hide: [f32; 4],
-    /// How far the card's ingredient rows can scroll (px).
-    pub card_max: f32,
-    /// The clearance of a page's content from its rim, and the height of a page's header (set once the book is open).
-    pub p: f32,
-    pub hh: f32,
+    /// The clearance of a sunk panel's content from its rim.
+    pub ip: f32,
 }
 
 pub struct Frame {
     /// The text unit (px per GUI unit).
     pub k: f32,
+    /// The panel.
     pub bag: [f32; 4],
     pub cells: Vec<(SlotId, [f32; 4])>,
-    /// The pocket band behind each row of cells (the armor row, three of the bag, the belt), and whether it is the belt's.
+    /// The pocket band behind each row of cells (Bag tab: the armor row, three of the bag, the belt), and whether it is the belt's.
     pub rows: Vec<([f32; 4], bool)>,
     pub btns: Vec<(Btn, [f32; 4])>,
-    pub book: Option<BookFrame>,
+    /// The tabs on the panel's top edge: `Bag` and `Craft`, or `Bag` and the categories.
+    pub tabs: Vec<(Pick, [f32; 4])>,
+    pub craft: Option<CraftFrame>,
+}
+
+/// The side of the preview grid for `e` on a screen with grid `gw`: a smelting shows its one ingredient, a recipe the grid it needs (at
+/// least the screen's).
+fn preview_dim(e: &book::Entry, gw: usize) -> usize {
+    if e.grid == 0 { 1 } else { gw.max(e.grid).clamp(2, 3) }
 }
 
 impl Frame {
     /// Every rect of the screen for `w` x `h` px, this state of the satchel and a crafting grid `gw` wide (the layout is fixed, every slot
-    /// has its cell: the bag's contents only order the book's list).
+    /// has its cell: the bag's contents only order the strip).
     pub fn new(sat: &Satchel, inv: &Inventory, gw: usize, w: f32, h: f32) -> Self {
         Self::with_grid(sat, inv, &[None; 9], gw, w, h)
     }
 
-    /// `new` for a screen whose crafting grid holds `grid`: the book's list puts the recipes the bag and the grid can make first, so the
-    /// rows (and what a finger finds on them) depend on both.
+    /// `new` for a screen whose crafting grid holds `grid`: the strip puts the recipes the bag and the grid can make first, so the cells
+    /// (and what a finger finds on them) depend on both.
     pub fn with_grid(sat: &Satchel, inv: &Inventory, grid: &[Option<ItemStack>; 9], gw: usize, w: f32, h: f32) -> Self {
         let k = craft::panel(0, w, h).2;
-        let tk = units(k).0;
+        let (tk, sk) = units(k);
         let u = tk; // one sprite pixel
-        // The panel's border is 8 sprite pixels and its seam and corner marks lie inside 7 of them: the slots start clear of both.
+        // The panel's border is 8 sprite pixels and its seam and corner marks lie inside 7 of them: the content starts clear of both.
         let pad = (0.03 * h).max(11.0 * u).round();
         let rise = (1.0 - ease(sat.age / RISE_SECS)) * 0.1 * h;
-        let (top, bh) = (0.17 * h + rise, 0.74 * h);
-        let mut f = Frame { k, bag: [0.0; 4], cells: Vec::new(), rows: Vec::new(), btns: Vec::new(), book: None };
-
-        // The bag: 9 columns, the armor row on top, the belt at the foot. With the book closed the bag and the cover lie side by side, centred
-        // together; as the book opens the bag glides to the left 45% of the screen and the book's spine to the middle of the right 55%.
-        // Slots touch, like Minecraft's: a cell is one slot sprite and the next starts where its border ends. A pocket band lies behind each
-        // block of them (the armor row, the bag's three rows, the belt), two sprite pixels wider than it, clear of the seam.
-        let gv = 12.0 * u; // the gap between those blocks: the armor, the bag and the belt read as three separate things
-        let cell = ((0.455 * w - 2.0 * pad) / 9.0).min((bh - 2.0 * pad - 2.0 * gv) / 5.0).floor().max(1.0);
-        let (pw, ph) = (9.0 * cell + 2.0 * pad, 5.0 * cell + 2.0 * gv + 2.0 * pad);
-        let (open_x, gap, half) = (0.012 * w, 0.02 * w, (BOOK_R - BOOK_L) * 0.5 * w); // half = a page of the open book
-        let closed_x = ((w - (pw + gap + half)) * 0.5).max(open_x);
-        let e = ease(sat.book_t);
-        let x = lerp(closed_x, open_x, e).round();
-        let spine = lerp(closed_x + pw + gap + half * 0.5, (BOOK_L + BOOK_R) * 0.5 * w, e);
-        let top = top.round();
-        f.bag = [x, top, pw, ph];
-        let (bx, by) = (x + pad, top + pad);
-        let band = |y: f32, n: f32, rows: f32| [bx - 2.0 * u, y - 2.0 * u, n * cell + 4.0 * u, rows * cell + 4.0 * u];
-        f.rows.push((band(by, 4.0, 1.0), false));
-        for i in 0..4 {
-            f.cells.push((SlotId::Inv(MAIN + 3 - i), [bx + i as f32 * cell, by, cell, cell])); // helmet first
-        }
-        let my = by + cell + gv;
-        f.rows.push((band(my, 9.0, 3.0), false));
-        for r in 0..3 {
-            for c in 0..9 {
-                f.cells.push((SlotId::Inv(9 + r * 9 + c), [bx + c as f32 * cell, my + r as f32 * cell, cell, cell]));
-            }
-        }
-        let belt_y = my + 3.0 * cell + gv;
-        f.rows.push((band(belt_y, 9.0, 1.0), true));
-        for c in 0..9 {
-            f.cells.push((SlotId::Inv(c), [bx + c as f32 * cell, belt_y, cell, cell]));
+        let (top, bh) = ((0.17 * h + rise).round(), 0.74 * h);
+        let mut f = Frame { k, bag: [0.0; 4], cells: Vec::new(), rows: Vec::new(), btns: Vec::new(), tabs: Vec::new(), craft: None };
+        if sat.craft {
+            let c = craft_layout(&mut f, sat, (gw, inv, grid), (w, h), (top, bh), (pad, tk, sk));
+            f.craft = Some(c);
+        } else {
+            bag_layout(&mut f, w, (top, bh), (pad, u));
         }
 
-        // The buttons above the bag, and the close button at the screen's corner.
-        let (by, bh2) = (0.035 * h + rise, 0.095 * h);
+        // The tabs sit on the panel's top edge, one seventh of its width each.
+        let (tw, tabh) = ((f.bag[2] / (1 + CATS.len()) as f32).floor(), (0.07 * h).floor());
+        let picks: Vec<Pick> = if sat.craft {
+            std::iter::once(Pick::Btn(Btn::Bag)).chain((0..CATS.len()).map(Pick::Cat)).collect()
+        } else {
+            vec![Pick::Btn(Btn::Bag), Pick::Btn(Btn::Craft)]
+        };
+        for (i, p) in picks.into_iter().enumerate() {
+            f.tabs.push((p, [f.bag[0] + i as f32 * tw, top - tabh, tw, tabh]));
+        }
+
+        // The buttons above the tabs, and the close button at the screen's corner.
+        let (by, bh2) = (0.015 * h + rise, 0.075 * h);
         let mut x = f.bag[0];
-        for (b, label) in [(Btn::Sort, "Sort"), (Btn::Shift, "Shift"), (Btn::One, "One")] {
+        let mut labels = vec![(Btn::Sort, "Sort"), (Btn::Shift, "Shift"), (Btn::One, "One")];
+        if sat.craft {
+            labels.extend([(Btn::Info, "Info"), (Btn::Only, "Craftable")]);
+        }
+        for (b, label) in labels {
             let bw = HudPipeline::text_width(label) as f32 * tk + 6.0 * tk;
             f.btns.push((b, [x, by, bw, bh2]));
             x += bw + 0.012 * h;
@@ -298,8 +275,6 @@ impl Frame {
         // The close button is twice as wide as it is tall (a thumb or a pad's cursor finds it easily); the letter stays centred in it.
         let cw = (HudPipeline::text_width("X") as f32 * tk + 8.0 * tk).max(2.0 * bh2).min(0.12 * w);
         f.btns.push((Btn::Close, [w - 0.02 * w - cw, by, cw, bh2]));
-
-        f.book = Some(book_frame(sat, (gw, inv, grid), (w, h), (top, bh), spine));
         f
     }
 
@@ -308,30 +283,22 @@ impl Frame {
         if let Some((b, _)) = self.btns.iter().find(|(_, r)| inside(*r, x, y)) {
             return Pick::Btn(*b);
         }
-        if let Some(b) = &self.book {
-            // A closed (or closing) book opens at a tap; an open one closes at its tab.
-            if (!sat.book && inside(b.rect, x, y)) || (sat.open() && inside(b.tab, x, y)) {
-                return Pick::Btn(Btn::Book);
-            }
-            if b.open && sat.open() {
-                let hit = b
-                    .cats
-                    .iter()
-                    .find(|(_, r)| inside(*r, x, y))
-                    .map(|&(i, _)| Pick::Cat(i))
-                    .or_else(|| b.back.filter(|r| inside(*r, x, y)).map(|_| Pick::Back))
-                    .or_else(|| b.rows.iter().find(|(_, r)| inside(*r, x, y)).map(|&(i, _)| Pick::Row(i)))
-                    .or_else(|| (sat.sel.is_some() && inside(b.pin, x, y)).then_some(Pick::Pin))
-                    .or_else(|| inside(b.hide, x, y).then_some(Pick::Hide))
-                    .or_else(|| b.grid.iter().find(|(_, r)| inside(*r, x, y)).map(|&(id, _)| Pick::Slot(id)))
-                    .or_else(|| b.list.filter(|r| inside(*r, x, y)).map(|_| Pick::List))
-                    .or_else(|| inside(b.card, x, y).then_some(Pick::Card));
-                if let Some(h) = hit {
-                    return h;
-                }
-            }
-            if inside(b.rect, x, y) {
-                return Pick::Panel;
+        if let Some((p, _)) = self.tabs.iter().find(|(_, r)| inside(*r, x, y)) {
+            return *p;
+        }
+        if let Some(b) = &self.craft {
+            let hit = b
+                .rows
+                .iter()
+                .find(|(_, r)| inside(*r, x, y))
+                .map(|&(i, _)| Pick::Row(i))
+                .or_else(|| (sat.sel.is_some() && inside(b.pin, x, y)).then_some(Pick::Pin))
+                .or_else(|| inside(b.hide, x, y).then_some(Pick::Hide))
+                .or_else(|| inside(b.result, x, y).then_some(Pick::Slot(SlotId::Result)))
+                .or_else(|| inside(b.strip, x, y).then_some(Pick::List))
+                .or_else(|| (sat.info && inside(b.card, x, y)).then_some(Pick::Card));
+            if let Some(h) = hit {
+                return h;
             }
         }
         if let Some((id, _)) = self.cells.iter().find(|(_, r)| inside(*r, x, y)) {
@@ -342,63 +309,46 @@ impl Frame {
         }
         Pick::Outside
     }
-}
 
-impl Frame {
-    /// Every rect a pad can rest on, the ones `hit` answers with something other than `Panel` / `Outside`: the buttons, the closed book
-    /// (a tap opens it) or an open one's tab, categories, back arrow, recipes, pin, toggle and grid, and every slot of the bag.
+    /// Every rect a pad can rest on, the ones `hit` answers with something other than `Panel` / `Outside` / `List` / `Card`: the buttons,
+    /// the tabs, the recipes in view, the pin, the toggle and the result, and every slot in view.
     pub fn targets(&self, sat: &Satchel) -> Vec<[f32; 4]> {
         let mut t: Vec<[f32; 4]> = self.btns.iter().map(|&(_, r)| r).collect();
-        if let Some(b) = &self.book {
-            if !sat.book {
-                t.push(b.rect);
+        t.extend(self.tabs.iter().map(|&(_, r)| r));
+        if let Some(b) = &self.craft {
+            t.extend(b.rows.iter().map(|&(_, r)| r));
+            if sat.sel.is_some() {
+                t.push(b.pin);
             }
-            if sat.open() && b.open {
-                t.push(b.tab);
-                t.extend(b.cats.iter().map(|&(_, r)| r));
-                t.extend(b.back);
-                t.extend(b.rows.iter().map(|&(_, r)| r));
-                if sat.sel.is_some() {
-                    t.push(b.pin);
-                }
-                t.push(b.hide);
-                t.extend(b.grid.iter().map(|&(_, r)| r));
-            }
+            t.push(b.hide);
+            t.push(b.result);
         }
         t.extend(self.cells.iter().map(|&(_, r)| r));
         t
     }
-}
 
-impl Frame {
-    /// The rects a pad's button hints keep off: every button (Close among them), the bag, the book (its cover, or both pages with the crafting
-    /// grid, the result and the recipe card on them) and, while it is open, its `Close` tab above the spine.
-    pub fn avoid(&self, sat: &Satchel) -> Vec<[f32; 4]> {
+    /// The rects a pad's button hints keep off: every button (Close among them), the tabs and the panel.
+    pub fn avoid(&self, _sat: &Satchel) -> Vec<[f32; 4]> {
         let mut a: Vec<[f32; 4]> = self.btns.iter().map(|&(_, r)| r).collect();
+        a.extend(self.tabs.iter().map(|&(_, r)| r));
         a.push(self.bag);
-        if let Some(b) = &self.book {
-            a.push(b.rect);
-            if sat.open() && b.open {
-                a.push(b.tab);
-            }
-        }
         a
     }
 }
 
 /// What the pad's buttons do over `pick` (the hints' rows: A, X, B), `holding` a stack on the cursor. Only what the press really does:
-/// `on_sat_tap` for A, `pad_alt` for X (a slot only), `sat_pad_keys` for B (a category steps back before the screen closes).
+/// `on_sat_tap` for A, `pad_alt` for X (a slot only), `sat_pad_keys` for B (it closes the screen).
 pub fn pad_hints(sat: &Satchel, pick: Pick, holding: bool) -> Vec<(Role, &'static str)> {
     let a = match pick {
         Pick::Slot(SlotId::Result) => Some("Craft"),
         Pick::Slot(_) => Some(if holding { "Place" } else { "Take" }),
         Pick::Btn(Btn::Close) => Some("Close"),
-        Pick::Btn(Btn::Book) => Some(if sat.book { "Close book" } else { "Open book" }),
+        Pick::Btn(Btn::Bag) => Some("Bag"),
+        Pick::Btn(Btn::Craft) => Some("Crafting"),
         Pick::Btn(Btn::Sort) => Some("Sort"),
-        Pick::Btn(Btn::Shift | Btn::One) | Pick::Hide => Some("Toggle"),
+        Pick::Btn(Btn::Shift | Btn::One | Btn::Info | Btn::Only) | Pick::Hide => Some("Toggle"),
         Pick::Cat(_) => Some("Open"),
-        Pick::Back => Some("Back"),
-        Pick::Row(i) => Some(if sat.sel == Some(i) { "Add set" } else { "Pick" }), // a second tap on the held recipe adds a set
+        Pick::Row(i) => Some(if sat.sel == Some(i) { "Craft" } else { "Pick" }), // a second tap on the picked recipe crafts it
         Pick::Pin => Some("Pin"),
         Pick::Outside => holding.then_some("Throw"),
         Pick::List | Pick::Panel | Pick::Card => None,
@@ -410,7 +360,7 @@ pub fn pad_hints(sat: &Satchel, pick: Pick, holding: bool) -> Vec<(Role, &'stati
     };
     let mut rows: Vec<(Role, &'static str)> = a.map(|t| (Role::Select, t)).into_iter().collect();
     rows.extend(x.map(|t| (Role::Alt, t)));
-    rows.push((Role::Back, if sat.open() && sat.cat.is_some() { "Back" } else { "Close" }));
+    rows.push((Role::Back, "Close"));
     rows
 }
 
@@ -420,9 +370,9 @@ pub fn under(targets: &[[f32; 4]], at: (f32, f32)) -> Option<[f32; 4]> {
 }
 
 /// The pad's step: the rect to jump to from the one under `at` when the d-pad says `d` (x, y; y down). Off every rect (the cursor
-/// was left where a page turned or the book glided), the nearest one. Among the rects that lie that way, within 63 degrees of it, the
+/// was left where a tab changed under it), the nearest one. Among the rects that lie that way, within 63 degrees of it, the
 /// one with the least `along + 2 * across` (centre to centre) wins: touching slots step one by one, a button row above the bag is a
-/// step up from its columns, the book is a step right from the bag's last column. `None` when nothing lies that way.
+/// step up from its columns, a recipe is a step right of the one before it. `None` when nothing lies that way.
 pub fn step(targets: &[[f32; 4]], at: (f32, f32), d: (i32, i32)) -> Option<[f32; 4]> {
     let mid = |r: &[f32; 4]| (r[0] + r[2] * 0.5, r[1] + r[3] * 0.5);
     let Some(cur) = under(targets, at) else {
@@ -438,73 +388,112 @@ pub fn step(targets: &[[f32; 4]], at: (f32, f32), d: (i32, i32)) -> Option<[f32;
     targets.iter().copied().filter(|r| *r != cur).filter_map(|r| score(&r).map(|sc| (sc, r))).min_by(|a, b| a.0.total_cmp(&b.0)).map(|(_, r)| r)
 }
 
-/// The book's rects: closed, a cover one page wide; opening, both pages grow from the spine; the contents exist once it is open.
-fn book_frame(sat: &Satchel, (gw, inv, grid): (usize, &Inventory, &[Option<ItemStack>; 9]), (w, h): (f32, f32), (top, bh): (f32, f32), spine: f32) -> BookFrame {
-    let (bx0, bx1) = (BOOK_L * w, BOOK_R * w);
-    let (spine_open, half) = ((bx0 + bx1) * 0.5, (bx1 - bx0) * 0.5); // `spine` is where it is now, on its way there
-    let e = ease(sat.book_t);
-    // Closed it is one page wide, centred on the spine; opening, it grows to both pages (and the spine slides to its place).
-    let tab = [spine - 0.05 * w, top - 0.07 * h, 0.1 * w, 0.07 * h];
-    let mut b = BookFrame { rect: [spine - half * (1.0 + e) * 0.5, top, half * (1.0 + e), bh], open: sat.book_t >= 0.98, tab, ..Default::default() };
-    let gap = 0.003 * w;
-    b.left = [bx0, top, half - gap, bh];
-    b.right = [spine_open + gap, top, half - gap, bh];
-    if !b.open {
-        return b;
+
+/// The Bag tab: the armor row, three rows of the bag and the quick belt, centred on the screen. Slots touch, like Minecraft's: a cell is
+/// one slot sprite and the next starts where its border ends. A pocket band lies behind each block of them, two sprite pixels wider than
+/// it, clear of the seam.
+fn bag_layout(f: &mut Frame, w: f32, (top, bh): (f32, f32), (pad, u): (f32, f32)) {
+    let gv = 12.0 * u; // the gap between the blocks: the armor, the bag and the belt read as three separate things
+    let cell = ((0.9 * w - 2.0 * pad) / 9.0).min((bh - 2.0 * pad - 2.0 * gv) / 5.0).floor().max(1.0);
+    let (pw, ph) = (9.0 * cell + 2.0 * pad, 5.0 * cell + 2.0 * gv + 2.0 * pad);
+    let x = ((w - pw) * 0.5).round();
+    f.bag = [x, top, pw, ph];
+    let (bx, by) = (x + pad, top + pad);
+    let band = |y: f32, n: f32, rows: f32| [bx - 2.0 * u, y - 2.0 * u, n * cell + 4.0 * u, rows * cell + 4.0 * u];
+    f.rows.push((band(by, 4.0, 1.0), false));
+    for i in 0..4 {
+        f.cells.push((SlotId::Inv(MAIN + 3 - i), [bx + i as f32 * cell, by, cell, cell])); // helmet first
     }
-    let (u, sk) = units(craft::panel(0, w, h).2);
-    // `p`: clear of the page's rim (6 sprite pixels thick) by 4 more; the header's content lies in `p ..= hh - 6u`, above its rule.
-    let (p, hh) = ((0.04 * h).max(10.0 * u).round(), 0.11 * h);
-    let zh = hh - p - 6.0 * u;
-    (b.p, b.hh) = (p, hh);
-    let slide = (1.0 - ease(sat.page_t)) * 0.05 * w;
-    let l = b.left;
-    match sat.cat {
-        None => {
-            let cg = 0.012 * h;
-            let ch = (l[3] - hh - 1.5 * p - 5.0 * cg) / 6.0;
-            for i in 0..CATS.len() {
-                b.cats.push((i, [l[0] + p + slide, l[1] + hh + 0.5 * p + i as f32 * (ch + cg), l[2] - 2.0 * p, ch]));
-            }
-        }
-        Some(ci) => {
-            b.back = Some([l[0] + p, l[1] + p, 0.14 * l[2], zh]);
-            let list = [l[0] + p + slide, l[1] + hh + 0.5 * p, l[2] - 2.0 * p, l[3] - hh - 1.5 * p];
-            b.list = Some(list);
-            b.row_h = 0.1 * h;
-            let ids = book::in_cat_ready(CATS[ci.min(CATS.len() - 1)], gw, inv, grid); // what can be made now first
-            b.max_scroll = (ids.len() as f32 * b.row_h - list[3]).max(0.0);
-            for (n, &ei) in ids.iter().enumerate() {
-                let y = list[1] + n as f32 * b.row_h - sat.scroll;
-                if y >= list[1] - 0.5 && y + b.row_h <= list[1] + list[3] + 0.5 {
-                    b.rows.push((ei, [list[0], y, list[2], b.row_h - 0.008 * h]));
-                }
-            }
+    let my = by + cell + gv;
+    f.rows.push((band(my, 9.0, 3.0), false));
+    for r in 0..3 {
+        for c in 0..9 {
+            f.cells.push((SlotId::Inv(9 + r * 9 + c), [bx + c as f32 * cell, my + r as f32 * cell, cell, cell]));
         }
     }
-    // Right page: the grid (2 x 2 or 3 x 3), the arrow and the result; the card of the picked recipe under them.
-    let (r, gw) = (b.right, gw.clamp(2, 3));
-    // The cells touch (no gap). A cell is the smaller of the height's share and what the page's width leaves for the grid, the arrow and
-    // the result (1.2 cells): a narrow screen shrinks the grid instead of pushing the result off the page.
-    let (gx, gy) = ((r[0] + p + 0.01 * w).round(), (r[1] + hh + 3.0 * u).round());
+    let belt_y = my + 3.0 * cell + gv;
+    f.rows.push((band(belt_y, 9.0, 1.0), true));
+    for c in 0..9 {
+        f.cells.push((SlotId::Inv(c), [bx + c as f32 * cell, belt_y, cell, cell]));
+    }
+}
+
+/// The Craft tab: the panel across the screen, the strip of recipes on top, the recipe (left) and the bag or its ingredients (right) under it.
+fn craft_layout(f: &mut Frame, sat: &Satchel, (gw, inv, grid): (usize, &Inventory, &[Option<ItemStack>; 9]), (w, h): (f32, f32), (top, bh): (f32, f32), (pad, tk, sk): (f32, f32, f32)) -> CraftFrame {
+    let u = tk;
+    let px = (0.02 * w).round();
+    f.bag = [px, top, w - 2.0 * px, bh];
+    let p = f.bag;
+    let mut c = CraftFrame::default();
+
+    // The strip: whole cells only, centred in the panel; it scrolls a whole cell at a time.
+    let rc = (0.12 * h).floor().max(1.0);
+    let inner = p[2] - 2.0 * pad;
+    let vis = (inner / rc).floor().max(1.0);
+    c.strip = [(p[0] + pad + (inner - vis * rc) * 0.5).floor(), p[1] + pad, vis * rc, rc];
+    c.row_w = rc;
+    let mut ids = book::in_cat_ready(CATS[sat.cat.min(CATS.len() - 1)], gw, inv, grid); // what can be made now first
+    if sat.only {
+        ids.retain(|&i| book::ready(&book::entries()[i], gw, inv, grid));
+    }
+    c.max_scroll = (ids.len() as f32 - vis).max(0.0) * rc;
+    let off = (sat.scroll.clamp(0.0, c.max_scroll) / rc).round() * rc;
+    for (n, &ei) in ids.iter().enumerate() {
+        let x = c.strip[0] + n as f32 * rc - off;
+        if x >= c.strip[0] - 0.5 && x + rc <= c.strip[0] + c.strip[2] + 0.5 {
+            c.rows.push((ei, [x, c.strip[1], rc, rc]));
+        }
+    }
+
+    // The two sunk panels.
+    let (ip, gap) = (5.0 * u, (0.012 * w).round());
+    let y1 = (c.strip[1] + rc + 0.016 * h).round();
+    let bz = p[1] + p[3] - pad - y1;
+    let hw = ((p[2] - 2.0 * pad - gap) * 0.5).floor();
+    c.left = [p[0] + pad, y1, hw, bz];
+    c.right = [p[0] + pad + hw + gap, y1, hw, bz];
+    c.ip = ip;
+
+    // Left: a header (the name, a line under it), the pin in its corner, the toggle at the foot, the preview between them.
+    let l = c.left;
+    let th = 8.0 * tk + 8.0 * sk + 6.0 * u;
+    let (pin, hide_h) = (th - ip, (0.06 * h).floor());
+    c.pin = [l[0] + l[2] - ip - pin, l[1] + ip, pin, pin];
+    c.hide = [l[0] + ip, l[1] + l[3] - ip - hide_h, l[2] - 2.0 * ip, hide_h];
+    let pg = sat.sel.and_then(|i| book::entries().get(i)).map_or(gw.clamp(2, 3), |e| preview_dim(e, gw));
     let (ga, aw) = (0.004 * w, 0.03 * w);
-    let room = r[0] + r[2] - p - gx - 2.0 * ga - aw;
-    let c = (if gw == 2 { 0.11 * h } else { 0.075 * h }).min(room / (gw as f32 + 1.2)).floor().max(1.0);
-    for i in 0..gw * gw {
-        b.grid.push((SlotId::Grid(i), [gx + (i % gw) as f32 * c, gy + (i / gw) as f32 * c, c, c]));
+    let avail = (c.hide[1] - ip - (l[1] + th)).max(1.0);
+    // The cells are the smaller of the panel's width share (the grid, the arrow and the result, 1.2 cells) and its height share.
+    let cg = ((l[2] - 2.0 * ip - 2.0 * ga - aw) / (pg as f32 + 1.2)).min(avail / pg as f32).min(0.13 * h).floor().max(1.0);
+    let (gh, rcell) = (pg as f32 * cg, (cg * 1.2).floor());
+    let gx = (l[0] + (l[2] - (gh + 2.0 * ga + aw + rcell)) * 0.5).floor();
+    let gy = (l[1] + th + ((avail - gh) * 0.5).max(0.0)).floor();
+    for i in 0..pg * pg {
+        c.grid.push([gx + (i % pg) as f32 * cg, gy + (i / pg) as f32 * cg, cg, cg]);
     }
-    let gh = gw as f32 * c;
     let ax = gx + gh + ga;
-    b.arrow = [ax, gy + gh * 0.5 - 0.02 * h, aw, 0.04 * h];
-    let rc = (c * 1.2).floor();
-    b.grid.push((SlotId::Result, [(ax + aw + ga).floor(), (gy + (gh - rc) * 0.5).round(), rc, rc]));
-    let cy = gy + gh + 0.02 * h;
-    b.card = [r[0] + p, cy, r[2] - 2.0 * p, r[1] + r[3] - 0.18 * h - cy];
-    b.card_max = sat.sel.and_then(|i| book::entries().get(i)).map_or(0.0, |e| card_m(b.card, (sk, u), e.need.len()).max);
-    // The pin's hit box is a square down to the rule; its picture (10 sprite pixels) hangs from the top of it.
-    b.pin = [r[0] + r[2] - p - (hh - p), r[1] + p, hh - p, hh - p];
-    b.hide = [r[0] + p, r[1] + r[3] - 0.17 * h, r[2] - 2.0 * p, 0.07 * h]; // the hint under it ends above the page's rim
-    b
+    c.arrow = [ax, gy + gh * 0.5 - 0.02 * h, aw, 0.04 * h];
+    c.result = [(ax + aw + ga).floor(), (gy + (gh - rcell) * 0.5).round(), rcell, rcell];
+
+    // Right: a title, then the bag (the three rows and the belt, a small gap before it) or the ingredient list.
+    let (r, th2) = (c.right, 8.0 * tk + 7.0 * u);
+    if sat.info {
+        c.card = [r[0] + ip, r[1] + th2, r[2] - 2.0 * ip, r[3] - th2 - ip];
+        c.card_max = sat.sel.and_then(|i| book::entries().get(i)).map_or(0.0, |e| card_m(c.card, (sk, u), e.need.len()).max);
+    } else {
+        let gv = 4.0 * u;
+        let ci = ((r[2] - 2.0 * ip) / 9.0).min((r[3] - th2 - ip - gv) / 4.0).floor().max(1.0);
+        let x0 = (r[0] + (r[2] - 9.0 * ci) * 0.5).floor();
+        for row in 0..3 {
+            for col in 0..9 {
+                f.cells.push((SlotId::Inv(9 + row * 9 + col), [x0 + col as f32 * ci, r[1] + th2 + row as f32 * ci, ci, ci]));
+            }
+        }
+        for col in 0..9 {
+            f.cells.push((SlotId::Inv(col), [x0 + col as f32 * ci, r[1] + th2 + 3.0 * ci + gv, ci, ci]));
+        }
+    }
+    c
 }
 
 // ---- Drawing ----
@@ -518,12 +507,8 @@ use crate::render::hud::sprites::sat as art;
 const WHITE: [f32; 4] = [1.0; 4];
 const INK: [f32; 4] = [0.22, 0.15, 0.08, 1.0];
 const GOOD: [f32; 4] = [0.25, 0.6, 0.2, 1.0];
-const BAD: [f32; 4] = [0.75, 0.2, 0.15, 1.0];
-const WARN: [f32; 4] = [0.85, 0.5, 0.1, 1.0];
-const MUTE: [f32; 4] = [0.55, 0.47, 0.34, 1.0];
 const SELECTED: [f32; 4] = [0.95, 0.85, 0.1, 1.0];
 /// Ink on the brown cover.
-const COVER_INK: [f32; 4] = [0.91, 0.85, 0.64, 1.0];
 
 /// The rim of a filled slot: its item's category, tinted lightly (tools blue, food green, materials brown, the rest grey).
 fn tint(id: u16) -> [f32; 4] {
@@ -596,19 +581,7 @@ fn frame_rect(v: &mut Vec<HudVertex>, r: [f32; 4], t: f32, col: [f32; 4]) {
     HudPipeline::push_quad(v, r[0] + r[2] - t, r[1] + t, t, r[3] - 2.0 * t, col);
 }
 
-/// A leather plate with its label: `state` 0 disabled, 1 normal, 2 on.
-fn button(v: &mut Vec<HudVertex>, r: [f32; 4], (tk, u): (f32, f32), text: &str, state: u8) {
-    let c = if state == 0 { [0.6, 0.6, 0.6, 1.0] } else { WHITE };
-    HudPipeline::push_nine(v, (r[0], r[1], r[2], r[3]), if state == 2 { art::BTN_ON } else { art::BTN }, 4.0, u, c, true);
-    text_in(v, r[0] + r[2] * 0.5, r[1] + (r[3] - 8.0 * tk) * 0.5, tk, (r[0] + 2.0 * u, r[0] + r[2] - 2.0 * u), text, [0.96, 0.96, 0.96, 1.0]);
-}
-
-/// A title's rule under a page's header: an ink line across the page.
-fn rule(v: &mut Vec<HudVertex>, page: [f32; 4], hh: f32, p: f32, u: f32) {
-    HudPipeline::push_tiled(v, (page[0] + p, page[1] + hh - 4.3 * u, page[2] - 2.0 * p, 4.0 * u), art::RULE, u, WHITE);
-}
-
-/// The whole screen: the dimmed world, the bag, the book, the stack on the finger and the name of what it touches.
+/// The whole screen: the dimmed world, the panel with its tab, the stack on the finger and the name of what it touches.
 pub fn draw(v: &mut Vec<HudVertex>, (w, h): (f32, f32), sat: &Satchel, c: &Ctx) {
     let f = Frame::with_grid(sat, c.inv, &c.screen.grid, c.screen.gw, w, h);
     let k = f.k;
@@ -616,11 +589,13 @@ pub fn draw(v: &mut Vec<HudVertex>, (w, h): (f32, f32), sat: &Satchel, c: &Ctx) 
     let u = tk;
     HudPipeline::push_quad(v, 0.0, 0.0, w, h, [0.0, 0.0, 0.0, 0.5]);
 
-    // The bag: leather with its seam and rivets; a pocket behind each row (the belt's is a strap with a buckle), the label tag sewn over
-    // the armor pocket's lip, then every cell.
+    // The panel; on the Bag tab a pocket behind each row (the belt's is a strap with a buckle), on the Craft tab the strip and the two sunk panels.
     nine(v, f.bag, art::BAG, 8.0, u);
     for &(r, belt) in &f.rows {
         nine(v, r, if belt { art::BELT } else { art::POCKET }, 4.0, u);
+    }
+    if let Some(b) = &f.craft {
+        draw_craft(v, sat, b, c, (tk, sk, u));
     }
     for &(id, r) in &f.cells {
         let st = c.screen.get(c.inv, None, id);
@@ -640,20 +615,28 @@ pub fn draw(v: &mut Vec<HudVertex>, (w, h): (f32, f32), sat: &Satchel, c: &Ctx) 
         }
     }
 
+    // Tabs: the picked one is lit.
+    for &(p, r) in &f.tabs {
+        let (text, on) = match p {
+            Pick::Btn(Btn::Bag) => ("Bag", !sat.craft),
+            Pick::Btn(Btn::Craft) => ("Craft", false),
+            Pick::Cat(i) => (CATS[i.min(CATS.len() - 1)].label(), sat.craft && sat.cat == i),
+            _ => ("", false),
+        };
+        button(v, r, (tk, u), text, if on { 2 } else { 1 });
+    }
     // Buttons: the toggles show their number while on.
     for &(b, r) in &f.btns {
         let (text, state) = match b {
             Btn::Close => ("X", 1),
-            Btn::Book => ("Book", if sat.book { 2 } else { 1 }),
             Btn::Sort => ("Sort", 1),
             Btn::Shift => (if c.shift { "2" } else { "Shift" }, if c.shift { 2 } else { 1 }),
             Btn::One => (if c.one { "1" } else { "One" }, if c.one { 2 } else { 1 }),
+            Btn::Info => ("Info", if sat.info { 2 } else { 1 }),
+            Btn::Only => ("Craftable", if sat.only { 2 } else { 1 }),
+            Btn::Bag | Btn::Craft => ("", 1),
         };
         button(v, r, (tk, u), text, state);
-    }
-
-    if let Some(b) = &f.book {
-        draw_book(v, (w, h), (sat, b), c, (tk, sk, u));
     }
 
     // A pad's cursor rests on a target (it jumps from one to the next): a white frame round it, edged in black.
@@ -666,15 +649,16 @@ pub fn draw(v: &mut Vec<HudVertex>, (w, h): (f32, f32), sat: &Satchel, c: &Ctx) 
         }
     }
     // The stack on the finger floats above it; a finger down (or a pad's cursor) names what it holds or rests on.
-
     if let Some(st) = c.screen.cursor {
         let sz = 16.0 * k;
         crate::push_stack(v, (fx - sz * 0.5, fy - sz * 1.4, sz, sz), 0.875, st);
     }
     if c.down || c.pad {
+        let known = |e: &&book::Entry| !c.discovery || c.notes.known(e);
         let under = || match f.hit(sat, fx, fy) {
+            Pick::Slot(SlotId::Result) => sat.sel.and_then(|i| book::entries().get(i)).filter(known).map(|e| e.out),
             Pick::Slot(id) => c.screen.get(c.inv, None, id),
-            Pick::Row(i) => book::entries().get(i).map(|e| e.out).filter(|_| !c.discovery || c.notes.known(&book::entries()[i])),
+            Pick::Row(i) => book::entries().get(i).filter(known).map(|e| e.out),
             _ => None,
         };
         if let Some((st, name)) = c.screen.cursor.or_else(under).and_then(|st| items::name(st).map(|n| (st, n))) {
@@ -687,142 +671,116 @@ pub fn draw(v: &mut Vec<HudVertex>, (w, h): (f32, f32), sat: &Satchel, c: &Ctx) 
     }
 }
 
-fn draw_book(v: &mut Vec<HudVertex>, (w, _h): (f32, f32), (sat, b): (&Satchel, &BookFrame), c: &Ctx, (tk, sk, u): (f32, f32, f32)) {
-    // Under the cover that swings away: the back cover, thick leather round the pages (it grows with the opening, so it never shows
-    // wider than the closed cover), the paper (one sheet while it opens, aged at its rim), and the red-stitched binding at the spine.
-    if sat.book_t > 0.0 {
-        let cm = 0.013 * w * ease(sat.book_t * 2.0);
-        nine(v, [b.rect[0] - cm, b.rect[1], b.rect[2] + 2.0 * cm, b.rect[3]], art::COVER, 8.0, u); // wider than the pages, never taller
-        let r = (b.rect[0], b.rect[1], b.rect[2], b.rect[3]);
-        HudPipeline::push_tiled(v, r, art::PARCH, u, WHITE);
-        HudPipeline::push_nine(v, r, art::PAGE_EDGE, 6.0, u, WHITE, false);
-        if sat.book_t > 0.3 {
-            HudPipeline::push_tiled(v, (r.0 + r.2 * 0.5 - 4.0 * u, r.1 + 6.0 * u, 8.0 * u, r.3 - 12.0 * u), art::BINDING, u, WHITE);
-        }
-    }
-    if sat.book_t < 0.5 {
-        draw_cover(v, [b.rect[0], b.rect[1], b.rect[2] * (1.0 - 2.0 * sat.book_t), b.rect[3]], sat, (tk, sk, u));
-    }
-    if !b.open {
-        return;
-    }
-    if sat.book {
-        button(v, b.tab, (tk, u), "Close", 1);
-    }
-    // The corner of the right page, turned up.
-    HudPipeline::push_gui(v, b.right[0] + b.right[2] - 14.0 * u, b.right[1] + b.right[3] - 14.0 * u, 12.0 * u, 12.0 * u, art::CURL);
-    let (p, hh) = (b.p, b.hh);
+/// The Craft tab's contents: the strip, the recipe's panel and the right panel (the bag's slots are drawn by `draw`).
+fn draw_craft(v: &mut Vec<HudVertex>, sat: &Satchel, b: &CraftFrame, c: &Ctx, (tk, sk, u): (f32, f32, f32)) {
     let entries = book::entries();
     let gw = c.screen.gw;
-    let title_y = |r: [f32; 4]| r[1] + p + (hh - p - 6.0 * u - 8.0 * tk) * 0.5; // centred between the page's margin and the rule
-    rule(v, b.left, hh, p, u);
-    rule(v, b.right, hh, p, u);
+    let (o, ip) = ((u * 0.34).round().max(1.0), b.ip);
 
-    // Left page: the categories, or the recipes of one.
-    match sat.cat {
-        None => {
-            text_fit(v, (b.left[0] + p, title_y(b.left)), tk, b.left[2] - 2.0 * p, "Recipes", INK);
-            for &(i, r) in &b.cats {
-                let ids = book::in_cat(CATS[i]);
-                nine(v, r, art::ENTRY, 3.0, u);
-                if let Some(e) = ids.first().map(|&e| &entries[e]) {
-                    crate::push_stack(v, (r[0] + 3.0 * u, r[1] + (r[3] - r[3] * 0.8) * 0.5, r[3] * 0.8, r[3] * 0.8), 0.875, ItemStack { count: 1, ..e.out });
-                }
-                // `made/all`: how many of the page the bag can make now (just the total while none).
-                let made = ids.iter().filter(|&&e| book::ready(&entries[e], c.screen.gw, c.inv, &c.screen.grid)).count();
-                let n = if made > 0 { format!("{made}/{}", ids.len()) } else { ids.len().to_string() };
-                let nw = HudPipeline::text_width(&n) as f32 * tk;
-                let (lx, ty) = (r[0] + r[3] + 4.0 * u, r[1] + (r[3] - 8.0 * tk) * 0.5);
-                text_fit(v, (lx, ty), tk, r[0] + r[2] - 8.0 * u - nw - lx, CATS[i].label(), INK);
-                HudPipeline::push_text_flat(v, r[0] + r[2] - nw - 5.0 * u, ty, tk, &n, INK);
-            }
+    // The strip: slots that touch, the picked one rimmed in yellow, the ones that cannot be made now dimmed (an unknown one is a `?`).
+    nine(v, [b.strip[0] - u, b.strip[1] - u, b.strip[2] + 2.0 * u, b.strip[3] + 2.0 * u], art::CARD, 3.0, u);
+    for &(ei, r) in &b.rows {
+        let e = &entries[ei];
+        let known = !c.discovery || c.notes.known(e);
+        nine(v, r, art::SLOT, 2.0, u);
+        if known {
+            crate::push_stack(v, (r[0], r[1], r[2], r[3]), 0.875, ItemStack { count: 1, ..e.out });
+        } else {
+            text_in(v, r[0] + r[2] * 0.5, r[1] + (r[3] - 8.0 * tk) * 0.5, tk, (r[0], r[0] + r[2]), "?", [0.85, 0.85, 0.9, 1.0]);
         }
-        Some(ci) => {
-            if let Some(r) = b.back {
-                nine(v, r, art::ENTRY, 3.0, u);
-                let (aw, ah) = (12.0 * u * 0.9, 9.0 * u * 0.9);
-                HudPipeline::push_gui_tinted(v, r[0] + (r[2] - aw) * 0.5, r[1] + (r[3] - ah) * 0.5, aw, ah, art::ARROW, INK);
-            }
-            let tx = b.left[0] + p + 0.14 * b.left[2] + 8.0 * u;
-            text_fit(v, (tx, title_y(b.left)), tk, b.left[0] + b.left[2] - p - tx, CATS[ci.min(CATS.len() - 1)].label(), INK);
-            for &(ei, r) in &b.rows {
-                let e = &entries[ei];
-                let known = !c.discovery || c.notes.known(e);
-                let ok = known && book::craftable(e, gw, c.inv, &c.screen.grid);
-                let lit = known && book::ready(e, gw, c.inv, &c.screen.grid); // the list puts these first
-                let sel = sat.sel == Some(ei);
-                nine(v, r, if sel { art::ENTRY_SEL } else { art::ENTRY }, 3.0, u);
-                let isz = r[3] * 0.82;
-                let ib = (r[0] + 3.0 * u, r[1] + (r[3] - isz) * 0.5, isz, isz);
-                if known {
-                    crate::push_stack(v, ib, 0.875, ItemStack { count: 1, ..e.out });
-                } else {
-                    HudPipeline::push_nine(v, (ib.0, ib.1, ib.2, ib.3), art::SLOT, 2.0, u, WHITE, true);
-                    text_in(v, ib.0 + ib.2 * 0.5, ib.1 + (ib.3 - 8.0 * tk) * 0.5, tk, (ib.0, ib.0 + ib.2), "?", [0.85, 0.85, 0.9, 1.0]);
-                }
-                let name = if known { items::name(e.out).unwrap_or("?") } else { "???" };
-                let nx = ib.0 + isz + 6.0 * u;
-                text_fit(v, (nx, r[1] + (r[3] - 8.0 * tk) * 0.5), tk, r[0] + r[2] - r[3] * 0.34 - 8.0 * u - nx, name, INK); // up to the gem
-                // The gem at the right: green = the bag has it all and the grid fits; orange = a furnace's; red = something is short.
-                let dot = if !known { MUTE } else if e.grid == 0 { WARN } else if ok { GOOD } else { BAD };
-                let ds = r[3] * 0.34;
-                HudPipeline::push_gui_tinted(v, r[0] + r[2] - ds - 5.0 * u, r[1] + (r[3] - ds) * 0.5, ds, ds, art::GEM, dot);
-                if !lit {
-                    HudPipeline::push_quad(v, r[0], r[1], r[2], r[3], [0.0, 0.0, 0.0, 0.55]); // not now: the row is dimmed, icon and name with it
-                }
-            }
-            if b.max_scroll > 0.0 {
-                // A thin scroll bar along the list's right edge.
-                if let Some(l) = b.list {
-                    let (bar, at) = (l[3] * l[3] / (l[3] + b.max_scroll), sat.scroll / b.max_scroll);
-                    HudPipeline::push_quad(v, l[0] + l[2] - 0.6 * u, l[1] + (l[3] - bar) * at, 0.6 * u, bar, [0.3, 0.2, 0.1, 0.6]);
-                }
-            }
+        if !(known && book::ready(e, gw, c.inv, &c.screen.grid)) {
+            HudPipeline::push_quad(v, r[0], r[1], r[2], r[3], [0.0, 0.0, 0.0, 0.55]); // not now: icon and slot dimmed
+        }
+        if sat.sel == Some(ei) {
+            HudPipeline::push_nine(v, (r[0], r[1], r[2], r[3]), art::RIM, 2.0, u, SELECTED, false);
         }
     }
+    if b.max_scroll > 0.0 {
+        // A thin scroll bar under the strip.
+        let (sw, at) = (b.strip[2], sat.scroll.clamp(0.0, b.max_scroll) / b.max_scroll);
+        let bar = sw * sw / (sw + b.max_scroll);
+        HudPipeline::push_quad(v, b.strip[0] + (sw - bar) * at, b.strip[1] + b.strip[3] + 1.5 * u, bar, 0.8 * u, [0.3, 0.2, 0.1, 0.6]);
+    }
 
-    // Right page: title, pin, the grid with its arrow and result, the card of the picked recipe.
-    text_fit(v, (b.right[0] + p, title_y(b.right)), tk, b.pin[0] - 2.0 * u - b.right[0] - p, if gw == 3 { "Workbench" } else { "Crafting" }, INK);
+    nine(v, b.left, art::CARD, 3.0, u);
+    nine(v, b.right, art::CARD, 3.0, u);
+
+    // Left panel: the name and a line under it (what is missing, what a tap does), the pin.
+    let l = b.left;
+    let sel = sat.sel.and_then(|i| entries.get(i));
+    let known = sel.map_or(true, |e| !c.discovery || c.notes.known(e));
+    let shown = sel.filter(|_| known);
+    let mw = b.pin[0] - 2.0 * u - (l[0] + ip);
+    let (nx, ny) = (l[0] + ip, l[1] + ip);
+    match (sel, shown) {
+        (None, _) => text_fit_o(v, (nx, ny), tk, mw, "Pick a recipe above", WHITE, o),
+        (Some(_), None) => {
+            text_fit_o(v, (nx, ny), tk, mw, "???", WHITE, o);
+            text_fit_o(v, (nx, ny + 8.0 * tk + 2.0 * u), sk, mw, "Find one of its items to learn it", WARN_T, o);
+        }
+        (Some(_), Some(e)) => {
+            let name = items::name(e.out).unwrap_or("?");
+            let head = if e.out.count > 1 { format!("{name} x{}", e.out.count) } else { name.to_string() };
+            text_fit_o(v, (nx, ny), tk, mw, &head, WHITE, o);
+            let short = book::missing(e, c.inv, &c.screen.grid);
+            let (note, col) = match (e.src, e.grid) {
+                (Src::Smelt(_), _) => ("Smelt it in a furnace", WARN_T),
+                (_, g) if g > gw => ("Needs a workbench (3x3)", WARN_T),
+                _ if short.is_empty() => ("Tap again to craft, hold for all", GOOD_T),
+                _ => ("Missing ingredients", BAD_T),
+            };
+            text_fit_o(v, (nx, ny + 8.0 * tk + 2.0 * u), sk, mw, note, col, o);
+        }
+    }
     // The pin: a picture that turns red when this recipe is pinned (dim while none is picked).
     let pinned = sat.sel.is_some_and(|s| c.notes.pinned == Some(s));
     let a = if sat.sel.is_some() { 1.0 } else { 0.4 };
     HudPipeline::push_gui_tinted(v, b.pin[0] + (b.pin[2] - 10.0 * u) * 0.5, b.pin[1], 10.0 * u, 10.0 * u, if pinned { art::PIN_ON } else { art::PIN }, [1.0, 1.0, 1.0, a]);
-    for &(id, r) in &b.grid {
-        let st = c.screen.get(c.inv, None, id);
-        let rim = (id == SlotId::Result && st.is_some()).then_some(GOOD);
-        slot(v, r, st, rim, u);
-    }
-    text_in(v, b.arrow[0] + b.arrow[2] * 0.5, b.arrow[1] + (b.arrow[3] - 8.0 * tk) * 0.5, tk, (b.arrow[0], b.arrow[0] + b.arrow[2]), "->", INK);
-    if c.hold {
-        if let Some((_, r)) = b.grid.iter().find(|(id, _)| *id == SlotId::Result) {
-            text_in(v, r[0] + r[2] * 0.5, r[1] - 10.0 * sk, sk, (b.right[0] + p, b.right[0] + b.right[2] - p), "Release: craft all", GOOD);
+
+    // The preview: the recipe's own ingredients in their places, red where the bag is short (not a grid to fill: it is only shown).
+    let pg = (b.grid.len() as f32).sqrt().round() as usize;
+    let cells = shown.map_or([0u16; 9], |e| book::preview(e, pg));
+    let short = shown.map_or_else(Vec::new, |e| book::missing(e, c.inv, &c.screen.grid));
+    for (i, r) in b.grid.iter().enumerate() {
+        nine(v, *r, art::SLOT, 2.0, u);
+        if cells[i] != 0 {
+            crate::push_stack(v, (r[0], r[1], r[2], r[3]), 0.875, item(cells[i]));
+            if short.iter().any(|s| s.0 == cells[i]) {
+                HudPipeline::push_quad(v, r[0], r[1], r[2], r[3], [0.8, 0.1, 0.1, 0.4]);
+            }
         }
     }
-    draw_card(v, sat, b, c, (tk, sk, u));
+    text_in_o(v, b.arrow[0] + b.arrow[2] * 0.5, b.arrow[1] + (b.arrow[3] - 8.0 * tk) * 0.5, tk, (b.arrow[0], b.arrow[0] + b.arrow[2]), "->", WHITE, o);
+    let ready = shown.is_some_and(|e| book::ready(e, gw, c.inv, &c.screen.grid));
+    slot(v, b.result, shown.map(|e| e.out), ready.then_some(GOOD), u);
+    if shown.is_some() && !ready {
+        let r = b.result;
+        HudPipeline::push_quad(v, r[0], r[1], r[2], r[3], [0.0, 0.0, 0.0, 0.55]);
+    }
+    if c.hold {
+        let r = b.result;
+        text_in_o(v, r[0] + r[2] * 0.5, r[1] - 10.0 * sk, sk, (l[0] + ip, l[0] + l[2] - ip), "Release: craft all", GOOD_T, o);
+    }
 
-    // The discovery toggle and the hint under it.
+    // The discovery toggle at the foot.
     nine(v, b.hide, art::ENTRY, 3.0, u);
     let label = if c.discovery { "Unknown recipes: hidden" } else { "Unknown recipes: shown" };
     text_in(v, b.hide[0] + b.hide[2] * 0.5, b.hide[1] + (b.hide[3] - 8.0 * sk) * 0.5, sk, (b.hide[0] + 2.0 * u, b.hide[0] + b.hide[2] - 2.0 * u), label, INK);
-    text_in(v, b.hide[0] + b.hide[2] * 0.5, b.hide[1] + b.hide[3] + 3.0 * sk, sk, (b.right[0] + p, b.right[0] + b.right[2] - p), "Hold the result to craft all", [0.4, 0.3, 0.2, 1.0]);
+
+    // Right panel: its title; the slots are drawn by `draw`, the ingredient list here.
+    let r = b.right;
+    let title = if sat.info { "Ingredients" } else { "Inventory" };
+    text_in_o(v, r[0] + r[2] * 0.5, r[1] + ip, tk, (r[0] + ip, r[0] + r[2] - ip), title, WHITE, o);
+    if sat.info {
+        draw_card(v, sat, b, c, (tk, sk, u));
+    }
 }
 
-/// The closed book: a plain brown cover with a red-stitched spine (the sprite's left border) and a sliver of page edge, the book icon and
-/// its title; the writing only while the cover is flat (it is foreshortened, narrower, while it swings). No clasp, no strap.
-fn draw_cover(v: &mut Vec<HudVertex>, r: [f32; 4], sat: &Satchel, (tk, sk, u): (f32, f32, f32)) {
-    if r[2] < 8.0 * u {
-        return;
-    }
-    nine(v, r, art::COVER, 8.0, u);
-    if sat.book_t < 0.1 {
-        let (lo, hi) = (r[0] + 10.0 * u, r[0] + r[2] - 4.0 * u); // right of the spine
-        let (cx, isz) = ((lo + hi) * 0.5, ((hi - lo) * 0.4).min(r[3] * 0.25));
-        crate::push_stack(v, (cx - isz * 0.5, r[1] + r[3] * 0.3, isz, isz), 0.875, ItemStack { id: 340, count: 1, damage: 0 });
-        text_in(v, cx, r[1] + r[3] * 0.3 + isz + 6.0 * u, tk, (lo, hi), "Recipes", COVER_INK);
-        if !sat.book {
-            text_in(v, cx, r[1] + r[3] * 0.86, sk, (lo, hi), "Tap to open", [0.74, 0.66, 0.48, 1.0]);
-        }
-    }
+/// A leather plate with its label: `state` 0 disabled, 1 normal, 2 on.
+fn button(v: &mut Vec<HudVertex>, r: [f32; 4], (tk, u): (f32, f32), text: &str, state: u8) {
+    let c = if state == 0 { [0.6, 0.6, 0.6, 1.0] } else { WHITE };
+    HudPipeline::push_nine(v, (r[0], r[1], r[2], r[3]), if state == 2 { art::BTN_ON } else { art::BTN }, 4.0, u, c, true);
+    text_in(v, r[0] + r[2] * 0.5, r[1] + (r[3] - 8.0 * tk) * 0.5, tk, (r[0] + 2.0 * u, r[0] + r[2] - 2.0 * u), text, [0.96, 0.96, 0.96, 1.0]);
 }
 
 /// The card's sizes from its rect `r`, the small text size and the sprite pixel, for `n` ingredients: the header (icon + name + note) is fixed,
@@ -853,12 +811,12 @@ const WARN_T: [f32; 4] = [1.0, 0.72, 0.2, 1.0];
 
 /// The picked recipe, on a card sunk into the page: result, a line on where it is made, the ingredients with what the bag has of each
 /// (all outlined text; the ingredient rows scroll).
-fn draw_card(v: &mut Vec<HudVertex>, sat: &Satchel, b: &BookFrame, c: &Ctx, (tk, sk, u): (f32, f32, f32)) {
+fn draw_card(v: &mut Vec<HudVertex>, sat: &Satchel, b: &CraftFrame, c: &Ctx, (tk, sk, u): (f32, f32, f32)) {
     let r = b.card;
     nine(v, r, art::CARD, 3.0, u);
     let o = (u * 0.34).round().max(1.0);
     let Some(e) = sat.sel.and_then(|i| book::entries().get(i)) else {
-        paragraph(v, r, (sk, u), "Pick a recipe on the left page: its items go into the grid.", WHITE, o);
+        paragraph(v, r, (sk, u), "Pick a recipe in the strip above: tap it again to craft it.", WHITE, o);
         return;
     };
     if c.discovery && !c.notes.known(e) {
@@ -876,7 +834,7 @@ fn draw_card(v: &mut Vec<HudVertex>, sat: &Satchel, b: &BookFrame, c: &Ctx, (tk,
     let (note, col) = match (e.src, e.grid) {
         (Src::Smelt(_), _) => ("Smelt it in a furnace", WARN_T),
         (_, g) if g > gw => ("Needs a workbench (3x3)", WARN_T),
-        _ if short.is_empty() => ("Tap again to add a set", GOOD_T),
+        _ if short.is_empty() => ("Tap again to craft", GOOD_T),
         _ => ("Missing ingredients", BAD_T),
     };
     text_fit_o(v, (tx, r[1] + 2.0 * u + 8.0 * tk + u), sk, mw, note, col, o);
@@ -925,88 +883,53 @@ mod tests {
     use super::*;
 
     const SIZE: (f32, f32) = (1604.0, 720.0);
+    const SIZES: [(f32, f32); 4] = [(1604.0, 720.0), (1280.0, 720.0), (2400.0, 1080.0), (1920.0, 1080.0)];
+
+    fn tab(craft: bool) -> Satchel {
+        let mut s = Satchel::new(craft);
+        s.tick(10.0);
+        s
+    }
 
     fn frame(sat: &Satchel, inv: &Inventory, gw: usize) -> Frame {
         Frame::new(sat, inv, gw, SIZE.0, SIZE.1)
-    }
-
-    fn open_book() -> Satchel {
-        let mut s = Satchel::new(true);
-        s.tick(10.0);
-        s
     }
 
     fn centre(r: [f32; 4]) -> (f32, f32) {
         (r[0] + r[2] * 0.5, r[1] + r[3] * 0.5)
     }
 
+    fn on_screen(r: [f32; 4], (w, h): (f32, f32)) -> bool {
+        r[0] >= 0.0 && r[1] >= 0.0 && r[0] + r[2] <= w && r[1] + r[3] <= h
+    }
+
     #[test]
-    fn every_slot_has_one_cell_that_a_finger_finds_in_both_layouts() {
+    fn every_slot_has_one_cell_that_a_finger_finds_on_both_tabs() {
         let mut inv = Inventory::default();
         inv.slots[12] = Some(ItemStack { id: 17, count: 5, damage: 0 });
-        for sat in [{ let mut s = Satchel::new(false); s.tick(10.0); s }, open_book()] {
+        for sat in [tab(false), tab(true)] {
             let f = frame(&sat, &inv, 2);
-            for i in (0..9).chain(MAIN..MAIN + 4) {
-                let c = f.cells.iter().filter(|(id, _)| *id == SlotId::Inv(i)).count();
-                assert_eq!(c, 1, "slot {i}");
+            for i in 0..MAIN {
+                assert_eq!(f.cells.iter().filter(|(id, _)| *id == SlotId::Inv(i)).count(), 1, "slot {i}");
             }
             for &(id, r) in &f.cells {
                 let (x, y) = centre(r);
                 assert_eq!(f.hit(&sat, x, y), Pick::Slot(id));
-                assert!(r[0] >= 0.0 && r[1] >= 0.0 && r[0] + r[2] <= SIZE.0 && r[1] + r[3] <= SIZE.1, "on the screen: {r:?}");
+                assert!(on_screen(r, SIZE), "on the screen: {r:?}");
             }
         }
-        // Both layouts are the same grid: all 27 main slots have a cell even when the bag is empty.
-        for sat in [Satchel::new(false), open_book()] {
-            let f = frame(&sat, &Inventory::default(), 2);
-            assert_eq!(f.cells.iter().filter(|(id, _)| matches!(id, SlotId::Inv(i) if (9..MAIN).contains(i))).count(), 27);
-        }
-    }
-
-    #[test]
-    fn opening_the_book_glides_the_bag_left_and_never_into_the_cover() {
-        let inv = Inventory::default();
-        let at = |t: f32| {
-            let mut s = Satchel::new(true);
-            (s.age, s.book_t) = (10.0, t);
-            frame(&s, &inv, 2)
-        };
-        let (c, m, o) = (at(0.0), at(0.5), at(1.0));
-        assert_eq!((c.bag[2], c.bag[3]), (o.bag[2], o.bag[3]), "the bag keeps its size");
-        assert!(c.bag[0] > m.bag[0] && m.bag[0] > o.bag[0], "it glides left");
-        let dx = o.bag[0] - c.bag[0];
-        for ((i, r), (j, q)) in c.cells.iter().zip(&o.cells) {
-            assert!(i == j && (r[2], r[3]) == (q[2], q[3]) && (q[0] - r[0] - dx).abs() < 0.01 && q[1] == r[1], "cell {i:?} only moves sideways");
-        }
-        for f in [&c, &m, &o] {
-            let r = f.book.as_ref().expect("book").rect;
-            assert!(r[0] >= f.bag[0] + f.bag[2] && r[0] + r[2] <= SIZE.0, "the book stays right of the bag and on the screen: {r:?}");
-        }
-    }
-
-    #[test]
-    fn a_closed_book_lies_beside_the_bag_and_a_tap_opens_it() {
-        let inv = Inventory::default();
-        let mut closed = Satchel::new(false);
-        closed.tick(10.0);
-        let f = frame(&closed, &inv, 2);
-        let r = f.book.as_ref().expect("the book is there from the start").rect;
-        assert!(r[0] > f.bag[0] + f.bag[2] && r[0] + r[2] <= SIZE.0 && r[1] >= 0.0 && r[1] + r[3] <= SIZE.1, "on the screen, right of the bag");
-        let (x, y) = centre(r);
-        assert_eq!(f.hit(&closed, x, y), Pick::Btn(Btn::Book));
-        // Open, the cover's place is a page (a tap there does nothing) and the tab above the spine shuts it.
-        let (open, f) = (open_book(), frame(&open_book(), &inv, 2));
-        let (x, y) = centre(f.book.as_ref().expect("book").tab);
-        assert_eq!(f.hit(&open, x, y), Pick::Btn(Btn::Book));
-        assert_ne!(f.hit(&open, f.book.as_ref().expect("book").right[0] + 2.0, f.book.as_ref().expect("book").right[1] + 2.0), Pick::Btn(Btn::Book));
+        // The armor slots are on the Bag tab only.
+        let f = frame(&tab(false), &inv, 2);
+        assert!((MAIN..MAIN + 4).all(|i| f.cells.iter().filter(|(id, _)| *id == SlotId::Inv(i)).count() == 1));
+        assert!(frame(&tab(true), &inv, 2).cells.iter().all(|(id, _)| !matches!(id, SlotId::Inv(i) if *i >= MAIN)));
     }
 
     /// The slots touch each other (rows and columns), start clear of the panel's 8-pixel border and its seam, and the pocket bands stay
-    /// inside the border: the old cells covered the seam on the left.
+    /// inside the border.
     #[test]
-    fn slots_touch_and_sit_clear_of_the_border() {
-        for (w, h) in [(1604.0, 720.0), (1280.0, 720.0), (2400.0, 1080.0), (1920.0, 1080.0)] {
-            let f = Frame::new(&open_book(), &Inventory::default(), 2, w, h);
+    fn bag_slots_touch_and_sit_clear_of_the_border() {
+        for (w, h) in SIZES {
+            let f = Frame::new(&tab(false), &Inventory::default(), 2, w, h);
             let u = units(f.k).0;
             let (lo, hi) = (f.bag[0] + 10.0 * u, f.bag[0] + f.bag[2] - 10.0 * u);
             for &(_, r) in &f.cells {
@@ -1020,181 +943,193 @@ mod tests {
             for pair in first.windows(2).filter(|p| p[0][1] == p[1][1]) {
                 assert!((pair[1][0] - pair[0][0] - pair[0][2]).abs() < 0.01, "neighbours touch");
             }
-            assert!(f.bag[1] + f.bag[3] <= h, "the bag fits the height at {w}x{h}");
+            assert!(f.bag[1] + f.bag[3] <= h * 0.92, "the panel fits the height at {w}x{h}, with room for the pad's hints");
         }
     }
 
-    /// The grid, the arrow and the result stay on the right page on every screen shape (the old sizes came from the height only).
+    /// Armor, bag and belt are three blocks with a clear gap between them.
     #[test]
-    fn the_result_stays_on_the_page_on_every_screen() {
-        for (w, h) in [(1604.0, 720.0), (1280.0, 720.0), (2400.0, 1080.0), (1920.0, 1080.0), (2340.0, 1080.0), (1560.0, 720.0)] {
+    fn the_blocks_are_apart() {
+        let f = frame(&tab(false), &Inventory::default(), 2);
+        let u = units(f.k).0;
+        let row = |id: SlotId| f.cells.iter().find(|(i, _)| *i == id).expect("cell").1;
+        let (armor, top, last, belt) = (row(SlotId::Inv(MAIN)), row(SlotId::Inv(9)), row(SlotId::Inv(35)), row(SlotId::Inv(0)));
+        assert!(top[1] - (armor[1] + armor[3]) >= 11.0 * u && belt[1] - (last[1] + last[3]) >= 11.0 * u, "gaps between the blocks");
+    }
+
+    /// The tabs sit on the panel's edge and a finger on one finds it: `Bag` and `Craft`, or `Bag` and every category.
+    #[test]
+    fn the_tabs_switch_between_the_bag_and_the_categories() {
+        let inv = Inventory::default();
+        let f = frame(&tab(false), &inv, 2);
+        assert_eq!(f.tabs.iter().map(|t| t.0).collect::<Vec<_>>(), [Pick::Btn(Btn::Bag), Pick::Btn(Btn::Craft)]);
+        let sat = tab(true);
+        let f = frame(&sat, &inv, 2);
+        assert_eq!(f.tabs.len(), 1 + CATS.len());
+        for &(p, r) in &f.tabs {
+            let (x, y) = centre(r);
+            assert_eq!(f.hit(&sat, x, y), p);
+            assert!(on_screen(r, SIZE) && r[1] + r[3] <= f.bag[1] + 0.01, "a tab lies on the panel's top edge: {r:?}");
+        }
+        assert_eq!(f.tabs[3].0, Pick::Cat(2));
+        let mut s = Satchel::new(false);
+        s.turn(99);
+        assert!(s.craft && s.cat == CATS.len() - 1, "a category tab opens the Craft tab, clamped");
+    }
+
+    /// The strip, the recipe's panel and the bag stay on the panel on every screen shape, the result next to the arrow inside the left panel.
+    #[test]
+    fn the_craft_tab_fits_every_screen() {
+        for (w, h) in SIZES.into_iter().chain([(800.0, 480.0), (2340.0, 1080.0)]) {
             for gw in [2, 3] {
-                let f = Frame::new(&open_book(), &Inventory::default(), gw, w, h);
-                let b = f.book.as_ref().expect("book");
-                let edge = b.right[0] + b.right[2] - b.p;
-                for &(_, r) in &b.grid {
-                    assert!(r[0] >= b.right[0] + b.p - 0.01 && r[0] + r[2] <= edge + 0.01, "{gw}x{gw} cell {r:?} at {w}x{h} (edge {edge})");
+                let mut sat = tab(true);
+                sat.sel = Some(0);
+                let f = Frame::new(&sat, &Inventory::default(), gw, w, h);
+                let b = f.craft.as_ref().expect("craft");
+                let inner = |r: [f32; 4], p: [f32; 4]| r[0] >= p[0] - 0.01 && r[1] >= p[1] - 0.01 && r[0] + r[2] <= p[0] + p[2] + 0.01 && r[1] + r[3] <= p[1] + p[3] + 0.01;
+                assert!(on_screen(f.bag, (w, h)) && f.bag[1] + f.bag[3] <= h * 0.92, "the panel at {w}x{h}");
+                assert!(inner(b.strip, f.bag) && inner(b.left, f.bag) && inner(b.right, f.bag), "{w}x{h}");
+                for r in b.grid.iter().chain([&b.result, &b.pin, &b.hide, &b.arrow]) {
+                    assert!(inner(*r, b.left), "{r:?} on the left panel at {w}x{h} ({gw})");
                 }
-                assert!(b.arrow[0] + b.arrow[2] <= b.grid.last().expect("result").1[0] + 0.01, "the arrow is left of the result");
+                assert!(b.arrow[0] + b.arrow[2] <= b.result[0] + 0.01, "the arrow is left of the result");
+                assert!(b.grid.last().is_some_and(|g| g[0] + g[2] <= b.arrow[0] + 0.01), "the grid is left of the arrow");
+                for &(_, r) in &f.cells {
+                    assert!(inner(r, b.right), "a slot is on the right panel at {w}x{h}: {r:?}");
+                }
+                for &(_, r) in &b.rows {
+                    assert!(inner(r, b.strip), "{r:?}");
+                }
+                assert!(b.pin[1] + b.pin[3] <= b.grid[0][1] + 0.01, "the pin does not reach the preview");
             }
         }
     }
 
-    /// The book is as tall closed as open (the back cover only grows sideways), and the cover is one page wide.
+    /// The strip shows whole recipes, a drag moves it a whole recipe at a time, and it ends where the recipes do.
     #[test]
-    fn the_book_is_as_tall_closed_as_open() {
+    fn the_strip_scrolls_a_whole_recipe_at_a_time() {
         let inv = Inventory::default();
-        let mut closed = Satchel::new(false);
-        closed.tick(10.0);
-        let (c, o) = (frame(&closed, &inv, 2), frame(&open_book(), &inv, 2));
-        let (rc, ro) = (c.book.expect("closed").rect, o.book.expect("open").rect);
-        assert_eq!((rc[1], rc[3]), (ro[1], ro[3]));
-        assert!(rc[2] < ro[2]);
-    }
-
-    /// A text is stepped down whole pixels and then cut until it fits; a paragraph wraps within its width.
-    #[test]
-    fn text_is_fitted_and_wrapped_within_its_box() {
-        for (s, k, maxw) in [("Redstone & rails", 3.0, 150.0), ("Redstone & rails", 3.0, 40.0), ("Hold the result to craft all", 2.0, 60.0), ("X", 3.0, 100.0)] {
-            let (kk, t) = fitted(s, k, maxw);
-            assert!(kk >= 1.0 && kk <= k && kk.fract() == 0.0 && HudPipeline::text_width(&t) as f32 * kk <= maxw.max(8.0), "{s}: {kk} {t}");
-        }
-        assert_eq!(fitted("X", 3.0, 100.0), (3.0, "X".to_string()), "a text that fits keeps its size");
-        for l in lines("Pick a recipe on the left page: its items go into the grid.", 2.0, 150.0) {
-            assert!(HudPipeline::text_width(&l) as f32 * 2.0 <= 150.0 || !l.contains(' '), "{l}");
-        }
-        assert_eq!(units(3.99), (3.0, 2.0));
-    }
-
-    #[test]
-    fn a_slot_rim_is_tinted_by_category() {
-        assert_ne!(tint(270), tint(297), "a pickaxe and bread differ");
-        assert_ne!(tint(297), tint(17), "bread and a log differ");
-    }
-
-    #[test]
-    fn cells_are_big_enough_for_a_thumb_beside_the_book() {
-        let f = frame(&open_book(), &Inventory::default(), 2);
-        let min = f.cells.iter().map(|(_, r)| r[2]).fold(f32::MAX, f32::min);
-        assert!(min >= 0.08 * SIZE.1, "a slot is {min} px");
-        let b = f.book.as_ref().expect("book");
-        assert!(f.bag[0] + f.bag[2] < b.left[0], "the bag and the book do not overlap");
-    }
-
-    #[test]
-    fn the_book_turns_pages_lists_recipes_and_scrolls() {
-        let inv = Inventory::default();
-        let mut sat = open_book();
+        let mut sat = tab(true);
         let f = frame(&sat, &inv, 2);
-        let b = f.book.as_ref().expect("book");
-        assert_eq!(b.cats.len(), CATS.len());
-        let (x, y) = centre(b.cats[0].1);
-        assert_eq!(f.hit(&sat, x, y), Pick::Cat(0));
-        sat.turn(Some(0));
-        sat.tick(1.0);
-        let f = frame(&sat, &inv, 2);
-        let b = f.book.as_ref().expect("book");
-        assert!(b.back.is_some() && !b.rows.is_empty());
-        let (x, y) = centre(b.rows[0].1);
-        assert_eq!(f.hit(&sat, x, y), Pick::Row(b.rows[0].0));
-        let (x, y) = centre(b.back.expect("back"));
-        assert_eq!(f.hit(&sat, x, y), Pick::Back);
-        // Scrolled down, other rows show and the first is gone.
+        let b = f.craft.as_ref().expect("craft");
+        assert_eq!(b.rows.len() as f32, (b.strip[2] / b.row_w).round(), "the strip is full");
+        assert!(b.max_scroll > 0.0 && (b.max_scroll / b.row_w).fract().abs() < 1e-3, "tools & gear do not fit one screen");
         let first = b.rows[0].0;
-        sat.scroll = b.max_scroll.min(2.5 * b.row_h);
+        sat.scroll = 2.4 * b.row_w;
         let f = frame(&sat, &inv, 2);
-        let b = f.book.as_ref().expect("book");
-        assert!(b.max_scroll > 0.0 && b.rows.iter().all(|(i, _)| *i != first) == (sat.scroll >= b.row_h));
-    }
-
-    #[test]
-    fn the_right_page_has_the_grid_the_screen_asks_for() {
-        let inv = Inventory::default();
-        let sat = open_book();
-        for (gw, cells) in [(2, 4), (3, 9)] {
-            let f = frame(&sat, &inv, gw);
-            let b = f.book.as_ref().expect("book");
-            assert_eq!(b.grid.iter().filter(|(id, _)| matches!(id, SlotId::Grid(_))).count(), cells);
-            let r = b.grid.iter().find(|(id, _)| *id == SlotId::Result).expect("result").1;
-            assert!(r[0] + r[2] <= b.right[0] + b.right[2], "the result stays on the page ({gw}x{gw})");
-            assert!(b.card[3] > 0.1 * SIZE.1, "the card has room ({gw}x{gw})");
-            let (x, y) = centre(r);
-            assert_eq!(f.hit(&sat, x, y), Pick::Slot(SlotId::Result));
-        }
-    }
-
-    #[test]
-    fn a_finger_past_everything_throws_and_the_papers_do_not() {
-        let inv = Inventory::default();
-        let sat = open_book();
+        let b = f.craft.as_ref().expect("craft");
+        assert_eq!(b.rows[0].0, book::in_cat_ready(CATS[0], 2, &inv, &[None; 9])[2], "two whole recipes over");
+        assert_ne!(b.rows[0].0, first);
+        sat.scroll = 1e9;
         let f = frame(&sat, &inv, 2);
-        assert_eq!(f.hit(&sat, 2.0, SIZE.1 - 2.0), Pick::Outside);
-        let b = f.book.as_ref().expect("book");
-        assert_eq!(f.hit(&sat, b.right[0] + 2.0, b.right[1] + b.right[3] - 2.0), Pick::Panel);
-        let (x, y) = centre(f.btns.iter().find(|(b, _)| *b == Btn::Close).expect("close").1);
-        assert_eq!(f.hit(&sat, x, y), Pick::Btn(Btn::Close));
+        let b = f.craft.as_ref().expect("craft");
+        assert_eq!(b.rows.last().map(|r| r.0), book::in_cat_ready(CATS[0], 2, &inv, &[None; 9]).last().copied(), "the last recipe is in view at the end");
     }
 
-    /// A pad steps from slot to slot, from the bag's edge to the book, up to the buttons, and never off a screen with nothing that way.
+    /// The recipes the bag can make come first and keep that order where a finger and the pad find them; `Craftable` leaves only those.
     #[test]
-    fn a_pad_steps_between_targets() {
-        let inv = Inventory::default();
-        let sat = open_book();
-        let f = frame(&sat, &inv, 2);
-        let t = f.targets(&sat);
-        let cell = |id: SlotId| f.cells.iter().find(|(i, _)| *i == id).expect("cell").1;
-        let on = |r: [f32; 4]| centre(r);
-        // Along a row and down a column the neighbour is the touching cell.
-        let (a, b) = (cell(SlotId::Inv(9)), cell(SlotId::Inv(10)));
-        assert_eq!(step(&t, on(a), (1, 0)), Some(b));
-        assert_eq!(step(&t, on(b), (-1, 0)), Some(a));
-        assert_eq!(step(&t, on(a), (0, 1)), Some(cell(SlotId::Inv(18))));
-        // Up from the bag's first row: the armor row (a block over it), up from that: the button row.
-        let armor_up = step(&t, on(a), (0, -1)).expect("the armor row is above");
-        assert!(f.cells.iter().any(|&(id, r)| r == armor_up && matches!(id, SlotId::Inv(i) if i >= MAIN)));
-        let btn = step(&t, on(armor_up), (0, -1)).expect("a button is above the armor");
-        assert!(f.btns.iter().any(|&(_, r)| r == btn));
-        // Nothing lies below the belt; right of the bag's last column is the book (the page's first thing), not another slot.
-        assert_eq!(step(&t, on(cell(SlotId::Inv(0))), (0, 1)), None);
-        let last = cell(SlotId::Inv(26));
-        let right = step(&t, on(last), (1, 0)).expect("the book is right of the bag");
-        assert!(right[0] > f.bag[0] + f.bag[2], "{right:?}");
-        // Off every target (a page turned under the cursor): the nearest one, in any direction.
-        let hole = (f.bag[0] + f.bag[2] + 1.0, 1.0);
-        assert!(t.iter().all(|r| !inside(*r, hole.0, hole.1)));
-        assert!(step(&t, hole, (0, 1)).is_some());
-        // Every target is on the screen and answers a finger with something (never Panel / Outside).
-        for r in &t {
-            let (x, y) = centre(*r);
-            assert!(!matches!(f.hit(&sat, x, y), Pick::Panel | Pick::Outside | Pick::List | Pick::Card), "{r:?}");
-        }
-    }
-
-    /// The recipes the bag can make come first on a page of the list and keep that order where a finger and the pad find them.
-    #[test]
-    fn the_list_puts_what_can_be_made_first() {
+    fn the_strip_puts_what_can_be_made_first_and_can_hide_the_rest() {
         let mut inv = Inventory::default();
         inv.slots[10] = Some(ItemStack { id: 17, count: 3, damage: 0 });
         let blocks = CATS.iter().position(|&c| c == book::Cat::Blocks).expect("blocks");
-        let mut sat = open_book();
-        sat.turn(Some(blocks));
-        sat.tick(1.0);
+        let mut sat = tab(true);
+        sat.turn(blocks);
         let planks = book::entries().iter().position(|e| e.out.id == 5 && e.grid == 2 && matches!(e.src, Src::Craft(_))).expect("planks");
         let f = Frame::with_grid(&sat, &inv, &[None; 9], 2, SIZE.0, SIZE.1);
-        let rows = &f.book.as_ref().expect("book").rows;
-        assert_eq!(rows[0].0, planks, "logs in the bag: planks are the first row");
+        let rows = &f.craft.as_ref().expect("craft").rows;
+        assert_eq!(rows[0].0, planks, "logs in the bag: planks are the first recipe");
         let (x, y) = centre(rows[0].1);
         assert_eq!(f.hit(&sat, x, y), Pick::Row(planks));
-        // With an empty bag the page is in its own order again.
+        // With an empty bag the category is in its own order again.
         let empty = Frame::with_grid(&sat, &Inventory::default(), &[None; 9], 2, SIZE.0, SIZE.1);
-        assert_eq!(empty.book.as_ref().expect("book").rows[0].0, book::in_cat(book::Cat::Blocks)[0]);
+        assert_eq!(empty.craft.as_ref().expect("craft").rows[0].0, book::in_cat(book::Cat::Blocks)[0]);
+        // Craftable only: every recipe left can be made now, and an empty bag leaves none.
+        sat.only = true;
+        let f = Frame::with_grid(&sat, &inv, &[None; 9], 2, SIZE.0, SIZE.1);
+        let rows = &f.craft.as_ref().expect("craft").rows;
+        assert!(!rows.is_empty() && rows.iter().all(|&(i, _)| book::ready(&book::entries()[i], 2, &inv, &[None; 9])));
+        let none = Frame::with_grid(&sat, &Inventory::default(), &[None; 9], 2, SIZE.0, SIZE.1);
+        assert!(none.craft.as_ref().expect("craft").rows.is_empty());
     }
 
-    /// A count lies inside its cell, inside it (the vanilla count's box ended a sixteenth past it), on every screen shape.
+    /// The preview is 1 x 1 for a smelting, 2 x 2 or 3 x 3 for a recipe by what it needs and the screen has; the result is a slot to press.
+    #[test]
+    fn the_preview_fits_the_recipe_and_the_result_is_pressable() {
+        let inv = Inventory::default();
+        let pick = book::entries().iter().position(|e| e.out.id == 270 && e.grid == 3).expect("wooden pickaxe");
+        let smelt = book::entries().iter().position(|e| e.src == Src::Smelt(15)).expect("iron ore");
+        let planks = book::entries().iter().position(|e| e.out.id == 5 && e.grid == 2 && matches!(e.src, Src::Craft(_))).expect("planks");
+        for (gw, sel, side) in [(2, pick, 3), (3, planks, 3), (2, planks, 2), (2, smelt, 1)] {
+            let mut sat = tab(true);
+            sat.sel = Some(sel);
+            let f = frame(&sat, &inv, gw);
+            let b = f.craft.as_ref().expect("craft");
+            assert_eq!(b.grid.len(), side * side, "gw {gw} entry {sel}");
+            let (x, y) = centre(b.result);
+            assert_eq!(f.hit(&sat, x, y), Pick::Slot(SlotId::Result));
+            assert!(b.result[2] > b.grid[0][2], "the result is bigger than an ingredient");
+        }
+    }
+
+    #[test]
+    fn a_finger_past_everything_throws_and_the_panels_do_not() {
+        let inv = Inventory::default();
+        for sat in [tab(false), tab(true)] {
+            let f = frame(&sat, &inv, 2);
+            assert_eq!(f.hit(&sat, 2.0, SIZE.1 - 2.0), Pick::Outside);
+            assert_eq!(f.hit(&sat, f.bag[0] + 1.0, f.bag[1] + f.bag[3] - 1.0), Pick::Panel);
+            let (x, y) = centre(f.btns.iter().find(|(b, _)| *b == Btn::Close).expect("close").1);
+            assert_eq!(f.hit(&sat, x, y), Pick::Btn(Btn::Close));
+        }
+        let sat = tab(true);
+        let f = frame(&sat, &inv, 2);
+        let b = f.craft.as_ref().expect("craft");
+        assert_eq!(f.hit(&sat, b.left[0] + 1.0, b.left[1] + b.left[3] - 1.0), Pick::Panel);
+    }
+
+    /// A pad steps from slot to slot, down a column, from the bag's top row up over the armor row to the tabs, and never off a screen with
+    /// nothing that way; every target answers a finger with something on both tabs.
+    #[test]
+    fn a_pad_steps_between_targets() {
+        let inv = Inventory::default();
+        let sat = tab(false);
+        let f = frame(&sat, &inv, 2);
+        let t = f.targets(&sat);
+        let cell = |id: SlotId| f.cells.iter().find(|(i, _)| *i == id).expect("cell").1;
+        let (a, b) = (cell(SlotId::Inv(9)), cell(SlotId::Inv(10)));
+        assert_eq!(step(&t, centre(a), (1, 0)), Some(b));
+        assert_eq!(step(&t, centre(b), (-1, 0)), Some(a));
+        assert_eq!(step(&t, centre(a), (0, 1)), Some(cell(SlotId::Inv(18))));
+        let armor_up = step(&t, centre(a), (0, -1)).expect("the armor row is above");
+        assert!(f.cells.iter().any(|&(id, r)| r == armor_up && matches!(id, SlotId::Inv(i) if i >= MAIN)));
+        let up = step(&t, centre(armor_up), (0, -1)).expect("a tab or a button is above the armor");
+        assert!(f.tabs.iter().any(|&(_, r)| r == up) || f.btns.iter().any(|&(_, r)| r == up));
+        assert_eq!(step(&t, centre(cell(SlotId::Inv(0))), (0, 1)), None, "nothing lies below the belt");
+        // Off every target (a tab changed under the cursor): the nearest one, in any direction.
+        let hole = (1.0, 1.0);
+        assert!(t.iter().all(|r| !inside(*r, hole.0, hole.1)));
+        assert!(step(&t, hole, (0, 1)).is_some());
+        for (craft, info) in [(false, false), (true, false), (true, true)] {
+            let mut sat = tab(craft);
+            (sat.sel, sat.info) = (Some(0), info);
+            let f = frame(&sat, &inv, 2);
+            for r in &f.targets(&sat) {
+                let (x, y) = centre(*r);
+                assert!(on_screen(*r, SIZE) && !matches!(f.hit(&sat, x, y), Pick::Panel | Pick::Outside | Pick::List | Pick::Card), "{r:?} (craft {craft}, info {info})");
+            }
+        }
+        // On the Craft tab a recipe is a step right of the previous one and the result is a target.
+        let sat = tab(true);
+        let f = frame(&sat, &inv, 2);
+        let rows = &f.craft.as_ref().expect("craft").rows;
+        assert_eq!(step(&f.targets(&sat), centre(rows[0].1), (1, 0)), Some(rows[1].1));
+    }
+
+    /// A count lies inside its cell on every screen shape.
     #[test]
     fn a_count_stays_inside_its_cell() {
-        for (w, h) in [(1604.0, 720.0), (1280.0, 720.0), (2400.0, 1080.0), (1920.0, 1080.0)] {
-            let f = Frame::new(&open_book(), &Inventory::default(), 2, w, h);
+        for (w, h) in SIZES {
+            let f = Frame::new(&tab(false), &Inventory::default(), 2, w, h);
             let u = units(f.k).0;
             for &(_, r) in f.cells.iter().step_by(7) {
                 for n in [2, 64] {
@@ -1207,106 +1142,122 @@ mod tests {
         }
     }
 
-    /// Armor, bag and belt are three blocks with a clear gap between them.
+    /// A text is stepped down whole pixels and then cut until it fits; a paragraph wraps within its width.
     #[test]
-    fn the_blocks_are_apart() {
-        let f = frame(&open_book(), &Inventory::default(), 2);
-        let u = units(f.k).0;
-        let row = |id: SlotId| f.cells.iter().find(|(i, _)| *i == id).expect("cell").1;
-        let (armor, top, last, belt) = (row(SlotId::Inv(MAIN)), row(SlotId::Inv(9)), row(SlotId::Inv(35)), row(SlotId::Inv(0)));
-        assert!(top[1] - (armor[1] + armor[3]) >= 11.0 * u && belt[1] - (last[1] + last[3]) >= 11.0 * u, "gaps between the blocks");
-        assert!(f.bag[1] + f.bag[3] <= SIZE.1);
+    fn text_is_fitted_and_wrapped_within_its_box() {
+        for (s, k, maxw) in [("Redstone & rails", 3.0, 150.0), ("Redstone & rails", 3.0, 40.0), ("Tap again to craft, hold for all", 2.0, 60.0), ("X", 3.0, 100.0)] {
+            let (kk, t) = fitted(s, k, maxw);
+            assert!(kk >= 1.0 && kk <= k && kk.fract() == 0.0 && HudPipeline::text_width(&t) as f32 * kk <= maxw.max(8.0), "{s}: {kk} {t}");
+        }
+        assert_eq!(fitted("X", 3.0, 100.0), (3.0, "X".to_string()), "a text that fits keeps its size");
+        for l in lines("Pick a recipe above: tap it again to craft it.", 2.0, 150.0) {
+            assert!(HudPipeline::text_width(&l) as f32 * 2.0 <= 150.0 || !l.contains(' '), "{l}");
+        }
+        assert_eq!(units(3.99), (3.0, 2.0));
     }
 
-    /// The page's content keeps clear of its rim (6 sprite pixels), the pin is a picture whose box lies in the header, and the card
-    /// shows at least one row of ingredients below its header and scrolls only when there are more rows than fit.
     #[test]
-    fn the_page_has_margins_a_pin_box_and_a_scrolling_card() {
+    fn a_slot_rim_is_tinted_by_category() {
+        assert_ne!(tint(270), tint(297), "a pickaxe and bread differ");
+        assert_ne!(tint(297), tint(17), "bread and a log differ");
+    }
+
+    #[test]
+    fn cells_are_big_enough_for_a_thumb_on_both_tabs() {
+        for craft in [false, true] {
+            let f = frame(&tab(craft), &Inventory::default(), 2);
+            let min = f.cells.iter().map(|(_, r)| r[2]).fold(f32::MAX, f32::min);
+            assert!(min >= 0.08 * SIZE.1, "a slot is {min} px (craft {craft})");
+        }
+    }
+
+    /// The pin is a box in the recipe's header, the ingredient list shows at least one row and scrolls only when there are more rows than
+    /// fit, and the toggle sits under the preview.
+    #[test]
+    fn the_recipe_panel_has_a_pin_a_toggle_and_a_scrolling_list() {
         let inv = Inventory::default();
         for gw in [2, 3] {
-            let mut sat = open_book();
-            sat.sel = Some(0);
+            let mut sat = tab(true);
+            (sat.sel, sat.info) = (Some(0), true);
             let f = frame(&sat, &inv, gw);
-            let b = f.book.as_ref().expect("book");
+            let b = f.craft.as_ref().expect("craft");
             let (u, sk) = units(f.k);
-            assert!(b.p >= 10.0 * u, "content is 4 sprite pixels clear of the rim");
-            assert!(b.pin[1] >= b.right[1] + b.p && b.pin[1] + b.pin[3] <= b.right[1] + b.hh + 0.01 && b.pin[0] + b.pin[2] <= b.right[0] + b.right[2] - b.p + 0.01, "pin box in the header");
             let (x, y) = centre(b.pin);
             assert_eq!(f.hit(&sat, x, y), Pick::Pin);
-            assert!(b.pin[1] + b.pin[3] <= b.grid[0].1[1], "the pin does not reach the grid");
+            let (x, y) = centre(b.hide);
+            assert_eq!(f.hit(&sat, x, y), Pick::Hide);
+            assert!(b.grid.last().is_some_and(|g| g[1] + g[3] <= b.hide[1] + 0.01), "the toggle is under the preview");
             let one = card_m(b.card, (sk, u), 1);
-            assert!(b.card[3] - one.top >= one.chip + 8.0 * sk + 2.0 * u, "a row of ingredients fits the card ({gw}x{gw})");
+            assert!(b.card[3] - one.top >= one.chip + 8.0 * sk + 2.0 * u, "a row of ingredients fits the list ({gw}x{gw})");
             assert_eq!(one.max, 0.0, "one row never scrolls");
             assert_eq!(card_m(b.card, (sk, u), 5).max, 0.0, "five fit in one row");
             assert!(card_m(b.card, (sk, u), 11).max > 0.0, "three rows scroll");
             let (x, y) = centre(b.card);
             assert_eq!(f.hit(&sat, x, y), Pick::Card);
-            assert!(b.card[1] + b.card[3] < b.hide[1], "the card ends above the toggle");
+            assert!(f.cells.iter().all(|(id, _)| !matches!(id, SlotId::Inv(_))), "the bag gives way to the list");
         }
     }
 
     /// The close button is at least twice as wide as the letter needs, a thumb finds it across its whole width, and it stays clear of the
-    /// other buttons, the book's tab and the screen's edge on the screens the game runs on.
+    /// other buttons, the tabs and the screen's edge on the screens the game runs on.
     #[test]
     fn the_close_button_is_wide() {
         for (w, h) in [(1604.0, 720.0), (1280.0, 720.0), (800.0, 480.0)] {
-            let sat = open_book();
-            let f = Frame::new(&sat, &Inventory::default(), 2, w, h);
-            let close = f.btns.iter().find(|(b, _)| *b == Btn::Close).expect("close").1;
-            let tk = units(f.k).0;
-            assert!(close[2] > HudPipeline::text_width("X") as f32 * tk + 8.0 * tk, "wider than the old one at {w} x {h}");
-            assert!(close[2] >= 1.9 * close[3] || close[2] >= 0.119 * w, "about twice as wide as tall at {w} x {h}: {close:?}");
-            assert!(close[0] + close[2] <= w && close[0] >= 0.0, "on the screen");
-            let apart = |a: [f32; 4], b: [f32; 4]| a[0] >= b[0] + b[2] || b[0] >= a[0] + a[2] || a[1] >= b[1] + b[3] || b[1] >= a[1] + a[3];
-            assert!(f.btns.iter().filter(|(b, _)| *b != Btn::Close).all(|(_, r)| apart(*r, close)), "no other button touches it");
-            assert!(apart(f.book.as_ref().expect("book").tab, close), "the book's tab does not touch it");
-            for x in [close[0] + 1.0, close[0] + close[2] * 0.5, close[0] + close[2] - 1.0] {
-                assert_eq!(f.hit(&sat, x, close[1] + close[3] * 0.5), Pick::Btn(Btn::Close), "a tap at x {x}");
+            for craft in [false, true] {
+                let sat = tab(craft);
+                let f = Frame::new(&sat, &Inventory::default(), 2, w, h);
+                let close = f.btns.iter().find(|(b, _)| *b == Btn::Close).expect("close").1;
+                let tk = units(f.k).0;
+                assert!(close[2] > HudPipeline::text_width("X") as f32 * tk + 8.0 * tk, "wider than the letter at {w} x {h}");
+                assert!(close[2] >= 1.9 * close[3] || close[2] >= 0.119 * w, "about twice as wide as tall at {w} x {h}: {close:?}");
+                assert!(close[0] + close[2] <= w && close[0] >= 0.0, "on the screen");
+                let apart = |a: [f32; 4], b: [f32; 4]| a[0] >= b[0] + b[2] || b[0] >= a[0] + a[2] || a[1] >= b[1] + b[3] || b[1] >= a[1] + a[3];
+                assert!(f.btns.iter().filter(|(b, _)| *b != Btn::Close).all(|(_, r)| apart(*r, close)), "no other button touches it");
+                assert!(f.tabs.iter().all(|(_, r)| apart(*r, close)), "no tab touches it");
+                for x in [close[0] + 1.0, close[0] + close[2] * 0.5, close[0] + close[2] - 1.0] {
+                    assert_eq!(f.hit(&sat, x, close[1] + close[3] * 0.5), Pick::Btn(Btn::Close), "a tap at x {x}");
+                }
             }
         }
     }
 
-    /// The hints name only what the press does: take / place on a slot (X: half / one), the result crafts, a recipe is picked and then adds
-    /// a set, the cover opens the book, B closes unless a category is open (then it steps back); every list ends with B.
+    /// The hints name only what the press does: take / place on a slot (X: half / one), the result crafts, a recipe is picked and then
+    /// crafted, a tab opens; B always closes.
     #[test]
     fn the_pad_hints_follow_what_is_under_the_cursor() {
         let slot = Pick::Slot(SlotId::Inv(0));
-        let closed = Satchel::new(false);
-        assert_eq!(pad_hints(&closed, slot, false), [(Role::Select, "Take"), (Role::Alt, "Take half"), (Role::Back, "Close")]);
-        assert_eq!(pad_hints(&closed, slot, true), [(Role::Select, "Place"), (Role::Alt, "Place one"), (Role::Back, "Close")]);
-        assert_eq!(pad_hints(&closed, Pick::Slot(SlotId::Result), false), [(Role::Select, "Craft"), (Role::Back, "Close")]);
-        assert_eq!(pad_hints(&closed, Pick::Btn(Btn::Close), false)[0], (Role::Select, "Close"));
-        assert_eq!(pad_hints(&closed, Pick::Btn(Btn::Book), false)[0], (Role::Select, "Open book"));
-        let mut open = open_book();
-        assert_eq!(pad_hints(&open, Pick::Btn(Btn::Book), false)[0], (Role::Select, "Close book"));
-        assert_eq!(pad_hints(&open, Pick::Row(3), false)[0], (Role::Select, "Pick"));
-        open.sel = Some(3);
-        assert_eq!(pad_hints(&open, Pick::Row(3), false)[0], (Role::Select, "Add set"));
-        assert_eq!(pad_hints(&open, Pick::Row(4), false)[0], (Role::Select, "Pick"));
-        assert_eq!(pad_hints(&open, Pick::Panel, false), [(Role::Back, "Close")], "nothing to press on leather");
-        assert_eq!(pad_hints(&open, Pick::Outside, true), [(Role::Select, "Throw"), (Role::Back, "Close")]);
-        assert_eq!(pad_hints(&open, Pick::Outside, false), [(Role::Back, "Close")]);
-        open.turn(Some(0));
-        assert_eq!(pad_hints(&open, Pick::Back, false), [(Role::Select, "Back"), (Role::Back, "Back")]);
+        let mut sat = tab(true);
+        assert_eq!(pad_hints(&sat, slot, false), [(Role::Select, "Take"), (Role::Alt, "Take half"), (Role::Back, "Close")]);
+        assert_eq!(pad_hints(&sat, slot, true), [(Role::Select, "Place"), (Role::Alt, "Place one"), (Role::Back, "Close")]);
+        assert_eq!(pad_hints(&sat, Pick::Slot(SlotId::Result), false), [(Role::Select, "Craft"), (Role::Back, "Close")]);
+        assert_eq!(pad_hints(&sat, Pick::Btn(Btn::Close), false)[0], (Role::Select, "Close"));
+        assert_eq!(pad_hints(&sat, Pick::Btn(Btn::Craft), false)[0], (Role::Select, "Crafting"));
+        assert_eq!(pad_hints(&sat, Pick::Cat(1), false)[0], (Role::Select, "Open"));
+        assert_eq!(pad_hints(&sat, Pick::Row(3), false)[0], (Role::Select, "Pick"));
+        sat.sel = Some(3);
+        assert_eq!(pad_hints(&sat, Pick::Row(3), false)[0], (Role::Select, "Craft"));
+        assert_eq!(pad_hints(&sat, Pick::Row(4), false)[0], (Role::Select, "Pick"));
+        assert_eq!(pad_hints(&sat, Pick::Panel, false), [(Role::Back, "Close")], "nothing to press on a panel");
+        assert_eq!(pad_hints(&sat, Pick::Outside, true), [(Role::Select, "Throw"), (Role::Back, "Close")]);
+        assert_eq!(pad_hints(&sat, Pick::Outside, false), [(Role::Back, "Close")]);
     }
 
-    /// What the hints keep off covers every button, the bag, the book with its tab, and so the grid, the result and the recipe card on it.
+    /// What the hints keep off covers every button, every tab and the panel, and so the strip, the preview, the result and the lists on it.
     #[test]
-    fn the_hints_keep_off_the_grid_the_close_button_and_the_card() {
+    fn the_hints_keep_off_the_buttons_the_tabs_and_the_panel() {
         let contains = |a: [f32; 4], r: [f32; 4]| r[0] >= a[0] - 0.01 && r[1] >= a[1] - 0.01 && r[0] + r[2] <= a[0] + a[2] + 0.01 && r[1] + r[3] <= a[1] + a[3] + 0.01;
-        for gw in [2, 3] {
-            let mut sat = open_book();
-            sat.sel = Some(0);
-            let f = frame(&sat, &Inventory::default(), gw);
-            let (avoid, b) = (f.avoid(&sat), f.book.as_ref().expect("book"));
+        for craft in [false, true] {
+            let mut sat = tab(craft);
+            (sat.sel, sat.info) = (Some(0), craft);
+            let f = frame(&sat, &Inventory::default(), 2);
+            let avoid = f.avoid(&sat);
             let covered = |r: [f32; 4]| avoid.iter().any(|a| contains(*a, r));
             assert!(f.btns.iter().all(|(_, r)| covered(*r)), "every button, Close among them");
-            assert!(f.cells.iter().all(|(_, r)| covered(*r)), "every slot of the bag");
-            assert!(b.grid.iter().all(|(_, r)| covered(*r)), "the grid and the result ({gw}x{gw})");
-            assert!(covered(b.card) && covered(b.tab), "the card and the tab");
+            assert!(f.tabs.iter().all(|(_, r)| covered(*r)), "every tab");
+            assert!(f.cells.iter().all(|(_, r)| covered(*r)), "every slot");
+            if let Some(b) = &f.craft {
+                assert!(covered(b.strip) && covered(b.result) && covered(b.card) && b.grid.iter().all(|r| covered(*r)), "the strip, the preview, the result and the list");
+            }
         }
-        let closed = Satchel::new(false);
-        let f = frame(&closed, &Inventory::default(), 2);
-        assert!(f.avoid(&closed).iter().any(|a| contains(*a, f.book.as_ref().expect("book").rect)), "the cover");
     }
 }
