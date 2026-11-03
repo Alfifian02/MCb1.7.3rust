@@ -3,7 +3,7 @@
 //!
 //! Everything from Cortes Combat is exclusive to a world with the Immersive Pack ON (`menu::Info::pack`, set by
 //! `enter_world`). With it OFF, `swing` is `None` and the b1.7.3 combat plays exactly as before: the 20 weapons
-//! cannot be crafted (`craft::find`, the recipe book), and the old tools keep their b1.7.3 damage, the ray target,
+//! cannot be crafted (`craft::find`), and the old tools keep their b1.7.3 damage, the ray target,
 //! the 10-tick damage window and no cooldown.
 
 use super::catalog;
@@ -12,7 +12,7 @@ use crate::world::craft::{self, Kind};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 // ponytail: one flag for the whole process, because the game holds one world at a time. Two worlds at once would need it
-// threaded through `mobs::attack`, `craft::find` and the recipe book instead.
+// threaded through `mobs::attack` and `craft::find` instead.
 static ON: AtomicBool = AtomicBool::new(false);
 
 /// `enter_world`: the world's Immersive Pack rule.
@@ -103,7 +103,7 @@ pub fn charged(profile: Profile, held: u32) -> Option<f32> {
     (c.ticks > 0 && held >= MIN_CHARGE_HOLD).then(|| charge_multiplier(c.bonus, charge_ratio(held, c.ticks)))
 }
 
-/// Is `id` one of the 20 weapons, or the bandage: an item that exists only in an Immersive Pack world (`craft::find` and the recipe book hide
+/// Is `id` one of the 20 weapons, or the bandage: an item that exists only in an Immersive Pack world (`craft::find` hides
 /// its recipe otherwise)? (The name is from before the bandage; ponytail: not worth a rename across the three callers.)
 pub fn is_weapon(id: u16) -> bool {
     catalog::get(id).is_some() || id == catalog::BANDAGE

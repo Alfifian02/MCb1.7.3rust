@@ -239,9 +239,6 @@ pub struct TouchUi {
     inventory: bool,
     /// A menu screen (`menu::Menu`) is up: every press is a tap, the pause and inventory buttons included.
     pub menu: bool,
-    /// The pack's table is open (`world::pack`): its buttons are 3D ones at the edges of the view, so the four HUD buttons are hidden
-    /// and every press is a tap.
-    pub pack_open: bool,
     /// Finger events on an open screen since the last `take_screen_events`.
     events: Vec<ScreenEv>,
     /// Where the finger last was on the open screen: the picked-up stack floats here.
@@ -305,7 +302,6 @@ impl TouchUi {
             screen: false,
             inventory: false,
             menu: false,
-            pack_open: false,
             events: Vec::new(),
             cursor_pos: (w as f32 * 0.5, h as f32 * 0.5),
             pad: Pad::default(),
@@ -637,7 +633,7 @@ impl TouchUi {
 
     /// What a press at (x, y) starts: in a menu everything is a tap.
     fn role_at(&self, x: f32, y: f32) -> Option<PointerRole> {
-        if self.menu || (self.screen && self.pack_open) {
+        if self.menu {
             return Some(PointerRole::Tap);
         }
         let role = self.layout.hit_test(x, y, self.paused, self.screen);

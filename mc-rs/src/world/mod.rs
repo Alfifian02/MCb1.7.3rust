@@ -31,8 +31,6 @@ pub mod sprint;
 pub mod stats;
 pub mod stamina;
 pub mod biomelife;
-pub mod pack;
-pub mod book;
 pub mod map;
 pub mod mapcolors;
 pub mod combat;

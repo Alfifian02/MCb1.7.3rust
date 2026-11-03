@@ -277,7 +277,7 @@ fn push_held(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, hand: &Mat4, s: ItemStac
 
 /// `RenderBlocks.renderItemIn3d` for a block item: drawn as its (textured) shape, not as a flat sprite.
 fn is_block3d(id: u16) -> bool {
-    id < 256 && id != 0 && !crate::world::pack::flat_icon(id as u8)
+    id < 256 && id != 0 && !crate::world::items::flat_icon(id as u8)
 }
 
 /// The boxes (min, max in 0..1) `renderBlockOnInventory` draws for a block: the slab's half, the stairs' two steps, the fence's two
@@ -392,8 +392,6 @@ pub struct Hand {
     pub held: Option<ItemStack>,
     /// Where he stands (his light).
     pub at: Vec3,
-    /// The immersive pack carried in both hands, raised 0..1 (`lib.rs` `carry`); 0 = not carried. It replaces the arm and the item.
-    pub pack: f32,
 }
 
 /// A quad of the item mesh in both windings (the Java draws with culling off), corners `p` and atlas UVs, moved by `m`.
@@ -428,19 +426,6 @@ pub fn push_hand(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, h: &Hand) {
     let (s, up) = (h.swing, (1.0 - h.equip) * 0.6);
     let (a, b, c, d) = ((s * PI).sin(), (s.sqrt() * PI).sin(), (s.sqrt() * PI * 2.0).sin(), (s * s * PI).sin());
     let (t, rx, ry, rz) = (|x, y, z| Mat4::from_translation(Vec3::new(x, y, z)), |d: f32| Mat4::from_rotation_x(d.to_radians()), |d: f32| Mat4::from_rotation_y(d.to_radians()), |d: f32| Mat4::from_rotation_z(d.to_radians()));
-    if h.pack > 0.0 {
-        // Both hands round the pack's roll in front of the chest, coming up from below. ponytail: the arms are the bare hand's pose and
-        // its mirror, held still (no swing, no sway); the roll is one box of brown wool.
-        let low = (1.0 - crate::world::pack::ease(h.pack)) * 0.8;
-        for (s, limb) in [(1.0_f32, R_ARM), (-1.0, R_ARM + 1)] {
-            let m = h.to_world * t(s * 0.64, -0.6 - low, -0.72) * ry(s * 45.0) * t(-s, 3.6, 3.5) * rz(s * 120.0) * rx(200.0) * ry(s * -135.0) * t(s * 5.6, 0.0, 0.0) * Mat4::from_scale(Vec3::splat(1.0 / 16.0));
-            push_quads(verts, idxs, &quads(&m, &Pose::default())[limb * 6..limb * 6 + 6]);
-        }
-        let n0 = verts.len();
-        push_box(verts, idxs, [-0.5, -0.12, -0.14], [0.5, 0.12, 0.14], atlas::tile_of(35, 12), 1.0);
-        place(&mut verts[n0..], &(h.to_world * t(0.0, -0.5 - low, -0.85)));
-        return;
-    }
     let Some(st) = h.held else {
         // The arm (`drawFirstPersonHand`: `setRotationAngles(0, ..)` = the default pose, the right arm alone, 1/16 a pixel).
         let m = h.to_world * t(-b * 0.3, c * 0.4, -a * 0.4) * t(0.64, -0.6 - up, -0.72) * ry(45.0) * ry(b * 70.0) * rz(-d * 20.0) * t(-1.0, 3.6, 3.5) * rz(120.0) * rx(200.0) * ry(-135.0) * t(5.6, 0.0, 0.0) * Mat4::from_scale(Vec3::splat(1.0 / 16.0));
@@ -744,18 +729,12 @@ mod tests {
         // The bare arm and a held sword, in eye space: ahead (-z) and below the eye, to the right.
         for held in [None, Some(ItemStack { id: 267, count: 1, damage: 0 })] {
             let (mut v, mut i) = (vec![], vec![]);
-            push_hand(&mut v, &mut i, &Hand { to_world: Mat4::IDENTITY, equip: 1.0, swing: 0.0, held, at: Vec3::ZERO, pack: 0.0 });
+            push_hand(&mut v, &mut i, &Hand { to_world: Mat4::IDENTITY, equip: 1.0, swing: 0.0, held, at: Vec3::ZERO });
             assert!(!i.is_empty());
             for p in v.chunks_exact(VF) {
                 assert!(p[2] < -0.1 && p[2] > -1.6 && p[0] > -0.2 && p[0] < 1.0 && p[1] < 0.2, "{held:?}: {p:?}", held = held.is_some());
             }
         }
-        // The pack in both hands: ahead of the eye, one arm on each side of the middle.
-        let (mut v, mut i) = (vec![], vec![]);
-        push_hand(&mut v, &mut i, &Hand { to_world: Mat4::IDENTITY, equip: 1.0, swing: 0.0, held: None, at: Vec3::ZERO, pack: 1.0 });
-        assert!(!i.is_empty());
-        let xs: Vec<f32> = v.chunks_exact(VF).map(|p| p[0]).collect();
-        assert!(v.chunks_exact(VF).all(|p| p[2] < -0.1 && p[2] > -1.6) && xs.iter().any(|&x| x < -0.2) && xs.iter().any(|&x| x > 0.2), "the carry has an arm and a side each");
     }
 
     #[test]

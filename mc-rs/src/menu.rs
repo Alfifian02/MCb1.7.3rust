@@ -6,12 +6,14 @@
 //! own soft keyboard (`lib.rs` shows it while `Menu::typing`, and feeds the keys to `type_char` / `backspace` / `end_typing`). Not done: Multiplayer and Mods and Texture Packs
 //! (drawn greyed out like a disabled `GuiButton`; Options is `options.rs`), the splash's calendar days, the local time zone (dates are UTC).
 
+use crate::gen_ui::GenUi;
 use crate::input::touch_ui::ScreenEv;
 use crate::options::{OptEv, OptionsUi, Settings};
 use crate::ui;
 use crate::render::hud::{sprites as sp, HudPipeline, HudVertex, NO_UV};
 use crate::render::player;
 use crate::skin::{self, Look};
+use crate::world::gen::natural::NaturalSettings;
 use crate::world::gen::overworld::WorldType;
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -22,16 +24,19 @@ const MAX_NAME: usize = 32;
 /// The seed the `world-cafebabe` save (before M14) was made with.
 const LEGACY_SEED: i64 = 0xCAFEBABE;
 
-/// A world on disk: `<root>/saves/<folder>/info` (name, seed, type, pack: one per line) next to its `level`, chunk and decor files.
+/// A world on disk: `<root>/saves/<folder>/info` (name, seed, type, pack: one per line) next to its `level`, chunk and decor files, and
+/// its `natural` file (the World-Gen Settings, only when they are not the defaults).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Info {
     pub folder: String,
     pub name: String,
     pub seed: i64,
     pub ty: WorldType,
-    /// The immersive pack (`world::pack`): the inventory is a cloth to spread on flat ground. Off for worlds made before it (their
+    /// The Immersive Pack rule (`world::combat::rules`): Cortes Combat, the healing and the QoL. Off for worlds made before it (their
     /// `info` has no fourth line); the Create World screen's switch sets it.
     pub pack: bool,
+    /// The World-Gen Settings (`gen_ui`): the Natural Temperature climate, off by default; fixed when the world is made.
+    pub nat: NaturalSettings,
     /// Seconds since the epoch of the last save (`SaveFormatComparator.lastTimePlayed`).
     pub modified: u64,
     pub bytes: u64,
@@ -53,6 +58,12 @@ impl Info {
         if let Err(e) = std::fs::write(d.join("info"), text) {
             log::warn!("world info {}: {e}", self.folder);
         }
+        let nat = d.join("natural");
+        if self.nat == NaturalSettings::default() {
+            let _ = std::fs::remove_file(&nat);
+        } else if let Err(e) = std::fs::write(&nat, self.nat.to_text()) {
+            log::warn!("world natural {}: {e}", self.folder);
+        }
     }
 
     fn read(root: &Path, folder: &str) -> Option<Self> {
@@ -61,10 +72,11 @@ impl Info {
         let mut l = text.lines();
         let (name, seed, ty) = (l.next()?, l.next()?.trim().parse().ok()?, l.next()?);
         let pack = l.next().is_some_and(|p| p.trim() == "1");
+        let nat = std::fs::read_to_string(d.join("natural")).map(|t| NaturalSettings::from_text(&t)).unwrap_or_default();
         let secs = |p: PathBuf| std::fs::metadata(p).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0, |t| t.as_secs());
         let bytes = std::fs::read_dir(&d).map_or(0, |r| r.flatten().filter_map(|e| e.metadata().ok()).map(|m| m.len()).sum());
         let modified = secs(d.join("level")).max(secs(d.join("info")));
-        Some(Self { folder: folder.into(), name: name.into(), seed, ty: WorldType::parse(ty), pack, modified, bytes })
+        Some(Self { folder: folder.into(), name: name.into(), seed, ty: WorldType::parse(ty), pack, nat, modified, bytes })
     }
 }
 
@@ -76,7 +88,7 @@ pub fn list(root: &Path) -> Vec<Info> {
     if from.is_dir() && !saves(root).join(old).exists() {
         let _ = std::fs::create_dir_all(saves(root));
         if std::fs::rename(&from, saves(root).join(old)).is_ok() {
-            Info { folder: old.into(), name: "Old world".into(), seed: LEGACY_SEED, ty: WorldType::Vanilla, pack: false, modified: 0, bytes: 0 }.write(root);
+            Info { folder: old.into(), name: "Old world".into(), seed: LEGACY_SEED, ty: WorldType::Vanilla, pack: false, nat: Default::default(), modified: 0, bytes: 0 }.write(root);
         }
     }
     let mut v: Vec<Info> = std::fs::read_dir(saves(root)).map_or_else(|_| Vec::new(), |r| r.flatten().filter_map(|e| Info::read(root, e.file_name().to_str()?)).collect());
@@ -145,6 +157,8 @@ pub(crate) fn rgb(c: u32) -> [f32; 4] {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Scr {
+    /// The World-Gen Settings of the world being created (`gen_ui`), opened from Create World's top right.
+    GenSettings,
     Main,
     Select,
     Create,
@@ -179,6 +193,9 @@ pub struct Menu {
     ty: WorldType,
     /// The create screen's immersive pack switch (see `Info::pack`).
     pack: bool,
+    /// The World-Gen Settings being edited for the world being created, and the open screen (`Scr::GenSettings`).
+    nat: NaturalSettings,
+    gen: Option<GenUi>,
     /// The text field being typed in (0 name, 1 seed): the keyboard is up.
     typing: Option<u8>,
     // finger
@@ -239,6 +256,8 @@ impl Menu {
             folder: String::new(),
             ty: WorldType::Vanilla,
             pack: true,
+            nat: NaturalSettings::default(),
+            gen: None,
             typing: None,
             press: None,
             press_scroll: 0.0,
@@ -320,6 +339,8 @@ impl Menu {
                     b(3, hw - 100.0, y0 + pitch, 200.0, if self.pack { "Immersive Pack: ON" } else { "Immersive Pack: OFF" }, true),
                     b(0, hw - 100.0, y0 + 2.0 * pitch, 200.0, "Create New World", !self.name.is_empty()),
                     b(1, hw - 100.0, y0 + 3.0 * pitch, 200.0, "Cancel", true),
+                    // Top right; under the title's band instead when the screen is too narrow to keep clear of its text.
+                    b(4, gw - tw("World-Gen Settings") - 14.0, if gw - tw("World-Gen Settings") - 14.0 < hw + 56.0 { 24.0 } else { 2.0 }, tw("World-Gen Settings") + 12.0, "World-Gen Settings", true),
                 ]
             }
             Scr::Delete => {
@@ -330,7 +351,7 @@ impl Menu {
                 let y = (gh / 4.0).floor() + 96.0 + 12.0; // `GuiRenameWorld.initGui`
                 vec![b(0, hw - 100.0, y, 200.0, "Rename", !self.name.trim().is_empty()), b(1, hw - 100.0, y + 24.0, 200.0, "Cancel", true)]
             }
-            Scr::Options => Vec::new(),
+            Scr::Options | Scr::GenSettings => Vec::new(),
             Scr::Pick => vec![
                 b(1, hw - 154.0, gh - 28.0, 150.0, "Use Selected Skin", self.sel.is_some()),
                 b(0, hw + 4.0, gh - 28.0, 150.0, "Cancel", true),
@@ -431,6 +452,15 @@ impl Menu {
         if self.scr == Scr::Options {
             if self.opt.event(ev, w, h, st) == Some(OptEv::Close) {
                 self.scr = Scr::Main;
+            }
+            return;
+        }
+        if self.scr == Scr::GenSettings {
+            if self.gen.as_mut().is_some_and(|g| g.event(ev, w, h, st.gui_scale)) {
+                if let Some(g) = self.gen.take() {
+                    self.nat = g.s;
+                }
+                self.scr = Scr::Create;
             }
             return;
         }
@@ -579,16 +609,18 @@ impl Menu {
             (Scr::Select, 3) => {
                 (self.name, self.seed, self.ty, self.typing, self.scr) = (String::from("New World"), String::new(), WorldType::Vanilla, None, Scr::Create);
                 self.pack = true;
+                (self.nat, self.gen) = (NaturalSettings::default(), None);
                 self.folder = folder_for(&self.root, &self.name);
             }
             (Scr::Create, 0) => {
-                let info = Info { folder: folder_for(&self.root, &self.name), name: self.name.clone(), seed: parse_seed(&self.seed, now_nanos() as i64), ty: self.ty, pack: self.pack, modified: 0, bytes: 0 };
+                let info = Info { folder: folder_for(&self.root, &self.name), name: self.name.clone(), seed: parse_seed(&self.seed, now_nanos() as i64), ty: self.ty, pack: self.pack, nat: self.nat.clone(), modified: 0, bytes: 0 };
                 info.write(&self.root);
                 self.loading = Some(info);
             }
             (Scr::Create, 1) => self.scr = Scr::Select,
             (Scr::Create, 2) => self.ty = self.ty.next(),
             (Scr::Create, 3) => self.pack = !self.pack,
+            (Scr::Create, 4) => (self.gen, self.scr) = (Some(GenUi::new(self.nat.clone(), true)), Scr::GenSettings),
             (Scr::Delete, 0) => {
                 if let Some(w) = self.sel.and_then(|i| self.worlds.get(i)) {
                     if let Err(e) = std::fs::remove_dir_all(w.dir(&self.root)) {
@@ -627,6 +659,9 @@ impl Menu {
         if self.scr == Scr::Options {
             return self.opt.avoid(w, h, st);
         }
+        if self.scr == Scr::GenSettings {
+            return self.gen.as_ref().map_or_else(Vec::new, |g| g.avoid(w, h, st.gui_scale));
+        }
         let (s, gw, gh) = scaled_gs(w, h, st.gui_scale);
         let hw = (gw / 2.0).floor();
         let mut r: Vec<[f32; 4]> = self.buttons(gw, gh).into_iter().map(|b| b.1).collect();
@@ -661,7 +696,7 @@ impl Menu {
                 r.push([0.0, 24.0, hw, gh - 24.0]); // the player and "Drag to turn"
                 r.push([hw + 2.0, 30.0, hw - 4.0, (gh - 28.0).max(210.0) - 4.0]);
             }
-            Scr::Options => {}
+            Scr::Options | Scr::GenSettings => {}
         }
         r.into_iter().map(|r| r.map(|u| u * s)).collect()
     }
@@ -689,6 +724,12 @@ impl Menu {
         }
         if self.scr == Scr::Options {
             self.opt.draw(v, w, h, st, false);
+            return;
+        }
+        if self.scr == Scr::GenSettings {
+            if let Some(g) = &self.gen {
+                g.draw(v, w, h, st.gui_scale, false);
+            }
             return;
         }
         if let Some(t) = self.typing {
@@ -734,7 +775,7 @@ impl Menu {
                     text_box(v, s, *r, t, false);
                 }
             }
-            Scr::Options => {}
+            Scr::Options | Scr::GenSettings => {}
             Scr::Skin => {
                 ui::title(v, s, gw, 0.0, "Customize Skin", true);
                 // The player, big, on the left half, turning slowly (a drag turns him by hand).
@@ -1055,13 +1096,43 @@ mod tests {
         m.draw(&mut v, sz.0, sz.1, &Settings::default());
     }
 
+    /// Create -> World-Gen Settings (the button at the top right) -> the switch on -> Done -> Create: the settings are part of the world on
+    /// disk (`natural`) and come back with it; a world left at the defaults writes no such file.
+    #[test]
+    fn world_gen_settings_are_saved_with_the_world() {
+        let root = tmp("gen");
+        let sz = (2400.0, 1080.0);
+        let mut m = Menu::new(&root);
+        tap(&mut m, "Singleplayer", sz);
+        tap(&mut m, "Create New World", sz);
+        tap(&mut m, "World-Gen Settings", sz);
+        assert_eq!(m.scr, Scr::GenSettings);
+        m.gen.as_mut().expect("the screen is open").s.enabled = true;
+        let mut v = Vec::new();
+        m.draw(&mut v, sz.0, sz.1, &Settings::default());
+        assert!(!v.is_empty() && v.iter().all(|p| p.pos[0].is_finite() && p.pos[1].is_finite()));
+        let (s, gw, gh) = scaled(sz.0, sz.1);
+        let (x, y) = ((gw / 2.0).floor() * s, (gh - 18.0) * s); // the middle of Done
+        m.event(ScreenEv::Down(x, y), sz.0, sz.1, &mut Settings::default());
+        m.event(ScreenEv::Up(x, y), sz.0, sz.1, &mut Settings::default());
+        assert!(m.scr == Scr::Create && m.nat.enabled, "Done keeps the edits and goes back to Create World");
+        tap(&mut m, "Create New World", sz);
+        let info = m.loading.clone().expect("create starts loading");
+        assert!(info.nat.enabled && info.dir(&root).join("natural").is_file());
+        let mut again = Menu::new(&root);
+        tap(&mut again, "Singleplayer", sz);
+        assert_eq!(again.worlds[0].nat, info.nat, "read back from the `natural` file");
+        Info { nat: Default::default(), ..info.clone() }.write(&root);
+        assert!(!info.dir(&root).join("natural").exists(), "the defaults write no file");
+    }
+
     /// Select -> Rename: the field starts with the name, a blank one disables the button, the new name is saved, the folder, the other
     /// settings, the order of the list and the choice stay.
     #[test]
     fn rename_changes_the_name_only() {
         let root = tmp("rename");
         let sz = (2400.0, 1080.0);
-        let info = |f: &str, n: &str| Info { folder: f.into(), name: n.into(), seed: 5, ty: WorldType::Tectonic, pack: true, modified: 0, bytes: 0 };
+        let info = |f: &str, n: &str| Info { folder: f.into(), name: n.into(), seed: 5, ty: WorldType::Tectonic, pack: true, nat: Default::default(), modified: 0, bytes: 0 };
         info("a", "Alpha").write(&root);
         info("b", "Beta").write(&root);
         for (f, s) in [("a", 1000), ("b", 2000)] {

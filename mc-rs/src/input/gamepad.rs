@@ -408,7 +408,7 @@ pub struct Out {
     pub click: Option<bool>,
     /// With `Pad::snap`: one step of the d-pad as (x, y), y down; the first on the press, then repeating while held.
     pub nav: Option<(i32, i32)>,
-    /// In a GUI: LB / RB turn the book's page (-1 / +1), and the right stick scrolls (px, down is positive) like a finger dragging a list.
+    /// In a GUI: LB / RB turn a page (-1 / +1; the options tabs), and the right stick scrolls (px, down is positive) like a finger dragging a list.
     pub page: i32,
     pub scroll: f32,
     /// In a GUI: X was pressed (`Some(false)`: the slot under the cursor is clicked for one, the "One" button's click without the toggle)
@@ -448,7 +448,7 @@ pub struct Pad {
     pub captured: Option<Btn>,
     wheel_open: bool,
     wheel: Option<usize>,
-    /// The open screen jumps between its targets (`Out::nav`) instead of the d-pad nudging the free cursor, which the stick still pushes (set by `lib.rs`: the satchel).
+    /// The open screen jumps between its targets (`Out::nav`) instead of the d-pad nudging the free cursor, which the stick still pushes (set by `lib.rs`: any container screen).
     pub snap: bool,
     nav_dir: (i32, i32),
     nav_t: f32,
@@ -1219,21 +1219,15 @@ mod tests {
         assert!((back.look_h - 0.5).abs() < 1e-4);
     }
 
-    /// In the satchel the hints take the rows of what is under the cursor and keep clear of its buttons, tabs and panel; X is named only while
-    /// no bind has it; the cursor stays under 60% of a slot.
+    /// In a container screen the hints keep clear of the centred panel; X is named only while no bind has it; the cursor stays under 60% of a slot.
     #[test]
-    fn satchel_hints_keep_off_the_satchel_and_the_cursor_stays_small() {
-        use crate::satchel::{pad_hints, Frame, Pick, Satchel};
+    fn hints_keep_off_the_panel_and_the_cursor_stays_small() {
         let (p, mut c) = pad();
-        let mut sat = Satchel::new(false);
-        sat.tick(10.0);
         let (w, h) = (1604.0, 720.0);
-        let f = Frame::new(&sat, &crate::world::items::Inventory::default(), 2, w, h);
-        let avoid = f.avoid(&sat);
+        let avoid = vec![[w * 0.3, h * 0.2, w * 0.4, h * 0.6]];
         let view = HintView { w, h, s: 3.0, ui: true, avoid: &avoid };
-        let slot = Pick::Slot(crate::world::craft::SlotId::Inv(0));
-        let rows = pad_hints(&sat, slot, false);
-        let b = hint_box_with(&p, &c, &view, &rows).expect("there is room beside the bag");
+        let rows = [(Role::Select, "Take"), (Role::Back, "Close")];
+        let b = hint_box_with(&p, &c, &view, &rows).expect("there is room beside the panel");
         assert!(avoid.iter().all(|a| apart(b, *a, 12.0)), "{avoid:?} vs {b:?}");
         let quads = |c: &PadCfg, rows: &[(Role, &str)]| {
             let mut v = Vec::new();
@@ -1250,7 +1244,7 @@ mod tests {
             p.draw(&mut v, w, h, 0, Some((500.0, 300.0)), cap);
             v.iter().fold([f32::MAX, f32::MAX, f32::MIN, f32::MIN], |b, q| [b[0].min(q.pos[0]), b[1].min(q.pos[1]), b[2].max(q.pos[0]), b[3].max(q.pos[1])])
         };
-        let slot_px = f.cells[0].1[2];
+        let slot_px = 40.0;
         let small = cross(0.6 * slot_px);
         assert!(small[2] - small[0] <= 0.6 * slot_px + 0.01 && small[3] - small[1] <= 0.6 * slot_px + 0.01, "{small:?} in a slot of {slot_px}");
         let free = cross(f32::INFINITY);

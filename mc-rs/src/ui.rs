@@ -1,5 +1,5 @@
 //! The pieces every menu shares, in b1.7.3's skin (stone buttons, dirt, the yellow of the splash, `GuiSlot`'s scroll bar): a clip for
-//! scrolling lists, word wrap, a scroll bar, a bevelled panel and the screen title. NOT b1.7.3 (it has no scrolling options screen);
+//! scrolling lists, word wrap, a scroll bar, a bevelled panel and the screen title, and the pad's step between targets (`step`). NOT b1.7.3 (it has no scrolling options screen);
 //! the layout of the options list is Sodium's (`VideoSettingsScreen`: a page list, one long option list, a tooltip pane).
 //!
 //! Units: everything takes GUI units except `clip`, which works on the vertices already in px.
@@ -122,6 +122,29 @@ pub fn title(v: &mut Vec<HudVertex>, s: f32, gw: f32, y: f32, text: &str, band: 
     rect(v, s, [x + w + 17.0, y + 11.0, (gw - 8.0 - (x + w + 17.0)).max(0.0), 1.0], 0x606060);
 }
 
+/// The target the cursor `at` rests on.
+pub fn under(targets: &[[f32; 4]], at: (f32, f32)) -> Option<[f32; 4]> {
+    targets.iter().copied().find(|r| at.0 >= r[0] && at.0 < r[0] + r[2] && at.1 >= r[1] && at.1 < r[1] + r[3])
+}
+
+/// The pad's step: the rect to jump to from the one under `at` when the d-pad says `d` (x, y; y down). Off every rect, the nearest one.
+/// Among the rects that lie that way, within 63 degrees of it, the one with the least `along + 2 * across` (centre to centre) wins:
+/// touching slots step one by one. `None` when nothing lies that way.
+pub fn step(targets: &[[f32; 4]], at: (f32, f32), d: (i32, i32)) -> Option<[f32; 4]> {
+    let mid = |r: &[f32; 4]| (r[0] + r[2] * 0.5, r[1] + r[3] * 0.5);
+    let Some(cur) = under(targets, at) else {
+        let far = |r: &[f32; 4]| (mid(r).0 - at.0).hypot(mid(r).1 - at.1);
+        return targets.iter().copied().min_by(|a, b| far(a).total_cmp(&far(b)));
+    };
+    let from = mid(&cur);
+    let score = |r: &[f32; 4]| {
+        let (dx, dy) = (mid(r).0 - from.0, mid(r).1 - from.1);
+        let (along, across) = if d.0 != 0 { (dx * d.0 as f32, dy.abs()) } else { (dy * d.1 as f32, dx.abs()) };
+        (along > 1.0 && across <= 2.0 * along).then_some(along + 2.0 * across)
+    };
+    targets.iter().copied().filter(|r| *r != cur).filter_map(|r| score(&r).map(|sc| (sc, r))).min_by(|a, b| a.0.total_cmp(&b.0)).map(|(_, r)| r)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,5 +205,17 @@ mod tests {
             let (bot, h2) = thumb(view, content, max, max);
             assert!(top == 0.0 && h >= 32.0 && h == h2 && bot + h <= view + 1e-3, "{view} {content}: {bot} {h}");
         }
+    }
+
+    /// The pad steps to the neighbour that lies that way, stops at the end of a row, and from off every rect goes to the nearest.
+    #[test]
+    fn a_pad_steps_between_targets() {
+        let (a, b, c) = ([0.0, 0.0, 18.0, 18.0], [18.0, 0.0, 18.0, 18.0], [0.0, 18.0, 18.0, 18.0]);
+        let t = [a, b, c];
+        assert_eq!(step(&t, (9.0, 9.0), (1, 0)), Some(b));
+        assert_eq!(step(&t, (27.0, 9.0), (-1, 0)), Some(a));
+        assert_eq!(step(&t, (9.0, 9.0), (0, 1)), Some(c));
+        assert_eq!(step(&t, (27.0, 9.0), (1, 0)), None, "nothing lies right of the row");
+        assert_eq!(step(&t, (40.0, 9.0), (0, 0)), Some(b), "off every rect: the nearest");
     }
 }

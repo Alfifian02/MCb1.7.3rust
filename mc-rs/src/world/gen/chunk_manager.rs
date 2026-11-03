@@ -19,6 +19,7 @@
 //! same arithmetic in Python (it gave the distribution quoted in the ROADMAP).
 
 use crate::world::biome::Biome;
+use crate::world::gen::natural::{self, Climate};
 use crate::world::gen::noise::{JavaRandom, PerlinNoise};
 #[cfg(test)]
 use crate::world::gen::noise::SimplexOctaves;
@@ -29,7 +30,7 @@ const SCALE: f64 = 1.0;
 
 /// Minecraft's `NormalNoise` on this crate's Perlin octaves: two stacks, the second read at 1.0181268882175227 x the coordinates,
 /// octave `i` at frequency `2^(first + i)` and weight `amp * 2^(n-1) / (2^n - 1) / 2^i`, scaled so the result spans about -1..1.
-struct Normal {
+pub(super) struct Normal {
     a: Vec<PerlinNoise>,
     b: Vec<PerlinNoise>,
     /// (octave, weight, frequency) of the octaves whose amplitude is not 0.
@@ -39,9 +40,13 @@ struct Normal {
 
 impl Normal {
     fn new(seed: i64, first: i32, amps: &[f64]) -> Self {
-        let mut r = JavaRandom::new(seed);
-        let a: Vec<PerlinNoise> = amps.iter().map(|_| PerlinNoise::new(&mut r)).collect();
-        let b: Vec<PerlinNoise> = amps.iter().map(|_| PerlinNoise::new(&mut r)).collect();
+        Self::from_rng(&mut JavaRandom::new(seed), first, amps)
+    }
+
+    /// `new` on a random source of the caller's (the Natural Temperature port's two noises share one, as the mod's do).
+    pub(super) fn from_rng(r: &mut JavaRandom, first: i32, amps: &[f64]) -> Self {
+        let a: Vec<PerlinNoise> = amps.iter().map(|_| PerlinNoise::new(r)).collect();
+        let b: Vec<PerlinNoise> = amps.iter().map(|_| PerlinNoise::new(r)).collect();
         let n = amps.len() as i32;
         let pers = 2f64.powi(n - 1) / (2f64.powi(n) - 1.0);
         let oct = amps
@@ -56,7 +61,7 @@ impl Normal {
         Self { a, b, oct, factor }
     }
 
-    fn get(&self, x: f64, z: f64) -> f64 {
+    pub(super) fn get(&self, x: f64, z: f64) -> f64 {
         const K: f64 = 1.0181268882175227;
         let mut t = 0.0;
         for &(i, w, f) in &self.oct {
@@ -126,6 +131,8 @@ pub struct WorldChunkManager {
     cont: Normal,
     erosion: Normal,
     ridge: Normal,
+    /// The Natural Temperature climate of the world (`natural::current` when this was built), laid over `temp` and `humid`.
+    natural: Option<Climate>,
     /// Climate of the last `load_block_generator_data` call, x-major
     /// (`x * 16 + z` for a 16x16 chunk). Terrain generation reads these.
     pub temperature: Vec<f64>,
@@ -147,6 +154,7 @@ impl WorldChunkManager {
             cont: mk(3, -9, &[1.0, 1.0, 2.0, 2.0, 2.0, 1.0, 1.0, 1.0, 1.0]),
             erosion: mk(4, -9, &[1.0, 1.0, 0.0, 1.0, 1.0]),
             ridge: mk(5, -7, &[1.0, 2.0, 1.0, 0.0, 0.0, 0.0]),
+            natural: natural::current().map(|g| Climate::new(g, seed)),
             temperature: Vec::new(),
             humidity: Vec::new(),
             #[cfg(test)]
@@ -174,6 +182,7 @@ impl WorldChunkManager {
         let (u, v) = (qx as f64 * SCALE, qz as f64 * SCALE);
         let (u, v) = (u + self.shift.get(u, v) * 4.0, v + self.shift.get(v, u) * 4.0);
         let (t, h) = (self.temp.get(u, v), self.humid.get(u, v));
+        let (t, h) = self.natural.as_ref().map_or((t, h), |n| n.sample(qx * 4, qz * 4, t, h)); // block coordinates, as the mod samples
         let (c, e, w) = if self.shaped {
             // ponytail: the spawn search only looks 32 blocks around the origin, so continentalness is lifted around it (land out to
             // about 300 blocks) instead of searching for land as the game does. Upgrade: search the climate for a land point.

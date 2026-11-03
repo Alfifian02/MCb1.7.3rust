@@ -49,16 +49,14 @@ pub const DPAD_SHEET: &[u8] = include_bytes!("../../assets/dpad.rgba");
 /// The title screen's sheet (256 x 272, `tools/gen_menu.py`): `mclogo.png`, then `background.png`: the last rows of the HUD texture.
 pub const MENU_SHEET: &[u8] = include_bytes!("../../assets/menu.rgba");
 /// The skins (`mob/char.png` and the armor, 64 x 32 each, four to a row, `atlas::skin_px`): 224 rows of the HUD texture, cut from the atlas's `ART` tail (`PLAYER_Y`).
-pub(crate) const SHEET_H: f32 = 3468.0;
+pub(crate) const SHEET_H: f32 = 3212.0;
 pub(crate) const PLAYER_Y: f32 = 2576.0;
 /// Where the font atlas starts in the HUD texture (the 64 rows after the player skin, see `font_sheet`).
 const FONT_Y: f32 = 2800.0;
 /// Where Cortes Combat's HUD sprites start (256 x 64, `tools/gen_combat_hud.py`): the 64 rows after the font atlas.
 const COMBAT_Y: f32 = 2864.0;
-/// Where the satchel's pixel art starts (256 x 256, `tools/gen_satchel_ui.py`): the last rows of the HUD texture, after the combat sprites.
-const SATCHEL_Y: f32 = 2928.0;
-/// Where the controller button pictures start (256 x 156, `tools/gen_pad_buttons.py`): the rows after the satchel, before the map block.
-const PAD_Y: f32 = 3184.0;
+/// Where the controller button pictures start (256 x 156, `tools/gen_pad_buttons.py`): the rows after the combat sprites, before the map block.
+const PAD_Y: f32 = 2928.0;
 const PAD_H: f32 = 156.0;
 /// Where the map block starts (256 x 128, `tools/gen_mapui.py`): the last rows of the HUD texture, after the pad buttons. The held map's 128 x 128
 /// pixels are rewritten here at run time (`HudPipeline::upload_map`); `mapbg.png` and `mapicons.png` sit beside them.
@@ -68,8 +66,6 @@ pub const MAP_SHEET: &[u8] = include_bytes!("../../assets/mapui.rgba");
 pub const PAD_SHEET: &[u8] = include_bytes!("../../assets/padbtn.rgba");
 /// Cortes Combat's HUD sprites (crosshair x3, guard orbs x2, charge bar x2, cooldown brackets; `tools/gen_combat_hud.py`).
 pub const COMBAT_SHEET: &[u8] = include_bytes!("../../assets/combat_hud.rgba");
-/// The satchel and recipe book's sprites (`satchel.rs`).
-pub const SATCHEL_SHEET: &[u8] = include_bytes!("../../assets/satchel.rgba");
 /// The font atlas: 95 glyph cells of 8 x 8 texels on a 10 texel pitch (a transparent texel on every side, so the sharp bilinear in
 /// `fs_main` never reads the neighbouring glyph), 16 columns by 6 rows, in a 256 x 64 block. The last rows of the HUD texture.
 const FONT_PITCH: usize = 10;
@@ -110,8 +106,6 @@ pub mod sprites {
     pub const SNEAK_ON: Sprite = (64.0, 2112.0, 64.0, 64.0);
     pub const JUMP: Sprite = (128.0, 2112.0, 64.0, 64.0);
     pub const JUMP_ON: Sprite = (192.0, 2112.0, 64.0, 64.0);
-    /// The satchel's pixel art (`tools/gen_satchel_ui.py`, same places): leather, slots, parchment, the red binding. The 16 / 32 px ones are 9-slices
-    /// (`push_nine`), `PARCH`, `STRAP`, `BINDING` and `RULE` tile (`push_tiled`), the rest are drawn once.
     /// The map block: the live map pixels, the paper (`mapbg.png`, drawn 142 / 128 of the map) and the marker cells (`mapicons.png`, 8 x 8 each).
     pub mod map {
         use super::Sprite;
@@ -148,41 +142,6 @@ pub mod sprites {
         pub fn glyph(style: usize, i: usize) -> Sprite {
             ((i % 8) as f32 * 26.0, super::super::PAD_Y + (style * 52 + i / 8 * 26) as f32, 26.0, 26.0)
         }
-    }
-    pub mod sat {
-        use super::Sprite;
-        const Y: f32 = super::super::SATCHEL_Y;
-        const fn at(x: f32, y: f32, w: f32, h: f32) -> Sprite {
-            (x, Y + y, w, h)
-        }
-        pub const BAG: Sprite = at(0.0, 0.0, 32.0, 32.0);
-        pub const COVER: Sprite = at(32.0, 0.0, 32.0, 32.0);
-        pub const PARCH: Sprite = at(64.0, 0.0, 32.0, 32.0);
-        pub const PAGE_EDGE: Sprite = at(96.0, 0.0, 16.0, 16.0);
-        pub const BINDING: Sprite = at(112.0, 0.0, 8.0, 16.0);
-        pub const CURL: Sprite = at(120.0, 0.0, 12.0, 12.0);
-        pub const ARROW: Sprite = at(132.0, 0.0, 16.0, 12.0);
-        pub const POCKET: Sprite = at(0.0, 32.0, 16.0, 16.0);
-        pub const BELT: Sprite = at(16.0, 32.0, 16.0, 16.0);
-        pub const BUCKLE: Sprite = at(32.0, 32.0, 12.0, 16.0);
-        pub const CLASP: Sprite = at(44.0, 32.0, 12.0, 20.0);
-        pub const STRAP: Sprite = at(56.0, 32.0, 8.0, 16.0);
-        pub const SLOT: Sprite = at(64.0, 32.0, 18.0, 18.0);
-        pub const RIM: Sprite = at(82.0, 32.0, 18.0, 18.0);
-        pub const BTN: Sprite = at(100.0, 32.0, 16.0, 16.0);
-        pub const BTN_ON: Sprite = at(116.0, 32.0, 16.0, 16.0);
-        pub const TAB: Sprite = at(132.0, 32.0, 16.0, 16.0);
-        pub const ENTRY: Sprite = at(148.0, 32.0, 16.0, 16.0);
-        pub const ENTRY_SEL: Sprite = at(164.0, 32.0, 16.0, 16.0);
-        pub const CARD: Sprite = at(180.0, 32.0, 16.0, 16.0);
-        pub const GEM: Sprite = at(196.0, 32.0, 8.0, 8.0);
-        pub const RULE: Sprite = at(204.0, 32.0, 16.0, 4.0);
-        /// The pin button of the recipe card, off and on (10 x 10, drawn once).
-        pub const PIN: Sprite = at(220.0, 32.0, 10.0, 10.0);
-        pub const PIN_ON: Sprite = at(230.0, 32.0, 10.0, 10.0);
-        /// What an empty armor slot shows (helmet, chestplate, leggings, boots): the outline figure cut in four, each exactly its size (white on clear,
-        /// tinted by the draw, which fits it to the cell keeping its proportions).
-        pub const ARMOR: [Sprite; 4] = [at(0.0, 56.0, 10.0, 11.0), at(12.0, 56.0, 14.0, 13.0), at(28.0, 56.0, 10.0, 17.0), at(40.0, 56.0, 16.0, 11.0)];
     }
     const fn dpad_row(y: f32) -> [Sprite; 8] {
         // literals, not `i * 22.0`: float arithmetic in a `const fn` needs Rust 1.82
@@ -254,9 +213,9 @@ fn shader_source(srgb: bool) -> String {
     format!("const SRGB: bool = {srgb};\nconst SHEET: vec2<f32> = vec2<f32>(256.0, {SHEET_H:.1});\n{SHADER_SRC}") // `SHEET` = the whole HUD texture
 }
 
-/// The whole HUD texture (256 x `SHEET_H`, RGBA8): items, the GUI sheet, terrain.png, the panels, the d-pad, the title screen, the player skin, the font, Cortes Combat's HUD, the satchel, the map.
+/// The whole HUD texture (256 x `SHEET_H`, RGBA8): items, the GUI sheet, terrain.png, the panels, the d-pad, the title screen, the player skin, the font, Cortes Combat's HUD, the controller buttons, the map.
 pub fn sheet_bytes() -> Vec<u8> {
-    [crate::render::atlas::ITEMS, GUI, crate::render::atlas::TERRAIN, CONTAINERS, DPAD_SHEET, MENU_SHEET, &crate::render::atlas::ART[256 * 288 * 4..], &font_sheet(), COMBAT_SHEET, SATCHEL_SHEET, PAD_SHEET, MAP_SHEET].concat()
+    [crate::render::atlas::ITEMS, GUI, crate::render::atlas::TERRAIN, CONTAINERS, DPAD_SHEET, MENU_SHEET, &crate::render::atlas::ART[256 * 288 * 4..], &font_sheet(), COMBAT_SHEET, PAD_SHEET, MAP_SHEET].concat()
 }
 
 /// Owns the HUD pipeline + dynamic vertex buffer. One instance per surface.
@@ -511,49 +470,6 @@ impl HudPipeline {
         }
     }
 
-    /// `spr` repeated over the box (x, y, w, h), one sprite pixel = `u` px; the last tile of a row / column is cut short, not squeezed.
-    /// ponytail: a big box is a few hundred quads (a page is ~200); a texture with a wrapping sampler would be one, but the sheet is shared.
-    pub fn push_tiled(out: &mut Vec<HudVertex>, (x, y, w, h): (f32, f32, f32, f32), (sx, sy, sw, sh): sprites::Sprite, u: f32, c: [f32; 4]) {
-        let (tw, th) = (sw * u, sh * u);
-        if w <= 0.0 || h <= 0.0 || tw <= 0.0 || th <= 0.0 {
-            return;
-        }
-        let mut py = y;
-        while py < y + h - 0.01 {
-            let dh = th.min(y + h - py);
-            let mut px = x;
-            while px < x + w - 0.01 {
-                let dw = tw.min(x + w - px);
-                Self::push_gui_tinted(out, px, py, dw, dh, (sx, sy, dw / u, dh / u), c);
-                px += tw;
-            }
-            py += th;
-        }
-    }
-
-    /// `spr` as a 9-slice over the box: its corners `b` sprite pixels square (scaled by `u`, shrunk when the box is small), the edges and the
-    /// middle tiled. `middle` false leaves the middle empty (a frame over something else).
-    pub fn push_nine(out: &mut Vec<HudVertex>, (x, y, w, h): (f32, f32, f32, f32), (sx, sy, sw, sh): sprites::Sprite, b: f32, u: f32, c: [f32; 4], middle: bool) {
-        let (cw, ch) = ((b * u).min(w * 0.5), (b * u).min(h * 0.5));
-        let (mw, mh) = (w - 2.0 * cw, h - 2.0 * ch);
-        let (iw, ih) = (sw - 2.0 * b, sh - 2.0 * b);
-        Self::push_gui_tinted(out, x, y, cw, ch, (sx, sy, b, b), c);
-        Self::push_gui_tinted(out, x + w - cw, y, cw, ch, (sx + sw - b, sy, b, b), c);
-        Self::push_gui_tinted(out, x, y + h - ch, cw, ch, (sx, sy + sh - b, b, b), c);
-        Self::push_gui_tinted(out, x + w - cw, y + h - ch, cw, ch, (sx + sw - b, sy + sh - b, b, b), c);
-        if mw > 0.0 {
-            Self::push_tiled(out, (x + cw, y, mw, ch), (sx + b, sy, iw, b), u, c);
-            Self::push_tiled(out, (x + cw, y + h - ch, mw, ch), (sx + b, sy + sh - b, iw, b), u, c);
-        }
-        if mh > 0.0 {
-            Self::push_tiled(out, (x, y + ch, cw, mh), (sx, sy + b, b, ih), u, c);
-            Self::push_tiled(out, (x + w - cw, y + ch, cw, mh), (sx + sw - b, sy + b, b, ih), u, c);
-        }
-        if middle && mw > 0.0 && mh > 0.0 {
-            Self::push_tiled(out, (x + cw, y + ch, mw, mh), (sx + b, sy + b, iw, ih), u, c);
-        }
-    }
-
     /// `push_gui` multiplied by `c` (the dirt background is `background.png` at 25% grey).
     pub fn push_gui_tinted(out: &mut Vec<HudVertex>, x: f32, y: f32, w: f32, h: f32, (sx, sy, sw, sh): sprites::Sprite, c: [f32; 4]) {
         // A hair inside the sprite, so nearest sampling never picks up its neighbour.
@@ -662,12 +578,6 @@ impl HudPipeline {
             Self::push_glyphs(out, x + dx, y + dy, k, s, [0.0, 0.0, 0.0, color[3]]);
         }
         Self::push_glyphs(out, x, y, k, s, color);
-    }
-
-    /// `s` with its top-left at `(x, y)` snapped to whole pixels and NO shadow: the satchel's ink on paper and its labels on panels
-    /// (`push_text`'s shadow reads as a second copy of the text on parchment). `k` is a whole number of pixels there.
-    pub fn push_text_flat(out: &mut Vec<HudVertex>, x: f32, y: f32, k: f32, s: &str, color: [f32; 4]) {
-        Self::push_glyphs(out, x.round(), y.round(), k, s, color);
     }
 
     /// One textured quad per glyph (`font_sheet`), 8 x 8 font pixels of `k` px; a blank glyph (the space) draws nothing.
@@ -1017,9 +927,8 @@ mod text_tests {
     #[test]
     fn font_sheet_is_the_glyph_bitmaps_with_a_gutter() {
         assert_eq!(FONT_Y + 64.0, COMBAT_Y);
-        assert_eq!(COMBAT_Y + 64.0, SATCHEL_Y);
+        assert_eq!(COMBAT_Y + 64.0, PAD_Y);
         assert_eq!(COMBAT_SHEET.len(), 256 * 64 * 4);
-        assert_eq!(SATCHEL_Y + 256.0, PAD_Y);
         assert_eq!(PAD_Y + PAD_H, MAP_Y);
         assert_eq!(MAP_Y + 128.0, SHEET_H);
         assert_eq!(PAD_SHEET.len(), 256 * PAD_H as usize * 4);
@@ -1046,35 +955,5 @@ mod text_tests {
             }
         }
         assert_eq!(px.chunks(4).filter(|p| p[3] != 0).count(), lit);
-    }
-
-    /// The satchel sheet is the last 256 rows, every sprite of `sprites::sat` lies inside it and has pixels, and a 9-slice / tiled box
-    /// stays inside its box and inside the sprite's rows.
-    #[test]
-    fn satchel_sheet_has_its_sprites_and_the_helpers_stay_inside() {
-        assert_eq!(SATCHEL_SHEET.len(), 256 * 256 * 4);
-        use sprites::sat::*;
-        let all = [BAG, COVER, PARCH, PAGE_EDGE, BINDING, CURL, ARROW, POCKET, BELT, BUCKLE, CLASP, STRAP, SLOT, RIM, BTN, BTN_ON, TAB, ENTRY, ENTRY_SEL, CARD, GEM, RULE, PIN, PIN_ON, ARMOR[0], ARMOR[1], ARMOR[2], ARMOR[3]];
-        for (i, &(x, y, w, h)) in all.iter().enumerate() {
-            assert!(x >= 0.0 && x + w <= 256.0 && y >= SATCHEL_Y && y + h <= SHEET_H, "sprite {i} inside the block");
-            let lit = (0..h as usize).flat_map(|r| (0..w as usize).map(move |c| (c, r))).filter(|&(c, r)| SATCHEL_SHEET[(((y - SATCHEL_Y) as usize + r) * 256 + x as usize + c) * 4 + 3] != 0).count();
-            assert!(lit > 0, "sprite {i} has pixels");
-        }
-        let (bx, by, bw, bh) = (10.0, 20.0, 333.0, 171.0);
-        for (middle, nine) in [(true, true), (false, true), (true, false)] {
-            let mut v = Vec::new();
-            if nine {
-                HudPipeline::push_nine(&mut v, (bx, by, bw, bh), BAG, 8.0, 3.5, [1.0; 4], middle);
-            } else {
-                HudPipeline::push_tiled(&mut v, (bx, by, bw, bh), PARCH, 3.5, [1.0; 4]);
-            }
-            assert!(!v.is_empty() && v.len() % 6 == 0);
-            assert!(v.iter().all(|p| p.pos[0] >= bx - 0.01 && p.pos[0] <= bx + bw + 0.01 && p.pos[1] >= by - 0.01 && p.pos[1] <= by + bh + 0.01), "inside the box");
-            assert!(v.iter().all(|p| p.uv[1] >= SATCHEL_Y / SHEET_H && p.uv[1] <= 1.0 && p.uv[0] >= 0.0 && p.uv[0] <= 1.0), "uv inside the satchel rows");
-        }
-        // A box smaller than two corners still draws (corners shrink) and never leaves its box.
-        let mut v = Vec::new();
-        HudPipeline::push_nine(&mut v, (0.0, 0.0, 10.0, 6.0), BTN, 4.0, 3.5, [1.0; 4], true);
-        assert!(v.iter().all(|p| p.pos[0] <= 10.01 && p.pos[1] <= 6.01));
     }
 }

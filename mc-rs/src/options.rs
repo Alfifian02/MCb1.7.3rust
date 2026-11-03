@@ -187,12 +187,6 @@ pub struct Settings {
     /// NOT b1.7.3 (`world::biomelife`): fog is cover for the mobs, heat and cold weigh on stamina, the forests have seasons and leaves give
     /// apples; a switch with no button, `biomeRules:false` in options.txt turns all of it off.
     pub biome_rules: bool,
-    /// The inventory button spreads the old cloth on the ground and pans a camera over it (`world::pack`, dizzying) instead of opening the
-    /// satchel and its recipe book (`satchel.rs`); a switch with no button, `packCloth:true` in options.txt.
-    pub pack_cloth: bool,
-    /// The recipe book hides what the player has not met yet: a recipe none of whose items was ever held shows as a silhouette and `???`
-    /// (`world::book::Notes::known`). The book's own toggle, `bookDiscovery` in options.txt.
-    pub book_discovery: bool,
     /// The scene scale follows the GPU load (`gpu::context::Drs`); off (`dynamicRes:false`, the Perf. tab's button) it stays at `START_PCT`.
     pub dynamic_res: bool,
     /// MSAA samples for the next start: 0 Auto (`present::pick_samples` decides by GPU), 1, 2 or 4 (`msaa:` in options.txt).
@@ -237,8 +231,6 @@ impl Default for Settings {
             animal_ai: true,
             sustained: true,
             biome_rules: true,
-            pack_cloth: false,
-            book_discovery: false,
             dynamic_res: true,
             msaa: 0,
             post: 0,
@@ -281,8 +273,6 @@ impl Settings {
                 ("frameLatency", _, Some(n)) if (1..=3).contains(&n) => s.frame_latency = n,
                 ("animalAi", ..) => s.animal_ai = b,
                 ("biomeRules", ..) => s.biome_rules = b,
-                ("packCloth", ..) => s.pack_cloth = b,
-                ("bookDiscovery", ..) => s.book_discovery = b,
                 ("dynamicRes", ..) => s.dynamic_res = b,
                 ("sustainedPerf", ..) => s.sustained = b,
                 ("msaa", _, Some(n)) if matches!(n, 0 | 1 | 2 | 4) => s.msaa = n,
@@ -306,8 +296,8 @@ impl Settings {
     pub fn save(&self) {
         let Some(p) = &self.path else { return };
         let mut t = format!(
-            "music:{}\nsound:{}\ninvertYMouse:{}\nmouseSensitivity:{}\nviewDistance:{}\nguiScale:{}\nbobView:{}\nanaglyph3d:{}\nadvancedOpengl:{}\nfpsLimit:{}\ndifficulty:{}\nfancyGraphics:{}\nao:{}\nlod:{}\ndigDelay:{}\ngpuErrorTrace:{}\ndynamicRes:{}\nmsaa:{}\npost:{}\nfxaa:{}\nrenderer:{}\ndebugScreen:{}\nanimalAi:{}\nbiomeRules:{}\npackCloth:{}\nbookDiscovery:{}\nframeLatency:{}\nsustainedPerf:{}\n",
-            self.music, self.sound, self.invert_mouse, self.sensitivity, self.render_distance, self.gui_scale, self.view_bobbing, self.anaglyph, self.advanced_opengl, self.limit_framerate, self.difficulty, self.fancy_graphics, self.ambient_occlusion, self.lod, self.dig_delay, self.gpu_error_trace, self.dynamic_res, self.msaa, self.post, self.fxaa, self.renderer, self.debug_screen, self.animal_ai, self.biome_rules, self.pack_cloth, self.book_discovery, self.frame_latency, self.sustained
+            "music:{}\nsound:{}\ninvertYMouse:{}\nmouseSensitivity:{}\nviewDistance:{}\nguiScale:{}\nbobView:{}\nanaglyph3d:{}\nadvancedOpengl:{}\nfpsLimit:{}\ndifficulty:{}\nfancyGraphics:{}\nao:{}\nlod:{}\ndigDelay:{}\ngpuErrorTrace:{}\ndynamicRes:{}\nmsaa:{}\npost:{}\nfxaa:{}\nrenderer:{}\ndebugScreen:{}\nanimalAi:{}\nbiomeRules:{}\nframeLatency:{}\nsustainedPerf:{}\n",
+            self.music, self.sound, self.invert_mouse, self.sensitivity, self.render_distance, self.gui_scale, self.view_bobbing, self.anaglyph, self.advanced_opengl, self.limit_framerate, self.difficulty, self.fancy_graphics, self.ambient_occlusion, self.lod, self.dig_delay, self.gpu_error_trace, self.dynamic_res, self.msaa, self.post, self.fxaa, self.renderer, self.debug_screen, self.animal_ai, self.biome_rules, self.frame_latency, self.sustained
         );
         t.push_str(&format!("fov:{}\n", self.fov));
         for (id, code) in KEY_IDS.iter().zip(self.keys) {
@@ -1401,6 +1391,8 @@ pub enum PauseEv {
     Info,
     /// Open `stats_ui` (true: Achievements, false: Statistics).
     Stats(bool),
+    /// Open `gen_ui` read only: the world's World-Gen Settings.
+    GenSettings,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1414,6 +1406,7 @@ enum PAct {
     Fly,
     Debug,
     Info,
+    GenSettings,
     /// The sun, bottom right: the live atmosphere editor.
     Atmos,
     /// Opens the page with Pregen / Fly / Info / LoD debug; its Done comes back.
@@ -1487,6 +1480,7 @@ impl Pause {
             (PAct::Fly, [hw - 120.0, y + 24.0, 118.0, 20.0], if info.flying { "Fly: on" } else { "Fly: off" }.to_string(), true),
             (PAct::Info, [hw + 2.0, y + 24.0, 118.0, 20.0], if info.info { "Info: on" } else { "Info: off" }.to_string(), true),
             (PAct::Debug, [hw - 120.0, y + 48.0, 240.0, 20.0], debug.to_string(), true),
+            (PAct::GenSettings, [hw - 120.0, y + 72.0, 240.0, 20.0], "World-Gen Settings...".to_string(), true),
             (PAct::ToolsDone, [hw - 100.0, y + 96.0, 200.0, 20.0], "Done".to_string(), true),
         ]
     }
@@ -1518,6 +1512,7 @@ impl Pause {
                     PAct::Fly => Some(PauseEv::Fly),
                     PAct::Debug => Some(PauseEv::LodDebug),
                     PAct::Info => Some(PauseEv::Info),
+                    PAct::GenSettings => Some(PauseEv::GenSettings),
                     PAct::Options => {
                         self.opt = Some(OptionsUi::new());
                         None
@@ -1723,12 +1718,11 @@ mod tests {
         assert!(st.animal_ai && st.biome_rules, "on until options.txt says otherwise");
         assert_eq!(st.frame_latency, 2, "the wgpu default until options.txt says otherwise");
         st.frame_latency = 1;
-        assert!(!st.pack_cloth && !st.book_discovery, "the satchel with every recipe shown, until options.txt says otherwise");
-        (st.gpu_error_trace, st.dynamic_res, st.debug_screen, st.pack_cloth, st.book_discovery, st.biome_rules) = (true, false, true, true, true, false);
+        (st.gpu_error_trace, st.dynamic_res, st.debug_screen, st.biome_rules) = (true, false, true, false);
         st.save();
         let back = Settings::load(&root);
         assert_eq!((back.sensitivity, back.invert_mouse, back.render_distance, back.lod, back.keys[4]), (0.25, true, 0, false, 50));
-        assert!(back.gpu_error_trace && !back.dynamic_res && back.debug_screen && back.pack_cloth && back.book_discovery && !back.biome_rules);
+        assert!(back.gpu_error_trace && !back.dynamic_res && back.debug_screen && !back.biome_rules);
         assert_eq!(back.msaa, 0, "Auto until options.txt says otherwise");
         assert_eq!(back.frame_latency, 1);
         assert!(std::fs::read_to_string(root.join("options.txt")).unwrap().contains("key_key.jump:50"));

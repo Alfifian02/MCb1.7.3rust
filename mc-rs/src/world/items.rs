@@ -124,6 +124,21 @@ pub fn icon_meta(s: ItemStack) -> u8 {
     if matches!(s.id, 29 | 33) { 1 } else { placed_meta(s) }
 }
 
+/// The blocks the inventory draws as their flat tile and not a cube: plants, the cobweb, torches, rails, doors, the bed ...
+pub fn flat_icon(id: u8) -> bool {
+    crate::world::chunk::cross_shape(id).is_some() || matches!(id, 26 | 27 | 28 | 30 | 50 | 51 | 55 | 63 | 64 | 65 | 66 | 68 | 69 | 71 | 75 | 76 | 77 | 90 | 92 | 93 | 94 | 96)
+}
+
+/// How high the cube of a block item is drawn, of its width: a slab is half of it, a pressure plate a quarter (a plate is 1/16 in the world;
+/// the inventory shows it as a flat tile you can tell from a block), every other cube all of it.
+pub fn icon_height(id: u16) -> f32 {
+    match id {
+        44 => 0.5,
+        70 | 72 => 0.25,
+        _ => 1.0,
+    }
+}
+
 // ---- Block.idDropped / quantityDropped / damageDropped ----
 // ponytail: blocks whose drop reads metadata and that nothing can make or place yet (stairs)
 // are missing; their drops go in with the blocks. Slabs are here because the drop is two lines.
@@ -197,15 +212,12 @@ pub struct Inventory {
     /// a use; food is not) and ids broken (tools and armour).
     pub used: Vec<u16>,
     pub broke: Vec<u16>,
-    /// Craft from a nearby chest (NOT b1.7.3, UNVERIFIED): what the chests within `book::NEAR` blocks of the open workbench hold, as (ingredient code,
-    /// count). The book counts it with the bag (`book::have`); `App::near_tick` keeps it, and it is empty everywhere but at a workbench of a pack world.
-    pub near: Vec<(u16, u32)>,
 }
 
 // Not derived: `Default` stops at 32-element arrays.
 impl Default for Inventory {
     fn default() -> Self {
-        Self { slots: [None; SLOTS], used: Vec::new(), broke: Vec::new(), near: Vec::new() }
+        Self { slots: [None; SLOTS], used: Vec::new(), broke: Vec::new() }
     }
 }
 
