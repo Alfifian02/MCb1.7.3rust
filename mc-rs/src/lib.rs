@@ -344,9 +344,10 @@ struct Gesture {
     grab: Option<(f32, f32)>,
     moved: bool,
     down: (f32, f32),
-    /// Seconds the finger has been down (a press on the satchel's result this long crafts all), and on the book's list (or the recipe card: `true`) the scroll it began at.
+    /// Seconds the finger has been down (a press on the satchel's result this long crafts all), and on the satchel's strip (mode 0), the
+    /// ingredient list (1) or the column of variants (2) the scroll it began at (for the column: the y of its last step).
     age: f32,
-    list: Option<(bool, f32)>,
+    list: Option<(u8, f32)>,
 }
 
 /// Pixels a finger must travel before a press on empty cloth is a pan and not a tap.
@@ -3256,6 +3257,9 @@ impl App {
                 _ => Vec::new(),
             }
         };
+        if d.0 == 0 && matches!(self.sat_hit(at.0, at.1), Some(satchel::Pick::Row(_))) && self.sat_variant(d.1) {
+            return; // up / down on a slot with variants steps through them (the slot shows the picked one), and only at their ends moves on
+        }
         let mut to = satchel::step(&targets(&*self), at, d);
         if to.is_none() && d.1 == 0 && matches!(self.sat_hit(at.0, at.1), Some(satchel::Pick::Row(_))) {
             let max = self.sat_max_scroll(false);
@@ -3372,7 +3376,13 @@ impl App {
                 }
                 self.sat_first();
             }
-            Pick::Row(i) => self.sat_pick(i),
+            Pick::Row(i) | Pick::Var(i) => self.sat_pick(i),
+            Pick::VarUp => {
+                self.sat_variant(-1);
+            }
+            Pick::VarDown => {
+                self.sat_variant(1);
+            }
             Pick::Pin => {
                 if let Some(sel) = self.sat.as_ref().and_then(|s| s.sel) {
                     self.notes.pinned = if self.notes.pinned == Some(sel) { None } else { Some(sel) };
@@ -3397,8 +3407,33 @@ impl App {
                     self.stats.add(world::stats::DROP, 1);
                 }
             }
-            Pick::List | Pick::Panel | Pick::Card => {}
+            Pick::List | Pick::VarList | Pick::Panel | Pick::Card => {}
         }
+    }
+
+    /// Pick the recipe `d` places on in the picked one's slot (the other recipes that make the same item, `satchel::variant`), as many
+    /// times as it goes. True when it moved.
+    fn sat_variant(&mut self, d: i32) -> bool {
+        let mut moved = false;
+        for _ in 0..d.unsigned_abs() {
+            let to = match (self.sat.as_ref(), self.screen.as_ref()) {
+                (Some(sat), Some(s)) => satchel::variant(sat, &self.inv, &s.grid, s.gw, d.signum()),
+                _ => None,
+            };
+            let Some(i) = to else { break };
+            if let Some(s) = self.sat.as_mut() {
+                (s.sel, s.card_scroll) = (Some(i), 0.0);
+            }
+            moved = true;
+        }
+        moved
+    }
+
+    /// How far a finger drags the column of variants for one step (px): one cell.
+    fn sat_var_step(&self) -> f32 {
+        let (Some(sat), Some(s)) = (self.sat.as_ref(), self.screen.as_ref()) else { return 40.0 };
+        let (w, h) = self.be.size();
+        satchel::Frame::with_grid(sat, &self.inv, &s.grid, s.gw, w as f32, h as f32).craft.and_then(|b| b.var).map_or(40.0, |v| v.step.max(1.0))
     }
 
     /// A tap on a recipe of the strip: it is picked (its ingredients show in the preview); a tap on the recipe already picked crafts it, like
@@ -3578,8 +3613,9 @@ impl App {
                 let pick = self.sat_hit(x, y);
                 let btn = (self.mat_ui && self.pack_btn(x, y).is_some()) || pick.is_some_and(|p| !matches!(p, satchel::Pick::Slot(_)));
                 let list = match (self.sat.as_ref(), pick) {
-                    (Some(s), Some(satchel::Pick::Row(_) | satchel::Pick::List)) => Some((false, s.scroll)),
-                    (Some(s), Some(satchel::Pick::Card)) => Some((true, s.card_scroll)),
+                    (Some(s), Some(satchel::Pick::Row(_) | satchel::Pick::List)) => Some((0, s.scroll)),
+                    (Some(s), Some(satchel::Pick::Card)) => Some((1, s.card_scroll)),
+                    (Some(_), Some(satchel::Pick::Var(_) | satchel::Pick::VarList)) => Some((2, y)),
                     _ => None,
                 };
                 let start = if btn { None } else { self.slot_under(x, y) };
@@ -3589,10 +3625,20 @@ impl App {
             }
             ScreenEv::Move(x, y) => {
                 // A drag that began on the strip (or the ingredient list) scrolls it; lifting after one is not a tap.
-                if let Some(((card, s0), down, moved)) = self.gesture.as_ref().and_then(|g| g.list.map(|l| (l, g.down, g.moved))) {
+                if let Some(((mode, s0), down, moved)) = self.gesture.as_ref().and_then(|g| g.list.map(|l| (l, g.down, g.moved))) {
                     let moved = moved || (x - down.0).hypot(y - down.1) > PAN_SLOP;
-                    if moved {
-                        let max = self.sat_max_scroll(card);
+                    if moved && mode == 2 {
+                        // The column of variants: a step for every cell's height the finger drags (up goes on to the next one).
+                        let step = self.sat_var_step();
+                        let n = ((s0 - y) / step).trunc() as i32;
+                        if n != 0 {
+                            self.sat_variant(n);
+                            if let Some(g) = self.gesture.as_mut() {
+                                g.list = Some((2, s0 - n as f32 * step));
+                            }
+                        }
+                    } else if moved {
+                        let (card, max) = (mode == 1, self.sat_max_scroll(mode == 1));
                         if let Some(s) = self.sat.as_mut() {
                             let to = (s0 - if card { y - down.1 } else { x - down.0 }).clamp(0.0, max); // the strip slides sideways, the list up and down
                             if card { s.card_scroll = to } else { s.scroll = to }
