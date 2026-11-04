@@ -14,8 +14,15 @@
 //! - `JigsawPlacement`, `RandomSpreadStructurePlacement`, the weighted pick of a set and the rule processors are written from memory of the
 //!   1.20 Java, not read from it; nothing here is checked against a real world's structure positions.
 //! - Heights come from `generate_far` (terrain without caves, rivers carved) instead of the 1.20 noise `getFirstFreeHeight`.
-//! - `terrain_adaptation`: `beard_thin` / `beard_box` = a dirt foundation under a rigid piece (up to 12 blocks), no terrain is cut away;
-//!   `bury` and none leave the terrain alone. Terrain-matching pieces (paths) follow the ground column by column like `GravityProcessor`.
+//! - `terrain_adaptation`: `beard_thin` / `beard_box` = a short dirt foundation under the load-bearing blocks of a rigid piece (`GAP` 6, 8
+//!   for a box), never through water or lava; `bury` and none leave the terrain alone. Terrain-matching pieces (paths) follow the ground
+//!   column by column like `GravityProcessor`.
+//! - NATURAL TERRAIN (2026-11-04): the templates bake a rectangle of grass / dirt into their bottom layers and fill their whole box with
+//!   air, which cut square plinths and square pits into the land. Now: (1) the baked ground of a rigid piece is not written (`base_run`),
+//!   the real terrain stays, and the start piece is lowered by that depth (`base_depth`) so its walls still stand on the surface;
+//!   (2) the start's height is the median of 9 ground samples over its footprint, not the one under its centre; (3) air is written only
+//!   under a roof (`roof_of`), so a hill is never cut into a box outside the walls; (4) the foundation only runs under load-bearing blocks
+//!   (`bearing`), not under fences, torches or ladders.
 //! - No entities (villagers, illagers, item frames, armor stands), no sign text, no banners: Beta has none. Chests and barrels become
 //!   chests with their loot table on Beta items; a spawner takes the template's mob (skeleton, zombie, spider).
 //! - Where the Beta world has no such block the converter picked the nearest one (stone bricks = cobblestone, walls and iron bars =
@@ -33,6 +40,8 @@ use std::sync::{Arc, OnceLock};
 
 const SKIP: u16 = 0xFFFF;
 const NONE16: u16 = 0xFFFF;
+/// Deepest foundation under a rigid piece (blocks); `beard_box` gets 2 more.
+const GAP: i32 = 6;
 static BIN: &[u8] = include_bytes!("../../../assets/structory.bin");
 
 // ---------------------------------------------------------------- the baked data
@@ -328,6 +337,63 @@ fn shuffle<T>(l: &mut [T], r: &mut JavaRandom) {
     }
 }
 
+// ---------------------------------------------------------------- natural terrain
+
+/// Natural ground the templates bake into their bottom layers.
+fn is_ground(id: u8) -> bool {
+    matches!(id, GRASS | DIRT | SAND | GRAVEL)
+}
+
+/// Blocks that carry a building (walls, floors, roofs): a foundation is only built under these.
+fn bearing(id: u8) -> bool {
+    matches!(id, STONE | COBBLE | 5 | LOG | SANDSTONE | 35 | 43 | 44 | 45 | MOSSY | 49 | 53 | 67 | 82)
+}
+
+fn is_liquid(id: u8) -> bool {
+    matches!(id, WATER_MOVING..=LAVA)
+}
+
+/// How many bottom layers of template `t` are baked ground (0..=3): the most common run of grass / dirt / sand / gravel from y = 0 up,
+/// if at least 40% of the footprint has one. Such a template is a house on a grass plinth; the plinth is not written (see `place_piece`).
+fn base_depth(d: &Data, t: usize) -> i32 {
+    let tp = &d.t[t];
+    let [sx, sy, sz] = tp.size;
+    let mut count = [0usize; 4];
+    for z in 0..sz {
+        for x in 0..sx {
+            let mut n = 0;
+            while n < sy.min(3) {
+                let c = tp.cells[((n * sz + z) * sx + x) as usize];
+                if c == SKIP || !is_ground(d.beta[usize::from(c)].0) {
+                    break;
+                }
+                n += 1;
+            }
+            count[n as usize] += 1;
+        }
+    }
+    (1..4usize).max_by_key(|&n| count[n]).filter(|&n| count[n] * 5 >= (sx * sz) as usize * 2).map_or(0, |n| n as i32)
+}
+
+/// Per column of template `t` (`z * sx + x`): the height of its highest load-bearing block, -1 if there is none. Air below it is
+/// under a roof (an interior); air at or above it is open sky and is not written.
+fn roof_of(d: &Data, t: usize) -> Vec<i32> {
+    let tp = &d.t[t];
+    let [sx, sy, sz] = tp.size;
+    let mut roof = vec![-1; (sx * sz) as usize];
+    for y in 0..sy {
+        for z in 0..sz {
+            for x in 0..sx {
+                let c = tp.cells[((y * sz + z) * sx + x) as usize];
+                if c != SKIP && bearing(d.beta[usize::from(c)].0) {
+                    roof[(z * sx + x) as usize] = y;
+                }
+            }
+        }
+    }
+    roof
+}
+
 // ---------------------------------------------------------------- assembly
 
 #[derive(Clone)]
@@ -368,7 +434,16 @@ fn assemble(d: &Data, st: usize, cx: i32, cz: i32, rnd: &mut JavaRandom, ground:
     let mut pos = [bx - (c0.0 - bx), 0, bz - (c0.1 - bz)]; // the box's centre goes to the chunk's corner
     let mut bxx = box_of(size, rot, pos);
     let g = centre(&bxx);
-    pos[1] = s.y + ground(g.0, g.1);
+    // the median of 9 samples over the footprint (not the one under the centre: on a slope that left one side floating and the other
+    // buried), less the baked ground of the template so that its walls, not its grass plinth, stand on the surface
+    let mut hs = Vec::with_capacity(9);
+    for &x in &[bxx[0], g.0, bxx[3]] {
+        for &z in &[bxx[2], g.1, bxx[5]] {
+            hs.push(ground(x, z));
+        }
+    }
+    hs.sort_unstable();
+    pos[1] = s.y + hs[4] - base_depth(d, usize::from(start.t));
     bxx = box_of(size, rot, pos);
     let p0 = Piece { t: usize::from(start.t), rot, pos, bx: bxx, rigid: start.proj == 0, kind: start.kind, proc: start.proc };
     let mut pieces = vec![p0.clone()];
@@ -664,7 +739,20 @@ fn place_piece(d: &Data, s: &Struct, p: &Piece, w: &mut Region, cell: [i32; 4], 
     let t = &d.t[p.t];
     let [sx, sy, sz] = t.size;
     let procs: &[Proc] = if p.proc == 255 { &[] } else { &d.procs[usize::from(p.proc)] };
-    let mut low = [[i32::MAX; 16]; 16]; // the lowest solid block of the piece in each column of the cell
+    let roof = roof_of(d, p.t);
+    // the baked ground of a rigid piece (the run of grass / dirt from y = 0 up) is the terrain's job, not the template's
+    let base_run = |x: i32, z: i32| -> i32 {
+        let mut n = 0;
+        while p.rigid && n < sy.min(3) {
+            let c = t.cells[((n * sz + z) * sx + x) as usize];
+            if c == SKIP || !is_ground(d.beta[usize::from(c)].0) {
+                break;
+            }
+            n += 1;
+        }
+        n
+    };
+    let mut low = [[i32::MAX; 16]; 16]; // the lowest load-bearing block of the piece in each column of the cell
     for y in 0..sy {
         for z in 0..sz {
             for x in 0..sx {
@@ -676,6 +764,9 @@ fn place_piece(d: &Data, s: &Struct, p: &Piece, w: &mut Region, cell: [i32; 4], 
                 let (wx, wz) = (p.pos[0] + rx, p.pos[2] + rz);
                 if wx < cell[0] || wx > cell[2] || wz < cell[1] || wz > cell[3] {
                     continue;
+                }
+                if y < base_run(x, z) {
+                    continue; // the plinth: the terrain stays as it is
                 }
                 let wy = if p.rigid { p.pos[1] + y } else { region_ground(w, wx, wz) - 1 + y }; // `GravityProcessor(WORLD_SURFACE_WG, -1)`
                 if !(1..128).contains(&wy) {
@@ -698,8 +789,11 @@ fn place_piece(d: &Data, s: &Struct, p: &Piece, w: &mut Region, cell: [i32; 4], 
                     }
                 }
                 let (id, meta) = d.beta[usize::from(st)];
+                if id == AIR && roof[(z * sx + x) as usize] <= y {
+                    continue; // open air: no box is cut out of a hill around the walls
+                }
                 w.set_meta(wx, wy, wz, id, rotate_meta(id, meta, p.rot));
-                if is_solid(id) {
+                if bearing(id) {
                     let l = &mut low[(wx - cell[0]) as usize][(wz - cell[1]) as usize];
                     *l = (*l).min(wy);
                 }
@@ -719,8 +813,9 @@ fn place_piece(d: &Data, s: &Struct, p: &Piece, w: &mut Region, cell: [i32; 4], 
             }
         }
     }
-    // beard_thin / beard_box: the terrain climbs up to a rigid piece
+    // beard_thin / beard_box: the terrain climbs up to the load-bearing blocks of a rigid piece, a few blocks at most, not through water
     if p.rigid && (s.adapt == 1 || s.adapt == 2) {
+        let gap = if s.adapt == 2 { GAP + 2 } else { GAP };
         for (i, col) in low.iter().enumerate() {
             for (j, &y0) in col.iter().enumerate() {
                 if y0 == i32::MAX {
@@ -728,7 +823,11 @@ fn place_piece(d: &Data, s: &Struct, p: &Piece, w: &mut Region, cell: [i32; 4], 
                 }
                 let (wx, wz) = (cell[0] + i as i32, cell[1] + j as i32);
                 let mut y = y0 - 1;
-                while y > 0 && y0 - y <= 12 && !is_solid(w.get(wx, y, wz)) {
+                while y > 0 && y0 - y <= gap {
+                    let b = w.get(wx, y, wz);
+                    if is_solid(b) || is_liquid(b) {
+                        break;
+                    }
                     w.set(wx, y, wz, DIRT);
                     y -= 1;
                 }
@@ -766,6 +865,29 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn baked_ground_is_found_and_the_start_is_lowered_by_it() {
+        let d = data().unwrap();
+        assert!((0..d.t.len()).any(|t| base_depth(d, t) > 0), "some template stands on a grass plinth");
+        assert!((0..d.t.len()).all(|t| (0..=3).contains(&base_depth(d, t))));
+        for st in 0..d.structs.len() {
+            for seed in 0..6 {
+                let mut r = JavaRandom::new(seed * 31 + st as i64);
+                let ps = assemble(d, st, 50 + seed as i32, 20, &mut r, &mut |_, _| 64);
+                if let Some(p0) = ps.first() {
+                    assert_eq!(p0.pos[1], d.structs[st].y + 64 - base_depth(d, p0.t), "structure {st}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn only_walls_and_roofs_bear_a_foundation() {
+        assert!(bearing(COBBLE) && bearing(5) && bearing(LOG));
+        assert!(!bearing(AIR) && !bearing(50) && !bearing(GRASS) && !bearing(DIRT) && !bearing(85));
+        assert!(is_ground(GRASS) && !is_ground(COBBLE) && is_liquid(WATER) && !is_liquid(AIR));
     }
 
     #[test]
