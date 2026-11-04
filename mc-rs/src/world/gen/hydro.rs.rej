@@ -1,0 +1,648 @@
+--- mc-rs/src/world/gen/hydro.rs	2026-11-04 11:14:25.918531501 +0000
++++ mc-rs/src/world/gen/hydro.rs	2026-11-04 11:14:27.724169343 +0000
+@@ -33,9 +33,11 @@
+ //! is 6700 instructions of `place` plus bank templates; only its plan, heights and materials by biome are followed), the lake level
+ //! (`spill - inset`), the mod's `cohesion` (taken as `0.4 + 0.6 * wetness`), how a plate's margin meets its neighbour (the owner's
+ //! network wins and a neighbour's fills the gaps), the plate seed, the push strength of the current, and how any of it plays on a device.
++//! Added after the first port (UNVERIFIED, chosen here): a trough-shaped bed (`bed_at`), reeds and boulders on the bank, no ice on fast water
++//! (`ICE_SPEED`), items carried by the current (`items.rs`).
+ //! NOT PORTED: `connectNetwork` (plate borders), lakes' 3-block masks,
+-//! waterfalls, the bed's channel bars and bend asymmetry in the carve (the width side of the hydraulics is ported), bank templates and
+-//! features, plants, the fluid block and its flow rendering, drifting items, particles, sound (mc-rs has no audio), disk cache of
++//! waterfalls, the bend asymmetry of the bed, bank templates (logs, rocks as the mod shapes them), underwater flora, the fluid block and its
++//! flow rendering, the fishing bobber in the current, the stream's sound (mc-rs has audio now, but no waterfall or stream sound), disk cache of
+ //! networks, village bridges and structure promises (b1.7.3 has neither). The Python reference is `tools/hydro_proto.py` (without the
+ //! hydraulic widths).
+ 
+@@ -43,7 +45,8 @@
+ use crate::world::gen::overworld::{block, SEA_LEVEL};
+ use std::cmp::Reverse;
+ use std::collections::{BinaryHeap, HashMap};
+-use std::sync::{Arc, Mutex, OnceLock};
++use std::path::PathBuf;
++use std::sync::{Arc, Mutex, OnceLock, RwLock};
+ 
+ /// Blocks between grid nodes (mod: `QualityPreset.MEDIUM`, the default, `gridSpacing` 16). A node is at world (16 gx, 16 gz); the generator's `probe` reads it there.
+ pub const CELL: i32 = 16;
+@@ -86,8 +89,9 @@
+ const LAKE_MIN_DEPTH: f64 = 1.5;
+ /// Cells a river may be traced over the real terrain, past the window, to find the sea.
+ const TAIL_CAP: usize = 6000;
+-/// Blocks a second per unit of the mod's flow speed (0.25..2): UNVERIFIED, the mod pushes by its settings.
+-const PUSH: f64 = 1.5;
++/// Blocks a second per unit of the mod's flow speed (0.25..2) before the entity's factor: UNVERIFIED. The factor is the mod's own
++/// (`CurrentPush.factor` -> `StreamsSettings.playerPush` 1.2, `boatPush` 2.0, `mobPush` 1.2), so a player is pushed 1.25 x 1.2 = 1.5 as before.
++const BASE_PUSH: f64 = 1.25;
+ /// A stream that is not the biggest branch where it joins another (or that ends in the sea) must run at least this many blocks from its
+ /// source, measured on the 16-block grid path (the mod's `minStreamLength` is 75; the player wants the small rivers long, so more). Chaikin and the
+ /// meander add about 15% to what is drawn.
+@@ -98,6 +102,104 @@
+ const LEVEL_RAMP: f64 = 48.0;
+ const BUCKET: i32 = 16;
+ const MAX_PLATES: usize = 12;
++/// Lake hi-res mask: the lake cells' occupancy, interpolated between cell centres, is a lake where it reaches this (the mod's `Lake` masks
++/// sample every 3 blocks; this one is smooth at any block). UNVERIFIED: chosen here.
++const LAKE_EDGE: f64 = 0.3;
++/// Blocks a lake's floor dips below its surface at the middle, over the first block (`lakeDip`). UNVERIFIED.
++const LAKE_DIP: f64 = 2.0;
++/// How far a bend moves the deepest line of the bed toward the outer bank (a share of the half width at a full bend). UNVERIFIED.
++const BEND_SHIFT: f64 = 0.5;
++/// The disk cache's version: raise it whenever the routing or the plan changes, or an old file would be read as the new one.
++const CACHE_VERSION: u32 = 1;
++/// Water faster than this (the mod's flow speed, 0.25..2) does not freeze over: the ice melt of a quick stream. UNVERIFIED: chosen here.
++const ICE_SPEED: f64 = 1.2;
++
++/// The mod's `StreamsSettings`, the parts that act when a column is carved or a current read (the ones that shape a network, `MIN_ACC`,
++/// `MIN_LEN`, are in its cache and stay constants).
++#[derive(Clone, Debug, PartialEq)]
++pub struct Settings {
++    /// Rivers and lakes on (`false`: the terrain's own water only; `current` is `None`).
++    pub enabled: bool,
++    /// `StreamsSettings.playerPush`, `boatPush`, `mobPush` (the mod's defaults 1.2, 2.0, 1.2): what a current's strength is multiplied by.
++    pub player_push: f64,
++    pub boat_push: f64,
++    pub mob_push: f64,
++    /// Water faster than this stays open in the cold.
++    pub ice_speed: f64,
++    /// `streamBiomeBlacklist`: no river is cut in these biomes (a lake still is).
++    pub blacklist: Vec<Biome>,
++}
++
++impl Default for Settings {
++    fn default() -> Self {
++        Self { enabled: true, player_push: 1.2, boat_push: 2.0, mob_push: 1.2, ice_speed: ICE_SPEED, blacklist: Vec::new() }
++    }
++}
++
++/// Who a current pushes (`CurrentPush.factor`: a player, a boat, anything else).
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum Push {
++    Player,
++    Boat,
++    Mob,
++}
++
++impl Settings {
++    fn factor(&self, k: Push) -> f64 {
++        match k {
++            Push::Player => self.player_push,
++            Push::Boat => self.boat_push,
++            Push::Mob => self.mob_push,
++        }
++    }
++
++    /// Reads `hydro:true|false`, `playerPush:1.2`, `boatPush:2.0`, `mobPush:1.2`, `hydroIceSpeed:1.2` and `hydroBlacklist:Desert,Beach` lines (the `options.txt` shape;
++    /// anything else is ignored, a bad value keeps the default). A biome is named as its variant, any case.
++    pub fn parse(text: &str, all: &[Biome]) -> Self {
++        let mut s = Self::default();
++        for line in text.lines() {
++            let Some((k, v)) = line.split_once(':') else { continue };
++            let v = v.trim();
++            match k.trim() {
++                "hydro" => s.enabled = v != "false",
++                "playerPush" => s.player_push = v.parse().unwrap_or(s.player_push).clamp(0.0, 10.0),
++                "boatPush" => s.boat_push = v.parse().unwrap_or(s.boat_push).clamp(0.0, 10.0),
++                "mobPush" => s.mob_push = v.parse().unwrap_or(s.mob_push).clamp(0.0, 10.0),
++                "hydroIceSpeed" => s.ice_speed = v.parse().unwrap_or(s.ice_speed),
++                "hydroBlacklist" => s.blacklist = v.split(',').filter_map(|n| all.iter().copied().find(|b| format!("{b:?}").eq_ignore_ascii_case(n.trim()))).collect(),
++                _ => {}
++            }
++        }
++        s
++    }
++}
++
++static SETTINGS: RwLock<Option<Settings>> = RwLock::new(None);
++
++/// The settings in force (the defaults until `configure`).
++pub fn settings() -> Settings {
++    SETTINGS.read().ok().and_then(|g| g.clone()).unwrap_or_default()
++}
++
++/// Sets the settings of the world being played. A river already carved stays as it is; a chunk made after this obeys.
++pub fn configure(s: Settings) {
++    if let Ok(mut g) = SETTINGS.write() {
++        *g = Some(s);
++    }
++}
++
++/// Where networks are kept between runs (`None`: nowhere). `FileNetworkStore`. A file holds one plate of one seed and world type; it does
++/// not know the Natural Temperature settings, so the caller sets no directory while those are on.
++static CACHE: Mutex<Option<PathBuf>> = Mutex::new(None);
++
++pub fn cache_dir(dir: Option<PathBuf>) {
++    if let Ok(mut c) = CACHE.lock() {
++        *c = dir;
++    }
++}
++/// Share of the depth kept at the channel's edge: the bed is a bar-shaped trough, deepest on the centre line (`HydraulicGeometry` bed side,
++/// symmetric here: the bend asymmetry needs the side of the centre line, which `Plan` does not carry). UNVERIFIED: chosen here.
++const BED_EDGE: f64 = 0.4;
+ const NONE: usize = usize::MAX;
+ const NB: [(i32, i32); 8] = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)];
+ 
+@@ -414,6 +516,8 @@
+     sp: f64,
+     o1: f64,
+     o2: f64,
++    /// Turn at this segment, -1..1: the cross product of the unit directions before and after it (positive: to the left, x toward z).
++    bend: f64,
+ }
+ 
+ /// What the carve needs to know about a column (the mod's `ColumnPlan`, the fields this port uses).
+@@ -436,6 +540,21 @@
+     pub speed: f64,
+     /// Distance still to run to the outlet.
+     pub to_outlet: f64,
++    /// Which side of the centre line, as a share of the half width: -1 right .. 1 left (from the flow's direction, x toward z).
++    pub side: f64,
++    /// The segment's `bend`.
++    pub bend: f64,
++}
++
++/// The bed's y of a channel column: the full depth on the deepest line, `BED_EDGE` of it at the edge, never less than one block of water.
++/// The deepest line sits on the centre line of a straight reach and moves toward the outer bank in a bend (the water of a bend digs the
++/// outside; `HydraulicGeometry`'s bed side, `RiverEngine`'s bend / lateral), by `BEND_SHIFT` of the half width at a full bend.
++fn bed_at(p: &Plan) -> i32 {
++    // Turning left (bend > 0) the outer bank is the right one (side < 0).
++    let c = -p.bend.clamp(-1.0, 1.0) * BEND_SHIFT;
++    let e = ((p.side - c).abs() / (1.0 + c.abs())).clamp(0.0, 1.0);
++    let full = (p.water_y - p.bed_y) as f64;
++    p.water_y - (full * (1.0 - (1.0 - BED_EDGE) * e * e)).round().max(1.0) as i32
+ }
+ 
+ impl Plan {
+@@ -456,6 +575,75 @@
+     n: (usize, usize),
+ }
+ 
++/// Little-endian reader for `Network::from_bytes`.
++struct Rd<'a>(&'a [u8]);
++
++impl Rd<'_> {
++    fn take<const N: usize>(&mut self) -> Option<[u8; N]> {
++        let (a, b) = self.0.split_at_checked(N)?;
++        self.0 = b;
++        a.try_into().ok()
++    }
++    fn u32(&mut self) -> Option<u32> {
++        self.take().map(u32::from_le_bytes)
++    }
++    fn i32(&mut self) -> Option<i32> {
++        self.take().map(i32::from_le_bytes)
++    }
++    fn f64(&mut self) -> Option<f64> {
++        self.take().map(f64::from_le_bytes)
++    }
++}
++
++impl Network {
++    /// `CACHE_VERSION`, the lattice, then the segments, the lake cells and the lake tops, all little endian. The index is made again on load.
++    fn to_bytes(&self) -> Vec<u8> {
++        let mut o = Vec::with_capacity(32 + self.segs.len() * 96 + self.lake_of.len() * 4);
++        o.extend(b"HYD");
++        o.extend(CACHE_VERSION.to_le_bytes());
++        for v in [self.g0.0, self.g0.1, self.n.0 as i32, self.n.1 as i32, self.segs.len() as i32, self.lake_top.len() as i32] {
++            o.extend(v.to_le_bytes());
++        }
++        for s in &self.segs {
++            for v in [s.x1, s.z1, s.y1, s.w1, s.x2, s.z2, s.y2, s.w2, s.sp, s.o1, s.o2, s.bend] {
++                o.extend(v.to_le_bytes());
++            }
++        }
++        for v in &self.lake_of {
++            o.extend(v.to_le_bytes());
++        }
++        for v in &self.lake_top {
++            o.extend(v.to_le_bytes());
++        }
++        o
++    }
++
++    /// `None` for a file of another version or one cut short (the plate is then routed again).
++    fn from_bytes(b: &[u8]) -> Option<Network> {
++        let mut r = Rd(b.strip_prefix(b"HYD")?);
++        if r.u32()? != CACHE_VERSION {
++            return None;
++        }
++        let (g0, n) = ((r.i32()?, r.i32()?), (r.i32()? as usize, r.i32()? as usize));
++        let (ns, nl) = (r.i32()? as usize, r.i32()? as usize);
++        if ns > 1 << 22 || nl > 1 << 20 || n.0 > 4096 || n.1 > 4096 {
++            return None;
++        }
++        let mut segs = Vec::with_capacity(ns);
++        for _ in 0..ns {
++            let mut f = [0.0; 12];
++            for v in &mut f {
++                *v = r.f64()?;
++            }
++            segs.push(Seg { x1: f[0], z1: f[1], y1: f[2], w1: f[3], x2: f[4], z2: f[5], y2: f[6], w2: f[7], sp: f[8], o1: f[9], o2: f[10], bend: f[11] });
++        }
++        let lake_of = (0..n.0 * n.1).map(|_| r.u32()).collect::<Option<Vec<_>>>()?;
++        let lake_top = (0..nl).map(|_| r.i32()).collect::<Option<Vec<_>>>()?;
++        let index = index_of(&segs);
++        Some(Network { segs, index, lake_of, lake_top, g0, n })
++    }
++}
++
+ /// The grid cell (node index) a block belongs to: a node owns the 12 x 12 blocks round it.
+ fn cell_of(v: f64) -> i32 {
+     ((v + (CELL / 2) as f64) / CELL as f64).floor() as i32
+@@ -474,6 +662,17 @@
+     ((x - (s.x1 + dx * t)).hypot(z - (s.z1 + dz * t)), t)
+ }
+ 
++/// Smooth value noise of the block (x, z), -4..4, on a 3-block lattice: `salt` makes the x and the z warp differ.
++fn warp(x: i32, z: i32, salt: i64) -> f64 {
++    let (fx, fz) = (x as f64 / 3.0, z as f64 / 3.0);
++    let (i, j) = (fx.floor(), fz.floor());
++    let (tx, tz) = (fx - i, fz - j);
++    let n = |a: f64, b: f64| unit4(0x1A4E, salt, a as i64, b as i64);
++    let top = n(i, j) * (1.0 - tx) + n(i + 1.0, j) * tx;
++    let bot = n(i, j + 1.0) * (1.0 - tx) + n(i + 1.0, j + 1.0) * tx;
++    ((top * (1.0 - tz) + bot * tz) - 0.5) * 8.0
++}
++
+ impl Network {
+     /// The segment a point belongs to: the one with the least clearance (distance to the centre line minus the half width), so a point
+     /// inside a wide channel is never taken for the bank of a narrow river that merely ends nearer to it. The mod takes the plain
+@@ -524,6 +723,7 @@
+         let water_y = (SEA_LEVEL - 1).max(grade.floor() as i32);
+         let depth = ((2.0 * w * STREAM_DEPTH + 0.5).floor() as i32).max(1);
+         let len = (s.x2 - s.x1).hypot(s.z2 - s.z1).max(1e-6);
++        let cross = (s.x2 - s.x1) * (z - s.z1) - (s.z2 - s.z1) * (x - s.x1);
+         Some(Plan {
+             in_channel: d <= w,
+             water_y,
+@@ -535,43 +735,50 @@
+             dir: [(s.x2 - s.x1) / len, (s.z2 - s.z1) / len],
+             speed: flow_at_depth(s.sp, depth as f64),
+             to_outlet: s.o1 + (s.o2 - s.o1) * t,
++            side: (d / w.max(1e-6)).copysign(cross).clamp(-1.0, 1.0),
++            bend: s.bend,
+         })
+     }
+ 
+-    /// Top water block's y of the lake covering the block (x, z): the lake's cells and 6 blocks round them.
+-    fn lake_top_at(&self, x: i32, z: i32) -> Option<i32> {
+-        let (ci, cj) = (cell_of(x as f64 + 0.5), cell_of(z as f64 + 0.5));
+-        let mut best: Option<i32> = None;
+-        for di in -1..=1 {
+-            for dj in -1..=1 {
+-                let (i, j) = (ci + di - self.g0.0, cj + dj - self.g0.1);
+-                if i < 0 || j < 0 || i as usize >= self.n.0 || j as usize >= self.n.1 {
+-                    continue;
+-                }
+-                let id = self.lake_of[i as usize * self.n.1 + j as usize];
+-                if id == u32::MAX {
+-                    continue;
+-                }
+-                // The cell owns [12 g - 6, 12 g + 6).
+-                let (gx, gz) = ((ci + di) * CELL - CELL / 2, (cj + dj) * CELL - CELL / 2);
+-                let ex = (gx - x).max(0).max(x - (gx + CELL - 1));
+-                let ez = (gz - z).max(0).max(z - (gz + CELL - 1));
+-                if ex.max(ez) <= 6 {
+-                    let t = self.lake_top[id as usize];
+-                    best = Some(best.map_or(t, |b| b.max(t)));
++    /// The lake covering the block (x, z): its top water block's y and the y of its floor at that block. The mask is the lake cells'
++    /// occupancy interpolated between the cell centres (12 blocks apart), so a shore is round at any block, and the floor dips toward the
++    /// middle of the lake (`LAKE_DIP`). A cell's lake wins by its weight.
++    fn lake_top_at(&self, x: i32, z: i32) -> Option<(i32, i32)> {
++        // The shore is warped by smooth noise of up to 4 blocks (`Lake.coverageSmooth`: the sample point is moved by `(noise - 0.5) * 2 * 4/3 *
++        // spacing` before the mask is read; here the noise is value noise on a 3-block lattice, the mod's hash is not followed).
++        let (px, pz) = (x as f64 + 0.5 + warp(x, z, 3), z as f64 + 0.5 + warp(x, z, 4));
++        let (fx, fz) = (px / CELL as f64, pz / CELL as f64);
++        let (i0, j0) = (fx.floor() as i32, fz.floor() as i32);
++        let (tx, tz) = (fx - i0 as f64, fz - j0 as f64);
++        let (mut occ, mut best): (f64, Option<(f64, u32)>) = (0.0, None);
++        for (di, dj, w) in [(0, 0, (1.0 - tx) * (1.0 - tz)), (1, 0, tx * (1.0 - tz)), (0, 1, (1.0 - tx) * tz), (1, 1, tx * tz)] {
++            let (i, j) = (i0 + di - self.g0.0, j0 + dj - self.g0.1);
++            if i < 0 || j < 0 || i as usize >= self.n.0 || j as usize >= self.n.1 {
++                continue;
++            }
++            let id = self.lake_of[i as usize * self.n.1 + j as usize];
++            if id != u32::MAX {
++                occ += w;
++                if best.map_or(true, |(bw, _)| w > bw) {
++                    best = Some((w, id));
+                 }
+             }
+         }
+-        best
++        if occ < LAKE_EDGE {
++            return None;
++        }
++        let top = self.lake_top[best?.1 as usize];
++        let dip = (LAKE_DIP * ((occ - LAKE_EDGE) / (1.0 - LAKE_EDGE)).clamp(0.0, 1.0)).round() as i32;
++        Some((top, top - 1 - dip))
+     }
+ 
+     /// The current at a point in blocks per second, `None` outside a channel.
+-    pub fn flow_at(&self, x: f32, z: f32) -> Option<[f32; 2]> {
++    pub fn flow_at(&self, x: f32, z: f32, k: Push) -> Option<[f32; 2]> {
+         let p = self.plan(x as f64, z as f64)?;
+         if p.distance > p.width + 0.5 {
+             return None;
+         }
+-        let v = p.speed * PUSH;
++        let v = p.speed * BASE_PUSH * settings().factor(k);
+         Some([(p.dir[0] * v) as f32, (p.dir[1] * v) as f32])
+     }
+ }
+@@ -1055,8 +1262,14 @@
+             }
+         }
+         starts.insert(ch.start, (lv[0], ch.width[0]));
++        let dir = |a: Pt, b: Pt| -> (f64, f64) {
++            let l = (b.x - a.x).hypot(b.z - a.z).max(1e-9);
++            ((b.x - a.x) / l, (b.z - a.z) / l)
++        };
+         for i in 0..m.saturating_sub(1) {
+             let (p, q) = (ch.pts[i], ch.pts[i + 1]);
++            let d1 = dir(p, q);
++            let bend = if i + 2 < m { let d2 = dir(q, ch.pts[i + 2]); (d1.0 * d2.1 - d1.1 * d2.0) * 4.0 } else { 0.0 }.clamp(-1.0, 1.0);
+             segs.push(Seg {
+                 x1: p.x,
+                 z1: p.z,
+@@ -1069,6 +1282,7 @@
+                 sp: (ch.speed[i] + ch.speed[i + 1]) * 0.5,
+                 o1: ch.out_base + ch.arc[i],
+                 o2: ch.out_base + ch.arc[i + 1],
++                bend,
+             });
+         }
+     }
+@@ -1154,9 +1368,36 @@
+         Some(p)
+     }
+ 
++    /// What the World Preview paints at block (x, z): 1 where `carve` would cut a river's channel, 2 where it would fill a lake, 0 for dry
++    /// land. `ground` is the land's height there (`carve`'s `surface`) and `biome` the column's. The same rules as `carve`, read at one
++    /// column: off when `Settings::enabled` is off, a lake only over ground from 40 up to its top, the channel not in a blacklisted biome,
++    /// not under 5 blocks, not above 120, and not where the ground lies more than 6 blocks under the channel's bed (the river is not
++    /// cut into a pit).
++    pub fn water_at(&self, x: i32, z: i32, ground: i32, biome: Biome) -> u8 {
++        let set = settings();
++        if !set.enabled {
++            return 0;
++        }
++        let plan = self.plan_at(f64::from(x) + 0.5, f64::from(z) + 0.5);
++        if !plan.is_some_and(|p| p.in_channel) {
++            if let Some((top, _floor)) = self.nets.iter().find_map(|n| n.lake_top_at(x, z)) {
++                return if (40..top).contains(&ground) { 2 } else { 0 };
++            }
++        }
++        let Some(p) = plan.filter(|p| p.in_channel) else { return 0 };
++        if set.blacklist.contains(&biome) || ground < 5 || p.bed_y < 5 || p.water_y > 120 || ground + 6 < bed_at(&p) {
++            return 0;
++        }
++        1
++    }
++
+     /// Cut this region's rivers and fill its lakes into chunk (cx, cz), `(x << 11) | (z << 7) | y`, after terrain and surface.
+     /// `biomes` and `temps` are the chunk's, `x * 16 + z`; ice caps the water where it is cold.
+     pub fn carve(&self, cx: i32, cz: i32, blocks: &mut [u8], biomes: &[Biome], temps: &[f64]) {
++        let set = settings();
++        if !set.enabled {
++            return;
++        }
+         for x in 0..16usize {
+             for z in 0..16usize {
+                 let (wx, wz) = (cx * 16 + x as i32, cz * 16 + z as i32);
+@@ -1167,18 +1408,22 @@
+                 let (px, pz) = (wx as f64 + 0.5, wz as f64 + 0.5);
+                 let plan = self.plan_at(px, pz);
+                 if !plan.is_some_and(|p| p.in_channel) {
+-                    if let Some(top) = self.nets.iter().find_map(|n| n.lake_top_at(wx, wz)) {
+-                        // Water fills what lies under the lake's surface; the shore is the terrain's own.
++                    if let Some((top, floor)) = self.nets.iter().find_map(|n| n.lake_top_at(wx, wz)) {
++                        // Water fills what lies under the lake's surface, down to the dipped floor; the shore is the terrain's own.
+                         if (40..top).contains(&s) {
+-                            for y in s + 1..=top {
++                            let low = s.min(floor);
++                            for y in low + 1..=top {
+                                 blocks[col + y as usize] = if cold && y == top { block::ICE } else { block::WATER };
+                             }
+-                            blocks[col + s as usize] = pick(st.bed, pat);
++                            blocks[col + low as usize] = pick(st.bed, pat);
+                         }
+                         continue;
+                     }
+                 }
+                 let Some(p) = plan else { continue };
++                if set.blacklist.contains(&biomes[x * 16 + z]) {
++                    continue;
++                }
+                 let (ws, bed) = (p.water_y, p.bed_y);
+                 if s < 5 || bed < 5 || ws > 120 {
+                     continue;
+@@ -1190,12 +1435,14 @@
+                 }
+                 if p.in_channel {
+                     // Channel: water up to the surface, whatever stood above it removed, a bed under it (built up where the ground is lower).
++                    let bed = bed_at(&p);
++                    let icy = cold && p.speed < set.ice_speed;
+                     if s + 6 < bed {
+                         continue;
+                     }
+                     for y in bed + 1..=s.max(ws).min(126) {
+                         blocks[col + y as usize] = if y <= ws {
+-                            if cold && y == ws { block::ICE } else { block::WATER }
++                            if icy && y == ws { block::ICE } else { block::WATER }
+                         } else {
+                             block::AIR
+                         };
+@@ -1245,6 +1492,17 @@
+                     if ns > 0 && ns < 126 && blocks[col + ns as usize] == block::GRASS && blocks[col + ns as usize + 1] == block::AIR && r < 0.12 * f {
+                         blocks[col + ns as usize + 1] = if r < 0.06 * f { block::FLOWER_Y } else { block::FLOWER_R };
+                     }
++                    // Bank features (`BankFeature`, cut down): reeds where the ground is level with the water (sugar cane needs water beside
++                    // its base), and now and then a boulder of cobblestone and moss. UNVERIFIED: the mod's templates are not followed.
++                    let r2 = unit3(0x72, wx as i64, wz as i64);
++                    let base = if ns > 0 && ns < 120 { blocks[col + ns as usize] } else { 0 };
++                    if ns == ws && k < 2.0 && matches!(base, block::GRASS | block::DIRT | block::SAND) && blocks[col + ns as usize + 1] == block::AIR && r2 < 0.12 {
++                        for y in ns + 1..=ns + 1 + (r2 * 25.0) as i32 % 3 {
++                            blocks[col + y as usize] = block::REED;
++                        }
++                    } else if ns > ws && ns < 120 && k > 1.5 && k < band && base == block::GRASS && blocks[col + ns as usize + 1] == block::AIR && r2 > 0.995 {
++                        blocks[col + ns as usize + 1] = if r2 > 0.998 { block::MOSSY } else { block::COBBLE };
++                    }
+                 }
+             }
+         }
+@@ -1258,6 +1516,9 @@
+ pub struct Hydro {
+     seed: i64,
+     plates: Mutex<Vec<((i32, i32), Arc<OnceLock<Arc<Network>>>)>>,
++    /// Whether this world's plates go through the disk cache (`cache_dir`). The World Preview's do not: its seed, type and Natural
++    /// Temperature settings are not those of the world whose folder `cache_dir` points at, and a file does not know them.
++    disk: bool,
+ }
+ 
+ impl Hydro {
+@@ -1265,7 +1526,15 @@
+     pub fn of(seed: i64, tectonic: bool) -> Arc<Hydro> {
+         static WORLDS: OnceLock<Mutex<HashMap<(i64, bool), Arc<Hydro>>>> = OnceLock::new();
+         let mut m = WORLDS.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+-        m.entry((seed, tectonic)).or_insert_with(|| Arc::new(Hydro { seed, plates: Mutex::default() })).clone()
++        m.entry((seed, tectonic)).or_insert_with(|| Arc::new(Hydro { seed, plates: Mutex::default(), disk: true })).clone()
++    }
++
++    /// The `Hydro` the World Preview reads: shared by the preview's workers like `of`, but apart from the game's worlds and never read from
++    /// or written to the disk cache.
++    pub fn of_preview(seed: i64, tectonic: bool) -> Arc<Hydro> {
++        static PREVIEWS: OnceLock<Mutex<HashMap<(i64, bool), Arc<Hydro>>>> = OnceLock::new();
++        let mut m = PREVIEWS.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
++        m.entry((seed, tectonic)).or_insert_with(|| Arc::new(Hydro { seed, plates: Mutex::default(), disk: false })).clone()
+     }
+ 
+     /// The network of a plate, routed with `probe` if nobody has yet. A second thread that needs the same plate waits for the first.
+@@ -1284,7 +1553,18 @@
+                 s
+             }
+         };
+-        slot.get_or_init(|| Arc::new(build(self.seed, key, probe))).clone()
++        slot.get_or_init(|| {
++            let file = self.disk.then(|| CACHE.lock().ok().and_then(|c| c.clone())).flatten().map(|d| d.join(format!("{:x}_{}_{}.net", self.seed, key.0, key.1)));
++            if let Some(n) = file.as_ref().and_then(|f| std::fs::read(f).ok()).and_then(|b| Network::from_bytes(&b)) {
++                return Arc::new(n);
++            }
++            let n = build(self.seed, key, probe);
++            if let Some(f) = file {
++                let _ = f.parent().map(std::fs::create_dir_all);
++                let _ = std::fs::write(f, n.to_bytes());
++            }
++            Arc::new(n)
++        }).clone()
+     }
+ 
+     /// The networks that reach chunk (cx, cz): its plate's and the neighbours' whose margin covers it.
+@@ -1329,8 +1609,16 @@
+ 
+ /// The current at a point in blocks per second, `None` away from a river or on a plate not made yet.
+ pub fn current(x: f32, z: f32) -> Option<[f32; 2]> {
++    current_for(x, z, Push::Player)
++}
++
++/// `current` for a kind of pusher (a boat is pushed harder than a player or a mob).
++pub fn current_for(x: f32, z: f32, k: Push) -> Option<[f32; 2]> {
++    if !settings().enabled {
++        return None;
++    }
+     let h = WATCHED.lock().ok()?.clone()?;
+-    h.peek(x, z)?.flow_at(x, z)
++    h.peek(x, z)?.flow_at(x, z, k)
+ }
+ 
+ #[cfg(test)]
+@@ -1418,7 +1706,7 @@
+     /// The carve puts water in a chunk with a river, holds it up, and leaves most chunks alone.
+     #[test]
+     fn carved_water_rests_on_ground() {
+-        let h = Hydro { seed: SEED, plates: Mutex::default() };
++        let h = Hydro { seed: SEED, plates: Mutex::default(), disk: false };
+         let (mut water, mut touched, mut chunks) = (0, 0, 0);
+         let (sx, sz) = plate_seed_point(SEED, plate_at(SEED, 0.0, 0.0).0, plate_at(SEED, 0.0, 0.0).1);
+         for cx in (sx / 16.0) as i32 - 12..(sx / 16.0) as i32 + 12 {
+@@ -1462,12 +1750,39 @@
+             .iter()
+             .map(|&(x1, z1, x2, z2, w)| {
+                 let y = grade - inset_for(w) as f64;
+-                Seg { x1, z1, y1: y, w1: w, x2, z2, y2: y, w2: w, sp: 1.0, o1: 0.0, o2: 0.0 }
++                Seg { x1, z1, y1: y, w1: w, x2, z2, y2: y, w2: w, sp: 1.0, o1: 0.0, o2: 0.0, bend: 0.0 }
+             })
+             .collect();
+         Network { index: index_of(&segs), segs, lake_of: Vec::new(), lake_top: Vec::new(), g0: (0, 0), n: (0, 0) }
+     }
+ 
++    /// The World Preview paints water where `carve` puts it: on flat ground, on ground far under the bed, and on a hill.
++    #[test]
++    fn the_preview_water_matches_the_carve() {
++        let reg = Region { nets: vec![Arc::new(made(&[(0.0, 8.0, 15.0, 8.0, 2.0)]))] };
++        for top in [69usize, 66, 30] {
++            let mut b = vec![block::AIR; 16 * 16 * 128];
++            for x in 0..16usize {
++                for z in 0..16usize {
++                    for y in 0..=top {
++                        b[(x << 11) | (z << 7) | y] = block::STONE;
++                    }
++                }
++            }
++            reg.carve(0, 0, &mut b, &vec![Biome::Plains; 256], &vec![0.8; 256]);
++            let mut wet = 0;
++            for x in 0..16usize {
++                for z in 0..16usize {
++                    let carved = b[(x << 11) | (z << 7)..][..128].iter().any(|&c| c == block::WATER);
++                    let seen = reg.water_at(x as i32, z as i32, top as i32, Biome::Plains) == 1;
++                    assert_eq!(carved, seen, "ground {top}: column ({x}, {z}) carved {carved}, preview {seen}");
++                    wet += usize::from(carved);
++                }
++            }
++            assert_eq!(wet > 0, top >= 60, "ground {top}: {wet} wet columns");
++        }
++    }
++
+     /// A river on a terrace is not overwritten by a lower river whose bank reaches it: the lower network comes first, as the plate's own
+     /// does. Its bank used to take the upper channel's columns (cut or skipped), leaving no river or water standing on a cliff.
+     /// Two channels that overlap (a stream joining a river, at different levels) are one water: every column of the overlap has the same
+@@ -1607,6 +1922,60 @@
+     }
+ 
+     /// A river's current points downstream (west here) at a speed in the mod's range.
++    fn plan_at_side(side: f64, bend: f64) -> Plan {
++        Plan { in_channel: true, water_y: 62, bed_y: 56, blend: 0.0, distance: side.abs() * 6.0, width: 6.0, grade: 62.0, dir: [1.0, 0.0], speed: 1.0, to_outlet: 0.0, side, bend }
++    }
++
++    #[test]
++    fn the_bed_is_deepest_on_the_centre_line() {
++        assert_eq!(bed_at(&plan_at_side(0.0, 0.0)), 56);
++        assert!(bed_at(&plan_at_side(0.5, 0.0)) > 56 && bed_at(&plan_at_side(1.0, 0.0)) > bed_at(&plan_at_side(0.5, 0.0)));
++        assert_eq!(bed_at(&plan_at_side(1.0, 0.0)), 60); // 0.4 of 6 = 2.4 -> 2
++        assert_eq!(bed_at(&Plan { bed_y: 61, ..plan_at_side(1.0, 0.0) }), 61); // never under one block of water
++    }
++
++    #[test]
++    fn a_bend_digs_its_outer_bank() {
++        // Turning left, the outer bank is the right one (side < 0): deeper there than on the inner side, and the straight reach is even.
++        assert_eq!(bed_at(&plan_at_side(0.5, 0.0)), bed_at(&plan_at_side(-0.5, 0.0)));
++        assert!(bed_at(&plan_at_side(-0.5, 1.0)) < bed_at(&plan_at_side(0.5, 1.0)));
++        assert!(bed_at(&plan_at_side(0.5, -1.0)) < bed_at(&plan_at_side(-0.5, -1.0)));
++    }
++
++    #[test]
++    fn the_cache_round_trips_and_refuses_a_cut_file() {
++        let net = made(&[(0.0, 0.0, 100.0, 0.0, 2.0), (100.0, 0.0, 200.0, 40.0, 2.0)]);
++        let b = net.to_bytes();
++        let back = Network::from_bytes(&b).expect("reads back");
++        assert_eq!(back.segs.len(), net.segs.len());
++        assert_eq!(back.plan(50.0, 1.0).map(|p| p.water_y), net.plan(50.0, 1.0).map(|p| p.water_y));
++        assert!(Network::from_bytes(&b[..b.len() - 1]).is_none());
++        assert!(Network::from_bytes(b"HYD\xff\0\0\0").is_none());
++    }
++
++    #[test]
++    fn a_boat_is_pushed_harder_than_a_player() {
++        let s = Settings::default();
++        assert!(s.factor(Push::Boat) > s.factor(Push::Player) && s.factor(Push::Mob) == s.factor(Push::Player));
++        assert!((BASE_PUSH * s.factor(Push::Player) - 1.5).abs() < 1e-9);
++    }
++
++    #[test]
++    fn the_lake_warp_stays_inside_four_blocks() {
++        for x in -40..40 {
++            for z in -40..40 {
++                assert!(warp(x, z, 3).abs() <= 4.0 && warp(x, z, 4).abs() <= 4.0);
++            }
++        }
++    }
++
++    #[test]
++    fn settings_read_their_lines() {
++        let s = Settings::parse("hydro:false\nplayerPush:2.5\nhydroBlacklist:desert, Beach, nope\nx", &[Biome::Desert, Biome::Beach, Biome::Plains]);
++        assert!(!s.enabled && s.player_push == 2.5 && s.boat_push == 2.0 && s.blacklist == vec![Biome::Desert, Biome::Beach]);
++        assert_eq!(Settings::parse("playerPush:abc", &[]), Settings::default());
++    }
++
+     #[test]
+     fn the_current_follows_the_river() {
+         let net = build(SEED, plate_at(SEED, 0.0, 0.0), &mut land);

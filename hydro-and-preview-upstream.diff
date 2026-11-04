@@ -1,0 +1,2219 @@
+diff -ruN a/README.md b/README.md
+--- a/README.md	2026-11-04 11:14:23.534343620 +0000
++++ b/README.md	2026-11-04 11:14:27.745632137 +0000
+@@ -58,7 +58,7 @@
+ | M14b Options + game menu | written without a toolchain: not compiled, not run (+5 tests in `options.rs`, 1 in `touch_ui.rs`) | `options.rs`: b1.7.3's `GameSettings` (`options.txt`), `GuiOptions`, `GuiVideoSettings`, `GuiControls`, `GuiSlider` and `GuiIngameMenu`, from the pause button and the title screen's "Options...". Replaces the old pause menu (its Reset world button is gone); Pregen, Fly and LoD debug stay top-left; new `LoD: ON/OFF` button in Options. Sensitivity, invert, render distance, GUI scale, performance cap and difficulty act; music, sound, bobbing, anaglyph, advanced OpenGL, graphics, smooth lighting and the keys are stored only. See ROADMAP changelog. |
+ | Options list (Sodium layout, 2026-11-01) | written without a toolchain: not compiled, not run, not seen on a device (+9 tests in `options.rs`, +4 in `ui.rs`; `tools/optlist_proto.py` runs here: layout, text widths, tips and the clip maths against the real font); **NOT b1.7.3** | `options.rs` + new `ui.rs` + `menu.rs`: the options screen is Sodium's `VideoSettingsScreen` in b1.7.3's skin. ONE scrolling list of every setting (General, Graphics, Performance, Effects, Controls, Controller buttons, Controller tuning), each row its name on the left and a stone button or slider on the right; a page list down the left jumps to a section and lights the section in view as the list scrolls (LB / RB step it); group headings; a description pane (beside the list on a wide screen, a strip under it on a narrow one) explains the last tapped setting; settings that are saved but read by nothing (Graphics, Smooth Lighting, Advanced OpenGL, 3D Anaglyph, the keys) are dim, like Sodium's unavailable options. A drag scrolls (a drag that starts on a slider and goes along it moves the slider, one that goes up scrolls), a tap acts on lift. The Keys / Controller tabs and the Tuning... page are gone (one list), Dig Delay lives under Controls only. Without a scissor in the HUD pass, `ui::clip` cuts the quads at the list's edges. The same look (title with rules and studs, bevelled panels, coloured world-kind tags, empty-list hint, shared scroll bar) on the title screen, world list, create / rename / delete screens and the game menu. Not done: search, kinetic scrolling, a mouse wheel (no events for it), restyling the atmosphere editor. Controls (look and keys, pad buttons, pad tuning) is a tab of its own beside Settings; Graphics has an FOV slider (30 .. 110, 70 by default) and Brightness and Gamma percent sliders (50% .. 150%, final pass of both renderers). |
+ | M15 Controller (Controllify port) | written without a toolchain: not compiled, not run (+7 tests in `gamepad.rs`, 1 in `options.rs`) | `input/gamepad.rs`: isXander's Controllify, the parts b1.7.3 has. Sticks walk and look (Controllify's deadzone, 6 look curves, 10 deg/tick at 100%), triggers dig / hit / place, bumpers and the hotbar wheel pick slots, a virtual mouse drives every menu and container, touch buttons hide while a pad is in use, rumble on damage / block break / explosion (`rumble.rs`, JNI). New **Controls > Controller** tab (buttons page + tuning page), saved as `pad_*` in `options.txt`. Button hints (2026-11-02): a bottom-right list of what the bound buttons do while a pad is in use (`Pad::hints`), drawn with the Controller Tooltip Selector pack's Xbox, PlayStation or Switch pictures (`assets/padbtn.rgba`, `tools/gen_pad_buttons.py`, the HUD texture's `PAD_Y` block) or as text; **Button Hints** and **Button Icons** in Controls > Controller tuning, saved as `pad_hints`, `pad_iconStyle`. New **Drop** bind (D-Down by default, `pad_drop`): throws one item of the selected slot. **Hint placement and size (2026-11-02):** the hints no longer sit on a fixed corner: each screen hands in the rects it draws (`menu::Menu::avoid`, `options::OptionsUi::avoid` / `Pause::avoid`, `stats_ui::StatsUi::avoid`, the hotbar while playing) and the hints slide along the bottom (then the top edge) to the first spot 4 GUI units clear of all of them, shrink to half their size, turn into the other layout, or are left out; **Hint Size** (50% .. 200% of the GUI scale, `pad_hintSize`) and **Hint Layout** (Auto = a row in menus and a list while playing, Horizontal, Vertical; `pad_hintLayout`) in Controls > Controller tuning. Written without a toolchain, not compiled. Not ported: gyro, DualSense extras, on-screen keyboard, chat / drop / perspective (not in mc-rs / b1.7.3); sprint is the row below, on L3. |
+-| World Preview (2026-11-04) | written without a toolchain: not compiled, not run, not seen on a device (+2 tests in `preview.rs`) | `preview.rs`: port of World Preview Prime's idea (background tiles, biome / height maps, biome list highlight, read-out) as a screen opened by **World Preview** at Create World's top left. Reads the seed (a blank field's random seed is fixed when Create World opens), the world type and every `NaturalSettings` field (workers build `OverworldGenerator::preview` + its chunk manager after `natural::set`); the type can be cycled and **Settings** opens World-Gen Settings and returns with the map rebuilt. Height comes from the density column (`height_at`), not a made chunk. Views: Biomes, Relief, Height, Temperature, Humidity. Touch: drag pans, pinch zooms (`TouchUi::take_pinch`, second finger = `PointerRole::Pinch`), double tap zooms, tap reads out a point, scrolling legend. Not in it: rivers, structures, caves, seed editing, fling. |
++| World Preview (2026-11-04) | written without a toolchain: not compiled, not run, not seen on a device (+2 tests in `preview.rs`) | `preview.rs`: port of World Preview Prime's idea (background tiles, biome / height maps, biome list highlight, read-out) as a screen opened by **World Preview** at Create World's top left. Reads the seed (a blank field's random seed is fixed when Create World opens), the world type and every `NaturalSettings` field (workers build `OverworldGenerator::preview` + its chunk manager after `natural::set`); the type can be cycled and **Settings** opens World-Gen Settings and returns with the map rebuilt. Height comes from the density column (`height_at`), not a made chunk. Views: Biomes, Relief, Height, Temperature, Humidity. Touch: drag pans, pinch zooms (`TouchUi::take_pinch`, second finger = `PointerRole::Pinch`), double tap zooms, tap reads out a point, scrolling legend. Second pass (same day, also uncompiled): rivers and lakes from `Hydro` (`Region::water_at`), Blooming structure starts (`structory::starts`, legend filter, no real names: `structory.bin` keeps none), seed typed or re-rolled in the preview, fling and eased zoom, contour lines, chunk grid, live read-out, and the same map from the game menu's Tools page (**World Preview**) with the player and the explored area (`Explored`, `<world>/explored`, fog toggle). Not in it: caves, structure pieces. |
+ | Item + recipe viewer (REI, 2026-11-04) | written without a toolchain: not compiled, not run, not seen on a device (+3 tests in `rei.rs`; favorites, tags, categories, `@mod` and auto-crafting added 2026-11-04, +9 tests: `rei.rs` +7, `craft.rs` +1, `items.rs` +1); **NOT b1.7.3** | `rei.rs`: after Roughly Enough Items 26.2 (entry list, `DefaultDisplayViewingScreen`, crafting / fuel categories), drawn with the Immersive Interfaces REI support pack (bundled in `tools/packs/immersive_rei`, `tools/gen_rei.py` -> `assets/rei.rgba`, a 256 x 64 block of the HUD texture before the map block, `SHEET_H` 3276). Opened by **Tools > Inventory Cheat...** (gives items) or the small **R** button of the inventory and crafting table screens (views; the table's is new, for auto-crafting 3x3 recipes). Paged entry list (arrows or a horizontal swipe), soft-keyboard search, tap = recipes, long press = uses, **Mode: View / Give / Fav** (give: tap 1, long press a stack; fav: tap stars the item); the recipe view has category tabs (a registry, `Category` / `register_category`: Crafting, Smelting, Fuel, Block Drops from `items::block_drops`, Tag), page row, workstation, `+1` / `Stack` in give mode, and a star for the item and one on every display; Back walks the history. **Search**: words match the name, `@mod` the namespace (`@minecraft`, `@cortes` = ids 400..=430), `#tag` the tags (`TAGS`: ores, fuel, wool, dyes, ingots, slabs, food, armor, tools, swords, pickaxes, axes, shovels, hoes, `cortes:weapons`; b1.7.3 has none, these are this port's), a leading `-` excludes. **Favorites** (items and whole recipes): the **Favs** tab of the list (tap opens, long press removes), kept per world in `reiFavorites` of the world folder (`i`, `c`, `s`, `f`, `x` lines, 64 at most, bad lines dropped on load). **Auto-crafting**: only while the viewer is open over a crafting grid (inventory 2x2 or table 3x3) a crafting display has a `+` (long press: as many sets as the stock allows) that lays the recipe out from the main inventory through `craft::Screen::auto_fill` (all or nothing, the grid goes back to the inventory first), then closes the viewer; ingredients you lack are red and `+` says why it refuses. The star sprites are drawn by `tools/gen_rei.py` (the pack has none). **REI Theme** (Light / Dark, `reiTheme`) in Options > Effects. Not ported: favorites of REI's own entry types (Game Mode, Weather, Time), mob-loot category (loot is rolled per mob, `mobs.rs`), tag recipes in `#tag` autocompletion, auto-crafting from chests. |
+ | ImmediatelyFast ideas | written without a toolchain: not compiled, not run (+7 tests, 1 extended) | `render/hud.rs`: the HUD text is one textured quad per glyph from a font atlas at the end of the HUD texture (was a quad per run of lit pixels: about 7x fewer text vertices); `render/items.rs`: `SignCache` keeps a sign's text quads between frames (5 s expiry); `gpuErrorTrace:true` in `options.txt` logs a backtrace with each wgpu error (`gpu/context.rs`). The rest of ImmediatelyFast (batching, map and animated-item atlases, framebuffer switching, Apple GL upload, resource pack handling) has no counterpart in mc-rs. Idea source: ImmediatelyFast 26.3, RaphiMC, LGPL-3.0. See the performance changelog. |
+ | FerriteCore ideas | written without a toolchain: not compiled, not run (+2 tests) | Lazy `Nibbles` (no array while all metadata is 0), flat `lod::Cols` for a real chunk's columns (no `Vec` per column; `Tile0::put` no longer clones 4096), exact-size LoD vectors. The rest of FerriteCore (blockstate / model / component dedupe, thread detector) has no counterpart in mc-rs. Idea source: FerriteCore, malte0811, MIT. See ROADMAP changelog. |
+@@ -199,7 +199,7 @@
+ - `world::items::damage_dropped` / `placed_meta` — `Block.damageDropped` (sapling and leaves `& 3`, log, wool, slabs as
+   placed, lapis ore 4) and `Item.getPlacedBlockMetadata` (`ItemSapling`, `ItemLog`, `ItemCloth`, `ItemSlab` pass the damage,
+   `ItemLeaves` adds bit 8). `render::atlas::FLEECE` is `EntitySheep.fleeceColorTable`, indexed by the cloth metadata.
+-- `world::gen::hydro` — port of the Fabric mod Streams Reflowing 2.15.2, read from its class files: jittered 768-block plates (bit for bit the mod's `PlateLattice` + `Hashing`), a 16-block grid probed from the generator (Vanilla density or Tectonic), priority flood, accumulation, wetness-pruned headwaters, separation, lakes, Chaikin + meander, the mod's hydraulic width (slope / climate / variation / braids / delta mouths), depth, inset and flow-speed formulas, `Region::carve`, `current`. Every river drains to the sea (traced on past the window or culled). `tools/hydro_proto.py` is the Python reference.
++- `world::gen::hydro` — port of the Fabric mod Streams Reflowing 2.15.2 (2026-11-04: trough bed, reeds, boulders, fast water stays open, items drift), read from its class files: jittered 768-block plates (bit for bit the mod's `PlateLattice` + `Hashing`), a 16-block grid probed from the generator (Vanilla density or Tectonic), priority flood, accumulation, wetness-pruned headwaters, separation, lakes, Chaikin + meander, the mod's hydraulic width (slope / climate / variation / braids / delta mouths), depth, inset and flow-speed formulas, `Region::carve`, `current`. Every river drains to the sea (traced on past the window or culled). `tools/hydro_proto.py` is the Python reference.
+ - `world::gen::chunk_manager` — `shape` gives the vanilla terrain's wanted surface per density column (`OverworldGenerator::density`; `shaped(false)` for Tectonic). Biomes come from Minecraft 1.18+ style multi-noise (temperature, humidity, continentalness,
+   erosion, weirdness, domain shift) and `Biome::from_params`; `temperature` / `humidity` (0..1) come from the same noise. The b1.7.3
+   manager is `WorldChunkManager::legacy` (tests only: the terrain / surface / populate goldens run on it; its climate noise scales
+diff -ruN a/mc-rs/src/input/touch_ui.rs b/mc-rs/src/input/touch_ui.rs
+--- a/mc-rs/src/input/touch_ui.rs	2026-11-04 11:14:25.857968256 +0000
++++ b/mc-rs/src/input/touch_ui.rs	2026-11-04 11:14:27.707213974 +0000
+@@ -695,7 +695,7 @@
+     fn on_press(&mut self, pid: i32, x: f32, y: f32, role: PointerRole) {
+         // A second finger on a menu screen is half of a pinch (the World Preview zooms with it); other menus ignore `take_pinch`.
+         if role == PointerRole::Tap
+-            && self.menu
++            && (self.menu || self.paused)
+             && self.pointers.values().any(|p| p.role == PointerRole::Tap)
+             && !self.pointers.values().any(|p| p.role == PointerRole::Pinch)
+         {
+diff -ruN a/mc-rs/src/lib.rs b/mc-rs/src/lib.rs
+--- a/mc-rs/src/lib.rs	2026-11-04 11:14:25.858125863 +0000
++++ b/mc-rs/src/lib.rs	2026-11-04 11:14:27.708379211 +0000
+@@ -144,6 +144,9 @@
+     /// The world's World-Gen Settings (`menu::Info::nat`) and, read only, their screen from the game menu's Tools page.
+     nat: world::gen::natural::NaturalSettings,
+     gen_ui: Option<gen_ui::GenUi>,
++    /// The World Preview of the world being played (`PauseEv::Preview`), and the chunks the player has been near (`<world>/explored`).
++    preview: Option<preview::Preview>,
++    explored: preview::Explored,
+     toast: stats_ui::Toast,
+     /// Ticks (1/20 s) not yet counted into `MINUTES`.
+     stat_t: f32,
+@@ -362,7 +365,7 @@
+         let mut stats = std::fs::read(dir.join("stats")).ok().and_then(|b| world::stats::Stats::decode(&b)).unwrap_or_default();
+         stats.add(world::stats::START_GAME, 1);
+         let mut app = Self {
+-            be, world_type: WorldType::Vanilla, lod: None, seed: 0, root: dir.clone(), opts, pause: None, stats, stats_ui: None, rei: None, nat: Default::default(), gen_ui: None, toast: Default::default(), stat_t: 0.0, stat_pos: glam::Vec3::ZERO, pig_fall: 0.0, cart_from: None, lod_on: false, menu: Some(Menu::new(&dir)),
++            be, world_type: WorldType::Vanilla, lod: None, seed: 0, root: dir.clone(), opts, pause: None, stats, stats_ui: None, rei: None, preview: None, explored: Default::default(), nat: Default::default(), gen_ui: None, toast: Default::default(), stat_t: 0.0, stat_pos: glam::Vec3::ZERO, pig_fall: 0.0, cart_from: None, lod_on: false, menu: Some(Menu::new(&dir)),
+             chunks, camera,
+             player,
+             last_frame: Instant::now(),
+@@ -565,6 +568,7 @@
+         if self.nether {
+             self.dir = self.dir.join("nether");
+         }
++        (self.explored, self.preview) = (preview::Explored::load(&self.overworld_dir().join("explored")), None);
+         // UNVERIFIED: the Java counts `createWorld` on the create screen and `loadWorld` on the list; here a world with a `level` is a load.
+         self.stats.add(if self.dir.join("level").exists() { world::stats::LOAD_WORLD } else { world::stats::CREATE_WORLD }, 1);
+         self.reset_world(false);
+@@ -586,7 +590,7 @@
+         self.chunks = ChunkManager::new_typed(0, RENDER_DIST, WorldType::Vanilla); // the world's workers stop on drop
+         self.lod = None;
+         self.menu = Some(Menu::new(&self.root));
+-        (self.pause, self.stats_ui, self.gen_ui, self.rei) = (None, None, None, None);
++        (self.pause, self.stats_ui, self.gen_ui, self.rei, self.preview) = (None, None, None, None, None);
+         self.touch.set_menu(true);
+         if let Ok(mut l) = LAST_WORLD.lock() {
+             *l = None;
+@@ -708,6 +712,11 @@
+         if let Err(e) = save::write(&self.dir.join("level"), &level.encode()) {
+             log::warn!("save: level file: {e}");
+         }
++        if self.explored.take_dirty() {
++            if let Err(e) = save::write(&self.overworld_dir().join("explored"), &self.explored.encode()) {
++                log::warn!("save: explored file: {e}");
++            }
++        }
+         let signs: Vec<_> = self.signs.iter().map(|(&p, t)| (p, t.clone())).collect();
+         if let Err(e) = save::write(&self.dir.join("decor"), &decor::encode(&self.paintings, &signs)) {
+             log::warn!("save: decor file: {e}");
+@@ -811,7 +820,11 @@
+             let info = self.pause_info();
+             let mut asked = Vec::new();
+             for ev in self.touch.take_screen_events() {
+-                if let Some(u) = self.rei.as_mut() {
++                if let Some(u) = self.preview.as_mut() {
++                    if u.event(ev, w, h, self.opts.gui_scale) != preview::PvOut::None {
++                        self.preview = None;
++                    }
++                } else if let Some(u) = self.rei.as_mut() {
+                     if let Some(o) = u.event(ev, w, h, &self.opts) {
+                         self.rei_out(o);
+                     }
+@@ -827,9 +840,16 @@
+                     asked.extend(p.event(ev, w, h, &mut self.opts, &info));
+                 }
+             }
++            // Two fingers on the game menu zoom the World Preview (always taken, so a pinch does not pile up).
++            if let Some((k, px, py)) = self.touch.take_pinch() {
++                if let Some(u) = self.preview.as_mut() {
++                    u.pinch(k, px, py, w, h, self.opts.gui_scale);
++                }
++            }
+             for a in asked {
+                 match a {
+                     PauseEv::Resume => self.touch.resume(),
++                    PauseEv::Preview => self.open_preview(),
+                     PauseEv::Rei => self.rei = Some(rei::ReiUi::new(true, self.rei_ctx())),
+                     PauseEv::Stats(ach) => self.stats_ui = Some(stats_ui::StatsUi::new(ach)),
+                     PauseEv::GenSettings => self.gen_ui = Some(gen_ui::GenUi::new(self.nat.clone(), false)),
+@@ -862,7 +882,10 @@
+             self.camera.pos = self.player.pos + glam::Vec3::new(0.0, EYE_HEIGHT - self.sneak_y, 0.0);
+             return;
+         }
+-        (self.pause, self.stats_ui, self.gen_ui, self.rei) = (None, None, None, None);
++        (self.pause, self.stats_ui, self.gen_ui, self.rei, self.preview) = (None, None, None, None, None);
++        if !self.nether {
++            self.explored.visit(self.player.pos.x.floor() as i32 >> 4, self.player.pos.z.floor() as i32 >> 4, self.opts.chunks().min(8));
++        }
+         // Four seconds in a portal: the other dimension (`EntityPlayerSP.onLivingUpdate`).
+         if self.portal_t >= 1.0 {
+             let p = self.audio.rnd() * 0.4 + 0.8;
+@@ -3017,6 +3040,16 @@
+ 
+     /// What the item viewer needs of the game: the open crafting grid, if any, and what the player has for it (auto-crafting), and this world's
+     /// folder (the favorites are kept there).
++    /// The game menu's World Preview: the world being played, read only, with the player and what they have explored. In the Nether the
++    /// map is the overworld's: its blocks are 8 of these.
++    fn open_preview(&mut self) {
++        let k = if self.nether { 8.0 } else { 1.0 };
++        let at = (f64::from(self.player.pos.x) * k, f64::from(self.player.pos.z) * k);
++        let v = preview::View { cx: at.0, cz: at.1, bpg: 3.0, mode: 0 };
++        let ig = preview::InGame { player: at, explored: self.explored.clone() };
++        self.preview = Some(preview::Preview::new_ingame(self.seed, self.world_type, &self.nat, v, ig));
++    }
++
+     fn rei_ctx(&self) -> rei::Ctx {
+         let grid = self.screen.as_ref().filter(|s| s.gw == 2 || s.gw == 3);
+         rei::Ctx { craft_gw: grid.map_or(0, |s| s.gw), have: grid.map_or_else(Vec::new, |s| s.have(&self.inv)), dir: Some(self.dir.clone()) }
+@@ -3733,7 +3766,7 @@
+     fn pad_sync(&mut self, dt: f32) {
+         self.touch.pad.capture = self.pause.as_ref().is_some_and(Pause::pad_waiting) || self.menu.as_ref().is_some_and(Menu::pad_waiting);
+         // The d-pad jumps between targets in a chest / furnace / bench / inventory screen and the pause menu's top page; the stick is the free cursor.
+-        self.touch.pad.snap = self.screen.is_some() || (self.touch.paused && self.stats_ui.is_none() && self.gen_ui.is_none() && self.pause.as_ref().is_some_and(Pause::top));
++        self.touch.pad.snap = self.screen.is_some() || (self.touch.paused && self.stats_ui.is_none() && self.gen_ui.is_none() && self.preview.is_none() && self.pause.as_ref().is_some_and(Pause::top));
+         self.touch.pad_update(dt, &self.opts.pad);
+         if let Some(d) = self.touch.take_nav() {
+             self.pad_nav(d);
+@@ -4340,7 +4373,10 @@
+         // The game menu (`GuiIngameMenu`, the death screen when dead), over the dimmed frame.
+         if paused {
+             let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
+-            if let Some(u) = &self.rei {
++            if let Some(u) = self.preview.as_mut() {
++                v.clear(); // it fills the screen; what the frame drew before would only use up the HUD pass's quads
++                u.draw(v, w, h, self.opts.gui_scale);
++            } else if let Some(u) = &self.rei {
+                 u.draw(v, w, h, &self.opts);
+             } else if let Some(u) = &self.gen_ui {
+                 u.draw(v, w, h, self.opts.gui_scale, true);
+@@ -4374,7 +4410,9 @@
+             let (s, ..) = crate::menu::scaled_gs(w, h, self.opts.gui_scale);
+             let rows: Vec<(crate::input::gamepad::Role, &str)> = Vec::new();
+             let avoid: Vec<[f32; 4]> = if paused {
+-                if let Some(u) = &self.rei {
++                if let Some(u) = &self.preview {
++                    u.avoid(w, h, self.opts.gui_scale)
++                } else if let Some(u) = &self.rei {
+                     u.avoid(w, h, &self.opts)
+                 } else if let Some(u) = &self.gen_ui {
+                     u.avoid(w, h, self.opts.gui_scale)
+diff -ruN a/mc-rs/src/menu.rs b/mc-rs/src/menu.rs
+--- a/mc-rs/src/menu.rs	2026-11-04 11:14:25.858808121 +0000
++++ b/mc-rs/src/menu.rs	2026-11-04 11:14:27.707430247 +0000
+@@ -484,11 +484,20 @@
+             return;
+         }
+         if self.scr == Scr::Preview {
++            if self.typing.is_some() {
++                // The seed is being typed (the keyboard is up): a tap anywhere finishes, as on Create World; `draw` hands the new seed over.
++                if matches!(ev, ScreenEv::Up(..)) {
++                    self.typing = None;
++                }
++                return;
++            }
+             let out = self.prev.as_mut().map_or(PvOut::Close, |p| p.event(ev, w, h, st.gui_scale));
+             match out {
+                 PvOut::None => {}
+                 PvOut::Close => self.close_preview(false),
+                 PvOut::Settings => self.close_preview(true),
++                PvOut::EditSeed => self.typing = Some(1),
++                PvOut::Random => (self.seed, self.rand_seed) = (String::new(), now_nanos() as i64),
+             }
+             return;
+         }
+@@ -782,7 +791,14 @@
+             HudPipeline::push_text(v, x * s, y * s, s, t, rgb(c));
+         };
+         if self.scr == Scr::Preview {
++            if self.typing.is_some() {
++                dirt(v, s, [0.0, 0.0, gw, gh], 0.0, 0x404040);
++                self.draw_typing(v, s, gw, 1);
++                return;
++            }
++            let seed = self.world_seed(); // typed, re-rolled or unchanged: the map follows the seed field
+             if let Some(p) = self.prev.as_mut() {
++                p.set_seed(seed);
+                 p.draw(v, w, h, st.gui_scale); // its own background: no dirt under it (the HUD pass holds few quads)
+             }
+             return;
+diff -ruN a/mc-rs/src/options.rs b/mc-rs/src/options.rs
+--- a/mc-rs/src/options.rs	2026-11-04 11:14:25.859018122 +0000
++++ b/mc-rs/src/options.rs	2026-11-04 11:14:27.707856587 +0000
+@@ -1432,6 +1432,8 @@
+     Stats(bool),
+     /// Open `gen_ui` read only: the world's World-Gen Settings.
+     GenSettings,
++    /// Open the World Preview of the world being played (`preview::Preview::new_ingame`).
++    Preview,
+     /// Open `rei`, the item and recipe viewer, giving items.
+     Rei,
+ }
+@@ -1448,6 +1450,7 @@
+     Debug,
+     Info,
+     GenSettings,
++    Preview,
+     /// The sun, bottom right: the live atmosphere editor.
+     Atmos,
+     /// Opens the item and recipe viewer (`rei.rs`, cheat mode).
+@@ -1524,7 +1527,8 @@
+             (PAct::Info, [hw + 2.0, y + 24.0, 118.0, 20.0], if info.info { "Info: on" } else { "Info: off" }.to_string(), true),
+             (PAct::Debug, [hw - 120.0, y + 48.0, 240.0, 20.0], debug.to_string(), true),
+             (PAct::GenSettings, [hw - 120.0, y + 72.0, 240.0, 20.0], "World-Gen Settings...".to_string(), true),
+-            (PAct::Rei, [hw - 120.0, y + 96.0, 240.0, 20.0], "Inventory Cheat...".to_string(), true),
++            (PAct::Rei, [hw - 120.0, y + 96.0, 118.0, 20.0], "Inventory Cheat".to_string(), true),
++            (PAct::Preview, [hw + 2.0, y + 96.0, 118.0, 20.0], "World Preview".to_string(), true),
+             (PAct::ToolsDone, [hw - 100.0, y + 120.0, 200.0, 20.0], "Done".to_string(), true),
+         ]
+     }
+@@ -1557,6 +1561,7 @@
+                     PAct::Debug => Some(PauseEv::LodDebug),
+                     PAct::Info => Some(PauseEv::Info),
+                     PAct::GenSettings => Some(PauseEv::GenSettings),
++                    PAct::Preview => Some(PauseEv::Preview),
+                     PAct::Rei => Some(PauseEv::Rei),
+                     PAct::Options => {
+                         self.opt = Some(OptionsUi::new());
+diff -ruN a/mc-rs/src/preview.rs b/mc-rs/src/preview.rs
+--- a/mc-rs/src/preview.rs	2026-11-04 11:14:25.859312617 +0000
++++ b/mc-rs/src/preview.rs	2026-11-04 11:14:27.728873184 +0000
+@@ -15,6 +15,11 @@
+ //! - The HUD pass holds only `gles::HUD_QUADS` quads, so the map is run-length merged and the cell size is chosen to keep it within ~4300
+ //!   quads; colours are quantized so neighbours merge.
+ //!
++//! Second pass (2026-11-04): rivers and lakes from the game's own `Hydro` (`Region::water_at`), the Structory starts of a Blooming world
++//! (`structory::starts`, with a legend filter), a seed that can be typed or re-rolled here, fling and eased zoom, contour lines, a chunk
++//! grid, a live read-out of the middle of the map and, from the game menu, the same map of the world being played with the player and
++//! the explored area (`Explored`, `<world>/explored`).
++//!
+ //! Everything the Create World screen can change is read: the seed (the random one is fixed when the screen opens, `Menu::rand_seed`),
+ //! the world type, and every field of `NaturalSettings` (the generator and the chunk manager are made from them, after `natural::set`).
+ //! The world type can also be cycled here, and `Settings` opens the World-Gen Settings screen and comes back here with the map rebuilt.
+@@ -25,7 +30,9 @@
+ use crate::render::hud::{HudPipeline, HudVertex};
+ use crate::ui;
+ use crate::world::biome::Biome;
++use crate::world::gen::hydro::Region;
+ use crate::world::gen::natural::{self, NaturalSettings};
++use crate::world::gen::structory;
+ use crate::world::gen::overworld::{OverworldGenerator, WorldType, SEA_LEVEL};
+ use std::collections::{HashMap, HashSet};
+ use std::sync::{mpsc, Arc, Mutex};
+@@ -42,11 +49,20 @@
+ /// Tiles asked for and not yet delivered, at most.
+ const IN_FLIGHT: usize = WORKERS * 3;
+ const MAX_TILES: usize = 700;
+-/// Quads the map may use (the HUD pass holds 6144 for everything).
++/// Quads the map may use (the HUD pass holds 6144 for everything); less while the contour lines need room.
+ const MAP_QUADS: f32 = 4300.0;
++const MAP_QUADS_LINES: f32 = 3200.0;
+ const BPG_MIN: f32 = 0.5;
+ const BPG_MAX: f32 = 160.0;
+-const BAR: f32 = 24.0;
++/// Height of the two bars (two rows of buttons on top, one below): the map lies between them.
++const TOP: f32 = 46.0;
++const BOT: f32 = 24.0;
++/// Structure starts are asked for in squares of this many blocks, and only while zoomed in at most this far (blocks per GUI unit).
++const MARK_SPAN: i32 = 1024;
++const MARK_ZOOM: f32 = 48.0;
++/// Contour lines every this many blocks (so one lies on the sea level), and the most quads they may use.
++const CONTOUR: i32 = 8;
++const CONTOUR_QUADS: usize = 1100;
+ const LEG_ROW: f32 = 12.0;
+ 
+ const ALL: [Biome; 19] = [
+@@ -148,53 +164,164 @@
+ 
+ // ---- tiles and the workers ----
+ 
+-/// `TS` x `TS` samples, x outer and z inner: biome index, surface height, temperature and humidity (0..255).
++/// `TS` x `TS` samples, x outer and z inner: biome index, surface height, temperature and humidity (0..255), water (0 none, 1 river, 2 lake).
+ struct Tile {
+     b: Vec<u8>,
+     h: Vec<i16>,
+     t: Vec<u8>,
+     w: Vec<u8>,
++    r: Vec<u8>,
+ }
+ 
+-fn make(g: &mut OverworldGenerator, cm: &crate::world::gen::chunk_manager::WorldChunkManager, (lvl, tx, tz): Key) -> Tile {
++/// A structure start: (x, z, structure index).
++type Mark = (i32, i32, u8);
++
++enum Job {
++    Tile(Key),
++    /// Structure starts of the square `MARK_SPAN` blocks wide with this index.
++    Marks(i32, i32),
++}
++
++enum Res {
++    Tile(Key, Tile),
++    Marks((i32, i32), Vec<Mark>),
++}
++
++type Cache = HashMap<(i32, i32), Arc<Region>>;
++
++fn make(g: &mut OverworldGenerator, cm: &crate::world::gen::chunk_manager::WorldChunkManager, cache: &mut Cache, (lvl, tx, tz): Key) -> Tile {
+     let step = 4i32 << lvl;
+     let n = (TS * TS) as usize;
+-    let mut t = Tile { b: Vec::with_capacity(n), h: Vec::with_capacity(n), t: Vec::with_capacity(n), w: Vec::with_capacity(n) };
++    let mut t = Tile { b: Vec::with_capacity(n), h: Vec::with_capacity(n), t: Vec::with_capacity(n), w: Vec::with_capacity(n), r: Vec::with_capacity(n) };
+     for i in 0..TS {
+         for j in 0..TS {
+             // The centre of the cell, so a sample is what lies in the middle of the square it paints.
+             let (bx, bz) = ((tx * TS + i) * step + step / 2, (tz * TS + j) * step + step / 2);
+             let (b, temp, hum) = cm.sample_at(bx, bz);
++            let y = g.height_at(bx, bz, cm);
++            let mut water = g.water_at(bx, bz, cm, cache, y);
++            if water == 0 && lvl >= 2 {
++                // A cell this big would miss a river that runs beside its middle: look at the 8 points round it too.
++                let q = step / 3;
++                for (ox, oz) in [(-q, -q), (0, -q), (q, -q), (-q, 0), (q, 0), (-q, q), (0, q), (q, q)] {
++                    water = g.water_at(bx + ox, bz + oz, cm, cache, y);
++                    if water != 0 {
++                        break;
++                    }
++                }
++            }
+             t.b.push(idx(b));
+-            t.h.push(g.height_at(bx, bz, cm).clamp(0, 255) as i16);
++            t.h.push(y.clamp(0, 255) as i16);
+             t.t.push((temp.clamp(0.0, 1.0) * 255.0) as u8);
+             t.w.push((hum.clamp(0.0, 1.0) * 255.0) as u8);
++            t.r.push(water);
+         }
+     }
+     t
+ }
+ 
+ /// One worker: builds its own generator and chunk manager (the chunk manager reads `natural::current` when made, so `natural::set` came
+-/// first), then makes the tiles it is asked for until the sender is dropped.
+-fn spawn(seed: i64, ty: WorldType, rx: Arc<Mutex<mpsc::Receiver<Key>>>, tx: mpsc::Sender<(Key, Tile)>) {
++/// first), then does the jobs it is given until the sender is dropped.
++fn spawn(seed: i64, ty: WorldType, rx: Arc<Mutex<mpsc::Receiver<Job>>>, tx: mpsc::Sender<Res>) {
+     let _ = std::thread::Builder::new().name("world-preview".into()).spawn(move || {
+         let mut g = OverworldGenerator::preview(ty, seed);
+         let cm = g.manager();
++        let mut cache = Cache::new();
+         loop {
+-            let key = match rx.lock() {
++            let job = match rx.lock() {
+                 Ok(r) => match r.recv() {
+-                    Ok(k) => k,
++                    Ok(j) => j,
+                     Err(_) => break,
+                 },
+                 Err(_) => break,
+             };
+-            if tx.send((key, make(&mut g, &cm, key))).is_err() {
++            let res = match job {
++                Job::Tile(k) => Res::Tile(k, make(&mut g, &cm, &mut cache, k)),
++                Job::Marks(rx, rz) => {
++                    let (x0, z0) = (rx * MARK_SPAN, rz * MARK_SPAN);
++                    Res::Marks((rx, rz), structory::starts(seed, x0, z0, x0 + MARK_SPAN - 1, z0 + MARK_SPAN - 1, &mut |x, z| cm.sample_at(x, z).0))
++                }
++            };
++            if tx.send(res).is_err() {
+                 break;
+             }
+         }
+     });
+ }
+ 
++/// The chunks the player has been near (`<world>/explored`): level `k` holds them in squares of `2^k` chunks, so a coarse map cell is one
++/// look-up. Only level 0 is saved.
++#[derive(Clone, Default)]
++pub struct Explored {
++    lv: Vec<HashSet<(i32, i32)>>,
++    last: Option<(i32, i32)>,
++    dirty: bool,
++}
++
++impl Explored {
++    fn ensure(&mut self) {
++        if self.lv.len() <= usize::from(MAX_LVL) {
++            self.lv.resize_with(usize::from(MAX_LVL) + 1, HashSet::new);
++        }
++    }
++
++    pub fn mark(&mut self, cx: i32, cz: i32) {
++        self.ensure();
++        for k in 0..=MAX_LVL {
++            let new = self.lv[usize::from(k)].insert((cx >> k, cz >> k));
++            self.dirty |= new && k == 0;
++        }
++    }
++
++    /// The player is in chunk (cx, cz): everything within `r` chunks counts as seen. Cheap while the chunk does not change.
++    pub fn visit(&mut self, cx: i32, cz: i32, r: i32) {
++        if self.last == Some((cx, cz)) {
++            return;
++        }
++        self.last = Some((cx, cz));
++        for dx in -r..=r {
++            for dz in -r..=r {
++                if dx * dx + dz * dz <= r * r {
++                    self.mark(cx + dx, cz + dz);
++                }
++            }
++        }
++    }
++
++    /// Whether block (bx, bz)'s square of `2^k` chunks has been seen.
++    pub fn seen(&self, bx: i32, bz: i32, k: u8) -> bool {
++        self.lv.get(usize::from(k)).is_some_and(|s| s.contains(&((bx >> 4) >> k, (bz >> 4) >> k)))
++    }
++
++    /// True once after a chunk was added: the caller writes the file then.
++    pub fn take_dirty(&mut self) -> bool {
++        std::mem::take(&mut self.dirty)
++    }
++
++    pub fn encode(&self) -> Vec<u8> {
++        self.lv.first().map_or_else(Vec::new, |s| s.iter().flat_map(|&(x, z)| x.to_le_bytes().into_iter().chain(z.to_le_bytes())).collect())
++    }
++
++    pub fn decode(b: &[u8]) -> Self {
++        let mut e = Self::default();
++        for c in b.chunks_exact(8) {
++            e.mark(i32::from_le_bytes([c[0], c[1], c[2], c[3]]), i32::from_le_bytes([c[4], c[5], c[6], c[7]]));
++        }
++        e.dirty = false;
++        e
++    }
++
++    pub fn load(path: &std::path::Path) -> Self {
++        std::fs::read(path).map(|b| Self::decode(&b)).unwrap_or_default()
++    }
++}
++
++/// What the game menu hands the preview: where the player is (overworld block coordinates) and what the player has explored.
++pub struct InGame {
++    pub player: (f64, f64),
++    pub explored: Explored,
++}
++
+ // ---- the screen ----
+ 
+ /// What the view keeps between visits (the Create screen hands it back when the preview is opened again).
+@@ -217,10 +344,14 @@
+ #[derive(Clone, Copy, PartialEq, Debug)]
+ pub enum PvOut {
+     None,
+-    /// Back to Create World.
++    /// Back to Create World (or to the game).
+     Close,
+     /// The World-Gen Settings screen (the menu comes back here when it is done).
+     Settings,
++    /// The seed button was tapped: the menu opens the keyboard on the seed field.
++    EditSeed,
++    /// The dice: the menu draws a new random seed.
++    Random,
+ }
+ 
+ #[derive(Clone, Copy, PartialEq)]
+@@ -230,6 +361,15 @@
+     Bar,
+ }
+ 
++/// A row of the legend.
++#[derive(Clone, Copy, PartialEq)]
++enum LegRow {
++    Biome(Biome),
++    /// The "Structures" heading: a tap shows or hides the markers.
++    Head,
++    Struct(u8),
++}
++
+ struct Lay {
+     s: f32,
+     gw: f32,
+@@ -240,6 +380,12 @@
+     mode: R,
+     ty: R,
+     set: R,
++    seed: R,
++    rand: R,
++    fog: R,
++    cont: R,
++    grid: R,
++    live: R,
+     leg: R,
+     home: R,
+     zout: R,
+@@ -251,6 +397,20 @@
+     x >= r[0] && x < r[0] + r[2] && y >= r[1] && y < r[1] + r[3]
+ }
+ 
++const ST_COLORS: [u32; 16] =
++    [0xFF5555, 0xFFAA00, 0xFFFF55, 0x55FF55, 0x55FFFF, 0x5555FF, 0xFF55FF, 0xFFFFFF, 0xAA0000, 0x00AAAA, 0xAA00AA, 0xAAAAAA, 0x00AA00, 0xFFCC99, 0x99CCFF, 0xCC99FF];
++
++/// The name of a structure: its number and the first biomes it can start in (`structory.bin` keeps no names).
++fn st_label(st: u8) -> String {
++    let m = structory::mask(usize::from(st));
++    let names: Vec<&str> = ALL.iter().enumerate().filter(|(i, _)| m >> i & 1 != 0).map(|(_, b)| info(*b).0).collect();
++    match names.len() {
++        0 => format!("S{st}"),
++        1..=2 => format!("S{st} {}", names.join("/")),
++        n => format!("S{st} {}/{} +{}", names[0], names[1], n - 2),
++    }
++}
++
+ pub struct Preview {
+     pub seed: i64,
+     pub ty: WorldType,
+@@ -262,12 +422,24 @@
+     mode: u8,
+     tiles: HashMap<Key, Arc<Tile>>,
+     pending: HashSet<Key>,
+-    req: Option<mpsc::Sender<Key>>,
+-    res: mpsc::Receiver<(Key, Tile)>,
++    marks: HashMap<(i32, i32), Vec<Mark>>,
++    pending_marks: HashSet<(i32, i32)>,
++    req: Option<mpsc::Sender<Job>>,
++    res: mpsc::Receiver<Res>,
+     legend: bool,
+     scroll: f32,
+     hl: Option<u8>,
+-    /// The point a tap read out (block coordinates).
++    /// Structure markers shown, and the one structure the legend picked (the others hide).
++    show_struct: bool,
++    sh: Option<u8>,
++    /// Layers: contour lines, chunk grid, the live read-out of the map's middle.
++    contours: bool,
++    grid: bool,
++    live: bool,
++    /// Hide what the player has not explored (in the game only).
++    fog: bool,
++    ingame: Option<InGame>,
++    /// The point a tap (or, live, the middle) reads out (block coordinates).
+     probe: Option<(f64, f64)>,
+     press: Option<(f32, f32)>,
+     press_c: (f64, f64),
+@@ -277,12 +449,27 @@
+     pinched: bool,
+     last_tap: Option<(Instant, (f32, f32))>,
+     finger: Option<(f32, f32)>,
++    /// The finger's recent track (for the fling), the fling's speed (GUI units per second), the zoom being eased to (blocks per GUI unit,
++    /// and the GUI point it stays on), and the time of the last frame.
++    track: Vec<((f32, f32), Instant)>,
++    vel: (f32, f32),
++    anim: Option<(f32, f32, f32)>,
++    frame: Instant,
+     /// The level drawn last frame (for the read-out).
+     lvl: u8,
+ }
+ 
+ impl Preview {
+     pub fn new(seed: i64, ty: WorldType, nat: &NaturalSettings, v: View) -> Self {
++        Self::build(seed, ty, nat, v, None)
++    }
++
++    /// The preview of the world being played: read only (seed and type stay), with the player and the explored area.
++    pub fn new_ingame(seed: i64, ty: WorldType, nat: &NaturalSettings, v: View, ig: InGame) -> Self {
++        Self::build(seed, ty, nat, v, Some(ig))
++    }
++
++    fn build(seed: i64, ty: WorldType, nat: &NaturalSettings, v: View, ingame: Option<InGame>) -> Self {
+         let (_, res) = mpsc::channel();
+         let mut p = Self {
+             seed,
+@@ -294,11 +481,20 @@
+             mode: v.mode % MODES.len() as u8,
+             tiles: HashMap::new(),
+             pending: HashSet::new(),
++            marks: HashMap::new(),
++            pending_marks: HashSet::new(),
+             req: None,
+             res,
+             legend: false,
+             scroll: 0.0,
+             hl: None,
++            show_struct: true,
++            sh: None,
++            contours: false,
++            grid: false,
++            live: false,
++            fog: ingame.is_some(),
++            ingame,
+             probe: None,
+             press: None,
+             press_c: (0.0, 0.0),
+@@ -308,6 +504,10 @@
+             pinched: false,
+             last_tap: None,
+             finger: None,
++            track: Vec::new(),
++            vel: (0.0, 0.0),
++            anim: None,
++            frame: Instant::now(),
+             lvl: 0,
+         };
+         p.reset();
+@@ -318,12 +518,25 @@
+         View { cx: self.cx, cz: self.cz, bpg: self.bpg, mode: self.mode }
+     }
+ 
++    /// A new seed (typed or re-rolled on the Create screen): the map is made again. The same seed changes nothing.
++    pub fn set_seed(&mut self, seed: i64) {
++        if seed != self.seed {
++            self.seed = seed;
++            self.reset();
++        }
++    }
++
+     /// Throws every tile away and starts workers for the current seed, world type and Natural Temperature settings. The settings are
+-    /// handed to `natural` first: the workers' chunk managers take them when they are made (switch off, `natural` holds nothing).
++    /// handed to `natural` first: the workers' chunk managers take them when they are made (switch off, `natural` holds nothing). In the
++    /// game they are already there (the world's own) and stay.
+     fn reset(&mut self) {
+-        natural::set(Some(&self.nat));
++        if self.ingame.is_none() {
++            natural::set(Some(&self.nat));
++        }
+         self.tiles.clear();
+         self.pending.clear();
++        self.marks.clear();
++        self.pending_marks.clear();
+         let (tx, rx) = mpsc::channel();
+         let (qtx, qrx) = mpsc::channel();
+         let qrx = Arc::new(Mutex::new(qrx));
+@@ -334,20 +547,33 @@
+         self.res = rx;
+     }
+ 
+-    /// The biomes this world type can show, in the legend's order.
+-    fn biomes(&self) -> &'static [Biome] {
+-        if self.ty == WorldType::Blooming {
+-            &ALL
+-        } else {
+-            &ALL[..BASE]
++    /// Whether this world has structures to mark (Blooming, with `structory.bin`).
++    fn has_structs(&self) -> bool {
++        self.ty == WorldType::Blooming && structory::available()
++    }
++
++    /// The legend's rows: the biomes this world type can show, then the structures.
++    fn rows(&self) -> Vec<LegRow> {
++        let mut v: Vec<LegRow> = if self.ty == WorldType::Blooming { &ALL[..] } else { &ALL[..BASE] }.iter().map(|&b| LegRow::Biome(b)).collect();
++        if self.has_structs() {
++            v.push(LegRow::Head);
++            v.extend((0..structory::count().min(ST_COLORS.len())).map(|n| LegRow::Struct(n as u8)));
+         }
++        v
+     }
+ 
+     fn lay(&self, w: f32, h: f32, gs: u8) -> Lay {
+         let (s, gw, gh) = scaled_gs(w, h, gs);
+-        let (top, bottom) = (BAR, gh - BAR);
+-        let rows = self.biomes().len() as f32;
+-        let ph = (rows * LEG_ROW + 4.0).min(bottom - top - 16.0);
++        let (top, bottom) = (TOP, gh - BOT);
++        let ph = (self.rows().len() as f32 * LEG_ROW + 4.0).min(bottom - top - 16.0);
++        let none = [0.0; 4];
++        // The second row: in Create World the seed and the dice, in the game the way back to the player; then the layers.
++        let ing = self.ingame.is_some();
++        let (seed, rand, fog, cont, grid, live) = if ing {
++            ([204.0, 25.0, (gw - 206.0).max(0.0), 20.0], [2.0, 25.0, 34.0, 20.0], [38.0, 25.0, 44.0, 20.0], [84.0, 25.0, 40.0, 20.0], [126.0, 25.0, 36.0, 20.0], [164.0, 25.0, 36.0, 20.0])
++        } else {
++            ([2.0, 25.0, 126.0, 20.0], [130.0, 25.0, 36.0, 20.0], none, [168.0, 25.0, 40.0, 20.0], [210.0, 25.0, 36.0, 20.0], [248.0, 25.0, (gw - 250.0).clamp(30.0, 70.0), 20.0])
++        };
+         Lay {
+             s,
+             gw,
+@@ -356,8 +582,14 @@
+             bottom,
+             done: [2.0, 2.0, 46.0, 20.0],
+             mode: [50.0, 2.0, 96.0, 20.0],
+-            ty: [148.0, 2.0, 96.0, 20.0],
+-            set: [246.0, 2.0, (gw - 248.0).clamp(40.0, 80.0), 20.0],
++            ty: if ing { none } else { [148.0, 2.0, 96.0, 20.0] },
++            set: if ing { none } else { [246.0, 2.0, (gw - 248.0).clamp(40.0, 80.0), 20.0] },
++            seed,
++            rand,
++            fog,
++            cont,
++            grid,
++            live,
+             leg: [2.0, gh - 22.0, 58.0, 20.0],
+             home: [62.0, gh - 22.0, 50.0, 20.0],
+             zout: [gw - 58.0, gh - 22.0, 28.0, 20.0],
+@@ -369,11 +601,11 @@
+     /// What the pad's button hints keep off (px).
+     pub fn avoid(&self, w: f32, h: f32, gs: u8) -> Vec<R> {
+         let l = self.lay(w, h, gs);
+-        [[0.0, 0.0, l.gw, l.top], [0.0, l.bottom, l.gw, BAR]].into_iter().map(|r| r.map(|u| u * l.s)).collect()
++        [[0.0, 0.0, l.gw, l.top], [0.0, l.bottom, l.gw, BOT]].into_iter().map(|r| r.map(|u| u * l.s)).collect()
+     }
+ 
+     fn max_scroll(&self, l: &Lay) -> f32 {
+-        (self.biomes().len() as f32 * LEG_ROW + 4.0 - l.panel[3]).max(0.0)
++        (self.rows().len() as f32 * LEG_ROW + 4.0 - l.panel[3]).max(0.0)
+     }
+ 
+     /// Blocks per sample at level `lvl`.
+@@ -386,9 +618,9 @@
+         ((self.bpg * cs / 4.0).max(1.0).log2().ceil() as i32).clamp(0, i32::from(MAX_LVL)) as u8
+     }
+ 
+-    /// Size of a painted cell in GUI units: the smallest that keeps the map within `MAP_QUADS` quads.
+-    fn cell(l: &Lay) -> f32 {
+-        ((l.gw * (l.bottom - l.top)) / MAP_QUADS).sqrt().max(3.0)
++    /// Size of a painted cell in GUI units: the smallest that keeps the map within its quads (fewer while the contour lines are on).
++    fn cell(&self, l: &Lay) -> f32 {
++        ((l.gw * (l.bottom - l.top)) / if self.contours { MAP_QUADS_LINES } else { MAP_QUADS }).sqrt().max(3.0)
+     }
+ 
+     fn zoom_about(&mut self, l: &Lay, k: f32, gx: f32, gy: f32) {
+@@ -400,10 +632,16 @@
+         self.cz = wz - dy * f64::from(self.bpg);
+     }
+ 
++    /// Zoom by `k` about a GUI point, eased over a few frames (`draw` follows `anim`). Taps on the buttons add up.
++    fn zoom_to(&mut self, k: f32, gx: f32, gy: f32) {
++        let base = self.anim.map_or(self.bpg, |a| a.0);
++        self.anim = Some(((base / k).clamp(BPG_MIN, BPG_MAX), gx, gy));
++    }
++
+     /// Two fingers moved: `k` is the ratio of their distance now to before, (mx, my) px their midpoint (`TouchUi::take_pinch`).
+     pub fn pinch(&mut self, k: f32, mx: f32, my: f32, w: f32, h: f32, gs: u8) {
+         let l = self.lay(w, h, gs);
+-        (self.pinched, self.press, self.moved) = (true, None, false);
++        (self.pinched, self.press, self.moved, self.anim, self.vel) = (true, None, false, None, (0.0, 0.0));
+         if k.is_finite() && k > 0.0 {
+             self.zoom_about(&l, k, mx / l.s, my / l.s);
+         }
+@@ -419,6 +657,8 @@
+                 self.finger = Some(p);
+                 self.press = Some(p);
+                 (self.press_c, self.press_scroll, self.moved, self.pinched) = ((self.cx, self.cz), self.scroll, false, false);
++                (self.vel, self.anim) = ((0.0, 0.0), None);
++                self.track.clear();
+                 self.grab = if p.1 < l.top || p.1 >= l.bottom {
+                     Grab::Bar
+                 } else if self.legend && hit(l.panel, p.0, p.1) {
+@@ -442,6 +682,10 @@
+                         Grab::Map => {
+                             self.cx = self.press_c.0 - f64::from(p.0 - d.0) * f64::from(self.bpg);
+                             self.cz = self.press_c.1 - f64::from(p.1 - d.1) * f64::from(self.bpg);
++                            self.track.push((p, Instant::now()));
++                            if self.track.len() > 8 {
++                                self.track.remove(0);
++                            }
+                         }
+                         Grab::Legend => self.scroll = (self.press_scroll - (p.1 - d.1)).clamp(0.0, self.max_scroll(&l)),
+                         Grab::Bar => {}
+@@ -452,6 +696,9 @@
+                 self.finger = None;
+                 let down = self.press.take();
+                 let moved = std::mem::take(&mut self.moved);
++                if moved && !self.pinched && self.grab == Grab::Map {
++                    self.fling();
++                }
+                 if self.pinched || moved || down.is_none() {
+                     return PvOut::None;
+                 }
+@@ -461,8 +708,27 @@
+         PvOut::None
+     }
+ 
++    /// The finger lifted while moving: the map keeps going at the speed the finger had over the last 100 ms (if it was still moving).
++    fn fling(&mut self) {
++        let now = Instant::now();
++        let recent: Vec<((f32, f32), Instant)> = self.track.iter().copied().filter(|(_, t)| now.duration_since(*t) < Duration::from_millis(100)).collect();
++        if let (Some(&(a, ta)), Some(&(b, tb))) = (recent.first(), recent.last()) {
++            let dt = tb.duration_since(ta).as_secs_f32();
++            if dt > 0.01 {
++                let v = ((b.0 - a.0) / dt, (b.1 - a.1) / dt);
++                let sp = v.0.hypot(v.1);
++                if sp > 60.0 {
++                    let k = sp.min(1200.0) / sp;
++                    self.vel = (v.0 * k, v.1 * k);
++                }
++            }
++        }
++        self.track.clear();
++    }
++
+     fn tap(&mut self, p: (f32, f32), l: &Lay) -> PvOut {
+         let (hx, hy) = (l.gw / 2.0, (l.top + l.bottom) / 2.0);
++        let ing = self.ingame.is_some();
+         if hit(l.done, p.0, p.1) {
+             return PvOut::Close;
+         } else if hit(l.set, p.0, p.1) {
+@@ -471,29 +737,66 @@
+             self.mode = (self.mode + 1) % MODES.len() as u8;
+         } else if hit(l.ty, p.0, p.1) {
+             self.ty = self.ty.next();
+-            self.hl = self.hl.filter(|&b| (b as usize) < self.biomes().len());
+-            self.scroll = 0.0;
++            self.hl = None;
++            (self.sh, self.scroll) = (None, 0.0);
+             self.reset();
++        } else if !ing && hit(l.seed, p.0, p.1) {
++            return PvOut::EditSeed;
++        } else if hit(l.rand, p.0, p.1) {
++            if let Some(ig) = &self.ingame {
++                (self.cx, self.cz) = ig.player; // "Me"
++            } else {
++                return PvOut::Random;
++            }
++        } else if hit(l.fog, p.0, p.1) {
++            self.fog = !self.fog;
++        } else if hit(l.cont, p.0, p.1) {
++            self.contours = !self.contours;
++        } else if hit(l.grid, p.0, p.1) {
++            self.grid = !self.grid;
++        } else if hit(l.live, p.0, p.1) {
++            self.live = !self.live;
++            if !self.live {
++                self.probe = None;
++            }
+         } else if hit(l.leg, p.0, p.1) {
+             self.legend = !self.legend;
+         } else if hit(l.home, p.0, p.1) {
+             (self.cx, self.cz) = (0.0, 0.0);
+         } else if hit(l.zout, p.0, p.1) {
+-            self.zoom_about(l, 0.5, hx, hy);
++            self.zoom_to(0.5, hx, hy);
+         } else if hit(l.zin, p.0, p.1) {
+-            self.zoom_about(l, 2.0, hx, hy);
++            self.zoom_to(2.0, hx, hy);
+         } else if self.legend && hit(l.panel, p.0, p.1) {
+             let row = ((p.1 - l.panel[1] - 2.0 + self.scroll) / LEG_ROW).floor();
+-            if row >= 0.0 && (row as usize) < self.biomes().len() {
+-                let b = idx(self.biomes()[row as usize]);
+-                self.hl = if self.hl == Some(b) { None } else { Some(b) };
++            let rows = self.rows();
++            if row >= 0.0 && (row as usize) < rows.len() {
++                match rows[row as usize] {
++                    LegRow::Biome(b) => {
++                        let b = idx(b);
++                        self.hl = if self.hl == Some(b) { None } else { Some(b) };
++                    }
++                    LegRow::Head => self.show_struct = !self.show_struct,
++                    LegRow::Struct(n) => {
++                        self.show_struct = true;
++                        self.sh = if self.sh == Some(n) { None } else { Some(n) };
++                    }
++                }
+             }
+-        } else if p.1 >= l.top && p.1 < l.bottom {
++        } else if p.1 >= l.top && p.1 < l.bottom && !self.live {
+             let twice = self.last_tap.is_some_and(|(t, q)| t.elapsed() < Duration::from_millis(350) && (q.0 - p.0).hypot(q.1 - p.1) < 14.0);
+             self.last_tap = Some((Instant::now(), p));
+             self.probe = Some((self.cx + f64::from(p.0 - hx) * f64::from(self.bpg), self.cz + f64::from(p.1 - hy) * f64::from(self.bpg)));
+             if twice {
+-                self.zoom_about(l, 2.0, p.0, p.1);
++                self.zoom_to(2.0, p.0, p.1);
++                self.last_tap = None;
++            }
++        } else if p.1 >= l.top && p.1 < l.bottom {
++            // Live read-out follows the middle: a double tap still zooms.
++            let twice = self.last_tap.is_some_and(|(t, q)| t.elapsed() < Duration::from_millis(350) && (q.0 - p.0).hypot(q.1 - p.1) < 14.0);
++            self.last_tap = Some((Instant::now(), p));
++            if twice {
++                self.zoom_to(2.0, p.0, p.1);
+                 self.last_tap = None;
+             }
+         }
+@@ -515,11 +818,20 @@
+     }
+ 
+     /// Takes in what the workers made, drops the tiles furthest away when there are too many, and asks for the missing ones of the view:
+-    /// the coarse level first (cheap, so the map is never empty), then the wanted one, each nearest the middle first.
++    /// the coarse level first (cheap, so the map is never empty), then the wanted one, each nearest the middle first; then the structure
++    /// starts of the squares in view.
+     fn update(&mut self, l: &Lay, lvl: u8) {
+-        while let Ok((k, t)) = self.res.try_recv() {
+-            self.pending.remove(&k);
+-            self.tiles.insert(k, Arc::new(t));
++        while let Ok(r) = self.res.try_recv() {
++            match r {
++                Res::Tile(k, t) => {
++                    self.pending.remove(&k);
++                    self.tiles.insert(k, Arc::new(t));
++                }
++                Res::Marks(k, v) => {
++                    self.pending_marks.remove(&k);
++                    self.marks.insert(k, v);
++                }
++            }
+         }
+         if self.tiles.len() > MAX_TILES {
+             let (cx, cz) = (self.cx, self.cz);
+@@ -537,7 +849,7 @@
+         let (hw, hh) = (f64::from(l.gw / 2.0 * self.bpg), f64::from((l.bottom - l.top) / 2.0 * self.bpg));
+         let mut levels = vec![(lvl + 2).min(MAX_LVL), lvl];
+         levels.dedup();
+-        for lv in levels {
++        'tiles: for lv in levels {
+             let span = f64::from(TS) * Self::step(lv);
+             let (x0, x1) = (((self.cx - hw) / span).floor() as i32, ((self.cx + hw) / span).floor() as i32);
+             let (z0, z1) = (((self.cz - hh) / span).floor() as i32, ((self.cz + hh) / span).floor() as i32);
+@@ -554,13 +866,35 @@
+             want.sort_by(|a, b| a.0.total_cmp(&b.0));
+             for (_, k) in want {
+                 if self.pending.len() >= IN_FLIGHT {
+-                    return;
++                    break 'tiles;
+                 }
+-                if req.send(k).is_ok() {
++                if req.send(Job::Tile(k)).is_ok() {
+                     self.pending.insert(k);
+                 }
+             }
+         }
++        if self.has_structs() && self.show_struct && self.bpg <= MARK_ZOOM {
++            let span = f64::from(MARK_SPAN);
++            let (x0, x1) = (((self.cx - hw) / span).floor() as i32, ((self.cx + hw) / span).floor() as i32);
++            let (z0, z1) = (((self.cz - hh) / span).floor() as i32, ((self.cz + hh) / span).floor() as i32);
++            let mut want: Vec<(f64, (i32, i32))> = Vec::new();
++            for rx in x0..=x1 {
++                for rz in z0..=z1 {
++                    if !self.marks.contains_key(&(rx, rz)) && !self.pending_marks.contains(&(rx, rz)) {
++                        want.push((((f64::from(rx) + 0.5) * span - self.cx).hypot((f64::from(rz) + 0.5) * span - self.cz), (rx, rz)));
++                    }
++                }
++            }
++            want.sort_by(|a, b| a.0.total_cmp(&b.0));
++            for (_, k) in want {
++                if self.pending_marks.len() >= 8 {
++                    break;
++                }
++                if req.send(Job::Marks(k.0, k.1)).is_ok() {
++                    self.pending_marks.insert(k);
++                }
++            }
++        }
+     }
+ 
+     // ---- colours of a sample ----
+@@ -583,17 +917,30 @@
+         let Some((t, k)) = self.sample(lvl, i, j) else { return if (i + j) & 1 == 0 { 0x262626 } else { 0x2C2C2C } };
+         let (b, y) = (t.b[k], i32::from(t.h[k]));
+         let biome = info(ALL[b as usize % ALL.len()]).1;
+-        let c = match self.mode {
++        let mut c = match self.mode {
+             0 => biome,
+             1 => lit(biome, self.relief(lvl, i, j, y)),
+             2 => lit(hypso(y & !1), if y < SEA_LEVEL { 1.0 } else { self.relief(lvl, i, j, y) }),
+-            3 => return ramp(&TEMP, f32::from(t.t[k] >> 3) / 31.0),
+-            _ => return ramp(&HUMID, f32::from(t.w[k] >> 3) / 31.0),
++            3 => ramp(&TEMP, f32::from(t.t[k] >> 3) / 31.0),
++            _ => ramp(&HUMID, f32::from(t.w[k] >> 3) / 31.0),
+         };
+-        match self.hl {
+-            Some(h) if h != b => mix(c, 0x1A1A1A, 0.72),
+-            _ => c,
++        if self.mode < 3 {
++            match t.r[k] {
++                1 => c = mix(c, 0x3F7FE8, 0.85),
++                2 => c = mix(c, 0x2F6FD0, 0.85),
++                _ => {}
++            }
++            if self.hl.is_some_and(|h| h != b) {
++                c = mix(c, 0x1A1A1A, 0.72);
++            }
++        }
++        if let (true, Some(ig)) = (self.fog, &self.ingame) {
++            let st = 4i32 << lvl;
++            if !ig.explored.seen(i * st + st / 2, j * st + st / 2, lvl.saturating_sub(2)) {
++                c = mix(c, 0x0A0A0A, 0.68);
++            }
+         }
++        c
+     }
+ 
+     // ---- drawing ----
+@@ -601,21 +948,61 @@
+     pub fn draw(&mut self, v: &mut Vec<HudVertex>, w: f32, h: f32, gs: u8) {
+         let l = self.lay(w, h, gs);
+         let s = l.s;
+-        let lvl = self.level(Self::cell(&l));
++        let now = Instant::now();
++        let dt = now.duration_since(self.frame).as_secs_f32().min(0.1);
++        self.frame = now;
++        // A fling slows down; a zoom eases to its target (about the point it was asked at).
++        if self.press.is_none() && self.vel != (0.0, 0.0) {
++            self.cx -= f64::from(self.vel.0 * self.bpg * dt);
++            self.cz -= f64::from(self.vel.1 * self.bpg * dt);
++            let k = (-3.5 * dt).exp();
++            self.vel = (self.vel.0 * k, self.vel.1 * k);
++            if self.vel.0.hypot(self.vel.1) < 8.0 {
++                self.vel = (0.0, 0.0);
++            }
++        }
++        if let Some((t, gx, gy)) = self.anim {
++            let gap = t.ln() - self.bpg.ln();
++            let nb = if gap.abs() < 0.01 { t } else { (self.bpg.ln() + gap * (1.0 - (-12.0 * dt).exp())).exp() };
++            self.zoom_about(&l, self.bpg / nb, gx, gy);
++            if nb == t {
++                self.anim = None;
++            }
++        }
++        if self.live {
++            self.probe = Some((self.cx, self.cz));
++        }
++        let lvl = self.level(self.cell(&l));
+         self.lvl = lvl;
+         self.update(&l, lvl);
+-        v.clear();
+         HudPipeline::push_quad(v, 0.0, 0.0, l.gw * s, l.gh * s, rgb(0x161616));
+         self.draw_map(v, &l, lvl);
++        if self.grid {
++            self.draw_grid(v, &l);
++        }
+         self.draw_marks(v, &l);
+         // The bars, over the map's edges.
+         ui::panel(v, s, [0.0, 0.0, l.gw, l.top], 0.85);
+-        ui::panel(v, s, [0.0, l.bottom, l.gw, BAR], 0.85);
++        ui::panel(v, s, [0.0, l.bottom, l.gw, BOT], 0.85);
+         let over = |r: R| self.finger.is_some_and(|(x, y)| hit(r, x, y));
++        let ing = self.ingame.is_some();
+         button(v, s, l.done, "Done", true, over(l.done), None);
+         button(v, s, l.mode, &format!("View: {}", MODES[self.mode as usize]), true, over(l.mode), None);
+-        button(v, s, l.ty, &format!("Type: {}", ty_name(self.ty)), true, over(l.ty), None);
+-        button(v, s, l.set, "Settings", true, over(l.set), None);
++        if ing {
++            let t = format!("World: {}", ty_name(self.ty));
++            HudPipeline::push_text(v, 150.0 * s, 8.0 * s, s, &ui::fit(&t, l.gw - 152.0), rgb(0xA0A0A0));
++            button(v, s, l.rand, "Me", true, over(l.rand), None);
++            button(v, s, l.fog, "Fog", true, over(l.fog) || self.fog, None);
++            HudPipeline::push_text(v, (l.seed[0] + 2.0) * s, (l.seed[1] + 6.0) * s, s, &ui::fit(&format!("Seed {}", self.seed), l.seed[2] - 2.0), rgb(0xA0A0A0));
++        } else {
++            button(v, s, l.ty, &format!("Type: {}", ty_name(self.ty)), true, over(l.ty), None);
++            button(v, s, l.set, "Settings", true, over(l.set), None);
++            button(v, s, l.seed, &ui::fit(&format!("Seed: {}", self.seed), l.seed[2] - 8.0), true, over(l.seed), None);
++            button(v, s, l.rand, "Rand", true, over(l.rand), None);
++        }
++        button(v, s, l.cont, "Cont", true, over(l.cont) || self.contours, None);
++        button(v, s, l.grid, "Grid", true, over(l.grid) || self.grid, None);
++        button(v, s, l.live, "Live", true, over(l.live) || self.live, None);
+         button(v, s, l.leg, if self.legend { "Legend*" } else { "Legend" }, true, over(l.leg), None);
+         button(v, s, l.home, "Spawn", true, over(l.home), None);
+         button(v, s, l.zout, "-", true, over(l.zout), None);
+@@ -639,7 +1026,8 @@
+         }
+     }
+ 
+-    /// The painted cells: one quad per run of equal colour along a row, edges snapped to whole pixels so neighbours share them.
++    /// The painted cells: one quad per run of equal colour along a row, edges snapped to whole pixels so neighbours share them; with
++    /// the contour lines on, a thin line on the edge between two cells that lie on different `CONTOUR` bands.
+     fn draw_map(&self, v: &mut Vec<HudVertex>, l: &Lay, lvl: u8) {
+         let s = f64::from(l.s);
+         let (step, bpg) = (Self::step(lvl), f64::from(self.bpg));
+@@ -679,6 +1067,58 @@
+                 quad(v, xs, to_x(i1 + 1).round() as f32, y0, y1, rc);
+             }
+         }
++        if !self.contours {
++            return;
++        }
++        let (mut left, line, w) = (CONTOUR_QUADS, [0.0, 0.0, 0.0, 0.4], (l.s * 0.7).max(1.0));
++        let band = |y: i32| y.div_euclid(CONTOUR);
++        'rows: for j in j0..=j1 {
++            let (y0, y1) = ((to_y(j).round() as f32).max(pt), (to_y(j + 1).round() as f32).min(pb));
++            if y1 <= y0 {
++                continue;
++            }
++            for i in i0..=i1 {
++                let Some(a) = self.hgt(lvl, i as i32, j as i32) else { continue };
++                let x = to_x(i + 1).round() as f32;
++                if x > pl && x < pr && self.hgt(lvl, i as i32 + 1, j as i32).is_some_and(|b| band(a) != band(b)) {
++                    HudPipeline::push_quad(v, x - w / 2.0, y0, w, y1 - y0, line);
++                    left -= 1;
++                }
++                if y1 < pb && self.hgt(lvl, i as i32, j as i32 + 1).is_some_and(|b| band(a) != band(b)) {
++                    let (x0, x1) = (to_x(i).round().max(pl) as f32, (to_x(i + 1).round() as f32).min(pr));
++                    if x1 > x0 {
++                        HudPipeline::push_quad(v, x0, y1 - w / 2.0, x1 - x0, w, line);
++                        left -= 1;
++                    }
++                }
++                if left < 2 {
++                    break 'rows;
++                }
++            }
++        }
++    }
++
++    /// Chunk lines: every 16 blocks when that is 9 GUI units or more apart, else every 64, 256 or 1024.
++    fn draw_grid(&self, v: &mut Vec<HudVertex>, l: &Lay) {
++        let s = l.s;
++        let Some(g) = [16i64, 64, 256, 1024].into_iter().find(|&g| g as f32 / self.bpg >= 9.0) else { return };
++        let (hx, hy, bpg) = (f64::from(l.gw) / 2.0, f64::from(l.top + l.bottom) / 2.0, f64::from(self.bpg));
++        let w = s.max(1.0);
++        let line = |major: bool| if major { [1.0, 1.0, 1.0, 0.28] } else { [1.0, 1.0, 1.0, 0.14] };
++        let (x0, x1) = (((self.cx - hx * bpg) / g as f64).floor() as i64, ((self.cx + hx * bpg) / g as f64).ceil() as i64);
++        for k in x0..=x1 {
++            let x = ((hx + (k as f64 * g as f64 - self.cx) / bpg) as f32 * s).round();
++            if x >= 0.0 && x < l.gw * s {
++                HudPipeline::push_quad(v, x, l.top * s, w, (l.bottom - l.top) * s, line(k % 8 == 0));
++            }
++        }
++        let (z0, z1) = (((self.cz - (hy - f64::from(l.top)) * bpg) / g as f64).floor() as i64, ((self.cz + (f64::from(l.bottom) - hy) * bpg) / g as f64).ceil() as i64);
++        for k in z0..=z1 {
++            let y = ((hy + (k as f64 * g as f64 - self.cz) / bpg) as f32 * s).round();
++            if y >= l.top * s && y < l.bottom * s {
++                HudPipeline::push_quad(v, 0.0, y, l.gw * s, w, line(k % 8 == 0));
++            }
++        }
+     }
+ 
+     fn to_gui(&self, l: &Lay, wx: f64, wz: f64) -> (f32, f32) {
+@@ -686,9 +1126,10 @@
+         (l.gw / 2.0 + ((wx - self.cx) / bpg) as f32, (l.top + l.bottom) / 2.0 + ((wz - self.cz) / bpg) as f32)
+     }
+ 
+-    /// The world's axes, the spawn and the read-out point.
++    /// Structure starts, the world's axes, the spawn, the player and the read-out point.
+     fn draw_marks(&self, v: &mut Vec<HudVertex>, l: &Lay) {
+         let s = l.s;
++        let inside = |x: f32, y: f32, pad: f32| x > -pad && x < l.gw + pad && y > l.top - pad && y < l.bottom + pad;
+         let (ox, oz) = self.to_gui(l, 0.0, 0.0);
+         let line = [1.0, 1.0, 1.0, 0.3];
+         if ox >= 0.0 && ox < l.gw {
+@@ -697,9 +1138,28 @@
+         if oz >= l.top && oz < l.bottom {
+             HudPipeline::push_quad(v, 0.0, (oz * s).round(), l.gw * s, s.max(1.0), line);
+         }
+-        if ox > -4.0 && ox < l.gw + 4.0 && oz > l.top - 4.0 && oz < l.bottom + 4.0 {
++        if inside(ox, oz, 4.0) {
+             HudPipeline::push_quad(v, (ox - 2.0) * s, (oz - 2.0) * s, 5.0 * s, 5.0 * s, rgb(0xFF3030));
+         }
++        if self.show_struct && self.has_structs() {
++            for &(x, z, st) in self.marks.values().flatten() {
++                if self.sh.is_some_and(|h| h != st) {
++                    continue;
++                }
++                let (gx, gy) = self.to_gui(l, f64::from(x), f64::from(z));
++                if inside(gx, gy, -3.0) {
++                    HudPipeline::push_quad(v, (gx - 4.0) * s, (gy - 4.0) * s, 8.0 * s, 8.0 * s, rgb(0x000000));
++                    HudPipeline::push_quad(v, (gx - 3.0) * s, (gy - 3.0) * s, 6.0 * s, 6.0 * s, rgb(ST_COLORS[usize::from(st) % ST_COLORS.len()]));
++                }
++            }
++        }
++        if let Some(ig) = &self.ingame {
++            let (gx, gy) = self.to_gui(l, ig.player.0, ig.player.1);
++            if inside(gx, gy, -3.0) {
++                HudPipeline::push_quad(v, (gx - 4.0) * s, (gy - 4.0) * s, 9.0 * s, 9.0 * s, rgb(0x000000));
++                HudPipeline::push_quad(v, (gx - 3.0) * s, (gy - 3.0) * s, 7.0 * s, 7.0 * s, rgb(0xFFFF55));
++            }
++        }
+         if let Some((px, pz)) = self.probe {
+             let (x, y) = self.to_gui(l, px, pz);
+             if y > l.top && y < l.bottom && x > 0.0 && x < l.gw {
+@@ -715,19 +1175,25 @@
+         let (s, p) = (l.s, l.panel);
+         ui::panel(v, s, p, 0.8);
+         let from = v.len();
+-        for (n, b) in self.biomes().iter().enumerate() {
++        for (n, row) in self.rows().iter().enumerate() {
+             let y = p[1] + 2.0 + n as f32 * LEG_ROW - self.scroll;
+             if y + LEG_ROW < p[1] || y > p[1] + p[3] {
+                 continue;
+             }
+-            let (name, c) = info(*b);
+-            let on = self.hl == Some(idx(*b));
++            let (name, c, on) = match *row {
++                LegRow::Biome(b) => (info(b).0.to_string(), info(b).1, self.hl == Some(idx(b))),
++                LegRow::Head => (format!("Structures {}", if self.show_struct { "(on)" } else { "(off)" }), 0xFFAA00, false),
++                LegRow::Struct(n) => (st_label(n), ST_COLORS[usize::from(n) % ST_COLORS.len()], self.sh == Some(n)),
++            };
+             if on {
+                 HudPipeline::push_quad(v, (p[0] + 1.0) * s, y * s, (p[2] - 2.0) * s, LEG_ROW * s, [1.0, 1.0, 1.0, 0.25]);
+             }
+-            HudPipeline::push_quad(v, (p[0] + 4.0) * s, (y + 2.0) * s, 8.0 * s, 8.0 * s, rgb(0x000000));
+-            HudPipeline::push_quad(v, (p[0] + 5.0) * s, (y + 3.0) * s, 6.0 * s, 6.0 * s, rgb(c));
+-            HudPipeline::push_text(v, (p[0] + 16.0) * s, (y + 2.0) * s, s, &ui::fit(name, p[2] - 20.0), rgb(if on { 0xFFFF55 } else { 0xE0E0E0 }));
++            if *row != LegRow::Head {
++                HudPipeline::push_quad(v, (p[0] + 4.0) * s, (y + 2.0) * s, 8.0 * s, 8.0 * s, rgb(0x000000));
++                HudPipeline::push_quad(v, (p[0] + 5.0) * s, (y + 3.0) * s, 6.0 * s, 6.0 * s, rgb(c));
++            }
++            let (x, col) = if *row == LegRow::Head { (4.0, 0xFFAA00) } else { (16.0, if on { 0xFFFF55 } else { 0xE0E0E0 }) };
++            HudPipeline::push_text(v, (p[0] + x) * s, (y + 2.0) * s, s, &ui::fit(&name, p[2] - x - 4.0), rgb(col));
+         }
+         ui::clip(v, from, [p[0] * s, p[1] * s, p[2] * s, p[3] * s]);
+         let max = self.max_scroll(l);
+@@ -736,21 +1202,32 @@
+         }
+     }
+ 
+-    /// The line under the map for the point a tap chose: biome, height, temperature and humidity (0..1) and the block.
++    /// The line under the map for the point a tap chose (or the middle, live): the structure start next to it if there is one, else biome,
++    /// water, height, temperature and humidity (0..1) and the block.
+     fn readout(&self, lvl: u8) -> Option<String> {
+         let (px, pz) = self.probe?;
++        if self.show_struct && self.has_structs() {
++            let reach = f64::from(self.bpg) * 7.0;
++            let near = self.marks.values().flatten().filter(|m| self.sh.map_or(true, |h| h == m.2)).find(|m| (f64::from(m.0) - px).hypot(f64::from(m.1) - pz) <= reach);
++            if let Some(&(x, z, st)) = near {
++                return Some(format!("{}  ({x}, {z})", st_label(st)));
++            }
++        }
+         let step = Self::step(lvl);
+         let (i, j) = ((px / step).floor() as i32, (pz / step).floor() as i32);
+         let (t, k) = self.sample(lvl, i, j)?;
+         let name = info(ALL[t.b[k] as usize % ALL.len()]).0;
+-        Some(format!("{name}  Y {}  T {:.2}  H {:.2}  ({}, {})", t.h[k], f32::from(t.t[k]) / 255.0, f32::from(t.w[k]) / 255.0, px.floor() as i64, pz.floor() as i64))
++        let water = ["", " (river)", " (lake)"][usize::from(t.r[k]).min(2)];
++        Some(format!("{name}{water}  Y {}  T {:.2}  H {:.2}  ({}, {})", t.h[k], f32::from(t.t[k]) / 255.0, f32::from(t.w[k]) / 255.0, px.floor() as i64, pz.floor() as i64))
+     }
+ }
+ 
+ impl Drop for Preview {
+-    /// No world is open in the menu, so nothing may keep the settings the preview handed to `natural`.
++    /// No world is open in the menu, so nothing may keep the settings the preview handed to `natural` (in the game they are the world's).
+     fn drop(&mut self) {
+-        natural::set(None);
++        if self.ingame.is_none() {
++            natural::set(None);
++        }
+     }
+ }
+ 
+@@ -768,6 +1245,18 @@
+     }
+ 
+     #[test]
++    fn explored_squares_nest_and_survive_a_save() {
++        let mut e = Explored::default();
++        e.visit(3, -2, 1);
++        assert!(e.seen(3 * 16 + 5, -2 * 16 + 5, 0));
++        assert!(!e.seen(40 * 16, 0, 0));
++        assert!(e.seen(3 * 16, -2 * 16, 2)); // the square of 4 chunks that holds it
++        let back = Explored::decode(&e.encode());
++        assert!(back.seen(3 * 16, -2 * 16, 0) && back.seen(4 * 16, -2 * 16, 0));
++        assert!(!back.seen(0, 40 * 16, 0));
++    }
++
++    #[test]
+     fn every_biome_has_a_legend_entry() {
+         for (n, b) in ALL.iter().enumerate() {
+             assert_eq!(idx(*b) as usize, n);
+diff -ruN a/mc-rs/src/render/mesh.rs b/mc-rs/src/render/mesh.rs
+--- a/mc-rs/src/render/mesh.rs	2026-11-04 11:14:25.868099058 +0000
++++ b/mc-rs/src/render/mesh.rs	2026-11-04 11:14:27.716457191 +0000
+@@ -386,7 +386,15 @@
+                 let (boxes, n_boxes) = shapes(blk, meta, &|dx, dz| rid(x + dx, y, z + dz) == blk);
+                 for &bounds in &boxes[..n_boxes] {
+                 let heights = is_fluid(blk).then(|| fluid_heights(&rid, &meta_at, x, y, z));
+-                let flow = if heights.is_some() { flow_angle(&rid, &meta_at, x, y, z) } else { None };
++                // A still water cell in a stream turns its top along the stream's current (`StreamFlowGrid`, read from `gen::hydro` instead of baked).
++                let flow = if heights.is_some() {
++                    flow_angle(&rid, &meta_at, x, y, z).or_else(|| {
++                        let c = (blk >> 1 == 4).then(|| crate::world::gen::hydro::current((ox + x) as f32 + 0.5, (oz + z) as f32 + 0.5)).flatten()?;
++                        Some(c[1].atan2(c[0]) - std::f32::consts::FRAC_PI_2)
++                    })
++                } else {
++                    None
++                };
+                 for (face_i, face) in FACES.iter().enumerate() {
+                     let (dx, dy, dz) = DIRS[face_i];
+                     let n = rid(x + dx, y + dy, z + dz);
+diff -ruN a/mc-rs/src/world/boat.rs b/mc-rs/src/world/boat.rs
+--- a/mc-rs/src/world/boat.rs	2026-11-04 11:14:25.913295137 +0000
++++ b/mc-rs/src/world/boat.rs	2026-11-04 11:14:27.719420801 +0000
+@@ -194,7 +194,7 @@
+         }
+         // A stream's current pushes a boat afloat (blocks a tick; a rider's paddling is ten times stronger, so it can go upstream).
+         if wet > 0.0 {
+-            if let Some(c) = crate::world::gen::hydro::current(self.pos.x, self.pos.z) {
++            if let Some(c) = crate::world::gen::hydro::current_for(self.pos.x, self.pos.z, crate::world::gen::hydro::Push::Boat) {
+                 self.vel.x += c[0] / 20.0 * 0.015;
+                 self.vel.z += c[1] / 20.0 * 0.015;
+             }
+diff -ruN a/mc-rs/src/world/chunks.rs b/mc-rs/src/world/chunks.rs
+--- a/mc-rs/src/world/chunks.rs	2026-11-04 11:14:25.914184138 +0000
++++ b/mc-rs/src/world/chunks.rs	2026-11-04 11:14:27.722803474 +0000
+@@ -993,6 +993,10 @@
+                 Some((x.parse().ok()?, z.parse().ok()?)) // "c.1.2.tmp" and other strays do not parse
+             })
+             .collect();
++        // The river networks are kept beside the chunks, unless Natural Temperature is on (a file does not know its settings).
++        // `hydro.cfg` beside the chunks (`playerPush:1.2`, `boatPush:2.0`, `mobPush:1.2`, `hydroIceSpeed:1.2`, `hydroBlacklist:Desert`, `hydro:false`).
++        hydro::configure(std::fs::read_to_string(dir.join("hydro.cfg")).map(|t| hydro::Settings::parse(&t, &crate::world::atmos::ALL)).unwrap_or_default());
++        hydro::cache_dir(crate::world::gen::natural::current().is_none().then(|| dir.join("hydro")));
+         self.dir = Some(dir);
+         self.writer = Some(Writer::spawn());
+         self
+diff -ruN a/mc-rs/src/world/effects.rs b/mc-rs/src/world/effects.rs
+--- a/mc-rs/src/world/effects.rs	2026-11-04 11:14:25.917644006 +0000
++++ b/mc-rs/src/world/effects.rs	2026-11-04 11:14:27.724693255 +0000
+@@ -216,7 +216,7 @@
+             }
+             Fx::Leaf | Fx::Twig => {
+                 // Carried by the stream, at the surface; gone when it leaves the water.
+-                let Some(c) = hydro::current(self.pos.x, self.pos.z) else { return false };
++                let Some(c) = hydro::current_for(self.pos.x, self.pos.z, hydro::Push::Mob) else { return false };
+                 self.vel.x += (c[0] / 20.0 - self.vel.x) * 0.15;
+                 self.vel.z += (c[1] / 20.0 - self.vel.z) * 0.15;
+                 self.pos.x += self.vel.x;
+@@ -581,7 +581,7 @@
+     pub fn river_life(&mut self, eye: Vec3, get: BlockQuery<'_>) {
+         for _ in 0..3 {
+             let (x, z) = (eye.x + (self.rng.next_float() - 0.5) * 48.0, eye.z + (self.rng.next_float() - 0.5) * 48.0);
+-            let Some(c) = hydro::current(x, z) else { continue };
++            let Some(c) = hydro::current_for(x, z, hydro::Push::Mob) else { continue };
+             let Some(top) = water_top(get, x, z, eye.y + 12.0) else { continue };
+             let len = c[0].hypot(c[1]).max(1e-3);
+             let (nx, nz) = (x + c[0] / len * 1.5, z + c[1] / len * 1.5);
+diff -ruN a/mc-rs/src/world/gear.rs b/mc-rs/src/world/gear.rs
+--- a/mc-rs/src/world/gear.rs	2026-11-04 11:14:25.917952463 +0000
++++ b/mc-rs/src/world/gear.rs	2026-11-04 11:14:27.728549047 +0000
+@@ -192,6 +192,11 @@
+         }
+         self.in_water = wet > 0.0;
+         if wet > 0.0 {
++            // A stream's current carries the bobber (`Entity.handleWaterMovement`; `gen::hydro`'s flow, as for items and mobs).
++            if let Some(c) = crate::world::gen::hydro::current_for(self.pos.x, self.pos.z, crate::world::gen::hydro::Push::Mob) {
++                self.vel.x += (c[0] / 20.0 - self.vel.x) * 0.1;
++                self.vel.z += (c[1] / 20.0 - self.vel.z) * 0.1;
++            }
+             if self.catchable > 0 {
+                 self.catchable -= 1;
+             } else if rng.next_int_bound(if rain { 300 } else { 500 }) == 0 {
+diff -ruN a/mc-rs/src/world/gen/hydro.rs b/mc-rs/src/world/gen/hydro.rs
+--- a/mc-rs/src/world/gen/hydro.rs	2026-11-04 11:14:25.918531501 +0000
++++ b/mc-rs/src/world/gen/hydro.rs	2026-11-04 11:14:27.724169343 +0000
+@@ -33,9 +33,11 @@
+ //! is 6700 instructions of `place` plus bank templates; only its plan, heights and materials by biome are followed), the lake level
+ //! (`spill - inset`), the mod's `cohesion` (taken as `0.4 + 0.6 * wetness`), how a plate's margin meets its neighbour (the owner's
+ //! network wins and a neighbour's fills the gaps), the plate seed, the push strength of the current, and how any of it plays on a device.
++//! Added after the first port (UNVERIFIED, chosen here): a trough-shaped bed (`bed_at`), reeds and boulders on the bank, no ice on fast water
++//! (`ICE_SPEED`), items carried by the current (`items.rs`).
+ //! NOT PORTED: `connectNetwork` (plate borders), lakes' 3-block masks,
+-//! waterfalls, the bed's channel bars and bend asymmetry in the carve (the width side of the hydraulics is ported), bank templates and
+-//! features, plants, the fluid block and its flow rendering, drifting items, particles, sound (mc-rs has no audio), disk cache of
++//! waterfalls, the bend asymmetry of the bed, bank templates (logs, rocks as the mod shapes them), underwater flora, the fluid block and its
++//! flow rendering, the fishing bobber in the current, the stream's sound (mc-rs has audio now, but no waterfall or stream sound), disk cache of
+ //! networks, village bridges and structure promises (b1.7.3 has neither). The Python reference is `tools/hydro_proto.py` (without the
+ //! hydraulic widths).
+ 
+@@ -43,7 +45,8 @@
+ use crate::world::gen::overworld::{block, SEA_LEVEL};
+ use std::cmp::Reverse;
+ use std::collections::{BinaryHeap, HashMap};
+-use std::sync::{Arc, Mutex, OnceLock};
++use std::path::PathBuf;
++use std::sync::{Arc, Mutex, OnceLock, RwLock};
+ 
+ /// Blocks between grid nodes (mod: `QualityPreset.MEDIUM`, the default, `gridSpacing` 16). A node is at world (16 gx, 16 gz); the generator's `probe` reads it there.
+ pub const CELL: i32 = 16;
+@@ -86,8 +89,9 @@
+ const LAKE_MIN_DEPTH: f64 = 1.5;
+ /// Cells a river may be traced over the real terrain, past the window, to find the sea.
+ const TAIL_CAP: usize = 6000;
+-/// Blocks a second per unit of the mod's flow speed (0.25..2): UNVERIFIED, the mod pushes by its settings.
+-const PUSH: f64 = 1.5;
++/// Blocks a second per unit of the mod's flow speed (0.25..2) before the entity's factor: UNVERIFIED. The factor is the mod's own
++/// (`CurrentPush.factor` -> `StreamsSettings.playerPush` 1.2, `boatPush` 2.0, `mobPush` 1.2), so a player is pushed 1.25 x 1.2 = 1.5 as before.
++const BASE_PUSH: f64 = 1.25;
+ /// A stream that is not the biggest branch where it joins another (or that ends in the sea) must run at least this many blocks from its
+ /// source, measured on the 16-block grid path (the mod's `minStreamLength` is 75; the player wants the small rivers long, so more). Chaikin and the
+ /// meander add about 15% to what is drawn.
+@@ -98,6 +102,104 @@
+ const LEVEL_RAMP: f64 = 48.0;
+ const BUCKET: i32 = 16;
+ const MAX_PLATES: usize = 12;
++/// Lake hi-res mask: the lake cells' occupancy, interpolated between cell centres, is a lake where it reaches this (the mod's `Lake` masks
++/// sample every 3 blocks; this one is smooth at any block). UNVERIFIED: chosen here.
++const LAKE_EDGE: f64 = 0.3;
++/// Blocks a lake's floor dips below its surface at the middle, over the first block (`lakeDip`). UNVERIFIED.
++const LAKE_DIP: f64 = 2.0;
++/// How far a bend moves the deepest line of the bed toward the outer bank (a share of the half width at a full bend). UNVERIFIED.
++const BEND_SHIFT: f64 = 0.5;
++/// The disk cache's version: raise it whenever the routing or the plan changes, or an old file would be read as the new one.
++const CACHE_VERSION: u32 = 1;
++/// Water faster than this (the mod's flow speed, 0.25..2) does not freeze over: the ice melt of a quick stream. UNVERIFIED: chosen here.
++const ICE_SPEED: f64 = 1.2;
++
++/// The mod's `StreamsSettings`, the parts that act when a column is carved or a current read (the ones that shape a network, `MIN_ACC`,
++/// `MIN_LEN`, are in its cache and stay constants).
++#[derive(Clone, Debug, PartialEq)]
++pub struct Settings {
++    /// Rivers and lakes on (`false`: the terrain's own water only; `current` is `None`).
++    pub enabled: bool,
++    /// `StreamsSettings.playerPush`, `boatPush`, `mobPush` (the mod's defaults 1.2, 2.0, 1.2): what a current's strength is multiplied by.
++    pub player_push: f64,
++    pub boat_push: f64,
++    pub mob_push: f64,
++    /// Water faster than this stays open in the cold.
++    pub ice_speed: f64,
++    /// `streamBiomeBlacklist`: no river is cut in these biomes (a lake still is).
++    pub blacklist: Vec<Biome>,
++}
++
++impl Default for Settings {
++    fn default() -> Self {
++        Self { enabled: true, player_push: 1.2, boat_push: 2.0, mob_push: 1.2, ice_speed: ICE_SPEED, blacklist: Vec::new() }
++    }
++}
++
++/// Who a current pushes (`CurrentPush.factor`: a player, a boat, anything else).
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum Push {
++    Player,
++    Boat,
++    Mob,
++}
++
++impl Settings {
++    fn factor(&self, k: Push) -> f64 {
++        match k {
++            Push::Player => self.player_push,
++            Push::Boat => self.boat_push,
++            Push::Mob => self.mob_push,
++        }
++    }
++
++    /// Reads `hydro:true|false`, `playerPush:1.2`, `boatPush:2.0`, `mobPush:1.2`, `hydroIceSpeed:1.2` and `hydroBlacklist:Desert,Beach` lines (the `options.txt` shape;
++    /// anything else is ignored, a bad value keeps the default). A biome is named as its variant, any case.
++    pub fn parse(text: &str, all: &[Biome]) -> Self {
++        let mut s = Self::default();
++        for line in text.lines() {
++            let Some((k, v)) = line.split_once(':') else { continue };
++            let v = v.trim();
++            match k.trim() {
++                "hydro" => s.enabled = v != "false",
++                "playerPush" => s.player_push = v.parse().unwrap_or(s.player_push).clamp(0.0, 10.0),
++                "boatPush" => s.boat_push = v.parse().unwrap_or(s.boat_push).clamp(0.0, 10.0),
++                "mobPush" => s.mob_push = v.parse().unwrap_or(s.mob_push).clamp(0.0, 10.0),
++                "hydroIceSpeed" => s.ice_speed = v.parse().unwrap_or(s.ice_speed),
++                "hydroBlacklist" => s.blacklist = v.split(',').filter_map(|n| all.iter().copied().find(|b| format!("{b:?}").eq_ignore_ascii_case(n.trim()))).collect(),
++                _ => {}
++            }
++        }
++        s
++    }
++}
++
++static SETTINGS: RwLock<Option<Settings>> = RwLock::new(None);
++
++/// The settings in force (the defaults until `configure`).
++pub fn settings() -> Settings {
++    SETTINGS.read().ok().and_then(|g| g.clone()).unwrap_or_default()
++}
++
++/// Sets the settings of the world being played. A river already carved stays as it is; a chunk made after this obeys.
++pub fn configure(s: Settings) {
++    if let Ok(mut g) = SETTINGS.write() {
++        *g = Some(s);
++    }
++}
++
++/// Where networks are kept between runs (`None`: nowhere). `FileNetworkStore`. A file holds one plate of one seed and world type; it does
++/// not know the Natural Temperature settings, so the caller sets no directory while those are on.
++static CACHE: Mutex<Option<PathBuf>> = Mutex::new(None);
++
++pub fn cache_dir(dir: Option<PathBuf>) {
++    if let Ok(mut c) = CACHE.lock() {
++        *c = dir;
++    }
++}
++/// Share of the depth kept at the channel's edge: the bed is a bar-shaped trough, deepest on the centre line (`HydraulicGeometry` bed side,
++/// symmetric here: the bend asymmetry needs the side of the centre line, which `Plan` does not carry). UNVERIFIED: chosen here.
++const BED_EDGE: f64 = 0.4;
+ const NONE: usize = usize::MAX;
+ const NB: [(i32, i32); 8] = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)];
+ 
+@@ -414,6 +516,8 @@
+     sp: f64,
+     o1: f64,
+     o2: f64,
++    /// Turn at this segment, -1..1: the cross product of the unit directions before and after it (positive: to the left, x toward z).
++    bend: f64,
+ }
+ 
+ /// What the carve needs to know about a column (the mod's `ColumnPlan`, the fields this port uses).
+@@ -436,6 +540,21 @@
+     pub speed: f64,
+     /// Distance still to run to the outlet.
+     pub to_outlet: f64,
++    /// Which side of the centre line, as a share of the half width: -1 right .. 1 left (from the flow's direction, x toward z).
++    pub side: f64,
++    /// The segment's `bend`.
++    pub bend: f64,
++}
++
++/// The bed's y of a channel column: the full depth on the deepest line, `BED_EDGE` of it at the edge, never less than one block of water.
++/// The deepest line sits on the centre line of a straight reach and moves toward the outer bank in a bend (the water of a bend digs the
++/// outside; `HydraulicGeometry`'s bed side, `RiverEngine`'s bend / lateral), by `BEND_SHIFT` of the half width at a full bend.
++fn bed_at(p: &Plan) -> i32 {
++    // Turning left (bend > 0) the outer bank is the right one (side < 0).
++    let c = -p.bend.clamp(-1.0, 1.0) * BEND_SHIFT;
++    let e = ((p.side - c).abs() / (1.0 + c.abs())).clamp(0.0, 1.0);
++    let full = (p.water_y - p.bed_y) as f64;
++    p.water_y - (full * (1.0 - (1.0 - BED_EDGE) * e * e)).round().max(1.0) as i32
+ }
+ 
+ impl Plan {
+@@ -456,6 +575,75 @@
+     n: (usize, usize),
+ }
+ 
++/// Little-endian reader for `Network::from_bytes`.
++struct Rd<'a>(&'a [u8]);
++
++impl Rd<'_> {
++    fn take<const N: usize>(&mut self) -> Option<[u8; N]> {
++        let (a, b) = self.0.split_at_checked(N)?;
++        self.0 = b;
++        a.try_into().ok()
++    }
++    fn u32(&mut self) -> Option<u32> {
++        self.take().map(u32::from_le_bytes)
++    }
++    fn i32(&mut self) -> Option<i32> {
++        self.take().map(i32::from_le_bytes)
++    }
++    fn f64(&mut self) -> Option<f64> {
++        self.take().map(f64::from_le_bytes)
++    }
++}
++
++impl Network {
++    /// `CACHE_VERSION`, the lattice, then the segments, the lake cells and the lake tops, all little endian. The index is made again on load.
++    fn to_bytes(&self) -> Vec<u8> {
++        let mut o = Vec::with_capacity(32 + self.segs.len() * 96 + self.lake_of.len() * 4);
++        o.extend(b"HYD");
++        o.extend(CACHE_VERSION.to_le_bytes());
++        for v in [self.g0.0, self.g0.1, self.n.0 as i32, self.n.1 as i32, self.segs.len() as i32, self.lake_top.len() as i32] {
++            o.extend(v.to_le_bytes());
++        }
++        for s in &self.segs {
++            for v in [s.x1, s.z1, s.y1, s.w1, s.x2, s.z2, s.y2, s.w2, s.sp, s.o1, s.o2, s.bend] {
++                o.extend(v.to_le_bytes());
++            }
++        }
++        for v in &self.lake_of {
++            o.extend(v.to_le_bytes());
++        }
++        for v in &self.lake_top {
++            o.extend(v.to_le_bytes());
++        }
++        o
++    }
++
++    /// `None` for a file of another version or one cut short (the plate is then routed again).
++    fn from_bytes(b: &[u8]) -> Option<Network> {
++        let mut r = Rd(b.strip_prefix(b"HYD")?);
++        if r.u32()? != CACHE_VERSION {
++            return None;
++        }
++        let (g0, n) = ((r.i32()?, r.i32()?), (r.i32()? as usize, r.i32()? as usize));
++        let (ns, nl) = (r.i32()? as usize, r.i32()? as usize);
++        if ns > 1 << 22 || nl > 1 << 20 || n.0 > 4096 || n.1 > 4096 {
++            return None;
++        }
++        let mut segs = Vec::with_capacity(ns);
++        for _ in 0..ns {
++            let mut f = [0.0; 12];
++            for v in &mut f {
++                *v = r.f64()?;
++            }
++            segs.push(Seg { x1: f[0], z1: f[1], y1: f[2], w1: f[3], x2: f[4], z2: f[5], y2: f[6], w2: f[7], sp: f[8], o1: f[9], o2: f[10], bend: f[11] });
++        }
++        let lake_of = (0..n.0 * n.1).map(|_| r.u32()).collect::<Option<Vec<_>>>()?;
++        let lake_top = (0..nl).map(|_| r.i32()).collect::<Option<Vec<_>>>()?;
++        let index = index_of(&segs);
++        Some(Network { segs, index, lake_of, lake_top, g0, n })
++    }
++}
++
+ /// The grid cell (node index) a block belongs to: a node owns the 12 x 12 blocks round it.
+ fn cell_of(v: f64) -> i32 {
+     ((v + (CELL / 2) as f64) / CELL as f64).floor() as i32
+@@ -474,6 +662,17 @@
+     ((x - (s.x1 + dx * t)).hypot(z - (s.z1 + dz * t)), t)
+ }
+ 
++/// Smooth value noise of the block (x, z), -4..4, on a 3-block lattice: `salt` makes the x and the z warp differ.
++fn warp(x: i32, z: i32, salt: i64) -> f64 {
++    let (fx, fz) = (x as f64 / 3.0, z as f64 / 3.0);
++    let (i, j) = (fx.floor(), fz.floor());
++    let (tx, tz) = (fx - i, fz - j);
++    let n = |a: f64, b: f64| unit4(0x1A4E, salt, a as i64, b as i64);
++    let top = n(i, j) * (1.0 - tx) + n(i + 1.0, j) * tx;
++    let bot = n(i, j + 1.0) * (1.0 - tx) + n(i + 1.0, j + 1.0) * tx;
++    ((top * (1.0 - tz) + bot * tz) - 0.5) * 8.0
++}
++
+ impl Network {
+     /// The segment a point belongs to: the one with the least clearance (distance to the centre line minus the half width), so a point
+     /// inside a wide channel is never taken for the bank of a narrow river that merely ends nearer to it. The mod takes the plain
+@@ -524,6 +723,7 @@
+         let water_y = (SEA_LEVEL - 1).max(grade.floor() as i32);
+         let depth = ((2.0 * w * STREAM_DEPTH + 0.5).floor() as i32).max(1);
+         let len = (s.x2 - s.x1).hypot(s.z2 - s.z1).max(1e-6);
++        let cross = (s.x2 - s.x1) * (z - s.z1) - (s.z2 - s.z1) * (x - s.x1);
+         Some(Plan {
+             in_channel: d <= w,
+             water_y,
+@@ -535,43 +735,50 @@
+             dir: [(s.x2 - s.x1) / len, (s.z2 - s.z1) / len],
+             speed: flow_at_depth(s.sp, depth as f64),
+             to_outlet: s.o1 + (s.o2 - s.o1) * t,
++            side: (d / w.max(1e-6)).copysign(cross).clamp(-1.0, 1.0),
++            bend: s.bend,
+         })
+     }
+ 
+-    /// Top water block's y of the lake covering the block (x, z): the lake's cells and 6 blocks round them.
+-    fn lake_top_at(&self, x: i32, z: i32) -> Option<i32> {
+-        let (ci, cj) = (cell_of(x as f64 + 0.5), cell_of(z as f64 + 0.5));
+-        let mut best: Option<i32> = None;
+-        for di in -1..=1 {
+-            for dj in -1..=1 {
+-                let (i, j) = (ci + di - self.g0.0, cj + dj - self.g0.1);
+-                if i < 0 || j < 0 || i as usize >= self.n.0 || j as usize >= self.n.1 {
+-                    continue;
+-                }
+-                let id = self.lake_of[i as usize * self.n.1 + j as usize];
+-                if id == u32::MAX {
+-                    continue;
+-                }
+-                // The cell owns [12 g - 6, 12 g + 6).
+-                let (gx, gz) = ((ci + di) * CELL - CELL / 2, (cj + dj) * CELL - CELL / 2);
+-                let ex = (gx - x).max(0).max(x - (gx + CELL - 1));
+-                let ez = (gz - z).max(0).max(z - (gz + CELL - 1));
+-                if ex.max(ez) <= 6 {
+-                    let t = self.lake_top[id as usize];
+-                    best = Some(best.map_or(t, |b| b.max(t)));
++    /// The lake covering the block (x, z): its top water block's y and the y of its floor at that block. The mask is the lake cells'
++    /// occupancy interpolated between the cell centres (12 blocks apart), so a shore is round at any block, and the floor dips toward the
++    /// middle of the lake (`LAKE_DIP`). A cell's lake wins by its weight.
++    fn lake_top_at(&self, x: i32, z: i32) -> Option<(i32, i32)> {
++        // The shore is warped by smooth noise of up to 4 blocks (`Lake.coverageSmooth`: the sample point is moved by `(noise - 0.5) * 2 * 4/3 *
++        // spacing` before the mask is read; here the noise is value noise on a 3-block lattice, the mod's hash is not followed).
++        let (px, pz) = (x as f64 + 0.5 + warp(x, z, 3), z as f64 + 0.5 + warp(x, z, 4));
++        let (fx, fz) = (px / CELL as f64, pz / CELL as f64);
++        let (i0, j0) = (fx.floor() as i32, fz.floor() as i32);
++        let (tx, tz) = (fx - i0 as f64, fz - j0 as f64);
++        let (mut occ, mut best): (f64, Option<(f64, u32)>) = (0.0, None);
++        for (di, dj, w) in [(0, 0, (1.0 - tx) * (1.0 - tz)), (1, 0, tx * (1.0 - tz)), (0, 1, (1.0 - tx) * tz), (1, 1, tx * tz)] {
++            let (i, j) = (i0 + di - self.g0.0, j0 + dj - self.g0.1);
++            if i < 0 || j < 0 || i as usize >= self.n.0 || j as usize >= self.n.1 {
++                continue;
++            }
++            let id = self.lake_of[i as usize * self.n.1 + j as usize];
++            if id != u32::MAX {
++                occ += w;
++                if best.map_or(true, |(bw, _)| w > bw) {
++                    best = Some((w, id));
+                 }
+             }
+         }
+-        best
++        if occ < LAKE_EDGE {
++            return None;
++        }
++        let top = self.lake_top[best?.1 as usize];
++        let dip = (LAKE_DIP * ((occ - LAKE_EDGE) / (1.0 - LAKE_EDGE)).clamp(0.0, 1.0)).round() as i32;
++        Some((top, top - 1 - dip))
+     }
+ 
+     /// The current at a point in blocks per second, `None` outside a channel.
+-    pub fn flow_at(&self, x: f32, z: f32) -> Option<[f32; 2]> {
++    pub fn flow_at(&self, x: f32, z: f32, k: Push) -> Option<[f32; 2]> {
+         let p = self.plan(x as f64, z as f64)?;
+         if p.distance > p.width + 0.5 {
+             return None;
+         }
+-        let v = p.speed * PUSH;
++        let v = p.speed * BASE_PUSH * settings().factor(k);
+         Some([(p.dir[0] * v) as f32, (p.dir[1] * v) as f32])
+     }
+ }
+@@ -1055,8 +1262,14 @@
+             }
+         }
+         starts.insert(ch.start, (lv[0], ch.width[0]));
++        let dir = |a: Pt, b: Pt| -> (f64, f64) {
++            let l = (b.x - a.x).hypot(b.z - a.z).max(1e-9);
++            ((b.x - a.x) / l, (b.z - a.z) / l)
++        };
+         for i in 0..m.saturating_sub(1) {
+             let (p, q) = (ch.pts[i], ch.pts[i + 1]);
++            let d1 = dir(p, q);
++            let bend = if i + 2 < m { let d2 = dir(q, ch.pts[i + 2]); (d1.0 * d2.1 - d1.1 * d2.0) * 4.0 } else { 0.0 }.clamp(-1.0, 1.0);
+             segs.push(Seg {
+                 x1: p.x,
+                 z1: p.z,
+@@ -1069,6 +1282,7 @@
+                 sp: (ch.speed[i] + ch.speed[i + 1]) * 0.5,
+                 o1: ch.out_base + ch.arc[i],
+                 o2: ch.out_base + ch.arc[i + 1],
++                bend,
+             });
+         }
+     }
+@@ -1154,9 +1368,36 @@
+         Some(p)
+     }
+ 
++    /// What the World Preview paints at block (x, z): 1 where `carve` would cut a river's channel, 2 where it would fill a lake, 0 for dry
++    /// land. `ground` is the land's height there (`carve`'s `surface`) and `biome` the column's. The same rules as `carve`, read at one
++    /// column: off when `Settings::enabled` is off, a lake only over ground from 40 up to its top, the channel not in a blacklisted biome,
++    /// not under 5 blocks, not above 120, and not where the ground lies more than 6 blocks under the channel's bed (the river is not
++    /// cut into a pit).
++    pub fn water_at(&self, x: i32, z: i32, ground: i32, biome: Biome) -> u8 {
++        let set = settings();
++        if !set.enabled {
++            return 0;
++        }
++        let plan = self.plan_at(f64::from(x) + 0.5, f64::from(z) + 0.5);
++        if !plan.is_some_and(|p| p.in_channel) {
++            if let Some((top, _floor)) = self.nets.iter().find_map(|n| n.lake_top_at(x, z)) {
++                return if (40..top).contains(&ground) { 2 } else { 0 };
++            }
++        }
++        let Some(p) = plan.filter(|p| p.in_channel) else { return 0 };
++        if set.blacklist.contains(&biome) || ground < 5 || p.bed_y < 5 || p.water_y > 120 || ground + 6 < bed_at(&p) {
++            return 0;
++        }
++        1
++    }
++
+     /// Cut this region's rivers and fill its lakes into chunk (cx, cz), `(x << 11) | (z << 7) | y`, after terrain and surface.
+     /// `biomes` and `temps` are the chunk's, `x * 16 + z`; ice caps the water where it is cold.
+     pub fn carve(&self, cx: i32, cz: i32, blocks: &mut [u8], biomes: &[Biome], temps: &[f64]) {
++        let set = settings();
++        if !set.enabled {
++            return;
++        }
+         for x in 0..16usize {
+             for z in 0..16usize {
+                 let (wx, wz) = (cx * 16 + x as i32, cz * 16 + z as i32);
+@@ -1167,18 +1408,22 @@
+                 let (px, pz) = (wx as f64 + 0.5, wz as f64 + 0.5);
+                 let plan = self.plan_at(px, pz);
+                 if !plan.is_some_and(|p| p.in_channel) {
+-                    if let Some(top) = self.nets.iter().find_map(|n| n.lake_top_at(wx, wz)) {
+-                        // Water fills what lies under the lake's surface; the shore is the terrain's own.
++                    if let Some((top, floor)) = self.nets.iter().find_map(|n| n.lake_top_at(wx, wz)) {
++                        // Water fills what lies under the lake's surface, down to the dipped floor; the shore is the terrain's own.
+                         if (40..top).contains(&s) {
+-                            for y in s + 1..=top {
++                            let low = s.min(floor);
++                            for y in low + 1..=top {
+                                 blocks[col + y as usize] = if cold && y == top { block::ICE } else { block::WATER };
+                             }
+-                            blocks[col + s as usize] = pick(st.bed, pat);
++                            blocks[col + low as usize] = pick(st.bed, pat);
+                         }
+                         continue;
+                     }
+                 }
+                 let Some(p) = plan else { continue };
++                if set.blacklist.contains(&biomes[x * 16 + z]) {
++                    continue;
++                }
+                 let (ws, bed) = (p.water_y, p.bed_y);
+                 if s < 5 || bed < 5 || ws > 120 {
+                     continue;
+@@ -1190,12 +1435,14 @@
+                 }
+                 if p.in_channel {
+                     // Channel: water up to the surface, whatever stood above it removed, a bed under it (built up where the ground is lower).
++                    let bed = bed_at(&p);
++                    let icy = cold && p.speed < set.ice_speed;
+                     if s + 6 < bed {
+                         continue;
+                     }
+                     for y in bed + 1..=s.max(ws).min(126) {
+                         blocks[col + y as usize] = if y <= ws {
+-                            if cold && y == ws { block::ICE } else { block::WATER }
++                            if icy && y == ws { block::ICE } else { block::WATER }
+                         } else {
+                             block::AIR
+                         };
+@@ -1245,6 +1492,17 @@
+                     if ns > 0 && ns < 126 && blocks[col + ns as usize] == block::GRASS && blocks[col + ns as usize + 1] == block::AIR && r < 0.12 * f {
+                         blocks[col + ns as usize + 1] = if r < 0.06 * f { block::FLOWER_Y } else { block::FLOWER_R };
+                     }
++                    // Bank features (`BankFeature`, cut down): reeds where the ground is level with the water (sugar cane needs water beside
++                    // its base), and now and then a boulder of cobblestone and moss. UNVERIFIED: the mod's templates are not followed.
++                    let r2 = unit3(0x72, wx as i64, wz as i64);
++                    let base = if ns > 0 && ns < 120 { blocks[col + ns as usize] } else { 0 };
++                    if ns == ws && k < 2.0 && matches!(base, block::GRASS | block::DIRT | block::SAND) && blocks[col + ns as usize + 1] == block::AIR && r2 < 0.12 {
++                        for y in ns + 1..=ns + 1 + (r2 * 25.0) as i32 % 3 {
++                            blocks[col + y as usize] = block::REED;
++                        }
++                    } else if ns > ws && ns < 120 && k > 1.5 && k < band && base == block::GRASS && blocks[col + ns as usize + 1] == block::AIR && r2 > 0.995 {
++                        blocks[col + ns as usize + 1] = if r2 > 0.998 { block::MOSSY } else { block::COBBLE };
++                    }
+                 }
+             }
+         }
+@@ -1258,6 +1516,9 @@
+ pub struct Hydro {
+     seed: i64,
+     plates: Mutex<Vec<((i32, i32), Arc<OnceLock<Arc<Network>>>)>>,
++    /// Whether this world's plates go through the disk cache (`cache_dir`). The World Preview's do not: its seed, type and Natural
++    /// Temperature settings are not those of the world whose folder `cache_dir` points at, and a file does not know them.
++    disk: bool,
+ }
+ 
+ impl Hydro {
+@@ -1265,7 +1526,15 @@
+     pub fn of(seed: i64, tectonic: bool) -> Arc<Hydro> {
+         static WORLDS: OnceLock<Mutex<HashMap<(i64, bool), Arc<Hydro>>>> = OnceLock::new();
+         let mut m = WORLDS.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+-        m.entry((seed, tectonic)).or_insert_with(|| Arc::new(Hydro { seed, plates: Mutex::default() })).clone()
++        m.entry((seed, tectonic)).or_insert_with(|| Arc::new(Hydro { seed, plates: Mutex::default(), disk: true })).clone()
++    }
++
++    /// The `Hydro` the World Preview reads: shared by the preview's workers like `of`, but apart from the game's worlds and never read from
++    /// or written to the disk cache.
++    pub fn of_preview(seed: i64, tectonic: bool) -> Arc<Hydro> {
++        static PREVIEWS: OnceLock<Mutex<HashMap<(i64, bool), Arc<Hydro>>>> = OnceLock::new();
++        let mut m = PREVIEWS.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
++        m.entry((seed, tectonic)).or_insert_with(|| Arc::new(Hydro { seed, plates: Mutex::default(), disk: false })).clone()
+     }
+ 
+     /// The network of a plate, routed with `probe` if nobody has yet. A second thread that needs the same plate waits for the first.
+@@ -1284,7 +1553,18 @@
+                 s
+             }
+         };
+-        slot.get_or_init(|| Arc::new(build(self.seed, key, probe))).clone()
++        slot.get_or_init(|| {
++            let file = self.disk.then(|| CACHE.lock().ok().and_then(|c| c.clone())).flatten().map(|d| d.join(format!("{:x}_{}_{}.net", self.seed, key.0, key.1)));
++            if let Some(n) = file.as_ref().and_then(|f| std::fs::read(f).ok()).and_then(|b| Network::from_bytes(&b)) {
++                return Arc::new(n);
++            }
++            let n = build(self.seed, key, probe);
++            if let Some(f) = file {
++                let _ = f.parent().map(std::fs::create_dir_all);
++                let _ = std::fs::write(f, n.to_bytes());
++            }
++            Arc::new(n)
++        }).clone()
+     }
+ 
+     /// The networks that reach chunk (cx, cz): its plate's and the neighbours' whose margin covers it.
+@@ -1329,8 +1609,16 @@
+ 
+ /// The current at a point in blocks per second, `None` away from a river or on a plate not made yet.
+ pub fn current(x: f32, z: f32) -> Option<[f32; 2]> {
++    current_for(x, z, Push::Player)
++}
++
++/// `current` for a kind of pusher (a boat is pushed harder than a player or a mob).
++pub fn current_for(x: f32, z: f32, k: Push) -> Option<[f32; 2]> {
++    if !settings().enabled {
++        return None;
++    }
+     let h = WATCHED.lock().ok()?.clone()?;
+-    h.peek(x, z)?.flow_at(x, z)
++    h.peek(x, z)?.flow_at(x, z, k)
+ }
+ 
+ #[cfg(test)]
+@@ -1418,7 +1706,7 @@
+     /// The carve puts water in a chunk with a river, holds it up, and leaves most chunks alone.
+     #[test]
+     fn carved_water_rests_on_ground() {
+-        let h = Hydro { seed: SEED, plates: Mutex::default() };
++        let h = Hydro { seed: SEED, plates: Mutex::default(), disk: false };
+         let (mut water, mut touched, mut chunks) = (0, 0, 0);
+         let (sx, sz) = plate_seed_point(SEED, plate_at(SEED, 0.0, 0.0).0, plate_at(SEED, 0.0, 0.0).1);
+         for cx in (sx / 16.0) as i32 - 12..(sx / 16.0) as i32 + 12 {
+@@ -1462,12 +1750,39 @@
+             .iter()
+             .map(|&(x1, z1, x2, z2, w)| {
+                 let y = grade - inset_for(w) as f64;
+-                Seg { x1, z1, y1: y, w1: w, x2, z2, y2: y, w2: w, sp: 1.0, o1: 0.0, o2: 0.0 }
++                Seg { x1, z1, y1: y, w1: w, x2, z2, y2: y, w2: w, sp: 1.0, o1: 0.0, o2: 0.0, bend: 0.0 }
+             })
+             .collect();
+         Network { index: index_of(&segs), segs, lake_of: Vec::new(), lake_top: Vec::new(), g0: (0, 0), n: (0, 0) }
+     }
+ 
++    /// The World Preview paints water where `carve` puts it: on flat ground, on ground far under the bed, and on a hill.
++    #[test]
++    fn the_preview_water_matches_the_carve() {
++        let reg = Region { nets: vec![Arc::new(made(&[(0.0, 8.0, 15.0, 8.0, 2.0)]))] };
++        for top in [69usize, 66, 30] {
++            let mut b = vec![block::AIR; 16 * 16 * 128];
++            for x in 0..16usize {
++                for z in 0..16usize {
++                    for y in 0..=top {
++                        b[(x << 11) | (z << 7) | y] = block::STONE;
++                    }
++                }
++            }
++            reg.carve(0, 0, &mut b, &vec![Biome::Plains; 256], &vec![0.8; 256]);
++            let mut wet = 0;
++            for x in 0..16usize {
++                for z in 0..16usize {
++                    let carved = b[(x << 11) | (z << 7)..][..128].iter().any(|&c| c == block::WATER);
++                    let seen = reg.water_at(x as i32, z as i32, top as i32, Biome::Plains) == 1;
++                    assert_eq!(carved, seen, "ground {top}: column ({x}, {z}) carved {carved}, preview {seen}");
++                    wet += usize::from(carved);
++                }
++            }
++            assert_eq!(wet > 0, top >= 60, "ground {top}: {wet} wet columns");
++        }
++    }
++
+     /// A river on a terrace is not overwritten by a lower river whose bank reaches it: the lower network comes first, as the plate's own
+     /// does. Its bank used to take the upper channel's columns (cut or skipped), leaving no river or water standing on a cliff.
+     /// Two channels that overlap (a stream joining a river, at different levels) are one water: every column of the overlap has the same
+@@ -1607,6 +1922,60 @@
+     }
+ 
+     /// A river's current points downstream (west here) at a speed in the mod's range.
++    fn plan_at_side(side: f64, bend: f64) -> Plan {
++        Plan { in_channel: true, water_y: 62, bed_y: 56, blend: 0.0, distance: side.abs() * 6.0, width: 6.0, grade: 62.0, dir: [1.0, 0.0], speed: 1.0, to_outlet: 0.0, side, bend }
++    }
++
++    #[test]
++    fn the_bed_is_deepest_on_the_centre_line() {
++        assert_eq!(bed_at(&plan_at_side(0.0, 0.0)), 56);
++        assert!(bed_at(&plan_at_side(0.5, 0.0)) > 56 && bed_at(&plan_at_side(1.0, 0.0)) > bed_at(&plan_at_side(0.5, 0.0)));
++        assert_eq!(bed_at(&plan_at_side(1.0, 0.0)), 60); // 0.4 of 6 = 2.4 -> 2
++        assert_eq!(bed_at(&Plan { bed_y: 61, ..plan_at_side(1.0, 0.0) }), 61); // never under one block of water
++    }
++
++    #[test]
++    fn a_bend_digs_its_outer_bank() {
++        // Turning left, the outer bank is the right one (side < 0): deeper there than on the inner side, and the straight reach is even.
++        assert_eq!(bed_at(&plan_at_side(0.5, 0.0)), bed_at(&plan_at_side(-0.5, 0.0)));
++        assert!(bed_at(&plan_at_side(-0.5, 1.0)) < bed_at(&plan_at_side(0.5, 1.0)));
++        assert!(bed_at(&plan_at_side(0.5, -1.0)) < bed_at(&plan_at_side(-0.5, -1.0)));
++    }
++
++    #[test]
++    fn the_cache_round_trips_and_refuses_a_cut_file() {
++        let net = made(&[(0.0, 0.0, 100.0, 0.0, 2.0), (100.0, 0.0, 200.0, 40.0, 2.0)]);
++        let b = net.to_bytes();
++        let back = Network::from_bytes(&b).expect("reads back");
++        assert_eq!(back.segs.len(), net.segs.len());
++        assert_eq!(back.plan(50.0, 1.0).map(|p| p.water_y), net.plan(50.0, 1.0).map(|p| p.water_y));
++        assert!(Network::from_bytes(&b[..b.len() - 1]).is_none());
++        assert!(Network::from_bytes(b"HYD\xff\0\0\0").is_none());
++    }
++
++    #[test]
++    fn a_boat_is_pushed_harder_than_a_player() {
++        let s = Settings::default();
++        assert!(s.factor(Push::Boat) > s.factor(Push::Player) && s.factor(Push::Mob) == s.factor(Push::Player));
++        assert!((BASE_PUSH * s.factor(Push::Player) - 1.5).abs() < 1e-9);
++    }
++
++    #[test]
++    fn the_lake_warp_stays_inside_four_blocks() {
++        for x in -40..40 {
++            for z in -40..40 {
++                assert!(warp(x, z, 3).abs() <= 4.0 && warp(x, z, 4).abs() <= 4.0);
++            }
++        }
++    }
++
++    #[test]
++    fn settings_read_their_lines() {
++        let s = Settings::parse("hydro:false\nplayerPush:2.5\nhydroBlacklist:desert, Beach, nope\nx", &[Biome::Desert, Biome::Beach, Biome::Plains]);
++        assert!(!s.enabled && s.player_push == 2.5 && s.boat_push == 2.0 && s.blacklist == vec![Biome::Desert, Biome::Beach]);
++        assert_eq!(Settings::parse("playerPush:abc", &[]), Settings::default());
++    }
++
+     #[test]
+     fn the_current_follows_the_river() {
+         let net = build(SEED, plate_at(SEED, 0.0, 0.0), &mut land);
+diff -ruN a/mc-rs/src/world/gen/overworld.rs b/mc-rs/src/world/gen/overworld.rs
+--- a/mc-rs/src/world/gen/overworld.rs	2026-11-04 11:14:25.920232396 +0000
++++ b/mc-rs/src/world/gen/overworld.rs	2026-11-04 11:14:27.724438718 +0000
+@@ -7,7 +7,7 @@
+ use crate::world::biome::Biome;
+ use crate::world::gen::caves;
+ use crate::world::gen::chunk_manager::WorldChunkManager;
+-use crate::world::gen::hydro::{Hydro, CELL};
++use crate::world::gen::hydro::{Hydro, Region, CELL};
+ use crate::world::gen::noise::{JavaRandom, OctaveNoise};
+ use std::collections::HashMap;
+ use std::sync::Arc;
+@@ -235,7 +235,8 @@
+         self
+     }
+ 
+-    /// The generator the World Preview samples: the terrain of `ty` and nothing else (no rivers, caves, structures), so it is cheap to make.
++    /// The generator the World Preview samples: the terrain of `ty` and its rivers and lakes (the same `Hydro` the game uses, made on
++    /// demand), no caves or structures, so it is cheap to make.
+     pub fn preview(ty: WorldType, seed: i64) -> Self {
+         let mut g = Self::new(seed);
+         match ty {
+@@ -243,9 +244,25 @@
+             WorldType::Tectonic => g = g.tectonic(),
+             WorldType::Blooming => g.blooming = true,
+         }
++        g.hydro = Some(Hydro::of_preview(g.seed, g.tectonic.is_some()));
+         g
+     }
+ 
++    /// Water at block (bx, bz) for the World Preview: 0 dry, 1 river, 2 lake (`Region::water_at`). `cache` keeps the regions of the chunks
++    /// asked about (the caller owns it; it is emptied past 48).
++    pub fn water_at(&mut self, bx: i32, bz: i32, cm: &WorldChunkManager, cache: &mut HashMap<(i32, i32), Arc<Region>>, ground: i32) -> u8 {
++        let Some(h) = self.hydro.clone() else { return 0 };
++        let key = (bx >> 4, bz >> 4);
++        if !cache.contains_key(&key) {
++            if cache.len() > 48 {
++                cache.clear();
++            }
++            let r = h.region(key.0, key.1, &mut |gx, gz| self.probe(gx, gz, cm));
++            cache.insert(key, r);
++        }
++        cache[&key].water_at(bx, bz, ground, cm.sample_at(bx, bz).0)
++    }
++
+     /// Surface height (the zero crossing of the density column, or Tectonic's surface) at block (bx, bz), read without making the chunk.
+     pub fn height_at(&mut self, bx: i32, bz: i32, cm: &WorldChunkManager) -> i32 {
+         self.probe_block(bx, bz, cm).0.round() as i32
+diff -ruN a/mc-rs/src/world/gen/structory.rs b/mc-rs/src/world/gen/structory.rs
+--- a/mc-rs/src/world/gen/structory.rs	2026-11-04 11:14:25.920528989 +0000
++++ b/mc-rs/src/world/gen/structory.rs	2026-11-04 11:14:27.723068372 +0000
+@@ -28,6 +28,7 @@
+ //! - Where the Beta world has no such block the converter picked the nearest one (stone bricks = cobblestone, walls and iron bars =
+ //!   fences, carpets = nothing, ...), see `to_beta` in the tool.
+ 
++use crate::world::biome::Biome;
+ use crate::world::chest::Chest;
+ use crate::world::chunk::idx;
+ use crate::world::gen::chunk_manager::WorldChunkManager;
+@@ -589,6 +590,66 @@
+     }
+ }
+ 
++/// Whether `structory.bin` loaded (the Blooming world has structures at all).
++pub fn available() -> bool {
++    data().is_some()
++}
++
++/// Number of structures, and the biomes (bit `Biome as u8`) structure `st` can start in.
++pub fn count() -> usize {
++    data().map_or(0, |d| d.structs.len())
++}
++
++pub fn mask(st: usize) -> u32 {
++    data().and_then(|d| d.structs.get(st)).map_or(0, |s| s.mask)
++}
++
++/// Where structures start inside the block box (x0, z0) .. (x1, z1), for the World Preview: (x, z of the start chunk's middle,
++/// structure index). The same `spread`, frequency roll and weighted pick as `Structory::start`, with the biome read through
++/// `biome`; the pieces are not assembled, so a start that `assemble` would refuse (rare) still shows.
++pub fn starts(seed: i64, x0: i32, z0: i32, x1: i32, z1: i32, biome: &mut dyn FnMut(i32, i32) -> Biome) -> Vec<(i32, i32, u8)> {
++    let Some(d) = data() else { return Vec::new() };
++    let (cx0, cx1, cz0, cz1) = (x0 >> 4, x1 >> 4, z0 >> 4, z1 >> 4);
++    let mut out = Vec::new();
++    for set in &d.sets {
++        for rx in cx0.div_euclid(set.spacing)..=cx1.div_euclid(set.spacing) {
++            for rz in cz0.div_euclid(set.spacing)..=cz1.div_euclid(set.spacing) {
++                let (sx, sz) = spread(seed, rx, rz, set);
++                if sx < cx0 || sx > cx1 || sz < cz0 || sz > cz1 {
++                    continue;
++                }
++                if set.freq != 65535 && JavaRandom::new(large_feature(seed, sx, sz, set.salt)).next_float() >= f32::from(set.freq) / 65535.0 {
++                    continue;
++                }
++                let mut r = JavaRandom::new(seed);
++                let (a, b) = (r.next_long(), r.next_long());
++                r.set_seed(i64::from(sx).wrapping_mul(a) ^ i64::from(sz).wrapping_mul(b) ^ seed);
++                let mut list = set.entries.clone();
++                let mut total: i32 = list.iter().map(|e| i32::from(e.1)).sum();
++                let b = biome(sx * 16, sz * 16);
++                while !list.is_empty() && total > 0 {
++                    let mut k = r.next_int_bound(total);
++                    let mut at = list.len() - 1;
++                    for (i, e) in list.iter().enumerate() {
++                        k -= i32::from(e.1);
++                        if k < 0 {
++                            at = i;
++                            break;
++                        }
++                    }
++                    let (ix, w) = list.remove(at);
++                    total -= i32::from(w);
++                    if d.structs[usize::from(ix)].mask >> (b as u8) & 1 != 0 {
++                        out.push((sx * 16 + 8, sz * 16 + 8, ix));
++                        break;
++                    }
++                }
++            }
++        }
++    }
++    out
++}
++
+ /// The per-generator state of the structures: the starts already assembled and the heights they needed.
+ pub struct Structory {
+     seed: i64,
+diff -ruN a/mc-rs/src/world/items.rs b/mc-rs/src/world/items.rs
+--- a/mc-rs/src/world/items.rs	2026-11-04 11:14:25.920745735 +0000
++++ b/mc-rs/src/world/items.rs	2026-11-04 11:14:27.728774724 +0000
+@@ -382,6 +382,13 @@
+             return false;
+         }
+         self.vel.y -= 0.04;
++        // A stream's current carries an item that lies in its water (`Entity.handleWaterMovement`; `gen::hydro`'s flow, as for mobs).
++        if matches!(get(here[0], here[1], here[2]), Some(8 | 9)) {
++            if let Some(c) = crate::world::gen::hydro::current_for(self.pos.x, self.pos.z, crate::world::gen::hydro::Push::Mob) {
++                self.vel.x += (c[0] / 20.0 - self.vel.x) * 0.15;
++                self.vel.z += (c[1] / 20.0 - self.vel.z) * 0.15;
++            }
++        }
+         // pushOutOfBlocks (simplified): a block placed on top of it lifts it onto the block.
+         if solid(get, here) {
+             self.pos.y = here[1] as f32 + 1.0 + R;
+diff -ruN a/roadmap/world.md b/roadmap/world.md
+--- a/roadmap/world.md	2026-11-04 11:14:25.927831343 +0000
++++ b/roadmap/world.md	2026-11-04 11:14:27.729062521 +0000
+@@ -5,7 +5,7 @@
+ 
+ ## Rivers: what is still missing from Streams Reflowing 2.15.2
+ 
+-Source: `world/gen/hydro.rs`, a port read from the mod's bytecode (no source). Written WITHOUT a Rust toolchain: not compiled, not run, 5 tests in `hydro::tests` not yet run; `tools/hydro_proto.py` ran. The mod is "All Rights Reserved": ask its author before publishing mc-rs with this port.
++Source: `world/gen/hydro.rs`, a port read from the mod's bytecode (no source). Written WITHOUT a Rust toolchain: not compiled, not run, `hydro::tests` (README: the 16 older ones passed in a Linux scratch crate; `the_bed_is_deepest_on_the_centre_line` is new and not run); `tools/hydro_proto.py` ran. The mod is "All Rights Reserved": ask its author before publishing mc-rs with this port.
+ Labels: PORTED = read from the bytecode and followed; APPROX = something is there, but chosen here, not the mod's; MISSING = not there; N/A = cannot or should not be ported to b1.7.3 / this engine.
+ 
+ | Label | Part of the mod | State in mc-rs |
+@@ -19,35 +19,42 @@
+ | PORTED | `RiverEngine.plan` (channel, bank band, water surface, depth, inset), `RiverSegment` geometry, nearest-segment index | `Network::plan` |
+ | PORTED | `FlowSpeed` (slope, width ratio, depth) | `flow_for_reach`, `flow_at_depth` |
+ | APPROX | Every river reaches the sea | Traced on over the real terrain past the window, else culled (the mod does it with `connectNetwork`) |
+-| APPROX | Plate borders | Owner's network first, `HALO` 8 cells of margin, neighbours fill gaps; no `connectNetwork` / connectors |
++| N/A | `connectNetwork` / `Connector` (plate borders) | Read in `StreamsReflowing-disassembly`: it only repairs a stub (a point segment above sea + 1, `NetworkTracer.a(RiverSegment, int)`) where the mod's own plate ends a river dead at its border, by a path through the neighbours within `connectRadius`. hydro.rs has no stubs: a river leaving the window is traced on over the real terrain until the sea or culled (`trace_tail`), and neighbours' networks cover the halo. Plates still meet by the least clearance (`Region::plan_at`), not by a connector |
+ | APPROX | Lakes | Basins of the 16-block grid (4 cells, mean depth 1.5), level = spill - 2, footprint + 6 blocks |
+ | APPROX | Carve (`RiverCarverFeature.place`, ~6700 instructions) | Own channel / bank / berm rules; materials by biome after `bank_style/*.json` but not its data model; the bank slopes out to the terrain over up to 48 blocks (`VALLEY`), no wall |
+ | APPROX | Terrain grade fit (`terrainFit`, valley snap, grade windows) | Grade = filled terrain height, never rising downstream |
+ | APPROX | `cohesion` (a `WetnessSampler` input of the braid model) | `0.4 + 0.6 x humidity` |
+-| APPROX | Current strength on entities (`CurrentPush`, settings) | `PUSH` 1.5 blocks/s per unit of speed |
++| PORTED | Current strength on entities (`CurrentPush.factor`) | `Settings::{player,boat,mob}_push` 1.2 / 2.0 / 1.2 (the mod's defaults) x `BASE_PUSH` 1.25 blocks/s per unit of speed (the base is chosen here); `hydro::current_for(x, z, Push)` |
+ | APPROX | Plate seed of the meander / pruning hashes | `hash3(seed, cx, cz)` |
+ | APPROX | Minimum stream length (`minStreamLength` 75, `minLengthScope` 2, `minSeaChainNodes`) | `MIN_LEN` 160 blocks on the grid path: a source's stretch to a confluence where it is not the biggest branch, or to the sea, is dropped if shorter (`build`, after the separation step); not the mod's scope rule |
+ | APPROX | A tributary meets the river it joins at one water level | Each chain's water surface is computed in `build` (grade - inset, never rising); a stream joining a bigger river runs level with it for `LEVEL_RUN` 24 blocks + 2 half widths of the big river, then rises to its own surface over `LEVEL_RAMP` 48; the big river's first stretch is held level too. Not in the mod (it smooths banks instead) |
+-| MISSING | Lakes: 3-block hi-res masks (`Lake`, `lakeSampleSpacing`), lake dip / digDepth, rivers entering and leaving lakes at their level | Only the grid footprint |
++| APPROX | Lakes: hi-res masks (`Lake`), lake dip / digDepth | Occupancy interpolated between cell centres (`LAKE_EDGE`), the sample point warped by up to 4 blocks like `Lake.coverageSmooth` (value noise, not its hash), floor dips `LAKE_DIP` 2 at the middle. The mod's mask is a 3-block bit grid blurred by a Gaussian (`Lake.a()`), not ported. Still missing: rivers entering and leaving lakes at their level |
+ | APPROX | Waterfalls and steps (`stepDeltaY`), rapids | The carve still makes steps of whole blocks; the still sources at a step or a cut bank are woken (`ChunkManager::edge_water` -> `Ticks::wake_water`, the mod's `scheduleTick`) and the fluid sim pours them into levels and falling water. No rapids; `stepDeltaY` itself is unused in the mod too |
+-| MISSING | Channel bars and bend asymmetry in the bed (`HydraulicGeometry` bed side, `RiverEngine` bend / lateral) | Only the width side of the hydraulics |
+-| MISSING | Bank templates and features (`BankFeature`, `BankRing`, `BankStyle`, rocks, fallen logs, `bankFeatures` 3) | A few flowers |
+-| MISSING | Vegetation and underwater flora (`StreamVegetationFeature`, `UnderwaterFlora`, `floraRadius` 5, biome boost) | None |
+-| MISSING | Snow cleanup and ice melt on streams | Ice caps where cold, no melt |
+-| MISSING | Fluid block with baked flow direction (`StreamLiquid`, `StreamFlowGrid`) and its rendering | Water is block 9; the current is a lookup (`hydro::current`) |
+-| MISSING | Drifting items, fishing bobber, mobs holding in the current (`mobsHoldInCurrent`) | Players and boats only |
++| APPROX | Channel bars in the bed (`HydraulicGeometry` bed side) | 2026-11-04: `bed_at`, a trough deepest on the centre line (`BED_EDGE` 0.4 at the edge), symmetric |
++| APPROX | Bend asymmetry of the bed (`RiverEngine` bend / lateral) | 2026-11-04: `Seg::bend`, `Plan::side`; the deepest line moves toward the outer bank (`BEND_SHIFT`) |
++| APPROX | Bank features (`BankFeature`, `BankRing`, `BankStyle`, rocks, fallen logs, `bankFeatures` 3) | 2026-11-04: flowers, reeds level with the water, rare cobble / mossy boulders; no templates, no logs (the carve writes no metadata) |
++| APPROX | Vegetation (`StreamVegetationFeature`, `floraRadius` 5, biome boost) | Reeds and flowers only |
++| N/A | Underwater flora (`UnderwaterFlora`) | b1.7.3 has no seagrass or kelp; the bed is clay / gravel / sand |
++| APPROX | Snow cleanup and ice melt on streams | Snow on a cut bank goes with the cut; ice caps where cold, except on water faster than `ICE_SPEED` 1.2 (UNVERIFIED) |
++| APPROX | Fluid block with baked flow direction (`StreamLiquid`, `StreamFlowGrid`) and its rendering | Water is still block 9, but the mesher turns the top of a still stream cell along `hydro::current` (`render/mesh.rs`) |
++| APPROX | Drifting items, mobs in the current (`mobsHoldInCurrent`) | Players, boats, every mob (`physics::step_box`, fliers too), leaf and twig particles and, since 2026-11-04, dropped items (`items.rs`). Holding a mob in place is not ported |
++| PORTED | Fishing bobber in the current | `gear.rs` (pushed like items and mobs) |
+ | MISSING | Particles (foam, bubbles, splash, leaves, sticks; `StreamParticleScanner`) | The older `river_life` in `effects.rs`, not tied to the new plan |
+-| MISSING | Water tint per stream (`StreamTint`) | Biome tint only |
+-| MISSING | Disk cache of networks (`FileNetworkStore`) and prefetch (`prefetchRadius`, region helpers) | Rebuilt per run, `MAX_PLATES` 12 |
+-| MISSING | Biome rules: `streamBiomeBlacklist`, outlet biomes, `allWaterBanks`, `riverDrainageSize` | Outlets are terrain under the sea only |
+-| MISSING | Settings, commands, diagnostics, loading notice | Constants in `hydro.rs` |
+-| N/A | Sound (waterfall, stream) | mc-rs has no audio (M9 out of scope) |
++| N/A | Water tint per stream (`StreamTint`) | Read in the disassembly: it paints the mod's river biome with the colour of the nearest LAND biome (8-block grid, bilinear, up to 6 rings). mc-rs water already takes the biome of the land it lies in (`chunks::biome_tints`, `blend_water`). The darkening `hydro::tint` of the last patch was invented and is removed |
++| APPROX | Disk cache of networks (`FileNetworkStore`) and prefetch | `Network::to_bytes` / `from_bytes` in `<world>/<chunks>/hydro/` (off while Natural Temperature is on; raise `CACHE_VERSION` on any change). No prefetch, `MAX_PLATES` 12 |
++| APPROX | Biome rules: `streamBiomeBlacklist`, outlet biomes, `allWaterBanks`, `riverDrainageSize` | `Settings::blacklist` (default empty, as `D_STREAM_BIOME_BLACKLIST`). Missing: outlet biomes (default `#is_river, #is_ocean, #is_swamp`: here only the sea ends a river), `allWaterBanks`, `riverDrainageSize` |
++| APPROX | Settings, commands, diagnostics, loading notice | `hydro::Settings` (`enabled`, the three pushes, `ice_speed`, `blacklist`), read from `hydro.cfg` beside a world's chunks by `ChunkManager::with_dir` (`key:value` lines). No screen, no commands |
++| MISSING | Sound (waterfall, stream) | `audio/` exists (M9 is done), but has no stream or waterfall sound; b1.7.3's `liquid.water` is the only water loop |
+ | N/A | Village bridges, structure promises / overlap | b1.7.3 has neither |
+ | N/A | Mod compat (Dynamic Trees, RTF, Sable, Flowing Fluids), Fabric mixins, platform services | Not applicable |
+ | N/A | Modern-only blocks in the bank styles (mud, mangrove, cherry, ...) | Mapped to dirt / clay / gravel / sand |
+ 
+ ## Changelog
+ 
++- 2026-11-04 (merge of the hydro 1-3 patches and World Preview 2, written WITHOUT a Rust toolchain: not compiled, not run): `Region::water_at` (the World Preview's water) follows the new `carve`: it reads `lake_top_at`'s `(top, floor)` pair (hydro 2 changed it from a plain top), is off with `Settings::enabled`, fills a lake only over ground 40 .. top, skips a blacklisted biome (now passed in: `OverworldGenerator::water_at` reads it with `sample_at`), ground under 5, a bed under 5, a surface over 120 and ground more than 6 under the bed, like `carve`; test `the_preview_water_matches_the_carve` (not run). The settings are the global ones of the world opened last (`hydro.cfg`), so a Create World preview shows them too; the preview's generator uses `Hydro::of_preview` (its own plates, never the disk cache `cache_dir` of the world last opened: that file name holds the seed and the plate, not the type or the Natural Temperature settings).
++- 2026-11-04 (hydro 3, after `StreamsReflowing-disassembly.zip`): read `connectNetwork`, `StreamTint`, `CurrentPush`, `Lake` and the settings defaults. Ported: the mod's push factors and `current_for`, the lake shore warp, `hydro.cfg`. Corrected: `hydro::tint` (invented) removed; `connectNetwork` and `StreamTint` marked N/A with the reason. Written WITHOUT a Rust toolchain: not compiled, not run (+2 tests `a_boat_is_pushed_harder_than_a_player`, `the_lake_warp_stays_inside_four_blocks`; the settings test updated). Still open: rivers entering lakes at their level, outlet biomes / `allWaterBanks` / `riverDrainageSize`, prefetch (`StreamPrefetcher`), the 3-block Gaussian lake mask.
++- 2026-11-04 (hydro 2): bend asymmetry, hi-res lakes with a dip, the bobber in the current, flow direction on still stream tops, `hydro::tint`, the disk cache and `Settings` (written WITHOUT a Rust toolchain: not compiled, not run; +4 tests in `hydro::tests`: `a_bend_digs_its_outer_bank`, `the_cache_round_trips_and_refuses_a_cut_file`, `settings_read_their_lines`, the bed test rewritten). NOT done: `connectNetwork` (plate-border connectors: the mod's bytecode is not in the zip), rivers entering lakes at the lake's level, outlet biomes / `allWaterBanks`, prefetch, the `options.txt` wiring of `Settings`.
++- 2026-11-04 (hydro): stale notes fixed and five gaps closed in `hydro.rs` (written WITHOUT a Rust toolchain: not compiled, not run; +1 test `the_bed_is_deepest_on_the_centre_line`). Notes: the current already reached mobs, fliers and leaf / twig particles (the table said players and boats), and audio exists (the table said it did not). Code: `bed_at` (trough bed), reeds and boulders on the bank, no ice on water faster than `ICE_SPEED`, dropped items carried by the current (`Item::step`). All chosen here, UNVERIFIED against the mod. Still open: lakes' hi-res masks, `connectNetwork`, bend asymmetry, fluid block + flow rendering, bobber, per-stream tint, disk cache, biome rules, settings.
+ - 2026-11-04: Natural Temperature (Caesius_Leo, Fabric 1.2.1) ported, optional per world (written WITHOUT a Rust toolchain: not compiled, not run; +4 tests: `gen::natural` x3, `menu` x1; `tools/natural_proto.py` was run against the mod's own classes: 6000 cases, 0 mismatches).
+     - What it is: the temperature and humidity of the Overworld laid out in bands / rings / squares round an equator (8 modes each: default, simplified, linear, circular, banded, circular6, square6, discrete) instead of in noise blobs, so the biomes follow like the Earth's. Read from the mod's bytecode (its licence allows reverse engineering); `world/gen/natural.rs` is `MathUtils`, `TemperatureCalculator`, `HumidityCalculator` and `PainterCore`.
+     - Proof: `tools/golden/NaturalHarness.java` runs the mod's own `PainterCore` on a JVM (class version patched 69 -> 65, Minecraft and Fabric stubbed, the two noises replaced by sine stubs) on random settings; `tools/natural_proto.py` (the Python twin the Rust mirrors) and the Rust test `matches_the_mods_own_classes` must give the same two numbers on `tools/golden/natural.txt` (168 cases, every mode). Mutating a constant of the twin breaks the check.
+@@ -180,3 +187,5 @@
+     - ponytail: RTG's OpenSimplex, 1.12 biomes, `ChunkLandscape` cache and its 256-high numbers are not ported (the b1.7.3 simplex and Beta biomes stand in, scaled to sea level 64 of 128); river bends are a second added noise. UNVERIFIED: how the terrain looks and whether the spawn search finds dry land at the origin; the numbers in `params` and the 0.045 river width are eyeballed, not measured.
+ - `done` 2026-11-04 World Preview (compiled: no, ran: no, written without a toolchain). `preview.rs`, `menu.rs` (`Scr::Preview`, button at Create World's top left, `rand_seed`), `OverworldGenerator::preview` / `height_at`, `WorldChunkManager::sample_at`, `TouchUi::take_pinch`. See the README row.
+     - ponytail: no rivers (`hydro`) or structures on the map; no fling after a drag; the seed is edited on Create World only.
++- `done` 2026-11-04 (2) World Preview second pass (compiled: no, ran: no, written without a toolchain; +1 test `preview::tests::explored_squares_nest_and_survive_a_save`). Rivers/lakes (`hydro::Region::water_at`, `OverworldGenerator::water_at`), structure starts (`structory::starts`), seed edit/dice, fling, eased zoom, Cont/Grid/Live layers, in-game preview (`PauseEv::Preview`, `Explored`).
++    - ponytail: a structure start whose pieces `assemble` would refuse still shows; structures have no names (index and biomes); explored = chunks within the render distance of where the player stood, only in the overworld; the Nether shows the overworld map at 8x.
