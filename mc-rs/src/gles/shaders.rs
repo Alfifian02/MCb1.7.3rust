@@ -494,8 +494,9 @@ void main() {
     Src { vs: format!("{HEAD_V}{FULL_VS}"), fs: format!("{HEAD_F}#define FXAA {}\n#define FAST {}\n{fs}", fxaa as u8, fast as u8) }
 }
 
-/// The HUD quads over the final frame (`render/hud.rs`); `sheet_h` = the HUD texture's height. The surface is not sRGB, so no `lin`.
-pub fn hud(sheet_h: f32) -> Src {
+/// The HUD quads over the final frame (`render/hud.rs`); `sheet_h` = the HUD texture's height, `imm_h` the second texture's (Immersive Interfaces,
+/// read when `u >= 1.5`: `hud::IMM_U` is added to it). The surface is not sRGB, so no `lin`.
+pub fn hud(sheet_h: f32, imm_h: f32) -> Src {
     let vs = r#"
 layout(location = 0) in vec2 a_pos;
 layout(location = 1) in vec4 a_color;
@@ -512,17 +513,22 @@ void main() {
     let fs = format!(
         r#"
 uniform sampler2D u_items;
+uniform sampler2D u_imm;
 const vec2 SHEET = vec2(256.0, {sheet_h:.1});
+const vec2 SHEET_B = vec2(256.0, {imm_h:.1});
 in vec4 v_color;
 in vec2 v_uv;
 layout(location = 0) out vec4 o_color;
 void main() {{
-    vec2 p = v_uv * SHEET;
+    bool b = v_uv.x >= 1.5;
+    vec2 uv = vec2(v_uv.x - (b ? 2.0 : 0.0), v_uv.y);
+    vec2 dims = b ? SHEET_B : SHEET;
+    vec2 p = uv * dims;
     vec2 w = max(fwidth(p), vec2(1e-4));
     vec2 e = floor(p + 0.5);
-    vec2 q = (e + clamp((p - e) / w, vec2(-0.5), vec2(0.5))) / SHEET;
+    vec2 q = (e + clamp((p - e) / w, vec2(-0.5), vec2(0.5))) / dims;
     if (v_uv.x < 0.0) {{ o_color = v_color; return; }}
-    vec4 t = textureLod(u_items, q, 0.0);
+    vec4 t = b ? textureLod(u_imm, q, 0.0) : textureLod(u_items, q, 0.0);
     if (t.a < 0.5) {{ discard; }}
     o_color = vec4(t.rgb * v_color.rgb, t.a * v_color.a);
 }}

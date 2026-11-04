@@ -5,6 +5,7 @@
 //! plus `TileEntityFurnace` and `FurnaceRecipes` (smelting).
 //! Item ids follow `world::items`: below 256 = the block, from 256 up = `Item.shiftedIndex` (256 + n).
 
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::OnceLock;
 
 use crate::world::combat;
@@ -690,6 +691,79 @@ impl Screen {
 
 // ---- Geometry: the vanilla GUI (176 x 166 units, a chest's taller), scaled to the surface ----
 
+// ---- Immersive Interfaces (NOT b1.7.3): the container pictures are the pack's 256 x 256 ones (`render::hud::IMMERSIVE`) ----
+// The pack keeps the vanilla slot positions and draws its picture 40 units left of and 45 above the vanilla panel's origin (a chest's: 44 + (3 - rows) * 18
+// above), so a style only changes where the panel sits and how big it is, and the inventory's crafting block (the pack's has the workbench's positions).
+// `Settings::gui_style` / `panel_size` are copied here once a frame (`set_style`): every caller below (`cell`, `slot_at`, `in_panel`, the drawing) reads it.
+
+static IMMERSIVE: AtomicBool = AtomicBool::new(false);
+/// The panel size factor as `f32` bits: 1.0 = the picture fits the screen (`PANEL_FIT` of its height).
+static PANEL_SCALE: AtomicU32 = AtomicU32::new(0x3f80_0000);
+
+/// The picture's size in GUI units and the share of the screen's height it fills at a factor of 1.
+pub const IMM_ART: f32 = 256.0;
+const PANEL_FIT: f32 = 0.92;
+
+/// Switches the style (`Settings::gui_style`) and the panel size factor (`Settings::panel_scale`, 0.5 .. 1.5).
+pub fn set_style(immersive: bool, scale: f32) {
+    IMMERSIVE.store(immersive, Ordering::Relaxed);
+    PANEL_SCALE.store(scale.clamp(0.5, 1.5).to_bits(), Ordering::Relaxed);
+}
+
+pub fn immersive() -> bool {
+    IMMERSIVE.load(Ordering::Relaxed)
+}
+
+fn panel_scale() -> f32 {
+    f32::from_bits(PANEL_SCALE.load(Ordering::Relaxed))
+}
+
+/// The chest's rows of a screen with `gw` chest slots, as far as the pack has a picture (3, or 6 for anything bigger).
+fn chest_rows(gw: usize) -> usize {
+    (gw / 9).clamp(3, 6)
+}
+
+/// Where the vanilla panel's origin lies in the pack's 256 x 256 picture: (40, 45), a chest's y is 44 + (3 - rows) * 18 (the player's rows sit
+/// 18 units per chest row lower in vanilla, the picture's bag is fixed).
+pub fn art_origin(gw: usize) -> (f32, f32) {
+    let chest = gw > 3 && gw != 9;
+    (40.0, if chest { 44.0 + (3 - chest_rows(gw) as i32) as f32 * 18.0 } else { 45.0 })
+}
+
+/// The picture of the pack's panel for a screen with `gw`: the rect of `render::hud::sprites::imm`.
+pub fn art_sprite(gw: usize) -> crate::render::hud::sprites::Sprite {
+    use crate::render::hud::sprites::imm;
+    match gw {
+        2 => imm::INVENTORY,
+        3 => imm::CRAFTING,
+        0 => imm::FURNACE,
+        9 => imm::DISPENSER,
+        _ if chest_rows(gw) <= 3 => imm::CHEST3,
+        _ => imm::CHEST6,
+    }
+}
+
+/// The picture's top-left (px) and its scale (px per unit) on a `w` x `h` surface at the size factor `scale`: centred, fitted to the screen at 1.0.
+fn art_rect(w: f32, h: f32, scale: f32) -> (f32, f32, f32) {
+    let k = (h * PANEL_FIT / IMM_ART).min(w * PANEL_FIT / IMM_ART) * scale;
+    ((w - IMM_ART * k) * 0.5, (h - IMM_ART * k) * 0.5, k)
+}
+
+/// Where the style puts the pack's picture of the current screen: (x, y, size in px of its 256 units), `None` in the vanilla style.
+pub fn art(gw: usize, w: f32, h: f32) -> Option<(f32, f32, f32)> {
+    let _ = gw;
+    immersive().then(|| {
+        let (x, y, k) = art_rect(w, h, panel_scale());
+        (x, y, IMM_ART * k)
+    })
+}
+
+/// The scale the vanilla panel of a furnace gets (what the touch HUD sizes its hotbar and buttons by): the same in both styles.
+pub fn hud_k(w: f32, h: f32) -> f32 {
+    let (pw, ph) = (176.0, 166.0);
+    (h * 0.92 / ph).min(w * 0.92 / pw)
+}
+
 /// `GuiContainer.xSize` x `ySize`: the vanilla 176 x 166 GUI, or a chest's `114 + 18 * rows` (`GuiChest`).
 pub fn panel_size(gw: usize) -> (f32, f32) {
     (176.0, if gw > 3 && gw != 9 { 114.0 + 18.0 * (gw / 9) as f32 } else { 166.0 })
@@ -702,9 +776,14 @@ pub const CRAFT_SHIFT: usize = 6;
 /// Vanilla `(slot, x, y)` of every slot's top-left pixel (`ContainerPlayer` / `ContainerWorkbench` / `ContainerFurnace` /
 /// `ContainerChest` constructors). A chest screen has `gw` chest slots (rows of 9) and the player's 27 + 9 below them.
 pub fn layout(gw: usize) -> Vec<(SlotId, f32, f32)> {
+    layout_for(gw, immersive())
+}
+
+/// `layout` in a given style: the pack's inventory picture has its 2x2 grid where the workbench's 3x3 starts and its result where the workbench's is.
+pub fn layout_for(gw: usize, imm: bool) -> Vec<(SlotId, f32, f32)> {
     let (disp, chest) = (gw == 9, gw > 3 && gw != 9);
     let d = if chest { (gw / 9) as i32 * 18 - 72 } else { 0 }; // `ContainerChest`: `(rows - 4) * 18`
-    let ((rx, ry), (gx, gy)) = if gw == 2 { ((154 - CRAFT_SHIFT, 28), (98 - CRAFT_SHIFT, 18)) } else { ((124, 35), (30, 17)) };
+    let ((rx, ry), (gx, gy)) = if gw == 2 && !imm { ((154 - CRAFT_SHIFT, 28), (98 - CRAFT_SHIFT, 18)) } else { ((124, 35), (30, 17)) };
     let mut v: Vec<_> = if disp {
         (0..9).map(|i| (SlotId::Chest(i), (62 + 18 * (i % 3)) as f32, (17 + 18 * (i / 3)) as f32)).collect() // `ContainerDispenser`
     } else if chest {
@@ -728,6 +807,16 @@ pub fn layout(gw: usize) -> Vec<(SlotId, f32, f32)> {
 
 /// Panel origin (px) and scale (px per GUI unit) for a `w` x `h` surface and a screen with `gw` (see `Screen::gw`).
 pub fn panel(gw: usize, w: f32, h: f32) -> (f32, f32, f32) {
+    panel_for(gw, w, h, immersive(), panel_scale())
+}
+
+/// `panel` in a given style: in the immersive one the origin is the vanilla panel's, found inside the centred picture (`art_origin`).
+pub fn panel_for(gw: usize, w: f32, h: f32, imm: bool, scale: f32) -> (f32, f32, f32) {
+    if imm {
+        let (ax, ay, k) = art_rect(w, h, scale);
+        let (ux, uy) = art_origin(gw);
+        return (ax + ux * k, ay + uy * k, k);
+    }
     let (pw, ph) = panel_size(gw);
     let k = (h * 0.92 / ph).min(w * 0.92 / pw);
     ((w - pw * k) * 0.5, (h - ph * k) * 0.5, k)
@@ -770,6 +859,9 @@ pub fn on_shift_button(gw: usize, w: f32, h: f32, px: f32, py: f32) -> bool {
 }
 
 pub fn in_panel(gw: usize, w: f32, h: f32, px: f32, py: f32) -> bool {
+    if let Some((ax, ay, size)) = art(gw, w, h) {
+        return px >= ax && px < ax + size && py >= ay && py < ay + size;
+    }
     let (ox, oy, k) = panel(gw, w, h);
     let (pw, ph) = panel_size(gw);
     px >= ox && px < ox + pw * k && py >= oy && py < oy + ph * k
@@ -778,6 +870,44 @@ pub fn in_panel(gw: usize, w: f32, h: f32, px: f32, py: f32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Immersive Interfaces: every slot of every panel sits on a slot of the pack's picture (`assets/immersive.rgba`, `tools/gen_immersive_ui.py`: the
+    /// picture's slot wells are dark, their frame lighter), and the picture lies inside the screen's middle at the fitted size.
+    #[test]
+    fn immersive_slots_sit_on_the_pictures() {
+        use crate::render::hud::IMMERSIVE;
+        let px = |sx: f32, sy: f32, x: f32, y: f32| {
+            let i = (((sy + y) as usize) * 256 + (sx + x) as usize) * 4;
+            (IMMERSIVE[i] as u32 + IMMERSIVE[i + 1] as u32 + IMMERSIVE[i + 2] as u32, IMMERSIVE[i + 3])
+        };
+        for gw in [2usize, 3, 0, 9, 27, 54] {
+            let (sx, sy, ..) = art_sprite(gw);
+            let (ox, oy) = art_origin(gw);
+            for (id, ux, uy) in layout_for(gw, true) {
+                let (x, y) = (ux + ox, uy + oy);
+                // the slot's middle is inside the picture and opaque (the art has a well or a surface under every slot)
+                let (_, a) = px(sx, sy, x + 8.0, y + 8.0);
+                assert!(a > 128, "gw {gw} {id:?} at ({ux}, {uy}): nothing under the slot's middle");
+                assert!(x >= 0.0 && y >= 0.0 && x + 16.0 <= 256.0 && y + 16.0 <= 256.0, "gw {gw} {id:?} leaves the 256 x 256 picture");
+            }
+        }
+        // the chest pictures keep the player's rows where the picture has them: the hotbar's first slot is at art y 187 whatever the rows
+        for gw in [27usize, 54] {
+            let (_, oy) = art_origin(gw);
+            let hot = layout_for(gw, true).into_iter().find(|s| s.0 == SlotId::Inv(0)).unwrap();
+            assert_eq!(hot.2 + oy, 187.0, "gw {gw}");
+        }
+        let hot = layout_for(2, true).into_iter().find(|s| s.0 == SlotId::Inv(0)).unwrap();
+        assert_eq!(hot.2 + art_origin(2).1, 187.0);
+        // the style fits the screen: at a factor of 1 the picture is 92% of the height (landscape), centred; the vanilla style is untouched
+        let (ox, oy, k) = panel_for(2, 2400.0, 1080.0, true, 1.0);
+        let (ax, ay) = (ox - 40.0 * k, oy - 45.0 * k);
+        assert!((256.0 * k - 1080.0 * 0.92).abs() < 0.01 && (ax - (2400.0 - 256.0 * k) / 2.0).abs() < 0.01 && (ay - (1080.0 - 256.0 * k) / 2.0).abs() < 0.01);
+        assert_eq!(panel_for(2, 2400.0, 1080.0, false, 1.5), { let (pw, ph) = panel_size(2); let k = (1080.0 * 0.92 / ph).min(2400.0 * 0.92 / pw); ((2400.0 - pw * k) / 2.0, (1080.0 - ph * k) / 2.0, k) });
+        assert!(layout_for(2, true).iter().any(|s| s.0 == SlotId::Result && s.1 == 124.0) && layout_for(2, false).iter().any(|s| s.0 == SlotId::Result && s.1 == 148.0));
+        // `hud_k` is the furnace's vanilla scale
+        assert_eq!(hud_k(2400.0, 1080.0), panel_for(0, 2400.0, 1080.0, false, 1.0).2);
+    }
 
     /// Every slot of `layout` sits on a frame of the pack's panel (`assets/containers.rgba`, 256 rows per panel): its left edge, one texel
     /// out, is the frame's dark line. The 2x2 screen once used b1.7.3's positions on the modern panel, and taps missed the drawn slots.

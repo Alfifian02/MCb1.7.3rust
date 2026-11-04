@@ -3840,6 +3840,8 @@ impl App {
     /// Build the HUD vertex buffer for this frame. Called between the chunk
     /// and HUD render passes inside `render`.
     fn build_hud(&mut self) {
+        // Immersive Interfaces (Options > General): `craft`'s geometry and this frame's drawing read the style from here.
+        craft::set_style(self.opts.gui_style, self.opts.panel_scale());
         // `ext` reads all of `self`, so it is taken before `hud_verts` is borrowed mutably.
         let ext = self.screen.as_ref().and_then(|s| self.ext(s));
         let pause_info = self.pause_info();
@@ -4035,10 +4037,14 @@ impl App {
             let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
             let (ox, oy, k) = craft::panel(s.gw, w, h);
             let (pw, ph) = craft::panel_size(s.gw);
+            // Immersive Interfaces (NOT b1.7.3, Options > General > GUI Style): the pack's 256 x 256 picture (`craft::art`) instead of the vanilla panel.
+            let art = craft::art(s.gw, w, h);
             HudPipeline::push_quad(v, 0.0, 0.0, w, h, [0.0, 0.0, 0.0, 0.55]);
             // The panel is the pack's picture (`GuiInventory` / `GuiCrafting` / `GuiFurnace` / `GuiChest`: a chest is its rows' top, then the
             // 96 units of the player's inventory from y = 126 of the sheet); the slots are in it, so a slot is only its stack.
-            if s.gw > 3 {
+            if let Some((ax, ay, size)) = art {
+                HudPipeline::push_imm(v, ax, ay, size, size, craft::art_sprite(s.gw));
+            } else if s.gw > 3 {
                 let top = 17.0 + 18.0 * (s.gw / 9) as f32;
                 HudPipeline::push_gui(v, ox, oy, pw * k, top * k, (0.0, sp::CHEST_Y, 176.0, top));
                 HudPipeline::push_gui(v, ox, oy + top * k, pw * k, 96.0 * k, (0.0, sp::CHEST_Y + 126.0, 176.0, 96.0));
@@ -4048,7 +4054,9 @@ impl App {
             // `GuiInventory`: the player at (51, 75) of the panel, straight ahead, an item in hand lowers the arm.
             if s.gw == 2 {
                 let pose = render::player::Pose { age: self.world_ticks as f32, holding: self.inv.slots[self.touch.hotbar_slot].is_some(), ..Default::default() };
-                HudPipeline::push_player(v, render::player::inventory_quads(ox + 51.0 * k, oy + 75.0 * k, k, &pose, &worn));
+                // The pack's picture has no room for the big model: a small one stands on its oval under the 2x2 grid (UNVERIFIED: spot and 0.42 are by eye).
+                let (px, py, pk) = if art.is_some() { (42.0, 77.0, k * 0.42) } else { (51.0, 75.0, k) };
+                HudPipeline::push_player(v, render::player::inventory_quads(ox + px * k, oy + py * k, pk, &pose, &worn));
             }
             // Icons here are drawn as big in px as the hotbar's (`16 * hw / 20` box, 0.875 of it: 14 hotbar units), not as 16 panel units.
             let icon_fill = 14.0 * layout.hotbar[0].2 / 20.0 / (16.0 * k);
@@ -4072,7 +4080,8 @@ impl App {
                 9 => &[("Dispenser", 60.0, 6.0), ("Inventory", 8.0, ph - 94.0)],
                 _ => &[(if s.chests.len() > 1 { "Large chest" } else if s.chests.first().is_some_and(|p| p.0 == i32::MIN) { "Minecart" } else { "Chest" }, 8.0, 6.0), ("Inventory", 8.0, ph - 94.0)],
             };
-            for &(text, ux, uy) in labels {
+            // The pack hides every title (its pictures carry no text), so the immersive style draws none.
+            for &(text, ux, uy) in labels.iter().filter(|_| art.is_none()) {
                 // 0.75 x: the 8 px glyphs are wider than vanilla's proportional font and ran into the grid and the buttons.
                 if text == "Crafting" {
                     HudPipeline::push_text_outlined(v, ox + ux * k, oy + uy * k, k * 0.75, (k * 0.3).max(1.0), text, [1.0; 4]); // white, thin black outline
@@ -4087,11 +4096,22 @@ impl App {
                 let fy = sp::FURNACE.1;
                 let cook = (f.cook as f32 * 24.0 / 200.0).floor() + 1.0;
                 let (ax, ay, ..) = u(79.0, 34.0, 0.0, 0.0);
-                HudPipeline::push_gui(v, ax, ay, cook * k, 16.0 * k, (176.0, fy + 14.0, cook, 16.0));
+                // The pack's furnace picture has its own sprites (`sp::imm::ARROW` 24 x 16, `FLAME` 14 x 14) at the same spots (UNVERIFIED: not compared on a device).
+                if art.is_some() {
+                    let (arx, ary, ..) = sp::imm::ARROW;
+                    HudPipeline::push_imm(v, ax, ay, cook * k, 16.0 * k, (arx, ary, cook, 16.0));
+                } else {
+                    HudPipeline::push_gui(v, ax, ay, cook * k, 16.0 * k, (176.0, fy + 14.0, cook, 16.0));
+                }
                 if f.burn > 0 {
                     let b = (f.burn as f32 * 12.0 / f.item_burn.max(1) as f32).floor();
                     let (fx, fyy, ..) = u(56.0, 36.0 + 12.0 - b, 0.0, 0.0);
-                    HudPipeline::push_gui(v, fx, fyy, 14.0 * k, (b + 2.0) * k, (176.0, fy + 12.0 - b, 14.0, b + 2.0));
+                    if art.is_some() {
+                        let (flx, fly, ..) = sp::imm::FLAME;
+                        HudPipeline::push_imm(v, fx, fyy, 14.0 * k, (b + 2.0) * k, (flx, fly + 12.0 - b, 14.0, b + 2.0));
+                    } else {
+                        HudPipeline::push_gui(v, fx, fyy, 14.0 * k, (b + 2.0) * k, (176.0, fy + 12.0 - b, 14.0, b + 2.0));
+                    }
                 }
             }
             // The "place one" toggle: blue = whole stacks, orange with a 1 = one at a time (what the right mouse
@@ -4174,9 +4194,15 @@ impl App {
         if play {
             let (hx, hy, hw, _) = layout.hotbar[0];
             let u = hw / 20.0;
-            HudPipeline::push_gui(v, hx - u, hy - u, 182.0 * u, 22.0 * u, sp::HOTBAR);
             let (sx, _, _, _) = layout.hotbar[self.touch.hotbar_slot];
-            HudPipeline::push_gui(v, sx - 2.0 * u, hy - 2.0 * u, 24.0 * u, 24.0 * u, sp::SELECTOR);
+            if self.opts.gui_style {
+                // Immersive Interfaces' leather strip and its 24 x 23 selector (the strip is the same 182 x 22, so the slots keep their places).
+                HudPipeline::push_imm(v, hx - u, hy - u, 182.0 * u, 22.0 * u, sp::imm::HOTBAR);
+                HudPipeline::push_imm(v, sx - 2.0 * u, hy - 2.0 * u, 24.0 * u, 23.0 * u, sp::imm::SELECTOR);
+            } else {
+                HudPipeline::push_gui(v, hx - u, hy - u, 182.0 * u, 22.0 * u, sp::HOTBAR);
+                HudPipeline::push_gui(v, sx - 2.0 * u, hy - 2.0 * u, 24.0 * u, 24.0 * u, sp::SELECTOR);
+            }
         }
         for (i, &(hx, hy, hw, _)) in layout.hotbar.iter().enumerate().filter(|_| play) {
             if let Some(s) = self.inv.slots[i] {
@@ -4188,7 +4214,7 @@ impl App {
         // A bed was tapped by day.
         if play && self.hint > 0.0 {
             let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
-            let k = craft::panel(0, w, h).2 * 0.75;
+            let k = craft::hud_k(w, h) * 0.75;
             let msg = self.hint_msg;
             let bw = (HudPipeline::text_width(msg) as f32 + 6.0) * k;
             HudPipeline::push_tooltip(v, (w - bw) * 0.5, h * 0.62, k, msg);
@@ -4198,7 +4224,7 @@ impl App {
         // UNVERIFIED: not in b1.7.3 (Beta 1.8 added it); the 2 s, the 0.75 scale and the spot are invented.
         if let (true, Some((st, name))) = (play && self.tip.1 > 0.0, self.inv.slots[self.touch.hotbar_slot].and_then(|st| items::name(st).map(|n| (st, n)))) {
             let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
-            let (k0, (hx, hy, hw, _)) = (craft::panel(0, w, h).2, layout.hotbar[4]);
+            let (k0, (hx, hy, hw, _)) = (craft::hud_k(w, h), layout.hotbar[4]);
             let k = k0 * 0.75;
             // Almanac: the clock's line under its name (only the clock: a weapon's lines stay out of this flash).
             let lines = if st.id == world::biomelife::CLOCK { world::combat::tooltip::lines(st) } else { Vec::new() };

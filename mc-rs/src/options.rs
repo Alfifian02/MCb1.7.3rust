@@ -42,6 +42,10 @@ pub enum Opt {
     Graphics,
     AmbientOcclusion,
     GuiScale,
+    /// Added (General): Immersive Interfaces (Shrimpsnail's pack) for the container screens and the hotbar, or the vanilla panels. NOT b1.7.3. Takes effect at once.
+    GuiStyle,
+    /// Added (General): the size of the container panels, 50% .. 150%; 100% fits the picture to the screen. Takes effect at once.
+    PanelSize,
     /// Added: how long a finger or the attack button rests on a block before the arm swings and the dig starts.
     DigDelay,
     /// Added: samples per pixel of the scene pass (Auto, Off, 2x, 4x). Read once at start-up: the pipelines are built with it.
@@ -77,7 +81,7 @@ pub enum Opt {
 impl Opt {
     /// `getEnumFloat`: a slider.
     fn slider(self) -> bool {
-        matches!(self, Opt::Music | Opt::Sound | Opt::Sensitivity | Opt::DigDelay | Opt::Vibrance | Opt::Brightness | Opt::Gamma | Opt::Fov)
+        matches!(self, Opt::Music | Opt::Sound | Opt::Sensitivity | Opt::DigDelay | Opt::Vibrance | Opt::Brightness | Opt::Gamma | Opt::Fov | Opt::PanelSize)
     }
 
     /// `lang/en_US.lang`'s `options.*`.
@@ -96,6 +100,8 @@ impl Opt {
             Opt::Graphics => "Graphics",
             Opt::AmbientOcclusion => "Smooth Lighting",
             Opt::GuiScale => "GUI Scale",
+            Opt::GuiStyle => "GUI Style",
+            Opt::PanelSize => "Panel Size",
             Opt::DigDelay => "Dig Delay",
             Opt::Msaa => "MSAA",
             Opt::Post => "Post",
@@ -172,6 +178,10 @@ pub struct Settings {
     pub ambient_occlusion: bool,
     /// 0 Auto, 1 Small, 2 Normal, 3 Large.
     pub gui_scale: u8,
+    /// NOT b1.7.3: Immersive Interfaces for the container screens and the hotbar (`guiStyle:` in options.txt); off = the vanilla panels.
+    pub gui_style: bool,
+    /// The immersive panels' size as a slider value 0 .. 1 (`panelSize:`): `panel_scale` = 50% .. 150%, the middle 100% fits the picture to the screen.
+    pub panel_size: f32,
     pub keys: [u32; 10],
     /// Controllify's settings and button bindings (`input/gamepad.rs`).
     pub pad: PadCfg,
@@ -227,6 +237,8 @@ impl Default for Settings {
             fancy_graphics: true,
             ambient_occlusion: true,
             gui_scale: 0,
+            gui_style: false,
+            panel_size: 0.5,
             keys: KEY_DEFAULT,
             pad: PadCfg::default(),
             lod: true,
@@ -265,6 +277,8 @@ impl Settings {
                 ("fov", Some(f), _) => s.fov = f.clamp(0.0, 1.0),
                 ("viewDistance", _, Some(n)) => s.render_distance = n.min(3),
                 ("guiScale", _, Some(n)) => s.gui_scale = n.min(3),
+                ("guiStyle", ..) => s.gui_style = b,
+                ("panelSize", Some(f), _) => s.panel_size = f.clamp(0.0, 1.0),
                 ("fpsLimit", _, Some(n)) => s.limit_framerate = n.min(2),
                 ("difficulty", _, Some(n)) => s.difficulty = n.min(3),
                 ("invertYMouse", ..) => s.invert_mouse = b,
@@ -306,7 +320,7 @@ impl Settings {
             "music:{}\nsound:{}\ninvertYMouse:{}\nmouseSensitivity:{}\nviewDistance:{}\nguiScale:{}\nbobView:{}\nanaglyph3d:{}\nadvancedOpengl:{}\nfpsLimit:{}\ndifficulty:{}\nfancyGraphics:{}\nao:{}\nlod:{}\ndigDelay:{}\ngpuErrorTrace:{}\ndynamicRes:{}\nmsaa:{}\npost:{}\nfxaa:{}\nrenderer:{}\ndebugScreen:{}\nanimalAi:{}\nbiomeRules:{}\nframeLatency:{}\nsustainedPerf:{}\nreiTheme:{}\n",
             self.music, self.sound, self.invert_mouse, self.sensitivity, self.render_distance, self.gui_scale, self.view_bobbing, self.anaglyph, self.advanced_opengl, self.limit_framerate, self.difficulty, self.fancy_graphics, self.ambient_occlusion, self.lod, self.dig_delay, self.gpu_error_trace, self.dynamic_res, self.msaa, self.post, self.fxaa, self.renderer, self.debug_screen, self.animal_ai, self.biome_rules, self.frame_latency, self.sustained, self.rei_theme
         );
-        t.push_str(&format!("fov:{}\n", self.fov));
+        t.push_str(&format!("fov:{}\nguiStyle:{}\npanelSize:{}\n", self.fov, self.gui_style, self.panel_size));
         for (id, code) in KEY_IDS.iter().zip(self.keys) {
             t.push_str(&format!("key_key.{id}:{code}\n"));
         }
@@ -316,6 +330,11 @@ impl Settings {
         if let Err(e) = std::fs::write(p, t) {
             log::warn!("options: {e}");
         }
+    }
+
+    /// The immersive panels' size factor: 0.5 .. 1.5 over the slider, 1.0 in the middle (`craft::set_style`).
+    pub fn panel_scale(&self) -> f32 {
+        0.5 + self.panel_size.clamp(0.0, 1.0)
     }
 
     /// The render distance in chunks: Far 256 blocks, Normal 128, Short 64, Tiny 32.
@@ -354,6 +373,7 @@ impl Settings {
             Opt::Brightness => self.look.brightness,
             Opt::Gamma => self.look.gamma,
             Opt::Fov => self.fov,
+            Opt::PanelSize => self.panel_size,
             _ => 0.0,
         }
     }
@@ -369,6 +389,7 @@ impl Settings {
             Opt::Brightness => self.look.brightness = v,
             Opt::Gamma => self.look.gamma = v,
             Opt::Fov => self.fov = v,
+            Opt::PanelSize => self.panel_size = v,
             _ => {}
         }
     }
@@ -379,6 +400,7 @@ impl Settings {
             Opt::InvertMouse => self.invert_mouse = !self.invert_mouse,
             Opt::RenderDistance => self.render_distance = (self.render_distance + 1) & 3,
             Opt::GuiScale => self.gui_scale = (self.gui_scale + 1) & 3,
+            Opt::GuiStyle => self.gui_style = !self.gui_style,
             Opt::ViewBobbing => self.view_bobbing = !self.view_bobbing,
             Opt::AdvancedOpengl => self.advanced_opengl = !self.advanced_opengl,
             Opt::Anaglyph => self.anaglyph = !self.anaglyph,
@@ -414,6 +436,7 @@ impl Settings {
                 Opt::Sensitivity => format!("{}%", (f * 200.0) as i32),
                 Opt::DigDelay => format!("{} ms", (self.dig_secs() * 1000.0).round() as i32),
                 Opt::Fov => format!("{}", self.fov_deg() as i32),
+                Opt::PanelSize => format!("{}%", (self.panel_scale() * 100.0).round() as i32),
                 Opt::Brightness | Opt::Gamma => format!("{}%", (tone_factor(f) * 100.0).round() as i32),
                 _ if f == 0.0 => "OFF".to_string(),
                 _ => format!("{}%", (f * 100.0) as i32),
@@ -436,6 +459,7 @@ impl Settings {
                 Opt::RenderDistance => ["Far", "Normal", "Short", "Tiny"][self.render_distance.min(3) as usize].into(),
                 Opt::Difficulty => ["Peaceful", "Easy", "Normal", "Hard"][self.difficulty.min(3) as usize].into(),
                 Opt::GuiScale => ["Auto", "Small", "Normal", "Large"][self.gui_scale.min(3) as usize].into(),
+                Opt::GuiStyle => (if self.gui_style { "Immersive" } else { "Vanilla" }).into(),
                 Opt::FramerateLimit => ["Max FPS", "Balanced", "Power saver"][self.limit_framerate.min(2) as usize].into(),
                 // The pipelines keep the count they were built with: a change shows only at the next start.
                 Opt::Msaa => {
@@ -700,6 +724,8 @@ const TIPS: &[(&str, &str)] = &[
     ("Sound", "Volume of steps, mobs, blocks and ambience."),
     ("Difficulty", "Peaceful removes monsters. Easy hurts less, Hard hurts more."),
     ("GUI Scale", "Size of menus and the HUD. Auto picks the largest that fits."),
+    ("GUI Style", "Immersive panels and hotbar (Shrimpsnail's pack), or the vanilla ones."),
+    ("Panel Size", "Immersive panel size, 50% to 150%. 100% fits the picture on screen."),
     ("View Bobbing", "The camera sways a little as you walk."),
     ("Render Distance", "Chunks kept around you: Far 16, Normal 8, Short 4, Tiny 2."),
     ("LoD", "Draws far terrain as simplified blocks, out to 768 blocks."),
@@ -953,6 +979,8 @@ impl OptionsUi {
             o(Opt::Sound),
             o(Opt::Difficulty),
             o(Opt::GuiScale),
+            o(Opt::GuiStyle),
+            o(Opt::PanelSize),
             o(Opt::ViewBobbing),
             P(1),
             G("Display"),
@@ -1763,6 +1791,23 @@ mod tests {
 
     /// The FXAA button cycles Auto -> On -> Off -> Auto, reads back from options.txt, and a bad value falls back to Auto.
     #[test]
+    fn gui_style_and_panel_size_round_trip() {
+        let root = tmp("guistyle");
+        let mut st = Settings::load(&root);
+        assert!(!st.gui_style && st.panel_scale() == 1.0, "vanilla panels and 100% by default");
+        assert_eq!((st.text(Opt::GuiStyle).as_str(), st.text(Opt::PanelSize).as_str()), ("GUI Style: Vanilla", "Panel Size: 100%"));
+        st.cycle(Opt::GuiStyle);
+        st.set_float(Opt::PanelSize, 1.0);
+        assert_eq!((st.text(Opt::GuiStyle).as_str(), st.text(Opt::PanelSize).as_str()), ("GUI Style: Immersive", "Panel Size: 150%"));
+        st.save();
+        let back = Settings::load(&root);
+        assert!(back.gui_style && back.panel_size == 1.0);
+        std::fs::write(root.join("options.txt"), "panelSize:9\nguiStyle:true\n").unwrap();
+        let clamped = Settings::load(&root);
+        assert!(clamped.gui_style && clamped.panel_scale() == 1.5, "out of range: clamped");
+    }
+
+    #[test]
     fn fxaa_option_cycles_and_round_trips() {
         let root = tmp("fxaa");
         let mut st = Settings::load(&root);
@@ -2127,7 +2172,7 @@ mod tests {
             }
         }
         for want in [
-            "Music", "Sound", "Difficulty", "GUI Scale", "View Bobbing", "Graphics: ", "Render Distance", "LoD", "Smooth Lighting", "Advanced OpenGL", "3D Anaglyph",
+            "Music", "Sound", "Difficulty", "GUI Scale", "GUI Style", "Panel Size", "View Bobbing", "Graphics: ", "Render Distance", "LoD", "Smooth Lighting", "Advanced OpenGL", "3D Anaglyph",
             "Performance", "Dynamic Res", "Sustained Perf", "MSAA", "FXAA", "Post", "Renderer", "Vibrance", "Warm Light", "Water Look", "Glow", "Motion", "Haze", "REI Theme", "Sensitivity", "Invert Mouse",
             "Dig Delay", "Jump: ", "Look X", "Invert Y", "Forward", "Toggle Fog", "Brightness", "Gamma", "FOV",
         ] {

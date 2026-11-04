@@ -44,12 +44,19 @@ pub const NO_UV: [f32; 2] = [-1.0, -1.0];
 pub const GUI: &[u8] = include_bytes!("../../assets/gui.rgba");
 /// `gui/container/{inventory,crafting_table,furnace,generic_54}.png` stacked, 256 x 1024 (`tools/gen_gui.py`).
 pub const CONTAINERS: &[u8] = include_bytes!("../../assets/containers.rgba");
+/// Immersive Interfaces (Shrimpsnail's pack; `tools/gen_immersive_ui.py`): the HUD's SECOND texture, 256 x `IMM_H`: six 256 x 256 panels (inventory,
+/// workbench, furnace, dispenser, chest of 3 rows, chest of 6 rows), the furnace's two progress sprites, the hotbar and its selector. NOT b1.7.3.
+/// A vertex reads it when its `u` has `IMM_U` added (`HudPipeline::push_imm`), so it needs no second draw call and no second vertex format.
+pub const IMMERSIVE: &[u8] = include_bytes!("../../assets/immersive.rgba");
 /// The touch d-pad's sprites (Stone D-pad pack, 256 x 256, `tools/gen_dpad.py`): the last 256 rows of the HUD texture.
 pub const DPAD_SHEET: &[u8] = include_bytes!("../../assets/dpad.rgba");
 /// The title screen's sheet (256 x 272, `tools/gen_menu.py`): `mclogo.png`, then `background.png`: the last rows of the HUD texture.
 pub const MENU_SHEET: &[u8] = include_bytes!("../../assets/menu.rgba");
 /// The skins (`mob/char.png` and the armor, 64 x 32 each, four to a row, `atlas::skin_px`): 224 rows of the HUD texture, cut from the atlas's `ART` tail (`PLAYER_Y`).
 pub(crate) const SHEET_H: f32 = 3276.0;
+/// Height of the second texture (`IMMERSIVE`), and what is added to a vertex's `u` to read it instead of the sheet (both shaders test `u >= 1.5`).
+pub(crate) const IMM_H: f32 = 1600.0;
+pub(crate) const IMM_U: f32 = 2.0;
 pub(crate) const PLAYER_Y: f32 = 2576.0;
 /// Where the font atlas starts in the HUD texture (the 64 rows after the player skin, see `font_sheet`).
 const FONT_Y: f32 = 2800.0;
@@ -100,6 +107,21 @@ pub mod sprites {
     pub const CRAFTING: Sprite = (0.0, 1280.0, 176.0, 166.0);
     pub const FURNACE: Sprite = (0.0, 1536.0, 176.0, 166.0);
     pub const CHEST_Y: f32 = 1792.0;
+    /// Rects of `IMMERSIVE` (second texture, not the sheet): drawn with `HudPipeline::push_imm`. Panels are 256 x 256 with the vanilla panel's
+    /// origin at (40, 45) of the picture (a chest's: (40, 44 + (3 - rows) * 18)); the furnace's flame (14 x 14) and arrow (24 x 16) lie in its free right columns.
+    pub mod imm {
+        use super::Sprite;
+        pub const INVENTORY: Sprite = (0.0, 0.0, 256.0, 256.0);
+        pub const CRAFTING: Sprite = (0.0, 256.0, 256.0, 256.0);
+        pub const FURNACE: Sprite = (0.0, 512.0, 256.0, 256.0);
+        pub const DISPENSER: Sprite = (0.0, 768.0, 256.0, 256.0);
+        pub const CHEST3: Sprite = (0.0, 1024.0, 256.0, 256.0);
+        pub const CHEST6: Sprite = (0.0, 1280.0, 256.0, 256.0);
+        pub const FLAME: Sprite = (232.0, 512.0, 14.0, 14.0);
+        pub const ARROW: Sprite = (232.0, 526.0, 24.0, 16.0);
+        pub const HOTBAR: Sprite = (0.0, 1536.0, 182.0, 22.0);
+        pub const SELECTOR: Sprite = (0.0, 1558.0, 24.0, 23.0);
+    }
     /// Touch d-pad (`tools/gen_dpad.py`). Directions in the order up, down, left, right, up_left, up_right, down_left, down_right:
     /// the arrows are 22 x 22, the four corners 18 x 18. Pressed ones are 22 rows lower; sneak / jump are 64 x 64.
     pub const DPAD: [Sprite; 8] = dpad_row(2048.0);
@@ -196,6 +218,7 @@ struct VsOut {
 };
 @group(0) @binding(1) var items: texture_2d<f32>;
 @group(0) @binding(2) var items_samp: sampler;
+@group(0) @binding(3) var imm: texture_2d<f32>; // Immersive Interfaces (`IMMERSIVE`): read when `uv.x >= 1.5` (`IMM_U` is added to it)
 
 @vertex
 fn vs_main(@location(0) vpos: vec2<f32>, @location(1) vcolor: vec4<f32>, @location(2) vuv: vec2<f32>) -> VsOut {
@@ -218,19 +241,27 @@ fn lin(c: vec3<f32>) -> vec3<f32> {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    let p = in.uv * SHEET;
+    let b = in.uv.x >= 1.5; // a quad of the second texture: all four of its vertices carry `IMM_U`
+    let uv = vec2<f32>(in.uv.x - select(0.0, 2.0, b), in.uv.y);
+    let dims = select(SHEET, SHEET_B, b);
+    let p = uv * dims;
     let w = max(fwidth(p), vec2<f32>(1e-4)); // derivatives before the early return: uniform control flow
     let e = floor(p + 0.5);
-    let q = (e + clamp((p - e) / w, vec2<f32>(-0.5), vec2<f32>(0.5))) / SHEET;
+    let q = (e + clamp((p - e) / w, vec2<f32>(-0.5), vec2<f32>(0.5))) / dims;
     if in.uv.x < 0.0 { return vec4<f32>(lin(in.color.rgb), in.color.a); }
-    let t = textureSampleLevel(items, items_samp, q, 0.0); // `gui/items.png`, the GUI sheet, terrain.png, the panels
+    var t: vec4<f32>;
+    if b {
+        t = textureSampleLevel(imm, items_samp, q, 0.0); // Immersive Interfaces
+    } else {
+        t = textureSampleLevel(items, items_samp, q, 0.0); // `gui/items.png`, the GUI sheet, terrain.png, the panels
+    }
     if t.a < 0.5 { discard; }
     return vec4<f32>(lin(t.rgb * in.color.rgb), t.a * in.color.a);
 }
 "#;
 /// The shader with its one constant spliced in: whether the surface encodes sRGB itself.
 fn shader_source(srgb: bool) -> String {
-    format!("const SRGB: bool = {srgb};\nconst SHEET: vec2<f32> = vec2<f32>(256.0, {SHEET_H:.1});\n{SHADER_SRC}") // `SHEET` = the whole HUD texture
+    format!("const SRGB: bool = {srgb};\nconst SHEET: vec2<f32> = vec2<f32>(256.0, {SHEET_H:.1});\nconst SHEET_B: vec2<f32> = vec2<f32>(256.0, {IMM_H:.1});\n{SHADER_SRC}") // `SHEET` = the whole HUD texture, `SHEET_B` the second one
 }
 
 /// The whole HUD texture (256 x `SHEET_H`, RGBA8): items, the GUI sheet, terrain.png, the panels, the d-pad, the title screen, the player skin, the font, Cortes Combat's HUD, the controller buttons, the map.
@@ -353,6 +384,11 @@ impl HudPipeline {
                 visibility: ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                 count: None,
+            }, wgpu::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
+                count: None,
             }],
         });
         // The item sprites (`gui/items.png`, 256 x 256), the GUI sheet and `terrain.png` under them, Rgba8Unorm: the shader decodes sRGB itself when the surface is one.
@@ -375,6 +411,25 @@ impl HudPipeline {
         let items_view = items_tex.create_view(&wgpu::TextureViewDescriptor::default());
         let items_samp = device.create_sampler(&wgpu::SamplerDescriptor { mag_filter: wgpu::FilterMode::Linear, min_filter: wgpu::FilterMode::Linear, ..Default::default() }); // Linear only feeds `fs_main`'s sharp-bilinear UV
 
+        // Immersive Interfaces: a second, never rewritten texture (`IMMERSIVE`, 256 x `IMM_H`), read by the quads `push_imm` makes.
+        let imm_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("hud_immersive"),
+            size: wgpu::Extent3d { width: 256, height: IMM_H as u32, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo { texture: &imm_tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            IMMERSIVE,
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(256 * 4), rows_per_image: Some(IMM_H as u32) },
+            wgpu::Extent3d { width: 256, height: IMM_H as u32, depth_or_array_layers: 1 },
+        );
+        let imm_view = imm_tex.create_view(&wgpu::TextureViewDescriptor::default());
+
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("hud_bind"),
             layout: &bind_layout,
@@ -382,6 +437,7 @@ impl HudPipeline {
                 wgpu::BindGroupEntry { binding: 0, resource: uniform_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&items_view) },
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&items_samp) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&imm_view) },
             ],
         });
 
@@ -491,6 +547,22 @@ impl HudPipeline {
     }
 
     /// `push_gui` multiplied by `c` (the dirt background is `background.png` at 25% grey).
+    /// A rect of the second texture (`sprites::imm`, Immersive Interfaces): `push_gui` with `IMM_U` added to every `u`, which both shaders read as
+    /// "sample `IMMERSIVE`" (its own height, `IMM_H`).
+    pub fn push_imm(out: &mut Vec<HudVertex>, x: f32, y: f32, w: f32, h: f32, spr: sprites::Sprite) {
+        let start = out.len();
+        Self::push_imm_tinted(out, x, y, w, h, spr, [1.0; 4]);
+        debug_assert_eq!(out.len(), start + 6);
+    }
+
+    pub fn push_imm_tinted(out: &mut Vec<HudVertex>, x: f32, y: f32, w: f32, h: f32, (sx, sy, sw, sh): sprites::Sprite, c: [f32; 4]) {
+        let (u0, u1) = (IMM_U + (sx + 0.01) / 256.0, IMM_U + (sx + sw - 0.01) / 256.0);
+        let (v0, v1) = ((sy + 0.01) / IMM_H, (sy + sh - 0.01) / IMM_H);
+        let v = |px: f32, py: f32, u: f32, vv: f32| HudVertex { pos: [px, py], color: c, uv: [u, vv] };
+        let (tl, tr, br, bl) = (v(x, y, u0, v0), v(x + w, y, u1, v0), v(x + w, y + h, u1, v1), v(x, y + h, u0, v1));
+        out.extend([tl, tr, br, tl, br, bl]);
+    }
+
     pub fn push_gui_tinted(out: &mut Vec<HudVertex>, x: f32, y: f32, w: f32, h: f32, (sx, sy, sw, sh): sprites::Sprite, c: [f32; 4]) {
         // A hair inside the sprite, so nearest sampling never picks up its neighbour.
         let (u0, u1) = ((sx + 0.01) / 256.0, (sx + sw - 0.01) / 256.0);
@@ -778,6 +850,27 @@ mod tests {
         }
         let f = sprites::FURNACE.1 as usize;
         assert!(a(182, f + 7) > 0 && a(186, f + 20) > 0, "flame and arrow");
+    }
+
+    /// The second texture (Immersive Interfaces): the right size, ink in every panel, the furnace's two sprites in its free columns, the hotbar and its selector.
+    #[test]
+    fn immersive_sheet_has_the_panels() {
+        assert_eq!(IMMERSIVE.len(), 256 * IMM_H as usize * 4);
+        let a = |x: usize, y: usize| IMMERSIVE[(y * 256 + x) * 4 + 3];
+        for (x, y, w, h) in [sprites::imm::INVENTORY, sprites::imm::CRAFTING, sprites::imm::FURNACE, sprites::imm::DISPENSER, sprites::imm::CHEST3, sprites::imm::CHEST6] {
+            let ink = (0..(w * h) as usize).filter(|k| a(x as usize + k % w as usize, y as usize + k / w as usize) > 128).count();
+            assert!(ink > 8000, "panel at row {y} is nearly empty ({ink} texels)");
+        }
+        for (x, y, w, h) in [sprites::imm::FLAME, sprites::imm::ARROW, sprites::imm::HOTBAR, sprites::imm::SELECTOR] {
+            assert!((0..(w * h) as usize).any(|k| a(x as usize + k % w as usize, y as usize + k / w as usize) > 128), "sprite at ({x}, {y}) is empty");
+            assert!(x + w <= 256.0 && y + h <= IMM_H);
+        }
+        // a quad of the second texture carries IMM_U in all six u, the sheet's quads never do
+        let (mut v, mut u) = (Vec::new(), Vec::new());
+        HudPipeline::push_imm(&mut v, 0.0, 0.0, 10.0, 10.0, sprites::imm::HOTBAR);
+        HudPipeline::push_gui(&mut u, 0.0, 0.0, 10.0, 10.0, sprites::HOTBAR);
+        assert!(v.iter().all(|p| p.uv[0] >= 1.5 && p.uv[1] >= 0.0 && p.uv[1] <= 1.0));
+        assert!(u.iter().all(|p| p.uv[0] < 1.5));
     }
 
     /// Every controller button picture of every style holds ink, and is clear or fully opaque (`fs_main` drops anything under alpha 0.5).

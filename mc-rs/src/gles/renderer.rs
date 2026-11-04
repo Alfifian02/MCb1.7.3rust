@@ -70,6 +70,8 @@ const U_WEATHER: u32 = 2;
 const U_HUD: u32 = 3;
 const U_SCENE: u32 = 4;
 const U_PANO: u32 = 5;
+/// The HUD's second texture (Immersive Interfaces, `hud::IMMERSIVE`).
+const U_IMM: u32 = 6;
 
 const HUD_VERT: usize = 32;
 
@@ -110,6 +112,8 @@ pub struct Renderer {
     ubo_sky: Buf,
     atlas: u32,
     hud_tex: u32,
+    #[allow(dead_code)] // owned for the life of the context: the unit it sits on is read by the HUD program
+    imm_tex: u32,
     body_tex: u32,
     snow_tex: u32,
     rain_tex: u32,
@@ -164,7 +168,7 @@ impl Renderer {
         }
         let mk = |s: shaders::Src, u: &[&str], what: &str| gl.program(&s.vs, &s.fs, u).map_err(|e| format!("{what}: {e}"));
         let present = mk(shaders::present(fxaa, fast), &["u_src", "u_px", "u_grade", "u_tone"], "present")?;
-        let hud = mk(shaders::hud(hud::SHEET_H), &["u_items", "u_size"], "hud")?;
+        let hud = mk(shaders::hud(hud::SHEET_H, hud::IMM_H), &["u_items", "u_size", "u_imm"], "hud")?;
         let pano = mk(shaders::panorama(), &["u_tex", "u_m", "u_t"], "panorama")?;
         let dome = mk(shaders::sky_dome(), &[], "sky dome")?;
         let fan = mk(shaders::sky_geo(true), &[], "sky fan")?;
@@ -189,6 +193,7 @@ impl Renderer {
             };
             unit(&present, 0, U_SCENE);
             unit(&hud, 0, U_HUD);
+            unit(&hud, 2, U_IMM);
             unit(&pano, 0, U_PANO);
             unit(&body, 0, U_BODY);
             unit(&weather, 0, U_WEATHER);
@@ -226,6 +231,12 @@ impl Renderer {
         // SAFETY: as above, one level.
         unsafe { (f.TexStorage2D)(TEXTURE_2D, 1, RGBA8, 256, hud::SHEET_H as i32) };
         up(256, hud::SHEET_H as i32, 0, &hud::sheet_bytes());
+        tex_params(f, TEXTURE_2D, LINEAR, LINEAR, CLAMP_TO_EDGE);
+        // Immersive Interfaces: the second HUD texture, on its own unit, written once (plain RGBA8 like the sheet).
+        let imm_t = texture(U_IMM, TEXTURE_2D);
+        // SAFETY: as above, one level.
+        unsafe { (f.TexStorage2D)(TEXTURE_2D, 1, RGBA8, 256, hud::IMM_H as i32) };
+        up(256, hud::IMM_H as i32, 0, hud::IMMERSIVE);
         tex_params(f, TEXTURE_2D, LINEAR, LINEAR, CLAMP_TO_EDGE);
         let body_t = texture(U_BODY, TEXTURE_2D);
         // SAFETY: as above.
@@ -276,7 +287,7 @@ impl Renderer {
         let mut r = Self {
             t: Targets { scene: 0, draw: 0, depth: 0, ms_color: 0, resolve: 0, size: (0, 0) },
             gl, size, samples, fast, chunk, present, hud, pano, dome, fan, stars, body, weather, ubo_frame, ubo_sky,
-            atlas: atlas_t, hud_tex: hud_t, body_tex: body_t, snow_tex: snow_t, rain_tex: rain_t, pano_tex: pano_t,
+            atlas: atlas_t, hud_tex: hud_t, imm_tex: imm_t, body_tex: body_t, snow_tex: snow_t, rain_tex: rain_t, pano_tex: pano_t,
             vaos: HashMap::new(), empty_vao, hud_buf, fan_buf, star_v, star_i, star_n: star_idx.len() as i32, body_v, weather_buf,
             born: Instant::now(), grade: [0.0; 4], tone: [1.0, 1.0, 0.0, 0.0], cur_prog: 0, cur_vao: 0, blend: Blend::Off,
         };
