@@ -97,6 +97,9 @@ pub struct Pointer {
 #[derive(Clone, Debug)]
 pub struct LayoutRects {
     pub pause: Rect,
+    /// The X of an open screen: where the pause button is. With a screen open (not the game menu) the four top-right buttons (pause, inventory, zoom,
+    /// view) are not drawn nor hit; this one takes their place and closes the screen (it answers as `PointerRole::Inventory`).
+    pub close: Rect,
     pub inventory: Rect,
     /// Hold to zoom (Zoomify), left of `inventory`.
     pub zoom: Rect,
@@ -159,12 +162,16 @@ impl LayoutRects {
         let gs = 0.13 * u;
         let guard = (jump.0 + (jw - gs) * 0.5, jump.1 - gs - pad, gs, gs);
 
-        Self { pause, inventory, zoom, view, hotbar, jump, guard, special: guard, sneak: cell(0.0, 0.0), dpad, dpad_gap }
+        Self { pause, close: pause, inventory, zoom, view, hotbar, jump, guard, special: guard, sneak: cell(0.0, 0.0), dpad, dpad_gap }
     }
 
-    /// Hit-test a press. `None` means the press is ignored. The pause button always answers; while paused everything else is a tap on
-    /// the game menu (`options::Pause`); with a `screen` open everything but the pause and inventory buttons is a tap.
+    /// Hit-test a press. `None` means the press is ignored. The pause button always answers, except over an open `screen`; while paused
+    /// everything else is a tap on the game menu (`options::Pause`); with a `screen` open (and no game menu) everything but the `close` X is a tap:
+    /// the pause, inventory, zoom and view buttons are hidden then.
     pub fn hit_test(&self, x: f32, y: f32, paused: bool, screen: bool) -> Option<PointerRole> {
+        if screen && !paused {
+            return Some(if in_rect(self.close, x, y) { PointerRole::Inventory } else { PointerRole::Tap });
+        }
         if in_rect(self.pause, x, y) {
             return Some(PointerRole::Pause);
         }
@@ -1112,9 +1119,25 @@ mod tests {
         assert_eq!(ui.cursor_pos, (1100.0, 520.0));
         ui.on_release(6);
         assert_eq!(ui.take_screen_events(), vec![ScreenEv::Down(1000.0, 500.0), ScreenEv::Move(1100.0, 520.0), ScreenEv::Up(1100.0, 520.0)]);
-        // The pause button still works with a screen open.
+        // The pause button is hidden behind an open screen: its place is the X, which closes the screen (the inventory press) and does not pause.
         tap(&mut ui, 5, px + pw * 0.5, py + 1.0);
-        assert!(ui.paused);
+        assert!(!ui.paused && ui.take_inventory());
+    }
+
+    /// An open screen hides the top-right HUD buttons; one X (where pause is) is left and closes the screen. The game menu keeps its pause button.
+    #[test]
+    fn an_open_screen_has_one_x_in_place_of_the_hud_buttons() {
+        let ui = TouchUi::new(W, H);
+        let l = &ui.layout;
+        assert_eq!(l.close, l.pause);
+        let (cx, cy) = mid(l.close);
+        assert_eq!(l.hit_test(cx, cy, false, true), Some(PointerRole::Inventory), "the X");
+        for r in [l.inventory, l.zoom, l.view] {
+            let (x, y) = mid(r);
+            assert_eq!(l.hit_test(x, y, false, true), Some(PointerRole::Tap), "hidden: a tap on the screen");
+        }
+        assert_eq!(l.hit_test(cx, cy, true, true), Some(PointerRole::Pause), "the game menu still has its pause button");
+        assert_eq!(l.hit_test(cx, cy, false, false), Some(PointerRole::Pause), "and so does play");
     }
 
     /// The Use bind (a key or a pad button) is the right button of a weapon: it presses the special / holds the guard instead of placing.

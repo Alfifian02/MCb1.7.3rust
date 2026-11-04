@@ -3059,9 +3059,9 @@ impl App {
     fn rei_step(&mut self, dt: f32) {
         let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
         let panel = self.screen.as_ref().map(|s| craft::panel_rect(s.gw, w, h));
-        let ((px, py, pw, ph), (ix, iy, iw, ih)) = (self.touch.layout.pause, self.touch.layout.inventory);
-        let (x0, y0) = (px.min(ix), py.min(iy));
-        let hud = [x0, y0, (px + pw).max(ix + iw) - x0, (py + ph).max(iy + ih) - y0];
+        // What the overlay keeps clear of: the X of an open screen (the other top-right buttons are hidden then), or the pause button of the game menu.
+        let (px, py, pw, ph) = if self.touch.paused { self.touch.layout.pause } else { self.touch.layout.close };
+        let hud = [px, py, pw, ph];
         let ctx = self.rei_ctx();
         let target = match self.rei.as_mut() {
             Some(u) => {
@@ -4258,7 +4258,13 @@ impl App {
             }
         }
 
-        if !self.touch.pad.hud_hidden() {
+        // An open screen hides the four top-right buttons; one X, in the pause button's place and the viewer's look, closes it (`LayoutRects::close`).
+        let x_only = self.touch.screen && !paused;
+        if x_only && !self.touch.pad.hud_hidden() {
+            let (cx, cy, cw, ch) = layout.close;
+            rei::close_button(v, [cx, cy, cw, ch], self.opts.rei_theme, pressed(PointerRole::Inventory));
+        }
+        if !x_only && !self.touch.pad.hud_hidden() {
         // Pause button: top-right, two bars.
         let (px, py, pw, ph) = layout.pause;
         HudPipeline::push_button(v, px, py, pw, ph, if pressed(PointerRole::Pause) { 2 } else { 1 });

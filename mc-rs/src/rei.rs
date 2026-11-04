@@ -676,6 +676,16 @@ fn button(v: &mut Vec<HudVertex>, s: f32, theme: usize, r: [f32; 4], label: &str
     centred(v, s, r, label, if enabled { WHITE } else { GREY });
 }
 
+/// The X that closes an open container screen (`lib.rs`, in the pause button's place, `LayoutRects::close`), in the viewer's look: the pack's button face
+/// and the label in white. `r` is in px; `theme` is `Settings::rei_theme`; `pressed` lights it.
+pub fn close_button(v: &mut Vec<HudVertex>, r: [f32; 4], theme: u8, pressed: bool) {
+    let k = r[3] / BTN; // a unit of the viewer's 20-unit button, in px
+    let theme = (theme as usize).min(1);
+    let (sx, sy, ..) = sp::button(theme, if pressed { sp::BTN_LIT } else { sp::BTN });
+    slice(v, k, (sx, sy), 2.0, [r[0] / k, r[1] / k, r[2] / k, r[3] / k]);
+    HudPipeline::push_text_centered(v, r[0] + r[2] * 0.5, r[1] + (r[3] - 8.0 * k) * 0.5, k, "X", [1.0; 4]);
+}
+
 /// A button with REI's left / right arrow.
 fn arrow_button(v: &mut Vec<HudVertex>, s: f32, theme: usize, r: [f32; 4], right: bool, lit: bool, enabled: bool) {
     face(v, s, theme, if !enabled { sp::BTN_OFF } else if lit { sp::BTN_LIT } else { sp::BTN }, r);
