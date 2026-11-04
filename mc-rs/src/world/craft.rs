@@ -610,6 +610,98 @@ impl Screen {
         }
     }
 
+    /// What the player has for the item viewer's auto-crafting: the (code, count) of the main inventory and the grid, same items merged.
+    pub fn have(&self, inv: &Inventory) -> Vec<(u16, u32)> {
+        let mut out: Vec<(u16, u32)> = Vec::new();
+        for s in inv.slots[..MAIN].iter().chain(self.grid.iter()).flatten() {
+            let c = code(s.id, s.damage);
+            match out.iter_mut().find(|o| o.0 == c) {
+                Some(o) => o.1 += s.count as u32,
+                None => out.push((c, s.count as u32)),
+            }
+        }
+        out
+    }
+
+    /// Auto-crafting (REI `TransferHandler`): lay the recipe (`w` x rows pattern of `cells` codes, `w` 0 = shapeless list) out on the open grid from the
+    /// main inventory. What is on the grid goes back to the inventory first; `max` makes as many sets as the stock and stack sizes allow (one otherwise).
+    /// All or nothing: on `Err` (the reason) neither the grid nor the inventory changed.
+    pub fn auto_fill(&mut self, inv: &mut Inventory, w: usize, cells: &[u16; 9], max: bool) -> Result<(), String> {
+        let gw = self.gw;
+        if gw != 2 && gw != 3 {
+            return Err("Open a crafting grid first".into());
+        }
+        let too_big = || if gw == 2 { "Needs a crafting table".to_string() } else { "Does not fit the grid".to_string() };
+        // (grid cell, ingredient code) of every ingredient.
+        let mut place: Vec<(usize, u16)> = Vec::new();
+        if w == 0 {
+            let list: Vec<u16> = cells.iter().copied().filter(|&c| c != 0).collect();
+            if list.is_empty() || list.len() > gw * gw {
+                return Err(too_big());
+            }
+            place.extend(list.into_iter().enumerate());
+        } else {
+            let last = cells.iter().rposition(|&c| c != 0).ok_or_else(too_big)?;
+            let rows = last / w + 1;
+            if w > gw || rows > gw {
+                return Err(too_big());
+            }
+            for (i, &c) in cells.iter().enumerate().take(w * rows) {
+                if c != 0 {
+                    place.push(((i / w) * gw + i % w, c));
+                }
+            }
+        }
+        // Work on copies: the grid goes back into the inventory, then the ingredients come out of it.
+        let mut main = [None; MAIN];
+        main.copy_from_slice(&inv.slots[..MAIN]);
+        for mut st in self.grid.iter().flatten().copied() {
+            merge(&mut main, &mut st);
+            if st.count > 0 {
+                return Err("Inventory is full".into());
+            }
+        }
+        let stock = |main: &[Option<ItemStack>], c: u16| main.iter().flatten().filter(|s| code(s.id, s.damage) == c).map(|s| s.count as u32).sum::<u32>();
+        let mut sets = if max { 64 } else { 1 };
+        for &(_, c) in &place {
+            let per = place.iter().filter(|p| p.1 == c).count() as u32;
+            sets = sets.min(stock(&main, c) / per).min(max_stack(c & 511) as u32);
+        }
+        if sets == 0 {
+            let missing = place.iter().find(|&&(_, c)| stock(&main, c) < place.iter().filter(|p| p.1 == c).count() as u32).map_or(0, |p| p.1);
+            let name = crate::world::items::name(ItemStack { id: missing & 511, count: 1, damage: if matches!(missing & 511, 35 | 351) { missing >> 9 } else { 0 } });
+            return Err(format!("Missing: {}", name.unwrap_or("an ingredient")));
+        }
+        let mut grid = [None; 9];
+        for &(cell, c) in &place {
+            let mut need = sets as u8;
+            let mut damage = None;
+            for o in main.iter_mut() {
+                let Some(t) = o else { continue };
+                if need == 0 {
+                    break;
+                }
+                if code(t.id, t.damage) != c || damage.is_some_and(|d| d != t.damage) {
+                    continue;
+                }
+                damage = Some(t.damage);
+                let n = need.min(t.count);
+                need -= n;
+                t.count -= n;
+                if t.count == 0 {
+                    *o = None;
+                }
+            }
+            if need > 0 {
+                return Err("The ingredients are different variants".into()); // one stack's damage differs from another's (a log's wood)
+            }
+            grid[cell] = Some(ItemStack { id: c & 511, count: sets as u8, damage: damage.unwrap_or(0) });
+        }
+        inv.slots[..MAIN].copy_from_slice(&main);
+        self.grid = grid;
+        Ok(())
+    }
+
     /// `SlotArmor`: only the right armor goes in, one at a time. Any other slot takes anything.
     fn armor_ok(&self, id: SlotId) -> bool {
         match (id, self.cursor) {
@@ -756,12 +848,27 @@ pub fn art_box(gw: usize) -> (f32, f32, f32, f32) {
     }
 }
 
-/// The picture's top-left (px) and its scale (px per unit) on a `w` x `h` surface at the size factor `scale`: its inked part (`art_box`) centred and
-/// `PANEL_FIT` of the screen at 1.0.
+/// The art rows (y, in picture units) the slots of `gw` cover, a unit of margin round them: where the vanilla slot positions (`layout_for`) fall in the picture.
+fn slot_span(gw: usize) -> (f32, f32) {
+    let (_, oy) = art_origin(gw);
+    let chest = gw > 3 && gw != 9;
+    let top = if gw == 2 { 8.0 } else if chest { 18.0 } else { 17.0 };
+    let hot = if chest { 161.0 + (gw / 9) as f32 * 18.0 - 72.0 } else { 142.0 };
+    (oy + top - 1.0, oy + hot + 17.0)
+}
+
+/// The picture's top-left (px) and its scale (px per unit) on a `w` x `h` surface at the size factor `scale`. ONE scale for every panel, so a slot is as big
+/// on each screen as on the crafting table's: the table's inked part (`art_box(3)`) fills `PANEL_FIT` of the screen at 1.0. A taller picture then runs past the
+/// screen's top and bottom (its margins are only decoration), but never past its slots: the scale is lowered just enough to keep them on screen (the 6-row
+/// chest). The picture's inked part is centred.
 fn art_rect(gw: usize, w: f32, h: f32, scale: f32) -> (f32, f32, f32) {
     let (x0, y0, x1, y1) = art_box(gw);
-    let k = (h * PANEL_FIT / (y1 - y0)).min(w * PANEL_FIT / (x1 - x0)) * scale;
-    (w * 0.5 - (x0 + x1) * 0.5 * k, h * 0.5 - (y0 + y1) * 0.5 * k, k)
+    let (tx0, ty0, tx1, ty1) = art_box(3);
+    let k_ref = (h * PANEL_FIT / (ty1 - ty0)).min(w * PANEL_FIT / (tx1 - tx0));
+    let (cy, (s0, s1)) = ((y0 + y1) * 0.5, slot_span(gw));
+    let k_slots = h * 0.5 * PANEL_FIT / (cy - s0).max(s1 - cy);
+    let k = k_ref.min(k_slots) * scale;
+    (w * 0.5 - (x0 + x1) * 0.5 * k, h * 0.5 - cy * k, k)
 }
 
 /// Where the style puts the pack's picture of the current screen: (x, y, size in px of its 256 units), `None` in the vanilla style.
@@ -864,9 +971,9 @@ pub fn slot_at(gw: usize, w: f32, h: f32, px: f32, py: f32) -> Option<SlotId> {
     layout(gw).into_iter().find(|&(_, ux, uy)| inside(cell(gw, w, h, (ux, uy)), px, py)).map(|s| s.0)
 }
 
-/// The viewer's button (REI) beside the other two toggles, inventory screen only.
+/// The viewer's button (REI) beside the other two toggles, on the screens with a crafting grid (inventory, table): auto-crafting needs one.
 pub fn on_rei_button(gw: usize, w: f32, h: f32, px: f32, py: f32) -> bool {
-    gw == 2 && inside(toggle(gw, w, h, 2), px, py)
+    (gw == 2 || gw == 3) && inside(toggle(gw, w, h, 2), px, py)
 }
 
 pub fn on_mode_button(gw: usize, w: f32, h: f32, px: f32, py: f32) -> bool {
@@ -890,6 +997,28 @@ pub fn in_panel(gw: usize, w: f32, h: f32, px: f32, py: f32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Auto-crafting: four planks make a workbench on the 2x2 grid, one set by default; a 3x3 recipe needs a table; nothing changes on a failure.
+    #[test]
+    fn auto_fill_lays_a_recipe_out_from_the_inventory() {
+        let mut inv = Inventory::default();
+        inv.slots[3] = Some(ItemStack { id: 5, count: 9, damage: 0 });
+        let mut s = Screen::new(2);
+        let mut cells = [0; 9];
+        cells[..4].fill(5);
+        assert_eq!(s.auto_fill(&mut inv, 2, &cells, false), Ok(()));
+        assert_eq!(s.grid[..4].iter().map(|g| g.map(|g| g.count)).collect::<Vec<_>>(), vec![Some(1); 4]);
+        assert_eq!(inv.slots[3].map(|t| t.count), Some(5));
+        assert_eq!(s.result().map(|r| r.id), Some(58));
+        assert_eq!(s.auto_fill(&mut inv, 2, &cells, true), Ok(())); // the grid goes back first: 9 planks, 2 sets
+        assert_eq!(s.grid[0].map(|g| g.count), Some(2));
+        let mut chest = [0; 9];
+        chest[..8].fill(5);
+        let before = (s.grid, inv.slots);
+        assert!(s.auto_fill(&mut inv, 3, &chest, false).is_err(), "a 3x3 pattern does not fit the 2x2 grid");
+        assert!(Screen::new(3).auto_fill(&mut Inventory::default(), 3, &chest, false).unwrap_err().starts_with("Missing"));
+        assert_eq!((s.grid, inv.slots), before);
+    }
 
     /// Immersive Interfaces: every slot of every panel sits on a slot of the pack's picture (`assets/immersive.rgba`, `tools/gen_immersive_ui.py`: the
     /// picture's slot wells are dark, their frame lighter), and the picture lies inside the screen's middle at the fitted size.
@@ -919,10 +1048,10 @@ mod tests {
         }
         let hot = layout_for(2, true).into_iter().find(|s| s.0 == SlotId::Inv(0)).unwrap();
         assert_eq!(hot.2 + art_origin(2).1, 187.0);
-        // the style fits the INKED part to the screen: at a factor of 1 it is 94% of the height (landscape), centred; the vanilla style is untouched
-        let (ox, oy, k) = panel_for(2, 2400.0, 1080.0, true, 1.0);
+        // the table's INKED part is 94% of the screen's height at a factor of 1 (landscape), centred; the vanilla style is untouched
+        let (ox, oy, k) = panel_for(3, 2400.0, 1080.0, true, 1.0);
         let (ax, ay) = (ox - 40.0 * k, oy - 45.0 * k);
-        let (x0, y0, x1, y1) = art_box(2);
+        let (x0, y0, x1, y1) = art_box(3);
         assert!(((y1 - y0) * k - 1080.0 * 0.94).abs() < 0.01, "the inked height is 94% of the screen's");
         assert!((ax + (x0 + x1) * 0.5 * k - 1200.0).abs() < 0.01 && (ay + (y0 + y1) * 0.5 * k - 540.0).abs() < 0.01, "and centred");
         // the 2x2 grid is on the leather disc and the result on the paper: (98, 18) and (154, 28), the modern positions
@@ -932,6 +1061,27 @@ mod tests {
         assert!(layout_for(2, true).iter().any(|s| s.0 == SlotId::Result && s.1 == 154.0) && layout_for(2, false).iter().any(|s| s.0 == SlotId::Result && s.1 == 148.0));
         // `hud_k` is the furnace's vanilla scale
         assert_eq!(hud_k(2400.0, 1080.0), panel_for(0, 2400.0, 1080.0, false, 1.0).2);
+    }
+
+    /// Every panel has the crafting table's scale (a slot is as big on each), except where that would push a slot off the screen: the 6-row chest. Its
+    /// `slot_span` is what `layout_for` covers, and the slots stay on the screen at the scale it gets.
+    #[test]
+    fn immersive_panels_share_the_tables_slot_size() {
+        let (w, h) = (2400.0, 1080.0);
+        let k3 = panel_for(3, w, h, true, 1.0).2;
+        for gw in [2usize, 0, 9, 27] {
+            assert_eq!(panel_for(gw, w, h, true, 1.0).2, k3, "gw {gw}");
+        }
+        assert!(panel_for(54, w, h, true, 1.0).2 <= k3);
+        for gw in [2usize, 3, 0, 9, 27, 54] {
+            let l = layout_for(gw, true);
+            let (lo, hi) = (l.iter().map(|s| s.2).fold(f32::MAX, f32::min), l.iter().map(|s| s.2).fold(f32::MIN, f32::max));
+            let (_, oy) = art_origin(gw);
+            assert_eq!(slot_span(gw), (oy + lo - 1.0, oy + hi + 17.0), "gw {gw}: the span is the slots' rows");
+            let (_, oy_px, k) = panel_for(gw, w, h, true, 1.0);
+            let (top, bot) = (oy_px + (lo - 1.0) * k, oy_px + (hi + 17.0) * k);
+            assert!(top >= 0.0 && bot <= h, "gw {gw}: the slots fit the screen ({top}, {bot})");
+        }
     }
 
     /// `art_box` is exactly the ink of every picture (left of column 228: the furnace's two sprites lie in the columns after it).

@@ -830,7 +830,7 @@ impl App {
             for a in asked {
                 match a {
                     PauseEv::Resume => self.touch.resume(),
-                    PauseEv::Rei => self.rei = Some(rei::ReiUi::new(true)),
+                    PauseEv::Rei => self.rei = Some(rei::ReiUi::new(true, self.rei_ctx())),
                     PauseEv::Stats(ach) => self.stats_ui = Some(stats_ui::StatsUi::new(ach)),
                     PauseEv::GenSettings => self.gen_ui = Some(gen_ui::GenUi::new(self.nat.clone(), false)),
                     PauseEv::Quit => {
@@ -3015,10 +3015,27 @@ impl App {
         self.touch.set_screen(true);
     }
 
-    /// What the item viewer asked for: closed, or an item given (what does not fit is thrown out like a drop).
+    /// What the item viewer needs of the game: the open crafting grid, if any, and what the player has for it (auto-crafting), and this world's
+    /// folder (the favorites are kept there).
+    fn rei_ctx(&self) -> rei::Ctx {
+        let grid = self.screen.as_ref().filter(|s| s.gw == 2 || s.gw == 3);
+        rei::Ctx { craft_gw: grid.map_or(0, |s| s.gw), have: grid.map_or_else(Vec::new, |s| s.have(&self.inv)), dir: Some(self.dir.clone()) }
+    }
+
+    /// What the item viewer asked for: closed, an item given (what does not fit is thrown out like a drop), or a recipe laid out on the open grid
+    /// (auto-crafting: on success the viewer closes to show the grid, else it stays and says why).
     fn rei_out(&mut self, o: rei::Out) {
         match o {
             rei::Out::Close => self.rei = None,
+            rei::Out::Fill { w, cells, max } => match self.with_ext(|s, inv, _| s.auto_fill(inv, w, &cells, max)) {
+                Some(Ok(())) => self.rei = None,
+                Some(Err(why)) => {
+                    if let Some(u) = self.rei.as_mut() {
+                        u.notice(&why);
+                    }
+                }
+                None => {}
+            },
             rei::Out::Give(mut st) => {
                 self.inv.add(&mut st);
                 if st.count > 0 {
@@ -3209,7 +3226,7 @@ impl App {
         let one = self.one_mode;
         let (on_one, on_shift, inside) = (craft::on_mode_button(gw, w, h, x, y), craft::on_shift_button(gw, w, h, x, y), craft::in_panel(gw, w, h, x, y));
         if craft::on_rei_button(gw, w, h, x, y) {
-            self.rei = Some(rei::ReiUi::new(false));
+            self.rei = Some(rei::ReiUi::new(false, self.rei_ctx()));
         } else if on_one {
             self.one_mode = !one;
         } else if on_shift {
@@ -4054,8 +4071,10 @@ impl App {
             // `GuiInventory`: the player at (51, 75) of the panel, straight ahead, an item in hand lowers the arm.
             if s.gw == 2 {
                 let pose = render::player::Pose { age: self.world_ticks as f32, holding: self.inv.slots[self.touch.hotbar_slot].is_some(), ..Default::default() };
-                // The pack's parchment is the modern inventory's: the doll stands on its oval at the same (51, 75), as big as vanilla's.
-                HudPipeline::push_player(v, render::player::inventory_quads(ox + 51.0 * k, oy + 75.0 * k, k, &pose, &worn));
+                // The pack's parchment is the modern inventory's. Vanilla: the doll stands at (51, 75). On the pack's oval (a flood fill of its pixels: centre (49.5, 71.5)
+                // of the panel, 35 x 11 units) he stands at (49.5, 72.5), 12% bigger. UNVERIFIED: not compared on a device.
+                let (dx, dy, dk) = if art.is_some() { (49.5, 72.5, 1.12) } else { (51.0, 75.0, 1.0) };
+                HudPipeline::push_player(v, render::player::inventory_quads(ox + dx * k, oy + dy * k, k * dk, &pose, &worn));
             }
             // Icons here are drawn as big in px as the hotbar's (`16 * hw / 20` box, 0.875 of it: 14 hotbar units), not as 16 panel units.
             // The immersive wells are 16 units of a panel smaller than the hotbar's, so there the icon is 14 units (7/8 of the well), not the hotbar's px.
@@ -4129,8 +4148,8 @@ impl App {
             if self.shift_mode {
                 HudPipeline::push_number(v, sx + ss * 0.32, sy + ss * 0.2, ss * 0.6, 2, [1.0; 4]);
             }
-            // The item viewer's button (REI), third toggle, inventory screen only: brown like the pack's panels.
-            if s.gw == 2 {
+            // The item viewer's button (REI), third toggle, on the inventory and the crafting table (where its `+` lays recipes out): brown like the pack's panels.
+            if s.gw == 2 || s.gw == 3 {
                 let (rx, ry, rs) = craft::toggle(s.gw, w, h, 2);
                 HudPipeline::push_outlined_quad(v, rx, ry, rs, rs, [0.48, 0.31, 0.2, 1.0], [0.15, 0.15, 0.15, 1.0], k.max(2.0));
                 HudPipeline::push_text_centered(v, rx + rs * 0.5, ry + rs * 0.5 - 4.0 * (rs / 20.0), rs / 20.0, "R", [1.0; 4]);

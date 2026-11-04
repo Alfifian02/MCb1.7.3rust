@@ -147,6 +147,10 @@ pub mod sprites {
         pub fn arrow(theme: usize) -> Sprite {
             (72.0, super::super::REI_Y + theme as f32 * 32.0, 22.0, 16.0)
         }
+        /// The favorite star (9 x 9, drawn by `tools/gen_rei.py`): filled gold when `on`, a grey outline when not.
+        pub fn star(theme: usize, on: bool) -> Sprite {
+            (if on { 96.0 } else { 106.0 }, super::super::REI_Y + theme as f32 * 32.0, 9.0, 9.0)
+        }
     }
     /// The map block: the live map pixels, the paper (`mapbg.png`, drawn 142 / 128 of the map) and the marker cells (`mapicons.png`, 8 x 8 each).
     pub mod map {

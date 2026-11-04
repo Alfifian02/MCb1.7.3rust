@@ -198,6 +198,25 @@ fn damage_dropped(b: u8, meta: u8) -> u16 {
     }
 }
 
+/// For the item viewer (`rei`): what block `b` can drop, as (item id, damage). `idDropped` reads a random number for a few blocks (leaves, gravel,
+/// tall grass, ores), so those are drawn over many seeds and every result kept; nothing for a block that drops nothing.
+pub fn block_drops(b: u8) -> Vec<(u16, u16)> {
+    let draws = if matches!(b, 13 | 18 | 21 | 31 | 73 | 74 | 89) { 256 } else { 1 };
+    let mut out: Vec<(u16, u16)> = Vec::new();
+    for seed in 0..draws {
+        let mut r = JavaRandom::new(seed);
+        let n = quantity(b, &mut r);
+        let id = id_dropped(b, &mut r);
+        if n > 0 && id > 0 {
+            let d = (id as u16, damage_dropped(b, 0));
+            if !out.contains(&d) {
+                out.push(d);
+            }
+        }
+    }
+    out
+}
+
 // ---- Inventory ----
 
 /// `InventoryPlayer.mainInventory`: 0..9 is the hotbar, 9..36 the rest (shown on the inventory screen); 36..40 is
@@ -548,6 +567,15 @@ impl Drops {
 
 #[cfg(test)]
 mod tests {
+    /// The item viewer's drop list: stone gives cobblestone, leaves a sapling (one time in 20, found over the seeds), glass nothing.
+    #[test]
+    fn block_drops_lists_what_a_block_can_give() {
+        assert_eq!(super::block_drops(1), vec![(4, 0)]);
+        assert!(super::block_drops(18).contains(&(6, 0)));
+        assert!(super::block_drops(13).contains(&(318, 0)) && super::block_drops(13).contains(&(13, 0)));
+        assert!(super::block_drops(20).is_empty());
+    }
+
     /// `Explosion.doExplosionA` on a dropped item: `attackEntityFrom` takes the damage off its 5 health (gone at 0) and the push is added to its motion.
     #[test]
     fn a_blast_wears_an_item_down_and_throws_it() {
