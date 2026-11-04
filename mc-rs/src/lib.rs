@@ -4054,12 +4054,12 @@ impl App {
             // `GuiInventory`: the player at (51, 75) of the panel, straight ahead, an item in hand lowers the arm.
             if s.gw == 2 {
                 let pose = render::player::Pose { age: self.world_ticks as f32, holding: self.inv.slots[self.touch.hotbar_slot].is_some(), ..Default::default() };
-                // The pack's picture has no room for the big model: a small one stands on its oval under the 2x2 grid (UNVERIFIED: spot and 0.42 are by eye).
-                let (px, py, pk) = if art.is_some() { (42.0, 77.0, k * 0.42) } else { (51.0, 75.0, k) };
-                HudPipeline::push_player(v, render::player::inventory_quads(ox + px * k, oy + py * k, pk, &pose, &worn));
+                // The pack's parchment is the modern inventory's: the doll stands on its oval at the same (51, 75), as big as vanilla's.
+                HudPipeline::push_player(v, render::player::inventory_quads(ox + 51.0 * k, oy + 75.0 * k, k, &pose, &worn));
             }
             // Icons here are drawn as big in px as the hotbar's (`16 * hw / 20` box, 0.875 of it: 14 hotbar units), not as 16 panel units.
-            let icon_fill = 14.0 * layout.hotbar[0].2 / 20.0 / (16.0 * k);
+            // The immersive wells are 16 units of a panel smaller than the hotbar's, so there the icon is 14 units (7/8 of the well), not the hotbar's px.
+            let icon_fill = if art.is_some() { 0.875 } else { 14.0 * layout.hotbar[0].2 / 20.0 / (16.0 * k) };
             let slot = |v: &mut Vec<HudVertex>, c: (f32, f32, f32), st: Option<ItemStack>| {
                 if let Some(st) = st {
                     push_stack(v, (c.0 + k, c.1 + k, c.2 - 2.0 * k, c.2 - 2.0 * k), icon_fill, st);

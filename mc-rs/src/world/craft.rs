@@ -702,7 +702,7 @@ static PANEL_SCALE: AtomicU32 = AtomicU32::new(0x3f80_0000);
 
 /// The picture's size in GUI units and the share of the screen's height it fills at a factor of 1.
 pub const IMM_ART: f32 = 256.0;
-const PANEL_FIT: f32 = 0.92;
+const PANEL_FIT: f32 = 0.94;
 
 /// Switches the style (`Settings::gui_style`) and the panel size factor (`Settings::panel_scale`, 0.5 .. 1.5).
 pub fn set_style(immersive: bool, scale: f32) {
@@ -743,17 +743,31 @@ pub fn art_sprite(gw: usize) -> crate::render::hud::sprites::Sprite {
     }
 }
 
-/// The picture's top-left (px) and its scale (px per unit) on a `w` x `h` surface at the size factor `scale`: centred, fitted to the screen at 1.0.
-fn art_rect(w: f32, h: f32, scale: f32) -> (f32, f32, f32) {
-    let k = (h * PANEL_FIT / IMM_ART).min(w * PANEL_FIT / IMM_ART) * scale;
-    ((w - IMM_ART * k) * 0.5, (h - IMM_ART * k) * 0.5, k)
+/// The inked part of the picture of `gw`, `(x0, y0, x1, y1)` in its units (x1 and y1 exclusive; `immersive_art_boxes_hold_the_ink` checks them against
+/// the data). The screen is fitted to THIS, not to the 256 x 256 square: its clear margins (up to 56 rows at the top) wasted a tenth of the height.
+pub fn art_box(gw: usize) -> (f32, f32, f32, f32) {
+    match gw {
+        2 => (28.0, 20.0, 228.0, 254.0),
+        3 => (28.0, 56.0, 228.0, 254.0),
+        0 => (28.0, 40.0, 228.0, 254.0),
+        9 => (28.0, 60.0, 228.0, 254.0),
+        _ if chest_rows(gw) <= 3 => (28.0, 60.0, 228.0, 254.0),
+        _ => (28.0, 6.0, 228.0, 254.0),
+    }
+}
+
+/// The picture's top-left (px) and its scale (px per unit) on a `w` x `h` surface at the size factor `scale`: its inked part (`art_box`) centred and
+/// `PANEL_FIT` of the screen at 1.0.
+fn art_rect(gw: usize, w: f32, h: f32, scale: f32) -> (f32, f32, f32) {
+    let (x0, y0, x1, y1) = art_box(gw);
+    let k = (h * PANEL_FIT / (y1 - y0)).min(w * PANEL_FIT / (x1 - x0)) * scale;
+    (w * 0.5 - (x0 + x1) * 0.5 * k, h * 0.5 - (y0 + y1) * 0.5 * k, k)
 }
 
 /// Where the style puts the pack's picture of the current screen: (x, y, size in px of its 256 units), `None` in the vanilla style.
 pub fn art(gw: usize, w: f32, h: f32) -> Option<(f32, f32, f32)> {
-    let _ = gw;
     immersive().then(|| {
-        let (x, y, k) = art_rect(w, h, panel_scale());
+        let (x, y, k) = art_rect(gw, w, h, panel_scale());
         (x, y, IMM_ART * k)
     })
 }
@@ -779,11 +793,16 @@ pub fn layout(gw: usize) -> Vec<(SlotId, f32, f32)> {
     layout_for(gw, immersive())
 }
 
-/// `layout` in a given style: the pack's inventory picture has its 2x2 grid where the workbench's 3x3 starts and its result where the workbench's is.
+/// `layout` in a given style: the pack's inventory picture is the modern one, its 2x2 grid on the leather disc at (98, 18) and its result on the paper at
+/// (154, 28), where the vanilla panel of this port has them `CRAFT_SHIFT` units further left.
 pub fn layout_for(gw: usize, imm: bool) -> Vec<(SlotId, f32, f32)> {
     let (disp, chest) = (gw == 9, gw > 3 && gw != 9);
     let d = if chest { (gw / 9) as i32 * 18 - 72 } else { 0 }; // `ContainerChest`: `(rows - 4) * 18`
-    let ((rx, ry), (gx, gy)) = if gw == 2 && !imm { ((154 - CRAFT_SHIFT, 28), (98 - CRAFT_SHIFT, 18)) } else { ((124, 35), (30, 17)) };
+    let ((rx, ry), (gx, gy)) = match (gw, imm) {
+        (2, false) => ((154 - CRAFT_SHIFT, 28), (98 - CRAFT_SHIFT, 18)),
+        (2, true) => ((154, 28), (98, 18)),
+        _ => ((124, 35), (30, 17)),
+    };
     let mut v: Vec<_> = if disp {
         (0..9).map(|i| (SlotId::Chest(i), (62 + 18 * (i % 3)) as f32, (17 + 18 * (i / 3)) as f32)).collect() // `ContainerDispenser`
     } else if chest {
@@ -813,7 +832,7 @@ pub fn panel(gw: usize, w: f32, h: f32) -> (f32, f32, f32) {
 /// `panel` in a given style: in the immersive one the origin is the vanilla panel's, found inside the centred picture (`art_origin`).
 pub fn panel_for(gw: usize, w: f32, h: f32, imm: bool, scale: f32) -> (f32, f32, f32) {
     if imm {
-        let (ax, ay, k) = art_rect(w, h, scale);
+        let (ax, ay, k) = art_rect(gw, w, h, scale);
         let (ux, uy) = art_origin(gw);
         return (ax + ux * k, ay + uy * k, k);
     }
@@ -860,7 +879,8 @@ pub fn on_shift_button(gw: usize, w: f32, h: f32, px: f32, py: f32) -> bool {
 
 pub fn in_panel(gw: usize, w: f32, h: f32, px: f32, py: f32) -> bool {
     if let Some((ax, ay, size)) = art(gw, w, h) {
-        return px >= ax && px < ax + size && py >= ay && py < ay + size;
+        let (k, (x0, y0, x1, y1)) = (size / IMM_ART, art_box(gw));
+        return px >= ax + x0 * k && px < ax + x1 * k && py >= ay + y0 * k && py < ay + y1 * k;
     }
     let (ox, oy, k) = panel(gw, w, h);
     let (pw, ph) = panel_size(gw);
@@ -899,14 +919,37 @@ mod tests {
         }
         let hot = layout_for(2, true).into_iter().find(|s| s.0 == SlotId::Inv(0)).unwrap();
         assert_eq!(hot.2 + art_origin(2).1, 187.0);
-        // the style fits the screen: at a factor of 1 the picture is 92% of the height (landscape), centred; the vanilla style is untouched
+        // the style fits the INKED part to the screen: at a factor of 1 it is 94% of the height (landscape), centred; the vanilla style is untouched
         let (ox, oy, k) = panel_for(2, 2400.0, 1080.0, true, 1.0);
         let (ax, ay) = (ox - 40.0 * k, oy - 45.0 * k);
-        assert!((256.0 * k - 1080.0 * 0.92).abs() < 0.01 && (ax - (2400.0 - 256.0 * k) / 2.0).abs() < 0.01 && (ay - (1080.0 - 256.0 * k) / 2.0).abs() < 0.01);
+        let (x0, y0, x1, y1) = art_box(2);
+        assert!(((y1 - y0) * k - 1080.0 * 0.94).abs() < 0.01, "the inked height is 94% of the screen's");
+        assert!((ax + (x0 + x1) * 0.5 * k - 1200.0).abs() < 0.01 && (ay + (y0 + y1) * 0.5 * k - 540.0).abs() < 0.01, "and centred");
+        // the 2x2 grid is on the leather disc and the result on the paper: (98, 18) and (154, 28), the modern positions
+        let inv = layout_for(2, true);
+        assert!(inv.iter().any(|s| s.0 == SlotId::Grid(0) && (s.1, s.2) == (98.0, 18.0)) && inv.iter().any(|s| s.0 == SlotId::Grid(3) && (s.1, s.2) == (116.0, 36.0)));
         assert_eq!(panel_for(2, 2400.0, 1080.0, false, 1.5), { let (pw, ph) = panel_size(2); let k = (1080.0 * 0.92 / ph).min(2400.0 * 0.92 / pw); ((2400.0 - pw * k) / 2.0, (1080.0 - ph * k) / 2.0, k) });
-        assert!(layout_for(2, true).iter().any(|s| s.0 == SlotId::Result && s.1 == 124.0) && layout_for(2, false).iter().any(|s| s.0 == SlotId::Result && s.1 == 148.0));
+        assert!(layout_for(2, true).iter().any(|s| s.0 == SlotId::Result && s.1 == 154.0) && layout_for(2, false).iter().any(|s| s.0 == SlotId::Result && s.1 == 148.0));
         // `hud_k` is the furnace's vanilla scale
         assert_eq!(hud_k(2400.0, 1080.0), panel_for(0, 2400.0, 1080.0, false, 1.0).2);
+    }
+
+    /// `art_box` is exactly the ink of every picture (left of column 228: the furnace's two sprites lie in the columns after it).
+    #[test]
+    fn immersive_art_boxes_hold_the_ink() {
+        use crate::render::hud::IMMERSIVE;
+        for gw in [2usize, 3, 0, 9, 27, 54] {
+            let (sx, sy, ..) = art_sprite(gw);
+            let (mut lo, mut hi) = ((255usize, 255usize), (0usize, 0usize));
+            for y in 0..256usize {
+                for x in 0..228usize {
+                    if IMMERSIVE[((sy as usize + y) * 256 + sx as usize + x) * 4 + 3] > 128 {
+                        (lo, hi) = ((lo.0.min(x), lo.1.min(y)), (hi.0.max(x), hi.1.max(y)));
+                    }
+                }
+            }
+            assert_eq!((lo.0 as f32, lo.1 as f32, hi.0 as f32 + 1.0, hi.1 as f32 + 1.0), art_box(gw), "gw {gw}");
+        }
     }
 
     /// Every slot of `layout` sits on a frame of the pack's panel (`assets/containers.rgba`, 256 rows per panel): its left edge, one texel

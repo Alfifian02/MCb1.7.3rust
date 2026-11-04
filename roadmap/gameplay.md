@@ -4,6 +4,11 @@ Part of [`ROADMAP.md`](../ROADMAP.md). The to-do milestones of this part (M11 Ne
 
 ## Changelog
 
+- 2026-11-04 (52): Immersive Interfaces, first fixes after phone screenshots. Still written WITHOUT a Rust toolchain. **NOT b1.7.3**.
+    - Bug: the inventory's 2x2 grid and result were on the parchment (workbench positions guessed from an overlay), the pack's inventory is the modern one: grid (98, 18) on the leather disc, result (154, 28) on the paper (`craft::layout_for`, no `CRAFT_SHIFT`; checked on an overlay of the art).
+    - Bug: the paper doll was 0.42 size at (42, 77); the parchment's oval is where vanilla's (51, 75) is, so it is drawn as in vanilla again.
+    - Bug: icons filled the whole well (the hotbar's px, bigger than a panel unit now); in the immersive style they are 14 of the well's 16 units (`icon_fill` 0.875).
+    - Bigger: the panel is fitted by the inked part of its picture (`craft::art_box`, tested against the data), 94% of the height at Panel Size 100% (the 256 x 256 square wasted up to a fifth of it: ink starts at row 20 to 60); `in_panel` is the inked part too.
 - 2026-11-04 (51): Immersive Interfaces (Shrimpsnail's pack) for the container screens and the hotbar. Written WITHOUT a Rust toolchain: not compiled, not run, not seen on a device. **NOT b1.7.3**; Options > General > GUI Style (default Vanilla) and Panel Size.
     - Decisions (asked of the owner): containers + hotbar only (menus, buttons, tooltip stay), a slider for the panel size, a second HUD texture (not more rows in the sheet: the sheet has 820 rows left (SHEET_H 3276 after REI) and the six pictures need ~1020), titles hidden, the owner has the author's permission (README, Credits).
     - `tools/gen_immersive_ui.py` -> `assets/immersive.rgba` (256 x 1600): inventory, workbench, furnace, dispenser, chest 3 rows (strip 2 of `generic_54.png`), chest 6 rows (strip 5), the furnace's flame and arrow, hotbar, selector. `--preview` writes a slot-box overlay.
