@@ -612,8 +612,19 @@ impl Screen {
 
     /// What the player has for the item viewer's auto-crafting: the (code, count) of the main inventory and the grid, same items merged.
     pub fn have(&self, inv: &Inventory) -> Vec<(u16, u32)> {
+        have_of(inv, self.grid.iter())
+    }
+}
+
+/// `Screen::have` without a screen: the (code, count) of the main inventory, same items merged (the craftable filter of the item viewer when no grid is open).
+pub fn have_inv(inv: &Inventory) -> Vec<(u16, u32)> {
+    have_of(inv, [].iter())
+}
+
+fn have_of<'a>(inv: &'a Inventory, grid: impl Iterator<Item = &'a Option<ItemStack>>) -> Vec<(u16, u32)> {
+    {
         let mut out: Vec<(u16, u32)> = Vec::new();
-        for s in inv.slots[..MAIN].iter().chain(self.grid.iter()).flatten() {
+        for s in inv.slots[..MAIN].iter().chain(grid).flatten() {
             let c = code(s.id, s.damage);
             match out.iter_mut().find(|o| o.0 == c) {
                 Some(o) => o.1 += s.count as u32,
@@ -622,7 +633,9 @@ impl Screen {
         }
         out
     }
+}
 
+impl Screen {
     /// Auto-crafting (REI `TransferHandler`): lay the recipe (`w` x rows pattern of `cells` codes, `w` 0 = shapeless list) out on the open grid from the
     /// main inventory. What is on the grid goes back to the inventory first; `max` makes as many sets as the stock and stack sizes allow (one otherwise).
     /// All or nothing: on `Err` (the reason) neither the grid nor the inventory changed.
@@ -792,6 +805,20 @@ static IMMERSIVE: AtomicBool = AtomicBool::new(false);
 /// The panel size factor as `f32` bits: 1.0 = the picture fits the screen (`PANEL_FIT` of its height).
 static PANEL_SCALE: AtomicU32 = AtomicU32::new(0x3f80_0000);
 
+/// How far the REI overlay has pushed the open container panel sideways, in px (negative = left) as `f32` bits. Every geometry function below (`panel`,
+/// `art`, `cell`, `slot_at`, `in_panel`) reads it, so the drawing and the hit tests slide together. 0 = centred; `lib.rs` eases it each frame.
+static PANEL_SHIFT: AtomicU32 = AtomicU32::new(0);
+
+/// Sets the sideways push of the container panel (px, negative = left); see `rei_layout::shift_target`.
+pub fn set_shift(px: f32) {
+    PANEL_SHIFT.store(if px.is_finite() { px } else { 0.0 }.to_bits(), Ordering::Relaxed);
+}
+
+/// The current sideways push in px.
+pub fn shift() -> f32 {
+    f32::from_bits(PANEL_SHIFT.load(Ordering::Relaxed))
+}
+
 /// The picture's size in GUI units and the share of the screen's height it fills at a factor of 1.
 pub const IMM_ART: f32 = 256.0;
 const PANEL_FIT: f32 = 0.94;
@@ -868,7 +895,7 @@ fn art_rect(gw: usize, w: f32, h: f32, scale: f32) -> (f32, f32, f32) {
     let (cy, (s0, s1)) = ((y0 + y1) * 0.5, slot_span(gw));
     let k_slots = h * 0.5 * PANEL_FIT / (cy - s0).max(s1 - cy);
     let k = k_ref.min(k_slots) * scale;
-    (w * 0.5 - (x0 + x1) * 0.5 * k, h * 0.5 - cy * k, k)
+    (w * 0.5 - (x0 + x1) * 0.5 * k + shift(), h * 0.5 - cy * k, k)
 }
 
 /// Where the style puts the pack's picture of the current screen: (x, y, size in px of its 256 units), `None` in the vanilla style.
@@ -945,7 +972,19 @@ pub fn panel_for(gw: usize, w: f32, h: f32, imm: bool, scale: f32) -> (f32, f32,
     }
     let (pw, ph) = panel_size(gw);
     let k = (h * 0.92 / ph).min(w * 0.92 / pw);
-    ((w - pw * k) * 0.5, (h - ph * k) * 0.5, k)
+    ((w - pw * k) * 0.5 + shift(), (h - ph * k) * 0.5, k)
+}
+
+/// The open screen's panel as a rect `[x, y, w, h]` in px, where it is NOW (pushed by `shift`): the pack picture's inked part or the vanilla panel. This is
+/// what the REI overlay keeps beside (`rei_layout::overlay`).
+pub fn panel_rect(gw: usize, w: f32, h: f32) -> [f32; 4] {
+    if let Some((ax, ay, size)) = art(gw, w, h) {
+        let (k, (x0, y0, x1, y1)) = (size / IMM_ART, art_box(gw));
+        return [ax + x0 * k, ay + y0 * k, (x1 - x0) * k, (y1 - y0) * k];
+    }
+    let (ox, oy, k) = panel(gw, w, h);
+    let (pw, ph) = panel_size(gw);
+    [ox, oy, pw * k, ph * k]
 }
 
 /// The 18 x 18 unit cell around the 16 x 16 slot at GUI position `(ux, uy)`, in px: (x, y, size).

@@ -21,6 +21,7 @@ mod options;
 mod gen_ui;
 mod preview;
 mod rei;
+mod rei_layout;
 mod stats_ui;
 mod ui;
 mod version;
@@ -141,6 +142,8 @@ struct App {
     stats_ui: Option<stats_ui::StatsUi>,
     /// The item and recipe viewer (`rei.rs`), over the inventory or the Tools page.
     rei: Option<rei::ReiUi>,
+    /// How far the REI overlay has pushed the open container panel sideways, px (`rei_layout::ease_to`, `craft::set_shift`).
+    rei_shift: f32,
     /// The world's World-Gen Settings (`menu::Info::nat`) and, read only, their screen from the game menu's Tools page.
     nat: world::gen::natural::NaturalSettings,
     gen_ui: Option<gen_ui::GenUi>,
@@ -365,7 +368,7 @@ impl App {
         let mut stats = std::fs::read(dir.join("stats")).ok().and_then(|b| world::stats::Stats::decode(&b)).unwrap_or_default();
         stats.add(world::stats::START_GAME, 1);
         let mut app = Self {
-            be, world_type: WorldType::Vanilla, lod: None, seed: 0, root: dir.clone(), opts, pause: None, stats, stats_ui: None, rei: None, preview: None, explored: Default::default(), nat: Default::default(), gen_ui: None, toast: Default::default(), stat_t: 0.0, stat_pos: glam::Vec3::ZERO, pig_fall: 0.0, cart_from: None, lod_on: false, menu: Some(Menu::new(&dir)),
+            be, world_type: WorldType::Vanilla, lod: None, seed: 0, root: dir.clone(), opts, pause: None, stats, stats_ui: None, rei: None, rei_shift: 0.0, preview: None, explored: Default::default(), nat: Default::default(), gen_ui: None, toast: Default::default(), stat_t: 0.0, stat_pos: glam::Vec3::ZERO, pig_fall: 0.0, cart_from: None, lod_on: false, menu: Some(Menu::new(&dir)),
             chunks, camera,
             player,
             last_frame: Instant::now(),
@@ -787,6 +790,7 @@ impl App {
         if dt < 0.0 { dt = 0.0; }
         self.last_frame = now;
         self.pad_sync(dt);
+        self.rei_step(real_dt);
         self.touch.pad.watch_health(self.vitals.health);
         // C9: the vignette and flash follow the health (only with the Immersive Pack ON; entering a world never flashes).
         if world::combat::rules::on() { self.dmg.frame(self.vitals.health as f32, real_dt); } else { self.dmg = Default::default(); }
@@ -825,7 +829,7 @@ impl App {
                         self.preview = None;
                     }
                 } else if let Some(u) = self.rei.as_mut() {
-                    if let Some(o) = u.event(ev, w, h, &self.opts) {
+                    if let Some(o) = u.event(ev, w, h, &self.opts, None).out {
                         self.rei_out(o);
                     }
                 } else if let Some(u) = self.gen_ui.as_mut() {
@@ -882,7 +886,11 @@ impl App {
             self.camera.pos = self.player.pos + glam::Vec3::new(0.0, EYE_HEIGHT - self.sneak_y, 0.0);
             return;
         }
-        (self.pause, self.stats_ui, self.gen_ui, self.rei, self.preview) = (None, None, None, None, None);
+        (self.pause, self.stats_ui, self.gen_ui, self.preview) = (None, None, None, None);
+        // The item viewer lives with its screen (the overlay) or with the pause menu (the standalone one).
+        if self.screen.is_none() {
+            self.rei = None;
+        }
         if !self.nether {
             self.explored.visit(self.player.pos.x.floor() as i32 >> 4, self.player.pos.z.floor() as i32 >> 4, self.opts.chunks().min(8));
         }
@@ -1440,9 +1448,15 @@ impl App {
         }
         for ev in self.touch.take_screen_events() {
             if let Some(u) = self.rei.as_mut() {
+                // The viewer takes what starts on it (the lists, its menus, the recipe view); the rest is the container screen's.
                 let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
-                if let Some(o) = u.event(ev, w, h, &self.opts) {
+                let panel = self.screen.as_ref().map(|s| craft::panel_rect(s.gw, w, h));
+                let r = u.event(ev, w, h, &self.opts, panel);
+                if let Some(o) = r.out {
                     self.rei_out(o);
+                }
+                if !r.taken {
+                    self.on_screen_event(ev);
                 }
             } else {
                 self.on_screen_event(ev);
@@ -3036,6 +3050,29 @@ impl App {
         self.screen = Some(screen);
         (self.one_mode, self.shift_mode) = (false, false);
         self.touch.set_screen(true);
+        // REI sits beside the screen (Options > REI Overlay); the panel makes room for it by sliding over (`rei_step`).
+        self.rei = self.opts.rei_overlay.then(|| rei::ReiUi::overlay(self.rei_ctx()));
+    }
+
+    /// Each frame: the item viewer learns what the player has and where the touch HUD's buttons are, and the open container panel eases to where the viewer
+    /// leaves it room (back to the middle when there is none).
+    fn rei_step(&mut self, dt: f32) {
+        let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
+        let panel = self.screen.as_ref().map(|s| craft::panel_rect(s.gw, w, h));
+        let ((px, py, pw, ph), (ix, iy, iw, ih)) = (self.touch.layout.pause, self.touch.layout.inventory);
+        let (x0, y0) = (px.min(ix), py.min(iy));
+        let hud = [x0, y0, (px + pw).max(ix + iw) - x0, (py + ph).max(iy + ih) - y0];
+        let ctx = self.rei_ctx();
+        let target = match self.rei.as_mut() {
+            Some(u) => {
+                u.set_hud(Some(hud));
+                u.sync(ctx.craft_gw, ctx.have);
+                u.target_shift_px(w, h, &self.opts, panel)
+            }
+            None => 0.0,
+        };
+        self.rei_shift = rei_layout::ease_to(self.rei_shift, target, dt);
+        craft::set_shift(self.rei_shift);
     }
 
     /// What the item viewer needs of the game: the open crafting grid, if any, and what the player has for it (auto-crafting), and this world's
@@ -3052,16 +3089,25 @@ impl App {
 
     fn rei_ctx(&self) -> rei::Ctx {
         let grid = self.screen.as_ref().filter(|s| s.gw == 2 || s.gw == 3);
-        rei::Ctx { craft_gw: grid.map_or(0, |s| s.gw), have: grid.map_or_else(Vec::new, |s| s.have(&self.inv)), dir: Some(self.dir.clone()) }
+        rei::Ctx { craft_gw: grid.map_or(0, |s| s.gw), have: grid.map_or_else(|| craft::have_inv(&self.inv), |s| s.have(&self.inv)), dir: Some(self.dir.clone()) }
     }
 
     /// What the item viewer asked for: closed, an item given (what does not fit is thrown out like a drop), or a recipe laid out on the open grid
     /// (auto-crafting: on success the viewer closes to show the grid, else it stays and says why).
     fn rei_out(&mut self, o: rei::Out) {
         match o {
-            rei::Out::Close => self.rei = None,
+            rei::Out::Close | rei::Out::Hide => self.rei = None,
+            rei::Out::Theme(t) => {
+                self.opts.rei_theme = t.min(1);
+                self.opts.save();
+            }
             rei::Out::Fill { w, cells, max } => match self.with_ext(|s, inv, _| s.auto_fill(inv, w, &cells, max)) {
-                Some(Ok(())) => self.rei = None,
+                // Laid out: the recipe view gives the screen back so the grid shows (the overlay stays).
+                Some(Ok(())) => {
+                    if let Some(u) = self.rei.as_mut() {
+                        u.close_views();
+                    }
+                }
                 Some(Err(why)) => {
                     if let Some(u) = self.rei.as_mut() {
                         u.notice(&why);
@@ -3081,6 +3127,8 @@ impl App {
     /// `onCraftGuiClosed`: the cursor stack and whatever is left in the grid are thrown out in front of the player.
     fn close_screen(&mut self) {
         self.rei = None;
+        self.rei_shift = 0.0;
+        craft::set_shift(0.0);
         self.stat_sync();
         if let Some(mut s) = self.screen.take() {
             for st in s.close() {
@@ -3259,7 +3307,8 @@ impl App {
         let one = self.one_mode;
         let (on_one, on_shift, inside) = (craft::on_mode_button(gw, w, h, x, y), craft::on_shift_button(gw, w, h, x, y), craft::in_panel(gw, w, h, x, y));
         if craft::on_rei_button(gw, w, h, x, y) {
-            self.rei = Some(rei::ReiUi::new(false, self.rei_ctx()));
+            // The R button hides the overlay and brings it back (REI's "hide overlay").
+            self.rei = if self.rei.is_some() { None } else { Some(rei::ReiUi::overlay(self.rei_ctx())) };
         } else if on_one {
             self.one_mode = !one;
         } else if on_shift {
@@ -4083,7 +4132,7 @@ impl App {
         }
 
         // Container screen: the vanilla GUI (176 x 166 units) over a dimmed frame, slots with their stacks.
-        if let Some(s) = self.screen.as_ref() {
+        if let Some(s) = self.screen.as_ref().filter(|_| !self.rei.as_ref().is_some_and(|u| u.covers())) {
             let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
             let (ox, oy, k) = craft::panel(s.gw, w, h);
             let (pw, ph) = craft::panel_size(s.gw);
@@ -4377,7 +4426,7 @@ impl App {
                 v.clear(); // it fills the screen; what the frame drew before would only use up the HUD pass's quads
                 u.draw(v, w, h, self.opts.gui_scale);
             } else if let Some(u) = &self.rei {
-                u.draw(v, w, h, &self.opts);
+                u.draw(v, w, h, &self.opts, None);
             } else if let Some(u) = &self.gen_ui {
                 u.draw(v, w, h, self.opts.gui_scale, true);
             } else if let Some(u) = &self.stats_ui {
@@ -4388,7 +4437,8 @@ impl App {
         }
         if let (false, Some(u)) = (paused, &self.rei) {
             let (w, h) = self.be.size();
-            u.draw(v, w as f32, h as f32, &self.opts);
+            let (w, h) = (w as f32, h as f32);
+            u.draw(v, w, h, &self.opts, self.screen.as_ref().map(|s| craft::panel_rect(s.gw, w, h)));
         }
         {
             let (w, h) = self.be.size();

@@ -53,7 +53,7 @@ pub const DPAD_SHEET: &[u8] = include_bytes!("../../assets/dpad.rgba");
 /// The title screen's sheet (256 x 272, `tools/gen_menu.py`): `mclogo.png`, then `background.png`: the last rows of the HUD texture.
 pub const MENU_SHEET: &[u8] = include_bytes!("../../assets/menu.rgba");
 /// The skins (`mob/char.png` and the armor, 64 x 32 each, four to a row, `atlas::skin_px`): 224 rows of the HUD texture, cut from the atlas's `ART` tail (`PLAYER_Y`).
-pub(crate) const SHEET_H: f32 = 3276.0;
+pub(crate) const SHEET_H: f32 = 3340.0;
 /// Height of the second texture (`IMMERSIVE`), and what is added to a vertex's `u` to read it instead of the sheet (both shaders test `u >= 1.5`).
 pub(crate) const IMM_H: f32 = 1600.0;
 pub(crate) const IMM_U: f32 = 2.0;
@@ -67,9 +67,12 @@ const PAD_Y: f32 = 2928.0;
 const PAD_H: f32 = 156.0;
 /// Where the map block starts (256 x 128, `tools/gen_mapui.py`): the last rows of the HUD texture, after the pad buttons. The held map's 128 x 128
 /// pixels are rewritten here at run time (`HudPipeline::upload_map`); `mapbg.png` and `mapicons.png` sit beside them.
-const MAP_Y: f32 = REI_Y + 64.0;
-/// Where the REI block starts (256 x 64, `tools/gen_rei.py`): the 64 rows after the pad buttons, before the map block.
+const MAP_Y: f32 = REI_Y + REI_H;
+/// Where the REI block starts (256 x `REI_H`, `tools/gen_rei.py`): the rows after the pad buttons, before the map block.
 const REI_Y: f32 = PAD_Y + PAD_H;
+/// The REI block's height: two themes (light at its first row, dark `REI_THEME_H` rows below).
+const REI_H: f32 = 128.0;
+const REI_THEME_H: f32 = 64.0;
 /// REI's panels and arrows from the Immersive Interfaces REI pack (light theme at row 0 of the block, dark at 32), see `sprites::rei`.
 pub const REI_SHEET: &[u8] = include_bytes!("../../assets/rei.rgba");
 pub const MAP_SHEET: &[u8] = include_bytes!("../../assets/mapui.rgba");
@@ -132,7 +135,8 @@ pub mod sprites {
     pub const SNEAK_ON: Sprite = (64.0, 2112.0, 64.0, 64.0);
     pub const JUMP: Sprite = (128.0, 2112.0, 64.0, 64.0);
     pub const JUMP_ON: Sprite = (192.0, 2112.0, 64.0, 64.0);
-    /// The REI block (`tools/gen_rei.py`): per theme (0 light, 1 dark) four 12 x 12 nine-slice panels (border 4) and two arrows.
+    /// The REI block (`tools/gen_rei.py`): per theme (0 light, 1 dark) four 12 x 12 nine-slice panels (border 4), three 6 x 6 button nine-slices (border 2),
+    /// the arrows, the star, the shapeless mark, the gear and the two tab pictures.
     pub mod rei {
         use super::Sprite;
         /// Panel kinds, `PanelTextures`: default, lighter, none, slot.
@@ -140,16 +144,43 @@ pub mod sprites {
         pub const LIGHTER: usize = 1;
         pub const NONE: usize = 2;
         pub const SLOT: usize = 3;
+        /// Button looks: normal, lit (hover / selected), disabled.
+        pub const BTN: usize = 0;
+        pub const BTN_LIT: usize = 1;
+        pub const BTN_OFF: usize = 2;
+        fn y0(theme: usize) -> f32 {
+            super::super::REI_Y + theme as f32 * super::super::REI_THEME_H
+        }
         pub fn panel(theme: usize, kind: usize) -> Sprite {
-            (kind as f32 * 12.0, super::super::REI_Y + theme as f32 * 32.0, 12.0, 12.0)
+            (kind as f32 * 12.0, y0(theme), 12.0, 12.0)
+        }
+        /// A button's 6 x 6 nine-slice (border 2).
+        pub fn button(theme: usize, kind: usize) -> Sprite {
+            (kind as f32 * 6.0, y0(theme) + 16.0, 6.0, 6.0)
         }
         /// The white arrow (22 x 16) of `DefaultCraftingCategory`.
         pub fn arrow(theme: usize) -> Sprite {
-            (72.0, super::super::REI_Y + theme as f32 * 32.0, 22.0, 16.0)
+            (72.0, y0(theme), 22.0, 16.0)
         }
         /// The favorite star (9 x 9, drawn by `tools/gen_rei.py`): filled gold when `on`, a grey outline when not.
         pub fn star(theme: usize, on: bool) -> Sprite {
-            (if on { 96.0 } else { 106.0 }, super::super::REI_Y + theme as f32 * 32.0, 9.0, 9.0)
+            (if on { 96.0 } else { 106.0 }, y0(theme), 9.0, 9.0)
+        }
+        /// REI's `arrow_left.png` / `arrow_right.png` (8 x 8), the page and category buttons.
+        pub fn arrow_lr(theme: usize, right: bool) -> Sprite {
+            (if right { 28.0 } else { 20.0 }, y0(theme) + 16.0, 8.0, 8.0)
+        }
+        /// `shapeless_icon_1x.png` (8 x 8), the mark on a shapeless crafting display.
+        pub fn shapeless(theme: usize) -> Sprite {
+            (36.0, y0(theme) + 16.0, 8.0, 8.0)
+        }
+        /// The config button's gear (14 x 14).
+        pub fn gear(theme: usize) -> Sprite {
+            (46.0, y0(theme) + 16.0, 14.0, 14.0)
+        }
+        /// A category tab (`TabWidget`): unselected 28 x 26, selected 28 x 30 (it reaches two rows over the panel).
+        pub fn tab(theme: usize, selected: bool) -> Sprite {
+            if selected { (28.0, y0(theme) + 32.0, 28.0, 30.0) } else { (0.0, y0(theme) + 32.0, 28.0, 26.0) }
         }
     }
     /// The map block: the live map pixels, the paper (`mapbg.png`, drawn 142 / 128 of the map) and the marker cells (`mapicons.png`, 8 x 8 each).
@@ -1047,8 +1078,9 @@ mod text_tests {
         assert_eq!(COMBAT_Y + 64.0, PAD_Y);
         assert_eq!(COMBAT_SHEET.len(), 256 * 64 * 4);
         assert_eq!(PAD_Y + PAD_H, REI_Y);
-        assert_eq!(REI_Y + 64.0, MAP_Y);
-        assert_eq!(REI_SHEET.len(), 256 * 64 * 4);
+        assert_eq!(REI_Y + REI_H, MAP_Y);
+        assert_eq!(REI_SHEET.len(), 256 * REI_H as usize * 4);
+        assert_eq!(REI_H, 2.0 * REI_THEME_H);
         assert_eq!(MAP_Y + 128.0, SHEET_H);
         assert_eq!(PAD_SHEET.len(), 256 * PAD_H as usize * 4);
         assert_eq!(sheet_bytes().len(), 256 * SHEET_H as usize * 4);

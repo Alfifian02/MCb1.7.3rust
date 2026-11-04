@@ -76,6 +76,8 @@ pub enum Opt {
     FxHaze,
     /// Added (Effects tab): the item viewer's look, Light or Dark pack (`rei.rs`).
     ReiTheme,
+    /// Added (Effects tab): the item viewer's overlay beside the open container screens (`rei.rs`).
+    ReiOverlay,
 }
 
 impl Opt {
@@ -118,6 +120,7 @@ impl Opt {
             Opt::FxGlow => "Glow",
             Opt::FxMotion => "Motion",
             Opt::ReiTheme => "REI Theme",
+            Opt::ReiOverlay => "REI Overlay",
             Opt::FxHaze => "Haze",
         }
     }
@@ -195,6 +198,8 @@ pub struct Settings {
     pub sustained: bool,
     /// The item viewer's look (`rei.rs`): 0 the light pack, 1 the dark one (`reiTheme` in options.txt).
     pub rei_theme: u8,
+    /// The item viewer shows beside every container screen (`reiOverlay` in options.txt); the R button of a screen hides / shows it.
+    pub rei_overlay: bool,
     /// Frames the swap chain may queue (`gpu::context::set_frame_latency`): 2 = as before, 1 = less latency, a frame that needs more than half the refresh period may then drop a step; no button. Next start.
     pub frame_latency: u8,
     /// Smart animals (`Mobs::smart`, not b1.7.3): path-walked wandering, herding, panic, and the grazing / rooting / pecking / resting pauses; a switch with no button, `animalAi:false` in options.txt turns all of it off.
@@ -248,6 +253,7 @@ impl Default for Settings {
             animal_ai: true,
             sustained: true,
             rei_theme: 0,
+            rei_overlay: true,
             biome_rules: true,
             dynamic_res: true,
             msaa: 0,
@@ -296,6 +302,7 @@ impl Settings {
                 ("dynamicRes", ..) => s.dynamic_res = b,
                 ("sustainedPerf", ..) => s.sustained = b,
                 ("reiTheme", _, Some(n)) if n <= 1 => s.rei_theme = n,
+                ("reiOverlay", ..) => s.rei_overlay = b,
                 ("msaa", _, Some(n)) if matches!(n, 0 | 1 | 2 | 4) => s.msaa = n,
                 ("post", _, Some(n)) if n <= 2 => s.post = n,
                 ("fxaa", _, Some(n)) if n <= 2 => s.fxaa = n,
@@ -317,8 +324,8 @@ impl Settings {
     pub fn save(&self) {
         let Some(p) = &self.path else { return };
         let mut t = format!(
-            "music:{}\nsound:{}\ninvertYMouse:{}\nmouseSensitivity:{}\nviewDistance:{}\nguiScale:{}\nbobView:{}\nanaglyph3d:{}\nadvancedOpengl:{}\nfpsLimit:{}\ndifficulty:{}\nfancyGraphics:{}\nao:{}\nlod:{}\ndigDelay:{}\ngpuErrorTrace:{}\ndynamicRes:{}\nmsaa:{}\npost:{}\nfxaa:{}\nrenderer:{}\ndebugScreen:{}\nanimalAi:{}\nbiomeRules:{}\nframeLatency:{}\nsustainedPerf:{}\nreiTheme:{}\n",
-            self.music, self.sound, self.invert_mouse, self.sensitivity, self.render_distance, self.gui_scale, self.view_bobbing, self.anaglyph, self.advanced_opengl, self.limit_framerate, self.difficulty, self.fancy_graphics, self.ambient_occlusion, self.lod, self.dig_delay, self.gpu_error_trace, self.dynamic_res, self.msaa, self.post, self.fxaa, self.renderer, self.debug_screen, self.animal_ai, self.biome_rules, self.frame_latency, self.sustained, self.rei_theme
+            "music:{}\nsound:{}\ninvertYMouse:{}\nmouseSensitivity:{}\nviewDistance:{}\nguiScale:{}\nbobView:{}\nanaglyph3d:{}\nadvancedOpengl:{}\nfpsLimit:{}\ndifficulty:{}\nfancyGraphics:{}\nao:{}\nlod:{}\ndigDelay:{}\ngpuErrorTrace:{}\ndynamicRes:{}\nmsaa:{}\npost:{}\nfxaa:{}\nrenderer:{}\ndebugScreen:{}\nanimalAi:{}\nbiomeRules:{}\nframeLatency:{}\nsustainedPerf:{}\nreiTheme:{}\nreiOverlay:{}\n",
+            self.music, self.sound, self.invert_mouse, self.sensitivity, self.render_distance, self.gui_scale, self.view_bobbing, self.anaglyph, self.advanced_opengl, self.limit_framerate, self.difficulty, self.fancy_graphics, self.ambient_occlusion, self.lod, self.dig_delay, self.gpu_error_trace, self.dynamic_res, self.msaa, self.post, self.fxaa, self.renderer, self.debug_screen, self.animal_ai, self.biome_rules, self.frame_latency, self.sustained, self.rei_theme, self.rei_overlay
         );
         t.push_str(&format!("fov:{}\nguiStyle:{}\npanelSize:{}\n", self.fov, self.gui_style, self.panel_size));
         for (id, code) in KEY_IDS.iter().zip(self.keys) {
@@ -420,6 +427,7 @@ impl Settings {
             Opt::FxMotion => self.look.motion = (self.look.motion + 1) % 3,
             Opt::FxHaze => self.look.haze = !self.look.haze,
             Opt::ReiTheme => self.rei_theme = (self.rei_theme + 1) % 2,
+            Opt::ReiOverlay => self.rei_overlay = !self.rei_overlay,
             _ => {}
         }
         self.save();
@@ -456,6 +464,7 @@ impl Settings {
                 Opt::FxMotion => ["OFF", "Low", "On"][self.look.motion.min(2) as usize].into(),
                 Opt::FxHaze => onoff(self.look.haze).into(),
                 Opt::ReiTheme => ["Light", "Dark"][self.rei_theme.min(1) as usize].into(),
+                Opt::ReiOverlay => onoff(self.rei_overlay).into(),
                 Opt::RenderDistance => ["Far", "Normal", "Short", "Tiny"][self.render_distance.min(3) as usize].into(),
                 Opt::Difficulty => ["Peaceful", "Easy", "Normal", "Hard"][self.difficulty.min(3) as usize].into(),
                 Opt::GuiScale => ["Auto", "Small", "Normal", "Large"][self.gui_scale.min(3) as usize].into(),
@@ -1014,6 +1023,7 @@ impl OptionsUi {
             o(Opt::FxMotion),
             o(Opt::FxHaze),
             o(Opt::ReiTheme),
+            o(Opt::ReiOverlay),
             P(4),
             G("Look and dig"),
             o(Opt::Sensitivity),
