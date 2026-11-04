@@ -386,7 +386,15 @@ pub fn build_split_tinted(smooth: bool, blocks: &[u8], data: &Nibbles, nb_data: 
                 let (boxes, n_boxes) = shapes(blk, meta, &|dx, dz| rid(x + dx, y, z + dz) == blk);
                 for &bounds in &boxes[..n_boxes] {
                 let heights = is_fluid(blk).then(|| fluid_heights(&rid, &meta_at, x, y, z));
-                let flow = if heights.is_some() { flow_angle(&rid, &meta_at, x, y, z) } else { None };
+                // A still water cell in a stream turns its top along the stream's current (`StreamFlowGrid`, read from `gen::hydro` instead of baked).
+                let flow = if heights.is_some() {
+                    flow_angle(&rid, &meta_at, x, y, z).or_else(|| {
+                        let c = (blk >> 1 == 4).then(|| crate::world::gen::hydro::current((ox + x) as f32 + 0.5, (oz + z) as f32 + 0.5)).flatten()?;
+                        Some(c[1].atan2(c[0]) - std::f32::consts::FRAC_PI_2)
+                    })
+                } else {
+                    None
+                };
                 for (face_i, face) in FACES.iter().enumerate() {
                     let (dx, dy, dz) = DIRS[face_i];
                     let n = rid(x + dx, y + dy, z + dz);

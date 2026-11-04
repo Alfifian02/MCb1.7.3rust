@@ -382,6 +382,13 @@ impl ItemEntity {
             return false;
         }
         self.vel.y -= 0.04;
+        // A stream's current carries an item that lies in its water (`Entity.handleWaterMovement`; `gen::hydro`'s flow, as for mobs).
+        if matches!(get(here[0], here[1], here[2]), Some(8 | 9)) {
+            if let Some(c) = crate::world::gen::hydro::current_for(self.pos.x, self.pos.z, crate::world::gen::hydro::Push::Mob) {
+                self.vel.x += (c[0] / 20.0 - self.vel.x) * 0.15;
+                self.vel.z += (c[1] / 20.0 - self.vel.z) * 0.15;
+            }
+        }
         // pushOutOfBlocks (simplified): a block placed on top of it lifts it onto the block.
         if solid(get, here) {
             self.pos.y = here[1] as f32 + 1.0 + R;

@@ -1432,6 +1432,8 @@ pub enum PauseEv {
     Stats(bool),
     /// Open `gen_ui` read only: the world's World-Gen Settings.
     GenSettings,
+    /// Open the World Preview of the world being played (`preview::Preview::new_ingame`).
+    Preview,
     /// Open `rei`, the item and recipe viewer, giving items.
     Rei,
 }
@@ -1448,6 +1450,7 @@ enum PAct {
     Debug,
     Info,
     GenSettings,
+    Preview,
     /// The sun, bottom right: the live atmosphere editor.
     Atmos,
     /// Opens the item and recipe viewer (`rei.rs`, cheat mode).
@@ -1524,7 +1527,8 @@ impl Pause {
             (PAct::Info, [hw + 2.0, y + 24.0, 118.0, 20.0], if info.info { "Info: on" } else { "Info: off" }.to_string(), true),
             (PAct::Debug, [hw - 120.0, y + 48.0, 240.0, 20.0], debug.to_string(), true),
             (PAct::GenSettings, [hw - 120.0, y + 72.0, 240.0, 20.0], "World-Gen Settings...".to_string(), true),
-            (PAct::Rei, [hw - 120.0, y + 96.0, 240.0, 20.0], "Inventory Cheat...".to_string(), true),
+            (PAct::Rei, [hw - 120.0, y + 96.0, 118.0, 20.0], "Inventory Cheat".to_string(), true),
+            (PAct::Preview, [hw + 2.0, y + 96.0, 118.0, 20.0], "World Preview".to_string(), true),
             (PAct::ToolsDone, [hw - 100.0, y + 120.0, 200.0, 20.0], "Done".to_string(), true),
         ]
     }
@@ -1557,6 +1561,7 @@ impl Pause {
                     PAct::Debug => Some(PauseEv::LodDebug),
                     PAct::Info => Some(PauseEv::Info),
                     PAct::GenSettings => Some(PauseEv::GenSettings),
+                    PAct::Preview => Some(PauseEv::Preview),
                     PAct::Rei => Some(PauseEv::Rei),
                     PAct::Options => {
                         self.opt = Some(OptionsUi::new());

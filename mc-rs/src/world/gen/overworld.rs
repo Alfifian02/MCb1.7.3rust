@@ -7,7 +7,7 @@
 use crate::world::biome::Biome;
 use crate::world::gen::caves;
 use crate::world::gen::chunk_manager::WorldChunkManager;
-use crate::world::gen::hydro::{Hydro, CELL};
+use crate::world::gen::hydro::{Hydro, Region, CELL};
 use crate::world::gen::noise::{JavaRandom, OctaveNoise};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -235,7 +235,8 @@ impl OverworldGenerator {
         self
     }
 
-    /// The generator the World Preview samples: the terrain of `ty` and nothing else (no rivers, caves, structures), so it is cheap to make.
+    /// The generator the World Preview samples: the terrain of `ty` and its rivers and lakes (the same `Hydro` the game uses, made on
+    /// demand), no caves or structures, so it is cheap to make.
     pub fn preview(ty: WorldType, seed: i64) -> Self {
         let mut g = Self::new(seed);
         match ty {
@@ -243,7 +244,23 @@ impl OverworldGenerator {
             WorldType::Tectonic => g = g.tectonic(),
             WorldType::Blooming => g.blooming = true,
         }
+        g.hydro = Some(Hydro::of_preview(g.seed, g.tectonic.is_some()));
         g
+    }
+
+    /// Water at block (bx, bz) for the World Preview: 0 dry, 1 river, 2 lake (`Region::water_at`). `cache` keeps the regions of the chunks
+    /// asked about (the caller owns it; it is emptied past 48).
+    pub fn water_at(&mut self, bx: i32, bz: i32, cm: &WorldChunkManager, cache: &mut HashMap<(i32, i32), Arc<Region>>, ground: i32) -> u8 {
+        let Some(h) = self.hydro.clone() else { return 0 };
+        let key = (bx >> 4, bz >> 4);
+        if !cache.contains_key(&key) {
+            if cache.len() > 48 {
+                cache.clear();
+            }
+            let r = h.region(key.0, key.1, &mut |gx, gz| self.probe(gx, gz, cm));
+            cache.insert(key, r);
+        }
+        cache[&key].water_at(bx, bz, ground, cm.sample_at(bx, bz).0)
     }
 
     /// Surface height (the zero crossing of the density column, or Tectonic's surface) at block (bx, bz), read without making the chunk.

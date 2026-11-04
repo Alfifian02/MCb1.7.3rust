@@ -695,7 +695,7 @@ impl TouchUi {
     fn on_press(&mut self, pid: i32, x: f32, y: f32, role: PointerRole) {
         // A second finger on a menu screen is half of a pinch (the World Preview zooms with it); other menus ignore `take_pinch`.
         if role == PointerRole::Tap
-            && self.menu
+            && (self.menu || self.paused)
             && self.pointers.values().any(|p| p.role == PointerRole::Tap)
             && !self.pointers.values().any(|p| p.role == PointerRole::Pinch)
         {

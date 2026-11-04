@@ -993,6 +993,10 @@ impl ChunkManager {
                 Some((x.parse().ok()?, z.parse().ok()?)) // "c.1.2.tmp" and other strays do not parse
             })
             .collect();
+        // The river networks are kept beside the chunks, unless Natural Temperature is on (a file does not know its settings).
+        // `hydro.cfg` beside the chunks (`playerPush:1.2`, `boatPush:2.0`, `mobPush:1.2`, `hydroIceSpeed:1.2`, `hydroBlacklist:Desert`, `hydro:false`).
+        hydro::configure(std::fs::read_to_string(dir.join("hydro.cfg")).map(|t| hydro::Settings::parse(&t, &crate::world::atmos::ALL)).unwrap_or_default());
+        hydro::cache_dir(crate::world::gen::natural::current().is_none().then(|| dir.join("hydro")));
         self.dir = Some(dir);
         self.writer = Some(Writer::spawn());
         self

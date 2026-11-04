@@ -484,11 +484,20 @@ impl Menu {
             return;
         }
         if self.scr == Scr::Preview {
+            if self.typing.is_some() {
+                // The seed is being typed (the keyboard is up): a tap anywhere finishes, as on Create World; `draw` hands the new seed over.
+                if matches!(ev, ScreenEv::Up(..)) {
+                    self.typing = None;
+                }
+                return;
+            }
             let out = self.prev.as_mut().map_or(PvOut::Close, |p| p.event(ev, w, h, st.gui_scale));
             match out {
                 PvOut::None => {}
                 PvOut::Close => self.close_preview(false),
                 PvOut::Settings => self.close_preview(true),
+                PvOut::EditSeed => self.typing = Some(1),
+                PvOut::Random => (self.seed, self.rand_seed) = (String::new(), now_nanos() as i64),
             }
             return;
         }
@@ -782,7 +791,14 @@ impl Menu {
             HudPipeline::push_text(v, x * s, y * s, s, t, rgb(c));
         };
         if self.scr == Scr::Preview {
+            if self.typing.is_some() {
+                dirt(v, s, [0.0, 0.0, gw, gh], 0.0, 0x404040);
+                self.draw_typing(v, s, gw, 1);
+                return;
+            }
+            let seed = self.world_seed(); // typed, re-rolled or unchanged: the map follows the seed field
             if let Some(p) = self.prev.as_mut() {
+                p.set_seed(seed);
                 p.draw(v, w, h, st.gui_scale); // its own background: no dirt under it (the HUD pass holds few quads)
             }
             return;

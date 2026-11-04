@@ -192,6 +192,11 @@ impl Hook {
         }
         self.in_water = wet > 0.0;
         if wet > 0.0 {
+            // A stream's current carries the bobber (`Entity.handleWaterMovement`; `gen::hydro`'s flow, as for items and mobs).
+            if let Some(c) = crate::world::gen::hydro::current_for(self.pos.x, self.pos.z, crate::world::gen::hydro::Push::Mob) {
+                self.vel.x += (c[0] / 20.0 - self.vel.x) * 0.1;
+                self.vel.z += (c[1] / 20.0 - self.vel.z) * 0.1;
+            }
             if self.catchable > 0 {
                 self.catchable -= 1;
             } else if rng.next_int_bound(if rain { 300 } else { 500 }) == 0 {

@@ -194,7 +194,7 @@ impl Boat {
         }
         // A stream's current pushes a boat afloat (blocks a tick; a rider's paddling is ten times stronger, so it can go upstream).
         if wet > 0.0 {
-            if let Some(c) = crate::world::gen::hydro::current(self.pos.x, self.pos.z) {
+            if let Some(c) = crate::world::gen::hydro::current_for(self.pos.x, self.pos.z, crate::world::gen::hydro::Push::Boat) {
                 self.vel.x += c[0] / 20.0 * 0.015;
                 self.vel.z += c[1] / 20.0 * 0.015;
             }
