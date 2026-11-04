@@ -20,6 +20,7 @@ mod skin;
 mod options;
 mod gen_ui;
 mod preview;
+mod rei;
 mod stats_ui;
 mod ui;
 mod version;
@@ -138,6 +139,8 @@ struct App {
     stats: world::stats::Stats,
     /// Achievements / Statistics (`PauseEv::Stats`), drawn instead of the game menu while `Some`.
     stats_ui: Option<stats_ui::StatsUi>,
+    /// The item and recipe viewer (`rei.rs`), over the inventory or the Tools page.
+    rei: Option<rei::ReiUi>,
     /// The world's World-Gen Settings (`menu::Info::nat`) and, read only, their screen from the game menu's Tools page.
     nat: world::gen::natural::NaturalSettings,
     gen_ui: Option<gen_ui::GenUi>,
@@ -359,7 +362,7 @@ impl App {
         let mut stats = std::fs::read(dir.join("stats")).ok().and_then(|b| world::stats::Stats::decode(&b)).unwrap_or_default();
         stats.add(world::stats::START_GAME, 1);
         let mut app = Self {
-            be, world_type: WorldType::Vanilla, lod: None, seed: 0, root: dir.clone(), opts, pause: None, stats, stats_ui: None, nat: Default::default(), gen_ui: None, toast: Default::default(), stat_t: 0.0, stat_pos: glam::Vec3::ZERO, pig_fall: 0.0, cart_from: None, lod_on: false, menu: Some(Menu::new(&dir)),
+            be, world_type: WorldType::Vanilla, lod: None, seed: 0, root: dir.clone(), opts, pause: None, stats, stats_ui: None, rei: None, nat: Default::default(), gen_ui: None, toast: Default::default(), stat_t: 0.0, stat_pos: glam::Vec3::ZERO, pig_fall: 0.0, cart_from: None, lod_on: false, menu: Some(Menu::new(&dir)),
             chunks, camera,
             player,
             last_frame: Instant::now(),
@@ -583,7 +586,7 @@ impl App {
         self.chunks = ChunkManager::new_typed(0, RENDER_DIST, WorldType::Vanilla); // the world's workers stop on drop
         self.lod = None;
         self.menu = Some(Menu::new(&self.root));
-        (self.pause, self.stats_ui, self.gen_ui) = (None, None, None);
+        (self.pause, self.stats_ui, self.gen_ui, self.rei) = (None, None, None, None);
         self.touch.set_menu(true);
         if let Ok(mut l) = LAST_WORLD.lock() {
             *l = None;
@@ -808,7 +811,11 @@ impl App {
             let info = self.pause_info();
             let mut asked = Vec::new();
             for ev in self.touch.take_screen_events() {
-                if let Some(u) = self.gen_ui.as_mut() {
+                if let Some(u) = self.rei.as_mut() {
+                    if let Some(o) = u.event(ev, w, h, &self.opts) {
+                        self.rei_out(o);
+                    }
+                } else if let Some(u) = self.gen_ui.as_mut() {
                     if u.event(ev, w, h, self.opts.gui_scale) {
                         self.gen_ui = None;
                     }
@@ -823,6 +830,7 @@ impl App {
             for a in asked {
                 match a {
                     PauseEv::Resume => self.touch.resume(),
+                    PauseEv::Rei => self.rei = Some(rei::ReiUi::new(true)),
                     PauseEv::Stats(ach) => self.stats_ui = Some(stats_ui::StatsUi::new(ach)),
                     PauseEv::GenSettings => self.gen_ui = Some(gen_ui::GenUi::new(self.nat.clone(), false)),
                     PauseEv::Quit => {
@@ -854,7 +862,7 @@ impl App {
             self.camera.pos = self.player.pos + glam::Vec3::new(0.0, EYE_HEIGHT - self.sneak_y, 0.0);
             return;
         }
-        (self.pause, self.stats_ui, self.gen_ui) = (None, None, None);
+        (self.pause, self.stats_ui, self.gen_ui, self.rei) = (None, None, None, None);
         // Four seconds in a portal: the other dimension (`EntityPlayerSP.onLivingUpdate`).
         if self.portal_t >= 1.0 {
             let p = self.audio.rnd() * 0.4 + 0.8;
@@ -1408,7 +1416,14 @@ impl App {
             }
         }
         for ev in self.touch.take_screen_events() {
-            self.on_screen_event(ev);
+            if let Some(u) = self.rei.as_mut() {
+                let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
+                if let Some(o) = u.event(ev, w, h, &self.opts) {
+                    self.rei_out(o);
+                }
+            } else {
+                self.on_screen_event(ev);
+            }
         }
         self.hint = (self.hint - real_dt).max(0.0);
         let eye = self.camera.pos.as_dvec3();
@@ -3000,8 +3015,22 @@ impl App {
         self.touch.set_screen(true);
     }
 
+    /// What the item viewer asked for: closed, or an item given (what does not fit is thrown out like a drop).
+    fn rei_out(&mut self, o: rei::Out) {
+        match o {
+            rei::Out::Close => self.rei = None,
+            rei::Out::Give(mut st) => {
+                self.inv.add(&mut st);
+                if st.count > 0 {
+                    self.drops.throw(st, self.camera.pos, self.camera.forward());
+                }
+            }
+        }
+    }
+
     /// `onCraftGuiClosed`: the cursor stack and whatever is left in the grid are thrown out in front of the player.
     fn close_screen(&mut self) {
+        self.rei = None;
         self.stat_sync();
         if let Some(mut s) = self.screen.take() {
             for st in s.close() {
@@ -3023,7 +3052,7 @@ impl App {
                 let (w, h) = (w as f32, h as f32);
                 let cell = |(ux, uy)| craft::cell(s.gw, w, h, (ux, uy));
                 let slots = craft::layout(s.gw).into_iter().map(|(_, ux, uy)| cell((ux, uy)));
-                let togs = (0..2).map(|i| craft::toggle(s.gw, w, h, i));
+                let togs = (0..if s.gw == 2 { 3 } else { 2 }).map(|i| craft::toggle(s.gw, w, h, i));
                 slots.chain(togs).map(|(x, y, k)| [x, y, k, k]).collect()
             }
             None => match self.pause.as_ref() {
@@ -3179,7 +3208,9 @@ impl App {
         let Some(gw) = self.screen.as_ref().map(|s| s.gw) else { return };
         let one = self.one_mode;
         let (on_one, on_shift, inside) = (craft::on_mode_button(gw, w, h, x, y), craft::on_shift_button(gw, w, h, x, y), craft::in_panel(gw, w, h, x, y));
-        if on_one {
+        if craft::on_rei_button(gw, w, h, x, y) {
+            self.rei = Some(rei::ReiUi::new(false));
+        } else if on_one {
             self.one_mode = !one;
         } else if on_shift {
             self.shift_mode = !self.shift_mode;
@@ -4078,6 +4109,12 @@ impl App {
             if self.shift_mode {
                 HudPipeline::push_number(v, sx + ss * 0.32, sy + ss * 0.2, ss * 0.6, 2, [1.0; 4]);
             }
+            // The item viewer's button (REI), third toggle, inventory screen only: brown like the pack's panels.
+            if s.gw == 2 {
+                let (rx, ry, rs) = craft::toggle(s.gw, w, h, 2);
+                HudPipeline::push_outlined_quad(v, rx, ry, rs, rs, [0.48, 0.31, 0.2, 1.0], [0.15, 0.15, 0.15, 1.0], k.max(2.0));
+                HudPipeline::push_text_centered(v, rx + rs * 0.5, ry + rs * 0.5 - 4.0 * (rs / 20.0), rs / 20.0, "R", [1.0; 4]);
+            }
             // The picked-up stack floats just above the finger.
             if let Some(c) = s.cursor {
                 let (cx, cy) = self.touch.cursor_pos;
@@ -4258,13 +4295,19 @@ impl App {
         // The game menu (`GuiIngameMenu`, the death screen when dead), over the dimmed frame.
         if paused {
             let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
-            if let Some(u) = &self.gen_ui {
+            if let Some(u) = &self.rei {
+                u.draw(v, w, h, &self.opts);
+            } else if let Some(u) = &self.gen_ui {
                 u.draw(v, w, h, self.opts.gui_scale, true);
             } else if let Some(u) = &self.stats_ui {
                 u.draw(v, w, h, &self.opts, &self.stats);
             } else if let Some(p) = &self.pause {
                 p.draw(v, w, h, &self.opts, &pause_info);
             }
+        }
+        if let (false, Some(u)) = (paused, &self.rei) {
+            let (w, h) = self.be.size();
+            u.draw(v, w as f32, h as f32, &self.opts);
         }
         {
             let (w, h) = self.be.size();
@@ -4286,7 +4329,9 @@ impl App {
             let (s, ..) = crate::menu::scaled_gs(w, h, self.opts.gui_scale);
             let rows: Vec<(crate::input::gamepad::Role, &str)> = Vec::new();
             let avoid: Vec<[f32; 4]> = if paused {
-                if let Some(u) = &self.gen_ui {
+                if let Some(u) = &self.rei {
+                    u.avoid(w, h, &self.opts)
+                } else if let Some(u) = &self.gen_ui {
                     u.avoid(w, h, self.opts.gui_scale)
                 } else if let Some(u) = &self.stats_ui {
                     u.avoid(w, h, &self.opts)
@@ -4497,6 +4542,24 @@ fn start_init(app: &AndroidApp) -> Option<std::thread::JoinHandle<Result<App, St
 
 /// A key of the phone's soft keyboard for the menu's text field: Del erases, Enter / Back close it, the rest is looked up in the
 /// device's key map (`KeyEvent.getUnicodeChar`). UNVERIFIED: not built or run on a device (IME composition, e.g. predictive text, is not handled).
+fn rei_key(app: &AndroidApp, r: &mut rei::ReiUi, k: &android_activity::input::KeyEvent) {
+    use android_activity::input::{KeyAction, KeyMapChar, Keycode};
+    if k.action() != KeyAction::Down {
+        return;
+    }
+    match k.key_code() {
+        Keycode::Del => r.backspace(),
+        Keycode::Enter | Keycode::NumpadEnter | Keycode::Back => r.end_typing(),
+        code => {
+            if let Ok(map) = app.device_key_character_map(k.device_id()) {
+                if let Ok(KeyMapChar::Unicode(c)) = map.get(code, k.meta_state()) {
+                    r.type_char(c);
+                }
+            }
+        }
+    }
+}
+
 fn menu_key(app: &AndroidApp, m: &mut Menu, k: &android_activity::input::KeyEvent) {
     use android_activity::input::{KeyAction, KeyMapChar, Keycode};
     if k.action() != KeyAction::Down {
@@ -4583,7 +4646,12 @@ fn android_main(app: AndroidApp) {
                                 IEv::KeyEvent(k) => match app_state.as_mut() {
                                     // not a guard: a guard binds `a` immutably, `on_key` needs it mutable
                                     // The create / rename screen's text field: the phone's soft keyboard types into it.
-                                    Some(a) => if a.menu.as_ref().is_some_and(Menu::typing) {
+                                    Some(a) => if a.rei.as_ref().is_some_and(rei::ReiUi::typing) {
+                                        if let Some(r) = a.rei.as_mut() {
+                                            rei_key(&app, r, &k);
+                                        }
+                                        InputStatus::Handled
+                                    } else if a.menu.as_ref().is_some_and(Menu::typing) {
                                         if let Some(m) = a.menu.as_mut() {
                                             menu_key(&app, m, &k);
                                         }
@@ -4643,7 +4711,7 @@ fn android_main(app: AndroidApp) {
         });
 
         // The soft keyboard follows the menu's focused text field (shown / hidden only when that changes).
-        let want_kbd = app_state.as_ref().and_then(|a| a.menu.as_ref()).is_some_and(Menu::typing);
+        let want_kbd = app_state.as_ref().is_some_and(|a| a.menu.as_ref().is_some_and(Menu::typing) || a.rei.as_ref().is_some_and(rei::ReiUi::typing));
         if want_kbd != kbd_up {
             kbd_up = want_kbd;
             if want_kbd {

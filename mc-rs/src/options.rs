@@ -70,6 +70,8 @@ pub enum Opt {
     FxGlow,
     FxMotion,
     FxHaze,
+    /// Added (Effects tab): the item viewer's look, Light or Dark pack (`rei.rs`).
+    ReiTheme,
 }
 
 impl Opt {
@@ -109,6 +111,7 @@ impl Opt {
             Opt::FxWater => "Water Look",
             Opt::FxGlow => "Glow",
             Opt::FxMotion => "Motion",
+            Opt::ReiTheme => "REI Theme",
             Opt::FxHaze => "Haze",
         }
     }
@@ -180,6 +183,8 @@ pub struct Settings {
     pub gpu_error_trace: bool,
     /// See `Opt::Sustained`; on by default (`sustainedPerf` in options.txt).
     pub sustained: bool,
+    /// The item viewer's look (`rei.rs`): 0 the light pack, 1 the dark one (`reiTheme` in options.txt).
+    pub rei_theme: u8,
     /// Frames the swap chain may queue (`gpu::context::set_frame_latency`): 2 = as before, 1 = less latency, a frame that needs more than half the refresh period may then drop a step; no button. Next start.
     pub frame_latency: u8,
     /// Smart animals (`Mobs::smart`, not b1.7.3): path-walked wandering, herding, panic, and the grazing / rooting / pecking / resting pauses; a switch with no button, `animalAi:false` in options.txt turns all of it off.
@@ -230,6 +235,7 @@ impl Default for Settings {
             frame_latency: 2,
             animal_ai: true,
             sustained: true,
+            rei_theme: 0,
             biome_rules: true,
             dynamic_res: true,
             msaa: 0,
@@ -275,6 +281,7 @@ impl Settings {
                 ("biomeRules", ..) => s.biome_rules = b,
                 ("dynamicRes", ..) => s.dynamic_res = b,
                 ("sustainedPerf", ..) => s.sustained = b,
+                ("reiTheme", _, Some(n)) if n <= 1 => s.rei_theme = n,
                 ("msaa", _, Some(n)) if matches!(n, 0 | 1 | 2 | 4) => s.msaa = n,
                 ("post", _, Some(n)) if n <= 2 => s.post = n,
                 ("fxaa", _, Some(n)) if n <= 2 => s.fxaa = n,
@@ -296,8 +303,8 @@ impl Settings {
     pub fn save(&self) {
         let Some(p) = &self.path else { return };
         let mut t = format!(
-            "music:{}\nsound:{}\ninvertYMouse:{}\nmouseSensitivity:{}\nviewDistance:{}\nguiScale:{}\nbobView:{}\nanaglyph3d:{}\nadvancedOpengl:{}\nfpsLimit:{}\ndifficulty:{}\nfancyGraphics:{}\nao:{}\nlod:{}\ndigDelay:{}\ngpuErrorTrace:{}\ndynamicRes:{}\nmsaa:{}\npost:{}\nfxaa:{}\nrenderer:{}\ndebugScreen:{}\nanimalAi:{}\nbiomeRules:{}\nframeLatency:{}\nsustainedPerf:{}\n",
-            self.music, self.sound, self.invert_mouse, self.sensitivity, self.render_distance, self.gui_scale, self.view_bobbing, self.anaglyph, self.advanced_opengl, self.limit_framerate, self.difficulty, self.fancy_graphics, self.ambient_occlusion, self.lod, self.dig_delay, self.gpu_error_trace, self.dynamic_res, self.msaa, self.post, self.fxaa, self.renderer, self.debug_screen, self.animal_ai, self.biome_rules, self.frame_latency, self.sustained
+            "music:{}\nsound:{}\ninvertYMouse:{}\nmouseSensitivity:{}\nviewDistance:{}\nguiScale:{}\nbobView:{}\nanaglyph3d:{}\nadvancedOpengl:{}\nfpsLimit:{}\ndifficulty:{}\nfancyGraphics:{}\nao:{}\nlod:{}\ndigDelay:{}\ngpuErrorTrace:{}\ndynamicRes:{}\nmsaa:{}\npost:{}\nfxaa:{}\nrenderer:{}\ndebugScreen:{}\nanimalAi:{}\nbiomeRules:{}\nframeLatency:{}\nsustainedPerf:{}\nreiTheme:{}\n",
+            self.music, self.sound, self.invert_mouse, self.sensitivity, self.render_distance, self.gui_scale, self.view_bobbing, self.anaglyph, self.advanced_opengl, self.limit_framerate, self.difficulty, self.fancy_graphics, self.ambient_occlusion, self.lod, self.dig_delay, self.gpu_error_trace, self.dynamic_res, self.msaa, self.post, self.fxaa, self.renderer, self.debug_screen, self.animal_ai, self.biome_rules, self.frame_latency, self.sustained, self.rei_theme
         );
         t.push_str(&format!("fov:{}\n", self.fov));
         for (id, code) in KEY_IDS.iter().zip(self.keys) {
@@ -390,6 +397,7 @@ impl Settings {
             Opt::FxGlow => self.look.glow = !self.look.glow,
             Opt::FxMotion => self.look.motion = (self.look.motion + 1) % 3,
             Opt::FxHaze => self.look.haze = !self.look.haze,
+            Opt::ReiTheme => self.rei_theme = (self.rei_theme + 1) % 2,
             _ => {}
         }
         self.save();
@@ -424,6 +432,7 @@ impl Settings {
                 Opt::FxGlow => onoff(self.look.glow).into(),
                 Opt::FxMotion => ["OFF", "Low", "On"][self.look.motion.min(2) as usize].into(),
                 Opt::FxHaze => onoff(self.look.haze).into(),
+                Opt::ReiTheme => ["Light", "Dark"][self.rei_theme.min(1) as usize].into(),
                 Opt::RenderDistance => ["Far", "Normal", "Short", "Tiny"][self.render_distance.min(3) as usize].into(),
                 Opt::Difficulty => ["Peaceful", "Easy", "Normal", "Hard"][self.difficulty.min(3) as usize].into(),
                 Opt::GuiScale => ["Auto", "Small", "Normal", "Large"][self.gui_scale.min(3) as usize].into(),
@@ -710,6 +719,7 @@ const TIPS: [(&str, &str); 42] = [
     ("Glow", "Soft halos on lava, torches, glowstone and the sun."),
     ("Motion", "Leaf sway, motes near flowers and water, light rays at a low sun."),
     ("Haze", "Aerial perspective: far things fade into the sky."),
+    ("REI Theme", "Light or dark look of the item and recipe viewer (Tools > Inventory Cheat, the R button in the inventory)."),
     ("Sensitivity", "How far a finger drag turns the view."),
     ("Invert Mouse", "Flips the vertical look."),
     ("Dig Delay", "How long a finger rests on a block before digging starts."),
@@ -975,6 +985,7 @@ impl OptionsUi {
             o(Opt::FxGlow),
             o(Opt::FxMotion),
             o(Opt::FxHaze),
+            o(Opt::ReiTheme),
             P(4),
             G("Look and dig"),
             o(Opt::Sensitivity),
@@ -1393,6 +1404,8 @@ pub enum PauseEv {
     Stats(bool),
     /// Open `gen_ui` read only: the world's World-Gen Settings.
     GenSettings,
+    /// Open `rei`, the item and recipe viewer, giving items.
+    Rei,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1409,6 +1422,8 @@ enum PAct {
     GenSettings,
     /// The sun, bottom right: the live atmosphere editor.
     Atmos,
+    /// Opens the item and recipe viewer (`rei.rs`, cheat mode).
+    Rei,
     /// Opens the page with Pregen / Fly / Info / LoD debug; its Done comes back.
     Tools,
     ToolsDone,
@@ -1481,7 +1496,8 @@ impl Pause {
             (PAct::Info, [hw + 2.0, y + 24.0, 118.0, 20.0], if info.info { "Info: on" } else { "Info: off" }.to_string(), true),
             (PAct::Debug, [hw - 120.0, y + 48.0, 240.0, 20.0], debug.to_string(), true),
             (PAct::GenSettings, [hw - 120.0, y + 72.0, 240.0, 20.0], "World-Gen Settings...".to_string(), true),
-            (PAct::ToolsDone, [hw - 100.0, y + 96.0, 200.0, 20.0], "Done".to_string(), true),
+            (PAct::Rei, [hw - 120.0, y + 96.0, 240.0, 20.0], "Inventory Cheat...".to_string(), true),
+            (PAct::ToolsDone, [hw - 100.0, y + 120.0, 200.0, 20.0], "Done".to_string(), true),
         ]
     }
 
@@ -1513,6 +1529,7 @@ impl Pause {
                     PAct::Debug => Some(PauseEv::LodDebug),
                     PAct::Info => Some(PauseEv::Info),
                     PAct::GenSettings => Some(PauseEv::GenSettings),
+                    PAct::Rei => Some(PauseEv::Rei),
                     PAct::Options => {
                         self.opt = Some(OptionsUi::new());
                         None
@@ -2111,7 +2128,7 @@ mod tests {
         }
         for want in [
             "Music", "Sound", "Difficulty", "GUI Scale", "View Bobbing", "Graphics: ", "Render Distance", "LoD", "Smooth Lighting", "Advanced OpenGL", "3D Anaglyph",
-            "Performance", "Dynamic Res", "Sustained Perf", "MSAA", "FXAA", "Post", "Renderer", "Vibrance", "Warm Light", "Water Look", "Glow", "Motion", "Haze", "Sensitivity", "Invert Mouse",
+            "Performance", "Dynamic Res", "Sustained Perf", "MSAA", "FXAA", "Post", "Renderer", "Vibrance", "Warm Light", "Water Look", "Glow", "Motion", "Haze", "REI Theme", "Sensitivity", "Invert Mouse",
             "Dig Delay", "Jump: ", "Look X", "Invert Y", "Forward", "Toggle Fog", "Brightness", "Gamma", "FOV",
         ] {
             assert!(labels.iter().any(|l| l.starts_with(want)), "{want} is not in the list");

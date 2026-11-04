@@ -49,7 +49,7 @@ pub const DPAD_SHEET: &[u8] = include_bytes!("../../assets/dpad.rgba");
 /// The title screen's sheet (256 x 272, `tools/gen_menu.py`): `mclogo.png`, then `background.png`: the last rows of the HUD texture.
 pub const MENU_SHEET: &[u8] = include_bytes!("../../assets/menu.rgba");
 /// The skins (`mob/char.png` and the armor, 64 x 32 each, four to a row, `atlas::skin_px`): 224 rows of the HUD texture, cut from the atlas's `ART` tail (`PLAYER_Y`).
-pub(crate) const SHEET_H: f32 = 3212.0;
+pub(crate) const SHEET_H: f32 = 3276.0;
 pub(crate) const PLAYER_Y: f32 = 2576.0;
 /// Where the font atlas starts in the HUD texture (the 64 rows after the player skin, see `font_sheet`).
 const FONT_Y: f32 = 2800.0;
@@ -60,7 +60,11 @@ const PAD_Y: f32 = 2928.0;
 const PAD_H: f32 = 156.0;
 /// Where the map block starts (256 x 128, `tools/gen_mapui.py`): the last rows of the HUD texture, after the pad buttons. The held map's 128 x 128
 /// pixels are rewritten here at run time (`HudPipeline::upload_map`); `mapbg.png` and `mapicons.png` sit beside them.
-const MAP_Y: f32 = PAD_Y + PAD_H;
+const MAP_Y: f32 = REI_Y + 64.0;
+/// Where the REI block starts (256 x 64, `tools/gen_rei.py`): the 64 rows after the pad buttons, before the map block.
+const REI_Y: f32 = PAD_Y + PAD_H;
+/// REI's panels and arrows from the Immersive Interfaces REI pack (light theme at row 0 of the block, dark at 32), see `sprites::rei`.
+pub const REI_SHEET: &[u8] = include_bytes!("../../assets/rei.rgba");
 pub const MAP_SHEET: &[u8] = include_bytes!("../../assets/mapui.rgba");
 /// The controller button pictures: 3 styles (Xbox, PlayStation, Switch) x 16 buttons of 26 x 26 (`tools/gen_pad_buttons.py`, `sprites::pad`).
 pub const PAD_SHEET: &[u8] = include_bytes!("../../assets/padbtn.rgba");
@@ -106,6 +110,22 @@ pub mod sprites {
     pub const SNEAK_ON: Sprite = (64.0, 2112.0, 64.0, 64.0);
     pub const JUMP: Sprite = (128.0, 2112.0, 64.0, 64.0);
     pub const JUMP_ON: Sprite = (192.0, 2112.0, 64.0, 64.0);
+    /// The REI block (`tools/gen_rei.py`): per theme (0 light, 1 dark) four 12 x 12 nine-slice panels (border 4) and two arrows.
+    pub mod rei {
+        use super::Sprite;
+        /// Panel kinds, `PanelTextures`: default, lighter, none, slot.
+        pub const DEFAULT: usize = 0;
+        pub const LIGHTER: usize = 1;
+        pub const NONE: usize = 2;
+        pub const SLOT: usize = 3;
+        pub fn panel(theme: usize, kind: usize) -> Sprite {
+            (kind as f32 * 12.0, super::super::REI_Y + theme as f32 * 32.0, 12.0, 12.0)
+        }
+        /// The white arrow (22 x 16) of `DefaultCraftingCategory`.
+        pub fn arrow(theme: usize) -> Sprite {
+            (72.0, super::super::REI_Y + theme as f32 * 32.0, 22.0, 16.0)
+        }
+    }
     /// The map block: the live map pixels, the paper (`mapbg.png`, drawn 142 / 128 of the map) and the marker cells (`mapicons.png`, 8 x 8 each).
     pub mod map {
         use super::Sprite;
@@ -215,7 +235,7 @@ fn shader_source(srgb: bool) -> String {
 
 /// The whole HUD texture (256 x `SHEET_H`, RGBA8): items, the GUI sheet, terrain.png, the panels, the d-pad, the title screen, the player skin, the font, Cortes Combat's HUD, the controller buttons, the map.
 pub fn sheet_bytes() -> Vec<u8> {
-    [crate::render::atlas::ITEMS, GUI, crate::render::atlas::TERRAIN, CONTAINERS, DPAD_SHEET, MENU_SHEET, &crate::render::atlas::ART[256 * 288 * 4..], &font_sheet(), COMBAT_SHEET, PAD_SHEET, MAP_SHEET].concat()
+    [crate::render::atlas::ITEMS, GUI, crate::render::atlas::TERRAIN, CONTAINERS, DPAD_SHEET, MENU_SHEET, &crate::render::atlas::ART[256 * 288 * 4..], &font_sheet(), COMBAT_SHEET, PAD_SHEET, REI_SHEET, MAP_SHEET].concat()
 }
 
 /// Owns the HUD pipeline + dynamic vertex buffer. One instance per surface.
@@ -929,7 +949,9 @@ mod text_tests {
         assert_eq!(FONT_Y + 64.0, COMBAT_Y);
         assert_eq!(COMBAT_Y + 64.0, PAD_Y);
         assert_eq!(COMBAT_SHEET.len(), 256 * 64 * 4);
-        assert_eq!(PAD_Y + PAD_H, MAP_Y);
+        assert_eq!(PAD_Y + PAD_H, REI_Y);
+        assert_eq!(REI_Y + 64.0, MAP_Y);
+        assert_eq!(REI_SHEET.len(), 256 * 64 * 4);
         assert_eq!(MAP_Y + 128.0, SHEET_H);
         assert_eq!(PAD_SHEET.len(), 256 * PAD_H as usize * 4);
         assert_eq!(sheet_bytes().len(), 256 * SHEET_H as usize * 4);

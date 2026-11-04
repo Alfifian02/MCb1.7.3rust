@@ -169,6 +169,11 @@ pub struct Recipe {
 }
 
 impl Recipe {
+    /// For the item viewer (`rei`): the pattern width and height (0 x 0 = shapeless), the cells (`code`s, row by row; the list for a shapeless one) and the result.
+    pub fn view(&self) -> (usize, usize, [u16; 9], ItemStack) {
+        (self.w, self.h, self.cells, self.out)
+    }
+
     /// `ShapedRecipes.matches` on a `gw` x `gw` grid of item ids: the pattern may sit anywhere in the 3x3 area
     /// (cells outside a 2x2 grid are empty), mirrored or not, and every other cell must be empty.
     fn matches(&self, grid: &[u16; 9], gw: usize) -> bool {
@@ -371,6 +376,11 @@ fn burn_time(id: u16) -> u16 {
         327 => 20000,
         _ => 0,
     }
+}
+
+/// `TileEntityFurnace.getItemBurnTime` in ticks (0 = not a fuel), for the item viewer.
+pub fn fuel_ticks(id: u16) -> u16 {
+    burn_time(id)
 }
 
 /// A `TileEntityFurnace`: 0 input, 1 fuel, 2 output. 20 Hz `tick`s, 200 ticks per item.
@@ -744,6 +754,11 @@ fn inside((x, y, s): (f32, f32, f32), px: f32, py: f32) -> bool {
 /// Which slot a touch at `(px, py)` is on.
 pub fn slot_at(gw: usize, w: f32, h: f32, px: f32, py: f32) -> Option<SlotId> {
     layout(gw).into_iter().find(|&(_, ux, uy)| inside(cell(gw, w, h, (ux, uy)), px, py)).map(|s| s.0)
+}
+
+/// The viewer's button (REI) beside the other two toggles, inventory screen only.
+pub fn on_rei_button(gw: usize, w: f32, h: f32, px: f32, py: f32) -> bool {
+    gw == 2 && inside(toggle(gw, w, h, 2), px, py)
 }
 
 pub fn on_mode_button(gw: usize, w: f32, h: f32, px: f32, py: f32) -> bool {
