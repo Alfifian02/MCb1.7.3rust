@@ -1,0 +1,11 @@
+--- a/mc-rs/src/preview.rs	2026-11-04 11:10:24.522232846 +0000
++++ b/mc-rs/src/preview.rs	2026-11-04 11:51:12.705794501 +0000
+@@ -1085,7 +1085,7 @@
+                     left -= 1;
+                 }
+                 if y1 < pb && self.hgt(lvl, i as i32, j as i32 + 1).is_some_and(|b| band(a) != band(b)) {
+-                    let (x0, x1) = (to_x(i).round().max(pl) as f32, (to_x(i + 1).round() as f32).min(pr));
++                    let (x0, x1) = ((to_x(i).round() as f32).max(pl), (to_x(i + 1).round() as f32).min(pr));
+                     if x1 > x0 {
+                         HudPipeline::push_quad(v, x0, y1 - w / 2.0, x1 - x0, w, line);
+                         left -= 1;
