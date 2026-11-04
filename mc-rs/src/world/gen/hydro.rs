@@ -102,13 +102,21 @@ const LEVEL_RUN: f64 = 24.0;
 const LEVEL_RAMP: f64 = 48.0;
 const BUCKET: i32 = 16;
 const MAX_PLATES: usize = 12;
-/// Lake hi-res mask: the lake cells' occupancy, interpolated between cell centres, is a lake where it reaches this (the mod's `Lake` masks
-/// sample every 3 blocks; this one is smooth at any block). UNVERIFIED: chosen here.
-const LAKE_EDGE: f64 = 0.3;
+/// Lake hi-res mask: the grid step in blocks (the mod's `Lake` masks sample every 3).
+const LAKE_STEP: i32 = 3;
+/// Samples either side of a block the lake blur reads, and its width in samples. UNVERIFIED: chosen here.
+const LAKE_REACH: i32 = 3;
+const LAKE_SIGMA: f64 = 1.3;
+/// Blocks from a lake's shore within which a river is brought to the lake's level. UNVERIFIED.
+const LAKE_NEAR: i32 = 24;
+/// The blur's weights summed over a full kernel: a sample that is all lake reads 1.
+const LAKE_NORM: f64 = 10.5;
 /// Blocks a lake's floor dips below its surface at the middle, over the first block (`lakeDip`). UNVERIFIED.
 const LAKE_DIP: f64 = 2.0;
 /// How far a bend moves the deepest line of the bed toward the outer bank (a share of the half width at a full bend). UNVERIFIED.
 const BEND_SHIFT: f64 = 0.5;
+/// Blocks from a chunk within which the plates round it are made ahead (`prefetchRadius`). UNVERIFIED: chosen here.
+const PREFETCH: f64 = 192.0;
 /// The disk cache's version: raise it whenever the routing or the plan changes, or an old file would be read as the new one.
 const CACHE_VERSION: u32 = 1;
 /// Water faster than this (the mod's flow speed, 0.25..2) does not freeze over: the ice melt of a quick stream. UNVERIFIED: chosen here.
@@ -128,12 +136,29 @@ pub struct Settings {
     pub ice_speed: f64,
     /// `streamBiomeBlacklist`: no river is cut in these biomes (a lake still is).
     pub blacklist: Vec<Biome>,
+    /// Outlet biomes (`outletBiomes`, the mod's `#is_river, #is_ocean, #is_swamp`): a river may end in them, as in the sea. The sea itself always
+    /// is one; b1.7.3 has no river biome, so the default here is the swamp.
+    pub outlets: Vec<Biome>,
+    /// `riverDrainageSize`: blocks across a plate (256, 512, 768, 1024, 1536, 2048, 4096 or 8192). A world keeps the size it was made with.
+    pub drainage: u32,
+    /// `allWaterBanks`: 0 banks only the streams; 1 gives every pond and lake a bank too; 2 the sea (an `Ocean` column) as well.
+    pub all_water_banks: u8,
+    /// Make the plates round a chunk ahead (`StreamPrefetcher`).
+    pub prefetch: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { enabled: true, player_push: 1.2, boat_push: 2.0, mob_push: 1.2, ice_speed: ICE_SPEED, blacklist: Vec::new() }
+        Self { enabled: true, player_push: 1.2, boat_push: 2.0, mob_push: 1.2, ice_speed: ICE_SPEED, blacklist: Vec::new(), outlets: vec![Biome::Swamp], drainage: PLATE as u32, all_water_banks: 1, prefetch: true }
     }
+}
+
+/// The plate sizes the mod offers (`WatershedSize`).
+const DRAINAGE_SIZES: [u32; 8] = [256, 512, 768, 1024, 1536, 2048, 4096, 8192];
+
+/// The biomes named in a comma list (a variant's name, any case; an unknown name is skipped).
+fn names(v: &str, all: &[Biome]) -> Vec<Biome> {
+    v.split(',').filter_map(|n| all.iter().copied().find(|b| format!("{b:?}").eq_ignore_ascii_case(n.trim()))).collect()
 }
 
 /// Who a current pushes (`CurrentPush.factor`: a player, a boat, anything else).
@@ -166,25 +191,41 @@ impl Settings {
                 "boatPush" => s.boat_push = v.parse().unwrap_or(s.boat_push).clamp(0.0, 10.0),
                 "mobPush" => s.mob_push = v.parse().unwrap_or(s.mob_push).clamp(0.0, 10.0),
                 "hydroIceSpeed" => s.ice_speed = v.parse().unwrap_or(s.ice_speed),
-                "hydroBlacklist" => s.blacklist = v.split(',').filter_map(|n| all.iter().copied().find(|b| format!("{b:?}").eq_ignore_ascii_case(n.trim()))).collect(),
+                "hydroBlacklist" => s.blacklist = names(v, all),
+                "hydroOutlets" => s.outlets = names(v, all),
+                "riverDrainageSize" => s.drainage = v.parse().ok().and_then(|n: u32| DRAINAGE_SIZES.iter().copied().min_by_key(|d| d.abs_diff(n))).unwrap_or(s.drainage),
+                "allWaterBanks" => s.all_water_banks = v.parse().unwrap_or(s.all_water_banks).min(2),
+                "hydroPrefetch" => s.prefetch = v != "false",
                 _ => {}
             }
         }
         s
     }
+
+    /// The hash of what shapes a network: the plate size and the outlets.
+    fn layout_tag(&self) -> u64 {
+        let mut h = 0xcbf29ce484222325u64 ^ u64::from(self.drainage);
+        for b in &self.outlets {
+            for c in format!("{b:?}").bytes() {
+                h = (h ^ u64::from(c)).wrapping_mul(0x100000001b3);
+            }
+        }
+        h
+    }
 }
 
-static SETTINGS: RwLock<Option<Settings>> = RwLock::new(None);
+static SETTINGS: RwLock<Option<Arc<Settings>>> = RwLock::new(None);
 
 /// The settings in force (the defaults until `configure`).
-pub fn settings() -> Settings {
-    SETTINGS.read().ok().and_then(|g| g.clone()).unwrap_or_default()
+pub fn settings() -> Arc<Settings> {
+    static DEFAULT: OnceLock<Arc<Settings>> = OnceLock::new();
+    SETTINGS.read().ok().and_then(|g| g.clone()).unwrap_or_else(|| DEFAULT.get_or_init(Default::default).clone())
 }
 
 /// Sets the settings of the world being played. A river already carved stays as it is; a chunk made after this obeys.
 pub fn configure(s: Settings) {
     if let Ok(mut g) = SETTINGS.write() {
-        *g = Some(s);
+        *g = Some(Arc::new(s));
     }
 }
 
@@ -242,24 +283,35 @@ fn unit4(a: i64, b: i64, c: i64, d: i64) -> f64 {
 }
 
 /// The seed point of lattice cell (i, j) (`PlateLattice.seedX` / `seedZ`).
-fn plate_seed_point(seed: i64, i: i32, j: i32) -> (f64, f64) {
+fn plate_seed_point_in(ps: f64, seed: i64, i: i32, j: i32) -> (f64, f64) {
     let c = JITTER.max(0.0).min(0.49);
     let (i, j) = (i as i64, j as i64);
     (
-        ((i as f64 + 0.5) + (unit4(seed, i, j, 1) - 0.5) * 2.0 * c) * PLATE,
-        ((j as f64 + 0.5) + (unit4(seed, i, j, 2) - 0.5) * 2.0 * c) * PLATE,
+        ((i as f64 + 0.5) + (unit4(seed, i, j, 1) - 0.5) * 2.0 * c) * ps,
+        ((j as f64 + 0.5) + (unit4(seed, i, j, 2) - 0.5) * 2.0 * c) * ps,
     )
 }
 
-/// The plate owning a point: the nearest seed of the 3 x 3 lattice cells round it (`PlateLattice.plateAt`).
+/// `plate_seed_point_in` at the default plate size.
+#[cfg(test)]
+fn plate_seed_point(seed: i64, i: i32, j: i32) -> (f64, f64) {
+    plate_seed_point_in(PLATE, seed, i, j)
+}
+
+/// The plate owning a point at the default plate size (`riverDrainageSize` 768).
 pub fn plate_at(seed: i64, x: f64, z: f64) -> (i32, i32) {
-    let (ci, cj) = ((x / PLATE).floor() as i32, (z / PLATE).floor() as i32);
+    plate_at_in(PLATE, seed, x, z)
+}
+
+/// The plate owning a point: the nearest seed of the 3 x 3 lattice cells round it (`PlateLattice.plateAt`), plates `ps` blocks wide.
+pub fn plate_at_in(ps: f64, seed: i64, x: f64, z: f64) -> (i32, i32) {
+    let (ci, cj) = ((x / ps).floor() as i32, (z / ps).floor() as i32);
     let mut best = f64::MAX;
     let mut key = (ci, cj);
     for dj in -1..=1 {
         for di in -1..=1 {
             let (i, j) = (ci + di, cj + dj);
-            let (sx, sz) = plate_seed_point(seed, i, j);
+            let (sx, sz) = plate_seed_point_in(ps, seed, i, j);
             let d = (sx - x) * (sx - x) + (sz - z) * (sz - z);
             if d < best || (d == best && (i, j) < key) {
                 best = d;
@@ -740,36 +792,63 @@ impl Network {
         })
     }
 
-    /// The lake covering the block (x, z): its top water block's y and the y of its floor at that block. The mask is the lake cells'
-    /// occupancy interpolated between the cell centres (12 blocks apart), so a shore is round at any block, and the floor dips toward the
-    /// middle of the lake (`LAKE_DIP`). A cell's lake wins by its weight.
+    /// The lake cell a block belongs to (a cell owns 12 blocks round its centre), as an index into `lake_of`.
+    fn lake_cell(&self, bx: i32, bz: i32) -> Option<u32> {
+        let (i, j) = ((bx + CELL / 2).div_euclid(CELL) - self.g0.0, (bz + CELL / 2).div_euclid(CELL) - self.g0.1);
+        if i < 0 || j < 0 || i as usize >= self.n.0 || j as usize >= self.n.1 {
+            return None;
+        }
+        Some(self.lake_of[i as usize * self.n.1 + j as usize]).filter(|&id| id != u32::MAX)
+    }
+
+    /// The lake covering the block (x, z): its top water block's y and the y of its floor at that block. As the mod's `Lake`, the footprint is
+    /// a bit mask on a 3-block grid (`LAKE_STEP`), blurred by a Gaussian (`LAKE_SIGMA` samples), and a block is lake where the blurred value
+    /// passes a half (`Lake.wetAt`); the sample point is first warped by smooth noise (`Lake.coverageSmooth`). The floor dips toward the
+    /// middle (`LAKE_DIP`). The mod's own kernel width and noise hash are not followed.
     fn lake_top_at(&self, x: i32, z: i32) -> Option<(i32, i32)> {
-        // The shore is warped by smooth noise of up to 4 blocks (`Lake.coverageSmooth`: the sample point is moved by `(noise - 0.5) * 2 * 4/3 *
-        // spacing` before the mask is read; here the noise is value noise on a 3-block lattice, the mod's hash is not followed).
-        let (px, pz) = (x as f64 + 0.5 + warp(x, z, 3), z as f64 + 0.5 + warp(x, z, 4));
-        let (fx, fz) = (px / CELL as f64, pz / CELL as f64);
-        let (i0, j0) = (fx.floor() as i32, fz.floor() as i32);
-        let (tx, tz) = (fx - i0 as f64, fz - j0 as f64);
-        let (mut occ, mut best): (f64, Option<(f64, u32)>) = (0.0, None);
-        for (di, dj, w) in [(0, 0, (1.0 - tx) * (1.0 - tz)), (1, 0, tx * (1.0 - tz)), (0, 1, (1.0 - tx) * tz), (1, 1, tx * tz)] {
-            let (i, j) = (i0 + di - self.g0.0, j0 + dj - self.g0.1);
-            if i < 0 || j < 0 || i as usize >= self.n.0 || j as usize >= self.n.1 {
-                continue;
-            }
-            let id = self.lake_of[i as usize * self.n.1 + j as usize];
-            if id != u32::MAX {
-                occ += w;
-                if best.map_or(true, |(bw, _)| w > bw) {
-                    best = Some((w, id));
+        let (wx, wz) = (x + warp(x, z, 3).round() as i32, z + warp(x, z, 4).round() as i32);
+        let (si, sj) = (wx.div_euclid(LAKE_STEP), wz.div_euclid(LAKE_STEP));
+        let mut cov = 0.0;
+        let mut votes: Vec<(u32, f64)> = Vec::new();
+        for di in -LAKE_REACH..=LAKE_REACH {
+            for dj in -LAKE_REACH..=LAKE_REACH {
+                let g = (-((di * di + dj * dj) as f64) / (2.0 * LAKE_SIGMA * LAKE_SIGMA)).exp();
+                // The sample's centre is the middle of its 3 x 3 blocks.
+                let Some(id) = self.lake_cell((si + di) * LAKE_STEP + LAKE_STEP / 2, (sj + dj) * LAKE_STEP + LAKE_STEP / 2) else { continue };
+                cov += g;
+                match votes.iter_mut().find(|v| v.0 == id) {
+                    Some(v) => v.1 += g,
+                    None => votes.push((id, g)),
                 }
             }
         }
-        if occ < LAKE_EDGE {
+        cov /= LAKE_NORM;
+        if cov <= 0.5 {
             return None;
         }
-        let top = self.lake_top[best?.1 as usize];
-        let dip = (LAKE_DIP * ((occ - LAKE_EDGE) / (1.0 - LAKE_EDGE)).clamp(0.0, 1.0)).round() as i32;
+        let id = votes.iter().max_by(|a, b| a.1.total_cmp(&b.1))?.0;
+        let top = self.lake_top[id as usize];
+        let dip = (LAKE_DIP * ((cov - 0.5) / 0.5).clamp(0.0, 1.0)).round() as i32;
         Some((top, top - 1 - dip))
+    }
+
+    /// The level of a lake whose shore is within `LAKE_NEAR` blocks of (x, z): the river that runs into (or out of) a lake meets it at the
+    /// lake's level (`RiverEngine` ends a river at its lake's `level()`).
+    fn lake_level_near(&self, x: i32, z: i32) -> Option<i32> {
+        let r = LAKE_NEAR / CELL + 1;
+        let (ci, cj) = ((x + CELL / 2).div_euclid(CELL), (z + CELL / 2).div_euclid(CELL));
+        let mut best: Option<(f64, u32)> = None;
+        for di in -r..=r {
+            for dj in -r..=r {
+                let Some(id) = self.lake_cell((ci + di) * CELL, (cj + dj) * CELL) else { continue };
+                let (dx, dz) = (((ci + di) * CELL - x).abs().saturating_sub(CELL / 2), ((cj + dj) * CELL - z).abs().saturating_sub(CELL / 2));
+                let d = f64::from(dx * dx + dz * dz).sqrt();
+                if d <= LAKE_NEAR as f64 && best.map_or(true, |b| d < b.0) {
+                    best = Some((d, id));
+                }
+            }
+        }
+        best.map(|(_, id)| self.lake_top[id as usize])
     }
 
     /// The current at a point in blocks per second, `None` outside a channel.
@@ -825,11 +904,17 @@ fn trace_tail(height: &mut dyn FnMut(i32, i32) -> f64, gi: i32, gj: i32, sea_h: 
 }
 
 /// Route one plate. `probe(gx, gz)` is the (surface height, humidity 0..1) of the node at world (12 gx, 12 gz).
+#[cfg(test)]
 fn build(seed: i64, key: (i32, i32), probe: &mut dyn FnMut(i32, i32) -> (f64, f64)) -> Network {
-    let (cx, cz) = plate_seed_point(seed, key.0, key.1);
+    build_in(PLATE, seed, key, probe)
+}
+
+/// `build` for plates `ps` blocks wide.
+fn build_in(ps: f64, seed: i64, key: (i32, i32), probe: &mut dyn FnMut(i32, i32) -> (f64, f64)) -> Network {
+    let (cx, cz) = plate_seed_point_in(ps, seed, key.0, key.1);
     let c = CELL as f64;
-    let g0 = (((cx - PLATE) / c).floor() as i32 - HALO, ((cz - PLATE) / c).floor() as i32 - HALO);
-    let g1 = (((cx + PLATE) / c).ceil() as i32 + HALO, ((cz + PLATE) / c).ceil() as i32 + HALO);
+    let g0 = (((cx - ps) / c).floor() as i32 - HALO, ((cz - ps) / c).floor() as i32 - HALO);
+    let g1 = (((cx + ps) / c).ceil() as i32 + HALO, ((cz + ps) / c).ceil() as i32 + HALO);
     let (nx, nz) = ((g1.0 - g0.0 + 1) as usize, (g1.1 - g0.1 + 1) as usize);
     let n = nx * nz;
     let at = |i: usize, j: usize| i * nz + j;
@@ -840,7 +925,7 @@ fn build(seed: i64, key: (i32, i32), probe: &mut dyn FnMut(i32, i32) -> (f64, f6
     let mut own = vec![false; n];
     for i in 0..nx {
         for j in 0..nz {
-            own[at(i, j)] = plate_at(seed, ((g0.0 + i as i32) * CELL) as f64, ((g0.1 + j as i32) * CELL) as f64) == key;
+            own[at(i, j)] = plate_at_in(ps, seed, ((g0.0 + i as i32) * CELL) as f64, ((g0.1 + j as i32) * CELL) as f64) == key;
         }
     }
     let mut tmp = vec![false; n];
@@ -1341,6 +1426,40 @@ fn pick(list: &[u8], h: f64) -> u8 {
     list[((h * list.len() as f64) as usize).min(list.len() - 1)]
 }
 
+/// `allWaterBanks` (`RiverCarverFeature.skinAllWater`, in outline): every column of still surface water at sea level (a pond, a lake the
+/// terrain made, the sea at level 2) gets the bank of its biome's style on the land block beside it, one block out (`line`, as at a
+/// stream's edge). Inside the chunk only: a pond across a chunk border is skinned by the half in each chunk. The mod's bank rings and
+/// styles are not followed. UNVERIFIED.
+fn skin_all_water(cx: i32, cz: i32, blocks: &mut [u8], biomes: &[Biome], level: u8) {
+    let surf = (SEA_LEVEL - 1) as usize;
+    let water = |blocks: &[u8], x: usize, z: usize| {
+        let col = (x << 11) | (z << 7);
+        matches!(blocks[col + surf], block::WATER | block::WATER_MOVING | block::ICE) && blocks[col + surf + 1] == block::AIR
+    };
+    let mut wet = [false; 256];
+    for x in 0..16 {
+        for z in 0..16 {
+            wet[x * 16 + z] = water(blocks, x, z) && (level >= 2 || biomes[x * 16 + z] != Biome::Ocean);
+        }
+    }
+    for x in 0..16i32 {
+        for z in 0..16i32 {
+            if wet[(x * 16 + z) as usize] || !NB.iter().any(|&(a, b)| (0..16).contains(&(x + a)) && (0..16).contains(&(z + b)) && wet[((x + a) * 16 + z + b) as usize]) {
+                continue;
+            }
+            let col = ((x as usize) << 11) | ((z as usize) << 7);
+            // The ground: the first solid block from just above the sea down; a bank only where it is within a block of the water's level.
+            let Some(y) = (surf.saturating_sub(2)..=surf + 2).rev().find(|&y| blocks[col + y] != block::AIR) else { continue };
+            if !matches!(blocks[col + y], block::GRASS | block::DIRT) || y + 1 < surf {
+                continue;
+            }
+            let st = style(biomes[(x * 16 + z) as usize]);
+            let h = unit3(0x5A1, i64::from(cx * 16 + x), i64::from(cz * 16 + z));
+            blocks[col + y] = pick(st.line, h);
+        }
+    }
+}
+
 /// The networks that can reach one chunk (its plate's first), made on demand.
 pub struct Region {
     nets: Vec<Arc<Network>>,
@@ -1394,6 +1513,14 @@ impl Region {
     /// Cut this region's rivers and fill its lakes into chunk (cx, cz), `(x << 11) | (z << 7) | y`, after terrain and surface.
     /// `biomes` and `temps` are the chunk's, `x * 16 + z`; ice caps the water where it is cold.
     pub fn carve(&self, cx: i32, cz: i32, blocks: &mut [u8], biomes: &[Biome], temps: &[f64]) {
+        self.carve_streams(cx, cz, blocks, biomes, temps);
+        let set = settings();
+        if set.enabled && set.all_water_banks > 0 {
+            skin_all_water(cx, cz, blocks, biomes, set.all_water_banks);
+        }
+    }
+
+    fn carve_streams(&self, cx: i32, cz: i32, blocks: &mut [u8], biomes: &[Biome], temps: &[f64]) {
         let set = settings();
         if !set.enabled {
             return;
@@ -1423,6 +1550,11 @@ impl Region {
                 let Some(p) = plan else { continue };
                 if set.blacklist.contains(&biomes[x * 16 + z]) {
                     continue;
+                }
+                let near = self.nets.iter().find_map(|n| n.lake_level_near(wx, wz)).filter(|&t| (t - p.water_y).abs() <= 6);
+                let mut p = p;
+                if let Some(t) = near {
+                    p.water_y = t;
                 }
                 let (ws, bed) = (p.water_y, p.bed_y);
                 if s < 5 || bed < 5 || ws > 120 {
@@ -1515,26 +1647,35 @@ impl Region {
 #[derive(Default)]
 pub struct Hydro {
     seed: i64,
+    /// Blocks across a plate (`riverDrainageSize`) and the hash of the settings that shape a network: both are part of a plate's identity.
+    size: f64,
+    tag: u64,
     plates: Mutex<Vec<((i32, i32), Arc<OnceLock<Arc<Network>>>)>>,
     /// Whether this world's plates go through the disk cache (`cache_dir`). The World Preview's do not: its seed, type and Natural
-    /// Temperature settings are not those of the world whose folder `cache_dir` points at, and a file does not know them.
+    /// Temperature settings are not those of the world whose folder `cache_dir` points at, and a file does not know them. Nor are
+    /// the plates round a chunk made ahead for them (`PREFETCH`).
     disk: bool,
 }
 
 impl Hydro {
     /// The (one) `Hydro` of the world with this seed and type.
     pub fn of(seed: i64, tectonic: bool) -> Arc<Hydro> {
-        static WORLDS: OnceLock<Mutex<HashMap<(i64, bool), Arc<Hydro>>>> = OnceLock::new();
+        static WORLDS: OnceLock<Mutex<HashMap<(i64, bool, u64), Arc<Hydro>>>> = OnceLock::new();
+        let set = settings();
+        let (size, tag) = (set.drainage as f64, set.layout_tag());
         let mut m = WORLDS.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
-        m.entry((seed, tectonic)).or_insert_with(|| Arc::new(Hydro { seed, plates: Mutex::default(), disk: true })).clone()
+        m.entry((seed, tectonic, tag)).or_insert_with(|| Arc::new(Hydro { seed, size, tag, plates: Mutex::default(), disk: true })).clone()
     }
 
     /// The `Hydro` the World Preview reads: shared by the preview's workers like `of`, but apart from the game's worlds and never read from
     /// or written to the disk cache.
     pub fn of_preview(seed: i64, tectonic: bool) -> Arc<Hydro> {
-        static PREVIEWS: OnceLock<Mutex<HashMap<(i64, bool), Arc<Hydro>>>> = OnceLock::new();
+        static PREVIEWS: OnceLock<Mutex<HashMap<(i64, bool, u64), Arc<Hydro>>>> = OnceLock::new();
+        // The plate size and the settings that shape a network are part of the key here too: the preview shows the rivers the world will have.
+        let set = settings();
+        let (size, tag) = (set.drainage as f64, set.layout_tag());
         let mut m = PREVIEWS.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
-        m.entry((seed, tectonic)).or_insert_with(|| Arc::new(Hydro { seed, plates: Mutex::default(), disk: false })).clone()
+        m.entry((seed, tectonic, tag)).or_insert_with(|| Arc::new(Hydro { seed, size, tag, plates: Mutex::default(), disk: false })).clone()
     }
 
     /// The network of a plate, routed with `probe` if nobody has yet. A second thread that needs the same plate waits for the first.
@@ -1554,11 +1695,11 @@ impl Hydro {
             }
         };
         slot.get_or_init(|| {
-            let file = self.disk.then(|| CACHE.lock().ok().and_then(|c| c.clone())).flatten().map(|d| d.join(format!("{:x}_{}_{}.net", self.seed, key.0, key.1)));
+            let file = self.disk.then(|| CACHE.lock().ok().and_then(|c| c.clone())).flatten().map(|d| d.join(format!("{:x}_{:x}_{}_{}.net", self.seed, self.tag, key.0, key.1)));
             if let Some(n) = file.as_ref().and_then(|f| std::fs::read(f).ok()).and_then(|b| Network::from_bytes(&b)) {
                 return Arc::new(n);
             }
-            let n = build(self.seed, key, probe);
+            let n = build_in(self.size, self.seed, key, probe);
             if let Some(f) = file {
                 let _ = f.parent().map(std::fs::create_dir_all);
                 let _ = std::fs::write(f, n.to_bytes());
@@ -1571,12 +1712,25 @@ impl Hydro {
     pub fn region(&self, cx: i32, cz: i32, probe: &mut dyn FnMut(i32, i32) -> (f64, f64)) -> Arc<Region> {
         let (mx, mz) = (cx as f64 * 16.0 + 8.0, cz as f64 * 16.0 + 8.0);
         let r = (HALO * CELL) as f64 + 8.0;
-        let mut keys = vec![plate_at(self.seed, mx, mz)];
+        let mut keys = vec![plate_at_in(self.size, self.seed, mx, mz)];
         for dx in [-r, 0.0, r] {
             for dz in [-r, 0.0, r] {
-                let k = plate_at(self.seed, mx + dx, mz + dz);
+                let k = plate_at_in(self.size, self.seed, mx + dx, mz + dz);
                 if !keys.contains(&k) {
                     keys.push(k);
+                }
+            }
+        }
+        // `StreamPrefetcher`, in its simplest form: the plates `PREFETCH` blocks round the chunk are made now (here, on the generating thread),
+        // so the chunk that crosses into one does not wait for its routing. UNVERIFIED: the mod makes them on a worker. Not for the World
+        // Preview's `Hydro` (`disk` false): it asks for the plates it shows, a map is drawn from what is near, and up to eight more routings
+        // a tile would slow it down and push its own plates out past `MAX_PLATES`.
+        let ahead = self.disk && settings().prefetch;
+        for dx in [-PREFETCH, 0.0, PREFETCH] {
+            for dz in [-PREFETCH, 0.0, PREFETCH] {
+                let k = plate_at_in(self.size, self.seed, mx + dx, mz + dz);
+                if ahead && !keys.contains(&k) {
+                    self.network(k, probe);
                 }
             }
         }
@@ -1586,7 +1740,7 @@ impl Hydro {
 
     /// The network at a block, if it has been made.
     fn peek(&self, x: f32, z: f32) -> Option<Arc<Network>> {
-        let key = plate_at(self.seed, x as f64, z as f64);
+        let key = plate_at_in(self.size, self.seed, x as f64, z as f64);
         let p = self.plates.lock().ok()?;
         p.iter().find(|(k, _)| *k == key)?.1.get().cloned()
     }
@@ -1706,7 +1860,7 @@ mod tests {
     /// The carve puts water in a chunk with a river, holds it up, and leaves most chunks alone.
     #[test]
     fn carved_water_rests_on_ground() {
-        let h = Hydro { seed: SEED, plates: Mutex::default(), disk: false };
+        let h = Hydro { seed: SEED, size: PLATE, tag: 0, plates: Mutex::default(), disk: false };
         let (mut water, mut touched, mut chunks) = (0, 0, 0);
         let (sx, sz) = plate_seed_point(SEED, plate_at(SEED, 0.0, 0.0).0, plate_at(SEED, 0.0, 0.0).1);
         for cx in (sx / 16.0) as i32 - 12..(sx / 16.0) as i32 + 12 {
@@ -1967,6 +2121,65 @@ mod tests {
                 assert!(warp(x, z, 3).abs() <= 4.0 && warp(x, z, 4).abs() <= 4.0);
             }
         }
+    }
+
+    fn lake_net() -> Network {
+        let mut lake_of = vec![u32::MAX; 25];
+        for i in 1..=3 {
+            for j in 1..=3 {
+                lake_of[i * 5 + j] = 0;
+            }
+        }
+        Network { segs: vec![], index: index_of(&[]), lake_of, lake_top: vec![63], g0: (0, 0), n: (5, 5) }
+    }
+
+    #[test]
+    fn a_lake_is_a_blurred_footprint_with_a_dip() {
+        let n = lake_net(); // cells 1..3 of both axes: blocks 6..42
+        let (top, floor) = n.lake_top_at(24, 24).expect("the middle is lake");
+        assert_eq!(top, 63);
+        assert!(floor <= 61, "the middle dips: {floor}");
+        assert!(n.lake_top_at(80, 24).is_none() && n.lake_top_at(-30, 24).is_none());
+    }
+
+    #[test]
+    fn a_river_meets_a_near_lake_at_its_level() {
+        let n = lake_net();
+        assert_eq!(n.lake_level_near(55, 24), Some(63));
+        assert_eq!(n.lake_level_near(24, 24), Some(63));
+        assert_eq!(n.lake_level_near(90, 24), None);
+    }
+
+    #[test]
+    fn a_pond_gets_a_bank_and_the_sea_only_at_level_two() {
+        let mut blocks = vec![block::AIR; 16 * 16 * 128];
+        for x in 0..16 {
+            for z in 0..16 {
+                let col = (x << 11) | (z << 7);
+                blocks[col + 62] = block::STONE;
+                blocks[col + 63] = if (x, z) == (8, 8) { block::WATER } else { block::GRASS };
+            }
+        }
+        let desert = vec![Biome::Desert; 256];
+        let mut b = blocks.clone();
+        skin_all_water(0, 0, &mut b, &desert, 1);
+        assert_eq!(b[(9 << 11) | (8 << 7) | 63], block::SAND);
+        assert_eq!(b[(11 << 11) | (8 << 7) | 63], block::GRASS);
+        let sea = vec![Biome::Ocean; 256];
+        let mut b = blocks.clone();
+        skin_all_water(0, 0, &mut b, &sea, 1);
+        assert_eq!(b[(9 << 11) | (8 << 7) | 63], block::GRASS);
+        skin_all_water(0, 0, &mut b, &sea, 2);
+        assert_eq!(b[(9 << 11) | (8 << 7) | 63], block::SAND);
+    }
+
+    #[test]
+    fn the_plate_size_moves_the_plates() {
+        assert_eq!(plate_at_in(PLATE, SEED, 10.0, 10.0), plate_at(SEED, 10.0, 10.0));
+        assert_ne!(plate_at_in(4096.0, SEED, 2000.0, 2000.0), plate_at_in(PLATE, SEED, 2000.0, 2000.0));
+        let s = Settings::parse("riverDrainageSize:1000\nallWaterBanks:9\nhydroOutlets:swamp, Marsh", &[Biome::Swamp, Biome::Marsh]);
+        assert_eq!((s.drainage, s.all_water_banks, s.outlets.len()), (1024, 2, 2));
+        assert_ne!(s.layout_tag(), Settings::default().layout_tag());
     }
 
     #[test]

@@ -299,7 +299,13 @@ impl OverworldGenerator {
     /// (surface height, humidity 0..1) of grid node (gx, gz) at block (12 gx, 12 gz) (`hydro::CELL`), read without making the chunk: the vanilla
     /// density column (Beta's noise at this one grid column and the zero crossing of its 17 densities) or Tectonic's density.
     fn probe(&mut self, gx: i32, gz: i32, cm: &WorldChunkManager) -> (f64, f64) {
-        self.probe_block(gx * CELL, gz * CELL, cm)
+        let (y, h) = self.probe_block(gx * CELL, gz * CELL, cm);
+        // An outlet biome (`outletBiomes`) ends a river as the sea does: its node is read as just under the sea, so the routing drains into it.
+        let set = crate::world::gen::hydro::settings();
+        if y >= SEA_LEVEL as f64 - 1.0 && !set.outlets.is_empty() && set.outlets.contains(&cm.sample_at(gx * CELL, gz * CELL).0) {
+            return (y.min(SEA_LEVEL as f64 - 1.5), h);
+        }
+        (y, h)
     }
 
     /// `probe` at block (bx, bz).

@@ -22,6 +22,8 @@
 //!
 //! Everything the Create World screen can change is read: the seed (the random one is fixed when the screen opens, `Menu::rand_seed`),
 //! the world type, and every field of `NaturalSettings` (the generator and the chunk manager are made from them, after `natural::set`).
+//! Rivers follow the river settings too (`hydro::Settings`: `riverDrainageSize` sets the plates, outlet biomes end rivers; the Create World map uses the
+//! defaults a new world gets, the in-game map the world's own); the preview's `Hydro` is keyed by them (`Hydro::of_preview`) and does not prefetch plates.
 //! The world type can also be cycled here, and `Settings` opens the World-Gen Settings screen and comes back here with the map rebuilt.
 
 use crate::input::touch_ui::ScreenEv;
@@ -30,7 +32,7 @@ use crate::options::button;
 use crate::render::hud::{HudPipeline, HudVertex};
 use crate::ui;
 use crate::world::biome::Biome;
-use crate::world::gen::hydro::Region;
+use crate::world::gen::hydro::{self, Region};
 use crate::world::gen::natural::{self, NaturalSettings};
 use crate::world::gen::structory;
 use crate::world::gen::overworld::{OverworldGenerator, WorldType, SEA_LEVEL};
@@ -532,6 +534,9 @@ impl Preview {
     fn reset(&mut self) {
         if self.ingame.is_none() {
             natural::set(Some(&self.nat));
+            // A world made from the Create World screen has no `hydro.cfg` yet, so it gets the river defaults (plate size, outlet biomes): the map
+            // shows those, not what the world played last left in `hydro`. In the game they are the world's own and stay.
+            hydro::configure(hydro::Settings::default());
         }
         self.tiles.clear();
         self.pending.clear();
