@@ -208,12 +208,83 @@
      fn a_rotated_block_comes_home_after_four_turns() {
          for &(id, m) in &[(53u8, 2u8), (67, 3), (65, 4), (54, 0), (61, 5), (50, 3), (69, 5), (64, 5), (64, 13), (96, 6), (26, 10), (86, 1), (66, 6), (27, 10), (63, 9), (33, 3)] {
              assert_eq!(rotate_meta(id, m, 4), m, "id {id} meta {m}");
+--- a/mc-rs/src/gen_ui.rs	2026-11-04 01:21:20.596162249 +0000
++++ b/mc-rs/src/gen_ui.rs	2026-11-04 01:21:20.610181047 +0000
+@@ -147,6 +147,12 @@
+         }
+     }
+ 
++    /// A zone value or transition point at the mod's 8.0 (random / automatic). Only the rows with an `A` button mean it: a Coverage or
++    /// Influence slider that lands on 8 is just 8.
++    fn is_auto(self, s: &NaturalSettings) -> bool {
++        self.spec().3 && self.get(s) == AUTO
++    }
++
+     fn is_transition(self) -> bool {
+         matches!(self, Id::TTrans(_) | Id::HTrans(_))
+     }
+@@ -157,7 +163,7 @@
+         match self {
+             Id::Mode => MODES[s.mode.clamp(0, 12) as usize].to_string(),
+             _ if self.is_toggle() => (if v != 0.0 { "ON" } else { "OFF" }).to_string(),
+-            _ if v == AUTO => (if self.is_transition() { "Auto" } else { "Random" }).to_string(),
++            _ if self.is_auto(s) => (if self.is_transition() { "Auto" } else { "Random" }).to_string(),
+             _ => {
+                 let step = self.spec().2;
+                 if step >= 1.0 { format!("{v:.0}") } else if step >= 0.1 { format!("{v:.1}") } else { format!("{v:.2}") }
+@@ -421,16 +427,17 @@
+                     HudPipeline::push_text(v, (rect[0] + 6.0) * s, (rect[1] + 6.0) * s, s, &ui::fit(label, room), rgb(if self.edit { 0xE0E0E0 } else { 0xA0A0A0 }));
+                     let text = id.text(&self.s);
+                     let val = id.get(&self.s);
++                    let auto_on = id.is_auto(&self.s);
+                     let (lit, on) = (over(track) && self.edit, self.edit);
+                     if id.is_toggle() || *id == Id::Mode {
+                         button(v, s, track, &text, on, lit, None);
+                     } else {
+                         let (min, max, ..) = id.spec();
+-                        let knob = if val == AUTO { 0.5 } else { ((val - min) / (max - min)).clamp(0.0, 1.0) as f32 };
+-                        button_c(v, s, track, &text, if on { if val == AUTO { 0xFFFF55 } else { 0xE0E0E0 } } else { 0xA0A0A0 }, 0, Some(knob));
++                        let knob = if auto_on { 0.5 } else { ((val - min) / (max - min)).clamp(0.0, 1.0) as f32 };
++                        button_c(v, s, track, &text, if on { if auto_on { 0xFFFF55 } else { 0xE0E0E0 } } else { 0xA0A0A0 }, 0, Some(knob));
+                     }
+                     if let Some(a) = auto {
+-                        button_c(v, s, a, "A", if val == AUTO { 0xFFFF55 } else if on { 0xE0E0E0 } else { 0xA0A0A0 }, if on { if over(a) { 2 } else { 1 } } else { 0 }, None);
++                        button_c(v, s, a, "A", if auto_on { 0xFFFF55 } else if on { 0xE0E0E0 } else { 0xA0A0A0 }, if on { if over(a) { 2 } else { 1 } } else { 0 }, None);
+                     }
+                 }
+             }
+@@ -449,3 +456,24 @@
+         }
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn only_zones_and_transitions_read_8_as_random() {
++        let mut s = NaturalSettings::default();
++        s.coverage[1] = 8.0;
++        s.influence = 8.0;
++        s.wave_magnification = 8.0;
++        assert_eq!(Id::Cov(1).text(&s), "8.0");
++        assert_eq!(Id::Infl.text(&s), "8");
++        assert_eq!(Id::WMag.text(&s), "8.0");
++        s.temp_zone[0] = AUTO;
++        s.temp_transition[0] = AUTO;
++        assert_eq!(Id::TZone(0).text(&s), "Random");
++        assert_eq!(Id::TTrans(0).text(&s), "Auto");
++        assert!(!Id::Cov(1).is_auto(&s) && Id::TZone(0).is_auto(&s));
++    }
++}
 --- a/roadmap/world.md	2026-11-04 00:53:40.420035852 +0000
-+++ b/roadmap/world.md	2026-11-04 00:53:40.508165871 +0000
-@@ -48,6 +48,11 @@
++++ b/roadmap/world.md	2026-11-04 01:21:20.610831319 +0000
+@@ -48,6 +48,12 @@
  
  ## Changelog
  
++- 2026-11-04 (2): the World-Gen Settings screen no longer shows "Random" on a slider that merely sits at 8 (UNVERIFIED: not compiled, not run; +1 test in `gen_ui`). Cause: `Id::text` and the knob / colour in `draw` compared every row's value with the mod's 8.0 (`AUTO`), so Coverage (0..30), Influence, Temp Modifier / Mitigation and Wave Magnification read "Random" at 8; only the rows with an `A` button (zones, transition points) mean it. `natural.rs` was already right (`pick` is only called on zones), so the generated climate is unchanged: the bug was the label.
 +- 2026-11-04: Structory no longer builds square terrain around its buildings (UNVERIFIED: written WITHOUT a Rust toolchain, not compiled, not run; +2 tests in `gen::structory`; the data analysis was run with `tools/structory_proto.py`).
 +    - Cause (read from `structory.bin`): the templates bake a rectangle of grass / dirt into their bottom layers (60-96% of the footprint of the big ones) and fill their whole box with air; `place_piece` wrote both, and `beard` filled dirt up to 12 blocks (through water and lava too, `is_solid` is false for both) under every solid block, fences and torches included. Result: a square plinth, a square pit in a hill, dirt columns in lakes.
 +    - Fix, all in `structory.rs`: the baked ground of a rigid piece is skipped (`base_run`) and the start is lowered by it (`base_depth`); the start height is the median of 9 ground samples over the footprint; air is only written under a roof (`roof_of`); the foundation (`GAP` 6, 8 for `beard_box`) runs under load-bearing blocks only (`bearing`) and stops at water / lava.
