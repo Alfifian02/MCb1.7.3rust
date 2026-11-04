@@ -9,6 +9,7 @@
 use crate::gen_ui::GenUi;
 use crate::input::touch_ui::ScreenEv;
 use crate::options::{OptEv, OptionsUi, Settings};
+use crate::preview::{Preview, PvOut, View};
 use crate::ui;
 use crate::render::hud::{sprites as sp, HudPipeline, HudVertex, NO_UV};
 use crate::render::player;
@@ -163,6 +164,8 @@ pub enum Scr {
     Select,
     Create,
     Delete,
+    /// NOT b1.7.3: the World Preview (`preview.rs`), from Create World's top left (`Menu::prev`).
+    Preview,
     /// `GuiRenameWorld`, from the list's "Rename" (the typed name is `Menu::name`).
     Rename,
     /// `GuiOptions`, from the title screen's "Options...".
@@ -196,6 +199,13 @@ pub struct Menu {
     /// The World-Gen Settings being edited for the world being created, and the open screen (`Scr::GenSettings`).
     nat: NaturalSettings,
     gen: Option<GenUi>,
+    /// The World Preview being shown (`Scr::Preview`), the view it keeps between visits, and whether the World-Gen Settings screen
+    /// opened from it (it goes back to the preview, not to Create World).
+    prev: Option<Preview>,
+    pv: View,
+    to_preview: bool,
+    /// The seed a blank seed field stands for: drawn when Create World opens, so the preview shows the world that Create makes.
+    rand_seed: i64,
     /// The text field being typed in (0 name, 1 seed): the keyboard is up.
     typing: Option<u8>,
     // finger
@@ -258,6 +268,10 @@ impl Menu {
             pack: true,
             nat: NaturalSettings::default(),
             gen: None,
+            prev: None,
+            pv: View::default(),
+            to_preview: false,
+            rand_seed: 0,
             typing: None,
             press: None,
             press_scroll: 0.0,
@@ -340,6 +354,8 @@ impl Menu {
                     b(0, hw - 100.0, y0 + 2.0 * pitch, 200.0, "Create New World", !self.name.is_empty()),
                     b(1, hw - 100.0, y0 + 3.0 * pitch, 200.0, "Cancel", true),
                     // Top right; under the title's band instead when the screen is too narrow to keep clear of its text.
+                    // Top left, like the one at the right.
+                    b(5, 2.0, if 2.0 + tw("World Preview") + 12.0 > hw - 50.0 { 24.0 } else { 2.0 }, tw("World Preview") + 12.0, "World Preview", true),
                     b(4, gw - tw("World-Gen Settings") - 14.0, if gw - tw("World-Gen Settings") - 14.0 < hw + 56.0 { 24.0 } else { 2.0 }, tw("World-Gen Settings") + 12.0, "World-Gen Settings", true),
                 ]
             }
@@ -351,7 +367,7 @@ impl Menu {
                 let y = (gh / 4.0).floor() + 96.0 + 12.0; // `GuiRenameWorld.initGui`
                 vec![b(0, hw - 100.0, y, 200.0, "Rename", !self.name.trim().is_empty()), b(1, hw - 100.0, y + 24.0, 200.0, "Cancel", true)]
             }
-            Scr::Options | Scr::GenSettings => Vec::new(),
+            Scr::Options | Scr::GenSettings | Scr::Preview => Vec::new(),
             Scr::Pick => vec![
                 b(1, hw - 154.0, gh - 28.0, 150.0, "Use Selected Skin", self.sel.is_some()),
                 b(0, hw + 4.0, gh - 28.0, 150.0, "Cancel", true),
@@ -461,6 +477,18 @@ impl Menu {
                     self.nat = g.s;
                 }
                 self.scr = Scr::Create;
+                if std::mem::take(&mut self.to_preview) {
+                    self.open_preview(); // the map is made again from the settings just edited
+                }
+            }
+            return;
+        }
+        if self.scr == Scr::Preview {
+            let out = self.prev.as_mut().map_or(PvOut::Close, |p| p.event(ev, w, h, st.gui_scale));
+            match out {
+                PvOut::None => {}
+                PvOut::Close => self.close_preview(false),
+                PvOut::Settings => self.close_preview(true),
             }
             return;
         }
@@ -610,16 +638,18 @@ impl Menu {
                 (self.name, self.seed, self.ty, self.typing, self.scr) = (String::from("New World"), String::new(), WorldType::Vanilla, None, Scr::Create);
                 self.pack = true;
                 (self.nat, self.gen) = (NaturalSettings::default(), None);
+                (self.rand_seed, self.pv, self.prev) = (now_nanos() as i64, View::default(), None);
                 self.folder = folder_for(&self.root, &self.name);
             }
             (Scr::Create, 0) => {
-                let info = Info { folder: folder_for(&self.root, &self.name), name: self.name.clone(), seed: parse_seed(&self.seed, now_nanos() as i64), ty: self.ty, pack: self.pack, nat: self.nat.clone(), modified: 0, bytes: 0 };
+                let info = Info { folder: folder_for(&self.root, &self.name), name: self.name.clone(), seed: self.world_seed(), ty: self.ty, pack: self.pack, nat: self.nat.clone(), modified: 0, bytes: 0 };
                 info.write(&self.root);
                 self.loading = Some(info);
             }
             (Scr::Create, 1) => self.scr = Scr::Select,
             (Scr::Create, 2) => self.ty = self.ty.next(),
             (Scr::Create, 3) => self.pack = !self.pack,
+            (Scr::Create, 5) => self.open_preview(),
             (Scr::Create, 4) => (self.gen, self.scr) = (Some(GenUi::new(self.nat.clone(), true)), Scr::GenSettings),
             (Scr::Delete, 0) => {
                 if let Some(w) = self.sel.and_then(|i| self.worlds.get(i)) {
@@ -645,6 +675,40 @@ impl Menu {
         }
     }
 
+    /// The seed Create makes the world with: the field, or the random one drawn when the screen opened.
+    fn world_seed(&self) -> i64 {
+        parse_seed(&self.seed, self.rand_seed)
+    }
+
+    /// Opens the World Preview on what the Create screen holds now: seed, world type and every Natural Temperature setting.
+    fn open_preview(&mut self) {
+        self.prev = None; // drops the old one first (its `Drop` clears `natural`, the new one sets it again)
+        self.prev = Some(Preview::new(self.world_seed(), self.ty, &self.nat, self.pv));
+        self.scr = Scr::Preview;
+    }
+
+    /// Leaves the preview for Create World (or, with `settings`, for the World-Gen Settings screen, which comes back here). The world type
+    /// cycled in the preview stays.
+    fn close_preview(&mut self, settings: bool) {
+        if let Some(p) = self.prev.take() {
+            self.ty = p.ty;
+            self.pv = p.view();
+        }
+        self.scr = Scr::Create;
+        if settings {
+            (self.gen, self.scr, self.to_preview) = (Some(GenUi::new(self.nat.clone(), true)), Scr::GenSettings, true);
+        }
+    }
+
+    /// A pinch of two fingers (`TouchUi::take_pinch`): zooms the World Preview.
+    pub fn pinch(&mut self, k: f32, x: f32, y: f32, w: f32, h: f32, st: &Settings) {
+        if self.scr == Scr::Preview {
+            if let Some(p) = self.prev.as_mut() {
+                p.pinch(k, x, y, w, h, st.gui_scale);
+            }
+        }
+    }
+
     fn open_list(&mut self) {
         (self.worlds, self.sel, self.scroll, self.scr) = (list(&self.root), None, 0.0, Scr::Select);
     }
@@ -661,6 +725,9 @@ impl Menu {
         }
         if self.scr == Scr::GenSettings {
             return self.gen.as_ref().map_or_else(Vec::new, |g| g.avoid(w, h, st.gui_scale));
+        }
+        if self.scr == Scr::Preview {
+            return self.prev.as_ref().map_or_else(Vec::new, |p| p.avoid(w, h, st.gui_scale));
         }
         let (s, gw, gh) = scaled_gs(w, h, st.gui_scale);
         let hw = (gw / 2.0).floor();
@@ -696,7 +763,7 @@ impl Menu {
                 r.push([0.0, 24.0, hw, gh - 24.0]); // the player and "Drag to turn"
                 r.push([hw + 2.0, 30.0, hw - 4.0, (gh - 28.0).max(210.0) - 4.0]);
             }
-            Scr::Options | Scr::GenSettings => {}
+            Scr::Options | Scr::GenSettings | Scr::Preview => {}
         }
         r.into_iter().map(|r| r.map(|u| u * s)).collect()
     }
@@ -714,6 +781,12 @@ impl Menu {
             let x = if center { x - tw(t) / 2.0 } else { x };
             HudPipeline::push_text(v, x * s, y * s, s, t, rgb(c));
         };
+        if self.scr == Scr::Preview {
+            if let Some(p) = self.prev.as_mut() {
+                p.draw(v, w, h, st.gui_scale); // its own background: no dirt under it (the HUD pass holds few quads)
+            }
+            return;
+        }
         if !self.panorama() {
             dirt(v, s, [0.0, 0.0, gw, gh], 0.0, 0x404040);
         }
@@ -775,7 +848,7 @@ impl Menu {
                     text_box(v, s, *r, t, false);
                 }
             }
-            Scr::Options | Scr::GenSettings => {}
+            Scr::Options | Scr::GenSettings | Scr::Preview => {}
             Scr::Skin => {
                 ui::title(v, s, gw, 0.0, "Customize Skin", true);
                 // The player, big, on the left half, turning slowly (a drag turns him by hand).

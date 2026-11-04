@@ -235,6 +235,22 @@ impl OverworldGenerator {
         self
     }
 
+    /// The generator the World Preview samples: the terrain of `ty` and nothing else (no rivers, caves, structures), so it is cheap to make.
+    pub fn preview(ty: WorldType, seed: i64) -> Self {
+        let mut g = Self::new(seed);
+        match ty {
+            WorldType::Vanilla => {}
+            WorldType::Tectonic => g = g.tectonic(),
+            WorldType::Blooming => g.blooming = true,
+        }
+        g
+    }
+
+    /// Surface height (the zero crossing of the density column, or Tectonic's surface) at block (bx, bz), read without making the chunk.
+    pub fn height_at(&mut self, bx: i32, bz: i32, cm: &WorldChunkManager) -> i32 {
+        self.probe_block(bx, bz, cm).0.round() as i32
+    }
+
     /// The generator of a played overworld: `new` plus rivers, streams and lakes.
     pub fn world(seed: i64) -> Self {
         Self::new(seed).with_hydro()
@@ -266,7 +282,11 @@ impl OverworldGenerator {
     /// (surface height, humidity 0..1) of grid node (gx, gz) at block (12 gx, 12 gz) (`hydro::CELL`), read without making the chunk: the vanilla
     /// density column (Beta's noise at this one grid column and the zero crossing of its 17 densities) or Tectonic's density.
     fn probe(&mut self, gx: i32, gz: i32, cm: &WorldChunkManager) -> (f64, f64) {
-        let (bx, bz) = (gx * CELL, gz * CELL);
+        self.probe_block(gx * CELL, gz * CELL, cm)
+    }
+
+    /// `probe` at block (bx, bz).
+    fn probe_block(&mut self, bx: i32, bz: i32, cm: &WorldChunkManager) -> (f64, f64) {
         let (t, h, off, steep) = cm.probe_at(bx, bz);
         if let Some(tc) = self.tectonic.as_ref() {
             return (f64::from(tc.surface(bx, bz)) + 0.5, h);

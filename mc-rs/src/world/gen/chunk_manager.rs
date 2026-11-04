@@ -203,6 +203,12 @@ impl WorldChunkManager {
         (c.t, c.h, c.off, c.steep)
     }
 
+    /// Biome and 0..1 temperature and humidity at one block, without making a chunk (the World Preview reads this).
+    pub fn sample_at(&self, x: i32, z: i32) -> (Biome, f64, f64) {
+        let c = self.cell(x >> 2, z >> 2);
+        (c.biome, c.t, c.h)
+    }
+
     /// The terrain wanted at the 5 x 5 density columns of chunk (cx, cz), x outer, z inner: (offset of the surface in blocks,
     /// steepness factor of the hills). `None` when the terrain does not follow the parameters (Tectonic, the b1.7.3 manager).
     pub fn shape(&self, cx: i32, cz: i32) -> Option<Vec<(f64, f64)>> {

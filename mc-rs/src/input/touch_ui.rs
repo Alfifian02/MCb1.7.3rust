@@ -63,6 +63,8 @@ pub enum PointerRole {
     Inventory,
     /// Any other press while a screen is open. Reported as a tap on release.
     Tap,
+    /// A second finger on a menu screen: with the first (`Tap`) finger it is a pinch (`TouchUi::take_pinch`), and neither reports taps or moves.
+    Pinch,
     /// Press landed on hotbar slot N. Selects on release.
     Hotbar(usize),
     /// Press landed on the jump button. Held = jumping.
@@ -241,6 +243,10 @@ pub struct TouchUi {
     pub menu: bool,
     /// Finger events on an open screen since the last `take_screen_events`.
     events: Vec<ScreenEv>,
+    /// A pinch on a menu screen since the last `take_pinch`: the product of the distance ratios, and the fingers' midpoint (px).
+    pinch_scale: f32,
+    pinch_mid: (f32, f32),
+    pinch_new: bool,
     /// Where the finger last was on the open screen: the picked-up stack floats here.
     pub cursor_pos: (f32, f32),
     /// The game pad (`gamepad.rs`): its outputs below are OR-ed with the fingers'.
@@ -303,6 +309,9 @@ impl TouchUi {
             inventory: false,
             menu: false,
             events: Vec::new(),
+            pinch_scale: 1.0,
+            pinch_mid: (0.0, 0.0),
+            pinch_new: false,
             cursor_pos: (w as f32 * 0.5, h as f32 * 0.5),
             pad: Pad::default(),
             pad_jump: false,
@@ -512,6 +521,19 @@ impl TouchUi {
         std::mem::take(&mut self.inventory)
     }
 
+    /// The pinch since the last call as (scale, x, y): fingers apart gives more than 1, (x, y) is their midpoint in surface pixels.
+    pub fn take_pinch(&mut self) -> Option<(f32, f32, f32)> {
+        let k = std::mem::replace(&mut self.pinch_scale, 1.0);
+        std::mem::take(&mut self.pinch_new).then_some((k, self.pinch_mid.0, self.pinch_mid.1))
+    }
+
+    /// Distance and midpoint of the two fingers of a pinch (the `Tap` finger and the `Pinch` finger), if both are down.
+    fn pinch_span(&self) -> Option<(f32, (f32, f32))> {
+        let at = |r: PointerRole| self.pointers.values().find(|p| p.role == r).map(|p| p.last);
+        let (a, b) = (at(PointerRole::Tap)?, at(PointerRole::Pinch)?);
+        Some(((a.0 - b.0).hypot(a.1 - b.1), ((a.0 + b.0) / 2.0, (a.1 + b.1) / 2.0)))
+    }
+
     /// Finger events on an open screen since the last call, in surface pixels.
     pub fn take_screen_events(&mut self) -> Vec<ScreenEv> {
         std::mem::take(&mut self.events)
@@ -617,6 +639,7 @@ impl TouchUi {
         self.place = false;
         self.release = false;
         self.events.clear();
+        (self.pinch_scale, self.pinch_new) = (1.0, false);
     }
 
     /// Rebuild the layout if the surface size changed. True if it did.
@@ -670,6 +693,18 @@ impl TouchUi {
     }
 
     fn on_press(&mut self, pid: i32, x: f32, y: f32, role: PointerRole) {
+        // A second finger on a menu screen is half of a pinch (the World Preview zooms with it); other menus ignore `take_pinch`.
+        if role == PointerRole::Tap
+            && self.menu
+            && self.pointers.values().any(|p| p.role == PointerRole::Tap)
+            && !self.pointers.values().any(|p| p.role == PointerRole::Pinch)
+        {
+            self.pointers.insert(pid, Pointer { role: PointerRole::Pinch, last: (x, y), held: 0.0, travel: 0.0, broke: false });
+            if let Some((_, m)) = self.pinch_span() {
+                (self.pinch_mid, self.pinch_new) = (m, true);
+            }
+            return;
+        }
         // One d-pad finger and one look finger at a time; extras are ignored.
         if matches!(role, PointerRole::Dir | PointerRole::Look | PointerRole::Tap)
             && self
@@ -691,6 +726,19 @@ impl TouchUi {
     }
 
     fn on_move(&mut self, pid: i32, x: f32, y: f32) {
+        if self.pointers.values().any(|p| p.role == PointerRole::Pinch) && self.pointers.get(&pid).is_some_and(|p| matches!(p.role, PointerRole::Tap | PointerRole::Pinch)) {
+            let old = self.pinch_span();
+            if let Some(p) = self.pointers.get_mut(&pid) {
+                p.last = (x, y);
+            }
+            if let (Some((d0, _)), Some((d1, m))) = (old, self.pinch_span()) {
+                if d0 > 1.0 {
+                    self.pinch_scale *= d1 / d0;
+                    (self.pinch_mid, self.pinch_new) = (m, true);
+                }
+            }
+            return;
+        }
         let Some(ptr) = self.pointers.get_mut(&pid) else { return };
         let (lx, ly) = ptr.last;
         ptr.last = (x, y);
@@ -743,7 +791,7 @@ impl TouchUi {
                     self.release = true; // a hold that stayed put: `lib.rs` turns it into a charged blow if one was building
                 }
             }
-            PointerRole::Jump | PointerRole::Zoom | PointerRole::Guard | PointerRole::Special => {}
+            PointerRole::Jump | PointerRole::Zoom | PointerRole::Guard | PointerRole::Special | PointerRole::Pinch => {}
         }
     }
 }

@@ -19,6 +19,7 @@ mod menu;
 mod skin;
 mod options;
 mod gen_ui;
+mod preview;
 mod stats_ui;
 mod ui;
 mod version;
@@ -3646,6 +3647,9 @@ impl App {
         let Some(m) = self.menu.as_mut() else { return };
         for ev in self.touch.take_screen_events() {
             m.event(ev, w, h, &mut self.opts);
+        }
+        if let Some((k, px, py)) = self.touch.take_pinch() {
+            m.pinch(k, px, py, w, h, &self.opts); // two fingers zoom the World Preview
         }
         if m.quit {
             std::process::exit(0); // Quit Game: nothing is loaded, so nothing to save
