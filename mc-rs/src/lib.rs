@@ -3059,6 +3059,15 @@ impl App {
     fn rei_step(&mut self, dt: f32) {
         let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
         let panel = self.screen.as_ref().map(|s| craft::panel_rect(s.gw, w, h));
+        // The X of an open screen: pushed to the right edge, its top level with the viewer's page arrows (GUI row y = 5, `rei_layout::strip`).
+        // Without the viewer it stays in the pause button's place. `hit_test` and the drawing both read `layout.close`, so they agree.
+        self.touch.layout.close = if self.rei.is_some() {
+            let (s, _, _) = menu::scaled_gs(w, h, self.opts.gui_scale);
+            let (_, _, cw, ch) = self.touch.layout.pause;
+            (w - cw - 2.0 * s, 5.0 * s, cw, ch)
+        } else {
+            self.touch.layout.pause
+        };
         // What the overlay keeps clear of: the X of an open screen (the other top-right buttons are hidden then), or the pause button of the game menu.
         let (px, py, pw, ph) = if self.touch.paused { self.touch.layout.pause } else { self.touch.layout.close };
         let hud = [px, py, pw, ph];
