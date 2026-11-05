@@ -1709,7 +1709,7 @@ impl App {
                     self.swing_cd = s.interval;
                     self.mobs.strike(i, dmg, self.player.pos); // the weapon's own 3-tick damage window
                     if s.profile == world::combat::profile::Profile::Axe {
-                        self.mobs.stagger(i, if blow > 1.0 { 16 } else { 10 }); // the axe's role: a heavy blow staggers (no steering, no bite) for a moment
+                        self.mobs.stagger(i, world::combat::weight::stagger_ticks(blow > 1.0)); // the axe's role: a heavy blow staggers (no steering, no bite) for a moment
                     }
                     let full = { let c = s.profile.charge(); c.ticks > 0 && blow >= 1.0 + c.bonus - 1e-4 }; // C7: a full charge (`chargeRatio >= FULL_CHARGE`)
                     self.hit_fx(i, s.profile, blow > 1.0, full, 1.0, true);
@@ -2161,7 +2161,15 @@ impl App {
             away = glam::Vec3::new(-f.x, 0.0, -f.z);
         }
         let away = away.normalize_or_zero();
-        self.kick = glam::Vec3::new(self.kick.x * 0.5 + away.x * PUSH, 0.0, self.kick.z * 0.5 + away.z * PUSH);
+        // Immersive Pack (NOT b1.7.3): armor takes part of the shove (`weight::knock_scale`, the stamina's own load), and a blow that lands breaks a
+        // charge in progress, so a heavy weapon's commitment can be punished. The lift is untouched.
+        let push = if world::combat::rules::on() {
+            self.charge = 0;
+            PUSH * world::combat::weight::knock_scale(self.armor_load())
+        } else {
+            PUSH
+        };
+        self.kick = glam::Vec3::new(self.kick.x * 0.5 + away.x * push, 0.0, self.kick.z * 0.5 + away.z * push);
         self.player.vel.y = (self.player.vel.y * 0.5 + PUSH).min(PUSH);
         self.player.on_ground = false;
         self.sprint.attack(); // ponytail: a shove ends the sprint, as a landed blow does
@@ -2468,9 +2476,8 @@ impl App {
 
     /// Hotbar change (`swing_held` differs from `held_id`): the cooldown still owed by the weapon put away is written to the ledger under its id and the
     /// one taken up gets its own debt back (0 if it owes none), so swapping never pays off a lunge or a sweep; only time does. A short draw lock
-    /// (`DRAW_LOCK` ticks, at most the new weapon's own interval) keeps a swap-and-swing from landing in the same frame. NOT b1.7.3, UNVERIFIED.
+    /// (`weight::draw_ticks`: 6 x the weapon's weight, at most its own interval) keeps a swap-and-swing from landing in the same frame. NOT b1.7.3, UNVERIFIED.
     fn switch_weapon(&mut self, held_id: Option<u16>) {
-        const DRAW_LOCK: u32 = 6;
         if self.swing_held == held_id {
             return;
         }
@@ -2480,7 +2487,7 @@ impl App {
             self.swing_debt.push((old, owed)); // ponytail: the bare hand (None) owes at most its 4 ticks, not worth an entry
         }
         let back = self.swing_debt_of(held_id);
-        let draw = world::combat::rules::swing(held_id).map_or(0, |s| DRAW_LOCK.min(s.interval));
+        let draw = world::combat::rules::swing(held_id).map_or(0, |s| world::combat::weight::draw_ticks(s.profile.weight(), s.interval)); // heavy weapons are slower to draw
         (self.swing_held, self.swing_cd) = (held_id, back.max(draw));
     }
 

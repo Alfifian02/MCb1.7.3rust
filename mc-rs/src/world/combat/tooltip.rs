@@ -10,7 +10,7 @@
 //! arcabuz's three lines (C8) say gunpowder where the mod says Firestone. A pickaxe gets its category and durability only, as in the mod.
 
 use super::profile::{charge_multiplier, Profile, Special};
-use super::{arcabuz, rules, special};
+use super::{arcabuz, rules, special, weight};
 use crate::world::{biomelife, craft};
 use crate::world::items::ItemStack;
 
@@ -97,6 +97,7 @@ fn of(s: ItemStack, swing: Option<rules::Swing>) -> Vec<Line> {
     let secs = |t: u32| t as f32 / 20.0;
     match sw.profile {
         Profile::Ropera => v.push(("Right click: forward lunge, and it passes through several".into(), rgb(NOTE))),
+        Profile::Axe => v.push((format!("Heavy blow: staggers its target for {:.1} s; a hit taken breaks the charge", secs(weight::STAGGER as u32)), rgb(NOTE))),
         Profile::Halberd => v.push(("Right click: sweeps the whole arc, and costs the same cooldown as a hit".into(), rgb(NOTE))),
         Profile::Sabre => v.push((format!("Right click: parry. A {:.1} s window, a {:.1} s cooldown", secs(special::PARRY_WINDOW), secs(special::PARRY_COOLDOWN)), rgb(NOTE))),
         Profile::Warhammer => v.push((format!("Escalates with each consecutive hit; the streak lasts {:.1} s", secs(special::STREAK_WINDOW)), rgb(NOTE))),

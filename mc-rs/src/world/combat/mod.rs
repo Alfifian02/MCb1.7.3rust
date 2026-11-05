@@ -14,6 +14,7 @@
 //! * `tooltip` - C6: the coloured lines under a weapon's name (category, damage, speed, reach, special, durability). UNVERIFIED: not compiled.
 //! * `fx`      - C7: the camera shake table (`Rig`) and the geometry of the slash and the sweep. UNVERIFIED: not compiled.
 //! * `sound`   - C7: which recording each moment of a weapon plays, at what pitch. UNVERIFIED: not compiled.
+//! * `weight`  - heavy weapons draw slowly and stagger, heavy armor takes part of a shove (the numbers only). UNVERIFIED: not compiled.
 //! * `rules`   - C2: the world rule and the swing of whatever is held (cone, cooldown, damage); C3: `charged`, the multiplier of a held-then-released blow. UNVERIFIED: not compiled.
 //!
 //! **Exclusive to the Immersive Pack.** Every feature from Cortes Combat is on only in a world created with the Immersive
@@ -32,3 +33,4 @@ pub mod rules;
 pub mod sound;
 pub mod special;
 pub mod tooltip;
+pub mod weight;
