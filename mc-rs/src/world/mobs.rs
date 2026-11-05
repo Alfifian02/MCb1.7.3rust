@@ -1908,6 +1908,13 @@ impl Mobs {
         m.fire = m.fire.max(ticks);
     }
 
+    /// The axe's stagger (NOT b1.7.3, UNVERIFIED): mob `i` cannot steer (`free`, as after a knockback) or bite (`attack_time`) for `ticks`; never shortened.
+    pub fn stagger(&mut self, i: usize, ticks: u8) {
+        let m = &mut self.list[i];
+        m.free = m.free.max(ticks);
+        m.attack_time = m.attack_time.max(ticks as _);
+    }
+
     /// Retro Sprint's `target.addVelocity` (m/s here): added to the motion as it is, so the hit's own `knockBack` that follows halves it
     /// when it lands (a hit inside the damage window keeps it whole, as in the mod). No steering for 10 ticks, like after a knockback.
     pub fn shove(&mut self, i: usize, v: Vec3) {

@@ -258,6 +258,9 @@ struct App {
     /// Cortes Combat (C2, only with the Immersive Pack ON, `combat::rules`; NOT b1.7.3, UNVERIFIED): ticks until the held item may swing again, and the item
     /// (`None` = the bare hand) that cooldown belongs to: changing item starts it over (`resetOnItemChange`).
     swing_cd: u32,
+    /// Cooldown owed by the weapons NOT in hand (item id -> ticks left, counted down each tick): a lunge or sweep stays paid for when you swap away and back.
+    /// Only time clears it. NOT b1.7.3, UNVERIFIED.
+    swing_debt: Vec<(Option<u16>, u32)>,
     swing_held: Option<u16>,
     /// C3: ticks the attack has been held on a mob in reach of a weapon that can charge (`Profile::charge`), and the damage multiplier of the
     /// blow this frame's release delivers (1 = a plain one). NOT b1.7.3, UNVERIFIED.
@@ -430,6 +433,7 @@ impl App {
             one_mode: false,
             shift_mode: false,
             swing_cd: 0,
+            swing_debt: Vec::new(),
             swing_held: None,
             charge: 0,
             blow: 1.0,
@@ -563,6 +567,7 @@ impl App {
         world::gen::natural::set(Some(&info.nat));
         world::combat::rules::set(info.pack); // Cortes Combat lives only in an Immersive Pack world
         (self.swing_cd, self.charge, self.eating, self.cd_rise) = (0, 0, None, false);
+        self.swing_debt.clear();
         self.sp = Default::default();
         self.shake.clear();
         (self.xh, self.dmg, self.gun) = Default::default();
@@ -1139,7 +1144,10 @@ impl App {
                     let d = match self.opts.difficulty { 0 => 0, 1 => d / 3 + 1, 3 => d * 3 / 2, _ => d };
                     // C5: a lunge cannot be hurt (`LungeImmunity`), a parry turns the hit back (`ParryHandler`), then the guard.
                     if d > 0 && self.sp.lunge.is_none() && !self.parried(d, from) && !self.guarded(from) {
-                        self.vitals.hurt(d);
+                        // A hit that the damage window refuses (`hurt` false) shoves nobody, as `EntityLiving.attackEntityFrom` only calls `knockBack` once the damage took.
+                        if self.vitals.hurt(d) {
+                            self.knock_player(from);
+                        }
                         if world::combat::rules::on() {
                             self.shake.add(world::combat::fx::Kind::Hurt, self.player.pos); // C7 (`HurtShake`)
                         }
@@ -1641,9 +1649,7 @@ impl App {
             // fallback. Either way an `Entity.interact` (a saddle, a tame wolf, shears, a bone) needs the mob under the crosshair (`touch`).
             let held_id = self.inv.slots[slot].map(|s| s.id);
             let swing = world::combat::rules::swing(held_id);
-            if self.swing_held != held_id {
-                (self.swing_held, self.swing_cd) = (held_id, 0);
-            }
+            self.switch_weapon(held_id);
             let (target, ray) = self.melee_target(held_id, eye, fwd, wall);
             if let Some(i) = target {
                 let touch = ray == Some(i); // an interaction only with the mob under the crosshair
@@ -1702,6 +1708,9 @@ impl App {
                 if let Some(s) = swing {
                     self.swing_cd = s.interval;
                     self.mobs.strike(i, dmg, self.player.pos); // the weapon's own 3-tick damage window
+                    if s.profile == world::combat::profile::Profile::Axe {
+                        self.mobs.stagger(i, if blow > 1.0 { 16 } else { 10 }); // the axe's role: a heavy blow staggers (no steering, no bite) for a moment
+                    }
                     let full = { let c = s.profile.charge(); c.ticks > 0 && blow >= 1.0 + c.bonus - 1e-4 }; // C7: a full charge (`chargeRatio >= FULL_CHARGE`)
                     self.hit_fx(i, s.profile, blow > 1.0, full, 1.0, true);
                 } else {
@@ -2137,6 +2146,27 @@ impl App {
         self.swing_cd > 0 || self.guard_blocks(held_id)
     }
 
+    /// `EntityLiving.knockBack`: a hit that took shoves the player away from its source. The motion is halved, then 0.4 blocks a tick is taken along
+    /// the line from the attacker and the vertical is `min(0.4, motion_y / 2 + 0.4)`. The walk overwrites `vel.x/z` every frame, so the horizontal
+    /// part rides in `kick` (m/s, dragged like the Java's motion; see `frame`), as an explosion's does. b1.7.3's own behaviour, no switch.
+    fn knock_player(&mut self, from: glam::Vec3) {
+        const PUSH: f32 = 0.4 * 20.0; // blocks a tick -> m/s
+        if self.vitals.dead() || self.sleep.is_some() || self.riding() || self.touch.flying {
+            return;
+        }
+        let me = self.player.pos;
+        let mut away = glam::Vec3::new(me.x - from.x, 0.0, me.z - from.z);
+        if away.length_squared() < 1e-4 {
+            let f = self.camera.forward(); // a hit from inside the body (a slime on top): shove backwards, the Java picks a random side
+            away = glam::Vec3::new(-f.x, 0.0, -f.z);
+        }
+        let away = away.normalize_or_zero();
+        self.kick = glam::Vec3::new(self.kick.x * 0.5 + away.x * PUSH, 0.0, self.kick.z * 0.5 + away.z * PUSH);
+        self.player.vel.y = (self.player.vel.y * 0.5 + PUSH).min(PUSH);
+        self.player.on_ground = false;
+        self.sprint.attack(); // ponytail: a shove ends the sprint, as a landed blow does
+    }
+
     /// C4 (`GuardHandler.onShieldBlock`): a hit from `from` into the raised guard is absorbed, a point spent and a combat mark made; the last
     /// point breaks the guard and the charge. True if blocked. ponytail: the arc is measured on the ground plane, the mod's is 3D with the pitch.
     fn guarded(&mut self, from: glam::Vec3) -> bool {
@@ -2436,6 +2466,28 @@ impl App {
         }
     }
 
+    /// Hotbar change (`swing_held` differs from `held_id`): the cooldown still owed by the weapon put away is written to the ledger under its id and the
+    /// one taken up gets its own debt back (0 if it owes none), so swapping never pays off a lunge or a sweep; only time does. A short draw lock
+    /// (`DRAW_LOCK` ticks, at most the new weapon's own interval) keeps a swap-and-swing from landing in the same frame. NOT b1.7.3, UNVERIFIED.
+    fn switch_weapon(&mut self, held_id: Option<u16>) {
+        const DRAW_LOCK: u32 = 6;
+        if self.swing_held == held_id {
+            return;
+        }
+        let (old, owed) = (self.swing_held, self.swing_cd);
+        self.swing_debt.retain(|d| d.0 != old && d.0 != held_id);
+        if owed > 0 && old.is_some() {
+            self.swing_debt.push((old, owed)); // ponytail: the bare hand (None) owes at most its 4 ticks, not worth an entry
+        }
+        let back = self.swing_debt_of(held_id);
+        let draw = world::combat::rules::swing(held_id).map_or(0, |s| DRAW_LOCK.min(s.interval));
+        (self.swing_held, self.swing_cd) = (held_id, back.max(draw));
+    }
+
+    fn swing_debt_of(&self, id: Option<u16>) -> u32 {
+        self.swing_debt.iter().find(|d| d.0 == id).map_or(0, |d| d.1)
+    }
+
     /// C3 / C4 request: while a charge builds, the hand repeats the hotbar switch (the weapon rises slowly from low), one rise per cooldown of
     /// the weapon; at a full charge it stays raised. During the cooldown that comes first (the charge cannot build yet) the same rise follows
     /// the cooldown itself, so a hold never looks idle. `None` when nothing is charging.
@@ -2464,9 +2516,12 @@ impl App {
         let (eye, fwd, slot) = (self.camera.pos, self.camera.forward(), self.touch.hotbar_slot);
         let held_id = self.inv.slots[slot].map(|s| s.id);
         if self.swing_held != held_id {
-            (self.swing_held, self.swing_cd, self.charge) = (held_id, 0, 0);
+            self.charge = 0;
+            self.switch_weapon(held_id);
         }
-        let full = world::combat::rules::swing(held_id).map_or(0, |s| s.profile.charge().ticks);
+        let swung = world::combat::rules::swing(held_id);
+        let full = swung.map_or(0, |s| s.profile.charge().ticks);
+        let overlap = swung.is_some_and(|s| s.profile == world::combat::profile::Profile::Axe); // the axe's hold counts from the start of its cooldown
         let cooling = self.swing_cd > 0 && !self.guard_blocks(held_id); // only the cooldown holds it back, not a guard
         self.cd_rise = false;
         if full == 0 || (self.swing_blocked(held_id) && !cooling) || self.screen.is_some() || !self.touch.resting() {
@@ -2475,8 +2530,10 @@ impl App {
         let wall = self.target.map_or(f32::MAX, |h| h.point.distance(eye.as_dvec3()) as f32);
         if self.melee_target(held_id, eye, fwd, wall).0.is_some() {
             if cooling {
-                self.cd_rise = true; // the charge starts when the cooldown ends; until then the hand rises with it
-            } else {
+                self.cd_rise = true; // until the cooldown ends the hand rises with it
+            }
+            if !cooling || overlap {
+                // Heavy weapons (the axe) charge while they cool, so waiting out the cooldown and waiting for the charge is one commitment, not two.
                 self.charge = (self.charge + 1).min(full);
                 if self.charge == world::combat::profile::MIN_CHARGE_HOLD {
                     if let Some(s) = world::combat::rules::swing(held_id) {
@@ -2510,6 +2567,8 @@ impl App {
     /// block below the feet while sprinting out of the water). The forward input is the d-pad's / the stick's, sneaking already x0.3.
     fn sprint_tick(&mut self) {
         self.swing_cd = self.swing_cd.saturating_sub(1); // Cortes Combat's attack cooldown (C2), 20 Hz
+        self.swing_debt.iter_mut().for_each(|d| d.1 = d.1.saturating_sub(1)); // the weapons put away keep paying in the background
+        self.swing_debt.retain(|d| d.1 > 0);
         self.shake.tick(); // C7: the camera impulses' clock
         self.crosshair_tick();
         self.charge_tick();

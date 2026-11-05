@@ -44,6 +44,8 @@ const TEMPO_AXE: f32 = 0.85;
 /// `SwordRebalance`: the sword's modifier is lowered by one. `HoeRebalance.ADDED`: the hoe's is raised by 1.5.
 const SWORD_LOWERED: f32 = 1.0;
 const HOE_ADDED: f32 = 1.5;
+/// The axe's damage is `AXE_BLOW x (2 + material bonus)`: a heavy, slow blow (see `Profile::charge` and `Profile::weight`).
+const AXE_BLOW: f32 = 2.0;
 
 /// Vanilla 1.21 attack speed (swings per second) of an old tool, by `craft::MATERIALS` order wood, stone, iron, diamond, gold.
 /// UNVERIFIED: from memory of 1.21, not read from the game's files (the user accepted that).
@@ -84,6 +86,8 @@ pub fn swing_of(held: Option<u16>) -> Option<Swing> {
     let (damage, wear) = match kind {
         Kind::Sword => (4.0 + bonus - SWORD_LOWERED, 1),
         Kind::Hoe => (1.0 + HOE_ADDED, 0),
+        // Axe pays in time, not in stamina: half the swings, twice the blow (4, 6, 8, 10, 4 from wood to gold). UNVERIFIED by play.
+        Kind::Axe => (AXE_BLOW * (2.0 + bonus), 2),
         _ => (2.0 + bonus, 2),
     };
     let tempo = if kind == Kind::Axe { TEMPO_AXE } else { 1.0 };
@@ -118,10 +122,10 @@ mod tests {
         // The bare hand: 4 ticks (`IframesTest`: bareHand == 4), 1 damage, no wear.
         let hand = swing_of(None).unwrap();
         assert_eq!((hand.interval, hand.damage, hand.wear), (4, 1.0, 0));
-        // A wooden sword (268): 12 ticks (1.6), 4 - 1 = 3 damage. An iron axe (258): 0.9 * 0.85 = 0.765 -> 26 ticks, 2 + 2 = 4.
+        // A wooden sword (268): 12 ticks (1.6), 4 - 1 = 3 damage. An iron axe (258): 0.9 * 0.85 = 0.765 -> 26 ticks, 2 * (2 + 2) = 8.
         let sword = swing_of(Some(268)).unwrap();
         assert_eq!((sword.interval, sword.damage, sword.wear), (12, 3.0, 1));
-        assert_eq!(swing_of(Some(258)).map(|s| (s.interval, s.damage)), Some((26, 4.0)));
+        assert_eq!(swing_of(Some(258)).map(|s| (s.interval, s.damage)), Some((26, 8.0)));
         // A wooden hoe (290): 1.0 + 1.5 = 2.5 damage, no wear. A diamond pickaxe (278): 1.2 -> 17 ticks, 2 + 3 = 5.
         assert_eq!(swing_of(Some(290)).map(|s| (s.damage, s.wear)), Some((2.5, 0)));
         assert_eq!(swing_of(Some(278)).map(|s| (s.interval, s.damage)), Some((17, 5.0)));
@@ -136,7 +140,7 @@ mod tests {
         assert_eq!(charged(Profile::Sword, 3), None); // under the minimum hold: a tap
         assert_eq!(charged(Profile::Sword, 4), Some(1.0)); // the minimum hold, ratio 0
         assert_eq!(charged(Profile::Sword, 25), Some(1.5)); // full: 1 + 0.5
-        assert_eq!(charged(Profile::Axe, 60), Some(3.0)); // 1 + 2.0
+        assert_eq!(charged(Profile::Axe, 40), Some(1.75)); // 1 + 0.75
         assert_eq!(charged(Profile::Dagger, 99), None); // cannot charge
     }
 }

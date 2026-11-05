@@ -106,7 +106,7 @@ impl Profile {
         match self {
             Profile::Unarmed => c(0.3, 12),
             Profile::Sword | Profile::Trident => c(0.5, 25),
-            Profile::Axe => c(2.0, 60),
+            Profile::Axe => c(0.75, 40), // NOT the mod's (2.0, 60): the blow is doubled in `rules`, so the charge is lighter (iron: 8 x 1.75 = 14)
             Profile::Shovel => c(0.4, 33),
             Profile::Halberd => c(0.6, 36),
             Profile::Warhammer => c(0.6, 32),
@@ -122,7 +122,7 @@ impl Profile {
         match self {
             Profile::Dagger => 0.6,
             Profile::Sabre | Profile::Ropera => 0.8,
-            Profile::Axe => 1.2,
+            Profile::Axe => 1.0, // the axe pays in time (cooldown, charge), not in stamina
             Profile::Halberd => 1.5,
             Profile::Warhammer | Profile::Mace => 1.6,
             _ => 1.0,
