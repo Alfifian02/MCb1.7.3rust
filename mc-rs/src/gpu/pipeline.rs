@@ -504,7 +504,7 @@ fn fs_water(in: VsOut) -> @location(0) vec4<f32> {
     return vec4<f32>(rgb, a);
 }
 
-// A soft additive disc (`render::look`: halos of lava, torches, glowstone and the sun; motes). `k` is the strength (+ 10: no fog), the uv the
+// A soft additive disc (`render::look`: halos of lava, glowstone and the sun; motes). `k` is the strength (+ 10: no fog), the uv the
 // corner -1..1, the tint its colour; the blend is src alpha + one.
 @fragment
 fn fs_glow(in: VsOut) -> @location(0) vec4<f32> {

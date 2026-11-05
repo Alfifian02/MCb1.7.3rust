@@ -284,6 +284,16 @@ pub fn build_split_tinted(smooth: bool, blocks: &[u8], data: &Nibbles, nb_data: 
         (if (v & 15) < 15 && open(x, y, z) { 15 } else { v & 15 }, v >> 4)
     };
     let br = |(s, b): (u8, u8)| table[s.saturating_sub(sky_sub).max(b) as usize];
+    // `Block.useNeighborBrightness` (slab, stairs, farmland: `World.getBlockLightValue_do` with its flag): these blocks are opaque to the light
+    // engine, so their own cell is dark (no sky light, no block light), and the faces the box keeps inside its cell (a slab's top) took that
+    // 0 and drew black, torch beside them or not. The vanilla rule reads the brightest of the cell and the five it touches (up and the four
+    // sides) instead; sky and block light are taken apart, which `br` then combines as for any other cell.
+    let lv_neighbours = |x: i32, y: i32, z: i32| -> (u8, u8) {
+        [(0, 1, 0), (1, 0, 0), (-1, 0, 0), (0, 0, 1), (0, 0, -1)]
+            .into_iter()
+            .map(|(dx, dy, dz)| lv(x + dx, y + dy, z + dz))
+            .fold(lv(x, y, z), |a, b| (a.0.max(b.0), a.1.max(b.1)))
+    };
     // `RenderBlocks.renderStandardBlockWithAmbientOcclusion`: the light of a face corner is the mean of the four cells around it (the
     // face's own cell, the two beside it along the face, and the diagonal); an opaque cell counts as 0.2 for the occlusion and, as in
     // later versions, takes the face cell's light instead of its own 0. A diagonal behind two opaque sides is that side. A cell
@@ -430,7 +440,13 @@ pub fn build_split_tinted(smooth: bool, blocks: &[u8], data: &Nibbles, nb_data: 
                     };
                     // A face the box does not reach the edge with, and a fluid's top, take the light of their own cell.
                     let own_cell = !reach || (heights.is_some() && face_i == 2);
-                    let lvl = if own_cell { lv(x, y, z) } else { lv(x + dx, y + dy, z + dz) };
+                    let lvl = if !own_cell {
+                        lv(x + dx, y + dy, z + dz)
+                    } else if matches!(blk, 44 | 53 | 60 | 67) {
+                        lv_neighbours(x, y, z)
+                    } else {
+                        lv(x, y, z)
+                    };
                     let lmv = lm(lvl.0, lvl.1);
                     let mut light = shade * br(lvl);
                     // Water carries the depth of its column (water cells from here down, <= 15) in the integer part of `light`:
@@ -891,6 +907,22 @@ mod tests {
         assert!(v.chunks(6).all(|q| q[1] >= 20.0 && q[1] <= 20.5));
         c[idx(5, 21, 5)] = 1; // stone above the slab: the slab's top (at 20.5) is still drawn, the stone's bottom too
         assert_eq!(face_count(&mesh(&c, &Nibbles::new())), 6 + 6);
+    }
+
+    /// The top of a slab sits inside its own cell, and the light engine leaves that cell dark (opaque): the top took the 0 and drew black beside a
+    /// torch at night. It takes the brightest of the cell and its up / side neighbours instead (`Block.useNeighborBrightness`).
+    #[test]
+    fn slab_top_takes_the_light_round_it() {
+        let mut c = air();
+        c[idx(5, 20, 5)] = 44;
+        let mut l = vec![0xE0u8; VOLUME]; // block light 14, no sky light, everywhere
+        l[idx(5, 20, 5)] = 0; // the slab's own cell stays dark
+        let a = air();
+        let (v, _) = build(&c, &Nibbles::new(), &l, [&a[..], &a[..], &a[..], &a[..]], [&l[..], &l[..], &l[..], &l[..]], 15, 0, 0);
+        assert_eq!(v.len(), 6 * 4 * VF, "six faces of four corners");
+        let tops: Vec<&[f32]> = v.chunks(VF).skip(2 * 4).take(4).collect(); // faces come +X, -X, +Y: the third is the top
+        assert!(tops.iter().all(|q| q[1] == 20.5), "the slab's top is at half height");
+        assert!(tops.iter().all(|q| (q[5] - brightness(14)).abs() < 1e-6), "lit as the cells round it, not black: {:?}", tops.iter().map(|q| q[5]).collect::<Vec<_>>());
     }
 
     /// The cactus keeps full-size tiles on side faces 1/16 inside the cell (`renderBlockCactus`), and its top stays at the edge.

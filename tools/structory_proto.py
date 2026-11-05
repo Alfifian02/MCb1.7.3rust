@@ -107,7 +107,7 @@ def fits(shape, bx):
     return (outer[0] <= bx[0] and bx[3] <= outer[3] and outer[1] <= bx[1] and bx[4] <= outer[4] and outer[2] <= bx[2] and bx[5] <= outer[5]
             and not any(inter(bx, h) for h in holes))
 
-def assemble(D, st, cx, cz, rnd, ground, height=128):
+def assemble(D, st, cx, cz, rnd, ground, height=128, off=(0, 0)):
     """Pieces of structure `st` starting in chunk (cx, cz). `ground(x, z)` = first free height. Returns a list of piece dicts."""
     S = D['structs'][st]; pools = D['pools']
     def flat(ix): return [e for e in pools[ix]['els'] for _ in range(e['w'])]
@@ -116,7 +116,7 @@ def assemble(D, st, cx, cz, rnd, ground, height=128):
     start = (lambda l: l[rnd.int(len(l))] if l else None)(flat(S['pool']))
     if start is None or start['kind'] == 0: return []
     rot = rnd.int(4)
-    bx, bz = cx * 16, cz * 16
+    bx, bz = cx * 16 + off[0], cz * 16 + off[1]
     size = D['t'][start['t']]['size']
     b0 = box_of(size, rot, (bx, 0, bz))
     ctr = lambda b: (b[0] + (b[3] - b[0] + 1) // 2, b[2] + (b[5] - b[2] + 1) // 2)           # BoundingBox.getCenter
@@ -180,6 +180,43 @@ def assemble(D, st, cx, cz, rnd, ground, height=128):
                 if placed: break
     return pieces
 
+# ---- the site (twin of `judge`, `blend`, `Site::height`, `shifts` in structory.rs): move to flat dry ground, level what is left
+PAD, MARGIN, FLAT, SIDE, CLIFF, SAFE, SHIFT, SHIFT_STEP = 2, 16, 2, 6, 2, 4, 48, 8
+def aquatic(D, st, wet_bits=(1 << 10) | (1 << 1) | (1 << 15)): return D['structs'][st]['mask'] & ~wet_bits == 0   # Ocean, Swamp, Marsh
+def shifts(): n = SHIFT // SHIFT_STEP; return sorted(((i * SHIFT_STEP, j * SHIFT_STEP) for i in range(-n, n + 1) for j in range(-n, n + 1)), key=lambda o: (o[0] ** 2 + o[1] ** 2, o))
+def blend(t, n, k):
+    u = min(max(int(k / MARGIN * 1024), 0), 1024); s = (u * u * (3072 - 2 * u)) >> 20
+    return t + ((n - t) * s + 512) // 1024
+def rdist(r, x, z): return ((max(r[0] - x, 0, x - r[2])) ** 2 + (max(r[1] - z, 0, z - r[3])) ** 2) ** 0.5
+def every2(a, b): return list(range(a, b + 1, 2)) + ([b] if b > a and (b - a) % 2 else [])
+def site_height(rigid, target, x, z, n):
+    d = min(rdist(r, x, z) for r in rigid)
+    return None if d > PAD + MARGIN else blend(target, n, max(d - PAD, 0))
+def judge(pieces, target, flat, at):
+    """at(x, z) -> (height, wet). Returns the rigid rects, or None when the site is refused."""
+    rigid = [(p['box'][0], p['box'][2], p['box'][3], p['box'][5]) for p in pieces if p['rigid']]
+    if not (flat and rigid): return []
+    reach = PAD + MARGIN
+    for r in rigid:
+        for x in every2(r[0] - reach - SAFE, r[2] + reach + SAFE):
+            for z in every2(r[1] - reach - SAFE, r[3] + reach + SAFE):
+                n, wet = at(x, z)
+                if wet: return None
+                d = rdist(r, x, z); dev = abs(n - target)
+                if (d <= PAD and dev > FLAT) or (d <= reach and dev > SIDE): return None
+                if d <= reach and (abs(at(x + 1, z)[0] - n) > CLIFF or abs(at(x, z + 1)[0] - n) > CLIFF): return None
+    return rigid
+def place(D, st, cx, cz, seed, at):
+    """The first shift whose assembled rigid pieces `judge` accepts: (offset, pieces, rigid rects, target) or None."""
+    for off in (shifts() if not aquatic(D, st) else [(0, 0)]):
+        ps = assemble(D, st, cx, cz, Rand(seed), lambda x, z: at(x, z)[0], off=off)
+        if not ps: return None
+        base = lambda t: 0                                   # the start's baked ground depth is the template's; the proto assumes none
+        target = ps[0]['pos'][1] - D['structs'][st]['y'] + base(ps[0]['t'])
+        rigid = judge(ps, target, not aquatic(D, st), at)
+        if rigid is not None: return off, ps, rigid, target
+    return None
+
 def spread(seed, rx, rz, sp):
     r = Rand((rx * 341873128712 + rz * 132897987541 + seed + sp['salt']) & ((1 << 64) - 1))
     k = sp['spacing'] - sp['sep']
@@ -204,3 +241,25 @@ if __name__ == '__main__':
                 assert abs(a['box'][0] - cx_) <= S['dist'] and abs(a['box'][3] - cx_) <= S['dist'] + 1 and abs(a['box'][2] - cz_) <= S['dist'] and abs(a['box'][5] - cz_) <= S['dist'] + 1, ('dist', st)
         print('structure %2d  pieces over 25 starts: min %d max %d mean %.1f' % (st, min(counts), max(counts), sum(counts) / len(counts)))
     print('total pieces', total)
+    # the site search on a ramp between x = 260 and 300 (plateau west, flat and dry east of it) with a river along x = 420: nothing may end on the ramp or the river
+    at = lambda x, z: (64 + max(0, min(40, 300 - x)) // 2, abs(x - 420) <= 3)
+    for st in range(len(D['structs'])):
+        if aquatic(D, st): continue
+        found = [place(D, st, 17, 6, 100 + i, at) for i in range(6)]
+        for f in found:
+            if f is None: continue
+            off, ps, rigid, target = f
+            assert all(abs(at(x, z)[0] - target) <= FLAT for r in rigid for x in every2(r[0] - PAD, r[2] + PAD) for z in every2(r[1] - PAD, r[3] + PAD)), st
+            assert not any(at(x, z)[1] for r in rigid for x in every2(r[0] - 22, r[2] + 22) for z in every2(r[1] - 22, r[3] + 22)), st
+            for r in rigid[:3]:                                # the levelled ground: the target on the pad, between target and land in the margin, never a jump
+                for x in range(r[0] - PAD - MARGIN - 1, r[2] + PAD + MARGIN + 2, 3):
+                    row = []
+                    for z in range(r[1] - PAD - MARGIN - 1, r[3] + PAD + MARGIN + 2, 3):
+                        n = at(x, z)[0]; h = site_height(rigid, target, x, z, n); d = min(rdist(q, x, z) for q in rigid)
+                        if h is None: assert d > PAD + MARGIN; continue
+                        assert min(n, target) <= h <= max(n, target), (st, x, z, n, h, target)
+                        if d <= PAD: assert h == target
+                        if d >= PAD + MARGIN: assert h == n
+                        row.append(h)
+                    assert all(abs(a - b) <= 4 for a, b in zip(row, row[1:])), (st, row)   # 3 blocks apart, on a 0.5 slope: no wall
+        print('structure %2d  sites %d/6 accepted, shifted %s' % (st, sum(f is not None for f in found), sorted({f[0] for f in found if f})[:4]))

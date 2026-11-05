@@ -543,6 +543,9 @@ mod tests {
         assert_eq!((bed_tile(0, 0), bed_tile(0, 1), bed_tile(8, 1)), (4, 134, 135));
         assert!(super::super::icons::ICONS.windows(2).all(|w| w[0].0 < w[1].0) && item_icon(256) == Some(82) && item_icon(1) == None);
         assert_eq!((item_icon(400), item_icon(424), item_icon(405)), (Some(208), Some(232), None)); // C6: wooden dagger, golden shotel, no wooden ropera
+        // The shears (359) have their own sprite: the icon table names tile 93 and that tile of items.rgba is not blank.
+        assert_eq!(item_icon(359), Some(93));
+        assert!((0..16).any(|y| (0..16).any(|x| ITEMS[((y + 5 * 16) * 256 + 13 * 16 + x) * 4 + 3] != 0)), "tile 93 of items.rgba holds the shears");
         assert_eq!(item_icon(crate::world::combat::catalog::BANDAGE), Some(234)); // the bandage (`tools/gen_bandage_icon.py`)
         assert_eq!(terrain_tile(255, 0, 0), None);
         // Terrain UVs stay inside their own tile and the flat strip stays under the png.

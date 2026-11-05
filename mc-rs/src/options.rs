@@ -751,7 +751,7 @@ const TIPS: &[(&str, &str)] = &[
     ("Gamma", "Mid-tone curve, 50% to 150%. Above 100% lifts the shadows."),
     ("Warm Light", "Golden light at a low sun and bluer shade."),
     ("Water Look", "A depth gradient and the sun's glint on water."),
-    ("Glow", "Soft halos on lava, torches, glowstone and the sun."),
+    ("Glow", "Soft halos on lava, glowstone and the sun."),
     ("Motion", "Leaf sway, motes near flowers and water, light rays at a low sun."),
     ("Haze", "Aerial perspective: far things fade into the sky."),
     ("REI Theme", "Light or dark look of the item and recipe viewer (Tools > Inventory Cheat, the R button in the inventory)."),

@@ -103,6 +103,7 @@ pub const ICONS: &[(u16, u8)] = &[
     (356, 86),
     (357, 92),
     (358, 60),
+    (359, 93), // shears: `Item.shears = new ItemShears(103).setIconCoord(13, 5)`; the generator's regex missed it
     (2256, 240),
     (2257, 241),
 ];

@@ -11,6 +11,7 @@ const MULT: u64 = 0x5DEECE66D;
 const MASK: u64 = (1u64 << 48) - 1;
 
 /// java.util.Random (48-bit LCG), same algorithm as the JDK.
+#[derive(Clone)]
 pub struct JavaRandom {
     seed: u64,
     /// `nextNextGaussian` while `haveNextNextGaussian` is set.

@@ -23,6 +23,7 @@ use crate::world::gen::chunk_manager::WorldChunkManager;
 use crate::world::gen::noise::{ifloor, mh_cos, mh_sin, JavaRandom};
 use crate::world::items::ItemStack;
 use crate::world::gen::overworld::{block::*, OverworldGenerator};
+use crate::world::gen::structory;
 use std::f32::consts::PI;
 
 /// The 2x2 chunks populate may touch, standing in for the Java `World`. Reads outside read as air
@@ -176,6 +177,11 @@ impl OverworldGenerator {
         }
         let (bx, bz) = (cx * 16, cz * 16);
         let biome = cm.load_block_generator_data(bx + 16, bz + 16, 1, 1)[0];
+        // Structory (Blooming only): the starts that touch this cell. Their pieces and levelled ground are written at the end; until
+        // then a tree, lake or dungeon whose centre is near one is not made (`Start::blocks`), so none grows through a wall.
+        let mut stry = self.structory.take();
+        let near = stry.as_mut().map(|s| s.near(self, cx, cz, cm)).unwrap_or_default();
+        let blocked = |x: i32, z: i32, r: i32| near.iter().any(|s| s.blocks(x, z, r));
         let mut r = JavaRandom::new(self.seed);
         let a = r.next_long() / 2 * 2 + 1;
         let b = r.next_long() / 2 * 2 + 1;
@@ -183,20 +189,24 @@ impl OverworldGenerator {
 
         if r.next_int_bound(4) == 0 {
             let (x, y, z) = (bx + r.next_int_bound(16) + 8, r.next_int_bound(128), bz + r.next_int_bound(16) + 8);
-            lake(w, &mut r, WATER, x, y, z);
+            if !blocked(x, z, structory::LAKE_VETO) {
+                lake(w, &mut r, WATER, x, y, z);
+            }
         }
         if r.next_int_bound(8) == 0 {
             let x = bx + r.next_int_bound(16) + 8;
             let h = r.next_int_bound(120) + 8;
             let y = r.next_int_bound(h);
             let z = bz + r.next_int_bound(16) + 8;
-            if y < 64 || r.next_int_bound(10) == 0 {
+            if (y < 64 || r.next_int_bound(10) == 0) && !blocked(x, z, structory::LAKE_VETO) {
                 lake(w, &mut r, LAVA, x, y, z);
             }
         }
         for _ in 0..8 {
             let (x, y, z) = (bx + r.next_int_bound(16) + 8, r.next_int_bound(128), bz + r.next_int_bound(16) + 8);
-            dungeon(w, &mut r, x, y, z);
+            if !blocked(x, z, 6) {
+                dungeon(w, &mut r, x, y, z);
+            }
         }
         // Veins: (count, size, replaces stone with, y range). Lapis is the odd one (two draws summed).
         // NOT b1.7.3: the marsh is where the clay is (proposal 6, "every biome has one export": bricks for what is built elsewhere).
@@ -239,7 +249,9 @@ impl OverworldGenerator {
             let (x, z) = (bx + r.next_int_bound(16) + 8, bz + r.next_int_bound(16) + 8);
             let kind = Tree::pick(biome, &mut r);
             let y = w.height(x, z);
-            kind.generate(w, &mut r, x, y, z);
+            if !blocked(x, z, structory::TREE_VETO) {
+                kind.generate(w, &mut r, x, y, z);
+            }
         }
 
         let n = match biome {
@@ -327,8 +339,8 @@ impl OverworldGenerator {
             }
         }
         // Structory (Blooming only): last, so no feature of this populate cuts into a building. Draws from its own Randoms.
-        if let Some(mut s) = self.structory.take() {
-            s.populate(self, w, cx, cz, cm);
+        if let Some(mut s) = stry {
+            s.populate(self, w, cx, cz, cm, &near);
             self.structory = Some(s);
         }
     }

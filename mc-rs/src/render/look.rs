@@ -4,7 +4,7 @@
 //! * One dial: `vibrance` (Video Settings, 0 = the grade is off) scales the whole grade of the final pass: vibrance (not saturation: the
 //!   already vivid colours stay put), a gentle S-curve and a warm-highlight / cool-shadow split. Conservative default, bounded top end.
 //! * Five switches (Video Settings > Effects...), each can be turned off: `warm` (golden low sun, bluer shade, a little more face
-//!   shading), `water` (depth gradient + sun glint), `glow` (soft additive halos on lava, torches, glowstone and the sun only),
+//!   shading), `water` (depth gradient + sun glint), `glow` (soft additive halos on lava, glowstone and the sun only),
 //!   `motion` (off / low / on: leaf sway, a few drifting motes near flowers and water, light rays at a low sun), `haze` (aerial perspective).
 //! * Caps: at most `MAX_GLOW` halos, `MOTE_CAP` motes and `MAX_QUADS` sprites a frame, whatever the world holds.
 //!
@@ -209,8 +209,9 @@ pub struct Quad {
     pub nofog: bool,
 }
 
-/// The block ids the scan keeps: lava (flowing, still), torch, glowstone, then the two flowers.
-const SCAN_IDS: [u8; 6] = [10, 11, 50, 89, 37, 38];
+/// The block ids the scan keeps: lava (flowing, still), glowstone, then the two flowers. A torch is NOT here: it has no halo (its light
+/// is the block light the mesher already shows; the disc round it read as a smudge on the screen).
+const SCAN_IDS: [u8; 5] = [10, 11, 89, 37, 38];
 const SCAN_R: i32 = 2;
 /// Cells kept per chunk and kind (halo emitters / flowers).
 const PER_CHUNK: usize = 16;
@@ -281,19 +282,23 @@ impl Scan {
     }
 }
 
-/// The halo of an emitter: (colour, half size in blocks, strength, height of its centre above the cell's floor).
+/// The halo of an emitter: (colour, half size in blocks, strength, height of its centre above the cell's floor). Lava and glowstone only.
 fn halo(id: u8) -> ([f32; 3], f32, f32, f32) {
     match id {
         10 | 11 => ([1.0, 0.45, 0.12], 1.7, 0.42, 1.05),
-        50 => ([1.0, 0.62, 0.22], 1.0, 0.50, 0.75),
         _ => ([1.0, 0.80, 0.42], 1.5, 0.46, 0.5), // glowstone
     }
+}
+
+/// Does a scanned cell get a halo? Lava (flowing, still) and glowstone; the flowers feed the motes, a torch has none.
+fn has_halo(id: i32) -> bool {
+    matches!(id, 10 | 11 | 89)
 }
 
 /// The halos of the emitters in `scan` nearest to `eye`, at most `MAX_GLOW`, faded out with distance. Each is pulled half a block
 /// towards the eye so a wall behind a torch does not cut it in half.
 pub fn halos(scan: &Scan, eye: Vec3, out: &mut Vec<Quad>) {
-    let mut near: Vec<(f32, [i32; 4])> = scan.cells().filter(|c| !is_flower(c[3])).map(|c| ((Vec3::new(c[0] as f32 + 0.5, c[1] as f32 + 0.5, c[2] as f32 + 0.5) - eye).length_squared(), c)).filter(|(d, _)| *d < GLOW_FADE.1 * GLOW_FADE.1).collect();
+    let mut near: Vec<(f32, [i32; 4])> = scan.cells().filter(|c| has_halo(c[3])).map(|c| ((Vec3::new(c[0] as f32 + 0.5, c[1] as f32 + 0.5, c[2] as f32 + 0.5) - eye).length_squared(), c)).filter(|(d, _)| *d < GLOW_FADE.1 * GLOW_FADE.1).collect();
     if near.len() > MAX_GLOW {
         // The nearest MAX_GLOW in any order (the blend is additive, so the draw order does not matter): no full sort.
         near.select_nth_unstable_by(MAX_GLOW, |a, b| a.0.total_cmp(&b.0));
@@ -588,7 +593,7 @@ mod tests {
         let mut out = Vec::new();
         halos(&s, Vec3::new(8.0, 70.0, 8.0), &mut out);
         assert_eq!(out.len(), MAX_GLOW);
-        assert!(out.iter().all(|q| q.half == 1.5), "48 emitters in reach: the nearest 16 are the glowstones (no full sort needed)");
+        assert!(out.iter().all(|q| q.half == 1.5), "32 halo emitters in reach (the 16 torches have none): the nearest 16 are the glowstones (no full sort needed)");
         let mut far = Vec::new();
         halos(&s, Vec3::new(500.0, 70.0, 8.0), &mut far);
         assert!(far.is_empty(), "nothing within reach");
@@ -597,6 +602,20 @@ mod tests {
         assert!((q.pos.length() - 920.0).abs() < 1e-2 && q.nofog && q.a > 0.0);
         assert!(sun_halo(&l, Vec3::new(1.0, -0.4, 0.0), Vec3::ZERO, 1000.0, 0.0).is_none());
         assert!(sun_halo(&Look::OFF, Vec3::Y, Vec3::ZERO, 1000.0, 0.0).is_none());
+    }
+
+    /// A torch has no halo, alone or among other emitters (the scan no longer keeps them, and `halos` ignores one that is in the cache).
+    #[test]
+    fn a_torch_has_no_halo() {
+        assert!(!SCAN_IDS.contains(&50) && !has_halo(50) && has_halo(10) && has_halo(11) && has_halo(89) && !has_halo(37));
+        let mut s = Scan::default();
+        s.absorb((0, 0), (0, 0), (0..8).map(|i| [i, 70, 3, 50]));
+        let mut out = Vec::new();
+        halos(&s, Vec3::new(8.0, 70.0, 8.0), &mut out);
+        assert!(out.is_empty(), "torches only: nothing drawn");
+        s.absorb((0, 0), (0, 0), [[2, 70, 3, 50], [4, 70, 3, 89]].into_iter());
+        halos(&s, Vec3::new(8.0, 70.0, 8.0), &mut out);
+        assert_eq!(out.len(), 1, "the glowstone keeps its halo, the torch beside it has none");
     }
 
     /// Motes never exceed the cap, come only from flowers by day, fade in and out, and `cap` 0 clears them.

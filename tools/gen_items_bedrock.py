@@ -61,7 +61,7 @@ TABLE = [
     (339, 58, "paper"), (340, 59, "book_normal"), (341, 30, "slimeball"), (342, 151, "minecart_chest"), (343, 167, "minecart_furnace"),
     (344, 12, "egg"), (346, 69, "fishing_rod_uncast"), (348, 73, "glowstone_dust"), (349, 89, "fish_raw"), (350, 90, "fish_cooked"),
     (352, 28, "bone"), (353, 13, "sugar"), (354, 29, "cake"), (355, 45, "bed_red"), (356, 86, "repeater"), (357, 92, "cookie"),
-    (358, 60, "map_filled"), (2256, 240, "record_13"), (2257, 241, "record_cat"),
+    (358, 60, "map_filled"), (359, 93, "shears"), (2256, 240, "record_13"), (2257, 241, "record_cat"),
 ]
 # armor: leather 298.., chain 302.., iron 306.., diamond 310.., gold 314..; helmet, chestplate, leggings, boots = tile 0, 16, 32, 48 + column 0..4
 for col, (mat, ida) in enumerate((("leather", 298), ("chainmail", 302), ("iron", 306), ("diamond", 310), ("gold", 314))):
