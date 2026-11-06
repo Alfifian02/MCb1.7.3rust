@@ -514,7 +514,7 @@ impl Ticks {
             let (mut cells, mut crush) = (Vec::new(), None);
             for i in 1..=13 {
                 let (cx, cy, cz) = at(i);
-                if cy <= 0 || cy >= 127 {
+                if cy <= 0 || cy >= crate::world::chunk::H as i32 - 1 {
                     return;
                 }
                 let b = bid(w, cx, cy, cz);
@@ -960,7 +960,7 @@ fn stay(w: &ChunkManager, x: i32, y: i32, z: i32, id: u8, placing: bool) -> bool
         32 => lit() && below == 12,
         59 => lit() && below == 60,
         // BlockMushroom.canBlockStay: dark enough, on an opaque cube (UNVERIFIED: `opaqueCubeLookup` is `light_opacity == 255` here).
-        39 | 40 => (0..128).contains(&y) && (placing || w.light_at(x, y, z, 0) < 13) && light_opacity(below) == 255 && !matches!(below, 10 | 11),
+        39 | 40 => (0..crate::world::chunk::H as i32).contains(&y) && (placing || w.light_at(x, y, z, 0) < 13) && light_opacity(below) == 255 && !matches!(below, 10 | 11),
         83 => below == 83 || (matches!(below, 2 | 3) && [(-1, 0), (1, 0), (0, -1), (0, 1)].iter().any(|&(dx, dz)| matches!(bid(w, x + dx, y - 1, z + dz), 8 | 9))),
         81 => [(-1, 0), (1, 0), (0, -1), (0, 1)].iter().all(|&(dx, dz)| non_solid(bid(w, x + dx, y, z + dz))) && matches!(below, 12 | 81),
         // wire and pressure plates need a solid cell below; a lever or a button any solid neighbour (`canPlaceBlockAt`)
@@ -1294,7 +1294,7 @@ impl Ticks {
     /// that is open to the air freezes (both only where block light is under 10).
     fn snow_ice(&mut self, w: &mut ChunkManager, x: i32, z: i32) {
         let y = w.top_solid(x, z);
-        if !(0..128).contains(&y) || w.block_light(x, y, z) >= 10 || !w.biomes(x, z, 1, 1).first().is_some_and(|b| b.snows()) {
+        if !(0..crate::world::chunk::H as i32).contains(&y) || w.block_light(x, y, z) >= 10 || !w.biomes(x, z, 1, 1).first().is_some_and(|b| b.snows()) {
             return;
         }
         let below = bid(w, x, y - 1, z);

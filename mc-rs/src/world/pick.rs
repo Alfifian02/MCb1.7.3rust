@@ -158,7 +158,7 @@ pub fn piston_facing(p: glam::Vec3, (x, y, z): (i32, i32, i32), yaw: f32) -> u8 
 /// placed at `cell`, or `None` when it cannot stand there. The hinge goes to the side with more solid neighbours or next
 /// to another door (the `+ 4` open-state bit is how the Java stores a mirrored hinge).
 pub fn door_meta(get: &dyn Fn(i32, i32, i32) -> u8, (x, y, z): (i32, i32, i32), yaw: f32, id: u8) -> Option<u8> {
-    if y >= 127 || !normal_cube(get(x, y - 1, z)) || !replaceable(get(x, y, z)) || !replaceable(get(x, y + 1, z)) {
+    if y >= crate::world::chunk::H as i32 - 1 || !normal_cube(get(x, y - 1, z)) || !replaceable(get(x, y, z)) || !replaceable(get(x, y + 1, z)) {
         return None;
     }
     let n = ((yaw + 180.0) * 4.0 / 360.0 - 0.5).floor() as i32 & 3;

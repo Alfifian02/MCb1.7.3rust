@@ -632,9 +632,10 @@ impl App {
         self.lod = self.new_lod();
         // The terrain around the player must be real before the first frame, so those chunks are loaded (or generated and
         // populated) here; everything further out streams in on the worker threads.
-        let (pcx, pcz) = level.as_ref().map_or((0, 0), |l| (chunk_coord(l.pos.x), chunk_coord(l.pos.z)));
+        let start = if self.nether { (0, 0) } else { crate::world::gen::overworld::land_start(self.world_type, self.seed) };
+        let (pcx, pcz) = level.as_ref().map_or(start, |l| (chunk_coord(l.pos.x), chunk_coord(l.pos.z)));
         self.chunks.preload(pcx, pcz);
-        self.spawn = level.as_ref().map_or_else(|| find_spawn(&self.chunks), |l| l.spawn);
+        self.spawn = level.as_ref().map_or_else(|| find_spawn(&self.chunks, start), |l| l.spawn);
         let s = level.as_ref().map_or(self.spawn, |l| l.pos);
         log::info!("save: {} in {}", if level.is_some() { "resuming" } else { "new world" }, self.dir.display());
         // Light and mesh the area around the player now, so the first frame already shows terrain.
@@ -1996,7 +1997,7 @@ impl App {
                 let cake = self.inv.slots[slot].is_some_and(|s| s.id == 354);
                 let at = if self.chunks.block_loaded(hit.pos.0, hit.pos.1, hit.pos.2) == Some(78) { hit.pos } else { pick::place_pos(&hit) };
                 let get = |a, b, c| self.chunks.block_loaded(a, b, c).unwrap_or(0);
-                let ok = at.1 < 127 && self.chunks.block_loaded(at.0, at.1, at.2).is_some_and(pick::replaceable)
+                let ok = at.1 < crate::world::chunk::H as i32 - 1 && self.chunks.block_loaded(at.0, at.1, at.2).is_some_and(pick::replaceable)
                     && if cake { !crate::world::ticks::non_solid(get(at.0, at.1 - 1, at.2)) && !pick::overlaps_player(at, physics_id(92, 0), self.player.pos) } else { pick::reed_ok(&get, at) };
                 if ok && self.chunks.set_block_meta(at.0, at.1, at.2, if cake { 92 } else { 83 }, 0) {
                     self.inv.consume(slot);
@@ -2009,7 +2010,7 @@ impl App {
             if let Some(b) = self.inv.slots[slot].and_then(|s| match s.id { 331 => Some(55u8), 356 => Some(93), _ => None }) {
                 let at = pick::place_pos(&hit);
                 let meta = pick::facing_meta(b as u16, self.camera.yaw.to_degrees() + 180.0).unwrap_or(0);
-                if at.1 < 127 && self.chunks.block_loaded(at.0, at.1, at.2).is_some_and(pick::replaceable) && ticks::can_place(&self.chunks, at.0, at.1, at.2, b) && self.chunks.set_block_meta(at.0, at.1, at.2, b, meta) {
+                if at.1 < crate::world::chunk::H as i32 - 1 && self.chunks.block_loaded(at.0, at.1, at.2).is_some_and(pick::replaceable) && ticks::can_place(&self.chunks, at.0, at.1, at.2, b) && self.chunks.set_block_meta(at.0, at.1, at.2, b, meta) {
                     self.inv.consume(slot);
                     if b == 93 {
                         self.placed(b, at); // an `ItemReed`; the dust (`ItemRedstone`) is silent
@@ -3031,7 +3032,7 @@ impl App {
             self.inv.slots[slot] = Some(ItemStack { id: full, count: 1, damage: 0 });
         } else if let Some(fluid) = gear::bucket_pour(held) {
             let (x, y, z) = pick::place_pos(&hit);
-            if self.chunks.block_loaded(x, y, z).is_some_and(pick::replaceable) && y < 128 {
+            if self.chunks.block_loaded(x, y, z).is_some_and(pick::replaceable) && y < crate::world::chunk::H as i32 {
                 if self.nether && fluid == 8 {
                     // `ItemBucket`: water does not stay in the Nether; it fizzes away: "random.fizz" at 0.5, pitch `2.6 + (r - r) * 0.8`, played at the ray's
                     // origin plus 0.5 on each axis (the Java's `var7 / var9 / var11`, the eye, not the cell), then 8 `largesmoke` (still) at random points of the cell.
@@ -4578,19 +4579,21 @@ fn chunk_manager(seed: i64, ty: WorldType, nether: bool) -> ChunkManager {
 }
 
 /// A new world's spawn point (feet position): dry ground closest to the centre of chunk (0, 0), not under water (a
-/// fixed spawn at y=60 put the camera inside the sea), and not on top of a tree. Needs chunks 0..=1 final.
-fn find_spawn(chunks: &ChunkManager) -> glam::Vec3 {
+/// fixed spawn at y=60 put the camera inside the sea), and not on top of a tree. Needs the chunks `start` and the next in x and z final
+/// (`start`: the chunk of the world's start, (0, 0) unless `land_start` moved it).
+fn find_spawn(chunks: &ChunkManager, start: (i32, i32)) -> glam::Vec3 {
+    let (ox, oz) = (start.0 * 16, start.1 * 16);
     let top_of = |x: i32, z: i32| {
-        (0..128).rev().find(|&y| !matches!(chunks.block(x, y, z), Some(0 | 8 | 9 | 17 | 18)) && !chunks.block(x, y, z).is_some_and(is_plant)).unwrap_or(-1)
+        (0..crate::world::chunk::H as i32).rev().find(|&y| !matches!(chunks.block(x, y, z), Some(0 | 8 | 9 | 17 | 18)) && !chunks.block(x, y, z).is_some_and(is_plant)).unwrap_or(-1)
     };
     let mut best: Option<(i32, i32, i32, i32)> = None; // x, z, top, dist^2
-    let mut highest = (8, 8, i32::MIN);
-    for z in 0..32 {
-        for x in 0..32 {
+    let mut highest = (ox + 8, oz + 8, i32::MIN);
+    for z in oz..oz + 32 {
+        for x in ox..ox + 32 {
             let t = top_of(x, z);
             if t > highest.2 { highest = (x, z, t); }
             if t >= 64 {
-                let d2 = (x - 8).pow(2) + (z - 8).pow(2);
+                let d2 = (x - ox - 8).pow(2) + (z - oz - 8).pow(2);
                 if best.map_or(true, |b| d2 < b.3) { best = Some((x, z, t, d2)); }
             }
         }

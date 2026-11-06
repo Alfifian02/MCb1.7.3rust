@@ -116,7 +116,7 @@ void main() {
     uint w0 = a_w.x;
     uint w1 = a_w.y;
     uint w2 = a_w.z;
-    vec3 vpos = u_origin + vec3(float(w0 & 511u) / 16.0 - 8.0, float((w0 >> 18u) & 8191u) / 32.0 - 8.0, float((w0 >> 9u) & 511u) / 16.0 - 8.0);
+    vec3 vpos = u_origin + vec3(float(w0 & 511u) / 16.0 - 8.0, float((w0 >> 18u) & 8191u) / 16.0 - 8.0, float((w0 >> 9u) & 511u) / 16.0 - 8.0);
     vec2 tl = vec2(float((w1 >> 10u) & 2047u), float(w1 >> 21u)) * 0.25 - 240.0;
     uint tile = w1 & 1023u;
     // Leaves (tiles 53, 133, 255) sway a little (`fx.z` blocks, 0 = off): a smooth function of the position, so shared corners move together.

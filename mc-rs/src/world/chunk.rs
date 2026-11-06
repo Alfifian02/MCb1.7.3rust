@@ -1,17 +1,35 @@
-//! Chunk storage layout. Vanilla b1.7.3 dimensions: 16 wide, 128 tall, 16 deep.
-//! Volume = 32768 cells. A chunk is a `Vec<u8>` of block ids (0 = air) with index
-//! `(x<<11) | (z<<7) | y`, plus a `Nibbles` of block metadata with the same index; the chunks themselves
+//! Chunk storage layout. 16 wide, `H` = 384 tall (Cascades' range, 2026-11-05; b1.7.3 was 128), 16 deep, in EVERY world and the Nether.
+//! Volume = 98304 cells. A chunk is a `Vec<u8>` of block ids (0 = air) with index
+//! `(x * 16 + z) * H + y` (`idx`; `cell_x` / `cell_y` / `cell_z` take it apart), plus a `Nibbles` of block metadata with the same index; the chunks themselves
 //! live in `world::chunks::ChunkManager`.
 
 pub const W: usize = 16;
-pub const H: usize = 128;
+pub const H: usize = 384;
 pub const D: usize = 16;
 pub const VOLUME: usize = W * H * D;
 
 /// Index of a cell within the chunk volume.
 #[inline]
 pub const fn idx(x: usize, y: usize, z: usize) -> usize {
-    (x << 11) | (z << 7) | y
+    (x * D + z) * H + y
+}
+
+/// The `x` of a cell index (`idx` taken apart).
+#[inline]
+pub const fn cell_x(i: usize) -> usize {
+    i / (D * H)
+}
+
+/// The `y` of a cell index.
+#[inline]
+pub const fn cell_y(i: usize) -> usize {
+    i % H
+}
+
+/// The `z` of a cell index.
+#[inline]
+pub const fn cell_z(i: usize) -> usize {
+    i / H % D
 }
 
 /// `NibbleArray`: 4 bits per cell, two cells to a byte (an even cell index is the low nibble), indexed like the
@@ -389,8 +407,8 @@ pub fn brightness_in(level: u8, ambient: f32) -> f32 {
 
 /// `Chunk.heightMap` for one chunk, indexed `z << 4 | x`: the y of the first cell, scanning down from
 /// the top, whose block below it is not fully transparent (`generateHeightMap`).
-pub fn height_map(blocks: &[u8]) -> [u8; 256] {
-    let mut h = [0u8; 256];
+pub fn height_map(blocks: &[u8]) -> [u16; 256] {
+    let mut h = [0u16; 256];
     for x in 0..W {
         for z in 0..D {
             let base = idx(x, 0, z);
@@ -398,10 +416,39 @@ pub fn height_map(blocks: &[u8]) -> [u8; 256] {
             while y > 0 && light_opacity(blocks[base + y - 1]) == 0 {
                 y -= 1;
             }
-            h[z << 4 | x] = y as u8;
+            h[z << 4 | x] = y as u16;
         }
     }
     h
+}
+
+/// Test helper: the lowest 128 cells of every column in b1.7.3's cell order `x << 11 | z << 7 | y`, which is what the Java golden hashes
+/// (`tools/golden/`) were taken over; the cells above (air in a Beta-terrain chunk) are dropped.
+#[cfg(test)]
+pub fn to_beta(blocks: &[u8]) -> Vec<u8> {
+    let mut out = vec![0u8; W * 128 * D];
+    for x in 0..W {
+        for z in 0..D {
+            let (from, to) = (idx(x, 0, z), (x << 11) | (z << 7));
+            out[to..to + 128].copy_from_slice(&blocks[from..from + 128]);
+        }
+    }
+    out
+}
+
+/// Test helper: a metadata array as the Java's `NibbleArray` bytes (the lowest 128 cells of every column, b1.7.3's cell order).
+#[cfg(test)]
+pub fn nibbles_to_beta(n: &Nibbles) -> Vec<u8> {
+    let mut out = vec![0u8; W * 128 * D / 2];
+    for x in 0..W {
+        for z in 0..D {
+            for y in 0..128 {
+                let (i, m) = ((x << 11) | (z << 7) | y, n.get(x, y, z));
+                out[i >> 1] |= m << ((i & 1) * 4);
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -428,10 +475,10 @@ mod tests {
         let mut n = Nibbles::new();
         n.set(0, 0, 0, 5);
         n.set(0, 1, 0, 9); // cell 1: the high nibble of byte 0
-        n.set(15, 127, 15, 0xAB); // the last cell; only the low 4 bits count
+        n.set(15, H - 1, 15, 0xAB); // the last cell; only the low 4 bits count
         assert_eq!(n.bytes()[0], 0x95);
         assert_eq!(n.bytes()[VOLUME / 2 - 1], 0xB0);
-        assert_eq!((n.get(0, 0, 0), n.get(0, 1, 0), n.get(15, 127, 15), n.get(1, 0, 0)), (5, 9, 11, 0));
+        assert_eq!((n.get(0, 0, 0), n.get(0, 1, 0), n.get(15, H - 1, 15), n.get(1, 0, 0)), (5, 9, 11, 0));
         n.set(0, 0, 0, 0);
         assert_eq!(n.bytes()[0], 0x90);
     }
@@ -448,7 +495,7 @@ mod tests {
         assert_eq!(n, Nibbles::new(), "an array of zeros equals no array");
         assert!(Nibbles::from_bytes(vec![0; VOLUME / 2]).0.is_empty(), "an all-zero save keeps no array");
         assert_eq!(Nibbles::from_bytes(n.bytes().to_vec()), n);
-        assert!(Nibbles::default().get(15, 127, 15) == 0, "the `mem::take` placeholder reads as zeros, it no longer panics");
+        assert!(Nibbles::default().get(15, H - 1, 15) == 0, "the `mem::take` placeholder reads as zeros, it no longer panics");
     }
 
     /// A snow layer collides from 3 layers up (`meta & 7 >= 3`), half a block high, like the Java; 1-2 layers are walked through.

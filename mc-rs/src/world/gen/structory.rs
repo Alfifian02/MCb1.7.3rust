@@ -482,7 +482,7 @@ fn assemble(d: &Data, st: usize, cx: i32, cz: i32, off: (i32, i32), rnd: &mut Ja
     bxx = box_of(size, rot, pos);
     let p0 = Piece { t: usize::from(start.t), rot, pos, bx: bxx, rigid: start.proj == 0, kind: start.kind, proc: start.proc };
     let mut pieces = vec![p0.clone()];
-    let area: Bx = [g.0 - s.dist, 0, g.1 - s.dist, g.0 + s.dist, 127, g.1 + s.dist];
+    let area: Bx = [g.0 - s.dist, 0, g.1 - s.dist, g.0 + s.dist, crate::world::chunk::H as i32 - 1, g.1 + s.dist];
     let mut free_holes: Vec<Bx> = vec![bxx];
     let mut queue: VecDeque<(Piece, i32)> = VecDeque::new();
     queue.push_back((p0, 0));
@@ -606,7 +606,7 @@ fn pos_seed(x: i32, y: i32, z: i32) -> i64 {
 }
 
 /// The ground under a column of the terrain (`generate_far`, so no caves and no trees), first free height, kept per chunk. A column
-/// is `height | wet << 8`: wet = its top block is water, lava or ice (sea, river, lake).
+/// is `height | wet << 15` (the world is 384 tall: 9 bits of height): wet = its top block is water, lava or ice (sea, river, lake).
 struct Ground<'a> {
     g: &'a mut OverworldGenerator,
     cm: &'a mut WorldChunkManager,
@@ -624,9 +624,9 @@ impl Ground<'_> {
             let col = (0..256usize)
                 .map(|i| {
                     let base = idx(i / 16, 0, i % 16);
-                    (0..128).rev().find(|&y| b[base + y] != AIR).map_or(0u16, |y| {
+                    (0..crate::world::chunk::H).rev().find(|&y| b[base + y] != AIR).map_or(0u16, |y| {
                         let t = b[base + y];
-                        (y as u16 + 1) | (u16::from(is_liquid(t) || t == ICE) << 8)
+                        (y as u16 + 1) | (u16::from(is_liquid(t) || t == ICE) << 15)
                     })
                 })
                 .collect();
@@ -635,7 +635,7 @@ impl Ground<'_> {
         self.h[&key][((x & 15) * 16 + (z & 15)) as usize]
     }
     fn at(&mut self, x: i32, z: i32) -> i32 {
-        i32::from(self.col(x, z) & 0xFF)
+        i32::from(self.col(x, z) & 0x7FFF)
     }
 }
 
@@ -743,7 +743,7 @@ fn rebuild(w: &mut Region, x: i32, z: i32, h: i32, force: bool) {
         fill = DIRT;
     }
     let snow = w.get(x, cur, z) == SNOW;
-    for y in h.max(1)..128 {
+    for y in h.max(1)..w.top() {
         if w.get(x, y, z) != AIR {
             w.set(x, y, z, AIR);
         }
@@ -756,7 +756,7 @@ fn rebuild(w: &mut Region, x: i32, z: i32, h: i32, force: bool) {
         w.set(x, y, z, fill);
     }
     w.set(x, h - 1, z, top);
-    if snow && h < 128 && is_solid(top) {
+    if snow && h < w.top() && is_solid(top) {
         w.set(x, h, z, SNOW);
     }
 }
@@ -902,7 +902,7 @@ impl Structory {
                     let flat = !d.aquatic(st);
                     if let Some(site) = judge(&pieces, target, flat, &mut |x, z| {
                         let c = gr.col(x, z);
-                        (i32::from(c & 0xFF), c >> 8 != 0)
+                        (i32::from(c & 0x7FFF), c >> 15 != 0)
                     }) {
                         made = Some(Arc::new(Start { st, pieces, site }));
                         break;
@@ -1004,7 +1004,7 @@ fn rotate_meta(id: u8, m: u8, rot: u8) -> u8 {
 
 /// WORLD_SURFACE_WG-like ground in the region: one above the top block that is not air, foliage or a plant.
 fn region_ground(w: &Region, x: i32, z: i32) -> i32 {
-    (1..128).rev().find(|&y| !matches!(w.get(x, y, z), AIR | LEAVES | LOG | TALL_GRASS | DEAD_BUSH | FLOWER_Y..=MUSH_RED | SNOW | REED)).map_or(1, |y| y + 1)
+    (1..w.top()).rev().find(|&y| !matches!(w.get(x, y, z), AIR | LEAVES | LOG | TALL_GRASS | DEAD_BUSH | FLOWER_Y..=MUSH_RED | SNOW | REED)).map_or(1, |y| y + 1)
 }
 
 /// A chest's contents from a baked loot table (`LootTable`: rolls, weighted entries, count, chance).
@@ -1066,7 +1066,7 @@ fn place_piece(d: &Data, s: &Struct, p: &Piece, w: &mut Region, cell: [i32; 4], 
                     continue; // the plinth: the terrain stays as it is
                 }
                 let wy = if p.rigid { p.pos[1] + y } else { region_ground(w, wx, wz) - 1 + y }; // `GravityProcessor(WORLD_SURFACE_WG, -1)`
-                if !(1..128).contains(&wy) {
+                if !(1..w.top()).contains(&wy) {
                     continue; // never the bedrock layer, nor outside the world
                 }
                 let mut st = s0;
@@ -1288,7 +1288,7 @@ mod tests {
     #[test]
     fn a_column_is_rebuilt_cut_or_filled_and_cleared_above() {
         use crate::world::chunk::Nibbles;
-        let mut w = Region::new(0, 0, std::array::from_fn(|_| vec![AIR; 16 * 16 * 128]), std::array::from_fn(|_| Nibbles::new()));
+        let mut w = Region::new(0, 0, std::array::from_fn(|_| vec![AIR; crate::world::chunk::VOLUME]), std::array::from_fn(|_| Nibbles::new()));
         let col = |w: &mut Region, x: i32, z: i32, ground: i32| {
             for y in 1..ground - 4 {
                 w.set(x, y, z, STONE);

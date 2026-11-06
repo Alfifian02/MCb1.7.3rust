@@ -656,7 +656,7 @@ impl Mob {
         // EntityZombie / EntitySkeleton.onLivingUpdate: daylight on bare sky sets fire; fire is 1 damage a second.
         if matches!(k, Zombie | Skeleton) {
             let b = brightness((c.light)(cx, cy, cz));
-            if c.day && b > 0.5 && (cy + 1..128).all(|y| matches!((c.get)(cx, y, cz), Some(0))) && rng.next_float() * 30.0 < (b - 0.4) * 2.0 {
+            if c.day && b > 0.5 && (cy + 1..crate::world::chunk::H as i32).all(|y| matches!((c.get)(cx, y, cz), Some(0))) && rng.next_float() * 30.0 < (b - 0.4) * 2.0 {
                 self.fire = 160;
             }
         }
@@ -1353,7 +1353,7 @@ pub(crate) fn ray_box(o: Vec3, d: Vec3, lo: Vec3, hi: Vec3) -> Option<f32> {
 
 /// Grass with two air cells above, in column (x, z): the y of the grass.
 fn grass_top(get: BlockQuery<'_>, x: i32, z: i32) -> Option<i32> {
-    let y = (1..127).rev().find(|&y| get(x, y, z) != Some(0))?;
+    let y = (1..crate::world::chunk::H as i32 - 1).rev().find(|&y| get(x, y, z) != Some(0))?;
     (get(x, y, z) == Some(2) && get(x, y + 1, z) == Some(0) && get(x, y + 2, z) == Some(0)).then_some(y)
 }
 
@@ -1593,7 +1593,7 @@ impl Mobs {
         if self.clock % 40 == 0 && self.difficulty > 0 && room {
             for _ in 0..8 {
                 let (x, z) = ring(&mut self.rng);
-                let y = ((c.player.y as i32) + self.rng.next_int_bound(41) - 20).clamp(1, 126);
+                let y = ((c.player.y as i32) + self.rng.next_int_bound(41) - 20).clamp(1, crate::world::chunk::H as i32 - 2);
                 // `BiomeGenHell.spawnableMonsterList`: ghast 10, pig zombie 10 (a ghast has its own cap, so a crowd of pigmen does not keep it out).
                 let kind = if self.nether { if self.rng.next_int_bound(2) == 0 && n(&self.list, &[Ghast]) < CAP_GHAST { Ghast } else { PigZombie } } else { [Spider, Zombie, Skeleton, Creeper, Slime][self.rng.next_int_bound(5) as usize] };
                 let before = self.list.len();
@@ -1624,16 +1624,16 @@ impl Mobs {
         for _ in 0..20 {
             let x = px + self.rng.next_int_bound(32) - self.rng.next_int_bound(32);
             let z = pz + self.rng.next_int_bound(32) - self.rng.next_int_bound(32);
-            let y0 = (py + self.rng.next_int_bound(16) - self.rng.next_int_bound(16)).clamp(1, 128);
+            let y0 = (py + self.rng.next_int_bound(16) - self.rng.next_int_bound(16)).clamp(1, crate::world::chunk::H as i32);
             let kind = [Spider, Zombie, Skeleton][self.rng.next_int_bound(3) as usize];
             let mut y = y0;
             while y > 2 && !solid(at(x, y - 1, z)) {
                 y -= 1;
             }
-            while !spot(x, y, z) && y < y0 + 16 && y < 128 {
+            while !spot(x, y, z) && y < y0 + 16 && y < crate::world::chunk::H as i32 {
                 y += 1;
             }
-            if y >= y0 + 16 || y >= 128 || !self.can_spawn(c, kind, x, y, z) {
+            if y >= y0 + 16 || y >= crate::world::chunk::H as i32 || !self.can_spawn(c, kind, x, y, z) {
                 continue;
             }
             let (w, h, ..) = spec(kind);

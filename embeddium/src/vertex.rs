@@ -5,7 +5,7 @@
 //! ```text
 //! word 0   bits  0..9   x      (v + 8) * 16   : -8 <= v < 24 in steps of 1/16
 //!          bits  9..18  z      (v + 8) * 16
-//!          bits 18..31  y      (v + 8) * 32   : -8 <= v < 248 in steps of 1/32
+//!          bits 18..31  y      (v + 8) * 16   : -8 <= v < 504 in steps of 1/16 (was * 32 and < 248 while the world was 128 tall)
 //!          bit  31      repeat 1: the quad tiles its texture (a merged run of faces), 0: it shows the tile once
 //! word 1   bits  0..10  tile   atlas tile number (row * 16 + column of the 16 x 16 texel tiles)
 //!          bits 10..21  u      (texel + 240) * 4 : texels inside the tile, in quarter texels; a repeating quad runs past 0..16
@@ -20,8 +20,8 @@
 //!
 //! Positions are relative to the chunk origin, which the host supplies per draw (Sodium's `u_RegionOffset`; a dynamic-offset uniform
 //! here, push constants are not on GLES). x and z cover -8 <= v < 24 (Sodium's `MODEL_ORIGIN` 8 and `MODEL_RANGE` 32, so a model may
-//! stick out of its chunk by 8 blocks each side) in steps of 1/16, the finest step of a block model; y covers -8 <= v < 248 in steps of
-//! 1/32, so a fluid's corner is within 1/64 of its height. The 16-byte format this replaces had 1/2048 and 1/256 steps and a 16-bit
+//! stick out of its chunk by 8 blocks each side) in steps of 1/16, the finest step of a block model; y covers -8 <= v < 504 in steps of
+//! 1/16, so a fluid's corner is within 1/32 of its height (1/64 with the 1/32 step of the 128-tall world). The 16-byte format this replaces had 1/2048 and 1/256 steps and a 16-bit
 //! atlas coordinate per axis: nothing the mesher emits needs them, and 4 bytes less per vertex is 25 % less vertex fetch and binning
 //! traffic on a tile-based GPU.
 //!
@@ -40,7 +40,7 @@ pub type Packed = [u8; STRIDE];
 const ORIGIN: f32 = 8.0;
 /// Steps per block in x and z, and in y.
 pub const XZ_SCALE: f32 = 16.0;
-pub const Y_SCALE: f32 = 32.0;
+pub const Y_SCALE: f32 = 16.0;
 /// Quarter texels, biased so a repeating quad may run 15 tiles either way from the tile it starts in: `(texel + UV_BIAS) * UV_SCALE`.
 pub const UV_SCALE: f32 = 4.0;
 pub const UV_BIAS: f32 = 240.0;
@@ -49,7 +49,7 @@ pub const FACE_SHADE: [f32; 4] = [1.0, 0.8, 0.6, 0.5];
 pub const AO_STEP: f32 = 0.2;
 
 pub struct Vertex {
-    /// Relative to the chunk's origin in x and z, absolute in y: -8 <= x, z < 24 and -8 <= y < 248 (outside clamps).
+    /// Relative to the chunk's origin in x and z, absolute in y: -8 <= x, z < 24 and -8 <= y < 504 (outside clamps).
     pub pos: [f32; 3],
     /// Atlas tile number, 0..1024.
     pub tile: u16,
@@ -134,7 +134,7 @@ mod tests {
     fn layout_and_round_trip() {
         let b = encode(&vx());
         let w = |i: usize| u32::from_le_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]);
-        assert_eq!(w(0), 128 | 0 << 9 | 528 << 18, "x (8 + 0) * 16, z 0, y (8 + 8.5) * 32");
+        assert_eq!(w(0), 128 | 0 << 9 | 264 << 18, "x (8 + 0) * 16, z 0, y (8 + 8.5) * 16");
         assert_eq!(w(4), 700 | 962 << 10 | 1023 << 21, "(0.5 + 240) * 4, (15.75 + 240) * 4");
         assert_eq!(w(8) >> 16, 60 | 3 << 6 | 6 << 11);
         let d = decode(&b);
@@ -158,7 +158,7 @@ mod tests {
             assert_eq!(dequantize(quantize(v, XZ_SCALE, 511), XZ_SCALE), v);
             assert_eq!(dequantize(quantize(v, Y_SCALE, 8191), Y_SCALE), v);
         }
-        assert_eq!(dequantize(quantize(127.0 + 1.0 / 9.0, Y_SCALE, 8191), Y_SCALE), 127.125); // a fluid corner lands on the 1/32 grid
+        assert_eq!(dequantize(quantize(127.0 + 1.0 / 9.0, Y_SCALE, 8191), Y_SCALE), 127.125); // a fluid corner lands on the 1/16 grid
         assert_eq!(dequantize(quantize(23.9999, XZ_SCALE, 511), XZ_SCALE), 23.9375, "the top step is 511 / 16 - 8");
     }
 

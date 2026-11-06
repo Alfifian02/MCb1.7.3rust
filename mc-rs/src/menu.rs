@@ -349,7 +349,7 @@ impl Menu {
                 // Below the last hint (y 140..148), with the gap between buttons growing from 2 to 6 GUI units as the screen allows.
                 let (y0, pitch) = (152.0, ((gh - 4.0 - 152.0) / 4.0).clamp(22.0, 26.0));
                 vec![
-                    b(2, hw - 100.0, y0, 200.0, match self.ty { WorldType::Vanilla => "World Type: Vanilla", WorldType::Tectonic => "World Type: Tectonic", WorldType::Blooming => "World Type: Blooming" }, true),
+                    b(2, hw - 100.0, y0, 200.0, match self.ty { WorldType::Vanilla => "World Type: Vanilla", WorldType::Tectonic => "World Type: Tectonic", WorldType::Blooming => "World Type: Blooming", WorldType::BloomingLegacy => "World Type: Blooming (old)" }, true),
                     b(3, hw - 100.0, y0 + pitch, 200.0, if self.pack { "Immersive Pack: ON" } else { "Immersive Pack: OFF" }, true),
                     b(0, hw - 100.0, y0 + 2.0 * pitch, 200.0, "Create New World", !self.name.is_empty()),
                     b(1, hw - 100.0, y0 + 3.0 * pitch, 200.0, "Cancel", true),
@@ -922,7 +922,7 @@ impl Menu {
                 rect(v, s, [hw - 109.0, y - 1.0, 218.0, 34.0], 0x000000);
             }
             // the kind is a coloured tag on the right of the name
-            let (kind, kc) = match wd.ty { WorldType::Vanilla => ("Vanilla", 0xAAAAAA), WorldType::Tectonic => ("Tectonic", 0x55FFFF), WorldType::Blooming => ("Blooming", 0xFF55FF) };
+            let (kind, kc) = match wd.ty { WorldType::Vanilla => ("Vanilla", 0xAAAAAA), WorldType::Tectonic => ("Tectonic", 0x55FFFF), WorldType::Blooming => ("Blooming", 0xFF55FF), WorldType::BloomingLegacy => ("Blooming (old)", 0xAA55AA) };
             let line = format!("{} ({}, {:?} MB)", wd.folder, date(wd.modified), (wd.bytes / 1024 * 100 / 1024) as f32 / 100.0);
             HudPipeline::push_text(v, (hw - 108.0) * s, (y + 1.0) * s, s, &ui::fit(&wd.name, 216.0 - tw(kind) - 8.0), rgb(0xFFFFFF));
             HudPipeline::push_text(v, (hw + 108.0 - tw(kind)) * s, (y + 1.0) * s, s, kind, rgb(kc));

@@ -2,7 +2,7 @@
 //! mushrooms) of b1.7.3, written from the decompiled classes (no golden file yet: the hashes need `tools/golden/G.java` to run
 //! `ChunkProviderHell`; the tests below only check what the Java guarantees by construction).
 //!
-//! Same layout as the overworld: a chunk is `(x << 11) | (z << 7) | y`.
+//! Same layout as the overworld: a chunk is `(x * 16 + z) * H + y`; the Nether fills y 0..128 of it and the rest is air.
 //!
 //! - `func_4057_a`'s `field_4172_f` / `field_4171_g` (the 10- and 16-octave stacks fed by 1.0 / 100.0 scales) only feed a variable that
 //!   stays 0.0 in the Java, so they are not sampled here; the stacks are still built, because their octaves draw from the same Random.
@@ -63,7 +63,7 @@ impl Nether {
     /// `provideChunk`: terrain, surface, caves.
     pub fn generate(&mut self, cx: i32, cz: i32) -> Vec<u8> {
         self.rng.set_seed(Self::chunk_seed(cx, cz));
-        let mut blocks = vec![AIR; 32768];
+        let mut blocks = vec![AIR; crate::world::chunk::VOLUME];
         self.terrain(cx, cz, &mut blocks);
         self.surface(cx, cz, &mut blocks);
         carve(self.seed, cx, cz, &mut blocks);
@@ -122,7 +122,7 @@ impl Nether {
                         let (mut a, mut b) = (c00, c01);
                         let (da, db) = ((c10 - c00) * 0.25, (c11 - c01) * 0.25);
                         for sx in 0..4 {
-                            let mut i = ((x * 4 + sx) << 11) | ((z * 4) << 7) | (y * 8 + sy);
+                            let mut i = crate::world::chunk::idx(x * 4 + sx, y * 8 + sy, z * 4);
                             let mut v = a;
                             let dv = (b - a) * 0.25;
                             for _ in 0..4 {
@@ -134,7 +134,7 @@ impl Nether {
                                     id = NETHERRACK;
                                 }
                                 blocks[i] = id;
-                                i += 128;
+                                i += crate::world::chunk::H;
                                 v += dv;
                             }
                             a += da;
@@ -166,7 +166,7 @@ impl Nether {
                 let depth = (n3[i7 + i8 * 16] / 3.0 + 3.0 + r.next_double() * 0.25) as i32;
                 let (mut left, mut top, mut fill) = (-1i32, NETHERRACK, NETHERRACK);
                 for y in (0..128i32).rev() {
-                    let i = (i8 * 16 + i7) * 128 + y as usize;
+                    let i = (i8 * 16 + i7) * crate::world::chunk::H + y as usize;
                     if y >= 127 - r.next_int_bound(5) || y <= r.next_int_bound(5) {
                         blocks[i] = BEDROCK;
                         continue;
@@ -380,7 +380,7 @@ fn tunnel(main: &mut JavaRandom, cx: i32, cz: i32, blocks: &mut [u8], (mut x, mu
                         for iz in z0..z1 {
                             let nz = ((iz + cz * 16) as f64 + 0.5 - z) / rad;
                             // Java quirk kept (as in the overworld's caves): the index starts one cell above `iy`.
-                            let mut i = ((ix * 16 + iz) * 128 + y1) as usize;
+                            let mut i = ((ix * 16 + iz) * crate::world::chunk::H as i32 + y1) as usize;
                             for iy in (y0..y1).rev() {
                                 let ny = (iy as f64 + 0.5 - y) / rad_y;
                                 if ny > -0.7 && nx * nx + ny * ny + nz * nz < 1.0 && matches!(blocks[i], NETHERRACK | DIRT | GRASS) {
@@ -407,7 +407,7 @@ fn touches_lava(blocks: &[u8], (x0, x1, y0, y1, z0, z1): (i32, i32, i32, i32, i3
             let mut iy = y1 + 1;
             while iy >= y0 - 1 {
                 if (0..128).contains(&iy) {
-                    let b = blocks[((ix * 16 + iz) * 128 + iy) as usize];
+                    let b = blocks[((ix * 16 + iz) * crate::world::chunk::H as i32 + iy) as usize];
                     if b == LAVA_MOVING || b == LAVA {
                         return true;
                     }
@@ -439,7 +439,7 @@ mod tests {
         let a = g.generate(3, -2);
         assert_eq!(a, Nether::new(0xCAFEBABE).generate(3, -2), "deterministic, whichever generator makes it");
         for i in 0..256 {
-            let col = &a[i * 128..(i + 1) * 128];
+            let col = &a[i * crate::world::chunk::H..][..128];
             assert_eq!(col[127], BEDROCK, "ceiling");
             assert_eq!(col[0], BEDROCK, "floor");
             assert!(col[1..127].iter().all(|&b| matches!(b, AIR | BEDROCK | NETHERRACK | LAVA | GRAVEL | SOUL_SAND)));

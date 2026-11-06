@@ -15,7 +15,7 @@
 //! border) just marks it for a rebuild.
 //!
 //! M13 frustum culling: each chunk's bounds are known from its key
-//! ((cx*16, 0, cz*16) .. +(16, 128, 16)), so it is one `filter` on `meshes()` in the draw loop.
+//! ((cx*16, 0, cz*16) .. +(16, 384, 16)), so it is one `filter` on `meshes()` in the draw loop.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -27,7 +27,7 @@ use glam::Vec3;
 use crate::gpu::gfx::{Buf, Gfx};
 use crate::gpu::pipeline::{DrawOrigins, MAX_ORIGINS};
 use crate::render::mesh;
-use crate::world::chunk::{height_map, idx, meta_matters, normal_cube, opaque, physics_id, Nibbles, H, VOLUME};
+use crate::world::chunk::{cell_x, cell_y, cell_z, height_map, idx, meta_matters, normal_cube, opaque, physics_id, Nibbles, H, VOLUME};
 use crate::world::gen::chunk_manager::WorldChunkManager;
 use crate::world::gen::hydro;
 use crate::world::gen::overworld::{OverworldGenerator, WorldType};
@@ -284,7 +284,7 @@ pub enum Layer {
 
 /// Sections (16 blocks tall) of a chunk column: the unit the draw loop culls.
 pub const SECTIONS: usize = H / 16;
-const _: () = assert!(SECTIONS <= 8); // `ChunkManager::visible` keeps one bit per section in a u8
+const _: () = assert!(SECTIONS <= 32); // `ChunkManager::visible` keeps one bit per section in a u32 (a u8 while the world was 128 tall)
 
 /// Radius (blocks, 3D distance from the eye) of the REAL translucent water. Real water blends over what is under it, so it is only safe where
 /// the real floor is certainly drawn; the floor's 16-block sections reach less far than the water's when the eye is high, and the two earlier
@@ -306,10 +306,10 @@ pub enum Shape {
 
 /// The sections of the mask `mask` of chunk (x, z) that are within `rh` / `rv` of the eye: the same box (one block taller at both
 /// ends) and the same `in_range` as `ChunkManager::update_visible`.
-fn near_sections(x: i32, z: i32, mask: u8, eye: Vec3, shape: Shape, rh: f32, rv: f32) -> u8 {
+fn near_sections(x: i32, z: i32, mask: u32, eye: Vec3, shape: Shape, rh: f32, rv: f32) -> u32 {
     (0..SECTIONS as i32).filter(|&y| mask >> y & 1 != 0).fold(0, |m, y| {
         let min = Vec3::new(x as f32 * 16.0, y as f32 * 16.0 - 1.0, z as f32 * 16.0);
-        if in_range(shape, eye, min, min + Vec3::new(16.0, 18.0, 16.0), rh, rv) { m | 1u8 << y } else { m }
+        if in_range(shape, eye, min, min + Vec3::new(16.0, 18.0, 16.0), rh, rv) { m | 1u32 << y } else { m }
     })
 }
 
@@ -776,7 +776,7 @@ struct Entry {
     /// Per cell, sky light in the low nibble and block light in the high nibble (same index as `blocks`).
     light: Arc<Vec<u8>>,
     /// `Chunk.heightMap`, indexed `z << 4 | x`; kept in step with `blocks` (insert, populate, edits).
-    height: [u8; 256],
+    height: [u16; 256],
     /// Initial light was computed (the light thread's `init_chunk`, reported back); meshing waits for it. `light` and `lit` are the
     /// render thread's read-only copy: only the light thread's reports write them.
     lit: bool,
@@ -803,6 +803,8 @@ fn ring_for(radius: i32) -> Vec<Key> {
 
 pub struct ChunkManager {
     chunks: Chunks,
+    /// The world's height for populate (`Region::top`): 128 for the b1.7.3 worlds and the Nether, `H` for Blooming (Cascades' terrain).
+    top: i32,
     /// Requested from a worker, not back yet.
     pending: HashSet<Key>,
     /// Offsets of the raw ring (radius + 2), nearest first.
@@ -865,9 +867,9 @@ pub struct ChunkManager {
     /// through `graph.set` (a chunk loads or unloads, a mesh arrives with other occlusion data), which is what makes the walk redo itself.
     graph: wide::Snapshot,
     /// Per chunk column, the sections (bit `s`) `update_visible` found drawable this frame.
-    visible: HashMap<Key, u8>,
+    visible: HashMap<Key, u32>,
     /// The part of `visible` within the water radius `wr` (`WATER_RANGE`, or all of it with the LoD off): the sections whose real water is drawn (and whose LoD water sheet is cut).
-    wet: HashMap<Key, u8>,
+    wet: HashMap<Key, u32>,
     /// The visible chunks near to far (`update_visible`): the order `draw_ranges` walks, once a frame instead of once a layer.
     order: Vec<Key>,
     /// Chunks whose blocks are final, as columns for the far terrain (`world::lod`, Voxy's ingest), until `take_ingest`.
@@ -903,13 +905,16 @@ impl ChunkManager {
             WorldType::Vanilla => OverworldGenerator::world,
             WorldType::Tectonic => OverworldGenerator::world_tectonic,
             WorldType::Blooming => OverworldGenerator::world_blooming,
+            WorldType::BloomingLegacy => OverworldGenerator::world_blooming_legacy,
         };
-        hydro::watch(Some(hydro::Hydro::of(seed, ty == WorldType::Tectonic))); // the currents of this world (Blooming's are Vanilla's)
-        Self::new_with(seed, radius, make)
+        hydro::watch(Some(hydro::Hydro::of(seed, ty.terrain()))); // the currents of this world
+        let mut m = Self::new_with(seed, radius, make);
+        m.top = if ty == WorldType::Blooming { H as i32 } else { 128 };
+        m
     }
 
     /// The Nether: the same manager with `gen::nether` in every worker (no sky light comes out of it by itself: the ceiling is solid
-    /// bedrock, so every column's height map is 128).
+    /// bedrock, so every column's height map is `H`).
     pub fn new_nether(seed: i64, radius: i32) -> Self {
         hydro::watch(None);
         Self::new_with(seed, radius, OverworldGenerator::new_nether)
@@ -964,7 +969,7 @@ impl ChunkManager {
         let gen = make(seed);
         Self { chunks: Chunks::default(), pending: HashSet::new(), ring, radius, center: None, max_in_flight: workers * 2, built, meshing: HashSet::new(), max_meshing: workers * 2, urgent: HashSet::new(),
                populated_rx, populating: HashMap::new(), busy: HashSet::new(), max_populating: workers, stamp: 0,
-               cm: gen.manager(), bm: std::sync::Mutex::new(gen.manager()), biome_area: None, gen, jobs, done, light: light::LightLink::spawn(), sky_sub: 0, mesh_gen: 0, dir: None, saved: HashSet::new(), writer: None, changes: Vec::new(), fresh_water: Vec::new(), loot: Vec::new(), spawners: Vec::new(), wide: wide::WideCull::spawn(), graph: wide::Snapshot::default(), visible: HashMap::new(), wet: HashMap::new(), order: Vec::new(), ingest: Vec::new(), ingested: HashSet::new(), pages: Pages::default(), held: None, upload: UploadDurationEstimator::new(), frame_ns: None, last_update: None, born: HashMap::new(), mesh_wait: (0.0, 0.0, 0) }
+               cm: gen.manager(), bm: std::sync::Mutex::new(gen.manager()), biome_area: None, gen, jobs, done, light: light::LightLink::spawn(), sky_sub: 0, top: 128, mesh_gen: 0, dir: None, saved: HashSet::new(), writer: None, changes: Vec::new(), fresh_water: Vec::new(), loot: Vec::new(), spawners: Vec::new(), wide: wide::WideCull::spawn(), graph: wide::Snapshot::default(), visible: HashMap::new(), wet: HashMap::new(), order: Vec::new(), ingest: Vec::new(), ingested: HashSet::new(), pages: Pages::default(), held: None, upload: UploadDurationEstimator::new(), frame_ns: None, last_update: None, born: HashMap::new(), mesh_wait: (0.0, 0.0, 0) }
     }
 
     /// The render distance in chunks.
@@ -1116,7 +1121,7 @@ impl ChunkManager {
         self.chunks.get(&(x >> 4, z >> 4)).map(|e| e.blocks[idx((x & 15) as usize, y as usize, (z & 15) as usize)])
     }
 
-    /// The 128 blocks of the column at `x`, `z` (index = y), `None` when its chunk is not loaded (`world::map`'s scan).
+    /// The `H` blocks of the column at `x`, `z` (index = y), `None` when its chunk is not loaded (`world::map`'s scan).
     pub fn column(&self, x: i32, z: i32) -> Option<&[u8]> {
         let e = self.chunks.get(&(x >> 4, z >> 4))?;
         let base = idx((x & 15) as usize, 0, (z & 15) as usize);
@@ -1127,11 +1132,11 @@ impl ChunkManager {
     /// nothing when the chunk is not loaded.
     pub fn find_blocks(&self, cx: i32, cz: i32, ids: &[u8], mut f: impl FnMut(i32, i32, i32, u8)) {
         let Some(e) = self.chunks.get(&(cx, cz)) else { return };
-        // One table read a block instead of a search of `ids` (this walks all 32768 cells, once a frame).
+        // One table read a block instead of a search of `ids` (this walks all 98304 cells, once a frame).
         let mut want = [false; 256];
         ids.iter().for_each(|&i| want[i as usize] = true);
         for (i, &b) in e.blocks.iter().enumerate().filter(|(_, &b)| want[b as usize]) {
-            f(cx * 16 + (i >> 11) as i32, (i & 127) as i32, cz * 16 + ((i >> 7) & 15) as i32, b);
+            f(cx * 16 + cell_x(i) as i32, cell_y(i) as i32, cz * 16 + cell_z(i) as i32, b);
         }
     }
 
@@ -1219,7 +1224,7 @@ impl ChunkManager {
         // The column's height is kept here (readers such as `sees_sky` need it at once); the light thread does the same on its copy
         // and relights.
         if let Some(top) = light::height_after_set(&e.blocks, lx, lz, id, y, h) {
-            e.height[lz << 4 | lx] = top as u8;
+            e.height[lz << 4 | lx] = top as u16;
         }
         self.mark_dirty(x, z);
         self.light_edit(x, y, z, id);
@@ -1231,7 +1236,7 @@ impl ChunkManager {
         let mut out = Vec::new();
         for (&(cx, cz), e) in &self.chunks {
             for (i, _) in e.blocks.iter().enumerate().filter(|&(_, &b)| b == id) {
-                out.push((cx * 16 + (i >> 11) as i32, (i & 127) as i32, cz * 16 + ((i >> 7) & 15) as i32));
+                out.push((cx * 16 + cell_x(i) as i32, cell_y(i) as i32, cz * 16 + cell_z(i) as i32));
             }
         }
         out
@@ -1314,7 +1319,7 @@ impl ChunkManager {
             for _ in 0..80 {
                 *lcg = lcg.wrapping_mul(3).wrapping_add(1013904223);
                 let v = *lcg >> 2;
-                let (x, z, y) = ((v & 15) as usize, (v >> 8 & 15) as usize, (v >> 16 & 127) as usize);
+                let (x, z, y) = ((v & 15) as usize, (v >> 8 & 15) as usize, (v >> 16 & 511) as usize % H); // b1.7.3 drew `& 127`; the world is 384 tall now
                 let id = e.blocks[idx(x, y, z)];
                 if crate::world::ticks::ticks_at_random(id) {
                     out.push((cx * 16 + x as i32, y as i32, cz * 16 + z as i32, id));
@@ -1351,7 +1356,7 @@ impl ChunkManager {
         }
         let blocks = keys.map(|k| Arc::unwrap_or_clone(std::mem::take(&mut self.chunks.get_mut(&k).unwrap().blocks)));
         let data = keys.map(|k| std::mem::take(&mut self.chunks.get_mut(&k).unwrap().data));
-        Some(Region::new(x, z, blocks, data))
+        Some(Region::new(x, z, blocks, data).with_top(self.top))
     }
 
     /// The chests populate filled since the last call; the game puts them into its tile entities.
@@ -1502,10 +1507,10 @@ impl ChunkManager {
             if !in_range(shape, eye, min, max, rh, rv) || !in_frustum(min, max) {
                 continue;
             }
-            let seen = (0..SECTIONS as i32).filter(|&y| mask >> y & 1 != 0).fold(0u8, |m, y| {
+            let seen = (0..SECTIONS as i32).filter(|&y| mask >> y & 1 != 0).fold(0u32, |m, y| {
                 let min = Vec3::new(x as f32 * 16.0, y as f32 * 16.0 - 1.0, z as f32 * 16.0);
                 let max = min + Vec3::new(16.0, 18.0, 16.0);
-                if in_range(shape, eye, min, max, rh, rv) && in_frustum(min, max) { m | 1u8 << y } else { m }
+                if in_range(shape, eye, min, max, rh, rv) && in_frustum(min, max) { m | 1u32 << y } else { m }
             });
             if seen != 0 {
                 self.visible.insert((x, z), seen);
@@ -1532,7 +1537,7 @@ impl ChunkManager {
         if sy0 < 0 || sy1 >= SECTIONS as i32 {
             return true;
         }
-        let bits = (sy0..=sy1).fold(0u8, |m, s| m | 1u8 << s);
+        let bits = (sy0..=sy1).fold(0u32, |m, s| m | 1u32 << s);
         for cx in chunk_coord(min.x)..=chunk_coord(max.x) {
             for cz in chunk_coord(min.z)..=chunk_coord(max.z) {
                 match self.visible.get(&(cx, cz)) {
@@ -1775,7 +1780,7 @@ impl ChunkManager {
             keys.iter().for_each(|&k| {
                 self.busy.insert(k);
             });
-            let _ = self.jobs.send(Job::Populate(Box::new(PopJob { x, z, region: Region::new(x, z, blocks, data) })));
+            let _ = self.jobs.send(Job::Populate(Box::new(PopJob { x, z, region: Region::new(x, z, blocks, data).with_top(self.top) })));
         }
     }
 
@@ -2036,7 +2041,7 @@ mod tests {
     #[test]
     fn water_is_drawn_only_within_its_range() {
         let eye = Vec3::new(8.0, 70.0, 8.0);
-        let near = |x| near_sections(x, 0, 0xFF, eye, Shape::Sphere, WATER_RANGE, 48.0);
+        let near = |x| near_sections(x, 0, u32::MAX, eye, Shape::Sphere, WATER_RANGE, 48.0);
         // Section boxes are one block taller at both ends: y 3 (47..65) is 5 below the eye, y 4 holds it, y 5 (79..97) is 9 above;
         // y 2 (31..49) is 21 below and y 6 (95..113) 25 above: out.
         assert_eq!(near(0), 0b0011_1000);
@@ -2044,7 +2049,7 @@ mod tests {
         assert_eq!(near(3), 0, "a chunk 40 blocks off is out");
         assert_eq!(near_sections(0, 0, 0b0000_1000, Vec3::new(8.0, 200.0, 8.0), Shape::Sphere, WATER_RANGE, 48.0), 0, "an eye far above keeps none");
         // LoD off: `update_visible` passes `1e9.min(rh)`, so the chunk 40 blocks off keeps its water too.
-        assert_ne!(near_sections(3, 0, 0xFF, eye, Shape::Sphere, 1e9f32.min(64.0), 48.0), 0);
+        assert_ne!(near_sections(3, 0, u32::MAX, eye, Shape::Sphere, 1e9f32.min(64.0), 48.0), 0);
     }
 
     /// `box_visible`: a box is seen when one of the sections it touches was found by `update_visible`; a box in a loaded chunk the walk
@@ -2117,7 +2122,7 @@ mod tests {
         assert!(m.set_block(3, 40, 5, 0)); // break: the metadata is cleared
         assert_eq!((m.block(3, 40, 5), m.meta(3, 40, 5)), (Some(0), 0));
         assert_eq!(m.meta(100, 40, 5), 0); // unloaded
-        assert!(!m.set_block_meta(3, 128, 5, 35, 1)); // above the world
+        assert!(!m.set_block_meta(3, H as i32, 5, 35, 1)); // above the world
     }
 
     /// The chunk arrays are shared (`Arc`) with mesh jobs and the light thread: an edit copies on write, so a snapshot taken before it
@@ -2387,13 +2392,13 @@ mod tests {
         let b = idx(5, 0, 5);
         (1..=63).for_each(|y| blocks[b + y] = 9); // water to the surface
         blocks[b + 64] = 31;
-        blocks[b + 127] = 1; // a block in the topmost cell
+        blocks[b + H - 1] = 1; // a block in the topmost cell
         m.insert((0, 0), blocks);
         let walk = |x: i32, z: i32| (1..H as i32).rev().find(|&y| m.block_loaded(x, y, z).is_some_and(|b| is_solid(b) || is_liquid(b))).map_or(-1, |y| y + 1);
         for (x, z) in [(0, 0), (15, 15), (3, 9), (5, 5), (8, 8), (-1, 0), (16, 0), (0, -17)] {
             assert_eq!(m.top_solid(x, z), walk(x, z), "column ({x}, {z})");
         }
-        assert_eq!((m.top_solid(0, 0), m.top_solid(5, 5), m.top_solid(8, 8), m.top_solid(16, 0)), (61, 128, -1, -1));
+        assert_eq!((m.top_solid(0, 0), m.top_solid(5, 5), m.top_solid(8, 8), m.top_solid(16, 0)), (61, H as i32, -1, -1));
     }
 
     /// The biome grid of the rain pass is memoised: the same area twice is one noise run, a new area is a new answer.

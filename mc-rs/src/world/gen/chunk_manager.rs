@@ -19,6 +19,7 @@
 //! same arithmetic in Python (it gave the distribution quoted in the ROADMAP).
 
 use crate::world::biome::Biome;
+use std::sync::Arc;
 use crate::world::gen::natural::{self, Climate};
 use crate::world::gen::noise::{JavaRandom, PerlinNoise};
 #[cfg(test)]
@@ -125,6 +126,8 @@ pub struct WorldChunkManager {
     shaped: bool,
     /// The Blooming world type: the biomes come from `Biome::blooming` (see `blooming`).
     blooming: bool,
+    /// The Blooming world type's terrain (Cascades): the climate, and so the biomes, come from its density functions (see `cascades`).
+    cascades: Option<Arc<tectonic::Tectonic>>,
     shift: Normal,
     temp: Normal,
     humid: Normal,
@@ -148,6 +151,7 @@ impl WorldChunkManager {
         Self {
             shaped: true,
             blooming: false,
+            cascades: None,
             shift: mk(6, -3, &[1.0, 1.0, 1.0, 0.0]),
             temp: mk(1, -10, &[1.5, 0.0, 1.0, 0.0, 0.0, 0.0]),
             humid: mk(2, -8, &[1.0, 1.0, 0.0, 0.0, 0.0, 0.0]),
@@ -176,9 +180,20 @@ impl WorldChunkManager {
         self
     }
 
+    /// This manager for a world whose climate is Cascades' (`Some`): temperature, humidity, continentalness, erosion and weirdness are the
+    /// datapack's own, and the biome is the one its multi-noise table puts there (`gen::cascades`), not the Beta table's.
+    pub fn cascades(mut self, t: Option<Arc<tectonic::Tectonic>>) -> Self {
+        self.cascades = t;
+        self
+    }
+
     /// Biome, 0..1 climate and wanted terrain of one quart (4 x 4 blocks), as the game samples them. The coordinates are in quarts;
     /// the shift bends the borders (about 16 blocks) so they do not follow the noise's grid.
     fn cell(&self, qx: i32, qz: i32) -> Cell {
+        if let Some(k) = self.cascades.as_ref().and_then(|t| t.climate(qx * 4 + 2, qz * 4 + 2)) {
+            // The middle block of the quart; the terrain is the density's, so there is no wanted offset or steepness.
+            return Cell { biome: super::cascades::biome(k), t: through(k[0], &TEMPERATURE), h: through(k[1], &HUMIDITY), off: 0.0, steep: 1.0 };
+        }
         let (u, v) = (qx as f64 * SCALE, qz as f64 * SCALE);
         let (u, v) = (u + self.shift.get(u, v) * 4.0, v + self.shift.get(v, u) * 4.0);
         let (t, h) = (self.temp.get(u, v), self.humid.get(u, v));

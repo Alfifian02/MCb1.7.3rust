@@ -136,7 +136,7 @@ fn touches_water(blocks: &[u8], x_lo: i32, x_hi: i32, y_lo: i32, y_hi: i32, z_lo
             let mut iy = y_hi + 1;
             while iy >= y_lo - 1 {
                 if (0..128).contains(&iy) {
-                    let b = blocks[((ix * 16 + iz) * 128 + iy) as usize];
+                    let b = blocks[((ix * 16 + iz) * crate::world::chunk::H as i32 + iy) as usize];
                     if b == block::WATER_MOVING || b == block::WATER {
                         return true;
                     }
@@ -164,7 +164,7 @@ fn carve_ellipsoid(blocks: &mut [u8], cx: i32, cz: i32, (x, y, z): (f64, f64, f6
                 continue;
             }
             // Java quirk kept: `i` starts one cell above `iy` (see the module docs).
-            let mut i = ((ix * 16 + iz) * 128 + y_hi) as usize;
+            let mut i = ((ix * 16 + iz) * crate::world::chunk::H as i32 + y_hi) as usize;
             let mut grass = false;
             for iy in (y_lo..y_hi).rev() {
                 let dy = (iy as f64 + 0.5 - y) / r2;

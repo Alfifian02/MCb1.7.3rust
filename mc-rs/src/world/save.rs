@@ -60,15 +60,52 @@ pub fn encode_chunk(blocks: &[u8], data: &Nibbles, populated: bool) -> Vec<u8> {
     out
 }
 
-/// (blocks, metadata, populated).
+/// The height of a chunk before 2026-11-05 (b1.7.3's 128): older files hold `16 * 16 * 128` cells in the order `x << 11 | z << 7 | y`.
+const OLD_H: usize = 128;
+const OLD_VOLUME: usize = 16 * 16 * OLD_H;
+
+/// (blocks, metadata, populated). A file of the 128-high world is read too: its cells are moved to the 384-high layout and the cells
+/// above them are air (`widen`), so a saved chunk keeps its blocks and only gets taller.
 pub fn decode_chunk(b: &[u8]) -> Option<(Vec<u8>, Nibbles, bool)> {
+    if let Some((blocks, data, populated)) = decode_raw(b, VOLUME) {
+        return Some((blocks, Nibbles::from_bytes(data), populated));
+    }
+    let (blocks, data, populated) = decode_raw(b, OLD_VOLUME)?;
+    let (blocks, data) = widen(&blocks, &data);
+    Some((blocks, data, populated))
+}
+
+/// The two run-length coded arrays of a file for a chunk of `volume` cells (blocks, packed metadata, populated).
+fn decode_raw(b: &[u8], volume: usize) -> Option<(Vec<u8>, Vec<u8>, bool)> {
     let (&populated, rest) = b.split_first()?;
-    let (blocks, rest) = unrle(rest, VOLUME)?;
-    let (data, rest) = unrle(rest, VOLUME / 2)?;
+    let (blocks, rest) = unrle(rest, volume)?;
+    let (data, rest) = unrle(rest, volume / 2)?;
     if populated > 1 || !rest.is_empty() {
         return None;
     }
-    Some((blocks, Nibbles::from_bytes(data), populated == 1))
+    Some((blocks, data, populated == 1))
+}
+
+/// A chunk of the 128-high layout (`x << 11 | z << 7 | y`, metadata packed two cells to a byte, even cell low) re-seated in the
+/// 384-high one, air above.
+fn widen(old_blocks: &[u8], old_data: &[u8]) -> (Vec<u8>, Nibbles) {
+    let mut blocks = vec![0u8; VOLUME];
+    let mut data = Nibbles::new();
+    for x in 0..16 {
+        for z in 0..16 {
+            let from = (x << 11) | (z << 7);
+            let to = crate::world::chunk::idx(x, 0, z);
+            blocks[to..to + OLD_H].copy_from_slice(&old_blocks[from..from + OLD_H]);
+            for y in 0..OLD_H {
+                let i = from + y;
+                let m = old_data[i >> 1] >> ((i & 1) * 4) & 15;
+                if m != 0 {
+                    data.set(x, y, z, m);
+                }
+            }
+        }
+    }
+    (blocks, data)
 }
 
 /// Everything about the player and the loose ends of the world that is not a chunk.
@@ -250,17 +287,44 @@ impl Level {
 mod tests {
     use super::*;
 
+    /// A file of the 128-high world (2026-11-05 and before) loads into the 384-high layout: every old cell keeps its place, the cells
+    /// above are air, the metadata moves with its cell. A file of neither size is refused.
+    #[test]
+    fn a_128_high_chunk_file_is_widened() {
+        let mut old = vec![0u8; OLD_VOLUME];
+        for x in 0..16usize {
+            for z in 0..16usize {
+                for y in 0..60 {
+                    old[(x << 11) | (z << 7) | y] = 1;
+                }
+                old[(x << 11) | (z << 7) | 127] = (x + z) as u8 + 2;
+            }
+        }
+        let mut meta = vec![0u8; OLD_VOLUME / 2];
+        let i = (5usize << 11) | (9 << 7) | 40; // cell (5, 40, 9)
+        meta[i >> 1] |= 7 << ((i & 1) * 4);
+        let mut file = vec![1u8];
+        rle(&old, &mut file);
+        rle(&meta, &mut file);
+        let (blocks, data, populated) = decode_chunk(&file).expect("an old file still loads");
+        assert!(populated && blocks.len() == VOLUME);
+        let at = |x, y, z| blocks[crate::world::chunk::idx(x, y, z)];
+        assert_eq!((at(3, 0, 4), at(3, 59, 4), at(3, 60, 4), at(3, 127, 4), at(3, 128, 4), at(3, 383, 4)), (1, 1, 0, 9, 0, 0));
+        assert_eq!((data.get(5, 40, 9), data.get(5, 41, 9), data.get(9, 40, 5)), (7, 0, 0));
+        assert!(decode_chunk(&file[..file.len() - 3]).is_none());
+    }
+
     /// A chunk (stone below y = 60, a few stray blocks; all-zero metadata, whose runs are split at 255) round-trips exactly (metadata, flag and all); any cut, extra byte or
     /// bad flag is refused. The level round-trips, a cut or a NaN position is refused.
     #[test]
     fn chunk_and_level_round_trip() {
         let mut blocks = vec![0u8; VOLUME];
         for (i, b) in blocks.iter_mut().enumerate() {
-            *b = if i % 128 < 60 { 1 } else if i % 977 == 0 { 3 } else { 0 };
+            *b = if i % crate::world::chunk::H < 60 { 1 } else if i % 977 == 0 { 3 } else { 0 };
         }
         let mut data = Nibbles::new();
         data.set(3, 40, 5, 14);
-        data.set(15, 127, 15, 9);
+        data.set(15, crate::world::chunk::H - 1, 15, 9);
         let enc = encode_chunk(&blocks, &data, true);
         assert!(enc.len() < VOLUME / 4, "{} bytes", enc.len());
         let (b2, d2, p2) = decode_chunk(&enc).unwrap();

@@ -258,7 +258,7 @@ struct Draw { origin: vec4<f32> };
 const ASIZE: vec2<f32> = vec2<f32>(@AW@.0, @AH@.0);
 
 fn chunk_pos(w: vec3<u32>) -> vec3<f32> {
-    return draw.origin.xyz + vec3<f32>(f32(w.x & 511u) / 16.0 - 8.0, f32((w.x >> 18u) & 8191u) / 32.0 - 8.0, f32((w.x >> 9u) & 511u) / 16.0 - 8.0);
+    return draw.origin.xyz + vec3<f32>(f32(w.x & 511u) / 16.0 - 8.0, f32((w.x >> 18u) & 8191u) / 16.0 - 8.0, f32((w.x >> 9u) & 511u) / 16.0 - 8.0);
 }
 // Texels inside the tile (0..16 for a face that shows it once, further for a merged run).
 fn chunk_texel(w: vec3<u32>) -> vec2<f32> {

@@ -70,14 +70,14 @@ impl WideKey {
 pub(super) struct Wide {
     pub key: WideKey,
     pub gen: u32,
-    pub cols: Vec<(Key, u8)>,
+    pub cols: Vec<(Key, u32)>,
 }
 
 /// The walk from the camera's section, in range but not tested against the frustum. The eye is taken as the middle of its section and
 /// the ranges grow by the most that can move it (half a section's diagonal), so the result holds every section any eye position inside
 /// that section would reach; the per-frame test with the real eye (`ChunkManager::update_visible`) cuts it down again.
 /// With the camera in a chunk that is not loaded there is nowhere to start: every loaded section in range is returned.
-fn walk(map: &VisMap, culler: &mut Culler, k: &WideKey) -> Vec<(Key, u8)> {
+fn walk(map: &VisMap, culler: &mut Culler, k: &WideKey) -> Vec<(Key, u32)> {
     let [ox, oy, oz] = k.origin;
     let eye = Vec3::new(ox as f32 * 16.0 + 8.0, oy as f32 * 16.0 + 8.0, oz as f32 * 16.0 + 8.0);
     let (rh, rv) = (k.rh + 14.0, k.rv + 8.0);
@@ -85,14 +85,14 @@ fn walk(map: &VisMap, culler: &mut Culler, k: &WideKey) -> Vec<(Key, u8)> {
         let min = Vec3::new(x as f32 * 16.0, y as f32 * 16.0 - 1.0, z as f32 * 16.0);
         in_range(k.shape, eye, min, min + Vec3::new(16.0, 18.0, 16.0), rh, rv)
     };
-    let mut cols: Vec<(Key, u8)> = Vec::new();
+    let mut cols: Vec<(Key, u32)> = Vec::new();
     let mut at: HashMap<Key, usize, std::hash::BuildHasherDefault<KeyHasher>> = HashMap::default();
     let mut add = |x: i32, y: i32, z: i32| {
         let i = *at.entry((x, z)).or_insert_with(|| {
             cols.push(((x, z), 0));
             cols.len() - 1
         });
-        cols[i].1 |= 1u8 << y;
+        cols[i].1 |= 1u32 << y;
     };
     match culler.find_visible(&Sections(map), k.origin, k.inside, &ok) {
         Some(found) => found.iter().for_each(|&[x, y, z]| add(x, y, z)),
@@ -202,7 +202,7 @@ mod tests {
     fn walk_reaches_every_open_section() {
         let s = strip(0..=3);
         let cols = walk(&s.map, &mut Culler::default(), &key([0, 0, 0]));
-        let all = (0..SECTIONS).fold(0u8, |m, y| m | 1 << y);
+        let all = (0..SECTIONS).fold(0u32, |m, y| m | 1 << y);
         assert_eq!(cols.len(), 4);
         assert!(cols.iter().all(|c| c.1 == all));
     }

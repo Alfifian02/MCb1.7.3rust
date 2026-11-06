@@ -1398,7 +1398,7 @@ fn index_of(segs: &[Seg]) -> HashMap<(i32, i32), Vec<u32>> {
 
 /// Top solid block of a column (not water, not ice), or -1.
 fn surface(col: &[u8]) -> i32 {
-    (0..128).rev().find(|&y| !matches!(col[y], block::AIR | block::WATER | block::WATER_MOVING | block::ICE)).map_or(-1, |y| y as i32)
+    (0..col.len()).rev().find(|&y| !matches!(col[y], block::AIR | block::WATER | block::WATER_MOVING | block::ICE)).map_or(-1, |y| y as i32)
 }
 
 /// Blocks of a bank, after the mod's `bank_style` files by biome (river / plains: clay and gravel, desert and beach: sand, mountains:
@@ -1433,7 +1433,7 @@ fn pick(list: &[u8], h: f64) -> u8 {
 fn skin_all_water(cx: i32, cz: i32, blocks: &mut [u8], biomes: &[Biome], level: u8) {
     let surf = (SEA_LEVEL - 1) as usize;
     let water = |blocks: &[u8], x: usize, z: usize| {
-        let col = (x << 11) | (z << 7);
+        let col = crate::world::chunk::idx(x, 0, z);
         matches!(blocks[col + surf], block::WATER | block::WATER_MOVING | block::ICE) && blocks[col + surf + 1] == block::AIR
     };
     let mut wet = [false; 256];
@@ -1447,7 +1447,7 @@ fn skin_all_water(cx: i32, cz: i32, blocks: &mut [u8], biomes: &[Biome], level: 
             if wet[(x * 16 + z) as usize] || !NB.iter().any(|&(a, b)| (0..16).contains(&(x + a)) && (0..16).contains(&(z + b)) && wet[((x + a) * 16 + z + b) as usize]) {
                 continue;
             }
-            let col = ((x as usize) << 11) | ((z as usize) << 7);
+            let col = crate::world::chunk::idx(x as usize, 0, z as usize);
             // The ground: the first solid block from just above the sea down; a bank only where it is within a block of the water's level.
             let Some(y) = (surf.saturating_sub(2)..=surf + 2).rev().find(|&y| blocks[col + y] != block::AIR) else { continue };
             if !matches!(blocks[col + y], block::GRASS | block::DIRT) || y + 1 < surf {
@@ -1510,7 +1510,7 @@ impl Region {
         1
     }
 
-    /// Cut this region's rivers and fill its lakes into chunk (cx, cz), `(x << 11) | (z << 7) | y`, after terrain and surface.
+    /// Cut this region's rivers and fill its lakes into chunk (cx, cz), `crate::world::chunk::idx(x, y, z)`, after terrain and surface.
     /// `biomes` and `temps` are the chunk's, `x * 16 + z`; ice caps the water where it is cold.
     pub fn carve(&self, cx: i32, cz: i32, blocks: &mut [u8], biomes: &[Biome], temps: &[f64]) {
         self.carve_streams(cx, cz, blocks, biomes, temps);
@@ -1528,10 +1528,10 @@ impl Region {
         for x in 0..16usize {
             for z in 0..16usize {
                 let (wx, wz) = (cx * 16 + x as i32, cz * 16 + z as i32);
-                let col = (x << 11) | (z << 7);
+                let col = crate::world::chunk::idx(x, 0, z);
                 let (st, cold) = (style(biomes[x * 16 + z]), temps[x * 16 + z] < 0.5);
                 let pat = unit3(0x5EED, wx.div_euclid(3) as i64, wz.div_euclid(3) as i64);
-                let s = surface(&blocks[col..col + 128]);
+                let s = surface(&blocks[col..col + crate::world::chunk::H]);
                 let (px, pz) = (wx as f64 + 0.5, wz as f64 + 0.5);
                 let plan = self.plan_at(px, pz);
                 if !plan.is_some_and(|p| p.in_channel) {
@@ -1618,7 +1618,7 @@ impl Region {
                         }
                     }
                     // Flowers along the water, thinning out with the distance.
-                    let ns = surface(&blocks[col..col + 128]);
+                    let ns = surface(&blocks[col..col + crate::world::chunk::H]);
                     let r = unit3(0x71, wx as i64, wz as i64);
                     let f = 1.0 - k / band;
                     if ns > 0 && ns < 126 && blocks[col + ns as usize] == block::GRASS && blocks[col + ns as usize + 1] == block::AIR && r < 0.12 * f {
@@ -1659,23 +1659,24 @@ pub struct Hydro {
 
 impl Hydro {
     /// The (one) `Hydro` of the world with this seed and type.
-    pub fn of(seed: i64, tectonic: bool) -> Arc<Hydro> {
-        static WORLDS: OnceLock<Mutex<HashMap<(i64, bool, u64), Arc<Hydro>>>> = OnceLock::new();
+    /// `terrain`: 0 Vanilla, 1 Tectonic, 2 Cascades (`WorldType::terrain`).
+    pub fn of(seed: i64, terrain: u8) -> Arc<Hydro> {
+        static WORLDS: OnceLock<Mutex<HashMap<(i64, u8, u64), Arc<Hydro>>>> = OnceLock::new();
         let set = settings();
         let (size, tag) = (set.drainage as f64, set.layout_tag());
         let mut m = WORLDS.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
-        m.entry((seed, tectonic, tag)).or_insert_with(|| Arc::new(Hydro { seed, size, tag, plates: Mutex::default(), disk: true })).clone()
+        m.entry((seed, terrain, tag)).or_insert_with(|| Arc::new(Hydro { seed, size, tag, plates: Mutex::default(), disk: true })).clone()
     }
 
     /// The `Hydro` the World Preview reads: shared by the preview's workers like `of`, but apart from the game's worlds and never read from
     /// or written to the disk cache.
-    pub fn of_preview(seed: i64, tectonic: bool) -> Arc<Hydro> {
-        static PREVIEWS: OnceLock<Mutex<HashMap<(i64, bool, u64), Arc<Hydro>>>> = OnceLock::new();
+    pub fn of_preview(seed: i64, terrain: u8) -> Arc<Hydro> {
+        static PREVIEWS: OnceLock<Mutex<HashMap<(i64, u8, u64), Arc<Hydro>>>> = OnceLock::new();
         // The plate size and the settings that shape a network are part of the key here too: the preview shows the rivers the world will have.
         let set = settings();
         let (size, tag) = (set.drainage as f64, set.layout_tag());
         let mut m = PREVIEWS.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
-        m.entry((seed, tectonic, tag)).or_insert_with(|| Arc::new(Hydro { seed, size, tag, plates: Mutex::default(), disk: false })).clone()
+        m.entry((seed, terrain, tag)).or_insert_with(|| Arc::new(Hydro { seed, size, tag, plates: Mutex::default(), disk: false })).clone()
     }
 
     /// The network of a plate, routed with `probe` if nobody has yet. A second thread that needs the same plate waits for the first.
@@ -1866,11 +1867,11 @@ mod tests {
         for cx in (sx / 16.0) as i32 - 12..(sx / 16.0) as i32 + 12 {
             for cz in (sz / 16.0) as i32 - 12..(sz / 16.0) as i32 + 12 {
                 let reg = h.region(cx, cz, &mut land);
-                let mut b = vec![block::AIR; 16 * 16 * 128];
+                let mut b = vec![block::AIR; crate::world::chunk::VOLUME];
                 for i in 0..256 {
                     let top = land((cx * 16 + (i / 16) as i32).div_euclid(CELL), (cz * 16 + (i % 16) as i32).div_euclid(CELL)).0 as usize;
                     for y in 0..top.min(120) {
-                        b[(i / 16) << 11 | (i % 16) << 7 | y] = block::STONE;
+                        b[crate::world::chunk::idx(i / 16, y, i % 16)] = block::STONE;
                     }
                 }
                 let before = b.clone();
@@ -1881,7 +1882,7 @@ mod tests {
                 }
                 for i in 0..256usize {
                     for y in 1..127usize {
-                        let at = (i / 16) << 11 | (i % 16) << 7 | y;
+                        let at = crate::world::chunk::idx(i / 16, y, i % 16);
                         if b[at] == block::WATER {
                             water += 1;
                             assert!(b[at - 1] != block::AIR, "water over air at chunk ({cx}, {cz}), y {y}");
@@ -1915,11 +1916,11 @@ mod tests {
     fn the_preview_water_matches_the_carve() {
         let reg = Region { nets: vec![Arc::new(made(&[(0.0, 8.0, 15.0, 8.0, 2.0)]))] };
         for top in [69usize, 66, 30] {
-            let mut b = vec![block::AIR; 16 * 16 * 128];
+            let mut b = vec![block::AIR; crate::world::chunk::VOLUME];
             for x in 0..16usize {
                 for z in 0..16usize {
                     for y in 0..=top {
-                        b[(x << 11) | (z << 7) | y] = block::STONE;
+                        b[crate::world::chunk::idx(x, y, z)] = block::STONE;
                     }
                 }
             }
@@ -1927,7 +1928,7 @@ mod tests {
             let mut wet = 0;
             for x in 0..16usize {
                 for z in 0..16usize {
-                    let carved = b[(x << 11) | (z << 7)..][..128].iter().any(|&c| c == block::WATER);
+                    let carved = b[crate::world::chunk::idx(x, 0, z)..][..128].iter().any(|&c| c == block::WATER);
                     let seen = reg.water_at(x as i32, z as i32, top as i32, Biome::Plains) == 1;
                     assert_eq!(carved, seen, "ground {top}: column ({x}, {z}) carved {carved}, preview {seen}");
                     wet += usize::from(carved);
@@ -1967,16 +1968,16 @@ mod tests {
         let lower = Arc::new(made_at(66.5, &[(-40.0, 0.0, 60.0, 0.0, 4.0)]));
         let upper = Arc::new(made_at(75.5, &[(-40.0, 10.0, 60.0, 10.0, 1.5)]));
         let reg = Region { nets: vec![lower, upper] };
-        let mut b = vec![block::AIR; 16 * 16 * 128];
+        let mut b = vec![block::AIR; crate::world::chunk::VOLUME];
         for x in 0..16usize {
             for z in 0..16usize {
                 for y in 0..70 {
-                    b[(x << 11) | (z << 7) | y] = block::STONE;
+                    b[crate::world::chunk::idx(x, y, z)] = block::STONE;
                 }
             }
         }
         reg.carve(0, 0, &mut b, &vec![Biome::Plains; 256], &vec![0.8; 256]);
-        let at = |x: usize, z: usize, y: usize| b[(x << 11) | (z << 7) | y];
+        let at = |x: usize, z: usize, y: usize| b[crate::world::chunk::idx(x, y, z)];
         // The upper river's surface: grade 75.5, half width 1.5 -> inset 2 -> water block 73, on channel columns z 8..=11.
         for x in 1..15usize {
             for z in 8..=11usize {
@@ -2005,17 +2006,17 @@ mod tests {
         let mut h = vec![0i32; (nx * 16) * (nz * 16)];
         for cx in 0..nx {
             for cz in 0..nz {
-                let mut b = vec![block::AIR; 16 * 16 * 128];
+                let mut b = vec![block::AIR; crate::world::chunk::VOLUME];
                 for i in 0..256usize {
                     for y in 0..100 {
-                        b[((i / 16) << 11) | ((i % 16) << 7) | y] = block::STONE;
+                        b[crate::world::chunk::idx(i / 16, y, i % 16)] = block::STONE;
                     }
                 }
                 reg.carve(x0 / 16 + cx as i32, z0 / 16 + cz as i32, &mut b, &vec![Biome::Plains; 256], &vec![0.8; 256]);
                 for x in 0..16usize {
                     for z in 0..16usize {
-                        let col = (x << 11) | (z << 7);
-                        let top = (0..128usize).rev().find(|&y| b[col + y] != block::AIR).unwrap() as i32;
+                        let col = crate::world::chunk::idx(x, 0, z);
+                        let top = (0..crate::world::chunk::H).rev().find(|&y| b[col + y] != block::AIR).unwrap() as i32;
                         h[(cx * 16 + x) * (nz * 16) + cz * 16 + z] = top;
                     }
                 }
@@ -2040,16 +2041,16 @@ mod tests {
     #[test]
     fn the_mouth_opens_into_the_sea() {
         let reg = Region { nets: vec![Arc::new(made(&[(-30.0, 8.0, 12.0, 8.0, 1.5)]))] };
-        let mut b = vec![block::AIR; 16 * 16 * 128];
+        let mut b = vec![block::AIR; crate::world::chunk::VOLUME];
         for x in 0..16usize {
             for z in 0..16usize {
                 let top = if x < 8 { 66 } else { 60 };
                 for y in 0..top {
-                    b[(x << 11) | (z << 7) | y] = block::STONE;
+                    b[crate::world::chunk::idx(x, y, z)] = block::STONE;
                 }
                 if x >= 8 {
                     for y in top..64 {
-                        b[(x << 11) | (z << 7) | y] = block::WATER;
+                        b[crate::world::chunk::idx(x, y, z)] = block::WATER;
                     }
                 }
             }
@@ -2059,12 +2060,12 @@ mod tests {
         for x in 8..16usize {
             for z in 0..16usize {
                 for y in 0..128usize {
-                    let i = (x << 11) | (z << 7) | y;
+                    let i = crate::world::chunk::idx(x, y, z);
                     assert_eq!(b[i], before[i], "the sea changed at ({x}, {z}, {y})");
                 }
             }
         }
-        assert_eq!(b[(3 << 11) | (8 << 7) | 63], block::WATER, "the river is cut on the land");
+        assert_eq!(b[crate::world::chunk::idx(3, 63, 8)], block::WATER, "the river is cut on the land");
     }
 
     /// A point inside a wide channel belongs to it even where a narrow tributary's end lies nearer.
@@ -2152,10 +2153,10 @@ mod tests {
 
     #[test]
     fn a_pond_gets_a_bank_and_the_sea_only_at_level_two() {
-        let mut blocks = vec![block::AIR; 16 * 16 * 128];
+        let mut blocks = vec![block::AIR; crate::world::chunk::VOLUME];
         for x in 0..16 {
             for z in 0..16 {
-                let col = (x << 11) | (z << 7);
+                let col = crate::world::chunk::idx(x, 0, z);
                 blocks[col + 62] = block::STONE;
                 blocks[col + 63] = if (x, z) == (8, 8) { block::WATER } else { block::GRASS };
             }
@@ -2163,14 +2164,14 @@ mod tests {
         let desert = vec![Biome::Desert; 256];
         let mut b = blocks.clone();
         skin_all_water(0, 0, &mut b, &desert, 1);
-        assert_eq!(b[(9 << 11) | (8 << 7) | 63], block::SAND);
-        assert_eq!(b[(11 << 11) | (8 << 7) | 63], block::GRASS);
+        assert_eq!(b[crate::world::chunk::idx(9, 63, 8)], block::SAND);
+        assert_eq!(b[crate::world::chunk::idx(11, 63, 8)], block::GRASS);
         let sea = vec![Biome::Ocean; 256];
         let mut b = blocks.clone();
         skin_all_water(0, 0, &mut b, &sea, 1);
-        assert_eq!(b[(9 << 11) | (8 << 7) | 63], block::GRASS);
+        assert_eq!(b[crate::world::chunk::idx(9, 63, 8)], block::GRASS);
         skin_all_water(0, 0, &mut b, &sea, 2);
-        assert_eq!(b[(9 << 11) | (8 << 7) | 63], block::SAND);
+        assert_eq!(b[crate::world::chunk::idx(9, 63, 8)], block::SAND);
     }
 
     #[test]

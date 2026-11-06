@@ -125,6 +125,7 @@ fn ty_name(t: WorldType) -> &'static str {
         WorldType::Vanilla => "Vanilla",
         WorldType::Tectonic => "Tectonic",
         WorldType::Blooming => "Blooming",
+        WorldType::BloomingLegacy => "Blooming (old)",
     }
 }
 
@@ -154,11 +155,11 @@ fn ramp(stops: &[u32], t: f32) -> u32 {
 const TEMP: [u32; 6] = [0x2A46D6, 0x3FB7E8, 0x45C46A, 0xE6D84A, 0xE8892A, 0xD02A1F];
 const HUMID: [u32; 5] = [0xD8B86A, 0xA8C46A, 0x4CAA5A, 0x2A8A9A, 0x2A4FB0];
 /// Height map: (y, colour); the sea is at `SEA_LEVEL`.
-const HYPSO: [(i32, u32); 9] =
-    [(0, 0x081A50), (40, 0x1A47A0), (63, 0x3F80E0), (64, 0xE6D890), (67, 0x58AA3C), (84, 0x9AA83C), (100, 0x8A6A45), (114, 0xA8A8A8), (127, 0xFFFFFF)];
+const HYPSO: [(i32, u32); 10] =
+    [(0, 0x081A50), (40, 0x1A47A0), (63, 0x3F80E0), (64, 0xE6D890), (67, 0x58AA3C), (84, 0x9AA83C), (100, 0x8A6A45), (114, 0xA8A8A8), (127, 0xA8A8A8), (200, 0xFFFFFF)];
 
 fn hypso(y: i32) -> u32 {
-    let y = y.clamp(0, 127);
+    let y = y.clamp(0, 200);
     let i = HYPSO.iter().rposition(|&(h, _)| h <= y).unwrap_or(0).min(HYPSO.len() - 2);
     let ((y0, c0), (y1, c1)) = (HYPSO[i], HYPSO[i + 1]);
     mix(c0, c1, (y - y0) as f32 / (y1 - y0) as f32)
@@ -554,12 +555,12 @@ impl Preview {
 
     /// Whether this world has structures to mark (Blooming, with `structory.bin`).
     fn has_structs(&self) -> bool {
-        self.ty == WorldType::Blooming && structory::available()
+        self.ty.is_blooming() && structory::available()
     }
 
     /// The legend's rows: the biomes this world type can show, then the structures.
     fn rows(&self) -> Vec<LegRow> {
-        let mut v: Vec<LegRow> = if self.ty == WorldType::Blooming { &ALL[..] } else { &ALL[..BASE] }.iter().map(|&b| LegRow::Biome(b)).collect();
+        let mut v: Vec<LegRow> = if self.ty.is_blooming() { &ALL[..] } else { &ALL[..BASE] }.iter().map(|&b| LegRow::Biome(b)).collect();
         if self.has_structs() {
             v.push(LegRow::Head);
             v.extend((0..structory::count().min(ST_COLORS.len())).map(|n| LegRow::Struct(n as u8)));
@@ -1245,7 +1246,7 @@ mod tests {
         assert_eq!(ramp(&TEMP, 0.0), TEMP[0]);
         assert_eq!(ramp(&TEMP, 1.0), TEMP[5]);
         assert_eq!(mix(0x000000, 0xFFFFFF, 0.5), 0x808080);
-        assert_eq!(hypso(127), 0xFFFFFF);
+        assert_eq!(hypso(200), 0xFFFFFF);
         assert_eq!(hypso(0), 0x081A50);
     }
 

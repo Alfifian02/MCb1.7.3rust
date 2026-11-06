@@ -13,12 +13,12 @@
 //!
 //! Left out on purpose: `SWMRNibbleArray` (null / zero / full nibble states, the host keeps flat arrays), the vanilla light
 //! interface, the save format (the host does not save light), conditionally transparent blocks (b1.7.3 has none) and
-//! section emptiness maps (a chunk here is one 128-high array).
+//! section emptiness maps (a chunk here is one 384-high array).
 //!
 //! The settled light is the same as the b1.7.3 relaxation's: `L(c) = max(source(c), max(L(n)) - max(opacity(c), 1))`, with
 //! sky sources at `y >= height` and block sources at the cell's emission; `tests` check it against a brute-force fixpoint.
 //!
-//! Cell layout of the host (`mc-rs/src/world/chunk.rs`): index `x << 11 | z << 7 | y`, `H` = 128 high, one light byte per cell
+//! Cell layout of the host (`mc-rs/src/world/chunk.rs`): index `(x * 16 + z) * H + y`, `H` = 384 high, one light byte per cell
 //! with sky in the low nibble and block light in the high one, `height[z << 4 | x]` = first y with no opaque cell above.
 
 use std::collections::HashMap;
@@ -27,7 +27,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Instant;
 
-pub const H: usize = 128;
+pub const H: usize = 384;
 pub const VOLUME: usize = 16 * 16 * H;
 pub type Key = (i32, i32);
 
@@ -42,7 +42,7 @@ pub trait Blocks {
 pub struct Chunk {
     pub blocks: Arc<Vec<u8>>,
     pub light: Arc<Vec<u8>>,
-    pub height: [u8; 256],
+    pub height: [u16; 256],
     /// `light_chunk` ran and the blocks have not been replaced since. Unlit chunks are invisible to the engine's neighbours.
     pub lit: bool,
     pub touched: bool,
@@ -87,7 +87,7 @@ fn but(d: usize) -> u8 {
 #[derive(Clone, Copy)]
 struct Q {
     x: u8,
-    y: u8,
+    y: u16,
     z: u8,
     lvl: u8,
     dirs: u8,
@@ -95,7 +95,7 @@ struct Q {
 }
 
 fn q(x: i32, y: i32, z: i32, lvl: u8, dirs: u8, flags: u8) -> Q {
-    Q { x: x as u8, y: y as u8, z: z as u8, lvl, dirs, flags }
+    Q { x: x as u8, y: y as u16, z: z as u8, lvl, dirs, flags }
 }
 
 /// The 3x3 chunks a task owns, moved out of the host's map for the length of the task (so tasks with disjoint windows can
@@ -136,7 +136,7 @@ impl Window {
         }
         let s = (x >> 4) as usize + 3 * (z >> 4) as usize;
         self.c[s].as_ref()?;
-        Some((s, ((x & 15) as usize) << 11 | ((z & 15) as usize) << 7 | y as usize))
+        Some((s, ((x & 15) as usize * 16 + (z & 15) as usize) * H + y as usize))
     }
 
     fn ch(&self, s: usize) -> &Chunk {
@@ -153,7 +153,7 @@ impl Window {
 
     /// `Chunk.heightMap` of the column holding the cell `i`.
     fn height(&self, s: usize, i: usize) -> i32 {
-        self.ch(s).height[(i >> 7 & 15) << 4 | i >> 11] as i32
+        self.ch(s).height[(i / H % 16) << 4 | i / (16 * H)] as i32
     }
 
     fn height_at(&self, x: i32, z: i32) -> Option<i32> {
@@ -174,7 +174,7 @@ impl Window {
         Arc::make_mut(&mut c.light)[i] = new;
         c.touched = true;
         c.stale = true;
-        let (lx, lz) = (i >> 11, i >> 7 & 15);
+        let (lx, lz) = (i / (16 * H), i / H % 16);
         for (hit, ok, o) in [(lx == 0, s % 3 > 0, -1i32), (lx == 15, s % 3 < 2, 1), (lz == 0, s / 3 > 0, -3), (lz == 15, s / 3 < 2, 3)] {
             if hit && ok {
                 if let Some(n) = self.c[(s as i32 + o) as usize].as_mut() {
@@ -369,7 +369,7 @@ impl<B: Blocks> Engine<B> {
             let Chunk { light, height, blocks, .. } = c;
             let light = Arc::get_mut(light).unwrap();
             for col in 0..256 {
-                let base = (col & 15) << 11 | (col >> 4) << 7;
+                let base = ((col & 15) * 16 + (col >> 4)) * H;
                 light[base + height[col] as usize..base + H].fill(15);
             }
             // ponytail: reads all 32768 blocks; Starlight skips sections whose palette has no emitter (a per-chunk emitter count would do).
@@ -377,7 +377,7 @@ impl<B: Blocks> Engine<B> {
                 let e = B::emission(id);
                 if e != 0 {
                     light[i] |= e << 4;
-                    self.inc.push(q(16 + (i >> 11) as i32, (i & 127) as i32, 16 + (i >> 7 & 15) as i32, e, ALL, 0));
+                    self.inc.push(q(16 + (i / (16 * H)) as i32, (i % H) as i32, 16 + (i / H % 16) as i32, e, ALL, 0));
                 }
             }
         }
@@ -524,18 +524,18 @@ mod tests {
     }
 
     fn cell(x: usize, y: usize, z: usize) -> usize {
-        x << 11 | z << 7 | y
+        (x * 16 + z) * H + y
     }
 
-    fn heights(blocks: &[u8]) -> [u8; 256] {
-        let mut h = [0u8; 256];
+    fn heights(blocks: &[u8]) -> [u16; 256] {
+        let mut h = [0u16; 256];
         for x in 0..16 {
             for z in 0..16 {
                 let mut y = H;
                 while y > 0 && T::opacity(blocks[cell(x, y - 1, z)]) == 0 {
                     y -= 1;
                 }
-                h[z << 4 | x] = y as u8;
+                h[z << 4 | x] = y as u16;
             }
         }
         h
@@ -592,7 +592,7 @@ mod tests {
                 for z in 0..16 {
                     for y in 0..H {
                         let i = cell(x, y, z);
-                        l[i] = if y as u8 >= c.height[z << 4 | x] { 15 } else { 0 } | T::emission(c.blocks[i]) << 4;
+                        l[i] = if y as u16 >= c.height[z << 4 | x] { 15 } else { 0 } | T::emission(c.blocks[i]) << 4;
                         if l[i] != 0 {
                             work.push((s, i));
                         }
@@ -603,7 +603,7 @@ mod tests {
         }
         while let Some((s, i)) = work.pop() {
             let v = out[s].as_ref().unwrap()[i];
-            let (x, y, z) = ((i >> 11) as i32, (i & 127) as i32, (i >> 7 & 15) as i32);
+            let (x, y, z) = ((i / (16 * H)) as i32, (i % H) as i32, (i / H % 16) as i32);
             for (dx, dy, dz) in DIRS {
                 let (nx, ny, nz) = (x + dx, y + dy, z + dz);
                 let k = ((s as i32) / GZ + (nx >> 4), (s as i32) % GZ + (nz >> 4));
@@ -626,7 +626,7 @@ mod tests {
         for (k, want) in oracle(chunks) {
             let got = &chunks[&k].light;
             if let Some(i) = (0..VOLUME).find(|&i| got[i] != want[i]) {
-                panic!("{what}: chunk {k:?} cell ({}, {}, {}): sky/block {}/{} want {}/{}", i >> 11, i & 127, i >> 7 & 15, got[i] & 15, got[i] >> 4, want[i] & 15, want[i] >> 4);
+                panic!("{what}: chunk {k:?} cell ({}, {}, {}): sky/block {}/{} want {}/{}", i / (16 * H), i % H, i / H % 16, got[i] & 15, got[i] >> 4, want[i] & 15, want[i] >> 4);
             }
         }
     }

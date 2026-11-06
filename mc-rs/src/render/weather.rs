@@ -148,7 +148,7 @@ pub fn build(i: &Input) -> (Vec<Vertex>, Vec<Vertex>) {
                 let scroll = ((((i.ticks as i32).wrapping_add(hash(x, z)) & 31) as f32) + i.partial) / 32.0 * (3.0 + rng.next_float());
                 let (dx, dz) = ((x as f32 + 0.5) as f64 - px, (z as f32 + 0.5) as f64 - pz);
                 let d = ((dx * dx + dz * dz).sqrt()) as f32 / rf;
-                let l = (i.brightness)(x, 128, z) * 0.85 + 0.15;
+                let l = (i.brightness)(x, crate::world::chunk::H as i32, z) * 0.85 + 0.15;
                 column(&mut rain, x, z, y0, y1, 0.0, 1.0, |y| y / 4.0 + scroll, [l, l, l, ((1.0 - d * d) * 0.5 + 0.5) * i.rain]);
             }
         }

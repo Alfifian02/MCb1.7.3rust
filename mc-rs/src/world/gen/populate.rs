@@ -36,6 +36,8 @@ pub struct Region {
     b: [Vec<u8>; 4],
     /// Block metadata of the same chunks (`Chunk.data`).
     d: [Nibbles; 4],
+    /// Cells above `top` do not exist for populate: 128 in the b1.7.3 worlds (every Java bound is over it), `chunk::H` in the Blooming world.
+    top: i32,
     /// The tile entities populate filled: dungeon chests and their loot (`WorldGenDungeons`).
     pub(super) loot: Vec<(Pos, Chest)>,
     /// Dungeon spawners and the mob index `pickMobSpawner` drew (0..4).
@@ -44,7 +46,18 @@ pub struct Region {
 
 impl Region {
     pub fn new(cx: i32, cz: i32, b: [Vec<u8>; 4], d: [Nibbles; 4]) -> Self {
-        Self { cx, cz, b, d, loot: Vec::new(), spawners: Vec::new() }
+        Self { cx, cz, b, d, top: 128, loot: Vec::new(), spawners: Vec::new() }
+    }
+
+    /// This region's world height (see `top`).
+    pub fn with_top(mut self, top: i32) -> Self {
+        self.top = top;
+        self
+    }
+
+    /// The first y that is above the world (the bound the Java wrote as 128).
+    pub fn top(&self) -> i32 {
+        self.top
     }
 
     /// The chests populate filled since the last call.
@@ -63,7 +76,7 @@ impl Region {
 
     fn at(&self, x: i32, y: i32, z: i32) -> Option<(usize, usize)> {
         let (i, j) = ((x >> 4) - self.cx, (z >> 4) - self.cz);
-        if !(0..128).contains(&y) || !(0..2).contains(&i) || !(0..2).contains(&j) {
+        if !(0..self.top).contains(&y) || !(0..2).contains(&i) || !(0..2).contains(&j) {
             return None;
         }
         Some(((i * 2 + j) as usize, idx((x & 15) as usize, y as usize, (z & 15) as usize)))
@@ -97,7 +110,7 @@ impl Region {
         if self.at(x, 0, z).is_none() {
             return 0;
         }
-        let mut y = 127;
+        let mut y = self.top - 1;
         while y > 0 && opacity(self.get(x, y - 1, z)) == 0 {
             y -= 1;
         }
@@ -110,7 +123,7 @@ impl Region {
             return 0;
         }
         let mut light = 15;
-        for yy in (y.min(127)..128).rev() {
+        for yy in (y.min(self.top - 1)..self.top).rev() {
             light -= opacity(self.get(x, yy, z)) as i32;
             if light <= 0 {
                 return 0;
@@ -121,7 +134,7 @@ impl Region {
 
     /// World.findTopSolidBlock: one above the highest solid or liquid cell, -1 if none.
     fn top_solid(&self, x: i32, z: i32) -> i32 {
-        (1..128).rev().find(|&y| matches!(self.get(x, y, z), b if is_solid(b) || is_liquid(b))).map_or(-1, |y| y + 1)
+        (1..self.top).rev().find(|&y| matches!(self.get(x, y, z), b if is_solid(b) || is_liquid(b))).map_or(-1, |y| y + 1)
     }
 }
 
@@ -161,7 +174,7 @@ fn is_water(b: u8) -> bool {
 fn can_stay(w: &Region, id: u8, x: i32, y: i32, z: i32) -> bool {
     let below = w.get(x, y - 1, z);
     match id {
-        MUSH_BROWN | MUSH_RED => (0..128).contains(&y) && w.sky(x, y, z) < 13 && opaque(below),
+        MUSH_BROWN | MUSH_RED => (0..w.top).contains(&y) && w.sky(x, y, z) < 13 && opaque(below),
         _ => {
             let ground = if id == DEAD_BUSH { below == SAND } else { below == GRASS || below == DIRT || below == 60 };
             (w.sky(x, y, z) >= 8 || y >= w.height(x, z)) && ground
@@ -330,7 +343,7 @@ impl OverworldGenerator {
             for z in bz + 8..bz + 24 {
                 let y = w.top_solid(x, z);
                 let t = cm.temperature[((x - (bx + 8)) * 16 + (z - (bz + 8))) as usize] - (y - 64) as f64 / 64.0 * 0.3;
-                if t < 0.5 && y > 0 && y < 128 && w.air(x, y, z) {
+                if t < 0.5 && y > 0 && y < w.top && w.air(x, y, z) {
                     let below = w.get(x, y - 1, z);
                     if is_solid(below) && below != ICE {
                         w.set(x, y, z, SNOW);
@@ -711,7 +724,7 @@ impl Tree {
 
 /// True when every cell of the box is air or leaves (the trees' "room to grow" test).
 fn room(w: &Region, x0: i32, x1: i32, y: i32, z0: i32, z1: i32) -> bool {
-    (x0..=x1).all(|x| (z0..=z1).all(|z| (0..128).contains(&y) && matches!(w.get(x, y, z), AIR | LEAVES)))
+    (x0..=x1).all(|x| (z0..=z1).all(|z| (0..w.top).contains(&y) && matches!(w.get(x, y, z), AIR | LEAVES)))
 }
 
 fn grows_on(w: &Region, x: i32, y: i32, z: i32) -> bool {
@@ -758,7 +771,7 @@ pub fn grow_sapling(w: &mut Region, r: &mut JavaRandom, x: i32, y: i32, z: i32, 
 /// WorldGenTrees (min height 4, species 0) and WorldGenForest (5, birch = 2).
 fn round_tree(w: &mut Region, r: &mut JavaRandom, x: i32, y: i32, z: i32, min_h: i32, meta: u8) -> bool {
     let h = r.next_int_bound(3) + min_h;
-    if y < 1 || y + h + 1 > 128 {
+    if y < 1 || y + h + 1 > w.top {
         return false;
     }
     for yy in y..=y + 1 + h {
@@ -767,7 +780,7 @@ fn round_tree(w: &mut Region, r: &mut JavaRandom, x: i32, y: i32, z: i32, min_h:
             return false;
         }
     }
-    if !grows_on(w, x, y, z) || y >= 128 - h - 1 {
+    if !grows_on(w, x, y, z) || y >= w.top - h - 1 {
         return false;
     }
     w.set(x, y - 1, z, DIRT);
@@ -786,7 +799,7 @@ fn taiga1(w: &mut Region, r: &mut JavaRandom, x: i32, y: i32, z: i32) -> bool {
     let bare = h - r.next_int_bound(2) - 3;
     let span = h - bare;
     let max_rad = 1 + r.next_int_bound(span + 1);
-    if y < 1 || y + h + 1 > 128 {
+    if y < 1 || y + h + 1 > w.top {
         return false;
     }
     for yy in y..=y + 1 + h {
@@ -795,7 +808,7 @@ fn taiga1(w: &mut Region, r: &mut JavaRandom, x: i32, y: i32, z: i32) -> bool {
             return false;
         }
     }
-    if !grows_on(w, x, y, z) || y >= 128 - h - 1 {
+    if !grows_on(w, x, y, z) || y >= w.top - h - 1 {
         return false;
     }
     w.set(x, y - 1, z, DIRT);
@@ -817,7 +830,7 @@ fn taiga2(w: &mut Region, r: &mut JavaRandom, x: i32, y: i32, z: i32) -> bool {
     let bare = 1 + r.next_int_bound(2);
     let span = h - bare;
     let max_rad = 2 + r.next_int_bound(2);
-    if y < 1 || y + h + 1 > 128 {
+    if y < 1 || y + h + 1 > w.top {
         return false;
     }
     for yy in y..=y + 1 + h {
@@ -826,7 +839,7 @@ fn taiga2(w: &mut Region, r: &mut JavaRandom, x: i32, y: i32, z: i32) -> bool {
             return false;
         }
     }
-    if !grows_on(w, x, y, z) || y >= 128 - h - 1 {
+    if !grows_on(w, x, y, z) || y >= w.top - h - 1 {
         return false;
     }
     w.set(x, y - 1, z, DIRT);
@@ -1077,15 +1090,15 @@ mod tests {
             let at = [(cx, cz), (cx, cz + 1), (cx + 1, cz), (cx + 1, cz + 1)];
             let blocks = at.map(|(x, z)| g.generate(x, z, &mut cm));
             for i in 0..4 {
-                assert_eq!(format!("{:x}", fnv(&blocks[i])), raw[3 + i], "raw chunk {:?}, seed {seed}", at[i]);
+                assert_eq!(format!("{:x}", fnv(&crate::world::chunk::to_beta(&blocks[i]))), raw[3 + i], "raw chunk {:?}, seed {seed}", at[i]);
             }
             assert_eq!(meta[..3], raw[..3], "META line out of step with RAW");
             let mut w = Region::new(cx, cz, blocks, std::array::from_fn(|_| Nibbles::new()));
             g.populate(&mut w, cx, cz, &mut cm);
             let (blocks, data) = w.into_parts();
             for i in 0..4 {
-                assert_eq!(format!("{:x}", fnv(&blocks[i])), pop[3 + i], "populated chunk {:?}, seed {seed}", at[i]);
-                assert_eq!(format!("{:x}", fnv(data[i].bytes())), meta[3 + i], "metadata of chunk {:?}, seed {seed}", at[i]);
+                assert_eq!(format!("{:x}", fnv(&crate::world::chunk::to_beta(&blocks[i]))), pop[3 + i], "populated chunk {:?}, seed {seed}", at[i]);
+                assert_eq!(format!("{:x}", fnv(&crate::world::chunk::nibbles_to_beta(&data[i]))), meta[3 + i], "metadata of chunk {:?}, seed {seed}", at[i]);
             }
             cases += 1;
         }

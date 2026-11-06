@@ -27,6 +27,10 @@
 use std::collections::HashMap;
 
 const BUNDLE: &str = include_str!("../terrain.json");
+/// The Cascades (hybrid-beta) datapack, bundled by `tools/cascades.py`: the same node set, a 384-high world, 26.x noise definitions.
+const CASCADES: &str = include_str!("../cascades.json");
+/// The functions `Tectonic::climate` reads, in the order it returns them: temperature, vegetation (humidity), continents, erosion, ridges (weirdness).
+const CLIMATE: [&str; 5] = ["cascades:temperature", "cascades:vegetation", "minecraft:overworld/continents", "minecraft:overworld/erosion", "minecraft:overworld/ridges"];
 
 // ------------------------------------------------------------------------------------------------ config
 
@@ -86,6 +90,13 @@ impl Config {
         assert!(height > 0 && height % 8 == 0, "height must be a multiple of 8");
         let min_y = 63 - sea_level;
         Config { min_y, max_y: min_y + height, vertical_scale: 0.3, ..Config::default() }
+    }
+
+    /// Cascades' world: 384 blocks tall, the sea surface at y = 64 (the datapack's sea is at 63 in -64 .. 320, so the world starts at the
+    /// datapack's y = -1: its lowest 63 blocks, deep caves and deepslate, are not there). The pack has no config nodes, so the rest is
+    /// the default.
+    pub fn cascades() -> Self {
+        Self::compact(384, 64)
     }
 
     fn constant(&self, key: &str) -> Result<f64, String> {
@@ -953,6 +964,25 @@ impl Tectonic {
         Self::from_bundle(BUNDLE, seed, cfg).expect("terrain.json")
     }
 
+    /// The Cascades terrain of `seed` (`Config::cascades`, 384 blocks tall). Panics only if the embedded `cascades.json` is broken.
+    pub fn cascades(seed: i64) -> Self {
+        Self::from_bundle(CASCADES, seed, Config::cascades()).expect("cascades.json")
+    }
+
+    /// The climate of a column, for choosing the biome: [temperature, vegetation, continents, erosion, ridges] (the multi-noise
+    /// parameters of the datapack's biome table, about -1 .. 1). `None` for a bundle that has no such routes (Tectonic's).
+    pub fn climate(&self, x: i32, z: i32) -> Option<[f64; 5]> {
+        let g = Grid { on: false, x0: 0, z0: 0, min_y: self.min_y, ny: 2, tabs: Vec::new() };
+        let mut m = Memo::new(self.nodes.len());
+        m.column();
+        m.point();
+        let mut out = [0.0; 5];
+        for (o, name) in out.iter_mut().zip(CLIMATE) {
+            *o = self.ev(*self.ids.get(name)?, x, 0, z, &mut m, &g);
+        }
+        Some(out)
+    }
+
     pub fn from_bundle(json: &str, seed: i64, cfg: Config) -> Result<Self, String> {
         Self::build(json, seed, cfg, true)
     }
@@ -995,6 +1025,12 @@ impl Tectonic {
         };
         let root_name = field("root")?.str().ok_or("terrain.json: root is not a name")?;
         let root = b.named(root_name)?;
+        // The router entries the world reads besides the density (`Tectonic::climate`): compiled too, so `ids` has them.
+        if let Some(J::Obj(r)) = j.get("routes") {
+            for (_, v) in r {
+                b.named(v.str().ok_or("terrain.json: a route is not a name")?)?;
+            }
+        }
         let Builder { nodes, dep, ids, splines, interps, .. } = b;
         let mut t = Tectonic { nodes, dep, splines, interps, ids, root, noises, noise_ix, offset, blended, min_y: cfg.min_y, height: (cfg.max_y - cfg.min_y) as usize };
         if simplify {
@@ -1445,5 +1481,20 @@ mod tests {
             let (p, q) = (top(&c0, h, 15, z), top(&c1, h, 0, z));
             assert!((p - q).abs() <= 6, "seam at z {z}: {p} vs {q}");
         }
+    }
+
+    /// UNVERIFIED (not run): the Cascades bundle loads, is 384 blocks tall, solid at the bottom and air at the top, and has climate routes.
+    #[test]
+    fn cascades_bundle_loads_and_has_a_climate() {
+        let t = Tectonic::cascades(1);
+        assert_eq!(t.height(), 384);
+        let c = t.chunk(3, -2);
+        assert_eq!(c.len(), 256 * 384);
+        // The top is air everywhere; the bottom is rock except where a cave of the datapack reaches it.
+        assert!((0..256).all(|col| c[col * 384 + 383] <= 0.0), "the top layer is not air");
+        assert!((0..256).filter(|&col| c[col * 384] > 0.0).count() > 128, "the bottom layer is mostly air");
+        let k = t.climate(100, -200).expect("no climate routes");
+        assert!(k.iter().all(|v| v.abs() < 3.0), "{k:?}");
+        assert!(Tectonic::new(1, Config::compact(128, 64)).climate(0, 0).is_none(), "Tectonic's bundle has no routes");
     }
 }

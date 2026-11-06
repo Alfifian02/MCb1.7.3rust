@@ -209,7 +209,7 @@ pub fn sign_place(get: &dyn Fn(i32, i32, i32) -> u8, (x, y, z): Pos, face: u8, y
     }
     let (dx, dy, dz) = [(0, 0, 0), (0, 1, 0), (0, 0, -1), (0, 0, 1), (-1, 0, 0), (1, 0, 0)][face as usize];
     let at = (x + dx, y + dy, z + dz);
-    if at.1 > 127 || !crate::world::pick::replaceable(get(at.0, at.1, at.2)) {
+    if at.1 >= crate::world::chunk::H as i32 || !crate::world::pick::replaceable(get(at.0, at.1, at.2)) {
         return None;
     }
     Some(if face == 1 { (at, POST, (((yaw + 180.0) * 16.0 / 360.0 + 0.5).floor() as i32 & 15) as u8) } else { (at, WALL, face) })

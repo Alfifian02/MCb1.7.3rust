@@ -195,7 +195,7 @@ impl LightWorld {
                 let h = e.height[lz << 4 | lx] as i32;
                 Arc::make_mut(&mut e.blocks)[idx(lx, y as usize, lz)] = id;
                 if let Some(top) = height_after_set(&e.blocks, lx, lz, id, y, h) {
-                    e.height[lz << 4 | lx] = top as u8;
+                    e.height[lz << 4 | lx] = top as u16;
                 }
                 // An unlit chunk lights from its blocks as they are when its first light runs.
                 if e.lit {
@@ -448,7 +448,7 @@ mod tests {
         }
         for kind in [Kind::Sky, Kind::Block] {
             for (x, z) in [(5, 5), (0, 0), (15, 15), (16, 0), (-1, -1), (15, 8), (8, 0), (14, 8), (16, 15), (31, 31), (-16, -16), (0, 15)] {
-                for y in [0, 1, 9, 10, 11, 12, 60, 126, 127] {
+                for y in [0, 1, 9, 10, 11, 12, 60, 126, 127, 128, 383] {
                     let Some(e) = w.chunks.get(&(x >> 4, z >> 4)) else { continue };
                     let id = e.blocks[idx((x & 15) as usize, y as usize, (z & 15) as usize)];
                     let source = match kind {

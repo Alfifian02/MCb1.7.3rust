@@ -12,10 +12,10 @@ use crate::world::gen::noise::{JavaRandom, OctaveNoise};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-pub const W: usize = 16;
-pub const H: usize = 128;
-pub const D: usize = 16;
-pub const VOLUME: usize = W * H * D;
+pub use crate::world::chunk::{D, H, VOLUME, W};
+/// The height of the b1.7.3 terrain: the Vanilla and Tectonic generators fill the lowest `GH` cells of a column (the chunk is `H` = 384
+/// tall since 2026-11-05) and every Random draw of the Java is over this range, so the golden tests stay bit for bit.
+pub const GH: usize = 128;
 pub const SEA_LEVEL: i32 = 64;
 
 /// Block ids (Beta-1.7 numbering).
@@ -67,8 +67,12 @@ pub enum WorldType {
     Vanilla,
     /// The `tectonic` crate's terrain.
     Tectonic,
-    /// Vanilla, plus six biomes of the Blooming Biosphere datapack (`Biome::blooming`).
+    /// Cascades' (hybrid-beta) worldgen: its terrain, rivers, caves and biome placement, the biomes folded to the 19 mc-rs has (6 of them
+    /// the Blooming Biosphere's, `Biome::blooming`). Info word `blooming2`; the create screen's "Blooming".
     Blooming,
+    /// The Blooming world type before Cascades (until 2026-11-05): Vanilla terrain, rivers and lakes, plus six Blooming Biosphere biomes
+    /// placed by `Biome::blooming`. Info word `blooming`, so a world saved then keeps its generator; the create screen no longer offers it.
+    BloomingLegacy,
 }
 
 impl WorldType {
@@ -77,13 +81,28 @@ impl WorldType {
         match self {
             WorldType::Vanilla => "vanilla",
             WorldType::Tectonic => "tectonic",
-            WorldType::Blooming => "blooming",
+            WorldType::Blooming => "blooming2",
+            WorldType::BloomingLegacy => "blooming",
+        }
+    }
+
+    /// The Blooming biomes (`Biome::blooming`, Structory) are part of this world type.
+    pub fn is_blooming(self) -> bool {
+        matches!(self, WorldType::Blooming | WorldType::BloomingLegacy)
+    }
+
+    /// Which terrain the world has, for `Hydro`'s key: 0 Beta's density, 1 Tectonic, 2 Cascades.
+    pub fn terrain(self) -> u8 {
+        match self {
+            WorldType::Vanilla | WorldType::BloomingLegacy => 0,
+            WorldType::Tectonic => 1,
+            WorldType::Blooming => 2,
         }
     }
 
     /// `name` back; anything else (an old or hand-edited file) is Vanilla.
     pub fn parse(s: &str) -> Self {
-        [WorldType::Tectonic, WorldType::Blooming].into_iter().find(|t| t.name() == s.trim()).unwrap_or(WorldType::Vanilla)
+        [WorldType::Tectonic, WorldType::Blooming, WorldType::BloomingLegacy].into_iter().find(|t| t.name() == s.trim()).unwrap_or(WorldType::Vanilla)
     }
 
     /// The create screen's button: the next type, round and round.
@@ -91,7 +110,7 @@ impl WorldType {
         match self {
             WorldType::Vanilla => WorldType::Tectonic,
             WorldType::Tectonic => WorldType::Blooming,
-            WorldType::Blooming => WorldType::Vanilla,
+            WorldType::Blooming | WorldType::BloomingLegacy => WorldType::Vanilla,
         }
     }
 
@@ -101,6 +120,7 @@ impl WorldType {
             WorldType::Vanilla => OverworldGenerator::world(seed),
             WorldType::Tectonic => OverworldGenerator::world_tectonic(seed),
             WorldType::Blooming => OverworldGenerator::world_blooming(seed),
+            WorldType::BloomingLegacy => OverworldGenerator::world_blooming_legacy(seed),
         }
     }
 }
@@ -125,7 +145,9 @@ pub struct OverworldGenerator {
     cols: HashMap<(i32, i32), Col>,
     max_cols: usize,
     /// The second world type (the `tectonic` crate): its density replaces the density pass; surface, caves and populate are unchanged.
-    tectonic: Option<tectonic::Tectonic>,
+    tectonic: Option<Arc<tectonic::Tectonic>>,
+    /// The tectonic above is Cascades' (the Blooming world type): 384 blocks of terrain, its own caves and biomes (`gen::cascades`).
+    cascades: bool,
     /// The Nether (`nether.rs`): when set, `generate` and `populate` are its own.
     pub(super) nether: Option<crate::world::gen::nether::Nether>,
     /// Rivers, streams and lakes (`gen::hydro`), carved after the surface pass: set by `world` / `world_tectonic`, so the goldens
@@ -214,7 +236,7 @@ impl OverworldGenerator {
         let noise_main = OctaveNoise::new(&mut rand, 10);
         let noise_height = OctaveNoise::new(&mut rand, 16);
         let noise_spawner = OctaveNoise::new(&mut rand, 8);
-        Self { seed, rand, noise_lim, noise_low, noise_base, noise_sand, noise_stone, noise_main, noise_height, noise_spawner, cols: HashMap::new(), max_cols: MAX_COLS, tectonic: None, nether: None, hydro: None, blooming: false, structory: None }
+        Self { seed, rand, noise_lim, noise_low, noise_base, noise_sand, noise_stone, noise_main, noise_height, noise_spawner, cols: HashMap::new(), max_cols: MAX_COLS, tectonic: None, cascades: false, nether: None, hydro: None, blooming: false, structory: None }
     }
 
     /// The Nether (`gen::nether`): `generate` and `populate` hand over to it, everything else here stays unused.
@@ -231,7 +253,7 @@ impl OverworldGenerator {
 
     /// This generator on the Tectonic world type: the mod's terrain, fitted to this 128-high world with the sea at `SEA_LEVEL`.
     pub fn tectonic(mut self) -> Self {
-        self.tectonic = Some(tectonic::Tectonic::new(self.seed, tectonic::Config::compact(H as i32, SEA_LEVEL)));
+        self.tectonic = Some(Arc::new(tectonic::Tectonic::new(self.seed, tectonic::Config::compact(GH as i32, SEA_LEVEL))));
         self
     }
 
@@ -242,9 +264,10 @@ impl OverworldGenerator {
         match ty {
             WorldType::Vanilla => {}
             WorldType::Tectonic => g = g.tectonic(),
-            WorldType::Blooming => g.blooming = true,
+            WorldType::Blooming => g = g.cascades(),
+            WorldType::BloomingLegacy => g.blooming = true,
         }
-        g.hydro = Some(Hydro::of_preview(g.seed, g.tectonic.is_some()));
+        g.hydro = Some(Hydro::of_preview(g.seed, g.terrain()));
         g
     }
 
@@ -278,16 +301,40 @@ impl OverworldGenerator {
         Self::new_tectonic(seed).with_hydro()
     }
 
-    /// `world` on the Blooming world type: Vanilla terrain, rivers and lakes, with the Blooming Biosphere biomes.
-    pub fn world_blooming(seed: i64) -> Self {
+    /// `world` on the Blooming world type before Cascades: Vanilla terrain, rivers and lakes, with the Blooming Biosphere biomes.
+    pub fn world_blooming_legacy(seed: i64) -> Self {
         let mut g = Self::world(seed);
         g.blooming = true;
         g.structory = crate::world::gen::structory::Structory::new(seed);
         g
     }
 
+    /// `world` on the Blooming world type: Cascades' terrain (`tectonic::Tectonic::cascades`), its biomes, rivers and Structory's structures.
+    pub fn world_blooming(seed: i64) -> Self {
+        let mut g = Self::new(seed).cascades().with_hydro();
+        g.structory = crate::world::gen::structory::Structory::new(seed);
+        g
+    }
+
+    /// This generator on Cascades' terrain (no Beta caves: the density has its own; the Blooming biomes, Beta's trees and ores unchanged).
+    pub fn cascades(mut self) -> Self {
+        self.tectonic = Some(Arc::new(tectonic::Tectonic::cascades(self.seed)));
+        self.cascades = true;
+        self.blooming = true;
+        self
+    }
+
+    /// 0 Beta's density, 1 Tectonic, 2 Cascades (`WorldType::terrain`).
+    fn terrain(&self) -> u8 {
+        match (&self.tectonic, self.cascades) {
+            (None, _) => 0,
+            (Some(_), false) => 1,
+            (Some(_), true) => 2,
+        }
+    }
+
     fn with_hydro(mut self) -> Self {
-        self.hydro = Some(Hydro::of(self.seed, self.tectonic.is_some()));
+        self.hydro = Some(Hydro::of(self.seed, self.terrain()));
         self
     }
 
@@ -329,7 +376,7 @@ impl OverworldGenerator {
     /// The chunk manager for this generator's world: only the vanilla terrain follows its climate parameters (`shape`); Tectonic's
     /// comes from elsewhere. Every place that makes a generator makes its manager with this.
     pub fn manager(&self) -> WorldChunkManager {
-        WorldChunkManager::new(self.seed).shaped(self.tectonic.is_none()).blooming(self.blooming)
+        WorldChunkManager::new(self.seed).shaped(self.tectonic.is_none()).blooming(self.blooming).cascades(self.tectonic.clone().filter(|_| self.cascades))
     }
 
     /// Highest solid block at column (x, z) of a grid `depth` blocks deep in Z, or -1 if none.
@@ -343,13 +390,15 @@ impl OverworldGenerator {
         -1
     }
 
-    /// provideChunk: one 16x128x16 chunk (terrain, surface, caves), indexed `(x << 11) | (z << 7) | y`.
+    /// provideChunk: one 16x128x16 chunk (terrain, surface, caves), indexed `(x * 16 + z) * H + y` (`chunk::idx`); the Beta terrain fills y 0..`GH`.
     pub fn generate(&mut self, chunk_x: i32, chunk_z: i32, cm: &mut WorldChunkManager) -> Vec<u8> {
         if let Some(n) = self.nether.as_mut() {
             return n.generate(chunk_x, chunk_z);
         }
         let mut blocks = self.generate_far(chunk_x, chunk_z, cm);
-        caves::carve(self.seed, chunk_x, chunk_z, &mut blocks);
+        if !self.cascades {
+            caves::carve(self.seed, chunk_x, chunk_z, &mut blocks); // Cascades' caves are in its density
+        }
         blocks
     }
 
@@ -361,12 +410,13 @@ impl OverworldGenerator {
         if let Some(t) = self.tectonic.as_ref() {
             // Stone where Tectonic's final density is above 0; below the sea the rest is water, iced over where it is cold.
             let d = t.chunk(chunk_x, chunk_z);
+            let th = t.height(); // GH for Tectonic, 384 for Cascades
             for x in 0..16usize {
                 for z in 0..16usize {
                     let cold = cm.temperature[x * 16 + z] < 0.5;
-                    let col = &mut blocks[(x << 11) | (z << 7)..][..H];
+                    let col = &mut blocks[crate::world::chunk::idx(x, 0, z)..][..th];
                     for (y, c) in col.iter_mut().enumerate() {
-                        *c = if d[(x * 16 + z) * H + y] > 0.0 {
+                        *c = if d[(x * 16 + z) * th + y] > 0.0 {
                             block::STONE
                         } else if (y as i32) < SEA_LEVEL {
                             if cold && y as i32 >= SEA_LEVEL - 1 { block::ICE } else { block::WATER }
@@ -380,7 +430,8 @@ impl OverworldGenerator {
             let shape = cm.shape(chunk_x, chunk_z);
             self.generate_terrain(chunk_x, chunk_z, &mut blocks, &cm.temperature, &cm.humidity, shape.as_deref());
         }
-        self.replace_blocks_for_biome(chunk_x, chunk_z, &mut blocks, &biomes);
+        let scan = self.tectonic.as_ref().map_or(GH, |t| t.height());
+        self.replace_blocks_for_biome(chunk_x, chunk_z, &mut blocks, &biomes, scan);
         if let Some(h) = self.hydro.clone() {
             let region = h.region(chunk_x, chunk_z, &mut |gx, gz| self.probe(gx, gz, cm));
             region.carve(chunk_x, chunk_z, &mut blocks, &biomes, &cm.temperature);
@@ -468,7 +519,7 @@ impl OverworldGenerator {
                         let v39 = (v20 - v16) * 0.25;
                         let v41 = (v22 - v18) * 0.25;
                         for m in 0..4usize {
-                            let mut pos = ((m + i * 4) << 11) | ((j * 4) << 7) | y;
+                            let mut pos = crate::world::chunk::idx(m + i * 4, y, j * 4);
                             let mut v48 = v35;
                             let v50 = (v37 - v35) * 0.25;
                             for n in 0..4usize {
@@ -481,7 +532,7 @@ impl OverworldGenerator {
                                     b = block::STONE;
                                 }
                                 blocks[pos] = b;
-                                pos += 128;
+                                pos += H;
                                 v48 += v50;
                             }
                             v35 += v39;
@@ -499,7 +550,8 @@ impl OverworldGenerator {
 
     /// replaceBlocksForBiome: grass/dirt/sand/gravel skin and bedrock floor.
     /// `biomes` is x-major (`x * 16 + z`), as from the chunk manager.
-    fn replace_blocks_for_biome(&mut self, chunk_x: i32, chunk_z: i32, blocks: &mut [u8], biomes: &[Biome]) {
+    /// `scan`: the height of the terrain, `GH` for Beta's and Tectonic's (every Java draw is over it), 384 for Cascades'.
+    fn replace_blocks_for_biome(&mut self, chunk_x: i32, chunk_z: i32, blocks: &mut [u8], biomes: &[Biome], scan: usize) {
         let s = 1.0 / 32.0;
         let (bx, bz) = ((chunk_x * 16) as f64, (chunk_z * 16) as f64);
         // Sand and gravel both use noise_sand; gravel samples an x/z plane,
@@ -519,8 +571,8 @@ impl OverworldGenerator {
                 let mut top = biome.top_block();
                 let mut filler = biome.filler_block();
                 // One column as a slice: no per-block index arithmetic or bounds checks (FastSurface's packed column walk).
-                let col = &mut blocks[(b * 16 + a) * 128..][..H];
-                for y in (0..H).rev() {
+                let col = &mut blocks[(b * 16 + a) * H..][..scan];
+                for y in (0..scan).rev() {
                     // The draw is made for every y, as in the Java: it advances the Random.
                     if y as i32 <= self.rand.next_int_bound(5) {
                         col[y] = block::BEDROCK;
@@ -560,6 +612,30 @@ impl OverworldGenerator {
             }
         }
     }
+}
+
+/// The chunk where a new world of this type starts: Cascades' ocean can cover the origin (the other types' land is lifted around it, see
+/// `WorldChunkManager::cell`), so the Blooming type starts at the dry land nearest to it, found on a square spiral of 64-block steps up to
+/// 4096 blocks out (the origin's chunk if there is none).
+pub fn land_start(ty: WorldType, seed: i64) -> (i32, i32) {
+    if ty != WorldType::Blooming {
+        return (0, 0);
+    }
+    let t = tectonic::Tectonic::cascades(seed);
+    for r in 0..=64i32 {
+        for i in -r..=r {
+            for j in -r..=r {
+                if i.abs().max(j.abs()) != r {
+                    continue;
+                }
+                let (x, z) = (i * 64, j * 64);
+                if t.surface(x, z) > SEA_LEVEL + 1 {
+                    return (x >> 4, z >> 4);
+                }
+            }
+        }
+    }
+    (0, 0)
 }
 
 /// provideChunk's per-chunk Random seed.
@@ -624,9 +700,9 @@ mod tests {
             assert_eq!(cm.humidity[255].to_bits(), want[6], "humidity[255], {at}");
             let mut blocks = vec![block::AIR; VOLUME];
             g.generate_terrain(cx, cz, &mut blocks, &cm.temperature, &cm.humidity, None);
-            assert_eq!(fnv(&blocks), want[1], "terrain, {at}");
-            g.replace_blocks_for_biome(cx, cz, &mut blocks, &biomes);
-            assert_eq!(fnv(&blocks), want[2], "surface, {at}");
+            assert_eq!(fnv(&crate::world::chunk::to_beta(&blocks)), want[1], "terrain, {at}");
+            g.replace_blocks_for_biome(cx, cz, &mut blocks, &biomes, GH);
+            assert_eq!(fnv(&crate::world::chunk::to_beta(&blocks)), want[2], "surface, {at}");
         }
     }
 
