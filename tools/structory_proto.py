@@ -107,7 +107,7 @@ def fits(shape, bx):
     return (outer[0] <= bx[0] and bx[3] <= outer[3] and outer[1] <= bx[1] and bx[4] <= outer[4] and outer[2] <= bx[2] and bx[5] <= outer[5]
             and not any(inter(bx, h) for h in holes))
 
-def assemble(D, st, cx, cz, rnd, ground, height=128, off=(0, 0)):
+def assemble(D, st, cx, cz, rnd, ground, height=128):
     """Pieces of structure `st` starting in chunk (cx, cz). `ground(x, z)` = first free height. Returns a list of piece dicts."""
     S = D['structs'][st]; pools = D['pools']
     def flat(ix): return [e for e in pools[ix]['els'] for _ in range(e['w'])]
@@ -116,7 +116,7 @@ def assemble(D, st, cx, cz, rnd, ground, height=128, off=(0, 0)):
     start = (lambda l: l[rnd.int(len(l))] if l else None)(flat(S['pool']))
     if start is None or start['kind'] == 0: return []
     rot = rnd.int(4)
-    bx, bz = cx * 16 + off[0], cz * 16 + off[1]
+    bx, bz = cx * 16, cz * 16
     size = D['t'][start['t']]['size']
     b0 = box_of(size, rot, (bx, 0, bz))
     ctr = lambda b: (b[0] + (b[3] - b[0] + 1) // 2, b[2] + (b[5] - b[2] + 1) // 2)           # BoundingBox.getCenter
@@ -181,41 +181,68 @@ def assemble(D, st, cx, cz, rnd, ground, height=128, off=(0, 0)):
     return pieces
 
 # ---- the site (twin of `judge`, `blend`, `Site::height`, `shifts` in structory.rs): move to flat dry ground, level what is left
-PAD, MARGIN, FLAT, SIDE, CLIFF, SAFE, SHIFT, SHIFT_STEP = 2, 16, 2, 6, 2, 4, 48, 8
+BASE, PAD, MARGIN, SAFE, SHIFT, CROWN, LAKE = 64, 2, 16, 4, 48, 10, 8
+AREA = PAD + MARGIN
+TIERS = [(2, 6, 4), (3, 8, 5)]           # (pad deviation, margin deviation, margin cell spread), strict first
+COS = [100, 92, 71, 38, 0, -38, -71, -92, -100, -92, -71, -38, 0, 38, 71, 92]
+SIN = [0, 38, 71, 92, 100, 92, 71, 38, 0, -38, -71, -92, -100, -92, -71, -38]
 def aquatic(D, st, wet_bits=(1 << 10) | (1 << 1) | (1 << 15)): return D['structs'][st]['mask'] & ~wet_bits == 0   # Ocean, Swamp, Marsh
-def shifts(): n = SHIFT // SHIFT_STEP; return sorted(((i * SHIFT_STEP, j * SHIFT_STEP) for i in range(-n, n + 1) for j in range(-n, n + 1)), key=lambda o: (o[0] ** 2 + o[1] ** 2, o))
+def fixed(D, st): S = D['structs'][st]; return aquatic(D, st) or S['adapt'] == 3 or S['y'] <= -6   # not on the ground: keeps its chunk, levels nothing
+def tdiv(a, b): q = abs(a) // abs(b); return q if (a < 0) == (b < 0) else -q                          # Rust's integer division
+def shifts():
+    v = [(0, 0)]
+    for r, step in ((16, 2), (32, 1), (SHIFT, 1)):
+        for k in range(0, 16, step): v.append((tdiv(r * COS[k], 100), tdiv(r * SIN[k], 100)))
+    return v
 def blend(t, n, k):
     u = min(max(int(k / MARGIN * 1024), 0), 1024); s = (u * u * (3072 - 2 * u)) >> 20
     return t + ((n - t) * s + 512) // 1024
-def rdist(r, x, z): return ((max(r[0] - x, 0, x - r[2])) ** 2 + (max(r[1] - z, 0, z - r[3])) ** 2) ** 0.5
-def every2(a, b): return list(range(a, b + 1, 2)) + ([b] if b > a and (b - a) % 2 else [])
-def site_height(rigid, target, x, z, n):
-    d = min(rdist(r, x, z) for r in rigid)
-    return None if d > PAD + MARGIN else blend(target, n, max(d - PAD, 0))
-def judge(pieces, target, flat, at):
-    """at(x, z) -> (height, wet). Returns the rigid rects, or None when the site is refused."""
-    rigid = [(p['box'][0], p['box'][2], p['box'][3], p['box'][5]) for p in pieces if p['rigid']]
-    if not (flat and rigid): return []
-    reach = PAD + MARGIN
+def d2(r, x, z): dx = max(r[0] - x, 0, x - r[2]); dz = max(r[1] - z, 0, z - r[3]); return dx * dx + dz * dz
+def rect_d2(a, b): dx = max(a[0] - b[2], b[0] - a[2], 0); dz = max(a[1] - b[3], b[1] - a[3], 0); return dx * dx + dz * dz
+def within(rs, x, z, r): return any(d2(a, x, z) <= r * r for a in rs)
+def shift(rs, dx, dz): return [(r[0] + dx, r[1] + dz, r[2] + dx, r[3] + dz) for r in rs]
+def cells_of(at):
+    """at(x, z) -> (height, wet), as the 4 x 4 cells (lo, hi, wet) `Ground::cell` keeps."""
+    def cell(i, j):
+        cols = [at(x, z) for x in range(i * 4, i * 4 + 4) for z in range(j * 4, j * 4 + 4)]
+        return min(c[0] for c in cols), max(c[0] for c in cols), any(c[1] for c in cols)
+    return cell
+def judge(rigid, target, tier, cell):
+    wide = AREA + SAFE
+    cls = {}
     for r in rigid:
-        for x in every2(r[0] - reach - SAFE, r[2] + reach + SAFE):
-            for z in every2(r[1] - reach - SAFE, r[3] + reach + SAFE):
-                n, wet = at(x, z)
-                if wet: return None
-                d = rdist(r, x, z); dev = abs(n - target)
-                if (d <= PAD and dev > FLAT) or (d <= reach and dev > SIDE): return None
-                if d <= reach and (abs(at(x + 1, z)[0] - n) > CLIFF or abs(at(x, z + 1)[0] - n) > CLIFF): return None
-    return rigid
+        for i in range((r[0] - wide) >> 2, ((r[2] + wide) >> 2) + 1):
+            for j in range((r[1] - wide) >> 2, ((r[3] + wide) >> 2) + 1):
+                q = rect_d2((i * 4, j * 4, i * 4 + 3, j * 4 + 3), r)
+                c = 1 if q <= PAD * PAD else 2 if q <= AREA * AREA else 3 if q <= wide * wide else 0
+                if c and (cls.get((i, j), 9) > c): cls[(i, j)] = c
+    for c in (1, 2, 3):
+        for (i, j), k in cls.items():
+            if k != c: continue
+            lo, hi, wet = cell(i, j)
+            if wet or (c == 1 and (lo < target - tier[0] or hi > target + tier[0])): return False
+            if c == 2 and (lo < target - tier[1] or hi > target + tier[1] or hi - lo > tier[2]): return False
+    return True
 def place(D, st, cx, cz, seed, at):
-    """The first shift whose assembled rigid pieces `judge` accepts: (offset, pieces, rigid rects, target) or None."""
-    for off in (shifts() if not aquatic(D, st) else [(0, 0)]):
-        ps = assemble(D, st, cx, cz, Rand(seed), lambda x, z: at(x, z)[0], off=off)
-        if not ps: return None
-        base = lambda t: 0                                   # the start's baked ground depth is the template's; the proto assumes none
-        target = ps[0]['pos'][1] - D['structs'][st]['y'] + base(ps[0]['t'])
-        rigid = judge(ps, target, not aquatic(D, st), at)
-        if rigid is not None: return off, ps, rigid, target
+    """Assemble once on flat ground, then the first place `judge` accepts, nearest first, strict tier first: (dx, dz, pieces, rigid, target) or None."""
+    ps = assemble(D, st, cx, cz, Rand(seed), lambda x, z: BASE)
+    if not ps: return None
+    shows = [p for p in ps if p['box'][4] >= BASE - 3]
+    fx = fixed(D, st)
+    rigid0 = [] if fx else [(p['box'][0], p['box'][2], p['box'][3], p['box'][5]) for p in shows if p['rigid']]
+    flat = bool(rigid0); cell = cells_of(at)
+    b = ps[0]['box']; gx, gz = b[0] + (b[3] - b[0] + 1) // 2, b[2] + (b[5] - b[2] + 1) // 2
+    for tier in (TIERS if flat else TIERS[:1]):
+        for dx, dz in (shifts() if flat else [(0, 0)]):
+            hs = sorted(at(x + dx, z + dz)[0] for x in (b[0], gx, b[3]) for z in (b[2], gz, b[5]))
+            target = hs[4]
+            if flat and not judge(shift(rigid0, dx, dz), target, tier, cell): continue
+            return dx, dz, ps, shift(rigid0, dx, dz), target
     return None
+def height(rigid, target, x, z, n):
+    q = min(d2(r, x, z) for r in rigid)
+    return None if q > AREA * AREA else blend(target, n, max(q ** 0.5 - PAD, 0))
+def tree_ok(rigid, high, x, z): return not within(rigid, x, z, AREA) and not within(high, x, z, CROWN)
 
 def spread(seed, rx, rz, sp):
     r = Rand((rx * 341873128712 + rz * 132897987541 + seed + sp['salt']) & ((1 << 64) - 1))
@@ -243,23 +270,33 @@ if __name__ == '__main__':
     print('total pieces', total)
     # the site search on a ramp between x = 260 and 300 (plateau west, flat and dry east of it) with a river along x = 420: nothing may end on the ramp or the river
     at = lambda x, z: (64 + max(0, min(40, 300 - x)) // 2, abs(x - 420) <= 3)
+    assert len(shifts()) == 41 and shifts()[0] == (0, 0)
     for st in range(len(D['structs'])):
-        if aquatic(D, st): continue
         found = [place(D, st, 17, 6, 100 + i, at) for i in range(6)]
         for f in found:
             if f is None: continue
-            off, ps, rigid, target = f
-            assert all(abs(at(x, z)[0] - target) <= FLAT for r in rigid for x in every2(r[0] - PAD, r[2] + PAD) for z in every2(r[1] - PAD, r[3] + PAD)), st
-            assert not any(at(x, z)[1] for r in rigid for x in every2(r[0] - 22, r[2] + 22) for z in every2(r[1] - 22, r[3] + 22)), st
+            dx, dz, ps, rigid, target = f
+            if fixed(D, st):
+                assert (dx, dz) == (0, 0) and rigid == [], st; continue
+            cell = cells_of(at)
+            pad = lambda x, z: min(d2(r, x, z) for r in rigid) <= PAD * PAD
+            assert all(abs(at(x, z)[0] - target) <= 3 for r in rigid for x in range(r[0] - PAD, r[2] + PAD + 1, 2) for z in range(r[1] - PAD, r[3] + PAD + 1, 2)), ('pad', st)
+            assert not any(at(x, z)[1] for r in rigid for x in range(r[0] - AREA - SAFE, r[2] + AREA + SAFE + 1, 2) for z in range(r[1] - AREA - SAFE, r[3] + AREA + SAFE + 1, 2)), ('river', st)
             for r in rigid[:3]:                                # the levelled ground: the target on the pad, between target and land in the margin, never a jump
-                for x in range(r[0] - PAD - MARGIN - 1, r[2] + PAD + MARGIN + 2, 3):
+                for x in range(r[0] - AREA - 1, r[2] + AREA + 2, 3):
                     row = []
-                    for z in range(r[1] - PAD - MARGIN - 1, r[3] + PAD + MARGIN + 2, 3):
-                        n = at(x, z)[0]; h = site_height(rigid, target, x, z, n); d = min(rdist(q, x, z) for q in rigid)
-                        if h is None: assert d > PAD + MARGIN; continue
+                    for z in range(r[1] - AREA - 1, r[3] + AREA + 2, 3):
+                        n = at(x, z)[0]; h = height(rigid, target, x, z, n); q = min(d2(t, x, z) for t in rigid) ** 0.5
+                        if h is None: assert q > AREA; continue
                         assert min(n, target) <= h <= max(n, target), (st, x, z, n, h, target)
-                        if d <= PAD: assert h == target
-                        if d >= PAD + MARGIN: assert h == n
+                        if q <= PAD: assert h == target
+                        if q >= AREA: assert h == n
                         row.append(h)
-                    assert all(abs(a - b) <= 4 for a, b in zip(row, row[1:])), (st, row)   # 3 blocks apart, on a 0.5 slope: no wall
-        print('structure %2d  sites %d/6 accepted, shifted %s' % (st, sum(f is not None for f in found), sorted({f[0] for f in found if f})[:4]))
+                    assert all(abs(a - b) <= 4 for a, b in zip(row, row[1:])), (st, row)   # 3 blocks apart: no wall
+            # no tree trunk within the levelled ground or a crown of a piece that shows
+            high = [(p['box'][0], p['box'][2], p['box'][3], p['box'][5]) for p in ps if p['box'][4] >= BASE - 3]
+            high = shift(high, dx, dz)
+            for x in range(min(r[0] for r in rigid) - 40, max(r[2] for r in rigid) + 41, 5):
+                for z in range(min(r[1] for r in rigid) - 40, max(r[3] for r in rigid) + 41, 5):
+                    if min(d2(t, x, z) for t in rigid) <= AREA * AREA: assert not tree_ok(rigid, high, x, z)
+        print('structure %2d  %s  sites %d/6 accepted, moved %s' % (st, 'fixed' if fixed(D, st) else 'ground', sum(f is not None for f in found), sorted({(f[0], f[1]) for f in found if f})[:4]))

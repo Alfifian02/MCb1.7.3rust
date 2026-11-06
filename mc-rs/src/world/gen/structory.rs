@@ -14,20 +14,26 @@
 //! - `JigsawPlacement`, `RandomSpreadStructurePlacement`, the weighted pick of a set and the rule processors are written from memory of the
 //!   1.20 Java, not read from it; nothing here is checked against a real world's structure positions.
 //! - Heights come from `generate_far` (terrain without caves, rivers carved) instead of the 1.20 noise `getFirstFreeHeight`.
-//! - SITE (2026-11-05, replaces the dirt foundations and the 2026-11-04 plinth rules): a structure is moved to flat, dry ground and
-//!   the little slope that is left is levelled, so nothing stands on a platform, a pillar or a wall of dirt.
-//!   1. `Structory::start` tries the nominal start and then shifts of 8 .. `SHIFT` blocks (nearest first) and keeps the first one whose
-//!      rigid pieces (`Piece::rigid`) stand on ground within `FLAT` of the start's height, whose surroundings out to `PAD + MARGIN`
-//!      are within `SIDE` of it with no step over `CLIFF`, and with no water, river, lake or ice within `SAFE` more blocks (`judge`).
-//!      None fits: no structure there. Water structures (`Data::aquatic`: only Ocean / Swamp / Marsh in their biome mask: the boats
-//!      and the swamp ruin) are not moved or levelled; they keep the natural ground.
-//!   2. The levelling is `Site::height`, a pure function of (seed, start) and the `Ground` heights (`generate_far`, no caves, no trees),
-//!      never of the `Region`: the ground is the start's target height under the rigid pieces and `PAD` blocks around them, and
-//!      eases into the natural height over `MARGIN` blocks with a smoothstep. `flatten` rebuilds each column of a cell that way (cut or
-//!      fill, the surface block and two filler layers of the column's own biome surface, snow kept, everything above cleared, so
-//!      trees and plants of the area go). Several starts: the first in iteration order owns a column, the same from every cell.
-//!   3. Trees, lakes and dungeons of `populate` are vetoed near a structure (`Start::blocks`), so a later populate cannot grow a tree
-//!      through a wall (`TREE_VETO`); trees already there are cleared by the levelling.
+//! - SITE (2026-11-06, rewrites the 2026-11-05 one): a structure stands on flat, dry ground and its trees keep away, so nothing stands
+//!   on a platform, a pillar or a wall of dirt and no tree is cut in two.
+//!   1. The layout is assembled ONCE, on flat ground (`BASE`); the site search only moves it. `settle` tries the nominal start and then
+//!      rings of 16, 32 and 48 blocks (`shifts`, nearest first, 41 places) and keeps the first whose rigid pieces pass `judge` on the
+//!      coarse terrain (`Ground`: per 4 x 4 block cell of `generate_far` the lowest and highest ground and whether any column is
+//!      water, ice or lava): under them and `PAD` round them within `TIERS` .0 of the start's height, out to `AREA` (`PAD + MARGIN`)
+//!      within .1 of it and no cell spreading more than .2, and no water within `SAFE` more blocks (a river may run near, not touch).
+//!      A second, looser tier is tried before the structure is dropped (none = no structure there: the weighted pick tries the next).
+//!      The biome at the new place must still be one of the structure's; it must fit y 1 .. top - 2; and it keeps `2 * AREA` of
+//!      ground and 6 blocks of pieces from every start of lower key (set, x, z) within `NEAR` chunks (the priority keeps the answer
+//!      a pure function of the seed). Structures that do not stand on the ground (`Data::fixed`: the water ones, the buried ones) keep
+//!      their chunk, shape nothing and only keep trees off what shows.
+//!   2. The levelling (`flatten`, per cell, before any piece) is a pure function of the start and of the `Region`'s own column: the
+//!      ground is the start's target height under the rigid pieces and `PAD` blocks round them and eases into the column's natural
+//!      height over `MARGIN` blocks with a smoothstep (`blend`). A column is cut or filled with its own surface block and filler
+//!      (snow kept). Under the pad everything above the ground is cleared; in the margin only loose plants and snow, so the canopy of
+//!      a tree outside stays whole. A water column is left alone. Where two starts cover a column the first in `near()` owns it.
+//!   3. Trees, lakes and dungeons of `populate` ask the starts first (`Start::allows_tree` etc.): no trunk within `AREA` of a rigid
+//!      piece (the whole levelled ground) or `CROWN` of any piece that shows, no lake centre within `AREA + LAKE` or 10, no dungeon
+//!      within 8. So no tree grows through a wall or is sliced by the levelling, whichever cell is populated first.
 //!   4. Foundations are gone. Only a gap of at most `GAP` (2) blocks under a load-bearing block of a rigid piece is filled. Terrain-
 //!      matching pieces (paths) follow the levelled ground column by column like `GravityProcessor`.
 //!   5. Baked ground (`base_run`, `base_depth`), the median-of-9 start height, air only under a roof (`roof_of`) and the load-bearing
@@ -52,24 +58,32 @@ const SKIP: u16 = 0xFFFF;
 const NONE16: u16 = 0xFFFF;
 /// Deepest gap filled under a load-bearing block of a rigid piece (blocks): a 1 .. 2 block rest, never a foundation.
 const GAP: i32 = 2;
-/// Full flat ground around the rigid pieces, then the ease into the natural ground over `MARGIN` blocks (12 .. 20 in the plan).
+/// The ground level the layout is assembled at; the finished structure is moved to its real level afterwards.
+const BASE: i32 = 64;
+/// Full flat ground round the rigid pieces, then the ease into the natural ground over `MARGIN` blocks.
 const PAD: i32 = 2;
 const MARGIN: i32 = 16;
-/// Largest |natural ground - target| under (and `PAD` round) the rigid pieces, and in the margin.
-const FLAT: i32 = 2;
-const SIDE: i32 = 6;
-/// Largest step between two neighbouring columns anywhere in the area (3 would be a wall).
-const CLIFF: i32 = 2;
-/// Extra blocks beyond the margin that must have no water, ice or lava.
+/// How far from a rigid piece the ground is touched.
+const AREA: i32 = PAD + MARGIN;
+/// Extra blocks beyond `AREA` that must have no water, ice or lava.
 const SAFE: i32 = 4;
-/// The start may move this far from `spread`'s chunk (blocks), in steps of `SHIFT_STEP`.
+/// What a site may ask of the land, strict first: the largest |ground - target| under the pad, the same in the margin, and the
+/// largest spread (highest - lowest) of a 4 x 4 block cell in the margin (no wall).
+const TIERS: [(i32, i32, i32); 2] = [(2, 6, 4), (3, 8, 5)];
+/// The farthest the site search moves a structure from its start chunk (blocks).
 const SHIFT: i32 = 48;
-const SHIFT_STEP: i32 = 8;
-/// A tree, lake or dungeon centre closer than this to a piece (blocks) is vetoed: `PAD` + the widest crown (7). `LAKE_VETO` covers a pit.
-pub const TREE_VETO: i32 = 9;
-pub const LAKE_VETO: i32 = 10;
-/// Chunks a start can reach a cell from: `max_distance_from_center` 80 + `SHIFT` 48 + the area `PAD + MARGIN` 18 + the veto 10, rounded up.
-const REACH: i32 = 10;
+/// The widest reach of a tree (a big tree's branches): no trunk this close to a piece that shows.
+const CROWN: i32 = 10;
+/// A lake is up to 16 wide: no lake centre this close to the levelled ground.
+const LAKE: i32 = 8;
+/// What a start asks of the land around it reaches this far from its pieces (blocks).
+const ZONE: i32 = 40;
+/// Chunks within which two starts can touch each other: the priority rule looks this far.
+const NEAR: i32 = 20;
+/// Chunks a start can reach a cell from: `max_distance_from_center` 80 + `SHIFT` 48 + `ZONE`, rounded up.
+const REACH: i32 = 12;
+/// Chunks of coarse terrain kept between two searches (96 bytes each).
+const CELLS: usize = 1536;
 static BIN: &[u8] = include_bytes!("../../../assets/structory.bin");
 
 // ---------------------------------------------------------------- the baked data
@@ -180,6 +194,13 @@ impl Data {
     fn aquatic(&self, st: usize) -> bool {
         let wet = (1u32 << Biome::Ocean as u8) | (1 << Biome::Swamp as u8) | (1 << Biome::Marsh as u8);
         self.structs[st].mask & !wet == 0
+    }
+
+    /// Structures that keep their chunk and leave the ground alone: the water ones and the ones sunk into the land (`bury`, or a start
+    /// height of -6 or less: the swamp ruin and the buried one). `structory.bin` keeps no names; this is read from the baked numbers.
+    fn fixed(&self, st: usize) -> bool {
+        let s = &self.structs[st];
+        self.aquatic(st) || s.adapt == 3 || s.y <= -6
     }
 
     /// The layout `tools/gen_structory.py` writes (and `structory_proto.py` reads).
@@ -448,8 +469,8 @@ fn fits(outer: &Bx, holes: &[Bx], b: &Bx) -> bool {
 }
 
 /// `JigsawPlacement.addPieces` + `Placer.tryPlacingChildren` of 1.20 for structure `st` starting in chunk (cx, cz). `ground(x, z)` is
-/// the first free height there; `off` moves the whole structure from the chunk corner (the site search). Twin of `structory_proto.assemble`.
-fn assemble(d: &Data, st: usize, cx: i32, cz: i32, off: (i32, i32), rnd: &mut JavaRandom, ground: &mut dyn FnMut(i32, i32) -> i32) -> Vec<Piece> {
+/// the first free height there. Twin of `structory_proto.assemble`.
+fn assemble(d: &Data, st: usize, cx: i32, cz: i32, rnd: &mut JavaRandom, ground: &mut dyn FnMut(i32, i32) -> i32) -> Vec<Piece> {
     let s = &d.structs[st];
     let flat = |ix: u16| -> Vec<Elem> { d.pools[usize::from(ix)].els.iter().flat_map(|e| std::iter::repeat(*e).take(usize::from(e.w))).collect() };
     let pool_max = |ix: u16| -> i32 { d.pools[usize::from(ix)].els.iter().filter(|e| e.kind != 0).map(|e| d.t[usize::from(e.t)].size[1]).max().unwrap_or(0) };
@@ -462,7 +483,7 @@ fn assemble(d: &Data, st: usize, cx: i32, cz: i32, off: (i32, i32), rnd: &mut Ja
         return Vec::new();
     }
     let rot = rnd.next_int_bound(4) as u8;
-    let (bx, bz) = (cx * 16 + off.0, cz * 16 + off.1);
+    let (bx, bz) = (cx * 16, cz * 16);
     let size = d.t[usize::from(start.t)].size;
     let b0 = box_of(size, rot, [bx, 0, bz]);
     let c0 = centre(&b0);
@@ -571,7 +592,7 @@ fn assemble(d: &Data, st: usize, cx: i32, cz: i32, off: (i32, i32), rnd: &mut Ja
 
 // ---------------------------------------------------------------- starts
 
-/// A structure that starts in one chunk: its pieces, assembled once.
+/// A structure that starts in one chunk: its pieces (already at their place) and the site that place gave it.
 pub struct Start {
     st: usize,
     pieces: Vec<Piece>,
@@ -579,9 +600,19 @@ pub struct Start {
 }
 
 impl Start {
-    /// Whether a tree, lake or dungeon centred at (x, z) would come within `r` blocks of a piece of this structure.
-    pub fn blocks(&self, x: i32, z: i32, r: i32) -> bool {
-        self.site.blocks(x, z, r)
+    /// Whether a tree may be grown with its trunk at (x, z): not on the levelled ground, not within a crown of a piece that shows.
+    pub fn allows_tree(&self, x: i32, z: i32) -> bool {
+        self.site.tree_ok(x, z)
+    }
+
+    /// Whether a lake may be dug round (x, z): not within reach of the levelled ground or a piece.
+    pub fn allows_lake(&self, x: i32, z: i32) -> bool {
+        self.site.lake_ok(x, z)
+    }
+
+    /// Whether a dungeon room may be made round (x, z): not into a piece.
+    pub fn allows_dungeon(&self, x: i32, z: i32) -> bool {
+        self.site.dungeon_ok(x, z)
     }
 }
 
@@ -605,54 +636,133 @@ fn pos_seed(x: i32, y: i32, z: i32) -> i64 {
     l.wrapping_mul(l).wrapping_mul(42317861).wrapping_add(l.wrapping_mul(11)) >> 16
 }
 
-/// The ground under a column of the terrain (`generate_far`, so no caves and no trees), first free height, kept per chunk. A column
-/// is `height | wet << 15` (the world is 384 tall: 9 bits of height): wet = its top block is water, lava or ice (sea, river, lake).
+/// One 4 x 4 block cell of the natural terrain (`generate_far`: no caves, no trees): the lowest and the highest first free height of
+/// its 16 columns, and whether the top block of any of them is water, lava or ice (sea, river, lake).
+#[derive(Clone, Copy)]
+struct Cell {
+    lo: u16,
+    hi: u16,
+    wet: bool,
+}
+
+/// The coarse natural terrain, kept per chunk (16 cells of 6 bytes), generated only where a search looks.
 struct Ground<'a> {
     g: &'a mut OverworldGenerator,
     cm: &'a mut WorldChunkManager,
-    h: &'a mut HashMap<(i32, i32), Vec<u16>>,
+    h: &'a mut HashMap<(i32, i32), [Cell; 16]>,
 }
 
 impl Ground<'_> {
-    fn col(&mut self, x: i32, z: i32) -> u16 {
-        let key = (x >> 4, z >> 4);
+    /// Cell (i, j): the blocks 4i ..= 4i + 3 by 4j ..= 4j + 3.
+    fn cell(&mut self, i: i32, j: i32) -> Cell {
+        let key = (i >> 2, j >> 2);
         if !self.h.contains_key(&key) {
-            if self.h.len() > 900 {
-                self.h.clear(); // backstop only: `Structory::start` clears at 400 between starts (about 0.5 MB at 900)
+            if self.h.len() > CELLS * 2 {
+                self.h.clear(); // backstop only: `Structory::settle` clears at `CELLS`, between two searches
             }
             let b = self.g.generate_far(key.0, key.1, self.cm);
-            let col = (0..256usize)
-                .map(|i| {
-                    let base = idx(i / 16, 0, i % 16);
-                    (0..crate::world::chunk::H).rev().find(|&y| b[base + y] != AIR).map_or(0u16, |y| {
-                        let t = b[base + y];
-                        (y as u16 + 1) | (u16::from(is_liquid(t) || t == ICE) << 15)
-                    })
-                })
-                .collect();
-            self.h.insert(key, col);
+            let mut cells = [Cell { lo: u16::MAX, hi: 0, wet: false }; 16];
+            for x in 0..16usize {
+                for z in 0..16usize {
+                    let base = idx(x, 0, z);
+                    let (h, wet) = match (0..crate::world::chunk::H).rev().find(|&y| b[base + y] != AIR) {
+                        Some(y) => (y as u16 + 1, is_liquid(b[base + y]) || b[base + y] == ICE),
+                        None => (0, false),
+                    };
+                    let c = &mut cells[(x / 4) * 4 + z / 4];
+                    c.lo = c.lo.min(h);
+                    c.hi = c.hi.max(h);
+                    c.wet |= wet;
+                }
+            }
+            self.h.insert(key, cells);
         }
-        self.h[&key][((x & 15) * 16 + (z & 15)) as usize]
+        self.h[&key][((i & 3) * 4 + (j & 3)) as usize]
     }
+
+    /// The first free height at (x, z), to within the spread of its cell.
     fn at(&mut self, x: i32, z: i32) -> i32 {
-        i32::from(self.col(x, z) & 0x7FFF)
+        let c = self.cell(x >> 2, z >> 2);
+        (i32::from(c.lo) + i32::from(c.hi) + 1) / 2
     }
 }
 
 // ---------------------------------------------------------------- the site
 
-/// The flat ground of a structure: what `judge` accepted and `flatten` builds.
-pub struct Site {
-    /// Whether the ground is levelled (false for the water structures).
+/// An x / z box `[x0, z0, x1, z1]`, both ends inclusive.
+type R = [i32; 4];
+
+/// Squared distance from (x, z) to a box, 0 inside it.
+fn d2(r: &R, x: i32, z: i32) -> i32 {
+    let dx = (r[0] - x).max(0).max(x - r[2]);
+    let dz = (r[1] - z).max(0).max(z - r[3]);
+    dx * dx + dz * dz
+}
+
+/// Squared distance between two boxes, 0 where they meet.
+fn rect_d2(a: &R, b: &R) -> i32 {
+    let dx = (a[0] - b[2]).max(b[0] - a[2]).max(0);
+    let dz = (a[1] - b[3]).max(b[1] - a[3]).max(0);
+    dx * dx + dz * dz
+}
+
+/// Whether (x, z) is within `r` blocks of a box.
+fn within(rs: &[R], x: i32, z: i32, r: i32) -> bool {
+    rs.iter().any(|a| d2(a, x, z) <= r * r)
+}
+
+fn shift(rs: &[R], dx: i32, dz: i32) -> Vec<R> {
+    rs.iter().map(|r| [r[0] + dx, r[1] + dz, r[2] + dx, r[3] + dz]).collect()
+}
+
+/// Where a start stands and what it asks of the land round it.
+struct Site {
+    /// Whether the ground is levelled (false for the structures that are not on the ground, `Data::fixed`).
     flat: bool,
     /// The ground height under the start piece (the median of 9 samples) that every column of the pad is brought to.
     target: i32,
-    /// x0, z0, x1, z1 (inclusive) of every rigid piece; they are what is levelled.
-    rigid: Vec<[i32; 4]>,
-    /// The same for every piece, rigid or not: what trees, lakes and dungeons keep away from.
-    all: Vec<[i32; 4]>,
-    /// The box a cell must meet for this start to matter to it: every piece, `PAD + MARGIN` and the veto round it.
-    zone: [i32; 4],
+    /// Every rigid piece that stands on the ground: what is levelled.
+    rigid: Vec<R>,
+    /// Every piece that shows above the ground (paths too): what trees keep away from.
+    high: Vec<R>,
+    /// Every piece: what lakes and dungeon rooms keep away from.
+    deep: Vec<R>,
+    /// The box a cell must meet for this start to matter to it: every piece and `ZONE` round it.
+    zone: R,
+}
+
+impl Site {
+    fn new(flat: bool, target: i32, rigid: Vec<R>, high: Vec<R>, deep: Vec<R>) -> Self {
+        let mut zone = [i32::MAX, i32::MAX, i32::MIN, i32::MIN];
+        for a in &deep {
+            zone = [zone[0].min(a[0] - ZONE), zone[1].min(a[1] - ZONE), zone[2].max(a[2] + ZONE), zone[3].max(a[3] + ZONE)];
+        }
+        Self { flat, target, rigid, high, deep, zone }
+    }
+
+    /// Squared distance from (x, z) to the nearest rigid piece (`i32::MAX` for none).
+    fn dist2(&self, x: i32, z: i32) -> i32 {
+        self.rigid.iter().map(|r| d2(r, x, z)).min().unwrap_or(i32::MAX)
+    }
+
+    /// The levelled height of a column that is `q` (squared) from the rigid pieces over the natural height `n`, and whether it is under
+    /// the pad (the structure itself). Past `AREA` it is `n`.
+    fn height(&self, q: i32, n: i32) -> (i32, bool) {
+        let k = (f64::from(q).sqrt() - f64::from(PAD)).max(0.0);
+        (blend(self.target, n, k), k == 0.0)
+    }
+
+    fn tree_ok(&self, x: i32, z: i32) -> bool {
+        !within(&self.rigid, x, z, AREA) && !within(&self.high, x, z, CROWN)
+    }
+
+    fn lake_ok(&self, x: i32, z: i32) -> bool {
+        !within(&self.rigid, x, z, AREA + LAKE) && !within(&self.deep, x, z, 10)
+    }
+
+    fn dungeon_ok(&self, x: i32, z: i32) -> bool {
+        !within(&self.deep, x, z, 8)
+    }
 }
 
 /// `target` eased to the natural height `n` by the smoothstep of `k` blocks of `MARGIN` (integer maths after the one `f64` sqrt, so every
@@ -663,92 +773,207 @@ fn blend(target: i32, n: i32, k: f64) -> i32 {
     target + ((n - target) * s + 512).div_euclid(1024)
 }
 
-fn rect_dist(r: &[i32; 4], x: i32, z: i32) -> f64 {
-    let dx = (r[0] - x).max(0).max(x - r[2]);
-    let dz = (r[1] - z).max(0).max(z - r[3]);
-    f64::from(dx * dx + dz * dz).sqrt()
-}
-
-impl Site {
-    /// The levelled height of column (x, z) over natural ground `n`, and whether the column is under the pad (the structure itself);
-    /// `None` outside the area, where nothing is touched.
-    fn height(&self, x: i32, z: i32, n: i32) -> Option<(i32, bool)> {
-        let d = self.rigid.iter().map(|r| rect_dist(r, x, z)).fold(f64::MAX, f64::min);
-        if d > f64::from(PAD + MARGIN) {
-            return None;
-        }
-        let k = (d - f64::from(PAD)).max(0.0);
-        Some((blend(self.target, n, k), k == 0.0))
+/// Whether the rigid boxes `rigid` (already moved) stand on ground that `tier` accepts, on the coarse terrain `cell`: every 4 x 4 cell
+/// under the pad within `.0` of `target`, in the margin within `.1` and spreading no more than `.2`, and none within `AREA + SAFE`
+/// holding water. `buf` is scratch. The pad is checked first: it is what fails most, and it asks the fewest chunks.
+fn judge(rigid: &[R], target: i32, tier: (i32, i32, i32), cell: &mut dyn FnMut(i32, i32) -> Cell, buf: &mut Vec<u8>) -> bool {
+    let wide = AREA + SAFE;
+    let (mut x0, mut z0, mut x1, mut z1) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+    for r in rigid {
+        x0 = x0.min(r[0] - wide);
+        z0 = z0.min(r[1] - wide);
+        x1 = x1.max(r[2] + wide);
+        z1 = z1.max(r[3] + wide);
     }
-
-    /// Whether (x, z) is within `r` blocks of a piece.
-    fn blocks(&self, x: i32, z: i32, r: i32) -> bool {
-        self.all.iter().any(|a| a[0] - r <= x && x <= a[2] + r && a[1] - r <= z && z <= a[3] + r)
-    }
-}
-
-/// The columns a..=b every 2 blocks, always with b.
-fn every2(a: i32, b: i32) -> impl Iterator<Item = i32> {
-    (a..=b).step_by(2).chain((b > a && (b - a) % 2 == 1).then_some(b))
-}
-
-/// Accepts or refuses the assembled `pieces` on the ground `at(x, z) = (height, wet)` for the target `target`: the rigid pieces on ground
-/// within `FLAT` of it, their surroundings within `SIDE` out to `PAD + MARGIN`, no step over `CLIFF` between neighbours, and no water within
-/// `SAFE` more. A pure function of the ground, so every cell and every worker comes to the same answer.
-fn judge(pieces: &[Piece], target: i32, flat: bool, at: &mut dyn FnMut(i32, i32) -> (i32, bool)) -> Option<Site> {
-    let rect = |p: &Piece| [p.bx[0], p.bx[2], p.bx[3], p.bx[5]];
-    let all: Vec<[i32; 4]> = pieces.iter().map(rect).collect();
-    let rigid: Vec<[i32; 4]> = pieces.iter().filter(|p| p.rigid).map(rect).collect();
-    let mut zone = [i32::MAX, i32::MAX, i32::MIN, i32::MIN];
-    for a in &all {
-        let e = PAD + MARGIN + LAKE_VETO;
-        zone = [zone[0].min(a[0] - e), zone[1].min(a[1] - e), zone[2].max(a[2] + e), zone[3].max(a[3] + e)];
-    }
-    if flat && !rigid.is_empty() {
-        let reach = PAD + MARGIN;
-        for r in &rigid {
-            for x in every2(r[0] - reach - SAFE, r[2] + reach + SAFE) {
-                for z in every2(r[1] - reach - SAFE, r[3] + reach + SAFE) {
-                    let (n, wet) = at(x, z);
-                    if wet {
-                        return None;
-                    }
-                    let d = rect_dist(r, x, z);
-                    let dev = (n - target).abs();
-                    if (d <= f64::from(PAD) && dev > FLAT) || (d <= f64::from(reach) && dev > SIDE) {
-                        return None;
-                    }
-                    if d <= f64::from(reach) && ((at(x + 1, z).0 - n).abs() > CLIFF || (at(x, z + 1).0 - n).abs() > CLIFF) {
-                        return None;
-                    }
+    let (i0, j0, i1, j1) = (x0 >> 2, z0 >> 2, x1 >> 2, z1 >> 2);
+    let nj = (j1 - j0 + 1) as usize;
+    buf.clear();
+    buf.resize((i1 - i0 + 1) as usize * nj, 0);
+    // class of every cell near a rigid box: 1 = pad, 2 = margin, 3 = the water margin
+    for r in rigid {
+        for i in (r[0] - wide) >> 2..=(r[2] + wide) >> 2 {
+            for j in (r[1] - wide) >> 2..=(r[3] + wide) >> 2 {
+                let q = rect_d2(&[i * 4, j * 4, i * 4 + 3, j * 4 + 3], r);
+                let class = if q <= PAD * PAD {
+                    1
+                } else if q <= AREA * AREA {
+                    2
+                } else if q <= wide * wide {
+                    3
+                } else {
+                    continue;
+                };
+                let k = (i - i0) as usize * nj + (j - j0) as usize;
+                if buf[k] == 0 || class < buf[k] {
+                    buf[k] = class;
                 }
             }
         }
     }
-    Some(Site { flat: flat && !rigid.is_empty(), target, rigid, all, zone })
-}
-
-/// Rebuild column (x, z) so its ground is at `h` (one above the top block): cut or fill, the column's own surface block and two filler
-/// layers, snow kept, everything above cleared. `force` clears even when the height is right (the pad: no tree stays inside a wall).
-fn rebuild(w: &mut Region, x: i32, z: i32, h: i32, force: bool) {
-    let cur = region_ground(w, x, z);
-    if cur == h && !force {
-        return;
-    }
-    let (mut top, mut fill) = (if cur >= 2 { w.get(x, cur - 1, z) } else { GRASS }, if cur >= 3 { w.get(x, cur - 2, z) } else { DIRT });
-    if is_liquid(top) || top == ICE || top == AIR {
-        (top, fill) = (GRASS, DIRT);
-    }
-    if is_liquid(fill) || fill == AIR {
-        fill = DIRT;
-    }
-    let snow = w.get(x, cur, z) == SNOW;
-    for y in h.max(1)..w.top() {
-        if w.get(x, y, z) != AIR {
-            w.set(x, y, z, AIR);
+    for class in 1..=3u8 {
+        for i in i0..=i1 {
+            for j in j0..=j1 {
+                if buf[(i - i0) as usize * nj + (j - j0) as usize] != class {
+                    continue;
+                }
+                let c = cell(i, j);
+                let (lo, hi) = (i32::from(c.lo), i32::from(c.hi));
+                let ok = !c.wet
+                    && match class {
+                        1 => lo >= target - tier.0 && hi <= target + tier.0,
+                        2 => lo >= target - tier.1 && hi <= target + tier.1 && hi - lo <= tier.2,
+                        _ => true,
+                    };
+                if !ok {
+                    return false;
+                }
+            }
         }
     }
-    if h < 2 {
+    true
+}
+
+/// cos and sin of 22.5 degree steps, times 100 (integers: every platform tries the same places).
+const COS: [i32; 16] = [100, 92, 71, 38, 0, -38, -71, -92, -100, -92, -71, -38, 0, 38, 71, 92];
+const SIN: [i32; 16] = [0, 38, 71, 92, 100, 92, 71, 38, 0, -38, -71, -92, -100, -92, -71, -38];
+
+/// The places the site search tries, nearest first: the start chunk, 8 places 16 blocks away, 16 at 32 and 16 at `SHIFT`.
+fn shifts() -> Vec<(i32, i32)> {
+    let mut v = vec![(0, 0)];
+    for (r, step) in [(16, 2usize), (32, 1), (SHIFT, 1)] {
+        for k in (0..16).step_by(step) {
+            v.push((r * COS[k] / 100, r * SIN[k] / 100));
+        }
+    }
+    v
+}
+
+/// What the site search asks of the world.
+trait Land {
+    fn cell(&mut self, i: i32, j: i32) -> Cell;
+    /// The ground level under the start piece when the layout is moved by (dx, dz): the median of 9 samples.
+    fn level(&mut self, dx: i32, dz: i32) -> i32;
+    /// Whether a place that passed the ground test may be used: its biome, the height of the world, the starts of lower key.
+    fn allow(&mut self, dx: i32, dz: i32, level: i32) -> bool;
+}
+
+/// The first place, nearest to where the start chunk put it, where `rigid` (the boxes of the layout) stands on ground `judge` accepts,
+/// strict tier first, and `land` allows: (dx, dz, level). `flat` false: only the start chunk, no ground test.
+fn search(rigid: &[R], flat: bool, land: &mut dyn Land) -> Option<(i32, i32, i32)> {
+    let offs = if flat { shifts() } else { vec![(0, 0)] };
+    let tiers = if flat { &TIERS[..] } else { &TIERS[..1] };
+    let mut buf = Vec::new();
+    for &tier in tiers {
+        for &(dx, dz) in &offs {
+            let level = land.level(dx, dz);
+            if flat && !judge(&shift(rigid, dx, dz), level, tier, &mut |i, j| land.cell(i, j), &mut buf) {
+                continue;
+            }
+            if land.allow(dx, dz, level) {
+                return Some((dx, dz, level));
+            }
+        }
+    }
+    None
+}
+
+/// `search`'s view of the world while one start is settled.
+struct Siting<'a, 'b> {
+    gr: Ground<'a>,
+    /// The start piece's box in the layout (before it is moved).
+    p0: Bx,
+    pieces: &'b [Piece],
+    mask: u32,
+    rigid: &'b [R],
+    high: &'b [R],
+    flat: bool,
+    others: &'b [Arc<Start>],
+}
+
+impl Land for Siting<'_, '_> {
+    fn cell(&mut self, i: i32, j: i32) -> Cell {
+        self.gr.cell(i, j)
+    }
+
+    fn level(&mut self, dx: i32, dz: i32) -> i32 {
+        let (cx, cz) = centre(&self.p0);
+        let mut hs = [0i32; 9];
+        let mut n = 0;
+        for &x in &[self.p0[0], cx, self.p0[3]] {
+            for &z in &[self.p0[2], cz, self.p0[5]] {
+                hs[n] = self.gr.at(x + dx, z + dz);
+                n += 1;
+            }
+        }
+        hs.sort_unstable();
+        hs[4]
+    }
+
+    fn allow(&mut self, dx: i32, dz: i32, level: i32) -> bool {
+        let dy = level - BASE;
+        if self.pieces.iter().any(|p| p.bx[1] + dy < 1 || p.bx[4] + dy > crate::world::chunk::H as i32 - 2) {
+            return false; // out of the world
+        }
+        if self.flat {
+            let (x, z) = centre(&self.p0);
+            let biome = self.gr.cm.load_block_generator_data(x + dx, z + dz, 1, 1)[0];
+            if self.mask >> (biome as u8) & 1 == 0 {
+                return false; // moved out of the biomes it can stand in
+            }
+        }
+        // a start of lower key keeps its place: no ground in common, and the pieces 6 blocks apart
+        let (rigid, high) = (shift(self.rigid, dx, dz), shift(self.high, dx, dz));
+        let far = (2 * AREA) * (2 * AREA);
+        self.others.iter().all(|o| {
+            rigid.iter().all(|a| o.site.rigid.iter().all(|b| rect_d2(a, b) > far)) && high.iter().all(|a| o.site.high.iter().all(|b| rect_d2(a, b) > 36))
+        })
+    }
+}
+
+/// Things that grow on the ground and are no part of it: a margin column that changes height loses these.
+fn loose(id: u8) -> bool {
+    matches!(id, TALL_GRASS | DEAD_BUSH | FLOWER_Y..=MUSH_RED | SNOW | REED | CACTUS | PUMPKIN | 6)
+}
+
+/// The natural ground of a column of the region: one above the top block that is not air, a tree or something loose.
+fn natural_ground(w: &Region, x: i32, z: i32) -> i32 {
+    (1..w.top()).rev().find(|&y| !matches!(w.get(x, y, z), AIR | LEAVES | LOG) && !loose(w.get(x, y, z))).map_or(1, |y| y + 1)
+}
+
+/// Bring column (x, z), whose natural ground is `cur`, to `h` (one above its top block): cut or fill, with the column's own surface block
+/// and filler, snow kept. Under the pad (`pad`) everything above is cleared; in the margin only loose plants and snow go, so the canopy
+/// of a tree outside it stays whole. A column of water or ice is left alone.
+fn rebuild(w: &mut Region, x: i32, z: i32, cur: i32, h: i32, pad: bool) {
+    if cur < 2 || h < 2 || (cur == h && !pad) {
+        return;
+    }
+    let top = w.get(x, cur - 1, z);
+    if is_liquid(top) || top == ICE {
+        return;
+    }
+    let fill = match w.get(x, cur - 2, z) {
+        AIR | WATER_MOVING..=LAVA => DIRT,
+        f => f,
+    };
+    let snow = w.get(x, cur, z) == SNOW;
+    for y in h..cur {
+        w.set(x, y, z, AIR);
+    }
+    let from = h.max(cur);
+    if pad {
+        for y in from..w.top() {
+            if w.get(x, y, z) != AIR {
+                w.set(x, y, z, AIR);
+            }
+        }
+    } else {
+        let mut y = from;
+        while y < w.top() && loose(w.get(x, y, z)) {
+            w.set(x, y, z, AIR);
+            y += 1;
+        }
+    }
+    if h == cur {
         return;
     }
     let from = if h > cur { cur - 1 } else { h - 3 };
@@ -762,7 +987,7 @@ fn rebuild(w: &mut Region, x: i32, z: i32, h: i32, force: bool) {
 }
 
 /// Level the columns of `cell` that `s` owns: the pad and its margin. A column already taken by an earlier start of this cell is left.
-fn flatten(s: &Start, gr: &mut Ground, w: &mut Region, cell: [i32; 4], claimed: &mut [[bool; 16]; 16]) {
+fn flatten(s: &Start, w: &mut Region, cell: [i32; 4], claimed: &mut [[bool; 16]; 16]) {
     let z0 = s.site.zone;
     if !s.site.flat || z0[0] > cell[2] || z0[2] < cell[0] || z0[1] > cell[3] || z0[3] < cell[1] {
         return;
@@ -770,14 +995,14 @@ fn flatten(s: &Start, gr: &mut Ground, w: &mut Region, cell: [i32; 4], claimed: 
     for x in cell[0]..=cell[2] {
         for z in cell[1]..=cell[3] {
             let c = &mut claimed[(x - cell[0]) as usize][(z - cell[1]) as usize];
-            if *c {
+            let q = s.site.dist2(x, z);
+            if *c || q > AREA * AREA {
                 continue;
             }
-            let n = gr.at(x, z);
-            if let Some((h, pad)) = s.site.height(x, z, n) {
-                *c = true;
-                rebuild(w, x, z, h, pad);
-            }
+            *c = true;
+            let cur = natural_ground(w, x, z);
+            let (h, pad) = s.site.height(q, cur);
+            rebuild(w, x, z, cur, h, pad);
         }
     }
 }
@@ -842,11 +1067,11 @@ pub fn starts(seed: i64, x0: i32, z0: i32, x1: i32, z1: i32, biome: &mut dyn FnM
     out
 }
 
-/// The per-generator state of the structures: the starts already assembled and the heights they needed.
+/// The per-generator state of the structures: the starts already settled and the coarse terrain their searches read.
 pub struct Structory {
     seed: i64,
     starts: HashMap<(usize, i32, i32), Option<Arc<Start>>>,
-    heights: HashMap<(i32, i32), Vec<u16>>,
+    heights: HashMap<(i32, i32), [Cell; 16]>,
 }
 
 impl Structory {
@@ -855,7 +1080,8 @@ impl Structory {
         data().map(|_| Self { seed, starts: HashMap::new(), heights: HashMap::new() })
     }
 
-    /// The structure that starts in chunk (sx, sz) of set `si`, if there is one (`ChunkGenerator.tryGenerateStructures`).
+    /// The structure that starts in chunk (sx, sz) of set `si`, if there is one (`ChunkGenerator.tryGenerateStructures`). A pure function
+    /// of (seed, si, sx, sz): the same from every worker and every side.
     fn start(&mut self, d: &'static Data, g: &mut OverworldGenerator, cm: &mut WorldChunkManager, si: usize, sx: i32, sz: i32) -> Option<Arc<Start>> {
         if let Some(s) = self.starts.get(&(si, sx, sz)) {
             return s.clone();
@@ -870,7 +1096,8 @@ impl Structory {
             r.set_seed(i64::from(sx).wrapping_mul(a) ^ i64::from(sz).wrapping_mul(b) ^ self.seed);
             let mut list = set.entries.clone();
             let mut total: i32 = list.iter().map(|e| i32::from(e.1)).sum();
-            // the weighted pick; a structure that cannot start here (its biome, no piece) is dropped and the next one tried
+            let mut lower: Option<Vec<Arc<Start>>> = None; // the starts of lower key near this one, asked for once
+            // the weighted pick; a structure that cannot start here (its biome, no piece, no place) is dropped and the next one tried
             while !list.is_empty() && total > 0 {
                 let mut k = r.next_int_bound(total);
                 let mut at = list.len() - 1;
@@ -888,27 +1115,16 @@ impl Structory {
                 if d.structs[st].mask >> (biome as u8) & 1 == 0 {
                     continue;
                 }
-                // the nominal start, then shifts nearest first; the first flat, dry site wins (`judge`); water structures stay put
-                let offs = if d.aquatic(st) { vec![(0, 0)] } else { shifts() };
-                if self.heights.len() > 400 {
-                    self.heights.clear(); // between starts only, never in the middle of a search
+                // the layout does not depend on the ground: assembled once on flat ground, then moved to its place
+                let layout = assemble(d, st, sx, sz, &mut r, &mut |_, _| BASE);
+                if layout.is_empty() {
+                    continue;
                 }
-                let mut gr = Ground { g: &mut *g, cm: &mut *cm, h: &mut self.heights };
-                for off in offs {
-                    let mut rr = r.clone();
-                    let pieces = assemble(d, st, sx, sz, off, &mut rr, &mut |x, z| gr.at(x, z));
-                    let Some(p0) = pieces.first() else { break }; // the same draws whatever the shift: no start piece, no structure
-                    let target = p0.pos[1] - d.structs[st].y + base_depth(d, p0.t);
-                    let flat = !d.aquatic(st);
-                    if let Some(site) = judge(&pieces, target, flat, &mut |x, z| {
-                        let c = gr.col(x, z);
-                        (i32::from(c & 0x7FFF), c >> 15 != 0)
-                    }) {
-                        made = Some(Arc::new(Start { st, pieces, site }));
-                        break;
-                    }
+                if lower.is_none() {
+                    lower = Some(self.neighbours(d, g, cm, si, sx, sz));
                 }
-                if made.is_some() {
+                if let Some(start) = self.settle(d, g, cm, st, layout, lower.as_deref().unwrap_or(&[])) {
+                    made = Some(Arc::new(start));
                     break;
                 }
             }
@@ -917,7 +1133,55 @@ impl Structory {
         made
     }
 
-    /// The structures whose area, veto or pieces can touch the cell of chunk (cx, cz), in a fixed order (set, region x, region z).
+    /// The starts that rank before (si, sx, sz) (lower set, then chunk x, then chunk z) within `NEAR` chunks. Only they are asked about,
+    /// so the recursion ends and every start gets the same answer whichever is looked at first.
+    fn neighbours(&mut self, d: &'static Data, g: &mut OverworldGenerator, cm: &mut WorldChunkManager, si: usize, sx: i32, sz: i32) -> Vec<Arc<Start>> {
+        let mut out = Vec::new();
+        for (s2, set) in d.sets.iter().enumerate() {
+            let (rx0, rx1) = ((sx - NEAR).div_euclid(set.spacing), (sx + NEAR).div_euclid(set.spacing));
+            let (rz0, rz1) = ((sz - NEAR).div_euclid(set.spacing), (sz + NEAR).div_euclid(set.spacing));
+            for rx in rx0..=rx1 {
+                for rz in rz0..=rz1 {
+                    let (x2, z2) = spread(self.seed, rx, rz, set);
+                    if (s2, x2, z2) >= (si, sx, sz) || (x2 - sx).abs() > NEAR || (z2 - sz).abs() > NEAR {
+                        continue;
+                    }
+                    if let Some(o) = self.start(d, g, cm, s2, x2, z2) {
+                        out.push(o);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Give the layout `pieces` (assembled on flat ground at its start chunk) its place (`search`) and move it there. None when the land
+    /// has no place for it or a start of lower key has it.
+    fn settle(&mut self, d: &'static Data, g: &mut OverworldGenerator, cm: &mut WorldChunkManager, st: usize, mut pieces: Vec<Piece>, lower: &[Arc<Start>]) -> Option<Start> {
+        if self.heights.len() > CELLS {
+            self.heights.clear(); // between two searches only, never in the middle of one
+        }
+        let rect = |p: &Piece| [p.bx[0], p.bx[2], p.bx[3], p.bx[5]];
+        let shows = |p: &&Piece| p.bx[4] >= BASE - 3; // the layout stands on ground level `BASE`
+        let rigid: Vec<R> = if d.fixed(st) { Vec::new() } else { pieces.iter().filter(shows).filter(|p| p.rigid).map(rect).collect() };
+        let high: Vec<R> = pieces.iter().filter(shows).map(rect).collect();
+        let deep: Vec<R> = pieces.iter().map(rect).collect();
+        let flat = !rigid.is_empty();
+        let (dx, dz, target) = {
+            let gr = Ground { g: &mut *g, cm: &mut *cm, h: &mut self.heights };
+            let mut sit = Siting { gr, p0: pieces[0].bx, pieces: &pieces, mask: d.structs[st].mask, rigid: &rigid, high: &high, flat, others: lower };
+            search(&rigid, flat, &mut sit)?
+        };
+        let dy = target - BASE;
+        for p in &mut pieces {
+            p.pos = [p.pos[0] + dx, p.pos[1] + dy, p.pos[2] + dz];
+            p.bx = [p.bx[0] + dx, p.bx[1] + dy, p.bx[2] + dz, p.bx[3] + dx, p.bx[4] + dy, p.bx[5] + dz];
+        }
+        let site = Site::new(flat, target, shift(&rigid, dx, dz), shift(&high, dx, dz), shift(&deep, dx, dz));
+        Some(Start { st, pieces, site })
+    }
+
+    /// The structures whose levelled ground, veto or pieces can touch the cell of chunk (cx, cz), in a fixed order (set, region x, region z).
     pub fn near(&mut self, g: &mut OverworldGenerator, cx: i32, cz: i32, cm: &mut WorldChunkManager) -> Vec<Arc<Start>> {
         let Some(d) = data() else { return Vec::new() };
         let cell = [cx * 16 + 8, cz * 16 + 8, cx * 16 + 23, cz * 16 + 23];
@@ -928,7 +1192,7 @@ impl Structory {
             for rx in rx0..=rx1 {
                 for rz in rz0..=rz1 {
                     let (sx, sz) = spread(self.seed, rx, rz, set);
-                    if (sx * 16 - cell[0]).abs() > 16 * REACH + 16 || (sz * 16 - cell[1]).abs() > 16 * REACH + 16 {
+                    if (sx - cx).abs() > REACH + 1 || (sz - cz).abs() > REACH + 1 {
                         continue;
                     }
                     let Some(start) = self.start(d, g, cm, si, sx, sz) else { continue };
@@ -944,14 +1208,13 @@ impl Structory {
 
     /// Write what the structures `near` put in the cell of chunk (cx, cz): first the levelled ground of all of them, then the pieces.
     /// Called at the end of `populate`, after the features.
-    pub fn populate(&mut self, g: &mut OverworldGenerator, w: &mut Region, cx: i32, cz: i32, cm: &mut WorldChunkManager, near: &[Arc<Start>]) {
+    pub fn populate(&mut self, w: &mut Region, cx: i32, cz: i32, near: &[Arc<Start>]) {
         let Some(d) = data() else { return };
         let cell = [cx * 16 + 8, cz * 16 + 8, cx * 16 + 23, cz * 16 + 23];
         if near.iter().any(|s| s.site.flat) {
             let mut claimed = [[false; 16]; 16];
-            let mut gr = Ground { g: &mut *g, cm: &mut *cm, h: &mut self.heights };
             for s in near {
-                flatten(s, &mut gr, w, cell, &mut claimed);
+                flatten(s, w, cell, &mut claimed);
             }
         }
         for start in near {
@@ -963,14 +1226,6 @@ impl Structory {
             }
         }
     }
-}
-
-/// The offsets the site search tries: (0, 0), then multiples of `SHIFT_STEP` up to `SHIFT`, the nearest first.
-fn shifts() -> Vec<(i32, i32)> {
-    let n = SHIFT / SHIFT_STEP;
-    let mut v: Vec<(i32, i32)> = (-n..=n).flat_map(|i| (-n..=n).map(move |j| (i * SHIFT_STEP, j * SHIFT_STEP))).collect();
-    v.sort_by_key(|&(x, z)| (x * x + z * z, x, z));
-    v
 }
 
 // ---------------------------------------------------------------- writing a piece
@@ -1154,7 +1409,7 @@ mod tests {
             let dist = d.structs[st].dist;
             for seed in 0..12 {
                 let mut r = JavaRandom::new(seed * 7919 + st as i64);
-                let ps = assemble(d, st, 100 + seed as i32, -40 + seed as i32, (0, 0), &mut r, &mut |_, _| 64);
+                let ps = assemble(d, st, 100 + seed as i32, -40 + seed as i32, &mut r, &mut |_, _| 64);
                 let c = centre(&ps.first().map_or([0; 6], |p| p.bx));
                 for p in &ps {
                     assert!(p.bx[1] >= 0 && p.bx[4] < 128, "structure {st} piece out of the world: {:?}", p.bx);
@@ -1172,7 +1427,7 @@ mod tests {
         for st in 0..d.structs.len() {
             for seed in 0..6 {
                 let mut r = JavaRandom::new(seed * 31 + st as i64);
-                let ps = assemble(d, st, 50 + seed as i32, 20, (0, 0), &mut r, &mut |_, _| 64);
+                let ps = assemble(d, st, 50 + seed as i32, 20, &mut r, &mut |_, _| 64);
                 if let Some(p0) = ps.first() {
                     assert_eq!(p0.pos[1], d.structs[st].y + 64 - base_depth(d, p0.t), "structure {st}");
                 }
@@ -1209,9 +1464,23 @@ mod tests {
         }
     }
 
-    /// A rigid piece box (x0, z0, x1, z1) at height 64, for `judge`.
-    fn piece(b: [i32; 4], rigid: bool) -> Piece {
-        Piece { t: 0, rot: 0, pos: [b[0], 64, b[1]], bx: [b[0], 64, b[1], b[2], 70, b[3]], rigid, kind: 1, proc: 255 }
+    /// A flat made-up land: every cell between `lo` and `hi`, dry.
+    fn dry(lo: u16, hi: u16) -> impl FnMut(i32, i32) -> Cell {
+        move |_, _| Cell { lo, hi, wet: false }
+    }
+
+    /// The land `h(x)` (the same along z) seen as cells.
+    fn ramp(h: impl Fn(i32) -> i32) -> impl FnMut(i32, i32) -> Cell {
+        move |i, _| {
+            let hs: Vec<i32> = (0..4).map(|k| h(i * 4 + k)).collect();
+            Cell { lo: *hs.iter().min().unwrap() as u16, hi: *hs.iter().max().unwrap() as u16, wet: false }
+        }
+    }
+
+    const STRICT: (i32, i32, i32) = TIERS[0];
+
+    fn accepts(rigid: &[R], mut land: impl FnMut(i32, i32) -> Cell) -> bool {
+        judge(rigid, 64, STRICT, &mut land, &mut Vec::new())
     }
 
     #[test]
@@ -1219,109 +1488,196 @@ mod tests {
         assert_eq!(blend(64, 70, 0.0), 64);
         assert_eq!(blend(64, 70, f64::from(MARGIN)), 70);
         assert_eq!(blend(64, 58, f64::from(MARGIN)), 58);
-        for n in [-6, 6] {
+        for n in [-6, 6, 8] {
             let hs: Vec<i32> = (0..=MARGIN).map(|k| blend(64, 64 + n, f64::from(k))).collect();
             assert!(hs.windows(2).all(|w| (w[1] - w[0]).abs() <= 1 && (w[1] - 64) * n.signum() >= (w[0] - 64) * n.signum()), "{hs:?}");
         }
     }
 
     #[test]
-    fn a_flat_dry_site_is_accepted_and_levelled_to_its_pad() {
-        let ps = [piece([0, 0, 15, 15], true), piece([16, 4, 24, 10], false)];
-        let site = judge(&ps, 64, true, &mut |_, _| (64, false)).expect("flat ground");
-        assert!(site.flat && site.rigid.len() == 1 && site.all.len() == 2);
-        assert_eq!(site.height(8, 8, 64), Some((64, true)));
-        assert_eq!(site.height(8, 8, 66), Some((64, true))); // under the pad: the target, whatever the ground was
-        assert_eq!(site.height(8, 15 + PAD + MARGIN + 1, 70), None); // past the margin nothing is touched
-        let (h, pad) = site.height(8, 15 + PAD + MARGIN, 70).unwrap();
-        assert_eq!((h, pad), (70, false)); // the margin ends flush with the natural ground
-        // a neighbour column never differs by more than the natural ground does, plus one
-        let mut last = 64;
-        for z in 16..=15 + PAD + MARGIN {
-            let (h, _) = site.height(8, z, 70).unwrap();
-            assert!((h - last).abs() <= 1, "z {z}: {last} -> {h}");
-            last = h;
-        }
-        assert!(site.blocks(24 + 3, 7, 3) && !site.blocks(24 + 4, 7, 3)); // the veto follows every piece, rigid or not
-        assert!(site.zone[0] <= -(PAD + MARGIN) && site.zone[2] >= 24 + PAD + MARGIN);
+    fn a_level_dry_place_is_accepted_and_slopes_cliffs_and_water_refuse_one() {
+        let b = [[0, 0, 15, 15]];
+        assert!(accepts(&b, dry(64, 64)));
+        assert!(accepts(&b, dry(63, 65))); // a little unevenness is within the pad's 2
+        assert!(accepts(&b, ramp(|x| 64 + (x - 20).clamp(0, 6)))); // a gentle rise of 6 in the margin
+        assert!(!accepts(&b, ramp(|x| 64 + x.div_euclid(4)))); // a slope under the building
+        assert!(!accepts(&b, ramp(|x| 64 + 3 * i32::from((9..=10).contains(&x))))); // a wall 3 high under the pad
+        assert!(!accepts(&b, ramp(|x| 64 + 5 * i32::from(x > 24)))); // a wall of 5 in the margin
+        assert!(!accepts(&b, ramp(|x| 64 + (x - 17).clamp(0, 8)))); // a long hill 8 high beside it
+        let river = |i: i32| move |ci: i32, _: i32| Cell { lo: 64, hi: 64, wet: ci == i };
+        assert!(!accepts(&b, river((15 + AREA + SAFE - 1) >> 2))); // water at the far end of the water margin
+        assert!(accepts(&b, river((15 + AREA + SAFE + 4) >> 2))); // one cell beyond: it does not matter
+        assert!(!judge(&b, 64, STRICT, &mut |_, _| Cell { lo: 64, hi: 64, wet: true }, &mut Vec::new())); // a lake under it
     }
 
     #[test]
-    fn slopes_cliffs_and_water_refuse_a_site() {
-        let ps = [piece([0, 0, 15, 15], true)];
-        let ok = |f: &mut dyn FnMut(i32, i32) -> (i32, bool)| judge(&ps, 64, true, f).is_some();
-        assert!(ok(&mut |_, _| (64, false)));
-        assert!(ok(&mut |x, _| (64 + (x - 20).clamp(0, 6), false))); // a gentle rise of 6 in the margin is fine
-        assert!(!ok(&mut |x, _| (64 + x.div_euclid(4), false))); // a slope under the building
-        assert!(!ok(&mut |x, _| (64 + (x > 8 && x < 10) as i32 * 3, false))); // a 3 block wall under the pad
-        assert!(!ok(&mut |x, _| (64 + (x > 24) as i32 * 3, false))); // a 3 block wall in the margin
-        assert!(!ok(&mut |x, _| (64 + (x - 17).clamp(0, 8), false))); // a long gentle hill 8 high beside it: over SIDE
-        assert!(!ok(&mut |x, z| (64, x == 15 + PAD + MARGIN + SAFE && z == 0))); // a river `SAFE` blocks past the margin
-        assert!(ok(&mut |x, z| (64, x == 15 + PAD + MARGIN + SAFE + 3 && z == 0))); // further away it does not matter
-        // a water structure is never levelled nor refused for its water
-        let site = judge(&ps, 64, false, &mut |_, _| (40, true)).unwrap();
-        assert!(!site.flat && site.blocks(0, 0, 0));
+    fn the_looser_tier_takes_what_the_strict_one_refuses() {
+        let b = [[0, 0, 15, 15]];
+        let mut land = ramp(|x| 64 + (x - 17).clamp(0, 7));
+        assert!(!judge(&b, 64, TIERS[0], &mut land, &mut Vec::new()));
+        assert!(judge(&b, 64, TIERS[1], &mut land, &mut Vec::new()));
     }
 
     #[test]
-    fn the_site_search_shifts_nearest_first_and_a_shift_only_translates_the_layout() {
+    fn the_places_tried_are_nearest_first_and_centred_on_the_start() {
         let n = shifts();
-        assert_eq!((n[0], n.len()), ((0, 0), 169));
-        assert!(n.windows(2).all(|w| w[0].0 * w[0].0 + w[0].1 * w[0].1 <= w[1].0 * w[1].0 + w[1].1 * w[1].1));
-        // a hump 16 wide that runs along z: the nominal rectangle is refused, the first shift that clears it is accepted
-        let hump = |x: i32| if (0..16).contains(&x) { 70 } else { 64 };
-        let found = n.iter().find(|&&(dx, _)| judge(&[piece([dx, 0, dx + 15, 15], true)], 64, true, &mut |x, _| (hump(x), false)).is_some());
-        assert!(found.is_some_and(|o| o.0.abs() >= 40), "{found:?}");
-        // the same Random and ground give the same layout, only moved
-        let d = data().unwrap();
-        for st in (0..d.structs.len()).filter(|&st| !d.aquatic(st)) {
-            let (mut r0, mut r1) = (JavaRandom::new(77 + st as i64), JavaRandom::new(77 + st as i64));
-            let a = assemble(d, st, 12, 4, (0, 0), &mut r0, &mut |_, _| 64);
-            let b = assemble(d, st, 12, 4, (8, -16), &mut r1, &mut |_, _| 64);
-            assert_eq!(a.len(), b.len(), "structure {st}");
-            for (p, q) in a.iter().zip(&b) {
-                assert_eq!((q.bx[0] - p.bx[0], q.bx[2] - p.bx[2], q.bx[1] - p.bx[1], q.bx[5] - p.bx[5]), (8, -16, 0, -16), "structure {st}");
-            }
+        assert_eq!((n[0], n.len()), ((0, 0), 41));
+        let r2 = |o: &(i32, i32)| o.0 * o.0 + o.1 * o.1;
+        let rings = [&n[1..9], &n[9..25], &n[25..41]];
+        let mut last = 0;
+        for ring in rings {
+            assert!(ring.iter().map(r2).min().unwrap() > last, "a ring starts inside the one before");
+            last = ring.iter().map(r2).max().unwrap();
+        }
+        assert!(n.iter().all(|o| o.0.abs() <= SHIFT && o.1.abs() <= SHIFT));
+    }
+
+    /// `search` on a made-up land: `cell` as cells, level 64 everywhere, `ok` the extra permission.
+    struct Mock<F: FnMut(i32, i32) -> Cell, A: FnMut(i32, i32) -> bool>(F, A);
+
+    impl<F: FnMut(i32, i32) -> Cell, A: FnMut(i32, i32) -> bool> Land for Mock<F, A> {
+        fn cell(&mut self, i: i32, j: i32) -> Cell {
+            (self.0)(i, j)
+        }
+        fn level(&mut self, _: i32, _: i32) -> i32 {
+            64
+        }
+        fn allow(&mut self, dx: i32, dz: i32, _: i32) -> bool {
+            (self.1)(dx, dz)
         }
     }
 
     #[test]
-    fn a_column_is_rebuilt_cut_or_filled_and_cleared_above() {
+    fn the_search_steps_over_a_hump_and_over_a_refusal_and_gives_up_on_broken_land() {
+        let b = [[0, 0, 15, 15]];
+        // a hump 16 wide along z (heights of cells whole: it starts and ends on a cell edge): the start chunk and the near rings are refused
+        let mut m = Mock(ramp(|x| if (0..16).contains(&x) { 72 } else { 64 }), |_, _| true);
+        let (dx, dz, level) = search(&b, true, &mut m).expect("flat ground lies beside the hump");
+        assert!(dx.abs() >= 32 && level == 64, "({dx}, {dz})");
+        // a place that is flat but not allowed (its biome, another structure) is skipped
+        let mut m = Mock(dry(64, 64), |dx, dz| (dx, dz) != (0, 0));
+        let (dx, dz, _) = search(&b, true, &mut m).unwrap();
+        assert_eq!((dx * dx + dz * dz > 0, dx.abs().max(dz.abs()) <= 16), (true, true));
+        // land that is broken everywhere has no place: no structure
+        let mut m = Mock(|i, j| Cell { lo: 60, hi: 75, wet: (i + j) % 7 == 0 }, |_, _| true);
+        assert_eq!(search(&b, true, &mut m), None);
+        // a structure that is not on the ground is never moved nor judged
+        let mut m = Mock(|_, _| Cell { lo: 0, hi: 300, wet: true }, |_, _| true);
+        assert_eq!(search(&b, false, &mut m), Some((0, 0, 64)));
+    }
+
+    #[test]
+    fn trees_lakes_and_dungeons_keep_off_the_levelled_ground_and_the_pieces() {
+        let site = Site::new(true, 64, vec![[0, 0, 15, 15]], vec![[0, 0, 15, 15], [16, 4, 24, 10]], vec![[0, 0, 15, 15], [16, 4, 24, 10]]);
+        assert!(!site.tree_ok(8, 8) && !site.tree_ok(15 + AREA, 8), "no trunk on the building nor in its levelled ground");
+        assert!(site.tree_ok(15 + AREA + 1, 8 + 30), "past the area");
+        assert!(!site.tree_ok(24 + CROWN, 7) && site.tree_ok(24 + CROWN + 1, 7 + 30), "a crown's reach from the path");
+        assert!(!site.lake_ok(15 + AREA + LAKE, 8) && site.lake_ok(15 + AREA + LAKE + 1, 8 + 30));
+        assert!(!site.dungeon_ok(15 + 8, 8) && site.dungeon_ok(24 + 9, 7));
+        // what is not on the ground levels nothing and vetoes only what shows
+        let hidden = Site::new(false, 64, Vec::new(), Vec::new(), vec![[0, 0, 15, 15]]);
+        assert!(hidden.tree_ok(8, 8) && hidden.lake_ok(30, 8) && !hidden.dungeon_ok(8, 8) && hidden.dist2(8, 8) == i32::MAX);
+    }
+
+    fn column(w: &mut Region, x: i32, z: i32, ground: i32) {
+        for y in 1..ground - 4 {
+            w.set(x, y, z, STONE);
+        }
+        for y in ground - 4..ground - 1 {
+            w.set(x, y, z, DIRT);
+        }
+        w.set(x, ground - 1, z, GRASS);
+        w.set(x, ground, z, TALL_GRASS);
+    }
+
+    fn region() -> Region {
         use crate::world::chunk::Nibbles;
-        let mut w = Region::new(0, 0, std::array::from_fn(|_| vec![AIR; crate::world::chunk::VOLUME]), std::array::from_fn(|_| Nibbles::new()));
-        let col = |w: &mut Region, x: i32, z: i32, ground: i32| {
-            for y in 1..ground - 4 {
-                w.set(x, y, z, STONE);
-            }
-            for y in ground - 4..ground - 1 {
-                w.set(x, y, z, DIRT);
-            }
-            w.set(x, ground - 1, z, GRASS);
-            w.set(x, ground, z, TALL_GRASS);
-        };
-        col(&mut w, 3, 3, 70);
+        Region::new(0, 0, std::array::from_fn(|_| vec![AIR; crate::world::chunk::VOLUME]), std::array::from_fn(|_| Nibbles::new()))
+    }
+
+    #[test]
+    fn a_column_under_the_pad_is_cut_or_filled_and_cleared_above() {
+        let mut w = region();
+        column(&mut w, 3, 3, 70);
         for y in 71..78 {
             w.set(3, y, 3, LEAVES);
         }
-        rebuild(&mut w, 3, 3, 66, false); // cut 4 down
+        assert_eq!(natural_ground(&w, 3, 3), 70, "leaves and grass are not the ground");
+        rebuild(&mut w, 3, 3, 70, 66, true); // cut 4 down
         assert_eq!((w.get(3, 65, 3), w.get(3, 64, 3), w.get(3, 63, 3), w.get(3, 66, 3), w.get(3, 77, 3)), (GRASS, DIRT, DIRT, AIR, AIR));
-        assert_eq!(region_ground(&w, 3, 3), 66);
-        col(&mut w, 4, 3, 60);
-        rebuild(&mut w, 4, 3, 63, false); // fill 3 up
+        column(&mut w, 4, 3, 60);
+        rebuild(&mut w, 4, 3, 60, 63, true); // fill 3 up
         assert_eq!((w.get(4, 62, 3), w.get(4, 61, 3), w.get(4, 60, 3), w.get(4, 63, 3)), (GRASS, DIRT, DIRT, AIR));
-        col(&mut w, 5, 3, 64);
+        column(&mut w, 5, 3, 64);
         w.set(5, 65, 3, LEAVES);
-        rebuild(&mut w, 5, 3, 64, false); // right height, not forced: left alone
+        rebuild(&mut w, 5, 3, 64, 64, false); // right height in the margin: left alone
         assert_eq!(w.get(5, 65, 3), LEAVES);
-        rebuild(&mut w, 5, 3, 64, true); // under the pad: cleared
+        rebuild(&mut w, 5, 3, 64, 64, true); // under the pad: cleared
         assert_eq!((w.get(5, 65, 3), w.get(5, 63, 3)), (AIR, GRASS));
     }
 
     #[test]
-    fn only_water_structures_are_aquatic() {
+    fn a_margin_column_keeps_the_canopy_of_a_tree_outside_and_loses_its_loose_plants() {
+        let mut w = region();
+        column(&mut w, 3, 3, 70);
+        for y in 73..78 {
+            w.set(3, y, 3, LEAVES); // a canopy that hangs over the margin
+        }
+        w.set(3, 80, 3, LOG);
+        rebuild(&mut w, 3, 3, 70, 68, false); // cut 2 down
+        assert_eq!((w.get(3, 67, 3), w.get(3, 68, 3), w.get(3, 70, 3), w.get(3, 73, 3), w.get(3, 77, 3), w.get(3, 80, 3)), (GRASS, AIR, AIR, LEAVES, LEAVES, LOG));
+        column(&mut w, 4, 3, 70);
+        w.set(4, 73, 3, LEAVES);
+        rebuild(&mut w, 4, 3, 70, 72, false); // fill 2 up
+        assert_eq!((w.get(4, 71, 3), w.get(4, 72, 3), w.get(4, 73, 3)), (GRASS, AIR, LEAVES));
+        // snow stays on top of what it covered
+        column(&mut w, 5, 3, 70);
+        w.set(5, 70, 3, SNOW);
+        rebuild(&mut w, 5, 3, 70, 68, false);
+        assert_eq!((w.get(5, 67, 3), w.get(5, 68, 3), w.get(5, 70, 3)), (GRASS, SNOW, AIR));
+    }
+
+    #[test]
+    fn water_is_not_ours_to_move() {
+        let mut w = region();
+        for y in 1..62 {
+            w.set(3, y, 3, STONE);
+        }
+        for y in 62..64 {
+            w.set(3, y, 3, WATER);
+        }
+        rebuild(&mut w, 3, 3, 64, 60, true);
+        assert_eq!((w.get(3, 63, 3), w.get(3, 62, 3)), (WATER, WATER));
+    }
+
+    #[test]
+    fn flatten_levels_the_pad_and_eases_the_margin_without_a_step() {
+        let mut w = region();
+        for x in 8..24 {
+            for z in 8..24 {
+                column(&mut w, x, z, 66);
+            }
+        }
+        // one rigid box [8, 8, 12, 12] levelled to 64: a pad 2 round it, then 16 blocks of margin
+        let s = Start { st: 0, pieces: Vec::new(), site: Site::new(true, 64, vec![[8, 8, 12, 12]], vec![[8, 8, 12, 12]], vec![[8, 8, 12, 12]]) };
+        let mut claimed = [[false; 16]; 16];
+        flatten(&s, &mut w, [8, 8, 23, 23], &mut claimed);
+        let ground = |w: &Region, x: i32| natural_ground(w, x, 10);
+        let hs: Vec<i32> = (12..24).map(|x| ground(&w, x)).collect();
+        assert_eq!(hs[0], 64, "under the pad");
+        assert!(hs.windows(2).all(|p| (p[1] - p[0]).abs() <= 1 && p[1] >= p[0]), "a wall or a pit in {hs:?}");
+        assert!(*hs.last().unwrap() <= 66);
+        assert!(claimed[0][0] && claimed[15][15] == (s.site.dist2(23, 23) <= AREA * AREA));
+    }
+
+    #[test]
+    fn only_what_is_not_on_the_ground_is_fixed() {
         let d = data().unwrap();
+        let fixed: Vec<usize> = (0..d.structs.len()).filter(|&st| d.fixed(st)).collect();
         let wet: Vec<usize> = (0..d.structs.len()).filter(|&st| d.aquatic(st)).collect();
         assert_eq!(wet.len(), 2, "the boats and the swamp ruin: {wet:?}");
-        assert!(wet.iter().all(|&st| d.structs[st].mask != 0));
+        assert!(wet.iter().all(|st| fixed.contains(st)));
+        assert!(fixed.iter().all(|&st| d.aquatic(st) || d.structs[st].adapt == 3 || d.structs[st].y <= -6));
+        assert!(fixed.len() < d.structs.len() / 2, "most structures stand on the ground: {fixed:?}");
     }
 }
