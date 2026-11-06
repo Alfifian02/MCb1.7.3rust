@@ -38,6 +38,11 @@
 //!      matching pieces (paths) follow the levelled ground column by column like `GravityProcessor`.
 //!   5. Baked ground (`base_run`, `base_depth`), the median-of-9 start height, air only under a roof (`roof_of`) and the load-bearing
 //!      test (`bearing`) stay from the 2026-11-04 pass.
+//!   6. (2026-11-07) The starts and the coarse terrain are cached in ONE `Shared` per world, not per worker: a start is settled once by
+//!      whichever worker asks first. `near` settles a start only when the cell is within the reach of the structures it can be
+//!      (`Data::reach`), not within the worst case of all of them. A site keeps the highest natural ground of its area + `HEADROOM`
+//!      (`Site::ceil`), where the scan for the ground of a column starts. The top of the world a structure must fit under is the
+//!      world's (`Shared::top`: `Region::top`), not `chunk::H`.
 //! - No entities (villagers, illagers, item frames, armor stands), no sign text, no banners: Beta has none. Chests and barrels become
 //!   chests with their loot table on Beta items; a spawner takes the template's mob (skeleton, zombie, spider).
 //! - Where the Beta world has no such block the converter picked the nearest one (stone bricks = cobblestone, walls and iron bars =
@@ -52,7 +57,7 @@ use crate::world::gen::overworld::{block::*, OverworldGenerator};
 use crate::world::gen::populate::{is_solid, Region};
 use crate::world::items::ItemStack;
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 const SKIP: u16 = 0xFFFF;
 const NONE16: u16 = 0xFFFF;
@@ -80,10 +85,15 @@ const LAKE: i32 = 8;
 const ZONE: i32 = 40;
 /// Chunks within which two starts can touch each other: the priority rule looks this far.
 const NEAR: i32 = 20;
-/// Chunks a start can reach a cell from: `max_distance_from_center` 80 + `SHIFT` 48 + `ZONE`, rounded up.
+/// Chunks `near` looks for starts in, the widest any structure can reach a cell from (`Data::reach` of the biggest, rounded up, is
+/// under it: a test pins that). The reach of the structure a start can really be is what decides whether it is settled (`near`).
 const REACH: i32 = 12;
-/// Chunks of coarse terrain kept between two searches (96 bytes each).
-const CELLS: usize = 1536;
+/// Chunks of coarse terrain kept at once, shared by every worker (16 cells of 6 bytes and the map's own cost, about 150 bytes each:
+/// about 1.2 MB). A start's neighbours lie in chunks the search of the next one reads again, so a small cache threw them away early.
+const CELLS: usize = 8192;
+/// Blocks above the highest natural ground of a site where the scan for the ground of a column starts (`Site::ceil`). The scan skips
+/// leaves, logs and loose plants anyway, so this only has to cover what could stand on the ground and is none of them.
+const HEADROOM: i32 = 32;
 static BIN: &[u8] = include_bytes!("../../../assets/structory.bin");
 
 // ---------------------------------------------------------------- the baked data
@@ -201,6 +211,18 @@ impl Data {
     fn fixed(&self, st: usize) -> bool {
         let s = &self.structs[st];
         self.aquatic(st) || s.adapt == 3 || s.y <= -6
+    }
+
+    /// How far (blocks, along either axis) from the corner of its start chunk the zone of structure `st` can lie, wherever the site search
+    /// puts it: the pieces stay within `dist` of the start piece's centre or inside the start piece itself (half its longest side), then
+    /// `SHIFT` of move and `ZONE` of what it asks of the land, and 4 for the rounding of the centre.
+    fn reach(&self, st: usize) -> i32 {
+        let s = &self.structs[st];
+        let half = self.pools[usize::from(s.pool)].els.iter().filter(|e| e.kind != 0).map(|e| {
+            let size = self.t[usize::from(e.t)].size;
+            size[0].max(size[2]) / 2 + 1
+        });
+        s.dist.max(half.max().unwrap_or(0)) + SHIFT + ZONE + 4
     }
 
     /// The layout `tools/gen_structory.py` writes (and `structory_proto.py` reads).
@@ -645,22 +667,63 @@ struct Cell {
     wet: bool,
 }
 
-/// The coarse natural terrain, kept per chunk (16 cells of 6 bytes), generated only where a search looks.
+/// What the generators of one world share (every worker, and the manager's own for `preload`): the starts already settled and the coarse
+/// terrain their searches read. Each value is made ONCE for a key, by whichever thread asks first (the others wait for it): a start is a
+/// pure function of (seed, key) and the terrain of a chunk of the world, so which thread makes it changes nothing. No deadlock: a thread
+/// settling a start waits only for starts of LOWER key (`Structory::neighbours`), and for terrain, which waits for nothing.
+pub struct Shared {
+    /// The world's height for populate (`Region::top`): the highest a structure may stand (`Siting::allow`).
+    top: i32,
+    starts: Mutex<HashMap<(usize, i32, i32), Arc<Slot>>>,
+    heights: Mutex<HashMap<(i32, i32), Arc<OnceLock<[Cell; 16]>>>>,
+}
+
+/// What is known of one start key, each part made once.
+#[derive(Default)]
+struct Slot {
+    /// `Structory::reach_of`: -1 when no structure can start there, else how far its zone can reach (blocks from the start chunk's corner).
+    reach: OnceLock<i32>,
+    /// The settled start (`None`: no structure, or no place for it).
+    start: OnceLock<Option<Arc<Start>>>,
+}
+
+impl Shared {
+    /// A cache for a world of height `top` (the `Region::top` its chunks are populated with).
+    pub fn new(top: i32) -> Arc<Self> {
+        Arc::new(Self { top, starts: Mutex::new(HashMap::new()), heights: Mutex::new(HashMap::new()) })
+    }
+
+    /// The slot of a start key, made empty the first time. The lock is held for the lookup only, never while a value is made.
+    fn slot(&self, key: (usize, i32, i32)) -> Arc<Slot> {
+        self.starts.lock().unwrap_or_else(|e| e.into_inner()).entry(key).or_default().clone()
+    }
+
+    /// The cell of a chunk, made empty the first time. Dropped whole at `CELLS` chunks: a thread that holds a slot finishes it and
+    /// its work is lost, nothing more (the terrain is the same whenever it is made).
+    fn cells(&self, key: (i32, i32)) -> Arc<OnceLock<[Cell; 16]>> {
+        let mut m = self.heights.lock().unwrap_or_else(|e| e.into_inner());
+        if m.len() >= CELLS && !m.contains_key(&key) {
+            m.clear();
+        }
+        m.entry(key).or_default().clone()
+    }
+}
+
+/// The coarse natural terrain, kept per chunk (16 cells of 6 bytes) in the shared cache, generated only where a search looks.
 struct Ground<'a> {
     g: &'a mut OverworldGenerator,
     cm: &'a mut WorldChunkManager,
-    h: &'a mut HashMap<(i32, i32), [Cell; 16]>,
+    sh: &'a Shared,
 }
 
 impl Ground<'_> {
     /// Cell (i, j): the blocks 4i ..= 4i + 3 by 4j ..= 4j + 3.
     fn cell(&mut self, i: i32, j: i32) -> Cell {
         let key = (i >> 2, j >> 2);
-        if !self.h.contains_key(&key) {
-            if self.h.len() > CELLS * 2 {
-                self.h.clear(); // backstop only: `Structory::settle` clears at `CELLS`, between two searches
-            }
-            let b = self.g.generate_far(key.0, key.1, self.cm);
+        let (g, cm) = (&mut *self.g, &mut *self.cm);
+        let slot = self.sh.cells(key);
+        let cells = slot.get_or_init(|| {
+            let b = g.generate_far(key.0, key.1, cm);
             let mut cells = [Cell { lo: u16::MAX, hi: 0, wet: false }; 16];
             for x in 0..16usize {
                 for z in 0..16usize {
@@ -675,9 +738,22 @@ impl Ground<'_> {
                     c.wet |= wet;
                 }
             }
-            self.h.insert(key, cells);
+            cells
+        });
+        cells[((i & 3) * 4 + (j & 3)) as usize]
+    }
+
+    /// The highest natural ground of the cells within `AREA` of the boxes `rs`: what `Site::ceil` is made from.
+    fn peak(&mut self, rs: &[R]) -> i32 {
+        let mut hi = 0;
+        for r in rs {
+            for i in (r[0] - AREA) >> 2..=(r[2] + AREA) >> 2 {
+                for j in (r[1] - AREA) >> 2..=(r[3] + AREA) >> 2 {
+                    hi = hi.max(i32::from(self.cell(i, j).hi));
+                }
+            }
         }
-        self.h[&key][((i & 3) * 4 + (j & 3)) as usize]
+        hi
     }
 
     /// The first free height at (x, z), to within the spread of its cell.
@@ -729,6 +805,9 @@ struct Site {
     deep: Vec<R>,
     /// The box a cell must meet for this start to matter to it: every piece and `ZONE` round it.
     zone: R,
+    /// Above this y (exclusive) there is nothing of the start's ground or of its pieces in a column within `AREA` of a rigid piece: the
+    /// highest natural ground there + `HEADROOM`, or the top of a piece if that is higher. `i32::MAX` = not known (the whole column is read).
+    ceil: i32,
 }
 
 impl Site {
@@ -737,7 +816,26 @@ impl Site {
         for a in &deep {
             zone = [zone[0].min(a[0] - ZONE), zone[1].min(a[1] - ZONE), zone[2].max(a[2] + ZONE), zone[3].max(a[3] + ZONE)];
         }
-        Self { flat, target, rigid, high, deep, zone }
+        Self { flat, target, rigid, high, deep, zone, ceil: i32::MAX }
+    }
+
+    /// This site with the top of the columns `ceil_at` can bound (see `ceil`).
+    fn with_ceil(mut self, ceil: i32) -> Self {
+        self.ceil = ceil;
+        self
+    }
+
+    /// An exclusive upper bound for the top of column (x, z) as far as this start goes: `ceil` within `AREA` of a rigid piece (where its
+    /// levelling and its natural ground were read), `i32::MAX` where only a piece of it is known to stand (a path out on the land: the
+    /// ground there was not read), 0 where nothing of it is.
+    fn ceil_at(&self, x: i32, z: i32) -> i32 {
+        if within(&self.rigid, x, z, AREA) {
+            self.ceil
+        } else if within(&self.deep, x, z, 0) {
+            i32::MAX
+        } else {
+            0
+        }
     }
 
     /// Squared distance from (x, z) to the nearest rigid piece (`i32::MAX` for none).
@@ -888,6 +986,8 @@ struct Siting<'a, 'b> {
     high: &'b [R],
     flat: bool,
     others: &'b [Arc<Start>],
+    /// The world's height (`Shared::top`).
+    top: i32,
 }
 
 impl Land for Siting<'_, '_> {
@@ -911,8 +1011,8 @@ impl Land for Siting<'_, '_> {
 
     fn allow(&mut self, dx: i32, dz: i32, level: i32) -> bool {
         let dy = level - BASE;
-        if self.pieces.iter().any(|p| p.bx[1] + dy < 1 || p.bx[4] + dy > crate::world::chunk::H as i32 - 2) {
-            return false; // out of the world
+        if self.pieces.iter().any(|p| p.bx[1] + dy < 1 || p.bx[4] + dy > self.top - 2) {
+            return false; // out of the world: the roof or the tower of a structure on a high hill would be cut off
         }
         if self.flat {
             let (x, z) = centre(&self.p0);
@@ -935,9 +1035,10 @@ fn loose(id: u8) -> bool {
     matches!(id, TALL_GRASS | DEAD_BUSH | FLOWER_Y..=MUSH_RED | SNOW | REED | CACTUS | PUMPKIN | 6)
 }
 
-/// The natural ground of a column of the region: one above the top block that is not air, a tree or something loose.
-fn natural_ground(w: &Region, x: i32, z: i32) -> i32 {
-    (1..w.top()).rev().find(|&y| !matches!(w.get(x, y, z), AIR | LEAVES | LOG) && !loose(w.get(x, y, z))).map_or(1, |y| y + 1)
+/// The natural ground of a column of the region: one above the top block that is not air, a tree or something loose. The scan starts
+/// under `ceil` (`Site::ceil`) instead of at the top of the world.
+fn natural_ground(w: &Region, x: i32, z: i32, ceil: i32) -> i32 {
+    (1..w.top().min(ceil)).rev().find(|&y| !matches!(w.get(x, y, z), AIR | LEAVES | LOG) && !loose(w.get(x, y, z))).map_or(1, |y| y + 1)
 }
 
 /// Bring column (x, z), whose natural ground is `cur`, to `h` (one above its top block): cut or fill, with the column's own surface block
@@ -1000,7 +1101,7 @@ fn flatten(s: &Start, w: &mut Region, cell: [i32; 4], claimed: &mut [[bool; 16];
                 continue;
             }
             *c = true;
-            let cur = natural_ground(w, x, z);
+            let cur = natural_ground(w, x, z, s.site.ceil);
             let (h, pad) = s.site.height(q, cur);
             rebuild(w, x, z, cur, h, pad);
         }
@@ -1067,25 +1168,50 @@ pub fn starts(seed: i64, x0: i32, z0: i32, x1: i32, z1: i32, biome: &mut dyn FnM
     out
 }
 
-/// The per-generator state of the structures: the starts already settled and the coarse terrain their searches read.
+/// The structures of one generator. The starts it settled and the terrain its searches read live in a `Shared` cache, which every worker
+/// of a world uses (`share`): a start is searched for once, not once a worker.
 pub struct Structory {
     seed: i64,
-    starts: HashMap<(usize, i32, i32), Option<Arc<Start>>>,
-    heights: HashMap<(i32, i32), [Cell; 16]>,
+    sh: Arc<Shared>,
 }
 
 impl Structory {
-    /// `None` when `structory.bin` is stale or broken (the Blooming world then simply has no structures).
+    /// `None` when `structory.bin` is stale or broken (the Blooming world then simply has no structures). Alone, with a cache of its own
+    /// and the height `chunk::H`; a world's workers get one cache with the world's height through `share`.
     pub fn new(seed: i64) -> Option<Self> {
-        data().map(|_| Self { seed, starts: HashMap::new(), heights: HashMap::new() })
+        data().map(|_| Self { seed, sh: Shared::new(crate::world::chunk::H as i32) })
+    }
+
+    /// The cache this generator uses.
+    pub fn shared(&self) -> Arc<Shared> {
+        self.sh.clone()
+    }
+
+    /// Use `sh` (of the same seed and world type) instead of the cache of its own.
+    pub fn share(&mut self, sh: Arc<Shared>) {
+        self.sh = sh;
     }
 
     /// The structure that starts in chunk (sx, sz) of set `si`, if there is one (`ChunkGenerator.tryGenerateStructures`). A pure function
-    /// of (seed, si, sx, sz): the same from every worker and every side.
+    /// of (seed, si, sx, sz): the same from every worker and every side, made once (the first thread to ask makes it, the rest wait).
     fn start(&mut self, d: &'static Data, g: &mut OverworldGenerator, cm: &mut WorldChunkManager, si: usize, sx: i32, sz: i32) -> Option<Arc<Start>> {
-        if let Some(s) = self.starts.get(&(si, sx, sz)) {
-            return s.clone();
+        let slot = self.sh.slot((si, sx, sz));
+        slot.start.get_or_init(|| self.make(d, g, cm, si, sx, sz)).clone()
+    }
+
+    /// How far a structure starting in chunk (sx, sz) of set `si` can reach (`Data::reach`, the most of the structures this chunk's biome
+    /// lets the set pick), or -1 when none can start there (the frequency roll, or no entry fits the biome). Cheap: nothing is assembled.
+    fn reach_of(&self, d: &'static Data, cm: &mut WorldChunkManager, si: usize, sx: i32, sz: i32) -> i32 {
+        let set = &d.sets[si];
+        if set.freq != 65535 && JavaRandom::new(large_feature(self.seed, sx, sz, set.salt)).next_float() >= f32::from(set.freq) / 65535.0 {
+            return -1;
         }
+        let biome = cm.load_block_generator_data(sx * 16, sz * 16, 1, 1)[0];
+        set.entries.iter().map(|e| usize::from(e.0)).filter(|&st| d.structs[st].mask >> (biome as u8) & 1 != 0).map(|st| d.reach(st)).max().unwrap_or(-1)
+    }
+
+    /// The work of `start`: the pick, the layout and the search for its place.
+    fn make(&mut self, d: &'static Data, g: &mut OverworldGenerator, cm: &mut WorldChunkManager, si: usize, sx: i32, sz: i32) -> Option<Arc<Start>> {
         let set = &d.sets[si];
         let mut made = None;
         // frequency reduction (`probabilityReducer`)
@@ -1129,7 +1255,6 @@ impl Structory {
                 }
             }
         }
-        self.starts.insert((si, sx, sz), made.clone());
         made
     }
 
@@ -1158,26 +1283,29 @@ impl Structory {
     /// Give the layout `pieces` (assembled on flat ground at its start chunk) its place (`search`) and move it there. None when the land
     /// has no place for it or a start of lower key has it.
     fn settle(&mut self, d: &'static Data, g: &mut OverworldGenerator, cm: &mut WorldChunkManager, st: usize, mut pieces: Vec<Piece>, lower: &[Arc<Start>]) -> Option<Start> {
-        if self.heights.len() > CELLS {
-            self.heights.clear(); // between two searches only, never in the middle of one
-        }
         let rect = |p: &Piece| [p.bx[0], p.bx[2], p.bx[3], p.bx[5]];
         let shows = |p: &&Piece| p.bx[4] >= BASE - 3; // the layout stands on ground level `BASE`
         let rigid: Vec<R> = if d.fixed(st) { Vec::new() } else { pieces.iter().filter(shows).filter(|p| p.rigid).map(rect).collect() };
         let high: Vec<R> = pieces.iter().filter(shows).map(rect).collect();
         let deep: Vec<R> = pieces.iter().map(rect).collect();
         let flat = !rigid.is_empty();
-        let (dx, dz, target) = {
-            let gr = Ground { g: &mut *g, cm: &mut *cm, h: &mut self.heights };
-            let mut sit = Siting { gr, p0: pieces[0].bx, pieces: &pieces, mask: d.structs[st].mask, rigid: &rigid, high: &high, flat, others: lower };
-            search(&rigid, flat, &mut sit)?
+        let sh = self.sh.clone();
+        let (dx, dz, target, peak) = {
+            let gr = Ground { g: &mut *g, cm: &mut *cm, sh: &sh };
+            let mut sit = Siting { gr, p0: pieces[0].bx, pieces: &pieces, mask: d.structs[st].mask, rigid: &rigid, high: &high, flat, others: lower, top: sh.top };
+            let (dx, dz, target) = search(&rigid, flat, &mut sit)?;
+            // the natural ground the levelling and the pieces will meet (the cells the search just read): where a column's scan starts
+            let peak = if flat { sit.gr.peak(&shift(&rigid, dx, dz)) } else { i32::MAX - HEADROOM };
+            (dx, dz, target, peak)
         };
         let dy = target - BASE;
         for p in &mut pieces {
             p.pos = [p.pos[0] + dx, p.pos[1] + dy, p.pos[2] + dz];
             p.bx = [p.bx[0] + dx, p.bx[1] + dy, p.bx[2] + dz, p.bx[3] + dx, p.bx[4] + dy, p.bx[5] + dz];
         }
-        let site = Site::new(flat, target, shift(&rigid, dx, dz), shift(&high, dx, dz), shift(&deep, dx, dz));
+        let tallest = pieces.iter().map(|p| p.bx[4] + 1).max().unwrap_or(0);
+        let ceil = (peak + HEADROOM).max(tallest);
+        let site = Site::new(flat, target, shift(&rigid, dx, dz), shift(&high, dx, dz), shift(&deep, dx, dz)).with_ceil(ceil);
         Some(Start { st, pieces, site })
     }
 
@@ -1194,6 +1322,17 @@ impl Structory {
                     let (sx, sz) = spread(self.seed, rx, rz, set);
                     if (sx - cx).abs() > REACH + 1 || (sz - cz).abs() > REACH + 1 {
                         continue;
+                    }
+                    // A start nobody settled yet is settled only if the cell can be within the reach of the structures it can be (a camp
+                    // reaches far less than a manor): the search is the costly part and waits until a player is really that close.
+                    let slot = self.sh.slot((si, sx, sz));
+                    if slot.start.get().is_none() {
+                        let reach = *slot.reach.get_or_init(|| self.reach_of(d, cm, si, sx, sz));
+                        let (px, pz) = (sx * 16, sz * 16);
+                        let far = (cell[0] - px).max(px - cell[2]).max(cell[1] - pz).max(pz - cell[3]).max(0);
+                        if reach < 0 || far > reach {
+                            continue;
+                        }
                     }
                     let Some(start) = self.start(d, g, cm, si, sx, sz) else { continue };
                     let z = start.site.zone;
@@ -1217,11 +1356,13 @@ impl Structory {
                 flatten(s, w, cell, &mut claimed);
             }
         }
+        // where a terrain-matching piece looks for the ground it follows: under the highest bound any start here has for the column
+        let ceil_at = |x: i32, z: i32| near.iter().map(|s| s.site.ceil_at(x, z)).max().unwrap_or(i32::MAX);
         for start in near {
             let s = &d.structs[start.st];
             for p in &start.pieces {
                 if p.bx[0] <= cell[2] && p.bx[3] >= cell[0] && p.bx[2] <= cell[3] && p.bx[5] >= cell[1] {
-                    place_piece(d, s, p, w, cell, self.seed);
+                    place_piece(d, s, p, w, cell, self.seed, &ceil_at);
                 }
             }
         }
@@ -1257,9 +1398,9 @@ fn rotate_meta(id: u8, m: u8, rot: u8) -> u8 {
     m
 }
 
-/// WORLD_SURFACE_WG-like ground in the region: one above the top block that is not air, foliage or a plant.
-fn region_ground(w: &Region, x: i32, z: i32) -> i32 {
-    (1..w.top()).rev().find(|&y| !matches!(w.get(x, y, z), AIR | LEAVES | LOG | TALL_GRASS | DEAD_BUSH | FLOWER_Y..=MUSH_RED | SNOW | REED)).map_or(1, |y| y + 1)
+/// WORLD_SURFACE_WG-like ground in the region: one above the top block that is not air, foliage or a plant. The scan starts under `ceil`.
+fn region_ground(w: &Region, x: i32, z: i32, ceil: i32) -> i32 {
+    (1..w.top().min(ceil)).rev().find(|&y| !matches!(w.get(x, y, z), AIR | LEAVES | LOG | TALL_GRASS | DEAD_BUSH | FLOWER_Y..=MUSH_RED | SNOW | REED)).map_or(1, |y| y + 1)
 }
 
 /// A chest's contents from a baked loot table (`LootTable`: rolls, weighted entries, count, chance).
@@ -1287,7 +1428,7 @@ fn fill(d: &Data, ix: usize, r: &mut JavaRandom) -> Chest {
 
 /// `StructureTemplate.placeInWorld` for the part of piece `p` in `cell` (x0, z0, x1, z1, inclusive): rotation, the processor list,
 /// the ground for terrain-matching pieces, chests and spawners, then the foundation.
-fn place_piece(d: &Data, s: &Struct, p: &Piece, w: &mut Region, cell: [i32; 4], seed: i64) {
+fn place_piece(d: &Data, s: &Struct, p: &Piece, w: &mut Region, cell: [i32; 4], seed: i64, ceil_at: &dyn Fn(i32, i32) -> i32) {
     let t = &d.t[p.t];
     let [sx, sy, sz] = t.size;
     let procs: &[Proc] = if p.proc == 255 { &[] } else { &d.procs[usize::from(p.proc)] };
@@ -1320,7 +1461,7 @@ fn place_piece(d: &Data, s: &Struct, p: &Piece, w: &mut Region, cell: [i32; 4], 
                 if y < base_run(x, z) {
                     continue; // the plinth: the terrain stays as it is
                 }
-                let wy = if p.rigid { p.pos[1] + y } else { region_ground(w, wx, wz) - 1 + y }; // `GravityProcessor(WORLD_SURFACE_WG, -1)`
+                let wy = if p.rigid { p.pos[1] + y } else { region_ground(w, wx, wz, ceil_at(wx, wz)) - 1 + y }; // `GravityProcessor(WORLD_SURFACE_WG, -1)`
                 if !(1..w.top()).contains(&wy) {
                     continue; // never the bedrock layer, nor outside the world
                 }
@@ -1602,7 +1743,8 @@ mod tests {
         for y in 71..78 {
             w.set(3, y, 3, LEAVES);
         }
-        assert_eq!(natural_ground(&w, 3, 3), 70, "leaves and grass are not the ground");
+        assert_eq!(natural_ground(&w, 3, 3, i32::MAX), 70, "leaves and grass are not the ground");
+        assert_eq!(natural_ground(&w, 3, 3, 70 + HEADROOM), 70, "a scan that starts lower finds the same ground");
         rebuild(&mut w, 3, 3, 70, 66, true); // cut 4 down
         assert_eq!((w.get(3, 65, 3), w.get(3, 64, 3), w.get(3, 63, 3), w.get(3, 66, 3), w.get(3, 77, 3)), (GRASS, DIRT, DIRT, AIR, AIR));
         column(&mut w, 4, 3, 60);
@@ -1662,7 +1804,7 @@ mod tests {
         let s = Start { st: 0, pieces: Vec::new(), site: Site::new(true, 64, vec![[8, 8, 12, 12]], vec![[8, 8, 12, 12]], vec![[8, 8, 12, 12]]) };
         let mut claimed = [[false; 16]; 16];
         flatten(&s, &mut w, [8, 8, 23, 23], &mut claimed);
-        let ground = |w: &Region, x: i32| natural_ground(w, x, 10);
+        let ground = |w: &Region, x: i32| natural_ground(w, x, 10, i32::MAX);
         let hs: Vec<i32> = (12..24).map(|x| ground(&w, x)).collect();
         assert_eq!(hs[0], 64, "under the pad");
         assert!(hs.windows(2).all(|p| (p[1] - p[0]).abs() <= 1 && p[1] >= p[0]), "a wall or a pit in {hs:?}");
@@ -1679,5 +1821,73 @@ mod tests {
         assert!(wet.iter().all(|st| fixed.contains(st)));
         assert!(fixed.iter().all(|&st| d.aquatic(st) || d.structs[st].adapt == 3 || d.structs[st].y <= -6));
         assert!(fixed.len() < d.structs.len() / 2, "most structures stand on the ground: {fixed:?}");
+    }
+    #[test]
+    fn the_reach_of_a_structure_holds_every_piece_it_can_have() {
+        let d = data().unwrap();
+        for st in 0..d.structs.len() {
+            let reach = d.reach(st);
+            assert!(reach <= (REACH + 1) * 16, "structure {st}: `near` looks {REACH} chunks round a cell, its reach is {reach} blocks");
+            for seed in 0..12 {
+                let (sx, sz) = (100 + seed as i32, -40 + seed as i32);
+                let mut r = JavaRandom::new(seed * 7919 + st as i64);
+                let ps = assemble(d, st, sx, sz, &mut r, &mut |_, _| BASE);
+                let (px, pz) = (sx * 16, sz * 16);
+                for p in &ps {
+                    let far = (p.bx[0] - px).abs().max((p.bx[3] - px).abs()).max((p.bx[2] - pz).abs()).max((p.bx[5] - pz).abs());
+                    assert!(far + SHIFT + ZONE <= reach, "structure {st}: a piece {far} blocks from its chunk, reach {reach}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_shared_cache_makes_each_key_once_whoever_asks() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let sh = Shared::new(384);
+        let (starts, cells) = (AtomicUsize::new(0), AtomicUsize::new(0));
+        std::thread::scope(|sc| {
+            for _ in 0..4 {
+                sc.spawn(|| {
+                    for k in 0..3 {
+                        let slot = sh.slot((0, k, 7));
+                        assert!(slot.start.get_or_init(|| {
+                            starts.fetch_add(1, Ordering::SeqCst);
+                            None
+                        }).is_none());
+                        let c = sh.cells((k, 7));
+                        c.get_or_init(|| {
+                            cells.fetch_add(1, Ordering::SeqCst);
+                            [Cell { lo: 1, hi: 2, wet: false }; 16]
+                        });
+                    }
+                });
+            }
+        });
+        assert_eq!((starts.load(Ordering::SeqCst), cells.load(Ordering::SeqCst)), (3, 3), "one start and one chunk of terrain per key");
+        assert!(Arc::ptr_eq(&sh.slot((0, 1, 7)), &sh.slot((0, 1, 7))) && !Arc::ptr_eq(&sh.slot((0, 1, 7)), &sh.slot((0, 2, 7))));
+    }
+
+    #[test]
+    fn the_terrain_cache_is_dropped_whole_only_for_a_new_chunk_at_the_cap() {
+        let sh = Shared::new(384);
+        for i in 0..CELLS as i32 {
+            sh.cells((i, 0));
+        }
+        let len = |sh: &Shared| sh.heights.lock().unwrap().len();
+        sh.cells((0, 0));
+        assert_eq!(len(&sh), CELLS, "a chunk already kept is no reason to drop the rest");
+        sh.cells((-1, -1));
+        assert_eq!(len(&sh), 1, "a new one at the cap starts over");
+    }
+
+    #[test]
+    fn a_column_is_bounded_by_its_start_only_where_the_start_knows_the_ground() {
+        let site = Site::new(true, 64, vec![[0, 0, 15, 15]], vec![[0, 0, 15, 15], [40, 0, 60, 4]], vec![[0, 0, 15, 15], [40, 0, 60, 4]]).with_ceil(110);
+        assert_eq!(site.ceil_at(8, 8), 110, "on the building");
+        assert_eq!(site.ceil_at(15 + AREA, 8), 110, "in the levelled ground");
+        assert_eq!(site.ceil_at(50, 2), i32::MAX, "a path out on land nobody read: the whole column");
+        assert_eq!(site.ceil_at(15 + AREA + 1, 8 + 30), 0, "nothing of it there");
+        assert_eq!(Site::new(false, 64, Vec::new(), Vec::new(), vec![[0, 0, 15, 15]]).ceil_at(8, 8), i32::MAX, "a start that is not on the ground bounds nothing");
     }
 }

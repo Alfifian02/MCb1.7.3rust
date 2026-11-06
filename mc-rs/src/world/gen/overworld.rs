@@ -291,6 +291,19 @@ impl OverworldGenerator {
         self.probe_block(bx, bz, cm).0.round() as i32
     }
 
+    /// The cache of Structory's starts and coarse terrain this generator uses (Blooming only): hand it to the other generators of the same
+    /// world (`share_structory`) so a start is searched for once, not once by each.
+    pub fn structory_cache(&self) -> Option<Arc<crate::world::gen::structory::Shared>> {
+        self.structory.as_ref().map(|s| s.shared())
+    }
+
+    /// Use `cache` (from `structory_cache` of a generator of the same seed and world type) for Structory. No effect without Structory.
+    pub fn share_structory(&mut self, cache: Arc<crate::world::gen::structory::Shared>) {
+        if let Some(s) = self.structory.as_mut() {
+            s.share(cache);
+        }
+    }
+
     /// The generator of a played overworld: `new` plus rivers, streams and lakes.
     pub fn world(seed: i64) -> Self {
         Self::new(seed).with_hydro()

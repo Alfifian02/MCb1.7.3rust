@@ -908,8 +908,9 @@ impl ChunkManager {
             WorldType::BloomingLegacy => OverworldGenerator::world_blooming_legacy,
         };
         hydro::watch(Some(hydro::Hydro::of(seed, ty.terrain()))); // the currents of this world
-        let mut m = Self::new_with(seed, radius, make);
-        m.top = if ty == WorldType::Blooming { H as i32 } else { 128 };
+        let top = if ty == WorldType::Blooming { H as i32 } else { 128 };
+        let mut m = Self::new_with(seed, radius, make, top);
+        m.top = top;
         m
     }
 
@@ -917,19 +918,23 @@ impl ChunkManager {
     /// bedrock, so every column's height map is `H`).
     pub fn new_nether(seed: i64, radius: i32) -> Self {
         hydro::watch(None);
-        Self::new_with(seed, radius, OverworldGenerator::new_nether)
+        Self::new_with(seed, radius, OverworldGenerator::new_nether, 128)
     }
 
-    fn new_with(seed: i64, radius: i32, make: fn(i64) -> OverworldGenerator) -> Self {
+    /// `top` is the height of this world for populate (`Region::top`): the workers' Structory searches keep structures under it.
+    fn new_with(seed: i64, radius: i32, make: fn(i64) -> OverworldGenerator, top: i32) -> Self {
         let (jobs, job_rx) = mpsc::channel::<Job>();
         let (done_tx, done) = mpsc::channel();
         let (built_tx, built) = mpsc::channel();
         let (pop_tx, populated_rx) = mpsc::channel();
         let job_rx = Arc::new(Mutex::new(job_rx));
+        // One Structory cache for the manager's generator and every worker's: a start is searched for once, whichever asks first.
+        let structures = crate::world::gen::structory::Shared::new(top);
         // Leave a core for the render thread; two workers are plenty for walking speed.
         let workers = std::thread::available_parallelism().map_or(2, |n| n.get()).saturating_sub(1).clamp(1, 2);
         for i in 0..workers {
             let (rx, tx, bt, pt) = (job_rx.clone(), done_tx.clone(), built_tx.clone(), pop_tx.clone());
+            let structures = structures.clone();
             std::thread::Builder::new()
                 .name(format!("chunk-gen-{i}"))
                 .spawn(move || {
@@ -937,6 +942,7 @@ impl ChunkManager {
                     // Each worker owns its generator: generate() reseeds per chunk, so the
                     // result does not depend on which worker gets which chunk.
                     let mut g = make(seed);
+                    g.share_structory(structures);
                     let mut cm = g.manager();
                     loop {
                         // The guard is a temporary of this statement: the lock is held while
@@ -966,7 +972,8 @@ impl ChunkManager {
 
         let ring = ring_for(radius);
 
-        let gen = make(seed);
+        let mut gen = make(seed);
+        gen.share_structory(structures);
         Self { chunks: Chunks::default(), pending: HashSet::new(), ring, radius, center: None, max_in_flight: workers * 2, built, meshing: HashSet::new(), max_meshing: workers * 2, urgent: HashSet::new(),
                populated_rx, populating: HashMap::new(), busy: HashSet::new(), max_populating: workers, stamp: 0,
                cm: gen.manager(), bm: std::sync::Mutex::new(gen.manager()), biome_area: None, gen, jobs, done, light: light::LightLink::spawn(), sky_sub: 0, top: 128, mesh_gen: 0, dir: None, saved: HashSet::new(), writer: None, changes: Vec::new(), fresh_water: Vec::new(), loot: Vec::new(), spawners: Vec::new(), wide: wide::WideCull::spawn(), graph: wide::Snapshot::default(), visible: HashMap::new(), wet: HashMap::new(), order: Vec::new(), ingest: Vec::new(), ingested: HashSet::new(), pages: Pages::default(), held: None, upload: UploadDurationEstimator::new(), frame_ns: None, last_update: None, born: HashMap::new(), mesh_wait: (0.0, 0.0, 0) }
