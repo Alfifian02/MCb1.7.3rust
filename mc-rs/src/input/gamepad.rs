@@ -506,11 +506,6 @@ fn deadzone(v: f32, dz: f32) -> f32 {
 }
 
 
-/// `ControllerUtils.deadzone`.
-fn deadzone(v: f32, dz: f32) -> f32 {
-    (v - v.signum() * v.abs().min(dz)) / (1.0 - dz)
-}
-
 /// `InputCurves`, applied to a stick's length (`applyEasingToLength`) so a diagonal keeps its direction.
 fn ease(x: f32, y: f32, curve: u8) -> (f32, f32) {
     let l = x.hypot(y).min(1.0);
@@ -669,6 +664,14 @@ pub struct Pad {
     nav_t: f32,
     hp: i32,
     /// Vibration (`rumble_fx.rs`): the effect queue, its wire to the phone's vibrators, the command `lib.rs` has yet to send, the 20 Hz
+    /// accumulator and its clock in ms, and the effects that live as long as something goes on (`Holds`).
+    fx: Manager,
+    wire: Wire,
+    cmd: Option<Cmd>,
+    fx_acc: f32,
+    fx_ms: u64,
+    fx_key: u16,
+    holds: Holds,
     /// A bow-like use is on (`player.isUsingItem()` with the bow, crossbow or spear animation): `lib.rs` sets it while a weapon's charge builds.
     pub aiming: bool,
     /// Toggle Sprint's state.
@@ -682,14 +685,6 @@ pub struct Pad {
 /// The four directions of a stick as (up, down, left, right) in `Ax` order: a stick's axes, y down, split into the values 0..1 of its four inputs.
 fn split(x: f32, y: f32) -> [f32; 4] {
     [(-y).max(0.0), y.max(0.0), (-x).max(0.0), x.max(0.0)]
-    /// accumulator and its clock in ms, and the effects that live as long as something goes on (`Holds`).
-    fx: Manager,
-    wire: Wire,
-    cmd: Option<Cmd>,
-    fx_acc: f32,
-    fx_ms: u64,
-    fx_key: u16,
-    holds: Holds,
 }
 
 /// The effects that run for as long as a state lasts, one slot each (Controlify keeps them in a field of the mixin that plays them).
