@@ -43,6 +43,37 @@ mod page_runs;
 
 type Key = (i32, i32);
 
+/// The Starling techniques as switches (Settings > Performance > Optimizations, `Settings::apply_tuning`). Process-wide, read where each
+/// technique runs, all on by default; turned off they leave the chunk code as it was without that technique, so a device can A/B each one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Tuning {
+    /// The cave search (`update_visible`): off = the view frustum and the range only.
+    pub cave_culling: bool,
+    /// `PageRuns` (`for_each_run`): off = the near-to-far chunk list as it is.
+    pub draw_bands: bool,
+    /// `frame_state_limits` (`mesh_pending`): off = the plain Sodium budget.
+    pub upload_pacing: bool,
+    /// `MeshPool` / `Job::Free`: off = buffers freed in the frame, every mesh packed into a fresh one.
+    pub mesh_reuse: bool,
+}
+
+static TUNING: [std::sync::atomic::AtomicBool; 4] = [
+    std::sync::atomic::AtomicBool::new(true),
+    std::sync::atomic::AtomicBool::new(true),
+    std::sync::atomic::AtomicBool::new(true),
+    std::sync::atomic::AtomicBool::new(true),
+];
+
+pub fn set_tuning(t: Tuning) {
+    for (flag, on) in TUNING.iter().zip([t.cave_culling, t.draw_bands, t.upload_pacing, t.mesh_reuse]) {
+        flag.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+fn tuned(i: usize) -> bool {
+    TUNING[i].load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Multiply-rotate hasher for the chunk map. The default SipHash was the main cost of the light engine
 /// (about 10 map lookups per cell evaluated); keys here are small ints, not attacker input.
 #[derive(Default)]
@@ -1032,7 +1063,7 @@ impl ChunkManager {
                             Job::Gen((cx, cz)) => tx.send(((cx, cz), g.generate(cx, cz, &mut cm))).is_ok(),
                             Job::Mesh(j) => {
                                 let key = j.key;
-                                let recycled = meshes.lock().unwrap().take();
+                                let recycled = if tuned(3) { meshes.lock().unwrap().take() } else { Vec::new() };
                                 bt.send((key, build_job_reusing(*j, &mut cm, recycled))).is_ok()
                             }
                             Job::Free(freed) => {
@@ -1608,7 +1639,11 @@ impl ChunkManager {
     /// ponytail: a hole in the loaded ring (a chunk still generating) lets the view through (a column without a mesh has no `vis`).
     pub fn update_visible(&mut self, eye: Vec3, shape: Shape, rh: f32, rv: f32, wr: f32, in_frustum: impl Fn(Vec3, Vec3) -> bool) {
         // Starling's `start_occlusion`: the search keeps the full radius, whatever the tests below then drop.
-        self.occlusion.update(glam::DVec3::new(f64::from(eye.x), f64::from(eye.y), f64::from(eye.z)), (rh / 16.0) as i32 + 2);
+        // Cave culling off (Settings): no search is started and every section of the range is tested against the frustum only.
+        let caves = tuned(0);
+        if caves {
+            self.occlusion.update(glam::DVec3::new(f64::from(eye.x), f64::from(eye.y), f64::from(eye.z)), (rh / 16.0) as i32 + 2);
+        }
         self.visible.clear();
         for &(x, z) in self.chunks.keys() {
             // The column's box holds those of its sections: most columns are behind the camera or out of the side.
@@ -1617,7 +1652,7 @@ impl ChunkManager {
             if !in_range(shape, eye, min, max, rh, rv) || !in_frustum(min, max) {
                 continue;
             }
-            let seen = (0..SECTIONS as i32).filter(|&y| self.occlusion.contains((x, y, z))).fold(0u32, |m, y| {
+            let seen = (0..SECTIONS as i32).filter(|&y| !caves || self.occlusion.contains((x, y, z))).fold(0u32, |m, y| {
                 let min = Vec3::new(x as f32 * 16.0, y as f32 * 16.0 - 1.0, z as f32 * 16.0);
                 let max = min + Vec3::new(16.0, 18.0, 16.0);
                 if in_range(shape, eye, min, max, rh, rv) && in_frustum(min, max) { m | 1u32 << y } else { m }
@@ -1747,7 +1782,9 @@ impl ChunkManager {
                     grouped.push(f64::from(*d2).to_bits(), page, start, pending.len() - start);
                 }
             }
-            grouped.regroup(&mut pending, 0);
+            if tuned(1) {
+                grouped.regroup(&mut pending, 0);
+            }
             for (page, slot, origin, a, b) in pending {
                 if let Some(p) = self.pages.get(page) {
                     emit(p, page, slot, origin, a, b);
@@ -1980,7 +2017,7 @@ impl ChunkManager {
     /// (Starling `streaming.rs`, `Streaming::free`, MIT; see `THIRD_PARTY_NOTICES.md`. Changed: Starling's job goes to the front of its
     /// priority queue; this channel is first in, first out, so the buffers are pooled after the jobs already queued.)
     fn free(&mut self, meshes: Vec<Vec<Packed>>) {
-        if !meshes.is_empty() {
+        if !meshes.is_empty() && tuned(3) {
             let _ = self.jobs.send(Job::Free(meshes));
         }
     }
@@ -1997,7 +2034,8 @@ impl ChunkManager {
     fn mesh_pending(&mut self, gfx: Gfx, origins: Option<&DrawOrigins>, cx: i32, cz: i32, settled: bool, interactive: bool) -> usize {
         self.urgent.retain(|k| self.chunks.contains_key(k));
         // Sodium's budget, cut when the frame before this one was late or the camera or a menu is being touched (`frame_state_limits`).
-        let (duration, size) = upload_budget::frame_state_limits(upload_budget::frame_duration_budget(self.frame_ns.unwrap_or(FIRST_FRAME_NS)), UPLOAD_SIZE_LIMIT, self.last_frame_ns, interactive);
+        let sodium = upload_budget::frame_duration_budget(self.frame_ns.unwrap_or(FIRST_FRAME_NS));
+        let (duration, size) = if tuned(2) { upload_budget::frame_state_limits(sodium, UPLOAD_SIZE_LIMIT, self.last_frame_ns, interactive) } else { (sodium, UPLOAD_SIZE_LIMIT) };
         let mut budget = UploadBudget::limited(duration, size);
         let mut uploaded = 0;
         // The vertex buffers this frame is done with, given back to the workers in one `Job::Free` at the end (`free`).

@@ -68,6 +68,11 @@ pub fn set_frame_latency(n: u32) {
     FRAME_LATENCY.store(n.clamp(1, 3), Ordering::Relaxed);
 }
 
+/// The latency the swap chain was configured with (what `set_frame_latency` stored at start-up): Video Settings shows "(restart)" when the button differs.
+pub fn frame_latency() -> u32 {
+    FRAME_LATENCY.load(Ordering::Relaxed)
+}
+
 pub fn set_scale_pct(p: u32) {
     SCALE_PCT.store(p.clamp(SCALE_MIN, SCALE_MAX), Ordering::Relaxed);
 }

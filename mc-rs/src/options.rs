@@ -80,6 +80,19 @@ pub enum Opt {
     ReiTheme,
     /// Added (Effects tab): the item viewer's overlay beside the open container screens (`rei.rs`).
     ReiOverlay,
+    /// Added (Performance > Optimizations): the Starling / Horizon techniques, each a switch so a device can A/B them without editing options.txt.
+    /// Cave culling: the search that hides sections behind hills and walls (`world/chunks/occlusion.rs`); off = the view frustum only. At once.
+    CaveCulling,
+    /// Opaque and cut-out draws grouped by page in 64-block bands (`world/chunks/page_runs.rs`); off = plain near-to-far chunk order. At once.
+    DrawBands,
+    /// The mesh upload budget shrinks when the last frame was late or the camera / a menu is touched (`embeddium::upload_budget::frame_state_limits`). At once.
+    UploadPacing,
+    /// Emptied mesh buffers are recycled on a worker (`MeshPool`, `Job::Free`); off = freed in the frame, packed into fresh ones. At once.
+    MeshReuse,
+    /// Performance > Next start: flat chunk draws (`gpu::flat`, `gles::flat`): Off / Auto (512+ sections) / Always. Built with the pipelines.
+    FlatDraws,
+    /// Performance > Next start: frames the Vulkan swap chain may queue (`gpu::context::set_frame_latency`). Read when the surface is configured.
+    FrameLatency,
 }
 
 impl Opt {
@@ -124,6 +137,12 @@ impl Opt {
             Opt::ReiTheme => "REI Theme",
             Opt::ReiOverlay => "REI Overlay",
             Opt::FxHaze => "Haze",
+            Opt::CaveCulling => "Cave Culling",
+            Opt::DrawBands => "Draw Bands",
+            Opt::UploadPacing => "Upload Pacing",
+            Opt::MeshReuse => "Mesh Reuse",
+            Opt::FlatDraws => "Flat Draws",
+            Opt::FrameLatency => "Frame Latency",
         }
     }
 }
@@ -220,8 +239,14 @@ pub struct Settings {
     /// The renderer for the next start: 0 Auto (Vulkan), 1 Vulkan, 2 OpenGL ES 3.2 (`renderer:` in options.txt).
     pub renderer: u8,
     /// Flat chunk draws (`gpu::flat`, ported from Starling) for the next start: 0 off (the default), 1 on for frames with 512+ sections, 2 on
-    /// for every frame (A/B checks); a switch with no button, `flatDraws:` in options.txt. Both renderers (`gpu::flat`, `gles::flat`), and only where the device can (Vulkan: vertex storage + compute; GL: ES 3.1 compute and a 64 KiB uniform block).
+    /// for every frame (A/B checks); `flatDraws:` in options.txt, the Flat Draws button of the Performance page. Both renderers (`gpu::flat`, `gles::flat`), and only where the device can (Vulkan: vertex storage + compute; GL: ES 3.1 compute and a 64 KiB uniform block).
     pub flat_draws: u8,
+    /// The Starling techniques as switches, all on by default (`caveCulling`, `drawBands`, `uploadPacing`, `meshReuse` in options.txt; the
+    /// Performance page's Optimizations group). They take effect at once (`apply_tuning`).
+    pub cave_culling: bool,
+    pub draw_bands: bool,
+    pub upload_pacing: bool,
+    pub mesh_reuse: bool,
     /// The look of every biome's sky as the player tuned it (the sun button of the game menu, `world::atmos`), `atmos_<n>:` in options.txt.
     pub atmos: AtmosCfg,
     /// The Vibrance dial and the effect switches (`render::look`), `look_*` in options.txt.
@@ -266,6 +291,10 @@ impl Default for Settings {
             fxaa: 0,
             renderer: 0,
             flat_draws: 0,
+            cave_culling: true,
+            draw_bands: true,
+            upload_pacing: true,
+            mesh_reuse: true,
             atmos: AtmosCfg::default(),
             look: LookCfg::default(),
             path: None,
@@ -314,6 +343,10 @@ impl Settings {
                 ("fxaa", _, Some(n)) if n <= 2 => s.fxaa = n,
                 ("renderer", _, Some(n)) if n <= 2 => s.renderer = n,
                 ("flatDraws", _, Some(n)) if n <= 2 => s.flat_draws = n,
+                ("caveCulling", ..) => s.cave_culling = b,
+                ("drawBands", ..) => s.draw_bands = b,
+                ("uploadPacing", ..) => s.upload_pacing = b,
+                ("meshReuse", ..) => s.mesh_reuse = b,
                 (k, ..) if k.starts_with("pad_") => s.pad.load(k, v),
                 (k, ..) if k.starts_with("atmos_") => s.atmos.load(k, v),
                 (k, ..) if k.starts_with("look_") => s.look.load(k, v),
@@ -335,7 +368,7 @@ impl Settings {
             self.music, self.sound, self.invert_mouse, self.sensitivity, self.render_distance, self.gui_scale, self.view_bobbing, self.anaglyph, self.advanced_opengl, self.limit_framerate, self.difficulty, self.fancy_graphics, self.ambient_occlusion, self.lod, self.dig_delay, self.gpu_error_trace, self.dynamic_res, self.msaa, self.post, self.fxaa, self.renderer, self.debug_screen, self.animal_ai, self.biome_rules, self.frame_latency, self.sustained, self.rei_theme, self.rei_overlay
         );
         t.push_str(&format!("fov:{}\nguiStyle:{}\npanelSize:{}\n", self.fov, self.gui_style, self.panel_size));
-        t.push_str(&format!("flatDraws:{}\n", self.flat_draws));
+        t.push_str(&format!("flatDraws:{}\ncaveCulling:{}\ndrawBands:{}\nuploadPacing:{}\nmeshReuse:{}\n", self.flat_draws, self.cave_culling, self.draw_bands, self.upload_pacing, self.mesh_reuse));
         for (id, code) in KEY_IDS.iter().zip(self.keys) {
             t.push_str(&format!("key_key.{id}:{code}\n"));
         }
@@ -436,9 +469,29 @@ impl Settings {
             Opt::FxHaze => self.look.haze = !self.look.haze,
             Opt::ReiTheme => self.rei_theme = (self.rei_theme + 1) % 2,
             Opt::ReiOverlay => self.rei_overlay = !self.rei_overlay,
+            Opt::CaveCulling => self.cave_culling = !self.cave_culling,
+            Opt::DrawBands => self.draw_bands = !self.draw_bands,
+            Opt::UploadPacing => self.upload_pacing = !self.upload_pacing,
+            Opt::MeshReuse => self.mesh_reuse = !self.mesh_reuse,
+            Opt::FlatDraws => self.flat_draws = (self.flat_draws + 1) % 3,
+            Opt::FrameLatency => self.frame_latency = self.frame_latency % 3 + 1,
             _ => {}
         }
+        if matches!(o, Opt::CaveCulling | Opt::DrawBands | Opt::UploadPacing | Opt::MeshReuse) {
+            self.apply_tuning();
+        }
         self.save();
+    }
+
+    /// Hands the four switches of the Optimizations group to the chunk code (`world::chunks::set_tuning`), which reads them where the technique
+    /// runs. Called at start-up and when one of them is cycled.
+    pub fn apply_tuning(&self) {
+        crate::world::chunks::set_tuning(crate::world::chunks::Tuning {
+            cave_culling: self.cave_culling,
+            draw_bands: self.draw_bands,
+            upload_pacing: self.upload_pacing,
+            mesh_reuse: self.mesh_reuse,
+        });
     }
 
     /// `getKeyBinding`: the button text, "Name: value".
@@ -473,6 +526,19 @@ impl Settings {
                 Opt::FxHaze => onoff(self.look.haze).into(),
                 Opt::ReiTheme => ["Light", "Dark"][self.rei_theme.min(1) as usize].into(),
                 Opt::ReiOverlay => onoff(self.rei_overlay).into(),
+                Opt::CaveCulling => onoff(self.cave_culling).into(),
+                Opt::DrawBands => onoff(self.draw_bands).into(),
+                Opt::UploadPacing => onoff(self.upload_pacing).into(),
+                Opt::MeshReuse => onoff(self.mesh_reuse).into(),
+                // Built with the pipelines: the value in use is what `gpu::flat::want` / `gpu::context::frame_latency` hold since start-up.
+                Opt::FlatDraws => {
+                    let v = ["Off", "Auto", "Always"][self.flat_draws.min(2) as usize];
+                    if self.flat_draws != crate::gpu::flat::want() { format!("{v} (restart)") } else { v.into() }
+                }
+                Opt::FrameLatency => {
+                    let v = self.frame_latency.clamp(1, 3).to_string();
+                    if u32::from(self.frame_latency) != crate::gpu::context::frame_latency() { format!("{v} (restart)") } else { v }
+                }
                 Opt::RenderDistance => ["Far", "Normal", "Short", "Tiny"][self.render_distance.min(3) as usize].into(),
                 Opt::Difficulty => ["Peaceful", "Easy", "Normal", "Hard"][self.difficulty.min(3) as usize].into(),
                 Opt::GuiScale => ["Auto", "Small", "Normal", "Large"][self.gui_scale.min(3) as usize].into(),
@@ -755,6 +821,12 @@ const TIPS: &[(&str, &str)] = &[
     ("FXAA", "Smooths edges in the final pass. Auto uses it only without MSAA. Next start."),
     ("Post", "The final pass: Full sharpens and smooths, Fast skips both. Next start."),
     ("Renderer", "Auto and Vulkan use wgpu, OpenGL ES the native one. Next start."),
+    ("Cave Culling", "Hides terrain behind hills and walls. Off draws all in view."),
+    ("Draw Bands", "Draws near terrain first, grouped by buffer: fewer switches."),
+    ("Upload Pacing", "Loads less new terrain per frame while frames are late or you touch."),
+    ("Mesh Reuse", "Recycles chunk mesh memory on a worker thread, not in the frame."),
+    ("Flat Draws", "One draw per buffer from a GPU-built list. Auto: big views only. Next start."),
+    ("Frame Latency", "Frames Vulkan queues: 1 less lag, 3 smoother. Next start."),
     ("Vibrance", "Strength of the colour grade. Off turns it off."),
     ("FOV", "Camera view angle, 30 to 110. 70 is normal; sprinting widens it."),
     ("Brightness", "Gain on the whole picture, 50% to 150%. 100% is unchanged."),
@@ -1034,11 +1106,18 @@ impl OptionsUi {
             o(Opt::FramerateLimit),
             o(Opt::DynamicRes),
             o(Opt::Sustained),
+            G("Optimizations"),
+            o(Opt::CaveCulling),
+            o(Opt::DrawBands),
+            o(Opt::UploadPacing),
+            o(Opt::MeshReuse),
             G("Next start"),
             o(Opt::Msaa),
             o(Opt::Fxaa),
             o(Opt::Post),
             o(Opt::Renderer),
+            o(Opt::FlatDraws),
+            o(Opt::FrameLatency),
             P(3),
             o(Opt::Vibrance),
             G("Switches"),
@@ -1894,6 +1973,39 @@ mod tests {
         assert_eq!(Settings::load(&root).flat_draws, 0);
     }
 
+    /// The Optimizations switches are on until options.txt says otherwise, cycle, read back, and reach the chunk code; Flat Draws and Frame
+    /// Latency cycle through their values and say "(restart)" when they differ from what the running pipelines were built with.
+    #[test]
+    fn optimization_switches_cycle_and_round_trip() {
+        let root = tmp("optimizations");
+        let mut st = Settings::load(&root);
+        assert!(st.cave_culling && st.draw_bands && st.upload_pacing && st.mesh_reuse, "the techniques are on until options.txt says otherwise");
+        for o in [Opt::CaveCulling, Opt::DrawBands, Opt::UploadPacing, Opt::MeshReuse] {
+            assert!(st.text(o).ends_with(": ON"), "{o:?}");
+            st.cycle(o);
+            assert!(st.text(o).ends_with(": OFF"), "{o:?}");
+        }
+        let back = Settings::load(&root);
+        assert!(!back.cave_culling && !back.draw_bands && !back.upload_pacing && !back.mesh_reuse);
+        std::fs::write(root.join("options.txt"), "drawBands:true\nmeshReuse:false\n").unwrap();
+        let back = Settings::load(&root);
+        assert!(back.draw_bands && !back.mesh_reuse && back.cave_culling);
+        // Back on, so the chunk code's switches (process-wide) are as every other test expects them.
+        for o in [Opt::CaveCulling, Opt::DrawBands, Opt::UploadPacing, Opt::MeshReuse] {
+            st.cycle(o);
+        }
+        assert!(st.cave_culling && st.draw_bands && st.upload_pacing && st.mesh_reuse);
+        let seen: Vec<u8> = (0..4).map(|_| { st.cycle(Opt::FlatDraws); st.flat_draws }).collect();
+        assert_eq!(seen, [1, 2, 0, 1]);
+        st.flat_draws = crate::gpu::flat::want();
+        assert!(!st.text(Opt::FlatDraws).contains("restart"));
+        st.cycle(Opt::FlatDraws);
+        assert!(st.text(Opt::FlatDraws).contains("(restart)"));
+        let seen: Vec<u8> = (0..4).map(|_| { st.cycle(Opt::FrameLatency); st.frame_latency }).collect();
+        assert_eq!(seen.iter().copied().collect::<std::collections::BTreeSet<_>>().len(), 3, "1, 2 and 3 all come round");
+        assert!(seen.iter().all(|n| (1..=3).contains(n)));
+    }
+
     /// The FXAA button cycles Auto -> On -> Off -> Auto, reads back from options.txt, and a bad value falls back to Auto.
     #[test]
     fn gui_style_and_panel_size_round_trip() {
@@ -2292,7 +2404,7 @@ mod tests {
         }
         for want in [
             "Music", "Sound", "Difficulty", "GUI Scale", "GUI Style", "Panel Size", "View Bobbing", "Graphics: ", "Render Distance", "LoD", "Smooth Lighting", "Advanced OpenGL", "3D Anaglyph",
-            "Performance", "Dynamic Res", "Sustained Perf", "MSAA", "FXAA", "Post", "Renderer", "Vibrance", "Warm Light", "Water Look", "Glow", "Motion", "Haze", "REI Theme", "Sensitivity", "Invert Mouse",
+            "Performance", "Dynamic Res", "Sustained Perf", "Cave Culling", "Draw Bands", "Upload Pacing", "Mesh Reuse", "MSAA", "FXAA", "Post", "Renderer", "Flat Draws", "Frame Latency", "Vibrance", "Warm Light", "Water Look", "Glow", "Motion", "Haze", "REI Theme", "Sensitivity", "Invert Mouse",
             "Dig Delay", "Jump: ", "Look X", "Invert Look Y", "Forward", "Toggle Fog", "Brightness", "Gamma", "FOV",
         ] {
             assert!(labels.iter().any(|l| l.starts_with(want)), "{want} is not in the list");

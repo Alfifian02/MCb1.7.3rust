@@ -25,6 +25,8 @@ Status words: `done` = code written; `verified` = measured on a device; `skipped
 | 3 | 8 | Flat-index batching on the OpenGL ES renderer | done 2026-11-08, off by default, not verified | `mc-rs/src/gles/flat.rs`; ES 3.1 compute + a uniform-block origin table. See "Phase 3 #8 result, GLES". |
 | 3 | 9 | Thermal hints | not started | Next patch: Starling's `android/device_runtime.rs` (ADPF). |
 
+**Switches (2026-11-08):** every ported technique with a sensible \"off\" has a button in Settings > Performance (Optimizations: Cave Culling, Draw Bands, Upload Pacing, Mesh Reuse; Next start: Flat Draws, Frame Latency), so the \"one change, measure before and after\" rule can be followed on a device without editing options.txt. See the changelog of `performance.md`.
+
 ### What the screenshots say (same phone, Adreno 610, render distance 8)
 
 | | Starling 26.3 | mc-rs b1.7.3 |
