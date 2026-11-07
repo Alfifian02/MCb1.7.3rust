@@ -14,14 +14,15 @@ Status words: `done` = code written; `verified` = measured on a device; `skipped
 | 0 | 4 | Audit of `gpu/` and `render/` against phases 1-2 | done for 1-2 | Read from the code (see "Phase 1 result", "Phase 2 result"). The one question the code cannot answer: what the 14 ms of CPU in the GLES shot is made of (see Open questions). |
 | 1 | 1 | Sky after solid terrain | already there | Both renderers; nothing changed. |
 | 1 | 2 | Solid without `discard`, cutout in its own layer | already there | Both renderers; nothing changed. |
-| 1 | 3 | Group draws by page in 64-block distance bands | done, not verified | `world/chunks.rs`: `BAND`, `band_breaks`, `for_each_run`. Keep only if `set_vertex_buffer` calls or GPU ms move. |
+| 1 | 3 | Group draws by page in 64-block distance bands | done 2026-11-08, not verified | Copied from Starling's `gfx/page_runs.rs`: `world/chunks/page_runs.rs` (`PageRuns`, `BAND`), called from `ChunkManager::for_each_run`. **Correction:** this row and "Phase 1 result" said it was done on 2026-11-07, with `band_breaks` and `ChunkManager::bands`; none of that was in the code (checked when the Phase 2 patch was made). Keep only if `set_vertex_buffer` calls or GPU ms move. |
 | 2 | 4 | Frame-aware upload budget | done, not verified | Copied from Starling: `embeddium/src/upload_budget.rs` `frame_state_limits`, called from `ChunkManager::mesh_pending`; `ChunkManager::update` takes `interactive`, `lib.rs` passes it. |
 | 2 | 5 | Cave culling off the render thread, partial update | done, not verified | The walk already ran on a worker (`wide.rs`, Sodium's `embeddium::cull`). The owner asked for Starling's partial update, which only works on Starling's own search, so `world/chunks/occlusion.rs` is a copy of Starling's `gfx/occlusion.rs` and replaces `wide.rs`. **What is culled changes** (vanilla's rules instead of Sodium's; see "Phase 2 result"). |
 | 2 | 6 | Reuse empty mesh buffers | done, not verified | Copied from Starling: `MeshPool`, `Job::Free`, `ChunkManager::free`, `pack_reusing` / `build_job_reusing` in `world/chunks.rs`. |
 | 2 | 6 | Arena pages grow in steps of at most 32 MiB | not applicable | mc-rs pages are fixed, 12 MiB (`PAGE_VERTS`), and never grow, so no step exceeds 32 MiB. |
 | 2 | 7 | Write unloaded chunks from a background thread | already there | `Writer` (thread `chunk-io`); `load` looks at `inflight` first. |
 | 2 | 7 | Tick mobs and dropped items only inside the simulation distance | not ported | mc-rs has no simulation distance; owner decision needed (see below). |
-| 3 | 8-9 | Flat-index batching, thermal hints | not started | Decide with data. |
+| 3 | 8 | Flat-index batching | done, off by default, not verified | Copied from Starling's `gfx/flat.rs` / `flatten.wgsl`: `mc-rs/src/gpu/flat.rs`, `flatten.wgsl`. Vulkan only; `flatDraws:1` (past 512 sections) or `flatDraws:2` (every frame) in options.txt. See "Phase 3 #8 result". |
+| 3 | 9 | Thermal hints | not started | Next patch: Starling's `android/device_runtime.rs` (ADPF). |
 
 ### What the screenshots say (same phone, Adreno 610, render distance 8)
 
@@ -69,7 +70,7 @@ Audit of `backend.rs`, `gpu/pipeline.rs`, `gles/renderer.rs`, `gles/shaders.rs` 
 |---|---|
 | 1 | **Already there, both renderers.** `Backend::draw_world` runs `draw_opaque` first, then `sky.draw` (depth-tested LessEqual, no depth write) and `draw_extras`; GLES does the same (`DepthMask(FALSE)`, `LEQUAL` after the cut-outs). The 4x MSAA scene pass allows it. Nothing to change. |
 | 2 | **Already there, both renderers.** `fs_solid` calls `frag_chunk(in, false)` (no `discard`); cut-outs are their own layer (`Layer::Cutout`, `fs_cut`, alpha-to-coverage); GLSL `FS_CUT` guards the `discard` the same way. Starling needs a second pipeline pair and an Android-Vulkan-only switch because it had one shader; mc-rs split them from the start. Nothing to change. |
-| 3 | **Changed.** `for_each_run` went page by page, each page near to far, so a far chunk in page 0 was drawn before a near one in page 1. It now goes band by band (64 blocks, `BAND`, Starling's width), near to far, and page by page inside a band (`band_breaks`, `ChunkManager::bands`, one pass over `order` when there is one page). Both renderers share it. Water is unchanged (far to near across pages). Re-derived from the idea, no code copied, so no `THIRD_PARTY_NOTICES` entry. |
+| 3 | **Changed (2026-11-08; the 2026-11-07 text described code that was never there).** `for_each_run` went page by page, each page near to far, so a far chunk in page 0 was drawn before a near one in page 1. It now walks `order` once, near to far (`order` keeps each chunk's squared distance, `update_visible`), and regroups the runs by (band of 64 blocks, page) with Starling's `PageRuns` (stable sort, `BAND`, the one-page shortcut): one `set_vertex_buffer` per page and band. Both renderers share it. Water is unchanged (far to near across pages). **Copied from Starling's `gfx/page_runs.rs`** (see `THIRD_PARTY_NOTICES`); the list `for_each_run` builds holds plain values (page, slot, origin, first, end), looked up again when handed out. UNVERIFIED: that it compiles; the number of `set_vertex_buffer` calls (not counted anywhere yet). Tests: Starling's three `page_runs` tests, adapted. |
 
 Still to do on a device: paired screenshots are not needed for 3 (opaque draws write depth, sections share no faces; only a tie between equal-depth fragments could differ), but the rule stands: measure `set_vertex_buffer` calls per frame and GPU ms before and after on the same scenario, and drop the change if the numbers do not move. Open: with one page (small render distance) the change is a no-op.
 
@@ -99,6 +100,20 @@ On a device, in this order: (a) `slow chunk work` and the frame-time tail while 
 
 8. **Flat-index batching** (compute pass builds one index list; one draw per page run). Starling measured 46.05 to 22.30 ms GPU at 2560x1600, 16 chunks, but against per-section indirect draws. mc-rs draws runs directly, so the gain is unproven. Needs storage buffers in the vertex shader; check Adreno 610 limits. Starling only enables it past 512 sections.
 9. **Thermal hints** (ADPF `PerformanceHintManager`) to keep clocks steady. Measure over 10+ minutes, not 60 s.
+
+#### Phase 3 #8 result (2026-11-08; written WITHOUT a Rust toolchain: not compiled, not run, not measured)
+
+What it does: with `flatDraws` on, `Flat::prepare` (before the scene pass, in `Wg::draw_world`) walks the same `for_each_run` the per-chunk loop walks, for the three layers, and a compute pass (`flatten.wgsl`) copies the runs' indices into one list; the layers are then drawn from it with one `draw_indexed` per run of one page (`Flat::draw`), through `vs_chunk_flat` / `vs_chunk_water_flat`, which find a chunk's origin from the vertex number: `slot_origins[block_slots[vertex >> 8u]]`. Off, nothing is drawn differently (the shader refactor is `chunk_vs(w, origin)`; the pipelines, the allocation and the draw loop are the same).
+
+What it needed from mc-rs: pages hold a block table (`Page::blocks`, one origin slot per 256 vertices); `Pages::put` rounds a mesh up to whole blocks when flat draws are on (a few hundred spare vertices a chunk); `DrawOrigins` mirrors every origin into a storage buffer (`flat_buffer`).
+
+What was left out of Starling's file, and why: phase 2 / GPU occlusion culling (mc-rs has none; Starling disables it on Android), shader packs and the shadow camera, the sorted-index source (mc-rs's water is quads of the shared index buffer), `for_vanilla` and the Intel Gen11/12 workaround (desktop). Starling's own default on Android Vulkan is OFF "to prevent chunk displacement" (`HORIZON_FLAT_DRAWS=1` turns it on); that is why this one is off too. Its 46.05 to 22.30 ms is against per-section indirect draws; mc-rs's baseline is one `draw_indexed` per run of a chunk plus one origin bind per chunk, so the gain is unproven. Gating: `DownlevelFlags::VERTEX_STORAGE | COMPUTE_SHADERS`, 2+ storage buffers per stage, the default storage binding size.
+
+To measure (Phase 0 is still skipped, so there is no baseline): the same spot and view distance with `flatDraws:0`, `1` and `2`; compare draw calls and `set_bind_group` calls per frame, CPU ms in `render`, and GPU ms. **The GPU timer times the scene pass only** (`GpuTimer`), so the compute pass is not in `Drs`'s ms: for an honest A/B take the frame time, not that number.
+
+UNVERIFIED, all of it: that it compiles; `naga` accepting the vertex entry points' storage bindings next to the `draw` uniform (they use different bindings, 1 and 2 against 0); that the picture is pixel-identical to the per-chunk draws (the `flatten` test checks the indices against the shared index buffer, on a GPU or lavapipe, skipped without one); that Adreno 610's Vulkan driver is happy with two read-only storage buffers in the vertex stage; that a page's bind group follows a page that was dropped and its id never reused (ids only grow).
+
+Tests added: `plan_draws_runs_of_a_page_in_order`, `plan_skips_empty_layers`, `flatten_writes_the_indices_of_the_per_chunk_draws` (from Starling's `plan` / `flatten` tests, adapted), `flat_meshes_take_whole_blocks`, `flat_draws_option_is_off_by_default_and_round_trips` (mine); the shader test now also checks `vs_chunk_flat` and `vs_chunk_water_flat`.
 
 ### Not ported
 

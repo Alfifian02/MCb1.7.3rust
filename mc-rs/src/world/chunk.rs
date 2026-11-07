@@ -376,14 +376,20 @@ pub const fn light_opacity(id: u8) -> u8 {
 }
 
 /// `Block.lightValue` = `(int)(15.0F * setLightValue)`: block ids that emit light.
+///
+/// NOT b1.7.3 (UNVERIFIED by eye, taste values): every emitter below the nibble's ceiling of 15 is a little brighter than the Java's
+/// (the vanilla level is in each comment), so a torch is a full 15 and reaches one block further. Lava, fire, glowstone, the
+/// jack-o-lantern and the locked chest were 15 already; their extra brightness is the shaders' `look::BLOCK_LIGHT_BOOST`, which touches
+/// no gameplay. The brown mushroom stays at 1 (its `light_at < 13` placement rule and the tiny glow are the Java's). Light is not saved,
+/// it is recomputed on load, so old worlds simply light up brighter.
 pub const fn light_value(id: u8) -> u8 {
     match id {
         10 | 11 | 51 | 89 | 91 | 95 => 15, // lava, fire, glowstone, jack-o-lantern, locked chest
-        50 => 14,                          // torch (15/16)
-        62 => 13,                          // lit furnace (14/16)
-        90 => 11,                          // portal (12/16)
-        74 | 94 => 9,                      // glowing redstone ore, lit repeater (10/16)
-        76 => 7,                           // redstone torch (0.5)
+        50 => 15,                          // torch (vanilla 14, 15/16)
+        62 => 14,                          // lit furnace (vanilla 13, 14/16)
+        90 => 13,                          // portal (vanilla 11, 12/16)
+        74 | 94 => 11,                     // glowing redstone ore, lit repeater (vanilla 9, 10/16)
+        76 => 9,                           // redstone torch (vanilla 7, 0.5)
         39 => 1,                           // brown mushroom (2/16)
         _ => 0,
     }
@@ -454,6 +460,19 @@ pub fn nibbles_to_beta(n: &Nibbles) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// No emitter is dimmer than b1.7.3's `Block.lightValue`, none passes the nibble's 15, a torch is a full 15 and a block that does not
+    /// shine still reads 0.
+    #[test]
+    fn emitters_are_never_dimmer_than_vanilla_and_a_torch_is_full() {
+        // (id, b1.7.3 level)
+        for (id, vanilla) in [(10u8, 15u8), (11, 15), (51, 15), (89, 15), (91, 15), (95, 15), (50, 14), (62, 13), (90, 11), (74, 9), (94, 9), (76, 7), (39, 1)] {
+            assert!((vanilla..=15).contains(&light_value(id)), "id {id}: {} against vanilla {vanilla}", light_value(id));
+        }
+        assert_eq!(light_value(50), 15, "a torch is as bright as lava");
+        assert!(light_value(62) > 13 && light_value(76) > 7, "the weaker emitters did get brighter");
+        assert_eq!((light_value(0), light_value(1), light_value(3), light_value(89)), (0, 0, 0, 15));
+    }
 
     /// `WorldProviderHell` keeps the curve and lifts the floor from 0.05 to 0.1: level 0 is 0.1, level 15 is still 1, every level is at
     /// least as bright as the overworld's, and the overworld's table is the one with `AMBIENT`.

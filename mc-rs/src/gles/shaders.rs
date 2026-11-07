@@ -60,9 +60,13 @@ float fog_factor(float d) {
     float k = d * fogp.z; // the biome's haze (`world::atmos`)
     return 1.0 - (1.0 - lin) * exp(-k * k);
 }
+// `look::BLOCK_LIGHT_BOOST` (1.0 = b1.7.3's table): block light (torch, lava, glowstone...) is lifted before the table, see `brightness` in gpu/pipeline.rs.
+const float BLOCK_BOOST = @BKL@;
 // World.lightBrightnessTable; sky and blk are light levels / 15, eye.w the sky light the time of day takes away.
 float brightness(float sky, float blk) {
-    float l = max(max(sky - eye.w, 0.0), blk);
+    // NOT b1.7.3: block light is lifted (0 stays 0, 1 stays 1; the floor of 0.0001 keeps `pow` off 0 on mobile GPUs), sky light is not.
+    float bl = 1.0 - pow(max(1.0 - blk, 0.0001), BLOCK_BOOST);
+    float l = max(max(sky - eye.w, 0.0), bl);
     return (l / (4.0 - 3.0 * l)) * (0.95 - fx.w) + 0.05 + fx.w; // `fx.w`: the Nether raises the floor of the table to 0.1 (0 in the overworld)
 }
 // A lightning bolt's light (`bolt`, see `bolt_lit` in gpu/pipeline.rs, line for line).
@@ -396,6 +400,7 @@ fn splice(s: &str) -> String {
         .replace("@SBB@", &format!("{:?}", look::boosted(0.5f32.powf(2.2))))
         .replace("@SZB@", &format!("{:?}", look::boosted(0.8f32.powf(2.2))))
         .replace("@SXB@", &format!("{:?}", look::boosted(0.6f32.powf(2.2))))
+        .replace("@BKL@", &format!("{:?}", look::BLOCK_LIGHT_BOOST))
 }
 
 /// The chunk program `which`; `a2c`: the scene pass is multisampled and the cut-out layers write coverage.

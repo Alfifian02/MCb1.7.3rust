@@ -342,6 +342,7 @@ impl App {
         crate::render::present::set_msaa_want(u32::from(opts.msaa));
         crate::render::present::set_post_want(u32::from(opts.post));
         crate::render::present::set_fxaa_want(u32::from(opts.fxaa));
+        crate::gpu::flat::set_want(opts.flat_draws);
         crate::gles::set_want(opts.renderer);
         let be = Backend::new(opts.renderer == 2, native_ptr, width, height).await?;
         log::info!("renderer: {}", be.gpu_info());

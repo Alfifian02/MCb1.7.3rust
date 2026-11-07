@@ -6,6 +6,8 @@
 //! * Five switches (Video Settings > Effects...), each can be turned off: `warm` (golden low sun, bluer shade, a little more face
 //!   shading), `water` (depth gradient + sun glint), `glow` (soft additive halos on lava, glowstone and the sun only),
 //!   `motion` (off / low / on: leaf sway, a few drifting motes near flowers and water, light rays at a low sun), `haze` (aerial perspective).
+//! * Block light (torch, lava, glowstone, furnace...) is shown brighter than b1.7.3's table by `BLOCK_LIGHT_BOOST`, spliced into both
+//!   renderers' `brightness`. Not a switch and not a uniform: one constant. Visual only (gameplay reads the real light levels).
 //! * Caps: at most `MAX_GLOW` halos, `MOTE_CAP` motes and `MAX_QUADS` sprites a frame, whatever the world holds.
 //!
 //! Nothing here is b1.7.3; every number is a taste value. UNVERIFIED on a device: all of them (by eye only).
@@ -42,6 +44,16 @@ const FACE_BOOST: f32 = 0.10;
 /// constants from here (`@SXB@`...) instead of a `pow` per pixel; `Look::new` sets `warm[3]` to `FACE_BOOST` or 0, nothing between.
 pub fn boosted(s: f32) -> f32 {
     s.powf(1.0 + FACE_BOOST)
+}
+/// How much brighter the shaders show block light than b1.7.3's table (1.0 = the vanilla table): a block light level `b` (0..1, level / 15)
+/// is lifted to `1 - (1 - b)^BLOCK_LIGHT_BOOST` before the usual `l / (4 - 3 l)` curve and the floor. 0 stays 0 (no light, nothing added)
+/// and 1 stays 1 (nothing passes full white), the gradient between is kept and the lift is largest in the middle: at 1.35 a torch's light
+/// three cells out reads about 0.68 where vanilla's read 0.44. Sky light does not take it. Spliced as `@BKL@` into the WGSL and the GLSL.
+/// A taste value, UNVERIFIED by eye: the one number to tune (1.5 is a strong lift, 1.2 a light one).
+pub const BLOCK_LIGHT_BOOST: f32 = 1.35;
+/// `BLOCK_LIGHT_BOOST` applied to a block light level `b` (0..1), the shaders' `1.0 - pow(max(1.0 - blk, 0.0001), BLOCK_BOOST)` on the CPU.
+pub fn block_light_level(b: f32) -> f32 {
+    1.0 - (1.0 - b).max(1e-4).powf(BLOCK_LIGHT_BOOST)
 }
 /// How much of the distance tint the fog factor brings (`AER` in the shaders), 0..1.
 const AERIAL: f32 = 1.0;
@@ -475,6 +487,25 @@ mod tests {
             assert!((table(nether.fx[3], k) - brightness_in(k, NETHER_AMBIENT)).abs() < 1e-6, "nether level {k}");
             assert!((table(over.fx[3], k) - brightness_in(k, AMBIENT)).abs() < 1e-6, "overworld level {k}");
         }
+    }
+
+    /// Block light is shown brighter than b1.7.3's table without moving its ends: 0 stays dark, 15 stays full, every level is brighter than the
+    /// one below and than the vanilla table's, and a torch (15) three cells out beats vanilla's torch (14) at the same distance.
+    #[test]
+    fn block_light_is_lifted_but_keeps_its_ends() {
+        assert_eq!(block_light_level(0.0), 0.0);
+        assert!((block_light_level(1.0) - 1.0).abs() < 1e-4);
+        let mut prev = 0.0;
+        for k in 1..=15u8 {
+            let (b, lifted) = (k as f32 / 15.0, block_light_level(k as f32 / 15.0));
+            assert!(lifted > prev, "level {k} is brighter than the one below");
+            if k < 15 {
+                assert!(lifted > b, "level {k} is lifted above the vanilla table");
+            }
+            prev = lifted;
+        }
+        let shown = |l: f32| l / (4.0 - 3.0 * l) * 0.95 + 0.05; // the shaders' curve, overworld floor
+        assert!(shown(block_light_level(12.0 / 15.0)) > shown(11.0 / 15.0) + 0.15);
     }
 
     /// Options.txt round trip, a bad line is skipped and the dial stays inside 0..1.

@@ -166,9 +166,18 @@ impl Ticks {
     /// Streams Reflowing's `scheduleTick(WATER, 5 + floorMod(seed, 20))` on a river's edge water: a still source becomes a flowing one
     /// (level 0, it stays a source) and is ticked, so `flow` spreads it over what lies beside and below it. Not a still water: nothing.
     pub fn wake_water(&mut self, w: &mut ChunkManager, x: i32, y: i32, z: i32) {
-        if bid(w, x, y, z) == 9 {
-            w.set_quiet(x, y, z, 8, w.meta(x, y, z));
-            self.schedule(x, y, z, 8, 5 + (x.wrapping_mul(3129871) ^ z.wrapping_mul(116129781) ^ y).rem_euclid(20) as u64);
+        let jitter = 5 + (x.wrapping_mul(3129871) ^ z.wrapping_mul(116129781) ^ y).rem_euclid(20) as u64;
+        match bid(w, x, y, z) {
+            9 => {
+                w.set_quiet(x, y, z, 8, w.meta(x, y, z));
+                self.schedule(x, y, z, 8, jitter);
+            }
+            // Still lava at an aquifer's border (Cascades): the same, at lava's own tick rate.
+            11 => {
+                w.set_quiet(x, y, z, 10, w.meta(x, y, z));
+                self.schedule(x, y, z, 10, tick_rate(10) + jitter);
+            }
+            _ => {}
         }
     }
 

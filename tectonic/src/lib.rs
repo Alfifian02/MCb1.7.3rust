@@ -7,7 +7,7 @@
 //! defaults, and a chunk filler that evaluates `final_density` on the 4 x 8 x 4 cell corners and interpolates between them.
 //!
 //! What is not: caves, noodle caves, underground rivers and lava tunnels (`tectonic:caves`, `cave/noodle`, `underground_river/total`,
-//! `lava_tunnel/total` are stubbed to "nothing here"; mc-rs keeps its own b1.7.3 caves), biomes, surface rules, aquifers, blending
+//! `lava_tunnel/total` are stubbed to "nothing here"; mc-rs keeps its own b1.7.3 caves), biomes, surface rules, aquifers (Cascades' are in `aquifer`), blending
 //! with old chunks, and the `ultrasmooth` option.
 //!
 //! The graph is rewritten once when it is built (`Tectonic::simplify`, after C2ME's density function compiler): wrappers dropped,
@@ -25,6 +25,8 @@
 //! `vegetation`. If they are right a seed gives the mod's continents; if one is wrong the terrain is still Tectonic-shaped.
 
 use std::collections::HashMap;
+
+pub mod aquifer;
 
 const BUNDLE: &str = include_str!("../terrain.json");
 /// The Cascades (hybrid-beta) datapack, bundled by `tools/cascades.py`: the same node set, a 384-high world, 26.x noise definitions.
@@ -950,6 +952,8 @@ pub struct Tectonic {
     blended: Blended,
     min_y: i32,
     height: usize,
+    /// Cascades' aquifers (`aquifer.rs`); `None` for a bundle without an `aq` section.
+    aq: Option<aquifer::Ids>,
 }
 
 fn hash(j: Option<&J>) -> Result<(u64, u64), String> {
@@ -1031,10 +1035,30 @@ impl Tectonic {
                 b.named(v.str().ok_or("terrain.json: a route is not a name")?)?;
             }
         }
+        // The aquifer section (Cascades): its functions are compiled too, and resolved to node ids once the graph is simplified.
+        let mut aq_spec = None;
+        if let Some(a) = j.get("aq") {
+            let fns = a.get("fns").ok_or("terrain.json: aq without fns")?;
+            let mut names = Vec::new();
+            for k in aquifer::FNS {
+                let name = fns.get(k).and_then(|v| v.str()).ok_or_else(|| format!("terrain.json: aq.fns has no {k}"))?;
+                b.named(name)?;
+                names.push(name.to_string());
+            }
+            let num = |k: &str| a.get(k).and_then(|v| v.num()).map(|v| v as i32).ok_or_else(|| format!("terrain.json: aq has no {k}"));
+            aq_spec = Some((names, num("lower")?, num("cell")?, hash(a.get("hash"))?, hash(a.get("ore_hash"))?));
+        }
         let Builder { nodes, dep, ids, splines, interps, .. } = b;
-        let mut t = Tectonic { nodes, dep, splines, interps, ids, root, noises, noise_ix, offset, blended, min_y: cfg.min_y, height: (cfg.max_y - cfg.min_y) as usize };
+        let mut t = Tectonic { nodes, dep, splines, interps, ids, root, noises, noise_ix, offset, blended, min_y: cfg.min_y, height: (cfg.max_y - cfg.min_y) as usize, aq: None };
         if simplify {
             t.simplify();
+        }
+        if let Some((names, lower, cell, h, oh)) = aq_spec {
+            let mut f = [0u32; aquifer::FNS.len()];
+            for (slot, name) in f.iter_mut().zip(&names) {
+                *slot = t.ids[name];
+            }
+            t.aq = Some(aquifer::Ids { fac: Xoro::from_hash(root_fac, h).fork(), ore_fac: Xoro::from_hash(root_fac, oh).fork(), f, lower, cell });
         }
         Ok(t)
     }

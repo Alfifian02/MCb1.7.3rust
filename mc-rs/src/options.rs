@@ -219,6 +219,9 @@ pub struct Settings {
     pub fxaa: u8,
     /// The renderer for the next start: 0 Auto (Vulkan), 1 Vulkan, 2 OpenGL ES 3.2 (`renderer:` in options.txt).
     pub renderer: u8,
+    /// Flat chunk draws (`gpu::flat`, ported from Starling) for the next start: 0 off (the default), 1 on for frames with 512+ sections, 2 on
+    /// for every frame (A/B checks); a switch with no button, `flatDraws:` in options.txt. Vulkan only, and only where the device can.
+    pub flat_draws: u8,
     /// The look of every biome's sky as the player tuned it (the sun button of the game menu, `world::atmos`), `atmos_<n>:` in options.txt.
     pub atmos: AtmosCfg,
     /// The Vibrance dial and the effect switches (`render::look`), `look_*` in options.txt.
@@ -262,6 +265,7 @@ impl Default for Settings {
             post: 0,
             fxaa: 0,
             renderer: 0,
+            flat_draws: 0,
             atmos: AtmosCfg::default(),
             look: LookCfg::default(),
             path: None,
@@ -309,6 +313,7 @@ impl Settings {
                 ("post", _, Some(n)) if n <= 2 => s.post = n,
                 ("fxaa", _, Some(n)) if n <= 2 => s.fxaa = n,
                 ("renderer", _, Some(n)) if n <= 2 => s.renderer = n,
+                ("flatDraws", _, Some(n)) if n <= 2 => s.flat_draws = n,
                 (k, ..) if k.starts_with("pad_") => s.pad.load(k, v),
                 (k, ..) if k.starts_with("atmos_") => s.atmos.load(k, v),
                 (k, ..) if k.starts_with("look_") => s.look.load(k, v),
@@ -330,6 +335,7 @@ impl Settings {
             self.music, self.sound, self.invert_mouse, self.sensitivity, self.render_distance, self.gui_scale, self.view_bobbing, self.anaglyph, self.advanced_opengl, self.limit_framerate, self.difficulty, self.fancy_graphics, self.ambient_occlusion, self.lod, self.dig_delay, self.gpu_error_trace, self.dynamic_res, self.msaa, self.post, self.fxaa, self.renderer, self.debug_screen, self.animal_ai, self.biome_rules, self.frame_latency, self.sustained, self.rei_theme, self.rei_overlay
         );
         t.push_str(&format!("fov:{}\nguiStyle:{}\npanelSize:{}\n", self.fov, self.gui_style, self.panel_size));
+        t.push_str(&format!("flatDraws:{}\n", self.flat_draws));
         for (id, code) in KEY_IDS.iter().zip(self.keys) {
             t.push_str(&format!("key_key.{id}:{code}\n"));
         }
@@ -1871,6 +1877,21 @@ mod tests {
         assert_eq!(Settings::load(&root).msaa, 0);
         st.msaa = 4;
         assert!(st.text(Opt::Msaa).starts_with("MSAA: 4x"));
+    }
+
+    /// Flat chunk draws are off until options.txt says so (1 = past `flat::MIN_SECTIONS`, 2 = every frame), and a bad value leaves them off.
+    #[test]
+    fn flat_draws_option_is_off_by_default_and_round_trips() {
+        let root = tmp("flat");
+        let mut st = Settings::load(&root);
+        assert_eq!(st.flat_draws, 0, "a switch for measuring: off until options.txt says so");
+        st.flat_draws = 2;
+        st.save();
+        assert_eq!(Settings::load(&root).flat_draws, 2);
+        std::fs::write(root.join("options.txt"), "flatDraws:1\n").unwrap();
+        assert_eq!(Settings::load(&root).flat_draws, 1);
+        std::fs::write(root.join("options.txt"), "flatDraws:3\n").unwrap();
+        assert_eq!(Settings::load(&root).flat_draws, 0);
     }
 
     /// The FXAA button cycles Auto -> On -> Off -> Auto, reads back from options.txt, and a bad value falls back to Auto.

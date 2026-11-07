@@ -24,6 +24,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use embeddium::{arena::Arena, quad_index, upload_budget::{self, UploadBudget, UploadDurationEstimator}, vertex::{self, Packed}, vis};
 use glam::Vec3;
 
+use crate::gpu::flat::GRAIN;
 use crate::gpu::gfx::{Buf, Gfx};
 use crate::gpu::pipeline::{DrawOrigins, MAX_ORIGINS};
 use crate::render::mesh;
@@ -38,6 +39,7 @@ use crate::world::save;
 
 mod light;
 mod occlusion;
+mod page_runs;
 
 type Key = (i32, i32);
 
@@ -178,12 +180,17 @@ struct Page {
     id: u32,
     vbuf: Buf,
     verts: Arena,
+    /// Flat draws (`gpu::flat`): the origin slot of the chunk that owns each `GRAIN`-vertex block of the page, read by the vertex shader.
+    blocks: Option<Buf>,
 }
 
+const _: () = assert!(PAGE_VERTS % GRAIN == 0); // every range is a whole number of blocks, so every offset is block aligned
+
 impl Page {
-    fn new(gfx: Gfx, id: u32) -> Self {
+    fn new(gfx: Gfx, id: u32, flat: bool) -> Self {
         let vbuf = gfx.writable(PAGE_VERTS as u64 * VERT_BYTES, false);
-        Self { id, vbuf, verts: Arena::new(PAGE_VERTS, PAGE_VERTS) }
+        let blocks = flat.then(|| gfx.storage((PAGE_VERTS / GRAIN) as u64 * 4));
+        Self { id, vbuf, verts: Arena::new(PAGE_VERTS, PAGE_VERTS), blocks }
     }
 }
 
@@ -224,6 +231,10 @@ impl Pages {
         if nv > PAGE_VERTS {
             return None;
         }
+        // Flat draws name a chunk by the `GRAIN`-vertex block a vertex is in (`gpu::flat`), so a mesh takes whole blocks: the range is
+        // rounded up (the arena only ever holds multiples of `GRAIN`, so every offset is aligned too). A few hundred spare vertices a chunk.
+        let flat = origins.is_some_and(|o| o.flat_enabled());
+        let len = if flat { nv.next_multiple_of(GRAIN) } else { nv };
         let Some(slot) = self.slot() else {
             log::error!("chunk {key:?}: no free origin slot ({MAX_ORIGINS} meshes alive)");
             return None;
@@ -231,13 +242,13 @@ impl Pages {
         if self.quads.is_none() {
             self.quads = Some(gfx.index(bytemuck::cast_slice(&quad_index::indices(PAGE_VERTS / quad_index::VERTICES_PER_QUAD))));
         }
-        let at = self.list.iter_mut().find_map(|p| p.verts.alloc(nv).map(|v| (p.id, v)));
+        let at = self.list.iter_mut().find_map(|p| p.verts.alloc(len).map(|v| (p.id, v)));
         let (id, v) = match at {
             Some(a) => a,
             None => {
-                let mut p = Page::new(gfx, self.next);
+                let mut p = Page::new(gfx, self.next, flat);
                 self.next += 1;
-                let v = p.verts.alloc(nv).expect("a mesh that fits a page fits an empty one");
+                let v = p.verts.alloc(len).expect("a mesh that fits a page fits an empty one");
                 let id = p.id;
                 self.list.push(p);
                 (id, v)
@@ -245,6 +256,10 @@ impl Pages {
         };
         let p = self.list.iter().find(|p| p.id == id).expect("page just used");
         gfx.write(&p.vbuf, v as u64 * VERT_BYTES, bytemuck::cast_slice(verts));
+        if let Some(blocks) = p.blocks.as_ref().filter(|_| flat) {
+            debug_assert_eq!(v % GRAIN, 0, "a flat mesh starts on a block");
+            gfx.write(blocks, (v / GRAIN) as u64 * 4, bytemuck::cast_slice(&vec![slot; (len / GRAIN) as usize]));
+        }
         if let (Some(o), Gfx::Wgpu(_, q)) = (origins, gfx) {
             o.write(q, slot, [key.0 as f32 * 16.0, 0.0, key.1 as f32 * 16.0]);
         }
@@ -920,8 +935,9 @@ pub struct ChunkManager {
     visible: HashMap<Key, u32>,
     /// The part of `visible` within the water radius `wr` (`WATER_RANGE`, or all of it with the LoD off): the sections whose real water is drawn (and whose LoD water sheet is cut).
     wet: HashMap<Key, u32>,
-    /// The visible chunks near to far (`update_visible`): the order `draw_ranges` walks, once a frame instead of once a layer.
-    order: Vec<Key>,
+    /// The visible chunks near to far (`update_visible`) with their squared distance to the eye (blocks, horizontal): the order `draw_ranges`
+    /// walks, once a frame instead of once a layer; the distance is what `page_runs` bands them by.
+    order: Vec<(Key, f32)>,
     /// Chunks whose blocks are final, as columns for the far terrain (`world::lod`, Voxy's ingest), until `take_ingest`.
     ingest: Vec<(Key, crate::world::lod::Cols)>,
     /// The chunks handed over while loaded: one that unloads is handed over again (it may have been edited), any other is not (its
@@ -1346,11 +1362,15 @@ impl ChunkManager {
             for lz in 0..16usize {
                 let col = idx(lx, 0, lz);
                 for y in 1..H - 1 {
-                    if e.blocks[col + y] != 9 || e.blocks[col + y + 1] != 0 || e.data.get(lx, y, lz) != 0 {
+                    let b = e.blocks[col + y];
+                    if (b != 9 && b != 11) || e.data.get(lx, y, lz) != 0 {
                         continue;
                     }
                     let (wx, wz) = (k.0 * 16 + lx as i32, k.1 * 16 + lz as i32);
-                    if [(-1, 0), (1, 0), (0, -1), (0, 1)].iter().any(|&(dx, dz)| self.block_loaded(wx + dx, y as i32, wz + dz) == Some(0)) {
+                    // Cascades' aquifers (`shouldScheduleFluidUpdate`): a fluid block over a hole (air below) flows down, and lava with air beside
+                    // it flows out, as the game's post-processing fluid tick does at an aquifer's border.
+                    let beside = || [(-1, 0), (1, 0), (0, -1), (0, 1)].iter().any(|&(dx, dz)| self.block_loaded(wx + dx, y as i32, wz + dz) == Some(0));
+                    if e.blocks[col + y - 1] == 0 || (b == 9 && e.blocks[col + y + 1] == 0 && beside()) || (b == 11 && beside()) {
                         out.push((wx, y as i32, wz));
                     }
                 }
@@ -1601,8 +1621,8 @@ impl ChunkManager {
         self.wet = self.visible.iter().filter_map(|(&(x, z), &m)| Some(((x, z), near_sections(x, z, m, eye, shape, wr.min(rh), rv))).filter(|e| e.1 != 0)).collect();
         let d2 = |k: &Key| ((k.0 * 16 + 8) as f32 - eye.x).powi(2) + ((k.1 * 16 + 8) as f32 - eye.z).powi(2);
         self.order.clear();
-        self.order.extend(self.visible.keys().copied());
-        self.order.sort_unstable_by(|a, b| d2(a).total_cmp(&d2(b)));
+        self.order.extend(self.visible.keys().map(|k| (*k, d2(k))));
+        self.order.sort_unstable_by(|a, b| a.1.total_cmp(&b.1));
     }
 
     /// Whether an entity's box (`min`..`max`, world coordinates) touches a section `update_visible` found this frame: Sodium's
@@ -1667,18 +1687,20 @@ impl ChunkManager {
     }
 
     /// Every run of neighbouring sections `update_visible` found (empty sections are skipped, touching ones are one range, so a chunk is
-    /// mostly one run), for one render `Layer`, in draw order. Both renderers walk this. Opaque terrain goes near to far inside each page, so
-    /// what is drawn first hides the rest from the depth test (early-Z / the tiler's hidden-surface removal); translucent water blends over
-    /// what is behind it, so it goes far to near across pages (with the LoD on it only reaches `WATER_RANGE`, a few chunks).
+    /// mostly one run), for one render `Layer`, in draw order. Both renderers walk this. Opaque terrain goes near to far, band by band
+    /// (64 blocks, `page_runs`, Starling's `PageRuns`), and page by page inside a band: what is drawn first hides the rest from the depth
+    /// test (early-Z / the tiler's hidden-surface removal), with one vertex buffer switch per page and band instead of one per page change
+    /// down the list. Translucent water blends over what is behind it, so it goes far to near across pages (with the LoD on it only reaches
+    /// `WATER_RANGE`, a few chunks).
     /// ponytail: whole chunks only, the faces inside one chunk keep map order; upgrade = sort the sections / faces too.
     pub fn for_each_run(&self, layer: Layer, mut f: impl FnMut(Run)) {
         let water = layer == Layer::Water;
         let masks = if water { &self.wet } else { &self.visible }; // real water only within `wr` (`update_visible`)
         let Some(quads) = self.pages.quads.as_ref() else { return };
-        // One chunk: its runs of sections in `layer`, only if it lives in page `only` (None = any).
-        let mut visit = |k: &Key, only: Option<u32>| {
+        // One chunk: its runs of sections in `layer`, as (page, mesh, first, end) to `sink`.
+        let visit = |k: &Key, sink: &mut dyn FnMut(&Page, &Mesh, u32, u32)| {
             let (Some(&mask), Some(e)) = (masks.get(k), self.chunks.get(k)) else { return };
-            let Some(m) = e.mesh.as_ref().filter(|m| only.map_or(true, |p| p == m.page)) else { return };
+            let Some(m) = e.mesh.as_ref() else { return };
             let starts = match (layer, &m.water) {
                 (Layer::Water, Some(w)) => w,
                 (Layer::Water, None) => return,
@@ -1693,24 +1715,57 @@ impl ChunkManager {
                     (true, None) => run = Some((starts[s], starts[s + 1])),
                     (true, Some((a, _))) => run = Some((a, starts[s + 1])),
                     (false, Some((a, b))) => {
-                        f(Run { vbuf: &p.vbuf, quads, page: m.page, slot: m.slot, origin: m.origin, first: a, end: b });
+                        sink(p, m, a, b);
                         run = None;
                     }
                     _ => {}
                 }
             }
         };
+        let mut emit = |p: &Page, page: u32, slot: u32, origin: [f32; 3], a: u32, b: u32| f(Run { vbuf: &p.vbuf, quads, page, slot, origin, first: a, end: b });
         if water {
-            for k in self.order.iter().rev() {
-                visit(k, None);
+            for (k, _) in self.order.iter().rev() {
+                visit(k, &mut |p, m, a, b| emit(p, m.page, m.slot, m.origin, a, b));
             }
         } else {
-            for p in &self.pages.list {
-                for k in &self.order {
-                    visit(k, Some(p.id));
+            // Near to far, then regrouped by (band, page): one list in chunk order, each chunk's runs one `PageRuns` run. Plain values
+            // (page, slot, origin, first, end), not references: the page is looked up again when a run is handed out.
+            let mut pending: Vec<(u32, u32, [f32; 3], u32, u32)> = Vec::new();
+            let mut grouped = page_runs::PageRuns::default();
+            for (k, d2) in &self.order {
+                let start = pending.len();
+                visit(k, &mut |_, m, a, b| pending.push((m.page, m.slot, m.origin, a, b)));
+                if let Some(&(page, ..)) = pending.get(start) {
+                    grouped.push(f64::from(*d2).to_bits(), page, start, pending.len() - start);
+                }
+            }
+            grouped.regroup(&mut pending, 0);
+            for (page, slot, origin, a, b) in pending {
+                if let Some(p) = self.pages.get(page) {
+                    emit(p, page, slot, origin, a, b);
                 }
             }
         }
+    }
+
+    /// Sections the frame draws (`update_visible`'s masks, solid layer): what `gpu::flat` weighs against `MIN_SECTIONS`.
+    pub fn sections_drawn(&self) -> usize {
+        self.visible.iter().filter(|(k, _)| self.drawn(**k)).map(|(_, m)| m.count_ones() as usize).sum()
+    }
+
+    /// Page `id` is alive (a page left empty is dropped): `gpu::flat` forgets the bind groups of the others.
+    pub fn has_page(&self, id: u32) -> bool {
+        self.pages.get(id).is_some()
+    }
+
+    /// Page `id`'s vertex buffer.
+    pub fn page_vbuf(&self, id: u32) -> Option<&Buf> {
+        self.pages.get(id).map(|p| &p.vbuf)
+    }
+
+    /// Page `id`'s block table (flat draws only).
+    pub fn page_blocks(&self, id: u32) -> Option<&Buf> {
+        self.pages.get(id).and_then(|p| p.blocks.as_ref())
     }
 
     /// Chunks that currently have something to draw.
@@ -2828,5 +2883,30 @@ mod tests {
         pages.free(&at(pa, va, sa));
         assert_eq!(put(&mut pages), (pa, va, sa), "the run and the slot come back");
         assert!(pages.put(Gfx::Wgpu(&device, &queue), Some(&origins), &vec![[0u8; vertex::STRIDE]; PAGE_VERTS as usize + 4], (0, 0)).is_none());
+    }
+
+    /// With flat draws on (`gpu::flat`) a mesh takes whole `GRAIN`-vertex blocks and its page has a block table; with them off nothing changes:
+    /// meshes sit back to back and there is no table. Needs an adapter; skipped without one.
+    #[test]
+    fn flat_meshes_take_whole_blocks() {
+        let instance = wgpu::Instance::default();
+        let Ok(adapter) = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())) else {
+            eprintln!("no adapter: skipped");
+            return;
+        };
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
+        let quad = vec![[0u8; vertex::STRIDE]; 4];
+        for flat in [false, true] {
+            let origins = crate::gpu::pipeline::ChunkPipeline::with_flat(&device, flat).origins;
+            assert_eq!(origins.flat_enabled(), flat);
+            let mut pages = Pages::default();
+            let mut put = || pages.put(Gfx::Wgpu(&device, &queue), Some(&origins), &quad, (1, 2)).unwrap();
+            let ((_, a, _), (_, b, _)) = (put(), put());
+            // The arena cuts a run from the end of its free segment, so the second one is the one below the first.
+            let gap = a.abs_diff(b);
+            assert_eq!(gap, if flat { GRAIN } else { 4 }, "flat = {flat}");
+            assert!(!flat || (a % GRAIN == 0 && b % GRAIN == 0), "block aligned");
+            assert_eq!(pages.list[0].blocks.is_some(), flat);
+        }
     }
 }

@@ -64,6 +64,20 @@ impl Gfx<'_> {
         }
     }
 
+    /// An empty storage buffer of `size` bytes that `write` fills: the block table of a page (`gpu::flat`), read by the vertex shader.
+    /// wgpu only; the GL renderer has no flat draws and never asks.
+    pub fn storage(&self, size: u64) -> Buf {
+        match self {
+            Gfx::Wgpu(d, _) => Buf::Wgpu(d.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("flat_blocks"),
+                size,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })),
+            Gfx::Gl(g) => Buf::Gl(g.buffer(size as usize, &[], gles::sys::DYNAMIC_DRAW)),
+        }
+    }
+
     pub fn write(&self, b: &Buf, offset: u64, bytes: &[u8]) {
         match self {
             Gfx::Wgpu(_, q) => q.write_buffer(b.wgpu(), offset, bytes),

@@ -421,15 +421,34 @@ impl OverworldGenerator {
         let biomes = cm.load_block_generator_data(chunk_x * 16, chunk_z * 16, 16, 16);
         let mut blocks = vec![block::AIR; VOLUME];
         if let Some(t) = self.tectonic.as_ref() {
-            // Stone where Tectonic's final density is above 0; below the sea the rest is water, iced over where it is cold.
+            // Stone where the final density is above 0. The rest: Cascades has aquifers (`tectonic::aquifer`, the game's: caves under the land
+            // stay dry, some hold water, the deep ones lava, the sea is water); Tectonic's bundle has none, so there everything under the sea is
+            // water. Either way the sea's surface is iced over where it is cold.
             let d = t.chunk(chunk_x, chunk_z);
             let th = t.height(); // GH for Tectonic, 384 for Cascades
+            let fluids = t.fluids(chunk_x, chunk_z, &d);
             for x in 0..16usize {
                 for z in 0..16usize {
                     let cold = cm.temperature[x * 16 + z] < 0.5;
                     let col = &mut blocks[crate::world::chunk::idx(x, 0, z)..][..th];
                     for (y, c) in col.iter_mut().enumerate() {
-                        *c = if d[(x * 16 + z) * th + y] > 0.0 {
+                        let i = (x * 16 + z) * th + y;
+                        *c = if let Some(f) = fluids.as_ref() {
+                            match f[i] {
+                                tectonic::aquifer::STONE => block::STONE,
+                                tectonic::aquifer::WATER => {
+                                    // Ice only on open water: the block above is air (not a cave's roof).
+                                    let open = y + 1 < th && f[i + 1] == tectonic::aquifer::AIR;
+                                    if cold && open && y as i32 == SEA_LEVEL - 1 { block::ICE } else { block::WATER }
+                                }
+                                tectonic::aquifer::LAVA => block::LAVA,
+                                // Veins: Beta has no copper, so its veins give coal; raw iron is an iron block (42).
+                                tectonic::aquifer::COPPER_ORE | tectonic::aquifer::RAW_COPPER => block::ORE_COAL,
+                                tectonic::aquifer::IRON_ORE => block::ORE_IRON,
+                                tectonic::aquifer::RAW_IRON => 42,
+                                _ => block::AIR,
+                            }
+                        } else if d[i] > 0.0 {
                             block::STONE
                         } else if (y as i32) < SEA_LEVEL {
                             if cold && y as i32 >= SEA_LEVEL - 1 { block::ICE } else { block::WATER }
@@ -594,6 +613,9 @@ impl OverworldGenerator {
                     let cur = col[y];
                     if cur == block::AIR {
                         depth = -1;
+                    } else if cur == block::LAVA {
+                        // Lava (Cascades' aquifers): the stone under it is its bed, not a surface to grass over.
+                        depth = -2;
                     } else if cur == block::STONE {
                         if depth == -1 {
                             if stone <= 0 {

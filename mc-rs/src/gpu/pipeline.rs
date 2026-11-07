@@ -61,6 +61,8 @@ pub const MAX_ORIGINS: u32 = 4096;
 pub struct DrawOrigins {
     buf: Buffer,
     pub group: BindGroup,
+    /// The same origins, 16 bytes a slot, for the vertex shader of flat draws to read (`gpu::flat`): only when they are on.
+    flat: Option<Buffer>,
 }
 
 pub fn origin_layout(device: &Device) -> wgpu::BindGroupLayout {
@@ -76,18 +78,33 @@ pub fn origin_layout(device: &Device) -> wgpu::BindGroupLayout {
 }
 
 impl DrawOrigins {
-    fn new(device: &Device, layout: &wgpu::BindGroupLayout) -> Self {
+    fn new(device: &Device, layout: &wgpu::BindGroupLayout, flat: bool) -> Self {
         let buf = device.create_buffer(&wgpu::BufferDescriptor { label: Some("chunk_origins"), size: ORIGIN_STRIDE * MAX_ORIGINS as u64, usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST, mapped_at_creation: false });
         let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("chunk_origin_bind"),
             layout,
             entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer: &buf, offset: 0, size: wgpu::BufferSize::new(16) }) }],
         });
-        Self { buf, group }
+        let flat = flat.then(|| device.create_buffer(&wgpu::BufferDescriptor { label: Some("flat_origins"), size: 16 * MAX_ORIGINS as u64, usage: BufferUsages::STORAGE | BufferUsages::COPY_DST, mapped_at_creation: false }));
+        Self { buf, group, flat }
     }
 
     pub fn write(&self, queue: &Queue, slot: u32, origin: [f32; 3]) {
-        queue.write_buffer(&self.buf, slot as u64 * ORIGIN_STRIDE, bytemuck::bytes_of(&[origin[0], origin[1], origin[2], 0.0f32]));
+        let o = [origin[0], origin[1], origin[2], 0.0f32];
+        queue.write_buffer(&self.buf, slot as u64 * ORIGIN_STRIDE, bytemuck::bytes_of(&o));
+        if let Some(flat) = &self.flat {
+            queue.write_buffer(flat, slot as u64 * 16, bytemuck::bytes_of(&o));
+        }
+    }
+
+    /// Flat draws are on: meshes are allocated in whole blocks of `flat::GRAIN` vertices and name their chunk in their page's block table.
+    pub fn flat_enabled(&self) -> bool {
+        self.flat.is_some()
+    }
+
+    /// The origins by slot, for the vertex shader of flat draws.
+    pub fn flat_buffer(&self) -> Option<&Buffer> {
+        self.flat.as_ref()
     }
 
     pub fn offset(slot: u32) -> u32 {
@@ -145,6 +162,8 @@ const CHAR_Y: f32 = @CY@.0; // `atlas::CHAR_Y`: the player skin, read at mip 0 (
 const S_BOT: f32 = @SB@;
 const S_Z: f32 = @SZ@;
 const S_X: f32 = @SX@;
+// `look::BLOCK_LIGHT_BOOST`: block light (torch, lava, glowstone...) is lifted before the table, see `brightness`. 1.0 = b1.7.3's table.
+const BLOCK_BOOST: f32 = @BKL@;
 // The same with Warm Light's extra exponent baked (`look::boosted`): `flat_shade` runs per pixel on the far terrain, a `pow` there is too dear.
 const S_BOT_B: f32 = @SBB@;
 const S_Z_B: f32 = @SZB@;
@@ -206,7 +225,9 @@ fn fog_factor(d: f32) -> f32 {
 // `World.lightBrightnessTable`; `sky` and `blk` are light levels / 15, `u.eye.w` the sky light the time of day takes away, `u.fx.w` how far the
 // dimension raises the table's floor above 0.05 (0 in the overworld, 0.05 in the Nether: `WorldProviderHell`, floor 0.1).
 fn brightness(sky: f32, blk: f32) -> f32 {
-    let l = max(max(sky - u.eye.w, 0.0), blk);
+    // NOT b1.7.3: block light is lifted (0 stays 0, 1 stays 1; the floor of 0.0001 keeps `pow` off 0 on mobile GPUs), sky light is not.
+    let bl = 1.0 - pow(max(1.0 - blk, 0.0001), BLOCK_BOOST);
+    let l = max(max(sky - u.eye.w, 0.0), bl);
     return (l / (4.0 - 3.0 * l)) * (0.95 - u.fx.w) + 0.05 + u.fx.w;
 }
 
@@ -257,8 +278,19 @@ struct Draw { origin: vec4<f32> };
 @group(1) @binding(0) var<uniform> draw: Draw;
 const ASIZE: vec2<f32> = vec2<f32>(@AW@.0, @AH@.0);
 
+// Flat chunk draws (`gpu::flat`): the chunk of a vertex is found by its number, not by a bind group per chunk. A chunk's vertices fill whole
+// 256-vertex blocks of its page: the block gives the chunk's origin slot, the slot its origin. (Bindings 1 and 2: `draw` keeps binding 0.)
+@group(1) @binding(1) var<storage, read> block_slots: array<u32>;
+@group(1) @binding(2) var<storage, read> slot_origins: array<vec4<f32>>;
+fn flat_origin(vertex: u32) -> vec3<f32> {
+    return slot_origins[block_slots[vertex >> 8u]].xyz;
+}
+
 fn chunk_pos(w: vec3<u32>) -> vec3<f32> {
-    return draw.origin.xyz + vec3<f32>(f32(w.x & 511u) / 16.0 - 8.0, f32((w.x >> 18u) & 8191u) / 16.0 - 8.0, f32((w.x >> 9u) & 511u) / 16.0 - 8.0);
+    return chunk_pos_at(w, draw.origin.xyz);
+}
+fn chunk_pos_at(w: vec3<u32>, origin: vec3<f32>) -> vec3<f32> {
+    return origin + vec3<f32>(f32(w.x & 511u) / 16.0 - 8.0, f32((w.x >> 18u) & 8191u) / 16.0 - 8.0, f32((w.x >> 9u) & 511u) / 16.0 - 8.0);
 }
 // Texels inside the tile (0..16 for a face that shows it once, further for a merged run).
 fn chunk_texel(w: vec3<u32>) -> vec2<f32> {
@@ -291,8 +323,15 @@ struct VsC {
 
 @vertex
 fn vs_chunk(@location(0) w: vec3<u32>) -> VsC {
+    return chunk_vs(w, draw.origin.xyz);
+}
+@vertex
+fn vs_chunk_flat(@builtin(vertex_index) vertex: u32, @location(0) w: vec3<u32>) -> VsC {
+    return chunk_vs(w, flat_origin(vertex));
+}
+fn chunk_vs(w: vec3<u32>, origin: vec3<f32>) -> VsC {
     var o: VsC;
-    var vpos = chunk_pos(w);
+    var vpos = chunk_pos_at(w, origin);
     let tile = f32(w.y & 1023u);
     // Leaves (tiles 53, 133, 255) sway a little (`u.fx.z` blocks, 0 = off): a smooth function of the position, so shared corners move together.
     if u.fx.z > 0.0 && (tile == 53.0 || tile == 133.0 || tile == 255.0) {
@@ -313,8 +352,15 @@ fn vs_chunk(@location(0) w: vec3<u32>) -> VsC {
 // Water keeps the full `VsOut` (`fs_water` wants the world position for its shade and its radius test) and an atlas uv.
 @vertex
 fn vs_chunk_water(@location(0) w: vec3<u32>) -> VsOut {
+    return chunk_water_vs(w, draw.origin.xyz);
+}
+@vertex
+fn vs_chunk_water_flat(@builtin(vertex_index) vertex: u32, @location(0) w: vec3<u32>) -> VsOut {
+    return chunk_water_vs(w, flat_origin(vertex));
+}
+fn chunk_water_vs(w: vec3<u32>, origin: vec3<f32>) -> VsOut {
     var o: VsOut;
-    let vpos = chunk_pos(w);
+    let vpos = chunk_pos_at(w, origin);
     let tile = w.y & 1023u;
     o.tint = chunk_tint(w);
     o.pos = u.vp * vec4<f32>(vpos, 1.0);
@@ -537,6 +583,7 @@ fn shader_source_with(a2c: bool) -> String {
         .replace("@SBB@", &format!("{:?}", look::boosted(0.5f32.powf(2.2))))
         .replace("@SZB@", &format!("{:?}", look::boosted(0.8f32.powf(2.2))))
         .replace("@SXB@", &format!("{:?}", look::boosted(0.6f32.powf(2.2))))
+        .replace("@BKL@", &format!("{:?}", look::BLOCK_LIGHT_BOOST))
 }
 
 /// Source alpha x colour added to the frame: the halos' blend (the alpha channel is unused).
@@ -563,6 +610,8 @@ pub struct ChunkPipeline {
     pub water: RenderPipeline,
     /// Additive soft discs (`fs_glow`): halos and motes, after the water, depth-tested and not written.
     pub glow: RenderPipeline,
+    /// The chunk pipelines of flat draws and their index list (`gpu::flat`); `None` unless asked for and the device can.
+    pub flat: Option<super::flat::Flat>,
     uniform_buf: Buffer,
     atlas_tex: Texture,
     pub bind_group: BindGroup,
@@ -570,6 +619,11 @@ pub struct ChunkPipeline {
 
 impl ChunkPipeline {
     pub fn new(device: &Device) -> Self {
+        Self::with_flat(device, false)
+    }
+
+    /// `flat`: also build the pipelines of flat chunk draws (`gpu::flat::wanted` decides).
+    pub fn with_flat(device: &Device, flat: bool) -> Self {
         let atlas_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("atlas"),
             size: wgpu::Extent3d { width: atlas::ATLAS_W as u32, height: atlas::ATLAS_H as u32, depth_or_array_layers: 1 },
@@ -617,12 +671,12 @@ impl ChunkPipeline {
         let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("chunk_pipeline_layout"), bind_group_layouts: &[&layout], push_constant_ranges: &[] });
         let origin_bgl = origin_layout(device);
         let pl_chunk = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("chunk_origin_pipeline_layout"), bind_group_layouts: &[&layout, &origin_bgl], push_constant_ranges: &[] });
-        let origins = DrawOrigins::new(device, &origin_bgl);
+        let origins = DrawOrigins::new(device, &origin_bgl, flat);
         // (label, vertex entry, fragment entry, depth write, depth bias, blend, cull)
-        let make = |label: &str, vs: &str, fs: &str, water: bool, bias: wgpu::DepthBiasState, compact: bool| device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let make_with = |layout: &wgpu::PipelineLayout, label: &str, vs: &str, fs: &str, water: bool, bias: wgpu::DepthBiasState, vertex: wgpu::VertexBufferLayout<'static>| device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some(label),
-            layout: Some(if compact { &pl_chunk } else { &pl }),
-            vertex: wgpu::VertexState { module: &shader, entry_point: Some(vs), buffers: &[if compact { chunk_layout() } else { Vertex::layout() }], compilation_options: Default::default() },
+            layout: Some(layout),
+            vertex: wgpu::VertexState { module: &shader, entry_point: Some(vs), buffers: &[vertex], compilation_options: Default::default() },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
                 entry_point: Some(fs),
@@ -636,7 +690,11 @@ impl ChunkPipeline {
             multiview: None,
             cache: None,
         });
+        let make = |label: &str, vs: &str, fs: &str, water: bool, bias: wgpu::DepthBiasState, compact: bool| {
+            make_with(if compact { &pl_chunk } else { &pl }, label, vs, fs, water, bias, if compact { chunk_layout() } else { Vertex::layout() })
+        };
         let none = wgpu::DepthBiasState::default();
+        let flat = flat.then(|| super::flat::Flat::new(device, &layout, super::flat::min_sections(), |pl, label, vs, fs, water| make_with(pl, label, vs, fs, water, none, chunk_layout())));
         Self {
             solid: make("chunk_solid", "vs_chunk", "fs_solid", false, none, true),
             cutout: make("chunk_cutout", "vs_chunk", "fs_cut", false, none, true),
@@ -646,6 +704,7 @@ impl ChunkPipeline {
             lod_water: make("lod_water", "vs_water", "fs_water", true, none, false),
             glow: make("glow", "vs_main", "fs_glow", true, none, false),
             origins,
+            flat,
             uniform_buf,
             atlas_tex,
             bind_group,
@@ -756,13 +815,22 @@ mod tests {
         assert!(!SHADER_SRC.contains("* 0.95 + 0.05;"));
     }
 
+    /// Block light goes through the lift of `look::BLOCK_LIGHT_BOOST` before the table, sky light does not, and the constant is spliced.
+    #[test]
+    fn block_light_is_lifted_in_the_shader() {
+        let src = shader_source();
+        assert!(src.contains(&format!("const BLOCK_BOOST: f32 = {:?};", look::BLOCK_LIGHT_BOOST)) && !src.contains("@BKL@"));
+        assert!(SHADER_SRC.contains("let bl = 1.0 - pow(max(1.0 - blk, 0.0001), BLOCK_BOOST);"));
+        assert!(SHADER_SRC.contains("let l = max(max(sky - u.eye.w, 0.0), bl);"));
+    }
+
     /// The shader parses and validates, every entry point is there, and the atlas is read through `atlas_sample_g` only (tile-clamped, no bleed).
     #[test]
     fn chunk_shader_validates() {
         let src = shader_source();
         let m = naga::front::wgsl::parse_str(&src).unwrap_or_else(|e| panic!("{}", e.emit_to_string(&src)));
         naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all()).validate(&m).unwrap();
-        for e in ["vs_main", "vs_water", "vs_chunk", "vs_chunk_water", "fs_solid", "fs_cut", "fs_cut_flat", "fs_water", "fs_glow"] {
+        for e in ["vs_main", "vs_water", "vs_chunk", "vs_chunk_water", "vs_chunk_flat", "vs_chunk_water_flat", "fs_solid", "fs_cut", "fs_cut_flat", "fs_water", "fs_glow"] {
             assert!(m.entry_points.iter().any(|p| p.name == e), "{e} missing");
         }
         assert!(!SHADER_SRC.contains("textureSample(tex"));

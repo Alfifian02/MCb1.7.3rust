@@ -11,6 +11,8 @@ The datapack is written in the 26.x density-function dialect (`left` / `right`, 
 
 The pack only carries what Cascades changes; the vanilla functions it points at (`continents`, `erosion`, `ridges`, `depth`, the cave
 noodle...) are written out below from memory of the 1.21 `NoiseRouterData` and are UNVERIFIED, like `VANILLA_NOISES` in `tectonic.py`.
+The pack's `aquifers` block (barrier, floodedness, level spread, lava, exclusion, the preliminary surface) is bundled under `aq` and evaluated by
+`tectonic/src/aquifer.rs`.
 NOT PORTED, stubbed (every stub is a constant in the bundle's `stubs`): `minecraft:overworld/caves/spaghetti_2d` (it needs a
 `weird_scaled_sampler`; the 3D spaghetti, the cheese, the layer caves, the entrances and the noodle caves are real),
 `minecraft:overworld/caves/pillars`, the beardifier (no structures in the density), the blend nodes (no old chunks to blend with).
@@ -46,6 +48,16 @@ VANILLA_NOISES = {
     "minecraft:noodle_thickness": (-8, [1.0]),
     "minecraft:noodle_ridge_a": (-7, [1.0]),
     "minecraft:noodle_ridge_b": (-7, [1.0]),
+    # Aquifers (`Noises`): barrier, floodedness, level spread, lava.
+    "minecraft:aquifer_barrier": (-3, [1.0]),
+    "minecraft:aquifer_fluid_level_floodedness": (-7, [1.0]),
+    "minecraft:aquifer_fluid_level_spread": (-5, [1.0]),
+    "minecraft:aquifer_lava": (-1, [1.0]),
+    # Ore veins (`Veminer`): the toggle (ore_veininess), the two ridged noises, the gap noise.
+    "minecraft:ore_veininess": (-8, [1.0]),
+    "minecraft:ore_vein_a": (-7, [1.0]),
+    "minecraft:ore_vein_b": (-7, [1.0]),
+    "minecraft:ore_gap": (-5, [1.0]),
 }
 
 
@@ -120,6 +132,8 @@ def norm(n):
         return _add(norm(n["left"]), _mul(-1.0, norm(n["right"])))
     if t == "cache":
         return {"type": "minecraft:cache_once", "argument": norm(n["input"])}
+    if t == "reciprocal":
+        return {"type": "tectonic:invert", "argument": norm(n["input"])}
     if t in UNARY:
         return {"type": full, "argument": norm(n["input"])}
     if t == "clamp":
@@ -208,7 +222,22 @@ def bundle(path, out):
             for k, v in n.items():
                 if k not in ("type", "noise"):
                     walk(v)
-    for r in (ROOT, "cascades:temperature", "cascades:vegetation"):
+    # The pack's `aquifers` block (`noise_settings/overworld.json`). `find_top_surface` (the preliminary surface) is evaluated by the crate,
+    # so it gets the density and the upper bound as two functions; then the barrier / lava noises, floodedness, level spread, exclusion.
+    aq = pack.get("noise_settings", "minecraft:overworld")["aquifers"]
+    fns["cascades:aq_surface_density"] = norm(aq["surface_level"]["density"])
+    fns["cascades:aq_surface_upper"] = norm(aq["surface_level"]["upper_bound"])
+    for k in ("barrier", "lava", "fluid_level_floodedness", "fluid_level_spread", "exclusion"):
+        fns["cascades:aq_" + k] = norm(aq[k])
+    # Ore veins: vanilla's router (not in the pack): toggle = noise(ore_veininess, 1.5, 1.5), ridged = -0.08 + max(|a|, |b|) with a, b = noise(ore_vein_a / b, 4, 4),
+    # gap = noise(ore_gap, 1, 1). The y limits (-60 .. 50) and the veins themselves are in `aquifer.rs`.
+    fns["cascades:vein_toggle"] = _noise("minecraft:ore_veininess", 1.5, 1.5)
+    fns["cascades:vein_a"] = _noise("minecraft:ore_vein_a", 4.0, 4.0)
+    fns["cascades:vein_b"] = _noise("minecraft:ore_vein_b", 4.0, 4.0)
+    fns["cascades:vein_gap"] = _noise("minecraft:ore_gap", 1.0, 1.0)
+    aq_fns = {k: "cascades:aq_" + k for k in ("surface_density", "surface_upper", "barrier", "lava", "fluid_level_floodedness", "fluid_level_spread", "exclusion")}
+    aq_fns.update({"vein_toggle": "cascades:vein_toggle", "vein_a": "cascades:vein_a", "vein_b": "cascades:vein_b", "vein_gap": "cascades:vein_gap"})
+    for r in (ROOT, "cascades:temperature", "cascades:vegetation", *aq_fns.values()):
         walk(fns[r])
     for r in ROUTES.values():
         walk(r)
@@ -223,7 +252,9 @@ def bundle(path, out):
             o, a = VANILLA_NOISES.get(k) or T.VANILLA_NOISES[k]
         noises[k] = {"o": o, "a": a, "h": T.md5_pair(k)}
     octs = {str(i): T.md5_pair(f"octave_{i}") for i in range(-16, 1)}
-    json.dump({"root": ROOT, "routes": ROUTES, "stubs": STUBS, "f": fns, "n": noises, "oct": octs, "terrain": T.md5_pair("minecraft:terrain")},
+    # `aq`: the functions above by role, `find_top_surface`'s lower bound and cell height, the name hash of the aquifer's positional random.
+    aqj = {"fns": aq_fns, "lower": aq["surface_level"]["lower_bound"], "cell": aq["surface_level"]["cell_height"], "hash": T.md5_pair("minecraft:aquifer"), "ore_hash": T.md5_pair("minecraft:ore")}
+    json.dump({"root": ROOT, "routes": ROUTES, "stubs": STUBS, "f": fns, "n": noises, "oct": octs, "terrain": T.md5_pair("minecraft:terrain"), "aq": aqj},
               open(out, "w"), separators=(",", ":"))
     print(f"{out}: {len(fns)} functions, {len(noises)} noises, {os.path.getsize(out)} bytes")
 

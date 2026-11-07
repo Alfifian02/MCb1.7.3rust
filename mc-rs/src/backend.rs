@@ -34,7 +34,7 @@ impl Wg {
     pub fn new(gpu: Gpu) -> Self {
         let (w, h) = (gpu.config.width, gpu.config.height);
         let fmt = gpu.surface_format();
-        let pipe = ChunkPipeline::new(&gpu.device);
+        let pipe = ChunkPipeline::with_flat(&gpu.device, crate::gpu::flat::wanted(&gpu.adapter, &gpu.device));
         pipe.upload_atlas(&gpu.queue);
         let hud = HudPipeline::new(&gpu.device, &gpu.queue, fmt, w, h);
         let pano = Panorama::new(&gpu.device, &gpu.queue, fmt);
@@ -51,17 +51,30 @@ impl Wg {
         self.present.resize(&self.gpu.device, &self.gpu.queue, self.gpu.scene(), (c.width, c.height));
     }
 
+    /// One layer of the chunk meshes: from the frame's flat index list when `Flat::prepare` built one (`gpu::flat`), else one draw per run.
+    fn draw_chunks(&self, rp: &mut wgpu::RenderPass<'_>, d: &WorldDraw, layer: crate::world::chunks::Layer) {
+        use crate::world::chunks::Layer;
+        if let Some(flat) = self.pipe.flat.as_ref().filter(|f| f.active()) {
+            flat.draw(rp, layer, d.chunks);
+            return;
+        }
+        rp.set_pipeline(match layer {
+            Layer::Solid => &self.pipe.solid,
+            Layer::Cutout => &self.pipe.cutout,
+            Layer::Water => &self.pipe.water,
+        });
+        d.chunks.draw_ranges(layer, rp, &self.pipe.origins);
+    }
+
     /// Opaque layers, the far terrain, entities and the outline (the old `App::draw_opaque`).
     fn draw_opaque(&self, rp: &mut wgpu::RenderPass<'_>, d: &WorldDraw) {
         rp.set_bind_group(0, &self.pipe.bind_group, &[]);
-        rp.set_pipeline(&self.pipe.solid);
-        d.chunks.draw_ranges(crate::world::chunks::Layer::Solid, rp, &self.pipe.origins);
+        self.draw_chunks(rp, d, crate::world::chunks::Layer::Solid);
         if let Some(l) = d.lod {
             rp.set_pipeline(&self.pipe.lod);
             l.draw(rp);
         }
-        rp.set_pipeline(&self.pipe.cutout);
-        d.chunks.draw_ranges(crate::world::chunks::Layer::Cutout, rp, &self.pipe.origins);
+        self.draw_chunks(rp, d, crate::world::chunks::Layer::Cutout);
         if d.item_indices > 0 || d.outline_indices > 0 {
             rp.set_pipeline(&self.pipe.entity); // the float vertex, no chunk origin
         }
@@ -114,6 +127,11 @@ impl Wg {
             self.gpu.queue.write_buffer(&self.hud.vbuf, 0, bytemuck::cast_slice(d.hud));
         }
         let mut enc = self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
+        // Flat chunk draws (off unless `flatDraws`): the compute pass that builds the frame's index list comes before the scene pass.
+        // The GPU timer below times the scene pass only, so this pass is not in `Drs`'s ms.
+        if let Some(flat) = self.pipe.flat.as_mut() {
+            flat.prepare(&self.gpu.device, &self.gpu.queue, &mut enc, d.chunks, &self.pipe.origins);
+        }
         let slot = self.timer.as_mut().and_then(|t| t.begin()); // a busy slot leaves this frame untimed
         {
             let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -139,8 +157,7 @@ impl Wg {
             if let Some(l) = d.lod {
                 l.draw_water(&mut rp); // the far water first (it is farther than the real water, which only reaches `WATER_RANGE`)
             }
-            rp.set_pipeline(&self.pipe.water);
-            d.chunks.draw_ranges(crate::world::chunks::Layer::Water, &mut rp, &self.pipe.origins);
+            self.draw_chunks(&mut rp, d, crate::world::chunks::Layer::Water);
             if d.glow_indices > 0 {
                 // Halos and motes: additive soft discs over the finished scene, depth-tested and not written.
                 rp.set_pipeline(&self.pipe.glow);
