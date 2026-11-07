@@ -1061,6 +1061,20 @@ impl ChunkManager {
         }
     }
 
+    /// Queue a small world file (`level`, `decor`, `stats`, `explored`) for the I/O thread, behind the chunk writes already queued. The
+    /// caller encodes it (that stays on the calling thread); only the `fs::write` + `rename` move. `flush(usize::MAX)` waits for it
+    /// like for a chunk, so pause and exit still end with everything on disk. With no I/O thread (no save dir) it is written here.
+    pub fn write_file(&mut self, path: PathBuf, bytes: Vec<u8>) {
+        match self.writer.as_mut() {
+            Some(w) => w.queue_file(path, bytes),
+            None => {
+                if let Err(e) = save::write(&path, &bytes) {
+                    log::warn!("save: {}: {e}", path.display());
+                }
+            }
+        }
+    }
+
     /// Queue up to `budget` unsaved chunks for the I/O thread (`usize::MAX` = all, for pause and exit: that one also waits until
     /// every queued write has landed, so the process may end right after). A write that fails leaves its chunk dirty again for the
     /// next call (`reap_writes`).
@@ -1952,12 +1966,26 @@ fn chunk_path(dir: &Path, (x, z): Key) -> PathBuf {
     dir.join(format!("c.{x}.{z}"))
 }
 
+/// What the save I/O thread is asked to write.
+enum IoJob {
+    /// A chunk file; its key and sequence number come back with the answer (see `Writer::inflight`).
+    Chunk(Key, u64, PathBuf, Arc<Vec<u8>>),
+    /// A small world file (`level`, `decor`, `stats`, `explored`): nothing is kept for it, the answer only says whether it landed.
+    File(PathBuf, Vec<u8>),
+}
+
+/// The I/O thread's answer to one `IoJob`.
+enum IoDone {
+    Chunk(Key, u64, std::io::Result<()>),
+    File(PathBuf, std::io::Result<()>),
+}
+
 /// The save I/O thread (C2ME `rewrites-chunkio`): chunk files are written there, one after the other in the order they were
 /// queued, each through `save::write` (atomic). The manager keeps the newest queued bytes of every chunk until its write has been
 /// answered, because the file on disk can still be the older one.
 struct Writer {
-    tx: mpsc::Sender<(Key, u64, PathBuf, Arc<Vec<u8>>)>,
-    answers: mpsc::Receiver<(Key, u64, std::io::Result<()>)>,
+    tx: mpsc::Sender<IoJob>,
+    answers: mpsc::Receiver<IoDone>,
     /// Newest queued bytes per chunk and the sequence number of that write, until it lands.
     inflight: HashMap<Key, (u64, Arc<Vec<u8>>)>,
     seq: u64,
@@ -1967,15 +1995,22 @@ struct Writer {
 
 impl Writer {
     fn spawn() -> Self {
-        let (tx, jobs) = mpsc::channel::<(Key, u64, PathBuf, Arc<Vec<u8>>)>();
-        let (done, answers) = mpsc::channel();
+        let (tx, jobs) = mpsc::channel::<IoJob>();
+        let (done, answers) = mpsc::channel::<IoDone>();
         std::thread::Builder::new()
             .name("chunk-io".into())
             .spawn(move || {
                 crate::world::nice(10);
                 // Ends when the manager is dropped (the channel closes after the last queued write).
-                while let Ok((key, seq, path, bytes)) = jobs.recv() {
-                    if done.send((key, seq, save::write(&path, &bytes))).is_err() {
+                while let Ok(job) = jobs.recv() {
+                    let answer = match job {
+                        IoJob::Chunk(key, seq, path, bytes) => IoDone::Chunk(key, seq, save::write(&path, &bytes)),
+                        IoJob::File(path, bytes) => {
+                            let res = save::write(&path, &bytes);
+                            IoDone::File(path, res)
+                        }
+                    };
+                    if done.send(answer).is_err() {
                         break;
                     }
                 }
@@ -1988,7 +2023,14 @@ impl Writer {
         self.seq += 1;
         let bytes = Arc::new(bytes);
         self.inflight.insert(key, (self.seq, bytes.clone()));
-        if self.tx.send((key, self.seq, chunk_path(dir, key), bytes)).is_ok() {
+        if self.tx.send(IoJob::Chunk(key, self.seq, chunk_path(dir, key), bytes)).is_ok() {
+            self.pending += 1;
+        }
+    }
+
+    /// Queue a small world file behind the writes already queued (the thread is one FIFO, so two writes of one path land in order).
+    fn queue_file(&mut self, path: PathBuf, bytes: Vec<u8>) {
+        if self.tx.send(IoJob::File(path, bytes)).is_ok() {
             self.pending += 1;
         }
     }
@@ -1999,14 +2041,24 @@ impl Writer {
         let mut failed = Vec::new();
         loop {
             let msg = if wait && self.pending > 0 { self.answers.recv().ok() } else { self.answers.try_recv().ok() };
-            let Some((key, seq, res)) = msg else { break };
+            let Some(done) = msg else { break };
             self.pending = self.pending.saturating_sub(1);
-            // An answer for an older write of the chunk leaves the newer one's bytes in place.
-            if self.inflight.get(&key).is_some_and(|(s, _)| *s == seq) {
-                self.inflight.remove(&key);
-            }
-            if let Err(e) = res {
-                failed.push((key, e));
+            match done {
+                IoDone::Chunk(key, seq, res) => {
+                    // An answer for an older write of the chunk leaves the newer one's bytes in place.
+                    if self.inflight.get(&key).is_some_and(|(s, _)| *s == seq) {
+                        self.inflight.remove(&key);
+                    }
+                    if let Err(e) = res {
+                        failed.push((key, e));
+                    }
+                }
+                // A world file has no entry to retire; the next autosave writes a fresh one, so a failure is only logged.
+                IoDone::File(path, res) => {
+                    if let Err(e) = res {
+                        log::warn!("save: {}: {e}", path.display());
+                    }
+                }
             }
         }
         failed
@@ -2287,6 +2339,36 @@ mod tests {
         m.chunks.remove(&(0, 0));
         m.flush(usize::MAX); // waits for nothing (no write was sent), so it must not hang on the entry above, which is not the writer's to retire
         assert!(m.writer.as_ref().unwrap().inflight.contains_key(&(0, 0)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A world file queued with `write_file` is on disk by the time a full `flush` returns (pause and exit rely on it), two writes of one
+    /// path land in order, and a failing write is only logged (the temp name sits in a directory that does not exist).
+    #[test]
+    fn queued_world_files_land_before_a_full_flush_returns() {
+        let dir = std::env::temp_dir().join(format!("mc-rs-files-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut m = ChunkManager::new(1, 1).with_dir(dir.clone());
+        let level = dir.join("level");
+        m.write_file(level.clone(), vec![1, 2, 3]);
+        m.write_file(level.clone(), vec![4, 5, 6]);
+        m.write_file(dir.join("no-such-dir").join("decor"), vec![9]); // fails on the thread: logged, nothing else
+        m.flush(usize::MAX);
+        assert_eq!(std::fs::read(&level).unwrap(), vec![4, 5, 6], "the newer write won, and it landed before flush returned");
+        assert_eq!(m.writer.as_ref().unwrap().pending, 0, "every answer was taken");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// With no save dir there is no I/O thread: `write_file` writes in place, as `save()` did before.
+    #[test]
+    fn a_world_file_without_an_io_thread_is_written_in_place() {
+        let dir = std::env::temp_dir().join(format!("mc-rs-files-sync-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut m = ChunkManager::new(1, 1);
+        assert!(m.writer.is_none());
+        m.write_file(dir.join("stats"), vec![7, 7]);
+        assert_eq!(std::fs::read(dir.join("stats")).unwrap(), vec![7, 7]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

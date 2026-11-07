@@ -726,7 +726,7 @@ impl ChunkPipeline {
     }
 }
 
-// Kept for `world::far::build` (the far tiles are not drawn by any renderer yet) and the shadow test.
+// Kept for `world::far::build` (the far tiles are not drawn by any renderer yet).
 #[allow(dead_code)]
 pub fn create_vertex_buffer(device: &Device, verts: &[Vertex]) -> Buffer {
     device.create_buffer_init(&wgpu::util::BufferInitDescriptor {

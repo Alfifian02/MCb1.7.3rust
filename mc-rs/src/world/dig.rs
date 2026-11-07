@@ -87,6 +87,11 @@ pub struct Dig {
 }
 
 impl Dig {
+    /// `blockHitWait` is still counting: the next `tick` starts no dig (the vibration's `startRumble` waits with it).
+    pub fn waiting(&self) -> bool {
+        self.wait > 0
+    }
+
     /// `resetBlockRemoving`: the dig input was released.
     pub fn reset(&mut self) {
         self.damage = 0.0;

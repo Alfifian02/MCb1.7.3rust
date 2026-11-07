@@ -53,7 +53,7 @@ pub const DPAD_SHEET: &[u8] = include_bytes!("../../assets/dpad.rgba");
 /// The title screen's sheet (256 x 272, `tools/gen_menu.py`): `mclogo.png`, then `background.png`: the last rows of the HUD texture.
 pub const MENU_SHEET: &[u8] = include_bytes!("../../assets/menu.rgba");
 /// The skins (`mob/char.png` and the armor, 64 x 32 each, four to a row, `atlas::skin_px`): 224 rows of the HUD texture, cut from the atlas's `ART` tail (`PLAYER_Y`).
-pub(crate) const SHEET_H: f32 = 3340.0;
+pub(crate) const SHEET_H: f32 = 3472.0;
 /// Height of the second texture (`IMMERSIVE`), and what is added to a vertex's `u` to read it instead of the sheet (both shaders test `u >= 1.5`).
 pub(crate) const IMM_H: f32 = 1600.0;
 pub(crate) const IMM_U: f32 = 2.0;
@@ -62,9 +62,9 @@ pub(crate) const PLAYER_Y: f32 = 2576.0;
 const FONT_Y: f32 = 2800.0;
 /// Where Cortes Combat's HUD sprites start (256 x 64, `tools/gen_combat_hud.py`): the 64 rows after the font atlas.
 const COMBAT_Y: f32 = 2864.0;
-/// Where the controller button pictures start (256 x 156, `tools/gen_pad_buttons.py`): the rows after the combat sprites, before the map block.
+/// Where the controller glyphs start (256 x 288, `tools/gen_glyphs.py`: Controlify's controller fonts): the rows after the combat sprites, before the map block.
 const PAD_Y: f32 = 2928.0;
-const PAD_H: f32 = 156.0;
+const PAD_H: f32 = 288.0;
 /// Where the map block starts (256 x 128, `tools/gen_mapui.py`): the last rows of the HUD texture, after the pad buttons. The held map's 128 x 128
 /// pixels are rewritten here at run time (`HudPipeline::upload_map`); `mapbg.png` and `mapicons.png` sit beside them.
 const MAP_Y: f32 = REI_Y + REI_H;
@@ -76,7 +76,7 @@ const REI_THEME_H: f32 = 64.0;
 /// REI's panels and arrows from the Immersive Interfaces REI pack (light theme at row 0 of the block, dark at 32), see `sprites::rei`.
 pub const REI_SHEET: &[u8] = include_bytes!("../../assets/rei.rgba");
 pub const MAP_SHEET: &[u8] = include_bytes!("../../assets/mapui.rgba");
-/// The controller button pictures: 3 styles (Xbox, PlayStation, Switch) x 16 buttons of 26 x 26 (`tools/gen_pad_buttons.py`, `sprites::pad`).
+/// Controlify's controller glyphs: 7 controller types x 32 cells of 16 x 16 on an 18 texel pitch, 14 to a row (`tools/gen_glyphs.py`, `sprites::pad`, `input/glyph_map.rs`).
 pub const PAD_SHEET: &[u8] = include_bytes!("../../assets/padbtn.rgba");
 /// Cortes Combat's HUD sprites (crosshair x3, guard orbs x2, charge bar x2, cooldown brackets; `tools/gen_combat_hud.py`).
 pub const COMBAT_SHEET: &[u8] = include_bytes!("../../assets/combat_hud.rgba");
@@ -212,12 +212,13 @@ pub mod sprites {
         pub const ALPHA_CHARGE: f32 = 204.0 / 255.0;
         pub const ALPHA_CHARGE_EMPTY: f32 = 88.0 / 255.0;
     }
-    /// The controller button pictures (`tools/gen_pad_buttons.py`): `glyph(style, i)` is button `i` (`Btn::ALL` order) of style 0 Xbox, 1 PlayStation,
-    /// 2 Switch; 26 x 26 each, 8 to a row, 52 rows a style. Opaque or clear.
+    /// Controlify's controller glyphs (`tools/gen_glyphs.py`): `glyph(ty, cell)` is cell `cell` (the font character's code - 1, `glyph_map::CELL`) of
+    /// controller type `ty` (`glyph_map::TYPES`): 16 x 16 inside an 18 x 18 pitch, 32 cells a type, 14 to a row. Opaque or clear.
     pub mod pad {
         use super::Sprite;
-        pub fn glyph(style: usize, i: usize) -> Sprite {
-            ((i % 8) as f32 * 26.0, super::super::PAD_Y + (style * 52 + i / 8 * 26) as f32, 26.0, 26.0)
+        pub fn glyph(ty: usize, cell: usize) -> Sprite {
+            let n = ty * 32 + cell;
+            (((n % 14) * 18 + 1) as f32, super::super::PAD_Y + ((n / 14) * 18 + 1) as f32, 16.0, 16.0)
         }
     }
     const fn dpad_row(y: f32) -> [Sprite; 8] {
@@ -698,6 +699,11 @@ impl HudPipeline {
         Self::push_glyphs(out, x, y, k, s, color);
     }
 
+    /// `s` in `color` with no shadow: what `GuiGraphics.drawString(..., dropShadow = false)` draws (the guide's text over its contrast box).
+    pub fn push_text_flat(out: &mut Vec<HudVertex>, x: f32, y: f32, k: f32, s: &str, color: [f32; 4]) {
+        Self::push_glyphs(out, x, y, k, s, color);
+    }
+
     /// `s` in `color` with a thin black outline `o` px wide: the text in black at the 8 offsets round it, then the text itself. Replaces
     /// the shadow (the outline already separates the glyphs from the panel).
     pub fn push_text_outlined(out: &mut Vec<HudVertex>, x: f32, y: f32, k: f32, o: f32, s: &str, color: [f32; 4]) {
@@ -908,16 +914,29 @@ mod tests {
         assert!(u.iter().all(|p| p.uv[0] < 1.5));
     }
 
-    /// Every controller button picture of every style holds ink, and is clear or fully opaque (`fs_main` drops anything under alpha 0.5).
+    /// Every glyph Controlify has for every controller type holds ink, is clear or fully opaque (`fs_main` drops anything under alpha 0.5), and has a
+    /// transparent texel round it (what keeps the sharp bilinear off the neighbouring cell).
     #[test]
-    fn pad_sheet_has_every_button_of_every_style() {
-        for style in 0..3 {
-            for i in 0..16 {
-                let (x, y, w, h) = sprites::pad::glyph(style, i);
-                assert!(y >= PAD_Y && y + h <= MAP_Y && x + w <= 256.0, "style {style} button {i} inside the block");
-                let a: Vec<u8> = (0..(w * h) as usize).map(|k| PAD_SHEET[((y as usize - PAD_Y as usize + k / w as usize) * 256 + x as usize + k % w as usize) * 4 + 3]).collect();
-                assert!(a.iter().any(|&p| p == 255), "style {style} button {i} is empty");
-                assert!(a.iter().all(|&p| p == 0 || p == 255), "style {style} button {i} has a half alpha");
+    fn pad_sheet_has_every_glyph_of_every_type() {
+        use crate::input::glyph_map::{CELL, CELLS, COLS, PITCH, TYPES};
+        assert_eq!((CELLS, COLS, PITCH), (32, 14, 18), "`sprites::pad::glyph` hard-codes the generator's layout");
+        assert_eq!(PAD_H as usize, crate::input::glyph_map::BLOCK_H);
+        let at = |x: usize, y: usize| PAD_SHEET[((y - PAD_Y as usize) * 256 + x) * 4 + 3];
+        for (ty, row) in CELL.iter().enumerate() {
+            assert!(ty < TYPES.len());
+            for (input, &cell) in row.iter().enumerate() {
+                if cell < 0 {
+                    continue;
+                }
+                let (x, y, w, h) = sprites::pad::glyph(ty, cell as usize);
+                assert!(y >= PAD_Y && y + h <= MAP_Y && x + w <= 256.0, "type {ty} input {input} inside the block");
+                let a: Vec<u8> = (0..(w * h) as usize).map(|k| at(x as usize + k % w as usize, y as usize + k / w as usize)).collect();
+                assert!(a.iter().any(|&p| p == 255), "type {ty} input {input} is empty");
+                assert!(a.iter().all(|&p| p == 0 || p == 255), "type {ty} input {input} has a half alpha");
+                for k in 0..18 {
+                    let (gx, gy) = (x as usize - 1, y as usize - 1);
+                    assert_eq!([at(gx + k, gy), at(gx + k, gy + 17), at(gx, gy + k), at(gx + 17, gy + k)], [0; 4], "type {ty} input {input}: the gutter is clear");
+                }
             }
         }
     }

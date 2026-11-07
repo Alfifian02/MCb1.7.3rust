@@ -7,6 +7,7 @@
 //! (drawn greyed out like a disabled `GuiButton`; Options is `options.rs`), the splash's calendar days, the local time zone (dates are UTC).
 
 use crate::gen_ui::GenUi;
+use crate::input::guide;
 use crate::input::touch_ui::ScreenEv;
 use crate::options::{OptEv, OptionsUi, Settings};
 use crate::preview::{Preview, PvOut, View};
@@ -414,13 +415,50 @@ impl Menu {
         self.scr == Scr::Options && self.opt.pad_waiting()
     }
 
-    pub fn pad_button(&mut self, b: crate::input::gamepad::Btn, st: &mut Settings) {
+    pub fn pad_button(&mut self, b: crate::input::bindings::Input, st: &mut Settings) {
         self.opt.pad_button(b, st);
     }
 
     /// The options screen is up: the pad's bumpers step its tabs.
     pub fn in_options(&self) -> bool {
         self.scr == Scr::Options
+    }
+
+    /// The enabled buttons of this screen in px: the pad's focus targets on a focus screen, its snap points on the others
+    /// (Controlify's `ScreenMixin` makes a point of every widget). None on the pages that draw their own widgets (options, world-gen, preview)
+    /// and while a text field or the loading box covers the screen.
+    pub fn targets(&self, w: f32, h: f32, st: &Settings) -> Vec<[f32; 4]> {
+        if matches!(self.scr, Scr::Options | Scr::GenSettings | Scr::Preview) || self.typing.is_some() || self.loading.is_some() {
+            return Vec::new();
+        }
+        let (s, gw, gh) = scaled_gs(w, h, st.gui_scale);
+        self.buttons(gw, gh).into_iter().filter(|b| b.3).map(|b| b.1.map(|v| v * s)).collect()
+    }
+
+    /// The Options and the Quit button of the title in px, for the pad's X and Y (`TitleScreenProcessor`); none on the other pages.
+    pub fn action_rects(&self, w: f32, h: f32, st: &Settings) -> (Option<[f32; 4]>, Option<[f32; 4]>) {
+        if self.scr != Scr::Main || self.typing.is_some() || self.loading.is_some() {
+            return (None, None);
+        }
+        let (s, gw, gh) = scaled_gs(w, h, st.gui_scale);
+        let by = |want: u8| self.buttons(gw, gh).into_iter().find(|b| b.0 == want).map(|b| b.1.map(|v| v * s));
+        (by(0), by(4))
+    }
+
+    /// A focus screen (Controlify's default: the virtual mouse is for container screens): the title and the delete confirmation, which are
+    /// only buttons. The world list and Create World also need the cursor (list rows, text fields), so they keep it, with snap points.
+    pub fn focus(&self) -> bool {
+        matches!(self.scr, Scr::Main | Scr::Delete) && self.typing.is_none() && self.loading.is_none()
+    }
+
+    /// Which `PadCfg::vm_screens` bit this focus screen is (0: not one the virtual mouse toggle can switch).
+    pub fn focus_key(&self) -> u8 {
+        use crate::input::gamepad::{VM_DELETE, VM_TITLE};
+        match self.scr {
+            Scr::Main => VM_TITLE,
+            Scr::Delete => VM_DELETE,
+            _ => 0,
+        }
     }
 
     pub fn step_tab(&mut self, d: i32, st: &mut Settings) {
@@ -894,11 +932,28 @@ impl Menu {
             }
         }
         let held = self.press.filter(|_| !self.dragging);
-        for Btn(_, r, label, on) in self.buttons(gw, gh) {
+        for Btn(id, r, label, on) in self.buttons(gw, gh) {
             let over = held.is_some_and(|(x, y)| x >= r[0] && x < r[0] + r[2] && y >= r[1] && y < r[1] + r[3]);
             HudPipeline::push_button(v, r[0] * s, r[1] * s, r[2] * s, r[3] * s, if !on { 0 } else if over { 2 } else { 1 });
             let c = if !on { 0xA0A0A0 } else if over { 0xFFFFA0 } else { 0xE0E0E0 };
-            txt(v, r[0] + r[2] / 2.0, r[1] + (r[3] - 8.0) / 2.0, &label, c, true);
+            // `TitleScreenProcessor`: Quit Game shows the back button, Options the first abstract action.
+            let mark = if self.scr == Scr::Main {
+                match id {
+                    4 => Some(guide::Mark::Back),
+                    0 => Some(guide::Mark::Action1),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            let (cx, ty) = (r[0] + r[2] / 2.0, r[1] + (r[3] - 8.0) / 2.0);
+            match mark.and_then(|m| guide::mark_label(m, &label, cx)) {
+                Some(m) => {
+                    txt(v, cx, ty, &m.label, c, true);
+                    guide::push_mark(v, s, &m, ty);
+                }
+                None => txt(v, cx, ty, &label, c, true),
+            }
         }
     }
 

@@ -15,7 +15,9 @@
 //! Smooth Lighting and the key bindings (a touch screen has no keys; `OptionsUi::key` takes one when a keyboard event exists).
 //! Achievements and Statistics open `stats_ui` (`PauseEv::Stats`).
 
-use crate::input::gamepad::{Btn, PadCfg, ACTS};
+use crate::input::bind_defs::B;
+use crate::input::bindings::{Binds, Cat, Input};
+use crate::input::gamepad::{PadCfg, Row as PadRow, SECTIONS};
 use crate::input::touch_ui::{ScreenEv, HOLD_SECS, SWING_SECS};
 use crate::menu::{dirt, grad, rect, rgb, scaled_gs, tw};
 use crate::ui;
@@ -512,8 +514,8 @@ const PAGES: [(&str, &str); N_PAGES] = [
     ("Performance", "Performance"),
     ("Effects", "Effects"),
     ("Look & keys", "Controls"),
-    ("Pad buttons", "Controller buttons"),
-    ("Pad tuning", "Controller tuning"),
+    ("Controller", "Controller"),
+    ("Bindings", "Controller bindings"),
 ];
 
 /// The two tabs of the screen: its name, the first page it holds and the one after its last (`PAGES`). Controls is a tab of its own, so no
@@ -543,6 +545,8 @@ enum Act {
     PadBind(usize),
     PadKnob(usize),
     PadToggle(usize),
+    /// "Reset All Binds" (`controlify.gui.reset_all_binds`).
+    PadResetAll,
     AtTab(usize),
     AtKnob(usize),
     AtStep(i32),
@@ -585,7 +589,7 @@ fn is_slider(a: Act) -> bool {
 
 /// A setting of the list (not a page entry, Done or the editor's controls): it is clipped to the list.
 fn is_row(a: Act) -> bool {
-    matches!(a, Act::Opt(_) | Act::Lod | Act::Key(_) | Act::PadBind(_) | Act::PadKnob(_) | Act::PadToggle(_))
+    matches!(a, Act::Opt(_) | Act::Lod | Act::Key(_) | Act::PadBind(_) | Act::PadKnob(_) | Act::PadToggle(_) | Act::PadResetAll)
 }
 
 /// Saved, but nothing reads it yet (README, M14b): the key bindings (a touch screen has no keys), Graphics, Smooth Lighting, Advanced
@@ -760,20 +764,33 @@ const TIPS: &[(&str, &str)] = &[
     ("Dig Delay", "How long a finger rests on a block before digging starts."),
     ("Look X", "Horizontal look speed of the right stick."),
     ("Look Y", "Vertical look speed of the right stick."),
-    ("Deadzone", "How far a stick must move before it counts."),
+    ("Left Deadzone", "How far the left stick must move before it counts."),
+    ("Right Deadzone", "How far the right stick must move before it counts."),
     ("Cursor", "Speed of the pad's pointer in menus."),
-    ("Trigger", "How far a trigger is pulled before it counts as pressed."),
-    ("Rumble", "Strength of the vibration on damage, digging and blasts."),
-    ("Curve", "How stick movement turns into look speed. Tap to change."),
-    ("Invert X", "Flips the horizontal look of the right stick."),
-    ("Invert Y", "Flips the vertical look of the right stick."),
+    ("Button Threshold", "How far a stick or trigger must go to count as a pressed button."),
+    ("Vibration", "Master strength of the pad's vibration. The four below scale one kind of effect each."),
+    ("Vib Player", "Vibration of what happens to you: damage, a splash, a tool breaking, soul sand."),
+    ("Vib World", "Vibration of the world: explosions and lightning."),
+    ("Vib Interaction", "Vibration of what you do: digging, hitting, eating, guarding, a bite."),
+    ("Vib GUI", "Vibration of menus. Controlify uses it only for the anvil, which b1.7.3 lacks."),
+    ("Allow Vibration", "Turns the pad's vibration on or off."),
+    ("Test Vibration", "Tap to feel the pad's vibration. It stops when you leave this screen."),
+    ("Reach Around", "Looking down at air from a block's edge targets the block under you, to bridge. Off by default."),
+    ("Look Curve", "How stick movement turns into look speed. Tap to change. Not used in LCE style."),
+    ("Invert Look X", "Flips the horizontal look of the right stick."),
+    ("Invert Look Y", "Flips the vertical look of the right stick."),
     ("Toggle Sneak", "Sneak stays on until pressed again."),
-    ("Button Hints", "Shows what the pad's buttons do in the corner while a pad is in use."),
-    ("Button Icons", "Style of the button pictures: Xbox, PlayStation, Switch or plain text. Tap to change."),
-    ("Icon Size", "Size of the button pictures in the hints. 100% matches the GUI Scale."),
-    ("Text Size", "Size of the hints' labels, apart from the pictures."),
-    ("Hint BG", "Opacity of the black box behind the hints. 0% shows none."),
-    ("Hint Layout", "Auto: a row in menus, a list in game. Tap to change."),
+    ("Toggle Sprint", "Sprint stays on until pressed again."),
+    ("Reduce Aiming Sensitivity", "Slower look while a weapon's charge builds."),
+    ("LCE Style Controls", "Legacy Console look: a quadratic curve per axis and a slower turn, cursor and aim."),
+    ("Flick Stick", "Pushing the look stick turns the view to where it points, with no steady look."),
+    ("Button Guide", "Shows what the pad's buttons do right now in the corners of the screen while a pad is in use (Controlify's button guide)."),
+    ("Controller Icons", "Whose button pictures the guide draws: Xbox, PlayStation 5 / 4 / 3, Switch, Steam or Generic. Tap to change."),
+    ("Guide Size", "Size of the guide. 100% matches the GUI Scale."),
+    ("Guide Position", "Whether the in-game guide sits along the top or the bottom of the screen. Tap to change."),
+    ("Guide Detail", "How much the guide says: Full shows every hint, Reduced and Minimal only the essential ones. Tap to change."),
+    ("Screen Guides", "Shows the guide in container screens (chests, furnaces, the workbench, the inventory)."),
+    ("Reset All Binds", "Puts every pad bind back on Controlify's default."),
 ];
 
 /// The sentence under a setting's name in the description pane.
@@ -781,7 +798,7 @@ fn tip(act: Act, name: &str) -> &'static str {
     if unused(act) {
         "Saved in options.txt, but nothing reads this setting yet."
     } else if matches!(act, Act::PadBind(_)) {
-        "Tap, then press the pad button to bind it. Tap another button to cancel."
+        "Tap, then press a button or push a stick. Tap again to clear. Red: shared input."
     } else {
         TIPS.iter().find(|t| t.0 == name).map_or("", |t| t.1)
     }
@@ -795,6 +812,8 @@ fn value_color(val: &str) -> u32 {
         0xFF5555
     } else if val.contains("(restart)") {
         0xFFAA00
+    } else if val.ends_with(" !") {
+        0xFF5555
     } else if val.starts_with('>') {
         0xFFFF55
     } else {
@@ -1035,14 +1054,30 @@ impl OptionsUi {
             let k = key_name(st.keys[i]);
             Row(Act::Key(i), format!("{}: {}", KEY_NAMES[i], if self.wait == Some(i) { format!("> {k} <") } else { k }))
         }));
+        // The controller page, in Controlify's groups (`ControllerConfigScreenFactory`): sensitivity, controls, accessibility, deadzones, haptics.
         v.push(P(5));
-        v.extend(ACTS.iter().enumerate().map(|(i, a)| {
-            let b = if self.wait_pad == Some(i) { "> <" } else { st.pad.binds[i].name() };
-            Row(Act::PadBind(i), format!("{}: {b}", a.name()))
-        }));
+        for (name, rows) in SECTIONS {
+            v.push(G(name));
+            v.extend(rows.iter().map(|r| match r {
+                PadRow::Knob(k) => Row(Act::PadKnob(*k as usize), st.pad.knob_text(*k as usize)),
+                PadRow::Tog(t) => Row(Act::PadToggle(*t as usize), st.pad.toggle_text(*t as usize)),
+            }));
+        }
+        // The bindings, grouped by category as Controlify does. A red mark is a conflict: another bind shares an input and a context (`updateConflictingBinds`).
         v.push(P(6));
-        v.extend((0..PadCfg::knob_count()).map(|i| Row(Act::PadKnob(i), st.pad.knob_text(i))));
-        v.extend((0..PadCfg::toggle_count()).map(|i| Row(Act::PadToggle(i), st.pad.toggle_text(i))));
+        for cat in Cat::ALL {
+            let mut binds = Binds::of(cat).peekable();
+            if binds.peek().is_none() {
+                continue;
+            }
+            v.push(G(cat.name()));
+            v.extend(binds.map(|b| {
+                let input = if self.wait_pad == Some(b as usize) { "> <" } else { st.pad.binds.get(b).name() };
+                let conflict = if self.wait_pad != Some(b as usize) && st.pad.binds.conflicts(b) { " !" } else { "" };
+                Row(Act::PadBind(b as usize), format!("{}: {input}{conflict}", b.def().name))
+            }));
+        }
+        v.push(Row(Act::PadResetAll, "Reset All Binds".into()));
         v
     }
 
@@ -1200,7 +1235,7 @@ impl OptionsUi {
 
     fn act(&mut self, a: Act, st: &mut Settings) -> Option<OptEv> {
         self.wait = None; // `GuiControls`: any button ends the wait
-        self.wait_pad = None;
+        let was_waiting = self.wait_pad.take();
         match a {
             Act::Opt(o) => st.cycle(o),
             Act::Lod => {
@@ -1218,7 +1253,16 @@ impl OptionsUi {
                 self.jump(i, st);
             }
             Act::Key(i) => self.wait = Some(i),
+            Act::PadBind(i) if was_waiting == Some(i) => {
+                // a second tap on the row that waits clears it (`controlify.binding.controlify.clear_binding`)
+                st.pad.binds.set(B::ALL[i], Input::None);
+                st.save();
+            }
             Act::PadBind(i) => self.wait_pad = Some(i),
+            Act::PadResetAll => {
+                st.pad.binds.reset_all();
+                st.save();
+            }
             Act::PadKnob(_) => {}
             Act::PadToggle(i) => {
                 st.pad.toggle(i);
@@ -1284,9 +1328,9 @@ impl OptionsUi {
     }
 
     /// The pad button that follows a tap on a Controller binding becomes it.
-    pub fn pad_button(&mut self, b: Btn, st: &mut Settings) {
+    pub fn pad_button(&mut self, b: Input, st: &mut Settings) {
         if let Some(i) = self.wait_pad.take() {
-            st.pad.binds[i] = b;
+            st.pad.binds.set(B::ALL[i], b);
             st.save();
         }
     }
@@ -1605,6 +1649,17 @@ impl Pause {
         self.page(gw, gh, info).into_iter().filter(|b| b.3).map(|b| b.1.map(|v| v * s)).collect()
     }
 
+    /// The Options and the Save and Quit button of the top page in px, for the pad's X and Y (`PauseScreenProcessor`).
+    pub fn action_rects(&self, w: f32, h: f32, st: &Settings, info: &PauseInfo) -> (Option<[f32; 4]>, Option<[f32; 4]>) {
+        if self.opt.is_some() || self.tools {
+            return (None, None);
+        }
+        let (s, gw, gh) = scaled_gs(w, h, st.gui_scale);
+        let page = self.page(gw, gh, info);
+        let by = |want: PAct| page.iter().find(|b| b.0 == want && b.3).map(|b| b.1.map(|v| v * s));
+        (by(PAct::Options), by(PAct::Quit))
+    }
+
     pub fn pad_waiting(&self) -> bool {
         self.opt.as_ref().is_some_and(OptionsUi::pad_waiting)
     }
@@ -1620,7 +1675,7 @@ impl Pause {
         }
     }
 
-    pub fn pad_button(&mut self, b: Btn, st: &mut Settings) {
+    pub fn pad_button(&mut self, b: Input, st: &mut Settings) {
         if let Some(o) = self.opt.as_mut() {
             o.pad_button(b, st);
         }
@@ -1677,7 +1732,20 @@ impl Pause {
         for (act, r, label, on) in self.page(gw, gh, info) {
             let over = self.finger.is_some_and(|(x, y)| inside(r, x, y));
             let lit = (act == PAct::Pregen && info.pregen.is_some_and(|p| p.0)) || (act == PAct::Fly && info.flying) || (act == PAct::Debug && info.debug != 0) || (act == PAct::Info && info.info);
-            button(v, s, r, &label, on, over || lit, None);
+            // `PauseScreenProcessor`: Back to Game shows the back button, Options the first abstract action, Save and Quit the second.
+            let mark = match act {
+                PAct::Resume => Some(crate::input::guide::Mark::Back),
+                PAct::Options => Some(crate::input::guide::Mark::Action1),
+                PAct::Quit => Some(crate::input::guide::Mark::Action2),
+                _ => None,
+            };
+            match mark.and_then(|m| crate::input::guide::mark_label(m, &label, r[0] + r[2] / 2.0)) {
+                Some(m) => {
+                    button(v, s, r, &m.label, on, over || lit, None);
+                    crate::input::guide::push_mark(v, s, &m, r[1] + (r[3] - 8.0) / 2.0);
+                }
+                None => button(v, s, r, &label, on, over || lit, None),
+            }
             if act == PAct::Atmos {
                 sun(v, s, r);
             }
@@ -1688,6 +1756,7 @@ impl Pause {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::input::gamepad::Btn;
 
     const SZ: (f32, f32) = (2400.0, 1080.0);
 
@@ -2101,23 +2170,36 @@ mod tests {
         let root = tmp("pad");
         let mut st = Settings::load(&root);
         let mut o = OptionsUi::new();
-        tap(&mut o, &mut st, "Pad buttons");
-        assert_eq!(o.page, 5);
+        tap(&mut o, &mut st, "Bindings");
+        assert_eq!(o.page, 6);
         tap(&mut o, &mut st, "Jump: A");
         assert!(o.pad_waiting());
-        o.pad_button(Btn::X, &mut st);
-        assert_eq!((st.pad.binds[0], o.pad_waiting()), (Btn::X, false));
-        tap(&mut o, &mut st, "Pad tuning");
-        assert_eq!(o.page, 6);
-        tap(&mut o, &mut st, "Invert Y: OFF");
+        o.pad_button(Input::Btn(Btn::X), &mut st);
+        assert_eq!((st.pad.binds.get(B::Jump), o.pad_waiting()), (Input::Btn(Btn::X), false));
+        // a stick direction can be bound, and a second tap on the waiting row clears it
+        tap(&mut o, &mut st, "Sneak: R3");
+        o.pad_button(Input::Stick(crate::input::bindings::Ax::LeftDown), &mut st);
+        assert_eq!(st.pad.binds.get(B::Sneak), Input::Stick(crate::input::bindings::Ax::LeftDown));
+        tap(&mut o, &mut st, "Sneak: LS Down");
+        tap(&mut o, &mut st, "Sneak: > <");
+        assert_eq!(st.pad.binds.get(B::Sneak), Input::None);
+        tap(&mut o, &mut st, "Reset All Binds");
+        assert_eq!(st.pad.binds.get(B::Jump), Input::Btn(Btn::A));
+        tap(&mut o, &mut st, "Jump: A");
+        o.pad_button(Input::Btn(Btn::X), &mut st);
+        tap(&mut o, &mut st, "Controller");
+        assert_eq!(o.page, 5);
+        tap(&mut o, &mut st, "Invert Look Y: OFF");
         assert!(st.pad.invert_y);
-        tap(&mut o, &mut st, "Button Icons: Xbox");
-        assert_eq!(st.pad.style, 1, "Xbox -> PlayStation");
-        tap(&mut o, &mut st, "Button Hints: ON");
+        tap(&mut o, &mut st, "Controller Icons: Xbox");
+        assert_eq!(st.pad.style, 1, "Xbox -> PlayStation 5");
+        tap(&mut o, &mut st, "Button Guide: ON");
         assert!(!st.pad.hints);
-        tap(&mut o, &mut st, "Hint Layout: Auto");
-        assert_eq!(st.pad.layout, 1, "Auto -> Horizontal");
-        let (x, y, w, s) = track_px(&mut o, &st, "Icon Size");
+        tap(&mut o, &mut st, "Guide Position: Top");
+        assert_eq!(st.pad.layout, 1, "Top -> Bottom");
+        tap(&mut o, &mut st, "Guide Detail: Full");
+        assert_eq!(st.pad.verbosity, 1, "Full -> Reduced");
+        let (x, y, w, s) = track_px(&mut o, &st, "Guide Size");
         o.event(ScreenEv::Down(x + w - 2.0 * s, y + 4.0 * s), SZ.0, SZ.1, &mut st);
         o.event(ScreenEv::Up(x + w - 2.0 * s, y + 4.0 * s), SZ.0, SZ.1, &mut st);
         assert!(st.pad.hint_size > 1.9, "the slider's right end is 200%: {}", st.pad.hint_size);
@@ -2125,9 +2207,10 @@ mod tests {
         let y = y + 4.0 * s;
         o.event(ScreenEv::Down(x + 4.0 * s, y), SZ.0, SZ.1, &mut st);
         o.event(ScreenEv::Up(x + 4.0 * s, y), SZ.0, SZ.1, &mut st);
-        assert_eq!(st.pad.look_h, 0.0);
+        assert!((st.pad.look_h - 0.1).abs() < 1e-6, "Controlify's lowest look speed is 10%");
         let back = Settings::load(&root);
-        assert_eq!((back.pad.binds[0], back.pad.invert_y, back.pad.look_h), (Btn::X, true, 0.0));
+        assert_eq!((back.pad.binds.get(B::Jump), back.pad.invert_y), (Input::Btn(Btn::X), true));
+        assert!((back.pad.look_h - 0.1).abs() < 1e-6);
         assert_eq!((back.pad.style, back.pad.hints), (1, false));
         assert_eq!(back.pad.layout, 1);
         assert!(back.pad.hint_size > 1.9);
@@ -2189,7 +2272,7 @@ mod tests {
         for want in [
             "Music", "Sound", "Difficulty", "GUI Scale", "GUI Style", "Panel Size", "View Bobbing", "Graphics: ", "Render Distance", "LoD", "Smooth Lighting", "Advanced OpenGL", "3D Anaglyph",
             "Performance", "Dynamic Res", "Sustained Perf", "MSAA", "FXAA", "Post", "Renderer", "Vibrance", "Warm Light", "Water Look", "Glow", "Motion", "Haze", "REI Theme", "Sensitivity", "Invert Mouse",
-            "Dig Delay", "Jump: ", "Look X", "Invert Y", "Forward", "Toggle Fog", "Brightness", "Gamma", "FOV",
+            "Dig Delay", "Jump: ", "Look X", "Invert Look Y", "Forward", "Toggle Fog", "Brightness", "Gamma", "FOV",
         ] {
             assert!(labels.iter().any(|l| l.starts_with(want)), "{want} is not in the list");
         }
@@ -2197,26 +2280,6 @@ mod tests {
         let (_, gw, gh) = scaled_gs(320.0, 240.0, 0);
         let o = OptionsUi::new();
         assert!(o.widgets(gw, gh, &st).iter().filter(|b| matches!(b.act, Act::Tab(_))).count() == tab_pages(0).len());
-    }
-
-    /// The rects the options screen hands to the pad's hints cover Done, the list and the pane, and the hints end up beside Done, not on it
-    /// (the screenshot that started this: `Select` / `Back` over the Done button).
-    #[test]
-    fn button_hints_keep_off_done() {
-        let mut st = Settings::default();
-        st.pad.layout = 0;
-        let o = OptionsUi::new();
-        let (s, gw, gh) = scaled_gs(SZ.0, SZ.1, st.gui_scale);
-        let avoid = o.avoid(SZ.0, SZ.1, &st);
-        let done = frame(gw, gh).done.map(|u| u * s);
-        assert!(avoid.contains(&done), "Done is one of the rects");
-        let mut pad = crate::input::gamepad::Pad::default();
-        pad.key(Btn::Start, false); // a pad is in use
-        let mut v = Vec::new();
-        pad.hints(&mut v, &st.pad, &crate::input::gamepad::HintView { w: SZ.0, h: SZ.1, s, ui: true, avoid: &avoid });
-        assert!(!v.is_empty(), "there is room for them along the bottom");
-        let inside = |p: [f32; 2], r: [f32; 4]| p[0] > r[0] - 4.0 * s && p[0] < r[0] + r[2] + 4.0 * s && p[1] > r[1] - 4.0 * s && p[1] < r[1] + r[3] + 4.0 * s;
-        assert!(v.iter().all(|q| avoid.iter().all(|a| !inside(q.pos, *a))), "no hint vertex within 4 units of anything the screen draws");
     }
 
     /// Every sentence of the description pane fits the strip of the narrow screen (3 lines) and the pane of a wide one.
@@ -2257,13 +2320,15 @@ mod tests {
             o.step_tab(1, &mut st);
         }
         assert_eq!((o.page, o.tab), (4, 1), "past the last page of Settings the Controls tab opens");
-        tap(&mut o, &mut st, "Pad buttons");
+        tap(&mut o, &mut st, "Bindings");
         tap(&mut o, &mut st, "Jump: A");
         o.step_tab(1, &mut st);
-        assert_eq!(o.page, 5, "the bumper is the binding while it waits");
-        o.pad_button(Btn::Rb, &mut st);
+        assert_eq!(o.page, 6, "the bumper is the binding while it waits");
+        o.pad_button(Input::Btn(Btn::Rb), &mut st);
         o.step_tab(1, &mut st);
-        assert_eq!(o.page, 6);
+        assert_eq!((o.page, o.tab), (0, 0), "past the last page the first opens");
+        o.step_tab(-1, &mut st);
+        assert_eq!((o.page, o.tab), (N_PAGES - 1, 1));
         let mut e = OptionsUi::atmos(&mut st);
         e.step_tab(1, &mut st);
         assert_eq!(e.scr, OptScr::Atmos);

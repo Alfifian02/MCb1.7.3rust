@@ -53,6 +53,11 @@ max_sdk_version = 32
 [[package.metadata.android.uses_permission]]
 name = "android.permission.READ_MEDIA_IMAGES"
 
+# Controller vibration (`src/rumble.rs`): a normal permission, granted at install. A pad's own `InputDeviceVibrator` may not check it, but a
+# `Vibrator` call without it can be refused on some builds.
+[[package.metadata.android.uses_permission]]
+name = "android.permission.VIBRATE"
+
 [package.metadata.android.application]
 label = "MC b1.7.3 Rust"
 # No title/status bar, so the landscape surface is the full screen.

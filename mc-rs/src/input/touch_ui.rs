@@ -285,8 +285,11 @@ pub struct TouchUi {
     /// B in a container screen, LB / RB pages (-1 / +1) and the right stick's scroll (px), until taken: `lib.rs` decides what they mean.
     back: bool,
     pad_info: bool,
-    /// The pad's drop bind was pressed while playing, until `take_pad_drop`.
-    pad_drop: bool,
+    /// How many single items the pad's drop bind throws while playing, until `take_pad_drop`; and the drop-stack bind's press, until `take_pad_drop_stack`.
+    pad_drop: u32,
+    pad_drop_stack: bool,
+    /// The pad's virtual mouse toggle was pressed on a screen, until `take_pad_vm_toggle`.
+    pad_vm_toggle: bool,
     page: i32,
     scroll: f32,
     /// X (`Some(false)`, click for one) or RT (`Some(true)`, quick-move) in a container screen, until `take_alt`.
@@ -337,7 +340,9 @@ impl TouchUi {
             nav: None,
             back: false,
             pad_info: false,
-            pad_drop: false,
+            pad_drop: 0,
+            pad_drop_stack: false,
+            pad_vm_toggle: false,
             page: 0,
             scroll: 0.0,
             alt: None,
@@ -348,24 +353,27 @@ impl TouchUi {
     /// GUI (pause menu, container, title menu) a virtual mouse that sends the `ScreenEv`s a finger would.
     pub fn pad_update(&mut self, dt: f32, cfg: &PadCfg) {
         let ui = self.paused || self.screen || self.menu;
+        let (w, h) = (self.surface_w as f32, self.surface_h as f32);
+        // The virtual mouse chases from where the cursor is now (a finger may have moved it) inside the surface.
+        (self.pad.at, self.pad.bounds) = (self.cursor_pos, (w, h));
         let o = self.pad.update(dt, cfg, ui, self.surface_w.min(self.surface_h) as f32);
         if ui {
-            let (w, h) = (self.surface_w as f32, self.surface_h as f32);
-            let p = (self.cursor_pos.0 + o.cursor.0, self.cursor_pos.1 + o.cursor.1);
+            let p = o.cursor_to.unwrap_or(self.cursor_pos);
             let p = (p.0.clamp(0.0, w - 1.0), p.1.clamp(0.0, h - 1.0));
             if p != self.cursor_pos {
                 self.cursor_pos = p;
                 self.events.push(ScreenEv::Move(p.0, p.1));
             }
             self.nav = o.nav.or(self.nav);
+            self.pad_vm_toggle |= o.vm_toggle;
             match o.click {
                 Some(true) => self.events.push(ScreenEv::Down(p.0, p.1)),
                 Some(false) => self.events.push(ScreenEv::Up(p.0, p.1)),
                 None => {}
             }
             (self.page, self.scroll) = (self.page + o.page, self.scroll + o.scroll);
-            if self.screen && !self.paused && !self.menu {
-                self.alt = o.alt.or(self.alt);
+            if (self.screen && !self.paused && !self.menu) || self.pad.focus {
+                self.alt = o.alt.or(self.alt); // a container's X / Y, or a focus screen's first and second abstract action
             }
             if o.back && !self.paused && self.screen && !self.menu {
                 self.back = true; // the screen steps back one level first (`take_back`); closing is `lib.rs`'s call
@@ -397,7 +405,8 @@ impl TouchUi {
             self.cycle_view();
         }
         self.pad_info |= o.info;
-        self.pad_drop |= o.drop;
+        self.pad_drop += o.drop;
+        self.pad_drop_stack |= o.drop_stack;
         if cfg.toggle_sneak {
             self.sneak ^= o.sneak_down;
         } else if o.sneak_down {
@@ -434,9 +443,19 @@ impl TouchUi {
         };
     }
 
-    /// The pad's drop bind was pressed since the last call.
-    pub fn take_pad_drop(&mut self) -> bool {
+    /// How many single items the pad's drop bind throws since the last call.
+    pub fn take_pad_drop(&mut self) -> u32 {
         std::mem::take(&mut self.pad_drop)
+    }
+
+    /// The pad's drop-stack bind was pressed since the last call.
+    pub fn take_pad_drop_stack(&mut self) -> bool {
+        std::mem::take(&mut self.pad_drop_stack)
+    }
+
+    /// The pad's virtual mouse toggle was pressed on a screen since the last call.
+    pub fn take_pad_vm_toggle(&mut self) -> bool {
+        std::mem::take(&mut self.pad_vm_toggle)
     }
 
     /// The pad's info bind was pressed since the last call.
@@ -467,12 +486,19 @@ impl TouchUi {
         self.alt.take()
     }
 
-    /// The pad's step since the last call (only while `pad.snap`): `lib.rs` moves the cursor to the neighbouring target.
+    /// The pad's step since the last call (only while `pad.focus`): `lib.rs` moves the cursor to the neighbouring target.
     pub fn take_nav(&mut self) -> Option<(i32, i32)> {
         self.nav.take()
     }
 
     /// Put the cursor at `p` as a finger sliding there would (a held press spreads its stack over what the cursor crosses).
+    /// A tap at `p` (px) from the pad: the cursor goes there and the screen gets a press and a lift.
+    pub fn tap_at(&mut self, p: (f32, f32)) {
+        self.warp_cursor(p);
+        self.events.push(ScreenEv::Down(p.0, p.1));
+        self.events.push(ScreenEv::Up(p.0, p.1));
+    }
+
     pub fn warp_cursor(&mut self, p: (f32, f32)) {
         if p != self.cursor_pos {
             self.cursor_pos = p;

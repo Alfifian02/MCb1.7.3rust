@@ -1,2 +1,11 @@
+pub mod bind_defs;
+pub mod bindings;
 pub mod gamepad;
+pub mod glyph_map;
+pub mod guide;
+pub mod guide_rules;
+pub mod reach;
+pub mod rumble_fx;
 pub mod touch_ui;
+pub mod vmouse;
+pub mod vmouse_cursor;

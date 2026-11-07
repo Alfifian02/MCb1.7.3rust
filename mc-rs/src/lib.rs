@@ -26,6 +26,8 @@ mod stats_ui;
 mod ui;
 mod version;
 
+use crate::input::reach;
+use crate::input::rumble_fx::fx as rfx;
 use crate::input::touch_ui::{PointerRole, ScreenEv, TouchUi};
 use crate::menu::Menu;
 use crate::options::{Pause, PauseEv, PauseInfo, Settings};
@@ -62,7 +64,7 @@ use crate::world::minecart;
 use crate::world::portal;
 use crate::world::mobs::{self, Ctx, Ev, Mobs, Strike};
 use crate::world::ticks::{self, Ticks};
-use crate::world::save::{self, Level};
+use crate::world::save::Level;
 use crate::world::sky;
 use crate::world::sprint::{self, Sprint};
 use crate::world::chunk::{is_plant, normal_cube, outline_bounds, physics_id, pick_bounds};
@@ -531,6 +533,7 @@ impl App {
         (self.detectors, self.paintings, self.signs) = (Default::default(), Vec::new(), HashMap::new());
         (self.furnaces, self.chests, self.fx.spawners, self.furn_acc) = (HashMap::new(), HashMap::new(), HashMap::new(), 0.0);
         (self.target, self.dig, self.dig_acc) = (None, Dig::default(), 0.0);
+        self.touch.pad.rumble_clear(); // `MinecraftMixin`: leaving a world clears the vibration effects
         if let Some(l) = std::fs::read(self.dir.join("level")).ok().and_then(|b| Level::decode(&b)) {
             self.furnaces = l.furnaces.into_iter().collect();
             self.chests = l.chests.into_iter().collect();
@@ -597,6 +600,7 @@ impl App {
         world::gen::natural::set(None);
         self.chunks = ChunkManager::new_typed(0, RENDER_DIST, WorldType::Vanilla); // the world's workers stop on drop
         self.lod = None;
+        self.touch.pad.rumble_clear();
         self.menu = Some(Menu::new(&self.root));
         (self.pause, self.stats_ui, self.gen_ui, self.rei, self.preview) = (None, None, None, None, None);
         self.touch.set_menu(true);
@@ -656,6 +660,7 @@ impl App {
         self.fx = Effects::new(seed);
         self.sprint = Sprint::default();
         (self.tip, self.dig, self.dig_acc, self.target) = ((0, 0.0), Dig::default(), 0.0, None);
+        self.touch.pad.rumble_clear();
         (self.inv, self.drops, self.mobs, self.ticks) = (Inventory::default(), Drops::new(seed), Mobs::new(seed), Ticks::new(seed));
         (self.furnaces, self.furn_acc, self.vitals, self.save_acc) = (HashMap::new(), 0.0, Vitals::default(), 0.0);
         self.chests.clear();
@@ -693,7 +698,8 @@ impl App {
 
     /// Write the world to disk: the level file, then up to `chunks` unsaved chunks (`usize::MAX` = all). An open
     /// screen is closed first, so the cursor stack and the grid become dropped items, which are saved.
-    // ponytail: runs on the render thread; the level file is ~1 KB and the chunk writes are capped per autosave.
+    // ponytail: the encoding still runs on the render thread (the level file is ~1 KB, the chunk writes are capped per autosave); only the
+    // file writes are on the I/O thread. `maps.save_all()` below still writes the changed maps in place (one 16 KB file per map in use).
     fn save(&mut self, chunks: usize) {
         if self.menu.is_some() {
             return; // no world is loaded
@@ -718,21 +724,21 @@ impl App {
             bed: self.bed_spawn,
             drops: self.drops.items.iter().map(|e| (e.pos, e.stack, e.saved_age())).collect(),
         };
-        if let Err(e) = save::write(&self.dir.join("level"), &level.encode()) {
-            log::warn!("save: level file: {e}");
-        }
+        // The four small files are encoded here but written by the chunk I/O thread (`ChunkManager::write_file`): an autosave every 5 s
+        // used to do four `fs::write` + `rename` pairs on the render thread, each of which can stall for tens of ms on phone storage.
+        // `chunks.flush(usize::MAX)` below (pause, exit) waits for them, so those saves still end with everything on disk.
+        let level_path = self.dir.join("level");
+        self.chunks.write_file(level_path, level.encode());
         if self.explored.take_dirty() {
-            if let Err(e) = save::write(&self.overworld_dir().join("explored"), &self.explored.encode()) {
-                log::warn!("save: explored file: {e}");
-            }
+            let explored_path = self.overworld_dir().join("explored");
+            let explored = self.explored.encode();
+            self.chunks.write_file(explored_path, explored);
         }
         let signs: Vec<_> = self.signs.iter().map(|(&p, t)| (p, t.clone())).collect();
-        if let Err(e) = save::write(&self.dir.join("decor"), &decor::encode(&self.paintings, &signs)) {
-            log::warn!("save: decor file: {e}");
-        }
-        if let Err(e) = save::write(&self.root.join("stats"), &self.stats.encode()) {
-            log::warn!("save: stats file: {e}");
-        }
+        let decor_path = self.dir.join("decor");
+        self.chunks.write_file(decor_path, decor::encode(&self.paintings, &signs));
+        let stats_path = self.root.join("stats");
+        self.chunks.write_file(stats_path, self.stats.encode());
         self.settle_maps();
         self.maps.save_all();
         self.chunks.flush(chunks);
@@ -798,6 +804,7 @@ impl App {
         self.pad_sync(dt);
         self.rei_step(real_dt);
         self.touch.pad.watch_health(self.vitals.health);
+        self.rumble_step(real_dt);
         // C9: the vignette and flash follow the health (only with the Immersive Pack ON; entering a world never flashes).
         if world::combat::rules::on() { self.dmg.frame(self.vitals.health as f32, real_dt); } else { self.dmg = Default::default(); }
         // Zoomify: hold the zoom button for 4x (the vertical tangent / 4), eased; the look drag slows with the field of view.
@@ -1081,6 +1088,12 @@ impl App {
             let v = (((motion.x * motion.x + motion.z * motion.z) * 0.2 + motion.y * motion.y).sqrt() * 0.2).min(1.0);
             let p = 1.0 + (self.audio.rnd() - self.audio.rnd()) * 0.4;
             self.audio.play_here("random.splash", v, p);
+            // `waterland/LocalPlayerMixin`: the same impact the sound is made from. NOT ported: a rider's (0.9, not 0.2).
+            if !self.riding() {
+                if let Some(e) = rfx::splash(v) {
+                    self.touch.pad.rumble_play(e);
+                }
+            }
             self.fx.splash(glam::Vec3::new(self.player.pos.x, (self.player.pos.y - 0.9).floor() + 1.0, self.player.pos.z), 0.6, motion);
         }
         self.was_in_water = water;
@@ -1436,13 +1449,23 @@ impl App {
         if place && !self.swing_swallowed() {
             self.body.swing(); // a tap places, uses or hits: `swingItem`
         }
-        // The pad's Drop bind: one item of the selected slot, thrown the way a screen's leftovers are (`EntityPlayer.dropPlayerItem`).
-        if self.touch.take_pad_drop() && !self.vitals.dead() {
+        // The pad's Drop bind: one item of the selected slot (a held bind repeats: `Out::drop` counts them), the Drop Stack bind the whole stack, thrown the way a
+        // screen's leftovers are (`EntityPlayer.dropPlayerItem`).
+        let (drops, drop_stack) = (self.touch.take_pad_drop(), self.touch.take_pad_drop_stack());
+        if (drops > 0 || drop_stack) && !self.vitals.dead() {
             let slot = self.touch.hotbar_slot;
-            if let Some(s) = self.inv.slots[slot] {
-                self.drops.throw(ItemStack { count: 1, ..s }, self.camera.pos, self.camera.forward());
-                self.inv.slots[slot] = (s.count > 1).then_some(ItemStack { count: s.count - 1, ..s });
-                self.stats.add(world::stats::DROP, 1);
+            if drop_stack {
+                if let Some(s) = self.inv.slots[slot].take() {
+                    self.drops.throw(s, self.camera.pos, self.camera.forward());
+                    self.stats.add(world::stats::DROP, 1);
+                }
+            } else {
+                for _ in 0..drops {
+                    let Some(s) = self.inv.slots[slot] else { break };
+                    self.drops.throw(ItemStack { count: 1, ..s }, self.camera.pos, self.camera.forward());
+                    self.inv.slots[slot] = (s.count > 1).then_some(ItemStack { count: s.count - 1, ..s });
+                    self.stats.add(world::stats::DROP, 1);
+                }
             }
         }
         // The inventory button, and taps on an open screen (its presses are not look / move / place).
@@ -1478,6 +1501,15 @@ impl App {
         // (vanilla's rayTraceBlocks skips them).
         let bounds = |x: i32, y: i32, z: i32| self.chunks.block_loaded(x, y, z).and_then(|b| pick_bounds(b, self.chunks.meta(x, y, z)));
         self.target = pick::ray_trace(&bounds, eye, end);
+        // `ReachAroundHandler` (`input/reach.rs`, Controls > Controller > Reach Around): a pick that found nothing, looking down from a block's edge, targets
+        // the block under the feet on the side that faces the look, so using the item bridges forward. Like Controlify's, it feeds the attack too.
+        if self.target.is_none() && self.opts.pad.reach_around {
+            let p = reach::Player { feet: self.player.pos.to_array(), yaw: self.camera.yaw, pitch: self.camera.pitch, on_ground: self.player.on_ground, riding: self.riding() };
+            let solid = |x: i32, y: i32, z: i32| self.chunks.block_loaded(x, y, z).is_some_and(|b| world::chunk::collision(b).is_some()); // not air, a fluid or a plant
+            if let Some(r) = reach::reach_around(&p, true, &solid) {
+                self.target = Some(pick::Hit { pos: r.pos, face: r.face, point: glam::DVec3::from_array(r.point) });
+            }
+        }
         // The arm starts to swing while the pad's attack is down or a finger rests on a block, before the hold turns into digging
         // (`HOLD_SECS`). ponytail: it swings without digging for that moment; a finger that moves is a look drag and does not swing.
         if self.touch.pressing() && self.target.is_some() {
@@ -1524,7 +1556,12 @@ impl App {
                     if let Some(id) = self.chunks.block_loaded(x, y, z) {
                         let slot = self.touch.hotbar_slot;
                         let held = self.inv.slots[slot];
+                        let waiting = self.dig.waiting();
                         let broke = self.dig.tick(hit.pos, id, held, self.player.on_ground, in_water);
+                        if !waiting && id != 0 {
+                            // `MultiPlayerGameMode.startDestroyBlock`: a new block starts its vibration (and ends the last one's).
+                            self.touch.pad.rumble_dig(Some((hit.pos, dig::hardness(id))));
+                        }
                         if self.dig.hit {
                             // `PlayerControllerSP.sendBlockRemoving`: the step sound at (volume + 1) / 8 and half the pitch.
                             let (key, _, pitch) = audio::STEP[audio::step_of(id)];
@@ -1536,7 +1573,7 @@ impl App {
                             // `RenderGlobal` break effect: `stepSoundDir()` at ((volume + 1) / 2, pitch x 0.8).
                             let (brk, pitch) = (audio::STEP[audio::step_of(id)].1, audio::STEP[audio::step_of(id)].2 * 0.8);
                             self.audio.play(brk, glam::Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5), 1.0, pitch);
-                            self.touch.pad.rumble(60, 140); // `RumbleSource.INTERACTION`: a block breaks
+                            self.touch.pad.rumble_dig(None); // the block is gone (`destroyBlock` / `stopDestroyBlock`); an instant one still buzzed a tick
                             self.fx.dig(hit.pos, crate::render::atlas::particle_tile(id, meta)); // `addBlockDestroyEffects`: the block's own tile
                             if let (61 | 62, Some(f)) = (id, self.furnaces.remove(&hit.pos)) {
                                 for st in f.slots.into_iter().flatten() {
@@ -1582,6 +1619,7 @@ impl App {
             _ => {
                 self.dig.reset();
                 self.dig_acc = 0.0;
+                self.touch.pad.rumble_dig(None); // `stopDestroyBlock`: the dig input was released or the crosshair left the block
             }
         }
         // A tap that has a mob under the crosshair, nearer than the block behind it, hits it (`Minecraft.clickMouse`'s attack;
@@ -1721,6 +1759,7 @@ impl App {
                     self.sp.streak_hit(); // ponytail: every blow that connects counts, one the mob's damage window refused too (a martillo is 19 ticks, the window 3)
                 }
                 self.vitals.stamina.hit(); // Stamina: a hit dealt puts the player in combat for 15 s (ponytail: also one the mob's damage window ignored)
+                self.touch.pad.rumble_play(rfx::damage_dealt()); // `damage/ClientPacketListenerMixin.playOutgoingDamageRumble`
                 self.inv.damage(slot, wear);
                 return;
             }
@@ -2294,6 +2333,7 @@ impl App {
                 self.fx.slash(&world::combat::fx::sweep_points(eye, fwd, reach.dist, reach.h));
                 for &i in &hit {
                     self.mobs.strike(i, dmg, self.player.pos);
+                    self.touch.pad.rumble_play(rfx::damage_dealt());
                     self.hit_fx(i, s.profile, false, false, 1.0, false);
                 }
                 if !hit.is_empty() {
@@ -2413,6 +2453,7 @@ impl App {
         let (dmg, _) = mobs::attack(held_id);
         for (k, &i) in fresh.iter().enumerate() {
             self.mobs.strike(i, special::lunge_damage(dmg, k), p);
+            self.touch.pad.rumble_play(rfx::damage_dealt());
             self.hit_fx(i, s.profile, false, false, 1.0 - k as f32 * 0.06, true); // C7: each target a sixth of a tone below the last (`LungeDamage` index)
             l.done.push(i);
         }
@@ -2610,6 +2651,38 @@ impl App {
         }
     }
 
+    /// Vibration (`input/rumble_fx.rs`: Controlify's `RumbleManager` and the mixins that feed it). What goes on now keeps its effect alive (a meal, a
+    /// raised guard, a fish on the line, a walk through soul sand); the one-shot effects are played where they happen (`watch_health`, `explode`, the dig,
+    /// the hits...). Then the 20 Hz tick. Silent while the game menu is up outside its options page (`isPaused && !isConfigScreen`) and, in the pad,
+    /// while the keyboard or mouse is in use. NOT ported: a pad's `outOfFocus` (the app's loop does not run in the background anyway).
+    fn rumble_step(&mut self, real_dt: f32) {
+        let in_options = self.pause.as_ref().is_some_and(Pause::in_options) || self.menu.as_ref().is_some_and(|m| m.scr == crate::menu::Scr::Options);
+        let silent = self.touch.paused && !in_options;
+        // Which screen is open, for `finishOnScreenChange` (the Test Vibration ends when it changes).
+        let key = self.touch.paused as u16 | (self.screen.is_some() as u16) << 1 | (in_options as u16) << 2 | self.menu.as_ref().map_or(0, |m| (m.scr as u16 + 1) << 3);
+        let eating = self.eating.is_some() && !self.vitals.dead();
+        let guard = world::combat::rules::on() && self.vitals.guard.active();
+        let bite = self.hook.as_ref().is_some_and(|h| h.bite());
+        // `slowblock/LocalPlayerMixin`: moving through something that slows. b1.7.3's only such block is soul sand (`BlockSoulSand`; the web has its own rule).
+        let sand = {
+            let get = |x: i32, y: i32, z: i32| self.chunks.block(x, y, z);
+            physics::touching(self.player.pos, physics::HALF, &get, 88)
+        };
+        let (f, sd) = self.touch.move_input;
+        let amount = (f * f + sd * sd).sqrt() * if self.touch.sneak { 0.3 } else { 1.0 };
+        let slow = (sand && amount > 0.0 && self.sleep.is_none() && !self.riding()).then_some(amount);
+        if std::mem::take(&mut self.opts.pad.test_vibration) {
+            self.touch.pad.rumble_test();
+        }
+        let pad = &mut self.touch.pad;
+        pad.rumble_screen(key);
+        pad.rumble_eating(eating);
+        pad.rumble_guard(guard);
+        pad.rumble_bite(bite);
+        pad.rumble_slow(slow);
+        pad.rumble_frame(real_dt, &self.opts.pad, silent);
+    }
+
     /// `Minecraft.clickMouse` -> `sendUseItem`: a tap that neither placed a block nor opened a screen uses the held item;
     /// food is eaten, aimed at a block or not.
     /// `Explosion` at `at`: the rays pick the cells (`Mobs::explode`), a broken block drops with chance 0.3 (vanilla: per item),
@@ -2625,6 +2698,8 @@ impl App {
                     let at = glam::Vec3::new(x as f32, y as f32, z as f32);
                     self.fx.strike(at);
                     self.fx.clap(at, self.camera.pos);
+                    // `explosion/LightningBoltMixin`: every bolt the client sees, at full strength whatever the distance (the thunder is what is late).
+                    self.touch.pad.rumble_play(rfx::lightning());
                 }
             }
         }
@@ -2658,7 +2733,6 @@ impl App {
             self.audio.play_gain("ambient.weather.thunder", c.at, 12.0, (0.8 + r * 0.2) * (0.7 + 0.3 * m), m);
             if c.dist < 40.0 {
                 self.audio.play_gain("random.explode", c.at, 2.0, (0.5 + r * 0.2) * (0.7 + 0.3 * m), m);
-                self.touch.pad.rumble(250, (80.0 + 175.0 * (1.0 - c.dist / 40.0)) as u8);
             }
         }
         // Spawners see the same world as the mobs do (plants read as air).
@@ -2710,7 +2784,10 @@ impl App {
 
     /// `Explosion`; `flame` is `isFlaming` (a ghast's fireball): afterwards, in each destroyed cell that is now air over an opaque block, fire 1 time in 3.
     fn explode(&mut self, at: glam::Vec3, power: f32, flame: bool) {
-        self.touch.pad.rumble(400, 255);
+        // `explosion/ClientPacketListenerMixin.onClientExplosion`: from the distance of the player's feet to the centre and the blast's radius.
+        if let Some(e) = rfx::explosion(at.distance(self.player.pos), power) {
+            self.touch.pad.rumble_play(e);
+        }
         self.audio.cry("random.explode", at, 4.0, 0.7, true); // `Explosion`: volume 4, pitch `(1 + (r - r) * 0.2) * 0.7`
         // The fireball's (`flame`) is the one with no exploder entity: no `knockBack`, only the push.
         let cells = self.mobs.explode(&|x: i32, y: i32, z: i32| self.chunks.block(x, y, z), at, power, !flame);
@@ -3215,28 +3292,48 @@ impl App {
         self.touch.set_screen(false);
     }
 
-    /// A d-pad step in a container screen or the pause menu: the cursor jumps to the neighbouring target (`ui::step`), so there is no
-    /// stick to push from a slot to a toggle, or between buttons.
+    /// A d-pad (or left stick) step on a focus screen, the game menu's top page or the title: the focus moves to the neighbouring button
+    /// (`vmouse::focus_step`; the cursor is hidden and only sits on the focused button, so it shows as hovered). A container screen has no
+    /// focus: its d-pad snaps the virtual mouse inside `Pad::update`.
     fn pad_nav(&mut self, d: (i32, i32)) {
         let (w, h) = self.be.size();
-        let at = self.touch.cursor_pos;
-        // Chest, furnace, bench, the 2x2 screen and the pause menu: the slots and the two toggles, or the buttons.
-        let t: Vec<[f32; 4]> = match self.screen.as_ref() {
-            Some(s) => {
-                let (w, h) = (w as f32, h as f32);
-                let cell = |(ux, uy)| craft::cell(s.gw, w, h, (ux, uy));
-                let slots = craft::layout(s.gw).into_iter().map(|(_, ux, uy)| cell((ux, uy)));
-                let togs = (0..if s.gw == 2 { 3 } else { 2 }).map(|i| craft::toggle(s.gw, w, h, i));
-                slots.chain(togs).map(|(x, y, k)| [x, y, k, k]).collect()
-            }
-            None => match self.pause.as_ref() {
-                Some(p) => p.targets(w as f32, h as f32, &self.opts, &self.pause_info()),
-                None => Vec::new(),
-            },
-        };
-        if let Some(r) = ui::step(&t, at, d) {
+        let (w, h) = (w as f32, h as f32);
+        let t = self.pad_targets(w, h);
+        if let Some(r) = crate::input::vmouse::focus_step(&t, self.touch.cursor_pos, d) {
             self.touch.warp_cursor((r[0] + r[2] * 0.5, r[1] + r[3] * 0.5));
         }
+    }
+
+    /// The focus targets of a focus screen (px): the game menu's top page or the title's buttons; none elsewhere.
+    fn pad_targets(&self, w: f32, h: f32) -> Vec<[f32; 4]> {
+        if self.screen.is_none() {
+            if let Some(p) = self.pause.as_ref().filter(|_| self.touch.paused) {
+                return p.targets(w, h, &self.opts, &self.pause_info());
+            }
+            if let Some(m) = self.menu.as_ref().filter(|m| m.focus()) {
+                return m.targets(w, h, &self.opts);
+            }
+        }
+        Vec::new()
+    }
+
+    /// What the virtual mouse needs of the open screen (`ScreenMixin` / `AbstractContainerScreenMixin`): its snap points, in px, and the
+    /// px per GUI unit. A container's slots are 17-unit points around the icon centres, its two or three touch toggles are widgets.
+    fn pad_points(&self, w: f32, h: f32) -> (Vec<crate::input::vmouse::SnapPoint>, f32) {
+        use crate::input::vmouse::SnapPoint;
+        if let Some(sc) = self.screen.as_ref() {
+            let unit = craft::cell(sc.gw, w, h, (0.0, 0.0)).2 / 18.0;
+            let slots = craft::layout(sc.gw).into_iter().map(|(_, ux, uy)| craft::cell(sc.gw, w, h, (ux, uy))).map(|(x, y, k)| SnapPoint::slot([x, y, k, k], unit));
+            let togs = (0..if sc.gw == 2 { 3 } else { 2 }).map(|i| craft::toggle(sc.gw, w, h, i)).map(|(x, y, k)| SnapPoint::widget([x, y, k, k], unit));
+            return (slots.chain(togs).collect(), unit);
+        }
+        let (s, ..) = crate::menu::scaled_gs(w, h, self.opts.gui_scale);
+        // A focus screen the player gave the cursor (`PadCfg::vm_screens`) snaps to its buttons like any other page.
+        let pts = match self.menu.as_ref() {
+            Some(m) => m.targets(w, h, &self.opts),
+            None => self.pad_targets(w, h),
+        };
+        (pts.into_iter().map(|r| SnapPoint::widget(r, s)).collect(), s)
     }
 
     /// The pad's B in a container screen closes it. LB / RB and the right stick have nothing to turn or scroll there (the options take the
@@ -3252,9 +3349,129 @@ impl App {
     /// take the larger half) or quick-moved, as the "One" and "Shift" buttons do, but for this press only and without moving the cursor to
     /// them. Nothing off a slot, or while a press is down (a held A may be spreading a stack).
     fn pad_alt(&mut self, shift: bool) {
+        // Y while the cursor carries a stack is `drop_inventory` (Controlify's `AbstractContainerScreenProcessor`): the stack is thrown out whole;
+        // with an empty cursor it is `inv_quick_move` on the slot under it.
+        if shift {
+            if let Some(c) = self.screen.as_ref().and_then(|s| s.cursor) {
+                if let Some(s) = self.screen.as_mut() {
+                    s.cursor = None;
+                }
+                self.drops.throw(c, self.camera.pos, self.camera.forward());
+                self.stats.add(world::stats::DROP, 1);
+                return;
+            }
+        }
         let at = self.touch.cursor_pos;
         let Some(id) = self.slot_under(at.0, at.1).filter(|_| self.gesture.is_none()) else { return };
         self.with_ext(|s, inv, ext| if shift { s.shift_click(id, inv, ext) } else { s.click(id, true, inv, ext) });
+    }
+
+    /// X / Y on a focus screen (`GUI_ABSTRACT_ACTION_1` / `_2`): X taps the Options button, Y moves the focus onto the Quit button (`PauseScreenProcessor`
+    /// and `TitleScreenProcessor`).
+    fn pad_focus_action(&mut self, y: bool) {
+        let (w, h) = self.be.size();
+        let (w, h) = (w as f32, h as f32);
+        let (options, quit) = if let Some(p) = self.pause.as_ref().filter(|_| self.touch.paused) {
+            p.action_rects(w, h, &self.opts, &self.pause_info())
+        } else if let Some(m) = self.menu.as_ref() {
+            m.action_rects(w, h, &self.opts)
+        } else {
+            (None, None)
+        };
+        let mid = |r: [f32; 4]| (r[0] + r[2] * 0.5, r[1] + r[3] * 0.5);
+        if y {
+            if let Some(r) = quit {
+                self.touch.warp_cursor(mid(r));
+            }
+        } else if let Some(r) = options {
+            self.touch.tap_at(mid(r));
+        }
+    }
+
+    /// What the in-game button guide is worked out from (`ContextualStateContributors.IN_GAME`): the block or entity under the crosshair (the
+    /// nearest of a mob, a boat and a cart in front of the wall), the held item and the player. b1.7.3 has no off hand, creative or spectator mode.
+    fn guide_in_game(&self) -> crate::input::guide::InGame {
+        use crate::input::guide as g;
+        let (eye, fwd, reach) = (self.camera.pos, self.camera.forward(), pick::REACH as f32);
+        let wall = self.target.map_or(f32::MAX, |h| h.point.distance(eye.as_dvec3()) as f32);
+        let near = [
+            self.mobs.pick(eye, fwd, reach).map(|(i, t)| (t, 0u8, i)),
+            self.boats.pick(eye, fwd, reach).map(|(i, t)| (t, 1, i)),
+            self.carts.pick(eye, fwd, reach).map(|(i, t)| (t, 2, i)),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|e| e.0 < wall)
+        .min_by(|a, b| a.0.total_cmp(&b.0));
+        let hit = match (near, self.target) {
+            (Some((_, 0, i)), _) => g::Hit::Entity { ent: g::Ent::Mob(mob_name(self.mobs.list[i].kind)), saddled: self.mobs.list[i].saddled },
+            (Some((_, 1, _)), _) => g::Hit::Entity { ent: g::Ent::Boat, saddled: false },
+            (Some((_, _, i)), _) => g::Hit::Entity { ent: g::Ent::Cart(self.carts.list[i].kind as u8), saddled: false },
+            (None, Some(h)) => {
+                let (x, y, z) = h.pos;
+                let id = self.chunks.block_loaded(x, y, z).unwrap_or(0);
+                // a door's open bit is in its lower half, a trap door's in itself
+                let open = match id {
+                    64 | 71 => {
+                        let m = self.chunks.meta(x, y, z);
+                        let low = if m & 8 != 0 { self.chunks.meta(x, y - 1, z) } else { m };
+                        low & 4 != 0
+                    }
+                    96 => self.chunks.meta(x, y, z) & 4 != 0,
+                    _ => false,
+                };
+                g::Hit::Block { id, open }
+            }
+            (None, None) => g::Hit::None,
+        };
+        let get = |x: i32, y: i32, z: i32| self.chunks.block_loaded(x, y, z);
+        let e = self.camera.pos;
+        let under_water = matches!(get(e.x.floor() as i32, e.y.floor() as i32, e.z.floor() as i32), Some(8 | 9));
+        let riding = if let Some(m) = self.mobs.list.iter().find(|m| m.ridden) {
+            Some((g::Ent::Mob(mob_name(m.kind)), m.saddled))
+        } else if self.boats.ridden().is_some() {
+            Some((g::Ent::Boat, false))
+        } else {
+            self.carts.ridden().map(|c| (g::Ent::Cart(c.kind as u8), false))
+        };
+        g::InGame {
+            me: g::Me {
+                on_ground: self.player.on_ground,
+                in_water: self.was_in_water,
+                under_water,
+                sneaking: self.touch.sneak,
+                sprinting: self.sprint.on(),
+                flying: self.touch.flying,
+                on_climbable: physics::on_ladder(self.player.pos, physics::HALF, &get),
+                moving: self.touch.move_input != (0.0, 0.0),
+                riding,
+                toggle_sneak: self.opts.pad.toggle_sneak,
+                toggle_sprint: false, // sprint is a held button here
+                fishing_cast: self.hook.is_some(),
+                guarding_item: self.touch.guard_shown,
+            },
+            hit,
+            main: self.inv.slots[self.touch.hotbar_slot].map(|s| g::Stack { id: s.id, count: i32::from(s.count) }),
+        }
+    }
+
+    /// What a container screen's guide is worked out from (`ContextualStateContributors.CONTAINER`): the slot under the cursor, the stack the
+    /// cursor carries, whether the slot takes it (the crafting and furnace outputs never do; the fuel slot only fuel) and whether the cursor is off the panel.
+    fn guide_container(&self, w: f32, h: f32) -> Option<crate::input::guide::Container> {
+        use crate::input::guide as g;
+        let s = self.screen.as_ref()?;
+        let ext = self.ext(s);
+        let (x, y) = self.touch.cursor_pos;
+        let stack = |st: ItemStack| g::Stack { id: st.id, count: i32::from(st.count) };
+        let at = craft::slot_at(s.gw, w, h, x, y);
+        let hovering = at.map(|id| s.get(&self.inv, ext.as_deref(), id).map(stack));
+        let can_place = match (at, s.cursor) {
+            (Some(craft::SlotId::Result | craft::SlotId::Furn(2)), _) => false,
+            (Some(craft::SlotId::Furn(1)), Some(c)) => craft::fuel_ticks(c.id) > 0,
+            (Some(_), Some(_)) => true,
+            _ => false,
+        };
+        Some(g::Container { hovering, holding: s.cursor.map(stack), can_place, outside: !craft::in_panel(s.gw, w, h, x, y) })
     }
 
     /// The slot under a finger of the open screen (a slot of the vanilla panel).
@@ -3436,6 +3653,7 @@ impl App {
         }
         for id in std::mem::take(&mut self.inv.broke) {
             self.stats.bump(Kind::Depleted, id, 1);
+            self.touch.pad.rumble_play(rfx::item_break()); // `itembreak/LocalPlayerMixin.onBreakItem`
         }
         for o in self.screen.as_mut().map(|s| std::mem::take(&mut s.made)).unwrap_or_default() {
             self.stats.bump(Kind::Crafted, o.id, o.count as u32);
@@ -3867,9 +4085,6 @@ impl App {
         m.draw(&mut self.hud_verts, w, h, &self.opts);
         let cur = self.touch.pad.shows_cursor().then_some(self.touch.cursor_pos);
         self.touch.pad.draw(&mut self.hud_verts, w, h, self.touch.hotbar_slot, cur, f32::INFINITY);
-        let (s, ..) = crate::menu::scaled_gs(w, h, self.opts.gui_scale);
-        let avoid = m.avoid(w, h, &self.opts);
-        self.touch.pad.hints(&mut self.hud_verts, &self.opts.pad, &crate::input::gamepad::HintView { w, h, s, ui: true, avoid: &avoid });
         let pano = m.panorama();
         self.hud_verts.truncate(crate::gles::HUD_QUADS * 6);
         match self.be.draw_menu(pano, &self.hud_verts) {
@@ -3890,14 +4105,52 @@ impl App {
     /// The pad's frame: moves / looks / clicks through `TouchUi`, and hands a button the Controls screen waits for to it.
     fn pad_sync(&mut self, dt: f32) {
         self.touch.pad.capture = self.pause.as_ref().is_some_and(Pause::pad_waiting) || self.menu.as_ref().is_some_and(Menu::pad_waiting);
-        // The d-pad jumps between targets in a chest / furnace / bench / inventory screen and the pause menu's top page; the stick is the free cursor.
-        self.touch.pad.snap = self.screen.is_some() || (self.touch.paused && self.stats_ui.is_none() && self.gen_ui.is_none() && self.preview.is_none() && self.pause.as_ref().is_some_and(Pause::top));
+        // Controlify's rule: the virtual mouse (a cursor, snapping to slots) is for a container screen; the game menu's top page and the title
+        // are focus screens (the d-pad / left stick step the focus). The other pages keep the cursor, with snap points where there are widgets.
+        let (w, h) = self.be.size();
+        let (w, h) = (w as f32, h as f32);
+        let pause_top = self.touch.paused && self.screen.is_none() && self.stats_ui.is_none() && self.gen_ui.is_none() && self.preview.is_none() && self.pause.as_ref().is_some_and(Pause::top);
+        let has_map = pause_top || (self.screen.is_none() && self.menu.as_ref().is_some_and(Menu::focus));
+        // The virtual mouse toggle (`VMOUSE_TOGGLE`, `virtualMouseScreens`): a screen that is a focus screen by default can be given the cursor, and it is remembered. A container
+        // always has it; the pages with no focus map keep it too (see below), so the toggle has nothing to change there.
+        let key = if pause_top { crate::input::gamepad::VM_PAUSE } else if has_map { self.menu.as_ref().map_or(0, Menu::focus_key) } else { 0 };
+        if self.touch.take_pad_vm_toggle() && key != 0 && self.screen.is_none() {
+            self.opts.pad.vm_screens ^= key;
+            self.opts.save();
+        }
+        let focus = has_map && self.opts.pad.vm_screens & key == 0;
+        self.touch.pad.aiming = self.charge > 0; // `isUsingItem` with a bow-like animation: a weapon's charge is building
+        let (points, gs) = self.pad_points(w, h);
+        self.touch.pad.focus = focus;
+        self.touch.pad.behaviour = if self.screen.is_some() { crate::input::vmouse::Behaviour::CursorScroll } else { crate::input::vmouse::Behaviour::Default };
+        self.touch.pad.points = if focus { Vec::new() } else { points };
+        self.touch.pad.gs = gs;
+        // `setInitialFocus`: a focus screen opens with its first button focused, so A acts at once.
+        if focus && self.touch.pad.active() {
+            let t = self.pad_targets(w, h);
+            if !t.is_empty() && crate::ui::under(&t, self.touch.cursor_pos).is_none() {
+                let f = t[0];
+                self.touch.warp_cursor((f[0] + f[2] * 0.5, f[1] + f[3] * 0.5));
+            }
+        }
         self.touch.pad_update(dt, &self.opts.pad);
         if let Some(d) = self.touch.take_nav() {
             self.pad_nav(d);
         }
+        // The marks on the title's and the game menu's buttons (`input/guide.rs`): the glyphs of the pad in use, while screen guides are on.
+        {
+            use crate::input::bind_defs::B;
+            let pc = &self.opts.pad;
+            let g = |b: B| pc.binds.get(b).glyph().unwrap_or("button/none");
+            let marks = (self.touch.pad.active() && pc.screen_guides).then(|| (pc.style as usize % crate::input::glyph_map::TYPES.len(), [g(B::GuiBack), g(B::GuiAbstractAction1), g(B::GuiAbstractAction2)]));
+            crate::input::guide::set_marks(marks);
+        }
         if let Some(shift) = self.touch.take_alt() {
-            self.pad_alt(shift);
+            if focus {
+                self.pad_focus_action(shift);
+            } else {
+                self.pad_alt(shift);
+            }
         }
         // LB / RB step the options tabs.
         if self.pause.as_ref().is_some_and(Pause::in_options) || self.menu.as_ref().is_some_and(Menu::in_options) {
@@ -4031,6 +4284,14 @@ impl App {
         let gauge = if world::combat::rules::on() && !self.vitals.dead() {
             let (air, calm) = (self.air(), !self.vitals.stamina.in_combat());
             Some((air, self.vitals.mend.bandaged(), world::combat::mend::Mend::hearth_on(self.vitals.health, calm, self.heat_at_hand())))
+        } else {
+            None
+        };
+        // Controlify's button guide (`input/guide.rs`): the state it is worked out from, read here for the same reason.
+        let guide_ig = (!self.touch.paused && self.screen.is_none() && !info_on).then(|| self.guide_in_game());
+        let guide_ct = if !self.touch.paused {
+            let (w, h) = self.be.size();
+            self.guide_container(w as f32, h as f32)
         } else {
             None
         };
@@ -4538,31 +4799,15 @@ impl App {
                 _ => f32::INFINITY,
             };
             t.pad.draw(v, w, h, t.hotbar_slot, cur, cap);
-            // What the open screen draws, for the hints to keep off: the game menu's buttons, the statistics' tabs, or the hotbar while playing.
+            // Controlify's button guide: the in-game one while playing (not under the debug screen), the container's with a screen open.
             let (s, ..) = crate::menu::scaled_gs(w, h, self.opts.gui_scale);
-            let rows: Vec<(crate::input::gamepad::Role, &str)> = Vec::new();
-            let avoid: Vec<[f32; 4]> = if paused {
-                if let Some(u) = &self.preview {
-                    u.avoid(w, h, self.opts.gui_scale)
-                } else if let Some(u) = &self.rei {
-                    u.avoid(w, h, &self.opts)
-                } else if let Some(u) = &self.gen_ui {
-                    u.avoid(w, h, self.opts.gui_scale)
-                } else if let Some(u) = &self.stats_ui {
-                    u.avoid(w, h, &self.opts)
-                } else if let Some(p) = &self.pause {
-                    p.avoid(w, h, &self.opts, &pause_info)
-                } else {
-                    Vec::new()
-                }
-            } else if t.screen {
-                Vec::new() // ponytail: a chest / furnace / bench panel is centred, the corner is free; no rects of its own yet
-            } else {
-                let (hx, hy, hw, _) = t.layout.hotbar[0];
-                let u = hw / 20.0;
-                vec![[hx - u, hy - u, 182.0 * u, 22.0 * u]]
-            };
-            t.pad.hints_with(v, &self.opts.pad, &crate::input::gamepad::HintView { w, h, s, ui: paused || t.screen, avoid: &avoid }, &rows);
+            use crate::input::guide::Domain;
+            if let Some(g) = &guide_ig {
+                self.touch.pad.draw_guide(v, &self.opts.pad, w, h, s, Domain::InGame(g));
+            }
+            if let Some(c) = &guide_ct {
+                self.touch.pad.draw_guide(v, &self.opts.pad, w, h, s, Domain::Container(c));
+            }
         }
 
         // Cap to the buffer capacity; extra quads are silently dropped.
@@ -4977,8 +5222,8 @@ fn android_main(app: AndroidApp) {
             }
             #[cfg(feature = "pad-rumble")]
             {
-                if let Some((dev, ms, amp)) = a.touch.pad.take_rumble(&a.opts.pad) {
-                    rumble::buzz(&app, dev, ms, amp);
+                if let Some((dev, cmd)) = a.touch.pad.take_haptics() {
+                    rumble::apply(&app, dev, cmd);
                 }
             }
             self_main_frames += 1;
@@ -4989,5 +5234,26 @@ fn android_main(app: AndroidApp) {
         if self_main_frames % 30 == 0 {
             sync_size(&app, &mut app_state);
         }
+    }
+}
+
+/// Controlify's rules name entities as Minecraft does (`minecraft:pig`): a b1.7.3 mob's name for them (`input/guide.rs`).
+fn mob_name(k: world::mobs::Kind) -> &'static str {
+    use world::mobs::Kind::*;
+    match k {
+        Pig => "minecraft:pig",
+        Cow => "minecraft:cow",
+        Sheep => "minecraft:sheep",
+        Chicken => "minecraft:chicken",
+        Wolf => "minecraft:wolf",
+        Squid => "minecraft:squid",
+        Zombie => "minecraft:zombie",
+        PigZombie => "minecraft:zombified_piglin",
+        Giant => "minecraft:giant",
+        Skeleton => "minecraft:skeleton",
+        Creeper => "minecraft:creeper",
+        Spider => "minecraft:spider",
+        Slime => "minecraft:slime",
+        Ghast => "minecraft:ghast",
     }
 }

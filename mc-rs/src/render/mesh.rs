@@ -225,7 +225,7 @@ fn flow_uv(blk: u8, angle: f32, corner: &[f32; 3]) -> (f32, f32) {
 /// light in the high nibble. `sky_sub` is `World.skylightSubtracted` (0 day .. 11 night, `world::sky`).
 /// `(ox, oz)` is the chunk's world origin (chunk * 16).
 /// Vertices: `VF` floats each (px, py, pz, u, v, light, lm). Indices: 6 per face (two triangles).
-/// Shadows are not baked here: the sun's shadow map darkens the frame in `render::vl`. Leaves do not dim the sky light either
+/// Shadows are not baked here (there is no shadow map). Leaves do not dim the sky light either
 /// (see `open` below), or a tree would be shaded twice.
 pub fn build(blocks: &[u8], data: &Nibbles, light: &[u8], nb: [&[u8]; 4], nb_light: [&[u8]; 4], sky_sub: u8, ox: i32, oz: i32) -> (Vec<f32>, Vec<u32>) {
     let e = Nibbles::new();
@@ -804,7 +804,7 @@ mod tests {
         assert!((0..4).all(|k| q[k * VF + 6] >= SMOOTH_LM));
     }
 
-    /// Leaves above a cell do not dim its sky light (the shadow map darkens it, `render::vl`); a stone roof still does.
+    /// Leaves above a cell do not dim its sky light; a stone roof still does.
     #[test]
     fn leaves_do_not_shade_like_a_roof() {
         let (l, e) = (vec![12u8; VOLUME], air()); // sky light 12 everywhere, empty neighbours
