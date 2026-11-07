@@ -88,6 +88,17 @@ fn lit(verts: &mut [f32], from: usize, lv: &dyn Fn(i32, i32, i32) -> (u8, u8), a
     }
 }
 
+/// `lit` for vertices whose `light` already holds their face shade (`player::bake_hand_shade`): the cell's levels go in as a smooth vertex
+/// (`mesh::SMOOTH_LM`: sky in quarter levels, block in half levels, as the terrain mesher writes them), so `vert` in `gpu/pipeline.rs`
+/// and `gles/shaders.rs` takes the shade from the vertex (`k = -1`) and never calls `flat_shade`.
+fn lit_smooth(verts: &mut [f32], from: usize, lv: &dyn Fn(i32, i32, i32) -> (u8, u8), at: Vec3) {
+    let (sky, block) = lv(at.x.floor() as i32, at.y.floor() as i32, at.z.floor() as i32);
+    let packed = crate::render::mesh::SMOOTH_LM + sky.min(15) as f32 * 4.0 * 32.0 + block.min(15) as f32 * 2.0;
+    for v in verts[from..].chunks_exact_mut(VF) {
+        v[6] = packed;
+    }
+}
+
 /// Added to the `light` of a hurt mob's vertices (after `lit` set it to the cell's 0..1): the entity shader reads `light` 2..3 as
 /// `RenderLiving`'s red overlay (0.4 of red over the same pixels). The flat entity path uses `light` for nothing else.
 pub(crate) const HURT: f32 = 2.0;
@@ -140,9 +151,12 @@ fn geometry(drops: &Drops, mobs: &Mobs, falling: &[Falling], fx: &Effects, lv: &
     }
     // The first-person hand (`ItemRenderer`), in the first-person view only.
     if let Some(h) = hand {
-        let n0 = verts.len();
+        let (n0, i0) = (verts.len(), idxs.len());
         crate::render::player::push_hand(&mut verts, &mut idxs, h);
-        lit(&mut verts, n0, lv, h.at);
+        // Shade baked per face (not `flat_shade`'s per-pixel derivatives, which are noise on this tiny, squashed, rotated mesh).
+        let block = h.held.map_or(false, |s| crate::render::player::is_block3d(s.id));
+        crate::render::player::bake_hand_shade(&mut verts, &idxs, i0, &h.to_world, block);
+        lit_smooth(&mut verts, n0, lv, h.at);
     }
     for c in carts.0.iter().filter(|c| seen(c.pos, 2.0)).take(MAX_CARTS) {
         let n0 = verts.len();

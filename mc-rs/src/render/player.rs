@@ -276,7 +276,7 @@ fn push_held(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, hand: &Mat4, s: ItemStac
 }
 
 /// `RenderBlocks.renderItemIn3d` for a block item: drawn as its (textured) shape, not as a flat sprite.
-fn is_block3d(id: u16) -> bool {
+pub fn is_block3d(id: u16) -> bool {
     id < 256 && id != 0 && !crate::world::items::flat_icon(id as u8)
 }
 
@@ -435,6 +435,34 @@ pub fn push_hand(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, h: &Hand) {
     let rod = if st.id == crate::world::gear::ROD { ry(180.0) } else { Mat4::IDENTITY }; // `shouldRotateAroundWhenRendering`
     let m = h.to_world * t(-b * 0.4, c * 0.2, -a * 0.2) * t(0.56, -0.52 - up, -0.72) * ry(45.0) * ry(-d * 20.0) * rz(-b * 20.0) * rx(-b * 80.0) * Mat4::from_scale(Vec3::splat(0.4)) * rod;
     render_item(verts, idxs, &m, st);
+}
+
+/// The first-person hand's face shade, baked into the vertices instead of taken from the screen. `fs_cut_flat` / `flat_shade` derive a
+/// flat face's shade per pixel from `dpdx` / `dpdy` of the WORLD position and assume every face is axis aligned. The hand is neither:
+/// it is turned with the view, squashed to 0.3 of its distance (`SQUASH`), and a pixel on it spans about 0.0005 blocks, which is the
+/// rounding step of an f32 world coordinate a few thousand blocks out. So the derivatives were noise, the dominant axis flipped from
+/// pixel to pixel and the sprite showed a stipple of two shades, worst where two axes of the normal are close (the angle-dependent
+/// artifact). Here each triangle's normal is taken once, on the CPU, in the hand's own (eye-aligned) frame, so the shade also stays put
+/// while the view turns. `from_idx` is where the hand's indices begin; `shaded_in_tint` = a block item (`block3d` already put its
+/// face shade in the tint: 1.0 here). The vertices must then be lit with `SMOOTH_LM` (`items::lit_smooth`), which makes the shader
+/// read `light` as the shade and skip `flat_shade`.
+pub fn bake_hand_shade(verts: &mut [f32], idxs: &[u32], from_idx: usize, to_world: &Mat4, shaded_in_tint: bool) {
+    let inv = to_world.inverse();
+    let at = |verts: &[f32], i: u32| {
+        let o = i as usize * VF;
+        Vec3::new(verts[o], verts[o + 1], verts[o + 2])
+    };
+    for t in idxs[from_idx..].chunks_exact(3) {
+        let (a, b, c) = (at(&*verts, t[0]), at(&*verts, t[1]), at(&*verts, t[2]));
+        let mut n = inv.transform_vector3((b - a).cross(c - a)).normalize_or_zero();
+        if n.z < 0.0 {
+            n = -n; // both windings are drawn: the face looks at the eye
+        }
+        let s = if shaded_in_tint { 1.0 } else { (0.8 + 0.2 * n.y - 0.15 * n.x.abs()).clamp(0.5, 1.0) };
+        for &i in t {
+            verts[i as usize * VF + 5] = s;
+        }
+    }
 }
 
 /// `GuiInventory.drawGuiContainerBackgroundLayer`: the player at `(x, y)` (his feet; the panel's (51, 75)) with `k` px a GUI unit,
@@ -734,6 +762,27 @@ mod tests {
             for p in v.chunks_exact(VF) {
                 assert!(p[2] < -0.1 && p[2] > -1.6 && p[0] > -0.2 && p[0] < 1.0 && p[1] < 0.2, "{held:?}: {p:?}", held = held.is_some());
             }
+        }
+    }
+
+    #[test]
+    fn the_hand_shade_is_baked_and_does_not_depend_on_where_in_the_world_it_is() {
+        // A sprite item and the bare arm: every vertex gets a finite shade in 0.5..=1, the same far from the origin as near it
+        // (the per-pixel `flat_shade` it replaces turned into noise at a few thousand blocks).
+        for held in [Some(ItemStack { id: 267, count: 1, damage: 0 }), None] {
+            let (mut v, mut i) = (Vec::new(), Vec::new());
+            let h = Hand { to_world: Mat4::IDENTITY, equip: 1.0, swing: 0.0, held, at: Vec3::ZERO };
+            push_hand(&mut v, &mut i, &h);
+            bake_hand_shade(&mut v, &i, 0, &h.to_world, false);
+            let shades: Vec<f32> = v.chunks_exact(VF).map(|p| p[5]).collect();
+            assert!(shades.iter().all(|s| s.is_finite() && (0.5..=1.0).contains(s)), "{shades:?}");
+            let far = Mat4::from_translation(Vec3::new(5000.0, 70.0, -6000.0));
+            let (mut v2, mut i2) = (Vec::new(), Vec::new());
+            let h2 = Hand { to_world: far, ..h };
+            push_hand(&mut v2, &mut i2, &h2);
+            bake_hand_shade(&mut v2, &i2, 0, &h2.to_world, false);
+            let far_shades: Vec<f32> = v2.chunks_exact(VF).map(|p| p[5]).collect();
+            assert!(shades.iter().zip(&far_shades).all(|(a, b)| (a - b).abs() < 0.02), "shade follows the hand, not the world position");
         }
     }
 
