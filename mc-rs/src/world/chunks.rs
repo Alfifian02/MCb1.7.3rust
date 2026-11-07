@@ -37,7 +37,7 @@ use crate::world::gen::populate::Region;
 use crate::world::save;
 
 mod light;
-mod wide;
+mod occlusion;
 
 type Key = (i32, i32);
 
@@ -624,7 +624,15 @@ struct Quads {
 /// faces is one quad, not 256) and encodes them. The other diagonal becomes a rotation of the corners and the second side a second quad
 /// with the corners reversed, so the one shared index pattern (`embeddium::quad_index`) draws exactly the triangles the mesher's own
 /// index list did.
+#[cfg(test)]
 fn pack(verts: &[f32], solid: &[u32], water: &[u32]) -> Quads {
+    pack_reusing(verts, solid, water, Vec::new())
+}
+
+/// `pack` into a buffer that was used before (`MeshPool`): it is cleared and keeps its capacity. (Starling `mesher.rs`, `Mesher::mesh` and
+/// `Mesher::mesh_reusing`, MIT: the same split, `out.clear()` first.)
+fn pack_reusing(verts: &[f32], solid: &[u32], water: &[u32], mut recycled: Vec<Packed>) -> Quads {
+    recycled.clear();
     let mut layers: [Vec<(usize, PQ, bool, bool)>; 3] = Default::default();
     let mut groups: BTreeMap<Join, Group> = BTreeMap::new();
     for q in quads_of(solid) {
@@ -662,7 +670,9 @@ fn pack(verts: &[f32], solid: &[u32], water: &[u32]) -> Quads {
             layers[run.cut as usize].push((run.section, merged(&g.rep, &run, g.rcu, g.rcv, u0, v0, w, h), false, false));
         }
     }
-    let mut out = Quads { verts: Vec::with_capacity((solid.len() + water.len()) / 6 * 4), starts: [0; SECTIONS + 1], cut: [0; SECTIONS + 1], wstarts: [0; SECTIONS + 1] };
+    // The estimate `Vec::with_capacity` was given, asked of the buffer that is there: no allocation when it is already big enough.
+    recycled.reserve((solid.len() + water.len()) / 6 * 4);
+    let mut out = Quads { verts: recycled, starts: [0; SECTIONS + 1], cut: [0; SECTIONS + 1], wstarts: [0; SECTIONS + 1] };
     for (l, list) in layers.iter_mut().enumerate() {
         list.sort_by_key(|e| e.0);
         let mut starts = [0u32; SECTIONS + 1];
@@ -720,6 +730,9 @@ enum Job {
     Gen(Key),
     Mesh(Box<MeshJob>),
     Populate(Box<PopJob>),
+    /// Vertex buffers the renderer is done with (`ChunkManager::free`): their memory is given back here, not in the frame.
+    /// (Starling `streaming.rs`, `Job::Free`, MIT; see `THIRD_PARTY_NOTICES.md`.)
+    Free(Vec<Vec<Packed>>),
 }
 
 /// `populate` for the chunk (x, z) on a copy of its 2x2 block (`Region::new` takes the arrays by value), so the chunks stay
@@ -739,9 +752,46 @@ struct Built {
     vis: [u64; SECTIONS],
 }
 
+/// Emptied vertex buffers, kept with their capacity for the next mesh. Only the workers touch it: a worker `take`s one for the job it
+/// starts, and the frame sends back the ones it has uploaded (`Job::Free`) for a worker to `put` here. Retaining cleared buffers avoids
+/// racing the renderer for the process heap: a mesh's vertex vector used to be allocated by a worker and freed by the frame.
+/// (Starling `streaming.rs`, `MeshPool`, MIT; see `THIRD_PARTY_NOTICES.md`. Starling pools `SectionMesh`es, whole; here the one buffer
+/// that crosses threads is `Built::verts`, so that is what is pooled. Its 16 MiB (`BYTES`) and 128 (`COUNT`) are Starling's.)
+#[derive(Default)]
+struct MeshPool {
+    meshes: Vec<Vec<Packed>>,
+    bytes: usize,
+}
+impl MeshPool {
+    const BYTES: usize = 16 << 20;
+    const COUNT: usize = 128;
+    fn take(&mut self) -> Vec<Packed> {
+        let mesh = self.meshes.pop().unwrap_or_default();
+        self.bytes -= mesh.capacity() * std::mem::size_of::<Packed>();
+        mesh
+    }
+    /// A rejected mesh is dropped by the caller, after releasing the lock.
+    fn put(&mut self, mut mesh: Vec<Packed>) -> Option<Vec<Packed>> {
+        let bytes = mesh.capacity() * std::mem::size_of::<Packed>();
+        if bytes == 0 || self.meshes.len() == Self::COUNT || bytes > Self::BYTES.saturating_sub(self.bytes) {
+            return Some(mesh);
+        }
+        mesh.clear();
+        self.bytes += bytes;
+        self.meshes.push(mesh);
+        None
+    }
+}
+
 /// The CPU half of meshing a chunk, run by a worker with its own climate noise (`cm`) for the biome tints. The mesher runs with origin 0,
 /// so the vertices are chunk-local (and exact far from the world's origin); the chunk's origin is `DrawOrigins`' business.
+#[cfg(test)]
 fn build_job(job: MeshJob, cm: &mut WorldChunkManager) -> Built {
+    build_job_reusing(job, cm, Vec::new())
+}
+
+/// `build_job` packing into `recycled` (`MeshPool::take`), which comes back as `Built::verts`.
+fn build_job_reusing(job: MeshJob, cm: &mut WorldChunkManager, recycled: Vec<Packed>) -> Built {
     let (x, z) = job.key;
     let [me, px, nx, pz, nz] = &job.cells;
     let (verts, idxs, widxs) = mesh::build_split_tinted(
@@ -759,7 +809,7 @@ fn build_job(job: MeshJob, cm: &mut WorldChunkManager) -> Built {
     );
     // Sodium's layers: the faces that show a see-through tile are drawn with the alpha test, the rest without it. All three layers live in
     // one run of the page, solid first.
-    let Quads { verts, starts, cut, wstarts } = pack(&verts, &idxs, &widxs);
+    let Quads { verts, starts, cut, wstarts } = pack_reusing(&verts, &idxs, &widxs, recycled);
     // Only full cubes that stop light hide what is behind them: leaves, glass, ice and water are seen through, slabs and stairs are not cubes.
     let vis = std::array::from_fn(|s| vis::compute(|x, y, z| {
         let b = me.blocks[idx(x, s * 16 + y, z)];
@@ -861,11 +911,11 @@ pub struct ChunkManager {
     loot: Vec<(Pos, Chest)>,
     /// Dungeon spawners populate placed that the game has not taken over yet (`take_spawners`).
     spawners: Vec<(Pos, u8)>,
-    /// The occlusion walk without the frustum, refreshed on a worker (`wide`): `update_visible` only tests it against the frustum.
-    wide: wide::WideCull,
-    /// What that walk reads: the `vis` of every loaded chunk's sections (a chunk without a mesh lets the view through). Every change goes
-    /// through `graph.set` (a chunk loads or unloads, a mesh arrives with other occlusion data), which is what makes the walk redo itself.
-    graph: wide::Snapshot,
+    /// Which sections the eye can see through open faces (Starling's `Occlusion`, `occlusion.rs`): a full search on its own thread, from the
+    /// last finished graph, with the sections that changed since propagated into it at once. `update_visible` only tests it against the frustum.
+    /// It holds the `vis` of every meshed section (a chunk without a mesh has none and lets the view through): a chunk that unloads or loads
+    /// again goes through `remove_column`, a mesh that arrives with other occlusion data through `set`.
+    occlusion: occlusion::Occlusion,
     /// Per chunk column, the sections (bit `s`) `update_visible` found drawable this frame.
     visible: HashMap<Key, u32>,
     /// The part of `visible` within the water radius `wr` (`WATER_RANGE`, or all of it with the LoD off): the sections whose real water is drawn (and whose LoD water sheet is cut).
@@ -885,6 +935,8 @@ pub struct ChunkManager {
     /// `update` calls: the two numbers the frame's `UploadBudget` is made of.
     upload: UploadDurationEstimator,
     frame_ns: Option<f64>,
+    /// The length (ns) of the last frame, as `update` measured it (0 before the second call): what the budget's slow tiers read.
+    last_frame_ns: u64,
     last_update: Option<std::time::Instant>,
     /// When each chunk without a first mesh entered the map, and what the first uploads since the last `take_mesh_wait` waited
     /// (sum of ms, longest ms, count): the time from "chunk exists" to "chunk can be drawn", which is what streaming feels like.
@@ -932,9 +984,12 @@ impl ChunkManager {
         let structures = crate::world::gen::structory::Shared::new(top);
         // Leave a core for the render thread; two workers are plenty for walking speed.
         let workers = std::thread::available_parallelism().map_or(2, |n| n.get()).saturating_sub(1).clamp(1, 2);
+        // The emptied vertex buffers of finished meshes, shared by the workers (`MeshPool`); the frame never locks it.
+        let meshes = Arc::new(Mutex::new(MeshPool::default()));
         for i in 0..workers {
             let (rx, tx, bt, pt) = (job_rx.clone(), done_tx.clone(), built_tx.clone(), pop_tx.clone());
             let structures = structures.clone();
+            let meshes = meshes.clone();
             std::thread::Builder::new()
                 .name(format!("chunk-gen-{i}"))
                 .spawn(move || {
@@ -953,7 +1008,15 @@ impl ChunkManager {
                             Job::Gen((cx, cz)) => tx.send(((cx, cz), g.generate(cx, cz, &mut cm))).is_ok(),
                             Job::Mesh(j) => {
                                 let key = j.key;
-                                bt.send((key, build_job(*j, &mut cm))).is_ok()
+                                let recycled = meshes.lock().unwrap().take();
+                                bt.send((key, build_job_reusing(*j, &mut cm, recycled))).is_ok()
+                            }
+                            Job::Free(freed) => {
+                                for mesh in freed {
+                                    let rejected = meshes.lock().unwrap().put(mesh);
+                                    drop(rejected);
+                                }
+                                true
                             }
                             Job::Populate(j) => {
                                 // populate() draws from a Random it seeds from the chunk, so the result does not depend on the worker.
@@ -976,7 +1039,7 @@ impl ChunkManager {
         gen.share_structory(structures);
         Self { chunks: Chunks::default(), pending: HashSet::new(), ring, radius, center: None, max_in_flight: workers * 2, built, meshing: HashSet::new(), max_meshing: workers * 2, urgent: HashSet::new(),
                populated_rx, populating: HashMap::new(), busy: HashSet::new(), max_populating: workers, stamp: 0,
-               cm: gen.manager(), bm: std::sync::Mutex::new(gen.manager()), biome_area: None, gen, jobs, done, light: light::LightLink::spawn(), sky_sub: 0, top: 128, mesh_gen: 0, dir: None, saved: HashSet::new(), writer: None, changes: Vec::new(), fresh_water: Vec::new(), loot: Vec::new(), spawners: Vec::new(), wide: wide::WideCull::spawn(), graph: wide::Snapshot::default(), visible: HashMap::new(), wet: HashMap::new(), order: Vec::new(), ingest: Vec::new(), ingested: HashSet::new(), pages: Pages::default(), held: None, upload: UploadDurationEstimator::new(), frame_ns: None, last_update: None, born: HashMap::new(), mesh_wait: (0.0, 0.0, 0) }
+               cm: gen.manager(), bm: std::sync::Mutex::new(gen.manager()), biome_area: None, gen, jobs, done, light: light::LightLink::spawn(), sky_sub: 0, top: 128, mesh_gen: 0, dir: None, saved: HashSet::new(), writer: None, changes: Vec::new(), fresh_water: Vec::new(), loot: Vec::new(), spawners: Vec::new(), occlusion: occlusion::Occlusion::new(0, SECTIONS as i32), visible: HashMap::new(), wet: HashMap::new(), order: Vec::new(), ingest: Vec::new(), ingested: HashSet::new(), pages: Pages::default(), held: None, upload: UploadDurationEstimator::new(), frame_ns: None, last_frame_ns: 0, last_update: None, born: HashMap::new(), mesh_wait: (0.0, 0.0, 0) }
     }
 
     /// The render distance in chunks.
@@ -1025,7 +1088,7 @@ impl ChunkManager {
             self.light_remove(key); // a fresh, unlit entry replaces it, light thread's copy included
         }
         self.born.entry(key).or_insert_with(std::time::Instant::now);
-        self.graph.set(key, Some([vis::FULL; SECTIONS])); // no mesh yet: the view passes through
+        self.occlusion.remove_column(key.0, key.1); // no mesh yet (and none of an older chunk here): the view passes through
         self.light_chunk(key, copy);
     }
 
@@ -1507,28 +1570,26 @@ impl ChunkManager {
     }
 
     /// Call once per frame before `draw_ranges`: finds the sections to draw from the eye (`wr` = radius of the real water, `WATER_RANGE` or `1e9`).
-    /// The sections come from a breadth-first walk out of the eye's section (`embeddium::cull`) that stays inside the `shape` (radii `rh`,
-    /// `rv` in blocks) and does not continue through terrain that walls the view off, so caves and hills hide what is behind them. That walk
-    /// does not look at the frustum or where in its section the eye is, so it is redone only when the eye changes section or a chunk's
-    /// occlusion data changes, on a worker (`wide`); this frame's part is testing it against the frustum (`in_frustum(min, max)`) and the real
-    /// eye. Each section's box is one block taller at both ends. With the eye in a chunk that is not loaded there is nowhere to start: every
-    /// section is tested instead.
-    /// ponytail: a hole in the loaded ring (a chunk still generating) cuts the walk there; it fills in as the chunk arrives. After a change
-    /// the walk in use is a frame or two old: a chunk whose mesh just arrived is drawn from the next walk on.
+    /// The sections the eye can see come from `occlusion` (Starling's `Occlusion`, vanilla's `SectionOcclusionGraph`): a search out of the eye's
+    /// section through the faces each section's `vis` connects, over the box of `rh` blocks and two chunks more, so caves and hills hide what
+    /// is behind them. The search runs on its own thread and the frame never waits for it: it uses the last finished graph, and a section whose
+    /// mesh arrived since is propagated into that graph at once (vanilla's partial update), so what it opens shows in this frame; what it closes
+    /// goes with the next search. This frame's part is testing those sections against the `shape` (radii `rh`, `rv` in blocks) and the frustum
+    /// (`in_frustum(min, max)`). Each section's box is one block taller at both ends. Before the first search has landed, or when the eye is
+    /// somewhere the last one never reached, every section is tested.
+    /// ponytail: a hole in the loaded ring (a chunk still generating) lets the view through (a column without a mesh has no `vis`).
     pub fn update_visible(&mut self, eye: Vec3, shape: Shape, rh: f32, rv: f32, wr: f32, in_frustum: impl Fn(Vec3, Vec3) -> bool) {
-        let ey = (eye.y.floor() as i32) >> 4;
-        let inside = (0..SECTIONS as i32).contains(&ey); // above or below the world the eye's section says nothing about the view
-        let origin = [chunk_coord(eye.x), ey.clamp(0, SECTIONS as i32 - 1), chunk_coord(eye.z)];
-        let wide = self.wide.get(&self.graph, wide::WideKey { origin, inside, shape, rh, rv });
+        // Starling's `start_occlusion`: the search keeps the full radius, whatever the tests below then drop.
+        self.occlusion.update(glam::DVec3::new(f64::from(eye.x), f64::from(eye.y), f64::from(eye.z)), (rh / 16.0) as i32 + 2);
         self.visible.clear();
-        for &((x, z), mask) in &wide.cols {
-            // The column's box holds those of its sections: most columns of a wide walk are behind the camera or out of the side.
+        for &(x, z) in self.chunks.keys() {
+            // The column's box holds those of its sections: most columns are behind the camera or out of the side.
             let min = Vec3::new(x as f32 * 16.0, -1.0, z as f32 * 16.0);
             let max = min + Vec3::new(16.0, H as f32 + 2.0, 16.0);
             if !in_range(shape, eye, min, max, rh, rv) || !in_frustum(min, max) {
                 continue;
             }
-            let seen = (0..SECTIONS as i32).filter(|&y| mask >> y & 1 != 0).fold(0u32, |m, y| {
+            let seen = (0..SECTIONS as i32).filter(|&y| self.occlusion.contains((x, y, z))).fold(0u32, |m, y| {
                 let min = Vec3::new(x as f32 * 16.0, y as f32 * 16.0 - 1.0, z as f32 * 16.0);
                 let max = min + Vec3::new(16.0, 18.0, 16.0);
                 if in_range(shape, eye, min, max, rh, rv) && in_frustum(min, max) { m | 1u32 << y } else { m }
@@ -1549,7 +1610,8 @@ impl ChunkManager {
     /// The walk lists every section it enters, air ones too, so a box in an empty section of a reachable room counts as visible. A box that
     /// reaches above or below the world, or lies in a chunk that is not loaded, or a frame before the first `update_visible`, is visible:
     /// there is nothing to judge it by.
-    /// ponytail: a hole in the loaded ring cuts the walk (see `update_visible`), so an entity behind the hole is hidden until the chunk loads.
+    /// ponytail: a column that is loaded but has no mesh yet lets the search through (`update_visible`), so an entity in or behind a hole in the
+    /// loaded ring is judged by the sections the search reached beyond it, not hidden.
     pub fn box_visible(&self, min: Vec3, max: Vec3) -> bool {
         if self.visible.is_empty() {
             return true;
@@ -1674,11 +1736,14 @@ impl ChunkManager {
         (n > 0).then(|| (sum / n as f32, max, n))
     }
 
-    /// Call once per frame with the player's chunk.
-    pub fn update(&mut self, gfx: Gfx, origins: Option<&DrawOrigins>, cx: i32, cz: i32) {
+    /// Call once per frame with the player's chunk. `interactive`: the camera or a menu is being touched this frame (the frame's upload
+    /// budget is cut then, `upload_budget::frame_state_limits`).
+    pub fn update(&mut self, gfx: Gfx, origins: Option<&DrawOrigins>, cx: i32, cz: i32, interactive: bool) {
         let t0 = std::time::Instant::now();
         if let Some(last) = self.last_update.replace(t0) {
-            self.frame_ns = Some(upload_budget::next_average_frame(self.frame_ns, t0.duration_since(last).as_nanos() as f64));
+            let frame = t0.duration_since(last).as_nanos() as f64;
+            self.last_frame_ns = frame as u64;
+            self.frame_ns = Some(upload_budget::next_average_frame(self.frame_ns, frame));
         }
         self.stream(cx, cz);
         self.populate_land();
@@ -1687,7 +1752,7 @@ impl ChunkManager {
         self.light_pending(cx, cz);
         let lit = t0.elapsed();
         // A new chunk waits for the light thread to settle, so it is meshed once, lit; an edited one does not (`mesh_pending`).
-        let built = self.mesh_pending(gfx, origins, cx, cz, self.light_settled());
+        let built = self.mesh_pending(gfx, origins, cx, cz, self.light_settled(), interactive);
         let total = t0.elapsed();
         if total >= SLOW_CHUNK_WORK {
             log::warn!("slow chunk work {total:?}: stream + populate {populated:?}, light done at {lit:?}, {built} mesh(es)");
@@ -1749,7 +1814,7 @@ impl ChunkManager {
             for k in gone {
                 let Some(e) = self.chunks.remove(&k) else { continue };
                 self.born.remove(&k);
-                self.graph.set(k, None);
+                self.occlusion.remove_column(k.0, k.1);
                 e.mesh.iter().for_each(|m| self.pages.free(m));
                 if self.ingested.remove(&k) {
                     let cols = cols_of(&mut self.cm, k, &e);
@@ -1846,6 +1911,17 @@ impl ChunkManager {
         self.chunks.contains_key(&key)
     }
 
+    /// Give back vertex buffers the renderer has copied: a worker takes them (`Job::Free`), as vanilla's compile task closes its mesh
+    /// data on its own thread once copied. Freed in the frame, the hundreds of meshes a chunk border brings waited on the allocator
+    /// behind every busy worker: up to 20 ms of a frame each time (Starling's measurement, flying at render distance 32).
+    /// (Starling `streaming.rs`, `Streaming::free`, MIT; see `THIRD_PARTY_NOTICES.md`. Changed: Starling's job goes to the front of its
+    /// priority queue; this channel is first in, first out, so the buffers are pooled after the jobs already queued.)
+    fn free(&mut self, meshes: Vec<Vec<Packed>>) {
+        if !meshes.is_empty() {
+            let _ = self.jobs.send(Job::Free(meshes));
+        }
+    }
+
     /// Uploads finished meshes while the frame's `UploadBudget` (bytes and time, Sodium's `UploadResourceBudget`) lasts, at most
     /// `MESH_PER_FRAME`: the first always, a later one only if its size and its estimated cost (`UploadDurationEstimator`) still
     /// fit; one that does not is kept for the next frame (`held`). Then queues jobs for the chunks that need one, nearest first,
@@ -1855,16 +1931,21 @@ impl ChunkManager {
     /// chunk (`urgent`) does not: a broken block was visible for as long as the engine was busy (first light of the chunks streaming
     /// in keeps it busy for seconds), then a frame for the report, then the job. Its mesh takes the light as it is, and the engine's
     /// `stale` report queues the second, lit one. ponytail: two meshes per edit while the engine is busy, one when it is not.
-    fn mesh_pending(&mut self, gfx: Gfx, origins: Option<&DrawOrigins>, cx: i32, cz: i32, settled: bool) -> usize {
+    fn mesh_pending(&mut self, gfx: Gfx, origins: Option<&DrawOrigins>, cx: i32, cz: i32, settled: bool, interactive: bool) -> usize {
         self.urgent.retain(|k| self.chunks.contains_key(k));
-        let mut budget = UploadBudget::limited(upload_budget::frame_duration_budget(self.frame_ns.unwrap_or(FIRST_FRAME_NS)), UPLOAD_SIZE_LIMIT);
+        // Sodium's budget, cut when the frame before this one was late or the camera or a menu is being touched (`frame_state_limits`).
+        let (duration, size) = upload_budget::frame_state_limits(upload_budget::frame_duration_budget(self.frame_ns.unwrap_or(FIRST_FRAME_NS)), UPLOAD_SIZE_LIMIT, self.last_frame_ns, interactive);
+        let mut budget = UploadBudget::limited(duration, size);
         let mut uploaded = 0;
+        // The vertex buffers this frame is done with, given back to the workers in one `Job::Free` at the end (`free`).
+        let mut freed: Vec<Vec<Packed>> = Vec::new();
         // What this frame really wrote (meshes that went into an existing page only: a new page's buffer creation is not an upload).
         let (mut writes, mut written, mut spent_ns) = (0u64, 0u64, 0u64);
         while uploaded < MESH_PER_FRAME {
             let Some((key, b)) = self.held.take().or_else(|| self.built.try_recv().ok()) else { break };
             if !self.chunks.contains_key(&key) {
                 self.meshing.remove(&key); // unloaded meanwhile (what `accept` says), and it costs no budget
+                freed.push(b.verts);
                 continue;
             }
             let bytes = b.verts.len() as u64 * VERT_BYTES;
@@ -1907,16 +1988,20 @@ impl ChunkManager {
                     None
                 }
             };
+            freed.push(verts); // copied into the page (or not drawn): the buffer is a worker's to keep, not the frame's to free
             if let Some(e) = self.chunks.get_mut(&key) {
                 // ponytail: a rebuild with the same index count (the time-of-day relight) is taken as the same geometry, so the
                 // shadow map is not redrawn for it; an edit that keeps the count is picked up by the next sun / movement refresh.
                 if e.mesh.as_ref().map_or(0, |m| m.index_count) != mesh.as_ref().map_or(0, |m| m.index_count) {
                     self.mesh_gen = self.mesh_gen.wrapping_add(1);
                 }
-                // Only other occlusion data makes the walk redo itself: the time-of-day relight rebuilds a mesh with the same `vis`.
+                // Only other occlusion data is passed on: the time-of-day relight rebuilds a mesh with the same `vis`. `Occlusion::set` takes a
+                // section at a time and ignores one that did not change.
                 let (was, now) = (e.mesh.as_ref().map_or([vis::FULL; SECTIONS], |m| m.vis), mesh.as_ref().map_or([vis::FULL; SECTIONS], |m| m.vis));
                 if was != now {
-                    self.graph.set(key, Some(now));
+                    for (y, &v) in now.iter().enumerate() {
+                        self.occlusion.set((key.0, y as i32, key.1), v);
+                    }
                 }
                 // The new runs are in before the old ones go, so a page holding only this chunk is not dropped and made again.
                 if let Some(old) = std::mem::replace(&mut e.mesh, mesh) {
@@ -1926,6 +2011,8 @@ impl ChunkManager {
                 self.pages.free(m); // (cannot happen: `accept` checked) keep the arena honest
             }
         }
+
+        self.free(freed);
 
         // Sodium feeds the estimator one sample per frame: the average size and the average duration of that frame's uploads
         // (the time of one mesh is not separable from the others', so the mean is what it learns from).
@@ -2409,6 +2496,77 @@ mod tests {
         assert_eq!(vertex::decode(&q.verts[0]).pos[1], 5.0);
         assert_eq!(vertex::decode(&q.verts[4]).pos[1], 40.0);
         assert!(q.cut.iter().all(|&c| c == 2) && q.wstarts.iter().all(|&c| c == 2), "no cut-out, no water: empty layers after the solid ones");
+    }
+
+    /// Starling's `mesh_pool_reuses_capacity_with_clean_geometry_state` (`streaming.rs`, MIT), on a vertex buffer: the pool hands back the
+    /// same allocation, empty, and its byte count follows.
+    #[test]
+    fn mesh_pool_reuses_capacity_with_clean_geometry_state() {
+        let size = std::mem::size_of::<Packed>();
+        let mut mesh: Vec<Packed> = Vec::new();
+        mesh.resize(64, [0; vertex::STRIDE]);
+        let capacities = mesh.capacity() * size;
+        let pointers = mesh.as_ptr();
+        let mut pool = MeshPool::default();
+        assert!(pool.put(mesh).is_none());
+        assert_eq!(pool.bytes, capacities);
+        let reused = pool.take();
+        assert_eq!(reused.capacity() * size, capacities);
+        assert_eq!(pointers, reused.as_ptr());
+        assert!(reused.is_empty());
+        assert_eq!(pool.bytes, 0);
+    }
+
+    /// Starling's `mesh_pool_caps_retained_count_and_bytes` (`streaming.rs`, MIT), on vertex buffers.
+    #[test]
+    fn mesh_pool_caps_retained_count_and_bytes() {
+        let size = std::mem::size_of::<Packed>();
+        let mut pool = MeshPool::default();
+        for _ in 0..MeshPool::COUNT {
+            let mut mesh: Vec<Packed> = Vec::new();
+            mesh.reserve_exact(1);
+            assert!(pool.put(mesh).is_none());
+        }
+        let mut extra: Vec<Packed> = Vec::new();
+        extra.reserve_exact(1);
+        assert!(pool.put(extra).is_some());
+        for _ in 0..MeshPool::COUNT {
+            pool.take();
+        }
+        assert_eq!(pool.bytes, 0);
+        for i in 0..2 {
+            let mut mesh: Vec<Packed> = Vec::new();
+            mesh.reserve_exact(MeshPool::BYTES / size / 2 + 1);
+            assert_eq!(pool.put(mesh).is_some(), i == 1);
+            assert!(pool.bytes <= MeshPool::BYTES);
+            assert_eq!(pool.meshes.len(), 1);
+        }
+        pool.take();
+        assert_eq!(pool.bytes, 0);
+        let mut huge: Vec<Packed> = Vec::new();
+        huge.reserve_exact(MeshPool::BYTES / size + 1);
+        assert!(pool.put(huge).is_some());
+        assert!(pool.meshes.is_empty());
+        assert_eq!(pool.bytes, 0);
+    }
+
+    /// Not from Starling (its `mesher/reuse_tests.rs` compares a mesh built in a recycled buffer with a fresh one; this does it for `pack`):
+    /// a buffer that held other vertices packs the same quads as a new one, and is used as it is when it is big enough.
+    #[test]
+    fn a_recycled_buffer_packs_the_same_quads() {
+        let vf = crate::render::mesh::VF;
+        let mut v = vec![0.0f32; 8 * vf];
+        (0..8).for_each(|i| {
+            v[i * vf + 1] = if i < 4 { 5.0 } else { 40.0 };
+            (v[i * vf + 3], v[i * vf + 4], v[i * vf + 6], v[i * vf + 7]) = (0.07, 0.01, 255.0, mesh::WHITE);
+        });
+        let idx = [4, 5, 6, 4, 6, 7, 0, 1, 2, 0, 2, 3];
+        let fresh = pack(&v, &idx, &[]);
+        let dirty: Vec<Packed> = vec![[0xAB; vertex::STRIDE]; 100];
+        let pointer = dirty.as_ptr();
+        let recycled = pack_reusing(&v, &idx, &[], dirty);
+        assert_eq!(fresh, recycled);
+        assert_eq!(recycled.verts.as_ptr(), pointer, "100 vertices of room hold the 8 of two quads: no new allocation");
     }
 
     /// The CPU half of meshing run from a snapshot (what a worker does) gives exactly what the mesher gives on the live arrays.

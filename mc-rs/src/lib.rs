@@ -645,7 +645,7 @@ impl App {
         // Light and mesh the area around the player now, so the first frame already shows terrain.
         let warm = Instant::now();
         while self.chunks.meshed() < 24 && warm.elapsed() < Duration::from_secs(8) {
-            self.chunks.update(self.be.gfx(), self.be.origins(), chunk_coord(s.x), chunk_coord(s.z));
+            self.chunks.update(self.be.gfx(), self.be.origins(), chunk_coord(s.x), chunk_coord(s.z), false);
             std::thread::sleep(Duration::from_millis(1));
         }
         log::info!("chunks: {} meshed after {:?}", self.chunks.meshed(), warm.elapsed());
@@ -3846,7 +3846,10 @@ impl App {
         // Real water reaches `WATER_RANGE` with the LoD on (its water sheet takes over beyond); with it off there is no sheet, so the real water is drawn everywhere the player sees.
         let wr = if lod_on { WATER_RANGE } else { 1e9 };
         let (pcx, pcz) = (chunk_coord(self.player.pos.x), chunk_coord(self.player.pos.z));
-        self.chunks.update(self.be.gfx(), self.be.origins(), pcx, pcz);
+        // Starling's "camera/menu being touched" (`interactive` of `UploadBudget::with_frame_state`): a menu or a screen is open, or a finger is
+        // on the look area. ponytail: the gamepad's look stick and a mouse are not counted.
+        let interactive = self.touch.paused || self.screen.is_some() || self.touch.pointers.values().any(|p| p.role == PointerRole::Look);
+        self.chunks.update(self.be.gfx(), self.be.origins(), pcx, pcz, interactive);
         self.camera.zfar = if lod_on { lod::ZFAR } else { 256.0 }; // the far terrain needs the depth range
         // C7 (`CameraShake.onCameraAngles`): the live impulses roll and pitch the view, in view space, ahead of the rig and the bob.
         let (shake_pitch, shake_roll) = self.shake.angles(tick_partial, self.camera.pos);

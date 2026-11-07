@@ -43,6 +43,30 @@ pub fn frame_duration_budget(average_frame_ns: f64) -> u64 {
     ((average_frame_ns * FRAME_DURATION_UPLOAD_FRACTION) as u64).max(MIN_UPLOAD_DURATION_BUDGET)
 }
 
+/// The frame-state tiers of Starling's `UploadBudget::with_frame_state` (Starling / Horizon Android, `gfx/upload_budget.rs`, MIT; see
+/// `THIRD_PARTY_NOTICES.md`), copied as they are in the non-batching case: "prevents a missed VSync wait or active camera/menu
+/// interaction from triggering multi-millisecond mesh upload stalls". Starling's `Duration`s are nanoseconds here (this module's unit).
+pub const SLOW_FRAME: u64 = 22_000_000;
+pub const LATE_FRAME: u64 = 18_000_000;
+const MAX_UPLOAD: u64 = 2 << 20;
+const MAX_TIME: u64 = 2_000_000;
+
+/// `(duration_ns, size_bytes)` for a frame whose budget would be `duration_ns` and `size_bytes` (`frame_duration_budget`, the host's
+/// size limit), given the length of the frame before it (`frame_ns`, the last one, not the average) and whether the camera or a menu is
+/// being touched (`interactive`). Past `SLOW_FRAME` the budget is 1 MiB and 1 ms; past `LATE_FRAME`, or while interactive, half of
+/// `MAX_UPLOAD` and at most 2 ms; otherwise the size is capped at `MAX_UPLOAD`.
+/// Changed from Starling: in the last case Starling also sets the time to `MAX_TIME` (2 ms); here the caller's duration stays (Sodium's 30%
+/// of the frame, at least 2 ms), so a smooth frame is budgeted as before and only the two slow tiers are new. They never raise a value.
+pub fn frame_state_limits(duration_ns: u64, size_bytes: u64, frame_ns: u64, interactive: bool) -> (u64, u64) {
+    if frame_ns > SLOW_FRAME {
+        (duration_ns.min(1_000_000), size_bytes.min(1 << 20))
+    } else if frame_ns > LATE_FRAME || interactive {
+        (duration_ns.min(MAX_TIME.clamp(1_000_000, 2_000_000)), size_bytes.min(MAX_UPLOAD / 2))
+    } else {
+        (duration_ns, size_bytes.min(MAX_UPLOAD))
+    }
+}
+
 /// `UploadResourceBudget`: what a frame may still spend on uploads. Spent amounts are subtracted and may overshoot (`consume`),
 /// like Sodium's; [`UploadBudget::fits`] is the stricter question the host can ask when it knows the size beforehand.
 #[derive(Copy, Clone, Debug)]
@@ -239,6 +263,19 @@ mod tests {
     fn frame_budget_is_a_third_of_the_frame_with_a_floor() {
         assert_eq!(frame_duration_budget(16_666_667.0), 5_000_000);
         assert_eq!(frame_duration_budget(4_000_000.0), MIN_UPLOAD_DURATION_BUDGET);
+    }
+
+    /// Not from Starling (it has no test for `with_frame_state`): the tiers of `frame_state_limits` at the budget `ChunkManager` passes
+    /// (5 ms and 1 MiB at 60 Hz).
+    #[test]
+    fn slow_frames_and_touch_shrink_the_budget_and_a_smooth_frame_keeps_it() {
+        let (d, s) = (5_000_000, 1 << 20);
+        assert_eq!(frame_state_limits(d, s, 16_000_000, false), (d, s), "a smooth frame keeps the Sodium budget");
+        assert_eq!(frame_state_limits(d, s, 19_000_000, false), (2_000_000, s), "late: at most 2 ms");
+        assert_eq!(frame_state_limits(d, s, 16_000_000, true), (2_000_000, s), "touched: the same tier");
+        assert_eq!(frame_state_limits(d, s, 23_000_000, false), (1_000_000, 1 << 20), "slow: 1 ms and at most 1 MiB");
+        assert_eq!(frame_state_limits(d, 8 << 20, 16_000_000, false), (d, 2 << 20), "the size is capped at 2 MiB");
+        assert_eq!(frame_state_limits(500_000, s, 23_000_000, true), (500_000, s), "a tier never raises a smaller budget");
     }
 
     #[test]

@@ -2,7 +2,7 @@
 //! OpenGL, Minecraft or Forge glue. std only, no `unsafe`, no threads: the caller decides where it runs.
 //!
 //! - [`vis`]: section connectivity (`VisibilityEncoding` + a flood fill that builds it).
-//! - [`cull`]: `OcclusionCuller`, the breadth-first walk over sections that hides whatever sits behind solid terrain.
+//! - [`cull`]: `OcclusionCuller`, the breadth-first walk over sections that hides whatever sits behind solid terrain. mc-rs stopped calling it on 2026-11-07 (it uses Starling's `Occlusion` now, `mc-rs/src/world/chunks/occlusion.rs`); it stays here, tested.
 //! - [`arena`]: `GlBufferArena`'s allocator (best fit, coalescing, compacting growth) as plain bookkeeping.
 //! - [`vertex`]: `CompactChunkVertex` cut to 12 bytes, the terrain vertex.
 //! - [`quad_index`]: `SharedQuadIndexBuffer`, the one index buffer every quad mesh draws with.
