@@ -220,7 +220,7 @@ pub struct Settings {
     /// The renderer for the next start: 0 Auto (Vulkan), 1 Vulkan, 2 OpenGL ES 3.2 (`renderer:` in options.txt).
     pub renderer: u8,
     /// Flat chunk draws (`gpu::flat`, ported from Starling) for the next start: 0 off (the default), 1 on for frames with 512+ sections, 2 on
-    /// for every frame (A/B checks); a switch with no button, `flatDraws:` in options.txt. Vulkan only, and only where the device can.
+    /// for every frame (A/B checks); a switch with no button, `flatDraws:` in options.txt. Both renderers (`gpu::flat`, `gles::flat`), and only where the device can (Vulkan: vertex storage + compute; GL: ES 3.1 compute and a 64 KiB uniform block).
     pub flat_draws: u8,
     /// The look of every biome's sky as the player tuned it (the sun button of the game menu, `world::atmos`), `atmos_<n>:` in options.txt.
     pub atmos: AtmosCfg,

@@ -31,6 +31,11 @@ pub const MIN_SECTIONS: usize = 512;
 
 static WANT: AtomicU8 = AtomicU8::new(0);
 
+/// `flatDraws` of options.txt, as set at start (the GL renderer reads it too, `gles::flat`).
+pub fn want() -> u8 {
+    WANT.load(Ordering::Relaxed)
+}
+
 /// `flatDraws` of options.txt: 0 off (the default), 1 on past `MIN_SECTIONS`, 2 on for every frame. Set once, before the pipelines.
 pub fn set_want(v: u8) {
     WANT.store(v.min(2), Ordering::Relaxed);
@@ -63,7 +68,7 @@ fn supported(adapter: &wgpu::Adapter, device: &Device) -> bool {
 }
 
 /// One chunk run for `flatten.wgsl`: index count, base vertex, first index in the list.
-type Range = [u32; 3];
+pub(crate) type Range = [u32; 3];
 
 /// A run of the frame's index list drawn from one arena page.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -75,21 +80,21 @@ pub struct Call {
 
 /// One draw of the per-chunk loop (`Run`): the page it reads, its index count, and the first vertex of its quads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Draw {
-    page: u32,
-    count: u32,
-    base: u32,
+pub(crate) struct Draw {
+    pub page: u32,
+    pub count: u32,
+    pub base: u32,
 }
 
 /// The frame's draw calls, as `plan` lays them out: where the cut-out and the water calls begin (the solid ones come first).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Plan {
-    cutout_calls: usize,
-    water_calls: usize,
-    total: u64,
+pub(crate) struct Plan {
+    pub cutout_calls: usize,
+    pub water_calls: usize,
+    pub total: u64,
 }
 
-const GROUP_LIMIT: u32 = 65535;
+pub(crate) const GROUP_LIMIT: u32 = 65535;
 
 pub struct Flat {
     /// The chunk pipelines as the per-chunk ones, reading the block table in group 1 instead of the origin uniform.
@@ -133,7 +138,7 @@ fn buffer(device: &Device, label: &str, size: u64, usage: wgpu::BufferUsages) ->
 
 /// Lays out the frame's index list: the draw calls, one per run of draws in the same vertex page (a layer's first draw starts a call of its
 /// own, `layers` = the draw where the cut-out and the water layers begin), and each draw's range of the list (`ranges`, in draw order).
-fn plan(draws: &[Draw], layers: [usize; 2], calls: &mut Vec<Call>, ranges: &mut Vec<Range>) -> Plan {
+pub(crate) fn plan(draws: &[Draw], layers: [usize; 2], calls: &mut Vec<Call>, ranges: &mut Vec<Range>) -> Plan {
     calls.clear();
     ranges.clear();
     let mut layer_calls = [None; 2];

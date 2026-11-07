@@ -64,8 +64,8 @@ impl Gfx<'_> {
         }
     }
 
-    /// An empty storage buffer of `size` bytes that `write` fills: the block table of a page (`gpu::flat`), read by the vertex shader.
-    /// wgpu only; the GL renderer has no flat draws and never asks.
+    /// An empty storage buffer of `size` bytes that `write` fills: the block table of a page (`gpu::flat`, `gles::flat`), read by the vertex
+    /// shader. On GL it is a plain buffer the draw loop binds as the uniform block `B`.
     pub fn storage(&self, size: u64) -> Buf {
         match self {
             Gfx::Wgpu(d, _) => Buf::Wgpu(d.create_buffer(&wgpu::BufferDescriptor {

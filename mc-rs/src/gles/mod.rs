@@ -2,8 +2,9 @@
 //! phone whose Vulkan driver is slow can run the same frame on its (usually better tuned) GLES driver, with the same optimisations as
 //! the Vulkan one: the 12-byte chunk vertex, one shared quad index buffer, chunk pages (one VAO per page), the layer order solid /
 //! cut-out / water, MSAA resolved in tile memory (`EXT_multisampled_render_to_texture`, else a renderbuffer blit with the samples
-//! invalidated), alpha-to-coverage, dynamic resolution, one final pass with the HUD. Written 3.0-safe: 3.2 is asked for first.
+//! invalidated), alpha-to-coverage, dynamic resolution, one final pass with the HUD. Written 3.0-safe: 3.2 is asked for first, then 3.1; only flat chunk draws (`flat`) need 3.1.
 
+pub mod flat;
 pub mod renderer;
 pub mod shaders;
 pub mod sys;
@@ -63,6 +64,11 @@ pub struct Gl {
     pub name: String,
     pub max_samples: i32,
     pub ms_rtt: Option<(FbTexMs, RbMs)>,
+    /// ES 3.1's compute entry points; `None` on a 3.0 context.
+    pub compute: Option<Compute>,
+    /// Flat chunk draws (`flat`): 0 off (not asked for, or the context cannot), else `flatDraws` of options.txt. Read by `Pages::put`, which
+    /// gives every mesh whole blocks and a block table only when this is on.
+    pub flat: u8,
     size: Cell<(u32, u32)>,
     pub dq: Arc<DelQ>,
 }
@@ -79,7 +85,7 @@ fn cstr(p: *const u8) -> String {
 }
 
 impl Gl {
-    /// EGL display, an ES 3.2 context (3.0 if that is all there is) and a window surface on `window` (an `ANativeWindow*`); the context is current
+    /// EGL display, an ES 3.2 context (then 3.1, then 3.0, the least there is; flat chunk draws need 3.1's compute) and a window surface on `window` (an `ANativeWindow*`); the context is current
     /// on the calling thread.
     pub fn new(window: *mut c_void) -> Result<Self, String> {
         let egl = Egl::open()?;
@@ -97,7 +103,7 @@ impl Gl {
             }
             let mut ctx = std::ptr::null_mut();
             let mut version = (3, 2);
-            for minor in [2, 0] {
+            for minor in [2, 1, 0] {
                 let a = [EGL_CTX_MAJOR, 3, EGL_CTX_MINOR, minor, EGL_NONE];
                 ctx = (egl.create_context)(dpy, cfg, std::ptr::null_mut(), a.as_ptr());
                 if !ctx.is_null() {
@@ -130,8 +136,29 @@ impl Gl {
             };
             let mut max_samples = 1;
             (f.GetIntegerv)(MAX_SAMPLES, &mut max_samples);
+            let compute = if version >= (3, 1) {
+                let (a, b) = (get("glDispatchCompute\0"), get("glMemoryBarrier\0"));
+                (!a.is_null() && !b.is_null()).then(|| Compute {
+                    dispatch: std::mem::transmute::<*const c_void, unsafe extern "C" fn(Uint, Uint, Uint)>(a),
+                    barrier: std::mem::transmute::<*const c_void, unsafe extern "C" fn(u32)>(b),
+                })
+            } else {
+                None
+            };
+            // A page's block table is one uniform block of 16 bytes a block (`flat::BLOCK_TABLE_BYTES`); ES 3.0 only promises 16 KiB.
+            let mut max_ubo = 0;
+            (f.GetIntegerv)(MAX_UNIFORM_BLOCK_SIZE, &mut max_ubo);
+            let want = crate::gpu::flat::want();
+            let flat = if want == 0 {
+                0
+            } else if compute.is_some() && max_ubo as u32 >= self::flat::BLOCK_TABLE_BYTES {
+                want
+            } else {
+                log::info!("flat chunk draws: asked for ({want}), this GL context cannot (ES {}.{}, compute {}, uniform block {max_ubo} bytes), off", version.0, version.1, compute.is_some());
+                0
+            };
             log::info!("GLES init: {name} | {glver} | context {}.{}, max samples {max_samples}, tile-memory MSAA {}", version.0, version.1, ms_rtt.is_some());
-            let gl = Self { egl, dpy, surf, ctx, f, current: Cell::new(true), version, name, max_samples, ms_rtt, size: Cell::new((0, 0)), dq: Arc::new(DelQ::default()) };
+            let gl = Self { egl, dpy, surf, ctx, f, current: Cell::new(true), version, name, max_samples, ms_rtt, compute, flat, size: Cell::new((0, 0)), dq: Arc::new(DelQ::default()) };
             gl.size.set(gl.query_size());
             Ok(gl)
         }
@@ -234,6 +261,37 @@ impl Gl {
         }
     }
 
+    /// Compiles and links one compute shader (ES 3.1).
+    pub fn compute_program(&self, src: &str, uniforms: &[&str]) -> Result<Prog, String> {
+        let f = self.f();
+        // SAFETY: a shader object made, checked and deleted here; the string is a NUL-terminated copy.
+        unsafe {
+            let s = (f.CreateShader)(COMPUTE_SHADER);
+            let c = CString::new(src).map_err(|e| e.to_string())?;
+            (f.ShaderSource)(s, 1, &c.as_ptr(), std::ptr::null());
+            (f.CompileShader)(s);
+            let mut ok = 0;
+            (f.GetShaderiv)(s, COMPILE_STATUS, &mut ok);
+            if ok == 0 {
+                let mut buf = vec![0u8; 2048];
+                (f.GetShaderInfoLog)(s, 2048, std::ptr::null_mut(), buf.as_mut_ptr() as *mut c_char);
+                return Err(format!("compute shader: {}", String::from_utf8_lossy(&buf).trim_end_matches('\0')));
+            }
+            let p = (f.CreateProgram)();
+            (f.AttachShader)(p, s);
+            (f.LinkProgram)(p);
+            (f.DeleteShader)(s);
+            (f.GetProgramiv)(p, LINK_STATUS, &mut ok);
+            if ok == 0 {
+                let mut buf = vec![0u8; 2048];
+                (f.GetProgramInfoLog)(p, 2048, std::ptr::null_mut(), buf.as_mut_ptr() as *mut c_char);
+                return Err(format!("compute link: {}", String::from_utf8_lossy(&buf).trim_end_matches('\0')));
+            }
+            let loc = uniforms.iter().map(|n| CString::new(*n).map_or(-1, |c| (f.GetUniformLocation)(p, c.as_ptr()))).collect();
+            Ok(Prog { id: p, loc })
+        }
+    }
+
     /// Compiles and links `vs` + `fs`; `uniforms` are looked up by name (in that order). The blocks `U` and `S` are bound to points 0 and 1.
     pub fn program(&self, vs: &str, fs: &str, uniforms: &[&str]) -> Result<Prog, String> {
         let f = self.f();
@@ -267,7 +325,8 @@ impl Gl {
                 (f.GetProgramInfoLog)(p, 2048, std::ptr::null_mut(), buf.as_mut_ptr() as *mut c_char);
                 return Err(format!("link: {}", String::from_utf8_lossy(&buf).trim_end_matches('\0')));
             }
-            for (name, point) in [(c"U", 0), (c"S", 1)] {
+            // `B`: the block table of a page (flat chunk draws), bound by the draw loop at point 2.
+            for (name, point) in [(c"U", 0), (c"S", 1), (c"B", 2)] {
                 let i = (f.GetUniformBlockIndex)(p, name.as_ptr());
                 if i != u32::MAX {
                     (f.UniformBlockBinding)(p, i, point);

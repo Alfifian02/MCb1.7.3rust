@@ -22,6 +22,7 @@ Status words: `done` = code written; `verified` = measured on a device; `skipped
 | 2 | 7 | Write unloaded chunks from a background thread | already there | `Writer` (thread `chunk-io`); `load` looks at `inflight` first. |
 | 2 | 7 | Tick mobs and dropped items only inside the simulation distance | not ported | mc-rs has no simulation distance; owner decision needed (see below). |
 | 3 | 8 | Flat-index batching | done, off by default, not verified | Copied from Starling's `gfx/flat.rs` / `flatten.wgsl`: `mc-rs/src/gpu/flat.rs`, `flatten.wgsl`. Vulkan only; `flatDraws:1` (past 512 sections) or `flatDraws:2` (every frame) in options.txt. See "Phase 3 #8 result". |
+| 3 | 8 | Flat-index batching on the OpenGL ES renderer | done 2026-11-08, off by default, not verified | `mc-rs/src/gles/flat.rs`; ES 3.1 compute + a uniform-block origin table. See "Phase 3 #8 result, GLES". |
 | 3 | 9 | Thermal hints | not started | Next patch: Starling's `android/device_runtime.rs` (ADPF). |
 
 ### What the screenshots say (same phone, Adreno 610, render distance 8)
@@ -114,6 +115,29 @@ To measure (Phase 0 is still skipped, so there is no baseline): the same spot an
 UNVERIFIED, all of it: that it compiles; `naga` accepting the vertex entry points' storage bindings next to the `draw` uniform (they use different bindings, 1 and 2 against 0); that the picture is pixel-identical to the per-chunk draws (the `flatten` test checks the indices against the shared index buffer, on a GPU or lavapipe, skipped without one); that Adreno 610's Vulkan driver is happy with two read-only storage buffers in the vertex stage; that a page's bind group follows a page that was dropped and its id never reused (ids only grow).
 
 Tests added: `plan_draws_runs_of_a_page_in_order`, `plan_skips_empty_layers`, `flatten_writes_the_indices_of_the_per_chunk_draws` (from Starling's `plan` / `flatten` tests, adapted), `flat_meshes_take_whole_blocks`, `flat_draws_option_is_off_by_default_and_round_trips` (mine); the shader test now also checks `vs_chunk_flat` and `vs_chunk_water_flat`.
+
+#### Phase 3 #8 result, GLES (2026-11-08; written WITHOUT a Rust toolchain: not compiled, not run, not measured)
+
+What it does: with `flatDraws` on and a context that can, `gles::flat::Flat::prepare` (before the scene pass, in `Renderer::draw_world`) walks the same `for_each_run` for the three layers, `plan` (shared with `gpu::flat`) lays out the calls, and a compute pass (`FLATTEN_CS`, GLSL ES 3.10, `flatten.wgsl` line for line) writes one index list; `Renderer::flat_runs` draws it with one `DrawElements` per run of one page, binding the page's vertex buffer (the list is the element buffer of its VAO) and its block table once per page. No `Uniform3f` per chunk.
+
+How it differs from the Vulkan one, and why:
+
+| | Vulkan (`gpu/flat.rs`) | GLES (`gles/flat.rs`) |
+|---|---|---|
+| Needs | vertex storage, compute, 2 storage buffers per stage | ES 3.1 context (`glDispatchCompute`, `glMemoryBarrier`), `MAX_UNIFORM_BLOCK_SIZE` >= 64 KiB |
+| Origin lookup | `slot_origins[block_slots[vertex >> 8]]`, storage buffers | `blocks[gl_VertexID >> 8].xyz`, one uniform block `B` (point 2), a `vec4` origin a block (4096 blocks, 64 KiB a page) |
+| Why | storage buffers are core | ES 3.1 lets a driver have no vertex-stage storage blocks; uniform blocks it always has. One level: a slot table would be a second 64 KiB block |
+| Context 3.0 / no compute | n/a | `Gl::flat` = 0, per-chunk draws, logged |
+
+What `Pages::put` does for GL now: rounds a mesh up to whole `GRAIN` blocks and writes the chunk's origin into every block of it (`Page::blocks`, 16 bytes a block) when `Gl::flat` is on. `Gl::flat` is read at context creation from `flatDraws`; if the flat programs then fail to build, pages stay in flat layout (a few hundred spare vertices a chunk) and the per-chunk draws are used.
+
+Left out: GPU occlusion culling, shader packs, sorted translucent indices (as in the Vulkan port). Unlike Vulkan, no indirect draws: ES 3.1's `DrawElementsIndirect` has no multi-draw, so one draw per page run it is.
+
+UNVERIFIED, all of it: that it compiles; that a driver accepts `gl_VertexID` as an index into a uniform array in the vertex shader of the compact chunk vertex (it should, ES 3.0 allows dynamic indexing of uniform blocks); that `glDrawElements` over a buffer the compute pass wrote needs only `ELEMENT_ARRAY_BARRIER_BIT`; **that the dispatch before the scene pass does not cost a tile-memory flush or a stall on Adreno / Mali** (the one real risk of putting compute in a GLES frame: the driver may serialise the previous frame's reads of the list); that the picture is pixel-identical to the per-chunk draws. Origins are f32 of `chunk * 16`, the same value the per-chunk path sends as `u_origin`, so the maths is the same.
+
+To measure (Phase 0 is still skipped): the same spot and view distance with `flatDraws:0`, `1`, `2` on GLES; count `DrawElements` and `Uniform3f` calls per frame (not counted anywhere yet), CPU ms in `draw_world`, frame time (the GL path has no GPU timer for the compute pass).
+
+Tests added (CPU only): `flatten_shader_matches_the_shared_quad_indices` (the shader's `quad` arithmetic against `embeddium::quad_index`, and the text of the shader), `flat_vertex_shader_reads_the_block_table`.
 
 ### Not ported
 

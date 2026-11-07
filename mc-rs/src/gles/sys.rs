@@ -72,6 +72,11 @@ pub const RENDERER: Enum = 0x1F01;
 pub const EXTENSIONS: Enum = 0x1F03;
 pub const NUM_EXTENSIONS: Enum = 0x821D;
 pub const MAX_SAMPLES: Enum = 0x8D57;
+pub const MAX_UNIFORM_BLOCK_SIZE: Enum = 0x8A30;
+/// ES 3.1 (compute): the storage buffer target, the compute stage and the barrier that makes a shader's writes visible to an index fetch.
+pub const SHADER_STORAGE_BUFFER: Enum = 0x90D2;
+pub const COMPUTE_SHADER: Enum = 0x91B9;
+pub const ELEMENT_ARRAY_BARRIER_BIT: u32 = 0x2;
 pub const FALSE: u8 = 0;
 pub const TRUE: u8 = 1;
 
@@ -169,6 +174,14 @@ gl_api! {
     GetIntegerv(Enum, *mut Int);
     GetError() -> Enum;
     PixelStorei(Enum, Int);
+}
+
+/// The two ES 3.1 entry points flat chunk draws need (`gles::flat`). Loaded apart from `Fns`, which fails when anything is missing: an ES 3.0
+/// context has no `glDispatchCompute`, and that must not stop the renderer.
+#[derive(Clone, Copy)]
+pub struct Compute {
+    pub dispatch: unsafe extern "C" fn(Uint, Uint, Uint),
+    pub barrier: unsafe extern "C" fn(u32),
 }
 
 /// `GL_EXT_multisampled_render_to_texture`: the samples live in tile memory and resolve when the pass ends.

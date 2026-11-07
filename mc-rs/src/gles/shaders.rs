@@ -80,7 +80,15 @@ float bolt_lit(float lit, vec3 wp, float shade) {
 const CHUNK_VS: &str = r#"
 #ifdef COMPACT
 layout(location = 0) in uvec3 a_w;
+#ifdef FLAT
+// Flat chunk draws (`gles::flat`): one draw covers many chunks, so a vertex finds its chunk's origin by the block of its page it is in
+// (`GRAIN` = 256 vertices, one chunk each; `Pages::put`), in the page's table, bound by the draw loop.
+layout(std140) uniform B { vec4 blocks[@NB@]; };
+vec3 chunk_origin() { return blocks[uint(gl_VertexID) >> 8u].xyz; }
+#else
 uniform vec3 u_origin;
+vec3 chunk_origin() { return u_origin; }
+#endif
 #else
 layout(location = 0) in vec3 a_p;
 layout(location = 1) in vec2 a_uv;
@@ -120,7 +128,7 @@ void main() {
     uint w0 = a_w.x;
     uint w1 = a_w.y;
     uint w2 = a_w.z;
-    vec3 vpos = u_origin + vec3(float(w0 & 511u) / 16.0 - 8.0, float((w0 >> 18u) & 8191u) / 16.0 - 8.0, float((w0 >> 9u) & 511u) / 16.0 - 8.0);
+    vec3 vpos = chunk_origin() + vec3(float(w0 & 511u) / 16.0 - 8.0, float((w0 >> 18u) & 8191u) / 16.0 - 8.0, float((w0 >> 9u) & 511u) / 16.0 - 8.0);
     vec2 tl = vec2(float((w1 >> 10u) & 2047u), float(w1 >> 21u)) * 0.25 - 240.0;
     uint tile = w1 & 1023u;
     // Leaves (tiles 53, 133, 255) sway a little (`fx.z` blocks, 0 = off): a smooth function of the position, so shared corners move together.
@@ -400,12 +408,23 @@ fn splice(s: &str) -> String {
         .replace("@SBB@", &format!("{:?}", look::boosted(0.5f32.powf(2.2))))
         .replace("@SZB@", &format!("{:?}", look::boosted(0.8f32.powf(2.2))))
         .replace("@SXB@", &format!("{:?}", look::boosted(0.6f32.powf(2.2))))
+        .replace("@NB@", &super::flat::BLOCKS.to_string())
         .replace("@BKL@", &format!("{:?}", look::BLOCK_LIGHT_BOOST))
 }
 
 /// The chunk program `which`; `a2c`: the scene pass is multisampled and the cut-out layers write coverage.
 pub fn chunk(which: Chunk, a2c: bool) -> Src {
+    chunk_with(which, a2c, false)
+}
+
+/// `chunk`, with `flat`: the origin comes from the page's block table by `gl_VertexID` (`gles::flat`), not from `u_origin`. Only the compact
+/// layers (solid, cut-out, water) have it.
+pub fn chunk_with(which: Chunk, a2c: bool, flat: bool) -> Src {
+    debug_assert!(!flat || which.compact(), "flat draws are for the chunk layers");
     let mut defs = String::new();
+    if flat {
+        defs += "#define FLAT\n";
+    }
     if which.compact() {
         defs += "#define COMPACT\n";
     }

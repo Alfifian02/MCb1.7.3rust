@@ -185,11 +185,14 @@ struct Page {
 }
 
 const _: () = assert!(PAGE_VERTS % GRAIN == 0); // every range is a whole number of blocks, so every offset is block aligned
+const _: () = assert!(PAGE_VERTS / GRAIN == crate::gles::flat::BLOCKS); // the GL block table is one uniform block of this many origins
 
 impl Page {
     fn new(gfx: Gfx, id: u32, flat: bool) -> Self {
         let vbuf = gfx.writable(PAGE_VERTS as u64 * VERT_BYTES, false);
-        let blocks = flat.then(|| gfx.storage((PAGE_VERTS / GRAIN) as u64 * 4));
+        // wgpu: a slot (u32) a block; GL: the origin itself (vec4) a block, read through a uniform block (`gles::flat`).
+        let entry = if matches!(gfx, Gfx::Gl(_)) { 16 } else { 4 };
+        let blocks = flat.then(|| gfx.storage((PAGE_VERTS / GRAIN) as u64 * entry));
         Self { id, vbuf, verts: Arena::new(PAGE_VERTS, PAGE_VERTS), blocks }
     }
 }
@@ -233,7 +236,7 @@ impl Pages {
         }
         // Flat draws name a chunk by the `GRAIN`-vertex block a vertex is in (`gpu::flat`), so a mesh takes whole blocks: the range is
         // rounded up (the arena only ever holds multiples of `GRAIN`, so every offset is aligned too). A few hundred spare vertices a chunk.
-        let flat = origins.is_some_and(|o| o.flat_enabled());
+        let flat = origins.is_some_and(|o| o.flat_enabled()) || matches!(gfx, Gfx::Gl(g) if g.flat > 0);
         let len = if flat { nv.next_multiple_of(GRAIN) } else { nv };
         let Some(slot) = self.slot() else {
             log::error!("chunk {key:?}: no free origin slot ({MAX_ORIGINS} meshes alive)");
@@ -258,7 +261,12 @@ impl Pages {
         gfx.write(&p.vbuf, v as u64 * VERT_BYTES, bytemuck::cast_slice(verts));
         if let Some(blocks) = p.blocks.as_ref().filter(|_| flat) {
             debug_assert_eq!(v % GRAIN, 0, "a flat mesh starts on a block");
-            gfx.write(blocks, (v / GRAIN) as u64 * 4, bytemuck::cast_slice(&vec![slot; (len / GRAIN) as usize]));
+            let n = (len / GRAIN) as usize;
+            match gfx {
+                // GL: the chunk's origin in every block of the mesh (the same f32 the per-chunk draws send as `u_origin`).
+                Gfx::Gl(_) => gfx.write(blocks, (v / GRAIN) as u64 * 16, bytemuck::cast_slice(&vec![[key.0 as f32 * 16.0, 0.0, key.1 as f32 * 16.0, 0.0f32]; n])),
+                Gfx::Wgpu(..) => gfx.write(blocks, (v / GRAIN) as u64 * 4, bytemuck::cast_slice(&vec![slot; n])),
+            }
         }
         if let (Some(o), Gfx::Wgpu(_, q)) = (origins, gfx) {
             o.write(q, slot, [key.0 as f32 * 16.0, 0.0, key.1 as f32 * 16.0]);

@@ -18,6 +18,7 @@ use crate::gpu::gfx::{Drawn, Gfx, WorldDraw};
 use crate::gpu::pipeline::Uniforms;
 use crate::render::{atlas, hud, present, sky, weather};
 use crate::world::chunks::Layer;
+use super::flat::Flat;
 
 /// GL clip z = 2 z - w: turns the wgpu / Vulkan projection (depth 0..1, what `FirstPersonCamera` builds) into GL's -1..1.
 pub fn depth_fix() -> Mat4 {
@@ -100,6 +101,10 @@ pub struct Renderer {
     samples: u32,
     fast: bool,
     chunk: Vec<(Chunk, Prog)>,
+    /// The chunk layers' programs that read the origin from a page's block table (`flat`); empty when flat draws are off.
+    flat_chunk: Vec<(Chunk, Prog)>,
+    /// Flat chunk draws (`flat`): `None` unless asked for (`flatDraws`) and the context can (ES 3.1 compute).
+    flat: Option<Flat>,
     present: Prog,
     hud: Prog,
     pano: Prog,
@@ -166,6 +171,27 @@ impl Renderer {
             let s = shaders::chunk(c, a2c);
             chunk.push((c, gl.program(&s.vs, &s.fs, &["u_tex", "u_origin"]).map_err(|e| format!("{c:?}: {e}"))?));
         }
+        // Flat chunk draws: asked for and the context can (`Gl::flat`). Pages already give meshes whole blocks and block tables then, so a
+        // failure here (a driver that refuses the shaders) only leaves the per-chunk draws in charge.
+        let mut flat_chunk = Vec::new();
+        let mut flat = None;
+        if gl.flat > 0 {
+            let built: Result<Vec<(Chunk, Prog)>, String> = [Chunk::Solid, Chunk::Cutout, Chunk::Water]
+                .into_iter()
+                .map(|c| {
+                    let s = shaders::chunk_with(c, a2c, true);
+                    gl.program(&s.vs, &s.fs, &["u_tex", "u_origin"]).map(|p| (c, p)).map_err(|e| format!("flat {c:?}: {e}"))
+                })
+                .collect();
+            match built.and_then(|progs| Flat::new(&gl).map(|fl| (progs, fl))) {
+                Ok((progs, fl)) => {
+                    log::info!("flat chunk draws: on (flatDraws:{})", gl.flat);
+                    flat_chunk = progs;
+                    flat = Some(fl);
+                }
+                Err(e) => log::warn!("flat chunk draws: {e}; the per-chunk draws stay"),
+            }
+        }
         let mk = |s: shaders::Src, u: &[&str], what: &str| gl.program(&s.vs, &s.fs, u).map_err(|e| format!("{what}: {e}"));
         let present = mk(shaders::present(fxaa, fast), &["u_src", "u_px", "u_grade", "u_tone"], "present")?;
         let hud = mk(shaders::hud(hud::SHEET_H, hud::IMM_H), &["u_items", "u_size", "u_imm"], "hud")?;
@@ -183,7 +209,7 @@ impl Renderer {
         unsafe {
             (f.BindBufferBase)(UNIFORM_BUFFER, 0, ubo_frame.id);
             (f.BindBufferBase)(UNIFORM_BUFFER, 1, ubo_sky.id);
-            for (_, p) in &chunk {
+            for (_, p) in chunk.iter().chain(&flat_chunk) {
                 (f.UseProgram)(p.id);
                 (f.Uniform1i)(p.loc[0], U_ATLAS as i32);
             }
@@ -286,7 +312,7 @@ impl Renderer {
         let size = gl.surface_size();
         let mut r = Self {
             t: Targets { scene: 0, draw: 0, depth: 0, ms_color: 0, resolve: 0, size: (0, 0) },
-            gl, size, samples, fast, chunk, present, hud, pano, dome, fan, stars, body, weather, ubo_frame, ubo_sky,
+            gl, size, samples, fast, chunk, flat_chunk, flat, present, hud, pano, dome, fan, stars, body, weather, ubo_frame, ubo_sky,
             atlas: atlas_t, hud_tex: hud_t, imm_tex: imm_t, body_tex: body_t, snow_tex: snow_t, rain_tex: rain_t, pano_tex: pano_t,
             vaos: HashMap::new(), empty_vao, hud_buf, fan_buf, star_v, star_i, star_n: star_idx.len() as i32, body_v, weather_buf,
             born: Instant::now(), grade: [0.0; 4], tone: [1.0, 1.0, 0.0, 0.0], cur_prog: 0, cur_vao: 0, blend: Blend::Off,
@@ -549,8 +575,12 @@ impl Renderer {
         (p.id, p.loc[1])
     }
 
-    /// Draws one chunk layer's runs with program `c`.
+    /// Draws one chunk layer's runs with program `c`: from the frame's flat index list when `Flat::prepare` built one, else one draw per run.
     fn runs(&mut self, d: &WorldDraw, layer: Layer, c: Chunk) {
+        if self.flat.as_ref().is_some_and(Flat::active) {
+            self.flat_runs(d, layer, c);
+            return;
+        }
         let (prog, origin_loc) = self.chunk_prog(c);
         self.use_prog(prog);
         let mut last: Option<u32> = None;
@@ -568,6 +598,30 @@ impl Renderer {
             // SAFETY: indices `first..end` of the bound shared quad buffer (byte offset = first * 4).
             unsafe { (self.gl.f().DrawElements)(TRIANGLES, (r.end - r.first) as i32, UNSIGNED_INT, (r.first as usize * 4) as *const _) };
         });
+    }
+
+    /// `runs` from the flat index list: the page's vertex buffer, with the list as its element buffer, and the page's block table (the uniform
+    /// block `B`, point 2) once per page, then one `DrawElements` per run of one page. No origin uniform: the vertex shader reads it.
+    fn flat_runs(&mut self, d: &WorldDraw, layer: Layer, c: Chunk) {
+        let Some(flat) = self.flat.take() else { return };
+        let calls = flat.calls(layer);
+        let prog = self.flat_chunk.iter().find(|(k, _)| *k == c).map(|(_, p)| p.id);
+        if let (false, Some(prog)) = (calls.is_empty(), prog) {
+            self.use_prog(prog);
+            let mut page = None;
+            for call in calls {
+                if page != Some(call.page) {
+                    let (Some(vbuf), Some(blocks)) = (d.chunks.page_vbuf(call.page), d.chunks.page_blocks(call.page)) else { continue };
+                    self.bind_vao(vbuf.gl().id, flat.indices().id, L_CHUNK);
+                    // SAFETY: the page's block table (a buffer of `BLOCK_TABLE_BYTES`) as the uniform block `B` of the flat chunk programs.
+                    unsafe { (self.gl.f().BindBufferBase)(UNIFORM_BUFFER, 2, blocks.gl().id) };
+                    page = Some(call.page);
+                }
+                // SAFETY: indices `first..first + count` of the list the compute pass wrote (4 bytes each), the element buffer of the bound VAO.
+                unsafe { (self.gl.f().DrawElements)(TRIANGLES, call.count as i32, UNSIGNED_INT, (call.first as usize * 4) as *const _) };
+            }
+        }
+        self.flat = Some(flat);
     }
 
     fn tiles(&mut self, d: &WorldDraw, water: bool, c: Chunk) {
@@ -638,6 +692,12 @@ impl Renderer {
         let hud_n = d.hud.len().min(HUD_QUADS * 6);
         self.gl.stream(&self.hud_buf, HUD_QUADS * 6 * HUD_VERT, bytemuck::cast_slice(&d.hud[..hud_n]));
 
+        // Flat chunk draws (off unless `flatDraws`): the compute pass that builds the frame's index list comes before the scene pass.
+        if let Some(flat) = self.flat.as_mut() {
+            if flat.prepare(&self.gl, d.chunks) {
+                self.cur_prog = flat.program(); // the dispatch left the compute program current
+            }
+        }
         let (sw, sh) = self.t.size;
         // SAFETY: the scene pass: bind, clear, fixed state.
         unsafe {
