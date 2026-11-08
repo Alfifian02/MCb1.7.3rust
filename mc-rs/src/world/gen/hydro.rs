@@ -111,6 +111,25 @@ const LAKE_SIGMA: f64 = 1.3;
 const LAKE_NEAR: i32 = 24;
 /// The blur's weights summed over a full kernel: a sample that is all lake reads 1.
 const LAKE_NORM: f64 = 10.5;
+/// Blocks round a chunk within which a lake can still matter to a column of it (`lake_top_at` reads up to about 16 blocks out,
+/// `lake_level_near` up to `LAKE_NEAR` + a cell): a network with no river bucket on the chunk and no lake cell this near cannot change it.
+const LAKE_MARGIN: i32 = 48;
+/// Side of the blur kernel in samples.
+const KN: usize = (2 * LAKE_REACH + 1) as usize;
+
+/// The blur's weights, `exp(-(di^2 + dj^2) / (2 sigma^2))`, made once (the same expression as before, so the same bits) instead of 49 `exp` a column.
+fn kernel() -> &'static [f64; KN * KN] {
+    static K: OnceLock<[f64; KN * KN]> = OnceLock::new();
+    K.get_or_init(|| {
+        let mut k = [0.0; KN * KN];
+        for di in -LAKE_REACH..=LAKE_REACH {
+            for dj in -LAKE_REACH..=LAKE_REACH {
+                k[((di + LAKE_REACH) as usize) * KN + (dj + LAKE_REACH) as usize] = (-((di * di + dj * dj) as f64) / (2.0 * LAKE_SIGMA * LAKE_SIGMA)).exp();
+            }
+        }
+        k
+    })
+}
 /// Blocks a lake's floor dips below its surface at the middle, over the first block (`lakeDip`). UNVERIFIED.
 const LAKE_DIP: f64 = 2.0;
 /// How far a bend moves the deepest line of the bed toward the outer bank (a share of the half width at a full bend). UNVERIFIED.
@@ -616,10 +635,40 @@ impl Plan {
     }
 }
 
+/// A multiplicative hasher (the idea of rustc's FxHash) for the bucket index: its keys are a pair of small `i32`, read for every column
+/// near a river, and std's SipHash (made to resist hostile keys) cost more than the lookup itself. The keys come from the world's own
+/// geometry, so nothing needs the resistance. The index is made again on load, so no cache file depends on this.
+#[derive(Default)]
+struct Fx(u64);
+
+impl std::hash::Hasher for Fx {
+    fn finish(&self) -> u64 {
+        // The last multiply leaves its best bits at the top; the table reads the bottom ones.
+        self.0.rotate_left(26)
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.write_u64(u64::from(b));
+        }
+    }
+
+    fn write_i32(&mut self, n: i32) {
+        self.write_u64(u64::from(n as u32));
+    }
+
+    fn write_u64(&mut self, n: u64) {
+        self.0 = (self.0.rotate_left(5) ^ n).wrapping_mul(0x517C_C1B7_2722_0A95);
+    }
+}
+
+/// Segment indices by the 16 x 16 block bucket they reach (`index_of`).
+type Buckets = HashMap<(i32, i32), Vec<u32>, std::hash::BuildHasherDefault<Fx>>;
+
 /// The rivers and lakes of one plate (and the margin round it).
 pub struct Network {
     segs: Vec<Seg>,
-    index: HashMap<(i32, i32), Vec<u32>>,
+    index: Buckets,
     /// Lake of each grid cell of the window (`u32::MAX`: none), the window's origin cell and size, and the lakes' top water block.
     lake_of: Vec<u32>,
     lake_top: Vec<i32>,
@@ -792,6 +841,29 @@ impl Network {
         })
     }
 
+    /// Whether this network can change chunk (cx, cz) at all: a river bucket on the chunk (`BUCKET` is the chunk's width, so the bucket of
+    /// every column is (cx, cz)), or a lake cell within `LAKE_MARGIN` blocks. When it is `false` every `plan`, `channel_grade`,
+    /// `lake_top_at` and `lake_level_near` of the chunk's columns is `None`, so leaving the network out changes nothing.
+    fn reaches(&self, cx: i32, cz: i32) -> bool {
+        if self.index.contains_key(&(cx, cz)) {
+            return true;
+        }
+        if self.lake_top.is_empty() {
+            return false;
+        }
+        let (x0, z0) = (cx * 16, cz * 16);
+        let (i0, i1) = ((x0 - LAKE_MARGIN + CELL / 2).div_euclid(CELL) - self.g0.0, (x0 + 15 + LAKE_MARGIN + CELL / 2).div_euclid(CELL) - self.g0.0);
+        let (j0, j1) = ((z0 - LAKE_MARGIN + CELL / 2).div_euclid(CELL) - self.g0.1, (z0 + 15 + LAKE_MARGIN + CELL / 2).div_euclid(CELL) - self.g0.1);
+        for i in i0.max(0)..=i1.min(self.n.0 as i32 - 1) {
+            for j in j0.max(0)..=j1.min(self.n.1 as i32 - 1) {
+                if self.lake_of.get(i as usize * self.n.1 + j as usize).is_some_and(|&id| id != u32::MAX) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     /// The lake cell a block belongs to (a cell owns 12 blocks round its centre), as an index into `lake_of`.
     fn lake_cell(&self, bx: i32, bz: i32) -> Option<u32> {
         let (i, j) = ((bx + CELL / 2).div_euclid(CELL) - self.g0.0, (bz + CELL / 2).div_euclid(CELL) - self.g0.1);
@@ -810,9 +882,10 @@ impl Network {
         let (si, sj) = (wx.div_euclid(LAKE_STEP), wz.div_euclid(LAKE_STEP));
         let mut cov = 0.0;
         let mut votes: Vec<(u32, f64)> = Vec::new();
+        let k = kernel();
         for di in -LAKE_REACH..=LAKE_REACH {
             for dj in -LAKE_REACH..=LAKE_REACH {
-                let g = (-((di * di + dj * dj) as f64) / (2.0 * LAKE_SIGMA * LAKE_SIGMA)).exp();
+                let g = k[((di + LAKE_REACH) as usize) * KN + (dj + LAKE_REACH) as usize];
                 // The sample's centre is the middle of its 3 x 3 blocks.
                 let Some(id) = self.lake_cell((si + di) * LAKE_STEP + LAKE_STEP / 2, (sj + dj) * LAKE_STEP + LAKE_STEP / 2) else { continue };
                 cov += g;
@@ -1377,8 +1450,8 @@ fn build_in(ps: f64, seed: i64, key: (i32, i32), probe: &mut dyn FnMut(i32, i32)
 }
 
 /// Every bucket a segment's channel and bank can reach, per bucket the segments to test.
-fn index_of(segs: &[Seg]) -> HashMap<(i32, i32), Vec<u32>> {
-    let mut index: HashMap<(i32, i32), Vec<u32>> = HashMap::new();
+fn index_of(segs: &[Seg]) -> Buckets {
+    let mut index = Buckets::default();
     for (si, s) in segs.iter().enumerate() {
         let wmax = s.w1.max(s.w2);
         let r = wmax + reach(wmax);
@@ -1520,7 +1593,25 @@ impl Region {
         }
     }
 
+    /// `carve_columns` over the networks that reach the chunk: most chunks have none, and then no column is read at all (a dry column
+    /// used to cost a lake lookup in every network of the region). The order of the networks is kept (ties go to the earlier one).
     fn carve_streams(&self, cx: i32, cz: i32, blocks: &mut [u8], biomes: &[Biome], temps: &[f64]) {
+        if !settings().enabled {
+            return;
+        }
+        let live: Vec<Arc<Network>> = self.nets.iter().filter(|n| n.reaches(cx, cz)).cloned().collect();
+        if live.is_empty() {
+            return;
+        }
+        if live.len() == self.nets.len() {
+            self.carve_columns(cx, cz, blocks, biomes, temps);
+        } else {
+            Region { nets: live }.carve_columns(cx, cz, blocks, biomes, temps);
+        }
+    }
+
+    /// The carve of every column of the chunk over all of this region's networks.
+    fn carve_columns(&self, cx: i32, cz: i32, blocks: &mut [u8], biomes: &[Biome], temps: &[f64]) {
         let set = settings();
         if !set.enabled {
             return;
@@ -1722,21 +1813,29 @@ impl Hydro {
                 }
             }
         }
-        // `StreamPrefetcher`, in its simplest form: the plates `PREFETCH` blocks round the chunk are made now (here, on the generating thread),
-        // so the chunk that crosses into one does not wait for its routing. UNVERIFIED: the mod makes them on a worker. Not for the World
-        // Preview's `Hydro` (`disk` false): it asks for the plates it shows, a map is drawn from what is near, and up to eight more routings
-        // a tile would slow it down and push its own plates out past `MAX_PLATES`.
-        let ahead = self.disk && settings().prefetch;
-        for dx in [-PREFETCH, 0.0, PREFETCH] {
-            for dz in [-PREFETCH, 0.0, PREFETCH] {
-                let k = plate_at_in(self.size, self.seed, mx + dx, mz + dz);
-                if ahead && !keys.contains(&k) {
-                    self.network(k, probe);
+        let nets: Vec<Arc<Network>> = keys.iter().map(|&k| self.network(k, probe)).collect();
+        // `StreamPrefetcher`, in its simplest form: a plate `PREFETCH` blocks round the chunk is made ahead (here, on the generating thread),
+        // so the chunk that crosses into it does not wait for its routing. At most ONE plate a call, after the ones this chunk needs: the
+        // routing of a plate is tens of milliseconds and up to eight of them in one chunk's call was a hitch; the chunks that follow make
+        // the rest. UNVERIFIED: the mod makes them on a worker. Not for the World Preview's `Hydro` (`disk` false): it asks for the plates it
+        // shows, and extra routings would slow a tile and push its own plates out past `MAX_PLATES`.
+        if self.disk && settings().prefetch {
+            'ahead: for dx in [-PREFETCH, 0.0, PREFETCH] {
+                for dz in [-PREFETCH, 0.0, PREFETCH] {
+                    let k = plate_at_in(self.size, self.seed, mx + dx, mz + dz);
+                    if !keys.contains(&k) && !self.known(k) {
+                        self.network(k, probe);
+                        break 'ahead;
+                    }
                 }
             }
         }
-        let nets = keys.into_iter().map(|k| self.network(k, probe)).collect();
         Arc::new(Region { nets })
+    }
+
+    /// Whether a plate is made or being made (by any thread).
+    fn known(&self, key: (i32, i32)) -> bool {
+        self.plates.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|(k, _)| *k == key)
     }
 
     /// The network at a block, if it has been made.
@@ -2132,6 +2231,58 @@ mod tests {
             }
         }
         Network { segs: vec![], index: index_of(&[]), lake_of, lake_top: vec![63], g0: (0, 0), n: (5, 5) }
+    }
+
+    /// Leaving out the networks that do not reach a chunk changes no block: `carve` (filtered) equals `carve_columns` over every network, on
+    /// chunks beside a river, beside a lake, and far from both, and a far chunk is not reached at all.
+    #[test]
+    fn a_network_that_does_not_reach_a_chunk_is_left_out_without_changing_it() {
+        let river = made(&[(-100.0, 8.0, 100.0, 8.0, 2.0)]);
+        let far = made(&[(2000.0, 2000.0, 2200.0, 2000.0, 2.0)]);
+        assert!(river.reaches(0, 0) && !river.reaches(0, 5) && !far.reaches(0, 0));
+        let lake = lake_net();
+        assert!(lake.reaches(1, 1) && lake.reaches(-2, 1) && !lake.reaches(-6, 1) && !lake.reaches(1, 9));
+        let reg = Region { nets: vec![Arc::new(far), Arc::new(river), Arc::new(lake)] };
+        for cx in -4..6 {
+            for cz in -4..8 {
+                let mut a = vec![block::AIR; crate::world::chunk::VOLUME];
+                for i in 0..256usize {
+                    for y in 0..66 {
+                        a[crate::world::chunk::idx(i / 16, y, i % 16)] = block::STONE;
+                    }
+                }
+                let mut b = a.clone();
+                let (bio, tmp) = (vec![Biome::Plains; 256], vec![0.8; 256]);
+                reg.carve_streams(cx, cz, &mut a, &bio, &tmp);
+                reg.carve_columns(cx, cz, &mut b, &bio, &tmp);
+                assert!(a == b, "chunk {cx} {cz} differs");
+            }
+        }
+    }
+
+    /// The bucket index finds the same segments as a scan of all of them, and its hasher spreads a square of keys without a collision.
+    #[test]
+    fn the_bucket_index_holds_what_a_scan_finds() {
+        use std::hash::{BuildHasher, BuildHasherDefault};
+        let net = made(&[(-100.0, 8.0, 100.0, 8.0, 2.0), (0.0, -60.0, 0.0, 90.0, 3.0), (400.0, 400.0, 460.0, 380.0, 1.0)]);
+        for bx in -12..30 {
+            for bz in -12..30 {
+                let mut scan = Vec::new();
+                for (i, s) in net.segs.iter().enumerate() {
+                    let r = s.w1.max(s.w2) + reach(s.w1.max(s.w2));
+                    let b = BUCKET as f64;
+                    let (x0, x1) = (((s.x1.min(s.x2) - r) / b).floor() as i32, ((s.x1.max(s.x2) + r) / b).floor() as i32);
+                    let (z0, z1) = (((s.z1.min(s.z2) - r) / b).floor() as i32, ((s.z1.max(s.z2) + r) / b).floor() as i32);
+                    if (x0..=x1).contains(&bx) && (z0..=z1).contains(&bz) {
+                        scan.push(i as u32);
+                    }
+                }
+                assert_eq!(net.index.get(&(bx, bz)).cloned().unwrap_or_default(), scan, "bucket {bx} {bz}");
+            }
+        }
+        let h = BuildHasherDefault::<Fx>::default();
+        let all: std::collections::HashSet<u64> = (-100..100).flat_map(|a| (-100..100).map(move |b| (a, b))).map(|k: (i32, i32)| h.hash_one(k)).collect();
+        assert_eq!(all.len(), 200 * 200);
     }
 
     #[test]
