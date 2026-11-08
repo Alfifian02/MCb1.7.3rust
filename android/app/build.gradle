@@ -1,0 +1,37 @@
+plugins { id 'com.android.application' }
+
+// Signing: CI passes the committed long-lived keystore (keystore/debug.keystore in the repo root) through these
+// properties, so every build has the same identity and `adb install -r` can upgrade in place.
+// Without them the release APK falls back to the local debug key.
+def ksFile = findProperty('MCPP_KEYSTORE')
+
+android {
+    namespace 'dev.mcpp.b173'
+    compileSdk 34
+    ndkVersion '26.1.10909125'
+    defaultConfig {
+        applicationId 'dev.mcpp.b173'
+        minSdk 26            // ALooper_pollOnce
+        targetSdk 34
+        versionCode (findProperty('MCPP_BUILD') ?: '1').toInteger()
+        versionName "0.1.${findProperty('MCPP_BUILD') ?: '0'}"
+        ndk { abiFilters 'arm64-v8a' }
+        externalNativeBuild { cmake { arguments '-DANDROID_STL=c++_shared' } }
+    }
+    signingConfigs {
+        if (ksFile) {
+            ci {
+                storeFile file(ksFile)
+                storePassword findProperty('MCPP_KEYSTORE_PASSWORD') ?: 'android'
+                keyAlias findProperty('MCPP_KEY_ALIAS') ?: 'androiddebugkey'
+                keyPassword findProperty('MCPP_KEYSTORE_PASSWORD') ?: 'android'
+            }
+        }
+    }
+    buildTypes {
+        release {
+            signingConfig ksFile ? signingConfigs.ci : signingConfigs.debug
+        }
+    }
+    externalNativeBuild { cmake { path file('../../CMakeLists.txt'); version '3.22.1' } }
+}

@@ -1,9 +1,0 @@
-[package]
-name = "lod"
-version = "0.1.0"
-edition = "2021"
-description = "Distant terrain for a short world: height columns, a mip quadtree, tile selection by distance, a small mesher. std only."
-
-# No dependencies on purpose, like `embeddium`: pure CPU logic that `cargo test -p lod` runs on a plain Linux host
-# (the mc-rs cdylib cannot be tested there) and that cross-compiles to Android unchanged.
-[dependencies]

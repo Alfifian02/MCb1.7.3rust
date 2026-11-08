@@ -1,0 +1,106 @@
+name: mc-cpp
+# Host tests + signed Android APK of the C++ port (mc-cpp/). Separate from ci.yml (the Rust port).
+on:
+  push:
+    paths: ['mc-cpp/**', '.github/workflows/mc-cpp.yml', 'keystore/**']
+  pull_request:
+    paths: ['mc-cpp/**', '.github/workflows/mc-cpp.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mc-cpp-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NDK_VERSION: 26.1.10909125
+  CMAKE_VERSION: 3.22.1
+
+jobs:
+  test:
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: mc-cpp
+    steps:
+      - uses: actions/checkout@v4
+      # golden_test (bit-exact against the b1.7.3 Java hashes, caves included) + sim_test (streaming + physics).
+      # No pipe to tail here: a failing test must fail the job.
+      - name: Golden + simulation tests
+        run: make test
+      - name: Sanitizer pass (ASan + UBSan)
+        run: |
+          make clean
+          make test CXXFLAGS="-std=c++17 -O1 -g -Wall -Wextra -pthread -fsanitize=address,undefined -fno-sanitize-recover=undefined"
+
+  apk:
+    runs-on: ubuntu-22.04
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      # AGP 8.5 needs Gradle >= 8.7. The skeleton has no wrapper, so install Gradle here.
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+      - name: Install Android NDK + CMake
+        run: |
+          set -e
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMANAGER" ]; then
+            mkdir -p "$ANDROID_HOME/cmdline-tools"
+            curl -sLo /tmp/cmdtools.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+            unzip -q /tmp/cmdtools.zip -d /tmp/cmdtools
+            mv /tmp/cmdtools/cmdline-tools "$ANDROID_HOME/cmdline-tools/latest"
+          fi
+          yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
+          "$SDKMANAGER" --install "platforms;android-34" "build-tools;34.0.0" "ndk;${NDK_VERSION}" "cmake;${CMAKE_VERSION}"
+      - name: Build release APK
+        working-directory: mc-cpp/android
+        env:
+          ANDROID_SDK_ROOT: ${{ env.ANDROID_HOME }}
+        run: |
+          set -euo pipefail
+          # The committed long-lived keystore signs every build with the same identity (same as ci.yml).
+          gradle --no-daemon :app:assembleRelease \
+            -PMCPP_KEYSTORE="$GITHUB_WORKSPACE/keystore/debug.keystore" \
+            -PMCPP_KEYSTORE_PASSWORD=android \
+            -PMCPP_BUILD="${{ github.run_number }}"
+      - name: Collect + verify APK
+        run: |
+          set -euo pipefail
+          APK=$(find mc-cpp/android/app/build/outputs/apk/release -name '*.apk' | head -1)
+          [ -n "$APK" ] || { echo "::error::no APK produced"; exit 1; }
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name apksigner -type f | sort | tail -1)
+          "$APKSIGNER" verify --print-certs "$APK"
+          unzip -l "$APK" | grep -E 'lib/arm64-v8a/lib(mcpp|c\+\+_shared)\.so'
+          mkdir -p dist
+          cp "$APK" dist/MinecraftB173Cpp.apk
+          ls -la dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MinecraftB173Cpp-apk
+          path: dist/MinecraftB173Cpp.apk
+      - name: Upload Gradle / CMake reports on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mc-cpp-build-reports
+          path: |
+            mc-cpp/android/app/build/reports
+            mc-cpp/android/app/.cxx/**/*.log
+          if-no-files-found: ignore
+      # Only on pushes to a branch (not PRs): a prerelease to install the APK straight onto a phone.
+      - name: Release (for direct phone install)
+        if: github.event_name != 'pull_request'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: mc-cpp-build-${{ github.run_number }}
+          name: mc-cpp APK build ${{ github.run_number }}
+          prerelease: true
+          files: dist/MinecraftB173Cpp.apk
