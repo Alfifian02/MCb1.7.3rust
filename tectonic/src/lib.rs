@@ -24,7 +24,8 @@
 //! legacy octave order of `BlendedNoise`, `shift_x` / `shift_z`, and the noise parameters of `offset`, `jagged`, `temperature`,
 //! `vegetation`. If they are right a seed gives the mod's continents; if one is wrong the terrain is still Tectonic-shaped.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex, OnceLock};
 
 pub mod aquifer;
 
@@ -937,6 +938,44 @@ fn key(n: &Node) -> [u64; 7] {
 
 // ------------------------------------------------------------------------------------------------ the terrain
 
+/// How many corner columns of the `interpolated` tables the Cascades cache keeps (one is `interps.len() * ny` f64, about 3 KB).
+const CORNER_CAP: usize = 1536;
+
+/// The corner columns of the `interpolated` tables that lie on a chunk's edge, by the block (x, z) of the column, each `interps.len() * ny`
+/// values table by table. A chunk's 5 x 5 corners for its 4 x 4 cells are 16 on the edge and 9 inside; the edge ones are the neighbours' too,
+/// so the chunk next to it takes them from here instead of evaluating the whole density tree on them again. The value is the one `chunk`
+/// computes (a cached node is the same f64 operations), so the density is bit for bit the same. First in, first out.
+#[derive(Default)]
+struct Corners {
+    map: HashMap<(i32, i32), Box<[f64]>>,
+    order: VecDeque<(i32, i32)>,
+}
+
+impl Corners {
+    fn put(&mut self, k: (i32, i32), col: Box<[f64]>) {
+        if self.map.insert(k, col).is_none() {
+            self.order.push_back(k);
+            while self.order.len() > CORNER_CAP {
+                if let Some(old) = self.order.pop_front() {
+                    self.map.remove(&old);
+                }
+            }
+        }
+    }
+}
+
+/// The corner cache of a world: every `Tectonic::cascades` of one seed (the game's workers each make their own) share it, so a chunk next
+/// to one that another worker made still finds its edge. `layout` (`Tectonic::layout`) keeps two bundles whose tables differ apart. A third
+/// world's arrival drops the older ones (the generators that hold one keep it).
+fn shared_corners(seed: i64, layout: u64) -> Arc<Mutex<Corners>> {
+    static ALL: OnceLock<Mutex<HashMap<(i64, u64), Arc<Mutex<Corners>>>>> = OnceLock::new();
+    let mut all = ALL.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+    if all.len() >= 2 && !all.contains_key(&(seed, layout)) {
+        all.clear();
+    }
+    all.entry((seed, layout)).or_default().clone()
+}
+
 pub struct Tectonic {
     nodes: Vec<Node>,
     dep: Vec<bool>,
@@ -954,6 +993,8 @@ pub struct Tectonic {
     height: usize,
     /// Cascades' aquifers (`aquifer.rs`); `None` for a bundle without an `aq` section.
     aq: Option<aquifer::Ids>,
+    /// The corner columns shared between chunks (`Corners`): Cascades only, `None` for every other bundle.
+    corners: Option<Arc<Mutex<Corners>>>,
 }
 
 fn hash(j: Option<&J>) -> Result<(u64, u64), String> {
@@ -970,7 +1011,27 @@ impl Tectonic {
 
     /// The Cascades terrain of `seed` (`Config::cascades`, 384 blocks tall). Panics only if the embedded `cascades.json` is broken.
     pub fn cascades(seed: i64) -> Self {
-        Self::from_bundle(CASCADES, seed, Config::cascades()).expect("cascades.json")
+        let mut t = Self::from_bundle(CASCADES, seed, Config::cascades()).expect("cascades.json");
+        t.corners = Some(shared_corners(seed, t.layout()));
+        t
+    }
+
+    /// A fingerprint of the `interpolated` tables: how many, how tall, and the value of each at a few fixed points, in table order. Two
+    /// terrains with the same seed and the same fingerprint have the same tables, so they may share the corner columns made for them.
+    fn layout(&self) -> u64 {
+        let g = Grid { on: false, x0: 0, z0: 0, min_y: self.min_y, ny: 2, tabs: Vec::new() };
+        let mut m = Memo::new(self.nodes.len());
+        let mut h = (self.interps.len() as u64) << 32 | self.height as u64;
+        for (x, z) in [(0, 0), (1234, -777)] {
+            m.column();
+            for dy in [0, 72, 200] {
+                m.point();
+                for &arg in &self.interps {
+                    h = (h.rotate_left(7) ^ self.ev(arg, x, self.min_y + dy, z, &mut m, &g).to_bits()).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                }
+            }
+        }
+        h
     }
 
     /// The climate of a column, for choosing the biome: [temperature, vegetation, continents, erosion, ridges] (the multi-noise
@@ -1049,7 +1110,7 @@ impl Tectonic {
             aq_spec = Some((names, num("lower")?, num("cell")?, hash(a.get("hash"))?, hash(a.get("ore_hash"))?));
         }
         let Builder { nodes, dep, ids, splines, interps, .. } = b;
-        let mut t = Tectonic { nodes, dep, splines, interps, ids, root, noises, noise_ix, offset, blended, min_y: cfg.min_y, height: (cfg.max_y - cfg.min_y) as usize, aq: None };
+        let mut t = Tectonic { nodes, dep, splines, interps, ids, root, noises, noise_ix, offset, blended, min_y: cfg.min_y, height: (cfg.max_y - cfg.min_y) as usize, aq: None, corners: None };
         if simplify {
             t.simplify();
         }
@@ -1186,15 +1247,41 @@ impl Tectonic {
     pub fn chunk(&self, cx: i32, cz: i32) -> Vec<f32> {
         let h = self.height;
         let ny = h / 8 + 1;
-        // ponytail: the memo lives for one chunk, so the border columns shared with the neighbours (5 x 5 corners for 4 x 4 cells,
-        // ~56 % more 2D work than needed) are computed again by each; upgrade is a column cache across chunks like `OverworldGenerator::cols`.
+        // The memo lives for one chunk. The corner columns on the chunk's edge (16 of its 5 x 5) are its neighbours' too: Cascades keeps them in
+        // `corners`, so the neighbour takes them from there (a hit is the same f64 the loop below would make) and the tree is evaluated on the
+        // other 9 and on the edge ones not made yet. Other bundles have no cache and evaluate all 25.
         let mut m = Memo::new(self.nodes.len());
         let mut g = Grid { on: false, x0: cx * 16, z0: cz * 16, min_y: self.min_y, ny, tabs: Vec::new() };
+        let n = self.interps.len();
+        let mut tabs = vec![vec![0.0; 25 * ny]; n];
+        let edge = |gx: usize, gz: usize| gx == 0 || gx == 4 || gz == 0 || gz == 4;
+        let mut have = [false; 25];
+        if let Some(c) = &self.corners {
+            let c = c.lock().unwrap_or_else(|e| e.into_inner());
+            for gx in 0..5usize {
+                for gz in 0..5usize {
+                    if !edge(gx, gz) {
+                        continue;
+                    }
+                    if let Some(col) = c.map.get(&(g.x0 + gx as i32 * 4, g.z0 + gz as i32 * 4)) {
+                        if col.len() == n * ny {
+                            for t in 0..n {
+                                tabs[t][(gx * 5 + gz) * ny..][..ny].copy_from_slice(&col[t * ny..][..ny]);
+                            }
+                            have[gx * 5 + gz] = true;
+                        }
+                    }
+                }
+            }
+        }
         // Pass 1: each `interpolated` argument on the 5 x ny x 5 cell corners. Column by column, so the y-independent nodes of a
         // corner column are computed once for every table.
-        let mut tabs = vec![vec![0.0; 25 * ny]; self.interps.len()];
+        let mut made: Vec<((i32, i32), Box<[f64]>)> = Vec::new();
         for gx in 0..5usize {
             for gz in 0..5usize {
+                if have[gx * 5 + gz] {
+                    continue;
+                }
                 m.column();
                 let (x, z) = (g.x0 + gx as i32 * 4, g.z0 + gz as i32 * 4);
                 for (t, &arg) in self.interps.iter().enumerate() {
@@ -1203,6 +1290,19 @@ impl Tectonic {
                         tabs[t][(gx * 5 + gz) * ny + gy] = self.ev(arg, x, self.min_y + gy as i32 * 8, z, &mut m, &g);
                     }
                 }
+                if self.corners.is_some() && edge(gx, gz) {
+                    let mut col = Vec::with_capacity(n * ny);
+                    for tab in &tabs {
+                        col.extend_from_slice(&tab[(gx * 5 + gz) * ny..][..ny]);
+                    }
+                    made.push(((x, z), col.into_boxed_slice()));
+                }
+            }
+        }
+        if let (Some(c), false) = (&self.corners, made.is_empty()) {
+            let mut c = c.lock().unwrap_or_else(|e| e.into_inner());
+            for (k, col) in made {
+                c.put(k, col);
             }
         }
         g.tabs = tabs;
@@ -1505,6 +1605,25 @@ mod tests {
             let (p, q) = (top(&c0, h, 15, z), top(&c1, h, 0, z));
             assert!((p - q).abs() <= 6, "seam at z {z}: {p} vs {q}");
         }
+    }
+
+    /// UNVERIFIED (not run): the corner cache changes no density. A Cascades terrain with the cache and one without it make the same
+    /// chunks, in an order where the second, third and a repeated chunk find edge columns already made.
+    #[test]
+    fn the_corner_cache_changes_no_density() {
+        let seed = 0x5EED_CA5C;
+        let mut plain = Tectonic::cascades(seed);
+        plain.corners = None;
+        let cached = Tectonic::cascades(seed);
+        let first = plain.chunk(0, 0);
+        for (cx, cz) in [(0, 0), (1, 0), (0, 1)] {
+            let want = if (cx, cz) == (0, 0) { first.clone() } else { plain.chunk(cx, cz) };
+            assert!(cached.chunk(cx, cz) == want, "chunk {cx} {cz} differs");
+        }
+        assert!(cached.chunk(0, 0) == first, "a chunk made from a full cache differs");
+        let n = cached.corners.as_ref().unwrap().lock().unwrap().map.len();
+        assert!(n >= 16 && n <= CORNER_CAP, "{n} corner columns kept");
+        assert!(plain.corners.is_none() && Tectonic::new(1, Config::compact(128, 64)).corners.is_none(), "only Cascades has the cache");
     }
 
     /// UNVERIFIED (not run): the Cascades bundle loads, is 384 blocks tall, solid at the bottom and air at the top, and has climate routes.
