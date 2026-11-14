@@ -4015,6 +4015,9 @@ impl App {
         self.gpu_n += self.gpu_buf.len() as u32;
         let gpu = (!self.gpu_buf.is_empty()).then(|| self.gpu_buf.iter().sum::<f32>() / self.gpu_buf.len() as f32 / 1000.0);
         if self.opts.dynamic_res {
+            // Aim at what the frame cap lets through (Steady 60 on a 90 Hz panel: 60), not at the panel alone.
+            let aim = self.opts.frame_cap().map_or(self.refresh_hz, |d| self.refresh_hz.min(1.0 / d.as_secs_f32()));
+            self.drs.set_refresh_hz(aim);
             if let Some(p) = self.drs.tick(spent.as_secs_f32(), cpu.as_secs_f32(), gpu) {
                 crate::gpu::context::set_scale_pct(p);
                 self.be.rescale();
@@ -5217,13 +5220,13 @@ fn android_main(app: AndroidApp) {
             let frame_start = Instant::now();
             a.render();
             if let Some(left) = a.opts.frame_cap().and_then(|cap| cap.checked_sub(frame_start.elapsed())) {
-                std::thread::sleep(left); // `Performance`: Balanced 120 fps, Power saver 40
+                std::thread::sleep(left); // `Performance`: Balanced 120 fps, Power saver 40, Steady 60
             }
             if sustained != Some(a.opts.sustained) {
                 sustained = Some(a.opts.sustained);
                 immersive::set_sustained(&app, a.opts.sustained);
             }
-            // The refresh-rate hint follows the Performance option (Balanced 120, Power saver 40, Max FPS none).
+            // The refresh-rate hint follows the Performance option (Balanced 120, Power saver 40, Steady 60, Max FPS none).
             let hint = a.opts.frame_cap().map_or(0.0, |d| (1.0 / d.as_secs_f32()).round());
             if hint != frame_hint {
                 frame_hint = hint;

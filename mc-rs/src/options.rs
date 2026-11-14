@@ -194,7 +194,7 @@ pub struct Settings {
     pub view_bobbing: bool,
     pub anaglyph: bool,
     pub advanced_opengl: bool,
-    /// 0 Max FPS, 1 Balanced, 2 Power saver.
+    /// 0 Max FPS, 1 Balanced, 2 Power saver, 3 Steady 60.
     pub limit_framerate: u8,
     /// 0 Peaceful .. 3 Hard.
     pub difficulty: u8,
@@ -320,7 +320,7 @@ impl Settings {
                 ("guiScale", _, Some(n)) => s.gui_scale = n.min(3),
                 ("guiStyle", ..) => s.gui_style = b,
                 ("panelSize", Some(f), _) => s.panel_size = f.clamp(0.0, 1.0),
-                ("fpsLimit", _, Some(n)) => s.limit_framerate = n.min(2),
+                ("fpsLimit", _, Some(n)) => s.limit_framerate = n.min(3),
                 ("difficulty", _, Some(n)) => s.difficulty = n.min(3),
                 ("invertYMouse", ..) => s.invert_mouse = b,
                 ("bobView", ..) => s.view_bobbing = b,
@@ -406,9 +406,11 @@ impl Settings {
         (FOV_MIN + self.fov.clamp(0.0, 1.0) * (FOV_MAX - FOV_MIN)).round()
     }
 
-    /// The frame time the Performance option allows (`EntityRenderer`: 120 fps balanced, 40 power saver); none for Max FPS.
+    /// The frame time the Performance option allows (`EntityRenderer`: 120 fps balanced, 40 power saver, 60 steady); none for Max FPS.
+    /// Steady 60 also asks the compositor for 60 Hz (`immersive::set_frame_rate`) and makes `Drs` aim at 60 fps: on a 90 Hz panel a 55-60 fps game
+    /// otherwise alternates 11 ms and 22 ms frames.
     pub fn frame_cap(&self) -> Option<Duration> {
-        [None, Some(Duration::from_micros(8333)), Some(Duration::from_millis(25))][self.limit_framerate.min(2) as usize]
+        [None, Some(Duration::from_micros(8333)), Some(Duration::from_millis(25)), Some(Duration::from_micros(16667))][self.limit_framerate.min(3) as usize]
     }
 
     fn float(&self, o: Opt) -> f32 {
@@ -452,7 +454,7 @@ impl Settings {
             Opt::ViewBobbing => self.view_bobbing = !self.view_bobbing,
             Opt::AdvancedOpengl => self.advanced_opengl = !self.advanced_opengl,
             Opt::Anaglyph => self.anaglyph = !self.anaglyph,
-            Opt::FramerateLimit => self.limit_framerate = (self.limit_framerate + 1) % 3,
+            Opt::FramerateLimit => self.limit_framerate = (self.limit_framerate + 1) % 4,
             Opt::Difficulty => self.difficulty = (self.difficulty + 1) & 3,
             Opt::Graphics => self.fancy_graphics = !self.fancy_graphics,
             Opt::AmbientOcclusion => self.ambient_occlusion = !self.ambient_occlusion,
@@ -543,7 +545,7 @@ impl Settings {
                 Opt::Difficulty => ["Peaceful", "Easy", "Normal", "Hard"][self.difficulty.min(3) as usize].into(),
                 Opt::GuiScale => ["Auto", "Small", "Normal", "Large"][self.gui_scale.min(3) as usize].into(),
                 Opt::GuiStyle => (if self.gui_style { "Immersive" } else { "Vanilla" }).into(),
-                Opt::FramerateLimit => ["Max FPS", "Balanced", "Power saver"][self.limit_framerate.min(2) as usize].into(),
+                Opt::FramerateLimit => ["Max FPS", "Balanced", "Power saver", "Steady 60"][self.limit_framerate.min(3) as usize].into(),
                 // The pipelines keep the count they were built with: a change shows only at the next start.
                 Opt::Msaa => {
                     let v = match self.msaa { 0 => "Auto", 1 => "Off", 2 => "2x", _ => "4x" };
@@ -814,7 +816,7 @@ const TIPS: &[(&str, &str)] = &[
     ("View Bobbing", "The camera sways a little as you walk."),
     ("Render Distance", "Chunks kept around you: Far 16, Normal 8, Short 4, Tiny 2."),
     ("LoD", "Draws far terrain as simplified blocks, out to 768 blocks."),
-    ("Performance", "Frame cap: Max FPS, Balanced (120 fps) or Power saver (40 fps)."),
+    ("Performance", "Frame cap: Max FPS, Balanced (120 fps), Power saver (40 fps) or Steady 60 (even frames on a 90 Hz panel, higher resolution)."),
     ("Sustained Perf", "Steadier clocks for long sessions, less throttling. May lower peak speed."),
     ("Dynamic Res", "Raises and lowers the render resolution (50% to 100%) with the GPU load."),
     ("MSAA", "Samples for smoother edges. Auto picks by GPU. Applies at the next start."),
@@ -1911,7 +1913,7 @@ mod tests {
         st.set_float(Opt::Sensitivity, 1.0);
         st.set_float(Opt::Music, 0.0);
         assert_eq!((st.text(Opt::Sensitivity).as_str(), st.text(Opt::Music).as_str()), ("Sensitivity: HYPERSPEED!!!", "Music: OFF"));
-        (st.render_distance, st.difficulty, st.limit_framerate, st.gui_scale) = (3, 3, 2, 3);
+        (st.render_distance, st.difficulty, st.limit_framerate, st.gui_scale) = (3, 3, 3, 3);
         for o in [Opt::RenderDistance, Opt::Difficulty, Opt::FramerateLimit, Opt::GuiScale] {
             st.cycle(o);
         }
