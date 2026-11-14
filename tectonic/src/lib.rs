@@ -35,6 +35,37 @@ const CASCADES: &str = include_str!("../cascades.json");
 /// The functions `Tectonic::climate` reads, in the order it returns them: temperature, vegetation (humidity), continents, erosion, ridges (weirdness).
 const CLIMATE: [&str; 5] = ["cascades:temperature", "cascades:vegetation", "minecraft:overworld/continents", "minecraft:overworld/erosion", "minecraft:overworld/ridges"];
 
+// ------------------------------------------------------------------------------------------------ roofs
+
+/// Cascades only: a ground column whose top solid skin is thinner than `ROOF` blocks over air gets its skin thickened to `ROOF`.
+/// Where the surface of the density is nearly flat in y (the 3D noise is as strong as the slope) the land came out as a 2-5 block shell
+/// over a cave, a paper-thin roof that collapses under a step: the player's "hollow land". Entrance mouths are not closed: a mouth is a
+/// column with no skin at all (air to the sky), and a tunnel's roof only gets thicker. Columns are independent, so chunks stay seamless.
+pub const ROOF: usize = 8;
+/// Lowest top (index) a roof is thickened at: the sea. Under the sea the aquifer decides what is cave.
+pub const ROOF_FROM: usize = 64;
+
+/// `thicken_roofs` on a chunk's density (`(x * 16 + z) * h + y`): see `ROOF`. Public so the tests (and the probe) can run it on a column.
+pub fn thicken_roofs(d: &mut [f32], h: usize, from: usize, roof: usize) {
+    for col in d.chunks_mut(h) {
+        let Some(top) = (0..h).rev().find(|&y| col[y] > 0.0) else { continue };
+        if top < from {
+            continue;
+        }
+        let mut skin = 1;
+        while skin <= top && col[top - skin] > 0.0 {
+            skin += 1;
+        }
+        // `top - skin` is the first block under the skin: air (a cave or a hollow), or off the bottom.
+        let mut y = top as i64 - skin as i64;
+        while skin < roof && y >= 0 && col[y as usize] <= 0.0 {
+            col[y as usize] = 0.05;
+            skin += 1;
+            y -= 1;
+        }
+    }
+}
+
 // ------------------------------------------------------------------------------------------------ config
 
 /// `ConfigState` (the mod's config) as far as the terrain reads it. `min_y` / `max_y` are in the datapack's frame, where the sea is
@@ -997,6 +1028,8 @@ pub struct Tectonic {
     aq: Option<aquifer::Ids>,
     /// The corner columns shared between chunks (`Corners`): Cascades only, `None` for every other bundle.
     corners: Option<Arc<Mutex<Corners>>>,
+    /// Thicken paper-thin roofs (`thicken_roofs`): Cascades only.
+    roofs: bool,
 }
 
 fn hash(j: Option<&J>) -> Result<(u64, u64), String> {
@@ -1015,6 +1048,7 @@ impl Tectonic {
     pub fn cascades(seed: i64) -> Self {
         let mut t = Self::from_bundle(CASCADES, seed, Config::cascades()).expect("cascades.json");
         t.corners = Some(shared_corners(seed, t.layout()));
+        t.roofs = true;
         t
     }
 
@@ -1112,7 +1146,7 @@ impl Tectonic {
             aq_spec = Some((names, num("lower")?, num("cell")?, hash(a.get("hash"))?, hash(a.get("ore_hash"))?));
         }
         let Builder { nodes, dep, ids, splines, interps, .. } = b;
-        let mut t = Tectonic { nodes, dep, splines, interps, ids, root, noises, noise_ix, offset, blended, min_y: cfg.min_y, height: (cfg.max_y - cfg.min_y) as usize, aq: None, corners: None };
+        let mut t = Tectonic { nodes, dep, splines, interps, ids, root, noises, noise_ix, offset, blended, min_y: cfg.min_y, height: (cfg.max_y - cfg.min_y) as usize, aq: None, corners: None, roofs: false };
         if simplify {
             t.simplify();
         }
@@ -1320,6 +1354,9 @@ impl Tectonic {
                     out[(x * 16 + z) * h + y] = d as f32;
                 }
             }
+        }
+        if self.roofs {
+            thicken_roofs(&mut out, h, ROOF_FROM, ROOF);
         }
         out
     }
@@ -1626,6 +1663,55 @@ mod tests {
         let n = cached.corners.as_ref().unwrap().lock().unwrap().map.len();
         assert!(n >= 16 && n <= CORNER_CAP, "{n} corner columns kept");
         assert!(plain.corners.is_none() && Tectonic::new(1, Config::compact(128, 64)).corners.is_none(), "only Cascades has the cache");
+    }
+
+    #[test]
+    fn a_thin_roof_is_thickened_and_a_mouth_or_a_thick_roof_is_left() {
+        let h = 40;
+        let col = |solid: &[(usize, usize)]| {
+            let mut c = vec![-1.0f32; h];
+            for &(a, b) in solid {
+                for y in a..b {
+                    c[y] = 1.0;
+                }
+            }
+            c
+        };
+        // skin 2 (y 20..22) over a cave y 10..20 over rock 0..10: the roof grows to 6.
+        let mut d = col(&[(0, 10), (20, 22)]);
+        thicken_roofs(&mut d, h, 5, 6);
+        assert!((16..22).all(|y| d[y] > 0.0) && (10..16).all(|y| d[y] <= 0.0), "{d:?}");
+        // a roof of 8 stays, a mouth (floor only, air to the sky) stays, ground under `from` stays.
+        let (a, b) = (col(&[(0, 10), (12, 20)]), col(&[(0, 10)]));
+        let (mut a2, mut b2) = (a.clone(), b.clone());
+        thicken_roofs(&mut a2, h, 5, 6);
+        thicken_roofs(&mut b2, h, 5, 6);
+        assert_eq!((a2, b2), (a, b));
+        let mut low = col(&[(0, 3), (5, 7)]);
+        let before = low.clone();
+        thicken_roofs(&mut low, h, 20, 6);
+        assert_eq!(low, before);
+    }
+
+    #[test]
+    fn cascades_land_has_no_paper_thin_roofs() {
+        let t = Tectonic::cascades(2);
+        let h = t.height();
+        let mut shells = 0;
+        for (cx, cz) in [(-10, -10), (-9, -10), (-10, -9), (3, 4)] {
+            let d = t.chunk(cx, cz);
+            for col in d.chunks(h) {
+                let Some(top) = (0..h).rev().find(|&y| col[y] > 0.0) else { continue };
+                if top < ROOF_FROM {
+                    continue;
+                }
+                let skin = (0..=top).rev().take_while(|&y| col[y] > 0.0).count();
+                if skin < ROOF && skin <= top && col[top - skin] <= 0.0 && top - skin > 0 {
+                    shells += 1;
+                }
+            }
+        }
+        assert_eq!(shells, 0, "roofs thinner than {ROOF} over air");
     }
 
     /// UNVERIFIED (not run): the Cascades bundle loads, is 384 blocks tall, solid at the bottom and air at the top, and has climate routes.

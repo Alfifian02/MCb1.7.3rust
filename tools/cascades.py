@@ -254,8 +254,10 @@ def bundle(path, out):
     octs = {str(i): T.md5_pair(f"octave_{i}") for i in range(-16, 1)}
     # `aq`: the functions above by role, `find_top_surface`'s lower bound and cell height, the name hash of the aquifer's positional random.
     aqj = {"fns": aq_fns, "lower": aq["surface_level"]["lower_bound"], "cell": aq["surface_level"]["cell_height"], "hash": T.md5_pair("minecraft:aquifer"), "ore_hash": T.md5_pair("minecraft:ore")}
-    json.dump({"root": ROOT, "routes": ROUTES, "stubs": STUBS, "f": fns, "n": noises, "oct": octs, "terrain": T.md5_pair("minecraft:terrain"), "aq": aqj},
-              open(out, "w"), separators=(",", ":"))
+    bundle = {"root": ROOT, "routes": ROUTES, "stubs": STUBS, "f": fns, "n": noises, "oct": octs, "terrain": T.md5_pair("minecraft:terrain"), "aq": aqj}
+    import cascades_tune
+    cascades_tune.tune(bundle)  # the in-game artifacts' fixes (sheer walls, entrances), see cascades_tune.py
+    json.dump(bundle, open(out, "w"), separators=(",", ":"))
     print(f"{out}: {len(fns)} functions, {len(noises)} noises, {os.path.getsize(out)} bytes")
 
 

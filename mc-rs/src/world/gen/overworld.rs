@@ -604,6 +604,11 @@ impl OverworldGenerator {
                 let mut filler = biome.filler_block();
                 // One column as a slice: no per-block index arithmetic or bounds checks (FastSurface's packed column walk).
                 let col = &mut blocks[(b * 16 + a) * H..][..scan];
+                // Cascades (384 tall): the grass / dirt / sand skin is for the ground the sky sees, the first solid block of the column. Every
+                // later air -> stone step (a cave's floor, a ledge under an overhang) stays stone: b1.7.3 had no such caves under its hills,
+                // and grassing them gave the dirt-lined, grass-terraced "hollow land" under overhangs.
+                let tall = scan > GH;
+                let mut roofed = false;
                 for y in (0..scan).rev() {
                     // The draw is made for every y, as in the Java: it advances the Random.
                     if y as i32 <= self.rand.next_int_bound(5) {
@@ -617,7 +622,11 @@ impl OverworldGenerator {
                         // Lava (Cascades' aquifers): the stone under it is its bed, not a surface to grass over.
                         depth = -2;
                     } else if cur == block::STONE {
+                        if depth == -1 && tall && roofed {
+                            continue; // under the open ground: bare stone
+                        }
                         if depth == -1 {
+                            roofed = true;
                             if stone <= 0 {
                                 top = block::AIR;
                                 filler = block::STONE;

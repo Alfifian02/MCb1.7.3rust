@@ -260,6 +260,12 @@ pub fn cache_dir(dir: Option<PathBuf>) {
 /// Share of the depth kept at the channel's edge: the bed is a bar-shaped trough, deepest on the centre line (`HydraulicGeometry` bed side,
 /// symmetric here: the bend asymmetry needs the side of the centre line, which `Plan` does not carry). UNVERIFIED: chosen here.
 const BED_EDGE: f64 = 0.4;
+/// Highest block a river may be cut at or reach: the world's top less a margin. The carve used to stop at 120 / 126 (b1.7.3's 128): a river
+/// above 120 was not cut at all (it ended in a line on the hillside) and a channel under a hill higher than 126 left the hill's top as a
+/// roof over it (a tunnel, "hollow land"). The chunk is `chunk::H` tall in every world now.
+const TOP: i32 = crate::world::chunk::H as i32 - 8;
+/// Blocks under a river's bed that must not be air or water: a cave under the bed would drain the river into a pit.
+const SEAL: i32 = 4;
 const NONE: usize = usize::MAX;
 const NB: [(i32, i32); 8] = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)];
 
@@ -1577,7 +1583,7 @@ impl Region {
             }
         }
         let Some(p) = plan.filter(|p| p.in_channel) else { return 0 };
-        if set.blacklist.contains(&biome) || ground < 5 || p.bed_y < 5 || p.water_y > 120 || ground + 6 < bed_at(&p) {
+        if set.blacklist.contains(&biome) || ground < 5 || p.bed_y < 5 || p.water_y > TOP || ground + 6 < bed_at(&p) {
             return 0;
         }
         1
@@ -1648,7 +1654,7 @@ impl Region {
                     p.water_y = t;
                 }
                 let (ws, bed) = (p.water_y, p.bed_y);
-                if s < 5 || bed < 5 || ws > 120 {
+                if s < 5 || bed < 5 || ws > TOP {
                     continue;
                 }
                 // Water already stands at the river's level (the sea, a lake, a bigger river): a mouth opens into it. The bank's berm used
@@ -1663,7 +1669,7 @@ impl Region {
                     if s + 6 < bed {
                         continue;
                     }
-                    for y in bed + 1..=s.max(ws).min(126) {
+                    for y in bed + 1..=s.max(ws).min(TOP + 2) {
                         blocks[col + y as usize] = if y <= ws {
                             if icy && y == ws { block::ICE } else { block::WATER }
                         } else {
@@ -1671,8 +1677,15 @@ impl Region {
                         };
                     }
                     let bm = pick(st.bed, pat);
-                    for y in (if s < bed { s + 1 } else { bed - 1 }).max(1)..=bed {
+                    let from = (if s < bed { s + 1 } else { bed - 1 }).max(1);
+                    for y in from..=bed {
                         blocks[col + y as usize] = bm;
+                    }
+                    // Seal: a cave under the bed (Cascades' density has them) must not open under the water.
+                    for y in (from - SEAL).max(1)..from {
+                        if matches!(blocks[col + y as usize], block::AIR | block::WATER | block::WATER_MOVING) {
+                            blocks[col + y as usize] = st.fill;
+                        }
                     }
                 } else {
                     // Bank: a slope up from the waterline cut into higher ground, a berm on lower ground so the water is held.
@@ -1683,7 +1696,7 @@ impl Region {
                     // valley side and never a wall at the end of the band.
                     let t = ws as f64 + k * BANK_SLOPE;
                     let u = ((k / reach(p.width) - 0.5) * 2.0).clamp(0.0, 1.0);
-                    let target = ((t + (s as f64 - t) * u * u * (3.0 - 2.0 * u)).floor() as i32).min(120);
+                    let target = ((t + (s as f64 - t) * u * u * (3.0 - 2.0 * u)).floor() as i32).min(TOP);
                     let top = pick(if k < 1.5 { st.line } else { st.top }, pat);
                     if s > ws {
                         if s > target {
@@ -1712,18 +1725,18 @@ impl Region {
                     let ns = surface(&blocks[col..col + crate::world::chunk::H]);
                     let r = unit3(0x71, wx as i64, wz as i64);
                     let f = 1.0 - k / band;
-                    if ns > 0 && ns < 126 && blocks[col + ns as usize] == block::GRASS && blocks[col + ns as usize + 1] == block::AIR && r < 0.12 * f {
+                    if ns > 0 && ns < TOP + 2 && blocks[col + ns as usize] == block::GRASS && blocks[col + ns as usize + 1] == block::AIR && r < 0.12 * f {
                         blocks[col + ns as usize + 1] = if r < 0.06 * f { block::FLOWER_Y } else { block::FLOWER_R };
                     }
                     // Bank features (`BankFeature`, cut down): reeds where the ground is level with the water (sugar cane needs water beside
                     // its base), and now and then a boulder of cobblestone and moss. UNVERIFIED: the mod's templates are not followed.
                     let r2 = unit3(0x72, wx as i64, wz as i64);
-                    let base = if ns > 0 && ns < 120 { blocks[col + ns as usize] } else { 0 };
+                    let base = if ns > 0 && ns < TOP { blocks[col + ns as usize] } else { 0 };
                     if ns == ws && k < 2.0 && matches!(base, block::GRASS | block::DIRT | block::SAND) && blocks[col + ns as usize + 1] == block::AIR && r2 < 0.12 {
                         for y in ns + 1..=ns + 1 + (r2 * 25.0) as i32 % 3 {
                             blocks[col + y as usize] = block::REED;
                         }
-                    } else if ns > ws && ns < 120 && k > 1.5 && k < band && base == block::GRASS && blocks[col + ns as usize + 1] == block::AIR && r2 > 0.995 {
+                    } else if ns > ws && ns < TOP && k > 1.5 && k < band && base == block::GRASS && blocks[col + ns as usize + 1] == block::AIR && r2 > 0.995 {
                         blocks[col + ns as usize + 1] = if r2 > 0.998 { block::MOSSY } else { block::COBBLE };
                     }
                 }
@@ -2133,6 +2146,30 @@ mod tests {
             assert_eq!(at(x, nz * 16 - 1), 99, "the plateau is cut at the far edge");
         }
         assert!(worst <= 3, "a wall of {worst} blocks beside the river");
+    }
+
+    /// A channel cut through ground higher than the old 126 cap leaves no roof (a tunnel under the hill), and a cave under the bed is
+    /// sealed so the water does not drain into a pit. Stone to y 150 with a cave at y 40..58 under a river at grade 64.5.
+    #[test]
+    fn a_channel_in_tall_ground_has_no_roof_and_no_pit_under_its_bed() {
+        let reg = Region { nets: vec![Arc::new(made(&[(-60.0, 8.0, 60.0, 8.0, 2.0)]))] };
+        let mut b = vec![block::AIR; crate::world::chunk::VOLUME];
+        for i in 0..256usize {
+            for y in 0..150 {
+                b[crate::world::chunk::idx(i / 16, y, i % 16)] = if (40..58).contains(&y) { block::AIR } else { block::STONE };
+            }
+        }
+        reg.carve(0, 0, &mut b, &vec![Biome::Plains; 256], &vec![0.8; 256]);
+        let mut water = 0;
+        for x in 0..16usize {
+            let col = crate::world::chunk::idx(x, 0, 8);
+            let Some(wy) = (0..crate::world::chunk::H).rev().find(|&y| b[col + y] == block::WATER) else { continue };
+            water += 1;
+            assert!((wy + 1..crate::world::chunk::H).all(|y| b[col + y] == block::AIR), "x {x}: a roof over the channel above y {wy}");
+            let bed = (0..wy).rev().find(|&y| b[col + y] != block::WATER).unwrap();
+            assert!((bed.saturating_sub(SEAL as usize)..=bed).all(|y| b[col + y] != block::AIR && b[col + y] != block::WATER), "x {x}: a pit under the bed at y {bed}");
+        }
+        assert!(water > 8, "the river is cut at all ({water} columns)");
     }
 
     /// A river opens into the sea: water already there is left alone (the bank's berm used to dam the mouth with dirt and gravel), and
