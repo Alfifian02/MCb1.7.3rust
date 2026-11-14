@@ -375,7 +375,7 @@ mod tests {
     use super::*;
 
     /// A stone wall at z = 10 (cells z >= 10 solid), air in front.
-    fn wall(x: i32, y: i32, z: i32) -> Option<(u8, u8)> {
+    fn wall(_x: i32, y: i32, z: i32) -> Option<(u8, u8)> {
         Some((if z >= 10 && y >= 60 { 1 } else { 0 }, 0))
     }
 

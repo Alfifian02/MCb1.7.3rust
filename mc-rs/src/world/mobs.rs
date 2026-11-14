@@ -2566,7 +2566,7 @@ mod tests {
     fn fog_shortens_how_far_a_mob_notices() {
         let l = |_, _, _| 15u8;
         let player = Vec3::new(32.5, 10.9, 20.5);
-        let (mut clear, mut foggy) = (ctx(player, &l), ctx(player, &l));
+        let (clear, mut foggy) = (ctx(player, &l), ctx(player, &l));
         foggy.sight = crate::world::biomelife::sight(0.01);
         let mut rng = JavaRandom::new(4);
         for (c, want) in [(&clear, true), (&foggy, false)] {
@@ -2574,7 +2574,6 @@ mod tests {
             z.tick(&mut rng, c, &mut Vec::new());
             assert_eq!(z.target, want, "sight {}", c.sight);
         }
-        clear.sight = 1.0;
     }
 
     /// NOT b1.7.3: wolves are born where `wolf_land` says, in the coat of the biome, and never on the plains.

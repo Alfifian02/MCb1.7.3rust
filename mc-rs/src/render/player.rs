@@ -7,7 +7,7 @@
 //! UNVERIFIED: written without a Rust toolchain: not compiled, not run.
 
 use crate::render::atlas;
-use crate::render::mesh::{lm, push_box, VF, WHITE};
+use crate::render::mesh::{lm, VF, WHITE};
 use crate::world::craft::{self, Kind};
 use crate::world::items::{icon_meta, ItemStack};
 use glam::{Mat4, Vec3};

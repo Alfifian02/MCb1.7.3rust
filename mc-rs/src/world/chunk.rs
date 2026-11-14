@@ -3,6 +3,8 @@
 //! `(x * 16 + z) * H + y` (`idx`; `cell_x` / `cell_y` / `cell_z` take it apart), plus a `Nibbles` of block metadata with the same index; the chunks themselves
 //! live in `world::chunks::ChunkManager`.
 
+use std::sync::Arc;
+
 pub const W: usize = 16;
 pub const H: usize = 384;
 pub const D: usize = 16;
@@ -42,42 +44,50 @@ pub const fn cell_z(i: usize) -> usize {
 /// no array at all. An empty `Vec` is "every nibble 0"; the 16 KB array is made by the first non-zero `set`. So `new`, `Default`
 /// (what `mem::take` leaves behind), a mesh job's `Snap` clone and a decoded all-zero save cost nothing, and `bytes` still hands out
 /// the full McRegion array (a shared static of zeros).
+///
+/// The array is an `Arc` (`None` = all 0): a clone shares it, so a mesh job's `Snap` of five chunks copies no metadata on the render
+/// thread (it was 5 x 16 KB wherever tall grass grows); a `set` while a job holds the array (`Arc::make_mut`) copies it once, so the
+/// job still sees the chunk as it was.
 #[derive(Clone, Default, Debug)]
-pub struct Nibbles(Vec<u8>);
+pub struct Nibbles(Option<Arc<Vec<u8>>>);
 
 /// The packed bytes of an all-zero `Nibbles`.
 static ZEROS: [u8; VOLUME / 2] = [0; VOLUME / 2];
 
 impl Nibbles {
     pub fn new() -> Self {
-        Self(Vec::new())
+        Self(None)
     }
 
     pub fn get(&self, x: usize, y: usize, z: usize) -> u8 {
         let i = idx(x, y, z);
-        self.0.get(i >> 1).map_or(0, |&b| b >> ((i & 1) * 4) & 15)
+        self.0.as_ref().map_or(0, |a| a[i >> 1] >> ((i & 1) * 4) & 15)
     }
 
     /// Only the low 4 bits of `v` count (`NibbleArray.setNibble`).
     pub fn set(&mut self, x: usize, y: usize, z: usize, v: u8) {
         let v = v & 15;
-        if self.0.is_empty() {
+        let i = idx(x, y, z);
+        let s = (i & 1) * 4;
+        if self.0.is_none() {
             if v == 0 {
                 return; // writing a 0 over nothing changes nothing
             }
-            self.0 = vec![0; VOLUME / 2];
+            self.0 = Some(Arc::new(vec![0; VOLUME / 2]));
         }
-        let i = idx(x, y, z);
-        let s = (i & 1) * 4;
-        let b = &mut self.0[i >> 1];
+        let a = self.0.as_mut().expect("made above");
+        // Writing the value that is already there must not copy an array a job is reading.
+        if a[i >> 1] >> s & 15 == v {
+            return;
+        }
+        let b = &mut Arc::make_mut(a)[i >> 1];
         *b = *b & !(15u8 << s) | v << s;
     }
 
     pub fn bytes(&self) -> &[u8] {
-        if self.0.is_empty() {
-            &ZEROS
-        } else {
-            &self.0
+        match &self.0 {
+            None => &ZEROS,
+            Some(a) => a,
         }
     }
 
@@ -87,7 +97,7 @@ impl Nibbles {
         if b.iter().all(|&x| x == 0) {
             Self::new()
         } else {
-            Self(b)
+            Self(Some(Arc::new(b)))
         }
     }
 }
@@ -507,12 +517,12 @@ mod tests {
     fn nibbles_allocate_on_the_first_non_zero() {
         let mut n = Nibbles::new();
         n.set(3, 4, 5, 0);
-        assert!(n.0.is_empty() && n.get(3, 4, 5) == 0 && n.bytes().len() == VOLUME / 2 && n.bytes().iter().all(|&b| b == 0));
+        assert!(n.0.is_none() && n.get(3, 4, 5) == 0 && n.bytes().len() == VOLUME / 2 && n.bytes().iter().all(|&b| b == 0));
         n.set(3, 4, 5, 7);
-        assert_eq!((n.0.len(), n.get(3, 4, 5)), (VOLUME / 2, 7));
+        assert_eq!((n.0.as_ref().map_or(0, |a| a.len()), n.get(3, 4, 5)), (VOLUME / 2, 7));
         n.set(3, 4, 5, 0);
         assert_eq!(n, Nibbles::new(), "an array of zeros equals no array");
-        assert!(Nibbles::from_bytes(vec![0; VOLUME / 2]).0.is_empty(), "an all-zero save keeps no array");
+        assert!(Nibbles::from_bytes(vec![0; VOLUME / 2]).0.is_none(), "an all-zero save keeps no array");
         assert_eq!(Nibbles::from_bytes(n.bytes().to_vec()), n);
         assert!(Nibbles::default().get(15, H - 1, 15) == 0, "the `mem::take` placeholder reads as zeros, it no longer panics");
     }

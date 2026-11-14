@@ -135,6 +135,8 @@ impl Config {
 
 enum J {
     Null,
+    // Part of the generic JSON model; terrain.json holds no boolean, so only the parser test reads it.
+    #[allow(dead_code)]
     Bool(bool),
     Num(f64),
     Str(String),

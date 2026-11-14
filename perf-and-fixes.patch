@@ -1,0 +1,568 @@
+diff -ruN -x __pycache__ a/mc-rs/src/render/mesh.rs b/mc-rs/src/render/mesh.rs
+--- a/mc-rs/src/render/mesh.rs	2026-11-07 18:50:28.000000000 +0000
++++ b/mc-rs/src/render/mesh.rs	2026-11-14 10:47:43.231582203 +0000
+@@ -416,7 +416,10 @@
+                     } else {
+                         // `BlockLeavesBase.shouldSideBeRendered` (fancy graphics): leaves do not hide against leaves, or a hollow crown shows
+                         // the sky through its edge rows as pale dashes (only while a leaf tile has see-through texels, see `leaf_depth`). Only the faces deeper than `leaf_depth` leaves are dropped (Xenon).
+-                        reach && opaque(n) && (blk != 18 || n != 18 || (2..=leaf_depth).all(|k| leaf(x + dx * k, y + dy * k, z + dz * k)))
++                        reach && ((opaque(n) && (blk != 18 || n != 18 || (2..=leaf_depth).all(|k| leaf(x + dx * k, y + dy * k, z + dz * k))))
++                            // A neighbour that is not a cube but fills this face's whole cell side with an opaque tile (the snow layer on the
++                            // ground, a slab or stairs on a block, the farmland under a crop) hides it just as well.
++                            || (matches!(n, 44 | 53 | 60 | 67 | 78) && covers(n, meta_at(x + dx, y + dy, z + dz), face_i)))
+                     };
+                     if hidden {
+                         continue;
+@@ -590,6 +593,24 @@
+     }
+ }
+ 
++/// Whether the neighbour `n` (one of the blocks drawn with an opaque tile whose box is not the whole cell: slab 44, stairs 53 / 67, farmland 60,
++/// snow layer 78) covers the whole of the face `face_i` (`DIRS` order) of the cell next to it. The neighbour touches that face with its own
++/// opposite side, and the boxes of it that reach that side have to fill the 1 x 1 square (the stairs' two steps do, side by side; none of them
++/// overlap, so their areas add up). So the top of the block under a snow layer or a slab, whose only way to be seen is through that block,
++/// is not drawn; the sides of the same blocks are (a slab's box is half a cell high).
++fn covers(n: u8, meta: u8, face_i: usize) -> bool {
++    let (boxes, count) = shapes(n, meta, &|_, _| false);
++    let a = face_i / 2; // the axis of the face
++    let (o1, o2) = match a { 0 => (1, 2), 1 => (0, 2), _ => (0, 1) };
++    let area: f32 = boxes[..count]
++        .iter()
++        // face_i even looks toward +, so it meets the neighbour's - side (its box has to start at 0), odd the + side (end at 1)
++        .filter(|b| if face_i % 2 == 0 { b[a] <= 0.0 } else { b[a + 3] >= 1.0 })
++        .map(|b| (b[o1 + 3] - b[o1]) * (b[o2 + 3] - b[o2]))
++        .sum();
++    area >= 0.999
++}
++
+ /// `RenderBlocks.func_1245_b` (crops): two pairs of crossing quads at 1/4 and 3/4 of the cell, one sixteenth sunk into the farmland,
+ /// the growth stage (metadata) picks the tile. Visible from both sides.
+ pub fn push_crops(verts: &mut Vec<f32>, idxs: &mut Vec<u32>, cell: [f32; 3], meta: u8, light: f32, lmv: f32) {
+@@ -778,6 +799,25 @@
+         assert_eq!(quads(&[13, 14, 15], &nbx), 13);
+     }
+ 
++    /// A snow layer, a slab or farmland on a block fills the cell's whole footprint from the floor up, so the top of the block under it is
++    /// not drawn (stone 5 quads, its cover 5: the four sides and the top; the cover's bottom hides against the stone as before). The sides
++    /// that are only partly covered stay: a stone next to a slab keeps all 6.
++    #[test]
++    fn the_top_under_a_snow_layer_or_a_slab_is_not_drawn() {
++        let a = air();
++        let quads = |cells: &[(usize, usize, usize, u8)]| {
++            let mut c = air();
++            cells.iter().for_each(|&(x, y, z, id)| c[idx(x, y, z)] = id);
++            face_count(&build(&c, &Nibbles::new(), &a, [&a[..]; 4], [&a[..]; 4], 0, 0, 0).0)
++        };
++        assert_eq!(quads(&[(5, 20, 5, 1)]), 6);
++        for cover in [78, 44, 60] {
++            assert_eq!(quads(&[(5, 20, 5, 1), (5, 21, 5, cover)]), 10, "stone under block {cover}");
++        }
++        assert_eq!(quads(&[(5, 20, 5, 1), (6, 20, 5, 44)]), 11, "a slab beside a stone covers part of its side only: the stone keeps 6, the slab 5");
++        assert_eq!(quads(&[(5, 21, 5, 78)]), 6, "a layer on nothing is a box of its own (its bottom shows)");
++    }
++
+     /// One block in the middle of a chunk is exactly one cube.
+     #[test]
+     fn single_block_is_one_cube() {
+diff -ruN -x __pycache__ a/mc-rs/src/render/player.rs b/mc-rs/src/render/player.rs
+--- a/mc-rs/src/render/player.rs	2026-11-07 17:47:40.000000000 +0000
++++ b/mc-rs/src/render/player.rs	2026-11-14 10:40:52.748023721 +0000
+@@ -7,7 +7,7 @@
+ //! UNVERIFIED: written without a Rust toolchain: not compiled, not run.
+ 
+ use crate::render::atlas;
+-use crate::render::mesh::{lm, push_box, VF, WHITE};
++use crate::render::mesh::{lm, VF, WHITE};
+ use crate::world::craft::{self, Kind};
+ use crate::world::items::{icon_meta, ItemStack};
+ use glam::{Mat4, Vec3};
+diff -ruN -x __pycache__ a/mc-rs/src/world/chunk.rs b/mc-rs/src/world/chunk.rs
+--- a/mc-rs/src/world/chunk.rs	2026-11-14 17:32:46.000000000 +0000
++++ b/mc-rs/src/world/chunk.rs	2026-11-14 10:40:36.380173300 +0000
+@@ -517,9 +517,9 @@
+     fn nibbles_allocate_on_the_first_non_zero() {
+         let mut n = Nibbles::new();
+         n.set(3, 4, 5, 0);
+-        assert!(n.0.is_empty() && n.get(3, 4, 5) == 0 && n.bytes().len() == VOLUME / 2 && n.bytes().iter().all(|&b| b == 0));
++        assert!(n.0.is_none() && n.get(3, 4, 5) == 0 && n.bytes().len() == VOLUME / 2 && n.bytes().iter().all(|&b| b == 0));
+         n.set(3, 4, 5, 7);
+-        assert_eq!((n.0.len(), n.get(3, 4, 5)), (VOLUME / 2, 7));
++        assert_eq!((n.0.as_ref().map_or(0, |a| a.len()), n.get(3, 4, 5)), (VOLUME / 2, 7));
+         n.set(3, 4, 5, 0);
+         assert_eq!(n, Nibbles::new(), "an array of zeros equals no array");
+         assert!(Nibbles::from_bytes(vec![0; VOLUME / 2]).0.is_none(), "an all-zero save keeps no array");
+diff -ruN -x __pycache__ a/mc-rs/src/world/chunks.rs b/mc-rs/src/world/chunks.rs
+--- a/mc-rs/src/world/chunks.rs	2026-11-14 17:32:46.000000000 +0000
++++ b/mc-rs/src/world/chunks.rs	2026-11-14 10:48:06.268607952 +0000
+@@ -199,8 +199,18 @@
+     water: Option<[u32; SECTIONS + 1]>,
+     /// Per section, which faces see each other through it (`embeddium::vis`): what the occlusion walk reads.
+     vis: [u64; SECTIONS],
++    /// Per section, the box of the solid and cut-out geometry it really holds, chunk-local `[min x, y, z, max x, y, z]` (`EMPTY_BOX` when it
++    /// has none): the draw loop tests this against the frustum, not the 16-block cell the geometry sits in.
++    bounds: [[f32; 6]; SECTIONS],
+ }
+ 
++/// `Mesh::bounds` of a section without solid or cut-out quads: min above max, so no box test can pass.
++const EMPTY_BOX: [f32; 6] = [f32::MAX, f32::MAX, f32::MAX, f32::MIN, f32::MIN, f32::MIN];
++
++/// What a section's box grows by on every side, so the 1/16 grid of the packed positions (and the f32 sums of the test) never cut a face
++/// whose corner sits on the edge of the box.
++const BOX_PAD: f32 = 0.1;
++
+ /// Vertices per page (`PAGE_VERTS * 12` bytes). A page is one vertex buffer carved up by an `embeddium::arena::Arena`; a few pages hold
+ /// the whole ring. A mesh that is bigger than a page is not drawn. Lever: a bigger page = fewer buffer switches in the draw loop,
+ /// but memory is taken a page at a time. The shared index buffer is sized for one page (`PAGE_VERTS / 4` quads, 6 MiB) and serves all.
+@@ -460,8 +470,8 @@
+     (((top - 0.5).floor().max(0.0) as usize) >> 4).min(SECTIONS - 1)
+ }
+ 
+-/// A quad that is one block face on the block grid showing a whole terrain tile, the same light, shade and colour on all four corners:
+-/// the only kind `merged` can join with its neighbours. `an` is the axis it is flat on, `au` / `av` the axes its corner 1 and corner 3 lie
++/// A quad that is one block face on the block grid showing a whole terrain tile, with the same colour on all four corners and light and shade
++/// that is the same on all four, or the same along one of its two axes (`mode`): the only kind `merged` can join with its neighbours. `an` is the axis it is flat on, `au` / `av` the axes its corner 1 and corner 3 lie
+ /// along (the template's u and v), `su` / `sv` which way the corners go along them and `du` / `dv` which way the texture runs.
+ #[derive(Clone, Copy, Debug)]
+ struct Unit {
+@@ -476,12 +486,21 @@
+     /// The cell: the lower of its two coordinates along `au` and `av`.
+     cu: i32,
+     cv: i32,
++    /// Which way a run of these may grow: 0 = both (all four corners carry the same light, a rectangle), 1 = along `au` only (the light is
++    /// the same at corners 0 and 1 and at corners 3 and 2, so it changes along `av` alone), 2 = along `av` only. A strip stretched along the
++    /// axis its light does not change on shades exactly like the cells it replaces.
++    mode: u8,
+ }
+ 
+ fn unit_of(q: &PQ) -> Option<Unit> {
+-    if q.tile >= 256 || (1..4).any(|k| q.v[k].lm.to_bits() != q.v[0].lm.to_bits() || q.v[k].lit.to_bits() != q.v[0].lit.to_bits() || q.v[k].tint.to_bits() != q.v[0].tint.to_bits()) {
++    // The template's corners: 1 is 0 moved along u, 3 is 0 moved along v, 2 is both. A face whose corners carry the same light pairwise
++    // along one axis (the dark foot of a wall, a lit edge) still joins its neighbours along that axis.
++    let alike = |a: usize, b: usize| q.v[a].lm.to_bits() == q.v[b].lm.to_bits() && q.v[a].lit.to_bits() == q.v[b].lit.to_bits();
++    let (u_flat, v_flat) = (alike(0, 1) && alike(3, 2), alike(0, 3) && alike(1, 2));
++    if q.tile >= 256 || (1..4).any(|k| q.v[k].tint.to_bits() != q.v[0].tint.to_bits()) || !(u_flat || v_flat) {
+         return None;
+     }
++    let mode = if u_flat && v_flat { 0 } else if u_flat { 1 } else { 2 };
+     let p = |k: usize| q.v[k].pos;
+     let same = |a: usize| (1..4).all(|k| p(k)[a] == p(0)[a]);
+     let mut an = None;
+@@ -529,12 +548,14 @@
+         dv: sign(dy),
+         cu: p(0)[au].min(p(1)[au]) as i32,
+         cv: p(0)[av].min(p(3)[av]) as i32,
++        mode,
+     })
+ }
+ 
+ /// What two `Unit`s must share to be one quad: the layer, the section (so a merged quad stays in the section it is drawn with), the plane,
+-/// the way they face and their texture runs, the tile, and the light, shade and colour (all four corners of each agree, so the run has the
+-/// same values everywhere and needs no per-cell interpolation).
++/// the way they face and their texture runs, the tile, the colour, and the light and shade of each of the four corners (and so the way a run
++/// may grow, `mode`): the cells of a run have the same values at the same corners, so the stretched quad shades like them without a
++/// per-cell interpolation.
+ #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+ struct Join {
+     cut: bool,
+@@ -548,9 +569,22 @@
+     du: i32,
+     dv: i32,
+     tile: u16,
+-    lm: u32,
+-    lit: u32,
++    /// The light, shade and colour of each of the four corners (equal in pairs along the axis a strip grows on, see `Unit::mode`).
++    lm: [u32; 4],
++    lit: [u32; 4],
+     tint: u32,
++    mode: u8,
++}
++
++impl Join {
++    /// The longest run along (u, v): a strip grows only along the axis its light does not change on.
++    fn limits(&self) -> (i32, i32) {
++        match self.mode {
++            1 => (MERGE_MAX, 1),
++            2 => (1, MERGE_MAX),
++            _ => (MERGE_MAX, MERGE_MAX),
++        }
++    }
+ }
+ 
+ /// The cells of one `Join`, and the first of its quads to build the merged ones from (`rcu`, `rcv`: its cell).
+@@ -566,8 +600,8 @@
+ const MERGE_MAX: i32 = 16;
+ 
+ /// Greedy meshing of one plane: the rectangles (cell u, cell v, width, height) that cover `cells` once, taking the next free cell in
+-/// (v, u) order, widening as far as the row runs and then heightening while whole rows follow.
+-fn greedy(cells: &mut Vec<(i32, i32)>) -> Vec<(i32, i32, i32, i32)> {
++/// (v, u) order, widening as far as the row runs (at most `max_w`) and then heightening while whole rows follow (at most `max_h`).
++fn greedy(cells: &mut Vec<(i32, i32)>, max_w: i32, max_h: i32) -> Vec<(i32, i32, i32, i32)> {
+     cells.sort_unstable_by_key(|&(u, v)| (v, u));
+     let mut free: HashSet<(i32, i32)> = cells.iter().copied().collect();
+     let mut out = Vec::new();
+@@ -576,11 +610,11 @@
+             continue;
+         }
+         let mut w = 1;
+-        while w < MERGE_MAX && free.contains(&(u0 + w, v0)) {
++        while w < max_w && free.contains(&(u0 + w, v0)) {
+             w += 1;
+         }
+         let mut h = 1;
+-        'grow: while h < MERGE_MAX {
++        'grow: while h < max_h {
+             for du in 0..w {
+                 if !free.contains(&(u0 + du, v0 + h)) {
+                     break 'grow;
+@@ -671,6 +705,8 @@
+     starts: [u32; SECTIONS + 1],
+     cut: [u32; SECTIONS + 1],
+     wstarts: [u32; SECTIONS + 1],
++    /// `Mesh::bounds`: the box of each section's solid and cut-out quads.
++    bounds: [[f32; 6]; SECTIONS],
+ }
+ 
+ /// Sorts the mesher's quads into layers (a quad that shows a see-through tile is cut-out: the tile at the centre of its four uvs) and
+@@ -706,9 +742,10 @@
+                     du: u.du,
+                     dv: u.dv,
+                     tile: pq.tile,
+-                    lm: pq.v[0].lm.to_bits(),
+-                    lit: pq.v[0].lit.to_bits(),
++                    lm: std::array::from_fn(|k| pq.v[k].lm.to_bits()),
++                    lit: std::array::from_fn(|k| pq.v[k].lit.to_bits()),
+                     tint: pq.v[0].tint.to_bits(),
++                    mode: u.mode,
+                 };
+                 groups.entry(run).or_insert_with(|| Group { rep: pq, rcu: u.cu, rcv: u.cv, cells: Vec::new() }).cells.push((u.cu, u.cv));
+             }
+@@ -720,13 +757,15 @@
+         layers[2].push((section_of(&pq), pq, q.flip, q.both));
+     }
+     for (run, mut g) in groups {
+-        for (u0, v0, w, h) in greedy(&mut g.cells) {
++        let (max_w, max_h) = run.limits();
++        for (u0, v0, w, h) in greedy(&mut g.cells, max_w, max_h) {
+             layers[run.cut as usize].push((run.section, merged(&g.rep, &run, g.rcu, g.rcv, u0, v0, w, h), false, false));
+         }
+     }
+     // The estimate `Vec::with_capacity` was given, asked of the buffer that is there: no allocation when it is already big enough.
+     recycled.reserve((solid.len() + water.len()) / 6 * 4);
+-    let mut out = Quads { verts: recycled, starts: [0; SECTIONS + 1], cut: [0; SECTIONS + 1], wstarts: [0; SECTIONS + 1] };
++    let mut out = Quads { verts: recycled, starts: [0; SECTIONS + 1], cut: [0; SECTIONS + 1], wstarts: [0; SECTIONS + 1], bounds: [EMPTY_BOX; SECTIONS] };
++    let mut bounds = [EMPTY_BOX; SECTIONS];
+     for (l, list) in layers.iter_mut().enumerate() {
+         list.sort_by_key(|e| e.0);
+         let mut starts = [0u32; SECTIONS + 1];
+@@ -734,6 +773,17 @@
+         for s in 0..SECTIONS {
+             starts[s] = out.verts.len() as u32 / 4;
+             while let Some((_, q, flip, both)) = it.next_if(|e| e.0 == s) {
++                if l < 2 {
++                    // The solid and cut-out layers share the section's mask in the draw loop, so their boxes are one box. Water has its own
++                    // mask (`wet`), it is not in here.
++                    let b = &mut bounds[s];
++                    for v in &q.v {
++                        for a in 0..3 {
++                            b[a] = b[a].min(v.pos[a]);
++                            b[a + 3] = b[a + 3].max(v.pos[a]);
++                        }
++                    }
++                }
+                 let mut put = |order: [usize; 4]| {
+                     let face = face_code(&q.v[order[0]].pos, &q.v[order[1]].pos, &q.v[order[2]].pos);
+                     order.iter().for_each(|&k| out.verts.push(encode_vertex(&q.v[k], q.tile, q.repeat, face, l == 2)));
+@@ -755,6 +805,13 @@
+             _ => out.wstarts = starts,
+         }
+     }
++    for b in bounds.iter_mut().filter(|b| b[0] <= b[3]) {
++        for a in 0..3 {
++            b[a] -= BOX_PAD;
++            b[a + 3] += BOX_PAD;
++        }
++    }
++    out.bounds = bounds;
+     out
+ }
+ 
+@@ -804,6 +861,7 @@
+     cut: [u32; SECTIONS + 1],
+     wstarts: [u32; SECTIONS + 1],
+     vis: [u64; SECTIONS],
++    bounds: [[f32; 6]; SECTIONS],
+ }
+ 
+ /// Emptied vertex buffers, kept with their capacity for the next mesh. Only the workers touch it: a worker `take`s one for the job it
+@@ -863,13 +921,13 @@
+     );
+     // Sodium's layers: the faces that show a see-through tile are drawn with the alpha test, the rest without it. All three layers live in
+     // one run of the page, solid first.
+-    let Quads { verts, starts, cut, wstarts } = pack_reusing(&verts, &idxs, &widxs, recycled);
++    let Quads { verts, starts, cut, wstarts, bounds } = pack_reusing(&verts, &idxs, &widxs, recycled);
+     // Only full cubes that stop light hide what is behind them: leaves, glass, ice and water are seen through, slabs and stairs are not cubes.
+     let vis = std::array::from_fn(|s| vis::compute(|x, y, z| {
+         let b = me.blocks[idx(x, s * 16 + y, z)];
+         opaque(b) && normal_cube(b)
+     }));
+-    Built { verts, starts, cut, wstarts, vis }
++    Built { verts, starts, cut, wstarts, vis, bounds }
+ }
+ 
+ struct Entry {
+@@ -970,8 +1028,13 @@
+     /// It holds the `vis` of every meshed section (a chunk without a mesh has none and lets the view through): a chunk that unloads or loads
+     /// again goes through `remove_column`, a mesh that arrives with other occlusion data through `set`.
+     occlusion: occlusion::Occlusion,
+-    /// Per chunk column, the sections (bit `s`) `update_visible` found drawable this frame.
++    /// Per chunk column, the sections (bit `s`) `update_visible` found in range, reached by the occlusion search and in the frustum this frame
++    /// (by their 16-block cell): what entities, real water and the LoD cut-out go by.
+     visible: HashMap<Key, u32>,
++    /// Per chunk column, the sections of `visible` whose solid and cut-out geometry itself (`Mesh::bounds`) is in the frustum: what the
++    /// terrain draw loop walks (`for_each_run`). A section's cell reaches up to 16 blocks above the ground it holds, so looking over a
++    /// hill used to draw the near ground's sections for the sky's sake.
++    draw: HashMap<Key, u32>,
+     /// The part of `visible` within the water radius `wr` (`WATER_RANGE`, or all of it with the LoD off): the sections whose real water is drawn (and whose LoD water sheet is cut).
+     wet: HashMap<Key, u32>,
+     /// The visible chunks near to far (`update_visible`) with their squared distance to the eye (blocks, horizontal): the order `draw_ranges`
+@@ -1094,7 +1157,7 @@
+         gen.share_structory(structures);
+         Self { chunks: Chunks::default(), pending: HashSet::new(), ring, radius, center: None, max_in_flight: workers * 2, built, meshing: HashSet::new(), max_meshing: workers * 2, urgent: HashSet::new(),
+                populated_rx, populating: HashMap::new(), busy: HashSet::new(), max_populating: workers, stamp: 0,
+-               cm: gen.manager(), bm: std::sync::Mutex::new(gen.manager()), biome_area: None, gen, jobs, done, light: light::LightLink::spawn(), sky_sub: 0, top: 128, mesh_gen: 0, dir: None, saved: HashSet::new(), writer: None, changes: Vec::new(), fresh_water: Vec::new(), loot: Vec::new(), spawners: Vec::new(), occlusion: occlusion::Occlusion::new(0, SECTIONS as i32), visible: HashMap::new(), wet: HashMap::new(), order: Vec::new(), ingest: Vec::new(), ingested: HashSet::new(), pages: Pages::default(), held: None, upload: UploadDurationEstimator::new(), frame_ns: None, last_frame_ns: 0, last_update: None, born: HashMap::new(), mesh_wait: (0.0, 0.0, 0) }
++               cm: gen.manager(), bm: std::sync::Mutex::new(gen.manager()), biome_area: None, gen, jobs, done, light: light::LightLink::spawn(), sky_sub: 0, top: 128, mesh_gen: 0, dir: None, saved: HashSet::new(), writer: None, changes: Vec::new(), fresh_water: Vec::new(), loot: Vec::new(), spawners: Vec::new(), occlusion: occlusion::Occlusion::new(0, SECTIONS as i32), visible: HashMap::new(), draw: HashMap::new(), wet: HashMap::new(), order: Vec::new(), ingest: Vec::new(), ingested: HashSet::new(), pages: Pages::default(), held: None, upload: UploadDurationEstimator::new(), frame_ns: None, last_frame_ns: 0, last_update: None, born: HashMap::new(), mesh_wait: (0.0, 0.0, 0) }
+     }
+ 
+     /// The render distance in chunks.
+@@ -1645,7 +1708,8 @@
+             self.occlusion.update(glam::DVec3::new(f64::from(eye.x), f64::from(eye.y), f64::from(eye.z)), (rh / 16.0) as i32 + 2);
+         }
+         self.visible.clear();
+-        for &(x, z) in self.chunks.keys() {
++        self.draw.clear();
++        for (&(x, z), e) in &self.chunks {
+             // The column's box holds those of its sections: most columns are behind the camera or out of the side.
+             let min = Vec3::new(x as f32 * 16.0, -1.0, z as f32 * 16.0);
+             let max = min + Vec3::new(16.0, H as f32 + 2.0, 16.0);
+@@ -1659,6 +1723,19 @@
+             });
+             if seen != 0 {
+                 self.visible.insert((x, z), seen);
++                // The terrain is drawn only where its own box is in the frustum. The range test stays the cell's: the LoD cuts its plates by it
++                // (`covered`), and a real face the range kept must not be dropped here while the plate under it is.
++                let (ox, oz) = (x as f32 * 16.0, z as f32 * 16.0);
++                let drawn = match &e.mesh {
++                    Some(m) => (0..SECTIONS).filter(|&y| seen >> y & 1 != 0).fold(0u32, |a, y| {
++                        let b = &m.bounds[y];
++                        if b[0] <= b[3] && in_frustum(Vec3::new(ox + b[0], b[1], oz + b[2]), Vec3::new(ox + b[3], b[4], oz + b[5])) { a | 1u32 << y } else { a }
++                    }),
++                    None => seen,
++                };
++                if drawn != 0 {
++                    self.draw.insert((x, z), drawn);
++                }
+             }
+         }
+         self.wet = self.visible.iter().filter_map(|(&(x, z), &m)| Some(((x, z), near_sections(x, z, m, eye, shape, wr.min(rh), rv))).filter(|e| e.1 != 0)).collect();
+@@ -1738,7 +1815,7 @@
+     /// ponytail: whole chunks only, the faces inside one chunk keep map order; upgrade = sort the sections / faces too.
+     pub fn for_each_run(&self, layer: Layer, mut f: impl FnMut(Run)) {
+         let water = layer == Layer::Water;
+-        let masks = if water { &self.wet } else { &self.visible }; // real water only within `wr` (`update_visible`)
++        let masks = if water { &self.wet } else { &self.draw }; // real water only within `wr` (`update_visible`)
+         let Some(quads) = self.pages.quads.as_ref() else { return };
+         // One chunk: its runs of sections in `layer`, as (page, mesh, first, end) to `sink`.
+         let visit = |k: &Key, sink: &mut dyn FnMut(&Page, &Mesh, u32, u32)| {
+@@ -1795,7 +1872,7 @@
+ 
+     /// Sections the frame draws (`update_visible`'s masks, solid layer): what `gpu::flat` weighs against `MIN_SECTIONS`.
+     pub fn sections_drawn(&self) -> usize {
+-        self.visible.iter().filter(|(k, _)| self.drawn(**k)).map(|(_, m)| m.count_ones() as usize).sum()
++        self.draw.iter().filter(|(k, _)| self.drawn(**k)).map(|(_, m)| m.count_ones() as usize).sum()
+     }
+ 
+     /// Page `id` is alive (a page left empty is dropped): `gpu::flat` forgets the bind groups of the others.
+@@ -2057,7 +2134,7 @@
+             self.accept(key);
+             self.note_mesh(key);
+             uploaded += 1;
+-            let Built { verts, starts, cut, wstarts, vis } = b;
++            let Built { verts, starts, cut, wstarts, vis, bounds } = b;
+             let pages_before = self.pages.list.len();
+             let t = std::time::Instant::now();
+             let put = if verts.is_empty() { None } else { Some(self.pages.put(gfx, origins, &verts, key)) };
+@@ -2081,6 +2158,7 @@
+                         cut: cut.map(|q| at(q)),
+                         water: (wstarts[SECTIONS] > wstarts[0]).then(|| wstarts.map(|q| at(q))),
+                         vis,
++                        bounds,
+                     })
+                 }
+                 Some(None) => {
+@@ -2597,6 +2675,8 @@
+         assert_eq!(vertex::decode(&q.verts[0]).pos[1], 5.0);
+         assert_eq!(vertex::decode(&q.verts[4]).pos[1], 40.0);
+         assert!(q.cut.iter().all(|&c| c == 2) && q.wstarts.iter().all(|&c| c == 2), "no cut-out, no water: empty layers after the solid ones");
++        assert!(q.bounds[1][0] > q.bounds[1][3], "section 1 holds nothing: an empty box");
++        assert!((q.bounds[0][1] - (5.0 - BOX_PAD)).abs() < 1e-6 && (q.bounds[0][4] - (5.0 + BOX_PAD)).abs() < 1e-6 && (q.bounds[2][1] - (40.0 - BOX_PAD)).abs() < 1e-6, "a section's box is its geometry's, padded");
+     }
+ 
+     /// Starling's `mesh_pool_reuses_capacity_with_clean_geometry_state` (`streaming.rs`, MIT), on a vertex buffer: the pool hands back the
+@@ -2878,6 +2958,35 @@
+         assert!((uv[0][0] - 0.0).abs() < 0.13 && (uv[1][0] - 63.98).abs() < 0.13 && (uv[0][1] - 0.0).abs() < 0.13 && (uv[3][1] - 47.98).abs() < 0.13, "{uv:?}");
+     }
+ 
++    /// A row of faces whose light changes across the row but not along it (the dark foot of a wall) is one strip that keeps both light levels
++    /// at its ends, the faces that follow the same pattern along the other axis are not joined to it, and a lone face stays a quad.
++    #[test]
++    fn a_row_with_the_same_light_along_it_is_one_strip() {
++        let mut v = Vec::new();
++        let mut idxs = Vec::new();
++        let (w, h) = (crate::render::atlas::ATLAS_W as f32, crate::render::atlas::ATLAS_H as f32);
++        // Corners 0 and 1 (the z + 1 edge) are dark, 3 and 2 (the z edge) are light: the same on every cell of the row.
++        let dark = mesh::SMOOTH_LM + 2.0 * 32.0 + 3.0;
++        let light = mesh::SMOOTH_LM + 14.0 * 32.0 + 3.0;
++        for (x, lms) in [(0.0, [dark, dark, light, light]), (1.0, [dark, dark, light, light]), (2.0, [dark, dark, light, light]), (3.0, [dark, light, light, dark])] {
++            let base = v.len() as u32 / mesh::VF as u32;
++            for (k, (c, (lx, ly))) in [[0.0, 1.0, 1.0], [1.0, 1.0, 1.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]].iter().zip([(0.02, 0.02), (15.98, 0.02), (15.98, 15.98), (0.02, 15.98)]).enumerate() {
++                v.extend_from_slice(&[x + c[0], 5.0, c[2], (16.0 + lx) / w, ly / h, 1.0, lms[k], mesh::WHITE]);
++            }
++            idxs.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
++        }
++        let q = pack(&v, &idxs, &[]);
++        assert_eq!(q.verts.len(), 8, "a strip of three and the face with the other pattern");
++        let d: Vec<_> = q.verts.iter().map(vertex::decode).collect();
++        let strip: Vec<_> = d.iter().filter(|v| v.repeat).collect();
++        assert_eq!(strip.len(), 4, "only the strip tiles its texture");
++        let levels: Vec<_> = strip.iter().map(|v| (v.sky, v.block)).collect();
++        assert_eq!(levels, [(2, 3), (2, 3), (14, 3), (14, 3)], "each end keeps the light the cells had");
++        let xs: Vec<f32> = strip.iter().map(|v| v.pos[0]).collect();
++        assert_eq!(xs, [0.0, 3.0, 3.0, 0.0], "stretched along the row only");
++        assert!(strip.iter().all(|v| v.pos[2] == 0.0 || v.pos[2] == 1.0), "one block across");
++    }
++
+     /// Faces that differ in light, or that are not a whole block on the grid, are not joined: the row stays 3 quads (2 + 1 with the dark one
+     /// between) and a slab-high face stays itself.
+     #[test]
+@@ -2899,11 +3008,14 @@
+     #[test]
+     fn a_run_stops_at_sixteen() {
+         let mut cells: Vec<(i32, i32)> = (0..16).flat_map(|v| (0..16).map(move |u| (u, v))).collect();
+-        assert_eq!(greedy(&mut cells), vec![(0, 0, 16, 16)]);
++        assert_eq!(greedy(&mut cells, MERGE_MAX, MERGE_MAX), vec![(0, 0, 16, 16)]);
+         let mut row: Vec<(i32, i32)> = (0..20).map(|u| (u, 0)).collect();
+-        assert_eq!(greedy(&mut row), vec![(0, 0, 16, 1), (16, 0, 4, 1)]);
++        assert_eq!(greedy(&mut row, MERGE_MAX, MERGE_MAX), vec![(0, 0, 16, 1), (16, 0, 4, 1)]);
+         let mut l: Vec<(i32, i32)> = vec![(0, 0), (1, 0), (0, 1)];
+-        assert_eq!(greedy(&mut l), vec![(0, 0, 2, 1), (0, 1, 1, 1)], "an L is two rectangles that cover it once");
++        assert_eq!(greedy(&mut l, MERGE_MAX, MERGE_MAX), vec![(0, 0, 2, 1), (0, 1, 1, 1)], "an L is two rectangles that cover it once");
++        let mut block: Vec<(i32, i32)> = (0..3).flat_map(|v| (0..4).map(move |u| (u, v))).collect();
++        assert_eq!(greedy(&mut block, MERGE_MAX, 1), vec![(0, 0, 4, 1), (0, 1, 4, 1), (0, 2, 4, 1)], "a strip grows along one axis only");
++        assert_eq!(greedy(&mut block, 1, MERGE_MAX), vec![(0, 0, 1, 3), (1, 0, 1, 3), (2, 0, 1, 3), (3, 0, 1, 3)]);
+     }
+ 
+     /// Meshes share a page: a freed run is handed out again (best fit), the page is not duplicated, and a mesh bigger than a page is refused.
+@@ -2925,7 +3037,7 @@
+         assert_eq!((pa, pb, pages.list.len()), (0, 0, 1));
+         assert!(va != vb && sa != sb && va % 4 == 0 && vb % 4 == 0, "whole quads, one slot each");
+         assert!(pages.quads.is_some(), "the shared index buffer exists once a mesh is in");
+-        let at = |page, v, slot| Mesh { page, v, slot, origin: [0.0; 3], index_count: 6, starts: [0; SECTIONS + 1], cut: [0; SECTIONS + 1], water: None, vis: [0; SECTIONS] };
++        let at = |page, v, slot| Mesh { page, v, slot, origin: [0.0; 3], index_count: 6, starts: [0; SECTIONS + 1], cut: [0; SECTIONS + 1], water: None, vis: [0; SECTIONS], bounds: [EMPTY_BOX; SECTIONS] };
+         pages.free(&at(pa, va, sa));
+         assert_eq!(put(&mut pages), (pa, va, sa), "the run and the slot come back");
+         assert!(pages.put(Gfx::Wgpu(&device, &queue), Some(&origins), &vec![[0u8; vertex::STRIDE]; PAGE_VERTS as usize + 4], (0, 0)).is_none());
+diff -ruN -x __pycache__ a/mc-rs/src/world/decor.rs b/mc-rs/src/world/decor.rs
+--- a/mc-rs/src/world/decor.rs	2026-11-06 20:41:42.000000000 +0000
++++ b/mc-rs/src/world/decor.rs	2026-11-14 10:40:52.751034445 +0000
+@@ -375,7 +375,7 @@
+     use super::*;
+ 
+     /// A stone wall at z = 10 (cells z >= 10 solid), air in front.
+-    fn wall(x: i32, y: i32, z: i32) -> Option<(u8, u8)> {
++    fn wall(_x: i32, y: i32, z: i32) -> Option<(u8, u8)> {
+         Some((if z >= 10 && y >= 60 { 1 } else { 0 }, 0))
+     }
+ 
+diff -ruN -x __pycache__ a/mc-rs/src/world/gen/hydro.rs b/mc-rs/src/world/gen/hydro.rs
+--- a/mc-rs/src/world/gen/hydro.rs	2026-11-08 16:30:54.000000000 +0000
++++ b/mc-rs/src/world/gen/hydro.rs	2026-11-14 10:40:36.380768751 +0000
+@@ -2345,7 +2345,7 @@
+     fn the_current_follows_the_river() {
+         let net = build(SEED, plate_at(SEED, 0.0, 0.0), &mut land);
+         let s = net.segs.iter().find(|s| s.x2 - s.x1 < -1.0 && s.w1 > 1.0).copied().expect("a river going west");
+-        let c = net.flow_at(((s.x1 + s.x2) / 2.0) as f32, ((s.z1 + s.z2) / 2.0) as f32).expect("water at the middle of a piece");
++        let c = net.flow_at(((s.x1 + s.x2) / 2.0) as f32, ((s.z1 + s.z2) / 2.0) as f32, Push::Player).expect("water at the middle of a piece");
+         assert!(c[0] < 0.0 && (0.3..=3.1).contains(&c[0].hypot(c[1])), "{c:?}");
+     }
+ 
+diff -ruN -x __pycache__ a/mc-rs/src/world/gen/overworld.rs b/mc-rs/src/world/gen/overworld.rs
+--- a/mc-rs/src/world/gen/overworld.rs	2026-11-08 12:44:50.000000000 +0000
++++ b/mc-rs/src/world/gen/overworld.rs	2026-11-14 10:40:52.748519765 +0000
+@@ -12,7 +12,7 @@
+ use std::collections::HashMap;
+ use std::sync::Arc;
+ 
+-pub use crate::world::chunk::{D, H, VOLUME, W};
++pub use crate::world::chunk::{H, VOLUME};
+ /// The height of the b1.7.3 terrain: the Vanilla and Tectonic generators fill the lowest `GH` cells of a column (the chunk is `H` = 384
+ /// tall since 2026-11-05) and every Random draw of the Java is over this range, so the golden tests stay bit for bit.
+ pub const GH: usize = 128;
+diff -ruN -x __pycache__ a/mc-rs/src/world/mobs.rs b/mc-rs/src/world/mobs.rs
+--- a/mc-rs/src/world/mobs.rs	2026-11-06 20:41:42.000000000 +0000
++++ b/mc-rs/src/world/mobs.rs	2026-11-14 10:40:52.750645508 +0000
+@@ -2566,7 +2566,7 @@
+     fn fog_shortens_how_far_a_mob_notices() {
+         let l = |_, _, _| 15u8;
+         let player = Vec3::new(32.5, 10.9, 20.5);
+-        let (mut clear, mut foggy) = (ctx(player, &l), ctx(player, &l));
++        let (clear, mut foggy) = (ctx(player, &l), ctx(player, &l));
+         foggy.sight = crate::world::biomelife::sight(0.01);
+         let mut rng = JavaRandom::new(4);
+         for (c, want) in [(&clear, true), (&foggy, false)] {
+@@ -2574,7 +2574,6 @@
+             z.tick(&mut rng, c, &mut Vec::new());
+             assert_eq!(z.target, want, "sight {}", c.sight);
+         }
+-        clear.sight = 1.0;
+     }
+ 
+     /// NOT b1.7.3: wolves are born where `wolf_land` says, in the coat of the biome, and never on the plains.
+diff -ruN -x __pycache__ a/mc-rs/src/world/physics.rs b/mc-rs/src/world/physics.rs
+--- a/mc-rs/src/world/physics.rs	2026-11-05 12:06:02.000000000 +0000
++++ b/mc-rs/src/world/physics.rs	2026-11-14 10:40:52.748940651 +0000
+@@ -468,7 +468,7 @@
+     #[test]
+     fn a_slab_is_stepped_up_a_full_block_is_not() {
+         let at = |top: u8| {
+-            let get = move |x: i32, y: i32, z: i32| -> Option<u8> {
++            let get = move |x: i32, y: i32, _z: i32| -> Option<u8> {
+                 if y < 0 { return None; }
+                 Some(match (x, y) { (_, 0..=9) => 1, (x, 10) if x >= 10 => top, _ => 0 })
+             };
+diff -ruN -x __pycache__ a/roadmap/performance.md b/roadmap/performance.md
+--- a/roadmap/performance.md	2026-11-14 17:32:46.000000000 +0000
++++ b/roadmap/performance.md	2026-11-14 10:48:56.145652726 +0000
+@@ -59,6 +59,11 @@
+ Not applicable, left out on purpose: multi-draw and persistent mapping (not in wgpu's downlevel set, none on a GLES fallback), mixins and the Forge / Fabric glue, the options screen, `ColorProviderRegistry` (biome tints are `biome_tints` already).
+ 
+ ## Changelog
++- 2026-11-14 (4): four things asked for together (written WITHOUT a Rust toolchain: not compiled, not run, not measured; the brackets of every edited file were checked against the original, nothing more). 1. **`cargo test -p mc-rs` compiled with 3 errors, now fixed**: `chunk.rs` `nibbles_allocate_on_the_first_non_zero` still read `Nibbles.0` as a `Vec` (`is_empty`, `len`; `nibbles-arc.patch` only changed its last line), now `is_none()` / `as_ref().map_or(0, |a| a.len())`; `hydro.rs` `the_current_follows_the_river` calls `flow_at` without the `Push` argument, now `Push::Player` (factor 1.2 x `BASE_PUSH` 1.25 = 1.5, the range the test asserts is that of a player). 2. **Warnings fixed (the 6 of the log, 5 of `mc-rs` and 1 of `tectonic`)**: unused `push_box` (`render/player.rs`), unused `D` and `W` re-exports (`gen/overworld.rs`, nothing used them), unused `z` (`physics.rs` test, now `_z`), unused `x` (`decor.rs` test, now `_x`), a dead `clear.sight = 1.0` (`mobs.rs` test; `clear` is no longer `mut`), `J::Bool` never read (`tectonic/src/lib.rs`: kept, it is part of the JSON model and a test reads it, with `#[allow(dead_code)]` and the reason). The log stopped at the errors, so a warning that only appears after them (the non-test build, other lints) is not known: run `cargo check --all-targets` and read what is left.
++    - **Strip merging** (`world/chunks.rs`, `unit_of`, `Join`, `greedy`): a face joined its neighbours only when all four corners had the same light and shade. Now a face whose corners are equal in pairs along one axis (corners 0 = 1 and 3 = 2, or 0 = 3 and 1 = 2: the dark foot of a wall, a lit edge, the usual ambient occlusion row) joins along THAT axis only (`Unit::mode`: 0 rectangle, 1 along u, 2 along v; `Join::limits`; `greedy(cells, max_w, max_h)`). A strip stretched along the axis its light does not change on interpolates exactly as the cells did, so the picture is the same; `Join` keeps the light and shade of each corner, so strips with another pattern never join. The vertex format, `merged` and the shaders did not change. Test `a_row_with_the_same_light_along_it_is_one_strip`, and `a_run_stops_at_sixteen` checks the limits.
++    - **Tighter culling of the terrain draw** (`ChunkManager::update_visible`, `Mesh::bounds`, `ChunkManager::draw`): a section's frustum test used its whole 16 x 18 x 16 cell, so the ground chunks beside you were drawn while you looked at the sky over them (the cell reaches 16 blocks above the ground it holds). `pack` now keeps the box of each section's solid and cut-out quads (`Quads::bounds`, padded by `BOX_PAD`), and `update_visible` fills `draw` with the sections of `visible` whose own box is in the frustum; `for_each_run` (both renderers, `gpu::flat` and `gles::flat` through it) and `sections_drawn` walk `draw`. `visible` is unchanged and still what entities (`box_visible`), the real water (`wet`) and the LoD cut-out (`covered`) read, on purpose: an entity in the air above the ground is in view although the ground under it is not, and the LoD cuts its plates by range, not by frustum, so only the frustum part is tightened. Test: the bounds assertions added to `render_shape_and_sections`.
++    - **Faces that cannot be seen** (`render/mesh.rs`, `covers`): leaves already hid against leaves (`leaf_depth` 1 while the leaf tiles are opaque, 2026-10-21 (5)) and against any `opaque` block. What was left: the top of a block under a snow layer, a slab, stairs or farmland, which is drawn into the cover's bottom (the cover's own bottom already hid against the block). `covers(n, meta, face_i)` asks whether the boxes of the neighbour that touch that face fill its whole 1 x 1 square (`shapes`, the stairs' two steps add up); only for ids 44 / 53 / 60 / 67 / 78, whose tiles are all opaque (read from `terrain.rgba`: minimum alpha 255 for tiles 66, 87, 5, 6, 4, 16). In a snowy biome that is the whole ground layer. A face against a partly covering neighbour (a stone beside a slab) stays. Test `the_top_under_a_snow_layer_or_a_slab_is_not_drawn` (counts 6 / 10 / 11 worked out by hand). Not done: the faces of an air pocket sealed on all six sides (a rule that reaches 2 cells from the face; at a chunk border the snapshot does not hold the second cell), and the slab-against-slab sides.
++    - **To read on a device:** quads per chunk in snow and in hills (the `FPS:` line prints the totals), the `Drawn` row (GLES) while looking at the sky over a hill, and that no section vanishes at the edge of the screen (the box is padded by 0.1 block; if a face pops in at the border, raise `BOX_PAD`).
+ - 2026-11-14 (3): `Nibbles` (block metadata) is an `Arc` (`mc-rs/src/world/chunk.rs`): `Option<Arc<Vec<u8>>>`, `None` = all 0; a clone shares the array, a real write goes through `Arc::make_mut` (copies once while a mesh job holds it), writing the value already there copies nothing. Why: `MeshJob`'s five `Snap`s still cloned `data` on the render thread, 5 x 48 KB wherever tall grass grows (`VOLUME / 2` = 48 KB since H = 384). Item 2 of "Memory and speed" (`Arc` for `blocks` / `light`) was already in the code (`Entry`, `Snap`, `LChunk`) and the list above is stale on that point; item 3 (light deltas) is NOT worth doing: `Report.chunks` carries an `Arc::clone`, not a copy, and the only copy is `Arc::make_mut` in `starlight` on the light thread, once per chunk per report; a delta would make the render thread patch its array, i.e. copy it there. Tests: the new `Nibbles` behaviour (clone shares, write copies once, same-value write copies nothing, zero equals none) passed standalone with rustc 1.75; the crate was not built (no wgpu / Android toolchain in the session), so `cargo test -p mc-rs` is still to run.
+ - 2026-11-14: a GPU clock, upload staging and a draw count on the OpenGL ES renderer (written WITHOUT a Rust toolchain: not compiled, not run, not measured; +1 test `gles::timer::tests::a_result_counts_only_when_it_is_whole_and_believable`). Why: the GLES path had no GPU time at all (`Backend::gpu_ms` returned nothing for it), so the dynamic resolution judged the frame by its swap wait, which vsync pads and a panel above 60 Hz turns into "always slow", and sank to `SCALE_MIN` whatever the cost was made of. A debug-screen shot (Adreno 610, scene 802 x 360 at 50%, CPU 5 ms, 55 fps, p99 and worst 21 ms) shows a frame whose pixel count cannot be what limits it: a quarter of the pixels of the 100% scene and still 18 ms, so what is left is per-triangle work, a wait that is not the GPU's, or both. 1. `gles/timer.rs` `GpuTimer`: `GL_EXT_disjoint_timer_query`, one `TIME_ELAPSED_EXT` query around the scene pass (the final pass and the HUD are not in it, as on the wgpu path), six slots, a result is read only when `QUERY_RESULT_AVAILABLE` says it is there (never waits) and dropped when the disjoint flag is set. `Renderer::gpu_ms` -> `Backend::gpu_ms` -> `Drs::tick` (the GPU-time path that was already written for wgpu: down above 85% of the panel's frame time, probe up under 70%) and the `gpu` figure of the debug screen's Frame row; the pacing log line prints it too. A context without the extension keeps the old behaviour. 2. `Gl::write`: a write into a buffer of 256 KiB or more (the 12 MiB chunk pages) goes through a staging buffer and `glCopyBufferSubData` instead of `glBufferSubData`: the copy is a command in the GPU's own queue, so the driver neither waits for the draws still queued on that page nor clones it. UNVERIFIED that the Adreno 610 driver did either: compare `p99` and `worst` while flying, before and after. `Buf` carries its `size` now. `tools/gles_timer_check.py` runs the staged write and the query ring on Mesa (GLES 3.2, llvmpipe): the 12 MiB buffer comes out byte for byte as with direct writes and 39 of 40 frames are timed with no GL error; that checks the GL calls and constants only, not the Rust and not the speed. 3. Debug screen row `Drawn` (GLES only): chunk draw calls and triangles of the last frame (`Renderer::drawn`, counted in `runs` and `flat_runs`). **To read on a device:** `gpu` against the frame time. `gpu` close to the frame time: GPU-bound; then a `gpu` that did not fall when the scale did (compare 50% with 70%) is per-triangle work, and `Drawn` gives the triangle count to divide it by. `gpu` well under the frame time: the wait is elsewhere (a vsync step, the `Perf` refresh hint, the compositor), and lowering the scene does nothing. **Consequence to know:** the scale can now rise above the floor it used to sit on, because it follows the scene pass's own time; the full-size final pass is outside that figure, so if frames get longer after this change, raise `GPU_DOWN`'s margin (the share left for the final pass) before anything else.
+ - 2026-11-14 (2): `Performance: Steady 60` (`fpsLimit:3`) (written WITHOUT a Rust toolchain: not compiled, not run on a device). Why: on a 90 Hz panel a frame can only be shown every 11.1 or 22.2 ms, so a game at 55-60 fps alternates 90 and 45 fps (the 21 ms worst frame on the Adreno 610 shot), and `Drs` chasing 90 fps keeps the scene near `SCALE_MIN`. What: a 16.7 ms frame cap, `ANativeWindow_setFrameRate(60)` (the compositor may switch the panel to 60 Hz), and `Drs` aims at `min(panel Hz, cap fps)` every frame, so it holds the scene to 60 fps instead of 90 and the scale can rise. Default stays Balanced. **To read on a device:** `p99` and `worst` near 17 ms and a higher `Dyn. res` percent than at Balanced; if the hint is ignored (log `frame rate hint 60 Hz -> N`, N != 0) set the panel to 60 Hz in Android settings.
+diff -ruN -x __pycache__ a/tectonic/src/lib.rs b/tectonic/src/lib.rs
+--- a/tectonic/src/lib.rs	2026-11-08 17:21:20.000000000 +0000
++++ b/tectonic/src/lib.rs	2026-11-14 10:40:52.751633363 +0000
+@@ -135,6 +135,8 @@
+ 
+ enum J {
+     Null,
++    // Part of the generic JSON model; terrain.json holds no boolean, so only the parser test reads it.
++    #[allow(dead_code)]
+     Bool(bool),
+     Num(f64),
+     Str(String),

@@ -12,7 +12,7 @@ use crate::world::gen::noise::{JavaRandom, OctaveNoise};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-pub use crate::world::chunk::{D, H, VOLUME, W};
+pub use crate::world::chunk::{H, VOLUME};
 /// The height of the b1.7.3 terrain: the Vanilla and Tectonic generators fill the lowest `GH` cells of a column (the chunk is `H` = 384
 /// tall since 2026-11-05) and every Random draw of the Java is over this range, so the golden tests stay bit for bit.
 pub const GH: usize = 128;

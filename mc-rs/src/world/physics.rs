@@ -468,7 +468,7 @@ mod tests {
     #[test]
     fn a_slab_is_stepped_up_a_full_block_is_not() {
         let at = |top: u8| {
-            let get = move |x: i32, y: i32, z: i32| -> Option<u8> {
+            let get = move |x: i32, y: i32, _z: i32| -> Option<u8> {
                 if y < 0 { return None; }
                 Some(match (x, y) { (_, 0..=9) => 1, (x, 10) if x >= 10 => top, _ => 0 })
             };

@@ -2345,7 +2345,7 @@ mod tests {
     fn the_current_follows_the_river() {
         let net = build(SEED, plate_at(SEED, 0.0, 0.0), &mut land);
         let s = net.segs.iter().find(|s| s.x2 - s.x1 < -1.0 && s.w1 > 1.0).copied().expect("a river going west");
-        let c = net.flow_at(((s.x1 + s.x2) / 2.0) as f32, ((s.z1 + s.z2) / 2.0) as f32).expect("water at the middle of a piece");
+        let c = net.flow_at(((s.x1 + s.x2) / 2.0) as f32, ((s.z1 + s.z2) / 2.0) as f32, Push::Player).expect("water at the middle of a piece");
         assert!(c[0] < 0.0 && (0.3..=3.1).contains(&c[0].hypot(c[1])), "{c:?}");
     }
 

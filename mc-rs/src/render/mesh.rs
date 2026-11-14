@@ -416,7 +416,10 @@ pub fn build_split_tinted(smooth: bool, blocks: &[u8], data: &Nibbles, nb_data: 
                     } else {
                         // `BlockLeavesBase.shouldSideBeRendered` (fancy graphics): leaves do not hide against leaves, or a hollow crown shows
                         // the sky through its edge rows as pale dashes (only while a leaf tile has see-through texels, see `leaf_depth`). Only the faces deeper than `leaf_depth` leaves are dropped (Xenon).
-                        reach && opaque(n) && (blk != 18 || n != 18 || (2..=leaf_depth).all(|k| leaf(x + dx * k, y + dy * k, z + dz * k)))
+                        reach && ((opaque(n) && (blk != 18 || n != 18 || (2..=leaf_depth).all(|k| leaf(x + dx * k, y + dy * k, z + dz * k))))
+                            // A neighbour that is not a cube but fills this face's whole cell side with an opaque tile (the snow layer on the
+                            // ground, a slab or stairs on a block, the farmland under a crop) hides it just as well.
+                            || (matches!(n, 44 | 53 | 60 | 67 | 78) && covers(n, meta_at(x + dx, y + dy, z + dz), face_i)))
                     };
                     if hidden {
                         continue;
@@ -588,6 +591,24 @@ fn shapes(id: u8, meta: u8, same: &dyn Fn(i32, i32) -> bool) -> ([[f32; 6]; 5], 
             (o, 1)
         }
     }
+}
+
+/// Whether the neighbour `n` (one of the blocks drawn with an opaque tile whose box is not the whole cell: slab 44, stairs 53 / 67, farmland 60,
+/// snow layer 78) covers the whole of the face `face_i` (`DIRS` order) of the cell next to it. The neighbour touches that face with its own
+/// opposite side, and the boxes of it that reach that side have to fill the 1 x 1 square (the stairs' two steps do, side by side; none of them
+/// overlap, so their areas add up). So the top of the block under a snow layer or a slab, whose only way to be seen is through that block,
+/// is not drawn; the sides of the same blocks are (a slab's box is half a cell high).
+fn covers(n: u8, meta: u8, face_i: usize) -> bool {
+    let (boxes, count) = shapes(n, meta, &|_, _| false);
+    let a = face_i / 2; // the axis of the face
+    let (o1, o2) = match a { 0 => (1, 2), 1 => (0, 2), _ => (0, 1) };
+    let area: f32 = boxes[..count]
+        .iter()
+        // face_i even looks toward +, so it meets the neighbour's - side (its box has to start at 0), odd the + side (end at 1)
+        .filter(|b| if face_i % 2 == 0 { b[a] <= 0.0 } else { b[a + 3] >= 1.0 })
+        .map(|b| (b[o1 + 3] - b[o1]) * (b[o2 + 3] - b[o2]))
+        .sum();
+    area >= 0.999
 }
 
 /// `RenderBlocks.func_1245_b` (crops): two pairs of crossing quads at 1/4 and 3/4 of the cell, one sixteenth sunk into the farmland,
@@ -776,6 +797,25 @@ mod tests {
         let mut nbx = air();
         nbx[idx(0, 20, 5)] = 18;
         assert_eq!(quads(&[13, 14, 15], &nbx), 13);
+    }
+
+    /// A snow layer, a slab or farmland on a block fills the cell's whole footprint from the floor up, so the top of the block under it is
+    /// not drawn (stone 5 quads, its cover 5: the four sides and the top; the cover's bottom hides against the stone as before). The sides
+    /// that are only partly covered stay: a stone next to a slab keeps all 6.
+    #[test]
+    fn the_top_under_a_snow_layer_or_a_slab_is_not_drawn() {
+        let a = air();
+        let quads = |cells: &[(usize, usize, usize, u8)]| {
+            let mut c = air();
+            cells.iter().for_each(|&(x, y, z, id)| c[idx(x, y, z)] = id);
+            face_count(&build(&c, &Nibbles::new(), &a, [&a[..]; 4], [&a[..]; 4], 0, 0, 0).0)
+        };
+        assert_eq!(quads(&[(5, 20, 5, 1)]), 6);
+        for cover in [78, 44, 60] {
+            assert_eq!(quads(&[(5, 20, 5, 1), (5, 21, 5, cover)]), 10, "stone under block {cover}");
+        }
+        assert_eq!(quads(&[(5, 20, 5, 1), (6, 20, 5, 44)]), 11, "a slab beside a stone covers part of its side only: the stone keeps 6, the slab 5");
+        assert_eq!(quads(&[(5, 21, 5, 78)]), 6, "a layer on nothing is a box of its own (its bottom shows)");
     }
 
     /// One block in the middle of a chunk is exactly one cube.
