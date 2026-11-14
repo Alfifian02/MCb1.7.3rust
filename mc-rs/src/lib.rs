@@ -1,0 +1,5268 @@
+//! mc-rs: Minecraft b1.7.3 in Rust for Android.
+//!
+//! M12 - Landscape touch UX (move stick, look drag, jump button, hotbar, pause menu) on
+//! top of M2 (camera + physics) and M3 (overworld generation), with the world streamed by
+//! `world::chunks::ChunkManager` (render-distance ring, generation on worker threads).
+
+mod audio;
+mod render;
+mod gles;
+mod backend;
+mod world;
+mod gpu;
+mod input;
+mod immersive;
+#[cfg(feature = "pad-rumble")]
+mod rumble;
+mod storage;
+mod menu;
+mod skin;
+mod options;
+mod gen_ui;
+mod preview;
+mod rei;
+mod rei_layout;
+mod stats_ui;
+mod ui;
+mod version;
+
+use crate::input::reach;
+use crate::input::rumble_fx::fx as rfx;
+use crate::input::touch_ui::{PointerRole, ScreenEv, TouchUi};
+use crate::menu::Menu;
+use crate::options::{Pause, PauseEv, PauseInfo, Settings};
+use crate::render::hud::{sprites as sp, HudPipeline, HudVertex};
+
+use android_activity::{AndroidApp, InputStatus, MainEvent, PollEvent};
+use android_activity::input::InputEvent as IEv;
+use core::ffi::c_void;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
+use crate::backend::Backend;
+use crate::gpu::context::{Drs, FrameTimes};
+use crate::gpu::gfx::{Drawn, WorldDraw};
+use crate::render::atlas;
+use crate::render::debug::Row;
+use crate::render::items::{ItemMesh, SignView};
+use crate::render::camera::{FirstPersonCamera, Frustum};
+use crate::render::look::{self, GlowMesh, Look};
+use crate::render::outline::Outline;
+use crate::render::color;
+use crate::world::gen::overworld::WorldType;
+use crate::world::lod::{self, Lod};
+use crate::world::pick::{self, Hit};
+use crate::world::dig::{self, Dig};
+use crate::world::chest::{self, Chest};
+use crate::world::decor::{self, Edit, Key, Painting, Text};
+use crate::world::craft::{self, Furnace, Screen};
+use crate::world::items::{self, Drops, Inventory, ItemStack};
+use crate::world::gear::{self, Hook, Used};
+use crate::world::boat;
+use crate::world::minecart;
+use crate::world::portal;
+use crate::world::mobs::{self, Ctx, Ev, Mobs, Strike};
+use crate::world::ticks::{self, Ticks};
+use crate::world::save::Level;
+use crate::world::sky;
+use crate::world::sprint::{self, Sprint};
+use crate::world::chunk::{is_plant, normal_cube, outline_bounds, physics_id, pick_bounds};
+use crate::world::chunks::{chunk_coord, ChunkManager, Shape, WATER_RANGE};
+use crate::world::physics::{self, Player};
+use crate::world::redstone;
+use crate::world::vitals::{self, Env, Vitals};
+use crate::world::effects::{self, Effects, Spawner};
+use crate::render::weather;
+
+/// Render distance in chunks (a circle of this radius is meshed and drawn, two more are generated).
+const RENDER_DIST: i32 = 4;
+/// The world seed (its save folder is `world-<seed>`).
+/// The world the player is in (its folder): when Android takes the window away the `App` is dropped and built again, and that world
+/// is entered again instead of the title screen.
+static LAST_WORLD: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+/// Vertical render distance in chunks (16 blocks): sections further above or below the eye are not drawn.
+const RENDER_VERT: i32 = 3;
+/// `Sphere`: what is drawn is within `RENDER_DIST` blocks-of-16 in 3D (matches the fog, which is by 3D distance);
+/// `Cylinder`: a circle of that radius at any height within `RENDER_VERT`.
+const RENDER_SHAPE: Shape = Shape::Sphere;
+
+/// Seconds of play between autosaves (the level file and a few chunks; pause and exit save everything).
+const AUTOSAVE_SECS: f32 = 5.0;
+/// Chunks written per autosave, so the first ones after generating a lot of terrain do not hitch a frame.
+const AUTOSAVE_CHUNKS: usize = 24;
+
+/// Console-Edition look: the vanilla light table + face shades. It is the only look now (the Photon passes were removed); the mesher and
+/// the sky still read this switch for their legacy branches.
+pub(crate) const LEGACY: bool = true;
+
+const LOOK_SENS: f32 = 0.004;
+/// Zoom button magnification (Zoomify's default).
+const ZOOM: f32 = 4.0;
+/// World units per second when a d-pad direction is held.
+const MOVE_SPEED: f32 = physics::WALK_SPEED;
+/// Eye offset from `player.pos`, which is the CENTRE of the 1.8-tall box. Steve's eyes are
+/// 1.62 above his feet (EntityPlayer.yOffset), i.e. 1.62 - 0.9 above the centre.
+const EYE_HEIGHT: f32 = 1.62 - physics::HALF.y;
+/// Asleep the eye sits this far over `posY` (the bed's surface + 15/16 less its 9/16): `orientCamera`'s `+0.42` less the `0.3` view translation.
+const SLEEP_EYE_LIFT: f32 = 0.12;
+
+/// Cortes Combat C4 (NOT b1.7.3, UNVERIFIED): a meal (or a bandage) in the mouth. Food takes `EAT_TICKS` (the mod's 1.21 use time), a bandage
+/// `mend::BANDAGE_USE`; any damage taken ends it unless the guard is up (`EatInterruptHandler`); it also ends when the hotbar slot changes or
+/// the item is gone. `total` is what `left` started from (the bar's scale).
+#[derive(Clone, Copy)]
+struct Eating {
+    left: u32,
+    total: u32,
+    slot: usize,
+    health: i32,
+}
+const EAT_TICKS: u32 = 32;
+
+struct App {
+    /// The renderer: wgpu (Vulkan) or OpenGL ES 3.2 (`backend.rs`).
+    be: Backend,
+    /// The world's type (chosen on the create screen, saved in its `info`): vanilla b1.7.3 terrain, Tectonic (the `tectonic` crate) or Blooming (Vanilla + the Blooming Biosphere biomes).
+    world_type: WorldType,
+    /// Far terrain behind the chunks (Voxy-style voxel LoD, `world::lod`): the view reaches the horizon with the same blocks; none in
+    /// the Nether (it would be overworld terrain).
+    lod: Option<Lod>,
+    seed: i64,
+    /// The app's private storage: `saves/<folder>` holds the worlds.
+    root: PathBuf,
+    /// The title screen, world list and world creation; `Some` while no world is loaded.
+    menu: Option<Menu>,
+    /// The far terrain was drawn this frame (`opts.lod` and a dimension that has it): the draw passes read it.
+    lod_on: bool,
+    /// `GameSettings` (`<root>/options.txt`): the options screens change it, the frame reads it.
+    opts: Settings,
+    /// The game menu (`GuiIngameMenu`, or the death screen) while `touch.paused`.
+    pause: Option<Pause>,
+    /// `stats.dat` of b1.7.3 (`StatFileWriter`), `<root>/stats`: shared by all worlds like the Java's per-user file. UNVERIFIED.
+    stats: world::stats::Stats,
+    /// Achievements / Statistics (`PauseEv::Stats`), drawn instead of the game menu while `Some`.
+    stats_ui: Option<stats_ui::StatsUi>,
+    /// The item and recipe viewer (`rei.rs`), over the inventory or the Tools page.
+    rei: Option<rei::ReiUi>,
+    /// How far the REI overlay has pushed the open container panel sideways, px (`rei_layout::ease_to`, `craft::set_shift`).
+    rei_shift: f32,
+    /// The world's World-Gen Settings (`menu::Info::nat`) and, read only, their screen from the game menu's Tools page.
+    nat: world::gen::natural::NaturalSettings,
+    gen_ui: Option<gen_ui::GenUi>,
+    /// The World Preview of the world being played (`PauseEv::Preview`), and the chunks the player has been near (`<world>/explored`).
+    preview: Option<preview::Preview>,
+    explored: preview::Explored,
+    toast: stats_ui::Toast,
+    /// Ticks (1/20 s) not yet counted into `MINUTES`.
+    stat_t: f32,
+    /// Where the player was at the last `move_stats`.
+    stat_pos: glam::Vec3,
+    /// Blocks fallen riding a pig (`EntityPig.fall`) and where the minecart ride began (`startMinecartCoordinates`).
+    pig_fall: f32,
+    cart_from: Option<glam::Vec3>,
+    chunks: ChunkManager,
+    camera: FirstPersonCamera,
+    player: Player,
+    last_frame: Instant,
+    frames: u64,
+    fps_last: Instant,
+    /// FPS counter: average over the last second, and a moving average over the last ~10 s of play (`fps_avg`; 0 = not started).
+    fps_recent: u32,
+    fps_avg: f32,
+    /// Shown under the FPS: CPU ms per frame and the longest frame (ms) of the last second; `frame_prev` / `worst_acc` feed the latter.
+    cpu_ms: u32,
+    /// Scene-pass GPU time (`gpu::timing`): this second's sum, count, and last second's mean in tenths of a ms (0 = not measured); `gpu_buf` is the scratch for `Backend::gpu_ms`.
+    gpu_acc: f32,
+    gpu_n: u32,
+    gpu_tenths: u32,
+    gpu_buf: Vec<f32>,
+    worst_ms: u32,
+    worst_acc: f32,
+    /// The 99th percentile of the frame gaps of the last second (ms), `FrameTimes` feeding it, and the panel's refresh rate (60 until the display says).
+    p99_ms: u32,
+    times: FrameTimes,
+    refresh_hz: f32,
+    /// The previous frame was a paused one (its idle wait is not a spike).
+    was_paused: bool,
+    frame_prev: Instant,
+    /// `render::look`: the emitters and flowers round the player, the drifting motes, and the sprite buffers of the halos and motes.
+    scan: look::Scan,
+    motes: look::Motes,
+    glow: GlowMesh,
+    // M12: touch UI state + HUD renderer.
+    touch: TouchUi,
+    /// Scratch vertex buffer for the HUD; cleared each frame, then emitted.
+    hud_verts: Vec<HudVertex>,
+    // M5: block under the crosshair (within reach) and its outline buffers.
+    target: Option<Hit>,
+    outline: Outline,
+    /// World time in ticks (20 per second); a new world starts at 0, sunrise.
+    world_ticks: f64,
+    /// Sun, moon and stars drawn behind the terrain, and the rain/thunder timers (not saved: a loaded world starts clear).
+    /// `weather_ticks` counts the whole ticks the weather has run, so it catches up to `world_ticks` one tick at a time.
+    weather: sky::Weather,
+    weather_ticks: u64,
+    /// The biome's sky, fog, haze, clouds and stars, eased in real time (`world::atmos`).
+    atmos: world::atmos::Atmos,
+    /// Water particles, lightning and the dungeon spawners (`world::effects`).
+    fx: Effects,
+    /// The player's box touched water last frame (`Entity.inWater`): a splash on entry.
+    was_in_water: bool,
+    /// `Entity.ySize` of the player, as far as the camera goes: how far the eye hangs below standing height (0.08 sneaking, then it decays).
+    sneak_y: f32,
+    /// The horizontal push an explosion gave the player (m/s, `Explosion.doExplosionA`'s `motion +=`): added to the walk each frame and dying away (`frame`).
+    kick: glam::Vec3,
+    /// Sprinting (`world::sprint`, Retro Sprint): ticked at 20 Hz, its push and field of view are read every frame.
+    sprint: Sprint,
+    /// A wall stopped the player's move on x or z since the last sprint tick (`horizontalCollision`).
+    sprint_blocked: bool,
+    /// Hotbar slot last seen and seconds its item name still shows (`GuiIngame` shows it ~2 s after a switch).
+    tip: (usize, f32),
+    /// The local player's model state (`render::player`): body yaw, limb and arm swing, ticked at 20 Hz.
+    body: render::player::Anim,
+    /// The eye's place while the frame is drawn from behind (`third_pos`), put back after the frame.
+    third_saved: Option<(glam::Vec3, f32)>,
+    /// The shoulder-surf camera (`render::shoulder`), reset on every frame it is not the view in use.
+    shoulder: render::shoulder::Rig,
+    /// Survival digging state and the leftover time towards the next 20 Hz dig tick.
+    dig: Dig,
+    dig_acc: f32,
+    /// Hotbar stacks (starts empty), dropped items on the ground and their draw buffers.
+    inv: Inventory,
+    drops: Drops,
+    mobs: Mobs,
+    boats: boat::Boats,
+    /// How far the rider's head is turned from the boat's bow (radians, within +-90 degrees): the look drag turns the head, never the boat.
+    boat_head: f32,
+    /// Seconds until a finger held on a boat punches it again.
+    punch_cd: f32,
+    carts: minecart::Carts,
+    /// Detector rails switched on by a cart, to be switched off when it has gone (`scheduleBlockUpdate` of `BlockDetectorRail`).
+    detectors: std::collections::HashSet<(i32, i32, i32)>,
+    /// In the Nether (its folder is `<world>/nether`; `<world>/dim` says which one a restart resumes in).
+    nether: bool,
+    /// Time inside a portal, 0..1 (`timeInPortal`: +0.0125 a tick inside, -0.05 outside; at 1 the player travels) and the 10 tick
+    /// cooldown after arriving (`timeUntilPortal`), in seconds.
+    portal_t: f32,
+    portal_cd: f32,
+    /// Block updates (scheduled + random ticks, notifications, falling blocks), stepped on the 20 Hz game tick.
+    ticks: Ticks,
+    /// Sounds (`SoundManager`): effects, music and records, `audio/`.
+    audio: audio::Audio,
+    /// Cave sounds and the water, fire and portal hum around the player (`World` 20 Hz).
+    ambient: audio::Ambient,
+    item_mesh: ItemMesh,
+    /// Open container screen (the 2x2 inventory or a workbench's 3x3) and its "place one" click toggle.
+    screen: Option<Screen>,
+    one_mode: bool,
+    /// Shift-click toggle (second button beside `one_mode`): a tap on a slot quick-moves its stack.
+    shift_mode: bool,
+    /// Cortes Combat (C2, only with the Immersive Pack ON, `combat::rules`; NOT b1.7.3, UNVERIFIED): ticks until the held item may swing again, and the item
+    /// (`None` = the bare hand) that cooldown belongs to: changing item starts it over (`resetOnItemChange`).
+    swing_cd: u32,
+    /// Cooldown owed by the weapons NOT in hand (item id -> ticks left, counted down each tick): a lunge or sweep stays paid for when you swap away and back.
+    /// Only time clears it. NOT b1.7.3, UNVERIFIED.
+    swing_debt: Vec<(Option<u16>, u32)>,
+    swing_held: Option<u16>,
+    /// C3: ticks the attack has been held on a mob in reach of a weapon that can charge (`Profile::charge`), and the damage multiplier of the
+    /// blow this frame's release delivers (1 = a plain one). NOT b1.7.3, UNVERIFIED.
+    charge: u32,
+    blow: f32,
+    /// C3 fix: a still finger on a mob in reach of a charging weapon while its cooldown runs; the hand rises with the cooldown (`charge_phase`).
+    cd_rise: bool,
+    /// C5 (NOT b1.7.3, UNVERIFIED): the right button's state: the shotel's parry, the ropera's lunge, the martillo's streak.
+    sp: world::combat::special::State,
+    /// C7 (NOT b1.7.3, UNVERIFIED): the camera's live shake impulses (`combat::fx::Rig`), composed into `camera.bob` each frame.
+    shake: world::combat::fx::Rig,
+    /// C9 (NOT b1.7.3, UNVERIFIED): Cortes Combat's HUD state: the crosshair's reaction (20 Hz) and the damage vignette / flash (per frame).
+    xh: render::combat_hud::Crosshair,
+    dmg: render::combat_hud::DamageFx,
+    /// C8 (NOT b1.7.3, UNVERIFIED): the arcabuz's fuse and reload (`combat::arcabuz`), one for the player.
+    gun: world::combat::arcabuz::State,
+    eating: Option<Eating>,
+    hint: f32,
+    /// What `hint` shows: the bed's message (`use_bed`).
+    hint_msg: &'static str,
+    /// The fishing bobber in the water (`EntityPlayer.fishEntity`).
+    hook: Option<Hook>,
+    /// Furnace tile entities by block position (created on first use), and the time left over from the last 20 Hz tick.
+    furnaces: HashMap<(i32, i32, i32), Furnace>,
+    furn_acc: f32,
+    /// Leftover wall-clock time towards the next tick of the player's model state (`body`).
+    body_acc: f32,
+    /// Animated water / lava / fire tiles (`render::anim`) and the time left over from their last 20 Hz tick.
+    anim: crate::render::anim::Anim,
+    anim_acc: f32,
+    /// CPU seconds spent in `render` (without the swap-chain wait) since the last FPS log line.
+    cpu_acc: f32,
+    /// Dynamic resolution (`gpu::context::Drs`), fed by `render_frame`; off with `dynamicRes:false`.
+    drs: Drs,
+    /// Chest tile entities by block position (created on first open, or by a dungeon's populate).
+    chests: HashMap<chest::Pos, Chest>,
+    /// Paintings on walls, sign texts by block position (`TileEntitySign`) and the sign being edited (`GuiEditSign`); saved in `decor`.
+    paintings: Vec<Painting>,
+    signs: HashMap<decor::Pos, Text>,
+    sign_edit: Option<Edit>,
+    /// The finger gesture on the open screen, to tell a tap from a spread.
+    gesture: Option<Gesture>,
+    /// Health, air and fire; and where a dead player comes back (the first spawn: no beds yet).
+    vitals: Vitals,
+    spawn: glam::Vec3,
+    /// Asleep: the bed's cell (the half with bit 8) and the ticks slept (`EntityPlayer.sleepTimer`, 100 = fully asleep).
+    sleep: Option<(i32, i32, i32, u32)>,
+    /// The yaw and pitch the player had before lying down, put back on waking (`rotationYaw` is never touched by sleeping in the Java; the view
+    /// along the bed is `orientCamera`'s own turn).
+    sleep_view: Option<(f32, f32)>,
+    /// The bed a respawn goes to while it still stands (`playerSpawnCoordinate`).
+    bed_spawn: Option<(i32, i32, i32)>,
+    /// Where this world is saved (M7) and the play time since the last autosave.
+    dir: PathBuf,
+    save_acc: f32,
+    /// The world's maps (`world::map`, `<world>/data`), the (map id, version) whose pixels are in the HUD texture, and the markers of the
+    /// map in hand (`None` = no map in hand: nothing is drawn).
+    maps: world::map::Maps,
+    map_shown: (u16, u32),
+    map_held: Option<Vec<world::map::Marker>>,
+}
+
+/// A press on an open screen: where it began, whether it became a spread (a drag over slots with a stack on the
+/// cursor, one item into each slot it enters) and which slots it already filled.
+struct Gesture {
+    start: Option<craft::SlotId>,
+    spread: bool,
+    visited: Vec<craft::SlotId>,
+}
+
+impl App {
+    async fn init(native_ptr: *mut c_void, width: u32, height: u32, dir: PathBuf) -> Result<Self, String> {
+        // The options come first: the MSAA count is baked into every pipeline `Gpu` and what follows build.
+        let opts = Settings::load(&dir);
+        crate::gpu::context::set_error_trace(opts.gpu_error_trace);
+        crate::gpu::context::set_frame_latency(u32::from(opts.frame_latency));
+        crate::render::present::set_msaa_want(u32::from(opts.msaa));
+        crate::render::present::set_post_want(u32::from(opts.post));
+        crate::render::present::set_fxaa_want(u32::from(opts.fxaa));
+        crate::gpu::flat::set_want(opts.flat_draws);
+        opts.apply_tuning();
+        crate::gles::set_want(opts.renderer);
+        let be = Backend::new(opts.renderer == 2, native_ptr, width, height).await?;
+        log::info!("renderer: {}", be.gpu_info());
+        let look = skin::Look::load(&dir);
+        if let Some(px) = skin::load_custom(&dir) {
+            be.upload_skin(&px); // an imported skin (Import Custom Skin) wins over the palette look
+        } else if look != skin::Look::default() {
+            be.upload_skin(&look.apply()); // the atlas and the HUD sheet are built with `mob/char.png`; the saved look goes over it
+        }
+
+        // No world yet: the title screen is up (`enter_world` loads one, and does it again for `LAST_WORLD` below).
+        let start = glam::Vec3::ZERO;
+        let chunks = ChunkManager::new_typed(0, RENDER_DIST, WorldType::Vanilla);
+        let mut camera = FirstPersonCamera::spawn_at(0.0, 80.0, 0.0);
+        // spawn_at defaults to aspect 1.0 and resize() only runs when the size changes, so
+        // without this the 3D view is squashed horizontally onto the real screen shape.
+        camera.aspect = width as f32 / height as f32;
+        camera.fov_y = opts.fov_deg().to_radians();
+        let player = Player { pos: start, vel: glam::Vec3::ZERO, on_ground: false };
+
+        // M12: HUD pipeline + touch state machine. Surface dimensions match
+        // the window we just initialised against.
+        let touch = TouchUi::new(width, height);
+        let outline = Outline::new(be.gfx());
+        let item_mesh = ItemMesh::new(be.gfx());
+        let glow = GlowMesh::new(be.gfx());
+        let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as i64);
+
+        let mut stats = std::fs::read(dir.join("stats")).ok().and_then(|b| world::stats::Stats::decode(&b)).unwrap_or_default();
+        stats.add(world::stats::START_GAME, 1);
+        let mut app = Self {
+            be, world_type: WorldType::Vanilla, lod: None, seed: 0, root: dir.clone(), opts, pause: None, stats, stats_ui: None, rei: None, rei_shift: 0.0, preview: None, explored: Default::default(), nat: Default::default(), gen_ui: None, toast: Default::default(), stat_t: 0.0, stat_pos: glam::Vec3::ZERO, pig_fall: 0.0, cart_from: None, lod_on: false, menu: Some(Menu::new(&dir)),
+            chunks, camera,
+            player,
+            last_frame: Instant::now(),
+            frames: 0,
+            fps_last: Instant::now(),
+            fps_recent: 0,
+            fps_avg: 0.0,
+            cpu_ms: 0,
+            gpu_acc: 0.0,
+            gpu_n: 0,
+            gpu_tenths: 0,
+            gpu_buf: Vec::new(),
+            worst_ms: 0,
+            worst_acc: 0.0,
+            p99_ms: 0,
+            times: FrameTimes::default(),
+            refresh_hz: 60.0,
+            was_paused: false,
+            frame_prev: Instant::now(),
+            scan: Default::default(),
+            motes: Default::default(),
+            glow,
+            touch,
+            hud_verts: Vec::with_capacity(256),
+            target: None,
+            outline,
+            world_ticks: 0.0,
+            weather: sky::Weather::new(seed),
+            weather_ticks: 0,
+            atmos: world::atmos::Atmos::new(),
+            fx: Effects::new(seed),
+            was_in_water: false,
+            sneak_y: 0.0,
+            kick: glam::Vec3::ZERO,
+            sprint: Sprint::default(),
+            sprint_blocked: false,
+            tip: (0, 0.0),
+            body: render::player::Anim::default(),
+            third_saved: None,
+            shoulder: render::shoulder::Rig::new(),
+            dig: Dig::default(),
+            dig_acc: 0.0,
+            inv: Inventory::default(),
+            drops: Drops::new(seed),
+            mobs: Mobs::new(seed),
+            boats: boat::Boats::default(),
+            boat_head: 0.0,
+            punch_cd: 0.0,
+            carts: minecart::Carts::new(seed),
+            detectors: std::collections::HashSet::new(),
+            nether: false,
+            portal_t: 0.0,
+            portal_cd: 0.0,
+            ticks: Ticks::new(seed),
+            audio: audio::Audio::new(),
+            ambient: audio::Ambient::new(seed),
+            item_mesh,
+            screen: None,
+            one_mode: false,
+            shift_mode: false,
+            swing_cd: 0,
+            swing_debt: Vec::new(),
+            swing_held: None,
+            charge: 0,
+            blow: 1.0,
+            eating: None,
+            cd_rise: false,
+            sp: Default::default(),
+            shake: Default::default(),
+            xh: Default::default(),
+            dmg: Default::default(),
+            gun: Default::default(),
+            hint: 0.0,
+            hint_msg: "",
+            hook: None,
+            furnaces: HashMap::new(),
+            chests: HashMap::new(),
+            paintings: Vec::new(),
+            signs: HashMap::new(),
+            sign_edit: None,
+            furn_acc: 0.0,
+            maps: world::map::Maps::default(),
+            map_shown: (u16::MAX, 0),
+            map_held: None,
+            body_acc: 0.0,
+            anim: crate::render::anim::Anim::new(),
+            anim_acc: 0.0,
+            cpu_acc: 0.0,
+            drs: Drs::new(crate::gpu::context::START_PCT),
+            gesture: None,
+            vitals: Vitals::default(),
+            spawn: start,
+            sleep: None,
+            sleep_view: None,
+            bed_spawn: None,
+            dir,
+            save_acc: 0.0,
+        };
+        app.touch.set_menu(true);
+        let last = LAST_WORLD.lock().ok().and_then(|l| l.clone());
+        if let Some(info) = last.and_then(|f| menu::list(&app.root).into_iter().find(|i| i.folder == f)) {
+            app.enter_world(&info);
+        }
+        app.be.release(); // the GL context goes to the render thread (a no-op for wgpu)
+        Ok(app)
+    }
+
+    /// The distant terrain of the dimension in `self.dir`: the overworld has it, the Nether does not.
+    fn new_lod(&self) -> Option<Lod> {
+        // Pre-generation is on from the start: the view's own worker alone left the far tiles empty for minutes (`Lod::toggle_pregen` stops it).
+        (!self.nether).then(|| {
+            let mut l = Lod::new(self.seed, self.world_type, Some(self.dir.join("lod")));
+            l.toggle_pregen();
+            l
+        })
+    }
+
+    /// The overworld's folder, whichever dimension this is.
+    fn overworld_dir(&self) -> PathBuf {
+        if self.nether { self.dir.parent().map_or_else(|| self.dir.clone(), |p| p.to_path_buf()) } else { self.dir.clone() }
+    }
+
+    /// Back to the overworld's folder without moving anyone (a reset builds the world anew).
+    fn leave_nether(&mut self) {
+        if self.nether {
+            self.dir = self.overworld_dir();
+            self.nether = false;
+            self.mobs.nether = false;
+            let _ = std::fs::write(self.dir.join("dim"), "overworld");
+        }
+    }
+
+    /// Portal travel (`Minecraft.usePortal`, `Teleporter`): save this dimension, load the other one (a new `ChunkManager` on its own
+    /// folder; `<root>/dim` remembers it), arrive at the nearest portal to the player's spot x 8 or / 8 (one is built when none
+    /// is loaded there). `respawn`: no portal, the spawn point (death in the Nether). What belongs to a dimension (mobs, items on
+    /// the ground, block updates, vehicles, furnaces, chests, spawners, signs, paintings) is swapped for what that dimension's own
+    /// `level` and `decor` files held; the player, inventory, health and bed stay. ponytail: `preload` runs on the render thread.
+    fn enter(&mut self, nether: bool, respawn: bool) {
+        if self.nether == nether {
+            return;
+        }
+        self.save(usize::MAX);
+        let ow = self.overworld_dir();
+        let _ = std::fs::write(ow.join("dim"), if nether { "nether" } else { "overworld" });
+        let (old, k) = (self.player.pos, if nether { 0.125 } else { 8.0 });
+        (self.nether, self.dir) = (nether, if nether { ow.join("nether") } else { ow });
+        let to = if respawn { self.spawn } else { glam::Vec3::new(old.x * k, old.y, old.z * k) };
+        self.chunks = chunk_manager(self.seed, self.world_type, nether).with_dir(self.dir.clone()); // the old one's workers stop on drop
+        self.lod = self.new_lod();
+        self.chunks.preload(chunk_coord(to.x), chunk_coord(to.z));
+        self.close_sign();
+        let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as i64);
+        (self.mobs, self.drops, self.ticks) = (Mobs::new(seed), Drops::new(seed), Ticks::new(seed));
+        self.mobs.nether = nether;
+        self.boats = boat::Boats::default();
+        self.carts = minecart::Carts::default();
+        (self.detectors, self.paintings, self.signs) = (Default::default(), Vec::new(), HashMap::new());
+        (self.furnaces, self.chests, self.fx.spawners, self.furn_acc) = (HashMap::new(), HashMap::new(), HashMap::new(), 0.0);
+        (self.target, self.dig, self.dig_acc) = (None, Dig::default(), 0.0);
+        self.touch.pad.rumble_clear(); // `MinecraftMixin`: leaving a world clears the vibration effects
+        if let Some(l) = std::fs::read(self.dir.join("level")).ok().and_then(|b| Level::decode(&b)) {
+            self.furnaces = l.furnaces.into_iter().collect();
+            self.chests = l.chests.into_iter().collect();
+            self.fx.spawners = l.spawners.into_iter().map(|(p, kind, delay)| (p, Spawner::new(kind, delay))).collect();
+            self.drops.items = l.drops.into_iter().map(|(p, s, age)| items::ItemEntity::resting(p, s, age)).collect();
+        }
+        if let Some((p, s)) = std::fs::read(self.dir.join("decor")).ok().and_then(|b| decor::decode(&b)) {
+            (self.paintings, self.signs) = (p, s.into_iter().collect());
+        }
+        let mut at = to;
+        if !respawn {
+            let want = (to.x as f64, to.y as f64, to.z as f64);
+            let mut found = portal::find(&self.chunks, &self.chunks.find(portal::PORTAL), want);
+            if found.is_none() {
+                portal::make(&mut self.chunks, want, &mut crate::world::gen::noise::JavaRandom::new(seed));
+                found = portal::find(&self.chunks, &self.chunks.find(portal::PORTAL), want);
+            }
+            if let Some((x, y, z)) = found {
+                at = glam::Vec3::new(x as f32, y as f32 + physics::HALF.y + 0.01, z as f32);
+            }
+        }
+        self.player = Player { pos: at, vel: glam::Vec3::ZERO, on_ground: false };
+        self.camera.pos = at + glam::Vec3::new(0.0, EYE_HEIGHT, 0.0);
+        (self.portal_t, self.portal_cd) = (0.0, 0.5);
+        log::info!("portal: now in the {} at {at:?}", if nether { "Nether" } else { "overworld" });
+    }
+
+    /// Load a world of the list (or just made): from its `level` and chunk files where it has them, else a new one of its seed.
+    fn enter_world(&mut self, info: &menu::Info) {
+        self.dir = info.dir(&self.root);
+        (self.seed, self.world_type) = (info.seed, info.ty);
+        // Every `WorldChunkManager` built from here on (the chunk workers, the far terrain) takes the world's climate.
+        (self.nat, self.gen_ui) = (info.nat.clone(), None);
+        world::gen::natural::set(Some(&info.nat));
+        world::combat::rules::set(info.pack); // Cortes Combat lives only in an Immersive Pack world
+        (self.swing_cd, self.charge, self.eating, self.cd_rise) = (0, 0, None, false);
+        self.swing_debt.clear();
+        self.sp = Default::default();
+        self.shake.clear();
+        (self.xh, self.dmg, self.gun) = Default::default();
+        // The world resumes in the dimension it was left in (`<world>/dim`).
+        self.nether = std::fs::read_to_string(self.dir.join("dim")).is_ok_and(|s| s.trim() == "nether");
+        if self.nether {
+            self.dir = self.dir.join("nether");
+        }
+        (self.explored, self.preview) = (preview::Explored::load(&self.overworld_dir().join("explored")), None);
+        // UNVERIFIED: the Java counts `createWorld` on the create screen and `loadWorld` on the list; here a world with a `level` is a load.
+        self.stats.add(if self.dir.join("level").exists() { world::stats::LOAD_WORLD } else { world::stats::CREATE_WORLD }, 1);
+        self.reset_world(false);
+        self.menu = None;
+        self.touch.set_menu(false);
+        (self.last_frame, self.frame_prev, self.fps_last) = (Instant::now(), Instant::now(), Instant::now()); // the load and the menu before it are not a frame
+        (self.frames, self.cpu_acc, self.fps_avg) = (0, 0.0, 0.0); // a new world starts the FPS average again
+        if let Ok(mut l) = LAST_WORLD.lock() {
+            *l = Some(info.folder.clone());
+        }
+    }
+
+    /// The pause menu's "Save and quit to title" (`GuiIngameMenu`).
+    fn quit_to_title(&mut self) {
+        self.close_sign();
+        self.stats.add(world::stats::LEAVE_GAME, 1);
+        self.save(usize::MAX);
+        world::gen::natural::set(None);
+        self.chunks = ChunkManager::new_typed(0, RENDER_DIST, WorldType::Vanilla); // the world's workers stop on drop
+        self.lod = None;
+        self.touch.pad.rumble_clear();
+        self.menu = Some(Menu::new(&self.root));
+        (self.pause, self.stats_ui, self.gen_ui, self.rei, self.preview) = (None, None, None, None, None);
+        self.touch.set_menu(true);
+        if let Ok(mut l) = LAST_WORLD.lock() {
+            *l = None;
+        }
+    }
+
+    /// Put everything back for the world in `self.dir` (`self.seed`, `self.world_type`): `wipe` (the TEMPORARY pause-menu reset button)
+    /// deletes the save folder first and makes a new world: terrain without edits, spawn point, hotbar and inventory, health, time,
+    /// weather, mobs, drops, furnaces, block updates; otherwise it resumes from the `level`, chunk and `decor` files, a new world
+    /// where there are none. An open screen's stacks are discarded, not dropped.
+    /// ponytail: `preload` runs on the render thread (a second or two of freeze after the "Loading level" frame).
+    fn reset_world(&mut self, wipe: bool) {
+        if wipe {
+            self.leave_nether();
+        }
+        if self.screen.take().is_some() {
+            self.touch.set_screen(false);
+        }
+        self.hint = 0.0;
+        self.close_sign();
+        (self.paintings, self.signs) = (Vec::new(), HashMap::new());
+        self.boats = boat::Boats::default();
+        self.carts = minecart::Carts::default();
+        self.detectors.clear();
+        if wipe {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+        let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as i64);
+        let level = if wipe { None } else { std::fs::read(self.dir.join("level")).ok().and_then(|b| Level::decode(&b)) };
+        self.chunks = chunk_manager(self.seed, self.world_type, self.nether).with_dir(self.dir.clone()); // the old one's workers stop on drop
+        self.lod = self.new_lod();
+        // The terrain around the player must be real before the first frame, so those chunks are loaded (or generated and
+        // populated) here; everything further out streams in on the worker threads.
+        let start = if self.nether { (0, 0) } else { crate::world::gen::overworld::land_start(self.world_type, self.seed) };
+        let (pcx, pcz) = level.as_ref().map_or(start, |l| (chunk_coord(l.pos.x), chunk_coord(l.pos.z)));
+        self.chunks.preload(pcx, pcz);
+        self.spawn = level.as_ref().map_or_else(|| find_spawn(&self.chunks, start), |l| l.spawn);
+        let s = level.as_ref().map_or(self.spawn, |l| l.pos);
+        log::info!("save: {} in {}", if level.is_some() { "resuming" } else { "new world" }, self.dir.display());
+        // Light and mesh the area around the player now, so the first frame already shows terrain.
+        let warm = Instant::now();
+        while self.chunks.meshed() < 24 && warm.elapsed() < Duration::from_secs(8) {
+            self.chunks.update(self.be.gfx(), self.be.origins(), chunk_coord(s.x), chunk_coord(s.z), false);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        log::info!("chunks: {} meshed after {:?}", self.chunks.meshed(), warm.elapsed());
+        (self.sleep, self.sleep_view, self.bed_spawn) = (None, None, None);
+        self.player = Player { pos: s, vel: glam::Vec3::ZERO, on_ground: false };
+        let aspect = self.camera.aspect;
+        self.camera = FirstPersonCamera::spawn_at(s.x, s.y + EYE_HEIGHT, s.z);
+        self.camera.aspect = aspect;
+        self.camera.fov_y = self.opts.fov_deg().to_radians();
+        (self.world_ticks, self.weather_ticks, self.weather) = (0.0, 0, sky::Weather::new(seed));
+        self.atmos.reset();
+        self.fx = Effects::new(seed);
+        self.sprint = Sprint::default();
+        (self.tip, self.dig, self.dig_acc, self.target) = ((0, 0.0), Dig::default(), 0.0, None);
+        self.touch.pad.rumble_clear();
+        (self.inv, self.drops, self.mobs, self.ticks) = (Inventory::default(), Drops::new(seed), Mobs::new(seed), Ticks::new(seed));
+        (self.furnaces, self.furn_acc, self.vitals, self.save_acc) = (HashMap::new(), 0.0, Vitals::default(), 0.0);
+        self.chests.clear();
+        self.mobs.nether = self.nether;
+        self.touch.hotbar_slot = 0;
+        if let Some(l) = level {
+            self.restore(l);
+        }
+        if let Some((p, s)) = std::fs::read(self.dir.join("decor")).ok().and_then(|b| decor::decode(&b)).filter(|_| !wipe) {
+            (self.paintings, self.signs) = (p, s.into_iter().collect());
+        }
+        self.maps = world::map::Maps::open(Some(self.overworld_dir().join("data")));
+        (self.map_shown, self.map_held) = ((u16::MAX, 0), None);
+        log::info!("world of seed {:x} ({}), spawn {:?}", self.seed, self.world_type.name(), self.spawn);
+    }
+
+    /// Put a loaded `Level` back: time, look direction, hotbar slot, health, inventory, furnaces and dropped items
+    /// (the position and spawn were used when the app was built).
+    fn restore(&mut self, l: Level) {
+        self.world_ticks = l.ticks;
+        self.weather_ticks = l.ticks as u64;
+        self.camera.yaw = l.yaw;
+        self.camera.pitch = l.pitch;
+        self.touch.hotbar_slot = l.slot as usize;
+        self.vitals.health = l.vitals[0];
+        self.vitals.air = l.vitals[1];
+        self.vitals.fire = l.vitals[2];
+        self.inv.slots = l.inv;
+        self.furnaces = l.furnaces.into_iter().collect();
+        self.chests = l.chests.into_iter().collect();
+        self.fx.spawners = l.spawners.into_iter().map(|(p, kind, delay)| (p, Spawner::new(kind, delay))).collect();
+        self.bed_spawn = l.bed;
+        self.drops.items = l.drops.into_iter().map(|(p, s, age)| items::ItemEntity::resting(p, s, age)).collect();
+    }
+
+    /// Write the world to disk: the level file, then up to `chunks` unsaved chunks (`usize::MAX` = all). An open
+    /// screen is closed first, so the cursor stack and the grid become dropped items, which are saved.
+    // ponytail: the encoding still runs on the render thread (the level file is ~1 KB, the chunk writes are capped per autosave); only the
+    // file writes are on the I/O thread. `maps.save_all()` below still writes the changed maps in place (one 16 KB file per map in use).
+    fn save(&mut self, chunks: usize) {
+        if self.menu.is_some() {
+            return; // no world is loaded
+        }
+        // `close_screen` also calls `touch.set_screen(false)`, which resets the touch state. Autosave runs while
+        // playing (no screen open), so calling it unconditionally cut every held action (move, dig, look) every 5 s.
+        if self.screen.is_some() {
+            self.close_screen();
+        }
+        let level = Level {
+            ticks: self.world_ticks,
+            pos: self.player.pos,
+            spawn: self.spawn,
+            yaw: self.camera.yaw,
+            pitch: self.camera.pitch,
+            slot: self.touch.hotbar_slot as u8,
+            vitals: [self.vitals.health, self.vitals.air, self.vitals.fire],
+            inv: self.inv.slots,
+            furnaces: self.furnaces.iter().map(|(&p, f)| (p, f.clone())).collect(),
+            chests: self.chests.iter().filter(|(p, _)| p.0 != i32::MIN).map(|(&p, &c)| (p, c)).collect(),
+            spawners: self.fx.spawners.iter().map(|(&p, s)| (p, s.kind, s.delay)).collect(),
+            bed: self.bed_spawn,
+            drops: self.drops.items.iter().map(|e| (e.pos, e.stack, e.saved_age())).collect(),
+        };
+        // The four small files are encoded here but written by the chunk I/O thread (`ChunkManager::write_file`): an autosave every 5 s
+        // used to do four `fs::write` + `rename` pairs on the render thread, each of which can stall for tens of ms on phone storage.
+        // `chunks.flush(usize::MAX)` below (pause, exit) waits for them, so those saves still end with everything on disk.
+        let level_path = self.dir.join("level");
+        self.chunks.write_file(level_path, level.encode());
+        if self.explored.take_dirty() {
+            let explored_path = self.overworld_dir().join("explored");
+            let explored = self.explored.encode();
+            self.chunks.write_file(explored_path, explored);
+        }
+        let signs: Vec<_> = self.signs.iter().map(|(&p, t)| (p, t.clone())).collect();
+        let decor_path = self.dir.join("decor");
+        self.chunks.write_file(decor_path, decor::encode(&self.paintings, &signs));
+        let stats_path = self.root.join("stats");
+        self.chunks.write_file(stats_path, self.stats.encode());
+        self.settle_maps();
+        self.maps.save_all();
+        self.chunks.flush(chunks);
+    }
+
+    /// `ItemMap.onCreated` for the maps just crafted, then `ItemMap.onUpdate` for every map in the main inventory (`InventoryPlayer.decrementAnimations`):
+    /// the arrow on it, and for the one in hand the repaint of this tick's strip (`MapData::scan`) and the upload of its pixels when they changed.
+    fn map_tick(&mut self) {
+        use world::map::MAP;
+        self.settle_maps();
+        let dim: i8 = if self.nether { -1 } else { 0 };
+        let at = (self.player.pos.x as f64, self.player.pos.z as f64);
+        let (slot, alive, yaw) = (self.touch.hotbar_slot, !self.vitals.dead(), self.camera.yaw.to_degrees() + 180.0);
+        let spawn = (self.spawn.x.floor() as i32, self.spawn.z.floor() as i32);
+        let (chunks, no_sky) = (&self.chunks, self.nether);
+        // Death pile (NOT b1.7.3, Immersive Pack only): where the pile of the last death lies, if it is still there.
+        let pile = if world::combat::rules::on() { self.drops.pile_at() } else { None };
+        let mut held = None;
+        for i in 0..items::MAIN {
+            let Some(mut st) = self.inv.slots[i].filter(|s| s.id == MAP) else { continue };
+            let d = self.maps.data_for(&mut st, spawn, dim);
+            d.track(alive, dim, at, yaw);
+            if let Some(p) = pile {
+                d.pin(dim, p);
+            }
+            if i == slot {
+                d.scan(dim, no_sky, at, |x, z| chunks.column(x, z));
+                held = Some(d.markers.clone());
+                if self.map_shown != (st.damage, d.version) {
+                    self.be.upload_map(&d.rgba());
+                    self.map_shown = (st.damage, d.version);
+                }
+            }
+            self.inv.slots[i] = Some(st);
+        }
+        self.map_held = held;
+    }
+
+    /// `ItemMap.onCreated` for the maps taken from a crafting result since the last call (`map::fresh`): in the bag or on the cursor.
+    fn settle_maps(&mut self) {
+        let dim: i8 = if self.nether { -1 } else { 0 };
+        let at = (self.player.pos.x as f64, self.player.pos.z as f64);
+        for s in self.inv.slots.iter_mut().flatten().chain(self.screen.iter_mut().filter_map(|s| s.cursor.as_mut())) {
+            self.maps.settle(s, at, dim);
+        }
+    }
+
+    fn resize(&mut self, w: u32, h: u32) {
+        self.be.resize(w, h);
+        self.camera.aspect = w as f32 / h as f32;
+        self.touch.ensure_layout(w, h);
+    }
+
+    fn step_frame(&mut self) {
+        let now = Instant::now();
+        let mut dt = now.duration_since(self.last_frame).as_secs_f32();
+        // The wall-clock frame time, for what a person times with a finger or an eye (hold to dig, dig ticks, the arm swing): `dt` below
+        // is cut at 1/30 s, which is slow motion under 30 fps (at 10 fps a 0.2 s hold took 0.6 s and the swing 1.2 s).
+        let real_dt = dt.min(0.25);
+        if dt > 1.0 / 30.0 { dt = 1.0 / 30.0; }
+        if dt < 0.0 { dt = 0.0; }
+        self.last_frame = now;
+        self.pad_sync(dt);
+        self.rei_step(real_dt);
+        self.touch.pad.watch_health(self.vitals.health);
+        self.rumble_step(real_dt);
+        // C9: the vignette and flash follow the health (only with the Immersive Pack ON; entering a world never flashes).
+        if world::combat::rules::on() { self.dmg.frame(self.vitals.health as f32, real_dt); } else { self.dmg = Default::default(); }
+        // Zoomify: hold the zoom button for 4x (the vertical tangent / 4), eased; the look drag slows with the field of view.
+        // Retro Sprint: the field of view x 1.15 while sprinting (eased), and the zoom starts from it.
+        self.sprint.fov_step(dt);
+        let base = self.opts.fov_deg().to_radians() * self.sprint.fov; // Options > FOV (70 by default)
+        let target = if self.touch.zooming() { 2.0 * ((base * 0.5).tan() / ZOOM).atan() } else { base };
+        self.camera.fov_y += (target - self.camera.fov_y) * (1.0 - (-14.0 * dt).exp());
+        // Look drag accumulated by the touch UI since the last frame. Drained
+        // even when paused so a drag started before pausing doesn't replay.
+        let (look_dx, look_dy) = self.touch.take_look();
+        let (pad_yaw, pad_pitch) = self.touch.take_pad_look();
+        // Pause: freeze the world but keep the timer warm so un-pause doesn't
+        // produce a giant dt step (which would either teleport the player or
+        // kill their fall).
+        if self.touch.paused {
+            if self.pause.is_none() {
+                self.pause = Some(Pause::new());
+            } else if self.pause.as_ref().is_some_and(|p| !p.saved) {
+                // `GuiIngameMenu` shows "Saving level..": the world is written on the menu's second frame, so the first one (the tap that
+                // opened it) is on screen before the encode and the file writes, not after them.
+                if let Some(p) = self.pause.as_mut() {
+                    p.saved = true;
+                }
+                if self.screen.is_none() {
+                    self.save(AUTOSAVE_CHUNKS);
+                }
+            }
+            let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
+            let info = self.pause_info();
+            let mut asked = Vec::new();
+            for ev in self.touch.take_screen_events() {
+                if let Some(u) = self.preview.as_mut() {
+                    if u.event(ev, w, h, self.opts.gui_scale) != preview::PvOut::None {
+                        self.preview = None;
+                    }
+                } else if let Some(u) = self.rei.as_mut() {
+                    if let Some(o) = u.event(ev, w, h, &self.opts, None).out {
+                        self.rei_out(o);
+                    }
+                } else if let Some(u) = self.gen_ui.as_mut() {
+                    if u.event(ev, w, h, self.opts.gui_scale) {
+                        self.gen_ui = None;
+                    }
+                } else if let Some(u) = self.stats_ui.as_mut() {
+                    if u.event(ev, w, h, &self.opts, &self.stats) {
+                        self.stats_ui = None;
+                    }
+                } else if let Some(p) = self.pause.as_mut() {
+                    asked.extend(p.event(ev, w, h, &mut self.opts, &info));
+                }
+            }
+            // Two fingers on the game menu zoom the World Preview (always taken, so a pinch does not pile up).
+            if let Some((k, px, py)) = self.touch.take_pinch() {
+                if let Some(u) = self.preview.as_mut() {
+                    u.pinch(k, px, py, w, h, self.opts.gui_scale);
+                }
+            }
+            for a in asked {
+                match a {
+                    PauseEv::Resume => self.touch.resume(),
+                    PauseEv::Preview => self.open_preview(),
+                    PauseEv::Rei => self.rei = Some(rei::ReiUi::new(true, self.rei_ctx())),
+                    PauseEv::Stats(ach) => self.stats_ui = Some(stats_ui::StatsUi::new(ach)),
+                    PauseEv::GenSettings => self.gen_ui = Some(gen_ui::GenUi::new(self.nat.clone(), false)),
+                    PauseEv::Quit => {
+                        self.quit_to_title();
+                        return;
+                    }
+                    PauseEv::Pregen => {
+                        if let Some(l) = self.lod.as_mut() {
+                            l.toggle_pregen();
+                        }
+                    }
+                    PauseEv::Fly => self.touch.flying = !self.touch.flying,
+                    PauseEv::Info => {
+                        self.opts.debug_screen = !self.opts.debug_screen;
+                        self.opts.save();
+                    }
+                    PauseEv::LodDebug => {
+                        if let Some(l) = self.lod.as_mut() {
+                            l.cycle_debug();
+                        }
+                    }
+                }
+            }
+        }
+        if self.touch.paused {
+            // Player physics is still ticked so they don't fall through the
+            // world if pause was opened mid-air, but gravity is zeroed.
+            self.player.vel = glam::Vec3::ZERO;
+            self.camera.pos = self.player.pos + glam::Vec3::new(0.0, EYE_HEIGHT - self.sneak_y, 0.0);
+            return;
+        }
+        (self.pause, self.stats_ui, self.gen_ui, self.preview) = (None, None, None, None);
+        // The item viewer lives with its screen (the overlay) or with the pause menu (the standalone one).
+        if self.screen.is_none() {
+            self.rei = None;
+        }
+        if !self.nether {
+            self.explored.visit(self.player.pos.x.floor() as i32 >> 4, self.player.pos.z.floor() as i32 >> 4, self.opts.chunks().min(8));
+        }
+        // Four seconds in a portal: the other dimension (`EntityPlayerSP.onLivingUpdate`).
+        if self.portal_t >= 1.0 {
+            let p = self.audio.rnd() * 0.4 + 0.8;
+            self.audio.play_fx("portal.travel", 1.0, p);
+            self.enter(!self.nether, false);
+            return;
+        }
+        // The death screen's resume button was pressed: come back at the spawn point with full health.
+        if self.vitals.dead() {
+            self.vitals = Vitals::default();
+            self.sprint.stop();
+            self.enter(false, true); // `Minecraft.respawn`: always in the overworld
+            self.player.pos = self.respawn_pos();
+            self.player.vel = glam::Vec3::ZERO;
+        }
+        // Autosave while playing (not with a screen open: its cursor stack is not in the inventory yet).
+        self.save_acc += dt;
+        if self.save_acc >= AUTOSAVE_SECS && self.screen.is_none() {
+            self.save_acc = 0.0;
+            self.save(AUTOSAVE_CHUNKS);
+        }
+        let slot = self.touch.hotbar_slot;
+        // Almanac (NOT b1.7.3): a clock in hand keeps its name and its line up, so the day can be read at any time.
+        let clock = world::combat::rules::on() && self.inv.slots[slot].is_some_and(|s| s.id == world::biomelife::CLOCK);
+        self.tip = if slot != self.tip.0 || clock { (slot, 2.0) } else { (slot, (self.tip.1 - dt).max(0.0)) };
+        // Day/night: time only runs while playing; the shader reads the sky-light level from a uniform, so the meshes are not rebuilt.
+        self.world_ticks += dt as f64 * 20.0;
+        // `minutesPlayedStat`: one per tick; and the inventory hint until `openInventory` is taken (`EntityPlayerSP.onLivingUpdate`).
+        self.stat_t += dt * 20.0;
+        self.stats.add(world::stats::MINUTES, self.stat_t as u32);
+        self.stat_t = self.stat_t.fract();
+        if !self.stats.has(world::stats::OPEN_INVENTORY) {
+            self.toast.hint(world::stats::OPEN_INVENTORY);
+        }
+        while self.weather_ticks < self.world_ticks as u64 {
+            self.weather.tick();
+            self.weather_ticks += 1;
+        }
+        let angle = sky::celestial_angle(self.world_ticks as u64, 1.0);
+        let sub = sky::skylight_subtracted(angle, self.weather.rain(1.0), self.weather.thunder(1.0));
+        self.chunks.set_sky_sub(sub);
+        // NOT b1.7.3 (`biomeRules`): the oak foliage of the two forests follows the season; a change restarts the meshes (once an hour).
+        let season = if self.opts.biome_rules && !self.nether { world::biomelife::season(self.world_ticks as u64) } else { world::biomelife::Season::Summer };
+        if world::biomelife::set_season(season) {
+            self.chunks.restart_meshes();
+        }
+        world::biomelife::set_now((!self.nether).then_some(self.world_ticks as u64), self.opts.biome_rules); // Almanac: the held clock's line
+        // Asleep, the jump button is "leave bed" (`GuiSleepMP`); the view and the body stay put.
+        if self.sleep.is_some() && self.touch.jumping() {
+            self.wake(true);
+        }
+        // On a saddled pig the jump button is "get off" (PE dismounts with sneak; b1.7.3 has no sneak-dismount, so the jump button keeps it) and the body goes
+        // wherever the pig goes (`updateRidden`: no motion of its own).
+        if self.touch.jumping() {
+            self.mobs.list.iter_mut().for_each(|m| m.ridden = false);
+            self.boats.list.iter_mut().for_each(|b| b.ridden = false);
+            self.carts.list.iter_mut().for_each(|c| c.ridden = false);
+        }
+        let riding = self.riding();
+        let asleep = self.sleep.is_some();
+        if !asleep {
+            let k = LOOK_SENS * (self.camera.fov_y / self.sprint.fov * 0.5).tan() / (self.opts.fov_deg().to_radians() * 0.5).tan() * self.opts.look_scale(); // neither the sprint's wider view nor the FOV setting speeds the look up, only the zoom slows it
+            self.turn_head(look_dx * k);
+            self.camera.add_pitch(look_dy * k * if self.opts.invert_mouse { -1.0 } else { 1.0 });
+            // The right stick has its own sensitivity (Controls > Controller); only the zoom narrows it.
+            let z = (self.camera.fov_y / self.sprint.fov * 0.5).tan() / (self.opts.fov_deg().to_radians() * 0.5).tan();
+            self.turn_head(pad_yaw * z);
+            self.camera.add_pitch(pad_pitch * z);
+        }
+        // Analog move stick: rotate the camera-frame (fwd, side) by yaw into
+        // world-space velocity. Set every frame (zero when the stick is idle),
+        // otherwise the player keeps sliding after the finger lifts.
+        let (mut fwd, mut side) = if asleep || riding { (0.0, 0.0) } else { self.touch.move_input };
+        // `MovementInputFromOptions`: sneaking scales both axes by 0.3. `EntityPlayerSP.isSneaking` is false in bed.
+        let sneaking = self.touch.sneak && !asleep;
+        if sneaking {
+            fwd *= 0.3;
+            side *= 0.3;
+        }
+        let yaw = self.camera.yaw;
+        // forward = -Z when yaw = 0; rotate by yaw around +Y.
+        self.player.vel.x = (fwd * yaw.sin() + side * yaw.cos()) * MOVE_SPEED;
+        self.player.vel.z = (-fwd * yaw.cos() + side * yaw.sin()) * MOVE_SPEED;
+        // Retro Sprint (`LivingEntityMixin`): the sprint pushes along the facing on top of the walk, and a jump on the ground adds the jump push.
+        if !asleep && !riding {
+            if self.touch.jumping() && self.player.on_ground && !self.was_in_water {
+                self.sprint.jump();
+            }
+            let push = self.sprint.add();
+            self.player.vel.x += yaw.sin() * push;
+            self.player.vel.z -= yaw.cos() * push;
+        }
+        // Stamina's slowdown: x0.9 while locked, x0.85 more while sprinting on little (it multiplies the walk, the sprint's push and the jump's).
+        let slow = self.vitals.stamina.speed(self.sprint.on()) * self.sp.slow() * self.leather_speed(); // C5: the parry's blade out slows the walk (x0.4)
+        self.player.vel.x *= slow;
+        self.player.vel.z *= slow;
+        // An explosion's push rides on top of the walk and the sprint (and is neither slowed by stamina nor kept in bed, on a ride or in death).
+        if asleep || riding || self.vitals.dead() {
+            self.kick = glam::Vec3::ZERO;
+        }
+        self.player.vel.x += self.kick.x;
+        self.player.vel.z += self.kick.z;
+        // C5: a lunge drives the body along its line over the walk, the sprint and any push (`Lunge`: the step replaces the player's own).
+        if let Some(l) = &self.sp.lunge {
+            (self.player.vel.x, self.player.vel.z) = (l.dir.x * world::combat::special::LUNGE_SPEED, l.dir.z * world::combat::special::LUNGE_SPEED);
+        }
+        let (vx0, vz0) = (self.player.vel.x, self.player.vel.z);
+        // Plants are drawn but not solid yet (collision shapes come with M14), so physics reads them as air.
+        let get = |x: i32, y: i32, z: i32| self.chunks.block(x, y, z).map(|b| if is_plant(b) { 0 } else { self.chunks.physics_at(x, y, z, b) });
+        // The held jump button jumps (8.4 m/s, the b1.7.3 velocity) or swims up; fluids (ids 8..=11) are not solid.
+        let (y0, grounded) = (self.player.pos.y, self.player.on_ground);
+        if sneaking && !riding {
+            physics::sneak(&mut self.player, physics::HALF, dt, &get); // no walking off an edge, a hold on ladders
+        }
+        // TEMPORARY fly mode (pause menu button): jump climbs, sneak descends, otherwise hover; the frame's gravity is added back so `step`
+        // leaves the speed as set. ponytail: in water the drag still sags it a little; no fall damage while on.
+        let flying = self.touch.flying && !asleep && !riding;
+        if flying {
+            self.player.vel.y = (if self.touch.jumping() { 8.0 } else if sneaking { -8.0 } else { 0.0 }) + 23.0 * dt;
+        }
+        let (water, lava) = if asleep || riding { (false, false) } else { physics::step(&mut self.player, dt, self.touch.jumping() && !flying, &get) };
+        // The push dies like the Java's motion (x0.546 a tick on the ground, x0.91 in the air, x0.8 in water, x0.5 in lava), and a wall that stopped the
+        // frame's move stopped it.
+        if self.kick != glam::Vec3::ZERO {
+            let drag = if lava { 0.5 } else if water { 0.8 } else if self.player.on_ground { 0.546 } else { 0.91f32 };
+            self.kick *= drag.powf(dt * 20.0);
+            if self.player.vel.x == 0.0 {
+                self.kick.x = 0.0;
+            }
+            if self.player.vel.z == 0.0 {
+                self.kick.z = 0.0;
+            }
+            if self.kick.length_squared() < 0.01 {
+                self.kick = glam::Vec3::ZERO;
+            }
+        }
+        // `LivingJumpEvent` (Stamina): a jump that left the ground costs 10; one a ceiling stopped zeroed `vel.y`, so it is free.
+        if grounded && !water && !flying && !asleep && !riding && self.touch.jumping() && self.player.vel.y > 0.0 {
+            self.vitals.stamina.jump();
+            self.stats.add(world::stats::JUMP, 1);
+        }
+        // `horizontalCollision`: `step` zeroes the velocity of the axis a wall stopped (a stepped-up slab keeps it).
+        self.sprint_blocked |= !asleep && !riding && ((vx0 != 0.0 && self.player.vel.x == 0.0) || (vz0 != 0.0 && self.player.vel.z == 0.0));
+        // `EntityPlayerSP.onLivingUpdate` sets `ySize` 0.2 while sneaking and `moveEntity` multiplies it by 0.4 every tick: the eye hangs 0.08
+        // low (1.54 up), and it comes back by the same x0.4 a tick once the button is released.
+        self.sneak_y = if sneaking { 0.08 } else { self.sneak_y * 0.4f32.powf(dt * 20.0) };
+        self.camera.pos = self.player.pos + glam::Vec3::new(0.0, EYE_HEIGHT - self.sneak_y, 0.0);
+        let e = self.camera.pos;
+        let eye_in_water = matches!(self.chunks.block_loaded(e.x.floor() as i32, e.y.floor() as i32, e.z.floor() as i32), Some(8 | 9));
+        self.vitals.armor = craft::armor_value(&self.inv.slots[items::MAIN..]);
+        // `Entity.isEntityInsideOpaqueBlock` at the head (`EntityPlayer.getEyeHeight` is 0.12 over the eye): 1 damage a tick in a wall.
+        let in_wall = effects::inside_opaque(&|x, y, z| self.chunks.block(x, y, z), self.player.pos.x, self.player.pos.y + 0.84, self.player.pos.z, 0.6);
+        let ladder = !asleep && physics::on_ladder(self.player.pos, physics::HALF, &get);
+        // `BlockCactus.onEntityCollidedWithBlock`: 1 damage every frame the box touches a cactus cell (the 10 tick damage window paces it).
+        if !asleep && physics::touching(self.player.pos, physics::HALF, &get, 81) {
+            self.vitals.hurt(1);
+        }
+        // `BlockPortal.onEntityCollidedWithBlock` -> `Entity.setInPortal`: inside a portal the timer fills (a quarter a second, drains
+        // at 1 a second outside); the cooldown after an arrival is held while the player still stands in the pane.
+        if !asleep && !riding && physics::touching(self.player.pos, physics::HALF, &get, 90) {
+            if self.portal_cd > 0.0 {
+                self.portal_cd = 0.5;
+            } else {
+                if self.portal_t == 0.0 {
+                    let p = self.audio.rnd() * 0.4 + 0.8;
+                    self.audio.play_fx("portal.trigger", 1.0, p); // `EntityPlayerSP`: the timer starts
+                }
+                self.portal_t += 0.25 * dt;
+            }
+        } else {
+            self.portal_t = (self.portal_t - dt).max(0.0);
+            self.portal_cd = (self.portal_cd - dt).max(0.0);
+        }
+        self.vitals.update(dt, Env { dy: self.player.pos.y - y0, on_ground: self.player.on_ground || flying, water, lava, ladder, eye_in_water, eye_y: e.y, in_wall });
+        // Entering water splashes (`Entity.onEntityUpdate`); running out of air pops 8 bubbles round the eye (`EntityLiving.onEntityUpdate`).
+        let motion = self.player.vel / 20.0; // blocks per tick
+        if water && !self.was_in_water {
+            // `Entity.onEntityUpdate`: `random.splash`, as loud as the fall in is fast (`sqrt(vx² * 0.2 + vy² + vz² * 0.2) * 0.2`, at most 1).
+            let v = (((motion.x * motion.x + motion.z * motion.z) * 0.2 + motion.y * motion.y).sqrt() * 0.2).min(1.0);
+            let p = 1.0 + (self.audio.rnd() - self.audio.rnd()) * 0.4;
+            self.audio.play_here("random.splash", v, p);
+            // `waterland/LocalPlayerMixin`: the same impact the sound is made from. NOT ported: a rider's (0.9, not 0.2).
+            if !self.riding() {
+                if let Some(e) = rfx::splash(v) {
+                    self.touch.pad.rumble_play(e);
+                }
+            }
+            self.fx.splash(glam::Vec3::new(self.player.pos.x, (self.player.pos.y - 0.9).floor() + 1.0, self.player.pos.z), 0.6, motion);
+        }
+        self.was_in_water = water;
+        if std::mem::take(&mut self.vitals.drowned) {
+            self.fx.breath(e, motion);
+        }
+        // `random.hurt` for a fresh hit (and the death), then a hard landing's step sound at half volume and 3/4 pitch (`EntityLiving.fall`).
+        if std::mem::take(&mut self.vitals.cry) {
+            let p = 1.0 + (self.audio.rnd() - self.audio.rnd()) * 0.2;
+            self.audio.play_here("random.hurt", 1.0, p);
+        }
+        // `Entity.moveEntity`: a burning body in water: "random.fizz" at 0.7, pitch `1.6 + (r - r) * 0.4`.
+        if std::mem::take(&mut self.vitals.fizz) {
+            let p = 1.6 + (self.audio.rnd() - self.audio.rnd()) * 0.4;
+            self.audio.play_here("random.fizz", 0.7, p);
+        }
+        if std::mem::take(&mut self.vitals.thud) {
+            let below = self.chunks.block_loaded(self.player.pos.x.floor() as i32, (self.player.pos.y - 1.1).floor() as i32, self.player.pos.z.floor() as i32).unwrap_or(0);
+            let (key, _, pitch) = audio::STEP[audio::step_of(below)];
+            if below > 0 {
+                self.audio.play_here(key, 0.5, pitch * 0.75);
+            }
+        }
+        // `InventoryPlayer.damageArmor`: every worn piece takes the damage that was dealt (before armor).
+        let wear = std::mem::take(&mut self.vitals.wear) as u16;
+        self.stats.add(world::stats::DAMAGE_TAKEN, wear as u32);
+        self.stats.walk(world::stats::Dist::Fall, std::mem::take(&mut self.vitals.fell) * 100.0);
+        (items::MAIN..items::SLOTS).filter(|_| wear > 0).for_each(|i| self.inv.damage(i, wear));
+        if self.vitals.dead() {
+            self.die();
+            return;
+        }
+        // Dropped items fall, settle and get picked up (before the target check below, which can return early).
+        self.drops.tick(dt, &|x: i32, y: i32, z: i32| self.chunks.block(x, y, z).map(|b| self.chunks.physics_at(x, y, z, b)), self.player.pos, &mut self.inv);
+        for at in std::mem::take(&mut self.drops.pops) {
+            // `EntityItem.onCollideWithPlayer` (`EntityArrow`'s is the same call): at the item, volume 0.2, pitch `((r - r) * 0.7 + 1) * 2`.
+            let pitch = ((self.audio.rnd() - self.audio.rnd()) * 0.7 + 1.0) * 2.0;
+            self.audio.play("random.pop", at, 0.2, pitch);
+        }
+        let light = |x: i32, y: i32, z: i32| self.chunks.light(x, y, z);
+        let biome = |x: i32, z: i32| self.chunks.biome_at(x, z);
+        let sight = if self.opts.biome_rules && !self.nether { world::biomelife::sight(self.atmos.density()) } else { 1.0 };
+        let ctx = Ctx { get: &get, light: &light, day: sub < 4, player: self.player.pos, eye: self.camera.pos, biome: &biome, sight };
+        self.mobs.difficulty = self.opts.difficulty;
+        self.mobs.smart = self.opts.animal_ai;
+        // What a fireball can hit besides mobs, the player and other fireballs (`canBeCollidedWith`): boats, carts, paintings, a lit TNT (0.98 box on its middle).
+        self.mobs.targets.clear();
+        self.mobs.targets.extend(self.boats.list.iter().enumerate().map(|(i, b)| (b.pos - boat::HALF, b.pos + boat::HALF, Strike::Boat(i))));
+        self.mobs.targets.extend(self.carts.list.iter().enumerate().map(|(i, c)| (c.pos - minecart::HALF, c.pos + minecart::HALF, Strike::Cart(i))));
+        self.mobs.targets.extend(self.paintings.iter().enumerate().map(|(i, p)| { let (lo, hi) = p.bounds(); (lo, hi, Strike::Painting(i)) }));
+        self.mobs.targets.extend(self.ticks.falling.iter().filter(|f| f.mv.is_none()).map(|f| (f.pos - glam::Vec3::splat(0.49), f.pos + glam::Vec3::splat(0.49), Strike::Falling)));
+        let evs = self.mobs.update(dt, &ctx, &mut self.drops);
+        // After the last use of `ctx` / `get` (they borrow `self.chunks`; these two take `&mut self`). A death this frame returns before them.
+        self.move_stats(dt, water, eye_in_water, ladder, riding);
+        self.stat_sync();
+        self.struck(&evs);
+        for e in evs {
+            match e {
+                Ev::Strike(_) => {} // done by `struck`, ahead of the rest (the blasts below shift the lists the indices point into)
+                // `EntityPlayer.attackEntityFrom`: Peaceful 0, Easy d / 3 + 1, Hard d * 3 / 2.
+                Ev::Hurt(d, from) => {
+                    let d = match self.opts.difficulty { 0 => 0, 1 => d / 3 + 1, 3 => d * 3 / 2, _ => d };
+                    // C5: a lunge cannot be hurt (`LungeImmunity`), a parry turns the hit back (`ParryHandler`), then the guard.
+                    if d > 0 && self.sp.lunge.is_none() && !self.parried(d, from) && !self.guarded(from) {
+                        // A hit that the damage window refuses (`hurt` false) shoves nobody, as `EntityLiving.attackEntityFrom` only calls `knockBack` once the damage took.
+                        if self.vitals.hurt(d) {
+                            self.knock_player(from);
+                        }
+                        if world::combat::rules::on() {
+                            self.shake.add(world::combat::fx::Kind::Hurt, self.player.pos); // C7 (`HurtShake`)
+                        }
+                    }
+                }
+                Ev::Boom(p) => self.explode(p, 3.0, false),
+                // `EntityFireball.onUpdate`: `newExplosion(null, x, y, z, 1.0F, true)`, the fire flag on.
+                Ev::Burst(p) => self.explode(p, 1.0, true),
+                Ev::Smoke(p) => self.fx.puff(p),
+                Ev::Snd(name, at, vol, mul, jit) => self.audio.cry(name, at, vol, mul, jit),
+                // `EntitySkeleton`'s shot is "random.bow" at 1.0, pitch `1 / (r * 0.4 + 0.8)` (NOT in the b1.7.3 index, see `assets/sound/extra`);
+                // `EntityArrow`'s hit, on a block and on a mob it hurts, is "random.drr" at 1.0, pitch `1.2 / (r * 0.2 + 0.9)`.
+                Ev::Bow(at, hit) => {
+                    let pitch = if hit { 1.2 / (self.audio.rnd() * 0.2 + 0.9) } else { 1.0 / (self.audio.rnd() * 0.4 + 0.8) };
+                    self.audio.play(if hit { "random.drr" } else { "random.bow" }, at, 1.0, pitch);
+                }
+                // NOT b1.7.3 (`animalAi`): a sheep ate; the grass spread covers the dirt again.
+                Ev::Graze((x, y, z)) => match (self.chunks.block(x, y, z), self.chunks.block(x, y - 1, z)) {
+                    (Some(31), _) => drop(self.chunks.set_block(x, y, z, 0)),
+                    (_, Some(2)) => drop(self.chunks.set_block(x, y - 1, z, 3)),
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
+        // Boats (`EntityBoat.onUpdate`, 20 Hz ticks): forward / back is the throttle, the side only turns the hull (`Boat::drive`).
+        let paddle = if self.boats.ridden().is_some() { self.touch.move_input } else { (0.0, 0.0) };
+        let boat_events = {
+            let bget = |x: i32, y: i32, z: i32| self.chunks.block(x, y, z).map(|b| if is_plant(b) { 0 } else { physics_id(b, self.chunks.meta(x, y, z)) });
+            self.boats.update(dt, &bget, paddle)
+        };
+        for e in boat_events {
+            match e {
+                boat::Event::Drop(s, p) => self.drops.spawn_stack(s, (p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32)),
+                boat::Event::Snow(c) => {
+                    self.chunks.set_block(c.0, c.1, c.2, 0); // `Block.snow` is wiped by the hull
+                }
+            }
+        }
+        // Minecarts (`EntityMinecart.onUpdate`): on the rails the cart is its own master; a rider only slows it.
+        let cart_events = {
+            let raw = |x: i32, y: i32, z: i32| match self.chunks.block(x, y, z) {
+                Some(b) => (b, self.chunks.meta(x, y, z)),
+                None => (0, 0),
+            };
+            let cget = |x: i32, y: i32, z: i32| self.chunks.block(x, y, z).map(|b| if is_plant(b) { 0 } else { physics_id(b, self.chunks.meta(x, y, z)) });
+            self.carts.update(dt, &minecart::Env { get: &cget, raw: &raw })
+        };
+        for e in cart_events {
+            match e {
+                minecart::Event::Drop(s, p) => self.drops.spawn_stack(s, (p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32)),
+                minecart::Event::Smoke(p) => self.fx.puff(p),
+            }
+        }
+        // `BlockDetectorRail.setStateIfMinecartInteractsWithRail`: on while a cart is over it, off when it has gone.
+        for c in self.carts.cells() {
+            if self.chunks.block(c.0, c.1, c.2) == Some(28) && self.carts.over_detector(c) {
+                self.detectors.insert(c);
+                let m = self.chunks.meta(c.0, c.1, c.2);
+                if m & 8 == 0 {
+                    self.chunks.set_block_meta(c.0, c.1, c.2, 28, m | 8);
+                    self.chunks.ping(c.0, c.1 - 1, c.2);
+                }
+            }
+        }
+        for c in self.detectors.iter().copied().collect::<Vec<_>>() {
+            if self.chunks.block(c.0, c.1, c.2) != Some(28) {
+                self.detectors.remove(&c);
+            } else if !self.carts.over_detector(c) {
+                self.detectors.remove(&c);
+                let m = self.chunks.meta(c.0, c.1, c.2);
+                if m & 8 != 0 {
+                    self.chunks.set_block_meta(c.0, c.1, c.2, 28, m & 7);
+                    self.chunks.ping(c.0, c.1 - 1, c.2);
+                }
+            }
+        }
+        // `Entity.updateRiderPosition` for a cart: on the cart's centre line, feet 0.8 under the box's centre.
+        if let Some(c) = self.carts.ridden() {
+            self.player.pos = c.rider_pos(physics::HALF.y);
+            self.player.vel = glam::Vec3::ZERO;
+            self.player.on_ground = true;
+            self.camera.pos = self.player.pos + glam::Vec3::new(0.0, EYE_HEIGHT - self.sneak_y, 0.0);
+        }
+        // `Entity.updateRiderPosition` for a boat: 0.4 behind the middle, feet 0.8 under the box's centre.
+        // Drawn where the hull is drawn (between the last two ticks), so the view glides; the view is the bow's heading plus the head's turn.
+        if let Some(b) = self.boats.ridden() {
+            let a = self.boats.alpha();
+            self.player.pos = b.rider_pos(physics::HALF.y, a);
+            self.player.vel = glam::Vec3::ZERO;
+            self.player.on_ground = true;
+            self.camera.pos = self.player.pos + glam::Vec3::new(0.0, EYE_HEIGHT - self.sneak_y, 0.0);
+            self.camera.yaw = b.heading_at(a) + self.boat_head;
+        }
+        // `Entity.updateRiderPosition`: the rider's feet are 0.175 over the pig's (`getMountedYOffset` 0.675, `getYOffset` -0.5).
+        if let Some(m) = self.mobs.list.iter().find(|m| m.ridden) {
+            let feet = m.body.pos.y - m.half.y;
+            self.player.pos = glam::Vec3::new(m.body.pos.x, feet + 0.175 + physics::HALF.y, m.body.pos.z);
+            self.player.vel = glam::Vec3::ZERO;
+            self.player.on_ground = true; // no fall damage from a pig's hop
+            self.camera.pos = self.player.pos + glam::Vec3::new(0.0, EYE_HEIGHT, 0.0);
+        }
+        // Furnaces burn on the 20 Hz tick, open or not, but only in loaded chunks (vanilla ticks loaded tile entities).
+        // The block swaps between unlit 61 and lit 62 when the fire goes on or off.
+        // `TextureFX.onTick` every 20 Hz tick (at most 2 per frame: a stall does not queue a burst of texture uploads).
+        self.anim_acc = (self.anim_acc + dt).min(2.0 * dig::TICK);
+        while self.anim_acc >= dig::TICK {
+            self.anim_acc -= dig::TICK;
+            self.be.animate(&self.anim.tick());
+            // The compass points at the world spawn and the clock shows the sky (`TextureCompassFX`, `TextureWatchFX`); the sprite
+            // is rewritten in the atlas (held items, drops) and in the HUD's copy of items.png (hotbar, inventory).
+            let g = self.anim.gauges(
+                self.camera.yaw.to_degrees() + 180.0,
+                (self.player.pos.x as f64, self.player.pos.z as f64),
+                (self.spawn.x as f64, self.spawn.z as f64),
+                sky::celestial_angle(self.world_ticks as u64, 1.0),
+                self.nether,
+            );
+            self.be.animate_items(&g);
+        }
+        // The player's model state (arm swing, walk, the hand's raise) ticks at 20 Hz of the wall clock, at most 2 a frame.
+        self.body_acc = (self.body_acc + real_dt).min(2.0 * dig::TICK);
+        while self.body_acc >= dig::TICK {
+            self.body_acc -= dig::TICK;
+            let (riding, slot) = (self.riding(), self.touch.hotbar_slot);
+            let sneaking = self.touch.sneak && self.sleep.is_none();
+            let (ground, vy) = (self.player.on_ground && !riding, self.player.vel.y / 20.0);
+            self.body.tick(self.player.pos.x, self.player.pos.z, self.camera.yaw.to_degrees() + 180.0, ground, vy, !riding && !(ground && sneaking));
+            // In a boat the body sits square to the bow; only the head follows the view.
+            if let Some(b) = self.boats.ridden() {
+                self.body.face(b.heading_at(self.boats.alpha()).to_degrees() + 180.0);
+            }
+            self.body.equip_tick(slot, self.inv.slots[slot]);
+        }
+        self.furn_acc += dt;
+        while self.furn_acc >= dig::TICK {
+            self.furn_acc -= dig::TICK;
+            // The bobber: gone when the rod is not in hand, 32 blocks away, or after 1200 ticks on the ground.
+            if let Some(h) = &mut self.hook {
+                let rod = self.inv.slots[self.touch.hotbar_slot].is_some_and(|s| s.id == gear::ROD);
+                let get = |x: i32, y: i32, z: i32| self.chunks.block(x, y, z);
+                let rain = self.weather.rain(1.0) > 0.5;
+                let alive = rod && h.pos.distance_squared(self.player.pos) <= 1024.0 && h.tick(&get, &mut self.mobs.rng, rain);
+                let splash = std::mem::take(&mut h.splash);
+                if splash > 0.0 {
+                    // `EntityFish`: "random.splash" at the bobber, pitch `1 + (r - r) * 0.4`.
+                    let pitch = 1.0 + (self.audio.rnd() - self.audio.rnd()) * 0.4;
+                    self.audio.play("random.splash", h.pos, splash, pitch);
+                }
+                if !alive {
+                    self.hook = None;
+                }
+            }
+            let centre = (chunk_coord(self.player.pos.x), chunk_coord(self.player.pos.z));
+            self.sleep_tick(sub);
+            self.sprint_tick();
+            self.map_tick();
+            // `BlockPressurePlate`: the boxes of what may stand on a plate (the player, the mobs).
+            let p = self.player.pos;
+            self.ticks.plate_ents.clear();
+            self.ticks.plate_ents.push((p - physics::HALF, p + physics::HALF, true));
+            self.ticks.plate_ents.extend(self.mobs.list.iter().map(|m| { let (lo, hi) = m.aabb(); (lo, hi, true) }));
+            for (x, y, z) in self.chunks.take_fresh_water() {
+                self.ticks.wake_water(&mut self.chunks, x, y, z); // a river's edge water, Streams Reflowing's scheduleTick
+            }
+            self.ticks.step(&mut self.chunks, &mut self.drops, centre, self.weather.rain(1.0));
+            for s in std::mem::take(&mut self.ticks.sounds) {
+                self.audio.play(s.name, s.at, s.vol, s.pitch);
+            }
+            {
+                let ch = &self.chunks;
+                let ears = self.camera.pos;
+                if let Some(s) = self.ambient.cave(ears, &|x, y, z| (ch.block_loaded(x, y, z).unwrap_or(1), ch.light_at(x, y, z, 0), ch.light_levels(x, y, z).0)) {
+                    self.audio.play(s.name, s.at, s.vol, s.pitch);
+                }
+                let mut heard = Vec::new();
+                self.ambient.display((ears.x.floor() as i32, ears.y.floor() as i32, ears.z.floor() as i32), &|x, y, z| ch.block_loaded(x, y, z).unwrap_or(0), &|x, y, z| ch.meta(x, y, z), &mut heard);
+                for s in heard {
+                    self.audio.play(s.name, s.at, s.vol, s.pitch);
+                }
+            }
+            for ((x, y, z), n, inst) in std::mem::take(&mut self.ticks.note_events) {
+                self.audio.note(glam::Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5), n, inst); // `BlockNote.playBlock`
+            }
+            // `TileEntityPiston`: whatever stands in a sliding piece is carried half a block along per tick (ponytail: the player and
+            // the mobs only, and no collision check on the way).
+            for f in &self.ticks.falling {
+                let Some(mv) = f.mv else { continue };
+                let d = glam::Vec3::new((mv.to.0 - mv.from.0) as f32, (mv.to.1 - mv.from.1) as f32, (mv.to.2 - mv.from.2) as f32) * 0.5;
+                let (lo, hi) = (f.pos - glam::Vec3::splat(0.5), f.pos + glam::Vec3::splat(0.5));
+                let inside = |a: glam::Vec3, b: glam::Vec3| b.cmpgt(lo).all() && a.cmplt(hi).all();
+                let p = self.player.pos;
+                if inside(p - physics::HALF, p + physics::HALF) {
+                    self.player.pos += d;
+                }
+                for m in self.mobs.list.iter_mut() {
+                    let (a, b) = m.aabb();
+                    if inside(a, b) {
+                        m.body.pos += d;
+                    }
+                }
+            }
+            for p in std::mem::take(&mut self.ticks.dispenses) {
+                self.dispense(p);
+            }
+            for at in std::mem::take(&mut self.ticks.booms) {
+                self.explode(at, 4.0, false); // `EntityTNTPrimed.explode`
+            }
+            if self.sleep.is_none() {
+                let p = self.player.pos; // the box centre is 0.9 over the feet
+                if let Some((id, snow)) = self.ticks.walk(&mut self.chunks, p.x, p.y - 0.9, p.z) {
+                    // `Entity.moveEntity`: the block under the feet steps at 0.15 x its volume (snow on top: the snow's own sound); liquids are silent.
+                    if !matches!(id, 8..=11) {
+                        let (_, key, pitch) = audio::STEP[if snow { 7 } else { audio::step_of(id) }];
+                        self.audio.play_here(key, 0.15, pitch);
+                    }
+                }
+            }
+            self.audio.listener(self.player.pos + glam::Vec3::new(0.0, EYE_HEIGHT, 0.0), self.camera.yaw.to_degrees() + 180.0);
+            self.audio.set_volumes(self.opts.sound, self.opts.music);
+            self.audio.tick(); // `playRandomMusicIfReady`
+            self.tick_effects(centre);
+            let mut flips = Vec::new();
+            for (&pos, f) in self.furnaces.iter_mut() {
+                if matches!(self.chunks.block_loaded(pos.0, pos.1, pos.2), Some(61 | 62)) && f.tick() {
+                    flips.push((pos, f.burn > 0));
+                }
+            }
+            for ((x, y, z), lit) in flips {
+                // `updateFurnaceBlockState`: the facing survives the swap.
+                let m = self.chunks.meta(x, y, z);
+                self.chunks.set_block_meta(x, y, z, if lit { 62 } else { 61 }, m);
+            }
+            // Chests: take over what a dungeon's populate put in them; one whose block is gone (dug, blown up, washed away)
+            // spills its contents (`BlockChest.onBlockRemoval`; ponytail: seen on the next 20 Hz tick, not at the removal).
+            for (p, c) in self.chunks.take_loot() {
+                self.chests.entry(p).or_insert(c);
+            }
+            // Dungeon spawners (`TileEntityMobSpawner`): taken over from populate; one whose block is gone is dropped.
+            for (p, kind) in self.chunks.take_spawners() {
+                self.fx.spawners.entry(p).or_insert(Spawner::new(kind, 20));
+            }
+            // Paintings check their wall every 101 ticks and drop as an item when it is gone (`EntityPainting.onUpdate`); a sign's
+            // text goes with its block, and closes the editor.
+            let chunks = &self.chunks;
+            let cell = |x: i32, y: i32, z: i32| chunks.block_loaded(x, y, z).map(|b| (b, chunks.meta(x, y, z)));
+            for p in decor::step(&mut self.paintings, &cell) {
+                let c = p.frame().0;
+                self.drops.scatter(ItemStack { id: decor::PAINTING, count: 1, damage: 0 }, (c.x.floor() as i32, c.y.floor() as i32, c.z.floor() as i32));
+            }
+            self.signs.retain(|&(x, y, z), _| self.chunks.block_loaded(x, y, z).map_or(true, |b| matches!(b, decor::POST | decor::WALL)));
+            if self.sign_edit.is_some_and(|e| !self.signs.contains_key(&e.pos)) {
+                self.close_sign();
+            }
+            self.fx.spawners.retain(|&(x, y, z), _| self.chunks.block_loaded(x, y, z).map_or(true, |b| b == effects::SPAWNER_ID));
+            let gone: Vec<_> = self.chests.keys().copied().filter(|&(x, y, z)| self.chunks.block_loaded(x, y, z).is_some_and(|b| b != chest::ID && b != chest::DISPENSER)).collect();
+            for p in gone {
+                for st in self.chests.remove(&p).into_iter().flatten().flatten() {
+                    self.drops.scatter(st, p);
+                }
+            }
+        }
+
+        // `EntityPlayer.onUpdate`: a container that is no longer usable (the chest is gone, or the eye is 8+ blocks away) closes.
+        let reach = |p: &chest::Pos| match p.0 {
+            i32::MIN => self.carts.list.iter().any(|c| c.key() == *p && (self.player.pos - c.pos).length_squared() <= 64.0),
+            _ => chest::usable(&|x, y, z| self.chunks.block(x, y, z).unwrap_or(0), self.camera.pos, std::slice::from_ref(p)),
+        };
+        if self.screen.as_ref().is_some_and(|s| !s.chests.iter().all(reach)) {
+            self.close_screen();
+        }
+
+        // M5: pick the block under the crosshair, dig it while the dig input is held, place on a tap.
+        self.touch.swing_secs = self.opts.dig_secs();
+        self.touch.guard_shown = self.held_guard().points > 0 && self.screen.is_none(); // C4: the guard button, only for an item that can guard
+        self.touch.special_shown = matches!(self.held_special(), world::combat::profile::Special::Lunge | world::combat::profile::Special::MultiHit | world::combat::profile::Special::Parry | world::combat::profile::Special::Fusee) && self.screen.is_none(); // C5, C8
+        self.touch.tick(real_dt);
+        let place = self.touch.take_place();
+        let strike = self.touch.take_strike();
+        // Cortes Combat C3 (NOT b1.7.3, UNVERIFIED): lifting a finger that held still on a mob ends the charge as one blow, `place` for the code below.
+        let release = self.touch.take_release();
+        let charged = self.charge_release(release);
+        self.blow = charged.unwrap_or(1.0);
+        let place = place || charged.is_some();
+        if place && !self.swing_swallowed() {
+            self.body.swing(); // a tap places, uses or hits: `swingItem`
+        }
+        // The pad's Drop bind: one item of the selected slot (a held bind repeats: `Out::drop` counts them), the Drop Stack bind the whole stack, thrown the way a
+        // screen's leftovers are (`EntityPlayer.dropPlayerItem`).
+        let (drops, drop_stack) = (self.touch.take_pad_drop(), self.touch.take_pad_drop_stack());
+        if (drops > 0 || drop_stack) && !self.vitals.dead() {
+            let slot = self.touch.hotbar_slot;
+            if drop_stack {
+                if let Some(s) = self.inv.slots[slot].take() {
+                    self.drops.throw(s, self.camera.pos, self.camera.forward());
+                    self.stats.add(world::stats::DROP, 1);
+                }
+            } else {
+                for _ in 0..drops {
+                    let Some(s) = self.inv.slots[slot] else { break };
+                    self.drops.throw(ItemStack { count: 1, ..s }, self.camera.pos, self.camera.forward());
+                    self.inv.slots[slot] = (s.count > 1).then_some(ItemStack { count: s.count - 1, ..s });
+                    self.stats.add(world::stats::DROP, 1);
+                }
+            }
+        }
+        // The inventory button, and taps on an open screen (its presses are not look / move / place).
+        if self.touch.take_inventory() {
+            if self.sign_edit.is_some() {
+                self.close_sign();
+            } else if self.screen.is_some() {
+                self.close_screen();
+            } else {
+                self.open_screen(Screen::new(2));
+            }
+        }
+        for ev in self.touch.take_screen_events() {
+            if let Some(u) = self.rei.as_mut() {
+                // The viewer takes what starts on it (the lists, its menus, the recipe view); the rest is the container screen's.
+                let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
+                let panel = self.screen.as_ref().map(|s| craft::panel_rect(s.gw, w, h));
+                let r = u.event(ev, w, h, &self.opts, panel);
+                if let Some(o) = r.out {
+                    self.rei_out(o);
+                }
+                if !r.taken {
+                    self.on_screen_event(ev);
+                }
+            } else {
+                self.on_screen_event(ev);
+            }
+        }
+        self.hint = (self.hint - real_dt).max(0.0);
+        let eye = self.camera.pos.as_dvec3();
+        let end = eye + self.camera.forward().as_dvec3() * pick::REACH;
+        // The crosshair hits a block's bounds (`Block.collisionRayTrace`: a sapling's small box, half a slab); liquids are not pickable
+        // (vanilla's rayTraceBlocks skips them).
+        let bounds = |x: i32, y: i32, z: i32| self.chunks.block_loaded(x, y, z).and_then(|b| pick_bounds(b, self.chunks.meta(x, y, z)));
+        self.target = pick::ray_trace(&bounds, eye, end);
+        // `ReachAroundHandler` (`input/reach.rs`, Controls > Controller > Reach Around): a pick that found nothing, looking down from a block's edge, targets
+        // the block under the feet on the side that faces the look, so using the item bridges forward. Like Controlify's, it feeds the attack too.
+        if self.target.is_none() && self.opts.pad.reach_around {
+            let p = reach::Player { feet: self.player.pos.to_array(), yaw: self.camera.yaw, pitch: self.camera.pitch, on_ground: self.player.on_ground, riding: self.riding() };
+            let solid = |x: i32, y: i32, z: i32| self.chunks.block_loaded(x, y, z).is_some_and(|b| world::chunk::collision(b).is_some()); // not air, a fluid or a plant
+            if let Some(r) = reach::reach_around(&p, true, &solid) {
+                self.target = Some(pick::Hit { pos: r.pos, face: r.face, point: glam::DVec3::from_array(r.point) });
+            }
+        }
+        // The arm starts to swing while the pad's attack is down or a finger rests on a block, before the hold turns into digging
+        // (`HOLD_SECS`). ponytail: it swings without digging for that moment; a finger that moves is a look drag and does not swing.
+        if self.touch.pressing() && self.target.is_some() {
+            self.body.swing();
+        }
+        // A finger that rests on a block (no mob, boat or cart nearer) is digging: it starts now instead of at `HOLD_SECS`, so the dig
+        // does not wait for the swing that began with the rest; the pad's attack held that long digs too (its release is no hit then).
+        // ponytail: a tap longer than `SWING_SECS` on a block digs instead of placing.
+        if let Some(hit) = self.target.filter(|_| self.touch.resting()) {
+            let (eye, fwd) = (self.camera.pos, self.camera.forward());
+            let wall = hit.point.distance(eye.as_dvec3()) as f32;
+            let near = |o: Option<(usize, f32)>| o.is_some_and(|(_, t)| t < wall);
+            if !(near(self.mobs.pick(eye, fwd, pick::REACH as f32)) || near(self.boats.pick(eye, fwd, pick::REACH as f32)) || near(self.carts.pick(eye, fwd, pick::REACH as f32))) {
+                self.touch.dig_now();
+            }
+        }
+
+        // A finger held still on a boat (or the pad's attack held) punches it every 0.4 s; it never digs the block behind it.
+        self.punch_cd = (self.punch_cd - real_dt).max(0.0);
+        let mut punching = false;
+        if self.touch.resting() && self.screen.is_none() {
+            let (eye, fwd) = (self.camera.pos, self.camera.forward());
+            let wall = self.target.map_or(f32::MAX, |h| h.point.distance(eye.as_dvec3()) as f32);
+            let mob_t = self.mobs.pick(eye, fwd, pick::REACH as f32).filter(|&(_, t)| t < wall).map(|(_, t)| t);
+            if let Some((bi, _)) = self.boats.pick(eye, fwd, pick::REACH as f32).filter(|&(_, t)| t < wall && mob_t.map_or(true, |m| t < m)) {
+                punching = true;
+                if self.punch_cd == 0.0 {
+                    self.punch_cd = 0.4;
+                    self.punch_boat(bi, self.touch.hotbar_slot);
+                }
+            }
+        }
+        // Digging runs on the 20 Hz game tick of the Java (hardness-based time, see world::dig).
+        // A broken block drops its items (world::items) only if the held item may harvest it (stone needs a pickaxe),
+        // and wears the tool (`Item.onBlockDestroyed`: 1 use, a sword 2, a hoe none).
+        match self.target {
+            Some(hit) if self.touch.digging() && !punching && self.charge == 0 && !self.cd_rise => {
+                self.dig_acc += real_dt;
+                while self.dig_acc >= dig::TICK {
+                    self.dig_acc -= dig::TICK;
+                    let (x, y, z) = hit.pos;
+                    self.body.swing();
+                    let in_water = matches!(self.chunks.block_loaded(eye.x.floor() as i32, eye.y.floor() as i32, eye.z.floor() as i32), Some(8 | 9));
+                    if let Some(id) = self.chunks.block_loaded(x, y, z) {
+                        let slot = self.touch.hotbar_slot;
+                        let held = self.inv.slots[slot];
+                        let waiting = self.dig.waiting();
+                        let broke = self.dig.tick(hit.pos, id, held, self.player.on_ground, in_water);
+                        if !waiting && id != 0 {
+                            // `MultiPlayerGameMode.startDestroyBlock`: a new block starts its vibration (and ends the last one's).
+                            self.touch.pad.rumble_dig(Some((hit.pos, dig::hardness(id))));
+                        }
+                        if self.dig.hit {
+                            // `PlayerControllerSP.sendBlockRemoving`: the step sound at (volume + 1) / 8 and half the pitch.
+                            let (key, _, pitch) = audio::STEP[audio::step_of(id)];
+                            self.audio.play(key, glam::Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5), 0.25, pitch * 0.5);
+                        }
+                        if broke {
+                            let meta = self.chunks.meta(x, y, z); // before the cell is cleared: the drop depends on it
+                            self.chunks.set_block(x, y, z, 0);
+                            // `RenderGlobal` break effect: `stepSoundDir()` at ((volume + 1) / 2, pitch x 0.8).
+                            let (brk, pitch) = (audio::STEP[audio::step_of(id)].1, audio::STEP[audio::step_of(id)].2 * 0.8);
+                            self.audio.play(brk, glam::Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5), 1.0, pitch);
+                            self.touch.pad.rumble_dig(None); // the block is gone (`destroyBlock` / `stopDestroyBlock`); an instant one still buzzed a tick
+                            self.fx.dig(hit.pos, crate::render::atlas::particle_tile(id, meta)); // `addBlockDestroyEffects`: the block's own tile
+                            if let (61 | 62, Some(f)) = (id, self.furnaces.remove(&hit.pos)) {
+                                for st in f.slots.into_iter().flatten() {
+                                    self.drops.scatter(st, hit.pos);
+                                }
+                            }
+                            // PlayerControllerSP.sendBlockRemoved: `canHarvestBlock` is read before the tool wears, so
+                            // a tool that breaks on this block still harvests it; no suitable tool, no drop.
+                            let harvest = dig::can_harvest(id, held);
+                            if harvest {
+                                self.stats.bump(world::stats::Kind::Mined, id as u16, 1); // `Block.harvestBlock`
+                            }
+                            if let Some(h) = held {
+                                self.inv.damage(slot, craft::wear_on_break(h.id, id));
+                            }
+                            if id == 84 && meta & 15 != 0 {
+                                self.audio.play_record(None, glam::Vec3::ZERO);
+                                self.drops.spawn_stack(ItemStack { id: 2255 + (meta & 15) as u16, count: 1, damage: 0 }, hit.pos); // the record comes out
+                            }
+                            if id == 46 {
+                                // `BlockTNT.onBlockDestroyedByPlayer` (unconditional): metadata 1, or flint and steel in hand (`onBlockClicked`), lights it.
+                                if meta & 1 == 1 || held.is_some_and(|h| h.id == craft::FLINT_AND_STEEL) {
+                                    self.ticks.prime(hit.pos, false);
+                                } else {
+                                    self.drops.spawn_stack(ItemStack { id: 46, count: 1, damage: 0 }, hit.pos);
+                                }
+                            } else if harvest {
+                                // BlockLeaves.harvestBlock: shears drop the leaves themselves, not a sapling.
+                                if id == 18 && held.is_some_and(|h| h.id == craft::SHEARS) {
+                                    self.drops.spawn_stack(ItemStack { id: 18, count: 1, damage: (meta & 3) as u16 }, hit.pos);
+                                } else if id == 18 && self.opts.biome_rules {
+                                    // NOT b1.7.3: saplings and apples by the biome and the season (`biomelife::leaf_odds`).
+                                    let odds = world::biomelife::leaf_odds(self.chunks.biome_at(hit.pos.0, hit.pos.2), world::biomelife::season(self.world_ticks as u64));
+                                    self.drops.spawn_leaf(meta, hit.pos, odds);
+                                } else {
+                                    self.drops.spawn_block(id, meta, hit.pos);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {
+                self.dig.reset();
+                self.dig_acc = 0.0;
+                self.touch.pad.rumble_dig(None); // `stopDestroyBlock`: the dig input was released or the crosshair left the block
+            }
+        }
+        // A tap that has a mob under the crosshair, nearer than the block behind it, hits it (`Minecraft.clickMouse`'s attack;
+        // touch has no left button, and placing a block against a pig is not worth a gesture).
+        if place {
+            let (eye, fwd, slot) = (self.camera.pos, self.camera.forward(), self.touch.hotbar_slot);
+            let wall = self.target.map_or(f32::MAX, |h| h.point.distance(eye.as_dvec3()) as f32);
+            // A boat the crosshair is on (and nothing nearer): an empty hand gets in (`Entity.interact`), a held item hits it
+            // (`attackEntityFrom`: damage x 10, over 40 breaks it into 3 planks and 2 sticks).
+            let mob_t = self.mobs.pick(eye, fwd, pick::REACH as f32).filter(|&(_, t)| t < wall).map(|(_, t)| t);
+            let boat_t = self.boats.pick(eye, fwd, pick::REACH as f32).filter(|&(_, t)| t < wall && mob_t.map_or(true, |m| t < m));
+            // A ghast's fireball the crosshair is on and nothing nearer (`EntityFireball.attackEntityFrom`): it flies back along the look.
+            if let Some((fi, _)) = self.mobs.pick_fireball(eye, fwd, pick::REACH as f32).filter(|&(_, t)| t < wall && mob_t.map_or(true, |m| t < m) && boat_t.map_or(true, |b| t < b.1)) {
+                self.mobs.deflect(fi, fwd);
+                return;
+            }
+            // A cart the same way (`EntityMinecart.interact`): the empty one takes a rider, the furnace one is pushed away from you
+            // (coal is burnt first); a held item otherwise hits it, over 40 damage breaks it into the cart (and the furnace).
+            if let Some((ci, _)) = self.carts.pick(eye, fwd, pick::REACH as f32).filter(|&(_, t)| t < wall && mob_t.map_or(true, |m| t < m) && boat_t.map_or(true, |b| t < b.1)) {
+                let held = self.inv.slots[slot].map(|s| s.id);
+                let furnace = self.carts.list[ci].kind == 2;
+                match held {
+                    None if furnace => {
+                        self.carts.list[ci].push_from(self.player.pos, false);
+                    }
+                    None if self.carts.list[ci].kind == 1 => {
+                        let k = self.carts.list[ci].key();
+                        self.chests.entry(k).or_default();
+                        self.open_screen(Screen::at_chest(vec![k]));
+                    }
+                    None => {
+                        if self.carts.ridden().is_none() {
+                            self.carts.list[ci].ridden = true;
+                        }
+                    }
+                    Some(minecart::COAL) if furnace => {
+                        if self.carts.list[ci].push_from(self.player.pos, true) {
+                            self.inv.consume(slot);
+                        }
+                    }
+                    held => {
+                        let (dmg, wear) = mobs::attack(held);
+                        if self.carts.list[ci].hurt(dmg as i32) {
+                            self.smash_cart(ci);
+                        }
+                        if wear > 0 {
+                            self.inv.damage(slot, wear);
+                        }
+                    }
+                }
+                return;
+            }
+            // A boat: the pad's attack tap punches it (and a finger held on it, below); any other tap gets in, whatever is in the hand.
+            if let Some((bi, _)) = boat_t {
+                if strike {
+                    self.punch_boat(bi, slot);
+                } else if !self.riding() {
+                    self.boats.list[bi].ridden = true;
+                    self.boats.list[bi].set_heading(self.camera.yaw); // the boat faces where he looks; the head starts straight
+                    self.boat_head = 0.0;
+                }
+                return;
+            }
+            // Cortes Combat (C2, **NOT b1.7.3**, UNVERIFIED; only with the world's Immersive Pack ON): the held weapon or tool swings through
+            // its cone, not along the crosshair's ray; the bare hand still takes the mob under the crosshair first, the cone being its
+            // fallback. Either way an `Entity.interact` (a saddle, a tame wolf, shears, a bone) needs the mob under the crosshair (`touch`).
+            let held_id = self.inv.slots[slot].map(|s| s.id);
+            let swing = world::combat::rules::swing(held_id);
+            self.switch_weapon(held_id);
+            let (target, ray) = self.melee_target(held_id, eye, fwd, wall);
+            if let Some(i) = target {
+                let touch = ray == Some(i); // an interaction only with the mob under the crosshair
+                // A bone or pork on a wolf, a tap on a tame one, a saddle on a pig, a tap on a saddled one (`Entity.interact`).
+                let held = self.inv.slots[slot];
+                if let Some(b) = if touch { gear::befriend(&mut self.mobs.list[i], held, &mut self.mobs.rng) } else { None } {
+                    let m = &self.mobs.list[i];
+                    let (feet, w, h) = (m.body.pos - glam::Vec3::new(0.0, m.half.y, 0.0), m.half.x * 2.0, m.half.y * 2.0);
+                    match b {
+                        gear::Befriend::Tamed | gear::Befriend::Failed => {
+                            self.inv.consume(slot);
+                            self.fx.hearts(feet, w, h, b == gear::Befriend::Tamed);
+                        }
+                        gear::Befriend::Healed | gear::Befriend::Saddled => self.inv.consume(slot),
+                        gear::Befriend::Sat | gear::Befriend::Stood | gear::Befriend::Mounted => {}
+                    }
+                    return;
+                }
+                if let Some(h) = self.inv.slots[slot].filter(|_| touch) {
+                    // Shears / dye on a sheep, a bucket on a cow: `Entity.interact` before the attack.
+                    let used = gear::use_on_mob(&mut self.mobs.list[i], h, &mut self.mobs.rng);
+                    let at = self.mobs.list[i].body.pos;
+                    let cell = (at.x.floor() as i32, at.y.floor() as i32, at.z.floor() as i32);
+                    match used {
+                        Some(Used::Sheared(wool)) => {
+                            wool.into_iter().for_each(|w| self.drops.spawn_stack(w, cell));
+                            self.inv.damage(slot, 1);
+                            return;
+                        }
+                        Some(Used::Dyed) => {
+                            self.inv.consume(slot);
+                            return;
+                        }
+                        Some(Used::Milked) => {
+                            self.inv.slots[slot] = Some(ItemStack { id: gear::MILK_BUCKET, count: 1, damage: 0 });
+                            return;
+                        }
+                        None => {}
+                    }
+                }
+                if swing.is_some() && self.swing_blocked(held_id) {
+                    return; // still inside the last swing's cooldown (or behind a raised or staggered guard): nothing happens, and no part of the blow is paid early
+                }
+                let (dmg, wear) = mobs::attack(held_id);
+                // C3: the charged blow. C5: a live hammer streak adds 0.15 a hit to the multiplier (`DamageResolver`), counted before this blow.
+                let hammer = swing.is_some_and(|s| s.profile == world::combat::profile::Profile::Warhammer);
+                let blow = std::mem::replace(&mut self.blow, 1.0);
+                let dmg = dmg * (blow + if hammer { self.sp.streak_bonus() } else { 0.0 });
+                // Retro Sprint (`PlayerEntityMixin.onAttack`): a sprinting hit shoves the target the way the player looks, before the hit's own
+                // knockback, and ends the sprint (the walk is set from the input every frame, so the mod's x0.6 on the player's motion has no use here).
+                if self.sprint.attack() {
+                    let f = self.camera.forward();
+                    let d = glam::Vec3::new(f.x, 0.0, f.z).normalize_or_zero();
+                    self.mobs.shove(i, d * sprint::KNOCK + glam::Vec3::Y * sprint::KNOCK_UP);
+                }
+                if let Some(s) = swing {
+                    self.swing_cd = s.interval;
+                    self.mobs.strike(i, dmg, self.player.pos); // the weapon's own 3-tick damage window
+                    if s.profile == world::combat::profile::Profile::Axe {
+                        self.mobs.stagger(i, world::combat::weight::stagger_ticks(blow > 1.0)); // the axe's role: a heavy blow staggers (no steering, no bite) for a moment
+                    }
+                    let full = { let c = s.profile.charge(); c.ticks > 0 && blow >= 1.0 + c.bonus - 1e-4 }; // C7: a full charge (`chargeRatio >= FULL_CHARGE`)
+                    self.hit_fx(i, s.profile, blow > 1.0, full, 1.0, true);
+                } else {
+                    self.mobs.hit(i, dmg, self.player.pos);
+                }
+                if hammer {
+                    self.sp.streak_hit(); // ponytail: every blow that connects counts, one the mob's damage window refused too (a martillo is 19 ticks, the window 3)
+                }
+                self.vitals.stamina.hit(); // Stamina: a hit dealt puts the player in combat for 15 s (ponytail: also one the mob's damage window ignored)
+                self.touch.pad.rumble_play(rfx::damage_dealt()); // `damage/ClientPacketListenerMixin.playOutgoingDamageRumble`
+                self.inv.damage(slot, wear);
+                return;
+            }
+            // C7 (`CombatEngine.playMiss`): a swing of a weapon or tool that found nothing in its cone. ponytail: the hoe stays quiet, a tap on soil tills
+            // it and the mod's right button does that, so a swish there would be a lie; and the cooldown is still only paid by a hit (C2).
+            if let Some(s) = swing.filter(|s| held_id.is_some() && s.profile != world::combat::profile::Profile::Hoe && !self.swing_blocked(held_id)) {
+                self.cue(s.profile, world::combat::sound::Kind::Miss, 1.0, None);
+            }
+        }
+        // A tap on a painting nearer than the block behind it breaks it (`EntityPainting.attackEntityFrom`: it drops as an item).
+        if place {
+            let (eye, fwd) = (self.camera.pos, self.camera.forward());
+            let wall = self.target.map_or(f32::MAX, |h| h.point.distance(eye.as_dvec3()) as f32);
+            if let Some((i, _)) = decor::pick(&self.paintings, eye, fwd, pick::REACH as f32).filter(|&(_, t)| t < wall) {
+                self.break_painting(i);
+                return;
+            }
+        }
+        // The pad's attack tap only hits: it never places a block.
+        if strike {
+            return;
+        }
+        let Some(hit) = self.target else {
+            if place {
+                self.use_held();
+            }
+            return;
+        };
+        if place {
+            // Using a workbench or a furnace opens its screen instead of placing a block against it.
+            match self.chunks.block_loaded(hit.pos.0, hit.pos.1, hit.pos.2) {
+                Some(58) => {
+                    self.open_screen(Screen::new(3));
+                    return;
+                }
+                Some(61 | 62) => {
+                    self.furnaces.entry(hit.pos).or_default();
+                    self.open_screen(Screen::at_furnace(hit.pos));
+                    return;
+                }
+                // BlockDoor.blockActivated: a wooden door swings, an iron one ignores the hand.
+                Some(64) => {
+                    self.toggle_door(hit.pos);
+                    return;
+                }
+                Some(71) => return,
+                // BlockCake.blockActivated: a slice heals 3 while below full health; the sixth slice removes the cake.
+                // ponytail: a punch (`onBlockClicked`) does not eat; holding it digs the cake away like any block.
+                Some(92) => {
+                    let (x, y, z) = hit.pos;
+                    if self.vitals.health < crate::world::vitals::MAX_HEALTH {
+                        self.vitals.heal(3);
+                        let m = self.chunks.meta(x, y, z) + 1;
+                        if m >= 6 {
+                            self.chunks.set_block(x, y, z, 0);
+                        } else {
+                            self.chunks.set_block_meta(x, y, z, 92, m);
+                        }
+                    }
+                    return;
+                }
+                // BlockTrapDoor.blockActivated: the open bit flips.
+                Some(96) => {
+                    let (x, y, z) = hit.pos;
+                    self.chunks.set_block_meta(x, y, z, 96, self.chunks.meta(x, y, z) ^ 4);
+                    return;
+                }
+                // BlockLever.blockActivated: the on bit flips. ponytail: a punch (`onBlockClicked`) does not flip it.
+                Some(69) => {
+                    let (x, y, z) = hit.pos;
+                    let on = self.chunks.meta(x, y, z) & 8 == 0; // `BlockLever`: pitch 0.6 turning on, 0.5 off
+                    self.chunks.set_block_meta(x, y, z, 69, self.chunks.meta(x, y, z) ^ 8);
+                    self.audio.play("random.click", glam::Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5), 0.3, if on { 0.6 } else { 0.5 });
+                    return;
+                }
+                // BlockButton.blockActivated: pressed for 20 ticks.
+                Some(77) => {
+                    let (x, y, z) = hit.pos;
+                    let m = self.chunks.meta(x, y, z);
+                    if m & 8 == 0 && self.chunks.set_block_meta(x, y, z, 77, m | 8) {
+                        self.ticks.schedule(x, y, z, 77, 20);
+                        self.audio.play("random.click", glam::Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5), 0.3, 0.6);
+                    }
+                    return;
+                }
+                // BlockNote.blockActivated.
+                Some(25) => {
+                    let (x, y, z) = hit.pos;
+                    self.ticks.note_use(&self.chunks, x, y, z);
+                    return;
+                }
+                // BlockJukeBox.blockActivated + ItemRecord.onItemUse: a record goes in (the metadata says which: 1 = 13, 2 = cat;
+                // ponytail: the Java keeps it in a tile entity), clicking again takes it out.
+                Some(84) => {
+                    let (x, y, z) = hit.pos;
+                    let m = self.chunks.meta(x, y, z);
+                    if m != 0 {
+                        self.chunks.set_block_meta(x, y, z, 84, 0);
+                        self.audio.play_record(None, glam::Vec3::ZERO); // `playRecord(null)`
+                        self.drops.spawn_stack(ItemStack { id: 2255 + m as u16, count: 1, damage: 0 }, (x, y + 1, z));
+                        return;
+                    } else if let Some(s) = self.inv.slots[self.touch.hotbar_slot].filter(|s| matches!(s.id, 2256 | 2257)) {
+                        self.chunks.set_block_meta(x, y, z, 84, (s.id - 2255) as u8);
+                        self.audio.play_record(Some(if s.id == 2256 { "13" } else { "cat" }), glam::Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5));
+                        self.inv.consume(self.touch.hotbar_slot);
+                        return;
+                    }
+                }
+                // BlockRedstoneRepeater.blockActivated: the delay goes 1 -> 2 -> 3 -> 4 -> 1.
+                Some(93 | 94) => {
+                    let (x, y, z) = hit.pos;
+                    let (m, id) = (self.chunks.meta(x, y, z), self.chunks.block_loaded(x, y, z).unwrap_or(93));
+                    self.chunks.set_block_meta(x, y, z, id, ((m & 12) + 4 & 12) | m & 3);
+                    return;
+                }
+                // BlockRedstoneOre.blockActivated: it lights up, then the block in hand is still placed against it.
+                Some(73) => {
+                    self.chunks.set_block(hit.pos.0, hit.pos.1, hit.pos.2, 74);
+                }
+                Some(26) => {
+                    self.use_bed(hit.pos);
+                    return;
+                }
+                // BlockDispenser.blockActivated: its 9 slots open as a screen.
+                Some(chest::DISPENSER) => {
+                    self.chests.entry(hit.pos).or_default();
+                    self.open_screen(Screen::at_dispenser(hit.pos));
+                    return;
+                }
+                Some(chest::ID) => {
+                    // `BlockChest.blockActivated`: a large chest opens as one; under a normal cube nothing opens. Never places.
+                    if let Some(group) = chest::open(&|x, y, z| self.chunks.block(x, y, z).unwrap_or(0), hit.pos) {
+                        for p in &group {
+                            self.chests.entry(*p).or_default();
+                        }
+                        self.open_screen(Screen::at_chest(group));
+                    }
+                    return;
+                }
+                _ => {}
+            }
+            // ItemHoe.onItemUse: till dirt (or grass with air above) into farmland, one use of wear. A hoe never
+            // places anything. ponytail: farmland stays farmland (no `BlockFarmland.updateTick` reverting it to dirt),
+            // it is drawn as a full cube (the original is 15/16 high) and nothing grows on it yet.
+            let slot = self.touch.hotbar_slot;
+            // ItemPainting.onItemUse: a side face; the motive is drawn among those that fit (`decor::hang`). Never places a block.
+            if self.inv.slots[slot].is_some_and(|s| s.id == decor::PAINTING) {
+                if let (Some(dir), true) = (decor::dir_of_face(hit.face), self.paintings.len() < decor::MAX_PAINTINGS) {
+                    let chunks = &self.chunks;
+                    let cell = |x: i32, y: i32, z: i32| chunks.block_loaded(x, y, z).map(|b| (b, chunks.meta(x, y, z)));
+                    if let Some(p) = decor::hang(hit.pos, dir, &self.paintings, &cell, &mut self.mobs.rng) {
+                        self.paintings.push(p);
+                        self.inv.consume(slot);
+                    }
+                }
+                return;
+            }
+            // ItemSign.onItemUse: a post on a top face, a wall sign on a side face; the editor opens on the new sign.
+            if self.inv.slots[slot].is_some_and(|s| s.id == decor::SIGN) {
+                let yaw = self.camera.yaw.to_degrees() + 180.0;
+                let placed = decor::sign_place(&|a, b, c| self.chunks.block_loaded(a, b, c).unwrap_or(0), hit.pos, hit.face, yaw);
+                if let Some(((x, y, z), id, meta)) = placed {
+                    if self.chunks.set_block_meta(x, y, z, id, meta) {
+                        self.inv.consume(slot);
+                        self.signs.insert((x, y, z), Default::default());
+                        self.sign_edit = Some(Edit::new((x, y, z)));
+                        self.touch.set_screen(true);
+                    }
+                }
+                return;
+            }
+            // ItemBed.onItemUse: only against a top face, both halves on air over solid cubes.
+            if self.inv.slots[slot].is_some_and(|s| s.id == 355) {
+                let (x, y, z) = pick::place_pos(&hit);
+                let yaw = self.camera.yaw.to_degrees() + 180.0;
+                let n = pick::bed_meta(&|a, b, c| self.chunks.block_loaded(a, b, c).unwrap_or(0), (x, y, z), yaw);
+                if let Some(n) = n.filter(|_| hit.face == 1) {
+                    let (dx, dz) = pick::BED_DIR[n as usize];
+                    self.chunks.set_block_meta(x, y, z, 26, n);
+                    self.chunks.set_block_meta(x + dx, y, z + dz, 26, n + 8);
+                    self.inv.consume(slot);
+                }
+                return;
+            }
+            // ItemDoor.onItemUse: only against a top face; both halves are written before the neighbours are told.
+            if let Some(s) = self.inv.slots[slot].filter(|s| matches!(s.id, 324 | 330)) {
+                let (x, y, z) = pick::place_pos(&hit);
+                let bid = if s.id == 324 { 64 } else { 71 };
+                let yaw = self.camera.yaw.to_degrees() + 180.0;
+                let meta = pick::door_meta(&|a, b, c| self.chunks.block_loaded(a, b, c).unwrap_or(0), (x, y, z), yaw, bid);
+                if let Some(m) = meta.filter(|_| hit.face == 1) {
+                    self.chunks.set_block_meta(x, y, z, bid, m);
+                    self.chunks.set_block_meta(x, y + 1, z, bid, m + 8);
+                    self.inv.consume(slot);
+                }
+                return;
+            }
+            // ItemFlintAndSteel.onItemUse: fire in the empty cell next to the face aimed at; one use of wear either way.
+            if self.inv.slots[slot].is_some_and(|s| s.id == craft::FLINT_AND_STEEL) {
+                let (x, y, z) = pick::place_pos(&hit);
+                if self.chunks.block_loaded(x, y, z) == Some(0) {
+                    let p = self.audio.rnd() * 0.4 + 0.8;
+                    self.audio.play("fire.ignite", glam::Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5), 1.0, p);
+                    self.chunks.set_block(x, y, z, 51);
+                }
+                self.inv.damage(slot, 1);
+                return;
+            }
+            if self.inv.slots[slot].is_some_and(|s| craft::is_hoe(s.id)) {
+                let (x, y, z) = hit.pos;
+                let (b, above) = (self.chunks.block_loaded(x, y, z), self.chunks.block_loaded(x, y + 1, z));
+                if let (Some(b), Some(above)) = (b, above) {
+                    if craft::can_till(b, above, hit.face) {
+                        self.chunks.set_block(x, y, z, 60);
+                        let (key, _, pitch) = audio::STEP[audio::step_of(60)]; // `ItemHoe`: the tilled field's step sound
+                        self.audio.play(key, glam::Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5), 1.0, pitch * 0.8);
+                        self.inv.damage(slot, 1);
+                    }
+                }
+                return;
+            }
+            // ItemMinecart.onItemUse: aimed at a rail, the cart is set in the rail's cell (its centre, 0.5 up).
+            if let Some(kind) = self.inv.slots[slot].and_then(|s| match s.id {
+                minecart::EMPTY => Some(0),
+                minecart::WITH_CHEST => Some(1),
+                minecart::WITH_FURNACE => Some(2),
+                _ => None,
+            }) {
+                let (x, y, z) = hit.pos;
+                if matches!(self.chunks.block_loaded(x, y, z), Some(27 | 28 | 66)) {
+                    self.carts.list.push(minecart::Cart::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5, kind));
+                    self.inv.consume(slot);
+                }
+                return;
+            }
+            // ItemDye.onItemUse, bone meal (351, damage 15): sapling -> `growTree`, crops -> metadata 7 (`fertilize`), grass ->
+            // 128 random walks of tall grass and flowers. One is used up even when the tree does not fit. Anything else: no use.
+            if self.inv.slots[slot].is_some_and(|s| s.id == 351 && s.damage == 15) {
+                let (x, y, z) = hit.pos;
+                match self.chunks.block_loaded(x, y, z) {
+                    Some(6) => {
+                        let species = self.chunks.meta(x, y, z) & 3;
+                        self.chunks.grow_tree(x, y, z, species, &mut self.mobs.rng);
+                        self.inv.consume(slot);
+                    }
+                    Some(59) => {
+                        self.chunks.set_block_meta(x, y, z, 59, 7);
+                        self.inv.consume(slot);
+                    }
+                    Some(2) => {
+                        let get = |a, b, c| self.chunks.block_loaded(a, b, c).unwrap_or(1);
+                        let cells = gear::bone_meal_grass(&get, &mut self.mobs.rng, (x, y, z));
+                        for (a, b, c, id, m) in cells {
+                            self.chunks.set_block_meta(a, b, c, id, m);
+                        }
+                        self.inv.consume(slot);
+                    }
+                    _ => {}
+                }
+                return;
+            }
+            // ItemSeeds.onItemUse: only the top face of farmland with air above; one seed becomes a crops block (meta 0).
+            if self.inv.slots[slot].is_some_and(|s| s.id == 295) {
+                let (x, y, z) = hit.pos;
+                if hit.face == 1 && self.chunks.block_loaded(x, y, z) == Some(60) && self.chunks.block_loaded(x, y + 1, z) == Some(0) {
+                    self.chunks.set_block(x, y + 1, z, 59);
+                    self.inv.consume(slot);
+                }
+                return;
+            }
+            // ItemReed.onItemUse (sugar cane, cake): the cell beside the face aimed at, or the snow layer itself; the block's
+            // `canPlaceBlockAt` decides (reeds: `reed_ok`; cake: solid ground, and the player's box must not be in the way).
+            if self.inv.slots[slot].is_some_and(|s| matches!(s.id, 338 | 354)) {
+                let cake = self.inv.slots[slot].is_some_and(|s| s.id == 354);
+                let at = if self.chunks.block_loaded(hit.pos.0, hit.pos.1, hit.pos.2) == Some(78) { hit.pos } else { pick::place_pos(&hit) };
+                let get = |a, b, c| self.chunks.block_loaded(a, b, c).unwrap_or(0);
+                let ok = at.1 < crate::world::chunk::H as i32 - 1 && self.chunks.block_loaded(at.0, at.1, at.2).is_some_and(pick::replaceable)
+                    && if cake { !crate::world::ticks::non_solid(get(at.0, at.1 - 1, at.2)) && !pick::overlaps_player(at, physics_id(92, 0), self.player.pos) } else { pick::reed_ok(&get, at) };
+                if ok && self.chunks.set_block_meta(at.0, at.1, at.2, if cake { 92 } else { 83 }, 0) {
+                    self.inv.consume(slot);
+                    self.placed(if cake { 92 } else { 83 }, at);
+                }
+                return;
+            }
+            // ItemRedstone.onItemUse: dust on the cell beside the face aimed at (`BlockRedstoneWire.canPlaceBlockAt`: solid below).
+            // ItemReed for the repeater (356 -> block 93, facing from the yaw, `onBlockPlacedBy`: scheduled at once when powered).
+            if let Some(b) = self.inv.slots[slot].and_then(|s| match s.id { 331 => Some(55u8), 356 => Some(93), _ => None }) {
+                let at = pick::place_pos(&hit);
+                let meta = pick::facing_meta(b as u16, self.camera.yaw.to_degrees() + 180.0).unwrap_or(0);
+                if at.1 < crate::world::chunk::H as i32 - 1 && self.chunks.block_loaded(at.0, at.1, at.2).is_some_and(pick::replaceable) && ticks::can_place(&self.chunks, at.0, at.1, at.2, b) && self.chunks.set_block_meta(at.0, at.1, at.2, b, meta) {
+                    self.inv.consume(slot);
+                    if b == 93 {
+                        self.placed(b, at); // an `ItemReed`; the dust (`ItemRedstone`) is silent
+                    }
+                    if b == 93 && redstone::repeater_input(&self.chunks, at.0, at.1, at.2) {
+                        self.ticks.schedule(at.0, at.1, at.2, 93, 1);
+                    }
+                }
+                return;
+            }
+            let (x, y, z) = pick::place_pos(&hit);
+            // Items below 256 are blocks; anything else cannot be placed. ItemBlock refuses a solid block at y = 127
+            // (ponytail: plants are refused there too).
+            if let Some(s) = self.inv.slots[slot].filter(|s| s.id < 256) {
+                // A torch's facing comes from the face aimed at and what can hold it (None = nothing to hang on: no placement).
+                let floor = 5 + self.mobs.rng.next_int_bound(2) as u8; // a lever on the floor: 5 or 6
+                let meta = if matches!(s.id, 50 | 75 | 76) { pick::torch_meta(&|a, b, c| self.chunks.block_loaded(a, b, c).unwrap_or(0), (x, y, z), hit.face) } else if matches!(s.id, 33 | 29) { Some(pick::piston_facing(self.player.pos, (x, y, z), self.camera.yaw.to_degrees() + 180.0)) } else if matches!(s.id, 69 | 77) { pick::switch_meta(&|a, b, c| self.chunks.block_loaded(a, b, c).unwrap_or(0), (x, y, z), hit.face, s.id == 69, floor) } else if s.id == 96 { pick::trap_meta(hit.face, self.chunks.block_loaded(hit.pos.0, hit.pos.1, hit.pos.2).is_some_and(normal_cube)) } else { pick::facing_meta(s.id, self.camera.yaw.to_degrees() + 180.0).or(Some(items::placed_meta(s))) };
+                if let Some(meta) = meta.filter(|_| y < 127 && self.chunks.block_loaded(x, y, z).is_some_and(pick::replaceable) && !pick::overlaps_player((x, y, z), s.id as u8, self.player.pos) && ticks::can_place(&self.chunks, x, y, z, s.id as u8) && (s.id != chest::ID as u16 || chest::can_place(&|a, b, c| self.chunks.block(a, b, c).unwrap_or(0), (x, y, z)))) {
+                    if self.chunks.set_block_meta(x, y, z, s.id as u8, meta) {
+                        let (key, _, pitch) = audio::STEP[audio::step_of(s.id as u8)]; // `ItemBlock`: step sound, volume (1 + 1) / 2, pitch * 0.8
+                        self.audio.play(key, glam::Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5), 1.0, pitch * 0.8);
+                        self.inv.consume(slot);
+                    }
+                }
+            } else {
+                self.use_held();
+            }
+        }
+    }
+
+    /// A fire at hand: the block light of a torch, furnace or lava (`biomelife::FIRE_LIGHT`, 11: a torch within 3 blocks) in the head's or the feet's
+    /// cell. Joins the cold (`air`: no chill by a fire) and the hearth (`combat::mend`: a rest by a fire heals).
+    fn heat_at_hand(&self) -> bool {
+        let p = self.player.pos;
+        let (x, z) = (p.x.floor() as i32, p.z.floor() as i32);
+        let (head, feet) = ((p.y + 0.7).floor() as i32, (p.y - 0.5).floor() as i32);
+        self.chunks.light_levels(x, head, z).1.max(self.chunks.light_levels(x, feet, z).1) >= world::biomelife::FIRE_LIGHT
+    }
+
+    /// NOT b1.7.3 (`biomeRules`, `biomelife::air`): the heat or cold of the biome on the player: open daylight on the head, a fire at hand
+    /// (block light of a torch, furnace or lava), a meal, and the armor worn (leather is fur, the rest is metal).
+    /// Stamina's armor LOAD (NOT b1.7.3): the armor value weighed by the material of the pieces, metal 1 and leather 0.4 (`craft::armor`'s
+    /// material 0). ponytail: weighs by each piece's base points, not its wear. UNVERIFIED.
+    fn armor_load(&self) -> f32 {
+        let (mut sum, mut w) = (0.0, 0.0);
+        for (t, m) in self.inv.slots[items::MAIN..].iter().flatten().filter_map(|s| craft::armor(s.id)) {
+            let pts = [3.0, 8.0, 6.0, 3.0][t];
+            (sum, w) = (sum + pts * if m == 0 { 0.4 } else { 1.0 }, w + pts);
+        }
+        if w == 0.0 { 0.0 } else { self.vitals.armor as f32 * sum / w }
+    }
+
+    /// Leather is light (NOT b1.7.3): +2.5% walk and sprint per leather piece worn, +10% for the set. UNVERIFIED by play.
+    /// Terrain cost of a sprint tick (NOT b1.7.3): soul sand and snow 1.3, rails and cobblestone 0.8, else 1.0. Reads the feet and the block below.
+    /// ponytail: no slope (uphill) term; it needs the physics contact and a ground normal. UNVERIFIED.
+    fn terrain_cost(&self) -> f32 {
+        let p = self.player.pos;
+        let (x, z, y) = (p.x.floor() as i32, p.z.floor() as i32, p.y.floor() as i32);
+        let (feet, under) = (self.chunks.block(x, y, z).unwrap_or(0), self.chunks.block(x, (p.y - 0.1).floor() as i32, z).unwrap_or(0));
+        match (feet, under) {
+            (78, _) | (_, 88 | 80 | 78) => 1.3,
+            (27 | 28 | 66, _) | (_, 4 | 48) => 0.8,
+            _ => 1.0,
+        }
+    }
+
+    fn leather_speed(&self) -> f32 {
+        1.0 + 0.025 * self.inv.slots[items::MAIN..].iter().flatten().filter(|s| craft::armor(s.id).is_some_and(|a| a.1 == 0)).count() as f32
+    }
+
+    fn air(&self) -> world::biomelife::Air {
+        if !self.opts.biome_rules || self.nether {
+            return Default::default();
+        }
+        let (p, angle) = (self.player.pos, sky::celestial_angle(self.world_ticks as u64, 1.0));
+        let sub = sky::skylight_subtracted(angle, self.weather.rain(1.0), self.weather.thunder(1.0));
+        let (x, z) = (p.x.floor() as i32, p.z.floor() as i32);
+        let head = (p.y + 0.7).floor() as i32;
+        let sun = ((self.chunks.light_levels(x, head, z).0.saturating_sub(sub) as f32 - 8.0) / 7.0).clamp(0.0, 1.0);
+        let fire = self.heat_at_hand();
+        let (mut metal, mut fur) = (0u8, 0u8);
+        for a in self.inv.slots[items::MAIN..].iter().flatten().filter_map(|s| craft::armor(s.id)) {
+            if a.1 == 0 { fur += 1 } else { metal += 1 }
+        }
+        world::biomelife::air(self.opts.atmos.here, world::biomelife::Body { sun, fire, fed: self.vitals.fed > 0, metal, fur })
+    }
+
+    /// The mob a tap with `held_id` hits (first) and the one under the crosshair's ray (second). With the Immersive Pack ON (Cortes Combat,
+    /// C2, NOT b1.7.3, UNVERIFIED) a weapon or tool takes the nearest mob in its cone, the bare hand the ray's with the cone as fallback.
+    fn melee_target(&self, held_id: Option<u16>, eye: glam::Vec3, fwd: glam::Vec3, wall: f32) -> (Option<usize>, Option<usize>) {
+        let swing = world::combat::rules::swing(held_id);
+        let ray = self.mobs.pick(eye, fwd, swing.map_or(pick::REACH as f32, |s| s.reach.dist)).filter(|&(_, t)| t < wall).map(|(i, _)| i);
+        let cone = swing.and_then(|s| self.mobs.cone(eye, fwd, s.reach, wall));
+        (if swing.is_some() && held_id.is_some() { cone } else { ray.or(cone) }, ray)
+    }
+
+    /// Would a tap now be swallowed by the held item's cooldown (a target in reach, `swing_cd` still running)? Then the arm does not swing,
+    /// so a blocked tap looks like what it is. Cortes Combat C2, NOT b1.7.3, UNVERIFIED. ponytail: ignores a boat or cart nearer than the mob.
+    fn swing_swallowed(&self) -> bool {
+        let (eye, fwd, slot) = (self.camera.pos, self.camera.forward(), self.touch.hotbar_slot);
+        let held_id = self.inv.slots[slot].map(|s| s.id);
+        if world::combat::rules::swing(held_id).is_none() || !(self.swing_held == held_id && self.swing_cd > 0 || self.guard_blocks(held_id)) {
+            return false;
+        }
+        let wall = self.target.map_or(f32::MAX, |h| h.point.distance(eye.as_dvec3()) as f32);
+        self.melee_target(held_id, eye, fwd, wall).0.is_some()
+    }
+
+    /// C9, 20 Hz: the crosshair's clock. It aims (the aim sprite, a little bigger) while the held weapon has a mob in its cone.
+    fn crosshair_tick(&mut self) {
+        let held_id = self.inv.slots[self.touch.hotbar_slot].map(|s| s.id);
+        let aiming = world::combat::rules::swing(held_id).is_some_and(|s| s.profile.fights()) && {
+            let (eye, fwd) = (self.camera.pos, self.camera.forward());
+            let wall = self.target.map_or(f32::MAX, |h| h.point.distance(eye.as_dvec3()) as f32);
+            self.melee_target(held_id, eye, fwd, wall).0.is_some()
+        };
+        self.xh.tick(aiming);
+    }
+
+    /// C4: what guard the held item is worth (`guard::profile_of`; nothing with the Immersive Pack OFF).
+    fn held_guard(&self) -> world::combat::guard::GuardProfile {
+        let held = self.inv.slots[self.touch.hotbar_slot].map(|s| s.id);
+        world::combat::rules::swing(held).map_or(world::combat::guard::NONE, |s| world::combat::guard::profile_of(s.profile))
+    }
+
+    /// C4: a raised guard, or the stagger of the one in hand, stops the swing (`AttackCooldown.beginCharge`: covering and swinging are exclusive).
+    fn guard_blocks(&self, held_id: Option<u16>) -> bool {
+        let g = &self.vitals.guard;
+        g.active() || (g.stun > 0 && world::combat::rules::swing(held_id).is_some_and(|s| world::combat::guard::profile_of(s.profile).points > 0))
+    }
+
+    /// C4: the held item cannot swing now: its cooldown, or `guard_blocks`.
+    fn swing_blocked(&self, held_id: Option<u16>) -> bool {
+        self.swing_cd > 0 || self.guard_blocks(held_id)
+    }
+
+    /// `EntityLiving.knockBack`: a hit that took shoves the player away from its source. The motion is halved, then 0.4 blocks a tick is taken along
+    /// the line from the attacker and the vertical is `min(0.4, motion_y / 2 + 0.4)`. The walk overwrites `vel.x/z` every frame, so the horizontal
+    /// part rides in `kick` (m/s, dragged like the Java's motion; see `frame`), as an explosion's does. b1.7.3's own behaviour, no switch.
+    fn knock_player(&mut self, from: glam::Vec3) {
+        const PUSH: f32 = 0.4 * 20.0; // blocks a tick -> m/s
+        if self.vitals.dead() || self.sleep.is_some() || self.riding() || self.touch.flying {
+            return;
+        }
+        let me = self.player.pos;
+        let mut away = glam::Vec3::new(me.x - from.x, 0.0, me.z - from.z);
+        if away.length_squared() < 1e-4 {
+            let f = self.camera.forward(); // a hit from inside the body (a slime on top): shove backwards, the Java picks a random side
+            away = glam::Vec3::new(-f.x, 0.0, -f.z);
+        }
+        let away = away.normalize_or_zero();
+        // Immersive Pack (NOT b1.7.3): armor takes part of the shove (`weight::knock_scale`, the stamina's own load), and a blow that lands breaks a
+        // charge in progress, so a heavy weapon's commitment can be punished. The lift is untouched.
+        let push = if world::combat::rules::on() {
+            self.charge = 0;
+            PUSH * world::combat::weight::knock_scale(self.armor_load())
+        } else {
+            PUSH
+        };
+        self.kick = glam::Vec3::new(self.kick.x * 0.5 + away.x * push, 0.0, self.kick.z * 0.5 + away.z * push);
+        self.player.vel.y = (self.player.vel.y * 0.5 + PUSH).min(PUSH);
+        self.player.on_ground = false;
+        self.sprint.attack(); // ponytail: a shove ends the sprint, as a landed blow does
+    }
+
+    /// C4 (`GuardHandler.onShieldBlock`): a hit from `from` into the raised guard is absorbed, a point spent and a combat mark made; the last
+    /// point breaks the guard and the charge. True if blocked. ponytail: the arc is measured on the ground plane, the mod's is 3D with the pitch.
+    fn guarded(&mut self, from: glam::Vec3) -> bool {
+        let (gp, me, f) = (self.held_guard(), self.player.pos, self.camera.forward());
+        let Some(broke) = self.vitals.guard.block(gp, glam::Vec3::new(f.x, 0.0, f.z), me, glam::Vec3::new(from.x, me.y, from.z)) else { return false };
+        self.vitals.stamina.hit();
+        self.xh.event(render::combat_hud::Feedback::Guarded); // C9: the crosshair goes blue grey
+        // C7: `GuardHandler` shakes the view, a bigger one for the point that broke the guard, which also has its sound.
+        self.shake.add(if broke { world::combat::fx::Kind::GuardBreak } else { world::combat::fx::Kind::Guarded }, me);
+        if broke {
+            self.charge = 0;
+            self.cue(world::combat::profile::Profile::Sword, world::combat::sound::Kind::GuardBroken, 1.0, None);
+        }
+        true
+    }
+
+    /// C4, 20 Hz (only with the Immersive Pack ON): the guard follows its button and regenerates, the hearth and the bandage heal (`combat::mend`),
+    /// a meal runs.
+    fn survival_tick(&mut self) {
+        if !world::combat::rules::on() {
+            return;
+        }
+        let (gp, down) = (self.held_guard(), self.touch.guarding() && self.sleep.is_none() && !self.vitals.dead());
+        self.vitals.guard.sync(gp);
+        if self.vitals.guard.input(down, self.eating.is_some()) {
+            self.charge = 0; // raising the guard ends a charge (`endCharge`)
+        }
+        self.vitals.guard.tick(gp);
+        if !self.vitals.dead() {
+            let (calm, warm) = (!self.vitals.stamina.in_combat(), self.heat_at_hand());
+            let give = self.vitals.mend.tick(self.vitals.health, calm, warm);
+            self.vitals.restore(give);
+        }
+        self.eat_tick();
+    }
+
+    /// C4, 20 Hz: the meal in the mouth runs down; damage (unless guarding), another slot, no more food or a closed game cut it short.
+    fn eat_tick(&mut self) {
+        let Some(mut e) = self.eating else { return };
+        let food = self.touch.hotbar_slot == e.slot && self.inv.slots[e.slot].is_some_and(|s| items::heal_amount(s.id).is_some() || s.id == world::combat::catalog::BANDAGE);
+        let hit = self.vitals.health < e.health && !self.vitals.guard.active();
+        if !food || hit || self.vitals.dead() || self.screen.is_some() {
+            self.eating = None;
+            return;
+        }
+        e.health = self.vitals.health; // healing raises the line a hit is measured from
+        e.left -= 1;
+        if e.left > 0 {
+            self.eating = Some(e);
+        } else {
+            self.eating = None;
+            if self.inv.slots[e.slot].is_some_and(|s| s.id == world::combat::catalog::BANDAGE) {
+                self.inv.consume(e.slot);
+                self.vitals.mend.apply(self.vitals.health); // the points come one a second from `survival_tick`
+            } else if let Some(n) = self.inv.eat(e.slot) {
+                self.vitals.heal(n);
+                self.vitals.fed = world::biomelife::FED_TICKS; // NOT b1.7.3 (`biomeRules`): food for the cold
+            }
+        }
+    }
+
+    /// C5: what the held item's right button does (`Special::None` with the Immersive Pack OFF).
+    fn held_special(&self) -> world::combat::profile::Special {
+        let held = self.inv.slots[self.touch.hotbar_slot].map(|s| s.id);
+        world::combat::rules::swing(held).map_or(world::combat::profile::Special::None, |s| s.profile.special())
+    }
+
+    /// C5, 20 Hz: the right button's clocks, and a press on it. A press is taken even with the rule off, so it never waits for a later world.
+    fn special_tick(&mut self) {
+        let pressed = self.touch.take_special();
+        if !world::combat::rules::on() || self.vitals.dead() {
+            (self.sp, self.gun) = Default::default();
+            return;
+        }
+        self.sp.tick();
+        if pressed {
+            self.special_press();
+        }
+        self.lunge_tick();
+        self.gun_tick();
+    }
+
+    /// C5 (`SpecialHandler.resolve`): the sweep and the lunge spend the attack's own cooldown (4 and 8 swings) and are refused behind it or a
+    /// raised guard; the parry has a lockout of its own and does not care about the swing. The arcabuz's press is its own (`gun_press`, C8). Not ported: wear.
+    fn special_press(&mut self) {
+        use world::combat::{profile::Special, special};
+        let held_id = self.inv.slots[self.touch.hotbar_slot].map(|s| s.id);
+        let Some(s) = world::combat::rules::swing(held_id) else { return };
+        if self.screen.is_some() || self.sleep.is_some() || self.riding() {
+            return;
+        }
+        // Combat stamina: a special pays (weighted by the weapon) and a locked bar refuses it; the plain swing stays free. UNVERIFIED.
+        let pays = matches!(s.profile.special(), Special::Parry | Special::MultiHit | Special::Lunge);
+        let cost = special::stamina_of(s.profile.special(), s.profile.weight());
+        if pays && !self.vitals.stamina.can_sprint() {
+            return;
+        }
+        match s.profile.special() {
+            Special::Parry => {
+                if self.sp.parry_press() && self.vitals.stamina.spend(cost) {
+                    self.body.swing();
+                }
+            }
+            Special::MultiHit if !self.swing_blocked(held_id) => {
+                let (eye, fwd) = (self.camera.pos, self.camera.forward());
+                let wall = self.target.map_or(f32::MAX, |h| h.point.distance(eye.as_dvec3()) as f32);
+                self.vitals.stamina.spend(cost);
+                (self.swing_cd, self.charge) = (special::sweep_cost(s.interval), 0); // spent whether or not it connects
+                self.body.swing();
+                // Everything in the wider arc, the weapon's flat damage, no charge. ponytail: the knockback is `strike`'s own, not the sweep's 0.8 share.
+                let hit = self.mobs.cone_n(eye, fwd, special::sweep_reach(s.reach), wall, 0);
+                let (dmg, _) = mobs::attack(held_id);
+                // C7 (`SpecialHandler`): the sweep's sound and mark play whether or not it connects; each mob struck gets a slash and no sound of its own.
+                self.cue(s.profile, world::combat::sound::Kind::Special, 1.0, None);
+                let reach = special::sweep_reach(s.reach);
+                self.fx.slash(&world::combat::fx::sweep_points(eye, fwd, reach.dist, reach.h));
+                for &i in &hit {
+                    self.mobs.strike(i, dmg, self.player.pos);
+                    self.touch.pad.rumble_play(rfx::damage_dealt());
+                    self.hit_fx(i, s.profile, false, false, 1.0, false);
+                }
+                if !hit.is_empty() {
+                    self.vitals.stamina.hit();
+                }
+            }
+            Special::Lunge if !self.swing_blocked(held_id) && self.sp.lunge.is_none() => {
+                let f = self.camera.forward();
+                let dir = glam::Vec3::new(f.x, 0.0, f.z).normalize_or_zero();
+                if dir == glam::Vec3::ZERO {
+                    return;
+                }
+                let tier = held_id.and_then(world::combat::catalog::get).map_or(0, |(_, t)| t);
+                self.vitals.stamina.spend(cost);
+                (self.swing_cd, self.charge) = (special::lunge_cost(s.interval), 0);
+                self.body.swing();
+                self.cue(s.profile, world::combat::sound::Kind::Lunge, 1.0, None); // C7
+                let p = self.player.pos;
+                self.sp.lunge = Some(special::Lunge { dir, start: p, last: p, dist: special::lunge_distance(tier), left: special::LUNGE_WINDOW, done: Vec::new(), ticks: 0 });
+            }
+            Special::Fusee => self.gun_press(s.profile),
+            _ => {}
+        }
+    }
+
+    /// C8 (`Arcabuz.resolve`): the special button on the arcabuz lights a loaded gun's fuse or starts a reload (paid in gunpowder when it
+    /// ends). No cooldown gate: the press may be a reload, which has none.
+    fn gun_press(&mut self, profile: world::combat::profile::Profile) {
+        use world::combat::{arcabuz::Press, sound::Kind};
+        match self.gun.press(self.inv.has(world::combat::arcabuz::AMMO)) {
+            Press::Lit => {
+                self.body.swing();
+                self.cue(profile, Kind::FuseLit, 1.0, None);
+            }
+            Press::Reloading => self.cue(profile, Kind::Reload, 1.0, None),
+            Press::NoAmmo | Press::Busy => {}
+        }
+    }
+
+    /// C8, 20 Hz (`Arcabuz.tick`), while the arcabuz is in hand: the fuse burns and fires; a reload runs while the special button is down,
+    /// pays one gunpowder when it ends and spends the attack's cooldown (`AttackCooldown.consume`), or is lost when the finger lifts.
+    fn gun_tick(&mut self) {
+        use world::combat::{arcabuz::Tick, catalog, sound::Kind};
+        let held_id = self.inv.slots[self.touch.hotbar_slot].map(|s| s.id);
+        let Some(s) = world::combat::rules::swing(held_id).filter(|_| held_id == Some(catalog::ARCABUZ)) else {
+            self.gun.drop_reload();
+            return;
+        };
+        match self.gun.tick(self.touch.special_held() && self.screen.is_none(), self.inv.has(world::combat::arcabuz::AMMO)) {
+            Tick::Fire => self.gun_fire(),
+            Tick::Loaded => {
+                self.inv.take_one(world::combat::arcabuz::AMMO);
+                (self.swing_cd, self.swing_held) = (s.interval, held_id);
+                self.cue(s.profile, Kind::Loaded, 1.0, None);
+            }
+            Tick::Idle | Tick::Cancelled => {}
+        }
+    }
+
+    /// C8 (`Arcabuz.fire`): the blast. The shooter is kicked back and the view shakes; everything in the barrel's cone (6.5 blocks, 32 x 24
+    /// degrees, through walls as the mod's does not look) takes three times the melee damage, the best aimed first, ten at most, each
+    /// shoved by the gun's knockback and set alight for six seconds. A gun swapped for another item between the fuse and the bang loses the shot.
+    fn gun_fire(&mut self) {
+        use world::combat::{arcabuz, catalog, profile::Profile, sound::Kind};
+        let held_id = self.inv.slots[self.touch.hotbar_slot].map(|s| s.id);
+        let Some(s) = world::combat::rules::swing(held_id).filter(|s| s.profile == Profile::Arcabuz && held_id == Some(catalog::ARCABUZ)) else { return };
+        let (eye, look) = (self.camera.pos, self.camera.forward());
+        let (kx, kz) = arcabuz::recoil(look);
+        self.kick.x += kx * 20.0; // the explosion's push (`kick`: m/s, drag, rides on top of the walk), not `vel`, which the stick overwrites each frame
+        self.kick.z += kz * 20.0;
+        self.shake.add(world::combat::fx::Kind::Recoil, self.player.pos);
+        let found: Vec<(usize, f32, f32)> = self
+            .mobs
+            .cone_n(eye, look, s.profile.shot_reach(), f32::MAX, 0)
+            .into_iter()
+            .map(|i| {
+                let (lo, hi) = self.mobs.list[i].aabb();
+                let c = (lo + hi) * 0.5;
+                (i, arcabuz::aim_deviation(eye, look, c), c.distance_squared(eye))
+            })
+            .collect();
+        let (damage, knock, me) = (arcabuz::shot_damage(s.damage), s.profile.knockback(), self.player.pos);
+        let (mut centres, mut killed) = (Vec::new(), false);
+        for i in arcabuz::order(found) {
+            let (lo, hi) = self.mobs.list[i].aabb();
+            let away = glam::Vec3::new(self.mobs.list[i].body.pos.x - me.x, 0.0, self.mobs.list[i].body.pos.z - me.z).normalize_or_zero();
+            self.mobs.shove(i, away * knock.h * 20.0 + glam::Vec3::Y * knock.v * 20.0); // the mod's `Knockback.apply` at full push, before the hurt
+            self.mobs.shot(i, damage, me);
+            self.mobs.ignite(i, arcabuz::FIRE_TICKS);
+            killed |= self.mobs.list[i].health <= 0.0;
+            self.fx.flames((lo + hi) * 0.5, (hi - lo) * 0.5);
+            centres.push((lo + hi) * 0.5);
+        }
+        self.fx.blast(arcabuz::muzzle(eye, look), look, &centres);
+        self.cue(s.profile, Kind::Shot, 1.0, None);
+        if !centres.is_empty() {
+            self.vitals.stamina.hit();
+            self.xh.event(if killed { render::combat_hud::Feedback::Kill } else { render::combat_hud::Feedback::Hit });
+        }
+    }
+
+    /// C5, 20 Hz (`Lunge.tick`): the body is driven along the line in `frame`; here it ends (20 ticks, the distance of its tier, a wall or
+    /// anything that stops it, another item, a screen) and strikes what its cube meets on the way, once each, the nearest first.
+    fn lunge_tick(&mut self) {
+        use world::combat::{profile::Special, special};
+        let Some(mut l) = self.sp.lunge.take() else { return };
+        let held_id = self.inv.slots[self.touch.hotbar_slot].map(|s| s.id);
+        let Some(s) = world::combat::rules::swing(held_id).filter(|s| s.profile.special() == Special::Lunge) else { return };
+        let p = self.player.pos;
+        let travelled = (p.x - l.start.x).hypot(p.z - l.start.z);
+        let step = (p.x - l.last.x).hypot(p.z - l.last.z);
+        if l.left == 0 || travelled >= l.dist || (l.ticks > 0 && step < special::STILL) || self.screen.is_some() {
+            return;
+        }
+        let (lo, hi) = special::lunge_cube(p, s.reach.dist);
+        let fresh: Vec<usize> = self.mobs.in_box(lo, hi, p).into_iter().filter(|i| !l.done.contains(i)).collect();
+        let (dmg, _) = mobs::attack(held_id);
+        for (k, &i) in fresh.iter().enumerate() {
+            self.mobs.strike(i, special::lunge_damage(dmg, k), p);
+            self.touch.pad.rumble_play(rfx::damage_dealt());
+            self.hit_fx(i, s.profile, false, false, 1.0 - k as f32 * 0.06, true); // C7: each target a sixth of a tone below the last (`LungeDamage` index)
+            l.done.push(i);
+        }
+        if !fresh.is_empty() {
+            self.vitals.stamina.hit();
+        }
+        (l.last, l.left, l.ticks) = (p, l.left - 1, l.ticks + 1);
+        self.sp.lunge = Some(l);
+    }
+
+    /// C5 (`ParryHandler`): inside the shotel's window a hit does nothing and goes back to its dealer at the same strength. True when it parried.
+    /// ponytail: the dealer is the mob standing at the hit's source; an arrow is parried too (nobody to answer it).
+    fn parried(&mut self, d: i32, from: glam::Vec3) -> bool {
+        if !self.sp.parry_take() {
+            return false;
+        }
+        self.mobs.reflect(from, d as f32, self.player.pos);
+        self.vitals.stamina.hit();
+        // C7 (`ParryHandler`): the parry's sound at the attacker and a shake of the view.
+        self.cue(world::combat::profile::Profile::Sabre, world::combat::sound::Kind::Parry, 1.0, Some(from));
+        self.shake.add(world::combat::fx::Kind::Parry, from);
+        true
+    }
+
+    /// C7 (`CombatSounds.play`, NOT b1.7.3, UNVERIFIED): the cue of `kind` for `profile` (`combat::sound::of`; none is silent), at `at` or, with
+    /// `None`, at the player's ears. `scale` multiplies the pitch (the lunge's falling series).
+    fn cue(&mut self, profile: world::combat::profile::Profile, kind: world::combat::sound::Kind, scale: f32, at: Option<glam::Vec3>) {
+        use world::combat::sound;
+        let Some(c) = sound::of(profile, kind) else { return };
+        let (vol, pitch) = (if kind == sound::Kind::Charge { sound::CHARGE_VOLUME } else { 1.0 }, (c.pitch * scale).clamp(sound::MIN_PITCH, sound::MAX_PITCH));
+        match at {
+            Some(p) => self.audio.play(c.name, p, vol, pitch),
+            None => self.audio.play_here(c.name, vol, pitch),
+        }
+    }
+
+    /// C7: what a blow that landed on mob `i` shows (`CombatEngine.spawnSlash`, `onKill`): a slash at the contact point (a burst of gold specks for a
+    /// charged one), the hit's sound (`sound` false for a sweep's, which has its own), and the view's shake for a kill or a full charge. Called
+    /// after the damage, so a mob at 0 health was killed by this blow (it cannot have been in the cone before).
+    fn hit_fx(&mut self, i: usize, profile: world::combat::profile::Profile, charged: bool, full: bool, scale: f32, sound: bool) {
+        use world::combat::{fx, sound::Kind};
+        let (lo, hi) = self.mobs.list[i].aabb();
+        let (eye, look) = (self.camera.pos, self.camera.forward());
+        if charged {
+            self.fx.crit((lo + hi) * 0.5, (hi - lo) * 0.5);
+        } else {
+            self.fx.slash(&fx::slash_points(eye.clamp(lo, hi), look));
+        }
+        if sound {
+            self.cue(profile, if charged { Kind::ChargedHit } else { Kind::Hit }, scale, None);
+        }
+        let at = (lo + hi) * 0.5;
+        let killed = self.mobs.list[i].health <= 0.0;
+        if killed {
+            self.shake.add(fx::Kind::Kill, at);
+        }
+        self.xh.event(if killed { render::combat_hud::Feedback::Kill } else { render::combat_hud::Feedback::Hit }); // C9: the crosshair grows, shakes and reddens
+        if full {
+            self.shake.add(fx::Kind::ChargedHit, at);
+        }
+    }
+
+    /// Hotbar change (`swing_held` differs from `held_id`): the cooldown still owed by the weapon put away is written to the ledger under its id and the
+    /// one taken up gets its own debt back (0 if it owes none), so swapping never pays off a lunge or a sweep; only time does. A short draw lock
+    /// (`weight::draw_ticks`: 6 x the weapon's weight, at most its own interval) keeps a swap-and-swing from landing in the same frame. NOT b1.7.3, UNVERIFIED.
+    fn switch_weapon(&mut self, held_id: Option<u16>) {
+        if self.swing_held == held_id {
+            return;
+        }
+        let (old, owed) = (self.swing_held, self.swing_cd);
+        self.swing_debt.retain(|d| d.0 != old && d.0 != held_id);
+        if owed > 0 && old.is_some() {
+            self.swing_debt.push((old, owed)); // ponytail: the bare hand (None) owes at most its 4 ticks, not worth an entry
+        }
+        let back = self.swing_debt_of(held_id);
+        let draw = world::combat::rules::swing(held_id).map_or(0, |s| world::combat::weight::draw_ticks(s.profile.weight(), s.interval)); // heavy weapons are slower to draw
+        (self.swing_held, self.swing_cd) = (held_id, back.max(draw));
+    }
+
+    fn swing_debt_of(&self, id: Option<u16>) -> u32 {
+        self.swing_debt.iter().find(|d| d.0 == id).map_or(0, |d| d.1)
+    }
+
+    /// C3 / C4 request: while a charge builds, the hand repeats the hotbar switch (the weapon rises slowly from low), one rise per cooldown of
+    /// the weapon; at a full charge it stays raised. During the cooldown that comes first (the charge cannot build yet) the same rise follows
+    /// the cooldown itself, so a hold never looks idle. `None` when nothing is charging.
+    fn charge_phase(&self, partial: f32) -> Option<f32> {
+        let s = world::combat::rules::swing(self.inv.slots[self.touch.hotbar_slot].map(|s| s.id))?;
+        let full = s.profile.charge().ticks;
+        if full == 0 || s.interval == 0 {
+            return None;
+        }
+        let i = s.interval as f32;
+        if self.cd_rise && self.swing_cd > 0 {
+            return Some(1.0 - ((self.swing_cd as f32 - partial).max(0.0) / i).min(1.0));
+        }
+        if self.charge == 0 {
+            return None;
+        }
+        if self.charge >= full {
+            return Some(1.0);
+        }
+        Some(((self.charge as f32 - 1.0 + partial).max(0.0) % i) / i)
+    }
+
+    /// C3, 20 Hz: a finger (or the pad's attack) held still on a mob in the cone of a weapon that can charge builds `charge` up to the profile's
+    /// full hold, once the cooldown is over. Changing item starts everything over, as in the swing code (`resetOnItemChange`).
+    fn charge_tick(&mut self) {
+        let (eye, fwd, slot) = (self.camera.pos, self.camera.forward(), self.touch.hotbar_slot);
+        let held_id = self.inv.slots[slot].map(|s| s.id);
+        if self.swing_held != held_id {
+            self.charge = 0;
+            self.switch_weapon(held_id);
+        }
+        let swung = world::combat::rules::swing(held_id);
+        let full = swung.map_or(0, |s| s.profile.charge().ticks);
+        let overlap = swung.is_some_and(|s| s.profile == world::combat::profile::Profile::Axe); // the axe's hold counts from the start of its cooldown
+        let cooling = self.swing_cd > 0 && !self.guard_blocks(held_id); // only the cooldown holds it back, not a guard
+        self.cd_rise = false;
+        if full == 0 || (self.swing_blocked(held_id) && !cooling) || self.screen.is_some() || !self.touch.resting() {
+            return; // `charge_release` clears it once the finger is up or dragging
+        }
+        let wall = self.target.map_or(f32::MAX, |h| h.point.distance(eye.as_dvec3()) as f32);
+        if self.melee_target(held_id, eye, fwd, wall).0.is_some() {
+            if cooling {
+                self.cd_rise = true; // until the cooldown ends the hand rises with it
+            }
+            if !cooling || overlap {
+                // Heavy weapons (the axe) charge while they cool, so waiting out the cooldown and waiting for the charge is one commitment, not two.
+                self.charge = (self.charge + 1).min(full);
+                if self.charge == world::combat::profile::MIN_CHARGE_HOLD {
+                    if let Some(s) = world::combat::rules::swing(held_id) {
+                        self.cue(s.profile, world::combat::sound::Kind::Charge, 1.0, None); // C7 (`SwingInputHandler`: once the hold passes the minimum)
+                    }
+                }
+            }
+        }
+    }
+
+    /// C3: the multiplier of the blow a release now delivers (`rules::charged`), and the end of the charge once the finger is not holding
+    /// still any more (up, or dragging: a drag cancels).
+    fn charge_release(&mut self, release: bool) -> Option<f32> {
+        let held = self.charge;
+        if !self.touch.resting() {
+            self.charge = 0;
+        }
+        let (eye, fwd) = (self.camera.pos, self.camera.forward());
+        let held_id = self.inv.slots[self.touch.hotbar_slot].map(|s| s.id);
+        let wall = self.target.map_or(f32::MAX, |h| h.point.distance(eye.as_dvec3()) as f32);
+        // A release with nothing in reach is no blow: it must not fall through to placing a block or using the item.
+        let hit = release && !self.swing_blocked(held_id) && self.melee_target(held_id, eye, fwd, wall).0.is_some();
+        let s = world::combat::rules::swing(held_id).filter(|_| hit)?;
+        let m = world::combat::rules::charged(s.profile, held)?;
+        // Combat stamina: a charged blow pays by its ratio and weight; a locked bar leaves the plain blow (free). UNVERIFIED.
+        let ratio = world::combat::profile::charge_ratio(held, s.profile.charge().ticks);
+        self.vitals.stamina.spend(world::combat::special::stamina_charge(s.profile.weight(), ratio)).then_some(m)
+    }
+
+    /// One 20 Hz tick of sprinting (`ClientPlayerEntityMixin.tickSprintingMovement`) and its dust (`EntityMixin.addParticles`: a speck of the
+    /// block below the feet while sprinting out of the water). The forward input is the d-pad's / the stick's, sneaking already x0.3.
+    fn sprint_tick(&mut self) {
+        self.swing_cd = self.swing_cd.saturating_sub(1); // Cortes Combat's attack cooldown (C2), 20 Hz
+        self.swing_debt.iter_mut().for_each(|d| d.1 = d.1.saturating_sub(1)); // the weapons put away keep paying in the background
+        self.swing_debt.retain(|d| d.1 > 0);
+        self.shake.tick(); // C7: the camera impulses' clock
+        self.crosshair_tick();
+        self.charge_tick();
+        self.survival_tick();
+        self.special_tick();
+        let (asleep, riding) = (self.sleep.is_some(), self.riding());
+        let fwd = if asleep || riding { 0.0 } else { self.touch.move_input.0 * if self.touch.sneak { 0.3 } else { 1.0 } };
+        self.sprint.tick(sprint::In {
+            fwd,
+            key: self.touch.pad_sprint,
+            ground: self.player.on_ground,
+            blocked: std::mem::take(&mut self.sprint_blocked),
+            water: self.was_in_water,
+            can: !asleep && !riding && !self.vitals.dead() && self.vitals.stamina.can_sprint(), // an empty bar locks the sprint (Stamina)
+        });
+        // Stamina (`StaminaFeature.onPlayerTick`): a sprint consumes, anything else regenerates. The debug Fly button stands in for creative (no cost).
+        let air = self.air();
+        self.vitals.fed = self.vitals.fed.saturating_sub(1);
+        // Catch breath: still +0.5, on a boat or minecart +0.5, a fire at hand +0.3, at most +1.0 (NOT Stamina's; sneaking is not still enough on its own).
+        let still = self.player.vel.x.hypot(self.player.vel.z) < 0.1 && !self.sprint.on();
+        self.vitals.stamina.rest = (if still { 0.5_f32 } else { 0.0 } + if riding { 0.5 } else { 0.0 } + if self.heat_at_hand() { 0.3 } else { 0.0 }).min(1.0);
+        self.vitals.stamina.terrain = self.terrain_cost();
+        self.vitals.stamina.tick_in(self.sprint.on() && !self.touch.flying, self.vitals.health, self.armor_load(), air);
+        if self.sprint.on() && !self.was_in_water {
+            let (p, v) = (self.player.pos, self.player.vel / 20.0);
+            let (x, y, z) = (p.x.floor() as i32, (p.y - 0.9 - 0.2).floor() as i32, p.z.floor() as i32); // 0.2 under the feet
+            if let Some(id) = self.chunks.block(x, y, z).filter(|&b| b > 0 && !matches!(b, 8..=11)) {
+                let tile = atlas::particle_tile(id, self.chunks.meta(x, y, z));
+                self.fx.sprint_dust(glam::Vec3::new(p.x, p.y - 0.9, p.z), v, tile);
+            }
+        }
+    }
+
+    /// Vibration (`input/rumble_fx.rs`: Controlify's `RumbleManager` and the mixins that feed it). What goes on now keeps its effect alive (a meal, a
+    /// raised guard, a fish on the line, a walk through soul sand); the one-shot effects are played where they happen (`watch_health`, `explode`, the dig,
+    /// the hits...). Then the 20 Hz tick. Silent while the game menu is up outside its options page (`isPaused && !isConfigScreen`) and, in the pad,
+    /// while the keyboard or mouse is in use. NOT ported: a pad's `outOfFocus` (the app's loop does not run in the background anyway).
+    fn rumble_step(&mut self, real_dt: f32) {
+        let in_options = self.pause.as_ref().is_some_and(Pause::in_options) || self.menu.as_ref().is_some_and(|m| m.scr == crate::menu::Scr::Options);
+        let silent = self.touch.paused && !in_options;
+        // Which screen is open, for `finishOnScreenChange` (the Test Vibration ends when it changes).
+        let key = self.touch.paused as u16 | (self.screen.is_some() as u16) << 1 | (in_options as u16) << 2 | self.menu.as_ref().map_or(0, |m| (m.scr as u16 + 1) << 3);
+        let eating = self.eating.is_some() && !self.vitals.dead();
+        let guard = world::combat::rules::on() && self.vitals.guard.active();
+        let bite = self.hook.as_ref().is_some_and(|h| h.bite());
+        // `slowblock/LocalPlayerMixin`: moving through something that slows. b1.7.3's only such block is soul sand (`BlockSoulSand`; the web has its own rule).
+        let sand = {
+            let get = |x: i32, y: i32, z: i32| self.chunks.block(x, y, z);
+            physics::touching(self.player.pos, physics::HALF, &get, 88)
+        };
+        let (f, sd) = self.touch.move_input;
+        let amount = (f * f + sd * sd).sqrt() * if self.touch.sneak { 0.3 } else { 1.0 };
+        let slow = (sand && amount > 0.0 && self.sleep.is_none() && !self.riding()).then_some(amount);
+        if std::mem::take(&mut self.opts.pad.test_vibration) {
+            self.touch.pad.rumble_test();
+        }
+        let pad = &mut self.touch.pad;
+        pad.rumble_screen(key);
+        pad.rumble_eating(eating);
+        pad.rumble_guard(guard);
+        pad.rumble_bite(bite);
+        pad.rumble_slow(slow);
+        pad.rumble_frame(real_dt, &self.opts.pad, silent);
+    }
+
+    /// `Minecraft.clickMouse` -> `sendUseItem`: a tap that neither placed a block nor opened a screen uses the held item;
+    /// food is eaten, aimed at a block or not.
+    /// `Explosion` at `at`: the rays pick the cells (`Mobs::explode`), a broken block drops with chance 0.3 (vanilla: per item),
+    /// the player takes `(impact^2 + impact) / 2 x 8 x power + 1` (no exposure test, no knockback).
+    /// One 20 Hz tick of `world::effects`: thunderstorm rolls and what a bolt hits, particles, spawners.
+    fn tick_effects(&mut self, centre: (i32, i32)) {
+        // `World.tick`: in a thunderstorm (`func_27161_C` rain > 0.2 and `func_27160_B` thunder > 0.9) each chunk near the player
+        // rolls 1 in 100000 for a bolt on a column that is rained on (`canBlockBeRainedOn`: open to the sky, in a biome with rain).
+        if self.weather.rain(1.0) > 0.2 && self.weather.thunder(1.0) > 0.9 {
+            for (x, z) in self.fx.storm(centre) {
+                let y = self.chunks.top_solid(x, z);
+                if y >= 0 && self.chunks.biomes(x, z, 1, 1)[0].rains() {
+                    let at = glam::Vec3::new(x as f32, y as f32, z as f32);
+                    self.fx.strike(at);
+                    self.fx.clap(at, self.camera.pos);
+                    // `explosion/LightningBoltMixin`: every bolt the client sees, at full strength whatever the distance (the thunder is what is late).
+                    self.touch.pad.rumble_play(rfx::lightning());
+                }
+            }
+        }
+        let get = |x: i32, y: i32, z: i32| self.chunks.block(x, y, z);
+        self.fx.river_life(self.player.pos, &get);
+        for b in self.fx.tick(&get) {
+            // `Entity.onStruckByLightning` for everything in the bolt's box.
+            if effects::struck(b, self.player.pos, glam::Vec3::new(0.3, 0.9, 0.3)) {
+                self.vitals.lightning();
+            }
+            for m in self.mobs.list.iter_mut().filter(|m| effects::struck(b, m.body.pos, m.half)) {
+                m.damage(5.0, b, &mut self.mobs.rng); // ponytail: through `damage`, so it also knocks back; no burning
+            }
+        }
+        // The rain you hear: a patter clip every few ticks where it rains (not snow, not in the Nether), dull under a roof, none deep down.
+        let (px, pz) = (self.player.pos.x.floor() as i32, self.player.pos.z.floor() as i32);
+        let roof = self.chunks.top_solid(px, pz) as f32 - self.camera.pos.y;
+        if !self.nether && self.weather.rain(1.0) > 0.2 {
+            if let Some((vol, pitch)) = self.fx.patter(self.weather.rain(1.0), roof) {
+                if self.chunks.biomes(px, pz, 1, 1)[0].rains() {
+                    self.audio.play_here("ambient.weather.rain", vol, pitch);
+                }
+            }
+        }
+        // `EntityLightningBolt`: thunder (pitch 0.8 + 0.2 r) and, for a near bolt, a crack (`random.explode`, 0.5 + 0.2 r). Vanilla plays the
+        // thunder at volume 10000, the same loudness everywhere; 12 dies out over about 190 blocks, so a far storm is a quiet rumble.
+        // Through a roof it is quieter and lower (`effects::muffle`).
+        let m = effects::muffle(roof);
+        for c in self.fx.heard() {
+            let r = self.mobs.rng.next_float();
+            self.audio.play_gain("ambient.weather.thunder", c.at, 12.0, (0.8 + r * 0.2) * (0.7 + 0.3 * m), m);
+            if c.dist < 40.0 {
+                self.audio.play_gain("random.explode", c.at, 2.0, (0.5 + r * 0.2) * (0.7 + 0.3 * m), m);
+            }
+        }
+        // Spawners see the same world as the mobs do (plants read as air).
+        let get = |x: i32, y: i32, z: i32| self.chunks.block(x, y, z).map(|b| if is_plant(b) { 0 } else { self.chunks.physics_at(x, y, z, b) });
+        let light = |x: i32, y: i32, z: i32| self.chunks.light(x, y, z);
+        let biome = |x: i32, z: i32| self.chunks.biome_at(x, z);
+        let ctx = Ctx { get: &get, light: &light, day: false, player: self.player.pos, eye: self.camera.pos, biome: &biome, sight: 1.0 };
+        let chunks = &self.chunks;
+        self.fx.tick_spawners(&mut self.mobs, &ctx, &|(x, _, z)| chunks.block_loaded(x, 0, z).is_some());
+    }
+
+    /// A minecart that took its last hit: removed, its drops and what its chest held on the ground.
+    fn smash_cart(&mut self, ci: usize) {
+        let c = self.carts.list.remove(ci);
+        let cell = (c.pos.x.floor() as i32, c.pos.y.floor() as i32, c.pos.z.floor() as i32);
+        c.drops().into_iter().for_each(|s| self.drops.spawn_stack(s, cell));
+        self.chests.remove(&c.key()).into_iter().flatten().flatten().for_each(|s| self.drops.scatter(s, cell));
+    }
+
+    /// The look drag (and the right stick) by `d` radians: on foot it turns the view; in a boat only the head turns, up to 90 degrees to
+    /// either side of the bow, and past that the view stays where it is.
+    fn turn_head(&mut self, d: f32) {
+        if self.boats.ridden().is_some() {
+            self.boat_head = (self.boat_head + d).clamp(-std::f32::consts::FRAC_PI_2, std::f32::consts::FRAC_PI_2);
+        } else {
+            self.camera.add_yaw(d);
+        }
+    }
+
+    /// A punch at a boat with what is in the hand (`attackEntityFrom`: damage x 10, over 40 breaks it); the tool wears.
+    fn punch_boat(&mut self, bi: usize, slot: usize) {
+        let (dmg, wear) = mobs::attack(self.inv.slots[slot].map(|s| s.id));
+        self.body.swing();
+        if self.boats.list[bi].hurt(dmg as i32) {
+            self.smash_boat(bi);
+        }
+        if wear > 0 {
+            self.inv.damage(slot, wear);
+        }
+    }
+
+    /// A boat that took its last hit: removed, 3 planks and 2 sticks dropped.
+    fn smash_boat(&mut self, bi: usize) {
+        let b = self.boats.list.remove(bi);
+        let cell = (b.pos.x.floor() as i32, b.pos.y.floor() as i32, b.pos.z.floor() as i32);
+        self.drops.spawn_stack(ItemStack { id: boat::PLANKS, count: 3, damage: 0 }, cell);
+        self.drops.spawn_stack(ItemStack { id: boat::STICK, count: 2, damage: 0 }, cell);
+    }
+
+    /// `Explosion`; `flame` is `isFlaming` (a ghast's fireball): afterwards, in each destroyed cell that is now air over an opaque block, fire 1 time in 3.
+    fn explode(&mut self, at: glam::Vec3, power: f32, flame: bool) {
+        // `explosion/ClientPacketListenerMixin.onClientExplosion`: from the distance of the player's feet to the centre and the blast's radius.
+        if let Some(e) = rfx::explosion(at.distance(self.player.pos), power) {
+            self.touch.pad.rumble_play(e);
+        }
+        self.audio.cry("random.explode", at, 4.0, 0.7, true); // `Explosion`: volume 4, pitch `(1 + (r - r) * 0.2) * 0.7`
+        // The fireball's (`flame`) is the one with no exploder entity: no `knockBack`, only the push.
+        let cells = self.mobs.explode(&|x: i32, y: i32, z: i32| self.chunks.block(x, y, z), at, power, !flame);
+        // What the blast does to the boats, the carts and the player is worked out here, with the blocks still standing: `Explosion.doExplosionA` reads
+        // the exposure through them before `doExplosionB` takes the cells away. (Boats and carts: `vel` is blocks a tick, and `hurt` takes 10 a point.)
+        let get = |x: i32, y: i32, z: i32| self.chunks.block(x, y, z);
+        let hit = |pos: glam::Vec3, half: glam::Vec3| mobs::blast(&get, at, power, pos, pos - half, pos + half);
+        let boats: Vec<_> = self.boats.list.iter().map(|b| hit(b.pos, boat::HALF)).collect();
+        let carts: Vec<_> = self.carts.list.iter().map(|c| hit(c.pos, minecart::HALF)).collect();
+        // The player's `posY` is its eye (`yOffset` 1.62), which is what the distance and the push run from; the box is what the exposure looks at.
+        let me = mobs::blast(&get, at, power, self.player.pos + glam::Vec3::Y * EYE_HEIGHT, self.player.pos - physics::HALF, self.player.pos + physics::HALF);
+        // The rest of `doExplosionA`'s entity pass, over what exists NOW (the drops the blocks are about to leave and the TNT they chain are made in
+        // `doExplosionB`, after it, so they are not touched): a dropped item takes the damage off its 5 health and is thrown, a lit TNT, a falling
+        // block, an arrow and a thrown snowball or egg are thrown (`motion += direction x impact`; `blast` gives m/s, the motion is blocks a tick).
+        let mut gone = Vec::new();
+        for (i, it) in self.drops.items.iter_mut().enumerate() {
+            if let Some((dmg, push)) = hit(it.pos, glam::Vec3::splat(0.125)) {
+                if it.blast(push / 20.0, dmg) {
+                    gone.push(i);
+                }
+            }
+        }
+        for i in gone.into_iter().rev() {
+            self.drops.items.remove(i);
+        }
+        for f in self.ticks.falling.iter_mut().filter(|f| f.mv.is_none()) {
+            if let Some((_, push)) = hit(f.pos, glam::Vec3::splat(0.49)) {
+                f.shove(push / 20.0);
+            }
+        }
+        for a in self.mobs.arrows.iter_mut() {
+            if let Some((_, push)) = hit(a.pos, glam::Vec3::splat(0.25)) {
+                a.shove(push / 20.0);
+            }
+        }
+        // `EntityPainting.attackEntityFrom`: any hit takes it off the wall, whatever the damage: the distance from its middle to the blast, over the
+        // doubled size, is at most 1 (the box test in `doExplosionA` is met by the middle being that close). Its item is made after the pass above.
+        let size = power * 2.0;
+        let hung: Vec<usize> = self.paintings.iter().enumerate().filter(|(_, p)| (p.frame().0 - at).length() / size <= 1.0).map(|(i, _)| i).collect();
+        for i in hung.into_iter().rev() {
+            self.break_painting(i);
+        }
+        let cells_fire = if flame { cells.clone() } else { Vec::new() };
+        for (x, y, z) in cells {
+            let Some(id) = self.chunks.block_loaded(x, y, z).filter(|&b| b > 0) else { continue };
+            let meta = self.chunks.meta(x, y, z);
+            if id == 46 {
+                self.ticks.prime((x, y, z), true); // `BlockTNT.onBlockDestroyedByExplosion`: a chain, no drop
+            } else if self.mobs.rng.next_float() < 0.3 {
+                self.drops.spawn_block(id, meta, (x, y, z));
+            }
+            self.chunks.set_block(x, y, z, 0);
+        }
+        if flame {
+            for &(x, y, z) in cells_fire.iter().rev() {
+                let below = self.chunks.block_loaded(x, y - 1, z).unwrap_or(0);
+                if self.chunks.block_loaded(x, y, z) == Some(0) && world::chunk::opaque(below) && self.mobs.rng.next_int_bound(3) == 0 {
+                    self.chunks.set_block(x, y, z, 51);
+                }
+            }
+        }
+        for (i, h) in boats.into_iter().enumerate().rev() {
+            if let Some((dmg, push)) = h {
+                self.boats.list[i].vel += push / 20.0;
+                if self.boats.list[i].hurt(dmg) {
+                    self.smash_boat(i);
+                }
+            }
+        }
+        for (i, h) in carts.into_iter().enumerate().rev() {
+            if let Some((dmg, push)) = h {
+                self.carts.list[i].vel += push / 20.0;
+                if self.carts.list[i].hurt(dmg) {
+                    self.smash_cart(i);
+                }
+            }
+        }
+        // `Explosion.doExplosionA`: `attackEntityFrom` with the damage, and `motion += direction x impact`. The walk overwrites the horizontal velocity
+        // every frame, so the horizontal push is carried in `kick` (see `frame`); the vertical one is the velocity's own.
+        if let Some((dmg, push)) = me {
+            self.vitals.hurt(dmg);
+            self.kick += glam::Vec3::new(push.x, 0.0, push.z);
+            self.player.vel.y += push.y;
+        }
+    }
+
+    /// `EntityFireball.onUpdate`'s `attackEntityFrom(owner, 0)` on what it ran into (`Ev::Strike`): a boat or a cart rocks (`hurt(0)`: its own wobble,
+    /// apart from the blast's that follows, and no damage), a painting comes off the wall. The indices are of the lists as they were when `Mobs::targets`
+    /// was filled, so this runs before any blast changes them.
+    fn struck(&mut self, evs: &[Ev]) {
+        let mut paintings = Vec::new();
+        for e in evs {
+            match *e {
+                Ev::Strike(Strike::Boat(i)) => drop(self.boats.list[i].hurt(0)), // damage + 0 cannot cross the 40 that breaks it
+                Ev::Strike(Strike::Cart(i)) => drop(self.carts.list[i].hurt(0)),
+                Ev::Strike(Strike::Painting(i)) => paintings.push(i),
+                _ => {} // a lit TNT or a falling block: `Entity.attackEntityFrom` only marks it hit
+            }
+        }
+        paintings.sort_unstable();
+        paintings.dedup();
+        for i in paintings.into_iter().rev() {
+            self.break_painting(i);
+        }
+    }
+
+    /// `EntityPainting.attackEntityFrom`: it comes off the wall and drops as an item.
+    fn break_painting(&mut self, i: usize) {
+        let c = self.paintings.remove(i).frame().0;
+        self.drops.scatter(ItemStack { id: decor::PAINTING, count: 1, damage: 0 }, (c.x.floor() as i32, c.y.floor() as i32, c.z.floor() as i32));
+    }
+
+    /// `World.isDaytime`: the sky-light subtraction is under 4.
+    fn daytime(&self) -> bool {
+        let angle = sky::celestial_angle(self.world_ticks as u64, 1.0);
+        sky::skylight_subtracted(angle, self.weather.rain(1.0), self.weather.thunder(1.0)) < 4
+    }
+
+    /// `EntityPlayer.func_25060_a`: the bed's free cell, else the world spawn (feet 0.1 above the cell; `pos` is the box centre).
+    /// `Minecraft.respawn`: a bed that is gone, or has no free cell beside it, says `tile.bed.notValid` and is forgotten (the new player
+    /// has no spawn coordinate). The bed's chunks are made first (`func_25060_a`'s four `prepareChunk`s; `preload` takes the 4 x 4 round it, which
+    /// holds the 3 blocks the Java reaches), so a bed far from where the player died, or one in the overworld after a death in the Nether (whose
+    /// manager is new and empty), still counts. UNVERIFIED: the text is from memory of b1.7.3's `en_US.lang`, which is not in the decompiled tree.
+    /// ponytail: `preload` runs on the render thread (once per death).
+    fn respawn_pos(&mut self) -> glam::Vec3 {
+        if let Some((x, _, z)) = self.bed_spawn {
+            self.chunks.preload(chunk_coord(x as f32), chunk_coord(z as f32));
+        }
+        let get = |a, b, c| self.chunks.block_loaded(a, b, c).unwrap_or(0);
+        let cell = self.bed_spawn.filter(|&(x, y, z)| get(x, y, z) == 26).and_then(|b| pick::wake_cell(&get, b, self.chunks.meta(b.0, b.1, b.2), 0));
+        if cell.is_none() && self.bed_spawn.is_some() {
+            (self.hint, self.hint_msg, self.bed_spawn) = (2.5, "Your home bed was missing or obstructed", None);
+        }
+        cell.map_or(self.spawn, |(x, y, z)| glam::Vec3::new(x as f32 + 0.5, y as f32 + 1.0, z as f32 + 0.5))
+    }
+
+    /// `BlockBed.blockActivated` + `EntityPlayer.sleepInBedAt` (the OK status: at night, within 3 / 2 / 3 blocks; by day NOT_POSSIBLE_NOW says so).
+    /// b1.7.3 has no other message: `TOO_FAR_AWAY` returns silently (`BlockBed` only answers `NOT_POSSIBLE_NOW`), `tile.bed.occupied` needs a second
+    /// player and there is no "monsters nearby" check (Beta 1.8 added it) and, since the fix of 2026-11-02, no monster comes at the end of the sleep either.
+    fn use_bed(&mut self, (mut x, y, mut z): (i32, i32, i32)) {
+        let mut m = self.chunks.meta(x, y, z);
+        if m & 8 == 0 {
+            let (dx, dz) = pick::BED_DIR[(m & 3) as usize];
+            (x, z) = (x + dx, z + dz);
+            if self.chunks.block_loaded(x, y, z) != Some(26) {
+                return;
+            }
+            m = self.chunks.meta(x, y, z);
+        }
+        // `BlockBed.blockActivated`: where `canRespawnHere` is false (the Nether) the bed blows up instead of letting anyone sleep: the tapped half goes,
+        // then the cell one further along `headBlockToFootBlockMap` if it is a bed too, and a power 5 fiery blast at the middle of THAT cell (the
+        // Java moves x / z before the blast; the averaged point it works out is never used). Dead or alive, whatever the hour.
+        if self.nether {
+            let (dx, dz) = pick::BED_DIR[(m & 3) as usize];
+            self.chunks.set_block(x, y, z, 0);
+            if self.chunks.block_loaded(x + dx, y, z + dz) == Some(26) {
+                self.chunks.set_block(x + dx, y, z + dz, 0);
+            }
+            self.explode(glam::Vec3::new((x + dx) as f32 + 0.5, y as f32 + 0.5, (z + dz) as f32 + 0.5), 5.0, true);
+            return;
+        }
+        let eye = self.player.pos + glam::Vec3::new(0.0, EYE_HEIGHT, 0.0);
+        let near = (eye.x - x as f32).abs() <= 3.0 && (eye.y - y as f32).abs() <= 2.0 && (eye.z - z as f32).abs() <= 3.0;
+        if self.sleep.is_none() && !self.vitals.dead() && self.daytime() {
+            (self.hint, self.hint_msg) = (2.5, "You can only sleep at night");
+        }
+        if self.sleep.is_some() || self.vitals.dead() || self.daytime() || !near {
+            return;
+        }
+        let d = m & 3;
+        let (px, pz) = (if d == 1 { 0.1 } else if d == 3 { 0.9 } else { 0.5 }, if d == 0 { 0.9 } else if d == 2 { 0.1 } else { 0.5 });
+        self.player.pos = glam::Vec3::new(x as f32 + px, y as f32 + 15.0 / 16.0 - EYE_HEIGHT, z as f32 + pz);
+        self.player.vel = glam::Vec3::ZERO;
+        // `EntityRenderer.orientCamera` asleep: the turns by yaw and pitch cancel and what is left is `glRotatef(meta & 3 * 90, 0, 1, 0)`, which looks
+        // along `(sin a, 0, -cos a)`: from the pillow toward the foot of the bed, level. That is our yaw `a` itself. (The earlier port used
+        // `getBedOrientationInDegrees`, which is the BODY's turn in `RenderPlayer` and a different table.) UNVERIFIED on a device.
+        self.sleep_view = Some((self.camera.yaw, self.camera.pitch));
+        self.camera.yaw = (d as f32 * 90.0).to_radians();
+        self.camera.pitch = 0.0;
+        self.chunks.set_block_meta(x, y, z, 26, m | 4);
+        self.sleep = Some((x, y, z, 0));
+    }
+
+    /// `EntityPlayer.wakeUpPlayer`: the bed is free again and the player stands beside it (`set_spawn` = the bed becomes the
+    /// respawn point).
+    fn wake(&mut self, set_spawn: bool) {
+        let Some((x, y, z, _)) = self.sleep.take() else { return };
+        if let Some((yaw, pitch)) = self.sleep_view.take() {
+            (self.camera.yaw, self.camera.pitch) = (yaw, pitch);
+        }
+        let get = |a, b, c| self.chunks.block_loaded(a, b, c).unwrap_or(0);
+        let m = self.chunks.meta(x, y, z);
+        let cell = pick::wake_cell(&get, (x, y, z), m, 0).unwrap_or((x, y + 1, z));
+        if get(x, y, z) == 26 {
+            self.chunks.set_block_meta(x, y, z, 26, m & !4);
+        }
+        self.player.pos = glam::Vec3::new(cell.0 as f32 + 0.5, cell.1 as f32 + 1.0, cell.2 as f32 + 0.5);
+        if set_spawn {
+            self.bed_spawn = Some((x, y, z));
+        }
+    }
+
+    /// One 20 Hz tick of sleeping: fully asleep (100 ticks) the night is skipped and everyone wakes at the next morning (no weather runs
+    /// during the skip); a bed that is gone or day wakes the player earlier (`EntityPlayer.onUpdate`).
+    /// NOT b1.7.3: no monster is spawned beside the sleeper (`World.tick` -> `SpawnerAnimals.performSleepSpawning`, `Mobs::sleep_spawn`, is
+    /// deliberately not called: it was reported as a bug). ponytail: `Mobs::sleep_spawn` and its test stay for a future switch.
+    fn sleep_tick(&mut self, sky_sub: u8) {
+        let Some((x, y, z, t)) = self.sleep else { return };
+        if t >= 100 {
+            let next = self.world_ticks as u64 + 24000;
+            self.world_ticks = (next - next % 24000) as f64;
+            self.weather_ticks = self.world_ticks as u64;
+            if world::combat::rules::on() {
+                self.vitals.restore(vitals::MAX_HEALTH); // NOT b1.7.3 (`combat::mend`): a night's sleep heals everything
+            }
+            self.wake(true);
+        } else if self.chunks.block_loaded(x, y, z) != Some(26) {
+            self.wake(false);
+        } else if sky_sub < 4 {
+            self.wake(true);
+        } else {
+            self.sleep = Some((x, y, z, t + 1));
+        }
+    }
+
+    /// `BlockDoor.blockActivated` for a wooden door: the lower half's open bit flips, and the upper half follows.
+    fn toggle_door(&mut self, (x, y, z): (i32, i32, i32)) {
+        let y = if self.chunks.meta(x, y, z) & 8 != 0 { y - 1 } else { y };
+        if self.chunks.block_loaded(x, y, z) == Some(64) {
+            let m = self.chunks.meta(x, y, z);
+            if self.chunks.block_loaded(x, y + 1, z) == Some(64) {
+                self.chunks.set_block_meta(x, y + 1, z, 64, (m ^ 4) + 8);
+            }
+            self.chunks.set_block_meta(x, y, z, 64, m ^ 4);
+            self.audio.door(glam::Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5)); // aux effect 1003 (silent: no such asset in b1.7.3)
+        }
+    }
+
+    /// `ItemStack.useItemRightClick` for what is held and not placed: bow, rod, bucket, else food.
+    fn use_held(&mut self) {
+        let slot = self.touch.hotbar_slot;
+        let Some(held) = self.inv.slots[slot] else { return };
+        let (eye, fwd) = (self.camera.pos, self.camera.forward());
+        match held.id {
+            // `ItemBow`: uses one arrow from the inventory and shoots it at once (no draw time in b1.7.3).
+            gear::BOW => {
+                if self.inv.take_one(gear::ARROW) {
+                    let v = gear::arrow_velocity(fwd, &mut self.mobs.rng);
+                    self.mobs.shoot(eye + fwd * 0.5, v, 0);
+                    // `ItemBow`: "random.bow" at 1.0, pitch `1 / (r * 0.4 + 0.8)` (NOT in the b1.7.3 index, see `assets/sound/extra`).
+                    let pitch = 1.0 / (self.audio.rnd() * 0.4 + 0.8);
+                    self.audio.play_here("random.bow", 1.0, pitch);
+                }
+            }
+            // `ItemSnowball` / `ItemEgg`: one is used up and thrown along the look direction (same heading as an arrow).
+            gear::SNOWBALL | gear::EGG => {
+                self.inv.consume(slot);
+                let v = gear::arrow_velocity(fwd, &mut self.mobs.rng);
+                self.mobs.shoot(eye - glam::Vec3::Y * 0.1, v, held.id);
+            }
+            // `ItemFishingRod`: reel in what is out (a bite gives a raw fish), else cast.
+            gear::ROD => match self.hook.take() {
+                Some(h) => {
+                    let (fish, wear) = h.catch(self.player.pos);
+                    if let Some((s, v)) = fish {
+                        self.drops.throw_from(s, h.pos, v);
+                        self.stats.add(world::stats::FISH, 1);
+                    }
+                    self.inv.damage(slot, wear);
+                }
+                None => {
+                    self.hook = Some(Hook::cast(eye, fwd, &mut self.mobs.rng));
+                    // `ItemFishingRod`: "random.bow" (NOT in the b1.7.3 index, see `assets/sound/extra`) at 0.5, pitch `0.4 / (r * 0.4 + 0.8)`.
+                    let pitch = 0.4 / (self.audio.rnd() * 0.4 + 0.8);
+                    self.audio.play_here("random.bow", 0.5, pitch);
+                }
+            },
+            gear::BUCKET | gear::WATER_BUCKET | gear::LAVA_BUCKET => self.use_bucket(slot, held.id),
+            gear::BOAT => self.use_boat(slot),
+            _ => self.eat(),
+        }
+    }
+
+    /// `ItemBucket.onItemRightClick`: a 5 block ray; an empty bucket also hits liquids and takes a source, a full one
+    /// pours into the cell beside the face it hit (air or a non-solid block).
+    /// `ItemBoat.onItemUse`: the ray reaches 5 blocks and stops at water; the boat is set on top of the cell it hit.
+    fn use_boat(&mut self, slot: usize) {
+        let eye = self.camera.pos.as_dvec3();
+        let end = eye + self.camera.forward().as_dvec3() * 5.0;
+        let bounds = |x: i32, y: i32, z: i32| {
+            let b = self.chunks.block_loaded(x, y, z)?;
+            if (8..=11).contains(&b) { Some([0.0, 0.0, 0.0, 1.0, 1.0, 1.0]) } else { pick_bounds(b, self.chunks.meta(x, y, z)) }
+        };
+        let Some(hit) = pick::ray_trace(&bounds, eye, end) else { return };
+        let (x, y, z) = hit.pos;
+        self.boats.list.push(boat::Boat::new(x as f32 + 0.5, y as f32 + 1.0, z as f32 + 0.5));
+        self.inv.consume(slot);
+    }
+
+    /// `ItemReed.onItemUse` (as `ItemBlock`'s): the placed block's step sound at its cell, volume (1 + 1) / 2, pitch * 0.8.
+    fn placed(&mut self, id: u8, (x, y, z): (i32, i32, i32)) {
+        let (key, _, pitch) = audio::STEP[audio::step_of(id)];
+        self.audio.play(key, glam::Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5), 1.0, pitch * 0.8);
+    }
+
+    fn use_bucket(&mut self, slot: usize, held: u16) {
+        let eye = self.camera.pos.as_dvec3();
+        let end = eye + self.camera.forward().as_dvec3() * 5.0;
+        let empty = held == gear::BUCKET;
+        let bounds = |x: i32, y: i32, z: i32| {
+            let b = self.chunks.block_loaded(x, y, z)?;
+            if empty && (8..=11).contains(&b) { Some([0.0, 0.0, 0.0, 1.0, 1.0, 1.0]) } else { pick_bounds(b, self.chunks.meta(x, y, z)) }
+        };
+        let Some(hit) = pick::ray_trace(&bounds, eye, end) else { return };
+        let (x, y, z) = hit.pos;
+        let filled = self.chunks.block_loaded(x, y, z).and_then(|b| gear::bucket_fill(b, self.chunks.meta(x, y, z)));
+        if let (true, Some(full)) = (empty, filled) {
+            self.chunks.set_block(x, y, z, 0);
+            self.inv.slots[slot] = Some(ItemStack { id: full, count: 1, damage: 0 });
+        } else if let Some(fluid) = gear::bucket_pour(held) {
+            let (x, y, z) = pick::place_pos(&hit);
+            if self.chunks.block_loaded(x, y, z).is_some_and(pick::replaceable) && y < crate::world::chunk::H as i32 {
+                if self.nether && fluid == 8 {
+                    // `ItemBucket`: water does not stay in the Nether; it fizzes away: "random.fizz" at 0.5, pitch `2.6 + (r - r) * 0.8`, played at the ray's
+                    // origin plus 0.5 on each axis (the Java's `var7 / var9 / var11`, the eye, not the cell), then 8 `largesmoke` (still) at random points of the cell.
+                    let p = 2.6 + (self.audio.rnd() - self.audio.rnd()) * 0.8;
+                    self.audio.play("random.fizz", eye.as_vec3() + glam::Vec3::splat(0.5), 0.5, p);
+                    for _ in 0..8 {
+                        let at = glam::Vec3::new(x as f32 + self.audio.rnd(), y as f32 + self.audio.rnd(), z as f32 + self.audio.rnd());
+                        self.fx.puff(at);
+                    }
+                } else {
+                    self.chunks.set_block_meta(x, y, z, fluid, 0);
+                }
+                self.inv.slots[slot] = Some(ItemStack { id: gear::BUCKET, count: 1, damage: 0 });
+            }
+        }
+    }
+
+    fn eat(&mut self) {
+        // Cortes Combat C4 (NOT b1.7.3, only with the Immersive Pack ON): food is a meal that takes `EAT_TICKS` and then heals (`eat_tick`), not a heal
+        // on the tap; a bandage takes `mend::BANDAGE_USE` and then mends over time (not at full health, nor while one is working).
+        // ponytail: a tap starts it and it runs by itself; the mod holds the button.
+        if world::combat::rules::on() {
+            let slot = self.touch.hotbar_slot;
+            let total = match self.inv.slots[slot].map(|s| s.id) {
+                Some(world::combat::catalog::BANDAGE) if self.vitals.health < vitals::MAX_HEALTH && !self.vitals.mend.bandaged() => world::combat::mend::BANDAGE_USE,
+                Some(id) if items::heal_amount(id).is_some() => EAT_TICKS,
+                _ => 0,
+            };
+            if self.eating.is_none() && total > 0 {
+                self.eating = Some(Eating { left: total, total, slot, health: self.vitals.health });
+            }
+            return;
+        }
+        if let Some(n) = self.inv.eat(self.touch.hotbar_slot) {
+            self.vitals.heal(n);
+            self.vitals.fed = world::biomelife::FED_TICKS; // NOT b1.7.3 (`biomeRules`): food for the cold
+        }
+    }
+
+    /// `EntityPlayer.onDeath`: the open screen's cursor and grid, then the whole inventory, fall to the ground where he
+    /// died (ponytail: `scatter` drops one entity per stack, vanilla throws each with a random spread). The pause
+    /// menu is the death screen: its resume button respawns (top of `step_frame`).
+    fn die(&mut self) {
+        self.stats.add(world::stats::DEATHS, 1);
+        self.close_screen();
+        self.close_sign();
+        let at = (self.player.pos.x.floor() as i32, self.player.pos.y.floor() as i32, self.player.pos.z.floor() as i32);
+        // Death pile (NOT b1.7.3, Immersive Pack only): the drop lasts 20 minutes and the map marks it (`Drops::scatter_pile`, `map_tick`).
+        let pile = world::combat::rules::on();
+        for slot in self.inv.slots.iter_mut() {
+            if let Some(st) = slot.take() {
+                if pile { self.drops.scatter_pile(st, at) } else { self.drops.scatter(st, at) }
+            }
+        }
+        self.touch.pause();
+    }
+
+    /// The sign editor is done: the text stays on the sign (it is edited in place).
+    fn close_sign(&mut self) {
+        if self.sign_edit.take().is_some() {
+            self.touch.set_screen(false);
+        }
+    }
+
+    /// A tap on the sign editor: a key of the on-screen keyboard or a line of the board (`GuiEditSign.keyTyped`).
+    fn on_sign_tap(&mut self, x: f32, y: f32) {
+        let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
+        let Some(mut e) = self.sign_edit else { return };
+        let Some(k) = decor::key_at(w, h, e.shift, x, y) else { return };
+        let done = self.signs.get_mut(&e.pos).map_or(k == Key::Done, |t| e.press(k, t));
+        self.sign_edit = Some(e);
+        if done {
+            self.close_sign();
+        }
+    }
+
+    /// Open a container screen: the 2x2 inventory, a workbench's 3x3, a furnace or chests.
+    fn open_screen(&mut self, screen: Screen) {
+        if screen.gw == 2 {
+            self.earn(world::stats::OPEN_INVENTORY); // `GuiInventory`
+        }
+        self.screen = Some(screen);
+        (self.one_mode, self.shift_mode) = (false, false);
+        self.touch.set_screen(true);
+        // REI sits beside the screen (Options > REI Overlay); the panel makes room for it by sliding over (`rei_step`).
+        self.rei = self.opts.rei_overlay.then(|| rei::ReiUi::overlay(self.rei_ctx()));
+    }
+
+    /// Each frame: the item viewer learns what the player has and where the touch HUD's buttons are, and the open container panel eases to where the viewer
+    /// leaves it room (back to the middle when there is none).
+    fn rei_step(&mut self, dt: f32) {
+        let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
+        let panel = self.screen.as_ref().map(|s| craft::panel_rect(s.gw, w, h));
+        // The X of an open screen: pushed to the right edge, its top level with the viewer's page arrows (GUI row y = 5, `rei_layout::strip`).
+        // Without the viewer it stays in the pause button's place. `hit_test` and the drawing both read `layout.close`, so they agree.
+        self.touch.layout.close = if self.rei.is_some() {
+            let (s, _, _) = menu::scaled_gs(w, h, self.opts.gui_scale);
+            let (_, _, cw, ch) = self.touch.layout.pause;
+            (w - cw - 2.0 * s, 5.0 * s, cw, ch)
+        } else {
+            self.touch.layout.pause
+        };
+        // What the overlay keeps clear of: the X of an open screen (the other top-right buttons are hidden then), or the pause button of the game menu.
+        let (px, py, pw, ph) = if self.touch.paused { self.touch.layout.pause } else { self.touch.layout.close };
+        let hud = [px, py, pw, ph];
+        let ctx = self.rei_ctx();
+        let target = match self.rei.as_mut() {
+            Some(u) => {
+                u.set_hud(Some(hud));
+                u.sync(ctx.craft_gw, ctx.have);
+                u.target_shift_px(w, h, &self.opts, panel)
+            }
+            None => 0.0,
+        };
+        self.rei_shift = rei_layout::ease_to(self.rei_shift, target, dt);
+        craft::set_shift(self.rei_shift);
+    }
+
+    /// What the item viewer needs of the game: the open crafting grid, if any, and what the player has for it (auto-crafting), and this world's
+    /// folder (the favorites are kept there).
+    /// The game menu's World Preview: the world being played, read only, with the player and what they have explored. In the Nether the
+    /// map is the overworld's: its blocks are 8 of these.
+    fn open_preview(&mut self) {
+        let k = if self.nether { 8.0 } else { 1.0 };
+        let at = (f64::from(self.player.pos.x) * k, f64::from(self.player.pos.z) * k);
+        let v = preview::View { cx: at.0, cz: at.1, bpg: 3.0, mode: 0 };
+        let ig = preview::InGame { player: at, explored: self.explored.clone() };
+        self.preview = Some(preview::Preview::new_ingame(self.seed, self.world_type, &self.nat, v, ig));
+    }
+
+    fn rei_ctx(&self) -> rei::Ctx {
+        let grid = self.screen.as_ref().filter(|s| s.gw == 2 || s.gw == 3);
+        rei::Ctx { craft_gw: grid.map_or(0, |s| s.gw), have: grid.map_or_else(|| craft::have_inv(&self.inv), |s| s.have(&self.inv)), dir: Some(self.dir.clone()) }
+    }
+
+    /// What the item viewer asked for: closed, an item given (what does not fit is thrown out like a drop), or a recipe laid out on the open grid
+    /// (auto-crafting: on success the viewer closes to show the grid, else it stays and says why).
+    fn rei_out(&mut self, o: rei::Out) {
+        match o {
+            rei::Out::Close | rei::Out::Hide => self.rei = None,
+            rei::Out::Theme(t) => {
+                self.opts.rei_theme = t.min(1);
+                self.opts.save();
+            }
+            rei::Out::Fill { w, cells, max } => match self.with_ext(|s, inv, _| s.auto_fill(inv, w, &cells, max)) {
+                // Laid out: the recipe view gives the screen back so the grid shows (the overlay stays).
+                Some(Ok(())) => {
+                    if let Some(u) = self.rei.as_mut() {
+                        u.close_views();
+                    }
+                }
+                Some(Err(why)) => {
+                    if let Some(u) = self.rei.as_mut() {
+                        u.notice(&why);
+                    }
+                }
+                None => {}
+            },
+            rei::Out::Give(mut st) => {
+                self.inv.add(&mut st);
+                if st.count > 0 {
+                    self.drops.throw(st, self.camera.pos, self.camera.forward());
+                }
+            }
+        }
+    }
+
+    /// `onCraftGuiClosed`: the cursor stack and whatever is left in the grid are thrown out in front of the player.
+    fn close_screen(&mut self) {
+        self.rei = None;
+        self.rei_shift = 0.0;
+        craft::set_shift(0.0);
+        self.stat_sync();
+        if let Some(mut s) = self.screen.take() {
+            for st in s.close() {
+                self.drops.throw(st, self.camera.pos, self.camera.forward());
+                self.stats.add(world::stats::DROP, 1);
+            }
+        }
+        self.touch.set_screen(false);
+    }
+
+    /// A d-pad (or left stick) step on a focus screen, the game menu's top page or the title: the focus moves to the neighbouring button
+    /// (`vmouse::focus_step`; the cursor is hidden and only sits on the focused button, so it shows as hovered). A container screen has no
+    /// focus: its d-pad snaps the virtual mouse inside `Pad::update`.
+    fn pad_nav(&mut self, d: (i32, i32)) {
+        let (w, h) = self.be.size();
+        let (w, h) = (w as f32, h as f32);
+        let t = self.pad_targets(w, h);
+        if let Some(r) = crate::input::vmouse::focus_step(&t, self.touch.cursor_pos, d) {
+            self.touch.warp_cursor((r[0] + r[2] * 0.5, r[1] + r[3] * 0.5));
+        }
+    }
+
+    /// The focus targets of a focus screen (px): the game menu's top page or the title's buttons; none elsewhere.
+    fn pad_targets(&self, w: f32, h: f32) -> Vec<[f32; 4]> {
+        if self.screen.is_none() {
+            if let Some(p) = self.pause.as_ref().filter(|_| self.touch.paused) {
+                return p.targets(w, h, &self.opts, &self.pause_info());
+            }
+            if let Some(m) = self.menu.as_ref().filter(|m| m.focus()) {
+                return m.targets(w, h, &self.opts);
+            }
+        }
+        Vec::new()
+    }
+
+    /// What the virtual mouse needs of the open screen (`ScreenMixin` / `AbstractContainerScreenMixin`): its snap points, in px, and the
+    /// px per GUI unit. A container's slots are 17-unit points around the icon centres, its two or three touch toggles are widgets.
+    fn pad_points(&self, w: f32, h: f32) -> (Vec<crate::input::vmouse::SnapPoint>, f32) {
+        use crate::input::vmouse::SnapPoint;
+        if let Some(sc) = self.screen.as_ref() {
+            let unit = craft::cell(sc.gw, w, h, (0.0, 0.0)).2 / 18.0;
+            let slots = craft::layout(sc.gw).into_iter().map(|(_, ux, uy)| craft::cell(sc.gw, w, h, (ux, uy))).map(|(x, y, k)| SnapPoint::slot([x, y, k, k], unit));
+            let togs = (0..if sc.gw == 2 { 3 } else { 2 }).map(|i| craft::toggle(sc.gw, w, h, i)).map(|(x, y, k)| SnapPoint::widget([x, y, k, k], unit));
+            return (slots.chain(togs).collect(), unit);
+        }
+        let (s, ..) = crate::menu::scaled_gs(w, h, self.opts.gui_scale);
+        // A focus screen the player gave the cursor (`PadCfg::vm_screens`) snaps to its buttons like any other page.
+        let pts = match self.menu.as_ref() {
+            Some(m) => m.targets(w, h, &self.opts),
+            None => self.pad_targets(w, h),
+        };
+        (pts.into_iter().map(|r| SnapPoint::widget(r, s)).collect(), s)
+    }
+
+    /// The pad's B in a container screen closes it. LB / RB and the right stick have nothing to turn or scroll there (the options take the
+    /// bumpers before this), so they are drained.
+    fn pad_keys(&mut self) {
+        let (back, _, _) = (self.touch.take_back(), self.touch.take_page(), self.touch.take_scroll());
+        if back {
+            self.touch.press_inventory();
+        }
+    }
+
+    /// The pad's X (`shift` false) or RT (`shift` true) in a container screen: the slot under the cursor is clicked for one (place one, or
+    /// take the larger half) or quick-moved, as the "One" and "Shift" buttons do, but for this press only and without moving the cursor to
+    /// them. Nothing off a slot, or while a press is down (a held A may be spreading a stack).
+    fn pad_alt(&mut self, shift: bool) {
+        // Y while the cursor carries a stack is `drop_inventory` (Controlify's `AbstractContainerScreenProcessor`): the stack is thrown out whole;
+        // with an empty cursor it is `inv_quick_move` on the slot under it.
+        if shift {
+            if let Some(c) = self.screen.as_ref().and_then(|s| s.cursor) {
+                if let Some(s) = self.screen.as_mut() {
+                    s.cursor = None;
+                }
+                self.drops.throw(c, self.camera.pos, self.camera.forward());
+                self.stats.add(world::stats::DROP, 1);
+                return;
+            }
+        }
+        let at = self.touch.cursor_pos;
+        let Some(id) = self.slot_under(at.0, at.1).filter(|_| self.gesture.is_none()) else { return };
+        self.with_ext(|s, inv, ext| if shift { s.shift_click(id, inv, ext) } else { s.click(id, true, inv, ext) });
+    }
+
+    /// X / Y on a focus screen (`GUI_ABSTRACT_ACTION_1` / `_2`): X taps the Options button, Y moves the focus onto the Quit button (`PauseScreenProcessor`
+    /// and `TitleScreenProcessor`).
+    fn pad_focus_action(&mut self, y: bool) {
+        let (w, h) = self.be.size();
+        let (w, h) = (w as f32, h as f32);
+        let (options, quit) = if let Some(p) = self.pause.as_ref().filter(|_| self.touch.paused) {
+            p.action_rects(w, h, &self.opts, &self.pause_info())
+        } else if let Some(m) = self.menu.as_ref() {
+            m.action_rects(w, h, &self.opts)
+        } else {
+            (None, None)
+        };
+        let mid = |r: [f32; 4]| (r[0] + r[2] * 0.5, r[1] + r[3] * 0.5);
+        if y {
+            if let Some(r) = quit {
+                self.touch.warp_cursor(mid(r));
+            }
+        } else if let Some(r) = options {
+            self.touch.tap_at(mid(r));
+        }
+    }
+
+    /// What the in-game button guide is worked out from (`ContextualStateContributors.IN_GAME`): the block or entity under the crosshair (the
+    /// nearest of a mob, a boat and a cart in front of the wall), the held item and the player. b1.7.3 has no off hand, creative or spectator mode.
+    fn guide_in_game(&self) -> crate::input::guide::InGame {
+        use crate::input::guide as g;
+        let (eye, fwd, reach) = (self.camera.pos, self.camera.forward(), pick::REACH as f32);
+        let wall = self.target.map_or(f32::MAX, |h| h.point.distance(eye.as_dvec3()) as f32);
+        let near = [
+            self.mobs.pick(eye, fwd, reach).map(|(i, t)| (t, 0u8, i)),
+            self.boats.pick(eye, fwd, reach).map(|(i, t)| (t, 1, i)),
+            self.carts.pick(eye, fwd, reach).map(|(i, t)| (t, 2, i)),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|e| e.0 < wall)
+        .min_by(|a, b| a.0.total_cmp(&b.0));
+        let hit = match (near, self.target) {
+            (Some((_, 0, i)), _) => g::Hit::Entity { ent: g::Ent::Mob(mob_name(self.mobs.list[i].kind)), saddled: self.mobs.list[i].saddled },
+            (Some((_, 1, _)), _) => g::Hit::Entity { ent: g::Ent::Boat, saddled: false },
+            (Some((_, _, i)), _) => g::Hit::Entity { ent: g::Ent::Cart(self.carts.list[i].kind as u8), saddled: false },
+            (None, Some(h)) => {
+                let (x, y, z) = h.pos;
+                let id = self.chunks.block_loaded(x, y, z).unwrap_or(0);
+                // a door's open bit is in its lower half, a trap door's in itself
+                let open = match id {
+                    64 | 71 => {
+                        let m = self.chunks.meta(x, y, z);
+                        let low = if m & 8 != 0 { self.chunks.meta(x, y - 1, z) } else { m };
+                        low & 4 != 0
+                    }
+                    96 => self.chunks.meta(x, y, z) & 4 != 0,
+                    _ => false,
+                };
+                g::Hit::Block { id, open }
+            }
+            (None, None) => g::Hit::None,
+        };
+        let get = |x: i32, y: i32, z: i32| self.chunks.block_loaded(x, y, z);
+        let e = self.camera.pos;
+        let under_water = matches!(get(e.x.floor() as i32, e.y.floor() as i32, e.z.floor() as i32), Some(8 | 9));
+        let riding = if let Some(m) = self.mobs.list.iter().find(|m| m.ridden) {
+            Some((g::Ent::Mob(mob_name(m.kind)), m.saddled))
+        } else if self.boats.ridden().is_some() {
+            Some((g::Ent::Boat, false))
+        } else {
+            self.carts.ridden().map(|c| (g::Ent::Cart(c.kind as u8), false))
+        };
+        g::InGame {
+            me: g::Me {
+                on_ground: self.player.on_ground,
+                in_water: self.was_in_water,
+                under_water,
+                sneaking: self.touch.sneak,
+                sprinting: self.sprint.on(),
+                flying: self.touch.flying,
+                on_climbable: physics::on_ladder(self.player.pos, physics::HALF, &get),
+                moving: self.touch.move_input != (0.0, 0.0),
+                riding,
+                toggle_sneak: self.opts.pad.toggle_sneak,
+                toggle_sprint: false, // sprint is a held button here
+                fishing_cast: self.hook.is_some(),
+                guarding_item: self.touch.guard_shown,
+            },
+            hit,
+            main: self.inv.slots[self.touch.hotbar_slot].map(|s| g::Stack { id: s.id, count: i32::from(s.count) }),
+        }
+    }
+
+    /// What a container screen's guide is worked out from (`ContextualStateContributors.CONTAINER`): the slot under the cursor, the stack the
+    /// cursor carries, whether the slot takes it (the crafting and furnace outputs never do; the fuel slot only fuel) and whether the cursor is off the panel.
+    fn guide_container(&self, w: f32, h: f32) -> Option<crate::input::guide::Container> {
+        use crate::input::guide as g;
+        let s = self.screen.as_ref()?;
+        let ext = self.ext(s);
+        let (x, y) = self.touch.cursor_pos;
+        let stack = |st: ItemStack| g::Stack { id: st.id, count: i32::from(st.count) };
+        let at = craft::slot_at(s.gw, w, h, x, y);
+        let hovering = at.map(|id| s.get(&self.inv, ext.as_deref(), id).map(stack));
+        let can_place = match (at, s.cursor) {
+            (Some(craft::SlotId::Result | craft::SlotId::Furn(2)), _) => false,
+            (Some(craft::SlotId::Furn(1)), Some(c)) => craft::fuel_ticks(c.id) > 0,
+            (Some(_), Some(_)) => true,
+            _ => false,
+        };
+        Some(g::Container { hovering, holding: s.cursor.map(stack), can_place, outside: !craft::in_panel(s.gw, w, h, x, y) })
+    }
+
+    /// The slot under a finger of the open screen (a slot of the vanilla panel).
+    fn slot_under(&self, x: f32, y: f32) -> Option<craft::SlotId> {
+        let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
+        craft::slot_at(self.screen.as_ref()?.gw, w, h, x, y)
+    }
+
+    /// `BlockDispenser.dispenseItem`: one item of a random filled slot (`getRandomStackFromInventory`: each filled slot replaces the
+    /// pick with chance 1 / n) leaves through the front: an arrow, egg or snowball flies (speed 1.1, spread 6), anything else drops.
+    fn dispense(&mut self, (x, y, z): (i32, i32, i32)) {
+        let (dx, dz) = match self.chunks.meta(x, y, z) { 3 => (0.0, 1.0), 2 => (0.0, -1.0), 5 => (1.0, 0.0), _ => (-1.0, 0.0) };
+        let Some(c) = self.chests.get_mut(&(x, y, z)) else { return };
+        let at = glam::Vec3::new(x as f32, y as f32, z as f32); // the sounds are at the block's corner, as the Java passes the ints
+        let (mut pick, mut n) = (None, 1);
+        for (i, s) in c[..9].iter().enumerate() {
+            if s.is_some() {
+                if self.mobs.rng.next_int_bound(n) == 0 {
+                    pick = Some(i);
+                }
+                n += 1;
+            }
+        }
+        let Some(i) = pick else {
+            self.audio.play("random.click", at, 1.0, 1.2); // an empty dispenser only clicks
+            return;
+        };
+        let Some(s) = c[i].as_mut() else { return };
+        let (id, damage) = (s.id, s.damage);
+        s.count -= 1;
+        if s.count == 0 {
+            c[i] = None;
+        }
+        let pos = glam::Vec3::new(x as f32 + dx * 0.6 + 0.5, y as f32 + 0.5, z as f32 + dz * 0.6 + 0.5);
+        let mut g = |sd: f32| self.mobs.rng.next_gaussian() as f32 * 0.0075 * sd;
+        if matches!(id, gear::ARROW | gear::SNOWBALL | gear::EGG) {
+            let v = glam::Vec3::new(dx, 0.1, dz).normalize() * 1.1 + glam::Vec3::new(g(6.0), g(6.0), g(6.0));
+            self.mobs.shoot(pos, v, if id == gear::ARROW { 0 } else { id });
+            self.audio.play("random.bow", at, 1.0, 1.2); // NOT in the b1.7.3 index, see `assets/sound/extra`
+        } else {
+            let s = self.mobs.rng.next_double() as f32 * 0.1 + 0.2;
+            let mut g = |sd: f32| self.mobs.rng.next_gaussian() as f32 * 0.0075 * sd;
+            let v = glam::Vec3::new(dx * s + g(6.0), 0.2 + g(6.0), dz * s + g(6.0));
+            self.drops.throw_from(ItemStack { id, count: 1, damage }, pos - glam::Vec3::Y * 0.3, v);
+            self.stats.add(world::stats::DROP, 1);
+            self.audio.play("random.click", at, 1.0, 1.0);
+        }
+    }
+
+    /// The slots behind the open screen: a furnace's 3, or the chests' 27 each (upper half first); `None` for the 2x2 and the workbench.
+    fn ext(&self, s: &Screen) -> Option<Vec<Option<ItemStack>>> {
+        if let Some(f) = s.furnace.and_then(|p| self.furnaces.get(&p)) {
+            return Some(f.slots.to_vec());
+        }
+        (!s.chests.is_empty()).then(|| s.chests.iter().flat_map(|p| self.chests.get(p).copied().unwrap_or_default().into_iter().take(if s.gw == 9 { 9 } else { chest::SIZE })).collect())
+    }
+
+    /// Run `f` on the open screen with the slots behind it (`ext`): they are copied out and written back, so a large chest's
+    /// two halves are one slice, as `InventoryLargeChest` makes them. `None` when no screen is open.
+    fn with_ext<R>(&mut self, f: impl FnOnce(&mut Screen, &mut Inventory, Option<&mut [Option<ItemStack>]>) -> R) -> Option<R> {
+        let mut s = self.screen.take()?;
+        let mut ext = self.ext(&s);
+        let r = f(&mut s, &mut self.inv, ext.as_deref_mut());
+        if let Some(e) = ext {
+            if let Some(furn) = s.furnace.and_then(|p| self.furnaces.get_mut(&p)) {
+                furn.slots.copy_from_slice(&e);
+            }
+            for (p, part) in s.chests.iter().zip(e.chunks(if s.gw == 9 { 9 } else { chest::SIZE })) {
+                if let Some(c) = self.chests.get_mut(p) {
+                    c[..part.len()].copy_from_slice(part);
+                }
+            }
+        }
+        self.screen = Some(s);
+        Some(r)
+    }
+
+    /// A finger event on the open screen: a press that lifts where it began is a tap; one that drags over other
+    /// slots with a stack on the cursor spreads it, one item per slot (the start slot included).
+    fn on_screen_event(&mut self, ev: ScreenEv) {
+        if self.sign_edit.is_some() {
+            if let ScreenEv::Up(x, y) = ev {
+                self.on_sign_tap(x, y);
+            }
+            return;
+        }
+        if self.screen.is_none() {
+            return;
+        }
+        let mut fill = Vec::new();
+        match ev {
+            ScreenEv::Down(x, y) => {
+                let start = self.slot_under(x, y);
+                self.gesture = Some(Gesture { start, spread: false, visited: Vec::new() });
+            }
+            ScreenEv::Move(x, y) => {
+                let under = self.slot_under(x, y);
+                let (Some(g), Some(cur)) = (self.gesture.as_mut(), under) else { return };
+                if self.screen.as_ref().map_or(true, |s| s.cursor.is_none()) || (!g.spread && g.start == Some(cur)) {
+                    return;
+                }
+                if !g.spread {
+                    g.spread = true;
+                    fill.extend(g.start);
+                }
+                fill.push(cur);
+                fill.retain(|id| !g.visited.contains(id));
+                fill.dedup();
+                g.visited.extend(fill.iter().copied());
+            }
+            ScreenEv::Up(x, y) => {
+                if !self.gesture.take().is_some_and(|g| g.spread) {
+                    self.on_screen_tap(x, y);
+                }
+            }
+        }
+        for id in fill {
+            self.with_ext(|s, inv, ext| s.drop_one(id, inv, ext));
+        }
+    }
+
+    /// A tap on the open screen: the "place one" toggle, a slot, or outside the panel (throws the cursor stack).
+    fn on_screen_tap(&mut self, x: f32, y: f32) {
+        let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
+        let Some(gw) = self.screen.as_ref().map(|s| s.gw) else { return };
+        let one = self.one_mode;
+        let (on_one, on_shift, inside) = (craft::on_mode_button(gw, w, h, x, y), craft::on_shift_button(gw, w, h, x, y), craft::in_panel(gw, w, h, x, y));
+        if craft::on_rei_button(gw, w, h, x, y) {
+            // The R button hides the overlay and brings it back (REI's "hide overlay").
+            self.rei = if self.rei.is_some() { None } else { Some(rei::ReiUi::overlay(self.rei_ctx())) };
+        } else if on_one {
+            self.one_mode = !one;
+        } else if on_shift {
+            self.shift_mode = !self.shift_mode;
+        } else if let Some(id) = self.slot_under(x, y) {
+            let shift = self.shift_mode;
+            self.with_ext(|s, inv, ext| if shift { s.shift_click(id, inv, ext) } else { s.click(id, one, inv, ext) });
+        } else if !inside {
+            let Some(s) = self.screen.as_mut() else { return };
+            // Click outside the window (slot -999): throw the cursor stack, or one item of it.
+            if let Some(c) = s.cursor {
+                let n = if self.one_mode { 1 } else { c.count };
+                s.cursor = (c.count > n).then(|| ItemStack { count: c.count - n, ..c });
+                self.drops.throw(ItemStack { count: n, ..c }, self.camera.pos, self.camera.forward());
+                self.stats.add(world::stats::DROP, 1);
+            }
+        }
+    }
+
+    /// On a pig, in a boat or in a cart.
+    /// The armor the player wears for `render::player` (`RenderPlayer.setArmorModel`): `armorInventory[3 - slot]`, the slots after `MAIN`.
+    fn worn(&self) -> render::player::Worn {
+        std::array::from_fn(|slot| {
+            let s = self.inv.slots[world::items::MAIN + 3 - slot]?;
+            world::craft::armor(s.id).filter(|a| a.0 == slot).map(|a| a.1 as u8)
+        })
+    }
+
+    /// `EntityPlayerSP.addStat(achievement)`: the toast when it is new.
+    fn earn(&mut self, a: usize) {
+        if self.stats.earn(a) {
+            self.toast.taken(a);
+        }
+    }
+
+    /// Moves what the world logged since the last call into the stats: pickups (`onItemPickup`), item uses and breaks, what the screens
+    /// handed out (`SlotCrafting` / `SlotFurnace`: `onCrafting` and the achievements) and the player's blows (`EntityPlayer.attackTargetEntity`).
+    fn stat_sync(&mut self) {
+        use world::stats::{self as st, Kind};
+        for id in std::mem::take(&mut self.drops.got) {
+            match id {
+                17 => self.earn(st::MINE_WOOD),
+                334 => self.earn(st::KILL_COW),
+                _ => {}
+            }
+        }
+        for id in std::mem::take(&mut self.inv.used) {
+            self.stats.bump(Kind::Used, id, 1);
+        }
+        for id in std::mem::take(&mut self.inv.broke) {
+            self.stats.bump(Kind::Depleted, id, 1);
+            self.touch.pad.rumble_play(rfx::item_break()); // `itembreak/LocalPlayerMixin.onBreakItem`
+        }
+        for o in self.screen.as_mut().map(|s| std::mem::take(&mut s.made)).unwrap_or_default() {
+            self.stats.bump(Kind::Crafted, o.id, o.count as u32);
+            let a = match o.id {
+                58 => st::BUILD_WORKBENCH,
+                270 => st::BUILD_PICKAXE,
+                61 => st::BUILD_FURNACE,
+                290 => st::BUILD_HOE,
+                297 => st::MAKE_BREAD,
+                354 => st::BAKE_CAKE,
+                274 => st::BUILD_BETTER_PICKAXE,
+                268 => st::BUILD_SWORD,
+                265 => st::ACQUIRE_IRON,
+                350 => st::COOK_FISH,
+                _ => continue,
+            };
+            self.earn(a);
+        }
+        let (dealt, slain) = self.mobs.tally();
+        self.stats.add(st::DAMAGE_DEALT, dealt);
+        self.stats.add(st::MOB_KILLS, slain.len() as u32);
+        // `EntityMob`: not the slime or the ghast (`IMob` only).
+        use world::mobs::Kind::{Creeper, Giant, PigZombie, Skeleton, Spider, Zombie};
+        if slain.iter().any(|k| matches!(k, Zombie | PigZombie | Giant | Skeleton | Creeper | Spider)) {
+            self.earn(st::KILL_ENEMY);
+        }
+    }
+
+    /// `EntityPlayer.addMovementStat`, from this frame's displacement (the Java adds whole centimetres per tick). A move of 5+ blocks (spawn,
+    /// a portal, a respawn) is no walk. UNVERIFIED: flying counts above 5 blocks/s as the Java's 25 cm a tick.
+    fn move_stats(&mut self, dt: f32, water: bool, dive: bool, ladder: bool, riding: bool) {
+        use world::stats::Dist::*;
+        let d = self.player.pos - std::mem::replace(&mut self.stat_pos, self.player.pos);
+        let h = d.x.hypot(d.z) * 100.0;
+        if d.length() > 5.0 {
+            return;
+        }
+        let pig = riding && self.carts.ridden().is_none() && self.boats.ridden().is_none();
+        if !pig {
+            self.pig_fall = 0.0;
+        }
+        if !riding || pig {
+            self.cart_from = None;
+        }
+        if riding {
+            let k = if pig { Pig } else if self.carts.ridden().is_some() { Cart } else { Boat };
+            self.stats.walk(k, d.length() * 100.0);
+            if pig {
+                // `EntityPig.fall`: over 5 blocks with the player on it. UNVERIFIED: the frame's drop, not the pig's `fallDistance`.
+                if d.y < 0.0 {
+                    self.pig_fall -= d.y;
+                } else {
+                    if self.pig_fall > 5.0 {
+                        self.earn(world::stats::FLY_PIG);
+                    }
+                    self.pig_fall = 0.0;
+                }
+            } else if k == Cart {
+                // `addMovementStat`: a kilometre from where the ride began.
+                let from = *self.cart_from.get_or_insert(self.player.pos);
+                if (self.player.pos - from).length_squared() >= 1.0e6 {
+                    self.earn(world::stats::ON_A_RAIL);
+                }
+            }
+        } else if dive {
+            self.stats.walk(Dive, h);
+        } else if water {
+            self.stats.walk(Swim, h);
+        } else if ladder {
+            self.stats.walk(Climb, d.y.max(0.0) * 100.0);
+        } else if self.player.on_ground {
+            self.stats.walk(Walk, h);
+        } else if h > 25.0 * dt * 20.0 {
+            self.stats.walk(Fly, h);
+        }
+    }
+
+    fn riding(&self) -> bool {
+        self.mobs.list.iter().any(|m| m.ridden) || self.boats.ridden().is_some() || self.carts.ridden().is_some()
+    }
+
+    /// One frame; in the third-person view the camera sits behind the eye for it and is put back after (input reads the eye).
+    fn render(&mut self) {
+        self.render_frame();
+        if let Some((p, fov)) = self.third_saved.take() {
+            (self.camera.pos, self.camera.fov_y) = (p, fov);
+        }
+    }
+
+    /// The shoulder-surf shot for this frame (`render::shoulder`): where the camera sits, the field-of-view scale and the view-space turn
+    /// that keeps the crosshair on what the eye's pick ray hits.
+    fn shoulder_shot(&mut self) -> render::shoulder::Shot {
+        let (eye, chunks) = (self.camera.pos, &self.chunks);
+        let solid = |p: glam::Vec3| chunks.block_loaded(p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32).is_some_and(|b| crate::world::chunk::collision(b).is_some()); // leaves, glass, slabs, fences too, not only full opaque cubes
+        let aim = self.target.map(|h| (h.point.as_vec3() - eye).length());
+        let dt = Instant::now().duration_since(self.frame_prev).as_secs_f32().min(0.1);
+        if self.touch.take_swap() {
+            self.shoulder.swap();
+        }
+        self.shoulder.update(&render::shoulder::Frame {
+            dt,
+            eye,
+            yaw: self.camera.yaw,
+            pitch: self.camera.pitch,
+            vel: self.player.vel,
+            on_ground: self.player.on_ground,
+            sneak: self.touch.sneak && self.sleep.is_none(),
+            sprint: self.sprint.on(),
+            zoom: self.touch.zooming(),
+            health: self.vitals.health,
+            aim,
+            solid: &solid,
+        })
+    }
+
+    /// `EntityRenderer.orientCamera` for `thirdPersonView`: 4 blocks behind the eye, pulled in before terrain.
+    /// ponytail: one ray in 0.1 block steps (the Java casts 8 around it).
+    fn third_pos(&self) -> glam::Vec3 {
+        let (eye, back) = (self.camera.pos, -self.camera.forward());
+        let mut t = 0.1;
+        while t <= 4.0 {
+            let p = eye + back * t;
+            if self.chunks.block_loaded(p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32).is_some_and(normal_cube) {
+                return eye + back * (t - 0.2).max(0.0);
+            }
+            t += 0.1;
+        }
+        eye + back * 4.0
+    }
+
+    /// One frame: the scene pass (sky, terrain, far terrain, entities, water, rain; 4x MSAA resolved into `Present`'s 8-bit scene) and then
+    /// its one full-screen pass (CAS + upscale + vignette + the HUD) onto the swap chain. Two render passes in all; the old chain had a
+    /// shadow map, a G-buffer, a deferred pass, the light shafts and an HDR post chain of ~8 passes.
+    fn render_frame(&mut self) {
+        if self.menu.is_some() {
+            self.render_menu();
+            return;
+        }
+        let t0 = Instant::now();
+        self.step_frame();
+        if self.menu.is_some() {
+            return; // "Save and quit to title" just ran
+        }
+        let (mut rig_view, mut close) = (glam::Mat4::IDENTITY, false); // the shoulder-surf shot's roll / convergence / kicks, composed into `camera.bob` below
+        let asleep = self.sleep.is_some();
+        if asleep {
+            // `orientCamera`: asleep wins over the third-person view. The eye is `posY + 0.42` (`yOffset` 0.2, +1 asleep) less the 0.3 the view is
+            // translated down by: 0.12 over `posY`, which is the bed's surface + 0.375.
+            self.third_saved = Some((self.camera.pos, self.camera.fov_y));
+            self.camera.pos.y += SLEEP_EYE_LIFT;
+            self.shoulder.reset();
+        } else if self.touch.third {
+            self.third_saved = Some((self.camera.pos, self.camera.fov_y));
+            if self.touch.shoulder {
+                let shot = self.shoulder_shot();
+                (self.camera.pos, rig_view, close) = (shot.pos, shot.view, shot.close);
+                self.camera.fov_y *= shot.fov_scale;
+            } else {
+                self.camera.pos = self.third_pos();
+                self.shoulder.reset();
+            }
+        } else {
+            self.shoulder.reset();
+        }
+        // The player's own model, drawn only from behind (`RenderPlayer`; the first-person view has the hand instead).
+        let tick_partial = (self.body_acc / dig::TICK).clamp(0.0, 1.0);
+        // Asleep the model is drawn too, lying (`RenderGlobal`: `renderViewEntity` is skipped unless third-person or `isPlayerSleeping`).
+        let lying = self.sleep.map(|(x, y, z, _)| (self.chunks.meta(x, y, z) & 3) as usize);
+        let player_view = ((self.touch.third && !close) || asleep).then(|| {
+            let riding = self.riding();
+            let held = self.inv.slots[self.touch.hotbar_slot];
+            let (mut pose, yaw) = self.body.pose(tick_partial, self.camera.pitch.to_degrees(), self.touch.sneak && !asleep, riding, held.is_some());
+            if let Some(d) = lying {
+                // `posY` of the Java: the eye height of a standing box, which is the bed's surface + 0.375 here. ponytail: the head looks straight along
+                // the body (the Java keeps the yaw and pitch from before lying down, which only turns the head against the body).
+                let at = self.player.pos + glam::Vec3::new(0.0, EYE_HEIGHT, 0.0);
+                (pose.head_yaw, pose.pitch, pose.limb_amt, pose.swing) = (0.0, 0.0, 0.0, 0.0);
+                return render::player::View { root: render::player::lying_root(at, d), pose, held, worn: self.worn(), at };
+            }
+            let feet = self.player.pos - glam::Vec3::new(0.0, physics::HALF.y, 0.0);
+            render::player::View { root: render::player::root(feet, yaw), pose, held, worn: self.worn(), at: self.player.pos }
+        });
+        // Options: the render distance (Video Settings) and the far terrain switch (Options).
+        let rd = self.opts.chunks();
+        if self.chunks.radius() != rd {
+            self.chunks.set_radius(rd);
+        }
+        let lod_on = self.opts.lod && self.lod.is_some();
+        self.lod_on = lod_on;
+        // Real water reaches `WATER_RANGE` with the LoD on (its water sheet takes over beyond); with it off there is no sheet, so the real water is drawn everywhere the player sees.
+        let wr = if lod_on { WATER_RANGE } else { 1e9 };
+        let (pcx, pcz) = (chunk_coord(self.player.pos.x), chunk_coord(self.player.pos.z));
+        // Starling's "camera/menu being touched" (`interactive` of `UploadBudget::with_frame_state`): a menu or a screen is open, or a finger is
+        // on the look area. ponytail: the gamepad's look stick and a mouse are not counted.
+        let interactive = self.touch.paused || self.screen.is_some() || self.touch.pointers.values().any(|p| p.role == PointerRole::Look);
+        self.chunks.update(self.be.gfx(), self.be.origins(), pcx, pcz, interactive);
+        self.camera.zfar = if lod_on { lod::ZFAR } else { 256.0 }; // the far terrain needs the depth range
+        // C7 (`CameraShake.onCameraAngles`): the live impulses roll and pitch the view, in view space, ahead of the rig and the bob.
+        let (shake_pitch, shake_roll) = self.shake.angles(tick_partial, self.camera.pos);
+        let shake = glam::Mat4::from_rotation_z(shake_roll.to_radians()) * glam::Mat4::from_rotation_x(shake_pitch.to_radians());
+        self.camera.bob = shake * rig_view * if self.opts.view_bobbing { self.body.view_bob(tick_partial) } else { glam::Mat4::IDENTITY };
+        let (view, proj) = self.camera.build_view_proj();
+        // The first-person hand (`EntityRenderer.renderHand`): not in the third-person view, not in bed.
+        let hand = ((!self.touch.third || close) && self.sleep.is_none()).then(|| {
+            let (mut equip, held) = self.body.equipped(tick_partial);
+            if let Some(p) = self.charge_phase(tick_partial) {
+                equip = p; // C3: charging repeats the switch-slot rise
+            }
+            render::player::Hand { to_world: render::player::hand_to_world(&view, &self.camera.bob), equip, swing: self.body.swing_at(tick_partial), held: held.filter(|s| s.id != world::map::MAP), at: self.player.pos }
+        });
+        let outline_indices = self.target.map_or(0, |h| {
+            let (x, y, z) = h.pos;
+            let b = self.chunks.block_loaded(x, y, z).and_then(|b| outline_bounds(b, self.chunks.meta(x, y, z)));
+            b.map_or(0, |b| self.outline.update(self.be.gfx(), h.pos, b))
+        });
+        let eye = self.camera.pos;
+        let mut sign_views: Vec<SignView> = self
+            .signs
+            .iter()
+            .filter_map(|(&pos, text)| {
+                let id = self.chunks.block_loaded(pos.0, pos.1, pos.2).filter(|b| matches!(*b, decor::POST | decor::WALL))?;
+                Some(SignView { pos, id, meta: self.chunks.meta(pos.0, pos.1, pos.2), text })
+            })
+            .collect();
+        let near = |s: &SignView| (glam::Vec3::new(s.pos.0 as f32 + 0.5, s.pos.1 as f32 + 0.5, s.pos.2 as f32 + 0.5) - eye).length_squared();
+        sign_views.sort_by(|a, b| near(a).total_cmp(&near(b)));
+        let frustum = Frustum::from_view_proj(proj * view);
+        // Which terrain sections the camera sees (frustum, render shape, and occlusion by terrain); every layer draws from it, and so does
+        // the entity test below (it needs this frame's sections, so the walk runs before the entities are built).
+        self.chunks.update_visible(self.camera.pos, RENDER_SHAPE, (rd * 16) as f32, (RENDER_VERT * 16) as f32, wr, |min, max| frustum.intersects_aabb(min, max));
+        // Entities are only built when they are within the render range, in the camera's frustum and in a section the occlusion walk reached
+        // (Sodium's `isBoxVisible`: a mob in a cave behind a hill is skipped); `radius` = a bound on their size.
+        let reach2 = ((rd * 16 + 16) as f32).powi(2);
+        let terrain = &self.chunks;
+        let seen = |p: glam::Vec3, r: f32| p.distance_squared(eye) < reach2 && frustum.intersects_aabb(p - r, p + r) && terrain.box_visible(p - r, p + r);
+        let item_indices = {
+            let chunks = &self.chunks;
+            self.item_mesh.update(self.be.gfx(), &self.drops, &self.mobs, &self.ticks.falling, &self.fx, &|x, y, z| chunks.light_levels(x, y, z), self.hook.as_ref().map(|h| h.pos), &self.paintings, &sign_views, (&self.boats.list, self.boats.alpha()), (&self.carts.list, self.carts.alpha()), player_view.as_ref(), hand.as_ref(), eye, &seen)
+        };
+
+        // Sky and fog colour from the sun angle, the weather and the climate under the player; the frame is cleared to the fog colour and
+        // the sky pass is drawn over it (vanilla order).
+        let (px, pz) = (self.camera.pos.x.floor() as i32, self.camera.pos.z.floor() as i32);
+        let partial = self.world_ticks.fract() as f32;
+        let angle = sky::celestial_angle(self.world_ticks as u64, partial);
+        let (rain, thunder) = if self.nether { (0.0, 0.0) } else { (self.weather.rain(partial), self.weather.thunder(partial)) };
+        let hell = [0.2, 0.03, 0.03]; // `WorldProviderHell.func_4096_a`
+        // The biome's look (`world::atmos`): 9 columns around the player, eased over seconds; in the Nether the next overworld frame jumps.
+        let atm = if self.nether {
+            self.atmos.reset();
+            world::atmos::Frame::OFF
+        } else {
+            let (chunks, dt) = (&mut self.chunks, Instant::now().duration_since(self.frame_prev).as_secs_f32().min(0.25));
+            if !self.touch.paused {
+                self.opts.atmos.view = None; // the editor's preview lives only while its screen is up
+            }
+            self.opts.atmos.here = self.atmos.update(dt, (px, pz), &self.opts.atmos, |x, z| chunks.climate_at(x, z).0);
+            self.atmos.frame(angle, rain, thunder)
+        };
+        let sky_rgb = if self.nether { hell } else { atm.sky };
+        let e = self.camera.pos;
+        let eye_in_water = matches!(self.chunks.block_loaded(e.x.floor() as i32, e.y.floor() as i32, e.z.floor() as i32), Some(8 | 9));
+        let fresh = self.chunks.take_ingest(); // drained in the Nether too (no LoD there)
+        // ponytail: with the LoD switched off the fresh chunks are dropped, not kept for it (it re-reads the saved tiles when it is on again).
+        if let Some(l) = self.lod.as_mut().filter(|_| lod_on) {
+            fresh.into_iter().for_each(|(k, cols)| l.ingest(k, cols));
+            // The LoD is cut out only where a real chunk mesh exists (`drawn`), and again whenever the set of meshes changes (`mesh_gen`).
+            let chunks = &self.chunks;
+            l.update(self.be.gfx(), e, (rd * 16) as f32, (RENDER_VERT * 16) as f32, chunks.cut_gen(), |cx, cz| chunks.drawn((cx, cz)), |cx, sy, cz| chunks.shown((cx, cz), sy), |min, max| frustum.intersects_aabb(min, max));
+        }
+        let fog = color::legacy_lin(if self.nether { hell } else { atm.fog }); // vanilla values -> the frame's linear space
+        // Terrain fog (b1.7.3 `setupFog`): linear to the render distance, off the far terrain's own start; under water GL_EXP, density 0.1,
+        // colour (0.02, 0.02, 0.2); a negative far plane is how the shader learns the density.
+        let (fog_c, far) = if eye_in_water { (color::legacy_lin([0.02, 0.02, 0.2]), -0.1) } else { (fog, if lod_on { lod::RADIUS } else { (rd * 16) as f32 }) };
+        let start = if lod_on && !eye_in_water { lod::FOG_START } else { 0.0 };
+        // Rain and snow (`EntityRenderer.renderRainSnow`), drawn in the scene pass after the water; the depth test hides the streaks behind
+        // the terrain. ponytail: not behind water (its translucent layer is not wired), no splashes on the ground.
+        let precip = (rain > 0.0).then(|| {
+            let r = weather::radius();
+            let n = (2 * r + 1) as usize;
+            let biomes = self.chunks.biomes(px - r, pz - r, n, n);
+            let chunks = &self.chunks;
+            let top = |x: i32, z: i32| chunks.top_solid(x, z);
+            let bright = |x: i32, y: i32, z: i32| crate::world::chunk::brightness(chunks.light(x, y, z));
+            let (snow, rain_quads) = weather::build(&weather::Input { eye: e, ticks: self.world_ticks as u32, partial, rain, biomes: &biomes, top_solid: &top, brightness: &bright });
+            (snow, rain_quads, sky::sun_dir(angle).y)
+        });
+        if self.frames == 0 {
+            log::info!("render: first frame, {}, {} chunks loaded", self.be.gpu_info(), self.chunks.loaded());
+        }
+        self.build_hud();
+        // The look (`render::look`): the grade, the light's tones, the water, the sway; then the halos and motes it allows, capped.
+        let sun_v = sky::sun_dir(angle);
+        let look = Look::new(&self.opts.look, &look::Env { sun: sun_v, rain, seconds: self.world_ticks as f32 / 20.0, nether: self.nether, underwater: eye_in_water, bolt: self.fx.light(partial) });
+        let glow_indices = {
+            let dt = Instant::now().duration_since(self.frame_prev).as_secs_f32().min(0.25);
+            let mut quads = Vec::new();
+            if look.glow || look.motes > 0 {
+                self.scan.update(&self.chunks, (pcx, pcz));
+                let chunks = &self.chunks;
+                let mut water = |x: i32, y: i32, z: i32| matches!(chunks.block_loaded(x, y, z), Some(8 | 9)) && chunks.block_loaded(x, y + 1, z) == Some(0);
+                self.motes.update(dt, e, look.motes, if sun_v.y < 0.0 { 1.0 } else { 0.0 }, &self.scan, &mut water);
+                if look.glow {
+                    look::halos(&self.scan, e, &mut quads);
+                    quads.extend(look::sun_halo(&look, sun_v, e, self.camera.zfar, rain));
+                }
+                self.motes.quads(&mut quads);
+            }
+            let (right, up) = look::axes(&view);
+            self.glow.update(self.be.gfx(), &look::vertices(&quads, right, up))
+        };
+        let d = WorldDraw {
+            chunks: &self.chunks,
+            lod: self.lod.as_ref().filter(|_| lod_on),
+            items: &self.item_mesh,
+            item_indices,
+            outline: &self.outline,
+            outline_indices,
+            glow: &self.glow,
+            glow_indices,
+            look,
+            hud: &self.hud_verts,
+            camera: &self.camera,
+            view,
+            proj,
+            eye: e,
+            sky_sub: sky::skylight_subtracted(angle, rain, thunder) as f32 / 15.0,
+            fog: fog_c,
+            far,
+            start,
+            wr,
+            nether: self.nether,
+            angle,
+            rain,
+            seconds: self.world_ticks as f32 / 20.0,
+            zenith: color::legacy_lin(sky::lightning_flash(sky_rgb, self.fx.flash, partial)),
+            horizon: fog,
+            atmos: atm,
+            precip: precip.as_ref().map(|(s, r, y)| (&s[..], &r[..], *y)),
+        };
+        let acq = match self.be.draw_world(&d) {
+            Drawn::Done(acq) => acq,
+            Drawn::Resize(w, h) => {
+                log::info!("render: frame is {w}x{h}, reconfiguring");
+                self.resize(w, h);
+                return;
+            }
+            Drawn::Skipped => return,
+        };
+        let spent = t0.elapsed();
+        let cpu = spent.saturating_sub(acq);
+        self.cpu_acc += cpu.as_secs_f32();
+        // Scene-pass GPU time of the frames whose stamps arrived (a few frames late): one mean per frame for `Drs`, all of them for the debug screen.
+        self.gpu_buf.clear();
+        self.be.gpu_ms(&mut self.gpu_buf);
+        self.gpu_acc += self.gpu_buf.iter().sum::<f32>();
+        self.gpu_n += self.gpu_buf.len() as u32;
+        let gpu = (!self.gpu_buf.is_empty()).then(|| self.gpu_buf.iter().sum::<f32>() / self.gpu_buf.len() as f32 / 1000.0);
+        if self.opts.dynamic_res {
+            if let Some(p) = self.drs.tick(spent.as_secs_f32(), cpu.as_secs_f32(), gpu) {
+                crate::gpu::context::set_scale_pct(p);
+                self.be.rescale();
+                log::info!("dynamic resolution: scene at {p}%");
+            }
+        } else if crate::gpu::context::scale_pct() != crate::gpu::context::START_PCT {
+            // Switched off in Video Settings: pin the scene at `START_PCT` again and start `Drs` from there for the next switch-on.
+            crate::gpu::context::set_scale_pct(crate::gpu::context::START_PCT);
+            self.be.rescale();
+            self.drs = Drs::at(crate::gpu::context::START_PCT, self.refresh_hz);
+        }
+
+        self.frames += 1;
+        let now = Instant::now();
+        // A paused frame, and the first one after it, waited on purpose (the idle poll): not a spike.
+        if !(self.touch.paused || self.was_paused) {
+            let gap = now.duration_since(self.frame_prev).as_secs_f32();
+            self.worst_acc = self.worst_acc.max(gap);
+            self.times.push(gap);
+        }
+        self.was_paused = self.touch.paused;
+        self.frame_prev = now;
+        if now.duration_since(self.fps_last).as_secs_f32() >= 1.0 {
+            self.cpu_ms = (self.cpu_acc / self.frames as f32 * 1000.0).round() as u32;
+            self.worst_ms = (self.worst_acc * 1000.0).round() as u32;
+            self.worst_acc = 0.0;
+            self.p99_ms = (self.times.take_p99() * 1000.0).round() as u32;
+            self.gpu_tenths = if self.gpu_n > 0 { (self.gpu_acc / self.gpu_n as f32 * 10.0).round() as u32 } else { 0 };
+            (self.gpu_acc, self.gpu_n) = (0.0, 0);
+            let fps = self.frames as f32 / now.duration_since(self.fps_last).as_secs_f32();
+            self.fps_recent = fps.round() as u32;
+            // Moving average, 0.1 a second (~10 s); not fed while paused (the menu idles on purpose) and seeded by its first second.
+            if !self.touch.paused {
+                self.fps_avg = if self.fps_avg == 0.0 { fps } else { self.fps_avg * 0.9 + fps * 0.1 };
+            }
+            log::info!("FPS: {fps:.1} (average of the last ~10 s {:.0}), {} chunks loaded, CPU {:.1} ms/frame (CPU ~ frame time: CPU-bound; far below: GPU-bound), {} HUD vertices, {} sign texts kept", self.fps_avg, self.chunks.loaded(), self.cpu_acc / self.frames as f32 * 1000.0, self.hud_verts.len(), self.item_mesh.cached_signs());
+            // The pacing line: the slowest 1% of frames (not the average), the worst one, the panel, the scene pass's GPU time (`gpu::timing`; n/a
+            // without timestamp queries), and how long new chunks took to become drawable.
+            let wait = self.chunks.take_mesh_wait().map_or(String::new(), |(avg, max, n)| format!(", first mesh of {n} chunks: avg {avg:.0} ms, max {max:.0} ms"));
+            let gpu = if self.gpu_tenths > 0 { format!("{:.1} ms", self.gpu_tenths as f32 / 10.0) } else { "n/a".to_string() };
+            log::info!("pacing: p99 {} ms, worst {} ms, panel {:.0} Hz, scene pass GPU {gpu}{wait}", self.p99_ms, self.worst_ms, self.refresh_hz);
+            self.cpu_acc = 0.0;
+            self.frames = 0;
+            self.fps_last = now;
+        }
+    }
+
+    /// A frame of `menu::Menu` (the title screen, world list, creation, "Loading level"): the HUD pass over black, no world. The frame
+    /// that shows "Loading level" is presented before the world is loaded, which freezes the render thread for a moment.
+    fn render_menu(&mut self) {
+        let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
+        if self.menu.is_none() {
+            return;
+        }
+        let now = Instant::now();
+        let dt = now.duration_since(self.last_frame).as_secs_f32().min(0.1);
+        self.last_frame = now;
+        self.pad_sync(dt);
+        let Some(m) = self.menu.as_mut() else { return };
+        for ev in self.touch.take_screen_events() {
+            m.event(ev, w, h, &mut self.opts);
+        }
+        if let Some((k, px, py)) = self.touch.take_pinch() {
+            m.pinch(k, px, py, w, h, &self.opts); // two fingers zoom the World Preview
+        }
+        if m.quit {
+            std::process::exit(0); // Quit Game: nothing is loaded, so nothing to save
+        }
+        if let Some(px) = m.take_skin() {
+            self.be.upload_skin(&px); // the skin screen changed the look
+        }
+        self.hud_verts.clear();
+        m.draw(&mut self.hud_verts, w, h, &self.opts);
+        let cur = self.touch.pad.shows_cursor().then_some(self.touch.cursor_pos);
+        self.touch.pad.draw(&mut self.hud_verts, w, h, self.touch.hotbar_slot, cur, f32::INFINITY);
+        let pano = m.panorama();
+        self.hud_verts.truncate(crate::gles::HUD_QUADS * 6);
+        match self.be.draw_menu(pano, &self.hud_verts) {
+            Drawn::Resize(w, h) => {
+                self.resize(w, h);
+                return;
+            }
+            Drawn::Skipped => return,
+            Drawn::Done(_) => {}
+        }
+        let load = self.menu.as_mut().filter(|m| m.shown_loading).and_then(|m| m.loading.take());
+        if let Some(info) = load {
+            self.enter_world(&info);
+        }
+    }
+
+    /// What the game menu shows of the game.
+    /// The pad's frame: moves / looks / clicks through `TouchUi`, and hands a button the Controls screen waits for to it.
+    fn pad_sync(&mut self, dt: f32) {
+        self.touch.pad.capture = self.pause.as_ref().is_some_and(Pause::pad_waiting) || self.menu.as_ref().is_some_and(Menu::pad_waiting);
+        // Controlify's rule: the virtual mouse (a cursor, snapping to slots) is for a container screen; the game menu's top page and the title
+        // are focus screens (the d-pad / left stick step the focus). The other pages keep the cursor, with snap points where there are widgets.
+        let (w, h) = self.be.size();
+        let (w, h) = (w as f32, h as f32);
+        let pause_top = self.touch.paused && self.screen.is_none() && self.stats_ui.is_none() && self.gen_ui.is_none() && self.preview.is_none() && self.pause.as_ref().is_some_and(Pause::top);
+        let has_map = pause_top || (self.screen.is_none() && self.menu.as_ref().is_some_and(Menu::focus));
+        // The virtual mouse toggle (`VMOUSE_TOGGLE`, `virtualMouseScreens`): a screen that is a focus screen by default can be given the cursor, and it is remembered. A container
+        // always has it; the pages with no focus map keep it too (see below), so the toggle has nothing to change there.
+        let key = if pause_top { crate::input::gamepad::VM_PAUSE } else if has_map { self.menu.as_ref().map_or(0, Menu::focus_key) } else { 0 };
+        if self.touch.take_pad_vm_toggle() && key != 0 && self.screen.is_none() {
+            self.opts.pad.vm_screens ^= key;
+            self.opts.save();
+        }
+        let focus = has_map && self.opts.pad.vm_screens & key == 0;
+        self.touch.pad.aiming = self.charge > 0; // `isUsingItem` with a bow-like animation: a weapon's charge is building
+        let (points, gs) = self.pad_points(w, h);
+        self.touch.pad.focus = focus;
+        self.touch.pad.behaviour = if self.screen.is_some() { crate::input::vmouse::Behaviour::CursorScroll } else { crate::input::vmouse::Behaviour::Default };
+        self.touch.pad.points = if focus { Vec::new() } else { points };
+        self.touch.pad.gs = gs;
+        // `setInitialFocus`: a focus screen opens with its first button focused, so A acts at once.
+        if focus && self.touch.pad.active() {
+            let t = self.pad_targets(w, h);
+            if !t.is_empty() && crate::ui::under(&t, self.touch.cursor_pos).is_none() {
+                let f = t[0];
+                self.touch.warp_cursor((f[0] + f[2] * 0.5, f[1] + f[3] * 0.5));
+            }
+        }
+        self.touch.pad_update(dt, &self.opts.pad);
+        if let Some(d) = self.touch.take_nav() {
+            self.pad_nav(d);
+        }
+        // The marks on the title's and the game menu's buttons (`input/guide.rs`): the glyphs of the pad in use, while screen guides are on.
+        {
+            use crate::input::bind_defs::B;
+            let pc = &self.opts.pad;
+            let g = |b: B| pc.binds.get(b).glyph().unwrap_or("button/none");
+            let marks = (self.touch.pad.active() && pc.screen_guides).then(|| (pc.style as usize % crate::input::glyph_map::TYPES.len(), [g(B::GuiBack), g(B::GuiAbstractAction1), g(B::GuiAbstractAction2)]));
+            crate::input::guide::set_marks(marks);
+        }
+        if let Some(shift) = self.touch.take_alt() {
+            if focus {
+                self.pad_focus_action(shift);
+            } else {
+                self.pad_alt(shift);
+            }
+        }
+        // LB / RB step the options tabs.
+        if self.pause.as_ref().is_some_and(Pause::in_options) || self.menu.as_ref().is_some_and(Menu::in_options) {
+            let d = self.touch.take_page();
+            if d != 0 {
+                if let Some(p) = self.pause.as_mut().filter(|p| p.in_options()) {
+                    p.step_tab(d, &mut self.opts);
+                } else if let Some(m) = self.menu.as_mut() {
+                    m.step_tab(d, &mut self.opts);
+                }
+            }
+        }
+        self.pad_keys();
+        if self.touch.take_pad_info() {
+            self.opts.debug_screen = !self.opts.debug_screen;
+            self.opts.save();
+        }
+        if let Some(b) = self.touch.pad.captured.take() {
+            if let Some(p) = self.pause.as_mut() {
+                p.pad_button(b, &mut self.opts);
+            }
+            if let Some(m) = self.menu.as_mut() {
+                m.pad_button(b, &mut self.opts);
+            }
+        }
+    }
+
+    fn pause_info(&self) -> PauseInfo {
+        PauseInfo { dead: self.vitals.dead(), pregen: self.lod.as_ref().map(|l| l.pregen()), debug: self.lod.as_ref().map_or(0, |l| l.debug()), flying: self.touch.flying, info: self.opts.debug_screen }
+    }
+
+    /// The display's refresh rate (`immersive::refresh_hz`): the dynamic resolution aims at it, 60 to 90 Hz.
+    fn set_refresh_hz(&mut self, hz: f32) {
+        if (hz - self.refresh_hz).abs() > 0.5 {
+            log::info!("display refresh rate {hz:.1} Hz");
+        }
+        self.refresh_hz = hz;
+        self.drs.set_refresh_hz(hz);
+    }
+
+    fn on_motion(&mut self, ev: &android_activity::input::MotionEvent) {
+        self.touch.handle_motion(ev);
+    }
+
+    /// The rows of the debug screen (`render::debug`): left = the player and the world, right = the engine. Only built while it is on
+    /// and the game is not paused. ponytail: `meshed()` walks the chunk map once a frame (a few hundred entries) and the biome comes
+    /// from the cached one-column lookup the weather uses; neither is worth a counter of its own.
+    fn debug_rows(&mut self) -> (Vec<Row>, Vec<Row>) {
+        use crate::options::Opt;
+        use crate::render::debug::{bearing, clock, compass, fps_color, words, CYAN, GREEN, GREY, WHITE, YELLOW};
+        use crate::render::present::{fast_post, fxaa, scene_samples};
+        let p = self.player.pos;
+        let feet = p.y - physics::HALF.y;
+        let (bx, by, bz) = (p.x.floor() as i32, feet.floor() as i32, p.z.floor() as i32);
+        let (sky, blk) = self.chunks.light_levels(bx, (p.y + EYE_HEIGHT).floor() as i32, bz);
+        let b = bearing(self.camera.yaw);
+        let weather = if self.weather.thunder(1.0) > 0.5 { "  thunder" } else if self.weather.rain(1.0) > 0.5 { "  rain" } else { "" };
+        let mut left = vec![
+            Row::Head("Minecraft b1.7.3 (mc-rs)".to_string()),
+            Row::Kv("Build", crate::version::label(), WHITE),
+            Row::Gap,
+            Row::Kv("XYZ", format!("{:.2} / {:.2} / {:.2}", p.x, feet, p.z), WHITE),
+            Row::Kv("Block", format!("{bx} {by} {bz}"), WHITE),
+            Row::Kv("Chunk", format!("{} {}  (in {} {})", bx >> 4, bz >> 4, bx & 15, bz & 15), WHITE),
+            // Pitch is shown up-positive (the camera's is down-positive).
+            Row::Kv("Facing", format!("{} ({b})  pitch {:+}", compass(b), (-self.camera.pitch.to_degrees()).round() as i32), WHITE),
+        ];
+        if !self.nether {
+            let biome = self.chunks.biomes(bx, bz, 1, 1).first().map_or("?".to_string(), |b| words(&format!("{b:?}")));
+            left.push(Row::Kv("Biome", biome, GREEN));
+        }
+        left.push(Row::Kv("Light", format!("sky {sky}  block {blk}"), WHITE));
+        left.push(Row::Kv("Time", format!("{}{weather}", clock(self.world_ticks as u64)), WHITE));
+        let st = &self.vitals.stamina; // `StaminaFeatureClient`'s debug entry
+        left.push(Row::Kv("Stamina", format!("{:.1} / {:.1}  locked {}", st.cur, st.max, st.locked), if st.locked { YELLOW } else { WHITE }));
+        left.push(match self.target {
+            Some(h) => {
+                let (x, y, z) = h.pos;
+                let id = self.chunks.block(x, y, z).unwrap_or(0);
+                let name = crate::world::names::NAMES.binary_search_by_key(&(id as u16), |e| e.0).map_or_else(|_| format!("id {id}"), |i| crate::world::names::NAMES[i].1.to_string());
+                Row::Kv("Looking at", format!("{name} ({x} {y} {z})"), CYAN)
+            }
+            None => Row::Kv("Looking at", "nothing in reach".to_string(), GREY),
+        });
+
+        let (w, h) = self.be.size();
+        let fps = self.fps_recent;
+        // A setting as its button shows it (`Settings::text`, "Name: value"), so the two never disagree; "(restart)" comes along.
+        let set = |o: Opt| self.opts.text(o).split_once(": ").map_or(String::new(), |t| t.1.to_lowercase());
+        let (sc, pct, ms) = (crate::gpu::context::scene_size(w, h), crate::gpu::context::scale_pct(), scene_samples());
+        let mut right = vec![
+            Row::Kv("FPS", format!("{fps}  (avg {:.0})", self.fps_avg), fps_color(fps)),
+            Row::Kv("Frame", if self.gpu_tenths > 0 { format!("cpu {} ms  gpu {:.1} ms  p99 {} ms  worst {} ms", self.cpu_ms, self.gpu_tenths as f32 / 10.0, self.p99_ms, self.worst_ms) } else { format!("cpu {} ms  p99 {} ms  worst {} ms", self.cpu_ms, self.p99_ms, self.worst_ms) }, WHITE),
+            Row::Kv("Screen", format!("{w}x{h}"), WHITE),
+            Row::Kv("Scene", format!("{}x{}  {pct}%", sc.0, sc.1), WHITE),
+            Row::Kv("Dyn. res", set(Opt::DynamicRes), WHITE),
+            Row::Kv("MSAA", format!("{}  [{}]", if ms > 1 { format!("{ms}x") } else { "off".into() }, set(Opt::Msaa)), WHITE),
+            Row::Kv("Post", format!("{}  [{}]", if fast_post() { "fast" } else { "full" }, set(Opt::Post)), WHITE),
+            Row::Kv("FXAA", format!("{}  [{}]", if fxaa() && !fast_post() { "on" } else { "off" }, set(Opt::Fxaa)), WHITE),
+            Row::Kv("Renderer", self.be.gpu_info().chars().take(30).collect::<String>(), WHITE),
+            Row::Kv("Graphics", format!("{}, smooth lighting {}", set(Opt::Graphics), set(Opt::AmbientOcclusion)), WHITE),
+            Row::Kv("Perf", set(Opt::FramerateLimit), WHITE),
+            Row::Kv("Distance", format!("{} chunks", self.opts.chunks()), WHITE),
+            Row::Kv("Chunks", format!("{} loaded  {} meshed", self.chunks.loaded(), self.chunks.meshed()), WHITE),
+            Row::Kv("LoD", if self.lod_on { "on" } else { "off" }.to_string(), YELLOW),
+        ];
+        // The LoD debug mode that is on (the standalone title at the top centre is not drawn while this screen is).
+        if let Some((mode, title)) = self.lod.as_ref().map(|l| (l.debug(), l.debug_title())).filter(|t| t.0 != 0) {
+            right.push(Row::Kv("LoD debug", format!("{mode}: {}", title.split_once(": ").map_or(title, |t| t.1)), YELLOW));
+        }
+        // What the chunk layers asked of the GPU last frame: a frame that is slow with few triangles is not a geometry problem.
+        if let Some((calls, tris)) = self.be.drawn() {
+            right.push(Row::Kv("Drawn", format!("{calls} draws  {}k tris", tris / 1000), WHITE));
+        }
+        right.push(Row::Kv("World", if self.nether { "Nether" } else { "Overworld" }.to_string(), WHITE));
+        (left, right)
+    }
+
+    /// Build the HUD vertex buffer for this frame. Called between the chunk
+    /// and HUD render passes inside `render`.
+    fn build_hud(&mut self) {
+        // Immersive Interfaces (Options > General): `craft`'s geometry and this frame's drawing read the style from here.
+        craft::set_style(self.opts.gui_style, self.opts.panel_scale());
+        // `ext` reads all of `self`, so it is taken before `hud_verts` is borrowed mutably.
+        let ext = self.screen.as_ref().and_then(|s| self.ext(s));
+        let pause_info = self.pause_info();
+        // The debug screen replaces the FPS counter and the LoD debug title; its panels are not drawn under the pause menu.
+        let info_on = self.opts.debug_screen;
+        let dbg = if info_on && !self.touch.paused { Some(self.debug_rows()) } else { None };
+        let worn = self.worn();
+        // Read before `hud_verts` is borrowed mutably (the borrow checker forbids `&self` calls while `v` lives).
+        let held_special = self.held_special();
+        let guard_points = self.held_guard().points; // C9: the orbs above the crosshair
+        // Gauges (NOT b1.7.3, Immersive Pack only, UNVERIFIED): the air on the body, a bandage working, the hearth ticking. Read here, before `v`.
+        let gauge = if world::combat::rules::on() && !self.vitals.dead() {
+            let (air, calm) = (self.air(), !self.vitals.stamina.in_combat());
+            Some((air, self.vitals.mend.bandaged(), world::combat::mend::Mend::hearth_on(self.vitals.health, calm, self.heat_at_hand())))
+        } else {
+            None
+        };
+        // Controlify's button guide (`input/guide.rs`): the state it is worked out from, read here for the same reason.
+        let guide_ig = (!self.touch.paused && self.screen.is_none() && !info_on).then(|| self.guide_in_game());
+        let guide_ct = if !self.touch.paused {
+            let (w, h) = self.be.size();
+            self.guide_container(w as f32, h as f32)
+        } else {
+            None
+        };
+        let v = &mut self.hud_verts;
+        v.clear();
+        let layout = &self.touch.layout;
+        let paused = self.touch.paused;
+        let pressed = |role: PointerRole| self.touch.pointers.values().any(|p| p.role == role);
+        // The in-world controls are hidden while a container screen is open.
+        let play = self.screen.is_none() && self.sign_edit.is_none();
+
+        // C9: the damage vignette and flash, under everything else. One GUI pixel of the combat HUD is the crosshair's size / 15 (the old
+        // crosshair's 0.05 of the short side, so the Immersive Pack's one keeps the size it was tuned to).
+        let rule = world::combat::rules::on();
+        let gu = { let (w, h) = self.be.size(); 0.05 * (w.min(h) as f32) / render::combat_hud::SIZE };
+        if play && rule {
+            let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
+            self.dmg.draw(v, (w, h));
+        }
+
+        // Crosshair: the aim point of the pick ray (first, so the quad cap never drops it). With the Immersive Pack ON it is Cortes Combat's:
+        // three sprites (rest, aim, hit) that grow, shake and redden with what just happened.
+        if play && rule {
+            let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
+            render::combat_hud::draw_crosshair(v, gu, (w * 0.5, h * 0.5), &self.xh);
+        } else if play {
+            let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
+            // `icons.png`'s cross (the Java draws it inverting the pixels behind it; here plain white), the size the two bars had.
+            let s = 0.05 * w.min(h);
+            HudPipeline::push_gui(v, w * 0.5 - s * 0.5, h * 0.5 - s * 0.5, s, s, sp::CROSSHAIR);
+        }
+
+        // The map in hand (`ItemRenderer`'s map branch, here a flat sheet: UNVERIFIED place and size), right of the crosshair.
+        if let (true, Some(m)) = (play, &self.map_held) {
+            let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
+            let size = (0.62 * h).min(0.42 * w);
+            HudPipeline::push_map(v, (((w - size) * 0.5 + 0.2 * w).min(w - size - 0.02 * w), (h - size) * 0.35, size), m);
+        }
+
+        // Dig progress under the crosshair.
+        if play && self.dig.damage > 0.0 {
+            let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
+            let (bw, bh) = (0.12 * w.min(h), (0.012 * w.min(h)).max(3.0));
+            let (bx, by) = (w * 0.5 - bw * 0.5, h * 0.5 + 0.05 * w.min(h));
+            HudPipeline::push_quad(v, bx, by, bw, bh, [0.0, 0.0, 0.0, 0.6]);
+            HudPipeline::push_quad(v, bx, by, bw * self.dig.damage.min(1.0), bh, [1.0, 1.0, 1.0, 0.9]);
+        }
+
+        // Cortes Combat C3 (NOT b1.7.3, UNVERIFIED): the charge bar under the crosshair (white, gold when full; a tick at the minimum hold, below which a
+        // release is a plain tap) and the cooldown mark, the attack indicator: a thin bar that fills until the next swing.
+        if play && world::combat::rules::on() {
+            let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
+            let (bw, bh) = (0.12 * w.min(h), (0.012 * w.min(h)).max(3.0));
+            let (bx, by) = (w * 0.5 - bw * 0.5, h * 0.5 + 0.05 * w.min(h) + bh * 2.0);
+            let swing = world::combat::rules::swing(self.inv.slots[self.touch.hotbar_slot].map(|s| s.id));
+            let full = swing.map_or(0, |s| s.profile.charge().ticks);
+            // C4: the meal's (or the bandage's) progress (brown) takes the bar's place while it is eaten or put on.
+            if let Some(e) = self.eating {
+                HudPipeline::push_quad(v, bx, by, bw, bh, [0.0, 0.0, 0.0, 0.6]);
+                HudPipeline::push_quad(v, bx, by, bw * (1.0 - e.left as f32 / e.total as f32), bh, [0.85, 0.55, 0.25, 0.95]);
+            }
+            // C4: the guard button over the jump button (a shield; lit while the guard is up) with one orb a point, grey while it is staggered.
+            if self.touch.guard_shown && !self.touch.pad.hud_hidden() {
+                let (gx, gy, gw, gh) = self.touch.layout.guard;
+                let g = self.vitals.guard;
+                HudPipeline::push_button(v, gx, gy, gw, gh, if self.touch.guarding() || g.active() { 2 } else { 1 });
+                let shield = if g.stun > 0 { [0.6, 0.6, 0.6, 0.8] } else { [1.0; 4] };
+                HudPipeline::push_quad(v, gx + gw * 0.27, gy + gh * 0.2, gw * 0.46, gh * 0.26, shield);
+                HudPipeline::push_quad(v, gx + gw * 0.33, gy + gh * 0.46, gw * 0.34, gh * 0.18, shield);
+                HudPipeline::push_quad(v, gx + gw * 0.42, gy + gh * 0.64, gw * 0.16, gh * 0.14, shield);
+                for i in 0..g.max {
+                    let ox = gx + gw * 0.5 + (i as f32 - (g.max as f32 - 1.0) * 0.5) * gw * 0.22 - gw * 0.07;
+                    HudPipeline::push_quad(v, ox, gy - gw * 0.2, gw * 0.14, gw * 0.14, if i < g.points { [0.4, 0.8, 1.0, 0.95] } else { [0.0, 0.0, 0.0, 0.5] });
+                }
+            }
+            // C5: the special button, where the guard's would be (no weapon has both): lit while the blade is out or the lunge runs, an icon
+            // by special (an arrow, a fan, a cross) and a dark veil that sinks as its price (cooldown) is paid.
+            if self.touch.special_shown && !self.touch.pad.hud_hidden() {
+                use world::combat::{profile::Special, special};
+                let (sx, sy, sw, sh) = self.touch.layout.special;
+                let kind = held_special;
+                HudPipeline::push_button(v, sx, sy, sw, sh, if self.sp.parrying() || self.sp.lunge.is_some() || self.gun.burning() || self.gun.reloading() { 2 } else { 1 });
+                let c = [1.0; 4];
+                match kind {
+                    Special::Lunge => {
+                        HudPipeline::push_quad(v, sx + sw * 0.2, sy + sh * 0.46, sw * 0.5, sh * 0.08, c);
+                        HudPipeline::push_quad(v, sx + sw * 0.62, sy + sh * 0.36, sw * 0.16, sh * 0.28, c);
+                    }
+                    Special::MultiHit => {
+                        for k in 0..3 {
+                            HudPipeline::push_quad(v, sx + sw * (0.2 + 0.06 * k as f32), sy + sh * (0.28 + 0.16 * k as f32), sw * (0.6 - 0.12 * k as f32), sh * 0.08, c);
+                        }
+                    }
+                    Special::Fusee => {
+                        // C8: a barrel and its spark; a gold dot above it while the gun is loaded.
+                        HudPipeline::push_quad(v, sx + sw * 0.2, sy + sh * 0.46, sw * 0.5, sh * 0.1, c);
+                        HudPipeline::push_quad(v, sx + sw * 0.72, sy + sh * 0.4, sw * 0.1, sh * 0.22, [1.0, 0.7, 0.2, 1.0]);
+                        if self.gun.loaded() {
+                            HudPipeline::push_quad(v, sx + sw * 0.42, sy + sh * 0.22, sw * 0.16, sh * 0.16, [1.0, 0.8, 0.2, 0.95]);
+                        }
+                    }
+                    _ => {
+                        HudPipeline::push_quad(v, sx + sw * 0.46, sy + sh * 0.22, sw * 0.08, sh * 0.56, c);
+                        HudPipeline::push_quad(v, sx + sw * 0.3, sy + sh * 0.36, sw * 0.4, sh * 0.08, c);
+                    }
+                }
+                let left = match (kind, swing) {
+                    (Special::Parry, _) => self.sp.parry_cooldown().0 as f32 / self.sp.parry_cooldown().1 as f32,
+                    (Special::Lunge, Some(s)) => self.swing_cd as f32 / special::lunge_cost(s.interval) as f32,
+                    (Special::MultiHit, Some(s)) => self.swing_cd as f32 / special::sweep_cost(s.interval) as f32,
+                    (Special::Fusee, _) if self.gun.burning() => self.gun.fuse_left(),
+                    (Special::Fusee, _) if self.gun.reloading() => 1.0 - self.gun.reload_progress(),
+                    _ => 0.0,
+                }
+                .min(1.0);
+                if left > 0.0 {
+                    HudPipeline::push_quad(v, sx, sy + sh * (1.0 - left), sw, sh * left, [0.0, 0.0, 0.0, 0.55]);
+                }
+            }
+            // C5: the martillo's streak, one gold orb a hit (up to the nine of a full stack) where the guard orbs would be.
+            if self.sp.streak() > 0 && swing.is_some_and(|s| s.profile == world::combat::profile::Profile::Warhammer) && !self.touch.pad.hud_hidden() {
+                let (gx, gy, gw, _) = self.touch.layout.guard;
+                for i in 0..self.sp.streak().min(9) {
+                    HudPipeline::push_quad(v, gx + gw * 0.05 + i as f32 * gw * 0.1, gy - gw * 0.2, gw * 0.08, gw * 0.08, [1.0, 0.8, 0.2, 0.95]);
+                }
+            }
+            // C9 (Cortes `ChargeBar`, `CooldownBracketLayer`, `GuardOrbsLayer`): the charge bar under the crosshair (nothing before the minimum hold),
+            // the brackets at the cone's edge with a bar from the crosshair out to each that fills as the swing becomes ready, and the guard's points above.
+            let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
+            let c = (w * 0.5, h * 0.5);
+            // C8: on the arcabuz the bar is the gun's own clock: the reload filling, then the fuse burning down.
+            let bar = if self.gun.reloading() { self.gun.reload_progress() } else if self.gun.burning() { self.gun.fuse_left() } else { world::combat::profile::charge_ratio(self.charge, full) };
+            render::combat_hud::draw_charge(v, gu, c, &self.xh, bar);
+            if let Some(s) = swing.filter(|s| s.profile.fights()) {
+                let same = self.swing_held == self.inv.slots[self.touch.hotbar_slot].map(|i| i.id);
+                let ratio = render::combat_hud::cooldown_ratio(self.swing_cd, s.interval, same);
+                // C8 (`displayedFor`): the arcabuz's brackets are its barrel's cone (the right button), not the bayonet's.
+                let angle = if s.profile == world::combat::profile::Profile::Arcabuz { s.profile.shot_reach().h } else { s.reach.h };
+                render::combat_hud::draw_gauge(v, gu, c, &self.xh, angle, (w, h), self.opts.fov_deg(), ratio);
+            }
+            if guard_points > 0 {
+                let g = self.vitals.guard;
+                render::combat_hud::draw_orbs(v, gu, c, g.points, g.max, g.held || g.stun > 0);
+            }
+        }
+
+        // `GuiEditSign`: the title, the board with its four lines (the one being edited is wrapped in `> <` and blinks), and the keys.
+        if let Some(e) = self.sign_edit {
+            let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
+            let (u, keys) = decor::layout(w, h, e.shift);
+            HudPipeline::push_quad(v, 0.0, 0.0, w, h, [0.0, 0.0, 0.0, 0.55]);
+            let title = "Edit sign message:";
+            HudPipeline::push_text(v, (w - HudPipeline::text_width(title) as f32 * u) / 2.0, 14.0 * u, u, title, [1.0; 4]);
+            HudPipeline::push_outlined_quad(v, (w - 130.0 * u) / 2.0, 30.0 * u, 130.0 * u, 64.0 * u, [0.62, 0.49, 0.28, 1.0], [0.25, 0.18, 0.08, 1.0], (2.0 * u).max(2.0));
+            let text = self.signs.get(&e.pos).cloned().unwrap_or_default();
+            let blink = (self.world_ticks as u64 / 6) % 2 == 0;
+            for (k, r) in &keys {
+                let label = match *k {
+                    Key::Line(i) if i == e.line && blink => format!("> {} <", text[i as usize]),
+                    Key::Line(i) => text[i as usize].clone(),
+                    k => decor::label(k),
+                };
+                let (fill, ink) = match *k {
+                    Key::Line(_) => ([0.0; 4], [0.0, 0.0, 0.0, 1.0]),
+                    Key::Shift if e.shift => ([0.2, 0.5, 0.8, 0.97], [1.0; 4]),
+                    Key::Done => ([0.2, 0.55, 0.25, 0.97], [1.0; 4]),
+                    _ => ([0.33, 0.33, 0.33, 0.97], [1.0; 4]),
+                };
+                if fill[3] > 0.0 {
+                    HudPipeline::push_outlined_quad(v, r[0], r[1], r[2], r[3], fill, [0.1, 0.1, 0.1, 1.0], (u).max(1.0));
+                }
+                let tw = HudPipeline::text_width(&label) as f32 * u;
+                HudPipeline::push_text(v, r[0] + (r[2] - tw) / 2.0, r[1] + (r[3] - 8.0 * u) / 2.0, u, &label, ink);
+            }
+        }
+
+        // Container screen: the vanilla GUI (176 x 166 units) over a dimmed frame, slots with their stacks.
+        if let Some(s) = self.screen.as_ref().filter(|_| !self.rei.as_ref().is_some_and(|u| u.covers())) {
+            let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
+            let (ox, oy, k) = craft::panel(s.gw, w, h);
+            let (pw, ph) = craft::panel_size(s.gw);
+            // Immersive Interfaces (NOT b1.7.3, Options > General > GUI Style): the pack's 256 x 256 picture (`craft::art`) instead of the vanilla panel.
+            let art = craft::art(s.gw, w, h);
+            HudPipeline::push_quad(v, 0.0, 0.0, w, h, [0.0, 0.0, 0.0, 0.55]);
+            // The panel is the pack's picture (`GuiInventory` / `GuiCrafting` / `GuiFurnace` / `GuiChest`: a chest is its rows' top, then the
+            // 96 units of the player's inventory from y = 126 of the sheet); the slots are in it, so a slot is only its stack.
+            if let Some((ax, ay, size)) = art {
+                HudPipeline::push_imm(v, ax, ay, size, size, craft::art_sprite(s.gw));
+            } else if s.gw > 3 {
+                let top = 17.0 + 18.0 * (s.gw / 9) as f32;
+                HudPipeline::push_gui(v, ox, oy, pw * k, top * k, (0.0, sp::CHEST_Y, 176.0, top));
+                HudPipeline::push_gui(v, ox, oy + top * k, pw * k, 96.0 * k, (0.0, sp::CHEST_Y + 126.0, 176.0, 96.0));
+            } else {
+                HudPipeline::push_gui(v, ox, oy, pw * k, ph * k, match s.gw { 2 => sp::INVENTORY, 3 => sp::CRAFTING, _ => sp::FURNACE });
+            }
+            // `GuiInventory`: the player at (51, 75) of the panel, straight ahead, an item in hand lowers the arm.
+            if s.gw == 2 {
+                let pose = render::player::Pose { age: self.world_ticks as f32, holding: self.inv.slots[self.touch.hotbar_slot].is_some(), ..Default::default() };
+                // The pack's parchment is the modern inventory's. Vanilla: the doll stands at (51, 75). On the pack's oval (a flood fill of its pixels: centre (49.5, 71.5)
+                // of the panel, 35 x 11 units) he stands at (49.5, 72.5), 12% bigger. UNVERIFIED: not compared on a device.
+                let (dx, dy, dk) = if art.is_some() { (49.5, 72.5, 1.12) } else { (51.0, 75.0, 1.0) };
+                HudPipeline::push_player(v, render::player::inventory_quads(ox + dx * k, oy + dy * k, k * dk, &pose, &worn));
+            }
+            // Icons here are drawn as big in px as the hotbar's (`16 * hw / 20` box, 0.875 of it: 14 hotbar units), not as 16 panel units.
+            // The immersive wells are 16 units of a panel smaller than the hotbar's, so there the icon is 14 units (7/8 of the well), not the hotbar's px.
+            let icon_fill = if art.is_some() { 0.875 } else { 14.0 * layout.hotbar[0].2 / 20.0 / (16.0 * k) };
+            let slot = |v: &mut Vec<HudVertex>, c: (f32, f32, f32), st: Option<ItemStack>| {
+                if let Some(st) = st {
+                    push_stack(v, (c.0 + k, c.1 + k, c.2 - 2.0 * k, c.2 - 2.0 * k), icon_fill, st);
+                }
+            };
+            let furn = s.furnace.and_then(|p| self.furnaces.get(&p));
+            for (id, ux, uy) in craft::layout(s.gw) {
+                slot(v, craft::cell(s.gw, w, h, (ux, uy)), s.get(&self.inv, ext.as_deref(), id));
+            }
+            // The labels of `drawGuiContainerForegroundLayer`, colour 0x404040: the chest's name at (8, 6), "Inventory" at (8, ySize - 96 + 2);
+            // "Crafting" at (28, 6) on the workbench, (86, 16) in the inventory; "Furnace" at (60, 6).
+            // UNVERIFIED: the non-chest positions are recalled, not read from the Java.
+            let ink = [0.25, 0.25, 0.25, 1.0];
+            let labels: &[(&str, f32, f32)] = match s.gw {
+                2 => &[("Crafting", 97.0 - craft::CRAFT_SHIFT as f32, 8.0)], // the pack's panel is the modern one: its grid is at (98, 18), moved left by CRAFT_SHIFT
+                3 => &[("Crafting", 28.0, 6.0), ("Inventory", 8.0, ph - 94.0)],
+                0 => &[("Furnace", 60.0, 6.0), ("Inventory", 8.0, ph - 94.0)],
+                9 => &[("Dispenser", 60.0, 6.0), ("Inventory", 8.0, ph - 94.0)],
+                _ => &[(if s.chests.len() > 1 { "Large chest" } else if s.chests.first().is_some_and(|p| p.0 == i32::MIN) { "Minecart" } else { "Chest" }, 8.0, 6.0), ("Inventory", 8.0, ph - 94.0)],
+            };
+            // The pack hides every title (its pictures carry no text), so the immersive style draws none.
+            for &(text, ux, uy) in labels.iter().filter(|_| art.is_none()) {
+                // 0.75 x: the 8 px glyphs are wider than vanilla's proportional font and ran into the grid and the buttons.
+                if text == "Crafting" {
+                    HudPipeline::push_text_outlined(v, ox + ux * k, oy + uy * k, k * 0.75, (k * 0.3).max(1.0), text, [1.0; 4]); // white, thin black outline
+                } else {
+                    HudPipeline::push_text(v, ox + ux * k, oy + uy * k, k * 0.75, text, ink);
+                }
+            }
+            if let Some(f) = furn {
+                // Cook arrow (fills left to right over 200 ticks) and flame (drains from the top), vanilla positions.
+                let u = |ux: f32, uy: f32, uw: f32, uh: f32| (ox + ux * k, oy + uy * k, uw * k, uh * k);
+                // `GuiFurnace`: the arrow is `cook * 24 / 200 + 1` wide, the flame `burn * 12 / item_burn` + 2 tall from its bottom.
+                let fy = sp::FURNACE.1;
+                let cook = (f.cook as f32 * 24.0 / 200.0).floor() + 1.0;
+                let (ax, ay, ..) = u(79.0, 34.0, 0.0, 0.0);
+                // The pack's furnace picture has its own sprites (`sp::imm::ARROW` 24 x 16, `FLAME` 14 x 14) at the same spots (UNVERIFIED: not compared on a device).
+                if art.is_some() {
+                    let (arx, ary, ..) = sp::imm::ARROW;
+                    HudPipeline::push_imm(v, ax, ay, cook * k, 16.0 * k, (arx, ary, cook, 16.0));
+                } else {
+                    HudPipeline::push_gui(v, ax, ay, cook * k, 16.0 * k, (176.0, fy + 14.0, cook, 16.0));
+                }
+                if f.burn > 0 {
+                    let b = (f.burn as f32 * 12.0 / f.item_burn.max(1) as f32).floor();
+                    let (fx, fyy, ..) = u(56.0, 36.0 + 12.0 - b, 0.0, 0.0);
+                    if art.is_some() {
+                        let (flx, fly, ..) = sp::imm::FLAME;
+                        HudPipeline::push_imm(v, fx, fyy, 14.0 * k, (b + 2.0) * k, (flx, fly + 12.0 - b, 14.0, b + 2.0));
+                    } else {
+                        HudPipeline::push_gui(v, fx, fyy, 14.0 * k, (b + 2.0) * k, (176.0, fy + 12.0 - b, 14.0, b + 2.0));
+                    }
+                }
+            }
+            // The "place one" toggle: blue = whole stacks, orange with a 1 = one at a time (what the right mouse
+            // button does on a desktop). Dragging the stack over slots spreads it without the toggle.
+            let (mx, my, ms) = craft::toggle(s.gw, w, h, 1);
+            let fill = if self.one_mode { [0.85, 0.5, 0.1, 1.0] } else { [0.2, 0.4, 0.7, 1.0] };
+            HudPipeline::push_outlined_quad(v, mx, my, ms, ms, fill, [0.15, 0.15, 0.15, 1.0], k.max(2.0));
+            if self.one_mode {
+                HudPipeline::push_number(v, mx + ms * 0.32, my + ms * 0.2, ms * 0.6, 1, [1.0; 4]);
+            }
+            // The shift-click toggle: left of the other one, green when on (both sit bottom-left of the screen, `craft::toggle`).
+            let (sx, sy, ss) = craft::toggle(s.gw, w, h, 0);
+            let fill = if self.shift_mode { [0.2, 0.7, 0.3, 1.0] } else { [0.2, 0.4, 0.7, 1.0] };
+            HudPipeline::push_outlined_quad(v, sx, sy, ss, ss, fill, [0.15, 0.15, 0.15, 1.0], k.max(2.0));
+            if self.shift_mode {
+                HudPipeline::push_number(v, sx + ss * 0.32, sy + ss * 0.2, ss * 0.6, 2, [1.0; 4]);
+            }
+            // The item viewer's button (REI), third toggle, on the inventory and the crafting table (where its `+` lays recipes out): brown like the pack's panels.
+            if s.gw == 2 || s.gw == 3 {
+                let (rx, ry, rs) = craft::toggle(s.gw, w, h, 2);
+                HudPipeline::push_outlined_quad(v, rx, ry, rs, rs, [0.48, 0.31, 0.2, 1.0], [0.15, 0.15, 0.15, 1.0], k.max(2.0));
+                HudPipeline::push_text_centered(v, rx + rs * 0.5, ry + rs * 0.5 - 4.0 * (rs / 20.0), rs / 20.0, "R", [1.0; 4]);
+            }
+            // The picked-up stack floats just above the finger.
+            if let Some(c) = s.cursor {
+                let (cx, cy) = self.touch.cursor_pos;
+                let sz = 16.0 * k;
+                push_stack(v, (cx - sz * 0.5, cy - sz * 1.4, sz, sz), icon_fill, c);
+            }
+            // Item name while a finger is down (hover has no touch twin): the picked-up stack, else the stack under the
+            // finger. `GuiContainer.drawScreen` names only the hovered slot and only with an empty cursor; the held
+            // stack is named too because a tap picks the slot's stack up and the finger then covers it.
+            if self.gesture.is_some() {
+                let (cx, cy) = self.touch.cursor_pos;
+                let under = || craft::slot_at(s.gw, w, h, cx, cy).and_then(|id| s.get(&self.inv, ext.as_deref(), id));
+                if let Some((st, name)) = s.cursor.or_else(under).and_then(|st| items::name(st).map(|n| (st, n))) {
+                    let lines = world::combat::tooltip::lines(st); // C6: empty unless a Cortes weapon or tool of a pack world
+                    let (bw, bh) = HudPipeline::tooltip_size(name, &lines);
+                    let (bw, extra) = (bw * k, (bh - 14.0) * k);
+                    let ty = if cy > 36.0 * k + extra { cy - 34.0 * k - extra } else { cy + 14.0 * k };
+                    HudPipeline::push_tooltip_lines(v, (cx - bw * 0.5).clamp(0.0, (w - bw).max(0.0)), ty, k, name, &lines);
+                }
+            }
+        }
+
+        // An open screen hides the four top-right buttons; one X, in the pause button's place and the viewer's look, closes it (`LayoutRects::close`).
+        let x_only = self.touch.screen && !paused;
+        if x_only && !self.touch.pad.hud_hidden() {
+            let (cx, cy, cw, ch) = layout.close;
+            rei::close_button(v, [cx, cy, cw, ch], self.opts.rei_theme, pressed(PointerRole::Inventory));
+        }
+        if !x_only && !self.touch.pad.hud_hidden() {
+        // Pause button: top-right, two bars.
+        let (px, py, pw, ph) = layout.pause;
+        HudPipeline::push_button(v, px, py, pw, ph, if pressed(PointerRole::Pause) { 2 } else { 1 });
+        let bar_w = pw * 0.18;
+        let bar_h = ph * 0.50;
+        let bar_y = py + (ph - bar_h) * 0.5;
+        let bx0 = px + (pw - bar_w * 3.0) * 0.5;
+        HudPipeline::push_quad(v, bx0, bar_y, bar_w, bar_h, [1.0; 4]);
+        HudPipeline::push_quad(v, bx0 + bar_w * 2.0, bar_y, bar_w, bar_h, [1.0; 4]);
+
+        // Inventory button, left of pause: a 2x2 grid icon (the crafting grid of the screen it opens).
+        let (ix, iy, iw, ih) = layout.inventory;
+        HudPipeline::push_button(v, ix, iy, iw, ih, if pressed(PointerRole::Inventory) || !play { 2 } else { 1 });
+        let (q, g) = (iw * 0.22, iw * 0.08);
+        let (qx, qy) = (ix + (iw - q * 2.0 - g) * 0.5, iy + (ih - q * 2.0 - g) * 0.5);
+        for (dx, dy) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)] {
+            HudPipeline::push_quad(v, qx + dx * (q + g), qy + dy * (q + g), q, q, [1.0; 4]);
+        }
+
+        // View button, left of zoom: a person (head over body), lit in the third-person view.
+        let (vx, vy, vw, vh) = layout.view;
+        HudPipeline::push_button(v, vx, vy, vw, vh, if self.touch.third || pressed(PointerRole::View) || !play { 2 } else { 1 });
+        HudPipeline::push_quad(v, vx + vw * 0.38, vy + vh * 0.2, vw * 0.24, vh * 0.24, [1.0; 4]);
+        HudPipeline::push_quad(v, vx + vw * 0.32, vy + vh * 0.48, vw * 0.36, vh * 0.32, [1.0; 4]);
+
+        // Zoom button, left of the inventory button: a Z (Zoomify), lit while held.
+        let (zx, zy, zw, zh) = layout.zoom;
+        HudPipeline::push_button(v, zx, zy, zw, zh, if pressed(PointerRole::Zoom) || !play { 2 } else { 1 });
+        HudPipeline::push_text_centered(v, zx + zw * 0.5, zy + (zh - 8.0 * zh / 20.0) * 0.5, zh / 20.0, "Z", [1.0; 4]);
+        }
+
+        // Hotbar (`GuiIngame`): the 182 x 22 strip (20 units a slot, a unit = a ninth-cell / 20), then the 24 x 24 selector over the slot
+        // in use, then the stacks. The touch cells are the slots, so the strip is drawn around them.
+        if play {
+            let (hx, hy, hw, _) = layout.hotbar[0];
+            let u = hw / 20.0;
+            let (sx, _, _, _) = layout.hotbar[self.touch.hotbar_slot];
+            if self.opts.gui_style {
+                // Immersive Interfaces' leather strip and its 24 x 23 selector (the strip is the same 182 x 22, so the slots keep their places).
+                HudPipeline::push_imm(v, hx - u, hy - u, 182.0 * u, 22.0 * u, sp::imm::HOTBAR);
+                HudPipeline::push_imm(v, sx - 2.0 * u, hy - 2.0 * u, 24.0 * u, 23.0 * u, sp::imm::SELECTOR);
+            } else {
+                HudPipeline::push_gui(v, hx - u, hy - u, 182.0 * u, 22.0 * u, sp::HOTBAR);
+                HudPipeline::push_gui(v, sx - 2.0 * u, hy - 2.0 * u, 24.0 * u, 24.0 * u, sp::SELECTOR);
+            }
+        }
+        for (i, &(hx, hy, hw, _)) in layout.hotbar.iter().enumerate().filter(|_| play) {
+            if let Some(s) = self.inv.slots[i] {
+                let u = hw / 20.0; // the slot is 20 units, its item 16 at (2, 2)
+                push_stack(v, (hx + 2.0 * u, hy + 2.0 * u, 16.0 * u, 16.0 * u), 0.875, s); // icon 14 of the 16 units
+            }
+        }
+
+        // A bed was tapped by day.
+        if play && self.hint > 0.0 {
+            let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
+            let k = craft::hud_k(w, h) * 0.75;
+            let msg = self.hint_msg;
+            let bw = (HudPipeline::text_width(msg) as f32 + 6.0) * k;
+            HudPipeline::push_tooltip(v, (w - bw) * 0.5, h * 0.62, k, msg);
+        }
+
+        // Name of the item just switched to, centred above the hotbar and the hearts.
+        // UNVERIFIED: not in b1.7.3 (Beta 1.8 added it); the 2 s, the 0.75 scale and the spot are invented.
+        if let (true, Some((st, name))) = (play && self.tip.1 > 0.0, self.inv.slots[self.touch.hotbar_slot].and_then(|st| items::name(st).map(|n| (st, n)))) {
+            let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
+            let (k0, (hx, hy, hw, _)) = (craft::hud_k(w, h), layout.hotbar[4]);
+            let k = k0 * 0.75;
+            // Almanac: the clock's line under its name (only the clock: a weapon's lines stay out of this flash).
+            let lines = if st.id == world::biomelife::CLOCK { world::combat::tooltip::lines(st) } else { Vec::new() };
+            let (bw, bh) = HudPipeline::tooltip_size(name, &lines);
+            HudPipeline::push_tooltip_lines(v, hx + hw * 0.5 - bw * k * 0.5, hy - 34.0 * k0 - (bh - 14.0) * k, k, name, &lines);
+        }
+
+        if play {
+            // Hearts (GuiIngame: 10, 8 units apart on the 20 unit hotbar cells, left half, above the hotbar): a full
+            // heart is 2 health. Air bubbles sit over the right half while the eye is under water: whole ones
+            // `ceil((air - 2) * 10 / 300)`, then the one that is about to pop. Armor sits on the row above, left (`GuiIngame`).
+            let (hx, hy, hw, _) = layout.hotbar[0];
+            let (sz, y) = (hw * 0.45, hy - hw * 0.6);
+            for i in 0..10 {
+                let x = hx + i as f32 * hw * 0.4;
+                let at = 2 * i + 1;
+                HudPipeline::push_gui(v, x, y, sz, sz, sp::HEART_BG);
+                if at < self.vitals.health {
+                    HudPipeline::push_gui(v, x, y, sz, sz, sp::HEART_FULL);
+                } else if at == self.vitals.health {
+                    HudPipeline::push_gui(v, x, y, sz, sz, sp::HEART_HALF);
+                }
+            }
+            // Stamina (`StaminaFeatureClient.renderStamina`): the half hearts it no longer covers, from the right, get a grey half-heart overlay
+            // (alpha 0x9c, 0xcc while locked), 4 of the heart's 9 px each. ponytail: the hearts do not shake at low health here, so neither does it.
+            let (st, hp) = (&self.vitals.stamina, self.vitals.health.min(vitals::MAX_HEALTH));
+            let tint = gauge.map_or([1.0; 3], |g| world::biomelife::tint(g.0)); // Gauges: warm in the heat, cool in the cold
+            for h in st.halves(hp)..hp {
+                let (u, spr) = (if h % 2 == 0 { 1.0 } else { 5.0 }, sp::STAMINA);
+                HudPipeline::push_gui_tinted(v, hx + (h / 2) as f32 * hw * 0.4 + u * sz / 9.0, y, sz * 4.0 / 9.0, sz, (spr.0 + u, spr.1, 4.0, spr.3), [tint[0], tint[1], tint[2], if st.locked { 0.8 } else { 0.612 }]);
+            }
+            // Gauges: the marks right of the tenth heart (heat, cold, a bandage, the hearth).
+            if let Some((air, bandaged, hearth)) = gauge {
+                let m = render::combat_hud::marks(air.hot, air.cold, bandaged, hearth);
+                render::combat_hud::draw_marks(v, (hx + 10.0 * hw * 0.4 + sz * 0.3, y), sz, &m);
+            }
+            // Armor bar (GuiIngame): 10 shields over the hearts, a full one is 2 armor points, a half one 1.
+            if self.vitals.armor > 0 {
+                for i in 0..10 {
+                    let x = hx + i as f32 * hw * 0.4;
+                    let at = 2 * i + 1;
+                    let s = if at < self.vitals.armor { sp::ARMOR_FULL } else if at == self.vitals.armor { sp::ARMOR_HALF } else { sp::ARMOR_EMPTY };
+                    HudPipeline::push_gui(v, x, y - sz * 1.2, sz, sz, s);
+                }
+            }
+            if self.vitals.air < vitals::MAX_AIR {
+                let air = self.vitals.air as f32;
+                let whole = ((air - 2.0) * 10.0 / 300.0).ceil().max(0.0) as i32;
+                let popping = (air * 10.0 / 300.0).ceil().max(0.0) as i32 - whole;
+                let (rx, _, rw, _) = layout.hotbar[8];
+                for i in 0..whole + popping {
+                    let s = if i < whole { sp::BUBBLE } else { sp::BUBBLE_POP };
+                    HudPipeline::push_gui(v, rx + rw - sz - i as f32 * hw * 0.4, y - hw * 0.5, sz, sz, s);
+                }
+            }
+
+            // A pad, keyboard or mouse in hand hides the touch buttons (Controllify's `InputMode`); they stay where they are and still answer a finger.
+            // Touch d-pad (Stone D-pad sprites): the four arrows always, a corner only while an arrow beside it is held; the held button
+            // is drawn pressed. The cell is the hit area, the button is drawn `dpad_gap` smaller inside it, a corner (18 of 22 px)
+            // smaller still and centred.
+            let t = &self.touch;
+            for i in (0..8).filter(|&i| !t.pad.hud_hidden() && t.dpad_shown(i)) {
+                let spr = if t.dir == Some(i) { sp::DPAD_PRESSED[i] } else { sp::DPAD[i] };
+                let (cx, cy, cw, ch) = layout.dpad[i];
+                let k = (cw - layout.dpad_gap) / 22.0 * spr.2; // the arrows are 22 px, a corner 18: same pixel size
+                HudPipeline::push_gui(v, cx + (cw - k) * 0.5, cy + (ch - k) * 0.5, k, k, spr);
+            }
+            if !t.pad.hud_hidden() {
+                let (sx, sy, sw, sh) = layout.sneak;
+                let g = layout.dpad_gap * 0.5;
+                HudPipeline::push_gui(v, sx + g, sy + g, sw - 2.0 * g, sh - 2.0 * g, if t.sneak { sp::SNEAK_ON } else { sp::SNEAK });
+                let (jx, jy, jw, jh) = layout.jump;
+                HudPipeline::push_gui(v, jx, jy, jw, jh, if t.jumping() { sp::JUMP_ON } else { sp::JUMP });
+            }
+        }
+
+        // The LoD debug mode that is on, centred at the top (also while playing, not only in the pause menu).
+        if let Some(title) = self.lod.as_ref().map(|l| l.debug_title()).filter(|t| !t.is_empty() && !info_on) {
+            let (w, dh) = (self.be.size().0 as f32, (self.be.size().1 as f32 * 0.05).max(14.0));
+            let tw = HudPipeline::text_width(title) as f32;
+            let k = (dh / 10.0).min(w * 0.55 / tw);
+            let (tx, ty) = (w * 0.5, dh * 0.45);
+            HudPipeline::push_quad(v, tx - tw * k * 0.5 - k * 3.0, ty - k * 2.0, tw * k + k * 6.0, 8.0 * k + k * 4.0, [0.0, 0.0, 0.0, 0.55]);
+            HudPipeline::push_text_centered(v, tx, ty, k, title, [1.0, 1.0, 0.4, 1.0]);
+        }
+
+        // The debug screen (`render::debug`): two panels in the GUI scale.
+        if let Some((left, right)) = &dbg {
+            let (w, h) = self.be.size();
+            let (k, ..) = crate::menu::scaled_gs(w as f32, h as f32, self.opts.gui_scale);
+            crate::render::debug::draw(v, w as f32, k, left, right);
+        }
+
+        // The game menu (`GuiIngameMenu`, the death screen when dead), over the dimmed frame.
+        if paused {
+            let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
+            if let Some(u) = self.preview.as_mut() {
+                v.clear(); // it fills the screen; what the frame drew before would only use up the HUD pass's quads
+                u.draw(v, w, h, self.opts.gui_scale);
+            } else if let Some(u) = &self.rei {
+                u.draw(v, w, h, &self.opts, None);
+            } else if let Some(u) = &self.gen_ui {
+                u.draw(v, w, h, self.opts.gui_scale, true);
+            } else if let Some(u) = &self.stats_ui {
+                u.draw(v, w, h, &self.opts, &self.stats);
+            } else if let Some(p) = &self.pause {
+                p.draw(v, w, h, &self.opts, &pause_info);
+            }
+        }
+        if let (false, Some(u)) = (paused, &self.rei) {
+            let (w, h) = self.be.size();
+            let (w, h) = (w as f32, h as f32);
+            u.draw(v, w, h, &self.opts, self.screen.as_ref().map(|s| craft::panel_rect(s.gw, w, h)));
+        }
+        {
+            let (w, h) = self.be.size();
+            self.toast.draw(v, w as f32, h as f32, &self.opts);
+        }
+
+        // The pad's radial hotbar, and its cursor in any GUI (the pause menu, a container).
+        {
+            let (w, h) = { let (w, h) = self.be.size(); (w as f32, h as f32) };
+            let t = &self.touch;
+            let cur = (t.pad.shows_cursor() && (paused || t.screen)).then_some(t.cursor_pos);
+            // Over a slot the cursor stays smaller than the slot: 60% of the panel's 16-unit slot.
+            let cap = match self.screen.as_ref() {
+                Some(s) if !paused => 16.0 * craft::panel(s.gw, w, h).2 * 0.6,
+                _ => f32::INFINITY,
+            };
+            t.pad.draw(v, w, h, t.hotbar_slot, cur, cap);
+            // Controlify's button guide: the in-game one while playing (not under the debug screen), the container's with a screen open.
+            let (s, ..) = crate::menu::scaled_gs(w, h, self.opts.gui_scale);
+            use crate::input::guide::Domain;
+            if let Some(g) = &guide_ig {
+                self.touch.pad.draw_guide(v, &self.opts.pad, w, h, s, Domain::InGame(g));
+            }
+            if let Some(c) = &guide_ct {
+                self.touch.pad.draw_guide(v, &self.opts.pad, w, h, s, Domain::Container(c));
+            }
+        }
+
+        // Cap to the buffer capacity; extra quads are silently dropped.
+        let max = crate::gles::HUD_QUADS * 6;
+        if v.len() > max {
+            v.truncate(max);
+        }
+    }
+}
+
+/// The chunk manager of a dimension of the world with this seed: the overworld's (of the world's type) or the Nether's.
+fn chunk_manager(seed: i64, ty: WorldType, nether: bool) -> ChunkManager {
+    if nether { ChunkManager::new_nether(seed, RENDER_DIST) } else { ChunkManager::new_typed(seed, RENDER_DIST, ty) }
+}
+
+/// A new world's spawn point (feet position): dry ground closest to the centre of chunk (0, 0), not under water (a
+/// fixed spawn at y=60 put the camera inside the sea), and not on top of a tree. Needs the chunks `start` and the next in x and z final
+/// (`start`: the chunk of the world's start, (0, 0) unless `land_start` moved it).
+fn find_spawn(chunks: &ChunkManager, start: (i32, i32)) -> glam::Vec3 {
+    let (ox, oz) = (start.0 * 16, start.1 * 16);
+    let top_of = |x: i32, z: i32| {
+        (0..crate::world::chunk::H as i32).rev().find(|&y| !matches!(chunks.block(x, y, z), Some(0 | 8 | 9 | 17 | 18)) && !chunks.block(x, y, z).is_some_and(is_plant)).unwrap_or(-1)
+    };
+    let mut best: Option<(i32, i32, i32, i32)> = None; // x, z, top, dist^2
+    let mut highest = (ox + 8, oz + 8, i32::MIN);
+    for z in oz..oz + 32 {
+        for x in ox..ox + 32 {
+            let t = top_of(x, z);
+            if t > highest.2 { highest = (x, z, t); }
+            if t >= 64 {
+                let d2 = (x - ox - 8).pow(2) + (z - oz - 8).pow(2);
+                if best.map_or(true, |b| d2 < b.3) { best = Some((x, z, t, d2)); }
+            }
+        }
+    }
+    let (spawn_x, spawn_z, top) = match best {
+        Some((x, z, t, _)) => (x, z, t),
+        None => highest,
+    };
+    let spawn_feet_y = (top as f32) + 1.0 + 0.9;
+    log::info!("chunks: render distance {}, spawn at ({}, {}, {}), top block y={}", RENDER_DIST, spawn_x, spawn_feet_y, spawn_z, top);
+    glam::Vec3::new(spawn_x as f32 + 0.5, spawn_feet_y, spawn_z as f32 + 0.5)
+}
+
+/// The biome colour of a block icon: the plains climate (temperature 0.8, humidity 0.4), as `rgb` floats.
+fn icon_tint(c: u32) -> [f32; 3] {
+    [(c >> 16 & 255) as f32 / 255.0, (c >> 8 & 255) as f32 / 255.0, (c & 255) as f32 / 255.0]
+}
+
+/// A block stack as the inventory draws it (`RenderItem.drawItemIntoGui`): cubes (a slab half high) as an isometric cube with the
+/// grass and leaf tints, everything with another shape (plants, torches, rails, the ladder, wire, doors, signs, the lever, the
+/// button, the bed...) as its flat tile. `false`: the block has no tile (the caller draws the flat colour).
+fn push_block_icon(v: &mut Vec<HudVertex>, (x, y, w, h): (f32, f32, f32, f32), s: ItemStack) -> bool {
+    let (id, meta) = (s.id as u8, items::icon_meta(s));
+    let tile = |side: u8| atlas::terrain_tile(id, meta, side).map(u16::from);
+    let flat = items::flat_icon(id);
+    let grass = icon_tint(crate::world::climate::grass(0.8, 0.4));
+    let white = [1.0; 3];
+    if flat {
+        let Some(t) = tile(2) else { return false };
+        let rgb = if id == 31 && meta != 0 { grass } else { white };
+        HudPipeline::push_tile(v, x, y, w, h, t, rgb);
+        return true;
+    }
+    let (Some(top), Some(left), Some(right)) = (tile(1), tile(3), tile(5)) else { return false };
+    let tint = match id {
+        2 => [grass, white, white],
+        18 => {
+            let c = match meta & 3 { 1 => crate::world::climate::PINE, 2 => crate::world::climate::BIRCH, _ => crate::world::climate::foliage(0.8, 0.4) };
+            [icon_tint(c); 3]
+        }
+        _ => [white; 3],
+    };
+    let overlay = (id == 2).then_some((38, grass));
+    // The cactus tiles are 14 wide inside a transparent border (the world mesh pulls its faces in by 1/16): trim it so the cube stays solid.
+    HudPipeline::push_cube(v, (x, y, w, h), [(top, tint[0]), (left, tint[1]), (right, tint[2])], overlay, items::icon_height(id as u16), if id == 81 { 1.0 } else { 0.0 });
+    true
+}
+
+/// One item stack drawn into the 16 x 16 unit item box `(x, y, w, h)` (`hw / 16` px a unit): the flat colour of its tile (a tool is a stick-coloured handle
+/// with a head in the material colour, shaped per kind, so pickaxe, axe, shovel, sword and hoe can be told apart), a wear bar
+/// under a damaged tool, and the count bottom right in the font with a shadow like `RenderItem.renderItemOverlayIntoGUI`
+/// (shown above 1 only).
+// UNVERIFIED: the head shapes and the wear-bar colours are stand-ins for the item sprites and `renderItemOverlay`.
+fn push_stack(v: &mut Vec<HudVertex>, (cx, cy, cw, ch): (f32, f32, f32, f32), fill: f32, s: ItemStack) {
+    let u = cw / 16.0;
+    // The count and the wear bar keep the 16 unit box; the icon alone is drawn `fill` of it, centred (the hotbar draws it a little smaller).
+    let (hx, hy, hw, hh) = (cx + cw * (1.0 - fill) * 0.5, cy + ch * (1.0 - fill) * 0.5, cw * fill, ch * fill);
+    let rgb = |tile: u16| {
+        let c = atlas::tile_color(tile);
+        [c[0] as f32 / 255.0, c[1] as f32 / 255.0, c[2] as f32 / 255.0, 1.0]
+    };
+    let (ix, iy, iw, ih) = (hx + u, hy + u, hw - u * 2.0, hh - u * 2.0);
+    // Blocks are their isometric cube (plants, torches, rails... their flat tile), items their `gui/items.png` sprite (tools and shears
+    // included); anything without either keeps the flat shapes.
+    if !(s.id < 256 && push_block_icon(v, (hx, hy, hw, hh), s)) {
+    match (s.id >= 256).then(|| atlas::item_icon_dmg(s.id, s.damage)).flatten() { // a dye's colour is its damage
+    Some(icon) => HudPipeline::push_sprite(v, hx, hy, hw, hh, icon),
+    None => match craft::tool(s.id) {
+        None if s.id == craft::SHEARS => {
+            // Two blades over a grip.
+            let c = rgb(items::tile(s.id).into());
+            HudPipeline::push_quad(v, ix + iw * 0.15, iy, iw * 0.2, ih * 0.6, c);
+            HudPipeline::push_quad(v, ix + iw * 0.65, iy, iw * 0.2, ih * 0.6, c);
+            HudPipeline::push_quad(v, ix + iw * 0.25, iy + ih * 0.6, iw * 0.5, ih * 0.4, rgb(17));
+        }
+        None => HudPipeline::push_quad(v, ix, iy, iw, ih, rgb(items::stack_tile(s))),
+        Some((kind, _)) => {
+            HudPipeline::push_quad(v, ix + iw * 0.42, iy, iw * 0.16, ih, rgb(17));
+            let head = rgb(items::tile(s.id).into());
+            match kind {
+                craft::Kind::Sword => {
+                    HudPipeline::push_quad(v, ix + iw * 0.4, iy, iw * 0.2, ih * 0.7, head);
+                    HudPipeline::push_quad(v, ix + iw * 0.2, iy + ih * 0.68, iw * 0.6, ih * 0.1, head);
+                }
+                craft::Kind::Hoe => HudPipeline::push_quad(v, ix + iw * 0.42, iy, iw * 0.5, ih * 0.18, head),
+                craft::Kind::Pickaxe => HudPipeline::push_quad(v, ix, iy, iw, ih * 0.22, head),
+                craft::Kind::Axe => HudPipeline::push_quad(v, ix, iy, iw * 0.58, ih * 0.38, head),
+                craft::Kind::Shovel => HudPipeline::push_quad(v, ix + iw * 0.28, iy, iw * 0.44, ih * 0.32, head),
+            }
+        }
+    }}}
+    push_overlay(v, (cx, cy, cw, ch), s);
+}
+
+/// The wear bar under a damaged tool and the count of a stack, in the 16 unit box `(cx, cy, cw, ch)` (what `push_stack` ends with; the
+/// pack's 3D stacks have only this on the HUD).
+fn push_overlay(v: &mut Vec<HudVertex>, (cx, cy, cw, _): (f32, f32, f32, f32), s: ItemStack) {
+    let u = cw / 16.0;
+    if let Some(max) = craft::max_damage(s.id).filter(|_| s.damage > 0) {
+        // `renderItemOverlayIntoGUI`: a 13 x 2 unit bar at (2, 13), black behind the green-to-red fill.
+        let left = (1.0 - s.damage as f32 / max as f32).clamp(0.0, 1.0);
+        HudPipeline::push_quad(v, cx + 2.0 * u, cy + 13.0 * u, 13.0 * u, 2.0 * u, [0.0, 0.0, 0.0, 1.0]);
+        HudPipeline::push_quad(v, cx + 2.0 * u, cy + 13.0 * u, 13.0 * u * left, u, [1.0 - left, left, 0.0, 1.0]);
+    }
+    if s.count > 1 {
+        HudPipeline::push_count(v, cx, cy, u, s.count as u32);
+    }
+}
+
+/// Match the swapchain to the real window size. Hiding the nav bar or rotating changes the
+/// window size; a swapchain left at the old size gets scaled by Android to fit = stretched.
+fn sync_size(app: &AndroidApp, state: &mut Option<App>) {
+    let (Some(a), Some(win)) = (state.as_mut(), app.native_window()) else { return };
+    let (w, h) = (win.width().max(1) as u32, win.height().max(1) as u32);
+    if (w, h) != a.be.size() {
+        a.resize(w, h);
+    }
+}
+
+/// Spawn the GPU init thread for the current window (Vulkan, or GLES where there is no Vulkan driver).
+fn start_init(app: &AndroidApp) -> Option<std::thread::JoinHandle<Result<App, String>>> {
+    struct NativePtr(usize);
+    unsafe impl Send for NativePtr {}
+    let window = app.native_window()?;
+    let ptr = window.ptr().as_ptr() as usize;
+    let init_w = window.width().max(1) as u32;
+    let init_h = window.height().max(1) as u32;
+    // App-private storage, where the world is saved.
+    let dir = app.internal_data_path().unwrap_or_else(std::env::temp_dir);
+    // Where Import Custom Skin looks: the phone's Download and Pictures folders (they need the storage permission, `storage.rs`), a
+    // `MinecraftRS` folder of the user's own, and `Android/data/<package>/files`. ponytail: `/storage/emulated/0` is the primary user's
+    // shared storage on every phone this targets; the upgrade for a work profile or a secondary user is `Environment.getExternalStorageDirectory`.
+    let shared = std::path::Path::new("/storage/emulated/0");
+    let dirs = ["Download", "Pictures", "MinecraftRS"].map(|d| shared.join(d)).into_iter().chain(app.external_data_path()).collect();
+    let _ = skin::SKIN_DIRS.set(dirs);
+    log::info!("M3: InitWindow, native {init_w}x{init_h}, starting GPU init thread");
+    let h = std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let r = std::panic::catch_unwind(|| pollster::block_on(App::init(ptr as *mut c_void, init_w, init_h, dir)));
+            match r {
+                Ok(Ok(a)) => Ok(a),
+                Ok(Err(e)) => {
+                    log::error!("M3 init error: {e}");
+                    Err(e)
+                }
+                Err(p) => {
+                    let msg = if let Some(s) = p.downcast_ref::<&str>() {
+                        s.to_string()
+                    } else if let Some(s) = p.downcast_ref::<String>() {
+                        s.clone()
+                    } else {
+                        "<unknown panic>".to_string()
+                    };
+                    log::error!("M3 init panic: {msg}");
+                    Err(format!("panic: {msg}"))
+                }
+            }
+        })
+        .expect("spawn");
+    Some(h)
+}
+
+/// A key of the phone's soft keyboard for the menu's text field: Del erases, Enter / Back close it, the rest is looked up in the
+/// device's key map (`KeyEvent.getUnicodeChar`). UNVERIFIED: not built or run on a device (IME composition, e.g. predictive text, is not handled).
+fn rei_key(app: &AndroidApp, r: &mut rei::ReiUi, k: &android_activity::input::KeyEvent) {
+    use android_activity::input::{KeyAction, KeyMapChar, Keycode};
+    if k.action() != KeyAction::Down {
+        return;
+    }
+    match k.key_code() {
+        Keycode::Del => r.backspace(),
+        Keycode::Enter | Keycode::NumpadEnter | Keycode::Back => r.end_typing(),
+        code => {
+            if let Ok(map) = app.device_key_character_map(k.device_id()) {
+                if let Ok(KeyMapChar::Unicode(c)) = map.get(code, k.meta_state()) {
+                    r.type_char(c);
+                }
+            }
+        }
+    }
+}
+
+fn menu_key(app: &AndroidApp, m: &mut Menu, k: &android_activity::input::KeyEvent) {
+    use android_activity::input::{KeyAction, KeyMapChar, Keycode};
+    if k.action() != KeyAction::Down {
+        return;
+    }
+    match k.key_code() {
+        Keycode::Del => m.backspace(),
+        Keycode::Enter | Keycode::NumpadEnter | Keycode::Back => m.end_typing(),
+        code => {
+            if let Ok(map) = app.device_key_character_map(k.device_id()) {
+                if let Ok(KeyMapChar::Unicode(c)) = map.get(code, k.meta_state()) {
+                    m.type_char(c);
+                }
+            }
+        }
+    }
+}
+
+#[no_mangle]
+fn android_main(app: AndroidApp) {
+    #[cfg(target_os = "android")]
+    android_logger::init_once(
+        android_logger::Config::default()
+            .with_max_level(log::LevelFilter::Info)
+            .with_tag("mc-rs"),
+    );
+    #[cfg(not(target_os = "android"))]
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .try_init();
+
+    std::panic::set_hook(Box::new(|info| {
+        log::error!("PANIC: {info}");
+    }));
+
+    let mut self_main_frames: u64 = 0;
+    let mut app_state: Option<App> = None;
+    let mut init_handle: Option<std::thread::JoinHandle<Result<App, String>>> = None;
+    let mut running = true;
+    let mut last_input = Instant::now();
+    let mut kbd_up = false;
+    let mut sustained: Option<bool> = None; // the last `immersive::set_sustained` value (None: ask again)
+    let mut frame_hint = -1.0f32; // the last `immersive::set_frame_rate` value (-1: the window is new, ask again)
+
+    while running {
+        // The skin picker found nothing: ask for the storage permission (a no-op once it is given).
+        if skin::ASK_STORAGE.swap(false, std::sync::atomic::Ordering::Relaxed) {
+            storage::request(&app);
+        }
+        // Once the world is up the loop must not wait for events: an empty poll sleeps its whole timeout, and that 8 ms was added to EVERY
+        // frame without a touch event (CPU time + 8 ms > 16.7 ms drops a 60 fps frame to 30). Frames are paced by the swap chain (Fifo).
+        // Before the window and the GPU exist there is nothing to draw, so the loop may sleep.
+        // A menu left alone for a second (the world is frozen behind it) idles in the poll itself: 33 ms on the title screen, 90 ms behind the
+        // game menu. Any touch or pad event ends the poll at once, so the menu answers a finger in one frame instead of up to 90 ms later.
+        // Not while the atmosphere editor is up: the clouds drift behind it, so it runs at full rate.
+        let wait = match app_state.as_ref() {
+            None => Duration::from_millis(8),
+            Some(a) if (a.touch.paused || a.menu.is_some()) && a.opts.atmos.view.is_none() && !a.touch.pad.active() && last_input.elapsed() > Duration::from_secs(1) => {
+                Duration::from_millis(if a.menu.is_some() { 33 } else { 90 })
+            }
+            Some(_) => Duration::ZERO,
+        };
+        app.poll_events(Some(wait), |event| {
+            if let PollEvent::Main(main_event) = event {
+                match main_event {
+                    MainEvent::InitWindow { .. } => {
+                        immersive::hide_system_bars(&app);
+                        frame_hint = -1.0;
+                        sustained = None;
+                        init_handle = start_init(&app);
+                    }
+                    MainEvent::InputAvailable => {
+                        last_input = Instant::now();
+                        if let Ok(mut iter) = app.input_events_iter() {
+                            // `next` handles one queued event per call; loop so
+                            // multi-touch moves and Up events are never dropped.
+                            while iter.next(|event| match event {
+                                // Game-pad sticks / triggers / hat, and its buttons (reported handled: Android would turn B into Back).
+                                IEv::MotionEvent(m) if input::gamepad::is_pad_motion(&m) => {
+                                    if let Some(a) = app_state.as_mut() {
+                                        a.touch.pad.on_motion(&m);
+                                    }
+                                    InputStatus::Handled
+                                }
+                                IEv::KeyEvent(k) => match app_state.as_mut() {
+                                    // not a guard: a guard binds `a` immutably, `on_key` needs it mutable
+                                    // The create / rename screen's text field: the phone's soft keyboard types into it.
+                                    Some(a) => if a.rei.as_ref().is_some_and(rei::ReiUi::typing) {
+                                        if let Some(r) = a.rei.as_mut() {
+                                            rei_key(&app, r, &k);
+                                        }
+                                        InputStatus::Handled
+                                    } else if a.menu.as_ref().is_some_and(Menu::typing) {
+                                        if let Some(m) = a.menu.as_mut() {
+                                            menu_key(&app, m, &k);
+                                        }
+                                        InputStatus::Handled
+                                    } else if a.touch.pad.on_key(&k) {
+                                        InputStatus::Handled
+                                    } else {
+                                        a.touch.pad.kbm |= matches!(k.source(), android_activity::input::Source::Keyboard);
+                                        InputStatus::Unhandled
+                                    },
+                                    None => InputStatus::Unhandled,
+                                },
+                                IEv::MotionEvent(m) => {
+                                    if let Some(a) = app_state.as_mut() {
+                                        match m.source() {
+                                            android_activity::input::Source::Mouse => a.touch.pad.kbm = true,
+                                            android_activity::input::Source::Touchscreen => a.touch.pad.kbm = false,
+                                            _ => {}
+                                        }
+                                        a.on_motion(&m);
+                                    }
+                                    InputStatus::Unhandled
+                                }
+                                _ => InputStatus::Unhandled,
+                            }) {}
+                        }
+                    }
+                    MainEvent::TerminateWindow { .. } => {
+                        // Window is going away (home button, rotate, etc): the world is rebuilt from the save on
+                        // return, so save everything first. Then drop the surface before the ANativeWindow dies.
+                        if let Some(a) = app_state.as_mut() {
+                            a.save(usize::MAX);
+                        }
+                        app_state = None;
+                    }
+                    // The process may be killed after this without another event.
+                    MainEvent::Pause => {
+                        if let Some(a) = app_state.as_mut() {
+                            a.save(usize::MAX);
+                        }
+                    }
+                    MainEvent::GainedFocus => {
+                        immersive::hide_system_bars(&app);
+                        sync_size(&app, &mut app_state);
+                        if let (Some(a), Some(hz)) = (app_state.as_mut(), immersive::refresh_hz(&app)) {
+                            a.set_refresh_hz(hz); // the panel may have switched mode while we were away
+                        }
+                    }
+                    MainEvent::WindowResized { .. }
+                    | MainEvent::ContentRectChanged { .. }
+                    | MainEvent::InsetsChanged { .. }
+                    | MainEvent::RedrawNeeded { .. } => sync_size(&app, &mut app_state),
+                    MainEvent::Destroy { .. } => running = false,
+                    _ => {}
+                }
+            }
+        });
+
+        // The soft keyboard follows the menu's focused text field (shown / hidden only when that changes).
+        let want_kbd = app_state.as_ref().is_some_and(|a| a.menu.as_ref().is_some_and(Menu::typing) || a.rei.as_ref().is_some_and(rei::ReiUi::typing));
+        if want_kbd != kbd_up {
+            kbd_up = want_kbd;
+            if want_kbd {
+                app.show_soft_input(true);
+            } else {
+                app.hide_soft_input(false);
+            }
+        }
+
+        if init_handle.as_ref().map_or(false, |h| h.is_finished()) {
+            if let Some(h) = init_handle.take() {
+                match h.join() {
+                    Ok(Ok(a)) => {
+                        if app.native_window().is_some() {
+                            app_state = Some(a);
+                            sync_size(&app, &mut app_state);
+                            self_main_frames = 0;
+                            if let (Some(a), Some(hz)) = (app_state.as_mut(), immersive::refresh_hz(&app)) {
+                                a.set_refresh_hz(hz);
+                            }
+                        } else {
+                            log::warn!("init finished but window is gone; discarding");
+                        }
+                    }
+                    Ok(Err(e)) => log::error!("init failed: {e}"),
+                    Err(_) => log::error!("init panicked"),
+                }
+            }
+        }
+
+        if let Some(a) = app_state.as_mut() {
+            let frame_start = Instant::now();
+            a.render();
+            if let Some(left) = a.opts.frame_cap().and_then(|cap| cap.checked_sub(frame_start.elapsed())) {
+                std::thread::sleep(left); // `Performance`: Balanced 120 fps, Power saver 40
+            }
+            if sustained != Some(a.opts.sustained) {
+                sustained = Some(a.opts.sustained);
+                immersive::set_sustained(&app, a.opts.sustained);
+            }
+            // The refresh-rate hint follows the Performance option (Balanced 120, Power saver 40, Max FPS none).
+            let hint = a.opts.frame_cap().map_or(0.0, |d| (1.0 / d.as_secs_f32()).round());
+            if hint != frame_hint {
+                frame_hint = hint;
+                immersive::set_frame_rate(&app, hint);
+            }
+            #[cfg(feature = "pad-rumble")]
+            {
+                if let Some((dev, cmd)) = a.touch.pad.take_haptics() {
+                    rumble::apply(&app, dev, cmd);
+                }
+            }
+            self_main_frames += 1;
+            if self_main_frames == 1 || self_main_frames == 30 || self_main_frames % 300 == 0 {
+                log::info!("M3 main frame {self_main_frames}");
+            }
+        }
+        if self_main_frames % 30 == 0 {
+            sync_size(&app, &mut app_state);
+        }
+    }
+}
+
+/// Controlify's rules name entities as Minecraft does (`minecraft:pig`): a b1.7.3 mob's name for them (`input/guide.rs`).
+fn mob_name(k: world::mobs::Kind) -> &'static str {
+    use world::mobs::Kind::*;
+    match k {
+        Pig => "minecraft:pig",
+        Cow => "minecraft:cow",
+        Sheep => "minecraft:sheep",
+        Chicken => "minecraft:chicken",
+        Wolf => "minecraft:wolf",
+        Squid => "minecraft:squid",
+        Zombie => "minecraft:zombie",
+        PigZombie => "minecraft:zombified_piglin",
+        Giant => "minecraft:giant",
+        Skeleton => "minecraft:skeleton",
+        Creeper => "minecraft:creeper",
+        Spider => "minecraft:spider",
+        Slime => "minecraft:slime",
+        Ghast => "minecraft:ghast",
+    }
+}

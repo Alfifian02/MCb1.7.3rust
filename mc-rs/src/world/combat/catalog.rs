@@ -1,0 +1,241 @@
+//! The five new melee families (`WeaponFamily`, `WeaponShape`, `CortesTier`). **NOT b1.7.3.**
+//!
+//! Ids are `400 + 5 * family + tier`, so there is no table to keep in step: `get(id)` is arithmetic plus `exists`.
+//! They stay under 512 because `craft::shaped` packs a result as `id & 511` and `id >> 9` = damage.
+//! Tiers use the order of `craft::MATERIALS`: wood 0, stone 1, iron 2, diamond 3, gold 4 (no copper, no netherite:
+//! answer 6A). Of the mod's 7 tiers that leaves 20 items: dagger x5, ropera / alabarda / shotel x4 (no wood: the mod's
+//! `isRapierMaterial`), martillo x3 (iron, diamond, gold: the mod's `isWarhammerMaterial` is rank >= copper, and stone
+//! ranks below copper).
+//!
+//! Recipes: the grid rows are the mod's `WeaponShape` (`#` = empty). b1.7.3 has no nuggets and no emerald, so the
+//! ropera's tip (`*`) is flint for stone (as in the mod) and the tier's own ingot or diamond for iron, diamond and
+//! gold. // UNVERIFIED: the cost of that substitution is a guess, not the mod's.
+
+use super::profile::{interval_ticks, Profile};
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Family {
+    Daga,
+    Ropera,
+    Alabarda,
+    Martillo,
+    Shotel,
+    /// C8: one item, no tiers (`ArcabuzStats`: 6 damage, 1.4 a second, 250 uses), id `ARCABUZ`.
+    Arcabuz,
+}
+
+pub const FAMILIES: [Family; 6] = [Family::Daga, Family::Ropera, Family::Alabarda, Family::Martillo, Family::Shotel, Family::Arcabuz];
+
+/// First item id (a free id: b1.7.3 items stop at 359 and the records start at 2256).
+pub const FIRST_ID: u16 = 400;
+/// The arcabuz: family 5, tier 0 (`FIRST_ID + 5 * TIERS`).
+pub const ARCABUZ: u16 = 425;
+/// The bandage (`combat::mend`, NOT b1.7.3, only in an Immersive Pack world): the next free id, no tiers, no durability, so it is not a `get` family.
+/// Tile `ICON0 + 26` (`tools/gen_bandage_icon.py`), recipe in `craft::recipes()`.
+pub const BANDAGE: u16 = 426;
+const TIERS: usize = 5;
+/// `CortesTier.getAttackDamageBonus` in `craft::MATERIALS` order (wood, stone, iron, diamond, gold).
+const BONUS: [f32; TIERS] = [0.0, 1.0, 2.0, 3.0, 0.0];
+/// Body ingredient per tier: planks, cobblestone, iron ingot, diamond, gold ingot (`RecipesTools`' heads).
+const HEAD: [u16; TIERS] = [5, 4, 265, 264, 266];
+const IRON_BLOCK: u16 = 42;
+const FLINT: u16 = 318;
+const STICK: u16 = 280;
+
+impl Family {
+    fn index(self) -> u16 {
+        self as u16
+    }
+
+    pub fn profile(self) -> Profile {
+        match self {
+            Family::Daga => Profile::Dagger,
+            Family::Ropera => Profile::Ropera,
+            Family::Alabarda => Profile::Halberd,
+            Family::Martillo => Profile::Warhammer,
+            Family::Shotel => Profile::Sabre,
+            Family::Arcabuz => Profile::Arcabuz,
+        }
+    }
+
+    /// `WeaponFamily.attackDamage`: health points, before the tier's bonus.
+    pub fn damage(self) -> f32 {
+        match self {
+            Family::Daga => 1.6,
+            Family::Ropera => 6.5,
+            Family::Alabarda => 4.0,
+            Family::Martillo => 3.0,
+            Family::Shotel => 2.7,
+            Family::Arcabuz => 6.0, // `ArcabuzStats.ATTACK_DAMAGE`: the player's point + 5
+        }
+    }
+
+    /// `WeaponFamily.attackSpeed`: swings per second.
+    pub fn speed(self) -> f32 {
+        match self {
+            Family::Daga => 3.2,
+            Family::Ropera => 2.0,
+            Family::Alabarda => 0.88,
+            Family::Martillo => 1.05,
+            Family::Shotel => 2.0,
+            Family::Arcabuz => 1.4, // `ArcabuzStats.ATTACK_SPEED`: 4 - 2.6
+        }
+    }
+
+    /// Ticks between two swings (`WeaponFamily.swingInterval`).
+    pub fn interval(self) -> u32 {
+        interval_ticks(self.speed())
+    }
+
+    /// Does the tier exist for this family?
+    pub fn exists(self, tier: usize) -> bool {
+        tier < TIERS
+            && match self {
+                Family::Daga => true,
+                Family::Martillo => matches!(tier, 2..=4),
+                Family::Arcabuz => tier == 0,
+                _ => tier >= 1,
+            }
+    }
+
+    /// `WeaponShape.rows` with `#` as a space: `X` body, `/` stick, `*` extra.
+    fn rows(self) -> &'static [&'static str] {
+        match self {
+            Family::Daga => &["X", "/"],
+            Family::Ropera => &["*  ", " X ", "  /"],
+            Family::Alabarda => &["XX/", "X/X", "/  "],
+            Family::Martillo => &["X*X", " / ", " / "],
+            Family::Shotel => &["X  ", "XX/"],
+            Family::Arcabuz => &[],
+        }
+    }
+
+    /// `WeaponFamily.extraIngredient` (`*`), 0 when the shape has none.
+    fn extra(self, tier: usize) -> u16 {
+        match self {
+            Family::Ropera if tier == 1 => FLINT,
+            Family::Ropera => HEAD[tier],
+            Family::Martillo => IRON_BLOCK,
+            _ => 0,
+        }
+    }
+
+    fn name(self, tier: usize) -> &'static str {
+        const N: [[&str; TIERS]; 6] = [
+            ["Wooden Dagger", "Stone Dagger", "Iron Dagger", "Diamond Dagger", "Golden Dagger"],
+            ["", "Stone Ropera", "Iron Ropera", "Diamond Ropera", "Golden Ropera"],
+            ["", "Stone Alabarda", "Iron Alabarda", "Diamond Alabarda", "Golden Alabarda"],
+            ["", "", "Iron War Hammer", "Diamond War Hammer", "Golden War Hammer"],
+            ["", "Stone Shotel", "Iron Shotel", "Diamond Shotel", "Golden Shotel"],
+            ["Arcabuz", "", "", "", ""],
+        ];
+        N[self as usize][tier]
+    }
+}
+
+/// C6: first `gui/items.png` tile of the weapons (`tools/gen_combat_icons.py`): the sprite of item `400 + n` is tile `ICON0 + n`.
+/// Tiles 208..=232 are empty in b1.7.3's sheet and in no `icons.rs` row. UNVERIFIED: not seen on a device.
+pub const ICON0: u8 = 208;
+
+/// The `items.png` tile of a weapon, `None` for any other item.
+pub fn icon(id: u16) -> Option<u8> {
+    if id == BANDAGE {
+        return Some(ICON0 + 26);
+    }
+    get(id).map(|_| ICON0 + (id - FIRST_ID) as u8)
+}
+
+/// The item id of a family at a tier, `None` if that combination does not exist.
+pub fn id(f: Family, tier: usize) -> Option<u16> {
+    f.exists(tier).then(|| FIRST_ID + f.index() * TIERS as u16 + tier as u16)
+}
+
+/// The family and tier of an item id, `None` for any other item.
+pub fn get(id: u16) -> Option<(Family, usize)> {
+    let n = id.checked_sub(FIRST_ID)? as usize;
+    let f = *FAMILIES.get(n / TIERS)?;
+    f.exists(n % TIERS).then_some((f, n % TIERS))
+}
+
+/// Every (family, tier) that exists, family by family, weakest tier first.
+pub fn all() -> impl Iterator<Item = (Family, usize)> {
+    FAMILIES.into_iter().flat_map(|f| (0..TIERS).filter(move |&t| f.exists(t)).map(move |t| (f, t)))
+}
+
+/// Total damage of an item in health points: `WeaponFamily.attackDamage + CortesTier.getAttackDamageBonus`
+/// (`CortesWeaponItem.totalAttackDamage`; the player's own base point is b1.7.3's hand, not added).
+pub fn damage(id: u16) -> Option<f32> {
+    get(id).map(|(f, t)| f.damage() + BONUS[t])
+}
+
+/// `Item.getItemName` translated, for `items::name`.
+pub fn name(id: u16) -> Option<&'static str> {
+    if id == BANDAGE {
+        return Some("Bandage");
+    }
+    get(id).map(|(f, t)| f.name(t))
+}
+
+/// The recipe of an item: grid rows, the (key, item) pairs and the result id, for `craft::recipes()`.
+pub fn recipe(f: Family, tier: usize) -> Option<(&'static [&'static str], [(char, u16); 3], u16)> {
+    if f == Family::Arcabuz {
+        return None; // its grid has four ingredients: `arcabuz_recipe`
+    }
+    let out = id(f, tier)?; // first: `HEAD` / `extra` index by tier
+    Some((f.rows(), [('X', HEAD[tier]), ('/', STICK), ('*', f.extra(tier))], out))
+}
+
+/// C8 (`ArcabuzRecipes`): `/ V`, ` O `, ` MM` with a stick for the mod's bamboo, flint and steel, a dispenser and planks.
+pub fn arcabuz_recipe() -> (&'static [&'static str], [(char, u16); 4], u16) {
+    (&["/ V", " O ", " MM"], [('/', STICK), ('V', 259), ('O', 23), ('M', 5)], ARCABUZ)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // One check for the catalogue: 20 distinct ids that round-trip, under 512, every recipe grid rectangular and
+    // the numbers of the mod's WeaponCatalogueTest / WeaponKindsTest.
+    #[test]
+    fn twenty_weapons_with_round_tripping_ids() {
+        let items: Vec<_> = all().collect();
+        assert_eq!(items.len(), 5 + 4 + 4 + 3 + 4 + 1);
+        let mut seen = std::collections::HashSet::new();
+        for &(f, t) in &items {
+            let i = id(f, t).unwrap();
+            assert!(seen.insert(i) && (FIRST_ID..512).contains(&i), "{i}");
+            assert_eq!(get(i), Some((f, t)));
+            assert!(!name(i).unwrap().is_empty());
+            if f == Family::Arcabuz {
+                assert_eq!((i, t, recipe(f, t)), (ARCABUZ, 0, None));
+                continue;
+            }
+            let (rows, key, out) = recipe(f, t).unwrap();
+            assert_eq!(out, i);
+            assert!(rows.iter().all(|r| r.len() == rows[0].len()), "{f:?} grid is ragged");
+            let cells: String = rows.concat();
+            // every symbol the grid uses is defined (the mod's ShapedRecipePattern check), none is left unused
+            for (c, item) in key {
+                assert_eq!(cells.contains(c), item != 0, "{f:?} {t} key {c}");
+            }
+        }
+        // C6: every weapon has its own tile inside the 25 painted ones; a non-weapon has none
+        assert_eq!(icon(FIRST_ID), Some(ICON0));
+        assert_eq!(icon(id(Family::Shotel, 4).unwrap()), Some(ICON0 + 24));
+        assert_eq!((icon(399), icon(FIRST_ID + 5)), (None, None));
+        assert_eq!(get(399), None);
+        assert_eq!(get(FIRST_ID + 5), None); // wooden ropera does not exist (family 1, tier 0)
+        assert_eq!(get(425), Some((Family::Arcabuz, 0)));
+        assert_eq!((get(426), get(430)), (None, None));
+        assert_eq!((name(BANDAGE), icon(BANDAGE), damage(BANDAGE)), (Some("Bandage"), Some(ICON0 + 26), None)); // an item, not a weapon
+        assert_eq!((name(ARCABUZ), damage(ARCABUZ), icon(ARCABUZ)), (Some("Arcabuz"), Some(6.0), Some(ICON0 + 25)));
+        assert_eq!(Family::Arcabuz.interval(), 14); // 20 / 1.4
+        let (rows, key, out) = arcabuz_recipe();
+        assert_eq!((rows.concat().len(), out), (9, ARCABUZ));
+        assert!(rows.concat().chars().filter(|c| *c != ' ').all(|c| key.iter().any(|k| k.0 == c)));
+        assert_eq!(damage(id(Family::Ropera, 2).unwrap()), Some(8.5)); // 6.5 + iron's 2
+        assert_eq!(damage(id(Family::Daga, 0).unwrap()), Some(1.6));
+        assert_eq!(Family::Alabarda.interval(), 23);
+        assert_eq!(Family::Daga.interval(), 6);
+    }
+}

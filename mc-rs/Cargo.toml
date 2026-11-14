@@ -1,0 +1,68 @@
+[package]
+name = "mc-rs"
+version = "0.2.0"
+edition = "2021"
+
+[lib]
+name = "mc_rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+android-activity = { version = "0.6", features = ["native-activity"] }
+wgpu = { version = "26", default-features = false, features = ["vulkan", "gles", "wgsl"] }
+glam = "0.27"
+bytemuck = { version = "1", features = ["derive"] }
+raw-window-handle = "0.6"
+jni = "0.22"
+log = "0.4"
+env_logger = "0.11"
+pollster = "0.4"
+lewton = "0.10" # pure-Rust Ogg Vorbis decoder (audio/)
+png = "0.17" # pure-Rust PNG decoder (skin.rs: Import Custom Skin)
+embeddium = { path = "../embeddium" }
+lod = { path = "../lod" }
+tectonic = { path = "../tectonic" }
+starlight = { path = "../starlight" }
+
+[features]
+default = ["pad-rumble"]
+# Controller vibration over JNI (`src/rumble.rs`). `--no-default-features` builds without it.
+pad-rumble = []
+
+[dev-dependencies]
+naga = { version = "26", features = ["wgsl-in"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+ndk = { version = "0.9", features = ["audio"] } # AAudio output (audio/); the version android-activity 0.6 already uses
+android_logger = "0.14"
+
+[package.metadata.android]
+package = "dev.mcrs.b173"
+apk_name = "MinecraftB173Rust"
+build_targets = ["aarch64-linux-android"]
+
+[package.metadata.android.sdk]
+min_sdk_version = 26
+target_sdk_version = 34
+
+# Import Custom Skin lists the skin .png files of Download / Pictures (`storage.rs`): READ_EXTERNAL_STORAGE up to API 32, READ_MEDIA_IMAGES from 33.
+[[package.metadata.android.uses_permission]]
+name = "android.permission.READ_EXTERNAL_STORAGE"
+max_sdk_version = 32
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.READ_MEDIA_IMAGES"
+
+# Controller vibration (`src/rumble.rs`): a normal permission, granted at install. A pad's own `InputDeviceVibrator` may not check it, but a
+# `Vibrator` call without it can be refused on some builds.
+[[package.metadata.android.uses_permission]]
+name = "android.permission.VIBRATE"
+
+[package.metadata.android.application]
+label = "MC b1.7.3 Rust"
+# No title/status bar, so the landscape surface is the full screen.
+theme = "@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen"
+
+[package.metadata.android.application.activity]
+# Landscape, either direction (follows the sensor, never portrait).
+orientation = "sensorLandscape"

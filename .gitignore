@@ -1,6 +1,2 @@
-build/
-shot.ppm
-android/.gradle/
-android/app/build/
-android/app/.cxx/
-android/local.properties
+target/
+build.log
