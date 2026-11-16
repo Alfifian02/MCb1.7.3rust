@@ -34,6 +34,17 @@ jobs:
               https://github.com/RetroAchievements/rcheevos.git app/src/main/cpp/rcheevos
           fi
 
+      # core/third_party/CMakeLists.txt expects Lua 5.3.0 (lua/lua, tag v5.3.0) in
+      # core/third_party/lua, a submodule pointer that is not part of this repository.
+      - name: Ensure Lua sources
+        run: |
+          if [ ! -f core/third_party/lua/lapi.c ]; then
+            rm -rf core/third_party/lua
+            git clone --depth 1 --branch v5.3.0 \
+              https://github.com/lua/lua.git core/third_party/lua
+          fi
+          test -f core/third_party/lua/lapi.c
+
       # gradle/gradle-daemon-jvm.properties requires toolchain 25.
       - name: Set up JDK 25
         uses: actions/setup-java@v5
