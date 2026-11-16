@@ -58,6 +58,10 @@ jobs:
       - name: Set up Gradle (with cache)
         uses: gradle/actions/setup-gradle@v4
 
+      # The executable bit is lost when files are copied or committed from Windows or a zip.
+      - name: Make gradlew executable
+        run: chmod +x gradlew
+
       - name: Build debug APK
         run: ./gradlew --no-daemon :app:assembleDebug
 
