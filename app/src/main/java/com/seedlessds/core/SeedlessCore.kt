@@ -44,6 +44,15 @@ object SeedlessCore {
     /** Emulation-thread timing, off by default. Fills [out] with NDS_FRAME_STATS_FIELDS values in microseconds. */
     @JvmStatic external fun frameStatsEnable(enabled: Boolean)
     @JvmStatic external fun frameStats(out: IntArray): Int
+
+    /** GL_EXT_disjoint_timer_query through eglGetProcAddress. Render thread, context current. */
+    @JvmStatic external fun gpuTimerInit(): Boolean
+    @JvmStatic external fun gpuTimerGen(ids: IntArray): Boolean
+    @JvmStatic external fun gpuTimerBegin(id: Int)
+    @JvmStatic external fun gpuTimerEnd()
+    @JvmStatic external fun gpuTimerAvailable(id: Int): Boolean
+    @JvmStatic external fun gpuTimerResultNs(id: Int): Long
+    @JvmStatic external fun gpuTimerDisjoint(): Boolean
     @JvmStatic external fun screensRgba(top: IntArray, bottom: IntArray)
     @JvmStatic external fun screenshot(out: IntArray)
     @JvmStatic external fun clearScreens(textureTop: Int, textureBottom: Int)

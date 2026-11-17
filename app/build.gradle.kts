@@ -49,10 +49,13 @@ android {
             val local = Properties()
             val localFile = rootProject.file("local.properties")
             if (localFile.isFile) localFile.inputStream().use { local.load(it) }
-            local.getProperty("MELONDS_KEYSTORE")?.let { storeFile = file(it) }
-            storePassword = local.getProperty("MELONDS_KEYSTORE_PASSWORD") ?: ""
-            keyAlias = local.getProperty("MELONDS_KEY_ALIAS") ?: ""
-            keyPassword = local.getProperty("MELONDS_KEY_PASSWORD") ?: ""
+            // Without local.properties the committed keystore/release.keystore signs the app, so every
+            // build carries the same signature and installs over the previous one as an update.
+            val custom = local.getProperty("MELONDS_KEYSTORE")
+            storeFile = if (custom != null) file(custom) else rootProject.file("keystore/release.keystore")
+            storePassword = local.getProperty("MELONDS_KEYSTORE_PASSWORD") ?: "seedlessds"
+            keyAlias = local.getProperty("MELONDS_KEY_ALIAS") ?: "seedlessds"
+            keyPassword = local.getProperty("MELONDS_KEY_PASSWORD") ?: "seedlessds"
         }
         create("shared") {
 

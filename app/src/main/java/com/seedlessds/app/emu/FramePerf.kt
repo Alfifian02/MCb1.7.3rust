@@ -1,7 +1,5 @@
 package com.seedlessds.app.emu
 
-import android.opengl.EXTDisjointTimerQuery
-import android.opengl.GLES20
 import com.seedlessds.app.AppLog
 import com.seedlessds.core.SeedlessCore
 import java.util.Locale
@@ -12,7 +10,7 @@ import java.util.Locale
  * SeedlessDS rasterises 3D on the CPU and only uses the GPU for the shader chain, so "where is
  * the time going" has two separate answers:
  *  - CPU: the emulation thread (native, see frame_stats.c) and the render thread's GL submit.
- *  - GPU: GL_EXT_disjoint_timer_query around the upload and shader chain.
+ *  - GPU: GL_EXT_disjoint_timer_query (native, via eglGetProcAddress) around the upload and shader chain.
  *
  * GPU timing uses a ring of [SLOTS] queries and never waits. Each frame issues at most one
  * query, and results are read only once the driver reports them as available. If every slot
@@ -88,8 +86,6 @@ class FramePerf {
     private var head = 0
     private var tail = 0
     private var gpuOpen = false
-    private val one = IntArray(1)
-    private val ns = LongArray(1)
 
     /** Call when the GL context has just been created. */
     fun onContext(glExtensions: String) {
@@ -118,9 +114,12 @@ class FramePerf {
         if (!gpuSupported) return false
         if (queryIds[0] != 0) return true
         return try {
-            EXTDisjointTimerQuery.glGenQueriesEXT(SLOTS, queryIds, 0)
+            if (!SeedlessCore.gpuTimerInit() || !SeedlessCore.gpuTimerGen(queryIds)) {
+                gpuSupported = false
+                return false
+            }
             // Reading the flag clears it, so start from a clean state.
-            GLES20.glGetIntegerv(EXTDisjointTimerQuery.GL_GPU_DISJOINT_EXT, one, 0)
+            SeedlessCore.gpuTimerDisjoint()
             queryIds[0] != 0
         } catch (t: Throwable) {
             gpuFailed(t)
@@ -138,7 +137,7 @@ class FramePerf {
     fun gpuBegin() {
         if (!enabled || !gpuReady() || queryState[head] != FREE) return
         try {
-            EXTDisjointTimerQuery.glBeginQueryEXT(EXTDisjointTimerQuery.GL_TIME_ELAPSED_EXT, queryIds[head])
+            SeedlessCore.gpuTimerBegin(queryIds[head])
             gpuOpen = true
         } catch (t: Throwable) {
             gpuFailed(t)
@@ -149,7 +148,7 @@ class FramePerf {
         if (!gpuOpen) return
         gpuOpen = false
         try {
-            EXTDisjointTimerQuery.glEndQueryEXT(EXTDisjointTimerQuery.GL_TIME_ELAPSED_EXT)
+            SeedlessCore.gpuTimerEnd()
             queryState[head] = PENDING
             queryTainted[head] = false
             head = (head + 1) % SLOTS
@@ -162,13 +161,11 @@ class FramePerf {
     private fun gpuCollect() {
         if (!gpuSupported || queryIds[0] == 0 || queryState[tail] != PENDING) return
         try {
-            GLES20.glGetIntegerv(EXTDisjointTimerQuery.GL_GPU_DISJOINT_EXT, one, 0)
-            if (one[0] != 0) for (i in 0 until SLOTS) if (queryState[i] == PENDING) queryTainted[i] = true
+            if (SeedlessCore.gpuTimerDisjoint()) for (i in 0 until SLOTS) if (queryState[i] == PENDING) queryTainted[i] = true
             while (queryState[tail] == PENDING) {
-                EXTDisjointTimerQuery.glGetQueryObjectuivEXT(queryIds[tail], EXTDisjointTimerQuery.GL_QUERY_RESULT_AVAILABLE_EXT, one, 0)
-                if (one[0] == 0) break
-                EXTDisjointTimerQuery.glGetQueryObjectui64vEXT(queryIds[tail], EXTDisjointTimerQuery.GL_QUERY_RESULT_EXT, ns, 0)
-                if (!queryTainted[tail]) gpuRing.add(ns[0] / 1_000_000f)
+                if (!SeedlessCore.gpuTimerAvailable(queryIds[tail])) break
+                val resultNs = SeedlessCore.gpuTimerResultNs(queryIds[tail])
+                if (!queryTainted[tail]) gpuRing.add(resultNs / 1_000_000f)
                 queryState[tail] = FREE
                 tail = (tail + 1) % SLOTS
             }

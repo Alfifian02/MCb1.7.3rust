@@ -48,7 +48,8 @@ add_library(recon SHARED
         jni/core_frame.c
         jni/core_state.c
         jni/core_cheats.c
-        jni/core_fx.c)
+        jni/core_fx.c
+        jni/gpu_timer.c)
 target_include_directories(recon PRIVATE
         "${SEEDLESS_CORE_DIR}/recon" "${SEEDLESS_CORE_DIR}/include" "${CMAKE_CURRENT_BINARY_DIR}")
 target_link_options(recon PRIVATE -Wl,-z,max-page-size=16384)
@@ -60,4 +61,4 @@ target_compile_options(recon_fn PRIVATE
         -Werror=pointer-sign -Werror=unused-variable -Werror=unused-function -Werror=unused-const-variable)
 target_link_libraries(recon_fn ${log-lib} dl m OpenSLES GLESv2)
 target_link_options(recon_fn PRIVATE -Wl,-Bsymbolic -Wl,--exclude-libs,ALL -Wl,-z,max-page-size=16384)
-target_link_libraries(recon ${log-lib} dl recon_fn)
+target_link_libraries(recon ${log-lib} dl EGL recon_fn)
