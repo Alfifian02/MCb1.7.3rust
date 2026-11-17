@@ -100,6 +100,7 @@ void state_write_spi_memory_status(const spi_memory_t *m, unsigned char *desc);
 #include "frontend/frontend.h"
 #include "seedlessds/platform.h"
 #include "core_internals.h"
+#include "debug/frame_stats.h"
 
 #define BUF_SIZE   0x30000u
 #define GLOB      0x14c000
@@ -2410,7 +2411,7 @@ static void copy_bytes(void *dest, const void *origin, size_t size) {
     memcpy(dest, origin, size);
 }
 
-int32_t state_save_file(uint8_t *machine, const char *path,
+static int32_t state_save_file_impl(uint8_t *machine, const char *path,
                             const char *name_final, const void *copy_a,
                             const void *copy_b) {
 
@@ -2500,8 +2501,9 @@ int32_t state_save_file(uint8_t *machine, const char *path,
     state_write_machine_blocks(machine, stream, STATE_STREAM_VERSION);
 
     uint8_t *work = (uint8_t *)&state_write_work;
+    /* The previous state is still being compressed and written. Poll at 0.5 ms instead of spinning at 1 us. */
     while (rd32(work + 0x83c) != 0)
-        sleep(1);
+        sleep(500);
 
     copy_bytes(work + 0x808, stream, 32);
     wr_ptr(work + 0x828, SS(stream)->cursor);
@@ -2514,6 +2516,22 @@ int32_t state_save_file(uint8_t *machine, const char *path,
     return 0;
 }
 #undef WORK
+
+/*
+ * The compress-and-write half already runs on its own thread (state_write_finish).
+ * What stays on the caller is opening the temporary file, serialising the machine
+ * into a 6.5 MB block and waiting for a previous write. That time is reported to
+ * the frame statistics as emulation-thread I/O.
+ */
+int32_t state_save_file(uint8_t *machine, const char *path,
+                            const char *name_final, const void *copy_a,
+                            const void *copy_b) {
+    uint64_t io_mark = frame_stats_mark();
+    int32_t result = state_save_file_impl(machine, path, name_final, copy_a, copy_b);
+
+    frame_stats_io_since(io_mark);
+    return result;
+}
 
 int state_build_dir_path(unsigned char *obj, char *dest) {
     int (*format)(char *, size_t, const char *, ...) = str_vsprintf_caller_limit_4;

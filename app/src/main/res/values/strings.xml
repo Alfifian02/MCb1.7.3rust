@@ -676,6 +676,10 @@
     <string name="settings_sharp_bilinear_nds_color" translatable="false">"sharp_bilinear+nds_color"</string>
     <string name="settings_show_3d_resolution">"Show 3D resolution"</string>
     <string name="settings_show_fps">"Show FPS"</string>
+    <string name="settings_show_frame_timing">"Show frame timing"</string>
+    <string name="settings_shows_frame_timing_summary">"Average/99th percentile in ms: EMU = emulation thread CPU, RND = render thread CPU, GPU = shader chain, WORST = longest frame, IO = save writes that blocked the emulation thread. Also written to the log."</string>
+    <string name="settings_lite_shaders_on_weak_gpus">"Lite shaders on weak GPUs"</string>
+    <string name="settings_lite_shaders_on_weak_gpus_hint">"On Adreno below 620, FXAA, SMAA and HQ2X are replaced by one bilinear pass. Filters that are already single pass are not changed."</string>
     <string name="settings_show_hide_buttons">"Show/Hide buttons"</string>
     <string name="settings_show_only_one_of_the_ds_screens_touch_works">"Show only one of the DS screens (touch works when it\'s the bottom one)."</string>
     <string name="settings_show_rich_presence_on_screen">"Show Rich presence on screen"</string>

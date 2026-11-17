@@ -76,6 +76,16 @@ void nds_run_frame(nds_t *nds, const nds_input_t *input);
 void nds_frame_info(nds_t *nds, nds_frame_info_t *info);
 uint32_t nds_frame_word(nds_t *nds);
 uint32_t nds_perf_word(nds_t *nds);
+
+/*
+ * Emulation-thread frame timing, off by default. Values are microseconds.
+ * Order of out[]: samples, emu cpu avg/p99/max, process cpu avg/p99,
+ * frame wall time avg/p99/max, save I/O on the emulation thread avg/max,
+ * number of frames that did any save I/O. Returns the number of samples.
+ */
+#define NDS_FRAME_STATS_FIELDS 12
+void nds_frame_stats_enable(nds_t *nds, int enabled);
+int nds_frame_stats(nds_t *nds, uint32_t out[NDS_FRAME_STATS_FIELDS]);
 void nds_screen_buffers(nds_t *nds, const void **top, const void **bottom);
 int nds_screens_rgba(nds_t *nds, void *top, void *bottom);
 int nds_screenshot(nds_t *nds, void *rgba, size_t size);

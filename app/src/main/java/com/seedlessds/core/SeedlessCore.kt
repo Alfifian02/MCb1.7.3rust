@@ -40,6 +40,10 @@ object SeedlessCore {
     @JvmStatic external fun drawScreenExt(texture: Int, index: Int)
     @JvmStatic external fun frameWord(): Int
     @JvmStatic external fun hudWord(): Int
+
+    /** Emulation-thread timing, off by default. Fills [out] with NDS_FRAME_STATS_FIELDS values in microseconds. */
+    @JvmStatic external fun frameStatsEnable(enabled: Boolean)
+    @JvmStatic external fun frameStats(out: IntArray): Int
     @JvmStatic external fun screensRgba(top: IntArray, bottom: IntArray)
     @JvmStatic external fun screenshot(out: IntArray)
     @JvmStatic external fun clearScreens(textureTop: Int, textureBottom: Int)

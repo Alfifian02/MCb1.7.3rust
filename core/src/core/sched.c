@@ -6,6 +6,7 @@
 #include "core/sched.h"
 #include "core_internals.h"
 #include "mem_access.h"
+#include "debug/frame_stats.h"
 
 
 const int32_t bus_cost_same_region[64] = {
@@ -183,9 +184,15 @@ void sched_scanline_event(void *machine, void *argument) {
         gpu_frame_close((uint8_t *)&((nds_t *)machine)->gpu);
         input_record_end_of_frame((uint8_t *)&((nds_t *)machine)->input_record);
         benchmark_step((unsigned char *)&((nds_t *)machine)->benchmark);
-        spi_memory_save_tick(&((nds_t *)machine)->cart.backup);
-        spi_memory_save_tick(&((nds_t *)machine)->spi.firmware);
-        cart_slot2_backup_autosave_tick(&((nds_t *)machine)->cart.slot2);
+        {
+            uint64_t io_mark = frame_stats_mark();
+
+            spi_memory_save_tick(&((nds_t *)machine)->cart.backup);
+            spi_memory_save_tick(&((nds_t *)machine)->spi.firmware);
+            cart_slot2_backup_autosave_tick(&((nds_t *)machine)->cart.slot2);
+            frame_stats_io_since(io_mark);
+        }
+        frame_stats_frame_end();
 
         nds_config_t *cfg = &((nds_t *)machine)->config;
         if (cfg->cheats_enabled != 0

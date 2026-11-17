@@ -6,6 +6,7 @@
 #include "spi.h"
 #include "seedlessds/platform.h"
 #include "core_internals.h"
+#include "platform/save_writer.h"
 
 static uint32_t close(spi_memory_t *m, uint32_t cmd) {
     m->command = (uint16_t)cmd;
@@ -203,30 +204,31 @@ void spi_memory_set_state_word(spi_memory_t *m, uint32_t param_2)
     m->dirty_sectors[0] = param_2;
 }
 
-static size_t (*core_fwrite)(const void *, size_t, size_t, void *);
-static int    (*core_fclose)(void *);
-static int    (*core_fseek)(void *, long, int);
-static int    (*core_fflush)(void *);
-static int    (*core_fileno)(void *);
-static int    (*core_ftruncate)(int, long);
+#define SPI_SAVE_RECORD_OVERHEAD 16u
+#define SPI_SAVE_FOOTER_BYTES 122u
 
-long spi_memory_save_file(spi_memory_t *m) {
-    if (!core_fwrite) {
-        core_fwrite    = (size_t (*)(const void *, size_t, size_t, void *))sym_libc_fwrite;
-        core_fclose    = (int (*)(void *))sym_libc_fclose;
-        core_fseek     = (int (*)(void *, long, int))sym_libc_fseek;
-        core_fflush    = (int (*)(void *))sym_libc_fflush;
-        core_fileno    = (int (*)(void *))sym_libc_fileno;
-        core_ftruncate = (int (*)(int, long))sym_libc_ftruncate;
-    }
+/*
+ * Copies everything the next save has to write into a job: the dirty 512-byte
+ * sectors, the optional truncate, the footer. The order is the order the old
+ * synchronous code wrote them in. Dirty bits are cleared only once the copy
+ * succeeded, so an allocation failure loses nothing.
+ *
+ * Returns NULL when there is nothing to write (*failed == 0) or when memory
+ * ran out (*failed == 1).
+ */
+static save_job_t *spi_memory_snapshot(spi_memory_t *m, int *failed) {
+    *failed = 0;
 
     if (m->write_whole_file != 0) {
-        void *(*open_fn)(const char *, const char *) = platform_file_open;
-        void *f = open_fn(m->path, "wb");
-        if (f == 0) return 0;
-        uint32_t n = m->mask;
-        core_fwrite(m->data, (size_t)(n + 1), 1, f);
-        return core_fclose(f);
+        size_t bytes = (size_t)m->mask + 1u;
+        save_job_t *job = save_job_create(0, bytes + SPI_SAVE_RECORD_OVERHEAD);
+
+        if (job == 0 || save_job_set_path(job, m->path) != 0 || save_job_add(job, 0, m->data, bytes) != 0) {
+            save_job_discard(job);
+            *failed = 1;
+            return 0;
+        }
+        return job;
     }
 
     void *f = m->file;
@@ -235,10 +237,13 @@ long spi_memory_save_file(spi_memory_t *m) {
     uint32_t size = m->mask;
     uint32_t regions = (size + SPI_MEMORY_SECTOR_BYTES) >> SPI_MEMORY_SECTOR_SHIFT;
 
-    if (m->truncate_size != 0) {
-        core_ftruncate(core_fileno(f), m->truncate_size);
-        m->truncate_size = 0;
-    }
+    size_t dirty = 0;
+    for (uint32_t i = 0; i < regions; i++)
+        dirty += (size_t)__builtin_popcount(m->dirty_sectors[i]);
+
+    save_job_t *job = save_job_create(f, dirty * (512u + SPI_SAVE_RECORD_OVERHEAD)
+                                             + SPI_SAVE_FOOTER_BYTES + SPI_SAVE_RECORD_OVERHEAD);
+    if (job == 0) { *failed = 1; return 0; }
 
     for (uint64_t i = 0, base = 0; i < regions; i++, base += 0x4000) {
         uint32_t w = m->dirty_sectors[i];
@@ -246,13 +251,15 @@ long spi_memory_save_file(spi_memory_t *m) {
         uint64_t off = base;
         while (w) {
             if (w & 1) {
-                core_fseek(f, (long)off, 0);
-                core_fwrite(m->data + off, 512, 1, f);
+                if (save_job_add(job, off, m->data + off, 512) != 0) {
+                    save_job_discard(job);
+                    *failed = 1;
+                    return 0;
+                }
             }
             w >>= 1;
             off += 0x200;
         }
-        m->dirty_sectors[i] = 0;
     }
 
     if (m->footer_written == 0 && m->has_footer != 0) {
@@ -283,13 +290,35 @@ long spi_memory_save_file(spi_memory_t *m) {
         hdr[102] = hdr[103] = hdr[104] = hdr[105] = 0;
         for (int i = 0; i < 16; i++) hdr[106 + i] = k2[i];
 
-        core_fseek(f, (long)v, 0);
-        core_fwrite(hdr, 122, 1, f);
+        if (save_job_add(job, v, hdr, SPI_SAVE_FOOTER_BYTES) != 0) {
+            save_job_discard(job);
+            *failed = 1;
+            return 0;
+        }
         m->footer_written = 1;
     }
-    return core_fflush(f);
+
+    /* The copy is complete: from here the job owns the data, so the bookkeeping can be reset. */
+    if (m->truncate_size != 0) {
+        save_job_set_truncate(job, (long)m->truncate_size);
+        m->truncate_size = 0;
+    }
+    for (uint32_t i = 0; i < regions; i++)
+        m->dirty_sectors[i] = 0;
+    return job;
 }
 
+/* Synchronous save, used when the files are about to be closed. Earlier jobs finish first. */
+long spi_memory_save_file(spi_memory_t *m) {
+    int failed;
+
+    save_writer_flush();
+    save_job_t *job = spi_memory_snapshot(m, &failed);
+    if (job == 0) return 0;
+    return save_job_run(job);
+}
+
+/* Autosave tick: the emulation thread only copies, the I/O thread writes. */
 long spi_memory_save_tick(spi_memory_t *m) {
     uint32_t left = m->save_countdown;
     if (left == 0) return (long)(intptr_t)m;
@@ -297,7 +326,14 @@ long spi_memory_save_tick(spi_memory_t *m) {
     m->save_countdown = left;
     if (left != 0) return (long)(intptr_t)m;
 
-    return spi_memory_save_file(m);
+    int failed;
+    save_job_t *job = spi_memory_snapshot(m, &failed);
+    if (job != 0) {
+        save_job_submit(job);
+        return 0;
+    }
+    if (failed) m->save_countdown = 1;
+    return 0;
 }
 
 static size_t (*core_fread)(void *, size_t, size_t, void *);
@@ -335,6 +371,7 @@ long spi_memory_mount(spi_memory_t *m, uint32_t type, unsigned char *buf,
     else                put = 0;
     if (put) m->address_bytes = (unsigned char)class;
 
+    save_writer_flush();
     void *old = m->file;
     if (old) { core_fclose_8(old); m->file = 0; }
 
@@ -408,6 +445,7 @@ char *spi_memory_set_path(spi_memory_t *m, const char *str) {
 }
 
 int spi_memory_close_file(spi_memory_t *m) {
+    save_writer_flush();
     void *f = m->file;
     int r = 0;
     if (f) {

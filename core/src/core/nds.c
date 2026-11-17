@@ -20,6 +20,7 @@ nds_t nds_machine __attribute__((aligned(0x4000)));
 #include "frontend/archive/progress.h"
 #include "core_internals.h"
 #include "mem_access.h"
+#include "platform/save_writer.h"
 static int (*core_mprotect)(void *, size_t, int);
 static int (*core_setjmp)(void *);
 
@@ -475,6 +476,9 @@ int nds_close_files(cart_t *cart) {
         core_free   = (void (*)(void *))                       sym_libc_free;
         core_close  = (int (*)(int))                           sym_libc_close;
     }
+
+    /* Jobs queued by the autosave ticks must land before the final writes and the closes below. */
+    save_writer_flush();
 
     if (cart->backup.save_countdown != 0) {
         spi_memory_save_file(&cart->backup);

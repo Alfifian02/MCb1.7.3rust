@@ -98,6 +98,32 @@ Java_com_seedlessds_core_SeedlessCore_hudWord(JNIEnv *env, jclass cls)
 }
 
 JNIEXPORT void JNICALL
+Java_com_seedlessds_core_SeedlessCore_frameStatsEnable(JNIEnv *env, jclass cls, jboolean enabled)
+{
+    (void)env;
+    (void)cls;
+    nds_frame_stats_enable(seedless_core(), enabled != JNI_FALSE);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_seedlessds_core_SeedlessCore_frameStats(JNIEnv *env, jclass cls, jintArray out)
+{
+    uint32_t values[NDS_FRAME_STATS_FIELDS];
+    jint packed[NDS_FRAME_STATS_FIELDS];
+    int samples;
+    int i;
+
+    (void)cls;
+    if (out == NULL || (*env)->GetArrayLength(env, out) < NDS_FRAME_STATS_FIELDS)
+        return 0;
+    samples = nds_frame_stats(seedless_core(), values);
+    for (i = 0; i < NDS_FRAME_STATS_FIELDS; i++)
+        packed[i] = (jint)values[i];
+    (*env)->SetIntArrayRegion(env, out, 0, NDS_FRAME_STATS_FIELDS, packed);
+    return (jint)samples;
+}
+
+JNIEXPORT void JNICALL
 Java_com_seedlessds_core_SeedlessCore_screensRgba(JNIEnv *env, jclass cls, jintArray top,
                                                   jintArray bottom)
 {

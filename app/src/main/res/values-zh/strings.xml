@@ -578,6 +578,10 @@
     <string name="settings_settings_per_game_2">"设置 · 单游戏"</string>
     <string name="settings_show_3d_resolution">"显示 3D 分辨率"</string>
     <string name="settings_show_fps">"显示帧率"</string>
+    <string name="settings_show_frame_timing">"显示帧耗时"</string>
+    <string name="settings_shows_frame_timing_summary">"平均值/99 百分位（毫秒）：EMU = 模拟线程 CPU，RND = 渲染线程 CPU，GPU = 着色器链，WORST = 最长帧，IO = 阻塞模拟线程的存档写入。同时写入日志。"</string>
+    <string name="settings_lite_shaders_on_weak_gpus">"弱 GPU 使用精简着色器"</string>
+    <string name="settings_lite_shaders_on_weak_gpus_hint">"在 Adreno 620 以下的 GPU 上，FXAA、SMAA 和 HQ2X 会改用单次双线性滤波。本来就是单次的滤镜不受影响。"</string>
     <string name="settings_show_hide_buttons">"显示/隐藏按键"</string>
     <string name="settings_show_only_one_of_the_ds_screens_touch_works">"仅显示 DS 的一块屏幕（当为下屏时触控可用）。"</string>
     <string name="settings_show_rich_presence_on_screen">"在屏幕上显示 Rich Presence"</string>

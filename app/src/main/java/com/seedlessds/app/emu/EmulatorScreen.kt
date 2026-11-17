@@ -257,6 +257,8 @@ fun EmulatorScreen(
             }
             if (settings.showFps && !editingControls)
                 PerfOverlay(Modifier.align(Alignment.TopStart).padding(start = 90.dp, top = 16.dp))
+            if (settings.showPerf && !editingControls)
+                PerfStatsOverlay(glView, Modifier.align(Alignment.TopStart).padding(start = 90.dp, top = 44.dp))
             if (settings.showScale && !editingControls)
                 ScaleOverlay(Modifier.align(Alignment.TopEnd).padding(end = 90.dp, top = 16.dp))
             if (com.seedlessds.app.BuildConfig.FRAME_CONTROLS && !editingControls)
@@ -472,6 +474,27 @@ private fun PerfOverlay(modifier: Modifier) {
         color = Color.White,
         fontFamily = SeedlessMono,
         fontSize = 11.sp,
+        fontWeight = FontWeight.Bold,
+        modifier = modifier
+            .background(Color(0x8C000000), RoundedCornerShape(7.dp))
+            .padding(horizontal = 7.dp, vertical = 3.dp),
+    )
+}
+
+@Composable
+private fun PerfStatsOverlay(glView: DsGlView, modifier: Modifier) {
+    var text by remember { mutableStateOf("") }
+    androidx.compose.runtime.LaunchedEffect(glView) {
+        while (true) {
+            text = glView.perfText()
+            kotlinx.coroutines.delay(500)
+        }
+    }
+    if (text.isNotEmpty()) Text(
+        text = text,
+        color = Color.White,
+        fontFamily = SeedlessMono,
+        fontSize = 10.sp,
         fontWeight = FontWeight.Bold,
         modifier = modifier
             .background(Color(0x8C000000), RoundedCornerShape(7.dp))

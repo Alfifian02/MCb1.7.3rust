@@ -441,6 +441,8 @@ fun SettingsScreen(
         s.showFps) { set(s.copy(showFps = it)) }
     SwitchRow(uiContext.getString(R.string.settings_show_3d_resolution), uiContext.getString(R.string.settings_shows_the_3d_resolution_in_use_and_the_configured_one_next_to_the_fps_count),
         s.showScale) { set(s.copy(showScale = it)) }
+    SwitchRow(uiContext.getString(R.string.settings_show_frame_timing), uiContext.getString(R.string.settings_shows_frame_timing_summary),
+        s.showPerf) { set(s.copy(showPerf = it)) }
     SwitchRow(uiContext.getString(R.string.settings_fps_with_transparent_background), uiContext.getString(R.string.settings_removes_the_dark_background_of_the_fps_counter),
         s.fpsTransparent) { set(s.copy(fpsTransparent = it)) }
 }
@@ -503,6 +505,8 @@ fun SettingsScreen(
         options.rotation, s.rotationMode) { set(s.copy(rotationMode = it)) }
     DropdownRow(uiContext.getString(R.string.settings_image_filter), uiContext.getString(R.string.settings_image_smoothing_scaling_shader),
         options.filter, options.filterValues.indexOf(s.filter).coerceAtLeast(0)) { set(s.copy(filter = options.filterValues[it])) }
+    SwitchRow(uiContext.getString(R.string.settings_lite_shaders_on_weak_gpus), uiContext.getString(R.string.settings_lite_shaders_on_weak_gpus_hint),
+        s.fxAutoLite) { set(s.copy(fxAutoLite = it)) }
     SwitchRow(uiContext.getString(R.string.common_swap_screens), uiContext.getString(R.string.settings_puts_the_bottom_screen_on_top_and_vice_versa),
         s.swapScreens) { set(s.copy(swapScreens = it)) }
     if (!presetOn) {

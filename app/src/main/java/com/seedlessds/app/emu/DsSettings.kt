@@ -31,6 +31,7 @@ data class DsSettings(
     val rtcSystemTime: Boolean = false,
     val showFps: Boolean = false,
     val showScale: Boolean = false,
+    val showPerf: Boolean = false,
     val autosaveMode: Int = 0,
     val autofireSpeed: Int = 2,
     val cheatsEnabled: Boolean = true,
@@ -41,6 +42,7 @@ data class DsSettings(
     val autoTrim: Boolean = false,
     val preloadRoms: Boolean = false,
     val filter: String = "None",
+    val fxAutoLite: Boolean = true,
     val controllerAlpha: Float = 0.45f,
     val hapticFeedback: Boolean = false,
     val showStartSelect: Boolean = true,
@@ -226,6 +228,7 @@ object SettingsRepo {
             hires3D = p.getBoolean("_Hires3D", d.hires3D),
             dynamicRes = p.getBoolean("_DynamicRes", d.dynamicRes),
             showScale = p.getBoolean("_ShowScale", d.showScale),
+            showPerf = p.getBoolean("_ShowPerf", d.showPerf),
             gl16bit = p.getBoolean("_GlUse16Bit", d.gl16bit),
             disableEdgeMarking = p.getBoolean("_DisableEdgeMarking", d.disableEdgeMarking),
             fixMainScreen = p.getBoolean("_FixMainEngineScreen", d.fixMainScreen),
@@ -254,6 +257,7 @@ object SettingsRepo {
             autoTrim = p.getBoolean("_AutoTrim", d.autoTrim),
             preloadRoms = p.getBoolean("_PreloadRoms", d.preloadRoms),
             filter = p.getString("_CurrentFx", d.filter) ?: d.filter,
+            fxAutoLite = p.getBoolean("_FxAutoLite", d.fxAutoLite),
             controllerAlpha = p.getFloat("_ControllerAlpha", d.controllerAlpha),
             hapticFeedback = p.getBoolean("_HapticFeedback", d.hapticFeedback),
             showStartSelect = p.getBoolean("_ShowMore", d.showStartSelect),
@@ -324,6 +328,7 @@ object SettingsRepo {
             putBoolean("_Hires3D", s.hires3D)
             putBoolean("_DynamicRes", s.dynamicRes)
             putBoolean("_ShowScale", s.showScale)
+            putBoolean("_ShowPerf", s.showPerf)
             putBoolean("_GlUse16Bit", s.gl16bit)
             putBoolean("_DisableEdgeMarking", s.disableEdgeMarking)
             putBoolean("_FixMainEngineScreen", s.fixMainScreen)
@@ -352,6 +357,7 @@ object SettingsRepo {
             putBoolean("_AutoTrim", s.autoTrim)
             putBoolean("_PreloadRoms", s.preloadRoms)
             putString("_CurrentFx", s.filter)
+            putBoolean("_FxAutoLite", s.fxAutoLite)
             putFloat("_ControllerAlpha", s.controllerAlpha)
             putBoolean("_HapticFeedback", s.hapticFeedback)
             putBoolean("_ShowMore", s.showStartSelect)
@@ -426,6 +432,7 @@ object SettingsRepo {
         db("_Hires3D", s.hires3D, b.hires3D)
         db("_DynamicRes", s.dynamicRes, b.dynamicRes)
         db("_ShowScale", s.showScale, b.showScale)
+        db("_ShowPerf", s.showPerf, b.showPerf)
         db("_GlUse16Bit", s.gl16bit, b.gl16bit)
         db("_DisableEdgeMarking", s.disableEdgeMarking, b.disableEdgeMarking)
         db("_FixMainEngineScreen", s.fixMainScreen, b.fixMainScreen)
@@ -454,6 +461,7 @@ object SettingsRepo {
         db("_AutoTrim", s.autoTrim, b.autoTrim)
         db("_PreloadRoms", s.preloadRoms, b.preloadRoms)
         ds("_CurrentFx", s.filter, b.filter)
+        db("_FxAutoLite", s.fxAutoLite, b.fxAutoLite)
         df("_ControllerAlpha", s.controllerAlpha, b.controllerAlpha)
         db("_HapticFeedback", s.hapticFeedback, b.hapticFeedback)
         db("_ShowMore", s.showStartSelect, b.showStartSelect)

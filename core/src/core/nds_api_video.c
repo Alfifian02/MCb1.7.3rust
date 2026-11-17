@@ -8,6 +8,7 @@
 #include "frontend/frontend.h"
 #include "core_internals.h"
 #include "mem_access.h"
+#include "debug/frame_stats.h"
 
 #define SCREEN_WIDTH 256
 #define SCREEN_HEIGHT 192
@@ -172,6 +173,34 @@ static uint32_t hud_word(float value)
     if (scaled >= 4294967296.0)
         return UINT32_MAX;
     return (uint32_t)scaled;
+}
+
+void nds_frame_stats_enable(nds_t *nds, int enabled)
+{
+    (void)nds;
+    frame_stats_enable(enabled);
+}
+
+int nds_frame_stats(nds_t *nds, uint32_t out[NDS_FRAME_STATS_FIELDS])
+{
+    frame_stats_snapshot_t s;
+    uint32_t n;
+
+    (void)nds;
+    n = frame_stats_snapshot(&s);
+    out[0] = s.samples;
+    out[1] = s.emu_cpu_avg_us;
+    out[2] = s.emu_cpu_p99_us;
+    out[3] = s.emu_cpu_max_us;
+    out[4] = s.proc_cpu_avg_us;
+    out[5] = s.proc_cpu_p99_us;
+    out[6] = s.wall_avg_us;
+    out[7] = s.wall_p99_us;
+    out[8] = s.wall_max_us;
+    out[9] = s.io_avg_us;
+    out[10] = s.io_max_us;
+    out[11] = s.io_frames;
+    return (int)n;
 }
 
 uint32_t nds_perf_word(nds_t *nds)

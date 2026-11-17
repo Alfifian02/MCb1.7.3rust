@@ -28,6 +28,9 @@ class DsGlView(context: Context) : SurfaceView(context) {
 
     fun applyDisplaySettings() = queueEvent { renderer.reapplyDisplay() }
 
+    /** Overlay text from the frame timing statistics, empty while "Show frame timing" is off. */
+    fun perfText(): String = renderer.perfText()
+
     @Volatile var onFirstFrame: (() -> Unit)? = null
 
     @Volatile private var padState = 0
@@ -346,6 +349,18 @@ class DsGlView(context: Context) : SurfaceView(context) {
         }
         private var dimsCache: Pair<Int, Int>? = null
 
+        val perf = FramePerf()
+        private var perfPending = false
+        private var perfCpuNs = 0L
+        private var perfEndNs = 0L
+
+        fun perfText(): String {
+            val s = perf.latest ?: return ""
+            return s.overlay(GpuTier.liteActive(SettingsRepo.current.filter, SettingsRepo.current.fxAutoLite))
+        }
+
+        private fun effectiveFilter(cfg: DsSettings): String = GpuTier.effectiveFilter(cfg.filter, cfg.fxAutoLite)
+
         private var externalThread: ExternalThread? = null
         private var frame = 0L
         private val dpy14 get() = android.opengl.EGL14.eglGetCurrentDisplay()
@@ -360,6 +375,10 @@ class DsGlView(context: Context) : SurfaceView(context) {
 
         fun created(config: EGLConfig?) {
             ringForget()
+            val glRenderer = GLES20.glGetString(GLES20.GL_RENDERER) ?: ""
+            GpuTier.detect(glRenderer)
+            perf.onContext(GLES20.glGetString(GLES20.GL_EXTENSIONS) ?: "")
+            com.seedlessds.app.AppLog.i("reconDS", "GPU: $glRenderer, weak=${GpuTier.weak}, timerQuery=${perf.gpuSupported}, lite=${GpuTier.liteActive(SettingsRepo.current.filter, SettingsRepo.current.fxAutoLite)}")
             displayKey = ""
             pageScaleShown = 0; dimsCache = null
             externalThread?.terminate()
@@ -422,7 +441,7 @@ class DsGlView(context: Context) : SurfaceView(context) {
             GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, vbo)
             writeScreenGeometry(width, height)
 
-            val fxPath = PathCache.SYS_PREFIX + "shaders/${SettingsRepo.current.filter}.dfx"
+            val fxPath = PathCache.SYS_PREFIX + "shaders/${effectiveFilter(SettingsRepo.current)}.dfx"
             val fxResult = SeedlessCore.fxLoad(fxPath, 0, 2208)
             if (fxResult != 0) com.seedlessds.app.AppLog.w("reconDS", "fxLoad failed ($fxResult): $fxPath, using the default shader")
 
@@ -591,7 +610,7 @@ class DsGlView(context: Context) : SurfaceView(context) {
         }
 
         private fun displayKeyOf(cfg: DsSettings): String = listOf(
-            viewW, viewH, cfg.filter, cfg.hires3D, cfg.gl16bit, cfg.internalRes, cfg.integerScale, cfg.screenLayout,
+            viewW, viewH, cfg.filter, cfg.fxAutoLite, cfg.hires3D, cfg.gl16bit, cfg.internalRes, cfg.integerScale, cfg.screenLayout,
             cfg.singleScreen, cfg.singleBottom, cfg.swapScreens, cfg.dualScreenPreset, cfg.dsKeepRatio, cfg.dsIntFillW,
             cfg.dsIntFillH, cfg.dsIntAlign, cfg.dsSameSize, cfg.extDisplayType, cfg.extDisplayScreen,
             ControlLayout.topScale, ControlLayout.topOffX, ControlLayout.topOffY,
@@ -612,7 +631,7 @@ class DsGlView(context: Context) : SurfaceView(context) {
                 if (topTex2 != 0) { createScreenTexture(topTex2); createScreenTexture(bottomTex2); SeedlessCore.clearScreens(topTex2, bottomTex2) }
             }
             val (sw, sh) = srcDims()
-            val fxPath = PathCache.SYS_PREFIX + "shaders/${cfg.filter}.dfx"
+            val fxPath = PathCache.SYS_PREFIX + "shaders/${effectiveFilter(cfg)}.dfx"
             val fxResult = SeedlessCore.fxLoad(fxPath, 0, 2208)
             if (fxResult != 0) com.seedlessds.app.AppLog.w("reconDS", "fxLoad failed ($fxResult): $fxPath, using the default shader")
             SeedlessCore.fxSetup(sw, sh, 0, 0, viewW, viewH)
@@ -680,6 +699,7 @@ class DsGlView(context: Context) : SurfaceView(context) {
         }
 
         fun draw(config: EGLConfig?): Boolean {
+            perf.setEnabled(SettingsRepo.current.showPerf)
             setPresentMode()
             externalThreadAlive()
             if (viewW != 0 && viewH != 0 && (geoVersion != DualScreenPresets.version || geoExternal != ExternalSurface.attached)) writeScreenGeometry(viewW, viewH)
@@ -703,6 +723,7 @@ class DsGlView(context: Context) : SurfaceView(context) {
             GLES20.glDisable(GLES20.GL_BLEND)
             externalThread?.acquire(topTex, bottomTex)?.let { v -> android.opengl.EGL15.eglWaitSync(dpy14, v, 0); runCatching { android.opengl.EGL15.eglDestroySync(dpy14, v) } }
             followPageScale()
+            perf.gpuBegin()
             if (texPages != 0) {
                 val page = com.seedlessds.app.SeedlessBridge.pageList()
                 if (page >= 0) { if (pageScaleShown == 0 || pageScaleShown == SettingsRepo.coreScale) copyPage(page) else uploadPage(page, pageScaleShown) }
@@ -715,6 +736,7 @@ class DsGlView(context: Context) : SurfaceView(context) {
                 GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
                 ringBlit(delayC, frame)
             }
+            perf.gpuEnd()
             val ext = externalThread
             if (ext != null) {
                 frame++
@@ -724,6 +746,7 @@ class DsGlView(context: Context) : SurfaceView(context) {
                 ext.publish(frame, v, topTex, bottomTex, sw, sh)
             }
             val tEnd = android.os.SystemClock.elapsedRealtimeNanos()
+            perfCpuNs = tEnd - tUpload; perfEndNs = tEnd; perfPending = true
             if (probeTimes && probeTotal in probeSince..(probeSince + 1200)) com.seedlessds.app.AppLog.i("reconDS",
                 "T ${probeTotal} ${tWait / 1000} ${(tUpload - tWait) / 1000} ${(tEnd - tUpload) / 1000} ${if (probePrev != 0L) (tWait - probePrev) / 1000 else 0}" +
                 " swap ${probeSwapNs / 1000} ${probePresNs / 1000}")
@@ -765,7 +788,11 @@ class DsGlView(context: Context) : SurfaceView(context) {
         private var probeN = 0
         private var probeTotal = 0
         private var probeSwapNs = 0L; private var probePresNs = 0L
-        fun probeSwap(swap: Long, pres: Long) { probeSwapNs = swap; probePresNs = pres }
+        fun probeSwap(swap: Long, pres: Long) {
+            probeSwapNs = swap; probePresNs = pres
+            if (perfPending) { perfPending = false; perf.recordFrame(perfCpuNs, swap, perfEndNs) }
+            perf.afterSwap()
+        }
         private val probeTimes: Boolean = false
         private val probeSince: Int = 600
         private var probeWait = 0L

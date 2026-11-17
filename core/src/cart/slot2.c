@@ -10,6 +10,7 @@
 #include "seedlessds/platform.h"
 #include "core_internals.h"
 #include "mem_access.h"
+#include "platform/save_writer.h"
 
 static void *const slot2_serial_read_idle[3] = {
     (void *)io_slot2_serial_read8_idle, (void *)io_slot2_serial_read16_idle,
@@ -451,10 +452,6 @@ void cart_slot2_backup_write_byte(slot2_t *sub, uint32_t dir, uint32_t value)
     }
 }
 
-static int    (*core_fseek_11)(void *, long, int);
-static size_t (*core_fwrite_11)(const void *, size_t, size_t, void *);
-static int    (*core_fflush_11)(void *);
-
 long cart_slot2_backup_autosave_tick(slot2_t *obj) {
     uint32_t left = obj->save_countdown;
     if (left == 0)
@@ -474,15 +471,16 @@ long cart_slot2_backup_autosave_tick(slot2_t *obj) {
     if (file == 0)
         return (long)(intptr_t)obj;
 
-    if (!core_fseek_11) {
-        core_fseek_11  = (int (*)(void *, long, int))sym_libc_fseek;
-        core_fwrite_11 = (size_t (*)(const void *, size_t, size_t, void *))sym_libc_fwrite;
-        core_fflush_11 = (int (*)(void *))sym_libc_fflush;
-    }
-    core_fseek_11(file, 0, 0);
+    /* Copy now, write on the I/O thread. The whole image is rewritten, as before. */
     uint32_t size = obj->save_size;
-    core_fwrite_11(obj->save, (size_t)size, 1, file);
-    return core_fflush_11(file);
+    save_job_t *job = save_job_create(file, (size_t)size + 16u);
+    if (job == 0 || save_job_add(job, 0, data, (size_t)size) != 0) {
+        save_job_discard(job);
+        obj->save_countdown = 1;
+        return (long)(intptr_t)obj;
+    }
+    save_job_submit(job);
+    return 0;
 }
 
 #define P_BASE     0x59a0
@@ -531,6 +529,7 @@ int32_t cart_slot2_load_gba(cart_t *cart, const char *name) {
     void *fp = nds_platform_default()->files.open(nds_platform_default()->user, path, "rb");
 
     if (p->loaded) {
+        save_writer_flush();
         ((fn_free)sym_libc_free)(p->rom);
         void *s = p->save;
         if (s) ((fn_free)sym_libc_free)(s);

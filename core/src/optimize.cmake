@@ -2,6 +2,7 @@
 # Semua opsi dilewati pada konfigurasi Debug. Hasil harus diukur di perangkat nyata.
 
 option(SEEDLESS_ENABLE_THIN_LTO "Aktifkan ThinLTO (-flto=thin) untuk recon_fn" ON)
+option(SEEDLESS_ENABLE_FULL_LTO "Aktifkan LTO penuh (-flto) untuk recon_fn; menggantikan ThinLTO. Ukur dulu di perangkat." OFF)
 option(SEEDLESS_RASTER_O3 "Compile file raster 3D dan GPU 2D dengan -O3" ON)
 set(SEEDLESS_PGO_MODE "OFF" CACHE STRING "Mode PGO: OFF, GENERATE, atau USE")
 set_property(CACHE SEEDLESS_PGO_MODE PROPERTY STRINGS OFF GENERATE USE)
@@ -10,7 +11,13 @@ set(SEEDLESS_PGO_PROFILE "" CACHE FILEPATH "Path file .profdata (hasil llvm-prof
 set(_seedless_not_debug "$<NOT:$<CONFIG:Debug>>")
 
 # --- ThinLTO ---------------------------------------------------------------
-if(SEEDLESS_ENABLE_THIN_LTO)
+# Full LTO (-flto, setara lto="fat") digabung dengan ThinLTO tidak bermakna: bila keduanya ON, full yang dipakai.
+# Bandingkan dengan: -DSEEDLESS_ENABLE_FULL_LTO=ON (full) lawan default (thin), pada game dan perangkat yang sama,
+# memakai overlay "Show frame timing" (EMU avg/p99) dan waktu build.
+if(SEEDLESS_ENABLE_FULL_LTO)
+    target_compile_options(recon_fn PRIVATE "$<${_seedless_not_debug}:-flto=full>")
+    target_link_options(recon_fn PRIVATE "$<${_seedless_not_debug}:-flto=full>")
+elseif(SEEDLESS_ENABLE_THIN_LTO)
     target_compile_options(recon_fn PRIVATE "$<${_seedless_not_debug}:-flto=thin>")
     target_link_options(recon_fn PRIVATE "$<${_seedless_not_debug}:-flto=thin>")
 endif()
