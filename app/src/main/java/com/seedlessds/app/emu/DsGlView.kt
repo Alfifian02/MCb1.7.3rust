@@ -37,6 +37,7 @@ class DsGlView(context: Context) : SurfaceView(context) {
     @Volatile private var touchActive = false
     @Volatile private var touchPacked = 0
     @Volatile private var autofireMask = 0
+    @Volatile private var fingerDown = false
 
     private fun pushInput() {
         if (thread.isClosing()) return
@@ -54,6 +55,14 @@ class DsGlView(context: Context) : SurfaceView(context) {
 
     fun pushTouch(active: Boolean, packed: Int) { touchActive = active; touchPacked = packed; pushInput() }
 
+    /** Virtual stylus driven by a gamepad (Pointer mode). A real finger on the screen takes priority. */
+    fun stylusTouch(active: Boolean, dx: Int, dy: Int) {
+        if (fingerDown) return
+        touchActive = active
+        touchPacked = if (active) (dx.coerceIn(0, 255) shl 16) or dy.coerceIn(0, 191) else 0
+        pushInput()
+    }
+
     fun setButton(index: Int, pressed: Boolean) {
         if (index < 0) return
         padState = if (pressed) padState or (1 shl index) else padState and (1 shl index).inv()
@@ -65,6 +74,7 @@ class DsGlView(context: Context) : SurfaceView(context) {
         if (r[2] <= 0f || r[3] <= 0f) return true
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN, MotionEvent.ACTION_MOVE -> {
+                fingerDown = true
                 val lx = (event.x - r[0]) / r[2]
                 val ly = (event.y - r[1]) / r[3]
                 if (lx in 0f..1f && ly in 0f..1f) {
@@ -74,6 +84,7 @@ class DsGlView(context: Context) : SurfaceView(context) {
                 }
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                fingerDown = false
                 touchActive = false; touchPacked = 0; pushInput()
             }
         }

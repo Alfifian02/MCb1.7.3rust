@@ -398,6 +398,16 @@ class EmulatorActivity : ComponentActivity() {
             if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) capture(event.keyCode)
             return true
         }
+        // Pointer mode: R3/R2 tap and L2 slows the cursor, unless the player mapped that key to something.
+        if (!menuOpen && SettingsRepo.current.analogStickMode == StylusCursor.POINTER_MODE &&
+            KeyMap.dsForKey(event.keyCode) < 0 && KeyMap.specialForKey(event.keyCode) == 0) {
+            val down = event.action == KeyEvent.ACTION_DOWN
+            when (event.keyCode) {
+                KeyEvent.KEYCODE_BUTTON_THUMBR -> { StylusCursor.setTap(1, down); return true }
+                KeyEvent.KEYCODE_BUTTON_R2 -> { StylusCursor.setTap(2, down); return true }
+                KeyEvent.KEYCODE_BUTTON_L2 -> { StylusCursor.setSlow(1, down); return true }
+            }
+        }
         if (!menuOpen && (KeyMap.dsForKey(event.keyCode) >= 0 || KeyMap.specialForKey(event.keyCode) != 0)) {
             return when (event.action) {
                 KeyEvent.ACTION_DOWN -> onKeyDown(event.keyCode, event)
@@ -413,7 +423,7 @@ class EmulatorActivity : ComponentActivity() {
         if (menuOpen && MenuKeyRouter.dispatch(keyCode)) return true
         if (menuOpen) return super.onKeyDown(keyCode, event)
         val i = KeyMap.dsForKey(keyCode)
-        if (i >= 0) { if (i == L) keyL = true; if (i == R) keyR = true; glView.setButton(i, true); return true }
+        if (i >= 0) { if (i == L) keyL = true; if (i == R) keyR = true; glView.setButton(i, true); ExternalPadState.set(i, true); return true }
         val fn = KeyMap.specialForKey(keyCode)
         if (fn != 0 && event.repeatCount == 0 && ExtraKeyRouter.dispatch(fn, true)) return true
         if (fn != 0) return true
@@ -424,10 +434,16 @@ class EmulatorActivity : ComponentActivity() {
         if (KeyCapture.onKey != null) return true
         if (menuOpen) return true
         val i = KeyMap.dsForKey(keyCode)
-        if (i >= 0) { if (i == L) keyL = false; if (i == R) keyR = false; glView.setButton(i, false); return true }
+        if (i >= 0) { if (i == L) keyL = false; if (i == R) keyR = false; glView.setButton(i, false); ExternalPadState.set(i, false); return true }
         val fn = KeyMap.specialForKey(keyCode)
         if (fn != 0) { ExtraKeyRouter.dispatch(fn, false); return true }
         return super.onKeyUp(keyCode, event)
+    }
+
+    /** Sends an external-controller axis/trigger state to the core and mirrors it to the input display. */
+    private fun padAxis(index: Int, pressed: Boolean) {
+        glView.setButton(index, pressed)
+        ExternalPadState.set(index, pressed)
     }
 
     override fun onGenericMotionEvent(event: android.view.MotionEvent): Boolean {
@@ -444,14 +460,23 @@ class EmulatorActivity : ComponentActivity() {
                 MenuKeyRouter.dispatchAxes(x, y)
                 return true
             }
-            glView.setButton(LEFT, x < -dz); glView.setButton(RIGHT, x > dz)
-            glView.setButton(UP, y < -dz); glView.setButton(DOWN, y > dz)
-            if (SettingsRepo.current.analogTriggers) {
+            padAxis(LEFT, x < -dz); padAxis(RIGHT, x > dz)
+            padAxis(UP, y < -dz); padAxis(DOWN, y > dz)
+            if (SettingsRepo.current.analogStickMode == StylusCursor.POINTER_MODE) {
+                // Right stick moves the stylus cursor. Android reports it as Z/RZ on most pads (RX/RY on some).
+                val hasZ = event.device?.getMotionRange(android.view.MotionEvent.AXIS_Z, event.source) != null
+                StylusCursor.stickX = event.getAxisValue(if (hasZ) android.view.MotionEvent.AXIS_Z else android.view.MotionEvent.AXIS_RX)
+                StylusCursor.stickY = event.getAxisValue(if (hasZ) android.view.MotionEvent.AXIS_RZ else android.view.MotionEvent.AXIS_RY)
+                // The triggers are freed from L/R: R2 taps, L2 slows the cursor.
+                val lt = maxOf(event.getAxisValue(android.view.MotionEvent.AXIS_LTRIGGER), event.getAxisValue(android.view.MotionEvent.AXIS_BRAKE))
+                val rt = maxOf(event.getAxisValue(android.view.MotionEvent.AXIS_RTRIGGER), event.getAxisValue(android.view.MotionEvent.AXIS_GAS))
+                StylusCursor.setSlow(2, lt > 0.5f); StylusCursor.setTap(4, rt > 0.5f)
+            } else if (SettingsRepo.current.analogTriggers) {
                 val ax = android.view.MotionEvent.AXIS_LTRIGGER; val bx = android.view.MotionEvent.AXIS_BRAKE
                 val cx = android.view.MotionEvent.AXIS_RTRIGGER; val gx = android.view.MotionEvent.AXIS_GAS
                 val lt = maxOf(event.getAxisValue(ax), event.getAxisValue(bx))
                 val rt = maxOf(event.getAxisValue(cx), event.getAxisValue(gx))
-                glView.setButton(L, keyL || lt > 0.5f); glView.setButton(R, keyR || rt > 0.5f)
+                padAxis(L, keyL || lt > 0.5f); padAxis(R, keyR || rt > 0.5f)
             }
             return true
         }
@@ -482,6 +507,7 @@ class EmulatorActivity : ComponentActivity() {
     override fun onPause() {
         super.onPause()
         com.seedlessds.app.AppLog.i(TAG, "onPause")
+        StylusCursor.stop()
         commitPlayTime()
         stopCpuLoad()
         appForeground = false
@@ -496,6 +522,7 @@ class EmulatorActivity : ComponentActivity() {
         if (isClosing) return
         sessionStart = System.currentTimeMillis()
         if (::glView.isInitialized) glView.onResume()
+        if (::glView.isInitialized) StylusCursor.start(glView) { menuOpen }
         cancelResumeNotification()
         startCpuLoad()
         appForeground = true

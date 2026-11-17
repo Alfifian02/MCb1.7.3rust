@@ -139,6 +139,7 @@
     <string name="common_top">"上"</string>
     <string name="common_top_2">"上"</string>
     <string name="common_top_screen">"上屏"</string>
+    <string name="controls_input_display">"输入显示"</string>
     <string name="common_turbo_rapid_fire">"连发（快速连击）"</string>
     <string name="common_vertical_alignment">"垂直对齐"</string>
     <string name="common_view">"查看"</string>
@@ -616,6 +617,10 @@
     <string name="settings_spreads_3d_rasterizing_across_several_cores">"将 3D 光栅化分摊到多个核心。在复杂场景中速度更快。"</string>
     <string name="settings_sram_cartridge">"SRAM 卡带"</string>
     <string name="settings_stick_deadzone">"摇杆死区"</string>
+    <string name="settings_pointer_speed">"指针速度"</string>
+    <string name="settings_pointer_speed_desc">"指针模式下触控笔光标的移动速度。按住 L2 可减速。"</string>
+    <string name="settings_pointer_size">"指针大小"</string>
+    <string name="settings_pointer_size_desc">"下屏上触控笔光标的大小。"</string>
     <string name="settings_stick_mode">"摇杆模式"</string>
     <string name="settings_system">"系统"</string>
     <string name="settings_system_language">"系统语言"</string>
@@ -643,7 +648,7 @@
     <string name="settings_use_system_time_rtc">"使用系统时间（RTC）"</string>
     <string name="settings_uses_16_bit_color_in_3d_less_memory_slightly">"3D 中使用 16 位色彩：占用内存更少，精度略低。"</string>
     <string name="settings_uses_a_fixed_date_time_instead_of_the_system_s">"使用固定日期和时间，而非系统时间。"</string>
-    <string name="settings_uses_the_controller_s_l2_r2_triggers_as_the_ds_s_l_r">"将手柄的 L2/R2 扳机用作 DS 的 L/R 键。"</string>
+    <string name="settings_uses_the_controller_s_l2_r2_triggers_as_the_ds_s_l_r">"将手柄的 L2/R2 扳机用作 DS 的 L/R 键。在指针模式下,扳机改为控制光标(R2 点按,L2 减速)。"</string>
     <string name="settings_uses_the_real_microphone_for_games_that">"为需要麦克风的游戏使用真实麦克风。"</string>
     <string name="settings_vertical">"垂直"</string>
     <string name="settings_very_high">"极高"</string>

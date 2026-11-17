@@ -163,6 +163,7 @@
     <string name="common_top">"Top"</string>
     <string name="common_top_2">"TOP"</string>
     <string name="common_top_screen">"Top screen"</string>
+    <string name="controls_input_display">"Input display"</string>
     <string name="common_turbo_rapid_fire">"Turbo (rapid-fire)"</string>
     <string name="common_vertical_alignment">"Vertical alignment"</string>
     <string name="common_view">"View"</string>
@@ -715,6 +716,10 @@
     <string name="settings_spreads_3d_rasterizing_across_several_cores">"Spreads 3D rasterizing across several cores. Faster in dense scenes."</string>
     <string name="settings_sram_cartridge">"SRAM Cartridge"</string>
     <string name="settings_stick_deadzone">"Stick deadzone"</string>
+    <string name="settings_pointer_speed">"Pointer speed"</string>
+    <string name="settings_pointer_speed_desc">"How fast the stylus cursor moves in Pointer mode. Hold L2 to slow it down."</string>
+    <string name="settings_pointer_size">"Pointer size"</string>
+    <string name="settings_pointer_size_desc">"Size of the stylus cursor on the bottom screen."</string>
     <string name="settings_stick_mode">"Stick mode"</string>
     <string name="settings_system">"System"</string>
     <string name="settings_system_language">"System language"</string>
@@ -742,7 +747,7 @@
     <string name="settings_use_system_time_rtc">"Use system time (RTC)"</string>
     <string name="settings_uses_16_bit_color_in_3d_less_memory_slightly">"Uses 16-bit color in 3D: less memory, slightly less accurate."</string>
     <string name="settings_uses_a_fixed_date_time_instead_of_the_system_s">"Uses a fixed date/time instead of the system\'s."</string>
-    <string name="settings_uses_the_controller_s_l2_r2_triggers_as_the_ds_s_l_r">"Uses the controller\'s L2/R2 triggers as the DS\'s L/R."</string>
+    <string name="settings_uses_the_controller_s_l2_r2_triggers_as_the_ds_s_l_r">"Uses the controller\'s L2/R2 triggers as the DS\'s L/R. In Pointer mode the triggers control the cursor instead (R2 taps, L2 slows it)."</string>
     <string name="settings_uses_the_real_microphone_for_games_that">"Uses the real microphone for games that require it."</string>
     <string name="settings_vertical">"Vertical"</string>
     <string name="settings_very_high">"Very High"</string>

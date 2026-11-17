@@ -587,6 +587,10 @@ fun SettingsScreen(
         s.analogTriggers) { set(s.copy(analogTriggers = it)) }
     SliderRow(uiContext.getString(R.string.settings_stick_deadzone), uiContext.getString(R.string.settings_threshold_before_the_stick_registers_movement),
         (s.analogDeadzone * 100).toInt(), 0, 100, uiContext.getString(R.string.percent_unit)) { set(s.copy(analogDeadzone = it / 100f)) }
+    SliderRow(uiContext.getString(R.string.settings_pointer_speed), uiContext.getString(R.string.settings_pointer_speed_desc),
+        s.pointerSpeed, 25, 300, uiContext.getString(R.string.percent_unit)) { set(s.copy(pointerSpeed = it)) }
+    SliderRow(uiContext.getString(R.string.settings_pointer_size), uiContext.getString(R.string.settings_pointer_size_desc),
+        s.pointerSize, 50, 200, uiContext.getString(R.string.percent_unit)) { set(s.copy(pointerSize = it)) }
 
     Group(uiContext.getString(R.string.settings_overlay))
     SwitchRow(uiContext.getString(R.string.settings_hide_already_mapped_buttons), uiContext.getString(R.string.settings_removes_from_the_touch_pad_the_buttons_you),

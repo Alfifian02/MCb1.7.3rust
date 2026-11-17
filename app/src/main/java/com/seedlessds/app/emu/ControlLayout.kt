@@ -4,7 +4,8 @@ import android.content.Context
 
 object ControlLayout {
     private const val PREFS = "ctrl_layout"
-    val ids = listOf("dpad", "face", "lbtn", "rbtn", "startselect", "menu", "extra")
+    const val INPUT_VIEW = "inputview"
+    val ids = listOf("dpad", "face", "lbtn", "rbtn", "startselect", "menu", "extra", INPUT_VIEW)
 
     private val offsets = HashMap<String, Pair<Float, Float>>()
     private val scales = HashMap<String, Float>()
@@ -40,6 +41,8 @@ object ControlLayout {
         botOffY = p.getFloat("bot_offy", oldOffY)
         extScale = p.getFloat("ext_scale", 1f)
         hidden.clear(); p.getStringSet("hidden", null)?.let { hidden.addAll(it) }
+        // The input display is opt-in: hidden until the player has saved a layout that shows it.
+        if (!p.getBoolean("inputview_init", false)) hidden.add(INPUT_VIEW)
         backgroundUri = p.getString("background_uri", "") ?: ""
     }
 
@@ -57,7 +60,7 @@ object ControlLayout {
         e.putFloat("top_scale", topScale); e.putFloat("top_offx", topOffX); e.putFloat("top_offy", topOffY)
         e.putFloat("bot_scale", botScale); e.putFloat("bot_offx", botOffX); e.putFloat("bot_offy", botOffY)
         e.putFloat("ext_scale", extScale)
-        e.putStringSet("hidden", HashSet(hidden))
+        e.putStringSet("hidden", HashSet(hidden)); e.putBoolean("inputview_init", true)
         e.putFloat("screen_scale", topScale); e.putFloat("screen_offx", topOffX); e.putFloat("screen_offy", topOffY)
         e.apply()
         offsets.putAll(offsetValues); scales.putAll(scaleValues)
@@ -70,7 +73,7 @@ object ControlLayout {
 
     fun reset(ctx: Context) {
         ctx.getSharedPreferences(PREFS, 0).edit().clear().apply()
-        offsets.clear(); scales.clear(); hidden.clear()
+        offsets.clear(); scales.clear(); hidden.clear(); hidden.add(INPUT_VIEW)
         for (id in ids) { offsets[id] = 0f to 0f; scales[id] = 1f }
         topScale = 1f; topOffX = 0f; topOffY = 0f
         botScale = 1f; botOffX = 0f; botOffY = 0f

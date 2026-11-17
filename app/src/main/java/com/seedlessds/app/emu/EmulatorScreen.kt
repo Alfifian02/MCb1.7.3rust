@@ -233,6 +233,10 @@ fun EmulatorScreen(
             factory = { glView }, modifier = Modifier.fillMaxSize()
         )
 
+        if (overlay == Overlay.NONE && !editingControls && gamepadConnected &&
+            settings.analogStickMode == StylusCursor.POINTER_MODE)
+            StylusCursorOverlay(glView, settings.pointerSize)
+
         if (overlay == Overlay.NONE) {
             if (editingControls) {
                 Box(Modifier.fillMaxSize()
@@ -303,7 +307,8 @@ fun EmulatorScreen(
                             modifier = Modifier.padding(top = 6.dp),
                             label = when (sel) {
                                 "screenTop" -> uiContext.getString(R.string.common_top_screen); "screenBot" -> uiContext.getString(R.string.common_bottom_screen)
-                                "extScreen" -> uiContext.getString(R.string.menu_external_screen); else -> sel
+                                "extScreen" -> uiContext.getString(R.string.menu_external_screen)
+                                ControlLayout.INPUT_VIEW -> uiContext.getString(R.string.controls_input_display); else -> sel
                             },
                             value = curValue.coerceIn(range.start, range.endInclusive),
                             range = range,
@@ -843,6 +848,13 @@ private fun ControlsOverlay(
                 PadButton(uiContext.getString(R.string.common_start), Modifier.size(96.dp, 34.dp), RoundedCornerShape(16.dp), alpha, haptic, editMode, style) { glView.setButton(C.START, it) }
             }
         }
+
+        // External-controller input display: independent of the touch-button toggle, so it still
+        // shows while the on-screen pad is hidden because a gamepad is connected.
+        if (isVisible(ControlLayout.INPUT_VIEW)) InputDisplay(
+            Modifier.align(Alignment.BottomCenter).ctrl(ControlLayout.INPUT_VIEW).padding(bottom = 64.dp),
+            mask = ExternalPadState.mask, opacity = alpha.coerceAtLeast(0.5f)
+        )
 
         val extras = listOf(settings.extraFunc1, settings.extraFunc2, settings.extraFunc3)
         if (isVisible("extra")) Column(Modifier.align(Alignment.CenterEnd).ctrl("extra").padding(end = 4.dp),

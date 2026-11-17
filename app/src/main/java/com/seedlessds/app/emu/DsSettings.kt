@@ -70,6 +70,8 @@ data class DsSettings(
     val analogTriggers: Boolean = true,
     val analogTouch: Boolean = false,
     val analogDeadzone: Float = 0.05f,
+    val pointerSpeed: Int = 100,
+    val pointerSize: Int = 100,
     val disableMapped: Boolean = false,
     val disableBackButton: Boolean = false,
     val loadNeedsConfirm: Boolean = false,
@@ -285,6 +287,8 @@ object SettingsRepo {
             analogTriggers = p.getBoolean("_AnalogTriggers", d.analogTriggers),
             analogTouch = p.getBoolean("_AnalogTouch", d.analogTouch),
             analogDeadzone = p.getFloat("_AnalogDeadzone", d.analogDeadzone),
+            pointerSpeed = p.getInt("_PointerSpeed", d.pointerSpeed),
+            pointerSize = p.getInt("_PointerSize", d.pointerSize),
             disableMapped = p.getBoolean("_DisableMapped", d.disableMapped),
             disableBackButton = p.getBoolean("_DisableBackButton", d.disableBackButton),
             loadNeedsConfirm = p.getBoolean("_LoadNeedsConfirm", d.loadNeedsConfirm),
@@ -385,6 +389,8 @@ object SettingsRepo {
             putBoolean("_AnalogTriggers", s.analogTriggers)
             putBoolean("_AnalogTouch", s.analogTouch)
             putFloat("_AnalogDeadzone", s.analogDeadzone)
+            putInt("_PointerSpeed", s.pointerSpeed)
+            putInt("_PointerSize", s.pointerSize)
             putBoolean("_DisableMapped", s.disableMapped)
             putBoolean("_DisableBackButton", s.disableBackButton)
             putBoolean("_LoadNeedsConfirm", s.loadNeedsConfirm)
@@ -489,6 +495,8 @@ object SettingsRepo {
         db("_AnalogTriggers", s.analogTriggers, b.analogTriggers)
         db("_AnalogTouch", s.analogTouch, b.analogTouch)
         df("_AnalogDeadzone", s.analogDeadzone, b.analogDeadzone)
+        di("_PointerSpeed", s.pointerSpeed, b.pointerSpeed)
+        di("_PointerSize", s.pointerSize, b.pointerSize)
         db("_DisableMapped", s.disableMapped, b.disableMapped)
         db("_DisableBackButton", s.disableBackButton, b.disableBackButton)
         db("_LoadNeedsConfirm", s.loadNeedsConfirm, b.loadNeedsConfirm)
