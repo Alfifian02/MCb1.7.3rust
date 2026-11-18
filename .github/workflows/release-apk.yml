@@ -1,0 +1,177 @@
+# Builds a signed release APK and publishes it to a GitHub Release.
+#
+# Usage
+#   * Release:   bump VERSION_NAME / VERSION_CODE in gradle.properties, commit, then push a tag:
+#                  git tag v1.6.0 && git push origin v1.6.0
+#                The tag must match VERSION_NAME (v1.6.0 <-> VERSION_NAME=1.6.0).
+#   * Test run:  Actions -> "Release APK" -> Run workflow. This builds and signs the APK and
+#                attaches it to the run as an artifact, but does NOT create a release.
+#
+# Required repository secrets (Settings -> Secrets and variables -> Actions):
+#   SIGNING_KEYSTORE_BASE64  the keystore file, base64 encoded:  base64 -w0 release.jks
+#   SIGNING_STORE_PASSWORD   keystore password
+#   SIGNING_KEY_ALIAS        key alias
+#   SIGNING_KEY_PASSWORD     key password (identical to the store password for PKCS12 keystores)
+#
+# IMPORTANT: Android only installs an update if it is signed with the SAME key as the installed
+# version. Keep the keystore and its passwords backed up somewhere safe, and never replace them.
+#
+# app/build.gradle.kts reads the SIGNING_* variables below, no other Gradle setup is needed.
+
+name: Release APK
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+concurrency:
+  group: release-apk-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and publish signed APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write # create the release and upload the assets
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Check that the tag matches VERSION_NAME
+        if: github.ref_type == 'tag'
+        run: |
+          version_name="$(grep -E '^VERSION_NAME=' gradle.properties | cut -d= -f2 | tr -d '[:space:]')"
+          tag_version="${GITHUB_REF_NAME#v}"
+          if [[ "$version_name" != "$tag_version" ]]; then
+            echo "::error::Tag '$GITHUB_REF_NAME' does not match VERSION_NAME=$version_name in gradle.properties. Fix the version (and VERSION_CODE) and re-tag."
+            exit 1
+          fi
+
+      - name: Set up JDK
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+          cache: gradle
+
+      - name: Prepare signing key
+        env:
+          SIGNING_KEYSTORE_BASE64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
+          SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
+          SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+          SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
+        run: |
+          missing=0
+          for name in SIGNING_KEYSTORE_BASE64 SIGNING_STORE_PASSWORD SIGNING_KEY_ALIAS SIGNING_KEY_PASSWORD; do
+            if [[ -z "${!name}" ]]; then
+              echo "::error::Repository secret $name is not set"
+              missing=1
+            fi
+          done
+          if [[ "$missing" -ne 0 ]]; then
+            exit 1
+          fi
+
+          keystore_path="$RUNNER_TEMP/release.jks"
+          echo "$SIGNING_KEYSTORE_BASE64" | base64 --decode > "$keystore_path"
+          echo "SIGNING_STORE_FILE=$keystore_path" >> "$GITHUB_ENV"
+
+      - name: Build release APKs
+        env:
+          SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
+          SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+          SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
+        # ABI_SPLITS=true builds one APK per CPU architecture plus a universal APK.
+        run: ./gradlew assembleFossRelease -PABI_SPLITS=true --stacktrace
+
+      - name: Verify signature and collect files
+        run: |
+          apk_dir="app/build/outputs/apk/foss/release"
+          shopt -s nullglob
+          apks=("$apk_dir"/*.apk)
+          if [[ ${#apks[@]} -eq 0 ]]; then
+            echo "::error::No APK found in $apk_dir"
+            exit 1
+          fi
+
+          sdk="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          apksigner="$(ls -d "$sdk"/build-tools/*/apksigner | sort -V | tail -n 1)"
+
+          {
+            echo "### Signed APKs"
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          for apk in "${apks[@]}"; do
+            # Fails the job if the APK is unsigned or the signature is broken.
+            cert_sha256="$("$apksigner" verify --print-certs "$apk" | grep -m1 'certificate SHA-256 digest' | awk '{print $NF}')"
+            if [[ -z "$cert_sha256" ]]; then
+              echo "::error::Could not read the signing certificate of $apk"
+              exit 1
+            fi
+            echo "$(basename "$apk")  $cert_sha256"
+            echo "- \`$(basename "$apk")\`: certificate SHA-256 \`$cert_sha256\`" >> "$GITHUB_STEP_SUMMARY"
+          done
+
+          (cd "$apk_dir" && sha256sum -- *.apk > SHA256SUMS.txt)
+          echo "APK_DIR=$apk_dir" >> "$GITHUB_ENV"
+
+      - name: Upload APKs as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: camera-apks
+          path: |
+            ${{ env.APK_DIR }}/*.apk
+            ${{ env.APK_DIR }}/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Create or update GitHub release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="$GITHUB_REF_NAME"
+          version="${tag#v}"
+
+          # Release notes: the matching section of CHANGELOG.md, or GitHub's generated notes.
+          awk -v ver="$version" '
+            /^## \[/ {
+              if (found) exit
+              if (index($0, "[" ver "]")) { found = 1; next }
+            }
+            found { print }
+          ' CHANGELOG.md > "$RUNNER_TEMP/notes.md"
+
+          notes_args=(--generate-notes)
+          if grep -q '[^[:space:]]' "$RUNNER_TEMP/notes.md"; then
+            notes_args=(--notes-file "$RUNNER_TEMP/notes.md")
+          fi
+
+          prerelease_args=()
+          if [[ "$version" == *-* ]]; then
+            prerelease_args=(--prerelease)
+          fi
+
+          shopt -s nullglob
+          files=("$APK_DIR"/*.apk "$APK_DIR/SHA256SUMS.txt")
+
+          if gh release view "$tag" > /dev/null 2>&1; then
+            # Re-run of a failed or partial release: replace the assets.
+            gh release upload "$tag" "${files[@]}" --clobber
+          else
+            gh release create "$tag" "${files[@]}" \
+              --title "$tag" \
+              --verify-tag \
+              "${notes_args[@]}" \
+              "${prerelease_args[@]}"
+          fi
+
+      - name: Remove keystore
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release.jks"
