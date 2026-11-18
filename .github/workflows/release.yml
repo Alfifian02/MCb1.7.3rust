@@ -13,16 +13,13 @@
 # Manual run (Actions -> "Release" -> Run workflow, on main): builds and publishes the current
 # VERSION_NAME. Use it to retry a failed release; the assets of an existing release are replaced.
 #
-# Required repository secrets (Settings -> Secrets and variables -> Actions):
-#   SIGNING_KEYSTORE_BASE64  the keystore file, base64 encoded:  base64 -w0 release.jks
-#   SIGNING_STORE_PASSWORD   keystore password
-#   SIGNING_KEY_ALIAS        key alias
-#   SIGNING_KEY_PASSWORD     key password (identical to the store password for PKCS12 keystores)
+# Signing: the keystore lives in the repository (release.jks + keystore.properties in the root
+# folder). No repository secrets are needed. app/build.gradle.kts picks keystore.properties up
+# automatically. Anyone who can read the repository can sign APKs with this key, so keep the
+# repository private if that matters to you.
 #
 # IMPORTANT: Android only installs an update if it is signed with the SAME key as the installed
-# version. Keep the keystore and its passwords backed up somewhere safe, and never replace them.
-#
-# app/build.gradle.kts reads the SIGNING_* variables below, no other Gradle setup is needed.
+# version. Never replace release.jks, and keep a backup copy of it outside the repository.
 
 name: Release
 
@@ -107,33 +104,16 @@ jobs:
           java-version: 21
           cache: gradle
 
-      - name: Prepare signing key
-        env:
-          SIGNING_KEYSTORE_BASE64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
-          SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
-          SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
-          SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
+      - name: Check signing key
         run: |
-          missing=0
-          for name in SIGNING_KEYSTORE_BASE64 SIGNING_STORE_PASSWORD SIGNING_KEY_ALIAS SIGNING_KEY_PASSWORD; do
-            if [[ -z "${!name}" ]]; then
-              echo "::error::Repository secret $name is not set"
-              missing=1
+          for file in keystore.properties release.jks; do
+            if [[ ! -f "$file" ]]; then
+              echo "::error::$file is missing from the repository root, so the APKs cannot be signed."
+              exit 1
             fi
           done
-          if [[ "$missing" -ne 0 ]]; then
-            exit 1
-          fi
-
-          keystore_path="$RUNNER_TEMP/release.jks"
-          echo "$SIGNING_KEYSTORE_BASE64" | base64 --decode > "$keystore_path"
-          echo "SIGNING_STORE_FILE=$keystore_path" >> "$GITHUB_ENV"
 
       - name: Build release APKs
-        env:
-          SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
-          SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
-          SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
         # ABI_SPLITS=true builds one APK per CPU architecture plus a universal APK.
         run: ./gradlew assembleFossRelease -PABI_SPLITS=true --stacktrace
 
@@ -225,7 +205,3 @@ jobs:
           fi
 
           echo "Release: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$TAG" >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Remove keystore
-        if: always()
-        run: rm -f "$RUNNER_TEMP/release.jks"
