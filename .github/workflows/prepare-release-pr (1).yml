@@ -1,0 +1,55 @@
+name: Prepare Release PR
+
+on:
+  repository_dispatch:
+    types: [prepare-release]
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "CHANGELOG.md"
+
+jobs:
+  # Workflow bawaan FossifyOrg menjalankan `git diff refs/tags/<VERSION_NAME> HEAD`.
+  # Repo ini hanya punya tag build-* dan nightly, jadi tag 1.5.0 tidak ada dan job gagal
+  # dengan "fatal: bad revision 'refs/tags/1.5.0'". Job ini membuat tag yang hilang
+  # (di commit yang pertama kali menulis VERSION_NAME saat ini) sebelum workflow bawaan jalan.
+  ensure-version-tag:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Create missing tag for current VERSION_NAME
+        run: |
+          version="$(grep -E '^VERSION_NAME=' gradle.properties | cut -d= -f2 | tr -d '[:space:]')"
+          if [[ -z "$version" ]]; then
+            echo "::error::VERSION_NAME is missing from gradle.properties."
+            exit 1
+          fi
+          if git rev-parse -q --verify "refs/tags/$version" >/dev/null; then
+            echo "Tag $version already exists."
+            exit 0
+          fi
+          commit="$(git log --reverse --format=%H -S"VERSION_NAME=$version" -- gradle.properties | head -n1)"
+          if [[ -z "$commit" ]]; then
+            echo "::error::Could not find the commit that introduced VERSION_NAME=$version."
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$version" "$commit" -m "Release $version"
+          git push origin "refs/tags/$version"
+          echo "Created tag $version at $commit."
+
+  call-release-pr:
+    needs: ensure-version-tag
+    uses: FossifyOrg/.github/.github/workflows/prepare-release-pr.yml@main
+    with:
+      abi_apks: true
+    secrets: inherit
