@@ -115,7 +115,10 @@ jobs:
 
       - name: Build release APKs
         # ABI_SPLITS=true builds one APK per CPU architecture plus a universal APK.
-        run: ./gradlew assembleFossRelease -PABI_SPLITS=true --stacktrace
+        run: |
+          # The executable bit is lost when the repo is committed from some devices/zips.
+          chmod +x ./gradlew
+          ./gradlew assembleFossRelease -PABI_SPLITS=true --stacktrace
 
       - name: Verify signature and collect files
         run: |
