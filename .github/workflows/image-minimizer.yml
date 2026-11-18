@@ -1,3 +1,5 @@
+# Shrinks large images pasted into issues, comments and pull requests (shared Fossify workflow).
+
 name: Image Minimizer
 
 on:

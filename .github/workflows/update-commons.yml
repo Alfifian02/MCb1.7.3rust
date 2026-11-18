@@ -1,11 +1,13 @@
-name: Update Fossify Commons
+# Opens a PR when a new version of Fossify Commons is available (shared Fossify workflow).
+
+name: Update Commons
 
 on:
   repository_dispatch:
     types: [update-commons]
   workflow_dispatch:
   schedule:
-    - cron: "0 6 * * 0"
+    - cron: "0 6 * * 0" # Sundays at 06:00 UTC
 
 jobs:
   update-commons:

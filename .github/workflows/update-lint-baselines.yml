@@ -1,11 +1,13 @@
-name: Update lint baselines
+# Regenerates the lint baselines and opens a PR with the result (shared Fossify workflow).
+
+name: Update Lint Baselines
 
 on:
   repository_dispatch:
     types: [update-lint-baselines]
   workflow_dispatch:
   schedule:
-    - cron: "0 0 1 * *"
+    - cron: "0 0 1 * *" # 1st of every month at 00:00 UTC
 
 jobs:
   update-lint-baselines:

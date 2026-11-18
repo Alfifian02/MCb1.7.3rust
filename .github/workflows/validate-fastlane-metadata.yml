@@ -1,4 +1,6 @@
-name: Fastlane metadata validation
+# Validates the store metadata in fastlane/ (shared Fossify workflow).
+
+name: Validate Fastlane Metadata
 
 on:
   push:

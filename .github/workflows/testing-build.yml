@@ -1,18 +1,21 @@
-name: Testing build (on PR)
+# Builds a testing APK for pull requests (shared Fossify workflow).
+# No concurrency group on purpose: a "labeled" event must not cancel a build that is already running.
+
+name: PR Test Build
 
 on:
-    pull_request:
-        branches: [main]
-        types: [labeled, opened, synchronize, reopened]
-        paths-ignore:
-            - ".github/**"
-            - "CHANGELOG.md"
-            - "docs/**"
-            - "fastlane/**"
-            - "LICENSE"
-            - "README.md"
+  pull_request:
+    branches: [main]
+    types: [labeled, opened, synchronize, reopened]
+    paths-ignore:
+      - ".github/**"
+      - "CHANGELOG.md"
+      - "docs/**"
+      - "fastlane/**"
+      - "LICENSE"
+      - "README.md"
 
 jobs:
-    call-testing-build-workflow:
-        uses: FossifyOrg/.github/.github/workflows/testing-build.yml@main
-        secrets: inherit
+  call-testing-build-workflow:
+    uses: FossifyOrg/.github/.github/workflows/testing-build.yml@main
+    secrets: inherit

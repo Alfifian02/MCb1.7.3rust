@@ -1,0 +1,125 @@
+# Prepares a release: bumps the version in gradle.properties, moves the [Unreleased] section of
+# CHANGELOG.md under the new version, and opens a pull request with those two changes.
+#
+# Merging the PR publishes the release automatically (see release.yml).
+#
+# One-time setup: Settings -> Actions -> General -> Workflow permissions ->
+#   enable "Allow GitHub Actions to create and approve pull requests".
+# Note: PRs opened with the default GITHUB_TOKEN do not trigger other workflows (e.g. "PR Checks").
+
+name: Prepare Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "New version without the leading v, e.g. 1.6.0"
+        type: string
+        required: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  prepare:
+    name: Open release PR
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Bump version and roll the changelog
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "::error::'$VERSION' is not a valid version (expected e.g. 1.6.0 or 1.6.0-rc.1)."
+            exit 1
+          fi
+
+          current_name="$(grep -E '^VERSION_NAME=' gradle.properties | cut -d= -f2 | tr -d '[:space:]')"
+          current_code="$(grep -E '^VERSION_CODE=' gradle.properties | cut -d= -f2 | tr -d '[:space:]')"
+          if [[ -z "$current_name" || -z "$current_code" ]]; then
+            echo "::error::VERSION_NAME or VERSION_CODE is missing from gradle.properties."
+            exit 1
+          fi
+          if [[ "$VERSION" == "$current_name" ]]; then
+            echo "::error::gradle.properties is already at $VERSION."
+            exit 1
+          fi
+          if grep -qF "## [$VERSION]" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md already has a section for $VERSION."
+            exit 1
+          fi
+
+          sed -i -E \
+            -e "s/^VERSION_NAME=.*/VERSION_NAME=$VERSION/" \
+            -e "s/^VERSION_CODE=.*/VERSION_CODE=$((current_code + 1))/" \
+            gradle.properties
+
+          python3 - "$VERSION" "$(date -u +%F)" "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" <<'PY'
+          import re
+          import sys
+
+          version, today, repo_url = sys.argv[1:4]
+          path = "CHANGELOG.md"
+          text = open(path, encoding="utf-8").read()
+
+          header = re.search(r"^## \[Unreleased\][ \t]*\n", text, re.M)
+          if not header:
+              print("::error::CHANGELOG.md has no [Unreleased] section."); sys.exit(1)
+          next_header = re.search(r"^## \[", text[header.end():], re.M)
+          body_end = header.end() + (next_header.start() if next_header else len(text))
+          if not text[header.end():body_end].strip():
+              print("::error::The [Unreleased] section of CHANGELOG.md is empty."); sys.exit(1)
+
+          text = text[:header.end()] + f"\n## [{version}] - {today}\n" + text[header.end():]
+
+          link = re.search(r"^\[Unreleased\]: .+/compare/(.+)\.\.\.HEAD[ \t]*$", text, re.M)
+          if link:
+              previous = link.group(1)
+              text = text.replace(
+                  link.group(0),
+                  f"[Unreleased]: {repo_url}/compare/v{version}...HEAD\n"
+                  f"[{version}]: {repo_url}/compare/{previous}...v{version}",
+                  1,
+              )
+
+          open(path, "w", encoding="utf-8").write(text)
+          PY
+
+          git diff --stat
+
+      - name: Open pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          BASE: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          branch="release/$VERSION"
+
+          if git ls-remote --exit-code --heads origin "$branch" > /dev/null 2>&1; then
+            echo "::error::Branch '$branch' already exists. Delete it (and its PR) and run again."
+            exit 1
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git add gradle.properties CHANGELOG.md
+          git commit -m "chore: prepare release $VERSION"
+          git push origin "$branch"
+
+          gh pr create \
+            --base "$BASE" \
+            --head "$branch" \
+            --title "chore: release $VERSION" \
+            --body "Bumps the version to $VERSION and moves the unreleased changelog entries under it.
+
+          After merging, the Release workflow runs automatically: it builds the signed APKs, creates tag v$VERSION and publishes the GitHub Release."

@@ -1,18 +1,224 @@
+# Builds signed APKs and publishes them to a GitHub Release. Nothing is uploaded to Google Play.
+#
+# Fully automatic: every time a NEW VERSION_NAME lands on main (gradle.properties changes), this
+# workflow builds, signs and publishes release v<VERSION_NAME> and creates the tag for you.
+# If the tag already exists (for example an unrelated edit to gradle.properties) it does nothing.
+#
+# How to release
+#   1. Actions -> "Prepare Release" -> enter the new version. It opens a PR that bumps
+#      VERSION_NAME / VERSION_CODE and rolls CHANGELOG.md. (Editing those by hand works too.)
+#   2. Merge the PR. The release is published automatically.
+#
+# Manual run (Actions -> "Release" -> Run workflow, on main): builds and publishes the current
+# VERSION_NAME. Use it to retry a failed release; the assets of an existing release are replaced.
+#
+# Required repository secrets (Settings -> Secrets and variables -> Actions):
+#   SIGNING_KEYSTORE_BASE64  the keystore file, base64 encoded:  base64 -w0 release.jks
+#   SIGNING_STORE_PASSWORD   keystore password
+#   SIGNING_KEY_ALIAS        key alias
+#   SIGNING_KEY_PASSWORD     key password (identical to the store password for PKCS12 keystores)
+#
+# IMPORTANT: Android only installs an update if it is signed with the SAME key as the installed
+# version. Keep the keystore and its passwords backed up somewhere safe, and never replace them.
+#
+# app/build.gradle.kts reads the SIGNING_* variables below, no other Gradle setup is needed.
+
 name: Release
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
     paths:
-      - ".fossify/release-marker.txt"
+      - "gradle.properties"
+  workflow_dispatch:
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write # create the tag and release, upload the assets
 
 jobs:
-  call-release-workflow:
-    name: Release
-    uses: FossifyOrg/.github/.github/workflows/release.yml@main
-    with:
-      abi_apks: true
-      track: ${{ vars.GPLAY_TRACK || 'beta' }}
-      rollout: ${{ vars.GPLAY_ROLLOUT || '0.05' }}
-      validate_only: ${{ vars.GPLAY_DRY_RUN == 'true' }}
-    secrets: inherit
+  check:
+    name: Check version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      release: ${{ steps.version.outputs.release }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Decide whether to release
+        id: version
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          version="$(grep -E '^VERSION_NAME=' gradle.properties | cut -d= -f2 | tr -d '[:space:]')"
+          if [[ -z "$version" ]]; then
+            echo "::error::VERSION_NAME is missing from gradle.properties."
+            exit 1
+          fi
+          tag="v$version"
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" && "$GITHUB_REF_NAME" != "$DEFAULT_BRANCH" ]]; then
+            echo "::error::Run this workflow on '$DEFAULT_BRANCH' (this run is on '$GITHUB_REF_NAME')."
+            exit 1
+          fi
+
+          # Commit the tag points to (empty when the tag does not exist yet).
+          tag_commit="$(git ls-remote --tags origin "refs/tags/$tag" "refs/tags/$tag^{}" | awk 'END { print $1 }')"
+
+          if [[ -z "$tag_commit" || "$tag_commit" == "$GITHUB_SHA" ]]; then
+            echo "release=true" >> "$GITHUB_OUTPUT"
+            echo "Releasing $tag."
+          elif [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            # Never attach APKs built from this commit to a tag that points somewhere else.
+            echo "::error::Tag '$tag' already exists on another commit ($tag_commit). Bump VERSION_NAME first."
+            exit 1
+          else
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Tag '$tag' already exists, so there is nothing to release. Bump VERSION_NAME to publish a new version."
+          fi
+
+  release:
+    name: Build and publish signed APKs
+    needs: check
+    if: needs.check.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up JDK
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+          cache: gradle
+
+      - name: Prepare signing key
+        env:
+          SIGNING_KEYSTORE_BASE64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
+          SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
+          SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+          SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
+        run: |
+          missing=0
+          for name in SIGNING_KEYSTORE_BASE64 SIGNING_STORE_PASSWORD SIGNING_KEY_ALIAS SIGNING_KEY_PASSWORD; do
+            if [[ -z "${!name}" ]]; then
+              echo "::error::Repository secret $name is not set"
+              missing=1
+            fi
+          done
+          if [[ "$missing" -ne 0 ]]; then
+            exit 1
+          fi
+
+          keystore_path="$RUNNER_TEMP/release.jks"
+          echo "$SIGNING_KEYSTORE_BASE64" | base64 --decode > "$keystore_path"
+          echo "SIGNING_STORE_FILE=$keystore_path" >> "$GITHUB_ENV"
+
+      - name: Build release APKs
+        env:
+          SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
+          SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+          SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
+        # ABI_SPLITS=true builds one APK per CPU architecture plus a universal APK.
+        run: ./gradlew assembleFossRelease -PABI_SPLITS=true --stacktrace
+
+      - name: Verify signature and collect files
+        run: |
+          apk_dir="app/build/outputs/apk/foss/release"
+          shopt -s nullglob
+          apks=("$apk_dir"/*.apk)
+          if [[ ${#apks[@]} -eq 0 ]]; then
+            echo "::error::No APK found in $apk_dir"
+            exit 1
+          fi
+
+          sdk="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          apksigner="$(ls -d "$sdk"/build-tools/*/apksigner | sort -V | tail -n 1)"
+
+          {
+            echo "### Signed APKs"
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          for apk in "${apks[@]}"; do
+            # Fails the job if the APK is unsigned or the signature is broken.
+            cert_sha256="$("$apksigner" verify --print-certs "$apk" | grep -m1 'certificate SHA-256 digest' | awk '{print $NF}')"
+            if [[ -z "$cert_sha256" ]]; then
+              echo "::error::Could not read the signing certificate of $apk"
+              exit 1
+            fi
+            echo "$(basename "$apk")  $cert_sha256"
+            echo "- \`$(basename "$apk")\`: certificate SHA-256 \`$cert_sha256\`" >> "$GITHUB_STEP_SUMMARY"
+          done
+
+          (cd "$apk_dir" && sha256sum -- *.apk > SHA256SUMS.txt)
+          echo "APK_DIR=$apk_dir" >> "$GITHUB_ENV"
+
+      - name: Upload APKs as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: camera-apks
+          path: |
+            ${{ env.APK_DIR }}/*.apk
+            ${{ env.APK_DIR }}/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Create or update GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.check.outputs.tag }}
+          VERSION: ${{ needs.check.outputs.version }}
+        run: |
+          # Release notes: the matching section of CHANGELOG.md, or GitHub's generated notes.
+          awk -v ver="$VERSION" '
+            /^## \[/ {
+              if (found) exit
+              if (index($0, "[" ver "]")) { found = 1; next }
+            }
+            found { print }
+          ' CHANGELOG.md > "$RUNNER_TEMP/notes.md"
+
+          notes_args=(--generate-notes)
+          if grep -q '[^[:space:]]' "$RUNNER_TEMP/notes.md"; then
+            notes_args=(--notes-file "$RUNNER_TEMP/notes.md")
+          fi
+
+          prerelease_args=()
+          if [[ "$VERSION" == *-* ]]; then
+            prerelease_args=(--prerelease)
+          fi
+
+          shopt -s nullglob
+          files=("$APK_DIR"/*.apk "$APK_DIR/SHA256SUMS.txt")
+
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            # Re-run of a failed or partial release: replace the assets.
+            gh release upload "$TAG" "${files[@]}" --clobber
+          else
+            gh release create "$TAG" "${files[@]}" \
+              --title "$TAG" \
+              --target "$GITHUB_SHA" \
+              "${notes_args[@]}" \
+              "${prerelease_args[@]}"
+          fi
+
+          echo "Release: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$TAG" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove keystore
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release.jks"

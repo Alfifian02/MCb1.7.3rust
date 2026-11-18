@@ -22,6 +22,9 @@ updates:
       prefix: "chore"
       prefix-development: "chore"
       include: "scope"
+    groups:
+      bundler:
+        patterns: ["*"]
 
   - package-ecosystem: "gradle"
     directory: "/"
@@ -35,7 +38,12 @@ updates:
       prefix: "chore"
       prefix-development: "chore"
       include: "scope"
+    # Minor and patch bumps arrive as a single PR. Major bumps stay separate for review.
+    groups:
+      gradle-minor-patch:
+        update-types: ["minor", "patch"]
     ignore:
+      # Updated by the "Update Commons" workflow instead.
       - dependency-name: "org.fossify:commons"
 
   - package-ecosystem: "github-actions"
@@ -46,3 +54,6 @@ updates:
       prefix: "chore"
       prefix-development: "chore"
       include: "scope"
+    groups:
+      github-actions:
+        patterns: ["*"]

@@ -1,3 +1,5 @@
+# Labels new pull requests based on their title and changed files (shared Fossify workflow).
+
 name: PR Labeler
 
 on:
