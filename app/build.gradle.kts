@@ -1,184 +1,138 @@
-import com.android.build.api.variant.FilterConfiguration
-import org.jetbrains.kotlin.gradle.dsl.JvmTarget
-import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
-import org.jetbrains.kotlin.konan.properties.Properties
-import java.io.FileInputStream
+import java.util.Properties
 
 plugins {
-    alias(libs.plugins.android)
-    alias(libs.plugins.detekt)
+    id("com.android.application")
+    id("org.jetbrains.kotlin.plugin.compose")
 }
 
-val keystorePropertiesFile: File = rootProject.file("keystore.properties")
-val keystoreProperties = Properties()
-if (keystorePropertiesFile.exists()) {
-    keystoreProperties.load(FileInputStream(keystorePropertiesFile))
-}
 
-fun hasSigningVars(): Boolean {
-    return providers.environmentVariable("SIGNING_KEY_ALIAS").orNull != null
-            && providers.environmentVariable("SIGNING_KEY_PASSWORD").orNull != null
-            && providers.environmentVariable("SIGNING_STORE_FILE").orNull != null
-            && providers.environmentVariable("SIGNING_STORE_PASSWORD").orNull != null
-}
 
-val baseVersionCode = project.property("VERSION_CODE").toString().toInt()
-val abiCodes = mapOf("armeabi-v7a" to 1, "arm64-v8a" to 2, "x86" to 3, "x86_64" to 4)
-val abiSplits = providers.gradleProperty("ABI_SPLITS").map(String::toBoolean).getOrElse(false)
-
-base {
-    archivesName = "camera-$baseVersionCode"
-}
+val coreDir = (project.findProperty("coreDir") as String?)
+    ?: rootProject.file("core").absolutePath
 
 android {
-    compileSdk = project.libs.versions.app.build.compileSDKVersion.get().toInt()
+    namespace = "com.seedlessds.app"
+    compileSdk = 35
+    // Raising the NDK needs a JIT/.S test pass and a new PGO profile: pass -PndkVersion=... to try one.
+    ndkVersion = (project.findProperty("ndkVersion") as String?) ?: "25.2.9519653"
 
     defaultConfig {
-        applicationId = project.property("APP_ID").toString()
-        minSdk = project.libs.versions.app.build.minimumSDK.get().toInt()
-        targetSdk = project.libs.versions.app.build.targetSDK.get().toInt()
-        versionName = project.property("VERSION_NAME").toString()
-        versionCode = baseVersionCode
-        vectorDrawables.useSupportLibrary = true
+        applicationId = "com.seedlessds.app"
+        minSdk = 21
+        targetSdk = 35
+        versionCode = 111
+        versionName = "1.0.1"
+
+        ndk {
+            abiFilters += "arm64-v8a"
+        }
+
+        externalNativeBuild {
+            cmake {
+                arguments += "-DSEEDLESS_CORE_DIR=$coreDir"
+                System.getenv("SEEDLESS_THIRD_PARTY_DIR")?.let { arguments += "-DSEEDLESS_THIRD_PARTY_DIR=$it" }
+                cppFlags += "-std=c++17"
+                // A1: PGO. GENERATE builds a training APK; USE builds with the profile. Without
+                // -PseedlessPgoMode the committed pgo/recon.profdata is used when it exists.
+                val pgoProfile = (project.findProperty("seedlessPgoProfile") as String?)
+                    ?: rootProject.file("pgo/recon.profdata").takeIf { it.isFile }?.absolutePath
+                val pgoMode = (project.findProperty("seedlessPgoMode") as String?)
+                    ?: if (pgoProfile != null) "USE" else "OFF"
+                arguments += "-DSEEDLESS_PGO_MODE=$pgoMode"
+                if (pgoMode == "USE" && pgoProfile != null) arguments += "-DSEEDLESS_PGO_PROFILE=$pgoProfile"
+                if (project.findProperty("seedlessFullLto") == "true") arguments += "-DSEEDLESS_ENABLE_FULL_LTO=ON"
+                (project.findProperty("seedlessMtune") as String?)?.let { arguments += "-DSEEDLESS_MTUNE=$it" }
+            }
+        }
     }
 
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
+    }
+
+
+
     signingConfigs {
-        if (keystorePropertiesFile.exists()) {
-            register("release") {
-                keyAlias = keystoreProperties.getProperty("keyAlias")
-                keyPassword = keystoreProperties.getProperty("keyPassword")
-                storeFile = file(keystoreProperties.getProperty("storeFile"))
-                storePassword = keystoreProperties.getProperty("storePassword")
-            }
-        } else if (hasSigningVars()) {
-            register("release") {
-                keyAlias = providers.environmentVariable("SIGNING_KEY_ALIAS").get()
-                keyPassword = providers.environmentVariable("SIGNING_KEY_PASSWORD").get()
-                storeFile = file(providers.environmentVariable("SIGNING_STORE_FILE").get())
-                storePassword = providers.environmentVariable("SIGNING_STORE_PASSWORD").get()
-            }
-        } else {
-            logger.warn("Warning: No signing config found. Build will be unsigned.")
+        create("release") {
+            val local = Properties()
+            val localFile = rootProject.file("local.properties")
+            if (localFile.isFile) localFile.inputStream().use { local.load(it) }
+            // Without local.properties the committed keystore/release.keystore signs the app, so every
+            // build carries the same signature and installs over the previous one as an update.
+            val custom = local.getProperty("MELONDS_KEYSTORE")
+            storeFile = if (custom != null) file(custom) else rootProject.file("keystore/release.keystore")
+            storePassword = local.getProperty("MELONDS_KEYSTORE_PASSWORD") ?: "seedlessds"
+            keyAlias = local.getProperty("MELONDS_KEY_ALIAS") ?: "seedlessds"
+            keyPassword = local.getProperty("MELONDS_KEY_PASSWORD") ?: "seedlessds"
+        }
+        create("shared") {
+
+
+
+            storeFile = rootProject.file("keystore/debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
+
+    buildTypes {
+        release {
+            isMinifyEnabled = true
+            buildConfigField("boolean", "FRAME_CONTROLS", (project.findProperty("frameControls") == "true").toString())
+
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            signingConfig = signingConfigs.getByName("release")
+        }
+        debug {
+            isMinifyEnabled = false
+            buildConfigField("boolean", "FRAME_CONTROLS", "true")
+            signingConfig = signingConfigs.getByName("shared")
+            applicationIdSuffix = ".debug"
         }
     }
 
     buildFeatures {
-        viewBinding = true
+        compose = true
         buildConfig = true
     }
 
-    buildTypes {
-        debug {
-            applicationIdSuffix = ".debug"
-        }
-        release {
-            isMinifyEnabled = true
-            isShrinkResources = true
-            proguardFiles(
-                getDefaultProguardFile("proguard-android-optimize.txt"),
-                "proguard-rules.pro"
-            )
-            if (keystorePropertiesFile.exists() || hasSigningVars()) {
-                signingConfig = signingConfigs.getByName("release")
-            }
-        }
-    }
-
-    flavorDimensions.add("variants")
-    productFlavors {
-        register("foss")
-        register("gplay")
-    }
-
-    splits {
-        abi {
-            isEnable = abiSplits
-            reset()
-            include(*abiCodes.keys.toTypedArray())
-            isUniversalApk = true
-        }
-    }
-
-    sourceSets {
-        getByName("main").java.directories.add("src/main/kotlin")
-        getByName("test").java.directories.add("src/test/kotlin")
-    }
-
-    testOptions {
-        unitTests.isReturnDefaultValues = true
-    }
-
     compileOptions {
-        val currentJavaVersionFromLibs =
-            JavaVersion.valueOf(libs.versions.app.build.javaVersion.get())
-        sourceCompatibility = currentJavaVersionFromLibs
-        targetCompatibility = currentJavaVersionFromLibs
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
     }
 
-    dependenciesInfo {
-        includeInApk = false
+    packaging {
+        jniLibs { useLegacyPackaging = false }
     }
-
-    androidResources {
-        @Suppress("UnstableApiUsage")
-        generateLocaleConfig = true
-    }
-
-    tasks.withType<KotlinCompile> {
-        compilerOptions.jvmTarget.set(
-            JvmTarget.fromTarget(project.libs.versions.app.build.kotlinJVMTarget.get())
-        )
-    }
-
-    namespace = project.property("APP_ID").toString()
-
-    lint {
-        checkReleaseBuilds = false
-        abortOnError = true
-        warningsAsErrors = false
-        baseline = file("lint-baseline.xml")
-        lintConfig = rootProject.file("lint.xml")
-    }
-
-    bundle {
-        language {
-            enableSplit = false
-        }
-    }
-}
-
-if (abiSplits) {
-    androidComponents {
-        onVariants(selector().withBuildType("release").withFlavor("variants" to "foss")) { variant ->
-            variant.outputs.forEach { output ->
-                val abi = output.filters.find {
-                    it.filterType == FilterConfiguration.FilterType.ABI
-                }?.identifier
-                val versionCode = baseVersionCode + (abiCodes[abi] ?: 0)
-                val abiSuffix = abi?.let { "-$it" }.orEmpty()
-                val unsignedSuffix =
-                    if (output.outputFileName.get().endsWith("-unsigned.apk")) "-unsigned" else ""
-                output.versionCode.set(versionCode)
-                output.outputFileName.set("camera-$versionCode-foss${abiSuffix}-release${unsignedSuffix}.apk")
-            }
-        }
-    }
-}
-
-detekt {
-    baseline = file("detekt-baseline.xml")
-    config.setFrom("$rootDir/detekt.yml")
-    buildUponDefaultConfig = true
-    allRules = false
 }
 
 dependencies {
-    implementation(libs.fossify.commons)
-    implementation(libs.bundles.androidx.camera)
-    implementation(libs.androidx.documentfile)
-    implementation(libs.androidx.exifinterface)
-    implementation(libs.androidx.lifecycle.runtime.ktx)
-    implementation(libs.androidx.window)
-    detektPlugins(libs.compose.detekt)
-    testImplementation(libs.junit)
+    implementation("androidx.core:core-ktx:1.13.1")
+    implementation("androidx.appcompat:appcompat:1.7.0")
+    implementation("androidx.documentfile:documentfile:1.0.1")
+    implementation("androidx.annotation:annotation:1.8.2")
+    implementation("com.google.android.material:material:1.12.0")
+
+    val composeBom = platform("androidx.compose:compose-bom:2024.12.01")
+    implementation(composeBom)
+    implementation("androidx.compose.ui:ui")
+    implementation("androidx.compose.ui:ui-graphics")
+    implementation("androidx.compose.ui:ui-tooling-preview")
+    implementation("androidx.compose.material3:material3")
+    implementation("androidx.compose.material:material-icons-extended")
+    implementation("androidx.activity:activity-compose:1.9.3")
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
+    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
+    debugImplementation("androidx.compose.ui:ui-tooling")
+
+    implementation("androidx.datastore:datastore-preferences:1.1.1")
+
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("io.coil-kt:coil-compose:2.7.0")
+    implementation("androidx.security:security-crypto:1.1.0-alpha06")
 }
