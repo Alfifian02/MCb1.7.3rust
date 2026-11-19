@@ -5,8 +5,6 @@ import android.annotation.SuppressLint
 import android.content.Intent
 import android.content.res.ColorStateList
 import android.graphics.Bitmap
-import android.graphics.Color
-import android.graphics.drawable.GradientDrawable
 import android.hardware.SensorManager
 import android.net.Uri
 import android.os.Build
@@ -17,7 +15,6 @@ import android.view.*
 import android.widget.LinearLayout
 import android.widget.PopupMenu
 import android.widget.SeekBar
-import android.widget.TextView
 import androidx.constraintlayout.widget.ConstraintSet
 import androidx.core.content.ContextCompat
 import androidx.core.view.*
@@ -43,18 +40,19 @@ import org.fossify.camera.implementations.CameraXInitializer
 import org.fossify.camera.implementations.CameraXPreviewListener
 import org.fossify.camera.interfaces.MyPreview
 import org.fossify.camera.models.GridType
+import org.fossify.camera.models.ProCapabilities
 import org.fossify.camera.models.ResolutionOption
 import org.fossify.camera.models.SceneMode
 import org.fossify.camera.models.TimerMode
 import org.fossify.camera.models.VolumeButtonAction
+import org.fossify.camera.ui.ProControlsPanel
+import org.fossify.camera.ui.ZoomChipsController
 import org.fossify.camera.views.FocusCircleView
 import org.fossify.commons.extensions.*
 import org.fossify.commons.helpers.*
 import java.util.Locale
 import java.util.concurrent.TimeUnit
 import kotlin.math.abs
-import kotlin.math.ln
-import kotlin.math.roundToInt
 
 class MainActivity : SimpleActivity(), PhotoProcessor.MediaSavedListener, CameraXPreviewListener {
     private companion object {
@@ -68,9 +66,7 @@ class MainActivity : SimpleActivity(), PhotoProcessor.MediaSavedListener, Camera
         private const val SCREEN_FLASH_SAFETY_TIMEOUT = 4000L
         private const val SCREEN_FLASH_ALPHA = 0.95f
         private const val ZOOM_KEY_FACTOR = 1.06f
-        private const val ZOOM_CHIP_TOLERANCE = 0.03f
         private const val PAUSED_TIMER_ALPHA = 0.5f
-        private val ZOOM_PRESET_CANDIDATES = listOf(0.5f, 1f, 2f, 3f, 5f, 10f)
     }
 
     private val binding by viewBinding(ActivityMainBinding::inflate)
@@ -93,10 +89,8 @@ class MainActivity : SimpleActivity(), PhotoProcessor.MediaSavedListener, Camera
     private var mBrightnessBeforeScreenFlash: Float? = null
     private var mSceneModes: List<SceneMode> = emptyList()
     private var mSelectedSceneMode = SceneMode.OFF
-    private var mZoomMin = 1f
-    private var mZoomMax = 1f
-    private var mZoomPresets: List<Float> = emptyList()
-    private val mZoomChips = mutableListOf<TextView>()
+    private lateinit var mZoomChips: ZoomChipsController
+    private lateinit var mProPanel: ProControlsPanel
     private var mExposureMinIndex = 0
     private var mExposureStep = 0f
     private val hideScreenFlashRunnable = Runnable { setScreenFlash(false) }
@@ -150,6 +144,10 @@ class MainActivity : SimpleActivity(), PhotoProcessor.MediaSavedListener, Camera
             mOrientationEventListener.enable()
         }
 
+        if (::mProPanel.isInitialized) {
+            mProPanel.onResume()
+        }
+
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         mOriginalBrightness = window.updateBrightness(config.maxBrightness, mOriginalBrightness)
         ensureTransparentNavigationBar()
@@ -162,6 +160,10 @@ class MainActivity : SimpleActivity(), PhotoProcessor.MediaSavedListener, Camera
     override fun onPause() {
         super.onPause()
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        if (::mProPanel.isInitialized) {
+            mProPanel.onPause()
+        }
+
         if (::mFocusCircleView.isInitialized) {
             binding.levelView.stop()
             mIsScreenFlashPending = false
@@ -263,6 +265,7 @@ class MainActivity : SimpleActivity(), PhotoProcessor.MediaSavedListener, Camera
     private fun hideIntentButtons() = binding.apply {
         cameraModeHolder.beGone()
         layoutTop.settings.beGone()
+        layoutTop.toggleProControls.beGone()
         lastPhotoVideoPreview.beInvisible()
     }
 
@@ -444,6 +447,21 @@ class MainActivity : SimpleActivity(), PhotoProcessor.MediaSavedListener, Camera
     }
 
     private fun initButtons() = binding.apply {
+        mZoomChips = ZoomChipsController(
+            context = this@MainActivity,
+            container = zoomPresets,
+            host = object : ZoomChipsController.Host {
+                override fun currentRotation() = getCurrentRotation()
+                override fun primaryColor() = getProperPrimaryColor()
+                override fun onPresetClicked(view: View, ratio: Float) {
+                    performHaptic(view)
+                    mPreview?.setZoomRatio(ratio)
+                }
+            }
+        )
+        mProPanel = ProControlsPanel(this@MainActivity, proPanel, histogramView, previewView) { mPreview }
+        layoutTop.toggleProControls.setShadowIcon(R.drawable.ic_pro_vector)
+        layoutTop.toggleProControls.setOnClickListener { toggleProPanel() }
         timerText.setFactory { layoutInflater.inflate(R.layout.timer_text, null) }
         toggleCamera.setOnClickListener {
             animateCameraToggle()
@@ -613,6 +631,7 @@ class MainActivity : SimpleActivity(), PhotoProcessor.MediaSavedListener, Camera
         performHaptic(binding.shutter)
         when {
             countDownTimer != null -> cancelTimer()
+            mPreview?.isCaptureSequenceRunning() == true -> mPreview?.stopCaptureSequence()
             // A screen flash capture is already on its way.
             mIsScreenFlashPending -> Unit
             isInPhotoMode() -> {
@@ -646,7 +665,8 @@ class MainActivity : SimpleActivity(), PhotoProcessor.MediaSavedListener, Camera
             layoutTop.toggleTimer.beVisible()
             layoutTop.toggleTimer.fadeIn()
         }
-        closeOptions()
+        closeOptions(keepProPanel = true)
+        mProPanel.setPhotoMode(true)
         setupPreviewImage(true)
         selectPhotoTab()
     }
@@ -657,7 +677,8 @@ class MainActivity : SimpleActivity(), PhotoProcessor.MediaSavedListener, Camera
             layoutTop.toggleTimer.fadeOut()
             layoutTop.toggleTimer.beGone()
         }
-        closeOptions()
+        closeOptions(keepProPanel = true)
+        mProPanel.setPhotoMode(false)
         setupPreviewImage(false)
         selectVideoTab()
     }
@@ -794,118 +815,7 @@ class MainActivity : SimpleActivity(), PhotoProcessor.MediaSavedListener, Camera
 
     // region zoom
     override fun onZoomStateChanged(minRatio: Float, maxRatio: Float, zoomRatio: Float) {
-        if (minRatio != mZoomMin || maxRatio != mZoomMax) {
-            mZoomMin = minRatio
-            mZoomMax = maxRatio
-            rebuildZoomChips()
-        }
-
-        updateZoomChips(zoomRatio)
-    }
-
-    private fun rebuildZoomChips() {
-        val container = binding.zoomPresets
-        container.removeAllViews()
-        mZoomChips.clear()
-
-        val presets = ZOOM_PRESET_CANDIDATES
-            .filter { it >= mZoomMin - 0.01f && it <= mZoomMax + 0.01f }
-            .toMutableList()
-
-        // Devices with an ultra wide lens report a minimum zoom ratio below 1x (e.g. 0.6x).
-        val lowest = (mZoomMin * 10f).toInt() / 10f
-        if (lowest < 0.95f && presets.none { abs(it - lowest) < 0.05f }) {
-            presets.add(lowest)
-        }
-
-        mZoomPresets = presets.sorted()
-        if (mZoomPresets.size < 2) {
-            container.beGone()
-            return
-        }
-
-        container.beVisible()
-        val rotation = getCurrentRotation()
-        mZoomPresets.forEach { preset ->
-            val chip = createZoomChip(preset)
-            chip.rotation = rotation
-            container.addView(chip)
-            mZoomChips.add(chip)
-        }
-    }
-
-    private fun createZoomChip(preset: Float): TextView {
-        val density = resources.displayMetrics.density
-        val horizontalPadding = (8 * density).toInt()
-        val margin = (4 * density).toInt()
-        val chipBackground = GradientDrawable().apply {
-            shape = GradientDrawable.RECTANGLE
-            cornerRadius = 16 * density
-            setColor(Color.argb(102, 0, 0, 0))
-        }
-
-        return TextView(this).apply {
-            text = formatZoomLabel(preset)
-            gravity = Gravity.CENTER
-            textSize = 13f
-            minWidth = (44 * density).toInt()
-            minHeight = (32 * density).toInt()
-            setPadding(horizontalPadding, 0, horizontalPadding, 0)
-            setTextColor(Color.WHITE)
-            background = chipBackground
-            contentDescription = getString(R.string.zoom_level)
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply {
-                marginStart = margin
-                marginEnd = margin
-            }
-            setOnClickListener {
-                performHaptic(it)
-                mPreview?.setZoomRatio(preset)
-            }
-        }
-    }
-
-    private fun updateZoomChips(zoomRatio: Float) {
-        if (mZoomChips.isEmpty() || zoomRatio <= 0f) {
-            return
-        }
-
-        // The chip that is closest to the current zoom (measured in zoom "stops") shows the
-        // live value while pinching, the others keep their preset label.
-        var nearestIndex = 0
-        var smallestDistance = Float.MAX_VALUE
-        mZoomPresets.forEachIndexed { index, preset ->
-            val distance = abs(ln(zoomRatio / preset))
-            if (distance < smallestDistance) {
-                smallestDistance = distance
-                nearestIndex = index
-            }
-        }
-
-        val primaryColor = getProperPrimaryColor()
-        mZoomChips.forEachIndexed { index, chip ->
-            val preset = mZoomPresets[index]
-            if (index == nearestIndex) {
-                val isExact = abs(zoomRatio / preset - 1f) <= ZOOM_CHIP_TOLERANCE
-                chip.text = formatZoomLabel(if (isExact) preset else zoomRatio)
-                chip.setTextColor(primaryColor)
-            } else {
-                chip.text = formatZoomLabel(preset)
-                chip.setTextColor(Color.WHITE)
-            }
-        }
-    }
-
-    private fun formatZoomLabel(ratio: Float): String {
-        val rounded = (ratio * 10f).roundToInt() / 10f
-        return if (rounded % 1f == 0f) {
-            "${rounded.toInt()}×"
-        } else {
-            String.format(Locale.getDefault(), "%.1f×", rounded)
-        }
+        mZoomChips.onZoomStateChanged(minRatio, maxRatio, zoomRatio)
     }
     // endregion
 
@@ -987,6 +897,26 @@ class MainActivity : SimpleActivity(), PhotoProcessor.MediaSavedListener, Camera
         popup.show()
     }
     // endregion
+
+    override fun onProCapabilitiesChanged(capabilities: ProCapabilities) {
+        mProPanel.onCapabilities(capabilities)
+    }
+
+    override fun onCaptureSequenceProgress(taken: Int, total: Int?) {
+        binding.videoRecCurrTimer.beVisible()
+        binding.videoRecCurrTimer.text = if (total != null) {
+            getString(R.string.burst_progress, taken, total)
+        } else {
+            getString(R.string.timelapse_progress, taken)
+        }
+    }
+
+    override fun onCaptureSequenceFinished(taken: Int, completedAll: Boolean) {
+        binding.videoRecCurrTimer.beGone()
+        if (taken > 0) {
+            toast(getString(R.string.sequence_finished, taken))
+        }
+    }
 
     override fun onVideoRecordingPaused() {
         binding.togglePause.setImageResource(R.drawable.ic_resume_vector)
@@ -1075,6 +1005,7 @@ class MainActivity : SimpleActivity(), PhotoProcessor.MediaSavedListener, Camera
             layoutTop.changeResolution,
             layoutTop.toggleExposure,
             layoutTop.toggleScene,
+            layoutTop.toggleProControls,
             togglePause,
             shutter,
             layoutTop.settings,
@@ -1094,9 +1025,7 @@ class MainActivity : SimpleActivity(), PhotoProcessor.MediaSavedListener, Camera
         mediaSizeToggleGroup?.children?.forEach { child ->
             rotate(child, degrees)
         }
-        mZoomChips.forEach { chip ->
-            rotate(chip, degrees)
-        }
+        mZoomChips.rotate(degrees)
     }
 
     private fun rotate(view: View, degrees: Int) =
@@ -1234,8 +1163,9 @@ class MainActivity : SimpleActivity(), PhotoProcessor.MediaSavedListener, Camera
         closeOptions()
     }
 
-    private fun closeOptions(): Boolean {
+    private fun closeOptions(keepProPanel: Boolean = false): Boolean {
         binding.apply {
+            val wasProPanelOpen = !keepProPanel && mProPanel.hide()
             val wasExposureOpen = exposureHolder.isVisible()
             if (wasExposureOpen) {
                 exposureHolder.beGone()
@@ -1253,7 +1183,16 @@ class MainActivity : SimpleActivity(), PhotoProcessor.MediaSavedListener, Camera
                 return true
             }
 
-            return wasExposureOpen
+            return wasExposureOpen || wasProPanelOpen
+        }
+    }
+
+    private fun toggleProPanel() {
+        if (mProPanel.isVisible) {
+            mProPanel.hide()
+        } else {
+            closeOptions()
+            mProPanel.toggle()
         }
     }
 

@@ -2,6 +2,7 @@ package org.fossify.camera.implementations
 
 import android.graphics.Bitmap
 import android.net.Uri
+import org.fossify.camera.models.ProCapabilities
 import org.fossify.camera.models.ResolutionOption
 import org.fossify.camera.models.SceneMode
 
@@ -49,4 +50,7 @@ interface CameraXPreviewListener {
     fun onScreenFlashModeChanged(enabled: Boolean) {}
     fun onVideoRecordingPaused() {}
     fun onVideoRecordingResumed() {}
+    fun onProCapabilitiesChanged(capabilities: ProCapabilities) {}
+    fun onCaptureSequenceProgress(taken: Int, total: Int?) {}
+    fun onCaptureSequenceFinished(taken: Int, completedAll: Boolean) {}
 }

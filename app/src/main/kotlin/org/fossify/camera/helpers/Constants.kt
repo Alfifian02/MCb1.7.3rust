@@ -31,6 +31,13 @@ const val RECORD_AUDIO_ENABLED = "record_audio_enabled"
 const val ALWAYS_OPEN_BACK_CAMERA = "always_open_back_camera"
 const val TURN_FLASH_OFF_AT_STARTUP = "turn_flash_off_at_startup"
 const val SCENE_MODE = "scene_mode"
+const val VIDEO_FRAME_RATE = "video_frame_rate"
+const val VIDEO_STABILIZATION = "video_stabilization"
+const val DRIVE_MODE = "drive_mode"
+const val BURST_SIZE = "burst_size"
+const val TIMELAPSE_INTERVAL = "timelapse_interval"
+const val RAW_ENABLED = "raw_enabled"
+const val SHOW_HISTOGRAM = "show_histogram"
 
 const val FLASH_OFF = 0
 const val FLASH_ON = 1

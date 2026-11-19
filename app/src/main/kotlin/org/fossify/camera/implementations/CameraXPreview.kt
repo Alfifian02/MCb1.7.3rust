@@ -6,6 +6,7 @@ import android.hardware.SensorManager
 import android.hardware.display.DisplayManager
 import android.os.Handler
 import android.os.Looper
+import android.util.Range
 import android.util.Rational
 import android.util.Size
 import android.view.Display
@@ -24,14 +25,9 @@ import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCapture.Builder
 import androidx.camera.core.ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY
 import androidx.camera.core.ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY
-import androidx.camera.core.ImageCapture.ERROR_CAPTURE_FAILED
 import androidx.camera.core.ImageCapture.FLASH_MODE_AUTO
 import androidx.camera.core.ImageCapture.FLASH_MODE_OFF
 import androidx.camera.core.ImageCapture.FLASH_MODE_ON
-import androidx.camera.core.ImageCapture.Metadata
-import androidx.camera.core.ImageCapture.OnImageCapturedCallback
-import androidx.camera.core.ImageCaptureException
-import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
 import androidx.camera.core.UseCase
 import androidx.camera.core.UseCaseGroup
@@ -45,15 +41,10 @@ import androidx.camera.core.resolutionselector.ResolutionStrategy.FALLBACK_RULE_
 import androidx.camera.extensions.ExtensionsManager
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.video.FallbackStrategy
-import androidx.camera.video.FileDescriptorOutputOptions
-import androidx.camera.video.FileOutputOptions
-import androidx.camera.video.MediaStoreOutputOptions
 import androidx.camera.video.Quality
 import androidx.camera.video.QualitySelector
 import androidx.camera.video.Recorder
-import androidx.camera.video.Recording
 import androidx.camera.video.VideoCapture
-import androidx.camera.video.VideoRecordEvent
 import androidx.camera.view.PreviewView
 import androidx.camera.view.PreviewView.ScaleType
 import androidx.core.content.ContextCompat
@@ -73,31 +64,32 @@ import org.fossify.camera.extensions.toCameraSelector
 import org.fossify.camera.extensions.toCameraXFlashMode
 import org.fossify.camera.extensions.toCameraXQuality
 import org.fossify.camera.extensions.toLensFacing
-import org.fossify.camera.helpers.BitmapUtils
 import org.fossify.camera.helpers.CameraErrorHandler
+import org.fossify.camera.helpers.CaptureSequencer
 import org.fossify.camera.helpers.FLASH_ALWAYS_ON
 import org.fossify.camera.helpers.FLASH_AUTO
 import org.fossify.camera.helpers.FLASH_OFF
 import org.fossify.camera.helpers.FLASH_ON
 import org.fossify.camera.helpers.ImageQualityManager
-import org.fossify.camera.helpers.ImageSaver
-import org.fossify.camera.helpers.ImageUtil
 import org.fossify.camera.helpers.MediaOutputHelper
 import org.fossify.camera.helpers.MediaSizeStore
 import org.fossify.camera.helpers.MediaSoundHelper
 import org.fossify.camera.helpers.PinchToZoomOnScaleGestureListener
+import org.fossify.camera.helpers.RawCaptureHelper
 import org.fossify.camera.helpers.SimpleLocationManager
 import org.fossify.camera.helpers.VideoQualityManager
 import org.fossify.camera.interfaces.MyPreview
 import org.fossify.camera.models.CaptureMode
-import org.fossify.camera.models.MediaOutput
+import org.fossify.camera.models.DriveMode
+import org.fossify.camera.models.ManualSettings
 import org.fossify.camera.models.MySize
+import org.fossify.camera.models.ProCapabilities
 import org.fossify.camera.models.ResolutionOption
 import org.fossify.camera.models.SceneMode
+import org.fossify.camera.models.VideoFrameRate
 import org.fossify.commons.activities.BaseSimpleActivity
 import org.fossify.commons.extensions.toast
 import org.fossify.commons.helpers.PERMISSION_ACCESS_FINE_LOCATION
-import org.fossify.commons.helpers.ensureBackgroundThread
 import kotlin.math.abs
 
 class CameraXPreview(
@@ -180,8 +172,12 @@ class CameraXPreview(
     private var imageCapture: ImageCapture? = null
     private var videoCapture: VideoCapture<Recorder>? = null
     private var camera: Camera? = null
-    private var currentRecording: Recording? = null
-    private var recordingState: VideoRecordEvent? = null
+    private val videoRecorder = VideoRecorder(
+        activity, mediaOutputHelper, mediaSoundHelper, cameraErrorHandler, listener, isThirdPartyIntent
+    ) { simpleLocationManager?.getLocation() }
+    private val photoCapturer = PhotoCapturer(
+        activity, mediaOutputHelper, mediaSoundHelper, cameraErrorHandler, listener
+    ) { simpleLocationManager?.getLocation() }
     private var cameraSelector = if (config.alwaysOpenBackCamera) {
         CameraSelector.DEFAULT_BACK_CAMERA
     } else {
@@ -194,7 +190,35 @@ class CameraXPreview(
     private var simpleLocationManager: SimpleLocationManager? = null
     private var extensionsManager: ExtensionsManager? = null
     private var activeSceneMode = SceneMode.OFF
-    private var isRecordingPaused = false
+    private var proCapabilities: ProCapabilities? = null
+    private var isRawActive = false
+    private var manualSettings = ManualSettings()
+
+    // Bursts and time lapses: the handler token lets pending frames be cancelled in one call.
+    private val sequenceToken = Any()
+    private val sequenceScheduler = object : CaptureSequencer.Scheduler {
+        override fun postDelayed(delayMs: Long, task: () -> Unit) {
+            cameraHandler.postDelayed({ task() }, sequenceToken, delayMs)
+        }
+
+        override fun cancelPending() {
+            cameraHandler.removeCallbacksAndMessages(sequenceToken)
+        }
+    }
+    private val sequenceListener = object : CaptureSequencer.Listener {
+        override fun onProgress(taken: Int, total: Int?) {
+            listener.onCaptureSequenceProgress(taken, total)
+        }
+
+        override fun onFinished(taken: Int, completedAll: Boolean) {
+            listener.onCaptureSequenceFinished(taken, completedAll)
+        }
+    }
+    private val captureSequencer = CaptureSequencer(
+        scheduler = sequenceScheduler,
+        captureOne = { onFinished -> takePicture(onFinished) },
+        listener = sequenceListener
+    )
 
     // Observers are kept so they can be detached when the camera is rebound. Otherwise every
     // camera restart added another observer (duplicated error toasts, leaked callbacks).
@@ -251,6 +275,7 @@ class CameraXPreview(
     }
 
     private fun startCamera(switching: Boolean = false) {
+        captureSequencer.stop()
         val cameraProviderFuture = ProcessCameraProvider.getInstance(activity.applicationContext)
         cameraProviderFuture.addListener({
             try {
@@ -314,6 +339,8 @@ class CameraXPreview(
         val cameraProvider =
             cameraProvider ?: throw IllegalStateException("Camera initialization failed.")
 
+        updateActiveFeatures(readProCapabilities(cameraProvider))
+
         val resolution = if (isPhotoCapture) {
             imageQualityManager.getUserSelectedResolution(cameraSelector).also {
                 listener.displaySelectedResolution(it.toResolutionOption())
@@ -364,10 +391,14 @@ class CameraXPreview(
             }
         }
 
-        activeSceneMode = resolveSceneMode()
         camera = try {
             bind(getBindingSelector())
         } catch (e: IllegalArgumentException) {
+            if (isRawActive) {
+                handleRawFailure()
+                return false
+            }
+
             if (activeSceneMode == SceneMode.OFF) {
                 throw e
             }
@@ -379,7 +410,39 @@ class CameraXPreview(
         preview = previewUseCase
         setupZoomAndFocus()
         setFlashlightState(config.flashlightState)
+        applyManualSettings()
         return true
+    }
+
+    /** Decides whether RAW and a scene mode are used for this bind. */
+    private fun updateActiveFeatures(capabilities: ProCapabilities?) {
+        val rawWanted = isPhotoCapture && !isThirdPartyIntent && config.rawEnabled
+        isRawActive = rawWanted && capabilities?.rawSupported == true
+        // Vendor extensions and RAW can't be combined.
+        activeSceneMode = if (isRawActive) SceneMode.OFF else resolveSceneMode()
+    }
+
+    @Suppress("SwallowedException")
+    private fun readProCapabilities(provider: ProcessCameraProvider): ProCapabilities? {
+        proCapabilities = try {
+            ProCapabilitiesReader.read(provider.getCameraInfo(cameraSelector))
+        } catch (e: IllegalArgumentException) {
+            null
+        }
+        return proCapabilities
+    }
+
+    private fun handleRawFailure() {
+        config.rawEnabled = false
+        isRawActive = false
+        activity.toast(R.string.raw_unsupported)
+        startCamera()
+    }
+
+    private fun applyManualSettings() {
+        val control = camera?.cameraControl ?: return
+        val effective = if (activeSceneMode == SceneMode.OFF) manualSettings else ManualSettings()
+        Camera2ManualControl.apply(control, effective)
     }
 
     /** The scene mode that is actually applied: only photos, only if the device supports it. */
@@ -441,23 +504,29 @@ class CameraXPreview(
             buildImageCapture(resolution, rotation).also {
                 imageCapture = it
                 videoCapture = null
+                videoRecorder.videoCapture = null
             }
         } else {
             buildVideoCapture().also {
                 videoCapture = it
+                videoRecorder.videoCapture = it
                 imageCapture = null
             }
         }
     }
 
     private fun buildImageCapture(resolution: Size, rotation: Int): ImageCapture {
-        return Builder()
+        val builder = Builder()
             .setCaptureMode(getCaptureMode())
             .setFlashMode(flashMode)
             .setJpegQuality(config.photoQuality)
             .setTargetRotation(rotation)
             .setResolutionSelector(getResolutionSelector(resolution))
-            .build()
+        if (isRawActive) {
+            RawCaptureHelper.configure(builder)
+        }
+
+        return builder.build()
     }
 
     private fun getCaptureMode(): Int {
@@ -497,7 +566,19 @@ class CameraXPreview(
             .setQualitySelector(qualitySelector)
             .build()
 
-        return VideoCapture.withOutput(recorder)
+        val builder = VideoCapture.Builder(recorder)
+        val capabilities = proCapabilities
+        val frameRate = config.videoFrameRate
+        val fps = frameRate.fps
+        if (fps != null && (capabilities == null || frameRate in capabilities.frameRates)) {
+            builder.setTargetFrameRate(Range(fps, fps))
+        }
+
+        if (config.videoStabilization && capabilities?.stabilizationSupported != false) {
+            builder.setVideoStabilizationEnabled(true)
+        }
+
+        return builder.build()
     }
 
     private fun setupCameraObservers() {
@@ -513,6 +594,12 @@ class CameraXPreview(
         listener.setFlashAvailable(hasFlashUnit || usesScreenFlash)
         listener.onChangeCamera(isFrontCameraInUse())
         reportExposureState()
+        proCapabilities?.let { capabilities ->
+            // Vendor extensions don't take part in Camera2 interop.
+            val manual = capabilities.manual.takeIf { activeSceneMode == SceneMode.OFF }
+            listener.onProCapabilitiesChanged(capabilities.copy(manual = manual))
+        }
+
         if (isPhotoCapture) {
             listener.onSceneModesAvailable(getAvailableSceneModes(), activeSceneMode)
             listener.onInitPhotoMode()
@@ -646,6 +733,7 @@ class CameraXPreview(
     }
 
     override fun onStop(owner: LifecycleOwner) {
+        captureSequencer.stop()
         orientationEventListener.disable()
     }
 
@@ -677,7 +765,7 @@ class CameraXPreview(
             ) { index, changed ->
                 mediaSizeStore.storeSize(isPhotoCapture, isFrontCameraInUse(), index)
                 if (changed) {
-                    currentRecording?.stop()
+                    videoRecorder.stop()
                     startCamera()
                 }
             }
@@ -698,7 +786,7 @@ class CameraXPreview(
             }
 
             mediaSizeStore.storeSize(isPhotoCapture, isFrontCameraInUse(), nextIndex)
-            currentRecording?.stop()
+            videoRecorder.stop()
             startCamera()
         }
     }
@@ -737,6 +825,43 @@ class CameraXPreview(
 
         config.sceneMode = mode
         startCamera()
+    }
+
+    override fun setVideoFrameRate(rate: VideoFrameRate) {
+        if (rate != config.videoFrameRate) {
+            config.videoFrameRate = rate
+            restartIfNeeded(!isPhotoCapture)
+        }
+    }
+
+    override fun setVideoStabilization(enabled: Boolean) {
+        if (enabled != config.videoStabilization) {
+            config.videoStabilization = enabled
+            restartIfNeeded(!isPhotoCapture)
+        }
+    }
+
+    override fun setRawEnabled(enabled: Boolean) {
+        if (enabled != config.rawEnabled) {
+            config.rawEnabled = enabled
+            restartIfNeeded(isPhotoCapture)
+        }
+    }
+
+    override fun setManualSettings(settings: ManualSettings) {
+        manualSettings = settings
+        applyManualSettings()
+    }
+
+    override fun isCaptureSequenceRunning() = captureSequencer.isRunning
+
+    override fun stopCaptureSequence() = captureSequencer.stop()
+
+    private fun restartIfNeeded(needed: Boolean) {
+        if (needed) {
+            videoRecorder.stop()
+            startCamera()
+        }
     }
 
     override fun handleFlashlightClick() {
@@ -783,68 +908,25 @@ class CameraXPreview(
     }
 
     override fun tryTakePicture() {
-        if (imageCapture == null) {
+        // Third party apps ask for exactly one JPEG.
+        val driveMode = if (isThirdPartyIntent) DriveMode.SINGLE else config.driveMode
+        when (driveMode) {
+            DriveMode.SINGLE -> takePicture(null)
+            DriveMode.BURST -> captureSequencer.startBurst(config.burstSize.frames)
+            DriveMode.TIMELAPSE -> captureSequencer.startTimelapse(config.timelapseInterval.millis)
+        }
+    }
+
+    /** [onDone] is always called on the main thread, with whether the picture was saved. */
+    private fun takePicture(onDone: ((Boolean) -> Unit)?) {
+        val capture = imageCapture
+        if (capture == null) {
             activity.toast(R.string.camera_open_error)
+            onDone?.invoke(false)
             return
         }
 
-        val imageCapture = imageCapture
-
-        val metadata = Metadata().apply {
-            isReversedHorizontal = isFrontCameraInUse() && config.flipPhotos
-            if (config.savePhotoVideoLocation) {
-                location = simpleLocationManager?.getLocation()
-            }
-        }
-
-        val mediaOutput = mediaOutputHelper.getImageMediaOutput()
-        imageCapture!!.takePicture(mainExecutor, object : OnImageCapturedCallback() {
-            override fun onCaptureSuccess(image: ImageProxy) {
-                listener.shutterAnimation()
-                playShutterSoundIfEnabled()
-                ensureBackgroundThread {
-                    image.use {
-                        if (mediaOutput is MediaOutput.BitmapOutput) {
-                            val imageBytes = ImageUtil.jpegImageToJpegByteArray(image)
-                            val bitmap = BitmapUtils.makeBitmap(imageBytes)
-                            activity.runOnUiThread {
-                                listener.onPhotoCaptureEnd()
-                                if (bitmap != null) {
-                                    listener.onImageCaptured(bitmap)
-                                } else {
-                                    cameraErrorHandler.handleImageCaptureError(ERROR_CAPTURE_FAILED)
-                                }
-                            }
-                        } else {
-                            ImageSaver.saveImage(
-                                contentResolver = contentResolver,
-                                image = image,
-                                mediaOutput = mediaOutput,
-                                metadata = metadata,
-                                jpegQuality = config.photoQuality,
-                                saveExifAttributes = config.savePhotoMetadata,
-                                onImageSaved = { savedUri ->
-                                    activity.runOnUiThread {
-                                        listener.onPhotoCaptureEnd()
-                                        listener.onMediaSaved(savedUri)
-                                    }
-                                },
-                                onError = ::handleImageCaptureError
-                            )
-                        }
-                    }
-                }
-            }
-
-            override fun onError(exception: ImageCaptureException) {
-                handleImageCaptureError(exception)
-            }
-        })
-    }
-
-    private fun handleImageCaptureError(exception: ImageCaptureException) {
-        listener.onPhotoCaptureEnd()
-        cameraErrorHandler.handleImageCaptureError(exception.imageCaptureError)
+        photoCapturer.take(capture, isRawActive, isFrontCameraInUse(), onDone)
     }
 
     override fun initPhotoMode() {
@@ -867,116 +949,7 @@ class CameraXPreview(
         lastCameraStartTime = currentTime
     }
 
-    override fun toggleRecording() {
-        if (currentRecording == null || recordingState is VideoRecordEvent.Finalize) {
-            if (config.isSoundEnabled) {
-                mediaSoundHelper.playStartVideoRecordingSound(onPlayComplete = {
-                    startRecording()
-                })
-                listener.onVideoRecordingStarted()
-            } else {
-                startRecording()
-            }
-        } else {
-            currentRecording?.stop()
-            currentRecording = null
-            isRecordingPaused = false
-        }
-    }
+    override fun toggleRecording() = videoRecorder.toggle()
 
-    override fun toggleRecordingPause() {
-        val recording = currentRecording ?: return
-        if (isRecordingPaused) {
-            recording.resume()
-        } else {
-            recording.pause()
-        }
-    }
-
-    @SuppressLint("MissingPermission", "NewApi")
-    private fun startRecording() {
-        if (videoCapture == null) {
-            activity.toast(R.string.camera_open_error)
-            return
-        }
-
-        val videoCapture = videoCapture
-
-        val recording = when (val mediaOutput = mediaOutputHelper.getVideoMediaOutput()) {
-            is MediaOutput.FileDescriptorMediaOutput -> {
-                FileDescriptorOutputOptions.Builder(mediaOutput.fileDescriptor).apply {
-                    if (config.savePhotoVideoLocation) {
-                        setLocation(simpleLocationManager?.getLocation())
-                    }
-                }.build().let { videoCapture!!.output.prepareRecording(activity, it) }
-            }
-
-            is MediaOutput.FileMediaOutput -> {
-                FileOutputOptions.Builder(mediaOutput.file).apply {
-                    if (config.savePhotoVideoLocation) {
-                        setLocation(simpleLocationManager?.getLocation())
-                    }
-                }.build().let { videoCapture!!.output.prepareRecording(activity, it) }
-            }
-
-            is MediaOutput.MediaStoreOutput -> {
-                MediaStoreOutputOptions.Builder(contentResolver, mediaOutput.contentUri).apply {
-                    setContentValues(mediaOutput.contentValues)
-                    if (config.savePhotoVideoLocation) {
-                        setLocation(simpleLocationManager?.getLocation())
-                    }
-                }.build().let { videoCapture!!.output.prepareRecording(activity, it) }
-            }
-        }
-
-        // Third party apps asking for a video always expect sound.
-        val audioEnabled = config.recordAudio || isThirdPartyIntent
-        currentRecording = (if (audioEnabled) recording.withAudioEnabled() else recording)
-            .start(mainExecutor) { recordEvent ->
-                recordingState = recordEvent
-                when (recordEvent) {
-                    is VideoRecordEvent.Start -> {
-                        isRecordingPaused = false
-                        listener.onVideoRecordingStarted()
-                    }
-
-                    is VideoRecordEvent.Status -> {
-                        listener.onVideoDurationChanged(recordEvent.recordingStats.recordedDurationNanos)
-                    }
-
-                    is VideoRecordEvent.Pause -> {
-                        isRecordingPaused = true
-                        listener.onVideoRecordingPaused()
-                    }
-
-                    is VideoRecordEvent.Resume -> {
-                        isRecordingPaused = false
-                        listener.onVideoRecordingResumed()
-                    }
-
-                    is VideoRecordEvent.Finalize -> {
-                        isRecordingPaused = false
-                        playStopVideoRecordingSoundIfEnabled()
-                        listener.onVideoRecordingStopped()
-                        if (recordEvent.hasError()) {
-                            cameraErrorHandler.handleVideoRecordingError(recordEvent.error)
-                        } else {
-                            listener.onMediaSaved(recordEvent.outputResults.outputUri)
-                        }
-                    }
-                }
-            }
-    }
-
-    private fun playShutterSoundIfEnabled() {
-        if (config.isSoundEnabled) {
-            mediaSoundHelper.playShutterSound()
-        }
-    }
-
-    private fun playStopVideoRecordingSoundIfEnabled() {
-        if (config.isSoundEnabled) {
-            mediaSoundHelper.playStopVideoRecordingSound()
-        }
-    }
+    override fun toggleRecordingPause() = videoRecorder.togglePause()
 }

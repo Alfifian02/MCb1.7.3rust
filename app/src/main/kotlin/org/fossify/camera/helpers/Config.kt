@@ -3,10 +3,14 @@ package org.fossify.camera.helpers
 import android.content.Context
 import android.os.Environment
 import androidx.camera.core.CameraSelector
+import org.fossify.camera.models.BurstSize
 import org.fossify.camera.models.CaptureMode
+import org.fossify.camera.models.DriveMode
 import org.fossify.camera.models.GridType
 import org.fossify.camera.models.SceneMode
+import org.fossify.camera.models.TimelapseInterval
 import org.fossify.camera.models.TimerMode
+import org.fossify.camera.models.VideoFrameRate
 import org.fossify.camera.models.VolumeButtonAction
 import org.fossify.commons.helpers.BaseConfig
 import java.io.File
@@ -156,4 +160,38 @@ class Config(context: Context) : BaseConfig(context) {
         get() = SceneMode.entries.getOrNull(prefs.getInt(SCENE_MODE, SceneMode.OFF.ordinal))
             ?: SceneMode.OFF
         set(sceneMode) = prefs.edit().putInt(SCENE_MODE, sceneMode.ordinal).apply()
+
+    var videoFrameRate: VideoFrameRate
+        get() = VideoFrameRate.entries.getOrNull(
+            prefs.getInt(VIDEO_FRAME_RATE, VideoFrameRate.AUTO.ordinal)
+        ) ?: VideoFrameRate.AUTO
+        set(rate) = prefs.edit().putInt(VIDEO_FRAME_RATE, rate.ordinal).apply()
+
+    var videoStabilization: Boolean
+        get() = prefs.getBoolean(VIDEO_STABILIZATION, false)
+        set(enabled) = prefs.edit().putBoolean(VIDEO_STABILIZATION, enabled).apply()
+
+    var driveMode: DriveMode
+        get() = DriveMode.entries.getOrNull(prefs.getInt(DRIVE_MODE, DriveMode.SINGLE.ordinal))
+            ?: DriveMode.SINGLE
+        set(mode) = prefs.edit().putInt(DRIVE_MODE, mode.ordinal).apply()
+
+    var burstSize: BurstSize
+        get() = BurstSize.entries.getOrNull(prefs.getInt(BURST_SIZE, BurstSize.TEN.ordinal))
+            ?: BurstSize.TEN
+        set(size) = prefs.edit().putInt(BURST_SIZE, size.ordinal).apply()
+
+    var timelapseInterval: TimelapseInterval
+        get() = TimelapseInterval.entries.getOrNull(
+            prefs.getInt(TIMELAPSE_INTERVAL, TimelapseInterval.SECOND_2.ordinal)
+        ) ?: TimelapseInterval.SECOND_2
+        set(interval) = prefs.edit().putInt(TIMELAPSE_INTERVAL, interval.ordinal).apply()
+
+    var rawEnabled: Boolean
+        get() = prefs.getBoolean(RAW_ENABLED, false)
+        set(enabled) = prefs.edit().putBoolean(RAW_ENABLED, enabled).apply()
+
+    var showHistogram: Boolean
+        get() = prefs.getBoolean(SHOW_HISTOGRAM, false)
+        set(show) = prefs.edit().putBoolean(SHOW_HISTOGRAM, show).apply()
 }

@@ -91,4 +91,31 @@
         Haven't found some strings? There's more at
         https://github.com/FossifyOrg/Commons/tree/master/commons/src/main/res
     -->
+
+    <!-- Pro controls -->
+    <string name="pro_controls">Pro controls</string>
+    <string name="frame_rate">Frame rate</string>
+    <string name="fps_auto">Auto</string>
+    <string name="fps_value">%d fps</string>
+    <string name="seconds_short">%d s</string>
+    <string name="video_stabilization">Video stabilization</string>
+    <string name="drive_mode">Shooting mode</string>
+    <string name="drive_single">Single</string>
+    <string name="drive_burst">Burst</string>
+    <string name="drive_timelapse">Time lapse</string>
+    <string name="raw_format">RAW (DNG)</string>
+    <string name="raw_unsupported">RAW is not supported on this camera</string>
+    <string name="histogram">Histogram</string>
+    <string name="manual_exposure">Manual exposure</string>
+    <string name="iso">ISO</string>
+    <string name="shutter_speed">Shutter</string>
+    <string name="white_balance">White balance</string>
+    <string name="wb_auto">Auto</string>
+    <string name="wb_incandescent">Incandescent</string>
+    <string name="wb_fluorescent">Fluorescent</string>
+    <string name="wb_daylight">Daylight</string>
+    <string name="wb_cloudy">Cloudy</string>
+    <string name="burst_progress">Burst %1$d/%2$d</string>
+    <string name="timelapse_progress">Time lapse: %d photos</string>
+    <string name="sequence_finished">%d photos taken</string>
 </resources>

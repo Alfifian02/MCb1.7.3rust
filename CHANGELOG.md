@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Volume buttons can now also be used to zoom
 - Haptic feedback option
 - Options to always open with the back camera and to turn the flash off at startup
+- "Pro" panel with video frame rate (auto, 30, 60 fps), video stabilization, burst and time lapse
+  (photos at a fixed interval), RAW (DNG) capture, manual ISO, shutter speed and white balance, and
+  a live luminance histogram. Each option only shows up when the camera supports it
+- Unit tests (`app/src/test`) and a `Checks` workflow that runs tests, detekt and lint on every pull request
 
 ### Fixed
 - Camera failed to start on devices without a front camera

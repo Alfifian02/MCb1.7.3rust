@@ -71,4 +71,31 @@
     <string name="pause_recording">Jeda perekaman</string>
     <string name="resume_recording">Lanjutkan perekaman</string>
     <string name="zoom_level">Tingkat zoom</string>
+
+    <!-- Kontrol pro -->
+    <string name="pro_controls">Kontrol pro</string>
+    <string name="frame_rate">Frame rate</string>
+    <string name="fps_auto">Otomatis</string>
+    <string name="fps_value">%d fps</string>
+    <string name="seconds_short">%d dtk</string>
+    <string name="video_stabilization">Stabilisasi video</string>
+    <string name="drive_mode">Mode pemotretan</string>
+    <string name="drive_single">Tunggal</string>
+    <string name="drive_burst">Burst</string>
+    <string name="drive_timelapse">Timelapse</string>
+    <string name="raw_format">RAW (DNG)</string>
+    <string name="raw_unsupported">RAW tidak didukung oleh kamera ini</string>
+    <string name="histogram">Histogram</string>
+    <string name="manual_exposure">Eksposur manual</string>
+    <string name="iso">ISO</string>
+    <string name="shutter_speed">Rana</string>
+    <string name="white_balance">Keseimbangan putih</string>
+    <string name="wb_auto">Otomatis</string>
+    <string name="wb_incandescent">Lampu pijar</string>
+    <string name="wb_fluorescent">Neon</string>
+    <string name="wb_daylight">Siang hari</string>
+    <string name="wb_cloudy">Mendung</string>
+    <string name="burst_progress">Burst %1$d/%2$d</string>
+    <string name="timelapse_progress">Timelapse: %d foto</string>
+    <string name="sequence_finished">%d foto diambil</string>
 </resources>

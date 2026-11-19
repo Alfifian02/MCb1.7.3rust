@@ -1,0 +1,39 @@
+# Runs the unit tests, detekt and lint. A pull request that adds a new detekt or lint issue (that is
+# not in the baseline files) or breaks a test fails here, before it gets merged.
+name: Checks
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**.md"
+      - "LICENSE"
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - "**.md"
+      - "LICENSE"
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up JDK
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Unit tests
+        run: ./gradlew testFossDebugUnitTest
+
+      - name: Detekt
+        run: ./gradlew detekt
+
+      - name: Lint
+        run: ./gradlew lintFossDebug

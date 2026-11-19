@@ -1,6 +1,8 @@
 package org.fossify.camera.interfaces
 
+import org.fossify.camera.models.ManualSettings
 import org.fossify.camera.models.SceneMode
+import org.fossify.camera.models.VideoFrameRate
 
 interface MyPreview {
 
@@ -33,4 +35,18 @@ interface MyPreview {
     fun initVideoMode()
 
     fun showChangeResolution()
+
+    fun setVideoFrameRate(rate: VideoFrameRate)
+
+    fun setVideoStabilization(enabled: Boolean)
+
+    /** Takes effect on the next photo; the camera is rebound if the format has to change. */
+    fun setRawEnabled(enabled: Boolean)
+
+    fun setManualSettings(settings: ManualSettings)
+
+    /** True while a burst or time lapse is running. */
+    fun isCaptureSequenceRunning(): Boolean
+
+    fun stopCaptureSequence()
 }

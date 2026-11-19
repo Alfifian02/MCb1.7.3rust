@@ -52,6 +52,16 @@
         tools:visibility="visible" />
 
     <com.google.android.material.button.MaterialButton
+        android:id="@+id/toggle_pro_controls"
+        style="@style/Widget.App.Button.OutlineButton.IconOnly"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1"
+        android:contentDescription="@string/pro_controls"
+        android:padding="@dimen/normal_margin"
+        app:icon="@drawable/ic_pro_vector" />
+
+    <com.google.android.material.button.MaterialButton
         android:id="@+id/change_resolution"
         style="@style/Widget.App.Button.OutlineButton.IconOnly"
         android:layout_width="0dp"
