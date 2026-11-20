@@ -1,144 +1,138 @@
-# SeedlessDS
+# Krikiroid2-Yuri  
 
-A Nintendo DS emulator for Android handhelds with physical controls, including devices with two displays.
+![GitHub release (latest SemVer)](https://img.shields.io/github/v/release/YuriSizuku/Kirikiroid2Yuri?color=green&label=krkr2yuri&style=flat-square7&logo=4chan)  ![GitHub Workflow Status](https://img.shields.io/github/actions/workflow/status/YuriSizuku/Kirikiroid2Yuri/build_android.yml?label=android%28aarch64%29&style=flat-square)
 
-SeedlessDS is the smaller sibling of WatermelonDS: the same watermelon idea, with the seeds taken out.
+☘️ A krikiroid2 project matained by Yurisizuku.  
+It will support the newer android device and more formats.
 
-<p align="center">
-<img width="350" height="300" alt="SeedlessDS library" src="https://github.com/user-attachments/assets/9e9fbcee-28d5-4938-8b81-bbf5eb30fc36" />
-<img width="350" height="300" alt="SeedlessDS interface" src="https://github.com/user-attachments/assets/74c48268-3037-4c81-9abe-400f0b790b9f" />
-<img width="350" height="300" alt="SeedlessDS settings" src="https://github.com/user-attachments/assets/b23fb273-9a10-4244-b2b5-f05003c48c4d" />
-</p>
+Roadmap :
 
-> **Current status:** `1.0.1`. The Android app uses [SeedlessCoreDS](core/README.md), a Nintendo DS emulation library reconstructed from DraStic r2.6.0.4a and built from source. The original DraStic APK and prebuilt core are not required to build or run SeedlessDS.
+- core
+  - [ ] replace rendering from cocos to SDL2
+  - [ ] command line or config files for setting
+  - [ ] recent cx game (hash filename) decryption support
+- plugin
+  - [ ] [windowEx](https://github.com/wamsoft/windowEx)
+  - [ ] [layerEx](https://github.com/wamsoft/layerEx)
+  - [ ] [layerExDraw](https://github.com/wamsoft/layerExDraw) (gdiPlus)
+  - [ ] [scriptsEx](https://github.com/wamsoft/scriptsEx)
+- platform
+  - android
+    - [x] SDK level above 21 (android 5.1, Lolipop)
+    - [x] bypass scoped storage
+    - [ ] access extern sdcard by saf
+  - windows
+  - linux
+- develop  
+  - [x] camke project structure, documention for develop
+  - [x] scripts to compile or cross compile
+  - [x] vscode and android studio project for multi enviroment
+  - [x] ci in github action to automaticly build
 
-## What it is
+(This project is heavily relying on cocos. Sooner or later, I might rewrite these parts and replace them by SDL2. And because that the upstream didn't provide all the plugins source code, it still needs sometime to adapt them.)
 
-SeedlessDS combines a game library, settings, input mapping, save states, cheats and RetroAchievements with a renderer for one or two physical displays. The Android frontend and reconstructed core communicate through JNI and the core's C API.
+## 1. usage  
 
-## Why SeedlessDS exists
+Although now the apk build from source is runable, it is not perfect. Beta version has some problems due to the cocos version change, incomplecate of some code. Currently the beta version is only aimed for debug. Please use [Kirikiroid2_yuri_1.3.9.apk](https://github.com/YuriSizuku/Kirikiroid2Yuri/releases/download/1.3.9_yuri/Kirikiroid2_yuri_1.3.9.apk) instead.  
 
-The project focuses on Android handhelds where emulation performance and physical controls matter. It complements the melonDS-based WatermelonDS project with a different core. Performance depends on the game, device and internal resolution; higher resolutions require more processing power.
+## 2. Build  
 
-## The differentiator
+I add some futures by reverse engine before, and now this project can be build from source.  This is really a very hard work, because there are so many dependencies, lack of files, code not compatible problems.  
 
-### DualScreen Presets
+### (1) prepare  
 
-Presets coordinate scale, aspect ratio, alignment, position and touch mapping across both displays. Layouts can also be adjusted for a single display.
+- wget, 7z, git, make, cmake  
+- python2(for cocos2d-x v3), msys2 (if windows)  
+- thirdparty depedency (see `_fetch.sh` in detail)  
 
-### Dual-panel rendering
+``` shell
+# wget 
+https://downloads.xiph.org/releases/vorbis/libvorbis-1.3.7.tar.gz
+https://archive.mozilla.org/pub/opus/opus-1.3.1.tar.gz
+https://downloads.xiph.org/releases/ogg/libogg-1.3.5.tar.gz
+https://downloads.xiph.org/releases/opus/opusfile-0.12.tar.gz
+https://www.rarlab.com/rar/unrarsrc-6.0.7.tar.gz
+https://www.libsdl.org/release/SDL2-2.0.14.tar.gz
 
-The app coordinates each emulated frame and its presentation through EGL/OpenGL ES, with a separate presentation thread for the external display. This helps games that connect the two DS screens into one scene. Behavior still depends on the device's display implementation.
+# git
+https://github.com/krkrz/oniguruma
+https://github.com/google/breakpad
+https://github.com/zeas2/FFmpeg
 
-### Controller-first interface
-
-The interface supports D-pad navigation, shoulder-button tab switching and configurable emulator shortcuts. On supported dual-display layouts, the second panel can show information about the selected item.
-
-## Features
-
-### Library
-
-- User-selected game folders, favorites and accent-insensitive search.
-- Library filters, a Continue Playing section and per-game save slots.
-- Box art from libretro thumbnails, with a bundled index and disk cache.
-
-### Emulation
-
-- Save states with screenshots, quick save and quick load.
-- Bundled cheat database and custom cheat codes.
-- Global settings, per-game overrides and profiles.
-- Editable on-screen controls, screen layouts, image filters and integer scaling.
-- Internal resolution settings from 1x to 8x.
-
-### RetroAchievements
-
-The integration uses [`rcheevos`](https://github.com/RetroAchievements/rcheevos), pinned to v12.3.0. It provides achievements, leaderboards and profile information, including casual and hardcore score displays. Compatibility is still being tested; a score display alone does not imply that every Hardcore feature is supported.
-
-### Built for a gamepad
-
-Map DS buttons and emulator actions to physical controls: fast-forward, quick save/load, swapping screens, cycling layouts, microphone input and turbo.
-
-### Front-end friendly
-
-Launchers can start a game through the `LaunchGame` activity alias:
-
-```sh
-am start -n com.seedlessds.app/com.seedlessds.app.LaunchGame \
-    -e rom_path /storage/emulated/0/roms/nds/game.nds \
-    --ei load_slot 1
+# git with version
+https://github.com/google/oboe/archive/refs/tags/1.7.0.tar.gz
+https://github.com/kcat/openal-soft/archive/refs/tags/1.23.0.tar.gz
+https://github.com/libjpeg-turbo/libjpeg-turbo/archive/refs/tags/2.1.5.1.tar.gz
+https://github.com/opencv/opencv/archive/refs/tags/4.7.0.tar.gz
+https://github.com/lz4/lz4/archive/refs/tags/v1.9.4.tar.gz
+https://github.com/libarchive/libarchive/archive/refs/tags/v3.6.2.tar.gz
+https://github.com/cocos2d/cocos2d-x/archive/refs/tags/cocos2d-x-3.17.2.tar.gz
 ```
 
-The app recognizes `.nds`, `.dsi`, `.srl` and `.ids` game files and includes archive handling for ZIP, 7z and RAR. File recognition does not guarantee that a game or every archive layout is compatible. Device testing of the 7z/RAR paths remains in progress.
+In windows, you must use msys2 to build ffmpeg port.  
+You can also download the prebuild ports from [thirdparty_ports.tar.gz](https://github.com/YuriSizuku/Kirikiroid2Yuri/releases/download/deps/thirdparty_ports.tar.gz"), [thirdparty_build.tar.gz](https://github.com/YuriSizuku/Kirikiroid2Yuri/releases/download/deps/thirdparty_build.tar.gz).  
 
-## How it is built
+## (2) android  
 
-| Layer | Implementation |
-|---|---|
-| Android app | Kotlin, Jetpack Compose, Material 3 and Android Views |
-| Emulation | [SeedlessCoreDS](core/README.md), in `core/` |
-| Core library | `librecon_fn.so`, compiled from C and AArch64 assembly |
-| JNI | `librecon.so`, connecting Android to the core |
-| App helpers and achievements | `libseedless_bridge.so` and rcheevos |
-| Display and audio | EGL/OpenGL ES and OpenSL ES |
-| Supported ABI | `arm64-v8a` |
-| Android | API 21 minimum; API 35 compile/target SDK |
-| Version | `1.0.1`, version code 111 |
+- android sdk with `ANDROID_HOME` variable in env  
+- android ndk 25.2.9519653  
 
-### Build from source
+See `_androida64.sh` for how to build dependencies.
+Use `script/cross_android64.sh` to build ports and the use `project/android/gradlew assembleDebug` to build apk.
 
-The core lives in `core/` as regular files. Only `rcheevos` is a submodule; initialize it from the repository root:
+## 3. Compatibility  
 
-```sh
-git submodule update --init --recursive
-```
+|game|version|status|description|
+|----|-------|------|-----------|
 
-Use JDK 25, Android SDK 35 with Build Tools 36.0.0, NDK `25.2.9519653` and CMake `3.22.1`. The Gradle wrapper selects Gradle `9.7.0`, with Android Gradle Plugin `9.3.1` and Kotlin/Compose compiler `2.4.21`. Set the SDK location through `local.properties` or your Android SDK environment. The Gradle daemon requires a locally installed JDK 25. Java/Kotlin bytecode remains targeted to Java 17 and is converted to Android DEX; the minimum Android API level remains 21. The native build downloads pinned libarchive, unarr and LZMA SDK sources with SHA-256 verification; see [third-party licenses](core/third_party/LICENSES.md).
+## 4. Issues (including solved)
 
-Build the debug app (`com.seedlessds.app.debug`):
+(build from souce, beta version)  
 
-```sh
-./gradlew assembleDebug
-```
+major:  
 
-For the signed release (`com.seedlessds.app`), configure `MELONDS_KEYSTORE`, `MELONDS_KEYSTORE_PASSWORD`, `MELONDS_KEY_ALIAS` and `MELONDS_KEY_PASSWORD` in your untracked `local.properties`, then run:
+- title path button click position is not correct
+- crash in game menu form  
+- game alert window button can not click  
+- member GdiPlus does not exist
+- global preference can not save
 
-```sh
-./gradlew assembleRelease
-```
+minor:  
 
-On Windows, use `gradlew.bat` with the same arguments. APKs are written under `app/build/outputs/apk/`. Keep signing credentials and the release keystore outside version control. The tracked debug keystore is only for debug builds.
+- ~~android studio buildDir not worked and it make dir at root~~ fixed by cmake `add_subdirectory` build dir
 
-## Roadmap
+## 5. Todo
 
-The reconstructed core is now built from source. Future work includes broader compatibility testing, performance improvements and continued refinement of the Android interface. A Linux frontend remains a future direction; there is no released Linux application in this repository.
+See Roadmap.  
+___
+Original information about kirikiroid2 bellow, also refered some dependencies from [ningshanwutuobang](https://github.com/ningshanwutuobang/Kirikiroid2).  
 
-## Credits and distribution
+## Kirikiroid2 - A cross-platform port of Kirikiri2/KirikiriZ  
 
-DraStic was created by its original authors, including Exophase. SeedlessCoreDS is reconstructed from DraStic r2.6.0.4a; this is not a claim of an independently designed core. SeedlessDS is a separate project and is not an official DraStic release.
+==========================================================
 
-Games and original Nintendo BIOS/firmware images are not included. The app includes replacement BIOS assets. Third-party source and assets retain their respective attribution and license terms. Nintendo and game names belong to their respective owners; the project is not affiliated with Nintendo.
+Based on most code from [Kirikiri2](http://kikyou.info/tvp/) and [KirikiriZ](https://github.com/krkrz/krkrz)
 
-## Current known notes
+Video playback module modified from [kodi](https://github.com/xbmc/xbmc)
 
-- This release supports ARM64 Android devices.
-- Game compatibility, performance and dual-display behavior vary by device.
-- RetroAchievements and archive handling need further compatibility testing.
-- The interface is still being refined.
+Some string code from [glibc](https://www.gnu.org/s/libc) and [Apple Libc](https://opensource.apple.com/source/Libc).
 
-## Reporting issues
+Real-time texture codec modified from [etcpak](https://bitbucket.org/wolfpld/etcpak.git), [pvrtccompressor](https://bitbucket.org/jthlim/pvrtccompressor), [astcrt](https://github.com/daoo/astcrt)
 
-Include the device model, Android version, game, internal resolution, display layout, input method and whether RetroAchievements was enabled. Add reproduction steps and, where useful, screenshots or logs. Do not attach games, BIOS images, firmware or signing credentials.
+Android storage accessing code from [AmazeFileManager](https://github.com/arpitkh96/AmazeFileManager)
 
-## License
+## 3. Texture resolution scale + release workflow (merged build)
 
-Original or authorized project code is licensed under GPL-3.0-or-later; see [LICENSE](LICENSE) and [LICENSING.md](LICENSING.md). Bundled dependencies and resources retain their individual terms, including the DeadSkullzJr cheat catalog's AGPL-3.0 and XML source.
+This tree is Kirikiroid2-Yuri with the `texture-resolution-scale` patch applied
+(new option **Texture Resolution** 100/75/50/25 %, `ogl_tex_scale`, per game; strings in
+`project/ui/Resources/res/locale/*.xml`).
 
-Release source archives include exact app/core revisions, dependency sources, resource sources, generators and build instructions. The checked-out Android product builds directly with Gradle as described above.
+Dependencies live in `vendor/` (not committed):
 
-## Performance notes
+- `vendor/port` - sources, mainly cocos2d-x 3.17.2 with its Android java/gradle module
+- `vendor/build/arch_androida64` - prebuilt static libs and headers (see `script/_androida64.sh`)
 
-New in this build (all unmeasured until tested on devices; see SeedlessDS-Roadmap.md):
-2D worker count sized to the fast cores, ADPF hints and optional core pinning, thermal-adaptive
-3D resolution, optional AAudio output, optional presentation pacing, PGO pipeline
-(`tools/pgo/collect.sh`), `-mtune`, and ROM preloading only on devices with spare RAM.
-The NDK stays at r25 by default; try another with `-PndkVersion=...` and regenerate the PGO profile.
+`.github/workflows/release-apk.yml` fills `vendor/` from the cache, from the `VENDOR_URL` repository
+variable (a `.tar.gz`/`.zip` with `vendor/port` and `vendor/build` at its root), or from the prebuilt
+`deps` release of Kirikiroid2Yuri. Push a tag `v*` (or run it manually) to build, sign with `keystore/` and
+publish `Kirikiroid2Yuri-<tag>.apk`. The local scripts (`script/cross_androida64.sh`) use the same `vendor/` paths.

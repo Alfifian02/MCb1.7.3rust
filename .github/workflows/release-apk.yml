@@ -1,0 +1,156 @@
+name: Release APK
+
+# Push a tag such as v1.4.0-tex1, or run the workflow by hand and give it a tag.
+# The APK is built (Gradle + CMake, arm64-v8a), signed with keystore/ and attached to the GitHub Release of that tag.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to create or update (e.g. v1.4.0-tex1)'
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-apk-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  NDK_VERSION: 25.2.9519653   # ndkVersion in project/android/app/build.gradle
+  BUILD_TOOLS: 33.0.2         # buildToolsVersion in project/android/app/build.gradle
+  CMAKE_VERSION: 3.22.1       # cmake version in project/android/app/build.gradle
+  PLATFORM: android-29        # compileSdkVersion (PROP_TARGET_SDK_VERSION)
+  DEPS_BASE_URL: https://github.com/YuriSizuku/Kirikiroid2Yuri/releases/download/deps
+  APK_ASSETS_URL: https://github.com/YuriSizuku/Kirikiroid2Yuri/releases/download/1.3.9_yuri/Kirikiroid2_yuri_1.3.9.apk
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Validate tag
+        run: |
+          [[ "$TAG" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "::error::Invalid tag '$TAG'"; exit 1; }
+
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # vendor/ holds every native dependency, in the layout the CMake project expects:
+      #   vendor/port/                 sources (cocos2d-x incl. its Android java/gradle module, ...)
+      #   vendor/build/arch_androida64 prebuilt static libs + headers (opus, vorbis, openal, ffmpeg,
+      #                                opencv, libarchive, SDL2, onig, breakpad, ...)
+      # Not committed (see .gitignore). Cached between runs.
+      - name: Cache vendor/
+        uses: actions/cache@v4
+        with:
+          path: vendor
+          key: vendor-${{ runner.os }}-${{ vars.VENDOR_URL || 'yuri-deps' }}-v1
+
+      # Order: vendor/ already in the checkout/cache -> repository variable VENDOR_URL
+      # (Settings > Secrets and variables > Actions > Variables; a .tar.gz/.zip with vendor/ at its root,
+      # i.e. vendor/port and vendor/build) -> prebuilt deps published by the Kirikiroid2Yuri project.
+      - name: Prepare vendor/ dependencies
+        env:
+          VENDOR_URL: ${{ vars.VENDOR_URL }}
+        run: |
+          set -euo pipefail
+          have_vendor() { [ -d vendor/port/cocos2d-x ] && [ -d vendor/build/arch_androida64 ]; }
+          # shallowest match wins, so a nested directory with the same name is never picked
+          shallowest() { find "$1" -type d -name "$2" | awk '{ n = gsub("/", "/"); print n, $0 }' | sort -n | head -n 1 | cut -d' ' -f2-; }
+
+          if have_vendor; then
+            echo "vendor/ already present (checkout or cache)"
+          elif [ -n "$VENDOR_URL" ]; then
+            curl -fL --retry 3 "$VENDOR_URL" -o "$RUNNER_TEMP/vendor.pkg"
+            case "$VENDOR_URL" in
+              *.zip) unzip -q "$RUNNER_TEMP/vendor.pkg" ;;
+              *)     tar -xf "$RUNNER_TEMP/vendor.pkg" ;;
+            esac
+          else
+            tmp="$RUNNER_TEMP/deps"; mkdir -p "$tmp"
+            for n in thirdparty_build thirdparty_port; do
+              curl -fL --retry 3 "$DEPS_BASE_URL/$n.tar.gz" | tar -xz -C "$tmp"
+            done
+            port="$(shallowest "$tmp" cocos2d-x)"
+            build="$(shallowest "$tmp" arch_androida64)"
+            [ -n "$port" ] && [ -n "$build" ] || { echo "::error::Unexpected layout in the prebuilt dependency archives"; find "$tmp" -maxdepth 3; exit 1; }
+            mkdir -p vendor
+            mv "$(dirname "$port")"  vendor/port
+            mv "$(dirname "$build")" vendor/build
+          fi
+
+          have_vendor || { echo "::error::vendor/port/cocos2d-x or vendor/build/arch_androida64 not found after preparing vendor/. Set the VENDOR_URL repository variable to an archive that has vendor/port and vendor/build at its root."; exit 1; }
+          for f in libSDL2.a libavcodec.a libopus.a libonig.a libcpp_android_spec.a; do
+            test -f "vendor/build/arch_androida64/lib/$f" || { echo "::error::vendor/build/arch_androida64/lib/$f is missing"; exit 1; }
+          done
+          test -d vendor/port/cocos2d-x/cocos/platform/android/libcocos2dx || { echo "::error::cocos2d-x java module (libcocos2dx) is missing in vendor/port"; exit 1; }
+
+      # The APK needs the stock UI assets (cocos studio files, fonts, ...). They are taken from the
+      # Kirikiroid2-Yuri 1.3.9 APK, then project/ui/Resources (patched locale files with the new
+      # "Texture Resolution" strings) is laid over them.
+      - name: Prepare assets
+        run: |
+          set -euo pipefail
+          curl -fL --retry 3 "$APK_ASSETS_URL" -o "$RUNNER_TEMP/base.apk"
+          unzip -q "$RUNNER_TEMP/base.apk" 'assets/*' -d .
+          cp -rf project/ui/Resources/. assets/
+          grep -q preference_ogl_tex_scale assets/res/locale/en_us.xml || { echo "::error::texture scale strings missing from assets/res/locale/en_us.xml"; exit 1; }
+
+      - name: Check signing files
+        run: |
+          test -f keystore/keystore.properties
+          test -f "keystore/$(sed -n 's/^storeFile=//p' keystore/keystore.properties | tr -d '\r')"
+
+      # Must run before setup-java: sdkmanager needs the runner's default (newer) JDK,
+      # AGP 7.4.2 / Gradle 7.5 below are run with JDK 11.
+      - name: Install Android SDK components
+        run: |
+          SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKM" --licenses > /dev/null || true
+          "$SDKM" "platforms;$PLATFORM" "build-tools;$BUILD_TOOLS" "ndk;$NDK_VERSION" "cmake;$CMAKE_VERSION"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '11'
+          cache: gradle
+
+      - name: Build signed release APK
+        working-directory: project/android
+        run: |
+          printf 'sdk.dir=%s\n' "$ANDROID_HOME" > local.properties
+          chmod +x gradlew
+          ./gradlew --no-daemon --stacktrace assembleRelease
+
+      - name: Verify APK signature
+        id: apk
+        run: |
+          SRC=$(find "$GITHUB_WORKSPACE/build_android" "$GITHUB_WORKSPACE/../build_android" -path '*outputs/apk/release/*.apk' 2>/dev/null | head -n 1)
+          test -n "$SRC" || { echo "::error::No release APK produced"; exit 1; }
+          APK="Kirikiroid2Yuri-${TAG}.apk"
+          cp "$SRC" "$APK"
+          "$ANDROID_HOME/build-tools/$BUILD_TOOLS/apksigner" verify --verbose --print-certs "$APK"
+          echo "path=$APK" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.apk.outputs.path }}
+          path: ${{ steps.apk.outputs.path }}
+
+      - name: Publish GitHub Release
+        env:
+          APK: ${{ steps.apk.outputs.path }}
+        run: |
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" "$APK" --clobber
+          else
+            gh release create "$TAG" "$APK" --target "$GITHUB_SHA" --title "$TAG" --generate-notes
+          fi
