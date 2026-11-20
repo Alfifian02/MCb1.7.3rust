@@ -1291,6 +1291,76 @@ void TVPInitializeStartupScript()
 //---------------------------------------------------------------------------
 // tTJSNC_Scripts
 //---------------------------------------------------------------------------
+#include <vector>
+//----------------------------------------------------------------------
+// Scripts.getObjectKeys / getObjectCount / foreach  (meniru plugin scriptsEx)
+namespace {
+class tScriptsExKeyCollector : public tTJSDispatch
+{
+	iTJSDispatch2 *Array;
+	tjs_int Count;
+public:
+	tScriptsExKeyCollector(iTJSDispatch2 *a) : Array(a), Count(0) {}
+	tjs_error TJS_INTF_METHOD FuncCall(tjs_uint32 flag,
+		const tjs_char *membername, tjs_uint32 *hint,
+		tTJSVariant *result, tjs_int numparams,
+		tTJSVariant **param, iTJSDispatch2 *objthis)
+	{
+		if(numparams >= 1)
+		{
+			tTJSVariant name(*param[0]);
+			Array->PropSetByNum(TJS_MEMBERENSURE, Count++, &name, Array);
+		}
+		if(result) *result = (tjs_int)1;
+		return TJS_S_OK;
+	}
+};
+class tScriptsExCounter : public tTJSDispatch
+{
+public:
+	tjs_int Count;
+	tScriptsExCounter() : Count(0) {}
+	tjs_error TJS_INTF_METHOD FuncCall(tjs_uint32 flag,
+		const tjs_char *membername, tjs_uint32 *hint,
+		tTJSVariant *result, tjs_int numparams,
+		tTJSVariant **param, iTJSDispatch2 *objthis)
+	{
+		Count++;
+		if(result) *result = (tjs_int)1;
+		return TJS_S_OK;
+	}
+};
+// func(name, value, extra...) dipanggil untuk tiap member
+class tScriptsExForeach : public tTJSDispatch
+{
+	tTJSVariantClosure Func;
+	tjs_int ExtraNum;
+	tTJSVariant **Extra;
+public:
+	tScriptsExForeach(tTJSVariantClosure f, tjs_int n, tTJSVariant **e)
+		: Func(f), ExtraNum(n), Extra(e) {}
+	tjs_error TJS_INTF_METHOD FuncCall(tjs_uint32 flag,
+		const tjs_char *membername, tjs_uint32 *hint,
+		tTJSVariant *result, tjs_int numparams,
+		tTJSVariant **param, iTJSDispatch2 *objthis)
+	{
+		if(numparams >= 3)
+		{
+			std::vector<tTJSVariant> store(2 + ExtraNum);
+			std::vector<tTJSVariant*> args(2 + ExtraNum);
+			store[0] = *param[0]; // nama
+			store[1] = *param[2]; // nilai
+			for(tjs_int i = 0; i < ExtraNum; i++) store[2 + i] = *Extra[i];
+			for(tjs_int i = 0; i < 2 + ExtraNum; i++) args[i] = &store[i];
+			tTJSVariant res;
+			Func.FuncCall(0, NULL, NULL, &res, 2 + ExtraNum, &args[0], NULL);
+		}
+		if(result) *result = (tjs_int)1; // selalu lanjut
+		return TJS_S_OK;
+	}
+};
+}
+
 tjs_uint32 tTJSNC_Scripts::ClassID = -1;
 tTJSNC_Scripts::tTJSNC_Scripts() : inherited(TJS_W("Scripts"))
 {
@@ -1520,48 +1590,50 @@ TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/getObjectKeys)
 {
 	if(numparams < 1) return TJS_E_BADPARAMCOUNT;
 	if(param[0]->Type() != tvtObject) return TJS_E_INVALIDPARAM;
-
 	iTJSDispatch2 *dsp = param[0]->AsObjectNoAddRef();
 	if(!dsp) return TJS_E_INVALIDPARAM;
-
 	iTJSDispatch2 *array = TJSCreateArrayObject();
 	try
 	{
-		class tKeyCollector : public tTJSDispatch
-		{
-			iTJSDispatch2 *Array;
-			tjs_int Count;
-		public:
-			tKeyCollector(iTJSDispatch2 *a) : Array(a), Count(0) {}
-			tjs_error TJS_INTF_METHOD FuncCall(tjs_uint32 flag,
-				const tjs_char *membername, tjs_uint32 *hint,
-				tTJSVariant *result, tjs_int numparams,
-				tTJSVariant **param, iTJSDispatch2 *objthis)
-			{
-				if(numparams >= 1)
-				{
-					tTJSVariant name(*param[0]);
-					Array->PropSetByNum(TJS_MEMBERENSURE, Count++, &name, Array);
-				}
-				if(result) *result = (tjs_int)1; // lanjut enumerasi
-				return TJS_S_OK;
-			}
-		} collector(array);
-
+		tScriptsExKeyCollector collector(array);
 		tTJSVariantClosure clo(&collector, NULL);
 		dsp->EnumMembers(TJS_IGNOREPROP, &clo, dsp);
-
 		if(result) *result = tTJSVariant(array, array);
 	}
-	catch(...)
-	{
-		array->Release();
-		throw;
-	}
+	catch(...) { array->Release(); throw; }
 	array->Release();
 	return TJS_S_OK;
 }
 TJS_END_NATIVE_STATIC_METHOD_DECL(/*func. name*/getObjectKeys)
+//----------------------------------------------------------------------
+TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/getObjectCount)
+{
+	if(numparams < 1) return TJS_E_BADPARAMCOUNT;
+	if(param[0]->Type() != tvtObject) return TJS_E_INVALIDPARAM;
+	iTJSDispatch2 *dsp = param[0]->AsObjectNoAddRef();
+	if(!dsp) return TJS_E_INVALIDPARAM;
+	tScriptsExCounter counter;
+	tTJSVariantClosure clo(&counter, NULL);
+	dsp->EnumMembers(TJS_IGNOREPROP, &clo, dsp);
+	if(result) *result = (tjs_int)counter.Count;
+	return TJS_S_OK;
+}
+TJS_END_NATIVE_STATIC_METHOD_DECL(/*func. name*/getObjectCount)
+//----------------------------------------------------------------------
+TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/foreach)
+{
+	if(numparams < 2) return TJS_E_BADPARAMCOUNT;
+	if(param[0]->Type() != tvtObject || param[1]->Type() != tvtObject)
+		return TJS_E_INVALIDPARAM;
+	iTJSDispatch2 *dsp = param[0]->AsObjectNoAddRef();
+	if(!dsp) return TJS_E_INVALIDPARAM;
+	tScriptsExForeach fe(param[1]->AsObjectClosureNoAddRef(), numparams - 2, param + 2);
+	tTJSVariantClosure clo(&fe, NULL);
+	dsp->EnumMembers(TJS_IGNOREPROP, &clo, dsp);
+	if(result) result->Clear();
+	return TJS_S_OK;
+}
+TJS_END_NATIVE_STATIC_METHOD_DECL(/*func. name*/foreach)
 //----------------------------------------------------------------------
 TJS_BEGIN_NATIVE_PROP_DECL(textEncoding)
 {
