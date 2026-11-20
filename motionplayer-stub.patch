@@ -1,0 +1,39 @@
+diff --git a/src/plugins/motionplayer_stub.cpp b/src/plugins/motionplayer_stub.cpp
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/src/plugins/motionplayer_stub.cpp
+@@ -0,0 +1,33 @@
++// motionplayer_stub.cpp
++// STUB for the closed-source "motionplayer.dll" (E-mote / PSB motion engine).
++// It only registers the global `Motion` object with empty `Motion.Player` and
++// `Motion.D3DAdaptor` classes, so scripts that do
++//     Plugins.link("motionplayer.dll");  ... Motion.Player / Motion.D3DAdaptor
++// no longer die with: Member "Motion" does not exist.
++// It does NOT render any E-mote/PSB animation.
++#include "ncbind/ncbind.hpp"
++
++#define NCB_MODULE_NAME TJS_W("motionplayer.dll")
++
++struct MotionPlayerStub {
++	MotionPlayerStub() {}
++};
++
++struct MotionD3DAdaptorStub {
++	MotionD3DAdaptorStub() {}
++};
++
++struct MotionStub {};
++
++NCB_REGISTER_SUBCLASS(MotionPlayerStub) {
++	NCB_CONSTRUCTOR(());
++}
++
++NCB_REGISTER_SUBCLASS(MotionD3DAdaptorStub) {
++	NCB_CONSTRUCTOR(());
++}
++
++NCB_REGISTER_CLASS_DIFFER(Motion, MotionStub) {
++	NCB_SUBCLASS(Player, MotionPlayerStub);
++	NCB_SUBCLASS(D3DAdaptor, MotionD3DAdaptorStub);
++}

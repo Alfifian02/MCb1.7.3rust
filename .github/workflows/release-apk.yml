@@ -15,6 +15,15 @@ on:
         type: choice
         options: [release, debug]
         default: release
+      native_safe_flags:
+        description: 'Build our native code with -fno-strict-aliasing -fwrapv -fno-delete-null-pointer-checks (guards against optimiser-sensitive undefined behaviour)'
+        type: boolean
+        default: true
+      native_opt:
+        description: 'Optimisation level of the native release build (default = toolchain default, -O3). Lower it step by step if games only start in the debug variant'
+        type: choice
+        options: [default, O2, O1, O0]
+        default: default
       texture_patch:
         description: 'Keep the texture resolution patch (off = plain Kirikiroid2-Yuri source, to compare behaviour)'
         type: boolean
@@ -42,6 +51,8 @@ jobs:
     env:
       TAG: ${{ inputs.tag || github.ref_name }}
       VARIANT: ${{ inputs.variant || 'release' }}
+      KRKR2_OPT_LEVEL: ${{ (inputs.native_opt && inputs.native_opt != 'default') && inputs.native_opt || '' }}
+      KRKR2_EXTRA_CXX_FLAGS: ${{ (github.event_name != 'workflow_dispatch' || inputs.native_safe_flags) && '-fno-strict-aliasing -fwrapv -fno-delete-null-pointer-checks' || '' }}
       TEXPATCH: ${{ (github.event_name == 'workflow_dispatch' && !inputs.texture_patch) && 'false' || 'true' }}
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
@@ -153,6 +164,7 @@ jobs:
           SRC=$(find "$GITHUB_WORKSPACE/build_android" "$GITHUB_WORKSPACE/../build_android" -path "*outputs/apk/$VARIANT/*.apk" 2>/dev/null | head -n 1)
           test -n "$SRC" || { echo "::error::No $VARIANT APK produced"; exit 1; }
           SUFFIX=""; [ "$VARIANT" = release ] || SUFFIX="-$VARIANT"; [ "$TEXPATCH" = false ] && SUFFIX="$SUFFIX-notex"
+          [ -n "$KRKR2_OPT_LEVEL" ] && SUFFIX="$SUFFIX-$KRKR2_OPT_LEVEL"; [ -z "$KRKR2_EXTRA_CXX_FLAGS" ] && SUFFIX="$SUFFIX-noflags"
           APK="Kirikiroid2Yuri-${TAG}${SUFFIX}.apk"
           cp "$SRC" "$APK"
           "$ANDROID_HOME/build-tools/$BUILD_TOOLS/apksigner" verify --verbose --print-certs "$APK"

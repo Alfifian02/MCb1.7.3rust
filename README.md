@@ -146,3 +146,7 @@ Run the workflow by hand (Actions > Release APK > Run workflow) and compare:
 
 Release builds have R8 shrinking turned off on purpose: upstream only ever tested unminified builds, and the
 native code looks Java classes up by name through JNI.
+
+- `native_safe_flags` (default on) and `native_opt` (default / O2 / O1 / O0) tune how our own native code is compiled.
+  If games start in the debug variant but not in release, lower `native_opt` step by step (O2, then O1).
+- `patch.tjs` errors such as `Member "Motion" does not exist` come from the game folder, not from this build.
