@@ -483,7 +483,7 @@ public:
 		*/
 
 		_ensureCapacity();
-		int currentIndex = (int)UnusedIndexStack.back(); // ## fix error: cannot initialize a variable of type 'int'
+		int currentIndex = UnusedIndexStack.back(); UnusedIndexStack.pop_back(); // std::vector::pop_back() returns void
 		_tVectorList_Node &Node = PointerBuffPtr[currentIndex];
 		_tVectorList_Node &PrevNode = PointerBuffPtr[IteratorNode.prevIndex];
 		Node.Data = _Val;
@@ -513,7 +513,7 @@ public:
 		*/
 
 		_ensureCapacity();
-		int currentIndex = (int)UnusedIndexStack.pop_back();
+		int currentIndex = UnusedIndexStack.back(); UnusedIndexStack.pop_back(); // std::vector::pop_back() returns void
 		_tVectorList_Node &Node = PointerBuffPtr[currentIndex];
 		_tVectorList_Node &NextNode = PointerBuffPtr[IteratorNode.nextIndex];
 		Node.Data = _Val;

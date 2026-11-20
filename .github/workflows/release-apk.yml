@@ -10,6 +10,15 @@ on:
       tag:
         description: 'Release tag to create or update (e.g. v1.4.0-tex1)'
         required: true
+      variant:
+        description: 'APK variant (debug = unminified, native code built without optimisation: slow, for diagnosis)'
+        type: choice
+        options: [release, debug]
+        default: release
+      texture_patch:
+        description: 'Keep the texture resolution patch (off = plain Kirikiroid2-Yuri source, to compare behaviour)'
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -32,6 +41,8 @@ jobs:
     timeout-minutes: 120
     env:
       TAG: ${{ inputs.tag || github.ref_name }}
+      VARIANT: ${{ inputs.variant || 'release' }}
+      TEXPATCH: ${{ (github.event_name == 'workflow_dispatch' && !inputs.texture_patch) && 'false' || 'true' }}
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
     steps:
@@ -42,6 +53,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+
+      # patches/texture-resolution-scale.patch is already applied in the tree; reverse it for a baseline build.
+      - name: Remove texture patch (baseline build)
+        if: env.TEXPATCH == 'false'
+        run: git apply -R patches/texture-resolution-scale.patch
 
       # vendor/ holds every native dependency, in the layout the CMake project expects:
       #   vendor/port/                 sources (cocos2d-x incl. its Android java/gradle module, ...)
@@ -102,7 +118,7 @@ jobs:
           curl -fL --retry 3 "$APK_ASSETS_URL" -o "$RUNNER_TEMP/base.apk"
           unzip -q "$RUNNER_TEMP/base.apk" 'assets/*' -d .
           cp -rf project/ui/Resources/. assets/
-          grep -q preference_ogl_tex_scale assets/res/locale/en_us.xml || { echo "::error::texture scale strings missing from assets/res/locale/en_us.xml"; exit 1; }
+          [ "$TEXPATCH" = false ] || grep -q preference_ogl_tex_scale assets/res/locale/en_us.xml || { echo "::error::texture scale strings missing from assets/res/locale/en_us.xml"; exit 1; }
 
       - name: Check signing files
         run: |
@@ -123,19 +139,21 @@ jobs:
           java-version: '11'
           cache: gradle
 
-      - name: Build signed release APK
+      - name: Build signed APK
         working-directory: project/android
         run: |
           printf 'sdk.dir=%s\n' "$ANDROID_HOME" > local.properties
           chmod +x gradlew
-          ./gradlew --no-daemon --stacktrace assembleRelease
+          if [ "$VARIANT" = debug ]; then TASK=assembleDebug; else TASK=assembleRelease; fi
+          ./gradlew --no-daemon --stacktrace "$TASK"
 
       - name: Verify APK signature
         id: apk
         run: |
-          SRC=$(find "$GITHUB_WORKSPACE/build_android" "$GITHUB_WORKSPACE/../build_android" -path '*outputs/apk/release/*.apk' 2>/dev/null | head -n 1)
-          test -n "$SRC" || { echo "::error::No release APK produced"; exit 1; }
-          APK="Kirikiroid2Yuri-${TAG}.apk"
+          SRC=$(find "$GITHUB_WORKSPACE/build_android" "$GITHUB_WORKSPACE/../build_android" -path "*outputs/apk/$VARIANT/*.apk" 2>/dev/null | head -n 1)
+          test -n "$SRC" || { echo "::error::No $VARIANT APK produced"; exit 1; }
+          SUFFIX=""; [ "$VARIANT" = release ] || SUFFIX="-$VARIANT"; [ "$TEXPATCH" = false ] && SUFFIX="$SUFFIX-notex"
+          APK="Kirikiroid2Yuri-${TAG}${SUFFIX}.apk"
           cp "$SRC" "$APK"
           "$ANDROID_HOME/build-tools/$BUILD_TOOLS/apksigner" verify --verbose --print-certs "$APK"
           echo "path=$APK" >> "$GITHUB_OUTPUT"

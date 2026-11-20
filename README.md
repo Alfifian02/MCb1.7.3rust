@@ -136,3 +136,13 @@ Dependencies live in `vendor/` (not committed):
 variable (a `.tar.gz`/`.zip` with `vendor/port` and `vendor/build` at its root), or from the prebuilt
 `deps` release of Kirikiroid2Yuri. Push a tag `v*` (or run it manually) to build, sign with `keystore/` and
 publish `Kirikiroid2Yuri-<tag>.apk`. The local scripts (`script/cross_androida64.sh`) use the same `vendor/` paths.
+
+### Troubleshooting a build that does not start games
+
+Run the workflow by hand (Actions > Release APK > Run workflow) and compare:
+
+- `variant = debug` - unminified; native code is built without optimisation, so it is slow. Diagnosis only.
+- `texture_patch = off` - reverses `patches/texture-resolution-scale.patch`, giving the plain Yuri source.
+
+Release builds have R8 shrinking turned off on purpose: upstream only ever tested unminified builds, and the
+native code looks Java classes up by name through JNI.
