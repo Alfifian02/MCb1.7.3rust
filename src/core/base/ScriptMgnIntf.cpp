@@ -1515,6 +1515,54 @@ TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/getClassNames) /* UNDOCUMENTED: subje
 }
 TJS_END_NATIVE_STATIC_METHOD_DECL(/*func. name*/getClassNames) /* UNDOCUMENTED: subject to change */
 //----------------------------------------------------------------------
+//----------------------------------------------------------------------
+TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/getObjectKeys)
+{
+	if(numparams < 1) return TJS_E_BADPARAMCOUNT;
+	if(param[0]->Type() != tvtObject) return TJS_E_INVALIDPARAM;
+
+	iTJSDispatch2 *dsp = param[0]->AsObjectNoAddRef();
+	if(!dsp) return TJS_E_INVALIDPARAM;
+
+	iTJSDispatch2 *array = TJSCreateArrayObject();
+	try
+	{
+		class tKeyCollector : public tTJSDispatch
+		{
+			iTJSDispatch2 *Array;
+			tjs_int Count;
+		public:
+			tKeyCollector(iTJSDispatch2 *a) : Array(a), Count(0) {}
+			tjs_error TJS_INTF_METHOD FuncCall(tjs_uint32 flag,
+				const tjs_char *membername, tjs_uint32 *hint,
+				tTJSVariant *result, tjs_int numparams,
+				tTJSVariant **param, iTJSDispatch2 *objthis)
+			{
+				if(numparams >= 1)
+				{
+					tTJSVariant name(*param[0]);
+					Array->PropSetByNum(TJS_MEMBERENSURE, Count++, &name, Array);
+				}
+				if(result) *result = (tjs_int)1; // lanjut enumerasi
+				return TJS_S_OK;
+			}
+		} collector(array);
+
+		tTJSVariantClosure clo(&collector, NULL);
+		dsp->EnumMembers(TJS_IGNOREPROP, &clo, dsp);
+
+		if(result) *result = tTJSVariant(array, array);
+	}
+	catch(...)
+	{
+		array->Release();
+		throw;
+	}
+	array->Release();
+	return TJS_S_OK;
+}
+TJS_END_NATIVE_STATIC_METHOD_DECL(/*func. name*/getObjectKeys)
+//----------------------------------------------------------------------
 TJS_BEGIN_NATIVE_PROP_DECL(textEncoding)
 {
 	TJS_BEGIN_NATIVE_PROP_GETTER
