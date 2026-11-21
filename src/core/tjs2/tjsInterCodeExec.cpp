@@ -2146,6 +2146,14 @@ void tTJSInterCodeContext::TypeOfMemberIndirect(tTJSVariant *ra,
 			throw;
 		}
 
+		if(!str)
+		{
+			// typeof obj[void] : tidak ada nama member -> "undefined"
+			TJS_GET_VM_REG(ra, code[1]) = TJS_W("undefined");
+			clo.Release();
+			return;
+		}
+
 		try
 		{
 			// TODO: verify here needs hint holding
