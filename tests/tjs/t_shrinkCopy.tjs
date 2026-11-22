@@ -1,0 +1,61 @@
+// t_shrinkCopy.tjs - shrinkCopy.dll : Layer.shrinkCopy(dx, dy, dw, dh, src, sx, sy, sw, sh)
+// Spesifikasi: docs/spec/layerExShrink_shrinkCopy.md. Jalur CPU memvalidasi argumen; jalur GPU tidak (RENDERER di startup.tjs).
+function run_shrinkCopy()
+{
+	tlog("== shrinkCopy (RENDERER=" + RENDERER + ")");
+	var CPU = (RENDERER == "software");
+	Plugins.link("shrinkCopy.dll");
+	check("shrinkCopy terdaftar", hasMember(Layer, "shrinkCopy"));
+
+	var types = [ [ "alpha", Layer.ltAlpha, true ], [ "opaque", Layer.ltOpaque, false ] ];
+	for (var ti = 0; ti < types.count; ti++) {
+		var tn = types[ti][0], tt = types[ti][1], ta = types[ti][2];
+		var src = mk(16, 16, tt, 1, ta);
+		var cases = [
+			// nama,           dx,   dy,   dw,   dh,   sx, sy, sw, sh
+			[ "2to1",           0,    0,    8,    8,    0,  0,  16, 16 ],
+			[ "1to1",           0,    0,    16,   16,   0,  0,  16, 16 ],
+			[ "pecahan",        1.5,  2.25, 6.5,  5.5,  0,  0,  16, 16 ],
+			[ "sub_rect",       2,    2,    4,    4,    4,  4,  8,  8  ],
+			[ "src_keluar",     0,    0,    8,    8,    -4, -4, 16, 16 ],
+			[ "dest_keluar",    12,   12,   8,    8,    0,  0,  16, 16 ],
+			[ "dest_luar_total",20,   20,   8,    8,    0,  0,  16, 16 ]
+		];
+		for (var i = 0; i < cases.count; i++) {
+			var c = cases[i];
+			var d = mk(16, 16, tt, 2, ta);
+			var r = attempt(function() { d.shrinkCopy(c[1], c[2], c[3], c[4], src, c[5], c[6], c[7], c[8]); });
+			obs("shrinkCopy." + tn + "." + c[0], r + " hash=" + hashLayer(d));
+		}
+		// Kasus yang di jalur CPU harus melempar (TJS_E_INVALIDPARAM); di GPU tanpa validasi -> hanya pengamatan.
+		var bad = [
+			[ "sw_nol",   0, 0, 8,  8,  0, 0, 0,  16 ],
+			[ "sh_nol",   0, 0, 8,  8,  0, 0, 16, 0  ],
+			[ "dw_nol",   0, 0, 0,  8,  0, 0, 16, 16 ],
+			[ "dh_nol",   0, 0, 8,  0,  0, 0, 16, 16 ],
+			[ "perbesar", 0, 0, 32, 32, 0, 0, 16, 16 ]
+		];
+		for (var j = 0; j < bad.count; j++) {
+			var b = bad[j];
+			var d2 = mk(16, 16, tt, 2, ta), before = hashLayer(d2);
+			var r2 = attempt(function() { d2.shrinkCopy(b[1], b[2], b[3], b[4], src, b[5], b[6], b[7], b[8]); });
+			obs("shrinkCopy." + tn + "." + b[0], r2 + " hash_berubah=" + (hashLayer(d2) != before));
+			if (CPU) check("shrinkCopy CPU " + b[0] + " melempar (" + tn + ")", r2 != "ok");
+		}
+		// Warna & alfa rata tetap rata di bagian dalam (diuji di inti-host; di sini end-to-end, hanya CPU).
+		if (CPU) {
+			var flat = mk(16, 16, tt, 0, ta); fillFlat(flat, 0xC0336699);
+			var df = mk(8, 8, tt, 0, ta);
+			df.shrinkCopy(0, 0, 8, 8, flat, 0, 0, 16, 16);
+			var px = df.getMainPixel(3, 3);
+			obs("shrinkCopy." + tn + ".flat_tengah", hex8(px));
+			check("shrinkCopy piksel tengah warna rata tetap (" + tn + ")", (px & 0xFFFFFF) == 0x336699);
+		}
+	}
+	// argumen kurang -> TJS_E_BADPARAMCOUNT
+	var q = mk(16, 16, Layer.ltAlpha, 1, true), s = mk(16, 16, Layer.ltAlpha, 2, true);
+	obs("shrinkCopy.argumen_kurang", attempt(function() { q.shrinkCopy(0, 0, 8, 8, s, 0, 0, 16); }));
+	// src null: di APK 1.3.9 crash; fork melempar. Hanya bila RUN_UNSAFE_CASES.
+	if (RUN_UNSAFE_CASES) obs("shrinkCopy.src_null", attempt(function() { q.shrinkCopy(0, 0, 8, 8, null, 0, 0, 16, 16); }));
+	dropAll();
+}

@@ -11,11 +11,21 @@ Roadmap :
   - [ ] replace rendering from cocos to SDL2
   - [ ] command line or config files for setting
   - [ ] recent cx game (hash filename) decryption support
-- plugin
+- plugin  (status per plugin: [docs/plugins.md](docs/plugins.md); plan: [docs/rencana_decomp_recomp.md](docs/rencana_decomp_recomp.md))
   - [ ] [windowEx](https://github.com/wamsoft/windowEx)
-  - [ ] [layerEx](https://github.com/wamsoft/layerEx)
+  - [ ] [layerEx](https://github.com/wamsoft/layerEx) — the public repo only has `LayerExBase`, so the rest is **reconstructed from the 1.3.9 binary** (`[x]` = written, not yet built with the NDK or tested on a device)
+    - [x] `layerExAreaAverage` (`stretchCopyAA`, a TJS alias)
+    - [x] `layerExRaster` (`copyRaster`)
+    - [x] `shrinkCopy.dll`: `shrinkCopy`; `shrinkCopyFast` (CPU path complete, read from the binary; the GPU path knowingly deviates from the binary)
+    - [x] `layerExBTOA` (6 methods: `copyRightBlueToLeftAlpha`, `copyBottomBlueToTopAlpha`, `fillAlpha`, `copyAlphaToProvince`, `clipAlphaRect`, `fillByProvince`; CPU paths checked against an emulation of the original code, GPU paths untested)
+    - [x] `layerExImage` (`light`, `colorize`, `modulate`, `noise`, `generateWhiteNoise`, `gaussianBlur` — CPU path matches the original function in an emulator; GPU path untested)
+    - [~] `layerExShimmer` (2 methods written; the interior of `shimmer` and the 4th argument of `shimmerBuildMap` are still assumptions until the helper functions are read; host unit tests only)
+    - [~] `layerExAlpha`: **28 of the 31 registered names written** in one class (`turnAlpha … MaskImageEffectRect`; host unit tests + instruction emulation for part of them, not yet NDK/device). Missing: `AlphaBlend`, `WhiteToBlueBlurAdd`, `ExMaskRect2`
+    - [ ] `layerExSave` (14) — implementation address map is ready (`script/layerex_impl_map.tsv`)
   - [ ] [layerExDraw](https://github.com/wamsoft/layerExDraw) (gdiPlus)
   - [ ] [scriptsEx](https://github.com/wamsoft/scriptsEx)
+  - work is split into sessions: [docs/sesi_kerja.md](docs/sesi_kerja.md)
+  - [ ] verify the new plugins: NDK build (arm64-v8a, armeabi-v7a), small TJS scripts, differential test against the 1.3.9 APK
 - platform
   - android
     - [x] SDK level above 21 (android 5.1, Lolipop)

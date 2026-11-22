@@ -1,0 +1,361 @@
+# Rencana Decomp → Recomp (v2, berbasis langkah & status)
+
+Proyek: `libgame.so` Kirikiroid2 1.3.9 (arm64) → fork Kirikiroid2 1.4.0 beta milik Anda.
+Fokus saat ini: kelompok plugin **layerEx**.
+
+**Pembagian ke sesi kerja terpisah (S1–S19), inventaris yang belum/sebagian, dan prompt pembuka: [`sesi_kerja.md`](sesi_kerja.md).**
+
+**Legenda**
+- `[x]` selesai · `[ ]` belum
+- ⚠️ penting / perlu perhatian · ❌ ada kesalahan (diikuti ✔️ bila sudah diperbaiki)
+- Nomor langkah (mis. `4.3`) bisa dipakai untuk merujuk di percakapan.
+
+## Ringkasan progres
+
+| Tahap | Status |
+|---|---|
+| 1. Persiapan lingkungan | sebagian |
+| 2. Inventaris & pemetaan | **selesai** |
+| 3. Integrasi source publik | selesai (3.5 **sudah dijalankan**); 3.6 belum |
+| 4. Dekompilasi | **sedang berjalan** (4.6, 4.6b, 4.7 selesai (S1); 4.9a peta implementasi (**pemetaan Alpha dikoreksi S7, diverifikasi ulang langsung dari biner saat penggabungan**); 4.9c BTOA (S3) dan 4.9d Image (S4) selesai; 4.9e Shimmer **sebagian** (S5); **4.9f Alpha 28 dari 31 nama** (S6–S10); sisa: `AlphaBlend`, `WhiteToBlueBlurAdd`, `ExMaskRect2`, 4.9e-2, 4.9g Save) |
+| 5. Reimplementasi | **sebagian** (5.1–5.5 ditulis; **5.6 Alpha 28/31 nama dalam satu kelas**; 5.7 Shimmer sebagian; semuanya lolos cek sintaks terhadap header fork dan uji inti host ASan/UBSan **pada pohon gabungan**; BTOA/Image/Alpha-1/Alpha-3 juga terhadap emulasi instruksi biner; belum build NDK/perangkat) |
+| 6. Build & pendaftaran | **sebagian** (S2: 6.1, 6.2, 6.4 diverifikasi dari source + objek-host; 6.4 diperluas saat penggabungan ke 9 objek layerEx; **6.3 menunggu build Anda**) |
+| 7. Verifikasi | **sebagian** (7.1 dijalankan setelah penggabungan dengan skrip yang diperketat: **46 OK / 20 KOSONG dari 66 nama**; 7.2 skrip ditulis di `tests/tjs/` termasuk `t_alpha4` dan `t_registrasi` yang diperbarui, **belum dijalankan**) |
+| 8. Dokumentasi & pemeliharaan | **sebagian** (8.1 dan 8.2 dikerjakan; sisanya belum) |
+
+---
+
+## Tahap 1 — Persiapan lingkungan
+
+- [x] **1.1** Ekstrak `lib/arm64-v8a/libgame.so` (27,9 MB; ELF64 AArch64, stripped, clang 3.8/NDK r12–r13).
+- [x] **1.2** Buat `k2tool.sh` (extract, syms, find, dis, r2, strings) untuk Termux.
+- [x] **1.3** `objdump` native Termux terbukti bisa membaca AArch64: `k2recon.sh` berjalan di HP Anda dan menghasilkan disassembly.
+  - ⚠️ Jalur yang dipakai sekarang adalah **`objdump`, bukan radare2**. `r2` di `k2tool.sh` belum pernah dijalankan.
+- [ ] **1.4** Pasang Ghidra di PC dan import `libgame.so` arm64 (AARCH64:LE:64:v8A, base `0`).
+  - Opsional untuk fungsi kecil, tapi **sangat disarankan** untuk fungsi besar (loop piksel, NEON) karena pseudo-C jauh lebih mudah dibaca daripada asm.
+- [ ] **1.5** Import `lib/armeabi-v7a/libgame.so` sebagai pembanding silang.
+- [ ] **1.6** Pastikan baseline build fork (tanpa perubahan) lolos.
+  - ✔️ Temuan S2: ada jalur build tanpa PC/Termux — `.github/workflows/release-apk.yml` (`workflow_dispatch`; NDK `25.2.9519653`, CMake `3.22.1`, arm64-v8a). Butuh `vendor/` (cache, atau variabel repo `VENDOR_URL`). **`Repo.zip` tidak berisi `vendor/`** → Claude tidak bisa membangun di sandbox.
+  - ⚠️ Repo Anda ada di `/storage/emulated/0/...` (penyimpanan bersama). Itu memicu error git `dubious ownership` dan umumnya tidak mendukung symlink/izin exec. Untuk build sungguhan, pertimbangkan memindahkan repo ke `$HOME` Termux atau membangun di PC.
+
+---
+
+## Tahap 2 — Inventaris & pemetaan  ✅ selesai
+
+- [x] **2.1** Dump 26.429 simbol ekspor ter-demangle → `libgame_arm64_symbols_demangled.txt`.
+- [x] **2.2** Daftar per subsistem + alamat: `jni`, `tvp_core`, `archive_storage`, `layer_blend`.
+- [x] **2.3** Diff simbol vs source fork: dari 18.559 simbol non-library, **hanya 2 simbol inti Kirikiri yang belum ada** di fork → inti sudah tercakup.
+- [x] **2.4** Diff plugin: binary menyimpan **50** nama plugin, fork mendaftarkan **14** → **36 plugin belum ada** (daftar ada di bagian "Backlog").
+- [x] **2.5** Ekstrak 61 nama method layerEx dari string UTF-16 → `layerex_expected_methods.txt`.
+  - ❌ Daftar ternyata **kurang dua nama**: `shrinkCopyFast` (ditemukan di 4.6b) dan **`light`** (method keenam `layerExImage`, ditemukan oleh 4.9a). ✔️ Keduanya sudah ditambahkan → **63 nama**.
+- [x] **2.6** Peta nama method → alamat fungsi (`layerex_binary_map.txt`, via ADRP+ADD + `.eh_frame`).
+  - ⚠️ Alamat di peta adalah **fungsi registrasi** (thunk `ncbind`), **bukan isi method**. Pasangan 28 B + 104 B per method adalah registrasi/unregistrasi.
+  - ⚠️ Peta bersifat heuristik; verifikasi sebagian alamat di Ghidra.
+  - ⚠️ Peta ini **tidak lengkap** (mis. tidak memuat `0x601704`). Untuk alamat **implementasi** pakai `script/layerex_impl_map.tsv` (4.9a).
+- [x] **2.7** Temuan: `stretchCopyAA` hanyalah **alias TJS** (`Layer.stretchCopyAA = Layer.stretchCopy;`). Tidak perlu disassembly.
+
+---
+
+## Tahap 3 — Integrasi source publik
+
+- [x] **3.1** Terapkan `patch/plugins_cmake_ext.patch` (`git apply` lolos tanpa error).
+- [x] **3.2** Jalankan `fetch_plugins.sh layerEx`.
+  - ❌ Error `dubious ownership` (git menolak repo di storage bersama) → ✔️ diperbaiki dengan `git -c safe.directory=*` hanya untuk perintah script.
+- [x] **3.3** Jalankan `check_layerex_parity.sh`.
+  - ❌ Error `tee: /tmp/parity.txt: No such file` (Termux tidak punya `/tmp`) → ✔️ diperbaiki dengan `mktemp`.
+  - Hasil: **0 ada, 61 kosong** (sesuai harapan karena tidak ada source).
+- [x] **3.4** Hasil clone: `wamsoft/layerEx` hanya berisi `LayerExBase.cpp`, `LayerExBase.h`, `readme.txt`.
+  - ⚠️ **Asumsi awal "layerEx punya source publik lengkap" ternyata salah.** `layerExAlpha`, `BTOA`, `Image`, `Raster`, `Save`, `Shimmer` **tidak** ada di sana → harus **direkonstruksi dari binary**.
+- [x] **3.5** ⚠️ **Hapus clone** — ✔️ Anda sudah menjalankan `rm -rf src/plugins/ext/layerEx` (dikonfirmasi; `src/plugins/ext/` di `Repo.zip` kosong). Berkas `PINNED.txt` tidak ada di `Repo.zip`, jadi tidak ada yang tersisa.
+  - Jika dibiarkan, `LayerExBase.cpp` terkompilasi **dua kali** (sudah ada di `src/plugins/`) → *duplicate symbol* saat link.
+  - Opsional: `diff -u src/plugins/LayerExBase.cpp src/plugins/ext/layerEx/LayerExBase.cpp` untuk melihat apakah versinya berbeda.
+- [ ] **3.6** Coba plugin lain yang mungkin punya source publik (`windowEx`, `scriptsEx`, `json`, `sqlite3`, `minizip`, `expat`) dan periksa lisensinya.
+  - ⚠️ Cek hasil `fetch_plugins.sh` dulu (jumlah file `.cpp`) sebelum berasumsi.
+
+---
+
+## Tahap 4 — Dekompilasi (sedang berjalan)
+
+- [x] **4.1** Buat `k2recon.sh` (disassembly satu method + callee, hanya butuh `objdump`).
+- [x] **4.2** Jalankan untuk `copyRaster` dan `shrinkCopy` (depth 2).
+  - ❌ Hasil hanya **kode registrasi** (`0x5e6ac4`, `0x5ffba0`), bukan isi method. Penyebab: callback disimpan sebagai **pointer fungsi** (`adrp`+`add`), bukan dipanggil via `bl`.
+  - ✔️ `k2recon.sh` diperbarui: mengikuti pointer `adrp`+`add` (`PTR=1`).
+  - ⚠️ Perbaikan `PTR=1` baru diuji dengan `objdump` tiruan; **belum dijalankan** terhadap binary asli.
+- [x] **4.3** Pola registrasi terbaca:
+  - `0x5ba8a0` mengambil objek kelas `Layer` (string UTF-16 `Layer` di `0x14c4956`).
+  - `0x9f3c8c` membuat objek method native; lalu `PropSet` dengan flag `0x200` dan nama method (mis. `shrinkCopy` di `0x14cbe00`).
+  - Implementasi: **`copyRaster` → `0x5e6bb0` (1.900 B)**, **`shrinkCopy` → `0x5ffcf8` (2.468 B)**.
+- [x] **4.4** Kirim hasil recon implementasi: `recon_copyRaster_impl.txt` (3.096 baris, 20 fungsi), `recon_shrinkCopy_impl.txt` (4.780 baris, 33 fungsi).
+  - ⚠️ Depth 2 menarik banyak fungsi **umum runtime** (mis. `0x847380` 3.752 B, `0xa0b958` 2.168 B, `0x9e89a8` 2.304 B) yang bukan bagian plugin. Untuk berikutnya gunakan `bash script/k2recon.sh 0xALAMAT 1` agar lebih ringkas.
+- [x] **4.5** Baca disassembly `copyRaster` (`0x5e6bb0`) → spesifikasi: `docs/spec/layerExRaster_copyRaster.md`.
+  - ⚠️ Fungsi punya **dua jalur** (CPU/GPU, dipilih oleh `IsSoftware()`); shader GLSL `ExRaster` ditemukan utuh di binary.
+  - ⚠️ Arah geser CPU dan GPU di binary asli tampak berlawanan; harus dicek di perangkat (7.3).
+- [x] **4.6** `shrinkCopy` (`0x5ffcf8`, 2.468 B) — **selesai** (`shrinkCopyFast`, 4.6b, juga selesai di S1); spesifikasi: `docs/spec/layerExShrink_shrinkCopy.md`.
+  - [x] Parameter: `shrinkCopy(dx,dy,dw,dh,src,sx,sy,sw,sh)`, ≥ 9 argumen; dua jalur dipilih `IsSoftware()` (`0x848bdc`).
+  - [x] Jalur GPU: tanpa validasi, render method bawaan **`"Copy"`**, rect integer. Jalur CPU: rect tujuan **double**, validasi `sw,sh≥1`, `0<dw≤sw`, `0<dh≤sh` (selain itu `TJS_E_INVALIDPARAM`).
+  - [x] `0x60069c` (clip) dan loop akumulasi `0x600908` terbaca penuh → `layerExShrinkCore.hpp` (`clip`, `accumulate`), uji lolos ASan/UBSan.
+  - ⚠️ Temuan: **tidak ada `Update()`** di kedua jalur (beda dengan `copyRaster` di fork).
+  - ⚠️ Temuan: string **`shrinkCopyFast`** (`0x14cbe16`) berdekatan; **terkonfirmasi method kedua** (4.6b-1).
+  - [x] **4.6a** `0x6011e4` (pembangun tabel) terbaca: skala = sw/dw, `unit` = 256 (untuk shrink), entri interior memakai rumus pecahan awal/akhir; entri pertama & terakhir didelegasikan ke **`0x601454`**. Kode: `unit_for_scale`, `interior_entry` di `layerExShrinkCore.hpp` (diuji).
+  - [x] **4.6c** `0x601454` (entri tepi) terbaca: bobot **warna** memakai posisi mentah (memperpanjang piksel tepi), bobot **alfa**/`off`/`n` memakai posisi terpotong ke sumber. Kode: `edge_entry`, `build_axis`.
+  - [x] **4.6b-1** `shrinkCopyFast` (`0x60185c`, 1.332 B) + worker CPU `0x601d90` (1.628 B) dibaca dari `recon_60185c.txt` → spesifikasi `docs/spec/layerExShrinkFast_shrinkCopyFast.md`.
+    - Tanda tangan `shrinkCopyFast(src, hs [, vs])`, `vs` absen/0 → `hs`. Tujuan di-resize ke `ceil(sw/hs) × ceil(sh/vs)`. Jalur CPU: rata-rata kotak integer; rata-rata vertikal `udiv` memotong, **alfa tujuan = 0xFF**; sisa grup dibagi `rem`.
+    - ⚠️ Temuan: jalur GPU memakai tekstur **`this`** (bukan `src`) sebagai sumber `"Copy"` — kemungkinan bug asli. Fork: tekstur `src` (saklar `SHRINKFAST_GPU_USE_DEST_TEXTURE`). Putuskan di 7.3.
+    - ⚠️ Temuan: tidak ada `Update()`; `src == this` di binary = baca di luar batas → fork menolak (`TJS_E_INVALIDPARAM`).
+  - [x] **4.6b-2** Pengecil baris horizontal **`0x6023ec`** (792 B) — **selesai di S1** dari `recon_6023ec.txt` (203 baris, 1 fungsi, tanpa `LEWATI`).
+    - Hasil: rata-rata kotak per kanal indeks 0,1,2 (B,G,R): `quot = sw/hs` blok penuh dibagi **`hs`**, lalu blok sisa `rem = sw%hs` dibagi **`rem`**; jumlah **32-bit**, `udiv` **memotong**; alfa tujuan **`0xFF`**, alfa sumber **tidak dibaca**; `hs == 1` jalur khusus (salin). Fungsi **daun** (tanpa `bl`/PLT), **skalar murni** (tanpa NEON). Konteks yang dibaca: `+0x10` hs, `+0x18` sw/hs, `+0x1c` sw%hs (mengonfirmasi tata letak konteks lama).
+    - ✔️ **Tebakan lama `hrow_box()` ternyata benar** untuk semua kasus yang diuji; kode ditulis ulang mengikuti struktur binary (`hrow(dst, src, hs, quot, rem)`), bukan sekadar dibiarkan.
+    - Verifikasi: disassembly asli **dieksekusi** di emulator AArch64 mini (`tests/plugins/layerExShrinkFast/emu_hrow_6023ec.py`): 1.605 kasus, 0 beda; tidak ada baca/tulis di luar batas; mutasi (pembulatan, sisa÷`hs`, alfa, `udiv`→`mov`, `add`→`sub`) **semua terdeteksi** sehingga uji ini terbukti bisa gagal.
+    - ⚠️ Batas bukti: eksekusi instruksi vs model, **bukan** uji perangkat; nilai `hs/quot/rem` yang diisi pemanggil `0x60185c` diwarisi dari sesi lalu (tidak dibaca ulang).
+- [x] **4.7** Kamus helper dipetakan ke fork: **`docs/spec/helpers_map.md`** (S1). Padanan dicek langsung ke sumber fork (`LayerIntf.h/.cpp`, `RenderManager.h/.cpp`, `tjsVariant.h`, `layerExBase.hpp`).
+  - Sudah dipetakan (peran dari recon sesi lalu, padanan diverifikasi di S1): `0x806828`/`0x806920` → `GetImageWidth/Height`; `0x806960` → `SetImageSize` (return dini bila ukuran sama); `0xa75340`/`0xa7546c` → `GetMainImagePixelBufferForWrite/Pitch`; `0x848bdc` → `TVPIsSoftwareRenderManager`; `0x848834` → `TVPGetRenderManager`; konversi `tTJSVariant` → `AsInteger()` (real dipotong).
+  - ⚠️ **Temuan:** `layerExBase_GL::reset()` mengisi `_width/_height` dari `GetWidth()/GetHeight()` = ukuran **rect** layer (`LayerIntf.h:388`), sedangkan binary (dan `layerExShrink.cpp`) memakai ukuran **gambar utama** (`GetImageWidth/Height`, `LayerIntf.cpp:2336`). Jangan memakai `_width/_height` itu begitu saja di S3+.
+  - ⚠️ **Temuan:** `GetMainImagePixelBufferForWrite()` di fork menyetel `ImageModified = true`; belum diketahui apakah `0xa75340` di binary melakukannya (cek di S13).
+  - ⚠️ **Temuan:** `libgame_symbol_lists.zip`: **tidak ada** alamat helper/implementasi yang jatuh di dalam simbol ekspor (kode non-ekspor). Label `<std::vector<…>::_M_default_append+0x…>` di recon hanyalah simbol ekspor terdekat — **abaikan**, bukan nama fungsi.
+  - Fork sudah punya `GetProvinceImagePixelBuffer/ForWrite/Pitch` dan `GetClip*` — bahan untuk S3 (BTOA).
+  - ⚠️ **Masih ASUMSI/❓ di `helpers_map.md`:** peran `0x80c848` (sinkron; tak ada padanan eksplisit), `0xa74f34`, `0xa74e90`/`0xa75020`, PLT `0x41f9e0`/`0x426f20`, pemetaan alamat↔fungsi konversi variant, lebar 32 vs 64 bit `AsInteger`. Menutupnya butuh membaca ulang recon sesi lalu atau recon baru; tidak menghalangi S3.
+  - Tambahan (S7, dibaca tangan dari kata instruksi, bukan objdump): `0x807c00` = pembungkus Layer → `[this+0x118]` non-null ⇒ set `[this+0x199]=1` lalu tail call `0xa75340`; `0x807c20` = pembungkus Layer → tail call `0xa7546c` (pitch). Dipanggil bersama oleh method Alpha S7. Arti bendera `+0x199` = ASUMSI. Verifikasi dengan `k2recon.sh 0x807c00 0`.
+- [ ] **4.8** Silang dengan armv7 untuk method yang ambigu (butuh langkah 1.5).
+- [ ] **4.9** Ulangi 4.5–4.7 untuk kelompok **BTOA**, lalu **Image**, **Alpha**, **Shimmer**, **Save** (terakhir; NEON/thread).
+  - [x] **4.9a** Peta nama method → **alamat implementasi** → ukuran: `script/k2map.py` → `script/layerex_impl_map.tsv` (usulan Anda; tanpa disassembler).
+    - Mendekode langsung 4 jenis instruksi (ADRP, ADD imm, B, BL) di **seluruh** fungsi libgame.so; memasangkan penunjuk-kode dengan nama method menurut urutan instruksi. Tiga gaya registrasi: A (`CODE`→`NAME`, 240 B), B (`NAME`→`CODE`, thunk 28 B, mis. BTOA), C (banyak method dalam satu fungsi).
+    - **Uji-diri lolos 3/3** terhadap hasil baca manual: `copyRaster`→`0x5e6bb0`, `shrinkCopy`→`0x5ffcf8`, `shrinkCopyFast`→`0x60185c`.
+    - Hasil: **59 method** punya alamat implementasi. Per kelompok: Alpha 28 (29.440 B), Save 14 (7.584 B), BTOA 6 (7.316 B), Image 6 (8.228 B), Shimmer 2 (5.264 B), Raster 1, shrinkCopy 2.
+    - Tidak ditemukan (memang diharapkan): `stretchCopyAA` (alias TJS, 2.7), `WindowSaveImage` (kelas Window), `onSaveLayerImageProgress/Done` (callback sisi TJS).
+    - ⚠️ Heuristik. Alamat Alpha naik monoton mengikuti urutan nama (mendukung kebenaran), tetapi **belum diverifikasi di Ghidra**. Kolom `modul` adalah tebakan dari urutan string.
+    - ⚠️ Ukuran = jarak ke awal fungsi berikutnya di `.eh_frame`; fungsi tanpa FDE bisa tampak lebih besar dari aslinya.
+  - [x] **4.9b** `k2recon.sh` mode batch: `bash script/k2recon.sh @<kelompok> [depth=0] > recon_<kelompok>.txt` (`@btoa @image @alpha @shimmer @save @raster @shrinkcopy @all`; env `ONLY="m1 m2"`, `MAXSZ`).
+    - ✔️ **Terbukti jalan dengan `objdump` asli** di HP Anda: `recon_btoa.txt` (1.863 baris, 6 method, tanpa `LEWATI`). Default depth 0 = hanya badan implementasi (helper umum tidak ditarik).
+  - [x] **4.9c** BTOA (6 method, 7.316 B): **selesai di S3** — `recon_btoa.txt` dibaca seluruhnya (1.829 instruksi) + helper di luar recon dibongkar sendiri. Spesifikasi: `docs/spec/layerExBTOA_module.md` + 6 berkas per method.
+    - Nama modul terverifikasi dari biner: **`layerExBTOA.dll`** (UTF-16 @`0x14c5b72`); keenam nama method juga ada sebagai string UTF-16 (`0x14ca614`…`0x14ca788`).
+    - **Temuan 4.9c-1 (alat):** sandbox **bisa** `pip install capstone pyelftools unicorn`; catatan lama "tidak ada disassembler AArch64" tidak berlaku. `script/emu/k2dis.py` (disassembly beranotasi; 1.829 instruksi BTOA identik dengan `objdump`, selisih hanya alias `mov`/`orr`) dan `script/emu/harness.py` (menjalankan **fungsi asli** libgame.so di Unicorn dengan objek Layer/Texture/TJS tiruan). Callee di luar recon (depth 0) kini bisa dibaca sendiri.
+    - **Temuan 4.9c-2 (urutan kanal):** "Blue" = byte[2] piksel; `fillByProvince` menukar R/B pada warna dengan ekspresi yang **identik dengan `TVP_REVRGB`** di fork → buffer CPU R,G,B,A di 1.3.9 dan fork. `static_assert` di `layerExBTOA.cpp`.
+    - **Temuan 4.9c-3 (parameter):** `copyRight*/copyBottom*/fillAlpha` **tanpa parameter** (tidak membaca `numparams`); `copyAlphaToProvince([level])`: absen/void → -1, mode 0/1/2 untuk `<0`/`0..255`/`>255`; `fillByProvince(province, color)`: `numparams<2` → -1004; `clipAlphaRect(dx,dy,src,sx,sy,w,h[,outside])`: `<7` → -1004, `w<1|h<1` → -1003, `outside` hanya bila `(uint64)v<256`.
+    - **Temuan 4.9c-4 (helper):** `0x807c44` = `GetProvinceImagePixelBufferForWrite()` persis; `0x807bec/0x807c30` = buffer baca main/province; `0x807c20/0x807c80` = pitch; `0x7f84b0` = `FillMask`; `0x5e193c` = helper lokal `rowsOf`; `0x80c848` (sinkronisasi) tak punya padanan di fork. Tabel penuh di `layerExBTOA_module.md`.
+    - **Temuan 4.9c-5 (kekhasan biner, dibakukan di spesifikasi):** `fillByProvince` melempar `"must be Layer."` bila **klip kosong**; jalur CPU-nya menelusuri **seluruh tekstur** tetapi membaca province dari asal klip; `clipAlphaRect` menjumlah offset byte klip ke indeks larik baris (hanya benar bila klip di (0,0)) dan memperbarui lewat **method TJS `update`**, bukan `Update()`; `copyRight*/copyBottom*` mengabaikan klip (seluruh tekstur) dan jalur GPU berbagi satu render method `CopyAlphaFromBlue`.
+    - ⚠️ **Temuan 4.9c-6 (GPU `FillByProvince`):** faktor blend `(ADD, ONE_MINUS_SRC_ALPHA, SRC_ALPHA, ZERO, ONE)` berarti, menurut GL standar, piksel yang **tidak** cocok yang diisi (kebalikan jalur CPU). Saklar `LAYEREX_BTOA_FILLBYPROVINCE_GPU_STD_BLEND` (default 0 = tiru biner). Putuskan di 7.3/S13.
+  - [x] **4.9d** Image (6 method, termasuk `light`) — **selesai (S4)**; spesifikasi `docs/spec/layerExImage_*.md` (6 berkas).
+
+  - **Temuan S4 (Image)** — dibaca dari disassembly sendiri (`script/k2dis.py`, capstone) dan **dijalankan di emulator** (`script/k2emu_unicorn.py`, unicorn); `recon_image.txt` **tidak diterima/tidak dibutuhkan**:
+    - ✔️ **Alat baru:** sandbox Claude ternyata **bisa** `pip install capstone unicorn pyelftools` → disassembly AArch64 + menjalankan fungsi asli. Ini mengoreksi anggapan lama di `sesi_kerja.md` ("tidak punya disassembler"). Recon depth-0 dari Anda **tidak memuat helper** (di sini: HLS `0x5929cc`/`0x592afc`, filter `0x5943fc`); alat sendiri menutup celah itu.
+    - Nama modul **`layerExImage.dll`** terkonfirmasi (UTF-16, `0x14c5b92`). Tanda tangan TJS dari thunk ncbind: `light(brightness, contrast)`, `colorize(hue, sat, blend:real)`, `modulate(hue, sat, luminance)`, `noise(level)`, `generateWhiteNoise()`, `gaussianBlur(sigma:real→float)`; jumlah argumen minimum = jumlah parameter (`TJS_E_BADPARAMCOUNT`).
+    - Kelas `layerExImage : layerExBase_GL`; `reset()` dipanggil di **setiap** akses instance. Jalur CPU memproses **seluruh gambar** (clip diabaikan), alfa tak disentuh (kecuali blur), lalu `redraw()`; jalur GPU tanpa `Update()`, rect = ukuran gambar di titik asal clip.
+    - ⚠️ **`colorize` vs `modulate` memperlakukan urutan byte berbeda** (byte 0 = "R" vs byte 2 = "R"); ⚠️ CPU vs GPU berbeda: `colorize` memotong hue/sat ke 8 bit (GPU menjepit 255); `modulate` hue melipat (GPU menjepit), sat/lum **negatif** berlawanan arah. Putuskan di 7.3/S13.
+    - ⚠️ `noise`: seed dari `TVPGetRandomBits128` (acak tiap panggilan) + `rand()` untuk sisa piksel; generator blok `n0=t·C+u, n1=t·n0+u, n2=t·n1+u` dengan keadaan `C` berlanjut. Diuji dengan seed/`rand` yang disuntikkan.
+    - ⚠️ `gaussianBlur`: kernel supersampling 50×, **bobot tengah memakai x = +0.5 (kuirk asli)**, filter 1-D 3 rezim; rezim `n > len` punya **anomali asli** (indeks bobot salah) — ditiru. Jalur non-software = **box blur** (`DoBoxBlurForAlpha`, `r = trunc(sigma+0.99)`), bukan Gaussian.
+    - **Deviasi sadar fork:** `gaussianBlur` menolak kernel > 16.385 tap (binary: alokasi raksasa → crash). `modulate`: pelipatan hue memakai bentuk tertutup yang bit-identik (binary mengulang ±1 per piksel).
+    - Nama modul lain yang terbaca dari biner (bantu S3/S5/S6): **`layerExBTOA.dll`** (`0x14c5b72`), **`layerExShimmer.dll`** (`0x14cb3d8`), **`layerExAlpha.dll`** (`0x14c9f5c`). String `layerExSave`, `multiImage`, `layerExDraw` **tidak ditemukan** sebagai UTF-16 (nama modul Save perlu dicari lagi di S11).
+    - Helper baru untuk 4.7: `0xa28f38` = `TVPGetRandomBits128`; PLT `0x416e40` = `rand`, `0x41a120` = `exp`, `0x41f9e0` = `operator new[]`, `0x426f20` = `operator delete[]`, `0x4164f0`/`0x425650` = `__cxa_guard_acquire/release`; `0x7faff8` = `DoBoxBlurForAlpha` (pembungkus `InternalDoBoxBlur(..., true)`).
+    - Cakupan biner: badan 6 method 8.228 B + helper 304 + 500 + 1.880 B (`0x5943fc`).
+  - [~] **4.9e** Shimmer (2 method) — **S5 (2026-11-21): dibaca dari `recon_shimmer.txt`; SEBAGIAN.** Dua fungsi utama terbaca penuh; fungsi pembantu lokal belum di-dump → bagian tersebut **ASUMSI**.
+    - [x] **4.9e-0** Nama modul `layerExShimmer.dll` + method terverifikasi dari string biner; `script/k2scan.py` (pindai struktural).
+    - [x] **4.9e-1** `shimmer` (`0x5eedb8`, 1.174 instruksi) dan `shimmerBuildMap` (`0x5f0010`, 142 instruksi) dibaca → `docs/spec/layerExShimmer_shimmer.md`, `_shimmerBuildMap.md`.
+      - ✅ `shimmer(src, map, mask, dx, dy, w, h, sx, sy)`: peta-perpindahan (refraksi/"hembusan panas"): `tujuan(X,Y) = src[clamp(Y+oy)][clamp(X+ox)]`, `ox,oy` dari gradien kanal biru `map`, skala 16.16 (`fcvtzs #16`), opsional ×(mask/255). Skalar murni (**bukan** NEON — koreksi dugaan lama dikonfirmasi).
+      - ✅ `shimmerBuildMap(src, ox, oy)`: ubin kanal biru `src` (geser, modulo positif) ke byte 0 seluruh `this`.
+      - 🐞 Tiga keganjilan binary dipertahankan di kode (`[BIN-L1..L3]`): kolom W-2 baris atas/bawah tak ditulis; baris H-2 kolom kiri/kanan tak ditulis; kolom tepi ditulis ke baris `1+k` tanpa `dy`. Panggilan ke-4 `0x5f0248` memakai argumen ke-2 (map), bukan mask; **mask void ⇒ tanpa kerja** (tafsir).
+    - [ ] **4.9e-2** Dump & baca **`recon_shimmer_helpers.txt`** (`0x5f0248` tabel baris, `0x5f0494`/`0x5f0630` worker interior, `0x5f0798` jalur argumen ke-4 `shimmerBuildMap`, lambda `0x5f0410/0x5f0424/0x5f05ac/0x5f05c0`) → hapus ASUMSI-INT, tutup jalur `TJS_E_NOTIMPL`.
+  - [~] **4.9f** Alpha — biner mendaftarkan **31 nama** (bukan 28; lihat Temuan penggabungan). **28 ditulis:** Alpha-1 (S6) 14, Alpha-2 (S7) 7, Alpha-3 (S8) 2, Alpha-4 (S9) 3, Alpha-5 (S10) 2. **Sisa 3:** `AlphaBlend` (`0x5d5894`, 188 B), `WhiteToBlueBlurAdd` (`0x5d5f98`, 344 B), `ExMaskRect2` (`0x5d6ea0`, 1.664 B; recon sudah ada di `recon_alpha2.txt`, belum dibaca).
+    - [x] **S6 — Alpha-1 (14 method, 6.828 B): selesai** (`recon_alpha1.txt` diterima pada giliran kedua; giliran pertama sempat tertunda karena berkas belum ada). Daftar **(nama dikoreksi saat penggabungan; sesi S6 memakai peta lama yang bergeser satu slot)**: `turnAlpha turnAlpha2 turnAlpha3 turnOutline AlphaColorRect AlphaDivide AlphaAdd AlphaAdd2 BlackForAlpha ColorAlphaAdd ColorVectorEffectAdd ExtraColorVectorEffectAdd MaskRect ExMaskRect`.
+    - **Temuan S6 (rinci: [`docs/spec/layerExAlpha_umum.md`](spec/layerExAlpha_umum.md)):**
+      - **Nama modul `layerExAlpha.dll`** terkonfirmasi (string UTF-16 `0x14c9f5c`); 14 nama method kontigu `0x14c9f98…0x14ca0f8`, lalu `LightForAlpha` = awal S7.
+      - Tiap method = **anggota kelas turunan `layerExBase_GL`** (offset `+8/+0x10/+0x14/+0x18/+0x20/+0x24..0x30` + vtable slot 1 = `redraw()` cocok dengan header fork). Pembungkus: `NCB_ATTACH_CLASS_WITH_HOOK(layerExAlpha, Layer)`.
+      - **Helper didekode dari byte:** `0x807c00` = `GetMainImagePixelBufferForWrite()`, `0x807c20` = `…Pitch()`, `0x953d0c` = `TVPThrowExceptionMessage`, `0xa16ca4` = `TVPAddLog`; helper lain dari pola pemakaian (ASUMSI, ditandai di spesifikasi) — **menutup sebagian 4.7** (kamus helper).
+      - Jalur GPU hanya pada `turnAlpha`, `turnAlpha2`, `MaskRect` (mode 1–3); sisanya selalu CPU. GLSL, nama render method, dan enum blend terbaca dari `.rodata` + jejak emulasi.
+      - **Bug asli di binary:** `AlphaDivide` membandingkan hanya alfa piksel pertama tiap baris; `ExMaskRect` menulis di luar buffer/baris bila `sh+min(dy,0)<0` atau lebar salin negatif, tidak membatasi bacaan sumber, dan arg ke-4 tidak dipakai. Fork meniru yang aman ditiru dan mengoreksi pelanggaran memori (deviasi tercatat).
+      - `ExtraColorVectorEffectAdd`: **perilaku** ditiru persis (jaringan perbandingan kanal), **maksudnya** ASUMSI.
+    - **Alat baru:** `script/k2emu.py` (emulator AArch64-mini) + `script/k2emu_alpha1.py` (harness): mengeksekusi disassembly recon di host dan membandingkannya dengan inti C++ — **pembanding mekanis** atas transkripsi manual. Bukan perangkat, bukan pengganti uji diferensial APK (S13); helper berupa hook.
+    - **Bukti:** uji inti ASan/UBSan lolos (nilai tangan + 159 vektor emas); kampanye acak 3 seed × ±6.000 kasus cocok semua; sintaks `layerExAlpha.cpp` lolos terhadap header fork (dengan kontrol negatif). **Belum:** NDK, perangkat, diferensial APK, eksekusi GL.
+    - **4.9f / S7 (Alpha-2): 7 dari 7 method SELESAI** (kode + uji inti host).
+      - [x] `LightForAlpha` · [x] `LuminanceForAlpha` · [x] `LevelMaskRect` · [x] `LevelMaskRect2` · [x] `MaskImageRideRect` · [x] `MaskImageRideRect2` · [x] `MaskImageRideRect3` (`0x5d8b10`, recon_alpha2c.txt; kebalikan RideRect2: warna penuh di bawah `a`, `m == hi` diproses) — spesifikasi `docs/spec/layerExAlpha_<method>.md`; kode `src/plugins/layerExAlphaCore.hpp` + `layerExAlpha.cpp`; uji `tests/plugins/layerExAlpha/test_alpha2_s7s10.cpp` (lolos ASan/UBSan, juga `-O3 -mfma -ffp-contract=fast`). Cek sintaks `layerExAlpha.cpp` terhadap header inti fork lolos (host x86). ⚠️ Bukan build NDK, bukan link, belum dijalankan di perangkat.
+      - **Temuan besar (pemetaan):** registrasi `0x5d43b0` memasangkan `NAME` lalu `CODE` bersebelahan per blok 28 B. `layerex_impl_map.tsv` menggeser kode satu slot untuk `AlphaAdd`…`MaskImageRideRect3` karena nama `AlphaAdd`, `ColorVectorEffectAdd`, `MaskRect` tidak ada di daftar harapan dan kode `0x5d5f98`, `0x5d8b10` tak tercatat. **TSV dikoreksi** untuk rentang itu (+3 baris baru; baris lain Alpha belum diperiksa ulang). Daftar `ONLY=` S6 di `sesi_kerja.md` ikut berubah (lihat sana).
+      - Temuan: `layerExAlpha.dll` terkonfirmasi (`0x14c9f5c`); `MaskImageRideRect6` tidak ada di biner. Tata letak `layerExBase_GL`: `+8 _this, +0x10 _width, +0x14 _height, +0x18 _buffer, +0x20 _pitch`, `vtable[1]=redraw`. Pembantu `0x953d0c` = pelempar `Not Layer`. Konstanta luminans `0.298912/0.586611/0.114478` dikalikan ke byte 0/1/2 (**bobot R pada byte B** — galat bawaan, ditiru). Argumen warna `c1,c2,c3` = R,G,B.
+      - **Penyimpangan fork yang disengaja** (aslinya UB/crash): sumber lebih kecil dari tujuan → hanya irisan diproses; layer tanpa gambar → no-op; `b<0`, `l+r+1<0`, `w<-1` → `TJS_E_INVALIDPARAM`; buffer/pitch tujuan selalu dibaca segar (aslinya LightForAlpha/Luminance/RideRect memakai nilai tersimpan); tabel dibatasi 2^24 entri.
+      - ASUMSI: nama parameter TJS; `redraw()` = `Update(klip)`; pembungkus memanggil `reset()` sebelum method; semantik bendera `[ni+0x199]`.
+      - Catatan sambil lalu: `ExMaskRect` (`0x5d6ea0`, 1664 B) ternyata sudah ada di `recon_alpha2.txt` → bahan S6; `k2map.py::scan_fn` tidak mendekode cabang bersyarat (hitung loop dengan `script/k2xref.py`).
+    - Catatan: `recon_alpha2b.txt` ternyata `0x5d867c` (TSV lama di repo Anda) — bukan `0x5d8b10`; yang dipakai `recon_alpha2c.txt` (dijalankan dengan alamat langsung). Pasang TSV terkoreksi sebelum memakai `ONLY=` untuk Alpha.
+  - **4.9f / S8 Alpha-3 — `MaskImageRideRect4` (`0x5d8f94`) dan `MaskImageRideRect5` (`0x5d9cb8`)** ✔️ terbaca penuh dari `recon_alpha3.txt` (1.477 baris, 2 fungsi, tanpa `LEWATI`). Spesifikasi: `docs/spec/layerExAlpha_MaskImageRideRect4.md`, `…Rect5.md`. Kode: `src/plugins/layerExAlpha.cpp` + `layerExAlphaCore.hpp`.
+    - ✔️ **Nama modul `layerExAlpha.dll` terkonfirmasi** (string UTF-16 `0x14c9f5c`; nama method ada di daftar string yang sama; `MaskImageRideRect6` **tidak** ada di biner).
+    - ✔️ **Konteks (`x0`) = tata letak `layerExBase_GL`** (`+0x10` lebar, `+0x14` tinggi, `+0x18` buffer, `+0x20` pitch, `[vtable+8]` = `redraw()`) → kelas Alpha di fork diturunkan dari `layerExBase_GL`.
+    - ✔️ Rect4 = tabel segitiga (1 `vector<float>` + 3 `vector<int>`, `m = 2n−1`) + warna tetap `(r,g,b)`; Rect5 = **3 `vector<float>`** + pencampuran dengan `layer1`, **tanpa parameter warna** (4 argumen vs 7). ⚠️ **Rect4 dan Rect5 BUKAN varian satu pola** → S7 dan S9 sebaiknya dibaca per method, bukan diasumsikan sama.
+    - ⚠️ **Presisi campuran ditiru:** cabang tengah Rect4 memakai **double**, cabang atas **float**; urutan tabel `(c/n)·t` (bukan `(c·t)/n`, beda pada mis. `n=48,c=100,t=30` → 62 vs 63); simpan 8 bit tanpa klem (melingkar).
+    - ⚠️ **ANOMALI Rect5:** loop kolom dibatasi `2n−1` (ukuran tabel), **bukan lebar layer** — membaca/menulis di luar baris bila `2n−1 > lebar` (di emulator: di luar buffer pada 356/363 kasus). Fork default dibatasi lebar; `-DLAYEREXALPHA_RIDE5_BINARY_XLIMIT` meniru binary. Keputusan akhir di S13.
+    - ⚠️ Deviasi sadar: `n ≤ 0` (binary: `std::length_error` tak tertangkap) → exception TJS; `n > 2²⁰` ditolak; indeks tabel di luar rentang (hanya `a≈±2³¹`) → piksel dilewati; buffer tujuan null → no-op.
+    - ⚠️ **ASUMSI:** hook instance memanggil `reset()` tiap pemanggilan (pola layerEx upstream); hook binary ada di registrasi `0x5d43b0` (belum dibaca). Nama parameter `a,n,r,g,b` diperkirakan (posisi/tipe/pemetaan kanal **terbaca**).
+    - ✔️ Ketidakcocokan ukuran: 3 baris log `SW:w SH:h` / `DW:w DH:h` / `AW:w AH:h` lalu keluar tanpa efek dan tanpa `redraw`; gagal `NativeInstanceSupport` → `"Not Layer"`.
+    - Verifikasi: **seluruh fungsi** dieksekusi di emulator (`tests/plugins/layerExAlpha/emu_ride.py`, stub untuk panggilan keluar): 1.000 kasus acak, **0 beda** terhadap model; cakupan instruksi tubuh utama 346/353 (Rect4) dan 284/293 (Rect5), sisanya `Not Layer` (diuji terpisah) dan klem float tak terjangkau; cek mutasi (13 mutasi model/program) semuanya terdeteksi; uji C++ (vektor tangan + 14 hash golden) lolos ASan/UBSan; cek sintaks `layerExAlpha.cpp` lolos (0 peringatan dari berkas baru).
+    - ⚠️ Batas bukti: eksekusi instruksi vs model; **bukan** uji perangkat/NDK; identik-piksel dengan APK 1.3.9 belum terbukti (7.3).
+    - ✔️ **Nama modul Alpha terverifikasi (S9, string UTF-16 `libgame.so` arm64):** `layerExAlpha.dll` @`0x14c9f5c`; semua nama method Alpha ada sebagai string (mis. `MaskImageRideRect7` @`0x14ca246`, `MaskImageRideRect8` @`0x14ca26c`, `AlphaBorderInnerRect` @`0x14ca292`, `AlphaBorderImageCoverRect` @`0x14ca2bc`). **`MaskImageRideRect6` tidak ada** sebagai string → memang tidak ada (konsisten dengan peta). Tepat setelah daftar method ada string pesan `layerExAlpha: noting type` (ejaan asli; kemungkinan galat tipe layer — **ASUMSI**, belum dikaitkan ke kode).
+    - ⚠️ `layerExSave.dll` **tidak ditemukan** sebagai string UTF-16 persis itu; nama modul Save perlu dicari ulang di S11 (jangan asumsikan).
+    - ✔️ **S9 selesai:** 3 method Alpha-4 direkonstruksi dari `recon_alpha4.txt` (lihat 5.6). Temuan: `this` bertata letak `layerExBase_GL` (`+0x10` lebar, `+0x14` tinggi, `+0x18` buffer, `+0x20` pitch; slot vptr `+0x8` = redraw); alfa pada byte `+3`; ketidakcocokan ukuran → log `SW:/DW:/AW:` lalu kembali (tanpa pelempar, **ASUMSI** untuk `0xa16ca4`); `AlphaBorderInnerRect` hanya memeriksa lebar (mask lebih pendek = baca di luar buffer di binary).
+    - **4.9f / S10 (Alpha-5): 2 dari 2 method SELESAI** (2026-11-22; `recon_alpha5.txt`) — `MaskImageEffectRect` (`0x5dc9a4`, 1668 B) dan `AlphaBorderImageCoverRect` (`0x5dbea0`, badan ±2,3 KB dari 2820 B). Spesifikasi `docs/spec/layerExAlpha_MaskImageEffectRect.md`, `…_AlphaBorderImageCoverRect.md`; kode di `layerExAlphaCore.hpp`/`layerExAlpha.cpp`; uji di `test_core.cpp` (ASan/UBSan, `-O3 -mfma` lolos; cek sintaks cpp lolos). ⚠️ Bukan build NDK/perangkat. 4.9f/5.6 tetap tidak dicentang.
+      - **Temuan `MaskImageEffectRect`:** keluarga RideRect tetapi tabel **unsigned** + tabel alfa `Ta`; kanal R memakai **pembagian integer** `c1/(l+1)` (G,B float) — perilaku biner, ditiru; `m < lo` **menghapus alfa**; alfa baru hanya ditulis untuk `m <= a`.
+      - **Temuan `AlphaBorderImageCoverRect`:** tiga Layer (A,B,C) + `p,q`; ukuran A dan C harus sama dengan layer ini (B tidak diperiksa); galat **hanya dicatat ke log** (`SW:/SH:`, `DW:/DH:`, `AW:/AH:` dan `Out of range`) lalu kembali **tanpa redraw**. Jendela `[p-L,p+R)` dihitung dengan cabang rumit (lihat spesifikasi). Pola string `SW:…` yang di sesi S7 dikira milik RideRect4/5/7/8 sebenarnya juga dipakai di sini — periksa saat S8/S9.
+      - ASUMSI: fungsi `0xa16ca4` = `TVPAddLog`; konversi bilangan→string desimal; nama parameter; semantik `redraw()`.
+      - Penyimpangan fork: B lebih kecil dari tujuan → irisan; layer tanpa gambar → no-op; tabel > 2^24 atau ukuran negatif → `TJS_E_INVALIDPARAM`.
+    - **Temuan penggabungan S1–S10 (Alpha; sesi gabung 2026-11-22)**
+      - ✔️ **Pemetaan nama→kode diverifikasi langsung dari biner** (dekode ADRP/ADD fungsi registrasi `0x5d43b0`, 1.832 B; `x1` = nama dan `x2` = kode berdampingan per blok): `AlphaAdd`→`0x5d54a8`, `AlphaAdd2`→`0x5d5708`, `BlackForAlpha`→`0x5d57cc`, `AlphaBlend`→`0x5d5894`, `ColorAlphaAdd`→`0x5d5950`, `ColorVectorEffectAdd`→`0x5d5b8c`, `ExtraColorVectorEffectAdd`→`0x5d5cdc`, `WhiteToBlueBlurAdd`→`0x5d5f98`, `MaskRect`→`0x5d621c`, `ExMaskRect`→`0x5d6784`, `ExMaskRect2`→`0x5d6ea0`, `LightForAlpha`→`0x5d764c`. **S7 benar; peta lama (dipakai S6) bergeser satu slot.** Perilaku mendukung: kode `0x5d57cc` (`A=(R+G+B)/3`, RGB=0) cocok dengan nama *BlackForAlpha*, bukan *AlphaBlend*.
+      - **Dampak pada S6:** 7 dari 14 method terikat nama salah (`AlphaAdd2→AlphaAdd`, `BlackForAlpha→AlphaAdd2`, `AlphaBlend→BlackForAlpha`, `ExtraColorVectorEffectAdd→ColorVectorEffectAdd`, `WhiteToBlueBlurAdd→ExtraColorVectorEffectAdd`, `ExMaskRect→MaskRect`, `ExMaskRect2→ExMaskRect`). Kode piksel tidak berubah; yang diganti: nama di `layerExAlpha.cpp`/Core/uji, kunci `golden_cpu.txt` dan `k2emu_alpha1.py`, serta 7 berkas `docs/spec/layerExAlpha_*.md`. Uji S6 tetap lolos (510 pemeriksaan + 159 vektor emas). Tiga nama yang tidak ada di daftar harapan lama (`AlphaAdd`, `ColorVectorEffectAdd`, `MaskRect`) ditambahkan → daftar harapan 63 → **66 nama**.
+      - ⚠️ **ASUMSI:** `AlphaAdd` dan `ColorAlphaAdd` didaftarkan lewat objek `Function` (blok registrasi berbeda dari method biasa); artinya (overload/argumen opsional?) belum diselidiki. Keduanya diperlakukan sebagai method biasa.
+      - **Arsitektur tunggal:** S6/S8 memakai kelas `layerExAlpha : layerExBase_GL` + hook, sedangkan S7/S9/S10 memakai fungsi `tjs_error` mentah + `PropSet` dan helper bernama sama (`Redraw`, `Buf`, `add32`, `sdiv32`, `cvtzs`) → tidak bisa digabung apa adanya. Hasil: **satu kelas, satu hook (`reset()` tiap panggilan), satu `Core`** (pembantu numerik satu definisi; `cvtzs(double)` S8 dan S7 terbukti ekuivalen di seluruh domain). Cocok dengan spesifikasi S7/S9/S10 sendiri (tujuan = konteks `this+0x18/+0x20`).
+      - ⚠️ **Perbaikan lintas-sesi:** S8 memakai `if(!_buffer) return`, padahal `layerExBase_GL::reset()` fork hanya mengisi `_buffer` pada mode software → `MaskImageRideRect4/5` akan **diam-diam tidak bekerja di mode GPU**. Diganti `destBuffer()` (mengambil `GetMainImagePixelBufferForWrite()` segar, seperti `cpu()` S6). Pemeriksaan "layer lebih besar dari gambarnya = ukuran tak cocok" (S9) kini dipakai juga oleh S8/S10.
+      - ⚠️ **ASUMSI (ukuran tujuan):** ukuran tujuan = `_width/_height` dari `reset()` fork = **ukuran rect layer** (`GetWidth()`), dibatasi ke ukuran gambar. S1 mencatat bahwa `shrinkCopy` di biner memakai ukuran gambar; `reset()` `layerExBase_GL` **di biner belum dibaca**. Identik untuk layer normal (rect = gambar); bisa beda bila `Layer.width ≠ Layer.imageWidth`. S7/S10 sebelumnya memakai `GetImageWidth()` — kini seragam. Putuskan di 7.3.
+      - Alat: `script/k2emu.py` bentrok antara S4 (emulator `unicorn`) dan S6 (emulator AArch64 mini) → S4 menjadi **`script/k2emu_unicorn.py`** (rujukan di `gen_golden.py` dan `layerExImage_light.md` ikut diganti). Tiga alat emulasi kini hidup berdampingan: `script/k2emu.py` (mini, S6), `script/k2emu_unicorn.py` (S4), `script/emu/harness.py` (S3); dan dua `k2dis.py` (`script/` S4, `script/emu/` S3) — API berbeda, jangan tertukar.
+      - `script/check_layerex_parity.sh` **diperketat**: versi lama hanya `grep -w` seluruh teks (termasuk komentar), sehingga tiga method yang belum ditulis dilaporkan OK. Kini nama dihitung ada hanya bila muncul sebagai `NCB_METHOD(x)`, `TJS_W("x")` atau `Layer.x` (`LOOSE=1` = perilaku lama).
+      - **Verifikasi pada pohon gabungan:** uji inti ASan/UBSan lolos untuk BTOA (14.526), Image, Raster, Shimmer, Shrink, ShrinkFast dan keempat uji Alpha; `layerExAlpha.cpp` lolos `-fsyntax-only` (0 error, 0 peringatan dari berkas Alpha); `g++ -c` 9 objek layerEx tanpa simbol kuat ganda antar-objek (`layerExMovie` tidak bisa dikompilasi di sandbox: header `ffmpeg` tidak ada; tidak terkait). **Belum:** NDK, link penuh, perangkat, 7.3.
+  - [ ] **4.9g** Save (14; terakhir).
+
+
+**Templat spesifikasi per method:** plugin · method · alamat (internal) · parameter & default · efek piksel (rumus, urutan kanal) · error (`TJS_E_*`) · kasus tepi · uji.
+
+---
+
+## Tahap 5 — Reimplementasi ke fork
+
+- [x] **5.1** `layerExAreaAverage` / `stretchCopyAA`: satu ekspresi TJS.
+  - Berkas: `src/plugins/layerExAreaAverage.cpp`, spesifikasi: `docs/spec/layerExAreaAverage_stretchCopyAA.md`.
+  - Nama modul `layerExAreaAverage.dll` dikonfirmasi dari string UTF-16 binary (`0x14c04a2`).
+  - ⚠️ **Belum dikompilasi** terhadap fork (sandbox tidak punya toolchain Android/header inti penuh) dan belum dijalankan di perangkat. Menggunakan `NCB_POST_REGIST_CALLBACK` + `TVPExecuteExpression`, pola yang sama dengan `saveStruct.cpp`.
+  - ✔️ Koreksi S2: di fork `PostRegist` berjalan **saat `Plugins.link("layerExAreaAverage.dll")`** (`AllRegist()` hanya mengindeks, tidak memanggil callback) — lihat `docs/spec/plugin_registrasi.md`. ⚠️ Waktu di `libgame.so` 1.3.9 masih belum diketahui (**ASUMSI** sama); `tests/tjs/t_stretchCopyAA.tjs` mencatatnya untuk dibanding di APK (7.3).
+- [x] **5.2** `copyRaster`: `layerExRaster.cpp` + `layerExRasterCore.hpp` + uji inti (lolos, ASan/UBSan).
+  - ✔️ Cek sintaks `layerExRaster.cpp` terhadap header inti fork lolos (host x86, 8.1). ⚠️ Belum build NDK. Nama parameter adalah perkiraan.
+  - ❌ Uji inti Raster **tertimpa** uji Shrink (path sama `tests/plugins/layerExRaster/test_core.cpp`; isinya meng-include `layerExShrinkCore.hpp`). ✔️ Uji Shrink dipindah ke `tests/plugins/layerExShrink/`; uji Raster **ditulis ulang dari spesifikasi** (lolos ASan/UBSan). `README.txt` di root adalah catatan paket lama dan sudah usang.
+- [x] **5.3** `shrinkCopy`: `src/plugins/layerExShrink.cpp` (jalur CPU + jalur GPU `"Copy"`) + `layerExShrinkCore.hpp` + `tests/plugins/layerExShrink/test_core.cpp`.
+  - Uji inti lolos ASan/UBSan, termasuk end-to-end 8×8→4×4 (warna/alfa rata tetap rata).
+  - Cek sintaks `layerExShrink.cpp`, `layerExRaster.cpp`, `layerExAreaAverage.cpp` terhadap header inti fork lolos (`g++ -fsyntax-only -fpermissive`, host x86). ⚠️ Bukan build NDK dan bukan link; belum dijalankan di perangkat.
+  - ⚠️ Tidak memanggil `Update()` (meniru binary). ⚠️ Objek `src` null di binary tidak diperiksa (crash); fork melempar `TVPSpecifyLayer`.
+  - Modul: `shrinkCopy.dll` (@`0x14c5b54`).
+- [x] **5.3b** `shrinkCopyFast`: `layerExShrink.cpp` (+ `layerExShrinkFastCore.hpp`, `tests/plugins/layerExShrinkFast/test_core.cpp`).
+  - Uji inti lolos ASan/UBSan (1.296 kombinasi + kasus vertikal dari binary); cek sintaks lolos (dibandingkan dengan baseline; peringatan di berkas baru = 0).
+  - ✔️ `hrow_box()` yang tadinya ASUMSI sudah diganti `hrow()` hasil baca `0x6023ec` (5.3c). ⚠️ Jalur GPU: lihat anomali di 4.6b-1. ⚠️ Belum build NDK/perangkat.
+- [x] **5.3c** `hrow_box()` diganti `hrow()` dari `0x6023ec` (S1); uji `[ASUMSI-H]` → `[BINARY-H]` (vektor tangan + 13 hash golden dari eksekusi instruksi asli + end-to-end `shrink_fast`); lolos ASan/UBSan; uji terbukti bisa gagal (3 mutasi kode). Cek sintaks `layerExShrink.cpp` lolos (0 peringatan dari berkas inti; 2 peringatan `unused parameter 'result'` di `layerExShrink.cpp` sudah ada sebelumnya).
+- [x] **5.4** Kelompok BTOA: `copyRightBlueToLeftAlpha`, `copyBottomBlueToTopAlpha`, `fillAlpha`, `copyAlphaToProvince`, `clipAlphaRect`, `fillByProvince` — `layerExBTOA.cpp` (+ `layerExBTOACore.hpp`, `tests/plugins/layerExBTOA/test_core.cpp`, `golden_emu.inc`).
+  - Uji inti lolos ASan/UBSan: **14.526 pemeriksaan** = contoh tulis-tangan dari spesifikasi **[SPEC]** + **[EMU]** 4.635 kasus dari *eksekusi fungsi asli libgame.so* di emulator AArch64 (copyRight 154, copyBottom 154, copyAlphaToProvince 1.155 [termasuk jalur NEON], fillByProvince 672, clipAlphaRect 2.500 [termasuk 700 kasus int64/int32 ekstrem]). Pelacak akses menegaskan biner tidak membaca/menulis di luar buffer pada kasus yang masuk vektor. Uji mutasi: 9 mutan, 5 terbunuh; 4 tidak terbunuh dan dianalisis ekuivalen (penjaga redundan `dxr>=cw`, `dr<1`, `SW<=sx`, `dxc+wf<=cw` yang hasilnya sama dengan pemeriksaan sesudahnya; bukti ekuivalensi hanya analisis, bukan formal).
+  - Cek sintaks lolos terhadap header inti fork (`-fsyntax-only`, juga tanpa `-fpermissive`; peringatan di berkas baru = 0 juga dengan `-Wall -Wextra`); parity nama 7.1: BTOA 6/6 OK (total 4 → 10 dari 63).
+  - ⚠️ **Yang TIDAK terbukti:** jalur GPU (shader/blend/`OperateRect`), `fillAlpha` (hanya memanggil `FillMask` fork), perilaku di perangkat, build NDK/link. ⚠️ Emulasi memakai objek tiruan: kebenarannya bergantung pada pembacaan struktur Layer/Texture (offset di `layerExBTOA_module.md`).
+  - ⚠️ Deviasi sadar fork vs biner D1–D7 (D1–D6: crash di biner → tidak crash di fork; D7: flag +0x261 tidak ditiru): lihat `layerExBTOA_module.md`. ⚠️ Flag `+0x261` (jalur CPU `copyRight*/copyBottom*`) **bukan** `ImageModified` (terverifikasi emulasi) dan tidak ditiru (D7); dampaknya ASUMSI nol. ⚠️ Nama parameter perkiraan.
+- [x] **5.5** `layerExImage`: `light`, `colorize`, `modulate`, `noise`, `generateWhiteNoise`, `gaussianBlur` — `src/plugins/layerExImage.cpp` + `layerExImageCore.hpp` + `tests/plugins/layerExImage/{test_core.cpp, golden.inc, gen_golden.py}` + `script/k2dis.py`, `script/k2emu.py`.
+  - **Uji tingkat baru "emulasi-biner":** fungsi asli dijalankan di unicorn dengan gambar acak (4 ukuran × 2 pitch, ±12 kombinasi parameter per method) dan dibandingkan byte-per-byte dengan inti: `light`/`colorize`/`modulate` 280 kasus, `noise`/`generateWhiteNoise` 119 kasus, `gaussianBlur` 84 kasus penuh + 400 fuzz filter 1-D, helper HLS ±120.000 nilai — **0 selisih**. `golden.inc` (57 hash dari fungsi asli) dijalankan di `test_core.cpp` (ASan/UBSan dan -O2 lolos) beserta pemeriksaan analitik.
+  - Cek sintaks `layerExImage.cpp` terhadap header inti fork lolos (`g++ -fsyntax-only -fpermissive`, include semua `src/core/*` dan `src/plugins/*`; baseline `layerExRaster`/`layerExShrink` ikut lolos); peringatan di berkas baru = 0.
+  - ⚠️ **ASUMSI / belum:** jalur **GPU** (teks shader asli dibaca dan diformat ulang; render method/parameter/rect mengikuti binary, tetapi tidak dijalankan), `GetMainImage()` cukup menggantikan sinkronisasi `0x80c848`, perlu tidaknya `Update()` di GPU (saklar `LAYEREXIMAGE_GPU_UPDATE`), perilaku `exp()` Bionic vs host (ulp terakhir), urutan byte memori layer di fork (lihat temuan R/B), build NDK arm64/armv7 (`-ffp-contract=off` untuk berkas ini; pragma disertakan), perangkat. Lisensi: pustaka HSL di shader menyebut karya Hocevar/Persson — periksa bila fork didistribusikan.
+- [~] **5.6** `layerExAlpha`: **28 dari 31 nama ditulis**, satu kelas `layerExAlpha : layerExBase_GL` — `src/plugins/layerExAlpha.cpp` + `layerExAlphaCore.hpp` + `docs/spec/layerExAlpha_*.md` + `tests/plugins/layerExAlpha/` (`run_tests.sh` menjalankan 4 uji).
+  - Alpha-1 (S6, 14): `turnAlpha`…`ExMaskRect` — uji 510 pemeriksaan + 159 vektor emas (emulasi instruksi biner, `script/k2emu_alpha1.py`); satu-satunya bagian dengan jalur GPU (`turnAlpha`, `turnAlpha2`, `MaskRect` mode 1–3). Alpha-2 (S7, 7): `LightForAlpha`…`MaskImageRideRect3`. Alpha-3 (S8, 2): `MaskImageRideRect4/5` — 14 hash golden dari emulasi (`emu_ride.py`). Alpha-4 (S9, 3): `MaskImageRideRect7/8`, `AlphaBorderInnerRect` (+ `tests/tjs/t_alpha4.tjs`). Alpha-5 (S10, 2): `MaskImageEffectRect`, `AlphaBorderImageCoverRect`.
+  - Tingkat bukti: inti-host ASan/UBSan (empat uji terhadap Core gabungan) + sintaks `.cpp` terhadap header fork. **Belum dibandingkan dengan biner di perangkat (7.3), belum build NDK, belum dijalankan.** GPU Alpha-1 tidak dijalankan.
+  - ⚠️ **Tinggal:** `AlphaBlend`, `WhiteToBlueBlurAdd`, `ExMaskRect2`; keputusan deviasi (S13): `AlphaDivide` per-baris, anomali kolom Rect5, ukuran tujuan (lihat Temuan penggabungan).
+- [~] **5.7** `layerExShimmer`: `src/plugins/layerExShimmerCore.hpp` + `layerExShimmer.cpp` + `tests/plugins/layerExShimmer/test_core.cpp` (inti-host lolos ASan/UBSan). **Sebagian:** interior = ASUMSI-INT; `shimmerBuildMap` argumen ke-4 → `TJS_E_NOTIMPL`; `layerExShimmer.cpp` **belum dikompilasi** (butuh header Kirikiri penuh); nilai bawaan argumen tak terbaca. Selesai penuh setelah 4.9e-2 + build (S2) + uji diferensial (7.3).
+- [ ] **5.8** `layerExSave`: `getCropRect`, `getDiffRect`, `isBlank`, `saveLayerImagePng/Tlg5`, dst.
+- [ ] **5.9** Plugin non-layerEx dari backlog (util/data → windowEx/scriptsEx → emoteplayer/psbfile terakhir).
+
+**Aturan:** satu file per plugin di `src/plugins/<nama>.cpp`; `NCB_MODULE_NAME TJS_W("<nama>.dll")` **persis** seperti di binary; ikuti gaya `layerExPerspective.cpp`/`layerExMovie.cpp` (`NI_LayerExBase`, `ObjectCache`); skalar dulu, NEON belakangan; jangan commit output decompiler.
+
+---
+
+## Tahap 6 — Build & pendaftaran
+
+Tingkat bukti sesi S2: **baca-source + `g++ -c` host x86**. Belum ada build NDK/clang, belum ada link penuh, belum ada eksekusi.
+
+- [x] **6.1** Modul baru terdaftar lewat `ncbAutoRegister::AllRegist()` (sudah dipanggil di `TVPLoadInternalPlugins`). *(baca-source; belum dijalankan)*
+  - ⚠️ `AllRegist()` hanya **mengindeks** objek statis per nama modul; `Regist()` (callback kita) baru jalan di `Plugins.link(...)` → `LoadModule`. Detail: `docs/spec/plugin_registrasi.md`.
+  - Modul yang belum ada di fork: `Plugins.link` diabaikan tanpa error (`TVPLoadPlugin` memanggil lalu `return`).
+- [x] **6.2** Huruf besar-kecil nama modul: **tidak masalah** — kunci dan pencarian sama-sama huruf kecil, path dipotong (`AllRegist`, `LoadModule`, `TVPExtractStorageName`). *(baca-source)*
+  - [ ] **6.2b** Daftar nama modul yang benar-benar dipanggil game nyata (`Plugins.link("...")` di skrip game). Butuh skrip game Anda. **ASUMSI:** `shrinkCopy.dll` untuk `shrinkCopy*`.
+- [ ] **6.3** Build `arm64-v8a` dan `armeabi-v7a`. **Menunggu Anda** (jalur CI/Termux/PC di 1.6).
+  - ✔️ `--whole-archive` untuk `krkr2plugin` **sudah ada** di `CMakeLists.txt` akar → registrasi statis tidak dibuang. Tidak perlu tambahan.
+  - ✔️ Berkas baru lolos `-fsyntax-only` di `-std=c++11` dan `-std=c++14` **tanpa** `-fpermissive` (g++ 13) dan `g++ -c`. ⚠️ Clang 14 (NDK 25) tidak ada di sandbox → perbedaan clang tidak teruji.
+  - ⚠️ `armeabi-v7a` **belum didukung** konfigurasi: `PROP_APP_ABI=arm64-v8a`, dan `project/android/app/cpp/CMakeLists.txt` memakai `arch_androida64` juga di cabang `else()`. Butuh `vendor` 32-bit.
+  - ⚠️ `src/plugins/Android.mk` (c++11, tanpa whole-archive) adalah jalur lama yang tidak dipakai Gradle (`PROP_BUILD_TYPE=cmake`).
+  - ⚠️ `file(GLOB)` memungut berkas baru hanya setelah CMake dikonfigurasi ulang.
+- [x] **6.4** Tidak ada duplikasi `LayerExBase`: satu `LayerExBase.cpp`, `src/plugins/ext/` kosong, `layerExBase.hpp` tidak mendefinisikan `NI_LayerExBase`; `g++ -c` 4 objek → tak ada simbol kuat ganda antar objek. *(objek-host; bukan link penuh)*
+  - ✔️ Diperluas saat penggabungan S1–S10: `g++ -c` 9 objek (`layerExAlpha`, `AreaAverage`, `BTOA`, `Image`, `Perspective`, `Raster`, `Shimmer`, `Shrink`, `LayerExBase`) → tidak ada simbol kuat ganda antar-objek; nama modul (`NCB_MODULE_NAME`) tidak ada yang ganda. `file(GLOB)` pada `src/plugins/*.cpp` memungut berkas baru setelah CMake dikonfigurasi ulang.
+
+---
+
+## Tahap 7 — Verifikasi
+
+- [ ] **7.1** Parity nama: `FULL=1 bash script/check_layerex_parity.sh` → semua `OK`.
+  - ✔️ Dijalankan di S2: **4 OK / 59 KOSONG dari 63 nama** (OK: `stretchCopyAA`, `copyRaster`, `shrinkCopy`, `shrinkCopyFast`). KOSONG = kelompok yang belum ditulis (Alpha 28, Save 14, BTOA 6, Image 6, Shimmer 2, `WindowSaveImage`/`onSaveLayerImage*` di Save) — sesuai harapan; tetap `[ ]` sampai semua ditulis.
+  - ⚠️ (Versi lama; kini diperketat saat penggabungan) skrip hanya `grep -w` nama di `src/plugins` (termasuk komentar) → "OK" berarti nama muncul di source, **bukan** bahwa method terdaftar/berfungsi. Untuk keempat nama di atas pendaftaran diperiksa manual (`PropSet` di `InitPlugin_*`; `stretchCopyAA` lewat ekspresi TJS).
+  - ✔️ Setelah penggabungan, skrip ketat: **46 OK / 20 KOSONG dari 66 nama**. KOSONG = `layerExSave` 17 + Alpha 3 (`AlphaBlend`, `WhiteToBlueBlurAdd`, `ExMaskRect2`) — persis yang belum ditulis. OK = Alpha 28, BTOA 6, Image 6, Shimmer 2, shrinkCopy 2, `copyRaster`, `stretchCopyAA`. (Skrip longgar lama menghitung 49 OK karena tiga nama itu disebut di komentar.)
+- [ ] **7.2** Skrip TJS kecil per method (rect normal, di luar layer, ukuran 0, layer tanpa alfa) → cetak hash piksel.
+  - [x] Skrip ditulis: `tests/tjs/` (`startup.tjs`, `harness.tjs`, `t_registrasi`, `t_stretchCopyAA`, `t_copyRaster`, `t_shrinkCopy`, `t_shrinkCopyFast`; panduan `README.md`). ⚠️ Hanya dicek kurung seimbang; **tidak ada mesin TJS** di sandbox; konstanta `Layer.ltAlpha/ltOpaque/stLinear` dan `Debug.message` = **ASUMSI**. Pembaruan penggabungan: `t_alpha4.tjs` (S9) dan `t_registrasi.tjs` kini menaut BTOA/Image/Shimmer/Alpha dan mengamati keberadaan tiap method (termasuk 3 nama Alpha yang belum ditulis → `belum.*`).
+  - [ ] Dijalankan di fork (per `RENDERER` `software`/`opengl`) dan log dikirim.
+  - 💡 Menjalankan `t_shrinkCopyFast.tjs` di **APK 1.3.9** memberi kebenaran dasar untuk `hrow_box` (kasus `hs>=2`) tanpa disassembler — berguna untuk S1/5.3c. `RUN_UNSAFE_CASES` harus `false` di APK.
+- [ ] **7.3** Differential test: skrip yang sama di APK resmi 1.3.9 vs build fork; bandingkan hash. Tentukan toleransi pembulatan di awal.
+  - BTOA yang wajib dicakup: jalur **GPU** `CopyAlphaFromBlue` (copyRight/copyBottom) dan `FillByProvince` (arah isian, lihat 4.9c-6); `fillAlpha`; `clipAlphaRect` di render manager GPU (apakah tulisan lewat `GetScanLineForWrite` tekstur GL sampai ke layar); layer berklip non-default (D3/D4); `outside` tepi (-1, 255, 256).
+- [ ] **7.4** Uji game nyata yang memakai plugin tersebut.
+
+---
+
+## Tahap 8 — Dokumentasi & pemeliharaan
+
+- [x] **8.1** `readme.md` (roadmap) diperbarui; `docs/plugins.md` ditulis (status per plugin: sumber publik/bawaan/stub/rekonstruksi, teruji/belum). **Perbarui keduanya di setiap perubahan plugin.**
+- [ ] **8.2** Simpan spesifikasi perilaku di `docs/spec/` — berjalan: **37 berkas**: AreaAverage, Raster, Shrink, ShrinkFast, BTOA (modul + 6), Image (6), Shimmer (2, kerangka/ASUMSI), Alpha (umum + `common` + `S7_profil_xref` + 1 berkas per method yang ditulis; 7 berkas S6 diganti nama saat penggabungan), `plugin_registrasi.md`, `helpers_map.md` (S1, diperluas S8); sisanya mengikuti 4.9.
+- [ ] **8.3** Tag rilis per kelompok plugin; catat di changelog.
+- [ ] **8.4** Periksa Java (`classes.dex`/`KR2Activity`) hanya bila ada beda perilaku.
+
+---
+---
+
+## ⚠️ Catatan penting (kumpulan)
+
+1. **Lisensi:** reimplementasi dari spesifikasi perilaku, bukan salin pseudo-code; cek lisensi repo mana pun yang diambil. Bukan nasihat hukum.
+2. **Duplicate symbol:** hapus `src/plugins/ext/layerEx` (langkah 3.5).
+3. **Alamat peta ≠ isi method:** registrasi dulu, implementasi di pointer callback (4.2–4.3).
+4. **`PTR=1` belum teruji** di binary asli; hasil recon depth 2 memuat banyak fungsi umum (4.4).
+5. **Penyimpanan bersama Android** bermasalah untuk git dan build (1.6).
+6. **layerExDraw** (GDI+) kemungkinan tidak bisa dibangun langsung; perlu lapisan kompatibilitas/alternatif.
+7. **`emoteplayer`/`psbfile`** besar dan berformat proprietary; kerjakan terakhir.
+8. **`layerex_impl_map.tsv` heuristik** (4.9a): lolos uji-diri 3/3 tetapi belum diverifikasi di Ghidra; kolom `modul` hanya tebakan.
+9. **`shrinkCopyFast` GPU** memakai tekstur `this` di binary (4.6b-1) — fork menyimpang secara sadar; putuskan di 7.3.
+10. ~~`hrow_box()` = asumsi~~ ✔️ **Selesai (S1):** `0x6023ec` terbaca dan diverifikasi emulasi. `shrinkCopyFast` CPU kini tanpa asumsi, tetapi **identik-piksel dengan APK 1.3.9 belum terbukti** sampai 7.3 (bukti baru: eksekusi instruksi vs model, bukan perangkat).
+11. **Anotasi simbol di recon menyesatkan:** `<std::vector<…>::_M_default_append+0x…>` = simbol ekspor terdekat, bukan nama fungsi. Kode plugin ada di celah non-ekspor (`helpers_map.md`).
+12. **Emulator AArch64 mini** (`tests/plugins/layerExShrinkFast/emu_hrow_6023ec.py`) bisa dipakai ulang untuk fungsi daun kecil di S3+ (tambah instruksi yang belum didukung bila perlu); selalu lakukan **cek mutasi** agar uji terbukti bisa gagal. Recon tidak di-commit.
+13. **Registrasi (S2):** modul baru baru terdaftar saat `Plugins.link`, bukan di startup; nama tidak peka huruf besar-kecil. Modul belum-ada diabaikan diam-diam (`docs/spec/plugin_registrasi.md`).
+14. **`armeabi-v7a`** tidak didukung konfigurasi build saat ini (`vendor` arm64 saja); `Repo.zip` tak memuat `vendor/` → build tidak bisa dicoba di sandbox. Jalur CI: `release-apk.yml`.
+15. **Skrip TJS 7.2 belum pernah dijalankan**; jangan set `RUN_UNSAFE_CASES=true` pada APK 1.3.9.
+16. **Vektor emas BTOA bukan hasil kode fork** melainkan eksekusi fungsi asli di emulator dengan objek tiruan (`script/emu/`); regenerasi: `K2_LIBGAME=… python3 script/emu/btoa_golden.py > tests/plugins/layerExBTOA/golden_emu.inc`. Hanya jalur CPU. Jangan dibaca sebagai bukti di perangkat.
+17. **BTOA GPU `FillByProvince`** mungkin terbalik di biner asli (4.9c-6); `layerExBTOA.cpp` meniru biner secara default.
+18. **Alat sandbox (S4):** `pip install capstone unicorn pyelftools` berhasil → `script/k2dis.py` (disassembly + string/alamat), `script/k2emu_unicorn.py` (jalankan fungsi asli; stub callee). Berlaku bila sandbox masih mengizinkan pip; **tidak dijamin**. Ini membuka uji diferensial **tanpa perangkat** untuk fungsi tanpa efek samping sistem (jalur CPU).
+19. **`layerExImage` byte R/B tidak konsisten** (colorize byte0=R, modulate byte2=R) dan CPU≠GPU pada beberapa parameter (lihat 4.9d) — tetap seperti binary; putuskan di S13.
+20. **`noise`/`generateWhiteNoise` tidak deterministik** di binary (seed `TVPGetRandomBits128`, `rand()` global); uji memakai seed/`rand` suntikan.
+21. **Aritmatika float harus persis.** Binary memakai `fmul` lalu `fadd` terpisah (tanpa FMA), campuran float/double per cabang, dan urutan `(c/n)·t`. Di kode: setiap operasi dipisah per pernyataan + `#pragma clang fp contract(off)`. ⚠️ Pencarian di S8 **tidak menemukan** input yang membuat FMA mengubah hasil, jadi pragma adalah pengaman, bukan sesuatu yang terbukti perlu. Uji golden sengaja memakai gambar besar karena mutasi presisi hanya terlihat pada sebagian kecil piksel.
+22. **`MaskImageRideRect5` punya anomali batas kolom** (`2n−1`, bukan lebar). Jangan "memperbaikinya" tanpa uji diferensial (7.3): perilaku di APK bisa bergantung padanya.
+23. **Anotasi PLT di recon dapat dipercaya** (`…@plt`: `vector<float>::_M_default_append`, `_ZdlPv`, `__stack_chk_fail`, `_Unwind_Resume`); **label non-PLT tidak** (mis. `0x953d0c` berlabel `std::move_backward`, `0x52138c` berlabel `Java_…nativeOnLowMemory`): itu simbol ekspor terdekat (lihat 11).
+24. **`tests/plugins/layerExAlpha/emu_ride.py` mengeksekusi FUNGSI UTUH** (bukan potongan) dengan stub untuk `bl`/`blr` dikenali dari alamat, memori berbatas persis (mendeteksi akses di luar buffer), instruksi skalar + float. Pakai ulang untuk S6, S7, S9, S10: cukup tambah stub/instruksi; selalu ukur **cakupan** dan lakukan **cek mutasi** sebelum percaya hasilnya.
+25. **Nama method Alpha dari peta lama salah** (S6 memakai pemetaan bergeser satu slot): yang benar adalah pasangan NAME→CODE di registrasi `0x5d43b0` (4.9f, Temuan penggabungan). Jangan memakai `layerex_impl_map.tsv` versi sebelum S7 untuk Alpha; baris Alpha di TSV S7 sudah dikoreksi, ketiga nama baru (`AlphaAdd`, `ColorVectorEffectAdd`, `MaskRect`) ada di daftar harapan (66 nama).
+26. **Ukuran tujuan Alpha = ASUMSI** (rect layer dari `reset()` fork, dibatasi gambar; `reset()` biner belum dibaca) — lihat 4.9f. Dan `AlphaAdd`/`ColorAlphaAdd` terdaftar lewat objek `Function` (ASUMSI: method biasa).
+27. **Parity 7.1 kini ketat** (tidak menghitung komentar); angka lama (4/63, 7/63) tidak sebanding dengan 46/66 sekarang.
+28. **Tiga alat emulasi dan dua `k2dis.py`** hidup berdampingan (`script/k2emu.py` mini S6, `script/k2emu_unicorn.py` S4, `script/emu/harness.py` S3; `script/k2dis.py` vs `script/emu/k2dis.py`) — API berbeda.
+
+## Backlog 36 plugin (belum ada di fork)
+
+- **layerEx:** layerExAlpha (**28/31 nama ditulis**; sisa 3), ~~BTOA~~ (5.4 ditulis), ~~Image~~ (5.5 ditulis), ~~Raster~~ (5.2 ditulis), Save, ~~Shimmer~~ (5.7 sebagian — inti ditulis, ASUMSI-INT), ~~AreaAverage~~ (5.1 ditulis), ~~shrinkCopy~~ (5.3 + 5.3b + 5.3c ditulis), multiImage, layerExDraw
+- **Window/script:** windowEx, scriptsEx, kagparserex, kagparserexb, extkagparser, textrender
+- **Util/data:** json, sqlite3, minizip, expat, lzfs, fstat, util_generic, util_graph, util_system, fpackinone
+- **Game/media:** emoteplayer, psbfile, kaichotrans, extnagano, extrans, gfxeffect, alphamovie
+- **Stub Windows:** drawdeviced3d, drawdeviced3dz, kirikiroid2
+
+## Langkah berikutnya
+
+Dirinci per sesi di [`sesi_kerja.md`](sesi_kerja.md). Ringkas (status setelah penggabungan S1–S10):
+
+1. ~~**S1**~~ ✅ `shrinkCopyFast` CPU tuntas (4.6b-2, 5.3c) + kamus helper (4.7).
+2. **S2** (Anda + Claude): bagian Claude **selesai**; **tersisa bagian Anda:** build baseline + modul baru (1.6, 6.3) lewat CI/PC/Termux, kirim log; jalankan `tests/tjs/` dan kirim log. **Kini paling mendesak:** ada 7 modul rekonstruksi yang belum pernah dibangun dengan NDK (Shrink, Raster, AreaAverage, BTOA, Image, Shimmer, Alpha). Setelah `git pull` jalankan ulang CMake (GLOB).
+3. ~~**S3** BTOA~~ ✅ · ~~**S4** Image~~ ✅ · **S5** Shimmer **sebagian** (tinggal 4.9e-2: dump helper `0x5f0248 0x5f0494 0x5f0630 0x5f0798`) · ~~**S6–S10** Alpha~~ 28/31 ✅.
+4. **Sesi pendek "tutup Alpha"** (baru): `AlphaBlend` (`0x5d5894`), `WhiteToBlueBlurAdd` (`0x5d5f98`), `ExMaskRect2` (`0x5d6ea0`) — `ONLY=` memakai TSV terkoreksi; lalu memutuskan ASUMSI ukuran tujuan dengan membaca `layerExBase_GL::reset()` di biner.
+5. Lalu Save (S11–S12, 2 sesi) → verifikasi diferensial (S13); jalur non-layerEx (S14–S18) paralel.
+
+## Log perubahan
+
+- **8.1 / 4.9a–b / 4.6b-1 / 5.3b** — `k2map.py` + `layerex_impl_map.tsv` (59 method; uji-diri 3/3); `k2recon.sh @kelompok`; spesifikasi + kode `shrinkCopyFast` (horizontal ASUMSI); `light` & `shrinkCopyFast` ditambahkan ke daftar nama; uji Shrink dipindah, uji Raster ditulis ulang; `readme.md` + `docs/plugins.md`.
+- **Perencanaan sesi** — `docs/sesi_kerja.md` ditambahkan: inventaris belum-tuntas vs belum-ada (3 dari 59 method / 9,0 % kode biner terekonstruksi), 19 sesi dengan masukan/keluaran/kriteria selesai, perintah recon per sesi (`ONLY=` Alpha dihitung ≤ 7 KB), templat prompt. `recon_6023ec.txt` & `recon_btoa.txt` diterima; mode batch `k2recon.sh` terbukti di `objdump` asli (4.9b).
+- **S1 — 4.6b-2 / 5.3c / 4.7** — `0x6023ec` dibaca (`hrow`: rata-rata kotak B,G,R, `udiv` 32-bit memotong, sisa÷`rem`, alfa `0xFF`, daun, tanpa NEON) dan diverifikasi dengan **emulator AArch64 mini** (1.605 kasus, 0 beda; mutasi terdeteksi); `layerExShrinkFastCore.hpp`: `hrow_box` → `hrow(dst,src,hs,quot,rem)`; uji `[ASUMSI-H]` → `[BINARY-H]` (13 hash golden + vektor tangan); spesifikasi `shrinkCopyFast` dilengkapi; **`docs/spec/helpers_map.md`** baru (temuan: `layerExBase_GL` memakai ukuran rect, bukan gambar utama; helper tidak ada di ekspor; anotasi simbol recon menyesatkan); `plugins.md`, `sesi_kerja.md` disinkronkan. Arsip ketiga `libgame_symbol_lists.zip` dipakai untuk 4.7. `recon_btoa.txt` ikut terunggah tetapi **belum dipakai** (itu masukan S3).
+- **S2 (bagian Claude; tanpa log build dari Anda)** — Dibaca: `ncbind`, `InternalPlugins.cpp`, `PluginImpl.cpp`, CMake/Gradle/CI. Temuan: `AllRegist()` hanya mengindeks, callback jalan di `Plugins.link`; nama modul tidak peka huruf; `--whole-archive` sudah ada; `armeabi-v7a` belum didukung; CI `release-apk.yml` tersedia; `stSoftBilinear` tidak ada di inti (contoh spesifikasi AreaAverage diperbaiki ke `stLinear`). Dijalankan: parity 7.1 (4/63), cek sintaks C++11 & C++14 tanpa `-fpermissive`, `g++ -c` 4 objek (tak ada simbol ganda), uji inti ulang (3/3 OK, ASan/UBSan). Ditulis: `tests/tjs/*` (7.2), `docs/spec/plugin_registrasi.md`. **Tidak dikerjakan:** build NDK/link (butuh Anda + `vendor/`), eksekusi TJS, perbaikan error build (tidak ada log).
+- **S3 (2026-11-22) / 4.9c / 5.4** — BTOA lengkap: 7 spesifikasi (`docs/spec/layerExBTOA_*.md`), `layerExBTOACore.hpp`, `layerExBTOA.cpp`, uji `tests/plugins/layerExBTOA/` (14.526 pemeriksaan, ASan/UBSan, + `golden_emu.inc` dari eksekusi fungsi asli), alat baru `script/emu/{k2dis,harness,btoa_golden}.py`. Cek sintaks lolos; parity 7.1 BTOA 6/6. `recon_6023ec.txt` ikut diunggah tetapi **tidak dikerjakan** (itu S1). Tidak diubah: `sesi_kerja.md` (lihat catatan 13). Belum: NDK, perangkat, GPU.
+- **S4 / 4.9d / 5.5 (2026-11-22)** — `layerExImage` (6 method) direkonstruksi: 6 spesifikasi `docs/spec/layerExImage_*.md`, `layerExImageCore.hpp`, `layerExImage.cpp`, `tests/plugins/layerExImage/` (uji + `golden.inc` dari fungsi asli), `script/k2dis.py`, `script/k2emu.py`. Jalur CPU identik dengan biner di emulator (0 selisih); GPU belum diuji. `recon_image.txt` tidak ada → disassembly dibuat sendiri (capstone). `recon_btoa.txt` dan `recon_6023ec.txt` ikut terunggah tetapi **bukan masukan S4**, tidak dipakai. `sesi_kerja.md` dikoreksi (disassembler tersedia; angka cakupan 21,9 %).
+- **S5 (Shimmer) — sebagian (2026-11-21)** — `recon_shimmer.txt` diunggah (setelah percobaan pertama tertahan). Dibaca penuh: `shimmer` dan `shimmerBuildMap`. Ditulis: `layerExShimmerCore.hpp`, `layerExShimmer.cpp`, `tests/plugins/layerExShimmer/test_core.cpp` (`g++ -std=c++14 -fsanitize=address,undefined` → OK), spesifikasi penuh dua method, `script/k2scan.py`. **Temuan:** (1) `shimmer` = peta-perpindahan oleh gradien kanal biru, skalar murni (bukan NEON); (2) tiga keganjilan tepi dipertahankan (L1–L3); (3) panggilan ke-4 helper memakai map, bukan mask → mask void = tanpa kerja; (4) `shimmerBuildMap` hanya menulis byte 0; (5) interior dikerjakan worker thread yang tidak ada di recon → ASUMSI-INT. **Tidak ada** di unggahan: `recon_shimmer_helpers.txt` (helper lokal) — disebut, tidak dikarang. 4.9e dan 5.7 diberi `[~]` (bukan `[x]`). `layerExShimmer.cpp` belum pernah dikompilasi. Berkas `recon_6023ec.txt`, `recon_btoa.txt` (S1/S3) tidak disentuh.
+- **S6 (Alpha-1) — selesai** — 14 method `layerExAlpha.dll` direkonstruksi dari `recon_alpha1.txt` + string biner: `src/plugins/layerExAlphaCore.hpp` (inti, tanpa dependensi), `src/plugins/layerExAlpha.cpp` (kelas `layerExAlpha : layerExBase_GL`, `NCB_ATTACH_CLASS_WITH_HOOK`, jalur GPU untuk turnAlpha/turnAlpha2/MaskRect), `docs/spec/layerExAlpha_umum.md` + 14 spesifikasi, `tests/plugins/layerExAlpha/{test_core.cpp,golden_cpu.txt}`, alat `script/k2emu.py` + `script/k2emu_alpha1.py`. Temuan: nama modul terkonfirmasi; helper `0x807c00/0x807c20/0x953d0c/0xa16ca4` didekode dari byte; bug asli `AlphaDivide` & `ExMaskRect` (lihat 4.9f). Bukti: ASan/UBSan lolos, emulasi instruksi cocok (±18.000 pemeriksaan × 3 seed), sintaks fork lolos; **NDK/perangkat/GL: belum**. Sempat tertunda di giliran pertama karena `recon_alpha1.txt` belum diunggah. *[nama method dikoreksi saat penggabungan]*
+- **S7 (Alpha-2) — selesai 7/7** (2026-11-22) — `recon_alpha2.txt` + `recon_alpha2c.txt` diterima. Ditulis: 7 spesifikasi, `layerExAlphaCore.hpp`, `layerExAlpha.cpp`, uji inti; **TSV Alpha dikoreksi** (pemetaan nama→kode bergeser satu slot). 4.9f/5.6 tidak dicentang (sisa 24 method). Tidak ada build NDK/uji perangkat.
+- **S8 — 4.9f (sebagian) / 5.6 (2/28) / 8.2 / 4.7** — `MaskImageRideRect4` (`0x5d8f94`) dan `MaskImageRideRect5` (`0x5d9cb8`) dibaca penuh dari `recon_alpha3.txt`; modul `layerExAlpha.dll` terkonfirmasi dari string; konteks = tata letak `layerExBase_GL`; kode baru `layerExAlpha.cpp` + `layerExAlphaCore.hpp` (kelas turunan `layerExBase_GL`, ncbind hook, `ride4`/`ride5`); **emulator fungsi-utuh** `emu_ride.py` (1.000 kasus, 0 beda; cakupan 346/353 dan 284/293; 13 mutasi terdeteksi; probe tabel membuktikan urutan `(c/n)·t`); uji `test_core.cpp` (vektor tangan + 14 hash golden; ASan/UBSan lolos; mutasi kode terdeteksi); spesifikasi `layerExAlpha_MaskImageRideRect4.md`/`…5.md`; `helpers_map.md` diperluas (helper pointer/pitch `0x807c00`/`0x807c20`, `TVPThrowExceptionMessage`, nama PLT; temuan ctx). **Temuan:** Rect5 anomali batas kolom `2n−1`; Rect4≠Rect5 secara fungsional; presisi campuran float/double; `n ≤ 0` → `std::length_error`. **ASUMSI tersisa:** hook `reset()` (registrasi `0x5d43b0` belum dibaca), nama parameter. Dilewati urutan (S2–S7 belum): dikerjakan atas permintaan.
+- **S9 (Alpha-4) — selesai (bagian Claude)** — Masukan `recon_alpha4.txt` (3 fungsi, 5.892 B) dibaca penuh. Ditulis: `layerExAlphaCore.hpp` (`ride_table`, `ride_range`, `ride7`, `ride8`, `border_inner`), `layerExAlpha.cpp` (modul `layerExAlpha.dll`, PRE_REGIST seperti Raster), 4 spesifikasi (`layerExAlpha_common/_MaskImageRideRect7/_MaskImageRideRect8/_AlphaBorderInnerRect.md`), `tests/plugins/layerExAlpha/test_alpha4_s9.cpp`, `tests/tjs/t_alpha4.tjs` (+ startup/README). Dijalankan: uji inti ASan/UBSan OK, `-O2` OK, mutasi 5/5 terdeteksi, sintaks `-std=c++11/14 -Wall -Wextra` OK, objek `g++ -c` OK tanpa simbol global, parity 7.1 → 7/63 OK. **ASUMSI** (ditandai di spesifikasi): `0xa16ca4` = log; `reset()` dipanggil pengait ncbind; slot vptr `+8` = redraw; perilaku renderer GPU; jenis galat untuk `b<=0`; nama parameter. **Belum:** build NDK, eksekusi TJS, perbandingan biner (7.3). Sandbox tanpa disassembler → pembacaan manual; periksa ulang `ride7` terhadap `recon_alpha4.txt` bila ada perbedaan hasil di 7.3.
+- **S10 (Alpha-5) — selesai 2/2** (2026-11-22) — `recon_alpha5.txt` diterima. 2 spesifikasi, tambahan di `layerExAlphaCore.hpp` + `layerExAlpha.cpp`, uji inti. Tidak menggabungkan `perubahan_S1/S2.zip` (atas perintah). Tidak ada build NDK/uji perangkat; 4.9f/5.6 tidak dicentang (sisa 22 method).
+- **Penggabungan S1–S10 (2026-11-22)** — Sepuluh arsip perubahan digabung ke `Repo.zip` (S3 dan S8 menyusul di giliran kedua). Konflik nyata: (a) pemetaan Alpha bergeser satu slot (S6 vs S7) — diverifikasi dari biner, 7 method S6 diganti nama; (b) lima sesi menimpa `layerExAlphaCore.hpp`/`layerExAlpha.cpp`/`test_core.cpp` dengan gaya registrasi dan helper bernama-sama yang berbeda → satu kelas, satu Core, empat berkas uji + `run_tests.sh`; (c) `script/k2emu.py` dua skrip berbeda (S4/S6) → `k2emu_unicorn.py`; (d) `helpers_map.md` (S1 vs S8: S8 superset); (e) `tests/tjs` (S2 vs S9: S9 superset); (f) dokumen: gabungan manual. Perbaikan tambahan: `_buffer` kosong di mode GPU pada S8, parity ketat, daftar harapan 66 nama, `t_registrasi.tjs`. Verifikasi: lihat 4.9f (Temuan penggabungan). **ASUMSI/terbuka:** ukuran tujuan Alpha, `Function` pada `AlphaAdd`/`ColorAlphaAdd`, 3 method sisa, semuanya belum build NDK/perangkat.

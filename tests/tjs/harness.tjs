@@ -1,0 +1,95 @@
+// harness.tjs - pembantu bersama skrip uji TJS (rencana 7.2).
+// STATUS: BELUM DIJALANKAN di mesin mana pun. Semantik API Layer dibaca dari src/core/visual/LayerIntf.cpp fork;
+// konstanta Layer.ltAlpha / Layer.ltOpaque dan Debug.message adalah ASUMSI (nama standar TJS2, tidak diverifikasi di sini).
+// Keluaran: baris teks berawalan  CASE (pengamatan, dibandingkan APK 1.3.9 vs fork)  atau  CHECK (invarian dari spesifikasi).
+
+var T_LINES = [];
+var T_PASS = 0, T_FAIL = 0;
+
+function tlog(s) { T_LINES.add(s); Debug.message(s); }
+
+function hex8(v) {
+	var s = "";
+	v = v & 0xFFFFFFFF;
+	for (var i = 7; i >= 0; i--) s += "0123456789abcdef".charAt((v >> (i * 4)) & 15);
+	return s;
+}
+
+// FNV-1a 32-bit atas ukuran + semua piksel utama (getMainPixel). Mengembalikan 8 digit hex.
+function hashLayer(l) {
+	var w = l.imageWidth, h = l.imageHeight;
+	var x, y;
+	var hh = 2166136261;
+	hh = ((hh ^ w) * 16777619) & 0xFFFFFFFF;
+	hh = ((hh ^ h) * 16777619) & 0xFFFFFFFF;
+	for (y = 0; y < h; y++)
+		for (x = 0; x < w; x++)
+			hh = ((hh ^ (l.getMainPixel(x, y) & 0xFFFFFFFF)) * 16777619) & 0xFFFFFFFF;
+	return hex8(hh);
+}
+
+// Pengamatan: dicatat apa adanya, tanpa penilaian (untuk diff APK vs fork).
+function obs(name, value) { tlog("CASE  " + name + " = " + value); }
+
+// Invarian dari spesifikasi: PASS/FAIL. Gunakan hanya untuk hal yang spesifikasinya yakin.
+function check(name, cond) {
+	if (cond) { T_PASS++; tlog("CHECK PASS " + name); }
+	else      { T_FAIL++; tlog("CHECK FAIL " + name); }
+}
+
+// Jalankan fn; kembalikan "ok" atau "throw:<pesan>" (tidak pernah melempar).
+function attempt(fn) {
+	try { fn(); } catch (e) { return "throw:" + e.message; }
+	return "ok";
+}
+
+// Pola deterministik. withAlpha=false -> alfa 0xFF.
+function fillPattern(l, seed, withAlpha) {
+	var w = l.imageWidth, h = l.imageHeight;
+	var x, y;
+	for (y = 0; y < h; y++)
+		for (x = 0; x < w; x++) {
+			var r = (x * 17 + seed * 31) & 255;
+			var g = (y * 13 + seed * 7) & 255;
+			var b = ((x ^ y) * 11 + seed * 5) & 255;
+			var a = withAlpha ? (0x40 + ((x + y * 3 + seed) & 0x7F)) : 0xFF;
+			l.setMainPixel(x, y, (a << 24) | (r << 16) | (g << 8) | b);
+		}
+}
+
+function fillFlat(l, argb) {
+	var w = l.imageWidth, h = l.imageHeight;
+	var x, y;
+	for (y = 0; y < h; y++) for (x = 0; x < w; x++) l.setMainPixel(x, y, argb);
+}
+
+var T_WIN = new Window();
+var T_BASE = new Layer(T_WIN, null);   // layer primer; hanya sebagai induk, tidak diubah ukurannya
+
+var T_LAYERS = [];
+// Lepas semua layer uji yang dibuat mk() (panggil di akhir tiap run_*).
+function dropAll() {
+	for (var i = 0; i < T_LAYERS.count; i++) invalidate T_LAYERS[i];
+	T_LAYERS.clear();
+}
+// Ada member bernama name pada objek obj (tanpa melempar)?
+function hasMember(obj, name) {
+	try { var t = obj[name]; return t !== void; } catch (e) { return false; }
+}
+
+// Bila true, ikut dijalankan kasus yang di APK 1.3.9 berisiko crash/membaca di luar batas
+// (src null / bukan Layer, src == this). JANGAN true saat menjalankan APK resmi.
+var RUN_UNSAFE_CASES = false;
+
+// Layer anak mandiri w x h. type: Layer.ltAlpha atau Layer.ltOpaque.
+function mk(w, h, type, seed, withAlpha) {
+	var l = new Layer(T_WIN, T_BASE);
+	T_LAYERS.add(l);
+	l.type = type;
+	l.setImageSize(w, h);
+	l.setSizeToImageSize();
+	fillPattern(l, seed, withAlpha);
+	return l;
+}
+
+function pixelAlpha(l, x, y) { return (l.getMainPixel(x, y) >> 24) & 255; }

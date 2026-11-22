@@ -1,0 +1,27 @@
+// startup.tjs - jalankan semua skrip uji 7.2. Taruh folder ini sebagai folder game uji
+// (atau salin berkas .tjs ke folder game kosong) lalu jalankan di Kirikiroid2.
+//
+// SEBELUM MENJALANKAN, setel dua variabel di bawah:
+//   RENDERER        : "software" atau "opengl" -- samakan dengan pengaturan aplikasi (kunci preferensi "renderer"; default "software").
+//   RUN_UNSAFE_CASES: biarkan false di APK resmi 1.3.9 (kasus yang bisa crash/baca di luar batas).
+// Hasil: baris "CASE"/"CHECK" lewat Debug.message (log aplikasi). Simpan log untuk APK 1.3.9 dan fork lalu `diff`.
+var RENDERER = "software";
+
+Scripts.execStorage("harness.tjs");
+// RUN_UNSAFE_CASES didefinisikan di harness.tjs (false). Ubah di sana bila perlu (hanya untuk build fork).
+
+Scripts.execStorage("t_registrasi.tjs");
+Scripts.execStorage("t_stretchCopyAA.tjs");
+Scripts.execStorage("t_copyRaster.tjs");
+Scripts.execStorage("t_shrinkCopy.tjs");
+Scripts.execStorage("t_shrinkCopyFast.tjs");
+Scripts.execStorage("t_alpha4.tjs");
+
+tlog("##### MULAI renderer=" + RENDERER + " unsafe=" + RUN_UNSAFE_CASES);
+var T_STEPS = [ "registrasi", "stretchCopyAA", "copyRaster", "shrinkCopy", "shrinkCopyFast", "alpha4" ];
+for (var T_I = 0; T_I < T_STEPS.count; T_I++) {
+	var T_NAME = T_STEPS[T_I];
+	var T_R = attempt(function() { global["run_" + T_NAME](); });
+	if (T_R != "ok") tlog("ERROR  run_" + T_NAME + " " + T_R);
+}
+tlog("##### SELESAI  PASS=" + T_PASS + " FAIL=" + T_FAIL);
