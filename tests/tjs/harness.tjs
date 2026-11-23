@@ -1,12 +1,24 @@
 // harness.tjs - pembantu bersama skrip uji TJS (rencana 7.2).
-// STATUS: BELUM DIJALANKAN di mesin mana pun. Semantik API Layer dibaca dari src/core/visual/LayerIntf.cpp fork;
-// konstanta Layer.ltAlpha / Layer.ltOpaque dan Debug.message adalah ASUMSI (nama standar TJS2, tidak diverifikasi di sini).
+// STATUS: dijalankan di perangkat (log pertama) lalu DIPERBAIKI; lihat README.md bagian "Aturan TJS".
+// ATURAN TJS yang dipelajari dari log pertama (jangan dilanggar lagi):
+//  1. Konstanta lt* / st* adalah GLOBAL (ScriptMgnIntf.cpp: ltOpaque=1, ltAlpha=2, stLinear=2), BUKAN anggota Layer.
+//     Tulis `ltAlpha`, bukan `Layer.ltAlpha`.
+//  2. Fungsi ANONIM tidak melihat variabel lokal fungsi pembungkusnya (galat: Member "n" does not exist).
+//     Jangan menulis attempt(function() { obj.m(x); }) dengan obj/x lokal. Pakai callm(obj, "m", [ x ]) atau attempt(fn, args*).
+//  3. String TJS2 tidak punya lastIndexOf. `arguments` hanya ada pada fungsi bertanda `*`.
+//  4. getMainPixel/setMainPixel HANYA RGB 24-bit (LayerIntf.cpp:2615-2636: `& 0xffffff`; SetPointMain tidak menyentuh alfa).
+//     ALFA lewat getMaskPixel/setMaskPixel. Menyuruh setMainPixel membawa alfa (0xAARRGGBB) tidak mengisi alfa sama sekali
+//     (dan bit atas diperlakukan sebagai ID warna sistem oleh TVPToActualColor). Dulu ini membuat SEMUA alfa uji = bawaan (0) dan
+//     19 dari 27 CHECK FAIL di log kedua. Pakai setPx/getPx (ARGB konvensional) di bawah, bukan setMainPixel/getMainPixel.
+//  5. Urutan byte R/B antara setMainPixel dan getMainPixel bisa terbalik di fork (set menukar via TVP_REVRGB, get hanya menutup 24 bit).
+//     Probe di akhir berkas ini mengukurnya (T_RBSWAP); getPx menormalkannya kembali ke ARGB konvensional.
 // Keluaran: baris teks berawalan  CASE (pengamatan, dibandingkan APK 1.3.9 vs fork)  atau  CHECK (invarian dari spesifikasi).
 
-var T_LINES = [];
+// T_LINES = pencatat bersama dari startup.tjs (BOOT_LINES): satu berkas log untuk semuanya.
+var T_LINES = BOOT_LINES;
 var T_PASS = 0, T_FAIL = 0;
 
-function tlog(s) { T_LINES.add(s); Debug.message(s); }
+function tlog(s) { T_LINES.add(s); try { Debug.message(s); } catch (e) {} bootflush(); }
 
 function hex8(v) {
 	var s = "";
@@ -15,7 +27,8 @@ function hex8(v) {
 	return s;
 }
 
-// FNV-1a 32-bit atas ukuran + semua piksel utama (getMainPixel). Mengembalikan 8 digit hex.
+// FNV-1a 32-bit atas ukuran + semua piksel: (alfa lewat getMaskPixel << 24) | RGB mentah dari getMainPixel. Mengembalikan 8 digit hex.
+// CATATAN: nilai hash BERBEDA dari log lama (log lama tidak memuat alfa sama sekali); jangan dibandingkan dengan log lama.
 function hashLayer(l) {
 	var w = l.imageWidth, h = l.imageHeight;
 	var x, y;
@@ -24,12 +37,17 @@ function hashLayer(l) {
 	hh = ((hh ^ h) * 16777619) & 0xFFFFFFFF;
 	for (y = 0; y < h; y++)
 		for (x = 0; x < w; x++)
-			hh = ((hh ^ (l.getMainPixel(x, y) & 0xFFFFFFFF)) * 16777619) & 0xFFFFFFFF;
+			hh = ((hh ^ ((((l.getMaskPixel(x, y) & 255) << 24) | (l.getMainPixel(x, y) & 0xFFFFFF)) & 0xFFFFFFFF)) * 16777619) & 0xFFFFFFFF;
 	return hex8(hh);
 }
 
 // Pengamatan: dicatat apa adanya, tanpa penilaian (untuk diff APK vs fork).
-function obs(name, value) { tlog("CASE  " + name + " = " + value); }
+// Bila nilainya memuat "does not exist" (anggota/variabel tak ada) itu galat skrip/bahasa, bukan perilaku plugin: tandai FAIL
+// agar tidak lolos diam-diam (sebelumnya galat ini tertelan jadi "throw:...").
+function obs(name, value) {
+	tlog("CASE  " + name + " = " + value);
+	if (("" + value).indexOf("does not exist") >= 0) check("obs tanpa galat nama/lingkup (" + name + ")", false);
+}
 
 // Invarian dari spesifikasi: PASS/FAIL. Gunakan hanya untuk hal yang spesifikasinya yakin.
 function check(name, cond) {
@@ -37,9 +55,17 @@ function check(name, cond) {
 	else      { T_FAIL++; tlog("CHECK FAIL " + name); }
 }
 
-// Jalankan fn; kembalikan "ok" atau "throw:<pesan>" (tidak pernah melempar).
-function attempt(fn) {
-	try { fn(); } catch (e) { return "throw:" + e.message; }
+// Jalankan fn(args*); kembalikan "ok" atau "throw:<pesan>" (tidak pernah melempar).
+// Nilai yang dibutuhkan fn HARUS dioper lewat args (fungsi anonim tidak melihat variabel lokal pembungkusnya).
+function attempt(fn, args*) {
+	try { fn(args*); } catch (e) { return "throw:" + e.message; }
+	return "ok";
+}
+
+// Panggil method `name` pada `obj` dengan larik argumen `args`; kembalikan "ok" atau "throw:<pesan>".
+// Pengganti attempt(function() { obj.name(...); }) tanpa closure.
+function callm(obj, name, args) {
+	try { var f = obj[name]; f(args*); } catch (e) { return "throw:" + e.message; }
 	return "ok";
 }
 
@@ -53,18 +79,20 @@ function fillPattern(l, seed, withAlpha) {
 			var g = (y * 13 + seed * 7) & 255;
 			var b = ((x ^ y) * 11 + seed * 5) & 255;
 			var a = withAlpha ? (0x40 + ((x + y * 3 + seed) & 0x7F)) : 0xFF;
-			l.setMainPixel(x, y, (a << 24) | (r << 16) | (g << 8) | b);
+			setPx(l, x, y, (a << 24) | (r << 16) | (g << 8) | b);
 		}
 }
 
 function fillFlat(l, argb) {
 	var w = l.imageWidth, h = l.imageHeight;
 	var x, y;
-	for (y = 0; y < h; y++) for (x = 0; x < w; x++) l.setMainPixel(x, y, argb);
+	for (y = 0; y < h; y++) for (x = 0; x < w; x++) setPx(l, x, y, argb);
 }
 
+tlog("HARNESS dimuat; membuat Window uji...");
 var T_WIN = new Window();
 var T_BASE = new Layer(T_WIN, null);   // layer primer; hanya sebagai induk, tidak diubah ukurannya
+tlog("HARNESS Window + Layer uji dibuat");
 
 var T_LAYERS = [];
 // Lepas semua layer uji yang dibuat mk() (panggil di akhir tiap run_*).
@@ -81,7 +109,7 @@ function hasMember(obj, name) {
 // (src null / bukan Layer, src == this). JANGAN true saat menjalankan APK resmi.
 var RUN_UNSAFE_CASES = false;
 
-// Layer anak mandiri w x h. type: Layer.ltAlpha atau Layer.ltOpaque.
+// Layer anak mandiri w x h. type: ltAlpha atau ltOpaque (konstanta GLOBAL).
 function mk(w, h, type, seed, withAlpha) {
 	var l = new Layer(T_WIN, T_BASE);
 	T_LAYERS.add(l);
@@ -92,4 +120,55 @@ function mk(w, h, type, seed, withAlpha) {
 	return l;
 }
 
-function pixelAlpha(l, x, y) { return (l.getMainPixel(x, y) >> 24) & 255; }
+function pixelAlpha(l, x, y) { return l.getMaskPixel(x, y) & 255; }
+
+// ---- piksel ARGB konvensional (0xAARRGGBB) di atas API asli: RGB lewat getMainPixel/setMainPixel, alfa lewat getMaskPixel/setMaskPixel ----
+var T_RBSWAP = false;   // diisi probe di akhir berkas: true bila set(0x112233) lalu getMainPixel mengembalikan 0x332211
+function rbswap(v) { v = v & 0xFFFFFF; return ((v & 0xFF00) | ((v >> 16) & 0xFF) | ((v & 0xFF) << 16)); }
+function getPx(l, x, y) {
+	var m = l.getMainPixel(x, y) & 0xFFFFFF;
+	if (T_RBSWAP) m = rbswap(m);
+	return ((((l.getMaskPixel(x, y) & 255) << 24) | m) & 0xFFFFFFFF);
+}
+function setPx(l, x, y, argb) {
+	l.setMainPixel(x, y, argb & 0xFFFFFF);          // 24 bit saja: bit atas = ID warna sistem bagi TVPToActualColor
+	l.setMaskPixel(x, y, (argb >> 24) & 255);
+}
+
+// Probe urutan R/B (jalan saat berkas dimuat). Tanpa closure; hasil di T_RBSWAP.
+var T_PROBE = new Layer(T_WIN, T_BASE);
+T_PROBE.type = ltAlpha;
+T_PROBE.setImageSize(1, 1);
+T_PROBE.setSizeToImageSize();
+T_PROBE.setMainPixel(0, 0, 0x112233);
+var T_PROBE_V = T_PROBE.getMainPixel(0, 0) & 0xFFFFFF;
+T_RBSWAP = (T_PROBE_V == 0x332211);
+tlog("HARNESS probe RGB: set 0x112233 -> getMainPixel 0x" + hex8(T_PROBE_V) + "  T_RBSWAP=" + T_RBSWAP);
+invalidate T_PROBE;
+
+// Pemeriksaan-diri (langkah pertama di startup.tjs): menangkap galat bahasa/lingkup sebelum suite dijalankan.
+function run_selfcheck()
+{
+	tlog("== selfcheck");
+	check("konstanta global ltOpaque==1 ltAlpha==2 stLinear==2", ltOpaque == 1 && ltAlpha == 2 && stLinear == 2);
+	check("Layer tidak punya anggota ltAlpha (konstanta memang global)", !hasMember(Layer, "ltAlpha"));
+	var five = 5;
+	check("attempt mengoper args ke fungsi anonim", attempt(function(m) { if (m != 5) throw new Exception("salah"); }, five) == "ok");
+	check("attempt menangkap lemparan", attempt(function() { throw new Exception("x"); }) != "ok");
+	tlog("CASE  selfcheck.closure_tanpa_args = " + attempt(function() { var z = five; }) + "   (informasi: 'throw:Member ... does not exist' = perilaku TJS yang dihindari)");
+	var l = mk(3, 2, ltAlpha, 1, true);
+	check("callm memanggil method asli dengan this benar (setImageSize)", callm(l, "setImageSize", [ 5, 4 ]) == "ok" && l.imageWidth == 5 && l.imageHeight == 4);
+	check("callm melaporkan method yang tak ada", callm(l, "metodeTidakAda", [ 1 ]) != "ok");
+	// ---- piksel & alfa lewat API asli (alasan perbaikan setelah log kedua: 19 dari 27 FAIL berasal dari sini) ----
+	var pl = mk(2, 1, ltAlpha, 0, true);
+	setPx(pl, 0, 0, 0x80112233); setPx(pl, 1, 0, 0x00FEDCBA);
+	check("selfcheck: probe RGB mengembalikan 0x112233 atau 0x332211", T_PROBE_V == 0x112233 || T_PROBE_V == 0x332211);
+	tlog("CASE  selfcheck.getMainPixel_urutan = " + (T_RBSWAP ? "R/B TERBALIK terhadap setMainPixel (dinormalkan oleh getPx)" : "sama dengan setMainPixel"));
+	check("selfcheck: setPx/getPx bolak-balik ARGB (alfa 0x80)", getPx(pl, 0, 0) == 0x80112233 && getPx(pl, 1, 0) == 0x00FEDCBA);
+	check("selfcheck: alfa lewat getMaskPixel", pixelAlpha(pl, 0, 0) == 0x80 && pixelAlpha(pl, 1, 0) == 0);
+	check("selfcheck: getMainPixel tidak membawa alfa (24 bit)", (pl.getMainPixel(0, 0) & 0xFF000000) == 0);
+	var pq = mk(2, 1, ltOpaque, 0, false);
+	setPx(pq, 0, 0, 0x7F010203);
+	tlog("CASE  selfcheck.opaque_alfa_setelah_setMaskPixel_0x7F = " + pixelAlpha(pq, 0, 0));
+	dropAll();
+}

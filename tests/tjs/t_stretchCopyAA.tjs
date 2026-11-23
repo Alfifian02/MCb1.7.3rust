@@ -10,11 +10,11 @@ function run_stretchCopyAA()
 	check("stretchCopyAA === stretchCopy (alias)", Layer.stretchCopyAA === Layer.stretchCopy);
 
 	// Piksel: AA vs stretchCopy harus identik (alias), untuk dua mode skala.
-	var modes = [ [ "default", void ], [ "linear", Layer.stLinear ] ];
+	var modes = [ [ "default", void ], [ "linear", stLinear ] ];
 	for (var i = 0; i < modes.count; i++) {
-		var src = mk(16, 16, Layer.ltAlpha, 1, true);
-		var a = mk(8, 8, Layer.ltAlpha, 2, true);
-		var b = mk(8, 8, Layer.ltAlpha, 2, true);
+		var src = mk(16, 16, ltAlpha, 1, true);
+		var a = mk(8, 8, ltAlpha, 2, true);
+		var b = mk(8, 8, ltAlpha, 2, true);
 		if (modes[i][1] === void) {
 			a.stretchCopyAA(0, 0, 8, 8, src, 0, 0, 16, 16);
 			b.stretchCopy(0, 0, 8, 8, src, 0, 0, 16, 16);
@@ -26,6 +26,6 @@ function run_stretchCopyAA()
 		check("stretchCopyAA piksel == stretchCopy (" + modes[i][0] + ")", hashLayer(a) == hashLayer(b));
 	}
 	// Tautan ulang tidak boleh error.
-	obs("stretchCopyAA.link_ulang", attempt(function() { Plugins.link("layerExAreaAverage.dll"); }));
+	obs("stretchCopyAA.link_ulang", callm(Plugins, "link", [ "layerExAreaAverage.dll" ]));
 	dropAll();
 }

@@ -21,9 +21,9 @@ Roadmap :
     - [x] `layerExImage` (`light`, `colorize`, `modulate`, `noise`, `generateWhiteNoise`, `gaussianBlur` — CPU path matches the original function in an emulator; GPU path untested)
     - [~] `layerExShimmer` (2 methods written; the interior of `shimmer` and the 4th argument of `shimmerBuildMap` are still assumptions until the helper functions are read; host unit tests only)
     - [~] `layerExAlpha`: **28 of the 31 registered names written** in one class (`turnAlpha … MaskImageEffectRect`; host unit tests + instruction emulation for part of them, not yet NDK/device). Missing: `AlphaBlend`, `WhiteToBlueBlurAdd`, `ExMaskRect2`
-    - [ ] `layerExSave` (14) — implementation address map is ready (`script/layerex_impl_map.tsv`)
+    - [~] `layerExSave` (14): **8 utility methods written** (`getCropRect`, `getCropRectZero`, `getDiffRect`, `getDiffPixel`, `oozeColor`, `copyBlueToAlpha`, `isBlank`, `clearAlpha` — module name `LayerExSave.dll`; host unit tests + instruction emulation, not yet NDK/device). Missing: the thread/PNG/TLG5 part (6 methods + `WindowSaveImage` + callbacks)
   - [ ] [layerExDraw](https://github.com/wamsoft/layerExDraw) (gdiPlus)
-  - [ ] [scriptsEx](https://github.com/wamsoft/scriptsEx)
+  - [~] [scriptsEx](https://github.com/wtnbgo/scriptsEx) — source publik diadaptasi ke `src/plugins/scriptsEx.cpp` (sintaks/objek-host OK; belum NDK/perangkat)
   - work is split into sessions: [docs/sesi_kerja.md](docs/sesi_kerja.md)
   - [ ] verify the new plugins: NDK build (arm64-v8a, armeabi-v7a), small TJS scripts, differential test against the 1.3.9 APK
 - platform

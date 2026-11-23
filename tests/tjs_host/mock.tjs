@@ -1,0 +1,175 @@
+// mock.tjs - tiruan MINIMAL lingkungan Kirikiroid2 untuk memeriksa BAHASA skrip uji di mesin TJS2 milik repo.
+// TIDAK meniru semantik piksel plugin (stub hanya mengembalikan 0). CHECK yang bergantung piksel boleh FAIL di sini.
+var MOCK_NAMES = [];
+var MOCK_RBSWAP = false;   // ubah ke true (build_and_run.sh RBSWAP=1) untuk meniru urutan R/B terbalik di fork
+var MOCK_REAL = [ "shrinkCopy", "shrinkCopyFast", "stretchCopyAA", "getCropRect", "getCropRectZero", "getDiffRect", "getDiffPixel", "oozeColor", "copyBlueToAlpha", "isBlank", "clearAlpha", "MaskImageRideRect7", "MaskImageRideRect8", "AlphaBorderInnerRect" ];
+function MOCK_STUB() { return 0; }
+function mockImpl(name) { var f = void; try { f = global["mock_" + name]; } catch (e) { f = void; } return (f === void) ? MOCK_STUB : f; }
+// ---- semantik minimal sesuai docs/spec (hanya untuk menguji logika CHECK di skrip, BUKAN perilaku plugin sebenarnya) ----
+
+var MOCK_MODULES = %[
+	"layerexraster.dll"       => [ "copyRaster" ],
+	"shrinkcopy.dll"          => [ "shrinkCopy", "shrinkCopyFast" ],
+	"layerexareaaverage.dll"  => [ "stretchCopyAA" ],
+	"layerexbtoa.dll"         => [ "copyRightBlueToLeftAlpha", "copyBottomBlueToTopAlpha", "fillAlpha", "copyAlphaToProvince", "clipAlphaRect", "fillByProvince" ],
+	"layereximage.dll"       => [ "light", "colorize", "modulate", "noise", "generateWhiteNoise", "gaussianBlur" ],
+	"layerexshimmer.dll"      => [ "shimmer", "shimmerBuildMap" ],
+	"layerexsave.dll"         => [ "getCropRect", "getCropRectZero", "getDiffRect", "getDiffPixel", "oozeColor", "copyBlueToAlpha", "isBlank", "clearAlpha" ],
+	"layerexalpha.dll"        => [ "turnAlpha", "turnAlpha2", "turnAlpha3", "turnOutline", "AlphaColorRect", "AlphaDivide", "AlphaAdd", "AlphaAdd2", "BlackForAlpha", "ColorAlphaAdd", "ColorVectorEffectAdd", "ExtraColorVectorEffectAdd", "MaskRect", "ExMaskRect", "LightForAlpha", "LuminanceForAlpha", "LevelMaskRect", "LevelMaskRect2", "MaskImageRideRect", "MaskImageRideRect2", "MaskImageRideRect3", "MaskImageRideRect4", "MaskImageRideRect5", "MaskImageRideRect7", "MaskImageRideRect8", "AlphaBorderInnerRect", "AlphaBorderImageCoverRect", "MaskImageEffectRect" ]
+];
+// kunci modul = huruf kecil; "layerEximage" ditulis lowercase di bawah agar cocok
+MOCK_MODULES["layerexImage.dll".toLowerCase()] = MOCK_MODULES["layerEximage.dll".toLowerCase()];
+
+class MockPlugins {
+	function link(name) {
+		var n = name.toLowerCase();
+		var p = n.indexOf("/"); while (p >= 0) { n = n.substring(p + 1); p = n.indexOf("/"); }
+		var ms = MOCK_MODULES[n];
+		if (ms === void) return;                       // fork: modul tak dikenal diabaikan tanpa galat
+		for (var i = 0; i < ms.count; i++) { if (MOCK_REAL.find(ms[i]) < 0) Layer[ms[i]] = MOCK_STUB; if (MOCK_NAMES.find(ms[i]) < 0) MOCK_NAMES.add(ms[i]); }
+	}
+}
+var Plugins = new MockPlugins();
+class MockDebug { function message(s) { } function startLogToFile(b) { } }
+var Debug = new MockDebug();
+
+class Window {
+	var visible = false;
+	function Window() { }
+	function setInnerSize(w, h) { }
+}
+class Layer {
+	var type = 2, visible = false, font = %[ height: 18 ];
+	var _w = 0, _h = 0, _px = [];
+	function Layer(win, parent) { for (var i = 0; i < MOCK_NAMES.count; i++) if (MOCK_REAL.find(MOCK_NAMES[i]) < 0) this[MOCK_NAMES[i]] = MOCK_STUB; }
+	property imageWidth  { getter() { return _w; } }
+	property imageHeight { getter() { return _h; } }
+	function setImageSize(w, h) { _w = w; _h = h; _px = []; _px.count = w * h; for (var i = 0; i < w * h; i++) _px[i] = 0; }
+	function setSizeToImageSize() { }
+	function setClip(x, y, w, h) { }
+	function fillRect(x, y, w, h, c) { }
+	function drawText(x, y, s, c) { }
+	// Semantik ASLI fork (LayerIntf.cpp:2615-2636): getMainPixel = RGB 24 bit saja; setMainPixel tidak menyentuh alfa; alfa lewat mask.
+	// MOCK_RBSWAP meniru fork: set menukar R/B (TVP_REVRGB) tetapi get hanya menutup 24 bit -> bolak-balik terbalik. _px = kata memori.
+	function getMainPixel(x, y) { if (x < 0 || y < 0 || x >= _w || y >= _h) throw new Exception("out of rectangle"); return _px[y * _w + x] & 0xFFFFFF; }
+	function setMainPixel(x, y, c) {
+		if (x < 0 || y < 0 || x >= _w || y >= _h) throw new Exception("out of rectangle");
+		c = c & 0xFFFFFF; if (MOCK_RBSWAP) c = ((c & 0xFF00) | ((c >> 16) & 0xFF) | ((c & 0xFF) << 16));
+		_px[y * _w + x] = (_px[y * _w + x] & 0xFF000000) | c;
+	}
+	function getMaskPixel(x, y) { if (x < 0 || y < 0 || x >= _w || y >= _h) throw new Exception("out of rectangle"); return (_px[y * _w + x] >> 24) & 0xFF; }
+	function setMaskPixel(x, y, m) { if (x < 0 || y < 0 || x >= _w || y >= _h) throw new Exception("out of rectangle"); _px[y * _w + x] = ((m & 0xFF) << 24) | (_px[y * _w + x] & 0xFFFFFF); }
+	function copyRect(dx, dy, src, sx, sy, w, h) { }
+	function stretchCopy(dx, dy, dw, dh, src, sx, sy, sw, sh, t) { }
+	// ---- semantik minimal sesuai spesifikasi (hanya untuk menguji logika CHECK, BUKAN perilaku plugin sebenarnya) ----
+	function shrinkCopyFast(src, hs, vs) {
+		if (hs <= 0) throw new Exception("invalid param");
+		var evs = (vs === void || vs == 0) ? hs : vs;
+		var ew = int((src.imageWidth + hs - 1) / hs), eh = int((src.imageHeight + evs - 1) / evs);
+		setImageSize(ew, eh);
+		for (var y = 0; y < eh; y++) for (var x = 0; x < ew; x++) _px[y * _w + x] = 0xFF000000 | (src._px[(y * evs) * src._w + x * hs] & 0xFFFFFF);
+	}
+	function shrinkCopy(dx, dy, dw, dh, src, sx, sy, sw, sh) {
+		if (sw < 1 || sh < 1 || dw <= 0 || dh <= 0 || dw > sw || dh > sh) throw new Exception("invalid param");
+		var c = src._px[0];
+		for (var y = 0; y < _h; y++) for (var x = 0; x < _w; x++) if (x >= dx && y >= dy && x < dx + dw && y < dy + dh) _px[y * _w + x] = c;
+	}
+
+	// ---- LayerExSave bagian A: tiruan minimal HANYA agar semua jalur skrip tereksekusi (diturunkan dari ekspektasi tes, bukan dari plugin) ----
+	function _cropRect(zero) {
+		var x0 = _w, y0 = _h, x1 = -1, y1 = -1;
+		for (var y = 0; y < _h; y++) for (var x = 0; x < _w; x++) {
+			var v = _px[y * _w + x] & 0xFFFFFFFF; var hit = zero ? (v != 0) : (((v >> 24) & 0xFF) != 0);
+			if (hit) { if (x < x0) x0 = x; if (y < y0) y0 = y; if (x > x1) x1 = x; if (y > y1) y1 = y; }
+		}
+		if (x1 < 0) return void;
+		return %[ x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 ];
+	}
+	function getCropRect() { return _cropRect(false); }
+	function getCropRectZero() { return _cropRect(true); }
+	function _same(a, b) { a = a & 0xFFFFFFFF; b = b & 0xFFFFFFFF; if (((a >> 24) & 0xFF) == 0 && ((b >> 24) & 0xFF) == 0) return true; return a == b; }
+	function getDiffRect(o) {
+		if (o === void) throw new Exception("badparamcount");
+		if (o._w != _w || o._h != _h) throw new Exception("invalid param");
+		var x0 = _w, y0 = _h, x1 = -1, y1 = -1;
+		for (var y = 0; y < _h; y++) for (var x = 0; x < _w; x++) if (!_same(_px[y * _w + x], o._px[y * _w + x])) { if (x < x0) x0 = x; if (y < y0) y0 = y; if (x > x1) x1 = x; if (y > y1) y1 = y; }
+		if (x1 < 0) return void;
+		return %[ x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 ];
+	}
+	function getDiffPixel(o, same, diff) {
+		if (o === void) throw new Exception("badparamcount");
+		if (o._w != _w || o._h != _h) throw new Exception("invalid param");
+		var n = 0;
+		for (var y = 0; y < _h; y++) for (var x = 0; x < _w; x++) {
+			var d = (_px[y * _w + x] & 0xFFFFFFFF) != (o._px[y * _w + x] & 0xFFFFFFFF);
+			if (d) { n++; if (diff !== void) _px[y * _w + x] = diff; } else if (same !== void) _px[y * _w + x] = same;
+		}
+		return n;
+	}
+	function oozeColor(level, threshold, color) {
+		if (level === void) throw new Exception("badparamcount");
+		if (level < 1) throw new Exception("invalid param");
+		if (threshold === void) threshold = 1; if (color === void) color = 0;
+		for (var i = 0; i < _w * _h; i++) { var v = _px[i] & 0xFFFFFFFF; var a = (v >> 24) & 0xFF; if (a < threshold) _px[i] = (a << 24) | (color & 0xFFFFFF); }
+	}
+	function copyBlueToAlpha(src) {
+		var w = (src.imageWidth < _w) ? src.imageWidth : _w, h = (src.imageHeight < _h) ? src.imageHeight : _h;
+		for (var y = 0; y < h; y++) for (var x = 0; x < w; x++) _px[y * _w + x] = (((src._px[y * src._w + x] & 0xFF) << 24) | (_px[y * _w + x] & 0xFFFFFF));
+	}
+	function isBlank(x, y, w, h) {
+		if (h === void) throw new Exception("badparamcount");
+		if (w == 0 || h == 0) return 1;
+		if (x < 0 || y < 0 || w < 0 || h < 0 || x + w > _w || y + h > _h) throw new Exception("invalid param");
+		for (var j = y; j < y + h; j++) for (var i = x; i < x + w; i++) if ((_px[j * _w + i] & 0xFF) != 0) return 0;
+		return 1;
+	}
+	function clearAlpha(threshold, color) {
+		if (threshold === void) threshold = 0; if (color === void) color = 0;
+		for (var i = 0; i < _w * _h; i++) { var a = ((_px[i] & 0xFFFFFFFF) >> 24) & 0xFF; if (a <= threshold) _px[i] = (color & 0xFFFFFF); }
+	}
+	function stretchCopyAA(a, b, c, d, e, f, g, h, i, j) { stretchCopy(a, b, c, d, e, f, g, h, i, j); }
+
+	// ---- layerExAlpha S9 (semantik minimal dari docs/spec + layerExAlphaCore.hpp: ride7/ride8/border_inner). Hanya agar CHECK skrip ikut dieksekusi. ----
+	function _isLayer(o) { return typeof o == "Object" && o._px !== void; }
+	function MaskImageRideRect7(img, mask, a, b) {
+		if (b === void) throw new Exception("Invalid argument count");
+		if (!_isLayer(img) || !_isLayer(mask)) throw new Exception("Not Layer");
+		if (b < 1) throw new Exception("Invalid argument");
+		if (img._w != _w || img._h != _h || mask._w != _w || mask._h != _h) return;
+		var lo = (a - b < 0) ? 0 : (a - b + 1); if (lo > 255) lo = 255;
+		var hi = a + b; if (hi < 0) hi = 0; if (hi > 255) hi = 255;
+		var n = 2 * b - 1;
+		for (var i = 0; i < _w * _h; i++) {
+			var s = img._px[i] & 0xFFFFFFFF, da = (_px[i] >> 24) & 255, sa = (s >> 24) & 255;
+			if (da == 0 && sa == 0) continue;
+			var m = (mask._px[i] >> 24) & 255;
+			if (lo > m) continue;
+			if (hi <= m) { _px[i] = _px[i] & 0x00FFFFFF; continue; }
+			var idx = m - lo, t;
+			if (idx < b - 1) t = (idx + 1) / b; else if (idx == b - 1) t = 1.0; else t = (n - idx) / b;
+			if (t > 1.0) t = 1.0; if (t < 0.0) t = 0.0;
+			_px[i] = ((int(t * sa + 0.5) & 255) << 24) | (s & 0xFFFFFF);
+		}
+	}
+	function MaskImageRideRect8(img, mask, th) {
+		if (th === void) throw new Exception("Invalid argument count");
+		if (!_isLayer(img) || !_isLayer(mask)) throw new Exception("Not Layer");
+		if (img._w != _w || img._h != _h || mask._w != _w || mask._h != _h) return;
+		for (var i = 0; i < _w * _h; i++) {
+			var s = img._px[i] & 0xFFFFFFFF;
+			if ((((_px[i] >> 24) & 255) == 0) && (((s >> 24) & 255) == 0)) continue;
+			if (((mask._px[i] >> 24) & 255) <= th) continue;
+			_px[i] = s;
+		}
+	}
+	function AlphaBorderInnerRect(mask, th) {
+		if (th === void) throw new Exception("Invalid argument count");
+		if (!_isLayer(mask)) throw new Exception("Not Layer");
+		if (mask._w != _w || mask._h < _h) return;
+		for (var i = 0; i < _w * _h; i++) if (((mask._px[i] >> 24) & 255) >= th) _px[i] = _px[i] & 0x00FFFFFF;
+	}
+
+}
+
+// konstanta global seperti TVPInitTJSScript (ScriptMgnIntf.cpp:73,83)
+var ltOpaque = 1, ltAlpha = 2, stLinear = 2;

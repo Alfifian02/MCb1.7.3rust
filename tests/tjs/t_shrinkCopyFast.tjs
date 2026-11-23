@@ -9,7 +9,7 @@ function run_shrinkCopyFast()
 	Plugins.link("shrinkCopy.dll");
 	check("shrinkCopyFast terdaftar", hasMember(Layer, "shrinkCopyFast"));
 
-	var types = [ [ "alpha", Layer.ltAlpha, true ], [ "opaque", Layer.ltOpaque, false ] ];
+	var types = [ [ "alpha", ltAlpha, true ], [ "opaque", ltOpaque, false ] ];
 	for (var ti = 0; ti < types.count; ti++) {
 		var tn = types[ti][0], tt = types[ti][1], ta = types[ti][2];
 		var srcs = [ [ "16x16", 16, 16 ], [ "17x13", 17, 13 ] ];     // 17x13: sisa grup horizontal & vertikal
@@ -21,7 +21,7 @@ function run_shrinkCopyFast()
 			for (var k = 0; k < cfg.count; k++) {
 				var hs = cfg[k][0], vs = cfg[k][1];
 				var d = mk(5, 5, tt, 2, ta);                        // ukuran awal beda: harus di-resize
-				var r = attempt(function() { if (vs === void) d.shrinkCopyFast(src, hs); else d.shrinkCopyFast(src, hs, vs); });
+				var r = callm(d, "shrinkCopyFast", (vs === void) ? [ src, hs ] : [ src, hs, vs ]);
 				var evs = (vs === void || vs == 0) ? hs : vs;
 				var ew = int((sw + hs - 1) / hs), eh = int((sh + evs - 1) / evs);
 				var tag = "shrinkCopyFast." + tn + "." + sn + ".hs" + hs + "_vs" + (vs === void ? "none" : vs);
@@ -44,16 +44,16 @@ function run_shrinkCopyFast()
 		var zs = [ 0, -1 ];
 		for (var m = 0; m < zs.count; m++) {
 			var dz = mk(5, 5, tt, 2, ta), bz = hashLayer(dz);
-			var rz = attempt(function() { dz.shrinkCopyFast(src2, zs[m]); });
+			var rz = callm(dz, "shrinkCopyFast", [ src2, zs[m] ]);
 			obs("shrinkCopyFast." + tn + ".hs" + zs[m], rz + " ukuran=" + dz.imageWidth + "x" + dz.imageHeight + " hash_berubah=" + (hashLayer(dz) != bz));
 			if (CPU) check("shrinkCopyFast CPU hs=" + zs[m] + " melempar (" + tn + ")", rz != "ok");
 		}
 	}
 	// argumen kurang -> TJS_E_BADPARAMCOUNT
-	var q = mk(8, 8, Layer.ltAlpha, 1, true), s = mk(8, 8, Layer.ltAlpha, 2, true);
-	obs("shrinkCopyFast.argumen_kurang", attempt(function() { q.shrinkCopyFast(s); }));
+	var q = mk(8, 8, ltAlpha, 1, true), s = mk(8, 8, ltAlpha, 2, true);
+	obs("shrinkCopyFast.argumen_kurang", callm(q, "shrinkCopyFast", [ s ]));
 	// src == this: di APK 1.3.9 baca di luar batas; fork menolak (CPU). Hanya bila RUN_UNSAFE_CASES.
-	if (RUN_UNSAFE_CASES) obs("shrinkCopyFast.src_sama_dengan_this", attempt(function() { q.shrinkCopyFast(q, 2); }));
-	if (RUN_UNSAFE_CASES) obs("shrinkCopyFast.src_null", attempt(function() { q.shrinkCopyFast(null, 2); }));
+	if (RUN_UNSAFE_CASES) obs("shrinkCopyFast.src_sama_dengan_this", callm(q, "shrinkCopyFast", [ q, 2 ]));
+	if (RUN_UNSAFE_CASES) obs("shrinkCopyFast.src_null", callm(q, "shrinkCopyFast", [ null, 2 ]));
 	dropAll();
 }

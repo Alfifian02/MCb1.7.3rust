@@ -6,7 +6,7 @@ function run_copyRaster()
 	Plugins.link("layerExRaster.dll");
 	check("copyRaster terdaftar", hasMember(Layer, "copyRaster"));
 
-	var types = [ [ "alpha", Layer.ltAlpha, true ], [ "opaque", Layer.ltOpaque, false ] ];
+	var types = [ [ "alpha", ltAlpha, true ], [ "opaque", ltOpaque, false ] ];
 	for (var ti = 0; ti < types.count; ti++) {
 		var tn = types[ti][0], tt = types[ti][1], ta = types[ti][2];
 		var src = mk(16, 16, tt, 1, ta);
@@ -43,7 +43,7 @@ function run_copyRaster()
 		dcl.setClip(4, 4, 8, 8);
 		dcl.copyRaster(src, 3, 8, 30, 100);
 		obs("copyRaster." + tn + ".clip", hashLayer(dcl));
-		check("copyRaster di luar clip tak berubah (" + tn + ")", dcl.getMainPixel(0, 0) == orig.getMainPixel(0, 0) && dcl.getMainPixel(15, 15) == orig.getMainPixel(15, 15));
+		check("copyRaster di luar clip tak berubah (" + tn + ")", getPx(dcl, 0, 0) == getPx(orig, 0, 0) && getPx(dcl, 15, 15) == getPx(orig, 15, 15));
 		// clip kosong (lebar 0) -> tanpa kerja
 		var dz = mk(16, 16, tt, 2, ta), bz = hashLayer(dz);
 		dz.setClip(4, 4, 0, 0);
@@ -51,9 +51,9 @@ function run_copyRaster()
 		obs("copyRaster." + tn + ".clip_kosong", hashLayer(dz) == bz ? "tak_berubah" : "berubah");
 	}
 	// jumlah argumen kurang -> TJS_E_BADPARAMCOUNT
-	var q = mk(16, 16, Layer.ltAlpha, 1, true), s = mk(16, 16, Layer.ltAlpha, 2, true);
-	obs("copyRaster.argumen_kurang", attempt(function() { q.copyRaster(s, 3, 8, 30); }));
+	var q = mk(16, 16, ltAlpha, 1, true), s = mk(16, 16, ltAlpha, 2, true);
+	obs("copyRaster.argumen_kurang", callm(q, "copyRaster", [ s, 3, 8, 30 ]));
 	// Kasus berbahaya di APK asli (membaca penunjuk tak terinisialisasi): hanya bila RUN_UNSAFE_CASES.
-	if (RUN_UNSAFE_CASES) obs("copyRaster.src_bukan_layer", attempt(function() { q.copyRaster(void, 3, 8, 30, 100); }));
+	if (RUN_UNSAFE_CASES) obs("copyRaster.src_bukan_layer", callm(q, "copyRaster", [ void, 3, 8, 30, 100 ]));
 	dropAll();
 }

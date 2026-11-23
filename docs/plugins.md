@@ -1,6 +1,6 @@
 # Status plugin
 
-Diperbarui: 2026-11-22 (penggabungan S1–S10) · Target: fork Kirikiroid2 1.4.0 beta · Pembanding: `libgame.so` 1.3.9 (arm64).
+Diperbarui: 2026-11-23 (S11 digabung dengan S1–S10) · Target: fork Kirikiroid2 1.4.0 beta · Pembanding: `libgame.so` 1.3.9 (arm64).
 Rencana kerja: [`rencana_decomp_recomp.md`](rencana_decomp_recomp.md) · Pembagian sesi & inventaris yang belum: [`sesi_kerja.md`](sesi_kerja.md) · Spesifikasi perilaku: [`spec/`](spec/) · Kamus helper binary→fork: [`spec/helpers_map.md`](spec/helpers_map.md).
 
 ## Cara membaca
@@ -50,6 +50,13 @@ Build: jalur CMake (arm64-v8a) menautkan `krkr2plugin` dengan `--whole-archive`;
 | `layerExImage.dll` | `layerExImage.cpp` + `layerExImageCore.hpp` | `light`, `colorize`, `modulate`, `noise`, `generateWhiteNoise`, `gaussianBlur` | rekonstruksi | **emulasi-biner (jalur CPU)**, inti-host, sintaks, objek-host | Jalur CPU identik dengan fungsi asli di emulator (0 selisih; `tests/plugins/layerExImage/golden.inc`). ⚠️ Jalur GPU (shader asli diformat ulang) **belum diuji**. ⚠️ Perilaku asli yang ditiru: `colorize`/`modulate` memperlakukan byte R/B berbeda; CPU≠GPU pada beberapa parameter; `gaussianBlur` punya kuirk bobot tengah dan anomali bila kernel > baris; non-software = box blur. ⚠️ `noise`/`generateWhiteNoise` acak di binary (uji memakai seed suntikan). Deviasi sadar: `gaussianBlur` menolak kernel > 16.385 tap. Belum NDK/perangkat. |
 | `layerExShimmer.dll` | `layerExShimmer.cpp` + `layerExShimmerCore.hpp` | `shimmer`, `shimmerBuildMap` | rekonstruksi, **sebagian** (S5) | inti-host, sintaks, objek-host | Spesifikasi `spec/layerExShimmer_*.md`. ASUMSI: interior `shimmer` (worker `0x5f0494/0x5f0630` belum dibaca), `shimmerBuildMap` argumen ke-4 → `TJS_E_NOTIMPL`; tiga keganjilan tepi biner dipertahankan. Tinggal 4.9e-2 (dump helper). Belum NDK/perangkat. |
 | `layerExAlpha.dll` | `layerExAlpha.cpp` + `layerExAlphaCore.hpp` | **28 dari 31 nama.** Alpha-1 (S6): `turnAlpha`, `turnAlpha2`, `turnAlpha3`, `turnOutline`, `AlphaColorRect`, `AlphaDivide`, `AlphaAdd`, `AlphaAdd2`, `BlackForAlpha`, `ColorAlphaAdd`, `ColorVectorEffectAdd`, `ExtraColorVectorEffectAdd`, `MaskRect`, `ExMaskRect`. Alpha-2 (S7): `LightForAlpha`, `LuminanceForAlpha`, `LevelMaskRect`, `LevelMaskRect2`, `MaskImageRideRect`, `MaskImageRideRect2`, `MaskImageRideRect3`. Alpha-3 (S8): `MaskImageRideRect4`, `MaskImageRideRect5`. Alpha-4 (S9): `MaskImageRideRect7`, `MaskImageRideRect8`, `AlphaBorderInnerRect`. Alpha-5 (S10): `MaskImageEffectRect`, `AlphaBorderImageCoverRect` | rekonstruksi (satu kelas `layerExAlpha : layerExBase_GL`, satu hook, satu `Core`) | inti-host (4 uji ASan/UBSan, `tests/plugins/layerExAlpha/run_tests.sh`), **emulasi-binary** (Alpha-1: 159 vektor emas; Alpha-3: fungsi utuh, 14 hash golden), sintaks, objek-host | Spesifikasi [`spec/layerExAlpha_umum.md`](spec/layerExAlpha_umum.md), `spec/layerExAlpha_common.md`, 1 berkas per method. ⚠️ **Belum ditulis:** `AlphaBlend` (`0x5d5894`), `WhiteToBlueBlurAdd` (`0x5d5f98`), `ExMaskRect2` (`0x5d6ea0`). ⚠️ **Nama S6 dikoreksi saat penggabungan** (peta lama bergeser satu slot; pasangan NAME→CODE dibaca langsung dari registrasi `0x5d43b0`). ⚠️ ASUMSI: ukuran tujuan = rect layer (`reset()` fork) dibatasi ke gambar; `AlphaAdd`/`ColorAlphaAdd` terdaftar via objek `Function`; nama parameter perkiraan. ⚠️ GPU (hanya `turnAlpha`, `turnAlpha2`, `MaskRect` mode 1–3) tidak dijalankan. Deviasi sadar vs biner tercatat di spesifikasi (mis. `AlphaDivide`, anomali kolom `MaskImageRideRect5`). Belum NDK/perangkat. |
+| `LayerExSave.dll` | `layerExSave.cpp` + `layerExSaveCore.hpp` | `getCropRect`, `getCropRectZero`, `getDiffRect`, `getDiffPixel`, `oozeColor`, `copyBlueToAlpha`, `isBlank`, `clearAlpha` (8 dari 14; bagian A, S11) | rekonstruksi | inti-host, **emulasi-biner** (8 fungsi dieksekusi di emulator mini, 439 pemeriksaan; `tests/plugins/layerExSave/emu_saveA.py`), sintaks, objek-host | Semua algoritma piksel terbaca penuh dan dieksekusi dari instruksi asli; pembantu `0x5ead0c`/`0x5eaea4` dibaca dari byte (bukan recon). Nama modul asli **`LayerExSave.dll`** (L besar). ⚠️ `getDiffRect` meniru **bug biner** (baris-bawah dari kolom kanan; saklar `LAYEREXSAVE_DIFFRECT_BOTTOM_FROM_RIGHT`, putuskan di 7.3). `oozeColor`: `level` tanpa efek (sesuai biner). `isBlank` memeriksa **biru**. Tanpa `Update()`; tidak memeriksa `IsSoftware` (seperti biner). Fork tidak meniru kebocoran memori & UB biner. ASUMSI: perilaku GPU, `ImageModified`, pesan galat bukan-Layer, nama parameter. Bagian B (S12) belum ada. |
+
+### Salinan source publik (diadaptasi)
+
+| Modul | Berkas | Method | Sumber | Uji | Catatan |
+|---|---|---|---|---|---|
+| `scriptsEx.dll` | `scriptsEx.cpp` + `bitap_fuzzy.hpp` | `Scripts.getObjectContext`, `isNullContext`, `equalStruct`, `equalStructNumericLoose`, `getMD5HashString`, `clone`, `propSet`, `propGet`, `pf*` (konstanta), `safeEvalStorage`, `stringFuzzySearch`, `rehash` | **salinan source publik** `wtnbgo/scriptsEx` (lisensi: "ikuti Kirikiri" menurut readme-nya; belum diaudit lebih jauh) | sintaks, objek-host (S11-log) | Disesuaikan ke fork: MD5 lewat `utils/md5.h`; pengganti `Try_iTJSDispatch2_*`; `getObjectKeys`/`getObjectCount`/`foreach` **tidak** didaftarkan ulang karena sudah native di `ScriptMgnIntf.cpp`. Terdaftar saat `Plugins.link("scriptsEx.dll")`. Belum NDK/perangkat. |
 
 ### Bawaan fork
 
@@ -87,15 +94,15 @@ Source publik `wamsoft/layerEx` **tidak** memuatnya (hanya `LayerExBase`), jadi 
 | ~~`layerExImage`~~ | 6 | 8.228 B | **ditulis (S4)** — lihat tabel di atas; belum NDK/perangkat | 4.9d ✔ → 5.5 ✔ |
 | `layerExShimmer` | 2 | 5.264 B (+ fungsi lokal ≈ 1,7 KB di luar hitungan) | **rekonstruksi sebagian** (S5): inti-host lolos uji; interior `shimmer` ASUMSI | 4.9e-2 → 5.7 |
 | `layerExAlpha` | 31 nama (28 ditulis) | ≈ 29,4 KB (28 ditulis) | **sebagian**: 28 dari 31 ditulis (S6–S10); sisa `AlphaBlend`, `WhiteToBlueBlurAdd`, `ExMaskRect2` | 4.9f → 5.6 (sesi "tutup Alpha") |
-| `layerExSave` | 14 (+ `WindowSaveImage` dan callback `onSaveLayerImage*` di luar peta) | 7.584 B | belum ada — peta alamat siap; NEON/thread, dikerjakan terakhir | 4.9g → 5.8 |
+| `layerExSave` | 14 (+ `WindowSaveImage` dan callback `onSaveLayerImage*` di luar peta): **8 ditulis (bagian A, S11)**, 6 + `WindowSaveImage` + callback belum | 7.584 B (A 5.156 B ✅; B 2.428 B ❌) | A: **rekonstruksi selesai** (tabel di atas). B belum ada — thread/PNG/TLG5 (S12) | 4.9g-A ✅ → 5.8a ✅; 4.9g-B → 5.8b |
 | `multiImage`, `layerExDraw` | — | — | belum ada; `layerExDraw` memakai GDI+ (tidak bisa dibangun langsung) | tertunda |
 
 ## Backlog lain (36 nama di binary, belum ada di fork)
 
-Window/script: `windowEx`, `scriptsEx`, `kagparserex`, `kagparserexb`, `extkagparser`, `textrender` ·
+Window/script: `windowEx`, `kagparserex`, `kagparserexb`, `extkagparser`, `textrender` ·
 Util/data: `json`, `sqlite3`, `minizip`, `expat`, `lzfs`, `fstat`, `util_generic`, `util_graph`, `util_system`, `fpackinone` ·
 Game/media: `emoteplayer`, `psbfile`, `kaichotrans`, `extnagano`, `extrans`, `gfxeffect`, `alphamovie` ·
 Stub Windows: `drawdeviced3d`, `drawdeviced3dz`, `kirikiroid2` ·
-layerEx (di atas): `layerExAlpha` (28/31 ditulis), ~~`BTOA`~~ (ditulis), ~~`Image`~~ (ditulis), `Save`, `Shimmer` (sebagian), `multiImage`, `layerExDraw`.
+layerEx (di atas): `layerExAlpha` (28/31 ditulis), ~~`BTOA`~~ (ditulis), ~~`Image`~~ (ditulis), `Save` (A ditulis; B belum), `Shimmer` (sebagian), `multiImage`, `layerExDraw`.
 
 Status seluruhnya **belum ada** (kecuali layerEx yang sudah ditulis di atas). Mengecek apakah ada source publik yang lisensinya cocok (`windowEx`, `scriptsEx`, `json`, `sqlite3`, `minizip`, `expat`) adalah langkah 3.6 yang belum dikerjakan.

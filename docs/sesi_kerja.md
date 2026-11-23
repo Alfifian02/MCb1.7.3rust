@@ -1,6 +1,6 @@
 # Inventaris status & pembagian sesi kerja
 
-Diperbarui: 2026-11-22 (penggabungan S1–S10) · Dokumen ini pelengkap [`rencana_decomp_recomp.md`](rencana_decomp_recomp.md) (rencana induk, bernomor langkah)
+Diperbarui: 2026-11-23 (S11 digabung dengan S1–S10) · Dokumen ini pelengkap [`rencana_decomp_recomp.md`](rencana_decomp_recomp.md) (rencana induk, bernomor langkah)
 dan [`plugins.md`](plugins.md) (status per plugin). **Rencana induk tetap sumber kebenaran**; dokumen ini hanya mengelompokkan
 langkahnya menjadi sesi yang bisa dikerjakan terpisah, masing-masing di percakapan Claude yang baru.
 
@@ -15,9 +15,9 @@ Legenda: ✅ ada & terbukti sejauh yang disebut · ⚠️ ada tetapi belum tunta
 | Ukuran | Nilai |
 |---|---|
 | Method layerEx dengan alamat implementasi (`script/layerex_impl_map.tsv`) | **62** (59 + 3 nama Alpha baru dari S7: `AlphaAdd`, `ColorVectorEffectAdd`, `MaskRect`) |
-| Sudah direkonstruksi sebagai kode | **45 dari 62 nama**: `copyRaster`, `shrinkCopy`, `shrinkCopyFast`, 6 BTOA, 6 Image, 2 Shimmer (**sebagian**, interior ASUMSI), **28 Alpha** (+ alias `stretchCopyAA`) |
-| Belum ditulis | **17 nama**: Save 14 + Alpha 3 (`AlphaBlend` 188 B, `WhiteToBlueBlurAdd` 344 B, `ExMaskRect2` 1.664 B) |
-| Kode biner yang belum tercakup (perkiraan kasar) | **≈ 11,5 KB**: Save 7.584 B + 3 Alpha 2.196 B + helper Shimmer ≈ 1,7 KB. Persentase terhadap 63.532 B **tidak dihitung ulang**: angka itu memakai peta Alpha lama (bergeser satu slot), jadi ukuran per method Alpha berubah |
+| Sudah direkonstruksi sebagai kode | **53 dari 62 nama**: `copyRaster`, `shrinkCopy`, `shrinkCopyFast`, 6 BTOA, 6 Image, 2 Shimmer (**sebagian**, interior ASUMSI), **28 Alpha**, **8 Save-A** (S11) (+ alias `stretchCopyAA`) |
+| Belum ditulis | **9 nama**: Save-B 6 (+ `WindowSaveImage` dan callback `onSaveLayerImage*` di luar peta) + Alpha 3 (`AlphaBlend` 188 B, `WhiteToBlueBlurAdd` 344 B, `ExMaskRect2` 1.664 B) |
+| Kode biner yang belum tercakup (perkiraan kasar) | **≈ 6,3 KB** (setelah S11): Save-B 2.428 B + 3 Alpha 2.196 B + helper Shimmer ≈ 1,7 KB (Save-A 5.156 B sudah tercakup). Persentase terhadap 63.532 B **tidak dihitung ulang**: angka itu memakai peta Alpha lama (bergeser satu slot), jadi ukuran per method Alpha berubah |
 | Nama plugin backlog (36) yang masih belum ada di fork | **29** (7 sudah ditulis: Raster, AreaAverage, shrinkCopy, BTOA, Image, Alpha [28/31], Shimmer [sebagian]) |
 | Plugin yang sudah lolos build NDK atau uji perangkat | **0** |
 | Uji inti host pada pohon gabungan | **semua lolos** (BTOA, Image, Raster, Shimmer, Shrink, ShrinkFast, 4 uji Alpha; ASan/UBSan) |
@@ -36,6 +36,7 @@ Persentase ini ukuran **kode biner**, bukan jam kerja; fungsi berulang-pola (kel
 | 5 | `stretchCopyAA` | Alias TJS (`layerExAreaAverage.cpp`) | S2: di **fork** jalan saat `Plugins.link` (baca-source). Waktu di **1.3.9** belum dicocokkan (`t_stretchCopyAA.tjs` siap) | Perangkat | S13 |
 | 6 | **Semua kode baru** (Shrink, Raster, AreaAverage, BTOA, Image, Shimmer, Alpha) | Lolos `-fsyntax-only` terhadap header fork; `g++ -c` 9 objek layerEx OK, **tak ada simbol kuat ganda** antar-objek (penggabungan); semua uji inti host lolos | **Belum link, belum NDK (clang), belum dijalankan.** armeabi-v7a belum didukung konfigurasi | Anda perlu build (CI `release-apk.yml` + `vendor/`) | **S2 (sisa: Anda)** |
 | 7 | `layerex_impl_map.tsv` | 59 alamat (+3 baris Alpha baru dari S7, pemetaan Alpha dikoreksi dan **diverifikasi ulang langsung dari biner** saat penggabungan); uji-diri 3/3 | Belum diverifikasi Ghidra; kolom `modul` hanya tebakan; **nama modul `.dll` terkonfirmasi untuk 7 modul** (Raster, AreaAverage, shrinkCopy, BTOA, Image, Shimmer, Alpha) | Ghidra (opsional) | Tiap sesi grup memverifikasi nama modulnya dari string biner |
+| 8 | `layerExSave` bagian A (8 method) | ✅ Kode, spesifikasi, uji inti + emulasi instruksi asli, cek sintaks, skrip TJS (S11) | Build NDK/uji perangkat; **keputusan 7.3:** bug `getDiffRect` ditiru atau tidak; jalur GPU; `ImageModified` | Build, perangkat, APK 1.3.9 | S13 |
 | 8 | 14 plugin bawaan fork | Kode ada | **Tidak ada uji sama sekali** di repo ini; asal-usul/lisensi belum diaudit | — | S2 (uji asap), S14 (audit) |
 | 9 | Stub: `fftgraph`, `win32dialog`, `getabout`, `motionplayer` | Berjalan sebagai pengganti | Bukan implementasi. `motionplayer` hanya **mencatat log**, tidak merender → game ber-`Motion`/emote tidak akan tampil benar | Data log dari game | S17 |
 | 10 | Tahap 1 | 1.1–1.3 | **1.4** Ghidra, **1.5** armv7 pembanding, **1.6** baseline build | Alat di PC Anda | S2, Opsional A |
@@ -55,7 +56,7 @@ Persentase ini ukuran **kode biner**, bukan jam kerja; fungsi berulang-pola (kel
 |---|---|---:|---|
 | `layerExShimmer` | `shimmer` (4.696 B, skalar — terbukti dari disassembly), `shimmerBuildMap` — **S5 sebagian** (helper belum dibaca) | 5.264 B (+ fungsi lokal ≈ 1,7 KB di luar hitungan) | S5 lanjutan |
 | `layerExAlpha` (3 nama sisa) | `AlphaBlend` (`0x5d5894`, 188 B), `WhiteToBlueBlurAdd` (`0x5d5f98`, 344 B), `ExMaskRect2` (`0x5d6ea0`, 1.664 B; recon ada di `recon_alpha2.txt`) | 2.196 B | sesi "tutup Alpha" |
-| `layerExSave` | 14 method + `WindowSaveImage` + callback `onSaveLayerImage*` (thread, PNG, TLG5) | 7.584 B | S11–S12 |
+| `layerExSave` — **bagian B** | 6 method (`startSaveLayerImage`, `cancelSaveLayerImage`, `stopSaveLayerImage`, `saveLayerImageTlg5`, `saveLayerImagePng`, `saveLayerImagePngOctet`) + `WindowSaveImage` + callback `onSaveLayerImage*` (thread, PNG, TLG5). *(Bagian A, 8 method, **selesai di S11**.)* | 2.428 B | S12 |
 | `multiImage`, `layerExDraw` | `layerExDraw` memakai GDI+ (tidak bisa dibangun langsung) | — | S18 (kajian kelayakan) |
 | Window/script | `windowEx`, `scriptsEx`, `kagparserex`, `kagparserexb`, `extkagparser`, `textrender` | — | S15 |
 | Util/data | `json`, `sqlite3`, `minizip`, `expat`, `lzfs`, `fstat`, `util_generic`, `util_graph`, `util_system`, `fpackinone` | — | S14 |
@@ -109,7 +110,7 @@ Di luar cakupan dekompilasi (butir Roadmap `readme.md` yang bukan plugin): ganti
 | **S5** | Shimmer — **sebagian** (tinggal 4.9e-2) | 4.9e, 5.7 | Claude | ✔️ `recon_shimmer.txt` ada; **kurang:** `recon_shimmer_helpers.txt` | M |
 | **S6–S10** ✅ | Alpha-1 … Alpha-5 — **28 dari 31 nama selesai** | 4.9f, 5.6 | Claude | ✅ diterima semua | 5 × M |
 | **S-Alpha** (baru) | Tutup Alpha: `AlphaBlend`, `WhiteToBlueBlurAdd`, `ExMaskRect2` + putuskan ASUMSI ukuran tujuan (baca `layerExBase_GL::reset()`) | 4.9f, 5.6 | Claude | `libgame.so` (capstone bisa dipasang lewat pip) atau `ONLY="AlphaBlend WhiteToBlueBlurAdd ExMaskRect2"` | S |
-| **S11** | Save-A (utilitas) | 4.9g, 5.8 | Claude | `libgame.so` (recon opsional) | M |
+| **S11** ✅ | Save-A (utilitas) — **selesai** | 4.9g-A, 5.8a | Claude | ✅ `recon_saveA.txt` | M |
 | **S12** | Save-B (thread, PNG, TLG5) | 5.8 | Claude | `libgame.so` (recon opsional) | M |
 | **S13** | Verifikasi diferensial layerEx | 7.3, 7.4 | **Anda** (+ Claude analisis hasil) | — | M |
 | **S14** | Survei sumber publik + util/data | 3.6, 5.9 | Claude (+ pencarian web) | — | M |
@@ -210,7 +211,9 @@ Catatan: nama terurut `MaskImageRideRect`, `2`, `3`, `4`, `5`, `7`, `8` — **ti
 - **Unggah:** `Repo.zip` hasil penggabungan, `Kirikiroid2_1_3_9.zip` (capstone/unicorn via pip bila tersedia).
 - **Selesai bila:** parity ketat Alpha 31/31; ASUMSI ukuran tujuan tertutup atau tercatat jelas.
 
-### S11 — Save-A (utilitas)
+### S11 — Save-A (utilitas) ✅ selesai
+- **Hasil (S11 ✅):** 8 method terekonstruksi dan **dieksekusi di emulator dari instruksi asli** (439 pemeriksaan, 0 beda); spesifikasi `docs/spec/layerExSave_*.md`; kode `layerExSave.cpp` + `layerExSaveCore.hpp` (modul **`LayerExSave.dll`**); uji inti ASan/UBSan + mutasi; skrip TJS `t_layerExSaveA.tjs`. Temuan & keputusan terbuka: rencana 4.9g-A, 5.8a dan catatan 29–30.
+- **Tersisa untuk S13:** saklar `LAYEREXSAVE_DIFFRECT_BOTTOM_FROM_RIGHT` (bug biner `getDiffRect`), perilaku GPU, `ImageModified`; usul recon depth-1 `0x80c848` + badan vfn bitmap bila perlu. Catatan: `Kirikiroid2 dll list.csv` menyebut source publik `layerExSave` (wtnbgo/krkrz) — **belum dibandingkan** dengan rekonstruksi S11; lakukan di S14 bila lisensinya cocok.
 - **Recon:** `ONLY="getCropRect getCropRectZero getDiffRect getDiffPixel oozeColor copyBlueToAlpha isBlank clearAlpha" bash script/k2recon.sh @save > recon_saveA.txt` (8 method, 5.156 B).
 
 ### S12 — Save-B (thread, PNG, TLG5)
@@ -246,3 +249,10 @@ Tag rilis per kelompok plugin + changelog (8.3); periksa Java `classes.dex`/`KR2
 3. **Target ABI:** cukup `arm64-v8a`, atau `armeabi-v7a` juga? (armv7 menambah 6.3 dan 1.5/4.8.)
 4. **Game acuan:** game mana yang dipakai? Daftar `Plugins.link(...)` di skripnya menentukan urutan S4–S12.
 5. **Lisensi/distribusi:** apakah fork akan didistribusikan? (menentukan seberapa ketat audit di S14.)
+
+---
+
+## Catatan sesi log game (2026-11-23)
+- Log `krkr_console.log` (UTF-16, 7 run, game Limelight Lemonade Jam) dibaca. Run lama gagal di `Motion` (stub), `Scripts.getObjectKeys`/`foreach` (kini native di core). Dua run terakhir berhenti di `keybinder.tjs`: `Dictionary.assignStruct incontextof SystemConfig.ShortCutInitialPadKeyMap` dengan nilai void. `incontextof void` melempar di TJS2 standar, jadi sesuatu yang seharusnya mendefinisikan `ShortCutInitialPadKeyMap` tidak termuat. **Penyebab belum terbukti**; butuh skrip game (`keybinder.tjs`, `override.tjs`, config `SystemConfig`) dan daftar `Plugins.link` game.
+- `Kirikiroid2 dll list.csv` dari Anda: source publik ada untuk `scriptsEx`, `windowEx`, `json`, `sqlite3`, `minizip`, `expat`, `layerExImage/BTOA/Raster/Save/AreaAverage`, `shrinkCopy`, dll. (wtnbgo/krkrz). Ini mengoreksi catatan 3.4 bahwa hanya `LayerExBase` yang publik; **perlu diaudit di S14**.
+- `scriptsEx` dari `github.com/wtnbgo/scriptsEx` sudah diadaptasi ke `src/plugins/scriptsEx.cpp` (lolos `g++ -fsyntax-only` dan `-c`; belum NDK/perangkat). `windowEx` berisi API Win32 (HWND, menu, IME), tidak bisa disalin begitu saja; belum dikerjakan.
