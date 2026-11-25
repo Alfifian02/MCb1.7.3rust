@@ -116,7 +116,7 @@ fun LibraryFilterRow(
     Row(modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         LazyRow(
             horizontalArrangement = Arrangement.spacedBy(7.dp),
-            contentPadding = PaddingValues(start = 16.dp),
+            contentPadding = PaddingValues(start = SeedlessSpace.edge, end = SeedlessSpace.sm),
             modifier = Modifier.weight(1f),
         ) {
             item {
@@ -143,7 +143,7 @@ fun LibraryFilterRow(
                 )
             }
         }
-        Box(Modifier.padding(end = 16.dp)) { trailing() }
+        Box(Modifier.padding(end = SeedlessSpace.edge)) { trailing() }
     }
 }
 
@@ -258,7 +258,7 @@ fun ViewModeToggle(mode: RomLibrary.ViewMode, onSelect: (RomLibrary.ViewMode) ->
             val active = value == mode
             Box(
                 Modifier
-                    .size(32.dp)
+                    .size(38.dp)
                     .clip(RoundedCornerShape(9.dp))
                     .background(if (active) colors.red else Color.Transparent)
                     .clickable { onSelect(value) },

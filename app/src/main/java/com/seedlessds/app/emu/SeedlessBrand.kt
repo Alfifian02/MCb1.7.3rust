@@ -130,6 +130,7 @@ fun SeedlessScreenScaffold(
 ) {
     val uiContext = androidx.compose.ui.platform.LocalContext.current
     val colors = seedless
+    val barPad = headerVerticalPadding()
     Scaffold(
         modifier = modifier,
         containerColor = colors.bg,
@@ -140,11 +141,16 @@ fun SeedlessScreenScaffold(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(start = 8.dp, end = 16.dp, top = 6.dp, bottom = 6.dp),
+                        .padding(
+                            start = SeedlessSpace.edge - SeedlessSpace.iconInset,
+                            end = if (actions != null) SeedlessSpace.edge - SeedlessSpace.iconInset else SeedlessSpace.edge,
+                            top = barPad,
+                            bottom = barPad,
+                        ),
                 ) {
                     Box(
                         modifier = Modifier
-                            .size(38.dp)
+                            .size(SeedlessSpace.control)
                             .clip(CircleShape)
                             .clickable(onClick = onBack),
                         contentAlignment = Alignment.Center,
@@ -156,7 +162,7 @@ fun SeedlessScreenScaffold(
                             modifier = Modifier.size(20.dp),
                         )
                     }
-                    Spacer(Modifier.width(6.dp))
+                    Spacer(Modifier.width(SeedlessSpace.xs))
                     Column(Modifier.weight(1f)) {
                         Text(
                             text = title,

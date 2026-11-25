@@ -1,5 +1,8 @@
 package com.seedlessds.app.emu
 
+import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.horizontalScroll
 import com.seedlessds.app.R
 import android.view.KeyEvent
 import android.text.format.DateUtils
@@ -184,6 +187,7 @@ fun MultiplayerCreate(
     }
     LaunchedEffect(pad) { pad.collect { padAction(it) } }
 
+    val compact = rememberWidthClass() == WidthClass.COMPACT
     Column(Modifier.fillMaxSize()) {
         MultiplayerHeader(
             title = stringResource(if (step == 0) R.string.mp_create_title else if (play == MultiplayerRoom.Play.DOWNLOAD) R.string.mp_play_download else R.string.mp_play_rom),
@@ -192,9 +196,15 @@ fun MultiplayerCreate(
             if (step == 0) {
                 Mono(if (steps.size > 1) "${index + 1}/${steps.size} · ${stringResource(R.string.mp_step_mode)}" else stringResource(R.string.mp_step_mode),
                     size = 11.sp)
-            } else {
+            } else if (!compact) {
                 SearchField(query, { query = it }, eligible.size, searchFocused,
                     Modifier.width(214.dp).onFocusChanged { searchFocused = it.isFocused })
+            }
+        }
+        if (compact && step != 0) {
+            Box(Modifier.fillMaxWidth().padding(horizontal = SeedlessSpace.edge, vertical = SeedlessSpace.sm)) {
+                SearchField(query, { query = it }, eligible.size, searchFocused,
+                    Modifier.fillMaxWidth().onFocusChanged { searchFocused = it.isFocused })
             }
         }
         Box(Modifier.weight(1f).fillMaxWidth()) {
@@ -217,7 +227,19 @@ fun MultiplayerCreate(
                     modifier = Modifier.padding(horizontal = 18.dp, vertical = 6.dp))
             }
         }
-        MultiplayerFooter {
+        MultiplayerFooter(trailing = {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(SeedlessSpace.md)) {
+                if (step == 1) {
+                    FilterChip("GameTDB", false) { uriHandler.openUri("https://www.gametdb.com/DS") }
+                }
+                PillButton(
+                    text = stringResource(if (!last) R.string.mp_next else if (editing) R.string.mp_save_game else R.string.mp_open_room),
+                    onClick = { next() },
+                    enabled = !busy && (step != 1 || rom != null),
+                    key = "START",
+                )
+            }
+        }) {
             if (step == 0) {
                 Hint("A", stringResource(R.string.mp_hint_choose_next))
                 Hint("B", stringResource(R.string.multiplayer_back))
@@ -225,16 +247,6 @@ fun MultiplayerCreate(
                 Hint("A", stringResource(R.string.mp_hint_choose))
                 Hint("L R", stringResource(R.string.mp_hint_letter))
             }
-            Grow()
-            if (step == 1) {
-                FilterChip("GameTDB", false) { uriHandler.openUri("https://www.gametdb.com/DS") }
-            }
-            PillButton(
-                text = stringResource(if (!last) R.string.mp_next else if (editing) R.string.mp_save_game else R.string.mp_open_room),
-                onClick = { next() },
-                enabled = !busy && (step != 1 || rom != null),
-                key = "START",
-            )
         }
     }
 }
@@ -289,8 +301,14 @@ private fun ModeStep(play: MultiplayerRoom.Play, bios: Boolean, onBios: () -> Un
     val focus = remember { FocusRequester() }
     LaunchedEffect(Unit) { runCatching { focus.requestFocus() } }
     val chatLocked = !bios
-    Row(Modifier.fillMaxSize().padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 12.dp), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-        Column(Modifier.width(300.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    val compact = rememberWidthClass() == WidthClass.COMPACT
+    TwoPane(
+        compact = compact,
+        startWidth = 300.dp,
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(start = SeedlessSpace.edge, end = SeedlessSpace.edge, top = SeedlessSpace.edge, bottom = SeedlessSpace.md),
+        gap = 14.dp,
+        start = {
             Mono(stringResource(R.string.mp_how_play).trimEnd('?', '¿').trimStart('¿').uppercase(), Modifier.padding(start = 2.dp, bottom = 2.dp))
             listOf(
                 Triple(MultiplayerRoom.Play.ROM, Icons.Filled.SportsEsports, R.string.mp_play_rom),
@@ -314,11 +332,12 @@ private fun ModeStep(play: MultiplayerRoom.Play, bios: Boolean, onBios: () -> Un
                     )
                 }
             }
-        }
+        },
+        end = { endModifier ->
         val locked = play == MultiplayerRoom.Play.CHAT && chatLocked
-        Column(Modifier.weight(1f).fillMaxHeight().panel(colors).padding(horizontal = 16.dp, vertical = 14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Column(endModifier.let { if (compact) it else it.fillMaxHeight() }.panel(colors).padding(horizontal = 16.dp, vertical = 14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Mono(stringResource(R.string.mp_each_needs))
-            Row(Modifier.weight(1f).fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+            Row((if (compact) Modifier.height(104.dp) else Modifier.weight(1f)).fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(14.dp, Alignment.CenterHorizontally)) {
                 (0 until 3).forEach { index -> ConsoleNeed(play, index) }
             }
@@ -340,7 +359,8 @@ private fun ModeStep(play: MultiplayerRoom.Play, bios: Boolean, onBios: () -> Un
                 color = if (locked) colors.goldText else colors.text2, size = 11.sp, spacing = 0.5.sp, lines = 2,
             )
         }
-    }
+        },
+    )
 }
 
 @Composable
@@ -401,6 +421,7 @@ private fun GameStep(
     val context = LocalContext.current
     val focus = remember { FocusRequester() }
     val grid = rememberLazyGridState()
+    val compact = rememberWidthClass() == WidthClass.COMPACT
     val repeatedTitles = remember(library) { library.groupingBy(::romDisplayName).eachCount().filterValues { it > 1 }.keys }
     val repeatedCartridges = remember(library) {
         library.mapNotNull { it.cartridge?.copy(contentHash = null) }.groupingBy { it }.eachCount()
@@ -419,23 +440,35 @@ private fun GameStep(
         }
     }
     Column(Modifier.fillMaxSize()) {
-        Row(Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+        val countText = when {
+                    searching -> pluralStringResource(R.plurals.mp_count_found, shown.size, shown.size)
+                    filter == 1 -> pluralStringResource(R.plurals.mp_count_recent, shown.size, shown.size)
+                    filter == 2 -> pluralStringResource(R.plurals.mp_count_favorites, shown.size, shown.size)
+                    else -> pluralStringResource(R.plurals.mp_count_games, shown.size, shown.size)
+                }.uppercase()
+        val filterChips: @Composable RowScope.() -> Unit = {
             listOf(0 to R.string.mp_filter_library, 1 to R.string.mp_filter_recent,
                 2 to R.string.mp_filter_favorites).forEach { (value, label) ->
                 FilterChip(stringResource(label).uppercase(), filter == value && !searching) { onFilter(value) }
             }
             FilterChip(stringResource(R.string.mp_show_all).uppercase(), showAll, onShowAll)
-            Grow()
-            Mono(
-                when {
-                    searching -> pluralStringResource(R.plurals.mp_count_found, shown.size, shown.size)
-                    filter == 1 -> pluralStringResource(R.plurals.mp_count_recent, shown.size, shown.size)
-                    filter == 2 -> pluralStringResource(R.plurals.mp_count_favorites, shown.size, shown.size)
-                    else -> pluralStringResource(R.plurals.mp_count_games, shown.size, shown.size)
-                }.uppercase(),
-                size = 11.sp, spacing = 0.sp,
-            )
+        }
+        if (compact) {
+            Column(
+                Modifier.padding(start = SeedlessSpace.edge, end = SeedlessSpace.edge, top = SeedlessSpace.md, bottom = SeedlessSpace.xs),
+                verticalArrangement = Arrangement.spacedBy(SeedlessSpace.xs),
+            ) {
+                Row(Modifier.horizontalScroll(rememberScrollState()), verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(7.dp), content = filterChips)
+                Mono(countText, size = 11.sp, spacing = 0.sp)
+            }
+        } else {
+            Row(Modifier.padding(start = SeedlessSpace.edge, end = SeedlessSpace.edge, top = SeedlessSpace.md, bottom = SeedlessSpace.xs), verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                filterChips()
+                Grow()
+                Mono(countText, size = 11.sp, spacing = 0.sp)
+            }
         }
         if (shown.isEmpty()) {
             val emptyText = when {
@@ -450,7 +483,7 @@ private fun GameStep(
         Row(Modifier.weight(1f).padding(start = 16.dp, top = 8.dp)) {
             LazyVerticalGrid(
                 state = grid,
-                columns = GridCells.Fixed(if (wide) 5 else 4),
+                columns = GridCells.Fixed(if (wide) 5 else if (compact) 3 else 4),
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
                 contentPadding = PaddingValues(bottom = 8.dp),

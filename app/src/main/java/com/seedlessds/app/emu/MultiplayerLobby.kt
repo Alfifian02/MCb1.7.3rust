@@ -1,5 +1,6 @@
 package com.seedlessds.app.emu
 
+import androidx.compose.foundation.layout.PaddingValues
 import android.view.KeyEvent
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -214,6 +215,7 @@ fun MultiplayerLobby(
     BackHandler(enabled = dialog == LobbyDialog.NONE) { dialog = LobbyDialog.CLOSE }
 
     val joiningApp = viewModel.joining.collectAsState().value?.app.orEmpty()
+    val compact = rememberWidthClass() == WidthClass.COMPACT
     Box(Modifier.fillMaxSize()) {
         CompositionLocalProvider(LocalMultiplayerInteractive provides (dialog == LobbyDialog.NONE)) {
         Column(Modifier.fillMaxSize()) {
@@ -251,9 +253,9 @@ fun MultiplayerLobby(
                     }
                 }
                 SeatsPanel(seats, info?.maximum ?: 16, if (wide) 5 else 4, Modifier.fillMaxWidth().weight(1f))
-                Row(Modifier.height(74.dp).fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                LobbyBottom(compact) { cardModifier, codeModifier ->
                     if (host) {
-                        CodeCard(info?.code.orEmpty(), Modifier.width(250.dp).fillMaxHeight())
+                        CodeCard(info?.code.orEmpty(), codeModifier)
                         GameCard(
                             info = info,
                             rom = localRom,
@@ -266,7 +268,7 @@ fun MultiplayerLobby(
                             }.orEmpty(),
                             good = false,
                             onClick = onEdit,
-                            modifier = Modifier.weight(1f).fillMaxHeight(),
+                            modifier = cardModifier,
                         )
                     } else {
                         val (subtitle, good) = when {
@@ -288,7 +290,7 @@ fun MultiplayerLobby(
                             subtitle = subtitle,
                             good = good,
                             onClick = { if (openable) openGuest(info) else if (!bios) actions.openBiosSettings() },
-                            modifier = Modifier.weight(1f).fillMaxHeight(),
+                            modifier = cardModifier,
                             action = if (openable) stringResource(R.string.mp_open_now) else null,
                             focus = primary,
                         )
@@ -296,11 +298,7 @@ fun MultiplayerLobby(
                 }
             }
             if (host) {
-                MultiplayerFooter {
-                    Hint("X", stringResource(R.string.mp_hint_game))
-                    Hint("Y", stringResource(R.string.mp_hint_details))
-                    Hint("B", stringResource(R.string.mp_hint_close))
-                    Grow()
+                MultiplayerFooter(trailing = {
                     PillButton(
                         text = if (canStart) stringResource(R.string.mp_start, connected) else stringResource(R.string.mp_waiting),
                         onClick = { start() },
@@ -308,6 +306,10 @@ fun MultiplayerLobby(
                         key = "START",
                         modifier = Modifier.focusRequester(primary),
                     )
+                }) {
+                    Hint("X", stringResource(R.string.mp_hint_game))
+                    Hint("Y", stringResource(R.string.mp_hint_details))
+                    Hint("B", stringResource(R.string.mp_hint_close))
                 }
             } else {
                 MultiplayerFooter {
@@ -464,6 +466,23 @@ private fun FreeSeat(ring: androidx.compose.ui.unit.Dp, modifier: Modifier) {
     }
 }
 
+/**
+ * The code card and the game card at the bottom of the lobby. Side by side when wide (the code card
+ * keeps its 250dp), stacked and full width when compact.
+ */
+@Composable
+private fun LobbyBottom(compact: Boolean, content: @Composable (card: Modifier, code: Modifier) -> Unit) {
+    if (compact) {
+        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            content(Modifier.fillMaxWidth().height(74.dp), Modifier.fillMaxWidth().height(60.dp))
+        }
+    } else {
+        Row(Modifier.height(74.dp).fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            content(Modifier.weight(1f).fillMaxHeight(), Modifier.width(250.dp).fillMaxHeight())
+        }
+    }
+}
+
 @Composable
 private fun CodeCard(code: String, modifier: Modifier) {
     val colors = seedless
@@ -586,6 +605,7 @@ fun MultiplayerConnecting(viewModel: MultiplayerViewModel, onCancel: () -> Unit)
         add(Triple(stringResource(R.string.mp_entering_room), target.target.network, 2))
     }
     val position = steps.indexOfFirst { it.third >= step }.let { if (it < 0) steps.size else it }
+    val compact = rememberWidthClass() == WidthClass.COMPACT
     Column(Modifier.fillMaxSize()) {
         MultiplayerHeader(stringResource(R.string.mp_entering, stringResource(R.string.mp_room_of, target.host.nickname)), onBack = null, tags = {
             Tag(stringResource(R.string.mp_tag_direct), TagKind.GOOD)
@@ -593,10 +613,15 @@ fun MultiplayerConnecting(viewModel: MultiplayerViewModel, onCancel: () -> Unit)
         }) {
             Mono(stringResource(R.string.mp_step_of, (position + 1).coerceAtMost(steps.size), steps.size), size = 11.sp, spacing = 1.sp)
         }
-        Row(Modifier.weight(1f).fillMaxWidth().padding(16.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-            Column(Modifier.width(236.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        TwoPane(
+            compact = compact,
+            startWidth = 236.dp,
+            modifier = Modifier.weight(1f).fillMaxWidth(),
+            contentPadding = PaddingValues(SeedlessSpace.edge),
+            startSpacing = 10.dp,
+            start = {
                 RoomArt(matchRom(library.asSequence(), target.game), roomTitle(target),
-                    Modifier.fillMaxWidth().aspectRatio(DsBoxArtAspectRatio).clip(RoundedCornerShape(12.dp))
+                    (if (compact) Modifier.align(Alignment.CenterHorizontally).fillMaxWidth(0.6f) else Modifier.fillMaxWidth()).aspectRatio(DsBoxArtAspectRatio).clip(RoundedCornerShape(12.dp))
                         .border(1.dp, colors.text.copy(alpha = 0.13f), RoundedCornerShape(12.dp)))
                 Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween) {
@@ -615,13 +640,15 @@ fun MultiplayerConnecting(viewModel: MultiplayerViewModel, onCancel: () -> Unit)
                         Mono(stringResource(R.string.mp_tag_host), color = colors.text2, size = 10.sp, spacing = 1.sp)
                     }
                 }
-            }
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                steps.forEachIndexed { index, (title, meta, _) ->
-                    ProgressStep(title, meta.uppercase(), done = index < position, active = index == position)
+            },
+            end = { endModifier ->
+                Column(endModifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    steps.forEachIndexed { index, (title, meta, _) ->
+                        ProgressStep(title, meta.uppercase(), done = index < position, active = index == position)
+                    }
                 }
-            }
-        }
+            },
+        )
         MultiplayerFooter {
             Hint("B", stringResource(R.string.mp_cancel))
         }

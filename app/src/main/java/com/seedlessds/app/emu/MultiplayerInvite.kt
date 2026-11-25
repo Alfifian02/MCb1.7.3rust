@@ -114,28 +114,32 @@ fun MultiplayerInvitePill(onJoin: (String) -> Unit) {
 }
 
 @Composable
-fun MultiplayerHeaderButton(onClick: () -> Unit) {
+fun MultiplayerHeaderButton(modifier: Modifier = Modifier, showKey: Boolean = true, onClick: () -> Unit) {
     val colors = seedless
     val shape = RoundedCornerShape(21.dp)
     val interactionSource = remember { MutableInteractionSource() }
     val focused by interactionSource.collectIsFocusedAsState()
     val nearby by MultiplayerNearby.rooms.collectAsState()
     Row(
-        Modifier.height(42.dp).clip(shape).background(if (colors.isDark) colors.surface2 else colors.surface3)
+        modifier.height(SeedlessSpace.control).clip(shape).background(if (colors.isDark) colors.surface2 else colors.surface3)
             .let { if (focused) it.border(2.dp, colors.red, shape) else it }
             .clickable(interactionSource = interactionSource, indication = null, onClick = onClick)
-            .padding(start = 6.dp, end = 14.dp),
+            .padding(start = if (showKey) 6.dp else 14.dp, end = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.Center,
     ) {
-        Box(Modifier.height(24.dp).clip(RoundedCornerShape(12.dp)).background(colors.surface3).padding(horizontal = 7.dp),
-            contentAlignment = Alignment.Center) {
-            Text("SELECT", color = colors.text2, fontFamily = SpaceGrotesk, fontWeight = FontWeight.Bold, fontSize = 9.sp, letterSpacing = 0.5.sp)
+        if (showKey) {
+            Box(Modifier.height(24.dp).clip(RoundedCornerShape(12.dp)).background(colors.surface3).padding(horizontal = 7.dp),
+                contentAlignment = Alignment.Center) {
+                Text("SELECT", color = colors.text2, fontFamily = SpaceGrotesk, fontWeight = FontWeight.Bold, fontSize = 9.sp, letterSpacing = 0.5.sp)
+            }
+            Spacer(Modifier.width(8.dp))
         }
-        Spacer(Modifier.width(8.dp))
         if (nearby.isNotEmpty()) {
             Pulse()
             Spacer(Modifier.width(8.dp))
         }
-        Text(stringResource(R.string.multiplayer_title), color = colors.text, fontFamily = SpaceGrotesk, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+        Text(stringResource(R.string.multiplayer_title), color = colors.text, fontFamily = SpaceGrotesk, fontSize = 15.sp, fontWeight = FontWeight.Bold,
+            maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
     }
 }

@@ -1,5 +1,7 @@
 package com.seedlessds.app.emu
 
+import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.PaddingValues
 import android.view.KeyEvent
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
@@ -74,6 +76,7 @@ fun MultiplayerJoin(
     LaunchedEffect(code) { viewModel.focus.value = MultiplayerFocus.Code(code) }
     val keyFocus = remember { FocusRequester() }
     val foundFocus = remember { FocusRequester() }
+    val compact = rememberWidthClass() == WidthClass.COMPACT
 
     BackHandler { onBack() }
     LaunchedEffect(Unit) { runCatching { keyFocus.requestFocus() } }
@@ -91,13 +94,13 @@ fun MultiplayerJoin(
             Mono(stringResource(R.string.mp_code_label))
         }
         Column(Modifier.weight(1f).padding(start = 16.dp, end = 16.dp, top = 14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Row(Modifier.height(70.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            // Four code boxes and the status card: side by side when wide, stacked when compact.
+            val codeBoxes: @Composable RowScope.(Boolean) -> Unit = { fill ->
                     (0 until 4).forEach { index ->
                         val char = code.getOrNull(index)
                         val active = index == code.length
                         Box(
-                            Modifier.size(width = 54.dp, height = 70.dp).clip(RoundedCornerShape(10.dp))
+                            (if (fill) Modifier.weight(1f).height(64.dp) else Modifier.size(width = 54.dp, height = 70.dp)).clip(RoundedCornerShape(10.dp))
                                 .background(when {
                                     active -> tileColor(colors, false, true)
                                     char != null -> colors.surface2
@@ -110,7 +113,8 @@ fun MultiplayerJoin(
                             Text(char?.toString().orEmpty(), color = colors.text, fontFamily = SpaceGrotesk, fontWeight = FontWeight.Bold, fontSize = 34.sp)
                         }
                     }
-                }
+            }
+            val codeStatus: @Composable RowScope.() -> Unit = {
                 if (found != null) {
                     LaunchedEffect(found.key) {
                         withFrameNanos { }
@@ -150,6 +154,17 @@ fun MultiplayerJoin(
                     }
                 }
             }
+            if (compact) {
+                Column(verticalArrangement = Arrangement.spacedBy(SeedlessSpace.md)) {
+                    Row(Modifier.fillMaxWidth().height(64.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) { codeBoxes(true) }
+                    Row(Modifier.fillMaxWidth().height(70.dp)) { codeStatus() }
+                }
+            } else {
+                Row(Modifier.height(70.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) { codeBoxes(false) }
+                    codeStatus()
+                }
+            }
             LazyVerticalGrid(GridCells.Fixed(if (wide) 11 else 8), horizontalArrangement = Arrangement.spacedBy(6.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 items(MultiplayerRoom.CODE_ALPHABET.toList()) { char ->
@@ -166,11 +181,11 @@ fun MultiplayerJoin(
                 }
             }
         }
-        MultiplayerFooter {
+        MultiplayerFooter(trailing = {
+            PillButton(stringResource(R.string.mp_enter), { found?.let(onJoin) }, enabled = found != null, key = "START")
+        }) {
             Hint("A", stringResource(R.string.mp_hint_type))
             Hint("X", stringResource(R.string.mp_hint_erase))
-            Grow()
-            PillButton(stringResource(R.string.mp_enter), { found?.let(onJoin) }, enabled = found != null, key = "START")
         }
     }
 }
@@ -222,6 +237,7 @@ fun MultiplayerProfileScreen(viewModel: MultiplayerViewModel, pad: SharedFlow<In
     val symbolNames = stringArrayResource(R.array.mp_symbol_names)
     val months = stringArrayResource(R.array.mp_months)
     val focus = remember { FocusRequester() }
+    val compact = rememberWidthClass() == WidthClass.COMPACT
 
     fun save() {
         viewModel.saveProfile(draft) { if (it) onBack() }
@@ -256,8 +272,12 @@ fun MultiplayerProfileScreen(viewModel: MultiplayerViewModel, pad: SharedFlow<In
         MultiplayerHeader(stringResource(R.string.mp_profile_title), onBack = onBack) {
             Mono(stringResource(R.string.mp_profile_sub).uppercase())
         }
-        Row(Modifier.weight(1f).padding(horizontal = 16.dp, vertical = 14.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-            Column(Modifier.width(236.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        TwoPane(
+            compact = compact,
+            startWidth = 236.dp,
+            modifier = Modifier.weight(1f),
+            contentPadding = PaddingValues(horizontal = SeedlessSpace.edge, vertical = SeedlessSpace.md),
+            start = {
                 Box(Modifier.fillMaxWidth().height(100.dp).panel(colors, 12.dp)) {
                     Box(Modifier.fillMaxWidth().height(40.dp).background(DsPalette[draft.colour]))
                     Box(Modifier.padding(start = 12.dp, top = 12.dp).size(72.dp).clip(CircleShape)
@@ -276,8 +296,9 @@ fun MultiplayerProfileScreen(viewModel: MultiplayerViewModel, pad: SharedFlow<In
                     Mono(stringResource(R.string.mp_birthday).uppercase(), Modifier.width(74.dp), size = 10.sp)
                     TileTitle(stringResource(R.string.mp_birthday_value, draft.birthdayDay, months[draft.birthdayMonth - 1]), Modifier.weight(1f), size = 15.sp)
                 }
-            }
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            },
+            end = { endModifier ->
+            Column(endModifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Mono(stringResource(R.string.mp_colour).uppercase())
                     Mono(colourNames[draft.colour].uppercase(), color = colors.text)
@@ -313,14 +334,15 @@ fun MultiplayerProfileScreen(viewModel: MultiplayerViewModel, pad: SharedFlow<In
                 Text(stringResource(if (room != null) R.string.mp_profile_room_note else R.string.mp_profile_firmware_note), color = colors.text3,
                     fontSize = 13.sp, lineHeight = 17.sp, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 2.dp))
             }
-        }
-        MultiplayerFooter {
+            },
+        )
+        MultiplayerFooter(trailing = {
+            PillButton(stringResource(R.string.mp_save), { save() }, enabled = draft.nickname.isNotBlank(), key = "START")
+        }) {
             Hint("A", stringResource(R.string.mp_hint_edit))
             Hint("L R", stringResource(R.string.mp_hint_colour))
             Hint("L2 R2", stringResource(R.string.mp_hint_symbol))
             Hint("B", stringResource(R.string.multiplayer_back))
-            Grow()
-            PillButton(stringResource(R.string.mp_save), { save() }, enabled = draft.nickname.isNotBlank(), key = "START")
         }
         }
         }

@@ -1,5 +1,7 @@
 package com.seedlessds.app.emu
 
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -312,22 +314,52 @@ fun KeyCap(key: String, color: Color = seedless.text3) {
 @Composable
 fun Hint(key: String, text: String) {
     val colors = seedless
-    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+    val compact = rememberWidthClass() == WidthClass.COMPACT
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(if (compact) 5.dp else 7.dp)) {
         KeyCap(key)
-        Text(text, color = colors.text3, fontFamily = SeedlessMono, fontSize = 12.sp, maxLines = 1)
+        Text(text, color = colors.text3, fontFamily = SeedlessMono, fontSize = if (compact) 11.sp else 12.sp, maxLines = 1, softWrap = false)
     }
 }
 
 @Composable
-fun MultiplayerFooter(centered: Boolean = false, content: @Composable RowScope.() -> Unit) {
+fun MultiplayerFooter(
+    centered: Boolean = false,
+    trailing: (@Composable RowScope.() -> Unit)? = null,
+    content: @Composable RowScope.() -> Unit,
+) {
     val colors = seedless
+    val compact = rememberWidthClass() == WidthClass.COMPACT
+    val gap = if (compact) SeedlessSpace.md else 22.dp
     Box(Modifier.fillMaxWidth().height(1.dp).background(colors.line))
-    Row(
-        Modifier.fillMaxWidth().height(56.dp).padding(start = 18.dp, end = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = if (centered) Arrangement.spacedBy(22.dp, Alignment.CenterHorizontally) else Arrangement.spacedBy(18.dp),
-        content = content,
-    )
+    if (compact) {
+        // The hints scroll sideways instead of clipping. [trailing] (the primary button) stays
+        // pinned at the end so it is always on screen. A Grow() spacer inside the hints collapses.
+        Row(
+            Modifier.fillMaxWidth().height(48.dp).padding(horizontal = SeedlessSpace.edge),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(gap),
+        ) {
+            Row(
+                Modifier.weight(1f).horizontalScroll(rememberScrollState()),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = if (centered) Arrangement.spacedBy(gap, Alignment.CenterHorizontally) else Arrangement.spacedBy(gap),
+                content = content,
+            )
+            trailing?.invoke(this)
+        }
+    } else {
+        Row(
+            Modifier.fillMaxWidth().height(48.dp).padding(horizontal = SeedlessSpace.edge),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = if (centered) Arrangement.spacedBy(gap, Alignment.CenterHorizontally) else Arrangement.spacedBy(gap),
+        ) {
+            content()
+            if (trailing != null) {
+                Spacer(Modifier.weight(1f))
+                trailing()
+            }
+        }
+    }
 }
 
 @Composable
@@ -351,9 +383,10 @@ fun MultiplayerHeader(
     trailing: @Composable RowScope.() -> Unit = {},
 ) {
     val colors = seedless
+    val compact = rememberWidthClass() == WidthClass.COMPACT
     Column(modifier.fillMaxWidth()) {
         Row(
-            Modifier.fillMaxWidth().height(56.dp).padding(start = if (onBack != null) 8.dp else 18.dp, end = 16.dp),
+            Modifier.fillMaxWidth().height(56.dp).padding(start = if (onBack != null) SeedlessSpace.sm else SeedlessSpace.edge, end = SeedlessSpace.edge),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
@@ -365,7 +398,7 @@ fun MultiplayerHeader(
             }
             leading()
             Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(title, color = colors.text, fontFamily = SpaceGrotesk, fontWeight = FontWeight.Bold, fontSize = 21.sp, letterSpacing = (-0.3).sp,
+                Text(title, color = colors.text, fontFamily = SpaceGrotesk, fontWeight = FontWeight.Bold, fontSize = if (compact) 18.sp else 21.sp, letterSpacing = (-0.3).sp,
                     maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
                 tags()
             }

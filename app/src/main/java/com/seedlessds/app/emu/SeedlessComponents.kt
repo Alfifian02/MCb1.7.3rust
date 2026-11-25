@@ -1,5 +1,7 @@
 package com.seedlessds.app.emu
 
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.horizontalScroll
 import com.seedlessds.app.R
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateDpAsState
@@ -246,16 +248,20 @@ fun GamepadHintsFooter(
     showTopBorder: Boolean = true,
 ) {
     val colors = seedless
+    val compact = rememberWidthClass() == WidthClass.COMPACT
     Column(modifier = modifier.fillMaxWidth()) {
         if (showTopBorder) {
             Box(Modifier.fillMaxWidth().height(1.dp).background(colors.line))
         }
+        // At least as wide as the screen and centered; it scrolls sideways instead of clipping
+        // when the hints do not fit.
         Row(
-            horizontalArrangement = Arrangement.spacedBy(18.dp, Alignment.CenterHorizontally),
+            horizontalArrangement = Arrangement.spacedBy(if (compact) SeedlessSpace.md else 18.dp, Alignment.CenterHorizontally),
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 14.dp, vertical = 8.dp),
+                .horizontalScroll(rememberScrollState())
+                .padding(horizontal = SeedlessSpace.edge, vertical = SeedlessSpace.sm),
         ) {
             hints.forEach { hint ->
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -283,13 +289,18 @@ fun GamepadHintsFooter(
                             )
                         }
                     }
-                    Text(
-                        text = hint.label,
-                        color = colors.text3,
-                        fontFamily = SeedlessMono,
-                        fontSize = 10.sp,
-                        modifier = Modifier.padding(start = 6.dp),
-                    )
+                    // The "navigate" hint is icon-only on a narrow screen.
+                    if (hint.button != null || !compact) {
+                        Text(
+                            text = hint.label,
+                            color = colors.text3,
+                            fontFamily = SeedlessMono,
+                            fontSize = 10.sp,
+                            maxLines = 1,
+                            softWrap = false,
+                            modifier = Modifier.padding(start = 6.dp),
+                        )
+                    }
                 }
             }
         }

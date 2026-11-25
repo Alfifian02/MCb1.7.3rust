@@ -282,6 +282,19 @@ fun LibraryScreen(
         }
     }
 
+    val compact = rememberWidthClass() == WidthClass.COMPACT
+    val headerPad = headerVerticalPadding()
+    val headerActions = LibraryHeaderActions(
+        onMultiplayer = { onOpenMultiplayer(null) },
+        onSearch = { searchOpen = true },
+        onProfile = { profileDialog = true },
+        onOpenRom = onOpenSingle,
+        onAddFolder = onAddFolder,
+        onRemoveFolder = { foldersDialog = true },
+        onBootFirmware = onBootFirmware,
+        onSettings = onGlobalSettings,
+    )
+
     Scaffold(
         modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.systemBars.only(WindowInsetsSides.Horizontal)),
         containerColor = colors.bg,
@@ -291,7 +304,12 @@ fun LibraryScreen(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(start = 16.dp, end = 8.dp, top = 6.dp, bottom = 6.dp),
+                        .padding(
+                            start = SeedlessSpace.edge,
+                            end = SeedlessSpace.edge - SeedlessSpace.iconInset,
+                            top = headerPad,
+                            bottom = headerPad,
+                        ),
                 ) {
                     val folder = openFolder
                     if (searchOpen) {
@@ -391,27 +409,28 @@ fun LibraryScreen(
                         )
                     }
                     if (!searchOpen) {
-                        MultiplayerHeaderButton { onOpenMultiplayer(null) }
-                        Spacer(Modifier.width(4.dp))
-                        SeedlessHeaderAction(Icons.Rounded.Search, uiContext.getString(R.string.library_search), { searchOpen = true })
-                        ProfileChip(profile) { profileDialog = true }
-                    Spacer(Modifier.width(4.dp))
-                    ViewModeToggle(viewMode) {
-                        viewMode = it
-                        RomLibrary.setViewMode(ctx, it)
-                    }
-                    Spacer(Modifier.width(4.dp))
-                    SeedlessHeaderAction(Icons.Rounded.VideogameAsset, uiContext.getString(R.string.library_open_rom), onOpenSingle)
-                    SeedlessHeaderAction(Icons.Rounded.CreateNewFolder, uiContext.getString(R.string.library_add_folder), onAddFolder)
-                    SeedlessHeaderAction(Icons.Rounded.FolderDelete, uiContext.getString(R.string.library_remove_folder), { foldersDialog = true })
-                    SeedlessHeaderAction(Icons.Rounded.Settings, uiContext.getString(R.string.common_settings), onGlobalSettings)
+                        LibraryTitleActions(
+                            compact = compact,
+                            actions = headerActions,
+                            profile = profile,
+                            viewMode = viewMode,
+                            onViewMode = {
+                                viewMode = it
+                                RomLibrary.setViewMode(ctx, it)
+                            },
+                        )
                     }
                 }
-                TextButton(
-                    onClick = onBootFirmware,
-                    modifier = Modifier.align(Alignment.End).padding(end = 12.dp),
-                ) {
-                    Text(uiContext.getString(R.string.firmware_boot), color = colors.text2, fontFamily = Manrope)
+                if (compact && !searchOpen) {
+                    LibraryActionStrip(
+                        actions = headerActions,
+                        profile = profile,
+                        viewMode = viewMode,
+                        onViewMode = {
+                            viewMode = it
+                            RomLibrary.setViewMode(ctx, it)
+                        },
+                    )
                 }
                 if (!searchOpen) MultiplayerNearbyWatch()
                 LibraryFilterRow(
@@ -468,9 +487,9 @@ fun LibraryScreen(
                     .weight(1f)
                     .fillMaxSize()
                     .verticalScrollbar(gridState, colors.green.copy(alpha = 0.4f)),
-                contentPadding = PaddingValues(16.dp),
-                horizontalArrangement = Arrangement.spacedBy(11.dp),
-                verticalArrangement = Arrangement.spacedBy(if (viewMode == RomLibrary.ViewMode.GRID) 11.dp else 6.dp),
+                contentPadding = PaddingValues(SeedlessSpace.edge),
+                horizontalArrangement = Arrangement.spacedBy(SeedlessSpace.md),
+                verticalArrangement = Arrangement.spacedBy(if (viewMode == RomLibrary.ViewMode.GRID) SeedlessSpace.md else 6.dp),
             ) {
                 if (showFolders) {
                     item(span = { GridItemSpan(maxLineSpan) }) {
@@ -478,7 +497,7 @@ fun LibraryScreen(
                     }
                     item(span = { GridItemSpan(maxLineSpan) }) {
                         LazyRow(
-                            horizontalArrangement = Arrangement.spacedBy(9.dp),
+                            horizontalArrangement = Arrangement.spacedBy(SeedlessSpace.md),
                             contentPadding = PaddingValues(bottom = 4.dp),
                         ) {
                             items(folders, key = { "f_" + it.uri }) { folder ->
@@ -500,7 +519,7 @@ fun LibraryScreen(
                     }
                     item(span = { GridItemSpan(maxLineSpan) }) {
                         LazyRow(
-                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            horizontalArrangement = Arrangement.spacedBy(SeedlessSpace.md),
                             contentPadding = PaddingValues(bottom = 4.dp),
                         ) {
                             items(recent, key = { "r_" + it.uri }) { entry ->
@@ -636,18 +655,19 @@ private fun emptyMessage(uiContext: android.content.Context, filter: RomLibrary.
 }
 
 @Composable
-private fun ProfileChip(profile: String, onClick: () -> Unit) {
+internal fun ProfileChip(profile: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
     val colors = seedless
     val interactionSource = remember { MutableInteractionSource() }
     val focused by interactionSource.collectIsFocusedAsState()
     Row(
         verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier
-            .clip(RoundedCornerShape(20.dp))
+        modifier = modifier
+            .height(SeedlessSpace.control)
+            .clip(RoundedCornerShape(21.dp))
             .background(colors.surface2)
-            .let { if (focused) it.border(2.dp, colors.red, RoundedCornerShape(20.dp)) else it }
+            .let { if (focused) it.border(2.dp, colors.red, RoundedCornerShape(21.dp)) else it }
             .clickable(interactionSource = interactionSource, indication = null, onClick = onClick)
-            .padding(horizontal = 11.dp, vertical = 7.dp),
+            .padding(horizontal = 14.dp),
     ) {
         Icon(Icons.Rounded.Person, null, tint = colors.green, modifier = Modifier.size(15.dp))
         Text(

@@ -1,5 +1,6 @@
 package com.seedlessds.app.emu
 
+import androidx.compose.ui.unit.Dp
 import android.view.KeyEvent
 import android.os.Build
 import androidx.compose.foundation.layout.ColumnScope
@@ -246,6 +247,7 @@ fun MultiplayerScreen(viewModel: MultiplayerViewModel, pad: SharedFlow<Int>, act
 @Composable
 fun MultiplayerPermission(onContinue: () -> Unit, onSkip: () -> Unit, onBack: () -> Unit) {
     val colors = seedless
+    val compact = rememberWidthClass() == WidthClass.COMPACT
     val focus = remember { FocusRequester() }
     BackHandler { onSkip() }
     LaunchedEffect(Unit) { runCatching { focus.requestFocus() } }
@@ -253,31 +255,19 @@ fun MultiplayerPermission(onContinue: () -> Unit, onSkip: () -> Unit, onBack: ()
         MultiplayerHeader(stringResource(R.string.mp_perm_title), onBack = onBack) {
             Mono(stringResource(R.string.mp_first_time))
         }
-        Row(Modifier.weight(1f).fillMaxWidth().padding(16.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-            Box(Modifier.width(236.dp).fillMaxHeight().panel(colors, 12.dp), contentAlignment = Alignment.Center) {
-                Waves(Modifier.size(220.dp))
-                Mono(stringResource(R.string.mp_perm_radar), Modifier.align(Alignment.BottomCenter).padding(bottom = 14.dp), size = 10.sp)
+        if (compact) {
+            // Portrait: radar on top, text and buttons below, and the page scrolls if it is taller than the screen.
+            Column(
+                Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(SeedlessSpace.edge),
+                verticalArrangement = Arrangement.spacedBy(SeedlessSpace.md),
+            ) {
+                PermissionRadar(Modifier.fillMaxWidth().height(140.dp), wavesSize = 112.dp)
+                PermissionBody(Modifier.fillMaxWidth(), fill = false, onContinue = onContinue, onSkip = onSkip, focus = focus)
             }
-            Column(Modifier.weight(1f).fillMaxHeight(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                val ask = stringResource(if (Build.VERSION.SDK_INT >= 33) R.string.mp_perm_nearby else R.string.mp_perm_location)
-                Text(
-                    buildAnnotatedString {
-                        val text = stringResource(R.string.mp_perm_body, ask)
-                        val start = text.indexOf(ask)
-                        append(text)
-                        if (start >= 0) addStyle(SpanStyle(color = colors.goodText), start, start + ask.length)
-                    },
-                    color = colors.text, fontFamily = SpaceGrotesk, fontWeight = FontWeight.SemiBold, fontSize = 16.sp, lineHeight = 21.sp,
-                    modifier = Modifier.padding(bottom = 2.dp),
-                )
-                PermissionPoint(true, stringResource(R.string.mp_perm_find), stringResource(R.string.mp_perm_find_sub))
-                PermissionPoint(true, stringResource(R.string.mp_perm_direct), stringResource(R.string.mp_perm_direct_sub))
-                PermissionPoint(false, stringResource(R.string.mp_perm_private), stringResource(R.string.mp_perm_private_sub))
-                Box(Modifier.weight(1f))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    MenuTile(onContinue, Modifier.weight(1.5f).height(50.dp).focusRequester(focus)) { TileTitle(stringResource(R.string.mp_continue), size = 15.sp) }
-                    MenuTile(onSkip, Modifier.weight(1f).height(50.dp)) { TileTitle(stringResource(R.string.mp_not_now), size = 15.sp) }
-                }
+        } else {
+            Row(Modifier.weight(1f).fillMaxWidth().padding(SeedlessSpace.edge), horizontalArrangement = Arrangement.spacedBy(SeedlessSpace.edge)) {
+                PermissionRadar(Modifier.width(236.dp).fillMaxHeight(), wavesSize = 220.dp)
+                PermissionBody(Modifier.weight(1f).fillMaxHeight(), fill = true, onContinue = onContinue, onSkip = onSkip, focus = focus)
             }
         }
         MultiplayerFooter {
@@ -285,6 +275,41 @@ fun MultiplayerPermission(onContinue: () -> Unit, onSkip: () -> Unit, onBack: ()
             Hint("B", stringResource(R.string.multiplayer_back))
             Grow()
             Mono(stringResource(R.string.mp_direct_permission).uppercase(), size = 10.sp, spacing = 0.5.sp)
+        }
+    }
+}
+
+@Composable
+private fun PermissionRadar(modifier: Modifier, wavesSize: Dp) {
+    val colors = seedless
+    Box(modifier.panel(colors, 12.dp), contentAlignment = Alignment.Center) {
+        Waves(Modifier.size(wavesSize))
+        Mono(stringResource(R.string.mp_perm_radar), Modifier.align(Alignment.BottomCenter).padding(bottom = 14.dp), size = 10.sp)
+    }
+}
+
+@Composable
+private fun PermissionBody(modifier: Modifier, fill: Boolean, onContinue: () -> Unit, onSkip: () -> Unit, focus: FocusRequester) {
+    val colors = seedless
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        val ask = stringResource(if (Build.VERSION.SDK_INT >= 33) R.string.mp_perm_nearby else R.string.mp_perm_location)
+        Text(
+            buildAnnotatedString {
+                val text = stringResource(R.string.mp_perm_body, ask)
+                val start = text.indexOf(ask)
+                append(text)
+                if (start >= 0) addStyle(SpanStyle(color = colors.goodText), start, start + ask.length)
+            },
+            color = colors.text, fontFamily = SpaceGrotesk, fontWeight = FontWeight.SemiBold, fontSize = 16.sp, lineHeight = 21.sp,
+            modifier = Modifier.padding(bottom = 2.dp),
+        )
+        PermissionPoint(true, stringResource(R.string.mp_perm_find), stringResource(R.string.mp_perm_find_sub))
+        PermissionPoint(true, stringResource(R.string.mp_perm_direct), stringResource(R.string.mp_perm_direct_sub))
+        PermissionPoint(false, stringResource(R.string.mp_perm_private), stringResource(R.string.mp_perm_private_sub))
+        if (fill) Box(Modifier.weight(1f)) else Spacer(Modifier.height(SeedlessSpace.xs))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            MenuTile(onContinue, Modifier.weight(1.5f).height(50.dp).focusRequester(focus)) { TileTitle(stringResource(R.string.mp_continue), size = 15.sp) }
+            MenuTile(onSkip, Modifier.weight(1f).height(50.dp)) { TileTitle(stringResource(R.string.mp_not_now), size = 15.sp) }
         }
     }
 }
