@@ -132,7 +132,7 @@ data class DsSettings(
         v = v or ((slot2Type.toLong() and 15L) shl 43)
         if (soundEnabled)        v = v or 0x80000000L
         if (showFps)             v = v or 0x40000000L
-        if (SettingsRepo.fastForward) v = v or 0x20000000L
+        if (SettingsRepo.fastForward && !MultiplayerSession.active) v = v or 0x20000000L
         if (threaded3D)          v = v or 0x10000000L
         if (cheatsEnabled)       v = v or 0x8000000L
         if (micEnabled)          v = v or 0x4000000L
@@ -156,7 +156,7 @@ data class DsSettings(
         (firmwareLanguage and 0xFF) or ((firmwareColor and 0xFF) shl 8) or
         ((bdayMonth and 0xFF) shl 16) or ((bdayDay and 0xFF) shl 24)
 
-    fun autosaveInterval(): Int = when (autosaveMode) {
+    fun autosaveInterval(): Int = if (MultiplayerSession.active) 0 else when (autosaveMode) {
         2 -> 300; 3 -> 900; 4 -> 1800; else -> 0
     }
 }

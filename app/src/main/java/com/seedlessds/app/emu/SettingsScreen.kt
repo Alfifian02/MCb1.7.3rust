@@ -145,6 +145,7 @@ private val SettingsMaxWidth = 680.dp
 fun SettingsScreen(
     initial: DsSettings,
     onSave: (DsSettings) -> Unit,
+    onEnableMicrophone: () -> Unit,
     onOpenKeyMapper: () -> Unit,
     onOpenMappingInfo: () -> Unit,
     onOpenSystemTools: () -> Unit,
@@ -161,7 +162,6 @@ fun SettingsScreen(
     var lastCat by remember { mutableStateOf(-1) }
     var homeSelection by remember { mutableStateOf(0) }
     var subPage by remember { mutableStateOf<String?>(null) }
-    var wifiDialog by remember { mutableStateOf(false) }
     var confirmReset by remember { mutableStateOf(false) }
     val setS: (DsSettings) -> Unit = { s = it }
     val perGame = subtitle != null
@@ -207,15 +207,6 @@ fun SettingsScreen(
         return
     }
 
-    if (wifiDialog) SeedlessConfirmDialog(
-        title = uiContext.getString(R.string.settings_multiplayer_wifi),
-        message = uiContext.getString(R.string.settings_the_emulator_does_not_support_local),
-        confirmLabel = uiContext.getString(R.string.settings_got_it),
-        destructive = false,
-        onConfirm = { wifiDialog = false },
-        onDismiss = { wifiDialog = false },
-        cancelLabel = uiContext.getString(R.string.common_close),
-    )
     if (confirmReset && onReset != null) SeedlessConfirmDialog(
         title = uiContext.getString(R.string.settings_reset_to_global_settings),
         message = uiContext.getString(R.string.settings_this_discards_this_game_s_own_settings_and),
@@ -318,10 +309,10 @@ fun SettingsScreen(
                         1 -> ScreenSettings(s, setS, subPage) { subPage = it }
                         2 -> TouchSettings(s, setS)
                         3 -> PadSettings(s, setS, { onSave(s); onOpenKeyMapper() }, { onSave(s); onOpenMappingInfo() })
-                        4 -> AudioSettings(s, setS)
+                        4 -> AudioSettings(s, setS, onEnableMicrophone)
                         5 -> SystemSettings(s, setS)
                         6 -> SaveSettings(s, setS)
-                        7 -> AdvancedSettings(s, setS, !perGame, { wifiDialog = true }, { onSave(s); onOpenSystemTools() })
+                        7 -> AdvancedSettings(s, setS, !perGame, { uiContext.startActivity(android.content.Intent(uiContext, MultiplayerActivity::class.java)) }, { onSave(s); onOpenSystemTools() })
                         8 -> RaCategory()
                     }
                     }
@@ -597,7 +588,7 @@ fun SettingsScreen(
         s.disableMapped) { set(s.copy(disableMapped = it)) }
 }
 
-@Composable private fun AudioSettings(s: DsSettings, set: (DsSettings) -> Unit) {
+@Composable private fun AudioSettings(s: DsSettings, set: (DsSettings) -> Unit, onEnableMicrophone: () -> Unit) {
     val uiContext = androidx.compose.ui.platform.LocalContext.current
     val options = androidx.compose.runtime.remember(uiContext, androidx.compose.ui.platform.LocalConfiguration.current) { SettingsOptions(uiContext) }
     Group(uiContext.getString(R.string.settings_sound))
@@ -610,7 +601,10 @@ fun SettingsScreen(
 
     Group(uiContext.getString(R.string.settings_microphone))
     SwitchRow(uiContext.getString(R.string.settings_use_device_microphone), uiContext.getString(R.string.settings_uses_the_real_microphone_for_games_that),
-        s.micEnabled) { set(s.copy(micEnabled = it)) }
+        s.micEnabled) { enabled ->
+        set(s.copy(micEnabled = enabled))
+        if (enabled) onEnableMicrophone()
+    }
     DropdownRow(uiContext.getString(R.string.settings_microphone_level), uiContext.getString(R.string.settings_microphone_capture_sensitivity),
         options.micLevel, s.micLevel) { set(s.copy(micLevel = it)) }
 }

@@ -23,6 +23,7 @@ class DsGlView(context: Context) : SurfaceView(context) {
     private val renderer = DsRenderer()
     private val thread = RenderThread()
 
+    @Volatile internal var onLcdLayout: (() -> Unit)? = null
     val bottomScreenRect: FloatArray get() = renderer.bottomScreenRect
     val topScreenRect: FloatArray get() = renderer.topScreenRect
 
@@ -42,6 +43,14 @@ class DsGlView(context: Context) : SurfaceView(context) {
     private fun pushInput() {
         if (thread.isClosing()) return
         SeedlessCore.input(padState or (if (touchActive) 0x80000000.toInt() else 0), touchPacked, autofireMask)
+    }
+
+    fun clearInput() {
+        padState = 0
+        autofireMask = 0
+        touchActive = false
+        touchPacked = 0
+        pushInput()
     }
 
     fun toggleRapidFire() {
@@ -192,7 +201,7 @@ class DsGlView(context: Context) : SurfaceView(context) {
         }
 
         override fun run() {
-            try { renderLoop() } finally { renderer.shutdown(); teardown() }
+            try { renderLoop() } finally { try { renderer.shutdown() } finally { teardown() } }
         }
 
         private fun renderLoop() {
@@ -558,11 +567,10 @@ class DsGlView(context: Context) : SurfaceView(context) {
                 if (showingBottom) { bottomScreenRect = r; topScreenRect = zero }
                 else { topScreenRect = r; bottomScreenRect = zero }
             } else {
-                var slot0 = rawTop
-                var slot1 = rawBot
-                if (cfg.swapScreens) { val t = slot0; slot0 = slot1; slot1 = t }
-                val topRect = xform(slot0, w, h, ControlLayout.topScale, ControlLayout.topOffX, ControlLayout.topOffY)
-                val botRect = xform(slot1, w, h, ControlLayout.botScale, ControlLayout.botOffX, ControlLayout.botOffY)
+                val firstSlot = xform(rawTop, w, h, ControlLayout.topScale, ControlLayout.topOffX, ControlLayout.topOffY)
+                val secondSlot = xform(rawBot, w, h, ControlLayout.botScale, ControlLayout.botOffX, ControlLayout.botOffY)
+                val topRect = if (cfg.swapScreens) secondSlot else firstSlot
+                val botRect = if (cfg.swapScreens) firstSlot else secondSlot
                 System.arraycopy(quadNdc(w, h, topRect), 0, geo, 0, 12)
                 System.arraycopy(quadNdc(w, h, botRect), 0, geo, 12, 12)
                 topPxW = topRect[2].toInt(); topPxH = topRect[3].toInt()
@@ -570,6 +578,7 @@ class DsGlView(context: Context) : SurfaceView(context) {
                 topScreenRect = topRect
                 bottomScreenRect = botRect
             }
+            onLcdLayout?.invoke()
             writeVbo(0, geo)
             writeVbo(2208, FX_UV_BLOCK)
         }

@@ -14,6 +14,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import com.seedlessds.app.emu.DeviceMicrophonePermission
 import com.seedlessds.app.emu.ExternalIdleInfo
 import com.seedlessds.app.emu.LibraryKeyRouter
 import com.seedlessds.app.emu.MenuKeyRouter
@@ -22,11 +23,13 @@ import com.seedlessds.app.emu.ExternalInfoController
 import com.seedlessds.app.emu.SeedlessTheme
 import com.seedlessds.app.emu.EmulatorActivity
 import com.seedlessds.app.emu.LibraryScreen
+import com.seedlessds.app.emu.MultiplayerActivity
 import com.seedlessds.app.emu.RomLibrary
 import com.seedlessds.app.emu.SettingsHost
 
 class MainActivity : ComponentActivity() {
 
+    private val microphone = DeviceMicrophonePermission(this)
     private val refresh = mutableIntStateOf(0)
     private val externalInfo by lazy { ExternalInfoController(this) }
 
@@ -61,7 +64,7 @@ class MainActivity : ComponentActivity() {
                     var settingsGameKey by remember { mutableStateOf<String?>(null) }
 
                     if (inSettings) {
-                        SettingsHost(gameKey = settingsGameKey) { inSettings = false }
+                        SettingsHost(gameKey = settingsGameKey, onEnableMicrophone = microphone::requestFromSettings) { inSettings = false }
                     } else {
                         LibraryScreen(
                             refreshKey = refresh.intValue,
@@ -73,6 +76,14 @@ class MainActivity : ComponentActivity() {
                             onGlobalSettings = { settingsGameKey = null; inSettings = true },
                             onAddFolder = { folderPicker.launch(null) },
                             onOpenSingle = { singlePicker.launch(arrayOf("*/*")) },
+                            onBootFirmware = {
+                                startActivity(Intent(this, EmulatorActivity::class.java)
+                                    .putExtra(EmulatorActivity.EXTRA_FIRMWARE_BOOT, true))
+                            },
+                            onOpenMultiplayer = { join ->
+                                startActivity(Intent(this, MultiplayerActivity::class.java)
+                                    .putExtra(MultiplayerActivity.EXTRA_JOIN, join))
+                            },
                         )
                     }
                 }
@@ -98,6 +109,9 @@ class MainActivity : ComponentActivity() {
                 }
                 event.keyCode == android.view.KeyEvent.KEYCODE_BUTTON_Y -> {
                     if (LibraryKeyRouter.toggleFavorite?.invoke() == true) return true
+                }
+                event.keyCode == android.view.KeyEvent.KEYCODE_BUTTON_SELECT && event.repeatCount == 0 -> {
+                    if (LibraryKeyRouter.openMultiplayer?.invoke() == true) return true
                 }
             }
             if (MenuKeyRouter.dispatch(event.keyCode)) return true

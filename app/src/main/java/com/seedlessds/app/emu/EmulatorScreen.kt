@@ -122,6 +122,7 @@ fun EmulatorScreen(
     onApplySettings: (DsSettings) -> Unit,
     onApplyPerGame: (DsSettings) -> Unit,
     onClearPerGame: () -> Unit,
+    onEnableMicrophone: () -> Unit,
     onMenuVisibilityChange: (Boolean) -> Unit = {},
     gameIcon: androidx.compose.ui.graphics.ImageBitmap? = null,
     gameCoverUrl: String? = null,
@@ -131,6 +132,7 @@ fun EmulatorScreen(
     onApplyExternal: () -> Unit = {},
     extTapCount: Int = 0,
     onExtEditState: (Boolean, Boolean) -> Unit = { _, _ -> },
+    playerControls: @Composable () -> Unit = {},
 ) {
     val uiContext = androidx.compose.ui.platform.LocalContext.current
     var overlay by remember { mutableStateOf(Overlay.NONE) }
@@ -198,6 +200,10 @@ fun EmulatorScreen(
 
     fun dispatchExtra(fn: Int, pressed: Boolean) {
         if (fn == 0) return
+        if (fn in 1..3 && MultiplayerSession.active) {
+            if (!pressed) android.widget.Toast.makeText(ctx, R.string.multiplayer_operation_unavailable, android.widget.Toast.LENGTH_SHORT).show()
+            return
+        }
         if (pressed) { if (fn == 7) SeedlessCore.whitenoise(true); return }
         when (fn) {
             1 -> { SettingsRepo.fastForward = !SettingsRepo.fastForward; glView.applyFastForward() }
@@ -236,20 +242,31 @@ fun EmulatorScreen(
         if (overlay == Overlay.NONE && !editingControls && gamepadConnected &&
             settings.analogStickMode == StylusCursor.POINTER_MODE)
             StylusCursorOverlay(glView, settings.pointerSize)
+        if (glView.context is PhantomPeerActivity) {
+            androidx.compose.ui.viewinterop.AndroidView(factory = { ctx ->
+                PhantomFrame(ctx) { listOf(glView.topScreenRect, glView.bottomScreenRect) }.also { frame ->
+                    glView.onLcdLayout = frame::postInvalidate
+                }
+            }, modifier = Modifier.fillMaxSize())
+            androidx.compose.runtime.DisposableEffect(glView) { onDispose { glView.onLcdLayout = null } }
+        }
 
         if (overlay == Overlay.NONE) {
+            val topRect = remember(editingControls, rectTick) { glView.topScreenRect }
+            val botRect = remember(editingControls, rectTick) { glView.bottomScreenRect }
+            val swapped = editingControls && SettingsRepo.current.swapScreens && topRect[2] > 0f && botRect[2] > 0f
             if (editingControls) {
                 Box(Modifier.fillMaxSize()
                     .background(Color(0x66000000))
                     .pointerInput(Unit) { detectTapGestures { selectedId = null } })
-                val topRect = remember(rectTick) { glView.topScreenRect }
-                val botRect = remember(rectTick) { glView.bottomScreenRect }
-                ScreenEditHandle("screenTop", uiContext.getString(R.string.common_top_2), topRect, selectedId == "screenTop", canvasPx,
+                ScreenEditHandle("screenTop", uiContext.getString(if (swapped) R.string.common_bottom_2 else R.string.common_top_2),
+                    if (swapped) botRect else topRect, selectedId == "screenTop", canvasPx,
                     onSelect = { selectedId = "screenTop" }) { dx, dy ->
                     ControlLayout.topOffX += dx; ControlLayout.topOffY += dy
                     glView.applyDisplaySettings(); rectTick++
                 }
-                ScreenEditHandle("screenBot", uiContext.getString(R.string.common_bottom_2), botRect, selectedId == "screenBot", canvasPx,
+                ScreenEditHandle("screenBot", uiContext.getString(if (swapped) R.string.common_top_2 else R.string.common_bottom_2),
+                    if (swapped) topRect else botRect, selectedId == "screenBot", canvasPx,
                     onSelect = { selectedId = "screenBot" }) { dx, dy ->
                     ControlLayout.botOffX += dx; ControlLayout.botOffY += dy
                     glView.applyDisplaySettings(); rectTick++
@@ -263,6 +280,7 @@ fun EmulatorScreen(
                 PerfOverlay(Modifier.align(Alignment.TopStart).padding(start = 90.dp, top = 16.dp))
             if (settings.showPerf && !editingControls)
                 PerfStatsOverlay(glView, Modifier.align(Alignment.TopStart).padding(start = 90.dp, top = 44.dp))
+            if (!editingControls) playerControls()
             if (settings.showScale && !editingControls)
                 ScaleOverlay(Modifier.align(Alignment.TopEnd).padding(end = 90.dp, top = 16.dp))
             if (com.seedlessds.app.BuildConfig.FRAME_CONTROLS && !editingControls)
@@ -306,7 +324,8 @@ fun EmulatorScreen(
                         EditSizeBar(
                             modifier = Modifier.padding(top = 6.dp),
                             label = when (sel) {
-                                "screenTop" -> uiContext.getString(R.string.common_top_screen); "screenBot" -> uiContext.getString(R.string.common_bottom_screen)
+                                "screenTop" -> uiContext.getString(if (swapped) R.string.common_bottom_screen else R.string.common_top_screen)
+                                "screenBot" -> uiContext.getString(if (swapped) R.string.common_top_screen else R.string.common_bottom_screen)
                                 "extScreen" -> uiContext.getString(R.string.menu_external_screen)
                                 ControlLayout.INPUT_VIEW -> uiContext.getString(R.string.controls_input_display); else -> sel
                             },
@@ -378,6 +397,7 @@ fun EmulatorScreen(
                     onSave = { settings = it; onApplySettings(it) },
                     onOpenKeyMapper = { overlay = Overlay.KEYMAP },
                     onOpenMappingInfo = { overlay = Overlay.MAPPING_INFO },
+                    onEnableMicrophone = onEnableMicrophone,
                     onOpenSystemTools = { overlay = Overlay.SYSTEM_TOOLS },
                     onBack = { overlay = Overlay.MENU },
                     gameRunning = true,
@@ -389,6 +409,7 @@ fun EmulatorScreen(
                     onSave = { perGame = it; onApplyPerGame(it) },
                     onOpenKeyMapper = { overlay = Overlay.KEYMAP },
                     onOpenMappingInfo = { overlay = Overlay.MAPPING_INFO },
+                    onEnableMicrophone = onEnableMicrophone,
                     onOpenSystemTools = { overlay = Overlay.SYSTEM_TOOLS },
                     onBack = { overlay = Overlay.MENU },
                     gameRunning = true,
@@ -643,7 +664,7 @@ private fun GameMenu(
                     )
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
-                            text = uiContext.getString(R.string.menu_paused),
+                            text = uiContext.getString(if (MultiplayerSession.active) R.string.achievements_now_playing else R.string.menu_paused),
                             color = colors.red,
                             fontFamily = SeedlessMono,
                             fontSize = 9.sp,
