@@ -82,6 +82,7 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = true
+            isShrinkResources = true
             buildConfigField("boolean", "FRAME_CONTROLS", (project.findProperty("frameControls") == "true").toString())
 
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")

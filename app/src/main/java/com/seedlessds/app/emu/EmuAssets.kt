@@ -22,7 +22,7 @@ object EmuAssets {
     fun ensureInstalled(ctx: Context, sys: File = systemDir(ctx)) {
         for (it in ITEMS) {
             val out = File(sys, it.dest)
-            val assetSize = try { ctx.assets.openFd(it.asset).length } catch (e: Exception) { -1L }
+            val assetSize = try { ctx.assets.openFd(it.asset).use { fd -> fd.length } } catch (e: Exception) { -1L }
             if (out.exists() && (assetSize < 0 || out.length() == assetSize)) continue
             out.parentFile?.mkdirs()
             ctx.assets.open(it.asset).use { input ->

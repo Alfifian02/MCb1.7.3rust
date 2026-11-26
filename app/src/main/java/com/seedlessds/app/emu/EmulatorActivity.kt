@@ -438,7 +438,8 @@ open class EmulatorActivity : ComponentActivity() {
                     var i = 0L
                     while (i < iters && cpuLoadRunning) { r = Math.sqrt((r + 1.0) * 1.0000001); i++ }
                 }
-                try { Thread.sleep(10) } catch (_: InterruptedException) { break }
+                // Load 0 is the normal case: poll the setting a few times a second instead of 100.
+                try { Thread.sleep(if (load > 0) 10L else 250L) } catch (_: InterruptedException) { break }
             }
         }.apply { isDaemon = true; name = "seedless-cpuload"; start() }
     }

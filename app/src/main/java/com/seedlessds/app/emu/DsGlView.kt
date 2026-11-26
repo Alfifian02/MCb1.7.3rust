@@ -74,7 +74,12 @@ class DsGlView(context: Context) : SurfaceView(context) {
 
     fun setButton(index: Int, pressed: Boolean) {
         if (index < 0) return
-        padState = if (pressed) padState or (1 shl index) else padState and (1 shl index).inv()
+        val bit = 1 shl index
+        val old = padState
+        val next = if (pressed) old or bit else old and bit.inv()
+        // Joystick events arrive at 100+ Hz and set every direction each time; only a real change needs a JNI call.
+        if (next == old) return
+        padState = next
         pushInput()
     }
 
@@ -137,7 +142,8 @@ class DsGlView(context: Context) : SurfaceView(context) {
         private var pendingH = 0
         private var surfaceChanged = false
         private var dropWindow = false
-        private var exiting = false
+        // Written under [lock], read lock-free by the UI/input thread (see isClosing).
+        @Volatile private var exiting = false
         private var paused = false
 
         private val egl = EGLContext.getEGL() as EGL10
@@ -182,7 +188,8 @@ class DsGlView(context: Context) : SurfaceView(context) {
             lock.notifyAll()
         }
 
-        fun isClosing(): Boolean = synchronized(lock) { exiting }
+        // Called for every touch and button event on the main thread; must not contend with the render loop's monitor.
+        fun isClosing(): Boolean = exiting
 
         fun requestShutdown() = synchronized(lock) {
             if (exiting) return@synchronized
@@ -627,10 +634,18 @@ class DsGlView(context: Context) : SurfaceView(context) {
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
         }
 
+        // Render thread only. The largest upload is the 72-float UV block (288 bytes), so one small buffer serves all.
+        private val vboScratch: ByteBuffer = ByteBuffer.allocateDirect(512).order(ByteOrder.nativeOrder())
+
         private fun writeVbo(offsetBytes: Int, data: FloatArray) {
-            val b = ByteBuffer.allocateDirect(data.size * 4).order(ByteOrder.nativeOrder())
-            b.asFloatBuffer().put(data).flip()
-            GLES20.glBufferSubData(GLES20.GL_ARRAY_BUFFER, offsetBytes, data.size * 4, b)
+            val bytes = data.size * 4
+            val b = if (bytes <= vboScratch.capacity()) vboScratch
+                else ByteBuffer.allocateDirect(bytes).order(ByteOrder.nativeOrder())
+            b.clear()
+            b.asFloatBuffer().put(data)
+            b.position(0)
+            b.limit(bytes)
+            GLES20.glBufferSubData(GLES20.GL_ARRAY_BUFFER, offsetBytes, bytes, b)
         }
 
         private fun displayKeyOf(cfg: DsSettings): String = listOf(

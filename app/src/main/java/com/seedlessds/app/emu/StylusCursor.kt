@@ -1,5 +1,7 @@
 package com.seedlessds.app.emu
 
+import android.os.Handler
+import android.os.Looper
 import android.view.Choreographer
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.fillMaxSize
@@ -32,6 +34,7 @@ object StylusCursor : Choreographer.FrameCallback {
     private const val DS_H = 191f
     private const val BASE_SPEED = 200f   // DS pixels per second at full deflection, 100% speed
     private const val SLOW_FACTOR = 0.3f
+    private const val IDLE_MS = 250L   // how often to look for Pointer mode being switched on
 
     var x by mutableStateOf(128f); private set
     var y by mutableStateOf(96f); private set
@@ -48,6 +51,8 @@ object StylusCursor : Choreographer.FrameCallback {
     private var blocked: () -> Boolean = { false }
     private var lastNanos = 0L
     private var running = false
+    private val idleHandler = Handler(Looper.getMainLooper())
+    private val idleTick = Runnable { if (running) Choreographer.getInstance().postFrameCallback(this) }
     private var pushedX = -1
     private var pushedY = -1
 
@@ -70,6 +75,7 @@ object StylusCursor : Choreographer.FrameCallback {
 
     fun stop() {
         running = false
+        idleHandler.removeCallbacks(idleTick)
         Choreographer.getInstance().removeFrameCallback(this)
         release()
         stickX = 0f; stickY = 0f; tapSources = 0; slowSources = 0
@@ -83,13 +89,22 @@ object StylusCursor : Choreographer.FrameCallback {
 
     override fun doFrame(frameTimeNanos: Long) {
         if (!running) return
+        val s = SettingsRepo.current
+        if (s.analogStickMode != POINTER_MODE) {
+            // Not in Pointer mode (the default): nothing to integrate. Looking again every IDLE_MS instead of every
+            // vsync saves 60 to 120 main-thread wakeups a second for the whole play session.
+            tapSources = 0; slowSources = 0; stickX = 0f; stickY = 0f
+            release()
+            lastNanos = 0L
+            idleHandler.postDelayed(idleTick, IDLE_MS)
+            return
+        }
         Choreographer.getInstance().postFrameCallback(this)
         val dt = if (lastNanos == 0L) 0f else ((frameTimeNanos - lastNanos) / 1_000_000_000f).coerceAtMost(0.05f)
         lastNanos = frameTimeNanos
 
-        val s = SettingsRepo.current
         val glView = view ?: return
-        if (s.analogStickMode != POINTER_MODE || blocked()) {
+        if (blocked()) {
             tapSources = 0; slowSources = 0; stickX = 0f; stickY = 0f
             release()
             return
