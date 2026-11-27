@@ -1,0 +1,76 @@
+// startup.tjs - jalankan semua skrip uji 7.2. Taruh folder ini sebagai folder game uji
+// (atau salin berkas .tjs ke folder game kosong) lalu jalankan di Kirikiroid2.
+//
+// SEBELUM MENJALANKAN, setel dua variabel di bawah:
+//   RENDERER        : "software" atau "opengl" -- samakan dengan pengaturan aplikasi (kunci preferensi "renderer"; default "software").
+//   RUN_UNSAFE_CASES: biarkan false di APK resmi 1.3.9 (kasus yang bisa crash/baca di luar batas).
+// Hasil: baris "CASE"/"CHECK" lewat Debug.message (log aplikasi). Simpan log untuk APK 1.3.9 dan fork lalu `diff`.
+var RENDERER = "software";
+
+// ---- pencatat ke BERKAS (tanpa PC) -----------------------------------------------------------------------------------
+// Konsol layar Kirikiroid2 tidak selalu tampil, jadi semua baris juga ditulis ke berkas teks `uji_log.txt`.
+// Ditulis ke TIGA lokasi sekaligus (yang gagal diabaikan); cari berkas ini lewat aplikasi pengelola berkas:
+//   1) folder game uji (nama relatif)   2) /sdcard/uji_log.txt   3) /storage/emulated/0/uji_log.txt
+// Berkas ditulis ulang setiap ada baris baru, jadi bila skrip macet/crash, baris terakhir menunjukkan posisinya.
+var BOOT_FILES = [ "uji_log.txt", "/sdcard/uji_log.txt", "/storage/emulated/0/uji_log.txt" ];
+var BOOT_LINES = [];
+function bootflush() {
+	for (var i = 0; i < BOOT_FILES.count; i++) { try { BOOT_LINES.save(BOOT_FILES[i]); } catch (e) {} }
+}
+function bootlog(s) {
+	BOOT_LINES.add(s);
+	try { Debug.message(s); } catch (e) {}
+	bootflush();
+}
+function bootexec(name) {
+	try { Scripts.execStorage(name); bootlog("BOOT ok    " + name); return true; }
+	catch (e) { bootlog("BOOT ERROR " + name + " : " + e.message); return false; }
+}
+
+try { Debug.startLogToFile(true); } catch (e) {}   // cadangan: krkr.console.log (belum tentu terbuat di Android)
+bootlog("BOOT startup.tjs mulai; renderer=" + RENDERER);
+
+var BOOT_OK = bootexec("harness.tjs");
+var BOOT_TEST_FILES = [ "t_registrasi.tjs", "t_stretchCopyAA.tjs", "t_copyRaster.tjs", "t_shrinkCopy.tjs", "t_shrinkCopyFast.tjs", "t_alpha4.tjs", "t_layerExSaveA.tjs", "t_layerExSaveB.tjs", "t_motionplayer_stub.tjs" ];
+if (BOOT_OK) {
+	for (var BI = 0; BI < BOOT_TEST_FILES.count; BI++) bootexec(BOOT_TEST_FILES[BI]);   // galat sintaks satu berkas tidak menghentikan yang lain
+
+	tlog("##### MULAI renderer=" + RENDERER + " unsafe=" + RUN_UNSAFE_CASES);
+	var T_STEPS = [ "selfcheck", "registrasi", "stretchCopyAA", "copyRaster", "shrinkCopy", "shrinkCopyFast", "alpha4", "layerExSaveA", "layerExSaveB", "motionplayer_stub" ];
+	for (var T_I = 0; T_I < T_STEPS.count; T_I++) {
+		var T_NAME = T_STEPS[T_I];
+		tlog("STEP   mulai " + T_NAME);
+		// Tanpa fungsi anonim: di TJS fungsi anonim di tingkat atas tidak melihat variabel loop (galat "Member T_NAME does not exist").
+		var T_R = "ok";
+		try { Scripts.eval("run_" + T_NAME + "();"); } catch (e) { T_R = "throw:" + e.message; }
+		if (T_R != "ok") tlog("ERROR  run_" + T_NAME + " " + T_R);
+		else tlog("STEP   selesai " + T_NAME);
+	}
+	tlog("##### SELESAI  PASS=" + T_PASS + " FAIL=" + T_FAIL);
+} else {
+	bootlog("BOOT harness.tjs gagal dimuat -> uji tidak dijalankan (lihat baris ERROR di atas)");
+}
+
+// ---- ringkasan di LAYAR (bonus; dibuat setelah semua uji, jadi tidak mengganggu hasil) ---------------------------------
+function showSummary() {
+	var L = [];
+	L.add("PASS=" + T_PASS + "  FAIL=" + T_FAIL + "  baris=" + BOOT_LINES.count);
+	L.add("log lengkap: uji_log.txt (folder game, /sdcard, atau /storage/emulated/0)");
+	for (var i = 0; i < BOOT_LINES.count; i++) {
+		var s = BOOT_LINES[i];
+		if (s.indexOf("FAIL") >= 0 || s.indexOf("ERROR") >= 0) L.add(s);
+	}
+	var W = 1000, LH = 22, H = LH * (L.count + 1);
+	var win = new Window();
+	var lay = new Layer(win, null);
+	lay.setImageSize(W, H);
+	lay.setSizeToImageSize();
+	lay.fillRect(0, 0, W, H, 0xFF000000);
+	lay.font.height = 18;
+	for (var j = 0; j < L.count; j++) lay.drawText(8, j * LH + 2, L[j], 0xFFFFFFFF);
+	lay.visible = true;
+	win.setInnerSize(W, H);
+	win.visible = true;
+	global.T_VIEW = [ win, lay ];
+}
+try { showSummary(); bootlog("BOOT ringkasan layar dibuat"); } catch (e) { bootlog("BOOT ringkasan layar GAGAL: " + e.message); }

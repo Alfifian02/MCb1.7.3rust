@@ -1,0 +1,159 @@
+// t_layerExSaveB.tjs - LayerExSave.dll bagian B (S12): Layer.saveLayerImageTlg5 / saveLayerImagePng / saveLayerImagePngOctet
+// dan Window.startSaveLayerImage / cancelSaveLayerImage / stopSaveLayerImage (+ callback onSaveLayerImageProgress/Done).
+// Spesifikasi: docs/spec/layerExSave_B_common.md dan layerExSave_<method>.md.
+// STATUS: bahasa belum dijalankan di mesin TJS2 repo (tests/tjs_host) dan perilaku plugin BELUM dijalankan di perangkat.
+// Berkas keluaran ditulis ke lokasi pertama yang bisa ditulis dari daftar SB_DIRS (sama seperti uji_log.txt).
+// Uji pulang-pergi (simpan lalu muat ulang) sekaligus MENGUKUR urutan kanal: bila memori layer R,G,B,A (temuan BTOA) maka PNG
+// tersimpan benar dan hasil muat ulang sama; bila B,G,R,A maka biner menyimpan R/B tertukar -> muat ulang beda hanya R/B (dicatat).
+// Hasil async (Done) tiba SETELAH ringkasan awal: baris "CHECK ... (async)" ditulis belakangan oleh timer.
+var SB_DIRS = [ "", "/sdcard/", "/storage/emulated/0/" ];
+var SB_DONE = [];            // %[ idx, canceled, name ] dari onSaveLayerImageDone
+var SB_PROG = [];            // %[ idx, pct, name ] dari onSaveLayerImageProgress
+var SB_DIR = "";
+
+function sbPickDir(l)
+{
+	for (var i = 0; i < SB_DIRS.count; i++) {
+		var r = callm(l, "saveLayerImageTlg5", [ SB_DIRS[i] + "sbprobe.tlg" ]);
+		if (r == "ok") return SB_DIRS[i];
+	}
+	return void;
+}
+
+// Bandingkan dua layer: [beda_persis, beda_selain_swapRB, jumlah_piksel_beralfa_nol_dilewati]
+function sbCompare(a, b, w, h)
+{
+	var exact = 0, other = 0, skip = 0;
+	for (var y = 0; y < h; y++) for (var x = 0; x < w; x++) {
+		var p = getPx(a, x, y), q = getPx(b, x, y);
+		if (p == q) continue;
+		if ((p >>> 24) == 0 && (q >>> 24) == 0) { skip++; continue; }
+		if ((p & 0xFF000000) == (q & 0xFF000000) && (rbswap(p) & 0xFFFFFF) == (q & 0xFFFFFF)) exact++; else other++;
+	}
+	return [ exact, other, skip ];     // exact = beda hanya karena R/B tertukar
+}
+
+// Octet tidak bisa digabung ke string di TJS ("Cannot convert (octet) to string"); teks heksa diambil lewat Scripts.getTraceString.
+// Hasil "?" = tidak tersedia -> CHECK tanda tangan dilewati (dicatat), tipe tetap diperiksa.
+function sbOct(o)
+{
+	var r = "?";
+	try { r = Scripts.getTraceString(o, 4000); } catch (e) { r = "?"; }
+	return r.toUpperCase();
+}
+function sbIsPng(o) { var t = sbOct(o); return (t == "?") ? true : (t.indexOf("89 50 4E 47 0D 0A 1A 0A") >= 0); }
+
+function sbLoadBack(path)
+{
+	var l = new Layer(T_WIN, T_BASE);
+	T_LAYERS.add(l);
+	l.loadImages(path);
+	return l;
+}
+
+function run_layerExSaveB()
+{
+	tlog("== layerExSave B (RENDERER=" + RENDERER + ")");
+	Plugins.link("LayerExSave.dll");
+	var lnames = [ "saveLayerImageTlg5", "saveLayerImagePng", "saveLayerImagePngOctet" ];
+	var wnames = [ "startSaveLayerImage", "cancelSaveLayerImage", "stopSaveLayerImage" ];
+	var nada = 0;
+	for (var i = 0; i < lnames.count; i++) { var ok = hasMember(Layer, lnames[i]); if (!ok) nada++; check("terdaftar Layer." + lnames[i], ok); }
+	for (var j = 0; j < wnames.count; j++) { var ok2 = hasMember(Window, wnames[j]); if (!ok2) nada++; check("terdaftar Window." + wnames[j], ok2); }
+	if (nada == lnames.count + wnames.count) {
+		check("LayerExSave.dll termuat (APK harus dibangun dari pohon yang berisi src/plugins/layerExSave.cpp; konfigurasi ulang CMake)", false);
+		return;
+	}
+
+	var W = 8, H = 4;
+	var a = mk(W, H, ltAlpha, 5, true);
+
+	// ---- saveLayerImagePngOctet ----
+	var o = a.saveLayerImagePngOctet();
+	var os = sbOct(o);
+	obs("PngOctet.tipe", typeof o);
+	obs("PngOctet.getTraceString", (os == "?") ? "tidak tersedia" : "tersedia, panjang teks " + os.length);
+	check("PngOctet mengembalikan octet", typeof o == "Octet");
+	check("PngOctet berawalan tanda tangan PNG (dilewati bila getTraceString tak ada)", sbIsPng(o));
+	var o0 = a.saveLayerImagePngOctet(0), o9 = a.saveLayerImagePngOctet(9);
+	check("PngOctet level 0 dan 9 sama-sama PNG", sbIsPng(o0) && sbIsPng(o9));
+	obs("PngOctet.level0_vs_level9_panjang_teks", sbOct(o0).length + " vs " + sbOct(o9).length);
+	check("PngOctet level tidak sah -> galat deflate", callm(a, "saveLayerImagePngOctet", [ 42 ]).indexOf("throw:") == 0);
+	obs("PngOctet.level_tidak_sah_pesan", callm(a, "saveLayerImagePngOctet", [ 42 ]));
+
+	// ---- argumen ----
+	check("saveLayerImagePng tanpa argumen -> galat jumlah param", callm(a, "saveLayerImagePng", []) != "ok");
+	check("saveLayerImageTlg5 tanpa argumen -> galat jumlah param", callm(a, "saveLayerImageTlg5", []) != "ok");
+	obs("Png.arg_bukan_string", callm(a, "saveLayerImagePng", [ 123 ]));
+	obs("Png.opsi_bukan_objek", callm(a, "saveLayerImagePng", [ "x.png", 5 ]));
+
+	var d = sbPickDir(a);
+	if (d === void) { check("ada lokasi yang bisa ditulis untuk berkas keluaran", false); return; }
+	SB_DIR = d;
+	obs("lokasi_keluaran", "[" + d + "]");
+
+	// ---- saveLayerImagePng + muat ulang ----
+	var pf = d + "sbtest.png";
+	var opt = %[ reso_x : 2835, reso_y : 2835, reso_unit : "meter", offs_x : 3, offs_y : -4, offs_unit : "micrometer", vpag_w : 640, vpag_h : 480, vpag_unit : "micrometer", comp_lv : 6 ];
+	check("saveLayerImagePng dengan metadata", callm(a, "saveLayerImagePng", [ pf, opt ]) == "ok");
+	check("saveLayerImagePng tanpa opsi", callm(a, "saveLayerImagePng", [ d + "sbtest2.png" ]) == "ok");
+	var b = sbLoadBack(pf);
+	check("PNG termuat ulang berukuran sama", b.imageWidth == W && b.imageHeight == H);
+	var cmp = sbCompare(a, b, W, H);
+	obs("Png.pulang_pergi (beda_hanya_RB, beda_lain, alfa0_dilewati)", cmp[0] + "," + cmp[1] + "," + cmp[2]);
+	check("PNG pulang-pergi: tak ada beda selain penukaran R/B", cmp[1] == 0);
+	obs("Png.urutan_kanal", cmp[0] == 0 ? "sama (memori RGBA, PNG benar)" : "R/B tertukar (memori BGRA, PNG tertukar seperti biner)");
+
+	// ---- saveLayerImageTlg5 + muat ulang ----
+	var tf = d + "sbtest.tlg";
+	check("saveLayerImageTlg5", callm(a, "saveLayerImageTlg5", [ tf ]) == "ok");
+	var t = sbLoadBack(tf);
+	var ct = sbCompare(a, t, W, H);
+	obs("Tlg5.pulang_pergi (beda_hanya_RB, beda_lain, alfa0_dilewati)", ct[0] + "," + ct[1] + "," + ct[2]);
+	check("TLG5 pulang-pergi identik", ct[0] == 0 && ct[1] == 0);
+
+	// ---- startSaveLayerImage / cancel / stop (sinkron: indeks dan registrasi) ----
+	check("cancelSaveLayerImage indeks di luar rentang tidak melempar", callm(T_WIN, "cancelSaveLayerImage", [ 99 ]) == "ok");
+	check("stopSaveLayerImage indeks di luar rentang tidak melempar", callm(T_WIN, "stopSaveLayerImage", [ 99 ]) == "ok");
+	obs("cancel.indeks_negatif (biner: baca luar batas; fork: diabaikan)", RUN_UNSAFE_CASES ? callm(T_WIN, "cancelSaveLayerImage", [ -1 ]) : "dilewati");
+	check("startSaveLayerImage tanpa argumen -> galat jumlah param", callm(T_WIN, "startSaveLayerImage", []) != "ok");
+	obs("start.layer_bukan_objek", callm(T_WIN, "startSaveLayerImage", [ 5, "x.tlg" ]));
+
+	T_WIN.onSaveLayerImageDone = function(idx, canceled, layer, name) { global.SB_DONE.add(%[ idx : idx, canceled : canceled, name : name ]); };
+	T_WIN.onSaveLayerImageProgress = function(idx, pct, layer, name) { global.SB_PROG.add(%[ idx : idx, pct : pct, name : name ]); };
+
+	var i0 = T_WIN.startSaveLayerImage(a, d + "sbasync1.PNG", opt);     // ekstensi huruf besar -> jalur PNG
+	var i1 = T_WIN.startSaveLayerImage(a, d + "sbasync2.tlg");           // jalur TLG5
+	var i2 = T_WIN.startSaveLayerImage(a, d + "sbasync3.png");           // akan di-stop
+	obs("start.indeks", i0 + "," + i1 + "," + i2);
+	check("startSaveLayerImage mengembalikan indeks 0,1,2 berurutan", i0 == 0 && i1 == 1 && i2 == 2);
+	T_WIN.stopSaveLayerImage(i2);                                         // slot dibebaskan, Done tidak dikirim untuk i2
+	var i3 = T_WIN.startSaveLayerImage(a, d + "sbasync4.tlg");           // memakai ulang slot 2
+	check("slot hasil stop dipakai ulang", i3 == 2);
+	T_WIN.cancelSaveLayerImage(i3);                                       // Done dikirim dengan canceled=1
+
+	global.SB_ASYNC = %[ ticks : 0 ];
+	SB_ASYNC.onTimer = function() {
+		this.ticks++;
+		var done = global.SB_DONE;
+		if (done.count >= 3 || this.ticks >= 100) {
+			global.T_SB_TIMER.enabled = false;
+			var seen = %[], canc = %[];
+			for (var k = 0; k < done.count; k++) { seen[done[k].idx] = (seen[done[k].idx] === void ? 0 : seen[done[k].idx]) + 1; canc[done[k].idx] = done[k].canceled; }
+			tlog("CASE layerExSaveB.async.done_jumlah " + done.count + " progres_jumlah " + global.SB_PROG.count + " tick " + this.ticks);
+			for (var m = 0; m < done.count; m++) tlog("CASE layerExSaveB.async.done[" + m + "] idx=" + done[m].idx + " batal=" + done[m].canceled + " nama=" + done[m].name);
+			global.check("Done dikirim tepat satu kali per tugas (async)", done.count == 3 && seen[0] == 1 && seen[1] == 1 && seen[2] == 1);
+			global.check("Done tidak dikirim untuk tugas yang di-stop (indeks 2 hanya dari tugas ke-4, batal=1) (async)", canc[2] == 1);
+			global.check("tugas 0 dan 1 selesai tanpa batal (async)", canc[0] == 0 && canc[1] == 0);
+			var l0 = global.sbLoadBack(global.SB_DIR + "sbasync1.PNG");
+			var l1 = global.sbLoadBack(global.SB_DIR + "sbasync2.tlg");
+			var c0 = global.sbCompare(global.T_SB_SRC, l0, 8, 4), c1 = global.sbCompare(global.T_SB_SRC, l1, 8, 4);
+			global.check("berkas async .PNG (huruf besar) berisi gambar yang sama (async)", c0[1] == 0);
+			global.check("berkas async .tlg berisi gambar yang sama (async)", c1[0] == 0 && c1[1] == 0);
+		}
+	};
+	global.T_SB_SRC = a;                                                   // sumber tetap hidup sampai timer selesai
+	global.T_SB_TIMER = new Timer(SB_ASYNC, "onTimer");
+	T_SB_TIMER.interval = 100;
+	T_SB_TIMER.enabled = true;
+}

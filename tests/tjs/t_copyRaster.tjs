@@ -1,0 +1,59 @@
+// t_copyRaster.tjs - layerExRaster.dll : Layer.copyRaster(src, maxh, lines, cycle, time)
+// Spesifikasi: docs/spec/layerExRaster_copyRaster.md. Nama parameter = perkiraan.
+function run_copyRaster()
+{
+	tlog("== copyRaster");
+	Plugins.link("layerExRaster.dll");
+	check("copyRaster terdaftar", hasMember(Layer, "copyRaster"));
+
+	var types = [ [ "alpha", ltAlpha, true ], [ "opaque", ltOpaque, false ] ];
+	for (var ti = 0; ti < types.count; ti++) {
+		var tn = types[ti][0], tt = types[ti][1], ta = types[ti][2];
+		var src = mk(16, 16, tt, 1, ta);
+
+		// kasus normal + variasi waktu
+		var times = [ 0, 7, 100, 12345 ];
+		for (var k = 0; k < times.count; k++) {
+			var d = mk(16, 16, tt, 2, ta);
+			d.copyRaster(src, 3, 8, 30, times[k]);
+			obs("copyRaster." + tn + ".normal.t" + times[k], hashLayer(d));
+		}
+		// maxh = 0 -> s = 0 -> salinan biasa (spesifikasi: bukan error)
+		var d0 = mk(16, 16, tt, 2, ta), ref = mk(16, 16, tt, 2, ta);
+		d0.copyRaster(src, 0, 8, 30, 100);
+		ref.copyRect(0, 0, src, 0, 0, 16, 16);
+		obs("copyRaster." + tn + ".maxh0", hashLayer(d0));
+		check("copyRaster maxh=0 == salinan biasa (" + tn + ")", hashLayer(d0) == hashLayer(ref));
+		// lines = 0 dan cycle = 0 -> salinan biasa (spesifikasi, kasus tepi)
+		var dl = mk(16, 16, tt, 2, ta); dl.copyRaster(src, 3, 0, 30, 100);
+		var dc = mk(16, 16, tt, 2, ta); dc.copyRaster(src, 3, 8, 0, 100);
+		obs("copyRaster." + tn + ".lines0", hashLayer(dl));
+		obs("copyRaster." + tn + ".cycle0", hashLayer(dc));
+		check("copyRaster lines=0 == salinan biasa (" + tn + ")", hashLayer(dl) == hashLayer(ref));
+		check("copyRaster cycle=0 == salinan biasa (" + tn + ")", hashLayer(dc) == hashLayer(ref));
+		// |s| >= lebar -> baris dilewati (tujuan tak berubah) -> hanya pengamatan
+		var dbig = mk(16, 16, tt, 2, ta); dbig.copyRaster(src, 1000, 8, 30, 100);
+		obs("copyRaster." + tn + ".maxh_besar", hashLayer(dbig));
+		// ukuran berbeda -> tidak melakukan apa pun
+		var small = mk(8, 8, tt, 3, ta), dm = mk(16, 16, tt, 2, ta), before = hashLayer(dm);
+		dm.copyRaster(small, 3, 8, 30, 100);
+		check("copyRaster ukuran beda = no-op (" + tn + ")", hashLayer(dm) == before);
+		// clip rect: piksel di luar clip tidak berubah
+		var dcl = mk(16, 16, tt, 2, ta), orig = mk(16, 16, tt, 2, ta);
+		dcl.setClip(4, 4, 8, 8);
+		dcl.copyRaster(src, 3, 8, 30, 100);
+		obs("copyRaster." + tn + ".clip", hashLayer(dcl));
+		check("copyRaster di luar clip tak berubah (" + tn + ")", getPx(dcl, 0, 0) == getPx(orig, 0, 0) && getPx(dcl, 15, 15) == getPx(orig, 15, 15));
+		// clip kosong (lebar 0) -> tanpa kerja
+		var dz = mk(16, 16, tt, 2, ta), bz = hashLayer(dz);
+		dz.setClip(4, 4, 0, 0);
+		dz.copyRaster(src, 3, 8, 30, 100);
+		obs("copyRaster." + tn + ".clip_kosong", hashLayer(dz) == bz ? "tak_berubah" : "berubah");
+	}
+	// jumlah argumen kurang -> TJS_E_BADPARAMCOUNT
+	var q = mk(16, 16, ltAlpha, 1, true), s = mk(16, 16, ltAlpha, 2, true);
+	obs("copyRaster.argumen_kurang", callm(q, "copyRaster", [ s, 3, 8, 30 ]));
+	// Kasus berbahaya di APK asli (membaca penunjuk tak terinisialisasi): hanya bila RUN_UNSAFE_CASES.
+	if (RUN_UNSAFE_CASES) obs("copyRaster.src_bukan_layer", callm(q, "copyRaster", [ void, 3, 8, 30, 100 ]));
+	dropAll();
+}

@@ -1,0 +1,59 @@
+// t_shrinkCopyFast.tjs - shrinkCopy.dll : Layer.shrinkCopyFast(src, hs [, vs])
+// Spesifikasi: docs/spec/layerExShrinkFast_shrinkCopyFast.md.
+// PENTING: hash kasus hs>=2 bergantung pada pengecil baris horizontal 0x6023ec. Di fork bagian itu masih ASUMSI
+// (hrow_box). Menjalankan skrip ini di APK 1.3.9 memberi kebenaran dasar untuk menguji asumsi itu (tanpa disassembler).
+function run_shrinkCopyFast()
+{
+	tlog("== shrinkCopyFast (RENDERER=" + RENDERER + ")  [hash hs>=2: ASUMSI-H sampai dibandingkan dengan APK]");
+	var CPU = (RENDERER == "software");
+	Plugins.link("shrinkCopy.dll");
+	check("shrinkCopyFast terdaftar", hasMember(Layer, "shrinkCopyFast"));
+
+	var types = [ [ "alpha", ltAlpha, true ], [ "opaque", ltOpaque, false ] ];
+	for (var ti = 0; ti < types.count; ti++) {
+		var tn = types[ti][0], tt = types[ti][1], ta = types[ti][2];
+		var srcs = [ [ "16x16", 16, 16 ], [ "17x13", 17, 13 ] ];     // 17x13: sisa grup horizontal & vertikal
+		for (var si = 0; si < srcs.count; si++) {
+			var sn = srcs[si][0], sw = srcs[si][1], sh = srcs[si][2];
+			var src = mk(sw, sh, tt, 1, ta);
+			// hs, vs (void = tidak diberikan)
+			var cfg = [ [ 1, void ], [ 2, void ], [ 3, void ], [ 4, 2 ], [ 2, 3 ], [ 5, 0 ], [ 1, 3 ], [ 3, 1 ] ];
+			for (var k = 0; k < cfg.count; k++) {
+				var hs = cfg[k][0], vs = cfg[k][1];
+				var d = mk(5, 5, tt, 2, ta);                        // ukuran awal beda: harus di-resize
+				var r = callm(d, "shrinkCopyFast", (vs === void) ? [ src, hs ] : [ src, hs, vs ]);
+				var evs = (vs === void || vs == 0) ? hs : vs;
+				var ew = int((sw + hs - 1) / hs), eh = int((sh + evs - 1) / evs);
+				var tag = "shrinkCopyFast." + tn + "." + sn + ".hs" + hs + "_vs" + (vs === void ? "none" : vs);
+				obs(tag, r + " ukuran=" + d.imageWidth + "x" + d.imageHeight + " hash=" + hashLayer(d));
+				check("shrinkCopyFast ukuran tujuan ceil (" + tag + ")", d.imageWidth == ew && d.imageHeight == eh);
+				if (CPU && ta) {
+					// Alfa tujuan = 0xFF di jalur CPU (alfa sumber diabaikan).
+					var allFF = true;
+					for (var y = 0; y < d.imageHeight; y++) for (var x = 0; x < d.imageWidth; x++) if (pixelAlpha(d, x, y) != 0xFF) allFF = false;
+					check("shrinkCopyFast CPU alfa tujuan 0xFF (" + tag + ")", allFF);
+				}
+			}
+			// vs = 0 / tidak ada harus sama dengan vs = hs
+			var da = mk(5, 5, tt, 2, ta), db = mk(5, 5, tt, 2, ta), dc = mk(5, 5, tt, 2, ta);
+			da.shrinkCopyFast(src, 3); db.shrinkCopyFast(src, 3, 0); dc.shrinkCopyFast(src, 3, 3);
+			check("shrinkCopyFast vs absen == vs 0 == vs hs (" + tn + "." + sn + ")", hashLayer(da) == hashLayer(db) && hashLayer(db) == hashLayer(dc));
+		}
+		// hs <= 0: CPU melempar (TJS_E_INVALIDPARAM); GPU tanpa kerja.
+		var src2 = mk(16, 16, tt, 1, ta);
+		var zs = [ 0, -1 ];
+		for (var m = 0; m < zs.count; m++) {
+			var dz = mk(5, 5, tt, 2, ta), bz = hashLayer(dz);
+			var rz = callm(dz, "shrinkCopyFast", [ src2, zs[m] ]);
+			obs("shrinkCopyFast." + tn + ".hs" + zs[m], rz + " ukuran=" + dz.imageWidth + "x" + dz.imageHeight + " hash_berubah=" + (hashLayer(dz) != bz));
+			if (CPU) check("shrinkCopyFast CPU hs=" + zs[m] + " melempar (" + tn + ")", rz != "ok");
+		}
+	}
+	// argumen kurang -> TJS_E_BADPARAMCOUNT
+	var q = mk(8, 8, ltAlpha, 1, true), s = mk(8, 8, ltAlpha, 2, true);
+	obs("shrinkCopyFast.argumen_kurang", callm(q, "shrinkCopyFast", [ s ]));
+	// src == this: di APK 1.3.9 baca di luar batas; fork menolak (CPU). Hanya bila RUN_UNSAFE_CASES.
+	if (RUN_UNSAFE_CASES) obs("shrinkCopyFast.src_sama_dengan_this", callm(q, "shrinkCopyFast", [ q, 2 ]));
+	if (RUN_UNSAFE_CASES) obs("shrinkCopyFast.src_null", callm(q, "shrinkCopyFast", [ null, 2 ]));
+	dropAll();
+}

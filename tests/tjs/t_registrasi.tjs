@@ -1,0 +1,40 @@
+// t_registrasi.tjs - langkah 6.1/6.2 di perangkat: modul termuat lewat Plugins.link, huruf besar-kecil nama, path.
+// Spesifikasi mekanisme: docs/spec/plugin_registrasi.md (fork meng-lowercase nama modul).
+function run_registrasi()
+{
+	tlog("== registrasi");
+	// Nama dengan huruf campur / path: harus memuat modul yang sama (fork). Pengamatan untuk APK 1.3.9.
+	var names = [ "layerexraster.dll", "LAYEREXRASTER.DLL", "plugin/layerExRaster.dll", "shrinkcopy.dll", "ShrinkCopy.DLL" ];
+	for (var i = 0; i < names.count; i++) {
+		var n = names[i];
+		obs("link." + n, callm(Plugins, "link", [ n ]));
+	}
+	obs("ada.copyRaster", hasMember(Layer, "copyRaster"));
+	obs("ada.shrinkCopy", hasMember(Layer, "shrinkCopy"));
+	obs("ada.shrinkCopyFast", hasMember(Layer, "shrinkCopyFast"));
+	// Modul baru (S3-S10): setelah Plugins.link semua method harus ada di Layer. Pengamatan untuk dibandingkan dengan APK 1.3.9.
+	var mods = [
+		[ "layerExBTOA.dll", "copyRightBlueToLeftAlpha", "copyBottomBlueToTopAlpha", "fillAlpha", "copyAlphaToProvince", "clipAlphaRect", "fillByProvince" ],
+		[ "layerExImage.dll", "light", "colorize", "modulate", "noise", "generateWhiteNoise", "gaussianBlur" ],
+		[ "layerExShimmer.dll", "shimmer", "shimmerBuildMap" ],
+		[ "LayerExSave.dll", "getCropRect", "getCropRectZero", "getDiffRect", "getDiffPixel", "oozeColor", "copyBlueToAlpha", "isBlank", "clearAlpha" ],
+		[ "layerExAlpha.dll", "turnAlpha", "turnAlpha2", "turnAlpha3", "turnOutline", "AlphaColorRect", "AlphaDivide", "AlphaAdd", "AlphaAdd2", "BlackForAlpha", "ColorAlphaAdd", "ColorVectorEffectAdd", "ExtraColorVectorEffectAdd", "MaskRect", "ExMaskRect", "LightForAlpha", "LuminanceForAlpha", "LevelMaskRect", "LevelMaskRect2", "MaskImageRideRect", "MaskImageRideRect2", "MaskImageRideRect3", "MaskImageRideRect4", "MaskImageRideRect5", "MaskImageRideRect7", "MaskImageRideRect8", "AlphaBorderInnerRect", "AlphaBorderImageCoverRect", "MaskImageEffectRect" ]
+	];
+	for (var k = 0; k < mods.count; k++) {
+		var mm = mods[k];
+		obs("link." + mm[0], callm(Plugins, "link", [ mm[0] ]));
+		for (var q = 1; q < mm.count; q++) obs("ada." + mm[q], hasMember(Layer, mm[q]));
+	}
+	// Nama yang SUDAH terdaftar di biner tetapi BELUM direkonstruksi (S6/S7 memakai peta lama; lihat docs/spec/layerExAlpha_umum.md):
+	// di fork harus tidak ada (false) sampai ditulis.
+	var belum = [ "AlphaBlend", "WhiteToBlueBlurAdd", "ExMaskRect2" ];
+	for (var b = 0; b < belum.count; b++) obs("belum." + belum[b], hasMember(Layer, belum[b]));
+	// Modul yang belum ada di fork: tautan tidak boleh membuat crash (fork: diabaikan tanpa error).
+	// (LayerExSave.dll sudah ada sejak S11 dan diperiksa di daftar mods di atas; log kedua menunjukkan APK perangkat belum memuatnya.)
+	// Modul yang memang tidak ada di fork: nama acak.
+	var missing = [ "modulTidakAda.dll" ];
+	for (var j = 0; j < missing.count; j++) {
+		var m = missing[j];
+		obs("link_belum_ada." + m, callm(Plugins, "link", [ m ]));
+	}
+}

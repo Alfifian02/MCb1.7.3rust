@@ -1,0 +1,9 @@
+# Nama method/kelas yang terlihat di libgame.so 1.3.9 (string UTF-16). Pengelompokan per modul berdasarkan urutan string, belum pasti.  [Alpha dikoreksi: 31 nama; AlphaAdd, ColorVectorEffectAdd, MaskRect ditambahkan dari blok registrasi 0x5d43b0]
+layerExAlpha: turnAlpha turnAlpha2 turnAlpha3 turnOutline AlphaColorRect AlphaDivide AlphaAdd AlphaAdd2 BlackForAlpha AlphaBlend ColorAlphaAdd ColorVectorEffectAdd ExtraColorVectorEffectAdd WhiteToBlueBlurAdd MaskRect ExMaskRect ExMaskRect2 LightForAlpha LuminanceForAlpha LevelMaskRect LevelMaskRect2 MaskImageRideRect MaskImageRideRect2 MaskImageRideRect3 MaskImageRideRect4 MaskImageRideRect5 MaskImageRideRect7 MaskImageRideRect8 AlphaBorderInnerRect AlphaBorderImageCoverRect MaskImageEffectRect
+layerExBTOA: copyRightBlueToLeftAlpha copyBottomBlueToTopAlpha fillAlpha copyAlphaToProvince clipAlphaRect fillByProvince
+layerExImage: light colorize modulate noise generateWhiteNoise gaussianBlur
+layerExRaster: copyRaster
+layerExSave: WindowSaveImage startSaveLayerImage cancelSaveLayerImage stopSaveLayerImage getCropRect getCropRectZero getDiffRect getDiffPixel oozeColor copyBlueToAlpha isBlank clearAlpha saveLayerImageTlg5 saveLayerImagePng saveLayerImagePngOctet onSaveLayerImageProgress onSaveLayerImageDone
+layerExShimmer: shimmer shimmerBuildMap
+layerExAreaAverage: stretchCopyAA
+shrinkCopy: shrinkCopy shrinkCopyFast

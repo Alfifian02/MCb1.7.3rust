@@ -1,0 +1,80 @@
+// t_alpha4.tjs - layerExAlpha.dll (S9): MaskImageRideRect7 / MaskImageRideRect8 / AlphaBorderInnerRect
+// Spesifikasi: docs/spec/layerExAlpha_*.md. Belum dijalankan (lihat README). Piksel diberi lewat setPx (harness: RGB via setMainPixel, ALFA via setMaskPixel; setMainPixel sendiri tidak membawa alfa).
+// CHECK hanya menyentuh byte alfa dan hal yang tak bergantung warna. Nilai harapan sudah diperiksa ulang dengan Core C++ (ride7/ride8/border_inner).
+// PERHATIAN renderer: di binary 1.3.9 method ini kemungkinan hanya jalan di renderer "software" (ASUMSI, lihat layerExAlpha_common.md).
+
+function argb(a, r, g, b) { return ((a & 255) << 24) | ((r & 255) << 16) | ((g & 255) << 8) | (b & 255); }
+
+function mkRow(vals) {                       // layer W x 1 dari daftar ARGB
+	var l = mk(vals.count, 1, ltAlpha, 0, true);
+	for (var i = 0; i < vals.count; i++) setPx(l, i, 0, vals[i]);   // ARGB: RGB lewat setMainPixel, alfa lewat setMaskPixel
+	return l;
+}
+function alphas(l) { var s = []; for (var x = 0; x < l.imageWidth; x++) s.add(pixelAlpha(l, x, 0)); return s.join(","); }
+
+function run_alpha4()
+{
+	tlog("== alpha4 (RENDERER=" + RENDERER + ")");
+	Plugins.link("layerExAlpha.dll");
+	check("MaskImageRideRect7 terdaftar",   hasMember(Layer, "MaskImageRideRect7"));
+	check("MaskImageRideRect8 terdaftar",   hasMember(Layer, "MaskImageRideRect8"));
+	check("AlphaBorderInnerRect terdaftar", hasMember(Layer, "AlphaBorderInnerRect"));
+
+	// ---- Rect7: b=3, a=100 -> lo=98 hi=103; alfa mask 97,98,100,102,103,255; img alfa 200; dst alfa 255
+	var ma = [ 97, 98, 100, 102, 103, 255 ];
+	var dv = [], iv = [], mv = [];
+	for (var i = 0; i < ma.count; i++) { dv.add(argb(255, 1, 2, 3)); iv.add(argb(200, 31 + i, 21 + i, 11 + i)); mv.add(argb(ma[i], 0, 0, 0)); }
+	var d = mkRow(dv), im = mkRow(iv), mk_ = mkRow(mv);
+	var r = callm(d, "MaskImageRideRect7", [ im, mk_, 100, 3 ]);
+	obs("rect7.hasil", r + " alfa=" + alphas(d) + " hash=" + hashLayer(d));
+	check("rect7 alfa 255,67,200,67,0,0", alphas(d) == "255,67,200,67,0,0");
+
+	// b = 0 / negatif: binary melempar (jenis tak diketahui); fork TJS_E_INVALIDPARAM
+	var d0 = mkRow(dv);
+	obs("rect7.b0",   callm(d0, "MaskImageRideRect7", [ im, mk_, 100, 0 ]));
+	obs("rect7.bneg", callm(d0, "MaskImageRideRect7", [ im, mk_, 100, -4 ]));
+
+	// ---- Rect8: th=100; alfa mask 100,101,0,255; img alfa 77
+	var m8 = [ 100, 101, 0, 255 ], d8v = [], i8v = [], m8v = [];
+	for (var j = 0; j < m8.count; j++) { d8v.add(argb(255, 1, 2, 3)); i8v.add(argb(77, 40 + j, 50 + j, 60 + j)); m8v.add(argb(m8[j], 0, 0, 0)); }
+	var d8 = mkRow(d8v), i8 = mkRow(i8v), mm8 = mkRow(m8v);
+	var r8 = callm(d8, "MaskImageRideRect8", [ i8, mm8, 100 ]);
+	obs("rect8.hasil", r8 + " alfa=" + alphas(d8) + " hash=" + hashLayer(d8));
+	check("rect8 alfa 255,77,255,77", alphas(d8) == "255,77,255,77");
+
+	// ---- AlphaBorderInnerRect: th=128; alfa mask 0,127,128,129,255; dst alfa 200
+	var bm = [ 0, 127, 128, 129, 255 ], bdv = [], bmv = [];
+	for (var k = 0; k < bm.count; k++) { bdv.add(argb(200, 1, 2, 3)); bmv.add(argb(bm[k], 0, 0, 0)); }
+	var bd = mkRow(bdv), bmk = mkRow(bmv);
+	var rb = callm(bd, "AlphaBorderInnerRect", [ bmk, 128 ]);
+	obs("border.hasil", rb + " alfa=" + alphas(bd) + " hash=" + hashLayer(bd));
+	check("border alfa 200,200,0,0,0", alphas(bd) == "200,200,0,0,0");
+
+	// ---- ukuran tidak cocok: log "SW:.. SH:.." lalu kembali tanpa mengubah dst (binary & fork)
+	var small = mk(4, 1, ltAlpha, 3, true);
+	var dm = mkRow(dv), before = hashLayer(dm);
+	obs("rect7.ukuran_beda", callm(dm, "MaskImageRideRect7", [ small, mk_, 100, 3 ]) + " berubah=" + (hashLayer(dm) != before));
+	check("rect7 ukuran beda: dst tak berubah", hashLayer(dm) == before);
+	obs("rect8.ukuran_beda", callm(dm, "MaskImageRideRect8", [ im, small, 100 ]) + " berubah=" + (hashLayer(dm) != before));
+	check("rect8 ukuran beda: dst tak berubah", hashLayer(dm) == before);
+	obs("border.lebar_beda", callm(dm, "AlphaBorderInnerRect", [ small, 10 ]) + " berubah=" + (hashLayer(dm) != before));
+	check("border lebar beda: dst tak berubah", hashLayer(dm) == before);
+
+	// ---- bukan Layer -> "Not Layer"
+	obs("rect7.bukan_layer", callm(dm, "MaskImageRideRect7", [ 1, mk_, 100, 3 ]));
+	obs("rect8.bukan_layer", callm(dm, "MaskImageRideRect8", [ im, "x", 100 ]));
+	obs("border.bukan_layer", callm(dm, "AlphaBorderInnerRect", [ 5, 10 ]));
+	// ---- argumen kurang
+	obs("rect7.argumen_kurang", callm(dm, "MaskImageRideRect7", [ im, mk_, 100 ]));
+	obs("rect8.argumen_kurang", callm(dm, "MaskImageRideRect8", [ im, mk_ ]));
+	obs("border.argumen_kurang", callm(dm, "AlphaBorderInnerRect", [ bmk ]));
+	// ---- null: crash di APK 1.3.9 (dereferensi null) -> hanya RUN_UNSAFE_CASES
+	if (RUN_UNSAFE_CASES) {
+		obs("rect7.null", callm(dm, "MaskImageRideRect7", [ null, mk_, 100, 3 ]));
+		obs("border.null", callm(dm, "AlphaBorderInnerRect", [ null, 10 ]));
+		// mask lebih pendek (tinggi): binary baca di luar buffer
+		var tall = mk(6, 2, ltAlpha, 1, true), shortm = mk(6, 1, ltAlpha, 2, true);
+		obs("border.mask_lebih_pendek", callm(tall, "AlphaBorderInnerRect", [ shortm, 10 ]));
+	}
+	dropAll();
+}

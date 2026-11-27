@@ -1,0 +1,21 @@
+# nama<TAB>url git<TAB>bukti<TAB>catatan   (dipakai script/fetch_plugins.sh; kolom 3-4 hanya informasi)
+# bukti: log = clone Anda berhasil (fetch_s14.txt) · web = halaman repo dibuka (S14) · gist = hanya disebut daftar komunitas uyjulian (belum dibuka)
+windowEx	https://github.com/wamsoft/windowEx.git	log	1 .cpp; kemungkinan Windows-only (ASUMSI) -> jangan dibiarkan di ext/ saat build Android
+scriptsEx	https://github.com/wamsoft/scriptsEx.git	log	1 .cpp + bitap_fuzzy.hpp
+json	https://github.com/wamsoft/json.git	log+web	1 .cpp + Writer.hpp
+minizip	https://github.com/wamsoft/minizip.git	log	4 .cpp (termasuk LicensesGen.cpp); ioapi.cpp bentrok dengan src/core/utils/minizip (ASUMSI)
+expat	https://github.com/wamsoft/expat.git	log	2 .cpp (termasuk LicensesGen.cpp); libexpat via vcpkg
+csvParser	https://github.com/wamsoft/csvParser.git	web	sudah ada versi fork (src/plugins/csvParser.cpp); untuk pembanding
+layerExBTOA	https://github.com/wamsoft/layerExBTOA.git	web	26 commit; pengganti rekonstruksi S3
+layerExImage	https://github.com/wamsoft/layerExImage.git	web	LayerExImage.cpp/.h, Main.cpp, layerExBase.hpp
+layerExSave	https://github.com/wamsoft/layerExSave.git	web	LodePNG ikut di ./LodePNG/
+layerExRaster	https://github.com/wamsoft/layerExRaster.git	web	main.cpp, layerExBase.hpp; pembanding copyRaster rekonstruksi
+shrinkCopy	https://github.com/wtnbgo/shrinkCopy.git	web	pembanding shrinkCopy/shrinkCopyFast (menutup ASUMSI hrow_box bila ada)
+extrans	https://github.com/wamsoft/extrans.git	web	7 transisi; MMX hanya x86
+win32dialog	https://github.com/wamsoft/win32dialog.git	web	belum selesai (kata readme); fork memakai stub
+layerExVector	https://github.com/wamsoft/layerExVector.git	web	subset layerExDraw dengan ThorVG; kandidat S18
+layerExAreaAverage	https://github.com/wtnbgo/layerExAreaAverage.git	gist	pembanding alias stretchCopyAA
+fstat	https://github.com/wtnbgo/fstat.git	gist	
+KAGParserEx	https://github.com/wtnbgo/KAGParserEx.git	gist	
+# TIDAK ada di sini (di luar github.com/wamsoft|wtnbgo): sqlite3, expat/dirlist/layerExMovie/perspective versi krkrz
+#   -> https://github.com/krkrz/krkrz branch last_hodgepodge_repository, path src/plugins/win32/<nama> (repo besar; clone dangkal atau sparse-checkout)

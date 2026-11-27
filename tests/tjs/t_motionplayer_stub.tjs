@@ -1,0 +1,113 @@
+// t_motionplayer_stub.tjs - uji stub motionplayer.dll (src/plugins/motionplayer_stub.cpp), S17.
+// Spesifikasi: docs/spec/motionplayer_api_dipakai_game.md ; diagnosis: docs/spec/motionplayer_diagnosis_S17.md.
+// STATUS: BELUM dijalankan (bahasa TJS belum diuji di mesin TJS2 repo, perilaku belum diuji di perangkat).
+// Daftar nama berasal dari PELACAKAN bytecode skrip game (heuristik), bukan dari log runtime.
+//
+// Tujuan:
+//  1. Mereproduksi pemeriksaan di awal system/affinesourcemotion.tjs yang GAGAL di run 1 krkr.console.log:
+//        Motion.enableD3D = (typeof Motion.Player.useD3D == "Object");   // dan blok catch yang juga memakai Motion
+//     Run 1 gagal karena `Motion` tidak ada sesudah Plugins.link("motionplayer.dll") (stub lama kosong - ASUMSI).
+//  2. Memastikan anggota yang DIPAKAI game ada di stub, sehingga game tidak berhenti dengan
+//     "Member ... does not exist" begitu mulai memakai Motion.
+// Sisi plugin menulis baris berawalan "[motion]" ke log aplikasi (TVPAddLog); cari dengan: grep "\[motion\]".
+// Aturan TJS: lihat tests/tjs/README.md (tanpa closure atas variabel lokal; pakai callm/hasMember dari harness.tjs).
+
+var MS_PLAYER_METHODS = [
+	"play", "stop", "skip", "progress", "draw", "serialize", "unserialize", "initPhysics", "startWind",
+	"setCoord", "setScale", "setRotate", "setRot", "setColor",
+	"playTimeline", "stopTimeline", "fadeOutTimeline", "isTimelinePlaying",
+	"setTimelineBlendRatio", "getTimelineBlendRatio", "getVariable", "setVariable",
+	"getMainTimelineLabelAt", "getDiffTimelineLabelAt", "getPlayingTimelineLabelAt", "getPlayingTimelineFlagsAt",
+	"countMainTimelines", "countDiffTimelines", "countPlayingTimelines",   // dipanggil game: gpd lalu call ()
+	"getMainTimelineLabelList", "getDiffTimelineLabelList", "getLoopTimeline", "getTimelinePlaying",
+	"getPlayingTimelineInfoList", "getVariableFrameList", "setDrawAffineTranslateMatrix", "skipToSync",
+	"useD3D"
+];
+var MS_PLAYER_PROPS = [
+	"animating", "playing", "loopTime", "tags", "scale",
+	"bustScale", "hairScale", "partsScale", "meshDivisionRatio", "outline", "smoothing", "speed", "colorWeight",
+	"completionType", "maskMode", "chara", "tickCount", "allplaying", "variableKeys"
+];
+var MS_RM_METHODS = [ "load", "unload", "clearCache" ];
+
+// Berbeda dari hasMember() di harness: di sini "ada" = akses tidak melempar. Getter properti stub mengembalikan
+// void sebelum diisi, sehingga `t !== void` (hasMember) akan salah menganggap properti itu tidak ada.
+function ms_has(obj, name)
+{
+	try { var t = obj[name]; return true; } catch (e) { return false; }
+}
+
+function ms_member_checks(obj, label, names)
+{
+	var nada = 0;
+	for (var i = 0; i < names.count; i++) {
+		var ok = ms_has(obj, names[i]);
+		if (!ok) nada++;
+		check("terdaftar " + label + "." + names[i], ok);
+	}
+	return nada;
+}
+
+function run_motionplayer_stub()
+{
+	// 1. link seperti motion.tjs (cabang motionplayer.dll)
+	var linkErr = "";
+	try { Plugins.link("motionplayer.dll"); } catch (e) { linkErr = e.message; }
+	check("Plugins.link(motionplayer.dll) tidak melempar" + (linkErr != "" ? " [" + linkErr + "]" : ""), linkErr == "");
+
+	// 2. global Motion (galat run 1)
+	var hasMotion = (typeof global.Motion == "Object");
+	check("global Motion terdaftar (galat run 1: tidak ada)", hasMotion);
+	if (!hasMotion) { tlog("INFO   uji Motion dihentikan: tanpa Motion tidak ada yang bisa diperiksa"); return; }
+	check("Motion.Player ada", typeof Motion.Player == "Object");
+	check("Motion.ResourceManager ada", typeof Motion.ResourceManager == "Object");
+	check("Motion.EmotePlayer ada (dipakai bila _storageType == emote)", typeof Motion.EmotePlayer == "Object");
+	check("Motion.MaskModeAlpha ada (NILAI placeholder di stub)", typeof Motion.MaskModeAlpha != "undefined");
+
+	// 3. replika pemeriksaan awal affinesourcemotion.tjs
+	var r3 = "ok";
+	try { Motion.enableD3D = (typeof Motion.Player.useD3D == "Object"); } catch (e) { r3 = "throw:" + e.message; }
+	check("replika: Motion.enableD3D = typeof Motion.Player.useD3D == Object (" + r3 + ")", r3 == "ok");
+	tlog("INFO   Motion.enableD3D = " + Motion.enableD3D + " (true karena stub mendaftarkan useD3D; jalur D3D baru aktif bila kag.d3dMotion juga true)");
+
+	// 4. ResourceManager: new Motion.ResourceManager(host, cacheSize) lalu load/unload/clearCache pada instance (motion.tjs)
+	var rm = void;
+	var r4 = "ok";
+	try { rm = new Motion.ResourceManager(%[ motionCacheSize : 1048576 ], 1048576); } catch (e) { r4 = "throw:" + e.message; }
+	check("new Motion.ResourceManager(host, cacheSize) (" + r4 + ")", r4 == "ok");
+	if (r4 == "ok") {
+		ms_member_checks(rm, "ResourceManager(instance)", MS_RM_METHODS);
+		check("rm.load(path) tidak melempar", callm(rm, "load", [ "uji.mtn" ]) == "ok");
+		check("rm.unload(path) tidak melempar", callm(rm, "unload", [ "uji.mtn" ]) == "ok");
+		check("rm.clearCache() tidak melempar", callm(rm, "clearCache", []) == "ok");
+	}
+
+	// 5. Player: new Motion.Player(resourceManager) lalu member yang dipakai game
+	var pl = void;
+	var r5 = "ok";
+	try { pl = new Motion.Player(rm); } catch (e) { r5 = "throw:" + e.message; }
+	check("new Motion.Player(resourceManager) (" + r5 + ")", r5 == "ok");
+	if (r5 == "ok") {
+		ms_member_checks(pl, "Player(instance)", MS_PLAYER_METHODS);
+		ms_member_checks(pl, "Player(instance)", MS_PLAYER_PROPS);
+		var bad = 0;
+		for (var i = 0; i < MS_PLAYER_METHODS.count; i++) {
+			var rr = callm(pl, MS_PLAYER_METHODS[i], []);
+			if (rr != "ok") { bad++; tlog("INFO   panggil Player." + MS_PLAYER_METHODS[i] + "() -> " + rr); }
+		}
+		check("semua method Player bisa dipanggil tanpa melempar (gagal: " + bad + ")", bad == 0);
+		// pulang-pergi properti
+		pl.speed = 2; check("Player.speed pulang-pergi", pl.speed == 2);
+		pl.maskMode = 1; check("Player.maskMode pulang-pergi", pl.maskMode == 1);
+	}
+
+	// 6. EmotePlayer
+	var ep = void;
+	var r6 = "ok";
+	try { ep = new Motion.EmotePlayer(rm); } catch (e) { r6 = "throw:" + e.message; }
+	check("new Motion.EmotePlayer(resourceManager) (" + r6 + ")", r6 == "ok");
+	if (r6 == "ok") {
+		ms_member_checks(ep, "EmotePlayer(instance)", [ "play", "stop", "progress", "draw", "maskMode" ]);
+	}
+	tlog("INFO   selesai uji Motion; periksa juga baris \"[motion]\" di log aplikasi (jumlah panggilan terlog dibatasi per member)");
+}
